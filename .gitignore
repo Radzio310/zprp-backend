@@ -1,0 +1,13 @@
+# virtualenv
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Lokalne env
+.env
+
+# Docker
+Dockerfile
+.dockerignore
