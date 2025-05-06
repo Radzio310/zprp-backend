@@ -92,10 +92,7 @@ async def edit_judge(
         )
 
         # 6) Sprawdzenie, czy wartości w odpowiedzi zostały zaktualizowane
-        detected = chardet.detect(resp_edit.content)
-        html_edit = resp_edit.content.decode(
-            detected.get("encoding") or "utf-8", errors="replace"
-        )
+        html_edit = resp_edit.content.decode("iso-8859-2", errors="replace")
         soup2 = BeautifulSoup(html_edit, "html.parser")
         form2 = soup2.find("form", {"name": "edycja"})
         if not form2:
