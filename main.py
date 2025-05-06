@@ -5,8 +5,10 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
+
 from app.auth import router as auth_router
 from app.proxy import router as proxy_router
+from app.edit_judge import router as edit_router
 
 app = FastAPI(title="BAZA - API")
 
@@ -19,6 +21,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # rejestracja routerów
 app.include_router(auth_router)
 app.include_router(proxy_router)
+app.include_router(edit_router)
 
 # prosty healthcheck
 @app.get("/health")
