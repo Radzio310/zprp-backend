@@ -76,13 +76,9 @@ async def edit_judge(
         def decrypt_field(enc_b64: str) -> str:
             cipher = base64.b64decode(enc_b64)
             plain = private_key.decrypt(
-                cipher,
-                padding.OAEP(
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None
-                )
-            )
+            cipher,
+            padding.PKCS1v15()
+        )
             return plain.decode("utf-8")
 
         # 4) Nadpisanie tylko tych pól, które chcesz — teraz odszyfrowane
