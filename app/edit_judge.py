@@ -1,5 +1,5 @@
 # app/edit_judge.py
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from httpx import AsyncClient
 from app.schemas import EditJudgeRequest
 from app.utils import fetch_with_correct_encoding
