@@ -18,22 +18,41 @@ router = APIRouter()
 async def edit_judge(
     data: EditJudgeRequest,
     settings: Settings = Depends(get_settings),
-    keys = Depends(get_rsa_keys),  # <-- tutaj łapiemy (private_key, public_key)
+    keys=Depends(get_rsa_keys),  # (private_key, public_key)
 ):
     private_key, _ = keys
+
+    # ─── funkcja odszyfrowująca pojedyncze pole ─────────────────────────
+    def decrypt_field(enc_b64: str) -> str:
+        cipher = base64.b64decode(enc_b64)
+        plain = private_key.decrypt(
+            cipher,
+            padding.PKCS1v15()
+        )
+        return plain.decode("utf-8")
+
+    # 0) Najpierw odszyfruj login/hasło/judge_id
+    try:
+        user_plain, pass_plain, judge_plain = (
+            decrypt_field(data.username),
+            decrypt_field(data.password),
+            decrypt_field(data.judge_id),
+        )
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
 
     async with AsyncClient(
         base_url=settings.ZPRP_BASE_URL,
         follow_redirects=True
     ) as client:
-        # 1) Logowanie
+        # 1) Logowanie z odszyfrowanymi danymi
         resp_login, html_login = await fetch_with_correct_encoding(
             client,
             "/login.php",
             method="POST",
             data={
-                "login": data.username,
-                "haslo": data.password,
+                "login": user_plain,
+                "haslo": pass_plain,
                 "from": "/index.php?",
             },
         )
@@ -42,7 +61,7 @@ async def edit_judge(
         cookies = dict(resp_login.cookies)
 
         # 2) Pobranie formularza edycji
-        path = f"/index.php?a=sedzia&b=edycja&NrSedzia={data.judge_id}"
+        path = f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_plain}"
         _, html_get = await fetch_with_correct_encoding(
             client, path, method="GET", cookies=cookies
         )
@@ -53,35 +72,22 @@ async def edit_judge(
 
         # 3) Parsowanie wszystkich pól formularza (hidden, current values, itp.)
         form_fields: dict[str, str] = {}
-        # inputy
         for inp in form.find_all("input"):
             name = inp.get("name")
-            if not name:
-                continue
+            if not name: continue
             typ = inp.get("type", "text")
             if typ in ("hidden", "text", "password"):
                 form_fields[name] = inp.get("value", "")
             elif typ == "radio" and inp.has_attr("checked"):
                 form_fields[name] = inp.get("value", "")
 
-        # selecty
         for sel in form.find_all("select"):
             name = sel.get("name")
-            if not name:
-                continue
+            if not name: continue
             opt = sel.find("option", selected=True)
             form_fields[name] = opt.get("value", "") if opt else ""
 
-        # ─── funkcja odszyfrowująca pojedyncze pole ─────────────────────────
-        def decrypt_field(enc_b64: str) -> str:
-            cipher = base64.b64decode(enc_b64)
-            plain = private_key.decrypt(
-            cipher,
-            padding.PKCS1v15()
-        )
-            return plain.decode("utf-8")
-
-        # 4) Nadpisanie tylko tych pól, które chcesz — teraz odszyfrowane
+        # 4) Nadpisanie tylko tych pól, które chcesz — odszyfrowane
         overrides: dict[str, str] = {}
         if data.Imie is not None:
             overrides["Imie"] = decrypt_field(data.Imie)
@@ -118,14 +124,12 @@ async def edit_judge(
             # formularz zniknął? to sukces:
             return {"success": True}
 
-        # jeśli formularz nadal jest, to zczytujemy z niego wartości
         result_fields: dict[str, str] = {}
         for inp in form2.find_all("input"):
             name = inp.get("name")
             if name in overrides:
                 result_fields[name] = inp.get("value", "")
 
-        # porównujemy override vs. faktyczny zapis
         for k, v in overrides.items():
             if result_fields.get(k, "") != v:
                 return {
