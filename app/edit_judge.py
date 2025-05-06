@@ -2,12 +2,15 @@
 from fastapi import APIRouter, HTTPException, Depends
 from httpx import AsyncClient
 from urllib.parse import urlencode
-import chardet
 from bs4 import BeautifulSoup
+import base64
 
 from app.schemas import EditJudgeRequest
 from app.utils import fetch_with_correct_encoding
-from app.deps import get_settings, Settings
+from app.deps import get_settings, Settings, get_rsa_keys
+
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
 
 router = APIRouter()
 
@@ -15,7 +18,10 @@ router = APIRouter()
 async def edit_judge(
     data: EditJudgeRequest,
     settings: Settings = Depends(get_settings),
+    keys = Depends(get_rsa_keys),  # <-- tutaj łapiemy (private_key, public_key)
 ):
+    private_key, _ = keys
+
     async with AsyncClient(
         base_url=settings.ZPRP_BASE_URL,
         follow_redirects=True
@@ -66,20 +72,37 @@ async def edit_judge(
             opt = sel.find("option", selected=True)
             form_fields[name] = opt.get("value", "") if opt else ""
 
-        # 4) Nadpisanie tylko tych pól, które chcesz
-        overrides = {}
-        if data.Imie is not None:     overrides["Imie"]     = data.Imie
-        if data.Nazwisko is not None: overrides["Nazwisko"] = data.Nazwisko
-        if data.Miasto is not None:   overrides["Miasto"]   = data.Miasto
-        if data.Telefon is not None:  overrides["Telefon"]  = data.Telefon
-        if data.Email is not None:    overrides["Email"]    = data.Email
+        # ─── funkcja odszyfrowująca pojedyncze pole ─────────────────────────
+        def decrypt_field(enc_b64: str) -> str:
+            cipher = base64.b64decode(enc_b64)
+            plain = private_key.decrypt(
+                cipher,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            return plain.decode("utf-8")
+
+        # 4) Nadpisanie tylko tych pól, które chcesz — teraz odszyfrowane
+        overrides: dict[str, str] = {}
+        if data.Imie is not None:
+            overrides["Imie"] = decrypt_field(data.Imie)
+        if data.Nazwisko is not None:
+            overrides["Nazwisko"] = decrypt_field(data.Nazwisko)
+        if data.Miasto is not None:
+            overrides["Miasto"] = decrypt_field(data.Miasto)
+        if data.Telefon is not None:
+            overrides["Telefon"] = decrypt_field(data.Telefon)
+        if data.Email is not None:
+            overrides["Email"] = decrypt_field(data.Email)
         overrides["akcja"] = "ZAPISZ"
         form_fields.update(overrides)
 
         # 5) Przygotowanie body – percent‑escaping pod ISO‑8859‑2
-        #    Python3 urlencode wspiera parametry encoding/errors
         body_str = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
-        body_bytes = body_str.encode("ascii")  # wszystkie non-ASCII są już %-encoded
+        body_bytes = body_str.encode("ascii")
         headers = {
             "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2"
         }
@@ -100,14 +123,13 @@ async def edit_judge(
             return {"success": True}
 
         # jeśli formularz nadal jest, to zczytujemy z niego wartości
-        result_fields = {}
-        # text/hidden inputs
+        result_fields: dict[str, str] = {}
         for inp in form2.find_all("input"):
             name = inp.get("name")
             if name in overrides:
                 result_fields[name] = inp.get("value", "")
-        # selecty (choć tu nie nadpisujesz)
-        # teraz porównujemy:
+
+        # porównujemy override vs. faktyczny zapis
         for k, v in overrides.items():
             if result_fields.get(k, "") != v:
                 return {

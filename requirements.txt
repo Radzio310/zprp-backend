@@ -7,3 +7,4 @@ pydantic-settings
 chardet
 slowapi
 beautifulsoup4
+cryptography
