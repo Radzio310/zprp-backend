@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from httpx import AsyncClient
+from urllib.parse import urlencode               
+from app.utils import fetch_with_correct_encoding
 from app.schemas import BatchOffTimeRequest, OffTimeAction
 from app.deps import get_settings, get_rsa_keys
 from bs4 import BeautifulSoup
