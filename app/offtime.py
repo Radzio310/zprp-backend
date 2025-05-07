@@ -23,9 +23,9 @@ async def batch_offtimes(
     req: PlainBatchOffTimeRequest,
     settings = Depends(get_settings),
 ):
-    user  = req.username
-    pwd   = req.password
-    judge = req.judge_id
+    user    = req.username
+    pwd     = req.password
+    judge   = req.judge_id
     actions = req.actions
 
     async with AsyncClient(
@@ -44,36 +44,37 @@ async def batch_offtimes(
         cookies = dict(resp_login.cookies)
 
         results = []
-        # nagłówki do posta finalnego
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2"}
 
         for idx, act in enumerate(actions):
             result = {"index": idx, "type": act.type}
             try:
-                # a) GET formularza (Nowy / Edycja / Usun)
-                params = {
-                  "NrSedzia": judge,
-                  "user": user,
-                  "akcja": "Nowy" if act.type=="create"
-                           else "Edycja" if act.type=="update"
-                           else "Usun",
-                  "IdOffT": act.IdOffT or ""
-                }
-                resp_form = await client.get(
-                    "/sedzia_offtimeF.php",
-                    params=params,
+                # a) GET formularza przez fetch_with_correct_encoding
+                qs = urlencode({
+                    "NrSedzia": judge,
+                    "user": user,
+                    "akcja": "Nowy"   if act.type=="create"
+                             else "Edycja" if act.type=="update"
+                             else "Usun",
+                    "IdOffT": act.IdOffT or ""
+                })
+                form_res, form_html = await fetch_with_correct_encoding(
+                    client,
+                    f"/sedzia_offtimeF.php?{qs}",
+                    method="GET",
                     cookies=cookies,
                 )
-                html_form = resp_form.text
-                soup = BeautifulSoup(html_form, "html.parser")
+
+                # b) parsuj w ISO‑8859‑2
+                soup = BeautifulSoup(form_html, "html.parser")
                 form = soup.find("form", {"name": "OffTimeForm"})
                 if not form:
                     raise RuntimeError(
                         "Nie znaleziono formularza OffTimeForm; HTML fragment: "
-                        + html_form[:200]
+                        + form_html[:200]
                     )
 
-                # b) serializacja wszystkich pól <input>, <select>, <textarea>
+                # c) wypakuj wszystkie pola
                 form_fields = {}
                 for inp in form.find_all(["input","textarea","select"]):
                     n = inp.get("name")
@@ -88,13 +89,13 @@ async def batch_offtimes(
                         v = inp.get("value","")
                     form_fields[n] = v
 
-                # c) nadpisanie DataOd, DataDo, Info i wymuszenie zapisu
+                # d) nadpisz
                 form_fields["DataOd"] = act.DataOd
                 form_fields["DataDo"] = act.DataDo
                 form_fields["Info"]   = act.Info
                 form_fields["akcja"]  = "Zapisz"
 
-                # d) POST back
+                # e) wyślij POST
                 body = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
                 resp = await client.request(
                     "POST",
@@ -105,14 +106,13 @@ async def batch_offtimes(
                 )
                 text = resp.content.decode("iso-8859-2", errors="replace")
 
-                # e) sprawdzenie, czy pojawił się komunikat "Zapisano"
-                ok = (resp.status_code == 200) and ("Zapisano" in text)
+                # f) weryfikuj
+                ok = resp.status_code == 200 and "Zapisano" in text
                 result["success"] = ok
                 result["status_code"] = resp.status_code
                 if not ok:
                     result["error"] = (
-                        "Oczekiwano 'Zapisano' w odpowiedzi; "
-                        + "HTML fragment: "
+                        "Spodziewano się 'Zapisano' w odpowiedzi; HTML fragment: "
                         + text[:200]
                     )
             except Exception as e:
