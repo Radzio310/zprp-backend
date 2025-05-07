@@ -1,5 +1,4 @@
 # app/offtime.py
-
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from httpx import AsyncClient
@@ -24,8 +23,8 @@ async def batch_offtimes(
     req: PlainBatchOffTimeRequest,
     settings = Depends(get_settings),
 ):
-    user = req.username
-    pwd  = req.password
+    user  = req.username
+    pwd   = req.password
     judge = req.judge_id
     actions = req.actions
 
@@ -45,42 +44,49 @@ async def batch_offtimes(
         cookies = dict(resp_login.cookies)
 
         results = []
+        # nagłówki do posta finalnego
+        headers = {"Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2"}
+
         for idx, act in enumerate(actions):
+            result = {"index": idx, "type": act.type}
             try:
-                # a) POST‑em otwieramy popup i dostajemy formularz OffTimeForm
+                # a) GET formularza (Nowy / Edycja / Usun)
                 params = {
                   "NrSedzia": judge,
-                  "user":     user,
-                  "akcja":    "Nowy" if act.type == "create"
-                              else "Edycja" if act.type == "update"
-                              else "Usun",
-                  "IdOffT":   act.IdOffT or ""
+                  "user": user,
+                  "akcja": "Nowy" if act.type=="create"
+                           else "Edycja" if act.type=="update"
+                           else "Usun",
+                  "IdOffT": act.IdOffT or ""
                 }
-                resp_form, html = await fetch_with_correct_encoding(
-                    client,
+                resp_form = await client.get(
                     "/sedzia_offtimeF.php",
-                    method="POST",
-                    data=params,
+                    params=params,
                     cookies=cookies,
                 )
-                soup = BeautifulSoup(html, "html.parser")
+                html_form = resp_form.text
+                soup = BeautifulSoup(html_form, "html.parser")
                 form = soup.find("form", {"name": "OffTimeForm"})
                 if not form:
-                    raise RuntimeError("Nie znaleziono formularza OffTimeForm")
+                    raise RuntimeError(
+                        "Nie znaleziono formularza OffTimeForm; HTML fragment: "
+                        + html_form[:200]
+                    )
 
                 # b) serializacja wszystkich pól <input>, <select>, <textarea>
                 form_fields = {}
-                for inp in form.find_all(["input", "textarea", "select"]):
-                    name = inp.get("name")
-                    if not name:
+                for inp in form.find_all(["input","textarea","select"]):
+                    n = inp.get("name")
+                    if not n:
                         continue
                     if inp.name == "select":
-                        value = inp.find("option", selected=True).get("value", "")
+                        opt = inp.find("option", selected=True)
+                        v = opt.get("value","") if opt else ""
                     elif inp.name == "textarea":
-                        value = inp.text
+                        v = inp.text
                     else:
-                        value = inp.get("value", "")
-                    form_fields[name] = value
+                        v = inp.get("value","")
+                    form_fields[n] = v
 
                 # c) nadpisanie DataOd, DataDo, Info i wymuszenie zapisu
                 form_fields["DataOd"] = act.DataOd
@@ -90,9 +96,6 @@ async def batch_offtimes(
 
                 # d) POST back
                 body = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
-                headers = {
-                    "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2"
-                }
                 resp = await client.request(
                     "POST",
                     "/sedzia_offtimeF.php",
@@ -104,18 +107,19 @@ async def batch_offtimes(
 
                 # e) sprawdzenie, czy pojawił się komunikat "Zapisano"
                 ok = (resp.status_code == 200) and ("Zapisano" in text)
-                results.append({
-                    "index":   idx,
-                    "type":    act.type,
-                    "success": ok,
-                })
+                result["success"] = ok
+                result["status_code"] = resp.status_code
+                if not ok:
+                    result["error"] = (
+                        "Oczekiwano 'Zapisano' w odpowiedzi; "
+                        + "HTML fragment: "
+                        + text[:200]
+                    )
             except Exception as e:
-                results.append({
-                    "index":   idx,
-                    "type":    act.type,
-                    "success": False,
-                    "error":   str(e),
-                })
+                result["success"] = False
+                result["error"] = str(e)
+
+            results.append(result)
 
     return {
         "success": all(r["success"] for r in results),
