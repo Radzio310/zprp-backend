@@ -1,15 +1,19 @@
 # app/results.py
 
 import logging
-from typing import Optional
+from typing import Optional, Dict
 from urllib.parse import urlencode, parse_qs
+import base64
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 from httpx import AsyncClient
 
-from app.deps import get_settings, Settings
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+
+from app.deps import get_settings, get_rsa_keys, Settings
 from app.utils import fetch_with_correct_encoding
 
 logger = logging.getLogger(__name__)
@@ -17,40 +21,47 @@ router = APIRouter(tags=["Results"])
 
 
 class ShortResultRequest(BaseModel):
-    username: str
-    password: str
-    # ścieżka do strony szczegółów (część po index.php?)
-    details_path: str  # np. "a=zawody&b=protokol&Filtr_sezon=193&IdRozgr=11196&IdRundy=27666&IdZawody=176454"
-    # wynik do przerwy
+    username: str    # Base64-RSA
+    password: str    # Base64-RSA
+    details_path: str
     wynik_gosp_pol: str
     wynik_gosc_pol: str
-    # wynik w regulaminowym czasie
     wynik_gosp_full: str
     wynik_gosc_full: str
-    # seria rzutów karnych
     dogrywka_karne_gosp: str
     dogrywka_karne_gosc: str
-    # podyktowane rzuty karne
     karne_ile_gosp: str
     karne_bramki_gosp: str
     karne_ile_gosc: str
     karne_bramki_gosc: str
-    # time-outy gospodarzy
     timeout1_gosp_ii: str
     timeout1_gosp_ss: str
     timeout2_gosp_ii: str
     timeout2_gosp_ss: str
     timeout3_gosp_ii: str
     timeout3_gosp_ss: str
-    # time-outy gości
     timeout1_gosc_ii: str
     timeout1_gosc_ss: str
     timeout2_gosc_ii: str
     timeout2_gosc_ss: str
     timeout3_gosc_ii: str
     timeout3_gosc_ss: str
-    # dodatkowe pola
     widzowie: Optional[str] = ""
+
+
+def _decrypt_field(enc_b64: str, private_key) -> str:
+    """
+    Odszyfrowuje pole zaszyfrowane RSA+Base64.
+    """
+    try:
+        cipher = base64.b64decode(enc_b64)
+        plain = private_key.decrypt(
+            cipher,
+            padding.PKCS1v15()
+        )
+        return plain.decode('utf-8')
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Błąd deszyfrowania: {e}")
 
 
 async def _login_and_client(user: str, pwd: str, settings: Settings) -> AsyncClient:
@@ -76,7 +87,7 @@ async def _submit_short_result(
     client: AsyncClient,
     match_id: str,
     user: str,
-    overrides: dict[str, str],
+    overrides: Dict[str, str],
 ) -> bool:
     # 1) Otwórz modal 'Wynik skrócony'
     initial_data = {
@@ -96,7 +107,7 @@ async def _submit_short_result(
         return False
 
     # 2) Parsowanie pól formularza
-    form_fields: dict[str, str] = {}
+    form_fields: Dict[str, str] = {}
     for inp in form.find_all(["input", "select", "textarea"]):
         name = inp.get("name")
         if not name:
@@ -128,10 +139,7 @@ async def _submit_short_result(
         raise RuntimeError(f"Błąd HTTP {resp.status_code}: {text[:200]}")
 
     # jeżeli pojawił się komunikat „Zapisano zmiany” → sukces
-    if "Zapisano zmiany" in text:
-        return True
-    return False
-
+    return "Zapisano zmiany" in text
 
 
 @router.post(
@@ -141,11 +149,17 @@ async def _submit_short_result(
 async def short_result(
     req: ShortResultRequest,
     settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),       # tu pobieramy (private_key, public_key)
 ):
+    private_key, _ = keys
+    # 1) odszyfruj login i hasło
+    user_plain = _decrypt_field(req.username, private_key)
+    pass_plain = _decrypt_field(req.password, private_key)
+
     try:
-        client = await _login_and_client(req.username, req.password, settings)
+        client = await _login_and_client(user_plain, pass_plain, settings)
         try:
-            # 1) Wejdź na stronę szczegółów meczu
+            # 2) Wejdź na stronę szczegółów meczu
             details_url = f"/index.php?{req.details_path}"
             resp, html = await fetch_with_correct_encoding(
                 client,
@@ -154,19 +168,18 @@ async def short_result(
                 cookies=client.cookies,
             )
             soup = BeautifulSoup(html, "html.parser")
-            # sprawdź, czy przycisk/modal 'Wynik skrócony' istnieje
-            button = soup.find("button", class_="przycisk3", string="Wynik skrócony")
-            if not button:
+
+            # 3) sprawdź dostępność przycisku/modalu
+            if not soup.find("button", class_="przycisk3", string="Wynik skrócony"):
                 return {"success": False, "error": "Wynik skrócony zablokowany lub niedostępny"}
 
-
-            # 2) Wyciągnij IdZawody z query string
+            # 4) Wyciągnij IdZawody
             params = parse_qs(req.details_path)
             match_id = params.get("IdZawody", [None])[0]
             if not match_id:
                 raise HTTPException(400, "Brak parametru IdZawody w details_path")
 
-            # 3) Przygotuj overrides i wyślij
+            # 5) Przygotuj overrides (w tym wynik_bramki_* z wynik_*_full)
             overrides = {
                 "wynik_gosp_pol": req.wynik_gosp_pol,
                 "wynik_gosc_pol": req.wynik_gosc_pol,
@@ -194,10 +207,11 @@ async def short_result(
                 "timeout3_gosc_ss": req.timeout3_gosc_ss,
                 "widzowie": req.widzowie or ""
             }
+
             ok = await _submit_short_result(
                 client,
                 match_id=match_id,
-                user=req.username,
+                user=user_plain,
                 overrides=overrides,
             )
         finally:
