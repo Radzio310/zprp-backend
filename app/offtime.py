@@ -98,12 +98,16 @@ async def _submit_offtime(
             else:
                 form_fields[name] = inp.get("value", "") or ""
 
-        # 3) Nadpisanie pól i wymuszenie przycisku ZAPISZ
+        # 3) Nadpisanie pól
         for key, val in overrides.items():
             form_fields[key] = val
-        form_fields["akcja2"] = "zapisz"
+        # 4) Wymuszenie potwierdzenia: różne wartości akcja2 dla usunięcia vs. zapisu
+        if action_str == "Usun":
+            form_fields["akcja2"] = "tak"
+        else:
+            form_fields["akcja2"] = "zapisz"
 
-        # 4) POST zatwierdzający zmiany
+        # 5) POST zatwierdzający zmiany
         body = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2"}
         resp = await client.request(
@@ -115,8 +119,9 @@ async def _submit_offtime(
         text = resp.content.decode("iso-8859-2", errors="replace")
         if resp.status_code != 200:
             raise RuntimeError(f"Błąd HTTP {resp.status_code}: {text[:200]}")
-        if "Zapisano" not in text:
+        if "Zapisano" not in text and action_str != "Usun":
             raise RuntimeError(f"Nie znaleziono potwierdzenia w odpowiedzi: {text[:200]}")
+        # Usunięcie może przekierować lub nie zawierać tekstu "Zapisano" w formularzu
         return True
     except Exception as e:
         logger.error("_submit_offtime error: %s", e, exc_info=True)
