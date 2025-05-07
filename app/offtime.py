@@ -65,23 +65,24 @@ async def _submit_offtime(
     overrides: Dict[str, str],
 ) -> bool:
     try:
-        # 1) GET popup
-        qs = urlencode({
+        # 1) Otwórz popup przez POST, tak jak robi przeglądarka
+        initial_data = {
             "NrSedzia": judge_id,
             "user": user,
             "akcja": action_str,
             "IdOffT": overrides.get("IdOffT", "")
-        })
+        }
         _, html = await fetch_with_correct_encoding(
             client,
-            f"/sedzia_offtimeF.php?{qs}",
-            method="GET"
+            "/sedzia_offtimeF.php",
+            method="POST",
+            data=initial_data,
         )
 
         soup = BeautifulSoup(html, "html.parser")
         form = soup.find("form", {"name": "OffTimeForm"})
         if not form:
-            raise RuntimeError("Nie znaleziono formularza OffTimeForm; HTML=" + html[:200])
+            raise RuntimeError("Nie znaleziono formularza OffTimeForm; HTML fragment=" + html[:500])
 
         # 2) Serializacja wszystkich pól formularza
         form_fields: Dict[str, str] = {}
@@ -102,7 +103,7 @@ async def _submit_offtime(
             form_fields[key] = val
         form_fields["akcja2"] = "zapisz"
 
-        # 4) POST
+        # 4) POST zatwierdzający zmiany
         body = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2"}
         resp = await client.request(
@@ -131,7 +132,7 @@ async def create_offtime(
     try:
         client = await _login_and_client(req.username, req.password, settings)
         try:
-            ok = await _submit_offtime(
+            await _submit_offtime(
                 client,
                 req.judge_id,
                 req.username,
@@ -160,7 +161,7 @@ async def update_offtime(
     try:
         client = await _login_and_client(req.username, req.password, settings)
         try:
-            ok = await _submit_offtime(
+            await _submit_offtime(
                 client,
                 req.judge_id,
                 req.username,
@@ -189,14 +190,12 @@ async def delete_offtime(
     try:
         client = await _login_and_client(req.username, req.password, settings)
         try:
-            ok = await _submit_offtime(
+            await _submit_offtime(
                 client,
                 req.judge_id,
                 req.username,
                 action_str="Usun",
-                overrides={
-                    "IdOffT": req.IdOffT
-                }
+                overrides={"IdOffT": req.IdOffT}
             )
         finally:
             await client.aclose()
