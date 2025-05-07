@@ -29,7 +29,7 @@ async def delegate_note_test(
 
         resp = await client.get(path)
         ct = resp.headers.get("content-type", "")
-        if resp.status_code != 200 or "application/pdf" not in ct:
+        if resp.status_code != 200:
             raise HTTPException(502, f"ZPRP zwrócił {resp.status_code}, content-type={ct}")
 
         # 3) zwróć strumień
