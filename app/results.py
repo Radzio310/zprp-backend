@@ -172,6 +172,8 @@ async def short_result(
                 "wynik_gosc_pol": req.wynik_gosc_pol,
                 "wynik_gosp_full": req.wynik_gosp_full,
                 "wynik_gosc_full": req.wynik_gosc_full,
+                "wynik_bramki_gosp": req.wynik_gosp_full,
+                "wynik_bramki_gosc": req.wynik_gosc_full,
                 "dogrywka_karne_gosp": req.dogrywka_karne_gosp,
                 "dogrywka_karne_gosc": req.dogrywka_karne_gosc,
                 "karne_ile_gosp": req.karne_ile_gosp,
