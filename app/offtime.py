@@ -1,4 +1,5 @@
 # app/offtime.py
+
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from httpx import AsyncClient
@@ -46,21 +47,20 @@ async def batch_offtimes(
         results = []
         for idx, act in enumerate(actions):
             try:
-                # a) GET formularza (Nowy / Edycja / Usun)
+                # a) POST‑em otwieramy popup i dostajemy formularz OffTimeForm
                 params = {
                   "NrSedzia": judge,
-                  "user": user,
-                  "akcja": (
-                      "Nowy" if act.type=="create"
-                      else "Edycja" if act.type=="update"
-                      else "Usun"
-                  ),
-                  "IdOffT": act.IdOffT or ""
+                  "user":     user,
+                  "akcja":    "Nowy" if act.type == "create"
+                              else "Edycja" if act.type == "update"
+                              else "Usun",
+                  "IdOffT":   act.IdOffT or ""
                 }
-                _, html = await fetch_with_correct_encoding(
+                resp_form, html = await fetch_with_correct_encoding(
                     client,
-                    "/sedzia_offtimeF.php?" + urlencode(params),
-                    method="GET",
+                    "/sedzia_offtimeF.php",
+                    method="POST",
+                    data=params,
                     cookies=cookies,
                 )
                 soup = BeautifulSoup(html, "html.parser")
@@ -70,17 +70,17 @@ async def batch_offtimes(
 
                 # b) serializacja wszystkich pól <input>, <select>, <textarea>
                 form_fields = {}
-                for inp in form.find_all(["input","textarea","select"]):
-                    n = inp.get("name")
-                    if not n:
+                for inp in form.find_all(["input", "textarea", "select"]):
+                    name = inp.get("name")
+                    if not name:
                         continue
                     if inp.name == "select":
-                        v = inp.find("option", selected=True).get("value","")
+                        value = inp.find("option", selected=True).get("value", "")
                     elif inp.name == "textarea":
-                        v = inp.text
+                        value = inp.text
                     else:
-                        v = inp.get("value","")
-                    form_fields[n] = v
+                        value = inp.get("value", "")
+                    form_fields[name] = value
 
                 # c) nadpisanie DataOd, DataDo, Info i wymuszenie zapisu
                 form_fields["DataOd"] = act.DataOd
@@ -105,16 +105,16 @@ async def batch_offtimes(
                 # e) sprawdzenie, czy pojawił się komunikat "Zapisano"
                 ok = (resp.status_code == 200) and ("Zapisano" in text)
                 results.append({
-                    "index": idx,
-                    "type": act.type,
+                    "index":   idx,
+                    "type":    act.type,
                     "success": ok,
                 })
             except Exception as e:
                 results.append({
-                    "index": idx,
-                    "type": act.type,
+                    "index":   idx,
+                    "type":    act.type,
                     "success": False,
-                    "error": str(e),
+                    "error":   str(e),
                 })
 
     return {
