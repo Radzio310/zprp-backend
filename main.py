@@ -14,6 +14,7 @@ from app.auth import router as auth_router
 from app.proxy import router as proxy_router
 from app.edit_judge import router as edit_router
 from app.offtime import router as offtime_router
+from app.delegate import router as delegate_router
 
 app = FastAPI(title="BAZA - API")
 
@@ -28,6 +29,7 @@ app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(edit_router)
 app.include_router(offtime_router)
+app.include_router(delegate_router)
 
 # prosty healthcheck
 @app.get("/health")

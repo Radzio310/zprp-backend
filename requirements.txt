@@ -8,3 +8,4 @@ chardet
 slowapi
 beautifulsoup4
 cryptography
+aiohttp
