@@ -3,37 +3,59 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from app.deps import get_settings, Settings
-from app.offtime import _login_and_client  # normalne logowanie
+
+from app.deps import get_settings, get_rsa_keys, Settings
+from app.offtime import _decrypt_field, _login_and_client
 
 router = APIRouter()
 
-class DelegateNoteTestRequest(BaseModel):
-    username: str     # czysty login
-    password: str     # czyste hasło
-    judge_id: str     # zwykłe judge_id
-    delegate_url: str # np. "./statystyki_sedzia_oc_PDF.php?...")
+class DelegateNoteRequest(BaseModel):
+    username: str     # Base64-RSA zaszyfrowany login
+    password: str     # Base64-RSA zaszyfrowane hasło
+    judge_id: str     # Base64-RSA zaszyfrowane judge_id
+    delegate_url: str # względna ścieżka do PDF, np. "./statystyki_sedzia_oc_PDF.php?..."
 
-@router.post("/judge/offtimes/delegateNoteTest", summary="(TEST) Pobierz ocenę sędziów jako PDF BEZ szyfrowania")
-async def delegate_note_test(
-    req: DelegateNoteTestRequest,
+@router.post(
+    "/judge/offtimes/delegateNote",
+    summary="Pobierz ocenę sędziów jako PDF"
+)
+async def delegate_note(
+    req: DelegateNoteRequest,
     settings: Settings = Depends(get_settings),
+    keys = Depends(get_rsa_keys),
 ):
-    # 1) logujemy się „na czysto”
-    client = await _login_and_client(req.username, req.password, settings)
+    private_key, _ = keys
+
+    # 1) odszyfruj login, hasło i judge_id
+    try:
+        user  = _decrypt_field(req.username, private_key)
+        pwd   = _decrypt_field(req.password, private_key)
+        judge = _decrypt_field(req.judge_id, private_key)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Niepoprawny payload: {e}")
+
+    # 2) zaloguj się i pobierz HTTPX client z ciasteczkami
+    client = await _login_and_client(user, pwd, settings)
 
     try:
-        # 2) zbuduj ścieżkę i pobierz PDF
-        #    delegate_url może zaczynać się od "./" lub bez
+        # 3) zbuduj URL do PDF (serwer zwraca czasem application/octet-stream)
         path = "/" + req.delegate_url.lstrip("./")
-
         resp = await client.get(path)
+
         ct = resp.headers.get("content-type", "")
         if resp.status_code != 200:
-            raise HTTPException(502, f"ZPRP zwrócił {resp.status_code}, content-type={ct}")
+            raise HTTPException(
+                502,
+                f"ZPRP zwrócił {resp.status_code}, content-type={ct}"
+            )
 
-        # 3) zwróć strumień
-        return StreamingResponse(resp.aiter_bytes(), media_type="application/pdf")
+        # 4) zwróć strumień jako PDF
+        return StreamingResponse(
+            resp.aiter_bytes(),
+            media_type="application/pdf"
+        )
 
     finally:
         await client.aclose()
