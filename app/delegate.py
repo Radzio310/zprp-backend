@@ -1,19 +1,22 @@
 # app/delegate.py
 
 import os
-import uuid
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.deps import get_settings, get_rsa_keys, Settings
-from app.offtime import _decrypt_field, _login_and_client  # teraz z odszyfrowaniem
+from app.offtime import _decrypt_field, _login_and_client
 
 router = APIRouter()
 
 # katalog na tymczasowe pliki PDF
-tmp_dir = os.path.abspath("tmp_pdfs")
-os.makedirs(tmp_dir, exist_ok=True)
+TMP_DIR = os.path.abspath("tmp_pdfs")
+os.makedirs(TMP_DIR, exist_ok=True)
+
+# stała nazwa pliku wewnątrz TMP_DIR
+_TEMP_FILE = "delegate.pdf"
+_TEMP_PATH = os.path.join(TMP_DIR, _TEMP_FILE)
 
 class DelegateNoteRequest(BaseModel):
     username:    str  # Base64-RSA zaszyfrowany login
@@ -56,36 +59,24 @@ async def delegate_note(
     finally:
         await client.aclose()
 
-    # 4) zapisz plik tymczasowo
-    token = str(uuid.uuid4())
-    filename = f"{token}.pdf"
-    full_path = os.path.join(tmp_dir, filename)
-    with open(full_path, "wb") as f:
+    # 4) zapisz (nadpisując poprzedni) do TMP_DIR/delegate.pdf
+    with open(_TEMP_PATH, "wb") as f:
         f.write(data)
 
     # 5) zwróć link do pobrania
-    download_url = request.url_for("download_temp_pdf", token=token)
+    download_url = request.url_for("download_delegate_pdf")
     return {"download_url": str(download_url)}
 
 @router.get(
-    "/temp/{token}",
-    name="download_temp_pdf",
-    summary="(tymczasowe) Pobierz PDF i usuń go"
+    "/temp/delegate.pdf",
+    name="download_delegate_pdf",
+    summary="(tymczasowe) Pobierz PDF „Ocena Sędziów”"
 )
-async def download_temp_pdf(
-    token: str,
-    background_tasks: BackgroundTasks,
-):
-    filename = f"{token}.pdf"
-    full_path = os.path.join(tmp_dir, filename)
-    if not os.path.exists(full_path):
+async def download_delegate_pdf():
+    if not os.path.exists(_TEMP_PATH):
         raise HTTPException(404, "Plik nie istnieje lub wygasł")
-
-    # usuń po wysłaniu
-    background_tasks.add_task(os.remove, full_path)
-
     return FileResponse(
-        path=full_path,
+        path=_TEMP_PATH,
         media_type="application/pdf",
-        filename=filename,
+        filename="OCENA SĘDZIÓW.pdf",  # sugerowana nazwa przy pobieraniu
     )
