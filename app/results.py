@@ -127,10 +127,11 @@ async def _submit_short_result(
     if resp.status_code != 200:
         raise RuntimeError(f"Błąd HTTP {resp.status_code}: {text[:200]}")
 
-    # jeśli formularz nie istnieje po zapisie - sukces
-    if "zawody_WynikSkrocony" not in text:
+    # jeżeli pojawił się komunikat „Zapisano zmiany” → sukces
+    if "Zapisano zmiany" in text:
         return True
     return False
+
 
 
 @router.post(
