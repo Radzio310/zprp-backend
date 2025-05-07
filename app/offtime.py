@@ -1,127 +1,193 @@
 # app/offtime.py
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from httpx import AsyncClient
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
-from pydantic import BaseModel
 
 from app.utils import fetch_with_correct_encoding
-from app.schemas import OffTimeAction
 from app.deps import get_settings
 
-router = APIRouter()
+router = APIRouter(tags=["OffTime"])
 
-class PlainBatchOffTimeRequest(BaseModel):
+# ----------------- SCHEMAS -----------------
+
+class CreateOffTimeRequest(BaseModel):
     username: str
     password: str
     judge_id: str
-    actions: List[OffTimeAction]
+    DataOd: str   # format DD.MM.YYYY
+    DataDo: str
+    Info: str
 
-@router.post("/judge/offtimes/batch")
-async def batch_offtimes(
-    req: PlainBatchOffTimeRequest,
-    settings = Depends(get_settings),
-):
-    user    = req.username
-    pwd     = req.password
-    judge   = req.judge_id
-    actions = req.actions
+class UpdateOffTimeRequest(BaseModel):
+    username: str
+    password: str
+    judge_id: str
+    IdOffT: str
+    DataOd: str
+    DataDo: str
+    Info: str
 
-    async with AsyncClient(
+class DeleteOffTimeRequest(BaseModel):
+    username: str
+    password: str
+    judge_id: str
+    IdOffT: str
+
+# ----------------- HELPERS -----------------
+
+async def _login_and_client(user: str, pwd: str, settings) -> AsyncClient:
+    client = AsyncClient(
         base_url=settings.ZPRP_BASE_URL,
         follow_redirects=True
-    ) as client:
-        # 1) logowanie
-        resp_login, _ = await fetch_with_correct_encoding(
+    )
+    resp_login, _ = await fetch_with_correct_encoding(
+        client,
+        "/login.php",
+        method="POST",
+        data={"login": user, "haslo": pwd, "from": "/index.php?"},
+    )
+    if "/index.php" not in resp_login.url.path:
+        await client.aclose()
+        raise HTTPException(401, "Logowanie nie powiodło się")
+    # przepychamy cookies, żeby AsyncClient automatycznie je trzymał
+    client.cookies.update(resp_login.cookies)
+    return client
+
+async def _submit_offtime(
+    client: AsyncClient,
+    judge_id: str,
+    user: str,
+    action_str: str,   # "Nowy" | "Edycja" | "Usun"
+    overrides: dict,
+) -> bool:
+    # 1) GET popup
+    qs = urlencode({
+        "NrSedzia": judge_id,
+        "user": user,
+        "akcja": action_str,
+        "IdOffT": overrides.get("IdOffT", "")
+    })
+    _, html = await fetch_with_correct_encoding(
+        client,
+        f"/sedzia_offtimeF.php?{qs}",
+        method="GET"
+    )
+
+    soup = BeautifulSoup(html, "html.parser")
+    form = soup.find("form", {"name": "OffTimeForm"})
+    if not form:
+        raise RuntimeError("Nie znaleziono formularza OffTimeForm")
+
+    # 2) serializacja wszystkich pól
+    form_fields = {}
+    for inp in form.find_all(["input","select","textarea"]):
+        n = inp.get("name")
+        if not n: continue
+        if inp.name == "select":
+            opt = inp.find("option", selected=True)
+            form_fields[n] = opt.get("value","") if opt else ""
+        elif inp.name == "textarea":
+            form_fields[n] = inp.text
+        else:
+            form_fields[n] = inp.get("value","")
+
+    # 3) nadpisanie pól
+    for k, v in overrides.items():
+        form_fields[k] = v
+    # wymuszamy użycie przycisku Zapisz
+    form_fields["akcja"] = "Zapisz"
+
+    # 4) POST
+    body = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
+    headers = {"Content-Type":"application/x-www-form-urlencoded; charset=ISO-8859-2"}
+    resp = await client.request(
+        "POST",
+        "/sedzia_offtimeF.php",
+        content=body.encode("ascii"),
+        headers=headers
+    )
+    text = resp.content.decode("iso-8859-2", errors="replace")
+    return (resp.status_code == 200) and ("Zapisano" in text)
+
+# ----------------- ENDPOINTS -----------------
+
+@router.post("/judge/offtimes/create", summary="Dodaj nową niedyspozycyjność")
+async def create_offtime(
+    req: CreateOffTimeRequest,
+    settings = Depends(get_settings),
+):
+    client = await _login_and_client(req.username, req.password, settings)
+    try:
+        ok = await _submit_offtime(
             client,
-            "/login.php",
-            method="POST",
-            data={"login": user, "haslo": pwd, "from": "/index.php?"},
+            req.judge_id,
+            req.username,
+            action_str="Nowy",
+            overrides={
+                "DataOd": req.DataOd,
+                "DataDo": req.DataDo,
+                "Info": req.Info,
+                "IdOffT": ""
+            }
         )
-        if "/index.php" not in resp_login.url.path:
-            raise HTTPException(401, "Logowanie nie powiodło się")
-        cookies = dict(resp_login.cookies)
+    finally:
+        await client.aclose()
 
-        results = []
-        headers = {"Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2"}
+    if not ok:
+        raise HTTPException(500, "Nie udało się dodać niedyspozycyjności")
+    return {"success": True}
 
-        for idx, act in enumerate(actions):
-            result = {"index": idx, "type": act.type}
-            try:
-                # a) GET formularza przez fetch_with_correct_encoding
-                qs = urlencode({
-                    "NrSedzia": judge,
-                    "user": user,
-                    "akcja": "Nowy"   if act.type=="create"
-                             else "Edycja" if act.type=="update"
-                             else "Usun",
-                    "IdOffT": act.IdOffT or ""
-                })
-                form_res, form_html = await fetch_with_correct_encoding(
-                    client,
-                    f"/sedzia_offtimeF.php?{qs}",
-                    method="GET",
-                    cookies=cookies,
-                )
 
-                # b) parsuj w ISO‑8859‑2
-                soup = BeautifulSoup(form_html, "html.parser")
-                form = soup.find("form", {"name": "OffTimeForm"})
-                if not form:
-                    raise RuntimeError(
-                        "Nie znaleziono formularza OffTimeForm; HTML fragment: "
-                        + form_html[:200]
-                    )
+@router.post("/judge/offtimes/update", summary="Edytuj istniejącą niedyspozycyjność")
+async def update_offtime(
+    req: UpdateOffTimeRequest,
+    settings = Depends(get_settings),
+):
+    client = await _login_and_client(req.username, req.password, settings)
+    try:
+        ok = await _submit_offtime(
+            client,
+            req.judge_id,
+            req.username,
+            action_str="Edycja",
+            overrides={
+                "IdOffT": req.IdOffT,
+                "DataOd": req.DataOd,
+                "DataDo": req.DataDo,
+                "Info": req.Info
+            }
+        )
+    finally:
+        await client.aclose()
 
-                # c) wypakuj wszystkie pola
-                form_fields = {}
-                for inp in form.find_all(["input","textarea","select"]):
-                    n = inp.get("name")
-                    if not n:
-                        continue
-                    if inp.name == "select":
-                        opt = inp.find("option", selected=True)
-                        v = opt.get("value","") if opt else ""
-                    elif inp.name == "textarea":
-                        v = inp.text
-                    else:
-                        v = inp.get("value","")
-                    form_fields[n] = v
+    if not ok:
+        raise HTTPException(500, "Nie udało się edytować niedyspozycyjności")
+    return {"success": True}
 
-                # d) nadpisz
-                form_fields["DataOd"] = act.DataOd
-                form_fields["DataDo"] = act.DataDo
-                form_fields["Info"]   = act.Info
-                form_fields["akcja"]  = "Zapisz"
 
-                # e) wyślij POST
-                body = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
-                resp = await client.request(
-                    "POST",
-                    "/sedzia_offtimeF.php",
-                    content=body.encode("ascii"),
-                    headers=headers,
-                    cookies=cookies,
-                )
-                text = resp.content.decode("iso-8859-2", errors="replace")
+@router.post("/judge/offtimes/delete", summary="Usuń niedyspozycyjność")
+async def delete_offtime(
+    req: DeleteOffTimeRequest,
+    settings = Depends(get_settings),
+):
+    client = await _login_and_client(req.username, req.password, settings)
+    try:
+        ok = await _submit_offtime(
+            client,
+            req.judge_id,
+            req.username,
+            action_str="Usun",
+            overrides={
+                "IdOffT": req.IdOffT
+                # nie musimy nadpisywać DataOd/DataDo/Info
+            }
+        )
+    finally:
+        await client.aclose()
 
-                # f) weryfikuj
-                ok = resp.status_code == 200 and "Zapisano" in text
-                result["success"] = ok
-                result["status_code"] = resp.status_code
-                if not ok:
-                    result["error"] = (
-                        "Spodziewano się 'Zapisano' w odpowiedzi; HTML fragment: "
-                        + text[:200]
-                    )
-            except Exception as e:
-                result["success"] = False
-                result["error"] = str(e)
-
-            results.append(result)
-
-    return {
-        "success": all(r["success"] for r in results),
-        "results": results
-    }
+    if not ok:
+        raise HTTPException(500, "Nie udało się usunąć niedyspozycyjności")
+    return {"success": True}
