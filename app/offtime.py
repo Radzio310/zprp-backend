@@ -1,13 +1,16 @@
-from typing import Optional, Dict
+from typing import Dict
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from httpx import AsyncClient
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
+import base64
 import logging
 
 from app.utils import fetch_with_correct_encoding
-from app.deps import get_settings
+from app.deps import get_settings, get_rsa_keys
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["OffTime"])
@@ -15,9 +18,9 @@ router = APIRouter(tags=["OffTime"])
 # ----------------- SCHEMAS -----------------
 
 class CreateOffTimeRequest(BaseModel):
-    username: str
-    password: str
-    judge_id: str
+    username: str  # Base64-RSA
+    password: str  # Base64-RSA
+    judge_id: str  # Base64-RSA
     DataOd: str   # format DD.MM.YYYY
     DataDo: str
     Info: str
@@ -38,6 +41,17 @@ class DeleteOffTimeRequest(BaseModel):
     IdOffT: str
 
 # ----------------- HELPERS -----------------
+
+def _decrypt_field(enc_b64: str, private_key) -> str:
+    try:
+        cipher = base64.b64decode(enc_b64)
+        plain = private_key.decrypt(
+            cipher,
+            padding.PKCS1v15()
+        )
+        return plain.decode('utf-8')
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Błąd deszyfrowania: {e}")
 
 async def _login_and_client(user: str, pwd: str, settings) -> AsyncClient:
     client = AsyncClient(
@@ -65,7 +79,7 @@ async def _submit_offtime(
     overrides: Dict[str, str],
 ) -> bool:
     try:
-        # 1) Otwórz popup przez POST, tak jak robi przeglądarka
+        # 1) Otwórz popup przez POST
         initial_data = {
             "NrSedzia": judge_id,
             "user": user,
@@ -101,11 +115,8 @@ async def _submit_offtime(
         # 3) Nadpisanie pól
         for key, val in overrides.items():
             form_fields[key] = val
-        # 4) Wymuszenie potwierdzenia: różne wartości akcja2 dla usunięcia vs. zapisu
-        if action_str == "Usun":
-            form_fields["akcja2"] = "tak"
-        else:
-            form_fields["akcja2"] = "zapisz"
+        # 4) Wymuszenie odpowiedniego potwierdzenia
+        form_fields["akcja2"] = "tak" if action_str == "Usun" else "zapisz"
 
         # 5) POST zatwierdzający zmiany
         body = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
@@ -119,9 +130,8 @@ async def _submit_offtime(
         text = resp.content.decode("iso-8859-2", errors="replace")
         if resp.status_code != 200:
             raise RuntimeError(f"Błąd HTTP {resp.status_code}: {text[:200]}")
-        if "Zapisano" not in text and action_str != "Usun":
+        if action_str != "Usun" and "Zapisano" not in text:
             raise RuntimeError(f"Nie znaleziono potwierdzenia w odpowiedzi: {text[:200]}")
-        # Usunięcie może przekierować lub nie zawierać tekstu "Zapisano" w formularzu
         return True
     except Exception as e:
         logger.error("_submit_offtime error: %s", e, exc_info=True)
@@ -133,14 +143,20 @@ async def _submit_offtime(
 async def create_offtime(
     req: CreateOffTimeRequest,
     settings = Depends(get_settings),
+    keys = Depends(get_rsa_keys),  # (private_key, public_key)
 ):
+    private_key, _ = keys
+    # odszyfrowanie danych
+    user_plain = _decrypt_field(req.username, private_key)
+    pass_plain = _decrypt_field(req.password, private_key)
+    judge_plain = _decrypt_field(req.judge_id, private_key)
     try:
-        client = await _login_and_client(req.username, req.password, settings)
+        client = await _login_and_client(user_plain, pass_plain, settings)
         try:
             await _submit_offtime(
                 client,
-                req.judge_id,
-                req.username,
+                judge_plain,
+                user_plain,
                 action_str="Nowy",
                 overrides={
                     "dataOd": req.DataOd,
@@ -162,14 +178,19 @@ async def create_offtime(
 async def update_offtime(
     req: UpdateOffTimeRequest,
     settings = Depends(get_settings),
+    keys = Depends(get_rsa_keys),
 ):
+    private_key, _ = keys
+    user_plain = _decrypt_field(req.username, private_key)
+    pass_plain = _decrypt_field(req.password, private_key)
+    judge_plain = _decrypt_field(req.judge_id, private_key)
     try:
-        client = await _login_and_client(req.username, req.password, settings)
+        client = await _login_and_client(user_plain, pass_plain, settings)
         try:
             await _submit_offtime(
                 client,
-                req.judge_id,
-                req.username,
+                judge_plain,
+                user_plain,
                 action_str="Edycja",
                 overrides={
                     "IdOffT": req.IdOffT,
@@ -191,14 +212,19 @@ async def update_offtime(
 async def delete_offtime(
     req: DeleteOffTimeRequest,
     settings = Depends(get_settings),
+    keys = Depends(get_rsa_keys),
 ):
+    private_key, _ = keys
+    user_plain = _decrypt_field(req.username, private_key)
+    pass_plain = _decrypt_field(req.password, private_key)
+    judge_plain = _decrypt_field(req.judge_id, private_key)
     try:
-        client = await _login_and_client(req.username, req.password, settings)
+        client = await _login_and_client(user_plain, pass_plain, settings)
         try:
             await _submit_offtime(
                 client,
-                req.judge_id,
-                req.username,
+                judge_plain,
+                user_plain,
                 action_str="Usun",
                 overrides={"IdOffT": req.IdOffT}
             )
