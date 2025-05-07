@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.deps import get_settings, get_rsa_keys, Settings
-from app.offtime import _decrypt_field, _login_and_client
+from app.deps import get_settings, Settings
+from app.offtime import _login_and_client
 
 router = APIRouter()
 
@@ -15,39 +15,26 @@ router = APIRouter()
 TMP_DIR = "tmp_pdfs"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-class DelegateNoteRequest(BaseModel):
-    username:    str  # Base64-RSA zaszyfrowany login
-    password:    str  # Base64-RSA zaszyfrowane hasło
-    judge_id:    str  # Base64-RSA zaszyfrowane judge_id
+class DelegateNoteTestRequest(BaseModel):
+    username:    str  # czysty login
+    password:    str  # czyste hasło
+    judge_id:    str  # czyste judge_id (jak Ci to zwraca ZPRP)
     delegate_url: str  # względna ścieżka do PDF, np. "./statystyki_sedzia_oc_PDF.php?…"
 
 @router.post(
-    "/judge/offtimes/delegateNote",
-    summary="Pobierz ocenę sędziów jako PDF i wygeneruj link"
+    "/judge/offtimes/delegateNoteTest",
+    summary="(TEST) Pobierz ocenę sędziów jako PDF i wygeneruj link BEZ szyfrowania"
 )
-async def delegate_note(
-    req: DelegateNoteRequest,
+async def delegate_note_test(
+    req: DelegateNoteTestRequest,
     request: Request,
     settings: Settings = Depends(get_settings),
-    keys = Depends(get_rsa_keys),
 ):
-    private_key, _ = keys
-
-    # 1) odszyfruj login, hasło i judge_id
-    try:
-        user  = _decrypt_field(req.username, private_key)
-        pwd   = _decrypt_field(req.password, private_key)
-        judge = _decrypt_field(req.judge_id, private_key)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(400, f"Niepoprawny payload: {e}")
-
-    # 2) zaloguj się i pobierz HTTPX client z ciasteczkami
-    client = await _login_and_client(user, pwd, settings)
+    # 1) logowanie „na czysto”
+    client = await _login_and_client(req.username, req.password, settings)
 
     try:
-        # 3) pobierz PDF z ZPRP
+        # 2) pobierz PDF z ZPRP
         path = "/" + req.delegate_url.lstrip("./")
         resp = await client.get(path)
         ct = resp.headers.get("content-type", "")
@@ -58,22 +45,23 @@ async def delegate_note(
                 f"ZPRP zwrócił {resp.status_code}, content-type={ct}"
             )
 
-        # 4) wczytaj cały strumień do pamięci
+        # 3) wczytaj cały strumień do pamięci
         data = await resp.aread()
 
-        # 5) wygeneruj unikatowy token i zapisz plik
+        # 4) wygeneruj unikatowy token i zapisz plik
         token = str(uuid.uuid4())
         filename = f"{token}.pdf"
         file_path = os.path.join(TMP_DIR, filename)
         with open(file_path, "wb") as f:
             f.write(data)
 
-        # 6) skonstruuj URL do pobrania
+        # 5) skonstruuj URL do pobrania
         download_path = request.url_for("download_temp_pdf", token=token)
         return {"download_url": str(download_path)}
 
     finally:
         await client.aclose()
+
 
 @router.get(
     "/temp/{token}",
