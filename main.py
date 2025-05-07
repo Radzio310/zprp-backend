@@ -13,6 +13,7 @@ from app.deps import get_rsa_keys
 from app.auth import router as auth_router
 from app.proxy import router as proxy_router
 from app.edit_judge import router as edit_router
+from app.offtime import router as offtime_router
 
 app = FastAPI(title="BAZA - API")
 
@@ -26,6 +27,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(edit_router)
+app.include_router(offtime_router)
 
 # prosty healthcheck
 @app.get("/health")
