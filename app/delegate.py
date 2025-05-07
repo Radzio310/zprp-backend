@@ -1,88 +1,75 @@
-# app/delegate.py
-
 import os
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.deps import get_settings, Settings
-from app.offtime import _login_and_client
+from app.offtime import _login_and_client  # plain login without encryption
 
 router = APIRouter()
 
 # katalog na tymczasowe pliki PDF
-TMP_DIR = "tmp_pdfs"
-os.makedirs(TMP_DIR, exist_ok=True)
+tmp_dir = os.path.abspath("tmp_pdfs")
+os.makedirs(tmp_dir, exist_ok=True)
 
 class DelegateNoteTestRequest(BaseModel):
     username:    str  # czysty login
     password:    str  # czyste hasło
-    judge_id:    str  # czyste judge_id (jak Ci to zwraca ZPRP)
     delegate_url: str  # względna ścieżka do PDF, np. "./statystyki_sedzia_oc_PDF.php?…"
 
 @router.post(
     "/judge/offtimes/delegateNoteTest",
-    summary="(TEST) Pobierz ocenę sędziów jako PDF i wygeneruj link BEZ szyfrowania"
+    summary="(TEST) Pobierz ocenę sędziów jako PDF i wygeneruj link bez szyfrowania"
 )
 async def delegate_note_test(
     req: DelegateNoteTestRequest,
     request: Request,
     settings: Settings = Depends(get_settings),
 ):
-    # 1) logowanie „na czysto”
+    # 1) logujemy się "na czysto"
     client = await _login_and_client(req.username, req.password, settings)
-
     try:
         # 2) pobierz PDF z ZPRP
         path = "/" + req.delegate_url.lstrip("./")
         resp = await client.get(path)
-        ct = resp.headers.get("content-type", "")
-
         if resp.status_code != 200:
-            raise HTTPException(
-                502,
-                f"ZPRP zwrócił {resp.status_code}, content-type={ct}"
-            )
-
-        # 3) wczytaj cały strumień do pamięci
+            ct = resp.headers.get("content-type", "")
+            raise HTTPException(502, f"ZPRP zwrócił {resp.status_code}, content-type={ct}")
         data = await resp.aread()
-
-        # 4) wygeneruj unikatowy token i zapisz plik
-        token = str(uuid.uuid4())
-        filename = f"{token}.pdf"
-        file_path = os.path.join(TMP_DIR, filename)
-        with open(file_path, "wb") as f:
-            f.write(data)
-
-        # 5) skonstruuj URL do pobrania
-        download_path = request.url_for("download_temp_pdf", token=token)
-        return {"download_url": str(download_path)}
-
     finally:
         await client.aclose()
 
+    # 3) zapisz plik tymczasowo
+    token = str(uuid.uuid4())
+    filename = f"{token}.pdf"
+    full_path = os.path.join(tmp_dir, filename)
+    with open(full_path, "wb") as f:
+        f.write(data)
+
+    # 4) zwróć link do pobrania
+    download_url = request.url_for("download_temp_pdf", token=token)
+    return {"download_url": str(download_url)}
 
 @router.get(
     "/temp/{token}",
     name="download_temp_pdf",
     summary="(tymczasowe) Pobierz PDF i usuń go"
 )
-async def download_temp_pdf(token: str):
+async def download_temp_pdf(
+    token: str,
+    background_tasks: BackgroundTasks,
+):
     filename = f"{token}.pdf"
-    file_path = os.path.join(TMP_DIR, filename)
+    full_path = os.path.join(tmp_dir, filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(404, "Plik nie istnieje lub wygasł")
 
-    if not os.path.exists(file_path):
-        raise HTTPException(404, "Plik wygasł lub nie istnieje")
+    # usuń po wysłaniu
+    background_tasks.add_task(os.remove, full_path)
 
-    # zwróć plik i usuń po wysłaniu
-    response = FileResponse(file_path, media_type="application/pdf")
-
-    @response.call_on_close
-    def _cleanup():
-        try:
-            os.remove(file_path)
-        except OSError:
-            pass
-
-    return response
+    return FileResponse(
+        path=full_path,
+        media_type="application/pdf",
+        filename=filename,
+    )
