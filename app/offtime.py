@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from httpx import AsyncClient
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
+from pydantic import BaseModel
 
 from app.utils import fetch_with_correct_encoding
 from app.schemas import OffTimeAction
