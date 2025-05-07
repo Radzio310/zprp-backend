@@ -154,7 +154,7 @@ async def short_result(
             )
             soup = BeautifulSoup(html, "html.parser")
             # sprawdź, czy przycisk/modal 'Wynik skrócony' istnieje
-            if not soup.find("form", {"name": "zawody_WynikSkrocony"}):
+            if not soup.find("form", {"name": "WynikSkrocony"}):
                 return {"success": False, "error": "Wynik skrócony zablokowany lub niedostępny"}
 
             # 2) Wyciągnij IdZawody z query string
