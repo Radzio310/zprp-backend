@@ -171,7 +171,7 @@ async def short_result(
 
             # 3) sprawdź dostępność przycisku/modalu
             if not soup.find("button", class_="przycisk3", string="Wynik skrócony"):
-                return {"success": False, "error": "Wynik skrócony zablokowany lub niedostępny"}
+                return {"success": False, "error": "Wynik skrócony niedostępny"}
 
             # 4) Wyciągnij IdZawody
             params = parse_qs(req.details_path)
