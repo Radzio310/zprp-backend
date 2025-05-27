@@ -1,5 +1,3 @@
-# app/deps.py
-
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from cryptography.hazmat.primitives import serialization
@@ -18,13 +16,24 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
     )
 
+    # Core auth settings
     SECRET_KEY: str
     ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int
+
+    # ZPRP application settings
     ZPRP_BASE_URL: str
 
-    # PEM prywatnego klucza RSA (zwróć uwagę na literal '\n' jeśli multiline)
+    # Google OAuth2 Calendar
+    GOOGLE_CLIENT_ID: str
+    GOOGLE_CLIENT_SECRET: str
+    BACKEND_URL: str
+    FRONTEND_DEEP_LINK: str
+
+    # PEM prywatnego klucza RSA (multi-line stored as literal '\n')
     RSA_PRIVATE_KEY: str
+
+# Dependency: settings singleton
 
 def get_settings() -> Settings:
     return Settings()
@@ -35,7 +44,6 @@ def get_settings() -> Settings:
 
 def get_rsa_keys():
     settings = get_settings()
-    # Odtwórz multiline PEM, jeśli potrzebne
     pem_str = settings.RSA_PRIVATE_KEY.replace('\\n', '\n')
     private_key = serialization.load_pem_private_key(
         data=pem_str.encode('utf-8'),
@@ -66,9 +74,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         user_login: str = payload.get("sub")
-        if not user_login:
+        if user_login is None:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-
     return user_login
