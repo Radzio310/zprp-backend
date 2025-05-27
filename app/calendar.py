@@ -5,7 +5,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import datetime
 
-from app.deps import get_settings, get_current_user  # get_current_user zwraca user.id
+from app.deps import get_settings, get_current_user  # get_current_user zwraca login użytkownika (str)
 from app.calendar_storage import (
     save_calendar_tokens,
     get_calendar_tokens,
@@ -34,8 +34,8 @@ def create_flow(settings):
 
 @router.get("/auth-url", summary="Wygeneruj URL do Google OAuth2")
 async def get_auth_url(
-    settings = Depends(get_settings),
-    user = Depends(get_current_user)
+    settings=Depends(get_settings),
+    user_login: str = Depends(get_current_user)
 ):
     flow = create_flow(settings)
     auth_url, state = flow.authorization_url(
@@ -44,18 +44,18 @@ async def get_auth_url(
         prompt="consent"
     )
     # Zapisz stan CSRF w DB
-    await save_oauth_state(user.id, state)
+    await save_oauth_state(user_login, state)
     return JSONResponse({"url": auth_url})
 
 @router.get("/oauth2callback", summary="Callback OAuth2 z Google")
 async def oauth2callback(
     code: str = Query(...),
     state: str = Query(None),
-    settings = Depends(get_settings),
-    user = Depends(get_current_user)
+    settings=Depends(get_settings),
+    user_login: str = Depends(get_current_user)
 ):
     # Weryfikacja state (CSRF)
-    saved_state = await get_oauth_state(user.id)
+    saved_state = await get_oauth_state(user_login)
     if not saved_state or state != saved_state:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
@@ -68,7 +68,7 @@ async def oauth2callback(
     creds = flow.credentials
     # Refresh token fallback
     if not creds.refresh_token:
-        existing = await get_calendar_tokens(user.id)
+        existing = await get_calendar_tokens(user_login)
         if existing and existing["refresh_token"]:
             refresh_token = existing["refresh_token"]
         else:
@@ -81,7 +81,7 @@ async def oauth2callback(
 
     # Zapis tokenów w DB
     await save_calendar_tokens(
-        user.id,
+        user_login,
         access_token=creds.token,
         refresh_token=refresh_token,
         expires_at=creds.expiry.isoformat()
@@ -92,10 +92,10 @@ async def oauth2callback(
 
 @router.get("/events", summary="Pobierz nadchodzące wydarzenia")
 async def list_events(
-    settings = Depends(get_settings),
-    user = Depends(get_current_user)
+    settings=Depends(get_settings),
+    user_login: str = Depends(get_current_user)
 ):
-    row = await get_calendar_tokens(user.id)
+    row = await get_calendar_tokens(user_login)
     if not row:
         raise HTTPException(status_code=404, detail="Kalendarz Google nie jest połączony")
 

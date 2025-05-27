@@ -1,3 +1,5 @@
+# app/deps.py
+
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from cryptography.hazmat.primitives import serialization
@@ -11,22 +13,18 @@ from jose import JWTError, jwt
 # ====================================
 
 class Settings(BaseSettings):
-    # Wczytujemy zmienne środowiskowe z pliku .env
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
     )
 
-    # Twoje istniejące ustawienia
     SECRET_KEY: str
     ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int
     ZPRP_BASE_URL: str
 
-    # NOWOŚĆ: PEM prywatnego klucza RSA; nazwa dokładnie taka jak w .env / Railway
+    # PEM prywatnego klucza RSA (zwróć uwagę na literal '\n' jeśli multiline)
     RSA_PRIVATE_KEY: str
-
-# Dependency: settings singleton
 
 def get_settings() -> Settings:
     return Settings()
@@ -37,7 +35,7 @@ def get_settings() -> Settings:
 
 def get_rsa_keys():
     settings = get_settings()
-    # Jeśli multiline PEM zapisany jako '\n', odtwarzaj nowe linie:
+    # Odtwórz multiline PEM, jeśli potrzebne
     pem_str = settings.RSA_PRIVATE_KEY.replace('\\n', '\n')
     private_key = serialization.load_pem_private_key(
         data=pem_str.encode('utf-8'),
@@ -59,20 +57,18 @@ credentials_exception = HTTPException(
     headers={"WWW-Authenticate": "Bearer"},
 )
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> int:
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     """
-    Dekoduje JWT i zwraca user_id zapisane w polu 'sub'.
-    Jeśli token jest nieważny lub brak pola, rzuca 401.
+    Dekoduje JWT i zwraca login użytkownika (pole 'sub').
+    Jeśli token jest nieważny lub brak pola 'sub' → 401.
     """
     settings = get_settings()
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
+        user_login: str = payload.get("sub")
+        if not user_login:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    try:
-        return int(user_id)
-    except ValueError:
-        raise credentials_exception
+
+    return user_login
