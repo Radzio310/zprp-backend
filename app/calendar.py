@@ -84,19 +84,20 @@ async def calendar_status(
     tok = await get_calendar_tokens(user_login)
     return {"connected": bool(tok)}
 
-@router.post(
-    "/disconnect",
-    summary="Rozłącz konto Google Calendar",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
+@router.post("/disconnect", summary="Rozłącz konto Google Calendar")
 async def disconnect_calendar(
-    user_login: str = Depends(get_current_user),
+    user_login: str = Depends(get_current_user)
 ):
-    # Usuń zapisane tokeny OAuth
+    # sprawdź, czy faktycznie było połączenie
+    existing = await get_calendar_tokens(user_login)
+    if not existing:
+        return JSONResponse(
+            {"detail": "Brak połączenia z kalendarzem"},
+            status_code=status.HTTP_400_BAD_REQUEST
+        )
+    # usuń tokeny
     await delete_calendar_tokens(user_login)
-    # (opcjonalnie) wyczyść też mapowania eventów:
-    # await delete_event_mapping(user_login, match_id=None)  # lub pętlą po wszystkich
-    return JSONResponse(status_code=204, content=None)
+    return JSONResponse({"disconnected": True})
 
 
 @router.get("/events", summary="Pobierz nadchodzące wydarzenia")
