@@ -84,6 +84,16 @@ async def calendar_status(
     tok = await get_calendar_tokens(user_login)
     return {"connected": bool(tok)}
 
+@router.post("/disconnect", summary="Rozłącz konto Google Calendar")
+async def disconnect_calendar(
+    user_login: str = Depends(get_current_user),
+):
+    # usuń tokeny Google z bazy
+    await delete_calendar_tokens(user_login)
+    # (opcjonalnie: usuń też mapowanie istniejących eventów)
+    await delete_event_mapping(user_login)  # jeśli chcesz czyścić wszystkie
+    return JSONResponse(status_code=204, content=None)
+
 
 @router.get("/events", summary="Pobierz nadchodzące wydarzenia")
 async def list_events(
