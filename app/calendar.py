@@ -19,7 +19,7 @@ from app.calendar_storage import (
     get_event_mapping,
     delete_event_mapping,
 )
-from app.calendar import create_flow  # Twój helper do Flow
+from app.calendar_utils import create_flow  # Twój helper do Flow
 
 router = APIRouter(prefix="/calendar", tags=["Calendar"])
 
