@@ -1,3 +1,5 @@
+# app/calendar_storage.py
+
 import logging
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db import database, calendar_tokens, oauth_states
@@ -5,10 +7,13 @@ from app.db import database, calendar_tokens, oauth_states
 logger = logging.getLogger(__name__)
 
 # -------------------------
-# CSRF/OAuth-state
+# CSRF / OAuth-state storage
 # -------------------------
 
 async def save_oauth_state(user_login: str, state: str) -> None:
+    """
+    Save or update the OAuth2 state string for the given user_login.
+    """
     try:
         stmt = pg_insert(oauth_states).values(
             user_login=user_login,
@@ -23,6 +28,9 @@ async def save_oauth_state(user_login: str, state: str) -> None:
         raise
 
 async def get_oauth_state(user_login: str) -> str | None:
+    """
+    Retrieve the OAuth2 state string for the given user_login, or None if not found.
+    """
     try:
         query = oauth_states.select().where(oauth_states.c.user_login == user_login)
         row = await database.fetch_one(query)
@@ -32,6 +40,9 @@ async def get_oauth_state(user_login: str) -> str | None:
         raise
 
 async def get_user_login_by_state(state: str) -> str | None:
+    """
+    Lookup the user_login that corresponds to the given OAuth state.
+    """
     try:
         query = oauth_states.select().where(oauth_states.c.state == state)
         row = await database.fetch_one(query)
@@ -41,7 +52,7 @@ async def get_user_login_by_state(state: str) -> str | None:
         raise
 
 # -------------------------
-# Google Calendar tokens
+# Google Calendar tokens storage
 # -------------------------
 
 async def save_calendar_tokens(
@@ -50,6 +61,9 @@ async def save_calendar_tokens(
     refresh_token: str,
     expires_at: str
 ) -> None:
+    """
+    Insert or update Google Calendar access and refresh tokens for a user.
+    """
     try:
         stmt = pg_insert(calendar_tokens).values(
             user_login=user_login,
@@ -70,6 +84,10 @@ async def save_calendar_tokens(
         raise
 
 async def get_calendar_tokens(user_login: str):
+    """
+    Retrieve the stored Google Calendar tokens for a given user_login.
+    Returns a record with keys access_token, refresh_token, expires_at or None.
+    """
     try:
         query = calendar_tokens.select().where(calendar_tokens.c.user_login == user_login)
         return await database.fetch_one(query)
