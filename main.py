@@ -16,6 +16,9 @@ from app.edit_judge import router as edit_router
 from app.offtime import router as offtime_router
 from app.delegate import router as delegate_router
 from app.results import router as results_router
+from app.calendar import router as calendar_router
+
+from app.db import database
 
 app = FastAPI(title="BAZA - API")
 
@@ -32,6 +35,15 @@ app.include_router(edit_router)
 app.include_router(offtime_router)
 app.include_router(delegate_router)
 app.include_router(results_router)
+app.include_router(calendar_router)
+
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
 
 # prosty healthcheck
 @app.get("/health")
