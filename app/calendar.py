@@ -4,23 +4,20 @@ from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import datetime
-import logging
 
-from app.deps import get_settings, get_current_user  # get_current_user zwraca login użytkownika (str)
+from app.deps import get_settings, get_current_user
 from app.calendar_storage import (
-    save_calendar_tokens,
-    get_calendar_tokens,
     save_oauth_state,
     get_oauth_state,
+    get_user_login_by_state,
+    save_calendar_tokens,
+    get_calendar_tokens,
 )
 
 router = APIRouter(prefix="/calendar", tags=["Calendar"])
 
-# Logger dla tego modułu
-logger = logging.getLogger(__name__)
-
 def create_flow(settings):
-    client_config = {
+    conf = {
         "web": {
             "client_id": settings.GOOGLE_CLIENT_ID,
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
@@ -29,16 +26,13 @@ def create_flow(settings):
             "redirect_uris": [f"{settings.BACKEND_URL}/calendar/oauth2callback"],
         }
     }
-    flow = Flow.from_client_config(
-        client_config,
-        scopes=["https://www.googleapis.com/auth/calendar.events"]
-    )
+    flow = Flow.from_client_config(conf, scopes=["https://www.googleapis.com/auth/calendar.events"])
     flow.redirect_uri = f"{settings.BACKEND_URL}/calendar/oauth2callback"
     return flow
 
 @router.get("/auth-url", summary="Wygeneruj URL do Google OAuth2")
 async def get_auth_url(
-    settings=Depends(get_settings),
+    settings = Depends(get_settings),
     user_login: str = Depends(get_current_user)
 ):
     flow = create_flow(settings)
@@ -47,103 +41,66 @@ async def get_auth_url(
         include_granted_scopes="true",
         prompt="consent"
     )
-    # Zapisz stan CSRF w DB z obsługą wyjątków
-    try:
-        await save_oauth_state(user_login, state)
-    except Exception:
-        logger.exception("Failed to save OAuth state for user %s, state %s", user_login, state)
-        raise HTTPException(
-            status_code=500,
-            detail="Wewnętrzny błąd serwera podczas zapisywania stanu OAuth"
-        )
+    await save_oauth_state(user_login, state)
     return JSONResponse({"url": auth_url})
 
 @router.get("/oauth2callback", summary="Callback OAuth2 z Google")
 async def oauth2callback(
     code: str = Query(...),
-    state: str = Query(None),
-    settings=Depends(get_settings),
-    user_login: str = Depends(get_current_user)
+    state: str = Query(...),
+    settings = Depends(get_settings),
 ):
-    # Weryfikacja state (CSRF)
-    try:
-        saved_state = await get_oauth_state(user_login)
-    except Exception:
-        logger.exception("Error fetching OAuth state for user %s", user_login)
-        raise HTTPException(status_code=500, detail="Błąd wewnętrzny przy weryfikacji stanu OAuth")
-
-    if not saved_state or state != saved_state:
+    # nie ma tu już Depends(get_current_user) — rozpoznajemy user_login po state
+    user_login = await get_user_login_by_state(state)
+    if not user_login:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
     flow = create_flow(settings)
     try:
         flow.fetch_token(code=code)
     except Exception as e:
-        logger.error("OAuth2 token fetch failed: %s", e)
-        raise HTTPException(status_code=400, detail=f"OAuth2 token exchange failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
 
     creds = flow.credentials
-    # Refresh token fallback
+    # gdy brak refresh_token, próbujemy wziąć stary
     if not creds.refresh_token:
-        try:
-            existing = await get_calendar_tokens(user_login)
-        except Exception:
-            logger.exception("Error fetching existing calendar tokens for user %s", user_login)
-            raise HTTPException(status_code=500, detail="Błąd wewnętrzny przy odczycie tokenów kalendarza")
-        if existing and existing.get("refresh_token"):
-            refresh_token = existing["refresh_token"]
+        old = await get_calendar_tokens(user_login)
+        if old and old["refresh_token"]:
+            refresh_token = old["refresh_token"]
         else:
-            raise HTTPException(
-                status_code=400,
-                detail="Brak refresh_token. Usuń istniejące połączenie i spróbuj ponownie."
-            )
+            raise HTTPException(400, "Brak refresh_token. Powtórz consent.")
     else:
         refresh_token = creds.refresh_token
 
-    # Zapis tokenów w DB
-    try:
-        await save_calendar_tokens(
-            user_login,
-            access_token=creds.token,
-            refresh_token=refresh_token,
-            expires_at=creds.expiry.isoformat()
-        )
-    except Exception:
-        logger.exception("Failed to save calendar tokens for user %s", user_login)
-        raise HTTPException(status_code=500, detail="Błąd wewnętrzny przy zapisie tokenów kalendarza")
+    await save_calendar_tokens(
+        user_login,
+        access_token=creds.token,
+        refresh_token=refresh_token,
+        expires_at=creds.expiry.isoformat()
+    )
 
-    # Przekierowanie do aplikacji mobilnej przez deep link
     return RedirectResponse(f"{settings.FRONTEND_DEEP_LINK}?connected=true")
 
 @router.get("/events", summary="Pobierz nadchodzące wydarzenia")
 async def list_events(
-    settings=Depends(get_settings),
+    settings = Depends(get_settings),
     user_login: str = Depends(get_current_user)
 ):
-    try:
-        row = await get_calendar_tokens(user_login)
-    except Exception:
-        logger.exception("Error fetching calendar tokens for user %s", user_login)
-        raise HTTPException(status_code=500, detail="Błąd wewnętrzny przy odczycie tokenów kalendarza")
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Kalendarz Google nie jest połączony")
-
+    tok = await get_calendar_tokens(user_login)
+    if not tok:
+        raise HTTPException(404, "Kalendarz nie połączony")
     creds = Credentials(
-        token=row["access_token"],
-        refresh_token=row["refresh_token"],
+        token=tok["access_token"],
+        refresh_token=tok["refresh_token"],
         token_uri="https://oauth2.googleapis.com/token",
         client_id=settings.GOOGLE_CLIENT_ID,
         client_secret=settings.GOOGLE_CLIENT_SECRET,
-        expiry=row["expires_at"],
+        expiry=tok["expires_at"],
     )
-    service = build("calendar", "v3", credentials=creds)
-    now_iso = datetime.datetime.utcnow().isoformat() + "Z"
-    resp = service.events().list(
-        calendarId="primary",
-        timeMin=now_iso,
-        maxResults=20,
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
-    return resp.get("items", [])
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    items = build("calendar", "v3", credentials=creds) \
+        .events().list(calendarId="primary", timeMin=now,
+                       maxResults=20, singleEvents=True,
+                       orderBy="startTime").execute() \
+        .get("items", [])
+    return items
