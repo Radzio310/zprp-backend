@@ -16,4 +16,6 @@ databases
 sqlalchemy
 asyncpg
 aiosqlite
+psycopg2-binary
+
 
