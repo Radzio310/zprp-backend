@@ -1,9 +1,10 @@
+# app/calendar.py
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from google.auth.transport.requests import Request
 import datetime
 
 from app.deps import get_settings, get_current_user
@@ -83,7 +84,6 @@ async def calendar_status(
     tok = await get_calendar_tokens(user_login)
     return {"connected": bool(tok)}
 
-
 @router.post("/disconnect", summary="Rozłącz konto Google Calendar")
 async def disconnect_calendar(
     user_login: str = Depends(get_current_user)
@@ -110,21 +110,16 @@ async def list_events(
     if not tokens:
         raise HTTPException(status_code=404, detail="Kalendarz nie połączony")
 
-    # Konwersja string → datetime
-    expiry_dt = datetime.datetime.fromisoformat(tokens["expires_at"])
-
     creds = Credentials(
         token=tokens["access_token"],
         refresh_token=tokens["refresh_token"],
         token_uri="https://oauth2.googleapis.com/token",
         client_id=settings.GOOGLE_CLIENT_ID,
         client_secret=settings.GOOGLE_CLIENT_SECRET,
-        expiry=expiry_dt,
+        expiry=tokens["expires_at"],
     )
-
-    # Odświeżenie tokena, jeśli wygasł
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        creds.refresh(requests.Request())
         await save_calendar_tokens(
             user_login,
             access_token=creds.token,
@@ -162,19 +157,16 @@ async def create_event(
     if not tokens:
         raise HTTPException(status_code=404, detail="Kalendarz nie połączony")
 
-    expiry_dt = datetime.datetime.fromisoformat(tokens["expires_at"])
-
     creds = Credentials(
         token=tokens["access_token"],
         refresh_token=tokens["refresh_token"],
         token_uri="https://oauth2.googleapis.com/token",
         client_id=settings.GOOGLE_CLIENT_ID,
         client_secret=settings.GOOGLE_CLIENT_SECRET,
-        expiry=expiry_dt,
+        expiry=tokens["expires_at"],
     )
-
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        creds.refresh(requests.Request())
         await save_calendar_tokens(
             user_login,
             access_token=creds.token,
@@ -212,19 +204,16 @@ async def delete_event(
     if not tokens:
         raise HTTPException(status_code=404, detail="Kalendarz nie połączony")
 
-    expiry_dt = datetime.datetime.fromisoformat(tokens["expires_at"])
-
     creds = Credentials(
         token=tokens["access_token"],
         refresh_token=tokens["refresh_token"],
         token_uri="https://oauth2.googleapis.com/token",
         client_id=settings.GOOGLE_CLIENT_ID,
         client_secret=settings.GOOGLE_CLIENT_SECRET,
-        expiry=expiry_dt,
+        expiry=tokens["expires_at"],
     )
-
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        creds.refresh(requests.Request())
         await save_calendar_tokens(
             user_login,
             access_token=creds.token,
