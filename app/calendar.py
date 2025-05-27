@@ -4,6 +4,7 @@ from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import datetime
+import logging
 
 from app.deps import get_settings, get_current_user  # get_current_user zwraca login użytkownika (str)
 from app.calendar_storage import (
@@ -14,6 +15,9 @@ from app.calendar_storage import (
 )
 
 router = APIRouter(prefix="/calendar", tags=["Calendar"])
+
+# Logger dla tego modułu
+logger = logging.getLogger(__name__)
 
 def create_flow(settings):
     client_config = {
@@ -43,8 +47,15 @@ async def get_auth_url(
         include_granted_scopes="true",
         prompt="consent"
     )
-    # Zapisz stan CSRF w DB
-    await save_oauth_state(user_login, state)
+    # Zapisz stan CSRF w DB z obsługą wyjątków
+    try:
+        await save_oauth_state(user_login, state)
+    except Exception:
+        logger.exception("Failed to save OAuth state for user %s, state %s", user_login, state)
+        raise HTTPException(
+            status_code=500,
+            detail="Wewnętrzny błąd serwera podczas zapisywania stanu OAuth"
+        )
     return JSONResponse({"url": auth_url})
 
 @router.get("/oauth2callback", summary="Callback OAuth2 z Google")
@@ -55,7 +66,12 @@ async def oauth2callback(
     user_login: str = Depends(get_current_user)
 ):
     # Weryfikacja state (CSRF)
-    saved_state = await get_oauth_state(user_login)
+    try:
+        saved_state = await get_oauth_state(user_login)
+    except Exception:
+        logger.exception("Error fetching OAuth state for user %s", user_login)
+        raise HTTPException(status_code=500, detail="Błąd wewnętrzny przy weryfikacji stanu OAuth")
+
     if not saved_state or state != saved_state:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
@@ -63,13 +79,18 @@ async def oauth2callback(
     try:
         flow.fetch_token(code=code)
     except Exception as e:
+        logger.error("OAuth2 token fetch failed: %s", e)
         raise HTTPException(status_code=400, detail=f"OAuth2 token exchange failed: {e}")
 
     creds = flow.credentials
     # Refresh token fallback
     if not creds.refresh_token:
-        existing = await get_calendar_tokens(user_login)
-        if existing and existing["refresh_token"]:
+        try:
+            existing = await get_calendar_tokens(user_login)
+        except Exception:
+            logger.exception("Error fetching existing calendar tokens for user %s", user_login)
+            raise HTTPException(status_code=500, detail="Błąd wewnętrzny przy odczycie tokenów kalendarza")
+        if existing and existing.get("refresh_token"):
             refresh_token = existing["refresh_token"]
         else:
             raise HTTPException(
@@ -80,12 +101,16 @@ async def oauth2callback(
         refresh_token = creds.refresh_token
 
     # Zapis tokenów w DB
-    await save_calendar_tokens(
-        user_login,
-        access_token=creds.token,
-        refresh_token=refresh_token,
-        expires_at=creds.expiry.isoformat()
-    )
+    try:
+        await save_calendar_tokens(
+            user_login,
+            access_token=creds.token,
+            refresh_token=refresh_token,
+            expires_at=creds.expiry.isoformat()
+        )
+    except Exception:
+        logger.exception("Failed to save calendar tokens for user %s", user_login)
+        raise HTTPException(status_code=500, detail="Błąd wewnętrzny przy zapisie tokenów kalendarza")
 
     # Przekierowanie do aplikacji mobilnej przez deep link
     return RedirectResponse(f"{settings.FRONTEND_DEEP_LINK}?connected=true")
@@ -95,7 +120,12 @@ async def list_events(
     settings=Depends(get_settings),
     user_login: str = Depends(get_current_user)
 ):
-    row = await get_calendar_tokens(user_login)
+    try:
+        row = await get_calendar_tokens(user_login)
+    except Exception:
+        logger.exception("Error fetching calendar tokens for user %s", user_login)
+        raise HTTPException(status_code=500, detail="Błąd wewnętrzny przy odczycie tokenów kalendarza")
+
     if not row:
         raise HTTPException(status_code=404, detail="Kalendarz Google nie jest połączony")
 

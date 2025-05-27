@@ -8,6 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from cryptography.hazmat.primitives import serialization
+import logging
 
 from app.deps import get_rsa_keys
 from app.auth import router as auth_router
@@ -37,13 +38,18 @@ app.include_router(delegate_router)
 app.include_router(results_router)
 app.include_router(calendar_router)
 
+logger = logging.getLogger("uvicorn")
+
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    logger.info("✅ Connected to the database")
 
 @app.on_event("shutdown")
 async def shutdown():
     await database.disconnect()
+    logger.info("✅ Disconnected from the database")
+
 
 # prosty healthcheck
 @app.get("/health")
