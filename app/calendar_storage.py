@@ -1,6 +1,7 @@
 # app/calendar_storage.py
 
 import logging
+from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db import database, calendar_tokens, oauth_states
 
@@ -93,4 +94,15 @@ async def get_calendar_tokens(user_login: str):
         return await database.fetch_one(query)
     except Exception:
         logger.exception("Failed to fetch calendar tokens for %s", user_login)
+        raise
+
+async def delete_calendar_tokens(user_login: str) -> None:
+    """
+    Usuń z bazy tokeny Calendar dla danego user_login.
+    """
+    try:
+        stmt = delete(calendar_tokens).where(calendar_tokens.c.user_login == user_login)
+        await database.execute(stmt)
+    except Exception:
+        logger.exception("Failed to delete calendar tokens for %s", user_login)
         raise
