@@ -11,4 +11,8 @@ cryptography
 google-auth
 google-auth-oauthlib
 google-api-python-client
+python-jose[cryptography]
+databases
+sqlalchemy
+asyncpg
 

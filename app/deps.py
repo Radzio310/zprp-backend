@@ -1,9 +1,14 @@
-# app/deps.py
-
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+
+# ====================================
+# SETTINGS
+# ====================================
 
 class Settings(BaseSettings):
     # Wczytujemy zmienne środowiskowe z pliku .env
@@ -21,30 +26,53 @@ class Settings(BaseSettings):
     # NOWOŚĆ: PEM prywatnego klucza RSA; nazwa dokładnie taka jak w .env / Railway
     RSA_PRIVATE_KEY: str
 
+# Dependency: settings singleton
+
 def get_settings() -> Settings:
-    """
-    Dependency FastAPI do wstrzykiwania ustawień.
-    """
     return Settings()
 
+# ====================================
+# RSA KEYS
+# ====================================
+
 def get_rsa_keys():
-    """
-    Ładuje RSA_PRIVATE_KEY z Settings i zwraca krotkę
-      (private_key_obj, public_key_obj)
-    do szyfrowania/dekrypcji.
-    """
     settings = get_settings()
-
-    # Jeśli w Railway przechowujesz multiline PEM jako one‑liner z '\n',
-    # odkomentuj poniższą linię, aby odtworzyć nowe linie:
-    # pem_str = settings.RSA_PRIVATE_KEY.replace("\\n", "\n")
-    # w przeciwnym wypadku używaj bezpośrednio:
-    pem_str = settings.RSA_PRIVATE_KEY
-
+    # Jeśli multiline PEM zapisany jako '\n', odtwarzaj nowe linie:
+    pem_str = settings.RSA_PRIVATE_KEY.replace('\\n', '\n')
     private_key = serialization.load_pem_private_key(
-        data=pem_str.encode("utf-8"),
+        data=pem_str.encode('utf-8'),
         password=None,
         backend=default_backend(),
     )
     public_key = private_key.public_key()
     return private_key, public_key
+
+# ====================================
+# AUTHENTICATION DEPENDENCY
+# ====================================
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+credentials_exception = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Could not validate credentials",
+    headers={"WWW-Authenticate": "Bearer"},
+)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> int:
+    """
+    Dekoduje JWT i zwraca user_id zapisane w polu 'sub'.
+    Jeśli token jest nieważny lub brak pola, rzuca 401.
+    """
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    try:
+        return int(user_id)
+    except ValueError:
+        raise credentials_exception
