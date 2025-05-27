@@ -1,9 +1,9 @@
 import logging
 from sqlalchemy import Table, Column, String
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db import database, metadata, engine, calendar_tokens
 
-# Logger dla tego modułu
-logger = logging.getLogger(__name__)
+# Logger dla tego modułu\logger = logging.getLogger(__name__)
 
 # -------------------------
 # Table for storing OAuth2 CSRF state
@@ -26,14 +26,15 @@ async def save_oauth_state(user_login: str, state: str) -> None:
     Save or update the OAuth2 state string for the given user_login.
     """
     try:
-        query = oauth_states.insert().values(
+        stmt = pg_insert(oauth_states).values(
             user_login=user_login,
             state=state
-        ).on_conflict_do_update(
-            index_elements=[oauth_states.c.user_login],
-            set_={"state": state}
         )
-        await database.execute(query)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[oauth_states.c.user_login],
+            set_={"state": stmt.excluded.state}
+        )
+        await database.execute(stmt)
     except Exception:
         logger.exception(
             "Failed to save OAuth state for user_login=%s, state=%s",
@@ -72,20 +73,21 @@ async def save_calendar_tokens(
     Insert or update Google Calendar access and refresh tokens for a user.
     """
     try:
-        query = calendar_tokens.insert().values(
+        stmt = pg_insert(calendar_tokens).values(
             user_login=user_login,
             access_token=access_token,
             refresh_token=refresh_token,
             expires_at=expires_at,
-        ).on_conflict_do_update(
+        )
+        stmt = stmt.on_conflict_do_update(
             index_elements=[calendar_tokens.c.user_login],
             set_={
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "expires_at": expires_at,
+                "access_token": stmt.excluded.access_token,
+                "refresh_token": stmt.excluded.refresh_token,
+                "expires_at": stmt.excluded.expires_at,
             }
         )
-        await database.execute(query)
+        await database.execute(stmt)
     except Exception:
         logger.exception(
             "Failed to save calendar tokens for user_login=%s",
