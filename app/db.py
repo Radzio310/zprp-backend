@@ -1,3 +1,4 @@
+# app/db.py
 import os
 from sqlalchemy import (
     Column,
@@ -37,6 +38,15 @@ oauth_states = Table(
     Column("state", String, nullable=False),
 )
 
-# Tworzymy obie tabele przy starcie
+# 3) Mappings between your match_id and calendar event_id
+event_mappings = Table(
+    "event_mappings",
+    metadata,
+    Column("user_login", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("event_id", String, nullable=False),
+)
+
+# Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
