@@ -15,4 +15,5 @@ python-jose[cryptography]
 databases
 sqlalchemy
 asyncpg
+aiosqlite
 
