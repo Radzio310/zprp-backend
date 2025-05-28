@@ -196,7 +196,7 @@ async def create_event(
     return {"eventId": created["id"]}
 
 @router.put(
-    "/events/{match_id}",
+    "/events/{match_id:path}",
     status_code=status.HTTP_200_OK,
     summary="Aktualizuj istniejące wydarzenie po match_id"
 )
@@ -266,7 +266,7 @@ async def update_event(
     return {"eventId": updated["id"]}
 
 
-@router.delete("/events/{match_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Usuń wydarzenie po match_id")
+@router.delete("/events/{match_id:path}", status_code=status.HTTP_204_NO_CONTENT, summary="Usuń wydarzenie po match_id")
 async def delete_event(
     match_id: str,
     settings=Depends(get_settings),
