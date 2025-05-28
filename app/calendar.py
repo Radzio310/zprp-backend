@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from google.oauth2.credentials import Credentials
@@ -194,6 +194,76 @@ async def create_event(
 
     await save_event_mapping(user_login, payload.matchId, created["id"])
     return {"eventId": created["id"]}
+
+@router.put(
+    "/events/{match_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Aktualizuj istniejące wydarzenie po match_id"
+)
+async def update_event(
+    payload: EventCreate,
+    match_id: str = Path(..., description="Numer meczu (matchId)"),
+    settings=Depends(get_settings),
+    user_login: str = Depends(get_current_user),
+):
+    # 1) znajdź event_id z mapowania
+    event_id = await get_event_mapping(user_login, match_id)
+    if not event_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nie znaleziono powiązanego wydarzenia do edycji"
+        )
+
+    # 2) pobierz tokeny i odśwież jeśli trzeba
+    tokens = await get_calendar_tokens(user_login)
+    if not tokens:
+        raise HTTPException(status_code=404, detail="Kalendarz nie połączony")
+
+    expiry_dt = datetime.datetime.fromisoformat(tokens["expires_at"])
+    creds = Credentials(
+        token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.GOOGLE_CLIENT_ID,
+        client_secret=settings.GOOGLE_CLIENT_SECRET,
+        expiry=expiry_dt,
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        await save_calendar_tokens(
+            user_login,
+            access_token=creds.token,
+            refresh_token=creds.refresh_token,
+            expires_at=creds.expiry.isoformat(),
+        )
+
+    # 3) przygotuj body do update
+    event_body = {
+        "summary": payload.summary,
+        "start": {"dateTime": payload.start.isoformat()},
+        "end": {"dateTime": payload.end.isoformat()},
+        "location": payload.location,
+        "colorId": payload.colorId,
+        "reminders": {"useDefault": False, "overrides": payload.reminders},
+    }
+
+    service = build("calendar", "v3", credentials=creds)
+    try:
+        updated = service.events().update(
+            calendarId="primary",
+            eventId=event_id,
+            body=event_body
+        ).execute()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd przy aktualizacji wydarzenia: {e}"
+        )
+
+    # 4) nadpisz mapping (chociaż id zwykle nie zmienia się)
+    await save_event_mapping(user_login, match_id, updated["id"])
+
+    return {"eventId": updated["id"]}
 
 
 @router.delete("/events/{match_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Usuń wydarzenie po match_id")
