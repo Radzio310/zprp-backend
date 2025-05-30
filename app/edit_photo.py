@@ -55,21 +55,16 @@ async def upload_judge_photo(
     pass_plain = decrypt_field(private_key, password)
     judge_plain = decrypt_field(private_key, judge_id)
 
-    # wydobycie czystego base64 (usuń prefix data:image/jpeg;base64, jeśli jest)
+    # wydobycie czystego base64
     header, _, b64data = foto.partition("base64,")
     data = base64.b64decode(b64data or foto)
 
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True) as client:
         cookies = await authenticate(client, settings, user_plain, pass_plain)
 
-        # przygotuj multipart → sedzia_foto_dodaj3.php
-        files = {
-            "foto": ("profile.jpg", data, "image/jpeg"),
-        }
-        form = {
-            "NrSedzia": judge_plain,
-            "user": user_plain,
-        }
+        # upload
+        files = {"foto": ("profile.jpg", data, "image/jpeg")}
+        form = {"NrSedzia": judge_plain, "user": user_plain}
         resp = await client.post(
             "/sedzia_foto_dodaj3.php",
             data=form,
@@ -80,4 +75,19 @@ async def upload_judge_photo(
         if resp.status_code != 200 or "error" in resp.text.lower():
             raise HTTPException(status_code=500, detail="Upload nie powiódł się")
 
-    return JSONResponse({"success": True})
+        # teraz odczytujemy stronę profilu, gdzie jest <img src="..."> z nowym URL
+        profile = await client.get(f"/sedzia_foto.php?NrSedzia={judge_plain}", cookies=cookies)
+        html = profile.text
+
+    # prosta regex‐owa ekstrakcja src z <img id="fotoSedzia" src="...">
+    import re
+    m = re.search(r'<img[^>]+id="fotoSedzia"[^>]+src="([^"]+)"', html)
+    if not m:
+        # jeśli nie znaleziono, zwracamy po prostu success
+        return JSONResponse({"success": True})
+    # zbuduj pełny URL
+    photo_path = m.group(1)
+    photo_url = settings.ZPRP_BASE_URL.rstrip("/") + "/" + photo_path.lstrip("/")
+
+    return JSONResponse({"success": True, "photo_url": photo_url})
+
