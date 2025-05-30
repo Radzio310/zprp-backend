@@ -1,13 +1,10 @@
-# app/edit_photo.py
-
 import logging
 import base64
 import re
 
 from fastapi import APIRouter, Form, HTTPException, Depends, status
-from httpx import AsyncClient
-from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi.responses import JSONResponse
+from httpx import AsyncClient
 
 from app.deps import get_settings, get_rsa_keys
 from app.utils import fetch_with_correct_encoding
@@ -25,7 +22,7 @@ router = APIRouter(prefix="/judge", tags=["judge"])
 def decrypt_field(private_key, enc_b64: str) -> str:
     try:
         cipher = base64.b64decode(enc_b64)
-        plain = private_key.decrypt(cipher, padding.PKCS1v15())
+        plain = private_key.decrypt(cipher, padding=padding.PKCS1v15())
         text = plain.decode("utf-8")
         logger.debug(f"Decrypted field to: {text}")
         return text
@@ -35,6 +32,10 @@ def decrypt_field(private_key, enc_b64: str) -> str:
 
 
 async def authenticate(client: AsyncClient, settings, username: str, password: str):
+    """
+    Loguje się do ZPRP i ładuje ciasteczka do client.cookies.
+    Zwraca klienta gotowego do dalszych wywołań.
+    """
     logger.debug(f"Logging in as '{username}' to {settings.ZPRP_BASE_URL}/login.php")
     resp, _ = await fetch_with_correct_encoding(
         client,
@@ -43,15 +44,16 @@ async def authenticate(client: AsyncClient, settings, username: str, password: s
         data={"login": username, "haslo": password, "from": "/index.php?"},
     )
     logger.debug(f"Login response URL: {resp.url} status: {resp.status_code}")
-    # nie patrzymy już na resp.cookies, bo przy follow_redirects są w client.cookies
+
     if "/index.php" not in resp.url.path:
         logger.error("Login failed, did not redirect to index.php")
         raise HTTPException(status_code=401, detail="Logowanie nie powiodło się")
 
-    # pobierz wszystkie ciasteczka, które zebrał client
-    sess = client.cookies.get_dict()
-    logger.debug(f"Session cookies after login: {sess}")
-    return sess
+    # Załaduj ciasteczka z tego pojedynczego requestu do klienta
+    client.cookies.update(resp.cookies)
+    logger.debug(f"Client cookies after login: {client.cookies.get_dict()}")
+
+    return client
 
 
 @router.post(
@@ -83,14 +85,13 @@ async def upload_judge_photo(
         logger.error(f"Base64 decode error: {e}")
         raise HTTPException(status_code=400, detail="Niepoprawny format obrazka")
 
-    # 3) nowy client z follow_redirects
+    # 3) utwórz klienta i zaloguj się, ładując ciasteczka do jego jar
     async with AsyncClient(
         base_url=settings.ZPRP_BASE_URL, follow_redirects=True
     ) as client:
-        # 3a) logowanie
-        session_cookies = await authenticate(client, settings, user_plain, pass_plain)
+        client = await authenticate(client, settings, user_plain, pass_plain)
 
-        # 3b) upload pliku (client już trzyma cookies, nie musimy ich przekazywać)
+        # 4) upload pliku (client już trzyma cookies)
         logger.debug("Uploading image to sedzia_foto_dodaj3.php …")
         files = {"foto": ("profile.jpg", image_bytes, "image/jpeg")}
         data = {"NrSedzia": judge_plain, "user": user_plain}
@@ -98,7 +99,6 @@ async def upload_judge_photo(
             "/sedzia_foto_dodaj3.php",
             data=data,
             files=files,
-            # nie przekazujemy cookies=, client zrobi to sam
             headers={"Accept": "text/html"},
         )
         logger.debug(f"Upload status: {upload_resp.status_code}")
@@ -113,7 +113,7 @@ async def upload_judge_photo(
                 logger.error(f"Detected error fragment: {snippet!r}")
             raise HTTPException(status_code=500, detail=detail)
 
-        # 3c) fetch strony edycji, by wyciągnąć nowy src
+        # 5) pobierz stronę edycji, by wyciągnąć nowy src
         logger.debug("Fetching profile edit page …")
         profile_resp = await client.get(
             f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_plain}"
@@ -122,7 +122,7 @@ async def upload_judge_photo(
         html = profile_resp.text
         logger.debug(f"Profile HTML snippet: {html[:200]!r}")
 
-    # 4) regex do <img src="foto_sedzia/...">
+    # 6) wyciągnij nowy URL zdjęcia
     m = re.search(r'<img[^>]+src="(foto_sedzia/[^"]+)"', html)
     if not m:
         logger.warning("Could not find <img src='foto_sedzia/...'> in profile HTML")
