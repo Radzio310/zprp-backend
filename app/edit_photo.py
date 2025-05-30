@@ -106,16 +106,10 @@ async def upload_judge_photo(
             logger.debug(f"Upload status: {upload_resp.status_code}")
             logger.debug(f"Upload response snippet: {upload_resp.text[:200]!r}")
 
-            text_low = upload_resp.text.lower()
-            if upload_resp.status_code != 200 or "zdjęcie zostało zapisane" not in text_low:
-                detail = "Upload nie powiódł się"
-                if "error" in text_low:
-                    snippet = text_low.split("error", 1)[1][:200]
-                    detail += f": {snippet}"
-                    logger.error(f"Detected error fragment: {snippet!r}")
-                raise HTTPException(status_code=500, detail=detail)
+            if upload_resp.status_code != 200:
+                raise HTTPException(status_code=500, detail="Upload nie powiódł się (HTTP {upload_resp.status_code})")
 
-            # 3c) fetch strony edycji
+            # 3c) fetch strony edycji, by wyciągnąć nowy src
             logger.debug("Fetching profile edit page …")
             profile_resp = await client.get(
                 f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_plain}"
@@ -123,6 +117,7 @@ async def upload_judge_photo(
             logger.debug(f"Profile page status: {profile_resp.status_code}")
             html = profile_resp.text
             logger.debug(f"Profile HTML snippet: {html[:200]!r}")
+
 
     except Exception:
         logger.exception("Unhandled exception in upload_judge_photo")
