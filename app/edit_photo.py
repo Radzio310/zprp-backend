@@ -28,8 +28,8 @@ async def authenticate(
     client: AsyncClient, settings, username: str, password: str
 ) -> dict:
     """
-    Log in to baza.zprp.pl via their PHP login form,
-    return cookies for authenticated session.
+    Log in to baza.zprp.pl via their PHP form.
+    Returns the session cookies.
     """
     resp, _ = await fetch_with_correct_encoding(
         client,
@@ -37,7 +37,6 @@ async def authenticate(
         method="POST",
         data={"login": username, "haslo": password, "from": "/index.php?"},
     )
-    # on successful login, they redirect into index.php
     if "/index.php" not in resp.url.path:
         raise HTTPException(status_code=401, detail="Logowanie nie powiodło się")
     return dict(resp.cookies)
@@ -52,32 +51,31 @@ async def upload_judge_photo(
     username: str = Form(...),
     password: str = Form(...),
     judge_id: str = Form(...),
-    foto: str = Form(...),  # "data:image/jpeg;base64,..." or raw base64
+    foto: str = Form(...),  # data:image/jpeg;base64,... or raw base64
     settings=Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
     private_key, _ = keys
 
-    # 1) decrypt credentials & judge ID
+    # 1) Decrypt incoming credentials and judge ID
     user_plain = decrypt_field(private_key, username)
     pass_plain = decrypt_field(private_key, password)
     judge_plain = decrypt_field(private_key, judge_id)
 
-    # 2) extract raw JPEG bytes
+    # 2) Strip off any "data:image/..." prefix and base64-decode
     _, _, b64data = foto.partition("base64,")
     image_bytes = base64.b64decode(b64data or foto)
 
-    # 3) open an HTTPX client to baza.zprp.pl
+    # 3) Use HTTPX to drive the exact PHP flow on baza.zprp.pl
     async with AsyncClient(
         base_url=settings.ZPRP_BASE_URL, follow_redirects=True
     ) as client:
-
-        # 3a) login
+        # a) authenticate
         cookies = await authenticate(client, settings, user_plain, pass_plain)
 
-        # 3b) POST multipart to sedzia_foto_dodaj3.php
-        files = {"foto": ("profile.jpg", image_bytes, "image/jpeg")}
+        # b) upload/crop endpoint
         data = {"NrSedzia": judge_plain, "user": user_plain}
+        files = {"foto": ("profile.jpg", image_bytes, "image/jpeg")}
         upload_resp = await client.post(
             "/sedzia_foto_dodaj3.php",
             data=data,
@@ -85,32 +83,28 @@ async def upload_judge_photo(
             cookies=cookies,
             headers={"Accept": "text/html"},
         )
-
-        # if not HTTP 200 or the returned HTML doesn't show success
-        text = upload_resp.text.lower()
-        if upload_resp.status_code != 200 or "zdjęcie zostało zapisane" not in text:
+        text_lower = upload_resp.text.lower()
+        if upload_resp.status_code != 200 or "zdjęcie zostało zapisane" not in text_lower:
             detail = "Upload nie powiódł się"
-            # if the page contains an error fragment, include it
-            if "error" in text:
-                detail += ": " + text.split("error", 1)[1][:200]
+            if "error" in text_lower:
+                snippet = text_lower.split("error", 1)[1][:200]
+                detail += f": {snippet}"
             raise HTTPException(status_code=500, detail=detail)
 
-        # 3c) fetch the judge's profile page to extract the new photo URL
+        # c) fetch the edit-profile page to grab the new <img src=...>
         profile_resp = await client.get(
             f"/?a=sedzia&b=edycja&NrSedzia={judge_plain}", cookies=cookies
         )
         html = profile_resp.text
 
-    # 4) extract the <img src="foto_sedzia/..."> from the edit form
+    # 4) Extract the new photo path from the IMG tag
     m = re.search(r'<img[^>]+src="(foto_sedzia/[^"]+)"', html)
     if not m:
-        # Couldn't find it, but upload succeeded
+        # upload succeeded but we couldn't parse the new URL
         return JSONResponse({"success": True})
 
     photo_path = m.group(1)
-    photo_url = (
-        settings.ZPRP_BASE_URL.rstrip("/") + "/" + photo_path.lstrip("/")
-    )
+    photo_url = settings.ZPRP_BASE_URL.rstrip("/") + "/" + photo_path.lstrip("/")
 
-    # 5) return success + new URL
+    # 5) Return success + the fresh URL
     return JSONResponse({"success": True, "photo_url": photo_url})
