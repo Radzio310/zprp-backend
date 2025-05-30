@@ -34,9 +34,7 @@ def decrypt_field(private_key, enc_b64: str) -> str:
         raise HTTPException(status_code=400, detail=f"Decryption error: {e}")
 
 
-async def authenticate(
-    client: AsyncClient, settings, username: str, password: str
-) -> dict:
+async def authenticate(client: AsyncClient, settings, username: str, password: str):
     logger.debug(f"Logging in as '{username}' to {settings.ZPRP_BASE_URL}/login.php")
     resp, _ = await fetch_with_correct_encoding(
         client,
@@ -45,12 +43,15 @@ async def authenticate(
         data={"login": username, "haslo": password, "from": "/index.php?"},
     )
     logger.debug(f"Login response URL: {resp.url} status: {resp.status_code}")
+    # nie patrzymy już na resp.cookies, bo przy follow_redirects są w client.cookies
     if "/index.php" not in resp.url.path:
         logger.error("Login failed, did not redirect to index.php")
         raise HTTPException(status_code=401, detail="Logowanie nie powiodło się")
-    cookies = dict(resp.cookies)
-    logger.debug(f"Received cookies: {cookies}")
-    return cookies
+
+    # pobierz wszystkie ciasteczka, które zebrał client
+    sess = client.cookies.get_dict()
+    logger.debug(f"Session cookies after login: {sess}")
+    return sess
 
 
 @router.post(
@@ -62,7 +63,7 @@ async def upload_judge_photo(
     username: str = Form(...),
     password: str = Form(...),
     judge_id: str = Form(...),
-    foto: str = Form(...),  # "data:image/jpeg;base64,..." or raw base64
+    foto: str = Form(...),  # "data:image/jpeg;base64,..." lub czysty base64
     settings=Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
@@ -82,15 +83,14 @@ async def upload_judge_photo(
         logger.error(f"Base64 decode error: {e}")
         raise HTTPException(status_code=400, detail="Niepoprawny format obrazka")
 
-    # 3) otwórz sesję HTTP
+    # 3) nowy client z follow_redirects
     async with AsyncClient(
         base_url=settings.ZPRP_BASE_URL, follow_redirects=True
     ) as client:
-
         # 3a) logowanie
-        cookies = await authenticate(client, settings, user_plain, pass_plain)
+        session_cookies = await authenticate(client, settings, user_plain, pass_plain)
 
-        # 3b) upload multipart
+        # 3b) upload pliku (client już trzyma cookies, nie musimy ich przekazywać)
         logger.debug("Uploading image to sedzia_foto_dodaj3.php …")
         files = {"foto": ("profile.jpg", image_bytes, "image/jpeg")}
         data = {"NrSedzia": judge_plain, "user": user_plain}
@@ -98,11 +98,11 @@ async def upload_judge_photo(
             "/sedzia_foto_dodaj3.php",
             data=data,
             files=files,
-            cookies=cookies,
+            # nie przekazujemy cookies=, client zrobi to sam
             headers={"Accept": "text/html"},
         )
         logger.debug(f"Upload status: {upload_resp.status_code}")
-        logger.debug(f"Upload response snippet: {upload_resp.text[:200]}")
+        logger.debug(f"Upload response snippet: {upload_resp.text[:200]!r}")
 
         text = upload_resp.text.lower()
         if upload_resp.status_code != 200 or "zdjęcie zostało zapisane" not in text:
@@ -110,19 +110,19 @@ async def upload_judge_photo(
             if "error" in text:
                 snippet = text.split("error", 1)[1][:200]
                 detail += f": {snippet}"
-                logger.error(f"Detected error fragment: {snippet}")
+                logger.error(f"Detected error fragment: {snippet!r}")
             raise HTTPException(status_code=500, detail=detail)
 
-        # 3c) pobranie edycji profilu, by wyciągnąć <img src="...">
-        logger.debug("Fetching profile edit page to extract new photo URL …")
+        # 3c) fetch strony edycji, by wyciągnąć nowy src
+        logger.debug("Fetching profile edit page …")
         profile_resp = await client.get(
-            f"/?a=sedzia&b=edycja&NrSedzia={judge_plain}", cookies=cookies
+            f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_plain}"
         )
         logger.debug(f"Profile page status: {profile_resp.status_code}")
         html = profile_resp.text
-        logger.debug(f"Profile HTML snippet: {html[:200]}")
+        logger.debug(f"Profile HTML snippet: {html[:200]!r}")
 
-    # 4) regex
+    # 4) regex do <img src="foto_sedzia/...">
     m = re.search(r'<img[^>]+src="(foto_sedzia/[^"]+)"', html)
     if not m:
         logger.warning("Could not find <img src='foto_sedzia/...'> in profile HTML")
@@ -132,5 +132,4 @@ async def upload_judge_photo(
     photo_url = settings.ZPRP_BASE_URL.rstrip("/") + "/" + photo_path.lstrip("/")
     logger.info(f"New photo URL: {photo_url}")
 
-    # 5) zwróć sukces + URL
     return JSONResponse({"success": True, "photo_url": photo_url})
