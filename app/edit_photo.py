@@ -1,4 +1,7 @@
-import logging, base64, re
+import logging
+import base64
+import re
+
 from fastapi import APIRouter, Form, HTTPException, Depends, status
 from fastapi.responses import JSONResponse
 from httpx import AsyncClient
@@ -6,6 +9,7 @@ from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from app.deps import get_settings, get_rsa_keys
+from app.utils import fetch_with_correct_encoding
 
 logger = logging.getLogger("edit_photo")
 handler = logging.StreamHandler()
@@ -15,23 +19,26 @@ logger.addHandler(handler)
 
 router = APIRouter(prefix="/judge", tags=["judge"])
 
+
 def decrypt_field(private_key, enc_b64: str) -> str:
     try:
-        data = base64.b64decode(enc_b64)
-        plain = private_key.decrypt(data, padding=padding.PKCS1v15())
-        return plain.decode()
+        cipher = base64.b64decode(enc_b64)
+        plain = private_key.decrypt(cipher, padding=padding.PKCS1v15())
+        return plain.decode("utf-8")
     except Exception as e:
         logger.error("Decrypt error", exc_info=e)
-        raise HTTPException(400, "Decryption error")
+        raise HTTPException(status_code=400, detail="Decryption error")
 
-async def authenticate(client: AsyncClient, settings, user, pwd):
-    resp, _ = await client.request("POST", "/login.php",
-        data={"login": user, "haslo": pwd, "from": "/index.php?"},
-        follow_redirects=True
+
+async def authenticate(client: AsyncClient, settings, username: str, password: str):
+    resp, _ = await fetch_with_correct_encoding(
+        client, "/login.php", method="POST",
+        data={"login": username, "haslo": password, "from": "/index.php?"}
     )
     if "/index.php" not in resp.url.path:
-        raise HTTPException(401, "Logowanie nie powiodło się")
+        raise HTTPException(status_code=401, detail="Logowanie nie powiodło się")
     client.cookies.update(resp.cookies)
+
 
 @router.post("/photo", status_code=status.HTTP_200_OK)
 async def upload_judge_photo(
@@ -42,52 +49,88 @@ async def upload_judge_photo(
     settings=Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
-    priv, _ = keys
-    user = decrypt_field(priv, username)
-    pwd  = decrypt_field(priv, password)
-    jid  = decrypt_field(priv, judge_id)
+    private_key, _ = keys
 
-    # 1) zaloguj i trzymaj cookies
-    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True) as client:
-        await authenticate(client, settings, user, pwd)
+    # 1) Odszyfruj pola
+    user_plain = decrypt_field(private_key, username)
+    pass_plain = decrypt_field(private_key, password)
+    judge_plain = decrypt_field(private_key, judge_id)
 
-        # 2) Krok otwarcia modalnego Croppie (bez pliku)
-        resp_modal = await client.post(
+    # 2) Base64 → bajty (dla POSTa "KADRUJ" nie potrzebujemy)
+    _, _, b64data = foto.partition("base64,")
+    try:
+        image_bytes = base64.b64decode(b64data or foto)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Niepoprawny format obrazka")
+
+    async with AsyncClient(
+        base_url=settings.ZPRP_BASE_URL,
+        follow_redirects=True
+    ) as client:
+        # A) Zaloguj się i zachowaj cookies
+        await authenticate(client, settings, user_plain, pass_plain)
+
+        # B) Krok I: wyślij plik do croppie-temp (button=KADRUJ)
+        #   – bez tego nie dostaniesz formularza Croppie
+        files1 = {"foto": ("upload.jpg", image_bytes, "image/jpeg")}
+        data1 = {
+            "NrSedzia": judge_plain,
+            "user":     user_plain,
+            "button":   "KADRUJ",
+        }
+        resp1 = await client.post(
             "/sedzia_foto_dodaj3.php",
-            data={"NrSedzia": jid, "user": user},
+            data=data1,
+            files=files1,
             headers={"Accept": "text/html"},
         )
-        if resp_modal.status_code != 200:
-            raise HTTPException(500, "Nie udało się wczytać modalu Croppie")
+        if resp1.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"Stage 1 upload failed ({resp1.status_code})")
 
-        # (opcjonalnie) możesz tu sparsować resp_modal.text,
-        # ale skoro wiemy, że modal z Croppie zadziała, przejdź od razu do kroku 3.
+        html1 = resp1.text
 
-        # 3) Krok „ZAPISZ” – wysyłasz base64, NrSedzia, user, button=ZAPISZ
-        resp_save = await client.post(
+        # C) Parsuj ścieżkę do tymczasowego obrazka z Croppie
+        #    look for bind url: 'foto_sedzia_temp/...'
+        m = re.search(r"bind\(\s*\{\s*url:\s*'([^']+)'", html1)
+        if not m:
+            # spróbuj innego wzorca
+            m = re.search(r"url:\s*'([^']+foto_sedzia_temp[^']+)'", html1)
+        if not m:
+            logger.error("Could not find croppie temp URL in HTML:\n%s", html1[:500])
+            raise HTTPException(status_code=500, detail="Nie udało się wczytać Croppie")
+
+        temp_path = m.group(1)  # np. foto_sedzia_temp/5124_xxx.jpg
+        logger.debug("Croppie temp image: %s", temp_path)
+
+        # D) Krok II: wyślij base64 do finalnego zapisu (button=ZAPISZ)
+        data2 = {
+            "NrSedzia": judge_plain,
+            "user":     user_plain,
+            "foto":     foto,       # cały base64 z Croppie
+            "button":   "ZAPISZ",
+        }
+        resp2 = await client.post(
             "/sedzia_foto_dodaj3.php",
-            data={
-                "NrSedzia": jid,
-                "user":     user,
-                "foto":     foto,
-                "button":   "ZAPISZ",
-            },
+            data=data2,
             headers={"Accept": "text/html"},
         )
-        if resp_save.status_code != 200:
-            raise HTTPException(500, f"Zapis zdjęcia nie powiódł się ({resp_save.status_code})")
+        if resp2.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"Stage 2 save failed ({resp2.status_code})")
 
-        # 4) potwierdź na stronie edycji
-        resp_edit = await client.get(f"/index.php?a=sedzia&b=edycja&NrSedzia={jid}")
-        if resp_edit.status_code != 200:
-            raise HTTPException(500, "Nie udało się pobrać strony edycji")
+        # E) Fetch strony edycji, by wyciągnąć finalne <img>
+        prof = await client.get(f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_plain}")
+        if prof.status_code != 200:
+            raise HTTPException(status_code=500, detail="Nie udało się pobrać strony edycji")
 
-    # 5) scrapuj <img src="foto_sedzia/...">
-    soup = BeautifulSoup(resp_edit.text, "html.parser")
-    img = soup.find("img", src=re.compile(r"foto_sedzia/", re.IGNORECASE))
-    if not img or not img["src"]:
-        raise HTTPException(500, "Nie znaleziono nowego zdjęcia")
+        soup = BeautifulSoup(prof.text, "html.parser")
+        img = soup.find("img", src=re.compile(r"foto_sedzia/"))
+        if not img or not img.get("src"):
+            raise HTTPException(status_code=500, detail="Nie znaleziono finalnego zdjęcia")
 
-    src = img["src"]
-    url = src.lower().startswith("http") and src or settings.ZPRP_BASE_URL.rstrip("/") + "/" + src.lstrip("/")
-    return JSONResponse({"success": True, "photo_url": url})
+        src = img["src"]
+        if src.lower().startswith("http"):
+            photo_url = src
+        else:
+            photo_url = settings.ZPRP_BASE_URL.rstrip("/") + "/" + src.lstrip("/")
+
+    return JSONResponse({"success": True, "photo_url": photo_url})
