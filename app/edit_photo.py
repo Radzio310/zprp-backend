@@ -50,7 +50,7 @@ async def authenticate(client: AsyncClient, settings, username: str, password: s
     logger.debug(f"Session cookies: {dict(client.cookies)}")
 
 
-@router.post("/photo", status_code=status.HTTP_200_OK)
+@router.post("/photo", status_code=200)
 async def upload_judge_photo(
     username: str = Form(...),
     password: str = Form(...),
@@ -60,58 +60,73 @@ async def upload_judge_photo(
     keys=Depends(get_rsa_keys),
 ):
     private_key, _ = keys
-
-    # 1) odszyfruj
+    # 1) decrypt as before
     user_plain = decrypt_field(private_key, username)
     pass_plain = decrypt_field(private_key, password)
     judge_plain = decrypt_field(private_key, judge_id)
 
-    # 2) przygotuj obrazek
+    # 2) decode image bytes
     _, _, b64data = foto.partition("base64,")
     try:
         image_bytes = base64.b64decode(b64data or foto)
     except Exception:
-        raise HTTPException(status_code=400, detail="Niepoprawny format obrazka")
+        raise HTTPException(400, "Niepoprawny format obrazka")
 
-    # 3) logowanie + upload + pobranie strony edycji
     async with AsyncClient(
         base_url=settings.ZPRP_BASE_URL,
         follow_redirects=True
     ) as client:
+        # A) login & load cookies
         await authenticate(client, settings, user_plain, pass_plain)
 
-        # upload
-        files = {"foto": ("profile.jpg", image_bytes, "image/jpeg")}
-        data = {"NrSedzia": judge_plain, "user": user_plain}
-        upload_resp = await client.post(
-            "/sedzia_foto_dodaj3.php",
-            data=data,
-            files=files,
-            headers={"Accept": "text/html"},
+        # B) First GET the upload form so we know its fields & file-input name
+        form_page, html = await fetch_with_correct_encoding(
+            client,
+            f"/sedzia_foto_dodaj1.php?NrSedzia={judge_plain}",
+            method="GET"
         )
-        if upload_resp.status_code != 200:
-            text = await upload_resp.aread()
-            raise HTTPException(status_code=500, detail=f"Upload error HTTP {upload_resp.status_code}")
+        soup = BeautifulSoup(html, "html.parser")
+        form = soup.find("form", {"id": "form_foto"})  # adjust selector if needed
+        if not form:
+            raise HTTPException(500, "Nie znalazłem formularza uploadu zdjęcia")
 
-        # fetch edit page
-        profile_resp = await client.get(f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_plain}")
-        if profile_resp.status_code != 200:
-            raise HTTPException(status_code=500, detail="Nie udało się pobrać strony edycji")
+        # C) pull out all hidden/text inputs
+        form_fields: dict[str,str] = {}
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            if not name: continue
+            typ = inp.get("type", "text")
+            if typ in ("hidden","text","password"):
+                form_fields[name] = inp.get("value","")
 
-        html = profile_resp.text
+        # D) find the <input type="file" name="...">
+        file_input = form.find("input", {"type": "file"})
+        if not file_input or not file_input.get("name"):
+            raise HTTPException(500, "Formularz nie ma pola file!")
+        file_field_name = file_input["name"]
 
-    # 4) znajdź tag <img> z foto_sedzia
-    soup = BeautifulSoup(html, "html.parser")
-    img = soup.find("img", src=re.compile(r"foto_sedzia", re.IGNORECASE))
-    if not img or not img.get("src"):
-        raise HTTPException(status_code=500, detail="Nie znaleziono zaktualizowanego zdjęcia")
+        # E) POST back _all_ fields + file
+        files = {
+            file_field_name: ("profile.jpg", image_bytes, "image/jpeg")
+        }
+        resp = await client.post(
+            form["action"],   # the URL from the form’s action
+            data=form_fields,
+            files=files,
+            headers={"Accept":"text/html"},
+        )
+        if resp.status_code != 200:
+            raise HTTPException(500, f"Upload error {resp.status_code}")
 
-    src = img["src"]
-    # obsłuż zarówno relatywną, jak i absolutną ścieżkę
-    if src.lower().startswith("http"):
-        photo_url = src
-    else:
-        photo_url = settings.ZPRP_BASE_URL.rstrip("/") + "/" + src.lstrip("/")
+        # F) fetch edit page & extract new src exactly as before
+        profile_resp = await client.get(
+            f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_plain}"
+        )
+        soup2 = BeautifulSoup(profile_resp.text, "html.parser")
+        img = soup2.find("img", src=re.compile(r"foto_sedzia", re.IGNORECASE))
+        if not img:
+            raise HTTPException(500, "Nie znaleziono zaktualizowanego zdjęcia")
+        src = img["src"]
+        photo_url = src.startswith("http") and src or settings.ZPRP_BASE_URL.rstrip("/") + "/" + src.lstrip("/")
 
-    logger.info(f"New photo URL: {photo_url}")
-    return JSONResponse({"success": True, "photo_url": photo_url})
+    return {"success": True, "photo_url": photo_url}
