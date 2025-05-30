@@ -24,8 +24,7 @@ router = APIRouter(prefix="/judge", tags=["judge"])
 def decrypt_field(private_key, enc_b64: str) -> str:
     try:
         cipher = base64.b64decode(enc_b64)
-        # Używamy paddingu PKCS1v15
-        plain = private_key.decrypt(cipher, padding.PKCS1v15())
+        plain = private_key.decrypt(cipher, padding=padding.PKCS1v15())
         text = plain.decode("utf-8")
         logger.debug(f"Decrypted field to: {text}")
         return text
@@ -51,8 +50,9 @@ async def authenticate(client: AsyncClient, settings, username: str, password: s
         logger.error("Login failed, did not redirect to index.php")
         raise HTTPException(status_code=401, detail="Logowanie nie powiodło się")
 
+    # Załaduj ciasteczka do wewnętrznego „jar” klienta
     client.cookies.update(resp.cookies)
-    logger.debug(f"Session cookies after login: {client.cookies.get_dict()}")
+    logger.debug(f"Session cookies after login: {dict(client.cookies)}")
 
 
 @router.post(
@@ -70,12 +70,12 @@ async def upload_judge_photo(
 ):
     private_key, _ = keys
 
-    # 1) odszyfrowanie
+    # 1) odszyfruj dane
     user_plain = decrypt_field(private_key, username)
     pass_plain = decrypt_field(private_key, password)
     judge_plain = decrypt_field(private_key, judge_id)
 
-    # 2) dekodowanie obrazka
+    # 2) dekoduj obraz
     _, _, b64data = foto.partition("base64,")
     try:
         image_bytes = base64.b64decode(b64data or foto)
@@ -93,7 +93,7 @@ async def upload_judge_photo(
             # 3a) logowanie
             await authenticate(client, settings, user_plain, pass_plain)
 
-            # 3b) upload
+            # 3b) upload pliku
             logger.debug("Uploading image to sedzia_foto_dodaj3.php …")
             files = {"foto": ("profile.jpg", image_bytes, "image/jpeg")}
             data = {"NrSedzia": judge_plain, "user": user_plain}
@@ -106,16 +106,16 @@ async def upload_judge_photo(
             logger.debug(f"Upload status: {upload_resp.status_code}")
             logger.debug(f"Upload response snippet: {upload_resp.text[:200]!r}")
 
-            text = upload_resp.text.lower()
-            if upload_resp.status_code != 200 or "zdjęcie zostało zapisane" not in text:
+            text_low = upload_resp.text.lower()
+            if upload_resp.status_code != 200 or "zdjęcie zostało zapisane" not in text_low:
                 detail = "Upload nie powiódł się"
-                if "error" in text:
-                    snippet = text.split("error", 1)[1][:200]
+                if "error" in text_low:
+                    snippet = text_low.split("error", 1)[1][:200]
                     detail += f": {snippet}"
                     logger.error(f"Detected error fragment: {snippet!r}")
                 raise HTTPException(status_code=500, detail=detail)
 
-            # 3c) pobranie strony edycji
+            # 3c) fetch strony edycji
             logger.debug("Fetching profile edit page …")
             profile_resp = await client.get(
                 f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_plain}"
@@ -125,11 +125,10 @@ async def upload_judge_photo(
             logger.debug(f"Profile HTML snippet: {html[:200]!r}")
 
     except Exception:
-        # złap wszystkiego i wypisz pełny stack trace
         logger.exception("Unhandled exception in upload_judge_photo")
         raise
 
-    # 4) regex i odpowiedź
+    # 4) regex do <img src="foto_sedzia/...">
     m = re.search(r'<img[^>]+src="(foto_sedzia/[^"]+)"', html)
     if not m:
         logger.warning("Could not find <img src='foto_sedzia/...'> in profile HTML")
