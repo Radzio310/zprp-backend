@@ -71,12 +71,11 @@ async def upload_judge_photo(
         await authenticate(client, settings, user_plain, pass_plain)
 
         # B) Krok I: wyślij plik do croppie-temp (button=KADRUJ)
-        #   – bez tego nie dostaniesz formularza Croppie
         files1 = {"foto": ("upload.jpg", image_bytes, "image/jpeg")}
         data1 = {
             "NrSedzia": judge_plain,
-            "user":     user_plain,
-            "button":   "KADRUJ",
+            "user": user_plain,
+            "button": "KADRUJ",
         }
         resp1 = await client.post(
             "/sedzia_foto_dodaj3.php",
@@ -90,24 +89,24 @@ async def upload_judge_photo(
         html1 = resp1.text
 
         # C) Parsuj ścieżkę do tymczasowego obrazka z Croppie
-        #    look for bind url: 'foto_sedzia_temp/...'
-        m = re.search(r"bind\(\s*\{\s*url:\s*'([^']+)'", html1)
+        # Użyj bardziej elastycznego regexu by wychwycić bind i URL
+        m = re.search(r"'bind'\s*,\s*\{\s*url\s*:\s*'([^']+)'", html1)
         if not m:
-            # spróbuj innego wzorca
-            m = re.search(r"url:\s*'([^']+foto_sedzia_temp[^']+)'", html1)
+            # Prostsze dopasowanie samej ścieżki foto_sedzia_temp
+            m = re.search(r"(foto_sedzia_temp/[^'\"\s]+)", html1)
         if not m:
             logger.error("Could not find croppie temp URL in HTML:\n%s", html1[:500])
             raise HTTPException(status_code=500, detail="Nie udało się wczytać Croppie")
 
-        temp_path = m.group(1)  # np. foto_sedzia_temp/5124_xxx.jpg
+        temp_path = m.group(1)
         logger.debug("Croppie temp image: %s", temp_path)
 
         # D) Krok II: wyślij base64 do finalnego zapisu (button=ZAPISZ)
         data2 = {
             "NrSedzia": judge_plain,
-            "user":     user_plain,
-            "foto":     foto,       # cały base64 z Croppie
-            "button":   "ZAPISZ",
+            "user": user_plain,
+            "foto": foto,
+            "button": "ZAPISZ",
         }
         resp2 = await client.post(
             "/sedzia_foto_dodaj3.php",
