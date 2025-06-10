@@ -1,6 +1,6 @@
 # app/silesia.py
 import datetime
-import json
+from json import JSONDecodeError, loads
 from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy import select, insert, update, delete, func
 from app.db import database, announcements, silesia_offtimes
@@ -252,8 +252,8 @@ async def set_offtimes(
 
     # walidacja JSON
     try:
-        json.loads(data_json)
-    except json.JSONDecodeError:
+        loads(data_json)
+    except JSONDecodeError:
         raise HTTPException(status_code=400, detail="Niepoprawny JSON w data_json")
 
     stmt = pg_insert(silesia_offtimes).values(
