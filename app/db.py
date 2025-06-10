@@ -2,11 +2,14 @@
 import os
 from sqlalchemy import (
     Column,
+    DateTime,
     Integer,
     String,
     MetaData,
     Table,
+    Text,
     create_engine,
+    func,
 )
 from databases import Database
 
@@ -45,6 +48,30 @@ event_mappings = Table(
     Column("user_login", String, primary_key=True),
     Column("match_id", String, primary_key=True),
     Column("event_id", String, nullable=False),
+)
+
+# 4) Tabela ogłoszeń (Silesia)
+announcements = Table(
+    "announcements",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("title", String, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("image_url", String, nullable=True),
+    Column("priority", Integer, nullable=False, default=0),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+)
+
+# 5) Tabela “kalendarz niedyspozycji” Silesia
+silesia_offtimes = Table(
+    "silesia_offtimes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("full_name", String, nullable=False),
+    Column("data_json", Text, nullable=False),  # tu przechowujemy cały JSON jako tekst
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
 )
 
 # Tworzymy tabele przy starcie

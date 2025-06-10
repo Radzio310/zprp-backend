@@ -1,3 +1,4 @@
+import datetime
 from typing import Optional, Literal, List
 from pydantic import BaseModel
 
@@ -22,3 +23,65 @@ class BatchOffTimeRequest(BaseModel):
     password: str
     judge_id: str
     actions: str      # Base64‑RSA całego JSON array
+
+# — wspólny bazowy model uwierzytelniający (wszystko zaszyfrowane Base64-RSA) —
+class AuthPayload(BaseModel):
+    username: str   # Base64-RSA
+    password: str   # Base64-RSA
+    judge_id: str   # Base64-RSA
+
+# 1) Żądanie utworzenia ogłoszenia
+class CreateAnnouncementRequest(AuthPayload):
+    title: str      # zaszyfrowany Base64-RSA
+    content: str    # zaszyfrowany Base64-RSA
+    image_url: Optional[str] = None  # zaszyfrowany Base64-RSA lub plaintext URL
+    priority: int
+
+# 2) Żądanie aktualizacji ogłoszenia
+class UpdateAnnouncementRequest(AuthPayload):
+    id: int
+    title: Optional[str] = None
+    content: Optional[str] = None
+    image_url: Optional[str] = None
+    priority: Optional[int] = None
+
+# 3) Żądanie usunięcia ogłoszenia
+class DeleteAnnouncementRequest(AuthPayload):
+    id: int
+
+# 4) Odpowiedź pojedynczego ogłoszenia
+class AnnouncementResponse(BaseModel):
+    id: int
+    title: str
+    content: str
+    image_url: Optional[str]
+    priority: int
+    updated_at: datetime
+
+# 5) Odpowiedź listy ogłoszeń
+class ListAnnouncementsResponse(BaseModel):
+    announcements: List[AnnouncementResponse]
+
+# 6) Odpowiedź z datą ostatniej aktualizacji
+class LastUpdateResponse(BaseModel):
+    last_update: Optional[datetime] # type: ignore
+
+# 7) Żądanie ustawienia / nadpisania niedyspozycji sędziego
+class SetOfftimesRequest(AuthPayload):
+    full_name: str     # Base64‑RSA
+    data_json: str     # Base64‑RSA JSON array/string
+
+# 8) Żądanie pobrania listy po konkretnych judge_id
+class ListOfftimesRequest(AuthPayload):
+    judge_ids: List[str]  # każdy Base64‑RSA
+
+# 9) Odpowiedź pojedynczej niedyspozycji
+class OfftimeRecord(BaseModel):
+    judge_id: str
+    full_name: str
+    data_json: str
+    updated_at: datetime
+
+# 10) Odpowiedź listy niedyspozycji
+class ListOfftimesResponse(BaseModel):
+    records: List[OfftimeRecord]
