@@ -1,5 +1,5 @@
 # app/silesia.py
-import datetime
+from datetime import datetime
 from json import JSONDecodeError, loads
 from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy import select, insert, update, delete, func
