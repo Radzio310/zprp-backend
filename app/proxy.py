@@ -23,17 +23,6 @@ class ProxyRequest(BaseModel):
         "populate_by_alias": True,   # pozwala zwracać .dict(by_alias=True)
     }
 
-    method: str                 # "GET", "POST", "PUT", "DELETE" itp.
-    path: str                   # np. "/index.php?a=statystyki&b=sedzia&NrSedzia=123"
-    params: Optional[Dict[str, Any]] = None
-    json_body: Optional[Dict[str, Any]] = Field(None, alias="json")
-    data: Optional[Dict[str, Any]] = None
-    class Config:
-        # pozwala przyjmować dane zarówno po nazwie pola, jak i po aliasie
-        allow_population_by_field_name = True
-        # gdybyś eksportował model metodą .dict(by_alias=True)
-        allow_population_by_alias = True
-
 @router.post("/proxy", tags=["proxy"])
 async def proxy(
     req: ProxyRequest,
