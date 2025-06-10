@@ -12,6 +12,17 @@ from app.deps import get_settings, Settings
 router = APIRouter()
 
 class ProxyRequest(BaseModel):
+    method: str
+    path: str
+    params: Optional[Dict[str, Any]] = None
+    json_body: Optional[Dict[str, Any]] = Field(None, alias="json")
+    data: Optional[Dict[str, Any]] = None
+
+    model_config = {
+        "validate_by_name": True,    # pozwala wczytywać pola po ich nazwie nawet jeśli mają alias
+        "populate_by_alias": True,   # pozwala zwracać .dict(by_alias=True)
+    }
+
     method: str                 # "GET", "POST", "PUT", "DELETE" itp.
     path: str                   # np. "/index.php?a=statystyki&b=sedzia&NrSedzia=123"
     params: Optional[Dict[str, Any]] = None
