@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Any, Dict
 import httpx
 
@@ -15,7 +15,7 @@ class ProxyRequest(BaseModel):
     method: str                 # "GET", "POST", "PUT", "DELETE" itp.
     path: str                   # np. "/index.php?a=statystyki&b=sedzia&NrSedzia=123"
     params: Optional[Dict[str, Any]] = None
-    json: Optional[Dict[str, Any]] = None
+    json_body: Optional[Dict[str, Any]] = Field(None, alias="json")
     data: Optional[Dict[str, Any]] = None
 
 @router.post("/proxy", tags=["proxy"])
@@ -33,7 +33,7 @@ async def proxy(
             req.method.upper(),
             req.path,
             params=req.params,
-            json=req.json,
+            json=req.json_body,
             data=req.data,
         )
 
