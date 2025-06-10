@@ -85,3 +85,36 @@ class OfftimeRecord(BaseModel):
 # 10) Odpowiedź listy niedyspozycji
 class ListOfftimesResponse(BaseModel):
     records: List[OfftimeRecord]
+
+class MatchOfferRequest(AuthPayload):
+    full_name: str       # Base64-RSA
+    match_data: str      # Base64-RSA JSON
+
+class MatchAssignmentRequest(AuthPayload):
+    full_name: str       # Base64-RSA
+
+class ApprovalActionRequest(AuthPayload):
+    # ewentualne pola na decyzję (np. komentarz)
+    pass
+
+class OfferItem(BaseModel):
+    id: int
+    judge_id: str
+    judge_name: str
+    match_data: dict
+
+class ListOffersResponse(BaseModel):
+    offers: List[OfferItem]
+
+class ApprovalItem(BaseModel):
+    id: int
+    original_offer_id: int
+    judge_id: str
+    judge_name: str
+    match_data: dict
+    assign_judges: List[str]
+    assign_names: List[str]
+    requested_at: datetime
+
+class ListApprovalsResponse(BaseModel):
+    approvals: List[ApprovalItem]

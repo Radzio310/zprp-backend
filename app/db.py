@@ -1,6 +1,7 @@
 # app/db.py
 import os
 from sqlalchemy import (
+    ARRAY,
     Column,
     DateTime,
     Integer,
@@ -72,6 +73,46 @@ silesia_offtimes = Table(
     Column("full_name", String, nullable=False),
     Column("data_json", Text, nullable=False),  # tu przechowujemy cały JSON jako tekst
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+)
+
+# (6) Mecze do oddania
+matches_to_offer = Table(
+    "matches_to_offer",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("judge_name", String, nullable=False),
+    Column("match_data", Text, nullable=False),           # JSON jako tekst
+    Column("created_at", DateTime(timezone=True),
+           server_default=func.now(), nullable=False),
+)
+
+# (7) Mecze oczekujące na akceptację
+matches_to_approve = Table(
+    "matches_to_approve",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("original_offer_id", Integer, nullable=False, index=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("judge_name", String, nullable=False),
+    Column("match_data", Text, nullable=False),
+    Column("assign_judges", ARRAY(String), nullable=False),  # lista ID
+    Column("assign_names", ARRAY(String), nullable=False),   # lista imion
+    Column("requested_at", DateTime(timezone=True),
+           server_default=func.now(), nullable=False),
+)
+
+# (8) Historia zdarzeń przy meczu
+matches_events = Table(
+    "matches_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("event_type", String, nullable=False),           # np. "offer","assign","approve","reject","delete"
+    Column("event_time", DateTime(timezone=True),
+           server_default=func.now(), nullable=False),
+    Column("match_id", Integer, nullable=False, index=True), # odniesienie do offer_id
+    Column("owner_judge_id", String, nullable=False),        # kto dodał ofertę
+    Column("acting_judge_id", String, nullable=True),        # kto wykonał akcję
 )
 
 # Tworzymy tabele przy starcie

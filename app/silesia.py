@@ -3,11 +3,16 @@ from datetime import datetime
 from json import JSONDecodeError, loads
 from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy import select, insert, update, delete, func
-from app.db import database, announcements, silesia_offtimes
+from app.db import database, announcements, silesia_offtimes, matches_to_offer, matches_to_approve, matches_events
 from app.schemas import (
+    ApprovalActionRequest,
     CreateAnnouncementRequest,
+    ListApprovalsResponse,
+    ListOffersResponse,
     ListOfftimesRequest,
     ListOfftimesResponse,
+    MatchAssignmentRequest,
+    MatchOfferRequest,
     OfftimeRecord,
     SetOfftimesRequest,
     UpdateAnnouncementRequest,
@@ -21,9 +26,20 @@ import base64
 from cryptography.hazmat.primitives.asymmetric import padding
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-router = APIRouter(
+# Router for announcements
+router_ann = APIRouter(
     prefix="/silesia/announcements",
-    tags=["Silesia"]
+    tags=["Silesia - Announcements"]
+)
+# Router for offtimes
+router_off = APIRouter(
+    prefix="/silesia/offtimes",
+    tags=["Silesia - Offtimes"]
+)
+# Router for matches
+router_matches = APIRouter(
+    prefix="/silesia/matches",
+    tags=["Silesia - Matches"]
 )
 
 def _decrypt_field(enc_b64: str, private_key) -> str:
@@ -31,7 +47,7 @@ def _decrypt_field(enc_b64: str, private_key) -> str:
     plain = private_key.decrypt(cipher, padding.PKCS1v15())
     return plain.decode("utf-8")
 
-@router.get(
+@router_ann.get(
     "/last_update",
     response_model=LastUpdateResponse,
     summary="Pobierz datę ostatniej aktualizacji ogłoszeń sędziego"
@@ -52,7 +68,7 @@ async def get_last_update(
     row = await database.fetch_one(query)
     return LastUpdateResponse(last_update=row[0])
 
-@router.get(
+@router_ann.get(
     "/",
     response_model=ListAnnouncementsResponse,
     summary="Pobierz wszystkie ogłoszenia sędziego"
@@ -85,7 +101,7 @@ async def list_announcements(
     ]
     return ListAnnouncementsResponse(announcements=result)
 
-@router.post(
+@router_ann.post(
     "/create",
     status_code=status.HTTP_201_CREATED,
     response_model=AnnouncementResponse,
@@ -128,7 +144,7 @@ async def create_announcement(
         updated_at=record["updated_at"],
     )
 
-@router.put(
+@router_ann.put(
     "/{ann_id}",
     response_model=AnnouncementResponse,
     summary="Edytuj ogłoszenie"
@@ -187,7 +203,7 @@ async def update_announcement(
         updated_at=record["updated_at"],
     )
 
-@router.delete(
+@router_ann.delete(
     "/{ann_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Usuń ogłoszenie"
@@ -223,11 +239,6 @@ async def delete_announcement(
     )
     # brak treści w odpowiedzi → 204 No Content
     return
-
-router_off = APIRouter(
-    prefix="/silesia/offtimes",
-    tags=["Silesia"]
-)
 
 @router_off.post(
     "/set",
@@ -361,3 +372,209 @@ async def delete_offtimes(
     if deleted == 0:
         raise HTTPException(status_code=404, detail="Nie znaleziono niedyspozycji")
     return
+    
+# --- Matches module ---
+@router_matches.post(
+    "/offer",
+    status_code=status.HTTP_201_CREATED,
+    summary="Dodaj mecz do oferty"
+)
+async def offer_match(
+    req: MatchOfferRequest,
+    keys=Depends(get_rsa_keys),
+):
+    """
+    Dodaje do tabeli matches_to_offer nowy mecz.
+    Pole 'match_data' w formacie JSON string zaszyfrowane Base64-RSA.
+    """
+    private_key, _ = keys
+    judge_plain = _decrypt_field(req.judge_id, private_key)
+    match_json = _decrypt_field(req.match_data, private_key)
+    try:
+        loads(match_json)
+    except JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Niepoprawny JSON w match_data")
+    stmt = (
+        insert(matches_to_offer)
+        .values(
+            judge_id=judge_plain,
+            judge_name=_decrypt_field(req.full_name, private_key),
+            match_data=match_json,
+            created_at=func.now()
+        )
+        .returning(matches_to_offer)
+    )
+    record = await database.fetch_one(stmt)
+    return {"id": record["id"], "match_data": record["match_data"]}
+
+@router_matches.get(
+    "/offers",
+    response_model=ListOffersResponse,
+    summary="Lista meczów do oddania"
+)
+async def list_offers(
+    keys=Depends(get_rsa_keys),
+):
+    rows = await database.fetch_all(
+        select(matches_to_offer).order_by(matches_to_offer.c.created_at)
+    )
+    items = [{"id": r["id"], "judge_id": r["judge_id"], "judge_name": r["judge_name"], "match_data": r["match_data"]} for r in rows]
+    return {"offers": items}
+
+@router_matches.post(
+    "/assign/{offer_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Przypisz się do meczu"
+)
+async def assign_to_match(
+    offer_id: int,
+    req: MatchAssignmentRequest,
+    keys=Depends(get_rsa_keys),
+):
+    private_key, _ = keys
+    assign_judge_plain = _decrypt_field(req.judge_id, private_key)
+    assign_name = _decrypt_field(req.full_name, private_key)
+    # sprawdź istnienie oferty
+    offer = await database.fetch_one(
+        select(matches_to_offer).where(matches_to_offer.c.id == offer_id)
+    )
+    if not offer:
+        raise HTTPException(status_code=404, detail="Oferta meczu nie znaleziona")
+    # przenieś do matches_to_approve
+    stmt = (
+        insert(matches_to_approve)
+        .values(
+            original_offer_id=offer_id,
+            judge_id=offer["judge_id"],
+            judge_name=offer["judge_name"],
+            match_data=offer["match_data"],
+            assign_judges=[assign_judge_plain],
+            assign_names=[assign_name],
+            requested_at=func.now()
+        )
+    )
+    await database.execute(stmt)
+    # log event
+    await database.execute(
+        insert(matches_events).values(
+            event_type="assign",
+            event_time=func.now(),
+            match_id=offer_id,
+            owner_judge_id=offer["judge_id"],
+            acting_judge_id=assign_judge_plain
+        )
+    )
+    # kasuj oryginalną ofertę
+    await database.execute(
+        delete(matches_to_offer).where(matches_to_offer.c.id == offer_id)
+    )
+    return {"success": True}
+
+@router_matches.get(
+    "/approvals",
+    response_model=ListApprovalsResponse,
+    summary="Lista meczów do zaakceptowania"
+)
+async def list_approvals(
+    keys=Depends(get_rsa_keys),
+):
+    rows = await database.fetch_all(
+        select(matches_to_approve).order_by(matches_to_approve.c.requested_at)
+    )
+    items = []
+    for r in rows:
+        items.append({
+            "id": r["id"],
+            "original_offer_id": r["original_offer_id"],
+            "judge_id": r["judge_id"],
+            "judge_name": r["judge_name"],
+            "match_data": r["match_data"],
+            "assign_judges": r["assign_judges"],
+            "assign_names": r["assign_names"],
+            "requested_at": r["requested_at"],
+        })
+    return {"approvals": items}
+
+@router_matches.post(
+    "/approve/{approval_id}",
+    summary="Akceptuj przypisanie do meczu"
+)
+async def approve_match(
+    approval_id: int,
+    req: ApprovalActionRequest,
+    keys=Depends(get_rsa_keys),
+):
+    # na razie pusty
+    pass
+
+@router_matches.post(
+    "/reject/{approval_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Odrzuć przypisanie do meczu"
+)
+async def reject_match(
+    approval_id: int,
+    keys=Depends(get_rsa_keys),
+):
+    # pobierz zapis
+    rec = await database.fetch_one(
+        select(matches_to_approve).where(matches_to_approve.c.id == approval_id)
+    )
+    if not rec:
+        raise HTTPException(status_code=404, detail="Rekord nie istnieje")
+    # przenieś z powrotem do offers, jeśli tam nie ma
+    exists = await database.fetch_one(
+        select(matches_to_offer).where(matches_to_offer.c.id == rec["original_offer_id"])
+    )
+    if not exists:
+        await database.execute(
+            insert(matches_to_offer).values(
+                id=rec["original_offer_id"],
+                judge_id=rec["judge_id"],
+                judge_name=rec["judge_name"],
+                match_data=rec["match_data"],
+                created_at=rec["requested_at"]
+            )
+        )
+    # log event
+    await database.execute(
+        insert(matches_events).values(
+            event_type="reject",
+            event_time=func.now(),
+            match_id=rec["original_offer_id"],
+            owner_judge_id=rec["judge_id"]
+        )
+    )
+    # usuń z approve
+    await database.execute(
+        delete(matches_to_approve).where(matches_to_approve.c.id == approval_id)
+    )
+    return {"success": True}
+
+@router_matches.delete(
+    "/offer/{offer_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Usuń ofertę meczu (tylko właściciel)"
+)
+async def delete_offer(
+    offer_id: int,
+    req: MatchOfferRequest,
+    keys=Depends(get_rsa_keys),
+):
+    private_key, _ = keys
+    judge_plain = _decrypt_field(req.judge_id, private_key)
+    rec = await database.fetch_one(
+        select(matches_to_offer).where(matches_to_offer.c.id == offer_id)
+    )
+    if not rec or rec["judge_id"] != judge_plain:
+        raise HTTPException(status_code=404, detail="Nie znaleziono lub brak dostępu")
+    await database.execute(
+        delete(matches_to_offer).where(matches_to_offer.c.id == offer_id)
+    )
+    return
+
+# Include routers
+router = APIRouter()
+router.include_router(router_ann)
+router.include_router(router_off)
+router.include_router(router_matches)
