@@ -145,35 +145,47 @@ async def create_announcement(
 )
 async def update_announcement(
     ann_id: int,
-    req: UpdateAnnouncementRequest,
+    req: CreateAnnouncementRequest,      # używamy tego samego request co przy create
     keys=Depends(get_rsa_keys),
 ):
     """
     Parametr URL: id ogłoszenia
-    Body: dowolne pola do nadpisania (title, content, image_url, priority), wszystkie zaszyfrowane.
-    Możliwe tylko jeśli ogłoszenie należy do sędziego.
+    Body: 
+      - username, password, judge_id, title, content, priority
+      - image_url (opcjonalnie)
+      wszystkie pola zaszyfrowane Base64-RSA
+    Zwraca zaktualizowane ogłoszenie wraz z `id` i `updated_at`.
     """
     private_key, _ = keys
 
-    values = {}
-    if req.title is not None:
-        values["title"] = _decrypt_field(req.title, private_key)
-    if req.content is not None:
-        values["content"] = _decrypt_field(req.content, private_key)
-    if req.image_url is not None:
-        values["image_url"] = req.image_url
-    if req.priority is not None:
-        values["priority"] = req.priority
-    if not values:
-        raise HTTPException(status_code=400, detail="Brak pól do aktualizacji")
+    # odszyfrowujemy wszystkie pola
+    username_plain = _decrypt_field(req.username, private_key)
+    password_plain = _decrypt_field(req.password, private_key)
+    judge_plain    = _decrypt_field(req.judge_id, private_key)
+    title_plain    = _decrypt_field(req.title, private_key)
+    content_plain  = _decrypt_field(req.content, private_key)
+    priority_plain = req.priority  # to jest liczba lub string, nie szyfrujemy tutaj po stronie serwera
+    image_url      = req.image_url if req.image_url else None
 
+    # teraz wykonujemy update
     stmt = (
         update(announcements)
         .where(announcements.c.id == ann_id)
-        .values(**values)
+        .values(
+            username=username_plain,
+            password=password_plain,
+            judge_id=judge_plain,
+            title=title_plain,
+            content=content_plain,
+            priority=priority_plain,
+            image_url=image_url,
+        )
         .returning(announcements)
     )
     record = await database.fetch_one(stmt)
+    if not record:
+        raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
     return AnnouncementResponse(
         id=record["id"],
         title=record["title"],
@@ -182,6 +194,7 @@ async def update_announcement(
         priority=record["priority"],
         updated_at=record["updated_at"],
     )
+
 
 @router_ann.delete(
     "/{ann_id}",
