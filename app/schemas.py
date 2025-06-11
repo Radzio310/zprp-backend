@@ -36,6 +36,8 @@ class CreateAnnouncementRequest(AuthPayload):
     content: str    # zaszyfrowany Base64-RSA
     image_url: Optional[str] = None  # zaszyfrowany Base64-RSA lub plaintext URL
     priority: int
+    link: Optional[str] = None
+    full_name: str
 
 # 2) Żądanie aktualizacji ogłoszenia
 class UpdateAnnouncementRequest(AuthPayload):
@@ -44,6 +46,8 @@ class UpdateAnnouncementRequest(AuthPayload):
     content: Optional[str] = None
     image_url: Optional[str] = None
     priority: Optional[int] = None
+    link: Optional[str] = None
+    full_name: Optional[str] = None
 
 # 3) Żądanie usunięcia ogłoszenia
 class DeleteAnnouncementRequest(AuthPayload):
@@ -57,6 +61,7 @@ class AnnouncementResponse(BaseModel):
     image_url: Optional[str]
     priority: int
     updated_at: datetime
+    judge_name: Optional[str] = None
 
 # 5) Odpowiedź listy ogłoszeń
 class ListAnnouncementsResponse(BaseModel):

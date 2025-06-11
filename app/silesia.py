@@ -71,7 +71,7 @@ async def get_last_update(
 @router_ann.get(
     "/",
     response_model=ListAnnouncementsResponse,
-    summary="Pobierz wszystkie ogłoszenia sędziego"
+    summary="Pobierz wszystkie ogłoszenia"
 )
 async def list_announcements(
     # uwierzytelnianie JWT trzymamy globalnie, nie potrzebujemy RSA-dependów
@@ -89,7 +89,9 @@ async def list_announcements(
             content=r["content"],
             image_url=r["image_url"],
             priority=r["priority"],
+            link=r["link"],
             updated_at=r["updated_at"],
+            judge_name=r["judge_name"],
         )
         for r in rows
     ]
@@ -113,6 +115,7 @@ async def create_announcement(
     """
     private_key, _ = keys
     judge_plain = _decrypt_field(req.judge_id, private_key)
+    full_name_plain = _decrypt_field(req.full_name, private_key)
     title = _decrypt_field(req.title, private_key)
     content = req.content
     image_url = req.image_url if req.image_url else None
@@ -121,20 +124,24 @@ async def create_announcement(
         insert(announcements)
         .values(
             judge_id=judge_plain,
+            judge_name=full_name_plain,
             title=title,
             content=content,
             image_url=image_url,
             priority=req.priority,
+            link=req.link,
         )
         .returning(announcements)
     )
     record = await database.fetch_one(stmt)
     return AnnouncementResponse(
         id=record["id"],
+        judge_name=record["judge_name"],
         title=record["title"],
         content=record["content"],
         image_url=record["image_url"],
         priority=record["priority"],
+        link=record["link"],
         updated_at=record["updated_at"],
     )
 
@@ -162,10 +169,12 @@ async def update_announcement(
     username_plain = _decrypt_field(req.username, private_key)
     password_plain = _decrypt_field(req.password, private_key)
     judge_plain    = _decrypt_field(req.judge_id, private_key)
+    full_name_plain = _decrypt_field(req.full_name, private_key)
     title_plain    = _decrypt_field(req.title, private_key)
     content_plain  = req.content
     priority_plain = req.priority  # to jest liczba lub string, nie szyfrujemy tutaj po stronie serwera
     image_url      = req.image_url if req.image_url else None
+    
 
     # teraz wykonujemy update
     stmt = (
@@ -173,10 +182,12 @@ async def update_announcement(
         .where(announcements.c.id == ann_id)
         .values(
             judge_id=judge_plain,
+            judge_name=full_name_plain,
             title=title_plain,
             content=content_plain,
             priority=priority_plain,
             image_url=image_url,
+            link=req.link,
         )
         .returning(announcements)
     )
@@ -190,6 +201,8 @@ async def update_announcement(
         content=record["content"],
         image_url=record["image_url"],
         priority=record["priority"],
+        link=record["link"],
+        judge_name=record["judge_name"],
         updated_at=record["updated_at"],
     )
 

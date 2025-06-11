@@ -57,10 +57,12 @@ announcements = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("judge_id", String, nullable=False, index=True),
+    Column("judge_name", String, nullable=True),
     Column("title", String, nullable=False),
     Column("content", Text, nullable=False),
     Column("image_url", String, nullable=True),
     Column("priority", Integer, nullable=False, default=0),
+    Column("link", String, nullable=True), # link do ogłoszenia, może być pusty
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
 )
 
