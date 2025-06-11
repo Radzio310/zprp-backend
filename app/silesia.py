@@ -101,21 +101,20 @@ async def list_announcements(
     response_model=AnnouncementResponse,
     summary="Dodaj nowe ogłoszenie"
 )
-async def create_announcement(
-    req: CreateAnnouncementRequest,
-    keys=Depends(get_rsa_keys),
+async def create_announcement_plain(
+    req: AnnouncementResponse,  # albo inny prosty schema z title/content/image_url/priority
+    keys=Depends(get_rsa_keys)
 ):
     """
     Body:
-    - title, content, image_url (opcjonalnie), priority
-    - wszystkie pola zaszyfrowane Base64-RSA
+      - title, content, image_url (opcjonalnie), priority
     Zwraca utworzone ogłoszenie wraz z `id` i `updated_at`.
     """
+    title = req.title
+    content = req.content
+    image_url = req.image_url if req.image_url else None
     private_key, _ = keys
     judge_plain = _decrypt_field(req.judge_id, private_key)
-    title = _decrypt_field(req.title, private_key)
-    content = _decrypt_field(req.content, private_key)
-    image_url = req.image_url if req.image_url else None
 
     stmt = (
         insert(announcements)
