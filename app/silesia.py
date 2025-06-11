@@ -154,17 +154,6 @@ async def update_announcement(
     Możliwe tylko jeśli ogłoszenie należy do sędziego.
     """
     private_key, _ = keys
-    judge_plain = _decrypt_field(req.judge_id, private_key)
-
-    # sprawdź własność:
-    exists = await database.fetch_one(
-        select(announcements.c.id).where(
-            (announcements.c.id == ann_id) &
-            (announcements.c.judge_id == judge_plain)
-        )
-    )
-    if not exists:
-        raise HTTPException(status_code=404, detail="Nie znaleziono ogłoszenia")
 
     values = {}
     if req.title is not None:
@@ -180,10 +169,7 @@ async def update_announcement(
 
     stmt = (
         update(announcements)
-        .where(
-            (announcements.c.id == ann_id) &
-            (announcements.c.judge_id == judge_plain)
-        )
+        .where(announcements.c.id == ann_id)
         .values(**values)
         .returning(announcements)
     )
@@ -204,32 +190,14 @@ async def update_announcement(
 )
 async def delete_announcement(
     ann_id: int,
-    req: DeleteAnnouncementRequest,
-    keys=Depends(get_rsa_keys),
 ):
     """
     Parametr URL: id ogłoszenia
     Body: tylko AuthPayload (username, password, judge_id)
-    Usuwa, jeśli ogłoszenie należy do zadanego sędziego.
+    Usuwa ogłoszenie
     """
-    private_key, _ = keys
-    judge_plain = _decrypt_field(req.judge_id, private_key)
-
-    # sprawdź własność:
-    exists = await database.fetch_one(
-        select(announcements.c.id).where(
-            (announcements.c.id == ann_id) &
-            (announcements.c.judge_id == judge_plain)
-        )
-    )
-    if not exists:
-        raise HTTPException(status_code=404, detail="Nie znaleziono ogłoszenia")
-
     await database.execute(
-        delete(announcements).where(
-            (announcements.c.id == ann_id) &
-            (announcements.c.judge_id == judge_plain)
-        )
+        delete(announcements).where(announcements.c.id == ann_id)
     )
     # brak treści w odpowiedzi → 204 No Content
     return
