@@ -50,21 +50,14 @@ def _decrypt_field(enc_b64: str, private_key) -> str:
 @router_ann.get(
     "/last_update",
     response_model=LastUpdateResponse,
-    summary="Pobierz datę ostatniej aktualizacji ogłoszeń sędziego"
+    summary="Pobierz datę ostatniej aktualizacji wszystkich ogłoszeń"
 )
-async def get_last_update(
-    auth: CreateAnnouncementRequest = Depends(),  # wykorzystujemy ten sam schemat uwierzytelniający
-    keys=Depends(get_rsa_keys),
-):
+async def get_last_update():
     """
-    Zwraca timestamp ostatniej zmiany (lub None, jeśli brak wpisów).
+    Zwraca timestamp ostatniej zmiany spośród wszystkich ogłoszeń
+    (lub None, jeśli tabela jest pusta).
     """
-    private_key, _ = keys
-    judge_plain = _decrypt_field(auth.judge_id, private_key)
-
-    query = select(func.max(announcements.c.updated_at)).where(
-        announcements.c.judge_id == judge_plain
-    )
+    query = select(func.max(announcements.c.updated_at))
     row = await database.fetch_one(query)
     return LastUpdateResponse(last_update=row[0])
 
