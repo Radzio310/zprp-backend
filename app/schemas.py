@@ -58,6 +58,7 @@ class AnnouncementResponse(BaseModel):
     id: int
     title: str
     content: str
+    link: Optional[str] = None  # może być pusty
     image_url: Optional[str]
     priority: int
     updated_at: datetime
