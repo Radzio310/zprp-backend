@@ -172,8 +172,6 @@ async def update_announcement(
         update(announcements)
         .where(announcements.c.id == ann_id)
         .values(
-            username=username_plain,
-            password=password_plain,
             judge_id=judge_plain,
             title=title_plain,
             content=content_plain,
