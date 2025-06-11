@@ -121,7 +121,7 @@ async def create_announcement(
     judge_plain = _decrypt_field(req.judge_id, private_key)
     title = _decrypt_field(req.title, private_key)
     content = _decrypt_field(req.content, private_key)
-    image_url = _decrypt_field(req.image_url, private_key) if req.image_url else None
+    image_url = req.image_url if req.image_url else None
 
     stmt = (
         insert(announcements)
@@ -178,7 +178,7 @@ async def update_announcement(
     if req.content is not None:
         values["content"] = _decrypt_field(req.content, private_key)
     if req.image_url is not None:
-        values["image_url"] = _decrypt_field(req.image_url, private_key)
+        values["image_url"] = req.image_url
     if req.priority is not None:
         values["priority"] = req.priority
     if not values:
