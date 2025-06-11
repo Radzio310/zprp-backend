@@ -74,18 +74,12 @@ async def get_last_update(
     summary="Pobierz wszystkie ogłoszenia sędziego"
 )
 async def list_announcements(
-    auth: CreateAnnouncementRequest = Depends(),
-    keys=Depends(get_rsa_keys),
+    # uwierzytelnianie JWT trzymamy globalnie, nie potrzebujemy RSA-dependów
 ):
     """
-    Zwraca listę ogłoszeń pogrupowaną według priorytetu (rosnąco).
+    Zwraca **wszystkie** ogłoszenia (niezależnie od sędziego), posortowane według priority.
     """
-    private_key, _ = keys
-    judge_plain = _decrypt_field(auth.judge_id, private_key)
-
-    query = select(announcements).where(
-        announcements.c.judge_id == judge_plain
-    ).order_by(announcements.c.priority)
+    query = select(announcements).order_by(announcements.c.priority)
     rows = await database.fetch_all(query)
 
     result = [
