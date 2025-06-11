@@ -114,7 +114,7 @@ async def create_announcement(
     private_key, _ = keys
     judge_plain = _decrypt_field(req.judge_id, private_key)
     title = _decrypt_field(req.title, private_key)
-    content = _decrypt_field(req.content, private_key)
+    content = req.content
     image_url = req.image_url if req.image_url else None
 
     stmt = (
@@ -163,7 +163,7 @@ async def update_announcement(
     password_plain = _decrypt_field(req.password, private_key)
     judge_plain    = _decrypt_field(req.judge_id, private_key)
     title_plain    = _decrypt_field(req.title, private_key)
-    content_plain  = _decrypt_field(req.content, private_key)
+    content_plain  = req.content
     priority_plain = req.priority  # to jest liczba lub string, nie szyfrujemy tutaj po stronie serwera
     image_url      = req.image_url if req.image_url else None
 
