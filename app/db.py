@@ -125,6 +125,14 @@ admin_pins = Table(
     Column("pin_hash", String, nullable=False),
 )
 
+# (10) Tabela listy adminów
+admin_settings = Table(
+    "admin_settings",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("allowed_admins", ARRAY(String), nullable=False, default=[]),
+)
+
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

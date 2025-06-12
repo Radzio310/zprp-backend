@@ -1,8 +1,10 @@
+from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import select
 import bcrypt
-from app.db import database, admin_pins
-from app.schemas import ValidatePinRequest, ValidatePinResponse, UpdatePinRequest
+from app.db import database, admin_pins, admin_settings
+from app.schemas import ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 router = APIRouter(
     prefix="/admin",
@@ -38,6 +40,32 @@ async def update_pin(req: UpdatePinRequest):
     ).on_conflict_do_update(
         index_elements=[admin_pins.c.id],
         set_={"pin_hash": new_hash}
+    )
+    await database.execute(stmt)
+    return {"success": True}
+
+@router.get(
+    "/admins",
+    response_model=ListAdminsResponse,
+    summary="Pobierz listę ID adminów"
+)
+async def get_admins():
+    row = await database.fetch_one(select(admin_settings).limit(1))
+    return ListAdminsResponse(
+        allowed_admins=row["allowed_admins"] or []
+    )
+
+@router.put(
+    "/admins",
+    response_model=Dict[str,bool],
+    summary="Zaktualizuj listę ID adminów"
+)
+async def update_admins(req: UpdateAdminsRequest):
+    stmt = pg_insert(admin_settings).values(
+        id=1, allowed_admins=req.allowed_admins
+    ).on_conflict_do_update(
+        index_elements=[admin_settings.c.id],
+        set_={"allowed_admins": req.allowed_admins}
     )
     await database.execute(stmt)
     return {"success": True}

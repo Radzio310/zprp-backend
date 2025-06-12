@@ -134,3 +134,9 @@ class ValidatePinResponse(BaseModel):
 
 class UpdatePinRequest(BaseModel):
     new_pin: str  # plaintext nowego PIN-u, zmiana dostępna później z aplikacji
+
+class UpdateAdminsRequest(BaseModel):
+    allowed_admins: List[str]
+
+class ListAdminsResponse(BaseModel):
+    allowed_admins: List[str]
