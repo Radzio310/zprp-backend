@@ -20,6 +20,7 @@ from app.delegate import router as delegate_router
 from app.results import router as results_router
 from app.calendar import router as calendar_router
 from app.silesia import router as silesia_router
+from app.admin import router as admin_router
 
 from app.db import database
 
@@ -48,6 +49,7 @@ app.include_router(delegate_router)
 app.include_router(results_router)
 app.include_router(calendar_router)
 app.include_router(silesia_router)
+app.include_router(admin_router)
 
 logger = logging.getLogger("uvicorn")
 

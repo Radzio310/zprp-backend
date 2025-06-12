@@ -124,3 +124,13 @@ class ApprovalItem(BaseModel):
 
 class ListApprovalsResponse(BaseModel):
     approvals: List[ApprovalItem]
+
+# PANEL ADMINA
+class ValidatePinRequest(BaseModel):
+    pin: str  # plaintext PIN przesłany klientem
+
+class ValidatePinResponse(BaseModel):
+    valid: bool
+
+class UpdatePinRequest(BaseModel):
+    new_pin: str  # plaintext nowego PIN-u, zmiana dostępna później z aplikacji

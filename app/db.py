@@ -117,6 +117,14 @@ matches_events = Table(
     Column("acting_judge_id", String, nullable=True),        # kto wykonał akcję
 )
 
+# (9) Tabela admin PIN
+admin_pins = Table(
+    "admin_pins",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("pin_hash", String, nullable=False),
+)
+
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
