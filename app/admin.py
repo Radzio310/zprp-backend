@@ -17,7 +17,9 @@ router = APIRouter(
     summary="Walidacja PIN-u admina"
 )
 async def validate_pin(req: ValidatePinRequest):
-    row = await database.fetch_one(select(admin_pins).limit(1))
+    # teraz fetchujemy PIN tylko dla tego judge_id
+    stmt = select(admin_pins).where(admin_pins.c.judge_id == req.judge_id)
+    row = await database.fetch_one(stmt)
     if not row:
         return ValidatePinResponse(valid=False)
     pin_hash = row["pin_hash"].encode()
@@ -32,13 +34,12 @@ async def validate_pin(req: ValidatePinRequest):
 async def update_pin(req: UpdatePinRequest):
     # tu możesz dodać uwierzytelnianie JWT jeśli potrzebne
     new_hash = bcrypt.hashpw(req.new_pin.encode(), bcrypt.gensalt()).decode()
-    # upsert
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    # upsert per‑judge_id
     stmt = pg_insert(admin_pins).values(
-        id=1,
+        judge_id=req.judge_id,
         pin_hash=new_hash
     ).on_conflict_do_update(
-        index_elements=[admin_pins.c.id],
+        index_elements=[admin_pins.c.judge_id],
         set_={"pin_hash": new_hash}
     )
     await database.execute(stmt)
@@ -55,12 +56,9 @@ async def get_admins():
         allowed_admins=row["allowed_admins"] or []
     )
 
-@router.put(
-    "/admins",
-    response_model=Dict[str,bool],
-    summary="Zaktualizuj listę ID adminów"
-)
+@router.put("/admins", response_model=Dict[str,bool])
 async def update_admins(req: UpdateAdminsRequest):
+    # 1) zachowujemy ustawienia
     stmt = pg_insert(admin_settings).values(
         id=1, allowed_admins=req.allowed_admins
     ).on_conflict_do_update(
@@ -68,4 +66,22 @@ async def update_admins(req: UpdateAdminsRequest):
         set_={"allowed_admins": req.allowed_admins}
     )
     await database.execute(stmt)
+
+    # 2) reset PIN‑ów dla nowych / przywróconych adminów na "0000"
+    default_hash = bcrypt.hashpw("0000".encode(), bcrypt.gensalt()).decode()
+    for j in req.allowed_admins:
+        upsert = pg_insert(admin_pins).values(
+            judge_id=j, pin_hash=default_hash
+        ).on_conflict_do_update(
+            index_elements=[admin_pins.c.judge_id],
+            set_={"pin_hash": default_hash}
+        )
+        await database.execute(upsert)
+
+    # 3) (opcjonalnie) usuń wiersze PIN-ów dla judge_id, które już nie są w allow list:
+    delete_stmt = admin_pins.delete().where(
+        admin_pins.c.judge_id.notin_(req.allowed_admins)
+    )
+    await database.execute(delete_stmt)
+
     return {"success": True}

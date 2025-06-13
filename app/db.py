@@ -117,12 +117,12 @@ matches_events = Table(
     Column("acting_judge_id", String, nullable=True),        # kto wykonał akcję
 )
 
-# (9) Tabela admin PIN
+#9) Tabela admin PIN per‑judge
 admin_pins = Table(
-    "admin_pins",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("pin_hash", String, nullable=False),
+  "admin_pins",
+  metadata,
+  Column("judge_id", String, primary_key=True),      # teraz klucz główny
+  Column("pin_hash", String, nullable=False),
 )
 
 # (10) Tabela listy adminów

@@ -127,13 +127,15 @@ class ListApprovalsResponse(BaseModel):
 
 # PANEL ADMINA
 class ValidatePinRequest(BaseModel):
-    pin: str  # plaintext PIN przesłany klientem
+    judge_id: str      # plaintext ID sędziego
+    pin: str           # plaintext PIN
 
 class ValidatePinResponse(BaseModel):
     valid: bool
 
 class UpdatePinRequest(BaseModel):
-    new_pin: str  # plaintext nowego PIN-u, zmiana dostępna później z aplikacji
+    judge_id: str      # plaintext ID sędziego
+    new_pin: str       # plaintext nowego PIN-u
 
 class UpdateAdminsRequest(BaseModel):
     allowed_admins: List[str]
