@@ -168,6 +168,14 @@ admin_posts = Table(
   Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
+# (13) Tabela do zapisu ostatniego logowania
+login_records = Table(
+  "login_records",
+  metadata,
+  Column("judge_id", String, primary_key=True),
+  Column("full_name", String, nullable=False),
+  Column("last_login_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
 
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)

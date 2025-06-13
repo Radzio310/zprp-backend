@@ -189,3 +189,19 @@ class AdminPostItem(BaseModel):
 
 class ListAdminPostsResponse(BaseModel):
     posts: List[AdminPostItem]
+
+# UŻYTKOWNICY
+# 1) Żądanie (upsert) rekordu logowania
+class CreateLoginRecordRequest(BaseModel):
+    judge_id: str
+    full_name: str
+
+# 2) Jeden rekord w odpowiedzi
+class LoginRecordItem(BaseModel):
+    judge_id: str
+    full_name: str
+    last_login_at: datetime
+
+# 3) Lista rekordów
+class ListLoginRecordsResponse(BaseModel):
+    records: list[LoginRecordItem]
