@@ -120,8 +120,14 @@ async def post_report(req: CreateUserReportRequest):
       type=req.type,
       content=req.content
     )
-    await database.execute(stmt)
+    try:
+        await database.execute(stmt)
+    except Exception as e:
+        # wybadaj, co dokładnie zwraca baza
+        print("🔴 SQL ERROR in post_report:", e)
+        raise HTTPException(status_code=500, detail=str(e))
     return {"success": True}
+
 
 @router.get("/reports", response_model=ListUserReportsResponse, summary="Lista zgłoszeń")
 async def list_reports(limit: int = 0):
