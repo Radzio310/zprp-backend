@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional, Literal, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class EditJudgeRequest(BaseModel):
     username: str
@@ -142,3 +142,9 @@ class UpdateAdminsRequest(BaseModel):
 
 class ListAdminsResponse(BaseModel):
     allowed_admins: List[str]
+
+class GenerateHashRequest(BaseModel):
+    pin: str = Field(..., min_length=1, max_length=32, description="Dowolny PIN do zhashowania")
+
+class GenerateHashResponse(BaseModel):
+    hash: str = Field(..., description="bcrypt‑owy hash wejściowego PINu")

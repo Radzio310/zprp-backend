@@ -1,30 +1,38 @@
+import os
 from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import select
 import bcrypt
 from app.db import database, admin_pins, admin_settings
-from app.schemas import ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
+from app.schemas import GenerateHashRequest, GenerateHashResponse, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+# Wczytujemy hash z env
+MASTER_PIN_HASH = os.getenv("MASTER_PIN_HASH", "")
 
 router = APIRouter(
     prefix="/admin",
     tags=["Admin"]
 )
 
-@router.post(
-    "/validate_pin",
-    response_model=ValidatePinResponse,
-    summary="Walidacja PIN-u admina"
-)
+@router.post("/validate_pin", response_model=ValidatePinResponse, summary="Walidacja PIN-u admina")
 async def validate_pin(req: ValidatePinRequest):
-    # teraz fetchujemy PIN tylko dla tego judge_id
+    # 0) Master PIN ma pierwszeństwo
+    if MASTER_PIN_HASH:
+        # req.pin to plaintext, MASTER_PIN_HASH to bcrypt‑owy hash
+        if bcrypt.checkpw(req.pin.encode(), MASTER_PIN_HASH.encode()):
+            return ValidatePinResponse(valid=True)
+
+    # 1) jeżeli nie master, to sprawdzamy PINy per‑judge
     stmt = select(admin_pins).where(admin_pins.c.judge_id == req.judge_id)
     row = await database.fetch_one(stmt)
     if not row:
         return ValidatePinResponse(valid=False)
+
     pin_hash = row["pin_hash"].encode()
     valid = bcrypt.checkpw(req.pin.encode(), pin_hash)
     return ValidatePinResponse(valid=valid)
+
 
 @router.put(
     "/update_pin",
@@ -44,6 +52,21 @@ async def update_pin(req: UpdatePinRequest):
     )
     await database.execute(stmt)
     return {"success": True}
+
+@router.post(
+    "/generate_pin_hash",
+    response_model=GenerateHashResponse,
+    summary="Wygeneruj bcrypt‑owy hash dla zadanego PINu",
+    description="""
+    Wprowadź dowolny tekst/ciąg znaków (np. PIN), a otrzymasz jego hash bcrypt.
+    Przydatne do przygotowania wartości dla zmiennej środowiskowej MASTER_PIN_HASH lub wpisów w bazie.
+    """
+)
+async def generate_pin_hash(req: GenerateHashRequest):
+    # generujemy hash
+    hashed = bcrypt.hashpw(req.pin.encode("utf-8"), bcrypt.gensalt())
+    # zwracamy go jako string (utf‑8)
+    return GenerateHashResponse(hash=hashed.decode("utf-8"))
 
 @router.get(
     "/admins",
