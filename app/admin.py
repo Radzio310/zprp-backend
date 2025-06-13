@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
@@ -118,7 +119,9 @@ async def post_report(req: CreateUserReportRequest):
       phone=req.phone,
       email=req.email,
       type=req.type,
-      content=req.content
+      content=req.content,
+      created_at=datetime.datetime.utcnow(),
+      is_read=False,
     )
     try:
         await database.execute(stmt)
