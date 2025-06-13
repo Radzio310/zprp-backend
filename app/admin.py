@@ -148,6 +148,38 @@ async def mark_read(report_id: int):
     await database.execute(stmt)
     return {"success": True}
 
+@router.put(
+    "/reports/{report_id}/unread",
+    response_model=dict,
+    summary="Oznacz zgłoszenie jako nieprzeczytane"
+)
+async def mark_unread(report_id: int):
+    """Przełącz flagę is_read na False."""
+    # 1) aktualizacja
+    stmt = update(user_reports).where(user_reports.c.id == report_id).values(is_read=False)
+    result = await database.execute(stmt)
+    # 2) sprawdź czy coś zostało zmienione
+    #    (database.execute zwraca zazwyczaj ilość zmienionych wierszy)
+    if not result:
+        raise HTTPException(status_code=404, detail="Zgłoszenie nie znalezione")
+    return {"success": True}
+
+
+@router.delete(
+    "/reports/{report_id}",
+    response_model=dict,
+    summary="Usuń zgłoszenie użytkownika"
+)
+async def delete_report(report_id: int):
+    """Usuń zgłoszenie o danym ID z bazy."""
+    # 1) wykonaj delete
+    delete_stmt = user_reports.delete().where(user_reports.c.id == report_id)
+    result = await database.execute(delete_stmt)
+    # 2) jeżeli nic nie usunięte → 404
+    if not result:
+        raise HTTPException(status_code=404, detail="Zgłoszenie nie znalezione")
+    return {"success": True}
+
 @router.post("/posts", response_model=dict, summary="Dodaj wpis adminowy")
 async def post_admin_entry(req: CreateAdminPostRequest):
     stmt = admin_posts.insert().values(
