@@ -120,7 +120,7 @@ async def post_report(req: CreateUserReportRequest):
       email=req.email,
       type=req.type,
       content=req.content,
-      created_at=datetime.datetime.utcnow(),
+      created_at=datetime.utcnow(),
       is_read=False,
     )
     try:
