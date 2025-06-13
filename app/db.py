@@ -12,6 +12,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     func,
+    text,
 )
 from databases import Database
 
@@ -144,8 +145,18 @@ user_reports = Table(
   Column("email", String, nullable=True),
   Column("type", String, nullable=False),       # "pomysl", "awaria", "pytanie"
   Column("content", Text, nullable=False),
-  Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, default=func.now()),
-  Column("is_read", Boolean, nullable=False, default=False),
+    Column(
+    "created_at",
+    DateTime(timezone=True),
+    server_default=func.now(),
+    nullable=False
+  ),
+  Column(
+    "is_read",
+    Boolean,
+    nullable=False,
+    server_default=text("false")    # ← to dodaj
+  ),
 )
 # 12) Wpisy admina
 admin_posts = Table(
