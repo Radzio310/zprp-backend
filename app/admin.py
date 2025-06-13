@@ -1,10 +1,10 @@
 import os
 from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
-from sqlalchemy import select
+from sqlalchemy import select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings
-from app.schemas import GenerateHashRequest, GenerateHashResponse, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateUserReportRequest, GenerateHashRequest, GenerateHashResponse, ListAdminPostsResponse, ListUserReportsResponse, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # Wczytujemy hash z env
@@ -108,3 +108,46 @@ async def update_admins(req: UpdateAdminsRequest):
     await database.execute(delete_stmt)
 
     return {"success": True}
+
+## BUDUJMY RAZEM BAZĘ
+@router.post("/reports", response_model=dict, summary="Wyślij zgłoszenie")
+async def post_report(req: CreateUserReportRequest):
+    stmt = user_reports.insert().values(
+      judge_id=req.judge_id,
+      full_name=req.full_name,
+      phone=req.phone,
+      email=req.email,
+      type=req.type,
+      content=req.content
+    )
+    await database.execute(stmt)
+    return {"success": True}
+
+@router.get("/reports", response_model=ListUserReportsResponse, summary="Lista zgłoszeń")
+async def list_reports(limit: int = 0):
+    q = select(user_reports).order_by(user_reports.c.created_at.desc())
+    if limit:
+      q = q.limit(limit)
+    rows = await database.fetch_all(q)
+    return ListUserReportsResponse(
+      reports=[UserReportItem(**dict(r)) for r in rows]
+    )
+
+@router.put("/reports/{report_id}/read", response_model=dict, summary="Oznacz zgłoszenie jako przeczytane")
+async def mark_read(report_id: int):
+    stmt = update(user_reports).where(user_reports.c.id == report_id).values(is_read=True)
+    await database.execute(stmt)
+    return {"success": True}
+
+@router.post("/posts", response_model=dict, summary="Dodaj wpis adminowy")
+async def post_admin_entry(req: CreateAdminPostRequest):
+    stmt = admin_posts.insert().values(
+      title=req.title, content=req.content, link=req.link
+    )
+    await database.execute(stmt)
+    return {"success": True}
+
+@router.get("/posts", response_model=ListAdminPostsResponse, summary="Lista wpisów admina")
+async def list_admin_posts():
+    rows = await database.fetch_all(select(admin_posts).order_by(admin_posts.c.created_at.desc()))
+    return ListAdminPostsResponse(posts=[AdminPostItem(**dict(r)) for r in rows])

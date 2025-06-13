@@ -2,6 +2,7 @@
 import os
 from sqlalchemy import (
     ARRAY,
+    Boolean,
     Column,
     DateTime,
     Integer,
@@ -132,6 +133,30 @@ admin_settings = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("allowed_admins", ARRAY(String), nullable=False, default=[]),
 )
+
+# 11) Zgłoszenia od userów
+user_reports = Table(
+  "user_reports", metadata,
+  Column("id", Integer, primary_key=True, autoincrement=True),
+  Column("judge_id", String, nullable=False, index=True),
+  Column("full_name", String, nullable=False),
+  Column("phone", String, nullable=False),
+  Column("email", String, nullable=True),
+  Column("type", String, nullable=False),       # "pomysl", "awaria", "pytanie"
+  Column("content", Text, nullable=False),
+  Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+  Column("is_read", Boolean, nullable=False, default=False),
+)
+# 12) Wpisy admina
+admin_posts = Table(
+  "admin_posts", metadata,
+  Column("id", Integer, primary_key=True, autoincrement=True),
+  Column("title", String, nullable=False),
+  Column("content", Text, nullable=False),
+  Column("link", String, nullable=True),
+  Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
 
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)

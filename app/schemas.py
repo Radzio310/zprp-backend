@@ -126,6 +126,7 @@ class ListApprovalsResponse(BaseModel):
     approvals: List[ApprovalItem]
 
 # PANEL ADMINA
+## PIN‑y adminów
 class ValidatePinRequest(BaseModel):
     judge_id: str      # plaintext ID sędziego
     pin: str           # plaintext PIN
@@ -136,6 +137,8 @@ class ValidatePinResponse(BaseModel):
 class UpdatePinRequest(BaseModel):
     judge_id: str      # plaintext ID sędziego
     new_pin: str       # plaintext nowego PIN-u
+
+## LISTA ADMINÓW
 
 class UpdateAdminsRequest(BaseModel):
     allowed_admins: List[str]
@@ -148,3 +151,41 @@ class GenerateHashRequest(BaseModel):
 
 class GenerateHashResponse(BaseModel):
     hash: str = Field(..., description="bcrypt‑owy hash wejściowego PINu")
+
+## BUDUJMY RAZEM BAZĘ
+class CreateUserReportRequest(BaseModel):
+    judge_id: str
+    full_name: str
+    phone: str
+    email: Optional[str]
+    type: Literal["pomysl","awaria","pytanie"]
+    content: str
+
+class UserReportItem(BaseModel):
+    id: int
+    judge_id: str
+    full_name: str
+    phone: str
+    email: Optional[str]
+    type: str
+    content: str
+    created_at: datetime
+    is_read: bool
+
+class ListUserReportsResponse(BaseModel):
+    reports: List[UserReportItem]
+
+class CreateAdminPostRequest(BaseModel):
+    title: str
+    content: str
+    link: Optional[str]
+
+class AdminPostItem(BaseModel):
+    id: int
+    title: str
+    content: str
+    link: Optional[str]
+    created_at: datetime
+
+class ListAdminPostsResponse(BaseModel):
+    posts: List[AdminPostItem]
