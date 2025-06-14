@@ -177,6 +177,20 @@ login_records = Table(
   Column("last_login_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
+# (14) Jednopolowa tabela z terminu wymuszonego wylogowania
+forced_logout = Table(
+    "forced_logout",
+    metadata,
+    # pojedynczy wiersz o id=1
+    Column("id", Integer, primary_key=True, default=1),
+    Column(
+        "logout_at",
+        DateTime(timezone=True),
+        nullable=False,
+        comment="Globalny termin wymuszonego wylogowania"
+    ),
+)
+
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

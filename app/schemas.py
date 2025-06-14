@@ -205,3 +205,9 @@ class LoginRecordItem(BaseModel):
 # 3) Lista rekordów
 class ListLoginRecordsResponse(BaseModel):
     records: list[LoginRecordItem]
+
+class SetForcedLogoutRequest(BaseModel):
+    logout_at: datetime  # ISO‑8601
+
+class ForcedLogoutResponse(BaseModel):
+    logout_at: Optional[datetime]  # może być None, jeśli jeszcze nie ustawiono

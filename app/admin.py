@@ -2,10 +2,10 @@ from datetime import datetime
 import os
 from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateUserReportRequest, GenerateHashRequest, GenerateHashResponse, ListAdminPostsResponse, ListUserReportsResponse, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, ListAdminPostsResponse, ListUserReportsResponse, SetForcedLogoutRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # Wczytujemy hash z env
@@ -192,3 +192,29 @@ async def post_admin_entry(req: CreateAdminPostRequest):
 async def list_admin_posts():
     rows = await database.fetch_all(select(admin_posts).order_by(admin_posts.c.created_at.desc()))
     return ListAdminPostsResponse(posts=[AdminPostItem(**dict(r)) for r in rows])
+
+## UŻYTKOWNICY
+@router.get("/forced_logout", response_model=ForcedLogoutResponse, summary="Pobierz termin wymuszonego wylogowania")
+async def get_forced_logout():
+    row = await database.fetch_one(select(forced_logout).limit(1))
+    return ForcedLogoutResponse(logout_at=(row["logout_at"] if row else None))
+
+@router.put("/forced_logout", response_model=dict, summary="Ustaw lub zaktualizuj termin wymuszonego wylogowania")
+async def upsert_forced_logout(req: SetForcedLogoutRequest):
+    stmt = pg_insert(forced_logout).values(
+        id=1,
+        logout_at=req.logout_at
+    ).on_conflict_do_update(
+        index_elements=[forced_logout.c.id],
+        set_={"logout_at": req.logout_at}
+    )
+    await database.execute(stmt)
+    return {"success": True}
+
+@router.delete("/forced_logout", response_model=dict, summary="Usuń termin wymuszonego wylogowania")
+async def delete_forced_logout():
+    # usunięcie wiersza → później GET zwróci logout_at=None
+    result = await database.execute(delete(forced_logout).where(forced_logout.c.id == 1))
+    if not result:
+        raise HTTPException(status_code=404, detail="Brak ustawionego terminu")
+    return {"success": True}
