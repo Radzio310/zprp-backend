@@ -28,6 +28,15 @@ async def list_logins():
     rows = await database.fetch_all(select(login_records))
     return ListLoginRecordsResponse(records=[LoginRecordItem(**dict(r)) for r in rows])
 
+@router.get("/{judge_id}", response_model=LoginRecordItem)
+async def get_login_record(judge_id: str):
+    row = await database.fetch_one(
+        select(login_records).where(login_records.c.judge_id == judge_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono rekordu")
+    return LoginRecordItem(**dict(row))
+
 @router.delete("/{judge_id}", response_model=dict, summary="Usuń rekord logowania")
 async def delete_login(judge_id: str):
     result = await database.execute(login_records.delete().where(login_records.c.judge_id == judge_id))
