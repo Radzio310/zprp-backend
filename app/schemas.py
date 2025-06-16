@@ -211,3 +211,14 @@ class SetForcedLogoutRequest(BaseModel):
 
 class ForcedLogoutResponse(BaseModel):
     logout_at: Optional[datetime]  # może być None, jeśli jeszcze nie ustawiono
+
+# MODUŁ ŚLĄSKI
+class ListMastersResponse(BaseModel):
+    news: List[str]
+    calendar: List[str]
+    match: List[str]
+
+class UpdateMastersRequest(BaseModel):
+    news: List[str]
+    calendar: List[str]
+    match: List[str]

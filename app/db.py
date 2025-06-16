@@ -191,6 +191,24 @@ forced_logout = Table(
     ),
 )
 
+# 15) News Master – ogłoszenia
+news_masters = Table(
+    "news_masters", metadata,
+    Column("judge_id", String, primary_key=True),
+)
+
+# 16) Calendar Master – niedyspozycje
+calendar_masters = Table(
+    "calendar_masters", metadata,
+    Column("judge_id", String, primary_key=True),
+)
+
+# 17) Match Master – mecze/targ
+match_masters = Table(
+    "match_masters", metadata,
+    Column("judge_id", String, primary_key=True),
+)
+
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

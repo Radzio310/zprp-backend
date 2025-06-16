@@ -4,8 +4,8 @@ from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, ListAdminPostsResponse, ListUserReportsResponse, SetForcedLogoutRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, ListAdminPostsResponse, ListMastersResponse, ListUserReportsResponse, SetForcedLogoutRequest, UpdateMastersRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # Wczytujemy hash z env
@@ -217,4 +217,55 @@ async def delete_forced_logout():
     result = await database.execute(delete(forced_logout).where(forced_logout.c.id == 1))
     if not result:
         raise HTTPException(status_code=404, detail="Brak ustawionego terminu")
+    return {"success": True}
+
+# MODUŁ ŚLĄSKI
+@router.get(
+    "/slask/masters",
+    response_model=ListMastersResponse,
+    summary="Pobierz listy News/Calendar/Match Master"
+)
+async def get_slask_masters():
+    news = [r["judge_id"] for r in await database.fetch_all(select(news_masters))]
+    calendar = [r["judge_id"] for r in await database.fetch_all(select(calendar_masters))]
+    match = [r["judge_id"] for r in await database.fetch_all(select(match_masters))]
+    return ListMastersResponse(news=news, calendar=calendar, match=match)
+
+@router.put(
+    "/slask/masters",
+    response_model=dict,
+    summary="Zapisz wszystkie trzy listy naraz"
+)
+async def upsert_slask_masters(req: UpdateMastersRequest):
+    # Wyczyść i zapisz każdą tabelę
+    for table, arr in [
+        (news_masters, req.news),
+        (calendar_masters, req.calendar),
+        (match_masters, req.match),
+    ]:
+        # usuń stare
+        await database.execute(table.delete())
+        # wstaw nowe
+        for jid in arr:
+            await database.execute(
+                pg_insert(table).values(judge_id=jid)
+                .on_conflict_do_nothing()
+            )
+    return {"success": True}
+
+# (opcjonalnie) pojedyncze add/remove:
+@router.post("/slask/masters/{kind}/{judge_id}", summary="Dodaj do jednej listy")
+async def add_master(kind: str, judge_id: str):
+    table = {"news": news_masters, "calendar": calendar_masters, "match": match_masters}[kind]
+    await database.execute(
+        pg_insert(table).values(judge_id=judge_id).on_conflict_do_nothing()
+    )
+    return {"success": True}
+
+@router.delete("/slask/masters/{kind}/{judge_id}", summary="Usuń z jednej listy")
+async def remove_master(kind: str, judge_id: str):
+    table = {"news": news_masters, "calendar": calendar_masters, "match": match_masters}[kind]
+    result = await database.execute(table.delete().where(table.c.judge_id == judge_id))
+    if not result:
+        raise HTTPException(404, "Nie znaleziono")
     return {"success": True}
