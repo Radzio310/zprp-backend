@@ -82,7 +82,7 @@ async def get_admins():
 
 @router.put("/admins", response_model=Dict[str,bool])
 async def update_admins(req: UpdateAdminsRequest):
-    # 1) zachowujemy ustawienia
+    # 1) Zapisz listę w admin_settings
     stmt = pg_insert(admin_settings).values(
         id=1, allowed_admins=req.allowed_admins
     ).on_conflict_do_update(
@@ -91,24 +91,25 @@ async def update_admins(req: UpdateAdminsRequest):
     )
     await database.execute(stmt)
 
-    # 2) reset PIN‑ów dla nowych / przywróconych adminów na "0000"
-    default_hash = bcrypt.hashpw("0000".encode(), bcrypt.gensalt()).decode()
-    for j in req.allowed_admins:
-        upsert = pg_insert(admin_pins).values(
-            judge_id=j, pin_hash=default_hash
-        ).on_conflict_do_update(
-            index_elements=[admin_pins.c.judge_id],
-            set_={"pin_hash": default_hash}
-        )
-        await database.execute(upsert)
+    # 2) Pobierz obecną listę z bazy
+    row = await database.fetch_one(select(admin_settings).limit(1))
+    old_list = set(row["allowed_admins"] or [])
 
-    # 3) (opcjonalnie) usuń wiersze PIN-ów dla judge_id, które już nie są w allow list:
-    delete_stmt = admin_pins.delete().where(
-        admin_pins.c.judge_id.notin_(req.allowed_admins)
-    )
-    await database.execute(delete_stmt)
+    # 3) Znajdź nowych i tylko dla nich upsert PIN=0000
+    new_admins = set(req.allowed_admins) - old_list
+    default_hash = bcrypt.hashpw("0000".encode(), bcrypt.gensalt()).decode()
+    for j in new_admins:
+        await database.execute(
+            pg_insert(admin_pins)
+            .values(judge_id=j, pin_hash=default_hash)
+            .on_conflict_do_nothing()  # tylko wstaw, nie nadpisuj
+        )
+
+    # 4) (opcjonalnie) usuń PINy dla tych, których wykreślono – też możesz
+    #    wyciągnąć removed = old_list - set(req.allowed_admins) i usunąć tylko te.
 
     return {"success": True}
+
 
 ## BUDUJMY RAZEM BAZĘ
 @router.post("/reports", response_model=dict, summary="Wyślij zgłoszenie")
