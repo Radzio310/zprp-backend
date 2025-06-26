@@ -331,19 +331,13 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
     if req.key != key:
         raise HTTPException(400, "Key mismatch")
 
-    # serializujemy obiekt do tekstu JSON
-    try:
-        content_text = json.dumps(req.content)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON content: {e}")
-
     stmt = pg_insert(json_files).values(
     key=key,
     content=req.content,
     enabled=req.enabled
 ).on_conflict_do_update(
-    index_elements=[json_files.c.key],
-    set_={"content": content_text, "enabled": req.enabled}
+  index_elements=[json_files.c.key],
+  set_={"content": req.content, "enabled": req.enabled}
 )
     try:
         await database.execute(stmt)
