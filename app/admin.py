@@ -2,10 +2,10 @@ from datetime import datetime
 import os
 from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, ListAdminPostsResponse, ListMastersResponse, ListUserReportsResponse, SetForcedLogoutRequest, UpdateMastersRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, JsonFileItem, ListAdminPostsResponse, ListJsonFilesResponse, ListMastersResponse, ListUserReportsResponse, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # Wczytujemy hash z env
@@ -270,3 +270,43 @@ async def remove_master(kind: str, judge_id: str):
     if not result:
         raise HTTPException(404, "Nie znaleziono")
     return {"success": True}
+
+# Pliki źródłowe
+@router.get(
+    "/json_files",
+    response_model=ListJsonFilesResponse,
+    summary="Lista wszystkich plików JSON"
+)
+async def list_json_files():
+    rows = await database.fetch_all(select(json_files))
+    files = [JsonFileItem(**dict(r)) for r in rows]
+    return ListJsonFilesResponse(files=files)
+
+@router.get(
+    "/json_files/{key}",
+    response_model=GetJsonFileResponse,
+    summary="Pobierz konkretny plik JSON"
+)
+async def get_json_file(key: str):
+    row = await database.fetch_one(select(json_files).where(json_files.c.key==key))
+    if not row:
+        raise HTTPException(404, "Nie znaleziono pliku")
+    return GetJsonFileResponse(file=JsonFileItem(**dict(row)))
+
+@router.put(
+    "/json_files/{key}",
+    response_model=GetJsonFileResponse,
+    summary="Utwórz lub nadpisz plik JSON"
+)
+async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
+    if req.key != key:
+        raise HTTPException(400, "Key mismatch")
+    stmt = insert(json_files).values(
+      key=key, content=req.content, enabled=req.enabled
+    ).on_conflict_do_update(
+      index_elements=[json_files.c.key],
+      set_={"content": req.content, "enabled": req.enabled}
+    )
+    await database.execute(stmt)
+    row = await database.fetch_one(select(json_files).where(json_files.c.key==key))
+    return GetJsonFileResponse(file=JsonFileItem(**dict(row)))

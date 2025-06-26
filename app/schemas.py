@@ -222,3 +222,21 @@ class UpdateMastersRequest(BaseModel):
     news: List[str]
     calendar: List[str]
     match: List[str]
+
+# Pliki źródłowe
+class JsonFileItem(BaseModel):
+    key: str
+    content: str
+    enabled: bool
+    updated_at: datetime
+
+class GetJsonFileResponse(BaseModel):
+    file: JsonFileItem
+
+class ListJsonFilesResponse(BaseModel):
+    files: List[JsonFileItem]
+
+class UpsertJsonFileRequest(BaseModel):
+    key: str
+    content: str
+    enabled: bool

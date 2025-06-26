@@ -209,6 +209,17 @@ match_masters = Table(
     Column("judge_id", String, primary_key=True),
 )
 
+# 18) Pliki źródłowe
+json_files = Table(
+  "json_files", metadata,
+  Column("key", String, primary_key=True),
+  Column("content", Text, nullable=False),             
+  Column("enabled", Boolean, nullable=False, default=False),
+  Column("updated_at", DateTime(timezone=True),
+         server_default=func.now(), onupdate=func.now()),
+)
+
+
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
