@@ -332,27 +332,33 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
         raise HTTPException(400, "Key mismatch")
 
     stmt = pg_insert(json_files).values(
-    key=key,
-    content=req.content,
-    enabled=req.enabled
-).on_conflict_do_update(
-  index_elements=[json_files.c.key],
-  set_={"content": req.content, "enabled": req.enabled}
-)
+        key=key,
+        content=req.content,
+        enabled=req.enabled
+    ).on_conflict_do_update(
+        index_elements=[json_files.c.key],
+        set_={"content": req.content, "enabled": req.enabled}
+    )
     try:
         await database.execute(stmt)
     except Exception as e:
-        # odsyłamy pełny błąd SQL do frontendową obsługę
-        raise HTTPException(status_code=500, detail=f"SQL ERROR upsert_json_file: {repr(e)}")
+        raise HTTPException(500, detail=f"SQL ERROR upsert_json_file: {e!r}")
 
-    row = await database.fetch_one(select(json_files).where(json_files.c.key==key))
-    # po fetchu parsujemy content na JS-ON
-    parsed = json.loads(row["content"])
+    # Pobierz bezpośrednio po zapisaniu
+    row = await database.fetch_one(select(json_files).where(json_files.c.key == key))
+    raw = row["content"]
+    # RAW może być dict albo string (w zależności od dialektu)
+    if isinstance(raw, (dict, list)):
+        parsed = raw
+    else:
+        parsed = json.loads(raw)
+
     return GetJsonFileResponse(
         file=JsonFileItem(
             key=row["key"],
-            content=parsed,
+            content=parsed,     # tu już dict/list albo str
             enabled=row["enabled"],
             updated_at=row["updated_at"],
         )
     )
+
