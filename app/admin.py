@@ -281,14 +281,12 @@ async def list_json_files():
     rows = await database.fetch_all(select(json_files))
     files = []
     for r in rows:
-        files.append(
-            JsonFileItem(
-               key=r["key"],
-                content=json.loads(r["content"]),
-                enabled=r["enabled"],
-                updated_at=r["updated_at"],
-            )
-        )
+        files.append(JsonFileItem(
+        key=r["key"],
+        content=r["content"],
+        enabled=r["enabled"],
+        updated_at=r["updated_at"],
+        ))
     return ListJsonFilesResponse(files=files)
 
 @router.get(
@@ -341,7 +339,7 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
 
     stmt = pg_insert(json_files).values(
     key=key,
-    content=content_text,
+    content=req.content,
     enabled=req.enabled
 ).on_conflict_do_update(
     index_elements=[json_files.c.key],
