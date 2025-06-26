@@ -301,7 +301,20 @@ async def get_json_file(key: str):
     if not row:
         raise HTTPException(404, "Nie znaleziono pliku")
     # parsujemy string z bazy z powrotem na dowolny obiekt
-    parsed = json.loads(row["content"])
+    raw = row["content"]
+    if isinstance(raw, (dict, list)):
+        # już zdeserializowany JSON
+        parsed = raw
+    else:
+        # jeszcze string → zrób JSON-parse
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+            status_code=500,
+            detail=f"Niepoprawny JSON w bazie: {e}"
+            )
+
     return GetJsonFileResponse(
         file=JsonFileItem(
             key=row["key"],
