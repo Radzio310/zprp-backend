@@ -308,14 +308,14 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON content: {e}")
 
-    stmt = insert(json_files).values(
-        key=key,
-        content=content_text,
-        enabled=req.enabled
-    ).on_conflict_do_update(
-        index_elements=[json_files.c.key],
-        set_={"content": content_text, "enabled": req.enabled}
-    )
+    stmt = pg_insert(json_files).values(
+    key=key,
+    content=content_text,
+    enabled=req.enabled
+).on_conflict_do_update(
+    index_elements=[json_files.c.key],
+    set_={"content": content_text, "enabled": req.enabled}
+)
     try:
         await database.execute(stmt)
     except Exception as e:
