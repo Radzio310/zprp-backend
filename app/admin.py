@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 import os
 from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
@@ -301,20 +302,25 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
     if req.key != key:
         raise HTTPException(400, "Key mismatch")
 
+    # serializujemy obiekt do tekstu JSON
+    try:
+        content_text = json.dumps(req.content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON content: {e}")
+
     stmt = insert(json_files).values(
-      key=key,
-      content=req.content,
-      enabled=req.enabled
+        key=key,
+        content=content_text,
+        enabled=req.enabled
     ).on_conflict_do_update(
-      index_elements=[json_files.c.key],
-      set_={"content": req.content, "enabled": req.enabled}
+        index_elements=[json_files.c.key],
+        set_={"content": content_text, "enabled": req.enabled}
     )
     try:
         await database.execute(stmt)
     except Exception as e:
-        # <-- to Ci wypluje dokładny błąd SQL / PSQL
-        print("🔴 🔴 SQL ERROR upsert_json_file:", repr(e))
-        raise HTTPException(500, detail="Błąd zapisu JSON w bazie: " + str(e))
+        # odsyłamy pełny błąd SQL do frontendową obsługę
+        raise HTTPException(status_code=500, detail=f"SQL ERROR upsert_json_file: {repr(e)}")
 
     row = await database.fetch_one(select(json_files).where(json_files.c.key==key))
     return GetJsonFileResponse(file=JsonFileItem(**dict(row)))
