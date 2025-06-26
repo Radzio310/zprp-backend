@@ -301,12 +301,21 @@ async def get_json_file(key: str):
 async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
     if req.key != key:
         raise HTTPException(400, "Key mismatch")
+
     stmt = insert(json_files).values(
-      key=key, content=req.content, enabled=req.enabled
+      key=key,
+      content=req.content,
+      enabled=req.enabled
     ).on_conflict_do_update(
       index_elements=[json_files.c.key],
       set_={"content": req.content, "enabled": req.enabled}
     )
-    await database.execute(stmt)
+    try:
+        await database.execute(stmt)
+    except Exception as e:
+        # <-- to Ci wypluje dokładny błąd SQL / PSQL
+        print("🔴 🔴 SQL ERROR upsert_json_file:", repr(e))
+        raise HTTPException(500, detail="Błąd zapisu JSON w bazie: " + str(e))
+
     row = await database.fetch_one(select(json_files).where(json_files.c.key==key))
     return GetJsonFileResponse(file=JsonFileItem(**dict(row)))
