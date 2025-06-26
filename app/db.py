@@ -2,6 +2,7 @@
 import os
 from sqlalchemy import (
     ARRAY,
+    JSON,
     Boolean,
     Column,
     DateTime,
@@ -213,7 +214,7 @@ match_masters = Table(
 json_files = Table(
   "json_files", metadata,
   Column("key", String, primary_key=True),
-  Column("content", Text, nullable=False),             
+  Column("content", JSON, nullable=False),            
   Column("enabled", Boolean, nullable=False, default=False),
   Column("updated_at", DateTime(timezone=True),
          server_default=func.now(), onupdate=func.now()),

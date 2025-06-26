@@ -279,7 +279,16 @@ async def remove_master(kind: str, judge_id: str):
 )
 async def list_json_files():
     rows = await database.fetch_all(select(json_files))
-    files = [JsonFileItem(**dict(r)) for r in rows]
+    files = []
+    for r in rows:
+        files.append(
+            JsonFileItem(
+               key=r["key"],
+                content=json.loads(r["content"]),
+                enabled=r["enabled"],
+                updated_at=r["updated_at"],
+            )
+        )
     return ListJsonFilesResponse(files=files)
 
 @router.get(
@@ -291,7 +300,16 @@ async def get_json_file(key: str):
     row = await database.fetch_one(select(json_files).where(json_files.c.key==key))
     if not row:
         raise HTTPException(404, "Nie znaleziono pliku")
-    return GetJsonFileResponse(file=JsonFileItem(**dict(row)))
+    # parsujemy string z bazy z powrotem na dowolny obiekt
+    parsed = json.loads(row["content"])
+    return GetJsonFileResponse(
+        file=JsonFileItem(
+            key=row["key"],
+            content=parsed,
+            enabled=row["enabled"],
+            updated_at=row["updated_at"],
+        )
+    )
 
 @router.put(
     "/json_files/{key}",
@@ -323,4 +341,13 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
         raise HTTPException(status_code=500, detail=f"SQL ERROR upsert_json_file: {repr(e)}")
 
     row = await database.fetch_one(select(json_files).where(json_files.c.key==key))
-    return GetJsonFileResponse(file=JsonFileItem(**dict(row)))
+    # po fetchu parsujemy content na JS-ON
+    parsed = json.loads(row["content"])
+    return GetJsonFileResponse(
+        file=JsonFileItem(
+            key=row["key"],
+            content=parsed,
+            enabled=row["enabled"],
+            updated_at=row["updated_at"],
+        )
+    )
