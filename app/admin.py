@@ -127,9 +127,8 @@ async def post_report(req: CreateUserReportRequest):
     try:
         await database.execute(stmt)
     except Exception as e:
-        # wybadaj, co dokładnie zwraca baza
-        print("🔴 SQL ERROR in post_report:", e)
-        raise HTTPException(status_code=500, detail=str(e))
+            # Zwróć pełny opis błędu SQL do klienta
+            raise HTTPException(500, detail=f"SQL ERROR upsert_json_file: {repr(e)}")
     return {"success": True}
 
 

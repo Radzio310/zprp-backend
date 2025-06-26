@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, Literal, List
+from typing import Any, Optional, Literal, List
 from pydantic import BaseModel, Field
 
 class EditJudgeRequest(BaseModel):
@@ -238,5 +238,5 @@ class ListJsonFilesResponse(BaseModel):
 
 class UpsertJsonFileRequest(BaseModel):
     key: str
-    content: str
+    content: Any
     enabled: bool
