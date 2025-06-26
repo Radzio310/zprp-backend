@@ -226,7 +226,7 @@ class UpdateMastersRequest(BaseModel):
 # Pliki źródłowe
 class JsonFileItem(BaseModel):
     key: str
-    content: str
+    content: Any
     enabled: bool
     updated_at: datetime
 
