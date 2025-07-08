@@ -231,7 +231,9 @@ hall_reports = Table(
     Column("Hala_ulica", String, nullable=False),
     Column("Hala_numer", String, nullable=False),
     Column("Druzyny", ARRAY(String), nullable=False),
-    Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    # jeżeli chcesz śledzić, które zgłoszenia już przerobiłeś:
+    Column("is_processed", Boolean, nullable=False, server_default=text("false")),
 )
 
 # Tworzymy tabele przy starcie

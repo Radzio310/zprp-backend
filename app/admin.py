@@ -369,12 +369,14 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
 )
 async def post_hall_report(req: CreateHallReportRequest):
     stmt = hall_reports.insert().values(
-        nazwa=req.Hala_nazwa,
-        miasto=req.Hala_miasto,
-        ulica=req.Hala_ulica,
-        numer=req.Hala_numer,
-        druzyny=req.Druzyny,
-        created_at=datetime.utcnow()
+        Hala_nazwa=req.Hala_nazwa,
+       Hala_miasto=req.Hala_miasto,
+       Hala_ulica=req.Hala_ulica,
+       Hala_numer=req.Hala_numer,
+       Druzyny=req.Druzyny,
+       # to już wstawia func.now() na serwerze, ale dla pewności:
+       created_at=datetime.utcnow(),
+       is_processed=False,
     )
     await database.execute(stmt)
     return {"success": True}
