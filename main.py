@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -39,6 +40,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         content={"error": exc.detail},
     )
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # rejestracja Twoich routerów
 app.include_router(auth_router)

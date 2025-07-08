@@ -1,7 +1,11 @@
 # app/silesia.py
 from datetime import datetime
 from json import JSONDecodeError, loads
-from fastapi import APIRouter, HTTPException, Depends, status
+import os
+import shutil
+from typing import Optional
+import uuid
+from fastapi import APIRouter, File, Form, HTTPException, Depends, UploadFile, status
 from sqlalchemy import select, insert, update, delete, func
 from app.db import database, announcements, silesia_offtimes, matches_to_offer, matches_to_approve, matches_events
 from app.schemas import (
@@ -94,35 +98,51 @@ async def list_announcements(
     "/create",
     status_code=status.HTTP_201_CREATED,
     response_model=AnnouncementResponse,
-    summary="Dodaj nowe ogłoszenie"
+    summary="Dodaj nowe ogłoszenie",
+    response_model_exclude_none=True,
 )
 async def create_announcement(
-    req: CreateAnnouncementRequest,
+    # pozostałe pola jako formy + plik
+    username: str = Form(...),
+    password: str = Form(...),
+    judge_id: str = Form(...),
+    full_name: str = Form(...),
+    title: str = Form(...),
+    content: str = Form(...),
+    priority: int = Form(...),
+    link: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
     keys=Depends(get_rsa_keys),
 ):
-    """
-    Body:
-    - title, content, image_url (opcjonalnie), priority
-    - wszystkie pola zaszyfrowane Base64-RSA
-    Zwraca utworzone ogłoszenie wraz z `id` i `updated_at`.
-    """
     private_key, _ = keys
-    judge_plain = _decrypt_field(req.judge_id, private_key)
-    full_name_plain = _decrypt_field(req.full_name, private_key)
-    title = _decrypt_field(req.title, private_key)
-    content = req.content
-    image_url = req.image_url if req.image_url else None
+    judge_plain     = _decrypt_field(judge_id, private_key)
+    full_name_plain = _decrypt_field(full_name, private_key)
+    title_plain     = _decrypt_field(title, private_key)
+    content_plain   = content  # zakładamy, że content jest już plaintext
+    link_plain      = link
+
+    # obsługa uploadu
+    image_url = None
+    if image:
+        # dajemy plikowi unikalną nazwę
+        ext = image.filename.split(".")[-1]
+        filename = f"{uuid.uuid4()}.{ext}"
+        dest = f"static/{filename}"
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(image.file, out)
+        # adres pod którym plik jest potem serwowany
+        image_url = f"/static/{filename}"
 
     stmt = (
         insert(announcements)
         .values(
             judge_id=judge_plain,
             judge_name=full_name_plain,
-            title=title,
-            content=content,
+            title=title_plain,
+            content=content_plain,
             image_url=image_url,
-            priority=req.priority,
-            link=req.link,
+            priority=priority,
+            link=link_plain,
         )
         .returning(announcements)
     )
@@ -138,50 +158,80 @@ async def create_announcement(
         updated_at=record["updated_at"],
     )
 
+
 @router_ann.put(
     "/{ann_id}",
     response_model=AnnouncementResponse,
-    summary="Edytuj ogłoszenie"
+    summary="Edytuj ogłoszenie",
+    response_model_exclude_none=True,
 )
 async def update_announcement(
     ann_id: int,
-    req: CreateAnnouncementRequest,      # używamy tego samego request co przy create
+    username: str = Form(...),
+    password: str = Form(...),
+    judge_id: str = Form(...),
+    full_name: str = Form(...),
+    title: Optional[str] = Form(None),
+    content: Optional[str] = Form(None),
+    priority: Optional[int] = Form(None),
+    link: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
     keys=Depends(get_rsa_keys),
 ):
-    """
-    Parametr URL: id ogłoszenia
-    Body: 
-      - username, password, judge_id, title, content, priority
-      - image_url (opcjonalnie)
-      wszystkie pola zaszyfrowane Base64-RSA
-    Zwraca zaktualizowane ogłoszenie wraz z `id` i `updated_at`.
-    """
     private_key, _ = keys
 
-    # odszyfrowujemy wszystkie pola
-    username_plain = _decrypt_field(req.username, private_key)
-    password_plain = _decrypt_field(req.password, private_key)
-    judge_plain    = _decrypt_field(req.judge_id, private_key)
-    full_name_plain = _decrypt_field(req.full_name, private_key)
-    title_plain    = _decrypt_field(req.title, private_key)
-    content_plain  = req.content
-    priority_plain = req.priority  # to jest liczba lub string, nie szyfrujemy tutaj po stronie serwera
-    image_url      = req.image_url if req.image_url else None
-    
+    judge_plain     = _decrypt_field(judge_id, private_key)
+    full_name_plain = _decrypt_field(full_name, private_key)
+    title_plain     = _decrypt_field(title, private_key) if title else None
+    content_plain   = content
+    link_plain      = link
 
-    # teraz wykonujemy update
+    # obsługa uploadu – nadpisanie, jeśli jest nowy plik
+    image_url = None
+    if image:
+        # 0) Pobierz starą ścieżkę, jeśli istnieje
+        old = await database.fetch_one(
+            select(announcements.c.image_url)
+            .where(announcements.c.id == ann_id)
+        )
+        old_url = old["image_url"] if old else None
+        if old_url:
+            old_path = old_url.lstrip("/")
+            if os.path.isfile(old_path):
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    pass
+
+        # 1) Zapis nowego pliku
+        ext = image.filename.split(".")[-1]
+        filename = f"{uuid.uuid4()}.{ext}"
+        dest = f"static/{filename}"
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(image.file, out)
+        image_url = f"/static/{filename}"
+
+
+    # przygotuj słownik wartości do update
+    update_values = {
+        "judge_id": judge_plain,
+        "judge_name": full_name_plain,
+    }
+    if title_plain is not None:
+        update_values["title"] = title_plain
+    if content_plain is not None:
+        update_values["content"] = content_plain
+    if priority is not None:
+        update_values["priority"] = priority
+    if link_plain is not None:
+        update_values["link"] = link_plain
+    if image_url is not None:
+        update_values["image_url"] = image_url
+
     stmt = (
         update(announcements)
         .where(announcements.c.id == ann_id)
-        .values(
-            judge_id=judge_plain,
-            judge_name=full_name_plain,
-            title=title_plain,
-            content=content_plain,
-            priority=priority_plain,
-            image_url=image_url,
-            link=req.link,
-        )
+        .values(**update_values)
         .returning(announcements)
     )
     record = await database.fetch_one(stmt)
@@ -208,16 +258,32 @@ async def update_announcement(
 async def delete_announcement(
     ann_id: int,
 ):
-    """
-    Parametr URL: id ogłoszenia
-    Body: tylko AuthPayload (username, password, judge_id)
-    Usuwa ogłoszenie
-    """
+    # 1) Pobierz istniejący rekord i ścieżkę do pliku
+    row = await database.fetch_one(
+        select(announcements.c.image_url)
+        .where(announcements.c.id == ann_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    image_url = row["image_url"]
+    # 2) Jeżeli jest plik, usuń go fizycznie
+    if image_url:
+        # usuń wiodący slash i buduj ścieżkę na dysku
+        path = image_url.lstrip("/")
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                # Możesz zalogować wyjątek, ale nie przerywaj całej operacji
+                pass
+
+    # 3) Usuń rekord z bazy
     await database.execute(
         delete(announcements).where(announcements.c.id == ann_id)
     )
-    # brak treści w odpowiedzi → 204 No Content
     return
+
 
 @router_off.post(
     "/set",
