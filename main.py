@@ -1,5 +1,6 @@
 # main.py
 
+import os
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -41,6 +42,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         content={"error": exc.detail},
     )
 
+# ensure the static/ folder exists before mounting
+os.makedirs(os.path.join(os.path.dirname(__file__), "static"), exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # rejestracja Twoich routerów
