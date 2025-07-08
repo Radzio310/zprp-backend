@@ -1,10 +1,7 @@
 # app/silesia.py
 from datetime import datetime
 from json import JSONDecodeError, loads
-import os
-from typing import Optional
-from uuid import uuid4
-from fastapi import APIRouter, File, HTTPException, Depends, UploadFile, status
+from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy import select, insert, update, delete, func
 from app.db import database, announcements, silesia_offtimes, matches_to_offer, matches_to_approve, matches_events
 from app.schemas import (
@@ -93,52 +90,53 @@ async def list_announcements(
     ]
     return ListAnnouncementsResponse(announcements=result)
 
-from fastapi import Form, File, UploadFile, Depends
-from app.deps import get_rsa_keys
-
-@router_ann.post("/create", status_code=201, response_model=AnnouncementResponse)
+@router_ann.post(
+    "/create",
+    status_code=status.HTTP_201_CREATED,
+    response_model=AnnouncementResponse,
+    summary="Dodaj nowe ogłoszenie"
+)
 async def create_announcement(
-    # odszyfrowane Base64-RSA pola jako zwykłe stringi
-    enc_title: str = Form(...),
-    enc_content: str = Form(...),
-    enc_priority: str = Form(...),
-    enc_link: str = Form(...),
-    image: Optional[UploadFile] = File(None),
+    req: CreateAnnouncementRequest,
     keys=Depends(get_rsa_keys),
 ):
+    """
+    Body:
+    - title, content, image_url (opcjonalnie), priority
+    - wszystkie pola zaszyfrowane Base64-RSA
+    Zwraca utworzone ogłoszenie wraz z `id` i `updated_at`.
+    """
     private_key, _ = keys
-    title = _decrypt_field(enc_title, private_key)
-    content = _decrypt_field(enc_content, private_key)
-    priority = int(_decrypt_field(enc_priority, private_key))
-    link = _decrypt_field(enc_link, private_key)
+    judge_plain = _decrypt_field(req.judge_id, private_key)
+    full_name_plain = _decrypt_field(req.full_name, private_key)
+    title = _decrypt_field(req.title, private_key)
+    content = req.content
+    image_url = req.image_url if req.image_url else None
 
-    # upload pliku
-    public_url = None
-    if image:
-        filename = f"{uuid4().hex}_{image.filename}"
-        save_dir = "/var/www/cdn/announcements"
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, filename)
-        with open(save_path, "wb") as f:
-            f.write(await image.read())
-        public_url = f"https://zprp-backend-production.up.railway.app/announcements/{filename}"
-
-    # zapis do bazy
     stmt = (
         insert(announcements)
         .values(
+            judge_id=judge_plain,
+            judge_name=full_name_plain,
             title=title,
             content=content,
-            image_url=public_url,
-            priority=priority,
-            link=link,
-            # ...
+            image_url=image_url,
+            priority=req.priority,
+            link=req.link,
         )
         .returning(announcements)
     )
     record = await database.fetch_one(stmt)
-    return AnnouncementResponse(**record)
-
+    return AnnouncementResponse(
+        id=record["id"],
+        judge_name=record["judge_name"],
+        title=record["title"],
+        content=record["content"],
+        image_url=record["image_url"],
+        priority=record["priority"],
+        link=record["link"],
+        updated_at=record["updated_at"],
+    )
 
 @router_ann.put(
     "/{ann_id}",
