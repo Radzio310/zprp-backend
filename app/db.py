@@ -1,4 +1,5 @@
 # app/db.py
+from datetime import datetime
 import os
 from sqlalchemy import (
     ARRAY,
@@ -220,6 +221,18 @@ json_files = Table(
          server_default=func.now(), onupdate=func.now()),
 )
 
+# 19) Hale
+hall_reports = Table(
+    "hall_reports",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("Hala_nazwa", String, nullable=False),
+    Column("Hala_miasto", String, nullable=False),
+    Column("Hala_ulica", String, nullable=False),
+    Column("Hala_numer", String, nullable=False),
+    Column("Druzyny", ARRAY(String), nullable=False),
+    Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
+)
 
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)

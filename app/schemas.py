@@ -240,3 +240,23 @@ class UpsertJsonFileRequest(BaseModel):
     key: str
     content: Any
     enabled: bool
+
+# ---------------------------- HALE ----------------------------
+class CreateHallReportRequest(BaseModel):
+    Hala_nazwa: str
+    Hala_miasto: str
+    Hala_ulica: str
+    Hala_numer: str
+    Druzyny: List[str]
+
+class HallReportItem(BaseModel):
+    id: int
+    Hala_nazwa: str
+    Hala_miasto: str
+    Hala_ulica: str
+    Hala_numer: str
+    Druzyny: List[str]
+    created_at: datetime
+
+class ListHallReportsResponse(BaseModel):
+    reports: List[HallReportItem]

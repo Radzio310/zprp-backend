@@ -5,8 +5,8 @@ from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, JsonFileItem, ListAdminPostsResponse, ListJsonFilesResponse, ListMastersResponse, ListUserReportsResponse, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, hall_reports
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListUserReportsResponse, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # Wczytujemy hash z env
@@ -362,3 +362,45 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
         )
     )
 
+@router.post(
+    "/halls/reports",
+    response_model=dict,
+    summary="Zgłoś nową halę"
+)
+async def post_hall_report(req: CreateHallReportRequest):
+    stmt = hall_reports.insert().values(
+        nazwa=req.Hala_nazwa,
+        miasto=req.Hala_miasto,
+        ulica=req.Hala_ulica,
+        numer=req.Hala_numer,
+        druzyny=req.Druzyny,
+        created_at=datetime.utcnow()
+    )
+    await database.execute(stmt)
+    return {"success": True}
+
+@router.get(
+    "/halls/reports",
+    response_model=ListHallReportsResponse,
+    summary="Pobierz listę zgłoszonych hal"
+)
+async def list_hall_reports():
+    rows = await database.fetch_all(
+        select(hall_reports).order_by(hall_reports.c.created_at.desc())
+    )
+    return ListHallReportsResponse(
+        reports=[HallReportItem(**dict(r)) for r in rows]
+    )
+
+@router.delete(
+    "/halls/reports/{report_id}",
+    response_model=dict,
+    summary="Usuń zgłoszenie hali"
+)
+async def delete_hall_report(report_id: int):
+    result = await database.execute(
+        hall_reports.delete().where(hall_reports.c.id == report_id)
+    )
+    if not result:
+        raise HTTPException(404, "Zgłoszenie nie znalezione")
+    return {"success": True}
