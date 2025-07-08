@@ -362,23 +362,26 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
         )
     )
 
-@router.post(
-    "/halls/reports",
-    response_model=dict,
-    summary="Zgłoś nową halę"
-)
+@router.post("/halls/reports", response_model=dict, summary="Zgłoś nową halę")
 async def post_hall_report(req: CreateHallReportRequest):
     stmt = hall_reports.insert().values(
         Hala_nazwa=req.Hala_nazwa,
-       Hala_miasto=req.Hala_miasto,
-       Hala_ulica=req.Hala_ulica,
-       Hala_numer=req.Hala_numer,
-       Druzyny=req.Druzyny,
-       # to już wstawia func.now() na serwerze, ale dla pewności:
-       created_at=datetime.utcnow(),
-       is_processed=False,
+        Hala_miasto=req.Hala_miasto,
+        Hala_ulica=req.Hala_ulica,
+        Hala_numer=req.Hala_numer,
+        Druzyny=req.Druzyny,
+        created_at=datetime.utcnow(),
+        is_processed=False,
     )
-    await database.execute(stmt)
+    try:
+        await database.execute(stmt)
+    except Exception as e:
+        # Złapmy pełny stack i treść błędu
+        import traceback; traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"SQL ERROR insert hall_report: {e!r}"
+        )
     return {"success": True}
 
 @router.get(
