@@ -236,6 +236,20 @@ hall_reports = Table(
     Column("is_processed", Boolean, nullable=False, server_default=text("false")),
 )
 
+# 20) Kalendarzowe wydarzenia Google (opcjonalnie rozbijemy później)
+calendar_events = Table(
+    "calendar_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("event_id", String, nullable=False),       # Google Calendar event ID
+    Column("summary", String, nullable=False),        # tytuł wydarzenia
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True),
+           server_default=func.now(), nullable=False),
+)
+
+
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

@@ -1,6 +1,7 @@
 # app/silesia.py
 from datetime import datetime
 from json import JSONDecodeError, loads
+import json
 import os
 import shutil
 from typing import Optional
@@ -10,7 +11,10 @@ from sqlalchemy import select, insert, update, delete, func
 from app.db import database, announcements, silesia_offtimes, matches_to_offer, matches_to_approve, matches_events
 from app.schemas import (
     ApprovalActionRequest,
+    BatchOffTimeRequest,
     CreateAnnouncementRequest,
+    GoogleSyncRequest,
+    ListAllOfftimesResponse,
     ListApprovalsResponse,
     ListOffersResponse,
     ListOfftimesRequest,
@@ -417,6 +421,109 @@ async def delete_offtimes(
     if deleted == 0:
         raise HTTPException(status_code=404, detail="Nie znaleziono niedyspozycji")
     return
+
+@router_off.post(
+    "/batch",
+    summary="Batchowy import/edycja/usuwanie niedyspozycji",
+    response_model=ListOfftimesResponse,
+)
+async def batch_offtimes(
+    req: BatchOffTimeRequest,
+    keys=Depends(get_rsa_keys),
+):
+    """
+    Przetwarza listę operacji: create/update/delete na swoich niedyspozycjach.
+    Zwraca aktualny zapis po operacjach.
+    """
+    private_key, _ = keys
+    judge_plain = _decrypt_field(req.judge_id, private_key)
+
+    # Wczytujemy istniejące wpisy
+    rows = await database.fetch_all(
+        select(silesia_offtimes).where(silesia_offtimes.c.judge_id == judge_plain)
+    )
+    current = { r["id"]: loads(r["data_json"]) for r in rows }  # map id->lista
+
+    # Zmieniamy listę JSON
+    for act in req.actions:
+        if act.type == "create":
+            # przypisujemy nowe id później
+            current_id = None
+            lst = current.get(current_id, [])
+            lst.append({
+                "DataOd": act.DataOd.isoformat(),
+                "DataDo": act.DataDo.isoformat(),
+                "Info": act.Info,
+            })
+            # Zapis w tabeli: upsert silesia_offtimes (jedna lista JSON)
+        elif act.type == "update":
+            lst = current.get(act.IdOffT, [])
+            # znajdujemy odpowiedni wpis i nadpisujemy
+        elif act.type == "delete":
+            current.pop(act.IdOffT, None)
+    # After processing, zapisz nową "data_json" (serializując listę)
+    new_json = json.dumps(list(current.values()))
+    stmt = pg_insert(silesia_offtimes).values(
+        judge_id=judge_plain,
+        full_name=_decrypt_field(req.full_name, private_key),
+        data_json=new_json
+    ).on_conflict_do_update(
+        index_elements=[silesia_offtimes.c.judge_id],
+        set_={"data_json": new_json, "updated_at": func.now()}
+    )
+    await database.execute(stmt)
+
+    # Zwracamy aktualny stan
+    return ListOfftimesResponse(records=[
+        OfftimeRecord(
+            judge_id=judge_plain,
+            full_name=_decrypt_field(req.full_name, private_key),
+            data_json=new_json,
+            updated_at=datetime.utcnow(),
+        )
+    ])
+
+
+@router_off.get(
+    "/all",
+    summary="Lista wszystkich niedyspozycji",
+    response_model=ListAllOfftimesResponse,
+)
+async def list_all_offtimes(
+    keys=Depends(get_rsa_keys),
+):
+    """
+    Zwraca niedyspozycje WSZYSTKICH sędziów.
+    """
+    rows = await database.fetch_all(select(silesia_offtimes))
+    return ListAllOfftimesResponse(records=[
+        OfftimeRecord(
+            judge_id=r["judge_id"],
+            full_name=r["full_name"],
+            data_json=r["data_json"],
+            updated_at=r["updated_at"],
+        ) for r in rows
+    ])
+
+
+@router_off.post(
+    "/google/sync",
+    summary="Wczytaj wydarzenia z Google Calendar i zaproponuj filtrowanie",
+)
+async def google_sync(
+    req: GoogleSyncRequest,
+    keys=Depends(get_rsa_keys),
+):
+    """
+    Pobiera wydarzenia z Google Calendar (następne 90 dni),
+    zapisuje je w tabeli calendar_events i zwraca listę do wyboru w kliencie.
+    """
+    # 1) odszyfruj req.judge_id
+    # 2) pobierz tokeny z calendar_tokens
+    # 3) użyj google API do pobrania events.next(90 dni)
+    # 4) wrzuć w calendar_events (upsert)
+    # 5) zwróć listę GoogleEvent[]
+
     
 # --- Matches module ---
 @router_matches.post(

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional, Literal, List
 from pydantic import BaseModel, Field
 
@@ -260,3 +260,35 @@ class HallReportItem(BaseModel):
 
 class ListHallReportsResponse(BaseModel):
     reports: List[HallReportItem]
+
+# ---------------- NIEDYSPOZYCYJNOŚĆ ŚLĄSKA ----------------
+# 20) Dodatkowe modele dla rozszerzonego modułu niedyspozycji
+
+class GoogleEvent(BaseModel):
+    event_id: str
+    summary: str
+    start: datetime
+    end: datetime
+
+class BatchOffTimeRequest(BaseModel):
+    username: str     # Base64-RSA
+    password: str
+    judge_id: str
+    actions: List[OffTimeAction]  # zamiast string, już zdekodowana tablica
+
+class ListAllOfftimesResponse(BaseModel):
+    records: List[OfftimeRecord]
+
+class GoogleSyncRequest(BaseModel):
+    username: str
+    password: str
+    judge_id: str
+    # nie szyfrujemy listy, bo zapytanie robimy po zalogowaniu
+
+class OffTimeAction(BaseModel):
+    type: Literal["create", "update", "delete"]
+    IdOffT: Optional[int]    # id rekordu w silesia_offtimes, do update/delete
+    DataOd: date
+    DataDo: date
+    Info: str
+
