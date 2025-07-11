@@ -303,18 +303,26 @@ async def set_offtimes(
         loads(data_json)
     except JSONDecodeError:
         raise HTTPException(status_code=400, detail="Niepoprawny JSON w data_json")
+    
+    data_json_str = _decrypt_field(req.data_json, private_key)
+
+    # 1) parsujemy
+    try:
+        data_json_obj = loads(data_json_str)
+    except JSONDecodeError:
+        raise HTTPException(400, "Niepoprawny JSON w data_json")
 
     stmt = pg_insert(silesia_offtimes).values(
-        judge_id=judge_plain,
-        full_name=full_name,
-        city=city_plain,
-        data_json=data_json
-    ).on_conflict_do_update(
+       judge_id=judge_plain,
+       full_name=full_name,
+       city=city_plain,
+       data_json=data_json_obj
+   ).on_conflict_do_update(
         index_elements=[silesia_offtimes.c.judge_id],
         set_={
             "full_name": full_name,
             "city": city_plain,
-            "data_json": data_json,
+            "data_json": data_json_obj,
             "updated_at": func.now()
         }
     )

@@ -76,8 +76,8 @@ silesia_offtimes = Table(
   metadata,
   Column("judge_id", String, primary_key=True),
   Column("full_name", String, nullable=False),
-  Column("city", String, nullable=True),         # ← nowe pole
-  Column("data_json", Text, nullable=False),
+  Column("city", String, nullable=True),
+  Column("data_json", JSON, nullable=False),
   Column("updated_at", DateTime(timezone=True),
          server_default=func.now(), onupdate=func.now())
 )

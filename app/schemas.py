@@ -73,13 +73,13 @@ class SetOfftimesRequest(BaseModel):
   judge_id: str       # Base64-RSA
   full_name: str      # Base64-RSA
   city: Optional[str] # Base64-RSA  ← jeśli szyfrujemy
-  data_json: str      # Base64-RSA JSON array
+  data_json: Any      # Base64-RSA JSON array
 
 class OfftimeRecord(BaseModel):
   judge_id: str
   full_name: str
   city: Optional[str]
-  data_json: str
+  data_json: Any
   updated_at: datetime
 
 class ListOfftimesResponse(BaseModel):
