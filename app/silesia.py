@@ -328,11 +328,13 @@ async def set_offtimes(
 
 
 
-@router_off.get("/self", response_model=OfftimeRecord, summary="Pobierz swoje niedyspozycje")
+@router_off.get(
+    "/self", 
+    response_model=OfftimeRecord, 
+    summary="Pobierz swoje niedyspozycje"
+)
 async def get_my_offtimes(
-    judge_id: str    = Query(..., description="Encrypted judge_id"),
-    full_name: str   = Query(..., description="Encrypted full_name"),
-    city: str        = Query(..., description="Encrypted city"),
+    judge_id: str = Query(..., description="Encrypted judge_id"),
     keys=Depends(get_rsa_keys),
 ):
     private_key, _ = keys
