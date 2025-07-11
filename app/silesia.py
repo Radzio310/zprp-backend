@@ -11,20 +11,14 @@ from sqlalchemy import select, insert, update, delete, func
 from app.db import database, announcements, silesia_offtimes, matches_to_offer, matches_to_approve, matches_events
 from app.schemas import (
     ApprovalActionRequest,
-    BatchOffTimeRequest,
-    CreateAnnouncementRequest,
     GoogleSyncRequest,
     ListAllOfftimesResponse,
     ListApprovalsResponse,
     ListOffersResponse,
-    ListOfftimesRequest,
-    ListOfftimesResponse,
     MatchAssignmentRequest,
     MatchOfferRequest,
     OfftimeRecord,
     SetOfftimesRequest,
-    UpdateAnnouncementRequest,
-    DeleteAnnouncementRequest,
     ListAnnouncementsResponse,
     AnnouncementResponse,
     LastUpdateResponse,
@@ -298,17 +292,11 @@ async def set_offtimes(
     req: SetOfftimesRequest,
     keys=Depends(get_rsa_keys),
 ):
-    """
-    Upsert (INSERT albo UPDATE) całej listy niedyspozycji danego sędziego.
-    Body:
-      - username, password, judge_id, full_name, data_json (wszystkie Base64‑RSA)
-      - data_json: string JSON array np. '[{"from":"...","to":"...",...}, ...]'
-    Zwraca success=true.
-    """
     private_key, _ = keys
     judge_plain = _decrypt_field(req.judge_id, private_key)
-    full_name = _decrypt_field(req.full_name, private_key)
-    data_json = _decrypt_field(req.data_json, private_key)
+    full_name   = _decrypt_field(req.full_name, private_key)
+    city_plain  = _decrypt_field(req.city, private_key) if req.city else None
+    data_json   = _decrypt_field(req.data_json, private_key)
 
     # walidacja JSON
     try:
@@ -319,17 +307,20 @@ async def set_offtimes(
     stmt = pg_insert(silesia_offtimes).values(
         judge_id=judge_plain,
         full_name=full_name,
+        city=city_plain,
         data_json=data_json
     ).on_conflict_do_update(
         index_elements=[silesia_offtimes.c.judge_id],
         set_={
             "full_name": full_name,
+            "city": city_plain,
             "data_json": data_json,
             "updated_at": func.now()
         }
     )
     await database.execute(stmt)
     return {"success": True}
+
 
 @router_off.get(
     "/self",
@@ -340,10 +331,6 @@ async def get_my_offtimes(
     req: SetOfftimesRequest = Depends(),
     keys=Depends(get_rsa_keys),
 ):
-    """
-    Zwraca wpis niedyspozycji dla zalogowanego sędziego.
-    Body: username, password, judge_id (Base64‑RSA).
-    """
     private_key, _ = keys
     judge_plain = _decrypt_field(req.judge_id, private_key)
 
@@ -352,50 +339,15 @@ async def get_my_offtimes(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Brak zapisanych niedyspozycji")
+
     return OfftimeRecord(
         judge_id=row["judge_id"],
         full_name=row["full_name"],
+        city=row["city"],
         data_json=row["data_json"],
         updated_at=row["updated_at"],
     )
 
-@router_off.post(
-    "/list",
-    response_model=ListOfftimesResponse,
-    summary="Pobierz niedyspozycje wielu sędziów"
-)
-async def list_offtimes(
-    req: ListOfftimesRequest,
-    keys=Depends(get_rsa_keys),
-):
-    """
-    Body:
-      - username, password (Base64‑RSA, do uwierzytelnienia)
-      - judge_ids: lista Base64‑RSA identyfikatorów
-    Zwraca listę rekordów tylko dla tych judge_id.
-    """
-    private_key, _ = keys
-    # odszyfruj listę ID
-    plain_ids = []
-    for enc in req.judge_ids:
-        try:
-            plain_ids.append(_decrypt_field(enc, private_key))
-        except:
-            raise HTTPException(status_code=400, detail="Błędny judge_id w liście")
-
-    rows = await database.fetch_all(
-        select(silesia_offtimes).where(silesia_offtimes.c.judge_id.in_(plain_ids))
-    )
-    records = [
-        OfftimeRecord(
-            judge_id=r["judge_id"],
-            full_name=r["full_name"],
-            data_json=r["data_json"],
-            updated_at=r["updated_at"],
-        )
-        for r in rows
-    ]
-    return ListOfftimesResponse(records=records)
 
 @router_off.delete(
     "/{judge_id_enc}",
@@ -422,68 +374,6 @@ async def delete_offtimes(
         raise HTTPException(status_code=404, detail="Nie znaleziono niedyspozycji")
     return
 
-@router_off.post(
-    "/batch",
-    summary="Batchowy import/edycja/usuwanie niedyspozycji",
-    response_model=ListOfftimesResponse,
-)
-async def batch_offtimes(
-    req: BatchOffTimeRequest,
-    keys=Depends(get_rsa_keys),
-):
-    """
-    Przetwarza listę operacji: create/update/delete na swoich niedyspozycjach.
-    Zwraca aktualny zapis po operacjach.
-    """
-    private_key, _ = keys
-    judge_plain = _decrypt_field(req.judge_id, private_key)
-
-    # Wczytujemy istniejące wpisy
-    rows = await database.fetch_all(
-        select(silesia_offtimes).where(silesia_offtimes.c.judge_id == judge_plain)
-    )
-    current = { r["id"]: loads(r["data_json"]) for r in rows }  # map id->lista
-
-    # Zmieniamy listę JSON
-    for act in req.actions:
-        if act.type == "create":
-            # przypisujemy nowe id później
-            current_id = None
-            lst = current.get(current_id, [])
-            lst.append({
-                "DataOd": act.DataOd.isoformat(),
-                "DataDo": act.DataDo.isoformat(),
-                "Info": act.Info,
-            })
-            # Zapis w tabeli: upsert silesia_offtimes (jedna lista JSON)
-        elif act.type == "update":
-            lst = current.get(act.IdOffT, [])
-            # znajdujemy odpowiedni wpis i nadpisujemy
-        elif act.type == "delete":
-            current.pop(act.IdOffT, None)
-    # After processing, zapisz nową "data_json" (serializując listę)
-    new_json = json.dumps(list(current.values()))
-    stmt = pg_insert(silesia_offtimes).values(
-        judge_id=judge_plain,
-        full_name=_decrypt_field(req.full_name, private_key),
-        data_json=new_json
-    ).on_conflict_do_update(
-        index_elements=[silesia_offtimes.c.judge_id],
-        set_={"data_json": new_json, "updated_at": func.now()}
-    )
-    await database.execute(stmt)
-
-    # Zwracamy aktualny stan
-    return ListOfftimesResponse(records=[
-        OfftimeRecord(
-            judge_id=judge_plain,
-            full_name=_decrypt_field(req.full_name, private_key),
-            data_json=new_json,
-            updated_at=datetime.utcnow(),
-        )
-    ])
-
-
 @router_off.get(
     "/all",
     summary="Lista wszystkich niedyspozycji",
@@ -492,18 +382,17 @@ async def batch_offtimes(
 async def list_all_offtimes(
     keys=Depends(get_rsa_keys),
 ):
-    """
-    Zwraca niedyspozycje WSZYSTKICH sędziów.
-    """
     rows = await database.fetch_all(select(silesia_offtimes))
     return ListAllOfftimesResponse(records=[
         OfftimeRecord(
             judge_id=r["judge_id"],
             full_name=r["full_name"],
+            city=r["city"],
             data_json=r["data_json"],
             updated_at=r["updated_at"],
         ) for r in rows
     ])
+
 
 
 @router_off.post(

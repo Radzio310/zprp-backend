@@ -72,13 +72,14 @@ announcements = Table(
 
 # 5) Tabela “kalendarz niedyspozycji” Silesia
 silesia_offtimes = Table(
-    "silesia_offtimes",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("judge_id", String, nullable=False, index=True),
-    Column("full_name", String, nullable=False),
-    Column("data_json", Text, nullable=False),  # tu przechowujemy cały JSON jako tekst
-    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+  "silesia_offtimes",
+  metadata,
+  Column("judge_id", String, primary_key=True),
+  Column("full_name", String, nullable=False),
+  Column("city", String, nullable=True),         # ← nowe pole
+  Column("data_json", Text, nullable=False),
+  Column("updated_at", DateTime(timezone=True),
+         server_default=func.now(), onupdate=func.now())
 )
 
 # (6) Mecze do oddania

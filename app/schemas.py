@@ -11,12 +11,6 @@ class EditJudgeRequest(BaseModel):
     Miasto: Optional[str] = None
     Telefon: Optional[str] = None
     Email: Optional[str] = None
-class OffTimeAction(BaseModel):
-    type: Literal["create", "update", "delete"]
-    IdOffT: Optional[str]   # dla create może być None lub ""
-    DataOd: str             # w formacie DD.MM.YYYY
-    DataDo: str
-    Info: str
 
 class BatchOffTimeRequest(BaseModel):
     username: str     # Base64‑RSA
@@ -73,24 +67,27 @@ class LastUpdateResponse(BaseModel):
     last_update: Optional[datetime] # type: ignore
 
 # 7) Żądanie ustawienia / nadpisania niedyspozycji sędziego
-class SetOfftimesRequest(AuthPayload):
-    full_name: str     # Base64‑RSA
-    data_json: str     # Base64‑RSA JSON array/string
+class SetOfftimesRequest(BaseModel):
+  username: str       # Base64-RSA
+  password: str       # Base64-RSA
+  judge_id: str       # Base64-RSA
+  full_name: str      # Base64-RSA
+  city: Optional[str] # Base64-RSA  ← jeśli szyfrujemy
+  data_json: str      # Base64-RSA JSON array
 
-# 8) Żądanie pobrania listy po konkretnych judge_id
-class ListOfftimesRequest(AuthPayload):
-    judge_ids: List[str]  # każdy Base64‑RSA
-
-# 9) Odpowiedź pojedynczej niedyspozycji
 class OfftimeRecord(BaseModel):
-    judge_id: str
-    full_name: str
-    data_json: str
-    updated_at: datetime
+  judge_id: str
+  full_name: str
+  city: Optional[str]
+  data_json: str
+  updated_at: datetime
 
-# 10) Odpowiedź listy niedyspozycji
 class ListOfftimesResponse(BaseModel):
-    records: List[OfftimeRecord]
+  record: OfftimeRecord
+
+class ListAllOfftimesResponse(BaseModel):
+  records: List[OfftimeRecord]
+
 
 class MatchOfferRequest(AuthPayload):
     full_name: str       # Base64-RSA
@@ -269,15 +266,6 @@ class GoogleEvent(BaseModel):
     summary: str
     start: datetime
     end: datetime
-
-class BatchOffTimeRequest(BaseModel):
-    username: str     # Base64-RSA
-    password: str
-    judge_id: str
-    actions: List[OffTimeAction]  # zamiast string, już zdekodowana tablica
-
-class ListAllOfftimesResponse(BaseModel):
-    records: List[OfftimeRecord]
 
 class GoogleSyncRequest(BaseModel):
     username: str
