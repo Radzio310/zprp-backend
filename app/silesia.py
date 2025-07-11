@@ -6,7 +6,7 @@ import os
 import shutil
 from typing import Optional
 import uuid
-from fastapi import APIRouter, File, Form, HTTPException, Depends, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Depends, Query, UploadFile, status
 from sqlalchemy import select, insert, update, delete, func
 from app.db import database, announcements, silesia_offtimes, matches_to_offer, matches_to_approve, matches_events
 from app.schemas import (
@@ -328,17 +328,15 @@ async def set_offtimes(
 
 
 
-@router_off.get(
-    "/self",
-    response_model=OfftimeRecord,
-    summary="Pobierz swoje niedyspozycje"
-)
+@router_off.get("/self", response_model=OfftimeRecord, summary="Pobierz swoje niedyspozycje")
 async def get_my_offtimes(
-    req: SetOfftimesRequest = Depends(),
+    judge_id: str    = Query(..., description="Encrypted judge_id"),
+    full_name: str   = Query(..., description="Encrypted full_name"),
+    city: str        = Query(..., description="Encrypted city"),
     keys=Depends(get_rsa_keys),
 ):
     private_key, _ = keys
-    judge_plain = _decrypt_field(req.judge_id, private_key)
+    judge_plain = _decrypt_field(judge_id, private_key)
 
     row = await database.fetch_one(
         select(silesia_offtimes).where(silesia_offtimes.c.judge_id == judge_plain)
