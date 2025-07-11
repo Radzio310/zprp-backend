@@ -290,34 +290,31 @@ async def delete_announcement(
 )
 async def set_offtimes(
     req: SetOfftimesRequest,
-    keys=Depends(get_rsa_keys),
 ):
-    private_key, _ = keys
-    judge_plain = _decrypt_field(req.judge_id, private_key)
-    full_name   = _decrypt_field(req.full_name, private_key)
-    city_plain  = _decrypt_field(req.city, private_key) if req.city else None
-    data_json   = _decrypt_field(req.data_json, private_key)
+    # 1) Wyciągamy pola prosto z requestu
+    judge_plain = req.judge_id
+    full_name   = req.full_name
+    city_plain  = req.city
 
-    # walidacja JSON
-    try:
-        loads(data_json)
-    except JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Niepoprawny JSON w data_json")
-    
-    data_json_str = _decrypt_field(req.data_json, private_key)
+    # 2) Parsujemy data_json:
+    #    - jeśli to string, próbujemy json.loads
+    #    - jeśli już jest listą/dict, zostawiamy
+    raw = req.data_json
+    if isinstance(raw, str):
+        try:
+            data_json_obj = json.loads(raw)
+        except JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Niepoprawny JSON w data_json")
+    else:
+        data_json_obj = raw
 
-    # 1) parsujemy
-    try:
-        data_json_obj = loads(data_json_str)
-    except JSONDecodeError:
-        raise HTTPException(400, "Niepoprawny JSON w data_json")
-
+    # 3) Upsert do bazy, wykorzystując JSON-typ kolumny
     stmt = pg_insert(silesia_offtimes).values(
-       judge_id=judge_plain,
-       full_name=full_name,
-       city=city_plain,
-       data_json=data_json_obj
-   ).on_conflict_do_update(
+        judge_id=judge_plain,
+        full_name=full_name,
+        city=city_plain,
+        data_json=data_json_obj
+    ).on_conflict_do_update(
         index_elements=[silesia_offtimes.c.judge_id],
         set_={
             "full_name": full_name,
@@ -328,6 +325,7 @@ async def set_offtimes(
     )
     await database.execute(stmt)
     return {"success": True}
+
 
 
 @router_off.get(

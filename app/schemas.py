@@ -68,8 +68,6 @@ class LastUpdateResponse(BaseModel):
 
 # 7) Żądanie ustawienia / nadpisania niedyspozycji sędziego
 class SetOfftimesRequest(BaseModel):
-  username: str       # Base64-RSA
-  password: str       # Base64-RSA
   judge_id: str       # Base64-RSA
   full_name: str      # Base64-RSA
   city: Optional[str] # Base64-RSA  ← jeśli szyfrujemy
