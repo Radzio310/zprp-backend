@@ -329,23 +329,39 @@ async def set_offtimes(
 
 
 @router_off.get(
-    "/self", 
-    response_model=OfftimeRecord, 
+    "/self",
+    response_model=OfftimeRecord,
     summary="Pobierz swoje niedyspozycje"
 )
 async def get_my_offtimes(
     judge_id: str = Query(..., description="Encrypted judge_id"),
     keys=Depends(get_rsa_keys),
 ):
+    """
+    Odszyfruj tylko judge_id i zwróć wszystkie zapisane niedyspozycje tego sędziego.
+    """
     private_key, _ = keys
-    judge_plain = _decrypt_field(judge_id, private_key)
 
+    # 1) odszyfruj judge_id
+    try:
+        judge_plain = _decrypt_field(judge_id, private_key)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Niepoprawny format judge_id"
+        )
+
+    # 2) pobierz z bazy
     row = await database.fetch_one(
         select(silesia_offtimes).where(silesia_offtimes.c.judge_id == judge_plain)
     )
     if not row:
-        raise HTTPException(status_code=404, detail="Brak zapisanych niedyspozycji")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Brak zapisanych niedyspozycji"
+        )
 
+    # 3) zwróć rekord
     return OfftimeRecord(
         judge_id=row["judge_id"],
         full_name=row["full_name"],
