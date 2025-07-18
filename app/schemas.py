@@ -65,29 +65,20 @@ class ListAnnouncementsResponse(BaseModel):
 # 6) Odpowiedź z datą ostatniej aktualizacji
 class LastUpdateResponse(BaseModel):
     last_update: Optional[datetime] # type: ignore
-
-class OfftimeEntry(BaseModel):
-    id: str
-    from_: datetime = Field(..., alias="from")
-    to: Optional[datetime] = None
-    info: str
-    location: str
-    category_id: Optional[str] = None
-    category_name: Optional[str] = None
-    category_color: Optional[str] = None
+    
 
 # 7) Żądanie ustawienia / nadpisania niedyspozycji sędziego
 class SetOfftimesRequest(BaseModel):
   judge_id: str       # Base64-RSA
   full_name: str      # Base64-RSA
   city: Optional[str] # Base64-RSA  ← jeśli szyfrujemy
-  data_json: List[OfftimeEntry]
+  data_json: Any      # Base64-RSA JSON array
 
 class OfftimeRecord(BaseModel):
   judge_id: str
   full_name: str
   city: Optional[str]
-  data_json: List[OfftimeEntry]
+  data_json: Any
   updated_at: datetime
 
 class ListOfftimesResponse(BaseModel):
