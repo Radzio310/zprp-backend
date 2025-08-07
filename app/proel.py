@@ -18,10 +18,10 @@ router = APIRouter(
 )
 
 @router.post(
-    "/", 
-    response_model=dict, 
+    "/",
+    response_model=dict,
     status_code=status.HTTP_201_CREATED,
-    summary="Dodaj nowy mecz ProEl"
+    summary="Dodaj nowy mecz do ProEl'a"
 )
 async def create_proel_match(req: CreateSavedMatchRequest):
     existing = await database.fetch_one(
@@ -37,33 +37,35 @@ async def create_proel_match(req: CreateSavedMatchRequest):
     await database.execute(stmt)
     return {"success": True}
 
+
 @router.put(
-    "/{match_number}", 
-    response_model=dict, 
-    summary="Edytuj mecz ProEl (jeśli nie zakończony)"
+    "/{match_number:path}",
+    response_model=dict,
+    summary="Aktualizuj mecz w ProEl'u (jeśli nie zakończony)"
 )
 async def update_proel_match(
-    match_number: str, 
+    match_number: str,
     req: UpdateSavedMatchRequest
 ):
     row = await database.fetch_one(
         select(saved_matches).where(saved_matches.c.match_number == match_number)
     )
     if not row:
-        raise HTTPException(404, "Nie znaleziono meczu ProEl")
+        raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
     if row["is_finished"]:
         raise HTTPException(400, "Nie można edytować zakończonego meczu")
     stmt = (
         update(saved_matches)
         .where(saved_matches.c.match_number == match_number)
-        .values(data_json=req.data_json)
+        .values(data_json=req.data_json, updated_at=datetime.utcnow())
     )
     await database.execute(stmt)
     return {"success": True}
 
+
 @router.delete(
-    "/{match_number}", 
-    response_model=dict, 
+    "/{match_number:path}",
+    response_model=dict,
     summary="Usuń mecz ProEl"
 )
 async def delete_proel_match(match_number: str):
@@ -71,13 +73,14 @@ async def delete_proel_match(match_number: str):
         delete(saved_matches).where(saved_matches.c.match_number == match_number)
     )
     if result == 0:
-        raise HTTPException(404, "Nie znaleziono meczu ProEl")
+        raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
     return {"success": True}
 
+
 @router.get(
-    "/", 
-    response_model=ListSavedMatchesResponse, 
-    summary="Lista wszystkich meczów ProEl"
+    "/",
+    response_model=ListSavedMatchesResponse,
+    summary="Lista wszystkich meczów w ProEl'u"
 )
 async def list_proel_matches():
     rows = await database.fetch_all(
