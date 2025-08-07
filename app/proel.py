@@ -1,5 +1,3 @@
-# app/proel.py
-
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select, insert, update, delete
 from app.db import database, saved_matches
@@ -25,14 +23,16 @@ router = APIRouter(
 )
 async def create_proel_match(req: CreateSavedMatchRequest):
     existing = await database.fetch_one(
-        select(saved_matches).where(saved_matches.c.match_number == req.match_number)
+        select(saved_matches)
+        .where(saved_matches.c.match_number == req.match_number)
     )
     if existing:
-        raise HTTPException(status_code=400, detail="Mecz o takim numerze już istnieje")
+        raise HTTPException(400, "Mecz o takim numerze już istnieje")
+
     stmt = insert(saved_matches).values(
         match_number=req.match_number,
         data_json=req.data_json,
-        is_finished=False
+        is_finished=req.is_finished  # używamy tego, co przyszło (domyślnie False)
     )
     await database.execute(stmt)
     return {"success": True}
@@ -48,16 +48,26 @@ async def update_proel_match(
     req: UpdateSavedMatchRequest
 ):
     row = await database.fetch_one(
-        select(saved_matches).where(saved_matches.c.match_number == match_number)
+        select(saved_matches)
+        .where(saved_matches.c.match_number == match_number)
     )
     if not row:
         raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
     if row["is_finished"]:
+        # jeżeli już było zakończone, nie pozwalamy na jakiekolwiek zmiany
         raise HTTPException(400, "Nie można edytować zakończonego meczu")
+
+    # Budujemy słownik pól do aktualizacji
+    to_update: dict = {"data_json": req.data_json}
+    if req.is_finished is not None:
+        to_update["is_finished"] = req.is_finished
+    # zawsze przepisujemy updated_at na teraz
+    to_update["updated_at"] = datetime.utcnow()
+
     stmt = (
         update(saved_matches)
         .where(saved_matches.c.match_number == match_number)
-        .values(data_json=req.data_json, updated_at=datetime.utcnow())
+        .values(**to_update)
     )
     await database.execute(stmt)
     return {"success": True}
@@ -70,7 +80,8 @@ async def update_proel_match(
 )
 async def delete_proel_match(match_number: str):
     result = await database.execute(
-        delete(saved_matches).where(saved_matches.c.match_number == match_number)
+        delete(saved_matches)
+        .where(saved_matches.c.match_number == match_number)
     )
     if result == 0:
         raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
@@ -84,7 +95,8 @@ async def delete_proel_match(match_number: str):
 )
 async def list_proel_matches():
     rows = await database.fetch_all(
-        select(saved_matches).order_by(saved_matches.c.match_number)
+        select(saved_matches)
+        .order_by(saved_matches.c.match_number)
     )
     return ListSavedMatchesResponse(
         matches=[MatchItem(**dict(r)) for r in rows]
