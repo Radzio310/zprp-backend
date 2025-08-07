@@ -283,9 +283,11 @@ class OffTimeAction(BaseModel):
 class CreateSavedMatchRequest(BaseModel):
     match_number: str
     data_json: Any
+    is_finished: Optional[bool] = False
 
 class UpdateSavedMatchRequest(BaseModel):
     data_json: Any
+    is_finished: Optional[bool] = None
 
 class MatchItem(BaseModel):
     match_number: str
