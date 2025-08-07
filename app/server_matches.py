@@ -21,7 +21,9 @@ def _get_soup(params=None, url=None):
 
 
 def _strip_zespoly(href: str) -> str:
-    # usuń parametr Zespoly z URL-a
+    """
+    Z danego href usuń parametr Zespoly, zostaw pozostałe.
+    """
     p = urlparse(href)
     qs = parse_qs(p.query)
     qs.pop("Zespoly", None)
@@ -35,6 +37,7 @@ def _parse_match_row(tr):
     match_id = header[0]
     detail_link = urljoin(BASE_URL, tr.find("a", href=True)["href"])
 
+    # data i czas
     parts = tds[0].get_text(" ", strip=True).split()
     date = " ".join(parts[-2:])
 
@@ -75,9 +78,9 @@ def _parse_match_row(tr):
 
 
 def get_all_matches(season_id: int):
+    # 1) strona główna z menu Rozgrywki
     root = _get_soup(params={"Sezon": season_id})
 
-    # 1) znajdź sekcję "Rozgrywki"
     main_menu = root.select_one("#main-nav .menu")
     rozgrywki_li = next(
         (li for li in main_menu.find_all("li", recursive=False)
@@ -87,8 +90,8 @@ def get_all_matches(season_id: int):
     if not rozgrywki_li:
         raise HTTPException(500, "Nie znaleziono sekcji Rozgrywki")
 
-    wojewodztwa = rozgrywki_li.find("ul", class_="sub-menu").find_all("li", recursive=False)
     data = {}
+    wojewodztwa = rozgrywki_li.find("ul", class_="sub-menu").find_all("li", recursive=False)
 
     for woj_li in wojewodztwa:
         woj_name = woj_li.a.get_text(strip=True)
@@ -100,7 +103,7 @@ def get_all_matches(season_id: int):
             cat_key = "Kobiety" if "KOBIETY" in cat_label else "Mężczyźni"
             data[woj_name][cat_key] = {}
 
-            # 3) rozgrywki
+            # 3) lista rozgrywek
             for roz_li in cat_li.find("ul", class_="sub-menu").find_all("li", recursive=False):
                 roz_name = roz_li.a.get_text(strip=True)
                 href = roz_li.a["href"]
@@ -111,16 +114,16 @@ def get_all_matches(season_id: int):
 
                 data[woj_name][cat_key][roz_name] = defaultdict(lambda: defaultdict(list))
 
-                # przygotuj "czysty" URL bez &Zespoly
+                # 4) przygotuj URL bez &Zespoly
                 comp_url = _strip_zespoly(urljoin(BASE_URL, href))
 
-                # 4) lista rund
+                # 5) pobierz opcje rund
                 comp_soup = _get_soup(url=comp_url)
                 for r_opt in comp_soup.select("select[name=Runda] option")[1:]:
                     r_id = r_opt["value"]
                     r_txt = r_opt.get_text(strip=True)
 
-                    # 5) lista kolejek w tej rundzie
+                    # 6) pobierz opcje kolejek w tej rundzie
                     soup_r = _get_soup(
                         url=comp_url,
                         params={"Runda": r_id}
@@ -129,7 +132,7 @@ def get_all_matches(season_id: int):
                         k_id = k_opt["value"]
                         k_txt = k_opt.get_text(strip=True)
 
-                        # 6) tabela meczów
+                        # 7) wreszcie tabela meczów
                         soup_k = _get_soup(
                             url=comp_url,
                             params={"Runda": r_id, "Kolejka": k_id}
