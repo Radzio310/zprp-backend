@@ -36,11 +36,8 @@ def _parse_match_row(tr):
     header = tds[0].get_text(" ", strip=True).split()
     match_id = header[0]
     detail_link = urljoin(BASE_URL, tr.find("a", href=True)["href"])
-
-    # data i czas
     parts = tds[0].get_text(" ", strip=True).split()
     date = " ".join(parts[-2:])
-
     place = tds[-1].find_all("small")[0].get_text(strip=True)
     hall_map = tds[-1].find("a", href=True)["href"]
 
@@ -55,7 +52,6 @@ def _parse_match_row(tr):
 
     score = tds[3].find("big").get_text(strip=True)
     half_time = tds[3].find("small").get_text(strip=True).strip("()")
-
     viewers_txt = tds[-2].get_text(strip=True)
     viewers = int(viewers_txt) if viewers_txt.isdigit() else 0
 
@@ -112,31 +108,43 @@ def get_all_matches(season_id: int):
                 if not roz_id:
                     continue
 
-                data[woj_name][cat_key][roz_name] = defaultdict(lambda: defaultdict(list))
+                # inicjalizacja struktury
+                data[woj_name][cat_key][roz_name] = {
+                    "first_link": None,
+                    "rounds": defaultdict(lambda: defaultdict(list))
+                }
 
                 # 4) przygotuj URL bez &Zespoly
                 comp_url = _strip_zespoly(urljoin(BASE_URL, href))
 
-                # 5) pobierz opcje rund
+                # --- DEBUG: zbuduj link do 1 rundy i 1 kolejki ---
                 comp_soup = _get_soup(url=comp_url)
+                r_opts = comp_soup.select("select[name=Runda] option")[1:]
+                if r_opts:
+                    first_r = r_opts[0]
+                    first_r_id = first_r["value"]
+
+                    soup_r = _get_soup(url=comp_url, params={"Runda": first_r_id})
+                    k_opts = soup_r.select("select[name=Kolejka] option")[1:]
+                    if k_opts:
+                        first_k = k_opts[0]
+                        first_k_id = first_k["value"]
+                        # zbuduj pełny URL
+                        sep = "&" if "?" in comp_url else "?"
+                        debug_url = f"{comp_url}{sep}Runda={first_r_id}&Kolejka={first_k_id}"
+                        data[woj_name][cat_key][roz_name]["first_link"] = debug_url
+
+                # 5) właściwe parsowanie rund i kolejek
                 for r_opt in comp_soup.select("select[name=Runda] option")[1:]:
                     r_id = r_opt["value"]
                     r_txt = r_opt.get_text(strip=True)
 
-                    # 6) pobierz opcje kolejek w tej rundzie
-                    soup_r = _get_soup(
-                        url=comp_url,
-                        params={"Runda": r_id}
-                    )
+                    soup_r = _get_soup(url=comp_url, params={"Runda": r_id})
                     for k_opt in soup_r.select("select[name=Kolejka] option")[1:]:
                         k_id = k_opt["value"]
                         k_txt = k_opt.get_text(strip=True)
 
-                        # 7) wreszcie tabela meczów
-                        soup_k = _get_soup(
-                            url=comp_url,
-                            params={"Runda": r_id, "Kolejka": k_id}
-                        )
+                        soup_k = _get_soup(url=comp_url, params={"Runda": r_id, "Kolejka": k_id})
                         tbl = soup_k.find("table", id="prevMatchTable")
                         if not tbl:
                             continue
@@ -144,14 +152,14 @@ def get_all_matches(season_id: int):
                         for tr in tbl.find_all("tr")[1:]:
                             if tr.find("td"):
                                 m = _parse_match_row(tr)
-                                data[woj_name][cat_key][roz_name][r_txt][k_txt].append(m)
+                                data[woj_name][cat_key][roz_name]["rounds"][r_txt][k_txt].append(m)
 
     return data
 
 
 @router.get(
     "/{season_id}",
-    summary="Zwraca wszystkie mecze podzielone na województwa → kategorie → rozgrywki → rundy → kolejki",
+    summary="Zwraca wszystkie mecze podzielone na województwa → kategorie → rozgrywki → rundy → kolejki (plus debugowe first_link)",
 )
 def matches(season_id: int):
     try:
