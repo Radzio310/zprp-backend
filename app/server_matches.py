@@ -8,7 +8,6 @@ BASE_URL = "https://rozgrywki.zprp.pl/"
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 
-
 def _get_soup(params=None, url=None):
     if url:
         r = requests.get(url, timeout=10)
@@ -17,7 +16,6 @@ def _get_soup(params=None, url=None):
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
 
-
 def _strip_zespoly(href: str) -> str:
     p = urlparse(href)
     qs = parse_qs(p.query)
@@ -25,14 +23,11 @@ def _strip_zespoly(href: str) -> str:
     new_query = urlencode(qs, doseq=True)
     return urlunparse((p.scheme, p.netloc, p.path, p.params, new_query, p.fragment))
 
-
 def _parse_match_row(tr):
     tds = tr.find_all("td")
-    # Header: pierwszy <td> ma np. "190393 IMC/1"
     header = tds[0].get_text(" ", strip=True).split()
     match_id = header[0]
     detail_link = urljoin(BASE_URL, tr.find("a", href=lambda h: h and "Mecz=" in h)["href"])
-    # Data to dwa ostatnie wyrazy w headerze
     date = " ".join(header[-2:])
     place = tds[-1].find("small").get_text(strip=True)
     hall_map = tds[-1].find("a", href=True)["href"]
@@ -68,11 +63,10 @@ def _parse_match_row(tr):
         "referees": referees
     }
 
-
 def get_all_matches(season_id: int):
     root = _get_soup(params={"Sezon": season_id})
 
-    # 1) Znajdź w menu pozycję "Rozgrywki"
+    # 1) Znajdź w menu “Rozgrywki”
     main_menu = root.select_one("#main-nav .menu")
     rozgrywki_li = next(
         (li for li in main_menu.find_all("li", recursive=False)
@@ -102,10 +96,10 @@ def get_all_matches(season_id: int):
                 if not roz_id:
                     continue
 
-                # Przygotuj URL rozgrywek bez Zespoly
+                # URL rozgrywek bez parametru Zespoly
                 comp_url = _strip_zespoly(urljoin(BASE_URL, href))
 
-                # 2) Zbierz linki do rund z sekcji TERMINARZ
+                # 2) Zbierz gotowe linki do rund (TERMINARZ)
                 comp_soup = _get_soup(url=comp_url)
                 terminarz = comp_soup.select_one("#menu-item-5 ul.sub-menu")
                 first_links = {}
@@ -121,7 +115,7 @@ def get_all_matches(season_id: int):
                             f"&Kolejka={qs['Kolejka'][0]}"
                         )
 
-                # Inicjalizacja struktury
+                # Inicjalizacja
                 data[woj_name][cat_key][roz_name] = {
                     "first_links": first_links,
                     "rounds": defaultdict(dict)
@@ -136,7 +130,6 @@ def get_all_matches(season_id: int):
 
                     for q_li in menu2.find_all("li", recursive=False):
                         qa = q_li.find("a", href=True)
-                        # etykieta kolejki (np. "Kolejka 1", "Kolejka 14")
                         qlabel = qa.get_text(" ", strip=True).split()[0]
                         q_qs = parse_qs(qa["href"].lstrip("?"))
                         queue_link = urljoin(
@@ -147,13 +140,12 @@ def get_all_matches(season_id: int):
                             f"&Kolejka={q_qs['Kolejka'][0]}"
                         )
 
-                        # 4) Parsuj tabelę meczów dla tej kolejki
+                        # 4) Parsuj tabelę meczów
                         ksoup = _get_soup(url=queue_link)
                         table = ksoup.find("table", id="prevMatchTable")
                         matches = []
                         if table:
                             for tr in table.find_all("tr"):
-                                # tylko wiersze z linkiem do meczu i przynajmniej 7 kolumn
                                 if not tr.find("a", href=lambda h: h and "Mecz=" in h):
                                     continue
                                 tds = tr.find_all("td")
@@ -167,7 +159,6 @@ def get_all_matches(season_id: int):
                         data[woj_name][cat_key][roz_name]["rounds"][round_label][qlabel] = matches
 
     return data
-
 
 @router.get(
     "/{season_id}",
