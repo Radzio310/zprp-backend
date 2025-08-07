@@ -132,9 +132,13 @@ def get_all_matches(season_id: int):
                         table = ksoup.find("table", id="prevMatchTable")
                         matches = []
                         if table:
-                            for tr in table.find_all("tr")[1:]:
-                                if tr.find("td"):
-                                    matches.append(_parse_match_row(tr))
+                            for tr in table.find_all("tr"):
+                                tds = tr.find_all("td")
+                                # tylko prawdziwe wiersze z linkiem do meczu
+                                mecz_link = tr.find("a", href=lambda h: h and "Mecz=" in h)
+                                if not tds or not mecz_link:
+                                    continue
+                                matches.append(_parse_match_row(tr))
                         comp_entry["rounds"].setdefault(round_label, {})[qlabel] = matches
 
     return data
