@@ -105,7 +105,7 @@ def get_all_matches(season_id: int):
                 # Przygotuj URL rozgrywek bez Zespoly
                 comp_url = _strip_zespoly(urljoin(BASE_URL, href))
 
-                # === tutaj zbieramy *gotowe* linki do każdej rundy (TERMINARZ) ===
+                # 2) Zbierz linki do rund z sekcji TERMINARZ
                 comp_soup = _get_soup(url=comp_url)
                 terminarz = comp_soup.select_one("#menu-item-5 ul.sub-menu")
                 first_links = {}
@@ -113,7 +113,6 @@ def get_all_matches(season_id: int):
                     for li in terminarz.find_all("li", recursive=False):
                         a = li.find("a", href=True)
                         qs = parse_qs(a["href"].lstrip("?"))
-                        # składamy pełny URL:
                         first_links[a.get_text(strip=True)] = urljoin(
                             BASE_URL,
                             f"?Sezon={qs['Sezon'][0]}"
@@ -122,23 +121,22 @@ def get_all_matches(season_id: int):
                             f"&Kolejka={qs['Kolejka'][0]}"
                         )
 
-                # Inicjalizacja
+                # Inicjalizacja struktury
                 data[woj_name][cat_key][roz_name] = {
                     "first_links": first_links,
                     "rounds": defaultdict(dict)
                 }
 
-                # 2) Dla każdej rundy idziemy po jej pierwszym linku i zbieramy wszystkie kolejki:
+                # 3) Dla każdej rundy: wejdź w pierwszy link i zbierz wszystkie kolejki
                 for round_label, first_link in first_links.items():
                     rsoup = _get_soup(url=first_link)
-                    # menu kolejek to <nav id="main-nav2"> → ul.sub-menu
                     menu2 = rsoup.select_one("#main-nav2 ul.sub-menu")
                     if not menu2:
                         continue
 
                     for q_li in menu2.find_all("li", recursive=False):
                         qa = q_li.find("a", href=True)
-                        # nazwa kolejki (np. "Kolejka 1", "Kolejka 14", itd.)
+                        # etykieta kolejki (np. "Kolejka 1", "Kolejka 14")
                         qlabel = qa.get_text(" ", strip=True).split()[0]
                         q_qs = parse_qs(qa["href"].lstrip("?"))
                         queue_link = urljoin(
@@ -149,22 +147,21 @@ def get_all_matches(season_id: int):
                             f"&Kolejka={q_qs['Kolejka'][0]}"
                         )
 
-                        # Parsujemy tabelę meczów dla tej kolejki
+                        # 4) Parsuj tabelę meczów dla tej kolejki
                         ksoup = _get_soup(url=queue_link)
                         table = ksoup.find("table", id="prevMatchTable")
                         matches = []
                         if table:
                             for tr in table.find_all("tr"):
+                                # tylko wiersze z linkiem do meczu i przynajmniej 7 kolumn
+                                if not tr.find("a", href=lambda h: h and "Mecz=" in h):
+                                    continue
                                 tds = tr.find_all("td")
-                                # tylko wiersze z prawdziwym meczem
-                                has_mecz = tr.find("a", href=lambda h: h and "Mecz=" in h)
-                                # i przynajmniej 7 kolumn (minimalna struktura _parse_match_row)
-                                if not has_mecz or len(tds) < 7:
+                                if len(tds) < 7:
                                     continue
                                 try:
                                     matches.append(_parse_match_row(tr))
                                 except Exception:
-                                    # pominąć wiersze, które zaskakują formatem
                                     continue
 
                         data[woj_name][cat_key][roz_name]["rounds"][round_label][qlabel] = matches
@@ -180,5 +177,5 @@ def matches(season_id: int):
     try:
         tree = get_all_matches(season_id)
     except requests.HTTPError as e:
-        raise HTTPException(502, f"Błąd podczas pobierania z zewnętrznego serwisu: {e}")
+        raise HTTPException(502, f"Błąd podczas pobierania danych z zewnętrznego serwisu: {e}")
     return {"season": season_id, "matches": tree}
