@@ -250,6 +250,15 @@ calendar_events = Table(
            server_default=func.now(), nullable=False),
 )
 
+# 21) ProEl - zapisane mecze stolikowe
+saved_matches = Table(
+    "saved_matches", metadata,
+    Column("match_number", Integer, primary_key=True, index=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("data_json", JSON, nullable=False),
+    Column("is_finished", Boolean, nullable=False, server_default=text("false")),
+)
+
 
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)

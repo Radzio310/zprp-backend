@@ -279,3 +279,19 @@ class OffTimeAction(BaseModel):
     DataDo: date
     Info: str
 
+# ------------------------- PROEL SAVED MATCHES -------------------------
+class CreateSavedMatchRequest(BaseModel):
+    match_number: int
+    data_json: Any
+
+class UpdateSavedMatchRequest(BaseModel):
+    data_json: Any
+
+class MatchItem(BaseModel):
+    match_number: int
+    updated_at: datetime
+    data_json: Any
+    is_finished: bool
+
+class ListSavedMatchesResponse(BaseModel):
+    matches: List[MatchItem]
