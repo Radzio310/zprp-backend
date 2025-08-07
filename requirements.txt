@@ -19,5 +19,6 @@ aiosqlite
 psycopg2-binary
 python-multipart
 bcrypt
+lxml
 
 
