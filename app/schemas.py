@@ -281,14 +281,14 @@ class OffTimeAction(BaseModel):
 
 # ------------------------- PROEL SAVED MATCHES -------------------------
 class CreateSavedMatchRequest(BaseModel):
-    match_number: int
+    match_number: str
     data_json: Any
 
 class UpdateSavedMatchRequest(BaseModel):
     data_json: Any
 
 class MatchItem(BaseModel):
-    match_number: int
+    match_number: str
     updated_at: datetime
     data_json: Any
     is_finished: bool

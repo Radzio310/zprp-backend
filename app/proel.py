@@ -17,14 +17,18 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
-@router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED,
-             summary="Dodaj nowy zapis meczu do ProEl'a")
+@router.post(
+    "/", 
+    response_model=dict, 
+    status_code=status.HTTP_201_CREATED,
+    summary="Dodaj nowy mecz ProEl"
+)
 async def create_proel_match(req: CreateSavedMatchRequest):
     existing = await database.fetch_one(
         select(saved_matches).where(saved_matches.c.match_number == req.match_number)
     )
     if existing:
-        raise HTTPException(status_code=400, detail="Match already exists")
+        raise HTTPException(status_code=400, detail="Mecz o takim numerze już istnieje")
     stmt = insert(saved_matches).values(
         match_number=req.match_number,
         data_json=req.data_json,
@@ -33,13 +37,20 @@ async def create_proel_match(req: CreateSavedMatchRequest):
     await database.execute(stmt)
     return {"success": True}
 
-@router.put("/{match_number}", response_model=dict, summary="Aktualizuj istniejący mecz w ProEl'w")
-async def update_proel_match(match_number: int, req: UpdateSavedMatchRequest):
+@router.put(
+    "/{match_number}", 
+    response_model=dict, 
+    summary="Edytuj mecz ProEl (jeśli nie zakończony)"
+)
+async def update_proel_match(
+    match_number: str, 
+    req: UpdateSavedMatchRequest
+):
     row = await database.fetch_one(
         select(saved_matches).where(saved_matches.c.match_number == match_number)
     )
     if not row:
-        raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
+        raise HTTPException(404, "Nie znaleziono meczu ProEl")
     if row["is_finished"]:
         raise HTTPException(400, "Nie można edytować zakończonego meczu")
     stmt = (
@@ -50,8 +61,12 @@ async def update_proel_match(match_number: int, req: UpdateSavedMatchRequest):
     await database.execute(stmt)
     return {"success": True}
 
-@router.delete("/{match_number}", response_model=dict, summary="Usuń mecz z ProEl'a")
-async def delete_proel_match(match_number: int):
+@router.delete(
+    "/{match_number}", 
+    response_model=dict, 
+    summary="Usuń mecz ProEl"
+)
+async def delete_proel_match(match_number: str):
     result = await database.execute(
         delete(saved_matches).where(saved_matches.c.match_number == match_number)
     )
@@ -59,7 +74,11 @@ async def delete_proel_match(match_number: int):
         raise HTTPException(404, "Nie znaleziono meczu ProEl")
     return {"success": True}
 
-@router.get("/", response_model=ListSavedMatchesResponse, summary="Lista wszystkich meczów w ProEl'u")
+@router.get(
+    "/", 
+    response_model=ListSavedMatchesResponse, 
+    summary="Lista wszystkich meczów ProEl"
+)
 async def list_proel_matches():
     rows = await database.fetch_all(
         select(saved_matches).order_by(saved_matches.c.match_number)
