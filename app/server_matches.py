@@ -154,4 +154,14 @@ def full_timetable_by_id(
         raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
 
     # 4) Konwersja na JSON
-    return df.to_dict(orient="records")
+    # --- zamiast pełnego zwrotu:
+    # return df.to_dict(orient="records")
+
+    # zwracamy tylko pierwsze 10 wierszy
+    fragment = df.head(10).to_dict(orient="records")
+    return {
+        "season_id": season_id,
+        "total_rows": len(df),
+        "shown_rows": len(fragment),
+        "data": fragment
+    }
