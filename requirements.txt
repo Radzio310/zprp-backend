@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 httpx
+pandas
 python-dotenv
 pyjwt
 pydantic-settings

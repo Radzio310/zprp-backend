@@ -4,6 +4,8 @@ from collections import defaultdict
 from urllib.parse import urljoin, parse_qs, urlparse, urlencode, urlunparse
 from fastapi import APIRouter, HTTPException
 
+from app.zprp_client import ZprpApiClient, ZprpResponseError
+
 BASE_URL = "https://rozgrywki.zprp.pl/"
 
 router = APIRouter(prefix="/matches", tags=["matches"])
@@ -93,3 +95,45 @@ def first_links(season_id: int):
     except requests.HTTPError as e:
         raise HTTPException(502, f"Błąd podczas pobierania z zewnętrznego serwisu: {e}")
     return {"season": season_id, "first_links": tree}
+
+
+from fastapi import Query
+from typing import List
+
+@router.get(
+    "/{season_name}/full-timetable",
+    summary="Zwraca pełny terminarz meczów dla danego sezonu",
+    response_model=List[dict]
+)
+def full_timetable(
+    season_name: str,
+    wzpr_list: List[str] = Query(
+        [],
+        title="Filtr WZPR",
+        description="Lista skrótów województw (NazwaWZPR) do uwzględnienia; pusty = wszystkie"
+    ),
+    central_level_only: bool = Query(
+        False,
+        title="Poziom centralny",
+        description="Jeśli True, zwróci tylko rozgrywki centralne"
+    ),
+):
+    """
+    Pobiera kompletny terminarz meczów z API rozgrywki.zprp.pl dla sezonu `season_name`.
+    - `wzpr_list`: lista województw do filtrowania (puste = wszystkie).
+    - `central_level_only`: jeśli True, tylko rozgrywki centralne.
+    """
+    try:
+        client = ZprpApiClient(debug_logging=False)
+        df = client.fetch_full_timetable(
+            desired_season=season_name,
+            wzpr_list=wzpr_list,
+            central_level_only=central_level_only
+        )
+    except ZprpResponseError as e:
+        raise HTTPException(502, f"Błąd podczas komunikacji z API ZPRP: {e}")
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+    # Konwersja DataFrame na listę słowników
+    return df.to_dict(orient="records")
