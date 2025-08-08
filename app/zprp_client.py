@@ -71,6 +71,8 @@ class ZprpApiClient(ZprpApiCommon):
 
     def _get_request_json(self, link: str, spot: str):
         self.request_counter += 1
+        if self.request_counter % 10 == 0:
+            self.utils.log_this(f"Requests so far: {self.request_counter}", 'info')
         for _ in range(6):
             try:
                 resp = self.session.get(link, timeout=10)
