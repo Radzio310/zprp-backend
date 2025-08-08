@@ -98,35 +98,42 @@ def first_links(season_id: int):
 
 
 from fastapi import Query
-from typing import Any, Dict, List
+from typing import List, Optional
+from datetime import date
+import pandas as pd
 
 @router.get(
     "/{season_id}/full-timetable",
-    summary="Zwraca pełny terminarz meczów dla danego sezonu (po ID)",
-    response_model=Dict[str, Any]
+    summary="Zwraca fragment terminarza meczów dla danego sezonu (po ID) z opcjonalnym filtrem dat",
+    # teraz zwracamy słownik, nie listę
+    response_model=dict
 )
 def full_timetable_by_id(
     season_id: int,
     wzpr_list: List[str] = Query(
-        [],
-        title="Filtr WZPR",
+        [], title="Filtr WZPR",
         description="Lista skrótów województw (NazwaWZPR) do uwzględnienia; pusty = wszystkie"
     ),
     central_level_only: bool = Query(
-        False,
-        title="Poziom centralny",
+        False, title="Poziom centralny",
         description="Jeśli True, zwróci tylko rozgrywki centralne"
+    ),
+    start_date: Optional[date] = Query(
+        None, title="Data początkowa",
+        description="Pokaż tylko mecze z tej daty lub później (YYYY-MM-DD)"
+    ),
+    end_date:   Optional[date] = Query(
+        None, title="Data końcowa",
+        description="Pokaż tylko mecze do tej daty włącznie (YYYY-MM-DD)"
     ),
 ):
     """
-    Pobiera kompletny terminarz meczów z API rozgrywki.zprp.pl dla sezonu o danym ID.
-    - `season_id`: numer ID_sezon (np. 193, 194, …)
-    - `wzpr_list`: lista województw do filtrowania (puste = wszystkie).
-    - `central_level_only`: jeśli True, tylko rozgrywki centralne.
+    Pobiera kompletny terminarz meczów z API rozgrywki.zprp.pl dla sezonu o danym ID,
+    a następnie, jeśli podano `start_date` i/lub `end_date`, filtruje wyniki.
     """
     client = ZprpApiClient(debug_logging=False)
 
-    # 1) Najpierw pobierz listę sezonów i znajdź ten o pasującym ID
+    # 1) Pobierz listę sezonów i znajdź ten o pasującym ID
     link_seasons = client.get_link_zprp('seasons_api', {})
     seasons = client._get_request_json(link_seasons, 'seasons_api')
     season = next(
@@ -136,32 +143,36 @@ def full_timetable_by_id(
     if not season:
         raise HTTPException(404, f"Sezon o ID {season_id} nie znaleziony.")
 
-    # 2) Podmiana metody _find_season, by zwróciła nam słownik 'season'
+    # 2) Wstrzyknij znaleziony sezon zamiast _find_season
     client._find_season = lambda desired: season
 
-    # 3) Wywołanie fetch_full_timetable tak jak wcześniej
+    # 3) Pobierz cały terminarz
     try:
         df = client.fetch_full_timetable(
-            desired_season=str(season_id),  # wartość nieistotna, bo _find_season już zwraca
+            desired_season=str(season_id),
             wzpr_list=wzpr_list,
             central_level_only=central_level_only
         )
     except ZprpResponseError as e:
         raise HTTPException(502, f"Błąd podczas komunikacji z API ZPRP: {e}")
     except Exception as e:
-        # Tu złapiemy też każdy inny błąd i wypiszemy go w logu
         client.utils.log_this(f"Unexpected error in full-timetable: {e}", 'error')
         raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
 
-    # 4) Konwersja na JSON
-    # --- zamiast pełnego zwrotu:
-    # return df.to_dict(orient="records")
+    # 4) Filtr po dacie, jeśli podano
+    # zakładamy, że kolumna z datą to 'data_prop' — można też użyć 'data_fakt'
+    df['data_prop_dt'] = pd.to_datetime(df['data_prop'], errors='coerce').dt.date
 
-    # zwracamy tylko pierwsze 10 wierszy
+    if start_date:
+        df = df[df['data_prop_dt'] >= start_date]
+    if end_date:
+        df = df[df['data_prop_dt'] <= end_date]
+
+    # 5) Zwróć tylko fragment
     fragment = df.head(10).to_dict(orient="records")
     return {
-        "season_id": season_id,
+        "season_id":  season_id,
         "total_rows": len(df),
         "shown_rows": len(fragment),
-        "data": fragment
+        "data":       fragment
     }
