@@ -2,13 +2,17 @@ import requests
 from bs4 import BeautifulSoup
 from collections import defaultdict
 from urllib.parse import urljoin, parse_qs, urlparse, urlencode, urlunparse
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from typing import List, Optional
+from datetime import date
+import pandas as pd
 
 from app.zprp_client import ZprpApiClient, ZprpResponseError
 
 BASE_URL = "https://rozgrywki.zprp.pl/"
 
 router = APIRouter(prefix="/matches", tags=["matches"])
+
 
 def _get_soup(params=None, url=None):
     if url:
@@ -18,12 +22,14 @@ def _get_soup(params=None, url=None):
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
 
+
 def _strip_zespoly(href: str) -> str:
     p = urlparse(href)
     qs = parse_qs(p.query)
     qs.pop("Zespoly", None)
     new_query = urlencode(qs, doseq=True)
     return urlunparse((p.scheme, p.netloc, p.path, p.params, new_query, p.fragment))
+
 
 def get_all_first_links(season_id: int):
     root = _get_soup(params={"Sezon": season_id})
@@ -79,11 +85,10 @@ def get_all_first_links(season_id: int):
                             f"&Kolejka={qs['Kolejka'][0]}"
                         )
 
-                data[woj_name][cat_key][roz_name] = {
-                    "first_links": first_links
-                }
+                data[woj_name][cat_key][roz_name] = {"first_links": first_links}
 
     return data
+
 
 @router.get(
     "/{season_id}/first-links",
@@ -97,14 +102,9 @@ def first_links(season_id: int):
     return {"season": season_id, "first_links": tree}
 
 
-from fastapi import Query
-from typing import List, Optional
-from datetime import date
-import pandas as pd
-
 @router.get(
     "/{season_id}/full-timetable",
-    summary="Zwraca fragment terminarza meczów dla danego sezonu (po ID) z opcjonalnym filtrem dat",
+    summary="Zwraca terminarz meczów dla danego sezonu z opcjonalnym filtrem dat i kolejki",
     response_model=dict
 )
 def full_timetable_by_id(
@@ -121,23 +121,24 @@ def full_timetable_by_id(
         None, title="Data początkowa",
         description="Pokaż tylko mecze z tej daty lub później (YYYY-MM-DD)"
     ),
-    end_date:   Optional[date] = Query(
+    end_date: Optional[date] = Query(
         None, title="Data końcowa",
         description="Pokaż tylko mecze do tej daty włącznie (YYYY-MM-DD)"
+    ),
+    series_id: Optional[int] = Query(
+        None, title="ID kolejki",
+        description="Pokaż tylko mecze z tej kolejki (ID_kolejka)"
     ),
 ):
     """
     Pobiera kompletny terminarz meczów z API rozgrywki.zprp.pl dla sezonu o danym ID,
-    a następnie, jeśli podano `start_date` i/lub `end_date`, filtruje wyniki.
+    a następnie, jeśli podano `series_id`, `start_date` i/lub `end_date`, filtruje wyniki.
     """
     client = ZprpApiClient(debug_logging=False)
 
-    # 1) Pobierz listę sezonów i znajdź ten o pasującym ID
+    # 1) Pobierz i znajdź sezon po ID
     seasons = client._get_request_json(client.get_link_zprp('seasons_api', {}), 'seasons_api')
-    season = next(
-        (s for s in seasons.values() if s.get("ID_sezon") == str(season_id)),
-        None
-    )
+    season = next((s for s in seasons.values() if s.get("ID_sezon") == str(season_id)), None)
     if not season:
         raise HTTPException(404, f"Sezon o ID {season_id} nie znaleziony.")
 
@@ -157,14 +158,18 @@ def full_timetable_by_id(
         client.utils.log_this(f"Unexpected error in full-timetable: {e}", 'error')
         raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
 
-    # 4) Filtr po dacie (kolumna data_prop zawiera "YYYY-MM-DD HH:MM:SS")
+    # 4) Opcjonalny filtr po kolejce
+    if series_id is not None:
+        df = df[df["ID_kolejka"].astype(int) == series_id]
+
+    # 5) Filtr po dacie (kolumna data_prop zawiera "YYYY-MM-DD HH:MM:SS")
     df['data_prop_dt'] = pd.to_datetime(df['data_prop'], errors='coerce').dt.date
     if start_date:
         df = df[df['data_prop_dt'] >= start_date]
     if end_date:
         df = df[df['data_prop_dt'] <= end_date]
 
-    # 5) Zwróć tylko początkowy fragment (10 wierszy)
+    # 6) Zwróć tylko początkowy fragment (10 wierszy)
     fragment = df.head(10).to_dict(orient="records")
     return {
         "season_id":  season_id,
@@ -172,4 +177,3 @@ def full_timetable_by_id(
         "shown_rows": len(fragment),
         "data":       fragment
     }
-
