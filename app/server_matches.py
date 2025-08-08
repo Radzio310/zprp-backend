@@ -148,6 +148,10 @@ def full_timetable_by_id(
         )
     except ZprpResponseError as e:
         raise HTTPException(502, f"Błąd podczas komunikacji z API ZPRP: {e}")
+    except Exception as e:
+        # Tu złapiemy też każdy inny błąd i wypiszemy go w logu
+        client.utils.log_this(f"Unexpected error in full-timetable: {e}", 'error')
+        raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
 
     # 4) Konwersja na JSON
     return df.to_dict(orient="records")
