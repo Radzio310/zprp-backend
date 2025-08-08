@@ -76,7 +76,7 @@ class ZprpApiClient(ZprpApiCommon):
         for i in range(6):
             try:
                 return self.session.get(link, timeout=10).json()
-            except (requests.JSONDecodeError, ValueError) as e:
+            except (requests.exceptions.JSONDecodeError, ValueError) as e:
                 self.utils.log_this(f"JSON decode error at {spot}: {e}", 'warn')
                 time.sleep(0.5)
         raise ZprpResponseError(f"_get_request_json failed at {spot} for {link}")
