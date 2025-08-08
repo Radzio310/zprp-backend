@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, status
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select, insert, update, delete
 from app.db import database, saved_matches
 from app.schemas import (
@@ -93,11 +94,23 @@ async def delete_proel_match(match_number: str):
     response_model=ListSavedMatchesResponse,
     summary="Lista wszystkich meczów w ProEl'u"
 )
-async def list_proel_matches():
-    rows = await database.fetch_all(
-        select(saved_matches)
-        .order_by(saved_matches.c.match_number)
+async def list_proel_matches(
+    finished: Optional[bool] = Query(
+        None,
+        description="Filtruj po zakończonych (true) lub niezakończonych (false); domyślnie wszystkie"
     )
+):
+    # budujemy bazowy SELECT
+    stmt = select(saved_matches)
+
+    # jeżeli użytkownik podał finished, dodajemy WHERE
+    if finished is not None:
+        stmt = stmt.where(saved_matches.c.is_finished == finished)
+
+    # dodajemy ORDER BY
+    stmt = stmt.order_by(saved_matches.c.match_number)
+
+    rows = await database.fetch_all(stmt)
     return ListSavedMatchesResponse(
         matches=[MatchItem(**dict(r)) for r in rows]
     )
