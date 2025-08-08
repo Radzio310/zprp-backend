@@ -105,7 +105,6 @@ import pandas as pd
 @router.get(
     "/{season_id}/full-timetable",
     summary="Zwraca fragment terminarza meczów dla danego sezonu (po ID) z opcjonalnym filtrem dat",
-    # teraz zwracamy słownik, nie listę
     response_model=dict
 )
 def full_timetable_by_id(
@@ -134,8 +133,7 @@ def full_timetable_by_id(
     client = ZprpApiClient(debug_logging=False)
 
     # 1) Pobierz listę sezonów i znajdź ten o pasującym ID
-    link_seasons = client.get_link_zprp('seasons_api', {})
-    seasons = client._get_request_json(link_seasons, 'seasons_api')
+    seasons = client._get_request_json(client.get_link_zprp('seasons_api', {}), 'seasons_api')
     season = next(
         (s for s in seasons.values() if s.get("ID_sezon") == str(season_id)),
         None
@@ -143,8 +141,8 @@ def full_timetable_by_id(
     if not season:
         raise HTTPException(404, f"Sezon o ID {season_id} nie znaleziony.")
 
-    # 2) Wstrzyknij znaleziony sezon zamiast _find_season
-    client._find_season = lambda desired: season
+    # 2) Wstrzyknij znaleziony sezon
+    client._find_season = lambda _: season
 
     # 3) Pobierz cały terminarz
     try:
@@ -159,16 +157,14 @@ def full_timetable_by_id(
         client.utils.log_this(f"Unexpected error in full-timetable: {e}", 'error')
         raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
 
-    # 4) Filtr po dacie, jeśli podano
-    # zakładamy, że kolumna z datą to 'data_prop' — można też użyć 'data_fakt'
+    # 4) Filtr po dacie (kolumna data_prop zawiera "YYYY-MM-DD HH:MM:SS")
     df['data_prop_dt'] = pd.to_datetime(df['data_prop'], errors='coerce').dt.date
-
     if start_date:
         df = df[df['data_prop_dt'] >= start_date]
     if end_date:
         df = df[df['data_prop_dt'] <= end_date]
 
-    # 5) Zwróć tylko fragment
+    # 5) Zwróć tylko początkowy fragment (10 wierszy)
     fragment = df.head(10).to_dict(orient="records")
     return {
         "season_id":  season_id,
@@ -176,3 +172,4 @@ def full_timetable_by_id(
         "shown_rows": len(fragment),
         "data":       fragment
     }
+
