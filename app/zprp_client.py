@@ -36,7 +36,6 @@ class ZprpApiCommon:
             'table':  'Tabela',
         }
 
-        # wybór endpointu
         if link_type == 'seasons_api':
             link = f'{ZPRP_URL_API}pokaz_sezony.php'; required = []
         elif link_type == 'game_types_api':
@@ -57,13 +56,12 @@ class ZprpApiCommon:
 
     @staticmethod
     def _assemble_game_row(season, game_type, game_round, game_series, game) -> dict:
-        # zamiast tłumaczyć, łączymy wszystkie dane w jeden słownik
         row = {}
-        row.update(season)
-        row.update(game_type)
-        row.update(game_round)
-        row.update(game_series)
-        row.update(game)
+        row.update(season or {})
+        row.update(game_type or {})
+        row.update(game_round or {})
+        row.update(game_series or {})
+        row.update(game or {})
         return row
 
 class ZprpApiClient(ZprpApiCommon):
@@ -73,11 +71,16 @@ class ZprpApiClient(ZprpApiCommon):
 
     def _get_request_json(self, link: str, spot: str):
         self.request_counter += 1
-        for i in range(6):
+        for _ in range(6):
             try:
-                return self.session.get(link, timeout=10).json()
+                resp = self.session.get(link, timeout=10)
+                resp.raise_for_status()
+                return resp.json()
             except (requests.exceptions.JSONDecodeError, ValueError) as e:
                 self.utils.log_this(f"JSON decode error at {spot}: {e}", 'warn')
+                time.sleep(0.5)
+            except requests.RequestException as e:
+                self.utils.log_this(f"HTTP error at {spot}: {e}", 'warn')
                 time.sleep(0.5)
         raise ZprpResponseError(f"_get_request_json failed at {spot} for {link}")
 
@@ -98,34 +101,32 @@ class ZprpApiClient(ZprpApiCommon):
                         yield self._assemble_game_row(season, gt, rnd, ser, gm)
 
     def _find_season(self, desired_season):
-        link = self.get_link_zprp('seasons_api', {})
-        all_seasons = self._get_request_json(link, 'seasons_api')
+        all_seasons = self._get_request_json(self.get_link_zprp('seasons_api', {}), 'seasons_api') or {}
         for s in all_seasons.values():
             if s.get("Nazwa") == desired_season:
                 return s.copy()
         raise ValueError(f"Sezon `{desired_season}` nie znaleziony.")
 
     def _fetch_game_types(self, season, wzpr_list, central_level_only):
-        link = self.get_link_zprp('game_types_api', {'season': season['ID_sezon']})
-        types = self._get_request_json(link, 'game_types_api')
+        types = self._get_request_json(self.get_link_zprp('game_types_api', {'season': season['ID_sezon']}), 'game_types_api') or {}
         for gt in types.values():
             if not int(gt.get('Wystartowano', 0)): continue
-            ok_wzpr    = wzpr_list and gt['NazwaWZPR'] in wzpr_list
-            ok_central = central_level_only and len(gt['code_export'].split('/')) == 1
+            ok_wzpr    = wzpr_list and gt.get('NazwaWZPR') in wzpr_list
+            ok_central = central_level_only and len(gt.get('code_export','').split('/')) == 1
             if ok_wzpr or ok_central:
                 yield gt
 
     def _fetch_rounds(self, game_type):
-        link = self.get_link_zprp('game_rounds_api', {'type': game_type["Id_rozgrywki"]})
-        return self._get_request_json(link, 'game_rounds_api').values()
+        req = self._get_request_json(self.get_link_zprp('game_rounds_api', {'type': game_type["Id_rozgrywki"]}), 'game_rounds_api')
+        return list(req.values()) if isinstance(req, dict) else []
 
     def _fetch_series(self, game_round):
-        link = self.get_link_zprp('series_api', {'round': game_round["Id"]})
-        return self._get_request_json(link, 'series_api').values()
+        req = self._get_request_json(self.get_link_zprp('series_api', {'round': game_round["Id"]}), 'series_api')
+        return list(req.values()) if isinstance(req, dict) else []
 
     def _fetch_games(self, game_series):
-        link = self.get_link_zprp('games_api', {'series': game_series["ID_kolejka"]})
-        return self._get_request_json(link, 'games_api').values()
+        req = self._get_request_json(self.get_link_zprp('games_api', {'series': game_series["ID_kolejka"]}), 'games_api')
+        return list(req.values()) if isinstance(req, dict) else []
 
 class ZprpApiClientAsync(ZprpApiCommon):
     def __init__(self, utils=None, debug_logging: bool = False):
@@ -134,7 +135,7 @@ class ZprpApiClientAsync(ZprpApiCommon):
 
     async def _get_request_json(self, link: str, spot: str):
         self.request_counter += 1
-        for i in range(6):
+        for _ in range(6):
             try:
                 resp = await self.client.get(link)
                 resp.raise_for_status()
@@ -155,9 +156,9 @@ class ZprpApiClientAsync(ZprpApiCommon):
 
     async def _stream_games(self, desired_season, wzpr_list, central_level_only):
         season = await self._find_season(desired_season)
-        # analogicznie do wersji synchronicznej, ale z gather(...) jeśli chcesz
+        # możemy uprościć asynchronicznie bez gather, analogicznie do sync
         for gt in [gt async for gt in self._fetch_game_types(season, wzpr_list, central_level_only)]:
-            for rnd in await self._get_request_json(self.get_link_zprp('game_rounds_api', {'type': gt['Id_rozgrywki']}), 'game_rounds_api'):
-                for ser in await self._get_request_json(self.get_link_zprp('series_api', {'round': rnd['Id']}), 'series_api'):
-                    for gm in await self._get_request_json(self.get_link_zprp('games_api', {'series': ser['ID_kolejka']}), 'games_api'):
+            for rnd in await self.client.get(self.get_link_zprp('game_rounds_api', {'type': gt['Id_rozgrywki']})).json() or []:
+                for ser in await self.client.get(self.get_link_zprp('series_api', {'round': rnd['Id']})).json() or []:
+                    for gm in await self.client.get(self.get_link_zprp('games_api', {'series': ser['ID_kolejka']})).json() or []:
                         yield self._assemble_game_row(season, gt, rnd, ser, gm)
