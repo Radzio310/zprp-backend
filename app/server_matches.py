@@ -98,12 +98,12 @@ def first_links(season_id: int):
 
 
 from fastapi import Query
-from typing import List
+from typing import Any, Dict, List
 
 @router.get(
     "/{season_id}/full-timetable",
     summary="Zwraca pełny terminarz meczów dla danego sezonu (po ID)",
-    response_model=List[dict]
+    response_model=Dict[str, Any]
 )
 def full_timetable_by_id(
     season_id: int,
