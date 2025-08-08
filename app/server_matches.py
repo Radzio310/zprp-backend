@@ -101,12 +101,12 @@ from fastapi import Query
 from typing import List
 
 @router.get(
-    "/{season_name}/full-timetable",
-    summary="Zwraca pełny terminarz meczów dla danego sezonu",
+    "/{season_id}/full-timetable",
+    summary="Zwraca pełny terminarz meczów dla danego sezonu (po ID)",
     response_model=List[dict]
 )
-def full_timetable(
-    season_name: str,
+def full_timetable_by_id(
+    season_id: int,
     wzpr_list: List[str] = Query(
         [],
         title="Filtr WZPR",
@@ -119,21 +119,35 @@ def full_timetable(
     ),
 ):
     """
-    Pobiera kompletny terminarz meczów z API rozgrywki.zprp.pl dla sezonu `season_name`.
+    Pobiera kompletny terminarz meczów z API rozgrywki.zprp.pl dla sezonu o danym ID.
+    - `season_id`: numer ID_sezon (np. 193, 194, …)
     - `wzpr_list`: lista województw do filtrowania (puste = wszystkie).
     - `central_level_only`: jeśli True, tylko rozgrywki centralne.
     """
+    client = ZprpApiClient(debug_logging=False)
+
+    # 1) Najpierw pobierz listę sezonów i znajdź ten o pasującym ID
+    link_seasons = client.get_link_zprp('seasons_api', {})
+    seasons = client._get_request_json(link_seasons, 'seasons_api')
+    season = next(
+        (s for s in seasons.values() if s.get("ID_sezon") == str(season_id)),
+        None
+    )
+    if not season:
+        raise HTTPException(404, f"Sezon o ID {season_id} nie znaleziony.")
+
+    # 2) Podmiana metody _find_season, by zwróciła nam słownik 'season'
+    client._find_season = lambda desired: season
+
+    # 3) Wywołanie fetch_full_timetable tak jak wcześniej
     try:
-        client = ZprpApiClient(debug_logging=False)
         df = client.fetch_full_timetable(
-            desired_season=season_name,
+            desired_season=str(season_id),  # wartość nieistotna, bo _find_season już zwraca
             wzpr_list=wzpr_list,
             central_level_only=central_level_only
         )
     except ZprpResponseError as e:
         raise HTTPException(502, f"Błąd podczas komunikacji z API ZPRP: {e}")
-    except ValueError as e:
-        raise HTTPException(404, str(e))
 
-    # Konwersja DataFrame na listę słowników
+    # 4) Konwersja na JSON
     return df.to_dict(orient="records")
