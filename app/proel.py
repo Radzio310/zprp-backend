@@ -107,8 +107,11 @@ async def list_proel_matches(
     if finished is not None:
         stmt = stmt.where(saved_matches.c.is_finished == finished)
 
-    # dodajemy ORDER BY
-    stmt = stmt.order_by(saved_matches.c.match_number)
+    # najnowsze (ostatnio edytowane) najpierw
+    stmt = stmt.order_by(
+        saved_matches.c.updated_at.desc(),
+        saved_matches.c.match_number.desc()
+    )
 
     rows = await database.fetch_all(stmt)
     return ListSavedMatchesResponse(
