@@ -186,16 +186,19 @@ def full_timetable_by_id(
     if 'data_prop' in df.columns:
         df['data_prop_dt'] = pd.to_datetime(df['data_prop'], errors='coerce').dt.date
 
-    # 10 wierszy → czyste typy
-    fragment_df = df.head(10).copy()
-    fragment = json.loads(fragment_df.to_json(orient='records', force_ascii=False))
+    # po wszystkich filtrach — zwróć pełną listę
+    if 'data_prop_dt' in df.columns:
+        df = df.drop(columns=['data_prop_dt'])
+
+    records = json.loads(df.to_json(orient='records', force_ascii=False))
 
     payload = {
         "season_id": int(season_id),
         "total_rows": int(len(df)),
-        "shown_rows": len(fragment),
-        "data": fragment,
+        "shown_rows": len(records),
+        "data": records,
     }
+
 
     # ominięcie pydantic response_model
     return JSONResponse(content=payload)
