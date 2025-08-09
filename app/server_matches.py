@@ -1,3 +1,5 @@
+import json
+from fastapi.responses import JSONResponse
 import requests
 from bs4 import BeautifulSoup
 from collections import defaultdict
@@ -158,34 +160,28 @@ def full_timetable_by_id(
         client.utils.log_this(f"Unexpected error in full-timetable: {e}", 'error')
         raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
 
-    # 3.5) Jeżeli pusto – zwróć od razu pustą strukturę
     if df.empty:
-        return {
-            "season_id": season_id,
-            "total_rows": 0,
-            "shown_rows": 0,
-            "data": []
-        }
+        payload = {"season_id": season_id, "total_rows": 0, "shown_rows": 0, "data": []}
+        return JSONResponse(content=payload)
 
-    # 4) filtr po kolejce – tylko jeśli kolumna istnieje
+    # BEZPIECZNY filtr po kolejce
     if series_id is not None and 'ID_kolejka' in df.columns:
-        df = df[pd.to_numeric(df["ID_kolejka"], errors="coerce") == series_id]
+        df = df[pd.to_numeric(df['ID_kolejka'], errors='coerce') == series_id]
 
-    # 5) filtr dat – tylko jeśli mamy kolumnę data_prop
+    # BEZPIECZNY filtr po dacie
     if 'data_prop' in df.columns:
         df['data_prop_dt'] = pd.to_datetime(df['data_prop'], errors='coerce').dt.date
-        if start_date:
-            df = df[df['data_prop_dt'] >= start_date]
-        if end_date:
-            df = df[df['data_prop_dt'] <= end_date]
-    else:
-        df['data_prop_dt'] = pd.NaT  # albo pomiń całkiem
 
-    # 6) Zwróć tylko początkowy fragment (10 wierszy)
-    fragment = df.head(10).to_dict(orient="records")
-    return {
-        "season_id":  season_id,
-        "total_rows": len(df),
+    # 10 wierszy → czyste typy
+    fragment_df = df.head(10).copy()
+    fragment = json.loads(fragment_df.to_json(orient='records', force_ascii=False))
+
+    payload = {
+        "season_id": int(season_id),
+        "total_rows": int(len(df)),
         "shown_rows": len(fragment),
-        "data":       fragment
+        "data": fragment,
     }
+
+    # ominięcie pydantic response_model
+    return JSONResponse(content=payload)
