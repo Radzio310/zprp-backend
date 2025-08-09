@@ -1,10 +1,13 @@
 # main.py
 
+import asyncio
+from datetime import datetime, timedelta
 import os
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from requests import delete
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -27,7 +30,7 @@ from app.login_records import router as login_records_router
 from app.proel import router as proel_router
 from app.server_matches import router as matches_router
 
-from app.db import database
+from app.db import database, saved_matches
 
 app = FastAPI(title="BAZA - API")
 
@@ -65,13 +68,39 @@ app.include_router(matches_router)
 
 logger = logging.getLogger("uvicorn")
 
+_cleanup_task: asyncio.Task | None = None
+
+async def _cleanup_loop():
+    """Kasuje mecze z ProEl starsze niż PROEL_RETENTION_DAYS (domyślnie 7) co 24h."""
+    retention_days = int(os.getenv("PROEL_RETENTION_DAYS", "7"))
+    interval_sec = int(os.getenv("PROEL_CLEANUP_INTERVAL_SECONDS", str(24*60*60)))
+    while True:
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=retention_days)
+            stmt = delete(saved_matches).where(saved_matches.c.updated_at < cutoff)
+            removed = await database.execute(stmt)
+            logger.info(f"🧹 ProEl cleanup: removed {int(removed or 0)} rows older than {cutoff.isoformat()} UTC")
+        except Exception as e:
+            logger.exception("Cleanup loop error")
+        await asyncio.sleep(interval_sec)
+
+
 @app.on_event("startup")
 async def startup():
     await database.connect()
     logger.info("✅ Connected to the database")
+    global _cleanup_task
+    _cleanup_task = asyncio.create_task(_cleanup_loop())
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _cleanup_task
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
     await database.disconnect()
     logger.info("✅ Disconnected from the database")
 
