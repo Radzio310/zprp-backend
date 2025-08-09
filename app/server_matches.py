@@ -158,16 +158,28 @@ def full_timetable_by_id(
         client.utils.log_this(f"Unexpected error in full-timetable: {e}", 'error')
         raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
 
-    # 4) Opcjonalny filtr po kolejce
-    if series_id is not None:
-        df = df[df["ID_kolejka"].astype(int) == series_id]
+    # 3.5) Jeżeli pusto – zwróć od razu pustą strukturę
+    if df.empty:
+        return {
+            "season_id": season_id,
+            "total_rows": 0,
+            "shown_rows": 0,
+            "data": []
+        }
 
-    # 5) Filtr po dacie (kolumna data_prop zawiera "YYYY-MM-DD HH:MM:SS")
-    df['data_prop_dt'] = pd.to_datetime(df['data_prop'], errors='coerce').dt.date
-    if start_date:
-        df = df[df['data_prop_dt'] >= start_date]
-    if end_date:
-        df = df[df['data_prop_dt'] <= end_date]
+    # 4) filtr po kolejce – tylko jeśli kolumna istnieje
+    if series_id is not None and 'ID_kolejka' in df.columns:
+        df = df[pd.to_numeric(df["ID_kolejka"], errors="coerce") == series_id]
+
+    # 5) filtr dat – tylko jeśli mamy kolumnę data_prop
+    if 'data_prop' in df.columns:
+        df['data_prop_dt'] = pd.to_datetime(df['data_prop'], errors='coerce').dt.date
+        if start_date:
+            df = df[df['data_prop_dt'] >= start_date]
+        if end_date:
+            df = df[df['data_prop_dt'] <= end_date]
+    else:
+        df['data_prop_dt'] = pd.NaT  # albo pomiń całkiem
 
     # 6) Zwróć tylko początkowy fragment (10 wierszy)
     fragment = df.head(10).to_dict(orient="records")

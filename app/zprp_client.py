@@ -110,13 +110,22 @@ class ZprpApiClient(ZprpApiCommon):
         raise ValueError(f"Sezon `{desired_season}` nie znaleziony.")
 
     def _fetch_game_types(self, season, wzpr_list, central_level_only):
-        types = self._get_request_json(self.get_link_zprp('game_types_api', {'season': season['ID_sezon']}), 'game_types_api') or {}
+        types = self._get_request_json(
+            self.get_link_zprp('game_types_api', {'season': season['ID_sezon']}),
+            'game_types_api'
+        ) or {}
         for gt in types.values():
-            if not int(gt.get('Wystartowano', 0)): continue
-            ok_wzpr    = wzpr_list and gt.get('NazwaWZPR') in wzpr_list
-            ok_central = central_level_only and len(gt.get('code_export','').split('/')) == 1
-            if ok_wzpr or ok_central:
-                yield gt
+            if not int(gt.get('Wystartowano', 0)):
+                continue
+            # Filtr WZPR tylko jeśli podany
+            if wzpr_list and gt.get('NazwaWZPR') not in wzpr_list:
+                continue
+            # Filtr centralny tylko jeśli True
+            code = gt.get('code_export')  # może być None
+            if central_level_only and (not code or '/' in code):
+                continue
+            yield gt
+
 
     def _fetch_rounds(self, game_type):
         req = self._get_request_json(self.get_link_zprp('game_rounds_api', {'type': game_type["Id_rozgrywki"]}), 'game_rounds_api')
