@@ -160,6 +160,20 @@ def full_timetable_by_id(
         client.utils.log_this(f"Unexpected error in full-timetable: {e}", 'error')
         raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
 
+    # BEZPIECZNY filtr po dacie (priorytet: data_fakt -> data_prop), granice włącznie
+    if start_date or end_date:
+        dt_fakt = pd.to_datetime(df['data_fakt'], errors='coerce') if 'data_fakt' in df.columns else pd.Series(pd.NaT, index=df.index)
+        dt_prop = pd.to_datetime(df['data_prop'], errors='coerce') if 'data_prop' in df.columns else pd.Series(pd.NaT, index=df.index)
+        df['_match_dt'] = dt_fakt.fillna(dt_prop)  # preferuj data_fakt, fallback na data_prop
+
+        if start_date:
+            df = df[df['_match_dt'].dt.date >= start_date]
+        if end_date:
+            df = df[df['_match_dt'].dt.date <= end_date]
+
+        df = df.drop(columns=['_match_dt'])
+
+    # jeśli po filtrach nic nie zostało – zwróć pustą odpowiedź
     if df.empty:
         payload = {"season_id": season_id, "total_rows": 0, "shown_rows": 0, "data": []}
         return JSONResponse(content=payload)
