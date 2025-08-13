@@ -141,22 +141,38 @@ class ZprpApiClient(ZprpApiCommon):
     
     @staticmethod
     def _normalize_match_number(s: str) -> str:
-        # porównujemy bez różnic wielkości liter i spacji wokół
-        return (s or "").strip().upper()
+        return (str(s) or "").strip().upper()
 
     @classmethod
-    def _game_has_number(cls, gm: dict, target_norm: str) -> bool:
-        # API ZPRP bywa niekonsekwentne w nazewnictwie; sprawdzamy kilka kluczy
+    def _game_has_number(cls, gm: dict, gt: dict, target_norm: str) -> bool:
+        """
+        Sprawdza, czy mecz `gm` ma numer równy `target_norm`.
+        Oprócz klasycznych pól obsługujemy:
+        - `RozgrywkiCode` (np. SPM/1),
+        - kombinację: (gt.code_export || gt.code) + '/' + (gm.Nr || gm.nr || gm.Lp)
+        """
+        # 1) bezpośrednie pola w odpowiedzi meczu
         candidate_keys = (
+            "RozgrywkiCode",          # <-- to właśnie masz w payloadzie
             "Nr_meczu", "nr_meczu",
             "Numer_meczu", "numer_meczu",
-            "Numer", "nr",  # czasem krótko
-            "Kod_meczu", "kod_meczu", "code_game"
+            "Numer", "nr",
+            "Kod_meczu", "kod_meczu", "code_game",
         )
         for k in candidate_keys:
-            if k in gm:
-                if cls._normalize_match_number(str(gm[k])) == target_norm:
-                    return True
+            if k in gm and cls._normalize_match_number(gm[k]) == target_norm:
+                return True
+
+        # 2) złożone: prefix z typu rozgrywek + '/' + numer z meczu
+        prefixes = [gt.get("code_export"), gt.get("code")]
+        numbers  = [gm.get("Nr"), gm.get("nr"), gm.get("Lp")]
+        for p in prefixes:
+            for n in numbers:
+                if p and n:
+                    composed = f"{p}/{n}"
+                    if cls._normalize_match_number(composed) == target_norm:
+                        return True
+
         return False
 
     def find_game_by_number(
@@ -166,18 +182,14 @@ class ZprpApiClient(ZprpApiCommon):
         wzpr_list: list[str] | None = None,
         central_level_only: bool = False,
     ) -> dict | None:
-        """
-        Przechodzi po typach/rundach/kolejkach i zwraca pierwszy mecz,
-        którego numer == match_number. Zwraca scalony wiersz (season+type+round+series+game)
-        albo None jeśli nie znaleziono.
-        """
         season = self._find_season(desired_season)
         target = self._normalize_match_number(match_number)
+
         for gt in self._fetch_game_types(season, wzpr_list or [], central_level_only):
             for rnd in self._fetch_rounds(gt):
                 for ser in self._fetch_series(rnd):
                     for gm in self._fetch_games(ser):
-                        if self._game_has_number(gm, target):
+                        if self._game_has_number(gm, gt, target):
                             return self._assemble_game_row(season, gt, rnd, ser, gm)
         return None
 
