@@ -1,6 +1,7 @@
 # app/clients/zprp_client.py
 
 import asyncio
+from datetime import date
 import json
 import time
 import requests
@@ -175,20 +176,41 @@ class ZprpApiClient(ZprpApiCommon):
 
         return False
 
+    @staticmethod
+    def _game_date_str(gm: dict) -> str | None:
+        """
+        Zwraca 'YYYY-MM-DD' dla meczu (preferuje data_fakt, fallback data_prop),
+        albo None jeśli brak daty.
+        """
+        s = gm.get("data_fakt") or gm.get("data_prop") or ""
+        if not s:
+            return None
+        return str(s)[:10]  # szybkie, bez parsowania daty
+
     def find_game_by_number(
         self,
         desired_season: str,
         match_number: str,
         wzpr_list: list[str] | None = None,
         central_level_only: bool = False,
+        match_date: date | None = None,   # <-- NOWE
     ) -> dict | None:
         season = self._find_season(desired_season)
         target = self._normalize_match_number(match_number)
+        date_str = match_date.isoformat() if match_date else None
 
         for gt in self._fetch_game_types(season, wzpr_list or [], central_level_only):
             for rnd in self._fetch_rounds(gt):
                 for ser in self._fetch_series(rnd):
                     for gm in self._fetch_games(ser):
+
+                        # 1) jeśli podano dzień — filtruj najpierw po dacie
+                        if date_str is not None:
+                            gm_date = self._game_date_str(gm)
+                            if gm_date != date_str:
+                                continue
+
+                        # 2) dopiero potem sprawdzaj numer
                         if self._game_has_number(gm, gt, target):
                             return self._assemble_game_row(season, gt, rnd, ser, gm)
         return None

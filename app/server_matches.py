@@ -205,44 +205,36 @@ def full_timetable_by_id(
 
 @router.get(
     "/{season_id}/by-number",
-    summary="Znajdź jeden mecz po numerze (np. IKB/23) w podanym sezonie",
+    summary="Zwraca jeden mecz po numerze (opcjonalnie tylko z danego dnia)",
 )
 def match_by_number(
     season_id: int,
-    match_number: str = Query(..., min_length=1, description="Dokładny numer meczu, np. IKB/23"),
-    # opcjonalnie możesz wystawić te dwa filtry, ale nie są wymagane:
-    # central_level_only: bool = False,
-    # wzpr_list: List[str] = Query([], description="Filtr WZPR (opcjonalnie)"),
+    match_number: str = Query(..., description="Np. SPM/1 (slash będzie url-enkodowany)"),
+    match_date: Optional[date] = Query(
+        None, description="Filtr dnia w formacie YYYY-MM-DD; jeśli podany, szukamy tylko tego dnia"
+    ),
+    wzpr_list: List[str] = Query([], description="Opcjonalny filtr WZPR"),
+    central_level_only: bool = Query(False, description="Tylko poziom centralny"),
 ):
     client = ZprpApiClient(debug_logging=False)
 
-    # znajdź sezon po ID (jak w full_timetable)
+    # znajdź sezon po ID (jak w innych endpointach)
     seasons = client._get_request_json(client.get_link_zprp('seasons_api', {}), 'seasons_api')
     season = next((s for s in seasons.values() if s.get("ID_sezon") == str(season_id)), None)
     if not season:
         raise HTTPException(404, f"Sezon o ID {season_id} nie znaleziony.")
-
-    # wstrzyknij sezon, aby pominąć dodatkowe szukanie
     client._find_season = lambda _: season
 
-    try:
-        row = client.find_game_by_number(
-            desired_season=str(season_id),
-            match_number=match_number,
-            # central_level_only=central_level_only,
-            # wzpr_list=wzpr_list,
-        )
-    except ZprpResponseError as e:
-        raise HTTPException(502, f"Błąd podczas komunikacji z API ZPRP: {e}")
-    except Exception as e:
-        client.utils.log_this(f"Unexpected error in match-by-number: {e}", 'error')
-        raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
-
+    row = client.find_game_by_number(
+        desired_season=str(season_id),
+        match_number=match_number,
+        wzpr_list=wzpr_list,
+        central_level_only=central_level_only,
+        match_date=match_date,   # <-- przekazujemy filtr dnia
+    )
     if not row:
-        raise HTTPException(404, f"Nie znaleziono meczu o numerze '{match_number}' w sezonie {season_id}.")
+        suffix = f" w dniu {match_date.isoformat()}" if match_date else ""
+        raise HTTPException(404, f"Nie znaleziono meczu o numerze '{match_number}' w sezonie {season_id}{suffix}.")
 
-    return JSONResponse(content={
-        "season_id": int(season_id),
-        "match_number": match_number,
-        "data": row,   # scalone: sezon + rozgrywki + runda + kolejka + mecz
-    })
+    # zwracamy pojedynczy rekord (spłaszczony jak w innych miejscach)
+    return JSONResponse(content=row)
