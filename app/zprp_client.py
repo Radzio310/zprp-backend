@@ -4,6 +4,7 @@ import asyncio
 from datetime import date
 import json
 import time
+from typing import Optional
 import requests
 import httpx
 import pandas as pd
@@ -187,31 +188,102 @@ class ZprpApiClient(ZprpApiCommon):
             return None
         return str(s)[:10]  # szybkie, bez parsowania daty
 
+    @staticmethod
+    def _prefix_from_str(s: Optional[str]) -> Optional[str]:
+        """
+        Zwraca prefiks (do pierwszego '/') w UPPER lub None dla pustych.
+        """
+        if not s:
+            return None
+        s = str(s).strip().upper()
+        if not s:
+            return None
+        return s.split('/', 1)[0]
+
+    def _gt_prefix(self, gt: dict) -> Optional[str]:
+        """
+        Prefiks na poziomie typu rozgrywek (najtańszy wariant).
+        Zwykle odpowiada temu, co masz przed '/' w numerze meczu (np. IIM4).
+        """
+        for k in ("code_export", "code", "Kod", "kod", "RozgrywkiCode"):
+            p = self._prefix_from_str(gt.get(k))
+            if p:
+                return p
+        return None
+
+    def _probe_first_game_prefix_for_gt(self, gt: dict) -> Optional[str]:
+        """
+        Minimalny koszt: znajdujemy pierwszy mecz w danym typie rozgrywek
+        i wyciągamy prefiks z jego RozgrywkiCode. Jeśli brak — zwracamy None.
+        """
+        for rnd in self._fetch_rounds(gt):
+            for ser in self._fetch_series(rnd):
+                games = self._fetch_games(ser)
+                if not games:
+                    continue
+                gm = games[0]
+                # Preferuj bezpośrednio pełny kod meczu, bo zawiera prefiks
+                p = self._prefix_from_str(
+                    gm.get("RozgrywkiCode")
+                    or gm.get("Kod_meczu") or gm.get("kod_meczu")
+                    or gm.get("Nr_meczu")  or gm.get("nr_meczu")
+                )
+                if p:
+                    return p
+                # jeśli się nie udało, nie zgadujemy — wracamy None,
+                # żeby nie blokować dalszego zwykłego wyszukiwania
+                return None
+        return None
+
     def find_game_by_number(
         self,
         desired_season: str,
         match_number: str,
         wzpr_list: list[str] | None = None,
         central_level_only: bool = False,
-        match_date: date | None = None,   # <-- NOWE
+        match_date: date | None = None,
     ) -> dict | None:
         season = self._find_season(desired_season)
-        target = self._normalize_match_number(match_number)
-        date_str = match_date.isoformat() if match_date else None
+        target_norm   = self._normalize_match_number(match_number)
+        target_prefix = self._prefix_from_str(target_norm)
+        date_str      = match_date.isoformat() if match_date else None
 
         for gt in self._fetch_game_types(season, wzpr_list or [], central_level_only):
+            # 0) Szybki skip po prefiksie typu rozgrywek (bez dodatkowych requestów)
+            gt_prefix = self._gt_prefix(gt)
+            if target_prefix and gt_prefix and gt_prefix != target_prefix:
+                if self.debug_logging:
+                    self.utils.log_this(
+                        f"Skip GT {gt.get('Nazwa','?')} "
+                        f"(gt_prefix={gt_prefix} != target_prefix={target_prefix})",
+                        'info'
+                    )
+                continue
+
+            # 0b) Jeśli nie mamy prefiksu na GT — zrób lekką sondę: pierwszy mecz w gałęzi
+            if target_prefix and not gt_prefix:
+                probe_prefix = self._probe_first_game_prefix_for_gt(gt)
+                if probe_prefix and probe_prefix != target_prefix:
+                    if self.debug_logging:
+                        self.utils.log_this(
+                            f"Skip GT by probe {gt.get('Nazwa','?')} "
+                            f"(probe_prefix={probe_prefix} != target_prefix={target_prefix})",
+                            'info'
+                        )
+                    continue
+                # jeśli probe_prefix None — nie blokujemy, idziemy normalnie w głąb
+
+            # 1) Standardowy zjazd: rundy → kolejki → mecze
             for rnd in self._fetch_rounds(gt):
                 for ser in self._fetch_series(rnd):
                     for gm in self._fetch_games(ser):
-
-                        # 1) jeśli podano dzień — filtruj najpierw po dacie
+                        # najpierw filtr dnia (jeśli jest)
                         if date_str is not None:
                             gm_date = self._game_date_str(gm)
                             if gm_date != date_str:
                                 continue
-
-                        # 2) dopiero potem sprawdzaj numer
-                        if self._game_has_number(gm, gt, target):
+                        # dopiero potem faktyczne dopasowanie numeru
+                        if self._game_has_number(gm, gt, target_norm):
                             return self._assemble_game_row(season, gt, rnd, ser, gm)
         return None
 
