@@ -138,6 +138,48 @@ class ZprpApiClient(ZprpApiCommon):
     def _fetch_games(self, game_series):
         req = self._get_request_json(self.get_link_zprp('games_api', {'series': game_series["ID_kolejka"]}), 'games_api')
         return list(req.values()) if isinstance(req, dict) else []
+    
+    @staticmethod
+    def _normalize_match_number(s: str) -> str:
+        # porównujemy bez różnic wielkości liter i spacji wokół
+        return (s or "").strip().upper()
+
+    @classmethod
+    def _game_has_number(cls, gm: dict, target_norm: str) -> bool:
+        # API ZPRP bywa niekonsekwentne w nazewnictwie; sprawdzamy kilka kluczy
+        candidate_keys = (
+            "Nr_meczu", "nr_meczu",
+            "Numer_meczu", "numer_meczu",
+            "Numer", "nr",  # czasem krótko
+            "Kod_meczu", "kod_meczu", "code_game"
+        )
+        for k in candidate_keys:
+            if k in gm:
+                if cls._normalize_match_number(str(gm[k])) == target_norm:
+                    return True
+        return False
+
+    def find_game_by_number(
+        self,
+        desired_season: str,
+        match_number: str,
+        wzpr_list: list[str] | None = None,
+        central_level_only: bool = False,
+    ) -> dict | None:
+        """
+        Przechodzi po typach/rundach/kolejkach i zwraca pierwszy mecz,
+        którego numer == match_number. Zwraca scalony wiersz (season+type+round+series+game)
+        albo None jeśli nie znaleziono.
+        """
+        season = self._find_season(desired_season)
+        target = self._normalize_match_number(match_number)
+        for gt in self._fetch_game_types(season, wzpr_list or [], central_level_only):
+            for rnd in self._fetch_rounds(gt):
+                for ser in self._fetch_series(rnd):
+                    for gm in self._fetch_games(ser):
+                        if self._game_has_number(gm, target):
+                            return self._assemble_game_row(season, gt, rnd, ser, gm)
+        return None
 
 class ZprpApiClientAsync(ZprpApiCommon):
     def __init__(self, utils=None, debug_logging: bool = False):

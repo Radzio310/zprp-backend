@@ -202,3 +202,47 @@ def full_timetable_by_id(
 
     # ominięcie pydantic response_model
     return JSONResponse(content=payload)
+
+@router.get(
+    "/{season_id}/by-number",
+    summary="Znajdź jeden mecz po numerze (np. IKB/23) w podanym sezonie",
+)
+def match_by_number(
+    season_id: int,
+    match_number: str = Query(..., min_length=1, description="Dokładny numer meczu, np. IKB/23"),
+    # opcjonalnie możesz wystawić te dwa filtry, ale nie są wymagane:
+    # central_level_only: bool = False,
+    # wzpr_list: List[str] = Query([], description="Filtr WZPR (opcjonalnie)"),
+):
+    client = ZprpApiClient(debug_logging=False)
+
+    # znajdź sezon po ID (jak w full_timetable)
+    seasons = client._get_request_json(client.get_link_zprp('seasons_api', {}), 'seasons_api')
+    season = next((s for s in seasons.values() if s.get("ID_sezon") == str(season_id)), None)
+    if not season:
+        raise HTTPException(404, f"Sezon o ID {season_id} nie znaleziony.")
+
+    # wstrzyknij sezon, aby pominąć dodatkowe szukanie
+    client._find_season = lambda _: season
+
+    try:
+        row = client.find_game_by_number(
+            desired_season=str(season_id),
+            match_number=match_number,
+            # central_level_only=central_level_only,
+            # wzpr_list=wzpr_list,
+        )
+    except ZprpResponseError as e:
+        raise HTTPException(502, f"Błąd podczas komunikacji z API ZPRP: {e}")
+    except Exception as e:
+        client.utils.log_this(f"Unexpected error in match-by-number: {e}", 'error')
+        raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
+
+    if not row:
+        raise HTTPException(404, f"Nie znaleziono meczu o numerze '{match_number}' w sezonie {season_id}.")
+
+    return JSONResponse(content={
+        "season_id": int(season_id),
+        "match_number": match_number,
+        "data": row,   # scalone: sezon + rozgrywki + runda + kolejka + mecz
+    })
