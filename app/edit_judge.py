@@ -95,6 +95,8 @@ async def edit_judge(
             overrides["Nazwisko"] = decrypt_field(data.Nazwisko)
         if data.Miasto is not None:
             overrides["Miasto"] = decrypt_field(data.Miasto)
+        if data.KodPocztowy is not None:
+            overrides["KodPocztowy"] = decrypt_field(data.KodPocztowy)
         if data.Telefon is not None:
             overrides["Telefon"] = decrypt_field(data.Telefon)
         if data.Email is not None:

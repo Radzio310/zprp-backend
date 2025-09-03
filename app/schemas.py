@@ -9,6 +9,7 @@ class EditJudgeRequest(BaseModel):
     Imie: Optional[str] = None
     Nazwisko: Optional[str] = None
     Miasto: Optional[str] = None
+    KodPocztowy: Optional[str] = None
     Telefon: Optional[str] = None
     Email: Optional[str] = None
 
