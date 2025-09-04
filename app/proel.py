@@ -28,7 +28,10 @@ async def create_proel_match(req: CreateSavedMatchRequest):
         .where(saved_matches.c.match_number == req.match_number)
     )
     if existing:
-        raise HTTPException(400, "Mecz o takim numerze już istnieje")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "MATCH_EXISTS", "message": "Mecz o takim numerze już istnieje"},
+        )
 
     stmt = insert(saved_matches).values(
         match_number=req.match_number,
@@ -55,8 +58,10 @@ async def update_proel_match(
     if not row:
         raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
     if row["is_finished"]:
-        # jeżeli już było zakończone, nie pozwalamy na jakiekolwiek zmiany
-        raise HTTPException(400, "Nie można edytować zakończonego meczu")
+        raise HTTPException(
+            status.HTTP_423_LOCKED,
+            detail={"code": "MATCH_FINISHED", "message": "Nie można edytować zakończonego meczu"},
+        )
 
     # Budujemy słownik pól do aktualizacji
     to_update: dict = {"data_json": req.data_json}
