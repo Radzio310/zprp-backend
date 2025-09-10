@@ -298,3 +298,20 @@ class MatchItem(BaseModel):
 
 class ListSavedMatchesResponse(BaseModel):
     matches: List[MatchItem]
+
+# ------------------------- Najbliższe mecze z rozgrywki.zprp.pl -------------------------
+
+class UpcomingMatchItem(BaseModel):
+    Id: int = Field(..., description="ID meczu z query param Mecz")
+    Id_rozgrywki: int | None = Field(None, description="ID rozgrywek z query param Rozgrywki")
+    data_fakt: datetime | None = Field(None, description="Data i (opcjonalnie) czas meczu w strefie Europe/Warsaw")
+    ID_zespoly_gosp_ZespolNazwa: str | None = None
+    ID_zespoly_gosc_ZespolNazwa: str | None = None
+    RozgrywkiCode: str | None = None
+    code: str | None = None
+    league: str | None = Field(None, description="Nazwa rozgrywek z atrybutu title wiersza")
+    href: str | None = Field(None, description="Pełny URL do meczu na rozgrywki.zprp.pl")
+    wynik: str | None = Field(None, description="np. '39 : 24' jeśli jest już wynik")
+
+class UpcomingMatchesResponse(BaseModel):
+    data: list[UpcomingMatchItem]
