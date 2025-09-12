@@ -5,12 +5,20 @@ from typing import Dict
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, hall_reports
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListUserReportsResponse, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, okreg_rates, hall_reports
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregRatesResponse, ListUserReportsResponse, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # Wczytujemy hash z env
 MASTER_PIN_HASH = os.getenv("MASTER_PIN_HASH", "")
+
+PROVINCES = [
+    "DOLNOŚLĄSKIE","KUJAWSKO-POMORSKIE","LUBELSKIE","LUBUSKIE","ŁÓDZKIE",
+    "MAŁOPOLSKIE","MAZOWIECKIE","OPOLSKIE","PODKARPACKIE","PODLASKIE",
+    "POMORSKIE","ŚLĄSKIE","ŚWIĘTOKRZYSKIE","WARMIŃSKO-MAZURSKIE",
+    "WIELKOPOLSKIE","ZACHODNIOPOMORSKIE",
+]
+OKREG_CATEGORIES = ["Młodzik mł.","Młodzik","Junior mł.","Junior","III liga","Inne"]
 
 router = APIRouter(
     prefix="/admin",
@@ -357,6 +365,82 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
         file=JsonFileItem(
             key=row["key"],
             content=parsed,     # tu już dict/list albo str
+            enabled=row["enabled"],
+            updated_at=row["updated_at"],
+        )
+    )
+
+@router.get(
+    "/okreg_rates",
+    response_model=ListOkregRatesResponse,
+    summary="Lista plików stawek okręgowych (per-województwo)"
+)
+async def list_okreg_rates():
+    rows = await database.fetch_all(select(okreg_rates))
+    files = [
+        OkregRateItem(
+            province=r["province"],
+            content=r["content"] if isinstance(r["content"], (dict, list)) else json.loads(r["content"]),
+            enabled=r["enabled"],
+            updated_at=r["updated_at"],
+        )
+        for r in rows
+    ]
+    return ListOkregRatesResponse(files=files)
+
+@router.get(
+    "/okreg_rates/{province}",
+    response_model=GetOkregRateResponse,
+    summary="Pobierz stawki okręgowe dla danego województwa"
+)
+async def get_okreg_rate(province: str):
+    province = province.upper()
+    row = await database.fetch_one(select(okreg_rates).where(okreg_rates.c.province == province))
+    if not row:
+        raise HTTPException(404, "Nie znaleziono pliku dla tego województwa")
+    raw = row["content"]
+    parsed = raw if isinstance(raw, (dict, list)) else json.loads(raw)
+    return GetOkregRateResponse(
+        file=OkregRateItem(
+            province=row["province"],
+            content=parsed,
+            enabled=row["enabled"],
+            updated_at=row["updated_at"],
+        )
+    )
+
+@router.put(
+    "/okreg_rates/{province}",
+    response_model=GetOkregRateResponse,
+    summary="Utwórz lub zaktualizuj stawki okręgowe dla województwa"
+)
+async def upsert_okreg_rate(province: str, req: UpsertOkregRateRequest):
+    if req.province.upper() != province.upper():
+        raise HTTPException(400, "Province mismatch")
+
+    province = province.upper()
+
+    stmt = pg_insert(okreg_rates).values(
+        province=province,
+        content=req.content,
+        enabled=req.enabled,
+    ).on_conflict_do_update(
+        index_elements=[okreg_rates.c.province],
+        set_={"content": req.content, "enabled": req.enabled}
+    )
+    try:
+        await database.execute(stmt)
+    except Exception as e:
+        raise HTTPException(500, detail=f"SQL ERROR upsert_okreg_rate: {e!r}")
+
+    row = await database.fetch_one(select(okreg_rates).where(okreg_rates.c.province == province))
+    raw = row["content"]
+    parsed = raw if isinstance(raw, (dict, list)) else json.loads(raw)
+
+    return GetOkregRateResponse(
+        file=OkregRateItem(
+            province=row["province"],
+            content=parsed,
             enabled=row["enabled"],
             updated_at=row["updated_at"],
         )

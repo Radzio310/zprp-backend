@@ -238,6 +238,25 @@ class UpsertJsonFileRequest(BaseModel):
     content: Any
     enabled: bool
 
+# ---------------- Stawki okręgowe (per-województwo) ----------------
+class OkregRateItem(BaseModel):
+    province: str          # np. "ŚLĄSKIE"
+    content: Any           # dowolny JSON (jak w Twoich plikach z aplikacji)
+    enabled: bool
+    updated_at: datetime
+
+class GetOkregRateResponse(BaseModel):
+    file: OkregRateItem
+
+class ListOkregRatesResponse(BaseModel):
+    files: list[OkregRateItem]
+
+class UpsertOkregRateRequest(BaseModel):
+    province: str          # musi zgadzać się z path param
+    content: Any
+    enabled: bool = True
+
+
 # ---------------------------- HALE ----------------------------
 class CreateHallReportRequest(BaseModel):
     Hala_nazwa: str

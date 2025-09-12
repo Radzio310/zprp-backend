@@ -222,6 +222,22 @@ json_files = Table(
          server_default=func.now(), onupdate=func.now()),
 )
 
+# 18.1) Stawki okręgowe per województwo
+okreg_rates = Table(
+    "okreg_rates",
+    metadata,
+    Column("province", String, primary_key=True),  # np. "ŚLĄSKIE"
+    Column("content", JSON, nullable=False),       # pełny JSON stawek dla okręgu
+    Column("enabled", Boolean, nullable=False, server_default=text("false")),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+
 # 19) Hale
 hall_reports = Table(
     "hall_reports",
