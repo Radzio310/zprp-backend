@@ -500,65 +500,45 @@ async def delete_hall_report(report_id: int):
 # === Helpers do fuzzy porównań ===
 
 def _strip_diacritics(s: str) -> str:
-    # NFKD + ASCII bez znaków łączących (np. ą->a)
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 def _normalize_spaces(s: str) -> str:
-    return " ".join(s.strip().split())
+    return " ".join((s or "").strip().split())
 
 def _norm_text(s: str) -> str:
-    s0 = s or ""
-    s1 = _strip_diacritics(s0).lower()
+    s1 = _strip_diacritics(s).lower()
     s2 = _normalize_spaces(s1)
-    # Usuwamy „,.-” itp. i podwójne spacje (już zrobione)
     return "".join(ch for ch in s2 if ch.isalnum() or ch.isspace())
 
-def _name_variants(first: str, last: str) -> List[str]:
-    a = _norm_text(f"{first} {last}")
-    b = _norm_text(f"{last} {first}")
-    # czasem ludzie mają 2 nazwiska/2 imiona → normalizacja typu "ala ma-kota" już jest w _norm_text
-    return list({a, b})
-
 def _similarity(a: str, b: str) -> float:
-    # SequenceMatcher z stdlib (bez zależności)
     return difflib.SequenceMatcher(None, a, b).ratio()
 
-def _close_enough_name(target_first: str, target_last: str, candidate_fullname: str, threshold: float = 0.92) -> float:
-    # Zwraca najlepszy score (0..1) między wariantami imię+nazwisko a polem w rekordzie
-    c = _norm_text(candidate_fullname)
-    best = 0.0
-    for v in _name_variants(target_first, target_last):
-        best = max(best, _similarity(v, c))
-    return best
+def _full_name(name: str, surname: str) -> str:
+    return _norm_text(f"{name} {surname}")
 
-def _close_enough_city(target_city: str, candidate_city: str, threshold: float = 0.90) -> float:
-    if not target_city or not candidate_city:
+def _city_sim(a: str, b: str) -> float:
+    if not a or not b:
         return 0.0
-    return _similarity(_norm_text(target_city), _norm_text(candidate_city))
+    return _similarity(_norm_text(a), _norm_text(b))
 
 @router.post(
     "/contacts/judges/upsert",
     response_model=UpsertContactJudgeResponse,
-    summary="Utwórz lub zaktualizuj rekord sędziego w pliku 'kontakty' (fuzzy match po imieniu+nazwisku, ewentualnie + mieście)."
+    summary="Upsert sędziego w pliku 'kontakty' (edycja tylko name/surname/phone/email/city; domyślne role/isReferee/isTeam przy tworzeniu)"
 )
 async def upsert_contact_judge(req: UpsertContactJudgeRequest):
     """
-    Zasada:
-    1) Pobieramy JSON z `json_files` o key='kontakty'.
-       Oczekujemy, że to LISTA słowników (dowolny kształt).
-       Każdy element musi mieć jakiś identyfikowalny 'name' lub ('first_name'+'last_name').
-       Miasto: 'city' lub 'miasto'.
-    2) Szukamy najlepszego dopasowania:
-       - identyczny judge_id (jeśli występuje w rekordzie) → update
-       - w przeciwnym razie fuzzy po imię+nazwisko (case/diakrytyki bez znaczenia, literówki tolerowane),
-         jeśli kilka kandydatów → dookreślamy po mieście (fuzzy).
-    3) Jeśli brak jednoznacznego dopasowania (score < 0.92 lub konflikt nazw): tworzymy nowy rekord.
-    4) Aktualizacja: domyślnie wypełniamy tylko puste; jeśli overwrite_nonempty=True, nadpisujemy pola.
+    Zasady:
+    - Dopasowanie fuzzy po (name+surname) z tolerancją drobnych literówek,
+      bez wrażliwości na diakrytyki i wielkość liter. threshold_name = 0.92.
+    - Jeśli kandydatów >1, doprecyzuj po city (threshold_city = 0.90).
+    - Jeśli brak jednoznacznego dopasowania → twórz nowy rekord (z domyślnymi: role='sędzia', isReferee=true, isTeam=false).
+    - Przy UPDATE zmieniamy TYLKO: name, surname, phone, email, city.
+      Pozostałe pola (role, isReferee, isTeam, cokolwiek innego) zostają nietknięte.
     """
-    # 1) Wczytaj aktualny plik
+    # 1) Pobierz aktualny plik
     row = await database.fetch_one(select(json_files).where(json_files.c.key == "kontakty"))
     if not row:
-        # Plik nie istnieje → zacznijmy od pustej listy
         contacts: List[dict] = []
         enabled = True
     else:
@@ -568,117 +548,71 @@ async def upsert_contact_judge(req: UpsertContactJudgeRequest):
             raise HTTPException(500, "Plik 'kontakty' nie jest listą JSON")
         enabled = row["enabled"]
 
-    # 2) Szukanie po judge_id (najpewniejsze)
+    # 2) Fuzzy match po (name+surname)
+    target = _full_name(req.name, req.surname)
+    threshold_name = 0.92
+    threshold_city = 0.90
+
+    scored: List[tuple[int, float]] = []
+    for i, c in enumerate(contacts):
+        cand_full = _full_name(str(c.get("name", "")), str(c.get("surname", "")))
+        score = _similarity(target, cand_full)
+        if score >= threshold_name:
+            scored.append((i, score))
+
     best_idx = None
     matched_by = None
-    if req.judge_id:
-        for i, c in enumerate(contacts):
-            cid = str(c.get("judge_id") or c.get("sędzia_id") or "").strip()
-            if cid and cid == str(req.judge_id):
-                best_idx = i
-                matched_by = "judge_id"
-                break
+    if len(scored) == 1:
+        best_idx = scored[0][0]
+        matched_by = "name"
+    elif len(scored) > 1:
+        # doprecyzuj po city
+        ranked = []
+        for i, _s in scored:
+            c = contacts[i]
+            cs = _city_sim(req.city or "", str(c.get("city", "")))
+            ranked.append((i, cs))
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        if ranked and ranked[0][1] >= threshold_city and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+            best_idx = ranked[0][0]
+            matched_by = "name+city"
 
-    # 3) Fuzzy match po imię+nazwisko (+ miasto, jeśli potrzeba)
-    if best_idx is None:
-        # Zbierz kandydatów: name / (first_name+last_name)
-        target_full = f"{req.first_name} {req.last_name}"
-        scored: List[tuple[int, float]] = []  # (index, score)
-
-        for i, c in enumerate(contacts):
-            # nazwisko+imię albo jedno pole "name"
-            name = (
-                c.get("name")
-                or " ".join(x for x in [c.get("first_name"), c.get("last_name")] if x)
-                or " ".join(x for x in [c.get("imie"), c.get("nazwisko")] if x)
-            )
-            if not name:
-                continue
-            score = _close_enough_name(req.first_name, req.last_name, name, threshold=0.92)
-            if score >= 0.92:
-                scored.append((i, score))
-
-        if len(scored) == 1:
-            best_idx = scored[0][0]
-            matched_by = "name"
-        elif len(scored) > 1:
-            # Dookreśl po mieście (fuzzy)
-            city_scores: List[tuple[int, float]] = []
-            for i, _sc in scored:
-                c = contacts[i]
-                city = c.get("city") or c.get("miasto") or ""
-                cs = _close_enough_city(req.city or "", city, threshold=0.90)
-                city_scores.append((i, cs))
-            # wybierz najlepszy po mieście, jeśli się wyróżnia
-            city_scores.sort(key=lambda x: x[1], reverse=True)
-            if city_scores and city_scores[0][1] >= 0.90:
-                # upewnij się, że nie jest ex aequo z drugim
-                if len(city_scores) == 1 or city_scores[0][1] > city_scores[1][1]:
-                    best_idx = city_scores[0][0]
-                    matched_by = "name+city"
-                else:
-                    # wątpliwe – nie dopasowuj na siłę
-                    best_idx = None
-            else:
-                # brak wyraźnego rozstrzygnięcia po mieście → nie dopasowujemy
-                best_idx = None
-
-    # 4) Zdecyduj: update / create
-    now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
-    def _maybe_set(c: dict, key: str, new: Any):
-        if new is None or new == "":
-            return
-        if req.overwrite_nonempty or not c.get(key):
-            c[key] = new
+    # 3) Update albo create (dotykamy wyłącznie 5 pól)
+    def _set_if_provided(rec: dict, key: str, val: Any):
+        if req.overwrite:
+            if val is not None:
+                rec[key] = val
+        else:
+            if val not in (None, ""):
+                rec[key] = val
 
     if best_idx is not None:
-        # UPDATE
         rec = dict(contacts[best_idx])  # kopia
-        # Spróbuj wykryć istniejące klucze (PL/EN)
-        # nazwa: preferujemy pojedyncze "name" w danych (nie wymuszamy migracji schematu)
-        existing_name = rec.get("name")
-        if existing_name:
-            # Trzymajmy single-field "name", ale uzupełnijmy phone/email/city/judge_id
-            _maybe_set(rec, "city", req.city)
-            _maybe_set(rec, "miasto", req.city)  # jeśli używane PL
-        else:
-            # Mamy dwa pola
-            _maybe_set(rec, "first_name", req.first_name)
-            _maybe_set(rec, "last_name", req.last_name)
-            _maybe_set(rec, "imie", req.first_name)
-            _maybe_set(rec, "nazwisko", req.last_name)
-            _maybe_set(rec, "city", req.city)
-            _maybe_set(rec, "miasto", req.city)
-
-        # wspólne pola
-        _maybe_set(rec, "phone", req.phone)
-        _maybe_set(rec, "telefon", req.phone)
-        _maybe_set(rec, "email", req.email)
-        _maybe_set(rec, "judge_id", req.judge_id)
-
-        rec["updated_at"] = now_iso
+        _set_if_provided(rec, "name", req.name)
+        _set_if_provided(rec, "surname", req.surname)
+        _set_if_provided(rec, "phone", req.phone)
+        _set_if_provided(rec, "email", req.email)
+        _set_if_provided(rec, "city", req.city)
         contacts[best_idx] = rec
         action = "updated"
     else:
-        # CREATE – nowy rekord (unikamy duplikatów trywialnych przez fuzzy już powyżej)
-        # Przyjmijmy neutralny, nieinwazyjny kształt – nie psujemy istniejącego schematu.
-        # Jeżeli w Twoim pliku standardem jest "name", trzymajmy się "name".
+        # nowy rekord – szanuj schemat i wartości domyślne
         new_rec = {
-            "name": f"{req.first_name} {req.last_name}",
-            "city": req.city or "",
+            "name": req.name,
+            "surname": req.surname,
             "phone": req.phone or "",
             "email": req.email or "",
-            "judge_id": req.judge_id or "",
-            "created_at": now_iso,
-            "updated_at": now_iso,
+            "city": req.city or "",
+            "role": "sędzia",
+            "isReferee": True,
+            "isTeam": False,
         }
         contacts.append(new_rec)
         best_idx = len(contacts) - 1
         matched_by = "none"
         action = "created"
 
-    # 5) Zapisz z powrotem do json_files (tylko serwer modyfikuje treść)
+    # 4) Zapis z powrotem do json_files (bez zmiany enabled)
     stmt = pg_insert(json_files).values(
         key="kontakty",
         content=contacts,
@@ -694,7 +628,7 @@ async def upsert_contact_judge(req: UpsertContactJudgeRequest):
 
     return UpsertContactJudgeResponse(
         success=True,
-        action=action,            # "updated" albo "created"
-        matched_index=best_idx,   # dla wglądu / debug
-        matched_by=matched_by,    # jak dopasowano
+        action=action,
+        matched_index=best_idx,
+        matched_by=matched_by,
     )

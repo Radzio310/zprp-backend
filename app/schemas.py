@@ -336,19 +336,17 @@ class UpcomingMatchesResponse(BaseModel):
     data: list[UpcomingMatchItem]
 
 # --- Contacts (judges) upsert ---
-
 class UpsertContactJudgeRequest(BaseModel):
-    first_name: str = Field(..., description="Imię")
-    last_name: str = Field(..., description="Nazwisko")
+    name: str = Field(..., description="Imię (pole 'name')")
+    surname: str = Field(..., description="Nazwisko (pole 'surname')")
     city: Optional[str] = Field(None, description="Miasto")
     phone: Optional[str] = Field(None, description="Telefon")
     email: Optional[str] = Field(None, description="Email")
-    judge_id: Optional[str] = Field(None, description="ID sędziego (z bazy ZPRP)")
-    overwrite_nonempty: bool = Field(False, description="Jeśli True: można nadpisywać niepuste pola")
+    # jeśli kiedyś chcesz wymusić nadpisanie nawet pustą wartością:
+    overwrite: bool = Field(False, description="Jeśli True: nadpisuje istniejące pola podanymi wartościami (także pustymi)")
 
 class UpsertContactJudgeResponse(BaseModel):
     success: bool
     action: Literal["created", "updated"]
     matched_index: Optional[int] = None
-    # dla debugu/śledzenia:
-    matched_by: Optional[str] = None  # "name", "name+city", "judge_id", "none"
+    matched_by: Optional[str] = None  # "name", "name+city", "none"
