@@ -200,6 +200,16 @@ async def post_admin_entry(req: CreateAdminPostRequest):
     await database.execute(stmt)
     return {"success": True}
 
+@router.delete("/posts/{post_id}", response_model=dict, summary="Usuń wpis adminowy")
+async def delete_admin_post(post_id: int):
+    result = await database.execute(
+        admin_posts.delete().where(admin_posts.c.id == post_id)
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Wpis nie znaleziony")
+    return {"success": True}
+
+
 @router.get("/posts", response_model=ListAdminPostsResponse, summary="Lista wpisów admina")
 async def list_admin_posts():
     rows = await database.fetch_all(select(admin_posts).order_by(admin_posts.c.created_at.desc()))
