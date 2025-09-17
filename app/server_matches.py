@@ -338,7 +338,7 @@ def match_by_number(
 
 @router.get(
     "/{season_id}/players-by-number",
-    summary="Składy meczu po numerze: gospodarze, goście lub łącznie",
+    summary="Składy meczu po numerze: preferuj poziom centralny, w razie braku szukaj także w okręgach",
 )
 def players_by_number(
     season_id: int,
@@ -350,16 +350,17 @@ def players_by_number(
     match_date: Optional[date] = Query(
         None, description="Opcjonalny filtr dnia (YYYY-MM-DD) używany w wyszukiwaniu meczu"
     ),
-    wzpr_list: List[str] = Query([], description="Opcjonalny filtr WZPR"),
-    central_level_only: bool = Query(False, description="Tylko poziom centralny"),
 ):
     """
-    Analogicznie do /{season_id}/by-number: najpierw znajdujemy mecz w API ZPRP po `match_number`,
-    następnie budujemy URL strony meczu (?Sezon=...&Rozgrywki=...&Mecz=...), pobieramy HTML,
-    parsujemy dwie tabele #resultsData i zwracamy listę graczy w formacie:
-    {number:int, full_name:str, photo_url:str|None}.
+    Szuka meczu po numerze w podanym sezonie:
+      1) najpierw na poziomie centralnym (central_level_only=True),
+      2) jeśli nie znajdzie — ponownie bez ograniczenia (central_level_only=False).
+
+    Po znalezieniu pobiera stronę meczu, parsuje dwie tabele `table#resultsData`
+    i zwraca listę graczy (home/away/both) w formacie:
+      [{number:int, full_name:str, photo_url:str|None}, ...]
     """
-    # 0) Normalizacja 'side'
+    # 0) Normalizacja parametru "side"
     side_aliases = {
         "gospodarze": "home",
         "goscie": "away", "goście": "away",
@@ -378,14 +379,26 @@ def players_by_number(
         raise HTTPException(404, f"Sezon o ID {season_id} nie znaleziony.")
     client._find_season = lambda _: season
 
-    # 2) Znajdź mecz po numerze (opcjonalnie zawężony do dnia/WZPR/central)
-    row = client.find_game_by_number(
-        desired_season=str(season_id),
-        match_number=match_number,
-        wzpr_list=wzpr_list,
-        central_level_only=central_level_only,
-        match_date=match_date,
-    )
+    # 2) Spróbuj znaleźć mecz po numerze:
+    #    a) najpierw centralny,
+    #    b) jeśli brak — bez ograniczenia (okręg/central).
+    def _try_find(central_only: bool):
+        return client.find_game_by_number(
+            desired_season=str(season_id),
+            match_number=match_number,
+            wzpr_list=[],                 # bez województw
+            central_level_only=central_only,
+            match_date=match_date,
+        )
+
+    try:
+        row = _try_find(True) or _try_find(False)
+    except ZprpResponseError as e:
+        raise HTTPException(502, f"Błąd podczas komunikacji z API ZPRP: {e}")
+    except Exception as e:
+        client.utils.log_this(f"Unexpected error in players-by-number: {e}", 'error')
+        raise HTTPException(500, f"Nieoczekiwany błąd: {e}")
+
     if not row:
         suffix = f" w dniu {match_date.isoformat()}" if match_date else ""
         raise HTTPException(404, f"Nie znaleziono meczu o numerze '{match_number}' w sezonie {season_id}{suffix}.")
@@ -429,3 +442,4 @@ def players_by_number(
         "source_url": url,
     }
     return JSONResponse(content=payload)
+
