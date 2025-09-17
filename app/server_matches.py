@@ -38,7 +38,7 @@ def _build_match_url_from_row(season_id: int, row: dict) -> Optional[str]:
     Próbuje wyciągnąć z rekordu pola ID rozgrywek i meczu, by zbudować URL strony meczu.
     Obsługuje kilka wariantów nazw kluczy.
     """
-    rozgrywki_keys = ["ID_rozgrywki", "ID_Rozgrywki", "Rozgrywki", "ID_rozgrywek", "ID_rozgrywki_zprp"]
+    rozgrywki_keys = ["Rozgrywki", "RozgrywkiId", "Rozgrywki", "ID_rozgrywek", "ID_rozgrywki_zprp"]
     mecz_keys = ["ID_mecz", "ID_Mecz", "Mecz", "ID_meczu"]
 
     rozgrywki_id = next((row.get(k) for k in rozgrywki_keys if row.get(k) not in (None, "")), None)
