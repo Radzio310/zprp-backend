@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import Any, Optional, Literal, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 
 class EditJudgeRequest(BaseModel):
     username: str
@@ -334,6 +334,18 @@ class UpcomingMatchItem(BaseModel):
 
 class UpcomingMatchesResponse(BaseModel):
     data: list[UpcomingMatchItem]
+
+PlayersSide = Literal["home", "away", "both"]
+
+class PlayerInfo(BaseModel):
+    number: int
+    full_name: str
+    photo_url: Optional[HttpUrl] = None
+
+class PlayersResponse(BaseModel):
+    match_number: str
+    home: Optional[List[PlayerInfo]] = None
+    away: Optional[List[PlayerInfo]] = None
 
 # --- Contacts (judges) upsert ---
 class UpsertContactJudgeRequest(BaseModel):

@@ -4,11 +4,17 @@ from sqlalchemy import select, insert, update, delete
 from app.db import database, saved_matches
 from app.schemas import (
     CreateSavedMatchRequest,
+    PlayerInfo,
+    PlayersResponse,
+    PlayersSide,
     UpdateSavedMatchRequest,
     MatchItem,
     ListSavedMatchesResponse,
 )
 from datetime import datetime
+
+from app.services.zprp_players_parser import parse_players_from_html
+from app.services import zprp_fetch
 
 router = APIRouter(
     prefix="/proel",
@@ -122,3 +128,54 @@ async def list_proel_matches(
     return ListSavedMatchesResponse(
         matches=[MatchItem(**dict(r)) for r in rows]
     )
+
+@router.get(
+    "/{match_number:path}/players",
+    response_model=PlayersResponse,
+    summary="Lista zawodników (numer, imię i nazwisko, zdjęcie) – gospodarze/goście/obie drużyny"
+)
+async def get_match_players(
+    match_number: str,
+    side: PlayersSide = Query("both", description="home | away | both"),
+    season_id: Optional[int] = Query(None, description="ID sezonu – użyj tylko jeśli nie masz HTML-a w bazie"),
+    league_id: Optional[int] = Query(None, description="ID rozgrywek – użyj tylko jeśli nie masz HTML-a w bazie"),
+):
+    """
+    Zwraca połączone dane zawodników dla meczu:
+    - number
+    - full_name
+    - photo_url
+
+    ŹRÓDŁO HTML:
+    1) Najpierw próbuje wczytać surowy HTML meczu z bazy (saved_matches.data_json['raw_html' / 'html']).
+    2) Jeśli brak – pobiera stronę na żywo (wymagane season_id i league_id w query).
+    """
+    # 1) Spróbuj z bazy (jeśli tak trzymasz dane)
+    html = await zprp_fetch.get_match_html_from_db(match_number)
+
+    # 2) Jeśli nie ma HTML-a w bazie – pobierz na żywo
+    if not html:
+        if season_id is None or league_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Brak HTML-a w bazie. Podaj season_id i league_id aby pobrać stronę meczu."
+            )
+        try:
+            html = await zprp_fetch.fetch_match_html_httpx(season_id=season_id, league_id=league_id, match_number=match_number)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Nie udało się pobrać strony meczu: {e}")
+
+    # 3) Parsowanie
+    try:
+        home_raw, away_raw = parse_players_from_html(html)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Nie udało się sparsować składu: {e}")
+
+    # 4) Filtrowanie wg side
+    resp = PlayersResponse(match_number=match_number)
+    if side in ("home", "both"):
+        resp.home = [PlayerInfo(**p) for p in home_raw]
+    if side in ("away", "both"):
+        resp.away = [PlayerInfo(**p) for p in away_raw]
+
+    return resp
