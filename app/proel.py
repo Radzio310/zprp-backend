@@ -13,9 +13,6 @@ from app.schemas import (
 )
 from datetime import datetime
 
-from app.services.zprp_players_parser import parse_players_from_html
-from app.services import zprp_fetch
-
 router = APIRouter(
     prefix="/proel",
     tags=["ProEl"],
@@ -128,46 +125,3 @@ async def list_proel_matches(
     return ListSavedMatchesResponse(
         matches=[MatchItem(**dict(r)) for r in rows]
     )
-
-@router.get(
-    "/{match_number:path}/players",
-    response_model=PlayersResponse,
-    summary="Lista zawodników (numer, imię i nazwisko, zdjęcie) – gospodarze/goście/obie drużyny"
-)
-async def get_match_players(
-    match_number: str,
-    side: PlayersSide = Query("both", description="home | away | both"),
-):
-    """
-    Zwraca połączone dane zawodników dla meczu wyłącznie na podstawie numeru meczu.
-    Źródła: HTML zapisany w bazie lub HTML pobrany spod URL-i zapisanych w data_json.
-    Gdy nie ma składu/HTML-a — zwracamy puste listy (frontend pokaże toast).
-    """
-    html = await zprp_fetch.fetch_match_html_by_number(match_number)
-
-    if not html:
-        # brak źródła/HTML — traktujemy jako „brak składu”
-        resp = PlayersResponse(match_number=match_number, home=[], away=[])
-        if side == "home":
-            resp.away = []
-        elif side == "away":
-            resp.home = []
-        return resp
-
-    try:
-        home_raw, away_raw = parse_players_from_html(html)
-    except Exception:
-        # nie udało się sparsować -> „brak składu”
-        resp = PlayersResponse(match_number=match_number, home=[], away=[])
-        if side == "home":
-            resp.away = []
-        elif side == "away":
-            resp.home = []
-        return resp
-
-    resp = PlayersResponse(match_number=match_number)
-    if side in ("home", "both"):
-        resp.home = [PlayerInfo(**p) for p in (home_raw or [])]
-    if side in ("away", "both"):
-        resp.away = [PlayerInfo(**p) for p in (away_raw or [])]
-    return resp

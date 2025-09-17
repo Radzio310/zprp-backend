@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
 from datetime import date
 import pandas as pd
+import re
 
 from app.zprp_client import ZprpApiClient, ZprpResponseError
 
@@ -31,6 +32,102 @@ def _strip_zespoly(href: str) -> str:
     qs.pop("Zespoly", None)
     new_query = urlencode(qs, doseq=True)
     return urlunparse((p.scheme, p.netloc, p.path, p.params, new_query, p.fragment))
+
+def _build_match_url_from_row(season_id: int, row: dict) -> Optional[str]:
+    """
+    Próbuje wyciągnąć z rekordu pola ID rozgrywek i meczu, by zbudować URL strony meczu.
+    Obsługuje kilka wariantów nazw kluczy.
+    """
+    rozgrywki_keys = ["ID_rozgrywki", "ID_Rozgrywki", "Rozgrywki", "ID_rozgrywek", "ID_rozgrywki_zprp"]
+    mecz_keys = ["ID_mecz", "ID_Mecz", "Mecz", "ID_meczu"]
+
+    rozgrywki_id = next((row.get(k) for k in rozgrywki_keys if row.get(k) not in (None, "")), None)
+    mecz_id = next((row.get(k) for k in mecz_keys if row.get(k) not in (None, "")), None)
+
+    if not (rozgrywki_id and mecz_id):
+        return None
+
+    return f"{BASE_URL}?Sezon={season_id}&Rozgrywki={rozgrywki_id}&Mecz={mecz_id}"
+
+
+def _players_from_table(table) -> List[dict]:
+    """
+    Parsuje pojedynczą tabelę `#resultsData` do listy graczy:
+    [{number:int, full_name:str, photo_url:str|None}, ...]
+    - numer: z <div id="circle2"> (musi zawierać cyfrę),
+    - imię i nazwisko: preferencyjnie z <img alt="NAZWISKO Imię">,
+      fallback: tekst z komórki z nazwiskiem,
+    - link do zdjęcia: z <img src="..."> (puste -> None).
+    Wiersze niekompletne (bez numeru lub bez nazwy) są pomijane.
+    """
+    players = []
+    if not table:
+        return players
+
+    # każdy zawodnik to <tr> w tej tabeli
+    for tr in table.find_all("tr", recursive=False):
+        # numer
+        num_div = tr.find("div", id="circle2")
+        number_txt = (num_div.get_text(strip=True) if num_div else "") or ""
+        digits = "".join(ch for ch in number_txt if ch.isdigit())
+        if not digits:
+            # brak numeru -> pomijamy
+            continue
+        number = int(digits)
+
+        # imię i nazwisko + foto z <img>
+        img = tr.find("img")
+        full_name = None
+        photo_url = None
+        if img:
+            full_name = (img.get("alt") or "").strip() or None
+            src = (img.get("src") or "").strip()
+            photo_url = src if src else None
+
+        if not full_name:
+            # fallback: spróbuj wziąć tekst z komórki imienia/nazwiska
+            # wybierz td z wyrównaniem tekstowym (zwykle to kolumna nazwiska)
+            candidate = None
+            for td in tr.find_all("td"):
+                style = td.get("style", "")
+                if "text-align" in style:
+                    t = td.get_text(" ", strip=True)
+                    if t and t != "-" and not t.isdigit():
+                        candidate = t
+                        break
+            full_name = candidate or None
+
+        if not full_name:
+            # nadal brak sensownego nazwiska -> pomijamy
+            continue
+
+        # normalizacja spacji
+        full_name = " ".join(full_name.split())
+
+        players.append({
+            "number": number,
+            "full_name": full_name,
+            "photo_url": photo_url
+        })
+
+    return players
+
+
+def _parse_players_from_html_local(html: str) -> tuple[List[dict], List[dict]]:
+    """
+    Zwraca (home_players, away_players) wyciągnięte z dwóch tabel `table#resultsData`.
+    Pierwsza tabela = gospodarze (lewa), druga = goście (prawa).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    tables = soup.select("table#resultsData")
+    if len(tables) < 2:
+        raise ValueError("Nie znaleziono dwóch tabel 'resultsData' w HTML meczu.")
+
+    home_table, away_table = tables[0], tables[1]
+    home_players = _players_from_table(home_table)
+    away_players = _players_from_table(away_table)
+    return home_players, away_players
+
 
 
 def get_all_first_links(season_id: int):
@@ -238,3 +335,97 @@ def match_by_number(
 
     # zwracamy pojedynczy rekord (spłaszczony jak w innych miejscach)
     return JSONResponse(content=row)
+
+@router.get(
+    "/{season_id}/players-by-number",
+    summary="Składy meczu po numerze: gospodarze, goście lub łącznie",
+)
+def players_by_number(
+    season_id: int,
+    match_number: str = Query(..., description="Np. S/JmK/4 (slash będzie url-enkodowany)"),
+    side: str = Query(
+        "both",
+        description="Wybór: 'home' (gospodarze) | 'away' (goście) | 'both' (łącznie - domyślnie). Działają aliasy: 'gospodarze'/'goście'/'łącznie'."
+    ),
+    match_date: Optional[date] = Query(
+        None, description="Opcjonalny filtr dnia (YYYY-MM-DD) używany w wyszukiwaniu meczu"
+    ),
+    wzpr_list: List[str] = Query([], description="Opcjonalny filtr WZPR"),
+    central_level_only: bool = Query(False, description="Tylko poziom centralny"),
+):
+    """
+    Analogicznie do /{season_id}/by-number: najpierw znajdujemy mecz w API ZPRP po `match_number`,
+    następnie budujemy URL strony meczu (?Sezon=...&Rozgrywki=...&Mecz=...), pobieramy HTML,
+    parsujemy dwie tabele #resultsData i zwracamy listę graczy w formacie:
+    {number:int, full_name:str, photo_url:str|None}.
+    """
+    # 0) Normalizacja 'side'
+    side_aliases = {
+        "gospodarze": "home",
+        "goscie": "away", "goście": "away",
+        "lacznie": "both", "łącznie": "both",
+    }
+    side_norm = side_aliases.get(side.lower(), side.lower())
+    if side_norm not in {"home", "away", "both"}:
+        raise HTTPException(422, "Parametr 'side' musi być jednym z: home | away | both")
+
+    client = ZprpApiClient(debug_logging=False)
+
+    # 1) Znajdź sezon po ID (jak w innych endpointach)
+    seasons = client._get_request_json(client.get_link_zprp('seasons_api', {}), 'seasons_api')
+    season = next((s for s in seasons.values() if s.get("ID_sezon") == str(season_id)), None)
+    if not season:
+        raise HTTPException(404, f"Sezon o ID {season_id} nie znaleziony.")
+    client._find_season = lambda _: season
+
+    # 2) Znajdź mecz po numerze (opcjonalnie zawężony do dnia/WZPR/central)
+    row = client.find_game_by_number(
+        desired_season=str(season_id),
+        match_number=match_number,
+        wzpr_list=wzpr_list,
+        central_level_only=central_level_only,
+        match_date=match_date,
+    )
+    if not row:
+        suffix = f" w dniu {match_date.isoformat()}" if match_date else ""
+        raise HTTPException(404, f"Nie znaleziono meczu o numerze '{match_number}' w sezonie {season_id}{suffix}.")
+
+    # 3) Zbuduj URL do strony meczu
+    url = _build_match_url_from_row(season_id, row)
+    if not url:
+        raise HTTPException(502, "Nie udało się zbudować URL strony meczu z danych rekordu (brak ID rozgrywek/meczu).")
+
+    # 4) Pobierz HTML strony meczu
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        html = r.text
+    except requests.RequestException as e:
+        raise HTTPException(502, f"Błąd pobierania strony meczu: {e}")
+
+    # 5) Parsowanie dwóch tabel #resultsData
+    try:
+        home_players, away_players = _parse_players_from_html_local(html)
+    except ValueError as e:
+        raise HTTPException(502, f"Błąd parsowania HTML z rozgrywki.zprp.pl: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Nieoczekiwany błąd podczas parsowania: {e}")
+
+    # 6) Wybór strony
+    if side_norm == "home":
+        data = home_players
+    elif side_norm == "away":
+        data = away_players
+    else:
+        data = [*home_players, *away_players]
+
+    # 7) Odpowiedź
+    payload = {
+        "season_id": int(season_id),
+        "match_number": match_number,
+        "side": side_norm,          # 'home' | 'away' | 'both'
+        "count": len(data),
+        "data": data,               # [{number, full_name, photo_url}, ...]
+        "source_url": url,
+    }
+    return JSONResponse(content=payload)
