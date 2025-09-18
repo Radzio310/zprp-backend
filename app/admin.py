@@ -5,8 +5,8 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, okreg_rates, hall_reports
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregRatesResponse, ListUserReportsResponse, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, okreg_rates, okreg_distances, hall_reports
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import unicodedata
 import difflib
@@ -458,6 +458,87 @@ async def upsert_okreg_rate(province: str, req: UpsertOkregRateRequest):
             updated_at=row["updated_at"],
         )
     )
+
+# === Okręgowe tabele odległości (identyczne zachowanie jak okreg_rates) ===
+
+@router.get(
+    "/okreg_distances",
+    response_model=ListOkregDistancesResponse,
+    summary="Lista plików 'tabel odległości' (per-województwo)"
+)
+async def list_okreg_distances():
+    rows = await database.fetch_all(select(okreg_distances))
+    files = [
+        OkregDistanceItem(
+            province=r["province"],
+            content=r["content"] if isinstance(r["content"], (dict, list)) else json.loads(r["content"]),
+            enabled=r["enabled"],
+            updated_at=r["updated_at"],
+        )
+        for r in rows
+    ]
+    return ListOkregDistancesResponse(files=files)
+
+
+@router.get(
+    "/okreg_distances/{province}",
+    response_model=GetOkregDistanceResponse,
+    summary="Pobierz tabelę odległości dla danego województwa"
+)
+async def get_okreg_distance(province: str):
+    province = province.upper()
+    row = await database.fetch_one(select(okreg_distances).where(okreg_distances.c.province == province))
+    if not row:
+        raise HTTPException(404, "Nie znaleziono pliku dla tego województwa")
+    raw = row["content"]
+    parsed = raw if isinstance(raw, (dict, list)) else json.loads(raw)
+    return GetOkregDistanceResponse(
+        file=OkregDistanceItem(
+            province=row["province"],
+            content=parsed,
+            enabled=row["enabled"],
+            updated_at=row["updated_at"],
+        )
+    )
+
+
+@router.put(
+    "/okreg_distances/{province}",
+    response_model=GetOkregDistanceResponse,
+    summary="Utwórz lub zaktualizuj tabelę odległości dla województwa"
+)
+async def upsert_okreg_distance(province: str, req: UpsertOkregDistanceRequest):
+    if req.province.upper() != province.upper():
+        raise HTTPException(400, "Province mismatch")
+
+    province = province.upper()
+
+    stmt = pg_insert(okreg_distances).values(
+        province=province,
+        content=req.content,
+        enabled=req.enabled,
+    ).on_conflict_do_update(
+        index_elements=[okreg_distances.c.province],
+        set_={"content": req.content, "enabled": req.enabled}
+    )
+    try:
+        await database.execute(stmt)
+    except Exception as e:
+        raise HTTPException(500, detail=f"SQL ERROR upsert_okreg_distance: {e!r}")
+
+    row = await database.fetch_one(select(okreg_distances).where(okreg_distances.c.province == province))
+    raw = row["content"]
+    parsed = raw if isinstance(raw, (dict, list)) else json.loads(raw)
+
+    return GetOkregDistanceResponse(
+        file=OkregDistanceItem(
+            province=row["province"],
+            content=parsed,
+            enabled=row["enabled"],
+            updated_at=row["updated_at"],
+        )
+    )
+
 
 @router.post("/halls/reports", response_model=dict, summary="Zgłoś nową halę")
 async def post_hall_report(req: CreateHallReportRequest):

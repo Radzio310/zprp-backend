@@ -237,6 +237,20 @@ okreg_rates = Table(
     ),
 )
 
+# 18.2) Tabele odległości okręgowych per województwo
+okreg_distances = Table(
+    "okreg_distances",
+    metadata,
+    Column("province", String, primary_key=True),  # np. "ŚLĄSKIE"
+    Column("content", JSON, nullable=False),       # pełny JSON tabeli odległości dla okręgu
+    Column("enabled", Boolean, nullable=False, server_default=text("false")),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
 
 # 19) Hale
 hall_reports = Table(

@@ -256,6 +256,24 @@ class UpsertOkregRateRequest(BaseModel):
     content: Any
     enabled: bool = True
 
+# ====== DISTANCES (okręgowe) ======
+
+class OkregDistanceItem(BaseModel):
+    province: str                      # np. "ŚLĄSKIE"
+    content: Any                       # dowolny JSON (np. {cities:[], edges:[]})
+    enabled: bool
+    updated_at: Optional[datetime] = None
+
+class ListOkregDistancesResponse(BaseModel):
+    files: List[OkregDistanceItem]
+
+class GetOkregDistanceResponse(BaseModel):
+    file: OkregDistanceItem
+
+class UpsertOkregDistanceRequest(BaseModel):
+    province: str
+    content: Any                       # Twój JSON tabeli odległości
+    enabled: bool = True
 
 # ---------------------------- HALE ----------------------------
 class CreateHallReportRequest(BaseModel):
