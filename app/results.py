@@ -141,6 +141,68 @@ async def _submit_short_result(
     # jeżeli pojawił się komunikat „Zapisano zmiany” → sukces
     return "Zapisano zmiany" in text
 
+import unicodedata
+
+def _norm(s: str) -> str:
+    """lower + usunięcie znaków diakrytycznych, by porównania były odporne na warianty."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.lower()
+
+def _is_host_swapped(soup: BeautifulSoup) -> bool:
+    """
+    Elastyczne wykrywanie zmiany gospodarza:
+    1) dowolny <img> ze źródłem zawierającym 'zmiana' (np. 'pliki/zmiana.png')
+    2) alt/title zawierające rdzenie 'zmian' i 'gospod' (np. 'nastapila zmiana gospodarza')
+    3) fallback: sam tekst strony z taką frazą (na wypadek braku obrazka)
+    """
+    # 1) Po nazwie pliku/ścieżce (najstabilniejsze)
+    for img in soup.find_all("img"):
+        src_norm = _norm(img.get("src", ""))
+        if "zmiana" in src_norm:   # łapie też '.../Zmiana.png', '.../ico-zmiana.svg' itd.
+            return True
+
+        # 2) Po alt/title (luźne dopasowanie rdzeni)
+        meta = _norm((img.get("alt") or "") + " " + (img.get("title") or ""))
+        if ("zmian" in meta) and ("gospod" in meta):
+            return True
+
+    # 3) Fallback: tekstowy komunikat na stronie
+    page_text = _norm(soup.get_text(" ", strip=True))
+    if ("zmian" in page_text) and ("gospod" in page_text):
+        return True
+
+    return False
+
+
+def _swap_gosp_gosc(overrides: Dict[str, str]) -> Dict[str, str]:
+    """
+    Zamienia wartości par kluczy *_gosp* ↔ *_gosc* w słowniku overrides.
+    Działa dla wszystkich wariantów nazw (np. *_full, *_pol, *_ii, *_ss, itp.).
+    """
+    swapped = overrides.copy()
+    visited = set()
+
+    for k in list(overrides.keys()):
+        if k in visited:
+            continue
+        if "gosp" in k:
+            twin = k.replace("gosp", "gosc")
+            if twin in overrides:
+                swapped[k], swapped[twin] = overrides[twin], overrides[k]
+                visited.add(k)
+                visited.add(twin)
+        elif "gosc" in k:
+            twin = k.replace("gosc", "gosp")
+            if twin in overrides:
+                swapped[k], swapped[twin] = overrides[twin], overrides[k]
+                visited.add(k)
+                visited.add(twin)
+
+    return swapped
+
 
 @router.post(
     "/judge/results/short",
@@ -168,6 +230,7 @@ async def short_result(
                 cookies=client.cookies,
             )
             soup = BeautifulSoup(html, "html.parser")
+            host_swapped = _is_host_swapped(soup)
 
             # 3) sprawdź dostępność przycisku/modalu
             if not soup.find("button", class_="przycisk3", string="Wynik skrócony"):
@@ -207,6 +270,9 @@ async def short_result(
                 "timeout3_gosc_ss": req.timeout3_gosc_ss,
                 "widzowie": req.widzowie or ""
             }
+
+            if host_swapped:
+                overrides = _swap_gosp_gosc(overrides)
 
             ok = await _submit_short_result(
                 client,
