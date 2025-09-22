@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, okreg_rates, okreg_distances, hall_reports
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls
 from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import unicodedata
@@ -542,6 +542,17 @@ async def upsert_okreg_distance(province: str, req: UpsertOkregDistanceRequest):
 
 @router.post("/halls/reports", response_model=dict, summary="Zgłoś nową halę")
 async def post_hall_report(req: CreateHallReportRequest):
+    # 0) jeśli ta hala była kiedyś odrzucona – zablokuj przyjęcie zgłoszenia
+    norm_key = _hall_norm_key(req.Hala_nazwa, req.Hala_miasto, req.Hala_ulica, req.Hala_numer)
+    exists = await database.fetch_one(
+        select(rejected_halls.c.id).where(rejected_halls.c.norm_key == norm_key)
+    )
+    if exists:
+        # 409 – konflikt; ta hala jest na czarnej liście
+        raise HTTPException(
+            status_code=409,
+            detail="Ta hala została wcześniej odrzucona i nie przyjmujemy ponownych zgłoszeń."
+        )
     stmt = hall_reports.insert().values(
         Hala_nazwa=req.Hala_nazwa,
         Hala_miasto=req.Hala_miasto,
@@ -578,15 +589,45 @@ async def list_hall_reports():
 @router.delete(
     "/halls/reports/{report_id}",
     response_model=dict,
-    summary="Usuń zgłoszenie hali"
+    summary="Usuń zgłoszenie hali (i dodaj ją do listy odrzuconych)"
 )
 async def delete_hall_report(report_id: int):
-    result = await database.execute(
-        hall_reports.delete().where(hall_reports.c.id == report_id)
-    )
+    # 1) pobierz zgłoszenie
+    row = await database.fetch_one(select(hall_reports).where(hall_reports.c.id == report_id))
+    if not row:
+        raise HTTPException(404, "Zgłoszenie nie znalezione")
+
+    # 2) upsert do rejected_halls
+    norm_key = _hall_norm_key(row["Hala_nazwa"], row["Hala_miasto"], row["Hala_ulica"], row["Hala_numer"])
+    try:
+        # unikalność po norm_key – jeśli już jest, po prostu przejdź dalej
+        await database.execute(
+            pg_insert(rejected_halls).values(
+                Hala_nazwa=row["Hala_nazwa"],
+                Hala_miasto=row["Hala_miasto"],
+                Hala_ulica=row["Hala_ulica"],
+                Hala_numer=row["Hala_numer"],
+                norm_key=norm_key,
+            ).on_conflict_do_nothing(index_elements=[rejected_halls.c.norm_key])
+        )
+    except Exception as e:
+        # nie blokuj samego kasowania, ale zgłoś sensowny błąd gdyby coś było ewidentnie nie tak
+        raise HTTPException(500, detail=f"SQL ERROR insert rejected_halls: {e!r}")
+
+    # 3) usuń zgłoszenie
+    result = await database.execute(hall_reports.delete().where(hall_reports.c.id == report_id))
     if not result:
         raise HTTPException(404, "Zgłoszenie nie znalezione")
     return {"success": True}
+
+@router.get(
+    "/halls/rejected",
+    summary="Lista hal odrzuconych",
+    response_model=List[dict]  # albo własny model w schemas, jeśli wolisz
+)
+async def list_rejected_halls():
+    rows = await database.fetch_all(select(rejected_halls).order_by(rejected_halls.c.created_at.desc()))
+    return [dict(r) for r in rows]
 
 # === Helpers do fuzzy porównań ===
 
@@ -600,6 +641,16 @@ def _norm_text(s: str) -> str:
     s1 = _strip_diacritics(s).lower()
     s2 = _normalize_spaces(s1)
     return "".join(ch for ch in s2 if ch.isalnum() or ch.isspace())
+
+def _hall_norm_key(name: str, city: str, street: str, number: str) -> str:
+    # scalone, znormalizowane pola – jeden string do szybkiego porównania/unikatu
+    return "|".join([
+        _norm_text(name or ""),
+        _norm_text(city or ""),
+        _norm_text(street or ""),
+        _norm_text(number or "")
+    ])
+
 
 def _similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()

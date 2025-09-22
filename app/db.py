@@ -267,6 +267,21 @@ hall_reports = Table(
     Column("is_processed", Boolean, nullable=False, server_default=text("false")),
 )
 
+# 19.1) Hale odrzucone – żeby blokować ponowne zgłoszenia
+rejected_halls = Table(
+    "rejected_halls",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("Hala_nazwa", String, nullable=False),
+    Column("Hala_miasto", String, nullable=False),
+    Column("Hala_ulica", String, nullable=False),
+    Column("Hala_numer", String, nullable=False),
+    # klucz normalizowany do szybkiego porównania (bez znaków diakrytycznych/spacji/znaków specjalnych)
+    Column("norm_key", String, nullable=False, unique=True, index=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
+
 # 20) Kalendarzowe wydarzenia Google (opcjonalnie rozbijemy później)
 calendar_events = Table(
     "calendar_events", metadata,
