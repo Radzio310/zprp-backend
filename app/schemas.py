@@ -207,6 +207,13 @@ class LoginRecordItem(BaseModel):
 class ListLoginRecordsResponse(BaseModel):
     records: list[LoginRecordItem]
 
+class UpdateLoginRecordRequest(BaseModel):
+    full_name: Optional[str] = None
+    app_version: Optional[str] = None
+    app_opens: Optional[int] = None
+    last_open_at: Optional[datetime] = None
+    last_login_at: Optional[datetime] = None
+
 class SetForcedLogoutRequest(BaseModel):
     logout_at: datetime  # ISO‑8601
 

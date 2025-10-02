@@ -12,6 +12,7 @@ from app.schemas import (
     CreateLoginRecordRequest,
     LoginRecordItem,
     ListLoginRecordsResponse,
+    UpdateLoginRecordRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,3 +95,70 @@ async def delete_login(judge_id: str):
     # databases zwraca None dla DELETE w niektórych sterownikach – traktujemy jako OK,
     # ale jeżeli chcesz twardo 404 dla nieistniejącego ID, najpierw sprawdź istnienie.
     return {"success": True}
+
+@router.patch("/{judge_id}", response_model=LoginRecordItem,
+              summary="Częściowa edycja rekordu logowania")
+async def patch_login_record(judge_id: str, body: UpdateLoginRecordRequest):
+    # sprawdź, czy rekord istnieje
+    existing = await database.fetch_one(
+        select(login_records).where(login_records.c.judge_id == judge_id)
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Nie znaleziono rekordu")
+
+    update_data = {}
+    if body.full_name is not None:
+        update_data["full_name"] = body.full_name
+    if body.app_version is not None:
+        update_data["app_version"] = body.app_version
+    if body.app_opens is not None:
+        update_data["app_opens"] = body.app_opens
+    if body.last_open_at is not None:
+        update_data["last_open_at"] = body.last_open_at
+    if body.last_login_at is not None:
+        update_data["last_login_at"] = body.last_login_at
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="Brak pól do aktualizacji")
+
+    await database.execute(
+        login_records.update()
+        .where(login_records.c.judge_id == judge_id)
+        .values(**update_data)
+    )
+
+    row = await database.fetch_one(
+        select(login_records).where(login_records.c.judge_id == judge_id)
+    )
+    return LoginRecordItem(**dict(row))
+
+@router.put("/{judge_id}", response_model=LoginRecordItem,
+            summary="Upsert rekordu logowania po judge_id")
+async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
+    now = datetime.now(timezone.utc)
+
+    stmt = pg_insert(login_records).values(
+        judge_id=judge_id,
+        full_name=req.full_name,
+        last_login_at=now,
+        app_version=req.app_version,
+        app_opens=req.app_opens,
+        last_open_at=req.last_open_at,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[login_records.c.judge_id],
+        set_={
+            "full_name": req.full_name,
+            "last_login_at": now,
+            "app_version": func.coalesce(stmt.excluded.app_version, login_records.c.app_version),
+            "app_opens": func.coalesce(stmt.excluded.app_opens, login_records.c.app_opens),
+            "last_open_at": func.coalesce(stmt.excluded.last_open_at, login_records.c.last_open_at),
+        },
+    )
+
+    await database.execute(stmt)
+
+    row = await database.fetch_one(
+        select(login_records).where(login_records.c.judge_id == judge_id)
+    )
+    return LoginRecordItem(**dict(row))
