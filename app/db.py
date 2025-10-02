@@ -315,28 +315,3 @@ saved_matches = Table(
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
-
-# --- Lekka, bezpieczna migracja kolumn (SQLite/Postgres) ---
-
-def ensure_column(table_name: str, col_sql: str):
-    # col_sql np. 'ADD COLUMN app_version VARCHAR'
-    try:
-        if engine.dialect.name == "sqlite":
-            # SQLite nie ma łatwego "ADD COLUMN IF NOT EXISTS" – sprawdzamy PRAGMA
-            with engine.connect() as conn:
-                cols = [r[1] for r in conn.exec_driver_sql(f"PRAGMA table_info({table_name});")]
-                target = col_sql.split()[2]  # nazwa po 'ADD COLUMN'
-                if target not in cols:
-                    conn.exec_driver_sql(f"ALTER TABLE {table_name} {col_sql}")
-        else:
-            # Postgres ma IF NOT EXISTS
-            with engine.connect() as conn:
-                conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col_sql.split('ADD COLUMN ')[1]}")
-    except Exception as _:
-        pass  # cicho – jeśli istnieje, idziemy dalej
-
-# dopisz po create_all:
-ensure_column("login_records", "ADD COLUMN app_version VARCHAR")
-ensure_column("login_records", "ADD COLUMN app_opens INTEGER")
-ensure_column("login_records", "ADD COLUMN last_open_at TIMESTAMPTZ")
-
