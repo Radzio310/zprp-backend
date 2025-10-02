@@ -192,14 +192,18 @@ class ListAdminPostsResponse(BaseModel):
 class CreateLoginRecordRequest(BaseModel):
     judge_id: str
     full_name: str
+    app_version: Optional[str] = None
+    app_opens: Optional[int] = None
+    last_open_at: Optional[datetime] = None
 
-# 2) Jeden rekord w odpowiedzi
 class LoginRecordItem(BaseModel):
     judge_id: str
     full_name: str
     last_login_at: datetime
+    app_version: Optional[str] = None
+    app_opens: Optional[int] = None
+    last_open_at: Optional[datetime] = None
 
-# 3) Lista rekordów
 class ListLoginRecordsResponse(BaseModel):
     records: list[LoginRecordItem]
 
