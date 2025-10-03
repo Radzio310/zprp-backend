@@ -169,6 +169,9 @@ admin_posts = Table(
   Column("title", String, nullable=False),
   Column("content", Text, nullable=False),
   Column("link", String, nullable=True),
+  # ⬇⬇⬇ NOWE ⬇⬇⬇
+  Column("button_text", String, nullable=True),  # tekst przycisku w appce
+  Column("target_filters", JSON, nullable=True), # jak w forced_logout_rules.filters
   Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
@@ -199,6 +202,18 @@ forced_logout = Table(
         nullable=False,
         comment="Globalny termin wymuszonego wylogowania"
     ),
+)
+
+# 14.1) Wiele reguł wymuszonego wylogowania (targetowane)
+forced_logout_rules = Table(
+    "forced_logout_rules",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("logout_at", DateTime(timezone=True), nullable=False),
+    # JSON z opcjonalnymi filtrami:
+    # {"judge_ids": ["123","456"], "provinces": ["ŚLĄSKIE","MAZOWIECKIE"], "versions": ["1.23.14","1.24.0"]}
+    Column("filters", JSON, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
 # 15) News Master – ogłoszenia

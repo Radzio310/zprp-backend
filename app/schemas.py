@@ -172,16 +172,27 @@ class UserReportItem(BaseModel):
 class ListUserReportsResponse(BaseModel):
     reports: List[UserReportItem]
 
+class TargetFilters(BaseModel):
+    judge_ids: Optional[List[str]] = None
+    provinces: Optional[List[str]] = None
+    versions: Optional[List[str]] = None
+
 class CreateAdminPostRequest(BaseModel):
     title: str
     content: str
     link: Optional[str]
+    # ⬇⬇⬇ NOWE ⬇⬇⬇
+    button_text: Optional[str] = None
+    target_filters: Optional[TargetFilters] = None
 
 class AdminPostItem(BaseModel):
     id: int
     title: str
     content: str
     link: Optional[str]
+    # ⬇⬇⬇ NOWE ⬇⬇⬇
+    button_text: Optional[str] = None
+    target_filters: Optional[TargetFilters] = None
     created_at: datetime
 
 class ListAdminPostsResponse(BaseModel):
@@ -219,6 +230,20 @@ class SetForcedLogoutRequest(BaseModel):
 
 class ForcedLogoutResponse(BaseModel):
     logout_at: Optional[datetime]  # może być None, jeśli jeszcze nie ustawiono
+
+class ForcedLogoutRuleItem(BaseModel):
+    id: int
+    logout_at: datetime
+    filters: Optional[TargetFilters] = None
+    created_at: datetime
+
+class CreateForcedLogoutRuleRequest(BaseModel):
+    logout_at: datetime
+    filters: Optional[TargetFilters] = None
+
+class ListForcedLogoutRulesResponse(BaseModel):
+    rules: List[ForcedLogoutRuleItem]
+
 
 # MODUŁ ŚLĄSKI
 class ListMastersResponse(BaseModel):

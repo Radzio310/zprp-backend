@@ -1,12 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, ListVersionsResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpdateVersionRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateForcedLogoutRuleRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, ForcedLogoutRuleItem, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListForcedLogoutRulesResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, ListVersionsResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpdateVersionRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import unicodedata
 import difflib
@@ -27,6 +27,17 @@ router = APIRouter(
     prefix="/admin",
     tags=["Admin"]
 )
+
+def _parse_json(raw):
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
 
 @router.post("/validate_pin", response_model=ValidatePinResponse, summary="Walidacja PIN-u admina")
 async def validate_pin(req: ValidatePinRequest):
@@ -195,10 +206,15 @@ async def delete_report(report_id: int):
 @router.post("/posts", response_model=dict, summary="Dodaj wpis adminowy")
 async def post_admin_entry(req: CreateAdminPostRequest):
     stmt = admin_posts.insert().values(
-      title=req.title, content=req.content, link=req.link
+        title=req.title,
+        content=req.content,
+        link=req.link,
+        button_text=req.button_text,
+        target_filters=(req.target_filters.dict() if req.target_filters else None),
     )
     await database.execute(stmt)
     return {"success": True}
+
 
 @router.delete("/posts/{post_id}", response_model=dict, summary="Usuń wpis adminowy")
 async def delete_admin_post(post_id: int):
@@ -213,7 +229,18 @@ async def delete_admin_post(post_id: int):
 @router.get("/posts", response_model=ListAdminPostsResponse, summary="Lista wpisów admina")
 async def list_admin_posts():
     rows = await database.fetch_all(select(admin_posts).order_by(admin_posts.c.created_at.desc()))
-    return ListAdminPostsResponse(posts=[AdminPostItem(**dict(r)) for r in rows])
+    posts = []
+    for r in rows:
+        posts.append(AdminPostItem(
+            id=r["id"],
+            title=r["title"],
+            content=r["content"],
+            link=r["link"],
+            button_text=r.get("button_text"),
+            target_filters=_parse_json(r.get("target_filters")),
+            created_at=r["created_at"],
+        ))
+    return ListAdminPostsResponse(posts=posts)
 
 ## UŻYTKOWNICY
 @router.get("/forced_logout", response_model=ForcedLogoutResponse, summary="Pobierz termin wymuszonego wylogowania")
@@ -240,6 +267,108 @@ async def delete_forced_logout():
     if not result:
         raise HTTPException(status_code=404, detail="Brak ustawionego terminu")
     return {"success": True}
+
+@router.get(
+    "/forced_logout/rules",
+    response_model=ListForcedLogoutRulesResponse,
+    summary="Lista zaplanowanych reguł wymuszonego wylogowania"
+)
+async def list_forced_logout_rules():
+    rows = await database.fetch_all(
+        select(forced_logout_rules).order_by(forced_logout_rules.c.logout_at.asc())
+    )
+    rules = [
+        ForcedLogoutRuleItem(
+            id=r["id"],
+            logout_at=r["logout_at"],
+            filters=_parse_json(r["filters"]),
+            created_at=r["created_at"]
+        ) for r in rows
+    ]
+    return ListForcedLogoutRulesResponse(rules=rules)
+
+@router.post(
+    "/forced_logout/rules",
+    response_model=dict,
+    summary="Utwórz regułę wymuszonego wylogowania (z filtrami)"
+)
+async def create_forced_logout_rule(req: CreateForcedLogoutRuleRequest):
+    await database.execute(
+        insert(forced_logout_rules).values(
+            logout_at=req.logout_at,
+            filters=(req.filters.dict() if req.filters else None),
+        )
+    )
+    return {"success": True}
+
+@router.delete(
+    "/forced_logout/rules/{rule_id}",
+    response_model=dict,
+    summary="Usuń regułę wymuszonego wylogowania"
+)
+async def delete_forced_logout_rule(rule_id: int):
+    result = await database.execute(
+        delete(forced_logout_rules).where(forced_logout_rules.c.id == rule_id)
+    )
+    if not result:
+        raise HTTPException(404, "Reguła nie znaleziona")
+    return {"success": True}
+
+def _rule_matches(filters: dict|None, judge_id: str|None, province: str|None, app_version: str|None) -> bool:
+    if not filters:
+        return True
+    j_ok = ("judge_ids" not in filters or not filters["judge_ids"]
+            or (judge_id and judge_id in filters["judge_ids"]))
+    p_ok = ("provinces" not in filters or not filters["provinces"]
+            or (province and province.upper() in [s.upper() for s in filters["provinces"]]))
+    v_ok = ("versions" not in filters or not filters["versions"]
+            or (app_version and app_version in filters["versions"]))
+    # AND – jeśli filtr jest podany, musi pasować
+    return j_ok and p_ok and v_ok
+
+@router.get(
+    "/forced_logout/next",
+    summary="Zwraca najbliższe pasujące wymuszone wylogowanie dla użytkownika"
+)
+async def next_forced_logout(judge_id: str = "", province: str = "", app_version: str = ""):
+    now = datetime.now(timezone.utc)
+    rows = await database.fetch_all(
+        select(forced_logout_rules)
+        .where(forced_logout_rules.c.logout_at >= now)
+        .order_by(forced_logout_rules.c.logout_at.asc())
+    )
+    for r in rows:
+        filters = _parse_json(r["filters"])
+        if _rule_matches(filters, judge_id, province, app_version):
+            return {"logout_at": r["logout_at"]}
+    # fallback do starego globalnego terminu (jeśli istnieje i w przyszłości)
+    row = await database.fetch_one(select(forced_logout).limit(1))
+    if row and row["logout_at"] and row["logout_at"] >= now:
+        return {"logout_at": row["logout_at"]}
+    return {"logout_at": None}
+
+@router.get(
+    "/posts/for_user",
+    response_model=ListAdminPostsResponse,
+    summary="Lista wpisów admina dopasowanych do użytkownika"
+)
+async def posts_for_user(judge_id: str = "", province: str = "", app_version: str = ""):
+    rows = await database.fetch_all(select(admin_posts).order_by(admin_posts.c.created_at.desc()))
+    out = []
+    for r in rows:
+        filters = _parse_json(r.get("target_filters"))
+        if _rule_matches(filters, judge_id, province, app_version):
+            out.append(AdminPostItem(
+                id=r["id"],
+                title=r["title"],
+                content=r["content"],
+                link=r["link"],
+                button_text=r.get("button_text"),
+                target_filters=filters,
+                created_at=r["created_at"]
+            ))
+    return ListAdminPostsResponse(posts=out)
+
 
 # MODUŁ ŚLĄSKI
 @router.get(
