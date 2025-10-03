@@ -356,14 +356,16 @@ async def posts_for_user(judge_id: str = "", province: str = "", app_version: st
     rows = await database.fetch_all(select(admin_posts).order_by(admin_posts.c.created_at.desc()))
     out = []
     for r in rows:
-        filters = _parse_json(r.get("target_filters"))
+        # BYŁO: filters = _parse_json(r.get("target_filters"))
+        filters = _parse_json(r["target_filters"])
         if _rule_matches(filters, judge_id, province, app_version):
             out.append(AdminPostItem(
                 id=r["id"],
                 title=r["title"],
                 content=r["content"],
                 link=r["link"],
-                button_text=r.get("button_text"),
+                # BYŁO: button_text=r.get("button_text"),
+                button_text=r["button_text"],
                 target_filters=filters,
                 created_at=r["created_at"]
             ))
