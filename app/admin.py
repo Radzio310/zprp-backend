@@ -326,26 +326,23 @@ def _rule_matches(filters: dict|None, judge_id: str|None, province: str|None, ap
     # AND – jeśli filtr jest podany, musi pasować
     return j_ok and p_ok and v_ok
 
-@router.get(
-    "/forced_logout/next",
-    summary="Zwraca najbliższe pasujące wymuszone wylogowanie dla użytkownika"
-)
+@router.get("/forced_logout/next")
 async def next_forced_logout(judge_id: str = "", province: str = "", app_version: str = ""):
-    now = datetime.now(timezone.utc)
+    # NIE filtrujemy po ">= now"
     rows = await database.fetch_all(
         select(forced_logout_rules)
-        .where(forced_logout_rules.c.logout_at >= now)
-        .order_by(forced_logout_rules.c.logout_at.asc())
+        .order_by(forced_logout_rules.c.logout_at.desc())
     )
     for r in rows:
         filters = _parse_json(r["filters"])
         if _rule_matches(filters, judge_id, province, app_version):
-            return {"logout_at": r["logout_at"]}
-    # fallback do starego globalnego terminu (jeśli istnieje i w przyszłości)
+            return {"id": r["id"], "logout_at": r["logout_at"]}
+
+    # fallback do "klasycznego" wpisu – bez żadnego porównania do "now"
     row = await database.fetch_one(select(forced_logout).limit(1))
-    if row and row["logout_at"] and row["logout_at"] >= now:
-        return {"logout_at": row["logout_at"]}
-    return {"logout_at": None}
+    if row:
+        return {"id": 0, "logout_at": row["logout_at"]}
+    return {"id": None, "logout_at": None}
 
 @router.get(
     "/posts/for_user",
