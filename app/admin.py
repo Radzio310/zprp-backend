@@ -314,20 +314,84 @@ async def delete_forced_logout_rule(rule_id: int):
         raise HTTPException(404, "Reguła nie znaleziona")
     return {"success": True}
 
-def _rule_matches(filters: dict|None, judge_id: str|None, province: str|None, app_version: str|None) -> bool:
+def _cmp_semver(a: str, b: str) -> int:
+    """Zwraca -1 gdy a<b, 0 gdy a==b, 1 gdy a>b dla formatu X.Y.Z (liczby)."""
+    try:
+        pa = [int(x) for x in (a or "").split(".")]
+        pb = [int(x) for x in (b or "").split(".")]
+    except Exception:
+        return 0
+    la = len(pa); lb = len(pb)
+    for i in range(max(la, lb)):
+        aa = pa[i] if i < la else 0
+        bb = pb[i] if i < lb else 0
+        if aa < bb: return -1
+        if aa > bb: return 1
+    return 0
+
+
+def _rule_matches(
+    filters: dict | None,
+    judge_id: str | None,
+    province: str | None,
+    app_version: str | None,
+    platform: str | None = None
+) -> bool:
+    """
+    Dopasowanie zasady:
+      - judge_ids: lista ID (dokładne dopasowanie)
+      - provinces: lista województw (case-insensitive)
+      - versions: lista wersji (dokładne dopasowanie)
+      - min_version/max_version: zakres semver X.Y.Z
+      - platforms: ["ios","android"] (dokładne dopasowanie)
+    Jeżeli dany filtr jest podany, MUSI pasować (logika AND).
+    """
     if not filters:
         return True
-    j_ok = ("judge_ids" not in filters or not filters["judge_ids"]
-            or (judge_id and judge_id in filters["judge_ids"]))
-    p_ok = ("provinces" not in filters or not filters["provinces"]
-            or (province and province.upper() in [s.upper() for s in filters["provinces"]]))
-    v_ok = ("versions" not in filters or not filters["versions"]
-            or (app_version and app_version in filters["versions"]))
-    # AND – jeśli filtr jest podany, musi pasować
-    return j_ok and p_ok and v_ok
+
+    # judge_ids
+    j_ok = (
+        "judge_ids" not in filters or not filters["judge_ids"]
+        or (judge_id and judge_id in filters["judge_ids"])
+    )
+
+    # provinces (case-insensitive)
+    p_ok = (
+        "provinces" not in filters or not filters["provinces"]
+        or (province and province.upper() in [s.upper() for s in filters["provinces"]])
+    )
+
+    # exact list of versions
+    v_list_ok = (
+        "versions" not in filters or not filters["versions"]
+        or (app_version and app_version in filters["versions"])
+    )
+
+    # semver min/max
+    v_min_ok = (
+        "min_version" not in filters or not filters["min_version"]
+        or (app_version and _cmp_semver(app_version, filters["min_version"]) >= 0)
+    )
+    v_max_ok = (
+        "max_version" not in filters or not filters["max_version"]
+        or (app_version and _cmp_semver(app_version, filters["max_version"]) <= 0)
+    )
+
+    # platforms (ios/android)
+    plat_ok = (
+        "platforms" not in filters or not filters["platforms"]
+        or (platform and platform in filters["platforms"])
+    )
+
+    return j_ok and p_ok and v_list_ok and v_min_ok and v_max_ok and plat_ok
 
 @router.get("/forced_logout/next")
-async def next_forced_logout(judge_id: str = "", province: str = "", app_version: str = ""):
+async def next_forced_logout(
+    judge_id: str = "",
+    province: str = "",
+    app_version: str = "",
+    platform: str = ""   # <— DODANE
+):
     # NIE filtrujemy po ">= now"
     rows = await database.fetch_all(
         select(forced_logout_rules)
@@ -335,10 +399,11 @@ async def next_forced_logout(judge_id: str = "", province: str = "", app_version
     )
     for r in rows:
         filters = _parse_json(r["filters"])
-        if _rule_matches(filters, judge_id, province, app_version):
-            return {"id": r["id"], "logout_at": r["logout_at"]}
+        if _rule_matches(filters, judge_id, province, app_version, platform):
+            # możesz chcieć zwrócić także same filtry, by klient mógł dodatkowo weryfikować
+            return {"id": r["id"], "logout_at": r["logout_at"], "filters": filters}
 
-    # fallback do "klasycznego" wpisu – bez żadnego porównania do "now"
+    # fallback…
     row = await database.fetch_one(select(forced_logout).limit(1))
     if row:
         return {"id": 0, "logout_at": row["logout_at"]}
@@ -349,25 +414,27 @@ async def next_forced_logout(judge_id: str = "", province: str = "", app_version
     response_model=ListAdminPostsResponse,
     summary="Lista wpisów admina dopasowanych do użytkownika"
 )
-async def posts_for_user(judge_id: str = "", province: str = "", app_version: str = ""):
+async def posts_for_user(
+    judge_id: str = "",
+    province: str = "",
+    app_version: str = "",
+    platform: str = ""        # <— DODANE
+):
     rows = await database.fetch_all(select(admin_posts).order_by(admin_posts.c.created_at.desc()))
     out = []
     for r in rows:
-        # BYŁO: filters = _parse_json(r.get("target_filters"))
         filters = _parse_json(r["target_filters"])
-        if _rule_matches(filters, judge_id, province, app_version):
+        if _rule_matches(filters, judge_id, province, app_version, platform):
             out.append(AdminPostItem(
                 id=r["id"],
                 title=r["title"],
                 content=r["content"],
                 link=r["link"],
-                # BYŁO: button_text=r.get("button_text"),
                 button_text=r["button_text"],
                 target_filters=filters,
                 created_at=r["created_at"]
             ))
     return ListAdminPostsResponse(posts=out)
-
 
 # MODUŁ ŚLĄSKI
 @router.get(
