@@ -5,8 +5,8 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, news_masters, calendar_masters, match_masters, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, ListVersionsResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpdateVersionRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import unicodedata
 import difflib
@@ -774,3 +774,80 @@ async def upsert_contact_judge(req: UpsertContactJudgeRequest):
         matched_index=best_idx,
         matched_by=matched_by,
     )
+
+# ---------------------------- APP VERSIONS CRUD ----------------------------
+
+@router.get("/versions", response_model=ListVersionsResponse, summary="Pobierz listę wersji")
+async def list_versions():
+    rows = await database.fetch_all(
+        select(app_versions).order_by(app_versions.c.created_at.desc())
+    )
+    return ListVersionsResponse(
+        versions=[VersionItem(**dict(r)) for r in rows]
+    )
+
+@router.post("/versions", response_model=dict, summary="Dodaj nową wersję")
+async def create_version(req: CreateVersionRequest):
+    # Prosta walidacja formatu X.Y.Z (opcjonalnie rozszerz)
+    import re
+    if not re.fullmatch(r"\d+\.\d+\.\d+", req.version):
+        raise HTTPException(status_code=400, detail="Wersja musi być w formacie X.Y.Z (np. 1.23.14)")
+
+    # Unikalność 'version' dba DB, ale zróbmy też wstępny check
+    exists = await database.fetch_one(
+        select(app_versions.c.id).where(app_versions.c.version == req.version)
+    )
+    if exists:
+        raise HTTPException(status_code=409, detail="Taka wersja już istnieje")
+
+    await database.execute(
+        insert(app_versions).values(
+            version=req.version,
+            name=req.name,
+            description=req.description or "",
+        )
+    )
+    return {"success": True}
+
+@router.put("/versions/{version_id}", response_model=dict, summary="Zaktualizuj wersję")
+async def update_version(version_id: int, req: UpdateVersionRequest):
+    # jeśli ktoś zmienia numer wersji – sprawdź unikalność & format
+    values: Dict[str, Any] = {}
+    if req.version is not None:
+        import re
+        if not re.fullmatch(r"\d+\.\d+\.\d+", req.version):
+            raise HTTPException(status_code=400, detail="Wersja musi być w formacie X.Y.Z")
+        # kolizja?
+        exists = await database.fetch_one(
+            select(app_versions.c.id).where(
+                (app_versions.c.version == req.version) &
+                (app_versions.c.id != version_id)
+            )
+        )
+        if exists:
+            raise HTTPException(status_code=409, detail="Ta wersja już istnieje")
+        values["version"] = req.version
+
+    if req.name is not None:
+        values["name"] = req.name
+    if req.description is not None:
+        values["description"] = req.description
+
+    if not values:
+        return {"success": True}
+
+    result = await database.execute(
+        update(app_versions).where(app_versions.c.id == version_id).values(**values)
+    )
+    if not result:
+        raise HTTPException(404, "Wersja nie znaleziona")
+    return {"success": True}
+
+@router.delete("/versions/{version_id}", response_model=dict, summary="Usuń wersję")
+async def delete_version(version_id: int):
+    result = await database.execute(
+        delete(app_versions).where(app_versions.c.id == version_id)
+    )
+    if not result:
+        raise HTTPException(404, "Wersja nie znaleziona")
+    return {"success": True}

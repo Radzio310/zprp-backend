@@ -311,6 +311,17 @@ saved_matches = Table(
     Column("is_finished", Boolean, nullable=False, server_default=text("false")),
 )
 
+# 22) Wersje aplikacji / bazy
+app_versions = Table(
+    "app_versions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("version", String, nullable=False, unique=True, index=True),  # np. "1.23.14"
+    Column("name", String, nullable=False),                              # nazwa wersji
+    Column("description", Text, nullable=True),                          # opis zmian
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
 
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
