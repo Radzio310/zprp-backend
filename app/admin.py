@@ -236,8 +236,8 @@ async def list_admin_posts():
             title=r["title"],
             content=r["content"],
             link=r["link"],
-            button_text=r.get("button_text"),
-            target_filters=_parse_json(r.get("target_filters")),
+            button_text = r["button_text"],
+            target_filters=_parse_json(r["target_filters"]),
             created_at=r["created_at"],
         ))
     return ListAdminPostsResponse(posts=posts)
