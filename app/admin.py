@@ -811,8 +811,8 @@ async def create_version(req: CreateVersionRequest):
 
 @router.put("/versions/{version_id}", response_model=dict, summary="Zaktualizuj wersję")
 async def update_version(version_id: int, req: UpdateVersionRequest):
-    # jeśli ktoś zmienia numer wersji – sprawdź unikalność & format
     values: Dict[str, Any] = {}
+
     if req.version is not None:
         import re
         if not re.fullmatch(r"\d+\.\d+\.\d+", req.version):
@@ -834,20 +834,38 @@ async def update_version(version_id: int, req: UpdateVersionRequest):
         values["description"] = req.description
 
     if not values:
+        # nic nie zmieniasz, ale rekord musi istnieć
+        exists = await database.fetch_one(
+            select(app_versions.c.id).where(app_versions.c.id == version_id)
+        )
+        if not exists:
+            raise HTTPException(status_code=404, detail="Wersja nie znaleziona")
         return {"success": True}
 
-    result = await database.execute(
-        update(app_versions).where(app_versions.c.id == version_id).values(**values)
+    # KLUCZOWA ZMIANA: RETURNING + fetch_one zamiast execute
+    query = (
+        update(app_versions)
+        .where(app_versions.c.id == version_id)
+        .values(**values)
+        .returning(app_versions.c.id)
     )
-    if not result:
-        raise HTTPException(404, "Wersja nie znaleziona")
+    updated = await database.fetch_one(query)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Wersja nie znaleziona")
+
     return {"success": True}
+
 
 @router.delete("/versions/{version_id}", response_model=dict, summary="Usuń wersję")
 async def delete_version(version_id: int):
-    result = await database.execute(
-        delete(app_versions).where(app_versions.c.id == version_id)
+    # KLUCZOWA ZMIANA: RETURNING + fetch_one zamiast execute
+    query = (
+        delete(app_versions)
+        .where(app_versions.c.id == version_id)
+        .returning(app_versions.c.id)
     )
-    if not result:
-        raise HTTPException(404, "Wersja nie znaleziona")
+    deleted = await database.fetch_one(query)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Wersja nie znaleziona")
+
     return {"success": True}
