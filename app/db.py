@@ -338,6 +338,19 @@ app_versions = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
+# 23) Niedyspozycje partnera
+partner_offtimes = Table(
+    "partner_offtimes",
+    metadata,
+    Column("judge_id", String, primary_key=True),      # ID sędziego (unikatowy)
+    Column("full_name", String, nullable=False),       # Imię i nazwisko
+    Column("partner_id", String, nullable=True),       # ID partnera (opcjonalne)
+    Column("data_json", JSON, nullable=False),         # JSON z niedyspozycjami
+    Column("updated_at", DateTime(timezone=True),
+           server_default=func.now(), onupdate=func.now())
+)
+
+
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

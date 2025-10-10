@@ -439,3 +439,35 @@ class UpdateVersionRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
 
+
+# ---------------------------- Niedyspozcyje partnera ----------------------------
+class PartnerOfftimeBase(BaseModel):
+    judge_id: str
+    full_name: str
+    partner_id: Optional[str] = None
+    data_json: Any
+
+
+class CreatePartnerOfftimeRequest(PartnerOfftimeBase):
+    pass
+
+
+class UpdatePartnerOfftimeRequest(BaseModel):
+    full_name: Optional[str] = None
+    partner_id: Optional[str] = None
+    data_json: Optional[Any] = None
+
+
+class PartnerOfftimeItem(PartnerOfftimeBase):
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class ListPartnerOfftimesResponse(BaseModel):
+    records: List[PartnerOfftimeItem]
+
+
+class GetPartnerOfftimeResponse(BaseModel):
+    record: PartnerOfftimeItem
