@@ -350,6 +350,17 @@ partner_offtimes = Table(
            server_default=func.now(), onupdate=func.now())
 )
 
+# 24) Rejestr wysyłek "wyniku skróconego"
+short_result_records = Table(
+    "short_result_records",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("match_number", String, nullable=False, index=True),
+    Column("author_id", String, nullable=False, index=True),      # ID osoby wpisującej (np. judge_id)
+    Column("author_name", String, nullable=True),                 # Imię i nazwisko (opcjonalnie)
+    Column("payload", JSON, nullable=False),                      # Pełny JSON wysyłany na serwer
+)
 
 # Tworzymy tabele przy starcie
 engine = create_engine(DATABASE_URL)

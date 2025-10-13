@@ -30,6 +30,7 @@ from app.login_records import router as login_records_router
 from app.proel import router as proel_router
 from app.server_matches import router as matches_router
 from app.partner_offtimes import router as partner_offtimes_router
+from app.short_result_records import router as short_result_records_router
 
 from app.db import database, saved_matches
 
@@ -67,6 +68,7 @@ app.include_router(login_records_router)
 app.include_router(proel_router)
 app.include_router(matches_router)
 app.include_router(partner_offtimes_router)
+app.include_router(short_result_records_router)
 
 logger = logging.getLogger("uvicorn")
 

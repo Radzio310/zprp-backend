@@ -471,3 +471,22 @@ class ListPartnerOfftimesResponse(BaseModel):
 
 class GetPartnerOfftimeResponse(BaseModel):
     record: PartnerOfftimeItem
+
+# ------------------------- Rejestr "wyniku skróconego" -------------------------
+
+class CreateShortResultRecordRequest(BaseModel):
+    match_number: str
+    author_id: str
+    author_name: Optional[str] = None
+    payload: Any
+
+class ShortResultRecordItem(BaseModel):
+    id: int
+    created_at: datetime
+    match_number: str
+    author_id: str
+    author_name: Optional[str] = None
+    payload: Any
+
+class ListShortResultRecordsResponse(BaseModel):
+    records: List[ShortResultRecordItem]
