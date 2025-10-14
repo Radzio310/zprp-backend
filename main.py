@@ -32,7 +32,7 @@ from app.server_matches import router as matches_router
 from app.partner_offtimes import router as partner_offtimes_router
 from app.short_result_records import router as short_result_records_router
 
-from app.db import database, saved_matches
+from app.db import database, saved_matches, short_result_records
 
 app = FastAPI(title="BAZA - API")
 
@@ -78,12 +78,28 @@ async def _cleanup_loop():
     """Kasuje mecze z ProEl starsze niż PROEL_RETENTION_DAYS (domyślnie 7) co 24h."""
     retention_days = int(os.getenv("PROEL_RETENTION_DAYS", "7"))
     interval_sec = int(os.getenv("PROEL_CLEANUP_INTERVAL_SECONDS", str(24*60*60)))
+
+    # ⬇⬇⬇ DODANE: retencja short result (domyślnie 10 dni, można nadpisać env-em) ⬇⬇⬇
+    short_result_retention_days = int(os.getenv("SHORT_RESULT_RETENTION_DAYS", "10"))
+
     while True:
         try:
+            # ProEl
             cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
             stmt = delete(saved_matches).where(saved_matches.c.updated_at < cutoff)
             removed = await database.execute(stmt)
-            logger.info(f"🧹 ProEl cleanup: removed {int(removed or 0)} rows older than {cutoff.isoformat()} UTC")
+            logger.info(
+                f"🧹 ProEl cleanup: removed {int(removed or 0)} rows older than {cutoff.isoformat()} UTC"
+            )
+
+            # ⬇⬇⬇ DODANE: short_result_records ⬇⬇⬇
+            cutoff_sr = datetime.now(timezone.utc) - timedelta(days=short_result_retention_days)
+            stmt_sr = delete(short_result_records).where(short_result_records.c.created_at < cutoff_sr)
+            removed_sr = await database.execute(stmt_sr)
+            logger.info(
+                f"🧹 ShortResult cleanup: removed {int(removed_sr or 0)} rows older than {cutoff_sr.isoformat()} UTC"
+            )
+
         except Exception as e:
             logger.exception("Cleanup loop error")
         await asyncio.sleep(interval_sec)
