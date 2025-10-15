@@ -5,8 +5,8 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateForcedLogoutRuleRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, ForcedLogoutRuleItem, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListForcedLogoutRulesResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, ListVersionsResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpdateVersionRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, zprp_masters, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
+from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateForcedLogoutRuleRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, ForcedLogoutRuleItem, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListForcedLogoutRulesResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, ListVersionsResponse, ListZprpMastersResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpdateVersionRequest, UpdateZprpMastersRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import unicodedata
 import difflib
@@ -418,6 +418,61 @@ async def remove_master(kind: str, judge_id: str):
     result = await database.execute(table.delete().where(table.c.judge_id == judge_id))
     if not result:
         raise HTTPException(404, "Nie znaleziono")
+    return {"success": True}
+
+# ZPRP MASTERS
+@router.get(
+    "/zprp/masters",
+    response_model=ListZprpMastersResponse,
+    summary="Pobierz listę ZPRP Masters (ID sędziów)"
+)
+async def get_zprp_masters():
+    rows = await database.fetch_all(select(zprp_masters))
+    return ListZprpMastersResponse(masters=[r["judge_id"] for r in rows])
+
+
+@router.put(
+    "/zprp/masters",
+    response_model=dict,
+    summary="Zapisz pełną listę ZPRP Masters (nadpisuje całość)"
+)
+async def upsert_zprp_masters(req: UpdateZprpMastersRequest):
+    # wyczyść tabelę i wstaw nową listę
+    await database.execute(zprp_masters.delete())
+    for jid in req.masters:
+        await database.execute(
+            pg_insert(zprp_masters)
+            .values(judge_id=jid)
+            .on_conflict_do_nothing()
+        )
+    return {"success": True}
+
+
+@router.post(
+    "/zprp/masters/{judge_id}",
+    response_model=dict,
+    summary="Dodaj pojedyncze ID do ZPRP Masters"
+)
+async def add_zprp_master(judge_id: str):
+    await database.execute(
+        pg_insert(zprp_masters)
+        .values(judge_id=judge_id)
+        .on_conflict_do_nothing()
+    )
+    return {"success": True}
+
+
+@router.delete(
+    "/zprp/masters/{judge_id}",
+    response_model=dict,
+    summary="Usuń pojedyncze ID z ZPRP Masters"
+)
+async def remove_zprp_master(judge_id: str):
+    result = await database.execute(
+        zprp_masters.delete().where(zprp_masters.c.judge_id == judge_id)
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Nie znaleziono")
     return {"success": True}
 
 # Pliki źródłowe

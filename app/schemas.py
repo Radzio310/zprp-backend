@@ -256,6 +256,13 @@ class UpdateMastersRequest(BaseModel):
     calendar: List[str]
     match: List[str]
 
+# ---------------- ZPRP MASTERS ----------------
+class ListZprpMastersResponse(BaseModel):
+    masters: List[str]
+
+class UpdateZprpMastersRequest(BaseModel):
+    masters: List[str]
+
 # Pliki źródłowe
 class JsonFileItem(BaseModel):
     key: str

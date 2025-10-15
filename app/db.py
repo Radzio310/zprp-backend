@@ -234,6 +234,13 @@ match_masters = Table(
     Column("judge_id", String, primary_key=True),
 )
 
+# 17.1) ZPRP Master – uprawnieni do funkcji ZPRP
+zprp_masters = Table(
+    "zprp_masters",
+    metadata,
+    Column("judge_id", String, primary_key=True),
+)
+
 # 18) Pliki źródłowe
 json_files = Table(
   "json_files", metadata,
