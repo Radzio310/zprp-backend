@@ -18,6 +18,7 @@ from sqlalchemy import (
     inspect
 )
 from databases import Database
+from sqlalchemy.dialects.postgresql import JSONB
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./local.db")
 
@@ -216,22 +217,25 @@ forced_logout_rules = Table(
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
-# 15) News Master – ogłoszenia
+# 15) News Masters – listy per województwo
 news_masters = Table(
     "news_masters", metadata,
-    Column("judge_id", String, primary_key=True),
+    Column("province", String, primary_key=True),   # Np. "ŚLĄSKIE"
+    Column("judges", JSONB, nullable=False, server_default="[]")  # lista ID-ów sędziów
 )
 
-# 16) Calendar Master – niedyspozycje
+# 16) Calendar Masters – listy per województwo
 calendar_masters = Table(
     "calendar_masters", metadata,
-    Column("judge_id", String, primary_key=True),
+    Column("province", String, primary_key=True),
+    Column("judges", JSONB, nullable=False, server_default="[]")
 )
 
-# 17) Match Master – mecze/targ
+# 17) Match Masters – listy per województwo
 match_masters = Table(
     "match_masters", metadata,
-    Column("judge_id", String, primary_key=True),
+    Column("province", String, primary_key=True),
+    Column("judges", JSONB, nullable=False, server_default="[]")
 )
 
 # 17.1) ZPRP Master – uprawnieni do funkcji ZPRP

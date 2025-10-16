@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Any, Optional, Literal, List
+from typing import Any, Dict, Optional, Literal, List
 from pydantic import BaseModel, Field, HttpUrl
 
 class EditJudgeRequest(BaseModel):
@@ -246,15 +246,18 @@ class ListForcedLogoutRulesResponse(BaseModel):
 
 
 # MODUŁ ŚLĄSKI
+# Klucz = PROVINCE (np. "ŚLĄSKIE"), wartość = lista ID sędziów
+MastersMap = Dict[str, List[str]]
+
 class ListMastersResponse(BaseModel):
-    news: List[str]
-    calendar: List[str]
-    match: List[str]
+    news: MastersMap
+    calendar: MastersMap
+    match: MastersMap
 
 class UpdateMastersRequest(BaseModel):
-    news: List[str]
-    calendar: List[str]
-    match: List[str]
+    news: MastersMap
+    calendar: MastersMap
+    match: MastersMap
 
 # ---------------- ZPRP MASTERS ----------------
 class ListZprpMastersResponse(BaseModel):
