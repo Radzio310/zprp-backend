@@ -245,7 +245,7 @@ class ListForcedLogoutRulesResponse(BaseModel):
     rules: List[ForcedLogoutRuleItem]
 
 
-# MODUŁ ŚLĄSKI
+# MODUŁ OKRĘOWY - MASTERS
 # Klucz = PROVINCE (np. "ŚLĄSKIE"), wartość = lista ID sędziów
 MastersMap = Dict[str, List[str]]
 
@@ -265,6 +265,40 @@ class ListZprpMastersResponse(BaseModel):
 
 class UpdateZprpMastersRequest(BaseModel):
     masters: List[str]
+
+# ---------------- Aktywne okręgi ----------------
+class ActiveProvinceItem(BaseModel):
+    province: str
+    enabled: bool
+    updated_at: datetime
+
+class GetActiveProvinceResponse(BaseModel):
+    file: ActiveProvinceItem
+
+class ListActiveProvincesResponse(BaseModel):
+    files: List[ActiveProvinceItem]
+
+class UpsertActiveProvinceRequest(BaseModel):
+    province: str
+    enabled: bool = True
+
+
+# ---------------- Kluby rozliczane ----------------
+class SettlementClubsItem(BaseModel):
+    province: str
+    clubs: Any                                # np. lista słowników lub mapa {club_id: {...}}
+    updated_at: Optional[datetime] = None
+
+class GetSettlementClubsResponse(BaseModel):
+    file: SettlementClubsItem
+
+class ListSettlementClubsResponse(BaseModel):
+    files: List[SettlementClubsItem]
+
+class UpsertSettlementClubsRequest(BaseModel):
+    province: str
+    clubs: Any                                # pełny JSON, który chcesz przechowywać
+
 
 # Pliki źródłowe
 class JsonFileItem(BaseModel):

@@ -245,6 +245,27 @@ zprp_masters = Table(
     Column("judge_id", String, primary_key=True),
 )
 
+# 17.2) Aktywne okręgi (proste włącz/wyłącz per województwo)
+active_provinces = Table(
+    "active_provinces",
+    metadata,
+    Column("province", String, primary_key=True),                 # np. "ŚLĄSKIE"
+    Column("enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("updated_at", DateTime(timezone=True),
+           server_default=func.now(), onupdate=func.now()),
+)
+
+# 17.3) Kluby rozliczane (lista/JSON klubów per województwo)
+settlement_clubs = Table(
+    "settlement_clubs",
+    metadata,
+    Column("province", String, primary_key=True),                 # np. "ŚLĄSKIE"
+    Column("clubs", JSONB, nullable=False, server_default="[]"),  # dowolny JSON; domyślnie []
+    Column("updated_at", DateTime(timezone=True),
+           server_default=func.now(), onupdate=func.now()),
+)
+
+
 # 18) Pliki źródłowe
 json_files = Table(
   "json_files", metadata,

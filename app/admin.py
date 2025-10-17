@@ -5,8 +5,8 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, zprp_masters, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
-from app.schemas import AdminPostItem, CreateAdminPostRequest, CreateForcedLogoutRuleRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, ForcedLogoutRuleItem, GenerateHashRequest, GenerateHashResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, HallReportItem, JsonFileItem, ListAdminPostsResponse, ListForcedLogoutRulesResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListUserReportsResponse, ListVersionsResponse, ListZprpMastersResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, UpdateMastersRequest, UpdateVersionRequest, UpdateZprpMastersRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, zprp_masters, active_provinces, settlement_clubs, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
+from app.schemas import ActiveProvinceItem, AdminPostItem, CreateAdminPostRequest, CreateForcedLogoutRuleRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, ForcedLogoutRuleItem, GenerateHashRequest, GenerateHashResponse, GetActiveProvinceResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, GetSettlementClubsResponse, HallReportItem, JsonFileItem, ListActiveProvincesResponse, ListAdminPostsResponse, ListForcedLogoutRulesResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListSettlementClubsResponse, ListUserReportsResponse, ListVersionsResponse, ListZprpMastersResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, SettlementClubsItem, UpdateMastersRequest, UpdateVersionRequest, UpdateZprpMastersRequest, UpsertActiveProvinceRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UpsertSettlementClubsRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import unicodedata
 import difflib
@@ -1173,6 +1173,181 @@ async def upsert_okreg_distance(province: str, req: UpsertOkregDistanceRequest):
             updated_at=row["updated_at"],
         )
     )
+
+# -------------------- AKTYWNE OKRĘGI ---------------------
+
+@router.get(
+    "/okreg/active",
+    response_model=ListActiveProvincesResponse,
+    summary="Lista aktywnych/nieaktywnych województw"
+)
+async def list_active_provinces():
+    rows = await database.fetch_all(select(active_provinces))
+    files = [
+        ActiveProvinceItem(
+            province=r["province"],
+            enabled=bool(r["enabled"]),
+            updated_at=r["updated_at"],
+        ) for r in rows
+    ]
+    return ListActiveProvincesResponse(files=files)
+
+
+@router.get(
+    "/okreg/active/{province}",
+    response_model=GetActiveProvinceResponse,
+    summary="Status aktywności wybranego województwa"
+)
+async def get_active_province(province: str):
+    prov = _ensure_province(province)
+    row = await database.fetch_one(select(active_provinces).where(active_provinces.c.province == prov))
+    if not row:
+        # brak wpisu = traktuj jako disabled?
+        # tutaj zwracamy 404, żeby było jawne
+        raise HTTPException(404, "Brak wpisu dla tego województwa")
+    return GetActiveProvinceResponse(
+        file=ActiveProvinceItem(
+            province=row["province"],
+            enabled=bool(row["enabled"]),
+            updated_at=row["updated_at"],
+        )
+    )
+
+
+@router.put(
+    "/okreg/active/{province}",
+    response_model=GetActiveProvinceResponse,
+    summary="Utwórz/zaktualizuj status aktywności województwa"
+)
+async def upsert_active_province(province: str, req: UpsertActiveProvinceRequest):
+    prov = _ensure_province(province)
+    if prov != _ensure_province(req.province):
+        raise HTTPException(400, "Province mismatch")
+
+    stmt = pg_insert(active_provinces).values(
+        province=prov,
+        enabled=req.enabled,
+    ).on_conflict_do_update(
+        index_elements=[active_provinces.c.province],
+        set_={"enabled": req.enabled}
+    )
+    await database.execute(stmt)
+
+    row = await database.fetch_one(select(active_provinces).where(active_provinces.c.province == prov))
+    return GetActiveProvinceResponse(
+        file=ActiveProvinceItem(
+            province=row["province"],
+            enabled=bool(row["enabled"]),
+            updated_at=row["updated_at"],
+        )
+    )
+
+
+@router.delete(
+    "/okreg/active/{province}",
+    response_model=dict,
+    summary="Usuń wpis aktywności dla województwa"
+)
+async def delete_active_province(province: str):
+    prov = _ensure_province(province)
+    result = await database.execute(delete(active_provinces).where(active_provinces.c.province == prov))
+    if not result:
+        raise HTTPException(404, "Nie znaleziono")
+    return {"success": True}
+
+
+# -------------------- KLUBY ROZLICZANE ---------------------
+
+def _row_to_json(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return []
+
+@router.get(
+    "/okreg/clubs",
+    response_model=ListSettlementClubsResponse,
+    summary="Lista JSONów klubów (per województwo)"
+)
+async def list_settlement_clubs():
+    rows = await database.fetch_all(select(settlement_clubs))
+    files = [
+        SettlementClubsItem(
+            province=r["province"],
+            clubs=_row_to_json(r["clubs"]),
+            updated_at=r["updated_at"],
+        ) for r in rows
+    ]
+    return ListSettlementClubsResponse(files=files)
+
+
+@router.get(
+    "/okreg/clubs/{province}",
+    response_model=GetSettlementClubsResponse,
+    summary="Pobierz JSON klubów dla województwa"
+)
+async def get_settlement_clubs(province: str):
+    prov = _ensure_province(province)
+    row = await database.fetch_one(select(settlement_clubs).where(settlement_clubs.c.province == prov))
+    if not row:
+        raise HTTPException(404, "Nie znaleziono pliku dla tego województwa")
+    return GetSettlementClubsResponse(
+        file=SettlementClubsItem(
+            province=row["province"],
+            clubs=_row_to_json(row["clubs"]),
+            updated_at=row["updated_at"],
+        )
+    )
+
+
+@router.put(
+    "/okreg/clubs/{province}",
+    response_model=GetSettlementClubsResponse,
+    summary="Utwórz lub zaktualizuj JSON klubów dla województwa"
+)
+async def upsert_settlement_clubs(province: str, req: UpsertSettlementClubsRequest):
+    prov = _ensure_province(province)
+    if prov != _ensure_province(req.province):
+        raise HTTPException(400, "Province mismatch")
+
+    stmt = pg_insert(settlement_clubs).values(
+        province=prov,
+        clubs=req.clubs,
+    ).on_conflict_do_update(
+        index_elements=[settlement_clubs.c.province],
+        set_={"clubs": req.clubs}
+    )
+    try:
+        await database.execute(stmt)
+    except Exception as e:
+        raise HTTPException(500, detail=f"SQL ERROR upsert_settlement_clubs: {e!r}")
+
+    row = await database.fetch_one(select(settlement_clubs).where(settlement_clubs.c.province == prov))
+    return GetSettlementClubsResponse(
+        file=SettlementClubsItem(
+            province=row["province"],
+            clubs=_row_to_json(row["clubs"]),
+            updated_at=row["updated_at"],
+        )
+    )
+
+
+@router.delete(
+    "/okreg/clubs/{province}",
+    response_model=dict,
+    summary="Usuń JSON klubów dla województwa"
+)
+async def delete_settlement_clubs(province: str):
+    prov = _ensure_province(province)
+    result = await database.execute(delete(settlement_clubs).where(settlement_clubs.c.province == prov))
+    if not result:
+        raise HTTPException(404, "Nie znaleziono")
+    return {"success": True}
+
 
 
 @router.post("/halls/reports", response_model=dict, summary="Zgłoś nową halę")
