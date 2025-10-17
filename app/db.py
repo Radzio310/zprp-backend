@@ -68,15 +68,18 @@ announcements = Table(
     Column("content", Text, nullable=False),
     Column("image_url", String, nullable=True),
     Column("priority", Integer, nullable=False, default=0),
-    Column("link", String, nullable=True), # link do ogłoszenia, może być pusty
+    Column("link", String, nullable=True),
+    Column("province", String, nullable=False, index=True),  # ⬅⬅⬅ NOWE
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
 )
+
 
 # 5) Tabela “kalendarz niedyspozycji” Silesia
 silesia_offtimes = Table(
   "silesia_offtimes",
   metadata,
   Column("judge_id", String, primary_key=True),
+  Column("province", String, primary_key=True),     # ⬅⬅⬅ NOWE (PK cz. 2)
   Column("full_name", String, nullable=False),
   Column("city", String, nullable=True),
   Column("data_json", JSON, nullable=False),

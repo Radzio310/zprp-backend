@@ -27,14 +27,14 @@ class AuthPayload(BaseModel):
 
 # 1) Żądanie utworzenia ogłoszenia
 class CreateAnnouncementRequest(AuthPayload):
-    title: str      # zaszyfrowany Base64-RSA
-    content: str    # zaszyfrowany Base64-RSA
-    image_url: Optional[str] = None  # zaszyfrowany Base64-RSA lub plaintext URL
+    title: str
+    content: str
+    image_url: Optional[str] = None
     priority: int
     link: Optional[str] = None
     full_name: str
+    province: str                     # ⬅⬅⬅ NOWE
 
-# 2) Żądanie aktualizacji ogłoszenia
 class UpdateAnnouncementRequest(AuthPayload):
     id: int
     title: Optional[str] = None
@@ -43,6 +43,8 @@ class UpdateAnnouncementRequest(AuthPayload):
     priority: Optional[int] = None
     link: Optional[str] = None
     full_name: Optional[str] = None
+    province: Optional[str] = None    # ⬅⬅⬅ NOWE
+
 
 # 3) Żądanie usunięcia ogłoszenia
 class DeleteAnnouncementRequest(AuthPayload):
@@ -53,11 +55,12 @@ class AnnouncementResponse(BaseModel):
     id: int
     title: str
     content: str
-    link: Optional[str] = None  # może być pusty
+    link: Optional[str] = None
     image_url: Optional[str]
     priority: int
     updated_at: datetime
     judge_name: Optional[str] = None
+    province: str                     # ⬅⬅⬅ NOWE
 
 # 5) Odpowiedź listy ogłoszeń
 class ListAnnouncementsResponse(BaseModel):
@@ -70,17 +73,20 @@ class LastUpdateResponse(BaseModel):
 
 # 7) Żądanie ustawienia / nadpisania niedyspozycji sędziego
 class SetOfftimesRequest(BaseModel):
-  judge_id: str       # Base64-RSA
-  full_name: str      # Base64-RSA
-  city: Optional[str] # Base64-RSA  ← jeśli szyfrujemy
-  data_json: Any      # Base64-RSA JSON array
-
-class OfftimeRecord(BaseModel):
   judge_id: str
   full_name: str
   city: Optional[str]
   data_json: Any
+  province: str                  # ⬅⬅⬅ NOWE
+
+class OfftimeRecord(BaseModel):
+  judge_id: str
+  province: str                  # ⬅⬅⬅ NOWE
+  full_name: str
+  city: Optional[str]
+  data_json: Any
   updated_at: datetime
+
 
 class ListOfftimesResponse(BaseModel):
   record: OfftimeRecord
