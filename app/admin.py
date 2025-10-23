@@ -1724,10 +1724,13 @@ async def add_zprp_master(judge_id: str):
     summary="Usuń pojedyncze ID z ZPRP Masters"
 )
 async def remove_zprp_master(judge_id: str):
-    result = await database.execute(
-        zprp_masters.delete().where(zprp_masters.c.judge_id == judge_id)
+    query = (
+        delete(zprp_masters)
+        .where(zprp_masters.c.judge_id == judge_id)
+        .returning(zprp_masters.c.judge_id)
     )
-    if not result:
+    row = await database.fetch_one(query)
+    if row is None:
         raise HTTPException(status_code=404, detail="Nie znaleziono")
     return {"success": True}
 
