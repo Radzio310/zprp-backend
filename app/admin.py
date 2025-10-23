@@ -1626,16 +1626,15 @@ async def create_version(req: CreateVersionRequest):
 
 @router.put("/versions/{version_id}", response_model=dict, summary="Zaktualizuj wersję")
 async def update_version(version_id: int, req: UpdateVersionRequest):
-    import re
     values: Dict[str, Any] = {}
-
     if req.version is not None:
+        import re
         if not re.fullmatch(r"\d+\.\d+\.\d+", req.version):
             raise HTTPException(status_code=400, detail="Wersja musi być w formacie X.Y.Z")
         exists = await database.fetch_one(
             select(app_versions.c.id).where(
-                (app_versions.c.version == req.version)
-                & (app_versions.c.id != version_id)
+                (app_versions.c.version == req.version) &
+                (app_versions.c.id != version_id)
             )
         )
         if exists:
@@ -1652,21 +1651,29 @@ async def update_version(version_id: int, req: UpdateVersionRequest):
     if not values:
         return {"success": True}
 
-    result = await database.execute(
-        update(app_versions).where(app_versions.c.id == version_id).values(**values)
+    query = (
+        update(app_versions)
+        .where(app_versions.c.id == version_id)
+        .values(**values)
+        .returning(app_versions.c.id)
     )
-    if not result:
-        raise HTTPException(404, "Wersja nie znaleziona")
+    row = await database.fetch_one(query)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Wersja nie znaleziona")
     return {"success": True}
-
 
 @router.delete("/versions/{version_id}", response_model=dict, summary="Usuń wersję")
 async def delete_version(version_id: int):
-    result = await database.execute(
-        delete(app_versions).where(app_versions.c.id == version_id)
+    query = (
+        delete(app_versions)
+        .where(app_versions.c.id == version_id)
+        .returning(app_versions.c.id)
     )
-    if not result:
-        raise HTTPException(404, "Wersja nie znaleziona")
+    row = await database.fetch_one(query)
+    if row is None:
+        # Jeśli chcesz, żeby DELETE na nieistniejącym też był „idempotentny”, zwróć success:
+        # return {"success": True}
+        raise HTTPException(status_code=404, detail="Wersja nie znaleziona")
     return {"success": True}
 
 # ZPRP MASTERS
