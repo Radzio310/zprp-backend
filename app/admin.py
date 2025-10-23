@@ -3,6 +3,7 @@ import json
 import os
 from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi.responses import JSONResponse
 from sqlalchemy import delete, insert, select, update
 import bcrypt
 from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, zprp_masters, active_provinces, settlement_clubs, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
@@ -916,16 +917,22 @@ async def add_zprp_master(judge_id: str):
 
 @router.delete(
     "/zprp/masters/{judge_id}",
-    response_model=dict,
-    summary="Usuń pojedyncze ID z ZPRP Masters"
+    summary="Usuń pojedyncze ID z ZPRP Masters",
+    status_code=status.HTTP_204_NO_CONTENT,  # brak body, idempotentnie
 )
 async def remove_zprp_master(judge_id: str):
-    result = await database.execute(
-        zprp_masters.delete().where(zprp_masters.c.judge_id == judge_id)
+    # DELETE ... RETURNING judge_id
+    query = (
+        zprp_masters
+        .delete()
+        .where(zprp_masters.c.judge_id == judge_id)
+        .returning(zprp_masters.c.judge_id)
     )
-    if not result:
-        raise HTTPException(status_code=404, detail="Nie znaleziono")
-    return {"success": True}
+    row = await database.fetch_one(query)
+
+    # Semantyka HTTP: DELETE powinien być idempotentny.
+    # Zwracamy 204 tak czy inaczej – front i tak sprawdza tylko res.ok.
+    return JSONResponse(status_code=status.HTTP_204_NO_CONTENT, content=None)
 
 # Pliki źródłowe
 @router.get(
