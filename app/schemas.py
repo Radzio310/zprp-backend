@@ -467,27 +467,33 @@ class UpsertContactJudgeResponse(BaseModel):
     matched_index: Optional[int] = None
     matched_by: Optional[str] = None  # "name", "name+city", "none"
 
-    # ---------------------------- APP VERSIONS ----------------------------
+  # ---------------------------- APP VERSIONS ----------------------------
 class VersionItem(BaseModel):
     id: int
     version: str
     name: str
     description: Optional[str] = None
+    to_show: bool = False
     created_at: datetime
     updated_at: datetime
 
+
 class ListVersionsResponse(BaseModel):
     versions: List[VersionItem]
+
 
 class CreateVersionRequest(BaseModel):
     version: str  # "X.Y.Z"
     name: str
     description: Optional[str] = None
+    to_show: Optional[bool] = False
+
 
 class UpdateVersionRequest(BaseModel):
-    version: Optional[str] = None  # możesz pozwolić zmienić numer
+    version: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
+    to_show: Optional[bool] = None
 
 
 # ---------------------------- Niedyspozcyje partnera ----------------------------

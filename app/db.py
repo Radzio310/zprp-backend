@@ -369,6 +369,7 @@ app_versions = Table(
     Column("version", String, nullable=False, unique=True, index=True),  # np. "1.23.14"
     Column("name", String, nullable=False),                              # nazwa wersji
     Column("description", Text, nullable=True),                          # opis zmian
+    Column("to_show", Boolean, nullable=False, server_default="false"),   # czy pokazywać w aplikacji
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )

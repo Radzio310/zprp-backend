@@ -1592,18 +1592,21 @@ async def list_versions():
     rows = await database.fetch_all(
         select(app_versions).order_by(app_versions.c.created_at.desc())
     )
-    return ListVersionsResponse(
-        versions=[VersionItem(**dict(r)) for r in rows]
-    )
+    # backward compatibility – brak kolumny to_show → False
+    versions = []
+    for r in rows:
+        data = dict(r)
+        data.setdefault("to_show", False)
+        versions.append(VersionItem(**data))
+    return ListVersionsResponse(versions=versions)
+
 
 @router.post("/versions", response_model=dict, summary="Dodaj nową wersję")
 async def create_version(req: CreateVersionRequest):
-    # Prosta walidacja formatu X.Y.Z (opcjonalnie rozszerz)
     import re
     if not re.fullmatch(r"\d+\.\d+\.\d+", req.version):
         raise HTTPException(status_code=400, detail="Wersja musi być w formacie X.Y.Z (np. 1.23.14)")
 
-    # Unikalność 'version' dba DB, ale zróbmy też wstępny check
     exists = await database.fetch_one(
         select(app_versions.c.id).where(app_versions.c.version == req.version)
     )
@@ -1615,23 +1618,24 @@ async def create_version(req: CreateVersionRequest):
             version=req.version,
             name=req.name,
             description=req.description or "",
+            to_show=req.to_show if req.to_show is not None else False,
         )
     )
     return {"success": True}
 
+
 @router.put("/versions/{version_id}", response_model=dict, summary="Zaktualizuj wersję")
 async def update_version(version_id: int, req: UpdateVersionRequest):
-    # jeśli ktoś zmienia numer wersji – sprawdź unikalność & format
+    import re
     values: Dict[str, Any] = {}
+
     if req.version is not None:
-        import re
         if not re.fullmatch(r"\d+\.\d+\.\d+", req.version):
             raise HTTPException(status_code=400, detail="Wersja musi być w formacie X.Y.Z")
-        # kolizja?
         exists = await database.fetch_one(
             select(app_versions.c.id).where(
-                (app_versions.c.version == req.version) &
-                (app_versions.c.id != version_id)
+                (app_versions.c.version == req.version)
+                & (app_versions.c.id != version_id)
             )
         )
         if exists:
@@ -1642,6 +1646,8 @@ async def update_version(version_id: int, req: UpdateVersionRequest):
         values["name"] = req.name
     if req.description is not None:
         values["description"] = req.description
+    if req.to_show is not None:
+        values["to_show"] = req.to_show
 
     if not values:
         return {"success": True}
@@ -1652,6 +1658,7 @@ async def update_version(version_id: int, req: UpdateVersionRequest):
     if not result:
         raise HTTPException(404, "Wersja nie znaleziona")
     return {"success": True}
+
 
 @router.delete("/versions/{version_id}", response_model=dict, summary="Usuń wersję")
 async def delete_version(version_id: int):
