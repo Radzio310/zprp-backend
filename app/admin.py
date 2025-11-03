@@ -1592,6 +1592,117 @@ async def upsert_contact_judge(req: UpsertContactJudgeRequest):
         matched_by=matched_by,
     )
 
+@router.post(
+    "/contacts/clubs/upsert",
+    response_model=UpsertContactJudgeResponse,  # reuse istniejącego response
+    summary="Upsert kontaktu KLUB (edycja: name/surname/phone/email/city; przy tworzeniu role/isReferee/isTeam dla klubu)"
+)
+async def upsert_contact_club(req: UpsertContactJudgeRequest):
+    """
+    Jak /contacts/judges/upsert, ale przy tworzeniu:
+    - role = 'KLUB'
+    - isReferee = False
+    - isTeam = True
+
+    Update nadal dotyka TYLKO: name, surname, phone, email, city.
+    """
+    # 1) Pobierz aktualny plik 'kontakty'
+    row = await database.fetch_one(select(json_files).where(json_files.c.key == "kontakty"))
+    if not row:
+        contacts: List[dict] = []
+        enabled = True
+    else:
+        raw = row["content"]
+        contacts = raw if isinstance(raw, list) else json.loads(raw)
+        if not isinstance(contacts, list):
+            raise HTTPException(500, "Plik 'kontakty' nie jest listą JSON")
+        enabled = row["enabled"]
+
+    # 2) Fuzzy match po (name+surname), ewentualnie doprecyzowanie po city
+    target = _full_name(req.name, req.surname)
+    threshold_name = 0.92
+    threshold_city = 0.90
+
+    scored: List[tuple[int, float]] = []
+    for i, c in enumerate(contacts):
+        cand_full = _full_name(str(c.get("name", "")), str(c.get("surname", "")))
+        score = _similarity(target, cand_full)
+        if score >= threshold_name:
+            scored.append((i, score))
+
+    best_idx = None
+    matched_by = None
+    if len(scored) == 1:
+        best_idx = scored[0][0]
+        matched_by = "name"
+    elif len(scored) > 1:
+        ranked = []
+        for i, _s in scored:
+            c = contacts[i]
+            cs = _city_sim(req.city or "", str(c.get("city", "")))
+            ranked.append((i, cs))
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        if ranked and ranked[0][1] >= threshold_city and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+            best_idx = ranked[0][0]
+            matched_by = "name+city"
+
+    # 3) Update albo create (dotykamy wyłącznie 5 pól przy update)
+    def _set_if_provided(rec: dict, key: str, val: Any):
+        if req.overwrite:
+            if val is not None:
+                rec[key] = val
+        else:
+            if val not in (None, ""):
+                rec[key] = val
+
+    if best_idx is not None:
+        rec = dict(contacts[best_idx])  # kopia
+        _set_if_provided(rec, "name", req.name)
+        _set_if_provided(rec, "surname", req.surname)
+        _set_if_provided(rec, "phone", req.phone)
+        _set_if_provided(rec, "email", req.email)
+        _set_if_provided(rec, "city", req.city)
+        contacts[best_idx] = rec
+        action = "updated"
+    else:
+        # NOWY REKORD KLUBOWY
+        new_rec = {
+            "name": req.name,
+            "surname": req.surname,
+            "phone": req.phone or "",
+            "email": req.email or "",
+            "city": req.city or "",
+            "role": "KLUB",
+            "isReferee": False,
+            "isTeam": True,
+        }
+        contacts.append(new_rec)
+        best_idx = len(contacts) - 1
+        matched_by = "none"
+        action = "created"
+
+    # 4) Zapis z powrotem do json_files (bez zmiany enabled)
+    stmt = pg_insert(json_files).values(
+        key="kontakty",
+        content=contacts,
+        enabled=enabled,
+    ).on_conflict_do_update(
+        index_elements=[json_files.c.key],
+        set_={"content": contacts, "enabled": enabled}
+    )
+    try:
+        await database.execute(stmt)
+    except Exception as e:
+        raise HTTPException(500, detail=f"SQL ERROR upsert_contact_club: {e!r}")
+
+    return UpsertContactJudgeResponse(
+        success=True,
+        action=action,
+        matched_index=best_idx,
+        matched_by=matched_by,
+    )
+
+
 # ---------------------------- APP VERSIONS CRUD ----------------------------
 
 @router.get("/versions", response_model=ListVersionsResponse, summary="Pobierz listę wersji")
