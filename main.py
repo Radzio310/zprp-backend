@@ -14,6 +14,8 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from cryptography.hazmat.primitives import serialization
 import logging
+from fastapi import Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.deps import get_rsa_keys
 from app.auth import router as auth_router
@@ -148,6 +150,25 @@ async def public_key_endpoint(
     )
     # zwracamy czysty PEM jako tekst
     return pem_bytes.decode("utf-8")
+
+# —————————— Nowy endpoint: pobranie GROQ_API_KEY z Railway variables ——————————
+security = HTTPBearer()
+
+@app.get(
+    "/groq_key",
+    summary="Pobierz GROQ_API_KEY z Railway variables (Tylko dozwolonym użytkownikom!)",
+)
+async def groq_key_endpoint(
+    credentials: HTTPAuthorizationCredentials = Security(security)
+):
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Brak autoryzacji")
+
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        raise HTTPException(status_code=404, detail="Brak GROQ_API_KEY w środowisku")
+    
+    return {"GROQ_API_KEY": groq_key}
 
 # —————————— Custom OpenAPI (HTTP Bearer only) ——————————
 def custom_openapi():
