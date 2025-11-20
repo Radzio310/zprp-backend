@@ -309,6 +309,30 @@ okreg_distances = Table(
     ),
 )
 
+# 18.3) Młodzi sędziowie (per województwo)
+young_referees = Table(
+    "young_referees",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("full_name", String, nullable=False),          # imię i nazwisko młodego sędziego
+    Column("base_judge_id", String, nullable=True),       # ID bazowe (np. z systemu głównego)
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("province", String, nullable=False, index=True)  # województwo jak w innych tabelach
+)
+
+# 18.4) Oceny młodych sędziów
+young_referee_ratings = Table(
+    "young_referee_ratings",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("rating_date", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("province", String, nullable=False, index=True),      # województwo
+    Column("mentor_name", String, nullable=False),               # imię i nazwisko mentora
+    Column("young_referee_name", String, nullable=False),        # imię i nazwisko młodego sędziego (kopią)
+    Column("young_referee_id", Integer, nullable=False, index=True),  # ID z tabeli young_referees
+    Column("rating_json", JSON, nullable=False),                 # JSON z oceną
+)
+
 # 19) Hale
 hall_reports = Table(
     "hall_reports",

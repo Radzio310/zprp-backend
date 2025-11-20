@@ -403,6 +403,68 @@ class OffTimeAction(BaseModel):
     DataDo: date
     Info: str
 
+
+# ---------------------------------
+# MŁODZI SĘDZIOWIE – SCHEMAS
+# ---------------------------------
+
+class CreateYoungRefereeRequest(BaseModel):
+    full_name: str
+    base_judge_id: Optional[str] = None
+    province: str                        # np. "ŚLĄSKIE"
+    is_active: bool = True
+
+
+class UpdateYoungRefereeRequest(BaseModel):
+    full_name: Optional[str] = None
+    base_judge_id: Optional[str] = None
+    province: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class YoungRefereeItem(BaseModel):
+    id: int
+    full_name: str
+    base_judge_id: Optional[str] = None
+    province: str
+    is_active: bool
+
+
+class ListYoungRefereesResponse(BaseModel):
+    records: List[YoungRefereeItem]
+
+
+class CreateYoungRefereeRatingRequest(BaseModel):
+    rating_date: Optional[datetime] = None  # jeśli None – backend może ustawić "teraz"
+    province: str
+    mentor_name: str
+    young_referee_name: str
+    young_referee_id: int
+    rating: Any                              # JSON z oceną
+
+
+class UpdateYoungRefereeRatingRequest(BaseModel):
+    rating_date: Optional[datetime] = None
+    province: Optional[str] = None
+    mentor_name: Optional[str] = None
+    young_referee_name: Optional[str] = None
+    young_referee_id: Optional[int] = None
+    rating: Optional[Any] = None
+
+
+class YoungRefereeRatingItem(BaseModel):
+    id: int
+    rating_date: datetime
+    province: str
+    mentor_name: str
+    young_referee_name: str
+    young_referee_id: int
+    rating: Any
+
+
+class ListYoungRefereeRatingsResponse(BaseModel):
+    records: List[YoungRefereeRatingItem]
+
 # ------------------------- PROEL SAVED MATCHES -------------------------
 class CreateSavedMatchRequest(BaseModel):
     match_number: str
