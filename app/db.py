@@ -331,6 +331,8 @@ young_referee_ratings = Table(
     Column("mentor_name", String, nullable=False),               # imię i nazwisko mentora
     Column("young_referee_name", String, nullable=False),        # imię i nazwisko młodego sędziego (kopią)
     Column("young_referee_id", Integer, nullable=False, index=True),  # ID z tabeli young_referees
+    Column("young_referee2_name", String, nullable=True),
+    Column("young_referee2_id", Integer, nullable=True, index=True),
     Column("rating_json", JSON, nullable=False),                 # JSON z oceną
 )
 

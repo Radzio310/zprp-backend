@@ -440,6 +440,8 @@ class CreateYoungRefereeRatingRequest(BaseModel):
     mentor_name: str
     young_referee_name: str
     young_referee_id: int
+    young_referee2_name: Optional[str] = None
+    young_referee2_id: Optional[int] = None
     rating: Any                              # JSON z oceną
 
 
@@ -449,6 +451,8 @@ class UpdateYoungRefereeRatingRequest(BaseModel):
     mentor_name: Optional[str] = None
     young_referee_name: Optional[str] = None
     young_referee_id: Optional[int] = None
+    young_referee2_name: Optional[Optional[str]] = None
+    young_referee2_id: Optional[Optional[int]] = None
     rating: Optional[Any] = None
 
 
@@ -459,6 +463,8 @@ class YoungRefereeRatingItem(BaseModel):
     mentor_name: str
     young_referee_name: str
     young_referee_id: int
+    young_referee2_name: Optional[str] = None
+    young_referee2_id: Optional[int] = None
     rating: Any
 
 
