@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple, Dict, Any
 from sqlalchemy import select
 import json
 import math
@@ -20,8 +20,10 @@ class AgentQueryRequest(BaseModel):
     messages: List[ChatMessage]
     model: Optional[str] = "llama-3.1-8b-instant"
     temperature: float = 0.2
-    max_tokens: int = 1024
-    max_context_chunks: int = 8
+    # zwiększamy domyślny limit odpowiedzi
+    max_tokens: int = 2048
+    # to pole zostanie teraz użyte tylko pomocniczo, ale zostawiamy
+    max_context_chunks: int = 32
 
 
 class AgentQueryResponse(BaseModel):
@@ -43,10 +45,7 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
 
 
 async def embed_query(text: str) -> List[float]:
-    """
-    Embedding zapytania – używamy tego samego „embedding hacka”
-    co w app.agent_docs.simple_embed, żeby przestrzeń była spójna.
-    """
+    # używamy tego samego „embedding hack” co w agent_docs.py
     from app.agent_docs import simple_embed  # unikamy duplikacji kodu
 
     vecs = await simple_embed([text])
@@ -68,29 +67,29 @@ async def agent_query(payload: AgentQueryRequest):
 
     print("[agent_query] Ostatnia wiadomość usera:", last_user_msg.content)
 
-    # embedding zapytania
+    # 1) embedding zapytania
     query_vec = await embed_query(last_user_msg.content)
     print("[agent_query] Długość wektora zapytania:", len(query_vec))
     print("[agent_query] Pierwsze kilka wartości zapytania:", query_vec[:5])
 
-    # pobierz wszystkie chunki (v1 – prosty wariant, można potem dodać filtr po dokumencie)
+    # 2) pobierz wszystkie chunki
     q = select(agent_document_chunks)
     rows = await database.fetch_all(q)
-
     print("[agent_query] Liczba chunków w bazie:", len(rows))
 
-    # jeśli Bazyli nie ma w ogóle wiedzy – nie pytamy Groqa, tylko mówimy wprost
-    if len(rows) == 0:
-        print("[agent_query] Brak jakichkolwiek chunków – Bazyli jest 'na głodno' 🤖")
-        return AgentQueryResponse(
-            reply=(
-                "Nie mam jeszcze żadnych dokumentów w pamięci, więc nie mogę "
-                "odpowiedzieć na to pytanie. Wejdź w panel Bazylego i wgraj "
-                "przynajmniej jeden plik PDF, z którego mogę się uczyć."
-            )
+    if not rows:
+        # nie ma żadnych dokumentów – fallback: normalny czat z Groq
+        print("[agent_query] Brak chunków w bazie – fallback do czystego modelu")
+        reply = await groq_chat_completion(
+            messages=[{"role": m.role, "content": m.content} for m in payload.messages],
+            model=payload.model or "llama-3.1-8b-instant",
+            temperature=payload.temperature,
+            max_tokens=payload.max_tokens,
         )
+        return AgentQueryResponse(reply=reply)
 
-    scored: List[tuple[float, dict]] = []
+    # 3) policz similarity dla każdego chunku
+    scored: List[Tuple[float, Dict[str, Any]]] = []
     for row in rows:
         try:
             emb = json.loads(row["embedding"])
@@ -100,10 +99,11 @@ async def agent_query(payload: AgentQueryRequest):
             sim = 0.0
         scored.append((sim, dict(row)))
 
-    # posortuj po similarity malejąco
+    # sort malejąco po similarity
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    debug_top_n = min(payload.max_context_chunks, len(scored))
+    # DEBUG: pokaż top 8 chunków wg similarity
+    debug_top_n = min(8, len(scored))
     print(f"[agent_query] TOP {debug_top_n} chunków wg similarity:")
     for i, (sim, r) in enumerate(scored[:debug_top_n]):
         snippet = r["content"][:150].replace("\n", " ")
@@ -112,58 +112,80 @@ async def agent_query(payload: AgentQueryRequest):
             f"chunk_index={r['chunk_index']}, snippet='{snippet}'"
         )
 
-    # do KONTEKSTU bierzemy tylko te z similarity > 0
-    top = [r for (s, r) in scored[: payload.max_context_chunks] if s > 0]
-
-    print(f"[agent_query] Liczba chunków z sim>0 użytych w kontekście: {len(top)}")
-
-    # jeśli nie znaleźliśmy żadnego sensownego dopasowania – NIE pytamy Groqa
-    if not top:
+    best_sim, best_row = scored[0]
+    if best_sim <= 0:
+        # nic niepasujące – lepiej szczerze powiedzieć, że nie wiemy
+        print("[agent_query] Najlepsze similarity <= 0 – brak sensownego dopasowania")
+        context_text = ""
+    else:
+        best_doc_id = best_row["document_id"]
         print(
-            "[agent_query] Brak chunków z dodatnią similarity – zwracam 'nie wiem' "
-            "bez odpytywania modelu."
-        )
-        return AgentQueryResponse(
-            reply=(
-                "Przejrzałem wszystkie swoje dokumenty, ale nie znalazłem w nich "
-                "informacji, które pasowałyby do tego pytania. "
-                "Spróbuj sformułować je inaczej albo wgraj PDF, który to opisuje."
-            )
+            f"[agent_query] Najlepszy dokument: doc_id={best_doc_id} "
+            f"(sim={best_sim:.4f})"
         )
 
-    # zlep kontekst z chunków
-    context_text = "\n\n---\n\n".join(
-        f"[Fragment #{r['chunk_index']}] (doc_id={r['document_id']})\n{r['content']}"
-        for r in top
-    )
+        # 4) Zamiast brać top N *chunków z różnych dokumentów*,
+        #    bierzemy WSZYSTKIE chunki z najlepszego dokumentu,
+        #    w kolejności chunk_index, aż do limitu znaków.
+        doc_rows: List[Dict[str, Any]] = [
+            r for (_s, r) in scored if r["document_id"] == best_doc_id
+        ]
+        doc_rows.sort(key=lambda r: r["chunk_index"])
 
-    # dla bezpieczeństwa nie logujmy całego kontekstu jeśli jest gigantyczny
+        max_chars = 8000  # limit znaków kontekstu
+        total_chars = 0
+        context_parts: List[str] = []
+
+        for r in doc_rows:
+            part = f"[Fragment #{r['chunk_index']}]\n{r['content']}\n\n---\n\n"
+            if total_chars + len(part) > max_chars:
+                break
+            context_parts.append(part)
+            total_chars += len(part)
+
+        context_text = "".join(context_parts)
+        print(
+            f"[agent_query] Używam {len(context_parts)} fragmentów z dokumentu "
+            f"{best_doc_id} jako kontekst (łącznie {total_chars} znaków)."
+        )
+
     if context_text:
         print("[agent_query] KONTEKST (początek):")
         print(context_text[:2000])
+    else:
+        print("[agent_query] Brak kontekstu – żadnych fragmentów do użycia")
 
+    # 5) System prompt – mocno nastawiony na PEŁNĄ, WYCIERPNUJĄCĄ odpowiedź
     system_prompt = (
-        "Jesteś asystentem Bazyli, który odpowiada wyłącznie w oparciu o podany kontekst.\n"
-        "Jeśli czegoś nie ma w kontekście, jasno powiedz, że nie wiesz zamiast zmyślać.\n"
-        "Kontekst może być po polsku, odpowiadaj po polsku, chyba że użytkownik wyraźnie prosi inaczej.\n"
+        "Jesteś asystentem Bazyli.\n"
+        "Masz odpowiadać WYŁĄCZNIE w oparciu o podany kontekst z dokumentów.\n"
+        "Jeśli czegoś nie ma w kontekście – jasno napisz, że tego nie wiesz, "
+        "zamiast zgadywać.\n\n"
+        "Zasady odpowiedzi:\n"
+        "1. Zawsze twórz pełne, wyczerpujące odpowiedzi w oparciu o kontekst.\n"
+        "2. Jeśli pytanie dotyczy przepisów, założeń, zasad, list punktów itp., "
+        "to wypisz WSZYSTKIE istotne punkty z kontekstu w czytelnej, "
+        "ponumerowanej formie.\n"
+        "3. Nie pomijaj wyjątków, liczb, limitów ani szczegółowych warunków, "
+        "nawet jeśli odpowiedź będzie długa.\n"
+        "4. Odpowiadaj po polsku, chyba że użytkownik wyraźnie prosi o inny język.\n"
     )
 
-    # zbuduj historię dla Groqa:
+    # 6) budujemy wiadomości dla Groqa
     groq_messages: List[dict] = [{"role": "system", "content": system_prompt}]
 
-    # KONTEKST z PDF-ów jako osobna wiadomość systemowa
-    groq_messages.append(
-        {
-            "role": "system",
-            "content": (
-                "Kontekst do wykorzystania (fragmenty dokumentów użytkownika):\n\n"
-                f"{context_text}"
-            ),
-        }
-    )
+    if context_text:
+        groq_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Kontekst do wykorzystania (fragmenty jednego dokumentu):\n\n"
+                    f"{context_text}"
+                ),
+            }
+        )
 
-    # dodaj wszystkie dotychczasowe wiadomości użytkownika / asystenta,
-    # ale bez wcześniejszych systemów, bo je nadpisaliśmy:
+    # dodaj historię czatu (bez wcześniejszych systemów)
     for m in payload.messages:
         if m.role in ("user", "assistant"):
             groq_messages.append({"role": m.role, "content": m.content})
@@ -174,9 +196,10 @@ async def agent_query(payload: AgentQueryRequest):
         messages=groq_messages,
         model=payload.model or "llama-3.1-8b-instant",
         temperature=payload.temperature,
-        max_tokens=payload.max_tokens,
+        max_tokens=payload.max_tokens or 2048,
     )
 
+    # dla debug – utnij log do 500 znaków
     print("[agent_query] Odpowiedź z Groqa (początek):", reply[:500])
 
     return AgentQueryResponse(reply=reply)
