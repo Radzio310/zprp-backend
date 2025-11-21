@@ -124,7 +124,7 @@ async def list_young_referees(
 
 
 @router.get(
-    "/{referee_id}",
+    "/id/{referee_id}",
     response_model=YoungRefereeItem,
     summary="Pobierz młodego sędziego po ID",
 )
@@ -144,10 +144,10 @@ async def get_young_referee(referee_id: int):
     )
 
 
-@router.put(
-    "/{referee_id}",
-    response_model=YoungRefereeItem,
-    summary="Zaktualizuj młodego sędziego",
+@router.delete(
+    "/id/{referee_id}",
+    response_model=Dict[str, bool],
+    summary="Usuń młodego sędziego",
 )
 async def update_young_referee(referee_id: int, req: UpdateYoungRefereeRequest):
     # sprawdź czy istnieje
