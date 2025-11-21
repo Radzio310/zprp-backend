@@ -1,7 +1,7 @@
 # app/agent_docs.py
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from sqlalchemy import insert
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from sqlalchemy import select
 from datetime import datetime
 from typing import List
 
@@ -76,6 +76,27 @@ def chunk_text(text: str, max_chars: int = 800) -> List[str]:
     return [c for c in chunks if c]
 
 
+# ---------- NOWE: lista dokumentów ----------
+
+@router.get("")
+async def list_docs():
+    """
+    Zwraca listę wszystkich dokumentów znanych Bazylemu,
+    posortowaną malejąco po dacie utworzenia.
+    """
+    query = (
+        agent_documents
+        .select()
+        .order_by(agent_documents.c.created_at.desc())
+    )
+    rows = await database.fetch_all(query)
+    # frontend i tak umie obsłużyć zarówno [] jak i {documents: []},
+    # ale zróbmy ładny wrapper:
+    return {"documents": [dict(r) for r in rows]}
+
+
+# ---------- ISTNIEJĄCY: upload PDF ----------
+
 @router.post("/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
     if file.content_type not in ("application/pdf", "application/x-pdf"):
@@ -117,8 +138,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     # 2) Embeddingi dla chunków
     embeddings = await simple_embed(chunks)
 
-    # 3) Zapis chunków
-    # embedding trzymamy jako JSON string
+    # 3) Zapis chunków (embedding trzymamy jako JSON string)
     chunk_rows = []
     for idx, (content, emb) in enumerate(zip(chunks, embeddings)):
         chunk_rows.append(
@@ -139,3 +159,29 @@ async def upload_pdf(file: UploadFile = File(...)):
         "title": doc_title,
         "chunks": len(chunks),
     }
+
+
+# ---------- NOWE: kasowanie dokumentu + chunków ----------
+
+@router.delete("/{doc_id}")
+async def delete_doc(doc_id: int):
+    # sprawdź, czy dokument istnieje
+    doc = await database.fetch_one(
+        agent_documents.select().where(agent_documents.c.id == doc_id)
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Dokument nie istnieje")
+
+    # usuń wszystkie chunki powiązane z dokumentem
+    await database.execute(
+      agent_document_chunks
+      .delete()
+      .where(agent_document_chunks.c.document_id == doc_id)
+    )
+
+    # usuń sam dokument
+    await database.execute(
+      agent_documents.delete().where(agent_documents.c.id == doc_id)
+    )
+
+    return {"ok": True, "deleted_id": doc_id}
