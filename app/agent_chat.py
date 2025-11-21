@@ -63,30 +63,59 @@ async def agent_query(payload: AgentQueryRequest):
         )
     last_user_msg = user_messages[-1]
 
+    print("[agent_query] Ostatnia wiadomość usera:", last_user_msg.content)
+
     # embedding zapytania
     query_vec = await embed_query(last_user_msg.content)
+    print("[agent_query] Długość wektora zapytania:", len(query_vec))
+    print("[agent_query] Pierwsze kilka wartości zapytania:", query_vec[:5])
 
     # pobierz wszystkie chunki (v1 – prosty wariant, można potem dodać filtr po dokumencie)
     q = select(agent_document_chunks)
     rows = await database.fetch_all(q)
+
+    print("[agent_query] Liczba chunków w bazie:", len(rows))
 
     scored: List[tuple[float, dict]] = []
     for row in rows:
         try:
             emb = json.loads(row["embedding"])
             sim = cosine_similarity(query_vec, [float(x) for x in emb])
-        except Exception:
+        except Exception as e:
+            print("[agent_query] Błąd przy liczeniu similarity:", e)
             sim = 0.0
         scored.append((sim, dict(row)))
 
-    # posortuj po similarity malejąco i weź top N
+    # posortuj po similarity malejąco
     scored.sort(key=lambda x: x[0], reverse=True)
+
+    # DEBUG: pokaż top N z similarity (nawet jeśli 0)
+    debug_top_n = min(payload.max_context_chunks, len(scored))
+    print(f"[agent_query] TOP {debug_top_n} chunków wg similarity:")
+    for i, (sim, r) in enumerate(scored[:debug_top_n]):
+        snippet = r["content"][:150].replace("\n", " ")
+        print(
+            f"  #{i} sim={sim:.4f}, doc_id={r['document_id']}, chunk_index={r['chunk_index']}, "
+            f"snippet='{snippet}'"
+        )
+
+    # do kontekstu bierzemy tylko te z similarity > 0
     top = [r for (s, r) in scored[: payload.max_context_chunks] if s > 0]
+
+    print(f"[agent_query] Liczba chunków z sim>0 użytych w kontekście: {len(top)}")
 
     # zlep kontekst z chunków
     context_text = "\n\n---\n\n".join(
-        f"[Fragment #{r['chunk_index']}]\n{r['content']}" for r in top
+        f"[Fragment #{r['chunk_index']}] (doc_id={r['document_id']})\n{r['content']}"
+        for r in top
     )
+
+    # dla bezpieczeństwa nie logujmy całego kontekstu jeśli jest gigantyczny
+    if context_text:
+        print("[agent_query] KONTEKST (początek):")
+        print(context_text[:2000])
+    else:
+        print("[agent_query] Brak kontekstu – żadnych chunków z sim>0")
 
     system_prompt = (
         "Jesteś asystentem Bazyli, który odpowiada wyłącznie w oparciu o podany kontekst.\n"
@@ -111,11 +140,15 @@ async def agent_query(payload: AgentQueryRequest):
         if m.role in ("user", "assistant"):
             groq_messages.append({"role": m.role, "content": m.content})
 
+    print("[agent_query] Liczba wiadomości wysyłanych do Groqa:", len(groq_messages))
+
     reply = await groq_chat_completion(
         messages=groq_messages,
         model=payload.model or "llama-3.1-8b-instant",
         temperature=payload.temperature,
         max_tokens=payload.max_tokens,
     )
+
+    print("[agent_query] Odpowiedź z Groqa:", reply[:500])
 
     return AgentQueryResponse(reply=reply)

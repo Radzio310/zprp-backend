@@ -22,13 +22,16 @@ async def simple_embed(texts: List[str]) -> List[List[float]]:
     """
     embeddings: List[List[float]] = []
 
-    for t in texts:
-        # prosimy model o wygenerowanie listy floatów jako JSON
+    for idx, t in enumerate(texts):
         prompt = (
             "Zamień poniższy tekst na prostą reprezentację numeryczną: "
             "zwróć TYLKO JSON z listą 16 liczb zmiennoprzecinkowych.\n\n"
             f"Tekst: {t[:2000]}"
         )
+
+        print(f"[simple_embed] Tekst #{idx}, długość={len(t)}")
+        # żeby log nie był gigantyczny:
+        print(f"[simple_embed] Fragment tekstu #{idx}: {t[:200].replace(chr(10),' ')}")
 
         reply = await groq_chat_completion(
             messages=[
@@ -40,14 +43,19 @@ async def simple_embed(texts: List[str]) -> List[List[float]]:
             max_tokens=512,
         )
 
+        print(f"[simple_embed] Surowa odpowiedź modelu dla chunk #{idx}: {reply}")
+
         try:
             vec = json.loads(reply)
             if isinstance(vec, list):
-                embeddings.append([float(x) for x in vec])
+                emb = [float(x) for x in vec]
+                embeddings.append(emb)
+                print(f"[simple_embed] Udało się sparsować embedding dla chunk #{idx}, len={len(emb)}")
             else:
                 raise ValueError("Embedding nie jest listą")
-        except Exception:
-            # fallback: zero-vector
+        except Exception as e:
+            print(f"[simple_embed] BŁĄD parsowania embeddingu dla chunk #{idx}: {e}")
+            print("[simple_embed] Fallback: wektor zerowy")
             embeddings.append([0.0] * 16)
 
     return embeddings
