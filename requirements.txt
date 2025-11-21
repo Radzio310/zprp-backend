@@ -22,4 +22,4 @@ python-multipart
 bcrypt
 lxml
 pymupdf
-
+openai>=1.40.0

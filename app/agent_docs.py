@@ -6,92 +6,48 @@ from datetime import datetime
 from typing import List
 
 from app.db import database, agent_documents, agent_document_chunks
-from app.groq_client import groq_chat_completion
 
 import fitz  # PyMuPDF – musisz dodać do dependencies (pip install pymupdf)
 import json
-import re
+import os
+
+# ---------- NOWE: klient OpenAI (embeddingi) ----------
+from openai import AsyncOpenAI
+
+# Klient używa zmiennej środowiskowej OPENAI_API_KEY
+openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 router = APIRouter(prefix="/agent/docs", tags=["agent_docs"])
 
 
-def extract_json_array(text: str) -> str:
-    """
-    Wyciąga pierwszą tablicę JSON z tekstu (od pierwszego '[' do ostatniego ']').
-    Ignoruje opisy, ```json itp.
-    """
-    text = text.strip()
-    # usuń znaczniki ```json / ```JSON, zostaw tylko ``` (lub w ogóle)
-    text = text.replace("```json", "```").replace("```JSON", "```")
-
-    # jeśli są codeblocki ``` ... ```, spróbuj wyciągnąć zawartość bloków
-    if "```" in text:
-        parts = text.split("```")
-        # zwykle struktura: [prefix, blok1, blok2, ...]
-        for part in parts:
-            p = part.strip()
-            if p.startswith("[") and p.endswith("]"):
-                return p
-
-    # fallback: szukamy pierwszego '[' i ostatniego ']'
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("Brak listy JSON w odpowiedzi modelu")
-
-    return text[start : end + 1]
-
+# ---------- EMBEDDINGI: prawdziwe z OpenAI ----------
 
 async def simple_embed(texts: List[str]) -> List[List[float]]:
     """
-    Bardzo prosty embedding przez Groq:
-    - używamy modelu, który generuje krótką listę liczb jako JSON (hack v1)
-    W realu: lepiej użyć dedykowanego modelu embeddingów, np. z innego API.
+    Prawdziwe embeddingi z OpenAI:
+    - model: text-embedding-3-small (1536 wymiarów)
+    - zwracamy listę wektorów floatów
     """
-    embeddings: List[List[float]] = []
+    if not texts:
+        return []
 
-    for idx, t in enumerate(texts):
-        prompt = (
-            "Zamień poniższy tekst na prostą reprezentację numeryczną: "
-            "zwróć TYLKO JSON z listą 16 liczb zmiennoprzecinkowych.\n\n"
-            f"Tekst: {t[:2000]}"
-        )
+    # OpenAI embeddings API przyjmuje listę tekstów w `input`
+    resp = await openai_client.embeddings.create(
+        model="text-embedding-3-small",
+        input=texts,
+    )
 
-        print(f"[simple_embed] Tekst #{idx}, długość={len(t)}")
+    vectors: List[List[float]] = []
+    for i, item in enumerate(resp.data):
+        emb = item.embedding
+        vectors.append(emb)
+        # Prosty log diagnostyczny (możesz wyciąć, gdy już będzie ok)
         print(
-            f"[simple_embed] Fragment tekstu #{idx}: "
-            f"{t[:200].replace(chr(10), ' ')}"
+            f"[simple_embed] embedding #{i}: len={len(emb)}, "
+            f"pierwsze 5 wartości={emb[:5]}"
         )
 
-        reply = await groq_chat_completion(
-            messages=[
-                {"role": "system", "content": "Jesteś funkcją generującą embeddingi."},
-                {"role": "user", "content": prompt},
-            ],
-            model="llama-3.1-8b-instant",
-            temperature=0.0,
-            max_tokens=512,
-        )
-
-        print(f"[simple_embed] Surowa odpowiedź modelu dla chunk #{idx}: {reply}")
-
-        try:
-            json_str = extract_json_array(reply)
-            vec = json.loads(json_str)
-            if not isinstance(vec, list):
-                raise ValueError("Embedding nie jest listą")
-            emb = [float(x) for x in vec]
-            embeddings.append(emb)
-            print(
-                f"[simple_embed] Udało się sparsować embedding dla chunk #{idx}, "
-                f"len={len(emb)}"
-            )
-        except Exception as e:
-            print(f"[simple_embed] BŁĄD parsowania embeddingu dla chunk #{idx}: {e}")
-            print("[simple_embed] Fallback: wektor zerowy")
-            embeddings.append([0.0] * 16)
-
-    return embeddings
+    return vectors
 
 
 def chunk_text(text: str, max_chars: int = 800) -> List[str]:
@@ -119,7 +75,6 @@ def chunk_text(text: str, max_chars: int = 800) -> List[str]:
 
 # ---------- LISTA DOKUMENTÓW ----------
 
-
 @router.get("")
 async def list_docs():
     """
@@ -132,7 +87,6 @@ async def list_docs():
 
 
 # ---------- UPLOAD PDF ----------
-
 
 @router.post("/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -172,7 +126,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     doc_id_row = await database.fetch_one(insert_doc)
     document_id = int(doc_id_row["id"])
 
-    # 2) Embeddingi dla chunków
+    # 2) Embeddingi dla chunków (OpenAI)
     embeddings = await simple_embed(chunks)
 
     # 3) Zapis chunków (embedding trzymamy jako JSON string)
@@ -199,7 +153,6 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 
 # ---------- KASOWANIE DOKUMENTU + CHUNKÓW ----------
-
 
 @router.delete("/{doc_id}")
 async def delete_doc(doc_id: int):
