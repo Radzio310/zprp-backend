@@ -1,11 +1,11 @@
 # app/young_referees.py
 
 from datetime import datetime, timezone
-from typing import List, Optional, Any, Dict
+from typing import Optional, Any, Dict
 import json
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select, insert, update, delete, and_
+from sqlalchemy import select, insert, update, delete
 
 from app.db import (
     database,
@@ -27,7 +27,6 @@ router = APIRouter(
     prefix="/young_referees",
     tags=["Młodzi sędziowie"],
 )
-
 
 # ----------------- Helpers -----------------
 
@@ -77,7 +76,9 @@ async def create_young_referee(req: CreateYoungRefereeRequest):
         select(young_referees).where(young_referees.c.id == new_id)
     )
     if row is None:
-        raise HTTPException(status_code=500, detail="Nie udało się odczytać nowego rekordu")
+        raise HTTPException(
+            status_code=500, detail="Nie udało się odczytać nowego rekordu"
+        )
 
     return YoungRefereeItem(
         id=row["id"],
@@ -144,10 +145,10 @@ async def get_young_referee(referee_id: int):
     )
 
 
-@router.delete(
+@router.put(
     "/id/{referee_id}",
-    response_model=Dict[str, bool],
-    summary="Usuń młodego sędziego",
+    response_model=YoungRefereeItem,
+    summary="Zaktualizuj młodego sędziego",
 )
 async def update_young_referee(referee_id: int, req: UpdateYoungRefereeRequest):
     # sprawdź czy istnieje
@@ -189,15 +190,12 @@ async def update_young_referee(referee_id: int, req: UpdateYoungRefereeRequest):
 
 
 @router.delete(
-    "/{referee_id}",
+    "/id/{referee_id}",
     response_model=Dict[str, bool],
     summary="Usuń młodego sędziego",
 )
 async def delete_young_referee(referee_id: int):
-    stmt = (
-        delete(young_referees)
-        .where(young_referees.c.id == referee_id)
-    )
+    stmt = delete(young_referees).where(young_referees.c.id == referee_id)
     result = await database.execute(stmt)
     if not result:
         raise HTTPException(status_code=404, detail="Młody sędzia nie znaleziony")
@@ -246,7 +244,9 @@ async def create_young_referee_rating(req: CreateYoungRefereeRatingRequest):
         select(young_referee_ratings).where(young_referee_ratings.c.id == new_id)
     )
     if row is None:
-        raise HTTPException(status_code=500, detail="Nie udało się odczytać nowej oceny")
+        raise HTTPException(
+            status_code=500, detail="Nie udało się odczytać nowej oceny"
+        )
 
     return YoungRefereeRatingItem(
         id=row["id"],
@@ -356,7 +356,9 @@ async def update_young_referee_rating(
     if req.young_referee_id is not None:
         # opcjonalnie: sprawdź czy sędzia istnieje
         ref_row = await database.fetch_one(
-            select(young_referees.c.id).where(young_referees.c.id == req.young_referee_id)
+            select(young_referees.c.id).where(
+                young_referees.c.id == req.young_referee_id
+            )
         )
         if ref_row is None:
             raise HTTPException(
