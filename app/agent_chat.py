@@ -43,7 +43,10 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
 
 
 async def embed_query(text: str) -> List[float]:
-    # używamy tego samego „embedding hack” co w agent_docs.py
+    """
+    Embedding zapytania – używamy tego samego „embedding hacka”
+    co w app.agent_docs.simple_embed, żeby przestrzeń była spójna.
+    """
     from app.agent_docs import simple_embed  # unikamy duplikacji kodu
 
     vecs = await simple_embed([text])
@@ -76,6 +79,17 @@ async def agent_query(payload: AgentQueryRequest):
 
     print("[agent_query] Liczba chunków w bazie:", len(rows))
 
+    # jeśli Bazyli nie ma w ogóle wiedzy – nie pytamy Groqa, tylko mówimy wprost
+    if len(rows) == 0:
+        print("[agent_query] Brak jakichkolwiek chunków – Bazyli jest 'na głodno' 🤖")
+        return AgentQueryResponse(
+            reply=(
+                "Nie mam jeszcze żadnych dokumentów w pamięci, więc nie mogę "
+                "odpowiedzieć na to pytanie. Wejdź w panel Bazylego i wgraj "
+                "przynajmniej jeden plik PDF, z którego mogę się uczyć."
+            )
+        )
+
     scored: List[tuple[float, dict]] = []
     for row in rows:
         try:
@@ -89,20 +103,33 @@ async def agent_query(payload: AgentQueryRequest):
     # posortuj po similarity malejąco
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # DEBUG: pokaż top N z similarity (nawet jeśli 0)
     debug_top_n = min(payload.max_context_chunks, len(scored))
     print(f"[agent_query] TOP {debug_top_n} chunków wg similarity:")
     for i, (sim, r) in enumerate(scored[:debug_top_n]):
         snippet = r["content"][:150].replace("\n", " ")
         print(
-            f"  #{i} sim={sim:.4f}, doc_id={r['document_id']}, chunk_index={r['chunk_index']}, "
-            f"snippet='{snippet}'"
+            f"  #{i} sim={sim:.4f}, doc_id={r['document_id']}, "
+            f"chunk_index={r['chunk_index']}, snippet='{snippet}'"
         )
 
-    # do kontekstu bierzemy tylko te z similarity > 0
+    # do KONTEKSTU bierzemy tylko te z similarity > 0
     top = [r for (s, r) in scored[: payload.max_context_chunks] if s > 0]
 
     print(f"[agent_query] Liczba chunków z sim>0 użytych w kontekście: {len(top)}")
+
+    # jeśli nie znaleźliśmy żadnego sensownego dopasowania – NIE pytamy Groqa
+    if not top:
+        print(
+            "[agent_query] Brak chunków z dodatnią similarity – zwracam 'nie wiem' "
+            "bez odpytywania modelu."
+        )
+        return AgentQueryResponse(
+            reply=(
+                "Przejrzałem wszystkie swoje dokumenty, ale nie znalazłem w nich "
+                "informacji, które pasowałyby do tego pytania. "
+                "Spróbuj sformułować je inaczej albo wgraj PDF, który to opisuje."
+            )
+        )
 
     # zlep kontekst z chunków
     context_text = "\n\n---\n\n".join(
@@ -114,8 +141,6 @@ async def agent_query(payload: AgentQueryRequest):
     if context_text:
         print("[agent_query] KONTEKST (początek):")
         print(context_text[:2000])
-    else:
-        print("[agent_query] Brak kontekstu – żadnych chunków z sim>0")
 
     system_prompt = (
         "Jesteś asystentem Bazyli, który odpowiada wyłącznie w oparciu o podany kontekst.\n"
@@ -126,13 +151,16 @@ async def agent_query(payload: AgentQueryRequest):
     # zbuduj historię dla Groqa:
     groq_messages: List[dict] = [{"role": "system", "content": system_prompt}]
 
-    if context_text:
-        groq_messages.append(
-            {
-                "role": "system",
-                "content": f"Kontekst do wykorzystania (fragmenty dokumentów):\n\n{context_text}",
-            }
-        )
+    # KONTEKST z PDF-ów jako osobna wiadomość systemowa
+    groq_messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Kontekst do wykorzystania (fragmenty dokumentów użytkownika):\n\n"
+                f"{context_text}"
+            ),
+        }
+    )
 
     # dodaj wszystkie dotychczasowe wiadomości użytkownika / asystenta,
     # ale bez wcześniejszych systemów, bo je nadpisaliśmy:
@@ -149,6 +177,6 @@ async def agent_query(payload: AgentQueryRequest):
         max_tokens=payload.max_tokens,
     )
 
-    print("[agent_query] Odpowiedź z Groqa:", reply[:500])
+    print("[agent_query] Odpowiedź z Groqa (początek):", reply[:500])
 
     return AgentQueryResponse(reply=reply)

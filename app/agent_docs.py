@@ -10,14 +10,42 @@ from app.groq_client import groq_chat_completion
 
 import fitz  # PyMuPDF – musisz dodać do dependencies (pip install pymupdf)
 import json
+import re
 
 router = APIRouter(prefix="/agent/docs", tags=["agent_docs"])
+
+
+def extract_json_array(text: str) -> str:
+    """
+    Wyciąga pierwszą tablicę JSON z tekstu (od pierwszego '[' do ostatniego ']').
+    Ignoruje opisy, ```json itp.
+    """
+    text = text.strip()
+    # usuń znaczniki ```json / ```JSON, zostaw tylko ``` (lub w ogóle)
+    text = text.replace("```json", "```").replace("```JSON", "```")
+
+    # jeśli są codeblocki ``` ... ```, spróbuj wyciągnąć zawartość bloków
+    if "```" in text:
+        parts = text.split("```")
+        # zwykle struktura: [prefix, blok1, blok2, ...]
+        for part in parts:
+            p = part.strip()
+            if p.startswith("[") and p.endswith("]"):
+                return p
+
+    # fallback: szukamy pierwszego '[' i ostatniego ']'
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("Brak listy JSON w odpowiedzi modelu")
+
+    return text[start : end + 1]
 
 
 async def simple_embed(texts: List[str]) -> List[List[float]]:
     """
     Bardzo prosty embedding przez Groq:
-    - używamy modelu, który generuje krótki embedding jako JSON (hack v1)
+    - używamy modelu, który generuje krótką listę liczb jako JSON (hack v1)
     W realu: lepiej użyć dedykowanego modelu embeddingów, np. z innego API.
     """
     embeddings: List[List[float]] = []
@@ -30,8 +58,10 @@ async def simple_embed(texts: List[str]) -> List[List[float]]:
         )
 
         print(f"[simple_embed] Tekst #{idx}, długość={len(t)}")
-        # żeby log nie był gigantyczny:
-        print(f"[simple_embed] Fragment tekstu #{idx}: {t[:200].replace(chr(10),' ')}")
+        print(
+            f"[simple_embed] Fragment tekstu #{idx}: "
+            f"{t[:200].replace(chr(10), ' ')}"
+        )
 
         reply = await groq_chat_completion(
             messages=[
@@ -46,13 +76,16 @@ async def simple_embed(texts: List[str]) -> List[List[float]]:
         print(f"[simple_embed] Surowa odpowiedź modelu dla chunk #{idx}: {reply}")
 
         try:
-            vec = json.loads(reply)
-            if isinstance(vec, list):
-                emb = [float(x) for x in vec]
-                embeddings.append(emb)
-                print(f"[simple_embed] Udało się sparsować embedding dla chunk #{idx}, len={len(emb)}")
-            else:
+            json_str = extract_json_array(reply)
+            vec = json.loads(json_str)
+            if not isinstance(vec, list):
                 raise ValueError("Embedding nie jest listą")
+            emb = [float(x) for x in vec]
+            embeddings.append(emb)
+            print(
+                f"[simple_embed] Udało się sparsować embedding dla chunk #{idx}, "
+                f"len={len(emb)}"
+            )
         except Exception as e:
             print(f"[simple_embed] BŁĄD parsowania embeddingu dla chunk #{idx}: {e}")
             print("[simple_embed] Fallback: wektor zerowy")
@@ -84,7 +117,8 @@ def chunk_text(text: str, max_chars: int = 800) -> List[str]:
     return [c for c in chunks if c]
 
 
-# ---------- NOWE: lista dokumentów ----------
+# ---------- LISTA DOKUMENTÓW ----------
+
 
 @router.get("")
 async def list_docs():
@@ -92,18 +126,13 @@ async def list_docs():
     Zwraca listę wszystkich dokumentów znanych Bazylemu,
     posortowaną malejąco po dacie utworzenia.
     """
-    query = (
-        agent_documents
-        .select()
-        .order_by(agent_documents.c.created_at.desc())
-    )
+    query = agent_documents.select().order_by(agent_documents.c.created_at.desc())
     rows = await database.fetch_all(query)
-    # frontend i tak umie obsłużyć zarówno [] jak i {documents: []},
-    # ale zróbmy ładny wrapper:
     return {"documents": [dict(r) for r in rows]}
 
 
-# ---------- ISTNIEJĄCY: upload PDF ----------
+# ---------- UPLOAD PDF ----------
+
 
 @router.post("/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -169,7 +198,8 @@ async def upload_pdf(file: UploadFile = File(...)):
     }
 
 
-# ---------- NOWE: kasowanie dokumentu + chunków ----------
+# ---------- KASOWANIE DOKUMENTU + CHUNKÓW ----------
+
 
 @router.delete("/{doc_id}")
 async def delete_doc(doc_id: int):
@@ -182,14 +212,14 @@ async def delete_doc(doc_id: int):
 
     # usuń wszystkie chunki powiązane z dokumentem
     await database.execute(
-      agent_document_chunks
-      .delete()
-      .where(agent_document_chunks.c.document_id == doc_id)
+        agent_document_chunks.delete().where(
+            agent_document_chunks.c.document_id == doc_id
+        )
     )
 
     # usuń sam dokument
     await database.execute(
-      agent_documents.delete().where(agent_documents.c.id == doc_id)
+        agent_documents.delete().where(agent_documents.c.id == doc_id)
     )
 
     return {"ok": True, "deleted_id": doc_id}
