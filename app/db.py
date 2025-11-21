@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    ForeignKey,
     Integer,
     String,
     MetaData,
@@ -420,6 +421,35 @@ short_result_records = Table(
     Column("author_id", String, nullable=False, index=True),      # ID osoby wpisującej (np. judge_id)
     Column("author_name", String, nullable=True),                 # Imię i nazwisko (opcjonalnie)
     Column("payload", JSON, nullable=False),                      # Pełny JSON wysyłany na serwer
+)
+
+# 25) Dokumenty agenta 
+agent_documents = Table(
+    "agent_documents",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("title", String(255), nullable=False),
+    Column("source_type", String(50), nullable=False, default="pdf"),  # 'pdf', 'note', etc.
+    Column("source_path", String(1024), nullable=True),  # np. ścieżka do pliku w storage
+    Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
+    Column("updated_at", DateTime, default=datetime.utcnow, nullable=False),
+)
+
+# 26) Fragmenty dokumentów agenta z embeddingami
+agent_document_chunks = Table(
+    "agent_document_chunks",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column(
+        "document_id",
+        Integer,
+        ForeignKey("agent_documents.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("chunk_index", Integer, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("embedding", Text, nullable=False),  # JSON-owy string listy floatów
+    Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
 )
 
 # Tworzymy tabele przy starcie
