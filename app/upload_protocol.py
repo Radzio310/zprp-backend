@@ -223,10 +223,8 @@ async def upload_protocol(
         user_plain = _decrypt_field(username, private_key)
         pass_plain = _decrypt_field(password, private_key)
         judge_plain = _decrypt_field(judge_id, private_key)  # na razie tylko do logów / spójności
-        match_id_plain = _decrypt_field(match_id, private_key)
-        details_path_plain = (
-            _decrypt_field(details_path, private_key) if details_path else None
-        )
+        match_id_plain = match_id           # już plain text z frontu
+        details_path_plain = details_path   # też plain text lub None
     except HTTPException:
         # błąd deszyfrowania został już opakowany w HTTPException
         raise
