@@ -146,7 +146,7 @@ async def _send_protocol_attachment(
             detail=f"Błąd połączenia z serwerem ZPRP podczas wysyłki: {exc}",
         )
 
-    # 4) Interpretacja odpowiedzi HTML
+        # 4) Interpretacja odpowiedzi HTML
     text = resp.content.decode("iso-8859-2", errors="replace")
 
     if resp.status_code != 200:
@@ -163,19 +163,34 @@ async def _send_protocol_attachment(
             ),
         )
 
-    # TODO: dostosuj warunek sukcesu do realnej odpowiedzi ZPRP, jeśli będzie inna.
-    if "Załącznik zapisany" not in text and "Załącznik dodany" not in text:
+    # SUKCES: strona z informacją "Przesłany plik"
+    if "Przesłany plik" in text:
+        logger.info(
+            "Załącznik został poprawnie zapisany w ZPRP. Fragment odpowiedzi: %s",
+            text[:200],
+        )
+        return
+
+    # (opcjonalnie) dodatkowe markery błędu, jeśli kiedyś się pojawią
+    lower = text.lower()
+    if "błąd" in lower or "blad" in lower:
         logger.error(
-            "Nie udało się potwierdzić zapisu załącznika w ZPRP. Fragment odpowiedzi: %s",
+            "ZPRP zgłosił błąd przy dodawaniu załącznika. Fragment odpowiedzi: %s",
             text[:300],
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                "Nie udało się potwierdzić, że załącznik został zapisany "
-                "w systemie ZPRP."
-            ),
+            detail="ZPRP zgłosił błąd przy zapisie załącznika.",
         )
+
+    # Fallback: HTTP 200, brak znanego komunikatu – traktujemy jako sukces,
+    # ale zostawiamy ślad w logach.
+    logger.warning(
+        "Nie udało się jednoznacznie rozpoznać odpowiedzi ZPRP, "
+        "ale status HTTP=200 – traktuję jako sukces. Fragment: %s",
+        text[:300],
+    )
+    return
 
 
 @router.post(
