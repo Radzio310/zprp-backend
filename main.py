@@ -7,6 +7,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import delete
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -16,6 +17,8 @@ from cryptography.hazmat.primitives import serialization
 import logging
 from fastapi import Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import base64
+import httpx
 
 from app.deps import get_rsa_keys
 from app.auth import router as auth_router
@@ -158,6 +161,11 @@ async def public_key_endpoint(
 # —————————— Nowy endpoint: pobranie GROQ_API_KEY z Railway variables ——————————
 security = HTTPBearer()
 
+class SpeechToTextRequest(BaseModel):
+    audio_base64: str
+    filename: str | None = None  # opcjonalnie, jakbyś chciał kiedyś podawać
+    language: str | None = None  # np. "pl"
+
 @app.get(
     "/groq_key",
     summary="Pobierz GROQ_API_KEY z Railway variables (Tylko dozwolonym użytkownikom!)",
@@ -173,6 +181,74 @@ async def groq_key_endpoint(
         raise HTTPException(status_code=404, detail="Brak GROQ_API_KEY w środowisku")
     
     return {"GROQ_API_KEY": groq_key}
+
+@app.post(
+    "/speech_to_text",
+    summary="Transkrypcja nagrania audio na tekst (Whisper przez Groq)",
+)
+async def speech_to_text_endpoint(payload: SpeechToTextRequest):
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Brak GROQ_API_KEY w środowisku",
+        )
+
+    # dekodowanie base64 z payloadu z appki mobilnej
+    try:
+        audio_bytes = base64.b64decode(payload.audio_base64)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Nieprawidłowe pole audio_base64 (błąd dekodowania base64)",
+        )
+
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    filename = payload.filename or "audio.m4a"
+
+    headers = {
+        "Authorization": f"Bearer {groq_key}",
+    }
+    data = {
+        "model": "whisper-large-v3-turbo",
+        "response_format": "json",
+    }
+    if payload.language:
+        data["language"] = payload.language
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                url,
+                headers=headers,
+                data=data,
+                files={"file": (filename, audio_bytes, "audio/m4a")},
+            )
+
+        if resp.status_code >= 400:
+            logger.error(
+                "Groq STT error %s: %s",
+                resp.status_code,
+                resp.text[:500],
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Błąd podczas przetwarzania mowy (Groq STT)",
+            )
+
+        result = resp.json()
+    except HTTPException:
+        # przepuszczamy nasze własne HTTPException
+        raise
+    except Exception:
+        logger.exception("Groq STT request failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Nie udało się połączyć z usługą STT",
+        )
+
+    text = (result.get("text") or "").strip()
+    return {"text": text}
 
 # —————————— Custom OpenAPI (HTTP Bearer only) ——————————
 def custom_openapi():
