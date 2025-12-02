@@ -70,8 +70,17 @@ announcements = Table(
     Column("image_url", String, nullable=True),
     Column("priority", Integer, nullable=False, default=0),
     Column("link", String, nullable=True),
-    Column("province", String, nullable=False, index=True),  # ⬅⬅⬅ NOWE
-    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+    Column("province", String, nullable=False, index=True),
+    # lista reakcji: [{judge_id, full_name?, reaction, created_at}, ...]
+    Column("likes", JSON, nullable=False, server_default="[]"),
+    # lista komentarzy: [{id, judge_id, full_name?, text, created_at}, ...]
+    Column("comments", JSON, nullable=False, server_default="[]"),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
 )
 
 

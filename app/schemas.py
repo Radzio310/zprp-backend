@@ -50,6 +50,37 @@ class UpdateAnnouncementRequest(AuthPayload):
 class DeleteAnnouncementRequest(AuthPayload):
     id: int
 
+# ------------------- REAKCJE I KOMENTARZE (OGŁOSZENIA) -------------------
+
+ReactionType = Literal["like", "love", "haha", "wow", "sad", "angry"]
+
+
+class ReactionEntry(BaseModel):
+    judge_id: str
+    full_name: Optional[str] = None
+    reaction: ReactionType | str
+    created_at: datetime
+
+
+class CommentEntry(BaseModel):
+    id: str
+    judge_id: str
+    full_name: Optional[str] = None
+    text: str
+    created_at: datetime
+
+
+class ToggleReactionRequest(BaseModel):
+    judge_id: str
+    full_name: Optional[str] = None
+    reaction: ReactionType
+
+
+class AddCommentRequest(BaseModel):
+    judge_id: str
+    full_name: Optional[str] = None
+    text: str
+
 # 4) Odpowiedź pojedynczego ogłoszenia
 class AnnouncementResponse(BaseModel):
     id: int
@@ -60,7 +91,10 @@ class AnnouncementResponse(BaseModel):
     priority: int
     updated_at: datetime
     judge_name: Optional[str] = None
-    province: str                     # ⬅⬅⬅ NOWE
+    province: str
+    likes: List[ReactionEntry] = []
+    comments: List[CommentEntry] = []
+
 
 # 5) Odpowiedź listy ogłoszeń
 class ListAnnouncementsResponse(BaseModel):

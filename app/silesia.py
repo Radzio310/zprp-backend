@@ -23,6 +23,7 @@ from sqlalchemy import select, insert, update, delete, func
 from app.db import database, announcements, silesia_offtimes
 from app.schemas import (
     # Announcements
+    AddCommentRequest,
     AnnouncementResponse,
     LastUpdateResponse,
     ListAnnouncementsResponse,
@@ -30,6 +31,7 @@ from app.schemas import (
     OfftimeRecord,
     ListAllOfftimesResponse,
     SetOfftimesRequest,
+    ToggleReactionRequest,
 )
 from app.deps import get_rsa_keys
 
@@ -48,6 +50,28 @@ def _decrypt_field(enc_b64: str, private_key) -> str:
     cipher = base64.b64decode(enc_b64)
     plain = private_key.decrypt(cipher, padding.PKCS1v15())
     return plain.decode("utf-8")
+
+def _announcement_row_to_response(row) -> AnnouncementResponse:
+    """
+    Konwersja rekordu z DB na AnnouncementResponse – w jednym miejscu,
+    żeby nie duplikować logiki.
+    """
+    likes = row["likes"] or []
+    comments = row["comments"] or []
+
+    return AnnouncementResponse(
+        id=row["id"],
+        title=row["title"],
+        content=row["content"],
+        image_url=row["image_url"],
+        priority=row["priority"],
+        link=row["link"],
+        updated_at=row["updated_at"],
+        judge_name=row["judge_name"],
+        province=row["province"],
+        likes=likes,
+        comments=comments,
+    )
 
 
 # -------------------------
@@ -98,21 +122,9 @@ async def list_announcements(province: Optional[str] = Query(None)):
     q = q.order_by(announcements.c.priority)
 
     rows = await database.fetch_all(q)
-    result = [
-        AnnouncementResponse(
-            id=r["id"],
-            title=r["title"],
-            content=r["content"],
-            image_url=r["image_url"],
-            priority=r["priority"],
-            link=r["link"],
-            updated_at=r["updated_at"],
-            judge_name=r["judge_name"],
-            province=r["province"],  # ⬅ per-województwo
-        )
-        for r in rows
-    ]
+    result = [_announcement_row_to_response(r) for r in rows]
     return ListAnnouncementsResponse(announcements=result)
+
 
 
 @router_ann.post(
@@ -157,7 +169,7 @@ async def create_announcement(
             shutil.copyfileobj(image.file, out)
         image_url = f"/static/{filename}"
 
-    stmt = (
+        stmt = (
         insert(announcements)
         .values(
             judge_id=judge_plain,
@@ -168,21 +180,12 @@ async def create_announcement(
             priority=priority,
             link=link_plain,
             province=province_plain,  # ⬅ zapis województwa
+            # likes/comments biorą się z domyślnego "[]"
         )
         .returning(announcements)
     )
     record = await database.fetch_one(stmt)
-    return AnnouncementResponse(
-        id=record["id"],
-        judge_name=record["judge_name"],
-        title=record["title"],
-        content=record["content"],
-        image_url=record["image_url"],
-        priority=record["priority"],
-        link=record["link"],
-        updated_at=record["updated_at"],
-        province=record["province"],
-    )
+    return _announcement_row_to_response(record)
 
 
 @router_ann.put(
@@ -262,17 +265,115 @@ async def update_announcement(
     if not record:
         raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
 
-    return AnnouncementResponse(
-        id=record["id"],
-        title=record["title"],
-        content=record["content"],
-        image_url=record["image_url"],
-        priority=record["priority"],
-        link=record["link"],
-        judge_name=record["judge_name"],
-        updated_at=record["updated_at"],
-        province=record["province"],
+    return _announcement_row_to_response(record)
+
+
+@router_ann.post(
+    "/{ann_id}/reaction",
+    response_model=AnnouncementResponse,
+    summary="Dodaj / zmień / usuń reakcję użytkownika na ogłoszenie",
+)
+async def toggle_reaction(ann_id: int, payload: ToggleReactionRequest):
+    """
+    Logika jak na Facebooku:
+    - jeśli użytkownik nie miał reakcji → dodaj
+    - jeśli miał inną → podmień na nową
+    - jeśli miał taką samą → usuń (toggle off)
+    """
+    row = await database.fetch_one(
+        select(announcements).where(announcements.c.id == ann_id)
     )
+    if not row:
+        raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    likes = row["likes"] or []
+    if not isinstance(likes, list):
+        likes = []
+
+    judge_id = payload.judge_id
+    full_name = payload.full_name
+    reaction = payload.reaction
+    now = datetime.utcnow().isoformat()
+
+    # znajdź istniejącą reakcję tego sędziego
+    idx = None
+    for i, entry in enumerate(likes):
+        if entry.get("judge_id") == judge_id:
+            idx = i
+            break
+
+    if idx is None:
+        # brak reakcji → dodaj
+        likes.append(
+            {
+                "judge_id": judge_id,
+                "full_name": full_name,
+                "reaction": reaction,
+                "created_at": now,
+            }
+        )
+    else:
+        existing = likes[idx]
+        if existing.get("reaction") == reaction:
+            # ta sama reakcja → usuń (toggle off)
+            likes.pop(idx)
+        else:
+            # inna reakcja → podmień typ + odśwież czas
+            existing["reaction"] = reaction
+            existing["created_at"] = now
+            likes[idx] = existing
+
+    stmt = (
+        update(announcements)
+        .where(announcements.c.id == ann_id)
+        .values(likes=likes)
+        .returning(announcements)
+    )
+    updated = await database.fetch_one(stmt)
+    return _announcement_row_to_response(updated)
+
+
+@router_ann.post(
+    "/{ann_id}/comment",
+    response_model=AnnouncementResponse,
+    summary="Dodaj komentarz do ogłoszenia",
+)
+async def add_comment(ann_id: int, payload: AddCommentRequest):
+    """
+    Dodaje nowy komentarz na końcu wątku.
+    Edycja/usuwanie komentarzy można dodać osobnymi endpointami.
+    """
+    row = await database.fetch_one(
+        select(announcements).where(announcements.c.id == ann_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    comments = row["comments"] or []
+    if not isinstance(comments, list):
+        comments = []
+
+    comment_id = uuid.uuid4().hex
+    now = datetime.utcnow().isoformat()
+
+    comments.append(
+        {
+            "id": comment_id,
+            "judge_id": payload.judge_id,
+            "full_name": payload.full_name,
+            "text": payload.text,
+            "created_at": now,
+        }
+    )
+
+    stmt = (
+        update(announcements)
+        .where(announcements.c.id == ann_id)
+        .values(comments=comments)
+        .returning(announcements)
+    )
+    updated = await database.fetch_one(stmt)
+    return _announcement_row_to_response(updated)
 
 
 @router_ann.delete(
