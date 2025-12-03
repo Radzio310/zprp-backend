@@ -293,11 +293,13 @@ class ListMastersResponse(BaseModel):
     news: MastersMap
     calendar: MastersMap
     match: MastersMap
+    teach: MastersMap   # ⬅⬅⬅ NOWE – Teach Masters w tym samym formacie
 
 class UpdateMastersRequest(BaseModel):
     news: MastersMap
     calendar: MastersMap
     match: MastersMap
+    teach: MastersMap   # ⬅⬅⬅ NOWE – Teach Masters w tym samym formacie
 
 # ---------------- ZPRP MASTERS ----------------
 class ListZprpMastersResponse(BaseModel):

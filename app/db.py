@@ -251,6 +251,14 @@ match_masters = Table(
     Column("judges", JSONB, nullable=False, server_default="[]")
 )
 
+# 17.4) Teach Masters – listy per województwo
+teach_masters = Table(
+    "teach_masters",
+    metadata,
+    Column("province", String, primary_key=True),                 # np. "ŚLĄSKIE"
+    Column("judges", JSONB, nullable=False, server_default="[]"), # lista ID sędziów
+)
+
 # 17.1) ZPRP Master – uprawnieni do funkcji ZPRP
 zprp_masters = Table(
     "zprp_masters",

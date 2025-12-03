@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, insert, select, update
 import bcrypt
-from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, zprp_masters, active_provinces, settlement_clubs, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
+from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, teach_masters, zprp_masters, active_provinces, settlement_clubs, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
 from app.schemas import ActiveProvinceItem, AdminPostItem, CreateAdminPostRequest, CreateForcedLogoutRuleRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, ForcedLogoutRuleItem, GenerateHashRequest, GenerateHashResponse, GetActiveProvinceResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, GetSettlementClubsResponse, HallReportItem, JsonFileItem, ListActiveProvincesResponse, ListAdminPostsResponse, ListForcedLogoutRulesResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListSettlementClubsResponse, ListUserReportsResponse, ListVersionsResponse, ListZprpMastersResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, SettlementClubsItem, UpdateMastersRequest, UpdateVersionRequest, UpdateZprpMastersRequest, UpsertActiveProvinceRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UpsertSettlementClubsRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import unicodedata
@@ -769,35 +769,45 @@ def _row_to_list(raw):
 @router.get(
     "/masters",
     response_model=ListMastersResponse,
-    summary="Pobierz mapy Mastersów (news/calendar/match) per województwo"
+    summary="Pobierz mapy Mastersów (news/calendar/match/teach) per województwo"
 )
 async def get_masters():
     # NEWS
     news_rows = await database.fetch_all(select(news_masters))
-    news_map = { r["province"]: _row_to_list(r["judges"]) for r in news_rows }
+    news_map = {r["province"]: _row_to_list(r["judges"]) for r in news_rows}
 
     # CALENDAR
     cal_rows = await database.fetch_all(select(calendar_masters))
-    cal_map = { r["province"]: _row_to_list(r["judges"]) for r in cal_rows }
+    cal_map = {r["province"]: _row_to_list(r["judges"]) for r in cal_rows}
 
     # MATCH
     match_rows = await database.fetch_all(select(match_masters))
-    match_map = { r["province"]: _row_to_list(r["judges"]) for r in match_rows }
+    match_map = {r["province"]: _row_to_list(r["judges"]) for r in match_rows}
 
-    return ListMastersResponse(news=news_map, calendar=cal_map, match=match_map)
+    # TEACH
+    teach_rows = await database.fetch_all(select(teach_masters))
+    teach_map = {r["province"]: _row_to_list(r["judges"]) for r in teach_rows}
+
+    return ListMastersResponse(
+        news=news_map,
+        calendar=cal_map,
+        match=match_map,
+        teach=teach_map,
+    )
 
 
 @router.put(
     "/masters",
     response_model=dict,
-    summary="Zapisz pełne mapy Mastersów (nadpisuje całość dla 3 kategorii)"
+    summary="Zapisz pełne mapy Mastersów (nadpisuje całość dla 4 kategorii)"
 )
 async def upsert_masters(req: UpdateMastersRequest):
-    # Czyścimy i wstawiamy nowe mapy dla news/calendar/match
+    # Czyścimy i wstawiamy nowe mapy dla news/calendar/match/teach
     for table, mp in [
         (news_masters, req.news),
         (calendar_masters, req.calendar),
         (match_masters, req.match),
+        (teach_masters, req.teach),   # ⬅⬅⬅ DODANE
     ]:
         # 1) wyczyść tabelę
         await database.execute(table.delete())
@@ -805,12 +815,14 @@ async def upsert_masters(req: UpdateMastersRequest):
         for province, judges in (mp or {}).items():
             prov = _ensure_province(province)
             await database.execute(
-                pg_insert(table).values(
+                pg_insert(table)
+                .values(
                     province=prov,
-                    judges=judges or []
-                ).on_conflict_do_update(
+                    judges=judges or [],
+                )
+                .on_conflict_do_update(
                     index_elements=[table.c.province],
-                    set_={"judges": judges or []}
+                    set_={"judges": judges or []},
                 )
             )
     return {"success": True}
@@ -822,9 +834,17 @@ async def upsert_masters(req: UpdateMastersRequest):
     summary="Dodaj pojedyncze ID do listy Masters w wybranym województwie"
 )
 async def add_master(kind: str, province: str, judge_id: str):
-    table = {"news": news_masters, "calendar": calendar_masters, "match": match_masters}.get(kind)
+    table = {
+        "news": news_masters,
+        "calendar": calendar_masters,
+        "match": match_masters,
+        "teach": teach_masters,   # ⬅⬅⬅ DODANE
+    }.get(kind)
     if not table:
-        raise HTTPException(400, "Parametr 'kind' musi być jednym z: news|calendar|match")
+        raise HTTPException(
+            400,
+            "Parametr 'kind' musi być jednym z: news|calendar|match|teach",
+        )
 
     prov = _ensure_province(province)
     row = await database.fetch_one(select(table).where(table.c.province == prov))
@@ -834,12 +854,14 @@ async def add_master(kind: str, province: str, judge_id: str):
         current.append(judge_id)
 
     await database.execute(
-        pg_insert(table).values(
+        pg_insert(table)
+        .values(
             province=prov,
-            judges=current
-        ).on_conflict_do_update(
+            judges=current,
+        )
+        .on_conflict_do_update(
             index_elements=[table.c.province],
-            set_={"judges": current}
+            set_={"judges": current},
         )
     )
     return {"success": True}
@@ -851,27 +873,34 @@ async def add_master(kind: str, province: str, judge_id: str):
     summary="Usuń pojedyncze ID z listy Masters w wybranym województwie"
 )
 async def remove_master(kind: str, province: str, judge_id: str):
-    table = {"news": news_masters, "calendar": calendar_masters, "match": match_masters}.get(kind)
+    table = {
+        "news": news_masters,
+        "calendar": calendar_masters,
+        "match": match_masters,
+        "teach": teach_masters,   # ⬅⬅⬅ DODANE
+    }.get(kind)
     if not table:
-        raise HTTPException(400, "Parametr 'kind' musi być jednym z: news|calendar|match")
+        raise HTTPException(
+            400,
+            "Parametr 'kind' musi być jednym z: news|calendar|match|teach",
+        )
 
     prov = _ensure_province(province)
     row = await database.fetch_one(select(table).where(table.c.province == prov))
     if not row:
-        # brak rekordu dla tego województwa
         raise HTTPException(404, "Nie znaleziono rekordu dla województwa")
 
     current = _row_to_list(row["judges"])
     if judge_id in current:
         current = [j for j in current if j != judge_id]
 
-    # Zostawiamy wiersz nawet z pustą listą (czytelne „brak masterów”)
     result = await database.execute(
         update(table).where(table.c.province == prov).values(judges=current)
     )
     if not result:
         raise HTTPException(404, "Nie zaktualizowano rekordu")
     return {"success": True}
+
 
 # ZPRP MASTERS
 @router.get(
