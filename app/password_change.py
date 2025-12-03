@@ -45,7 +45,31 @@ def _decrypt_field(enc_b64: str, private_key) -> str:
         raise HTTPException(status_code=400, detail=f"Błąd deszyfrowania: {e}")
 
 
+def _is_login_page(html: str) -> bool:
+    """
+    Rozpoznaje klasyczny ekran logowania baza.zprp.pl.
+    Używane zarówno przy próbie logowania, jak i przy sprawdzaniu,
+    czy po POST zmiany hasła nie wróciliśmy na login.php.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    form = soup.find("form", {"action": "login.php"})
+    if not form:
+        return False
+    has_login_input = bool(form.find("input", {"name": "login"}))
+    has_password_input = bool(form.find("input", {"name": "haslo", "type": "password"}))
+    return has_login_input and has_password_input
+
+
 async def _login_and_client(user: str, pwd: str, settings: Settings) -> AsyncClient:
+    """
+    Loguje do baza.zprp.pl i zwraca AsyncClient z ustawioną sesją.
+
+    **Kluczowa zmiana**:
+    - sukces = HTML NIE jest stroną logowania (_is_login_page(html) == False)
+    - to pokrywa zarówno normalne wejście na /index.php,
+      jak i przypadek wymuszonej zmiany hasła, gdzie od razu trafiamy
+      na konto (`index.php?a=konto`).
+    """
     client = AsyncClient(
         base_url=settings.ZPRP_BASE_URL,
         follow_redirects=True,
@@ -65,28 +89,17 @@ async def _login_and_client(user: str, pwd: str, settings: Settings) -> AsyncCli
         resp_login.status_code,
     )
 
-    # opcjonalnie: zobacz, czy to ewidentnie ekran logowania
+    # Jeśli po POST dalej widzimy ekran logowania → hasło/login złe / brak sesji
     if _is_login_page(html):
-        logger.warning("ZPRP returned login page for user=%s (prawdopodobnie złe hasło)", user)
-
-    if "/index.php" not in resp_login.url.path:
         await client.aclose()
-        logger.error("Logowanie nie powiodło się dla user %s", user)
+        logger.error("Logowanie nie powiodło się (pozostał ekran logowania) dla user %s", user)
         raise HTTPException(status_code=401, detail="Logowanie nie powiodło się")
 
+    # W tym miejscu zakładamy, że jesteśmy już zalogowani
+    # (np. /index.php, /index.php?a=konto itp.)
     client.cookies.update(resp_login.cookies)
     return client
 
-
-def _is_login_page(html: str) -> bool:
-    soup = BeautifulSoup(html, "html.parser")
-    form = soup.find("form", {"action": "login.php"})
-    if not form:
-        return False
-    # opcjonalnie doprecyzowanie:
-    has_login_input = bool(form.find("input", {"name": "login"}))
-    has_password_input = bool(form.find("input", {"name": "haslo", "type": "password"}))
-    return has_login_input and has_password_input
 
 async def _submit_password_change(
     client: AsyncClient,
@@ -185,8 +198,6 @@ async def _submit_password_change(
         raise RuntimeError(f"Błąd HTTP {resp_post.status_code}: {text[:200]}")
 
     # 6) Heurystyka sukcesu – analogicznie do short_result:
-    #    często na takich formularzach pojawia się komunikat "Zapisano zmiany".
-    #    Dodajemy też ewentualny komunikat o zmianie hasła, jeśli się pojawi.
     if "Zapisano zmiany" in text:
         return True
     if "Hasło zostało zmienione" in text:
