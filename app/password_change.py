@@ -46,23 +46,29 @@ def _decrypt_field(enc_b64: str, private_key) -> str:
 
 
 async def _login_and_client(user: str, pwd: str, settings: Settings) -> AsyncClient:
-    """
-    Loguje do baza.zprp.pl i zwraca skonfigurowanego AsyncClient
-    z ustawionymi ciasteczkami sesji.
-    """
     client = AsyncClient(
         base_url=settings.ZPRP_BASE_URL,
         follow_redirects=True,
     )
 
-    resp_login, _ = await fetch_with_correct_encoding(
+    resp_login, html = await fetch_with_correct_encoding(
         client,
         "/login.php",
         method="POST",
         data={"login": user, "haslo": pwd, "from": "/index.php?"},
     )
 
-    # Tak jak w results.py – sukces jeśli lądujemy na /index.php
+    logger.info(
+        "ZPRP login attempt user=%s -> final_url=%s status=%s",
+        user,
+        resp_login.url,
+        resp_login.status_code,
+    )
+
+    # opcjonalnie: zobacz, czy to ewidentnie ekran logowania
+    if _is_login_page(html):
+        logger.warning("ZPRP returned login page for user=%s (prawdopodobnie złe hasło)", user)
+
     if "/index.php" not in resp_login.url.path:
         await client.aclose()
         logger.error("Logowanie nie powiodło się dla user %s", user)
