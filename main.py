@@ -40,6 +40,7 @@ from app.young_referees import router as young_referees_router
 from app.agent_docs import router as agent_docs_router
 from app.agent_chat import router as agent_chat_router
 from app.upload_protocol import router as upload_protocol_router
+from app.password_change import router as password_change_router
 
 from app.db import database, saved_matches, short_result_records
 
@@ -82,6 +83,7 @@ app.include_router(young_referees_router)
 app.include_router(agent_docs_router)
 app.include_router(agent_chat_router)
 app.include_router(upload_protocol_router)
+app.include_router(password_change_router)
 
 logger = logging.getLogger("uvicorn")
 
