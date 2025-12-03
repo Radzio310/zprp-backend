@@ -72,6 +72,16 @@ async def _login_and_client(user: str, pwd: str, settings: Settings) -> AsyncCli
     return client
 
 
+def _is_login_page(html: str) -> bool:
+    soup = BeautifulSoup(html, "html.parser")
+    form = soup.find("form", {"action": "login.php"})
+    if not form:
+        return False
+    # opcjonalnie doprecyzowanie:
+    has_login_input = bool(form.find("input", {"name": "login"}))
+    has_password_input = bool(form.find("input", {"name": "haslo", "type": "password"}))
+    return has_login_input and has_password_input
+
 async def _submit_password_change(
     client: AsyncClient,
     new_password: str,
@@ -177,8 +187,9 @@ async def _submit_password_change(
         return True
     if "Zmieniono hasło" in text:
         return True
-    if "Zaloguj" in text:
-        # po zmianie hasła następuje wylogowanie
+    # NOWE: sukces → jeśli po POST lądujemy na ekranie logowania
+    # (po zmianie hasła następuje wylogowanie)
+    if resp_post.url.path.endswith("login.php") and _is_login_page(text):
         return True
 
     # jeśli nic z powyższych – uznaj jako failure (frontend zobaczy komunikat z backendu)
