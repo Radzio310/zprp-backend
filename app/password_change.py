@@ -177,6 +177,9 @@ async def _submit_password_change(
         return True
     if "Zmieniono hasło" in text:
         return True
+    if "Zaloguj" in text:
+        # po zmianie hasła następuje wylogowanie
+        return True
 
     # jeśli nic z powyższych – uznaj jako failure (frontend zobaczy komunikat z backendu)
     logger.warning("Nie udało się jednoznacznie potwierdzić zmiany hasła")
