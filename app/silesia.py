@@ -145,7 +145,7 @@ async def create_announcement(
     content: str = Form(...),
     priority: int = Form(...),
     link: Optional[str] = Form(None),
-    province: str = Form(...),  # ⬅ NOWE – plaintext województwo
+    province: str = Form(...),  # ⬅ plaintext województwo
     image: Optional[UploadFile] = File(None),
     keys=Depends(get_rsa_keys),
 ):
@@ -153,6 +153,7 @@ async def create_announcement(
     Tworzy ogłoszenie przypisane do konkretnego `province`.
     """
     private_key, _ = keys
+
     judge_plain     = _decrypt_field(judge_id, private_key)
     full_name_plain = _decrypt_field(full_name, private_key)
     title_plain     = _decrypt_field(title, private_key)
@@ -160,7 +161,10 @@ async def create_announcement(
     link_plain      = link
     province_plain  = province
 
+    # domyślnie brak obrazka
     image_url = None
+
+    # jeśli obrazek jest, zapisujemy plik i ustawiamy image_url
     if image:
         ext = (image.filename or "img").split(".")[-1]
         filename = f"{uuid.uuid4()}.{ext}"
@@ -169,21 +173,23 @@ async def create_announcement(
             shutil.copyfileobj(image.file, out)
         image_url = f"/static/{filename}"
 
-        stmt = (
+    # 🔴 TO MUSI BYĆ POZA if image: 🔴
+    stmt = (
         insert(announcements)
         .values(
             judge_id=judge_plain,
             judge_name=full_name_plain,
             title=title_plain,
             content=content_plain,
-            image_url=image_url,
+            image_url=image_url,   # None lub ścieżka
             priority=priority,
             link=link_plain,
-            province=province_plain,  # ⬅ zapis województwa
+            province=province_plain,
             # likes/comments biorą się z domyślnego "[]"
         )
         .returning(announcements)
     )
+
     record = await database.fetch_one(stmt)
     return _announcement_row_to_response(record)
 
