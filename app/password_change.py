@@ -206,7 +206,7 @@ async def _submit_password_change(
         return True
     # NOWE: sukces → jeśli po POST lądujemy na ekranie logowania
     # (po zmianie hasła następuje wylogowanie)
-    if resp_post.url.path.endswith("login.php") and _is_login_page(text):
+    if resp_post.url.path.endswith("baza.zprp.pl") and _is_login_page(text):
         return True
 
     # jeśli nic z powyższych – uznaj jako failure (frontend zobaczy komunikat z backendu)
