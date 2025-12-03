@@ -20,12 +20,11 @@ router = APIRouter(tags=["Account"])
 
 
 class ChangePasswordRequest(BaseModel):
-    # wszystkie trzy pola są RSA+Base64, tak jak w short_result
-    username: str       # Base64-RSA (stary login)
+    # wszystkie pola RSA+Base64 (tak jak w short_result)
+    username: str       # Base64-RSA (login)
     password: str       # Base64-RSA (stare hasło – do zalogowania)
     new_password: str   # Base64-RSA (NOWE hasło – do ustawienia na koncie)
-    # opcjonalnie pozwalamy też podmienić telefon/email,
-    # ale jeśli nie przyjdą → użyjemy tego, co jest w formularzu
+    # opcjonalnie: podmiana telefonu/email; jeśli brak → użyj tego, co jest już w formularzu
     phone: Optional[str] = None
     email: Optional[str] = None
 
@@ -36,10 +35,7 @@ def _decrypt_field(enc_b64: str, private_key) -> str:
     """
     try:
         cipher = base64.b64decode(enc_b64)
-        plain = private_key.decrypt(
-            cipher,
-            padding.PKCS1v15()
-        )
+        plain = private_key.decrypt(cipher, padding.PKCS1v15())
         return plain.decode("utf-8")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Błąd deszyfrowania: {e}")
@@ -47,16 +43,22 @@ def _decrypt_field(enc_b64: str, private_key) -> str:
 
 def _is_login_page(html: str) -> bool:
     """
-    Rozpoznaje klasyczny ekran logowania baza.zprp.pl.
-    Używane zarówno przy próbie logowania, jak i przy sprawdzaniu,
-    czy po POST zmiany hasła nie wróciliśmy na login.php.
+    Rozpoznaje klasyczny ekran logowania baza.zprp.pl (ten z formularzem login/haslo).
+
+    Używane:
+    - przy próbie logowania,
+    - przy sprawdzaniu, czy po POST zmiany hasła nie wróciliśmy na ekran logowania.
     """
     soup = BeautifulSoup(html, "html.parser")
+    # dokładnie taki formularz, jak wkleiłeś: <form method='POST' action='login.php'>
     form = soup.find("form", {"action": "login.php"})
     if not form:
         return False
+
     has_login_input = bool(form.find("input", {"name": "login"}))
-    has_password_input = bool(form.find("input", {"name": "haslo", "type": "password"}))
+    has_password_input = bool(
+        form.find("input", {"name": "haslo", "type": "password"})
+    )
     return has_login_input and has_password_input
 
 
@@ -64,11 +66,10 @@ async def _login_and_client(user: str, pwd: str, settings: Settings) -> AsyncCli
     """
     Loguje do baza.zprp.pl i zwraca AsyncClient z ustawioną sesją.
 
-    **Kluczowa zmiana**:
-    - sukces = HTML NIE jest stroną logowania (_is_login_page(html) == False)
-    - to pokrywa zarówno normalne wejście na /index.php,
-      jak i przypadek wymuszonej zmiany hasła, gdzie od razu trafiamy
-      na konto (`index.php?a=konto`).
+    Sukces = HTML NIE jest stroną logowania (_is_login_page(html) == False),
+    co pokrywa zarówno:
+    - zwykłe wejście na /index.php,
+    - przypadek wymuszonej zmiany hasła (index.php?a=konto).
     """
     client = AsyncClient(
         base_url=settings.ZPRP_BASE_URL,
@@ -92,11 +93,13 @@ async def _login_and_client(user: str, pwd: str, settings: Settings) -> AsyncCli
     # Jeśli po POST dalej widzimy ekran logowania → hasło/login złe / brak sesji
     if _is_login_page(html):
         await client.aclose()
-        logger.error("Logowanie nie powiodło się (pozostał ekran logowania) dla user %s", user)
+        logger.error(
+            "Logowanie nie powiodło się (pozostał ekran logowania) dla user %s",
+            user,
+        )
         raise HTTPException(status_code=401, detail="Logowanie nie powiodło się")
 
     # W tym miejscu zakładamy, że jesteśmy już zalogowani
-    # (np. /index.php, /index.php?a=konto itp.)
     client.cookies.update(resp_login.cookies)
     return client
 
@@ -110,7 +113,10 @@ async def _submit_password_change(
     """
     Otwiera stronę ?a=konto, parsuje formularz i wysyła POST z nowym hasłem
     (i ewentualnie zaktualizowanym telefonem/email).
-    Zwraca True/False w zależności od powodzenia.
+
+    Sukces rozpoznajemy po TYM, ŻE PO POST dostajemy HTML ekranu logowania
+    (czyli użytkownik został wylogowany, a przeglądarka pokazuje formularz login/haslo),
+    niezależnie od tego, jaki dokładnie jest URL (może to być 'baza.zprp.pl', '/index.php', itd.).
     """
     # 1) Pobierz stronę konta
     resp, html = await fetch_with_correct_encoding(
@@ -134,11 +140,9 @@ async def _submit_password_change(
         logger.error("Nie znaleziono formularza zmiany hasła na stronie konta")
         return False
 
-    # 3) Zbuduj słownik pól formularza (jak w short_result),
-    #    ale emulując zachowanie przeglądarki (pomijamy disabled).
+    # 3) Zbuduj słownik pól formularza, emulując przeglądarkę (bez disabled)
     form_fields = {}
 
-    # input / select / textarea
     for inp in form.find_all(["input", "select", "textarea"]):
         name = inp.get("name")
         if not name:
@@ -162,7 +166,6 @@ async def _submit_password_change(
             if input_type in ["checkbox", "radio"]:
                 if inp.has_attr("checked"):
                     form_fields[name] = inp.get("value", "on")
-                # jeśli nie checked → nie wysyłamy
                 continue
             else:
                 form_fields[name] = inp.get("value", "") or ""
@@ -187,7 +190,7 @@ async def _submit_password_change(
     resp_post = await client.request(
         "POST",
         "/index.php?a=konto",
-        content=body.encode("ascii"),
+        content=body.encode("ascii", errors="replace"),
         headers=headers,
         cookies=client.cookies,
     )
@@ -197,20 +200,23 @@ async def _submit_password_change(
     if resp_post.status_code != 200:
         raise RuntimeError(f"Błąd HTTP {resp_post.status_code}: {text[:200]}")
 
-    # 6) Heurystyka sukcesu – analogicznie do short_result:
-    if "Zapisano zmiany" in text:
-        return True
-    if "Hasło zostało zmienione" in text:
-        return True
-    if "Zmieniono hasło" in text:
-        return True
-    # NOWE: sukces → jeśli po POST lądujemy na ekranie logowania
-    # (po zmianie hasła następuje wylogowanie)
-    if resp_post.url.path.endswith("baza.zprp.pl") and _is_login_page(text):
+    # 6) Heurystyka sukcesu:
+    #    ✅ Sukces: po POST dostajemy ekran logowania (ten, którego HTML wkleiłeś),
+    #       niezależnie od tego, czy URL to 'baza.zprp.pl', '/', '/index.php', itd.
+    if _is_login_page(text):
+        logger.info(
+            "Hasło zmienione – po POST wylądowaliśmy na ekranie logowania (formularz login/haslo)"
+        )
         return True
 
-    # jeśli nic z powyższych – uznaj jako failure (frontend zobaczy komunikat z backendu)
-    logger.warning("Nie udało się jednoznacznie potwierdzić zmiany hasła")
+    # jeżeli nie wylądowaliśmy na login page, uznaj jako failure;
+    # w razie czego w logach masz finalny URL + kawałek HTML do diagnostyki
+    logger.warning(
+        "Nie udało się jednoznacznie potwierdzić zmiany hasła. "
+        "final_url=%s status=%s",
+        resp_post.url,
+        resp_post.status_code,
+    )
     return False
 
 
