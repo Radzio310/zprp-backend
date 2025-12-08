@@ -16,7 +16,11 @@ class ChatMessage(BaseModel):
     content: str
 
 
-AgentMode = Literal["app", "rules"]
+# NOWE: trzy tryby
+# - "baza": pytania o aplikację BAZA
+# - "proel": pytania o system ProEl
+# - "rules": pytania o przepisy piłki ręcznej
+AgentMode = Literal["baza", "proel", "rules"]
 
 
 class AgentQueryRequest(BaseModel):
@@ -25,9 +29,9 @@ class AgentQueryRequest(BaseModel):
     temperature: float = 0.2
     # zwiększamy domyślny limit odpowiedzi
     max_tokens: int = 2048
-    # to pole zostanie teraz użyte tylko pomocniczo, ale zostawiamy
+    # to pole zostaje tylko pomocniczo, ale zostawiamy
     max_context_chunks: int = 32
-    # NOWE: tryb pracy Bazylego – aplikacja BAZA/ProEl albo przepisy
+    # TRYB pracy Bazylego – BAZA / ProEl / przepisy
     mode: Optional[AgentMode] = None
 
 
@@ -60,7 +64,8 @@ async def embed_query(text: str) -> List[float]:
 def build_system_prompt(mode: Optional[AgentMode]) -> str:
     """
     Buduje system prompt Bazylego w zależności od trybu:
-    - "app": fokus na BAZA / ProEl
+    - "baza": fokus na aplikację BAZA
+    - "proel": fokus na system ProEl
     - "rules": fokus na przepisy piłki ręcznej
     """
     base = (
@@ -78,16 +83,27 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
         "4. Odpowiadaj po polsku, chyba że użytkownik wyraźnie prosi o inny język.\n\n"
     )
 
-    if mode == "app":
+    if mode == "baza":
         mode_part = (
-            "TRYB: Aplikacja BAZA / ProEl.\n"
-            "Jesteś ekspertem od działania aplikacji BAZA / ProEl, ich konfiguracji, "
+            "TRYB: Aplikacja BAZA.\n"
+            "Jesteś ekspertem od działania aplikacji BAZA, jej konfiguracji, "
             "integracji (np. z systemem ZPRP) oraz typowych problemów użytkowników.\n"
             "Kontekst pochodzi głównie z dokumentacji, regulaminów i instrukcji, "
-            "których tytuł zawiera słowa 'BAZA' lub 'ProEl'.\n"
-            "Jeżeli pytanie dotyczy przepisów gry w piłkę ręczną (a nie aplikacji), "
-            "napisz uprzejmie, że to pytanie wymaga trybu przepisów i zasugeruj "
-            "użytkownikowi przełączenie się na tryb pytań o przepisy.\n"
+            "których tytuł dotyczy aplikacji BAZA.\n"
+            "Jeżeli pytanie dotyczy systemu ProEl lub przepisów gry w piłkę ręczną, "
+            "napisz uprzejmie, że to pytanie lepiej obsłużyć w odpowiednim trybie "
+            "(ProEl / przepisy).\n"
+        )
+    elif mode == "proel":
+        mode_part = (
+            "TRYB: System ProEl.\n"
+            "Jesteś ekspertem od systemu ProEl, jego działania, konfiguracji i integracji, "
+            "w tym powiązań z BAZĄ oraz innymi systemami.\n"
+            "Kontekst pochodzi głównie z dokumentacji, regulaminów i instrukcji, "
+            "których tytuł dotyczy systemu ProEl.\n"
+            "Jeżeli pytanie dotyczy aplikacji BAZA lub przepisów gry w piłkę ręczną, "
+            "napisz uprzejmie, że to pytanie lepiej obsłużyć w odpowiednim trybie "
+            "(BAZA / przepisy).\n"
         )
     elif mode == "rules":
         mode_part = (
@@ -105,15 +121,16 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
             "- 'Wytyczne'\n"
             "- 'Katalog pytania i odpowiedzi'\n"
             "- 'Katalog pytań'\n"
-            "Jeśli pytanie dotyczy działania aplikacji BAZA / ProEl, "
-            "napisz, że to pytanie wymaga trybu aplikacji.\n"
+            "Jeśli pytanie dotyczy działania aplikacji BAZA lub systemu ProEl, "
+            "napisz, że to pytanie wymaga odpowiedniego trybu aplikacji/systemu.\n"
         )
     else:
         # fallback – zachowanie zbliżone do starej wersji
         mode_part = (
             "TRYB: Ogólny.\n"
-            "Jeśli z kontekstu wynika, że pytanie dotyczy aplikacji BAZA/ProEl, "
-            "skup się na dokumentach dotyczących aplikacji.\n"
+            "Jeśli z kontekstu wynika, że pytanie dotyczy aplikacji BAZA, "
+            "skup się na dokumentach dotyczących BAZA.\n"
+            "Jeśli dotyczy systemu ProEl, skup się na dokumentach dotyczących ProEl.\n"
             "Jeśli dotyczy przepisów piłki ręcznej, skup się na regulaminach, "
             "przepisach i wytycznych sędziowskich.\n"
         )
@@ -125,7 +142,11 @@ def build_mode_filtered_query(mode: Optional[AgentMode]):
     """
     Buduje SELECT na agent_document_chunks z dołączeniem agent_documents
     oraz filtrami na tytuł dokumentu zależnie od trybu.
-    Zwraca obiekt select.
+
+    - 'baza': dokumenty dotyczące aplikacji BAZA
+    - 'proel': dokumenty dotyczące systemu ProEl
+    - 'rules': dokumenty z przepisami / regulaminami / wytycznymi itd.
+    - None: brak dodatkowego filtra po tytule (wszystkie dokumenty)
     """
     base_query = (
         select(
@@ -140,20 +161,28 @@ def build_mode_filtered_query(mode: Optional[AgentMode]):
         )
     )
 
-    if mode == "app":
-        # Dokumenty dotyczące aplikacji BAZA / ProEl
+    if mode == "baza":
         patterns = [
             "%BAZA%",
             "%Baza%",
             "%baza%",
-            "%ProEl%",
-            "%Pro El%",
-            "%Pro-EL%",
-            "%Proel%",
         ]
         conditions = [agent_documents.c.title.ilike(p) for p in patterns]
         if conditions:
             base_query = base_query.where(or_(*conditions))
+
+    elif mode == "proel":
+        patterns = [
+            "%ProEl%",
+            "%Pro El%",
+            "%Pro-EL%",
+            "%Proel%",
+            "%proel%",
+        ]
+        conditions = [agent_documents.c.title.ilike(p) for p in patterns]
+        if conditions:
+            base_query = base_query.where(or_(*conditions))
+
     elif mode == "rules":
         # Dokumenty zawierające przepisy / regulaminy / wytyczne itd.
         patterns = [
@@ -173,6 +202,7 @@ def build_mode_filtered_query(mode: Optional[AgentMode]):
         if conditions:
             base_query = base_query.where(or_(*conditions))
 
+    # dla mode=None nie dodajemy żadnego dodatkowego filtra
     return base_query
 
 
@@ -285,7 +315,7 @@ async def agent_query(payload: AgentQueryRequest):
                     f"fragmentów z wielu dokumentów (łącznie {total_chars} znaków)."
                 )
             else:
-                # TRYB APLIKACJI (lub ogólny): jak wcześniej – wszystkie chunki z najlepszego dokumentu
+                # TRYB BAZA / PROEL / ogólny: jak wcześniej – wszystkie chunki z najlepszego dokumentu
                 best_doc_id = best_row["document_id"]
                 best_title = best_row.get("doc_title", "")
                 print(
@@ -317,7 +347,7 @@ async def agent_query(payload: AgentQueryRequest):
 
                 context_text = "".join(context_parts)
                 print(
-                    f"[agent_query] Tryb 'app/ogólny': używam {len(context_parts)} "
+                    f"[agent_query] Tryb 'baza/proel/ogólny': używam {len(context_parts)} "
                     f"fragmentów z dokumentu {best_doc_id} (łącznie {total_chars} znaków)."
                 )
 
