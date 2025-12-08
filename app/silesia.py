@@ -25,6 +25,7 @@ from app.schemas import (
     # Announcements
     AddCommentRequest,
     AnnouncementResponse,
+    DeleteCommentRequest,
     LastUpdateResponse,
     ListAnnouncementsResponse,
     # Offtimes
@@ -423,6 +424,42 @@ async def pin_comment(ann_id: int, payload: PinCommentRequest):
     )
     updated = await database.fetch_one(stmt)
 
+    return _announcement_row_to_response(updated)
+
+@router_ann.post(
+    "/{ann_id}/comment_delete",
+    response_model=AnnouncementResponse,
+    summary="Usuń komentarz z ogłoszenia",
+)
+async def delete_comment(ann_id: int, payload: DeleteCommentRequest):
+    """
+    Usuwa wybrany komentarz z JSON-a comments ogłoszenia.
+    Zmiana jest globalna dla wszystkich użytkowników.
+    """
+    row = await database.fetch_one(
+        select(announcements).where(announcements.c.id == ann_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    comments = row["comments"] or []
+    if not isinstance(comments, list):
+        comments = []
+
+    target_id = str(payload.comment_id)
+    before = len(comments)
+    comments = [c for c in comments if str(c.get("id")) != target_id]
+
+    if len(comments) == before:
+        raise HTTPException(status_code=404, detail="Komentarz nie istnieje")
+
+    stmt = (
+        update(announcements)
+        .where(announcements.c.id == ann_id)
+        .values(comments=comments)
+        .returning(announcements)
+    )
+    updated = await database.fetch_one(stmt)
     return _announcement_row_to_response(updated)
 
 

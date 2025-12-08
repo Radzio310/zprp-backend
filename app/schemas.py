@@ -70,6 +70,11 @@ class CommentEntry(BaseModel):
     created_at: datetime
     is_pinned: bool = False
 
+class DeleteCommentRequest(BaseModel):
+    judge_id: str
+    full_name: Optional[str] = None
+    comment_id: str
+
 
 class ToggleReactionRequest(BaseModel):
     judge_id: str
