@@ -68,6 +68,7 @@ class CommentEntry(BaseModel):
     full_name: Optional[str] = None
     text: str
     created_at: datetime
+    is_pinned: bool = False
 
 
 class ToggleReactionRequest(BaseModel):
