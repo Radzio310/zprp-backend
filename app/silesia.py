@@ -30,6 +30,7 @@ from app.schemas import (
     # Offtimes
     OfftimeRecord,
     ListAllOfftimesResponse,
+    PinCommentRequest,
     SetOfftimesRequest,
     ToggleReactionRequest,
 )
@@ -369,6 +370,7 @@ async def add_comment(ann_id: int, payload: AddCommentRequest):
             "full_name": payload.full_name,
             "text": payload.text,
             "created_at": now,
+            "is_pinned": False,  # nowy klucz – domyślnie nieprzypięty
         }
     )
 
@@ -379,6 +381,48 @@ async def add_comment(ann_id: int, payload: AddCommentRequest):
         .returning(announcements)
     )
     updated = await database.fetch_one(stmt)
+    return _announcement_row_to_response(updated)
+
+@router_ann.post(
+    "/{ann_id}/comment_pin",
+    response_model=AnnouncementResponse,
+    summary="Przypnij / odepnij komentarz w ogłoszeniu",
+)
+async def pin_comment(ann_id: int, payload: PinCommentRequest):
+    """
+    Ustawia flagę is_pinned dla konkretnego komentarza w JSON-ie ogłoszenia.
+    Widoczne globalnie dla wszystkich użytkowników.
+    """
+    row = await database.fetch_one(
+        select(announcements).where(announcements.c.id == ann_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    comments = row["comments"] or []
+    if not isinstance(comments, list):
+        comments = []
+
+    found = False
+    target_id = str(payload.comment_id)
+
+    for c in comments:
+        if str(c.get("id")) == target_id:
+            c["is_pinned"] = bool(payload.pin)
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail="Komentarz nie istnieje")
+
+    stmt = (
+        update(announcements)
+        .where(announcements.c.id == ann_id)
+        .values(comments=comments)
+        .returning(announcements)
+    )
+    updated = await database.fetch_one(stmt)
+
     return _announcement_row_to_response(updated)
 
 

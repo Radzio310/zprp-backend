@@ -81,6 +81,12 @@ class AddCommentRequest(BaseModel):
     full_name: Optional[str] = None
     text: str
 
+class PinCommentRequest(BaseModel):
+    judge_id: str
+    full_name: str
+    comment_id: str
+    pin: bool
+
 # 4) Odpowiedź pojedynczego ogłoszenia
 class AnnouncementResponse(BaseModel):
     id: int
