@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Literal, Optional, Tuple, Dict, Any
-from sqlalchemy import select, or_
+from sqlalchemy import select
 import json
 import math
 
@@ -16,11 +16,27 @@ class ChatMessage(BaseModel):
     content: str
 
 
-# NOWE: trzy tryby
+# TRYBY:
 # - "baza": pytania o aplikację BAZA
 # - "proel": pytania o system ProEl
 # - "rules": pytania o przepisy piłki ręcznej
 AgentMode = Literal["baza", "proel", "rules"]
+
+
+# DOMYŚLNE ID DOKUMENTÓW – łatwe do edycji w jednym miejscu:
+DEFAULT_BAZA_PRIMARY_DOC_ID = 15
+DEFAULT_BAZA_SECONDARY_DOC_ID = 4
+
+DEFAULT_PROEL_PRIMARY_DOC_ID = 4
+DEFAULT_PROEL_SECONDARY_DOC_ID = 15
+
+DEFAULT_RULES_PRIMARY_DOC_ID = 6
+
+# Dokumenty, które są „bazowe” dla BAZA/ProEl – wykluczane z trybu przepisów
+BAZA_PROEL_DOC_IDS = {
+    DEFAULT_BAZA_PRIMARY_DOC_ID,
+    DEFAULT_PROEL_PRIMARY_DOC_ID,
+}
 
 
 class AgentQueryRequest(BaseModel):
@@ -63,48 +79,51 @@ async def embed_query(text: str) -> List[float]:
 
 def build_system_prompt(mode: Optional[AgentMode]) -> str:
     """
-    Buduje system prompt Bazylego w zależności od trybu:
-    - "baza": fokus na aplikację BAZA
-    - "proel": fokus na system ProEl
-    - "rules": fokus na przepisy piłki ręcznej
-
-    Kluczowe założenia:
-    - Agent ma wyglądać jak ekspert/znawca tematu, a NIE jak interfejs do dokumentów.
-    - Nie wolno mu mówić o PDF-ach, dokumentach, „kontekście” itp.
-    - Ma sam streścić i podać wszystkie potrzebne informacje użytkownikowi.
+    Buduje system prompt Bazylego w zależności od trybu.
+    Bardzo mocno pilnujemy:
+    - ZERO ściemy / zgadywania,
+    - tylko wiedza z rozmowy + ukrytych źródeł (chunków),
+    - brak odwołań do dokumentów jako dokumentów.
     """
 
     base = (
         "Jesteś asystentem Bazyli – praktycznym ekspertem pomagającym sędziom "
         "i działaczom w pracy z aplikacją BAZA, systemem ProEl oraz przepisami "
-        "piłki ręcznej.\n"
-        "Masz odpowiadać wyłącznie na podstawie informacji, które otrzymujesz "
-        "w tej rozmowie (w tym ukrytych dla użytkownika materiałów źródłowych). "
-        "Nie wymyślaj faktów.\n\n"
-        "Zasady odpowiedzi (wspólne dla wszystkich trybów):\n"
-        "1. Zawsze twórz pełne, wyczerpujące odpowiedzi na pytanie użytkownika, "
-        "wykorzystując wszystkie istotne informacje, które masz do dyspozycji.\n"
-        "2. Jeśli czegoś nie da się jednoznacznie ustalić na podstawie posiadanych "
-        "informacji, powiedz wprost, że tego nie wiesz albo że wymaga to doprecyzowania "
-        "– ale nie zgaduj.\n"
-        "3. Nigdy nie wspominaj o dokumentach, PDF-ach, plikach, załącznikach, "
-        "kontekście, embeddingach ani o „fragmentach dokumentów”. Użytkownik nie "
-        "powinien wiedzieć, że korzystasz z takich materiałów.\n"
-        "4. Nigdy nie odsyłaj użytkownika do dokumentów ani nie pisz w stylu "
-        "„szczegóły znajdziesz w dokumencie”, „ta informacja jest w pliku” itp. "
-        "Zamiast tego sam streść wszystkie potrzebne informacje i wypisz je w odpowiedzi.\n"
-        "5. Odpowiadaj jak praktyczny ekspert systemu (BAZA / ProEl / przepisy), "
+        "piłki ręcznej.\n\n"
+        "Podstawowe zasady, których MUSISZ bezwzględnie przestrzegać:\n"
+        "1. Możesz korzystać TYLKO z informacji, które pojawiają się w tej "
+        "konkretnej rozmowie (pytania/odpowiedzi) oraz z dodatkowych ukrytych "
+        "materiałów źródłowych przekazanych Ci w roli systemu. "
+        "NIE wolno Ci używać żadnej innej, ogólnej wiedzy ani pamięci modelu.\n"
+        "2. Jeśli jakaś informacja nie występuje w tych źródłach – traktuj ją "
+        "jako NIEZNANĄ. Nie zgaduj, nie dopowiadaj „bo tak zwykle bywa”, "
+        "nie uzupełniaj luk wyobraźnią.\n"
+        "3. Jeżeli nie masz wystarczających danych, aby odpowiedzieć pewnie, "
+        "powiedz wprost, że na podstawie dostępnych informacji nie możesz "
+        "udzielić jednoznacznej odpowiedzi. Możesz zaproponować doprecyzowanie "
+        "pytania, ale NIE wolno Ci wymyślać szczegółów.\n"
+        "4. Nigdy nie wspominaj o dokumentach, PDF-ach, plikach, załącznikach, "
+        "kontekście, embeddingach ani o „fragmentach dokumentów”. Użytkownik "
+        "nie powinien wiedzieć, że korzystasz z takich materiałów.\n"
+        "5. Nigdy nie odsyłaj użytkownika do dokumentów i nie pisz w stylu "
+        "„szczegóły znajdziesz w dokumencie…”. Zamiast tego sam streść wszystkie "
+        "potrzebne informacje i wypisz je w odpowiedzi.\n"
+        "6. Jeśli pytanie dotyczy przepisów, założeń, zasad lub list punktów, "
+        "to wypisz WSZYSTKIE istotne punkty, limity, wyjątki i warunki, które "
+        "występują w dostępnych źródłach – nawet jeśli odpowiedź będzie długa.\n"
+        "7. Nie próbuj „ulepszać” odpowiedzi dodawaniem niepewnych szczegółów. "
+        "Jeżeli w źródłach nie ma konkretnej liczby, terminu lub wyjątku, "
+        "powiedz, że nie jest on podany.\n"
+        "8. Odpowiadaj jak praktyczny ekspert systemu (BAZA / ProEl / przepisy), "
         "który tłumaczy dokładnie co zrobić: krok po kroku, z nazwami zakładek, "
-        "przycisków, przykładami i typowymi pułapkami, jeśli to potrzebne.\n"
-        "6. Jeśli pytanie dotyczy przepisów, założeń, zasad, list punktów itp., "
-        "to wypisz WSZYSTKIE istotne punkty z posiadanych informacji w czytelnej, "
-        "ponumerowanej formie.\n"
-        "7. Nie pomijaj wyjątków, liczb, limitów ani szczegółowych warunków, "
-        "nawet jeśli odpowiedź będzie długa.\n"
-        "8. Możesz używać sformułowań typu „zgodnie z przepisami gry” lub "
-        "„regulamin przewiduje, że…”, ale nie pisz, że „w dokumencie X na stronie Y "
-        "jest napisane…”.\n"
-        "9. Odpowiadaj po polsku, chyba że użytkownik wyraźnie poprosi o inny język.\n\n"
+        "przycisków i typowymi pułapkami – jeśli takie informacje masz.\n"
+        "9. Możesz używać sformułowań typu „zgodnie z przepisami gry”, "
+        "„regulamin przewiduje, że…”, ale nie pisz nigdy, że „w dokumencie X "
+        "na stronie Y jest napisane…”.\n"
+        "10. Odpowiadasz po polsku, chyba że użytkownik wyraźnie poprosi o inny język.\n"
+        "11. Jeżeli w danym trybie (BAZA / ProEl / przepisy) nie masz żadnych "
+        "wiarygodnych informacji powiązanych z pytaniem, powiedz wprost, "
+        "że w tym trybie nie masz danych na ten temat, zamiast zgadywać.\n\n"
     )
 
     if mode == "baza":
@@ -114,9 +133,9 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
             "integracji (np. z systemem ZPRP) oraz typowych problemów użytkowników.\n"
             "Myśl jak asystent w aplikacji BAZA: gdy użytkownik pyta „jak coś zrobić”, "
             "opisz dokładnie, co i gdzie kliknąć, jakie menu wybrać, jakie opcje zaznaczyć.\n"
-            "Jeżeli pytanie wyraźnie dotyczy systemu ProEl lub przepisów gry w piłkę ręczną, "
-            "napisz uprzejmie, że ten temat powinien być obsłużony w odpowiednim trybie "
-            "(ProEl / przepisy), bez wchodzenia w szczegóły techniczne innych systemów.\n"
+            "Jeśli pytanie wyraźnie dotyczy systemu ProEl lub przepisów gry w piłkę ręczną, "
+            "napisz uprzejmie, że w trybie BAZA nie masz informacji na ten temat i że "
+            "taki temat powinien być obsłużony w odpowiednim trybie (ProEl / przepisy).\n"
         )
     elif mode == "proel":
         mode_part = (
@@ -124,10 +143,11 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
             "Jesteś ekspertem od systemu ProEl, jego działania, konfiguracji i integracji, "
             "w tym powiązań z BAZĄ oraz innymi systemami.\n"
             "Odpowiadaj tak, jakbyś znał interfejs ProEl „na pamięć”: krok po kroku, "
-            "z nazwami modułów, ekranów i typowymi scenariuszami użycia.\n"
-            "Jeżeli pytanie dotyczy wyraźnie aplikacji BAZA lub przepisów gry w piłkę ręczną, "
-            "napisz uprzejmie, że ten temat powinien być obsłużony w odpowiednim trybie "
-            "(BAZA / przepisy), bez udawania, że znasz szczegóły spoza obecnego trybu.\n"
+            "z nazwami modułów, ekranów i typowymi scenariuszami użycia – ale tylko tam, "
+            "gdzie masz konkretne informacje w źródłach.\n"
+            "Jeśli pytanie wyraźnie dotyczy aplikacji BAZA lub przepisów gry w piłkę ręczną, "
+            "napisz, że w trybie ProEl nie masz informacji na ten temat i że ten temat "
+            "powinien być obsłużony w odpowiednim trybie (BAZA / przepisy).\n"
         )
     elif mode == "rules":
         mode_part = (
@@ -135,25 +155,19 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
             "Jesteś ekspertem od przepisów piłki ręcznej oraz ich praktycznej "
             "interpretacji z perspektywy sędziego.\n"
             "Wykorzystuj szeroki kontekst z wielu źródeł naraz, łącząc informacje "
-            "z różnych miejsc regulaminów i wytycznych, tak aby odpowiedź była "
-            "pełna i spójna.\n"
-            "Pamiętaj, że przepisy piłki ręcznej obejmują nie tylko sam dokument "
-            "„Przepisy gry”, ale również materiały typu regulaminy rozgrywek, "
-            "wytyczne, katalogi pytań i odpowiedzi, opisy wdrożeń zmian itp. "
-            "Użytkownik nie musi wiedzieć, skąd dokładnie pochodzą te informacje – "
-            "ma po prostu dostać jasną, konkretną odpowiedź.\n"
+            "z różnych miejsc regulaminów i wytycznych, ale TYLKO tam, gdzie "
+            "masz konkretne dane w źródłach.\n"
             "Jeśli pytanie dotyczy działania aplikacji BAZA lub systemu ProEl, "
-            "napisz, że taki temat powinien być obsłużony w odpowiednim trybie aplikacji/systemu.\n"
+            "napisz, że w trybie przepisów nie masz informacji na ten temat i że "
+            "taki temat powinien być obsłużony w odpowiednim trybie aplikacji/systemu.\n"
         )
     else:
-        # fallback – zachowanie zbliżone do starej wersji, ale z nowymi zasadami „eksperta”
         mode_part = (
             "TRYB: Ogólny.\n"
             "Na podstawie treści pytania staraj się rozpoznać, czy chodzi bardziej o "
             "aplikację BAZA, system ProEl, czy przepisy piłki ręcznej, i odpowiadaj "
-            "jak ekspert w tej dziedzinie.\n"
-            "Jeżeli potrzebne byłyby szczegóły z innego obszaru (np. ProEl przy pytaniu o BAZĘ), "
-            "możesz napisać, że wymaga to przełączenia na odpowiedni tryb, zamiast zgadywać.\n"
+            "jak ekspert w tej dziedzinie. Jeżeli nie masz źródeł dla danego obszaru, "
+            "powiedz wprost, że nie masz danych, zamiast zgadywać.\n"
         )
 
     return base + mode_part
@@ -162,12 +176,12 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
 def build_mode_filtered_query(mode: Optional[AgentMode]):
     """
     Buduje SELECT na agent_document_chunks z dołączeniem agent_documents
-    oraz filtrami na tytuł dokumentu zależnie od trybu.
+    oraz filtrami na document_id zależnie od trybu.
 
-    - 'baza': dokumenty dotyczące aplikacji BAZA
-    - 'proel': dokumenty dotyczące systemu ProEl
-    - 'rules': dokumenty z przepisami / regulaminami / wytycznymi itd.
-    - None: brak dodatkowego filtra po tytule (wszystkie dokumenty)
+    - 'baza': tylko dokumenty (15, 4)
+    - 'proel': tylko dokumenty (4, 15)
+    - 'rules': wszystkie dokumenty poza (4, 15)
+    - None: brak dodatkowego filtra (wszystkie dokumenty)
     """
     base_query = (
         select(
@@ -183,48 +197,83 @@ def build_mode_filtered_query(mode: Optional[AgentMode]):
     )
 
     if mode == "baza":
-        patterns = [
-            "%BAZA%",
-            "%Baza%",
-            "%baza%",
+        allowed_ids = [
+            DEFAULT_BAZA_PRIMARY_DOC_ID,
+            DEFAULT_BAZA_SECONDARY_DOC_ID,
         ]
-        conditions = [agent_documents.c.title.ilike(p) for p in patterns]
-        if conditions:
-            base_query = base_query.where(or_(*conditions))
+        base_query = base_query.where(
+            agent_document_chunks.c.document_id.in_(allowed_ids)
+        )
 
     elif mode == "proel":
-        patterns = [
-            "%ProEl%",
-            "%Pro El%",
-            "%Pro-EL%",
-            "%Proel%",
-            "%proel%",
+        allowed_ids = [
+            DEFAULT_PROEL_PRIMARY_DOC_ID,
+            DEFAULT_PROEL_SECONDARY_DOC_ID,
         ]
-        conditions = [agent_documents.c.title.ilike(p) for p in patterns]
-        if conditions:
-            base_query = base_query.where(or_(*conditions))
+        base_query = base_query.where(
+            agent_document_chunks.c.document_id.in_(allowed_ids)
+        )
 
     elif mode == "rules":
-        # Dokumenty zawierające przepisy / regulaminy / wytyczne itd.
-        patterns = [
-            "%regulamin%",
-            "%Regulamin%",
-            "%przepis%",
-            "%Przepisy%",
-            "%Buzzery%",
-            "%buzzer%",
-            "%Wdrożenie kluczowych zmian%",
-            "%Założenia%",
-            "%Wytyczne%",
-            "%Katalog pytania i odpowiedzi%",
-            "%Katalog pytań%",
-        ]
-        conditions = [agent_documents.c.title.ilike(p) for p in patterns]
-        if conditions:
-            base_query = base_query.where(or_(*conditions))
+        # wszystkie dokumenty poza „bazowymi” BAZA/ProEl
+        base_query = base_query.where(
+            ~agent_document_chunks.c.document_id.in_(BAZA_PROEL_DOC_IDS)
+        )
 
     # dla mode=None nie dodajemy żadnego dodatkowego filtra
     return base_query
+
+
+def build_context_for_single_document(
+    scored: List[Tuple[float, Dict[str, Any]]],
+    target_doc_id: int,
+    max_chars: int = 8000,
+    log_prefix: str = "",
+) -> str:
+    """
+    Buduje kontekst wyłącznie z jednego dokumentu (po document_id),
+    zachowując kolejność chunków po chunk_index i pilnując limitu znaków.
+    Zwraca pusty string, jeśli brak sensownego dopasowania (best_sim <= 0
+    lub brak chunków dla danego document_id).
+    """
+    doc_rows: List[Tuple[float, Dict[str, Any]]] = [
+        (sim, r) for (sim, r) in scored if r["document_id"] == target_doc_id
+    ]
+
+    if not doc_rows:
+        print(
+            f"[agent_query] {log_prefix} Brak chunków dla dokumentu {target_doc_id}"
+        )
+        return ""
+
+    best_sim = max(sim for sim, _ in doc_rows)
+    if best_sim <= 0:
+        print(
+            f"[agent_query] {log_prefix} Najlepsze similarity <= 0 dla dokumentu {target_doc_id}"
+        )
+        return ""
+
+    rows_sorted = sorted(
+        (r for _sim, r in doc_rows),
+        key=lambda r: r["chunk_index"],
+    )
+
+    total_chars = 0
+    parts: List[str] = []
+
+    for r in rows_sorted:
+        part = f"{r['content']}\n\n---\n\n"
+        if total_chars + len(part) > max_chars:
+            break
+        parts.append(part)
+        total_chars += len(part)
+
+    print(
+        f"[agent_query] {log_prefix} Używam {len(parts)} fragmentów z dokumentu {target_doc_id} "
+        f"(łącznie {total_chars} znaków, best_sim={best_sim:.4f})."
+    )
+
+    return "".join(parts)
 
 
 @router.post("/query", response_model=AgentQueryResponse)
@@ -248,7 +297,7 @@ async def agent_query(payload: AgentQueryRequest):
     print("[agent_query] Długość wektora zapytania:", len(query_vec))
     print("[agent_query] Pierwsze kilka wartości zapytania:", query_vec[:5])
 
-    # 2) pobierz chunki z uwzględnieniem trybu
+    # 2) pobierz chunki z uwzględnieniem trybu / document_id
     q = build_mode_filtered_query(payload.mode)
     rows = await database.fetch_all(q)
     print(
@@ -256,21 +305,27 @@ async def agent_query(payload: AgentQueryRequest):
         len(rows),
     )
 
+    # 3) jeśli w ogóle nie ma chunków – dalej też nie wolno zgadywać
     if not rows:
-        # nie ma żadnych dokumentów dla danego trybu – fallback: normalny czat z Groq
         print(
-            "[agent_query] Brak chunków w bazie dla danego trybu – "
-            "fallback do czystego modelu bez kontekstu"
+            "[agent_query] Brak chunków w bazie dla danego trybu – brak kontekstu, "
+            "ale nadal obowiązuje zakaz zgadywania."
         )
+        system_prompt = build_system_prompt(payload.mode)
+        groq_messages: List[dict] = [{"role": "system", "content": system_prompt}]
+        for m in payload.messages:
+            if m.role in ("user", "assistant"):
+                groq_messages.append({"role": m.role, "content": m.content})
+
         reply = await groq_chat_completion(
-            messages=[{"role": m.role, "content": m.content} for m in payload.messages],
+            messages=groq_messages,
             model=payload.model or "llama-3.1-8b-instant",
             temperature=payload.temperature,
             max_tokens=payload.max_tokens,
         )
         return AgentQueryResponse(reply=reply)
 
-    # 3) policz similarity dla każdego chunku
+    # 4) policz similarity dla każdego chunku
     scored: List[Tuple[float, Dict[str, Any]]] = []
     for row in rows:
         r_dict = dict(row)
@@ -296,71 +351,169 @@ async def agent_query(payload: AgentQueryRequest):
             f"chunk_index={r['chunk_index']}, snippet='{snippet}'"
         )
 
+    # 5) budowanie kontekstu wg trybu i priorytetów document_id
     context_text = ""
     if not scored:
         print("[agent_query] Brak wyników po scoringu – brak kontekstu")
     else:
-        best_sim, best_row = scored[0]
-        if best_sim <= 0:
-            # nic niepasujące – lepiej szczerze powiedzieć, że nie wiemy
-            print(
-                "[agent_query] Najlepsze similarity <= 0 – brak sensownego dopasowania"
+        if payload.mode == "baza":
+            # najpierw dokument 15, potem 4, potem brak dopasowania
+            context_text = build_context_for_single_document(
+                scored,
+                DEFAULT_BAZA_PRIMARY_DOC_ID,
+                max_chars=8000,
+                log_prefix="Tryb 'baza' (PRIMARY)",
             )
-            context_text = ""
-        else:
-            if payload.mode == "rules":
-                # TRYB PRZEPISÓW: bierzemy fragmenty z WIELU dokumentów (szeroki kontekst)
-                max_chars = 8000
-                total_chars = 0
-                context_parts: List[str] = []
-
-                print(
-                    "[agent_query] Buduję kontekst z wielu dokumentów (tryb 'rules')."
+            if not context_text:
+                context_text = build_context_for_single_document(
+                    scored,
+                    DEFAULT_BAZA_SECONDARY_DOC_ID,
+                    max_chars=8000,
+                    log_prefix="Tryb 'baza' (SECONDARY)",
                 )
-                for sim, r in scored:
-                    if sim <= 0:
-                        break
-                    title = r.get("doc_title") or f"Dokument {r['document_id']}"
-                    part = (
-                        f"[Dokument: {title} | Fragment #{r['chunk_index']} "
-                        f"(sim={sim:.4f})]\n{r['content']}\n\n---\n\n"
-                    )
-                    if total_chars + len(part) > max_chars:
-                        break
-                    context_parts.append(part)
-                    total_chars += len(part)
-
-                context_text = "".join(context_parts)
+            if not context_text:
                 print(
-                    f"[agent_query] Tryb 'rules': używam {len(context_parts)} "
-                    f"fragmentów z wielu dokumentów (łącznie {total_chars} znaków)."
+                    "[agent_query] Tryb 'baza': brak sensownego dopasowania w dokumentach "
+                    f"{DEFAULT_BAZA_PRIMARY_DOC_ID}/{DEFAULT_BAZA_SECONDARY_DOC_ID} – brak kontekstu."
+                )
+
+        elif payload.mode == "proel":
+            # najpierw dokument 4, potem 15, potem brak dopasowania
+            context_text = build_context_for_single_document(
+                scored,
+                DEFAULT_PROEL_PRIMARY_DOC_ID,
+                max_chars=8000,
+                log_prefix="Tryb 'proel' (PRIMARY)",
+            )
+            if not context_text:
+                context_text = build_context_for_single_document(
+                    scored,
+                    DEFAULT_PROEL_SECONDARY_DOC_ID,
+                    max_chars=8000,
+                    log_prefix="Tryb 'proel' (SECONDARY)",
+                )
+            if not context_text:
+                print(
+                    "[agent_query] Tryb 'proel': brak sensownego dopasowania w dokumentach "
+                    f"{DEFAULT_PROEL_PRIMARY_DOC_ID}/{DEFAULT_PROEL_SECONDARY_DOC_ID} – brak kontekstu."
+                )
+
+        elif payload.mode == "rules":
+            # najpierw dokument 6, potem wszystkie pozostałe (bez 4 i 15),
+            # z szerokim kontekstem z wielu dokumentów
+            max_chars = 8000
+            total_chars = 0
+            parts: List[str] = []
+
+            # tylko sensowne dopasowania
+            scored_positive: List[Tuple[float, Dict[str, Any]]] = [
+                (sim, r) for (sim, r) in scored if sim > 0
+            ]
+
+            if not scored_positive:
+                print(
+                    "[agent_query] Tryb 'rules': wszystkie similarity <= 0 – brak sensownego kontekstu."
                 )
             else:
-                # TRYB BAZA / PROEL / ogólny: wszystkie chunki z najlepszego dokumentu
-                best_doc_id = best_row["document_id"]
-                best_title = best_row.get("doc_title", "")
-                print(
-                    f"[agent_query] Najlepszy dokument: doc_id={best_doc_id}, "
-                    f"title='{best_title}' (sim={best_sim:.4f})"
+                # 1) dokument 6 (PRIMARY RULES)
+                doc6_rows = [
+                    (sim, r)
+                    for (sim, r) in scored_positive
+                    if r["document_id"] == DEFAULT_RULES_PRIMARY_DOC_ID
+                ]
+                if doc6_rows:
+                    rows_sorted = sorted(
+                        (r for _sim, r in doc6_rows),
+                        key=lambda r: r["chunk_index"],
+                    )
+                    local_count = 0
+                    for r in rows_sorted:
+                        part = f"{r['content']}\n\n---\n\n"
+                        if total_chars + len(part) > max_chars:
+                            break
+                        parts.append(part)
+                        total_chars += len(part)
+                        local_count += 1
+                    print(
+                        f"[agent_query] Tryb 'rules': używam {local_count} fragmentów z dokumentu "
+                        f"{DEFAULT_RULES_PRIMARY_DOC_ID} (PRIMARY RULES)."
+                    )
+                else:
+                    print(
+                        "[agent_query] Tryb 'rules': brak sensownego dopasowania w dokumencie "
+                        f"{DEFAULT_RULES_PRIMARY_DOC_ID}."
+                    )
+
+                # 2) pozostałe dokumenty (bez 4, 15 i bez doc 6)
+                remaining_by_doc: Dict[int, List[Tuple[float, Dict[str, Any]]]] = {}
+                for sim, r in scored_positive:
+                    doc_id = r["document_id"]
+                    if doc_id == DEFAULT_RULES_PRIMARY_DOC_ID:
+                        continue
+                    if doc_id in BAZA_PROEL_DOC_IDS:
+                        continue
+                    remaining_by_doc.setdefault(doc_id, []).append((sim, r))
+
+                # sort dokumenty po maksymalnym similarity (descending)
+                sorted_doc_ids = sorted(
+                    remaining_by_doc.keys(),
+                    key=lambda doc_id: max(
+                        sim for (sim, _r) in remaining_by_doc[doc_id]
+                    ),
+                    reverse=True,
                 )
 
-                # bierzemy WSZYSTKIE chunki z najlepszego dokumentu,
-                # w kolejności chunk_index, aż do limitu znaków.
+                for doc_id in sorted_doc_ids:
+                    rows_sorted = sorted(
+                        (r for _sim, r in remaining_by_doc[doc_id]),
+                        key=lambda r: r["chunk_index"],
+                    )
+                    local_count = 0
+                    for r in rows_sorted:
+                        part = f"{r['content']}\n\n---\n\n"
+                        if total_chars + len(part) > max_chars:
+                            break
+                        parts.append(part)
+                        total_chars += len(part)
+                        local_count += 1
+                    print(
+                        f"[agent_query] Tryb 'rules': dodaję {local_count} fragmentów z dokumentu {doc_id}."
+                    )
+                    if total_chars >= max_chars:
+                        break
+
+                context_text = "".join(parts)
+                print(
+                    f"[agent_query] Tryb 'rules': łączny kontekst {total_chars} znaków "
+                    f"z {len(sorted_doc_ids) + (1 if doc6_rows else 0)} dokumentów."
+                )
+
+        else:
+            # tryb ogólny – jak dawniej: najlepszy dokument po similarity,
+            # ale bez oznaczania nazw dokumentów w treści kontekstu
+            best_sim, best_row = scored[0]
+            if best_sim <= 0:
+                print(
+                    "[agent_query] Tryb 'ogólny': najlepsze similarity <= 0 – brak sensownego dopasowania."
+                )
+            else:
+                best_doc_id = best_row["document_id"]
+                print(
+                    f"[agent_query] Tryb 'ogólny': najlepszy dokument doc_id={best_doc_id} "
+                    f"(sim={best_sim:.4f})."
+                )
+
                 doc_rows: List[Dict[str, Any]] = [
                     r for (_s, r) in scored if r["document_id"] == best_doc_id
                 ]
                 doc_rows.sort(key=lambda r: r["chunk_index"])
 
-                max_chars = 8000  # limit znaków kontekstu
+                max_chars = 8000
                 total_chars = 0
                 context_parts: List[str] = []
 
                 for r in doc_rows:
-                    title = r.get("doc_title") or f"Dokument {r['document_id']}"
-                    part = (
-                        f"[Dokument: {title} | Fragment #{r['chunk_index']}]\n"
-                        f"{r['content']}\n\n---\n\n"
-                    )
+                    part = f"{r['content']}\n\n---\n\n"
                     if total_chars + len(part) > max_chars:
                         break
                     context_parts.append(part)
@@ -368,20 +521,23 @@ async def agent_query(payload: AgentQueryRequest):
 
                 context_text = "".join(context_parts)
                 print(
-                    f"[agent_query] Tryb 'baza/proel/ogólny': używam {len(context_parts)} "
-                    f"fragmentów z dokumentu {best_doc_id} (łącznie {total_chars} znaków)."
+                    f"[agent_query] Tryb 'ogólny': używam {len(context_parts)} fragmentów "
+                    f"z dokumentu {best_doc_id} (łącznie {total_chars} znaków)."
                 )
 
     if context_text:
         print("[agent_query] KONTEKST (początek):")
         print(context_text[:2000])
     else:
-        print("[agent_query] Brak kontekstu – żadnych fragmentów do użycia")
+        print(
+            "[agent_query] Brak kontekstu – odpowiedź musi być oparta wyłącznie na pytaniu "
+            "użytkownika (bez zgadywania)."
+        )
 
-    # 5) System prompt – zależny od trybu
+    # 6) System prompt – zależny od trybu (z mocnym zakazem ściemniania)
     system_prompt = build_system_prompt(payload.mode)
 
-    # 6) budujemy wiadomości dla Groqa
+    # 7) budujemy wiadomości dla Groqa
     groq_messages: List[dict] = [{"role": "system", "content": system_prompt}]
 
     if context_text:
@@ -391,8 +547,9 @@ async def agent_query(payload: AgentQueryRequest):
                 "content": (
                     "Poniżej masz ukryte dla użytkownika dodatkowe informacje "
                     "źródłowe. Użyj ich, aby udzielić jak najlepszej odpowiedzi, "
-                    "ale nie wspominaj w żaden sposób, że korzystasz z takich "
-                    "materiałów ani że istnieje jakiś „kontekst”:\n\n"
+                    "ale NIE wspominaj, że korzystasz z jakichkolwiek dokumentów "
+                    "czy kontekstu. Pamiętaj: jeśli czegoś w tych źródłach nie ma, "
+                    "masz powiedzieć, że tego nie wiesz, zamiast zgadywać:\n\n"
                     f"{context_text}"
                 ),
             }
