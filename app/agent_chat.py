@@ -43,9 +43,9 @@ class AgentQueryRequest(BaseModel):
     messages: List[ChatMessage]
     model: Optional[str] = "llama-3.1-8b-instant"
     temperature: float = 0.2
-    # zwiększamy domyślny limit odpowiedzi
+    # limit długości odpowiedzi
     max_tokens: int = 2048
-    # to pole zostaje tylko pomocniczo, ale zostawiamy
+    # pomocniczo – ile maksymalnie chunków chcemy użyć w kontekście
     max_context_chunks: int = 32
     # TRYB pracy Bazylego – BAZA / ProEl / przepisy
     mode: Optional[AgentMode] = None
@@ -132,7 +132,8 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
             "Jesteś ekspertem od działania aplikacji BAZA, jej konfiguracji, "
             "integracji (np. z systemem ZPRP) oraz typowych problemów użytkowników.\n"
             "Myśl jak asystent w aplikacji BAZA: gdy użytkownik pyta „jak coś zrobić”, "
-            "opisz dokładnie, co i gdzie kliknąć, jakie menu wybrać, jakie opcje zaznaczyć.\n"
+            "opisz dokładnie, co i gdzie kliknąć, jakie menu wybrać, jakie opcje zaznaczyć, "
+            "ale TYLKO jeśli masz te informacje w źródłach.\n"
             "Jeśli pytanie wyraźnie dotyczy systemu ProEl lub przepisów gry w piłkę ręczną, "
             "napisz uprzejmie, że w trybie BAZA nie masz informacji na ten temat i że "
             "taki temat powinien być obsłużony w odpowiednim trybie (ProEl / przepisy).\n"
@@ -228,48 +229,49 @@ def build_context_for_single_document(
     scored: List[Tuple[float, Dict[str, Any]]],
     target_doc_id: int,
     max_chars: int = 8000,
+    max_chunks: int = 32,
     log_prefix: str = "",
 ) -> str:
     """
     Buduje kontekst wyłącznie z jednego dokumentu (po document_id),
-    zachowując kolejność chunków po chunk_index i pilnując limitu znaków.
-    Zwraca pusty string, jeśli brak sensownego dopasowania (best_sim <= 0
-    lub brak chunków dla danego document_id).
+    wybierając NAJBARDZIEJ PODOBNE chunki (po similarity),
+    aż do limitu znaków oraz liczby chunków.
+    Zwraca pusty string, jeśli brak sensownego dopasowania
+    (brak chunków z sim > 0).
     """
     doc_rows: List[Tuple[float, Dict[str, Any]]] = [
-        (sim, r) for (sim, r) in scored if r["document_id"] == target_doc_id
+        (sim, r)
+        for (sim, r) in scored
+        if r["document_id"] == target_doc_id and sim > 0
     ]
 
     if not doc_rows:
         print(
-            f"[agent_query] {log_prefix} Brak chunków dla dokumentu {target_doc_id}"
+            f"[agent_query] {log_prefix} Brak sensownych chunków (sim>0) dla dokumentu {target_doc_id}"
         )
         return ""
 
-    best_sim = max(sim for sim, _ in doc_rows)
-    if best_sim <= 0:
-        print(
-            f"[agent_query] {log_prefix} Najlepsze similarity <= 0 dla dokumentu {target_doc_id}"
-        )
-        return ""
-
-    rows_sorted = sorted(
-        (r for _sim, r in doc_rows),
-        key=lambda r: r["chunk_index"],
-    )
+    # sortujemy po similarity malejąco – chcemy najpierw najbardziej trafne fragmenty
+    doc_rows.sort(key=lambda x: x[0], reverse=True)
 
     total_chars = 0
     parts: List[str] = []
+    chunks_used = 0
 
-    for r in rows_sorted:
+    best_sim = doc_rows[0][0]
+
+    for sim, r in doc_rows:
+        if chunks_used >= max_chunks:
+            break
         part = f"{r['content']}\n\n---\n\n"
         if total_chars + len(part) > max_chars:
             break
         parts.append(part)
         total_chars += len(part)
+        chunks_used += 1
 
     print(
-        f"[agent_query] {log_prefix} Używam {len(parts)} fragmentów z dokumentu {target_doc_id} "
+        f"[agent_query] {log_prefix} Używam {chunks_used} fragmentów z dokumentu {target_doc_id} "
         f"(łącznie {total_chars} znaków, best_sim={best_sim:.4f})."
     )
 
@@ -353,6 +355,8 @@ async def agent_query(payload: AgentQueryRequest):
 
     # 5) budowanie kontekstu wg trybu i priorytetów document_id
     context_text = ""
+    max_context_chunks = payload.max_context_chunks or 32
+
     if not scored:
         print("[agent_query] Brak wyników po scoringu – brak kontekstu")
     else:
@@ -362,6 +366,7 @@ async def agent_query(payload: AgentQueryRequest):
                 scored,
                 DEFAULT_BAZA_PRIMARY_DOC_ID,
                 max_chars=8000,
+                max_chunks=max_context_chunks,
                 log_prefix="Tryb 'baza' (PRIMARY)",
             )
             if not context_text:
@@ -369,6 +374,7 @@ async def agent_query(payload: AgentQueryRequest):
                     scored,
                     DEFAULT_BAZA_SECONDARY_DOC_ID,
                     max_chars=8000,
+                    max_chunks=max_context_chunks,
                     log_prefix="Tryb 'baza' (SECONDARY)",
                 )
             if not context_text:
@@ -383,6 +389,7 @@ async def agent_query(payload: AgentQueryRequest):
                 scored,
                 DEFAULT_PROEL_PRIMARY_DOC_ID,
                 max_chars=8000,
+                max_chunks=max_context_chunks,
                 log_prefix="Tryb 'proel' (PRIMARY)",
             )
             if not context_text:
@@ -390,6 +397,7 @@ async def agent_query(payload: AgentQueryRequest):
                     scored,
                     DEFAULT_PROEL_SECONDARY_DOC_ID,
                     max_chars=8000,
+                    max_chunks=max_context_chunks,
                     log_prefix="Tryb 'proel' (SECONDARY)",
                 )
             if not context_text:
@@ -415,27 +423,26 @@ async def agent_query(payload: AgentQueryRequest):
                     "[agent_query] Tryb 'rules': wszystkie similarity <= 0 – brak sensownego kontekstu."
                 )
             else:
-                # 1) dokument 6 (PRIMARY RULES)
+                # 1) dokument 6 (PRIMARY RULES) – bierzemy najbardziej podobne chunki
                 doc6_rows = [
                     (sim, r)
                     for (sim, r) in scored_positive
                     if r["document_id"] == DEFAULT_RULES_PRIMARY_DOC_ID
                 ]
+                local_chunks_used = 0
                 if doc6_rows:
-                    rows_sorted = sorted(
-                        (r for _sim, r in doc6_rows),
-                        key=lambda r: r["chunk_index"],
-                    )
-                    local_count = 0
-                    for r in rows_sorted:
+                    doc6_rows.sort(key=lambda x: x[0], reverse=True)
+                    for sim, r in doc6_rows:
+                        if local_chunks_used >= max_context_chunks:
+                            break
                         part = f"{r['content']}\n\n---\n\n"
                         if total_chars + len(part) > max_chars:
                             break
                         parts.append(part)
                         total_chars += len(part)
-                        local_count += 1
+                        local_chunks_used += 1
                     print(
-                        f"[agent_query] Tryb 'rules': używam {local_count} fragmentów z dokumentu "
+                        f"[agent_query] Tryb 'rules': używam {local_chunks_used} fragmentów z dokumentu "
                         f"{DEFAULT_RULES_PRIMARY_DOC_ID} (PRIMARY RULES)."
                     )
                 else:
@@ -464,33 +471,33 @@ async def agent_query(payload: AgentQueryRequest):
                 )
 
                 for doc_id in sorted_doc_ids:
-                    rows_sorted = sorted(
-                        (r for _sim, r in remaining_by_doc[doc_id]),
-                        key=lambda r: r["chunk_index"],
-                    )
+                    doc_rows = remaining_by_doc[doc_id]
+                    doc_rows.sort(key=lambda x: x[0], reverse=True)
                     local_count = 0
-                    for r in rows_sorted:
+                    for sim, r in doc_rows:
+                        if local_chunks_used >= max_context_chunks:
+                            break
                         part = f"{r['content']}\n\n---\n\n"
                         if total_chars + len(part) > max_chars:
                             break
                         parts.append(part)
                         total_chars += len(part)
+                        local_chunks_used += 1
                         local_count += 1
                     print(
                         f"[agent_query] Tryb 'rules': dodaję {local_count} fragmentów z dokumentu {doc_id}."
                     )
-                    if total_chars >= max_chars:
+                    if total_chars >= max_chars or local_chunks_used >= max_context_chunks:
                         break
 
                 context_text = "".join(parts)
                 print(
-                    f"[agent_query] Tryb 'rules': łączny kontekst {total_chars} znaków "
-                    f"z {len(sorted_doc_ids) + (1 if doc6_rows else 0)} dokumentów."
+                    f"[agent_query] Tryb 'rules': łączny kontekst {total_chars} znaków."
                 )
 
         else:
-            # tryb ogólny – jak dawniej: najlepszy dokument po similarity,
-            # ale bez oznaczania nazw dokumentów w treści kontekstu
+            # tryb ogólny – najlepszy dokument po similarity,
+            # ale wybieramy NAJBARDZIEJ PODOBNE chunki z tego dokumentu
             best_sim, best_row = scored[0]
             if best_sim <= 0:
                 print(
@@ -503,26 +510,12 @@ async def agent_query(payload: AgentQueryRequest):
                     f"(sim={best_sim:.4f})."
                 )
 
-                doc_rows: List[Dict[str, Any]] = [
-                    r for (_s, r) in scored if r["document_id"] == best_doc_id
-                ]
-                doc_rows.sort(key=lambda r: r["chunk_index"])
-
-                max_chars = 8000
-                total_chars = 0
-                context_parts: List[str] = []
-
-                for r in doc_rows:
-                    part = f"{r['content']}\n\n---\n\n"
-                    if total_chars + len(part) > max_chars:
-                        break
-                    context_parts.append(part)
-                    total_chars += len(part)
-
-                context_text = "".join(context_parts)
-                print(
-                    f"[agent_query] Tryb 'ogólny': używam {len(context_parts)} fragmentów "
-                    f"z dokumentu {best_doc_id} (łącznie {total_chars} znaków)."
+                context_text = build_context_for_single_document(
+                    scored,
+                    best_doc_id,
+                    max_chars=8000,
+                    max_chunks=max_context_chunks,
+                    log_prefix="Tryb 'ogólny'",
                 )
 
     if context_text:
