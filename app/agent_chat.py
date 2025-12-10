@@ -38,6 +38,12 @@ BAZA_PROEL_DOC_IDS = {
     DEFAULT_PROEL_PRIMARY_DOC_ID,
 }
 
+# Minimalne similarity, poniżej którego uznajemy, że dopasowania są bez sensu
+MIN_SIMILARITY_BAZA = 0.25
+MIN_SIMILARITY_PROEL = 0.25
+MIN_SIMILARITY_RULES = 0.20
+MIN_SIMILARITY_GENERAL = 0.20
+
 
 class AgentQueryRequest(BaseModel):
     messages: List[ChatMessage]
@@ -225,44 +231,60 @@ def build_mode_filtered_query(mode: Optional[AgentMode]):
     return base_query
 
 
+def detect_topic_from_question(text: str) -> Optional[AgentMode]:
+    """
+    Bardzo proste heurystyczne wykrywanie, czy pytanie dotyczy
+    bardziej BAZA czy ProEl. Możesz później rozbudować listę słów kluczowych.
+    """
+    t = text.lower()
+
+    if "proel" in t or "pro el" in t:
+        return "proel"
+    if "baza" in t or "aplikacja baza" in t:
+        return "baza"
+
+    # dla przepisów zostawiamy decyzję modelowi w trybie 'rules'
+    return None
+
+
 def build_context_for_single_document(
     scored: List[Tuple[float, Dict[str, Any]]],
     target_doc_id: int,
     max_chars: int = 8000,
     max_chunks: int = 32,
+    min_sim: float = 0.0,
     log_prefix: str = "",
 ) -> str:
     """
     Buduje kontekst wyłącznie z jednego dokumentu (po document_id),
-    wybierając NAJBARDZIEJ PODOBNE chunki (po similarity),
+    wybierając NAJBARDZIEJ PODOBNE chunki (po similarity >= min_sim),
     aż do limitu znaków oraz liczby chunków.
-    Zwraca pusty string, jeśli brak sensownego dopasowania
-    (brak chunków z sim > 0).
+    Zwraca pusty string, jeśli brak sensownego dopasowania.
     """
     doc_rows: List[Tuple[float, Dict[str, Any]]] = [
         (sim, r)
         for (sim, r) in scored
-        if r["document_id"] == target_doc_id and sim > 0
+        if r["document_id"] == target_doc_id and sim >= min_sim
     ]
 
     if not doc_rows:
         print(
-            f"[agent_query] {log_prefix} Brak sensownych chunków (sim>0) dla dokumentu {target_doc_id}"
+            f"[agent_query] {log_prefix} Brak sensownych chunków (sim>={min_sim}) dla dokumentu {target_doc_id}"
         )
         return ""
 
-    # sortujemy po similarity malejąco – chcemy najpierw najbardziej trafne fragmenty
+    # sortujemy po similarity malejąco, wybieramy top N, a potem układamy po chunk_index
     doc_rows.sort(key=lambda x: x[0], reverse=True)
+    top_rows = doc_rows[:max_chunks]
+    best_sim = top_rows[0][0]
+
+    top_rows.sort(key=lambda x: x[1]["chunk_index"])
 
     total_chars = 0
     parts: List[str] = []
     chunks_used = 0
 
-    best_sim = doc_rows[0][0]
-
-    for sim, r in doc_rows:
-        if chunks_used >= max_chunks:
-            break
+    for sim, r in top_rows:
         part = f"{r['content']}\n\n---\n\n"
         if total_chars + len(part) > max_chars:
             break
@@ -294,6 +316,68 @@ async def agent_query(payload: AgentQueryRequest):
     print("[agent_query] Tryb:", payload.mode or "brak / ogólny")
     print("[agent_query] Ostatnia wiadomość usera:", last_user_msg.content)
 
+    # temperatura – twardy limit 0.2 (żeby nie fantazjował)
+    effective_temperature = min(payload.temperature, 0.2)
+
+    # Detekcja tematu pytania (BAZA / ProEl) niezależnie od wybranego trybu
+    detected_topic = detect_topic_from_question(last_user_msg.content)
+    topic_mismatch = False
+
+    if payload.mode in ("baza", "proel", "rules") and detected_topic is not None:
+        # jeśli pytanie wygląda na ProEl, a tryb nie jest 'proel' → rozjazd
+        if detected_topic == "proel" and payload.mode != "proel":
+            topic_mismatch = True
+        # jeśli pytanie wygląda na BAZA, a tryb nie jest 'baza' → rozjazd
+        if detected_topic == "baza" and payload.mode != "baza":
+            topic_mismatch = True
+
+    # Jeśli jest rozjazd temat ↔ tryb – robimy grzeczny redirect, bez retrieval
+    if topic_mismatch:
+        system_prompt = build_system_prompt(payload.mode)
+
+        if detected_topic == "proel":
+            redirect_instr = (
+                "Pytanie użytkownika dotyczy systemu ProEl (np. prowadzenia meczu, "
+                "obsługi protokołu itp.), ale bieżący tryb NIE jest trybem ProEl. "
+                "Twoje zadanie: odpowiedzieć JEDNYM krótkim akapitem, że szczegółowe "
+                "informacje o obsłudze ProEl dostępne są tylko w trybie ProEl i że "
+                "w tym trybie nie masz do nich dostępu. NIE opisuj żadnych kroków, "
+                "nie podawaj szczegółów, nie próbuj zgadywać."
+            )
+        elif detected_topic == "baza":
+            redirect_instr = (
+                "Pytanie użytkownika dotyczy aplikacji BAZA, ale bieżący tryb NIE jest "
+                "trybem BAZA. Twoje zadanie: odpowiedzieć JEDNYM krótkim akapitem, że "
+                "szczegółowe informacje o aplikacji BAZA dostępne są tylko w trybie BAZA "
+                "i że w tym trybie nie masz do nich dostępu. NIE opisuj żadnych kroków, "
+                "nie podawaj szczegółów, nie próbuj zgadywać."
+            )
+        else:
+            redirect_instr = (
+                "Pytanie dotyczy innego trybu niż bieżący. Masz jedynie poprosić o zmianę "
+                "trybu, bez wchodzenia w szczegóły merytoryczne."
+            )
+
+        groq_messages: List[dict] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": redirect_instr},
+        ]
+        for m in payload.messages:
+            if m.role in ("user", "assistant"):
+                groq_messages.append({"role": m.role, "content": m.content})
+
+        reply = await groq_chat_completion(
+            messages=groq_messages,
+            model=payload.model or "llama-3.1-8b-instant",
+            temperature=effective_temperature,
+            max_tokens=payload.max_tokens or 2048,
+        )
+        print(
+            "[agent_query] Odpowiedź z Groqa (redirect między trybami, początek):",
+            reply[:500],
+        )
+        return AgentQueryResponse(reply=reply)
+
     # 1) embedding zapytania
     query_vec = await embed_query(last_user_msg.content)
     print("[agent_query] Długość wektora zapytania:", len(query_vec))
@@ -322,8 +406,8 @@ async def agent_query(payload: AgentQueryRequest):
         reply = await groq_chat_completion(
             messages=groq_messages,
             model=payload.model or "llama-3.1-8b-instant",
-            temperature=payload.temperature,
-            max_tokens=payload.max_tokens,
+            temperature=effective_temperature,
+            max_tokens=payload.max_tokens or 2048,
         )
         return AgentQueryResponse(reply=reply)
 
@@ -367,6 +451,7 @@ async def agent_query(payload: AgentQueryRequest):
                 DEFAULT_BAZA_PRIMARY_DOC_ID,
                 max_chars=8000,
                 max_chunks=max_context_chunks,
+                min_sim=MIN_SIMILARITY_BAZA,
                 log_prefix="Tryb 'baza' (PRIMARY)",
             )
             if not context_text:
@@ -375,6 +460,7 @@ async def agent_query(payload: AgentQueryRequest):
                     DEFAULT_BAZA_SECONDARY_DOC_ID,
                     max_chars=8000,
                     max_chunks=max_context_chunks,
+                    min_sim=MIN_SIMILARITY_BAZA,
                     log_prefix="Tryb 'baza' (SECONDARY)",
                 )
             if not context_text:
@@ -390,6 +476,7 @@ async def agent_query(payload: AgentQueryRequest):
                 DEFAULT_PROEL_PRIMARY_DOC_ID,
                 max_chars=8000,
                 max_chunks=max_context_chunks,
+                min_sim=MIN_SIMILARITY_PROEL,
                 log_prefix="Tryb 'proel' (PRIMARY)",
             )
             if not context_text:
@@ -398,6 +485,7 @@ async def agent_query(payload: AgentQueryRequest):
                     DEFAULT_PROEL_SECONDARY_DOC_ID,
                     max_chars=8000,
                     max_chunks=max_context_chunks,
+                    min_sim=MIN_SIMILARITY_PROEL,
                     log_prefix="Tryb 'proel' (SECONDARY)",
                 )
             if not context_text:
@@ -415,12 +503,13 @@ async def agent_query(payload: AgentQueryRequest):
 
             # tylko sensowne dopasowania
             scored_positive: List[Tuple[float, Dict[str, Any]]] = [
-                (sim, r) for (sim, r) in scored if sim > 0
+                (sim, r) for (sim, r) in scored if sim >= MIN_SIMILARITY_RULES
             ]
 
             if not scored_positive:
                 print(
-                    "[agent_query] Tryb 'rules': wszystkie similarity <= 0 – brak sensownego kontekstu."
+                    "[agent_query] Tryb 'rules': wszystkie similarity < MIN_SIMILARITY_RULES "
+                    "– brak sensownego kontekstu."
                 )
             else:
                 # 1) dokument 6 (PRIMARY RULES) – bierzemy najbardziej podobne chunki
@@ -499,9 +588,10 @@ async def agent_query(payload: AgentQueryRequest):
             # tryb ogólny – najlepszy dokument po similarity,
             # ale wybieramy NAJBARDZIEJ PODOBNE chunki z tego dokumentu
             best_sim, best_row = scored[0]
-            if best_sim <= 0:
+            if best_sim < MIN_SIMILARITY_GENERAL:
                 print(
-                    "[agent_query] Tryb 'ogólny': najlepsze similarity <= 0 – brak sensownego dopasowania."
+                    "[agent_query] Tryb 'ogólny': najlepsze similarity < MIN_SIMILARITY_GENERAL "
+                    "– brak sensownego dopasowania."
                 )
             else:
                 best_doc_id = best_row["document_id"]
@@ -515,6 +605,7 @@ async def agent_query(payload: AgentQueryRequest):
                     best_doc_id,
                     max_chars=8000,
                     max_chunks=max_context_chunks,
+                    min_sim=MIN_SIMILARITY_GENERAL,
                     log_prefix="Tryb 'ogólny'",
                 )
 
@@ -558,7 +649,7 @@ async def agent_query(payload: AgentQueryRequest):
     reply = await groq_chat_completion(
         messages=groq_messages,
         model=payload.model or "llama-3.1-8b-instant",
-        temperature=payload.temperature,
+        temperature=effective_temperature,
         max_tokens=payload.max_tokens or 2048,
     )
 
