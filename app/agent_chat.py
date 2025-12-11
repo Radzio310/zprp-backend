@@ -19,7 +19,7 @@ class ChatMessage(BaseModel):
 # TRYBY:
 # - "baza": pytania o aplikację BAZA
 # - "proel": pytania o system ProEl
-# - "rules": pytania o przepisy piłki ręcznej
+# - "rules": pytania o przepisy piłki ręcznej + regulaminy lig
 AgentMode = Literal["baza", "proel", "rules"]
 
 
@@ -30,9 +30,9 @@ DEFAULT_BAZA_SECONDARY_DOC_ID = 4
 DEFAULT_PROEL_PRIMARY_DOC_ID = 4
 DEFAULT_PROEL_SECONDARY_DOC_ID = 15
 
-DEFAULT_RULES_PRIMARY_DOC_ID = 6
+DEFAULT_RULES_PRIMARY_DOC_ID = 6  # główny dokument przepisów gry
 
-# Dokumenty, które są „bazowe” dla BAZA/ProEl – wykluczane z trybu przepisów
+# Dokumenty, które są „bazowe” dla BAZA/ProEl – wykluczane z trybu przepisów/regulaminów
 BAZA_PROEL_DOC_IDS = {
     DEFAULT_BAZA_PRIMARY_DOC_ID,
     DEFAULT_PROEL_PRIMARY_DOC_ID,
@@ -95,7 +95,7 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
     base = (
         "Jesteś asystentem Bazyli – praktycznym ekspertem pomagającym sędziom "
         "i działaczom w pracy z aplikacją BAZA, systemem ProEl oraz przepisami "
-        "piłki ręcznej.\n\n"
+        "i regulaminami piłki ręcznej.\n\n"
         "Podstawowe zasady, których MUSISZ bezwzględnie przestrzegać:\n"
         "1. Możesz korzystać TYLKO z informacji, które pojawiają się w tej "
         "konkretnej rozmowie (pytania/odpowiedzi) oraz z dodatkowych ukrytych "
@@ -106,15 +106,15 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
         "nie uzupełniaj luk wyobraźnią.\n"
         "3. Jeżeli nie masz wystarczających danych, aby odpowiedzieć pewnie, "
         "powiedz wprost, że na podstawie dostępnych informacji nie możesz "
-        "udzielić jednoznacznej odpowiedzi. Możesz zaproponować doprecyzowanie "
-        "pytania, ale NIE wolno Ci wymyślać szczegółów.\n"
+        "udzielić jednoznacznej odpowiedzi. Możesz poprosić użytkownika o "
+        "doprecyzowanie (np. poziomu rozgrywek), ale NIE wolno Ci wymyślać szczegółów.\n"
         "4. Nigdy nie wspominaj o dokumentach, PDF-ach, plikach, załącznikach, "
         "kontekście, embeddingach ani o „fragmentach dokumentów”. Użytkownik "
         "nie powinien wiedzieć, że korzystasz z takich materiałów.\n"
         "5. Nigdy nie odsyłaj użytkownika do dokumentów i nie pisz w stylu "
         "„szczegóły znajdziesz w dokumencie…”. Zamiast tego sam streść wszystkie "
         "potrzebne informacje i wypisz je w odpowiedzi.\n"
-        "6. Jeśli pytanie dotyczy przepisów, założeń, zasad lub list punktów, "
+        "6. Jeśli pytanie dotyczy przepisów, regulaminów, założeń, zasad lub list punktów, "
         "to wypisz WSZYSTKIE istotne punkty, limity, wyjątki i warunki, które "
         "występują w dostępnych źródłach – nawet jeśli odpowiedź będzie długa.\n"
         "7. Nie próbuj „ulepszać” odpowiedzi dodawaniem niepewnych szczegółów. "
@@ -123,8 +123,8 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
         "8. Odpowiadaj jak praktyczny ekspert systemu (BAZA / ProEl / przepisy), "
         "który tłumaczy dokładnie co zrobić: krok po kroku, z nazwami zakładek, "
         "przycisków i typowymi pułapkami – jeśli takie informacje masz.\n"
-        "9. Możesz używać sformułowań typu „zgodnie z przepisami gry”, "
-        "„regulamin przewiduje, że…”, ale nie pisz nigdy, że „w dokumencie X "
+        "9. Możesz używać sformułowań typu „zgodnie z przepisami gry” lub "
+        "„regulamin rozgrywek przewiduje, że…”, ale nie pisz nigdy, że „w dokumencie X "
         "na stronie Y jest napisane…”.\n"
         "10. Odpowiadasz po polsku, chyba że użytkownik wyraźnie poprosi o inny język.\n"
         "11. Jeżeli w danym trybie (BAZA / ProEl / przepisy) nie masz żadnych "
@@ -140,7 +140,7 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
             "Myśl jak asystent w aplikacji BAZA: gdy użytkownik pyta „jak coś zrobić”, "
             "opisz dokładnie, co i gdzie kliknąć, jakie menu wybrać, jakie opcje zaznaczyć, "
             "ale TYLKO jeśli masz te informacje w źródłach.\n"
-            "Jeśli pytanie wyraźnie dotyczy systemu ProEl lub przepisów gry w piłkę ręczną, "
+            "Jeśli pytanie wyraźnie dotyczy systemu ProEl lub przepisów/regulaminów gry, "
             "napisz uprzejmie, że w trybie BAZA nie masz informacji na ten temat i że "
             "taki temat powinien być obsłużony w odpowiednim trybie (ProEl / przepisy).\n"
         )
@@ -152,18 +152,22 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
             "Odpowiadaj tak, jakbyś znał interfejs ProEl „na pamięć”: krok po kroku, "
             "z nazwami modułów, ekranów i typowymi scenariuszami użycia – ale tylko tam, "
             "gdzie masz konkretne informacje w źródłach.\n"
-            "Jeśli pytanie wyraźnie dotyczy aplikacji BAZA lub przepisów gry w piłkę ręczną, "
+            "Jeśli pytanie wyraźnie dotyczy aplikacji BAZA lub przepisów/regulaminów gry, "
             "napisz, że w trybie ProEl nie masz informacji na ten temat i że ten temat "
             "powinien być obsłużony w odpowiednim trybie (BAZA / przepisy).\n"
         )
     elif mode == "rules":
         mode_part = (
-            "TRYB: Przepisy piłki ręcznej.\n"
-            "Jesteś ekspertem od przepisów piłki ręcznej oraz ich praktycznej "
-            "interpretacji z perspektywy sędziego.\n"
-            "Wykorzystuj szeroki kontekst z wielu źródeł naraz, łącząc informacje "
-            "z różnych miejsc regulaminów i wytycznych, ale TYLKO tam, gdzie "
-            "masz konkretne dane w źródłach.\n"
+            "TRYB: Przepisy i regulaminy piłki ręcznej.\n"
+            "Jesteś ekspertem od przepisów gry w piłkę ręczną oraz regulaminów "
+            "i wytycznych rozgrywek (np. I liga, II liga, Liga Centralna, Puchar Polski).\n"
+            "Najpierw szukaj odpowiedzi w ogólnych przepisach gry. Jeżeli tam nie ma "
+            "odpowiedzi, możesz korzystać z regulaminów konkretnych rozgrywek i wytycznych, "
+            "ale TYLKO tam, gdzie masz konkretne dane w źródłach.\n"
+            "Jeśli pytanie dotyczy rozgrywek (np. spadków/awansów, zasad marketingowych) "
+            "i na podstawie pytania NIE da się jednoznacznie ustalić, o który poziom "
+            "rozgrywkowy chodzi (I liga, II liga, Liga Centralna, Puchar Polski), "
+            "poproś użytkownika o doprecyzowanie poziomu rozgrywek, zamiast zgadywać.\n"
             "Jeśli pytanie dotyczy działania aplikacji BAZA lub systemu ProEl, "
             "napisz, że w trybie przepisów nie masz informacji na ten temat i że "
             "taki temat powinien być obsłużony w odpowiednim trybie aplikacji/systemu.\n"
@@ -172,9 +176,9 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
         mode_part = (
             "TRYB: Ogólny.\n"
             "Na podstawie treści pytania staraj się rozpoznać, czy chodzi bardziej o "
-            "aplikację BAZA, system ProEl, czy przepisy piłki ręcznej, i odpowiadaj "
-            "jak ekspert w tej dziedzinie. Jeżeli nie masz źródeł dla danego obszaru, "
-            "powiedz wprost, że nie masz danych, zamiast zgadywać.\n"
+            "aplikację BAZA, system ProEl, czy przepisy/regulaminy piłki ręcznej, "
+            "i odpowiadaj jak ekspert w tej dziedzinie. Jeżeli nie masz źródeł dla "
+            "danego obszaru, powiedz wprost, że nie masz danych, zamiast zgadywać.\n"
         )
 
     return base + mode_part
@@ -245,6 +249,66 @@ def detect_topic_from_question(text: str) -> Optional[AgentMode]:
 
     # dla przepisów zostawiamy decyzję modelowi w trybie 'rules'
     return None
+
+
+def detect_league_hint(text: str) -> Optional[str]:
+    """
+    Wykrywa, czy w pytaniu jest wprost wskazany poziom rozgrywek:
+    I liga, II liga, Liga Centralna, Puchar Polski.
+    Zwraca symboliczne oznaczenie albo None.
+    """
+    t = text.lower()
+
+    if "liga centralna" in t or "centralna liga" in t:
+        return "liga_centralna"
+    if "puchar polski" in t:
+        return "puchar_polski"
+    if "i liga" in t or "1 liga" in t or "pierwsza liga" in t:
+        return "i_liga"
+    if "ii liga" in t or "2 liga" in t or "druga liga" in t:
+        return "ii_liga"
+
+    return None
+
+
+def is_additional_regulations_question(text: str) -> bool:
+    """
+    Próbuje wykryć, czy pytanie dotyczy raczej dodatkowych regulaminów/wytycznych
+    konkretnych lig (I, II, Liga Centralna, Puchar Polski), niż ogólnych przepisów gry.
+    """
+    t = text.lower()
+
+    base_keywords = [
+        "regulamin",
+        "regulaminy",
+        "wytyczne",
+        "marketingowe",
+        "marketing",
+        "zasady ligi",
+        "zapisy ligi",
+        "warunki rozgrywek",
+        "organizacja rozgrywek",
+    ]
+    if any(k in t for k in base_keywords):
+        return True
+
+    # Pytanie o ligę nawet bez słowa „regulamin”
+    if "liga" in t and any(
+        x in t
+        for x in [
+            "centralna",
+            "i liga",
+            "1 liga",
+            "ii liga",
+            "2 liga",
+        ]
+    ):
+        return True
+
+    if "puchar polski" in t:
+        return True
+
+    return False
 
 
 def build_context_for_single_document(
@@ -440,6 +504,7 @@ async def agent_query(payload: AgentQueryRequest):
     # 5) budowanie kontekstu wg trybu i priorytetów document_id
     context_text = ""
     max_context_chunks = payload.max_context_chunks or 32
+    needs_league_clarification = False  # dla trybu 'rules'
 
     if not scored:
         print("[agent_query] Brak wyników po scoringu – brak kontekstu")
@@ -495,94 +560,96 @@ async def agent_query(payload: AgentQueryRequest):
                 )
 
         elif payload.mode == "rules":
-            # najpierw dokument 6, potem wszystkie pozostałe (bez 4 i 15),
-            # z szerokim kontekstem z wielu dokumentów
-            max_chars = 8000
-            total_chars = 0
-            parts: List[str] = []
+            # Najpierw PRÓBA w głównych przepisach gry (doc_id = 6)
+            rules_context = build_context_for_single_document(
+                scored,
+                DEFAULT_RULES_PRIMARY_DOC_ID,
+                max_chars=8000,
+                max_chunks=max_context_chunks,
+                min_sim=MIN_SIMILARITY_RULES,
+                log_prefix="Tryb 'rules' (PRIMARY RULES)",
+            )
 
-            # tylko sensowne dopasowania
-            scored_positive: List[Tuple[float, Dict[str, Any]]] = [
-                (sim, r) for (sim, r) in scored if sim >= MIN_SIMILARITY_RULES
-            ]
-
-            if not scored_positive:
-                print(
-                    "[agent_query] Tryb 'rules': wszystkie similarity < MIN_SIMILARITY_RULES "
-                    "– brak sensownego kontekstu."
-                )
+            if rules_context:
+                # jeśli przepisy gry coś mówią – korzystamy w pierwszej kolejności
+                context_text = rules_context
             else:
-                # 1) dokument 6 (PRIMARY RULES) – bierzemy najbardziej podobne chunki
-                doc6_rows = [
-                    (sim, r)
-                    for (sim, r) in scored_positive
-                    if r["document_id"] == DEFAULT_RULES_PRIMARY_DOC_ID
-                ]
-                local_chunks_used = 0
-                if doc6_rows:
-                    doc6_rows.sort(key=lambda x: x[0], reverse=True)
-                    for sim, r in doc6_rows:
-                        if local_chunks_used >= max_context_chunks:
-                            break
-                        part = f"{r['content']}\n\n---\n\n"
-                        if total_chars + len(part) > max_chars:
-                            break
-                        parts.append(part)
-                        total_chars += len(part)
-                        local_chunks_used += 1
+                # brak sensownego dopasowania w przepisach gry → może chodzi o
+                # regulaminy lig / wytyczne dodatkowe
+                question_text = last_user_msg.content
+                league_hint = detect_league_hint(question_text)
+                is_reg_q = is_additional_regulations_question(question_text)
+
+                if is_reg_q and league_hint is None:
+                    # wiemy, że pytanie jest o regulaminy/wytyczne ligowe,
+                    # ale nie wiemy, o który poziom (I/II/LC/PP) – trzeba dopytać
+                    needs_league_clarification = True
                     print(
-                        f"[agent_query] Tryb 'rules': używam {local_chunks_used} fragmentów z dokumentu "
-                        f"{DEFAULT_RULES_PRIMARY_DOC_ID} (PRIMARY RULES)."
+                        "[agent_query] Tryb 'rules': pytanie o regulamin/wytyczne ligowe, "
+                        "ale brak jednoznacznego poziomu rozgrywek – prosimy o doprecyzowanie."
                     )
                 else:
-                    print(
-                        "[agent_query] Tryb 'rules': brak sensownego dopasowania w dokumencie "
-                        f"{DEFAULT_RULES_PRIMARY_DOC_ID}."
-                    )
+                    # możemy budować szeroki kontekst z pozostałych dokumentów
+                    max_chars = 8000
+                    total_chars = 0
+                    parts: List[str] = []
 
-                # 2) pozostałe dokumenty (bez 4, 15 i bez doc 6)
-                remaining_by_doc: Dict[int, List[Tuple[float, Dict[str, Any]]]] = {}
-                for sim, r in scored_positive:
-                    doc_id = r["document_id"]
-                    if doc_id == DEFAULT_RULES_PRIMARY_DOC_ID:
-                        continue
-                    if doc_id in BAZA_PROEL_DOC_IDS:
-                        continue
-                    remaining_by_doc.setdefault(doc_id, []).append((sim, r))
+                    # tylko sensowne dopasowania spoza dokumentu z przepisami
+                    scored_positive: List[Tuple[float, Dict[str, Any]]] = [
+                        (sim, r)
+                        for (sim, r) in scored
+                        if sim >= MIN_SIMILARITY_RULES
+                        and r["document_id"] != DEFAULT_RULES_PRIMARY_DOC_ID
+                    ]
 
-                # sort dokumenty po maksymalnym similarity (descending)
-                sorted_doc_ids = sorted(
-                    remaining_by_doc.keys(),
-                    key=lambda doc_id: max(
-                        sim for (sim, _r) in remaining_by_doc[doc_id]
-                    ),
-                    reverse=True,
-                )
+                    if not scored_positive:
+                        print(
+                            "[agent_query] Tryb 'rules': brak sensownych dopasowań "
+                            "w regulaminach/wytycznych ligowych."
+                        )
+                    else:
+                        remaining_by_doc: Dict[int, List[Tuple[float, Dict[str, Any]]]] = {}
+                        for sim, r in scored_positive:
+                            doc_id = r["document_id"]
+                            # BAZA/ProEl już są wykluczone na poziomie zapytania,
+                            # więc tu przyjmujemy wszystko inne
+                            remaining_by_doc.setdefault(doc_id, []).append((sim, r))
 
-                for doc_id in sorted_doc_ids:
-                    doc_rows = remaining_by_doc[doc_id]
-                    doc_rows.sort(key=lambda x: x[0], reverse=True)
-                    local_count = 0
-                    for sim, r in doc_rows:
-                        if local_chunks_used >= max_context_chunks:
-                            break
-                        part = f"{r['content']}\n\n---\n\n"
-                        if total_chars + len(part) > max_chars:
-                            break
-                        parts.append(part)
-                        total_chars += len(part)
-                        local_chunks_used += 1
-                        local_count += 1
-                    print(
-                        f"[agent_query] Tryb 'rules': dodaję {local_count} fragmentów z dokumentu {doc_id}."
-                    )
-                    if total_chars >= max_chars or local_chunks_used >= max_context_chunks:
-                        break
+                        # sort dokumenty po maksymalnym similarity (descending)
+                        sorted_doc_ids = sorted(
+                            remaining_by_doc.keys(),
+                            key=lambda doc_id: max(
+                                sim for (sim, _r) in remaining_by_doc[doc_id]
+                            ),
+                            reverse=True,
+                        )
 
-                context_text = "".join(parts)
-                print(
-                    f"[agent_query] Tryb 'rules': łączny kontekst {total_chars} znaków."
-                )
+                        local_chunks_used = 0
+                        for doc_id in sorted_doc_ids:
+                            doc_rows = remaining_by_doc[doc_id]
+                            doc_rows.sort(key=lambda x: x[0], reverse=True)
+                            local_count = 0
+                            for sim, r in doc_rows:
+                                if local_chunks_used >= max_context_chunks:
+                                    break
+                                part = f"{r['content']}\n\n---\n\n"
+                                if total_chars + len(part) > max_chars:
+                                    break
+                                parts.append(part)
+                                total_chars += len(part)
+                                local_chunks_used += 1
+                                local_count += 1
+                            print(
+                                f"[agent_query] Tryb 'rules': dodaję {local_count} fragmentów z dokumentu {doc_id}."
+                            )
+                            if total_chars >= max_chars or local_chunks_used >= max_context_chunks:
+                                break
+
+                        context_text = "".join(parts)
+                        print(
+                            f"[agent_query] Tryb 'rules': łączny kontekst {total_chars} znaków "
+                            "z regulaminów/wytycznych."
+                        )
 
         else:
             # tryb ogólny – najlepszy dokument po similarity,
@@ -608,6 +675,39 @@ async def agent_query(payload: AgentQueryRequest):
                     min_sim=MIN_SIMILARITY_GENERAL,
                     log_prefix="Tryb 'ogólny'",
                 )
+
+    # Jeśli w trybie 'rules' trzeba doprecyzować ligę – robimy osobne wywołanie Groqa
+    if payload.mode == "rules" and needs_league_clarification:
+        system_prompt = build_system_prompt(payload.mode)
+        clarify_instr = (
+            "Pytanie dotyczy regulaminu lub wytycznych ligowych (np. I liga, II liga, "
+            "Liga Centralna, Puchar Polski), ale na podstawie treści pytania nie da się "
+            "jednoznacznie ustalić, o który poziom rozgrywek chodzi.\n"
+            "Twoje zadanie: odpowiedzieć JEDNYM krótkim, uprzejmym akapitem po polsku, "
+            "w którym poprosisz użytkownika o doprecyzowanie, czy chodzi o I ligę, "
+            "II ligę, Ligę Centralną czy Puchar Polski. NIE próbuj zgadywać, "
+            "nie opisuj jeszcze żadnych szczegółowych zasad ani przepisów."
+        )
+
+        groq_messages: List[dict] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": clarify_instr},
+        ]
+        for m in payload.messages:
+            if m.role in ("user", "assistant"):
+                groq_messages.append({"role": m.role, "content": m.content})
+
+        reply = await groq_chat_completion(
+            messages=groq_messages,
+            model=payload.model or "llama-3.1-8b-instant",
+            temperature=effective_temperature,
+            max_tokens=payload.max_tokens or 2048,
+        )
+        print(
+            "[agent_query] Odpowiedź z Groqa (doprecyzowanie ligi, początek):",
+            reply[:500],
+        )
+        return AgentQueryResponse(reply=reply)
 
     if context_text:
         print("[agent_query] KONTEKST (początek):")
