@@ -49,9 +49,7 @@ async def upsert_login(req: CreateLoginRecordRequest):
                 "app_version": func.coalesce(
                     stmt.excluded.app_version, login_records.c.app_version
                 ),
-                "app_opens": func.coalesce(
-                    stmt.excluded.app_opens, login_records.c.app_opens
-                ),
+                "app_opens": func.coalesce(login_records.c.app_opens, 0) + func.coalesce(stmt.excluded.app_opens, 0),
                 "last_open_at": func.coalesce(
                     stmt.excluded.last_open_at, login_records.c.last_open_at
                 ),
@@ -112,7 +110,8 @@ async def patch_login_record(judge_id: str, body: UpdateLoginRecordRequest):
     if body.app_version is not None:
         update_data["app_version"] = body.app_version
     if body.app_opens is not None:
-        update_data["app_opens"] = body.app_opens
+        # body.app_opens traktujemy jako DELTĘ (np. 54), którą dodajemy do tego co już jest w DB
+        update_data["app_opens"] = func.coalesce(login_records.c.app_opens, 0) + body.app_opens
     if body.last_open_at is not None:
         update_data["last_open_at"] = body.last_open_at
     if body.last_login_at is not None:
