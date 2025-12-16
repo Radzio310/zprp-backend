@@ -258,6 +258,7 @@ class CreateLoginRecordRequest(BaseModel):
     app_version: Optional[str] = None
     app_opens: Optional[int] = None
     last_open_at: Optional[datetime] = None
+    province: Optional[str] = None
 
 class LoginRecordItem(BaseModel):
     judge_id: str
@@ -266,6 +267,7 @@ class LoginRecordItem(BaseModel):
     app_version: Optional[str] = None
     app_opens: Optional[int] = None
     last_open_at: Optional[datetime] = None
+    province: Optional[str] = None
 
 class ListLoginRecordsResponse(BaseModel):
     records: list[LoginRecordItem]
@@ -276,6 +278,7 @@ class UpdateLoginRecordRequest(BaseModel):
     app_opens: Optional[int] = None
     last_open_at: Optional[datetime] = None
     last_login_at: Optional[datetime] = None
+    province: Optional[str] = None
 
 class SetForcedLogoutRequest(BaseModel):
     logout_at: datetime  # ISO‑8601
