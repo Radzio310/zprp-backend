@@ -33,7 +33,7 @@ class BazaWebLoginResponse(BaseModel):
 class BazaWebProfileRequest(BaseModel):
     username: str
     password: str
-    judge_id: str | None = None  # opcjonalnie: klient może wymusić
+    judge_id: str | None = None
 
 
 class JudgeProfile(BaseModel):
@@ -42,7 +42,7 @@ class JudgeProfile(BaseModel):
     middleName: str = ""
     lastName: str = ""
     maidenName: str = ""
-    gender: str = ""  # "M" / "K" / "" (u Ciebie RN bierze tekst option:selected)
+    gender: str = ""  # "M" / "K" / ""
     birthDate: str = ""
     street: str = ""
     postalCode: str = ""
@@ -61,7 +61,7 @@ class BazaWebProfileResponse(BaseModel):
 
 
 # -------------------------
-# Helpers (encoding + clean)
+# Helpers
 # -------------------------
 
 def _clean(s: str | None) -> str:
@@ -82,28 +82,27 @@ def _abs_url(base: str, maybe_rel: str) -> str:
         return "https:" + maybe_rel
     if maybe_rel.startswith("/"):
         return base.rstrip("/") + maybe_rel
+    # np. "foto_sedzia/5124.jpg?m=..."
     return base.rstrip("/") + "/" + maybe_rel.lstrip("./")
 
 
 def _detect_encoding(resp: httpx.Response, default: str = "iso-8859-2") -> str:
-    """
-    1) charset z nagłówka
-    2) fallback: meta charset z początku dokumentu
-    3) default: iso-8859-2 (w bazie bardzo częste)
-    """
     ct = resp.headers.get("content-type", "") or ""
     m = re.search(r"charset=([^;]+)", ct, re.I)
     if m:
         return m.group(1).strip().lower()
 
-    # meta charset – spróbuj odczytać pierwsze bajty jako utf-8 i wyłapać deklarację
-    head = resp.content[:2048]
+    head = resp.content[:4096]
     try:
         head_txt = head.decode("utf-8", errors="ignore")
     except Exception:
         head_txt = ""
 
-    mm = re.search(r'<meta\s+[^>]*charset=["\']?([a-zA-Z0-9\-_]+)["\']?', head_txt, re.I)
+    mm = re.search(
+        r'<meta\s+[^>]*charset=["\']?([a-zA-Z0-9\-_]+)["\']?',
+        head_txt,
+        re.I,
+    )
     if mm:
         return mm.group(1).strip().lower()
 
@@ -137,90 +136,84 @@ def _extract_judge_id_from_html(html: str) -> str:
 
 
 # -------------------------
-# HTML form parser (robust; zamiast regexów)
+# Robust HTML parser (radio/select/hidden + woj TD text)
 # -------------------------
 
 class _BazaProfileFormParser(HTMLParser):
     """
     Parsuje:
-    - input[name] -> value (value może być bez cudzysłowów, HTMLParser to ogarnia)
-    - textarea[name] -> inner text
-    - select[name] -> tekst option selected (jak Cheerio option:selected).text()
-    - img src "foto_sedzia/..."
-    Dodatkowo zbiera surowy tekst wewnątrz <td> zawierającego input[name=woj],
-    aby odtworzyć voivodeship (jak w RN: tekst obok ukrytego inputa).
+    - input[name] -> value (UWAGA: radio: bierzemy TYLKO checked)
+    - select[name] -> tekst option selected (gdyby kiedyś było)
+    - img src zawierające "foto_sedzia/"
+    - tekst w <td> zawierającym input[name=woj] (żeby wyciągnąć "ŚLĄSKIE")
     """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
 
         self.inputs: dict[str, str] = {}
-        self.textareas: dict[str, str] = {}
-
-        # select parsing
-        self._in_select: bool = False
-        self._select_name: str | None = None
-        self._in_option: bool = False
-        self._option_selected: bool = False
-        self._option_text_buf: list[str] = []
         self.select_selected_text: dict[str, str] = {}
 
-        # textarea parsing
-        self._in_textarea: bool = False
-        self._textarea_name: str | None = None
-        self._textarea_buf: list[str] = []
+        self._in_select = False
+        self._select_name: str | None = None
+        self._in_option = False
+        self._option_selected = False
+        self._option_text_buf: list[str] = []
 
-        # photo
         self.photo_src: str = ""
 
-        # voivodeship-from-td parsing
-        self._td_depth: int = 0
-        self._td_has_woj_input: bool = False
+        # voivodeship: TD containing input[name=woj]
+        self._td_depth = 0
+        self._td_has_woj_input = False
         self._td_text_buf: list[str] = []
         self.woj_td_text: str = ""
 
     @staticmethod
-    def _attrs_to_dict(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
+    def _attrs(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
         out: dict[str, str] = {}
         for k, v in attrs:
             if not k:
                 continue
-            out[k.lower()] = (v if v is not None else "")
+            out[k.lower()] = v if v is not None else ""
         return out
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_l = tag.lower()
-        a = self._attrs_to_dict(attrs)
+        a = self._attrs(attrs)
 
         if tag_l == "td":
             self._td_depth += 1
-            # reset bufora dla nowego <td>
             self._td_has_woj_input = False
             self._td_text_buf = []
 
         if tag_l == "img" and not self.photo_src:
             src = (a.get("src") or "").strip()
-            # baza bywa: foto_sedzia/... albo ./foto_sedzia/... albo /foto_sedzia/...
             if "foto_sedzia/" in src:
                 self.photo_src = src
 
         if tag_l == "input":
             name = (a.get("name") or "").strip()
-            if name:
-                val = (a.get("value") or "")
-                self.inputs[name] = _clean(val)
+            if not name:
+                return
 
-                if name == "woj":
-                    # jesteśmy w <td> zawierającym input woj
-                    if self._td_depth > 0:
-                        self._td_has_woj_input = True
+            itype = (a.get("type") or "").strip().lower()
+            val = _clean(a.get("value") or "")
 
-        if tag_l == "textarea":
-            name = (a.get("name") or "").strip()
-            if name:
-                self._in_textarea = True
-                self._textarea_name = name
-                self._textarea_buf = []
+            # RADIO: zapisuj tylko jeśli checked, a jeśli już mamy checked – nie nadpisuj
+            if itype == "radio":
+                is_checked = "checked" in a
+                if is_checked:
+                    self.inputs[name] = val
+                else:
+                    # jeśli jeszcze nie ma nic dla tej grupy – nie ustawiaj na siłę,
+                    # bo RN bierze faktycznie zaznaczone (checked)
+                    pass
+            else:
+                # normalne inputy (text/hidden itd.) – można nadpisywać
+                self.inputs[name] = val
+
+            if name == "woj" and self._td_depth > 0:
+                self._td_has_woj_input = True
 
         if tag_l == "select":
             name = (a.get("name") or "").strip()
@@ -230,8 +223,7 @@ class _BazaProfileFormParser(HTMLParser):
 
         if tag_l == "option" and self._in_select and self._select_name:
             self._in_option = True
-            # selected może być "selected", "selected=selected", itd.
-            self._option_selected = ("selected" in a)
+            self._option_selected = "selected" in a
             self._option_text_buf = []
 
     def handle_endtag(self, tag: str) -> None:
@@ -240,7 +232,6 @@ class _BazaProfileFormParser(HTMLParser):
         if tag_l == "option" and self._in_option:
             opt_text = _clean("".join(self._option_text_buf))
             if self._select_name and self._option_selected:
-                # zapisujemy tekst selected
                 self.select_selected_text[self._select_name] = opt_text
             self._in_option = False
             self._option_selected = False
@@ -250,33 +241,20 @@ class _BazaProfileFormParser(HTMLParser):
             self._in_select = False
             self._select_name = None
 
-        if tag_l == "textarea" and self._in_textarea:
-            txt = _clean("".join(self._textarea_buf))
-            if self._textarea_name:
-                self.textareas[self._textarea_name] = txt
-            self._in_textarea = False
-            self._textarea_name = None
-            self._textarea_buf = []
-
         if tag_l == "td":
             if self._td_depth > 0:
                 self._td_depth -= 1
-            # jeśli to był <td> z woj – zapamiętaj tekst (bez HTML)
+
             if self._td_has_woj_input:
                 self.woj_td_text = _clean("".join(self._td_text_buf))
+
             self._td_has_woj_input = False
             self._td_text_buf = []
 
     def handle_data(self, data: str) -> None:
-        # option text
         if self._in_option:
             self._option_text_buf.append(data)
 
-        # textarea text
-        if self._in_textarea:
-            self._textarea_buf.append(data)
-
-        # td text after input woj (chcemy tekst obok inputa)
         if self._td_depth > 0 and self._td_has_woj_input:
             self._td_text_buf.append(data)
 
@@ -294,44 +272,33 @@ def _parse_profile_fields(html: str) -> dict[str, Any]:
     def get_input(name: str) -> str:
         return _clean(p.inputs.get(name, ""))
 
-    def get_textarea(name: str) -> str:
-        return _clean(p.textareas.get(name, ""))
-
     def get_select_selected_text(name: str) -> str:
         return _clean(p.select_selected_text.get(name, ""))
 
-    # gender w RN: select option:selected text (fallback: input)
-    gender = get_select_selected_text("Plec") or get_input("Plec")
+    # gender: w Twoim HTML to RADIO, więc będzie w inputs["Plec"] jeśli zaznaczone
+    gender = get_input("Plec") or get_select_selected_text("Plec")
 
-    # voivodeshipCode: value ukrytego inputa "woj"
-    voiv_code = get_input("woj")
+    voivodeshipCode = get_input("woj")
 
-    # voivodeship: tekst obok inputa w tym samym TD
-    # parser zbiera cały tekst z td, ale może zawierać też inne śmieci; spróbuj wyciągnąć sensowny token
+    # voivodeship name z tekstu w tym samym TD po input[name=woj]
     woj_td = _clean(p.woj_td_text)
-    voiv_name = ""
-
-    # często to jest po prostu "ŚLĄSKIE" / "MAZOWIECKIE" itd.
-    # jeśli w td są dodatkowe słowa, bierz pierwsze "wielkimi literami"
+    voivodeship = ""
     if woj_td:
-        # usuń ewentualne resztki typu "Województwo" itp.
-        # i wyciągnij pierwsze słowo/ciąg liter (z polskimi znakami) w caps
+        # W przykładzie: "ŚLĄSKIE Zmiana możliwa z panelu ..."
+        # weź pierwsze "caps" słowo/ciąg (ŚLĄSKIE, MAZOWIECKIE, itp.)
         m = re.search(r"([A-ZĄĆĘŁŃÓŚŹŻ][A-ZĄĆĘŁŃÓŚŹŻ\- ]{2,})", woj_td)
-        voiv_name = _clean(m.group(1)) if m else woj_td
+        voivodeship = _clean(m.group(1)) if m else woj_td
 
-    # fallback: gdyby wrócili do select[name=woj], spróbuj wyłuskać selected text
-    if not voiv_name:
-        voiv_name = get_select_selected_text("woj")
-
-    # photo src
-    photo_src = (p.photo_src or "").strip()
+    # fallback: gdyby kiedyś woj było selectem
+    if not voivodeship:
+        voivodeship = get_select_selected_text("woj")
 
     return {
-        "photo_src": photo_src,
-        "firstName": get_input("Imie") or get_textarea("Imie"),
-        "middleName": get_input("Imie2") or get_textarea("Imie2"),
-        "lastName": get_input("Nazwisko") or get_textarea("Nazwisko"),
-        "maidenName": get_input("NazwiskoRodowe") or get_textarea("NazwiskoRodowe"),
+        "photo_src": (p.photo_src or "").strip(),
+        "firstName": get_input("Imie"),
+        "middleName": get_input("Imie2"),
+        "lastName": get_input("Nazwisko"),
+        "maidenName": get_input("NazwiskoRodowe"),
         "gender": gender,
         "birthDate": get_input("DataUr"),
         "street": get_input("Ulica"),
@@ -339,8 +306,8 @@ def _parse_profile_fields(html: str) -> dict[str, Any]:
         "city": get_input("Miasto"),
         "phone": get_input("Telefon"),
         "email": get_input("Email"),
-        "voivodeshipCode": voiv_code,
-        "voivodeship": voiv_name,
+        "voivodeship": voivodeship,
+        "voivodeshipCode": voivodeshipCode,
     }
 
 
@@ -359,6 +326,7 @@ async def _baza_login_and_get_cookies(
     """
     form = {"login": username, "haslo": password, "from": "/index.php?"}
     body = urlencode(form, encoding="iso-8859-2", errors="strict")
+
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=iso-8859-2",
         "User-Agent": "Mozilla/5.0 (compatible; zprp-backend/1.0)",
@@ -376,7 +344,6 @@ async def _baza_login_and_get_cookies(
 
     html = _decode_html(resp)
 
-    # Sukces: finalnie jesteśmy na /index.php (albo przynajmniej nie na login.php)
     if "/index.php" not in str(resp.url):
         if _looks_like_bad_credentials(html):
             raise HTTPException(
@@ -405,27 +372,35 @@ async def _baza_login_and_get_cookies(
 # -------------------------
 
 @router.post("/login", response_model=BazaWebLoginResponse)
-async def baza_web_login(data: BazaWebLoginRequest, settings: Settings = Depends(get_settings)):
+async def baza_web_login(
+    data: BazaWebLoginRequest,
+    settings: Settings = Depends(get_settings),
+):
     try:
         _, judge_id = await _baza_login_and_get_cookies(
             username=data.username,
             password=data.password,
             settings=settings,
         )
-        return {"success": True, "judge_id": judge_id}
+        return {"success": True, "judge_id": judge_id, "error": None}
     except HTTPException as e:
-        return {"success": False, "error": str(e.detail)}
+        return {"success": False, "judge_id": None, "error": str(e.detail)}
     except Exception as e:
-        return {"success": False, "error": f"Błąd serwera: {e}"}
+        return {"success": False, "judge_id": None, "error": f"Błąd serwera: {e}"}
 
 
 @router.post("/profile", response_model=BazaWebProfileResponse)
-async def baza_web_profile(data: BazaWebProfileRequest, settings: Settings = Depends(get_settings)):
+async def baza_web_profile(
+    data: BazaWebProfileRequest,
+    settings: Settings = Depends(get_settings),
+):
     """
-    Pobiera dane profilu analogicznie do fetchJudgeProfile (frontend):
+    Pobiera dane profilu analogicznie do fetchJudgeProfile z RN:
     - GET /index.php?a=sedzia&b=edycja&NrSedzia=...
-    - wyciąga foto + pola formularza
-    - województwo: code z input[name=woj], nazwa z tekstu w tym samym TD
+    - foto: img[src^="foto_sedzia/"]
+    - pola: input[name=Imie], Imie2, Nazwisko, ... itd.
+    - Plec: RADIO -> bierz checked
+    - województwo: input[name=woj] (hidden) + tekst w tym samym TD
     """
     try:
         cookies, judge_id_from_login = await _baza_login_and_get_cookies(
@@ -435,7 +410,6 @@ async def baza_web_profile(data: BazaWebProfileRequest, settings: Settings = Dep
         )
         judge_id = (data.judge_id or judge_id_from_login).strip() or judge_id_from_login
 
-        # Pobierz stronę edycji profilu sędziego
         path = f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_id}"
 
         headers = {
@@ -455,18 +429,36 @@ async def baza_web_profile(data: BazaWebProfileRequest, settings: Settings = Dep
 
         html = _decode_html(resp)
 
-        # minimalna walidacja: czy to wygląda jak strona edycji profilu
-        # (w praktyce zawiera pola Imie/Nazwisko/woj itd.)
-        low = (html or "").lower()
-        if ("name=imie" not in low and 'name="imie"' not in low) or ("name=nazwisko" not in low and 'name="nazwisko"' not in low):
+        # Zamiast wadliwej walidacji "name=imie" (case/quote sensitive),
+        # parsujemy i walidujemy wynik.
+        parsed = _parse_profile_fields(html)
+
+        # twarda walidacja: jeśli nic sensownego nie przyszło, to to nie jest strona profilu
+        # (np. logout, błąd sesji, jakaś strona pośrednia).
+        signal_fields = [
+            parsed.get("firstName", ""),
+            parsed.get("lastName", ""),
+            parsed.get("birthDate", ""),
+            parsed.get("email", ""),
+            parsed.get("city", ""),
+            parsed.get("street", ""),
+            parsed.get("postalCode", ""),
+        ]
+        if not any(_clean(x) for x in signal_fields):
+            # Dodatkowo: jeśli HTML wygląda jak ekran logowania/wylogowania
+            low = (html or "").lower()
+            if "login.php" in low or "wyloguj" in low and "haslo" in low:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Sesja do bazy nieaktywna lub przekierowanie do logowania",
+                )
+
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Nie udało się pobrać strony profilu (nieoczekiwany HTML / brak pól formularza).",
+                detail="Nie udało się pobrać strony profilu (HTML nie zawiera danych formularza).",
             )
 
         base = settings.ZPRP_BASE_URL.rstrip("/") + "/"
-
-        parsed = _parse_profile_fields(html)
 
         photo_src = parsed.get("photo_src", "") or ""
         photoUrl = _abs_url(base, photo_src) if photo_src else None
@@ -491,6 +483,6 @@ async def baza_web_profile(data: BazaWebProfileRequest, settings: Settings = Dep
         return {"success": True, "judge_id": judge_id, "profile": profile, "error": None}
 
     except HTTPException as e:
-        return {"success": False, "error": str(e.detail), "judge_id": None, "profile": None}
+        return {"success": False, "judge_id": None, "profile": None, "error": str(e.detail)}
     except Exception as e:
-        return {"success": False, "error": f"Błąd serwera: {e}", "judge_id": None, "profile": None}
+        return {"success": False, "judge_id": None, "profile": None, "error": f"Błąd serwera: {e}"}
