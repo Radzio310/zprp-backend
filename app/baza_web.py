@@ -90,33 +90,36 @@ def _extract_judge_id_from_html(html: str) -> str:
     return m.group(1) if m else ""
 
 
-def _looks_like_login_or_no_session(html: str) -> bool:
+def _looks_like_login_page(html: str) -> bool:
     """
-    Heurystyka identyczna w duchu do Twoich problemów:
-    - jeśli baza zwraca login / brak sesji, zwykle w HTML pojawią się elementy logowania
-      albo samo login.php w linkach.
+    UWAGA: nie wolno tu sprawdzać samego "login.php" w HTML, bo na stronach po zalogowaniu
+    jest link "login.php?def=logout" (wyloguj).
+    Detekcja musi być po FORMULARZU logowania.
     """
     low = (html or "").lower()
-    if "login.php" in low:
-        return True
-    if ("name=\"login\"" in low or "name='login'" in low) and ("haslo" in low or "password" in low):
-        return True
-    if "logowanie" in low and ("haslo" in low or "login" in low):
-        return True
-    return False
+
+    # typowe pola formularza logowania
+    has_login_input = ('name="login"' in low) or ("name='login'" in low)
+    has_pass_input = ('name="haslo"' in low) or ("name='haslo'" in low)
+
+    # form action do login.php
+    has_form_action = re.search(r"<form[^>]+action=['\"]?login\.php", low) is not None
+
+    # bardzo często na stronie logowania jest też "Zaloguj" / "Logowanie"
+    has_login_words = ("zalog" in low) and (has_login_input or has_pass_input)
+
+    return (has_login_input and has_pass_input) or has_form_action or has_login_words
 
 
 def _parse_profile_from_edit_form(html: str) -> dict[str, Any]:
     """
-    Parsuje dokładnie z <form name="edycja"> tak jak edit_judge.py.
+    Parsuje z <form name="edycja"> analogicznie do edit_judge.py.
     """
     soup = BeautifulSoup(html, "html.parser")
 
     form = soup.find("form", {"name": "edycja"})
     if not form:
-        # fallback: czasem bywa FORM uppercase albo inny parser – spróbuj po atrybucie name case-insensitive
         form = soup.find(lambda tag: tag.name == "form" and (tag.get("name") or "").lower() == "edycja")
-
     if not form:
         return {}
 
@@ -132,37 +135,32 @@ def _parse_profile_from_edit_form(html: str) -> dict[str, Any]:
         if typ in ("hidden", "text", "password"):
             values[name] = _clean(inp.get("value", ""))
         elif typ == "radio":
-            # tylko checked
             if inp.has_attr("checked"):
                 values[name] = _clean(inp.get("value", ""))
 
-    # selecty (gdyby kiedyś były)
+    # selecty (gdyby kiedyś wróciły)
     for sel in form.find_all("select"):
         name = sel.get("name")
         if not name:
             continue
         opt = sel.find("option", selected=True)
-        if opt:
-            # czasem interesuje value, czasem text — w RN gender brałeś text dla select,
-            # ale tu i tak prawie zawsze masz radio. Zostawiamy value jako domyślne.
-            values[name] = _clean(opt.get("value") or opt.get_text())
-        else:
-            values[name] = ""
+        values[name] = _clean(opt.get("value") or opt.get_text() if opt else "")
 
-    # photo
+    # foto
     photo_src = ""
     img = soup.select_one('img[src^="foto_sedzia/"]')
     if img and img.get("src"):
         photo_src = img.get("src", "").strip()
 
-    # województwo: input[name=woj] jest hidden, a nazwa jest w tekście w tym samym <td>
+    # województwo: hidden input + tekst w tym samym <td>
     voivodeship_name = ""
     woj_input = form.find("input", {"name": "woj"})
     if woj_input:
         td = woj_input.find_parent("td")
         if td:
             td_text = _clean(td.get_text(" ", strip=True))
-            # w przykładzie: "ŚLĄSKIE Zmiana możliwa z panelu WZPR lub ZPRP"
+            # np. "ŚLĄSKIE Zmiana możliwa z panelu WZPR lub ZPRP"
+            # bierz pierwsze "DUŻE LITERY" (z polskimi znakami)
             m = re.search(r"([A-ZĄĆĘŁŃÓŚŹŻ][A-ZĄĆĘŁŃÓŚŹŻ\- ]{2,})", td_text)
             voivodeship_name = _clean(m.group(1)) if m else td_text
 
@@ -181,11 +179,6 @@ async def _login_get_cookies_and_judge_id(
 ) -> tuple[dict, str, str]:
     """
     Logowanie 1:1 jak w auth.py / edit_judge.py:
-    - POST /login.php przez fetch_with_correct_encoding
-    - sprawdzenie resp.url.path
-    - cookies = dict(resp.cookies)
-    - judge_id z HTML
-    Zwraca: (cookies, judge_id, html_login)
     """
     resp_login, html_login = await fetch_with_correct_encoding(
         client,
@@ -199,7 +192,6 @@ async def _login_get_cookies_and_judge_id(
     )
 
     if "/index.php" not in resp_login.url.path:
-        # zachowanie jak w auth.py
         low = (html_login or "").lower()
         if "nieznany" in low or "tkownik" in low:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niepoprawny użytkownik")
@@ -252,11 +244,12 @@ async def baza_web_profile(
     settings: Settings = Depends(get_settings),
 ):
     """
-    Pobieranie profilu w 100% analogicznie do Twojego działającego przepływu:
-    - AsyncClient
-    - login przez fetch_with_correct_encoding -> cookies
-    - GET edycji przez fetch_with_correct_encoding z cookies
-    - parsowanie z form[name=edycja]
+    Pobiera dane profilu analogicznie do fetchJudgeProfile (RN):
+    - GET /index.php?a=sedzia&b=edycja&NrSedzia=...
+    - foto: img[src^="foto_sedzia/"]
+    - pola: input[name=Imie], Imie2, Nazwisko, ...
+    - Plec: RADIO checked
+    - woj: input hidden + tekst w tym samym TD
     """
     try:
         async with httpx.AsyncClient(
@@ -272,6 +265,14 @@ async def baza_web_profile(
 
             judge_id = (data.judge_id or judge_id_from_login).strip() or judge_id_from_login
 
+            # (opcjonalnie, ale bywa krytyczne) warm-up: wejście na index po zalogowaniu
+            # żeby baza "dopieściła" sesję i ewentualne dodatkowe cookies.
+            try:
+                await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
+            except Exception:
+                # nie blokuj – to tylko dopalacz
+                pass
+
             path = f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_id}"
             resp_get, html_get = await fetch_with_correct_encoding(
                 client,
@@ -280,8 +281,8 @@ async def baza_web_profile(
                 cookies=cookies,
             )
 
-        # Jeśli baza przekierowała mimo follow_redirects, to nadal wyjdzie w HTML.
-        if _looks_like_login_or_no_session(html_get) or "login.php" in resp_get.url.path:
+        # Jeśli baza przekierowała do logowania, resp_get.url.path będzie zwykle /login.php
+        if resp_get.url.path.endswith("/login.php") or _looks_like_login_page(html_get):
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
                 "Sesja do bazy nieaktywna lub przekierowanie do logowania",
@@ -296,10 +297,11 @@ async def baza_web_profile(
 
         values: dict[str, str] = parsed.get("values", {}) or {}
 
-        # sygnał, że to realnie formularz profilu
-        if not any(values.get(k) for k in ("Imie", "Nazwisko", "DataUr", "Email", "Miasto", "Ulica", "KodPocztowy")):
-            # często to znaczy, że HTML nie był tym, czego oczekujemy
-            if _looks_like_login_or_no_session(html_get):
+        # sygnał, że to realnie formularz profilu (jakiekolwiek istotne pola)
+        signal = any(_clean(values.get(k)) for k in ("Imie", "Nazwisko", "DataUr", "Miasto", "KodPocztowy", "Ulica", "Email"))
+        if not signal:
+            # jeśli to jednak login page (np. HTML bez formularza edycji) – zgłoś jasno
+            if _looks_like_login_page(html_get) or resp_get.url.path.endswith("/login.php"):
                 raise HTTPException(
                     status.HTTP_401_UNAUTHORIZED,
                     "Sesja do bazy nieaktywna lub przekierowanie do logowania",
@@ -314,20 +316,18 @@ async def baza_web_profile(
         photo_src = (parsed.get("photo_src") or "").strip()
         photoUrl = _abs_url(base, photo_src) if photo_src else None
 
-        voivodeship = _clean(parsed.get("voivodeship_name") or "")
-
         profile = JudgeProfile(
             photoUrl=photoUrl,
             firstName=_clean(values.get("Imie")),
             middleName=_clean(values.get("Imie2")),
             lastName=_clean(values.get("Nazwisko")),
             maidenName=_clean(values.get("NazwiskoRodowe")),
-            gender=_clean(values.get("Plec")),  # radio checked
+            gender=_clean(values.get("Plec")),  # radio checked => "M"/"K"
             birthDate=_clean(values.get("DataUr")),
             street=_clean(values.get("Ulica")),
             postalCode=_clean(values.get("KodPocztowy")),
             city=_clean(values.get("Miasto")),
-            voivodeship=voivodeship,
+            voivodeship=_clean(parsed.get("voivodeship_name") or ""),
             voivodeshipCode=_clean(values.get("woj")),
             phone=_clean(values.get("Telefon")),
             email=_clean(values.get("Email")),
