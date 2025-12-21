@@ -1,4 +1,12 @@
 # app/baza_web.py
+#
+# Podmiana pliku: logowanie + pobranie profilu odbywa się w RAMACH JEDNEGO httpx.AsyncClient,
+# dzięki czemu cookie-jar (PHPSESSID itp.) jest zachowany i baza nie zrzuca sesji.
+#
+# Dodatkowo:
+# - robimy "warmup" GET /index.php przed POST /login.php (często wymagane przez stare PHP)
+# - parser HTML obsługuje radio (Plec) -> tylko checked, hidden/text, foto_sedzia, woj TD text
+# - walidacja wykrywa przekierowanie / treść logowania i zwraca sensowny błąd
 
 import re
 import html as html_lib
@@ -82,7 +90,6 @@ def _abs_url(base: str, maybe_rel: str) -> str:
         return "https:" + maybe_rel
     if maybe_rel.startswith("/"):
         return base.rstrip("/") + maybe_rel
-    # np. "foto_sedzia/5124.jpg?m=..."
     return base.rstrip("/") + "/" + maybe_rel.lstrip("./")
 
 
@@ -131,8 +138,24 @@ def _looks_like_bad_credentials(html: str) -> bool:
 
 
 def _extract_judge_id_from_html(html: str) -> str:
-    m = re.search(r"NrSedzia=(\d+)", html)
+    m = re.search(r"\bNrSedzia=(\d+)\b", html)
     return m.group(1) if m else ""
+
+
+def _looks_like_login_page(html: str) -> bool:
+    """
+    Heurystyka: strona logowania / sesja zgaszona.
+    W praktyce login.php zwraca formularz z polami login/haslo.
+    """
+    low = (html or "").lower()
+    if "login.php" in low:
+        return True
+    # typowe pola/teksty logowania
+    if ("name=\"login\"" in low or "name='login'" in low) and ("haslo" in low or "password" in low):
+        return True
+    if "wyloguj" in low and ("haslo" in low or "login" in low):
+        return True
+    return False
 
 
 # -------------------------
@@ -142,7 +165,8 @@ def _extract_judge_id_from_html(html: str) -> str:
 class _BazaProfileFormParser(HTMLParser):
     """
     Parsuje:
-    - input[name] -> value (UWAGA: radio: bierzemy TYLKO checked)
+    - input[name] -> value
+      UWAGA: radio -> zapisujemy TYLKO checked
     - select[name] -> tekst option selected (gdyby kiedyś było)
     - img src zawierające "foto_sedzia/"
     - tekst w <td> zawierającym input[name=woj] (żeby wyciągnąć "ŚLĄSKIE")
@@ -199,17 +223,12 @@ class _BazaProfileFormParser(HTMLParser):
             itype = (a.get("type") or "").strip().lower()
             val = _clean(a.get("value") or "")
 
-            # RADIO: zapisuj tylko jeśli checked, a jeśli już mamy checked – nie nadpisuj
             if itype == "radio":
+                # only checked counts
                 is_checked = "checked" in a
                 if is_checked:
                     self.inputs[name] = val
-                else:
-                    # jeśli jeszcze nie ma nic dla tej grupy – nie ustawiaj na siłę,
-                    # bo RN bierze faktycznie zaznaczone (checked)
-                    pass
             else:
-                # normalne inputy (text/hidden itd.) – można nadpisywać
                 self.inputs[name] = val
 
             if name == "woj" and self._td_depth > 0:
@@ -275,21 +294,16 @@ def _parse_profile_fields(html: str) -> dict[str, Any]:
     def get_select_selected_text(name: str) -> str:
         return _clean(p.select_selected_text.get(name, ""))
 
-    # gender: w Twoim HTML to RADIO, więc będzie w inputs["Plec"] jeśli zaznaczone
     gender = get_input("Plec") or get_select_selected_text("Plec")
-
     voivodeshipCode = get_input("woj")
 
-    # voivodeship name z tekstu w tym samym TD po input[name=woj]
     woj_td = _clean(p.woj_td_text)
     voivodeship = ""
     if woj_td:
-        # W przykładzie: "ŚLĄSKIE Zmiana możliwa z panelu ..."
-        # weź pierwsze "caps" słowo/ciąg (ŚLĄSKIE, MAZOWIECKIE, itp.)
+        # np. "ŚLĄSKIE Zmiana możliwa z panelu ..."
         m = re.search(r"([A-ZĄĆĘŁŃÓŚŹŻ][A-ZĄĆĘŁŃÓŚŹŻ\- ]{2,})", woj_td)
         voivodeship = _clean(m.group(1)) if m else woj_td
 
-    # fallback: gdyby kiedyś woj było selectem
     if not voivodeship:
         voivodeship = get_select_selected_text("woj")
 
@@ -312,38 +326,36 @@ def _parse_profile_fields(html: str) -> dict[str, Any]:
 
 
 # -------------------------
-# Login helper
+# Session-preserving login helper (ONE client)
 # -------------------------
 
-async def _baza_login_and_get_cookies(
+async def _baza_login_in_client(
     *,
+    client: httpx.AsyncClient,
     username: str,
     password: str,
-    settings: Settings,
-) -> tuple[dict, str]:
+) -> str:
     """
-    Loguje się do baza.zprp.pl i zwraca (cookies_dict, judge_id).
+    Loguje się do baza.zprp.pl korzystając z TEGO SAMEGO client.
+    Cookie jar zostaje w client.cookies i jest używany później do profilu.
+    Zwraca judge_id.
     """
+    # Warmup: często ustawia PHPSESSID zanim zrobisz POST /login.php
+    r0 = await client.get("/index.php")
+    _ = _decode_html(r0)  # tylko żeby przejść przez dekoder, nie używamy treści
+
     form = {"login": username, "haslo": password, "from": "/index.php?"}
     body = urlencode(form, encoding="iso-8859-2", errors="strict")
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=iso-8859-2",
-        "User-Agent": "Mozilla/5.0 (compatible; zprp-backend/1.0)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+        "Referer": str(client.base_url).rstrip("/") + "/index.php",
     }
 
-    async with httpx.AsyncClient(
-        base_url=settings.ZPRP_BASE_URL,
-        follow_redirects=True,
-        timeout=httpx.Timeout(30.0),
-        headers=headers,
-    ) as client:
-        resp = await client.post("/login.php", content=body)
-
+    resp = await client.post("/login.php", content=body, headers=headers)
     html = _decode_html(resp)
 
+    # Sukces logowania: finalnie URL powinien być index.php (follow_redirects=True)
     if "/index.php" not in str(resp.url):
         if _looks_like_bad_credentials(html):
             raise HTTPException(
@@ -355,8 +367,11 @@ async def _baza_login_and_get_cookies(
             detail="Logowanie nie powiodło się",
         )
 
-    cookies = dict(resp.cookies)
     judge_id = _extract_judge_id_from_html(html)
+    if not judge_id:
+        # ostatnia próba: czasem id w treści menu
+        m = re.search(r"\bNrSedzia=(\d+)\b", html)
+        judge_id = m.group(1) if m else ""
 
     if not judge_id:
         raise HTTPException(
@@ -364,7 +379,17 @@ async def _baza_login_and_get_cookies(
             detail="Zalogowano, ale nie udało się odczytać judgeId (NrSedzia) z odpowiedzi",
         )
 
-    return cookies, judge_id
+    return judge_id
+
+
+def _default_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0 (compatible; zprp-backend/1.0)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
 
 
 # -------------------------
@@ -377,12 +402,20 @@ async def baza_web_login(
     settings: Settings = Depends(get_settings),
 ):
     try:
-        _, judge_id = await _baza_login_and_get_cookies(
-            username=data.username,
-            password=data.password,
-            settings=settings,
-        )
+        async with httpx.AsyncClient(
+            base_url=settings.ZPRP_BASE_URL,
+            follow_redirects=True,
+            timeout=httpx.Timeout(60.0),
+            headers=_default_headers(),
+        ) as client:
+            judge_id = await _baza_login_in_client(
+                client=client,
+                username=data.username,
+                password=data.password,
+            )
+
         return {"success": True, "judge_id": judge_id, "error": None}
+
     except HTTPException as e:
         return {"success": False, "judge_id": None, "error": str(e.detail)}
     except Exception as e:
@@ -396,45 +429,40 @@ async def baza_web_profile(
 ):
     """
     Pobiera dane profilu analogicznie do fetchJudgeProfile z RN:
+    - login -> cookie jar w tym samym client
     - GET /index.php?a=sedzia&b=edycja&NrSedzia=...
-    - foto: img[src^="foto_sedzia/"]
-    - pola: input[name=Imie], Imie2, Nazwisko, ... itd.
-    - Plec: RADIO -> bierz checked
-    - województwo: input[name=woj] (hidden) + tekst w tym samym TD
+    - foto: img[src zawiera "foto_sedzia/"]
+    - pola: inputy + radio Plec (checked)
+    - woj: hidden input[name=woj] + tekst w tym samym <td>
     """
     try:
-        cookies, judge_id_from_login = await _baza_login_and_get_cookies(
-            username=data.username,
-            password=data.password,
-            settings=settings,
-        )
-        judge_id = (data.judge_id or judge_id_from_login).strip() or judge_id_from_login
-
-        path = f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_id}"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; zprp-backend/1.0)",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
-        }
-
         async with httpx.AsyncClient(
             base_url=settings.ZPRP_BASE_URL,
             follow_redirects=True,
             timeout=httpx.Timeout(60.0),
-            cookies=cookies,
-            headers=headers,
+            headers=_default_headers(),
         ) as client:
+            judge_id_from_login = await _baza_login_in_client(
+                client=client,
+                username=data.username,
+                password=data.password,
+            )
+            judge_id = (data.judge_id or judge_id_from_login).strip() or judge_id_from_login
+
+            path = f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_id}"
             resp = await client.get(path)
+            html = _decode_html(resp)
 
-        html = _decode_html(resp)
+        # Jeśli sesja padła / redirect do logowania
+        if _looks_like_login_page(html):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Sesja do bazy nieaktywna lub przekierowanie do logowania",
+            )
 
-        # Zamiast wadliwej walidacji "name=imie" (case/quote sensitive),
-        # parsujemy i walidujemy wynik.
         parsed = _parse_profile_fields(html)
 
-        # twarda walidacja: jeśli nic sensownego nie przyszło, to to nie jest strona profilu
-        # (np. logout, błąd sesji, jakaś strona pośrednia).
+        # Walidacja: musimy zobaczyć realne dane formularza
         signal_fields = [
             parsed.get("firstName", ""),
             parsed.get("lastName", ""),
@@ -445,21 +473,12 @@ async def baza_web_profile(
             parsed.get("postalCode", ""),
         ]
         if not any(_clean(x) for x in signal_fields):
-            # Dodatkowo: jeśli HTML wygląda jak ekran logowania/wylogowania
-            low = (html or "").lower()
-            if "login.php" in low or "wyloguj" in low and "haslo" in low:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Sesja do bazy nieaktywna lub przekierowanie do logowania",
-                )
-
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Nie udało się pobrać strony profilu (HTML nie zawiera danych formularza).",
             )
 
         base = settings.ZPRP_BASE_URL.rstrip("/") + "/"
-
         photo_src = parsed.get("photo_src", "") or ""
         photoUrl = _abs_url(base, photo_src) if photo_src else None
 
