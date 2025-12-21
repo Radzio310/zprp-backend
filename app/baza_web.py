@@ -271,9 +271,9 @@ async def _login_get_cookies_and_judge_id(
     if "/index.php" not in resp.url.path:
         low = (html or "").lower()
         if "nieznany" in low or "tkownik" in low:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niepoprawny użytkownik")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niepoprawny użytkownik lub hasło")
         if "ponownie" in low:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niepoprawne hasło")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niepoprawne użytkownik lub hasło")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Logowanie nie powiodło się")
 
     cookies = dict(resp.cookies)
