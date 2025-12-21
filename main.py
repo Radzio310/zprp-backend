@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import os
 from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,6 +47,18 @@ from app.baza_web import router as baza_web_router
 from app.db import database, saved_matches, short_result_records
 
 app = FastAPI(title="BAZA - API")
+
+# CORS: pozwól na Web dev server (Expo/React Native Web)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # opcjonalny rate‑limiter
 limiter = Limiter(key_func=get_remote_address)
