@@ -280,6 +280,33 @@ class UpdateLoginRecordRequest(BaseModel):
     last_login_at: Optional[datetime] = None
     province: Optional[str] = None
 
+# ------------------------- SĘDZIOWIE PER WOJEWÓDZTWO (BADGES) -------------------------
+
+class CreateProvinceJudgeRequest(BaseModel):
+    judge_id: str
+    full_name: str
+    province: str
+    badges: Optional[Any] = None  # domyślnie backend ustawi {}
+
+
+class UpdateProvinceJudgeRequest(BaseModel):
+    full_name: Optional[str] = None
+    province: Optional[str] = None
+    badges: Optional[Any] = None
+
+
+class ProvinceJudgeItem(BaseModel):
+    judge_id: str
+    full_name: str
+    province: str
+    badges: Any
+    updated_at: datetime
+
+
+class ListProvinceJudgesResponse(BaseModel):
+    records: list[ProvinceJudgeItem]
+
+
 class SetForcedLogoutRequest(BaseModel):
     logout_at: datetime  # ISO‑8601
 

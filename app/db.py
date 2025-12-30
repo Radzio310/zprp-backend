@@ -204,6 +204,22 @@ login_records = Table(
   Column("province", String, nullable=True),
 )
 
+# (13.1) Tabela sędziów per-województwo (z badge'ami)
+province_judges = Table(
+  "province_judges",
+  metadata,
+  Column("judge_id", String, primary_key=True),            # ID sędziego
+  Column("full_name", String, nullable=False),             # Imię i nazwisko
+  Column("province", String, nullable=False, index=True),  # Województwo
+  Column("badges", JSON, nullable=False, server_default="{}"),  # NOWE: JSON z badge'ami
+  Column(
+      "updated_at",
+      DateTime(timezone=True),
+      server_default=func.now(),
+      onupdate=func.now(),
+      nullable=False,
+  ),
+)
 
 # (14) Jednopolowa tabela z terminu wymuszonego wylogowania
 forced_logout = Table(

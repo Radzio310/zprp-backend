@@ -9,7 +9,8 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import delete
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -43,8 +44,9 @@ from app.agent_chat import router as agent_chat_router
 from app.upload_protocol import router as upload_protocol_router
 from app.password_change import router as password_change_router
 from app.baza_web import router as baza_web_router
+from app.province_judges import router as province_judges_router
 
-from app.db import database, saved_matches, short_result_records
+from app.db import database, saved_matches, short_result_records, login_records, province_judges
 
 app = FastAPI(title="BAZA - API")
 
@@ -100,6 +102,7 @@ app.include_router(agent_chat_router)
 app.include_router(upload_protocol_router)
 app.include_router(password_change_router)
 app.include_router(baza_web_router)
+app.include_router(province_judges_router)
 
 logger = logging.getLogger("uvicorn")
 
@@ -130,6 +133,58 @@ async def _cleanup_loop():
             logger.info(
                 f"🧹 ShortResult cleanup: removed {int(removed_sr or 0)} rows older than {cutoff_sr.isoformat()} UTC"
             )
+
+                        # ⬇⬇⬇ DODANE: Sync province_judges z login_records (raz na pętlę, domyślnie 24h) ⬇⬇⬇
+            # Zasada: jeśli login_records ma judge_id, którego nie ma w province_judges,
+            # to dopisz go (full_name + province z login_records, badges = {}).
+            lr_rows = await database.fetch_all(
+                select(
+                    login_records.c.judge_id,
+                    login_records.c.full_name,
+                    login_records.c.province,
+                )
+            )
+
+            pj_rows = await database.fetch_all(
+                select(province_judges.c.judge_id)
+            )
+            existing_ids = {r["judge_id"] for r in pj_rows}
+
+            to_insert = []
+            for r in lr_rows:
+                jid = (r["judge_id"] or "").strip()
+                if not jid or jid in existing_ids:
+                    continue
+
+                prov = (r["province"] or "").strip().upper()
+                if not prov:
+                    # jeśli nie ma województwa, pomijamy (albo możesz wpisać np. "UNKNOWN")
+                    continue
+
+                full_name = (r["full_name"] or "").strip()
+                if not full_name:
+                    # defensywnie: jeśli brak nazwiska, też pomiń
+                    continue
+
+                to_insert.append({
+                    "judge_id": jid,
+                    "full_name": full_name,
+                    "province": prov,
+                    "badges": {},
+                    "updated_at": datetime.now(timezone.utc),
+                })
+
+            inserted = 0
+            if to_insert:
+                # Wstawiamy idempotentnie
+                stmt_ins = pg_insert(province_judges).values(to_insert).on_conflict_do_nothing(
+                    index_elements=[province_judges.c.judge_id]
+                )
+                res = await database.execute(stmt_ins)
+                # `databases` bywa różne w zwrotach; logujmy po prostu len(to_insert)
+                inserted = len(to_insert)
+
+            logger.info(f"👥 ProvinceJudges sync: inserted {inserted} missing judges from login_records")
 
         except Exception as e:
             logger.exception("Cleanup loop error")
