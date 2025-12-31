@@ -6,6 +6,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -324,13 +325,18 @@ json_files = Table(
          server_default=func.now(), onupdate=func.now()),
 )
 
-# 18.1) Stawki okręgowe per województwo
+# 18.1) Stawki okręgowe per województwo (WERSJONOWANE)
 okreg_rates = Table(
     "okreg_rates",
     metadata,
-    Column("province", String, primary_key=True),  # np. "ŚLĄSKIE"
-    Column("content", JSON, nullable=False),       # pełny JSON stawek dla okręgu
+    Column("id", Integer, primary_key=True, autoincrement=True),  # NOWE PK
+    Column("province", String, nullable=False, index=True),       # już nie PK
+    Column("content", JSON, nullable=False),
+    # zachowujemy "enabled" jako aktywność (zgodność wsteczna)
     Column("enabled", Boolean, nullable=False, server_default=text("false")),
+    # NOWE: okres obowiązywania
+    Column("valid_from", Date, nullable=True),
+    Column("valid_to", Date, nullable=True),
     Column(
         "updated_at",
         DateTime(timezone=True),

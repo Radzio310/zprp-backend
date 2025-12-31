@@ -421,23 +421,64 @@ class UpsertJsonFileRequest(BaseModel):
     content: Any
     enabled: bool
 
-# ---------------- Stawki okręgowe (per-województwo) ----------------
+# ---------------- Stawki okręgowe (per-województwo) - WERSJONOWANE ----------------
+
 class OkregRateItem(BaseModel):
-    province: str          # np. "ŚLĄSKIE"
-    content: Any           # dowolny JSON (jak w Twoich plikach z aplikacji)
+    # NOWE (ale opcjonalne => zgodność wsteczna)
+    id: Optional[int] = None
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
+
+    province: str
+    content: Any
     enabled: bool
     updated_at: datetime
+
 
 class GetOkregRateResponse(BaseModel):
     file: OkregRateItem
 
+
 class ListOkregRatesResponse(BaseModel):
-    files: list[OkregRateItem]
+    files: List[OkregRateItem]
+
 
 class UpsertOkregRateRequest(BaseModel):
-    province: str          # musi zgadzać się z path param
+    """
+    Backward compatible:
+    - stare klienty wysyłają: province, content, enabled
+    - nowe mogą dodać: id, valid_from, valid_to
+    """
+    province: str
     content: Any
     enabled: bool = True
+
+    # NOWE (opcjonalne)
+    id: Optional[int] = None
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
+
+
+# --- Nowe modele do zarządzania wieloma wersjami (CRUD) ---
+
+class ListOkregRateVersionsResponse(BaseModel):
+    files: List[OkregRateItem]
+
+
+class CreateOkregRateVersionRequest(BaseModel):
+    province: str
+    content: Any
+    enabled: bool = True
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
+
+
+class UpdateOkregRateVersionRequest(BaseModel):
+    # province trzymamy w path; tu same pola modyfikowalne
+    content: Optional[Any] = None
+    enabled: Optional[bool] = None
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
 
 # ====== DISTANCES (okręgowe) ======
 

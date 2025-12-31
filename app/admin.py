@@ -7,10 +7,13 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import delete, insert, select, update
 import bcrypt
 from app.db import database, admin_pins, admin_settings, user_reports, admin_posts, forced_logout, forced_logout_rules, news_masters, calendar_masters, match_masters, teach_masters, zprp_masters, active_provinces, settlement_clubs, json_files, okreg_rates, okreg_distances, hall_reports, rejected_halls, app_versions
-from app.schemas import ActiveProvinceItem, AdminPostItem, CreateAdminPostRequest, CreateForcedLogoutRuleRequest, CreateHallReportRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, ForcedLogoutRuleItem, GenerateHashRequest, GenerateHashResponse, GetActiveProvinceResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, GetSettlementClubsResponse, HallReportItem, JsonFileItem, ListActiveProvincesResponse, ListAdminPostsResponse, ListForcedLogoutRulesResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRatesResponse, ListSettlementClubsResponse, ListUserReportsResponse, ListVersionsResponse, ListZprpMastersResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, SettlementClubsItem, UpdateMastersRequest, UpdateVersionRequest, UpdateZprpMastersRequest, UpsertActiveProvinceRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UpsertSettlementClubsRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
+from app.schemas import ActiveProvinceItem, AdminPostItem, CreateAdminPostRequest, CreateForcedLogoutRuleRequest, CreateHallReportRequest, CreateOkregRateVersionRequest, CreateUserReportRequest, CreateVersionRequest, ForcedLogoutResponse, ForcedLogoutRuleItem, GenerateHashRequest, GenerateHashResponse, GetActiveProvinceResponse, GetJsonFileResponse, GetOkregDistanceResponse, GetOkregRateResponse, GetSettlementClubsResponse, HallReportItem, JsonFileItem, ListActiveProvincesResponse, ListAdminPostsResponse, ListForcedLogoutRulesResponse, ListHallReportsResponse, ListJsonFilesResponse, ListMastersResponse, ListOkregDistancesResponse, ListOkregRateVersionsResponse, ListOkregRatesResponse, ListSettlementClubsResponse, ListUserReportsResponse, ListVersionsResponse, ListZprpMastersResponse, OkregDistanceItem, OkregRateItem, SetForcedLogoutRequest, SettlementClubsItem, UpdateMastersRequest, UpdateVersionRequest, UpdateZprpMastersRequest, UpsertActiveProvinceRequest, UpsertJsonFileRequest, UpsertOkregDistanceRequest, UpsertOkregRateRequest, UpsertSettlementClubsRequest, UserReportItem, ValidatePinRequest, ValidatePinResponse, UpdatePinRequest, UpdateAdminsRequest, ListAdminsResponse, UpsertContactJudgeRequest, UpsertContactJudgeResponse, VersionItem
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import unicodedata
 import difflib
+from datetime import date, datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+from sqlalchemy import and_, or_
 
 
 # Wczytujemy hash z env
@@ -1972,81 +1975,334 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
         )
     )
 
+# --- OKREG RATES (wersjonowane, backward compatible) ---
+
+def _warsaw_today() -> date:
+    try:
+        return datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Warsaw")).date()
+    except Exception:
+        return date.today()
+
+def _parse_content(raw):
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return raw
+
+def _is_effective(row: dict, today: date) -> bool:
+    if not bool(row.get("enabled")):
+        return False
+    vf = row.get("valid_from")
+    vt = row.get("valid_to")
+    if vf is not None and vf > today:
+        return False
+    if vt is not None and vt < today:
+        return False
+    return True
+
+def _pick_best(rows: list[dict]) -> dict | None:
+    """
+    Prefer:
+    - większy valid_from (NULL traktujemy jak date.min => legacy przegrywa z wersją datowaną)
+    - potem większy updated_at
+    """
+    if not rows:
+        return None
+    def k(r: dict):
+        vf = r.get("valid_from") or date.min
+        ua = r.get("updated_at") or datetime.min
+        return (vf, ua)
+    rows_sorted = sorted(rows, key=k, reverse=True)
+    return rows_sorted[0]
+
+def _row_to_item(r: dict) -> OkregRateItem:
+    return OkregRateItem(
+        id=r.get("id"),
+        province=r["province"],
+        content=_parse_content(r["content"]),
+        enabled=bool(r["enabled"]),
+        valid_from=r.get("valid_from"),
+        valid_to=r.get("valid_to"),
+        updated_at=r["updated_at"],
+    )
+
 @router.get(
     "/okreg_rates",
     response_model=ListOkregRatesResponse,
-    summary="Lista plików stawek okręgowych (per-województwo)"
+    summary="Lista stawek okręgowych (domyślnie: aktualnie obowiązujące per województwo)"
 )
 async def list_okreg_rates():
-    rows = await database.fetch_all(select(okreg_rates))
-    files = [
-        OkregRateItem(
-            province=r["province"],
-            content=r["content"] if isinstance(r["content"], (dict, list)) else json.loads(r["content"]),
-            enabled=r["enabled"],
-            updated_at=r["updated_at"],
-        )
-        for r in rows
-    ]
-    return ListOkregRatesResponse(files=files)
+    today = _warsaw_today()
+
+    # Pobierz kandydatów, którzy mogą być aktualni
+    q = select(okreg_rates).where(
+        okreg_rates.c.enabled == True,
+        or_(okreg_rates.c.valid_from == None, okreg_rates.c.valid_from <= today),
+        or_(okreg_rates.c.valid_to == None, okreg_rates.c.valid_to >= today),
+    )
+    rows = [dict(r) for r in await database.fetch_all(q)]
+
+    # Zgrupuj per province i wybierz najlepszy (1 rekord / province)
+    by_prov: dict[str, list[dict]] = {}
+    for r in rows:
+        by_prov.setdefault(r["province"], []).append(r)
+
+    out: list[OkregRateItem] = []
+    for prov, items in by_prov.items():
+        best = _pick_best(items)
+        if best:
+            out.append(_row_to_item(best))
+
+    # deterministyczna kolejność
+    out.sort(key=lambda x: x.province)
+    return ListOkregRatesResponse(files=out)
+
+
+@router.get(
+    "/okreg_rates/all",
+    response_model=ListOkregRateVersionsResponse,
+    summary="Lista WSZYSTKICH wersji stawek (admin/debug)"
+)
+async def list_okreg_rates_all(province: str = ""):
+    q = select(okreg_rates)
+    if province:
+        q = q.where(okreg_rates.c.province == province.strip().upper())
+    q = q.order_by(okreg_rates.c.province.asc(), okreg_rates.c.updated_at.desc())
+    rows = [dict(r) for r in await database.fetch_all(q)]
+    return ListOkregRateVersionsResponse(files=[_row_to_item(r) for r in rows])
+
 
 @router.get(
     "/okreg_rates/{province}",
     response_model=GetOkregRateResponse,
-    summary="Pobierz stawki okręgowe dla danego województwa"
+    summary="Pobierz AKTUALNIE obowiązujące stawki okręgowe dla województwa (backward compatible)"
 )
 async def get_okreg_rate(province: str):
-    province = province.upper()
-    row = await database.fetch_one(select(okreg_rates).where(okreg_rates.c.province == province))
-    if not row:
-        raise HTTPException(404, "Nie znaleziono pliku dla tego województwa")
-    raw = row["content"]
-    parsed = raw if isinstance(raw, (dict, list)) else json.loads(raw)
-    return GetOkregRateResponse(
-        file=OkregRateItem(
-            province=row["province"],
-            content=parsed,
-            enabled=row["enabled"],
-            updated_at=row["updated_at"],
-        )
+    today = _warsaw_today()
+    prov = province.strip().upper()
+
+    q = select(okreg_rates).where(okreg_rates.c.province == prov)
+    rows = [dict(r) for r in await database.fetch_all(q)]
+
+    effective = [r for r in rows if _is_effective(r, today)]
+    best = _pick_best(effective)
+
+    if not best:
+        raise HTTPException(404, "Nie znaleziono aktywnych stawek dla tego województwa na dzisiaj")
+
+    return GetOkregRateResponse(file=_row_to_item(best))
+
+
+@router.get(
+    "/okreg_rates/{province}/versions",
+    response_model=ListOkregRateVersionsResponse,
+    summary="Lista wszystkich wersji stawek dla województwa"
+)
+async def list_okreg_rate_versions(province: str):
+    prov = province.strip().upper()
+    q = (
+        select(okreg_rates)
+        .where(okreg_rates.c.province == prov)
+        .order_by(okreg_rates.c.updated_at.desc())
     )
+    rows = [dict(r) for r in await database.fetch_all(q)]
+    return ListOkregRateVersionsResponse(files=[_row_to_item(r) for r in rows])
+
+
+@router.post(
+    "/okreg_rates/{province}/versions",
+    response_model=GetOkregRateResponse,
+    summary="Utwórz nową wersję stawek dla województwa (wersjonowanie)"
+)
+async def create_okreg_rate_version(province: str, req: CreateOkregRateVersionRequest):
+    prov = province.strip().upper()
+    if req.province.strip().upper() != prov:
+        raise HTTPException(400, "Province mismatch")
+
+    today = _warsaw_today()
+    vf = req.valid_from
+    vt = req.valid_to
+
+    if vf is None and vt is not None:
+        # jeśli ktoś podał tylko valid_to, przyjmij "od dziś"
+        vf = today
+    if vf is not None and vt is not None and vt < vf:
+        raise HTTPException(400, "valid_to nie może być wcześniejsze niż valid_from")
+
+    # insert
+    ins = (
+        insert(okreg_rates)
+        .values(
+            province=prov,
+            content=req.content,
+            enabled=req.enabled,
+            valid_from=vf,
+            valid_to=vt,
+        )
+        .returning(okreg_rates.c.id)
+    )
+    new_id = await database.fetch_val(ins)
+
+    # auto-zamykanie poprzednich otwartych, żeby “od jutra stare nie były aktywne”
+    if vf is not None:
+        close_to = vf - timedelta(days=1)
+        await database.execute(
+            update(okreg_rates)
+            .where(
+                okreg_rates.c.province == prov,
+                okreg_rates.c.id != new_id,
+                okreg_rates.c.enabled == True,
+                # nachodzenie na start nowej wersji:
+                or_(okreg_rates.c.valid_to == None, okreg_rates.c.valid_to >= vf),
+                or_(okreg_rates.c.valid_from == None, okreg_rates.c.valid_from <= vf),
+            )
+            .values(valid_to=close_to)
+        )
+
+    # zwróć “aktualną” (może być stara, jeśli vf jest w przyszłości)
+    return await get_okreg_rate(prov)
+
 
 @router.put(
     "/okreg_rates/{province}",
     response_model=GetOkregRateResponse,
-    summary="Utwórz lub zaktualizuj stawki okręgowe dla województwa"
+    summary="Backward compatible upsert: bez id -> legacy; z id -> update wersji; z datami bez id -> tworzy nową wersję"
 )
 async def upsert_okreg_rate(province: str, req: UpsertOkregRateRequest):
-    if req.province.upper() != province.upper():
+    prov = province.strip().upper()
+    if req.province.strip().upper() != prov:
         raise HTTPException(400, "Province mismatch")
 
-    province = province.upper()
+    today = _warsaw_today()
 
-    stmt = pg_insert(okreg_rates).values(
-        province=province,
-        content=req.content,
-        enabled=req.enabled,
-    ).on_conflict_do_update(
-        index_elements=[okreg_rates.c.province],
-        set_={"content": req.content, "enabled": req.enabled}
-    )
-    try:
-        await database.execute(stmt)
-    except Exception as e:
-        raise HTTPException(500, detail=f"SQL ERROR upsert_okreg_rate: {e!r}")
-
-    row = await database.fetch_one(select(okreg_rates).where(okreg_rates.c.province == province))
-    raw = row["content"]
-    parsed = raw if isinstance(raw, (dict, list)) else json.loads(raw)
-
-    return GetOkregRateResponse(
-        file=OkregRateItem(
-            province=row["province"],
-            content=parsed,
-            enabled=row["enabled"],
-            updated_at=row["updated_at"],
+    # 1) UPDATE konkretnej wersji po ID
+    if req.id is not None:
+        # pobierz istniejący
+        row = await database.fetch_one(
+            select(okreg_rates).where(and_(okreg_rates.c.id == req.id, okreg_rates.c.province == prov))
         )
+        if not row:
+            raise HTTPException(404, "Nie znaleziono wersji o takim id dla tego województwa")
+
+        values = {"content": req.content, "enabled": req.enabled}
+        # valid_* nadpisuj tylko jeśli podane (stare klienty nie podają)
+        if req.valid_from is not None:
+            values["valid_from"] = req.valid_from
+        if req.valid_to is not None:
+            values["valid_to"] = req.valid_to
+
+        # walidacja zakresu, jeśli oba finalnie są znane
+        final_vf = values.get("valid_from", row["valid_from"])
+        final_vt = values.get("valid_to", row["valid_to"])
+        if final_vf is not None and final_vt is not None and final_vt < final_vf:
+            raise HTTPException(400, "valid_to nie może być wcześniejsze niż valid_from")
+
+        await database.execute(
+            update(okreg_rates)
+            .where(okreg_rates.c.id == req.id)
+            .values(**values)
+        )
+        return await get_okreg_rate(prov)
+
+    # 2) Jeśli nie ma id, ale są daty -> tworzymy NOWĄ wersję (bez psucia legacy)
+    if req.valid_from is not None or req.valid_to is not None:
+        create_req = CreateOkregRateVersionRequest(
+            province=req.province,
+            content=req.content,
+            enabled=req.enabled,
+            valid_from=req.valid_from,
+            valid_to=req.valid_to,
+        )
+        return await create_okreg_rate_version(prov, create_req)
+
+    # 3) Legacy upsert (stare zachowanie): valid_from/to NULL, jeden rekord na province
+    legacy = await database.fetch_one(
+        select(okreg_rates)
+        .where(
+            okreg_rates.c.province == prov,
+            okreg_rates.c.valid_from == None,
+            okreg_rates.c.valid_to == None,
+        )
+        .order_by(okreg_rates.c.updated_at.desc())
+        .limit(1)
     )
+
+    if legacy:
+        await database.execute(
+            update(okreg_rates)
+            .where(okreg_rates.c.id == legacy["id"])
+            .values(content=req.content, enabled=req.enabled)
+        )
+    else:
+        await database.execute(
+            insert(okreg_rates).values(
+                province=prov,
+                content=req.content,
+                enabled=req.enabled,
+                valid_from=None,
+                valid_to=None,
+            )
+        )
+
+    return await get_okreg_rate(prov)
+
+
+@router.put(
+    "/okreg_rates/{province}/versions/{rate_id}",
+    response_model=GetOkregRateResponse,
+    summary="Update konkretnej wersji stawek (explicit)"
+)
+async def update_okreg_rate_version(province: str, rate_id: int, req: UpdateOkregRateVersionRequest):
+    prov = province.strip().upper()
+
+    row = await database.fetch_one(
+        select(okreg_rates).where(and_(okreg_rates.c.id == rate_id, okreg_rates.c.province == prov))
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono wersji")
+
+    values = {}
+    if req.content is not None:
+        values["content"] = req.content
+    if req.enabled is not None:
+        values["enabled"] = req.enabled
+    if req.valid_from is not None:
+        values["valid_from"] = req.valid_from
+    if req.valid_to is not None:
+        values["valid_to"] = req.valid_to
+
+    if not values:
+        return await get_okreg_rate(prov)
+
+    final_vf = values.get("valid_from", row["valid_from"])
+    final_vt = values.get("valid_to", row["valid_to"])
+    if final_vf is not None and final_vt is not None and final_vt < final_vf:
+        raise HTTPException(400, "valid_to nie może być wcześniejsze niż valid_from")
+
+    await database.execute(
+        update(okreg_rates).where(okreg_rates.c.id == rate_id).values(**values)
+    )
+    return await get_okreg_rate(prov)
+
+
+@router.delete(
+    "/okreg_rates/{province}/versions/{rate_id}",
+    response_model=dict,
+    summary="Usuń wersję stawek (uwaga: może zmienić 'aktualną' wersję)"
+)
+async def delete_okreg_rate_version(province: str, rate_id: int):
+    prov = province.strip().upper()
+    result = await database.execute(
+        delete(okreg_rates).where(and_(okreg_rates.c.id == rate_id, okreg_rates.c.province == prov))
+    )
+    if not result:
+        raise HTTPException(404, "Nie znaleziono wersji")
+    return {"success": True}
+
 
 # === Okręgowe tabele odległości (identyczne zachowanie jak okreg_rates) ===
 
