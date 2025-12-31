@@ -45,6 +45,7 @@ from app.upload_protocol import router as upload_protocol_router
 from app.password_change import router as password_change_router
 from app.baza_web import router as baza_web_router
 from app.province_judges import router as province_judges_router
+from app.badges import router as badges_router
 
 from app.db import database, saved_matches, short_result_records, login_records, province_judges
 
@@ -103,6 +104,7 @@ app.include_router(upload_protocol_router)
 app.include_router(password_change_router)
 app.include_router(baza_web_router)
 app.include_router(province_judges_router)
+app.include_router(badges_router)
 
 logger = logging.getLogger("uvicorn")
 

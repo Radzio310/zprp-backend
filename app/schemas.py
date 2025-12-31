@@ -306,6 +306,25 @@ class ProvinceJudgeItem(BaseModel):
 class ListProvinceJudgesResponse(BaseModel):
     records: list[ProvinceJudgeItem]
 
+# ---------------------------- BADGES (definicje) ----------------------------
+
+class CreateBadgeRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    meta_json: Any = Field(default_factory=dict, description="Charakterystyka badge'a jako JSON")
+
+class UpdateBadgeRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    meta_json: Optional[Any] = None
+
+class BadgeItem(BaseModel):
+    id: int
+    name: str
+    meta_json: Any
+    updated_at: datetime
+
+class ListBadgesResponse(BaseModel):
+    badges: List[BadgeItem]
+
 
 class SetForcedLogoutRequest(BaseModel):
     logout_at: datetime  # ISO‑8601

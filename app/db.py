@@ -221,6 +221,16 @@ province_judges = Table(
   ),
 )
 
+# 13.2) Badge sędziów okręgowych
+badges = Table(
+    "badges",
+    metadata,
+    Column("id", Integer, primary_key=True, index=True),
+    Column("name", String, nullable=False, unique=True, index=True),
+    Column("meta_json", JSONB, nullable=False, server_default="{}"),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
 # (14) Jednopolowa tabela z terminu wymuszonego wylogowania
 forced_logout = Table(
     "forced_logout",
