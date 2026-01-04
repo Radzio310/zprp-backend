@@ -716,19 +716,26 @@ async def create_okreg_rate_version(province: str, req: CreateOkregRateVersionRe
 )
 async def update_okreg_rate_version(province: str, rate_id: int, req: UpdateOkregRateVersionRequest):
     prov = province.strip().upper()
-    row = await database.fetch_one(select(okreg_rates).where(and_(okreg_rates.c.id == rate_id, okreg_rates.c.province == prov)))
+    row = await database.fetch_one(
+        select(okreg_rates).where(and_(okreg_rates.c.id == rate_id, okreg_rates.c.province == prov))
+    )
     if not row:
         raise HTTPException(404, "Nie znaleziono wersji")
 
     values: Dict[str, Any] = {}
-    if req.content is not None:
+
+    # Pydantic v1:
+    fields = getattr(req, "__fields_set__", set())
+    # (Jeśli masz Pydantic v2, daj: fields = getattr(req, "model_fields_set", set()))
+
+    if "content" in fields:
         values["content"] = req.content
-    if req.enabled is not None:
+    if "enabled" in fields:
         values["enabled"] = req.enabled
-    if req.valid_from is not None:
+    if "valid_from" in fields:
         values["valid_from"] = req.valid_from
-    if req.valid_to is not None:
-        values["valid_to"] = req.valid_to
+    if "valid_to" in fields:
+        values["valid_to"] = req.valid_to   # <-- TO MOŻE BYĆ None i ma trafić do DB jako NULL
 
     if not values:
         return await get_okreg_rate(prov)
@@ -780,10 +787,12 @@ async def upsert_okreg_rate(province: str, req: UpsertOkregRateRequest):
             raise HTTPException(404, "Nie znaleziono wersji o takim id dla tego województwa")
 
         values: Dict[str, Any] = {"content": req.content, "enabled": req.enabled}
-        if req.valid_from is not None:
+
+        fields = getattr(req, "__fields_set__", set())
+        if "valid_from" in fields:
             values["valid_from"] = req.valid_from
-        if req.valid_to is not None:
-            values["valid_to"] = req.valid_to
+        if "valid_to" in fields:
+            values["valid_to"] = req.valid_to   # może być None -> zapisze NULL
 
         final_vf = values.get("valid_from", row["valid_from"])
         final_vt = values.get("valid_to", row["valid_to"])
