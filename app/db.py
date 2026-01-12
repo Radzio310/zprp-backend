@@ -17,7 +17,8 @@ from sqlalchemy import (
     create_engine,
     func,
     text,
-    inspect
+    inspect,
+    Index
 )
 from databases import Database
 from sqlalchemy.dialects.postgresql import JSONB
@@ -85,7 +86,7 @@ announcements = Table(
 )
 
 
-# 5) Tabela “kalendarz niedyspozycji” Silesia
+# 5) Tabela “kalendarz niedyspozycji” okręgowej
 silesia_offtimes = Table(
   "silesia_offtimes",
   metadata,
@@ -385,6 +386,18 @@ young_referee_ratings = Table(
     Column("young_referee2_id", Integer, nullable=True, index=True),
     Column("rating_json", JSON, nullable=False),                 # JSON z oceną
 )
+
+# 18.5) Szablony ocen młodych sędziów per województwo
+young_referee_rating_templates = Table(
+    "young_referee_rating_templates",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, unique=True, index=True),
+    Column("template_json", JSON, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+Index("ix_yrrt_province", young_referee_rating_templates.c.province)
 
 # 19) Hale
 hall_reports = Table(

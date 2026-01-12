@@ -1,7 +1,7 @@
 # app/young_referees.py
 
 from datetime import datetime, timezone
-from typing import Optional, Any, Dict
+from typing import List, Optional, Any, Dict
 import json
 
 from fastapi import APIRouter, HTTPException, status
@@ -11,6 +11,7 @@ from app.db import (
     database,
     young_referees,
     young_referee_ratings,
+    young_referee_rating_templates,
 )
 from app.schemas import (
     CreateYoungRefereeRequest,
@@ -21,6 +22,8 @@ from app.schemas import (
     UpdateYoungRefereeRatingRequest,
     YoungRefereeRatingItem,
     ListYoungRefereeRatingsResponse,
+    YoungRefereeRatingTemplateOut,
+    YoungRefereeRatingTemplateUpsert,
 )
 
 router = APIRouter(
@@ -493,3 +496,203 @@ async def delete_young_referee_rating(rating_id: int):
     if not result:
         raise HTTPException(status_code=404, detail="Ocena nie znaleziona")
     return {"success": True}
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+def _normalize_province(p: str) -> str:
+    return (p or "").strip().upper()
+
+def _default_rating_template(province: str) -> dict:
+    """
+    Domyślny (legacy-compatible) szablon, odpowiadający Twojemu dotychczasowemu formularzowi.
+    Uwaga: to jest tylko fallback gdy brak konfiguracji dla województwa.
+    """
+    prov = _normalize_province(province)
+    return {
+        "version": 1,
+        "province": prov,
+        "title": "Szablon oceny młodego sędziego",
+        "sections": [
+            {
+                "id": "sec_details",
+                "title": "Oceny szczegółowe",
+                "items": [
+                    {"id": "overall_impression", "type": "scale5", "label": "Ogólne wrażenie pracy sędziego", "weight": 1.0, "legacyKey": "overall_impression"},
+                    {"id": "engagement", "type": "scale5", "label": "Zaangażowanie (przed, w trakcie i po meczu)", "weight": 1.0, "legacyKey": "engagement"},
+                    {"id": "decision_making", "type": "scale5", "label": "Zdolność do podejmowania decyzji", "weight": 1.0, "legacyKey": "decision_making"},
+                    {"id": "personal_culture", "type": "scale5", "label": "Kultura osobista w kontakcie z uczestnikami", "weight": 1.0, "legacyKey": "personal_culture"},
+                    {"id": "stress_handling", "type": "scale5", "label": "Radzenie sobie ze stresem", "weight": 1.0, "legacyKey": "stress_handling"},
+                    {"id": "rules_knowledge", "type": "scale5", "label": "Znajomość i rozumienie przepisów gry", "weight": 1.0, "legacyKey": "rules_knowledge"},
+                    {"id": "competence_diff", "type": "scale5", "label": "Rozróżnienie kompetencji sędziów na boisku", "weight": 1.0, "legacyKey": "competence_diff"},
+                ],
+            },
+            {
+                "id": "sec_org",
+                "title": "Organizacja i przygotowanie",
+                "items": [
+                    {
+                        "id": "arrival_time",
+                        "type": "choice",
+                        "label": "Czas przybycia na mecz (ile przed?)",
+                        "weight": 1.0,
+                        "legacyKey": "arrival_time",
+                        "choices": [
+                            {"id": ">=30", "label": "≥30 minut"},
+                            {"id": "30-15", "label": "30–15 minut"},
+                            {"id": "<15", "label": "Mniej niż 15 minut"},
+                        ],
+                        "order": [">=30", "30-15", "<15"],  # best -> worst
+                    },
+                    {
+                        "id": "preparation",
+                        "type": "choice",
+                        "label": "Przygotowanie sędziego do zawodów",
+                        "weight": 1.0,
+                        "legacyKey": "preparation",
+                        "choices": [
+                            {"id": "ok", "label": "Prawidłowe, posiadał wszystkie niezbędne przybory"},
+                            {"id": "other", "label": "Inne (doprecyzuj poniżej)"},
+                        ],
+                        "order": ["ok", "other"],
+                        "extra": {
+                            "otherTextItemId": "preparation_other_text",
+                            "legacyOtherKey": "preparation_other",
+                        },
+                    },
+                    {
+                        "id": "precheck_protocol",
+                        "type": "choice",
+                        "label": "Sprawdzenie protokołu przed zawodami",
+                        "weight": 1.0,
+                        "legacyKey": "precheck_protocol",
+                        "choices": [
+                            {"id": "yes", "label": "Tak"},
+                            {"id": "no", "label": "Nie"},
+                        ],
+                        "order": ["yes", "no"],
+                    },
+                    {
+                        "id": "postcheck_protocol",
+                        "type": "choice",
+                        "label": "Sprawdzenie protokołu po zawodach",
+                        "weight": 1.0,
+                        "legacyKey": "postcheck_protocol",
+                        "choices": [
+                            {"id": "yes", "label": "Tak"},
+                            {"id": "partial", "label": "Tak, ale wyłącznie pobieżnie"},
+                            {"id": "no", "label": "Nie"},
+                        ],
+                        "order": ["yes", "partial", "no"],
+                    },
+                ],
+            },
+            {
+                "id": "sec_notes",
+                "title": "Dodatkowe uwagi / spostrzeżenia",
+                "items": [
+                    {"id": "comments", "type": "text", "label": "Uwagi", "weight": 0.0, "legacyKey": "comments"}
+                ],
+            },
+        ],
+    }
+
+@router.get("/rating_templates", response_model=List[YoungRefereeRatingTemplateOut])
+async def list_rating_templates():
+    rows = await database.fetch_all(young_referee_rating_templates.select().order_by(young_referee_rating_templates.c.province.asc()))
+    out: List[YoungRefereeRatingTemplateOut] = []
+    for r in rows:
+        out.append(
+            YoungRefereeRatingTemplateOut(
+                id=r["id"],
+                province=r["province"],
+                template=r["template_json"],
+                updated_at=r["updated_at"],
+            )
+        )
+    return out
+
+@router.get("/rating_templates/{province}", response_model=YoungRefereeRatingTemplateOut)
+async def get_rating_template(province: str):
+    prov = _normalize_province(province)
+    row = await database.fetch_one(
+        young_referee_rating_templates.select().where(young_referee_rating_templates.c.province == prov)
+    )
+    if not row:
+        # fallback – zwracamy domyślny template (nie zapisujemy)
+        tpl = _default_rating_template(prov)
+        return YoungRefereeRatingTemplateOut(
+            id=0,
+            province=prov,
+            template=tpl,
+            updated_at=_utcnow(),
+        )
+
+    return YoungRefereeRatingTemplateOut(
+        id=row["id"],
+        province=row["province"],
+        template=row["template_json"],
+        updated_at=row["updated_at"],
+    )
+
+@router.put("/rating_templates/{province}", response_model=YoungRefereeRatingTemplateOut)
+async def upsert_rating_template(province: str, req: YoungRefereeRatingTemplateUpsert):
+    prov = _normalize_province(province or req.province)
+    if not prov:
+        raise HTTPException(status_code=400, detail="province is required")
+
+    now = _utcnow()
+    existing = await database.fetch_one(
+        young_referee_rating_templates.select().where(young_referee_rating_templates.c.province == prov)
+    )
+
+    payload = {
+        "province": prov,
+        "template_json": req.template,
+        "updated_at": now,
+    }
+
+    if existing:
+        await database.execute(
+            young_referee_rating_templates.update()
+            .where(young_referee_rating_templates.c.province == prov)
+            .values(**payload)
+        )
+        row = await database.fetch_one(
+            young_referee_rating_templates.select().where(young_referee_rating_templates.c.province == prov)
+        )
+        return YoungRefereeRatingTemplateOut(
+            id=row["id"],
+            province=row["province"],
+            template=row["template_json"],
+            updated_at=row["updated_at"],
+        )
+
+    new_id = await database.execute(young_referee_rating_templates.insert().values(**payload))
+    row = await database.fetch_one(
+        young_referee_rating_templates.select().where(young_referee_rating_templates.c.province == prov)
+    )
+    return YoungRefereeRatingTemplateOut(
+        id=row["id"] if row else int(new_id or 0),
+        province=prov,
+        template=(row["template_json"] if row else req.template),
+        updated_at=(row["updated_at"] if row else now),
+    )
+
+@router.delete("/rating_templates/{province}")
+async def delete_rating_template(province: str):
+    prov = _normalize_province(province)
+    if not prov:
+        raise HTTPException(status_code=400, detail="province is required")
+
+    existing = await database.fetch_one(
+        young_referee_rating_templates.select().where(young_referee_rating_templates.c.province == prov)
+    )
+    if not existing:
+        # idempotent
+        return {"ok": True}
+
+    await database.execute(
+        young_referee_rating_templates.delete().where(young_referee_rating_templates.c.province == prov)
+    )
+    return {"ok": True}

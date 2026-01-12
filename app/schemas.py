@@ -609,6 +609,16 @@ class YoungRefereeRatingItem(BaseModel):
 class ListYoungRefereeRatingsResponse(BaseModel):
     records: List[YoungRefereeRatingItem]
 
+class YoungRefereeRatingTemplateOut(BaseModel):
+    id: int
+    province: str
+    template: Any = Field(..., description="JSON szablonu oceny")
+    updated_at: datetime
+
+class YoungRefereeRatingTemplateUpsert(BaseModel):
+    province: str
+    template: Any = Field(..., description="JSON szablonu oceny")
+
 # ------------------------- PROEL SAVED MATCHES -------------------------
 class CreateSavedMatchRequest(BaseModel):
     match_number: str
