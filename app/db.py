@@ -517,6 +517,39 @@ agent_document_chunks = Table(
     Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
 )
 
-# Tworzymy tabele przy starcie
+# -------------------------
+# NEW: Push (tokens + schedules)
+# -------------------------
+
+push_tokens = Table(
+    "push_tokens",
+    metadata,
+    Column("installation_id", String, primary_key=True),
+    Column("token_type", String, nullable=False),  # device_fcm | device_apns | unknown
+    Column("token", Text, nullable=False),
+    Column("platform", String, nullable=True),     # ios | android | web
+    Column("app_variant", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+push_schedules = Table(
+    "push_schedules",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("installation_id", String, nullable=False, index=True),
+    Column("send_at_utc", DateTime(timezone=True), nullable=False, index=True),
+    Column("send_hour_utc", Integer, nullable=False, index=True),  # floor(timestamp/3600)
+    Column("title", String, nullable=False),
+    Column("body", Text, nullable=False),
+    Column("data_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("status", String, nullable=False, server_default=text("'pending'")),  # pending|sent|failed
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+Index("ix_push_sched_install_hour", push_schedules.c.installation_id, push_schedules.c.send_hour_utc)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

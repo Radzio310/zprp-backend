@@ -5,5 +5,7 @@
 __pycache__/
 *.py[cod]
 
-# Lokalne env
+# Lokalne
 .env
+service-account.json
+PUSH_ADMIN_KEY.txt

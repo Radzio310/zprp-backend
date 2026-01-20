@@ -47,24 +47,26 @@ from app.baza_web import router as baza_web_router
 from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
 
+# NEW: push router + scheduler
+from app.push.push import router as push_router
+from app.push.scheduler import run_push_scheduler
+
 from app.db import database, saved_matches, short_result_records, login_records, province_judges
 
 app = FastAPI(title="BAZA - API")
 
-# CORS: pozwól na Web dev server (Expo/React Native Web)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "http://localhost:8081",
-    "http://127.0.0.1:8081",
-    "https://baza-web-two.vercel.app",
-],
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+        "https://baza-web-two.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# opcjonalny rate‑limiter
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
@@ -77,11 +79,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         content={"error": exc.detail},
     )
 
-# ensure the static/ folder exists before mounting
 os.makedirs(os.path.join(os.path.dirname(__file__), "static"), exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# rejestracja Twoich routerów
 app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(edit_router)
@@ -106,21 +106,21 @@ app.include_router(baza_web_router)
 app.include_router(province_judges_router)
 app.include_router(badges_router)
 
+# NEW: push router
+app.include_router(push_router)
+
 logger = logging.getLogger("uvicorn")
 
 _cleanup_task: asyncio.Task | None = None
+_push_task: asyncio.Task | None = None
 
 async def _cleanup_loop():
-    """Kasuje mecze z ProEl starsze niż PROEL_RETENTION_DAYS (domyślnie 7) co 24h."""
     retention_days = int(os.getenv("PROEL_RETENTION_DAYS", "7"))
     interval_sec = int(os.getenv("PROEL_CLEANUP_INTERVAL_SECONDS", str(24*60*60)))
-
-    # ⬇⬇⬇ DODANE: retencja short result (domyślnie 10 dni, można nadpisać env-em) ⬇⬇⬇
     short_result_retention_days = int(os.getenv("SHORT_RESULT_RETENTION_DAYS", "10"))
 
     while True:
         try:
-            # ProEl
             cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
             stmt = delete(saved_matches).where(saved_matches.c.updated_at < cutoff)
             removed = await database.execute(stmt)
@@ -128,7 +128,6 @@ async def _cleanup_loop():
                 f"🧹 ProEl cleanup: removed {int(removed or 0)} rows older than {cutoff.isoformat()} UTC"
             )
 
-            # ⬇⬇⬇ DODANE: short_result_records ⬇⬇⬇
             cutoff_sr = datetime.now(timezone.utc) - timedelta(days=short_result_retention_days)
             stmt_sr = delete(short_result_records).where(short_result_records.c.created_at < cutoff_sr)
             removed_sr = await database.execute(stmt_sr)
@@ -136,9 +135,6 @@ async def _cleanup_loop():
                 f"🧹 ShortResult cleanup: removed {int(removed_sr or 0)} rows older than {cutoff_sr.isoformat()} UTC"
             )
 
-                        # ⬇⬇⬇ DODANE: Sync province_judges z login_records (raz na pętlę, domyślnie 24h) ⬇⬇⬇
-            # Zasada: jeśli login_records ma judge_id, którego nie ma w province_judges,
-            # to dopisz go (full_name + province z login_records, badges = {}).
             lr_rows = await database.fetch_all(
                 select(
                     login_records.c.judge_id,
@@ -147,9 +143,7 @@ async def _cleanup_loop():
                 )
             )
 
-            pj_rows = await database.fetch_all(
-                select(province_judges.c.judge_id)
-            )
+            pj_rows = await database.fetch_all(select(province_judges.c.judge_id))
             existing_ids = {r["judge_id"] for r in pj_rows}
 
             to_insert = []
@@ -160,12 +154,10 @@ async def _cleanup_loop():
 
                 prov = (r["province"] or "").strip().upper()
                 if not prov:
-                    # jeśli nie ma województwa, pomijamy (albo możesz wpisać np. "UNKNOWN")
                     continue
 
                 full_name = (r["full_name"] or "").strip()
                 if not full_name:
-                    # defensywnie: jeśli brak nazwiska, też pomiń
                     continue
 
                 to_insert.append({
@@ -178,70 +170,76 @@ async def _cleanup_loop():
 
             inserted = 0
             if to_insert:
-                # Wstawiamy idempotentnie
                 stmt_ins = pg_insert(province_judges).values(to_insert).on_conflict_do_nothing(
                     index_elements=[province_judges.c.judge_id]
                 )
-                res = await database.execute(stmt_ins)
-                # `databases` bywa różne w zwrotach; logujmy po prostu len(to_insert)
+                await database.execute(stmt_ins)
                 inserted = len(to_insert)
 
             logger.info(f"👥 ProvinceJudges sync: inserted {inserted} missing judges from login_records")
 
-        except Exception as e:
+        except Exception:
             logger.exception("Cleanup loop error")
         await asyncio.sleep(interval_sec)
-
 
 @app.on_event("startup")
 async def startup():
     await database.connect()
     logger.info("✅ Connected to the database")
-    global _cleanup_task
+
+    global _cleanup_task, _push_task
     _cleanup_task = asyncio.create_task(_cleanup_loop())
+
+    # NEW: background scheduler for push queue
+    _push_task = asyncio.create_task(run_push_scheduler())
+    logger.info("✅ Push scheduler started")
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task
+    global _cleanup_task, _push_task
+
     if _cleanup_task:
         _cleanup_task.cancel()
         try:
             await _cleanup_task
         except asyncio.CancelledError:
             pass
+
+    if _push_task:
+        _push_task.cancel()
+        try:
+            await _push_task
+        except asyncio.CancelledError:
+            pass
+
     await database.disconnect()
     logger.info("✅ Disconnected from the database")
 
-
-# prosty healthcheck
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-# —————————— Nowy endpoint: pobranie publicznego klucza RSA ——————————
 @app.get(
     "/public_key",
     response_class=PlainTextResponse,
     summary="Pobierz publiczny klucz RSA używany do szyfrowania",
 )
 async def public_key_endpoint(
-    keys=Depends(get_rsa_keys),  # get_rsa_keys zwraca (private_key, public_key)
+    keys=Depends(get_rsa_keys),
 ):
     _, public_key = keys
     pem_bytes = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    # zwracamy czysty PEM jako tekst
     return pem_bytes.decode("utf-8")
 
-# —————————— Nowy endpoint: pobranie GROQ_API_KEY z Railway variables ——————————
 security = HTTPBearer()
 
 class SpeechToTextRequest(BaseModel):
     audio_base64: str
-    filename: str | None = None  # opcjonalnie, jakbyś chciał kiedyś podawać
-    language: str | None = None  # np. "pl"
+    filename: str | None = None
+    language: str | None = None
 
 @app.get(
     "/groq_key",
@@ -256,7 +254,7 @@ async def groq_key_endpoint(
     groq_key = os.getenv("GROQ_API_KEY")
     if not groq_key:
         raise HTTPException(status_code=404, detail="Brak GROQ_API_KEY w środowisku")
-    
+
     return {"GROQ_API_KEY": groq_key}
 
 @app.post(
@@ -266,30 +264,18 @@ async def groq_key_endpoint(
 async def speech_to_text_endpoint(payload: SpeechToTextRequest):
     groq_key = os.getenv("GROQ_API_KEY")
     if not groq_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Brak GROQ_API_KEY w środowisku",
-        )
+        raise HTTPException(status_code=500, detail="Brak GROQ_API_KEY w środowisku")
 
-    # dekodowanie base64 z payloadu z appki mobilnej
     try:
         audio_bytes = base64.b64decode(payload.audio_base64)
     except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="Nieprawidłowe pole audio_base64 (błąd dekodowania base64)",
-        )
+        raise HTTPException(status_code=400, detail="Nieprawidłowe pole audio_base64 (błąd dekodowania base64)")
 
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
     filename = payload.filename or "audio.m4a"
 
-    headers = {
-        "Authorization": f"Bearer {groq_key}",
-    }
-    data = {
-        "model": "whisper-large-v3-turbo",
-        "response_format": "json",
-    }
+    headers = {"Authorization": f"Bearer {groq_key}"}
+    data = {"model": "whisper-large-v3-turbo", "response_format": "json"}
     if payload.language:
         data["language"] = payload.language
 
@@ -303,31 +289,19 @@ async def speech_to_text_endpoint(payload: SpeechToTextRequest):
             )
 
         if resp.status_code >= 400:
-            logger.error(
-                "Groq STT error %s: %s",
-                resp.status_code,
-                resp.text[:500],
-            )
-            raise HTTPException(
-                status_code=502,
-                detail="Błąd podczas przetwarzania mowy (Groq STT)",
-            )
+            logger.error("Groq STT error %s: %s", resp.status_code, resp.text[:500])
+            raise HTTPException(status_code=502, detail="Błąd podczas przetwarzania mowy (Groq STT)")
 
         result = resp.json()
     except HTTPException:
-        # przepuszczamy nasze własne HTTPException
         raise
     except Exception:
         logger.exception("Groq STT request failed")
-        raise HTTPException(
-            status_code=502,
-            detail="Nie udało się połączyć z usługą STT",
-        )
+        raise HTTPException(status_code=502, detail="Nie udało się połączyć z usługą STT")
 
     text = (result.get("text") or "").strip()
     return {"text": text}
 
-# —————————— Custom OpenAPI (HTTP Bearer only) ——————————
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -336,7 +310,6 @@ def custom_openapi():
         version="1.0.0",
         routes=app.routes,
     )
-    # Definicja Bearer JWT
     schema["components"]["securitySchemes"] = {
         "bearerAuth": {
             "type": "http",
@@ -344,12 +317,10 @@ def custom_openapi():
             "bearerFormat": "JWT",
         }
     }
-    # Dodajemy wymaganie bearerAuth do wszystkich operacji
     for path in schema["paths"].values():
         for op in path.values():
             op.setdefault("security", []).append({"bearerAuth": []})
     app.openapi_schema = schema
     return app.openapi_schema
 
-# podmieniamy metodę generującą OpenAPI
 app.openapi = custom_openapi
