@@ -21,6 +21,10 @@ from fastapi import Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import base64
 import httpx
+import re
+import unicodedata
+from collections import Counter, defaultdict
+from sqlalchemy import text as sql_text
 
 from app.deps import get_rsa_keys
 from app.auth import router as auth_router
@@ -51,7 +55,7 @@ from app.badges import router as badges_router
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
 
-from app.db import database, saved_matches, short_result_records, login_records, province_judges
+from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files
 
 app = FastAPI(title="BAZA - API")
 
@@ -110,6 +114,314 @@ app.include_router(badges_router)
 app.include_router(push_router)
 
 logger = logging.getLogger("uvicorn")
+
+# =========================
+# Contacts refactor (clubs)
+# =========================
+
+# Advisory lock key (stała liczba) — chroni przed równoległym refaktorem w wielu instancjach
+_CONTACTS_CLUB_REFACTOR_LOCK_KEY = 987654321
+
+_last_contacts_refactor_utc_day: str | None = None  # np. "2026-01-21"
+
+
+def _norm_text_key(s: str) -> str:
+    """Normalizacja tekstu: trim, upper, usuń diakrytyki, spacje wielokrotne."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")  # usuń diakrytyki
+    s = s.upper()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+
+
+def _extract_emails(raw: str) -> list[str]:
+    if not raw:
+        return []
+    found = _EMAIL_RE.findall(raw)
+    out = []
+    for e in found:
+        ee = e.strip().lower()
+        if ee and ee not in out:
+            out.append(ee)
+    return out
+
+
+def _normalize_phone_token(tok: str) -> tuple[str, str] | None:
+    """
+    Normalizuje pojedynczy token telefonu.
+    Zwraca (dedupe_key_digits, display_value).
+    - dedupe_key_digits: tylko cyfry (np. "48123456789")
+    - display_value: "+48123456789" jeśli było +, inaczej "123456789"
+    """
+    if not tok:
+        return None
+
+    t = tok.strip()
+    if not t:
+        return None
+
+    has_plus = "+" in t
+    digits = re.sub(r"\D+", "", t)  # tylko cyfry
+    # minimalny sensowny telefon — możesz podnieść do 7/8 jeśli chcesz
+    if len(digits) < 6:
+        return None
+
+    display = f"+{digits}" if has_plus else digits
+    return (digits, display)
+
+
+def _extract_phones(raw: str) -> list[str]:
+    """
+    Wyciąga telefony z dowolnego stringa:
+    - rozcina po ; , | \n
+    - dodatkowo wyciąga sekwencje cyfr z "dziwnych" zapisów
+    """
+    if not raw:
+        return []
+
+    chunks = re.split(r"[;\n,\|]+", raw)
+    candidates: list[str] = []
+
+    for ch in chunks:
+        c = (ch or "").strip()
+        if not c:
+            continue
+
+        # jeśli chunk ma dużo "śmieci", spróbuj znaleźć sekwencje które wyglądają jak tel
+        # bierzemy fragmenty zawierające co najmniej 6 cyfr łącznie
+        # (np. "tel: 123 456 789" albo "123-456-789")
+        if re.search(r"\d", c):
+            candidates.append(c)
+
+    # normalizacja + dedupe po samych cyfrach
+    seen_digits: set[str] = set()
+    out: list[str] = []
+
+    for cand in candidates:
+        norm = _normalize_phone_token(cand)
+        if not norm:
+            continue
+        digits, display = norm
+        if digits in seen_digits:
+            continue
+        seen_digits.add(digits)
+        out.append(display)
+
+    return out
+
+
+def _pick_best_field(values: list[str]) -> str:
+    """
+    Wybiera najlepszą wartość pola (np. city) z listy:
+    - preferuj najczęściej występującą niepustą,
+    - przy remisie preferuj najdłuższą.
+    """
+    cleaned = [v.strip() for v in values if (v or "").strip()]
+    if not cleaned:
+        return ""
+    cnt = Counter(cleaned)
+    best = sorted(cnt.items(), key=lambda x: (-x[1], -len(x[0])))[0][0]
+    return best
+
+
+def _merge_club_group(items: list[dict]) -> dict:
+    """
+    Łączy rekordy klubu w jeden:
+    - name: preferuj najczęściej występującą / najdłuższą niepustą
+    - city: jw.
+    - phone/email: zbierz, znormalizuj, dedupe, join ";"
+    - zachowaj role/isReferee/isTeam jako KLUB/False/True
+    - surname: zostaw (zwykle puste), ale jeśli coś jest, wybierz "best"
+    """
+    names = [str(x.get("name", "") or "").strip() for x in items]
+    surnames = [str(x.get("surname", "") or "").strip() for x in items]
+    cities = [str(x.get("city", "") or "").strip() for x in items]
+    roles = [str(x.get("role", "") or "").strip() for x in items]
+
+    # Telefony i maile zbieramy z całych pól, bo mogą być sklejone ";"
+    phones_all: list[str] = []
+    emails_all: list[str] = []
+    for it in items:
+        phones_all.extend(_extract_phones(str(it.get("phone", "") or "")))
+        emails_all.extend(_extract_emails(str(it.get("email", "") or "")))
+
+    # dedupe już robiliśmy w extractorach, ale tu defensywnie:
+    phones_uniq = []
+    seen_p = set()
+    for p in phones_all:
+        d = re.sub(r"\D+", "", p)
+        if not d or d in seen_p:
+            continue
+        seen_p.add(d)
+        phones_uniq.append(p)
+
+    emails_uniq = []
+    seen_e = set()
+    for e in emails_all:
+        ee = (e or "").strip().lower()
+        if not ee or ee in seen_e:
+            continue
+        seen_e.add(ee)
+        emails_uniq.append(ee)
+
+    merged = {
+        "name": _pick_best_field(names),
+        "surname": _pick_best_field(surnames),  # zwykle ""
+        "phone": ";".join(phones_uniq),
+        "email": ";".join(emails_uniq),
+        "city": _pick_best_field(cities),
+        "role": "KLUB",        # twardo
+        "isReferee": False,    # twardo
+        "isTeam": True,        # twardo
+    }
+
+    # jeśli role w danych bywa "klub" lub inne — nie przenosimy, bo utrzymujemy "KLUB"
+    return merged
+
+
+async def refactor_club_contacts_once_per_utc_day():
+    """
+    Raz na dobę (UTC) scala duplikaty klubów o tej samej nazwie (po normalizacji).
+    Nie dotyka rekordów sędziów (isTeam==False).
+    """
+    global _last_contacts_refactor_utc_day
+
+    now_utc = datetime.now(timezone.utc)
+    today_key = now_utc.strftime("%Y-%m-%d")
+
+    if _last_contacts_refactor_utc_day == today_key:
+        return  # już było dzisiaj w tej instancji
+
+    # Postgres advisory lock (jeśli masz kilka instancji)
+    got_lock = False
+    try:
+        got_lock = bool(
+            await database.fetch_val(
+                sql_text("SELECT pg_try_advisory_lock(:k)"),
+                {"k": _CONTACTS_CLUB_REFACTOR_LOCK_KEY},
+            )
+        )
+    except Exception:
+        logger.exception("[contacts.refactor] advisory lock check failed")
+        got_lock = False
+
+    if not got_lock:
+        # ktoś inny już robi / zrobił — nie ryzykuj równoległej modyfikacji
+        return
+
+    try:
+        row = await database.fetch_one(select(json_files).where(json_files.c.key == "kontakty"))
+        if not row:
+            _last_contacts_refactor_utc_day = today_key
+            return
+
+        enabled = bool(row["enabled"])
+        raw = row["content"]
+
+        # content może być listą (JSON) albo stringiem
+        contacts = raw if isinstance(raw, list) else None
+        if contacts is None:
+            try:
+                import json as _json
+                contacts = _json.loads(raw) if isinstance(raw, str) else []
+            except Exception:
+                logger.warning("[contacts.refactor] contacts content is not valid JSON list")
+                _last_contacts_refactor_utc_day = today_key
+                return
+
+        if not isinstance(contacts, list):
+            logger.warning("[contacts.refactor] contacts content is not a list")
+            _last_contacts_refactor_utc_day = today_key
+            return
+
+        # Rozdziel: sędziowie bez zmian vs kluby do refaktoru
+        judges: list[dict] = []
+        clubs: list[dict] = []
+
+        for c in contacts:
+            if not isinstance(c, dict):
+                continue
+            is_team = bool(c.get("isTeam", False))
+            # klub: isTeam True; sędzia: isTeam False
+            if is_team:
+                clubs.append(c)
+            else:
+                judges.append(c)
+
+        if not clubs:
+            _last_contacts_refactor_utc_day = today_key
+            return
+
+        # Grupowanie po znormalizowanej nazwie klubu
+        by_name: dict[str, list[dict]] = defaultdict(list)
+        singles: list[dict] = []
+
+        for c in clubs:
+            name = str(c.get("name", "") or "").strip()
+            nk = _norm_text_key(name)
+            if not nk:
+                # brak nazwy → zostaw bez zmian (nie da się sensownie scalać)
+                singles.append(c)
+                continue
+            by_name[nk].append(c)
+
+        merged_clubs: list[dict] = []
+        removed_count = 0
+        merged_groups = 0
+
+        for nk, group in by_name.items():
+            if len(group) <= 1:
+                merged_clubs.append(group[0])
+                continue
+
+            # Jest duplikat po nazwie → scalać
+            merged_groups += 1
+            removed_count += (len(group) - 1)
+            merged_clubs.append(_merge_club_group(group))
+
+        # Dodaj rekordy bez nazwy (singles)
+        merged_clubs.extend(singles)
+
+        # Finalny contacts: sędziowie + nowe kluby
+        new_contacts = judges + merged_clubs
+
+        # Zapisz tylko jeśli faktycznie coś się zmieniło (duplikaty)
+        if merged_groups > 0:
+            stmt = (
+                pg_insert(json_files)
+                .values(key="kontakty", content=new_contacts, enabled=enabled)
+                .on_conflict_do_update(
+                    index_elements=[json_files.c.key],
+                    set_={"content": new_contacts, "enabled": enabled},
+                )
+            )
+            await database.execute(stmt)
+
+            logger.info(
+                f"🧩 Contacts refactor (clubs): merged_groups={merged_groups}, removed={removed_count}, "
+                f"clubs_before={len(clubs)}, clubs_after={len(merged_clubs)}, total_after={len(new_contacts)}"
+            )
+
+        _last_contacts_refactor_utc_day = today_key
+
+    except Exception:
+        logger.exception("[contacts.refactor] failed")
+        # nie ustawiamy _last... żeby spróbować kolejnym razem
+    finally:
+        try:
+            await database.execute(
+                sql_text("SELECT pg_advisory_unlock(:k)"),
+                {"k": _CONTACTS_CLUB_REFACTOR_LOCK_KEY},
+            )
+        except Exception:
+            # jeśli unlock się nie uda, lock i tak zwolni się po zamknięciu połączenia
+            pass
 
 _cleanup_task: asyncio.Task | None = None
 _push_task: asyncio.Task | None = None
@@ -177,6 +489,8 @@ async def _cleanup_loop():
                 inserted = len(to_insert)
 
             logger.info(f"👥 ProvinceJudges sync: inserted {inserted} missing judges from login_records")
+            # 🧩 Raz na dobę: scal duplikaty klubów w 'kontakty' (sędziów nie ruszamy)
+            await refactor_club_contacts_once_per_utc_day()
 
         except Exception:
             logger.exception("Cleanup loop error")
