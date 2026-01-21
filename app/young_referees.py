@@ -12,10 +12,12 @@ from app.db import (
     young_referees,
     young_referee_ratings,
     young_referee_rating_templates,
+    young_referee_ratings_visibility,
 )
 from app.schemas import (
     CreateYoungRefereeRequest,
     UpdateYoungRefereeRequest,
+    UpsertYoungRefereeRatingsVisibilityRequest,
     YoungRefereeItem,
     ListYoungRefereesResponse,
     CreateYoungRefereeRatingRequest,
@@ -24,6 +26,7 @@ from app.schemas import (
     ListYoungRefereeRatingsResponse,
     YoungRefereeRatingTemplateOut,
     YoungRefereeRatingTemplateUpsert,
+    YoungRefereeRatingsVisibilityItem,
 )
 
 router = APIRouter(
@@ -696,3 +699,102 @@ async def delete_rating_template(province: str):
         young_referee_rating_templates.delete().where(young_referee_rating_templates.c.province == prov)
     )
     return {"ok": True}
+
+@router.get(
+    "/ratings_visibility/{province}",
+    response_model=YoungRefereeRatingsVisibilityItem,
+    summary="Pobierz ustawienie: czy młodzi sędziowie widzą oceny (per województwo)",
+)
+async def get_ratings_visibility(province: str):
+    prov = _normalize_province(province)
+    if not prov:
+        raise HTTPException(status_code=400, detail="province is required")
+
+    row = await database.fetch_one(
+        select(young_referee_ratings_visibility).where(
+            young_referee_ratings_visibility.c.province == prov
+        )
+    )
+
+    # Jeśli brak rekordu — traktujemy jak disabled
+    if not row:
+        return YoungRefereeRatingsVisibilityItem(
+            province=prov,
+            enabled=False,
+            updated_at=_utcnow(),
+        )
+
+    return YoungRefereeRatingsVisibilityItem(
+        province=row["province"],
+        enabled=bool(row["enabled"]),
+        updated_at=row["updated_at"],
+    )
+
+
+@router.get(
+    "/ratings_visibility",
+    response_model=List[YoungRefereeRatingsVisibilityItem],
+    summary="Lista ustawień widoczności ocen (wszystkie województwa)",
+)
+async def list_ratings_visibility():
+    rows = await database.fetch_all(
+        select(young_referee_ratings_visibility).order_by(
+            young_referee_ratings_visibility.c.province.asc()
+        )
+    )
+    return [
+        YoungRefereeRatingsVisibilityItem(
+            province=r["province"],
+            enabled=bool(r["enabled"]),
+            updated_at=r["updated_at"],
+        )
+        for r in rows
+    ]
+
+
+@router.put(
+    "/ratings_visibility/{province}",
+    response_model=YoungRefereeRatingsVisibilityItem,
+    summary="Upsert ustawienia widoczności ocen (per województwo)",
+)
+async def upsert_ratings_visibility(
+    province: str, req: UpsertYoungRefereeRatingsVisibilityRequest
+):
+    prov = _normalize_province(province or req.province)
+    if not prov:
+        raise HTTPException(status_code=400, detail="province is required")
+
+    now = _utcnow()
+
+    existing = await database.fetch_one(
+        select(young_referee_ratings_visibility.c.province).where(
+            young_referee_ratings_visibility.c.province == prov
+        )
+    )
+
+    payload = {
+        "province": prov,
+        "enabled": bool(req.enabled),
+        "updated_at": now,
+    }
+
+    if existing:
+        await database.execute(
+            update(young_referee_ratings_visibility)
+            .where(young_referee_ratings_visibility.c.province == prov)
+            .values(**payload)
+        )
+    else:
+        await database.execute(insert(young_referee_ratings_visibility).values(**payload))
+
+    row = await database.fetch_one(
+        select(young_referee_ratings_visibility).where(
+            young_referee_ratings_visibility.c.province == prov
+        )
+    )
+
+    return YoungRefereeRatingsVisibilityItem(
+        province=row["province"],
+        enabled=bool(row["enabled"]),
+        updated_at=row["updated_at"],
+    )

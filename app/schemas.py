@@ -619,6 +619,20 @@ class YoungRefereeRatingTemplateUpsert(BaseModel):
     province: str
     template: Any = Field(..., description="JSON szablonu oceny")
 
+# ---------------------------------
+# MŁODZI SĘDZIOWIE – WIDOCZNOŚĆ OCEN (per województwo)
+# ---------------------------------
+
+class YoungRefereeRatingsVisibilityItem(BaseModel):
+    province: str
+    enabled: bool
+    updated_at: datetime
+
+class UpsertYoungRefereeRatingsVisibilityRequest(BaseModel):
+    province: str
+    enabled: bool = True
+
+
 # ------------------------- PROEL SAVED MATCHES -------------------------
 class CreateSavedMatchRequest(BaseModel):
     match_number: str

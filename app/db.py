@@ -399,6 +399,23 @@ young_referee_rating_templates = Table(
 
 Index("ix_yrrt_province", young_referee_rating_templates.c.province)
 
+# 18.6) Widoczność ocen dla młodych sędziów (per województwo)
+young_referee_ratings_visibility = Table(
+    "young_referee_ratings_visibility",
+    metadata,
+    Column("province", String, primary_key=True),  # np. "ŚLĄSKIE"
+    Column("enabled", Boolean, nullable=False, server_default=text("false")),  # czy młodzi widzą oceny
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
+Index("ix_yrrv_province", young_referee_ratings_visibility.c.province)
+
 # 19) Hale
 hall_reports = Table(
     "hall_reports",
