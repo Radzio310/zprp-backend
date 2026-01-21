@@ -24,7 +24,6 @@ import httpx
 import re
 import unicodedata
 from collections import Counter, defaultdict
-from sqlalchemy import text as sql_text
 
 from app.deps import get_rsa_keys
 from app.auth import router as auth_router
@@ -303,7 +302,7 @@ async def refactor_club_contacts_once_per_utc_day():
     try:
         got_lock = bool(
             await database.fetch_val(
-                sql_text("SELECT pg_try_advisory_lock(:k)"),
+                "SELECT pg_try_advisory_lock(:k)",
                 {"k": _CONTACTS_CLUB_REFACTOR_LOCK_KEY},
             )
         )
@@ -416,7 +415,7 @@ async def refactor_club_contacts_once_per_utc_day():
     finally:
         try:
             await database.execute(
-                sql_text("SELECT pg_advisory_unlock(:k)"),
+                "SELECT pg_advisory_unlock(:k)",
                 {"k": _CONTACTS_CLUB_REFACTOR_LOCK_KEY},
             )
         except Exception:
