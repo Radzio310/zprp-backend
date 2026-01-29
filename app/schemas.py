@@ -259,6 +259,7 @@ class CreateLoginRecordRequest(BaseModel):
     app_opens: Optional[int] = None
     last_open_at: Optional[datetime] = None
     province: Optional[str] = None
+    config_json: Optional[Any] = None
 
 class LoginRecordItem(BaseModel):
     judge_id: str
@@ -268,6 +269,7 @@ class LoginRecordItem(BaseModel):
     app_opens: Optional[int] = None
     last_open_at: Optional[datetime] = None
     province: Optional[str] = None
+    config_json: Any = Field(default_factory=dict)
 
 class ListLoginRecordsResponse(BaseModel):
     records: list[LoginRecordItem]
@@ -279,6 +281,7 @@ class UpdateLoginRecordRequest(BaseModel):
     last_open_at: Optional[datetime] = None
     last_login_at: Optional[datetime] = None
     province: Optional[str] = None
+    config_json: Optional[Any] = None
 
 # ------------------------- SĘDZIOWIE PER WOJEWÓDZTWO (BADGES) -------------------------
 

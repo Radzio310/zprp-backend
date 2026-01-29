@@ -204,6 +204,13 @@ login_records = Table(
   Column("app_opens", Integer, nullable=True),             # licznik wejść
   Column("last_open_at", DateTime(timezone=True), nullable=True),  # data ostatniego wejścia
   Column("province", String, nullable=True),
+    # ✅ NOWE: JSON z konfiguracją użytkownika (np. dane urządzenia / ustawienia)
+  Column(
+      "config_json",
+      JSONB,
+      nullable=False,
+      server_default=text("'{}'::jsonb"),
+  ),
 )
 
 # (13.1) Tabela sędziów per-województwo (z badge'ami)

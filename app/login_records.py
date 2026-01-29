@@ -25,9 +25,8 @@ async def upsert_login(req: CreateLoginRecordRequest):
     """
     Wstawia lub uaktualnia rekord ostatniego logowania.
     - Zawsze nadpisuje: full_name, last_login_at
-    - Nadpisuje app_version / last_open_at / province tylko, jeśli zostały przesłane (COALESCE na EXCLUDED)
-    - app_opens inkrementuje o wartość z payloadu (tu w praktyce wysyłasz już policzoną liczbę,
-      ale logika pozostaje kompatybilna z inkrementem)
+    - Nadpisuje app_version / last_open_at / province / config_json tylko, jeśli zostały przesłane (COALESCE na EXCLUDED)
+    - app_opens inkrementuje o wartość z payloadu (zwykle 1)
     """
     now = datetime.now(timezone.utc)
 
@@ -39,7 +38,8 @@ async def upsert_login(req: CreateLoginRecordRequest):
             app_version=req.app_version,
             app_opens=req.app_opens,
             last_open_at=req.last_open_at,
-            province=req.province,  # ✅ NOWE
+            province=req.province,
+            config_json=req.config_json,  # ✅ NOWE
         )
 
         stmt = stmt.on_conflict_do_update(
@@ -55,9 +55,12 @@ async def upsert_login(req: CreateLoginRecordRequest):
                 "last_open_at": func.coalesce(
                     stmt.excluded.last_open_at, login_records.c.last_open_at
                 ),
-                # ✅ NOWE: tylko gdy przesłane
                 "province": func.coalesce(
                     stmt.excluded.province, login_records.c.province
+                ),
+                # ✅ NOWE: tylko gdy przesłane
+                "config_json": func.coalesce(
+                    stmt.excluded.config_json, login_records.c.config_json
                 ),
             },
         )
@@ -118,10 +121,12 @@ async def patch_login_record(judge_id: str, body: UpdateLoginRecordRequest):
         update_data["last_open_at"] = body.last_open_at
     if body.last_login_at is not None:
         update_data["last_login_at"] = body.last_login_at
-
-    # ✅ NOWE
     if body.province is not None:
         update_data["province"] = body.province
+
+    # ✅ NOWE
+    if body.config_json is not None:
+        update_data["config_json"] = body.config_json
 
     if not update_data:
         raise HTTPException(status_code=400, detail="Brak pól do aktualizacji")
@@ -153,7 +158,8 @@ async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
         app_version=req.app_version,
         app_opens=req.app_opens,
         last_open_at=req.last_open_at,
-        province=req.province,  # ✅ NOWE
+        province=req.province,
+        config_json=req.config_json,  # ✅ NOWE
     )
 
     stmt = stmt.on_conflict_do_update(
@@ -164,8 +170,9 @@ async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
             "app_version": func.coalesce(stmt.excluded.app_version, login_records.c.app_version),
             "app_opens": func.coalesce(stmt.excluded.app_opens, login_records.c.app_opens),
             "last_open_at": func.coalesce(stmt.excluded.last_open_at, login_records.c.last_open_at),
-            # ✅ NOWE
             "province": func.coalesce(stmt.excluded.province, login_records.c.province),
+            # ✅ NOWE
+            "config_json": func.coalesce(stmt.excluded.config_json, login_records.c.config_json),
         },
     )
 
