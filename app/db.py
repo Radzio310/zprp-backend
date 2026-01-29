@@ -466,7 +466,7 @@ calendar_events = Table(
            server_default=func.now(), nullable=False),
 )
 
-# 21) ProEl - zapisane mecze stolikowe
+# 21) ProEl - Mecze rozegrane w ProElu
 saved_matches = Table(
     "proel_matches", metadata,
     Column("match_number", String, primary_key=True, index=True),

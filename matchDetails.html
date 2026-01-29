@@ -1,0 +1,2211 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+    <meta http-equiv="Expires" content="0" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+    <meta http-equiv="Cache-Control" content="post-check=0, pre-check=0" />
+    <meta http-equiv="Pragma" content="no-cache" />
+
+    <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-2" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <title>ZPRP</title>
+    <link rel="stylesheet" href="config/styl.css" type="text/css" />
+
+    <script src="JSCal/src/js/jscal2.js"></script>
+    <script src="JSCal/src/js/lang/pl.js"></script>
+    <link rel="stylesheet" type="text/css" href="JSCal/src/css/jscal2.css" />
+    <link rel="stylesheet" type="text/css" href="JSCal/src/css/border-radius.css" />
+    <link rel="stylesheet" type="text/css" href="JSCal/src/css/steel/steel.css" />
+    <link rel="shortcut icon" href="pliki/favicon.ico" />
+    <script type="text/javascript" src="Jq/jquery-1.11.2.min.js"></script>
+</head>
+
+<body>
+    <script type="text/javascript" src="js/xlsx.js"></script>
+    <script type="text/javascript" src="js/FileSaver.js"></script>
+    <script>
+        function s2ab(s) {
+            if (typeof ArrayBuffer !== 'undefined') {
+                var buf = new ArrayBuffer(s.length);
+                var view = new Uint8Array(buf);
+                for (var i = 0; i != s.length; ++i) view[i] = s.charCodeAt(i) & 0xFF;
+                return buf;
+            } else {
+                var buf = new Array(s.length);
+                for (var i = 0; i != s.length; ++i) buf[i] = s.charCodeAt(i) & 0xFF;
+                return buf;
+            }
+        }
+
+
+        function export_table_to_excel(id, type, fn) {
+            var wb = XLSX.utils.table_to_book(document.getElementById(id), {
+                sheet: "Sheet JS"
+            });
+            var wbout = XLSX.write(wb, {
+                bookType: type,
+                bookSST: true,
+                type: 'binary'
+            });
+            var fname = fn || 'Tabela.' + type;
+            try {
+                saveAs(new Blob([s2ab(wbout)], {
+                    type: "application/octet-stream"
+                }), fname);
+            } catch (e) {
+                if (typeof console != 'undefined') console.log(e, wbout);
+            }
+            return wbout;
+        }
+
+        function doit(type, fn) {
+            return export_table_to_excel('table', type || 'xlsx', fn);
+        }
+    </script>
+
+
+
+    <script type="text/javascript" src="wz_tooltip/wz_tooltip.js"></script>
+    <script language="javascript">
+        function maskujKlawisze(AEvent, AMaska) {
+            if (window.Event) {
+                kodKlawisza = AEvent.which;
+            } else {
+                kodKlawisza = AEvent.keyCode;
+            }
+
+            if (kodKlawisza == 13) {
+                return true; // Enter
+            };
+            if (kodKlawisza == 8) {
+                return true; // Backspace
+            };
+
+
+            if (kodKlawisza == 0) {
+                return true; // klawisze sterujące
+            };
+
+            klawisz = String.fromCharCode(kodKlawisza);
+
+            if (AMaska.indexOf(klawisz) == -1) {
+                return false;
+            } else {
+                return true;
+            }
+        }
+
+        function capitalize(str) {
+            var tempArray = str.split(' ');
+            for (var i = 0; i < tempArray.length; i++) {
+                tempArray[i] = tempArray[i].substr(0, 1).toUpperCase() + tempArray[i].substr(1).toLowerCase();
+                // tempArray[i] = tempArray[i].charAt(0).toUpperCase() + tempArray[i].substring(1);
+            }
+            return tempArray.join(' ');
+        }
+
+        function Kod_pocztowy(wartosc) {
+            if (wartosc.value.length == 2 && wartosc.value.indexOf('-') == -1) wartosc.value += '-';
+        }
+
+        function Czas(wartosc) {
+            if (wartosc.value.length == 2 && wartosc.value.indexOf(':') == -1) wartosc.value += ':';
+        }
+    </SCRIPT>
+
+    <table width="100%" border="0" style="height:100%">
+        <tr>
+            <td>
+                <table border="0">
+                    <tr>
+                        <td align="right" valign="top" colspan="3">
+                            <font style="font-family:Arial">
+                                <a href="http://rozgrywki.zprp.pl/api/" title="API" target="_blank">API</a> |
+                                <a href="http://rozgrywki.zprp.pl?Sezon=194" title="rozgrywki.zprp.pl" target="_blank">rozgrywki.zprp.pl</a> |
+                                <small>Sezon[H]: </small> 2025/2026 |
+                                <small>Sezon[P]: </small> 2024/2025 |
+                                <small>Zalogowany: </small>Radosław WITKOWICZ | <small>Delegat/sędzia: </small> WITKOWICZ Radosław | <a href="?a=konto">konto</a> | <small>
+ <span id="session-warning" style="display:blok">
+    Sesja wygaśnie za <span id="session-time"></span>
+    <button class="przycisk" onClick="refreshSession()">Przedłuż</button>
+</span> | <a href="login.php?def=logout">wyloguj</a></font>
+
+<script>
+const WARNING_AT = 60; // sekundy
+let lastRemaining = null;
+
+function formatTime(sec) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function checkSession() {
+    fetch('/session_status.php', { cache: 'no-store' })
+        .then(r => r.json())
+        .then(data => {
+
+            if (!data.logged) {
+                localStorage.setItem('logout', Date.now());
+                window.location.href = "/index.php?a=zawody&b=protokol&Filtr_sezon=194&IdRozgr=11683&IdRundy=29407&IdZawody=193947";
+                return;
+            }
+
+            lastRemaining = data.remaining;
+            document.getElementById('session-time').textContent =
+                formatTime(data.remaining);
+
+            if (data.remaining <= WARNING_AT) {
+                document.getElementById('session-warning').style.color = 'red';
+            } else {
+                document.getElementById('session-warning').style.color = 'black';
+            }
+        });
+}
+
+// przedłużenie = ping
+function refreshSession() {
+    fetch('/session_guard.php', { method: 'POST' })
+        .then(() => checkSession());
+}
+
+// synchronizacja między kartami
+window.addEventListener('storage', e => {
+    if (e.key === 'logout') {
+        window.location.href = "/index.php?a=zawody&b=protokol&Filtr_sezon=194&IdRozgr=11683&IdRundy=29407&IdZawody=193947";
+    }
+});
+
+// polling
+checkSession();
+setInterval(checkSession, 1000);
+</script>
+
+
+</td>
+ 
+ </tr>
+  <tr>
+    <td align="left" width="5%"><a href="http://www.zprp.pl/" title="Związek Piłki Ręcznej w Polsce" target="_blank"><img src="pliki/logo.jpg" /></a></td>
+    <td align="left"><a href="http://www.zprp.pl/" title="Związek Piłki Ręcznej w Polsce" target="_blank"><img src="pliki/zprp.png" /></a>
+	
+	</td>
+	<td align="right" width="5%">
+	<!--<img src="pliki/ZPRP_100_300.png" width="150" /> -->
+	<!--<a href="https://handball23.com/" target="_blank"><img src="pliki/SPECIAL_PRIMARY_FORM_HORIZONTAL.png" height="150" /></a> -->
+	
+	</td>
+  </tr>
+</table>	</td>
+  </tr>
+
+  
+  
+  <tr>
+    <td align="left">
+<hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />
+<a style="vertical-align:bottom" href="index.php" title="Strona początkowa" target="_self"><img style="vertical-align:bottom" src="pliki/domek.png" height="20" border="0" /></a>
+	<a href="?a=zawody&amp;Filtr_sezon=194&amp;IdRozgr=11683&amp;IdRundy=29407" class="przycisk2">Zawody</a>
+	<a href="?a=statystyki&amp;b=sedzia&amp;NrSedzia=5124&amp;Filtr_sezon=194"  class="przycisk" >Statystyki</a>
+	
+	<a href="?a=sedzia&amp;b=edycja&amp;NrSedzia=5124"  class="przycisk" >Edycja danych</a>
+	<a href="?a=sedzia&amp;b=off"  class="przycisk" >Niedyspozycyjność</a>
+	<a href="?a=sedzia&amp;b=doku"  class="przycisk" >Dokumenty</a>	
+	
+</td>
+  </tr>
+
+  <tr>
+    <td align="left" valign="top" style="height:400px">
+<hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />
+<script type="text/javascript" src="zawody_zapisz.js"></script>
+<script type="text/javascript" src="zawody_zapisz2.js"></script>
+<script type="text/javascript" src="zawody_zapisz3.js"></script>
+<script type="text/javascript" src="zawody_zapisz4.js"></script>
+<script type="text/javascript" src="zawody_zapisz5.js"></script>
+<script type="text/javascript" src="zawody_zapisz6.js"></script>
+<script type="text/javascript" src="zawody_zapisz_pr.js"></script>
+<script>
+var elems='';
+var Lp = 0;
+
+function enter()
+{
+
+}
+
+function przeniesFocus(e)
+{
+//jezeli to jakies gecko podobne cudo to pobieramy kod klawisza dla neigo
+   if (!document.all){   klawisz = e.which;
+//jezeli produkt z redmond to odpowiedni kodzik
+   } else {      klawisz = window.event.keyCode;}
+//jezeli ktos wcisnal ENTER to przechodzimy dalej
+    // if (klawisz == 13) enter();
+	// if (klawisz == 13) alert(elems+Lp); 
+	// if (klawisz == 13) document.getElementById(elems+Lp).focus();
+	if (klawisz == 13) document.getElementById(elems+Lp).select();
+}
+function setEnterCounter(nazwa,Lp1){
+ elems = nazwa;
+ Lp = Lp1;
+}
+document.onkeydown = przeniesFocus;
+</script>
+
+<table border="1" frame="void" rules="rows" cellpadding="3" cellspacing="0" style="font-size:12px; font-family:Arial;" >
+<tr>
+ <td colspan="3" style="font-size:9px; color:#CCCCCC">
+ 
+ 
+ </td>
+</tr>
+<tr><td colspan="3">
+<table align="left" cellspacing="2" style="font-size:12px; font-family:Arial;">
+<tr>
+ <td align="right">
+ <big><b>Protokół zawodów</b></big> 
+ <a href="zawody_protokol_1.php?IdZawody=193947" target="_blank"><img src="pliki/pdfIcon.png" border="0" /></a>
+  </td>
+<td>
+<font color="#DD0000"><big><b>PRZED ZATWIERDZENIEM</b></big></font>
+</td>
+
+
+
+<form action="zawody_dodaj_zalacznik.php" method="post" name="zawody_dodaj_zalacznik" target="zawody_dodaj_zalacznik" class="sp" id="zawody_dodaj_zalacznik"  onsubmit="window.open('','zawody_dodaj_zalacznik','menubar=no,toolbar=no,location=no,directories=no,status=no,scrollbars=yes,resizable=yes,fullscreen=no,channelmode=no,left=50,top=50,width=800,height=400').focus()">
+<td>
+ <input type="hidden" name="IdZawody" value="193947"  />
+ <input type="hidden" name="user" value='radoslaw_witkowicz' />
+  <button type="submit" class="przycisk3" value="DODAJ ZALACZNIK">DODAJ ZAŁĄCZNIK</button>
+ </td>
+ </form>
+
+ <td align="center">
+ 
+<a href="zawody_zalaczniki/193947_1.jpg" title="protokol_S_JmK_79_1769182982354.jpg (radoslaw_witkowicz)" target="_blank"><img src="pliki/jpg_ikona.jpg" height="20" border="0" /></a>
+</td>
+
+
+
+ 
+ </tr>
+</table>
+
+ 
+
+
+</td></tr>
+<tr>
+ <td colspan="3" align="center">
+ <table align="center" cellspacing="2" style="font-family:Verdana, Arial, Helvetica, sans-serif; font-size:12px">
+<tr>
+ <td align="right">
+ S/JmK/79.&nbsp;
+ </td>
+ <td align="right"> 
+    
+  <big>
+   SPR Sośnica Gliwice   </big>
+     </td>
+<td align="center">
+&nbsp;<font color="#0000FF"><b><big>vs</big></b></font>&nbsp;
+</td>
+<td align="left">
+    <big>
+ <b>  SPR Pogoń 1945 Zabrze  </b> </big>
+   	
+ </td>
+</tr>
+</table>
+ </td>
+</tr>
+<tr>
+<td>
+
+<table border="0" cellpadding="3" cellspacing="0" style="font-size:12px; font-family:Arial" >
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Typ rozgrywek: </td>
+  <td align="left" bgcolor="#eeeeee">Śląska Liga Juniorek Młodszych  
+  </td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Runda: </td>
+  <td align="left" bgcolor="#eeeeee">Runda II</td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Kolejka: </td>
+  <td align="left" bgcolor="#eeeeee">Kolejka 16</td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Kategoria: </td>
+  <td align="left" bgcolor="#eeeeee">Junior mł.</td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Płeć: </td>
+  <td align="left" bgcolor="#eeeeee">Kobiety</td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Wynik skrócony: </td>
+  <td align="left" bgcolor="#eeeeee">
+        <b><big>16 : 44</big></b>
+        
+      ( 10 : 21 )
+      </td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Data: </td>
+  <td align="left" bgcolor="#eeeeee">2026-01-23 15:15</td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Liczba widzów:: </td>
+  <td align="left" bgcolor="#eeeeee">23</td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Transmisja: </td>
+  <td align="left" bgcolor="#eeeeee"> </td>
+ </tr>
+ <tr>
+ <FORM NAME="UstawSedziow" target="UstawSedziow" action="zawody_UstawSedziow.php" method="post"  onSubmit="window.open('','UstawSedziow','menubar=no,toolbar=no,location=no,directories=no,status=no,scrollbars=yes,resizable=yes,fullscreen=no,channelmode=no,left=50,top=50,width=500,height=490').focus()" class="sp">
+ <td colspan="2" align="center">
+<INPUT TYPE="hidden" NAME="IdZawody" VALUE='193947'>
+<INPUT TYPE="hidden" NAME="akcja" VALUE='UstawSedziow'>
+<INPUT TYPE="hidden" NAME="user" VALUE='radoslaw_witkowicz'>
+<button type="submit" class="przycisk3" >Sędziowie</button>
+</td>
+</FORM>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Sędziowie: </td>
+  <td align="left" bgcolor="#eeeeee">WITKOWICZ Krzysztof<br />
+                                     WITKOWICZ Radosław</td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Delegat: </td>
+  <td align="left" bgcolor="#eeeeee"><br /></td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Sekretarz: </td>
+  <td align="left" bgcolor="#eeeeee">GÓRALCZYK Marek</td>
+ </tr>
+ <tr>
+  <td align="right" bgcolor="#c2c8cf">Mierzący czas: </td>
+  <td align="left" bgcolor="#eeeeee"></td>
+ </tr>
+
+</table>
+
+ </td>
+  <td valign="top">
+
+  <table border="1" frame="void" rules="rows" cellpadding="3" cellspacing="0" style="font-size:12px; font-family:Arial;" >
+  <tr>
+  <FORM NAME="WynikSkrocony" target="WynikSkrocony" action="zawody_WynikSkrocony.php" method="post"  onSubmit="window.open('','WynikSkrocony','menubar=no,toolbar=no,location=no,directories=no,status=no,scrollbars=yes,resizable=yes,fullscreen=no,channelmode=no,left=50,top=50,width=550,height=690').focus()" class="sp">
+  <td colspan="3" align="center">
+<INPUT TYPE="hidden" NAME="IdZawody" VALUE='193947'>
+<INPUT TYPE="hidden" NAME="akcja" VALUE='WynikSkrocony'>
+<INPUT TYPE="hidden" NAME="user" VALUE='radoslaw_witkowicz'>
+<button type="submit" class="przycisk3" >Wynik skrócony</button>
+</td>
+</FORM>
+  </tr>
+  <tr bgcolor="#E7E7E7">
+   <td>Do przerwy:</td>
+   <td>&nbsp;</td>
+   <td align="center">  <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="wynik_gosp_pol" type="text" value="10" size="3" maxlength="3" disabled="disabled"/>
+       : 
+<input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="wynik_gosc_pol" type="text" value="21" size="3" maxlength="3" disabled="disabled"/>
+  </td>
+  </tr>
+  
+  <tr bgcolor="#E7E7E7">
+   <td>W regulaminowym czasie:</td>
+   <td>&nbsp;</td>
+   <td align="center">     <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="wynik_gosp_full" type="text" value="16" onChange="przepisz_gosp(this.value)" size="3" maxlength="3" disabled="disabled"/>
+	 :
+   <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="wynik_gosc_full" type="text" value="44" onChange="przepisz_gosc(this.value)" size="3" maxlength="3" disabled="disabled"/>
+  </td>
+  </tr>
+  
+  
+  <tr bgcolor="#E7E7E7">
+   <td><b>Wynik końcowy:</b><br /><font color="#666666"><small><i>Całkowita liczba strzelonych bramek</i></small></font>
+                        </td>
+                        <td>&nbsp;</td>
+                        <td align="center">
+                            <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="wynik_bramki_gosp" type="text" value="16" size="3" maxlength="3" disabled="disabled" /> :
+                            <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="wynik_bramki_gosc" type="text" value="44" size="3" maxlength="3" disabled="disabled" />
+
+                        </td>
+
+
+                    </tr>
+                    <tr>
+                        <td rowspan="2">Dogrywka 1:</td>
+                        <td><small><i>Do przerwy:</i></small></td>
+                        <td align="center">
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><small><i>Wynik końcowy:</i></small></td>
+                        <td align="center">
+                        </td>
+                    </tr>
+                    <tr>
+                        <td rowspan="2">Dogrywka 2:</td>
+                        <td><small><i>Do przerwy:</i></small></td>
+                        <td align="center">
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><small><i>Wynik końcowy:</i></small></td>
+                        <td align="center">
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>Seria rzutów karnych:</td>
+                        <td>&nbsp;</td>
+                        <td align="center">
+                        </td>
+                    </tr>
+
+
+                </table>
+            </td>
+            <td valign="top">
+
+                <table border="0" cellpadding="3" cellspacing="0" style="font-size:12px; font-family:Arial">
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf" colspan="4">Podyktowane rzuty karne</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Drużyna A</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Drużyna B</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#eeeeee">liczba</td>
+                        <td align="center" bgcolor="#eeeeee">bramki</td>
+                        <td align="center" bgcolor="#eeeeee">liczba</td>
+                        <td align="center" bgcolor="#eeeeee">bramki</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="karne_ile_gosp" type="text" value="1" size="3" maxlength="3" disabled="disabled" />
+                        </td>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="karne_bramki_gosp" type="text" value="1" size="3" maxlength="3" disabled="disabled" />
+                        </td>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="karne_ile_gosc" type="text" value="1" size="3" maxlength="3" disabled="disabled" />
+                        </td>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center; color:#FF0000; font-weight:bold" name="karne_bramki_gosc" type="text" value="1" size="3" maxlength="3" disabled="disabled" />
+                        </td>
+                    </tr>
+                </table>
+                <br /><br />
+
+                <table border="0" cellpadding="3" cellspacing="0" style="font-size:12px; font-family:Arial">
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Time Out</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf">Drużyna A</td>
+                        <td align="center" bgcolor="#c2c8cf">Drużyna B</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center" type="text" value="18'45''" size="7" disabled="disabled" />
+                        </td>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center" type="text" value="" size="7" disabled="disabled" />
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center" type="text" value="46'58''" size="7" disabled="disabled" />
+                        </td>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center" type="text" value="" size="7" disabled="disabled" />
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center" type="text" value="" size="7" disabled="disabled" />
+                        </td>
+                        <td align="center" bgcolor="#eeeeee">
+                            <input style="font-size:12px; text-align:center" type="text" value="" size="7" disabled="disabled" />
+                        </td>
+                    </tr>
+
+
+                </table>
+
+
+            </td>
+        </tr>
+        <tr>
+            <td colspan="3">
+                <a class="przycisk3" href="?a=zawody&amp;b=protokol&amp;Filtr_sezon=194&amp;IdRozgr=11683&amp;IdRundy=29407&amp;IdZawody=193947&amp;Sklad=1">Cała drużyna</a>
+                <a class="przycisk3" href="?a=zawody&amp;b=protokol&amp;Filtr_sezon=194&amp;IdRozgr=11683&amp;IdRundy=29407&amp;IdZawody=193947&amp;Sklad=2">Zgłoszeni na mecz</a>
+                <em><small>Uprawnienia WZPR: TAK</small></em>
+                <em><small>Uprawnienia ZPRP: <font color=red>NIE</font></small></em>
+                <em><small>Wymagany PESEL: TAK</small></em>
+            </td>
+        </tr>
+        <tr>
+            <td colspan="3">
+                <table border="0" cellpadding="3" cellspacing="1" style="font-size:12px; font-family:Arial">
+                    <tr>
+                        <td align="left" bgcolor="#c2c8cf" colspan="15">
+                            <a href="zespoly_PDF.php?ID_sezon=194&amp;ID_zespol=15776" target="_blank"><img src="pliki/pdf2.png" alt="Pobierz PDF" width="20" border="0" /></a>
+                            <b>SPR Sośnica Gliwice</b>
+
+                        </td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf" colspan="7">&nbsp;</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="4">Kary</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Karne</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Karne (seria)</td>
+
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf">Lp</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Nr [Poz]</td>
+                        <td align="center" bgcolor="#c2c8cf">Zawodnik</td>
+                        <td align="center" bgcolor="#c2c8cf">Kraj</td>
+                        <td align="center" bgcolor="#c2c8cf">W</td>
+                        <td align="center" bgcolor="#c2c8cf">B</td>
+                        <td align="center" bgcolor="#c2c8cf">U</td>
+                        <td align="center" bgcolor="#c2c8cf">2'</td>
+                        <td align="center" bgcolor="#c2c8cf">D</td>
+                        <td align="center" bgcolor="#c2c8cf">Kd</td>
+                        <td align="center" bgcolor="#c2c8cf">liczba</td>
+                        <td align="center" bgcolor="#c2c8cf">bramki</td>
+                        <td align="center" bgcolor="#c2c8cf">liczba</td>
+                        <td align="center" bgcolor="#c2c8cf">bramki</td>
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 13:10:28 | sprsosnica">1</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',1)" size="2" maxlength="3" name="NrKoszulki23617451" id="NrKoszulki20" type="text" value="3" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617451,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                        </td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=75628" target="_blank">GÓRAK Zuzanna</a></td>
+                        <td>
+                            POL
+                        </td>
+                        <td align="center">
+                            <input name="wyjscie3617451" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617451,'wyjscie',this.value,this.checked);" /></td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki',1)" size="3" maxlength="3" name="bramki3617451" id="bramki0" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617451,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617451" type="checkbox" value="0" onclick="zapiszProtok(3617451,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty',1)" size="1" maxlength="1" name="2minuty3617451" id="2minuty0" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617451,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617451" type="checkbox" value="0" onclick="zapiszProtok(3617451,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617451" type="checkbox" value="0" onclick="zapiszProtok(3617451,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba',1)" size="3" maxlength="3" name="karne_liczba3617451" id="karne_liczba0" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617451,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki',1)" size="3" maxlength="3" name="karne_bramki3617451" id="karne_bramki0" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617451,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria',1)" size="3" maxlength="3" name="karne_liczba_seria3617451" id="karne_liczba_seria0" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617451,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria',1)" size="3" maxlength="3" name="karne_bramki_seria3617451" id="karne_bramki_seria0" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617451,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617451" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617451" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617451" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 13:10:38 | sprsosnica">2</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',2)" size="2" maxlength="3" name="NrKoszulki23617455" id="NrKoszulki21" type="text" value="12" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617455,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                        </td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=108175" target="_blank">STOLAREK Nikola</a></td>
+                        <td>
+                            POL
+                        </td>
+                        <td align="center">
+                            <input name="wyjscie3617455" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617455,'wyjscie',this.value,this.checked);" /></td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki',2)" size="3" maxlength="3" name="bramki3617455" id="bramki1" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617455,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617455" type="checkbox" value="0" onclick="zapiszProtok(3617455,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty',2)" size="1" maxlength="1" name="2minuty3617455" id="2minuty1" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617455,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617455" type="checkbox" value="0" onclick="zapiszProtok(3617455,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617455" type="checkbox" value="0" onclick="zapiszProtok(3617455,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba',2)" size="3" maxlength="3" name="karne_liczba3617455" id="karne_liczba1" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617455,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki',2)" size="3" maxlength="3" name="karne_bramki3617455" id="karne_bramki1" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617455,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria',2)" size="3" maxlength="3" name="karne_liczba_seria3617455" id="karne_liczba_seria1" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617455,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria',2)" size="3" maxlength="3" name="karne_bramki_seria3617455" id="karne_bramki_seria1" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617455,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617455" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617455" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617455" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 13:10:33 | sprsosnica">3</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',3)" size="2" maxlength="3" name="NrKoszulki23617453" id="NrKoszulki22" type="text" value="15" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617453,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                        </td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=75639" target="_blank">KYCIA Agnieszka</a></td>
+                        <td>
+                            POL
+                        </td>
+                        <td align="center">
+                            <input name="wyjscie3617453" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617453,'wyjscie',this.value,this.checked);" /></td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki',3)" size="3" maxlength="3" name="bramki3617453" id="bramki2" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617453,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617453" type="checkbox" value="0" onclick="zapiszProtok(3617453,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty',3)" size="1" maxlength="1" name="2minuty3617453" id="2minuty2" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617453,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617453" type="checkbox" value="0" onclick="zapiszProtok(3617453,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617453" type="checkbox" value="0" onclick="zapiszProtok(3617453,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba',3)" size="3" maxlength="3" name="karne_liczba3617453" id="karne_liczba2" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617453,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki',3)" size="3" maxlength="3" name="karne_bramki3617453" id="karne_bramki2" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617453,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria',3)" size="3" maxlength="3" name="karne_liczba_seria3617453" id="karne_liczba_seria2" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617453,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria',3)" size="3" maxlength="3" name="karne_bramki_seria3617453" id="karne_bramki_seria2" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617453,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617453" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617453" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617453" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 13:10:31 | sprsosnica">4</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',4)" size="2" maxlength="3" name="NrKoszulki23617452" id="NrKoszulki23" type="text" value="15" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617452,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            5</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=85159" target="_blank">KOSIOREK Oliwia</a></td>
+                        <td>
+                            POL
+                        </td>
+                        <td align="center">
+                            <input name="wyjscie3617452" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617452,'wyjscie',this.value,this.checked);" /></td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki',4)" size="3" maxlength="3" name="bramki3617452" id="bramki3" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617452,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617452" type="checkbox" value="0" onclick="zapiszProtok(3617452,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty',4)" size="1" maxlength="1" name="2minuty3617452" id="2minuty3" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617452,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617452" type="checkbox" value="0" onclick="zapiszProtok(3617452,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617452" type="checkbox" value="0" onclick="zapiszProtok(3617452,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba',4)" size="3" maxlength="3" name="karne_liczba3617452" id="karne_liczba3" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617452,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki',4)" size="3" maxlength="3" name="karne_bramki3617452" id="karne_bramki3" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617452,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria',4)" size="3" maxlength="3" name="karne_liczba_seria3617452" id="karne_liczba_seria3" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617452,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria',4)" size="3" maxlength="3" name="karne_bramki_seria3617452" id="karne_bramki_seria3" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617452,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617452" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617452" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617452" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 13:10:44 | sprsosnica">5</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',5)" size="2" maxlength="3" name="NrKoszulki23617457" id="NrKoszulki24" type="text" value="17" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617457,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                        </td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=75641" target="_blank">WUZIK Natalia</a></td>
+                        <td>
+                            POL
+                        </td>
+                        <td align="center">
+                            <input name="wyjscie3617457" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617457,'wyjscie',this.value,this.checked);" /></td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki',5)" size="3" maxlength="3" name="bramki3617457" id="bramki4" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617457,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617457" type="checkbox" value="0" onclick="zapiszProtok(3617457,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty',5)" size="1" maxlength="1" name="2minuty3617457" id="2minuty4" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617457,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617457" type="checkbox" value="0" onclick="zapiszProtok(3617457,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617457" type="checkbox" value="0" onclick="zapiszProtok(3617457,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba',5)" size="3" maxlength="3" name="karne_liczba3617457" id="karne_liczba4" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617457,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki',5)" size="3" maxlength="3" name="karne_bramki3617457" id="karne_bramki4" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617457,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria',5)" size="3" maxlength="3" name="karne_liczba_seria3617457" id="karne_liczba_seria4" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617457,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria',5)" size="3" maxlength="3" name="karne_bramki_seria3617457" id="karne_bramki_seria4" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617457,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617457" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617457" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617457" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 13:10:42 | sprsosnica">6</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',6)" size="2" maxlength="3" name="NrKoszulki23617456" id="NrKoszulki25" type="text" value="18" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617456,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            14</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=99874" target="_blank">WARDZIŃSKA Malwina</a></td>
+                        <td>
+                            POL
+                        </td>
+                        <td align="center">
+                            <input name="wyjscie3617456" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617456,'wyjscie',this.value,this.checked);" /></td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki',6)" size="3" maxlength="3" name="bramki3617456" id="bramki5" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617456,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617456" type="checkbox" value="0" onclick="zapiszProtok(3617456,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty',6)" size="1" maxlength="1" name="2minuty3617456" id="2minuty5" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617456,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617456" type="checkbox" value="0" onclick="zapiszProtok(3617456,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617456" type="checkbox" value="0" onclick="zapiszProtok(3617456,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba',6)" size="3" maxlength="3" name="karne_liczba3617456" id="karne_liczba5" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617456,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki',6)" size="3" maxlength="3" name="karne_bramki3617456" id="karne_bramki5" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617456,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria',6)" size="3" maxlength="3" name="karne_liczba_seria3617456" id="karne_liczba_seria5" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617456,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria',6)" size="3" maxlength="3" name="karne_bramki_seria3617456" id="karne_bramki_seria5" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617456,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617456" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617456" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617456" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 13:10:34 | sprsosnica">7</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',7)" size="2" maxlength="3" name="NrKoszulki23617454" id="NrKoszulki26" type="text" value="20" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617454,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                        </td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=96749" target="_blank">MAŁOGOWSKA Kamila</a></td>
+                        <td>
+                            POL
+                        </td>
+                        <td align="center">
+                            <input name="wyjscie3617454" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617454,'wyjscie',this.value,this.checked);" /></td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki',7)" size="3" maxlength="3" name="bramki3617454" id="bramki6" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617454,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617454" type="checkbox" value="0" onclick="zapiszProtok(3617454,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty',7)" size="1" maxlength="1" name="2minuty3617454" id="2minuty6" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617454,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617454" type="checkbox" value="0" onclick="zapiszProtok(3617454,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617454" type="checkbox" value="0" onclick="zapiszProtok(3617454,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba',7)" size="3" maxlength="3" name="karne_liczba3617454" id="karne_liczba6" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617454,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki',7)" size="3" maxlength="3" name="karne_bramki3617454" id="karne_bramki6" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617454,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria',7)" size="3" maxlength="3" name="karne_liczba_seria3617454" id="karne_liczba_seria6" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617454,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria',7)" size="3" maxlength="3" name="karne_bramki_seria3617454" id="karne_bramki_seria6" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617454,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617454" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617454" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617454" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 13:10:13 | sprsosnica">8</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',8)" size="2" maxlength="3" name="NrKoszulki23617450" id="NrKoszulki27" type="text" value="21" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617450,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            [B]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=75644" target="_blank">GŁUC Daria</a></td>
+                        <td>
+                            POL
+                        </td>
+                        <td align="center">
+                            <input name="wyjscie3617450" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617450,'wyjscie',this.value,this.checked);" /></td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki',8)" size="3" maxlength="3" name="bramki3617450" id="bramki7" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617450,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617450" type="checkbox" value="0" onclick="zapiszProtok(3617450,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty',8)" size="1" maxlength="1" name="2minuty3617450" id="2minuty7" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617450,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617450" type="checkbox" value="0" onclick="zapiszProtok(3617450,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617450" type="checkbox" value="0" onclick="zapiszProtok(3617450,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba',8)" size="3" maxlength="3" name="karne_liczba3617450" id="karne_liczba7" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617450,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki',8)" size="3" maxlength="3" name="karne_bramki3617450" id="karne_bramki7" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617450,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria',8)" size="3" maxlength="3" name="karne_liczba_seria3617450" id="karne_liczba_seria7" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617450,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria',8)" size="3" maxlength="3" name="karne_bramki_seria3617450" id="karne_bramki_seria7" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617450,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617450" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617450" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617450" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td align="left" bgcolor="#c2c8cf" colspan="15">
+                            <a href="zespoly_PDF.php?ID_sezon=194&amp;ID_zespol=3517" target="_blank"><img src="pliki/pdf2.png" alt="Pobierz PDF" width="20" border="0" /></a>
+                            <b>SPR Pogoń 1945 Zabrze</b>
+
+                        </td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf" colspan="7">&nbsp;</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="4">Kary</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Karne</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Karne (seria)</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf">Lp</td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="2">Nr [Poz]</td>
+                        <td align="center" bgcolor="#c2c8cf">Zawodnik</td>
+                        <td align="center" bgcolor="#c2c8cf">Kraj</td>
+                        <td align="center" bgcolor="#c2c8cf">W</td>
+                        <td align="center" bgcolor="#c2c8cf">B</td>
+                        <td align="center" bgcolor="#c2c8cf">U</td>
+                        <td align="center" bgcolor="#c2c8cf">2'</td>
+                        <td align="center" bgcolor="#c2c8cf">D</td>
+                        <td align="center" bgcolor="#c2c8cf">Kd</td>
+                        <td align="center" bgcolor="#c2c8cf">liczba</td>
+                        <td align="center" bgcolor="#c2c8cf">bramki</td>
+                        <td align="center" bgcolor="#c2c8cf">liczba</td>
+                        <td align="center" bgcolor="#c2c8cf">bramki</td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:02:55 | kmiec_michal">1</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617147" id="NrKoszulki28" type="text" value="1" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617147,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            66 [B]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=91171" target="_blank">BANASIAK Klaudia</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617147" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617147,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',1)" size="3" maxlength="3" name="bramki3617147" id="bramki20" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617147,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617147" type="checkbox" value="0" onclick="zapiszProtok(3617147,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',1)" size="1" maxlength="1" name="2minuty3617147" id="2minuty20" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617147,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617147" type="checkbox" value="0" onclick="zapiszProtok(3617147,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617147" type="checkbox" value="0" onclick="zapiszProtok(3617147,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',1)" size="3" maxlength="3" name="karne_liczba3617147" id="karne_liczba20" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617147,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',1)" size="3" maxlength="3" name="karne_bramki3617147" id="karne_bramki20" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617147,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',1)" size="3" maxlength="3" name="karne_liczba_seria3617147" id="karne_liczba_seria20" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617147,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',1)" size="3" maxlength="3" name="karne_bramki_seria3617147" id="karne_bramki_seria20" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617147,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617147" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617147" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617147" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:02:57 | kmiec_michal">2</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617148" id="NrKoszulki28" type="text" value="3" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617148,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            3 [S]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=69380" target="_blank">BORODAJKO Marlena </a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617148" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617148,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',2)" size="3" maxlength="3" name="bramki3617148" id="bramki21" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617148,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617148" type="checkbox" value="0" onclick="zapiszProtok(3617148,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',2)" size="1" maxlength="1" name="2minuty3617148" id="2minuty21" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617148,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617148" type="checkbox" value="0" onclick="zapiszProtok(3617148,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617148" type="checkbox" value="0" onclick="zapiszProtok(3617148,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',2)" size="3" maxlength="3" name="karne_liczba3617148" id="karne_liczba21" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617148,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',2)" size="3" maxlength="3" name="karne_bramki3617148" id="karne_bramki21" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617148,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',2)" size="3" maxlength="3" name="karne_liczba_seria3617148" id="karne_liczba_seria21" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617148,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',2)" size="3" maxlength="3" name="karne_bramki_seria3617148" id="karne_bramki_seria21" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617148,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617148" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617148" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617148" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:13 | kmiec_michal">3</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617159" id="NrKoszulki28" type="text" value="4" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617159,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            4 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=72074" target="_blank">ZDEBSKA Nadia</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617159" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617159,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',3)" size="3" maxlength="3" name="bramki3617159" id="bramki22" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617159,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617159" type="checkbox" value="0" onclick="zapiszProtok(3617159,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',3)" size="1" maxlength="1" name="2minuty3617159" id="2minuty22" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617159,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617159" type="checkbox" value="0" onclick="zapiszProtok(3617159,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617159" type="checkbox" value="0" onclick="zapiszProtok(3617159,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',3)" size="3" maxlength="3" name="karne_liczba3617159" id="karne_liczba22" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617159,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',3)" size="3" maxlength="3" name="karne_bramki3617159" id="karne_bramki22" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617159,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',3)" size="3" maxlength="3" name="karne_liczba_seria3617159" id="karne_liczba_seria22" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617159,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',3)" size="3" maxlength="3" name="karne_bramki_seria3617159" id="karne_bramki_seria22" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617159,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617159" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617159" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617159" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:15 | kmiec_michal">4</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617161" id="NrKoszulki28" type="text" value="5" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617161,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            5 [S]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=72075" target="_blank">ZUBEL Zofia</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617161" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617161,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',4)" size="3" maxlength="3" name="bramki3617161" id="bramki23" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617161,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617161" type="checkbox" value="0" onclick="zapiszProtok(3617161,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',4)" size="1" maxlength="1" name="2minuty3617161" id="2minuty23" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617161,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617161" type="checkbox" value="0" onclick="zapiszProtok(3617161,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617161" type="checkbox" value="0" onclick="zapiszProtok(3617161,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',4)" size="3" maxlength="3" name="karne_liczba3617161" id="karne_liczba23" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617161,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',4)" size="3" maxlength="3" name="karne_bramki3617161" id="karne_bramki23" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617161,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',4)" size="3" maxlength="3" name="karne_liczba_seria3617161" id="karne_liczba_seria23" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617161,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',4)" size="3" maxlength="3" name="karne_bramki_seria3617161" id="karne_bramki_seria23" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617161,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617161" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617161" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617161" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:01 | kmiec_michal">5</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617149" id="NrKoszulki28" type="text" value="7" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617149,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            7 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=88970" target="_blank">DRGAS Zuzanna</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617149" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617149,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',5)" size="3" maxlength="3" name="bramki3617149" id="bramki24" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617149,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617149" type="checkbox" value="0" onclick="zapiszProtok(3617149,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',5)" size="1" maxlength="1" name="2minuty3617149" id="2minuty24" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617149,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617149" type="checkbox" value="0" onclick="zapiszProtok(3617149,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617149" type="checkbox" value="0" onclick="zapiszProtok(3617149,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',5)" size="3" maxlength="3" name="karne_liczba3617149" id="karne_liczba24" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617149,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',5)" size="3" maxlength="3" name="karne_bramki3617149" id="karne_bramki24" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617149,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',5)" size="3" maxlength="3" name="karne_liczba_seria3617149" id="karne_liczba_seria24" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617149,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',5)" size="3" maxlength="3" name="karne_bramki_seria3617149" id="karne_bramki_seria24" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617149,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617149" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617149" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617149" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:04 | kmiec_michal">6</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617152" id="NrKoszulki28" type="text" value="9" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617152,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            9 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=70893" target="_blank">MOROŃ Nina</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617152" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617152,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',6)" size="3" maxlength="3" name="bramki3617152" id="bramki25" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617152,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617152" type="checkbox" value="0" onclick="zapiszProtok(3617152,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',6)" size="1" maxlength="1" name="2minuty3617152" id="2minuty25" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617152,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617152" type="checkbox" value="0" onclick="zapiszProtok(3617152,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617152" type="checkbox" value="0" onclick="zapiszProtok(3617152,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',6)" size="3" maxlength="3" name="karne_liczba3617152" id="karne_liczba25" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617152,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',6)" size="3" maxlength="3" name="karne_bramki3617152" id="karne_bramki25" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617152,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',6)" size="3" maxlength="3" name="karne_liczba_seria3617152" id="karne_liczba_seria25" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617152,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',6)" size="3" maxlength="3" name="karne_bramki_seria3617152" id="karne_bramki_seria25" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617152,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617152" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617152" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617152" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:06 | kmiec_michal">7</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617154" id="NrKoszulki28" type="text" value="12" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617154,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            [B]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=76184" target="_blank">SIEJOK Marta</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617154" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617154,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',7)" size="3" maxlength="3" name="bramki3617154" id="bramki26" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617154,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617154" type="checkbox" value="0" onclick="zapiszProtok(3617154,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',7)" size="1" maxlength="1" name="2minuty3617154" id="2minuty26" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617154,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617154" type="checkbox" value="0" onclick="zapiszProtok(3617154,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617154" type="checkbox" value="0" onclick="zapiszProtok(3617154,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',7)" size="3" maxlength="3" name="karne_liczba3617154" id="karne_liczba26" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617154,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',7)" size="3" maxlength="3" name="karne_bramki3617154" id="karne_bramki26" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617154,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',7)" size="3" maxlength="3" name="karne_liczba_seria3617154" id="karne_liczba_seria26" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617154,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',7)" size="3" maxlength="3" name="karne_bramki_seria3617154" id="karne_bramki_seria26" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617154,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617154" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617154" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617154" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:09 | kmiec_michal">8</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617156" id="NrKoszulki28" type="text" value="13" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617156,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            13 [O]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=82875" target="_blank">ŚWIDER Anna</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617156" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617156,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',8)" size="3" maxlength="3" name="bramki3617156" id="bramki27" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617156,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617156" type="checkbox" value="0" onclick="zapiszProtok(3617156,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',8)" size="1" maxlength="1" name="2minuty3617156" id="2minuty27" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617156,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617156" type="checkbox" value="0" onclick="zapiszProtok(3617156,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617156" type="checkbox" value="0" onclick="zapiszProtok(3617156,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',8)" size="3" maxlength="3" name="karne_liczba3617156" id="karne_liczba27" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617156,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',8)" size="3" maxlength="3" name="karne_bramki3617156" id="karne_bramki27" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617156,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',8)" size="3" maxlength="3" name="karne_liczba_seria3617156" id="karne_liczba_seria27" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617156,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',8)" size="3" maxlength="3" name="karne_bramki_seria3617156" id="karne_bramki_seria27" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617156,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617156" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617156" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617156" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:12 | kmiec_michal">9</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617158" id="NrKoszulki28" type="text" value="14" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617158,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            14 [S]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=96407" target="_blank">WIERTELORZ Hanna</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617158" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617158,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',9)" size="3" maxlength="3" name="bramki3617158" id="bramki28" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617158,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617158" type="checkbox" value="0" onclick="zapiszProtok(3617158,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',9)" size="1" maxlength="1" name="2minuty3617158" id="2minuty28" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617158,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617158" type="checkbox" value="0" onclick="zapiszProtok(3617158,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617158" type="checkbox" value="0" onclick="zapiszProtok(3617158,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',9)" size="3" maxlength="3" name="karne_liczba3617158" id="karne_liczba28" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617158,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',9)" size="3" maxlength="3" name="karne_bramki3617158" id="karne_bramki28" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617158,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',9)" size="3" maxlength="3" name="karne_liczba_seria3617158" id="karne_liczba_seria28" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617158,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',9)" size="3" maxlength="3" name="karne_bramki_seria3617158" id="karne_bramki_seria28" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617158,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617158" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617158" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617158" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:02 | kmiec_michal">10</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617150" id="NrKoszulki28" type="text" value="15" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617150,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            15 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=70263" target="_blank">GOZDECKA Zuzanna</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617150" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617150,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',10)" size="3" maxlength="3" name="bramki3617150" id="bramki29" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617150,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617150" type="checkbox" value="0" onclick="zapiszProtok(3617150,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',10)" size="1" maxlength="1" name="2minuty3617150" id="2minuty29" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617150,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617150" type="checkbox" value="0" onclick="zapiszProtok(3617150,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617150" type="checkbox" value="0" onclick="zapiszProtok(3617150,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',10)" size="3" maxlength="3" name="karne_liczba3617150" id="karne_liczba29" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617150,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',10)" size="3" maxlength="3" name="karne_bramki3617150" id="karne_bramki29" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617150,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',10)" size="3" maxlength="3" name="karne_liczba_seria3617150" id="karne_liczba_seria29" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617150,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',10)" size="3" maxlength="3" name="karne_bramki_seria3617150" id="karne_bramki_seria29" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617150,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617150" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617150" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617150" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:11 | kmiec_michal">11</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617157" id="NrKoszulki28" type="text" value="16" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617157,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            33 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=87217" target="_blank">WĘGLIŃSKA Kinga</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617157" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617157,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',11)" size="3" maxlength="3" name="bramki3617157" id="bramki210" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617157,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617157" type="checkbox" value="0" onclick="zapiszProtok(3617157,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',11)" size="1" maxlength="1" name="2minuty3617157" id="2minuty210" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617157,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617157" type="checkbox" value="0" onclick="zapiszProtok(3617157,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617157" type="checkbox" value="0" onclick="zapiszProtok(3617157,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',11)" size="3" maxlength="3" name="karne_liczba3617157" id="karne_liczba210" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617157,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',11)" size="3" maxlength="3" name="karne_bramki3617157" id="karne_bramki210" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617157,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',11)" size="3" maxlength="3" name="karne_liczba_seria3617157" id="karne_liczba_seria210" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617157,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',11)" size="3" maxlength="3" name="karne_bramki_seria3617157" id="karne_bramki_seria210" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617157,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617157" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617157" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617157" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:02 | kmiec_michal">12</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617151" id="NrKoszulki28" type="text" value="19" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617151,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            19 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=72068" target="_blank">JERUSZKA Agata</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617151" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617151,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',12)" size="3" maxlength="3" name="bramki3617151" id="bramki211" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617151,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617151" type="checkbox" value="0" onclick="zapiszProtok(3617151,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',12)" size="1" maxlength="1" name="2minuty3617151" id="2minuty211" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617151,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617151" type="checkbox" value="0" onclick="zapiszProtok(3617151,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617151" type="checkbox" value="0" onclick="zapiszProtok(3617151,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',12)" size="3" maxlength="3" name="karne_liczba3617151" id="karne_liczba211" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617151,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',12)" size="3" maxlength="3" name="karne_bramki3617151" id="karne_bramki211" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617151,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',12)" size="3" maxlength="3" name="karne_liczba_seria3617151" id="karne_liczba_seria211" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617151,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',12)" size="3" maxlength="3" name="karne_bramki_seria3617151" id="karne_bramki_seria211" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617151,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617151" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617151" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617151" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:05 | kmiec_michal">13</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617153" id="NrKoszulki28" type="text" value="25" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617153,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            25 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=92048" target="_blank">RYCHLIK Nadia</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617153" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617153,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',13)" size="3" maxlength="3" name="bramki3617153" id="bramki212" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617153,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617153" type="checkbox" value="0" onclick="zapiszProtok(3617153,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',13)" size="1" maxlength="1" name="2minuty3617153" id="2minuty212" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617153,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617153" type="checkbox" value="0" onclick="zapiszProtok(3617153,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617153" type="checkbox" value="0" onclick="zapiszProtok(3617153,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',13)" size="3" maxlength="3" name="karne_liczba3617153" id="karne_liczba212" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617153,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',13)" size="3" maxlength="3" name="karne_bramki3617153" id="karne_bramki212" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617153,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',13)" size="3" maxlength="3" name="karne_liczba_seria3617153" id="karne_liczba_seria212" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617153,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',13)" size="3" maxlength="3" name="karne_bramki_seria3617153" id="karne_bramki_seria212" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617153,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617153" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617153" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617153" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:02:52 | kmiec_michal">14</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617146" id="NrKoszulki28" type="text" value="28" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617146,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            28 [S]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=75135" target="_blank">BAŁAZY Aleksandra</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617146" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617146,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',14)" size="3" maxlength="3" name="bramki3617146" id="bramki213" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617146,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617146" type="checkbox" value="0" onclick="zapiszProtok(3617146,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',14)" size="1" maxlength="1" name="2minuty3617146" id="2minuty213" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617146,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617146" type="checkbox" value="0" onclick="zapiszProtok(3617146,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617146" type="checkbox" value="0" onclick="zapiszProtok(3617146,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',14)" size="3" maxlength="3" name="karne_liczba3617146" id="karne_liczba213" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617146,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',14)" size="3" maxlength="3" name="karne_bramki3617146" id="karne_bramki213" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617146,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',14)" size="3" maxlength="3" name="karne_liczba_seria3617146" id="karne_liczba_seria213" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617146,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',14)" size="3" maxlength="3" name="karne_bramki_seria3617146" id="karne_bramki_seria213" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617146,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617146" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617146" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617146" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:14 | kmiec_michal">15</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617160" id="NrKoszulki28" type="text" value="89" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617160,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            89 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=86303" target="_blank">ZIEMLANKA Maja</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617160" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617160,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',15)" size="3" maxlength="3" name="bramki3617160" id="bramki214" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617160,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617160" type="checkbox" value="0" onclick="zapiszProtok(3617160,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',15)" size="1" maxlength="1" name="2minuty3617160" id="2minuty214" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617160,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617160" type="checkbox" value="0" onclick="zapiszProtok(3617160,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617160" type="checkbox" value="0" onclick="zapiszProtok(3617160,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',15)" size="3" maxlength="3" name="karne_liczba3617160" id="karne_liczba214" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617160,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',15)" size="3" maxlength="3" name="karne_bramki3617160" id="karne_bramki214" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617160,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',15)" size="3" maxlength="3" name="karne_liczba_seria3617160" id="karne_liczba_seria214" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617160,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',15)" size="3" maxlength="3" name="karne_bramki_seria3617160" id="karne_bramki_seria214" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617160,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617160" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617160" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617160" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr style="font-weight:bold;background-color:#FFE4C4" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#FFE4C4'">
+                        <td align="right" title="Zgłoszono: 2026-01-23 10:03:08 | kmiec_michal">16</td>
+                        <td align="right">
+
+                            <input onFocus="setEnterCounter('NrKoszulki2',9)" size="2" maxlength="3" name="NrKoszulki23617155" id="NrKoszulki28" type="text" value="97" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617155,'NrKoszulki2',this.value,this.checked);"
+                            />
+
+                        </td>
+                        <td align="right">
+                            97 [R]</td>
+                        <td align="left"><a href="?a=zawodnicy&amp;b=szczegoly&amp;NrZawodnika=86256" target="_blank">SZRAMOWSKA Sandra</a></td>
+                        <td>
+                            POL </td>
+                        <td align="center">
+                            <input name="wyjscie3617155" type="checkbox" value="1" checked="checked" onclick="zapiszProtok(3617155,'wyjscie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('bramki2',16)" size="3" maxlength="3" name="bramki3617155" id="bramki215" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617155,'bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="upomnienie3617155" type="checkbox" value="0" onclick="zapiszProtok(3617155,'upomnienie',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input style="color:#999999" onFocus="setEnterCounter('2minuty2',16)" size="1" maxlength="1" name="2minuty3617155" id="2minuty215" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123');" onchange="zapiszProtok(3617155,'2minuty',this.value,this.checked);"
+                            />
+                        </td>
+                        <td align="center">
+                            <input name="dyskwalifikacja3617155" type="checkbox" value="0" onclick="zapiszProtok(3617155,'dyskwalifikacja',this.value,this.checked);" />
+                        </td>
+                        <td align="center">
+                            <input name="kd3617155" type="checkbox" value="0" onclick="zapiszProtok(3617155,'kd',this.value,this.checked);" />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba2',16)" size="3" maxlength="3" name="karne_liczba3617155" id="karne_liczba215" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617155,'karne_liczba',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki2',16)" size="3" maxlength="3" name="karne_bramki3617155" id="karne_bramki215" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617155,'karne_bramki',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_liczba_seria2',16)" size="3" maxlength="3" name="karne_liczba_seria3617155" id="karne_liczba_seria215" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617155,'karne_liczba_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td>
+                            <input style="color:#999999" onFocus="setEnterCounter('karne_bramki_seria2',16)" size="3" maxlength="3" name="karne_bramki_seria3617155" id="karne_bramki_seria215" type="text" value="0" onkeypress="return maskujKlawisze(event, '0123456789');" onchange="zapiszProtok(3617155,'karne_bramki_seria',this.value,this.checked);"
+                            />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis13617155" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis23617155" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis33617155" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+
+                </table>
+            </td>
+        </tr>
+        <tr>
+            <td colspan="3">
+                Osoby towarzyszące:
+                <table border="0" cellpadding="3" cellspacing="1" style="font-size:12px; font-family:Arial">
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf" colspan="10"><b>SPR Sośnica Gliwice</b></td>
+                    </tr>
+                    <tr>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Osoba</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Funkcja</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Licencja<br />trenera</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf" style="color:#FF0000">NOWA<br />Licencja<br />trenera</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Uprawnienia<br />WZPR</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Uprawnienia<br />ZPRP</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf" valign="bottom">
+                            <font color="#666666"><small><i>Kolejność kliknięć<br />ustawia sortowanie A,B,C...</i></small></font>
+                        </td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="3">Kary</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf">U</td>
+                        <td align="center" bgcolor="#c2c8cf">2'</td>
+                        <td align="center" bgcolor="#c2c8cf">D</td>
+
+                    </tr>
+
+                    <tr style="background-color:#EEEEEE" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#EEEEEE'">
+                        <td>
+                            <a href="?a=osoba&b=szczegoly&NrOsoby=11398" target="_blank">ŁĄCZ Iwona</a>
+                        </td>
+                        <td>TRENER B</td>
+                        <td>B 308/2023</td>
+                        <td align="center">
+                            B 0308
+                            <font style="background:#00FF00; font-size:12px"> <b>&nbsp;2025&nbsp;</b></font>
+                            <br />
+                        </td>
+                        <td>
+                            <font style="font-size:12px">0021/SL/25</font>
+                            <font style="background-color:#009600; color:#FFFFFF"><b>OK</b></font> 2025-09-26
+
+                        </td>
+                        <td>
+
+                        </td>
+
+
+
+
+                        <td>
+                            A&nbsp;
+                            <a id="button63559" onclick="this.style.display='none';zapiszZglOsoba(63559,11398,193947,15776,0);"><img align="top" src="pliki/delete.png" width="15" /> </a>
+                        </td>
+                        <td title="upomnienie - żółta kartka">
+                            <input name="11398" type="checkbox" value="1" onclick="zapiszProtok4(0,11398,193947,15776,'2026-01-23',194,this.value,this.checked);" />
+                        </td>
+                        <td title="wykluczenie - 2 minuty">
+                            <input name="11398" type="checkbox" value="2" onclick="zapiszProtok4(0,11398,193947,15776,'2026-01-23',194,this.value,this.checked);" />
+                        </td>
+                        <td title="dyskwalifikacja - czerwona kartka">
+                            <input name="11398" type="checkbox" value="3" onclick="zapiszProtok4(0,11398,193947,15776,'2026-01-23',194,this.value,this.checked);" />
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis__111398" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis__211398" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis__311398" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+
+                    </tr>
+                    <tr>
+                        <td colspan="10">&nbsp;</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf" colspan="10"><b>SPR Pogoń 1945 Zabrze</b></td>
+                    </tr>
+                    <tr>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Osoba</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Funkcja</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Licencja<br />trenera</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf" style="color:#FF0000">NOWA<br />Licencja<br />trenera</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Uprawnienia<br />WZPR</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf">Uprawnienia<br />ZPRP</td>
+                        <td rowspan="2" align="center" bgcolor="#c2c8cf" valign="bottom">
+                            <font color="#666666"><small><i>Kolejność kliknięć<br />ustawia sortowanie A,B,C...</i></small></font>
+                        </td>
+                        <td align="center" bgcolor="#c2c8cf" colspan="3">Kary</td>
+                    </tr>
+                    <tr>
+                        <td align="center" bgcolor="#c2c8cf">U</td>
+                        <td align="center" bgcolor="#c2c8cf">2'</td>
+                        <td align="center" bgcolor="#c2c8cf">D</td>
+
+                    </tr>
+
+                    <tr style="background-color:#EEEEEE" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#EEEEEE'">
+                        <td><a href="?a=osoba&b=szczegoly&NrOsoby=12796" target="_blank">KMIEĆ Michał </a></td>
+                        <td>TRENER A</td>
+                        <td>A 0628/2022</td>
+                        <td align="center">
+                            A 0628
+                            <font style="background:#00FF00; font-size:12px"> <b>&nbsp;2025&nbsp;</b></font>
+                            <br />
+                        </td>
+                        <td>
+                            <font style="font-size:12px">0219/SL/17</font>
+                            <font style="background-color:#009600; color:#FFFFFF"><b>OK</b></font> 2025-09-16
+
+
+                        </td>
+                        <td>
+                            <font style="font-size:12px">1031/17</font>
+                        </td>
+
+
+
+                        <td>
+                            <button class="przycisk3" id="button63009" onclick="this.style.display='none';zapiszZglOsoba(63009,12796,193947,3517,1);">ZGŁOŚ NA MECZ</button>
+                        </td>
+
+
+
+
+                        <td title="upomnienie - żółta kartka">
+                            <input name="12796" type="checkbox" value="1" onclick="zapiszProtok4(0,12796,193947,3517,'2026-01-23',194,this.value,this.checked);" disabled="disabled" />
+
+                        </td>
+                        <td title="wykluczenie - 2 minuty">
+                            <input name="12796" type="checkbox" value="2" onclick="zapiszProtok4(0,12796,193947,3517,'2026-01-23',194,this.value,this.checked);" disabled="disabled" />
+
+                        </td>
+                        <td title="dyskwalifikacja - czerwona kartka">
+                            <input name="12796" type="checkbox" value="3" onclick="zapiszProtok4(0,12796,193947,3517,'2026-01-23',194,this.value,this.checked);" disabled="disabled" />
+
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis__112796" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis__212796" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis__312796" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+                    <tr style="background-color:#EEEEEE" onmouseover="this.style.backgroundColor='#FFC175'" onmouseout="this.style.backgroundColor='#EEEEEE'">
+                        <td><a href="?a=osoba&b=szczegoly&NrOsoby=6217" target="_blank">OGÓREK Adam</a></td>
+                        <td>TRENER B</td>
+                        <td>B 0640/2023</td>
+                        <td align="center">
+                            B 0640
+                            <font style="background:#00FF00; font-size:12px"> <b>&nbsp;2025&nbsp;</b></font>
+                            <br />
+                        </td>
+                        <td>
+                            <font style="font-size:12px">0076/SL/23</font>
+                            <font style="background-color:#009600; color:#FFFFFF"><b>OK</b></font> 2025-09-16
+
+
+                        </td>
+                        <td>
+                            <font style="font-size:12px">0285/23</font>
+                            <font style="background-color:#009600; color:#FFFFFF"><b>OK</b></font> 2026-01-09
+                        </td>
+
+
+
+                        <td>
+                            A&nbsp;
+                            <a id="button62033" onclick="this.style.display='none';zapiszZglOsoba(62033,6217,193947,3517,0);"><img align="top" src="pliki/delete.png" width="15" /> </a>
+                        </td>
+
+
+
+
+                        <td title="upomnienie - żółta kartka">
+                            <input name="6217" type="checkbox" value="1" onclick="zapiszProtok4(0,6217,193947,3517,'2026-01-23',194,this.value,this.checked);" />
+
+                        </td>
+                        <td title="wykluczenie - 2 minuty">
+                            <input name="6217" type="checkbox" value="2" onclick="zapiszProtok4(0,6217,193947,3517,'2026-01-23',194,this.value,this.checked);" />
+
+                        </td>
+                        <td title="dyskwalifikacja - czerwona kartka">
+                            <input name="6217" type="checkbox" value="3" onclick="zapiszProtok4(0,6217,193947,3517,'2026-01-23',194,this.value,this.checked);" />
+
+                        </td>
+                        <td style="width:20px; height:20px; background-color:#FFFFFF">
+                            <span id="Zapis__16217" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="20" height="20" /></span>
+                            <span id="Zapis__26217" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="20" height="20" /></span>
+                            <span id="Zapis__36217" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="20" height="20" /></span>
+                        </td>
+                    </tr>
+
+                </table>
+
+
+            </td>
+        </tr>
+
+        <tr>
+            <td colspan="3">
+                Komentarz sędziego:
+                <font color="#FF0000"><b>W OPISACH NALEŻY UNIKAĆ ZNAKÓW SPECJALNYCH np. '-apostrof</b></font>
+                <span id="Zapis_1193947" style="display:none"><img align="absmiddle" src="pliki/load.gif" width="15" height="15" /></span>
+                <span id="Zapis_2193947" style="display:none"><img align="absmiddle" src="pliki/tak.png" width="15" height="15" /></span>
+                <span id="Zapis_3193947" style="display:none"><img align="absmiddle" src="pliki/nie.png" width="15" height="15" /></span>
+
+                <br />
+                <textarea name="komentarz" cols="110" rows="6" onchange="zapiszProtok3(193947,'komentarz',this.value,this.checked);">
+</textarea>
+            </td>
+        </tr>
+        <tr>
+            <td colspan="5">
+
+                <table>
+                    <tr>
+
+
+
+
+                    </tr>
+
+                </table>
+
+            </td>
+
+
+
+        </tr>
+    </table>
+    </td>
+    </tr>
+
+
+    <tr>
+        <td align="right">
+            <hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />
+            <div align="right">
+                <p>
+                    <font size="1" face="Tahoma">&copy; <em>by</em> ZPRP | <em>designed by</em> Pilar (Domtel-Sport) 2013-2024 &nbsp; &nbsp; &nbsp; &nbsp; Czas: 0.025687 s. | Pamięć: 3 megabytes</font>
+                </p>
+            </div>
+        </td>
+    </tr>
+    </table>
+
+
+
+</body>
+
+</html>
