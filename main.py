@@ -495,19 +495,10 @@ async def _cleanup_loop():
             logger.exception("Cleanup loop error")
         await asyncio.sleep(interval_sec)
 
-async def reset_all_app_opens():
-    # zeruje licznik wejść wszystkim sędziom
-    await database.execute("UPDATE login_records SET app_opens = 0")
-
-
 @app.on_event("startup")
 async def startup():
     await database.connect()
     logger.info("✅ Connected to the database")
-
-    # ✅ ONE-SHOT: reset app_opens
-    await reset_all_app_opens()
-    logger.info("🔁 login_records.app_opens zostało wyzerowane")
 
     global _cleanup_task, _push_task
     _cleanup_task = asyncio.create_task(_cleanup_loop())
