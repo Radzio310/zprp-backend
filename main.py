@@ -54,7 +54,7 @@ from app.badges import router as badges_router
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
 
-from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files
+from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules
 
 app = FastAPI(title="BAZA - API")
 
@@ -444,6 +444,24 @@ async def _cleanup_loop():
             removed_sr = await database.execute(stmt_sr)
             logger.info(
                 f"🧹 ShortResult cleanup: removed {int(removed_sr or 0)} rows older than {cutoff_sr.isoformat()} UTC"
+            )
+                        # 🧹 Push cleanup: usuń sent/failed starsze niż 48h (liczone po send_at_utc)
+            cutoff_push = datetime.now(timezone.utc) - timedelta(hours=48)
+
+            stmt_push = (
+                delete(push_schedules)
+                .where(
+                    push_schedules.c.status.in_(["sent", "failed"]),
+                    push_schedules.c.send_at_utc < cutoff_push,
+                )
+                .returning(push_schedules.c.id)
+            )
+
+            deleted_push_rows = await database.fetch_all(stmt_push)
+            deleted_push = len(deleted_push_rows)
+
+            logger.info(
+                f"🧹 PushSchedules cleanup: removed {deleted_push} rows (sent/failed) older than {cutoff_push.isoformat()} UTC"
             )
 
             lr_rows = await database.fetch_all(
