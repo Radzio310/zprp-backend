@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from app.deps import Settings, get_rsa_keys, get_settings
 from app.utils import fetch_with_correct_encoding
+from starlette.background import BackgroundTask
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Results"])
@@ -1569,20 +1570,24 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
     env.setdefault("XDG_CACHE_HOME", "/tmp")
     env.setdefault("XDG_CONFIG_HOME", "/tmp")
 
+    profile_dir = os.path.join(out_dir, "lo_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
     cmd = [
         soffice,
         "--headless",
-        "--invisible",
         "--nologo",
         "--nolockcheck",
         "--nodefault",
         "--norestore",
+        f"-env:UserInstallation=file://{profile_dir}",
         "--convert-to",
         "pdf",
         "--outdir",
         out_dir,
         xlsx_path,
     ]
+
 
     proc = subprocess.run(
         cmd,
@@ -1666,74 +1671,62 @@ async def generate_protocol_pdf(
         winner = "B"
 
     try:
-        with tempfile.TemporaryDirectory() as td:
-            safe_code = re.sub(r"[^0-9A-Za-z_-]+", "_", (core.get("matchNumber") or "mecz"))
-            filled_xlsx = os.path.join(td, f"protocol_{safe_code}.xlsx")
-            os.makedirs(os.path.dirname(filled_xlsx), exist_ok=True)
-            safe_code = safe_code[:60] if safe_code else "mecz"
+        td = tempfile.mkdtemp(prefix="protocol_")  # ✅ nie usuwa się samo
+        safe_code = re.sub(r"[^0-9A-Za-z_-]+", "_", (core.get("matchNumber") or "mecz"))
+        filled_xlsx = os.path.join(td, f"protocol_{safe_code}.xlsx")
 
-            wb = load_workbook(str(template_path))
-            ws = wb.active  # jeśli masz konkretny arkusz, zmień na wb["NazwaArkusza"]
+        wb = load_workbook(str(template_path))
+        ws = wb.active  # jeśli masz konkretny arkusz, zmień na wb["NazwaArkusza"]
 
-            # --- header mapping ---
-            ws["AY1"].value = core["matchNumber"]
-            ws["C4"].value = core["hostName"]
-            ws["D9"].value = core["hostName"]
-            ws["C7"].value = core["guestName"]
-            ws["D34"].value = core["guestName"]
+        # --- header mapping ---
+        ws["AY1"].value = core["matchNumber"]
+        ws["C4"].value = core["hostName"]
+        ws["D9"].value = core["hostName"]
+        ws["C7"].value = core["guestName"]
+        ws["D34"].value = core["guestName"]
 
-            ws["AL6"].value = str(core["scoreHost"])
-            ws["AQ6"].value = str(core["scoreGuest"])
-            ws["AU6"].value = str(core["halfScoreHost"])
-            ws["AY6"].value = str(core["halfScoreGuest"])
-            ws["BB6"].value = winner
+        ws["AL6"].value = str(core["scoreHost"])
+        ws["AQ6"].value = str(core["scoreGuest"])
+        ws["AU6"].value = str(core["halfScoreHost"])
+        ws["AY6"].value = str(core["halfScoreGuest"])
+        ws["BB6"].value = winner
 
-            # --- timeouts mapping ---
-            _place_timeouts(ws, team_timeouts=tt_host, half_ms=half_ms, is_host=True)
-            _place_timeouts(ws, team_timeouts=tt_guest, half_ms=half_ms, is_host=False)
+        # --- timeouts mapping ---
+        _place_timeouts(ws, team_timeouts=tt_host, half_ms=half_ms, is_host=True)
+        _place_timeouts(ws, team_timeouts=tt_guest, half_ms=half_ms, is_host=False)
 
-            # --- penalties totals ---
-            ws["AN63"].value = str(pk_host_total)
-            ws["AR63"].value = str(pk_host_goals)
-            ws["AY63"].value = str(pk_guest_total)
-            ws["BC63"].value = str(pk_guest_goals)
+        # --- penalties totals ---
+        ws["AN63"].value = str(pk_host_total)
+        ws["AR63"].value = str(pk_host_goals)
+        ws["AY63"].value = str(pk_guest_total)
+        ws["BC63"].value = str(pk_guest_goals)
 
-            # --- players numbers + stats ---
-            _fill_players_block(
-                ws,
-                players=core["hostPlayers"],
-                stats_by_number=host_stats,
-                start_row=11,
-                end_row=28,
-            )
-            _fill_players_block(
-                ws,
-                players=core["guestPlayers"],
-                stats_by_number=guest_stats,
-                start_row=36,
-                end_row=53,
-            )
+        # --- players numbers + stats ---
+        _fill_players_block(ws, players=core["hostPlayers"],  stats_by_number=host_stats,  start_row=11, end_row=28)
+        _fill_players_block(ws, players=core["guestPlayers"], stats_by_number=guest_stats, start_row=36, end_row=53)
 
-            # --- timeline (match events) ---
-            _fill_timeline(
-                ws,
-                data_json=data_json,
-                half_ms=half_ms,
-                half_score_host=core["halfScoreHost"],
-                half_score_guest=core["halfScoreGuest"],
-            )
+        # --- timeline (match events) ---
+        _fill_timeline(
+            ws,
+            data_json=data_json,
+            half_ms=half_ms,
+            half_score_host=core["halfScoreHost"],
+            half_score_guest=core["halfScoreGuest"],
+        )
 
-            wb.save(filled_xlsx)
+        wb.save(filled_xlsx)
 
-            # --- convert to PDF ---
-            pdf_path = _convert_xlsx_to_pdf(filled_xlsx, td)
+        # --- convert to PDF ---
+        pdf_path = _convert_xlsx_to_pdf(filled_xlsx, td)
 
-            filename = f"protokol_{(core['matchNumber'] or 'mecz').replace('/', '-')}.pdf"
-            return FileResponse(
-                pdf_path,
-                media_type="application/pdf",
-                filename=filename,
-            )
+        filename = f"protokol_{(core['matchNumber'] or 'mecz').replace('/', '-')}.pdf"
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename=filename,
+            background=BackgroundTask(shutil.rmtree, td, ignore_errors=True),  # ✅ sprząta PO wysłaniu
+        )
+
 
     except HTTPException:
         raise
