@@ -247,18 +247,25 @@ async def short_result(
 
 
 # ============================================================
-# New: PROTOCOL SAVE (4 BLOCKS) + DELTA MODE
-#   - Players table contains 2 blocks: host then guest
-#   - Companions table contains 2 blocks: host then guest
-#   - Players are mapped by jersey number (NrKoszulki2 value)
-#   - Companions are mapped ONLY by letters A..E from the column:
-#       "Kolejność kliknięć ustawia sortowanie A,B,C..."
-#     (ignore rows like "ZGŁOŚ NA MECZ")
-#   - Save is performed through:
-#       zapiszProtok  -> zawody_zapisz2.php (ad1..ad4)
-#       zapiszProtok4 -> zawody_zapisz4.php (ad1..ad8)
-#   - DELTA MODE:
-#       send ONLY if desired value differs from current DOM value/checked state
+# PROTOCOL SAVE (4 BLOCKS) + DELTA MODE
+#
+# Zmiana wg Twojej obserwacji:
+# - Nazwa drużyny do identyfikacji bloków ma sens wyłącznie w:
+#   (a) nagłówku tabeli zawodników danej drużyny
+#   (b) nagłówku tabeli osób towarzyszących danej drużyny
+# - Ignorujemy “zestawienie drużyn grających” na górze strony.
+#
+# Mapowanie:
+# - zawodnicy mapowani po numerze koszulki (NrKoszulki2 value)
+# - jeśli ProEl ma numer, którego nie ma w tabeli -> skip (idziemy dalej)
+# - jeśli numer koszulki jest zdublowany w HTML -> bierzemy pierwszy napotkany (resztę ignorujemy)
+#
+# Zapis:
+# - zapiszProtok  -> zawody_zapisz2.php (ad1..ad4)
+# - zapiszProtok4 -> zawody_zapisz4.php (ad1..ad8)
+#
+# DELTA:
+# - wysyłamy tylko jeśli docelowa wartość != DOM
 # ============================================================
 
 PLAYERS_FIELD_TO_KIND = {
@@ -593,17 +600,27 @@ def _table_text(table) -> str:
 
 
 def _find_players_table(soup: BeautifulSoup):
+    """
+    Szukamy tabeli (zwykle zagnieżdżonej) dla zawodników:
+    - ma input NrKoszulki2*
+    - ma onchange/onclick z zapiszProtok(...)
+    """
     for table in soup.find_all("table"):
-        if not table.find(attrs={"onchange": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)}) and not table.find(
+        if not table.find("input", attrs={"name": re.compile(r"^NrKoszulki2\d+$")}):
+            continue
+        if table.find(attrs={"onchange": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)}) or table.find(
             attrs={"onclick": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)}
         ):
-            continue
-        if table.find("input", attrs={"name": re.compile(r"^NrKoszulki2\d+$")}):
             return table
     return None
 
 
 def _find_companions_table(soup: BeautifulSoup):
+    """
+    Tabela osób towarzyszących:
+    - ma onclick zapiszProtok4(...)
+    - ma nagłówki (Osoba/Funkcja/Kolejność...) w tekście
+    """
     for table in soup.find_all("table"):
         if not table.find(attrs={"onclick": re.compile(r"zapiszProtok4\s*\(", re.IGNORECASE)}):
             continue
@@ -620,45 +637,83 @@ def _norm_team_name(s: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "", s)
     return s
 
+
 def _team_from_header_text(header_txt: str, host_name: str, guest_name: str) -> Optional[str]:
+    """
+    Dopasowanie “contains” (obie strony) – bo czasem dochodzą dopiski.
+    Jeśli w tekście są OBIE drużyny (np. pasek "A vs B") -> ignorujemy (None).
+    """
     ht = _norm_team_name(header_txt)
     h = _norm_team_name(host_name)
     g = _norm_team_name(guest_name)
     if not ht:
         return None
-    # dopasowanie “contains” działa lepiej niż == (czasem dochodzą dopiski)
-    if h and (h in ht or ht in h):
+
+    has_h = bool(h and (h in ht or ht in h))
+    has_g = bool(g and (g in ht or ht in g))
+
+    if has_h and has_g:
+        return None
+    if has_h:
         return "host"
-    if g and (g in ht or ht in g):
+    if has_g:
         return "guest"
     return None
 
 
-def _iter_team_blocks_rows(table, *, host_name: str, guest_name: str) -> List[Tuple[str, Any]]:
-    out: List[Tuple[str, Any]] = []
+def _max_colspan_in_tr(tr) -> int:
+    mx = 0
+    for td in tr.find_all(["td", "th"]):
+        try:
+            cs = int(td.get("colspan") or 0)
+        except Exception:
+            cs = 0
+        mx = max(mx, cs)
+    return mx
 
+
+def _iter_team_blocks_rows(
+    table,
+    *,
+    host_name: str,
+    guest_name: str,
+    team_header_min_colspan: int,
+) -> List[Tuple[str, Any]]:
+    """
+    Nowa logika bloków:
+    - NIE opieramy się o “bgcolor/style + <b>” jako warunek ogólny.
+    - Bierzemy tylko te wiersze nagłówkowe, które:
+      (1) zawierają nazwę host lub guest (dokładnie wg _team_from_header_text)
+      (2) wyglądają jak prawdziwy nagłówek sekcji w tej tabeli: colspan >= team_header_min_colspan
+          (dla zawodników typowo 15, dla companions typowo 10)
+    """
+    out: List[Tuple[str, Any]] = []
     current_team: Optional[str] = None
-    order_fallback_idx = -1  # fallback tylko jeśli nie umiemy dopasować nazw
+
+    # fallback: jeśli nigdy nie trafimy dopasowania po nazwie (np. nazwy różne),
+    # to host=1. header, guest=2. header (ale TYLKO dla headerów z colspan>=min)
+    fallback_idx = 0
 
     for tr in table.find_all("tr"):
-        tds = tr.find_all("td")
+        row_txt = _normalize_space(tr.get_text(" ", strip=True))
+        if not row_txt:
+            continue
 
-        is_header_like = bool(tds) and (
-            any(td.get("bgcolor") for td in tds) or  # klasyczne
-            any("background" in (td.get("style") or "").lower() for td in tds)  # czasem idzie stylem
-        ) and tr.find("b")
-
-        if is_header_like:
-            header_txt = _normalize_space(tr.get_text(" ", strip=True))
-            matched = _team_from_header_text(header_txt, host_name, guest_name)
-
+        cs = _max_colspan_in_tr(tr)
+        if cs >= int(team_header_min_colspan or 0):
+            matched = _team_from_header_text(row_txt, host_name, guest_name)
             if matched:
                 current_team = matched
-            else:
-                # fallback: liczymy tylko nagłówki, których NIE da się dopasować
-                order_fallback_idx += 1
-                current_team = "host" if order_fallback_idx <= 0 else "guest"
-            continue
+                continue
+
+            # fallback tylko wtedy, gdy to wygląda jak “nagłówek drużyny” (duży colspan + zwykle <b>)
+            if tr.find("b") and any(ch.isalpha() for ch in row_txt):
+                # ale nie łapiemy np. "Osoby towarzyszące:" jako header drużyny,
+                # bo tam tekst jest inny (choć w praktyce team header w nested table ma tylko team name).
+                if "osoby towarzysz" not in row_txt.lower():
+                    fallback_idx += 1
+                    current_team = "host" if fallback_idx == 1 else "guest"
+                    continue
 
         if current_team in ("host", "guest"):
             out.append((current_team, tr))
@@ -666,16 +721,32 @@ def _iter_team_blocks_rows(table, *, host_name: str, guest_name: str) -> List[Tu
     return out
 
 
-def _collect_players_inputs(soup: BeautifulSoup, *, host_name: str, guest_name: str) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+def _collect_players_inputs(
+    soup: BeautifulSoup,
+    *,
+    host_name: str,
+    guest_name: str,
+) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
     table = _find_players_table(soup)
     if not table:
         return {}
 
     result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
-    for team, tr in _iter_team_blocks_rows(table, host_name=host_name, guest_name=guest_name):
+    # blokujemy duplikaty numerów “na serwerze” (w HTML) – bierzemy pierwszy napotkany wiersz na team
+    seen_jerseys: Dict[str, set] = {"host": set(), "guest": set()}
+
+    rows = _iter_team_blocks_rows(
+        table,
+        host_name=host_name,
+        guest_name=guest_name,
+        team_header_min_colspan=14,  # w praktyce jest 15, dajemy minimalnie 14 dla odporności
+    )
+
+    for team, tr in rows:
         jersey_inp = None
 
+        # najpierw szukamy inputu z NrKoszulki2 w tym wierszu (po JS field, nie po name – bo name ma suffix id)
         for inp in tr.find_all(["input", "select", "textarea"]):
             js = inp.get("onchange") or inp.get("onclick") or ""
             if "zapiszProtok" not in js:
@@ -696,6 +767,12 @@ def _collect_players_inputs(soup: BeautifulSoup, *, host_name: str, guest_name: 
             continue
         jersey = str(int(jersey_val))
 
+        # duplikat numeru w HTML: pierwszy wygrywa, resztę ignorujemy
+        if jersey in seen_jerseys[team]:
+            continue
+        seen_jerseys[team].add(jersey)
+
+        # collect pól tego wiersza
         for inp in tr.find_all(["input", "select", "textarea"]):
             js = inp.get("onchange") or inp.get("onclick") or ""
             if "zapiszProtok" not in js:
@@ -712,7 +789,12 @@ def _collect_players_inputs(soup: BeautifulSoup, *, host_name: str, guest_name: 
             if not kind:
                 continue
 
-            result[(team, jersey, kind)] = {
+            key = (team, jersey, kind)
+            # jeśli w HTML jest duplikat inputu (rzadkie, ale bywa) – pierwszy wygrywa
+            if key in result:
+                continue
+
+            result[key] = {
                 "inp": inp,
                 "field": field,
                 "args4": args4,
@@ -751,7 +833,12 @@ def _extract_letter_from_cell(td) -> Optional[str]:
     return None
 
 
-def _collect_companion_inputs(soup: BeautifulSoup, *, host_name: str, guest_name: str) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+def _collect_companion_inputs(
+    soup: BeautifulSoup,
+    *,
+    host_name: str,
+    guest_name: str,
+) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
     table = _find_companions_table(soup)
     if not table:
         return {}
@@ -759,7 +846,14 @@ def _collect_companion_inputs(soup: BeautifulSoup, *, host_name: str, guest_name
     letter_col = _find_letter_col_index(table)
     result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
-    for team, tr in _iter_team_blocks_rows(table, host_name=host_name, guest_name=guest_name):
+    rows = _iter_team_blocks_rows(
+        table,
+        host_name=host_name,
+        guest_name=guest_name,
+        team_header_min_colspan=9,  # w praktyce jest 10
+    )
+
+    for team, tr in rows:
         tds = tr.find_all("td")
         if not tds or len(tds) < 3:
             continue
@@ -788,7 +882,13 @@ def _collect_companion_inputs(soup: BeautifulSoup, *, host_name: str, guest_name
             kind = COMP_CHECKBOX_VALUE_TO_KIND.get(v)
             if not kind:
                 continue
-            result[(team, letter, kind)] = {
+
+            key = (team, letter, kind)
+            # duplikat checkboxa w HTML: pierwszy wygrywa
+            if key in result:
+                continue
+
+            result[key] = {
                 "inp": inp,
                 "args8": args8,
                 "checkbox_value": v,
@@ -869,7 +969,6 @@ def _norm_num_str(s: str) -> int:
     s2 = (s or "").strip()
     if s2 == "":
         return 0
-    # some pages may contain whitespace or non-breaking spaces
     s2 = s2.replace("\xa0", "").strip()
     return int(s2)
 
@@ -896,7 +995,6 @@ def _delta_equal_player(inp, kind: str, desired: Any) -> bool:
             des_i = int(desired or 0)
             return cur_i == des_i
         except Exception:
-            # fallback: string compare with desired formatting
             return cur_s.strip() == _desired_str_for_numeric(int(desired or 0)).strip()
 
     # fallback as text
@@ -915,7 +1013,7 @@ async def _apply_protocol_updates_4blocks(
     host_name: str,
     guest_name: str,
 ) -> Dict[str, Any]:
-    # ⬇️ kluczowa zmiana: collectory wymagają host_name/guest_name
+    # ⬇️ kluczowa zmiana: rozpoznajemy bloki po NAGŁÓWKACH z nazwą drużyny (players + companions)
     players_inputs = _collect_players_inputs(soup, host_name=host_name, guest_name=guest_name)
     comp_inputs = _collect_companion_inputs(soup, host_name=host_name, guest_name=guest_name)
 
@@ -935,6 +1033,7 @@ async def _apply_protocol_updates_4blocks(
     comp_kinds_order = ["warn", "p2", "disq"]
 
     # ---- players ----
+    # Zasada: mapujemy wszystko co umiemy; brak numeru na stronie -> tylko “missing”, ale idziemy dalej.
     for team in ("host", "guest"):
         team_stats = stats_map.get(team) or {}
         for key, st in team_stats.items():
@@ -949,6 +1048,7 @@ async def _apply_protocol_updates_4blocks(
 
                 meta = players_inputs.get((team, jersey, kind))
                 if not meta:
+                    # numer z ProEl, którego nie ma w HTML -> skip
                     missing.append({"section": "players", "team": team, "player": jersey, "kind": kind})
                     continue
 
@@ -1033,7 +1133,6 @@ async def _apply_protocol_updates_4blocks(
         "failed": failed,
         "missing": missing,
         "skipped": skipped_items,
-        # ✅ debug diagnostyczny
         "debug": {
             "host_name": host_name,
             "guest_name": guest_name,
@@ -1090,8 +1189,6 @@ async def save_protocol_from_json(
                 host_name=host_name,
                 guest_name=guest_name,
             )
-
-
         finally:
             await client.aclose()
 
