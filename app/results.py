@@ -1585,9 +1585,6 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
         "pdf",
         "--outdir",
         out_dir,
-        "--max-pages=1",  # Maksymalna liczba stron w dokumencie
-        "--page-size=A4",  # Ustawienie rozmiaru strony A4
-        "--fit-to-pages",  # Dostosowanie do stron
         xlsx_path,
     ]
 
