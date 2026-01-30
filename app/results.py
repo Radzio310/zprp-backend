@@ -1561,11 +1561,18 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
     """
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
-        raise RuntimeError("Brak LibreOffice (soffice) w środowisku. Dodaj libreoffice do Railway (nixpacks).")
+        raise RuntimeError("Brak LibreOffice (soffice) w środowisku. Doinstaluj libreoffice w Dockerfile.")
+
+    # LO w kontenerze często próbuje pisać do HOME — zabezpieczamy to envem
+    env = os.environ.copy()
+    env.setdefault("HOME", "/tmp")
+    env.setdefault("XDG_CACHE_HOME", "/tmp")
+    env.setdefault("XDG_CONFIG_HOME", "/tmp")
 
     cmd = [
         soffice,
         "--headless",
+        "--invisible",
         "--nologo",
         "--nolockcheck",
         "--nodefault",
@@ -1576,19 +1583,38 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
         out_dir,
         xlsx_path,
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        timeout=90,  # ważne: żeby request nie wisiał wiecznie
+    )
+
     if proc.returncode != 0:
-        raise RuntimeError(f"LibreOffice convert failed: {proc.stderr[:400]}")
+        raise RuntimeError(
+            f"LibreOffice convert failed (code={proc.returncode}). "
+            f"stderr={proc.stderr[:500]} stdout={proc.stdout[:200]}"
+        )
 
     base = os.path.splitext(os.path.basename(xlsx_path))[0]
     pdf_path = os.path.join(out_dir, base + ".pdf")
+
     if not os.path.exists(pdf_path):
-        # czasem LO robi nazwę z innym sufiksem — spróbuj znaleźć jedyny pdf w out_dir
+        # fallback: znajdź najbardziej pasujący PDF w out_dir
         pdfs = [p for p in os.listdir(out_dir) if p.lower().endswith(".pdf")]
         if len(pdfs) == 1:
             pdf_path = os.path.join(out_dir, pdfs[0])
         else:
-            raise RuntimeError("Nie znaleziono wyjściowego PDF po konwersji.")
+            # spróbuj dopasować po base
+            cand = [p for p in pdfs if os.path.splitext(p)[0] == base]
+            if len(cand) == 1:
+                pdf_path = os.path.join(out_dir, cand[0])
+            else:
+                raise RuntimeError(f"Nie znaleziono wyjściowego PDF po konwersji. Pliki: {pdfs[:10]}")
+
     return pdf_path
 
 
@@ -1643,6 +1669,8 @@ async def generate_protocol_pdf(
         with tempfile.TemporaryDirectory() as td:
             safe_code = re.sub(r"[^0-9A-Za-z_-]+", "_", (core.get("matchNumber") or "mecz"))
             filled_xlsx = os.path.join(td, f"protocol_{safe_code}.xlsx")
+            os.makedirs(os.path.dirname(filled_xlsx), exist_ok=True)
+            safe_code = safe_code[:60] if safe_code else "mecz"
 
             wb = load_workbook(str(template_path))
             ws = wb.active  # jeśli masz konkretny arkusz, zmień na wb["NazwaArkusza"]
