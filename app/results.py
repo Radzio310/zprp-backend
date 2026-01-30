@@ -613,29 +613,67 @@ def _find_companions_table(soup: BeautifulSoup):
     return None
 
 
-def _iter_team_blocks_rows(table) -> List[Tuple[str, Any]]:
-    out = []
-    team_idx = -1
+def _norm_team_name(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    return s
+
+def _team_from_header_text(header_txt: str, host_name: str, guest_name: str) -> Optional[str]:
+    ht = _norm_team_name(header_txt)
+    h = _norm_team_name(host_name)
+    g = _norm_team_name(guest_name)
+    if not ht:
+        return None
+    # dopasowanie “contains” działa lepiej niż == (czasem dochodzą dopiski)
+    if h and (h in ht or ht in h):
+        return "host"
+    if g and (g in ht or ht in g):
+        return "guest"
+    return None
+
+
+def _iter_team_blocks_rows(table, *, host_name: str, guest_name: str) -> List[Tuple[str, Any]]:
+    out: List[Tuple[str, Any]] = []
+
+    current_team: Optional[str] = None
+    order_fallback_idx = -1  # fallback tylko jeśli nie umiemy dopasować nazw
+
     for tr in table.find_all("tr"):
         tds = tr.find_all("td")
-        if tds:
-            if any(td.get("bgcolor") for td in tds) and tr.find("b"):
-                team_idx += 1
-                continue
-        team = "host" if team_idx <= 0 else "guest"
-        if team_idx >= 0:
-            out.append((team, tr))
+
+        is_header_like = bool(tds) and (
+            any(td.get("bgcolor") for td in tds) or  # klasyczne
+            any("background" in (td.get("style") or "").lower() for td in tds)  # czasem idzie stylem
+        ) and tr.find("b")
+
+        if is_header_like:
+            header_txt = _normalize_space(tr.get_text(" ", strip=True))
+            matched = _team_from_header_text(header_txt, host_name, guest_name)
+
+            if matched:
+                current_team = matched
+            else:
+                # fallback: liczymy tylko nagłówki, których NIE da się dopasować
+                order_fallback_idx += 1
+                current_team = "host" if order_fallback_idx <= 0 else "guest"
+            continue
+
+        if current_team in ("host", "guest"):
+            out.append((current_team, tr))
+
     return out
 
 
-def _collect_players_inputs(soup: BeautifulSoup) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+def _collect_players_inputs(soup: BeautifulSoup, *, host_name: str, guest_name: str) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
     table = _find_players_table(soup)
     if not table:
         return {}
 
     result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
-    for team, tr in _iter_team_blocks_rows(table):
+    for team, tr in _iter_team_blocks_rows(table, host_name=host_name, guest_name=guest_name):
         jersey_inp = None
 
         for inp in tr.find_all(["input", "select", "textarea"]):
@@ -713,7 +751,7 @@ def _extract_letter_from_cell(td) -> Optional[str]:
     return None
 
 
-def _collect_companion_inputs(soup: BeautifulSoup) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+def _collect_companion_inputs(soup: BeautifulSoup, *, host_name: str, guest_name: str) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
     table = _find_companions_table(soup)
     if not table:
         return {}
@@ -721,7 +759,7 @@ def _collect_companion_inputs(soup: BeautifulSoup) -> Dict[Tuple[str, str, str],
     letter_col = _find_letter_col_index(table)
     result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
-    for team, tr in _iter_team_blocks_rows(table):
+    for team, tr in _iter_team_blocks_rows(table, host_name=host_name, guest_name=guest_name):
         tds = tr.find_all("td")
         if not tds or len(tds) < 3:
             continue
@@ -873,9 +911,19 @@ async def _apply_protocol_updates_4blocks(
     client: AsyncClient,
     soup: BeautifulSoup,
     stats_map: Dict[str, Dict[str, Dict[str, Any]]],
+    *,
+    host_name: str,
+    guest_name: str,
 ) -> Dict[str, Any]:
-    players_inputs = _collect_players_inputs(soup)
-    comp_inputs = _collect_companion_inputs(soup)
+    # ⬇️ kluczowa zmiana: collectory wymagają host_name/guest_name
+    players_inputs = _collect_players_inputs(soup, host_name=host_name, guest_name=guest_name)
+    comp_inputs = _collect_companion_inputs(soup, host_name=host_name, guest_name=guest_name)
+
+    # --- DEBUG: ile komórek w ogóle wykryliśmy per team/sekcja ---
+    players_inputs_host = sum(1 for k in players_inputs.keys() if k[0] == "host")
+    players_inputs_guest = sum(1 for k in players_inputs.keys() if k[0] == "guest")
+    comp_inputs_host = sum(1 for k in comp_inputs.keys() if k[0] == "host")
+    comp_inputs_guest = sum(1 for k in comp_inputs.keys() if k[0] == "guest")
 
     updated = 0
     skipped = 0
@@ -985,6 +1033,17 @@ async def _apply_protocol_updates_4blocks(
         "failed": failed,
         "missing": missing,
         "skipped": skipped_items,
+        # ✅ debug diagnostyczny
+        "debug": {
+            "host_name": host_name,
+            "guest_name": guest_name,
+            "players_inputs_host": players_inputs_host,
+            "players_inputs_guest": players_inputs_guest,
+            "companions_inputs_host": comp_inputs_host,
+            "companions_inputs_guest": comp_inputs_guest,
+            "players_inputs_total": len(players_inputs),
+            "companions_inputs_total": len(comp_inputs),
+        },
     }
 
 
@@ -1020,7 +1079,18 @@ async def save_protocol_from_json(
             soup = BeautifulSoup(html, "html.parser")
 
             stats_map = _build_stats_map(data_json)
-            result = await _apply_protocol_updates_4blocks(client, soup, stats_map)
+            mc = data_json.get("matchConfig") or {}
+            host_name = mc.get("hostTeamName") or ""
+            guest_name = mc.get("guestTeamName") or ""
+
+            result = await _apply_protocol_updates_4blocks(
+                client,
+                soup,
+                stats_map,
+                host_name=host_name,
+                guest_name=guest_name,
+            )
+
 
         finally:
             await client.aclose()
