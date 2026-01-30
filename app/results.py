@@ -1206,3 +1206,508 @@ async def save_protocol_from_json(
     except Exception as e:
         logger.error("save_protocol_from_json error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Nie udało się zapisać protokołu: {e}")
+
+# ============================================================
+# EXPORT PROTOCOL PDF FROM ProEl data_json -> XLSX TEMPLATE -> PDF
+# ============================================================
+
+import os
+import math
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from fastapi.responses import FileResponse
+from openpyxl import load_workbook
+
+
+class ProtocolPdfRequest(BaseModel):
+    data_json: Dict[str, Any]  # dokładnie ten sam JSON ProEl
+
+
+def _ms_to_mmss(ms: Optional[int]) -> str:
+    if ms is None:
+        return ""
+    try:
+        ms_i = int(ms)
+    except Exception:
+        return ""
+    if ms_i < 0:
+        ms_i = 0
+    mm = ms_i // 60000
+    ss = (ms_i % 60000) // 1000
+    return f"{mm:02d}:{ss:02d}"
+
+
+def _event_minute_from_ms(ms: int) -> int:
+    # minute numbering: 0:00 => 1, 53:12 => 54 (floor + 1)
+    try:
+        ms_i = int(ms)
+    except Exception:
+        ms_i = 0
+    if ms_i < 0:
+        ms_i = 0
+    return (ms_i // 60000) + 1
+
+
+def _safe_int(v: Any, default: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def _get_match_core(data_json: Dict[str, Any]) -> Dict[str, Any]:
+    mc = data_json.get("matchConfig") or {}
+    return {
+        "matchNumber": (mc.get("matchNumber") or "").strip(),
+        "hostName": (mc.get("hostTeamName") or "").strip(),
+        "guestName": (mc.get("guestTeamName") or "").strip(),
+        "halfTimeMin": _safe_int(mc.get("halfTime") or 30, 30),
+        "scoreHost": _safe_int(data_json.get("scoreHost"), 0),
+        "scoreGuest": _safe_int(data_json.get("scoreGuest"), 0),
+        "halfScoreHost": _safe_int((data_json.get("halfScore") or {}).get("host"), 0),
+        "halfScoreGuest": _safe_int((data_json.get("halfScore") or {}).get("guest"), 0),
+        "hostPlayers": list(mc.get("hostPlayers") or []),
+        "guestPlayers": list(mc.get("guestPlayers") or []),
+    }
+
+
+def _place_timeouts(ws, *, team_timeouts: Dict[str, Any], half_ms: int, is_host: bool) -> None:
+    """
+    Wypełnia czasy zgodnie z Twoimi regułami, ale uproszczone do logiki:
+    - w 1. połowie: pierwszy timeout do (row10), drugi do (row11)
+    - w 2. połowie: pierwszy timeout do (row10), drugi do (row11)
+    Zgadza się z opisanymi przypadkami (max 2 czasy na połowę).
+    """
+    t1 = team_timeouts.get("first")
+    t2 = team_timeouts.get("second")
+    t3 = team_timeouts.get("third")
+    times = [t for t in [t1, t2, t3] if t is not None]
+
+    # sort rosnąco po czasie (ms)
+    def _as_int(x):
+        try:
+            return int(x)
+        except Exception:
+            return 10**18
+
+    times.sort(key=_as_int)
+
+    half1 = [t for t in times if _as_int(t) < half_ms]
+    half2 = [t for t in times if _as_int(t) >= half_ms]
+
+    # host: half1 -> AL10/AL11, half2 -> AW10/AW11
+    # guest: half1 -> AU10/AU11, half2 -> BF10/BF11
+    if is_host:
+        h1_cells = ["AL10", "AL11"]
+        h2_cells = ["AW10", "AW11"]
+    else:
+        h1_cells = ["AU10", "AU11"]
+        h2_cells = ["BF10", "BF11"]
+
+    for idx, t in enumerate(half1[:2]):
+        ws[h1_cells[idx]].value = _ms_to_mmss(t)
+
+    for idx, t in enumerate(half2[:2]):
+        ws[h2_cells[idx]].value = _ms_to_mmss(t)
+
+
+def _player_stats_map(data_json: Dict[str, Any], team: str) -> Dict[int, Dict[str, Any]]:
+    key = "hostPlayerStats" if team == "host" else "guestPlayerStats"
+    arr = data_json.get(key) or []
+    out: Dict[int, Dict[str, Any]] = {}
+    for ps in arr:
+        if not isinstance(ps, dict):
+            continue
+        n = ps.get("number")
+        if n is None:
+            continue
+        try:
+            out[int(n)] = ps
+        except Exception:
+            continue
+    return out
+
+
+def _fill_players_block(
+    ws,
+    *,
+    players: List[Any],
+    stats_by_number: Dict[int, Dict[str, Any]],
+    start_row: int,
+    end_row: int,
+) -> None:
+    """
+    Kolumny wg Twojej specyfikacji:
+      - A: numer
+      - Q: wejście "W" / "-"
+      - S: bramki liczba / "-"
+      - U: upomnienie "[minuta]'" / "-"
+      - W: 2' #1 (MM:SS) / "---"
+      - Z: 2' #2 / "---"
+      - AC: 2' #3 / "---"
+      - AF: dyskwalifikacja lub dysq z opisem / "---"
+      - AI: zawsze "---"
+    """
+    nums: List[int] = []
+    for p in players or []:
+        try:
+            nums.append(int(p))
+        except Exception:
+            continue
+    nums = sorted(set(nums))
+
+    max_rows = (end_row - start_row + 1)
+    nums = nums[:max_rows]
+
+    for i in range(max_rows):
+        row = start_row + i
+        ws[f"AI{row}"].value = "---"  # zawsze
+
+        if i >= len(nums):
+            # zostaw pusto jeśli mniej zawodników
+            ws[f"A{row}"].value = ""
+            ws[f"Q{row}"].value = "-"
+            ws[f"S{row}"].value = "-"
+            ws[f"U{row}"].value = "-"
+            ws[f"W{row}"].value = "---"
+            ws[f"Z{row}"].value = "---"
+            ws[f"AC{row}"].value = "---"
+            ws[f"AF{row}"].value = "---"
+            continue
+
+        num = nums[i]
+        ps = stats_by_number.get(num) or {}
+
+        entered = bool(ps.get("entered") or False)
+        goals = _safe_int(ps.get("goals") or 0, 0)
+        warning = ps.get("warning")  # w ProEl bywa "12'"
+        penalty1 = (ps.get("penalty1") or "").strip()
+        penalty2 = (ps.get("penalty2") or "").strip()
+        penalty3 = (ps.get("penalty3") or "").strip()
+        disq_time = (ps.get("disqualification") or "").strip()
+        disq_desc = (ps.get("disqualificationDesc") or "").strip()
+        has_red = bool(ps.get("hasRedCard") or False)
+
+        ws[f"A{row}"].value = num
+        ws[f"Q{row}"].value = "W" if entered else "-"
+        ws[f"S{row}"].value = goals if goals > 0 else "-"
+        ws[f"U{row}"].value = str(warning).strip() if isinstance(warning, str) and warning.strip() else "-"
+
+        ws[f"W{row}"].value = penalty1 if penalty1 else "---"
+        ws[f"Z{row}"].value = penalty2 if penalty2 else "---"
+        ws[f"AC{row}"].value = penalty3 if penalty3 else "---"
+
+        if disq_time or disq_desc or has_red:
+            if disq_time and disq_desc:
+                ws[f"AF{row}"].value = f"{disq_time} {disq_desc}"
+            elif disq_time:
+                ws[f"AF{row}"].value = disq_time
+            elif disq_desc:
+                ws[f"AF{row}"].value = disq_desc
+            else:
+                ws[f"AF{row}"].value = "D"
+        else:
+            ws[f"AF{row}"].value = "---"
+
+
+def _fill_timeline(
+    ws,
+    *,
+    data_json: Dict[str, Any],
+    half_ms: int,
+    half_score_host: int,
+    half_score_guest: int,
+) -> None:
+    """
+    Przebieg meczu:
+    - tylko: goal, penaltyKickScored, penaltyKickMissed
+    - zapisujemy minutę jako liczba (floor(ms/60000)+1)
+    - wiersze 15..61
+    - połowa 1: AL (min), AN (host player/host action), AP (host score), AS (guest score)
+    - połowa 2: AW (min), AY (host action), BA (host score), BD (guest score), BF (guest action)
+
+    UWAGA:
+    - Dla 1. połowy w Twoim opisie nie podałeś kolumny na zawodnika gości.
+      Zostawiamy gości pusto (tylko wyniki). Jeśli chcesz, dopnę gości do konkretnej kolumny.
+    """
+    prot = data_json.get("protocol") or []
+    evs1 = []
+    evs2 = []
+
+    for ev in prot:
+        if not isinstance(ev, dict):
+            continue
+        t = ev.get("type")
+        if t not in ("goal", "penaltyKickScored", "penaltyKickMissed"):
+            continue
+        half = ev.get("half")
+        if half == 1:
+            evs1.append(ev)
+        elif half == 2:
+            evs2.append(ev)
+
+    # sort po czasie rosnąco
+    def _ev_ms(e):
+        return _safe_int(e.get("time") or 0, 0)
+
+    evs1.sort(key=_ev_ms)
+    evs2.sort(key=_ev_ms)
+
+    # ---- half 1 ----
+    h_score = 0
+    g_score = 0
+    row = 15
+    for ev in evs1:
+        if row > 61:
+            break
+        ms = _ev_ms(ev)
+        minute = _event_minute_from_ms(ms)
+
+        team = ev.get("team")
+        player = ev.get("player")
+        t = ev.get("type")
+
+        ws[f"AL{row}"].value = str(minute)
+
+        # akcje w 1. połowie:
+        # - gospodarz -> kolumna AN
+        # - gość     -> kolumna AU
+        host_action = ""
+        guest_action = ""
+
+        if player is not None:
+            ptxt = str(player).strip()
+            if t.startswith("penaltyKick"):
+                ptxt = f"{ptxt}K"
+
+            if team == "host":
+                host_action = ptxt
+            elif team == "guest":
+                guest_action = ptxt
+
+        ws[f"AN{row}"].value = host_action
+        ws[f"AU{row}"].value = guest_action
+
+        if t == "goal" or t == "penaltyKickScored":
+            if team == "host":
+                h_score += 1
+            elif team == "guest":
+                g_score += 1
+            ws[f"AP{row}"].value = str(h_score)
+            ws[f"AS{row}"].value = str(g_score)
+        else:
+            # penaltyKickMissed -> "--" / "--"
+            ws[f"AP{row}"].value = "--"
+            ws[f"AS{row}"].value = "--"
+
+        row += 1
+
+    # ---- half 2 ----
+    h_score = _safe_int(half_score_host, 0)
+    g_score = _safe_int(half_score_guest, 0)
+    row = 15
+    for ev in evs2:
+        if row > 61:
+            break
+        ms = _ev_ms(ev)
+        minute = _event_minute_from_ms(ms)
+
+        team = ev.get("team")
+        player = ev.get("player")
+        t = ev.get("type")
+
+        ws[f"AW{row}"].value = str(minute)
+
+        # host action AY, guest action BF
+        if player is not None:
+            ptxt = str(player).strip()
+            if t.startswith("penaltyKick"):
+                ptxt = f"{ptxt}K"
+        else:
+            ptxt = ""
+
+        if team == "host":
+            ws[f"AY{row}"].value = ptxt
+            ws[f"BF{row}"].value = ""
+        elif team == "guest":
+            ws[f"AY{row}"].value = ""
+            ws[f"BF{row}"].value = ptxt
+        else:
+            ws[f"AY{row}"].value = ""
+            ws[f"BF{row}"].value = ""
+
+        if t == "goal" or t == "penaltyKickScored":
+            if team == "host":
+                h_score += 1
+            elif team == "guest":
+                g_score += 1
+            ws[f"BA{row}"].value = str(h_score)
+            ws[f"BD{row}"].value = str(g_score)
+        else:
+            ws[f"BA{row}"].value = "--"
+            ws[f"BD{row}"].value = "--"
+
+        row += 1
+
+
+def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
+    """
+    Konwersja przez LibreOffice:
+      soffice --headless --convert-to pdf --outdir <out_dir> <xlsx_path>
+    Zwraca ścieżkę do PDF.
+    """
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise RuntimeError("Brak LibreOffice (soffice) w środowisku. Dodaj libreoffice do Railway (nixpacks).")
+
+    cmd = [
+        soffice,
+        "--headless",
+        "--nologo",
+        "--nolockcheck",
+        "--nodefault",
+        "--norestore",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        out_dir,
+        xlsx_path,
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"LibreOffice convert failed: {proc.stderr[:400]}")
+
+    base = os.path.splitext(os.path.basename(xlsx_path))[0]
+    pdf_path = os.path.join(out_dir, base + ".pdf")
+    if not os.path.exists(pdf_path):
+        # czasem LO robi nazwę z innym sufiksem — spróbuj znaleźć jedyny pdf w out_dir
+        pdfs = [p for p in os.listdir(out_dir) if p.lower().endswith(".pdf")]
+        if len(pdfs) == 1:
+            pdf_path = os.path.join(out_dir, pdfs[0])
+        else:
+            raise RuntimeError("Nie znaleziono wyjściowego PDF po konwersji.")
+    return pdf_path
+
+
+@router.post(
+    "/judge/results/protocol/pdf",
+    summary="Generuj PDF z protokołu na podstawie data_json (ProEl) i szablonu XLSX",
+)
+async def generate_protocol_pdf(
+    req: ProtocolPdfRequest,
+):
+    data_json = req.data_json or {}
+    if not isinstance(data_json, dict):
+        raise HTTPException(400, "data_json musi być obiektem JSON")
+
+    # --- locate template ---
+    template_path = Path(__file__).resolve().parent / "templates" / "protocol_template.xlsx"
+    if not template_path.exists():
+        raise HTTPException(
+            500,
+            f"Brak szablonu XLSX: {template_path}. Umieść plik w app/templates/protocol_template.xlsx i dodaj do repo.",
+        )
+
+    core = _get_match_core(data_json)
+    half_ms = core["halfTimeMin"] * 60 * 1000
+
+    # penalties totals
+    pen = data_json.get("penaltyStats") or {}
+    pen_h = pen.get("host") or {}
+    pen_g = pen.get("guest") or {}
+    pk_host_total = _safe_int(pen_h.get("total"), 0)
+    pk_host_goals = _safe_int(pen_h.get("goals"), 0)
+    pk_guest_total = _safe_int(pen_g.get("total"), 0)
+    pk_guest_goals = _safe_int(pen_g.get("goals"), 0)
+
+    # timeouts
+    tt = data_json.get("teamTimeouts") or {}
+    tt_host = tt.get("host") or {}
+    tt_guest = tt.get("guest") or {}
+
+    # players stats
+    host_stats = _player_stats_map(data_json, "host")
+    guest_stats = _player_stats_map(data_json, "guest")
+
+    # winner
+    winner = ""
+    if core["scoreHost"] > core["scoreGuest"]:
+        winner = "A"
+    elif core["scoreGuest"] > core["scoreHost"]:
+        winner = "B"
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            filled_xlsx = os.path.join(td, f"protocol_{core['matchNumber'] or core.get('id','')}.xlsx")
+
+            wb = load_workbook(str(template_path))
+            ws = wb.active  # jeśli masz konkretny arkusz, zmień na wb["NazwaArkusza"]
+
+            # --- header mapping ---
+            ws["AY1"].value = core["matchNumber"]
+            ws["C4"].value = core["hostName"]
+            ws["D9"].value = core["hostName"]
+            ws["C7"].value = core["guestName"]
+            ws["D34"].value = core["guestName"]
+
+            ws["AL6"].value = str(core["scoreHost"])
+            ws["AQ6"].value = str(core["scoreGuest"])
+            ws["AU6"].value = str(core["halfScoreHost"])
+            ws["AY6"].value = str(core["halfScoreGuest"])
+            ws["BB6"].value = winner
+
+            # --- timeouts mapping ---
+            _place_timeouts(ws, team_timeouts=tt_host, half_ms=half_ms, is_host=True)
+            _place_timeouts(ws, team_timeouts=tt_guest, half_ms=half_ms, is_host=False)
+
+            # --- penalties totals ---
+            ws["AN63"].value = str(pk_host_total)
+            ws["AR63"].value = str(pk_host_goals)
+            ws["AY63"].value = str(pk_guest_total)
+            ws["BC63"].value = str(pk_guest_goals)
+
+            # --- players numbers + stats ---
+            _fill_players_block(
+                ws,
+                players=core["hostPlayers"],
+                stats_by_number=host_stats,
+                start_row=11,
+                end_row=28,
+            )
+            _fill_players_block(
+                ws,
+                players=core["guestPlayers"],
+                stats_by_number=guest_stats,
+                start_row=36,
+                end_row=53,
+            )
+
+            # --- timeline (match events) ---
+            _fill_timeline(
+                ws,
+                data_json=data_json,
+                half_ms=half_ms,
+                half_score_host=core["halfScoreHost"],
+                half_score_guest=core["halfScoreGuest"],
+            )
+
+            wb.save(filled_xlsx)
+
+            # --- convert to PDF ---
+            pdf_path = _convert_xlsx_to_pdf(filled_xlsx, td)
+
+            filename = f"protokol_{(core['matchNumber'] or 'mecz').replace('/', '-')}.pdf"
+            return FileResponse(
+                pdf_path,
+                media_type="application/pdf",
+                filename=filename,
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("generate_protocol_pdf error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Nie udało się wygenerować PDF: {e}")

@@ -1,0 +1,2 @@
+[phases.setup]
+nixPkgs = ["libreoffice", "fontconfig", "dejavu_fonts"]
