@@ -1641,7 +1641,8 @@ async def generate_protocol_pdf(
 
     try:
         with tempfile.TemporaryDirectory() as td:
-            filled_xlsx = os.path.join(td, f"protocol_{core['matchNumber'] or core.get('id','')}.xlsx")
+            safe_code = re.sub(r"[^0-9A-Za-z_-]+", "_", (core.get("matchNumber") or "mecz"))
+            filled_xlsx = os.path.join(td, f"protocol_{safe_code}.xlsx")
 
             wb = load_workbook(str(template_path))
             ws = wb.active  # jeśli masz konkretny arkusz, zmień na wb["NazwaArkusza"]
