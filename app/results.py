@@ -406,7 +406,7 @@ def _build_stats_map(data_json: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str,
             goals = int(ps.get("goals") or 0)
             entered = bool(ps.get("entered")) if "entered" in ps else False
             p2 = _count_nonempty_penalties(ps)
-            disq = bool(ps.get("hasRedCard")) or _truthy(ps.get("disqualification")) or _truthy(ps.get("disqualificationDesc"))
+            disq = _truthy(ps.get("disqualification")) or _truthy(ps.get("disqualificationDesc"))
 
             w = eventc.get(team, {}).get(k, {}).get("warning", 0)
             pk_total = eventc.get(team, {}).get(k, {}).get("pk_total", 0)
@@ -1423,15 +1423,13 @@ def _fill_players_block(
         ws[f"Z{row}"].value = penalty2 if penalty2 else "---"
         ws[f"AC{row}"].value = penalty3 if penalty3 else "---"
 
-        if disq_time or disq_desc or has_red:
+        if disq_time or disq_desc:
             if disq_time and disq_desc:
                 ws[f"AF{row}"].value = f"{disq_time} {disq_desc}"
             elif disq_time:
                 ws[f"AF{row}"].value = disq_time
             elif disq_desc:
                 ws[f"AF{row}"].value = disq_desc
-            else:
-                ws[f"AF{row}"].value = "D"
         else:
             ws[f"AF{row}"].value = "---"
 
