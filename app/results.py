@@ -1308,11 +1308,31 @@ def _place_timeouts(ws, *, team_timeouts: Dict[str, Any], half_ms: int, is_host:
         h1_cells = ["AU10", "AU11"]
         h2_cells = ["BF10", "BF11"]
 
-    for idx, t in enumerate(half1[:2]):
-        ws[h1_cells[idx]].value = _ms_to_mmss(t)
+    # 1. połowa
+    if len(half1) == 0:
+        # Nie wzięto żadnego czasu - wpisujemy "---" w AL10
+        ws[h1_cells[0]].value = "---"
+    elif len(half1) == 1:
+        # Wzięto tylko 1 czas - wpisujemy w AL10 oraz AL11
+        ws[h1_cells[0]].value = _ms_to_mmss(half1[0])
+        ws[h1_cells[1]].value = "---"
+    else:
+        # Wzięto dwa czasy - wpisujemy oba
+        ws[h1_cells[0]].value = _ms_to_mmss(half1[0])
+        ws[h1_cells[1]].value = _ms_to_mmss(half1[1])
 
-    for idx, t in enumerate(half2[:2]):
-        ws[h2_cells[idx]].value = _ms_to_mmss(t)
+    # 2. połowa
+    if len(half2) == 0:
+        # Nie wzięto żadnego czasu w 2. połowie - wpisujemy "---" w AW10
+        ws[h2_cells[0]].value = "---"
+    elif len(half2) == 1:
+        # Wzięto tylko 1 czas w 2. połowie - wpisujemy w AW10 oraz AW11
+        ws[h2_cells[0]].value = _ms_to_mmss(half2[0])
+        ws[h2_cells[1]].value = "---"
+    else:
+        # Wzięto dwa czasy w 2. połowie - wpisujemy oba
+        ws[h2_cells[0]].value = _ms_to_mmss(half2[0])
+        ws[h2_cells[1]].value = _ms_to_mmss(half2[1])
 
 
 def _player_stats_map(data_json: Dict[str, Any], team: str) -> Dict[int, Dict[str, Any]]:
@@ -1484,8 +1504,9 @@ def _fill_timeline(
             elif team == "guest":
                 guest_action = ptxt
 
-        ws[f"AN{row}"].value = host_action
-        ws[f"AU{row}"].value = guest_action
+        # Dodajemy logikę, aby puste wartości były zastępowane "--"
+        ws[f"AN{row}"].value = host_action if host_action else "--"
+        ws[f"AU{row}"].value = guest_action if guest_action else "--"
 
         if t == "goal" or t == "penaltyKickScored":
             if team == "host":
@@ -1517,23 +1538,25 @@ def _fill_timeline(
 
         ws[f"AW{row}"].value = str(minute)
 
-        # host action AY, guest action BF
+        # akcje w 2. połowie:
+        # - gospodarz -> kolumna AY
+        # - gość     -> kolumna BF
+        host_action = ""
+        guest_action = ""
+
         if player is not None:
             ptxt = str(player).strip()
             if t.startswith("penaltyKick"):
                 ptxt = f"{ptxt}K"
-        else:
-            ptxt = ""
 
-        if team == "host":
-            ws[f"AY{row}"].value = ptxt
-            ws[f"BF{row}"].value = ""
-        elif team == "guest":
-            ws[f"AY{row}"].value = ""
-            ws[f"BF{row}"].value = ptxt
-        else:
-            ws[f"AY{row}"].value = ""
-            ws[f"BF{row}"].value = ""
+            if team == "host":
+                host_action = ptxt
+            elif team == "guest":
+                guest_action = ptxt
+
+        # Dodajemy logikę, aby puste wartości były zastępowane "--"
+        ws[f"AY{row}"].value = host_action if host_action else "--"
+        ws[f"BF{row}"].value = guest_action if guest_action else "--"
 
         if t == "goal" or t == "penaltyKickScored":
             if team == "host":
@@ -1543,6 +1566,7 @@ def _fill_timeline(
             ws[f"BA{row}"].value = str(h_score)
             ws[f"BD{row}"].value = str(g_score)
         else:
+            # penaltyKickMissed -> "--" / "--"
             ws[f"BA{row}"].value = "--"
             ws[f"BD{row}"].value = "--"
 
