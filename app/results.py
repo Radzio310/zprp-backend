@@ -1424,15 +1424,10 @@ def _fill_timeline(
 ) -> None:
     """
     Przebieg meczu:
-    - tylko: goal, penaltyKickScored, penaltyKickMissed
     - zapisujemy minutę jako liczba (floor(ms/60000)+1)
     - wiersze 15..61
     - połowa 1: AL (min), AN (host player/host action), AP (host score), AS (guest score)
     - połowa 2: AW (min), AY (host action), BA (host score), BD (guest score), BF (guest action)
-
-    UWAGA:
-    - Dla 1. połowy w Twoim opisie nie podałeś kolumny na zawodnika gości.
-      Zostawiamy gości pusto (tylko wyniki). Jeśli chcesz, dopnę gości do konkretnej kolumny.
     """
     prot = data_json.get("protocol") or []
     evs1 = []
