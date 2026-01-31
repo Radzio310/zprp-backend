@@ -1310,8 +1310,9 @@ def _place_timeouts(ws, *, team_timeouts: Dict[str, Any], half_ms: int, is_host:
 
     # 1. połowa
     if len(half1) == 0:
-        # Nie wzięto żadnego czasu - wpisujemy "---" w AL10
-        ws[h1_cells[0]].value = "---"
+        # Nie wzięto żadnego czasu - wykreślamy AL10, AL11 (lub AU10, AU11 dla gości)
+        ws[h1_cells[0]].value = ""
+        ws[h1_cells[1]].value = ""
     elif len(half1) == 1:
         # Wzięto tylko 1 czas - wpisujemy w AL10 oraz AL11
         ws[h1_cells[0]].value = _ms_to_mmss(half1[0])
@@ -1323,8 +1324,9 @@ def _place_timeouts(ws, *, team_timeouts: Dict[str, Any], half_ms: int, is_host:
 
     # 2. połowa
     if len(half2) == 0:
-        # Nie wzięto żadnego czasu w 2. połowie - wpisujemy "---" w AW10
-        ws[h2_cells[0]].value = "---"
+        # Nie wzięto żadnego czasu w 2. połowie - wykreślamy AW10, AW11 (lub BF10, BF11 dla gości)
+        ws[h2_cells[0]].value = ""
+        ws[h2_cells[1]].value = ""
     elif len(half2) == 1:
         # Wzięto tylko 1 czas w 2. połowie - wpisujemy w AW10 oraz AW11
         ws[h2_cells[0]].value = _ms_to_mmss(half2[0])
