@@ -730,13 +730,12 @@ def _short_html(el, limit: int = 240) -> str:
 
 
 def _summarize_table_candidate(table, host_name: str, guest_name: str, team_header_min_colspan: int) -> Dict[str, Any]:
-    rows = _iter_team_blocks_rows(
+    rows = _iter_team_blocks_rows_by_order(
         table,
-        host_name=host_name,
-        guest_name=guest_name,
         team_header_min_colspan=team_header_min_colspan,
         debug_tag="candidate",
     )
+
     teams = {t for (t, _) in rows}
     jersey_inputs = len(table.find_all("input", attrs={"name": re.compile(r"^NrKoszulki2\d+$")}))
     has_z2 = bool(
@@ -790,8 +789,17 @@ def _find_players_table(soup: BeautifulSoup, *, host_name: str, guest_name: str)
             score += 1000
         if "guest" in teams:
             score += 1000
+
         score += summary["rows"]
-        score -= 0.1 * summary["nested_tables"]
+
+        # mocna kara za "tabelę-kontener" z masą zagnieżdżeń
+        score -= 50 * int(summary["nested_tables"] or 0)
+
+        # kara za layout / menu / “API | rozgrywki…”
+        sample_l = (summary.get("sample_text") or "").lower()
+        if "api | rozgrywki" in sample_l:
+            score -= 500
+
 
         _dbg(
             "players_table candidate",
@@ -845,8 +853,14 @@ def _find_companions_table(soup: BeautifulSoup, *, host_name: str, guest_name: s
             score += 1000
         if "guest" in teams:
             score += 1000
+
         score += summary["rows"]
-        score -= 0.1 * summary["nested_tables"]
+        score -= 50 * int(summary["nested_tables"] or 0)
+
+        sample_l = (summary.get("sample_text") or "").lower()
+        if "api | rozgrywki" in sample_l:
+            score -= 500
+
 
         _dbg(
             "companions_table candidate",
@@ -936,6 +950,69 @@ def _iter_team_blocks_rows(
 
     return out
 
+def _iter_team_blocks_rows_by_order(
+    table,
+    *,
+    team_header_min_colspan: int,
+    debug_tag: str = "main",
+) -> List[Tuple[str, Any]]:
+    """
+    Zwraca listę (team, tr) na podstawie KOLEJNOŚCI nagłówków drużyn:
+      - pierwszy wykryty nagłówek drużyny => host
+      - drugi wykryty nagłówek drużyny   => guest
+    Ignoruje dopasowanie po nazwie (odpornie na mojibake typu 'Zag³êbie').
+    """
+    out: List[Tuple[str, Any]] = []
+    current_team: Optional[str] = None
+    header_index = -1  # 0->host, 1->guest
+
+    if _dbg_enabled():
+        _dbg(
+            "iter_team_blocks_rows_by_order start",
+            debug_tag=debug_tag,
+            team_header_min_colspan=team_header_min_colspan,
+            table_sample=_table_text(table)[:200],
+        )
+
+    for tr_i, tr in enumerate(table.find_all("tr")):
+        header_name = _extract_team_header_name_from_tr(tr, team_header_min_colspan=team_header_min_colspan)
+        if header_name:
+            header_index += 1
+            if header_index == 0:
+                current_team = "host"
+            elif header_index == 1:
+                current_team = "guest"
+            else:
+                current_team = None  # kolejne nagłówki ignorujemy
+
+            _dbg(
+                "team header detected (by_order)",
+                debug_tag=debug_tag,
+                tr_index=tr_i,
+                header_name=header_name,
+                assigned_team=current_team,
+                tr_html=_short_html(tr),
+            )
+            continue
+
+        if current_team in ("host", "guest"):
+            out.append((current_team, tr))
+
+    if _dbg_enabled():
+        c_host = sum(1 for t, _ in out if t == "host")
+        c_guest = sum(1 for t, _ in out if t == "guest")
+        _dbg(
+            "iter_team_blocks_rows_by_order end",
+            debug_tag=debug_tag,
+            headers_seen=header_index + 1,
+            rows_total=len(out),
+            rows_host=c_host,
+            rows_guest=c_guest,
+        )
+
+    return out
+
+
 
 # =========================
 # INPUT COLLECTORS (verbose)
@@ -955,13 +1032,12 @@ def _collect_players_inputs(
     result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     seen_jerseys: Dict[str, set] = {"host": set(), "guest": set()}
 
-    rows = _iter_team_blocks_rows(
+    rows = _iter_team_blocks_rows_by_order(
         table,
-        host_name=host_name,
-        guest_name=guest_name,
         team_header_min_colspan=15,
         debug_tag="players",
     )
+
 
     jersey_seen_counts = {"host": 0, "guest": 0}
     row_with_jersey_counts = {"host": 0, "guest": 0}
@@ -1058,10 +1134,8 @@ def _collect_companion_inputs(
     letter_col = _find_letter_col_index(table)
     result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
-    rows = _iter_team_blocks_rows(
+    rows = _iter_team_blocks_rows_by_order(
         table,
-        host_name=host_name,
-        guest_name=guest_name,
         team_header_min_colspan=10,
         debug_tag="companions",
     )
