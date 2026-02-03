@@ -1576,17 +1576,6 @@ async def _apply_protocol_updates_4blocks(
                 if _delta_equal_player(inp, kind, desired):
                     skipped += 1
                     skipped_items.append({"section": "players", "team": team, "player": jersey, "kind": kind})
-                    _dbg(
-                        "SKIP delta players",
-                        req_id=req_id,
-                        team=team,
-                        jersey=jersey,
-                        kind=kind,
-                        desired=desired,
-                        cur_val=cur_val,
-                        cur_checked=cur_checked,
-                        args4=args4,
-                    )
                     continue
 
                 inp_type = (inp.get("type") or "").lower()
