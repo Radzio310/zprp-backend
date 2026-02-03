@@ -2,6 +2,8 @@
 
 import os
 from urllib.parse import urlparse
+import re
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -67,6 +69,36 @@ def _normalize_zprp_path(raw: str) -> str:
     if ".." in s:
         raise HTTPException(400, "Niepoprawny evaluation_url (..)")
     return s
+
+def _detect_charset_from_headers_and_html(content_type: str, raw: bytes) -> str:
+    """
+    ZPRP potrafi zwracać ISO-8859-2. Najpierw sprawdzamy nagłówek Content-Type,
+    potem meta charset w HTML, a na końcu fallback.
+    """
+    ct = (content_type or "").lower()
+
+    # 1) header: content-type: text/html; charset=iso-8859-2
+    m = re.search(r"charset\s*=\s*([a-z0-9_\-]+)", ct)
+    if m:
+        return m.group(1).strip()
+
+    # 2) meta tag w HTML (szukamy w pierwszych ~8KB)
+    head = raw[:8192].decode("ascii", errors="ignore").lower()
+    m2 = re.search(r'charset=["\']?\s*([a-z0-9_\-]+)\s*["\']?', head)
+    if m2:
+        return m2.group(1).strip()
+
+    # 3) ZPRP najczęściej: iso-8859-2
+    return "iso-8859-2"
+
+
+def _decode_html_bytes(raw: bytes, content_type: str) -> str:
+    charset = _detect_charset_from_headers_and_html(content_type, raw)
+    try:
+        return raw.decode(charset, errors="replace")
+    except Exception:
+        # awaryjnie: utf-8
+        return raw.decode("utf-8", errors="replace")
 
 
 @router.post(
@@ -173,7 +205,9 @@ async def delegate_html(
             )
 
         # użyj helpera, żeby poprawnie ogarnąć iso-8859-2/charsety ZPRP
-        html_text = await fetch_with_correct_encoding(resp)
+        raw = await resp.aread()
+        html_text = _decode_html_bytes(raw, resp.headers.get("content-type", ""))
+
 
     finally:
         await client.aclose()
