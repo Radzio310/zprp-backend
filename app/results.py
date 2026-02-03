@@ -690,35 +690,89 @@ def _table_text(table) -> str:
     return _normalize_space(table.get_text(" ", strip=True))
 
 
-def _find_players_table(soup: BeautifulSoup):
+def _find_players_table(soup: BeautifulSoup, *, host_name: str, guest_name: str):
     """
-    Szukamy tabeli (zwykle zagnieżdżonej) dla zawodników:
-    - ma input NrKoszulki2*
-    - ma onchange/onclick z zapiszProtok(...)
+    W ZPRP HTML często ma kilka zagnieżdżonych <table> spełniających warunki.
+    Wybieramy tę, która realnie zawiera bloki BOTH (host+guest) po nagłówkach <b> + colspan.
     """
+    best = None
+    best_score = -1
+
     for table in soup.find_all("table"):
         if not table.find("input", attrs={"name": re.compile(r"^NrKoszulki2\d+$")}):
             continue
-        if table.find(attrs={"onchange": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)}) or table.find(
-            attrs={"onclick": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)}
+
+        if not (
+            table.find(attrs={"onchange": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)})
+            or table.find(attrs={"onclick": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)})
         ):
-            return table
-    return None
+            continue
+
+        # policz realne wiersze przypisane do teamów na podstawie nagłówków <b> + colspan
+        rows = _iter_team_blocks_rows(
+            table,
+            host_name=host_name,
+            guest_name=guest_name,
+            team_header_min_colspan=14,  # w praktyce 15, ale dajemy min 14
+        )
+        teams = {t for (t, _) in rows}
+
+        # scoring: preferujemy tabelę, która ma i host i guest + dużo wierszy
+        score = 0
+        if "host" in teams:
+            score += 1000
+        if "guest" in teams:
+            score += 1000
+        score += len(rows)
+
+        # preferuj bardziej "wewnętrzną" tabelę (mniej zagnieżdżeń)
+        score -= 0.1 * len(table.find_all("table"))
+
+        if score > best_score:
+            best_score = score
+            best = table
+
+    return best
 
 
-def _find_companions_table(soup: BeautifulSoup):
+def _find_companions_table(soup: BeautifulSoup, *, host_name: str, guest_name: str):
     """
-    Tabela osób towarzyszących:
-    - ma onclick zapiszProtok4(...)
-    - ma nagłówki (Osoba/Funkcja/Kolejność...) w tekście
+    Jak players: wybieramy tabelę, która realnie zawiera bloki host+guest dla 'Osoby towarzyszące'
+    i ma zapiszProtok4().
     """
+    best = None
+    best_score = -1
+
     for table in soup.find_all("table"):
         if not table.find(attrs={"onclick": re.compile(r"zapiszProtok4\s*\(", re.IGNORECASE)}):
             continue
+
         txt = _table_text(table).lower()
-        if "osoba" in txt and "funkcja" in txt and "kolejność" in txt:
-            return table
-    return None
+        # heurystyka: to ma być ta tabela z nagłówkami kolumn
+        if not ("osoba" in txt and "funkcja" in txt and "kolejność" in txt):
+            continue
+
+        rows = _iter_team_blocks_rows(
+            table,
+            host_name=host_name,
+            guest_name=guest_name,
+            team_header_min_colspan=9,  # w praktyce 10
+        )
+        teams = {t for (t, _) in rows}
+
+        score = 0
+        if "host" in teams:
+            score += 1000
+        if "guest" in teams:
+            score += 1000
+        score += len(rows)
+        score -= 0.1 * len(table.find_all("table"))
+
+        if score > best_score:
+            best_score = score
+            best = table
+
+    return best
 
 
 def _norm_team_name(s: str) -> str:
@@ -832,7 +886,7 @@ def _collect_players_inputs(
     host_name: str,
     guest_name: str,
 ) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
-    table = _find_players_table(soup)
+    table = _find_players_table(soup, host_name=host_name, guest_name=guest_name)
     if not table:
         return {}
 
@@ -944,7 +998,7 @@ def _collect_companion_inputs(
     host_name: str,
     guest_name: str,
 ) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
-    table = _find_companions_table(soup)
+    table = _find_companions_table(soup, host_name=host_name, guest_name=guest_name)
     if not table:
         return {}
 
