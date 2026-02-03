@@ -829,83 +829,105 @@ def _find_players_table(soup: BeautifulSoup, *, host_name: str, guest_name: str)
 
 def _find_companions_table(soup: BeautifulSoup, *, host_name: str, guest_name: str):
     """
-    Wybiera tabelę 'Osoby towarzyszące' w sposób stabilny:
-    1) Najpierw szuka markera tekstowego 'Osoby towarzyszące:' i bierze tabelę po nim.
-    2) Jeśli marker nie istnieje (fallback), używa starego skanowania po całym DOM.
+    Stabilne znalezienie tabeli 'Osoby towarzyszące' dla ZPRP.
+
+    W realnym HTML masz:
+      <td colspan="3">
+        Osoby towarzyszące:
+        <table> ... (nagłówki drużyn colspan=10, kolumny Osoba/Funkcja/... + checkboxy zapiszProtok4) ...
+        </table>
+      </td>
+
+    Czyli: tabela jest ZAGNIEŻDŻONA wewnątrz tego samego <td>, a nie "po markerze".
     """
 
-    def _looks_like_companions_table(table) -> bool:
+    def _norm_no_diacritics(s: str) -> str:
+        # odporne na polskie znaki + różne encodowania
+        s = (s or "").strip()
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+        s = s.lower()
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    def _has_z4(table) -> bool:
+        return bool(table and table.find(attrs={"onclick": re.compile(r"zapiszProtok4\s*\(", re.IGNORECASE)}))
+
+    def _has_team_header_colspan10(table) -> bool:
         if not table:
             return False
-
-        # musi być zapiszProtok4 (checkboxy kar)
-        if not table.find(attrs={"onclick": re.compile(r"zapiszProtok4\s*\(", re.IGNORECASE)}):
-            return False
-
-        txt = _table_text(table).lower()
-
-        # charakterystyczne nagłówki
-        if not ("osoba" in txt and "funkcja" in txt):
-            return False
-        if "kolejność" not in txt:
-            return False
-        if "kary" not in txt:
-            return False
-
-        # często jest układ U / 2' / D
-        if not (("u" in txt) and ("2'" in txt or "2’" in txt) and ("d" in txt)):
-            # nie blokujemy w 100% (bo czasem formatowanie bywa inne), ale wolimy gdy jest
-            pass
-
-        # musi mieć nagłówek drużyny po colspan (dla companions to zwykle 10)
-        has_team_header = False
         for tr in table.find_all("tr"):
             hn = _extract_team_header_name_from_tr(tr, team_header_min_colspan=10)
             if hn:
-                has_team_header = True
-                break
-        if not has_team_header:
+                return True
+        return False
+
+    def _looks_like_companions_table(table) -> bool:
+        """
+        Minimalne, ale trafne warunki dla Twojego HTML:
+        - musi zawierać zapiszProtok4 (checkboxy U/2'/D)
+        - musi mieć nagłówki drużyn w wierszach <td colspan="10"><b>...</b>
+        - musi zawierać nagłówki 'Osoba' i 'Funkcja' (często są w rowspans)
+        """
+        if not table:
             return False
+        if not _has_z4(table):
+            return False
+        if not _has_team_header_colspan10(table):
+            return False
+
+        txt = _norm_no_diacritics(_table_text(table))
+        if ("osoba" not in txt) or ("funkcja" not in txt):
+            return False
+
+        # "Kary" zwykle występuje, ale różne encodowania mogą je psuć – nie blokujemy twardo.
+        # Jeśli chcesz twardo, odkomentuj:
+        # if "kary" not in txt:
+        #     return False
 
         return True
 
     # ------------------------------------------------------------
-    # 1) TRYB PREFEROWANY: po markerze "Osoby towarzyszące:"
+    # 1) TRYB PEWNY: znajdź kontener z tekstem "Osoby towarzyszące"
+    #    i weź tabelę zagnieżdżoną w środku.
     # ------------------------------------------------------------
-    marker = soup.find(string=re.compile(r"\bosoby\s+towarzyszące\b\s*:", re.IGNORECASE))
-    if marker:
-        # bierzemy pierwszą sensowną tabelę po markerze
-        cand_idx = 0
-        best = None
-        best_score = -1
-        best_summary = None
+    best = None
+    best_score = -1
+    best_summary = None
+    cand_idx = 0
 
-        # przejdź po kilku kolejnych tabelach (na wypadek wrapperów)
-        t = marker.find_next("table")
-        scanned = 0
-        while t is not None and scanned < 8:
-            scanned += 1
+    # Szukamy tagów (np. td), w których tekst zawiera frazę.
+    # Uwaga: w HTML bywa "Osoby towarzysz\u0105ce:" albo krzaki po ISO-8859-2,
+    # dlatego dopasowujemy po rdzeniu "osoby towarzysz".
+    for tag in soup.find_all(["td", "div", "span", "p"]):
+        t = _norm_no_diacritics(tag.get_text(" ", strip=True))
+        if "osoby towarzysz" not in t:
+            continue
 
-            if not _looks_like_companions_table(t):
-                t = t.find_next("table")
+        # najczęściej tabela jest bezpośrednio w tym tagu (td colspan="3")
+        inner_tables = tag.find_all("table")
+        if not inner_tables:
+            continue
+
+        for tbl in inner_tables:
+            if not _looks_like_companions_table(tbl):
                 continue
 
             cand_idx += 1
-            summary = _summarize_table_candidate(t, host_name, guest_name, team_header_min_colspan=10)
+            summary = _summarize_table_candidate(tbl, host_name, guest_name, team_header_min_colspan=10)
             teams = set(summary["teams"])
 
+            # scoring: preferuj tabelę, która ma oba bloki (host+guest), ale nie wymagaj
             score = 0
-            # w tej sekcji zwykle są oba bloki (host+guest), ale czasem bywa inaczej
             if "host" in teams:
                 score += 1000
             if "guest" in teams:
                 score += 1000
-
-            score += summary["rows"]
+            score += int(summary["rows"] or 0)
             score -= 50 * int(summary["nested_tables"] or 0)
 
             _dbg(
-                "companions_table candidate (after marker)",
+                "companions_table candidate (container)",
                 idx=cand_idx,
                 score=score,
                 teams=summary["teams"],
@@ -916,25 +938,21 @@ def _find_companions_table(soup: BeautifulSoup, *, host_name: str, guest_name: s
             )
 
             if score > best_score:
+                best = tbl
                 best_score = score
-                best = t
                 best_summary = summary
 
-            t = t.find_next("table")
-
-        _dbg(
-            "companions_table chosen (after marker)",
-            best_score=best_score,
-            best_summary=best_summary,
-            found=("yes" if best else "no"),
-        )
-        if best:
-            return best
-
-        # jeśli marker był, ale nie znaleźliśmy tabeli – lecimy fallbackiem poniżej
+    _dbg(
+        "companions_table chosen (container)",
+        best_score=best_score,
+        best_summary=best_summary,
+        found=("yes" if best else "no"),
+    )
+    if best:
+        return best
 
     # ------------------------------------------------------------
-    # 2) FALLBACK: stary skan po całym DOM (Twoje dotychczasowe podejście)
+    # 2) FALLBACK: globalny skan po wszystkich tabelach
     # ------------------------------------------------------------
     best = None
     best_score = -1
@@ -954,13 +972,8 @@ def _find_companions_table(soup: BeautifulSoup, *, host_name: str, guest_name: s
             score += 1000
         if "guest" in teams:
             score += 1000
-
-        score += summary["rows"]
+        score += int(summary["rows"] or 0)
         score -= 50 * int(summary["nested_tables"] or 0)
-
-        sample_l = (summary.get("sample_text") or "").lower()
-        if "api | rozgrywki" in sample_l:
-            score -= 500
 
         _dbg(
             "companions_table candidate (fallback)",
@@ -974,8 +987,8 @@ def _find_companions_table(soup: BeautifulSoup, *, host_name: str, guest_name: s
         )
 
         if score > best_score:
-            best_score = score
             best = table
+            best_score = score
             best_summary = summary
 
     _dbg(
