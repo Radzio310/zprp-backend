@@ -731,25 +731,88 @@ def _norm_team_name(s: str) -> str:
 
 def _team_from_header_text(header_txt: str, host_name: str, guest_name: str) -> Optional[str]:
     """
-    Dopasowanie “contains” (obie strony) – bo czasem dochodzą dopiski.
-    Jeśli w tekście są OBIE drużyny (np. pasek "A vs B") -> ignorujemy (None).
+    Dopasowanie po nazwie drużyny z nagłówka <b>...</b>.
+    Bez fallbacków: jeśli nie pasuje do host ani guest -> None.
     """
     ht = _norm_team_name(header_txt)
     h = _norm_team_name(host_name)
     g = _norm_team_name(guest_name)
+
     if not ht:
         return None
 
-    has_h = bool(h and (h in ht or ht in h))
-    has_g = bool(g and (g in ht or ht in g))
+    has_h = bool(h and (ht == h or h in ht or ht in h))
+    has_g = bool(g and (ht == g or g in ht or ht in g))
 
     if has_h and has_g:
+        # nagłówek nie powinien zawierać obu nazw (w praktyce ignorujemy taki wiersz)
         return None
     if has_h:
         return "host"
     if has_g:
         return "guest"
     return None
+
+
+def _extract_team_header_name_from_tr(tr, *, team_header_min_colspan: int) -> Optional[str]:
+    """
+    Prawdziwy nagłówek sekcji drużyny w ZPRP:
+      - komórka td/th z dużym colspan (players ~15, companions ~10)
+      - w środku <b>NAZWA DRUŻYNY</b>
+    """
+    for cell in tr.find_all(["td", "th"]):
+        try:
+            cs = int(cell.get("colspan") or 0)
+        except Exception:
+            cs = 0
+        if cs < int(team_header_min_colspan or 0):
+            continue
+
+        b = cell.find("b")
+        if not b:
+            continue
+
+        name = _normalize_space(b.get_text(" ", strip=True))
+        if not name:
+            continue
+
+        # odfiltruj wiersze typu "Osoby towarzyszące:" jeśli kiedykolwiek trafią tu przez colspan
+        if "osoby towarzysz" in name.lower():
+            continue
+
+        return name
+
+    return None
+
+
+def _iter_team_blocks_rows(
+    table,
+    *,
+    host_name: str,
+    guest_name: str,
+    team_header_min_colspan: int,
+) -> List[Tuple[str, Any]]:
+    """
+    Stabilne cięcie na bloki:
+      - current_team ustawiamy TYLKO po wykryciu prawdziwego nagłówka drużyny (<b>...</b> + colspan>=min)
+      - brak fallbacków: jeśli nagłówek nie pasuje do host/guest -> current_team=None
+      - wszystkie kolejne <tr> aż do następnego nagłówka należą do current_team
+    """
+    out: List[Tuple[str, Any]] = []
+    current_team: Optional[str] = None
+
+    for tr in table.find_all("tr"):
+        header_name = _extract_team_header_name_from_tr(tr, team_header_min_colspan=team_header_min_colspan)
+        if header_name:
+            matched = _team_from_header_text(header_name, host_name, guest_name)
+            current_team = matched  # może być None, i o to chodzi
+            continue
+
+        if current_team in ("host", "guest"):
+            out.append((current_team, tr))
+
+    return out
+
 
 
 def _max_colspan_in_tr(tr) -> int:
@@ -761,55 +824,6 @@ def _max_colspan_in_tr(tr) -> int:
             cs = 0
         mx = max(mx, cs)
     return mx
-
-
-def _iter_team_blocks_rows(
-    table,
-    *,
-    host_name: str,
-    guest_name: str,
-    team_header_min_colspan: int,
-) -> List[Tuple[str, Any]]:
-    """
-    Nowa logika bloków:
-    - NIE opieramy się o “bgcolor/style + <b>” jako warunek ogólny.
-    - Bierzemy tylko te wiersze nagłówkowe, które:
-      (1) zawierają nazwę host lub guest (dokładnie wg _team_from_header_text)
-      (2) wyglądają jak prawdziwy nagłówek sekcji w tej tabeli: colspan >= team_header_min_colspan
-          (dla zawodników typowo 15, dla companions typowo 10)
-    """
-    out: List[Tuple[str, Any]] = []
-    current_team: Optional[str] = None
-
-    # fallback: jeśli nigdy nie trafimy dopasowania po nazwie (np. nazwy różne),
-    # to host=1. header, guest=2. header (ale TYLKO dla headerów z colspan>=min)
-    fallback_idx = 0
-
-    for tr in table.find_all("tr"):
-        row_txt = _normalize_space(tr.get_text(" ", strip=True))
-        if not row_txt:
-            continue
-
-        cs = _max_colspan_in_tr(tr)
-        if cs >= int(team_header_min_colspan or 0):
-            matched = _team_from_header_text(row_txt, host_name, guest_name)
-            if matched:
-                current_team = matched
-                continue
-
-            # fallback tylko wtedy, gdy to wygląda jak “nagłówek drużyny” (duży colspan + zwykle <b>)
-            if tr.find("b") and any(ch.isalpha() for ch in row_txt):
-                # ale nie łapiemy np. "Osoby towarzyszące:" jako header drużyny,
-                # bo tam tekst jest inny (choć w praktyce team header w nested table ma tylko team name).
-                if "osoby towarzysz" not in row_txt.lower():
-                    fallback_idx += 1
-                    current_team = "host" if fallback_idx == 1 else "guest"
-                    continue
-
-        if current_team in ("host", "guest"):
-            out.append((current_team, tr))
-
-    return out
 
 
 def _collect_players_inputs(
@@ -831,7 +845,7 @@ def _collect_players_inputs(
         table,
         host_name=host_name,
         guest_name=guest_name,
-        team_header_min_colspan=14,  # w praktyce jest 15, dajemy minimalnie 14 dla odporności
+        team_header_min_colspan=15,  # w praktyce jest 15, dajemy minimalnie 14 dla odporności
     )
 
     for team, tr in rows:
@@ -941,7 +955,7 @@ def _collect_companion_inputs(
         table,
         host_name=host_name,
         guest_name=guest_name,
-        team_header_min_colspan=9,  # w praktyce jest 10
+        team_header_min_colspan=10,  # w praktyce jest 10
     )
 
     for team, tr in rows:
