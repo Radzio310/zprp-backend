@@ -496,7 +496,7 @@ def _build_stats_map(data_json: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str,
             goals = int(ps.get("goals") or 0)
             entered = bool(ps.get("entered")) if "entered" in ps else False
             p2 = _count_nonempty_penalties(ps)
-            disq = bool(ps.get("hasRedCard")) or _truthy(ps.get("disqualification")) or _truthy(ps.get("disqualificationDesc"))
+            disq = _truthy(ps.get("disqualification")) or _truthy(ps.get("disqualificationDesc"))
 
             w = eventc.get(team, {}).get(k, {}).get("warning", 0)
             pk_total = eventc.get(team, {}).get(k, {}).get("pk_total", 0)
@@ -690,78 +690,192 @@ def _table_text(table) -> str:
     return _normalize_space(table.get_text(" ", strip=True))
 
 
-def _find_players_table(soup: BeautifulSoup):
+import os
+import uuid
+
+# =========================
+# DEBUG helpers (Railway logs)
+# =========================
+
+def _dbg_enabled() -> bool:
     """
-    Szukamy tabeli (zwykle zagnieżdżonej) dla zawodników:
-    - ma input NrKoszulki2*
-    - ma onchange/onclick z zapiszProtok(...)
+    W Railway ustaw env:
+      RESULTS_PROTOCOL_DEBUG=1
+    aby włączyć bardzo obszerny log.
     """
+    v = (os.getenv("RESULTS_PROTOCOL_DEBUG") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _dbg(msg: str, **kw):
+    if not _dbg_enabled():
+        return
+    if kw:
+        try:
+            extras = " ".join([f"{k}={repr(v)[:400]}" for k, v in kw.items()])
+        except Exception:
+            extras = ""
+        logger.warning("[protocol-debug] %s | %s", msg, extras)  # <-- WARNING
+    else:
+        logger.warning("[protocol-debug] %s", msg)               # <-- WARNING
+
+
+def _short_html(el, limit: int = 240) -> str:
+    try:
+        s = str(el)
+    except Exception:
+        return ""
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:limit]
+
+
+def _summarize_table_candidate(table, host_name: str, guest_name: str, team_header_min_colspan: int) -> Dict[str, Any]:
+    rows = _iter_team_blocks_rows(
+        table,
+        host_name=host_name,
+        guest_name=guest_name,
+        team_header_min_colspan=team_header_min_colspan,
+        debug_tag="candidate",
+    )
+    teams = {t for (t, _) in rows}
+    jersey_inputs = len(table.find_all("input", attrs={"name": re.compile(r"^NrKoszulki2\d+$")}))
+    has_z2 = bool(
+        table.find(attrs={"onchange": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)})
+        or table.find(attrs={"onclick": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)})
+    )
+    has_z4 = bool(table.find(attrs={"onclick": re.compile(r"zapiszProtok4\s*\(", re.IGNORECASE)}))
+    # prosta "głębokość" zagnieżdżeń
+    nested_tables = len(table.find_all("table"))
+
+    return {
+        "teams": sorted(list(teams)),
+        "rows": len(rows),
+        "jersey_inputs": jersey_inputs,
+        "has_z2": has_z2,
+        "has_z4": has_z4,
+        "nested_tables": nested_tables,
+        "sample_text": _table_text(table)[:240],
+    }
+
+
+# =========================
+# TABLE FINDERS (with verbose logs)
+# =========================
+
+def _find_players_table(soup: BeautifulSoup, *, host_name: str, guest_name: str):
+    """
+    Wybiera najlepszą tabelę zawodników wg scoringu.
+    Loguje kandydatów i finalny wybór.
+    """
+    best = None
+    best_score = -1
+    best_summary = None
+
+    cand_idx = 0
     for table in soup.find_all("table"):
         if not table.find("input", attrs={"name": re.compile(r"^NrKoszulki2\d+$")}):
             continue
-        if table.find(attrs={"onchange": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)}) or table.find(
-            attrs={"onclick": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)}
+        if not (
+            table.find(attrs={"onchange": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)})
+            or table.find(attrs={"onclick": re.compile(r"zapiszProtok\s*\(", re.IGNORECASE)})
         ):
-            return table
-    return None
+            continue
+
+        cand_idx += 1
+        summary = _summarize_table_candidate(table, host_name, guest_name, team_header_min_colspan=15)
+        teams = set(summary["teams"])
+
+        score = 0
+        if "host" in teams:
+            score += 1000
+        if "guest" in teams:
+            score += 1000
+        score += summary["rows"]
+        score -= 0.1 * summary["nested_tables"]
+
+        _dbg(
+            "players_table candidate",
+            idx=cand_idx,
+            score=score,
+            teams=summary["teams"],
+            rows=summary["rows"],
+            jersey_inputs=summary["jersey_inputs"],
+            nested_tables=summary["nested_tables"],
+            has_z2=summary["has_z2"],
+            sample_text=summary["sample_text"],
+        )
+
+        if score > best_score:
+            best_score = score
+            best = table
+            best_summary = summary
+
+    _dbg(
+        "players_table chosen",
+        best_score=best_score,
+        best_summary=best_summary,
+        found=("yes" if best else "no"),
+    )
+    return best
 
 
-def _find_companions_table(soup: BeautifulSoup):
+def _find_companions_table(soup: BeautifulSoup, *, host_name: str, guest_name: str):
     """
-    Tabela osób towarzyszących:
-    - ma onclick zapiszProtok4(...)
-    - ma nagłówki (Osoba/Funkcja/Kolejność...) w tekście
+    Wybiera najlepszą tabelę companions.
+    Loguje kandydatów i finalny wybór.
     """
+    best = None
+    best_score = -1
+    best_summary = None
+
+    cand_idx = 0
     for table in soup.find_all("table"):
         if not table.find(attrs={"onclick": re.compile(r"zapiszProtok4\s*\(", re.IGNORECASE)}):
             continue
         txt = _table_text(table).lower()
-        if "osoba" in txt and "funkcja" in txt and "kolejność" in txt:
-            return table
-    return None
+        if not ("osoba" in txt and "funkcja" in txt and "kolejność" in txt):
+            continue
+
+        cand_idx += 1
+        summary = _summarize_table_candidate(table, host_name, guest_name, team_header_min_colspan=10)
+        teams = set(summary["teams"])
+
+        score = 0
+        if "host" in teams:
+            score += 1000
+        if "guest" in teams:
+            score += 1000
+        score += summary["rows"]
+        score -= 0.1 * summary["nested_tables"]
+
+        _dbg(
+            "companions_table candidate",
+            idx=cand_idx,
+            score=score,
+            teams=summary["teams"],
+            rows=summary["rows"],
+            nested_tables=summary["nested_tables"],
+            has_z4=summary["has_z4"],
+            sample_text=summary["sample_text"],
+        )
+
+        if score > best_score:
+            best_score = score
+            best = table
+            best_summary = summary
+
+    _dbg(
+        "companions_table chosen",
+        best_score=best_score,
+        best_summary=best_summary,
+        found=("yes" if best else "no"),
+    )
+    return best
 
 
-def _norm_team_name(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r"[^a-z0-9]+", "", s)
-    return s
-
-
-def _team_from_header_text(header_txt: str, host_name: str, guest_name: str) -> Optional[str]:
-    """
-    Dopasowanie “contains” (obie strony) – bo czasem dochodzą dopiski.
-    Jeśli w tekście są OBIE drużyny (np. pasek "A vs B") -> ignorujemy (None).
-    """
-    ht = _norm_team_name(header_txt)
-    h = _norm_team_name(host_name)
-    g = _norm_team_name(guest_name)
-    if not ht:
-        return None
-
-    has_h = bool(h and (h in ht or ht in h))
-    has_g = bool(g and (g in ht or ht in g))
-
-    if has_h and has_g:
-        return None
-    if has_h:
-        return "host"
-    if has_g:
-        return "guest"
-    return None
-
-
-def _max_colspan_in_tr(tr) -> int:
-    mx = 0
-    for td in tr.find_all(["td", "th"]):
-        try:
-            cs = int(td.get("colspan") or 0)
-        except Exception:
-            cs = 0
-        mx = max(mx, cs)
-    return mx
-
+# =========================
+# TEAM BLOCKS (verbose)
+# =========================
 
 def _iter_team_blocks_rows(
     table,
@@ -769,48 +883,63 @@ def _iter_team_blocks_rows(
     host_name: str,
     guest_name: str,
     team_header_min_colspan: int,
+    debug_tag: str = "main",
 ) -> List[Tuple[str, Any]]:
     """
-    Nowa logika bloków:
-    - NIE opieramy się o “bgcolor/style + <b>” jako warunek ogólny.
-    - Bierzemy tylko te wiersze nagłówkowe, które:
-      (1) zawierają nazwę host lub guest (dokładnie wg _team_from_header_text)
-      (2) wyglądają jak prawdziwy nagłówek sekcji w tej tabeli: colspan >= team_header_min_colspan
-          (dla zawodników typowo 15, dla companions typowo 10)
+    Zwraca listę (team, tr) tylko gdy current_team jest host/guest.
+    Loguje wykryte nagłówki i mapping do teamów.
     """
     out: List[Tuple[str, Any]] = []
     current_team: Optional[str] = None
 
-    # fallback: jeśli nigdy nie trafimy dopasowania po nazwie (np. nazwy różne),
-    # to host=1. header, guest=2. header (ale TYLKO dla headerów z colspan>=min)
-    fallback_idx = 0
+    if _dbg_enabled():
+        _dbg(
+            "iter_team_blocks_rows start",
+            debug_tag=debug_tag,
+            team_header_min_colspan=team_header_min_colspan,
+            host_name=host_name,
+            guest_name=guest_name,
+            table_sample=_table_text(table)[:200],
+        )
 
-    for tr in table.find_all("tr"):
-        row_txt = _normalize_space(tr.get_text(" ", strip=True))
-        if not row_txt:
+    seen_headers = 0
+    for tr_i, tr in enumerate(table.find_all("tr")):
+        header_name = _extract_team_header_name_from_tr(tr, team_header_min_colspan=team_header_min_colspan)
+        if header_name:
+            seen_headers += 1
+            matched = _team_from_header_text(header_name, host_name, guest_name)
+            _dbg(
+                "team header detected",
+                debug_tag=debug_tag,
+                tr_index=tr_i,
+                header_name=header_name,
+                matched_team=matched,
+                tr_html=_short_html(tr),
+            )
+            current_team = matched  # może być None
             continue
-
-        cs = _max_colspan_in_tr(tr)
-        if cs >= int(team_header_min_colspan or 0):
-            matched = _team_from_header_text(row_txt, host_name, guest_name)
-            if matched:
-                current_team = matched
-                continue
-
-            # fallback tylko wtedy, gdy to wygląda jak “nagłówek drużyny” (duży colspan + zwykle <b>)
-            if tr.find("b") and any(ch.isalpha() for ch in row_txt):
-                # ale nie łapiemy np. "Osoby towarzyszące:" jako header drużyny,
-                # bo tam tekst jest inny (choć w praktyce team header w nested table ma tylko team name).
-                if "osoby towarzysz" not in row_txt.lower():
-                    fallback_idx += 1
-                    current_team = "host" if fallback_idx == 1 else "guest"
-                    continue
 
         if current_team in ("host", "guest"):
             out.append((current_team, tr))
 
+    if _dbg_enabled():
+        c_host = sum(1 for t, _ in out if t == "host")
+        c_guest = sum(1 for t, _ in out if t == "guest")
+        _dbg(
+            "iter_team_blocks_rows end",
+            debug_tag=debug_tag,
+            headers_seen=seen_headers,
+            rows_total=len(out),
+            rows_host=c_host,
+            rows_guest=c_guest,
+        )
+
     return out
 
+
+# =========================
+# INPUT COLLECTORS (verbose)
+# =========================
 
 def _collect_players_inputs(
     soup: BeautifulSoup,
@@ -818,26 +947,29 @@ def _collect_players_inputs(
     host_name: str,
     guest_name: str,
 ) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
-    table = _find_players_table(soup)
+    table = _find_players_table(soup, host_name=host_name, guest_name=guest_name)
     if not table:
+        _dbg("collect_players_inputs: no table found")
         return {}
 
     result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-
-    # blokujemy duplikaty numerów “na serwerze” (w HTML) – bierzemy pierwszy napotkany wiersz na team
     seen_jerseys: Dict[str, set] = {"host": set(), "guest": set()}
 
     rows = _iter_team_blocks_rows(
         table,
         host_name=host_name,
         guest_name=guest_name,
-        team_header_min_colspan=14,  # w praktyce jest 15, dajemy minimalnie 14 dla odporności
+        team_header_min_colspan=15,
+        debug_tag="players",
     )
+
+    jersey_seen_counts = {"host": 0, "guest": 0}
+    row_with_jersey_counts = {"host": 0, "guest": 0}
 
     for team, tr in rows:
         jersey_inp = None
 
-        # najpierw szukamy inputu z NrKoszulki2 w tym wierszu (po JS field, nie po name – bo name ma suffix id)
+        # find jersey input (field == NrKoszulki2)
         for inp in tr.find_all(["input", "select", "textarea"]):
             js = inp.get("onchange") or inp.get("onclick") or ""
             if "zapiszProtok" not in js:
@@ -855,15 +987,19 @@ def _collect_players_inputs(
 
         jersey_val = (jersey_inp.get("value") or "").strip()
         if not re.fullmatch(r"\d{1,3}", jersey_val):
+            _dbg("players row jersey invalid", team=team, jersey_val=jersey_val, tr_html=_short_html(tr))
             continue
-        jersey = str(int(jersey_val))
 
-        # duplikat numeru w HTML: pierwszy wygrywa, resztę ignorujemy
+        jersey = str(int(jersey_val))
+        row_with_jersey_counts[team] += 1
+
         if jersey in seen_jerseys[team]:
+            _dbg("players row jersey duplicate in HTML", team=team, jersey=jersey, tr_html=_short_html(tr))
             continue
         seen_jerseys[team].add(jersey)
+        jersey_seen_counts[team] += 1
 
-        # collect pól tego wiersza
+        # collect mapped inputs (kinds)
         for inp in tr.find_all(["input", "select", "textarea"]):
             js = inp.get("onchange") or inp.get("onclick") or ""
             if "zapiszProtok" not in js:
@@ -871,27 +1007,184 @@ def _collect_players_inputs(
             args4 = _extract_zapisz2_args(js)
             if not args4:
                 continue
-
             field = _unquote_js(args4[1]).strip()
             if field == "NrKoszulki2":
                 continue
-
             kind = PLAYERS_FIELD_TO_KIND.get(field)
             if not kind:
                 continue
 
             key = (team, jersey, kind)
-            # jeśli w HTML jest duplikat inputu (rzadkie, ale bywa) – pierwszy wygrywa
             if key in result:
+                _dbg("players input duplicate key ignored", team=team, jersey=jersey, kind=kind, field=field)
                 continue
 
-            result[key] = {
-                "inp": inp,
-                "field": field,
-                "args4": args4,
-            }
+            result[key] = {"inp": inp, "field": field, "args4": args4}
+            _dbg(
+                "players input mapped",
+                team=team,
+                jersey=jersey,
+                kind=kind,
+                field=field,
+                dom_value=_current_text_value(inp),
+                dom_checked=_is_checked_dom(inp),
+                args4=args4,
+            )
 
+    _dbg(
+        "collect_players_inputs summary",
+        total=len(result),
+        host_keys=sum(1 for k in result.keys() if k[0] == "host"),
+        guest_keys=sum(1 for k in result.keys() if k[0] == "guest"),
+        jerseys_host=sorted(list(seen_jerseys["host"]))[:80],
+        jerseys_guest=sorted(list(seen_jerseys["guest"]))[:80],
+        rows_with_jersey_host=row_with_jersey_counts["host"],
+        rows_with_jersey_guest=row_with_jersey_counts["guest"],
+    )
     return result
+
+
+def _collect_companion_inputs(
+    soup: BeautifulSoup,
+    *,
+    host_name: str,
+    guest_name: str,
+) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+    table = _find_companions_table(soup, host_name=host_name, guest_name=guest_name)
+    if not table:
+        _dbg("collect_companion_inputs: no table found")
+        return {}
+
+    letter_col = _find_letter_col_index(table)
+    result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+
+    rows = _iter_team_blocks_rows(
+        table,
+        host_name=host_name,
+        guest_name=guest_name,
+        team_header_min_colspan=10,
+        debug_tag="companions",
+    )
+
+    for team, tr in rows:
+        tds = tr.find_all("td")
+        if not tds or len(tds) < 3:
+            continue
+
+        letter = None
+        if letter_col is not None and letter_col < len(tds):
+            letter = _extract_letter_from_cell(tds[letter_col])
+        else:
+            for td in tds:
+                cand = _extract_letter_from_cell(td)
+                if cand:
+                    letter = cand
+                    break
+
+        if not letter:
+            continue
+
+        for inp in tr.find_all("input"):
+            js = inp.get("onclick") or ""
+            if "zapiszProtok4" not in js:
+                continue
+            args8 = _extract_zapisz4_args(js)
+            if not args8:
+                continue
+
+            v = (inp.get("value") or "").strip()
+            kind = COMP_CHECKBOX_VALUE_TO_KIND.get(v)
+            if not kind:
+                continue
+
+            key = (team, letter, kind)
+            if key in result:
+                _dbg("companions input duplicate key ignored", team=team, letter=letter, kind=kind)
+                continue
+
+            result[key] = {"inp": inp, "args8": args8, "checkbox_value": v}
+            _dbg(
+                "companions input mapped",
+                team=team,
+                letter=letter,
+                kind=kind,
+                checkbox_value=v,
+                dom_checked=_is_checked_dom(inp),
+                args8=args8,
+            )
+
+    _dbg(
+        "collect_companion_inputs summary",
+        total=len(result),
+        host_keys=sum(1 for k in result.keys() if k[0] == "host"),
+        guest_keys=sum(1 for k in result.keys() if k[0] == "guest"),
+        letter_col=letter_col,
+    )
+    return result
+
+
+def _norm_team_name(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    return s
+
+
+def _team_from_header_text(header_txt: str, host_name: str, guest_name: str) -> Optional[str]:
+    """
+    Dopasowanie po nazwie drużyny z nagłówka <b>...</b>.
+    Bez fallbacków: jeśli nie pasuje do host ani guest -> None.
+    """
+    ht = _norm_team_name(header_txt)
+    h = _norm_team_name(host_name)
+    g = _norm_team_name(guest_name)
+
+    if not ht:
+        return None
+
+    has_h = bool(h and (ht == h or h in ht or ht in h))
+    has_g = bool(g and (ht == g or g in ht or ht in g))
+
+    if has_h and has_g:
+        # nagłówek nie powinien zawierać obu nazw (w praktyce ignorujemy taki wiersz)
+        return None
+    if has_h:
+        return "host"
+    if has_g:
+        return "guest"
+    return None
+
+
+def _extract_team_header_name_from_tr(tr, *, team_header_min_colspan: int) -> Optional[str]:
+    """
+    Prawdziwy nagłówek sekcji drużyny w ZPRP:
+      - komórka td/th z dużym colspan (players ~15, companions ~10)
+      - w środku <b>NAZWA DRUŻYNY</b>
+    """
+    for cell in tr.find_all(["td", "th"]):
+        try:
+            cs = int(cell.get("colspan") or 0)
+        except Exception:
+            cs = 0
+        if cs < int(team_header_min_colspan or 0):
+            continue
+
+        b = cell.find("b")
+        if not b:
+            continue
+
+        name = _normalize_space(b.get_text(" ", strip=True))
+        if not name:
+            continue
+
+        # odfiltruj wiersze typu "Osoby towarzyszące:" jeśli kiedykolwiek trafią tu przez colspan
+        if "osoby towarzysz" in name.lower():
+            continue
+
+        return name
+
+    return None
 
 
 def _find_letter_col_index(table) -> Optional[int]:
@@ -922,71 +1215,6 @@ def _extract_letter_from_cell(td) -> Optional[str]:
     if "ZGŁOŚ" in txt or "ZGLOS" in txt:
         return None
     return None
-
-
-def _collect_companion_inputs(
-    soup: BeautifulSoup,
-    *,
-    host_name: str,
-    guest_name: str,
-) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
-    table = _find_companions_table(soup)
-    if not table:
-        return {}
-
-    letter_col = _find_letter_col_index(table)
-    result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-
-    rows = _iter_team_blocks_rows(
-        table,
-        host_name=host_name,
-        guest_name=guest_name,
-        team_header_min_colspan=9,  # w praktyce jest 10
-    )
-
-    for team, tr in rows:
-        tds = tr.find_all("td")
-        if not tds or len(tds) < 3:
-            continue
-
-        letter = None
-        if letter_col is not None and letter_col < len(tds):
-            letter = _extract_letter_from_cell(tds[letter_col])
-        else:
-            for td in tds:
-                cand = _extract_letter_from_cell(td)
-                if cand:
-                    letter = cand
-                    break
-
-        if not letter:
-            continue
-
-        for inp in tr.find_all("input"):
-            js = inp.get("onclick") or ""
-            if "zapiszProtok4" not in js:
-                continue
-            args8 = _extract_zapisz4_args(js)
-            if not args8:
-                continue
-            v = (inp.get("value") or "").strip()
-            kind = COMP_CHECKBOX_VALUE_TO_KIND.get(v)
-            if not kind:
-                continue
-
-            key = (team, letter, kind)
-            # duplikat checkboxa w HTML: pierwszy wygrywa
-            if key in result:
-                continue
-
-            result[key] = {
-                "inp": inp,
-                "args8": args8,
-                "checkbox_value": v,
-            }
-
-    return result
-
 
 def _desired_value_for_player_kind(st: Dict[str, Any], kind: str) -> Any:
     if kind == "goals":
@@ -1104,15 +1332,35 @@ async def _apply_protocol_updates_4blocks(
     host_name: str,
     guest_name: str,
 ) -> Dict[str, Any]:
-    # ⬇️ kluczowa zmiana: rozpoznajemy bloki po NAGŁÓWKACH z nazwą drużyny (players + companions)
+    """
+    Wersja z bardzo obszernym loggingiem:
+    - ile inputów znaleziono per team
+    - jakie jersey w HTML wykryto
+    - dla KAŻDEGO update: current vs desired, delta-skip, payload/args, response
+    """
+
+    # request correlation id (żebyś mógł filtrować logi jednego requestu)
+    req_id = str(uuid.uuid4())[:8]
+    _dbg("apply_protocol start", req_id=req_id, host_name=host_name, guest_name=guest_name)
+
     players_inputs = _collect_players_inputs(soup, host_name=host_name, guest_name=guest_name)
     comp_inputs = _collect_companion_inputs(soup, host_name=host_name, guest_name=guest_name)
 
-    # --- DEBUG: ile komórek w ogóle wykryliśmy per team/sekcja ---
     players_inputs_host = sum(1 for k in players_inputs.keys() if k[0] == "host")
     players_inputs_guest = sum(1 for k in players_inputs.keys() if k[0] == "guest")
     comp_inputs_host = sum(1 for k in comp_inputs.keys() if k[0] == "host")
     comp_inputs_guest = sum(1 for k in comp_inputs.keys() if k[0] == "guest")
+
+    _dbg(
+        "inputs counts",
+        req_id=req_id,
+        players_inputs_total=len(players_inputs),
+        players_inputs_host=players_inputs_host,
+        players_inputs_guest=players_inputs_guest,
+        companions_inputs_total=len(comp_inputs),
+        companions_inputs_host=comp_inputs_host,
+        companions_inputs_guest=comp_inputs_guest,
+    )
 
     updated = 0
     skipped = 0
@@ -1124,9 +1372,10 @@ async def _apply_protocol_updates_4blocks(
     comp_kinds_order = ["warn", "p2", "disq"]
 
     # ---- players ----
-    # Zasada: mapujemy wszystko co umiemy; brak numeru na stronie -> tylko “missing”, ale idziemy dalej.
     for team in ("host", "guest"):
         team_stats = stats_map.get(team) or {}
+        _dbg("team players processing", req_id=req_id, team=team, players_in_stats=len(team_stats))
+
         for key, st in team_stats.items():
             if not re.fullmatch(r"\d{1,3}", str(key)):
                 continue
@@ -1139,23 +1388,36 @@ async def _apply_protocol_updates_4blocks(
 
                 meta = players_inputs.get((team, jersey, kind))
                 if not meta:
-                    # numer z ProEl, którego nie ma w HTML -> skip
                     missing.append({"section": "players", "team": team, "player": jersey, "kind": kind})
+                    _dbg("MISSING players input", req_id=req_id, team=team, jersey=jersey, kind=kind, desired=desired)
                     continue
 
                 inp = meta["inp"]
                 args4 = meta["args4"]
 
+                cur_val = _current_text_value(inp)
+                cur_checked = _is_checked_dom(inp)
+
                 # DELTA: skip if already equal
                 if _delta_equal_player(inp, kind, desired):
                     skipped += 1
                     skipped_items.append({"section": "players", "team": team, "player": jersey, "kind": kind})
+                    _dbg(
+                        "SKIP delta players",
+                        req_id=req_id,
+                        team=team,
+                        jersey=jersey,
+                        kind=kind,
+                        desired=desired,
+                        cur_val=cur_val,
+                        cur_checked=cur_checked,
+                        args4=args4,
+                    )
                     continue
 
                 inp_type = (inp.get("type") or "").lower()
                 if inp_type == "checkbox":
                     checked = bool(desired)
-                    # for this.value tokens, use element's value (usually "1")
                     value_str = (inp.get("value") or "1").strip()
                 else:
                     checked = False
@@ -1164,9 +1426,31 @@ async def _apply_protocol_updates_4blocks(
                     else:
                         value_str = str(desired)
 
+                _dbg(
+                    "UPDATE players sending",
+                    req_id=req_id,
+                    team=team,
+                    jersey=jersey,
+                    kind=kind,
+                    desired=desired,
+                    cur_val=cur_val,
+                    cur_checked=cur_checked,
+                    send_value=value_str,
+                    send_checked=checked,
+                    args4=args4,
+                )
+
                 ok, resp_txt = await _save_via_zapisz2(client, args4, value_str=value_str, checked=checked)
                 if ok:
                     updated += 1
+                    _dbg(
+                        "UPDATE players OK",
+                        req_id=req_id,
+                        team=team,
+                        jersey=jersey,
+                        kind=kind,
+                        resp=resp_txt,
+                    )
                 else:
                     failed.append({
                         "section": "players",
@@ -1177,10 +1461,20 @@ async def _apply_protocol_updates_4blocks(
                         "sent_checked": checked,
                         "resp": resp_txt,
                     })
+                    _dbg(
+                        "UPDATE players FAIL",
+                        req_id=req_id,
+                        team=team,
+                        jersey=jersey,
+                        kind=kind,
+                        resp=resp_txt,
+                    )
 
     # ---- companions A..E ----
     for team in ("host", "guest"):
         team_stats = stats_map.get(team) or {}
+        _dbg("team companions processing", req_id=req_id, team=team, items_in_stats=len(team_stats))
+
         for key, st in team_stats.items():
             if not re.fullmatch(r"[A-E]", str(key).upper()):
                 continue
@@ -1188,25 +1482,49 @@ async def _apply_protocol_updates_4blocks(
 
             for kind in comp_kinds_order:
                 desired_checked = _desired_value_for_companion_kind(st, kind)
-
                 meta = comp_inputs.get((team, letter, kind))
                 if not meta:
                     missing.append({"section": "companions", "team": team, "player": letter, "kind": kind})
+                    _dbg("MISSING companions input", req_id=req_id, team=team, letter=letter, kind=kind, desired=desired_checked)
                     continue
 
                 inp = meta["inp"]
                 args8 = meta["args8"]
+                cur_checked = _is_checked_dom(inp)
                 value_str = (inp.get("value") or "").strip()
 
-                # DELTA: skip if already equal
                 if _delta_equal_companion(inp, desired_checked):
                     skipped += 1
                     skipped_items.append({"section": "companions", "team": team, "player": letter, "kind": kind})
+                    _dbg(
+                        "SKIP delta companions",
+                        req_id=req_id,
+                        team=team,
+                        letter=letter,
+                        kind=kind,
+                        desired=desired_checked,
+                        cur_checked=cur_checked,
+                        args8=args8,
+                    )
                     continue
+
+                _dbg(
+                    "UPDATE companions sending",
+                    req_id=req_id,
+                    team=team,
+                    letter=letter,
+                    kind=kind,
+                    desired=desired_checked,
+                    cur_checked=cur_checked,
+                    send_checked=desired_checked,
+                    checkbox_value=value_str,
+                    args8=args8,
+                )
 
                 ok, resp_txt = await _save_via_zapisz4(client, args8, value_str=value_str, checked=desired_checked)
                 if ok:
                     updated += 1
+                    _dbg("UPDATE companions OK", req_id=req_id, team=team, letter=letter, kind=kind, resp=resp_txt)
                 else:
                     failed.append({
                         "section": "companions",
@@ -1217,6 +1535,20 @@ async def _apply_protocol_updates_4blocks(
                         "sent_checked": desired_checked,
                         "resp": resp_txt,
                     })
+                    _dbg("UPDATE companions FAIL", req_id=req_id, team=team, letter=letter, kind=kind, resp=resp_txt)
+
+    _dbg(
+        "apply_protocol end",
+        req_id=req_id,
+        updated_cells=updated,
+        skipped_cells=skipped,
+        failed=len(failed),
+        missing=len(missing),
+        players_inputs_host=players_inputs_host,
+        players_inputs_guest=players_inputs_guest,
+        companions_inputs_host=comp_inputs_host,
+        companions_inputs_guest=comp_inputs_guest,
+    )
 
     return {
         "updated_cells": updated,
@@ -1225,6 +1557,7 @@ async def _apply_protocol_updates_4blocks(
         "missing": missing,
         "skipped": skipped_items,
         "debug": {
+            "req_id": req_id,
             "host_name": host_name,
             "guest_name": guest_name,
             "players_inputs_host": players_inputs_host,
@@ -1246,6 +1579,11 @@ async def save_protocol_from_json(
     settings: Settings = Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
+    logger.warning(
+        "[protocol-debug] ENTER save_protocol_from_json env=%r enabled=%s",
+        os.getenv("RESULTS_PROTOCOL_DEBUG"),
+        _dbg_enabled(),
+    )
     private_key, _ = keys
     user_plain = _decrypt_field(req.username, private_key)
     pass_plain = _decrypt_field(req.password, private_key)
@@ -1297,3 +1635,548 @@ async def save_protocol_from_json(
     except Exception as e:
         logger.error("save_protocol_from_json error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Nie udało się zapisać protokołu: {e}")
+
+# ============================================================
+# EXPORT PROTOCOL PDF FROM ProEl data_json -> XLSX TEMPLATE -> PDF
+# ============================================================
+
+import os
+import math
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from fastapi.responses import FileResponse
+from openpyxl import load_workbook
+
+
+class ProtocolPdfRequest(BaseModel):
+    data_json: Dict[str, Any]  # dokładnie ten sam JSON ProEl
+
+
+def _ms_to_mmss(ms: Optional[int]) -> str:
+    if ms is None:
+        return ""
+    try:
+        ms_i = int(ms)
+    except Exception:
+        return ""
+    if ms_i < 0:
+        ms_i = 0
+    mm = ms_i // 60000
+    ss = (ms_i % 60000) // 1000
+    return f"{mm:02d}:{ss:02d}"
+
+
+def _event_minute_from_ms(ms: int) -> int:
+    # minute numbering: 0:00 => 1, 53:12 => 54 (floor + 1)
+    try:
+        ms_i = int(ms)
+    except Exception:
+        ms_i = 0
+    if ms_i < 0:
+        ms_i = 0
+    return (ms_i // 60000) + 1
+
+
+def _safe_int(v: Any, default: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def _get_match_core(data_json: Dict[str, Any]) -> Dict[str, Any]:
+    mc = data_json.get("matchConfig") or {}
+    return {
+        "matchNumber": (mc.get("matchNumber") or "").strip(),
+        "hostName": (mc.get("hostTeamName") or "").strip(),
+        "guestName": (mc.get("guestTeamName") or "").strip(),
+        "halfTimeMin": _safe_int(mc.get("halfTime") or 30, 30),
+        "scoreHost": _safe_int(data_json.get("scoreHost"), 0),
+        "scoreGuest": _safe_int(data_json.get("scoreGuest"), 0),
+        "halfScoreHost": _safe_int((data_json.get("halfScore") or {}).get("host"), 0),
+        "halfScoreGuest": _safe_int((data_json.get("halfScore") or {}).get("guest"), 0),
+        "hostPlayers": list(mc.get("hostPlayers") or []),
+        "guestPlayers": list(mc.get("guestPlayers") or []),
+    }
+
+
+def _place_timeouts(ws, *, team_timeouts: Dict[str, Any], half_ms: int, is_host: bool) -> None:
+    """
+    Wypełnia czasy zgodnie z Twoimi regułami, ale uproszczone do logiki:
+    - w 1. połowie: pierwszy timeout do (row10), drugi do (row11)
+    - w 2. połowie: pierwszy timeout do (row10), drugi do (row11)
+    Zgadza się z opisanymi przypadkami (max 2 czasy na połowę).
+    """
+    t1 = team_timeouts.get("first")
+    t2 = team_timeouts.get("second")
+    t3 = team_timeouts.get("third")
+    times = [t for t in [t1, t2, t3] if t is not None]
+
+    # sort rosnąco po czasie (ms)
+    def _as_int(x):
+        try:
+            return int(x)
+        except Exception:
+            return 10**18
+
+    times.sort(key=_as_int)
+
+    half1 = [t for t in times if _as_int(t) < half_ms]
+    half2 = [t for t in times if _as_int(t) >= half_ms]
+
+    # host: half1 -> AL10/AL11, half2 -> AW10/AW11
+    # guest: half1 -> AU10/AU11, half2 -> BF10/BF11
+    if is_host:
+        h1_cells = ["AL10", "AL11"]
+        h2_cells = ["AW10", "AW11"]
+    else:
+        h1_cells = ["AU10", "AU11"]
+        h2_cells = ["BF10", "BF11"]
+
+    # 1. połowa
+    if len(half1) == 0:
+        # Nie wzięto żadnego czasu w 1. połowie - wpisujemy "---" w AL10 i AL11
+        ws[h1_cells[0]].value = "---"
+        ws[h1_cells[1]].value = "---"
+    elif len(half1) == 1:
+        # Wzięto tylko 1 czas - wpisujemy w AL10 oraz AL11
+        ws[h1_cells[0]].value = _ms_to_mmss(half1[0])
+        ws[h1_cells[1]].value = "---"
+    else:
+        # Wzięto dwa czasy - wpisujemy oba
+        ws[h1_cells[0]].value = _ms_to_mmss(half1[0])
+        ws[h1_cells[1]].value = _ms_to_mmss(half1[1])
+
+    # 2. połowa
+    if len(half2) == 0:
+        # Nie wzięto żadnego czasu w 2. połowie - wpisujemy "---" w AW10 i AW11
+        ws[h2_cells[0]].value = "---"
+        ws[h2_cells[1]].value = "---"
+    elif len(half2) == 1:
+        # Wzięto tylko 1 czas w 2. połowie - wpisujemy w AW10 oraz AW11
+        ws[h2_cells[0]].value = _ms_to_mmss(half2[0])
+        ws[h2_cells[1]].value = "---"
+    else:
+        # Wzięto dwa czasy w 2. połowie - wpisujemy oba
+        ws[h2_cells[0]].value = _ms_to_mmss(half2[0])
+        ws[h2_cells[1]].value = _ms_to_mmss(half2[1])
+
+
+def _player_stats_map(data_json: Dict[str, Any], team: str) -> Dict[int, Dict[str, Any]]:
+    key = "hostPlayerStats" if team == "host" else "guestPlayerStats"
+    arr = data_json.get(key) or []
+    out: Dict[int, Dict[str, Any]] = {}
+    for ps in arr:
+        if not isinstance(ps, dict):
+            continue
+        n = ps.get("number")
+        if n is None:
+            continue
+        try:
+            out[int(n)] = ps
+        except Exception:
+            continue
+    return out
+
+
+def _fill_players_block(
+    ws,
+    *,
+    players: List[Any],
+    stats_by_number: Dict[int, Dict[str, Any]],
+    start_row: int,
+    end_row: int,
+) -> None:
+    """
+    Kolumny wg Twojej specyfikacji:
+      - A: numer
+      - Q: wejście "W" / "-"
+      - S: bramki liczba / "-"
+      - U: upomnienie "[minuta]'" / "-"
+      - W: 2' #1 (MM:SS) / "---"
+      - Z: 2' #2 / "---"
+      - AC: 2' #3 / "---"
+      - AF: dyskwalifikacja lub dysq z opisem / "---"
+      - AI: zawsze "---"
+    """
+    nums: List[int] = []
+    for p in players or []:
+        try:
+            nums.append(int(p))
+        except Exception:
+            continue
+    nums = sorted(set(nums))
+
+    max_rows = (end_row - start_row + 1)
+    nums = nums[:max_rows]
+
+    for i in range(max_rows):
+        row = start_row + i
+        ws[f"AI{row}"].value = "---"  # zawsze
+
+        if i >= len(nums):
+            # zostaw pusto jeśli mniej zawodników
+            ws[f"A{row}"].value = ""
+            ws[f"Q{row}"].value = "-"
+            ws[f"S{row}"].value = "-"
+            ws[f"U{row}"].value = "-"
+            ws[f"W{row}"].value = "---"
+            ws[f"Z{row}"].value = "---"
+            ws[f"AC{row}"].value = "---"
+            ws[f"AF{row}"].value = "---"
+            continue
+
+        num = nums[i]
+        ps = stats_by_number.get(num) or {}
+
+        entered = bool(ps.get("entered") or False)
+        goals = _safe_int(ps.get("goals") or 0, 0)
+        warning = ps.get("warning")  # w ProEl bywa "12'"
+        penalty1 = (ps.get("penalty1") or "").strip()
+        penalty2 = (ps.get("penalty2") or "").strip()
+        penalty3 = (ps.get("penalty3") or "").strip()
+        disq_time = (ps.get("disqualification") or "").strip()
+        disq_desc = (ps.get("disqualificationDesc") or "").strip()
+        has_red = bool(ps.get("hasRedCard") or False)
+
+        ws[f"A{row}"].value = num
+        ws[f"Q{row}"].value = "W" if entered else "-"
+        ws[f"S{row}"].value = goals if goals > 0 else "-"
+        ws[f"U{row}"].value = str(warning).strip() if isinstance(warning, str) and warning.strip() else "-"
+
+        ws[f"W{row}"].value = penalty1 if penalty1 else "---"
+        ws[f"Z{row}"].value = penalty2 if penalty2 else "---"
+        ws[f"AC{row}"].value = penalty3 if penalty3 else "---"
+
+        if disq_time or disq_desc:
+            if disq_time and disq_desc:
+                ws[f"AF{row}"].value = f"{disq_time} {disq_desc}"
+            elif disq_time:
+                ws[f"AF{row}"].value = disq_time
+            elif disq_desc:
+                ws[f"AF{row}"].value = disq_desc
+        else:
+            ws[f"AF{row}"].value = "---"
+
+
+def _fill_timeline(
+    ws,
+    *,
+    data_json: Dict[str, Any],
+    half_ms: int,
+    half_score_host: int,
+    half_score_guest: int,
+) -> None:
+    """
+    Przebieg meczu:
+    - zapisujemy minutę jako liczba (floor(ms/60000)+1)
+    - wiersze 15..61
+    - połowa 1: AL (min), AN (host player/host action), AP (host score), AS (guest score)
+    - połowa 2: AW (min), AY (host action), BA (host score), BD (guest score), BF (guest action)
+    """
+    prot = data_json.get("protocol") or []
+    evs1 = []
+    evs2 = []
+
+    for ev in prot:
+        if not isinstance(ev, dict):
+            continue
+        t = ev.get("type")
+        if t not in ("goal", "penaltyKickScored", "penaltyKickMissed"):
+            continue
+        half = ev.get("half")
+        if half == 1:
+            evs1.append(ev)
+        elif half == 2:
+            evs2.append(ev)
+
+    # sort po czasie rosnąco
+    def _ev_ms(e):
+        return _safe_int(e.get("time") or 0, 0)
+
+    evs1.sort(key=_ev_ms)
+    evs2.sort(key=_ev_ms)
+
+    # ---- half 1 ----
+    h_score = 0
+    g_score = 0
+    row = 15
+    for ev in evs1:
+        if row > 61:
+            break
+        ms = _ev_ms(ev)
+        minute = _event_minute_from_ms(ms)
+
+        team = ev.get("team")
+        player = ev.get("player")
+        t = ev.get("type")
+
+        ws[f"AL{row}"].value = str(minute)
+
+        # akcje w 1. połowie:
+        # - gospodarz -> kolumna AN
+        # - gość     -> kolumna AU
+        host_action = ""
+        guest_action = ""
+
+        if player is not None:
+            ptxt = str(player).strip()
+            if t.startswith("penaltyKick"):
+                ptxt = f"{ptxt}K"
+
+            if team == "host":
+                host_action = ptxt
+            elif team == "guest":
+                guest_action = ptxt
+
+        # Dodajemy logikę, aby puste wartości były zastępowane "--"
+        ws[f"AN{row}"].value = host_action if host_action else "--"
+        ws[f"AU{row}"].value = guest_action if guest_action else "--"
+
+        if t == "goal" or t == "penaltyKickScored":
+            if team == "host":
+                h_score += 1
+            elif team == "guest":
+                g_score += 1
+            ws[f"AP{row}"].value = str(h_score)
+            ws[f"AS{row}"].value = str(g_score)
+        else:
+            # penaltyKickMissed -> "--" / "--"
+            ws[f"AP{row}"].value = "--"
+            ws[f"AS{row}"].value = "--"
+
+        row += 1
+
+    # ---- half 2 ----
+    h_score = _safe_int(half_score_host, 0)
+    g_score = _safe_int(half_score_guest, 0)
+    row = 15
+    for ev in evs2:
+        if row > 61:
+            break
+        ms = _ev_ms(ev)
+        minute = _event_minute_from_ms(ms)
+
+        team = ev.get("team")
+        player = ev.get("player")
+        t = ev.get("type")
+
+        ws[f"AW{row}"].value = str(minute)
+
+        # akcje w 2. połowie:
+        # - gospodarz -> kolumna AY
+        # - gość     -> kolumna BF
+        host_action = ""
+        guest_action = ""
+
+        if player is not None:
+            ptxt = str(player).strip()
+            if t.startswith("penaltyKick"):
+                ptxt = f"{ptxt}K"
+
+            if team == "host":
+                host_action = ptxt
+            elif team == "guest":
+                guest_action = ptxt
+
+        # Dodajemy logikę, aby puste wartości były zastępowane "--"
+        ws[f"AY{row}"].value = host_action if host_action else "--"
+        ws[f"BF{row}"].value = guest_action if guest_action else "--"
+
+        if t == "goal" or t == "penaltyKickScored":
+            if team == "host":
+                h_score += 1
+            elif team == "guest":
+                g_score += 1
+            ws[f"BA{row}"].value = str(h_score)
+            ws[f"BD{row}"].value = str(g_score)
+        else:
+            # penaltyKickMissed -> "--" / "--"
+            ws[f"BA{row}"].value = "--"
+            ws[f"BD{row}"].value = "--"
+
+        row += 1
+
+
+def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
+    """
+    Konwersja przez LibreOffice:
+      soffice --headless --convert-to pdf --outdir <out_dir> <xlsx_path>
+    Zwraca ścieżkę do PDF.
+    """
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise RuntimeError("Brak LibreOffice (soffice) w środowisku. Doinstaluj libreoffice w Dockerfile.")
+
+    # LO w kontenerze często próbuje pisać do HOME — zabezpieczamy to envem
+    env = os.environ.copy()
+    env.setdefault("HOME", "/tmp")
+    env.setdefault("XDG_CACHE_HOME", "/tmp")
+    env.setdefault("XDG_CONFIG_HOME", "/tmp")
+
+    profile_dir = os.path.join(out_dir, "lo_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    cmd = [
+        soffice,
+        "--headless",
+        "--nologo",
+        "--nolockcheck",
+        "--nodefault",
+        "--norestore",
+        f"-env:UserInstallation=file://{profile_dir}",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        out_dir,
+        xlsx_path,
+    ]
+
+
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        timeout=90,  # ważne: żeby request nie wisiał wiecznie
+    )
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"LibreOffice convert failed (code={proc.returncode}). "
+            f"stderr={proc.stderr[:500]} stdout={proc.stdout[:200]}"
+        )
+
+    base = os.path.splitext(os.path.basename(xlsx_path))[0]
+    pdf_path = os.path.join(out_dir, base + ".pdf")
+
+    if not os.path.exists(pdf_path):
+        # fallback: znajdź najbardziej pasujący PDF w out_dir
+        pdfs = [p for p in os.listdir(out_dir) if p.lower().endswith(".pdf")]
+        if len(pdfs) == 1:
+            pdf_path = os.path.join(out_dir, pdfs[0])
+        else:
+            # spróbuj dopasować po base
+            cand = [p for p in pdfs if os.path.splitext(p)[0] == base]
+            if len(cand) == 1:
+                pdf_path = os.path.join(out_dir, cand[0])
+            else:
+                raise RuntimeError(f"Nie znaleziono wyjściowego PDF po konwersji. Pliki: {pdfs[:10]}")
+
+    return pdf_path
+
+
+@router.post(
+    "/judge/results/protocol/pdf",
+    summary="Generuj PDF z protokołu na podstawie data_json (ProEl) i szablonu XLSX",
+)
+async def generate_protocol_pdf(
+    req: ProtocolPdfRequest,
+):
+    data_json = req.data_json or {}
+    if not isinstance(data_json, dict):
+        raise HTTPException(400, "data_json musi być obiektem JSON")
+
+    # --- locate template ---
+    template_path = Path(__file__).resolve().parent / "templates" / "protocol_template.xlsx"
+    if not template_path.exists():
+        raise HTTPException(
+            500,
+            f"Brak szablonu XLSX: {template_path}. Umieść plik w app/templates/protocol_template.xlsx i dodaj do repo.",
+        )
+
+    core = _get_match_core(data_json)
+    half_ms = core["halfTimeMin"] * 60 * 1000
+
+    # penalties totals
+    pen = data_json.get("penaltyStats") or {}
+    pen_h = pen.get("host") or {}
+    pen_g = pen.get("guest") or {}
+    pk_host_total = _safe_int(pen_h.get("total"), 0)
+    pk_host_goals = _safe_int(pen_h.get("goals"), 0)
+    pk_guest_total = _safe_int(pen_g.get("total"), 0)
+    pk_guest_goals = _safe_int(pen_g.get("goals"), 0)
+
+    # timeouts
+    tt = data_json.get("teamTimeouts") or {}
+    tt_host = tt.get("host") or {}
+    tt_guest = tt.get("guest") or {}
+
+    # players stats
+    host_stats = _player_stats_map(data_json, "host")
+    guest_stats = _player_stats_map(data_json, "guest")
+
+    # winner
+    winner = ""
+    if core["scoreHost"] > core["scoreGuest"]:
+        winner = "A"
+    elif core["scoreGuest"] > core["scoreHost"]:
+        winner = "B"
+
+    try:
+        td = tempfile.mkdtemp(prefix="protocol_")  # ✅ nie usuwa się samo
+        safe_code = re.sub(r"[^0-9A-Za-z_-]+", "_", (core.get("matchNumber") or "mecz"))
+        filled_xlsx = os.path.join(td, f"protocol_{safe_code}.xlsx")
+
+        wb = load_workbook(str(template_path))
+        ws = wb.active  # jeśli masz konkretny arkusz, zmień na wb["NazwaArkusza"]
+
+        # --- header mapping ---
+        ws["AY1"].value = core["matchNumber"]
+        ws["C4"].value = core["hostName"]
+        ws["D9"].value = core["hostName"]
+        ws["C7"].value = core["guestName"]
+        ws["D34"].value = core["guestName"]
+
+        ws["AL6"].value = str(core["scoreHost"])
+        ws["AQ6"].value = str(core["scoreGuest"])
+        ws["AU6"].value = str(core["halfScoreHost"])
+        ws["AY6"].value = str(core["halfScoreGuest"])
+        ws["BB6"].value = winner
+
+        # --- timeouts mapping ---
+        _place_timeouts(ws, team_timeouts=tt_host, half_ms=half_ms, is_host=True)
+        _place_timeouts(ws, team_timeouts=tt_guest, half_ms=half_ms, is_host=False)
+
+        # --- penalties totals ---
+        ws["AN63"].value = str(pk_host_total)
+        ws["AR63"].value = str(pk_host_goals)
+        ws["AY63"].value = str(pk_guest_total)
+        ws["BC63"].value = str(pk_guest_goals)
+
+        # --- players numbers + stats ---
+        _fill_players_block(ws, players=core["hostPlayers"],  stats_by_number=host_stats,  start_row=11, end_row=28)
+        _fill_players_block(ws, players=core["guestPlayers"], stats_by_number=guest_stats, start_row=36, end_row=53)
+
+        # --- timeline (match events) ---
+        _fill_timeline(
+            ws,
+            data_json=data_json,
+            half_ms=half_ms,
+            half_score_host=core["halfScoreHost"],
+            half_score_guest=core["halfScoreGuest"],
+        )
+
+        wb.save(filled_xlsx)
+
+        # --- convert to PDF ---
+        pdf_path = _convert_xlsx_to_pdf(filled_xlsx, td)
+
+        filename = f"protokol_{(core['matchNumber'] or 'mecz').replace('/', '-')}.pdf"
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename=filename,
+            background=BackgroundTask(shutil.rmtree, td, ignore_errors=True),  # ✅ sprząta PO wysłaniu
+        )
+
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("generate_protocol_pdf error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Nie udało się wygenerować PDF: {e}")
