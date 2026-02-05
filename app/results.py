@@ -19,6 +19,8 @@ from app.deps import Settings, get_rsa_keys, get_settings
 from app.utils import fetch_with_correct_encoding
 from starlette.background import BackgroundTask
 
+from openpyxl.styles import Alignment, Font
+
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Results"])
 
@@ -2473,6 +2475,149 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
 
     return pdf_path
 
+def _parse_penalty_score(penalty_score: str) -> Tuple[int, int]:
+    """
+    "5 - 4" / "5-4" -> (5,4)
+    """
+    s = (penalty_score or "").strip()
+    if not s:
+        return (0, 0)
+    m = re.search(r"(\d+)\s*-\s*(\d+)", s)
+    if not m:
+        return (0, 0)
+    return int(m.group(1)), int(m.group(2))
+
+
+def _shootout_needed(data_json: Dict[str, Any]) -> bool:
+    """
+    Karne tylko gdy:
+      - wynik końcowy remis
+      - i jest penaltyScore albo penaltyShots
+    """
+    try:
+        sh = int(data_json.get("scoreHost") or 0)
+        sg = int(data_json.get("scoreGuest") or 0)
+    except Exception:
+        sh, sg = 0, 0
+
+    if sh != sg:
+        return False
+
+    ps = (data_json.get("penaltyScore") or "").strip()
+    shots = data_json.get("penaltyShots") or {}
+    has_shots = bool((shots.get("host") or []) or (shots.get("guest") or []))
+    return bool(ps) or has_shots
+
+
+def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
+    """
+    Strona "RZUTY KARNE" w przebiegu (kolumny AL..AU, wiersze 15..61).
+    Zaczynamy od wiersza 16.
+    """
+    # 1) Nagłówek: merge + tekst
+    ws.merge_cells("AL15:AU15")
+    ws["AL15"].value = "RZUTY KARNE"
+    ws["AL15"].alignment = Alignment(horizontal="center", vertical="center")
+    ws["AL15"].font = Font(bold=True)
+
+    # 2) Wyczyść/ustaw "--" w obu blokach przebiegu żeby nie było śmieci z kopiowanego arkusza
+    # lewy blok (AL..AU)
+    for r in range(16, 62):
+        ws[f"AL{r}"].value = "--"
+        ws[f"AN{r}"].value = "--"
+        ws[f"AP{r}"].value = "--"
+        ws[f"AS{r}"].value = "--"
+        ws[f"AU{r}"].value = "--"
+
+    # prawy blok (AW..BF) – na stronie karnych nie używamy, więc czyścimy
+    for r in range(15, 62):
+        ws[f"AW{r}"].value = "--"
+        ws[f"AY{r}"].value = "--"
+        ws[f"BA{r}"].value = "--"
+        ws[f"BD{r}"].value = "--"
+        ws[f"BF{r}"].value = "--"
+
+    # 3) Dane karnych
+    shots = data_json.get("penaltyShots") or {}
+    host_arr = shots.get("host") or []
+    guest_arr = shots.get("guest") or []
+
+    # ile serii (po 1 strzale na drużynę)
+    series_count = max(len(host_arr), len(guest_arr))
+    if series_count <= 0:
+        return
+
+    # 4) Wpisy od wiersza 16, po 2 wiersze na serię
+    row = 16
+    host_score = 0
+    guest_score = 0
+
+    def _shot(arr, idx) -> Optional[Dict[str, Any]]:
+        if idx < 0 or idx >= len(arr):
+            return None
+        x = arr[idx]
+        return x if isinstance(x, dict) else None
+
+    # co 5 serii zmiana startującego:
+    # serie 1-5: host first
+    # serie 6-10: guest first
+    # serie 11-15: host first
+    # itd.
+    for s in range(1, series_count + 1):
+        if row > 61:
+            break  # brak miejsca w szablonie
+
+        idx = s - 1
+        flip = ((s - 1) // 5) % 2 == 1
+        first_team = "guest" if flip else "host"
+        second_team = "host" if flip else "guest"
+
+        def write_team_shot(team: str, series_no: int):
+            nonlocal row, host_score, guest_score
+            if row > 61:
+                return
+
+            ws[f"AL{row}"].value = str(series_no)
+
+            if team == "host":
+                sh = _shot(host_arr, idx)
+                player = sh.get("player") if sh else None
+                result = int(sh.get("result") or 0) if sh else 0
+
+                ws[f"AN{row}"].value = str(int(player)) if player is not None else "--"
+                ws[f"AU{row}"].value = "--"
+
+                if result == 1:
+                    host_score += 1
+                    ws[f"AP{row}"].value = str(host_score)
+                else:
+                    ws[f"AP{row}"].value = "--"
+
+                ws[f"AS{row}"].value = "--"
+
+            else:
+                sh = _shot(guest_arr, idx)
+                player = sh.get("player") if sh else None
+                result = int(sh.get("result") or 0) if sh else 0
+
+                ws[f"AN{row}"].value = "--"
+                ws[f"AU{row}"].value = str(int(player)) if player is not None else "--"
+
+                if result == 1:
+                    guest_score += 1
+                    ws[f"AS{row}"].value = str(guest_score)
+                else:
+                    ws[f"AS{row}"].value = "--"
+
+                ws[f"AP{row}"].value = "--"
+
+            row += 1
+
+        # 1) pierwszy strzał w serii
+        write_team_shot(first_team, s)
+        # 2) drugi strzał w serii
+        write_team_shot(second_team, s)
+
 
 @router.post(
     "/judge/results/protocol/pdf",
@@ -2529,12 +2674,21 @@ async def generate_protocol_pdf(
 
 
 
-    # winner
+    # winner (A/B) – przy remisie rozstrzygamy z penaltyScore
     winner = ""
     if core["scoreHost"] > core["scoreGuest"]:
         winner = "A"
     elif core["scoreGuest"] > core["scoreHost"]:
         winner = "B"
+    else:
+        ph, pg = _parse_penalty_score(data_json.get("penaltyScore") or "")
+        if ph > pg:
+            winner = "A"
+        elif pg > ph:
+            winner = "B"
+        else:
+            winner = ""  # jeśli brak/niepoprawny penaltyScore
+
 
     try:
         td = tempfile.mkdtemp(prefix="protocol_")  # ✅ nie usuwa się samo
@@ -2651,27 +2805,43 @@ async def generate_protocol_pdf(
         ws["I67"].value = core.get("timekeeper") or ""
         ws["I68"].value = core.get("delegate") or ""
 
-                # --- timeline (match events) + optional 2nd page ---
-        # najpierw sprawdzamy, czy potrzebujemy dodatkowej strony
+        # --- timeline (match events) + optional pages (overflow + shootout) ---
         evs1, evs2 = _extract_timeline_events(data_json)
-        needs_page2 = (len(evs1) > TIMELINE_MAX_ROWS) or (len(evs2) > TIMELINE_MAX_ROWS)
+        needs_timeline_page2 = (len(evs1) > TIMELINE_MAX_ROWS) or (len(evs2) > TIMELINE_MAX_ROWS)
+
+        needs_shootout_page = _shootout_needed(data_json)
+
+        # Tworzymy listę stron (arkuszy) w kolejności: 1, (2 - overflow), (shootout)
+        pages = [ws]
 
         ws2 = None
-        if needs_page2:
+        if needs_timeline_page2:
             ws2 = wb.copy_worksheet(ws)
-            # (opcjonalnie) nazwa arkusza - żeby było czytelniej w debug
             try:
                 ws2.title = "Strona 2"
             except Exception:
                 pass
+            pages.append(ws2)
 
-            ws["AQ2"].value = "STRONA 1/2"
-            ws2["AQ2"].value = "STRONA 2/2"
+        ws_shoot = None
+        if needs_shootout_page:
+            ws_shoot = wb.copy_worksheet(ws)
+            try:
+                ws_shoot.title = "Rzuty karne"
+            except Exception:
+                pass
+            pages.append(ws_shoot)
+
+        # 1) Ustaw numerację stron STRONA X/N na wszystkich
+        total_pages = len(pages)
+        if total_pages > 1:
+            for i, p in enumerate(pages, start=1):
+                p["AQ2"].value = f"STRONA {i}/{total_pages}"
         else:
             ws["AQ2"].value = ""
 
-        # wypełnij przebieg na stronie 1 i ewentualnie kontynuację na stronie 2
-        if needs_page2 and ws2 is not None:
+        # 2) Wypełnij przebieg meczu na stronach 1 oraz (opcjonalnie) 2
+        if needs_timeline_page2 and ws2 is not None:
             _fill_timeline_pages(
                 ws,
                 ws2,
@@ -2681,7 +2851,6 @@ async def generate_protocol_pdf(
                 half_score_guest=core["halfScoreGuest"],
             )
         else:
-            # jedna strona: wypełnij tylko stronę 1, a brakujące wiersze domknij "--"
             _fill_timeline_pages(
                 ws,
                 None,
@@ -2690,6 +2859,10 @@ async def generate_protocol_pdf(
                 half_score_host=core["halfScoreHost"],
                 half_score_guest=core["halfScoreGuest"],
             )
+
+        # 3) Jeśli jest strona karnych – podmień przebieg na "RZUTY KARNE"
+        if ws_shoot is not None:
+            _fill_shootout_page(ws_shoot, data_json=data_json)
 
 
         wb.save(filled_xlsx)
