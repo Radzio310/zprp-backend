@@ -1997,6 +1997,55 @@ def _player_fullname_map_from_stats(stats_by_number: Dict[int, Dict[str, Any]]) 
     return out
 
 
+def _pick_companion_time(c: Dict[str, Any], *keys: str) -> str:
+    for k in keys:
+        v = c.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+def _companion_penalty_strings(comp_list: List[Any]) -> Dict[str, Dict[str, str]]:
+    """
+    Zwraca mapę:
+      "A".."E" -> {"warn": "U - MM:SS" | "---", "p2": "2' - MM:SS" | "---", "disq": "D - MM:SS" | "---"}
+    Źródła:
+      - upomnienie: warned + warnTime/warningTime/warnedTime (jeśli istnieje)
+      - 2 minuty: penaltyTimes[0] (pierwsza 2')
+      - dyskwalifikacja: red + redTime
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    for c in comp_list or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "").strip().upper()
+        if cid not in ("A", "B", "C", "D", "E"):
+            continue
+
+        # --- warning ---
+        warned = bool(c.get("warned")) if "warned" in c else bool(c.get("warn")) if "warn" in c else False
+        warn_time = _pick_companion_time(c, "warnTime", "warningTime", "warnedTime", "warning")
+        warn_str = f"U - {warn_time}" if (warned and warn_time) else ("U - --:--" if warned else "---")
+
+        # --- 2' ---
+        p_times = c.get("penaltyTimes") if isinstance(c.get("penaltyTimes"), list) else []
+        p2_time = ""
+        if p_times:
+            first = p_times[0]
+            if isinstance(first, str) and first.strip():
+                p2_time = first.strip()
+        # czasem możesz mieć boola "twoMinutes" bez listy — wtedy wpisz placeholder
+        two_min = bool(c.get("twoMinutes")) if "twoMinutes" in c else False
+        p2_str = f"2' - {p2_time}" if p2_time else ("2' - --:--" if two_min else "---")
+
+        # --- disq (red) ---
+        red = bool(c.get("red")) if "red" in c else bool(c.get("disq")) if "disq" in c else False
+        red_time = _pick_companion_time(c, "redTime", "disqTime", "disqualificationTime")
+        disq_str = f"D - {red_time}" if (red and red_time) else ("D - --:--" if red else "---")
+
+        out[cid] = {"warn": warn_str, "p2": p2_str, "disq": disq_str}
+
+    return out
+
 def _companion_fullname_map(comp_list: List[Any]) -> Dict[str, str]:
     """
     Zwraca mapę: "A".."E" -> "NAZWISKO Imię"
@@ -2475,6 +2524,10 @@ async def generate_protocol_pdf(
     host_comp_names = _companion_fullname_map(core.get("hostCompanions") or [])
     guest_comp_names = _companion_fullname_map(core.get("guestCompanions") or [])
 
+    host_comp_pen = _companion_penalty_strings(core.get("hostCompanions") or [])
+    guest_comp_pen = _companion_penalty_strings(core.get("guestCompanions") or [])
+
+
 
     # winner
     winner = ""
@@ -2546,6 +2599,50 @@ async def generate_protocol_pdf(
         ws["R54"].value  = guest_comp_names.get("C", "")
         ws["Y54"].value  = guest_comp_names.get("D", "")
         ws["AF54"].value = guest_comp_names.get("E", "")
+
+        # --- Kary osób towarzyszących (format: U/2'/D - MM:SS) ---
+
+        # HOST A..E (row 31)
+        ws["A31"].value  = host_comp_pen.get("A", {}).get("warn", "---")
+        ws["D31"].value  = host_comp_pen.get("A", {}).get("p2", "---")
+        ws["G31"].value  = host_comp_pen.get("A", {}).get("disq", "---")
+
+        ws["J31"].value  = host_comp_pen.get("B", {}).get("warn", "---")
+        ws["L31"].value  = host_comp_pen.get("B", {}).get("p2", "---")
+        ws["O31"].value  = host_comp_pen.get("B", {}).get("disq", "---")
+
+        ws["Q31"].value  = host_comp_pen.get("C", {}).get("warn", "---")
+        ws["S31"].value  = host_comp_pen.get("C", {}).get("p2", "---")
+        ws["V31"].value  = host_comp_pen.get("C", {}).get("disq", "---")
+
+        ws["X31"].value  = host_comp_pen.get("D", {}).get("warn", "---")
+        ws["Z31"].value  = host_comp_pen.get("D", {}).get("p2", "---")
+        ws["AC31"].value = host_comp_pen.get("D", {}).get("disq", "---")
+
+        ws["AE31"].value = host_comp_pen.get("E", {}).get("warn", "---")
+        ws["AH31"].value = host_comp_pen.get("E", {}).get("p2", "---")
+        ws["AJ31"].value = host_comp_pen.get("E", {}).get("disq", "---")
+
+        # GUEST A..E (row 56)
+        ws["A56"].value  = guest_comp_pen.get("A", {}).get("warn", "---")
+        ws["D56"].value  = guest_comp_pen.get("A", {}).get("p2", "---")
+        ws["G56"].value  = guest_comp_pen.get("A", {}).get("disq", "---")
+
+        ws["J56"].value  = guest_comp_pen.get("B", {}).get("warn", "---")
+        ws["L56"].value  = guest_comp_pen.get("B", {}).get("p2", "---")
+        ws["O56"].value  = guest_comp_pen.get("B", {}).get("disq", "---")
+
+        ws["Q56"].value  = guest_comp_pen.get("C", {}).get("warn", "---")
+        ws["S56"].value  = guest_comp_pen.get("C", {}).get("p2", "---")
+        ws["V56"].value  = guest_comp_pen.get("C", {}).get("disq", "---")
+
+        ws["X56"].value  = guest_comp_pen.get("D", {}).get("warn", "---")
+        ws["Z56"].value  = guest_comp_pen.get("D", {}).get("p2", "---")
+        ws["AC56"].value = guest_comp_pen.get("D", {}).get("disq", "---")
+
+        ws["AE56"].value = guest_comp_pen.get("E", {}).get("warn", "---")
+        ws["AH56"].value = guest_comp_pen.get("E", {}).get("p2", "---")
+        ws["AJ56"].value = guest_comp_pen.get("E", {}).get("disq", "---")
 
         # Sędziowie
         ws["I64"].value = core.get("referee1") or ""
