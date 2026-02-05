@@ -2024,7 +2024,7 @@ def _companion_penalty_strings(comp_list: List[Any]) -> Dict[str, Dict[str, str]
         # --- warning ---
         warned = bool(c.get("warned")) if "warned" in c else bool(c.get("warn")) if "warn" in c else False
         warn_time = _pick_companion_time(c, "warnTime", "warningTime", "warnedTime", "warning")
-        warn_str = f"U - {warn_time}" if (warned and warn_time) else ("U - --:--" if warned else "---")
+        warn_str = f"U - {warn_time}" if (warned and warn_time) else ("U - __:__" if warned else "")
 
         # --- 2' ---
         p_times = c.get("penaltyTimes") if isinstance(c.get("penaltyTimes"), list) else []
@@ -2035,12 +2035,12 @@ def _companion_penalty_strings(comp_list: List[Any]) -> Dict[str, Dict[str, str]
                 p2_time = first.strip()
         # czasem możesz mieć boola "twoMinutes" bez listy — wtedy wpisz placeholder
         two_min = bool(c.get("twoMinutes")) if "twoMinutes" in c else False
-        p2_str = f"2' - {p2_time}" if p2_time else ("2' - --:--" if two_min else "---")
+        p2_str = f"2' - {p2_time}" if p2_time else ("2' - __:__" if two_min else "")
 
         # --- disq (red) ---
         red = bool(c.get("red")) if "red" in c else bool(c.get("disq")) if "disq" in c else False
         red_time = _pick_companion_time(c, "redTime", "disqTime", "disqualificationTime")
-        disq_str = f"D - {red_time}" if (red and red_time) else ("D - --:--" if red else "---")
+        disq_str = f"D - {red_time}" if (red and red_time) else ("D - __:__" if red else "")
 
         out[cid] = {"warn": warn_str, "p2": p2_str, "disq": disq_str}
 
