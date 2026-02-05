@@ -2052,8 +2052,8 @@ def _fill_players_block(
 
         if i >= len(nums):
             # zostaw pusto jeśli mniej zawodników
-            ws[f"A{row}"].value = ""
-            ws[f"C{row}"].value = "----------"
+            ws[f"A{row}"].value = "--"
+            ws[f"C{row}"].value = "------------------------------"
             ws[f"Q{row}"].value = "-"
             ws[f"S{row}"].value = "-"
             ws[f"U{row}"].value = "-"
