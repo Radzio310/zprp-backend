@@ -1876,6 +1876,17 @@ def _get_match_core(data_json: Dict[str, Any]) -> Dict[str, Any]:
         "halfScoreGuest": _safe_int((data_json.get("halfScore") or {}).get("guest"), 0),
         "hostPlayers": list(mc.get("hostPlayers") or []),
         "guestPlayers": list(mc.get("guestPlayers") or []),
+        "venueAddress": (mc.get("venueAddress") or "").strip(),
+        "referee1": (mc.get("referee1") or "").strip(),
+        "referee2": (mc.get("referee2") or "").strip(),
+        "delegate": (mc.get("delegate") or "").strip(),
+        "timekeeper": (mc.get("timekeeper") or "").strip(),
+        "secretary": (mc.get("secretary") or "").strip(),
+        "hostPlayerCards": list(mc.get("hostPlayerCards") or []),
+        "guestPlayerCards": list(mc.get("guestPlayerCards") or []),
+        "hostCompanions": list(mc.get("hostCompanions") or []),
+        "guestCompanions": list(mc.get("guestCompanions") or []),
+
     }
 
 
@@ -1957,12 +1968,58 @@ def _player_stats_map(data_json: Dict[str, Any], team: str) -> Dict[int, Dict[st
             continue
     return out
 
+def _player_fullname_map_from_cards(cards: List[Any]) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for c in cards or []:
+        if not isinstance(c, dict):
+            continue
+        n = c.get("number")
+        if n is None:
+            continue
+        try:
+            num = int(n)
+        except Exception:
+            continue
+        name = (c.get("fullName") or "").strip()
+        if name:
+            out[num] = name
+    return out
+
+
+def _player_fullname_map_from_stats(stats_by_number: Dict[int, Dict[str, Any]]) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for num, ps in (stats_by_number or {}).items():
+        if not isinstance(ps, dict):
+            continue
+        name = (ps.get("fullName") or "").strip()
+        if name:
+            out[int(num)] = name
+    return out
+
+
+def _companion_fullname_map(comp_list: List[Any]) -> Dict[str, str]:
+    """
+    Zwraca mapę: "A".."E" -> "NAZWISKO Imię"
+    """
+    out: Dict[str, str] = {}
+    for c in comp_list or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "").strip().upper()
+        if cid not in ("A", "B", "C", "D", "E"):
+            continue
+        name = (c.get("fullName") or "").strip()
+        if name:
+            out[cid] = name
+    return out
+
 
 def _fill_players_block(
     ws,
     *,
     players: List[Any],
     stats_by_number: Dict[int, Dict[str, Any]],
+    fullnames_by_number: Dict[int, str],
     start_row: int,
     end_row: int,
 ) -> None:
@@ -1996,6 +2053,7 @@ def _fill_players_block(
         if i >= len(nums):
             # zostaw pusto jeśli mniej zawodników
             ws[f"A{row}"].value = ""
+            ws[f"C{row}"].value = "----------"
             ws[f"Q{row}"].value = "-"
             ws[f"S{row}"].value = "-"
             ws[f"U{row}"].value = "-"
@@ -2019,6 +2077,7 @@ def _fill_players_block(
         has_red = bool(ps.get("hasRedCard") or False)
 
         ws[f"A{row}"].value = num
+        ws[f"C{row}"].value = (fullnames_by_number.get(num) or "")
         ws[f"Q{row}"].value = "W" if entered else "-"
         ws[f"S{row}"].value = goals if goals > 0 else "-"
         ws[f"U{row}"].value = str(warning).strip() if isinstance(warning, str) and warning.strip() else "-"
@@ -2285,6 +2344,17 @@ async def generate_protocol_pdf(
     # players stats
     host_stats = _player_stats_map(data_json, "host")
     guest_stats = _player_stats_map(data_json, "guest")
+    host_names = _player_fullname_map_from_cards(core.get("hostPlayerCards") or [])
+    guest_names = _player_fullname_map_from_cards(core.get("guestPlayerCards") or [])
+
+    if not host_names:
+        host_names = _player_fullname_map_from_stats(host_stats)
+    if not guest_names:
+        guest_names = _player_fullname_map_from_stats(guest_stats)
+
+    host_comp_names = _companion_fullname_map(core.get("hostCompanions") or [])
+    guest_comp_names = _companion_fullname_map(core.get("guestCompanions") or [])
+
 
     # winner
     winner = ""
@@ -2303,6 +2373,7 @@ async def generate_protocol_pdf(
 
         # --- header mapping ---
         ws["AY1"].value = core["matchNumber"]
+        ws["AL4"].value = core.get("venueAddress") or ""
         ws["C4"].value = core["hostName"]
         ws["D9"].value = core["hostName"]
         ws["C7"].value = core["guestName"]
@@ -2325,8 +2396,22 @@ async def generate_protocol_pdf(
         ws["BC63"].value = str(pk_guest_goals)
 
         # --- players numbers + stats ---
-        _fill_players_block(ws, players=core["hostPlayers"],  stats_by_number=host_stats,  start_row=11, end_row=28)
-        _fill_players_block(ws, players=core["guestPlayers"], stats_by_number=guest_stats, start_row=36, end_row=53)
+        _fill_players_block(
+            ws,
+            players=core["hostPlayers"],
+            stats_by_number=host_stats,
+            fullnames_by_number=host_names,
+            start_row=11,
+            end_row=28,
+        )
+        _fill_players_block(
+            ws,
+            players=core["guestPlayers"],
+            stats_by_number=guest_stats,
+            fullnames_by_number=guest_names,
+            start_row=36,
+            end_row=53,
+        )
 
         # --- timeline (match events) ---
         _fill_timeline(
@@ -2336,6 +2421,28 @@ async def generate_protocol_pdf(
             half_score_host=core["halfScoreHost"],
             half_score_guest=core["halfScoreGuest"],
         )
+
+        # Osoby towarzyszące gospodarzy
+        ws["B29"].value  = host_comp_names.get("A", "")
+        ws["K29"].value  = host_comp_names.get("B", "")
+        ws["R29"].value  = host_comp_names.get("C", "")
+        ws["Y29"].value  = host_comp_names.get("D", "")
+        ws["AF29"].value = host_comp_names.get("E", "")
+
+        # Osoby towarzyszące gości
+        ws["B54"].value  = guest_comp_names.get("A", "")
+        ws["K54"].value  = guest_comp_names.get("B", "")
+        ws["R54"].value  = guest_comp_names.get("C", "")
+        ws["Y54"].value  = guest_comp_names.get("D", "")
+        ws["AF54"].value = guest_comp_names.get("E", "")
+
+        # Sędziowie
+        ws["I64"].value = core.get("referee1") or ""
+        ws["I65"].value = core.get("referee2") or ""
+        ws["I66"].value = core.get("secretary") or ""
+        ws["I67"].value = core.get("timekeeper") or ""
+        ws["I68"].value = core.get("delegate") or ""
+
 
         wb.save(filled_xlsx)
 
