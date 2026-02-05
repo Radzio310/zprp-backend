@@ -2097,24 +2097,19 @@ def _fill_players_block(
             ws[f"AF{row}"].value = "---"
 
 
-def _fill_timeline(
-    ws,
-    *,
-    data_json: Dict[str, Any],
-    half_ms: int,
-    half_score_host: int,
-    half_score_guest: int,
-) -> None:
+TIMELINE_START_ROW = 15
+TIMELINE_END_ROW = 61
+TIMELINE_MAX_ROWS = TIMELINE_END_ROW - TIMELINE_START_ROW + 1  # 47
+
+
+def _extract_timeline_events(data_json: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Przebieg meczu:
-    - zapisujemy minutę jako liczba (floor(ms/60000)+1)
-    - wiersze 15..61
-    - połowa 1: AL (min), AN (host player/host action), AP (host score), AS (guest score)
-    - połowa 2: AW (min), AY (host action), BA (host score), BD (guest score), BF (guest action)
+    Zwraca (evs1, evs2) dla typów: goal, penaltyKickScored, penaltyKickMissed,
+    posortowane rosnąco po time (ms).
     """
     prot = data_json.get("protocol") or []
-    evs1 = []
-    evs2 = []
+    evs1: List[Dict[str, Any]] = []
+    evs2: List[Dict[str, Any]] = []
 
     for ev in prot:
         if not isinstance(ev, dict):
@@ -2128,20 +2123,71 @@ def _fill_timeline(
         elif half == 2:
             evs2.append(ev)
 
-    # sort po czasie rosnąco
-    def _ev_ms(e):
+    def _ev_ms(e: Dict[str, Any]) -> int:
         return _safe_int(e.get("time") or 0, 0)
 
     evs1.sort(key=_ev_ms)
     evs2.sort(key=_ev_ms)
+    return evs1, evs2
 
-    # ---- half 1 ----
-    h_score = 0
-    g_score = 0
-    row = 15
-    for ev in evs1:
-        if row > 61:
+
+def _advance_scores_for_events(
+    evs: List[Dict[str, Any]],
+    start_host: int,
+    start_guest: int,
+) -> Tuple[int, int]:
+    """
+    Przelicza score po zdarzeniach (liczymy tylko goal i penaltyKickScored).
+    penaltyKickMissed nie zmienia wyniku.
+    """
+    h = _safe_int(start_host, 0)
+    g = _safe_int(start_guest, 0)
+
+    for ev in evs:
+        if not isinstance(ev, dict):
+            continue
+        t = ev.get("type")
+        team = ev.get("team")
+        if t == "goal" or t == "penaltyKickScored":
+            if team == "host":
+                h += 1
+            elif team == "guest":
+                g += 1
+
+    return h, g
+
+
+def _fill_timeline_half_chunk(
+    ws,
+    *,
+    evs: List[Dict[str, Any]],
+    start_row: int,
+    end_row: int,
+    half_ms: int,
+    start_score_host: int,
+    start_score_guest: int,
+    # kolumny na dany "blok połowy"
+    col_minute: str,
+    col_host_action: str,
+    col_host_score: str,
+    col_guest_score: str,
+    col_guest_action: str,
+) -> Tuple[int, int]:
+    """
+    Wypełnia wiersze przebiegu dla danego chunk-a zdarzeń (max 47).
+    ZASADA: jeśli wiersz nieużyty -> w 5 komórkach wpisujemy "--".
+    """
+    def _ev_ms(e: Dict[str, Any]) -> int:
+        return _safe_int(e.get("time") or 0, 0)
+
+    h_score = _safe_int(start_score_host, 0)
+    g_score = _safe_int(start_score_guest, 0)
+
+    row = start_row
+    for ev in evs:
+        if row > end_row:
             break
+
         ms = _ev_ms(ev)
         minute = _event_minute_from_ms(ms)
 
@@ -2149,11 +2195,17 @@ def _fill_timeline(
         player = ev.get("player")
         t = ev.get("type")
 
-        ws[f"AL{row}"].value = str(minute)
+        # defaulty na wierszu (gdyby coś było puste)
+        ws[f"{col_minute}{row}"].value = "--"
+        ws[f"{col_host_action}{row}"].value = "--"
+        ws[f"{col_host_score}{row}"].value = "--"
+        ws[f"{col_guest_score}{row}"].value = "--"
+        ws[f"{col_guest_action}{row}"].value = "--"
 
-        # akcje w 1. połowie:
-        # - gospodarz -> kolumna AN
-        # - gość     -> kolumna AU
+        # minuta
+        ws[f"{col_minute}{row}"].value = str(minute)
+
+        # akcje
         host_action = ""
         guest_action = ""
 
@@ -2167,73 +2219,141 @@ def _fill_timeline(
             elif team == "guest":
                 guest_action = ptxt
 
-        # Dodajemy logikę, aby puste wartości były zastępowane "--"
-        ws[f"AN{row}"].value = host_action if host_action else "--"
-        ws[f"AU{row}"].value = guest_action if guest_action else "--"
+        ws[f"{col_host_action}{row}"].value = host_action if host_action else "--"
+        ws[f"{col_guest_action}{row}"].value = guest_action if guest_action else "--"
 
+        # score: tylko na goal / penaltyKickScored
         if t == "goal" or t == "penaltyKickScored":
             if team == "host":
                 h_score += 1
             elif team == "guest":
                 g_score += 1
-            ws[f"AP{row}"].value = str(h_score)
-            ws[f"AS{row}"].value = str(g_score)
+            ws[f"{col_host_score}{row}"].value = str(h_score)
+            ws[f"{col_guest_score}{row}"].value = str(g_score)
         else:
-            # penaltyKickMissed -> "--" / "--"
-            ws[f"AP{row}"].value = "--"
-            ws[f"AS{row}"].value = "--"
+            # penaltyKickMissed -> zostaje "--" / "--" (jak wcześniej)
+            ws[f"{col_host_score}{row}"].value = "--"
+            ws[f"{col_guest_score}{row}"].value = "--"
 
         row += 1
 
-    # ---- half 2 ----
-    h_score = _safe_int(half_score_host, 0)
-    g_score = _safe_int(half_score_guest, 0)
-    row = 15
-    for ev in evs2:
-        if row > 61:
-            break
-        ms = _ev_ms(ev)
-        minute = _event_minute_from_ms(ms)
-
-        team = ev.get("team")
-        player = ev.get("player")
-        t = ev.get("type")
-
-        ws[f"AW{row}"].value = str(minute)
-
-        # akcje w 2. połowie:
-        # - gospodarz -> kolumna AY
-        # - gość     -> kolumna BF
-        host_action = ""
-        guest_action = ""
-
-        if player is not None:
-            ptxt = str(player).strip()
-            if t.startswith("penaltyKick"):
-                ptxt = f"{ptxt}K"
-
-            if team == "host":
-                host_action = ptxt
-            elif team == "guest":
-                guest_action = ptxt
-
-        # Dodajemy logikę, aby puste wartości były zastępowane "--"
-        ws[f"AY{row}"].value = host_action if host_action else "--"
-        ws[f"BF{row}"].value = guest_action if guest_action else "--"
-
-        if t == "goal" or t == "penaltyKickScored":
-            if team == "host":
-                h_score += 1
-            elif team == "guest":
-                g_score += 1
-            ws[f"BA{row}"].value = str(h_score)
-            ws[f"BD{row}"].value = str(g_score)
-        else:
-            # penaltyKickMissed -> "--" / "--"
-            ws[f"BA{row}"].value = "--"
-            ws[f"BD{row}"].value = "--"
-
+    # reszta pustych wierszy -> "--" we wszystkich 5 komórkach
+    while row <= end_row:
+        ws[f"{col_minute}{row}"].value = "--"
+        ws[f"{col_host_action}{row}"].value = "--"
+        ws[f"{col_host_score}{row}"].value = "--"
+        ws[f"{col_guest_score}{row}"].value = "--"
+        ws[f"{col_guest_action}{row}"].value = "--"
         row += 1
+
+    return h_score, g_score
+
+
+def _fill_timeline_pages(
+    ws_page1,
+    ws_page2,
+    *,
+    data_json: Dict[str, Any],
+    half_ms: int,
+    half_score_host: int,
+    half_score_guest: int,
+) -> bool:
+    """
+    Wypełnia przebieg na stronie 1 i (opcjonalnie) kontynuację na stronie 2.
+    Zwraca True jeśli powstała strona 2 (overflow), inaczej False.
+    """
+    evs1, evs2 = _extract_timeline_events(data_json)
+
+    overflow1 = len(evs1) > TIMELINE_MAX_ROWS
+    overflow2 = len(evs2) > TIMELINE_MAX_ROWS
+    needs_page2 = overflow1 or overflow2
+
+    # podział na chunk'i
+    evs1_p1 = evs1[:TIMELINE_MAX_ROWS]
+    evs1_p2 = evs1[TIMELINE_MAX_ROWS:]
+    evs2_p1 = evs2[:TIMELINE_MAX_ROWS]
+    evs2_p2 = evs2[TIMELINE_MAX_ROWS:]
+
+    # --- PAGE 1 ---
+    # 1 połowa startuje od 0:0
+    _fill_timeline_half_chunk(
+        ws_page1,
+        evs=evs1_p1,
+        start_row=TIMELINE_START_ROW,
+        end_row=TIMELINE_END_ROW,
+        half_ms=half_ms,
+        start_score_host=0,
+        start_score_guest=0,
+        col_minute="AL",
+        col_host_action="AN",
+        col_host_score="AP",
+        col_guest_score="AS",
+        col_guest_action="AU",
+    )
+
+    # 2 połowa startuje od halfScore
+    _fill_timeline_half_chunk(
+        ws_page1,
+        evs=evs2_p1,
+        start_row=TIMELINE_START_ROW,
+        end_row=TIMELINE_END_ROW,
+        half_ms=half_ms,
+        start_score_host=_safe_int(half_score_host, 0),
+        start_score_guest=_safe_int(half_score_guest, 0),
+        col_minute="AW",
+        col_host_action="AY",
+        col_host_score="BA",
+        col_guest_score="BD",
+        col_guest_action="BF",
+    )
+
+    if not needs_page2:
+        return False
+
+        # --- PAGE 2 ---
+    if ws_page2 is None:
+        # teoretycznie nie powinno się zdarzyć, ale bezpiecznie
+        return False
+
+    # jeśli nie ma kontynuacji danej połowy -> i tak wypełniamy "--"
+    # 1 połowa (kontynuacja): start score musi być po evs1_p1
+    h1_after, g1_after = _advance_scores_for_events(evs1_p1, 0, 0)
+    _fill_timeline_half_chunk(
+        ws_page2,
+        evs=evs1_p2,
+        start_row=TIMELINE_START_ROW,
+        end_row=TIMELINE_END_ROW,
+        half_ms=half_ms,
+        start_score_host=h1_after,
+        start_score_guest=g1_after,
+        col_minute="AL",
+        col_host_action="AN",
+        col_host_score="AP",
+        col_guest_score="AS",
+        col_guest_action="AU",
+    )
+
+    # 2 połowa (kontynuacja): start score musi być po evs2_p1 (od halfScore)
+    h2_start = _safe_int(half_score_host, 0)
+    g2_start = _safe_int(half_score_guest, 0)
+    h2_after, g2_after = _advance_scores_for_events(evs2_p1, h2_start, g2_start)
+
+    _fill_timeline_half_chunk(
+        ws_page2,
+        evs=evs2_p2,
+        start_row=TIMELINE_START_ROW,
+        end_row=TIMELINE_END_ROW,
+        half_ms=half_ms,
+        start_score_host=h2_after,
+        start_score_guest=g2_after,
+        col_minute="AW",
+        col_host_action="AY",
+        col_host_score="BA",
+        col_guest_score="BD",
+        col_guest_action="BF",
+    )
+
+    return True
 
 
 def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
@@ -2413,15 +2533,6 @@ async def generate_protocol_pdf(
             end_row=53,
         )
 
-        # --- timeline (match events) ---
-        _fill_timeline(
-            ws,
-            data_json=data_json,
-            half_ms=half_ms,
-            half_score_host=core["halfScoreHost"],
-            half_score_guest=core["halfScoreGuest"],
-        )
-
         # Osoby towarzyszące gospodarzy
         ws["B29"].value  = host_comp_names.get("A", "")
         ws["K29"].value  = host_comp_names.get("B", "")
@@ -2442,6 +2553,46 @@ async def generate_protocol_pdf(
         ws["I66"].value = core.get("secretary") or ""
         ws["I67"].value = core.get("timekeeper") or ""
         ws["I68"].value = core.get("delegate") or ""
+
+                # --- timeline (match events) + optional 2nd page ---
+        # najpierw sprawdzamy, czy potrzebujemy dodatkowej strony
+        evs1, evs2 = _extract_timeline_events(data_json)
+        needs_page2 = (len(evs1) > TIMELINE_MAX_ROWS) or (len(evs2) > TIMELINE_MAX_ROWS)
+
+        ws2 = None
+        if needs_page2:
+            ws2 = wb.copy_worksheet(ws)
+            # (opcjonalnie) nazwa arkusza - żeby było czytelniej w debug
+            try:
+                ws2.title = "Strona 2"
+            except Exception:
+                pass
+
+            ws["AQ2"].value = "STRONA 1/2"
+            ws2["AQ2"].value = "STRONA 2/2"
+        else:
+            ws["AQ2"].value = ""
+
+        # wypełnij przebieg na stronie 1 i ewentualnie kontynuację na stronie 2
+        if needs_page2 and ws2 is not None:
+            _fill_timeline_pages(
+                ws,
+                ws2,
+                data_json=data_json,
+                half_ms=half_ms,
+                half_score_host=core["halfScoreHost"],
+                half_score_guest=core["halfScoreGuest"],
+            )
+        else:
+            # jedna strona: wypełnij tylko stronę 1, a brakujące wiersze domknij "--"
+            _fill_timeline_pages(
+                ws,
+                None,
+                data_json=data_json,
+                half_ms=half_ms,
+                half_score_host=core["halfScoreHost"],
+                half_score_guest=core["halfScoreGuest"],
+            )
 
 
         wb.save(filled_xlsx)
