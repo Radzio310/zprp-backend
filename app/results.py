@@ -2515,7 +2515,7 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
     Zaczynamy od wiersza 16.
     """
     # 1) Nagłówek: merge + tekst
-    ws.merge_cells("AL15:AU15")
+    ws.merge_cells("AL15:AV15")
     ws["AL15"].value = "RZUTY KARNE"
     ws["AL15"].alignment = Alignment(horizontal="center", vertical="center")
     ws["AL15"].font = Font(bold=True)
@@ -2590,8 +2590,11 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
                 if result == 1:
                     host_score += 1
                     ws[f"AP{row}"].value = str(host_score)
+                    ws[f"AS{row}"].value = str(guest_score)   # <-- pokaż wynik przeciwnika
                 else:
                     ws[f"AP{row}"].value = "--"
+                    ws[f"AS{row}"].value = "--"
+
 
                 ws[f"AS{row}"].value = "--"
 
@@ -2605,8 +2608,10 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
 
                 if result == 1:
                     guest_score += 1
+                    ws[f"AP{row}"].value = str(host_score)    # <-- pokaż wynik gospodarza
                     ws[f"AS{row}"].value = str(guest_score)
                 else:
+                    ws[f"AP{row}"].value = "--"
                     ws[f"AS{row}"].value = "--"
 
                 ws[f"AP{row}"].value = "--"
