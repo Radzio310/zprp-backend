@@ -2596,8 +2596,6 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
                     ws[f"AS{row}"].value = "--"
 
 
-                ws[f"AS{row}"].value = "--"
-
             else:
                 sh = _shot(guest_arr, idx)
                 player = sh.get("player") if sh else None
@@ -2613,8 +2611,6 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
                 else:
                     ws[f"AP{row}"].value = "--"
                     ws[f"AS{row}"].value = "--"
-
-                ws[f"AP{row}"].value = "--"
 
             row += 1
 
