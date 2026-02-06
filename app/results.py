@@ -2563,14 +2563,28 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
     # serie 6-10: guest first
     # serie 11-15: host first
     # itd.
+    # W tej sekcji w kodzie odpowiedzialnej za ustawianie kolejności drużyn do wykonywania karnych
+
+    # Odczytanie drużyny rozpoczynającej karne z JSON
+    penalty_starter_team = data_json.get("penaltyStarterTeam", "guest")
+
+    # Zmienna do kontrolowania, która drużyna jako pierwsza wykonuje rzuty karne
+    flip = False  # Flaga do przełączania kolejności
+
+    # Co 5 kolejek zmieniamy drużynę zaczynającą karne
     for s in range(1, series_count + 1):
         if row > 61:
             break  # brak miejsca w szablonie
 
         idx = s - 1
-        flip = ((s - 1) // 5) % 2 == 1
-        first_team = "guest" if flip else "host"
-        second_team = "host" if flip else "guest"
+
+        # Zmiana kolejności co 5 serii
+        if (s - 1) // 5 % 2 == 1:
+            flip = not flip
+
+        # Jeśli 'penaltyStarterTeam' to 'guest', to 'guest' zaczyna
+        first_team = penalty_starter_team if not flip else ("guest" if penalty_starter_team == "host" else "host")
+        second_team = "guest" if first_team == "host" else "host"
 
         def write_team_shot(team: str, series_no: int):
             nonlocal row, host_score, guest_score
@@ -2618,6 +2632,7 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         write_team_shot(first_team, s)
         # 2) drugi strzał w serii
         write_team_shot(second_team, s)
+
 
 
 @router.post(
