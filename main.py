@@ -82,8 +82,19 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         content={"error": exc.detail},
     )
 
-os.makedirs(os.path.join(os.path.dirname(__file__), "static"), exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# -------------------------
+# Static files (Railway Volume)
+# -------------------------
+RAILWAY_VOLUME_MOUNT_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")  # np. "/data"
+STATIC_DIR = (
+    os.path.join(RAILWAY_VOLUME_MOUNT_PATH, "static")
+    if RAILWAY_VOLUME_MOUNT_PATH
+    else os.path.join(os.path.dirname(__file__), "static")
+)
+
+os.makedirs(STATIC_DIR, exist_ok=True)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
 
 app.include_router(auth_router)
 app.include_router(proxy_router)

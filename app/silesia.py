@@ -40,6 +40,25 @@ from app.deps import get_rsa_keys
 from cryptography.hazmat.primitives.asymmetric import padding
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+# -------------------------
+# Static files (Railway Volume)
+# -------------------------
+RAILWAY_VOLUME_MOUNT_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")  # np. "/data"
+STATIC_DIR = (
+    os.path.join(RAILWAY_VOLUME_MOUNT_PATH, "static")
+    if RAILWAY_VOLUME_MOUNT_PATH
+    else "static"
+)
+
+os.makedirs(STATIC_DIR, exist_ok=True)
+
+def _static_path_for_url(image_url: str) -> str:
+    """
+    Zamienia '/static/<filename>' -> '<STATIC_DIR>/<filename>'
+    """
+    filename = (image_url or "").split("/")[-1]
+    return os.path.join(STATIC_DIR, filename)
+
 
 # -------------------------
 # Helpers
@@ -170,7 +189,7 @@ async def create_announcement(
     if image:
         ext = (image.filename or "img").split(".")[-1]
         filename = f"{uuid.uuid4()}.{ext}"
-        dest = f"static/{filename}"
+        dest = os.path.join(STATIC_DIR, filename)
         with open(dest, "wb") as out:
             shutil.copyfileobj(image.file, out)
         image_url = f"/static/{filename}"
@@ -232,7 +251,7 @@ async def update_announcement(
         )
         old_url = old["image_url"] if old else None
         if old_url:
-            old_path = old_url.lstrip("/")
+            old_path = _static_path_for_url(old_url)
             if os.path.isfile(old_path):
                 try:
                     os.remove(old_path)
@@ -241,7 +260,7 @@ async def update_announcement(
 
         ext = (image.filename or "img").split(".")[-1]
         filename = f"{uuid.uuid4()}.{ext}"
-        dest = f"static/{filename}"
+        dest = os.path.join(STATIC_DIR, filename)
         with open(dest, "wb") as out:
             shutil.copyfileobj(image.file, out)
         image_url = f"/static/{filename}"
@@ -477,12 +496,13 @@ async def delete_announcement(ann_id: int):
 
     image_url = row["image_url"]
     if image_url:
-        path = image_url.lstrip("/")
+        path = _static_path_for_url(image_url)
         if os.path.isfile(path):
             try:
                 os.remove(path)
             except OSError:
                 pass
+
 
     await database.execute(delete(announcements).where(announcements.c.id == ann_id))
     return
