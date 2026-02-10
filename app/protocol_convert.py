@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from PIL import Image, ImageOps
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Protocol"])
@@ -40,24 +41,16 @@ def _draw_image_as_a4_page(
     c: canvas.Canvas,
     pil_img: Image.Image,
     page_size: Tuple[float, float],
-    margin_pt: float = 24.0,  # ~8.5mm
-    jpeg_quality: int = 92,
+    margin_pt: float = 24.0,
 ) -> None:
-    """
-    Skaluje obraz do A4 z zachowaniem proporcji (contain), centrowanie.
-    """
     page_w, page_h = page_size
     max_w = page_w - 2 * margin_pt
     max_h = page_h - 2 * margin_pt
 
     iw, ih = pil_img.size
     if iw <= 0 or ih <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Obraz ma nieprawidłowy rozmiar (0).",
-        )
+        raise HTTPException(status_code=400, detail="Obraz ma nieprawidłowy rozmiar (0).")
 
-    # contain scale
     scale = min(max_w / iw, max_h / ih)
     draw_w = iw * scale
     draw_h = ih * scale
@@ -65,13 +58,9 @@ def _draw_image_as_a4_page(
     x = (page_w - draw_w) / 2.0
     y = (page_h - draw_h) / 2.0
 
-    # ReportLab najpewniej rysuje obrazy z pliku/bytes jako JPEG/PNG,
-    # więc zapisujemy PIL -> JPEG do pamięci.
-    img_buf = io.BytesIO()
-    pil_img.save(img_buf, format="JPEG", quality=jpeg_quality, optimize=True)
-    img_buf.seek(0)
-
-    c.drawImage(img_buf, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
+    # klucz: ImageReader zamiast BytesIO wprost
+    img_reader = ImageReader(pil_img)
+    c.drawImage(img_reader, x, y, width=draw_w, height=draw_h, mask="auto")
 
 
 @router.post(
