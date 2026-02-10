@@ -1829,6 +1829,80 @@ from pathlib import Path
 
 from fastapi.responses import FileResponse
 from openpyxl import load_workbook
+from io import BytesIO
+import zipfile
+
+def _load_template_media_bytes(template_path: str) -> Dict[str, bytes]:
+    """
+    Czyta wszystkie pliki xl/media/* z szablonu XLSX do pamięci.
+    Klucz: 'xl/media/image1.png'
+    """
+    media: Dict[str, bytes] = {}
+    with zipfile.ZipFile(template_path, "r") as z:
+        for name in z.namelist():
+            if name.startswith("xl/media/"):
+                media[name] = z.read(name)
+    return media
+
+
+def _rehydrate_images_in_workbook(wb, media: Dict[str, bytes]) -> None:
+    """
+    Podmienia obrazy w każdym arkuszu na takie, które trzymają dane w BytesIO,
+    żeby wb.save() nie próbował czytać z zamkniętego strumienia.
+    """
+    for ws in wb.worksheets:
+        imgs = list(getattr(ws, "_images", []) or [])
+        if not imgs:
+            continue
+
+        # usuń stare
+        ws._images = []
+
+        for img in imgs:
+            # openpyxl trzyma ścieżkę jako '/xl/media/imageX.png'
+            path = (getattr(img, "path", "") or "").lstrip("/")
+            blob = media.get(path)
+
+            if not blob:
+                # jeśli z jakiegoś powodu nie ma w media, to lepiej pominąć niż wywalić save()
+                logger.warning("Protocol PDF: missing media for image path=%r", path)
+                continue
+
+            bio = BytesIO(blob)
+            new_img = Image(bio)
+            new_img.width = img.width
+            new_img.height = img.height
+            new_img.anchor = copy.deepcopy(img.anchor)
+
+            ws.add_image(new_img)
+
+
+def _copy_images_safe(src_ws, dst_ws):
+    """
+    Kopiuje obrazy, zakładając że src_ws ma już rehydratowane obrazy (ref=BytesIO).
+    """
+    for img in getattr(src_ws, "_images", []) or []:
+        data: Optional[bytes] = None
+
+        ref = getattr(img, "ref", None)
+        if ref is not None and hasattr(ref, "getvalue"):
+            data = ref.getvalue()
+
+        if not data:
+            # fallback (powinno już być bezpieczne po rehydratacji)
+            try:
+                data = img._data()
+            except Exception as e:
+                logger.warning("Protocol PDF: could not clone image: %s", e)
+                continue
+
+        bio = BytesIO(data)
+        new_img = Image(bio)
+        new_img.width = img.width
+        new_img.height = img.height
+        new_img.anchor = copy.deepcopy(img.anchor)
+
+        dst_ws.add_image(new_img)
 
 
 class ProtocolPdfRequest(BaseModel):
@@ -2634,23 +2708,7 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         write_team_shot(first_team, s)
         # 2) drugi strzał w serii
         write_team_shot(second_team, s)
-
-def _copy_images(src_ws, dst_ws):
-    # openpyxl trzyma obrazki w src_ws._images
-    for img in getattr(src_ws, "_images", []):
-        # img.ref to zwykle BytesIO; trzeba cofnąć wskaźnik
-        if hasattr(img, "ref") and hasattr(img.ref, "seek"):
-            img.ref.seek(0)
-
-        new_img = Image(img.ref)  # tworzymy nowy obiekt Image z tych samych danych
-        new_img.width = img.width
-        new_img.height = img.height
-
-        # zachowaj dokładnie to samo zakotwiczenie (pozycję) obrazka
-        new_img.anchor = copy.deepcopy(img.anchor)
-
-        dst_ws.add_image(new_img)
-
+        
 
 @router.post(
     "/judge/results/protocol/pdf",
@@ -2729,7 +2787,13 @@ async def generate_protocol_pdf(
         filled_xlsx = os.path.join(td, f"protocol_{safe_code}.xlsx")
 
         wb = load_workbook(str(template_path))
-        ws = wb.active  # jeśli masz konkretny arkusz, zmień na wb["NazwaArkusza"]
+
+        # 🔥 kluczowe: zanim cokolwiek zapiszesz / skopiujesz arkusze, rehydratacja obrazów
+        media = _load_template_media_bytes(str(template_path))
+        _rehydrate_images_in_workbook(wb, media)
+
+        ws = wb.active
+
 
         # --- header mapping ---
         ws["AY1"].value = core["matchNumber"]
@@ -2850,7 +2914,7 @@ async def generate_protocol_pdf(
         ws2 = None
         if needs_timeline_page2:
             ws2 = wb.copy_worksheet(ws)
-            _copy_images(ws, ws2)
+            _copy_images_safe(ws, ws2)
             try:
                 ws2.title = "Strona 2"
             except Exception:
@@ -2860,7 +2924,7 @@ async def generate_protocol_pdf(
         ws_shoot = None
         if needs_shootout_page:
             ws_shoot = wb.copy_worksheet(ws)
-            _copy_images(ws, ws_shoot)
+            _copy_images_safe(ws, ws_shoot)
             try:
                 ws_shoot.title = "Rzuty karne"
             except Exception:
