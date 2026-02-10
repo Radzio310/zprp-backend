@@ -24,3 +24,4 @@ lxml
 pymupdf
 openai>=1.40.0
 openpyxl
+Pillow==10.4.0
