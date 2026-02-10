@@ -20,6 +20,8 @@ from app.utils import fetch_with_correct_encoding
 from starlette.background import BackgroundTask
 
 from openpyxl.styles import Alignment, Font
+import copy
+from openpyxl.drawing.image import Image
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Results"])
@@ -2633,6 +2635,21 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         # 2) drugi strzał w serii
         write_team_shot(second_team, s)
 
+def _copy_images(src_ws, dst_ws):
+    # openpyxl trzyma obrazki w src_ws._images
+    for img in getattr(src_ws, "_images", []):
+        # img.ref to zwykle BytesIO; trzeba cofnąć wskaźnik
+        if hasattr(img, "ref") and hasattr(img.ref, "seek"):
+            img.ref.seek(0)
+
+        new_img = Image(img.ref)  # tworzymy nowy obiekt Image z tych samych danych
+        new_img.width = img.width
+        new_img.height = img.height
+
+        # zachowaj dokładnie to samo zakotwiczenie (pozycję) obrazka
+        new_img.anchor = copy.deepcopy(img.anchor)
+
+        dst_ws.add_image(new_img)
 
 
 @router.post(
@@ -2833,6 +2850,7 @@ async def generate_protocol_pdf(
         ws2 = None
         if needs_timeline_page2:
             ws2 = wb.copy_worksheet(ws)
+            _copy_images(ws, ws2)
             try:
                 ws2.title = "Strona 2"
             except Exception:
@@ -2842,6 +2860,7 @@ async def generate_protocol_pdf(
         ws_shoot = None
         if needs_shootout_page:
             ws_shoot = wb.copy_worksheet(ws)
+            _copy_images(ws, ws_shoot)
             try:
                 ws_shoot.title = "Rzuty karne"
             except Exception:
