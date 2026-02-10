@@ -2140,6 +2140,24 @@ def _companion_fullname_map(comp_list: List[Any]) -> Dict[str, str]:
             out[cid] = name
     return out
 
+def _companion_meta_map(comp_list: List[Any]) -> Dict[str, Dict[str, str]]:
+    """
+    Zwraca mapę: "A".."E" -> {"function": "...", "license": "..."}
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    for c in comp_list or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "").strip().upper()
+        if cid not in ("A", "B", "C", "D", "E"):
+            continue
+
+        func = (c.get("function") or "").strip()
+        lic = (c.get("license") or "").strip()
+
+        out[cid] = {"function": func, "license": lic}
+    return out
+
 
 def _fill_players_block(
     ws,
@@ -2760,10 +2778,11 @@ async def generate_protocol_pdf(
     host_comp_names = _companion_fullname_map(core.get("hostCompanions") or [])
     guest_comp_names = _companion_fullname_map(core.get("guestCompanions") or [])
 
+    host_comp_meta = _companion_meta_map(core.get("hostCompanions") or [])
+    guest_comp_meta = _companion_meta_map(core.get("guestCompanions") or [])
+
     host_comp_pen = _companion_penalty_strings(core.get("hostCompanions") or [])
     guest_comp_pen = _companion_penalty_strings(core.get("guestCompanions") or [])
-
-
 
     # winner (A/B) – przy remisie rozstrzygamy z penaltyScore
     winner = ""
@@ -2801,7 +2820,7 @@ async def generate_protocol_pdf(
         ws["C4"].value = core["hostName"]
         ws["D9"].value = core["hostName"]
         ws["C7"].value = core["guestName"]
-        ws["D34"].value = core["guestName"]
+        ws["D35"].value = core["guestName"]
 
         ws["AL6"].value = str(core["scoreHost"])
         ws["AQ6"].value = str(core["scoreGuest"])
@@ -2814,10 +2833,10 @@ async def generate_protocol_pdf(
         _place_timeouts(ws, team_timeouts=tt_guest, half_ms=half_ms, is_host=False)
 
         # --- penalties totals ---
-        ws["AN63"].value = str(pk_host_total)
-        ws["AR63"].value = str(pk_host_goals)
-        ws["AY63"].value = str(pk_guest_total)
-        ws["BC63"].value = str(pk_guest_goals)
+        ws["AN65"].value = str(pk_host_total)
+        ws["AR65"].value = str(pk_host_goals)
+        ws["AY65"].value = str(pk_guest_total)
+        ws["BC65"].value = str(pk_guest_goals)
 
         # --- players numbers + stats ---
         _fill_players_block(
@@ -2833,8 +2852,8 @@ async def generate_protocol_pdf(
             players=core["guestPlayers"],
             stats_by_number=guest_stats,
             fullnames_by_number=guest_names,
-            start_row=36,
-            end_row=53,
+            start_row=37,
+            end_row=54,
         )
 
         # Osoby towarzyszące gospodarzy
@@ -2845,62 +2864,111 @@ async def generate_protocol_pdf(
         ws["AF29"].value = host_comp_names.get("E", "")
 
         # Osoby towarzyszące gości
-        ws["B54"].value  = guest_comp_names.get("A", "")
-        ws["K54"].value  = guest_comp_names.get("B", "")
-        ws["R54"].value  = guest_comp_names.get("C", "")
-        ws["Y54"].value  = guest_comp_names.get("D", "")
-        ws["AF54"].value = guest_comp_names.get("E", "")
+        ws["B55"].value  = guest_comp_names.get("A", "")
+        ws["K55"].value  = guest_comp_names.get("B", "")
+        ws["R55"].value  = guest_comp_names.get("C", "")
+        ws["Y55"].value  = guest_comp_names.get("D", "")
+        ws["AF55"].value = guest_comp_names.get("E", "")
+
+        # =========================
+        # FUNKCJA + LICENCJA osób towarzyszących
+        # (wg Twojego mapowania komórek)
+        # =========================
+
+        # GOSPODARZE:
+        # A: function A30, license A31
+        ws["A30"].value  = host_comp_meta.get("A", {}).get("function", "")
+        ws["A31"].value  = host_comp_meta.get("A", {}).get("license", "")
+
+        # B: function J30, license J31
+        ws["J30"].value  = host_comp_meta.get("B", {}).get("function", "")
+        ws["J31"].value  = host_comp_meta.get("B", {}).get("license", "")
+
+        # C: function Q30, license Q31
+        ws["Q30"].value  = host_comp_meta.get("C", {}).get("function", "")
+        ws["Q31"].value  = host_comp_meta.get("C", {}).get("license", "")
+
+        # D: function X30, license X31
+        ws["X30"].value  = host_comp_meta.get("D", {}).get("function", "")
+        ws["X31"].value  = host_comp_meta.get("D", {}).get("license", "")
+
+        # E: function AE30, license AE31
+        ws["AE30"].value = host_comp_meta.get("E", {}).get("function", "")
+        ws["AE31"].value = host_comp_meta.get("E", {}).get("license", "")
+
+
+        # GOŚCIE:
+        # A: function A56, license A57
+        ws["A56"].value  = guest_comp_meta.get("A", {}).get("function", "")
+        ws["A57"].value  = guest_comp_meta.get("A", {}).get("license", "")
+
+        # B: function J56, license J57
+        ws["J56"].value  = guest_comp_meta.get("B", {}).get("function", "")
+        ws["J57"].value  = guest_comp_meta.get("B", {}).get("license", "")
+
+        # C: function Q56, license Q57
+        ws["Q56"].value  = guest_comp_meta.get("C", {}).get("function", "")
+        ws["Q57"].value  = guest_comp_meta.get("C", {}).get("license", "")
+
+        # D: function X56, license X57
+        ws["X56"].value  = guest_comp_meta.get("D", {}).get("function", "")
+        ws["X57"].value  = guest_comp_meta.get("D", {}).get("license", "")
+
+        # E: function AE56, license AE57
+        ws["AE56"].value = guest_comp_meta.get("E", {}).get("function", "")
+        ws["AE57"].value = guest_comp_meta.get("E", {}).get("license", "")
+
 
         # --- Kary osób towarzyszących (format: U/2'/D - MM:SS) ---
 
         # HOST A..E (row 31)
-        ws["A31"].value  = host_comp_pen.get("A", {}).get("warn", "---")
-        ws["D31"].value  = host_comp_pen.get("A", {}).get("p2", "---")
-        ws["G31"].value  = host_comp_pen.get("A", {}).get("disq", "---")
+        ws["A32"].value  = host_comp_pen.get("A", {}).get("warn", "---")
+        ws["D32"].value  = host_comp_pen.get("A", {}).get("p2", "---")
+        ws["G32"].value  = host_comp_pen.get("A", {}).get("disq", "---")
 
-        ws["J31"].value  = host_comp_pen.get("B", {}).get("warn", "---")
-        ws["L31"].value  = host_comp_pen.get("B", {}).get("p2", "---")
-        ws["O31"].value  = host_comp_pen.get("B", {}).get("disq", "---")
+        ws["J32"].value  = host_comp_pen.get("B", {}).get("warn", "---")
+        ws["L32"].value  = host_comp_pen.get("B", {}).get("p2", "---")
+        ws["O32"].value  = host_comp_pen.get("B", {}).get("disq", "---")
 
-        ws["Q31"].value  = host_comp_pen.get("C", {}).get("warn", "---")
-        ws["S31"].value  = host_comp_pen.get("C", {}).get("p2", "---")
-        ws["V31"].value  = host_comp_pen.get("C", {}).get("disq", "---")
+        ws["Q32"].value  = host_comp_pen.get("C", {}).get("warn", "---")
+        ws["S32"].value  = host_comp_pen.get("C", {}).get("p2", "---")
+        ws["V32"].value  = host_comp_pen.get("C", {}).get("disq", "---")
 
-        ws["X31"].value  = host_comp_pen.get("D", {}).get("warn", "---")
-        ws["Z31"].value  = host_comp_pen.get("D", {}).get("p2", "---")
-        ws["AC31"].value = host_comp_pen.get("D", {}).get("disq", "---")
+        ws["X32"].value  = host_comp_pen.get("D", {}).get("warn", "---")
+        ws["Z32"].value  = host_comp_pen.get("D", {}).get("p2", "---")
+        ws["AC32"].value = host_comp_pen.get("D", {}).get("disq", "---")
 
-        ws["AE31"].value = host_comp_pen.get("E", {}).get("warn", "---")
-        ws["AH31"].value = host_comp_pen.get("E", {}).get("p2", "---")
-        ws["AJ31"].value = host_comp_pen.get("E", {}).get("disq", "---")
+        ws["AE32"].value = host_comp_pen.get("E", {}).get("warn", "---")
+        ws["AH32"].value = host_comp_pen.get("E", {}).get("p2", "---")
+        ws["AJ32"].value = host_comp_pen.get("E", {}).get("disq", "---")
 
         # GUEST A..E (row 56)
-        ws["A56"].value  = guest_comp_pen.get("A", {}).get("warn", "---")
-        ws["D56"].value  = guest_comp_pen.get("A", {}).get("p2", "---")
-        ws["G56"].value  = guest_comp_pen.get("A", {}).get("disq", "---")
+        ws["A58"].value  = guest_comp_pen.get("A", {}).get("warn", "---")
+        ws["D58"].value  = guest_comp_pen.get("A", {}).get("p2", "---")
+        ws["G58"].value  = guest_comp_pen.get("A", {}).get("disq", "---")
 
-        ws["J56"].value  = guest_comp_pen.get("B", {}).get("warn", "---")
-        ws["L56"].value  = guest_comp_pen.get("B", {}).get("p2", "---")
-        ws["O56"].value  = guest_comp_pen.get("B", {}).get("disq", "---")
+        ws["J58"].value  = guest_comp_pen.get("B", {}).get("warn", "---")
+        ws["L58"].value  = guest_comp_pen.get("B", {}).get("p2", "---")
+        ws["O58"].value  = guest_comp_pen.get("B", {}).get("disq", "---")
 
-        ws["Q56"].value  = guest_comp_pen.get("C", {}).get("warn", "---")
-        ws["S56"].value  = guest_comp_pen.get("C", {}).get("p2", "---")
-        ws["V56"].value  = guest_comp_pen.get("C", {}).get("disq", "---")
+        ws["Q58"].value  = guest_comp_pen.get("C", {}).get("warn", "---")
+        ws["S58"].value  = guest_comp_pen.get("C", {}).get("p2", "---")
+        ws["V58"].value  = guest_comp_pen.get("C", {}).get("disq", "---")
 
-        ws["X56"].value  = guest_comp_pen.get("D", {}).get("warn", "---")
-        ws["Z56"].value  = guest_comp_pen.get("D", {}).get("p2", "---")
-        ws["AC56"].value = guest_comp_pen.get("D", {}).get("disq", "---")
+        ws["X58"].value  = guest_comp_pen.get("D", {}).get("warn", "---")
+        ws["Z58"].value  = guest_comp_pen.get("D", {}).get("p2", "---")
+        ws["AC58"].value = guest_comp_pen.get("D", {}).get("disq", "---")
 
-        ws["AE56"].value = guest_comp_pen.get("E", {}).get("warn", "---")
-        ws["AH56"].value = guest_comp_pen.get("E", {}).get("p2", "---")
-        ws["AJ56"].value = guest_comp_pen.get("E", {}).get("disq", "---")
+        ws["AE58"].value = guest_comp_pen.get("E", {}).get("warn", "---")
+        ws["AH58"].value = guest_comp_pen.get("E", {}).get("p2", "---")
+        ws["AJ58"].value = guest_comp_pen.get("E", {}).get("disq", "---")
 
         # Sędziowie
-        ws["I64"].value = core.get("referee1") or ""
-        ws["I65"].value = core.get("referee2") or ""
-        ws["I66"].value = core.get("secretary") or ""
-        ws["I67"].value = core.get("timekeeper") or ""
-        ws["I68"].value = core.get("delegate") or ""
+        ws["I66"].value = core.get("referee1") or ""
+        ws["I67"].value = core.get("referee2") or ""
+        ws["I68"].value = core.get("secretary") or ""
+        ws["I69"].value = core.get("timekeeper") or ""
+        ws["I70"].value = core.get("delegate") or ""
 
         # --- timeline (match events) + optional pages (overflow + shootout) ---
         evs1, evs2 = _extract_timeline_events(data_json)
