@@ -2243,8 +2243,11 @@ def _fill_players_block(
 
 
 TIMELINE_START_ROW = 15
-TIMELINE_END_ROW = 61
-TIMELINE_MAX_ROWS = TIMELINE_END_ROW - TIMELINE_START_ROW + 1  # 47
+TIMELINE_END_ROW = 63
+TIMELINE_SKIP_ROWS = {31, 57}
+
+TIMELINE_ROWS = [r for r in range(TIMELINE_START_ROW, TIMELINE_END_ROW + 1) if r not in TIMELINE_SKIP_ROWS]
+TIMELINE_MAX_ROWS = len(TIMELINE_ROWS)  # było 47, teraz będzie 45
 
 
 def _extract_timeline_events(data_json: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -2311,27 +2314,34 @@ def _fill_timeline_half_chunk(
     half_ms: int,
     start_score_host: int,
     start_score_guest: int,
-    # kolumny na dany "blok połowy"
     col_minute: str,
     col_host_action: str,
     col_host_score: str,
     col_guest_score: str,
     col_guest_action: str,
 ) -> Tuple[int, int]:
-    """
-    Wypełnia wiersze przebiegu dla danego chunk-a zdarzeń (max 47).
-    ZASADA: jeśli wiersz nieużyty -> w 5 komórkach wpisujemy "--".
-    """
     def _ev_ms(e: Dict[str, Any]) -> int:
         return _safe_int(e.get("time") or 0, 0)
 
     h_score = _safe_int(start_score_host, 0)
     g_score = _safe_int(start_score_guest, 0)
 
-    row = start_row
+    # bierzemy tylko te wiersze, które faktycznie wolno ruszać
+    rows = [r for r in TIMELINE_ROWS if start_row <= r <= end_row]
+
+    def _write_blank(r: int) -> None:
+        ws[f"{col_minute}{r}"].value = "--"
+        ws[f"{col_host_action}{r}"].value = "--"
+        ws[f"{col_host_score}{r}"].value = "--"
+        ws[f"{col_guest_score}{r}"].value = "--"
+        ws[f"{col_guest_action}{r}"].value = "--"
+
+    # 1) wypełnij eventami tyle ile się da
+    i = 0
     for ev in evs:
-        if row > end_row:
+        if i >= len(rows):
             break
+        r = rows[i]
 
         ms = _ev_ms(ev)
         minute = _event_minute_from_ms(ms)
@@ -2340,56 +2350,42 @@ def _fill_timeline_half_chunk(
         player = ev.get("player")
         t = ev.get("type")
 
-        # defaulty na wierszu (gdyby coś było puste)
-        ws[f"{col_minute}{row}"].value = "--"
-        ws[f"{col_host_action}{row}"].value = "--"
-        ws[f"{col_host_score}{row}"].value = "--"
-        ws[f"{col_guest_score}{row}"].value = "--"
-        ws[f"{col_guest_action}{row}"].value = "--"
+        _write_blank(r)  # default
 
-        # minuta
-        ws[f"{col_minute}{row}"].value = str(minute)
+        ws[f"{col_minute}{r}"].value = str(minute)
 
-        # akcje
         host_action = ""
         guest_action = ""
 
         if player is not None:
             ptxt = str(player).strip()
-            if t.startswith("penaltyKick"):
+            if isinstance(t, str) and t.startswith("penaltyKick"):
                 ptxt = f"{ptxt}K"
-
             if team == "host":
                 host_action = ptxt
             elif team == "guest":
                 guest_action = ptxt
 
-        ws[f"{col_host_action}{row}"].value = host_action if host_action else "--"
-        ws[f"{col_guest_action}{row}"].value = guest_action if guest_action else "--"
+        ws[f"{col_host_action}{r}"].value = host_action if host_action else "--"
+        ws[f"{col_guest_action}{r}"].value = guest_action if guest_action else "--"
 
-        # score: tylko na goal / penaltyKickScored
-        if t == "goal" or t == "penaltyKickScored":
+        if t in ("goal", "penaltyKickScored"):
             if team == "host":
                 h_score += 1
             elif team == "guest":
                 g_score += 1
-            ws[f"{col_host_score}{row}"].value = str(h_score)
-            ws[f"{col_guest_score}{row}"].value = str(g_score)
+            ws[f"{col_host_score}{r}"].value = str(h_score)
+            ws[f"{col_guest_score}{r}"].value = str(g_score)
         else:
-            # penaltyKickMissed -> zostaje "--" / "--" (jak wcześniej)
-            ws[f"{col_host_score}{row}"].value = "--"
-            ws[f"{col_guest_score}{row}"].value = "--"
+            ws[f"{col_host_score}{r}"].value = "--"
+            ws[f"{col_guest_score}{r}"].value = "--"
 
-        row += 1
+        i += 1
 
-    # reszta pustych wierszy -> "--" we wszystkich 5 komórkach
-    while row <= end_row:
-        ws[f"{col_minute}{row}"].value = "--"
-        ws[f"{col_host_action}{row}"].value = "--"
-        ws[f"{col_host_score}{row}"].value = "--"
-        ws[f"{col_guest_score}{row}"].value = "--"
-        ws[f"{col_guest_action}{row}"].value = "--"
-        row += 1
+    # 2) resztę dozwolonych wierszy wyczyść na "--"
+    while i < len(rows):
+        _write_blank(rows[i])
+        i += 1
 
     return h_score, g_score
 
