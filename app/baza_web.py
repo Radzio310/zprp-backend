@@ -3,7 +3,7 @@
 import re
 import html as html_lib
 from urllib.parse import urlencode
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,6 +11,11 @@ from pydantic import BaseModel
 from bs4 import BeautifulSoup
 
 from app.deps import get_settings, Settings
+
+# VIP DB (u Ciebie już istnieje)
+from datetime import datetime
+from sqlalchemy import select
+from app.db import database, baza_vips
 
 router = APIRouter(prefix="/baza_web", tags=["BAZA Web"])
 
@@ -24,10 +29,23 @@ class BazaWebLoginRequest(BaseModel):
     password: str
 
 
+class VipSummary(BaseModel):
+    created: bool = False
+    record: dict | None = None  # surowy rekord (permissions/province itd.)
+
+
 class BazaWebLoginResponse(BaseModel):
     success: bool
     judge_id: str | None = None
     error: str | None = None
+
+    # NOWE (jak auth.py):
+    account_type: str | None = None  # "judge" | "org" | "unknown"
+    display_name: str | None = None
+    available_tabs: list[str] | None = None
+
+    # NOWE: VIP
+    vip: VipSummary | None = None
 
 
 class BazaWebProfileRequest(BaseModel):
@@ -84,7 +102,6 @@ def _detect_encoding(resp: httpx.Response, default: str = "iso-8859-2") -> str:
     if mm:
         return mm.group(1).strip().lower()
 
-    # w Twoim HTML jest: <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-2" />
     mm2 = re.search(
         r'content=["\'][^"\']*charset=([a-zA-Z0-9\-_]+)[^"\']*["\']',
         head_txt,
@@ -135,10 +152,6 @@ def _extract_judge_id_from_html(html: str) -> str:
 
 
 def _looks_like_login_page(html: str) -> bool:
-    """
-    NIE sprawdzamy "login.php" literalnie (bo na stronie po zalogowaniu jest login.php?def=logout).
-    Szukamy cech formularza logowania.
-    """
     low = (html or "").lower()
     has_login_input = ('name="login"' in low) or ("name='login'" in low)
     has_pass_input = ('name="haslo"' in low) or ("name='haslo'" in low)
@@ -148,12 +161,6 @@ def _looks_like_login_page(html: str) -> bool:
 
 
 def _extract_voivodeship_from_td_text(td_text: str) -> str:
-    """
-    W <td> masz np.:
-      "ŚLĄSKIE Zmiana możliwa z panelu WZPR lub ZPRP"
-    Chcemy wyciągnąć tylko "ŚLĄSKIE" (albo np. "KUJAWSKO-POMORSKIE").
-    Bierzemy pierwszy ciąg tokenów będących w całości uppercase (z PL znakami i myślnikiem).
-    """
     t = _clean(td_text)
     if not t:
         return ""
@@ -161,20 +168,15 @@ def _extract_voivodeship_from_td_text(td_text: str) -> str:
     tokens = t.split()
     out: list[str] = []
 
-    # token jest "uppercase-ish" jeśli nie zawiera żadnych małych liter
-    # (uwzględniamy polskie znaki)
     lower_re = re.compile(r"[a-ząćęłńóśźż]")
     allowed_re = re.compile(r"^[A-ZĄĆĘŁŃÓŚŹŻ\-]+$")
 
     for tok in tokens:
-        # zatrzymaj się na pierwszym tokenie, który wygląda jak normalne zdanie (małe litery)
         if lower_re.search(tok):
             break
-        # w praktyce województwa są z dużych liter i myślników
         if allowed_re.match(tok):
             out.append(tok)
         else:
-            # np. przecinki/kropki — jeśli już coś mamy, kończ
             if out:
                 break
 
@@ -182,13 +184,6 @@ def _extract_voivodeship_from_td_text(td_text: str) -> str:
 
 
 def _parse_profile_from_edit_form(html: str) -> dict[str, Any]:
-    """
-    Parsuje wartości z <form name="edycja"> tak jak w edit_judge.py:
-    - input hidden/text + radio checked
-    - select option[selected] (fallback)
-    - img foto_sedzia/*
-    - województwo: input[name=woj] + tekst w tym samym <td>
-    """
     soup = BeautifulSoup(html, "html.parser")
 
     form = soup.find("form", {"name": "edycja"})
@@ -217,7 +212,6 @@ def _parse_profile_from_edit_form(html: str) -> dict[str, Any]:
             continue
         opt = sel.find("option", selected=True)
         if opt:
-            # czasem ważniejszy jest value, a czasem tekst — tu trzymamy value, ale możesz zmienić
             values[name] = _clean(opt.get("value") or opt.get_text())
         else:
             values[name] = ""
@@ -238,20 +232,134 @@ def _parse_profile_from_edit_form(html: str) -> dict[str, Any]:
 
 
 # -------------------------
+# auth.py-compatible "new" extractors
+# -------------------------
+
+def _extract_logged_label(html: str) -> str:
+    m = re.search(
+        r"<small>\s*Zalogowany:\s*</small>\s*([^<]+?)\s*\|\s*<a\s+href=\"\?a=konto\">konto</a>",
+        html,
+        re.I,
+    )
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    m2 = re.search(
+        r"Zalogowany:\s*</small>\s*([^<]+?)\s*\|\s*<a\s+href=\"\?a=konto\"",
+        html,
+        re.I,
+    )
+    if m2:
+        return re.sub(r"\s+", " ", m2.group(1)).strip()
+
+    return ""
+
+
+def _extract_menu_tabs(html: str) -> list[str]:
+    labels = re.findall(r'class="przycisk"\s*>\s*([^<]+?)\s*</a>', html, flags=re.I)
+    out = []
+    for lab in labels:
+        lab2 = re.sub(r"\s+", " ", lab).strip()
+        if lab2:
+            out.append(lab2)
+
+    seen = set()
+    uniq = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq
+
+
+def _detect_account_type(judge_id: str, tabs: list[str]) -> str:
+    if judge_id:
+        return "judge"
+
+    tabs_set = set(t.lower() for t in tabs)
+
+    if ("terminarz" in tabs_set and "rozgrywki" in tabs_set) or any("sędziowie i delegaci" in t.lower() for t in tabs):
+        return "org"
+
+    if any(t.lower() in {"zawody", "niedyspozycyjność", "dokumenty", "edycja danych"} for t in tabs):
+        return "judge"
+
+    return "unknown"
+
+
+# -------------------------
+# VIP upsert (local helper)
+# -------------------------
+
+def _norm_username(u: str) -> str:
+    return (u or "").strip()
+
+
+async def _vip_upsert_from_login(
+    *,
+    username: str,
+    judge_id: str | None,
+    province: str | None,
+    login_info_json: dict | None,
+) -> tuple[bool, dict | None]:
+    """
+    Minimalny odpowiednik /baza_vips/upsert_from_login,
+    bez ruszania Twoich routerów.
+    """
+    u = _norm_username(username)
+    if not u:
+        return False, None
+
+    now = datetime.utcnow()
+
+    row = await database.fetch_one(select(baza_vips).where(baza_vips.c.username == u))
+    if not row:
+        ins = {
+            "username": u,
+            "judge_id": (judge_id or None),
+            "province": (province or None),
+            "permissions_json": {},  # puste na start
+            "login_info_json": login_info_json or {},
+            "created_at": now,
+            "updated_at": now,
+            "last_login_at": now,
+        }
+        new_id = await database.execute(baza_vips.insert().values(**ins))
+        row = await database.fetch_one(select(baza_vips).where(baza_vips.c.id == int(new_id)))
+        return True, dict(row) if row else None
+
+    upd = {"updated_at": now, "last_login_at": now}
+    if judge_id is not None and str(judge_id).strip():
+        upd["judge_id"] = str(judge_id).strip()
+    if province is not None:
+        upd["province"] = (province or None)
+    if login_info_json is not None:
+        upd["login_info_json"] = login_info_json or {}
+
+    await database.execute(
+        baza_vips.update().where(baza_vips.c.username == u).values(**upd)
+    )
+    row2 = await database.fetch_one(select(baza_vips).where(baza_vips.c.username == u))
+    return False, dict(row2) if row2 else None
+
+
+# -------------------------
 # Login helper (cookies session)
 # -------------------------
 
-async def _login_get_cookies_and_judge_id(
+async def _login_get_session(
     *,
     client: httpx.AsyncClient,
     username: str,
     password: str,
-) -> tuple[dict, str, str]:
+) -> tuple[dict, str, str, list[str], str]:
     """
-    Logowanie identyczne w skutkach jak auth.py:
+    Logowanie zgodne z auth.py:
     - body urlencoded w ISO-8859-2
     - follow_redirects=True
     - cookies z resp.cookies
+    - judge_id może być pusty (konto org)
+    - dodatkowo: display_name, available_tabs, account_type
     """
     form = {"login": username, "haslo": password, "from": "/index.php?"}
     body_str = urlencode(form, encoding="iso-8859-2", errors="strict")
@@ -267,24 +375,22 @@ async def _login_get_cookies_and_judge_id(
     resp = await client.post("/login.php", content=body_bytes, headers=headers)
     html = _decode_html(resp)
 
-    # auth.py sprawdza /index.php w resp.url.path
     if "/index.php" not in resp.url.path:
         low = (html or "").lower()
         if "nieznany" in low or "tkownik" in low:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niepoprawny użytkownik lub hasło")
         if "ponownie" in low:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niepoprawne użytkownik lub hasło")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niepoprawny użytkownik lub hasło")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Logowanie nie powiodło się")
 
     cookies = dict(resp.cookies)
-    judge_id = _extract_judge_id_from_html(html)
-    if not judge_id:
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "Zalogowano, ale nie udało się odczytać judgeId (NrSedzia) z odpowiedzi",
-        )
 
-    return cookies, judge_id, html
+    judge_id = _extract_judge_id_from_html(html)  # może być ""
+    display_name = _extract_logged_label(html)
+    available_tabs = _extract_menu_tabs(html)
+    account_type = _detect_account_type(judge_id, available_tabs)
+
+    return cookies, judge_id, display_name, available_tabs, account_type
 
 
 # -------------------------
@@ -296,22 +402,65 @@ async def baza_web_login(
     data: BazaWebLoginRequest,
     settings: Settings = Depends(get_settings),
 ):
+    """
+    UWAGA: judge_id może być None (konto org).
+    Zwracamy też: account_type, display_name, available_tabs + vip.
+    """
     try:
         async with httpx.AsyncClient(
             base_url=settings.ZPRP_BASE_URL,
             follow_redirects=True,
             timeout=httpx.Timeout(60.0),
         ) as client:
-            _, judge_id, _ = await _login_get_cookies_and_judge_id(
+            _, judge_id, display_name, available_tabs, account_type = await _login_get_session(
                 client=client,
                 username=data.username,
                 password=data.password,
             )
-        return {"success": True, "judge_id": judge_id, "error": None}
+
+        # VIP upsert: nawet jeśli judge_id == "", to rekord VIP powstanie po username
+        created, vip_record = await _vip_upsert_from_login(
+            username=data.username,
+            judge_id=(judge_id or None),
+            province=None,  # możesz tu w przyszłości podać np. z profilu (tu jeszcze go nie mamy)
+            login_info_json={
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "account_type": account_type,
+                "display_name": display_name,
+                "tabs": available_tabs,
+            },
+        )
+
+        return {
+            "success": True,
+            "judge_id": judge_id or None,
+            "error": None,
+            "account_type": account_type,
+            "display_name": display_name or "",
+            "available_tabs": available_tabs or [],
+            "vip": {"created": created, "record": vip_record},
+        }
+
     except HTTPException as e:
-        return {"success": False, "judge_id": None, "error": str(e.detail)}
+        return {
+            "success": False,
+            "judge_id": None,
+            "error": str(e.detail),
+            "account_type": None,
+            "display_name": None,
+            "available_tabs": None,
+            "vip": None,
+        }
     except Exception as e:
-        return {"success": False, "judge_id": None, "error": f"Błąd serwera: {e}"}
+        return {
+            "success": False,
+            "judge_id": None,
+            "error": f"Błąd serwera: {e}",
+            "account_type": None,
+            "display_name": None,
+            "available_tabs": None,
+            "vip": None,
+        }
 
 
 @router.post("/profile", response_model=BazaWebProfileResponse)
@@ -319,24 +468,32 @@ async def baza_web_profile(
     data: BazaWebProfileRequest,
     settings: Settings = Depends(get_settings),
 ):
+    """
+    PROFIL jest tylko dla kont z NrSedzia.
+    Jeśli konto org -> zwracamy 400 z jasnym komunikatem.
+    """
     try:
         async with httpx.AsyncClient(
             base_url=settings.ZPRP_BASE_URL,
             follow_redirects=True,
             timeout=httpx.Timeout(60.0),
         ) as client:
-            cookies, judge_id_from_login, _ = await _login_get_cookies_and_judge_id(
+            cookies, judge_id_from_login, _, _, _ = await _login_get_session(
                 client=client,
                 username=data.username,
                 password=data.password,
             )
 
-            judge_id = (data.judge_id or judge_id_from_login).strip() or judge_id_from_login
+            judge_id = (data.judge_id or "").strip() or (judge_id_from_login or "").strip()
+            if not judge_id:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Brak judge_id (NrSedzia). To konto prawdopodobnie nie jest kontem sędziego – nie można pobrać profilu.",
+                )
 
-            # warm-up (czasem serwis ustawia/utwierdza sesję po wejściu na index)
+            # warm-up
             try:
                 resp_warm = await client.get("/index.php", cookies=cookies)
-                # zaktualizuj cookies o ewentualne nowe set-cookie
                 cookies.update(dict(resp_warm.cookies))
             except Exception:
                 pass
@@ -345,7 +502,6 @@ async def baza_web_profile(
             resp_get = await client.get(path, cookies=cookies)
             html_get = _decode_html(resp_get)
 
-        # realne przekierowanie do loginu
         if resp_get.url.path.endswith("/login.php") or _looks_like_login_page(html_get):
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
@@ -361,7 +517,6 @@ async def baza_web_profile(
 
         values: dict[str, str] = parsed.get("values", {}) or {}
 
-        # walidacja: czy mamy cokolwiek sensownego
         if not any(_clean(values.get(k)) for k in ("Imie", "Nazwisko", "DataUr", "Miasto", "KodPocztowy", "Ulica", "Email")):
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
