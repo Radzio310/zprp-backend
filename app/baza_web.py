@@ -418,18 +418,33 @@ async def baza_web_login(
                 password=data.password,
             )
 
-        # VIP upsert: nawet jeśli judge_id == "", to rekord VIP powstanie po username
-        created, vip_record = await _vip_upsert_from_login(
-            username=data.username,
-            judge_id=(judge_id or None),
-            province=None,  # możesz tu w przyszłości podać np. z profilu (tu jeszcze go nie mamy)
-            login_info_json={
-                "ts": datetime.utcnow().isoformat() + "Z",
-                "account_type": account_type,
-                "display_name": display_name,
-                "tabs": available_tabs,
-            },
-        )
+        vip_payload = None
+
+        # zapis do VIP TYLKO jeśli brak judge_id
+        if not (judge_id or "").strip():
+            created, vip_record = await _vip_upsert_from_login(
+                username=data.username,
+                judge_id=None,          # specjalnie None
+                province=None,
+                login_info_json={
+                    "ts": datetime.utcnow().isoformat() + "Z",
+                    "account_type": account_type,
+                    "display_name": display_name,
+                    "tabs": available_tabs,
+                },
+            )
+            vip_payload = {"created": created, "record": vip_record}
+
+        return {
+            "success": True,
+            "judge_id": judge_id or None,
+            "error": None,
+            "account_type": account_type,
+            "display_name": display_name or "",
+            "available_tabs": available_tabs or [],
+            "vip": vip_payload,         # <-- dla kont z judgeId będzie null
+        }
+
 
         return {
             "success": True,
