@@ -71,36 +71,13 @@ async def send_fcm_message(
     project_id = _get_project_id()
 
     url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
-
-    data = data or {}
-    kind = str(data.get("kind") or "")
-
-    # DATA-ONLY dla chronometru (żeby system nie wyświetlił "zwykłego" powiadomienia)
-    if kind == "match_countdown":
-        payload = {
-            "message": {
-                "token": fcm_token,
-                "data": {k: str(v) for k, v in {
-                    **data,
-                    "__title": title,
-                    "__body": body,
-                }.items()},
-                "android": {
-                    "priority": "HIGH",
-                },
-            }
+    payload = {
+        "message": {
+            "token": fcm_token,
+            "notification": {"title": title, "body": body},
+            "data": {k: str(v) for k, v in (data or {}).items()},
         }
-    else:
-        payload = {
-            "message": {
-                "token": fcm_token,
-                "notification": {"title": title, "body": body},
-                "data": {k: str(v) for k, v in (data or {}).items()},
-                "android": {
-                    "priority": "HIGH",
-                },
-            }
-        }
+    }
 
     headers = {
         "Authorization": f"Bearer {access_token}",
