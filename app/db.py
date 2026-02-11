@@ -630,9 +630,5 @@ baza_vips = Table(
     ),
 )
 
-Index("ix_baza_vips_username", baza_vips.c.username)
-Index("ix_baza_vips_judge_id", baza_vips.c.judge_id)
-Index("ix_baza_vips_province", baza_vips.c.province)
-
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
