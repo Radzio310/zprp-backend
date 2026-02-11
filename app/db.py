@@ -575,5 +575,64 @@ push_schedules = Table(
 
 Index("ix_push_sched_install_hour", push_schedules.c.installation_id, push_schedules.c.send_hour_utc)
 
+# -------------------------
+# NEW: BAZA VIPs (logowania bez judgeId)
+# -------------------------
+
+baza_vips = Table(
+    "baza_vips",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # login do baza.zprp.pl (unikat)
+    Column("username", String, nullable=False, unique=True, index=True),
+
+    # jeżeli kiedyś uda się wyliczyć judge_id – można uzupełnić
+    Column("judge_id", String, nullable=True, index=True),
+
+    # województwo (string) – np. "ŚLĄSKIE"
+    Column("province", String, nullable=True, index=True),
+
+    # uprawnienia jako JSON (Twoja dowolna struktura)
+    Column(
+        "permissions_json",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+
+    # info o logowaniu (np. user-agent, platforma, app_version, ip, cokolwiek)
+    Column(
+        "login_info_json",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+    Column(
+        "last_login_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+)
+
+Index("ix_baza_vips_username", baza_vips.c.username)
+Index("ix_baza_vips_judge_id", baza_vips.c.judge_id)
+Index("ix_baza_vips_province", baza_vips.c.province)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

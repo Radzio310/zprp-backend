@@ -283,6 +283,57 @@ class UpdateLoginRecordRequest(BaseModel):
     province: Optional[str] = None
     config_json: Optional[Any] = None
 
+# ------------------------- BAZA VIPs -------------------------
+
+class BazaVipUpsertRequest(BaseModel):
+    """
+    Wywoływane po udanym logowaniu do baza.zprp.pl, gdy:
+    - mamy pewność, że login działa
+    - ale nie mamy judge_id (lub mamy i chcemy go zlinkować)
+    """
+    username: str
+    judge_id: Optional[str] = None
+
+    # jeśli już znasz z profilu – wyślij; jeśli nie – zostaw None
+    province: Optional[str] = None
+
+    # dowolne dane diagnostyczne: platforma, app_version, itp.
+    login_info_json: Optional[Any] = None
+
+
+class BazaVipItem(BaseModel):
+    id: int
+    username: str
+    judge_id: Optional[str] = None
+    province: Optional[str] = None
+    permissions_json: Any = Field(default_factory=dict)
+    login_info_json: Any = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: datetime
+
+
+class BazaVipUpsertResponse(BaseModel):
+    success: bool
+    created: bool
+    record: Optional[BazaVipItem] = None
+
+
+class BazaVipUpdateRequest(BaseModel):
+    """
+    Do panelu/admina (lub Twojego narzędzia serwisowego):
+    ustawienie województwa i/lub uprawnień.
+    """
+    judge_id: Optional[str] = None
+    province: Optional[str] = None
+    permissions_json: Optional[Any] = None
+    login_info_json: Optional[Any] = None
+
+
+class ListBazaVipsResponse(BaseModel):
+    records: List[BazaVipItem]
+
+
 # ------------------------- SĘDZIOWIE PER WOJEWÓDZTWO (BADGES) -------------------------
 
 class CreateProvinceJudgeRequest(BaseModel):

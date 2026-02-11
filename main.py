@@ -50,6 +50,7 @@ from app.password_change import router as password_change_router
 from app.baza_web import router as baza_web_router
 from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
+from app.baza_vips import router as baza_vips_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -121,6 +122,7 @@ app.include_router(password_change_router)
 app.include_router(baza_web_router)
 app.include_router(province_judges_router)
 app.include_router(badges_router)
+app.include_router(baza_vips_router)
 
 # NEW: push router
 app.include_router(push_router)
