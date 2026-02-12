@@ -333,6 +333,11 @@ class BazaVipUpdateRequest(BaseModel):
 class ListBazaVipsResponse(BaseModel):
     records: List[BazaVipItem]
 
+class ZprpScheduleScrapeRequest(BaseModel):
+    username: str  # RSA+base64
+    password: str  # RSA+base64
+    season_id: Optional[str] = None
+
 
 # ------------------------- SĘDZIOWIE PER WOJEWÓDZTWO (BADGES) -------------------------
 

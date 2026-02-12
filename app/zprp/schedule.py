@@ -1,23 +1,25 @@
 # app/zprp/schedule.py
 from __future__ import annotations
 
-import re
+import base64
 import datetime
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from httpx import AsyncClient
 from bs4 import BeautifulSoup
+from cryptography.hazmat.primitives.asymmetric import padding
+from fastapi import APIRouter, Depends, HTTPException
+from httpx import AsyncClient
 
-from app.deps import get_settings, Settings
-from app.auth import get_current_cookies
+from app.deps import Settings, get_settings, get_rsa_keys
 from app.utils import fetch_with_correct_encoding
+from app.schemas import ZprpScheduleScrapeRequest  # <- dodasz (opis niżej)
 
 router = APIRouter()
 
 # =========================
-# Helpers
+# Regex / helpers
 # =========================
 
 _RE_INT = re.compile(r"(\d+)")
@@ -44,69 +46,60 @@ def _safe_int(s: str, default: int = 0) -> int:
 
 
 def _text_lines(el) -> List[str]:
-    """
-    BeautifulSoup element -> list of clean, non-empty lines.
-    """
     if not el:
         return []
     raw = el.get_text("\n", strip=True)
-    lines = []
+    out: List[str] = []
     for ln in raw.split("\n"):
         ln2 = _clean_spaces(ln)
         if ln2:
-            lines.append(ln2)
-    return lines
+            out.append(ln2)
+    return out
 
 
 def _looks_like_name(line: str) -> bool:
-    """
-    Loose heuristic for "NAZWISKO Imię" / "Nazwisko Imię".
-    Reject emails, phones, UI labels, purely numeric, etc.
-    """
     if not line:
         return False
     low = line.lower()
     if "@" in line:
         return False
-    if any(k in low for k in ["ustaw sędz", "ustaw sedz", "hala", "zapisz", "ukryj", "pokaż", "checkbox", "filtr"]):
+    if any(
+        k in low
+        for k in [
+            "ustaw sędz",
+            "ustaw sedz",
+            "hala",
+            "zapisz",
+            "ukryj",
+            "pokaż",
+            "checkbox",
+            "filtr",
+        ]
+    ):
         return False
     if re.search(r"\d{2,}", line):
         return False
-    # must contain at least one space (two words)
     if " " not in line.strip():
         return False
-    # must contain letters
     if not re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", line):
         return False
     return True
 
 
 def _parse_iso_datetime_from_td(td) -> str:
-    """
-    td[4] contains something like:
-      "sobota\n11.10.2025\n(12:00)"
-    Return "YYYY-MM-DD HH:MM:SS" (no TZ).
-    """
     if not td:
         return ""
-
-    # best: date in <b>
     b = td.find("b")
     date_str = _clean_spaces(b.get_text(strip=True)) if b else ""
     if not date_str:
-        # fallback: find first DD.MM.YYYY anywhere
         txt = td.get_text(" ", strip=True)
         m = _RE_DATE.search(txt)
         date_str = m.group(0) if m else ""
-
     if not date_str:
         return ""
-
-    # time often in parentheses
     txt2 = td.get_text(" ", strip=True)
     mtime = _RE_TIME.search(txt2)
     hhmm = mtime.group(1) if mtime else "00:00"
-
     m = _RE_DATE.search(date_str)
     if not m:
         return ""
@@ -115,11 +108,6 @@ def _parse_iso_datetime_from_td(td) -> str:
 
 
 def _parse_hall(td) -> Dict[str, Any]:
-    """
-    td[5]:
-      - map link with title like "Hala sportowa POGOŃ Zabrze, Zabrze, Wolności 406"
-      - capacity in next line
-    """
     out = {
         "Hala_nazwa": "",
         "Hala_miasto": "",
@@ -133,13 +121,11 @@ def _parse_hall(td) -> Dict[str, Any]:
     a = td.find("a", href=re.compile(r"maps", re.I))
     title = _clean_spaces(a.get("title", "")) if a else ""
     if title:
-        # often: name, city, street+num  (but sometimes 2 segments)
         parts = [_clean_spaces(p) for p in title.split(",") if _clean_spaces(p)]
         if len(parts) >= 3:
             out["Hala_nazwa"] = parts[0]
             out["Hala_miasto"] = parts[1]
-            street = ", ".join(parts[2:])  # in case street itself has commas
-            # split last token as number if possible
+            street = ", ".join(parts[2:])
             m = re.search(r"^(.*?)(\d+[A-Za-z]?)$", _clean_spaces(street))
             if m:
                 out["Hala_ulica"] = _clean_spaces(m.group(1))
@@ -148,12 +134,9 @@ def _parse_hall(td) -> Dict[str, Any]:
                 out["Hala_ulica"] = _clean_spaces(street)
         elif len(parts) == 2:
             out["Hala_nazwa"] = parts[0]
-            # second might be "Miasto" or "Ulica Nr"
             out["Hala_miasto"] = parts[1]
 
-    # capacity: usually on second line inside td text
     lines = _text_lines(td)
-    # try: last numeric-only line
     cap = 0
     for ln in reversed(lines):
         if re.fullmatch(r"\d+", ln):
@@ -164,14 +147,10 @@ def _parse_hall(td) -> Dict[str, Any]:
 
 
 def _parse_attendance(td) -> Dict[str, Any]:
-    """
-    td[6]: "50\n(5%)" or "0\n(0%)" or empty.
-    """
     out = {"widzowie": 0, "widzowie_pct": None}
     if not td:
         return out
     txt = td.get_text(" ", strip=True)
-    # first int is attendance
     m = _RE_INT.search(txt)
     out["widzowie"] = int(m.group(1)) if m else 0
     mp = re.search(r"\(\s*(\d+)\s*%\s*\)", txt)
@@ -180,13 +159,6 @@ def _parse_attendance(td) -> Dict[str, Any]:
 
 
 def _parse_result(td) -> Dict[str, Any]:
-    """
-    td[8] contains:
-      - full: "27 : 27"
-      - half: "( 12 : 12 )"
-      - penalties: "< 3 : 4 >" (this is what you want in dogrywka_karne_*)
-      - swapped icon: img src contains zmiana.png
-    """
     out = {
         "wynik_gosp_full": "",
         "wynik_gosc_full": "",
@@ -204,8 +176,6 @@ def _parse_result(td) -> Dict[str, Any]:
 
     txt = _clean_spaces(td.get_text(" ", strip=True))
 
-    # full score: take FIRST "X : Y" outside parentheses if possible;
-    # but simplest: first occurrence in text.
     m = _RE_SCORE.search(txt)
     if m:
         out["wynik_gosp_full"] = m.group(1)
@@ -225,31 +195,19 @@ def _parse_result(td) -> Dict[str, Any]:
 
 
 def _extract_idzawody_from_tr(tr) -> str:
-    """
-    Often present as hidden input in embedded forms:
-      <input type="hidden" name="IdZawody" value="191320" />
-    We'll scan entire row HTML as fallback.
-    """
     if not tr:
         return ""
     inp = tr.find("input", attrs={"name": "IdZawody"})
     if inp and inp.get("value"):
         return str(inp.get("value")).strip()
-
     html = str(tr)
-    m = re.search(r'name=["\']IdZawody["\']\s+value=["\'](\d+)["\']', html, re.I)
+    m = re.search(
+        r'name=["\']IdZawody["\']\s+value=["\'](\d+)["\']', html, re.I
+    )
     return m.group(1) if m else ""
 
 
 def _parse_officials(td) -> Dict[str, str]:
-    """
-    td[10] has lots of UI + emails/phones; we want just names:
-      NrSedzia_pierwszy_nazwisko
-      NrSedzia_drugi_nazwisko
-      NrSedzia_delegat_nazwisko (optional)
-      NrSedzia_sekretarz_nazwisko (optional)
-      NrSedzia_czas_nazwisko (optional)
-    """
     out = {
         "NrSedzia_pierwszy_nazwisko": "",
         "NrSedzia_drugi_nazwisko": "",
@@ -260,42 +218,51 @@ def _parse_officials(td) -> Dict[str, str]:
     if not td:
         return out
 
-    # Prefer visible text lines; then filter to likely name lines.
     lines = _text_lines(td)
 
-    # Drop obvious non-name noise
     noise_prefixes = (
-        "e-mail", "tel.", "tel:", "telefon", "kom.", "kom:", "mail", "www",
-        "ukryj obsadę", "pokaż obsadę", "ustaw sędziów", "ustaw sedziow", "ustaw halę", "ustaw hale",
-        "zapisz", "usuń", "usun",
+        "e-mail",
+        "tel.",
+        "tel:",
+        "telefon",
+        "kom.",
+        "kom:",
+        "mail",
+        "www",
+        "ukryj obsadę",
+        "pokaż obsadę",
+        "ustaw sędziów",
+        "ustaw sedziow",
+        "ustaw halę",
+        "ustaw hale",
+        "zapisz",
+        "usuń",
+        "usun",
     )
-    clean = []
+
+    clean_lines: List[str] = []
     for ln in lines:
         low = ln.lower()
         if any(low.startswith(p) for p in noise_prefixes):
             continue
         if "@" in ln:
             continue
-        # strip pure phones like "+48 123..."
         if re.fullmatch(r"[\+\d\-\s\(\)\/\.]{6,}", ln):
             continue
-        clean.append(ln)
+        clean_lines.append(ln)
 
-    name_lines = [ln for ln in clean if _looks_like_name(ln)]
+    name_lines = [ln for ln in clean_lines if _looks_like_name(ln)]
     if name_lines:
         out["NrSedzia_pierwszy_nazwisko"] = name_lines[0]
     if len(name_lines) >= 2:
         out["NrSedzia_drugi_nazwisko"] = name_lines[1]
 
-    # Optional roles: try to detect labels then next name line
-    # Some pages may include literal labels like "Delegat" / "Sekretarz" / "Mierzący czas" etc.
     def find_after_label(label_regex: str) -> str:
-        for i, ln in enumerate(clean):
+        for i, ln in enumerate(clean_lines):
             if re.search(label_regex, ln, re.I):
-                # search forward for first name-like line
-                for j in range(i + 1, min(i + 6, len(clean))):
-                    if _looks_like_name(clean[j]):
-                        return clean[j]
+                for j in range(i + 1, min(i + 6, len(clean_lines))):
+                    if _looks_like_name(clean_lines[j]):
+                        return clean_lines[j]
         return ""
 
     out["NrSedzia_delegat_nazwisko"] = find_after_label(r"\bdelegat\b")
@@ -305,13 +272,7 @@ def _parse_officials(td) -> Dict[str, str]:
 
 
 def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
-    """
-    Returns map: {IdZawody: matchObj} (if IdZawody missing, we synthesize key).
-    """
     soup = BeautifulSoup(html, "html.parser")
-
-    # Heuristic: the main matches table usually contains header "Lp" and 11 cells rows.
-    # We'll simply walk all <tr> and pick those with >= 11 <td>.
     out: Dict[str, Dict[str, Any]] = {}
     trs = soup.find_all("tr")
     synth_i = 0
@@ -320,14 +281,9 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         tds = tr.find_all("td", recursive=False)
         if not tds or len(tds) < 11:
             continue
-
-        # separator rows often use colspan
         if any(td.has_attr("colspan") for td in tds):
-            # but note: normal rows can still have colspan rarely; here it’s almost always a separator
-            # so skip them.
             continue
 
-        # columns by index
         td_lp = tds[0]
         td_season = tds[1]
         td_kolejka = tds[2]
@@ -354,7 +310,6 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         res = _parse_result(td_res)
         off = _parse_officials(td_off)
 
-        # Kolejka parsing
         kolejka_txt = _clean_spaces(td_kolejka.get_text(" ", strip=True))
         m_kno = re.search(r"Kolejka\s+(\d+)", kolejka_txt, re.I)
         kolejka_no = int(m_kno.group(1)) if m_kno else None
@@ -372,7 +327,7 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
             "RozgrywkiCode": code,
             "season": season_label,
             "data_fakt": data_fakt,
-            "runda": "",  # not present here; keeping for compatibility
+            "runda": "",
             "kolejka": kolejka_range,
             "kolejka_no": kolejka_no,
             "ID_zespoly_gosp_ZespolNazwa": host_name,
@@ -388,13 +343,11 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
             "wynik_gosc_full": res["wynik_gosc_full"],
             "wynik_gosp_pol": res["wynik_gosp_pol"],
             "wynik_gosc_pol": res["wynik_gosc_pol"],
-            # important: penalties as dogrywka_karne_*
             "dogrywka_karne_gosp": res["dogrywka_karne_gosp"],
             "dogrywka_karne_gosc": res["dogrywka_karne_gosc"],
             "host_swapped": res["host_swapped"],
-            # officials
             **off,
-            # links/status (not available here; keep keys for your JSON shape)
+            # kompatybilność z Twoim JSON-em:
             "matchLink": "",
             "protocol_link": "",
             "protocol_status": "",
@@ -408,10 +361,6 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
 
 
 def _parse_select_options(sel) -> List[Tuple[str, str, bool]]:
-    """
-    Returns list of (value, label, is_selected).
-    Skips empty labels.
-    """
     out: List[Tuple[str, str, bool]] = []
     if not sel:
         return out
@@ -425,10 +374,6 @@ def _parse_select_options(sel) -> List[Tuple[str, str, bool]]:
 
 
 def _detect_sex_from_kategoria_value(val: str, label: str) -> str:
-    """
-    In ZPRP you often get values like "123|K" or "123|M".
-    If not, fallback from label.
-    """
     m = re.search(r"\|\s*([KM])\s*$", val or "", re.I)
     if m:
         return m.group(1).upper()
@@ -441,54 +386,96 @@ def _detect_sex_from_kategoria_value(val: str, label: str) -> str:
 
 
 # =========================
-# Endpoint
+# Auth helpers (RSA decrypt + login)
 # =========================
 
-@router.get("/zprp/terminarz/scrape")
+def _decrypt_field(private_key, enc_b64: str) -> str:
+    cipher = base64.b64decode(enc_b64)
+    plain = private_key.decrypt(cipher, padding.PKCS1v15())
+    return plain.decode("utf-8")
+
+
+async def _login_zprp_and_get_cookies(
+    client: AsyncClient,
+    username: str,
+    password: str,
+) -> Dict[str, str]:
+    resp_login, _ = await fetch_with_correct_encoding(
+        client,
+        "/login.php",
+        method="POST",
+        data={
+            "login": username,
+            "haslo": password,
+            "from": "/index.php?",
+        },
+    )
+    # u Ciebie w edit_judge działa to tak:
+    if "/index.php" not in resp_login.url.path:
+        raise HTTPException(401, "Logowanie nie powiodło się")
+    return dict(resp_login.cookies)
+
+
+# =========================
+# Endpoint (POST, self-login)
+# =========================
+
+@router.post("/zprp/terminarz/scrape")
 async def scrape_terminarz_full(
-    season_id: Optional[str] = Query(default=None, description="Filtr_sezon (jeśli brak, weź wybrany domyślnie)"),
-    cookies: dict = Depends(get_current_cookies),
+    payload: ZprpScheduleScrapeRequest,
     settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),  # (private_key, public_key)
 ):
     """
-    Logika:
-      - otwórz /index.php?a=terminarz
-      - ustal season_id (selected option jeśli user nie poda)
-      - pobierz listę kategorii (Filtr_kategoria) i dla każdej:
-          - pobierz stronę żeby dostać IdRozgr options
-          - iteruj rozgrywki i parsuj mecze z IdRundy=ALL
-      - zwróć JSON z pełnym podziałem: sex (K/M) -> kategoria -> rozgrywki -> matches
+    - payload.username/password: RSA+base64 jak w edit_judge
+    - payload.season_id: opcjonalne
+    - backend sam loguje się do ZPRP i buduje pełny wynik
     """
-    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
-        # 1) Open base terminarz
+    private_key, _ = keys
+
+    # 0) Decrypt credentials
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+
+    async with AsyncClient(
+        base_url=settings.ZPRP_BASE_URL,
+        follow_redirects=True,
+        timeout=60.0,
+    ) as client:
+        # 1) Login -> cookies
+        cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
+
+        # 2) Open base terminarz
         _, html0 = await fetch_with_correct_encoding(
             client,
             "/index.php?a=terminarz",
             method="GET",
             cookies=cookies,
         )
-
         soup0 = BeautifulSoup(html0, "html.parser")
 
-        # 2) Determine season_id
+        # 3) Determine season_id
         sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
         seasons = _parse_select_options(sel_season)
         if not seasons:
             raise HTTPException(500, "Nie znaleziono listy sezonów (Filtr_sezon).")
 
-        picked_season = season_id
+        picked_season = _clean_spaces(payload.season_id or "")
         if not picked_season:
-            # take selected else first non-empty
-            picked_season = next((v for (v, _, sel) in seasons if sel and v), None) or next((v for (v, _, _) in seasons if v), None)
+            picked_season = (
+                next((v for (v, _, sel) in seasons if sel and v), None)
+                or next((v for (v, _, _) in seasons if v), None)
+            )
         if not picked_season:
             raise HTTPException(500, "Nie udało się ustalić Filtr_sezon.")
 
-        # 3) Categories list
+        # 4) Categories list
         sel_cat = soup0.find("select", attrs={"name": "Filtr_kategoria"})
         cats0 = _parse_select_options(sel_cat)
-        # drop empty / placeholder
         cats = [(v, lab, sel) for (v, lab, sel) in cats0 if v and v != "0"]
-
         if not cats:
             raise HTTPException(500, "Nie znaleziono kategorii (Filtr_kategoria).")
 
@@ -496,16 +483,17 @@ async def scrape_terminarz_full(
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
             "Filtr_sezon": picked_season,
-            "seasons_available": [{"value": v, "label": lab, "selected": sel} for (v, lab, sel) in seasons],
+            "seasons_available": [
+                {"value": v, "label": lab, "selected": sel} for (v, lab, sel) in seasons
+            ],
             "categories": [],
             "by_sex": {"K": [], "M": [], "": []},
         }
 
-        # 4) Iterate categories
+        # 5) Iterate categories
         for (cat_val, cat_label, _) in cats:
             sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
 
-            # Fetch page to get IdRozgr options for this category
             qs = {
                 "a": "terminarz",
                 "Filtr_sezon": picked_season,
@@ -533,7 +521,7 @@ async def scrape_terminarz_full(
                 "competitions": [],
             }
 
-            # 5) Iterate competitions (IdRozgr)
+            # 6) Iterate competitions (IdRozgr)
             for (rozgr_val, rozgr_label, _) in rozgr_opts:
                 qs2 = {
                     "a": "terminarz",
@@ -553,23 +541,22 @@ async def scrape_terminarz_full(
 
                 matches_map = _parse_matches_table(html)
 
-                comp_obj: Dict[str, Any] = {
-                    "IdRozgr": rozgr_val,
-                    "label": rozgr_label,
-                    "url": path,
-                    "matches": matches_map,  # map: Id -> match object
-                    "count": len(matches_map),
-                }
-                cat_obj["competitions"].append(comp_obj)
+                cat_obj["competitions"].append(
+                    {
+                        "IdRozgr": rozgr_val,
+                        "label": rozgr_label,
+                        "url": path,
+                        "matches": matches_map,
+                        "count": len(matches_map),
+                    }
+                )
 
-            # Summaries
             cat_obj["competitions_count"] = len(cat_obj["competitions"])
             cat_obj["matches_count"] = sum(int(c.get("count", 0)) for c in cat_obj["competitions"])
 
             result["categories"].append(cat_obj)
             result["by_sex"].setdefault(sex, []).append(cat_obj)
 
-        # Global summary
         result["summary"] = {
             "categories": len(result["categories"]),
             "competitions": sum(int(c.get("competitions_count", 0)) for c in result["categories"]),
