@@ -337,7 +337,12 @@ class ZprpScheduleScrapeRequest(BaseModel):
     username: str
     password: str
     judge_id: Optional[str] = None
+    # sezon
     season_id: Optional[str] = None
+    # NOWE: ograniczenia pobierania
+    filtr_kategoria: Optional[str] = None   # np. "1|M" (w URL: 1%7CM)
+    id_rozgr: Optional[str] = None          # np. "11625"
+
 
 
 # ------------------------- SĘDZIOWIE PER WOJEWÓDZTWO (BADGES) -------------------------

@@ -384,6 +384,27 @@ def _detect_sex_from_kategoria_value(val: str, label: str) -> str:
         return "M"
     return ""
 
+def _pick_season_id(
+    seasons: List[Tuple[str, str, bool]],
+    requested: Optional[str],
+) -> str:
+    picked = _clean_spaces(requested or "")
+    if picked:
+        # jeśli user podał season_id, bierzemy go bez dyskusji (o ile istnieje na liście)
+        if any(v == picked for (v, _, _) in seasons):
+            return picked
+        # jeśli podał coś nieistniejącego - to błąd (żebyś wiedział, że parametry są złe)
+        raise HTTPException(400, f"Nieprawidłowy season_id: {picked}")
+
+    # fallback: selected albo pierwszy niepusty
+    picked = (
+        next((v for (v, _, sel) in seasons if sel and v), None)
+        or next((v for (v, _, _) in seasons if v), None)
+    )
+    if not picked:
+        raise HTTPException(500, "Nie udało się ustalić Filtr_sezon.")
+    return picked
+
 
 # =========================
 # Auth helpers (RSA decrypt + login)
@@ -414,6 +435,118 @@ async def _login_zprp_and_get_cookies(
     if "/index.php" not in resp_login.url.path:
         raise HTTPException(401, "Logowanie nie powiodło się")
     return dict(resp_login.cookies)
+
+@router.post("/zprp/terminarz/meta")
+async def get_terminarz_meta(
+    payload: ZprpScheduleScrapeRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """
+    Zwraca:
+    - dostępne sezony
+    - kategorie (Filtr_kategoria)
+    - rozgrywki (IdRozgr) dla kategorii
+    Opcjonalnie ogranicza się do:
+    - payload.season_id
+    - payload.filtr_kategoria (tylko jedna kategoria)
+    """
+    private_key, _ = keys
+
+    # decrypt creds
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+
+    async with AsyncClient(
+        base_url=settings.ZPRP_BASE_URL,
+        follow_redirects=True,
+        timeout=60.0,
+    ) as client:
+        cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
+
+        # open base terminarz
+        _, html0 = await fetch_with_correct_encoding(
+            client,
+            "/index.php?a=terminarz",
+            method="GET",
+            cookies=cookies,
+        )
+        soup0 = BeautifulSoup(html0, "html.parser")
+
+        sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
+        seasons = _parse_select_options(sel_season)
+        if not seasons:
+            raise HTTPException(500, "Nie znaleziono listy sezonów (Filtr_sezon).")
+
+        picked_season = _pick_season_id(seasons, payload.season_id)
+
+        sel_cat = soup0.find("select", attrs={"name": "Filtr_kategoria"})
+        cats0 = _parse_select_options(sel_cat)
+        cats_all = [(v, lab, sel) for (v, lab, sel) in cats0 if v and v != "0"]
+        if not cats_all:
+            raise HTTPException(500, "Nie znaleziono kategorii (Filtr_kategoria).")
+
+        # filtr_kategoria: jeśli podana, ograniczamy meta do jednej
+        if payload.filtr_kategoria:
+            cat_req = _clean_spaces(payload.filtr_kategoria)
+            if not any(v == cat_req for (v, _, _) in cats_all):
+                raise HTTPException(400, f"Nieprawidłowy filtr_kategoria: {cat_req}")
+            cats = [(v, lab, sel) for (v, lab, sel) in cats_all if v == cat_req]
+        else:
+            cats = cats_all
+
+        out: Dict[str, Any] = {
+            "fetched_at": _now_iso(),
+            "base_url": settings.ZPRP_BASE_URL,
+            "Filtr_sezon": picked_season,
+            "seasons_available": [
+                {"value": v, "label": lab, "selected": sel} for (v, lab, sel) in seasons
+            ],
+            "categories": [],
+        }
+
+        # dla każdej kategorii pobieramy listę rozgrywek (IdRozgr)
+        for (cat_val, cat_label, cat_sel) in cats:
+            sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
+
+            qs = {
+                "a": "terminarz",
+                "Filtr_sezon": picked_season,
+                "Filtr_kategoria": cat_val,
+                "IdRundy": "ALL",   # jak chcesz: zawsze ALL (nie szkodzi)
+            }
+            path_cat = "/index.php?" + urlencode(qs, doseq=True)
+
+            _, html_cat = await fetch_with_correct_encoding(
+                client,
+                path_cat,
+                method="GET",
+                cookies=cookies,
+            )
+            soup_cat = BeautifulSoup(html_cat, "html.parser")
+
+            sel_rozgr = soup_cat.find("select", attrs={"name": "IdRozgr"})
+            rozgr_opts0 = _parse_select_options(sel_rozgr)
+            rozgr_opts = [(v, lab, sel) for (v, lab, sel) in rozgr_opts0 if v and v != "0"]
+
+            out["categories"].append(
+                {
+                    "Filtr_kategoria": cat_val,
+                    "label": cat_label,
+                    "selected": cat_sel,
+                    "sex": sex,
+                    "competitions": [
+                        {"IdRozgr": v, "label": lab, "selected": sel}
+                        for (v, lab, sel) in rozgr_opts
+                    ],
+                    "competitions_count": len(rozgr_opts),
+                }
+            )
+
+        return out
 
 
 # =========================
@@ -564,3 +697,142 @@ async def scrape_terminarz_full(
         }
 
         return result
+
+
+@router.post("/zprp/terminarz/scrape_slim")
+async def scrape_terminarz_slim(
+    payload: ZprpScheduleScrapeRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """
+    Pobiera OSZCZĘDNIE:
+    - jeśli payload.id_rozgr podane -> tylko jedna rozgrywka (IdRozgr) w danej kategorii
+    - jeśli payload.filtr_kategoria podane -> cała kategoria (wszystkie rozgrywki w niej)
+    W obu przypadkach: IdRundy=ALL.
+    Wymagane:
+    - filtr_kategoria musi być podane zawsze (bo IdRozgr bez kategorii nie jest stabilne na tej stronie)
+    """
+    private_key, _ = keys
+
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+
+    cat_val = _clean_spaces(payload.filtr_kategoria or "")
+    if not cat_val:
+        raise HTTPException(400, "Wymagane: payload.filtr_kategoria (np. '1|M').")
+
+    async with AsyncClient(
+        base_url=settings.ZPRP_BASE_URL,
+        follow_redirects=True,
+        timeout=60.0,
+    ) as client:
+        cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
+
+        # base -> sezony + walidacja
+        _, html0 = await fetch_with_correct_encoding(
+            client,
+            "/index.php?a=terminarz",
+            method="GET",
+            cookies=cookies,
+        )
+        soup0 = BeautifulSoup(html0, "html.parser")
+
+        sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
+        seasons = _parse_select_options(sel_season)
+        if not seasons:
+            raise HTTPException(500, "Nie znaleziono listy sezonów (Filtr_sezon).")
+        picked_season = _pick_season_id(seasons, payload.season_id)
+
+        # walidacja kategorii, żeby łapać złe parametry
+        sel_cat = soup0.find("select", attrs={"name": "Filtr_kategoria"})
+        cats0 = _parse_select_options(sel_cat)
+        cats_all = [(v, lab, sel) for (v, lab, sel) in cats0 if v and v != "0"]
+        if not any(v == cat_val for (v, _, _) in cats_all):
+            raise HTTPException(400, f"Nieprawidłowy filtr_kategoria: {cat_val}")
+
+        cat_label = next((lab for (v, lab, _) in cats_all if v == cat_val), "")
+        sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
+
+        # 1) Wejdź w kategorię, żeby dostać listę rozgrywek (IdRozgr)
+        qs_cat = {
+            "a": "terminarz",
+            "Filtr_sezon": picked_season,
+            "Filtr_kategoria": cat_val,
+            "IdRundy": "ALL",
+        }
+        path_cat = "/index.php?" + urlencode(qs_cat, doseq=True)
+
+        _, html_cat = await fetch_with_correct_encoding(
+            client,
+            path_cat,
+            method="GET",
+            cookies=cookies,
+        )
+        soup_cat = BeautifulSoup(html_cat, "html.parser")
+
+        sel_rozgr = soup_cat.find("select", attrs={"name": "IdRozgr"})
+        rozgr_opts0 = _parse_select_options(sel_rozgr)
+        rozgr_opts = [(v, lab, sel) for (v, lab, sel) in rozgr_opts0 if v and v != "0"]
+        if not rozgr_opts:
+            raise HTTPException(500, "Nie znaleziono rozgrywek (IdRozgr) dla tej kategorii.")
+
+        # jeśli user podał id_rozgr - ograniczamy do jednej rozgrywki
+        wanted_id_rozgr = _clean_spaces(payload.id_rozgr or "")
+        if wanted_id_rozgr:
+            if not any(v == wanted_id_rozgr for (v, _, _) in rozgr_opts):
+                raise HTTPException(400, f"Nieprawidłowy id_rozgr dla tej kategorii: {wanted_id_rozgr}")
+            target_rozgr = [(v, lab, sel) for (v, lab, sel) in rozgr_opts if v == wanted_id_rozgr]
+        else:
+            target_rozgr = rozgr_opts  # cała kategoria
+
+        # 2) Scrapuj tylko to co trzeba
+        competitions_out: List[Dict[str, Any]] = []
+        total_matches = 0
+
+        for (rozgr_val, rozgr_label, _) in target_rozgr:
+            qs = {
+                "a": "terminarz",
+                "Filtr_sezon": picked_season,
+                "Filtr_kategoria": cat_val,
+                "IdRozgr": rozgr_val,
+                "IdRundy": "ALL",
+            }
+            path = "/index.php?" + urlencode(qs, doseq=True)
+
+            _, html = await fetch_with_correct_encoding(
+                client,
+                path,
+                method="GET",
+                cookies=cookies,
+            )
+
+            matches_map = _parse_matches_table(html)
+            total_matches += len(matches_map)
+
+            competitions_out.append(
+                {
+                    "IdRozgr": rozgr_val,
+                    "label": rozgr_label,
+                    "url": path,
+                    "count": len(matches_map),
+                    "matches": matches_map,
+                }
+            )
+
+        return {
+            "fetched_at": _now_iso(),
+            "base_url": settings.ZPRP_BASE_URL,
+            "Filtr_sezon": picked_season,
+            "Filtr_kategoria": cat_val,
+            "category_label": cat_label,
+            "sex": sex,
+            "IdRundy": "ALL",
+            "mode": ("single_competition" if wanted_id_rozgr else "whole_category"),
+            "competitions_count": len(competitions_out),
+            "matches_count": total_matches,
+            "competitions": competitions_out,
+        }
