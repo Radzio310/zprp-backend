@@ -52,6 +52,8 @@ from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
 from app.baza_vips import router as baza_vips_router
 
+from app.zprp.schedule import router as schedule_router
+
 # NEW: push router + scheduler
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
@@ -123,6 +125,8 @@ app.include_router(baza_web_router)
 app.include_router(province_judges_router)
 app.include_router(badges_router)
 app.include_router(baza_vips_router)
+
+app.include_router(schedule_router, tags=["zprp"])
 
 # NEW: push router
 app.include_router(push_router)
