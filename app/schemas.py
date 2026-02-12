@@ -334,8 +334,9 @@ class ListBazaVipsResponse(BaseModel):
     records: List[BazaVipItem]
 
 class ZprpScheduleScrapeRequest(BaseModel):
-    username: str  # RSA+base64
-    password: str  # RSA+base64
+    username: str
+    password: str
+    judge_id: Optional[str] = None
     season_id: Optional[str] = None
 
 
