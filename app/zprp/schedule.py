@@ -195,16 +195,29 @@ def _parse_result(td) -> Dict[str, Any]:
 
 
 def _extract_idzawody_from_tr(tr) -> str:
+    """
+    Zwraca string z IdZawody jeśli uda się znaleźć, w przeciwnym razie "".
+    """
     if not tr:
         return ""
+
+    # 1) najczęstszy przypadek: hidden input name="IdZawody"
     inp = tr.find("input", attrs={"name": "IdZawody"})
     if inp and inp.get("value"):
         return str(inp.get("value")).strip()
+
+    # 2) fallback: regex po HTML
     html = str(tr)
-    m = re.search(
-        r'name=["\']IdZawody["\']\s+value=["\'](\d+)["\']', html, re.I
-    )
-    return m.group(1) if m else ""
+    m = re.search(r'name=["\']IdZawody["\']\s+value=["\'](\d+)["\']', html, re.I)
+    if m:
+        return m.group(1)
+
+    # 3) (opcjonalnie pomocny) fallback: czasem ID jest w wywołaniu JS (np. zapiszProtok3(191386,...))
+    m2 = re.search(r"zapiszProtok3\(\s*(\d+)\s*,", html, re.I)
+    if m2:
+        return m2.group(1)
+
+    return ""
 
 
 def _parse_officials(td) -> Dict[str, str]:
@@ -316,13 +329,20 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         m_rng = re.search(r"\(\s*([^)]+)\s*\)", kolejka_txt)
         kolejka_range = _clean_spaces(m_rng.group(1)) if m_rng else ""
 
-        match_id = _extract_idzawody_from_tr(tr)
-        if not match_id:
+        # --- KLUCZOWA ZMIANA: rozdzielamy Id (unikalne) i IdZawody (numeryczne / None)
+        idzawody_str = _extract_idzawody_from_tr(tr)
+        if idzawody_str and re.fullmatch(r"\d+", idzawody_str):
+            match_id = idzawody_str              # Id = prawdziwe IdZawody
+            idzawody: Optional[str] = idzawody_str
+        else:
             synth_i += 1
             match_id = f"synthetic:{season_label}:{code}:{lp}:{synth_i}"
+            idzawody = None
+        # ---
 
         match_obj: Dict[str, Any] = {
             "Id": match_id,
+            "IdZawody": idzawody,  # <-- nowy field: None jeśli nie ma
             "Lp": lp,
             "RozgrywkiCode": code,
             "season": season_label,
@@ -384,19 +404,17 @@ def _detect_sex_from_kategoria_value(val: str, label: str) -> str:
         return "M"
     return ""
 
+
 def _pick_season_id(
     seasons: List[Tuple[str, str, bool]],
     requested: Optional[str],
 ) -> str:
     picked = _clean_spaces(requested or "")
     if picked:
-        # jeśli user podał season_id, bierzemy go bez dyskusji (o ile istnieje na liście)
         if any(v == picked for (v, _, _) in seasons):
             return picked
-        # jeśli podał coś nieistniejącego - to błąd (żebyś wiedział, że parametry są złe)
         raise HTTPException(400, f"Nieprawidłowy season_id: {picked}")
 
-    # fallback: selected albo pierwszy niepusty
     picked = (
         next((v for (v, _, sel) in seasons if sel and v), None)
         or next((v for (v, _, _) in seasons if v), None)
@@ -431,10 +449,10 @@ async def _login_zprp_and_get_cookies(
             "from": "/index.php?",
         },
     )
-    # u Ciebie w edit_judge działa to tak:
     if "/index.php" not in resp_login.url.path:
         raise HTTPException(401, "Logowanie nie powiodło się")
     return dict(resp_login.cookies)
+
 
 @router.post("/zprp/terminarz/meta")
 async def get_terminarz_meta(
@@ -453,7 +471,6 @@ async def get_terminarz_meta(
     """
     private_key, _ = keys
 
-    # decrypt creds
     try:
         user_plain = _decrypt_field(private_key, payload.username)
         pass_plain = _decrypt_field(private_key, payload.password)
@@ -467,7 +484,6 @@ async def get_terminarz_meta(
     ) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        # open base terminarz
         _, html0 = await fetch_with_correct_encoding(
             client,
             "/index.php?a=terminarz",
@@ -489,7 +505,6 @@ async def get_terminarz_meta(
         if not cats_all:
             raise HTTPException(500, "Nie znaleziono kategorii (Filtr_kategoria).")
 
-        # filtr_kategoria: jeśli podana, ograniczamy meta do jednej
         if payload.filtr_kategoria:
             cat_req = _clean_spaces(payload.filtr_kategoria)
             if not any(v == cat_req for (v, _, _) in cats_all):
@@ -508,7 +523,6 @@ async def get_terminarz_meta(
             "categories": [],
         }
 
-        # dla każdej kategorii pobieramy listę rozgrywek (IdRozgr)
         for (cat_val, cat_label, cat_sel) in cats:
             sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
 
@@ -516,7 +530,7 @@ async def get_terminarz_meta(
                 "a": "terminarz",
                 "Filtr_sezon": picked_season,
                 "Filtr_kategoria": cat_val,
-                "IdRundy": "ALL",   # jak chcesz: zawsze ALL (nie szkodzi)
+                "IdRundy": "ALL",
             }
             path_cat = "/index.php?" + urlencode(qs, doseq=True)
 
@@ -549,15 +563,11 @@ async def get_terminarz_meta(
         return out
 
 
-# =========================
-# Endpoint (POST, self-login)
-# =========================
-
 @router.post("/zprp/terminarz/scrape")
 async def scrape_terminarz_full(
     payload: ZprpScheduleScrapeRequest,
     settings: Settings = Depends(get_settings),
-    keys=Depends(get_rsa_keys),  # (private_key, public_key)
+    keys=Depends(get_rsa_keys),
 ):
     """
     - payload.username/password: RSA+base64 jak w edit_judge
@@ -566,7 +576,6 @@ async def scrape_terminarz_full(
     """
     private_key, _ = keys
 
-    # 0) Decrypt credentials
     try:
         user_plain = _decrypt_field(private_key, payload.username)
         pass_plain = _decrypt_field(private_key, payload.password)
@@ -578,10 +587,8 @@ async def scrape_terminarz_full(
         follow_redirects=True,
         timeout=60.0,
     ) as client:
-        # 1) Login -> cookies
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        # 2) Open base terminarz
         _, html0 = await fetch_with_correct_encoding(
             client,
             "/index.php?a=terminarz",
@@ -590,7 +597,6 @@ async def scrape_terminarz_full(
         )
         soup0 = BeautifulSoup(html0, "html.parser")
 
-        # 3) Determine season_id
         sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
         seasons = _parse_select_options(sel_season)
         if not seasons:
@@ -605,7 +611,6 @@ async def scrape_terminarz_full(
         if not picked_season:
             raise HTTPException(500, "Nie udało się ustalić Filtr_sezon.")
 
-        # 4) Categories list
         sel_cat = soup0.find("select", attrs={"name": "Filtr_kategoria"})
         cats0 = _parse_select_options(sel_cat)
         cats = [(v, lab, sel) for (v, lab, sel) in cats0 if v and v != "0"]
@@ -623,7 +628,6 @@ async def scrape_terminarz_full(
             "by_sex": {"K": [], "M": [], "": []},
         }
 
-        # 5) Iterate categories
         for (cat_val, cat_label, _) in cats:
             sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
 
@@ -654,7 +658,6 @@ async def scrape_terminarz_full(
                 "competitions": [],
             }
 
-            # 6) Iterate competitions (IdRozgr)
             for (rozgr_val, rozgr_label, _) in rozgr_opts:
                 qs2 = {
                     "a": "terminarz",
@@ -732,7 +735,6 @@ async def scrape_terminarz_slim(
     ) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        # base -> sezony + walidacja
         _, html0 = await fetch_with_correct_encoding(
             client,
             "/index.php?a=terminarz",
@@ -747,7 +749,6 @@ async def scrape_terminarz_slim(
             raise HTTPException(500, "Nie znaleziono listy sezonów (Filtr_sezon).")
         picked_season = _pick_season_id(seasons, payload.season_id)
 
-        # walidacja kategorii, żeby łapać złe parametry
         sel_cat = soup0.find("select", attrs={"name": "Filtr_kategoria"})
         cats0 = _parse_select_options(sel_cat)
         cats_all = [(v, lab, sel) for (v, lab, sel) in cats0 if v and v != "0"]
@@ -757,7 +758,6 @@ async def scrape_terminarz_slim(
         cat_label = next((lab for (v, lab, _) in cats_all if v == cat_val), "")
         sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
 
-        # 1) Wejdź w kategorię, żeby dostać listę rozgrywek (IdRozgr)
         qs_cat = {
             "a": "terminarz",
             "Filtr_sezon": picked_season,
@@ -780,16 +780,14 @@ async def scrape_terminarz_slim(
         if not rozgr_opts:
             raise HTTPException(500, "Nie znaleziono rozgrywek (IdRozgr) dla tej kategorii.")
 
-        # jeśli user podał id_rozgr - ograniczamy do jednej rozgrywki
         wanted_id_rozgr = _clean_spaces(payload.id_rozgr or "")
         if wanted_id_rozgr:
             if not any(v == wanted_id_rozgr for (v, _, _) in rozgr_opts):
                 raise HTTPException(400, f"Nieprawidłowy id_rozgr dla tej kategorii: {wanted_id_rozgr}")
             target_rozgr = [(v, lab, sel) for (v, lab, sel) in rozgr_opts if v == wanted_id_rozgr]
         else:
-            target_rozgr = rozgr_opts  # cała kategoria
+            target_rozgr = rozgr_opts
 
-        # 2) Scrapuj tylko to co trzeba
         competitions_out: List[Dict[str, Any]] = []
         total_matches = 0
 
