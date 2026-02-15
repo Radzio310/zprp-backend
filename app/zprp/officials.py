@@ -5,8 +5,8 @@ import base64
 import datetime
 import logging
 import re
-from typing import Any, Dict, List, Tuple
-from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode, urlparse, parse_qs
 
 from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -34,10 +34,9 @@ logger.setLevel(logging.INFO)
 # Regex / helpers
 # =========================
 _RE_INT = re.compile(r"(\d+)")
-_RE_CITY_PAREN = re.compile(r"^(.*?)(\s*\([A-Z]{1,3}\)\s*)?$")  # "Ruda Śląska (SL)" -> "Ruda Śląska"
-_RE_PHONE = re.compile(r"(\+?\d[\d\s-]{6,}\d)")
-_RE_WS = re.compile(r"\s+")
-_RE_PAGER_NUM = re.compile(r"^\s*(\d+)\s*$")
+_RE_LP_DOT = re.compile(r"^\s*(\d+)\.\s*$")
+_RE_CITY_SUFFIX = re.compile(r"\s*\([A-Z]{1,3}\)\s*$")  # (SL), (MA) etc.
+_RE_PARA_Z = re.compile(r"Para\s+z\s*:?\s*(.+)$", re.I)
 
 
 def _now_iso() -> str:
@@ -45,7 +44,7 @@ def _now_iso() -> str:
 
 
 def _clean_spaces(s: str) -> str:
-    return _RE_WS.sub(" ", s or "").strip()
+    return re.sub(r"\s+", " ", (s or "")).strip()
 
 
 def _safe_int(s: str, default: int = 0) -> int:
@@ -75,7 +74,8 @@ async def _login_zprp_and_get_cookies(client: AsyncClient, username: str, passwo
 
 def _absorb_href_keep_relative(href: str) -> str:
     """
-    Zwraca relatywny path+query (bez hosta).
+    Na ZPRP href zwykle jest relatywny typu '?a=sedzia...'
+    Zwracamy relatywny path+query (bez hosta).
     """
     href = (href or "").strip()
     if not href:
@@ -89,495 +89,305 @@ def _absorb_href_keep_relative(href: str) -> str:
     return href
 
 
-def _normalize_city(city: str) -> str:
-    s = _clean_spaces(city)
-    m = _RE_CITY_PAREN.match(s)
-    if not m:
-        return s
-    return _clean_spaces(m.group(1) or "")
-
-
-def _extract_sedzia_link_from_home(html: str) -> str:
+def _extract_menu_href_from_page(html: str, label_regex: str, href_regex: str) -> str:
     """
-    Z głównej strony po zalogowaniu bierzemy link do zakładki "Sędziowie i Delegaci".
+    Z dowolnej strony po zalogowaniu bierzemy link z menu po labelu lub po href-regexie.
+    Przydatne bo link może nieść parametry (np. Filtr_woj2 / Filtr_archiwum).
     """
     soup = BeautifulSoup(html, "html.parser")
-    a = soup.find("a", string=re.compile(r"^\s*Sędziowie i Delegaci\s*$", re.I))
+    rx_label = re.compile(label_regex, re.I)
+    rx_href = re.compile(href_regex, re.I)
+
+    a = soup.find("a", string=rx_label)
     if not a:
-        a = soup.find("a", href=re.compile(r"\ba=sedzia\b", re.I))
+        a = soup.find("a", href=rx_href)
+
     href = _absorb_href_keep_relative(a.get("href", "") if a else "")
     if not href:
-        raise HTTPException(500, "Nie znaleziono linku do zakładki 'Sędziowie i Delegaci' na stronie głównej.")
+        raise HTTPException(500, f"Nie znaleziono linku menu: {label_regex}")
     return href
 
 
-def _text_lines_from_cell(td) -> List[str]:
+def _find_table(soup: BeautifulSoup):
+    return soup.find("table", attrs={"id": "tabelka"}) if soup else None
+
+
+def _row_is_data_tr(tr) -> bool:
     """
-    Zwraca “linie” z komórki: respektuje <br>, <hr>, nowe linie.
-    """
-    if not td:
-        return []
-    # zamień br/hr na newline
-    for br in td.find_all(["br"]):
-        br.replace_with("\n")
-    for hr in td.find_all(["hr"]):
-        hr.replace_with("\n")
-    txt = td.get_text("\n", strip=True)
-    lines = [_clean_spaces(x) for x in txt.split("\n")]
-    return [x for x in lines if x]
-
-
-def _extract_partner_and_roles(lines: List[str]) -> Tuple[str, List[str]]:
-    """
-    roles: linie typu "sędzia", "stolikowy", "delegat" itd.
-    partner: jeśli występuje "Para z:" (różne warianty).
-    """
-    partner = ""
-    roles: List[str] = []
-
-    for ln in lines:
-        # partner
-        m = re.search(r"\bPara\s*z\s*:\s*(.+)\s*$", ln, flags=re.I)
-        if m:
-            partner = _clean_spaces(m.group(1) or "")
-            continue
-
-        # typowe separatory / technikalia
-        if not ln or ln in ("-", "—", "–"):
-            continue
-
-        roles.append(ln)
-
-    # oczyszczenie: często w roli potrafi być "Para z: ..." wklejone obok
-    roles = [r for r in roles if not re.search(r"\bPara\s*z\s*:", r, flags=re.I)]
-    return partner, roles
-
-
-def _extract_phone_from_cell(td) -> str:
-    if not td:
-        return ""
-    txt = _clean_spaces(td.get_text(" ", strip=True))
-    m = _RE_PHONE.search(txt)
-    return _clean_spaces(m.group(1)) if m else txt
-
-
-def _find_officials_table(soup: BeautifulSoup):
-    """
-    Heurystyka: tabela, w której występują przyciski/linki typu:
-      - "Edytuj"
-      - "Pokaż mecze"
-      - "Pokaż offtime"
-    """
-    if not soup:
-        return None
-
-    candidates = []
-    for tbl in soup.find_all("table"):
-        # szybkie odrzucenie: zbyt mało wierszy
-        trs = tbl.find_all("tr")
-        if len(trs) < 3:
-            continue
-
-        text = _clean_spaces(tbl.get_text(" ", strip=True))
-        score = 0
-        if re.search(r"\bEdytuj\b", text, re.I):
-            score += 2
-        if re.search(r"\bPokaż\s+mecze\b", text, re.I):
-            score += 2
-        if re.search(r"\bPokaż\s+offtime\b", text, re.I):
-            score += 2
-        if re.search(r"\btelefon\b", text, re.I):
-            score += 1
-        if re.search(r"\bmiasto\b", text, re.I):
-            score += 1
-
-        if score >= 3:
-            candidates.append((score, len(trs), tbl))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    return candidates[0][2]
-
-
-def _row_is_data_row(tr) -> bool:
-    """
-    Odrzuć nagłówki. Zakładamy, że wiersz danych ma przynajmniej jeden przycisk/link akcji.
+    Dane sędziego: pierwszy td ma title=<NrSedzia> i tekst '1.'
     """
     if not tr:
         return False
     tds = tr.find_all("td", recursive=False)
-    if len(tds) < 4:
+    if len(tds) < 8:
         return False
-
-    # header często ma <th> albo krótkie etykiety
-    if tr.find_all("th"):
+    t0 = _clean_spaces(tds[0].get_text(" ", strip=True))
+    if not _RE_LP_DOT.match(t0):
         return False
-
-    txt = _clean_spaces(tr.get_text(" ", strip=True))
-    if not txt:
-        return False
-
-    has_action = bool(tr.find("a", string=re.compile(r"\bEdytuj\b|\bPokaż\s+mecze\b|\bPokaż\s+offtime\b", re.I)))
-    return has_action
+    title = _clean_spaces(tds[0].get("title", ""))
+    return bool(title and re.fullmatch(r"\d+", title))
 
 
-def _extract_action_links(tr) -> Dict[str, str]:
+def _strip_city(raw: str) -> str:
+    # "Ruda Śląska  (SL)" -> "Ruda Śląska"
+    s = _clean_spaces(raw)
+    s = _RE_CITY_SUFFIX.sub("", s).strip()
+    return s
+
+
+def _parse_photo_src(td) -> str:
     """
-    Z wiersza bierze linki do:
-      - edit
-      - matches
-      - offtime
+    W kolumnie Foto bywa <img src="foto_sedzia/5689.jpg?m=...">.
+    Zwracamy src (relatywny) albo "".
     """
-    out = {"edit_href": "", "matches_href": "", "offtime_href": ""}
-
-    for a in tr.find_all("a", href=True):
-        label = _clean_spaces(a.get_text(" ", strip=True))
-        href = _absorb_href_keep_relative(a.get("href", ""))
-
-        if not href:
-            continue
-
-        if re.search(r"\bEdytuj\b", label, re.I):
-            out["edit_href"] = href
-        elif re.search(r"\bPokaż\s+mecze\b", label, re.I):
-            out["matches_href"] = href
-        elif re.search(r"\bPokaż\s+offtime\b", label, re.I):
-            out["offtime_href"] = href
-
-    return out
-
-
-def _extract_photo_href(tr) -> str:
-    """
-    Link do zdjęcia: zwykle <img src="..."> w komórce (czasem w <a>).
-    """
-    img = tr.find("img", src=True)
+    if not td:
+        return ""
+    img = td.find("img", src=True)
     if not img:
         return ""
-    src = _absorb_href_keep_relative(img.get("src", ""))
-    return src
+    return _absorb_href_keep_relative(_clean_spaces(img.get("src", "")))
 
 
-def _parse_officials_page(html: str) -> Dict[str, Any]:
+def _parse_name_and_phone(td) -> Tuple[str, str]:
     """
-    Parsuje jedną stronę listy sędziów/delegatów.
-    Zwraca:
-      - items: lista rekordów
-      - pager: dane do paginacji (na podstawie linków)
+    Z kolumny "Nazwisko Imię ... Telefon" chcemy:
+    - name: z pierwszej linii (najczęściej "NAZWISKO  Imię", czasem z nawiasem jak "BREHMER Joanna (KACZOROWSKA)")
+    - phone: po ikonie telefonu (pliki/telefon.png) zwykle tekst z numerem
     """
-    soup = BeautifulSoup(html, "html.parser")
-    tbl = _find_officials_table(soup)
-    if not tbl:
-        # nie wywalamy 500 od razu, bo pierwsza strona "menu" sedzia może nie mieć tabeli
-        return {"items": [], "pager": {"pages": [], "page_param": "", "max_page": 0}}
+    if not td:
+        return "", ""
 
-    items: List[Dict[str, Any]] = []
+    # name: bierzemy pierwszy sensowny fragment tekstu do pierwszego <br>
+    # (bo potem są nazwisko rodowe / drugie imię / telefon)
+    # BeautifulSoup: możemy wyciągnąć "stripped_strings" i wziąć pierwszy
+    strings = [s for s in (td.stripped_strings or [])]
+    name = _clean_spaces(strings[0]) if strings else ""
 
-    for tr in tbl.find_all("tr", recursive=False):
-        if not _row_is_data_row(tr):
+    # phone: po img telefon.png (lub tekst zawierający 9-11 cyfr)
+    phone = ""
+    tel_img = td.find("img", src=re.compile(r"telefon\.png", re.I))
+    if tel_img:
+        # Weź tekst po img w obrębie rodzica, często jest " 696575338"
+        parent = tel_img.parent
+        if parent:
+            tail = parent.get_text(" ", strip=True)
+            # tail zawiera czasem też nazwę; filtrujemy do cyfr
+            m = re.search(r"(\+?\d[\d\s-]{6,})", tail)
+            if m:
+                phone = _clean_spaces(m.group(1))
+    if not phone:
+        # fallback: szukaj ciągu cyfr w całej komórce
+        txt = _clean_spaces(td.get_text(" ", strip=True))
+        m = re.search(r"(\+?\d[\d\s-]{6,})", txt)
+        if m:
+            phone = _clean_spaces(m.group(1))
+
+    return name, phone
+
+
+def _parse_city(td) -> str:
+    if not td:
+        return ""
+    # zwykle <div align="center">Ruda Śląska  (SL)</div>
+    txt = _clean_spaces(td.get_text(" ", strip=True))
+    return _strip_city(txt)
+
+
+def _parse_roles_and_partner(td) -> Tuple[str, List[str], str]:
+    """
+    Kolumna: "Sędzia / Delegat Stolikowy" zawiera <br>.
+    Chcemy:
+    - roles_text: role w nowych liniach (tylko: sędzia, stolikowy, delegat) w kolejności jak na stronie
+    - roles_list: lista ról (canonical: sedzia|stolikowy|delegat)
+    - partner: jeśli występuje "Para z : X" -> X
+    """
+    if not td:
+        return "", [], ""
+
+    # rozbij po <br> zachowując kolejność
+    parts = []
+    for chunk in td.decode_contents().split("<br"):
+        # chunk może mieć ">" + tekst albo HTML
+        # najprościej: zrób soup z chunk i wyciągnij tekst
+        txt = _clean_spaces(BeautifulSoup(chunk, "html.parser").get_text(" ", strip=True))
+        if txt:
+            parts.append(txt)
+
+    roles: List[str] = []
+    roles_text_lines: List[str] = []
+    partner = ""
+
+    def add_role(canon: str, label: str):
+        if canon not in roles:
+            roles.append(canon)
+            roles_text_lines.append(label)
+
+    for p in parts:
+        # partner?
+        m = _RE_PARA_Z.search(p)
+        if m and not partner:
+            partner = _clean_spaces(m.group(1))
             continue
 
-        tds = tr.find_all("td", recursive=False)
-
-        # Heurystyka mapowania kolumn:
-        # Ponieważ layout może się różnić między województwami/wersjami,
-        # robimy mapowanie “po treści”:
-        # - name: najdłuższy tekst przypominający imię i nazwisko (bez etykiet przycisków)
-        # - phone: komórka z numerem
-        # - city: komórka z "(XX)" albo z nazwą miasta
-        # - roles: komórka z wieloma liniami, często zawiera "sędzia" / "delegat" / "stolikowy" / "Para z:"
-        name = ""
-        phone = ""
-        city = ""
-        partner = ""
-        roles: List[str] = []
-
-        # candidate strings per cell
-        cell_lines = [_text_lines_from_cell(td) for td in tds]
-        cell_texts = [_clean_spaces(" ".join(lines)) for lines in cell_lines]
-
-        # usuń typowe etykiety przycisków
-        def _without_action_words(s: str) -> str:
-            s2 = re.sub(r"\b(Edytuj|Pokaż\s+mecze|Pokaż\s+offtime)\b", "", s, flags=re.I)
-            return _clean_spaces(s2)
-
-        cleaned_texts = [_without_action_words(t) for t in cell_texts]
-
-        # name: komórka o największej “literowej” zawartości
-        best_i = -1
-        best_score = -1
-        for i, t in enumerate(cleaned_texts):
-            if not t:
-                continue
-            # odrzuć czyste cyfry
-            if re.fullmatch(r"[\d\.\s]+", t):
-                continue
-            # scoring: litery + spacje, preferuj 2-4 wyrazy
-            words = [w for w in t.split(" ") if w]
-            letters = sum(1 for ch in t if ch.isalpha())
-            score = letters + (10 if 1 < len(words) <= 5 else 0)
-            if score > best_score:
-                best_score = score
-                best_i = i
-        if best_i >= 0:
-            name = cleaned_texts[best_i]
-
-        # phone: szukamy regexem
-        for i, td in enumerate(tds):
-            cand = _extract_phone_from_cell(td)
-            if cand and _RE_PHONE.search(cand):
-                phone = cand
-                break
-
-        # city: komórka zawierająca "(XX)" albo wygląda jak miasto
-        for i, t in enumerate(cleaned_texts):
-            if not t or t == name:
-                continue
-            if re.search(r"\([A-Z]{1,3}\)\s*$", t):
-                city = _normalize_city(t)
-                break
-        if not city:
-            # fallback: krótka komórka tekstowa bez cyfr, 1-3 słowa
-            for i, t in enumerate(cleaned_texts):
-                if not t or t == name:
-                    continue
-                if any(ch.isdigit() for ch in t):
-                    continue
-                words = t.split(" ")
-                if 1 <= len(words) <= 4 and len(t) <= 40:
-                    city = _normalize_city(t)
-                    break
-
-        # roles + partner: komórka z wieloma liniami lub zawierająca słowa kluczowe
-        role_cell_lines: List[str] = []
-        for i, lines in enumerate(cell_lines):
-            joined = " ".join(lines).lower()
-            if (
-                "sędz" in joined
-                or "sedz" in joined
-                or "deleg" in joined
-                or "stolik" in joined
-                or "para z" in joined
-                or len(lines) >= 2
-            ):
-                # odfiltruj oczywiste: komórki z przyciskami
-                if re.search(r"\bEdytuj\b|\bPokaż\s+mecze\b|\bPokaż\s+offtime\b", " ".join(lines), re.I):
-                    continue
-                # preferuj komórkę nie będącą name/phone/city
-                role_cell_lines = lines
-                # jeśli bardzo pasuje, przerwij
-                if "para z" in joined or "sędz" in joined or "deleg" in joined or "stolik" in joined:
-                    break
-
-        partner, roles = _extract_partner_and_roles(role_cell_lines)
-
-        actions = _extract_action_links(tr)
-        photo_href = _extract_photo_href(tr)
-
-        # klucz deduplikacji (w razie powtórek między stronami)
-        key = _clean_spaces(f"{name}|{phone}|{city}")
-
-        items.append(
-            {
-                "key": key,
-                "name": name,
-                "photo_href": photo_href,
-                "phone": phone,
-                "city": city,
-                "roles": roles,         # lista (frontend może join("\n"))
-                "partner": partner,     # string
-                "edit_href": actions.get("edit_href", ""),
-                "matches_href": actions.get("matches_href", ""),
-                "offtime_href": actions.get("offtime_href", ""),
-            }
-        )
-
-    pager = _detect_pagination(soup)
-    return {"items": items, "pager": pager}
-
-
-def _detect_pagination(soup: BeautifulSoup) -> Dict[str, Any]:
-    """
-    Heurystycznie wykrywa paginację:
-    - zbiera wszystkie <a href> z a=sedzia
-    - szuka parametru, który ma wiele wartości numerycznych (np. page/strona)
-    - wyciąga max_page
-    """
-    hrefs: List[str] = []
-    for a in soup.find_all("a", href=True):
-        href = _absorb_href_keep_relative(a.get("href", ""))
-        if not href:
+        # rola?
+        if re.search(r"\bSędzia\b", p, re.I):
+            add_role("sedzia", "Sędzia")
             continue
-        if re.search(r"\ba=sedzia\b", href, re.I):
-            hrefs.append(href)
+        if re.search(r"\bDelegat\b", p, re.I):
+            add_role("delegat", "Delegat")
+            continue
+        if re.search(r"\bStolikowy\b", p, re.I):
+            add_role("stolikowy", "Stolikowy")
+            continue
 
-    if not hrefs:
-        return {"pages": [], "page_param": "", "max_page": 0}
+    roles_text = "\n".join(roles_text_lines).strip()
+    return roles_text, roles, partner
 
-    # zbuduj mapę: param -> set(values)
-    values_by_param: Dict[str, set] = {}
-    for href in hrefs:
+
+def _parse_actions_links(tds: List[Any]) -> Tuple[str, str, str]:
+    """
+    Z wiersza:
+    - edycja: link z przycisku EDYTUJ
+    - matches: link z "POKAŻ MECZE"
+    - offtime: link z "POKAŻ OFFTIME"
+    """
+    edit_href = ""
+    matches_href = ""
+    offtime_href = ""
+
+    # w HTML: edycja jest w osobnej kolumnie, a pozostałe dwa w kolejnej
+    for td in tds:
+        for a in td.find_all("a", href=True):
+            label = _clean_spaces(a.get_text(" ", strip=True))
+            href = _absorb_href_keep_relative(a.get("href", ""))
+
+            if not href:
+                continue
+
+            if re.search(r"\bEDYTUJ\b", label, re.I) and not edit_href:
+                edit_href = href
+            elif re.search(r"\bPOKAŻ\s+MECZE\b", label, re.I) and not matches_href:
+                matches_href = href
+            elif re.search(r"\bPOKAŻ\s+OFFTIME\b", label, re.I) and not offtime_href:
+                offtime_href = href
+
+    return edit_href, matches_href, offtime_href
+
+
+def _extract_paging_state(table: Any) -> Tuple[int, int, int]:
+    """
+    Z paska paginacji bierzemy:
+    - count (np. 10/20/50/100) z <select name="count"> wybranej opcji
+    - current_offset (zwykle brak w aktualnej stronie -> 0)
+    - max_offset (największy offset z linków STRONA, np. 6 dla strony 7 przy count=10)
+    """
+    if not table:
+        return 10, 0, 0
+
+    # count
+    count = 10
+    sel = table.find("select", attrs={"name": "count"})
+    if sel:
+        opt_sel = sel.find("option", selected=True)
+        if opt_sel and _clean_spaces(opt_sel.get("value", "")):
+            count = _safe_int(opt_sel.get("value", ""), default=10)
+
+    # max_offset: weź wszystkie linki z offset=...
+    max_offset = 0
+    for a in table.find_all("a", href=True):
+        href = a.get("href", "")
+        if "offset=" not in href:
+            continue
         try:
-            u = urlparse("http://x" + href if href.startswith("?") else ("http://x/" + href))
+            u = urlparse(
+                href if href.startswith("http")
+                else ("http://x" + href if href.startswith("?") else "http://x/" + href)
+            )
             qs = parse_qs(u.query)
-            for k, vals in qs.items():
-                for v in vals:
-                    v2 = _clean_spaces(v)
-                    if not v2:
-                        continue
-                    if v2.isdigit():
-                        values_by_param.setdefault(k, set()).add(int(v2))
+            off = _safe_int((qs.get("offset", ["0"]) or ["0"])[0], default=0)
+            if off > max_offset:
+                max_offset = off
         except Exception:
             continue
 
-    # wybierz parametr “stronicowania”: ma >=2 różne wartości, min=1 zwykle
-    best_param = ""
-    best_score = -1
-    best_vals: List[int] = []
-    preferred = ["strona", "page", "Page", "p", "nr", "start"]
+    # current_offset: na tej stronie zwykle nie ma jawnego offset w URL (bo to już jest HTML),
+    # ale endpoint ma go w path. My będziemy go znać w pętli i przekazywać wyżej.
+    return count, 0, max_offset
 
-    for k, svals in values_by_param.items():
-        vals = sorted(list(svals))
-        if len(vals) < 2:
+
+def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+    table = _find_table(soup)
+    if not table:
+        raise HTTPException(500, "Nie znaleziono tabeli sędziów (id='tabelka').")
+
+    count, _, max_offset = _extract_paging_state(table)
+
+    officials: Dict[str, Dict[str, Any]] = {}
+
+    for tr in table.find_all("tr", recursive=False):
+        if not _row_is_data_tr(tr):
             continue
-        score = len(vals)
-        if (vals and vals[0] == 1):
-            score += 5
-        if k in preferred:
-            score += 10
-        if score > best_score:
-            best_score = score
-            best_param = k
-            best_vals = vals
 
-    if not best_param:
-        # fallback: numeryczne linki w pagerze (tekst "1 2 3")
-        nums = []
-        for a in soup.find_all("a"):
-            t = _clean_spaces(a.get_text(" ", strip=True))
-            m = _RE_PAGER_NUM.match(t)
-            if m:
-                nums.append(int(m.group(1)))
-        nums = sorted(set(nums))
-        return {"pages": nums, "page_param": "", "max_page": (max(nums) if nums else 0)}
+        tds = tr.find_all("td", recursive=False)
+        nr = _clean_spaces(tds[0].get("title", ""))  # NrSedzia
+        lp = _safe_int(_clean_spaces(tds[0].get_text(" ", strip=True)), default=0)
 
-    return {"pages": best_vals, "page_param": best_param, "max_page": (max(best_vals) if best_vals else 0)}
+        photo = _parse_photo_src(tds[1])
+        name, phone = _parse_name_and_phone(tds[2])
+        city = _parse_city(tds[3])
 
+        roles_text, roles, partner = _parse_roles_and_partner(tds[7])
 
-def _set_query_param(href: str, key: str, value: str) -> str:
-    """
-    Ustawia/zmienia query param w relatywnym href (?a=...).
-    """
-    href = _absorb_href_keep_relative(href)
-    if not href:
-        return href
+        edit_href, matches_href, offtime_href = _parse_actions_links(tds)
 
-    # znormalizuj do URL z hostem
-    u = urlparse("http://x" + href if href.startswith("?") else ("http://x/" + href))
-    qs = parse_qs(u.query)
-    qs[key] = [value]
-    query = urlencode(qs, doseq=True)
+        officials[nr] = {
+            "NrSedzia": nr,
+            "Lp": lp,
+            "name": name,
+            "photo_href": photo,
+            "phone": phone,
+            "city": city,
+            "roles_text": roles_text,   # role w nowych liniach
+            "roles": roles,             # ["sedzia","stolikowy","delegat"]
+            "partner": partner,         # np. "SOLECKI Michał"
+            "edit_href": edit_href,
+            "matches_href": matches_href,
+            "offtime_href": offtime_href,
+        }
 
-    # zachowaj relatywną postać: jeśli oryginał był "?...", zwróć "?..."
-    path = u.path if u.path else "/index.php"
-    rebuilt = urlunparse(("", "", path, "", query, ""))
-    if href.startswith("?"):
-        return "?" + query
-    return path + ("?" + query if query else "")
+    return {
+        "paging": {
+            "count": count,
+            "offset": current_offset,
+            "max_offset": max_offset,
+        },
+        "officials": officials,
+    }
 
 
-async def _scrape_all_pages(
-    *,
-    client: AsyncClient,
-    cookies: Dict[str, str],
-    entry_href: str,
-    max_pages_hard_limit: int = 200,
-) -> List[Dict[str, Any]]:
-    """
-    Przechodzi wszystkie strony listy sędziów/delegatów.
-    """
-    seen_keys = set()
-    out: List[Dict[str, Any]] = []
-
-    # pobierz pierwszą stronę
-    _, html0 = await fetch_with_correct_encoding(client, entry_href, method="GET", cookies=cookies)
-    parsed0 = _parse_officials_page(html0)
-    items0 = parsed0.get("items", []) or []
-    pager0 = parsed0.get("pager", {}) or {}
-
-    for it in items0:
-        k = _clean_spaces(it.get("key", ""))
-        if k and k not in seen_keys:
-            seen_keys.add(k)
-            out.append(it)
-
-    page_param = _clean_spaces(pager0.get("page_param", ""))
-    max_page = int(pager0.get("max_page", 0) or 0)
-
-    # Jeśli wykryliśmy page_param i max_page, idziemy 2..max_page
-    if page_param and max_page >= 2:
-        max_page = min(max_page, max_pages_hard_limit)
-        for p in range(2, max_page + 1):
-            href_p = _set_query_param(entry_href, page_param, str(p))
-            _, htmlp = await fetch_with_correct_encoding(client, href_p, method="GET", cookies=cookies)
-            parsedp = _parse_officials_page(htmlp)
-            for it in parsedp.get("items", []) or []:
-                k = _clean_spaces(it.get("key", ""))
-                if k and k not in seen_keys:
-                    seen_keys.add(k)
-                    out.append(it)
-        return out
-
-    # Fallback: próbuj iść “następna strona” jeśli jest link > / Następna
-    current_href = entry_href
-    for _ in range(max_pages_hard_limit - 1):
-        _, htmlc = await fetch_with_correct_encoding(client, current_href, method="GET", cookies=cookies)
-        soupc = BeautifulSoup(htmlc, "html.parser")
-
-        next_href = ""
-        for a in soupc.find_all("a", href=True):
-            lab = _clean_spaces(a.get_text(" ", strip=True)).lower()
-            if lab in (">", ">>", "następna", "nastepna", "dalej"):
-                cand = _absorb_href_keep_relative(a.get("href", ""))
-                if cand and re.search(r"\ba=sedzia\b", cand, re.I):
-                    next_href = cand
-                    break
-        if not next_href or next_href == current_href:
-            break
-
-        current_href = next_href
-        _, htmln = await fetch_with_correct_encoding(client, current_href, method="GET", cookies=cookies)
-        parsedn = _parse_officials_page(htmln)
-        new_any = False
-        for it in parsedn.get("items", []) or []:
-            k = _clean_spaces(it.get("key", ""))
-            if k and k not in seen_keys:
-                seen_keys.add(k)
-                out.append(it)
-                new_any = True
-        if not new_any:
-            break
-
-    return out
+def _merge_officials(dst: Dict[str, Dict[str, Any]], src: Dict[str, Dict[str, Any]]) -> None:
+    for k, v in (src or {}).items():
+        dst[k] = v
 
 
 # =========================
 # Endpoints
 # =========================
 
-@router.post("/zprp/sedziowie/meta")
-async def get_officials_meta(
+@router.post("/zprp/sedziowie/scrape")
+async def scrape_officials_full(
     payload: ZprpScheduleScrapeRequest,
     settings: Settings = Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
     """
-    Meta:
+    Full scrape "Sędziowie i Delegaci":
     - loguje się
-    - wchodzi na /index.php
-    - wyciąga link do "Sędziowie i Delegaci"
+    - wchodzi na /index.php (home)
+    - z menu wyciąga href do "Sędziowie i Delegaci" (z parametrami konta)
+    - pobiera wszystkie strony (offset=0..max_offset) dla aktualnego 'count' (domyślnie 10)
+    - zwraca JSON keyed po NrSedzia
     """
     private_key, _ = keys
     try:
@@ -588,29 +398,85 @@ async def get_officials_meta(
 
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
+
+        # home po zalogowaniu (żeby pobrać menu link z parametrami)
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
-        sedzia_href = _extract_sedzia_link_from_home(html_home)
+
+        # link do zakładki
+        sedzia_href = _extract_menu_href_from_page(
+            html_home,
+            label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
+            href_regex=r"\ba=sedzia\b",
+        )
+
+        # pierwsza strona
+        _, html0 = await fetch_with_correct_encoding(client, sedzia_href, method="GET", cookies=cookies)
+        parsed0 = _parse_officials_page(html0, current_offset=0)
+
+        all_officials: Dict[str, Dict[str, Any]] = {}
+        _merge_officials(all_officials, parsed0["officials"])
+
+        paging0 = parsed0["paging"]
+        count = int(paging0.get("count", 10))
+        max_offset = int(paging0.get("max_offset", 0))
+
+        # bazowe parametry do kolejnych stron: bierzemy z sedzia_href (np. Filtr_archiwum, Filtr_woj2, count)
+        try:
+            u0 = urlparse(
+                sedzia_href if sedzia_href.startswith("http")
+                else ("http://x" + sedzia_href if sedzia_href.startswith("?") else "http://x/" + sedzia_href)
+            )
+            base_qs = parse_qs(u0.query)
+        except Exception:
+            base_qs = {}
+
+        # normalizujemy bazowe: zawsze a=sedzia
+        # (parse_qs daje listy)
+        base_qs["a"] = ["sedzia"]
+        # count: trzymaj spójnie z tym co zwróciła strona
+        base_qs["count"] = [str(count)]
+        # offset będziemy nadpisywać
+
+        # iteruj po kolejnych stronach
+        for offset in range(1, max_offset + 1):
+            qs = {k: (v[:] if isinstance(v, list) else [str(v)]) for k, v in base_qs.items()}
+            qs["offset"] = [str(offset)]
+            path = "/index.php?" + urlencode(qs, doseq=True)
+
+            _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
+            parsed = _parse_officials_page(html, current_offset=offset)
+            _merge_officials(all_officials, parsed["officials"])
+
+            logger.info("ZPRP sedzia: fetched offset=%s count=%s officials_total=%s", offset, count, len(all_officials))
 
         return {
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
-            "sedzia_entry_href": sedzia_href,
+            "entry_href": sedzia_href,
+            "paging": {
+                "count": count,
+                "offset_min": 0,
+                "offset_max": max_offset,
+                "pages": max_offset + 1,
+            },
+            "officials": all_officials,
+            "summary": {
+                "officials_total": len(all_officials),
+            },
         }
 
 
-@router.post("/zprp/sedziowie/scrape")
-async def scrape_officials(
+@router.post("/zprp/sedziowie/scrape_lite")
+async def scrape_officials_lite(
     payload: ZprpScheduleScrapeRequest,
     settings: Settings = Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
     """
-    Scrape:
-    - logowanie
-    - home -> link "Sędziowie i Delegaci"
-    - wejście na listę i przejście po stronach (domyślnie 10/strona)
-    - zwrot listy rekordów:
-        name, photo_href, phone, city, roles[], partner, edit_href, matches_href, offtime_href
+    Lite scrape:
+    - loguje się
+    - wchodzi na home, bierze href do "Sędziowie i Delegaci"
+    - pobiera TYLKO pierwszą stronę (offset=0)
     """
     private_key, _ = keys
     try:
@@ -623,20 +489,26 @@ async def scrape_officials(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
-        sedzia_href = _extract_sedzia_link_from_home(html_home)
 
-        # Ważne: z menu często jest "?a=sedzia&Filtr_archiwum=1" (jak w Twoim przykładzie),
-        # więc startujemy dokładnie od tego href.
-        items = await _scrape_all_pages(client=client, cookies=cookies, entry_href=sedzia_href)
+        sedzia_href = _extract_menu_href_from_page(
+            html_home,
+            label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
+            href_regex=r"\ba=sedzia\b",
+        )
 
-        # usuń pomocniczy "key"
-        for it in items:
-            it.pop("key", None)
+        _, html0 = await fetch_with_correct_encoding(client, sedzia_href, method="GET", cookies=cookies)
+        parsed0 = _parse_officials_page(html0, current_offset=0)
+
+        officials = parsed0["officials"]
+        paging0 = parsed0["paging"]
 
         return {
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
-            "sedzia_entry_href": sedzia_href,
-            "count": len(items),
-            "officials": items,
+            "entry_href": sedzia_href,
+            "paging": paging0,
+            "officials": officials,
+            "summary": {
+                "officials_total": len(officials),
+            },
         }
