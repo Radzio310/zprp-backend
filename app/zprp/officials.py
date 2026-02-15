@@ -30,6 +30,7 @@ _RE_INT = re.compile(r"(\d+)")
 _RE_LP_DOT = re.compile(r"^\s*(\d+)\.\s*$")
 _RE_CITY_SUFFIX = re.compile(r"\s*\([A-Z]{1,3}\)\s*$")  # (SL)
 _RE_PARA_Z = re.compile(r"Para\s+z\s*:?\s*(.+)$", re.I)
+_RE_PARENS = re.compile(r"\s*\([^)]*\)\s*")  # usuwa "(...)"
 
 
 def _now_iso() -> str:
@@ -116,7 +117,7 @@ def _row_is_data_tr(tr) -> bool:
     if not tr:
         return False
 
-    tds = tr.find_all("td")  # UWAGA: bez recursive=False (HTML ma formy w środku)
+    tds = tr.find_all("td")
     if len(tds) < 8:
         return False
 
@@ -142,14 +143,72 @@ def _parse_photo_src(td) -> str:
     return _absorb_href_keep_relative(_clean_spaces(img.get("src", "")))
 
 
+def _smart_title_token(tok: str) -> str:
+    """
+    Lepsze niż .title() dla nazwisk z myślnikami i polskimi znakami.
+    """
+    tok = _clean_spaces(tok)
+    if not tok:
+        return ""
+    if "-" in tok:
+        parts = [p for p in tok.split("-") if p]
+        return "-".join(_smart_title_token(p) for p in parts)
+    return tok[:1].upper() + tok[1:].lower()
+
+
+def _format_name_last_first_to_first_last(s: str) -> str:
+    """
+    ZPRP zwykle ma "NAZWISKO Imię" (czasem "NAZWISKO  Imię" z dużymi literami).
+    Zwracamy "Imię Nazwisko" i normalizujemy wielkość liter.
+    """
+    s = _clean_spaces(s)
+    if not s:
+        return ""
+
+    parts = [p for p in s.split(" ") if p]
+    if len(parts) == 1:
+        return _smart_title_token(parts[0])
+
+    last = parts[0]
+    first = " ".join(parts[1:])
+
+    first_fmt = " ".join(_smart_title_token(p) for p in first.split(" ") if p)
+    last_fmt = " ".join(_smart_title_token(p) for p in last.split(" ") if p)
+    return _clean_spaces(f"{first_fmt} {last_fmt}")
+
+
 def _parse_name_and_phone(td) -> Tuple[str, str]:
+    """
+    Kolumna zawiera:
+      NAZWISKO Imię (NazwiskoRodowe)
+      (DrugieImię)
+      ... telefon ...
+    Chcemy: "Imię Nazwisko", bez nawiasów.
+    """
     if not td:
         return "", ""
 
-    strings = [s for s in (td.stripped_strings or [])]
-    name = _clean_spaces(strings[0]) if strings else ""
+    # 1) Wyciągnij pierwszą sensowną linię (przed kolejnymi <br>)
+    #    decode_contents -> split po <br to najpewniejsze na tym HTML.
+    raw_lines: List[str] = []
+    for chunk in td.decode_contents().split("<br"):
+        txt = _clean_spaces(BeautifulSoup(chunk, "html.parser").get_text(" ", strip=True))
+        if txt:
+            raw_lines.append(txt)
 
+    first_line = raw_lines[0] if raw_lines else _clean_spaces(td.get_text(" ", strip=True))
+
+    # 2) Usuń wszystko w nawiasach: (Nazwisko rodowe) i (Drugie imię)
+    #    np. "DRAB Krzysztof (DRAB)" -> "DRAB Krzysztof"
+    first_line_no_parens = _clean_spaces(_RE_PARENS.sub(" ", first_line))
+
+    # 3) Zamień kolejność na "Imię Nazwisko"
+    name = _format_name_last_first_to_first_last(first_line_no_parens)
+
+    # --- telefon (jak było, tylko minimalnie stabilniej) ---
     phone = ""
+
+    # W tym HTML telefon jest zwykle w tekście po ikonie telefon.png
     tel_img = td.find("img", src=re.compile(r"telefon\.png", re.I))
     if tel_img:
         parent = tel_img.parent
@@ -158,6 +217,7 @@ def _parse_name_and_phone(td) -> Tuple[str, str]:
             m = re.search(r"(\+?\d[\d\s-]{6,})", tail)
             if m:
                 phone = _clean_spaces(m.group(1))
+
     if not phone:
         txt = _clean_spaces(td.get_text(" ", strip=True))
         m = re.search(r"(\+?\d[\d\s-]{6,})", txt)
@@ -174,13 +234,22 @@ def _parse_city(td) -> str:
 
 
 def _parse_roles_and_partner(td) -> Tuple[str, List[str], str, List[str]]:
+    """
+    Kolumna ma np.:
+      "Sędzia<br>Para z : KASZNIA Wojciech<br> <br>Stolikowy"
+    albo:
+      "Delegat<br>Stolikowy"
+    albo:
+      "<br>Stolikowy"
+    """
     if not td:
         return "", [], "", []
 
-    # bierzemy linie po <br> bez polegania na strukturze DOM
+    # linie na bazie <br> (jak w nazwie)
     parts: List[str] = []
     for chunk in td.decode_contents().split("<br"):
         txt = _clean_spaces(BeautifulSoup(chunk, "html.parser").get_text(" ", strip=True))
+        # UWAGA: w tej kolumnie są "puste" linie – ignorujemy je
         if txt:
             parts.append(txt)
 
@@ -193,21 +262,20 @@ def _parse_roles_and_partner(td) -> Tuple[str, List[str], str, List[str]]:
             roles.append(canon)
             roles_text_lines.append(label)
 
+    # wykrywanie ról / partnera
     for p in parts:
         m = _RE_PARA_Z.search(p)
         if m and not partner:
             partner = _clean_spaces(m.group(1))
             continue
 
+        # role mogą występować z odstępami
         if re.search(r"\bSędzia\b", p, re.I):
             add_role("sedzia", "Sędzia")
-            continue
         if re.search(r"\bDelegat\b", p, re.I):
             add_role("delegat", "Delegat")
-            continue
         if re.search(r"\bStolikowy\b", p, re.I):
             add_role("stolikowy", "Stolikowy")
-            continue
 
     roles_text = "\n".join(roles_text_lines).strip()
     return roles_text, roles, partner, parts
@@ -243,7 +311,6 @@ def _extract_base_qs_from_paging_form(table: Any) -> Dict[str, str]:
     if not table:
         return {}
 
-    # szukamy formy, która ma select name="count"
     paging_form = None
     for f in table.find_all("form"):
         if f.find("select", attrs={"name": "count"}):
@@ -260,7 +327,6 @@ def _extract_base_qs_from_paging_form(table: Any) -> Dict[str, str]:
         if name:
             qs[name] = val
 
-    # count z select
     sel = paging_form.find("select", attrs={"name": "count"})
     if sel:
         opt_sel = sel.find("option", selected=True)
@@ -313,8 +379,7 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
     count, max_offset = _extract_paging_state(table)
     base_qs = _extract_base_qs_from_paging_form(table)
 
-    # DIAGNOSTYKA: ile tr w ogóle widzimy
-    all_trs = table.find_all("tr")  # <--- KLUCZOWA ZMIANA (bez recursive=False)
+    all_trs = table.find_all("tr")
     logger.info(
         "Officials page parsed offset=%s count=%s max_offset=%s trs_seen=%s base_qs_keys=%s",
         current_offset,
@@ -336,7 +401,7 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
             continue
 
         data_rows += 1
-        tds = tr.find_all("td")  # bez recursive=False
+        tds = tr.find_all("td")
 
         nr = _clean_spaces(tds[0].get("title", ""))  # NrSedzia
         lp = _safe_int(_clean_spaces(tds[0].get_text(" ", strip=True)), default=0)
@@ -392,7 +457,7 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
 
     return {
         "paging": {"count": count, "offset": current_offset, "max_offset": max_offset},
-        "base_qs": base_qs,  # <--- NOWE: weźmiemy to do budowania kolejnych requestów
+        "base_qs": base_qs,
         "officials": officials,
     }
 
@@ -476,11 +541,9 @@ async def scrape_officials_full(
         count = int(paging0.get("count", 10))
         max_offset = int(paging0.get("max_offset", 0))
 
-        # KLUCZOWE: bazę do kolejnych requestów bierzemy z hidden inputów strony
         base_qs0 = parsed0.get("base_qs") or {}
         base_qs: Dict[str, str] = dict(base_qs0)
 
-        # wymuszenia
         base_qs["a"] = "sedzia"
         base_qs["Filtr_archiwum"] = base_qs.get("Filtr_archiwum", "1") or "1"
         base_qs["count"] = str(count)
@@ -518,7 +581,6 @@ async def scrape_officials_full(
         role_stats = _summarize_roles(all_officials)
         logger.info("ZPRP officials: FINAL total=%s stats=%s", len(all_officials), role_stats)
 
-        # próbka końcowa (max 5)
         sample_final: List[Dict[str, Any]] = []
         for i, (nr, o) in enumerate(all_officials.items()):
             if i >= 5:
