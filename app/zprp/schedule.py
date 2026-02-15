@@ -15,8 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from httpx import AsyncClient
 
 from app.deps import Settings, get_settings, get_rsa_keys
+from app.schemas import ZprpScheduleScrapeRequest
 from app.utils import fetch_with_correct_encoding
-from app.schemas import ZprpScheduleScrapeRequest  # <- dodasz (opis niżej)
 
 router = APIRouter()
 
@@ -26,9 +26,7 @@ router = APIRouter()
 logger = logging.getLogger("app.zprp.schedule")
 if not logger.handlers:
     handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] %(message)s"
-    )
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
@@ -36,7 +34,6 @@ logger.setLevel(logging.INFO)
 # =========================
 # Regex / helpers
 # =========================
-
 _RE_INT = re.compile(r"(\d+)")
 _RE_SCORE = re.compile(r"(\d+)\s*:\s*(\d+)")
 _RE_HALF = re.compile(r"\(\s*(\d+)\s*:\s*(\d+)\s*\)")
@@ -92,6 +89,10 @@ def _looks_like_name(line: str) -> bool:
         ]
     ):
         return False
+    # telefony / numery
+    if re.fullmatch(r"[\+\d\-\s\(\)\/\.]{6,}", line):
+        return False
+    # same liczby / procenty itp.
     if re.search(r"\d{2,}", line):
         return False
     if " " not in line.strip():
@@ -211,23 +212,23 @@ def _parse_result(td) -> Dict[str, Any]:
 
 def _extract_idzawody_from_tr(tr) -> str:
     """
-    Zwraca string z IdZawody jeśli uda się znaleźć, w przeciwnym razie "".
+    Zwraca IdZawody jeśli uda się znaleźć, w przeciwnym razie "".
+    Uwzględnia:
+    - hidden input name="IdZawody" w formach UstawHale / UstawSedziow
+    - onclick zapiszProtok3(IdZawody,...)
     """
     if not tr:
         return ""
 
-    # 1) hidden input name="IdZawody"
     inp = tr.find("input", attrs={"name": "IdZawody"})
     if inp and inp.get("value"):
         return str(inp.get("value")).strip()
 
-    # 2) regex po HTML
     html = str(tr)
     m = re.search(r'name=["\']IdZawody["\']\s+value=["\'](\d+)["\']', html, re.I)
     if m:
         return m.group(1)
 
-    # 3) JS fallback: zapiszProtok3(191386,...)
     m2 = re.search(r"zapiszProtok3\(\s*(\d+)\s*,", html, re.I)
     if m2:
         return m2.group(1)
@@ -235,7 +236,104 @@ def _extract_idzawody_from_tr(tr) -> str:
     return ""
 
 
+def _normalize_name_line(s: str) -> str:
+    s = _clean_spaces(s)
+    # częsty przypadek: "KOWALCZYK Bartłomiej          L"
+    s = re.sub(r"\s+[A-Za-z]$", "", s).strip()
+    return s
+
+
+def _extract_first_person_name_from_lines(lines: List[str]) -> str:
+    """
+    Zwraca pierwszą sensowną linię wyglądającą jak imię+nazwisko.
+    """
+    for ln in lines:
+        low = ln.lower()
+        if "@" in ln:
+            continue
+        if low.startswith(("tel", "telefon", "e-mail", "mail", "www")):
+            continue
+        if re.fullmatch(r"[\+\d\-\s\(\)\/\.]{6,}", ln):
+            continue
+        if _looks_like_name(ln):
+            return _normalize_name_line(ln)
+    return ""
+
+
+def _split_td_by_top_level_hr(td) -> List[BeautifulSoup]:
+    """
+    Dzieli zawartość TD na segmenty po <hr> (normalnym), zostawiając <hr class="cienka-linia">
+    do rozdziału sędziów w parze.
+    """
+    if not td:
+        return []
+
+    # kopiujemy do nowego soup, żeby bezpiecznie usuwać śmieci
+    holder = BeautifulSoup("<div></div>", "html.parser")
+    container = holder.div
+    container.append(BeautifulSoup(str(td), "html.parser"))
+
+    # TD jest wewnątrz container
+    td2 = container.find("td")
+    if not td2:
+        # fallback: czasem dostaniemy fragment bez td
+        td2 = container
+
+    # usuń elementy techniczne/klikalne
+    for sel in [
+        "form",
+        "button",
+        "input",
+        "select",
+        "option",
+        "span",
+        "img",
+        "script",
+    ]:
+        for el in td2.select(sel):
+            el.decompose()
+
+    # teraz split po <hr> bez class='cienka-linia'
+    segments: List[List[str]] = [[]]
+    # przechodzimy po dzieciach TD i budujemy tekst + <br> jako newline
+    for node in td2.descendants:
+        if getattr(node, "name", None) == "hr":
+            cls = node.get("class") or []
+            if "cienka-linia" in cls:
+                # nie rozdziela ról (tylko parę)
+                segments[-1].append("__HR_THIN__")
+            else:
+                # rozdziela role
+                segments.append([])
+        elif getattr(node, "name", None) == "br":
+            segments[-1].append("\n")
+        elif isinstance(node, str):
+            txt = _clean_spaces(node)
+            if txt:
+                segments[-1].append(txt)
+
+    # zamień segmenty na listę "linii"
+    out_lines: List[List[str]] = []
+    for seg in segments:
+        joined = " ".join(seg)
+        joined = joined.replace("__HR_THIN__", "\n__HR_THIN__\n")
+        # normalizacja newline
+        joined = re.sub(r"\s*\n\s*", "\n", joined).strip()
+        lines = [ln.strip() for ln in joined.split("\n") if ln.strip()]
+        out_lines.append(lines)
+
+    return out_lines
+
+
 def _parse_officials(td) -> Dict[str, str]:
+    """
+    Parsowanie zgodnie z ustaleniami:
+    - w TD są śmieci techniczne (checkboxy/formy/spany) -> ignorujemy
+    - role rozdzielone zwykłymi <hr />
+    - para sędziowska rozdzielona <hr class='cienka-linia'>
+    - mapowanie ról od dołu: ostatni=czas, przedostatni=sekretarz, trzeci od końca=delegat
+    - jeśli brak IdZawody / brak obsady -> zwracamy puste stringi
+    """
     out = {
         "NrSedzia_pierwszy_nazwisko": "",
         "NrSedzia_drugi_nazwisko": "",
@@ -246,74 +344,70 @@ def _parse_officials(td) -> Dict[str, str]:
     if not td:
         return out
 
-    lines = _text_lines(td)
+    segments_lines = _split_td_by_top_level_hr(td)
+    if not segments_lines:
+        return out
 
-    noise_prefixes = (
-        "e-mail",
-        "tel.",
-        "tel:",
-        "telefon",
-        "kom.",
-        "kom:",
-        "mail",
-        "www",
-        "ukryj obsadę",
-        "pokaż obsadę",
-        "ustaw sędziów",
-        "ustaw sedziow",
-        "ustaw halę",
-        "ustaw hale",
-        "zapisz",
-        "usuń",
-        "usun",
-    )
-
-    clean_lines: List[str] = []
-    for ln in lines:
-        low = ln.lower()
-        if any(low.startswith(p) for p in noise_prefixes):
+    # 1) Para sędziowska = segment[0], wewnątrz rozdzielony "__HR_THIN__"
+    first_seg = segments_lines[0] if len(segments_lines) >= 1 else []
+    # rozdziel po thin-hr markerze
+    judges_a: List[str] = []
+    judges_b: List[str] = []
+    cur = judges_a
+    for ln in first_seg:
+        if ln == "__HR_THIN__":
+            cur = judges_b
             continue
-        if "@" in ln:
-            continue
-        if re.fullmatch(r"[\+\d\-\s\(\)\/\.]{6,}", ln):
-            continue
-        clean_lines.append(ln)
+        cur.append(ln)
 
-    name_lines = [ln for ln in clean_lines if _looks_like_name(ln)]
-    if name_lines:
-        out["NrSedzia_pierwszy_nazwisko"] = name_lines[0]
-    if len(name_lines) >= 2:
-        out["NrSedzia_drugi_nazwisko"] = name_lines[1]
+    j1 = _extract_first_person_name_from_lines(judges_a)
+    j2 = _extract_first_person_name_from_lines(judges_b)
 
-    def find_after_label(label_regex: str) -> str:
-        for i, ln in enumerate(clean_lines):
-            if re.search(label_regex, ln, re.I):
-                for j in range(i + 1, min(i + 6, len(clean_lines))):
-                    if _looks_like_name(clean_lines[j]):
-                        return clean_lines[j]
-        return ""
+    out["NrSedzia_pierwszy_nazwisko"] = j1
+    out["NrSedzia_drugi_nazwisko"] = j2
 
-    out["NrSedzia_delegat_nazwisko"] = find_after_label(r"\bdelegat\b")
-    out["NrSedzia_sekretarz_nazwisko"] = find_after_label(r"\bsekretarz\b")
-    out["NrSedzia_czas_nazwisko"] = find_after_label(r"\bczas\b|\bmierz")
+    # 2) Pozostałe segmenty (role) -> wyciągnij nazwiska, odfiltruj puste
+    role_names: List[str] = []
+    for seg in segments_lines[1:]:
+        name = _extract_first_person_name_from_lines(seg)
+        if name:
+            role_names.append(name)
+
+    # mapowanie od dołu
+    if len(role_names) >= 1:
+        out["NrSedzia_czas_nazwisko"] = role_names[-1]
+    if len(role_names) >= 2:
+        out["NrSedzia_sekretarz_nazwisko"] = role_names[-2]
+    if len(role_names) >= 3:
+        out["NrSedzia_delegat_nazwisko"] = role_names[-3]
+
     return out
 
 
-def _log_match_parse_info(
-    *,
-    match_obj: Dict[str, Any],
-    parse_meta: Dict[str, Any],
-    idx: int,
-) -> None:
+def _is_match_row(tr) -> bool:
     """
-    Loguje na INFO pełny snapshot meczu + jak został zparsowany.
+    Odfiltrowuje:
+    - nagłówek tabeli ("Lp.")
+    - separatory z colspan
+    - nietypowe wiersze
     """
-    payload = {
-        "idx": idx,
-        "match": match_obj,
-        "parsed_from": parse_meta,
-    }
-    logger.info("ZPRP terminarz: parsed_match=%s", json.dumps(payload, ensure_ascii=False))
+    if not tr:
+        return False
+    tds = tr.find_all("td", recursive=False)
+    if not tds or len(tds) < 11:
+        return False
+    if any(td.has_attr("colspan") for td in tds):
+        return False
+
+    lp_raw = _clean_spaces(tds[0].get_text(" ", strip=True))
+    # nagłówek: "Lp."
+    if lp_raw.lower() in ("lp.", "lp"):
+        return False
+    # wiersz meczu: "56."
+    if not re.fullmatch(r"\d+\.", lp_raw):
+        return False
+
+    return True
 
 
 def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
@@ -322,16 +416,11 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
     trs = soup.find_all("tr")
     synth_i = 0
 
-    # debug: loguj maks 5 pierwszych pełnych meczów na wywołanie parsera
-    debug_logged = 0
-    DEBUG_LIMIT = 5
-
     for tr in trs:
+        if not _is_match_row(tr):
+            continue
+
         tds = tr.find_all("td", recursive=False)
-        if not tds or len(tds) < 11:
-            continue
-        if any(td.has_attr("colspan") for td in tds):
-            continue
 
         td_lp = tds[0]
         td_season = tds[1]
@@ -351,21 +440,14 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         host_raw = td_host.get_text(" ", strip=True)
         guest_raw = td_guest.get_text(" ", strip=True)
         kolejka_raw = td_kolejka.get_text(" ", strip=True)
-        date_td_raw = td_date.get_text(" ", strip=True)
-        hall_td_raw = td_hall.get_text(" ", strip=True)
-        att_td_raw = td_att.get_text(" ", strip=True)
-        res_td_raw = td_res.get_text(" ", strip=True)
-        off_td_raw = td_off.get_text(" ", strip=True)
 
         lp = _safe_int(lp_raw, 0)
         season_label = _clean_spaces(season_raw)
         code = _clean_spaces(code_raw)
-
         host_name = _clean_spaces(host_raw)
         guest_name = _clean_spaces(guest_raw)
 
         data_fakt = _parse_iso_datetime_from_td(td_date)
-
         hall = _parse_hall(td_hall)
         att = _parse_attendance(td_att)
         res = _parse_result(td_res)
@@ -377,22 +459,23 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         m_rng = re.search(r"\(\s*([^)]+)\s*\)", kolejka_txt)
         kolejka_range = _clean_spaces(m_rng.group(1)) if m_rng else ""
 
-        # --- KLUCZOWA ZMIANA: rozdzielamy Id (unikalne) i IdZawody (numeryczne / None)
+        # IdZawody może być lub nie – NIE pomijamy meczu bez IdZawody
         idzawody_str = _extract_idzawody_from_tr(tr)
-        if idzawody_str and re.fullmatch(r"\d+", idzawody_str):
-            match_id = idzawody_str
-            idzawody: Optional[str] = idzawody_str
-            id_source = "IdZawody_from_dom"
+        idzawody_str = idzawody_str.strip()
+        has_idzawody = bool(idzawody_str and re.fullmatch(r"\d+", idzawody_str))
+
+        if has_idzawody:
+            match_id = idzawody_str  # stabilny klucz, zgodny z resztą systemu
+            idzawody_field = idzawody_str
         else:
             synth_i += 1
+            # stabilny-ish fallback (unikalny w obrębie fetchu)
             match_id = f"synthetic:{season_label}:{code}:{lp}:{synth_i}"
-            idzawody = None
-            id_source = "synthetic_fallback"
-        # ---
+            idzawody_field = ""  # wymaganie: pole puste
 
         match_obj: Dict[str, Any] = {
             "Id": match_id,
-            "IdZawody": idzawody,
+            "IdZawody": idzawody_field,
             "Lp": lp,
             "RozgrywkiCode": code,
             "season": season_label,
@@ -427,41 +510,6 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
 
         out[match_id] = match_obj
 
-        # =========================
-        # DEBUG LOG: pierwsze 5 meczów z każdego parsowania tabeli
-        # =========================
-        if debug_logged < DEBUG_LIMIT:
-            # Meta: co wczytaliśmy i jak
-            parse_meta = {
-                "id_source": id_source,
-                "idzawody_extracted": idzawody_str or None,
-                "raw_cells": {
-                    "lp": _clean_spaces(lp_raw),
-                    "season": _clean_spaces(season_raw),
-                    "kolejka": _clean_spaces(kolejka_raw),
-                    "code": _clean_spaces(code_raw),
-                    "date_td_text": _clean_spaces(date_td_raw),
-                    "hall_td_text": _clean_spaces(hall_td_raw),
-                    "attendance_td_text": _clean_spaces(att_td_raw),
-                    "host": _clean_spaces(host_raw),
-                    "result_td_text": _clean_spaces(res_td_raw),
-                    "guest": _clean_spaces(guest_raw),
-                    "officials_td_text": _clean_spaces(off_td_raw),
-                },
-                "derived": {
-                    "data_fakt": data_fakt,
-                    "kolejka_no": kolejka_no,
-                    "kolejka_range": kolejka_range,
-                    "hall_parsed": hall,
-                    "attendance_parsed": att,
-                    "result_parsed": res,
-                    "officials_parsed": off,
-                },
-            }
-
-            _log_match_parse_info(match_obj=match_obj, parse_meta=parse_meta, idx=debug_logged + 1)
-            debug_logged += 1
-
     return out
 
 
@@ -490,19 +538,15 @@ def _detect_sex_from_kategoria_value(val: str, label: str) -> str:
     return ""
 
 
-def _pick_season_id(
-    seasons: List[Tuple[str, str, bool]],
-    requested: Optional[str],
-) -> str:
+def _pick_season_id(seasons: List[Tuple[str, str, bool]], requested: Optional[str]) -> str:
     picked = _clean_spaces(requested or "")
     if picked:
         if any(v == picked for (v, _, _) in seasons):
             return picked
         raise HTTPException(400, f"Nieprawidłowy season_id: {picked}")
 
-    picked = (
-        next((v for (v, _, sel) in seasons if sel and v), None)
-        or next((v for (v, _, _) in seasons if v), None)
+    picked = next((v for (v, _, sel) in seasons if sel and v), None) or next(
+        (v for (v, _, _) in seasons if v), None
     )
     if not picked:
         raise HTTPException(500, "Nie udało się ustalić Filtr_sezon.")
@@ -512,27 +556,18 @@ def _pick_season_id(
 # =========================
 # Auth helpers (RSA decrypt + login)
 # =========================
-
 def _decrypt_field(private_key, enc_b64: str) -> str:
     cipher = base64.b64decode(enc_b64)
     plain = private_key.decrypt(cipher, padding.PKCS1v15())
     return plain.decode("utf-8")
 
 
-async def _login_zprp_and_get_cookies(
-    client: AsyncClient,
-    username: str,
-    password: str,
-) -> Dict[str, str]:
+async def _login_zprp_and_get_cookies(client: AsyncClient, username: str, password: str) -> Dict[str, str]:
     resp_login, _ = await fetch_with_correct_encoding(
         client,
         "/login.php",
         method="POST",
-        data={
-            "login": username,
-            "haslo": password,
-            "from": "/index.php?",
-        },
+        data={"login": username, "haslo": password, "from": "/index.php?"},
     )
     if "/index.php" not in resp_login.url.path:
         raise HTTPException(401, "Logowanie nie powiodło się")
@@ -569,12 +604,7 @@ async def get_terminarz_meta(
     ) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        _, html0 = await fetch_with_correct_encoding(
-            client,
-            "/index.php?a=terminarz",
-            method="GET",
-            cookies=cookies,
-        )
+        _, html0 = await fetch_with_correct_encoding(client, "/index.php?a=terminarz", method="GET", cookies=cookies)
         soup0 = BeautifulSoup(html0, "html.parser")
 
         sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
@@ -602,29 +632,17 @@ async def get_terminarz_meta(
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
             "Filtr_sezon": picked_season,
-            "seasons_available": [
-                {"value": v, "label": lab, "selected": sel} for (v, lab, sel) in seasons
-            ],
+            "seasons_available": [{"value": v, "label": lab, "selected": sel} for (v, lab, sel) in seasons],
             "categories": [],
         }
 
         for (cat_val, cat_label, cat_sel) in cats:
             sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
 
-            qs = {
-                "a": "terminarz",
-                "Filtr_sezon": picked_season,
-                "Filtr_kategoria": cat_val,
-                "IdRundy": "ALL",
-            }
+            qs = {"a": "terminarz", "Filtr_sezon": picked_season, "Filtr_kategoria": cat_val, "IdRundy": "ALL"}
             path_cat = "/index.php?" + urlencode(qs, doseq=True)
 
-            _, html_cat = await fetch_with_correct_encoding(
-                client,
-                path_cat,
-                method="GET",
-                cookies=cookies,
-            )
+            _, html_cat = await fetch_with_correct_encoding(client, path_cat, method="GET", cookies=cookies)
             soup_cat = BeautifulSoup(html_cat, "html.parser")
 
             sel_rozgr = soup_cat.find("select", attrs={"name": "IdRozgr"})
@@ -637,10 +655,7 @@ async def get_terminarz_meta(
                     "label": cat_label,
                     "selected": cat_sel,
                     "sex": sex,
-                    "competitions": [
-                        {"IdRozgr": v, "label": lab, "selected": sel}
-                        for (v, lab, sel) in rozgr_opts
-                    ],
+                    "competitions": [{"IdRozgr": v, "label": lab, "selected": sel} for (v, lab, sel) in rozgr_opts],
                     "competitions_count": len(rozgr_opts),
                 }
             )
@@ -655,9 +670,10 @@ async def scrape_terminarz_full(
     keys=Depends(get_rsa_keys),
 ):
     """
-    - payload.username/password: RSA+base64 jak w edit_judge
-    - payload.season_id: opcjonalne
-    - backend sam loguje się do ZPRP i buduje pełny wynik
+    FULL: iteruje po wszystkich kategoriach i rozgrywkach.
+    WAŻNE:
+    - pobiera też mecze bez IdZawody (IdZawody=""), nie pomija ich.
+    - loguje tylko podsumowania (ile meczów / jaka kategoria), bez dumpów meczów.
     """
     private_key, _ = keys
 
@@ -674,12 +690,7 @@ async def scrape_terminarz_full(
     ) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        _, html0 = await fetch_with_correct_encoding(
-            client,
-            "/index.php?a=terminarz",
-            method="GET",
-            cookies=cookies,
-        )
+        _, html0 = await fetch_with_correct_encoding(client, "/index.php?a=terminarz", method="GET", cookies=cookies)
         soup0 = BeautifulSoup(html0, "html.parser")
 
         sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
@@ -687,14 +698,7 @@ async def scrape_terminarz_full(
         if not seasons:
             raise HTTPException(500, "Nie znaleziono listy sezonów (Filtr_sezon).")
 
-        picked_season = _clean_spaces(payload.season_id or "")
-        if not picked_season:
-            picked_season = (
-                next((v for (v, _, sel) in seasons if sel and v), None)
-                or next((v for (v, _, _) in seasons if v), None)
-            )
-        if not picked_season:
-            raise HTTPException(500, "Nie udało się ustalić Filtr_sezon.")
+        picked_season = _pick_season_id(seasons, payload.season_id)
 
         sel_cat = soup0.find("select", attrs={"name": "Filtr_kategoria"})
         cats0 = _parse_select_options(sel_cat)
@@ -706,30 +710,20 @@ async def scrape_terminarz_full(
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
             "Filtr_sezon": picked_season,
-            "seasons_available": [
-                {"value": v, "label": lab, "selected": sel} for (v, lab, sel) in seasons
-            ],
+            "seasons_available": [{"value": v, "label": lab, "selected": sel} for (v, lab, sel) in seasons],
             "categories": [],
             "by_sex": {"K": [], "M": [], "": []},
         }
 
+        total_matches_all = 0
+
         for (cat_val, cat_label, _) in cats:
             sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
 
-            qs = {
-                "a": "terminarz",
-                "Filtr_sezon": picked_season,
-                "Filtr_kategoria": cat_val,
-                "IdRundy": "ALL",
-            }
+            qs = {"a": "terminarz", "Filtr_sezon": picked_season, "Filtr_kategoria": cat_val, "IdRundy": "ALL"}
             path_cat = "/index.php?" + urlencode(qs, doseq=True)
 
-            _, html_cat = await fetch_with_correct_encoding(
-                client,
-                path_cat,
-                method="GET",
-                cookies=cookies,
-            )
+            _, html_cat = await fetch_with_correct_encoding(client, path_cat, method="GET", cookies=cookies)
             soup_cat = BeautifulSoup(html_cat, "html.parser")
 
             sel_rozgr = soup_cat.find("select", attrs={"name": "IdRozgr"})
@@ -743,6 +737,8 @@ async def scrape_terminarz_full(
                 "competitions": [],
             }
 
+            cat_total_matches = 0
+
             for (rozgr_val, rozgr_label, _) in rozgr_opts:
                 qs2 = {
                     "a": "terminarz",
@@ -753,27 +749,39 @@ async def scrape_terminarz_full(
                 }
                 path = "/index.php?" + urlencode(qs2, doseq=True)
 
-                _, html = await fetch_with_correct_encoding(
-                    client,
-                    path,
-                    method="GET",
-                    cookies=cookies,
-                )
-
+                _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
                 matches_map = _parse_matches_table(html)
 
+                cnt = len(matches_map)
+                cat_total_matches += cnt
+                total_matches_all += cnt
+
+                logger.info(
+                    "ZPRP terminarz: FULL fetched matches=%d season=%s cat=%s (%s) rozgr=%s (%s)",
+                    cnt,
+                    picked_season,
+                    cat_val,
+                    cat_label,
+                    rozgr_val,
+                    rozgr_label,
+                )
+
                 cat_obj["competitions"].append(
-                    {
-                        "IdRozgr": rozgr_val,
-                        "label": rozgr_label,
-                        "url": path,
-                        "matches": matches_map,
-                        "count": len(matches_map),
-                    }
+                    {"IdRozgr": rozgr_val, "label": rozgr_label, "url": path, "matches": matches_map, "count": cnt}
                 )
 
             cat_obj["competitions_count"] = len(cat_obj["competitions"])
-            cat_obj["matches_count"] = sum(int(c.get("count", 0)) for c in cat_obj["competitions"])
+            cat_obj["matches_count"] = cat_total_matches
+
+            logger.info(
+                "ZPRP terminarz: FULL category done season=%s cat=%s (%s) sex=%s competitions=%d matches=%d",
+                picked_season,
+                cat_val,
+                cat_label,
+                sex,
+                cat_obj["competitions_count"],
+                cat_total_matches,
+            )
 
             result["categories"].append(cat_obj)
             result["by_sex"].setdefault(sex, []).append(cat_obj)
@@ -783,6 +791,14 @@ async def scrape_terminarz_full(
             "competitions": sum(int(c.get("competitions_count", 0)) for c in result["categories"]),
             "matches": sum(int(c.get("matches_count", 0)) for c in result["categories"]),
         }
+
+        logger.info(
+            "ZPRP terminarz: FULL summary season=%s categories=%d competitions=%d matches=%d",
+            picked_season,
+            result["summary"]["categories"],
+            result["summary"]["competitions"],
+            result["summary"]["matches"],
+        )
 
         return result
 
@@ -794,12 +810,14 @@ async def scrape_terminarz_slim(
     keys=Depends(get_rsa_keys),
 ):
     """
-    Pobiera OSZCZĘDNIE:
-    - jeśli payload.id_rozgr podane -> tylko jedna rozgrywka (IdRozgr) w danej kategorii
-    - jeśli payload.filtr_kategoria podane -> cała kategoria (wszystkie rozgrywki w niej)
-    W obu przypadkach: IdRundy=ALL.
-    Wymagane:
-    - filtr_kategoria musi być podane zawsze (bo IdRozgr bez kategorii nie jest stabilne na tej stronie)
+    LITE:
+    - wymaga filtr_kategoria
+    - jeśli id_rozgr podane -> tylko jedna rozgrywka
+    - jeśli id_rozgr puste -> cała kategoria
+    - zawsze IdRundy=ALL
+    WAŻNE:
+    - pobiera też mecze bez IdZawody (IdZawody=""), nie pomija ich.
+    - loguje tylko podsumowania (ile meczów / jaka kategoria), bez dumpów meczów.
     """
     private_key, _ = keys
 
@@ -820,12 +838,7 @@ async def scrape_terminarz_slim(
     ) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        _, html0 = await fetch_with_correct_encoding(
-            client,
-            "/index.php?a=terminarz",
-            method="GET",
-            cookies=cookies,
-        )
+        _, html0 = await fetch_with_correct_encoding(client, "/index.php?a=terminarz", method="GET", cookies=cookies)
         soup0 = BeautifulSoup(html0, "html.parser")
 
         sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
@@ -843,20 +856,10 @@ async def scrape_terminarz_slim(
         cat_label = next((lab for (v, lab, _) in cats_all if v == cat_val), "")
         sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
 
-        qs_cat = {
-            "a": "terminarz",
-            "Filtr_sezon": picked_season,
-            "Filtr_kategoria": cat_val,
-            "IdRundy": "ALL",
-        }
+        qs_cat = {"a": "terminarz", "Filtr_sezon": picked_season, "Filtr_kategoria": cat_val, "IdRundy": "ALL"}
         path_cat = "/index.php?" + urlencode(qs_cat, doseq=True)
 
-        _, html_cat = await fetch_with_correct_encoding(
-            client,
-            path_cat,
-            method="GET",
-            cookies=cookies,
-        )
+        _, html_cat = await fetch_with_correct_encoding(client, path_cat, method="GET", cookies=cookies)
         soup_cat = BeautifulSoup(html_cat, "html.parser")
 
         sel_rozgr = soup_cat.find("select", attrs={"name": "IdRozgr"})
@@ -886,25 +889,35 @@ async def scrape_terminarz_slim(
             }
             path = "/index.php?" + urlencode(qs, doseq=True)
 
-            _, html = await fetch_with_correct_encoding(
-                client,
-                path,
-                method="GET",
-                cookies=cookies,
-            )
-
+            _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
             matches_map = _parse_matches_table(html)
-            total_matches += len(matches_map)
+            cnt = len(matches_map)
+            total_matches += cnt
+
+            logger.info(
+                "ZPRP terminarz: LITE fetched matches=%d season=%s cat=%s (%s) rozgr=%s (%s)",
+                cnt,
+                picked_season,
+                cat_val,
+                cat_label,
+                rozgr_val,
+                rozgr_label,
+            )
 
             competitions_out.append(
-                {
-                    "IdRozgr": rozgr_val,
-                    "label": rozgr_label,
-                    "url": path,
-                    "count": len(matches_map),
-                    "matches": matches_map,
-                }
+                {"IdRozgr": rozgr_val, "label": rozgr_label, "url": path, "count": cnt, "matches": matches_map}
             )
+
+        logger.info(
+            "ZPRP terminarz: LITE summary season=%s cat=%s (%s) sex=%s competitions=%d matches=%d mode=%s",
+            picked_season,
+            cat_val,
+            cat_label,
+            sex,
+            len(competitions_out),
+            total_matches,
+            ("single_competition" if wanted_id_rozgr else "whole_category"),
+        )
 
         return {
             "fetched_at": _now_iso(),
