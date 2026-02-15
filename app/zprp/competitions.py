@@ -65,7 +65,6 @@ async def _login_zprp_and_get_cookies(client: AsyncClient, username: str, passwo
         method="POST",
         data={"login": username, "haslo": password, "from": "/index.php?"},
     )
-    # sukces = po redirect lądujemy na /index.php
     if "/index.php" not in resp_login.url.path:
         raise HTTPException(401, "Logowanie nie powiodło się")
     return dict(resp_login.cookies)
@@ -85,14 +84,9 @@ def _parse_select_options(sel) -> List[Tuple[str, str, bool]]:
 
 
 def _absorb_href_keep_relative(href: str) -> str:
-    """
-    Na ZPRP href zwykle jest relatywny typu '?a=rozgrywki...'
-    Zwracamy relatywny path (bez hosta), żeby front/back mógł go użyć w ramach base_url.
-    """
     href = (href or "").strip()
     if not href:
         return ""
-    # czasem ktoś wklei pełny URL - redukujemy do path+query
     try:
         u = urlparse(href)
         if u.scheme and u.netloc:
@@ -103,11 +97,6 @@ def _absorb_href_keep_relative(href: str) -> str:
 
 
 def _extract_rogrywki_link_from_home(html: str) -> Tuple[str, str, str]:
-    """
-    Z głównej strony po zalogowaniu bierzemy link do zakładki "Rozgrywki".
-    To ważne, bo zawiera Filtr_woj (związany z kontem wojewódzkim).
-    Zwraca: (href, filtr_woj, filtr_sezon)
-    """
     soup = BeautifulSoup(html, "html.parser")
 
     a = soup.find("a", string=re.compile(r"^\s*Rozgrywki\s*$", re.I))
@@ -120,8 +109,7 @@ def _extract_rogrywki_link_from_home(html: str) -> Tuple[str, str, str]:
 
     try:
         u = urlparse(
-            href
-            if href.startswith("http")
+            href if href.startswith("http")
             else ("http://x" + href if href.startswith("?") else "http://x/" + href)
         )
         qs = parse_qs(u.query)
@@ -175,17 +163,14 @@ def _parse_actions_cell(td) -> List[Dict[str, Any]]:
     for a in td.find_all("a"):
         href = _absorb_href_keep_relative(a.get("href", ""))
         txt = _clean_spaces(a.get_text(" ", strip=True))
-
         if not href and not txt:
             continue
 
         item: Dict[str, Any] = {"label": txt, "href": href}
 
-        # heurystyki po parametrze a/b
         try:
             u = urlparse(
-                href
-                if href.startswith("http")
+                href if href.startswith("http")
                 else ("http://x" + href if href.startswith("?") else "http://x/" + href)
             )
             qs = parse_qs(u.query)
@@ -207,9 +192,6 @@ def _parse_actions_cell(td) -> List[Dict[str, Any]]:
 
 
 def _pick_action_href(actions: List[Dict[str, Any]], label_regex: str) -> str:
-    """
-    Znajdź href akcji po labelu (np. 'Drużyny').
-    """
     rx = re.compile(label_regex, re.I)
     for a in actions or []:
         if rx.search(_clean_spaces(a.get("label", ""))):
@@ -284,7 +266,7 @@ def _parse_competitions_page(html: str) -> Dict[str, Any]:
             "teams_required": teams_required,
             "teams_declared": teams_declared,
             "actions": actions,
-            "teams_href": teams_href,  # szybki skrót
+            "teams_href": teams_href,
         }
 
     return {
@@ -309,21 +291,12 @@ def _pick_selected_value(opts: List[Tuple[str, str, bool]]) -> str:
 # =========================
 
 def _strip_team_name(raw: str) -> str:
-    """
-    W tabeli często jest: 'MKS Start Michałkowice  (SL)'
-    Chcemy samą nazwę: 'MKS Start Michałkowice'
-    """
     s = _clean_spaces(raw)
     s = re.sub(r"\s*\([A-Z]{1,3}\)\s*$", "", s).strip()
     return s
 
 
 def _looks_like_participants_header(tr) -> bool:
-    """
-    W przykładzie nad tabelą jest wiersz:
-      <td>Drużyny uczestniczące w rozgrywkach</td>
-    Potem w następnej linii <td valign="top"><table ...> ... </table></td>
-    """
     if not tr:
         return False
     tds = tr.find_all("td", recursive=False)
@@ -334,24 +307,14 @@ def _looks_like_participants_header(tr) -> bool:
 
 
 def _parse_competition_teams_from_teams_page(html: str) -> List[str]:
-    """
-    Parsuje stronę ?a=rozgrywki&b=zespoly&IdRozgr=...
-    i zwraca listę NAZW drużyn z lewej tabeli (uczestniczące).
-    """
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1) najpewniejsze: znaleźć wiersz nagłówkowy z tekstem "Drużyny uczestniczące w rozgrywkach",
-    #    a potem w kolejnym <tr> w pierwszej komórce jest <table> z listą.
-    main_table = soup.find("table", attrs={"border": "1", "cellpadding": re.compile(r".*"), "cellspacing": re.compile(r".*")})
-    # powyższe jest luźne; w praktyce stron jest kilka tabel. Więc robimy skan wszystkich <tr>.
     teams: List[str] = []
-
     trs = soup.find_all("tr")
     target_nested_table = None
 
     for i, tr in enumerate(trs):
         if _looks_like_participants_header(tr):
-            # szukamy kolejnych wierszy aż trafimy w nested table w pierwszej komórce
             for j in range(i + 1, min(i + 6, len(trs))):
                 tds = trs[j].find_all("td", recursive=False)
                 if not tds:
@@ -362,7 +325,6 @@ def _parse_competition_teams_from_teams_page(html: str) -> List[str]:
                     break
             break
 
-    # 2) fallback: wybierz najbardziej "pasującą" tabelę z linkami do ?a=zespoly&b=sklad i pdf2.png
     if target_nested_table is None:
         candidates = []
         for tbl in soup.find_all("table"):
@@ -372,7 +334,6 @@ def _parse_competition_teams_from_teams_page(html: str) -> List[str]:
             has_sklad_links = bool(tbl.find("a", href=re.compile(r"\ba=zespoly\b.*\bb=sklad\b", re.I)))
             has_pdf = bool(tbl.find("img", src=re.compile(r"pdf2\.png", re.I)))
             if has_sklad_links and has_pdf:
-                # preferuj większą liczbę <tr>
                 candidates.append((len(tbl.find_all("tr")), tbl))
         if candidates:
             candidates.sort(key=lambda x: x[0], reverse=True)
@@ -381,17 +342,14 @@ def _parse_competition_teams_from_teams_page(html: str) -> List[str]:
     if target_nested_table is None:
         return teams
 
-    # Tabela ma header (Lp, pdf, Nazwa, ...)
     for tr in target_nested_table.find_all("tr"):
         tds = tr.find_all("td", recursive=False)
         if len(tds) < 3:
             continue
-        # pierwsza komórka to Lp "1."
         lp_txt = _clean_spaces(tds[0].get_text(" ", strip=True))
         if not _RE_LP_DOT.match(lp_txt):
             continue
 
-        # kolumna nazwy to zwykle td[2] z <a href="?a=zespoly&b=sklad...">NAZWA</a>
         name_td = tds[2]
         a = name_td.find("a", href=True)
         name_txt = _clean_spaces(a.get_text(" ", strip=True) if a else name_td.get_text(" ", strip=True))
@@ -400,6 +358,67 @@ def _parse_competition_teams_from_teams_page(html: str) -> List[str]:
             teams.append(name_txt)
 
     return teams
+
+
+# =========================
+# Shared scrape helper
+# =========================
+
+async def _scrape_one_season(
+    *,
+    client: AsyncClient,
+    cookies: Dict[str, str],
+    season_id: str,
+    season_label: str,
+    filtr_woj: str,
+) -> Dict[str, Any]:
+    """
+    Pobiera rozgrywki tylko dla jednego sezonu + dopina teams dla każdej rozgrywki.
+    """
+    qs = {
+        "a": "rozgrywki",
+        "Filtr_sezon": season_id,
+        "Filtr_woj": filtr_woj,
+        "Filtr_klub": "",
+        "Filtr_kategoria": "",
+        "Filtr_plec": "",
+        "Filtr_typ": "",
+        "Nazwa": "",
+        "sort": "",
+    }
+    path = "/index.php?" + urlencode(qs, doseq=True)
+
+    _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
+    parsed = _parse_competitions_page(html)
+    comps = parsed["competitions"]
+
+    for cid, comp in comps.items():
+        teams_href = _clean_spaces(comp.get("teams_href", "")) or _pick_action_href(comp.get("actions", []), r"^Drużyny\b")
+        if not teams_href:
+            comp["teams"] = []
+            comp["teams_count"] = 0
+            continue
+
+        try:
+            _, html_teams = await fetch_with_correct_encoding(client, teams_href, method="GET", cookies=cookies)
+            teams = _parse_competition_teams_from_teams_page(html_teams)
+            comp["teams"] = teams
+            comp["teams_count"] = len(teams)
+            comp["teams_page_href"] = teams_href
+        except Exception as e:
+            logger.warning("Teams scrape failed IdRozgr=%s href=%s err=%s", cid, teams_href, e)
+            comp["teams"] = []
+            comp["teams_count"] = 0
+            comp["teams_page_href"] = teams_href
+            comp["teams_error"] = str(e)
+
+    return {
+        "season_id": season_id,
+        "season_label": season_label,
+        "url": path,
+        "count": len(comps),
+        "competitions": comps,
+    }
 
 
 # =========================
@@ -444,6 +463,81 @@ async def get_rozgrywki_meta(
         }
 
 
+@router.post("/zprp/rozgrywki/scrape_lite")
+async def scrape_rozgrywki_lite(
+    payload: ZprpScheduleScrapeRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """
+    Lite scrape:
+    - pobiera TYLKO wybrany sezon (payload.season_id albo domyślnie zaznaczony na stronie)
+    - dopina teams (uczestniczące) dla rozgrywek z tego sezonu
+    """
+    private_key, _ = keys
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+
+    # oczekujemy, że ZprpScheduleScrapeRequest ma opcjonalne pole season_id (string)
+    requested_season_id = _clean_spaces(getattr(payload, "season_id", "") or "")
+
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
+        cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
+
+        _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
+        rozgrywki_href, filtr_woj_home, _ = _extract_rogrywki_link_from_home(html_home)
+
+        _, html0 = await fetch_with_correct_encoding(client, rozgrywki_href, method="GET", cookies=cookies)
+        parsed0 = _parse_competitions_page(html0)
+        filters0 = parsed0["filters"]
+
+        seasons_list = filters0.get("Filtr_sezon", []) or []
+        woj_list = filters0.get("Filtr_woj", []) or []
+
+        filtr_woj = _pick_selected_value([(x["value"], x["label"], bool(x.get("selected"))) for x in woj_list]) or _clean_spaces(filtr_woj_home)
+        if not filtr_woj:
+            filtr_woj = _clean_spaces((filters0.get("hidden", {}) or {}).get("Filtr_woj", ""))
+
+        # sezon: payload.season_id -> jeśli pusty, bierzemy zaznaczony na stronie
+        selected_from_page = _pick_selected_value([(x.get("value", ""), x.get("label", ""), bool(x.get("selected"))) for x in seasons_list])
+        season_id = requested_season_id or selected_from_page
+        if not season_id:
+            raise HTTPException(400, "Brak season_id w payload i nie udało się wykryć zaznaczonego sezonu.")
+
+        season_label = next((x.get("label", "") for x in seasons_list if _clean_spaces(x.get("value", "")) == season_id), "")
+
+        one = await _scrape_one_season(
+            client=client,
+            cookies=cookies,
+            season_id=season_id,
+            season_label=season_label,
+            filtr_woj=filtr_woj,
+        )
+
+        comps = one["competitions"]
+        summary = {
+            "seasons": 1,
+            "competitions_total": int(one.get("count", 0)),
+            "teams_total": sum(int(c.get("teams_count", 0)) for c in comps.values()),
+        }
+
+        return {
+            "fetched_at": _now_iso(),
+            "base_url": settings.ZPRP_BASE_URL,
+            "rozgrywki_entry_href": rozgrywki_href,
+            "Filtr_woj": filtr_woj,
+            "season_id": season_id,
+            "season_label": season_label,
+            "filters_snapshot": filters0,
+            "by_season": {season_id: one},
+            "competitions": comps,  # tylko ten sezon
+            "summary": summary,
+        }
+
+
 @router.post("/zprp/rozgrywki/scrape")
 async def scrape_rozgrywki_full(
     payload: ZprpScheduleScrapeRequest,
@@ -466,11 +560,9 @@ async def scrape_rozgrywki_full(
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        # home po zalogowaniu
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
         rozgrywki_href, filtr_woj_home, filtr_sezon_home = _extract_rogrywki_link_from_home(html_home)
 
-        # strona rozgrywek (domyślnie sezon aktualny)
         _, html0 = await fetch_with_correct_encoding(client, rozgrywki_href, method="GET", cookies=cookies)
         parsed0 = _parse_competitions_page(html0)
 
@@ -484,7 +576,6 @@ async def scrape_rozgrywki_full(
 
         season_values = [x.get("value", "") for x in seasons_list if _clean_spaces(x.get("value", ""))]
         season_values = [v for v in season_values if v not in ("---", "0", "")]
-
         if not season_values:
             raise HTTPException(500, "Nie znaleziono listy sezonów na stronie 'Rozgrywki'.")
 
@@ -492,53 +583,17 @@ async def scrape_rozgrywki_full(
         competitions_all: Dict[str, Dict[str, Any]] = {}
 
         for season_id in season_values:
-            qs = {
-                "a": "rozgrywki",
-                "Filtr_sezon": season_id,
-                "Filtr_woj": filtr_woj,
-                "Filtr_klub": "",
-                "Filtr_kategoria": "",
-                "Filtr_plec": "",
-                "Filtr_typ": "",
-                "Nazwa": "",
-                "sort": "",
-            }
-            path = "/index.php?" + urlencode(qs, doseq=True)
+            season_label = next((x.get("label", "") for x in seasons_list if x.get("value") == season_id), "")
+            one = await _scrape_one_season(
+                client=client,
+                cookies=cookies,
+                season_id=season_id,
+                season_label=season_label,
+                filtr_woj=filtr_woj,
+            )
 
-            _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
-            parsed = _parse_competitions_page(html)
-
-            comps = parsed["competitions"]  # map IdRozgr -> record
-
-            # --- DOŁOŻENIE: pobranie listy drużyn dla każdej rozgrywki ---
-            for cid, comp in comps.items():
-                teams_href = _clean_spaces(comp.get("teams_href", "")) or _pick_action_href(comp.get("actions", []), r"^Drużyny\b")
-                if not teams_href:
-                    comp["teams"] = []
-                    comp["teams_count"] = 0
-                    continue
-
-                try:
-                    _, html_teams = await fetch_with_correct_encoding(client, teams_href, method="GET", cookies=cookies)
-                    teams = _parse_competition_teams_from_teams_page(html_teams)
-                    comp["teams"] = teams
-                    comp["teams_count"] = len(teams)
-                    comp["teams_page_href"] = teams_href
-                except Exception as e:
-                    # nie chcemy wywalać całego scrapu przez jedną rozgrywkę
-                    logger.warning("Teams scrape failed IdRozgr=%s href=%s err=%s", cid, teams_href, e)
-                    comp["teams"] = []
-                    comp["teams_count"] = 0
-                    comp["teams_page_href"] = teams_href
-                    comp["teams_error"] = str(e)
-
-            competitions_by_season[season_id] = {
-                "season_id": season_id,
-                "season_label": next((x.get("label", "") for x in seasons_list if x.get("value") == season_id), ""),
-                "url": path,
-                "count": len(comps),
-                "competitions": comps,
-            }
+            comps = one["competitions"]
+            competitions_by_season[season_id] = one
 
             for k, v in comps.items():
                 competitions_all[k] = v
