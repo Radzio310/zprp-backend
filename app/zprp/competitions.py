@@ -5,7 +5,7 @@ import base64
 import datetime
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 from urllib.parse import urlencode, urlparse, parse_qs
 
 from bs4 import BeautifulSoup
@@ -35,7 +35,6 @@ logger.setLevel(logging.INFO)
 # =========================
 _RE_INT = re.compile(r"(\d+)")
 _RE_LP_DOT = re.compile(r"^\s*(\d+)\.\s*$")
-_RE_STATUS = re.compile(r"^(aktywny|nieaktywny|archiwalny)\b", re.I)
 
 
 def _now_iso() -> str:
@@ -113,16 +112,18 @@ def _extract_rogrywki_link_from_home(html: str) -> Tuple[str, str, str]:
 
     a = soup.find("a", string=re.compile(r"^\s*Rozgrywki\s*$", re.I))
     if not a:
-        # fallback: po class="przycisk" i href zawiera a=rozgrywki
         a = soup.find("a", href=re.compile(r"\ba=rozgrywki\b", re.I))
 
     href = _absorb_href_keep_relative(a.get("href", "") if a else "")
     if not href:
         raise HTTPException(500, "Nie znaleziono linku do zakładki 'Rozgrywki' na stronie głównej.")
 
-    # wyciągamy Filtr_woj i Filtr_sezon z query
     try:
-        u = urlparse(href if href.startswith("http") else ("http://x" + href if href.startswith("?") else "http://x/" + href))
+        u = urlparse(
+            href
+            if href.startswith("http")
+            else ("http://x" + href if href.startswith("?") else "http://x/" + href)
+        )
         qs = parse_qs(u.query)
         filtr_woj = _clean_spaces((qs.get("Filtr_woj", [""]) or [""])[0])
         filtr_sezon = _clean_spaces((qs.get("Filtr_sezon", [""]) or [""])[0])
@@ -134,13 +135,7 @@ def _extract_rogrywki_link_from_home(html: str) -> Tuple[str, str, str]:
 
 
 def _find_competitions_table(soup: BeautifulSoup):
-    """
-    Strona rozgrywek ma tabelę id="tabelka".
-    """
-    if not soup:
-        return None
-    table = soup.find("table", attrs={"id": "tabelka"})
-    return table
+    return soup.find("table", attrs={"id": "tabelka"}) if soup else None
 
 
 def _row_is_data_tr(tr) -> bool:
@@ -149,7 +144,6 @@ def _row_is_data_tr(tr) -> bool:
     tds = tr.find_all("td", recursive=False)
     if len(tds) < 10:
         return False
-    # pierwsza komórka: "N." + title=IdRozgr
     t0 = _clean_spaces(tds[0].get_text(" ", strip=True))
     if not _RE_LP_DOT.match(t0):
         return False
@@ -158,10 +152,6 @@ def _row_is_data_tr(tr) -> bool:
 
 
 def _parse_regulamin_cell(td) -> Dict[str, Any]:
-    """
-    Kolumna "Regulamin" bywa pusta (&nbsp;) albo zawiera link(i).
-    Zwracamy: {text, links:[{label, href}]}
-    """
     out = {"text": "", "links": []}  # type: ignore[dict-item]
     if not td:
         return out
@@ -178,11 +168,6 @@ def _parse_regulamin_cell(td) -> Dict[str, Any]:
 
 
 def _parse_actions_cell(td) -> List[Dict[str, Any]]:
-    """
-    Ostatnia kolumna zawiera linki-akcje: Rundy, Kolejki, Zawody, Drużyny, Tabela, Terminarz, Edycja.
-    Parsujemy wszystkie <a>.
-    Dodatkowo dla "Rundy" wyciągamy liczbę (np. "Rundy  2").
-    """
     out: List[Dict[str, Any]] = []
     if not td:
         return out
@@ -196,9 +181,13 @@ def _parse_actions_cell(td) -> List[Dict[str, Any]]:
 
         item: Dict[str, Any] = {"label": txt, "href": href}
 
-        # heurystyki: typ akcji po parametrze a/b lub label
+        # heurystyki po parametrze a/b
         try:
-            u = urlparse(href if href.startswith("http") else ("http://x" + href if href.startswith("?") else "http://x/" + href))
+            u = urlparse(
+                href
+                if href.startswith("http")
+                else ("http://x" + href if href.startswith("?") else "http://x/" + href)
+            )
             qs = parse_qs(u.query)
             a_param = _clean_spaces((qs.get("a", [""]) or [""])[0])
             b_param = _clean_spaces((qs.get("b", [""]) or [""])[0])
@@ -217,18 +206,23 @@ def _parse_actions_cell(td) -> List[Dict[str, Any]]:
     return out
 
 
+def _pick_action_href(actions: List[Dict[str, Any]], label_regex: str) -> str:
+    """
+    Znajdź href akcji po labelu (np. 'Drużyny').
+    """
+    rx = re.compile(label_regex, re.I)
+    for a in actions or []:
+        if rx.search(_clean_spaces(a.get("label", ""))):
+            return _clean_spaces(a.get("href", ""))
+    return ""
+
+
 def _parse_competitions_page(html: str) -> Dict[str, Any]:
-    """
-    Parsuje JEDNĄ stronę rozgrywek (dla konkretnego Filtr_sezon) i zwraca:
-    - filters meta (sezony/kategorie/plec/typ/woj)
-    - competitions list/map
-    """
     soup = BeautifulSoup(html, "html.parser")
     table = _find_competitions_table(soup)
     if not table:
         raise HTTPException(500, "Nie znaleziono tabeli rozgrywek (id='tabelka').")
 
-    # filtry są w header row w <form method="get"> wewnątrz tabeli
     sel_season = table.find("select", attrs={"name": "Filtr_sezon"})
     sel_kat = table.find("select", attrs={"name": "Filtr_kategoria"})
     sel_plec = table.find("select", attrs={"name": "Filtr_plec"})
@@ -241,8 +235,7 @@ def _parse_competitions_page(html: str) -> Dict[str, Any]:
     typ = _parse_select_options(sel_typ)
     woj = _parse_select_options(sel_woj)
 
-    # hidden inputs też bywają przydatne (np. Filtr_woj zablokowany disabled)
-    hidden = {}
+    hidden: Dict[str, str] = {}
     for inp in table.find_all("input", attrs={"type": "hidden"}):
         name = _clean_spaces(inp.get("name", ""))
         val = _clean_spaces(inp.get("value", ""))
@@ -256,23 +249,9 @@ def _parse_competitions_page(html: str) -> Dict[str, Any]:
             continue
 
         tds = tr.find_all("td", recursive=False)
-        # Oczekiwany układ (z przykładu):
-        # 0 Lp (title=IdRozgr)
-        # 1 Nazwa
-        # 2 Płeć
-        # 3 Kategoria
-        # 4 Woj
-        # 5 Kod
-        # 6 Typ
-        # 7 Sezon (label)
-        # 8 Stan
-        # 9 Regulamin
-        # 10 liczba wymaganych
-        # 11 liczba zgłoszonych
-        # 12 akcje
+
         id_rozgr = _clean_spaces(tds[0].get("title", ""))
-        lp_txt = _clean_spaces(tds[0].get_text(" ", strip=True))
-        lp = _safe_int(lp_txt, default=0)
+        lp = _safe_int(_clean_spaces(tds[0].get_text(" ", strip=True)), default=0)
 
         name = _clean_spaces(tds[1].get_text(" ", strip=True))
         sex = _clean_spaces(tds[2].get_text(" ", strip=True))
@@ -288,6 +267,7 @@ def _parse_competitions_page(html: str) -> Dict[str, Any]:
         teams_declared = _safe_int(_clean_spaces(tds[11].get_text(" ", strip=True)), default=0)
 
         actions = _parse_actions_cell(tds[12])
+        teams_href = _pick_action_href(actions, r"^Drużyny\b")
 
         competitions[id_rozgr] = {
             "IdRozgr": id_rozgr,
@@ -304,6 +284,7 @@ def _parse_competitions_page(html: str) -> Dict[str, Any]:
             "teams_required": teams_required,
             "teams_declared": teams_declared,
             "actions": actions,
+            "teams_href": teams_href,  # szybki skrót
         }
 
     return {
@@ -323,35 +304,124 @@ def _pick_selected_value(opts: List[Tuple[str, str, bool]]) -> str:
     return next((v for (v, _, sel) in opts if sel and v), "") or next((v for (v, _, _) in opts if v), "")
 
 
+# =========================
+# Teams (Drużyny) parsing
+# =========================
+
+def _strip_team_name(raw: str) -> str:
+    """
+    W tabeli często jest: 'MKS Start Michałkowice  (SL)'
+    Chcemy samą nazwę: 'MKS Start Michałkowice'
+    """
+    s = _clean_spaces(raw)
+    s = re.sub(r"\s*\([A-Z]{1,3}\)\s*$", "", s).strip()
+    return s
+
+
+def _looks_like_participants_header(tr) -> bool:
+    """
+    W przykładzie nad tabelą jest wiersz:
+      <td>Drużyny uczestniczące w rozgrywkach</td>
+    Potem w następnej linii <td valign="top"><table ...> ... </table></td>
+    """
+    if not tr:
+        return False
+    tds = tr.find_all("td", recursive=False)
+    if not tds:
+        return False
+    txt = _clean_spaces(" ".join(td.get_text(" ", strip=True) for td in tds))
+    return "Drużyny uczestniczące w rozgrywkach" in txt
+
+
+def _parse_competition_teams_from_teams_page(html: str) -> List[str]:
+    """
+    Parsuje stronę ?a=rozgrywki&b=zespoly&IdRozgr=...
+    i zwraca listę NAZW drużyn z lewej tabeli (uczestniczące).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1) najpewniejsze: znaleźć wiersz nagłówkowy z tekstem "Drużyny uczestniczące w rozgrywkach",
+    #    a potem w kolejnym <tr> w pierwszej komórce jest <table> z listą.
+    main_table = soup.find("table", attrs={"border": "1", "cellpadding": re.compile(r".*"), "cellspacing": re.compile(r".*")})
+    # powyższe jest luźne; w praktyce stron jest kilka tabel. Więc robimy skan wszystkich <tr>.
+    teams: List[str] = []
+
+    trs = soup.find_all("tr")
+    target_nested_table = None
+
+    for i, tr in enumerate(trs):
+        if _looks_like_participants_header(tr):
+            # szukamy kolejnych wierszy aż trafimy w nested table w pierwszej komórce
+            for j in range(i + 1, min(i + 6, len(trs))):
+                tds = trs[j].find_all("td", recursive=False)
+                if not tds:
+                    continue
+                nested = tds[0].find("table")
+                if nested:
+                    target_nested_table = nested
+                    break
+            break
+
+    # 2) fallback: wybierz najbardziej "pasującą" tabelę z linkami do ?a=zespoly&b=sklad i pdf2.png
+    if target_nested_table is None:
+        candidates = []
+        for tbl in soup.find_all("table"):
+            txt = _clean_spaces(tbl.get_text(" ", strip=True))
+            if not txt:
+                continue
+            has_sklad_links = bool(tbl.find("a", href=re.compile(r"\ba=zespoly\b.*\bb=sklad\b", re.I)))
+            has_pdf = bool(tbl.find("img", src=re.compile(r"pdf2\.png", re.I)))
+            if has_sklad_links and has_pdf:
+                # preferuj większą liczbę <tr>
+                candidates.append((len(tbl.find_all("tr")), tbl))
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            target_nested_table = candidates[0][1]
+
+    if target_nested_table is None:
+        return teams
+
+    # Tabela ma header (Lp, pdf, Nazwa, ...)
+    for tr in target_nested_table.find_all("tr"):
+        tds = tr.find_all("td", recursive=False)
+        if len(tds) < 3:
+            continue
+        # pierwsza komórka to Lp "1."
+        lp_txt = _clean_spaces(tds[0].get_text(" ", strip=True))
+        if not _RE_LP_DOT.match(lp_txt):
+            continue
+
+        # kolumna nazwy to zwykle td[2] z <a href="?a=zespoly&b=sklad...">NAZWA</a>
+        name_td = tds[2]
+        a = name_td.find("a", href=True)
+        name_txt = _clean_spaces(a.get_text(" ", strip=True) if a else name_td.get_text(" ", strip=True))
+        name_txt = _strip_team_name(name_txt)
+        if name_txt:
+            teams.append(name_txt)
+
+    return teams
+
+
+# =========================
+# Endpoints
+# =========================
+
 @router.post("/zprp/rozgrywki/meta")
 async def get_rozgrywki_meta(
     payload: ZprpScheduleScrapeRequest,
     settings: Settings = Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
-    """
-    Meta endpoint:
-    - loguje się
-    - wchodzi na /index.php (home)
-    - znajduje link do zakładki Rozgrywki (z Filtr_woj / Filtr_sezon)
-    - pobiera stronę rozgrywek i zwraca dostępne filtry (w tym listę sezonów)
-    """
     private_key, _ = keys
-
     try:
         user_plain = _decrypt_field(private_key, payload.username)
         pass_plain = _decrypt_field(private_key, payload.password)
     except Exception as e:
         raise HTTPException(400, f"Decryption error: {e}")
 
-    async with AsyncClient(
-        base_url=settings.ZPRP_BASE_URL,
-        follow_redirects=True,
-        timeout=60.0,
-    ) as client:
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        # home po zalogowaniu
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
         rozgrywki_href, filtr_woj, filtr_sezon = _extract_rogrywki_link_from_home(html_home)
 
@@ -381,27 +451,19 @@ async def scrape_rozgrywki_full(
     keys=Depends(get_rsa_keys),
 ):
     """
-    Full scrape:
-    - logowanie identyczne jak schedule.py
-    - wejście na home -> bierzemy link do "Rozgrywki" (właściwy Filtr_woj)
-    - pobieramy stronę rozgrywek
-    - wyciągamy listę sezonów z selecta
-    - iterujemy po WSZYSTKICH sezonach (bez filtrowania po backendzie)
-    - składamy jeden JSON zawierający całą tabelę rozgrywek (per sezon) + linki akcji
+    Full scrape + TEAMS:
+    - iteruje po wszystkich sezonach
+    - pobiera rozgrywki
+    - dla każdej rozgrywki wchodzi w akcję "Drużyny" i zczytuje listę drużyn uczestniczących
     """
     private_key, _ = keys
-
     try:
         user_plain = _decrypt_field(private_key, payload.username)
         pass_plain = _decrypt_field(private_key, payload.password)
     except Exception as e:
         raise HTTPException(400, f"Decryption error: {e}")
 
-    async with AsyncClient(
-        base_url=settings.ZPRP_BASE_URL,
-        follow_redirects=True,
-        timeout=60.0,
-    ) as client:
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
         # home po zalogowaniu
@@ -416,20 +478,16 @@ async def scrape_rozgrywki_full(
         seasons_list = filters0.get("Filtr_sezon", []) or []
         woj_list = filters0.get("Filtr_woj", []) or []
 
-        # bieżące wartości (pomocniczo)
         filtr_woj = _pick_selected_value([(x["value"], x["label"], bool(x.get("selected"))) for x in woj_list]) or _clean_spaces(filtr_woj_home)
         if not filtr_woj:
-            # last resort: hidden input
             filtr_woj = _clean_spaces((filters0.get("hidden", {}) or {}).get("Filtr_woj", ""))
 
-        # wszystkie sezony do pobrania
         season_values = [x.get("value", "") for x in seasons_list if _clean_spaces(x.get("value", ""))]
-        season_values = [v for v in season_values if v != "---" and v != "0"]
+        season_values = [v for v in season_values if v not in ("---", "0", "")]
 
         if not season_values:
             raise HTTPException(500, "Nie znaleziono listy sezonów na stronie 'Rozgrywki'.")
 
-        # iteracja po sezonach
         competitions_by_season: Dict[str, Dict[str, Any]] = {}
         competitions_all: Dict[str, Dict[str, Any]] = {}
 
@@ -438,7 +496,6 @@ async def scrape_rozgrywki_full(
                 "a": "rozgrywki",
                 "Filtr_sezon": season_id,
                 "Filtr_woj": filtr_woj,
-                # resztę zostawiamy pustą (jak w formie)
                 "Filtr_klub": "",
                 "Filtr_kategoria": "",
                 "Filtr_plec": "",
@@ -452,6 +509,29 @@ async def scrape_rozgrywki_full(
             parsed = _parse_competitions_page(html)
 
             comps = parsed["competitions"]  # map IdRozgr -> record
+
+            # --- DOŁOŻENIE: pobranie listy drużyn dla każdej rozgrywki ---
+            for cid, comp in comps.items():
+                teams_href = _clean_spaces(comp.get("teams_href", "")) or _pick_action_href(comp.get("actions", []), r"^Drużyny\b")
+                if not teams_href:
+                    comp["teams"] = []
+                    comp["teams_count"] = 0
+                    continue
+
+                try:
+                    _, html_teams = await fetch_with_correct_encoding(client, teams_href, method="GET", cookies=cookies)
+                    teams = _parse_competition_teams_from_teams_page(html_teams)
+                    comp["teams"] = teams
+                    comp["teams_count"] = len(teams)
+                    comp["teams_page_href"] = teams_href
+                except Exception as e:
+                    # nie chcemy wywalać całego scrapu przez jedną rozgrywkę
+                    logger.warning("Teams scrape failed IdRozgr=%s href=%s err=%s", cid, teams_href, e)
+                    comp["teams"] = []
+                    comp["teams_count"] = 0
+                    comp["teams_page_href"] = teams_href
+                    comp["teams_error"] = str(e)
+
             competitions_by_season[season_id] = {
                 "season_id": season_id,
                 "season_label": next((x.get("label", "") for x in seasons_list if x.get("value") == season_id), ""),
@@ -460,7 +540,6 @@ async def scrape_rozgrywki_full(
                 "competitions": comps,
             }
 
-            # global map (IdRozgr jest globalnie unikalne w praktyce; jeśli nie, to „ostatni wygrywa”)
             for k, v in comps.items():
                 competitions_all[k] = v
 
@@ -474,6 +553,7 @@ async def scrape_rozgrywki_full(
         summary = {
             "seasons": len(competitions_by_season),
             "competitions_total": sum(int(x.get("count", 0)) for x in competitions_by_season.values()),
+            "teams_total": sum(int(c.get("teams_count", 0)) for c in competitions_all.values()),
         }
 
         return {
