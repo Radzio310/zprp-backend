@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 import datetime
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,6 +39,9 @@ _RE_HALF = re.compile(r"\(\s*(\d+)\s*:\s*(\d+)\s*\)")
 _RE_PENS = re.compile(r"<\s*(\d+)\s*:\s*(\d+)\s*>")
 _RE_DATE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
 _RE_TIME = re.compile(r"\(\s*(\d{2}:\d{2})\s*\)")
+
+_RE_BYE = re.compile(r"\bpauz\w*\b", re.I)  # pauzuje, pauza, pauz., etc.
+_RE_PLACEHOLDER_TEAM = re.compile(r"\bzesp[oó]ł\s*nr\s*\d+\b", re.I)  # Zespół nr 10
 
 
 def _now_iso() -> str:
@@ -260,7 +262,7 @@ def _extract_first_person_name_from_lines(lines: List[str]) -> str:
     return ""
 
 
-def _split_td_by_top_level_hr(td) -> List[BeautifulSoup]:
+def _split_td_by_top_level_hr(td) -> List[List[str]]:
     """
     Dzieli zawartość TD na segmenty po <hr> (normalnym), zostawiając <hr class="cienka-linia">
     do rozdziału sędziów w parze.
@@ -268,15 +270,12 @@ def _split_td_by_top_level_hr(td) -> List[BeautifulSoup]:
     if not td:
         return []
 
-    # kopiujemy do nowego soup, żeby bezpiecznie usuwać śmieci
     holder = BeautifulSoup("<div></div>", "html.parser")
     container = holder.div
     container.append(BeautifulSoup(str(td), "html.parser"))
 
-    # TD jest wewnątrz container
     td2 = container.find("td")
     if not td2:
-        # fallback: czasem dostaniemy fragment bez td
         td2 = container
 
     # usuń elementy techniczne/klikalne
@@ -293,17 +292,13 @@ def _split_td_by_top_level_hr(td) -> List[BeautifulSoup]:
         for el in td2.select(sel):
             el.decompose()
 
-    # teraz split po <hr> bez class='cienka-linia'
     segments: List[List[str]] = [[]]
-    # przechodzimy po dzieciach TD i budujemy tekst + <br> jako newline
     for node in td2.descendants:
         if getattr(node, "name", None) == "hr":
             cls = node.get("class") or []
             if "cienka-linia" in cls:
-                # nie rozdziela ról (tylko parę)
                 segments[-1].append("__HR_THIN__")
             else:
-                # rozdziela role
                 segments.append([])
         elif getattr(node, "name", None) == "br":
             segments[-1].append("\n")
@@ -312,12 +307,10 @@ def _split_td_by_top_level_hr(td) -> List[BeautifulSoup]:
             if txt:
                 segments[-1].append(txt)
 
-    # zamień segmenty na listę "linii"
     out_lines: List[List[str]] = []
     for seg in segments:
         joined = " ".join(seg)
         joined = joined.replace("__HR_THIN__", "\n__HR_THIN__\n")
-        # normalizacja newline
         joined = re.sub(r"\s*\n\s*", "\n", joined).strip()
         lines = [ln.strip() for ln in joined.split("\n") if ln.strip()]
         out_lines.append(lines)
@@ -332,7 +325,6 @@ def _parse_officials(td) -> Dict[str, str]:
     - role rozdzielone zwykłymi <hr />
     - para sędziowska rozdzielona <hr class='cienka-linia'>
     - mapowanie ról od dołu: ostatni=czas, przedostatni=sekretarz, trzeci od końca=delegat
-    - jeśli brak IdZawody / brak obsady -> zwracamy puste stringi
     """
     out = {
         "NrSedzia_pierwszy_nazwisko": "",
@@ -348,9 +340,8 @@ def _parse_officials(td) -> Dict[str, str]:
     if not segments_lines:
         return out
 
-    # 1) Para sędziowska = segment[0], wewnątrz rozdzielony "__HR_THIN__"
     first_seg = segments_lines[0] if len(segments_lines) >= 1 else []
-    # rozdziel po thin-hr markerze
+
     judges_a: List[str] = []
     judges_b: List[str] = []
     cur = judges_a
@@ -366,14 +357,12 @@ def _parse_officials(td) -> Dict[str, str]:
     out["NrSedzia_pierwszy_nazwisko"] = j1
     out["NrSedzia_drugi_nazwisko"] = j2
 
-    # 2) Pozostałe segmenty (role) -> wyciągnij nazwiska, odfiltruj puste
     role_names: List[str] = []
     for seg in segments_lines[1:]:
         name = _extract_first_person_name_from_lines(seg)
         if name:
             role_names.append(name)
 
-    # mapowanie od dołu
     if len(role_names) >= 1:
         out["NrSedzia_czas_nazwisko"] = role_names[-1]
     if len(role_names) >= 2:
@@ -400,21 +389,44 @@ def _is_match_row(tr) -> bool:
         return False
 
     lp_raw = _clean_spaces(tds[0].get_text(" ", strip=True))
-    # nagłówek: "Lp."
     if lp_raw.lower() in ("lp.", "lp"):
         return False
-    # wiersz meczu: "56."
     if not re.fullmatch(r"\d+\.", lp_raw):
         return False
 
     return True
 
 
-def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
+def _should_skip_bye_placeholder(host_name: str, guest_name: str) -> bool:
+    """
+    Pomijamy TYLKO takie wiersze, które oznaczają "pauzuje" vs placeholder typu "Zespół nr 10".
+    Zgodnie z wymaganiem: inne konfiguracje (pauzuje vs realna drużyna) NIE są pomijane.
+    """
+    h = _clean_spaces(host_name)
+    g = _clean_spaces(guest_name)
+    if not h and not g:
+        return False
+
+    h_is_bye = bool(_RE_BYE.search(h))
+    g_is_bye = bool(_RE_BYE.search(g))
+    h_is_placeholder = bool(_RE_PLACEHOLDER_TEAM.search(h))
+    g_is_placeholder = bool(_RE_PLACEHOLDER_TEAM.search(g))
+
+    # dokładnie: (pauzuje po jednej stronie) AND (placeholder po drugiej)
+    if h_is_bye and g_is_placeholder:
+        return True
+    if g_is_bye and h_is_placeholder:
+        return True
+
+    return False
+
+
+def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[str, Any]]:
     soup = BeautifulSoup(html, "html.parser")
     out: Dict[str, Dict[str, Any]] = {}
     trs = soup.find_all("tr")
     synth_i = 0
+    prefix = _clean_spaces(context_prefix)
 
     for tr in trs:
         if not _is_match_row(tr):
@@ -447,6 +459,10 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         host_name = _clean_spaces(host_raw)
         guest_name = _clean_spaces(guest_raw)
 
+        # Kluczowy filtr: pomijamy tylko "pauzuje" vs "Zespół nr X"
+        if _should_skip_bye_placeholder(host_name, guest_name):
+            continue
+
         data_fakt = _parse_iso_datetime_from_td(td_date)
         hall = _parse_hall(td_hall)
         att = _parse_attendance(td_att)
@@ -460,18 +476,20 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         kolejka_range = _clean_spaces(m_rng.group(1)) if m_rng else ""
 
         # IdZawody może być lub nie – NIE pomijamy meczu bez IdZawody
-        idzawody_str = _extract_idzawody_from_tr(tr)
-        idzawody_str = idzawody_str.strip()
+        idzawody_str = _extract_idzawody_from_tr(tr).strip()
         has_idzawody = bool(idzawody_str and re.fullmatch(r"\d+", idzawody_str))
 
         if has_idzawody:
-            match_id = idzawody_str  # stabilny klucz, zgodny z resztą systemu
+            match_id = idzawody_str
             idzawody_field = idzawody_str
         else:
             synth_i += 1
-            # stabilny-ish fallback (unikalny w obrębie fetchu)
-            match_id = f"synthetic:{season_label}:{code}:{lp}:{synth_i}"
-            idzawody_field = ""  # wymaganie: pole puste
+            # unikalność między rozgrywkami (FULL) zapewnia context_prefix
+            if prefix:
+                match_id = f"synthetic:{prefix}:{season_label}:{code}:{lp}:{synth_i}"
+            else:
+                match_id = f"synthetic:{season_label}:{code}:{lp}:{synth_i}"
+            idzawody_field = ""
 
         match_obj: Dict[str, Any] = {
             "Id": match_id,
@@ -673,7 +691,7 @@ async def scrape_terminarz_full(
     FULL: iteruje po wszystkich kategoriach i rozgrywkach.
     WAŻNE:
     - pobiera też mecze bez IdZawody (IdZawody=""), nie pomija ich.
-    - loguje tylko podsumowania (ile meczów / jaka kategoria), bez dumpów meczów.
+    - pomija TYLKO "pauzuje" vs "Zespół nr X"
     """
     private_key, _ = keys
 
@@ -750,7 +768,9 @@ async def scrape_terminarz_full(
                 path = "/index.php?" + urlencode(qs2, doseq=True)
 
                 _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
-                matches_map = _parse_matches_table(html)
+
+                context_prefix = f"{picked_season}|{cat_val}|{rozgr_val}"
+                matches_map = _parse_matches_table(html, context_prefix=context_prefix)
 
                 cnt = len(matches_map)
                 cat_total_matches += cnt
@@ -817,7 +837,7 @@ async def scrape_terminarz_slim(
     - zawsze IdRundy=ALL
     WAŻNE:
     - pobiera też mecze bez IdZawody (IdZawody=""), nie pomija ich.
-    - loguje tylko podsumowania (ile meczów / jaka kategoria), bez dumpów meczów.
+    - pomija TYLKO "pauzuje" vs "Zespół nr X"
     """
     private_key, _ = keys
 
@@ -890,7 +910,10 @@ async def scrape_terminarz_slim(
             path = "/index.php?" + urlencode(qs, doseq=True)
 
             _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
-            matches_map = _parse_matches_table(html)
+
+            context_prefix = f"{picked_season}|{cat_val}|{rozgr_val}"
+            matches_map = _parse_matches_table(html, context_prefix=context_prefix)
+
             cnt = len(matches_map)
             total_matches += cnt
 
