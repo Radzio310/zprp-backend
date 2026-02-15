@@ -54,6 +54,7 @@ from app.baza_vips import router as baza_vips_router
 
 from app.zprp.schedule import router as schedule_router
 from app.zprp.competitions import router as competitions_router
+from app.zprp.officials import router as officials_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -129,6 +130,7 @@ app.include_router(baza_vips_router)
 
 app.include_router(schedule_router, tags=["zprp"])
 app.include_router(competitions_router, tags=["zprp"])
+app.include_router(officials_router, tags=["zprp"])
 
 # NEW: push router
 app.include_router(push_router)
