@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import base64
 import datetime
+import json
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -17,6 +19,19 @@ from app.utils import fetch_with_correct_encoding
 from app.schemas import ZprpScheduleScrapeRequest  # <- dodasz (opis niżej)
 
 router = APIRouter()
+
+# =========================
+# Logger (Railway -> stdout)
+# =========================
+logger = logging.getLogger("app.zprp.schedule")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 # =========================
 # Regex / helpers
@@ -201,18 +216,18 @@ def _extract_idzawody_from_tr(tr) -> str:
     if not tr:
         return ""
 
-    # 1) najczęstszy przypadek: hidden input name="IdZawody"
+    # 1) hidden input name="IdZawody"
     inp = tr.find("input", attrs={"name": "IdZawody"})
     if inp and inp.get("value"):
         return str(inp.get("value")).strip()
 
-    # 2) fallback: regex po HTML
+    # 2) regex po HTML
     html = str(tr)
     m = re.search(r'name=["\']IdZawody["\']\s+value=["\'](\d+)["\']', html, re.I)
     if m:
         return m.group(1)
 
-    # 3) (opcjonalnie pomocny) fallback: czasem ID jest w wywołaniu JS (np. zapiszProtok3(191386,...))
+    # 3) JS fallback: zapiszProtok3(191386,...)
     m2 = re.search(r"zapiszProtok3\(\s*(\d+)\s*,", html, re.I)
     if m2:
         return m2.group(1)
@@ -284,11 +299,32 @@ def _parse_officials(td) -> Dict[str, str]:
     return out
 
 
+def _log_match_parse_info(
+    *,
+    match_obj: Dict[str, Any],
+    parse_meta: Dict[str, Any],
+    idx: int,
+) -> None:
+    """
+    Loguje na INFO pełny snapshot meczu + jak został zparsowany.
+    """
+    payload = {
+        "idx": idx,
+        "match": match_obj,
+        "parsed_from": parse_meta,
+    }
+    logger.info("ZPRP terminarz: parsed_match=%s", json.dumps(payload, ensure_ascii=False))
+
+
 def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
     soup = BeautifulSoup(html, "html.parser")
     out: Dict[str, Dict[str, Any]] = {}
     trs = soup.find_all("tr")
     synth_i = 0
+
+    # debug: loguj maks 5 pierwszych pełnych meczów na wywołanie parsera
+    debug_logged = 0
+    DEBUG_LIMIT = 5
 
     for tr in trs:
         tds = tr.find_all("td", recursive=False)
@@ -309,12 +345,24 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         td_guest = tds[9]
         td_off = tds[10]
 
-        lp = _safe_int(td_lp.get_text(" ", strip=True), 0)
-        season_label = _clean_spaces(td_season.get_text(" ", strip=True))
-        code = _clean_spaces(td_code.get_text(" ", strip=True))
+        lp_raw = td_lp.get_text(" ", strip=True)
+        season_raw = td_season.get_text(" ", strip=True)
+        code_raw = td_code.get_text(" ", strip=True)
+        host_raw = td_host.get_text(" ", strip=True)
+        guest_raw = td_guest.get_text(" ", strip=True)
+        kolejka_raw = td_kolejka.get_text(" ", strip=True)
+        date_td_raw = td_date.get_text(" ", strip=True)
+        hall_td_raw = td_hall.get_text(" ", strip=True)
+        att_td_raw = td_att.get_text(" ", strip=True)
+        res_td_raw = td_res.get_text(" ", strip=True)
+        off_td_raw = td_off.get_text(" ", strip=True)
 
-        host_name = _clean_spaces(td_host.get_text(" ", strip=True))
-        guest_name = _clean_spaces(td_guest.get_text(" ", strip=True))
+        lp = _safe_int(lp_raw, 0)
+        season_label = _clean_spaces(season_raw)
+        code = _clean_spaces(code_raw)
+
+        host_name = _clean_spaces(host_raw)
+        guest_name = _clean_spaces(guest_raw)
 
         data_fakt = _parse_iso_datetime_from_td(td_date)
 
@@ -323,7 +371,7 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         res = _parse_result(td_res)
         off = _parse_officials(td_off)
 
-        kolejka_txt = _clean_spaces(td_kolejka.get_text(" ", strip=True))
+        kolejka_txt = _clean_spaces(kolejka_raw)
         m_kno = re.search(r"Kolejka\s+(\d+)", kolejka_txt, re.I)
         kolejka_no = int(m_kno.group(1)) if m_kno else None
         m_rng = re.search(r"\(\s*([^)]+)\s*\)", kolejka_txt)
@@ -332,17 +380,19 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         # --- KLUCZOWA ZMIANA: rozdzielamy Id (unikalne) i IdZawody (numeryczne / None)
         idzawody_str = _extract_idzawody_from_tr(tr)
         if idzawody_str and re.fullmatch(r"\d+", idzawody_str):
-            match_id = idzawody_str              # Id = prawdziwe IdZawody
+            match_id = idzawody_str
             idzawody: Optional[str] = idzawody_str
+            id_source = "IdZawody_from_dom"
         else:
             synth_i += 1
             match_id = f"synthetic:{season_label}:{code}:{lp}:{synth_i}"
             idzawody = None
+            id_source = "synthetic_fallback"
         # ---
 
         match_obj: Dict[str, Any] = {
             "Id": match_id,
-            "IdZawody": idzawody,  # <-- nowy field: None jeśli nie ma
+            "IdZawody": idzawody,
             "Lp": lp,
             "RozgrywkiCode": code,
             "season": season_label,
@@ -376,6 +426,41 @@ def _parse_matches_table(html: str) -> Dict[str, Dict[str, Any]]:
         }
 
         out[match_id] = match_obj
+
+        # =========================
+        # DEBUG LOG: pierwsze 5 meczów z każdego parsowania tabeli
+        # =========================
+        if debug_logged < DEBUG_LIMIT:
+            # Meta: co wczytaliśmy i jak
+            parse_meta = {
+                "id_source": id_source,
+                "idzawody_extracted": idzawody_str or None,
+                "raw_cells": {
+                    "lp": _clean_spaces(lp_raw),
+                    "season": _clean_spaces(season_raw),
+                    "kolejka": _clean_spaces(kolejka_raw),
+                    "code": _clean_spaces(code_raw),
+                    "date_td_text": _clean_spaces(date_td_raw),
+                    "hall_td_text": _clean_spaces(hall_td_raw),
+                    "attendance_td_text": _clean_spaces(att_td_raw),
+                    "host": _clean_spaces(host_raw),
+                    "result_td_text": _clean_spaces(res_td_raw),
+                    "guest": _clean_spaces(guest_raw),
+                    "officials_td_text": _clean_spaces(off_td_raw),
+                },
+                "derived": {
+                    "data_fakt": data_fakt,
+                    "kolejka_no": kolejka_no,
+                    "kolejka_range": kolejka_range,
+                    "hall_parsed": hall,
+                    "attendance_parsed": att,
+                    "result_parsed": res,
+                    "officials_parsed": off,
+                },
+            }
+
+            _log_match_parse_info(match_obj=match_obj, parse_meta=parse_meta, idx=debug_logged + 1)
+            debug_logged += 1
 
     return out
 
