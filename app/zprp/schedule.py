@@ -215,32 +215,6 @@ def _parse_result(td) -> Dict[str, Any]:
     return out
 
 
-def _extract_idzawody_from_tr(tr) -> str:
-    """
-    Zwraca IdZawody jeśli uda się znaleźć, w przeciwnym razie "".
-    Uwzględnia:
-    - hidden input name="IdZawody" w formach UstawHale / UstawSedziow
-    - onclick zapiszProtok3(IdZawody,...)
-    """
-    if not tr:
-        return ""
-
-    inp = tr.find("input", attrs={"name": "IdZawody"})
-    if inp and inp.get("value"):
-        return str(inp.get("value")).strip()
-
-    html = str(tr)
-    m = re.search(r'name=["\']IdZawody["\']\s+value=["\'](\d+)["\']', html, re.I)
-    if m:
-        return m.group(1)
-
-    m2 = re.search(r"zapiszProtok3\(\s*(\d+)\s*,", html, re.I)
-    if m2:
-        return m2.group(1)
-
-    return ""
-
-
 def _normalize_name_line(s: str) -> str:
     s = _clean_spaces(s)
     # częsty przypadek: "KOWALCZYK Bartłomiej          L"
@@ -378,11 +352,7 @@ def _parse_officials(td) -> Dict[str, str]:
 
 def _extract_lp_and_season_from_row_cells(tds: List[Any]) -> Tuple[Optional[int], str]:
     """
-    Dodatkowe kryterium stabilizujące:
-    - każdy wiersz powinien zaczynać się od "N." (np. "1.") i zaraz potem sezonem "YYYY/YYYY".
-    - jeśli HTML jest "krzywy" (niedomknięte tagi) i sezon wpadł do tej samej komórki co Lp,
-      próbujemy odzyskać: "1. 2025/2026".
-    Zwraca: (lp_int_or_None, season_label_or_empty)
+    (Zachowane dla kompatybilności / fallback)
     """
     if not tds or len(tds) < 2:
         return None, ""
@@ -415,33 +385,22 @@ def _extract_lp_and_season_from_row_cells(tds: List[Any]) -> Tuple[Optional[int]
 
 def _is_match_row(tr) -> bool:
     """
-    Odfiltrowuje:
-    - nagłówek tabeli ("Lp.")
-    - separatory z colspan
-    - nietypowe wiersze
-    Dodatkowo (zgodnie z Twoją uwagę):
-    - wiersz musi zaczynać się od "N." i zaraz potem mieć sezon "YYYY/YYYY"
-      (to pomaga wyłapać krzywe HTML-e / niedomknięte TR/TD).
+    (Zachowane dla kompatybilności / fallback)
     """
     if not tr:
         return False
     tds = tr.find_all("td", recursive=False)
 
-    # minimalnie oczekujemy kompletnej tabeli terminarza (Lp + sezon + ... + obsada)
-    # przy krzywym HTML często robi się mniej kolumn -> odcinamy
     if not tds or len(tds) < 11:
         return False
 
-    # separator row (często pojedynczy td colspan=20)
     if any(td.has_attr("colspan") for td in tds):
         return False
 
-    # szybki filtr nagłówka tabeli
     lp_raw = _clean_spaces(tds[0].get_text(" ", strip=True))
     if lp_raw.lower() in ("lp.", "lp"):
         return False
 
-    # kryterium lp + season (stabilizuje, gdy HTML się rozjechał)
     lp, season = _extract_lp_and_season_from_row_cells(tds)
     if lp is None or not season or not _RE_SEASON.match(season):
         return False
@@ -464,7 +423,6 @@ def _should_skip_bye_placeholder(host_name: str, guest_name: str) -> bool:
     h_is_placeholder = bool(_RE_PLACEHOLDER_TEAM.search(h))
     g_is_placeholder = bool(_RE_PLACEHOLDER_TEAM.search(g))
 
-    # dokładnie: (pauzuje po jednej stronie) AND (placeholder po drugiej)
     if h_is_bye and g_is_placeholder:
         return True
     if g_is_bye and h_is_placeholder:
@@ -473,56 +431,278 @@ def _should_skip_bye_placeholder(host_name: str, guest_name: str) -> bool:
     return False
 
 
+# ============================================================
+# NEW: robust parsing that survives broken / nested <tr> markup
+# ============================================================
+
+def _extract_idzawody_from_html(html: str) -> str:
+    """
+    Zwraca IdZawody jeśli uda się znaleźć w HTML.
+    Obsługuje:
+    - hidden input name="IdZawody" value="..."
+    - onclick zapiszProtok3(IdZawody,...)
+    """
+    if not html:
+        return ""
+
+    m = re.search(r'name=["\']IdZawody["\']\s+value=["\'](\d+)["\']', html, re.I)
+    if m:
+        return m.group(1)
+
+    m2 = re.search(r"zapiszProtok3\(\s*(\d+)\s*,", html, re.I)
+    if m2:
+        return m2.group(1)
+
+    return ""
+
+
+def _find_schedule_table(soup: BeautifulSoup):
+    """
+    Znajduje tabelę terminarza po nagłówkach kolumn.
+    """
+    if not soup:
+        return None
+
+    required = ["Lp.", "Sezon", "Kolejka", "Mecz", "Data", "Hala", "Gospodarz", "Wynik", "Gość"]
+    for tr in soup.find_all("tr"):
+        txt = _clean_spaces(tr.get_text(" ", strip=True))
+        if not txt:
+            continue
+        if all(r.lower() in txt.lower() for r in required):
+            return tr.find_parent("table")
+    return None
+
+
+def _is_grid_td_for_table(td, table) -> bool:
+    """
+    Filtruje tylko te <td>, które należą do głównej tabeli terminarza (nie do ewentualnych tabel zagnieżdżonych).
+    """
+    if not td or not table:
+        return False
+    tr = td.find_parent("tr")
+    if not tr:
+        return False
+    parent_table = tr.find_parent("table")
+    return parent_table == table
+
+
+def _collect_grid_tds(table) -> List[Any]:
+    """
+    Zwraca listę <td> w kolejności dokumentu dla tabeli terminarza.
+    """
+    if not table:
+        return []
+    all_tds = table.find_all("td")
+    return [td for td in all_tds if _is_grid_td_for_table(td, table)]
+
+
+def _cell_text(td) -> str:
+    return _clean_spaces(td.get_text(" ", strip=True) if td else "")
+
+
+def _is_header_like_lp_cell(text: str) -> bool:
+    low = (text or "").strip().lower()
+    return low in ("lp.", "lp")
+
+
+def _detect_match_start_at(tds: List[Any], i: int) -> Tuple[bool, Optional[int], str, bool]:
+    """
+    Sprawdza czy na pozycji i zaczyna się rekord meczu.
+
+    Zwraca:
+      (is_start, lp_int_or_None, season_label, inline_lp_season)
+
+    inline_lp_season=True oznacza, że w tej samej komórce jest np. "1. 2025/2026".
+    """
+    if i < 0 or i >= len(tds):
+        return (False, None, "", False)
+
+    t0 = _cell_text(tds[i])
+    if not t0:
+        return (False, None, "", False)
+
+    if _is_header_like_lp_cell(t0):
+        return (False, None, "", False)
+
+    # standard: t0 == "N." oraz t1 == "YYYY/YYYY"
+    m_lp = _RE_LP.match(t0)
+    if m_lp and i + 1 < len(tds):
+        t1 = _cell_text(tds[i + 1])
+        m_sea = _RE_SEASON.match(t1)
+        if m_sea:
+            lp = int(m_lp.group(1))
+            season = f"{m_sea.group(1)}/{m_sea.group(2)}"
+            return (True, lp, season, False)
+
+    # recovery: t0 == "N. YYYY/YYYY"
+    m_inline = _RE_LP_AND_SEASON_INLINE.match(t0)
+    if m_inline:
+        lp = int(m_inline.group(1))
+        season_raw = _clean_spaces(m_inline.group(2))
+        m_sea2 = _RE_SEASON.match(season_raw)
+        season = f"{m_sea2.group(1)}/{m_sea2.group(2)}" if m_sea2 else season_raw
+        return (True, lp, season, True)
+
+    return (False, None, "", False)
+
+
 def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[str, Any]]:
+    """
+    NOWA wersja:
+    - nie iteruje po <tr>, tylko po strumieniu <td> tabeli terminarza
+    - rozcina rekordy po (Lp + Sezon)
+    - bierze stałe 11 kolumn na mecz (lub 10, jeśli Lp+Sezon sklejone)
+    - IdZawody szuka w HTML z całego rekordu (join komórek), nie w "tym <tr>"
+    """
     soup = BeautifulSoup(html, "html.parser")
     out: Dict[str, Dict[str, Any]] = {}
-    trs = soup.find_all("tr")
-    synth_i = 0
     prefix = _clean_spaces(context_prefix)
+    synth_i = 0
 
-    for tr in trs:
-        if not _is_match_row(tr):
+    table = _find_schedule_table(soup)
+    if not table:
+        # Fallback (zostawiamy, żebyś nie miał 0 wyników, gdy ZPRP zmieni layout)
+        logger.warning("ZPRP terminarz: schedule table not found by headers; fallback to <tr>-based scan")
+        for tr in soup.find_all("tr"):
+            if not _is_match_row(tr):
+                continue
+
+            tds = tr.find_all("td", recursive=False)
+            if len(tds) < 11:
+                continue
+
+            lp_int, season_label = _extract_lp_and_season_from_row_cells(tds)
+            if lp_int is None or not season_label:
+                continue
+
+            td_kolejka = tds[2]
+            td_code = tds[3]
+            td_date = tds[4]
+            td_hall = tds[5]
+            td_att = tds[6]
+            td_host = tds[7]
+            td_res = tds[8]
+            td_guest = tds[9]
+            td_off = tds[10]
+
+            lp = int(lp_int)
+            code = _clean_spaces(td_code.get_text(" ", strip=True))
+            host_name = _clean_spaces(td_host.get_text(" ", strip=True))
+            guest_name = _clean_spaces(td_guest.get_text(" ", strip=True))
+            kolejka_raw = _clean_spaces(td_kolejka.get_text(" ", strip=True))
+
+            if _should_skip_bye_placeholder(host_name, guest_name):
+                continue
+
+            data_fakt = _parse_iso_datetime_from_td(td_date)
+            hall = _parse_hall(td_hall)
+            att = _parse_attendance(td_att)
+            res = _parse_result(td_res)
+            off = _parse_officials(td_off)
+
+            m_kno = re.search(r"Kolejka\s+(\d+)", kolejka_raw, re.I)
+            kolejka_no = int(m_kno.group(1)) if m_kno else None
+            m_rng = re.search(r"\(\s*([^)]+)\s*\)", kolejka_raw)
+            kolejka_range = _clean_spaces(m_rng.group(1)) if m_rng else ""
+
+            idzawody_str = _extract_idzawody_from_html(str(tr)).strip()
+            has_idzawody = bool(idzawody_str and re.fullmatch(r"\d+", idzawody_str))
+
+            if has_idzawody:
+                match_id = idzawody_str
+                idzawody_field = idzawody_str
+            else:
+                synth_i += 1
+                match_id = (
+                    f"synthetic:{prefix}:{season_label}:{code}:{lp}:{synth_i}" if prefix else f"synthetic:{season_label}:{code}:{lp}:{synth_i}"
+                )
+                idzawody_field = ""
+
+            out[match_id] = {
+                "Id": match_id,
+                "IdZawody": idzawody_field,
+                "Lp": lp,
+                "RozgrywkiCode": code,
+                "season": season_label,
+                "data_fakt": data_fakt,
+                "runda": "",
+                "kolejka": kolejka_range,
+                "kolejka_no": kolejka_no,
+                "ID_zespoly_gosp_ZespolNazwa": host_name,
+                "ID_zespoly_gosc_ZespolNazwa": guest_name,
+                "Hala_miasto": hall["Hala_miasto"],
+                "Hala_nazwa": hall["Hala_nazwa"],
+                "Hala_ulica": hall["Hala_ulica"],
+                "Hala_numer": hall["Hala_numer"],
+                "hala_pojemnosc": hall["hala_pojemnosc"],
+                "widzowie": att["widzowie"],
+                "widzowie_pct": att["widzowie_pct"],
+                "wynik_gosp_full": res["wynik_gosp_full"],
+                "wynik_gosc_full": res["wynik_gosc_full"],
+                "wynik_gosp_pol": res["wynik_gosp_pol"],
+                "wynik_gosc_pol": res["wynik_gosc_pol"],
+                "dogrywka_karne_gosp": res["dogrywka_karne_gosp"],
+                "dogrywka_karne_gosc": res["dogrywka_karne_gosc"],
+                "host_swapped": res["host_swapped"],
+                **off,
+                "matchLink": "",
+                "protocol_link": "",
+                "protocol_status": "",
+                "delegate_note": "",
+                "fee": "",
+            }
+        return out
+
+    grid_tds = _collect_grid_tds(table)
+    if not grid_tds:
+        return out
+
+    i = 0
+    n = len(grid_tds)
+
+    while i < n:
+        is_start, lp_int, season_label, inline_lp_season = _detect_match_start_at(grid_tds, i)
+        if not is_start:
+            i += 1
             continue
 
-        tds = tr.find_all("td", recursive=False)
+        record_len = 10 if inline_lp_season else 11
+        if i + record_len > n:
+            break
 
-        # W teorii: [0]=Lp, [1]=Sezon, [2]=Kolejka, [3]=Kod, [4]=Data, [5]=Hala, [6]=Widzowie,
-        #           [7]=Gospodarze, [8]=Wynik, [9]=Goście, [10]=Obsada
-        # Przy "krzywym" HTML-e, gdy sezon się sklei z lp, BeautifulSoup nadal trzyma 11+ td,
-        # ale treści mogą być nieczyste. Dlatego lp/season wyciągamy dedykowaną funkcją.
-        td_lp = tds[0]
-        td_season = tds[1]
-        td_kolejka = tds[2]
-        td_code = tds[3]
-        td_date = tds[4]
-        td_hall = tds[5]
-        td_att = tds[6]
-        td_host = tds[7]
-        td_res = tds[8]
-        td_guest = tds[9]
-        td_off = tds[10]
+        rec_cells = grid_tds[i : i + record_len]
 
-        lp_raw = td_lp.get_text(" ", strip=True)
-        season_raw = td_season.get_text(" ", strip=True)
+        if inline_lp_season:
+            # [0]=Lp+Sezon, [1]=Kolejka, [2]=Mecz, [3]=Data, [4]=Hala, [5]=Widzowie, [6]=Gospodarz, [7]=Wynik, [8]=Gość, [9]=Obsada
+            td_kolejka = rec_cells[1]
+            td_code = rec_cells[2]
+            td_date = rec_cells[3]
+            td_hall = rec_cells[4]
+            td_att = rec_cells[5]
+            td_host = rec_cells[6]
+            td_res = rec_cells[7]
+            td_guest = rec_cells[8]
+            td_off = rec_cells[9]
+        else:
+            # [0]=Lp, [1]=Sezon, [2]=Kolejka, [3]=Mecz, [4]=Data, [5]=Hala, [6]=Widzowie, [7]=Gospodarz, [8]=Wynik, [9]=Gość, [10]=Obsada
+            td_kolejka = rec_cells[2]
+            td_code = rec_cells[3]
+            td_date = rec_cells[4]
+            td_hall = rec_cells[5]
+            td_att = rec_cells[6]
+            td_host = rec_cells[7]
+            td_res = rec_cells[8]
+            td_guest = rec_cells[9]
+            td_off = rec_cells[10]
 
-        lp_int, season_label = _extract_lp_and_season_from_row_cells(tds)
-        if lp_int is None or not season_label:
-            # dodatkowa asekuracja - teoretycznie nie wejdziemy tu przez _is_match_row
-            logger.warning("ZPRP terminarz: skip row (lp/season invalid) lp_raw=%r season_raw=%r", lp_raw, season_raw)
-            continue
+        lp = int(lp_int or 0)
+        code = _clean_spaces(td_code.get_text(" ", strip=True))
+        host_name = _clean_spaces(td_host.get_text(" ", strip=True))
+        guest_name = _clean_spaces(td_guest.get_text(" ", strip=True))
+        kolejka_raw = _clean_spaces(td_kolejka.get_text(" ", strip=True))
 
-        code_raw = td_code.get_text(" ", strip=True)
-        host_raw = td_host.get_text(" ", strip=True)
-        guest_raw = td_guest.get_text(" ", strip=True)
-        kolejka_raw = td_kolejka.get_text(" ", strip=True)
-
-        lp = int(lp_int)
-        code = _clean_spaces(code_raw)
-        host_name = _clean_spaces(host_raw)
-        guest_name = _clean_spaces(guest_raw)
-
-        # Kluczowy filtr: pomijamy tylko "pauzuje" vs "Zespół nr X"
         if _should_skip_bye_placeholder(host_name, guest_name):
+            i += record_len
             continue
 
         data_fakt = _parse_iso_datetime_from_td(td_date)
@@ -531,14 +711,13 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
         res = _parse_result(td_res)
         off = _parse_officials(td_off)
 
-        kolejka_txt = _clean_spaces(kolejka_raw)
-        m_kno = re.search(r"Kolejka\s+(\d+)", kolejka_txt, re.I)
+        m_kno = re.search(r"Kolejka\s+(\d+)", kolejka_raw, re.I)
         kolejka_no = int(m_kno.group(1)) if m_kno else None
-        m_rng = re.search(r"\(\s*([^)]+)\s*\)", kolejka_txt)
+        m_rng = re.search(r"\(\s*([^)]+)\s*\)", kolejka_raw)
         kolejka_range = _clean_spaces(m_rng.group(1)) if m_rng else ""
 
-        # IdZawody może być lub nie – NIE pomijamy meczu bez IdZawody
-        idzawody_str = _extract_idzawody_from_tr(tr).strip()
+        rec_html = "".join(str(x) for x in rec_cells)
+        idzawody_str = _extract_idzawody_from_html(rec_html).strip()
         has_idzawody = bool(idzawody_str and re.fullmatch(r"\d+", idzawody_str))
 
         if has_idzawody:
@@ -546,14 +725,14 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
             idzawody_field = idzawody_str
         else:
             synth_i += 1
-            # unikalność między rozgrywkami (FULL) zapewnia context_prefix
-            if prefix:
-                match_id = f"synthetic:{prefix}:{season_label}:{code}:{lp}:{synth_i}"
-            else:
-                match_id = f"synthetic:{season_label}:{code}:{lp}:{synth_i}"
+            match_id = (
+                f"synthetic:{prefix}:{season_label}:{code}:{lp}:{synth_i}"
+                if prefix
+                else f"synthetic:{season_label}:{code}:{lp}:{synth_i}"
+            )
             idzawody_field = ""
 
-        match_obj: Dict[str, Any] = {
+        out[match_id] = {
             "Id": match_id,
             "IdZawody": idzawody_field,
             "Lp": lp,
@@ -580,7 +759,6 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
             "dogrywka_karne_gosc": res["dogrywka_karne_gosc"],
             "host_swapped": res["host_swapped"],
             **off,
-            # kompatybilność z Twoim JSON-em:
             "matchLink": "",
             "protocol_link": "",
             "protocol_status": "",
@@ -588,7 +766,8 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
             "fee": "",
         }
 
-        out[match_id] = match_obj
+        # skaczemy o długość rekordu => gwarantowane „oddzielenie meczów”
+        i += record_len
 
     return out
 
