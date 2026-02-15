@@ -19,23 +19,16 @@ from app.utils import fetch_with_correct_encoding
 
 router = APIRouter()
 
-# =========================
-# Logger (Railway -> stdout)
-# =========================
 logger = logging.getLogger("app.zprp.officials")
 if not logger.handlers:
     handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
-    handler.setFormatter(formatter)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-# =========================
-# Regex / helpers
-# =========================
 _RE_INT = re.compile(r"(\d+)")
 _RE_LP_DOT = re.compile(r"^\s*(\d+)\.\s*$")
-_RE_CITY_SUFFIX = re.compile(r"\s*\([A-Z]{1,3}\)\s*$")  # (SL), (MA) etc.
+_RE_CITY_SUFFIX = re.compile(r"\s*\([A-Z]{1,3}\)\s*$")  # (SL)
 _RE_PARA_Z = re.compile(r"Para\s+z\s*:?\s*(.+)$", re.I)
 
 
@@ -67,17 +60,12 @@ async def _login_zprp_and_get_cookies(client: AsyncClient, username: str, passwo
         method="POST",
         data={"login": username, "haslo": password, "from": "/index.php?"},
     )
-    # sukces = po redirect lądujemy na /index.php
     if "/index.php" not in resp_login.url.path:
         raise HTTPException(401, "Logowanie nie powiodło się")
     return dict(resp_login.cookies)
 
 
 def _absorb_href_keep_relative(href: str) -> str:
-    """
-    Na ZPRP href zwykle jest relatywny typu '?a=sedzia...'
-    Zwracamy relatywny path+query (bez hosta).
-    """
     href = (href or "").strip()
     if not href:
         return ""
@@ -91,9 +79,6 @@ def _absorb_href_keep_relative(href: str) -> str:
 
 
 def _log_html_fingerprint(prefix: str, html: str) -> None:
-    """
-    Lekki fingerprint do logów (bez wypluwania HTML): długość + pierwsze znaki title.
-    """
     try:
         soup = BeautifulSoup(html, "html.parser")
         title = _clean_spaces((soup.title.get_text(strip=True) if soup.title else ""))[:80]
@@ -103,10 +88,6 @@ def _log_html_fingerprint(prefix: str, html: str) -> None:
 
 
 def _extract_menu_href_from_page(html: str, label_regex: str, href_regex: str) -> str:
-    """
-    Z dowolnej strony po zalogowaniu bierzemy link z menu po labelu lub po href-regexie.
-    Przydatne bo link może nieść parametry (np. Filtr_woj2 / Filtr_archiwum).
-    """
     soup = BeautifulSoup(html, "html.parser")
     rx_label = re.compile(label_regex, re.I)
     rx_href = re.compile(href_regex, re.I)
@@ -119,7 +100,6 @@ def _extract_menu_href_from_page(html: str, label_regex: str, href_regex: str) -
     if not href:
         raise HTTPException(500, f"Nie znaleziono linku menu: {label_regex}")
 
-    # INFO: co dokładnie znaleźliśmy
     logger.info("Menu link found label_regex='%s' href='%s'", label_regex, href)
     return href
 
@@ -130,32 +110,30 @@ def _find_table(soup: BeautifulSoup):
 
 def _row_is_data_tr(tr) -> bool:
     """
-    Dane sędziego: pierwszy td ma title=<NrSedzia> i tekst '1.'
+    Dane sędziego: pierwszy td ma title=<NrSedzia> (cyfry)
+    i tekst typu '1.'
     """
     if not tr:
         return False
-    tds = tr.find_all("td", recursive=False)
+
+    tds = tr.find_all("td")  # UWAGA: bez recursive=False (HTML ma formy w środku)
     if len(tds) < 8:
         return False
+
     t0 = _clean_spaces(tds[0].get_text(" ", strip=True))
     if not _RE_LP_DOT.match(t0):
         return False
+
     title = _clean_spaces(tds[0].get("title", ""))
     return bool(title and re.fullmatch(r"\d+", title))
 
 
 def _strip_city(raw: str) -> str:
-    # "Ruda Śląska  (SL)" -> "Ruda Śląska"
     s = _clean_spaces(raw)
-    s = _RE_CITY_SUFFIX.sub("", s).strip()
-    return s
+    return _RE_CITY_SUFFIX.sub("", s).strip()
 
 
 def _parse_photo_src(td) -> str:
-    """
-    W kolumnie Foto bywa <img src="foto_sedzia/5689.jpg?m=...">.
-    Zwracamy src (relatywny) albo "".
-    """
     if not td:
         return ""
     img = td.find("img", src=True)
@@ -165,11 +143,6 @@ def _parse_photo_src(td) -> str:
 
 
 def _parse_name_and_phone(td) -> Tuple[str, str]:
-    """
-    Z kolumny "Nazwisko Imię ... Telefon" chcemy:
-    - name: z pierwszej linii
-    - phone: po ikonie telefonu (telefon.png) albo fallback po cyfrach
-    """
     if not td:
         return "", ""
 
@@ -197,23 +170,15 @@ def _parse_name_and_phone(td) -> Tuple[str, str]:
 def _parse_city(td) -> str:
     if not td:
         return ""
-    txt = _clean_spaces(td.get_text(" ", strip=True))
-    return _strip_city(txt)
+    return _strip_city(_clean_spaces(td.get_text(" ", strip=True)))
 
 
 def _parse_roles_and_partner(td) -> Tuple[str, List[str], str, List[str]]:
-    """
-    Kolumna: "Sędzia / Delegat / Stolikowy" zawiera <br>.
-    Zwraca:
-      - roles_text: role w nowych liniach (tylko sędzia/delegat/stolikowy)
-      - roles_list: lista canonical ["sedzia","stolikowy","delegat"]
-      - partner: jeśli "Para z : X" -> X
-      - raw_lines: wszystkie niepuste linie z komórki (do logów/diagnostyki)
-    """
     if not td:
         return "", [], "", []
 
-    parts = []
+    # bierzemy linie po <br> bez polegania na strukturze DOM
+    parts: List[str] = []
     for chunk in td.decode_contents().split("<br"):
         txt = _clean_spaces(BeautifulSoup(chunk, "html.parser").get_text(" ", strip=True))
         if txt:
@@ -249,12 +214,6 @@ def _parse_roles_and_partner(td) -> Tuple[str, List[str], str, List[str]]:
 
 
 def _parse_actions_links(tr) -> Tuple[str, str, str]:
-    """
-    Z wiersza:
-    - edycja: link z przycisku EDYTUJ
-    - matches: link z "POKAŻ MECZE"
-    - offtime: link z "POKAŻ OFFTIME"
-    """
     edit_href = ""
     matches_href = ""
     offtime_href = ""
@@ -276,16 +235,49 @@ def _parse_actions_links(tr) -> Tuple[str, str, str]:
     return edit_href, matches_href, offtime_href
 
 
+def _extract_base_qs_from_paging_form(table: Any) -> Dict[str, str]:
+    """
+    Najpewniejsze źródło parametrów filtrów (Filtr_woj2 itp.)
+    jest w formularzu paginacji, w hidden inputach.
+    """
+    if not table:
+        return {}
+
+    # szukamy formy, która ma select name="count"
+    paging_form = None
+    for f in table.find_all("form"):
+        if f.find("select", attrs={"name": "count"}):
+            paging_form = f
+            break
+
+    if not paging_form:
+        return {}
+
+    qs: Dict[str, str] = {}
+    for inp in paging_form.find_all("input", attrs={"type": "hidden", "name": True}):
+        name = _clean_spaces(inp.get("name", ""))
+        val = _clean_spaces(inp.get("value", ""))
+        if name:
+            qs[name] = val
+
+    # count z select
+    sel = paging_form.find("select", attrs={"name": "count"})
+    if sel:
+        opt_sel = sel.find("option", selected=True)
+        if opt_sel:
+            qs["count"] = _clean_spaces(opt_sel.get("value", "")) or qs.get("count", "")
+
+    return qs
+
+
 def _extract_paging_state(table: Any) -> Tuple[int, int]:
     """
-    Z paska paginacji bierzemy:
-    - count (np. 10/20/50/100) z <select name="count"> wybranej opcji
-    - max_offset (największy offset z linków STRONA)
+    - count: zaznaczona opcja
+    - max_offset: najwyższy offset=... w linkach
     """
     if not table:
         return 10, 0
 
-    # count
     count = 10
     sel = table.find("select", attrs={"name": "count"})
     if sel:
@@ -293,7 +285,6 @@ def _extract_paging_state(table: Any) -> Tuple[int, int]:
         if opt_sel and _clean_spaces(opt_sel.get("value", "")):
             count = _safe_int(opt_sel.get("value", ""), default=10)
 
-    # max_offset: weź wszystkie linki z offset=...
     max_offset = 0
     for a in table.find_all("a", href=True):
         href = a.get("href", "")
@@ -320,13 +311,17 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
         raise HTTPException(500, "Nie znaleziono tabeli sędziów (id='tabelka').")
 
     count, max_offset = _extract_paging_state(table)
+    base_qs = _extract_base_qs_from_paging_form(table)
 
-    # INFO: paginacja wykryta na stronie
+    # DIAGNOSTYKA: ile tr w ogóle widzimy
+    all_trs = table.find_all("tr")  # <--- KLUCZOWA ZMIANA (bez recursive=False)
     logger.info(
-        "Officials page parsed offset=%s count=%s max_offset=%s",
+        "Officials page parsed offset=%s count=%s max_offset=%s trs_seen=%s base_qs_keys=%s",
         current_offset,
         count,
         max_offset,
+        len(all_trs),
+        sorted(list(base_qs.keys()))[:20],
     )
 
     officials: Dict[str, Dict[str, Any]] = {}
@@ -335,13 +330,13 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
     data_rows = 0
     skipped_rows = 0
 
-    for tr in table.find_all("tr", recursive=False):
+    for tr in all_trs:
         if not _row_is_data_tr(tr):
             skipped_rows += 1
             continue
 
         data_rows += 1
-        tds = tr.find_all("td", recursive=False)
+        tds = tr.find_all("td")  # bez recursive=False
 
         nr = _clean_spaces(tds[0].get("title", ""))  # NrSedzia
         lp = _safe_int(_clean_spaces(tds[0].get_text(" ", strip=True)), default=0)
@@ -369,7 +364,6 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
         }
         officials[nr] = rec
 
-        # log-sample: zbieramy kilka pierwszych rekordów z tej strony
         if len(sample_rows) < 3:
             sample_rows.append(
                 {
@@ -386,7 +380,6 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
                 }
             )
 
-    # INFO: ile wierszy danych na stronie i próbka
     logger.info(
         "Officials page summary offset=%s rows_data=%s rows_skipped=%s unique_officials_in_page=%s",
         current_offset,
@@ -398,19 +391,13 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
         logger.info("Officials page sample offset=%s sample=%s", current_offset, sample_rows)
 
     return {
-        "paging": {
-            "count": count,
-            "offset": current_offset,
-            "max_offset": max_offset,
-        },
+        "paging": {"count": count, "offset": current_offset, "max_offset": max_offset},
+        "base_qs": base_qs,  # <--- NOWE: weźmiemy to do budowania kolejnych requestów
         "officials": officials,
     }
 
 
 def _merge_officials(dst: Dict[str, Dict[str, Any]], src: Dict[str, Dict[str, Any]]) -> Tuple[int, int]:
-    """
-    Merge src -> dst. Zwraca (added, overwritten)
-    """
     added = 0
     overwritten = 0
     for k, v in (src or {}).items():
@@ -423,14 +410,7 @@ def _merge_officials(dst: Dict[str, Dict[str, Any]], src: Dict[str, Dict[str, An
 
 
 def _summarize_roles(officials: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
-    sedzia = 0
-    delegat = 0
-    stolikowy = 0
-    para = 0
-    phone = 0
-    photo = 0
-    city = 0
-
+    sedzia = delegat = stolikowy = para = phone = photo = city = 0
     for o in (officials or {}).values():
         roles = o.get("roles") or []
         if "sedzia" in roles:
@@ -447,7 +427,6 @@ def _summarize_roles(officials: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
             photo += 1
         if _clean_spaces(o.get("city", "")):
             city += 1
-
     return {
         "with_role_sedzia": sedzia,
         "with_role_delegat": delegat,
@@ -459,24 +438,12 @@ def _summarize_roles(officials: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
     }
 
 
-# =========================
-# Endpoints
-# =========================
-
 @router.post("/zprp/sedziowie/scrape")
 async def scrape_officials_full(
     payload: ZprpScheduleScrapeRequest,
     settings: Settings = Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
-    """
-    Full scrape "Sędziowie i Delegaci":
-    - loguje się
-    - wchodzi na /index.php (home)
-    - z menu wyciąga href do "Sędziowie i Delegaci" (z parametrami konta)
-    - pobiera wszystkie strony (offset=0..max_offset) dla aktualnego 'count' (domyślnie 10)
-    - zwraca JSON keyed po NrSedzia
-    """
     private_key, _ = keys
     try:
         user_plain = _decrypt_field(private_key, payload.username)
@@ -488,7 +455,6 @@ async def scrape_officials_full(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
         logger.info("ZPRP officials: login ok base_url=%s", settings.ZPRP_BASE_URL)
 
-        # home po zalogowaniu (żeby pobrać menu link z parametrami)
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
         _log_html_fingerprint("Home fetched", html_home)
 
@@ -498,7 +464,6 @@ async def scrape_officials_full(
             href_regex=r"\ba=sedzia\b",
         )
 
-        # pierwsza strona
         _, html0 = await fetch_with_correct_encoding(client, sedzia_href, method="GET", cookies=cookies)
         _log_html_fingerprint("Officials page[0] fetched", html0)
 
@@ -511,6 +476,15 @@ async def scrape_officials_full(
         count = int(paging0.get("count", 10))
         max_offset = int(paging0.get("max_offset", 0))
 
+        # KLUCZOWE: bazę do kolejnych requestów bierzemy z hidden inputów strony
+        base_qs0 = parsed0.get("base_qs") or {}
+        base_qs: Dict[str, str] = dict(base_qs0)
+
+        # wymuszenia
+        base_qs["a"] = "sedzia"
+        base_qs["Filtr_archiwum"] = base_qs.get("Filtr_archiwum", "1") or "1"
+        base_qs["count"] = str(count)
+
         logger.info(
             "ZPRP officials: page0 merged added=%s overwritten=%s officials_total=%s count=%s max_offset=%s",
             added0,
@@ -519,28 +493,11 @@ async def scrape_officials_full(
             count,
             max_offset,
         )
+        logger.info("ZPRP officials: paging base_qs=%s", base_qs)
 
-        # bazowe parametry do kolejnych stron: bierzemy z sedzia_href (np. Filtr_archiwum, Filtr_woj2, count)
-        try:
-            u0 = urlparse(
-                sedzia_href
-                if sedzia_href.startswith("http")
-                else ("http://x" + sedzia_href if sedzia_href.startswith("?") else "http://x/" + sedzia_href)
-            )
-            base_qs = parse_qs(u0.query)
-        except Exception:
-            base_qs = {}
-
-        base_qs["a"] = ["sedzia"]
-        base_qs["count"] = [str(count)]  # spójnie z tym co zdekodowała strona
-
-        # INFO: pokaż bazowe parametry paginacji
-        logger.info("ZPRP officials: paging base_qs=%s", {k: (v[0] if isinstance(v, list) and v else v) for k, v in base_qs.items()})
-
-        # iteruj po kolejnych stronach
         for offset in range(1, max_offset + 1):
-            qs = {k: (v[:] if isinstance(v, list) else [str(v)]) for k, v in base_qs.items()}
-            qs["offset"] = [str(offset)]
+            qs = dict(base_qs)
+            qs["offset"] = str(offset)
             path = "/index.php?" + urlencode(qs, doseq=True)
 
             logger.info("ZPRP officials: fetching offset=%s path='%s'", offset, path)
@@ -561,7 +518,7 @@ async def scrape_officials_full(
         role_stats = _summarize_roles(all_officials)
         logger.info("ZPRP officials: FINAL total=%s stats=%s", len(all_officials), role_stats)
 
-        # INFO: próbka końcowa (max 5) żeby widzieć "co dokładnie znalazł"
+        # próbka końcowa (max 5)
         sample_final: List[Dict[str, Any]] = []
         for i, (nr, o) in enumerate(all_officials.items()):
             if i >= 5:
@@ -587,17 +544,9 @@ async def scrape_officials_full(
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
             "entry_href": sedzia_href,
-            "paging": {
-                "count": count,
-                "offset_min": 0,
-                "offset_max": max_offset,
-                "pages": max_offset + 1,
-            },
+            "paging": {"count": count, "offset_min": 0, "offset_max": max_offset, "pages": max_offset + 1},
             "officials": all_officials,
-            "summary": {
-                "officials_total": len(all_officials),
-                **role_stats,
-            },
+            "summary": {"officials_total": len(all_officials), **role_stats},
         }
 
 
@@ -607,12 +556,6 @@ async def scrape_officials_lite(
     settings: Settings = Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
-    """
-    Lite scrape:
-    - loguje się
-    - wchodzi na home, bierze href do "Sędziowie i Delegaci"
-    - pobiera TYLKO pierwszą stronę (offset=0)
-    """
     private_key, _ = keys
     try:
         user_plain = _decrypt_field(private_key, payload.username)
@@ -638,41 +581,20 @@ async def scrape_officials_lite(
 
         parsed0 = _parse_officials_page(html0, current_offset=0)
         officials = parsed0["officials"]
-        paging0 = parsed0["paging"]
         role_stats = _summarize_roles(officials)
 
         logger.info(
             "ZPRP officials(lite): DONE officials_total=%s paging=%s stats=%s",
             len(officials),
-            paging0,
+            parsed0["paging"],
             role_stats,
         )
-
-        # próbka
-        sample: List[Dict[str, Any]] = []
-        for i, (nr, o) in enumerate(officials.items()):
-            if i >= 5:
-                break
-            sample.append(
-                {
-                    "NrSedzia": nr,
-                    "name": o.get("name", ""),
-                    "city": o.get("city", ""),
-                    "roles_text": o.get("roles_text", ""),
-                    "partner": o.get("partner", ""),
-                }
-            )
-        if sample:
-            logger.info("ZPRP officials(lite): sample=%s", sample)
 
         return {
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
             "entry_href": sedzia_href,
-            "paging": paging0,
+            "paging": parsed0["paging"],
             "officials": officials,
-            "summary": {
-                "officials_total": len(officials),
-                **role_stats,
-            },
+            "summary": {"officials_total": len(officials), **role_stats},
         }
