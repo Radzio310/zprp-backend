@@ -39,6 +39,9 @@ _RE_HALF = re.compile(r"\(\s*(\d+)\s*:\s*(\d+)\s*\)")
 _RE_PENS = re.compile(r"<\s*(\d+)\s*:\s*(\d+)\s*>")
 _RE_DATE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
 _RE_TIME = re.compile(r"\(\s*(\d{2}:\d{2})\s*\)")
+_RE_LP = re.compile(r"^\s*(\d+)\.\s*$")
+_RE_SEASON = re.compile(r"^\s*(\d{4})\s*/\s*(\d{4})\s*$")
+_RE_LP_AND_SEASON_INLINE = re.compile(r"^\s*(\d+)\.\s+(\d{4}\s*/\s*\d{4})\s*$")
 
 _RE_BYE = re.compile(r"\bpauz\w*\b", re.I)  # pauzuje, pauza, pauz., etc.
 _RE_PLACEHOLDER_TEAM = re.compile(r"\bzesp[oó]ł\s*nr\s*\d+\b", re.I)  # Zespół nr 10
@@ -373,25 +376,74 @@ def _parse_officials(td) -> Dict[str, str]:
     return out
 
 
+def _extract_lp_and_season_from_row_cells(tds: List[Any]) -> Tuple[Optional[int], str]:
+    """
+    Dodatkowe kryterium stabilizujące:
+    - każdy wiersz powinien zaczynać się od "N." (np. "1.") i zaraz potem sezonem "YYYY/YYYY".
+    - jeśli HTML jest "krzywy" (niedomknięte tagi) i sezon wpadł do tej samej komórki co Lp,
+      próbujemy odzyskać: "1. 2025/2026".
+    Zwraca: (lp_int_or_None, season_label_or_empty)
+    """
+    if not tds or len(tds) < 2:
+        return None, ""
+
+    lp_txt = _clean_spaces(tds[0].get_text(" ", strip=True))
+    season_txt = _clean_spaces(tds[1].get_text(" ", strip=True))
+
+    # standard: osobne komórki
+    m_lp = _RE_LP.match(lp_txt)
+    m_sea = _RE_SEASON.match(season_txt)
+    if m_lp and m_sea:
+        return int(m_lp.group(1)), f"{m_sea.group(1)}/{m_sea.group(2)}"
+
+    # recovery #1: sezon sklejony z Lp w tej samej komórce
+    m_inline = _RE_LP_AND_SEASON_INLINE.match(lp_txt)
+    if m_inline:
+        lp = int(m_inline.group(1))
+        season_raw = _clean_spaces(m_inline.group(2))
+        m_sea2 = _RE_SEASON.match(season_raw)
+        season = f"{m_sea2.group(1)}/{m_sea2.group(2)}" if m_sea2 else season_raw
+        return lp, season
+
+    # recovery #2: w 2. komórce może być "2025/2026 ..." -> wyciągnij sam sezon
+    m_sea_loose = re.search(r"(\d{4})\s*/\s*(\d{4})", season_txt)
+    if m_lp and m_sea_loose:
+        return int(m_lp.group(1)), f"{m_sea_loose.group(1)}/{m_sea_loose.group(2)}"
+
+    return None, ""
+
+
 def _is_match_row(tr) -> bool:
     """
     Odfiltrowuje:
     - nagłówek tabeli ("Lp.")
     - separatory z colspan
     - nietypowe wiersze
+    Dodatkowo (zgodnie z Twoją uwagę):
+    - wiersz musi zaczynać się od "N." i zaraz potem mieć sezon "YYYY/YYYY"
+      (to pomaga wyłapać krzywe HTML-e / niedomknięte TR/TD).
     """
     if not tr:
         return False
     tds = tr.find_all("td", recursive=False)
+
+    # minimalnie oczekujemy kompletnej tabeli terminarza (Lp + sezon + ... + obsada)
+    # przy krzywym HTML często robi się mniej kolumn -> odcinamy
     if not tds or len(tds) < 11:
         return False
+
+    # separator row (często pojedynczy td colspan=20)
     if any(td.has_attr("colspan") for td in tds):
         return False
 
+    # szybki filtr nagłówka tabeli
     lp_raw = _clean_spaces(tds[0].get_text(" ", strip=True))
     if lp_raw.lower() in ("lp.", "lp"):
         return False
-    if not re.fullmatch(r"\d+\.", lp_raw):
+
+    # kryterium lp + season (stabilizuje, gdy HTML się rozjechał)
+    lp, season = _extract_lp_and_season_from_row_cells(tds)
+    if lp is None or not season or not _RE_SEASON.match(season):
         return False
 
     return True
@@ -434,6 +486,10 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
 
         tds = tr.find_all("td", recursive=False)
 
+        # W teorii: [0]=Lp, [1]=Sezon, [2]=Kolejka, [3]=Kod, [4]=Data, [5]=Hala, [6]=Widzowie,
+        #           [7]=Gospodarze, [8]=Wynik, [9]=Goście, [10]=Obsada
+        # Przy "krzywym" HTML-e, gdy sezon się sklei z lp, BeautifulSoup nadal trzyma 11+ td,
+        # ale treści mogą być nieczyste. Dlatego lp/season wyciągamy dedykowaną funkcją.
         td_lp = tds[0]
         td_season = tds[1]
         td_kolejka = tds[2]
@@ -448,13 +504,19 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
 
         lp_raw = td_lp.get_text(" ", strip=True)
         season_raw = td_season.get_text(" ", strip=True)
+
+        lp_int, season_label = _extract_lp_and_season_from_row_cells(tds)
+        if lp_int is None or not season_label:
+            # dodatkowa asekuracja - teoretycznie nie wejdziemy tu przez _is_match_row
+            logger.warning("ZPRP terminarz: skip row (lp/season invalid) lp_raw=%r season_raw=%r", lp_raw, season_raw)
+            continue
+
         code_raw = td_code.get_text(" ", strip=True)
         host_raw = td_host.get_text(" ", strip=True)
         guest_raw = td_guest.get_text(" ", strip=True)
         kolejka_raw = td_kolejka.get_text(" ", strip=True)
 
-        lp = _safe_int(lp_raw, 0)
-        season_label = _clean_spaces(season_raw)
+        lp = int(lp_int)
         code = _clean_spaces(code_raw)
         host_name = _clean_spaces(host_raw)
         guest_name = _clean_spaces(guest_raw)
@@ -733,8 +795,6 @@ async def scrape_terminarz_full(
             "by_sex": {"K": [], "M": [], "": []},
         }
 
-        total_matches_all = 0
-
         for (cat_val, cat_label, _) in cats:
             sex = _detect_sex_from_kategoria_value(cat_val, cat_label)
 
@@ -774,7 +834,6 @@ async def scrape_terminarz_full(
 
                 cnt = len(matches_map)
                 cat_total_matches += cnt
-                total_matches_all += cnt
 
                 logger.info(
                     "ZPRP terminarz: FULL fetched matches=%d season=%s cat=%s (%s) rozgr=%s (%s)",
