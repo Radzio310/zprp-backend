@@ -1309,14 +1309,19 @@ def _first_name_from_lines(lines: List[str]) -> str:
     return ""
 
 
-def _strip_technical_nodes(td_soup) -> None:
+def _strip_technical_nodes(td_soup, *, remove_spans: bool = True) -> None:
     """
-    Usuwa elementy techniczne z komórki (form/input/button/span/img/script/style),
-    żeby nie wchodziły do parsowania tekstu.
+    Usuwa elementy techniczne, żeby nie wchodziły do parsowania tekstu.
+    UWAGA: w kolumnie delegata nazwisko bywa opakowane w <span>, więc tam remove_spans=False.
     """
     if not td_soup:
         return
-    for tag in td_soup.find_all(["form", "input", "button", "span", "img", "script", "style", "select", "option"]):
+
+    tags = ["form", "input", "button", "img", "script", "style", "select", "option"]
+    if remove_spans:
+        tags.append("span")
+
+    for tag in td_soup.find_all(tags):
         tag.decompose()
 
 
@@ -1469,7 +1474,7 @@ def _parse_delegate_cell(td) -> str:
     html = td.decode_contents() or ""
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     root = soup.div
-    _strip_technical_nodes(root)
+    _strip_technical_nodes(root, remove_spans=False)
     txt = _clean_spaces(root.get_text("\n", strip=True))
     if not txt:
         return ""
