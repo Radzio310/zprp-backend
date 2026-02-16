@@ -705,3 +705,493 @@ async def scrape_officials_lite(
             "officials": officials,
             "summary": {"officials_total": len(officials), **role_stats},
         }
+
+
+# ============================
+# OFFICIAL EDIT: READ + SAVE
+# (wklej na sam koniec officials.py)
+# ============================
+
+from pydantic import BaseModel, Field
+from typing import Optional, Union
+
+
+def _ensure_index_php_prefix(path: str) -> str:
+    """
+    ZPRP często zwraca href jako:
+      - "?a=sedzia&b=edycja&NrSedzia=5124"
+      - "index.php?a=sedzia&b=edycja&NrSedzia=5124"
+      - "/index.php?a=sedzia&b=edycja&NrSedzia=5124"
+    Tu normalizujemy do ścieżki względnej z wiodącym "/" i z /index.php gdy zaczyna się od '?'.
+    """
+    p = (path or "").strip()
+    if not p:
+        return ""
+
+    p = _absorb_href_keep_relative(p)
+
+    if p.startswith("?"):
+        return "/index.php" + p
+    if p.startswith("index.php"):
+        return "/" + p
+    if p.startswith("/index.php"):
+        return p
+    if p.startswith("/"):
+        return p
+
+    # fallback
+    return "/" + p
+
+
+def _build_edit_path_from_nr(nr_sedzia: Union[str, int]) -> str:
+    nr = _clean_spaces(str(nr_sedzia))
+    return f"/index.php?a=sedzia&b=edycja&NrSedzia={nr}"
+
+
+def _parse_select(td_or_select, *, include_options: bool) -> Dict[str, Any]:
+    """
+    Zwraca:
+      {
+        "selected": {"value": "...", "label": "..."} | None,
+        "options": [{"value": "...", "label": "...", "selected": bool}, ...]  # opcjonalnie
+      }
+    """
+    sel = td_or_select
+    if td_or_select and getattr(td_or_select, "name", None) != "select":
+        sel = td_or_select.find("select")
+    if not sel:
+        return {"selected": None, "options": [] if include_options else None}
+
+    selected_val = None
+    selected_label = None
+    opts_payload = [] if include_options else None
+
+    for opt in sel.find_all("option"):
+        val = _clean_spaces(opt.get("value", ""))
+        lab = _clean_spaces(opt.get_text(" ", strip=True))
+        is_sel = bool(opt.has_attr("selected"))
+        if is_sel and selected_val is None:
+            selected_val = val
+            selected_label = lab
+        if include_options:
+            opts_payload.append({"value": val, "label": lab, "selected": is_sel})
+
+    # czasem selected nie jest oznaczony, ale wartość jest ustawiona JS-em; tu nie mamy tego,
+    # więc zostawiamy None jeśli brak selected.
+
+    return {
+        "selected": ({"value": selected_val, "label": selected_label} if selected_val is not None else None),
+        "options": opts_payload,
+    }
+
+
+def _parse_official_edit_page(html: str, *, include_select_options: bool = False) -> Dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    # formularz edycji - w przykładzie: <form method='POST' name='edycja' action='?a=sedzia&b=edycja&NrSedzia=...'>
+    form = soup.find("form", attrs={"name": "edycja"})
+    if not form:
+        # fallback: pierwszy form z action zawierającym a=sedzia i b=edycja
+        for f in soup.find_all("form"):
+            act = _clean_spaces(f.get("action", ""))
+            if "a=sedzia" in act and "b=edycja" in act:
+                form = f
+                break
+
+    if not form:
+        raise HTTPException(500, "Nie znaleziono formularza edycji sędziego (form name='edycja').")
+
+    method = _clean_spaces(form.get("method", "GET")).upper() or "POST"
+    action_raw = _clean_spaces(form.get("action", ""))
+    action = _ensure_index_php_prefix(action_raw) if action_raw else ""
+
+    # NrSedzia - zwykle hidden w formie + w query string
+    nr_from_hidden = ""
+    nr_inp = form.find("input", attrs={"name": "NrSedzia"})
+    if nr_inp:
+        nr_from_hidden = _clean_spaces(nr_inp.get("value", ""))
+
+    nr_from_qs = ""
+    if action:
+        try:
+            u = urlparse("http://x" + action if action.startswith("/") else "http://x/" + action)
+            qs = parse_qs(u.query)
+            nr_from_qs = _clean_spaces((qs.get("NrSedzia", [""]) or [""])[0])
+        except Exception:
+            nr_from_qs = ""
+
+    nr_sedzia = nr_from_hidden or nr_from_qs
+
+    # foto (pierwsze sensowne img w sekcji "Foto :" - w przykładzie <img ... src="foto_sedzia/5124.jpg?...">)
+    photo_src = ""
+    try:
+        # heurystyka: pierwsze img z "foto_sedzia/"
+        img = soup.find("img", src=re.compile(r"\bfoto_sedzia\/", re.I))
+        if img:
+            photo_src = _absorb_href_keep_relative(_clean_spaces(img.get("src", "")))
+    except Exception:
+        photo_src = ""
+
+    # --- inputs ---
+    fields_text: Dict[str, str] = {}
+    fields_hidden: Dict[str, str] = {}
+    fields_radio: Dict[str, str] = {}
+    fields_checkbox: Dict[str, bool] = {}
+    fields_submit: List[Dict[str, str]] = []
+
+    for inp in form.find_all("input", attrs={"name": True}):
+        name = _clean_spaces(inp.get("name", ""))
+        if not name:
+            continue
+        itype = _clean_spaces(inp.get("type", "text")).lower()
+        val = _clean_spaces(inp.get("value", ""))
+
+        if itype in ("hidden",):
+            fields_hidden[name] = val
+        elif itype in ("text", "email", "number", "tel", "date"):
+            fields_text[name] = val
+        elif itype == "radio":
+            if inp.has_attr("checked"):
+                fields_radio[name] = val
+        elif itype == "checkbox":
+            # checkbox wysyła się tylko gdy zaznaczony
+            fields_checkbox[name] = bool(inp.has_attr("checked"))
+        elif itype in ("submit", "button"):
+            # ZAPISZ: <input class="przycisk3" name="akcja" type="submit" value="ZAPISZ" />
+            fields_submit.append({"name": name, "value": val})
+        else:
+            # inne typy też trzymajmy jako "text-like"
+            if val:
+                fields_text[name] = val
+
+    # --- textarea (na wypadek innych pól) ---
+    fields_textarea: Dict[str, str] = {}
+    for ta in form.find_all("textarea", attrs={"name": True}):
+        name = _clean_spaces(ta.get("name", ""))
+        if not name:
+            continue
+        fields_textarea[name] = _clean_spaces(ta.get_text("", strip=True))
+
+    # --- select ---
+    selects: Dict[str, Any] = {}
+    for sel in form.find_all("select", attrs={"name": True}):
+        sname = _clean_spaces(sel.get("name", ""))
+        if not sname:
+            continue
+        parsed = _parse_select(sel, include_options=include_select_options)
+        selects[sname] = parsed
+
+    # wyciągnij definicję przycisku "ZAPISZ" (preferuj value=ZAPISZ, inaczej pierwszy submit)
+    save_submit = None
+    for s in fields_submit:
+        if _clean_spaces(s.get("value", "")).upper() == "ZAPISZ":
+            save_submit = s
+            break
+    if not save_submit and fields_submit:
+        save_submit = fields_submit[0]
+
+    # dodatkowo: czy jest "ANULUJ" jako link (żeby UI mógł pokazać)
+    cancel_href = ""
+    try:
+        a_cancel = soup.find("a", string=re.compile(r"^\s*ANULUJ\s*$", re.I))
+        if a_cancel and a_cancel.get("href"):
+            cancel_href = _ensure_index_php_prefix(_clean_spaces(a_cancel.get("href", "")))
+    except Exception:
+        cancel_href = ""
+
+    return {
+        "NrSedzia": nr_sedzia,
+        "photo_src": photo_src,
+        "form": {
+            "method": method,
+            "action": action,
+            "save_submit": save_submit,  # np. {"name":"akcja","value":"ZAPISZ"}
+            "cancel_href": cancel_href,
+        },
+        "values": {
+            "text": fields_text,
+            "hidden": fields_hidden,
+            "radio": fields_radio,
+            "checkbox": fields_checkbox,
+            "textarea": fields_textarea,
+            "select": selects,
+        },
+    }
+
+
+def _build_post_data_for_save(
+    parsed_form: Dict[str, Any],
+    patch: Dict[str, Any],
+) -> Dict[str, str]:
+    """
+    Buduje finalny payload POST do ZPRP:
+      - bierze wszystkie aktualne wartości z formularza
+      - nadpisuje polami z patch
+      - checkboxy: True => wysyłamy "1" (albo wartość z HTML jeśli była); False => NIE wysyłamy
+      - radio/select: wysyłamy value
+      - zawsze dokleja save_submit (np. akcja=ZAPISZ) jeśli jest
+    """
+    values = (parsed_form or {}).get("values") or {}
+    text = dict(values.get("text") or {})
+    hidden = dict(values.get("hidden") or {})
+    radio = dict(values.get("radio") or {})
+    checkbox = dict(values.get("checkbox") or {})
+    textarea = dict(values.get("textarea") or {})
+    select = dict(values.get("select") or {})
+
+    # patch: pozwalamy podać:
+    # - wartości pól tekstowych/hidden/radio/textarea jako string
+    # - checkbox jako bool
+    # - select jako {"value": "..."} lub bezpośrednio string
+    # - dowolny klucz, który pasuje do name=... w form
+    patch = patch or {}
+
+    # 1) nadpisz proste stringi (text/hidden/textarea/radio)
+    for k, v in patch.items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            # checkbox
+            checkbox[k] = v
+            continue
+
+        # select w formie {"value": "..."}
+        if isinstance(v, dict) and "value" in v:
+            val = _clean_spaces(str(v.get("value", "")))
+            if val:
+                # select
+                if k in select:
+                    select[k] = {"selected": {"value": val, "label": None}, "options": None}
+                else:
+                    # jeśli nie rozpoznaliśmy jako select, potraktuj jak text
+                    text[k] = val
+            continue
+
+        # zwykły string/number
+        sval = _clean_spaces(str(v))
+        if k in text:
+            text[k] = sval
+        elif k in hidden:
+            hidden[k] = sval
+        elif k in textarea:
+            textarea[k] = sval
+        elif k in radio:
+            radio[k] = sval
+        elif k in select:
+            select[k] = {"selected": {"value": sval, "label": None}, "options": None}
+        else:
+            # nieznane pole - dodaj jako text (ZPRP raczej zignoruje, ale to bezpieczne)
+            text[k] = sval
+
+    # 2) złóż dane
+    data: Dict[str, str] = {}
+
+    # hidden + text + textarea
+    for src in (hidden, text, textarea):
+        for k, v in src.items():
+            k = _clean_spaces(k)
+            if not k:
+                continue
+            data[k] = _clean_spaces(str(v))
+
+    # radio (tylko zaznaczone)
+    for k, v in radio.items():
+        k = _clean_spaces(k)
+        if not k:
+            continue
+        data[k] = _clean_spaces(str(v))
+
+    # select (selected.value)
+    for k, obj in select.items():
+        k = _clean_spaces(k)
+        if not k:
+            continue
+        selected = (obj or {}).get("selected") if isinstance(obj, dict) else None
+        if isinstance(obj, str):
+            data[k] = _clean_spaces(obj)
+        elif isinstance(selected, dict):
+            vv = _clean_spaces(str(selected.get("value", "")))
+            if vv != "":
+                data[k] = vv
+
+    # checkbox (wysyłamy tylko gdy True)
+    # w HTML zwykle value="1" - my wysyłamy "1"
+    for k, is_on in checkbox.items():
+        k = _clean_spaces(k)
+        if not k:
+            continue
+        if bool(is_on):
+            data[k] = "1"
+
+    # 3) submit save (akcja=ZAPISZ)
+    save_submit = ((parsed_form or {}).get("form") or {}).get("save_submit") or None
+    if isinstance(save_submit, dict):
+        sn = _clean_spaces(save_submit.get("name", ""))
+        sv = _clean_spaces(save_submit.get("value", ""))
+        if sn and sv:
+            data[sn] = sv
+
+    # 4) upewnij się, że NrSedzia istnieje
+    nr = _clean_spaces((parsed_form or {}).get("NrSedzia", "")) or _clean_spaces(data.get("NrSedzia", ""))
+    if nr:
+        data["NrSedzia"] = nr
+
+    return data
+
+
+class ZprpOfficialEditReadRequest(BaseModel):
+    username: str
+    password: str
+    # jedno z poniższych:
+    edit_href: Optional[str] = Field(default=None, description="Link do edycji (z listy), np. '?a=sedzia&b=edycja&NrSedzia=5124'")
+    NrSedzia: Optional[Union[str, int]] = Field(default=None, description="Numer sędziego jeśli nie masz edit_href")
+    include_select_options: bool = Field(default=False, description="Jeśli True, zwraca pełne listy option dla selectów (UWAGA: może być bardzo duże).")
+
+
+class ZprpOfficialEditSaveRequest(BaseModel):
+    username: str
+    password: str
+    # jedno z poniższych:
+    edit_href: Optional[str] = None
+    NrSedzia: Optional[Union[str, int]] = None
+    # pola do nadpisania (może być tylko telefon itp.)
+    patch: Dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/zprp/sedziowie/edit/read")
+async def read_official_edit_page(
+    payload: ZprpOfficialEditReadRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    private_key, _ = keys
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+
+    # ustal URL edycji
+    edit_path = ""
+    if payload.edit_href:
+        edit_path = _ensure_index_php_prefix(payload.edit_href)
+    elif payload.NrSedzia is not None:
+        edit_path = _build_edit_path_from_nr(payload.NrSedzia)
+    else:
+        raise HTTPException(400, "Brak edit_href i NrSedzia.")
+
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
+        cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
+        logger.info("ZPRP official edit(read): login ok base_url=%s", settings.ZPRP_BASE_URL)
+
+        _, html = await fetch_with_correct_encoding(client, edit_path, method="GET", cookies=cookies)
+        _log_html_fingerprint("Official edit page fetched", html)
+
+        parsed = _parse_official_edit_page(html, include_select_options=bool(payload.include_select_options))
+
+        return {
+            "fetched_at": _now_iso(),
+            "base_url": settings.ZPRP_BASE_URL,
+            "edit_path": edit_path,
+            "official": parsed,
+            "save_action": {
+                "method": parsed.get("form", {}).get("method", ""),
+                "action": parsed.get("form", {}).get("action", ""),
+                "submit": parsed.get("form", {}).get("save_submit", None),
+            },
+        }
+
+
+@router.post("/zprp/sedziowie/edit/save")
+async def save_official_edit_page(
+    payload: ZprpOfficialEditSaveRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    private_key, _ = keys
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+
+    # ustal URL edycji (żeby pobrać aktualne wartości i action)
+    edit_path = ""
+    if payload.edit_href:
+        edit_path = _ensure_index_php_prefix(payload.edit_href)
+    elif payload.NrSedzia is not None:
+        edit_path = _build_edit_path_from_nr(payload.NrSedzia)
+    else:
+        raise HTTPException(400, "Brak edit_href i NrSedzia.")
+
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
+        cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
+        logger.info("ZPRP official edit(save): login ok base_url=%s", settings.ZPRP_BASE_URL)
+
+        # 1) pobierz formularz, żeby mieć komplet pól i action
+        _, html_before = await fetch_with_correct_encoding(client, edit_path, method="GET", cookies=cookies)
+        _log_html_fingerprint("Official edit page(before save) fetched", html_before)
+
+        parsed_before = _parse_official_edit_page(html_before, include_select_options=False)
+
+        # 2) zbuduj POST data: komplet + patch
+        post_data = _build_post_data_for_save(parsed_before, payload.patch or {})
+
+        # 3) target action
+        form = parsed_before.get("form") or {}
+        action = _ensure_index_php_prefix(form.get("action", "")) if form.get("action") else edit_path
+        method = _clean_spaces(form.get("method", "POST")).upper() or "POST"
+        if method != "POST":
+            # na ZPRP realnie jest POST, ale jakby kiedyś dali GET to i tak wymuszamy POST
+            method = "POST"
+
+        logger.info(
+            "ZPRP official edit(save): submitting method=%s action='%s' NrSedzia=%s patch_keys=%s",
+            method,
+            action,
+            parsed_before.get("NrSedzia", ""),
+            sorted(list((payload.patch or {}).keys()))[:50],
+        )
+
+        # 4) wykonaj zapis
+        _, html_after = await fetch_with_correct_encoding(
+            client,
+            action,
+            method="POST",
+            data=post_data,
+            cookies=cookies,
+        )
+        _log_html_fingerprint("Official edit page(after save) fetched", html_after)
+
+        # 5) spróbuj wyciągnąć komunikat (w przykładzie <div id="info_edit"...>)
+        soup_after = BeautifulSoup(html_after, "html.parser")
+        info_msg = ""
+        try:
+            div_info = soup_after.find(id="info_edit")
+            if div_info:
+                info_msg = _clean_spaces(div_info.get_text(" ", strip=True))
+        except Exception:
+            info_msg = ""
+
+        # 6) zwróć też odświeżone wartości (żebyś mógł porównać / potwierdzić zapis)
+        parsed_after = None
+        try:
+            parsed_after = _parse_official_edit_page(html_after, include_select_options=False)
+        except Exception:
+            parsed_after = None
+
+        return {
+            "saved_at": _now_iso(),
+            "base_url": settings.ZPRP_BASE_URL,
+            "edit_path": edit_path,
+            "submit": {
+                "method": method,
+                "action": action,
+                "sent_fields_count": len(post_data),
+                "sent_keys_sample": sorted(list(post_data.keys()))[:40],
+            },
+            "result": {
+                "info_edit": info_msg,
+                "parsed_after": parsed_after,
+            },
+        }
