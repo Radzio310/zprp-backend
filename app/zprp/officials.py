@@ -769,6 +769,11 @@ def _parse_select(td_or_select, *, include_options: bool) -> Dict[str, Any]:
     for opt in sel.find_all("option"):
         val = _clean_spaces(opt.get("value", ""))
         lab = _clean_spaces(opt.get_text(" ", strip=True))
+
+        # --- FIX: usuń placeholder typu "Wybierz województwo" / "Wybierz ..." ---
+        if val == "" or re.search(r"^\s*Wybierz\b", lab, re.I):
+            continue
+
         is_sel = bool(opt.has_attr("selected"))
         if is_sel and selected_val is None:
             selected_val = val
