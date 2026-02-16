@@ -29,7 +29,7 @@ logger.setLevel(logging.INFO)
 _RE_INT = re.compile(r"(\d+)")
 _RE_LP_DOT = re.compile(r"^\s*(\d+)\.\s*$")
 _RE_CITY_SUFFIX = re.compile(r"\s*\([A-Z]{1,3}\)\s*$")  # (SL)
-_RE_PARA_Z = re.compile(r"Para\s+z\s*:?\s*(.+)$", re.I)
+_RE_PARA_Z = re.compile(r"Para\s+z\s*:\s*(.+)$", re.I)  # "Para z : XYZ"
 _RE_PARENS = re.compile(r"\s*\([^)]*\)\s*")  # usuwa "(...)"
 
 
@@ -158,7 +158,7 @@ def _smart_title_token(tok: str) -> str:
 
 def _format_name_last_first_to_first_last(s: str) -> str:
     """
-    ZPRP zwykle ma "NAZWISKO Imię" (czasem "NAZWISKO  Imię" z dużymi literami).
+    ZPRP zwykle ma "NAZWISKO Imię".
     Zwracamy "Imię Nazwisko" i normalizujemy wielkość liter.
     """
     s = _clean_spaces(s)
@@ -177,6 +177,36 @@ def _format_name_last_first_to_first_last(s: str) -> str:
     return _clean_spaces(f"{first_fmt} {last_fmt}")
 
 
+def _looks_allcaps_word(w: str) -> bool:
+    w = _clean_spaces(w)
+    if not w:
+        return False
+    # ALLCAPS dla liter (zostawiamy diakrytyki); ignorujemy myślniki
+    letters = re.sub(r"[^A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", "", w)
+    return bool(letters) and letters == letters.upper()
+
+
+def _normalize_partner_name(raw: str) -> str:
+    """
+    Partner w ZPRP często jest w formacie "NAZWISKO Imię".
+    - jeśli pierwszy token wygląda na ALLCAPS => zamień na "Imię Nazwisko"
+    - inaczej tylko skapitalizuj tokeny w oryginalnej kolejności
+    """
+    s = _clean_spaces(_RE_PARENS.sub(" ", raw or ""))
+    if not s:
+        return ""
+
+    parts = [p for p in s.split(" ") if p]
+    if not parts:
+        return ""
+
+    if _looks_allcaps_word(parts[0]):
+        return _format_name_last_first_to_first_last(s)
+
+    # zostaw kolejność, ale uładź wielkość liter
+    return _clean_spaces(" ".join(_smart_title_token(p) for p in parts))
+
+
 def _parse_name_and_phone(td) -> Tuple[str, str]:
     """
     Kolumna zawiera:
@@ -188,8 +218,6 @@ def _parse_name_and_phone(td) -> Tuple[str, str]:
     if not td:
         return "", ""
 
-    # 1) Wyciągnij pierwszą sensowną linię (przed kolejnymi <br>)
-    #    decode_contents -> split po <br to najpewniejsze na tym HTML.
     raw_lines: List[str] = []
     for chunk in td.decode_contents().split("<br"):
         txt = _clean_spaces(BeautifulSoup(chunk, "html.parser").get_text(" ", strip=True))
@@ -198,17 +226,11 @@ def _parse_name_and_phone(td) -> Tuple[str, str]:
 
     first_line = raw_lines[0] if raw_lines else _clean_spaces(td.get_text(" ", strip=True))
 
-    # 2) Usuń wszystko w nawiasach: (Nazwisko rodowe) i (Drugie imię)
-    #    np. "DRAB Krzysztof (DRAB)" -> "DRAB Krzysztof"
     first_line_no_parens = _clean_spaces(_RE_PARENS.sub(" ", first_line))
-
-    # 3) Zamień kolejność na "Imię Nazwisko"
     name = _format_name_last_first_to_first_last(first_line_no_parens)
 
-    # --- telefon (jak było, tylko minimalnie stabilniej) ---
     phone = ""
 
-    # W tym HTML telefon jest zwykle w tekście po ikonie telefon.png
     tel_img = td.find("img", src=re.compile(r"telefon\.png", re.I))
     if tel_img:
         parent = tel_img.parent
@@ -236,7 +258,7 @@ def _parse_city(td) -> str:
 def _parse_roles_and_partner(td) -> Tuple[str, List[str], str, List[str]]:
     """
     Kolumna ma np.:
-      "Sędzia<br>Para z : KASZNIA Wojciech<br> <br>Stolikowy"
+      "Sędzia<br>Para z : KASZNIA Wojciech<br><br>Stolikowy"
     albo:
       "Delegat<br>Stolikowy"
     albo:
@@ -245,11 +267,9 @@ def _parse_roles_and_partner(td) -> Tuple[str, List[str], str, List[str]]:
     if not td:
         return "", [], "", []
 
-    # linie na bazie <br> (jak w nazwie)
     parts: List[str] = []
     for chunk in td.decode_contents().split("<br"):
         txt = _clean_spaces(BeautifulSoup(chunk, "html.parser").get_text(" ", strip=True))
-        # UWAGA: w tej kolumnie są "puste" linie – ignorujemy je
         if txt:
             parts.append(txt)
 
@@ -262,14 +282,12 @@ def _parse_roles_and_partner(td) -> Tuple[str, List[str], str, List[str]]:
             roles.append(canon)
             roles_text_lines.append(label)
 
-    # wykrywanie ról / partnera
     for p in parts:
         m = _RE_PARA_Z.search(p)
         if m and not partner:
-            partner = _clean_spaces(m.group(1))
+            partner = _normalize_partner_name(m.group(1))
             continue
 
-        # role mogą występować z odstępami
         if re.search(r"\bSędzia\b", p, re.I):
             add_role("sedzia", "Sędzia")
         if re.search(r"\bDelegat\b", p, re.I):
@@ -370,6 +388,31 @@ def _extract_paging_state(table: Any) -> Tuple[int, int]:
     return count, max_offset
 
 
+def _pick_roles_td(tds: List[Any]) -> Any:
+    """
+    Na tej stronie role są w tds[6], ale robimy to odporne:
+    wybieramy komórkę, która zawiera Sędzia/Delegat/Stolikowy albo "Para z :".
+    """
+    if not tds:
+        return None
+
+    # Najpierw szybki strzał: standardowy układ z tej strony.
+    if len(tds) > 6:
+        txt6 = _clean_spaces(tds[6].get_text(" ", strip=True))
+        if re.search(r"\b(Sędzia|Delegat|Stolikowy)\b", txt6, re.I) or _RE_PARA_Z.search(txt6):
+            return tds[6]
+
+    # Fallback: przeszukaj wszystkie td
+    for td in tds:
+        txt = _clean_spaces(td.get_text(" ", strip=True))
+        if not txt:
+            continue
+        if re.search(r"\b(Sędzia|Delegat|Stolikowy)\b", txt, re.I) or _RE_PARA_Z.search(txt):
+            return td
+
+    return None
+
+
 def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     table = _find_table(soup)
@@ -410,7 +453,9 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
         name, phone = _parse_name_and_phone(tds[2])
         city = _parse_city(tds[3])
 
-        roles_text, roles, partner, roles_raw_lines = _parse_roles_and_partner(tds[7])
+        roles_td = _pick_roles_td(tds)
+        roles_text, roles, partner, roles_raw_lines = _parse_roles_and_partner(roles_td)
+
         edit_href, matches_href, offtime_href = _parse_actions_links(tr)
 
         rec = {
