@@ -1247,10 +1247,17 @@ _RE_PENALTIES = re.compile(r"<\s*(\d{1,3})\s*:\s*(\d{1,3})\s*>")
 _RE_EMAIL = re.compile(r"\b[\w.\-+]+@[\w.\-]+\.\w+\b", re.I)
 _RE_PHONE = re.compile(r"(\+?\d[\d\s\-]{6,})")
 _RE_ONLY_DASHES = re.compile(r"^\s*-{2,}\s*-{2,}\s*$")
+_RE_ROLE_LABEL = re.compile(
+    r"^\s*(sekretarz|m\.?\s*czas|mier(z|ż)ący\s*czas|stolikowy|para\s*s(ę|e)dziowska)\s*$",
+    re.I,
+)
 
 def _is_name_like(s: str) -> bool:
     s = _clean_spaces(s)
     if not s:
+        return False
+    # NEW: odrzuć etykiety ról
+    if _RE_ROLE_LABEL.match(s):
         return False
     if _RE_ONLY_DASHES.match(s):
         return False
@@ -1272,13 +1279,18 @@ def _is_name_like(s: str) -> bool:
 def _first_name_from_lines(lines: List[str]) -> str:
     for ln in lines:
         ln = _clean_spaces(ln)
+        if not ln:
+            continue
+        # NEW: pomijaj etykiety ról (Sekretarz, m.czas itd.)
+        if _RE_ROLE_LABEL.match(ln):
+            continue
+
         if _is_name_like(ln):
-            # normalizacja jak w officials: partner jest "NAZWISKO Imię" => formatujemy na "Imię Nazwisko"
-            # tu też to pasuje, bo ZPRP zwykle ma "NAZWISKO Imię"
             return _format_name_last_first_to_first_last(ln) if _looks_allcaps_word(ln.split(" ")[0]) else _clean_spaces(
                 " ".join(_smart_title_token(p) for p in ln.split(" ") if p)
             )
     return ""
+
 
 def _html_to_plain_lines(html: str) -> List[str]:
     """
