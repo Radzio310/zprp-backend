@@ -742,6 +742,15 @@ def _ensure_index_php_prefix(path: str) -> str:
     # fallback
     return "/" + p
 
+def _form_urlencoded_bytes(data: Dict[str, str], *, charset: str = "iso-8859-2") -> bytes:
+    """
+    Buduje body application/x-www-form-urlencoded z kontrolą charsetu.
+    ZPRP działa na iso-8859-2, więc MUSIMY wysłać bajty w tym kodowaniu.
+    """
+    # urlencode zwraca str z %XX, które są ASCII – bezpiecznie kodujemy do ASCII
+    qs = urlencode(data, doseq=True, encoding=charset, errors="strict")
+    return qs.encode("ascii")
+
 
 def _build_edit_path_from_nr(nr_sedzia: Union[str, int]) -> str:
     nr = _clean_spaces(str(nr_sedzia))
@@ -1159,13 +1168,22 @@ async def save_official_edit_page(
         )
 
         # 4) wykonaj zapis
-        _, html_after = await fetch_with_correct_encoding(
-            client,
+        headers = {"Content-Type": "application/x-www-form-urlencoded; charset=iso-8859-2"}
+        body = _form_urlencoded_bytes(post_data, charset="iso-8859-2")
+
+        resp = await client.post(
             action,
-            method="POST",
-            data=post_data,
+            content=body,
+            headers=headers,
             cookies=cookies,
         )
+
+        # Teraz zdecyduj jak dekodujesz odpowiedź:
+        # - jeżeli fetch_with_correct_encoding robi Ci też wykrycie charsetu i poprawne .text,
+        #   to możesz go rozszerzyć o obsługę `content=...` zamiast `data=...`.
+        # - minimalnie:
+        html_after = resp.content.decode("iso-8859-2", errors="replace")
+
         _log_html_fingerprint("Official edit page(after save) fetched", html_after)
 
         # 5) spróbuj wyciągnąć komunikat (w przykładzie <div id="info_edit"...>)
