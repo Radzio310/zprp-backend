@@ -1711,8 +1711,11 @@ def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
 
     for tr in trs:
         tds = tr.find_all("td")
-        if len(tds) < 11:
+        # Ta tabela ma 13 kolumn: ... Para sędziowska, Delegat/Ewaluacja, tel gosp, tel gość
+        # Jeśli jest mniej, indeksy przestają odpowiadać kolumnom.
+        if len(tds) < 13:
             continue
+
 
         header_probe = _clean_spaces(tds[0].get_text(" ", strip=True))
         if header_probe.lower().startswith("lp"):
@@ -1759,11 +1762,8 @@ def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
         # wynik
         score = _parse_score_cell(tds[7])
 
-        # obsada (✅ poprawione wg schematu)
-        off = _parse_officials_cell(tds[9])
-
-        # delegat
-        delegate = _parse_delegate_cell(tds[10])
+        off = _parse_officials_cell(tds[-4])
+        delegate = _parse_delegate_cell(tds[-3])
 
         key = match_id or _clean_spaces(f"{season_label}|{code}|{date_ymd} {time_hm}")
 
