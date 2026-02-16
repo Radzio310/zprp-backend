@@ -1219,22 +1219,22 @@ async def save_official_edit_page(
             },
         }
 
-
 # ============================
 # JUDGE MATCHES: SCRAPE LIST (NO DETAILS FETCH)
-# (wklej na sam koniec officials.py)
+# (wklej na sam koniec officials.py)  ✅ PODMIANA FRAGMENTU
 # ============================
 
 # Uwaga: zakładamy, że masz już powyżej:
 # - _decrypt_field, _login_zprp_and_get_cookies, fetch_with_correct_encoding
 # - _clean_spaces, _safe_int, _absorb_href_keep_relative
 # - _ensure_index_php_prefix (z sekcji edit)
+# - _looks_allcaps_word, _smart_title_token, _format_name_last_first_to_first_last
 # oraz router = APIRouter()
 
 from pydantic import BaseModel, Field
-from typing import Optional, Union
-from urllib.parse import urlencode, urlparse, parse_qs
-
+from typing import Optional, Union, Any, Dict, List, Tuple
+from urllib.parse import urlencode, urlparse, parse_qs, unquote_plus
+import re
 
 # ----------------------------
 # helpers (matches list)
@@ -1247,16 +1247,23 @@ _RE_PENALTIES = re.compile(r"<\s*(\d{1,3})\s*:\s*(\d{1,3})\s*>")
 _RE_EMAIL = re.compile(r"\b[\w.\-+]+@[\w.\-]+\.\w+\b", re.I)
 _RE_PHONE = re.compile(r"(\+?\d[\d\s\-]{6,})")
 _RE_ONLY_DASHES = re.compile(r"^\s*-{2,}\s*-{2,}\s*$")
+
+# role labels (PL), używane do odrzucania linii i do detekcji
 _RE_ROLE_LABEL = re.compile(
     r"^\s*(sekretarz|m\.?\s*czas|mier(z|ż)ący\s*czas|stolikowy|para\s*s(ę|e)dziowska)\s*$",
     re.I,
 )
+_RE_LABEL_SECRETARY = re.compile(r"\bsekretarz\b", re.I)
+_RE_LABEL_TIMEKEEPER = re.compile(r"\bm\.?\s*czas\b|\bmier(z|ż)ący\s*czas\b", re.I)
+
+# w title hali często miasto bywa w CAPS, w nazwie też może się powtarzać
+_RE_CAPS_WORD = re.compile(r"^[A-ZĄĆĘŁŃÓŚŹŻ\-]{3,}$")
+
 
 def _is_name_like(s: str) -> bool:
     s = _clean_spaces(s)
     if not s:
         return False
-    # NEW: odrzuć etykiety ról
     if _RE_ROLE_LABEL.match(s):
         return False
     if _RE_ONLY_DASHES.match(s):
@@ -1264,81 +1271,403 @@ def _is_name_like(s: str) -> bool:
     if _RE_EMAIL.search(s):
         return False
     if _RE_PHONE.search(s):
-        # czasem w tej samej linii jest nazwisko + tel, ale my chcemy czystą linię z nazwiskiem;
-        # tu wolimy odrzucić linię, jeśli wygląda jak sam telefon
+        # jeśli wygląda jak sam telefon -> odrzuć
         if len(re.sub(r"[^\d+]", "", s)) >= 7 and len(s) <= 18:
             return False
+
     # musi mieć litery
     letters = re.sub(r"[^A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż ]", "", s)
     letters = _clean_spaces(letters)
     if len(letters) < 3:
         return False
-    # zwykle "NAZWISKO Imię" / "Imię Nazwisko"
     return True
+
+
+def _normalize_person_name(raw: str) -> str:
+    raw = _clean_spaces(raw)
+    if not raw:
+        return ""
+    parts = [p for p in raw.split(" ") if p]
+    if not parts:
+        return ""
+    # jeżeli wygląda jak "NAZWISKO Imię" (pierwszy token all-caps) -> odwróć
+    if _looks_allcaps_word(parts[0]):
+        return _format_name_last_first_to_first_last(raw)
+    # inaczej TitleCase tokenami
+    return _clean_spaces(" ".join(_smart_title_token(p) for p in parts))
+
 
 def _first_name_from_lines(lines: List[str]) -> str:
     for ln in lines:
         ln = _clean_spaces(ln)
         if not ln:
             continue
-        # NEW: pomijaj etykiety ról (Sekretarz, m.czas itd.)
         if _RE_ROLE_LABEL.match(ln):
             continue
-
         if _is_name_like(ln):
-            return _format_name_last_first_to_first_last(ln) if _looks_allcaps_word(ln.split(" ")[0]) else _clean_spaces(
-                " ".join(_smart_title_token(p) for p in ln.split(" ") if p)
-            )
+            return _normalize_person_name(ln)
     return ""
 
 
-def _html_to_plain_lines(html: str) -> List[str]:
+def _strip_technical_nodes(td_soup) -> None:
     """
-    Uproszczona wersja jak w utils/zprp.ts:
-    - rozbijamy po <br> oraz <hr>
-    - czyścimy do tekstu
+    Usuwa elementy techniczne z komórki (form/input/button/span/img/script/style),
+    żeby nie wchodziły do parsowania tekstu.
     """
-    if not html:
+    if not td_soup:
+        return
+    for tag in td_soup.find_all(["form", "input", "button", "span", "img", "script", "style", "select", "option"]):
+        tag.decompose()
+
+
+def _td_to_blocks_by_hr(td) -> List[List[str]]:
+    """
+    Schemat dokładnie pod tabelę "Mecze sędziego":
+      - dzielimy po <hr>
+      - w blokach robimy linie po <br>
+      - zachowujemy kolejność występowania
+    Zwraca listę bloków, gdzie blok = lista linii tekstu.
+    """
+    if not td:
         return []
-    # wstaw separatory tekstowe, żeby split działał przewidywalnie
-    h = html.replace("<hr", "\n<hr").replace("<br", "\n<br")
-    out: List[str] = []
-    for chunk in h.split("\n"):
-        if chunk.strip().lower().startswith("<hr"):
-            out.append("---HR---")
+
+    # kopiujemy do soup, żeby bezpiecznie usuwać techniczne elementy
+    td_html = td.decode_contents()
+    soup = BeautifulSoup(f"<div>{td_html}</div>", "html.parser")
+    root = soup.div
+    _strip_technical_nodes(root)
+
+    blocks: List[List[str]] = [[]]
+    # iteracja po dzieciach: teksty, <br>, <hr>
+    for node in root.descendants:
+        # tylko "płytko": interesuje nas kolejność renderowania; descendants daje też wewnętrzne,
+        # ale my filtrujemy do elementów i NavigableString
+        name = getattr(node, "name", None)
+        if name == "hr":
+            # nowy blok
+            if blocks and blocks[-1] == []:
+                # jeśli pusty, nadal rozdzielamy – ale nie mnożymy pustych
+                pass
+            blocks.append([])
             continue
-        if chunk.strip().lower().startswith("<br"):
-            out.append("")
+        if name == "br":
+            # nowa linia w bloku
+            if blocks:
+                blocks[-1].append("")
             continue
-        txt = _clean_spaces(BeautifulSoup(chunk, "html.parser").get_text(" ", strip=True))
-        if txt:
-            out.append(txt)
-        else:
-            out.append("")
-    # sklej puste, usuń nadmiary
-    cleaned: List[str] = []
-    for x in out:
-        x = _clean_spaces(x)
-        if x == "":
-            cleaned.append("")
-        else:
-            cleaned.append(x)
-    # usuń wielokrotne puste
-    final: List[str] = []
-    prev_empty = False
-    for x in cleaned:
-        is_empty = (x == "")
-        if is_empty and prev_empty:
+
+        # tekst
+        if hasattr(node, "strip") and name is None:
+            txt = _clean_spaces(str(node))
+            if txt:
+                if blocks:
+                    # doklej do ostatniej linii jeśli poprzednia niepusta, inaczej nowa
+                    if not blocks[-1]:
+                        blocks[-1].append(txt)
+                    else:
+                        # jeśli ostatnia linia była "", podmień, w przeciwnym razie doklej jako oddzielną
+                        if blocks[-1][-1] == "":
+                            blocks[-1][-1] = txt
+                        else:
+                            # separacja spacją (rendering inline)
+                            blocks[-1][-1] = _clean_spaces(blocks[-1][-1] + " " + txt)
+
+    # post-process: czyść puste, usuń wielokrotne puste linie
+    norm_blocks: List[List[str]] = []
+    for b in blocks:
+        cleaned_lines: List[str] = []
+        prev_empty = False
+        for ln in b:
+            ln = _clean_spaces(ln)
+            if not ln:
+                if prev_empty:
+                    continue
+                cleaned_lines.append("")
+                prev_empty = True
+            else:
+                cleaned_lines.append(ln)
+                prev_empty = False
+        cleaned_lines = [ln for ln in cleaned_lines if ln != ""]
+        if cleaned_lines:
+            norm_blocks.append(cleaned_lines)
+
+    return norm_blocks
+
+
+def _extract_name_after_label(lines: List[str], label_re: re.Pattern) -> str:
+    """
+    Z listy linii w bloku (w kolejności) wyciąga pierwsze "name-like" po wystąpieniu etykiety.
+    """
+    seen = False
+    for ln in lines:
+        s = _clean_spaces(ln)
+        if not s:
             continue
-        final.append(x)
-        prev_empty = is_empty
-    return [x for x in final if x != ""]
+        if label_re.search(s):
+            seen = True
+            continue
+        if not seen:
+            continue
+        if _RE_ROLE_LABEL.match(s):
+            continue
+        if _is_name_like(s):
+            return _normalize_person_name(s)
+    return ""
+
+
+def _parse_officials_cell(td) -> Dict[str, Any]:
+    """
+    ✅ Dokładnie wg schematu z tabeli "Mecze sędziego":
+    - Sędzia główny 1 = pierwszy blok (przed pierwszym <hr>) -> pierwsza osoba w tym bloku
+    - Sędzia główny 2 = drugi blok (po pierwszym <hr>, bez etykiet) -> pierwsza osoba
+    - Sekretarz = osoba po etykiecie "Sekretarz" (blue label)
+    - Mierzący czas = osoba po etykiecie "m.czas" (blue label)
+    """
+    if not td:
+        return {"referee1": "", "referee2": "", "secretary": "", "timekeeper": "", "raw_blocks": []}
+
+    blocks = _td_to_blocks_by_hr(td)
+
+    # 1) referee1/referee2 – tylko z bloków bez etykiet stołu
+    ref_blocks: List[List[str]] = []
+    for b in blocks:
+        joined = " ".join(b)
+        if _RE_LABEL_SECRETARY.search(joined) or _RE_LABEL_TIMEKEEPER.search(joined):
+            continue
+        ref_blocks.append(b)
+
+    referee1 = _first_name_from_lines(ref_blocks[0]) if len(ref_blocks) >= 1 else ""
+    referee2 = _first_name_from_lines(ref_blocks[1]) if len(ref_blocks) >= 2 else ""
+
+    # 2) sekretarz / m.czas – z dowolnych bloków, osoba po etykiecie
+    secretary = ""
+    timekeeper = ""
+    for b in blocks:
+        if not secretary and any(_RE_LABEL_SECRETARY.search(x) for x in b):
+            secretary = _extract_name_after_label(b, _RE_LABEL_SECRETARY)
+        if not timekeeper and any(_RE_LABEL_TIMEKEEPER.search(x) for x in b):
+            timekeeper = _extract_name_after_label(b, _RE_LABEL_TIMEKEEPER)
+
+    # raw debug (krótko)
+    raw_blocks = [" | ".join(b) for b in blocks[:6]]
+
+    return {
+        "referee1": referee1,
+        "referee2": referee2,
+        "secretary": secretary,
+        "timekeeper": timekeeper,
+        "raw_blocks": raw_blocks,
+    }
+
+
+def _parse_delegate_cell(td) -> str:
+    """
+    Kolumna Delegat / Ewaluacja – bierzemy pierwszą sensowną osobę (bez mail/tel).
+    """
+    if not td:
+        return ""
+    html = td.decode_contents() or ""
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    root = soup.div
+    _strip_technical_nodes(root)
+    txt = _clean_spaces(root.get_text("\n", strip=True))
+    if not txt:
+        return ""
+    lines = [_clean_spaces(x) for x in txt.split("\n") if _clean_spaces(x)]
+    return _first_name_from_lines(lines)
+
+
+def _parse_hall_from_title(title: str) -> Dict[str, str]:
+    """
+    title zwykle: "Nazwa Hali Miasto, Ulica Numer"
+    lub:           "Nazwa, Ulica Numer"
+    Heurystyka:
+      - split po przecinku -> left, right
+      - right: street + number (last token = number)
+      - left: name + city (city = ostatnie 1..3 tokeny; preferuj gdy name niepuste)
+    """
+    venue = {"name": "", "city": "", "street": "", "number": ""}
+    title = _clean_spaces(title)
+    if not title:
+        return venue
+
+    parts = [p.strip() for p in title.split(",") if p.strip()]
+    left = parts[0] if parts else title
+    right = parts[1] if len(parts) > 1 else ""
+
+    # street+number
+    if right:
+        rw = [w for w in _clean_spaces(right).split(" ") if w]
+        if rw:
+            venue["number"] = rw[-1]
+            venue["street"] = _clean_spaces(" ".join(rw[:-1]))
+
+    # name+city
+    lw = [w for w in _clean_spaces(left).split(" ") if w]
+    if not lw:
+        return venue
+
+    # jeśli ostatni wyraz jest CAPS (np. MIELEC) -> traktuj jako miasto
+    if _RE_CAPS_WORD.match(lw[-1]) and len(lw) >= 2:
+        venue["city"] = _smart_title_token(lw[-1])
+        venue["name"] = _clean_spaces(" ".join(lw[:-1]))
+        return venue
+
+    # ogólna heurystyka: city = ostatnie 3..1 tokeny, wybierz pierwsze sensowne gdzie name niepuste
+    for n in (3, 2, 1):
+        if len(lw) <= n:
+            continue
+        city_guess = _clean_spaces(" ".join(lw[-n:]))
+        name_guess = _clean_spaces(" ".join(lw[:-n]))
+        if name_guess:
+            venue["city"] = city_guess
+            venue["name"] = name_guess
+            return venue
+
+    # fallback
+    venue["name"] = _clean_spaces(left)
+    return venue
+
+
+def _parse_hall_from_maps_href(href: str) -> Dict[str, str]:
+    """
+    Fallback (gdy title jest dziwny / brak miasta):
+    google maps ma często query/q:
+      ...?q=MIELEC+SOLSKIEGO+1
+      ...?query=Zabrze+Wolności+406
+    Heurystyka:
+      - decode plus -> spacje
+      - last token = number
+      - pierwsza część przed ulicą traktowana jako city (pierwszy token / pierwsze 1-2 tokeny)
+      - reszta jako street
+    """
+    venue = {"name": "", "city": "", "street": "", "number": ""}
+    href = _clean_spaces(href or "")
+    if not href:
+        return venue
+    try:
+        u = urlparse(href)
+        qs = parse_qs(u.query)
+        qv = ""
+        for key in ("query", "q"):
+            if key in qs and qs[key]:
+                qv = qs[key][0]
+                break
+        if not qv:
+            return venue
+        qtxt = _clean_spaces(unquote_plus(qv))
+        tokens = [t for t in qtxt.split(" ") if t]
+        if len(tokens) < 2:
+            return venue
+
+        # number
+        venue["number"] = tokens[-1]
+        rest = tokens[:-1]
+
+        # city heuristic: 1-2 pierwsze tokeny (często wystarczy 1, ale np. "Ostrów Wielkopolski")
+        # wybierz 2 jeśli oba zaczynają się wielką literą / polskie litery i całość nie wygląda na ulicę
+        def looks_city(tok: str) -> bool:
+            return bool(re.match(r"^[A-ZĄĆĘŁŃÓŚŹŻ].*", tok))
+
+        city = rest[0]
+        street_tokens = rest[1:]
+
+        if len(rest) >= 2 and looks_city(rest[0]) and looks_city(rest[1]):
+            # 2-token city (bezpieczne)
+            city = _clean_spaces(rest[0] + " " + rest[1])
+            street_tokens = rest[2:]
+
+        venue["city"] = city
+        venue["street"] = _clean_spaces(" ".join(street_tokens)) if street_tokens else ""
+        return venue
+    except Exception:
+        return venue
+
+
+def _parse_hall_cell(td) -> Dict[str, Any]:
+    """
+    ✅ Kolumna Hala:
+      - pełny opis adresu bierzemy z a[title] linku maps
+      - dodatkowo capacity (ostatnia liczba w komórce)
+      - gdy title/hall incomplete: fallback z href query/q
+    Zwracamy:
+      { "maps_title": "...", "capacity": int, "venue": {"name":..., "city":..., "street":..., "number":...} }
+    """
+    empty = {"maps_title": "", "capacity": 0, "venue": {"name": "", "city": "", "street": "", "number": ""}}
+    if not td:
+        return empty
+
+    a = td.find("a", href=True)
+    title = _clean_spaces(a.get("title", "")) if a else ""
+    href = _clean_spaces(a.get("href", "")) if a else ""
+
+    # capacity: ostatnia liczba w tekście komórki
+    txt = _clean_spaces(td.get_text(" ", strip=True))
+    capacity = 0
+    mcap = None
+    for mm in re.finditer(r"\b(\d{1,6})\b", txt):
+        mcap = mm
+    if mcap:
+        capacity = _safe_int(mcap.group(1), default=0)
+
+    venue = _parse_hall_from_title(title) if title else {"name": "", "city": "", "street": "", "number": ""}
+
+    # fallback city/street/number z href jeśli brak
+    if href and (not venue.get("street") or not venue.get("number") or not venue.get("city")):
+        fb = _parse_hall_from_maps_href(href)
+        # uzupełniaj tylko braki
+        for k in ("city", "street", "number"):
+            if not venue.get(k) and fb.get(k):
+                venue[k] = fb[k]
+
+    return {"maps_title": title, "capacity": capacity, "venue": venue}
+
+
+def _parse_spectators_cell(td) -> Dict[str, Any]:
+    """
+    Kolumna 'Liczba widzów' ma:
+      200<br><br>34 %
+    albo pusto/0
+    """
+    if not td:
+        return {"spectators": 0, "spectators_pct": None}
+    txt = _clean_spaces(td.get_text(" ", strip=True))
+    m = re.search(r"\b(\d{1,6})\b", txt)
+    spectators = _safe_int(m.group(1), default=0) if m else 0
+    mp = re.search(r"(\d{1,3})\s*%", txt)
+    pct = _safe_int(mp.group(1), default=0) if mp else None
+    return {"spectators": spectators, "spectators_pct": pct}
+
+
+def _parse_score_cell(td) -> Dict[str, Any]:
+    """
+    Kolumna Wynik może mieć:
+      - final: "31 : 28"
+      - halftime: "( 16 : 13 )"
+      - penalties: "< 3 : 4 >" (gdy remis)
+      - ikona zmiany gospodarza: <img ... zmiana.png ...>
+    """
+    if not td:
+        return {"host_swapped": False, "score_full": None, "score_half": None, "penalties": None, "raw": ""}
+
+    host_swapped = bool(td.find("img", src=re.compile(r"zmiana\.png", re.I)))
+    raw = _clean_spaces(td.get_text(" ", strip=True))
+    html = td.decode_contents() or ""
+
+    mpen = _RE_PENALTIES.search(html) or _RE_PENALTIES.search(raw)
+    penalties = {"host": _safe_int(mpen.group(1)), "guest": _safe_int(mpen.group(2))} if mpen else None
+
+    mhalf = re.search(r"\(\s*(\d{1,3})\s*:\s*(\d{1,3})\s*\)", raw)
+    score_half = {"host": _safe_int(mhalf.group(1)), "guest": _safe_int(mhalf.group(2))} if mhalf else None
+
+    raw_no_parens = re.sub(r"\([^)]*\)", " ", raw)
+    mfull = _RE_SCORE.search(raw_no_parens)
+    score_full = {"host": _safe_int(mfull.group(1)), "guest": _safe_int(mfull.group(2))} if mfull else None
+
+    return {"host_swapped": host_swapped, "score_full": score_full, "score_half": score_half, "penalties": penalties, "raw": raw}
+
 
 def _normalize_details_href(rel: str) -> str:
-    """
-    Link do szczegółów meczu jest zwykle rel typu "?a=zawody&b=protokol&...&IdZawody=..."
-    Normalizujemy do ścieżki względnej /index.php?... (bez domeny).
-    """
     rel = _absorb_href_keep_relative(rel or "")
     if not rel:
         return ""
@@ -1352,10 +1681,8 @@ def _normalize_details_href(rel: str) -> str:
         return rel
     return "/" + rel
 
+
 def _parse_seasons_from_page(soup: BeautifulSoup) -> List[Dict[str, str]]:
-    """
-    Z select[name=Filtr_sezon] bierzemy listę sezonów (value!=empty).
-    """
     seasons: List[Dict[str, str]] = []
     sel = soup.find("select", attrs={"name": "Filtr_sezon"})
     if not sel:
@@ -1368,216 +1695,11 @@ def _parse_seasons_from_page(soup: BeautifulSoup) -> List[Dict[str, str]]:
         seasons.append({"value": val, "label": lab, "selected": bool(opt.has_attr("selected"))})
     return seasons
 
-def _parse_hall_cell(td) -> Dict[str, Any]:
-    """
-    W kolumnie Hala:
-      <a title="Nazwa Hali Miasto, Ulica nr" ...><img ...></a><br/>POJEMNOSC
-    Zwracamy:
-      { "maps_title": "...", "capacity": int, "venue": {"name":..., "city":..., "street":..., "number":...} }
-    """
-    if not td:
-        return {"maps_title": "", "capacity": 0, "venue": {"name": "", "city": "", "street": "", "number": ""}}
-
-    html = td.decode_contents()
-    a = td.find("a", href=True)
-    title = _clean_spaces(a.get("title", "")) if a else ""
-    capacity = 0
-
-    # capacity zwykle po <br /> jako liczba
-    txt = _clean_spaces(td.get_text(" ", strip=True))
-    # czasem w txt jest też miasto z title; capacity zwykle ostatnia liczba w komórce
-    mcap = None
-    for mm in re.finditer(r"\b(\d{1,6})\b", txt):
-        mcap = mm
-    if mcap:
-        capacity = _safe_int(mcap.group(1), default=0)
-
-    venue = {"name": "", "city": "", "street": "", "number": ""}
-
-    # title bywa: "Arena Ostrów Ostrów Wielkopolski, Andrzeja Kowalczyka 1"
-    # albo: "Hala Sportowa przy ZSI Legnica, K.Wierzyńskiego 1"
-    if title:
-        # spróbuj split po przecinku: [prefix + city] , [street+number]
-        parts = [p.strip() for p in title.split(",") if p.strip()]
-        left = parts[0] if parts else title
-        right = parts[1] if len(parts) > 1 else ""
-
-        # city zwykle jest ostatnim tokenem left (czasem dwa wyrazy) – nie mamy 100% reguły,
-        # więc robimy heurystykę: jeśli left ma >=2 wyrazy i ostatni wyraz zaczyna się wielką literą,
-        # to city = ostatnie 1-3 wyrazy; reszta to "name".
-        left_words = [w for w in _clean_spaces(left).split(" ") if w]
-        if len(left_words) >= 2:
-            # weź ostatnie 1..3 wyrazy jako city – najlepiej dopasować tak, aby "name" nie było puste
-            city_guess = " ".join(left_words[-2:]) if len(left_words) >= 3 else left_words[-1]
-            name_guess = " ".join(left_words[:-2]) if len(left_words) >= 3 else " ".join(left_words[:-1])
-            if _clean_spaces(name_guess):
-                venue["name"] = _clean_spaces(name_guess)
-                venue["city"] = _clean_spaces(city_guess)
-            else:
-                venue["name"] = _clean_spaces(left)
-
-        else:
-            venue["name"] = _clean_spaces(left)
-
-        # street+number
-        if right:
-            # ostatni token to numer (czasem "28b", "1", "83/7")
-            rw = [w for w in _clean_spaces(right).split(" ") if w]
-            if rw:
-                venue["number"] = rw[-1]
-                venue["street"] = _clean_spaces(" ".join(rw[:-1]))
-
-    return {"maps_title": title, "capacity": capacity, "venue": venue}
-
-def _parse_spectators_cell(td) -> Dict[str, Any]:
-    """
-    Kolumna 'Liczba widzów' ma:
-      200<br><br>34 %
-    albo pusto/0
-    """
-    if not td:
-        return {"spectators": 0, "spectators_pct": None}
-    txt = _clean_spaces(td.get_text(" ", strip=True))
-    # pierwsza liczba = widzowie
-    m = re.search(r"\b(\d{1,6})\b", txt)
-    spectators = _safe_int(m.group(1), default=0) if m else 0
-    mp = re.search(r"(\d{1,3})\s*%", txt)
-    pct = _safe_int(mp.group(1), default=0) if mp else None
-    return {"spectators": spectators, "spectators_pct": pct}
-
-def _parse_score_cell(td) -> Dict[str, Any]:
-    """
-    Kolumna Wynik może mieć:
-      - final: "31 : 28"
-      - halftime: "( 16 : 13 )"
-      - penalties: "< 3 : 4 >" (gdy remis)
-      - czasem 2 linie z wynikiem (ignorujemy duplikat)
-      - czasem ikona zmiany gospodarza: <img ... zmiana.png ...>
-    """
-    if not td:
-        return {
-            "host_swapped": False,
-            "score_full": None,
-            "score_half": None,
-            "penalties": None,
-            "raw": "",
-        }
-
-    host_swapped = bool(td.find("img", src=re.compile(r"zmiana\.png", re.I)))
-    raw = _clean_spaces(td.get_text(" ", strip=True))
-
-    # full score: bierzemy pierwsze "X : Y" które nie jest z nawiasów halftime
-    # ale halftime też jest X:Y, więc wyciągniemy wszystkie i rozróżnimy po obecności '(' w okolicy.
-    html = td.decode_contents()
-    # penalties:
-    mpen = _RE_PENALTIES.search(html) or _RE_PENALTIES.search(raw)
-    penalties = None
-    if mpen:
-        penalties = {"host": _safe_int(mpen.group(1)), "guest": _safe_int(mpen.group(2))}
-
-    # halftime:
-    mhalf = re.search(r"\(\s*(\d{1,3})\s*:\s*(\d{1,3})\s*\)", raw)
-    score_half = {"host": _safe_int(mhalf.group(1)), "guest": _safe_int(mhalf.group(2))} if mhalf else None
-
-    # full: bierzemy pierwsze dopasowanie X:Y z fragmentu bez nawiasów
-    raw_no_parens = re.sub(r"\([^)]*\)", " ", raw)
-    mfull = _RE_SCORE.search(raw_no_parens)
-    score_full = {"host": _safe_int(mfull.group(1)), "guest": _safe_int(mfull.group(2))} if mfull else None
-
-    return {
-        "host_swapped": host_swapped,
-        "score_full": score_full,
-        "score_half": score_half,
-        "penalties": penalties,
-        "raw": raw,
-    }
-
-def _parse_officials_cell(td) -> Dict[str, Any]:
-    """
-    Kolumna 'Para sędziowska' (w praktyce: obsada stołu też może tu siedzieć):
-      - ref1, ref2
-      - sekretarz
-      - m.czas
-    Rozdział zwykle przez <hr>, a role stołu mają label w HTML:
-      <small><font color=blue>Sekretarz</font></small><br> IMIĘ...
-      <small><font color=blue>m.czas</font></small><br> IMIĘ...
-    """
-    if not td:
-        return {"referee1": "", "referee2": "", "secretary": "", "timekeeper": "", "raw_blocks": []}
-
-    blocks: List[str] = []
-    # split po <hr ...>
-    html = td.decode_contents()
-    html = html.replace("<HR", "<hr").replace("</HR>", "</hr>")
-    parts = re.split(r"<hr[^>]*>", html, flags=re.I)
-    for p in parts:
-        txt_lines = _html_to_plain_lines(p)
-        if txt_lines:
-            blocks.append("\n".join(txt_lines))
-
-    # referee blocks: pierwsze dwa bloki zawierają zwykle ref1/ref2
-    ref1 = ""
-    ref2 = ""
-    secretary = ""
-    timekeeper = ""
-
-    # wykrywanie sekretarza/m.czas w blokach
-    def parse_role_block(block_txt: str) -> Tuple[str, str]:
-        lines = [l for l in block_txt.split("\n") if _clean_spaces(l)]
-        # usuń małe etykiety
-        role = ""
-        for l in lines[:3]:
-            if re.search(r"\bSekretarz\b", l, re.I):
-                role = "secretary"
-                break
-            if re.search(r"\bm\.?\s*czas\b", l, re.I):
-                role = "timekeeper"
-                break
-        name = _first_name_from_lines(lines)
-        return role, name
-
-    # najpierw spróbuj wyciągnąć role stołu z wszystkich bloków
-    for b in blocks:
-        role, nm = parse_role_block(b)
-        if role == "secretary" and nm and not secretary:
-            secretary = nm
-        elif role == "timekeeper" and nm and not timekeeper:
-            timekeeper = nm
-
-    # referee1/referee2: weź pierwsze 2 nazwiska-like z początku całości, ignorując role stołu
-    all_lines = _html_to_plain_lines(html)
-    # usuń linie typu "Sekretarz", "m.czas"
-    filtered = [l for l in all_lines if not re.search(r"\b(Sekretarz|m\.?\s*czas)\b", l, re.I)]
-    names: List[str] = []
-    for ln in filtered:
-        ln = _clean_spaces(ln)
-        if _is_name_like(ln):
-            nm = _format_name_last_first_to_first_last(ln) if _looks_allcaps_word(ln.split(" ")[0]) else _clean_spaces(
-                " ".join(_smart_title_token(p) for p in ln.split(" ") if p)
-            )
-            if nm and nm not in names:
-                names.append(nm)
-        if len(names) >= 2:
-            break
-    ref1 = names[0] if len(names) >= 1 else ""
-    ref2 = names[1] if len(names) >= 2 else ""
-
-    return {"referee1": ref1, "referee2": ref2, "secretary": secretary, "timekeeper": timekeeper, "raw_blocks": blocks[:6]}
-
-def _parse_delegate_cell(td) -> str:
-    """
-    Kolumna Delegat / Ewaluacja – bierzemy tylko nazwisko+imię (bez mail/tel).
-    """
-    if not td:
-        return ""
-    lines = _html_to_plain_lines(td.decode_contents())
-    return _first_name_from_lines(lines)
 
 def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
     """
-    Tabela meczów sędziego to: <table border="1" ...> z wierszem nagłówka i dalej dane.
-    Bierzemy tr, które mają >= 11 kolumn (w praktyce 13),
-    ignorujemy header.
+    Tabela meczów sędziego: <table border="1" ...>.
+    Bierzemy tr, które mają >= 11 kolumn (w praktyce 13), ignorujemy header.
     """
     table = soup.find("table", attrs={"border": "1"})
     if not table:
@@ -1585,14 +1707,13 @@ def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
 
     trs = table.find_all("tr")
     matches: Dict[str, Dict[str, Any]] = {}
-
     data_rows = 0
+
     for tr in trs:
         tds = tr.find_all("td")
         if len(tds) < 11:
             continue
 
-        # header row ma "Lp." "Data" itd.
         header_probe = _clean_spaces(tds[0].get_text(" ", strip=True))
         if header_probe.lower().startswith("lp"):
             continue
@@ -1625,7 +1746,7 @@ def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
         date_ymd = mdate.group(1) if mdate else ""
         time_hm = mtime.group(1) if mtime else ""
 
-        # hala
+        # hala (✅ poprawione)
         hall_info = _parse_hall_cell(tds[4])
 
         # widzowie
@@ -1638,13 +1759,12 @@ def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
         # wynik
         score = _parse_score_cell(tds[7])
 
-        # obsada
+        # obsada (✅ poprawione wg schematu)
         off = _parse_officials_cell(tds[9])
 
         # delegat
         delegate = _parse_delegate_cell(tds[10])
 
-        # jeśli brak match_id, fallback: key z (season+code+date)
         key = match_id or _clean_spaces(f"{season_label}|{code}|{date_ymd} {time_hm}")
 
         rec = {
@@ -1653,7 +1773,7 @@ def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
             "season": season_label,
             "match_code": code,
             "match_title": title,
-            "details_href": details_href,  # UWAGA: tylko link, nie wchodzimy w szczegóły
+            "details_href": details_href,
             "date": {"ymd": date_ymd, "time": time_hm},
             "data_fakt": _clean_spaces(f"{date_ymd} {time_hm}:00") if date_ymd and time_hm else (date_ymd or ""),
             "hall": {
@@ -1701,7 +1821,10 @@ class ZprpJudgeMatchesScrapeAllRequest(BaseModel):
     username: str
     password: str
     NrSedzia: Optional[Union[str, int]] = Field(default=None, description="NrSedzia (jeśli nie podasz matches_href)")
-    matches_href: Optional[str] = Field(default=None, description="Link do strony meczów sędziego, np. '?a=statystyki&b=sedzia&NrSedzia=465&Filtr_sezon=194'")
+    matches_href: Optional[str] = Field(
+        default=None,
+        description="Link do strony meczów sędziego, np. '?a=statystyki&b=sedzia&NrSedzia=465&Filtr_sezon=194'",
+    )
 
 
 class ZprpJudgeMatchesScrapeSeasonRequest(BaseModel):
@@ -1740,14 +1863,13 @@ async def scrape_judge_matches_all_seasons(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
         logger.info("ZPRP judge matches(all): login ok base_url=%s entry=%s", settings.ZPRP_BASE_URL, entry_path)
 
-        # 1) weź stronę wejściową, żeby odczytać listę sezonów
+        # 1) strona wejściowa, żeby odczytać listę sezonów
         _, html0 = await fetch_with_correct_encoding(client, entry_path, method="GET", cookies=cookies)
         _log_html_fingerprint("Judge matches page[entry] fetched", html0)
 
         soup0 = BeautifulSoup(html0, "html.parser")
         seasons = _parse_seasons_from_page(soup0)
         if not seasons:
-            # fallback: mimo braku sezonów spróbuj sparsować mecze z entry
             parsed0 = _parse_match_rows_from_soup(soup0)
             return {
                 "fetched_at": _now_iso(),
@@ -1767,12 +1889,11 @@ async def scrape_judge_matches_all_seasons(
             except Exception:
                 nr = None
 
-        # 2) pobierz każdy sezon osobno (bez innych filtrów) i zmerge’uj
         all_matches: Dict[str, Any] = {}
         total_rows = 0
         seasons_fetched = 0
 
-        # preferuj kolejność: od najnowszego (z selecta) do najstarszego – ZPRP zwykle już tak podaje
+        # ZPRP zwykle daje najnowsze pierwsze, ale nie zakładamy; bierzemy w tej kolejności
         for s in seasons:
             season_value = _clean_spaces(s.get("value", ""))
             if not season_value:
@@ -1788,7 +1909,6 @@ async def scrape_judge_matches_all_seasons(
             total_rows += int(parsed.get("rows") or 0)
             seasons_fetched += 1
 
-            # merge: nowsze nadpisuje starsze, ale key zwykle IdZawody więc i tak unikalne
             for k, v in (parsed.get("matches") or {}).items():
                 all_matches[k] = v
 
@@ -1838,7 +1958,6 @@ async def scrape_judge_matches_one_season(
             u = urlparse("http://x" + base_path)
             qs = parse_qs(u.query)
             qs["Filtr_sezon"] = [season_value]
-            # zachowaj a,b,NrSedzia jeśli były
             path = (u.path or "/index.php") + "?" + urlencode({k: v[0] for k, v in qs.items()}, doseq=True)
             base_path = path if base_path.startswith("/") else ("/" + path.lstrip("/"))
         except Exception:
@@ -1860,7 +1979,6 @@ async def scrape_judge_matches_one_season(
         seasons = _parse_seasons_from_page(soup)
         parsed = _parse_match_rows_from_soup(soup)
 
-        # NrSedzia: z query lub payload
         nr = payload.NrSedzia
         if not nr:
             try:
