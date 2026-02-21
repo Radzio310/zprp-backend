@@ -423,6 +423,38 @@ young_referee_ratings_visibility = Table(
 
 Index("ix_yrrv_province", young_referee_ratings_visibility.c.province)
 
+# 18.7) Wydarzenia okręgowe (per województwo)
+province_events = Table(
+    "province_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),  # np. "ŚLĄSKIE"
+
+    # data wydarzenia (UTC w DB, app i tak pokazuje w lokalnej strefie)
+    Column("event_date", DateTime(timezone=True), nullable=False, index=True),
+
+    Column("name", String, nullable=False),
+    Column("description", Text, nullable=True),
+
+    # Dowolny JSON: targetowanie, lista invited/present, metadane, etc.
+    Column(
+        "data_json",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
+Index("ix_province_events_prov_date", province_events.c.province, province_events.c.event_date)
+
 # 19) Hale
 hall_reports = Table(
     "hall_reports",

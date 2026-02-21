@@ -390,6 +390,79 @@ class BadgeItem(BaseModel):
 class ListBadgesResponse(BaseModel):
     badges: List[BadgeItem]
 
+# ---------------------------- WYDARZENIA OKRĘGOWE ----------------------------
+
+class ProvinceEventTarget(BaseModel):
+    """
+    Targetowanie zaproszeń:
+    - include_badges: zaproś tylko tych, którzy mają przynajmniej jeden z badge’y
+    - exclude_badges: wyklucz tych, którzy mają którykolwiek z badge’y
+    - include_all: jeśli True, ignoruje include_badges (ale nadal respektuje exclude_badges)
+    """
+    include_badges: List[str] = Field(default_factory=list)
+    exclude_badges: List[str] = Field(default_factory=list)
+    include_all: bool = False
+
+
+class ProvinceEventData(BaseModel):
+    """
+    Dowolny JSON. Trzymamy ustandaryzowane klucze,
+    ale backend nie ogranicza dodatkowych pól.
+    """
+    target: ProvinceEventTarget = Field(default_factory=ProvinceEventTarget)
+
+    # zapisujemy listę zaproszonych (wyliczoną lub ręcznie nadpisaną)
+    invited_ids: List[str] = Field(default_factory=list)
+
+    # obecność
+    present_ids: List[str] = Field(default_factory=list)
+
+    # opcjonalnie cache nazw/mini-profili (app może to uzupełniać)
+    invited_cache: Optional[Any] = None
+
+
+class CreateProvinceEventRequest(BaseModel):
+    province: str
+    event_date: datetime
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    data_json: Optional[Any] = None   # przyjmujemy dowolne, backend znormalizuje do ProvinceEventData
+
+
+class UpdateProvinceEventRequest(BaseModel):
+    province: Optional[str] = None
+    event_date: Optional[datetime] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[Optional[str]] = None
+    data_json: Optional[Any] = None
+
+
+class UpdateProvinceEventAttendanceRequest(BaseModel):
+    """
+    Aktualizacja obecności: wysyłasz pełną listę present_ids (prościej i stabilniej).
+    """
+    present_ids: List[str] = Field(default_factory=list)
+
+
+class ProvinceEventItem(BaseModel):
+    id: int
+    province: str
+    event_date: datetime
+    name: str
+    description: Optional[str] = None
+    data_json: Any = Field(default_factory=dict)
+    updated_at: datetime
+
+    # computed (backend dopina dla wygody UI)
+    invited_total: int = 0
+    present_total: int = 0
+    user_invited: bool = False
+    user_present: bool = False
+
+
+class ListProvinceEventsResponse(BaseModel):
+    events: List[ProvinceEventItem]
+
 
 class SetForcedLogoutRequest(BaseModel):
     logout_at: datetime  # ISO‑8601
