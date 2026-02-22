@@ -455,6 +455,30 @@ province_events = Table(
 
 Index("ix_province_events_prov_date", province_events.c.province, province_events.c.event_date)
 
+# (18.8) Province Travel – zapisy przejazdów per sędzia (wszystkie sezony w data_json)
+province_travel = Table(
+    "province_travel",
+    metadata,
+    Column("judge_id", String, primary_key=True),                 # id usera (sędziego)
+    Column("full_name", String, nullable=False),                  # imię i nazwisko
+    Column("province", String, nullable=False, index=True),       # województwo (np. "ŚLĄSKIE")
+    Column(
+        "data_json",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),                       # JSON z przejazdami (np. mapa sezonów)
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
+Index("ix_province_travel_province", province_travel.c.province)
+
 # 19) Hale
 hall_reports = Table(
     "hall_reports",

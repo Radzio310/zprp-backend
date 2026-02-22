@@ -464,6 +464,35 @@ class ListProvinceEventsResponse(BaseModel):
     events: List[ProvinceEventItem]
 
 
+# ---------------------------- PROVINCE TRAVEL (przejazdy) ----------------------------
+
+class ProvinceTravelUpsertAllRequest(BaseModel):
+    judge_id: str
+    full_name: str
+    province: str
+    data_json: Any  # pełny JSON z przejazdami (np. {"seasons": {...}})
+
+class ProvinceTravelUpsertSeasonRequest(BaseModel):
+    judge_id: str
+    full_name: str
+    province: str
+    season_key: str            # np. "2024/2025"
+    season_json: Any           # JSON tylko dla danego sezonu (dowolna struktura)
+    season_updated_at: Optional[datetime] = None  # opcjonalnie z klienta
+
+class ProvinceTravelItem(BaseModel):
+    judge_id: str
+    full_name: str
+    province: str
+    data_json: Any
+    updated_at: datetime
+
+class GetProvinceTravelResponse(BaseModel):
+    record: Optional[ProvinceTravelItem] = None
+
+class ListProvinceTravelResponse(BaseModel):
+    records: List[ProvinceTravelItem]
+
 class SetForcedLogoutRequest(BaseModel):
     logout_at: datetime  # ISO‑8601
 
