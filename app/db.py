@@ -477,8 +477,6 @@ province_travel = Table(
     ),
 )
 
-Index("ix_province_travel_province", province_travel.c.province)
-
 # 19) Hale
 hall_reports = Table(
     "hall_reports",
