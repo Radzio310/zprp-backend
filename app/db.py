@@ -477,6 +477,28 @@ province_travel = Table(
     ),
 )
 
+# (18.9) Mentor Grades – zapis statystyk ocen (rated/pending) per sędzia
+mentor_grades = Table(
+    "mentor_grades",
+    metadata,
+    Column("judge_id", String, primary_key=True),                 # id sędziego
+    Column("full_name", String, nullable=False),                  # imię i nazwisko
+    Column("province", String, nullable=False, index=True),       # województwo (np. "ŚLĄSKIE")
+    Column(
+        "grades_json",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),                       # JSON z licznikami
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
 # 19) Hale
 hall_reports = Table(
     "hall_reports",

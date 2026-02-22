@@ -493,6 +493,45 @@ class GetProvinceTravelResponse(BaseModel):
 class ListProvinceTravelResponse(BaseModel):
     records: List[ProvinceTravelItem]
 
+# ---------------------------- MENTOR GRADES (rated/pending counters) ----------------------------
+
+class MentorGradesPayload(BaseModel):
+    rated: int = 0
+    pending: int = 0
+    total: Optional[int] = None
+    season: Optional[str] = None  # opcjonalnie, jeśli chcesz dopinać po stronie appki
+
+
+class MentorGradesUpsertRequest(BaseModel):
+    judge_id: str
+    full_name: str
+    province: str
+    grades_json: Any  # np. {"rated": 10, "pending": 3, "total": 13, "season": "2025/2026"}
+
+
+class MentorGradesPatchRequest(BaseModel):
+    full_name: Optional[str] = None
+    province: Optional[str] = None
+    grades_json: Optional[Any] = None
+
+
+class MentorGradesItem(BaseModel):
+    judge_id: str
+    full_name: str
+    province: str
+    grades_json: Any
+    updated_at: datetime
+
+
+class GetMentorGradesResponse(BaseModel):
+    record: Optional[MentorGradesItem] = None
+
+
+class ListMentorGradesResponse(BaseModel):
+    records: List[MentorGradesItem]
+
+# ---------------------------- FORCED LOGOUT (wymuszone wylogowanie) ----------------------------
+
 class SetForcedLogoutRequest(BaseModel):
     logout_at: datetime  # ISO‑8601
 

@@ -53,6 +53,7 @@ from app.badges import router as badges_router
 from app.baza_vips import router as baza_vips_router
 from app.province_events import router as province_events_router
 from app.province_travel import router as province_travel_router
+from app.mentor_grades import router as mentor_grades_router
 
 from app.zprp.schedule import router as schedule_router
 from app.zprp.competitions import router as competitions_router
@@ -131,6 +132,7 @@ app.include_router(badges_router)
 app.include_router(baza_vips_router)
 app.include_router(province_events_router)
 app.include_router(province_travel_router)
+app.include_router(mentor_grades_router)
 
 app.include_router(schedule_router, tags=["zprp"])
 app.include_router(competitions_router, tags=["zprp"])
