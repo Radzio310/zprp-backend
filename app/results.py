@@ -3039,7 +3039,7 @@ async def generate_protocol_pdf(
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
                 max_width_px=70,
-                max_height_px=18,
+                max_height_px=13,
             )
 
 
