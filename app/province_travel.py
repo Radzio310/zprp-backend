@@ -257,7 +257,6 @@ async def upsert_travel_season(judge_id: str, body: ProvinceTravelUpsertSeasonRe
 BUCKET_KEYS = ["0-15", "16-30", "31-45", "46-60", "61-80", "81-100", ">100"]
 
 def _season_start_year(key: str) -> int:
-    # "2024/2025" -> 2024 (fallback 0)
     try:
         if isinstance(key, str) and len(key) >= 4:
             return int(key.split("/")[0])
@@ -266,15 +265,10 @@ def _season_start_year(key: str) -> int:
     return 0
 
 def _extract_season_payload_and_updated_at(season_entry: Any) -> tuple[dict, Optional[str]]:
-    """
-    Obsługa 2 formatów:
-    - old: { "stats": {...}, ... }
-    - new: { "data": {...}, "updated_at": "..." }
-    Zwraca (payload_dict, season_updated_at_iso_or_none)
-    """
     if not isinstance(season_entry, dict):
         return {}, None
 
+    # new: { data: {...}, updated_at: "..." }
     if "data" in season_entry and season_entry.get("data") is not None:
         payload = season_entry.get("data")
         if not isinstance(payload, dict):
@@ -282,13 +276,13 @@ def _extract_season_payload_and_updated_at(season_entry: Any) -> tuple[dict, Opt
         upd = season_entry.get("updated_at")
         return payload, (str(upd) if upd else None)
 
-    # fallback: bezpośrednio payload
+    # old: bezpośrednio payload
     return season_entry, None
 
 def _safe_num(x: Any) -> Optional[float]:
     try:
         n = float(x)
-        if n != n or n == float("inf") or n == float("-inf"):
+        if n != n or n in (float("inf"), float("-inf")):
             return None
         return n
     except Exception:
@@ -310,7 +304,7 @@ async def export_travel_xlsx(
     q: Optional[str] = Query(None, description="Szukaj po judge_id lub full_name (opcjonalnie)"),
     limit: int = Query(2000, ge=1, le=20000),
 ):
-    # 1) Pobierz rekordy jak w list endpoint (opcjonalne filtry)
+    # 1) Pobierz rekordy
     stmt = select(province_travel)
 
     if province:
@@ -341,14 +335,13 @@ async def export_travel_xlsx(
     ws_dane = wb["Dane"]
     ws_listy = wb["Listy"]
 
-    # 3) Wyczyść stare dane (od wiersza 2 w dół)
-    #    Czyścimy A..P na zapas w większym zakresie, żeby nie zostawiać śmieci.
+    # 3) Wyczyść stare dane
     max_clear_rows = max(2000, ws_dane.max_row)
     for r in range(2, max_clear_rows + 1):
-        for c in range(1, 16 + 1):  # A(1) .. P(16)
+        for c in range(1, 16 + 1):  # A..P
             ws_dane.cell(row=r, column=c).value = None
 
-    # 4) Zbierz wszystkie sezony + wypełnij dane
+    # 4) Wypełnij dane
     all_seasons: set[str] = set()
     out_row = 2
 
@@ -367,7 +360,6 @@ async def export_travel_xlsx(
 
             payload, season_upd = _extract_season_payload_and_updated_at(season_entry)
 
-            # stats mogą być bezpośrednio w payload["stats"]
             stats = payload.get("stats") if isinstance(payload, dict) else None
             if not isinstance(stats, dict):
                 stats = {}
@@ -381,32 +373,26 @@ async def export_travel_xlsx(
             if not isinstance(buckets_raw, dict):
                 buckets_raw = {}
 
-            # datę aktualizacji bierzemy:
-            # 1) season_entry.updated_at (nowy format) jeśli jest
-            # 2) w przeciwnym razie rekord.updated_at z tabeli
             upd_val = season_upd or (row["updated_at"].isoformat() if row.get("updated_at") else "")
 
-            # wpis do arkusza (A..P)
-            ws_dane.cell(out_row, 1).value = sk                 # A Sezon
-            ws_dane.cell(out_row, 2).value = prov               # B Województwo
-            ws_dane.cell(out_row, 3).value = judge_id           # C ID
-            ws_dane.cell(out_row, 4).value = full_name          # D Imię i nazwisko
-            ws_dane.cell(out_row, 5).value = total_matches      # E Mecze
-            ws_dane.cell(out_row, 6).value = (avg_km if avg_km is not None else None)  # F Średni
-            ws_dane.cell(out_row, 7).value = (min_km if min_km is not None else None)  # G Min
-            ws_dane.cell(out_row, 8).value = (max_km if max_km is not None else None)  # H Max
+            ws_dane.cell(out_row, 1).value = sk
+            ws_dane.cell(out_row, 2).value = prov
+            ws_dane.cell(out_row, 3).value = judge_id
+            ws_dane.cell(out_row, 4).value = full_name
+            ws_dane.cell(out_row, 5).value = total_matches
+            ws_dane.cell(out_row, 6).value = (avg_km if avg_km is not None else None)
+            ws_dane.cell(out_row, 7).value = (min_km if min_km is not None else None)
+            ws_dane.cell(out_row, 8).value = (max_km if max_km is not None else None)
 
-            # I..O buckety
             for idx, bk in enumerate(BUCKET_KEYS):
                 ws_dane.cell(out_row, 9 + idx).value = _safe_int(buckets_raw.get(bk))
 
-            ws_dane.cell(out_row, 16).value = upd_val           # P updated_at (string ISO)
+            ws_dane.cell(out_row, 16).value = upd_val
 
             all_seasons.add(sk)
             out_row += 1
 
-    # 5) Wypełnij Listy: sezony najnowszy -> najstarszy w kolumnie A od wiersza 2
-    #    Najpierw czyścimy A2..A200
+    # 5) Listy -> sezony
     for r in range(2, 200 + 1):
         ws_listy.cell(r, 1).value = None
 
@@ -414,7 +400,7 @@ async def export_travel_xlsx(
     for i, s in enumerate(seasons_sorted, start=2):
         ws_listy.cell(i, 1).value = s
 
-    # 6) Zapisz do pliku tymczasowego i zwróć FileResponse
+    # 6) Zapis do tmp + FileResponse (attachment)
     with NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
         tmp_path = tmp.name
 
@@ -430,10 +416,18 @@ async def export_travel_xlsx(
     background_tasks.add_task(_cleanup, tmp_path)
 
     filename = "statystyki_dojazdow.xlsx"
+
+    headers = {
+        # wymusza zachowanie jak download (a nie inline preview)
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    }
+
     return FileResponse(
         path=tmp_path,
-        filename=filename,
+        filename=filename,  # nadal warto zostawić
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
     )
 
 # ───────────────────────── END EXPORT XLSX ─────────────────────────
