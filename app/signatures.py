@@ -53,7 +53,7 @@ def _sniff_is_svg(upload: UploadFile, first_bytes: bytes) -> bool:
     ctype = (upload.content_type or "").lower().strip()
     if "svg" in ctype:
         return True
-    head = first_bytes.lstrip()[:200].lower()
+    head = first_bytes.lstrip()[:400].lower()
     return head.startswith(b"<svg") or b"<svg" in head or head.startswith(b"<?xml")
 
 
@@ -61,7 +61,11 @@ def _render_svg_to_png_bytes(svg_bytes: bytes) -> bytes:
     if cairosvg is None:
         raise HTTPException(
             status_code=500,
-            detail="Brak cairosvg na backendzie. Dodaj zależność cairosvg (i ewentualnie systemowe cairo/pango) lub poproś o wariant resvg.",
+            detail=(
+                "Brak cairosvg na backendzie. "
+                "Dla nowej wersji (Skia) wysyłamy PNG, więc SVG nie jest wymagane. "
+                "Jeśli jednak chcesz SVG fallback – dodaj cairosvg + systemowe cairo/pango."
+            ),
         )
 
     out = cairosvg.svg2png(
@@ -76,7 +80,7 @@ def _render_svg_to_png_bytes(svg_bytes: bytes) -> bytes:
 
 
 def _fit_raster_to_canvas_png_bytes(raster_bytes: bytes) -> bytes:
-    # Wczytaj, spłaszcz do białego tła, wpasuj zachowując proporcje w 600x400.
+    # Wczytaj raster (png/jpg), spłaszcz do białego tła i wpasuj w 600x400 (contain).
     try:
         img = Image.open(BytesIO(raster_bytes))
     except Exception:
@@ -86,7 +90,7 @@ def _fit_raster_to_canvas_png_bytes(raster_bytes: bytes) -> bytes:
 
     bg = Image.new("RGBA", (OUT_W, OUT_H), (255, 255, 255, 255))
 
-    # contain
+    # contain (zachowaj proporcje)
     img.thumbnail((OUT_W, OUT_H), Image.LANCZOS)
 
     x = (OUT_W - img.size[0]) // 2
@@ -99,7 +103,6 @@ def _fit_raster_to_canvas_png_bytes(raster_bytes: bytes) -> bytes:
 
 
 async def _read_upload_bytes(upload: UploadFile, max_bytes: int = 2_500_000) -> bytes:
-    # ~2.5MB limit (podpisy nie powinny być większe)
     data = await upload.read()
     if not data:
         raise HTTPException(status_code=400, detail="Pusty plik.")
@@ -175,6 +178,7 @@ async def _upload_to_png_url(image: UploadFile) -> str:
     if is_svg:
         png_bytes = _render_svg_to_png_bytes(raw)
     else:
+        # PNG/JPG z apki (Skia) -> normalizacja do 600x400
         png_bytes = _fit_raster_to_canvas_png_bytes(raw)
 
     return _save_png_bytes_to_static(png_bytes)
@@ -214,7 +218,6 @@ async def update_signature(sig_id: int, image: UploadFile = File(...)):
     if not old:
         raise HTTPException(status_code=404, detail="Podpis nie istnieje")
 
-    # usuń poprzedni PNG
     _delete_static_if_exists(old._mapping["image_url"])
 
     new_image_url = await _upload_to_png_url(image)
