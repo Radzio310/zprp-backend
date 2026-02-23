@@ -551,6 +551,39 @@ saved_matches = Table(
     Column("is_finished", Boolean, nullable=False, server_default=text("false")),
 )
 
+# 21.1) ProEl - podpisy
+# Wymagane przez app/signatures.py
+
+signatures = Table(
+    "signatures",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # właściciel podpisu (ID sędziego)
+    Column("judge_id", String, nullable=False, index=True),
+
+    # opcjonalnie: imię i nazwisko (kopiowane z payloadu)
+    Column("judge_name", String, nullable=True),
+
+    # ścieżka do pliku w static, np. "/static/<uuid>.<ext>"
+    Column("image_url", String, nullable=False),
+
+    # timestamps
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
 # 22) Wersje aplikacji / bazy
 app_versions = Table(
     "app_versions",
