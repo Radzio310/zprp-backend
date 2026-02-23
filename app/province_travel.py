@@ -204,7 +204,8 @@ async def export_travel_xlsx(
             if not isinstance(buckets_raw, dict):
                 buckets_raw = {}
 
-            upd_val = season_upd or (row["updated_at"].isoformat() if row.get("updated_at") else "")
+            updated_at = row["updated_at"]
+            upd_val = season_upd or (updated_at.isoformat() if updated_at else "")
 
             ws_dane.cell(out_row, 1).value = sk
             ws_dane.cell(out_row, 2).value = prov
