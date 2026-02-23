@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import re
+import time
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
@@ -2859,7 +2860,28 @@ def _safe_filename_from_match_number(match_number: str) -> str:
     base = (match_number or "mecz").strip().replace("/", "-")
     base = re.sub(r"[^0-9A-Za-z._-]+", "_", base)
     return f"protokol_{base}.pdf"
-        
+
+DOWNLOAD_DIR = "/tmp/protocol_downloads"
+DOWNLOAD_TTL_SECONDS = 10 * 60  # 10 min
+
+def _ensure_download_dir():
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+def _cleanup_expired_downloads():
+    try:
+        _ensure_download_dir()
+        now = time.time()
+        for fn in os.listdir(DOWNLOAD_DIR):
+            p = os.path.join(DOWNLOAD_DIR, fn)
+            try:
+                st = os.stat(p)
+                if now - st.st_mtime > DOWNLOAD_TTL_SECONDS:
+                    os.remove(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 @router.post(
     "/judge/results/protocol/pdf",
@@ -3272,20 +3294,27 @@ async def generate_protocol_pdf(
         # --- convert to PDF ---
         pdf_path = _convert_xlsx_to_pdf(filled_xlsx, td)
 
+        # przygotuj plik do pobrania po tokenie
+        _cleanup_expired_downloads()
+        _ensure_download_dir()
+
+        token = str(uuid.uuid4())
         filename = _safe_filename_from_match_number(core.get("matchNumber") or "mecz")
 
-        headers = {
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-        }
+        # zapisujemy finalny plik w /tmp (nie usuwamy go BackgroundTask od razu)
+        download_path = os.path.join(DOWNLOAD_DIR, f"{token}.pdf")
+        shutil.copyfile(pdf_path, download_path)
 
-        return FileResponse(
-            pdf_path,
-            media_type="application/pdf",
-            filename=filename,
-            headers=headers,
-            background=BackgroundTask(shutil.rmtree, td, ignore_errors=True),
-        )
+        # sprzątnij roboczy katalog po konwersji (xlsx + profile LO)
+        shutil.rmtree(td, ignore_errors=True)
+
+        # zwróć link do pobrania
+        return {
+            "success": True,
+            "token": token,
+            "filename": filename,
+            "download_url": f"/judge/results/protocol/pdf/download/{token}?filename={filename}",
+        }
 
 
     except HTTPException:
@@ -3294,26 +3323,36 @@ async def generate_protocol_pdf(
         logger.error("generate_protocol_pdf error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Nie udało się wygenerować PDF: {e}")
 
-@router.get(
-    "/judge/results/protocol/pdf",
-    summary="Pobierz PDF protokołu (GET, attachment) – do Linking.openURL",
-)
-async def generate_protocol_pdf_get(
-    payload_b64: str = Query(..., description="Base64(JSON({data_json}))"),
-):
-    # 1) decode base64 -> json
-    try:
-        raw = base64.b64decode(payload_b64.encode("utf-8"))
-        obj = json.loads(raw.decode("utf-8"))
-        data_json = obj.get("data_json")
-        if not isinstance(data_json, dict):
-            raise ValueError("data_json must be object")
-    except Exception as e:
-        raise HTTPException(400, f"Nieprawidłowy payload_b64: {e}")
 
-    # 2) wywołaj tę samą logikę co POST, ale bez duplikowania kodu:
-    #    Najprościej: skopiować wnętrze generate_protocol_pdf do funkcji helper
-    #    i użyć jej tu i w POST.
-    #    Minimalnie (bez refaktoru): wywołaj istniejącą logikę przez ręczne zbudowanie ProtocolPdfRequest.
-    req = ProtocolPdfRequest(data_json=data_json)
-    return await generate_protocol_pdf(req)
+from fastapi import Path, Query
+from fastapi.responses import FileResponse
+
+@router.get(
+    "/judge/results/protocol/pdf/download/{token}",
+    summary="Pobierz wygenerowany PDF protokołu (attachment)",
+)
+async def download_protocol_pdf(
+    token: str = Path(...),
+    filename: str = Query("protokol.pdf"),
+):
+    _ensure_download_dir()
+    file_path = os.path.join(DOWNLOAD_DIR, f"{token}.pdf")
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "Plik wygasł lub nie istnieje")
+
+    # nagłówki jak w excelu
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    }
+
+    # po pobraniu: możesz sprzątnąć (opcjonalnie)
+    # UWAGA: czasem system pobierania może dociągać plik chwilę,
+    # ale FileResponse(background=...) sprząta po zakończeniu odpowiedzi.
+    return FileResponse(
+        path=file_path,
+        media_type="application/pdf",
+        filename=filename,
+        headers=headers,
+        background=BackgroundTask(lambda: os.remove(file_path) if os.path.exists(file_path) else None),
+    )
