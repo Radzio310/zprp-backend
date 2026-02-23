@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
 
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Path as ApiPath
+from pathlib import Path as SysPath
 from httpx import AsyncClient
 from pydantic import BaseModel
 
@@ -1827,7 +1828,6 @@ import math
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
 
 from fastapi.responses import FileResponse
 from openpyxl import load_workbook
@@ -2895,7 +2895,7 @@ async def generate_protocol_pdf(
         raise HTTPException(400, "data_json musi być obiektem JSON")
 
     # --- locate template ---
-    template_path = Path(__file__).resolve().parent / "templates" / "protocol_template.xlsx"
+    template_path = SysPath(__file__).resolve().parent / "templates" / "protocol_template.xlsx"
     if not template_path.exists():
         raise HTTPException(
             500,
@@ -3324,7 +3324,6 @@ async def generate_protocol_pdf(
         raise HTTPException(status_code=500, detail=f"Nie udało się wygenerować PDF: {e}")
 
 
-from fastapi import Path, Query
 from fastapi.responses import FileResponse
 
 @router.get(
@@ -3332,7 +3331,7 @@ from fastapi.responses import FileResponse
     summary="Pobierz wygenerowany PDF protokołu (attachment)",
 )
 async def download_protocol_pdf(
-    token: str = Path(...),
+    token: str = ApiPath(...),
     filename: str = Query("protokol.pdf"),
 ):
     _ensure_download_dir()
