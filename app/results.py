@@ -3006,14 +3006,14 @@ async def generate_protocol_pdf(
             image_bytes=host_sig_bytes,
             anchor_cell=SIGN_ANCHORS["hostTeamSignature"],
             max_width_px=80,
-            max_height_px=50,
+            max_height_px=35,
         )
         _add_signature_image(
             ws,
             image_bytes=guest_sig_bytes,
             anchor_cell=SIGN_ANCHORS["guestTeamSignature"],
             max_width_px=80,
-            max_height_px=50,
+            max_height_px=35,
         )
 
         # 2) podpis medyka
@@ -3024,7 +3024,7 @@ async def generate_protocol_pdf(
             image_bytes=medic_sig_bytes,
             anchor_cell=SIGN_ANCHORS["medic"],
             max_width_px=120,
-            max_height_px=40,
+            max_height_px=30,
         )
 
         # 3) podpisy officials
@@ -3039,7 +3039,7 @@ async def generate_protocol_pdf(
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
                 max_width_px=70,
-                max_height_px=25,
+                max_height_px=18,
             )
 
 
