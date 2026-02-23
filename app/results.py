@@ -2987,11 +2987,11 @@ async def generate_protocol_pdf(
             "hostTeamSignature": "F29",
             "guestTeamSignature": "F55",
             "medic": "Z63",
-            "referee1": "AH66",
-            "referee2": "AH67",
-            "secretary": "AH68",
-            "timekeeper": "AH69",
-            "delegate": "AH70",
+            "referee1": "AI66",
+            "referee2": "AI67",
+            "secretary": "AI68",
+            "timekeeper": "AI69",
+            "delegate": "AI70",
         }
 
         # 1) podpisy drużyn
