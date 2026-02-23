@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select, insert, update, delete, func
 
-from app.db import database, signatures  # <- Twoja Table z db.py
+from app.db import database, signatures
 
 
 RAILWAY_VOLUME_MOUNT_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
@@ -82,11 +82,13 @@ router = APIRouter(prefix="/signatures", tags=["Signatures"])
 
 
 def _row_to_response(row) -> SignatureResponse:
+    # databases.Record -> używamy _mapping żeby mieć .get()
+    m = row._mapping  # noqa: SLF001 (w praktyce standard w "databases")
     return SignatureResponse(
-        id=row["id"],
-        image_url=row["image_url"],
-        created_at=row.get("created_at"),
-        updated_at=row.get("updated_at"),
+        id=m["id"],
+        image_url=m["image_url"],
+        created_at=m.get("created_at"),
+        updated_at=m.get("updated_at"),
     )
 
 
@@ -105,7 +107,8 @@ async def get_signature_url(sig_id: int):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Podpis nie istnieje")
-    return row["image_url"]
+    # tu też Record:
+    return row._mapping["image_url"]
 
 
 @router.get("/", response_model=ListSignaturesResponse)
@@ -127,20 +130,19 @@ async def list_signatures():
 async def upload_signature(image: UploadFile = File(...)):
     image_url = _save_upload_to_static(image)
 
-    # Twoja tabela ma judge_id NOT NULL -> musimy coś wstawić.
-    # Jeśli chcesz "bez walidacji", to daj stałą wartość albo poluzuj DB (nullable=True).
-    # Najprościej: stały owner.
+    # UWAGA: Twoja tabela ma judge_id NOT NULL
     stmt = (
         insert(signatures)
         .values(
             judge_id="system",
             judge_name=None,
             image_url=image_url,
-            # created_at / updated_at ogarnia server_default
         )
         .returning(signatures)
     )
     record = await database.fetch_one(stmt)
+    if not record:
+        raise HTTPException(status_code=500, detail="Insert failed")
     return _row_to_response(record)
 
 
@@ -154,7 +156,7 @@ async def update_signature(sig_id: int, image: UploadFile = File(...)):
     if not old:
         raise HTTPException(status_code=404, detail="Podpis nie istnieje")
 
-    _delete_static_if_exists(old["image_url"])
+    _delete_static_if_exists(old._mapping["image_url"])
     new_image_url = _save_upload_to_static(image)
 
     stmt = (
@@ -167,6 +169,8 @@ async def update_signature(sig_id: int, image: UploadFile = File(...)):
         .returning(signatures)
     )
     record = await database.fetch_one(stmt)
+    if not record:
+        raise HTTPException(status_code=500, detail="Update failed")
     return _row_to_response(record)
 
 
@@ -179,6 +183,6 @@ async def delete_signature(sig_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Podpis nie istnieje")
 
-    _delete_static_if_exists(row["image_url"])
+    _delete_static_if_exists(row._mapping["image_url"])
     await database.execute(delete(signatures).where(signatures.c.id == sig_id))
     return
