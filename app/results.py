@@ -2986,7 +2986,7 @@ async def generate_protocol_pdf(
         SIGN_ANCHORS = {
             "hostTeamSignature": "F29",
             "guestTeamSignature": "F55",
-            "medic": "U63",
+            "medic": "Z63",
             "referee1": "AH66",
             "referee2": "AH67",
             "secretary": "AH68",
@@ -3005,15 +3005,15 @@ async def generate_protocol_pdf(
             ws,
             image_bytes=host_sig_bytes,
             anchor_cell=SIGN_ANCHORS["hostTeamSignature"],
-            max_width_px=260,
-            max_height_px=90,
+            max_width_px=80,
+            max_height_px=25,
         )
         _add_signature_image(
             ws,
             image_bytes=guest_sig_bytes,
             anchor_cell=SIGN_ANCHORS["guestTeamSignature"],
-            max_width_px=260,
-            max_height_px=90,
+            max_width_px=80,
+            max_height_px=25,
         )
 
         # 2) podpis medyka
@@ -3023,8 +3023,8 @@ async def generate_protocol_pdf(
             ws,
             image_bytes=medic_sig_bytes,
             anchor_cell=SIGN_ANCHORS["medic"],
-            max_width_px=220,
-            max_height_px=80,
+            max_width_px=120,
+            max_height_px=20,
         )
 
         # 3) podpisy officials
@@ -3038,8 +3038,8 @@ async def generate_protocol_pdf(
                 ws,
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
-                max_width_px=220,
-                max_height_px=80,
+                max_width_px=70,
+                max_height_px=10,
             )
 
 
