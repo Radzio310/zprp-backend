@@ -1,6 +1,7 @@
 # app/results.py
 
 import base64
+import json
 import logging
 import random
 import re
@@ -9,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
 
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from httpx import AsyncClient
 from pydantic import BaseModel
 
@@ -2853,6 +2854,11 @@ def _add_signature_image(
 
     ws.add_image(img, anchor_cell)
     return True
+
+def _safe_filename_from_match_number(match_number: str) -> str:
+    base = (match_number or "mecz").strip().replace("/", "-")
+    base = re.sub(r"[^0-9A-Za-z._-]+", "_", base)
+    return f"protokol_{base}.pdf"
         
 
 @router.post(
@@ -3039,7 +3045,7 @@ async def generate_protocol_pdf(
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
                 max_width_px=70,
-                max_height_px=13,
+                max_height_px=15,
             )
 
 
@@ -3266,12 +3272,19 @@ async def generate_protocol_pdf(
         # --- convert to PDF ---
         pdf_path = _convert_xlsx_to_pdf(filled_xlsx, td)
 
-        filename = f"protokol_{(core['matchNumber'] or 'mecz').replace('/', '-')}.pdf"
+        filename = _safe_filename_from_match_number(core.get("matchNumber") or "mecz")
+
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        }
+
         return FileResponse(
             pdf_path,
             media_type="application/pdf",
             filename=filename,
-            background=BackgroundTask(shutil.rmtree, td, ignore_errors=True),  # ✅ sprząta PO wysłaniu
+            headers=headers,
+            background=BackgroundTask(shutil.rmtree, td, ignore_errors=True),
         )
 
 
@@ -3280,3 +3293,27 @@ async def generate_protocol_pdf(
     except Exception as e:
         logger.error("generate_protocol_pdf error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Nie udało się wygenerować PDF: {e}")
+
+@router.get(
+    "/judge/results/protocol/pdf",
+    summary="Pobierz PDF protokołu (GET, attachment) – do Linking.openURL",
+)
+async def generate_protocol_pdf_get(
+    payload_b64: str = Query(..., description="Base64(JSON({data_json}))"),
+):
+    # 1) decode base64 -> json
+    try:
+        raw = base64.b64decode(payload_b64.encode("utf-8"))
+        obj = json.loads(raw.decode("utf-8"))
+        data_json = obj.get("data_json")
+        if not isinstance(data_json, dict):
+            raise ValueError("data_json must be object")
+    except Exception as e:
+        raise HTTPException(400, f"Nieprawidłowy payload_b64: {e}")
+
+    # 2) wywołaj tę samą logikę co POST, ale bez duplikowania kodu:
+    #    Najprościej: skopiować wnętrze generate_protocol_pdf do funkcji helper
+    #    i użyć jej tu i w POST.
+    #    Minimalnie (bez refaktoru): wywołaj istniejącą logikę przez ręczne zbudowanie ProtocolPdfRequest.
+    req = ProtocolPdfRequest(data_json=data_json)
+    return await generate_protocol_pdf(req)
