@@ -2883,6 +2883,17 @@ def _cleanup_expired_downloads():
         pass
 
 
+OFFICIAL_NAME_FALLBACK = "--------------------------"
+OFFICIAL_CITY_FALLBACK = "     -------------     "
+OFFICIAL_SIGN_FALLBACK = "-------"
+
+def _fallback_text(v: Any, fallback: str) -> str:
+    s = (v or "").strip() if isinstance(v, str) else str(v).strip() if v is not None else ""
+    return s if s else fallback
+
+def _set_cell_fallback(ws, cell: str, v: Any, fallback: str) -> None:
+    ws[cell].value = _fallback_text(v, fallback)
+
 @router.post(
     "/judge/results/protocol/pdf",
     summary="Generuj PDF z protokołu na podstawie data_json (ProEl) i szablonu XLSX",
@@ -3004,11 +3015,11 @@ async def generate_protocol_pdf(
         # miejscowości sędziów (W66..W70)
         officials = extras.get("officials") or {}
 
-        ws["W66"].value = ((officials.get("referee1") or {}).get("city") or "").strip()
-        ws["W67"].value = ((officials.get("referee2") or {}).get("city") or "").strip()
-        ws["W68"].value = ((officials.get("secretary") or {}).get("city") or "").strip()
-        ws["W69"].value = ((officials.get("timekeeper") or {}).get("city") or "").strip()
-        ws["W70"].value = ((officials.get("delegate") or {}).get("city") or "").strip()
+        _set_cell_fallback(ws, "W66", (officials.get("referee1") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W67", (officials.get("referee2") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W68", (officials.get("secretary") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W69", (officials.get("timekeeper") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W70", (officials.get("delegate") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
 
                 # --- SIGNATURES (PNG z backendu) ---
         SIGN_ANCHORS = {
@@ -3062,13 +3073,18 @@ async def generate_protocol_pdf(
         for key in ("referee1", "referee2", "secretary", "timekeeper", "delegate"):
             url = _off_sig_url(key)
             blob = await _fetch_png_bytes(url)
-            _add_signature_image(
+
+            ok = _add_signature_image(
                 ws,
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
                 max_width_px=70,
                 max_height_px=15,
             )
+
+            # jeśli nie dodano obrazka -> wstaw placeholder tekstowy w komórkę kotwiczącą
+            if not ok:
+                ws[SIGN_ANCHORS[key]].value = OFFICIAL_SIGN_FALLBACK
 
 
         # --- header mapping ---
@@ -3221,11 +3237,11 @@ async def generate_protocol_pdf(
         ws["AJ58"].value = guest_comp_pen.get("E", {}).get("disq", "---")
 
         # Sędziowie
-        ws["I66"].value = core.get("referee1") or ""
-        ws["I67"].value = core.get("referee2") or ""
-        ws["I68"].value = core.get("secretary") or ""
-        ws["I69"].value = core.get("timekeeper") or ""
-        ws["I70"].value = core.get("delegate") or ""
+        _set_cell_fallback(ws, "I66", core.get("referee1"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I67", core.get("referee2"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I68", core.get("secretary"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I69", core.get("timekeeper"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I70", core.get("delegate"), OFFICIAL_NAME_FALLBACK)
 
         # --- timeline (match events) + optional pages (overflow + shootout) ---
         evs1, evs2 = _extract_timeline_events(data_json)
