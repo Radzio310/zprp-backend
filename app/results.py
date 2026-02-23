@@ -2722,6 +2722,137 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         write_team_shot(first_team, s)
         # 2) drugi strzał w serii
         write_team_shot(second_team, s)
+
+from datetime import datetime, date
+from io import BytesIO
+from typing import Callable
+
+# jeśli masz pillow (zwykle jest), to da nam rozmiar obrazka do skalowania
+try:
+    from PIL import Image as PILImage
+except Exception:
+    PILImage = None
+
+
+BACKEND_STATIC_PREFIX = "https://zprp-backend-production.up.railway.app"
+
+
+def _full_static_url(rel_or_abs: str) -> str:
+    """
+    '/static/xxx.png' -> 'https://.../static/xxx.png'
+    jeśli już jest absolutny URL -> zwraca bez zmian
+    """
+    s = (rel_or_abs or "").strip()
+    if not s:
+        return ""
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    if not s.startswith("/"):
+        s = "/" + s
+    return BACKEND_STATIC_PREFIX + s
+
+
+def _fmt_date_ddmmyyyy(iso_ymd: str) -> str:
+    """
+    '2026-02-23' -> '23.02.2026'
+    """
+    s = (iso_ymd or "").strip()
+    if not s:
+        return ""
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+        return d.strftime("%d.%m.%Y")
+    except Exception:
+        return ""
+
+
+def _fmt_time_hhmm(hhmm: str) -> str:
+    """
+    '18:00' -> '18:00' (waliduje format)
+    """
+    s = (hhmm or "").strip()
+    if not s:
+        return ""
+    try:
+        t = datetime.strptime(s, "%H:%M").time()
+        return t.strftime("%H:%M")
+    except Exception:
+        return ""
+
+
+def _set_yes_no_x(ws, *, yes_cell: str, no_cell: str, value: Any, yes_when_true: bool = True) -> None:
+    """
+    Wstawia "X" do pary komórek (tak/nie albo brak/verte).
+    Jeśli value truthy -> X do yes_cell (gdy yes_when_true=True), inaczej do no_cell.
+    """
+    v = bool(value) if value is not None else False
+    ws[yes_cell].value = ""
+    ws[no_cell].value = ""
+    if yes_when_true:
+        ws[yes_cell].value = "X" if v else ""
+        ws[no_cell].value = "" if v else "X"
+    else:
+        # odwrotna logika (raczej niepotrzebna tutaj, ale zostawiam)
+        ws[yes_cell].value = "" if v else "X"
+        ws[no_cell].value = "X" if v else ""
+
+
+async def _fetch_png_bytes(url: str) -> bytes:
+    """
+    Pobiera obraz PNG/JPG z URL. Zwraca bytes albo b'' gdy brak/nieprawidłowy.
+    """
+    u = (url or "").strip()
+    if not u:
+        return b""
+    try:
+        async with AsyncClient(follow_redirects=True, timeout=15.0) as c:
+            r = await c.get(u)
+            if r.status_code != 200:
+                return b""
+            return r.content or b""
+    except Exception:
+        return b""
+
+
+def _add_signature_image(
+    ws,
+    *,
+    image_bytes: bytes,
+    anchor_cell: str,
+    max_width_px: int = 220,
+    max_height_px: int = 90,
+) -> bool:
+    """
+    Wstawia obraz do arkusza, zakotwiczony w anchor_cell (czyli "nad tą komórką").
+    Skaluje, żeby zmieścił się w max_width/max_height (px).
+    Zwraca True jeśli dodano.
+    """
+    if not image_bytes:
+        return False
+
+    bio = BytesIO(image_bytes)
+    img = Image(bio)
+
+    # Skala (jeśli mamy PIL, weźmiemy faktyczny rozmiar)
+    if PILImage is not None:
+        try:
+            bio2 = BytesIO(image_bytes)
+            pil = PILImage.open(bio2)
+            w, h = pil.size
+            if w and h:
+                scale = min(max_width_px / float(w), max_height_px / float(h), 1.0)
+                img.width = int(w * scale)
+                img.height = int(h * scale)
+        except Exception:
+            # fallback: zostaw rozmiar domyślny openpyxl
+            pass
+    else:
+        # fallback bez PIL: ustaw “na oko”
+        img.width = min(img.width or max_width_px, max_width_px)
+        img.height = min(img.height or max_height_px, max_height_px)
+
+    ws.add_image(img, anchor_cell)
+    return True
         
 
 @router.post(
@@ -2808,6 +2939,108 @@ async def generate_protocol_pdf(
         _rehydrate_images_in_workbook(wb, media)
 
         ws = wb.active
+
+        # --- extras (NOWE POLA Z data_json) ---
+        mc = data_json.get("matchConfig") or {}
+        extras = mc.get("extras") or {}
+
+        # data/godzina
+        ws["AB8"].value = _fmt_date_ddmmyyyy(extras.get("matchDate"))
+        ws["AH8"].value = _fmt_time_hhmm(extras.get("matchTime"))
+
+        # medyk
+        medic = extras.get("medic") or {}
+        ws["U61"].value = (medic.get("fullName") or "").strip()
+        ws["U62"].value = (medic.get("number") or "").strip()
+
+        # widzowie / pojemność
+        ws["G62"].value = extras.get("spectatorsCount") if extras.get("spectatorsCount") is not None else ""
+        ws["Q62"].value = extras.get("venueCapacity") if extras.get("venueCapacity") is not None else ""
+
+        # szczegółowe uwagi sędziów: brak -> O61, verte -> S61
+        # value: True => verte (S61), False/None => brak (O61)
+        detailed_notes = bool(extras.get("detailedRefereeNotes")) if extras.get("detailedRefereeNotes") is not None else False
+        ws["O61"].value = "X" if not detailed_notes else ""
+        ws["S61"].value = "X" if detailed_notes else ""
+
+        # rejestracja zawodów: tak -> O63, nie -> S63
+        event_reg = bool(extras.get("eventRegistration")) if extras.get("eventRegistration") is not None else False
+        ws["O63"].value = "X" if event_reg else ""
+        ws["S63"].value = "X" if not event_reg else ""
+
+        # dodatkowy raport: tak -> O64, nie -> S64
+        extra_report = bool(extras.get("extraReport")) if extras.get("extraReport") is not None else False
+        ws["O64"].value = "X" if extra_report else ""
+        ws["S64"].value = "X" if not extra_report else ""
+
+        # miejscowości sędziów (W66..W70)
+        officials = extras.get("officials") or {}
+
+        ws["W66"].value = ((officials.get("referee1") or {}).get("city") or "").strip()
+        ws["W67"].value = ((officials.get("referee2") or {}).get("city") or "").strip()
+        ws["W68"].value = ((officials.get("secretary") or {}).get("city") or "").strip()
+        ws["W69"].value = ((officials.get("timekeeper") or {}).get("city") or "").strip()
+        ws["W70"].value = ((officials.get("delegate") or {}).get("city") or "").strip()
+
+                # --- SIGNATURES (PNG z backendu) ---
+        SIGN_ANCHORS = {
+            "hostTeamSignature": "F29",
+            "guestTeamSignature": "F55",
+            "medic": "U63",
+            "referee1": "AH66",
+            "referee2": "AH67",
+            "secretary": "AH68",
+            "timekeeper": "AH69",
+            "delegate": "AH70",
+        }
+
+        # 1) podpisy drużyn
+        host_sig_url = _full_static_url(extras.get("hostTeamSignature") or "")
+        guest_sig_url = _full_static_url(extras.get("guestTeamSignature") or "")
+
+        host_sig_bytes = await _fetch_png_bytes(host_sig_url)
+        guest_sig_bytes = await _fetch_png_bytes(guest_sig_url)
+
+        _add_signature_image(
+            ws,
+            image_bytes=host_sig_bytes,
+            anchor_cell=SIGN_ANCHORS["hostTeamSignature"],
+            max_width_px=260,
+            max_height_px=90,
+        )
+        _add_signature_image(
+            ws,
+            image_bytes=guest_sig_bytes,
+            anchor_cell=SIGN_ANCHORS["guestTeamSignature"],
+            max_width_px=260,
+            max_height_px=90,
+        )
+
+        # 2) podpis medyka
+        medic_sig_url = _full_static_url((medic.get("signature") or "").strip())
+        medic_sig_bytes = await _fetch_png_bytes(medic_sig_url)
+        _add_signature_image(
+            ws,
+            image_bytes=medic_sig_bytes,
+            anchor_cell=SIGN_ANCHORS["medic"],
+            max_width_px=220,
+            max_height_px=80,
+        )
+
+        # 3) podpisy officials
+        def _off_sig_url(key: str) -> str:
+            return _full_static_url((((officials.get(key) or {}).get("signature")) or "").strip())
+
+        for key in ("referee1", "referee2", "secretary", "timekeeper", "delegate"):
+            url = _off_sig_url(key)
+            blob = await _fetch_png_bytes(url)
+            _add_signature_image(
+                ws,
+                image_bytes=blob,
+                anchor_cell=SIGN_ANCHORS[key],
+                max_width_px=220,
+                max_height_px=80,
+            )
 
 
         # --- header mapping ---
