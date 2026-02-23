@@ -7,7 +7,11 @@ import logging
 import traceback
 from typing import Any, Dict, Optional, List
 
-from fastapi import APIRouter, HTTPException, Query, Path
+from fastapi import APIRouter, HTTPException, Query, Path, BackgroundTasks
+from fastapi.responses import FileResponse
+from pathlib import Path as SysPath
+from tempfile import NamedTemporaryFile
+from openpyxl import load_workbook
 from sqlalchemy import select, insert, update
 
 from app.db import database, province_travel
@@ -247,3 +251,189 @@ async def upsert_travel_season(judge_id: str, body: ProvinceTravelUpsertSeasonRe
     except Exception as e:
         logger.error("upsert_travel_season failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(500, f"upsert_travel_season failed: {e}")
+    
+# ───────────────────────── EXPORT XLSX (statystyki dojazdów) ─────────────────────────
+
+BUCKET_KEYS = ["0-15", "16-30", "31-45", "46-60", "61-80", "81-100", ">100"]
+
+def _season_start_year(key: str) -> int:
+    # "2024/2025" -> 2024 (fallback 0)
+    try:
+        if isinstance(key, str) and len(key) >= 4:
+            return int(key.split("/")[0])
+    except Exception:
+        pass
+    return 0
+
+def _extract_season_payload_and_updated_at(season_entry: Any) -> tuple[dict, Optional[str]]:
+    """
+    Obsługa 2 formatów:
+    - old: { "stats": {...}, ... }
+    - new: { "data": {...}, "updated_at": "..." }
+    Zwraca (payload_dict, season_updated_at_iso_or_none)
+    """
+    if not isinstance(season_entry, dict):
+        return {}, None
+
+    if "data" in season_entry and season_entry.get("data") is not None:
+        payload = season_entry.get("data")
+        if not isinstance(payload, dict):
+            payload = {}
+        upd = season_entry.get("updated_at")
+        return payload, (str(upd) if upd else None)
+
+    # fallback: bezpośrednio payload
+    return season_entry, None
+
+def _safe_num(x: Any) -> Optional[float]:
+    try:
+        n = float(x)
+        if n != n or n == float("inf") or n == float("-inf"):
+            return None
+        return n
+    except Exception:
+        return None
+
+def _safe_int(x: Any) -> int:
+    n = _safe_num(x)
+    if n is None:
+        return 0
+    return int(round(n))
+
+@router.get(
+    "/export-xlsx",
+    summary="Eksport XLSX statystyk dojazdów (szablon app/templates/statystyki_dojazdow.xlsx)",
+)
+async def export_travel_xlsx(
+    background_tasks: BackgroundTasks,
+    province: Optional[str] = Query(None, description="Województwo (opcjonalnie), np. ŚLĄSKIE"),
+    q: Optional[str] = Query(None, description="Szukaj po judge_id lub full_name (opcjonalnie)"),
+    limit: int = Query(2000, ge=1, le=20000),
+):
+    # 1) Pobierz rekordy jak w list endpoint (opcjonalne filtry)
+    stmt = select(province_travel)
+
+    if province:
+        stmt = stmt.where(province_travel.c.province == _normalize_province(province))
+
+    if q and q.strip():
+        needle = f"%{q.strip()}%"
+        stmt = stmt.where(
+            (province_travel.c.judge_id.ilike(needle)) | (province_travel.c.full_name.ilike(needle))
+        )
+
+    stmt = stmt.order_by(province_travel.c.updated_at.desc()).limit(limit)
+    rows = await database.fetch_all(stmt)
+
+    # 2) Załaduj template
+    base_dir = SysPath(__file__).resolve().parent  # .../app
+    tpl_path = base_dir / "templates" / "statystyki_dojazdow.xlsx"
+    if not tpl_path.exists():
+        raise HTTPException(status_code=404, detail="Brak szablonu: app/templates/statystyki_dojazdow.xlsx")
+
+    wb = load_workbook(filename=str(tpl_path))
+
+    if "Dane" not in wb.sheetnames:
+        raise HTTPException(status_code=422, detail="Szablon nie zawiera arkusza 'Dane'")
+    if "Listy" not in wb.sheetnames:
+        raise HTTPException(status_code=422, detail="Szablon nie zawiera arkusza 'Listy'")
+
+    ws_dane = wb["Dane"]
+    ws_listy = wb["Listy"]
+
+    # 3) Wyczyść stare dane (od wiersza 2 w dół)
+    #    Czyścimy A..P na zapas w większym zakresie, żeby nie zostawiać śmieci.
+    max_clear_rows = max(2000, ws_dane.max_row)
+    for r in range(2, max_clear_rows + 1):
+        for c in range(1, 16 + 1):  # A(1) .. P(16)
+            ws_dane.cell(row=r, column=c).value = None
+
+    # 4) Zbierz wszystkie sezony + wypełnij dane
+    all_seasons: set[str] = set()
+    out_row = 2
+
+    for row in rows:
+        judge_id = str(row["judge_id"] or "").strip()
+        full_name = str(row["full_name"] or "").strip()
+        prov = str(row["province"] or "").strip()
+
+        root = _normalize_root_payload(row["data_json"])
+        seasons_obj = root.get("seasons") if isinstance(root.get("seasons"), dict) else {}
+
+        for season_key, season_entry in seasons_obj.items():
+            sk = str(season_key or "").strip()
+            if not sk:
+                continue
+
+            payload, season_upd = _extract_season_payload_and_updated_at(season_entry)
+
+            # stats mogą być bezpośrednio w payload["stats"]
+            stats = payload.get("stats") if isinstance(payload, dict) else None
+            if not isinstance(stats, dict):
+                stats = {}
+
+            total_matches = _safe_int(stats.get("totalMatches"))
+            avg_km = _safe_num(stats.get("avgKm"))
+            min_km = _safe_num(stats.get("minKm"))
+            max_km = _safe_num(stats.get("maxKm"))
+
+            buckets_raw = stats.get("buckets")
+            if not isinstance(buckets_raw, dict):
+                buckets_raw = {}
+
+            # datę aktualizacji bierzemy:
+            # 1) season_entry.updated_at (nowy format) jeśli jest
+            # 2) w przeciwnym razie rekord.updated_at z tabeli
+            upd_val = season_upd or (row["updated_at"].isoformat() if row.get("updated_at") else "")
+
+            # wpis do arkusza (A..P)
+            ws_dane.cell(out_row, 1).value = sk                 # A Sezon
+            ws_dane.cell(out_row, 2).value = prov               # B Województwo
+            ws_dane.cell(out_row, 3).value = judge_id           # C ID
+            ws_dane.cell(out_row, 4).value = full_name          # D Imię i nazwisko
+            ws_dane.cell(out_row, 5).value = total_matches      # E Mecze
+            ws_dane.cell(out_row, 6).value = (avg_km if avg_km is not None else None)  # F Średni
+            ws_dane.cell(out_row, 7).value = (min_km if min_km is not None else None)  # G Min
+            ws_dane.cell(out_row, 8).value = (max_km if max_km is not None else None)  # H Max
+
+            # I..O buckety
+            for idx, bk in enumerate(BUCKET_KEYS):
+                ws_dane.cell(out_row, 9 + idx).value = _safe_int(buckets_raw.get(bk))
+
+            ws_dane.cell(out_row, 16).value = upd_val           # P updated_at (string ISO)
+
+            all_seasons.add(sk)
+            out_row += 1
+
+    # 5) Wypełnij Listy: sezony najnowszy -> najstarszy w kolumnie A od wiersza 2
+    #    Najpierw czyścimy A2..A200
+    for r in range(2, 200 + 1):
+        ws_listy.cell(r, 1).value = None
+
+    seasons_sorted = sorted(all_seasons, key=_season_start_year, reverse=True)
+    for i, s in enumerate(seasons_sorted, start=2):
+        ws_listy.cell(i, 1).value = s
+
+    # 6) Zapisz do pliku tymczasowego i zwróć FileResponse
+    with NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    wb.save(tmp_path)
+
+    def _cleanup(path: str):
+        try:
+            import os
+            os.remove(path)
+        except Exception:
+            pass
+
+    background_tasks.add_task(_cleanup, tmp_path)
+
+    filename = "statystyki_dojazdow.xlsx"
+    return FileResponse(
+        path=tmp_path,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+# ───────────────────────── END EXPORT XLSX ─────────────────────────
