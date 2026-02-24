@@ -54,7 +54,6 @@ def _sniff_is_svg(upload: UploadFile, first_bytes: bytes) -> bool:
         return True
 
     head = first_bytes.lstrip()[:600].lower()
-    # typowe przypadki: <?xml ...?><svg ...> albo bez xml: <svg ...>
     if head.startswith(b"<svg") or head.startswith(b"<?xml"):
         return b"<svg" in head
     return b"<svg" in head
@@ -70,11 +69,12 @@ def _render_svg_to_png_bytes(svg_bytes: bytes) -> bytes:
             ),
         )
 
+    # Transparent background (jeśli SVG nie ma własnego białego recta).
     out = cairosvg.svg2png(
         bytestring=svg_bytes,
         output_width=OUT_W,
         output_height=OUT_H,
-        background_color="white",
+        background_color=None,
     )
     if not out:
         raise HTTPException(status_code=400, detail="Nie udało się wyrenderować SVG do PNG.")
@@ -82,7 +82,7 @@ def _render_svg_to_png_bytes(svg_bytes: bytes) -> bytes:
 
 
 def _fit_raster_to_canvas_png_bytes(raster_bytes: bytes) -> bytes:
-    # Wczytaj raster (png/jpg), spłaszcz do białego tła i wpasuj w 600x400 (contain).
+    # Wczytaj raster (png/jpg), zachowaj alfę jeśli istnieje, wpasuj w 600x400 (contain)
     try:
         img = Image.open(BytesIO(raster_bytes))
     except Exception:
@@ -90,17 +90,21 @@ def _fit_raster_to_canvas_png_bytes(raster_bytes: bytes) -> bytes:
 
     img = img.convert("RGBA")
 
-    bg = Image.new("RGBA", (OUT_W, OUT_H), (255, 255, 255, 255))
+    # transparent background
+    bg = Image.new("RGBA", (OUT_W, OUT_H), (0, 0, 0, 0))
 
     # contain (zachowaj proporcje)
     img.thumbnail((OUT_W, OUT_H), Image.LANCZOS)
 
     x = (OUT_W - img.size[0]) // 2
     y = (OUT_H - img.size[1]) // 2
+
+    # Jeśli img ma alfę, użyj jej jako maski
     bg.paste(img, (x, y), img)
 
     out = BytesIO()
-    bg.convert("RGB").save(out, format="PNG", optimize=True)
+    # zapisuj RGBA -> PNG z przezroczystością
+    bg.save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
@@ -136,7 +140,7 @@ router = APIRouter(prefix="/signatures", tags=["Signatures"])
 
 
 def _row_to_response(row) -> SignatureResponse:
-    m = row._mapping  # databases.Record
+    m = row._mapping
     return SignatureResponse(
         id=m["id"],
         image_url=m["image_url"],
@@ -155,9 +159,7 @@ async def get_signature(sig_id: int):
 
 @router.get("/{sig_id}/url", response_model=str)
 async def get_signature_url(sig_id: int):
-    row = await database.fetch_one(
-        select(signatures.c.image_url).where(signatures.c.id == sig_id)
-    )
+    row = await database.fetch_one(select(signatures.c.image_url).where(signatures.c.id == sig_id))
     if not row:
         raise HTTPException(status_code=404, detail="Podpis nie istnieje")
     return row._mapping["image_url"]
@@ -197,7 +199,7 @@ async def upload_signature(image: UploadFile = File(...)):
     stmt = (
         insert(signatures)
         .values(
-            judge_id="system",  # masz NOT NULL
+            judge_id="system",
             judge_name=None,
             image_url=image_url,
         )
@@ -226,10 +228,7 @@ async def update_signature(sig_id: int, image: UploadFile = File(...)):
     stmt = (
         update(signatures)
         .where(signatures.c.id == sig_id)
-        .values(
-            image_url=new_image_url,
-            updated_at=func.now(),
-        )
+        .values(image_url=new_image_url, updated_at=func.now())
         .returning(signatures)
     )
     record = await database.fetch_one(stmt)
@@ -238,10 +237,7 @@ async def update_signature(sig_id: int, image: UploadFile = File(...)):
     return _row_to_response(record)
 
 
-@router.delete(
-    "/{sig_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
+@router.delete("/{sig_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_signature(sig_id: int):
     row = await database.fetch_one(select(signatures).where(signatures.c.id == sig_id))
     if not row:

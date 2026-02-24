@@ -3045,14 +3045,14 @@ async def generate_protocol_pdf(
             image_bytes=host_sig_bytes,
             anchor_cell=SIGN_ANCHORS["hostTeamSignature"],
             max_width_px=80,
-            max_height_px=35,
+            max_height_px=45,
         )
         _add_signature_image(
             ws,
             image_bytes=guest_sig_bytes,
             anchor_cell=SIGN_ANCHORS["guestTeamSignature"],
             max_width_px=80,
-            max_height_px=35,
+            max_height_px=45,
         )
 
         # 2) podpis medyka
@@ -3079,7 +3079,7 @@ async def generate_protocol_pdf(
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
                 max_width_px=70,
-                max_height_px=14,
+                max_height_px=17,
             )
 
             # jeśli nie dodano obrazka -> wstaw placeholder tekstowy w komórkę kotwiczącą
