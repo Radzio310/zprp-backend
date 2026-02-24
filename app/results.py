@@ -3150,16 +3150,16 @@ def _apply_companion_crossouts(ws, *, host_names, host_meta, host_pen, guest_nam
     Jeśli B-E są puste dla danej drużyny => scal + diagonal.
     """
     HOST_RANGES = {
-        "B": ("J29", "O33"),
-        "C": ("Q29", "V33"),
-        "D": ("X29", "AC33"),
-        "E": ("AE29", "AJ33"),
+        "B": ("J29", "P32"),
+        "C": ("Q29", "W32"),
+        "D": ("X29", "AD32"),
+        "E": ("AE29", "AK32"),
     }
     GUEST_RANGES = {
-        "B": ("J55", "O59"),
-        "C": ("Q55", "V59"),
-        "D": ("X55", "AC59"),
-        "E": ("AE55", "AJ59"),
+        "B": ("J55", "P58"),
+        "C": ("Q55", "W58"),
+        "D": ("X55", "AD58"),
+        "E": ("AE55", "AK58"),
     }
 
     for ltr, (a, b) in HOST_RANGES.items():
