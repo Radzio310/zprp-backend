@@ -2856,6 +2856,161 @@ def _add_signature_image(
     ws.add_image(img, anchor_cell)
     return True
 
+def _extract_city_from_venue_address(venue_address: str) -> str:
+    """
+    Heurystyka: venueAddress zwykle ma format:
+      "Hala Relax Piotrków Trybunalski, Stefana Batorego 8"
+    Chcemy wyciągnąć miejscowość do nagłówka: "Piotrków Trybunalski".
+
+    Reguła:
+      - bierzemy część przed pierwszym przecinkiem
+      - z niej bierzemy ostatnie 2 wyrazy (fallback: 1 wyraz)
+    """
+    s = (venue_address or "").strip()
+    if not s:
+        return ""
+    left = s.split(",", 1)[0].strip()
+    parts = [p for p in left.split() if p.strip()]
+    if not parts:
+        return ""
+    if len(parts) >= 2:
+        return " ".join(parts[-2:])
+    return parts[-1]
+
+
+def _create_detailed_notes_sheet(
+    wb,
+    *,
+    page_no: int,
+    total_pages: int,
+    date_ddmmyyyy: str,
+    place: str,
+    notes_text: str,
+    referee1_name: str,
+    referee2_name: str,
+    referee1_sig_bytes: bytes,
+    referee2_sig_bytes: bytes,
+) :
+    """
+    Tworzy białą stronę A4 z opisem + podpisami sędziów.
+    Zwraca worksheet.
+    """
+    ws_notes = wb.create_sheet(title="Uwagi sędziów")
+
+    # --- Page setup (A4) ---
+    try:
+        ws_notes.page_setup.paperSize = ws_notes.PAPERSIZE_A4
+        ws_notes.page_setup.orientation = ws_notes.ORIENTATION_PORTRAIT
+    except Exception:
+        pass
+
+    try:
+        ws_notes.page_margins.left = 0.6
+        ws_notes.page_margins.right = 0.6
+        ws_notes.page_margins.top = 0.6
+        ws_notes.page_margins.bottom = 0.6
+    except Exception:
+        pass
+
+    # Kolumny: zrób „kartkę” – szerokość pod tekst
+    for col in ["A","B","C","D","E","F","G","H","I","J","K","L","M","N"]:
+        try:
+            ws_notes.column_dimensions[col].width = 6.0
+        except Exception:
+            pass
+    try:
+        ws_notes.column_dimensions["A"].width = 4.0
+        ws_notes.column_dimensions["B"].width = 6.0
+        ws_notes.column_dimensions["C"].width = 6.0
+        ws_notes.column_dimensions["D"].width = 6.0
+        ws_notes.column_dimensions["E"].width = 6.0
+        ws_notes.column_dimensions["F"].width = 6.0
+        ws_notes.column_dimensions["G"].width = 6.0
+        ws_notes.column_dimensions["H"].width = 6.0
+        ws_notes.column_dimensions["I"].width = 6.0
+        ws_notes.column_dimensions["J"].width = 6.0
+        ws_notes.column_dimensions["K"].width = 6.0
+        ws_notes.column_dimensions["L"].width = 6.0
+        ws_notes.column_dimensions["M"].width = 6.0
+        ws_notes.column_dimensions["N"].width = 6.0
+    except Exception:
+        pass
+
+    # --- Nagłówek: Strona X/X (lewo) + data/miejsce (prawo) ---
+    ws_notes.merge_cells("A1:F1")
+    ws_notes["A1"].value = f"Strona {page_no}/{total_pages}"
+    ws_notes["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    ws_notes["A1"].font = Font(bold=False, size=10)
+
+    ws_notes.merge_cells("G1:N1")
+    right_hdr = ""
+    if date_ddmmyyyy and place:
+        right_hdr = f"{date_ddmmyyyy}, {place}"
+    elif date_ddmmyyyy:
+        right_hdr = date_ddmmyyyy
+    elif place:
+        right_hdr = place
+
+    ws_notes["G1"].value = right_hdr
+    ws_notes["G1"].alignment = Alignment(horizontal="right", vertical="center")
+    ws_notes["G1"].font = Font(bold=False, size=10)
+
+    # --- Treść opisu (A3..N32) ---
+    ws_notes.merge_cells("A3:N32")
+    ws_notes["A3"].value = (notes_text or "").strip()
+    ws_notes["A3"].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+    ws_notes["A3"].font = Font(size=12)
+
+    # trochę oddechu na kartce
+    for r in range(3, 33):
+        try:
+            ws_notes.row_dimensions[r].height = 18
+        except Exception:
+            pass
+
+    # --- Podpisy (prawa strona) ---
+    # Sędzia 1: nazwa w J36..N36, podpis obrazek w J37
+    ws_notes.merge_cells("J36:N36")
+    ws_notes["J36"].value = (referee1_name or "").strip()
+    ws_notes["J36"].alignment = Alignment(horizontal="right", vertical="center")
+    ws_notes["J36"].font = Font(size=11, bold=True)
+
+    # podpis obrazek
+    _add_signature_image(
+        ws_notes,
+        image_bytes=referee1_sig_bytes or b"",
+        anchor_cell="J37",
+        max_width_px=240,
+        max_height_px=80,
+    )
+
+    # Sędzia 2: nazwa w J41..N41, podpis obrazek w J42
+    ws_notes.merge_cells("J41:N41")
+    ws_notes["J41"].value = (referee2_name or "").strip()
+    ws_notes["J41"].alignment = Alignment(horizontal="right", vertical="center")
+    ws_notes["J41"].font = Font(size=11, bold=True)
+
+    _add_signature_image(
+        ws_notes,
+        image_bytes=referee2_sig_bytes or b"",
+        anchor_cell="J42",
+        max_width_px=240,
+        max_height_px=80,
+    )
+
+    for r in range(34, 46):
+        try:
+            ws_notes.row_dimensions[r].height = 20
+        except Exception:
+            pass
+    try:
+        ws_notes.row_dimensions[37].height = 60
+        ws_notes.row_dimensions[42].height = 60
+    except Exception:
+        pass
+
+    return ws_notes
+
 def _safe_filename_from_match_number(match_number: str) -> str:
     base = (match_number or "mecz").strip().replace("/", "-")
     base = re.sub(r"[^0-9A-Za-z._-]+", "_", base)
@@ -2983,6 +3138,14 @@ async def generate_protocol_pdf(
         mc = data_json.get("matchConfig") or {}
         extras = mc.get("extras") or {}
 
+        # --- detailed referee notes (last page) ---
+        detailed_notes = bool(extras.get("detailedRefereeNotes")) if extras.get("detailedRefereeNotes") is not None else False
+        detailed_notes_text = (extras.get("detailedRefereeNotesText") or extras.get("detailedRefereeNotesText") or "").strip()
+        # UWAGA: w Twoim JSON pole nazywa się "detailedRefereeNotesText" (case-sensitive)
+        detailed_notes_text = (extras.get("detailedRefereeNotesText") or "").strip()
+
+        needs_detailed_notes_page = bool(detailed_notes and detailed_notes_text != "")
+
         # data/godzina
         ws["AB8"].value = _fmt_date_ddmmyyyy(extras.get("matchDate"))
         ws["AH8"].value = _fmt_time_hhmm(extras.get("matchTime"))
@@ -2997,8 +3160,6 @@ async def generate_protocol_pdf(
         ws["Q62"].value = extras.get("venueCapacity") if extras.get("venueCapacity") is not None else ""
 
         # szczegółowe uwagi sędziów: brak -> O61, verte -> S61
-        # value: True => verte (S61), False/None => brak (O61)
-        detailed_notes = bool(extras.get("detailedRefereeNotes")) if extras.get("detailedRefereeNotes") is not None else False
         ws["O61"].value = "X" if not detailed_notes else ""
         ws["S61"].value = "X" if detailed_notes else ""
 
@@ -3070,9 +3231,12 @@ async def generate_protocol_pdf(
         def _off_sig_url(key: str) -> str:
             return _full_static_url((((officials.get(key) or {}).get("signature")) or "").strip())
 
+        official_sig_bytes: Dict[str, bytes] = {}
+
         for key in ("referee1", "referee2", "secretary", "timekeeper", "delegate"):
             url = _off_sig_url(key)
             blob = await _fetch_png_bytes(url)
+            official_sig_bytes[key] = blob or b""
 
             ok = _add_signature_image(
                 ws,
@@ -3082,7 +3246,6 @@ async def generate_protocol_pdf(
                 max_height_px=22,
             )
 
-            # jeśli nie dodano obrazka -> wstaw placeholder tekstowy w komórkę kotwiczącą
             if not ok:
                 ws[SIGN_ANCHORS[key]].value = OFFICIAL_SIGN_FALLBACK
 
@@ -3249,7 +3412,7 @@ async def generate_protocol_pdf(
 
         needs_shootout_page = _shootout_needed(data_json)
 
-        # Tworzymy listę stron (arkuszy) w kolejności: 1, (2 - overflow), (shootout)
+        # Tworzymy listę stron (arkuszy) w kolejności: 1, (2 - overflow), (shootout), (UWAGI - zawsze ostatnie jeśli warunek)
         pages = [ws]
 
         ws2 = None
@@ -3272,13 +3435,51 @@ async def generate_protocol_pdf(
                 pass
             pages.append(ws_shoot)
 
-        # 1) Ustaw numerację stron STRONA X/N na wszystkich
+        ws_notes = None
+        if needs_detailed_notes_page:
+            date_ddmmyyyy = _fmt_date_ddmmyyyy(extras.get("matchDate") or "")
+            place = _extract_city_from_venue_address(core.get("venueAddress") or "")
+
+            # preferuj dane z extras.officials (bo tam masz fullName + signature)
+            ref1_name = ((officials.get("referee1") or {}).get("fullName") or core.get("referee1") or "").strip()
+            ref2_name = ((officials.get("referee2") or {}).get("fullName") or core.get("referee2") or "").strip()
+
+            ref1_sig = official_sig_bytes.get("referee1", b"")
+            ref2_sig = official_sig_bytes.get("referee2", b"")
+
+            # tymczasowo dodamy jako ostatnią, ale numer strony policzymy po ustaleniu total_pages
+            ws_notes = _create_detailed_notes_sheet(
+                wb,
+                page_no=0,               # podmienimy po wyliczeniu total_pages
+                total_pages=0,           # podmienimy po wyliczeniu total_pages
+                date_ddmmyyyy=date_ddmmyyyy,
+                place=place,
+                notes_text=detailed_notes_text,
+                referee1_name=ref1_name,
+                referee2_name=ref2_name,
+                referee1_sig_bytes=ref1_sig,
+                referee2_sig_bytes=ref2_sig,
+            )
+            pages.append(ws_notes)
+
+        # 1) Ustaw numerację stron na wszystkich stronach protokołu (AQ2),
+        #    a na stronie uwag ustawiamy nagłówek "Strona X/X" w A1 (już w helperze).
         total_pages = len(pages)
+
+        # Arkusze protokołu: AQ2 = STRONA X/N (jak dotychczas)
         if total_pages > 1:
             for i, p in enumerate(pages, start=1):
+                if p is ws_notes:
+                    continue
                 p["AQ2"].value = f"STRONA {i}/{total_pages}"
         else:
             ws["AQ2"].value = ""
+
+        # Uzupełnij poprawnie page_no/total_pages na stronie uwag (bo helper dostał 0/0)
+        if ws_notes is not None:
+            page_no = pages.index(ws_notes) + 1  # 1-based
+            ws_notes["A1"].value = f"Strona {page_no}/{total_pages}"
+            # prawy nagłówek (G1) helper już wypełnił – nie ruszamy
 
         # 2) Wypełnij przebieg meczu na stronach 1 oraz (opcjonalnie) 2
         if needs_timeline_page2 and ws2 is not None:
