@@ -3079,7 +3079,7 @@ async def generate_protocol_pdf(
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
                 max_width_px=70,
-                max_height_px=15,
+                max_height_px=14,
             )
 
             # jeśli nie dodano obrazka -> wstaw placeholder tekstowy w komórkę kotwiczącą
