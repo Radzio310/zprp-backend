@@ -3063,7 +3063,7 @@ async def generate_protocol_pdf(
             image_bytes=medic_sig_bytes,
             anchor_cell=SIGN_ANCHORS["medic"],
             max_width_px=120,
-            max_height_px=30,
+            max_height_px=40,
         )
 
         # 3) podpisy officials
@@ -3079,7 +3079,7 @@ async def generate_protocol_pdf(
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
                 max_width_px=70,
-                max_height_px=17,
+                max_height_px=22,
             )
 
             # jeśli nie dodano obrazka -> wstaw placeholder tekstowy w komórkę kotwiczącą
