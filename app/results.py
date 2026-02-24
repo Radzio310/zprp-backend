@@ -2913,6 +2913,21 @@ def _create_detailed_notes_sheet(
     except Exception:
         pass
 
+    # --- FORCE: jedna strona na szerokość (eliminuje “strona 3” w prawo) ---
+    try:
+        ws_notes.sheet_properties.pageSetUpPr.fitToPage = True
+        ws_notes.page_setup.fitToWidth = 1
+        ws_notes.page_setup.fitToHeight = 1  # jeśli wolisz, możesz dać 0 (automatycznie)
+        ws_notes.page_setup.scale = None
+    except Exception:
+        pass
+
+    # print area (żeby LO nie brał “czegoś dalej”)
+    try:
+        ws_notes.print_area = "A1:N45"
+    except Exception:
+        pass
+
     # trochę większe marginesy boczne = “nie ucieka” w prawo
     try:
         ws_notes.page_margins.left = 0.7
@@ -2940,8 +2955,8 @@ def _create_detailed_notes_sheet(
     ws_notes["A1"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
     ws_notes["A1"].font = Font(size=10)
 
-    # Prawy nagłówek: węższy blok + wrap, żeby długie “data, miasto” łamało się w obrębie strony
-    ws_notes.merge_cells("H1:N1")
+    # --- Prawy nagłówek (KROK 3) ---
+    ws_notes.merge_cells("G1:M1")  # było: H1:N1
     right_hdr = ""
     if date_ddmmyyyy and place:
         right_hdr = f"{date_ddmmyyyy}, {place}"
@@ -2949,6 +2964,10 @@ def _create_detailed_notes_sheet(
         right_hdr = date_ddmmyyyy
     elif place:
         right_hdr = place
+
+    ws_notes["G1"].value = right_hdr             # było: H1
+    ws_notes["G1"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
+    ws_notes["G1"].font = Font(size=10)
 
     ws_notes["H1"].value = right_hdr
     ws_notes["H1"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
@@ -2978,11 +2997,11 @@ def _create_detailed_notes_sheet(
     _add_signature_image(
         ws_notes,
         image_bytes=referee1_sig_bytes or b"",
-        anchor_cell="K33",          # bardziej “środek” bloku
-        max_width_px=220,
-        max_height_px=70,
-        x_offset_px=10,             # lekki push w prawo (opcjonalny)
-        y_offset_px=2,
+        anchor_cell="K33",
+        max_width_px=180,
+        max_height_px=65,
+        x_offset_px=0,
+        y_offset_px=0,
     )
 
     # Sędzia 2: nazwa I36..N36, podpis K37
@@ -2995,10 +3014,10 @@ def _create_detailed_notes_sheet(
         ws_notes,
         image_bytes=referee2_sig_bytes or b"",
         anchor_cell="K37",
-        max_width_px=220,
-        max_height_px=70,
-        x_offset_px=10,
-        y_offset_px=2,
+        max_width_px=180,
+        max_height_px=65,
+        x_offset_px=0,
+        y_offset_px=0,
     )
 
     # wysokości wierszy w okolicy podpisów (żeby obraz “miał miejsce”)
