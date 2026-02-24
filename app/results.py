@@ -23,6 +23,7 @@ from app.utils import fetch_with_correct_encoding
 from starlette.background import BackgroundTask
 
 from openpyxl.styles import Alignment, Font
+from openpyxl.styles.borders import Border, Side
 import copy
 from openpyxl.drawing.image import Image
 
@@ -2823,11 +2824,13 @@ def _add_signature_image(
     anchor_cell: str,
     max_width_px: int = 220,
     max_height_px: int = 90,
+    x_offset_px: int = 0,
+    y_offset_px: int = 0,
 ) -> bool:
     """
-    Wstawia obraz do arkusza, zakotwiczony w anchor_cell (czyli "nad tą komórką").
-    Skaluje, żeby zmieścił się w max_width/max_height (px).
-    Zwraca True jeśli dodano.
+    Wstawia obraz do arkusza, zakotwiczony w anchor_cell.
+    Skaluje do max_width/max_height (px).
+    Opcjonalnie przesuwa obraz o x/y w pikselach (przydatne do centrowania).
     """
     if not image_bytes:
         return False
@@ -2846,14 +2849,24 @@ def _add_signature_image(
                 img.width = int(w * scale)
                 img.height = int(h * scale)
         except Exception:
-            # fallback: zostaw rozmiar domyślny openpyxl
             pass
     else:
-        # fallback bez PIL: ustaw “na oko”
         img.width = min(img.width or max_width_px, max_width_px)
         img.height = min(img.height or max_height_px, max_height_px)
 
     ws.add_image(img, anchor_cell)
+
+    # offset (działa w nowszych openpyxl; jak nie zadziała to nic nie popsuje)
+    try:
+        anchor = getattr(img, "anchor", None)
+        if anchor is not None and hasattr(anchor, "_from"):
+            if x_offset_px:
+                anchor._from.colOff = int(x_offset_px) * 9525  # px -> EMU
+            if y_offset_px:
+                anchor._from.rowOff = int(y_offset_px) * 9525
+    except Exception:
+        pass
+
     return True
 
 def _extract_city_from_venue_address(venue_address: str) -> str:
@@ -2890,11 +2903,7 @@ def _create_detailed_notes_sheet(
     referee2_name: str,
     referee1_sig_bytes: bytes,
     referee2_sig_bytes: bytes,
-) :
-    """
-    Tworzy białą stronę A4 z opisem + podpisami sędziów.
-    Zwraca worksheet.
-    """
+):
     ws_notes = wb.create_sheet(title="Uwagi sędziów")
 
     # --- Page setup (A4) ---
@@ -2904,45 +2913,35 @@ def _create_detailed_notes_sheet(
     except Exception:
         pass
 
+    # trochę większe marginesy boczne = “nie ucieka” w prawo
     try:
-        ws_notes.page_margins.left = 0.6
-        ws_notes.page_margins.right = 0.6
+        ws_notes.page_margins.left = 0.7
+        ws_notes.page_margins.right = 0.7
         ws_notes.page_margins.top = 0.6
         ws_notes.page_margins.bottom = 0.6
     except Exception:
         pass
 
-    # Kolumny: zrób „kartkę” – szerokość pod tekst
+    # Siatka “kartki”
     for col in ["A","B","C","D","E","F","G","H","I","J","K","L","M","N"]:
         try:
-            ws_notes.column_dimensions[col].width = 6.0
+            ws_notes.column_dimensions[col].width = 6.2
         except Exception:
             pass
     try:
-        ws_notes.column_dimensions["A"].width = 4.0
-        ws_notes.column_dimensions["B"].width = 6.0
-        ws_notes.column_dimensions["C"].width = 6.0
-        ws_notes.column_dimensions["D"].width = 6.0
-        ws_notes.column_dimensions["E"].width = 6.0
-        ws_notes.column_dimensions["F"].width = 6.0
-        ws_notes.column_dimensions["G"].width = 6.0
-        ws_notes.column_dimensions["H"].width = 6.0
-        ws_notes.column_dimensions["I"].width = 6.0
-        ws_notes.column_dimensions["J"].width = 6.0
-        ws_notes.column_dimensions["K"].width = 6.0
-        ws_notes.column_dimensions["L"].width = 6.0
-        ws_notes.column_dimensions["M"].width = 6.0
-        ws_notes.column_dimensions["N"].width = 6.0
+        ws_notes.column_dimensions["A"].width = 4.5
+        ws_notes.column_dimensions["N"].width = 4.5
     except Exception:
         pass
 
-    # --- Nagłówek: Strona X/X (lewo) + data/miejsce (prawo) ---
+    # --- Nagłówek ---
     ws_notes.merge_cells("A1:F1")
     ws_notes["A1"].value = f"Strona {page_no}/{total_pages}"
-    ws_notes["A1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws_notes["A1"].font = Font(bold=False, size=10)
+    ws_notes["A1"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    ws_notes["A1"].font = Font(size=10)
 
-    ws_notes.merge_cells("G1:N1")
+    # Prawy nagłówek: węższy blok + wrap, żeby długie “data, miasto” łamało się w obrębie strony
+    ws_notes.merge_cells("H1:N1")
     right_hdr = ""
     if date_ddmmyyyy and place:
         right_hdr = f"{date_ddmmyyyy}, {place}"
@@ -2951,61 +2950,66 @@ def _create_detailed_notes_sheet(
     elif place:
         right_hdr = place
 
-    ws_notes["G1"].value = right_hdr
-    ws_notes["G1"].alignment = Alignment(horizontal="right", vertical="center")
-    ws_notes["G1"].font = Font(bold=False, size=10)
+    ws_notes["H1"].value = right_hdr
+    ws_notes["H1"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
+    ws_notes["H1"].font = Font(size=10)
 
-    # --- Treść opisu (A3..N32) ---
-    ws_notes.merge_cells("A3:N32")
+    # --- Treść opisu ---
+    # Zostawiamy opis do 30 wierszy, a podpisy zaczynamy zaraz pod nim.
+    ws_notes.merge_cells("A3:N30")
     ws_notes["A3"].value = (notes_text or "").strip()
     ws_notes["A3"].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
     ws_notes["A3"].font = Font(size=12)
 
-    # trochę oddechu na kartce
-    for r in range(3, 33):
+    for r in range(3, 31):
         try:
             ws_notes.row_dimensions[r].height = 18
         except Exception:
             pass
 
-    # --- Podpisy (prawa strona) ---
-    # Sędzia 1: nazwa w J36..N36, podpis obrazek w J37
-    ws_notes.merge_cells("J36:N36")
-    ws_notes["J36"].value = (referee1_name or "").strip()
-    ws_notes["J36"].alignment = Alignment(horizontal="right", vertical="center")
-    ws_notes["J36"].font = Font(size=11, bold=True)
+    # --- Podpisy (bliżej opisu, bardziej wyśrodkowane) ---
+    # Blok podpisów: I..N (zamiast J..N) => całość “wchodzi” bliżej środka
+    # Sędzia 1: nazwa I32..N32, podpis K33 (centrowanie przez kotwicę w K)
+    ws_notes.merge_cells("I32:N32")
+    ws_notes["I32"].value = (referee1_name or "").strip()
+    ws_notes["I32"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws_notes["I32"].font = Font(size=11, bold=True)
 
-    # podpis obrazek
     _add_signature_image(
         ws_notes,
         image_bytes=referee1_sig_bytes or b"",
-        anchor_cell="J37",
-        max_width_px=240,
-        max_height_px=80,
+        anchor_cell="K33",          # bardziej “środek” bloku
+        max_width_px=220,
+        max_height_px=70,
+        x_offset_px=10,             # lekki push w prawo (opcjonalny)
+        y_offset_px=2,
     )
 
-    # Sędzia 2: nazwa w J41..N41, podpis obrazek w J42
-    ws_notes.merge_cells("J41:N41")
-    ws_notes["J41"].value = (referee2_name or "").strip()
-    ws_notes["J41"].alignment = Alignment(horizontal="right", vertical="center")
-    ws_notes["J41"].font = Font(size=11, bold=True)
+    # Sędzia 2: nazwa I36..N36, podpis K37
+    ws_notes.merge_cells("I36:N36")
+    ws_notes["I36"].value = (referee2_name or "").strip()
+    ws_notes["I36"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws_notes["I36"].font = Font(size=11, bold=True)
 
     _add_signature_image(
         ws_notes,
         image_bytes=referee2_sig_bytes or b"",
-        anchor_cell="J42",
-        max_width_px=240,
-        max_height_px=80,
+        anchor_cell="K37",
+        max_width_px=220,
+        max_height_px=70,
+        x_offset_px=10,
+        y_offset_px=2,
     )
 
-    for r in range(34, 46):
+    # wysokości wierszy w okolicy podpisów (żeby obraz “miał miejsce”)
+    for r in range(31, 39):
         try:
-            ws_notes.row_dimensions[r].height = 20
+            ws_notes.row_dimensions[r].height = 18
         except Exception:
             pass
     try:
-        ws_notes.row_dimensions[37].height = 60
-        ws_notes.row_dimensions[42].height = 60
+        ws_notes.row_dimensions[33].height = 55
+        ws_notes.row_dimensions[37].height = 55
     except Exception:
         pass
 
@@ -3048,6 +3052,107 @@ def _fallback_text(v: Any, fallback: str) -> str:
 
 def _set_cell_fallback(ws, cell: str, v: Any, fallback: str) -> None:
     ws[cell].value = _fallback_text(v, fallback)
+
+def _is_blank_str(v: Any) -> bool:
+    return (v is None) or (isinstance(v, str) and v.strip() == "")
+
+def _is_empty_companion_block(
+    letter: str,
+    *,
+    names_map: Dict[str, str],
+    meta_map: Dict[str, Dict[str, str]],
+    pen_map: Dict[str, Dict[str, str]],
+) -> bool:
+    """
+    True gdy dana osoba towarzysząca (B-E) jest „pusta”:
+    - brak fullName
+    - brak function
+    - brak license
+    - oraz brak jakichkolwiek kar (warn/p2/disq)
+    """
+    l = (letter or "").strip().upper()
+    name = (names_map.get(l) or "").strip()
+    func = ((meta_map.get(l) or {}).get("function") or "").strip()
+    lic  = ((meta_map.get(l) or {}).get("license") or "").strip()
+
+    pen = pen_map.get(l) or {}
+    warn = (pen.get("warn") or "").strip()
+    p2   = (pen.get("p2") or "").strip()
+    disq = (pen.get("disq") or "").strip()
+
+    # Uwaga: u Ciebie pen_map daje "---" tylko gdy klucza brak,
+    # ale gdy osoba jest pusta zazwyczaj będzie "" lub "---" — traktujemy oba jako puste.
+    def _pen_empty(s: str) -> bool:
+        return s == "" or s == "---"
+
+    return (
+        name == ""
+        and func == ""
+        and lic == ""
+        and _pen_empty(warn)
+        and _pen_empty(p2)
+        and _pen_empty(disq)
+    )
+
+def _merge_and_diagonal_cross(ws, *, start_cell: str, end_cell: str) -> None:
+    """
+    Scala zakres i robi diagonalne przekreślenie całej scalonej komórki.
+    Ustawia też alignment: left + top (z wrap).
+    """
+    rng = f"{start_cell}:{end_cell}"
+    ws.merge_cells(rng)
+
+    tl = ws[start_cell]  # top-left cell zakresu scalonego
+
+    # wyczyść wartość (żeby nie zostały śmieci po wcześniejszych wpisach)
+    tl.value = ""
+
+    # wyrównanie: lewo + góra (jak chciałeś)
+    tl.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    # diagonalne przekreślenie (jedna przekątna przez cały merge)
+    # Jeśli chcesz „X”, daj diagonalUp + diagonalDown; Ty pisałeś „diagonalne przekreślenie” -> zazwyczaj 1 linia.
+    thin = Side(style="thin", color="000000")
+
+    # zachowaj istniejące obramowania (jeśli jakieś były) i tylko dodaj diagonal
+    cur = tl.border or Border()
+    tl.border = Border(
+        left=cur.left,
+        right=cur.right,
+        top=cur.top,
+        bottom=cur.bottom,
+        diagonal=thin,
+        diagonalDown=True,   # linia z lewego-górnego do prawego-dolnego
+        diagonalUp=False,
+        outline=cur.outline,
+        vertical=cur.vertical,
+        horizontal=cur.horizontal,
+    )
+
+def _apply_companion_crossouts(ws, *, host_names, host_meta, host_pen, guest_names, guest_meta, guest_pen) -> None:
+    """
+    Jeśli B-E są puste dla danej drużyny => scal + diagonal.
+    """
+    HOST_RANGES = {
+        "B": ("J29", "O32"),
+        "C": ("Q29", "V32"),
+        "D": ("X29", "AC32"),
+        "E": ("AE29", "AJ32"),
+    }
+    GUEST_RANGES = {
+        "B": ("J55", "O58"),
+        "C": ("Q55", "V58"),
+        "D": ("X55", "AC58"),
+        "E": ("AE55", "AJ58"),
+    }
+
+    for ltr, (a, b) in HOST_RANGES.items():
+        if _is_empty_companion_block(ltr, names_map=host_names, meta_map=host_meta, pen_map=host_pen):
+            _merge_and_diagonal_cross(ws, start_cell=a, end_cell=b)
+
+    for ltr, (a, b) in GUEST_RANGES.items():
+        if _is_empty_companion_block(ltr, names_map=guest_names, meta_map=guest_meta, pen_map=guest_pen):
+            _merge_and_diagonal_cross(ws, start_cell=a, end_cell=b)
 
 @router.post(
     "/judge/results/protocol/pdf",
@@ -3140,8 +3245,6 @@ async def generate_protocol_pdf(
 
         # --- detailed referee notes (last page) ---
         detailed_notes = bool(extras.get("detailedRefereeNotes")) if extras.get("detailedRefereeNotes") is not None else False
-        detailed_notes_text = (extras.get("detailedRefereeNotesText") or extras.get("detailedRefereeNotesText") or "").strip()
-        # UWAGA: w Twoim JSON pole nazywa się "detailedRefereeNotesText" (case-sensitive)
         detailed_notes_text = (extras.get("detailedRefereeNotesText") or "").strip()
 
         needs_detailed_notes_page = bool(detailed_notes and detailed_notes_text != "")
@@ -3398,6 +3501,17 @@ async def generate_protocol_pdf(
         ws["AE58"].value = guest_comp_pen.get("E", {}).get("warn", "---")
         ws["AH58"].value = guest_comp_pen.get("E", {}).get("p2", "---")
         ws["AJ58"].value = guest_comp_pen.get("E", {}).get("disq", "---")
+
+        # --- Companion crossouts (B-E) if empty ---
+        _apply_companion_crossouts(
+            ws,
+            host_names=host_comp_names,
+            host_meta=host_comp_meta,
+            host_pen=host_comp_pen,
+            guest_names=guest_comp_names,
+            guest_meta=guest_comp_meta,
+            guest_pen=guest_comp_pen,
+        )
 
         # Sędziowie
         _set_cell_fallback(ws, "I66", core.get("referee1"), OFFICIAL_NAME_FALLBACK)
