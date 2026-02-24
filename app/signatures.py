@@ -20,7 +20,6 @@ except Exception:  # pragma: no cover
 
 from PIL import Image  # type: ignore
 
-
 RAILWAY_VOLUME_MOUNT_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
 STATIC_DIR = (
     os.path.join(RAILWAY_VOLUME_MOUNT_PATH, "static")
@@ -53,8 +52,12 @@ def _sniff_is_svg(upload: UploadFile, first_bytes: bytes) -> bool:
     ctype = (upload.content_type or "").lower().strip()
     if "svg" in ctype:
         return True
-    head = first_bytes.lstrip()[:400].lower()
-    return head.startswith(b"<svg") or b"<svg" in head or head.startswith(b"<?xml")
+
+    head = first_bytes.lstrip()[:600].lower()
+    # typowe przypadki: <?xml ...?><svg ...> albo bez xml: <svg ...>
+    if head.startswith(b"<svg") or head.startswith(b"<?xml"):
+        return b"<svg" in head
+    return b"<svg" in head
 
 
 def _render_svg_to_png_bytes(svg_bytes: bytes) -> bytes:
@@ -62,9 +65,8 @@ def _render_svg_to_png_bytes(svg_bytes: bytes) -> bytes:
         raise HTTPException(
             status_code=500,
             detail=(
-                "Brak cairosvg na backendzie. "
-                "Dla nowej wersji (Skia) wysyłamy PNG, więc SVG nie jest wymagane. "
-                "Jeśli jednak chcesz SVG fallback – dodaj cairosvg + systemowe cairo/pango."
+                "Backend nie ma cairosvg. "
+                "Wysyłaj PNG/JPG z aplikacji albo doinstaluj cairosvg + zależności systemowe."
             ),
         )
 
@@ -173,12 +175,11 @@ async def list_signatures():
 
 async def _upload_to_png_url(image: UploadFile) -> str:
     raw = await _read_upload_bytes(image)
-    is_svg = _sniff_is_svg(image, raw[:400])
+    is_svg = _sniff_is_svg(image, raw[:800])
 
     if is_svg:
         png_bytes = _render_svg_to_png_bytes(raw)
     else:
-        # PNG/JPG z apki (Skia) -> normalizacja do 600x400
         png_bytes = _fit_raster_to_canvas_png_bytes(raw)
 
     return _save_png_bytes_to_static(png_bytes)
