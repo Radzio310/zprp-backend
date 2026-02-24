@@ -2956,7 +2956,8 @@ def _create_detailed_notes_sheet(
     ws_notes["A1"].font = Font(size=10)
 
     # --- Prawy nagłówek (KROK 3) ---
-    ws_notes.merge_cells("G1:M1")  # było: H1:N1
+    ws_notes.merge_cells("G1:M1")
+
     right_hdr = ""
     if date_ddmmyyyy and place:
         right_hdr = f"{date_ddmmyyyy}, {place}"
@@ -2965,13 +2966,9 @@ def _create_detailed_notes_sheet(
     elif place:
         right_hdr = place
 
-    ws_notes["G1"].value = right_hdr             # było: H1
+    ws_notes["G1"].value = right_hdr
     ws_notes["G1"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
     ws_notes["G1"].font = Font(size=10)
-
-    ws_notes["H1"].value = right_hdr
-    ws_notes["H1"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
-    ws_notes["H1"].font = Font(size=10)
 
     # --- Treść opisu ---
     # Zostawiamy opis do 30 wierszy, a podpisy zaczynamy zaraz pod nim.
@@ -3153,16 +3150,16 @@ def _apply_companion_crossouts(ws, *, host_names, host_meta, host_pen, guest_nam
     Jeśli B-E są puste dla danej drużyny => scal + diagonal.
     """
     HOST_RANGES = {
-        "B": ("J29", "O32"),
-        "C": ("Q29", "V32"),
-        "D": ("X29", "AC32"),
-        "E": ("AE29", "AJ32"),
+        "B": ("J29", "O33"),
+        "C": ("Q29", "V33"),
+        "D": ("X29", "AC33"),
+        "E": ("AE29", "AJ33"),
     }
     GUEST_RANGES = {
-        "B": ("J55", "O58"),
-        "C": ("Q55", "V58"),
-        "D": ("X55", "AC58"),
-        "E": ("AE55", "AJ58"),
+        "B": ("J55", "O59"),
+        "C": ("Q55", "V59"),
+        "D": ("X55", "AC59"),
+        "E": ("AE55", "AJ59"),
     }
 
     for ltr, (a, b) in HOST_RANGES.items():
