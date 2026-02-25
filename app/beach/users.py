@@ -111,16 +111,16 @@ async def list_users():
     return BeachUsersListResponse(users=[_to_user_item(dict(r)) for r in rows])
 
 
-@router.get("/{user_id}", response_model=BeachUserItem, summary="Pobierz użytkownika po ID (BEACH)")
-async def get_user(user_id: int):
+@router.get("/me", response_model=BeachUserItem, summary="Pobierz zalogowanego użytkownika (BEACH)")
+async def get_me(user_id: int = Depends(beach_get_current_user_id)):
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
     return _to_user_item(dict(row))
 
 
-@router.get("/me", response_model=BeachUserItem, summary="Pobierz zalogowanego użytkownika (BEACH)")
-async def get_me(user_id: int = Depends(beach_get_current_user_id)):
+@router.get("/{user_id}", response_model=BeachUserItem, summary="Pobierz użytkownika po ID (BEACH)")
+async def get_user(user_id: int):
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
