@@ -60,6 +60,14 @@ from app.zprp.schedule import router as schedule_router
 from app.zprp.competitions import router as competitions_router
 from app.zprp.officials import router as officials_router
 
+# -------------------------
+# BEACH routers
+# -------------------------
+from app.beach.badges import router as beach_badges_router
+from app.beach.users import router as beach_users_router
+from app.beach.admins import router as beach_admins_router
+from app.beach.tournaments import router as beach_tournaments_router
+
 # NEW: push router + scheduler
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
@@ -139,6 +147,14 @@ app.include_router(signatures_router)
 app.include_router(schedule_router, tags=["zprp"])
 app.include_router(competitions_router, tags=["zprp"])
 app.include_router(officials_router, tags=["zprp"])
+
+# -------------------------
+# BEACH routers
+# -------------------------
+app.include_router(beach_badges_router)
+app.include_router(beach_users_router)
+app.include_router(beach_admins_router)
+app.include_router(beach_tournaments_router)
 
 # NEW: push router
 app.include_router(push_router)

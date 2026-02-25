@@ -739,5 +739,80 @@ baza_vips = Table(
     ),
 )
 
+# -------------------------
+# BEACH: nowe tabele (nowa appka)
+# -------------------------
+
+beach_badges = Table(
+    "beach_badges",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String, nullable=False, unique=True, index=True),
+    Column("config_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+beach_users = Table(
+    "beach_users",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    Column("judge_id", String, nullable=True, index=True),
+    Column("full_name", String, nullable=False),              # "NAZWISKO Imię"
+    Column("province", String, nullable=True, index=True),
+    Column("city", String, nullable=True),
+
+    Column("login", String, nullable=False, unique=True, index=True),
+    Column("password_hash", String, nullable=False),
+
+    # dowolna struktura (np. dict {badge:true} albo list ["A","B"])
+    Column("badges", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+
+    Column("last_login_at", DateTime(timezone=True), nullable=True),
+    Column("app_opens", Integer, nullable=False, server_default=text("0")),
+    Column("app_version", String, nullable=True),
+
+    # identyfikatory urządzeń (np. installation_id) – wiele urządzeń
+    Column("device_ids", ARRAY(String), nullable=False, server_default=text("'{}'")),
+
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+beach_admins = Table(
+    "beach_admins",
+    metadata,
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("beach_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("judge_id", String, nullable=True, index=True),
+    Column("full_name", String, nullable=False),
+    Column("province", String, nullable=True, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# Turnieje – analogicznie do province_events, ale targetowane po jednym badge
+beach_tournaments = Table(
+    "beach_tournaments",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # badge wymagany do widoczności; NULL => widoczne dla wszystkich
+    Column("badge", String, nullable=True, index=True),
+
+    Column("event_date", DateTime(timezone=True), nullable=False, index=True),
+    Column("name", String, nullable=False),
+    Column("description", Text, nullable=True),
+
+    # jak u Ciebie: target/invited_ids/present_ids + dowolne dodatkowe pola
+    Column("data_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

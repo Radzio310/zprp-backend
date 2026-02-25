@@ -982,3 +982,172 @@ class ShortResultRecordItem(BaseModel):
 
 class ListShortResultRecordsResponse(BaseModel):
     records: List[ShortResultRecordItem]
+
+
+# =====================================================================
+# BEACH (nowa aplikacja) — SCHEMAS
+# =====================================================================
+
+from typing import Any, Optional, List, Dict, Literal
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+# ---------------------------- BADGES (BEACH) ----------------------------
+
+class BeachBadgeCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    config_json: Any = Field(default_factory=dict)
+
+class BeachBadgeUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    config_json: Optional[Any] = None
+
+class BeachBadgeItem(BaseModel):
+    id: int
+    name: str
+    config_json: Any = Field(default_factory=dict)
+    updated_at: datetime
+
+class BeachBadgesListResponse(BaseModel):
+    badges: List[BeachBadgeItem]
+
+
+# ---------------------------- USERS (BEACH) ----------------------------
+
+class BeachUserCreateRequest(BaseModel):
+    judge_id: Optional[str] = None
+    full_name: str = Field(..., min_length=1, max_length=220)   # "NAZWISKO Imię"
+    province: Optional[str] = None
+    city: Optional[str] = None
+
+    login: str = Field(..., min_length=1, max_length=120)
+
+    # analogicznie jak w Twojej appce: jedno z poniższych
+    password: Optional[str] = None
+    password_encrypted: Optional[str] = None
+
+    badges: Optional[Any] = None
+    app_version: Optional[str] = None
+    device_ids: Optional[List[str]] = None
+
+class BeachUserUpdateRequest(BaseModel):
+    judge_id: Optional[str] = None
+    full_name: Optional[str] = Field(None, min_length=1, max_length=220)
+    province: Optional[str] = None
+    city: Optional[str] = None
+
+    login: Optional[str] = Field(None, min_length=1, max_length=120)
+
+    password: Optional[str] = None
+    password_encrypted: Optional[str] = None
+
+    badges: Optional[Any] = None
+    app_version: Optional[str] = None
+    device_ids: Optional[List[str]] = None
+
+class BeachUserItem(BaseModel):
+    id: int
+    judge_id: Optional[str] = None
+    full_name: str
+    province: Optional[str] = None
+    city: Optional[str] = None
+
+    login: str
+
+    badges: Any = Field(default_factory=dict)
+
+    last_login_at: Optional[datetime] = None
+    app_opens: int = 0
+    app_version: Optional[str] = None
+
+    device_ids: List[str] = Field(default_factory=list)
+
+    created_at: datetime
+    updated_at: datetime
+
+class BeachUsersListResponse(BaseModel):
+    users: List[BeachUserItem]
+
+
+class BeachLoginRequest(BaseModel):
+    login: str
+    password: Optional[str] = None
+    password_encrypted: Optional[str] = None
+
+    # opcjonalnie dopinamy urządzenie / wersję przy logowaniu
+    device_id: Optional[str] = None
+    app_version: Optional[str] = None
+
+class BeachLoginResponse(BaseModel):
+    user: BeachUserItem
+    token: str
+
+
+# ---------------------------- ADMINS (BEACH) ----------------------------
+
+class BeachAdminUpsertRequest(BaseModel):
+    user_id: int
+
+class BeachAdminItem(BaseModel):
+    user_id: int
+    judge_id: Optional[str] = None
+    full_name: str
+    province: Optional[str] = None
+    created_at: datetime
+
+class BeachAdminsListResponse(BaseModel):
+    admins: List[BeachAdminItem]
+
+
+# ---------------------------- TOURNAMENTS (BEACH) ----------------------------
+
+class BeachTournamentTarget(BaseModel):
+    """
+    Targetowanie:
+    - badge: jeśli ustawione, turniej widoczny dla userów posiadających ten badge
+    - include_all: jeśli True, ignoruje badge (wtedy badge może być None)
+    """
+    badge: Optional[str] = None
+    include_all: bool = False
+
+class BeachTournamentData(BaseModel):
+    target: BeachTournamentTarget = Field(default_factory=BeachTournamentTarget)
+    invited_ids: List[str] = Field(default_factory=list)   # u nas: user_id jako string
+    present_ids: List[str] = Field(default_factory=list)
+    invited_cache: Optional[Any] = None
+
+class CreateBeachTournamentRequest(BaseModel):
+    badge: Optional[str] = None  # zgodnie z tabelą; None => dla wszystkich
+    event_date: datetime
+    name: str = Field(..., min_length=1, max_length=220)
+    description: Optional[str] = None
+    data_json: Optional[Any] = None
+
+class UpdateBeachTournamentRequest(BaseModel):
+    badge: Optional[Optional[str]] = None
+    event_date: Optional[datetime] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=220)
+    description: Optional[Optional[str]] = None
+    data_json: Optional[Any] = None
+
+class UpdateBeachTournamentAttendanceRequest(BaseModel):
+    present_ids: List[str] = Field(default_factory=list)
+
+class BeachTournamentItem(BaseModel):
+    id: int
+    badge: Optional[str] = None
+    event_date: datetime
+    name: str
+    description: Optional[str] = None
+    data_json: Any = Field(default_factory=dict)
+    updated_at: datetime
+
+    invited_total: int = 0
+    present_total: int = 0
+    user_invited: bool = False
+    user_present: bool = False
+
+class BeachTournamentsListResponse(BaseModel):
+    tournaments: List[BeachTournamentItem]
