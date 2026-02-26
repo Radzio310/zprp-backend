@@ -211,13 +211,13 @@ async def list_visible_tournaments(
 
     out: List[BeachTournamentItem] = []
     for r in rows:
-        badge_req = r.get("badge")
+        badge_req = r["badge"]
         if badge_req and badge_req not in user_badges:
             continue
 
         data = _normalize_event_data(r["data_json"])
         if not data.get("invited_ids"):
-            data["invited_ids"] = await _compute_invited_ids_for_badge(badge_req, data)
+            data["invited_ids"] = await _compute_invited_ids_for_badge(r["badge"], data)
 
         invited_set = set([str(x) for x in (data.get("invited_ids") or [])])
         # jeśli invited_ids liczone, to user musi być w invited_set, chyba że to "include_all"

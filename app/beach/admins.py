@@ -32,13 +32,14 @@ async def list_admins():
     rows = await database.fetch_all(select(beach_admins).order_by(beach_admins.c.created_at.desc()))
     admins: List[BeachAdminItem] = [
         BeachAdminItem(
-            user_id=int(r["user_id"]),
-            judge_id=r.get("judge_id"),
-            full_name=r["full_name"],
-            province=r.get("province"),
-            created_at=r["created_at"],
+            user_id=int(d["user_id"]),
+            judge_id=d.get("judge_id"),
+            full_name=d["full_name"],
+            province=d.get("province"),
+            created_at=d["created_at"],
         )
         for r in rows
+        for d in [dict(r)]
     ]
     return BeachAdminsListResponse(admins=admins)
 
