@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import traceback
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Path, BackgroundTasks
 from fastapi.responses import FileResponse
@@ -84,8 +84,21 @@ def _row_to_item(row: Any) -> ProvinceTravelItem:
 
 
 # ───────────────────────── EXPORT XLSX (statystyki dojazdów) ─────────────────────────
+# NOWY UKŁAD KOLUMN w arkuszu "Dane":
+# A Sezon
+# B Województwo
+# C ID
+# D Sędzia
+# E Mecze
+# F Suma km            <-- NOWE
+# G Średni km
+# H Min km
+# I Max km
+# J..P bucket 0-15..>100
+# Q Data aktualizacji
 
 BUCKET_KEYS = ["0-15", "16-30", "31-45", "46-60", "61-80", "81-100", ">100"]
+
 
 def _season_start_year(key: str) -> int:
     try:
@@ -94,6 +107,7 @@ def _season_start_year(key: str) -> int:
     except Exception:
         pass
     return 0
+
 
 def _extract_season_payload_and_updated_at(season_entry: Any) -> tuple[dict, Optional[str]]:
     if not isinstance(season_entry, dict):
@@ -110,6 +124,7 @@ def _extract_season_payload_and_updated_at(season_entry: Any) -> tuple[dict, Opt
     # old: bezpośrednio payload
     return season_entry, None
 
+
 def _safe_num(x: Any) -> Optional[float]:
     try:
         n = float(x)
@@ -119,11 +134,13 @@ def _safe_num(x: Any) -> Optional[float]:
     except Exception:
         return None
 
+
 def _safe_int(x: Any) -> int:
     n = _safe_num(x)
     if n is None:
         return 0
     return int(round(n))
+
 
 @router.get(
     "/export-xlsx",
@@ -169,7 +186,7 @@ async def export_travel_xlsx(
     # 3) Wyczyść stare dane
     max_clear_rows = max(2000, ws_dane.max_row)
     for r in range(2, max_clear_rows + 1):
-        for c in range(1, 16 + 1):  # A..P
+        for c in range(1, 17 + 1):  # A..Q (17 kolumn)
             ws_dane.cell(row=r, column=c).value = None
 
     # 4) Wypełnij dane
@@ -196,9 +213,15 @@ async def export_travel_xlsx(
                 stats = {}
 
             total_matches = _safe_int(stats.get("totalMatches"))
+            sum_km = _safe_num(stats.get("sumKm"))
+
             avg_km = _safe_num(stats.get("avgKm"))
             min_km = _safe_num(stats.get("minKm"))
             max_km = _safe_num(stats.get("maxKm"))
+
+            # backward-compat fallback:
+            if sum_km is None and avg_km is not None and total_matches > 0:
+                sum_km = avg_km * float(total_matches)
 
             buckets_raw = stats.get("buckets")
             if not isinstance(buckets_raw, dict):
@@ -212,14 +235,18 @@ async def export_travel_xlsx(
             ws_dane.cell(out_row, 3).value = judge_id
             ws_dane.cell(out_row, 4).value = full_name
             ws_dane.cell(out_row, 5).value = total_matches
-            ws_dane.cell(out_row, 6).value = (avg_km if avg_km is not None else None)
-            ws_dane.cell(out_row, 7).value = (min_km if min_km is not None else None)
-            ws_dane.cell(out_row, 8).value = (max_km if max_km is not None else None)
+
+            ws_dane.cell(out_row, 6).value = (sum_km if sum_km is not None else None)  # Suma km (NOWE)
+
+            ws_dane.cell(out_row, 7).value = (avg_km if avg_km is not None else None)
+            ws_dane.cell(out_row, 8).value = (min_km if min_km is not None else None)
+            ws_dane.cell(out_row, 9).value = (max_km if max_km is not None else None)
 
             for idx, bk in enumerate(BUCKET_KEYS):
-                ws_dane.cell(out_row, 9 + idx).value = _safe_int(buckets_raw.get(bk))
+                # bucket startuje od kolumny J = 10
+                ws_dane.cell(out_row, 10 + idx).value = _safe_int(buckets_raw.get(bk))
 
-            ws_dane.cell(out_row, 16).value = upd_val
+            ws_dane.cell(out_row, 17).value = upd_val  # Q
 
             all_seasons.add(sk)
             out_row += 1
@@ -250,19 +277,20 @@ async def export_travel_xlsx(
     filename = "statystyki_dojazdow.xlsx"
 
     headers = {
-        # wymusza zachowanie jak download (a nie inline preview)
         "Content-Disposition": f'attachment; filename="{filename}"',
         "Cache-Control": "no-store",
     }
 
     return FileResponse(
         path=tmp_path,
-        filename=filename,  # nadal warto zostawić
+        filename=filename,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
 
+
 # ───────────────────────── END EXPORT XLSX ─────────────────────────
+
 
 @router.get(
     "/{judge_id}",
@@ -298,7 +326,6 @@ async def list_travel_records(
 
     if q and q.strip():
         needle = f"%{q.strip()}%"
-        # databases + SQLAlchemy: prosto po full_name/judge_id
         stmt = stmt.where(
             (province_travel.c.judge_id.ilike(needle)) | (province_travel.c.full_name.ilike(needle))
         )
