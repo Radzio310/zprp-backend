@@ -197,9 +197,9 @@ login_records = Table(
   metadata,
   Column("judge_id", String, primary_key=True),
   Column("full_name", String, nullable=False),
+  Column("photo_url", String, nullable=False, server_default=""),
   Column("last_login_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 
-  # ⬇⬇⬇ DODAJ TO ⬇⬇⬇
   Column("app_version", String, nullable=True),            # np. "1.4.0"
   Column("app_opens", Integer, nullable=True),             # licznik wejść
   Column("last_open_at", DateTime(timezone=True), nullable=True),  # data ostatniego wejścia
@@ -221,6 +221,7 @@ province_judges = Table(
   Column("full_name", String, nullable=False),             # Imię i nazwisko
   Column("province", String, nullable=False, index=True),  # Województwo
   Column("badges", JSON, nullable=False, server_default="{}"),  # NOWE: JSON z badge'ami
+  Column("photo_url", String, nullable=False, server_default=""),
   Column(
       "updated_at",
       DateTime(timezone=True),

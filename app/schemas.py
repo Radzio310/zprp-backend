@@ -259,6 +259,7 @@ class CreateLoginRecordRequest(BaseModel):
     app_opens: Optional[int] = None
     last_open_at: Optional[datetime] = None
     province: Optional[str] = None
+    photo_url: Optional[str] = None  # ✅ NOWE
     config_json: Optional[Any] = None
 
 class LoginRecordItem(BaseModel):
@@ -269,6 +270,7 @@ class LoginRecordItem(BaseModel):
     app_opens: Optional[int] = None
     last_open_at: Optional[datetime] = None
     province: Optional[str] = None
+    photo_url: str = ""  # ✅ NOWE (spójne z DB default "")
     config_json: Any = Field(default_factory=dict)
 
 class ListLoginRecordsResponse(BaseModel):
@@ -281,6 +283,7 @@ class UpdateLoginRecordRequest(BaseModel):
     last_open_at: Optional[datetime] = None
     last_login_at: Optional[datetime] = None
     province: Optional[str] = None
+    photo_url: Optional[str] = None  # ✅ NOWE
     config_json: Optional[Any] = None
 
 # ------------------------- BAZA VIPs -------------------------
@@ -351,12 +354,14 @@ class CreateProvinceJudgeRequest(BaseModel):
     judge_id: str
     full_name: str
     province: str
-    badges: Optional[Any] = None  # domyślnie backend ustawi {}
+    photo_url: Optional[str] = None  # ✅ NOWE: domyślnie backend ustawi ""
+    badges: Optional[Any] = None     # domyślnie backend ustawi {}
 
 
 class UpdateProvinceJudgeRequest(BaseModel):
     full_name: Optional[str] = None
     province: Optional[str] = None
+    photo_url: Optional[str] = None  # ✅ NOWE
     badges: Optional[Any] = None
 
 
@@ -364,6 +369,7 @@ class ProvinceJudgeItem(BaseModel):
     judge_id: str
     full_name: str
     province: str
+    photo_url: str  # ✅ NOWE
     badges: Any
     updated_at: datetime
 

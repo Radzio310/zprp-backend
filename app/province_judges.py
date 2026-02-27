@@ -26,8 +26,12 @@ def _norm_province(p: str) -> str:
 
 
 def _badges_or_default(badges: Any | None) -> Any:
-    # Utrzymujemy format JSON; jeśli brak – pusty obiekt
     return badges if badges is not None else {}
+
+
+def _photo_or_default(photo_url: Any | None) -> str:
+    s = (photo_url or "").strip()
+    return s
 
 
 @router.post("/", response_model=dict, summary="Upsert sędziego w tabeli province_judges")
@@ -35,28 +39,35 @@ async def upsert_province_judge(req: CreateProvinceJudgeRequest):
     """
     Upsert:
     - judge_id = PK
-    - zawsze nadpisuje full_name, province
+    - zawsze nadpisuje full_name, province, photo_url
     - badges: jeśli nie podano -> {}
     """
     now = datetime.now(timezone.utc)
     prov = _norm_province(req.province)
     badges = _badges_or_default(req.badges)
+    photo_url = _photo_or_default(getattr(req, "photo_url", None))
 
     try:
-        stmt = pg_insert(province_judges).values(
-            judge_id=req.judge_id,
-            full_name=req.full_name,
-            province=prov,
-            badges=badges,
-            updated_at=now,
-        ).on_conflict_do_update(
-            index_elements=[province_judges.c.judge_id],
-            set_={
-                "full_name": req.full_name,
-                "province": prov,
-                "badges": badges,
-                "updated_at": now,
-            },
+        stmt = (
+            pg_insert(province_judges)
+            .values(
+                judge_id=req.judge_id,
+                full_name=req.full_name,
+                province=prov,
+                photo_url=photo_url,
+                badges=badges,
+                updated_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=[province_judges.c.judge_id],
+                set_={
+                    "full_name": req.full_name,
+                    "province": prov,
+                    "photo_url": photo_url,
+                    "badges": badges,
+                    "updated_at": now,
+                },
+            )
         )
 
         await database.execute(stmt)
@@ -109,6 +120,8 @@ async def patch_province_judge(judge_id: str, body: UpdateProvinceJudgeRequest):
         update_data["full_name"] = body.full_name
     if body.province is not None:
         update_data["province"] = _norm_province(body.province)
+    if getattr(body, "photo_url", None) is not None:
+        update_data["photo_url"] = _photo_or_default(body.photo_url)
     if body.badges is not None:
         update_data["badges"] = body.badges
 
@@ -134,21 +147,28 @@ async def put_province_judge(judge_id: str, req: CreateProvinceJudgeRequest):
     now = datetime.now(timezone.utc)
     prov = _norm_province(req.province)
     badges = _badges_or_default(req.badges)
+    photo_url = _photo_or_default(getattr(req, "photo_url", None))
 
-    stmt = pg_insert(province_judges).values(
-        judge_id=judge_id,
-        full_name=req.full_name,
-        province=prov,
-        badges=badges,
-        updated_at=now,
-    ).on_conflict_do_update(
-        index_elements=[province_judges.c.judge_id],
-        set_={
-            "full_name": req.full_name,
-            "province": prov,
-            "badges": badges,
-            "updated_at": now,
-        },
+    stmt = (
+        pg_insert(province_judges)
+        .values(
+            judge_id=judge_id,
+            full_name=req.full_name,
+            province=prov,
+            photo_url=photo_url,
+            badges=badges,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[province_judges.c.judge_id],
+            set_={
+                "full_name": req.full_name,
+                "province": prov,
+                "photo_url": photo_url,
+                "badges": badges,
+                "updated_at": now,
+            },
+        )
     )
 
     await database.execute(stmt)

@@ -516,16 +516,16 @@ async def _cleanup_loop():
                     login_records.c.judge_id,
                     login_records.c.full_name,
                     login_records.c.province,
+                    login_records.c.photo_url,  # ✅ NOWE
                 )
             )
 
-            pj_rows = await database.fetch_all(select(province_judges.c.judge_id))
-            existing_ids = {r["judge_id"] for r in pj_rows}
+            to_upsert = []
+            now2 = datetime.now(timezone.utc)
 
-            to_insert = []
             for r in lr_rows:
                 jid = (r["judge_id"] or "").strip()
-                if not jid or jid in existing_ids:
+                if not jid:
                     continue
 
                 prov = (r["province"] or "").strip().upper()
@@ -536,23 +536,38 @@ async def _cleanup_loop():
                 if not full_name:
                     continue
 
-                to_insert.append({
+                photo_url = (r.get("photo_url") or "").strip()
+
+                to_upsert.append({
                     "judge_id": jid,
                     "full_name": full_name,
                     "province": prov,
-                    "badges": {},
-                    "updated_at": datetime.now(timezone.utc),
+                    "photo_url": photo_url,
+                    "badges": {},  # tylko przy insert
+                    "updated_at": now2,
                 })
 
-            inserted = 0
-            if to_insert:
-                stmt_ins = pg_insert(province_judges).values(to_insert).on_conflict_do_nothing(
-                    index_elements=[province_judges.c.judge_id]
+            upserted = 0
+            if to_upsert:
+                stmt_up = (
+                    pg_insert(province_judges)
+                    .values(to_upsert)
+                    .on_conflict_do_update(
+                        index_elements=[province_judges.c.judge_id],
+                        set_={
+                            "full_name": pg_insert(province_judges).excluded.full_name,
+                            "province": pg_insert(province_judges).excluded.province,
+                            "photo_url": pg_insert(province_judges).excluded.photo_url,
+                            "updated_at": now2,
+                            # badges zostają jak były (nie nadpisujemy ich z cleanup)
+                            "badges": province_judges.c.badges,
+                        },
+                    )
                 )
-                await database.execute(stmt_ins)
-                inserted = len(to_insert)
+                await database.execute(stmt_up)
+                upserted = len(to_upsert)
 
-            logger.info(f"👥 ProvinceJudges sync: inserted {inserted} missing judges from login_records")
+            logger.info(f"👥 ProvinceJudges sync: upserted {upserted} records from login_records")
             # 🧩 Raz na dobę: scal duplikaty klubów w 'kontakty' (sędziów nie ruszamy)
             await refactor_club_contacts_once_per_utc_day()
 
