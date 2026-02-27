@@ -29,9 +29,19 @@ def _badges_or_default(badges: Any | None) -> Any:
     return badges if badges is not None else {}
 
 
-def _photo_or_default(photo_url: Any | None) -> str:
+def _photo_or_none(photo_url: Any | None) -> str | None:
+    # ✅ pusty string traktujemy jako "nie przesłano" (None) dla UPSERT/COALESCE
     s = (photo_url or "").strip()
-    return s
+    return s if s else None
+
+
+def _row_to_item(row) -> ProvinceJudgeItem:
+    d = dict(row)
+    if d.get("photo_url") is None:
+        d["photo_url"] = ""
+    if d.get("badges") is None:
+        d["badges"] = {}
+    return ProvinceJudgeItem(**d)
 
 
 @router.post("/", response_model=dict, summary="Upsert sędziego w tabeli province_judges")
@@ -39,13 +49,14 @@ async def upsert_province_judge(req: CreateProvinceJudgeRequest):
     """
     Upsert:
     - judge_id = PK
-    - zawsze nadpisuje full_name, province, photo_url
+    - zawsze nadpisuje full_name, province
+    - photo_url: nadpisuje TYLKO jeśli przesłano niepuste (inaczej zostawia)
     - badges: jeśli nie podano -> {}
     """
     now = datetime.now(timezone.utc)
     prov = _norm_province(req.province)
     badges = _badges_or_default(req.badges)
-    photo_url = _photo_or_default(getattr(req, "photo_url", None))
+    photo_url = _photo_or_none(getattr(req, "photo_url", None))
 
     try:
         stmt = (
@@ -54,7 +65,7 @@ async def upsert_province_judge(req: CreateProvinceJudgeRequest):
                 judge_id=req.judge_id,
                 full_name=req.full_name,
                 province=prov,
-                photo_url=photo_url,
+                photo_url=photo_url,   # ✅ None jeśli puste
                 badges=badges,
                 updated_at=now,
             )
@@ -63,7 +74,10 @@ async def upsert_province_judge(req: CreateProvinceJudgeRequest):
                 set_={
                     "full_name": req.full_name,
                     "province": prov,
-                    "photo_url": photo_url,
+                    "photo_url": func.coalesce(
+                        pg_insert(province_judges).excluded.photo_url,
+                        province_judges.c.photo_url,
+                    ),
                     "badges": badges,
                     "updated_at": now,
                 },
@@ -82,7 +96,7 @@ async def upsert_province_judge(req: CreateProvinceJudgeRequest):
 async def list_province_judges():
     q = select(province_judges).order_by(province_judges.c.province.asc(), province_judges.c.full_name.asc())
     rows = await database.fetch_all(q)
-    return ListProvinceJudgesResponse(records=[ProvinceJudgeItem(**dict(r)) for r in rows])
+    return ListProvinceJudgesResponse(records=[_row_to_item(r) for r in rows])
 
 
 @router.get("/province/{province}", response_model=ListProvinceJudgesResponse, summary="Lista sędziów dla wybranego województwa")
@@ -94,7 +108,7 @@ async def list_province_judges_by_province(province: str):
         .order_by(province_judges.c.full_name.asc())
     )
     rows = await database.fetch_all(q)
-    return ListProvinceJudgesResponse(records=[ProvinceJudgeItem(**dict(r)) for r in rows])
+    return ListProvinceJudgesResponse(records=[_row_to_item(r) for r in rows])
 
 
 @router.get("/{judge_id}", response_model=ProvinceJudgeItem, summary="Pobierz sędziego po judge_id (province_judges)")
@@ -104,7 +118,7 @@ async def get_province_judge(judge_id: str):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Nie znaleziono sędziego")
-    return ProvinceJudgeItem(**dict(row))
+    return _row_to_item(row)
 
 
 @router.patch("/{judge_id}", response_model=ProvinceJudgeItem, summary="Częściowa edycja sędziego (province_judges)")
@@ -120,8 +134,11 @@ async def patch_province_judge(judge_id: str, body: UpdateProvinceJudgeRequest):
         update_data["full_name"] = body.full_name
     if body.province is not None:
         update_data["province"] = _norm_province(body.province)
+
+    # ✅ PATCH: pozwalamy wyczyścić zdjęcie pustym stringiem
     if getattr(body, "photo_url", None) is not None:
-        update_data["photo_url"] = _photo_or_default(body.photo_url)
+        update_data["photo_url"] = (body.photo_url or "").strip()
+
     if body.badges is not None:
         update_data["badges"] = body.badges
 
@@ -139,7 +156,7 @@ async def patch_province_judge(judge_id: str, body: UpdateProvinceJudgeRequest):
     row = await database.fetch_one(
         select(province_judges).where(province_judges.c.judge_id == judge_id)
     )
-    return ProvinceJudgeItem(**dict(row))
+    return _row_to_item(row)
 
 
 @router.put("/{judge_id}", response_model=ProvinceJudgeItem, summary="Upsert sędziego po judge_id (province_judges)")
@@ -147,7 +164,7 @@ async def put_province_judge(judge_id: str, req: CreateProvinceJudgeRequest):
     now = datetime.now(timezone.utc)
     prov = _norm_province(req.province)
     badges = _badges_or_default(req.badges)
-    photo_url = _photo_or_default(getattr(req, "photo_url", None))
+    photo_url = _photo_or_none(getattr(req, "photo_url", None))
 
     stmt = (
         pg_insert(province_judges)
@@ -155,7 +172,7 @@ async def put_province_judge(judge_id: str, req: CreateProvinceJudgeRequest):
             judge_id=judge_id,
             full_name=req.full_name,
             province=prov,
-            photo_url=photo_url,
+            photo_url=photo_url,  # ✅ None jeśli puste
             badges=badges,
             updated_at=now,
         )
@@ -164,7 +181,10 @@ async def put_province_judge(judge_id: str, req: CreateProvinceJudgeRequest):
             set_={
                 "full_name": req.full_name,
                 "province": prov,
-                "photo_url": photo_url,
+                "photo_url": func.coalesce(
+                    pg_insert(province_judges).excluded.photo_url,
+                    province_judges.c.photo_url,
+                ),
                 "badges": badges,
                 "updated_at": now,
             },
@@ -176,7 +196,7 @@ async def put_province_judge(judge_id: str, req: CreateProvinceJudgeRequest):
     row = await database.fetch_one(
         select(province_judges).where(province_judges.c.judge_id == judge_id)
     )
-    return ProvinceJudgeItem(**dict(row))
+    return _row_to_item(row)
 
 
 @router.delete("/{judge_id}", response_model=dict, summary="Usuń sędziego (province_judges)")

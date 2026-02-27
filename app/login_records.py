@@ -19,28 +19,48 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/login_records", tags=["LoginRecords"])
 
+
 def _norm_province(p: str | None) -> str | None:
     t = (p or "").strip()
     return t.upper() if t else None
 
+
 def _photo_or_none(photo_url: str | None) -> str | None:
+    # ✅ traktujemy pusty string jako "nie przesłano" (None) dla UPSERT/COALESCE
     t = (photo_url or "").strip()
     return t if t else None
+
+
+def _config_or_none(cfg):
+    # ✅ jeśli nie przesłano -> None (żeby COALESCE nie nadpisał)
+    #    jeśli przesłano {} albo cokolwiek -> zostaw
+    return cfg if cfg is not None else None
+
+
+def _row_to_login_item(row) -> LoginRecordItem:
+    d = dict(row)
+    if d.get("photo_url") is None:
+        d["photo_url"] = ""
+    if d.get("config_json") is None:
+        d["config_json"] = {}
+    return LoginRecordItem(**d)
+
 
 @router.post("/", response_model=dict, summary="Upsert ostatniego logowania")
 async def upsert_login(req: CreateLoginRecordRequest):
     """
-    Wstawia lub uaktualnia rekord ostatniego logowania.
     - Zawsze nadpisuje: full_name, last_login_at
-    - Nadpisuje app_version / last_open_at / province / photo_url / config_json tylko, jeśli zostały przesłane (COALESCE na EXCLUDED)
-    - app_opens inkrementuje o wartość z payloadu (zwykle 1)
-    - ✅ Dodatkowo: upsert do province_judges (full_name/province/photo_url), ale NIE ruszamy badges.
+    - app_version / last_open_at / province / photo_url / config_json -> TYLKO jeśli przesłane
+      (czyli excluded.* != NULL)
+    - app_opens inkrementuje
+    - Dodatkowo: upsert do province_judges (full_name/province/photo_url), badges bez zmian
     """
     now = datetime.now(timezone.utc)
 
     try:
         prov_norm = _norm_province(req.province)
-        photo_norm = (getattr(req, "photo_url", None) or "").strip()
+        photo_norm = _photo_or_none(getattr(req, "photo_url", None))
+        cfg_norm = _config_or_none(getattr(req, "config_json", None))
 
         stmt = pg_insert(login_records).values(
             judge_id=req.judge_id,
@@ -50,8 +70,8 @@ async def upsert_login(req: CreateLoginRecordRequest):
             app_opens=req.app_opens,
             last_open_at=req.last_open_at,
             province=prov_norm,
-            photo_url=photo_norm,      # ✅ NOWE
-            config_json=req.config_json,
+            photo_url=photo_norm,          # ✅ None jeśli puste -> nie nadpisze
+            config_json=cfg_norm,          # ✅ None jeśli brak -> nie nadpisze
         )
 
         stmt = stmt.on_conflict_do_update(
@@ -70,7 +90,7 @@ async def upsert_login(req: CreateLoginRecordRequest):
                 "province": func.coalesce(
                     stmt.excluded.province, login_records.c.province
                 ),
-                "photo_url": func.coalesce(               # ✅ NOWE
+                "photo_url": func.coalesce(
                     stmt.excluded.photo_url, login_records.c.photo_url
                 ),
                 "config_json": func.coalesce(
@@ -81,8 +101,9 @@ async def upsert_login(req: CreateLoginRecordRequest):
 
         await database.execute(stmt)
 
-        # ✅ Upsert province_judges (bez ruszania badges)
-        # Warunek sensowności: province musi istnieć (bo to tabela per-województwo)
+        # ✅ Upsert do province_judges:
+        # - province jest wymagane do sensownego wpisu per-województwo
+        # - photo_url aktualizujemy TYLKO jeśli przesłano niepuste (czyli photo_norm != None)
         if prov_norm:
             pj_stmt = (
                 pg_insert(province_judges)
@@ -90,8 +111,8 @@ async def upsert_login(req: CreateLoginRecordRequest):
                     judge_id=req.judge_id,
                     full_name=req.full_name,
                     province=prov_norm,
-                    photo_url=photo_norm or "",
-                    badges={},  # przy insert
+                    photo_url=photo_norm,  # ✅ None jeśli brak
+                    badges={},  # tylko przy insert
                     updated_at=now,
                 )
                 .on_conflict_do_update(
@@ -99,10 +120,12 @@ async def upsert_login(req: CreateLoginRecordRequest):
                     set_={
                         "full_name": req.full_name,
                         "province": prov_norm,
-                        "photo_url": photo_norm or "",
+                        "photo_url": func.coalesce(
+                            pg_insert(province_judges).excluded.photo_url,
+                            province_judges.c.photo_url,
+                        ),
                         "updated_at": now,
-                        # badges zostają jak były:
-                        "badges": province_judges.c.badges,
+                        "badges": province_judges.c.badges,  # badges bez zmian
                     },
                 )
             )
@@ -119,16 +142,7 @@ async def upsert_login(req: CreateLoginRecordRequest):
 async def list_logins():
     q = select(login_records).order_by(login_records.c.last_login_at.desc())
     rows = await database.fetch_all(q)
-
-    # ✅ defensywnie: NULL -> ""
-    out = []
-    for r in rows:
-        d = dict(r)
-        if d.get("photo_url") is None:
-            d["photo_url"] = ""
-        out.append(LoginRecordItem(**d))
-
-    return ListLoginRecordsResponse(records=out)
+    return ListLoginRecordsResponse(records=[_row_to_login_item(r) for r in rows])
 
 
 @router.get("/{judge_id}", response_model=LoginRecordItem, summary="Pobierz rekord logowania po judge_id")
@@ -138,11 +152,7 @@ async def get_login_record(judge_id: str):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Nie znaleziono rekordu")
-
-    d = dict(row)
-    if d.get("photo_url") is None:
-        d["photo_url"] = ""
-    return LoginRecordItem(**d)
+    return _row_to_login_item(row)
 
 
 @router.delete("/{judge_id}", response_model=dict, summary="Usuń rekord logowania")
@@ -178,10 +188,12 @@ async def patch_login_record(judge_id: str, body: UpdateLoginRecordRequest):
         update_data["last_login_at"] = body.last_login_at
     if body.province is not None:
         update_data["province"] = body.province
+
+    # ✅ PATCH: tu pozwalamy wyczyścić zdjęcie przez "", więc zapisujemy string (nie None)
     if getattr(body, "photo_url", None) is not None:
         update_data["photo_url"] = (body.photo_url or "").strip()
 
-    # ✅ NOWE
+    # ✅ PATCH: config_json tylko jeśli przesłane (jak było)
     if body.config_json is not None:
         update_data["config_json"] = body.config_json
 
@@ -197,7 +209,7 @@ async def patch_login_record(judge_id: str, body: UpdateLoginRecordRequest):
     row = await database.fetch_one(
         select(login_records).where(login_records.c.judge_id == judge_id)
     )
-    return LoginRecordItem(**dict(row))
+    return _row_to_login_item(row)
 
 
 @router.put(
@@ -208,6 +220,10 @@ async def patch_login_record(judge_id: str, body: UpdateLoginRecordRequest):
 async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
     now = datetime.now(timezone.utc)
 
+    prov_norm = _norm_province(req.province)
+    photo_norm = _photo_or_none(getattr(req, "photo_url", None))
+    cfg_norm = _config_or_none(getattr(req, "config_json", None))
+
     stmt = pg_insert(login_records).values(
         judge_id=judge_id,
         full_name=req.full_name,
@@ -215,9 +231,9 @@ async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
         app_version=req.app_version,
         app_opens=req.app_opens,
         last_open_at=req.last_open_at,
-        province=req.province,
-        photo_url=(getattr(req, "photo_url", None) or "").strip(),
-        config_json=req.config_json,  # ✅ NOWE
+        province=prov_norm,
+        photo_url=photo_norm,     # ✅ None jeśli puste
+        config_json=cfg_norm,     # ✅ None jeśli brak
     )
 
     stmt = stmt.on_conflict_do_update(
@@ -229,7 +245,7 @@ async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
             "app_opens": func.coalesce(stmt.excluded.app_opens, login_records.c.app_opens),
             "last_open_at": func.coalesce(stmt.excluded.last_open_at, login_records.c.last_open_at),
             "province": func.coalesce(stmt.excluded.province, login_records.c.province),
-            "photo_url": func.coalesce(stmt.excluded.photo_url, login_records.c.photo_url),  # ✅ NOWE
+            "photo_url": func.coalesce(stmt.excluded.photo_url, login_records.c.photo_url),
             "config_json": func.coalesce(stmt.excluded.config_json, login_records.c.config_json),
         },
     )
@@ -239,4 +255,4 @@ async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
     row = await database.fetch_one(
         select(login_records).where(login_records.c.judge_id == judge_id)
     )
-    return LoginRecordItem(**dict(row))
+    return _row_to_login_item(row)
