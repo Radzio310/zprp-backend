@@ -536,7 +536,7 @@ async def _cleanup_loop():
                 if not full_name:
                     continue
 
-                photo_url = (r.get("photo_url") or "").strip()
+                photo_url = (r["photo_url"] or "").strip()
 
                 to_upsert.append({
                     "judge_id": jid,
