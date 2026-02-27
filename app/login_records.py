@@ -40,7 +40,7 @@ async def upsert_login(req: CreateLoginRecordRequest):
 
     try:
         prov_norm = _norm_province(req.province)
-        photo_norm = _photo_or_none(getattr(req, "photo_url", None))
+        photo_norm = (getattr(req, "photo_url", None) or "").strip()
 
         stmt = pg_insert(login_records).values(
             judge_id=req.judge_id,
@@ -119,7 +119,16 @@ async def upsert_login(req: CreateLoginRecordRequest):
 async def list_logins():
     q = select(login_records).order_by(login_records.c.last_login_at.desc())
     rows = await database.fetch_all(q)
-    return ListLoginRecordsResponse(records=[LoginRecordItem(**dict(r)) for r in rows])
+
+    # ✅ defensywnie: NULL -> ""
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("photo_url") is None:
+            d["photo_url"] = ""
+        out.append(LoginRecordItem(**d))
+
+    return ListLoginRecordsResponse(records=out)
 
 
 @router.get("/{judge_id}", response_model=LoginRecordItem, summary="Pobierz rekord logowania po judge_id")
@@ -129,7 +138,11 @@ async def get_login_record(judge_id: str):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Nie znaleziono rekordu")
-    return LoginRecordItem(**dict(row))
+
+    d = dict(row)
+    if d.get("photo_url") is None:
+        d["photo_url"] = ""
+    return LoginRecordItem(**d)
 
 
 @router.delete("/{judge_id}", response_model=dict, summary="Usuń rekord logowania")
@@ -166,7 +179,7 @@ async def patch_login_record(judge_id: str, body: UpdateLoginRecordRequest):
     if body.province is not None:
         update_data["province"] = body.province
     if getattr(body, "photo_url", None) is not None:
-        update_data["photo_url"] = body.photo_url
+        update_data["photo_url"] = (body.photo_url or "").strip()
 
     # ✅ NOWE
     if body.config_json is not None:
@@ -203,7 +216,7 @@ async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
         app_opens=req.app_opens,
         last_open_at=req.last_open_at,
         province=req.province,
-        photo_url=_photo_or_none(getattr(req, "photo_url", None)),
+        photo_url=(getattr(req, "photo_url", None) or "").strip(),
         config_json=req.config_json,  # ✅ NOWE
     )
 
