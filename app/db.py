@@ -814,6 +814,24 @@ beach_tournaments = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 
+# -------------------------
+# BEACH: wersje aplikacji (analogicznie do app_versions)
+# -------------------------
+
+beach_app_versions = Table(
+    "beach_app_versions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("version", String, nullable=False, unique=True, index=True),   # np. "1.23.14"
+    Column("name", String, nullable=False),                               # nazwa wersji
+    Column("description", Text, nullable=True),                           # opis zmian
+    Column("to_show", Boolean, nullable=False, server_default=text("false")),  # czy pokazywać w appce
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+Index("ix_beach_app_versions_to_show", beach_app_versions.c.to_show)
+
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

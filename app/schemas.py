@@ -1157,3 +1157,32 @@ class BeachTournamentItem(BaseModel):
 
 class BeachTournamentsListResponse(BaseModel):
     tournaments: List[BeachTournamentItem]
+
+# ---------------------------- APP VERSIONS (BEACH) ----------------------------
+
+class BeachVersionItem(BaseModel):
+    id: int
+    version: str
+    name: str
+    description: Optional[str] = None
+    to_show: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class BeachListVersionsResponse(BaseModel):
+    versions: List[BeachVersionItem]
+
+
+class BeachCreateVersionRequest(BaseModel):
+    version: str  # "X.Y.Z"
+    name: str
+    description: Optional[str] = None
+    to_show: Optional[bool] = False
+
+
+class BeachUpdateVersionRequest(BaseModel):
+    version: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    to_show: Optional[bool] = None

@@ -67,6 +67,7 @@ from app.beach.badges import router as beach_badges_router
 from app.beach.users import router as beach_users_router
 from app.beach.admins import router as beach_admins_router
 from app.beach.tournaments import router as beach_tournaments_router
+from app.beach.versions import router as beach_versions_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -155,6 +156,7 @@ app.include_router(beach_badges_router)
 app.include_router(beach_users_router)
 app.include_router(beach_admins_router)
 app.include_router(beach_tournaments_router)
+app.include_router(beach_versions_router)
 
 # NEW: push router
 app.include_router(push_router)
