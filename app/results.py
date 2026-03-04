@@ -1808,32 +1808,37 @@ async def _apply_protocol_updates_4blocks(
         args4 = comment_meta["args4"]
 
         desired_text = _sanitize_comment_text(referee_comment or "")
-        cur_text = _current_text_value(inp)
-
-        # DELTA
-        if _normalize_space(cur_text) == _normalize_space(desired_text):
-            skipped += 1
-            skipped_items.append({"section": "comment", "team": None, "player": None, "kind": "komentarz"})
-            _dbg("SKIP delta comment", req_id=req_id, desired=desired_text[:200], cur=cur_text[:200], args4=args4)
+        if desired_text.strip() == "":
+            _dbg("SKIP comment empty desired", req_id=req_id)
         else:
-            _dbg("UPDATE comment sending", req_id=req_id, desired=desired_text[:200], cur=cur_text[:200], args4=args4)
+            cur_text = _current_text_value(inp)
 
-            # w JS jest this.checked, ale textarea nie ma sensownego checked => wysyłamy false
-            ok, resp_txt = await _save_via_zapisz3(client, args4, value_str=desired_text, checked=False)
-
-            if ok:
-                updated += 1
-                _dbg("UPDATE comment OK", req_id=req_id, resp=resp_txt)
+            # DELTA
+            cur_norm = _sanitize_comment_text(cur_text or "")
+            des_norm = desired_text
+            if cur_norm == des_norm:
+                skipped += 1
+                skipped_items.append({"section": "comment", "team": None, "player": None, "kind": "komentarz"})
+                _dbg("SKIP delta comment", req_id=req_id, desired=desired_text[:200], cur=cur_text[:200], args4=args4)
             else:
-                failed.append({
-                    "section": "comment",
-                    "team": None,
-                    "player": None,
-                    "kind": "komentarz",
-                    "sent_value": desired_text[:4000],
-                    "resp": resp_txt,
-                })
-                _dbg("UPDATE comment FAIL", req_id=req_id, resp=resp_txt)
+                _dbg("UPDATE comment sending", req_id=req_id, desired=desired_text[:200], cur=cur_text[:200], args4=args4)
+
+                # w JS jest this.checked, ale textarea nie ma sensownego checked => wysyłamy false
+                ok, resp_txt = await _save_via_zapisz3(client, args4, value_str=desired_text, checked=False)
+
+                if ok:
+                    updated += 1
+                    _dbg("UPDATE comment OK", req_id=req_id, resp=resp_txt)
+                else:
+                    failed.append({
+                        "section": "comment",
+                        "team": None,
+                        "player": None,
+                        "kind": "komentarz",
+                        "sent_value": desired_text[:4000],
+                        "resp": resp_txt,
+                    })
+                    _dbg("UPDATE comment FAIL", req_id=req_id, resp=resp_txt)
     else:
         # textarea nie istnieje na stronie protokołu
         if (referee_comment or "").strip():
