@@ -612,6 +612,16 @@ def _extract_zapisz2_args(js: str) -> Optional[List[str]]:
         return None
     return args[:4]
 
+def _extract_zapisz3_args(js: str) -> Optional[List[str]]:
+    if not js:
+        return None
+    m = re.search(r"zapiszProtok3\s*\(\s*(.*?)\s*\)", js, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    args = _split_js_args(m.group(1))
+    if len(args) < 4:
+        return None
+    return args[:4]
 
 def _extract_zapisz4_args(js: str) -> Optional[List[str]]:
     if not js:
@@ -659,6 +669,30 @@ async def _save_via_zapisz2(
     ok = (t == "OK") or ("OK" in t and "ERROR" not in t)
     return ok, t[:200]
 
+async def _save_via_zapisz3(
+    client: AsyncClient,
+    args4: List[str],
+    *,
+    value_str: str,
+    checked: bool,
+) -> Tuple[bool, str]:
+    payload = {
+        "ad1": _js_token_eval(args4[0], value_str=value_str, checked=checked),
+        "ad2": _js_token_eval(args4[1], value_str=value_str, checked=checked),
+        "ad3": _js_token_eval(args4[2], value_str=value_str, checked=checked),
+        "ad4": _js_token_eval(args4[3], value_str=value_str, checked=checked),
+        "sid": str(random.random()),
+    }
+    _, text = await fetch_with_correct_encoding(
+        client,
+        "/zawody_zapisz3.php",
+        method="POST",
+        data=payload,
+        cookies=client.cookies,
+    )
+    t = (text or "").strip()
+    ok = (t == "OK") or ("OK" in t and "ERROR" not in t)
+    return ok, t[:200]
 
 async def _save_via_zapisz4(
     client: AsyncClient,
@@ -692,6 +726,30 @@ async def _save_via_zapisz4(
 
 def _normalize_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
+
+def _sanitize_comment_text(s: str) -> str:
+    """
+    Minimalna, bezpieczna normalizacja:
+    - zamienia CRLF na LF
+    - usuwa znaki kontrolne
+    - podmienia apostrofy / myślniki typograficzne na proste odpowiedniki
+    """
+    if not isinstance(s, str):
+        return ""
+    x = s.replace("\r\n", "\n").replace("\r", "\n")
+
+    # normalizacja unicode (usuwa część "dziwnych" wariantów)
+    x = unicodedata.normalize("NFKC", x)
+
+    # typograficzne znaki na proste (częsty powód ostrzeżeń)
+    x = x.replace("’", "'").replace("`", "'")
+    x = x.replace("–", "-").replace("—", "-")
+
+    # usuń znaki kontrolne poza \n i \t
+    x = "".join(ch for ch in x if ch in ("\n", "\t") or ord(ch) >= 32)
+
+    # opcjonalnie: przytnij długość, żeby nie wpakować megatekstu (możesz zmienić limit)
+    return x.strip()[:2000]
 
 
 def _table_text(table) -> str:
@@ -1318,6 +1376,27 @@ def _collect_companion_inputs(
     return result
 
 
+def _collect_comment_input(soup: BeautifulSoup) -> Optional[Dict[str, Any]]:
+    """
+    Szuka textarea name="komentarz" z onchange="zapiszProtok3(...)".
+    Zwraca meta: {inp, args4}
+    """
+    ta = soup.find("textarea", attrs={"name": "komentarz"})
+    if not ta:
+        return None
+
+    js = ta.get("onchange") or ta.get("onclick") or ""
+    if "zapiszProtok3" not in js:
+        # czasem bywa w onchange, ale zostawiamy defensywnie
+        return None
+
+    args4 = _extract_zapisz3_args(js)
+    if not args4:
+        return None
+
+    return {"inp": ta, "args4": args4}
+
+
 def _norm_team_name(s: str) -> str:
     s = (s or "").strip().lower()
     s = unicodedata.normalize("NFKD", s)
@@ -1526,6 +1605,7 @@ async def _apply_protocol_updates_4blocks(
     *,
     host_name: str,
     guest_name: str,
+    referee_comment: str = "",
 ) -> Dict[str, Any]:
     """
     Wersja z bardzo obszernym loggingiem:
@@ -1540,6 +1620,7 @@ async def _apply_protocol_updates_4blocks(
 
     players_inputs = _collect_players_inputs(soup, host_name=host_name, guest_name=guest_name)
     comp_inputs = _collect_companion_inputs(soup, host_name=host_name, guest_name=guest_name)
+    comment_meta = _collect_comment_input(soup)
 
     players_inputs_host = sum(1 for k in players_inputs.keys() if k[0] == "host")
     players_inputs_guest = sum(1 for k in players_inputs.keys() if k[0] == "guest")
@@ -1555,6 +1636,7 @@ async def _apply_protocol_updates_4blocks(
         companions_inputs_total=len(comp_inputs),
         companions_inputs_host=comp_inputs_host,
         companions_inputs_guest=comp_inputs_guest,
+        comment_found=bool(comment_meta),
     )
 
     updated = 0
@@ -1720,6 +1802,43 @@ async def _apply_protocol_updates_4blocks(
                         "resp": resp_txt,
                     })
                     _dbg("UPDATE companions FAIL", req_id=req_id, team=team, letter=letter, kind=kind, resp=resp_txt)
+    # ---- referee comment (zapiszProtok3 -> zawody_zapisz3.php) ----
+    if comment_meta:
+        inp = comment_meta["inp"]
+        args4 = comment_meta["args4"]
+
+        desired_text = _sanitize_comment_text(referee_comment or "")
+        cur_text = _current_text_value(inp)
+
+        # DELTA
+        if _normalize_space(cur_text) == _normalize_space(desired_text):
+            skipped += 1
+            skipped_items.append({"section": "comment", "team": None, "player": None, "kind": "komentarz"})
+            _dbg("SKIP delta comment", req_id=req_id, desired=desired_text[:200], cur=cur_text[:200], args4=args4)
+        else:
+            _dbg("UPDATE comment sending", req_id=req_id, desired=desired_text[:200], cur=cur_text[:200], args4=args4)
+
+            # w JS jest this.checked, ale textarea nie ma sensownego checked => wysyłamy false
+            ok, resp_txt = await _save_via_zapisz3(client, args4, value_str=desired_text, checked=False)
+
+            if ok:
+                updated += 1
+                _dbg("UPDATE comment OK", req_id=req_id, resp=resp_txt)
+            else:
+                failed.append({
+                    "section": "comment",
+                    "team": None,
+                    "player": None,
+                    "kind": "komentarz",
+                    "sent_value": desired_text[:4000],
+                    "resp": resp_txt,
+                })
+                _dbg("UPDATE comment FAIL", req_id=req_id, resp=resp_txt)
+    else:
+        # textarea nie istnieje na stronie protokołu
+        if (referee_comment or "").strip():
+            missing.append({"section": "comment", "team": None, "player": None, "kind": "komentarz"})
+            _dbg("MISSING comment textarea", req_id=req_id)
 
     _dbg(
         "apply_protocol end",
@@ -1795,12 +1914,17 @@ async def save_protocol_from_json(
             host_name = mc.get("hostTeamName") or ""
             guest_name = mc.get("guestTeamName") or ""
 
+            mc = data_json.get("matchConfig") or {}
+            extras = mc.get("extras") or {}
+            ref_comment = extras.get("detailedRefereeNotesText") or ""
+
             result = await _apply_protocol_updates_4blocks(
                 client,
                 soup,
                 stats_map,
                 host_name=host_name,
                 guest_name=guest_name,
+                referee_comment=ref_comment,
             )
         finally:
             await client.aclose()
