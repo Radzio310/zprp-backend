@@ -1,4 +1,5 @@
 # app/silesia.py
+import binascii
 from datetime import datetime
 from json import JSONDecodeError
 import base64
@@ -65,12 +66,17 @@ def _static_path_for_url(image_url: str) -> str:
 # -------------------------
 
 def _decrypt_field(enc_b64: str, private_key) -> str:
-    """
-    Odszyfrowuje Base64-RSA (PKCS1v15) na str (utf-8).
-    """
     cipher = base64.b64decode(enc_b64)
-    plain = private_key.decrypt(cipher, padding.PKCS1v15())
-    return plain.decode("utf-8")
+    plain_b64 = private_key.decrypt(cipher, padding.PKCS1v15()).decode("ascii", errors="strict")
+
+    try:
+        raw = base64.b64decode(plain_b64, validate=True)
+    except binascii.Error:
+        # fallback: jeśli kiedyś przyjdzie "stary" format
+        # (możesz też zamiast fallback zrobić HTTP 400)
+        return plain_b64
+
+    return raw.decode("utf-8", errors="strict")
 
 def _announcement_row_to_response(row) -> AnnouncementResponse:
     """
