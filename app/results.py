@@ -2381,22 +2381,107 @@ TIMELINE_SKIP_ROWS = {31, 57}
 TIMELINE_ROWS = [r for r in range(TIMELINE_START_ROW, TIMELINE_END_ROW + 1) if r not in TIMELINE_SKIP_ROWS]
 TIMELINE_MAX_ROWS = len(TIMELINE_ROWS)  # było 47, teraz będzie 45
 
+def _filter_protocol_events_for_timeline(protocol: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Zwraca listę eventów do przebiegu meczu po uwzględnieniu cofniętych bramek.
+
+    Reguła:
+    - zwykłe bramki (`goal`) trafiają do przebiegu,
+    - jeśli później pojawi się `goalRemoved` z extra.origTime wskazującym na tę bramkę,
+      to ta wcześniejsza bramka jest usuwana z przebiegu,
+    - `penaltyKickScored` / `penaltyKickMissed` zostają bez zmian.
+    """
+    if not isinstance(protocol, list):
+        return []
+
+    filtered: List[Dict[str, Any]] = []
+
+    for ev in protocol:
+        if not isinstance(ev, dict):
+            continue
+
+        ev_type = ev.get("type")
+
+        # Najpierw normalne zdarzenia, które realnie mogą być pokazane w przebiegu
+        if ev_type in ("goal", "penaltyKickScored", "penaltyKickMissed"):
+            filtered.append(ev)
+            continue
+
+        # Cofnięcie bramki - usuń wcześniej dodany odpowiadający event "goal"
+        if ev_type == "goalRemoved":
+            team = ev.get("team")
+            player = ev.get("player")
+            extra_raw = ev.get("extra")
+
+            orig_time = None
+            penalty_flag = False
+
+            if isinstance(extra_raw, str) and extra_raw.strip():
+                try:
+                    extra_obj = json.loads(extra_raw)
+                    if isinstance(extra_obj, dict):
+                        orig_time = extra_obj.get("origTime")
+                        penalty_flag = bool(extra_obj.get("penalty", False))
+                except Exception:
+                    pass
+            elif isinstance(extra_raw, dict):
+                orig_time = extra_raw.get("origTime")
+                penalty_flag = bool(extra_raw.get("penalty", False))
+
+            # Nas interesuje tylko cofnięcie zwykłej bramki, nie ewentualnych karnych
+            if penalty_flag:
+                continue
+
+            # Szukamy od końca ostatniego pasującego eventu "goal"
+            for i in range(len(filtered) - 1, -1, -1):
+                prev = filtered[i]
+                if not isinstance(prev, dict):
+                    continue
+                if prev.get("type") != "goal":
+                    continue
+                if prev.get("team") != team:
+                    continue
+                if prev.get("player") != player:
+                    continue
+
+                prev_time = prev.get("time")
+
+                # Preferuj dopasowanie po origTime, a jeśli go nie ma - po czasie goalRemoved
+                if orig_time is not None:
+                    if prev_time == orig_time:
+                        filtered.pop(i)
+                        break
+                else:
+                    if prev_time == ev.get("time"):
+                        filtered.pop(i)
+                        break
+
+    return filtered
+
 
 def _extract_timeline_events(data_json: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Zwraca (evs1, evs2) dla typów: goal, penaltyKickScored, penaltyKickMissed,
-    posortowane rosnąco po time (ms).
+    Zwraca (evs1, evs2) dla przebiegu meczu po odfiltrowaniu cofniętych bramek.
+    Uwzględnia typy:
+      - goal
+      - penaltyKickScored
+      - penaltyKickMissed
+    oraz usuwa z przebiegu te `goal`, które zostały później cofnięte przez `goalRemoved`.
     """
     prot = data_json.get("protocol") or []
+    filtered_protocol = _filter_protocol_events_for_timeline(prot)
+
     evs1: List[Dict[str, Any]] = []
     evs2: List[Dict[str, Any]] = []
 
-    for ev in prot:
+    for ev in filtered_protocol:
         if not isinstance(ev, dict):
             continue
+
         t = ev.get("type")
         if t not in ("goal", "penaltyKickScored", "penaltyKickMissed"):
             continue
+
         half = ev.get("half")
         if half == 1:
             evs1.append(ev)
