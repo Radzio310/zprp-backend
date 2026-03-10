@@ -1,4 +1,5 @@
 # app/silesia.py
+import asyncio
 import binascii
 from datetime import datetime
 from json import JSONDecodeError
@@ -22,6 +23,7 @@ from fastapi import (
 from sqlalchemy import select, insert, update, delete, func
 
 from app.db import database, announcements, silesia_offtimes
+from app.notify_utils import schedule_province_push
 from app.schemas import (
     # Announcements
     AddCommentRequest,
@@ -100,6 +102,35 @@ def _announcement_row_to_response(row) -> AnnouncementResponse:
         comments=comments,
     )
 
+
+# -------------------------
+# Push helpers
+# -------------------------
+
+async def _fire_ann_push(
+    prefix: str,
+    title: str,
+    content: str,
+    province: str,
+    ann_id: int,
+) -> None:
+    """Fire-and-forget: planuje powiadomienie dla województwa. Błędy tylko loguje."""
+    try:
+        short_title = title[:60] + ("…" if len(title) > 60 else "")
+        short_body = content[:140] + ("…" if len(content) > 140 else "")
+        await schedule_province_push(
+            province=province,
+            title=f"{prefix}: {short_title}",
+            body=short_body,
+            data={
+                "type": "announcement_new",
+                "announcement_id": ann_id,
+            },
+            seconds_from_now=60,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("[silesia] _fire_ann_push error: %s", e)
 
 # -------------------------
 # Routers
@@ -218,6 +249,12 @@ async def create_announcement(
     )
 
     record = await database.fetch_one(stmt)
+
+    # ← DODAJ (fire-and-forget, nie blokuje odpowiedzi 201)
+    asyncio.create_task(
+        _fire_ann_push("Nowe ogłoszenie", title_plain, content_plain, province_plain, record["id"])
+    )
+
     return _announcement_row_to_response(record)
 
 
@@ -295,8 +332,17 @@ async def update_announcement(
         .returning(announcements)
     )
     record = await database.fetch_one(stmt)
+
     if not record:
         raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    # ← DODAJ
+    ann_province = province if province is not None else record["province"]
+    ann_title    = title_plain if title_plain is not None else record["title"]
+    ann_content  = content_plain if content_plain is not None else record["content"]
+    asyncio.create_task(
+        _fire_ann_push("Zaktualizowane ogłoszenie", ann_title, ann_content, ann_province, ann_id)
+    )
 
     return _announcement_row_to_response(record)
 
