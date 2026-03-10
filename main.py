@@ -73,7 +73,7 @@ from app.beach.versions import router as beach_versions_router
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
 
-from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules
+from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures
 
 app = FastAPI(title="BAZA - API")
 
@@ -570,6 +570,25 @@ async def _cleanup_loop():
                 upserted = len(to_upsert)
 
             logger.info(f"👥 ProvinceJudges sync: upserted {upserted} records from login_records")
+
+            # 🧹 Signatures cleanup: usuń podpisy (DB + pliki) starsze niż 14 dni
+            cutoff_sig = datetime.now(timezone.utc) - timedelta(days=14)
+            old_sigs = await database.fetch_all(
+                select(signatures.c.id, signatures.c.image_url)
+                .where(signatures.c.created_at < cutoff_sig)
+            )
+            if old_sigs:
+                old_sig_ids = [r["id"] for r in old_sigs]
+                for r in old_sigs:
+                    from app.signatures import _delete_static_if_exists
+                    _delete_static_if_exists(r["image_url"])
+                await database.execute(
+                    delete(signatures).where(signatures.c.id.in_(old_sig_ids))
+                )
+            logger.info(
+                f"🧹 Signatures cleanup: removed {len(old_sigs)} signatures older than {cutoff_sig.isoformat()} UTC"
+            )
+
             # 🧩 Raz na dobę: scal duplikaty klubów w 'kontakty' (sędziów nie ruszamy)
             await refactor_club_contacts_once_per_utc_day()
 
