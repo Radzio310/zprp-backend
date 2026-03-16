@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # ZPRP application settings
     ZPRP_BASE_URL: str
 
+    # BEACH -> logowanie serwerowe do baza.zprp.pl
+    ZPRP_BEACH_USERNAME: str
+    ZPRP_BEACH_PASSWORD: str
+
     # Google OAuth2 Calendar
     GOOGLE_CLIENT_ID: str
     GOOGLE_CLIENT_SECRET: str

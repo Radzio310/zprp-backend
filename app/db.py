@@ -832,6 +832,51 @@ beach_app_versions = Table(
 
 Index("ix_beach_app_versions_to_show", beach_app_versions.c.to_show)
 
+# -------------------------
+# BEACH: teams (lokalna kopia drużyn plażowych)
+# -------------------------
+
+beach_teams = Table(
+    "beach_teams",
+    metadata,
+    # ID drużyny z baza.zprp.pl
+    Column("id", Integer, primary_key=True, autoincrement=False),
+
+    Column("team_name", String, nullable=False, index=True),
+
+    # np. "K" / "M"
+    Column("gender", String, nullable=True, index=True),
+    Column("gender_label", String, nullable=True),
+
+    # np. "1", "2", "3", "4"
+    Column("category_id", String, nullable=True, index=True),
+    Column("category", String, nullable=True, index=True),
+
+    # np. "4771"
+    Column("club_id", String, nullable=True, index=True),
+    Column("club", String, nullable=True, index=True),
+
+    # np. "14", "12"
+    Column("province_id", String, nullable=True, index=True),
+    Column("province", String, nullable=True, index=True),
+
+    # np. "7"
+    Column("season_id", String, nullable=True, index=True),
+    Column("season", String, nullable=True, index=True),
+
+    Column("contact_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("squad_url", Text, nullable=True),
+
+    # pomocniczo: skąd dane i kiedy były ostatnio synchronizowane
+    Column("source", String, nullable=False, server_default=text("'zprp'")),
+    Column("last_synced_at", DateTime(timezone=True), nullable=True),
+
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+Index("ix_beach_teams_name_gender", beach_teams.c.team_name, beach_teams.c.gender)
+Index("ix_beach_teams_filters", beach_teams.c.season_id, beach_teams.c.province_id, beach_teams.c.gender, beach_teams.c.category_id)
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

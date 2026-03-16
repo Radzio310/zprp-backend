@@ -1186,3 +1186,158 @@ class BeachUpdateVersionRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     to_show: Optional[bool] = None
+
+# ---------------------------- TEAMS (BEACH) ----------------------------
+
+class BeachTeamContact(BaseModel):
+    address: Optional[str] = None
+    postal_code: Optional[str] = None
+    city: Optional[str] = None
+    phone: Optional[str] = None
+    phone2: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    website: Optional[str] = None
+    raw_lines: List[str] = Field(default_factory=list)
+
+
+class BeachFilterOption(BaseModel):
+    id: str
+    label: str
+    selected: bool = False
+
+
+class BeachFilterGroup(BaseModel):
+    selected_id: Optional[str] = None
+    selected_label: Optional[str] = None
+    options: List[BeachFilterOption] = Field(default_factory=list)
+
+
+class BeachTeamsFiltersResponse(BaseModel):
+    seasons: BeachFilterGroup = Field(default_factory=BeachFilterGroup)
+    provinces: BeachFilterGroup = Field(default_factory=BeachFilterGroup)
+    categories: BeachFilterGroup = Field(default_factory=BeachFilterGroup)
+    clubs: BeachFilterGroup = Field(default_factory=BeachFilterGroup)
+    genders: BeachFilterGroup = Field(default_factory=BeachFilterGroup)
+
+class BeachTeamItem(BaseModel):
+    id: int
+    team_name: str
+
+    gender: Optional[str] = None
+    gender_label: Optional[str] = None
+
+    category_id: Optional[str] = None
+    category: Optional[str] = None
+
+    club_id: Optional[str] = None
+    club: Optional[str] = None
+
+    province_id: Optional[str] = None
+    province: Optional[str] = None
+
+    season_id: Optional[str] = None
+    season: Optional[str] = None
+
+    contact: BeachTeamContact = Field(default_factory=BeachTeamContact)
+    squad_url: Optional[str] = None
+
+    source: str = "zprp"
+    last_synced_at: Optional[datetime] = None
+
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class BeachTeamsListResponse(BaseModel):
+    teams: List[BeachTeamItem]
+
+
+class BeachTeamCreateRequest(BaseModel):
+    id: int
+    team_name: str = Field(..., min_length=1, max_length=255)
+
+    gender: Optional[str] = Field(None, max_length=10)
+    gender_label: Optional[str] = Field(None, max_length=100)
+
+    category_id: Optional[str] = Field(None, max_length=50)
+    category: Optional[str] = Field(None, max_length=120)
+
+    club_id: Optional[str] = Field(None, max_length=50)
+    club: Optional[str] = Field(None, max_length=255)
+
+    province_id: Optional[str] = Field(None, max_length=50)
+    province: Optional[str] = Field(None, max_length=50)
+
+    season_id: Optional[str] = Field(None, max_length=50)
+    season: Optional[str] = Field(None, max_length=50)
+
+    contact: Optional[BeachTeamContact] = None
+    squad_url: Optional[str] = None
+
+    source: Optional[str] = "manual"
+
+
+class BeachTeamUpdateRequest(BaseModel):
+    team_name: Optional[str] = Field(None, min_length=1, max_length=255)
+
+    gender: Optional[str] = Field(None, max_length=10)
+    gender_label: Optional[str] = Field(None, max_length=100)
+
+    category_id: Optional[str] = Field(None, max_length=50)
+    category: Optional[str] = Field(None, max_length=120)
+
+    club_id: Optional[str] = Field(None, max_length=50)
+    club: Optional[str] = Field(None, max_length=255)
+
+    province_id: Optional[str] = Field(None, max_length=50)
+    province: Optional[str] = Field(None, max_length=50)
+
+    season_id: Optional[str] = Field(None, max_length=50)
+    season: Optional[str] = Field(None, max_length=50)
+
+    contact: Optional[BeachTeamContact] = None
+    squad_url: Optional[str] = None
+
+    source: Optional[str] = None
+
+
+class BeachTeamPutRequest(BaseModel):
+    team_name: str = Field(..., min_length=1, max_length=255)
+
+    gender: Optional[str] = Field(None, max_length=10)
+    gender_label: Optional[str] = Field(None, max_length=100)
+
+    category_id: Optional[str] = Field(None, max_length=50)
+    category: Optional[str] = Field(None, max_length=120)
+
+    club_id: Optional[str] = Field(None, max_length=50)
+    club: Optional[str] = Field(None, max_length=255)
+
+    province_id: Optional[str] = Field(None, max_length=50)
+    province: Optional[str] = Field(None, max_length=50)
+
+    season_id: Optional[str] = Field(None, max_length=50)
+    season: Optional[str] = Field(None, max_length=50)
+
+    contact: BeachTeamContact = Field(default_factory=BeachTeamContact)
+    squad_url: Optional[str] = None
+
+    source: Optional[str] = "manual"
+
+
+class BeachTeamsSyncRequest(BaseModel):
+    season_id: Optional[str] = None
+    province_id: Optional[str] = None
+    gender: Optional[str] = None
+    category_id: Optional[str] = None
+    club_id: Optional[str] = None
+    name: Optional[str] = None
+    sort: Optional[str] = None
+
+
+class BeachTeamsSyncResponse(BaseModel):
+    success: bool = True
+    fetched: int = 0
+    upserted: int = 0
+    filters: Dict[str, Optional[str]] = Field(default_factory=dict)
