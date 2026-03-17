@@ -1353,4 +1353,4 @@ class BeachTeamsSyncResponse(BaseModel):
     success: bool = True
     fetched: int = 0
     upserted: int = 0
-    filters: BeachTeamsSyncFilters = Field(default_factory=BeachTeamsSyncFilters)
+    filters: BeachTeamsSyncFilters = Field(default_factory=BeachTeamsSyncFilters) # akceptuje boola
