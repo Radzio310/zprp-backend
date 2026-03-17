@@ -825,11 +825,11 @@ def _extract_team_title_and_meta_from_squad_table(table) -> Dict[str, Any]:
     Tytuł bierzemy z pierwszego wiersza głównej tabeli składu:
     <td colspan="20"><b>NAZWA</b> (KLUB) 2024/2025 - Senior</td>
     """
-    rows = table.find_all("tr", recursive=False)
+    rows = table.find_all("tr")
 
     title = ""
     if rows:
-        first_tds = rows[0].find_all("td", recursive=False)
+        first_tds = rows[0].find_all("td")
         if first_tds:
             title = _norm_space(first_tds[0].get_text(" ", strip=True))
 
@@ -856,77 +856,59 @@ def _extract_team_title_and_meta_from_squad_table(table) -> Dict[str, Any]:
 
 def _find_main_squad_table(soup: BeautifulSoup):
     """
-    Główna tabela zawodników to pierwsza sensowna tabela po menu,
-    która:
-    - ma pierwszy wiersz z jednym td[colspan] zawierającym tytuł drużyny,
-    - ma osobny wiersz nagłówków z kolumnami zawodników,
-    - zawiera linki do szczegółów zawodników.
+    Jednoznacznie znajduje tabelę zawodników po:
+    - linkach do szczegółów zawodników
+    - nagłówkach kolumn charakterystycznych dla składu
+    - opcjonalnie tytule drużyny w pierwszym wierszu
     """
-    tables = soup.find_all("table")
+    player_href_re = re.compile(r"[?&]a=zawodnicy(?:P)?[&].*b=szczegoly.*NrZawodnika=\d+", re.I)
 
-    for table in tables:
-        rows = table.find_all("tr", recursive=False)
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
         if len(rows) < 3:
             continue
 
-        # 1) pierwszy wiersz: tytuł drużyny, zwykle jeden td z colspan=20
-        first_tds = rows[0].find_all("td", recursive=False)
-        if len(first_tds) != 1:
+        table_text = _norm_space(table.get_text(" ", strip=True)).lower()
+
+        has_player_link = table.find("a", href=player_href_re) is not None
+        if not has_player_link:
             continue
 
-        colspan = (first_tds[0].get("colspan") or "").strip()
+        has_headers = (
+            "nazwisko" in table_text
+            and "imię" in table_text
+            and "nr koszulki" in table_text
+            and "licencja zprp" in table_text
+        )
+        if not has_headers:
+            continue
+
+        # dodatkowy plus: pierwszy wiersz zwykle jest tytułem drużyny
         first_row_text = _norm_space(rows[0].get_text(" ", strip=True))
-        if colspan != "20":
-            continue
-        if not re.search(r"\b\d{4}/\d{4}\b", first_row_text):
-            continue
+        if re.search(r"\b\d{4}/\d{4}\b", first_row_text):
+            return table
 
-        # 2) znajdź wiersz nagłówków zawodników
-        header_idx = None
-        for i, tr in enumerate(rows[1:], start=1):
-            row_text = _norm_space(tr.get_text(" ", strip=True)).lower()
-            if (
-                "lp" in row_text
-                and "nazwisko" in row_text
-                and "imię" in row_text
-                and "data ur." in row_text
-                and "pozycja w grze" in row_text
-                and "nr koszulki" in row_text
-                and "licencja zprp" in row_text
-                and "pokaż zawodników" in row_text
-            ):
-                header_idx = i
-                break
-
-        if header_idx is None:
-            continue
-
-        # 3) musi mieć co najmniej jeden wiersz zawodnika z linkiem do szczegółów
-        has_player_details = False
-        for tr in rows[header_idx + 1:]:
-            if tr.find("a", href=re.compile(r"[?&]a=zawodnicy[&].*b=szczegoly.*NrZawodnika=", re.I)):
-                has_player_details = True
-                break
-
-        if not has_player_details:
-            continue
-
+        # nawet jeśli tytuł nie przejdzie, sama kombinacja linków + headerów
+        # już jest wystarczająco jednoznaczna
         return table
 
     return None
 
 
 def _find_companions_table(soup: BeautifulSoup):
+    person_href_re = re.compile(r"[?&]a=osoba(?:P)?[&].*b=szczegoly.*NrOsoby=\d+", re.I)
+
     for table in soup.find_all("table"):
-        rows = table.find_all("tr", recursive=False)
+        rows = table.find_all("tr")
         if len(rows) < 2:
             continue
 
-        first_row_text = _norm_space(rows[0].get_text(" ", strip=True)).lower()
-        if "osoby towarzyszące" not in first_row_text:
-            continue
+        table_text = _norm_space(table.get_text(" ", strip=True)).lower()
 
-        if table.find("a", href=re.compile(r"\?a=osoba&b=szczegoly&NrOsoby=", re.I)):
+        has_title = "osoby towarzyszące" in table_text
+        has_person_link = table.find("a", href=person_href_re) is not None
+
+        if has_title and has_person_link:
             return table
 
     return None
@@ -1135,7 +1117,7 @@ def _parse_beach_team_squad_html(
 
     seen_player_ids: set[int] = set()
 
-    rows = main_table.find_all("tr", recursive=False)
+    rows = main_table.find_all("tr")
     historical_mode = False
 
     for tr in rows:
