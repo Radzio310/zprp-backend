@@ -876,34 +876,13 @@ def _find_beach_menu_anchor(soup: BeautifulSoup):
 
 
 def _collect_tables_after_menu(soup: BeautifulSoup) -> List[Any]:
-    """
-    Zbierz tylko te tabele, które występują po menu zawierającym link
-    'Drużyny PLAŻA'. Dzięki temu ignorujemy header, layout i inne tabele
-    przed właściwą treścią strony.
-    """
     menu_anchor = _find_beach_menu_anchor(soup)
     if not menu_anchor:
         return soup.find_all("table")
 
     tables: List[Any] = []
-    started = False
-
-    # idziemy po kolejnych elementach dokumentu od miejsca menu w dół
-    for node in menu_anchor.parents:
-        # pierwszy parent typu body/html nie daje sensownego przebiegu,
-        # więc tylko przygotowujemy punkt startowy
-        pass
-
-    current = menu_anchor
-    while current is not None:
-        current = current.find_next()
-
-        if current is None:
-            break
-
-        name = getattr(current, "name", None)
-        if name == "table":
-            tables.append(current)
+    for table in menu_anchor.find_all_next("table"):
+        tables.append(table)
 
     return tables
 
@@ -914,15 +893,15 @@ def _find_main_squad_table(soup: BeautifulSoup):
     candidates = []
 
     for table in _collect_tables_after_menu(soup):
-        rows = table.find_all("tr", recursive=False)
+        # tu MUSI być bez recursive=False, bo header siedzi w <form>
+        rows = table.find_all("tr")
         if len(rows) < 3:
             continue
 
-        first_row_tds = rows[0].find_all("td", recursive=False)
-        first_row_text = _row_text(rows[0])
+        first_row = rows[0]
+        first_row_tds = first_row.find_all("td", recursive=False)
+        first_row_text = _row_text(first_row)
 
-        # tabela zawodników musi zaczynać się od wiersza z nazwą drużyny
-        # w komórce colspan=20
         has_team_title_row = False
         if first_row_tds:
             first_td = first_row_tds[0]
@@ -933,15 +912,15 @@ def _find_main_squad_table(soup: BeautifulSoup):
         if not has_team_title_row:
             continue
 
-        # w jednym z pierwszych wierszy musi być header kolumn zawodników
+        # header może siedzieć w <form>, więc szukamy w całej tabeli
         header_row = None
-        for tr in rows[:6]:
+        for tr in rows[:8]:
             txt = _row_text(tr)
             if (
                 "lp" in txt
                 and "foto" in txt
                 and "nazwisko" in txt
-                and "imię" in txt
+                and ("imię" in txt or "imie" in txt)
                 and "nr koszulki" in txt
                 and "licencja zprp" in txt
             ):
@@ -951,7 +930,6 @@ def _find_main_squad_table(soup: BeautifulSoup):
         if header_row is None:
             continue
 
-        # musi istnieć co najmniej jeden prawdziwy wiersz zawodnika
         has_direct_player_row = False
         for tr in rows:
             if tr.find("a", href=player_href_re):
@@ -962,16 +940,12 @@ def _find_main_squad_table(soup: BeautifulSoup):
             continue
 
         score = 0
-
-        # mocny sygnał: poprawny tytuł drużyny z sezonem i kategorią
         if re.search(r"\b\d{4}/\d{4}\b", first_row_text):
             score += 5
         if "(" in first_row_text and ")" in first_row_text:
             score += 2
-        if any(x in first_row_text for x in ["senior", "junior", "młod", "mlod"]):
+        if any(x in first_row_text for x in ["senior", "junior", "mł", "ml"]):
             score += 2
-        if "osoby towarzyszące" not in first_row_text:
-            score += 1
 
         candidates.append((score, table))
 
@@ -994,38 +968,34 @@ def _find_companions_table(soup: BeautifulSoup, main_table=None):
         except ValueError:
             pass
 
-    candidates = []
-
     for table in tables:
-        rows = table.find_all("tr", recursive=False)
+        rows = table.find_all("tr")
         if len(rows) < 2:
             continue
 
-        first_row_tds = rows[0].find_all("td", recursive=False)
-        first_row_text = _row_text(rows[0])
+        first_row = rows[0]
+        first_row_tds = first_row.find_all("td", recursive=False)
+        first_row_text = _row_text(first_row)
 
-        has_companions_title = False
-        if first_row_tds:
-            first_td = first_row_tds[0]
-            colspan = (first_td.get("colspan") or "").strip()
-            if colspan == "6" and "osoby towarzyszące" in first_row_text:
-                has_companions_title = True
-
-        if not has_companions_title:
+        if not first_row_tds:
             continue
 
-        has_direct_person_row = False
-        for tr in rows[1:]:
-            if tr.find("a", href=person_href_re):
-                has_direct_person_row = True
-                break
+        first_td = first_row_tds[0]
+        colspan = (first_td.get("colspan") or "").strip()
 
+        if colspan != "6":
+            continue
+
+        if "osoby towarzyszące" not in first_row_text:
+            continue
+
+        has_direct_person_row = any(tr.find("a", href=person_href_re) for tr in rows[1:])
         if not has_direct_person_row:
             continue
 
-        candidates.append(table)
+        return table
 
-    return candidates[0] if candidates else None
+    return None
 
 
 def _extract_first_jersey_number(text: str) -> Optional[str]:
