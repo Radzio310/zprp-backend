@@ -1336,8 +1336,20 @@ class BeachTeamsSyncRequest(BaseModel):
     sort: Optional[str] = None
 
 
+class BeachTeamsSyncFilters(BaseModel):
+    season_id: Optional[str] = None
+    province_id: Optional[str] = None
+    gender: Optional[str] = None
+    category_id: Optional[str] = None
+    club_id: Optional[str] = None
+    name: Optional[str] = None
+    sort: Optional[str] = None
+    include_squads: bool = False
+    db_squad_columns: Dict[str, bool] = Field(default_factory=dict)
+
+
 class BeachTeamsSyncResponse(BaseModel):
     success: bool = True
     fetched: int = 0
     upserted: int = 0
-    filters: Dict[str, Optional[str]] = Field(default_factory=dict)
+    filters: BeachTeamsSyncFilters = Field(default_factory=BeachTeamsSyncFilters)
