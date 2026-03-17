@@ -82,9 +82,36 @@ def _build_beach_teams_url(
     return f"/index.php?{urlencode(params)}"
 
 logger = logging.getLogger(__name__)
+
+def _mask_secret(value: str, visible_prefix: int = 2, visible_suffix: int = 2) -> str:
+    v = value or ""
+    if not v:
+        return ""
+    if len(v) <= visible_prefix + visible_suffix:
+        return "*" * len(v)
+    return f"{v[:visible_prefix]}***{v[-visible_suffix:]}"
+
 async def _login_beach_client(settings: Settings) -> AsyncClient:
-    username = (settings.ZPRP_BEACH_USERNAME or "").strip()
-    password = (settings.ZPRP_BEACH_PASSWORD or "").strip()
+    raw_username = settings.ZPRP_BEACH_USERNAME or ""
+    raw_password = settings.ZPRP_BEACH_PASSWORD or ""
+
+    username = raw_username.strip()
+    password = raw_password.strip()
+
+    logger.warning(
+        "BEACH login env debug | base_url=%r | username=%r | username_raw=%r | username_len=%d | "
+        "password_masked=%r | password_raw_masked=%r | password_len=%d | "
+        "username_changed_by_strip=%r | password_changed_by_strip=%r",
+        settings.ZPRP_BASE_URL,
+        username,
+        raw_username,
+        len(username),
+        _mask_secret(password),
+        _mask_secret(raw_password),
+        len(password),
+        raw_username != username,
+        raw_password != password,
+    )
 
     if not username or not password:
         raise HTTPException(
@@ -99,33 +126,76 @@ async def _login_beach_client(settings: Settings) -> AsyncClient:
     )
 
     try:
+        login_payload = {
+            "login": username,
+            "haslo": password,
+            "from": "/index.php?",
+        }
+
+        logger.warning(
+            "BEACH login request payload | login=%r | haslo_masked=%r | from=%r",
+            login_payload["login"],
+            _mask_secret(login_payload["haslo"]),
+            login_payload["from"],
+        )
+
         resp_login, html_login = await fetch_with_correct_encoding(
             client,
             "/login.php",
             method="POST",
-            data={
-                "login": username,
-                "haslo": password,
-                "from": "/index.php?",
-            },
+            data=login_payload,
         )
 
         html_norm = (html_login or "").lower()
+        final_path = (resp_login.url.path or "").strip()
+        final_url = str(resp_login.url)
+        snippet = (html_login or "")[:1200]
 
-        # sukces logowania rozpoznajemy po treści strony po zalogowaniu
         login_ok = (
             "zalogowany:" in html_norm
             or "sesja wygaśnie za" in html_norm
             or "wyloguj" in html_norm
         )
 
-        if not login_ok:
-            final_path = (resp_login.url.path or "").strip()
-            final_url = str(resp_login.url)
-            snippet = (html_login or "")[:700]
+        invalid_credentials = (
+            "nieznany użytkownik lub hasło" in html_norm
+            or "spróbuj ponownie" in html_norm
+            or "sprobuj ponownie" in html_norm
+        )
 
+        logger.warning(
+            "BEACH login response | final_path=%r | final_url=%r | status=%r | login_ok=%r | invalid_credentials=%r",
+            final_path,
+            final_url,
+            getattr(resp_login, "status_code", None),
+            login_ok,
+            invalid_credentials,
+        )
+
+        if invalid_credentials:
             logger.error(
-                "BEACH login failed: final_path=%r final_url=%r snippet=%r",
+                "BEACH login rejected by ZPRP | login=%r | password_masked=%r | final_path=%r | final_url=%r | snippet=%r",
+                username,
+                _mask_secret(password),
+                final_path,
+                final_url,
+                snippet,
+            )
+            await client.aclose()
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Logowanie do baza.zprp.pl nie powiodło się: "
+                    "ZPRP zwróciło 'Nieznany użytkownik lub hasło'. "
+                    f"final_path={final_path!r}, final_url={final_url!r}, snippet={snippet!r}"
+                ),
+            )
+
+        if not login_ok:
+            logger.error(
+                "BEACH login failed without success markers | login=%r | password_masked=%r | final_path=%r | final_url=%r | snippet=%r",
+                username,
+                _mask_secret(password),
                 final_path,
                 final_url,
                 snippet,
@@ -141,13 +211,25 @@ async def _login_beach_client(settings: Settings) -> AsyncClient:
             )
 
         client.cookies.update(resp_login.cookies)
+
+        logger.warning(
+            "BEACH login success | login=%r | password_masked=%r | final_url=%r",
+            username,
+            _mask_secret(password),
+            final_url,
+        )
+
         return client
 
     except HTTPException:
         raise
     except Exception as e:
         await client.aclose()
-        logger.exception("BEACH login unexpected error")
+        logger.exception(
+            "BEACH login unexpected error | login=%r | password_masked=%r",
+            username,
+            _mask_secret(password),
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Błąd podczas logowania do baza.zprp.pl: {e}",
