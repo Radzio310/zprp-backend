@@ -132,24 +132,44 @@ async def _login_beach_client(settings: Settings) -> AsyncClient:
             "from": "/index.php?",
         }
 
+        encoded_body = urlencode(
+            login_payload,
+            encoding="iso-8859-2",
+            errors="strict",
+        )
+
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2",
+        }
+
         logger.warning(
-            "BEACH login request payload | login=%r | haslo_masked=%r | from=%r",
+            "BEACH login request payload | login=%r | haslo_masked=%r | from=%r | body=%r",
             login_payload["login"],
             _mask_secret(login_payload["haslo"]),
             login_payload["from"],
+            encoded_body,
         )
 
-        resp_login, html_login = await fetch_with_correct_encoding(
-            client,
+        logger.warning(
+            "BEACH login encoding debug | username_repr=%r | password_repr=%r | encoded_body=%r",
+            username,
+            password,
+            encoded_body,
+        )
+
+        resp_login = await client.request(
+            "POST",
             "/login.php",
-            method="POST",
-            data=login_payload,
+            content=encoded_body.encode("ascii"),
+            headers=headers,
         )
 
-        html_norm = (html_login or "").lower()
+        html_login = resp_login.content.decode("iso-8859-2", errors="replace")
+        html_norm = html_login.lower()
+
         final_path = (resp_login.url.path or "").strip()
         final_url = str(resp_login.url)
-        snippet = (html_login or "")[:1200]
+        snippet = html_login[:1200]
 
         login_ok = (
             "zalogowany:" in html_norm
@@ -200,7 +220,6 @@ async def _login_beach_client(settings: Settings) -> AsyncClient:
                 final_url,
                 snippet,
             )
-
             await client.aclose()
             raise HTTPException(
                 status_code=401,
