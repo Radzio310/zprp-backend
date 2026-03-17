@@ -93,7 +93,10 @@ def _extract_year_highlight_validity(td, season_end_year: Optional[int]) -> Tupl
         return None, None
 
     license_number = None
-    m_num = re.search(r"\b([A-Z]?/?\d{4,}/\d{2})\b", text, re.I)
+
+    # zawodnik: P/0118/24
+    # osoba towarzysząca: 0046/24
+    m_num = re.search(r"\b([A-Z]/\d{3,}/\d{2}|\d{3,}/\d{2})\b", text, re.I)
     if m_num:
         license_number = m_num.group(1)
 
@@ -101,22 +104,22 @@ def _extract_year_highlight_validity(td, season_end_year: Optional[int]) -> Tupl
         return license_number, None
 
     target_year = str(season_end_year)
-    valid = False
 
+    # szukamy zielonego highlightu z rokiem końca sezonu
     for font in td.find_all("font"):
         year_txt = _norm_space(font.get_text(" ", strip=True))
-        style = (font.get("style") or "").replace(" ", "").lower()
+        style = (font.get("style") or "").lower()
+        style_compact = re.sub(r"\s+", "", style)
 
         is_green = (
-            "background:#00ff00" in style
-            or "background-color:#00ff00" in style
+            "#00ff00" in style_compact
+            or "rgb(0,255,0)" in style_compact
         )
 
         if year_txt == target_year and is_green:
-            valid = True
-            break
+            return license_number, True
 
-    return license_number, valid
+    return license_number, False
 
 
 def _extract_text_lines_from_cell(td) -> List[str]:
@@ -834,7 +837,8 @@ def _extract_team_title_and_meta_from_squad_table(table) -> Dict[str, Any]:
     team_display = None
     club_display = None
 
-    m = re.search(r"^(.*?)\s+\((.*?)\)\s+(\d{4}/\d{4})\s*-\s*(.+)$", title)
+    # np. "Akademia Handballu Ruch Chorzów (Akademia Handballu Ruch Chorzów) 2024/2025 - Junior mł."
+    m = re.search(r"^(.*?)\s+\((.*?)\)\s+(\d{4}/\d{4})\s*-\s*(.+?)(?:\s+OSIĄGNIĘTO.*)?$", title, re.I)
     if m:
         team_display = _norm_space(m.group(1))
         club_display = _norm_space(m.group(2))
@@ -854,23 +858,89 @@ def _row_text(tr) -> str:
     return _norm_space(tr.get_text(" ", strip=True)).lower()
 
 
+def _find_beach_menu_anchor(soup: BeautifulSoup):
+    """
+    Znajdź kotwicę menu PLAŻA. Interesuje nas link 'Drużyny PLAŻA',
+    bo dopiero po tym menu zaczyna się właściwa treść składu.
+    """
+    for a in soup.find_all("a", href=True):
+        text = _norm_space(a.get_text(" ", strip=True)).lower()
+        href = (a.get("href") or "").lower()
+        if (
+            "drużyny plaża" in text
+            or "druzyny plaza" in text
+            or "a=zespolyp" in href
+        ):
+            return a
+    return None
+
+
+def _collect_tables_after_menu(soup: BeautifulSoup) -> List[Any]:
+    """
+    Zbierz tylko te tabele, które występują po menu zawierającym link
+    'Drużyny PLAŻA'. Dzięki temu ignorujemy header, layout i inne tabele
+    przed właściwą treścią strony.
+    """
+    menu_anchor = _find_beach_menu_anchor(soup)
+    if not menu_anchor:
+        return soup.find_all("table")
+
+    tables: List[Any] = []
+    started = False
+
+    # idziemy po kolejnych elementach dokumentu od miejsca menu w dół
+    for node in menu_anchor.parents:
+        # pierwszy parent typu body/html nie daje sensownego przebiegu,
+        # więc tylko przygotowujemy punkt startowy
+        pass
+
+    current = menu_anchor
+    while current is not None:
+        current = current.find_next()
+
+        if current is None:
+            break
+
+        name = getattr(current, "name", None)
+        if name == "table":
+            tables.append(current)
+
+    return tables
+
+
 def _find_main_squad_table(soup: BeautifulSoup):
     player_href_re = re.compile(r"[?&]a=zawodnicy(?:P)?[&].*b=szczegoly.*NrZawodnika=\d+", re.I)
 
     candidates = []
 
-    for table in soup.find_all("table"):
+    for table in _collect_tables_after_menu(soup):
         rows = table.find_all("tr", recursive=False)
         if len(rows) < 3:
             continue
 
+        first_row_tds = rows[0].find_all("td", recursive=False)
         first_row_text = _row_text(rows[0])
 
+        # tabela zawodników musi zaczynać się od wiersza z nazwą drużyny
+        # w komórce colspan=20
+        has_team_title_row = False
+        if first_row_tds:
+            first_td = first_row_tds[0]
+            colspan = (first_td.get("colspan") or "").strip()
+            if colspan == "20" and first_td.find("b"):
+                has_team_title_row = True
+
+        if not has_team_title_row:
+            continue
+
+        # w jednym z pierwszych wierszy musi być header kolumn zawodników
         header_row = None
         for tr in rows[:6]:
             txt = _row_text(tr)
             if (
-                "nazwisko" in txt
+                "lp" in txt
+                and "foto" in txt
+                and "nazwisko" in txt
                 and "imię" in txt
                 and "nr koszulki" in txt
                 and "licencja zprp" in txt
@@ -881,6 +951,7 @@ def _find_main_squad_table(soup: BeautifulSoup):
         if header_row is None:
             continue
 
+        # musi istnieć co najmniej jeden prawdziwy wiersz zawodnika
         has_direct_player_row = False
         for tr in rows:
             if tr.find("a", href=player_href_re):
@@ -891,11 +962,15 @@ def _find_main_squad_table(soup: BeautifulSoup):
             continue
 
         score = 0
+
+        # mocny sygnał: poprawny tytuł drużyny z sezonem i kategorią
         if re.search(r"\b\d{4}/\d{4}\b", first_row_text):
-            score += 3
-        if "senior" in first_row_text or "junior" in first_row_text:
-            score += 1
-        if rows and rows[0].find("td", attrs={"colspan": True}):
+            score += 5
+        if "(" in first_row_text and ")" in first_row_text:
+            score += 2
+        if any(x in first_row_text for x in ["senior", "junior", "młod", "mlod"]):
+            score += 2
+        if "osoby towarzyszące" not in first_row_text:
             score += 1
 
         candidates.append((score, table))
@@ -907,19 +982,36 @@ def _find_main_squad_table(soup: BeautifulSoup):
     return candidates[0][1]
 
 
-def _find_companions_table(soup: BeautifulSoup):
+def _find_companions_table(soup: BeautifulSoup, main_table=None):
     person_href_re = re.compile(r"[?&]a=osoba(?:P)?[&].*b=szczegoly.*NrOsoby=\d+", re.I)
+
+    tables = _collect_tables_after_menu(soup)
+
+    if main_table is not None:
+        try:
+            start_idx = tables.index(main_table) + 1
+            tables = tables[start_idx:]
+        except ValueError:
+            pass
 
     candidates = []
 
-    for table in soup.find_all("table"):
+    for table in tables:
         rows = table.find_all("tr", recursive=False)
         if len(rows) < 2:
             continue
 
+        first_row_tds = rows[0].find_all("td", recursive=False)
         first_row_text = _row_text(rows[0])
 
-        if "osoby towarzyszące" not in first_row_text:
+        has_companions_title = False
+        if first_row_tds:
+            first_td = first_row_tds[0]
+            colspan = (first_td.get("colspan") or "").strip()
+            if colspan == "6" and "osoby towarzyszące" in first_row_text:
+                has_companions_title = True
+
+        if not has_companions_title:
             continue
 
         has_direct_person_row = False
@@ -1131,6 +1223,18 @@ def _parse_beach_team_squad_html(
 
     meta = _extract_team_title_and_meta_from_squad_table(main_table)
     season_end_year = _season_end_year_from_label(meta.get("season_label"))
+    if season_end_year is None:
+        title = meta.get("title") or ""
+        m_year = re.search(r"\b(\d{4})/(\d{4})\b", title)
+        if m_year:
+            season_end_year = int(m_year.group(2))
+    logger.warning(
+        "BEACH squad parse | squad_url=%r | meta_title=%r | season_label=%r | season_end_year=%r",
+        squad_url,
+        meta.get("title"),
+        meta.get("season_label"),
+        season_end_year,
+    )
 
     # fallback: spróbuj ustalić sezon po parametrze Filtr_sezon z URL i z ukrytych inputów,
     # ale tylko jeśli z tytułu nie udało się go odczytać
@@ -1171,7 +1275,7 @@ def _parse_beach_team_squad_html(
             if hist:
                 historical_players.append(hist)
 
-    companions_table = _find_companions_table(soup)
+    companions_table = _find_companions_table(soup, main_table=main_table)
     if companions_table:
         for tr in companions_table.find_all("tr", recursive=False):
             comp = _parse_companion_row(tr, season_end_year=season_end_year)
