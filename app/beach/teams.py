@@ -83,7 +83,10 @@ def _extract_year_highlight_validity(td, season_end_year: Optional[int]) -> Tupl
     """
     Z kolumny licencji pobiera:
     - numer licencji
-    - ważność dla sezonu (po zielonym roku końcowym sezonu)
+    - ważność dla sezonu:
+      True  -> jeśli rok końcowy sezonu jest zaznaczony na zielono
+      False -> jeśli znamy rok końcowy sezonu, ale nie ma zielonego oznaczenia tego roku
+      None  -> jeśli nie udało się ustalić roku końcowego sezonu
     """
     text = _norm_space(td.get_text(" ", strip=True))
     if not text:
@@ -94,14 +97,24 @@ def _extract_year_highlight_validity(td, season_end_year: Optional[int]) -> Tupl
     if m_num:
         license_number = m_num.group(1)
 
-    valid = False if season_end_year else None
-    if season_end_year is not None:
-        for font in td.find_all("font"):
-            bg = (font.get("style") or "").lower()
-            year_txt = _norm_space(font.get_text(" ", strip=True))
-            if year_txt == str(season_end_year) and "#00ff00" in bg:
-                valid = True
-                break
+    if season_end_year is None:
+        return license_number, None
+
+    target_year = str(season_end_year)
+    valid = False
+
+    for font in td.find_all("font"):
+        year_txt = _norm_space(font.get_text(" ", strip=True))
+        style = (font.get("style") or "").replace(" ", "").lower()
+
+        is_green = (
+            "background:#00ff00" in style
+            or "background-color:#00ff00" in style
+        )
+
+        if year_txt == target_year and is_green:
+            valid = True
+            break
 
     return license_number, valid
 
@@ -808,8 +821,18 @@ def _extract_person_id_from_details_url(details_url: Optional[str]) -> Optional[
 
 
 def _extract_team_title_and_meta_from_squad_table(table) -> Dict[str, Any]:
-    first_tr = table.find("tr", recursive=False)
-    title = _norm_space(first_tr.get_text(" ", strip=True)) if first_tr else ""
+    """
+    Tytuł bierzemy z pierwszego wiersza głównej tabeli składu:
+    <td colspan="20"><b>NAZWA</b> (KLUB) 2024/2025 - Senior</td>
+    """
+    rows = table.find_all("tr", recursive=False)
+
+    title = ""
+    if rows:
+        first_tds = rows[0].find_all("td", recursive=False)
+        if first_tds:
+            title = _norm_space(first_tds[0].get_text(" ", strip=True))
+
     season_label = None
     category_label = None
     team_display = None
@@ -832,30 +855,63 @@ def _extract_team_title_and_meta_from_squad_table(table) -> Dict[str, Any]:
 
 
 def _find_main_squad_table(soup: BeautifulSoup):
-    for table in soup.find_all("table"):
+    """
+    Główna tabela zawodników to pierwsza sensowna tabela po menu,
+    która:
+    - ma pierwszy wiersz z jednym td[colspan] zawierającym tytuł drużyny,
+    - ma osobny wiersz nagłówków z kolumnami zawodników,
+    - zawiera linki do szczegółów zawodników.
+    """
+    tables = soup.find_all("table")
+
+    for table in tables:
         rows = table.find_all("tr", recursive=False)
-        if len(rows) < 2:
+        if len(rows) < 3:
             continue
 
-        header_row = None
-        for tr in rows:
+        # 1) pierwszy wiersz: tytuł drużyny, zwykle jeden td z colspan=20
+        first_tds = rows[0].find_all("td", recursive=False)
+        if len(first_tds) != 1:
+            continue
+
+        colspan = (first_tds[0].get("colspan") or "").strip()
+        first_row_text = _norm_space(rows[0].get_text(" ", strip=True))
+        if colspan != "20":
+            continue
+        if not re.search(r"\b\d{4}/\d{4}\b", first_row_text):
+            continue
+
+        # 2) znajdź wiersz nagłówków zawodników
+        header_idx = None
+        for i, tr in enumerate(rows[1:], start=1):
             row_text = _norm_space(tr.get_text(" ", strip=True)).lower()
             if (
-                "nazwisko" in row_text
+                "lp" in row_text
+                and "nazwisko" in row_text
                 and "imię" in row_text
                 and "data ur." in row_text
                 and "pozycja w grze" in row_text
                 and "nr koszulki" in row_text
                 and "licencja zprp" in row_text
+                and "pokaż zawodników" in row_text
             ):
-                header_row = tr
+                header_idx = i
                 break
 
-        if not header_row:
+        if header_idx is None:
             continue
 
-        if table.find("a", href=re.compile(r"\?a=zawodnicy&b=szczegoly&NrZawodnika=", re.I)):
-            return table
+        # 3) musi mieć co najmniej jeden wiersz zawodnika z linkiem do szczegółów
+        has_player_details = False
+        for tr in rows[header_idx + 1:]:
+            if tr.find("a", href=re.compile(r"[?&]a=zawodnicy[&].*b=szczegoly.*NrZawodnika=", re.I)):
+                has_player_details = True
+                break
+
+        if not has_player_details:
+            continue
+
+        return table
 
     return None
 
@@ -1062,6 +1118,16 @@ def _parse_beach_team_squad_html(
 
     meta = _extract_team_title_and_meta_from_squad_table(main_table)
     season_end_year = _season_end_year_from_label(meta.get("season_label"))
+
+    # fallback: spróbuj ustalić sezon po parametrze Filtr_sezon z URL i z ukrytych inputów,
+    # ale tylko jeśli z tytułu nie udało się go odczytać
+    if season_end_year is None:
+        hidden_season = soup.find("input", attrs={"name": "Filtr_sezon"})
+        hidden_season_val = (hidden_season.get("value") or "").strip() if hidden_season else None
+        if hidden_season_val:
+            # tutaj nie znamy mapy id->etykieta sezonu, więc zostawiamy tylko fallback miękki
+            # sezon_end_year zostaje None, ale meta nadal będzie poprawne jeśli title został odczytany
+            pass
 
     players: List[Dict[str, Any]] = []
     historical_players: List[Dict[str, Any]] = []
