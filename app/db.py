@@ -867,6 +867,12 @@ beach_teams = Table(
     Column("contact_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("squad_url", Text, nullable=True),
 
+    # lokalnie zapisane składy
+    Column("roster_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("companions_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("historical_players_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("squad_last_synced_at", DateTime(timezone=True), nullable=True),
+
     # pomocniczo: skąd dane i kiedy były ostatnio synchronizowane
     Column("source", String, nullable=False, server_default=text("'zprp'")),
     Column("last_synced_at", DateTime(timezone=True), nullable=True),
@@ -876,7 +882,13 @@ beach_teams = Table(
 )
 
 Index("ix_beach_teams_name_gender", beach_teams.c.team_name, beach_teams.c.gender)
-Index("ix_beach_teams_filters", beach_teams.c.season_id, beach_teams.c.province_id, beach_teams.c.gender, beach_teams.c.category_id)
+Index(
+    "ix_beach_teams_filters",
+    beach_teams.c.season_id,
+    beach_teams.c.province_id,
+    beach_teams.c.gender,
+    beach_teams.c.category_id,
+)
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

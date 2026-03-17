@@ -1220,6 +1220,7 @@ class BeachTeamsFiltersResponse(BaseModel):
     clubs: BeachFilterGroup = Field(default_factory=BeachFilterGroup)
     genders: BeachFilterGroup = Field(default_factory=BeachFilterGroup)
 
+
 class BeachTeamItem(BaseModel):
     id: int
     team_name: str
