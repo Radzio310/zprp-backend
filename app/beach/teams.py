@@ -1,11 +1,10 @@
 import re
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
 import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode, parse_qs, urlparse
 
 from bs4 import BeautifulSoup
-from databases import Database
 from fastapi import APIRouter, Depends, HTTPException, Query
 from httpx import AsyncClient
 from sqlalchemy import and_, delete, func, select, update
@@ -24,13 +23,13 @@ from app.schemas import (
     BeachTeamsSyncResponse,
     BeachTeamUpdateRequest,
 )
-from app.utils import fetch_with_correct_encoding
 
 router = APIRouter(prefix="/beach/teams", tags=["Beach Teams"])
+logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# Helpers: login / URL / normalize
+# Helpers: basic
 # =========================================================
 
 def _now_utc() -> datetime:
@@ -59,30 +58,6 @@ def _abs_index_url(path_or_query: str) -> str:
     return f"/index.php?{s}"
 
 
-def _build_beach_teams_url(
-    *,
-    season_id: Optional[str] = None,
-    province_id: Optional[str] = None,
-    gender: Optional[str] = None,
-    category_id: Optional[str] = None,
-    club_id: Optional[str] = None,
-    name: Optional[str] = None,
-    sort: Optional[str] = None,
-) -> str:
-    params = {
-        "a": "zespolyP",
-        "Filtr_sezon": season_id or "",
-        "Filtr_woj": province_id or "",
-        "Filtr_plec": gender or "",
-        "Filtr_kategoria": category_id or "",
-        "Filtr_klub": club_id or "",
-        "Nazwa": name or "",
-        "sort": sort or "",
-    }
-    return f"/index.php?{urlencode(params)}"
-
-logger = logging.getLogger(__name__)
-
 def _mask_secret(value: str, visible_prefix: int = 2, visible_suffix: int = 2) -> str:
     v = value or ""
     if not v:
@@ -90,6 +65,116 @@ def _mask_secret(value: str, visible_prefix: int = 2, visible_suffix: int = 2) -
     if len(v) <= visible_prefix + visible_suffix:
         return "*" * len(v)
     return f"{v[:visible_prefix]}***{v[-visible_suffix:]}"
+
+
+def _table_has_column(col_name: str) -> bool:
+    return col_name in getattr(beach_teams.c, "keys", lambda: [])()
+
+
+def _season_end_year_from_label(season_label: Optional[str]) -> Optional[int]:
+    s = _norm_space(season_label or "")
+    m = re.search(r"(\d{4})\s*/\s*(\d{4})", s)
+    if m:
+        return int(m.group(2))
+    return None
+
+
+def _extract_year_highlight_validity(td, season_end_year: Optional[int]) -> Tuple[Optional[str], Optional[bool]]:
+    """
+    Z kolumny licencji pobiera:
+    - numer licencji
+    - ważność dla sezonu (po zielonym roku końcowym sezonu)
+    """
+    text = _norm_space(td.get_text(" ", strip=True))
+    if not text:
+        return None, None
+
+    license_number = None
+    m_num = re.search(r"\b([A-Z]?/?\d{4,}/\d{2})\b", text, re.I)
+    if m_num:
+        license_number = m_num.group(1)
+
+    valid = False if season_end_year else None
+    if season_end_year is not None:
+        for font in td.find_all("font"):
+            bg = (font.get("style") or "").lower()
+            year_txt = _norm_space(font.get_text(" ", strip=True))
+            if year_txt == str(season_end_year) and "#00ff00" in bg:
+                valid = True
+                break
+
+    return license_number, valid
+
+
+def _extract_text_lines_from_cell(td) -> List[str]:
+    text = td.get_text("\n", strip=True)
+    lines = [_norm_space(x) for x in text.split("\n")]
+    return [x for x in lines if x]
+
+
+def _extract_email_from_text(value: Optional[str]) -> Optional[str]:
+    s = _norm_space(value or "")
+    if not s:
+        return None
+    m = re.search(r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})", s, re.I)
+    return m.group(1) if m else None
+
+
+def _looks_like_email(value: Optional[str]) -> bool:
+    return _extract_email_from_text(value) is not None
+
+
+def _clean_postal_code(value: Optional[str]) -> Optional[str]:
+    s = _norm_space(value or "")
+    if not s:
+        return None
+    m = re.search(r"\b\d{2}-\d{3}\b", s)
+    return m.group(0) if m else None
+
+
+def _clean_city_candidate(value: Optional[str]) -> Optional[str]:
+    s = _norm_space(value or "")
+    if not s:
+        return None
+
+    if _looks_like_email(s):
+        return None
+
+    s = re.sub(r"^\s*\d{2}-\d{3}\s*", "", s).strip()
+    s = re.sub(r"^\s*\d{5}\s+", "", s).strip()
+
+    if not s:
+        return None
+
+    low = s.lower().strip(" :")
+    if low in {"mail", "www", "tel", "tel2", "uwagi"}:
+        return None
+
+    if re.fullmatch(r"[\d\s\-.,/]+", s):
+        return None
+
+    return s or None
+
+
+def _split_postal_and_city_from_line(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    s = _norm_space(value or "")
+    if not s:
+        return None, None
+
+    m = re.search(r"\b(?P<postal>\d{2}-\d{3})\b\s+(?P<city>.+)$", s)
+    if m:
+        return _clean_postal_code(m.group("postal")), _clean_city_candidate(m.group("city"))
+
+    m2 = re.search(r"^\s*(?P<postal>\d{5})\s+(?P<city>.+)$", s)
+    if m2:
+        return None, _clean_city_candidate(m2.group("city"))
+
+    return None, _clean_city_candidate(s)
+
+
+# =========================================================
+# Helpers: login
+# =========================================================
 
 async def _login_beach_client(settings: Settings) -> AsyncClient:
     raw_username = settings.ZPRP_BEACH_USERNAME or ""
@@ -147,13 +232,6 @@ async def _login_beach_client(settings: Settings) -> AsyncClient:
             login_payload["login"],
             _mask_secret(login_payload["haslo"]),
             login_payload["from"],
-            encoded_body,
-        )
-
-        logger.warning(
-            "BEACH login encoding debug | username_repr=%r | password_repr=%r | encoded_body=%r",
-            username,
-            password,
             encoded_body,
         )
 
@@ -256,8 +334,31 @@ async def _login_beach_client(settings: Settings) -> AsyncClient:
 
 
 # =========================================================
-# Helpers: filters metadata from page
+# Helpers: filters / list URLs
 # =========================================================
+
+def _build_beach_teams_url(
+    *,
+    season_id: Optional[str] = None,
+    province_id: Optional[str] = None,
+    gender: Optional[str] = None,
+    category_id: Optional[str] = None,
+    club_id: Optional[str] = None,
+    name: Optional[str] = None,
+    sort: Optional[str] = None,
+) -> str:
+    params = {
+        "a": "zespolyP",
+        "Filtr_sezon": season_id or "",
+        "Filtr_woj": province_id or "",
+        "Filtr_plec": gender or "",
+        "Filtr_kategoria": category_id or "",
+        "Filtr_klub": club_id or "",
+        "Nazwa": name or "",
+        "sort": sort or "",
+    }
+    return f"/index.php?{urlencode(params)}"
+
 
 def _parse_select_options(select_tag) -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -303,6 +404,7 @@ def _extract_filters_meta(soup: BeautifulSoup) -> Dict[str, Dict[str, str]]:
         "club_map": club_map,
         "gender_map": gender_map,
     }
+
 
 def _extract_selected_options_map(select_tag) -> Dict[str, Any]:
     out: Dict[str, Any] = {
@@ -360,7 +462,7 @@ def _parse_beach_filters_html(html: str) -> Dict[str, Any]:
 
 
 # =========================================================
-# Helpers: table parsing
+# Helpers: teams list parsing
 # =========================================================
 
 def _find_beach_teams_table(soup: BeautifulSoup):
@@ -379,12 +481,6 @@ def _find_beach_teams_table(soup: BeautifulSoup):
         ):
             return table
     return None
-
-
-def _extract_text_lines_from_cell(td) -> List[str]:
-    text = td.get_text("\n", strip=True)
-    lines = [_norm_space(x) for x in text.split("\n")]
-    return [x for x in lines if x]
 
 
 def _parse_contact_cell(td) -> Dict[str, Any]:
@@ -408,8 +504,7 @@ def _parse_contact_cell(td) -> Dict[str, Any]:
         elif txt and ("http://" in href or "https://" in href or href.startswith("http")):
             website = txt or href
 
-    # fallback email / website z linii tekstowych
-    for line in lines:
+    for idx, line in enumerate(lines):
         ll = line.lower()
 
         if ll.startswith("tel2:"):
@@ -421,8 +516,13 @@ def _parse_contact_cell(td) -> Dict[str, Any]:
             continue
 
         if ll.startswith("mail:"):
-            if not email:
-                email = line.split(":", 1)[1].strip() if ":" in line else None
+            rhs = line.split(":", 1)[1].strip() if ":" in line else ""
+            if rhs and not email:
+                email = _extract_email_from_text(rhs) or rhs
+            elif not rhs and not email and idx + 1 < len(lines):
+                maybe = _extract_email_from_text(lines[idx + 1])
+                if maybe:
+                    email = maybe
             continue
 
         if ll.startswith("uwagi:"):
@@ -430,29 +530,60 @@ def _parse_contact_cell(td) -> Dict[str, Any]:
             continue
 
         if ll.startswith("www:"):
-            website = line.split(":", 1)[1].strip() if ":" in line else None
+            rhs = line.split(":", 1)[1].strip() if ":" in line else ""
+            website = rhs or None
             continue
 
-    # adres + kod + miasto
+        if not email:
+            maybe = _extract_email_from_text(line)
+            if maybe:
+                email = maybe
+
     normal_lines: List[str] = []
     for line in lines:
         ll = line.lower()
         if ll.startswith(("tel", "mail:", "uwagi:", "www:")):
             continue
+        if _looks_like_email(line):
+            continue
         normal_lines.append(line)
 
     if normal_lines:
-        address = normal_lines[0]
+        first_postal, first_city = _split_postal_and_city_from_line(normal_lines[0])
+
+        if first_postal:
+            postal_code = first_postal
+        if first_city:
+            city = first_city
+
+        if not first_postal and not first_city:
+            address = _clean_city_candidate(normal_lines[0]) or normal_lines[0]
 
     for line in normal_lines[1:]:
-        m = re.search(r"(?P<postal>\d{2}-\d{3})\s+(?P<city>.+)", line)
-        if m:
-            postal_code = _norm_space(m.group("postal"))
-            city = _norm_space(m.group("city"))
-            break
+        found_postal, found_city = _split_postal_and_city_from_line(line)
 
-    if not city and len(normal_lines) >= 2:
-        city = normal_lines[1]
+        if found_postal and not postal_code:
+            postal_code = found_postal
+
+        if found_city and not city:
+            city = found_city
+
+    if not city and address:
+        maybe_city = _clean_city_candidate(address)
+        if maybe_city and re.fullmatch(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż.\- ]+", maybe_city):
+            city = maybe_city
+
+    if address and not postal_code:
+        found_postal, found_city = _split_postal_and_city_from_line(address)
+        if found_postal:
+            postal_code = found_postal
+            if found_city and not city:
+                city = found_city
+            address = None
+
+    city = _clean_city_candidate(city)
+    if city and _looks_like_email(city):
+        city = None
 
     return {
         "address": address,
@@ -518,14 +649,12 @@ def _parse_team_row(
     contact = _parse_contact_cell(tds[8])
     squad_url = _extract_squad_url(tds[9])
 
-    # ID-e filtrów najpewniej znamy tylko z aktywnych filtrów albo map nazw.
     category_id = selected_category_id
     season_id = selected_season_id
     province_id = selected_province_id
     club_id = selected_club_id
     gender_id = selected_gender
 
-    # jeśli filtr nie był ustawiony, spróbuj znaleźć po labelach
     if not category_id and category:
         for k, v in category_map.items():
             if v.strip().lower() == category.strip().lower():
@@ -540,7 +669,6 @@ def _parse_team_row(
 
     if not province_id and province:
         for k, v in province_map.items():
-            # mapy mają np. "WP", "SL", ...
             if v.strip().lower() == province.strip().lower():
                 province_id = k
                 break
@@ -623,12 +751,356 @@ def _parse_beach_teams_html(html: str) -> List[Dict[str, Any]]:
 
 
 # =========================================================
-# Helpers: item conversion / local query filters
+# Helpers: squad parsing
+# =========================================================
+
+def _extract_photo_url_from_img(img_tag) -> Optional[str]:
+    if not img_tag:
+        return None
+
+    onmouseover = img_tag.get("onMouseOver") or img_tag.get("onmouseover") or ""
+    m = re.search(r"foto/[^'\"<> ]+\.(?:jpg|jpeg|png|webp)", onmouseover, re.I)
+    if m:
+        return m.group(0)
+
+    src = (img_tag.get("src") or "").strip()
+    if src:
+        return src
+    return None
+
+
+def _extract_query_param_from_href(href: str, key: str) -> Optional[str]:
+    try:
+        parsed = urlparse(href)
+        q = parse_qs(parsed.query)
+        vals = q.get(key) or []
+        if vals:
+            return vals[0]
+    except Exception:
+        return None
+    return None
+
+
+def _extract_player_details_url(td) -> Optional[str]:
+    for a in td.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if "a=zawodnicy" in href and "b=szczegoly" in href and "NrZawodnika=" in href:
+            return _abs_index_url(href)
+    return None
+
+
+def _extract_person_details_url(td) -> Optional[str]:
+    for a in td.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if "a=osoba" in href and "b=szczegoly" in href and "NrOsoby=" in href:
+            return _abs_index_url(href)
+    return None
+
+
+def _extract_player_id_from_details_url(details_url: Optional[str]) -> Optional[int]:
+    if not details_url:
+        return None
+    val = _extract_query_param_from_href(details_url, "NrZawodnika")
+    if val and val.isdigit():
+        return int(val)
+    return None
+
+
+def _extract_person_id_from_details_url(details_url: Optional[str]) -> Optional[int]:
+    if not details_url:
+        return None
+    val = _extract_query_param_from_href(details_url, "NrOsoby")
+    if val and val.isdigit():
+        return int(val)
+    return None
+
+
+def _extract_team_title_and_meta_from_squad_table(table) -> Dict[str, Any]:
+    first_tr = table.find("tr")
+    title = _norm_space(first_tr.get_text(" ", strip=True)) if first_tr else ""
+    season_label = None
+    category_label = None
+    team_display = None
+    club_display = None
+
+    m = re.search(r"^(.*?)\s+\((.*?)\)\s+(\d{4}/\d{4})\s*-\s*(.+)$", title)
+    if m:
+        team_display = _norm_space(m.group(1))
+        club_display = _norm_space(m.group(2))
+        season_label = _norm_space(m.group(3))
+        category_label = _norm_space(m.group(4))
+
+    return {
+        "title": title,
+        "team_display": team_display,
+        "club_display": club_display,
+        "season_label": season_label,
+        "category_label": category_label,
+    }
+
+
+def _find_main_squad_table(soup: BeautifulSoup):
+    for table in soup.find_all("table"):
+        txt = _norm_space(table.get_text(" ", strip=True)).lower()
+        if (
+            "licencja zprp" in txt
+            and "nr koszulki" in txt
+            and "pozycja w grze" in txt
+            and "szczegóły" in txt
+        ):
+            return table
+    return None
+
+
+def _find_companions_table(soup: BeautifulSoup):
+    for table in soup.find_all("table"):
+        txt = _norm_space(table.get_text(" ", strip=True)).lower()
+        if "osoby towarzyszące" in txt and "szczegóły" in txt:
+            return table
+    return None
+
+
+def _extract_first_jersey_number(text: str) -> Optional[str]:
+    s = _norm_space(text or "")
+    m = re.search(r"nr\s+koszulki\s+(\d+)", s, re.I)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _extract_transfer_context(text: str) -> Dict[str, Any]:
+    s = _norm_space(text or "")
+
+    parent_club_name = None
+    loan_to_club_name = None
+
+    m_club = re.search(r"Klub:\s*(.+?)(?:użyczenie szkoleniowe do:|uzyczenie szkoleniowe do:|$)", s, re.I)
+    if m_club:
+        parent_club_name = _norm_space(m_club.group(1))
+
+    m_loan = re.search(r"(?:użyczenie szkoleniowe do:|uzyczenie szkoleniowe do:)\s*(.+?)$", s, re.I)
+    if m_loan:
+        loan_to_club_name = _norm_space(m_loan.group(1))
+
+    return {
+        "parent_club_name": parent_club_name,
+        "loan_to_club_name": loan_to_club_name,
+        "is_transferred": bool(parent_club_name or loan_to_club_name),
+    }
+
+
+def _extract_other_team_url(td) -> Optional[str]:
+    for a in td.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if "a=zespolyP" in href and "b=sklad" in href and "Filtr_zespol=" in href:
+            return _abs_index_url(href)
+    return None
+
+
+def _parse_player_row(
+    tr,
+    *,
+    season_end_year: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    tds = tr.find_all("td", recursive=False)
+    if len(tds) < 13:
+        return None
+
+    lp = _norm_space(tds[0].get_text(" ", strip=True))
+    if not re.fullmatch(r"\d+", lp):
+        return None
+
+    img_tag = tds[1].find("img")
+    photo_url = _extract_photo_url_from_img(img_tag)
+
+    last_name = _norm_space(tds[2].get_text(" ", strip=True)) or None
+    first_name = _norm_space(tds[3].get_text(" ", strip=True)) or None
+    country = _norm_space(tds[4].get_text(" ", strip=True)) or None
+
+    birth_text = _norm_space(tds[5].get_text(" ", strip=True))
+    birth_date = None
+    m_birth = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", birth_text)
+    if m_birth:
+        birth_date = m_birth.group(1)
+
+    position = _norm_space(tds[7].get_text(" ", strip=True)) or None
+
+    jersey_text = _norm_space(tds[8].get_text(" ", strip=True))
+    jersey_number = _extract_first_jersey_number(jersey_text)
+
+    license_number, license_valid = _extract_year_highlight_validity(tds[9], season_end_year)
+
+    status_td = tds[10]
+    status_text = _norm_space(status_td.get_text(" ", strip=True)).lower()
+    status_bg = (status_td.get("bgcolor") or "").strip().lower()
+
+    other_team_url = _extract_other_team_url(tds[11])
+    details_url = _extract_player_details_url(tds[12])
+    player_id = _extract_player_id_from_details_url(details_url)
+
+    transfer_ctx = _extract_transfer_context(jersey_text)
+    is_transferred = transfer_ctx["is_transferred"] or "dopisz2" in status_text or status_bg == "#ffff00"
+
+    return {
+        "player_id": player_id,
+        "lp": int(lp),
+        "photo_url": photo_url,
+        "last_name": last_name,
+        "first_name": first_name,
+        "country": country,
+        "birth_date": birth_date,
+        "position": position,
+        "jersey_number": jersey_number,
+        "zprp_license_number": license_number,
+        "zprp_license_valid_for_season": license_valid,
+        "is_transferred": is_transferred,
+        "parent_club_name": transfer_ctx["parent_club_name"],
+        "loan_to_club_name": transfer_ctx["loan_to_club_name"],
+        "other_team_url": other_team_url,
+        "details_url": details_url,
+    }
+
+
+def _parse_historical_player_row(tr) -> Optional[Dict[str, Any]]:
+    tds = tr.find_all("td", recursive=False)
+    if len(tds) < 12:
+        return None
+
+    lp = _norm_space(tds[0].get_text(" ", strip=True))
+    if not re.fullmatch(r"\d+", lp):
+        return None
+
+    img_tag = tds[1].find("img")
+    photo_url = _extract_photo_url_from_img(img_tag)
+
+    last_name = _norm_space(tds[2].get_text(" ", strip=True)) or None
+    first_name = _norm_space(tds[3].get_text(" ", strip=True)) or None
+    country = _norm_space(tds[4].get_text(" ", strip=True)) or None
+
+    birth_text = _norm_space(tds[5].get_text(" ", strip=True))
+    birth_date = None
+    m_birth = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", birth_text)
+    if m_birth:
+        birth_date = m_birth.group(1)
+
+    source_club = _norm_space(tds[7].get_text(" ", strip=True)) or None
+    other_team_url = _extract_other_team_url(tds[10])
+    details_url = _extract_player_details_url(tds[11])
+    player_id = _extract_player_id_from_details_url(details_url)
+
+    return {
+        "player_id": player_id,
+        "lp": int(lp),
+        "photo_url": photo_url,
+        "last_name": last_name,
+        "first_name": first_name,
+        "country": country,
+        "birth_date": birth_date,
+        "source_club_name": source_club,
+        "other_team_url": other_team_url,
+        "details_url": details_url,
+        "is_historical": True,
+    }
+
+
+def _parse_companion_row(
+    tr,
+    *,
+    season_end_year: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    tds = tr.find_all("td", recursive=False)
+    if len(tds) < 5:
+        return None
+
+    full_name = _norm_space(tds[0].get_text(" ", strip=True))
+    role = _norm_space(tds[1].get_text(" ", strip=True))
+    if not full_name or not role:
+        return None
+
+    beach_license = _norm_space(tds[2].get_text(" ", strip=True)) or None
+    license_number, license_valid = _extract_year_highlight_validity(tds[3], season_end_year)
+    details_url = _extract_person_details_url(tds[4])
+    person_id = _extract_person_id_from_details_url(details_url)
+
+    return {
+        "person_id": person_id,
+        "full_name": full_name,
+        "role": role,
+        "beach_license": beach_license,
+        "license_number": license_number,
+        "license_valid_for_season": license_valid,
+        "details_url": details_url,
+    }
+
+
+def _parse_beach_team_squad_html(
+    html: str,
+    *,
+    squad_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    main_table = _find_main_squad_table(soup)
+    if not main_table:
+        raise HTTPException(status_code=404, detail="Nie znaleziono tabeli składu drużyny")
+
+    meta = _extract_team_title_and_meta_from_squad_table(main_table)
+    season_end_year = _season_end_year_from_label(meta.get("season_label"))
+
+    players: List[Dict[str, Any]] = []
+    historical_players: List[Dict[str, Any]] = []
+    companions: List[Dict[str, Any]] = []
+
+    seen_player_ids: set[int] = set()
+
+    rows = main_table.find_all("tr", recursive=False)
+    historical_mode = False
+
+    for tr in rows:
+        txt = _norm_space(tr.get_text(" ", strip=True))
+
+        if "Zawodnicy historycznie związani z klubem drużyny" in txt:
+            historical_mode = True
+            continue
+
+        if not historical_mode:
+            player = _parse_player_row(tr, season_end_year=season_end_year)
+            if player:
+                pid = player.get("player_id")
+                if pid is None or pid not in seen_player_ids:
+                    if pid is not None:
+                        seen_player_ids.add(pid)
+                    players.append(player)
+        else:
+            hist = _parse_historical_player_row(tr)
+            if hist:
+                historical_players.append(hist)
+
+    companions_table = _find_companions_table(soup)
+    if companions_table:
+        for tr in companions_table.find_all("tr", recursive=False):
+            comp = _parse_companion_row(tr, season_end_year=season_end_year)
+            if comp:
+                companions.append(comp)
+
+    return {
+        "team_meta": {
+            **meta,
+            "season_end_year": season_end_year,
+            "squad_url": squad_url,
+        },
+        "players": players,
+        "historical_players": historical_players,
+        "companions": companions,
+    }
+
+
+# =========================================================
+# Helpers: DB conversion / update
 # =========================================================
 
 def _row_to_item(row) -> BeachTeamItem:
     data = dict(row)
-
     return BeachTeamItem(
         id=data["id"],
         team_name=data["team_name"],
@@ -678,9 +1150,46 @@ def _build_local_filters(
     return clauses
 
 
+async def _maybe_save_team_squad_to_db(team_id: int, squad_data: Dict[str, Any]) -> bool:
+    values: Dict[str, Any] = {}
+    if _table_has_column("roster_json"):
+        values["roster_json"] = squad_data.get("players") or []
+    if _table_has_column("companions_json"):
+        values["companions_json"] = squad_data.get("companions") or []
+    if _table_has_column("historical_players_json"):
+        values["historical_players_json"] = squad_data.get("historical_players") or []
+    if _table_has_column("squad_last_synced_at"):
+        values["squad_last_synced_at"] = _now_utc()
+
+    if not values:
+        logger.warning(
+            "BEACH team squad save skipped | team_id=%r | reason=%r",
+            team_id,
+            "missing roster_json/companions_json/historical_players_json/squad_last_synced_at columns",
+        )
+        return False
+
+    await database.execute(
+        update(beach_teams)
+        .where(beach_teams.c.id == team_id)
+        .values(**values)
+    )
+    return True
+
+
 # =========================================================
-# Live fetch from ZPRP
+# Helpers: live fetch
 # =========================================================
+
+async def _fetch_squad_for_team(
+    client: AsyncClient,
+    *,
+    squad_url: str,
+) -> Dict[str, Any]:
+    resp = await client.get(squad_url, cookies=client.cookies)
+    html = resp.content.decode("iso-8859-2", errors="replace")
+    return _parse_beach_team_squad_html(html, squad_url=squad_url)
+
 
 async def _fetch_teams_from_zprp(
     settings: Settings,
@@ -692,6 +1201,7 @@ async def _fetch_teams_from_zprp(
     club_id: Optional[str] = None,
     name: Optional[str] = None,
     sort: Optional[str] = None,
+    include_squads: bool = False,
 ) -> List[Dict[str, Any]]:
     client = await _login_beach_client(settings)
     try:
@@ -704,15 +1214,27 @@ async def _fetch_teams_from_zprp(
             name=name,
             sort=sort,
         )
-        _, html = await fetch_with_correct_encoding(
-            client,
-            url,
-            method="GET",
-            cookies=client.cookies,
-        )
-        return _parse_beach_teams_html(html)
+        resp = await client.get(url, cookies=client.cookies)
+        html = resp.content.decode("iso-8859-2", errors="replace")
+        teams = _parse_beach_teams_html(html)
+
+        if include_squads:
+            for team in teams:
+                squad_url = team.get("squad_url")
+                if not squad_url:
+                    team["squad"] = None
+                    continue
+                try:
+                    team["squad"] = await _fetch_squad_for_team(client, squad_url=squad_url)
+                except Exception as e:
+                    logger.exception("BEACH squad fetch failed | team_id=%r | squad_url=%r", team.get("id"), squad_url)
+                    team["squad_error"] = str(e)
+                    team["squad"] = None
+
+        return teams
     finally:
         await client.aclose()
+
 
 async def _fetch_filters_from_zprp(
     settings: Settings,
@@ -734,13 +1256,48 @@ async def _fetch_filters_from_zprp(
             name=None,
             sort=None,
         )
-        _, html = await fetch_with_correct_encoding(
-            client,
-            url,
-            method="GET",
-            cookies=client.cookies,
-        )
+        resp = await client.get(url, cookies=client.cookies)
+        html = resp.content.decode("iso-8859-2", errors="replace")
         return _parse_beach_filters_html(html)
+    finally:
+        await client.aclose()
+
+
+async def _fetch_single_team_from_zprp(
+    settings: Settings,
+    *,
+    team_id: int,
+    season_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
+    if row and dict(row).get("squad_url"):
+        team = _row_to_item(row)
+        client = await _login_beach_client(settings)
+        try:
+            squad = await _fetch_squad_for_team(client, squad_url=team.squad_url)
+            return {
+                "team": team.model_dump(),
+                "squad": squad,
+            }
+        finally:
+            await client.aclose()
+
+    fetched = await _fetch_teams_from_zprp(
+        settings,
+        season_id=season_id,
+        include_squads=False,
+    )
+    match = next((t for t in fetched if t["id"] == team_id), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Nie znaleziono drużyny w ZPRP")
+
+    client = await _login_beach_client(settings)
+    try:
+        squad = await _fetch_squad_for_team(client, squad_url=match["squad_url"])
+        return {
+            "team": match,
+            "squad": squad,
+        }
     finally:
         await client.aclose()
 
@@ -782,6 +1339,28 @@ async def get_local_beach_team(team_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Drużyna nie istnieje")
     return _row_to_item(row)
+
+
+@router.get("/local/{team_id}/squad")
+async def get_local_beach_team_squad(team_id: int):
+    row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Drużyna nie istnieje")
+
+    data = dict(row)
+    return {
+        "team": _row_to_item(row).model_dump(),
+        "players": data.get("roster_json") if _table_has_column("roster_json") else None,
+        "companions": data.get("companions_json") if _table_has_column("companions_json") else None,
+        "historical_players": data.get("historical_players_json") if _table_has_column("historical_players_json") else None,
+        "squad_last_synced_at": data.get("squad_last_synced_at") if _table_has_column("squad_last_synced_at") else None,
+        "db_has_squad_columns": {
+            "roster_json": _table_has_column("roster_json"),
+            "companions_json": _table_has_column("companions_json"),
+            "historical_players_json": _table_has_column("historical_players_json"),
+            "squad_last_synced_at": _table_has_column("squad_last_synced_at"),
+        },
+    }
 
 
 @router.post("/local", response_model=BeachTeamItem)
@@ -902,6 +1481,7 @@ async def list_beach_teams_from_zprp(
     club_id: Optional[str] = Query(None),
     name: Optional[str] = Query(None),
     sort: Optional[str] = Query(None),
+    include_squads: bool = Query(False, description="Czy pobierać też składy drużyn"),
     settings: Settings = Depends(get_settings),
 ):
     teams = await _fetch_teams_from_zprp(
@@ -913,8 +1493,10 @@ async def list_beach_teams_from_zprp(
         club_id=club_id,
         name=name,
         sort=sort,
+        include_squads=include_squads,
     )
 
+    # stary endpoint zachowuje stary response_model
     items = [
         BeachTeamItem(
             id=t["id"],
@@ -939,6 +1521,32 @@ async def list_beach_teams_from_zprp(
     return BeachTeamsListResponse(teams=items)
 
 
+@router.get("/zprp/full")
+async def list_beach_teams_full_from_zprp(
+    season_id: Optional[str] = Query(None),
+    province_id: Optional[str] = Query(None),
+    gender: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
+    club_id: Optional[str] = Query(None),
+    name: Optional[str] = Query(None),
+    sort: Optional[str] = Query(None),
+    include_squads: bool = Query(False),
+    settings: Settings = Depends(get_settings),
+):
+    teams = await _fetch_teams_from_zprp(
+        settings,
+        season_id=season_id,
+        province_id=province_id,
+        gender=gender,
+        category_id=category_id,
+        club_id=club_id,
+        name=name,
+        sort=sort,
+        include_squads=include_squads,
+    )
+    return {"teams": teams}
+
+
 @router.get("/zprp/filters", response_model=BeachTeamsFiltersResponse)
 async def get_beach_teams_filters_from_zprp(
     season_id: Optional[str] = Query(None),
@@ -958,6 +1566,62 @@ async def get_beach_teams_filters_from_zprp(
     )
     return BeachTeamsFiltersResponse(**data)
 
+
+@router.get("/zprp/squad")
+async def get_beach_team_squad_from_zprp(
+    team_id: Optional[int] = Query(None),
+    squad_url: Optional[str] = Query(None),
+    season_id: Optional[str] = Query(None),
+    province_id: Optional[str] = Query(None),
+    gender: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
+    club_id: Optional[str] = Query(None),
+    name: Optional[str] = Query(None),
+    sort: Optional[str] = Query(None),
+    settings: Settings = Depends(get_settings),
+):
+    if squad_url:
+        client = await _login_beach_client(settings)
+        try:
+            squad = await _fetch_squad_for_team(client, squad_url=_abs_index_url(squad_url))
+            return {"team": None, "squad": squad}
+        finally:
+            await client.aclose()
+
+    if team_id is not None:
+        return await _fetch_single_team_from_zprp(
+            settings,
+            team_id=team_id,
+            season_id=season_id,
+        )
+
+    teams = await _fetch_teams_from_zprp(
+        settings,
+        season_id=season_id,
+        province_id=province_id,
+        gender=gender,
+        category_id=category_id,
+        club_id=club_id,
+        name=name,
+        sort=sort,
+        include_squads=False,
+    )
+
+    if len(teams) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Podaj team_id albo taki zestaw filtrów, który zwraca dokładnie 1 drużynę.",
+        )
+
+    match = teams[0]
+    client = await _login_beach_client(settings)
+    try:
+        squad = await _fetch_squad_for_team(client, squad_url=match["squad_url"])
+        return {"team": match, "squad": squad}
+    finally:
+        await client.aclose()
+
+
 # =========================================================
 # Sync ZPRP -> local DB
 # =========================================================
@@ -965,6 +1629,7 @@ async def get_beach_teams_filters_from_zprp(
 @router.post("/local/sync", response_model=BeachTeamsSyncResponse)
 async def sync_beach_teams_to_local(
     req: BeachTeamsSyncRequest,
+    include_squads: bool = Query(False, description="Czy podczas sync pobierać też składy"),
     settings: Settings = Depends(get_settings),
 ):
     fetched = await _fetch_teams_from_zprp(
@@ -976,50 +1641,78 @@ async def sync_beach_teams_to_local(
         club_id=req.club_id,
         name=req.name,
         sort=req.sort,
+        include_squads=include_squads,
     )
 
     now = _now_utc()
     upserted = 0
 
+    save_squad_columns = {
+        "roster_json": _table_has_column("roster_json"),
+        "companions_json": _table_has_column("companions_json"),
+        "historical_players_json": _table_has_column("historical_players_json"),
+        "squad_last_synced_at": _table_has_column("squad_last_synced_at"),
+    }
+
     for item in fetched:
-        stmt = pg_insert(beach_teams).values(
-            id=item["id"],
-            team_name=item["team_name"],
-            gender=item.get("gender"),
-            gender_label=item.get("gender_label"),
-            category_id=item.get("category_id"),
-            category=item.get("category"),
-            club_id=item.get("club_id"),
-            club=item.get("club"),
-            province_id=item.get("province_id"),
-            province=item.get("province"),
-            season_id=item.get("season_id"),
-            season=item.get("season"),
-            contact_json=item.get("contact") or {},
-            squad_url=item.get("squad_url"),
-            source="zprp",
-            last_synced_at=now,
-        ).on_conflict_do_update(
+        values = {
+            "id": item["id"],
+            "team_name": item["team_name"],
+            "gender": item.get("gender"),
+            "gender_label": item.get("gender_label"),
+            "category_id": item.get("category_id"),
+            "category": item.get("category"),
+            "club_id": item.get("club_id"),
+            "club": item.get("club"),
+            "province_id": item.get("province_id"),
+            "province": item.get("province"),
+            "season_id": item.get("season_id"),
+            "season": item.get("season"),
+            "contact_json": item.get("contact") or {},
+            "squad_url": item.get("squad_url"),
+            "source": "zprp",
+            "last_synced_at": now,
+        }
+
+        set_values = {
+            "team_name": item["team_name"],
+            "gender": item.get("gender"),
+            "gender_label": item.get("gender_label"),
+            "category_id": item.get("category_id"),
+            "category": item.get("category"),
+            "club_id": item.get("club_id"),
+            "club": item.get("club"),
+            "province_id": item.get("province_id"),
+            "province": item.get("province"),
+            "season_id": item.get("season_id"),
+            "season": item.get("season"),
+            "contact_json": item.get("contact") or {},
+            "squad_url": item.get("squad_url"),
+            "source": "zprp",
+            "last_synced_at": now,
+            "updated_at": func.now(),
+        }
+
+        squad = item.get("squad")
+        if include_squads and squad:
+            if save_squad_columns["roster_json"]:
+                values["roster_json"] = squad.get("players") or []
+                set_values["roster_json"] = squad.get("players") or []
+            if save_squad_columns["companions_json"]:
+                values["companions_json"] = squad.get("companions") or []
+                set_values["companions_json"] = squad.get("companions") or []
+            if save_squad_columns["historical_players_json"]:
+                values["historical_players_json"] = squad.get("historical_players") or []
+                set_values["historical_players_json"] = squad.get("historical_players") or []
+            if save_squad_columns["squad_last_synced_at"]:
+                values["squad_last_synced_at"] = now
+                set_values["squad_last_synced_at"] = now
+
+        stmt = pg_insert(beach_teams).values(**values).on_conflict_do_update(
             index_elements=[beach_teams.c.id],
-            set_={
-                "team_name": item["team_name"],
-                "gender": item.get("gender"),
-                "gender_label": item.get("gender_label"),
-                "category_id": item.get("category_id"),
-                "category": item.get("category"),
-                "club_id": item.get("club_id"),
-                "club": item.get("club"),
-                "province_id": item.get("province_id"),
-                "province": item.get("province"),
-                "season_id": item.get("season_id"),
-                "season": item.get("season"),
-                "contact_json": item.get("contact") or {},
-                "squad_url": item.get("squad_url"),
-                "source": "zprp",
-                "last_synced_at": now,
-                "updated_at": func.now(),
-            },
+            set_=set_values,
         )
+
         await database.execute(stmt)
         upserted += 1
 
@@ -1035,5 +1728,59 @@ async def sync_beach_teams_to_local(
             "club_id": req.club_id,
             "name": req.name,
             "sort": req.sort,
+            "include_squads": include_squads,
+            "db_squad_columns": save_squad_columns,
         },
     )
+
+
+@router.post("/local/sync/squad")
+async def sync_single_beach_team_squad_to_local(
+    team_id: int = Query(...),
+    season_id: Optional[str] = Query(None),
+    settings: Settings = Depends(get_settings),
+):
+    payload = await _fetch_single_team_from_zprp(
+        settings,
+        team_id=team_id,
+        season_id=season_id,
+    )
+
+    team = payload["team"]
+    squad = payload["squad"]
+
+    exists = await database.fetch_one(select(beach_teams.c.id).where(beach_teams.c.id == team_id))
+    if not exists:
+        base_values = {
+            "id": team["id"],
+            "team_name": team["team_name"],
+            "gender": team.get("gender"),
+            "gender_label": team.get("gender_label"),
+            "category_id": team.get("category_id"),
+            "category": team.get("category"),
+            "club_id": team.get("club_id"),
+            "club": team.get("club"),
+            "province_id": team.get("province_id"),
+            "province": team.get("province"),
+            "season_id": team.get("season_id"),
+            "season": team.get("season"),
+            "contact_json": team.get("contact") or {},
+            "squad_url": team.get("squad_url"),
+            "source": "zprp",
+            "last_synced_at": _now_utc(),
+        }
+        await database.execute(pg_insert(beach_teams).values(**base_values).on_conflict_do_nothing())
+
+    saved = await _maybe_save_team_squad_to_db(team_id, squad)
+
+    return {
+        "success": True,
+        "team_id": team_id,
+        "saved_to_db": saved,
+        "team": team,
+        "squad_counts": {
+            "players": len(squad.get("players") or []),
+            "companions": len(squad.get("companions") or []),
+            "historical_players": len(squad.get("historical_players") or []),
+        },
+    }
