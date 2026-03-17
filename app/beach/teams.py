@@ -2,6 +2,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
+import logging
 
 from bs4 import BeautifulSoup
 from databases import Database
@@ -80,10 +81,10 @@ def _build_beach_teams_url(
     }
     return f"/index.php?{urlencode(params)}"
 
-
+logger = logging.getLogger(__name__)
 async def _login_beach_client(settings: Settings) -> AsyncClient:
-    username = (getattr(settings, "ZPRP_BEACH_USERNAME", None) or "").strip()
-    password = (getattr(settings, "ZPRP_BEACH_PASSWORD", None) or "").strip()
+    username = (settings.ZPRP_BEACH_USERNAME or "").strip()
+    password = (settings.ZPRP_BEACH_PASSWORD or "").strip()
 
     if not username or not password:
         raise HTTPException(
@@ -97,19 +98,60 @@ async def _login_beach_client(settings: Settings) -> AsyncClient:
         timeout=45.0,
     )
 
-    resp_login, _ = await fetch_with_correct_encoding(
-        client,
-        "/login.php",
-        method="POST",
-        data={"login": username, "haslo": password, "from": "/index.php?"},
-    )
+    try:
+        resp_login, html_login = await fetch_with_correct_encoding(
+            client,
+            "/login.php",
+            method="POST",
+            data={
+                "login": username,
+                "haslo": password,
+                "from": "/index.php?",
+            },
+        )
 
-    if "/index.php" not in resp_login.url.path:
+        html_norm = (html_login or "").lower()
+
+        # sukces logowania rozpoznajemy po treści strony po zalogowaniu
+        login_ok = (
+            "zalogowany:" in html_norm
+            or "sesja wygaśnie za" in html_norm
+            or "wyloguj" in html_norm
+        )
+
+        if not login_ok:
+            final_path = (resp_login.url.path or "").strip()
+            final_url = str(resp_login.url)
+            snippet = (html_login or "")[:700]
+
+            logger.error(
+                "BEACH login failed: final_path=%r final_url=%r snippet=%r",
+                final_path,
+                final_url,
+                snippet,
+            )
+
+            await client.aclose()
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Logowanie do baza.zprp.pl nie powiodło się. "
+                    f"final_path={final_path!r}, final_url={final_url!r}, snippet={snippet!r}"
+                ),
+            )
+
+        client.cookies.update(resp_login.cookies)
+        return client
+
+    except HTTPException:
+        raise
+    except Exception as e:
         await client.aclose()
-        raise HTTPException(status_code=401, detail="Logowanie do baza.zprp.pl nie powiodło się")
-
-    client.cookies.update(resp_login.cookies)
-    return client
+        logger.exception("BEACH login unexpected error")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd podczas logowania do baza.zprp.pl: {e}",
+        )
 
 
 # =========================================================
