@@ -549,15 +549,7 @@ def _parse_contact_cell(td) -> Dict[str, Any]:
         normal_lines.append(line)
 
     if normal_lines:
-        first_postal, first_city = _split_postal_and_city_from_line(normal_lines[0])
-
-        if first_postal:
-            postal_code = first_postal
-        if first_city:
-            city = first_city
-
-        if not first_postal and not first_city:
-            address = _clean_city_candidate(normal_lines[0]) or normal_lines[0]
+        address = normal_lines[0]
 
     for line in normal_lines[1:]:
         found_postal, found_city = _split_postal_and_city_from_line(line)
@@ -568,17 +560,17 @@ def _parse_contact_cell(td) -> Dict[str, Any]:
         if found_city and not city:
             city = found_city
 
-    if not city and address:
-        maybe_city = _clean_city_candidate(address)
-        if maybe_city and re.fullmatch(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż.\- ]+", maybe_city):
-            city = maybe_city
-
     if address and not postal_code:
         found_postal, found_city = _split_postal_and_city_from_line(address)
         if found_postal:
             postal_code = found_postal
             if found_city and not city:
                 city = found_city
+            address = None
+
+    if not city and address and len(normal_lines) == 1:
+        if not re.search(r"\d", address):
+            city = _clean_city_candidate(address)
             address = None
 
     city = _clean_city_candidate(city)
@@ -816,7 +808,7 @@ def _extract_person_id_from_details_url(details_url: Optional[str]) -> Optional[
 
 
 def _extract_team_title_and_meta_from_squad_table(table) -> Dict[str, Any]:
-    first_tr = table.find("tr")
+    first_tr = table.find("tr", recursive=False)
     title = _norm_space(first_tr.get_text(" ", strip=True)) if first_tr else ""
     season_label = None
     category_label = None
@@ -841,22 +833,46 @@ def _extract_team_title_and_meta_from_squad_table(table) -> Dict[str, Any]:
 
 def _find_main_squad_table(soup: BeautifulSoup):
     for table in soup.find_all("table"):
-        txt = _norm_space(table.get_text(" ", strip=True)).lower()
-        if (
-            "licencja zprp" in txt
-            and "nr koszulki" in txt
-            and "pozycja w grze" in txt
-            and "szczegóły" in txt
-        ):
+        rows = table.find_all("tr", recursive=False)
+        if len(rows) < 2:
+            continue
+
+        header_row = None
+        for tr in rows:
+            row_text = _norm_space(tr.get_text(" ", strip=True)).lower()
+            if (
+                "nazwisko" in row_text
+                and "imię" in row_text
+                and "data ur." in row_text
+                and "pozycja w grze" in row_text
+                and "nr koszulki" in row_text
+                and "licencja zprp" in row_text
+            ):
+                header_row = tr
+                break
+
+        if not header_row:
+            continue
+
+        if table.find("a", href=re.compile(r"\?a=zawodnicy&b=szczegoly&NrZawodnika=", re.I)):
             return table
+
     return None
 
 
 def _find_companions_table(soup: BeautifulSoup):
     for table in soup.find_all("table"):
-        txt = _norm_space(table.get_text(" ", strip=True)).lower()
-        if "osoby towarzyszące" in txt and "szczegóły" in txt:
+        rows = table.find_all("tr", recursive=False)
+        if len(rows) < 2:
+            continue
+
+        first_row_text = _norm_space(rows[0].get_text(" ", strip=True)).lower()
+        if "osoby towarzyszące" not in first_row_text:
+            continue
+
+        if table.find("a", href=re.compile(r"\?a=osoba&b=szczegoly&NrOsoby=", re.I)):
             return table
+
     return None
 
 
@@ -1472,7 +1488,7 @@ async def delete_local_beach_team(team_id: int):
 # Live endpoints from ZPRP
 # =========================================================
 
-@router.get("/zprp", response_model=BeachTeamsListResponse)
+@router.get("/zprp")
 async def list_beach_teams_from_zprp(
     season_id: Optional[str] = Query(None),
     province_id: Optional[str] = Query(None),
@@ -1496,7 +1512,9 @@ async def list_beach_teams_from_zprp(
         include_squads=include_squads,
     )
 
-    # stary endpoint zachowuje stary response_model
+    if include_squads:
+        return {"teams": teams}
+
     items = [
         BeachTeamItem(
             id=t["id"],
