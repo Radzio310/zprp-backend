@@ -1024,6 +1024,9 @@ class BeachBadgesListResponse(BaseModel):
 
 class BeachUserCreateRequest(BaseModel):
     judge_id: Optional[str] = None
+    person_id: Optional[int] = None
+    player_id: Optional[int] = None
+
     full_name: str = Field(..., min_length=1, max_length=220)   # "NAZWISKO Imię"
     province: Optional[str] = None
     city: Optional[str] = None
@@ -1034,12 +1037,19 @@ class BeachUserCreateRequest(BaseModel):
     password: Optional[str] = None
     password_encrypted: Optional[str] = None
 
+    # np. ["judge", "player"] albo [{type:"companion", role:"TRENER"}]
+    roles: Optional[Any] = None
+
     badges: Optional[Any] = None
     app_version: Optional[str] = None
     device_ids: Optional[List[str]] = None
 
+
 class BeachUserUpdateRequest(BaseModel):
     judge_id: Optional[str] = None
+    person_id: Optional[int] = None
+    player_id: Optional[int] = None
+
     full_name: Optional[str] = Field(None, min_length=1, max_length=220)
     province: Optional[str] = None
     city: Optional[str] = None
@@ -1049,19 +1059,27 @@ class BeachUserUpdateRequest(BaseModel):
     password: Optional[str] = None
     password_encrypted: Optional[str] = None
 
+    roles: Optional[Any] = None
+
     badges: Optional[Any] = None
     app_version: Optional[str] = None
     device_ids: Optional[List[str]] = None
 
+
 class BeachUserItem(BaseModel):
     id: int
+
     judge_id: Optional[str] = None
+    person_id: Optional[int] = None
+    player_id: Optional[int] = None
+
     full_name: str
     province: Optional[str] = None
     city: Optional[str] = None
 
     login: str
 
+    roles: Any = Field(default_factory=list)
     badges: Any = Field(default_factory=dict)
 
     last_login_at: Optional[datetime] = None
@@ -1072,6 +1090,7 @@ class BeachUserItem(BaseModel):
 
     created_at: datetime
     updated_at: datetime
+
 
 class BeachUsersListResponse(BaseModel):
     users: List[BeachUserItem]
@@ -1085,6 +1104,7 @@ class BeachLoginRequest(BaseModel):
     # opcjonalnie dopinamy urządzenie / wersję przy logowaniu
     device_id: Optional[str] = None
     app_version: Optional[str] = None
+
 
 class BeachLoginResponse(BaseModel):
     user: BeachUserItem

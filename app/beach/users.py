@@ -6,9 +6,8 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import select, update, delete
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from passlib.context import CryptContext
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -35,20 +34,22 @@ pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 def _hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
+
 def _verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-def _parse_jsonish(raw: Any):
+
+def _parse_jsonish(raw: Any, fallback: Any):
     if raw is None:
-        return {}
+        return fallback
     if isinstance(raw, (dict, list)):
         return raw
-    # w praktyce JSONB z databases zwróci dict/list, ale zostawiamy fallback
     try:
         import json
         return json.loads(raw)
     except Exception:
-        return {}
+        return fallback
+
 
 def _normalize_province(p: Optional[str]) -> Optional[str]:
     if p is None:
@@ -56,8 +57,10 @@ def _normalize_province(p: Optional[str]) -> Optional[str]:
     s = (p or "").strip().upper()
     return s or None
 
+
 def _decrypt_password_from_b64(password_encrypted_b64: str) -> str:
     from base64 import b64decode
+
     private_key, _ = get_rsa_keys()
     try:
         encrypted_password_bytes = b64decode(password_encrypted_b64)
@@ -77,15 +80,33 @@ def _decrypt_password_from_b64(password_encrypted_b64: str) -> str:
     except Exception:
         raise HTTPException(status_code=400, detail="Nie udało się odszyfrować hasła")
 
+
+def _normalize_roles(raw: Any) -> Any:
+    """
+    Dopuszczamy:
+    - listę, np. ["judge", "player"]
+    - dict
+    - None -> []
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, dict)):
+        return raw
+    return []
+
+
 def _to_user_item(row: dict) -> BeachUserItem:
     return BeachUserItem(
         id=int(row["id"]),
         judge_id=row.get("judge_id"),
+        person_id=row.get("person_id"),
+        player_id=row.get("player_id"),
         full_name=row["full_name"],
         province=row.get("province"),
         city=row.get("city"),
         login=row["login"],
-        badges=_parse_jsonish(row.get("badges")),
+        roles=_parse_jsonish(row.get("roles"), []),
+        badges=_parse_jsonish(row.get("badges"), {}),
         last_login_at=row.get("last_login_at"),
         app_opens=int(row.get("app_opens") or 0),
         app_version=row.get("app_version"),
@@ -93,6 +114,7 @@ def _to_user_item(row: dict) -> BeachUserItem:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
 
 def _merge_device_ids(existing: List[str], add_one: Optional[str], provided_list: Optional[List[str]]) -> List[str]:
     out = list(existing or [])
@@ -129,7 +151,6 @@ async def get_user(user_id: int):
 
 @router.post("/", response_model=BeachUserItem, summary="Utwórz użytkownika (BEACH)")
 async def create_user(req: BeachUserCreateRequest):
-    # hasło: password_encrypted albo password
     if not req.password_encrypted and not req.password:
         raise HTTPException(400, "Hasło jest wymagane")
 
@@ -143,16 +164,20 @@ async def create_user(req: BeachUserCreateRequest):
 
     hashed = _hash_password(password_plain)
     badges = req.badges if req.badges is not None else {}
+    roles = _normalize_roles(req.roles)
 
     device_ids = req.device_ids or []
 
     stmt = beach_users.insert().values(
         judge_id=req.judge_id,
+        person_id=req.person_id,
+        player_id=req.player_id,
         full_name=req.full_name.strip(),
         province=province,
         city=(req.city or None),
         login=req.login.strip(),
         password_hash=hashed,
+        roles=roles,
         badges=badges,
         last_login_at=None,
         app_opens=0,
@@ -167,7 +192,14 @@ async def create_user(req: BeachUserCreateRequest):
     except (IntegrityError, asyncpg.exceptions.UniqueViolationError) as e:
         msg = str(e).lower()
         if "login" in msg:
-            raise HTTPException(status_code=409, detail={"code": "LOGIN_EXISTS", "field": "login", "message": "Użytkownik o tym loginie już istnieje"})
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "LOGIN_EXISTS",
+                    "field": "login",
+                    "message": "Użytkownik o tym loginie już istnieje",
+                },
+            )
         raise HTTPException(status_code=409, detail="Unikalność naruszona") from e
     except Exception as e:
         logger.error("create_user failed: %s\n%s", e, traceback.format_exc())
@@ -184,8 +216,14 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
     update_data: Dict[str, Any] = {}
+
     if req.judge_id is not None:
         update_data["judge_id"] = req.judge_id
+    if req.person_id is not None:
+        update_data["person_id"] = req.person_id
+    if req.player_id is not None:
+        update_data["player_id"] = req.player_id
+
     if req.full_name is not None:
         update_data["full_name"] = req.full_name.strip()
     if req.province is not None:
@@ -196,17 +234,18 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
     if req.login is not None:
         update_data["login"] = req.login.strip()
 
+    if req.roles is not None:
+        update_data["roles"] = _normalize_roles(req.roles)
+
     if req.badges is not None:
         update_data["badges"] = req.badges
 
     if req.app_version is not None:
         update_data["app_version"] = req.app_version
 
-    # device_ids: jeśli podane -> merge
     if req.device_ids is not None:
         update_data["device_ids"] = _merge_device_ids(list(existing["device_ids"] or []), None, req.device_ids)
 
-    # zmiana hasła
     if req.password_encrypted or req.password:
         if req.password_encrypted:
             password_plain = _decrypt_password_from_b64(req.password_encrypted)
@@ -220,11 +259,22 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
     update_data["updated_at"] = datetime.now(timezone.utc)
 
     try:
-        await database.execute(update(beach_users).where(beach_users.c.id == user_id).values(**update_data))
+        await database.execute(
+            update(beach_users)
+            .where(beach_users.c.id == user_id)
+            .values(**update_data)
+        )
     except (IntegrityError, asyncpg.exceptions.UniqueViolationError) as e:
         msg = str(e).lower()
         if "login" in msg:
-            raise HTTPException(status_code=409, detail={"code": "LOGIN_EXISTS", "field": "login", "message": "Użytkownik o tym loginie już istnieje"})
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "LOGIN_EXISTS",
+                    "field": "login",
+                    "message": "Użytkownik o tym loginie już istnieje",
+                },
+            )
         raise
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
@@ -236,10 +286,6 @@ async def delete_user(user_id: int):
     await database.execute(delete(beach_users).where(beach_users.c.id == user_id))
     return {"success": True}
 
-
-# =========================
-# LOGIN — zwraca user + token (HMAC)
-# =========================
 
 @router.post("/login", response_model=BeachLoginResponse, summary="Logowanie użytkownika (BEACH)")
 async def login_user(req: BeachLoginRequest):
@@ -264,7 +310,6 @@ async def login_user(req: BeachLoginRequest):
 
     now = datetime.now(timezone.utc)
 
-    # update last_login_at, app_opens++, app_version (jeśli podano), device_id dopnij do listy
     device_ids = list(row_dict.get("device_ids") or [])
     device_ids = _merge_device_ids(device_ids, req.device_id, None)
 

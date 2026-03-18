@@ -759,12 +759,18 @@ beach_users = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
 
     Column("judge_id", String, nullable=True, index=True),
+    Column("person_id", Integer, nullable=True, index=True),
+    Column("player_id", Integer, nullable=True, index=True),
+
     Column("full_name", String, nullable=False),              # "NAZWISKO Imię"
     Column("province", String, nullable=True, index=True),
     Column("city", String, nullable=True),
 
     Column("login", String, nullable=False, unique=True, index=True),
     Column("password_hash", String, nullable=False),
+
+    # np. ["judge", "player"] albo [{type:"companion", role:"TRENER"}]
+    Column("roles", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
 
     # dowolna struktura (np. dict {badge:true} albo list ["A","B"])
     Column("badges", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
