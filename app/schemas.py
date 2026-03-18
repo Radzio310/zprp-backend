@@ -1111,6 +1111,36 @@ class BeachLoginResponse(BaseModel):
     token: str
 
 
+# ---------------------------- Verification (BEACH) ----------------------------
+
+class BeachVerificationCreateRequest(BaseModel):
+    role: str  # "judge" | "coach" | "player"
+    meta: Optional[Any] = None  # np. {team_id, person_id, license_number}
+
+class BeachVerificationItem(BaseModel):
+    id: int
+    user_id: int
+    role: str
+    status: str
+    meta: Any = Field(default_factory=dict)
+    admin_note: Optional[str] = None
+    reviewed_by_user_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+class BeachVerificationPatchRequest(BaseModel):
+    status: str                     # "approved" | "rejected"
+    admin_note: Optional[str] = None
+    judge_id: Optional[str] = None  # wypełnia admin przy approve sędziego
+    person_id: Optional[int] = None # wypełnia admin przy approve trenera
+    player_id: Optional[int] = None # wypełnia admin przy approve zawodnika
+
+class BeachVerificationsListResponse(BaseModel):
+    requests: List[BeachVerificationItem]
+    total: int
+    pending_count: int
+
+
 # ---------------------------- ADMINS (BEACH) ----------------------------
 
 class BeachAdminUpsertRequest(BaseModel):

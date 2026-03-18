@@ -786,6 +786,22 @@ beach_users = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 
+beach_verification_requests = Table(
+    "beach_verification_requests",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=False, index=True),
+    Column("role", String, nullable=False),        # "judge" | "coach" | "player"
+    Column("status", String, nullable=False, server_default=text("'pending'")),  # pending | approved | rejected
+    Column("meta", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # meta dla trenera/zawodnika:
+    #   { "team_id": 688, "person_id": 13627, "player_id": 40671, "license_number": "0083/24" }
+    Column("admin_note", String, nullable=True),
+    Column("reviewed_by_user_id", Integer, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
 beach_admins = Table(
     "beach_admins",
     metadata,
