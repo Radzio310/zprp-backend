@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/tournaments", tags=["Beach: Tournaments"])
 
 
+# ─────────────────── helpers ───────────────────
+
 def _parse_json(raw: Any) -> dict:
     if raw is None:
         return {}
@@ -35,21 +37,16 @@ def _parse_json(raw: Any) -> dict:
     except Exception:
         return {}
 
+
 def _extract_badge_names(badges_raw: Any) -> List[str]:
     if badges_raw is None:
         return []
     if isinstance(badges_raw, dict):
-        out = []
-        for k, v in badges_raw.items():
-            try:
-                if v:
-                    out.append(str(k))
-            except Exception:
-                continue
-        return out
+        return [str(k) for k, v in badges_raw.items() if v is not None and v]
     if isinstance(badges_raw, list):
         return [str(x) for x in badges_raw if x is not None]
     return []
+
 
 def _normalize_event_data(data_json: Any) -> Dict[str, Any]:
     base = _parse_json(data_json)
@@ -74,19 +71,20 @@ def _normalize_event_data(data_json: Any) -> Dict[str, Any]:
     base["present_ids"] = [str(x).strip() for x in present_ids if str(x).strip()]
     return base
 
+
 async def _is_admin(user_id: int) -> bool:
-    row = await database.fetch_one(select(beach_admins.c.user_id).where(beach_admins.c.user_id == user_id))
+    row = await database.fetch_one(
+        select(beach_admins.c.user_id).where(beach_admins.c.user_id == user_id)
+    )
     return bool(row)
 
-async def _compute_invited_ids_for_badge(badge: Optional[str], data: Dict[str, Any]) -> List[str]:
-    """
-    invited_ids = lista user_id (string) zaproszonych:
-    - jeśli include_all True albo badge None -> wszyscy userzy
-    - jeśli badge ustawiony -> userzy posiadający ten badge (w JSON badges)
-    """
+
+async def _compute_invited_ids_for_badge(
+    badge: Optional[str], data: Dict[str, Any]
+) -> List[str]:
     target = data.get("target") or {}
     include_all = bool(target.get("include_all") or False)
-    badge_eff = (badge or target.get("badge") or None)
+    badge_eff = badge or target.get("badge") or None
     badge_eff = str(badge_eff).strip() if badge_eff else None
 
     rows = await database.fetch_all(select(beach_users.c.id, beach_users.c.badges))
@@ -94,23 +92,25 @@ async def _compute_invited_ids_for_badge(badge: Optional[str], data: Dict[str, A
     invited: List[str] = []
     for r in rows:
         uid = str(r["id"])
-
         if include_all or not badge_eff:
             invited.append(uid)
             continue
-
         bnames = set(_extract_badge_names(r["badges"]))
         if badge_eff in bnames:
             invited.append(uid)
 
-    invited = sorted(list(set(invited)), key=lambda x: int(x) if x.isdigit() else x)
-    return invited
+    return sorted(list(set(invited)), key=lambda x: int(x) if x.isdigit() else x)
 
-def _attach_computed_fields(row: Any, data: Dict[str, Any], user_id: Optional[int]) -> BeachTournamentItem:
+
+def _attach_computed_fields(
+    row: Any,
+    data: Dict[str, Any],
+    user_id: Optional[int],
+) -> BeachTournamentItem:
     invited_ids = data.get("invited_ids") or []
     present_ids = data.get("present_ids") or []
-    invited_set = set([str(x) for x in invited_ids])
-    present_set = set([str(x) for x in present_ids])
+    invited_set = set(str(x) for x in invited_ids)
+    present_set = set(str(x) for x in present_ids)
 
     uid = str(user_id) if user_id is not None else None
     user_invited = bool(uid and uid in invited_set)
@@ -120,8 +120,11 @@ def _attach_computed_fields(row: Any, data: Dict[str, Any], user_id: Optional[in
         id=int(row["id"]),
         badge=row.get("badge"),
         event_date=row["event_date"],
+        end_date=row.get("end_date"),          # NEW
         name=row["name"],
         description=row.get("description"),
+        location=row.get("location"),          # NEW
+        category=row.get("category"),          # NEW
         data_json=data,
         updated_at=row["updated_at"],
         invited_total=len(invited_set),
@@ -131,8 +134,13 @@ def _attach_computed_fields(row: Any, data: Dict[str, Any], user_id: Optional[in
     )
 
 
+# ─────────────────── CREATE ───────────────────
+
 @router.post("/", response_model=dict, summary="Utwórz turniej (BEACH) — wymaga admina")
-async def create_tournament(req: CreateBeachTournamentRequest, current_user_id: int = Depends(beach_get_current_user_id)):
+async def create_tournament(
+    req: CreateBeachTournamentRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
@@ -142,7 +150,6 @@ async def create_tournament(req: CreateBeachTournamentRequest, current_user_id: 
     now = datetime.now(timezone.utc)
     data = _normalize_event_data(req.data_json)
 
-    # invited_ids: jeśli puste -> wylicz
     if not data.get("invited_ids"):
         data["invited_ids"] = await _compute_invited_ids_for_badge(req.badge, data)
 
@@ -152,8 +159,11 @@ async def create_tournament(req: CreateBeachTournamentRequest, current_user_id: 
             .values(
                 badge=(req.badge.strip() if req.badge else None),
                 event_date=req.event_date,
+                end_date=req.end_date,                          # NEW
                 name=req.name.strip(),
                 description=(req.description or "").strip() or None,
+                location=(req.location or "").strip() or None,  # NEW
+                category=req.category,                          # NEW
                 data_json=data,
                 updated_at=now,
             )
@@ -168,19 +178,27 @@ async def create_tournament(req: CreateBeachTournamentRequest, current_user_id: 
         raise HTTPException(500, f"create_tournament failed: {e}")
 
 
-@router.get("/", response_model=BeachTournamentsListResponse, summary="Lista turniejów (admin view) — wymaga admina")
+# ─────────────────── LIST (admin) ───────────────────
+
+@router.get(
+    "/",
+    response_model=BeachTournamentsListResponse,
+    summary="Lista turniejów (admin view) — wymaga admina",
+)
 async def list_tournaments_admin(
-    badge: Optional[str] = Query(None, description="Filtr badge"),
-    with_user: Optional[int] = Query(None, description="Opcjonalnie: computed user_* po user_id"),
+    badge: Optional[str] = Query(None),
+    with_user: Optional[int] = Query(None),
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
-    q = select(beach_tournaments).order_by(beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc())
+    q = select(beach_tournaments).order_by(
+        beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc()
+    )
     if badge is not None:
         if badge.strip() == "":
-            q = q.where(beach_tournaments.c.badge == None)
+            q = q.where(beach_tournaments.c.badge == None)  # noqa: E711
         else:
             q = q.where(beach_tournaments.c.badge == badge.strip())
 
@@ -195,18 +213,28 @@ async def list_tournaments_admin(
     return BeachTournamentsListResponse(tournaments=out)
 
 
-@router.get("/visible", response_model=BeachTournamentsListResponse, summary="Lista turniejów widocznych dla usera (BEACH)")
+# ─────────────────── LIST (visible for user) ───────────────────
+
+@router.get(
+    "/visible",
+    response_model=BeachTournamentsListResponse,
+    summary="Lista turniejów widocznych dla zalogowanego użytkownika",
+)
 async def list_visible_tournaments(
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    user_row = await database.fetch_one(select(beach_users).where(beach_users.c.id == current_user_id))
+    user_row = await database.fetch_one(
+        select(beach_users).where(beach_users.c.id == current_user_id)
+    )
     if not user_row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
     user_badges = set(_extract_badge_names(user_row["badges"]))
 
     rows = await database.fetch_all(
-        select(beach_tournaments).order_by(beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc())
+        select(beach_tournaments).order_by(
+            beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc()
+        )
     )
 
     out: List[BeachTournamentItem] = []
@@ -219,10 +247,11 @@ async def list_visible_tournaments(
         if not data.get("invited_ids"):
             data["invited_ids"] = await _compute_invited_ids_for_badge(r["badge"], data)
 
-        invited_set = set([str(x) for x in (data.get("invited_ids") or [])])
-        # jeśli invited_ids liczone, to user musi być w invited_set, chyba że to "include_all"
-        if str(current_user_id) not in invited_set and not (data.get("target") or {}).get("include_all", False):
-            # w praktyce przy badge=None invited_ids powinno zawierać wszystkich
+        invited_set = set(str(x) for x in (data.get("invited_ids") or []))
+        if (
+            str(current_user_id) not in invited_set
+            and not (data.get("target") or {}).get("include_all", False)
+        ):
             continue
 
         out.append(_attach_computed_fields(r, data, current_user_id))
@@ -230,12 +259,20 @@ async def list_visible_tournaments(
     return BeachTournamentsListResponse(tournaments=out)
 
 
-@router.get("/{tournament_id}", response_model=BeachTournamentItem, summary="Pobierz turniej po ID (BEACH)")
+# ─────────────────── GET single ───────────────────
+
+@router.get(
+    "/{tournament_id}",
+    response_model=BeachTournamentItem,
+    summary="Pobierz turniej po ID",
+)
 async def get_tournament(
     tournament_id: int,
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    row = await database.fetch_one(select(beach_tournaments).where(beach_tournaments.c.id == tournament_id))
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
     if not row:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
@@ -243,9 +280,10 @@ async def get_tournament(
     if not data.get("invited_ids"):
         data["invited_ids"] = await _compute_invited_ids_for_badge(row.get("badge"), data)
 
-    # user może wejść tylko jeśli widoczny
     if row.get("badge"):
-        user_row = await database.fetch_one(select(beach_users.c.badges).where(beach_users.c.id == current_user_id))
+        user_row = await database.fetch_one(
+            select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
+        )
         if not user_row:
             raise HTTPException(404, "Użytkownik nie znaleziony")
         if row.get("badge") not in set(_extract_badge_names(user_row["badges"])):
@@ -254,7 +292,13 @@ async def get_tournament(
     return _attach_computed_fields(row, data, current_user_id)
 
 
-@router.patch("/{tournament_id}", response_model=BeachTournamentItem, summary="Częściowa edycja turnieju (BEACH) — wymaga admina")
+# ─────────────────── PATCH ───────────────────
+
+@router.patch(
+    "/{tournament_id}",
+    response_model=BeachTournamentItem,
+    summary="Częściowa edycja turnieju — wymaga admina",
+)
 async def patch_tournament(
     tournament_id: int,
     body: UpdateBeachTournamentRequest,
@@ -263,34 +307,42 @@ async def patch_tournament(
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
-    existing = await database.fetch_one(select(beach_tournaments).where(beach_tournaments.c.id == tournament_id))
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
     if not existing:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
     update_data: Dict[str, Any] = {}
-
     fields = getattr(body, "__fields_set__", set())
 
     if "badge" in fields:
         update_data["badge"] = body.badge.strip() if body.badge else None
     if body.event_date is not None:
         update_data["event_date"] = body.event_date
+    if "end_date" in fields:                                            # NEW
+        update_data["end_date"] = body.end_date
     if body.name is not None:
         update_data["name"] = body.name.strip()
-    if body.description is not None:
+    if "description" in fields:
         update_data["description"] = (body.description or "").strip() or None
+    if "location" in fields:                                            # NEW
+        update_data["location"] = (body.location or "").strip() or None
+    if "category" in fields:                                            # NEW
+        update_data["category"] = body.category
     if body.data_json is not None:
         update_data["data_json"] = _normalize_event_data(body.data_json)
 
     if not update_data:
         data = _normalize_event_data(existing["data_json"])
         if not data.get("invited_ids"):
-            data["invited_ids"] = await _compute_invited_ids_for_badge(existing.get("badge"), data)
+            data["invited_ids"] = await _compute_invited_ids_for_badge(
+                existing.get("badge"), data
+            )
         return _attach_computed_fields(existing, data, None)
 
     update_data["updated_at"] = datetime.now(timezone.utc)
 
-    # jeśli target/badge zmieniony i invited_ids puste -> przelicz
     if "data_json" in update_data or "badge" in update_data:
         badge_eff = update_data.get("badge", existing.get("badge"))
         data_eff = _normalize_event_data(update_data.get("data_json", existing["data_json"]))
@@ -299,18 +351,27 @@ async def patch_tournament(
         update_data["data_json"] = data_eff
 
     await database.execute(
-        update(beach_tournaments).where(beach_tournaments.c.id == tournament_id).values(**update_data)
+        update(beach_tournaments)
+        .where(beach_tournaments.c.id == tournament_id)
+        .values(**update_data)
     )
 
-    row = await database.fetch_one(select(beach_tournaments).where(beach_tournaments.c.id == tournament_id))
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
     data2 = _normalize_event_data(row["data_json"])
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row.get("badge"), data2)
-
     return _attach_computed_fields(row, data2, None)
 
 
-@router.delete("/{tournament_id}", response_model=dict, summary="Usuń turniej (BEACH) — wymaga admina")
+# ─────────────────── DELETE ───────────────────
+
+@router.delete(
+    "/{tournament_id}",
+    response_model=dict,
+    summary="Usuń turniej — wymaga admina",
+)
 async def delete_tournament(
     tournament_id: int,
     current_user_id: int = Depends(beach_get_current_user_id),
@@ -318,15 +379,25 @@ async def delete_tournament(
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
-    row = await database.fetch_one(select(beach_tournaments.c.id).where(beach_tournaments.c.id == tournament_id))
+    row = await database.fetch_one(
+        select(beach_tournaments.c.id).where(beach_tournaments.c.id == tournament_id)
+    )
     if not row:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
-    await database.execute(delete(beach_tournaments).where(beach_tournaments.c.id == tournament_id))
+    await database.execute(
+        delete(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
     return {"success": True}
 
 
-@router.patch("/{tournament_id}/attendance", response_model=BeachTournamentItem, summary="Aktualizuj obecność (present_ids) (BEACH) — wymaga admina")
+# ─────────────────── ATTENDANCE ───────────────────
+
+@router.patch(
+    "/{tournament_id}/attendance",
+    response_model=BeachTournamentItem,
+    summary="Aktualizuj obecność (present_ids) — wymaga admina",
+)
 async def update_tournament_attendance(
     tournament_id: int,
     body: UpdateBeachTournamentAttendanceRequest,
@@ -335,7 +406,9 @@ async def update_tournament_attendance(
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
-    existing = await database.fetch_one(select(beach_tournaments).where(beach_tournaments.c.id == tournament_id))
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
     if not existing:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
@@ -344,7 +417,9 @@ async def update_tournament_attendance(
     data["present_ids"] = sorted(list(set(present_ids)))
 
     if not data.get("invited_ids"):
-        data["invited_ids"] = await _compute_invited_ids_for_badge(existing.get("badge"), data)
+        data["invited_ids"] = await _compute_invited_ids_for_badge(
+            existing.get("badge"), data
+        )
 
     await database.execute(
         update(beach_tournaments)
@@ -352,9 +427,10 @@ async def update_tournament_attendance(
         .values(data_json=data, updated_at=datetime.now(timezone.utc))
     )
 
-    row = await database.fetch_one(select(beach_tournaments).where(beach_tournaments.c.id == tournament_id))
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
     data2 = _normalize_event_data(row["data_json"])
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row.get("badge"), data2)
-
     return _attach_computed_fields(row, data2, None)

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import Any, Dict, Optional, Literal, List
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, validator
 
 class EditJudgeRequest(BaseModel):
     username: str
@@ -1091,6 +1091,8 @@ class BeachUserItem(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    is_admin: bool = False
+
 
 class BeachUsersListResponse(BaseModel):
     users: List[BeachUserItem]
@@ -1156,47 +1158,128 @@ class BeachAdminItem(BaseModel):
 class BeachAdminsListResponse(BaseModel):
     admins: List[BeachAdminItem]
 
+# ---------------------------- AVAILABILITY (BEACH) ----------------------------
+import re as _re
+
+_DATE_RE = _re.compile(r"^\\d{4}-\\d{2}-\\d{2}$")
+_VALID_AVAIL = {"available", "unavailable"}
+
+
+class BeachJudgeAvailabilityUpsertRequest(BaseModel):
+    """
+    availability_json: maps "YYYY-MM-DD" → "available" | "unavailable".
+    Dates absent from the dict mean the judge has not set their status for that day.
+    """
+    availability_json: Dict[str, str] = Field(default_factory=dict)
+
+    @validator("availability_json")
+    def validate_availability(cls, v: Dict[str, str]) -> Dict[str, str]:
+        cleaned: Dict[str, str] = {}
+        for k, val in v.items():
+            if not isinstance(k, str) or not _DATE_RE.match(k):
+                raise ValueError(
+                    f"Invalid date key {k!r}. Expected YYYY-MM-DD."
+                )
+            if val not in _VALID_AVAIL:
+                raise ValueError(
+                    f"Invalid value {val!r} for key {k}. "
+                    "Expected 'available' or 'unavailable'."
+                )
+            cleaned[k] = val
+        return cleaned
+
+
+class BeachJudgeAvailabilityItem(BaseModel):
+    user_id: int
+    full_name: str
+    judge_id: Optional[str] = None
+    availability_json: Dict[str, str] = Field(default_factory=dict)
+    updated_at: datetime
+
+
+class BeachJudgeAvailabilityListResponse(BaseModel):
+    items: List[BeachJudgeAvailabilityItem]
+
 
 # ---------------------------- TOURNAMENTS (BEACH) ----------------------------
 
+VALID_CATEGORIES = {
+    "Senior", "Junior", "Junior mł.", "Młodzik", "Dzieci"
+}
+
+
 class BeachTournamentTarget(BaseModel):
-    """
-    Targetowanie:
-    - badge: jeśli ustawione, turniej widoczny dla userów posiadających ten badge
-    - include_all: jeśli True, ignoruje badge (wtedy badge może być None)
-    """
     badge: Optional[str] = None
     include_all: bool = False
 
+
 class BeachTournamentData(BaseModel):
     target: BeachTournamentTarget = Field(default_factory=BeachTournamentTarget)
-    invited_ids: List[str] = Field(default_factory=list)   # u nas: user_id jako string
+    invited_ids: List[str] = Field(default_factory=list)
     present_ids: List[str] = Field(default_factory=list)
     invited_cache: Optional[Any] = None
 
+
 class CreateBeachTournamentRequest(BaseModel):
-    badge: Optional[str] = None  # zgodnie z tabelą; None => dla wszystkich
+    badge: Optional[str] = None
     event_date: datetime
+    end_date: Optional[datetime] = None          # NEW — last day of multi-day event
     name: str = Field(..., min_length=1, max_length=220)
     description: Optional[str] = None
+    location: Optional[str] = None               # NEW — city / venue
+    category: Optional[str] = None               # NEW — Senior | Junior | ...
     data_json: Optional[Any] = None
+
+    @validator("end_date")
+    def end_date_not_before_start(
+        cls, v: Optional[datetime], values: dict
+    ) -> Optional[datetime]:
+        if v is not None and "event_date" in values and values["event_date"] is not None:
+            if v.date() < values["event_date"].date():
+                raise ValueError("end_date cannot be before event_date")
+        return v
+
+    @validator("category")
+    def validate_category(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in VALID_CATEGORIES:
+            raise ValueError(
+                f"Invalid category {v!r}. Must be one of: {VALID_CATEGORIES}"
+            )
+        return v
+
 
 class UpdateBeachTournamentRequest(BaseModel):
     badge: Optional[Optional[str]] = None
     event_date: Optional[datetime] = None
+    end_date: Optional[Optional[datetime]] = None   # NEW
     name: Optional[str] = Field(None, min_length=1, max_length=220)
     description: Optional[Optional[str]] = None
+    location: Optional[Optional[str]] = None        # NEW
+    category: Optional[Optional[str]] = None        # NEW
     data_json: Optional[Any] = None
+
+    @validator("category")
+    def validate_category(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in VALID_CATEGORIES:
+            raise ValueError(
+                f"Invalid category {v!r}. Must be one of: {VALID_CATEGORIES}"
+            )
+        return v
+
 
 class UpdateBeachTournamentAttendanceRequest(BaseModel):
     present_ids: List[str] = Field(default_factory=list)
+
 
 class BeachTournamentItem(BaseModel):
     id: int
     badge: Optional[str] = None
     event_date: datetime
+    end_date: Optional[datetime] = None             # NEW
     name: str
     description: Optional[str] = None
+    location: Optional[str] = None                  # NEW
+    category: Optional[str] = None                  # NEW
     data_json: Any = Field(default_factory=dict)
     updated_at: datetime
 
@@ -1204,6 +1287,7 @@ class BeachTournamentItem(BaseModel):
     present_total: int = 0
     user_invited: bool = False
     user_present: bool = False
+
 
 class BeachTournamentsListResponse(BaseModel):
     tournaments: List[BeachTournamentItem]

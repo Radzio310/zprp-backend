@@ -817,6 +817,36 @@ beach_admins = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
+# Niedyspozycje sędziowskie
+beach_judge_availability = Table(
+        "beach_judge_availability",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column(
+            "user_id",
+            Integer,
+            ForeignKey("beach_users.id", ondelete="CASCADE"),
+            nullable=False,
+            unique=True,
+            index=True,
+        ),
+        # Dict: {"YYYY-MM-DD": "available" | "unavailable"}
+        # A date absent from the dict means the judge has not indicated status for that day.
+        Column(
+            "availability_json",
+            JSONB,
+            nullable=False,
+            server_default=text("'{}'::jsonb"),
+        ),
+        Column(
+            "updated_at",
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=func.now(),
+            onupdate=func.now(),
+        ),
+    )
+
 # Turnieje – analogicznie do province_events, ale targetowane po jednym badge
 beach_tournaments = Table(
     "beach_tournaments",
@@ -827,8 +857,11 @@ beach_tournaments = Table(
     Column("badge", String, nullable=True, index=True),
 
     Column("event_date", DateTime(timezone=True), nullable=False, index=True),
+    Column("end_date",  DateTime(timezone=True), nullable=True),
     Column("name", String, nullable=False),
     Column("description", Text, nullable=True),
+    Column("location",  String, nullable=True),
+    Column("category",  String, nullable=True),
 
     # jak u Ciebie: target/invited_ids/present_ids + dowolne dodatkowe pola
     Column("data_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),

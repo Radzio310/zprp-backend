@@ -13,7 +13,7 @@ from passlib.context import CryptContext
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 
-from app.db import database, beach_users
+from app.db import database, beach_users, beach_admins          # ← beach_admins added
 from app.schemas import (
     BeachUserCreateRequest,
     BeachUserUpdateRequest,
@@ -82,12 +82,6 @@ def _decrypt_password_from_b64(password_encrypted_b64: str) -> str:
 
 
 def _normalize_roles(raw: Any) -> Any:
-    """
-    Dopuszczamy:
-    - listę, np. ["judge", "player"]
-    - dict
-    - None -> []
-    """
     if raw is None:
         return []
     if isinstance(raw, (list, dict)):
@@ -95,7 +89,7 @@ def _normalize_roles(raw: Any) -> Any:
     return []
 
 
-def _to_user_item(row: dict) -> BeachUserItem:
+def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:   # ← is_admin param
     return BeachUserItem(
         id=int(row["id"]),
         judge_id=row.get("judge_id"),
@@ -113,10 +107,23 @@ def _to_user_item(row: dict) -> BeachUserItem:
         device_ids=list(row.get("device_ids") or []),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        is_admin=is_admin,                                                # ← injected
     )
 
 
-def _merge_device_ids(existing: List[str], add_one: Optional[str], provided_list: Optional[List[str]]) -> List[str]:
+async def _check_is_admin(user_id: int) -> bool:
+    """Returns True if user_id exists in beach_admins table."""
+    row = await database.fetch_one(
+        select(beach_admins.c.user_id).where(beach_admins.c.user_id == user_id)
+    )
+    return bool(row)
+
+
+def _merge_device_ids(
+    existing: List[str],
+    add_one: Optional[str],
+    provided_list: Optional[List[str]],
+) -> List[str]:
     out = list(existing or [])
     if provided_list:
         for d in provided_list:
@@ -127,9 +134,12 @@ def _merge_device_ids(existing: List[str], add_one: Optional[str], provided_list
     return out
 
 
+# ─────────────────── endpoints ───────────────────
+
 @router.get("/", response_model=BeachUsersListResponse, summary="Lista użytkowników (BEACH)")
 async def list_users():
     rows = await database.fetch_all(select(beach_users).order_by(beach_users.c.id.asc()))
+    # is_admin not computed in bulk listing for performance — kept False
     return BeachUsersListResponse(users=[_to_user_item(dict(r)) for r in rows])
 
 
@@ -138,7 +148,11 @@ async def get_me(user_id: int = Depends(beach_get_current_user_id)):
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
-    return _to_user_item(dict(row))
+
+    # ← is_admin check
+    is_admin = await _check_is_admin(user_id)
+
+    return _to_user_item(dict(row), is_admin=is_admin)
 
 
 @router.get("/{user_id}", response_model=BeachUserItem, summary="Pobierz użytkownika po ID (BEACH)")
@@ -165,7 +179,6 @@ async def create_user(req: BeachUserCreateRequest):
     hashed = _hash_password(password_plain)
     badges = req.badges if req.badges is not None else {}
     roles = _normalize_roles(req.roles)
-
     device_ids = req.device_ids or []
 
     stmt = beach_users.insert().values(
@@ -244,7 +257,9 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
         update_data["app_version"] = req.app_version
 
     if req.device_ids is not None:
-        update_data["device_ids"] = _merge_device_ids(list(existing["device_ids"] or []), None, req.device_ids)
+        update_data["device_ids"] = _merge_device_ids(
+            list(existing["device_ids"] or []), None, req.device_ids
+        )
 
     if req.password_encrypted or req.password:
         if req.password_encrypted:
@@ -300,7 +315,9 @@ async def login_user(req: BeachLoginRequest):
     else:
         password = str(req.password)
 
-    row = await database.fetch_one(select(beach_users).where(beach_users.c.login == login_value))
+    row = await database.fetch_one(
+        select(beach_users).where(beach_users.c.login == login_value)
+    )
     if not row:
         raise HTTPException(status_code=401, detail="Nie ma takiego użytkownika")
 
@@ -328,9 +345,15 @@ async def login_user(req: BeachLoginRequest):
         .values(**upd_values)
     )
 
-    updated = await database.fetch_one(select(beach_users).where(beach_users.c.id == int(row_dict["id"])))
-    user_model = _to_user_item(dict(updated))
+    updated = await database.fetch_one(
+        select(beach_users).where(beach_users.c.id == int(row_dict["id"]))
+    )
 
+    # ← is_admin check on login so the client gets the flag immediately
+    is_admin = await _check_is_admin(int(row_dict["id"]))
+
+    user_model = _to_user_item(dict(updated), is_admin=is_admin)
     token = beach_create_access_token(user_model.id)
 
     return BeachLoginResponse(user=user_model, token=token)
+
