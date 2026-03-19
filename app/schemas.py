@@ -1170,24 +1170,7 @@ class BeachJudgeAvailabilityUpsertRequest(BaseModel):
     availability_json: maps "YYYY-MM-DD" → "available" | "unavailable".
     Dates absent from the dict mean the judge has not set their status for that day.
     """
-    availability_json: Dict[str, str] = Field(default_factory=dict)
-
-    @validator("availability_json")
-    def validate_availability(cls, v: Dict[str, str]) -> Dict[str, str]:
-        cleaned: Dict[str, str] = {}
-        for k, val in v.items():
-            if not isinstance(k, str) or not _DATE_RE.match(k):
-                raise ValueError(
-                    f"Invalid date key {k!r}. Expected YYYY-MM-DD."
-                )
-            if val not in _VALID_AVAIL:
-                raise ValueError(
-                    f"Invalid value {val!r} for key {k}. "
-                    "Expected 'available' or 'unavailable'."
-                )
-            cleaned[k] = val
-        return cleaned
-
+    availability_json: Dict[str, Any] = Field(default_factory=dict)
 
 class BeachJudgeAvailabilityItem(BaseModel):
     user_id: int
