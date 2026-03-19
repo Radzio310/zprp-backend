@@ -107,6 +107,9 @@ def _attach_computed_fields(
     data: Dict[str, Any],
     user_id: Optional[int],
 ) -> BeachTournamentItem:
+    # ── KEY FIX: convert databases.Record → dict so .get() works ──
+    row_d: Dict[str, Any] = dict(row) if not isinstance(row, dict) else row
+
     invited_ids = data.get("invited_ids") or []
     present_ids = data.get("present_ids") or []
     invited_set = set(str(x) for x in invited_ids)
@@ -117,16 +120,16 @@ def _attach_computed_fields(
     user_present = bool(uid and uid in present_set)
 
     return BeachTournamentItem(
-        id=int(row["id"]),
-        badge=row.get("badge"),
-        event_date=row["event_date"],
-        end_date=row.get("end_date"),          # NEW
-        name=row["name"],
-        description=row.get("description"),
-        location=row.get("location"),          # NEW
-        category=row.get("category"),          # NEW
+        id=int(row_d["id"]),
+        badge=row_d.get("badge"),
+        event_date=row_d["event_date"],
+        end_date=row_d.get("end_date"),
+        name=row_d["name"],
+        description=row_d.get("description"),
+        location=row_d.get("location"),
+        category=row_d.get("category"),
         data_json=data,
-        updated_at=row["updated_at"],
+        updated_at=row_d["updated_at"],
         invited_total=len(invited_set),
         present_total=len(present_set & invited_set) if invited_set else len(present_set),
         user_invited=user_invited,
@@ -159,11 +162,11 @@ async def create_tournament(
             .values(
                 badge=(req.badge.strip() if req.badge else None),
                 event_date=req.event_date,
-                end_date=req.end_date,                          # NEW
+                end_date=req.end_date,
                 name=req.name.strip(),
                 description=(req.description or "").strip() or None,
-                location=(req.location or "").strip() or None,  # NEW
-                category=req.category,                          # NEW
+                location=(req.location or "").strip() or None,
+                category=req.category,
                 data_json=data,
                 updated_at=now,
             )
@@ -206,10 +209,11 @@ async def list_tournaments_admin(
 
     out: List[BeachTournamentItem] = []
     for r in rows:
-        data = _normalize_event_data(r["data_json"])
+        r_d = dict(r)  # ← FIX: convert to dict
+        data = _normalize_event_data(r_d["data_json"])
         if not data.get("invited_ids"):
-            data["invited_ids"] = await _compute_invited_ids_for_badge(r.get("badge"), data)
-        out.append(_attach_computed_fields(r, data, with_user))
+            data["invited_ids"] = await _compute_invited_ids_for_badge(r_d.get("badge"), data)
+        out.append(_attach_computed_fields(r_d, data, with_user))
     return BeachTournamentsListResponse(tournaments=out)
 
 
@@ -239,13 +243,14 @@ async def list_visible_tournaments(
 
     out: List[BeachTournamentItem] = []
     for r in rows:
-        badge_req = r["badge"]
+        r_d = dict(r)  # ← FIX: convert to dict
+        badge_req = r_d.get("badge")
         if badge_req and badge_req not in user_badges:
             continue
 
-        data = _normalize_event_data(r["data_json"])
+        data = _normalize_event_data(r_d["data_json"])
         if not data.get("invited_ids"):
-            data["invited_ids"] = await _compute_invited_ids_for_badge(r["badge"], data)
+            data["invited_ids"] = await _compute_invited_ids_for_badge(r_d.get("badge"), data)
 
         invited_set = set(str(x) for x in (data.get("invited_ids") or []))
         if (
@@ -254,7 +259,7 @@ async def list_visible_tournaments(
         ):
             continue
 
-        out.append(_attach_computed_fields(r, data, current_user_id))
+        out.append(_attach_computed_fields(r_d, data, current_user_id))
 
     return BeachTournamentsListResponse(tournaments=out)
 
@@ -276,20 +281,21 @@ async def get_tournament(
     if not row:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
-    data = _normalize_event_data(row["data_json"])
+    row_d = dict(row)  # ← FIX: convert to dict
+    data = _normalize_event_data(row_d["data_json"])
     if not data.get("invited_ids"):
-        data["invited_ids"] = await _compute_invited_ids_for_badge(row.get("badge"), data)
+        data["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data)
 
-    if row.get("badge"):
+    if row_d.get("badge"):
         user_row = await database.fetch_one(
             select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
         )
         if not user_row:
             raise HTTPException(404, "Użytkownik nie znaleziony")
-        if row.get("badge") not in set(_extract_badge_names(user_row["badges"])):
+        if row_d.get("badge") not in set(_extract_badge_names(user_row["badges"])):
             raise HTTPException(403, "Brak dostępu")
 
-    return _attach_computed_fields(row, data, current_user_id)
+    return _attach_computed_fields(row_d, data, current_user_id)
 
 
 # ─────────────────── PATCH ───────────────────
@@ -313,6 +319,8 @@ async def patch_tournament(
     if not existing:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
+    existing_d = dict(existing)  # ← FIX: convert to dict
+
     update_data: Dict[str, Any] = {}
     fields = getattr(body, "__fields_set__", set())
 
@@ -320,32 +328,32 @@ async def patch_tournament(
         update_data["badge"] = body.badge.strip() if body.badge else None
     if body.event_date is not None:
         update_data["event_date"] = body.event_date
-    if "end_date" in fields:                                            # NEW
+    if "end_date" in fields:
         update_data["end_date"] = body.end_date
     if body.name is not None:
         update_data["name"] = body.name.strip()
     if "description" in fields:
         update_data["description"] = (body.description or "").strip() or None
-    if "location" in fields:                                            # NEW
+    if "location" in fields:
         update_data["location"] = (body.location or "").strip() or None
-    if "category" in fields:                                            # NEW
+    if "category" in fields:
         update_data["category"] = body.category
     if body.data_json is not None:
         update_data["data_json"] = _normalize_event_data(body.data_json)
 
     if not update_data:
-        data = _normalize_event_data(existing["data_json"])
+        data = _normalize_event_data(existing_d["data_json"])
         if not data.get("invited_ids"):
             data["invited_ids"] = await _compute_invited_ids_for_badge(
-                existing.get("badge"), data
+                existing_d.get("badge"), data
             )
-        return _attach_computed_fields(existing, data, None)
+        return _attach_computed_fields(existing_d, data, None)
 
     update_data["updated_at"] = datetime.now(timezone.utc)
 
     if "data_json" in update_data or "badge" in update_data:
-        badge_eff = update_data.get("badge", existing.get("badge"))
-        data_eff = _normalize_event_data(update_data.get("data_json", existing["data_json"]))
+        badge_eff = update_data.get("badge", existing_d.get("badge"))
+        data_eff = _normalize_event_data(update_data.get("data_json", existing_d["data_json"]))
         if not data_eff.get("invited_ids"):
             data_eff["invited_ids"] = await _compute_invited_ids_for_badge(badge_eff, data_eff)
         update_data["data_json"] = data_eff
@@ -359,10 +367,11 @@ async def patch_tournament(
     row = await database.fetch_one(
         select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
     )
-    data2 = _normalize_event_data(row["data_json"])
+    row_d = dict(row)  # ← FIX: convert to dict
+    data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
-        data2["invited_ids"] = await _compute_invited_ids_for_badge(row.get("badge"), data2)
-    return _attach_computed_fields(row, data2, None)
+        data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+    return _attach_computed_fields(row_d, data2, None)
 
 
 # ─────────────────── DELETE ───────────────────
@@ -412,13 +421,14 @@ async def update_tournament_attendance(
     if not existing:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
-    data = _normalize_event_data(existing["data_json"])
+    existing_d = dict(existing)  # ← FIX: convert to dict
+    data = _normalize_event_data(existing_d["data_json"])
     present_ids = [str(x).strip() for x in (body.present_ids or []) if str(x).strip()]
     data["present_ids"] = sorted(list(set(present_ids)))
 
     if not data.get("invited_ids"):
         data["invited_ids"] = await _compute_invited_ids_for_badge(
-            existing.get("badge"), data
+            existing_d.get("badge"), data
         )
 
     await database.execute(
@@ -430,7 +440,8 @@ async def update_tournament_attendance(
     row = await database.fetch_one(
         select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
     )
-    data2 = _normalize_event_data(row["data_json"])
+    row_d = dict(row)  # ← FIX: convert to dict
+    data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
-        data2["invited_ids"] = await _compute_invited_ids_for_badge(row.get("badge"), data2)
-    return _attach_computed_fields(row, data2, None)
+        data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+    return _attach_computed_fields(row_d, data2, None)
