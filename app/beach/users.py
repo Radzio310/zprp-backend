@@ -6,14 +6,14 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy import select, update, delete
 from sqlalchemy.exc import IntegrityError
 from passlib.context import CryptContext
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 
-from app.db import database, beach_users, beach_admins          # ← beach_admins added
+from app.db import database, beach_users, beach_admins
 from app.schemas import (
     BeachUserCreateRequest,
     BeachUserUpdateRequest,
@@ -49,6 +49,17 @@ def _parse_jsonish(raw: Any, fallback: Any):
         return json.loads(raw)
     except Exception:
         return fallback
+
+
+def _extract_badge_names(badges_raw: Any) -> List[str]:
+    """Wyciąga nazwy badge'y z formatu dict lub list."""
+    if badges_raw is None:
+        return []
+    if isinstance(badges_raw, dict):
+        return [str(k) for k, v in badges_raw.items() if v is not None and v]
+    if isinstance(badges_raw, list):
+        return [str(x) for x in badges_raw if x is not None]
+    return []
 
 
 def _normalize_province(p: Optional[str]) -> Optional[str]:
@@ -89,7 +100,7 @@ def _normalize_roles(raw: Any) -> Any:
     return []
 
 
-def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:   # ← is_admin param
+def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
     return BeachUserItem(
         id=int(row["id"]),
         judge_id=row.get("judge_id"),
@@ -107,7 +118,7 @@ def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:   # ← i
         device_ids=list(row.get("device_ids") or []),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        is_admin=is_admin,                                                # ← injected
+        is_admin=is_admin,
     )
 
 
@@ -137,10 +148,21 @@ def _merge_device_ids(
 # ─────────────────── endpoints ───────────────────
 
 @router.get("/", response_model=BeachUsersListResponse, summary="Lista użytkowników (BEACH)")
-async def list_users():
+async def list_users(badge: Optional[str] = Query(None)):
+    """
+    Zwraca listę użytkowników.
+    Opcjonalny parametr `badge` filtruje po nazwie badge'a (np. ?badge=Gospodarz%20zawodów).
+    """
     rows = await database.fetch_all(select(beach_users).order_by(beach_users.c.id.asc()))
-    # is_admin not computed in bulk listing for performance — kept False
-    return BeachUsersListResponse(users=[_to_user_item(dict(r)) for r in rows])
+    result = []
+    for r in rows:
+        r_d = dict(r)
+        if badge:
+            badge_names = set(_extract_badge_names(r_d.get("badges")))
+            if badge not in badge_names:
+                continue
+        result.append(_to_user_item(r_d))
+    return BeachUsersListResponse(users=result)
 
 
 @router.get("/me", response_model=BeachUserItem, summary="Pobierz zalogowanego użytkownika (BEACH)")
@@ -149,9 +171,7 @@ async def get_me(user_id: int = Depends(beach_get_current_user_id)):
     if not row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
-    # ← is_admin check
     is_admin = await _check_is_admin(user_id)
-
     return _to_user_item(dict(row), is_admin=is_admin)
 
 
@@ -219,6 +239,47 @@ async def create_user(req: BeachUserCreateRequest):
         raise HTTPException(500, f"create_user failed: {e}")
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == int(new_id)))
+    return _to_user_item(dict(row))
+
+
+@router.patch("/{user_id}/add-badge", response_model=BeachUserItem, summary="Dodaj badge użytkownikowi (admin)")
+async def add_badge_to_user(
+    user_id: int,
+    badge_name: str = Query(..., description="Nazwa badge'a do dodania, np. 'Gospodarz zawodów'"),
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    """
+    Dodaje badge do użytkownika. Wymaga uprawnień admina.
+    Obsługuje obie formy przechowywania badge'y: dict i list.
+    """
+    if not await _check_is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    row_d = dict(row)
+    badges_raw = _parse_jsonish(row_d.get("badges"), {})
+
+    # Obsługa obu formatów: dict lub list
+    if isinstance(badges_raw, dict):
+        if badge_name not in badges_raw or not badges_raw[badge_name]:
+            badges_raw[badge_name] = True
+    elif isinstance(badges_raw, list):
+        if badge_name not in badges_raw:
+            badges_raw.append(badge_name)
+    else:
+        # Fallback: stwórz nowy dict
+        badges_raw = {badge_name: True}
+
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(badges=badges_raw, updated_at=datetime.now(timezone.utc))
+    )
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     return _to_user_item(dict(row))
 
 
@@ -349,11 +410,9 @@ async def login_user(req: BeachLoginRequest):
         select(beach_users).where(beach_users.c.id == int(row_dict["id"]))
     )
 
-    # ← is_admin check on login so the client gets the flag immediately
     is_admin = await _check_is_admin(int(row_dict["id"]))
 
     user_model = _to_user_item(dict(updated), is_admin=is_admin)
     token = beach_create_access_token(user_model.id)
 
     return BeachLoginResponse(user=user_model, token=token)
-
