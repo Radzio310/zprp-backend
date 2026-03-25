@@ -109,6 +109,8 @@ def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
         full_name=row["full_name"],
         province=row.get("province"),
         city=row.get("city"),
+        phone=row.get("phone"),
+        email=row.get("email"),
         login=row["login"],
         roles=_parse_jsonish(row.get("roles"), []),
         badges=_parse_jsonish(row.get("badges"), {}),
@@ -148,12 +150,25 @@ def _merge_device_ids(
 # ─────────────────── endpoints ───────────────────
 
 @router.get("/", response_model=BeachUsersListResponse, summary="Lista użytkowników (BEACH)")
-async def list_users(badge: Optional[str] = Query(None)):
+async def list_users(
+    badge: Optional[str] = Query(None),
+    player_id: Optional[int] = Query(None),
+    person_id: Optional[int] = Query(None),
+):
     """
     Zwraca listę użytkowników.
-    Opcjonalny parametr `badge` filtruje po nazwie badge'a (np. ?badge=Gospodarz%20zawodów).
+    - `badge`      — filtruje po nazwie badge'a (np. ?badge=Gospodarz%20zawodów)
+    - `player_id`  — zwraca użytkownika powiązanego z danym player_id
+    - `person_id`  — zwraca użytkownika powiązanego z danym person_id
     """
-    rows = await database.fetch_all(select(beach_users).order_by(beach_users.c.id.asc()))
+    query = select(beach_users)
+    if player_id is not None:
+        query = query.where(beach_users.c.player_id == player_id)
+    if person_id is not None:
+        query = query.where(beach_users.c.person_id == person_id)
+    query = query.order_by(beach_users.c.id.asc())
+
+    rows = await database.fetch_all(query)
     result = []
     for r in rows:
         r_d = dict(r)
@@ -208,6 +223,8 @@ async def create_user(req: BeachUserCreateRequest):
         full_name=req.full_name.strip(),
         province=province,
         city=(req.city or None),
+        phone=(req.phone or None),
+        email=(req.email or None),
         login=req.login.strip(),
         password_hash=hashed,
         roles=roles,
@@ -304,6 +321,12 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
         update_data["province"] = _normalize_province(req.province)
     if req.city is not None:
         update_data["city"] = req.city
+
+    # phone i email: None w requescie = nie zmieniaj; żeby wyczyścić, user wysyła ""
+    if req.phone is not None:
+        update_data["phone"] = req.phone.strip() or None
+    if req.email is not None:
+        update_data["email"] = req.email.strip() or None
 
     if req.login is not None:
         update_data["login"] = req.login.strip()

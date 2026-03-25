@@ -766,6 +766,9 @@ beach_users = Table(
     Column("province", String, nullable=True, index=True),
     Column("city", String, nullable=True),
 
+    Column("phone", String, nullable=True),                   # 9 cyfr, bez prefiksu
+    Column("email", String, nullable=True),
+
     Column("login", String, nullable=False, unique=True, index=True),
     Column("password_hash", String, nullable=False),
 

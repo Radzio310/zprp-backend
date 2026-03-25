@@ -1031,6 +1031,9 @@ class BeachUserCreateRequest(BaseModel):
     province: Optional[str] = None
     city: Optional[str] = None
 
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
     login: str = Field(..., min_length=1, max_length=120)
 
     # analogicznie jak w Twojej appce: jedno z poniższych
@@ -1054,6 +1057,9 @@ class BeachUserUpdateRequest(BaseModel):
     province: Optional[str] = None
     city: Optional[str] = None
 
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
     login: Optional[str] = Field(None, min_length=1, max_length=120)
 
     password: Optional[str] = None
@@ -1076,6 +1082,9 @@ class BeachUserItem(BaseModel):
     full_name: str
     province: Optional[str] = None
     city: Optional[str] = None
+
+    phone: Optional[str] = None
+    email: Optional[str] = None
 
     login: str
 
