@@ -300,81 +300,57 @@ async def add_badge_to_user(
     return _to_user_item(dict(row))
 
 
-@router.patch("/{user_id}", response_model=BeachUserItem, summary="Częściowa edycja użytkownika (BEACH)")
+@router.patch("/{user_id}", response_model=BeachUserItem)
 async def patch_user(user_id: int, req: BeachUserUpdateRequest):
     existing = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not existing:
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
-    update_data: Dict[str, Any] = {}
+    update_data = req.model_dump(exclude_unset=True)
 
-    if req.judge_id is not None:
-        update_data["judge_id"] = req.judge_id
-    if req.person_id is not None:
-        update_data["person_id"] = req.person_id
-    if req.player_id is not None:
-        update_data["player_id"] = req.player_id
+    if "full_name" in update_data and update_data["full_name"] is not None:
+        update_data["full_name"] = update_data["full_name"].strip()
 
-    if req.full_name is not None:
-        update_data["full_name"] = req.full_name.strip()
-    if req.province is not None:
-        update_data["province"] = _normalize_province(req.province)
-    if req.city is not None:
-        update_data["city"] = req.city
+    if "province" in update_data:
+        update_data["province"] = _normalize_province(update_data["province"])
 
-    # phone i email: None w requescie = nie zmieniaj; żeby wyczyścić, user wysyła ""
-    if req.phone is not None:
-        update_data["phone"] = req.phone.strip() or None
-    if req.email is not None:
-        update_data["email"] = req.email.strip() or None
+    if "phone" in update_data:
+        update_data["phone"] = (update_data["phone"] or "").strip() or None
 
-    if req.login is not None:
-        update_data["login"] = req.login.strip()
+    if "email" in update_data:
+        update_data["email"] = (update_data["email"] or "").strip() or None
 
-    if req.roles is not None:
-        update_data["roles"] = _normalize_roles(req.roles)
+    if "login" in update_data and update_data["login"] is not None:
+        update_data["login"] = update_data["login"].strip()
 
-    if req.badges is not None:
-        update_data["badges"] = req.badges
+    if "roles" in update_data:
+        update_data["roles"] = _normalize_roles(update_data["roles"])
 
-    if req.app_version is not None:
-        update_data["app_version"] = req.app_version
-
-    if req.device_ids is not None:
+    if "device_ids" in update_data:
         update_data["device_ids"] = _merge_device_ids(
-            list(existing["device_ids"] or []), None, req.device_ids
+            list(existing["device_ids"] or []), None, update_data["device_ids"]
         )
 
-    if req.password_encrypted or req.password:
-        if req.password_encrypted:
-            password_plain = _decrypt_password_from_b64(req.password_encrypted)
-        else:
-            password_plain = str(req.password)
-        update_data["password_hash"] = _hash_password(password_plain)
+    if "password_encrypted" in update_data or "password" in update_data:
+        password_encrypted = update_data.pop("password_encrypted", None)
+        password = update_data.pop("password", None)
+
+        if password_encrypted:
+            password_plain = _decrypt_password_from_b64(password_encrypted)
+            update_data["password_hash"] = _hash_password(password_plain)
+        elif password:
+            update_data["password_hash"] = _hash_password(str(password))
 
     if not update_data:
         return _to_user_item(dict(existing))
 
     update_data["updated_at"] = datetime.now(timezone.utc)
 
-    try:
-        await database.execute(
-            update(beach_users)
-            .where(beach_users.c.id == user_id)
-            .values(**update_data)
-        )
-    except (IntegrityError, asyncpg.exceptions.UniqueViolationError) as e:
-        msg = str(e).lower()
-        if "login" in msg:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "LOGIN_EXISTS",
-                    "field": "login",
-                    "message": "Użytkownik o tym loginie już istnieje",
-                },
-            )
-        raise
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(**update_data)
+    )
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     return _to_user_item(dict(row))
