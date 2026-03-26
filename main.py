@@ -194,6 +194,58 @@ def _norm_text_key(s: str) -> str:
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 
+# =========================
+# Device dedup helpers
+# =========================
+
+def _parse_semver(v: str | None) -> tuple[int, ...]:
+    """Parsuje string semver (np. '1.6.3') na krotkę intów do porównania.
+    Zwraca (0,) dla None/pustego/nieparsowanego — traktowane jako najstarsze."""
+    if not v:
+        return (0,)
+    try:
+        return tuple(int(x) for x in str(v).strip().split(".") if x.isdigit())
+    except Exception:
+        return (0,)
+
+
+def _dedup_devices_by_platform(config_json: dict) -> tuple[dict, bool]:
+    """Dla każdej platformy w config_json['devices'] zachowuje tylko urządzenie
+    z najwyższą app_version (semver). Zwraca (nowy_config_json, czy_coś_usunięto)."""
+    if not isinstance(config_json, dict):
+        return config_json, False
+    devices = config_json.get("devices")
+    if not isinstance(devices, dict) or not devices:
+        return config_json, False
+
+    # Grupuj klucze instancji po platform
+    by_platform: dict[str, list[str]] = {}
+    for inst_key, dev in devices.items():
+        if not isinstance(dev, dict):
+            continue
+        plat = (dev.get("platform") or "").strip().lower()
+        if not plat:
+            continue
+        by_platform.setdefault(plat, []).append(inst_key)
+
+    keys_to_remove: set[str] = set()
+    for plat, keys in by_platform.items():
+        if len(keys) <= 1:
+            continue
+        # Zachowaj ten z najwyższą app_version
+        best_key = max(keys, key=lambda k: _parse_semver(devices[k].get("app_version")))
+        for k in keys:
+            if k != best_key:
+                keys_to_remove.add(k)
+
+    if not keys_to_remove:
+        return config_json, False
+
+    new_devices = {k: v for k, v in devices.items() if k not in keys_to_remove}
+    new_config = {**config_json, "devices": new_devices}
+    return new_config, True
+
+
 def _extract_emails(raw: str) -> list[str]:
     if not raw:
         return []
@@ -518,6 +570,25 @@ async def _cleanup_loop():
             logger.info(
                 f"🧹 PushSchedules cleanup: removed {deleted_push} rows (sent/failed) older than {cutoff_push.isoformat()} UTC"
             )
+
+            # 🧹 DeviceDedup: usuń duplikaty urządzeń tej samej platformy z config_json
+            dedup_rows = await database.fetch_all(
+                select(login_records.c.judge_id, login_records.c.config_json)
+            )
+            dedup_cleaned = 0
+            for dr in dedup_rows:
+                raw_cfg = dr["config_json"]
+                if not isinstance(raw_cfg, dict):
+                    continue
+                new_cfg, changed = _dedup_devices_by_platform(raw_cfg)
+                if changed:
+                    await database.execute(
+                        login_records.update()
+                        .where(login_records.c.judge_id == dr["judge_id"])
+                        .values(config_json=new_cfg)
+                    )
+                    dedup_cleaned += 1
+            logger.info(f"🧹 DeviceDedup cleanup: cleaned {dedup_cleaned} users")
 
             lr_rows = await database.fetch_all(
                 select(
