@@ -1036,7 +1036,7 @@ class BeachUserCreateRequest(BaseModel):
 
     login: str = Field(..., min_length=1, max_length=120)
 
-    # analogicznie jak w Twojej appce: jedno z poniższych
+    # analogicznie jak w appce: jedno z poniższych
     password: Optional[str] = None
     password_encrypted: Optional[str] = None
 
@@ -1070,6 +1070,8 @@ class BeachUserUpdateRequest(BaseModel):
     badges: Optional[Any] = None
     app_version: Optional[str] = None
     device_ids: Optional[List[str]] = None
+    # is_active celowo poza BeachUserUpdateRequest —
+    # status aktywności zmienia wyłącznie endpoint /me/deactivate
 
 
 class BeachUserItem(BaseModel):
@@ -1101,6 +1103,7 @@ class BeachUserItem(BaseModel):
     updated_at: datetime
 
     is_admin: bool = False
+    is_active: bool = True          # ← NOWE
 
 
 class BeachUsersListResponse(BaseModel):

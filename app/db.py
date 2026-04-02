@@ -785,6 +785,9 @@ beach_users = Table(
     # identyfikatory urządzeń (np. installation_id) – wiele urządzeń
     Column("device_ids", ARRAY(String), nullable=False, server_default=text("'{}'")),
 
+    # aktywność konta: False = konto dezaktywowane (anonimizacja)
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )

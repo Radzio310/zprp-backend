@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 import logging
 import traceback
@@ -52,7 +53,6 @@ def _parse_jsonish(raw: Any, fallback: Any):
 
 
 def _extract_badge_names(badges_raw: Any) -> List[str]:
-    """Wyciąga nazwy badge'y z formatu dict lub list."""
     if badges_raw is None:
         return []
     if isinstance(badges_raw, dict):
@@ -121,11 +121,11 @@ def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         is_admin=is_admin,
+        is_active=bool(row.get("is_active", True)),
     )
 
 
 async def _check_is_admin(user_id: int) -> bool:
-    """Returns True if user_id exists in beach_admins table."""
     row = await database.fetch_one(
         select(beach_admins.c.user_id).where(beach_admins.c.user_id == user_id)
     )
@@ -154,14 +154,18 @@ async def list_users(
     badge: Optional[str] = Query(None),
     player_id: Optional[int] = Query(None),
     person_id: Optional[int] = Query(None),
+    include_inactive: bool = Query(False),
 ):
     """
     Zwraca listę użytkowników.
-    - `badge`      — filtruje po nazwie badge'a (np. ?badge=Gospodarz%20zawodów)
-    - `player_id`  — zwraca użytkownika powiązanego z danym player_id
-    - `person_id`  — zwraca użytkownika powiązanego z danym person_id
+    - `badge`             — filtruje po nazwie badge'a
+    - `player_id`         — filtruje po player_id
+    - `person_id`         — filtruje po person_id
+    - `include_inactive`  — gdy True, zwraca też dezaktywowanych (domyślnie False)
     """
     query = select(beach_users)
+    if not include_inactive:
+        query = query.where(beach_users.c.is_active == True)  # noqa: E712
     if player_id is not None:
         query = query.where(beach_users.c.player_id == player_id)
     if person_id is not None:
@@ -186,8 +190,52 @@ async def get_me(user_id: int = Depends(beach_get_current_user_id)):
     if not row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
+    row_dict = dict(row)
+    if not row_dict.get("is_active", True):
+        raise HTTPException(403, "Konto zostało dezaktywowane")
+
     is_admin = await _check_is_admin(user_id)
-    return _to_user_item(dict(row), is_admin=is_admin)
+    return _to_user_item(row_dict, is_admin=is_admin)
+
+
+@router.post("/me/deactivate", response_model=dict, summary="Dezaktywuj własne konto (BEACH)")
+async def deactivate_me(user_id: int = Depends(beach_get_current_user_id)):
+    """
+    Dezaktywuje konto zalogowanego użytkownika:
+    - anonimizuje dane osobowe (full_name, login, phone, email, city, province)
+    - ustawia losowe hasło blokujące
+    - ustawia is_active = False
+    - zachowuje: judge_id, person_id, player_id, roles, badges, app_opens, last_login_at
+    """
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    row_dict = dict(row)
+    if not row_dict.get("is_active", True):
+        raise HTTPException(409, "Konto jest już dezaktywowane")
+
+    anon_login = f"dezaktywowany_{user_id}"
+    random_password_hash = _hash_password(secrets.token_hex(32))
+
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(
+            full_name="DEZAKTYWOWANY Użytkownik",
+            login=anon_login,
+            phone=None,
+            email=None,
+            province=None,
+            city=None,
+            device_ids=[],
+            password_hash=random_password_hash,
+            is_active=False,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+    return {"success": True}
 
 
 @router.get("/{user_id}", response_model=BeachUserItem, summary="Pobierz użytkownika po ID (BEACH)")
@@ -233,6 +281,7 @@ async def create_user(req: BeachUserCreateRequest):
         app_opens=0,
         app_version=req.app_version,
         device_ids=device_ids,
+        is_active=True,
         created_at=now,
         updated_at=now,
     )
@@ -262,13 +311,9 @@ async def create_user(req: BeachUserCreateRequest):
 @router.patch("/{user_id}/add-badge", response_model=BeachUserItem, summary="Dodaj badge użytkownikowi (admin)")
 async def add_badge_to_user(
     user_id: int,
-    badge_name: str = Query(..., description="Nazwa badge'a do dodania, np. 'Gospodarz zawodów'"),
+    badge_name: str = Query(..., description="Nazwa badge'a do dodania"),
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    """
-    Dodaje badge do użytkownika. Wymaga uprawnień admina.
-    Obsługuje obie formy przechowywania badge'y: dict i list.
-    """
     if not await _check_is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
@@ -279,7 +324,6 @@ async def add_badge_to_user(
     row_d = dict(row)
     badges_raw = _parse_jsonish(row_d.get("badges"), {})
 
-    # Obsługa obu formatów: dict lub list
     if isinstance(badges_raw, dict):
         if badge_name not in badges_raw or not badges_raw[badge_name]:
             badges_raw[badge_name] = True
@@ -287,7 +331,6 @@ async def add_badge_to_user(
         if badge_name not in badges_raw:
             badges_raw.append(badge_name)
     else:
-        # Fallback: stwórz nowy dict
         badges_raw = {badge_name: True}
 
     await database.execute(
@@ -382,6 +425,11 @@ async def login_user(req: BeachLoginRequest):
         raise HTTPException(status_code=401, detail="Nie ma takiego użytkownika")
 
     row_dict = dict(row)
+
+    # Sprawdź czy konto jest aktywne
+    if not row_dict.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Konto zostało dezaktywowane")
+
     if not _verify_password(password, row_dict["password_hash"]):
         raise HTTPException(status_code=401, detail="Nieprawidłowe hasło")
 
