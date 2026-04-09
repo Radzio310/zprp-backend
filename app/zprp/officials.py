@@ -2052,7 +2052,8 @@ def _parse_offtime_rows(html: str) -> Dict[str, Any]:
         if not _RE_LP_OFFTIME.match(t0_text):
             continue
 
-        t0_title = _clean_spaces(tds[0].get("title", ""))
+        # Zachowaj oryginalne znaki nowej linii w title – NIE używaj _clean_spaces
+        t0_title = (tds[0].get("title") or "").strip()
         if not _RE_CREATED_TITLE.match(t0_title):
             continue
 
@@ -2064,19 +2065,18 @@ def _parse_offtime_rows(html: str) -> Dict[str, Any]:
         info = _clean_spaces(tds[3].get_text(" ", strip=True))
 
         # Historia edycji: szukamy td z img[src*=Info-ikona] – jego title to historia
+        # WAŻNE: NIE używamy _clean_spaces na title (kolapsa \n między wpisami historii)
         history_raw: Optional[str] = None
         is_deleted = False
 
         for td in tds[4:]:
             td_text = _clean_spaces(td.get_text(" ", strip=True))
-            td_title = _clean_spaces(td.get("title", ""))
+            td_title = (td.get("title") or "").strip()  # zachowaj \n
             if td_text == "USUNIĘTE":
                 is_deleted = True
-                # Title tego td też może zawierać historię – scalamy
                 if td_title and not history_raw:
                     history_raw = td_title
             elif td.find("img") and td_title:
-                # td z ikonką Info → title to historia edycji
                 if not history_raw:
                     history_raw = td_title
                 else:
