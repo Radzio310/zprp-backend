@@ -685,11 +685,13 @@ async def search_player(
 
         # ZPRP uses a dedicated AJAX endpoint for autocomplete
         # POST statystyki_NrZawodnika.php with body s=QUERY
+        # The response is plain text (no HTML <meta>), so we decode manually as iso-8859-2
         autocomplete_url = "/statystyki_NrZawodnika.php"
-        _, response_text = await fetch_with_correct_encoding(
-            client, autocomplete_url, method="POST",
-            data={"s": query}, cookies=cookies
+        resp = await client.request(
+            "POST", autocomplete_url,
+            data={"s": query}, cookies=cookies, follow_redirects=True
         )
+        response_text = resp.content.decode("iso-8859-2", errors="replace")
         players = _parse_player_search_results_pipe(response_text)
 
         return {
