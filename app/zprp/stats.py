@@ -685,13 +685,21 @@ async def search_player(
 
         # ZPRP uses a dedicated AJAX endpoint for autocomplete
         # POST statystyki_NrZawodnika.php with body s=QUERY
-        # The response is plain text (no HTML <meta>), so we decode manually as iso-8859-2
+        # The response is plain text — no HTML <meta charset>, so headers-based detection
+        # is unreliable.  Modern PHP/MySQL often returns UTF-8 even when surrounding
+        # pages declare iso-8859-2, so we try UTF-8 first and fall back to iso-8859-2.
         autocomplete_url = "/statystyki_NrZawodnika.php"
         resp = await client.request(
             "POST", autocomplete_url,
             data={"s": query}, cookies=cookies, follow_redirects=True
         )
-        response_text = resp.content.decode("iso-8859-2", errors="replace")
+        raw = resp.content
+        try:
+            response_text = raw.decode("utf-8")
+            logger.debug("autocomplete: decoded as utf-8 (%d bytes)", len(raw))
+        except UnicodeDecodeError:
+            response_text = raw.decode("iso-8859-2", errors="replace")
+            logger.debug("autocomplete: fallback to iso-8859-2 (%d bytes)", len(raw))
         players = _parse_player_search_results_pipe(response_text)
 
         return {
