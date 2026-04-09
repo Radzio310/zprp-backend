@@ -347,6 +347,16 @@ class ZprpScheduleScrapeRequest(BaseModel):
     id_rozgr: Optional[str] = None          # np. "11625"
 
 
+class ZprpStatsScrapeRequest(BaseModel):
+    username: str
+    password: str
+    season_id: Optional[str] = None    # Filtr_sezon
+    id_rozgr: Optional[str] = None     # IdRozgr — konkretne rozgrywki
+    id_team: Optional[str] = None      # ID_zespoly — filtr drużyny dla strzelców
+    zawodnik_id: Optional[str] = None  # NrZawodnika — ID zawodnika, mecze zawodnika
+    search_query: Optional[str] = None # szukaj po nazwisku/imieniu (wyszukiwarka zawodników)
+
+
 
 # ------------------------- SĘDZIOWIE PER WOJEWÓDZTWO (BADGES) -------------------------
 

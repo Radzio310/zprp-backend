@@ -59,6 +59,7 @@ from app.signatures import router as signatures_router
 from app.zprp.schedule import router as schedule_router
 from app.zprp.competitions import router as competitions_router
 from app.zprp.officials import router as officials_router
+from app.zprp.stats import router as zprp_stats_router
 
 # -------------------------
 # BEACH routers
@@ -151,6 +152,7 @@ app.include_router(signatures_router)
 app.include_router(schedule_router, tags=["zprp"])
 app.include_router(competitions_router, tags=["zprp"])
 app.include_router(officials_router, tags=["zprp"])
+app.include_router(zprp_stats_router, tags=["zprp"])
 
 # -------------------------
 # BEACH routers
