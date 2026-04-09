@@ -951,5 +951,73 @@ Index(
     beach_teams.c.category_id,
 )
 
+# -------------------------
+# BOARD: Tablica Komisji Okręgowej
+# -------------------------
+
+# board_posts: posty/ogłoszenia/notatki/linki per prowincja
+board_posts = Table(
+    "board_posts",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    # announcement | decision | note | link
+    Column("type", String, nullable=False, server_default=text("'announcement'")),
+    Column("title", String, nullable=True),
+    Column("content", Text, nullable=True),
+    Column("url", String, nullable=True),          # dla type="link"
+    Column("author_id", String, nullable=True),    # judge_id autora
+    Column("author_name", String, nullable=True),
+    Column("pinned", Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+# board_tasks: zadania w stylu Kanban per prowincja
+board_tasks = Table(
+    "board_tasks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("title", String, nullable=False),
+    Column("description", Text, nullable=True),
+    # todo | in_progress | done
+    Column("status", String, nullable=False, server_default=text("'todo'")),
+    # low | medium | high
+    Column("priority", String, nullable=True),
+    Column("assignee_ids", ARRAY(String), nullable=False, server_default=text("'{}'")),
+    Column("due_date", String, nullable=True),     # YYYY-MM-DD
+    Column("order_index", Integer, nullable=False, server_default=text("0")),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+# board_members: członkowie komisji okręgowej per prowincja
+board_members = Table(
+    "board_members",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("judge_id", String, nullable=True),     # opcjonalne powiązanie z sędzią
+    Column("name", String, nullable=False),
+    Column("role", String, nullable=True),         # Przewodniczący | Sekretarz | Członek itp.
+    Column("icon", String, nullable=True),         # nazwa Ionicons
+    Column("color", String, nullable=True),        # kolor hex
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
+# board_rankings: rankingi/tablice wyników per prowincja
+board_rankings = Table(
+    "board_rankings",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("title", String, nullable=False),
+    # [{pos, name, score, note}, ...]
+    Column("rows_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
