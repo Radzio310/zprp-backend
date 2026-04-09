@@ -685,6 +685,7 @@ async def startup():
     # Board migrations: add columns that may be missing on existing installations
     _board_migrations = [
         "ALTER TABLE board_posts ADD COLUMN IF NOT EXISTS order_index INTEGER DEFAULT 0",
+        "ALTER TABLE board_tasks ADD COLUMN IF NOT EXISTS checklist JSONB DEFAULT '[]'",
     ]
     for stmt in _board_migrations:
         try:

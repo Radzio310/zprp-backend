@@ -156,6 +156,12 @@ async def reorder_posts(
 # ── TASKS ──────────────────────────────────────────────────────────────────
 # ---------------------------------------------------------------------------
 
+class ChecklistItem(BaseModel):
+    id: str
+    text: str
+    done: bool = False
+
+
 class CreateTaskRequest(BaseModel):
     province: str
     title: str
@@ -165,6 +171,7 @@ class CreateTaskRequest(BaseModel):
     assignee_ids: List[str] = []
     due_date: Optional[str] = None  # YYYY-MM-DD
     order_index: int = 0
+    checklist: List[ChecklistItem] = []
 
 
 class UpdateTaskRequest(BaseModel):
@@ -175,6 +182,7 @@ class UpdateTaskRequest(BaseModel):
     assignee_ids: Optional[List[str]] = None
     due_date: Optional[str] = None
     order_index: Optional[int] = None
+    checklist: Optional[List[ChecklistItem]] = None
 
 
 @router.get("/tasks")
@@ -207,6 +215,7 @@ async def create_task(
         assignee_ids=body.assignee_ids,
         due_date=body.due_date,
         order_index=body.order_index,
+        checklist=[item.model_dump() for item in body.checklist],
     ).returning(board_tasks)
     row = await database.fetch_one(stmt)
     return _row_to_dict(row)
@@ -233,6 +242,8 @@ async def update_task(
         values["due_date"] = body.due_date
     if body.order_index is not None:
         values["order_index"] = body.order_index
+    if body.checklist is not None:
+        values["checklist"] = [item.model_dump() for item in body.checklist]
     if not values:
         raise HTTPException(status_code=400, detail="Brak pól do aktualizacji")
 

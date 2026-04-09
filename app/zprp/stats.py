@@ -126,7 +126,7 @@ def _parse_meta_from_strzelec_page(html: str) -> Dict[str, Any]:
     rozgr_raw = _parse_select_options(rozgr_sel) if rozgr_sel else []
     competitions = [{"id": v, "label": lab, "selected": sel} for (v, lab, sel) in rozgr_raw if v and lab and lab != "----"]
 
-    current_id_rozgr = _pick_selected(rozgr_raw)
+    current_id_rozgr = next((v for (v, _, sel) in rozgr_raw if sel and v), "")
 
     # Try to extract competition name from bold text before the table
     comp_title = ""

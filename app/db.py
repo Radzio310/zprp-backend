@@ -989,6 +989,7 @@ board_tasks = Table(
     Column("assignee_ids", ARRAY(String), nullable=False, server_default=text("'{}'")),
     Column("due_date", String, nullable=True),     # YYYY-MM-DD
     Column("order_index", Integer, nullable=False, server_default=text("0")),
+    Column("checklist", JSONB, nullable=False, server_default=text("'[]'")),  # [{id, text, done}]
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
