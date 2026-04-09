@@ -9,9 +9,9 @@ from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, insert, update, delete
+from sqlalchemy import select, insert, update, delete, case
 
-from app.db import database, board_posts, board_tasks, board_members, board_rankings
+from app.db import database, board_posts, board_tasks, board_members, board_rankings, board_events
 from app.deps import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,24 @@ async def delete_post(
 ):
     stmt = delete(board_posts).where(board_posts.c.id == post_id)
     await database.execute(stmt)
+
+
+class ReorderPostsRequest(BaseModel):
+    ordered_ids: List[int]  # IDs w nowej kolejności (od indeksu 0)
+
+
+@router.post("/posts/reorder", status_code=200)
+async def reorder_posts(
+    body: ReorderPostsRequest,
+    _user: str = Depends(get_current_user),
+):
+    for idx, post_id in enumerate(body.ordered_ids):
+        await database.execute(
+            update(board_posts)
+            .where(board_posts.c.id == post_id)
+            .values(order_index=idx)
+        )
+    return {"ok": True}
 
 # ---------------------------------------------------------------------------
 # ── TASKS ──────────────────────────────────────────────────────────────────
@@ -417,4 +435,109 @@ async def delete_ranking(
     _user: str = Depends(get_current_user),
 ):
     stmt = delete(board_rankings).where(board_rankings.c.id == ranking_id)
+    await database.execute(stmt)
+
+# ---------------------------------------------------------------------------
+# ── EVENTS (Kalendarz) ─────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+class CreateEventRequest(BaseModel):
+    province: str
+    title: str
+    description: Optional[str] = None
+    date: str                         # YYYY-MM-DD
+    time_start: Optional[str] = None  # HH:MM
+    time_end: Optional[str] = None    # HH:MM
+    location: Optional[str] = None
+    priority: Optional[str] = None    # low | medium | high
+    color: Optional[str] = None       # hex
+    assignee_id: Optional[int] = None # board_member id
+
+
+class UpdateEventRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    date: Optional[str] = None
+    time_start: Optional[str] = None
+    time_end: Optional[str] = None
+    location: Optional[str] = None
+    priority: Optional[str] = None
+    color: Optional[str] = None
+    assignee_id: Optional[int] = None
+
+
+@router.get("/events")
+async def list_events(
+    province: str = Query(...),
+    month: Optional[str] = Query(default=None),  # YYYY-MM — filtr miesiąca
+    _user: str = Depends(get_current_user),
+):
+    prov = _norm_province(province)
+    stmt = (
+        select(board_events)
+        .where(board_events.c.province == prov)
+        .order_by(board_events.c.date, board_events.c.time_start)
+    )
+    rows = await database.fetch_all(stmt)
+    result = [_row_to_dict(r) for r in rows]
+    if month:
+        result = [r for r in result if r["date"].startswith(month)]
+    return result
+
+
+@router.post("/events", status_code=201)
+async def create_event(
+    body: CreateEventRequest,
+    _user: str = Depends(get_current_user),
+):
+    prov = _norm_province(body.province)
+    stmt = insert(board_events).values(
+        province=prov,
+        title=body.title,
+        description=body.description,
+        date=body.date,
+        time_start=body.time_start,
+        time_end=body.time_end,
+        location=body.location,
+        priority=body.priority,
+        color=body.color,
+        assignee_id=body.assignee_id,
+    ).returning(board_events)
+    row = await database.fetch_one(stmt)
+    return _row_to_dict(row)
+
+
+@router.patch("/events/{event_id}")
+async def update_event(
+    event_id: int,
+    body: UpdateEventRequest,
+    _user: str = Depends(get_current_user),
+):
+    values: dict[str, Any] = {}
+    for field in ("title", "description", "date", "time_start", "time_end",
+                  "location", "priority", "color", "assignee_id"):
+        v = getattr(body, field)
+        if v is not None:
+            values[field] = v
+    if not values:
+        raise HTTPException(status_code=400, detail="Brak pól do aktualizacji")
+
+    stmt = (
+        update(board_events)
+        .where(board_events.c.id == event_id)
+        .values(**values)
+        .returning(board_events)
+    )
+    row = await database.fetch_one(stmt)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Wydarzenie nie istnieje")
+    return _row_to_dict(row)
+
+
+@router.delete("/events/{event_id}", status_code=204)
+async def delete_event(
+    event_id: int,
+    _user: str = Depends(get_current_user),
+):
+    stmt = delete(board_events).where(board_events.c.id == event_id)
     await database.execute(stmt)

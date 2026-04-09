@@ -969,6 +969,7 @@ board_posts = Table(
     Column("author_id", String, nullable=True),    # judge_id autora
     Column("author_name", String, nullable=True),
     Column("pinned", Boolean, nullable=False, server_default=text("false")),
+    Column("order_index", Integer, nullable=False, server_default=text("0")),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
@@ -1015,6 +1016,26 @@ board_rankings = Table(
     Column("title", String, nullable=False),
     # [{pos, name, score, note}, ...]
     Column("rows_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+# board_events: wydarzenia komisji okręgowej (kalendarz)
+board_events = Table(
+    "board_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("title", String, nullable=False),
+    Column("description", Text, nullable=True),
+    Column("date", String, nullable=False),        # YYYY-MM-DD
+    Column("time_start", String, nullable=True),   # HH:MM
+    Column("time_end", String, nullable=True),     # HH:MM
+    Column("location", String, nullable=True),
+    # low | medium | high
+    Column("priority", String, nullable=True),
+    Column("color", String, nullable=True),        # hex
+    Column("assignee_id", Integer, nullable=True), # board_member id
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )

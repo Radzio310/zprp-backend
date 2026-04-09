@@ -78,7 +78,7 @@ from app.beach.availability import router as beach_availability_router
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
 
-from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures
+from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts
 
 app = FastAPI(title="BAZA - API")
 
@@ -681,6 +681,16 @@ async def _cleanup_loop():
 async def startup():
     await database.connect()
     logger.info("✅ Connected to the database")
+
+    # Board migrations: add columns that may be missing on existing installations
+    _board_migrations = [
+        "ALTER TABLE board_posts ADD COLUMN IF NOT EXISTS order_index INTEGER DEFAULT 0",
+    ]
+    for stmt in _board_migrations:
+        try:
+            await database.execute(stmt)
+        except Exception:
+            pass  # sqlite or column already exists
 
     global _cleanup_task, _push_task
     _cleanup_task = asyncio.create_task(_cleanup_loop())
