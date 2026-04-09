@@ -2002,3 +2002,158 @@ async def scrape_judge_matches_one_season(
             "matches": parsed["matches"],
             "summary": {"matches_total": len(parsed["matches"]), "rows_seen": parsed["rows"]},
         }
+
+
+# ============================
+# OFFTIME SCRAPING
+# ============================
+
+class ZprpJudgeOfftimeScrapeRequest(BaseModel):
+    username: str
+    password: str
+    NrSedzia: Optional[Union[str, int]] = Field(default=None)
+    offtime_href: Optional[str] = Field(default=None)
+
+
+def _parse_offtime_rows(html: str) -> Dict[str, Any]:
+    """
+    Parsuje stronę niedyspozycji sędziego.
+    Zwraca dict z: official_name, offtimes (list), summary
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    table = _find_table(soup)
+    if not table:
+        raise HTTPException(500, "Nie znaleziono tabeli niedyspozycji (id='tabelka').")
+
+    all_trs = table.find_all("tr")
+
+    # Pierwsza komórka z colspan zawiera imię sędziego
+    official_name = ""
+    for tr in all_trs:
+        tds = tr.find_all("td")
+        if tds and tds[0].get("colspan"):
+            txt = _clean_spaces(tds[0].get_text(" ", strip=True))
+            if txt:
+                official_name = txt
+                break
+
+    # Wiersze danych: td[0] ma title="[user] YYYY-MM-DD HH:MM:SS" i tekst "N."
+    _RE_LP_OFFTIME = re.compile(r"^\s*(\d+)\.\s*$")
+    _RE_CREATED_TITLE = re.compile(r"^\[.*\]\s+\d{4}-\d{2}-\d{2}")
+
+    offtimes: List[Dict[str, Any]] = []
+
+    for tr in all_trs:
+        tds = tr.find_all("td")
+        if len(tds) < 4:
+            continue
+
+        t0_text = _clean_spaces(tds[0].get_text(" ", strip=True))
+        if not _RE_LP_OFFTIME.match(t0_text):
+            continue
+
+        t0_title = _clean_spaces(tds[0].get("title", ""))
+        if not _RE_CREATED_TITLE.match(t0_title):
+            continue
+
+        lp_m = _RE_LP_OFFTIME.match(t0_text)
+        lp = int(lp_m.group(1)) if lp_m else 0
+
+        date_from = _clean_spaces(tds[1].get_text(" ", strip=True))
+        date_to = _clean_spaces(tds[2].get_text(" ", strip=True))
+        info = _clean_spaces(tds[3].get_text(" ", strip=True))
+
+        # Historia edycji: szukamy td z img[src*=Info-ikona] – jego title to historia
+        history_raw: Optional[str] = None
+        is_deleted = False
+
+        for td in tds[4:]:
+            td_text = _clean_spaces(td.get_text(" ", strip=True))
+            td_title = _clean_spaces(td.get("title", ""))
+            if td_text == "USUNIĘTE":
+                is_deleted = True
+                # Title tego td też może zawierać historię – scalamy
+                if td_title and not history_raw:
+                    history_raw = td_title
+            elif td.find("img") and td_title:
+                # td z ikonką Info → title to historia edycji
+                if not history_raw:
+                    history_raw = td_title
+                else:
+                    history_raw = history_raw + "\n" + td_title
+
+        offtimes.append({
+            "lp": lp,
+            "created_by": t0_title,  # "[user] YYYY-MM-DD HH:MM:SS"
+            "date_from": date_from,
+            "date_to": date_to,
+            "info": info,
+            "history": history_raw,
+            "is_deleted": is_deleted,
+        })
+
+    deleted = sum(1 for o in offtimes if o["is_deleted"])
+    active = len(offtimes) - deleted
+
+    return {
+        "official_name": official_name,
+        "offtimes": offtimes,
+        "summary": {"total": len(offtimes), "deleted": deleted, "active": active},
+    }
+
+
+def _build_offtime_path(nr_sedzia: Union[str, int]) -> str:
+    nr = _clean_spaces(str(nr_sedzia))
+    return f"/index.php?a=sedzia&b=offtime&NrSedzia={nr}"
+
+
+@router.post("/zprp/sedziowie/niedyspozycje/scrape")
+async def scrape_judge_offtimes(
+    payload: ZprpJudgeOfftimeScrapeRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    private_key, _ = keys
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+
+    if payload.offtime_href:
+        entry_path = _ensure_index_php_prefix(payload.offtime_href)
+    elif payload.NrSedzia is not None:
+        entry_path = _build_offtime_path(payload.NrSedzia)
+    else:
+        raise HTTPException(400, "Brak offtime_href i NrSedzia.")
+
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
+        cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
+        logger.info(
+            "ZPRP offtimes: login ok base_url=%s path=%s",
+            settings.ZPRP_BASE_URL,
+            entry_path,
+        )
+
+        _, html = await fetch_with_correct_encoding(client, entry_path, method="GET", cookies=cookies)
+        _log_html_fingerprint("Judge offtimes page fetched", html)
+
+        parsed = _parse_offtime_rows(html)
+
+        nr = payload.NrSedzia
+        if not nr:
+            try:
+                u = urlparse("http://x" + entry_path)
+                nr = (parse_qs(u.query).get("NrSedzia", [""]) or [""])[0] or None
+            except Exception:
+                nr = None
+
+        return {
+            "fetched_at": _now_iso(),
+            "base_url": settings.ZPRP_BASE_URL,
+            "path": entry_path,
+            "NrSedzia": _clean_spaces(str(nr)) if nr is not None else None,
+            "official_name": parsed["official_name"],
+            "offtimes": parsed["offtimes"],
+            "summary": parsed["summary"],
+        }
