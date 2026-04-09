@@ -1475,7 +1475,7 @@ def _parse_delegate_cell(td) -> str:
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     root = soup.div
     _strip_technical_nodes(root, remove_spans=False)
-    txt = _clean_spaces(root.get_text("\n", strip=True))
+    txt = root.get_text("\n", strip=True)
     if not txt:
         return ""
     lines = [_clean_spaces(x) for x in txt.split("\n") if _clean_spaces(x)]
