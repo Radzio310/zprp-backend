@@ -398,14 +398,15 @@ def _parse_league_table(html: str) -> List[Dict[str, Any]]:
             Zd = _safe_int(tds[base + 5].get_text()) if len(tds) > base + 5 else 0
             St = _safe_int(tds[base + 6].get_text()) if len(tds) > base + 6 else 0
             diff = Zd - St
-            pts_zd = _safe_int(tds[base + 7].get_text()) if len(tds) > base + 7 else 0
-            pts_st = _safe_int(tds[base + 8].get_text()) if len(tds) > base + 8 else 0
+            # HTML has Zd-St diff at base+7, so pts start at base+8
+            pts_zd = _safe_int(tds[base + 8].get_text()) if len(tds) > base + 8 else 0
+            pts_st = _safe_int(tds[base + 9].get_text()) if len(tds) > base + 9 else 0
 
             # Mała tabela columns (may not exist for all rows)
-            P_Ex = _safe_int(tds[base + 9].get_text()) if len(tds) > base + 9 else 0
-            B_Ex = _safe_int(tds[base + 10].get_text()) if len(tds) > base + 10 else 0
-            Zd_Ex = _safe_int(tds[base + 11].get_text()) if len(tds) > base + 11 else 0
-            M_Ex = _safe_int(tds[base + 12].get_text()) if len(tds) > base + 12 else 0
+            P_Ex = _safe_int(tds[base + 10].get_text()) if len(tds) > base + 10 else 0
+            B_Ex = _safe_int(tds[base + 11].get_text()) if len(tds) > base + 11 else 0
+            Zd_Ex = _safe_int(tds[base + 12].get_text()) if len(tds) > base + 12 else 0
+            M_Ex = _safe_int(tds[base + 13].get_text()) if len(tds) > base + 13 else 0
 
         except (IndexError, ValueError):
             continue
@@ -546,36 +547,30 @@ def _parse_player_matches(html: str) -> Dict[str, Any]:
     }
 
 
-def _parse_player_search_results(html: str) -> List[Dict[str, str]]:
+def _parse_player_search_results_pipe(text: str) -> List[Dict[str, str]]:
     """
-    Parse the player search page (?a=statystyki&b=zawodnik&szukaj=XXX).
-    Returns list of players with id + name + birth_date.
+    Parse the statystyki_NrZawodnika.php response.
+    Format per line: DISPLAY_NAME|PLAYER_ID
     """
-    soup = BeautifulSoup(html, "html.parser")
     players = []
-
-    for a in soup.find_all("a", href=re.compile(r"NrZawodnika=\d+")):
-        href = _clean(a.get("href", ""))
-        m = re.search(r"NrZawodnika=(\d+)", href)
-        if not m:
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "|" not in line:
             continue
-        pid = m.group(1)
-        name = _clean(a.get_text())
-        if not name:
+        parts = line.split("|")
+        if len(parts) < 2:
             continue
-
-        # Try to find birth date near the link (often in parent/sibling td)
+        name = _clean(parts[0])
+        pid = _clean(parts[1])
+        if not name or not pid or not pid.isdigit():
+            continue
+        # Try to extract birth_date from name, e.g. "KOWALSKI Jan (1990-01-01)"
         dob = ""
-        parent_td = a.find_parent("td")
-        if parent_td:
-            next_td = parent_td.find_next_sibling("td")
-            if next_td:
-                txt = _clean(next_td.get_text())
-                if re.match(r"\d{4}-\d{2}-\d{2}", txt):
-                    dob = txt
-
+        m = re.search(r"\((\d{4}-\d{2}-\d{2})\)", name)
+        if m:
+            dob = m.group(1)
+            name = name[:m.start()].strip()
         players.append({"id": pid, "name": name, "birth_date": dob})
-
     return players
 
 
@@ -688,9 +683,14 @@ async def search_player(
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
-        url = "/index.php?" + urlencode({"a": "statystyki", "b": "zawodnik", "szukaj": query})
-        _, html = await fetch_with_correct_encoding(client, url, method="GET", cookies=cookies)
-        players = _parse_player_search_results(html)
+        # ZPRP uses a dedicated AJAX endpoint for autocomplete
+        # POST statystyki_NrZawodnika.php with body s=QUERY
+        autocomplete_url = "/statystyki_NrZawodnika.php"
+        _, response_text = await fetch_with_correct_encoding(
+            client, autocomplete_url, method="POST",
+            data={"s": query}, cookies=cookies
+        )
+        players = _parse_player_search_results_pipe(response_text)
 
         return {
             "fetched_at": _now_iso(),
