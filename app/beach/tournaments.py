@@ -38,6 +38,11 @@ class JudgeUpdateRequest(BaseModel):
     head_judge_id: Optional[int] = None
 
 
+class ScheduleUpdateRequest(BaseModel):
+    """Harmonogram zawodów — admin lub Gospodarz zawodów."""
+    schedule: Optional[dict] = None
+
+
 # ─────────────────── helpers ───────────────────
 
 def _parse_json(raw: Any) -> dict:
@@ -503,6 +508,72 @@ async def judge_update_tournament(
     fields_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set())
     if "head_judge_id" in fields_set:
         data["head_judge_id"] = body.head_judge_id  # może być None = reset
+
+    await database.execute(
+        update(beach_tournaments)
+        .where(beach_tournaments.c.id == tournament_id)
+        .values(data_json=data, updated_at=datetime.now(timezone.utc))
+    )
+
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    row_d = dict(row)
+    data2 = _normalize_event_data(row_d["data_json"])
+    if not data2.get("invited_ids"):
+        data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+    return _attach_computed_fields(row_d, data2, current_user_id)
+
+
+# ─────────────────── PATCH schedule-update (Admin / Gospodarz zawodów) ───────────────────
+
+@router.patch(
+    "/{tournament_id}/schedule-update",
+    response_model=BeachTournamentItem,
+    summary="Aktualizacja harmonogramu zawodów (admin lub Gospodarz zawodów)",
+)
+async def schedule_update_tournament(
+    tournament_id: int,
+    body: ScheduleUpdateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    """
+    Endpoint do zapisu/aktualizacji harmonogramu turnieju.
+    Pozwala aktualizować: data_json.schedule
+
+    Wymaga: admin LUB (badge "Gospodarz zawodów" + user.id w data_json.hosts[].id)
+    """
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not existing:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+
+    existing_d = dict(existing)
+    data = _parse_json(existing_d["data_json"])
+
+    is_admin_flag = await _is_admin(current_user_id)
+    if not is_admin_flag:
+        user_row = await database.fetch_one(
+            select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
+        )
+        if not user_row:
+            raise HTTPException(404, "Użytkownik nie znaleziony")
+
+        user_badges = set(_extract_badge_names(user_row["badges"]))
+        if "Gospodarz zawodów" not in user_badges:
+            raise HTTPException(403, "Wymagany badge: Gospodarz zawodów lub admin")
+
+        hosts = data.get("hosts") or []
+        host_ids = {int(h["id"]) for h in hosts if isinstance(h, dict) and "id" in h}
+        if current_user_id not in host_ids:
+            raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
+
+    # Basic sanity check
+    if body.schedule is not None:
+        if not isinstance(body.schedule, dict):
+            raise HTTPException(422, "schedule musi być obiektem")
+        data["schedule"] = body.schedule
 
     await database.execute(
         update(beach_tournaments)
