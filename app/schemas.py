@@ -874,6 +874,26 @@ class MatchItem(BaseModel):
 class ListSavedMatchesResponse(BaseModel):
     matches: List[MatchItem]
 
+# ------------------------- BEACH PROEL SAVED MATCHES -------------------------
+
+class BeachProElCreateMatchRequest(BaseModel):
+    match_number: str
+    data_json: Any
+    status: Optional[str] = "in_progress"
+
+class BeachProElUpdateMatchRequest(BaseModel):
+    data_json: Any
+    status: Optional[str] = None
+
+class BeachProElMatchItem(BaseModel):
+    match_number: str
+    updated_at: datetime
+    data_json: Any
+    status: str
+
+class BeachProElListMatchesResponse(BaseModel):
+    matches: List[BeachProElMatchItem]
+
 # ------------------------- Najbliższe mecze z rozgrywki.zprp.pl -------------------------
 
 class UpcomingMatchItem(BaseModel):

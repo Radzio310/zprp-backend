@@ -552,6 +552,15 @@ saved_matches = Table(
     Column("is_finished", Boolean, nullable=False, server_default=text("false")),
 )
 
+# 21.2) Beach ProEl - mecze (analogiczne do proel_matches, ale status jako String)
+beach_proel_matches = Table(
+    "beach_proel_matches", metadata,
+    Column("match_number", String, primary_key=True, index=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("data_json", JSON, nullable=False),
+    Column("status", String, nullable=False, server_default=text("'in_progress'")),
+)
+
 # 21.1) ProEl - podpisy
 # Wymagane przez app/signatures.py
 
