@@ -226,21 +226,18 @@ async def create_tournament(
         raise HTTPException(500, f"create_tournament failed: {e}")
 
 
-# ─────────────────── LIST (admin) ───────────────────
+# ─────────────────── LIST (all tournaments) ───────────────────
 
 @router.get(
     "/",
     response_model=BeachTournamentsListResponse,
-    summary="Lista turniejów (admin view) — wymaga admina",
+    summary="Lista wszystkich turniejów dla zalogowanego użytkownika",
 )
-async def list_tournaments_admin(
+async def list_tournaments(
     badge: Optional[str] = Query(None),
     with_user: Optional[int] = Query(None),
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    if not await _is_admin(current_user_id):
-        raise HTTPException(403, "Brak uprawnień")
-
     q = select(beach_tournaments).order_by(
         beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc()
     )
