@@ -68,6 +68,32 @@ def _extract_badge_names(badges_raw: Any) -> List[str]:
     return []
 
 
+def _roles_list(roles_raw: Any) -> List[dict]:
+    if isinstance(roles_raw, list):
+        return [r for r in roles_raw if isinstance(r, dict)]
+    if isinstance(roles_raw, str):
+        try:
+            parsed = json.loads(roles_raw)
+            if isinstance(parsed, list):
+                return [r for r in parsed if isinstance(r, dict)]
+        except Exception:
+            return []
+    return []
+
+
+def _extract_team_ids(roles_raw: Any) -> List[int]:
+    team_ids: List[int] = []
+    for role in _roles_list(roles_raw):
+        if role.get("verified") != "approved":
+            continue
+        if role.get("type") not in {"coach", "player"}:
+            continue
+        team_id = role.get("team_id")
+        if isinstance(team_id, int) and team_id not in team_ids:
+            team_ids.append(team_id)
+    return team_ids
+
+
 def _normalize_event_data(data_json: Any) -> Dict[str, Any]:
     base = _parse_json(data_json)
 
@@ -252,7 +278,7 @@ async def list_visible_tournaments(
     if not user_row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
-    user_badges = set(_extract_badge_names(user_row["badges"]))
+    user_team_ids = set(_extract_team_ids(user_row["roles"]))
 
     rows = await database.fetch_all(
         select(beach_tournaments).order_by(
@@ -263,18 +289,38 @@ async def list_visible_tournaments(
     out: List[BeachTournamentItem] = []
     for r in rows:
         r_d = dict(r)
-        badge_req = r_d.get("badge")
-        if badge_req and badge_req not in user_badges:
-            continue
 
         data = _normalize_event_data(r_d["data_json"])
         if not data.get("invited_ids"):
             data["invited_ids"] = await _compute_invited_ids_for_badge(r_d.get("badge"), data)
 
+        host_ids = {
+            int(h["id"])
+            for h in (data.get("hosts") or [])
+            if isinstance(h, dict) and isinstance(h.get("id"), int)
+        }
+        judge_ids = {
+            int(j["id"])
+            for j in (data.get("judges") or [])
+            if isinstance(j, dict) and isinstance(j.get("id"), int)
+        }
         invited_set = set(str(x) for x in (data.get("invited_ids") or []))
-        if (
-            str(current_user_id) not in invited_set
-            and not (data.get("target") or {}).get("include_all", False)
+        invited_team_ids = {
+            int(team_id)
+            for team_id in (data.get("invited_team_ids") or [])
+            if isinstance(team_id, int)
+        }
+        include_all = bool((data.get("target") or {}).get("include_all", False))
+        user_is_host = current_user_id in host_ids
+        user_is_judge = current_user_id in judge_ids
+        user_team_invited = bool(user_team_ids & invited_team_ids)
+        user_is_invited = str(current_user_id) in invited_set
+        if not (
+            include_all
+            or user_is_invited
+            or user_is_host
+            or user_is_judge
+            or user_team_invited
         ):
             continue
 
@@ -307,11 +353,41 @@ async def get_tournament(
 
     if row_d.get("badge"):
         user_row = await database.fetch_one(
-            select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
+            select(beach_users.c.badges, beach_users.c.roles).where(
+                beach_users.c.id == current_user_id
+            )
         )
         if not user_row:
             raise HTTPException(404, "Użytkownik nie znaleziony")
-        if row_d.get("badge") not in set(_extract_badge_names(user_row["badges"])):
+
+        user_badges = set(_extract_badge_names(user_row["badges"]))
+        user_team_ids = set(_extract_team_ids(user_row["roles"]))
+        host_ids = {
+            int(h["id"])
+            for h in (data.get("hosts") or [])
+            if isinstance(h, dict) and isinstance(h.get("id"), int)
+        }
+        judge_ids = {
+            int(j["id"])
+            for j in (data.get("judges") or [])
+            if isinstance(j, dict) and isinstance(j.get("id"), int)
+        }
+        invited_team_ids = {
+            int(team_id)
+            for team_id in (data.get("invited_team_ids") or [])
+            if isinstance(team_id, int)
+        }
+        invited_set = set(str(x) for x in (data.get("invited_ids") or []))
+        include_all = bool((data.get("target") or {}).get("include_all", False))
+        has_access = (
+            row_d.get("badge") in user_badges
+            or include_all
+            or str(current_user_id) in invited_set
+            or current_user_id in host_ids
+            or current_user_id in judge_ids
+            or bool(user_team_ids & invited_team_ids)
+        )
+        if not has_access:
             raise HTTPException(403, "Brak dostępu")
 
     return _attach_computed_fields(row_d, data, current_user_id)
