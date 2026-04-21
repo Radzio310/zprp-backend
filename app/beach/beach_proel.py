@@ -58,8 +58,16 @@ async def update_beach_proel_match(
             beach_proel_matches.c.match_number == match_number
         )
     )
+
     if not row:
-        raise HTTPException(404, "Nie znaleziono meczu w Beach ProEl'u")
+        # Match doesn't exist — create it (upsert behaviour)
+        stmt = insert(beach_proel_matches).values(
+            match_number=match_number,
+            data_json=req.data_json,
+            status=req.status or "IN_GAME",
+        )
+        await database.execute(stmt)
+        return {"success": True, "created": True}
 
     to_update: dict = {"data_json": req.data_json}
     if req.status is not None:
