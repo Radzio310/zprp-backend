@@ -881,6 +881,9 @@ beach_tournaments = Table(
     # jak u Ciebie: target/invited_ids/present_ids + dowolne dodatkowe pola
     Column("data_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
 
+    # unikalny prefiks numeracji meczów (np. "YRC", "YRC2") — globalnie unikalny
+    Column("match_prefix", String, nullable=True, unique=True, index=True),
+
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 

@@ -3,14 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import logging
+import re
 import traceback
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 from sqlalchemy import select, insert, update, delete
 
-from app.db import database, beach_tournaments, beach_users, beach_admins
+from app.db import database, beach_tournaments, beach_users, beach_admins, beach_proel_matches
 from app.schemas import (
     CreateBeachTournamentRequest,
     UpdateBeachTournamentRequest,
@@ -41,6 +43,16 @@ class JudgeUpdateRequest(BaseModel):
 class ScheduleUpdateRequest(BaseModel):
     """Harmonogram zawodów — admin lub Gospodarz zawodów."""
     schedule: Optional[dict] = None
+
+
+class SquadUpdateRequest(BaseModel):
+    """Aktualizacja selekcji składu dla drużyny w turnieju."""
+    team_id: int
+    default_players: Optional[List[int]] = None      # player_ids, max 10
+    default_companions: Optional[List[int]] = None   # person_ids, max 2
+    match_id: Optional[str] = None                   # jeśli override dla konkretnego meczu
+    match_players: Optional[List[int]] = None
+    match_companions: Optional[List[int]] = None
 
 
 # ─────────────────── helpers ───────────────────
@@ -735,3 +747,181 @@ async def update_tournament_attendance(
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
     return _attach_computed_fields(row_d, data2, None)
+
+
+# ─────────────────── PREFIX HELPERS ───────────────────
+
+def _strip_diacritics(text: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _make_initials_prefix(name: str) -> str:
+    ascii_name = _strip_diacritics(name).upper()
+    words = re.findall(r"[A-Z0-9]+", ascii_name)
+    initials = "".join(w[0] for w in words if w)
+    return initials[:6] or "TRN"
+
+
+async def _get_unique_prefix(base: str) -> str:
+    candidate = base
+    attempt = 2
+    while True:
+        existing = await database.fetch_one(
+            select(beach_tournaments.c.id).where(
+                beach_tournaments.c.match_prefix == candidate
+            )
+        )
+        if not existing:
+            return candidate
+        candidate = f"{base}{attempt}"
+        attempt += 1
+
+
+# ─────────────────── GET match-prefix ───────────────────
+
+@router.get(
+    "/{tournament_id}/match-prefix",
+    response_model=dict,
+    summary="Pobierz prefiks numeracji meczow turnieju",
+)
+async def get_match_prefix(
+    tournament_id: int,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    row = await database.fetch_one(
+        select(beach_tournaments.c.id, beach_tournaments.c.match_prefix, beach_tournaments.c.name)
+        .where(beach_tournaments.c.id == tournament_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+    return {"prefix": dict(row).get("match_prefix")}
+
+
+# ─────────────────── POST generate-match-number ───────────────────
+
+@router.post(
+    "/{tournament_id}/generate-match-number",
+    response_model=dict,
+    summary="Wygeneruj numer meczu dla turnieju (PREFIX/GENDER/N)",
+)
+async def generate_match_number(
+    tournament_id: int,
+    gender: str = Query(..., description="M lub K"),
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if gender not in ("M", "K"):
+        raise HTTPException(422, "gender musi byc 'M' lub 'K'")
+
+    row = await database.fetch_one(
+        select(beach_tournaments.c.id, beach_tournaments.c.name, beach_tournaments.c.match_prefix)
+        .where(beach_tournaments.c.id == tournament_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+
+    row_d = dict(row)
+    prefix = row_d.get("match_prefix")
+
+    if not prefix:
+        base = _make_initials_prefix(row_d["name"] or "TRN")
+        prefix = await _get_unique_prefix(base)
+        await database.execute(
+            update(beach_tournaments)
+            .where(beach_tournaments.c.id == tournament_id)
+            .values(match_prefix=prefix, updated_at=datetime.now(timezone.utc))
+        )
+
+    pattern = f"{prefix}/{gender}/%"
+    existing_rows = await database.fetch_all(
+        select(beach_proel_matches.c.match_number).where(
+            beach_proel_matches.c.match_number.like(pattern)
+        )
+    )
+    seq_nums = []
+    for r in existing_rows:
+        parts = dict(r)["match_number"].split("/")
+        if len(parts) == 3:
+            try:
+                seq_nums.append(int(parts[2]))
+            except ValueError:
+                pass
+    next_seq = (max(seq_nums) + 1) if seq_nums else 1
+    match_number = f"{prefix}/{gender}/{next_seq}"
+
+    return {"match_number": match_number, "prefix": prefix}
+
+
+# ─────────────────── PATCH squad-update (Admin / Trener druzyny) ───────────────────
+
+@router.patch(
+    "/{tournament_id}/squad-update",
+    response_model=dict,
+    summary="Aktualizuj selekcje skladu druzyny w turnieju",
+)
+async def squad_update_tournament(
+    tournament_id: int,
+    body: SquadUpdateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not existing:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+
+    is_admin_flag = await _is_admin(current_user_id)
+    if not is_admin_flag:
+        user_row = await database.fetch_one(
+            select(beach_users.c.roles_json).where(beach_users.c.id == current_user_id)
+        )
+        if not user_row:
+            raise HTTPException(404, "Uzytkownik nie znaleziony")
+
+        roles = user_row["roles_json"] or []
+        if isinstance(roles, str):
+            try:
+                roles = json.loads(roles)
+            except Exception:
+                roles = []
+
+        is_coach_of_team = any(
+            isinstance(r, dict)
+            and r.get("type") in ("coach",)
+            and r.get("team_id") == body.team_id
+            for r in roles
+        )
+        if not is_coach_of_team:
+            raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny lub admina")
+
+    existing_d = dict(existing)
+    data = _parse_json(existing_d["data_json"])
+    team_squads: dict = data.get("team_squads") or {}
+    team_key = str(body.team_id)
+    squad_entry: dict = dict(team_squads.get(team_key) or {})
+
+    if body.match_id:
+        match_overrides: dict = dict(squad_entry.get("match_overrides") or {})
+        override = dict(match_overrides.get(body.match_id) or {})
+        if body.match_players is not None:
+            override["players"] = body.match_players
+        if body.match_companions is not None:
+            override["companions"] = body.match_companions
+        match_overrides[body.match_id] = override
+        squad_entry["match_overrides"] = match_overrides
+    else:
+        if body.default_players is not None:
+            squad_entry["default_players"] = body.default_players
+        if body.default_companions is not None:
+            squad_entry["default_companions"] = body.default_companions
+
+    team_squads[team_key] = squad_entry
+    data["team_squads"] = team_squads
+
+    await database.execute(
+        update(beach_tournaments)
+        .where(beach_tournaments.c.id == tournament_id)
+        .values(data_json=data, updated_at=datetime.now(timezone.utc))
+    )
+
+    return {"success": True}

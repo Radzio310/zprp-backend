@@ -695,6 +695,16 @@ async def startup():
         except Exception:
             pass  # sqlite or column already exists
 
+    # Beach tournament migrations
+    _beach_tournament_migrations = [
+        "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS match_prefix VARCHAR UNIQUE",
+    ]
+    for stmt in _beach_tournament_migrations:
+        try:
+            await database.execute(stmt)
+        except Exception:
+            pass
+
     global _cleanup_task, _push_task
     _cleanup_task = asyncio.create_task(_cleanup_loop())
 
