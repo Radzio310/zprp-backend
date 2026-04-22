@@ -124,3 +124,19 @@ async def list_beach_proel_matches(
     return BeachProElListMatchesResponse(
         matches=[BeachProElMatchItem(**dict(r)) for r in rows]
     )
+
+
+@router.get(
+    "/{match_number:path}",
+    response_model=BeachProElMatchItem,
+    summary="Pobierz jeden mecz Beach ProEl po numerze",
+)
+async def get_beach_proel_match(match_number: str):
+    row = await database.fetch_one(
+        select(beach_proel_matches).where(
+            beach_proel_matches.c.match_number == match_number
+        )
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono meczu w Beach ProEl'u")
+    return BeachProElMatchItem(**dict(row))

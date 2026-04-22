@@ -964,6 +964,40 @@ Index(
 )
 
 # -------------------------
+# BEACH: Wytyczne i interpretacje
+# -------------------------
+
+beach_guidelines = Table(
+    "beach_guidelines",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("title", String, nullable=False),
+    Column("content", Text, nullable=False),
+    # opcjonalne powiązanie z rozdziałem przepisów (chapter.id z rules JSON)
+    Column("chapter_id", String, nullable=True),
+    # verified | pending | rejected
+    Column("status", String, nullable=False, server_default=text("'verified'")),
+    # autor
+    Column("author_id", Integer, nullable=False, index=True),
+    Column("author_name", String, nullable=False),
+    # jeśli dodane w kontekście turnieju
+    Column("tournament_id", Integer, nullable=True),
+    Column("tournament_name", String, nullable=True),
+    # weryfikacja / odrzucenie
+    Column("rejection_comment", Text, nullable=True),
+    Column("reviewed_by_id", Integer, nullable=True),
+    Column("reviewed_by_name", String, nullable=True),
+    Column("reviewed_at", DateTime(timezone=True), nullable=True),
+    # timestamps
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+Index("ix_beach_guidelines_status", beach_guidelines.c.status)
+Index("ix_beach_guidelines_chapter", beach_guidelines.c.chapter_id)
+Index("ix_beach_guidelines_tournament", beach_guidelines.c.tournament_id)
+
+# -------------------------
 # BOARD: Tablica Komisji Okręgowej
 # -------------------------
 

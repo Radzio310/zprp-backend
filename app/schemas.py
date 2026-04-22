@@ -1513,3 +1513,45 @@ class BeachTeamsSyncResponse(BaseModel):
     fetched: int = 0
     upserted: int = 0
     filters: BeachTeamsSyncFilters = Field(default_factory=BeachTeamsSyncFilters) # akceptuje boola
+
+
+# ---------------------------- GUIDELINES / INTERPRETATIONS (BEACH) ----------------------------
+
+class BeachGuidelineCreateRequest(BaseModel):
+    title: str
+    content: str
+    chapter_id: Optional[str] = None
+    tournament_id: Optional[int] = None
+
+
+class BeachGuidelineUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    chapter_id: Optional[str] = None
+
+
+class BeachGuidelineReviewRequest(BaseModel):
+    status: str  # "verified" | "rejected"
+    rejection_comment: Optional[str] = None
+
+
+class BeachGuidelineItem(BaseModel):
+    id: int
+    title: str
+    content: str
+    chapter_id: Optional[str] = None
+    status: str  # verified | pending | rejected
+    author_id: int
+    author_name: str
+    tournament_id: Optional[int] = None
+    tournament_name: Optional[str] = None
+    rejection_comment: Optional[str] = None
+    reviewed_by_id: Optional[int] = None
+    reviewed_by_name: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BeachGuidelinesListResponse(BaseModel):
+    guidelines: List[BeachGuidelineItem]

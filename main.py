@@ -74,6 +74,7 @@ from app.beach.teams import router as beach_teams_router
 from app.beach.verification import router as beach_verification_router
 from app.beach.availability import router as beach_availability_router
 from app.beach.beach_proel import router as beach_proel_router
+from app.beach.guidelines import router as beach_guidelines_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -169,6 +170,7 @@ app.include_router(beach_teams_router)
 app.include_router(beach_verification_router)
 app.include_router(beach_availability_router)
 app.include_router(beach_proel_router)
+app.include_router(beach_guidelines_router)
 
 # NEW: push router
 app.include_router(push_router)

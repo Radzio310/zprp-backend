@@ -194,6 +194,42 @@ def _attach_computed_fields(
     )
 
 
+async def _can_manage_tournament_schedule(
+    data: Dict[str, Any],
+    current_user_id: int,
+) -> bool:
+    if await _is_admin(current_user_id):
+        return True
+
+    user_row = await database.fetch_one(
+        select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
+    )
+    if not user_row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    user_badges = set(_extract_badge_names(user_row["badges"]))
+    host_ids = {
+        int(h["id"])
+        for h in (data.get("hosts") or [])
+        if isinstance(h, dict) and isinstance(h.get("id"), int)
+    }
+    judge_ids = {
+        int(j["id"])
+        for j in (data.get("judges") or [])
+        if isinstance(j, dict) and isinstance(j.get("id"), int)
+    }
+    head_judge_id = data.get("head_judge_id")
+
+    if "Gospodarz zawodów" in user_badges and current_user_id in host_ids:
+        return True
+    if isinstance(head_judge_id, int) and head_judge_id == current_user_id:
+        return True
+    if current_user_id in judge_ids:
+        return True
+
+    return False
+
+
 # ─────────────────── CREATE ───────────────────
 
 @router.post("/", response_model=dict, summary="Utwórz turniej (BEACH) — wymaga admina")
@@ -637,22 +673,8 @@ async def schedule_update_tournament(
     existing_d = dict(existing)
     data = _parse_json(existing_d["data_json"])
 
-    is_admin_flag = await _is_admin(current_user_id)
-    if not is_admin_flag:
-        user_row = await database.fetch_one(
-            select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
-        )
-        if not user_row:
-            raise HTTPException(404, "Użytkownik nie znaleziony")
-
-        user_badges = set(_extract_badge_names(user_row["badges"]))
-        if "Gospodarz zawodów" not in user_badges:
-            raise HTTPException(403, "Wymagany badge: Gospodarz zawodów lub admin")
-
-        hosts = data.get("hosts") or []
-        host_ids = {int(h["id"]) for h in hosts if isinstance(h, dict) and "id" in h}
-        if current_user_id not in host_ids:
-            raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
+    if not await _can_manage_tournament_schedule(data, current_user_id):
+        raise HTTPException(403, "Brak uprawnień do aktualizacji harmonogramu")
 
     # Basic sanity check
     if body.schedule is not None:
