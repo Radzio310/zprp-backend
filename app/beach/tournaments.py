@@ -859,6 +859,8 @@ async def generate_match_number(
         )
 
     pattern = f"{prefix}/{gender}/%"
+
+    # 1) Numbers already used in beach_proel_matches (played matches)
     existing_rows = await database.fetch_all(
         select(beach_proel_matches.c.match_number).where(
             beach_proel_matches.c.match_number.like(pattern)
@@ -872,6 +874,26 @@ async def generate_match_number(
                 seq_nums.append(int(parts[2]))
             except ValueError:
                 pass
+
+    # 2) Numbers already assigned inside the tournament schedule (data_json.schedule.matches)
+    #    These are stored but not yet in beach_proel_matches (match not played yet).
+    tour_row = await database.fetch_one(
+        select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
+    )
+    if tour_row:
+        tour_data = _parse_json(dict(tour_row)["data_json"])
+        schedule = tour_data.get("schedule") or {}
+        for m in (schedule.get("matches") or []):
+            mn = m.get("matchNumber") or m.get("match_number")
+            if not mn:
+                continue
+            parts = str(mn).split("/")
+            if len(parts) == 3 and parts[0] == prefix and parts[1] == gender:
+                try:
+                    seq_nums.append(int(parts[2]))
+                except ValueError:
+                    pass
+
     next_seq = (max(seq_nums) + 1) if seq_nums else 1
     match_number = f"{prefix}/{gender}/{next_seq}"
 
