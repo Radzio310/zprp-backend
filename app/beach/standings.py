@@ -732,3 +732,54 @@ async def adjust_standing(
         )
 
     return {"success": True}
+
+
+# ─────────────────── DELETE /beach/standings/adjust ───────────────────
+
+@router.delete(
+    "/adjust",
+    response_model=dict,
+    summary="Usuń manualną korektę punktów (po created_at)",
+)
+async def delete_manual_entry(
+    team_id: int = Query(...),
+    competition_type: str = Query(...),
+    category: str = Query(...),
+    season_id: str = Query(...),
+    gender: str = Query(...),
+    created_at: str = Query(...),
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    await _check_komisja_or_admin(current_user_id)
+
+    existing = await database.fetch_one(
+        select(beach_standings).where(
+            beach_standings.c.team_id == team_id,
+            beach_standings.c.competition_type == competition_type,
+            beach_standings.c.category == category,
+            beach_standings.c.season_id == season_id,
+            beach_standings.c.gender == gender,
+        )
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Standing not found")
+
+    ex_d = dict(existing)
+    entries = _parse_json(ex_d.get("tournaments_json") or [])
+    if not isinstance(entries, list):
+        entries = []
+
+    new_entries = [
+        e for e in entries
+        if not (e.get("type") == "manual" and e.get("created_at") == created_at)
+    ]
+    if len(new_entries) == len(entries):
+        raise HTTPException(status_code=404, detail="Manual entry not found")
+
+    now = datetime.now(timezone.utc)
+    await database.execute(
+        update(beach_standings)
+        .where(beach_standings.c.id == ex_d["id"])
+        .values(tournaments_json=new_entries, updated_at=now)
+    )
+    return {"success": True}
