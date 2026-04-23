@@ -699,9 +699,11 @@ async def startup():
         except Exception:
             pass  # sqlite or column already exists
 
-    # Beach tournament migrations
+    # Beach tournament migrations (tylko kolumny dodawane do istniejących tabel,
+    # bo nowe tabele tworzy metadata.create_all w db.py)
     _beach_tournament_migrations = [
         "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS match_prefix VARCHAR UNIQUE",
+        "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS competition_type VARCHAR",
     ]
     for stmt in _beach_tournament_migrations:
         try:

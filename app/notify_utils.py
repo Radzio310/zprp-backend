@@ -54,10 +54,22 @@ async def schedule_province_push(
         devices = config.get("devices") if isinstance(config, dict) else None
         if not devices or not isinstance(devices, dict):
             continue
-        for ins_id in devices.keys():
-            ins_id = str(ins_id).strip()
-            if ins_id:
-                installation_ids.add(ins_id)
+        for device_key, device_payload in devices.items():
+            payload_installation_id = ""
+            if isinstance(device_payload, dict):
+                payload_installation_id = str(
+                    device_payload.get("installation_id") or ""
+                ).strip()
+
+            if payload_installation_id:
+                installation_ids.add(payload_installation_id)
+                continue
+
+            # Backward compatibility: jeżeli starszy zapis trzymał installation_id
+            # jako klucz, zaakceptuj go tylko gdy wygląda jak prawdziwe ID instalacji.
+            legacy_installation_id = str(device_key or "").strip()
+            if legacy_installation_id.startswith("ins_"):
+                installation_ids.add(legacy_installation_id)
 
     targeted = len(installation_ids)
     ok = 0
