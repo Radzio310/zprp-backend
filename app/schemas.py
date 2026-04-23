@@ -1253,6 +1253,7 @@ class CreateBeachTournamentRequest(BaseModel):
     description: Optional[str] = None
     location: Optional[str] = None               # NEW — city / venue
     category: Optional[str] = None               # NEW — Senior | Junior | ...
+    competition_type: Optional[str] = None       # NEW — Woj / MP / INNE:custom
     data_json: Optional[Any] = None
 
     @validator("end_date")
@@ -1281,6 +1282,7 @@ class UpdateBeachTournamentRequest(BaseModel):
     description: Optional[Optional[str]] = None
     location: Optional[Optional[str]] = None        # NEW
     category: Optional[Optional[str]] = None        # NEW
+    competition_type: Optional[Optional[str]] = None  # NEW
     data_json: Optional[Any] = None
 
     @validator("category")
@@ -1305,6 +1307,7 @@ class BeachTournamentItem(BaseModel):
     description: Optional[str] = None
     location: Optional[str] = None                  # NEW
     category: Optional[str] = None                  # NEW
+    competition_type: Optional[str] = None           # NEW
     data_json: Any = Field(default_factory=dict)
     updated_at: datetime
 

@@ -185,6 +185,7 @@ def _attach_computed_fields(
         description=row_d.get("description"),
         location=row_d.get("location"),
         category=row_d.get("category"),
+        competition_type=row_d.get("competition_type"),
         data_json=data,
         updated_at=row_d["updated_at"],
         invited_total=len(invited_set),
@@ -260,6 +261,7 @@ async def create_tournament(
                 description=(req.description or "").strip() or None,
                 location=(req.location or "").strip() or None,
                 category=req.category,
+                competition_type=req.competition_type,
                 data_json=data,
                 updated_at=now,
             )
@@ -478,6 +480,8 @@ async def patch_tournament(
         update_data["location"] = (body.location or "").strip() or None
     if "category" in fields:
         update_data["category"] = body.category
+    if "competition_type" in fields:
+        update_data["competition_type"] = body.competition_type
     if body.data_json is not None:
         update_data["data_json"] = _normalize_event_data(body.data_json)
 

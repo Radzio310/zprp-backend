@@ -877,6 +877,7 @@ beach_tournaments = Table(
     Column("description", Text, nullable=True),
     Column("location",  String, nullable=True),
     Column("category",  String, nullable=True),
+    Column("competition_type", String, nullable=True),
 
     # jak u Ciebie: target/invited_ids/present_ids + dowolne dodatkowe pola
     Column("data_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
