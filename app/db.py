@@ -998,6 +998,46 @@ Index("ix_beach_guidelines_status", beach_guidelines.c.status)
 Index("ix_beach_guidelines_chapter", beach_guidelines.c.chapter_id)
 Index("ix_beach_guidelines_tournament", beach_guidelines.c.tournament_id)
 
+# ─────────────────── BEACH: Standings (tabela ligowa) ───────────────────
+beach_standings = Table(
+    "beach_standings",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # drużyna
+    Column("team_id", Integer, nullable=False, index=True),
+    Column("team_name", String, nullable=False),
+
+    # klucz rankingowy
+    Column("gender", String, nullable=False),            # "M" | "K"
+    Column("competition_type", String, nullable=False),  # "SLASKIE" | "MP" | "INNE:Liga"
+    Column("category", String, nullable=False),          # "Senior" | "Junior" | ...
+    Column("season_id", String, nullable=False),         # "8" = 2025/2026
+
+    # historia: tablica wpisów { type:"tournament"|"manual", ... }
+    Column("tournaments_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+
+    Column("updated_at", DateTime(timezone=True), nullable=False,
+           server_default=func.now(), onupdate=func.now()),
+)
+
+Index(
+    "ix_beach_standings_team_key",
+    beach_standings.c.team_id,
+    beach_standings.c.competition_type,
+    beach_standings.c.category,
+    beach_standings.c.season_id,
+    beach_standings.c.gender,
+    unique=True,
+)
+Index(
+    "ix_beach_standings_filter",
+    beach_standings.c.competition_type,
+    beach_standings.c.category,
+    beach_standings.c.season_id,
+    beach_standings.c.gender,
+)
+
 # -------------------------
 # BOARD: Tablica Komisji Okręgowej
 # -------------------------

@@ -1558,3 +1558,95 @@ class BeachGuidelineItem(BaseModel):
 
 class BeachGuidelinesListResponse(BaseModel):
     guidelines: List[BeachGuidelineItem]
+
+
+# ---------------------------- STANDINGS (BEACH) ----------------------------
+
+class BeachStandingTournamentEntry(BaseModel):
+    """Wpis za udział w konkretnym turnieju."""
+    type: Literal["tournament"] = "tournament"
+    tournament_id: int
+    tournament_name: str
+    date: str                  # "YYYY-MM-DD"
+    position: int              # 1 = pierwsze miejsce
+    teams_count: int
+    points: int
+    revoked: bool = False
+
+
+class BeachStandingManualEntry(BaseModel):
+    """Ręczna korekta punktów przez admina/Komisję."""
+    type: Literal["manual"] = "manual"
+    points: int                # może być ujemny
+    comment: str
+    created_by_id: int
+    created_by_name: str
+    created_at: str            # ISO datetime string
+
+
+class BeachStandingRow(BaseModel):
+    """Wiersz w tabeli standings (zwracany przez API)."""
+    id: int
+    team_id: int
+    team_name: str
+    gender: str
+    competition_type: str
+    category: str
+    season_id: str
+    tournaments_json: List[Any] = Field(default_factory=list)
+    updated_at: datetime
+    # computed po stronie API
+    total_points: int = 0
+
+
+class BeachStandingsListResponse(BaseModel):
+    rows: List[BeachStandingRow]
+
+
+class GrantTournamentRequest(BaseModel):
+    """Przyznanie punktów za turniej (wymaga admin lub badge Komisja)."""
+    tournament_id: int
+    competition_type: str
+    category: str
+    season_id: str
+
+
+class RevokeTournamentRequest(BaseModel):
+    """Cofnięcie punktów za turniej (ustawia revoked=True na wpisie)."""
+    tournament_id: int
+    competition_type: str
+    category: str
+    season_id: str
+
+
+class AdjustStandingRequest(BaseModel):
+    """Manualna korekta punktów dla drużyny."""
+    team_id: int
+    team_name: str
+    gender: str
+    competition_type: str
+    category: str
+    season_id: str
+    points: int       # może być ujemny
+    comment: str = Field(..., min_length=1, max_length=500)
+
+
+class BeachStandingPreviewEntry(BaseModel):
+    """Podgląd punktów przed zatwierdzeniem."""
+    team_id: int
+    team_name: str
+    position: int
+    teams_count: int
+    points: int
+    already_granted: bool = False   # True gdy turniej był już rozliczony
+
+
+class BeachStandingPreviewResponse(BaseModel):
+    tournament_id: int
+    tournament_name: str
+    date: str
+    men: List[BeachStandingPreviewEntry] = Field(default_factory=list)
+    women: List[BeachStandingPreviewEntry] = Field(default_factory=list)
+    all_finished: bool
+    men_count: int = 0
+    women_count: int = 0
