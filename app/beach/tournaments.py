@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
 import json
 import logging
+import os
+from pathlib import Path
 import re
 import traceback
 import unicodedata
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Depends
+import httpx
 from pydantic import BaseModel
 from sqlalchemy import select, insert, update, delete
 
@@ -55,6 +60,18 @@ class SquadUpdateRequest(BaseModel):
     match_companions: Optional[List[int]] = None
 
 
+class TournamentTitleImageRequest(BaseModel):
+    """Dane potrzebne do wygenerowania grafiki tytulowej turnieju."""
+    tournament_id: Optional[int] = None
+    name: str
+    event_date: Optional[str] = None
+    end_date: Optional[str] = None
+    location: Optional[str] = None
+    category: Optional[str] = None
+    competition_type: Optional[str] = None
+    regenerate: bool = False
+
+
 # ─────────────────── helpers ───────────────────
 
 def _parse_json(raw: Any) -> dict:
@@ -68,6 +85,107 @@ def _parse_json(raw: Any) -> dict:
         return json.loads(raw)
     except Exception:
         return {}
+
+
+def _static_root_dir() -> Path:
+    volume_path = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    if volume_path:
+        return Path(volume_path) / "static"
+    return Path(__file__).resolve().parents[2] / "static"
+
+
+def _public_static_url(path: Path) -> str:
+    rel = path.relative_to(_static_root_dir()).as_posix()
+    return f"/static/{rel}"
+
+
+def _build_title_image_prompt(req: TournamentTitleImageRequest) -> str:
+    location_hint = (req.location or "").strip()
+    category_hint = (req.category or "turniej").strip()
+    competition_hint = (req.competition_type or "").strip()
+    date_hint = " ".join(
+        x for x in [(req.event_date or "").strip(), (req.end_date or "").strip()] if x
+    )
+
+    return (
+        "Landscape title artwork for a Polish beach handball tournament. "
+        "Minimalist modern sports illustration, clean vector-like shapes, warm beach sunlight, "
+        "sand court, beach handball ball, subtle goal/court lines, one male player and one female "
+        "player in dynamic but simple silhouettes, summer atmosphere, tasteful coastal colors. "
+        "No text, no letters, no logos, no badges, no watermarks. "
+        "Leave darker open space in the lower-left area for app overlay text. "
+        "Use a premium mobile app tile composition, high contrast, readable background. "
+        f"Tournament name inspiration: {req.name.strip()}. "
+        f"Category: {category_hint}. "
+        f"Date context: {date_hint or 'summer tournament'}. "
+        f"Location inspiration: {location_hint or 'Polish beach town'}; "
+        "if location is recognizable, include only a very subtle local reference in the scenery. "
+        f"Competition type: {competition_hint or 'beach handball event'}."
+    )
+
+
+async def _get_title_image_regeneration_count(tournament_id: int) -> int:
+    row = await database.fetch_one(
+        select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+    data = _parse_json(dict(row)["data_json"])
+    title_image = data.get("title_image") if isinstance(data.get("title_image"), dict) else {}
+    try:
+        return int(title_image.get("regeneration_count") or 0)
+    except Exception:
+        return 0
+
+
+async def _generate_openai_title_image(prompt: str) -> bytes:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "Brak OPENAI_API_KEY w środowisku serwera")
+
+    model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "size": "1536x1024",
+        "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
+        "n": 1,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/images/generations",
+                headers=headers,
+                json=payload,
+            )
+    except Exception:
+        logger.exception("OpenAI title image request failed")
+        raise HTTPException(502, "Nie udało się połączyć z OpenAI Images API")
+
+    if resp.status_code >= 400:
+        logger.error("OpenAI title image error %s: %s", resp.status_code, resp.text[:700])
+        raise HTTPException(502, "OpenAI nie wygenerował grafiki turnieju")
+
+    data = resp.json()
+    image_item = (data.get("data") or [{}])[0]
+    b64 = image_item.get("b64_json")
+    if not b64 and image_item.get("url"):
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                image_resp = await client.get(image_item["url"])
+            if image_resp.status_code < 400 and image_resp.content:
+                return image_resp.content
+        except Exception:
+            logger.exception("OpenAI title image download failed")
+    if not b64:
+        raise HTTPException(502, "OpenAI zwrócił pustą grafikę")
+
+    try:
+        return base64.b64decode(b64)
+    except Exception:
+        raise HTTPException(502, "Nie udało się odczytać wygenerowanej grafiki")
 
 
 def _extract_badge_names(badges_raw: Any) -> List[str]:
@@ -374,6 +492,46 @@ async def list_visible_tournaments(
         out.append(_attach_computed_fields(r_d, data, current_user_id))
 
     return BeachTournamentsListResponse(tournaments=out)
+
+
+# ─────────────────── GENERATE TITLE IMAGE ───────────────────
+
+@router.post(
+    "/generate-title-image",
+    response_model=dict,
+    summary="Wygeneruj grafikę tytułową turnieju (admin)",
+)
+async def generate_tournament_title_image(
+    req: TournamentTitleImageRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    if not req.name or not req.name.strip():
+        raise HTTPException(400, "Brak nazwy turnieju")
+
+    current_regen_count = 0
+    if req.tournament_id is not None:
+        current_regen_count = await _get_title_image_regeneration_count(req.tournament_id)
+        if req.regenerate and current_regen_count >= 2:
+            raise HTTPException(400, "Limit regeneracji grafiki dla tego turnieju został wykorzystany")
+
+    prompt = _build_title_image_prompt(req)
+    image_bytes = await _generate_openai_title_image(prompt)
+
+    out_dir = _static_root_dir() / "beach" / "tournaments" / "title-images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    file_path = out_dir / f"{uuid.uuid4().hex}.png"
+    file_path.write_bytes(image_bytes)
+
+    return {
+        "url": _public_static_url(file_path),
+        "prompt": prompt,
+        "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1"),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "regeneration_count": current_regen_count + 1 if req.regenerate else current_regen_count,
+    }
 
 
 # ─────────────────── GET single ───────────────────
