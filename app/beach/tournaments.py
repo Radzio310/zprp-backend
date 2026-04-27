@@ -108,10 +108,11 @@ def _build_title_image_prompt(req: TournamentTitleImageRequest) -> str:
     )
 
     return (
-        "Landscape title artwork for a Polish beach handball tournament. "
-        "Minimalist modern sports illustration, clean vector-like shapes, warm beach sunlight, "
-        "sand court, beach handball ball, subtle goal/court lines, one male player and one female "
-        "player in dynamic but simple silhouettes, summer atmosphere, tasteful coastal colors. "
+        "Landscape realistic photo-style title image for a Polish beach handball tournament. "
+        "It should look like a real editorial sports photograph, not a cartoon, not CGI, not artificial "
+        "characters, not plastic-looking people. Use natural athletes photographed on a sunny sand court, "
+        "a beach handball ball, subtle goal/court lines, warm sunlight, beach atmosphere, tasteful coastal colors. "
+        "Keep the composition minimalist and premium, with real-world lighting and natural human poses. "
         "No text, no letters, no logos, no badges, no watermarks. "
         "Leave darker open space in the lower-left area for app overlay text. "
         "Use a premium mobile app tile composition, high contrast, readable background. "
