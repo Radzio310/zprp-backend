@@ -777,6 +777,34 @@ async def update_tournament_attendance(
 
 # ─────────────────── PREFIX HELPERS ───────────────────
 
+_VOIVODESHIP_CODES: dict[str, str] = {
+    "DOLNOŚLĄSKIE": "DS",
+    "KUJAWSKO-POMORSKIE": "KP",
+    "LUBELSKIE": "LU",
+    "LUBUSKIE": "LB",
+    "ŁÓDZKIE": "LD",
+    "MAŁOPOLSKIE": "MA",
+    "MAZOWIECKIE": "MZ",
+    "OPOLSKIE": "OP",
+    "PODKARPACKIE": "PK",
+    "PODLASKIE": "PD",
+    "POMORSKIE": "PM",
+    "ŚLĄSKIE": "SL",
+    "ŚWIĘTOKRZYSKIE": "SK",
+    "WARMIŃSKO-MAZURSKIE": "WN",
+    "WIELKOPOLSKIE": "WP",
+    "ZACHODNIOPOMORSKIE": "ZP",
+}
+
+_CATEGORY_CODES: dict[str, str] = {
+    "Senior": "S",
+    "Junior": "J",
+    "Junior mł.": "Jm",
+    "Młodzik": "Mł",
+    "Dzieci": "Dz",
+}
+
+
 def _strip_diacritics(text: str) -> str:
     nfkd = unicodedata.normalize("NFKD", text)
     return "".join(c for c in nfkd if not unicodedata.combining(c))
@@ -787,6 +815,22 @@ def _make_initials_prefix(name: str) -> str:
     words = re.findall(r"[A-Z0-9]+", ascii_name)
     initials = "".join(w[0] for w in words if w)
     return initials[:6] or "TRN"
+
+
+def _competition_type_to_prefix(competition_type: str | None, name: str) -> str:
+    """Derive match-number prefix from competition_type stored on the tournament."""
+    if not competition_type:
+        return _make_initials_prefix(name)
+    ct = competition_type.strip()
+    if ct == "MP":
+        return "MP"
+    if ct in _VOIVODESHIP_CODES:
+        return _VOIVODESHIP_CODES[ct]
+    if ct.startswith("INNE:"):
+        inne_name = ct[5:].strip()
+        return _make_initials_prefix(inne_name) if inne_name else "INNE"
+    # Unknown value — fall back to initials from tournament name
+    return _make_initials_prefix(name)
 
 
 async def _get_unique_prefix(base: str) -> str:
@@ -829,7 +873,7 @@ async def get_match_prefix(
 @router.post(
     "/{tournament_id}/generate-match-number",
     response_model=dict,
-    summary="Wygeneruj numer meczu dla turnieju (PREFIX/GENDER/N)",
+    summary="Wygeneruj numer meczu dla turnieju (PROVINCE/CATEGORY_GENDER/N)",
 )
 async def generate_match_number(
     tournament_id: int,
@@ -840,33 +884,31 @@ async def generate_match_number(
         raise HTTPException(422, "gender musi byc 'M' lub 'K'")
 
     row = await database.fetch_one(
-        select(beach_tournaments.c.id, beach_tournaments.c.name, beach_tournaments.c.match_prefix)
+        select(
+            beach_tournaments.c.id,
+            beach_tournaments.c.name,
+            beach_tournaments.c.competition_type,
+            beach_tournaments.c.category,
+        )
         .where(beach_tournaments.c.id == tournament_id)
     )
     if not row:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
     row_d = dict(row)
-    prefix = row_d.get("match_prefix")
+    prefix = _competition_type_to_prefix(row_d.get("competition_type"), row_d["name"] or "TRN")
+    cat_code = _CATEGORY_CODES.get(row_d.get("category") or "", "")
+    cat_gender = f"{cat_code}{gender}" if cat_code else gender
 
-    if not prefix:
-        base = _make_initials_prefix(row_d["name"] or "TRN")
-        prefix = await _get_unique_prefix(base)
-        await database.execute(
-            update(beach_tournaments)
-            .where(beach_tournaments.c.id == tournament_id)
-            .values(match_prefix=prefix, updated_at=datetime.now(timezone.utc))
-        )
+    pattern = f"{prefix}/{cat_gender}/%"
 
-    pattern = f"{prefix}/{gender}/%"
-
-    # 1) Numbers already used in beach_proel_matches (played matches)
+    # 1) Numbers already used in beach_proel_matches (global — all tournaments)
     existing_rows = await database.fetch_all(
         select(beach_proel_matches.c.match_number).where(
             beach_proel_matches.c.match_number.like(pattern)
         )
     )
-    seq_nums = []
+    seq_nums: list[int] = []
     for r in existing_rows:
         parts = dict(r)["match_number"].split("/")
         if len(parts) == 3:
@@ -875,12 +917,11 @@ async def generate_match_number(
             except ValueError:
                 pass
 
-    # 2) Numbers already assigned inside the tournament schedule (data_json.schedule.matches)
-    #    These are stored but not yet in beach_proel_matches (match not played yet).
-    tour_row = await database.fetch_one(
-        select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
+    # 2) Numbers already assigned in ALL tournament schedules (global uniqueness)
+    all_tour_rows = await database.fetch_all(
+        select(beach_tournaments.c.data_json)
     )
-    if tour_row:
+    for tour_row in all_tour_rows:
         tour_data = _parse_json(dict(tour_row)["data_json"])
         schedule = tour_data.get("schedule") or {}
         for m in (schedule.get("matches") or []):
@@ -888,14 +929,14 @@ async def generate_match_number(
             if not mn:
                 continue
             parts = str(mn).split("/")
-            if len(parts) == 3 and parts[0] == prefix and parts[1] == gender:
+            if len(parts) == 3 and parts[0] == prefix and parts[1] == cat_gender:
                 try:
                     seq_nums.append(int(parts[2]))
                 except ValueError:
                     pass
 
     next_seq = (max(seq_nums) + 1) if seq_nums else 1
-    match_number = f"{prefix}/{gender}/{next_seq}"
+    match_number = f"{prefix}/{cat_gender}/{next_seq}"
 
     return {"match_number": match_number, "prefix": prefix}
 
