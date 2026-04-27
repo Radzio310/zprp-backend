@@ -18,7 +18,6 @@ from sqlalchemy import (
     func,
     text,
     inspect,
-    Index
 )
 from databases import Database
 from sqlalchemy.dialects.postgresql import JSONB
@@ -1162,9 +1161,6 @@ beach_reports = Table(
     ),
 )
 
-Index("ix_beach_reports_user_id", beach_reports.c.user_id)
-Index("ix_beach_reports_status", beach_reports.c.status)
-
 beach_report_messages = Table(
     "beach_report_messages",
     metadata,
@@ -1174,7 +1170,6 @@ beach_report_messages = Table(
         Integer,
         ForeignKey("beach_reports.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     ),
     # "user" | "admin"
     Column("sender_type", String, nullable=False),
@@ -1184,8 +1179,12 @@ beach_report_messages = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
-Index("ix_beach_report_messages_report_id", beach_report_messages.c.report_id)
-
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
+
+# Indexes created separately with IF NOT EXISTS to survive restarts
+with engine.connect() as _conn:
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_user_id ON beach_reports (user_id)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_status ON beach_reports (status)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_report_messages_report_id ON beach_report_messages (report_id)"))
