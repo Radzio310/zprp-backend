@@ -704,6 +704,7 @@ async def startup():
     _beach_tournament_migrations = [
         "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS match_prefix VARCHAR UNIQUE",
         "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS competition_type VARCHAR",
+        "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS category VARCHAR",
     ]
     for stmt in _beach_tournament_migrations:
         try:

@@ -878,6 +878,7 @@ async def get_match_prefix(
 async def generate_match_number(
     tournament_id: int,
     gender: str = Query(..., description="M lub K"),
+    category: Optional[str] = Query(None, description="Kategoria turnieju (fallback gdy brak w DB)"),
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
     if gender not in ("M", "K"):
@@ -897,7 +898,9 @@ async def generate_match_number(
 
     row_d = dict(row)
     prefix = _competition_type_to_prefix(row_d.get("competition_type"), row_d["name"] or "TRN")
-    cat_code = _CATEGORY_CODES.get(row_d.get("category") or "", "")
+    # Use DB value first, fall back to query param if DB is NULL
+    effective_category = row_d.get("category") or category or ""
+    cat_code = _CATEGORY_CODES.get(effective_category, "")
     cat_gender = f"{cat_code}{gender}" if cat_code else gender
 
     pattern = f"{prefix}/{cat_gender}/%"
