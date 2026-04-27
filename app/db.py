@@ -18,6 +18,7 @@ from sqlalchemy import (
     func,
     text,
     inspect,
+    Index,
 )
 from databases import Database
 from sqlalchemy.dialects.postgresql import JSONB
