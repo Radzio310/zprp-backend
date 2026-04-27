@@ -1128,5 +1128,64 @@ board_events = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
+# ─────────────────── BEACH: Reports (system zgłoszeń) ───────────────────
+
+beach_reports = Table(
+    "beach_reports",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("beach_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    # awaria | pytanie | pomysl | info
+    Column("type", String, nullable=False),
+    # open | in_progress | closed
+    Column("status", String, nullable=False, server_default=text("'open'")),
+    # snapshot kontaktów usera przy tworzeniu (dla wygody admina)
+    Column("user_name", String, nullable=False),
+    Column("user_phone", String, nullable=True),
+    Column("user_email", String, nullable=True),
+    # flagi nieprzeczytania
+    Column("unread_by_admin", Boolean, nullable=False, server_default=text("true")),
+    Column("unread_by_user", Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+Index("ix_beach_reports_user_id", beach_reports.c.user_id)
+Index("ix_beach_reports_status", beach_reports.c.status)
+
+beach_report_messages = Table(
+    "beach_report_messages",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "report_id",
+        Integer,
+        ForeignKey("beach_reports.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    # "user" | "admin"
+    Column("sender_type", String, nullable=False),
+    Column("sender_user_id", Integer, nullable=False),
+    Column("sender_name", String, nullable=True),
+    Column("content", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index("ix_beach_report_messages_report_id", beach_report_messages.c.report_id)
+
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

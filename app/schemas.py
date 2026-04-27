@@ -1650,3 +1650,74 @@ class BeachStandingPreviewResponse(BaseModel):
     all_finished: bool
     men_count: int = 0
     women_count: int = 0
+
+
+# =====================================================================
+# BEACH: Reports (system zgłoszeń user ↔ admin)
+# =====================================================================
+
+class BeachReportCreateRequest(BaseModel):
+    type: Literal["awaria", "pytanie", "pomysl", "info"]
+    content: str = Field(..., min_length=1, max_length=4000)
+
+
+class BeachReportMessageItem(BaseModel):
+    id: int
+    report_id: int
+    sender_type: Literal["user", "admin"]
+    sender_user_id: int
+    sender_name: Optional[str] = None
+    content: str
+    created_at: datetime
+
+
+class BeachReportItem(BaseModel):
+    id: int
+    user_id: int
+    user_name: str
+    user_phone: Optional[str] = None
+    user_email: Optional[str] = None
+    type: str
+    status: str
+    unread_by_admin: bool
+    unread_by_user: bool
+    created_at: datetime
+    updated_at: datetime
+    last_message: Optional[str] = None
+    message_count: int = 0
+
+
+class BeachReportDetailResponse(BaseModel):
+    report: BeachReportItem
+    messages: List[BeachReportMessageItem]
+
+
+class BeachReportsListResponse(BaseModel):
+    reports: List[BeachReportItem]
+    total: int
+    unread_count: int
+
+
+class BeachReportReplyRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=4000)
+
+
+class BeachReportStatusRequest(BaseModel):
+    status: Literal["open", "in_progress", "closed"]
+
+
+class BeachReportUnreadCountResponse(BaseModel):
+    unread_count: int
+
+
+class BeachReportAdminStats(BaseModel):
+    open: int
+    in_progress: int
+    closed: int
+    unread_admin: int
+
+
+class BeachReportAdminListResponse(BaseModel):
+    reports: List[BeachReportItem]
+    total: int
+    stats: BeachReportAdminStats
