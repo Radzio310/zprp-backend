@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import random
 import re
 import traceback
 import unicodedata
@@ -61,7 +62,7 @@ class SquadUpdateRequest(BaseModel):
 
 
 class TournamentTitleImageRequest(BaseModel):
-    """Dane potrzebne do wygenerowania grafiki tytulowej turnieju."""
+    """Dane potrzebne do wygenerowania grafiki tytułowej turnieju."""
     tournament_id: Optional[int] = None
     name: str
     event_date: Optional[str] = None
@@ -99,6 +100,50 @@ def _public_static_url(path: Path) -> str:
     return f"/static/{rel}"
 
 
+_TITLE_IMAGE_VARIANTS = [
+    {
+        "scene": "one beach handball player seen from behind during a jump shot, ball raised, sand flying subtly",
+        "camera": "medium close-up from a low sideline angle with shallow depth of field",
+        "light": "golden evening sunset light",
+    },
+    {
+        "scene": "wide empty beach handball court with a ball in the foreground and soft goal lines in the sand, no people",
+        "camera": "wide cinematic establishing shot from court level",
+        "light": "quiet early morning light with long soft shadows",
+    },
+    {
+        "scene": "two athletes in natural motion, one defending and one preparing to shoot, seen from a diagonal side angle",
+        "camera": "telephoto sports photo, slightly compressed background",
+        "light": "bright midday beach sun with clean contrast",
+    },
+    {
+        "scene": "single female athlete diving or landing on sand after a shot, dynamic but realistic, no posed team photo",
+        "camera": "close action photograph with sand texture visible",
+        "light": "warm late afternoon light",
+    },
+    {
+        "scene": "beach handball ball and court markings dominating the frame, athletes blurred far in the background",
+        "camera": "close foreground focus with natural background blur",
+        "light": "soft morning sun",
+    },
+    {
+        "scene": "one male player sprinting across the sand, photographed from behind and slightly to the side",
+        "camera": "low tracking sports angle, motion implied but not blurry",
+        "light": "sunny summer afternoon",
+    },
+    {
+        "scene": "distant beach court scene with small silhouettes of players and more emphasis on sand, court, sky, and atmosphere",
+        "camera": "far wide shot with clean negative space for app text",
+        "light": "blue-hour evening light after sunset",
+    },
+    {
+        "scene": "goal area and court lines with a ball rolling on sand, no visible faces, only partial athlete legs in the distance",
+        "camera": "documentary-style sports detail shot",
+        "light": "clear morning beach light",
+    },
+]
+
+
 def _build_title_image_prompt(req: TournamentTitleImageRequest) -> str:
     location_hint = (req.location or "").strip()
     category_hint = (req.category or "turniej").strip()
@@ -106,13 +151,19 @@ def _build_title_image_prompt(req: TournamentTitleImageRequest) -> str:
     date_hint = " ".join(
         x for x in [(req.event_date or "").strip(), (req.end_date or "").strip()] if x
     )
+    variant = random.choice(_TITLE_IMAGE_VARIANTS)
 
     return (
         "Landscape realistic photo-style title image for a Polish beach handball tournament. "
         "It should look like a real editorial sports photograph, not a cartoon, not CGI, not artificial "
-        "characters, not plastic-looking people. Use natural athletes photographed on a sunny sand court, "
-        "a beach handball ball, subtle goal/court lines, warm sunlight, beach atmosphere, tasteful coastal colors. "
-        "Keep the composition minimalist and premium, with real-world lighting and natural human poses. "
+        "characters, not plastic-looking people. Avoid repetitive front-facing group poses and avoid always showing "
+        "three people facing the camera. "
+        f"Randomized scene direction: {variant['scene']}. "
+        f"Camera direction: {variant['camera']}. "
+        f"Time and light: {variant['light']}. "
+        "Use natural athletes only if this variant includes people; otherwise focus on the ball, court, sand, goal lines, "
+        "beach atmosphere, and real-world photographic lighting. "
+        "Keep the composition minimalist and premium, with natural poses and believable sports photography. "
         "No text, no letters, no logos, no badges, no watermarks. "
         "Leave darker open space in the lower-left area for app overlay text. "
         "Use a premium mobile app tile composition, high contrast, readable background. "
