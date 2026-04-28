@@ -71,6 +71,7 @@ class TournamentTitleImageRequest(BaseModel):
     category: Optional[str] = None
     competition_type: Optional[str] = None
     regenerate: bool = False
+    extra_prompt: Optional[str] = None
 
 
 # ─────────────────── helpers ───────────────────
@@ -144,6 +145,47 @@ _TITLE_IMAGE_VARIANTS = [
 ]
 
 
+def _infer_gender_hint(name: str) -> str:
+    """
+    Infer athlete gender from Polish tournament name keywords.
+    Returns an explicit gender instruction for the image prompt.
+    """
+    lower = name.lower()
+
+    # Strong female indicators (Polish grammar: feminine forms)
+    female_keywords = [
+        "juniorek", "juniorki", "juniorka",
+        "kobiet", "kobieca", "kobiecy",
+        "pań", "panie",
+        "seniorek", "seniorki",
+        "dziewcząt", "dziewczyny", "dziewczyna",
+        "uczniów szkół"  # context: often mixed but lean neutral
+    ]
+    # Strong male indicators (Polish grammar: masculine forms)
+    male_keywords = [
+        "juniorów", "juniora", "junior mł",
+        "mężczyzn", "panów",
+        "seniorów",
+        "chłopców", "chłopiec",
+    ]
+
+    female_score = sum(1 for kw in female_keywords if kw in lower)
+    male_score = sum(1 for kw in male_keywords if kw in lower)
+
+    if female_score > male_score:
+        return (
+            "The athletes in this image MUST be female. Show only women players. "
+            "Female beach handball players only, no men visible."
+        )
+    elif male_score > female_score:
+        return (
+            "The athletes in this image MUST be male. Show only men players. "
+            "Male beach handball players only, no women visible."
+        )
+    else:
+        return "Athletes may be male or female — choose freely based on the scene variant."
+
+
 def _build_title_image_prompt(req: TournamentTitleImageRequest) -> str:
     location_hint = (req.location or "").strip()
     category_hint = (req.category or "turniej").strip()
@@ -152,6 +194,8 @@ def _build_title_image_prompt(req: TournamentTitleImageRequest) -> str:
         x for x in [(req.event_date or "").strip(), (req.end_date or "").strip()] if x
     )
     variant = random.choice(_TITLE_IMAGE_VARIANTS)
+    gender_hint = _infer_gender_hint(req.name)
+    extra = (req.extra_prompt or "").strip()
 
     return (
         "Landscape realistic photo-style title image for a Polish beach handball tournament. "
@@ -163,6 +207,7 @@ def _build_title_image_prompt(req: TournamentTitleImageRequest) -> str:
         f"Time and light: {variant['light']}. "
         "Use natural athletes only if this variant includes people; otherwise focus on the ball, court, sand, goal lines, "
         "beach atmosphere, and real-world photographic lighting. "
+        f"IMPORTANT — athlete gender: {gender_hint} "
         "Keep the composition minimalist and premium, with natural poses and believable sports photography. "
         "No text, no letters, no logos, no badges, no watermarks. "
         "Leave darker open space in the lower-left area for app overlay text. "
@@ -173,6 +218,7 @@ def _build_title_image_prompt(req: TournamentTitleImageRequest) -> str:
         f"Location inspiration: {location_hint or 'Polish beach town'}; "
         "if location is recognizable, include only a very subtle local reference in the scenery. "
         f"Competition type: {competition_hint or 'beach handball event'}."
+        + (f" Additional context from organizer: {extra}" if extra else "")
     )
 
 
@@ -1227,3 +1273,169 @@ async def squad_update_tournament(
     )
 
     return {"success": True}
+
+
+# ─────────────────── TITLE IMAGES GALLERY ───────────────────
+
+class StandaloneImageGenerateRequest(BaseModel):
+    """Generuj grafikę bez przypisania do turnieju."""
+    name: str
+    event_date: Optional[str] = None
+    end_date: Optional[str] = None
+    location: Optional[str] = None
+    category: Optional[str] = None
+    competition_type: Optional[str] = None
+    extra_prompt: Optional[str] = None
+
+
+@router.get(
+    "/title-images/list",
+    response_model=dict,
+    summary="Lista wszystkich grafik tytułowych (admin)",
+)
+async def list_title_images(
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    images_dir = _static_root_dir() / "beach" / "tournaments" / "title-images"
+    if not images_dir.exists():
+        return {"images": []}
+
+    # Build map: filename → list of tournaments using it
+    tournament_rows = await database.fetch_all(
+        select(beach_tournaments.c.id, beach_tournaments.c.name, beach_tournaments.c.data_json)
+    )
+    filename_to_tours: dict[str, list] = {}
+    for row in tournament_rows:
+        row_d = dict(row)
+        data = _parse_json(row_d["data_json"])
+        ti = data.get("title_image")
+        if isinstance(ti, dict) and ti.get("url"):
+            url: str = ti["url"]
+            fname = url.rstrip("/").split("/")[-1]
+            if fname not in filename_to_tours:
+                filename_to_tours[fname] = []
+            filename_to_tours[fname].append({
+                "id": row_d["id"],
+                "name": row_d["name"],
+            })
+
+    images = []
+    for p in sorted(images_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+        if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            continue
+        stat = p.stat()
+        url = _public_static_url(p)
+        images.append({
+            "filename": p.name,
+            "url": url,
+            "size_bytes": stat.st_size,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            "used_by": filename_to_tours.get(p.name, []),
+        })
+
+    return {"images": images}
+
+
+@router.delete(
+    "/title-images/{filename}",
+    response_model=dict,
+    summary="Usuń grafikę tytułową (admin)",
+)
+async def delete_title_image(
+    filename: str,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    # Basic path traversal guard
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Nieprawidłowa nazwa pliku")
+
+    images_dir = _static_root_dir() / "beach" / "tournaments" / "title-images"
+    file_path = images_dir / filename
+    if not file_path.exists():
+        raise HTTPException(404, "Plik nie istnieje")
+
+    file_path.unlink()
+    return {"success": True, "deleted": filename}
+
+
+@router.post(
+    "/title-images/generate",
+    response_model=dict,
+    summary="Wygeneruj nową grafikę standalone (admin)",
+)
+async def generate_standalone_title_image(
+    req: StandaloneImageGenerateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    prompt_req = TournamentTitleImageRequest(
+        name=req.name,
+        event_date=req.event_date,
+        end_date=req.end_date,
+        location=req.location,
+        category=req.category,
+        competition_type=req.competition_type,
+        extra_prompt=req.extra_prompt,
+    )
+    prompt = _build_title_image_prompt(prompt_req)
+    image_bytes = await _generate_openai_title_image(prompt)
+
+    out_dir = _static_root_dir() / "beach" / "tournaments" / "title-images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    file_path = out_dir / f"{uuid.uuid4().hex}.png"
+    file_path.write_bytes(image_bytes)
+
+    return {
+        "filename": file_path.name,
+        "url": _public_static_url(file_path),
+        "prompt": prompt,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.patch(
+    "/{tournament_id}/set-title-image",
+    response_model=dict,
+    summary="Przypisz istniejącą grafikę do turnieju (admin)",
+)
+async def set_tournament_title_image(
+    tournament_id: int,
+    body: dict,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "Brak url grafiki")
+
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+
+    data = _parse_json(dict(row)["data_json"])
+    existing_ti = data.get("title_image") if isinstance(data.get("title_image"), dict) else {}
+    data["title_image"] = {
+        **existing_ti,
+        "url": url,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    await database.execute(
+        update(beach_tournaments)
+        .where(beach_tournaments.c.id == tournament_id)
+        .values(data_json=json.dumps(data, ensure_ascii=False))
+    )
+    return {"success": True, "url": url}
+
