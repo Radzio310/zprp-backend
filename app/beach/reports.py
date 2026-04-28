@@ -510,10 +510,14 @@ async def get_admin_stats(user_id: int = Depends(beach_get_current_user_id)):
         )
         return row[0] if row else 0
 
-    open_c = await _count(beach_reports.c.status == "open")
-    in_progress_c = await _count(beach_reports.c.status == "in_progress")
-    closed_c = await _count(beach_reports.c.status == "closed")
     unread_c = await _count(beach_reports.c.unread_by_admin == True)  # noqa: E712
+    open_c = await _count(
+        (beach_reports.c.status == "open") & (beach_reports.c.unread_by_admin == False)  # noqa: E712
+    )
+    in_progress_c = await _count(
+        (beach_reports.c.status == "in_progress") & (beach_reports.c.unread_by_admin == False)  # noqa: E712
+    )
+    closed_c = await _count(beach_reports.c.status == "closed")
 
     return BeachReportAdminStats(
         open=open_c,
@@ -557,11 +561,16 @@ async def get_admin_reports(
         )
         return r[0] if r else 0
 
+    unread_admin_c = await _count(beach_reports.c.unread_by_admin == True)  # noqa: E712
     stats = BeachReportAdminStats(
-        open=await _count(beach_reports.c.status == "open"),
-        in_progress=await _count(beach_reports.c.status == "in_progress"),
+        open=await _count(
+            (beach_reports.c.status == "open") & (beach_reports.c.unread_by_admin == False)  # noqa: E712
+        ),
+        in_progress=await _count(
+            (beach_reports.c.status == "in_progress") & (beach_reports.c.unread_by_admin == False)  # noqa: E712
+        ),
         closed=await _count(beach_reports.c.status == "closed"),
-        unread_admin=await _count(beach_reports.c.unread_by_admin == True),  # noqa: E712
+        unread_admin=unread_admin_c,
     )
 
     return BeachReportAdminListResponse(
