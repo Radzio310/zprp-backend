@@ -18,7 +18,7 @@ import httpx
 from pydantic import BaseModel
 from sqlalchemy import select, insert, update, delete
 
-from app.db import database, beach_tournaments, beach_users, beach_admins, beach_proel_matches
+from app.db import database, beach_tournaments, beach_users, beach_admins, beach_proel_matches, beach_standings
 from app.schemas import (
     CreateBeachTournamentRequest,
     UpdateBeachTournamentRequest,
@@ -977,6 +977,39 @@ async def delete_tournament(
     )
     if not row:
         raise HTTPException(404, "Nie znaleziono turnieju")
+
+    # Cofnij punkty ze standings za ten turniej przed usunięciem
+    import json as _json
+    from datetime import datetime, timezone as _tz
+    standings_rows = await database.fetch_all(select(beach_standings))
+    now = datetime.now(_tz.utc)
+    for sr in standings_rows:
+        sr_d = dict(sr)
+        raw = sr_d.get("tournaments_json") or []
+        if isinstance(raw, str):
+            try:
+                entries = _json.loads(raw)
+            except Exception:
+                entries = []
+        elif isinstance(raw, list):
+            entries = raw
+        else:
+            entries = []
+        changed = False
+        for e in entries:
+            if (
+                e.get("type") == "tournament"
+                and e.get("tournament_id") == tournament_id
+                and not e.get("revoked", False)
+            ):
+                e["revoked"] = True
+                changed = True
+        if changed:
+            await database.execute(
+                update(beach_standings)
+                .where(beach_standings.c.id == sr_d["id"])
+                .values(tournaments_json=entries, updated_at=now)
+            )
 
     await database.execute(
         delete(beach_tournaments).where(beach_tournaments.c.id == tournament_id)

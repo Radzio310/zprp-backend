@@ -399,8 +399,22 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
     return _to_user_item(dict(row))
 
 
-@router.delete("/{user_id}", response_model=dict, summary="Usuń użytkownika (BEACH)")
-async def delete_user(user_id: int):
+@router.delete("/{user_id}", response_model=dict, summary="Usuń użytkownika permanentnie (BEACH) — tylko superadmin")
+async def delete_user(
+    user_id: int,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    SUPER_ADMIN_ID = 2
+    if current_user_id != SUPER_ADMIN_ID:
+        raise HTTPException(status_code=403, detail="Brak uprawnień — tylko superadmin może usuwać konta")
+
+    if user_id == SUPER_ADMIN_ID:
+        raise HTTPException(status_code=400, detail="Nie można usunąć konta superadmina")
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
+
     await database.execute(delete(beach_users).where(beach_users.c.id == user_id))
     return {"success": True}
 

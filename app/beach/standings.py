@@ -783,3 +783,101 @@ async def delete_manual_entry(
         .values(tournaments_json=new_entries, updated_at=now)
     )
     return {"success": True}
+
+
+# ─────────────────── GET /beach/standings/orphan-check ───────────────────
+
+@router.get(
+    "/orphan-check",
+    response_model=dict,
+    summary="Sprawdź osierocone punkty (turnieje usunięte ale punkty zostały) — admin",
+)
+async def orphan_check(
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień admina")
+
+    # Zbierz wszystkie turniej-id wymienione w standings (niezrevokowane)
+    all_rows = await database.fetch_all(select(beach_standings))
+    tournament_info: dict[int, dict] = {}  # tournament_id -> {name, affected_rows}
+
+    for r in all_rows:
+        r_d = dict(r)
+        entries = _parse_json(r_d.get("tournaments_json") or [])
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if e.get("type") == "tournament" and not e.get("revoked", False):
+                tid = e.get("tournament_id")
+                tname = e.get("tournament_name", f"Turniej #{tid}")
+                if tid is not None:
+                    if tid not in tournament_info:
+                        tournament_info[tid] = {"name": tname, "affected_rows": 0}
+                    tournament_info[tid]["affected_rows"] += 1
+
+    if not tournament_info:
+        return {"orphans": []}
+
+    # Sprawdź które z tych turniejów już nie istnieją
+    existing_ids_rows = await database.fetch_all(
+        select(beach_tournaments.c.id).where(
+            beach_tournaments.c.id.in_(list(tournament_info.keys()))
+        )
+    )
+    existing_ids = {r["id"] for r in existing_ids_rows}
+
+    orphans = [
+        {
+            "tournament_id": tid,
+            "tournament_name": info["name"],
+            "affected_rows": info["affected_rows"],
+        }
+        for tid, info in tournament_info.items()
+        if tid not in existing_ids
+    ]
+
+    return {"orphans": orphans}
+
+
+# ─────────────────── DELETE /beach/standings/orphan/{tournament_id} ───────────────────
+
+@router.delete(
+    "/orphan/{tournament_id}",
+    response_model=dict,
+    summary="Usuń osierocone punkty za nieistniejący turniej — admin",
+)
+async def purge_orphaned_tournament(
+    tournament_id: int,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień admina")
+
+    all_rows = await database.fetch_all(select(beach_standings))
+    now = datetime.now(timezone.utc)
+    revoked_count = 0
+
+    for r in all_rows:
+        r_d = dict(r)
+        entries = _parse_json(r_d.get("tournaments_json") or [])
+        if not isinstance(entries, list):
+            continue
+        changed = False
+        for e in entries:
+            if (
+                e.get("type") == "tournament"
+                and e.get("tournament_id") == tournament_id
+                and not e.get("revoked", False)
+            ):
+                e["revoked"] = True
+                changed = True
+        if changed:
+            await database.execute(
+                update(beach_standings)
+                .where(beach_standings.c.id == r_d["id"])
+                .values(tournaments_json=entries, updated_at=now)
+            )
+            revoked_count += 1
+
+    return {"success": True, "revoked_count": revoked_count}
