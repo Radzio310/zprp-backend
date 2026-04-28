@@ -3,16 +3,18 @@ Beach Reports — system zgłoszeń user ↔ admin (mini-chat).
 
 Uprawnienia:
   - Każdy zalogowany user beach: tworzy zgłoszenia i odpowiada na własne
-  - Admin: widzi wszystkie zgłoszenia, odpowiada, zmienia status
+  - Admin: widzi wszystkie zgłoszenia, odpowiada, zmienia status, usuwa
 """
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import os
 import shutil
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import openai
@@ -53,6 +55,9 @@ router = APIRouter(prefix="/beach/reports", tags=["Beach: Reports"])
 # prevents background tasks from being garbage-collected before completion
 _bg_tasks: set = set()
 
+# cooldown timestamp for automatic image cleanup (epoch seconds)
+_last_cleanup_ts: float = 0.0
+
 
 # ─────────────────── OpenAI title generation ───────────────────
 
@@ -65,11 +70,13 @@ async def _generate_title_bg(report_id: int, content: str) -> None:
                 {
                     "role": "system",
                     "content": (
-                        "Stwórz krótki, konkretny tytuł (max 55 znaków) dla zgłoszenia użytkownika aplikacji do siatkówki plażowej. "
+                        "Jesteś asystentem aplikacji BAZA Beach — platformy do zarządzania "
+                        "rozgrywkami piłki ręcznej plażowej. Tworzysz krótkie, konkretne tytuły "
+                        "(max 55 znaków, po polsku) dla zgłoszeń użytkowników tej aplikacji. "
                         "Odpowiedz TYLKO tytułem — bez cudzysłowów, bez kropki na końcu."
                     ),
                 },
-                {"role": "user", "content": content},
+                {"role": "user", "content": content[:600]},
             ],
             max_tokens=25,
             temperature=0.4,
@@ -83,6 +90,84 @@ async def _generate_title_bg(report_id: int, content: str) -> None:
             )
     except Exception:
         logger.warning("OpenAI title generation failed for report %s", report_id)
+
+
+# ─────────────────── Image archive cleanup ───────────────────
+
+def _url_to_fs_path(url: str) -> Optional[str]:
+    """Konwertuje URL statyczny (/static/…) na ścieżkę filesystemu."""
+    if not url or url == "__archived__":
+        return None
+    stripped = url.lstrip("/")
+    if stripped.startswith("static/"):
+        return os.path.join(_STATIC_DIR, stripped[len("static/"):])
+    return None
+
+
+async def _archive_old_images() -> None:
+    """Usuwa pliki graficzne z zamkniętych zgłoszeń starszych niż 14 dni
+    i oznacza je jako '__archived__' w bazie danych."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+
+    msgs = await database.fetch_all(
+        select(
+            beach_report_messages.c.id,
+            beach_report_messages.c.report_id,
+            beach_report_messages.c.attachment_url,
+        )
+        .select_from(
+            beach_report_messages.join(
+                beach_reports,
+                beach_report_messages.c.report_id == beach_reports.c.id,
+            )
+        )
+        .where(
+            (beach_reports.c.status == "closed")
+            & (beach_reports.c.updated_at < cutoff)
+            & (beach_report_messages.c.attachment_url.isnot(None))
+            & (beach_report_messages.c.attachment_url != "__archived__")
+        )
+    )
+
+    if not msgs:
+        return
+
+    archived = 0
+    for msg in msgs:
+        att_raw: str = msg["attachment_url"] or ""
+        try:
+            urls: list = _json.loads(att_raw) if att_raw.startswith("[") else [att_raw]
+        except Exception:
+            urls = [att_raw] if att_raw else []
+
+        for url in urls:
+            path = _url_to_fs_path(url)
+            if path and os.path.isfile(path):
+                try:
+                    os.remove(path)
+                    archived += 1
+                except OSError:
+                    pass
+
+        await database.execute(
+            update(beach_report_messages)
+            .where(beach_report_messages.c.id == msg["id"])
+            .values(attachment_url="__archived__")
+        )
+
+    logger.info("Archived images: %d files from %d messages", archived, len(msgs))
+
+
+async def _maybe_run_cleanup() -> None:
+    """Odpala _archive_old_images() maksymalnie raz na godzinę w tle."""
+    global _last_cleanup_ts
+    now = time.monotonic()
+    if now - _last_cleanup_ts < 3600:
+        return
+    _last_cleanup_ts = now
+    task = asyncio.create_task(_archive_old_images())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 # ─────────────────── helpers ───────────────────
@@ -202,7 +287,6 @@ async def create_report(
     user_id: int = Depends(beach_get_current_user_id),
 ):
     """Utwórz nowe zgłoszenie (z pierwszą wiadomością)."""
-    # pobierz dane kontaktowe z profilu
     user_row = await database.fetch_one(
         select(
             beach_users.c.full_name,
@@ -219,7 +303,6 @@ async def create_report(
 
     now = datetime.now(timezone.utc)
 
-    # utwórz raport
     report_id = await database.execute(
         insert(beach_reports).values(
             user_id=user_id,
@@ -235,7 +318,6 @@ async def create_report(
         )
     )
 
-    # dodaj pierwszą wiadomość
     msg_id = await database.execute(
         insert(beach_report_messages).values(
             report_id=report_id,
@@ -247,12 +329,10 @@ async def create_report(
         )
     )
 
-    # tytuł generowany asynchronicznie w tle (task trzymany w secie żeby GC go nie usunął)
     _task = asyncio.create_task(_generate_title_bg(report_id, body.content))
     _bg_tasks.add(_task)
     _task.add_done_callback(_bg_tasks.discard)
 
-    # zwróć szczegóły
     report_row = await _get_report_or_404(report_id)
     msg_row = await database.fetch_one(
         select(beach_report_messages).where(beach_report_messages.c.id == msg_id)
@@ -274,7 +354,6 @@ async def get_report_thread(
     if report_row["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Brak dostępu do zgłoszenia")
 
-    # auto-mark jako przeczytane przez usera
     if report_row["unread_by_user"]:
         await database.execute(
             update(beach_reports)
@@ -310,14 +389,12 @@ async def reply_to_report(
     report_row = await _get_report_or_404(report_id)
     is_admin = await _is_admin(user_id)
 
-    # user może odpowiadać tylko na własne; admin na wszystkie
     if not is_admin and report_row["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Brak dostępu do zgłoszenia")
 
     if report_row["status"] == "closed" and not is_admin:
         raise HTTPException(status_code=400, detail="Zgłoszenie jest zamknięte")
 
-    # pobierz imię nadawcy
     sender_row = await database.fetch_one(
         select(beach_users.c.full_name).where(beach_users.c.id == user_id)
     )
@@ -338,7 +415,6 @@ async def reply_to_report(
         )
     )
 
-    # ustaw flagi unread + updated_at
     update_vals: dict = {"updated_at": now}
     if sender_type == "admin":
         update_vals["unread_by_user"] = True
@@ -349,7 +425,6 @@ async def reply_to_report(
         update(beach_reports).where(beach_reports.c.id == report_id).values(**update_vals)
     )
 
-    # zwróć zaktualizowany wątek
     report_row = await _get_report_or_404(report_id)
     msgs = await database.fetch_all(
         select(beach_report_messages)
@@ -416,7 +491,6 @@ async def delete_report(
         delete(beach_reports).where(beach_reports.c.id == report_id)
     )
 
-    # usuń pliki attachmentów jeśli istnieją
     attach_dir = os.path.join(_STATIC_DIR, "beach-report-attachments", str(report_id))
     if os.path.isdir(attach_dir):
         shutil.rmtree(attach_dir, ignore_errors=True)
@@ -459,6 +533,9 @@ async def get_admin_reports(
     if not await _is_admin(user_id):
         raise HTTPException(status_code=403, detail="Brak uprawnień")
 
+    # uruchom cleanup starych grafik w tle (max raz/h)
+    await _maybe_run_cleanup()
+
     query = select(beach_reports).order_by(beach_reports.c.updated_at.desc())
     if status:
         query = query.where(beach_reports.c.status == status)
@@ -474,7 +551,6 @@ async def get_admin_reports(
         last = await _get_last_message(d["id"])
         report_items.append(_row_to_report_item(d, cnt, last))
 
-    # stats
     async def _count(where_clause) -> int:
         r = await database.fetch_one(
             select(sa_func.count(beach_reports.c.id)).where(where_clause)
@@ -541,7 +617,7 @@ async def update_report_status(
     if not await _is_admin(user_id):
         raise HTTPException(status_code=403, detail="Brak uprawnień")
 
-    report_row = await _get_report_or_404(report_id)
+    await _get_report_or_404(report_id)
 
     now = datetime.now(timezone.utc)
     await database.execute(
@@ -554,3 +630,35 @@ async def update_report_status(
     cnt = await _get_message_count(report_id)
     last = await _get_last_message(report_id)
     return _row_to_report_item(updated_row, cnt, last)
+
+
+@router.delete("/admin/{report_id}", status_code=204)
+async def admin_delete_report(
+    report_id: int,
+    user_id: int = Depends(beach_get_current_user_id),
+):
+    """Admin: permanentne usunięcie zgłoszenia wraz ze wszystkimi plikami."""
+    if not await _is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Brak uprawnień")
+
+    await _get_report_or_404(report_id)
+
+    await database.execute(
+        delete(beach_report_messages).where(beach_report_messages.c.report_id == report_id)
+    )
+    await database.execute(
+        delete(beach_reports).where(beach_reports.c.id == report_id)
+    )
+
+    attach_dir = os.path.join(_STATIC_DIR, "beach-report-attachments", str(report_id))
+    if os.path.isdir(attach_dir):
+        shutil.rmtree(attach_dir, ignore_errors=True)
+
+
+@router.post("/admin/archive-images", status_code=200)
+async def trigger_archive_images(user_id: int = Depends(beach_get_current_user_id)):
+    """Admin: ręczne wywołanie archiwizacji grafik ze starych zamkniętych zgłoszeń."""
+    if not await _is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Brak uprawnień")
+    await _archive_old_images()
+    return {"detail": "Archiwizacja zakończona"}
