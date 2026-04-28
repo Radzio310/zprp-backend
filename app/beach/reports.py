@@ -50,6 +50,9 @@ _STATIC_DIR = (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/reports", tags=["Beach: Reports"])
 
+# prevents background tasks from being garbage-collected before completion
+_bg_tasks: set = set()
+
 
 # ─────────────────── OpenAI title generation ───────────────────
 
@@ -244,8 +247,10 @@ async def create_report(
         )
     )
 
-    # tytuł generowany asynchronicznie w tle
-    asyncio.create_task(_generate_title_bg(report_id, body.content))
+    # tytuł generowany asynchronicznie w tle (task trzymany w secie żeby GC go nie usunął)
+    _task = asyncio.create_task(_generate_title_bg(report_id, body.content))
+    _bg_tasks.add(_task)
+    _task.add_done_callback(_bg_tasks.discard)
 
     # zwróć szczegóły
     report_row = await _get_report_or_404(report_id)
