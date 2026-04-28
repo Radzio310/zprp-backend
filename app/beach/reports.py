@@ -7,12 +7,17 @@ Uprawnienia:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import shutil
+import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Depends
-from sqlalchemy import select, insert, update, func as sa_func
+import openai
+from fastapi import APIRouter, File, HTTPException, Query, Depends, UploadFile
+from sqlalchemy import delete, select, insert, update, func as sa_func
 
 from app.db import (
     database,
@@ -35,8 +40,46 @@ from app.schemas import (
 )
 from app.deps import beach_get_current_user_id
 
+_RAILWAY_VOLUME = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+_STATIC_DIR = (
+    os.path.join(_RAILWAY_VOLUME, "static")
+    if _RAILWAY_VOLUME
+    else os.path.join(os.path.dirname(__file__), "..", "..", "static")
+)
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/reports", tags=["Beach: Reports"])
+
+
+# ─────────────────── OpenAI title generation ───────────────────
+
+async def _generate_title_bg(report_id: int, content: str) -> None:
+    try:
+        client = openai.AsyncOpenAI()
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Stwórz krótki, konkretny tytuł (max 55 znaków) dla zgłoszenia użytkownika aplikacji do siatkówki plażowej. "
+                        "Odpowiedz TYLKO tytułem — bez cudzysłowów, bez kropki na końcu."
+                    ),
+                },
+                {"role": "user", "content": content},
+            ],
+            max_tokens=25,
+            temperature=0.4,
+        )
+        title = resp.choices[0].message.content.strip().strip('"').strip("'")
+        if title:
+            await database.execute(
+                update(beach_reports)
+                .where(beach_reports.c.id == report_id)
+                .values(title=title)
+            )
+    except Exception:
+        logger.warning("OpenAI title generation failed for report %s", report_id)
 
 
 # ─────────────────── helpers ───────────────────
@@ -90,6 +133,7 @@ def _row_to_report_item(row: dict, message_count: int = 0, last_message: Optiona
         status=row["status"],
         unread_by_admin=bool(row["unread_by_admin"]),
         unread_by_user=bool(row["unread_by_user"]),
+        title=row.get("title"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_message=last_message,
@@ -105,6 +149,7 @@ def _msg_row_to_item(row: dict) -> BeachReportMessageItem:
         sender_user_id=row["sender_user_id"],
         sender_name=row.get("sender_name"),
         content=row["content"],
+        attachment_url=row.get("attachment_url"),
         created_at=row["created_at"],
     )
 
@@ -199,6 +244,9 @@ async def create_report(
         )
     )
 
+    # tytuł generowany asynchronicznie w tle
+    asyncio.create_task(_generate_title_bg(report_id, body.content))
+
     # zwróć szczegóły
     report_row = await _get_report_or_404(report_id)
     msg_row = await database.fetch_one(
@@ -280,6 +328,7 @@ async def reply_to_report(
             sender_user_id=user_id,
             sender_name=sender_name,
             content=body.content,
+            attachment_url=body.attachment_url,
             created_at=now,
         )
     )
@@ -311,6 +360,61 @@ async def reply_to_report(
         report=_row_to_report_item(dict(report_row), cnt, last),
         messages=[_msg_row_to_item(dict(m)) for m in msgs],
     )
+
+
+@router.post("/{report_id}/upload-attachment")
+async def upload_report_attachment(
+    report_id: int,
+    file: UploadFile = File(...),
+    user_id: int = Depends(beach_get_current_user_id),
+):
+    """Upload obrazu do zgłoszenia (max 10 MB, tylko obrazy)."""
+    report_row = await _get_report_or_404(report_id)
+    is_admin = await _is_admin(user_id)
+    if not is_admin and report_row["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Brak dostępu")
+
+    content_type = file.content_type or ""
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Tylko pliki graficzne")
+
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Plik za duży (max 10 MB)")
+
+    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+    filename = f"{uuid.uuid4().hex}{ext}"
+    dir_path = os.path.join(_STATIC_DIR, "beach-report-attachments", str(report_id))
+    os.makedirs(dir_path, exist_ok=True)
+    with open(os.path.join(dir_path, filename), "wb") as f:
+        f.write(data)
+
+    url = f"/static/beach-report-attachments/{report_id}/{filename}"
+    return {"url": url}
+
+
+@router.delete("/{report_id}", status_code=204)
+async def delete_report(
+    report_id: int,
+    user_id: int = Depends(beach_get_current_user_id),
+):
+    """Usuń własne zgłoszenie (tylko autor lub admin)."""
+    report_row = await _get_report_or_404(report_id)
+    is_admin = await _is_admin(user_id)
+    if not is_admin and report_row["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Brak dostępu")
+
+    await database.execute(
+        delete(beach_report_messages).where(beach_report_messages.c.report_id == report_id)
+    )
+    await database.execute(
+        delete(beach_reports).where(beach_reports.c.id == report_id)
+    )
+
+    # usuń pliki attachmentów jeśli istnieją
+    attach_dir = os.path.join(_STATIC_DIR, "beach-report-attachments", str(report_id))
+    if os.path.isdir(attach_dir):
+        shutil.rmtree(attach_dir, ignore_errors=True)
 
 
 # ─────────────────── ADMIN endpoints ───────────────────

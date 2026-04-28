@@ -1152,6 +1152,8 @@ beach_reports = Table(
     # flagi nieprzeczytania
     Column("unread_by_admin", Boolean, nullable=False, server_default=text("true")),
     Column("unread_by_user", Boolean, nullable=False, server_default=text("false")),
+    # tytuł generowany asynchronicznie przez OpenAI
+    Column("title", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column(
         "updated_at",
@@ -1177,6 +1179,7 @@ beach_report_messages = Table(
     Column("sender_user_id", Integer, nullable=False),
     Column("sender_name", String, nullable=True),
     Column("content", Text, nullable=False),
+    Column("attachment_url", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 

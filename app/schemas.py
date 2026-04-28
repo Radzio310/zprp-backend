@@ -1668,6 +1668,7 @@ class BeachReportMessageItem(BaseModel):
     sender_user_id: int
     sender_name: Optional[str] = None
     content: str
+    attachment_url: Optional[str] = None
     created_at: datetime
 
 
@@ -1681,6 +1682,7 @@ class BeachReportItem(BaseModel):
     status: str
     unread_by_admin: bool
     unread_by_user: bool
+    title: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     last_message: Optional[str] = None
@@ -1700,6 +1702,7 @@ class BeachReportsListResponse(BaseModel):
 
 class BeachReportReplyRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=4000)
+    attachment_url: Optional[str] = None
 
 
 class BeachReportStatusRequest(BaseModel):
