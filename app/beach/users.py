@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy import select, update, delete
 from sqlalchemy.exc import IntegrityError
 from passlib.context import CryptContext
@@ -145,6 +146,24 @@ def _merge_device_ids(
     if add_one and add_one not in out:
         out.append(add_one)
     return out
+
+
+async def _remove_device_from_other_users(installation_id: str, current_user_id: int) -> None:
+    """Usuwa installation_id z device_ids wszystkich innych użytkowników (multi-account cleanup)."""
+    rows = await database.fetch_all(
+        select(beach_users.c.id, beach_users.c.device_ids).where(
+            beach_users.c.id != current_user_id
+        )
+    )
+    for row in rows:
+        ids = list(row["device_ids"] or [])
+        if installation_id in ids:
+            ids.remove(installation_id)
+            await database.execute(
+                update(beach_users)
+                .where(beach_users.c.id == row["id"])
+                .values(device_ids=ids, updated_at=datetime.now(timezone.utc))
+            )
 
 
 # ─────────────────── endpoints ───────────────────
@@ -452,6 +471,10 @@ async def login_user(req: BeachLoginRequest):
     device_ids = list(row_dict.get("device_ids") or [])
     device_ids = _merge_device_ids(device_ids, req.device_id, None)
 
+    # Multi-account: jeśli installation_id należał do innego usera, usuń go stamtąd
+    if req.device_id:
+        await _remove_device_from_other_users(req.device_id, int(row_dict["id"]))
+
     upd_values: Dict[str, Any] = {
         "last_login_at": now,
         "app_opens": (beach_users.c.app_opens + 1),
@@ -477,3 +500,40 @@ async def login_user(req: BeachLoginRequest):
     token = beach_create_access_token(user_model.id)
 
     return BeachLoginResponse(user=user_model, token=token)
+
+
+class SyncDeviceRequest(BaseModel):
+    installation_id: str
+
+
+@router.post("/me/sync-device", response_model=dict, summary="Synchronizuj device_id zalogowanego usera (BEACH)")
+async def sync_device(req: SyncDeviceRequest, user_id: int = Depends(beach_get_current_user_id)):
+    """
+    Sprawdza czy installation_id jest już w device_ids usera i dodaje je jeśli nie.
+    Wywołuj raz na dobę z aplikacji aby utrzymać device_ids aktualne.
+    """
+    if not req.installation_id or len(req.installation_id) < 5:
+        raise HTTPException(400, "Nieprawidłowy installation_id")
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    row_dict = dict(row)
+    if not row_dict.get("is_active", True):
+        raise HTTPException(403, "Konto zostało dezaktywowane")
+
+    device_ids = list(row_dict.get("device_ids") or [])
+    if req.installation_id in device_ids:
+        return {"ok": True, "updated": False}
+
+    # Multi-account cleanup
+    await _remove_device_from_other_users(req.installation_id, user_id)
+
+    device_ids = _merge_device_ids(device_ids, req.installation_id, None)
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(device_ids=device_ids, updated_at=datetime.now(timezone.utc))
+    )
+    return {"ok": True, "updated": True}

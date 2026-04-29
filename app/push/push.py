@@ -3,9 +3,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, update
 
-from app.db import database, push_tokens, push_schedules
+from app.db import database, push_tokens, push_schedules, beach_users
 from .models import (
     PushRegisterRequest,
     PushScheduleBulkRequest,
@@ -177,3 +178,76 @@ async def list_all(request: Request, limit: int = 200):
 
     rows = await database.fetch_all(stmt)
     return {"items": [dict(r) for r in rows]}
+
+
+# ─────────────────── Beach: send push to all devices of a user ───────────────
+
+class NotifyUserRequest(BaseModel):
+    user_id: int
+    title: str
+    body: str
+    send_at_utc: str  # ISO UTC, e.g. "2026-05-01T10:00:00Z"
+    data: Optional[Dict[str, Any]] = None
+
+
+@router.post("/beach/notify-user")
+async def beach_notify_user(req: NotifyUserRequest, request: Request):
+    """
+    Planuje powiadomienie push do WSZYSTKICH urządzeń (installation_ids) użytkownika Beach.
+    Wymaga nagłówka X-Admin-Key.
+    """
+    admin_key = os.getenv("PUSH_ADMIN_KEY", "")
+    if admin_key:
+        got = request.headers.get("X-Admin-Key", "")
+        if got != admin_key:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    send_at = _parse_utc_iso(req.send_at_utc)
+
+    # Pobierz device_ids użytkownika
+    row = await database.fetch_one(
+        select(beach_users.c.device_ids).where(beach_users.c.id == req.user_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    device_ids: List[str] = list(row["device_ids"] or [])
+    if not device_ids:
+        return {"ok": True, "scheduled": 0, "skipped": 0, "reason": "no_devices"}
+
+    now = _utc_now()
+    send_hour = _send_hour_utc(send_at)
+    scheduled = 0
+    skipped = 0
+
+    for installation_id in device_ids:
+        # Deduplikacja: jeden push na (installation_id, send_hour_utc)
+        existing = await database.fetch_one(
+            select(push_schedules.c.id).where(
+                (push_schedules.c.installation_id == installation_id)
+                & (push_schedules.c.send_hour_utc == send_hour)
+                & (push_schedules.c.status == "pending")
+            )
+        )
+        if existing:
+            skipped += 1
+            continue
+
+        await database.execute(
+            insert(push_schedules).values(
+                installation_id=installation_id,
+                send_at_utc=send_at,
+                send_hour_utc=send_hour,
+                title=req.title,
+                body=req.body,
+                data_json=req.data or {},
+                status="pending",
+                attempts=0,
+                last_error=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        scheduled += 1
+
+    return {"ok": True, "scheduled": scheduled, "skipped": skipped}
