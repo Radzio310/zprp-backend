@@ -1705,6 +1705,7 @@ class BeachReportsListResponse(BaseModel):
 class BeachReportReplyRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=4000)
     attachment_url: Optional[str] = None
+    force_user: bool = False
 
 
 class BeachReportStatusRequest(BaseModel):

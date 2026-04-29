@@ -400,7 +400,7 @@ async def reply_to_report(
         select(beach_users.c.full_name).where(beach_users.c.id == user_id)
     )
     sender_name = sender_row["full_name"] if sender_row else None
-    sender_type = "admin" if is_admin else "user"
+    sender_type = "user" if (not is_admin or body.force_user) else "admin"
 
     now = datetime.now(timezone.utc)
 
