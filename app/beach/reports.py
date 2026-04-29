@@ -41,6 +41,7 @@ from app.schemas import (
     BeachReportAdminListResponse,
 )
 from app.deps import beach_get_current_user_id
+from app.beach.notifications import create_notification
 
 _RAILWAY_VOLUME = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
 _STATIC_DIR = (
@@ -424,6 +425,18 @@ async def reply_to_report(
     await database.execute(
         update(beach_reports).where(beach_reports.c.id == report_id).values(**update_vals)
     )
+
+    # Notify user when admin replies
+    if sender_type == "admin":
+        report_owner_id = report_row["user_id"]
+        report_title = report_row.get("title") or "Twoje zgłoszenie"
+        await create_notification(
+            notif_type="report_reply",
+            title="Odpowiedź na zgłoszenie",
+            body=f"Otrzymałeś odpowiedź w: {report_title}",
+            data={"report_id": report_id},
+            target_user_ids=[report_owner_id],
+        )
 
     report_row = await _get_report_or_404(report_id)
     msgs = await database.fetch_all(

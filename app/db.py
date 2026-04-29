@@ -794,6 +794,14 @@ beach_users = Table(
     # identyfikatory urządzeń (np. installation_id) – wiele urządzeń
     Column("device_ids", ARRAY(String), nullable=False, server_default=text("'{}'")),
 
+    # preferencje powiadomień: {type: bool}; default = all true
+    Column("notification_prefs", JSONB, nullable=False, server_default=text(
+        "'{\"tournament_reminder_24h\":true,\"tournament_reminder_5h\":true,"
+        "\"match_reminder_30min\":true,\"new_guideline\":true,\"new_announcement\":true,"
+        "\"new_match_my_team\":true,\"new_match_as_judge\":true,\"points_awarded\":true,"
+        "\"tournament_assigned\":true,\"new_tournament_calendar\":true,\"report_reply\":true}'::jsonb"
+    )),
+
     # aktywność konta: False = konto dezaktywowane (anonimizacja)
     Column("is_active", Boolean, nullable=False, server_default=text("true")),
 
@@ -1183,6 +1191,23 @@ beach_report_messages = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
+# -------------------------
+# BEACH: powiadomienia in-app
+# -------------------------
+beach_notifications = Table(
+    "beach_notifications",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("type", String, nullable=False, index=True),       # enum: report_reply, new_announcement, ...
+    Column("title", String, nullable=False),
+    Column("body", Text, nullable=False),
+    Column("data_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("target_user_ids", ARRAY(Integer), nullable=False),   # kto powinien zobaczyć
+    Column("read_user_ids", ARRAY(Integer), nullable=False, server_default=text("'{}'")),  # kto odczytał
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("expires_at", DateTime(timezone=True), nullable=False),  # created_at + 7 days
+)
+
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
@@ -1192,3 +1217,7 @@ with engine.connect() as _conn:
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_user_id ON beach_reports (user_id)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_status ON beach_reports (status)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_report_messages_report_id ON beach_report_messages (report_id)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_type ON beach_notifications (type)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_created_at ON beach_notifications (created_at)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_expires_at ON beach_notifications (expires_at)"))
+    _conn.commit()

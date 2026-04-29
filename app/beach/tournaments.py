@@ -27,6 +27,7 @@ from app.schemas import (
     BeachTournamentsListResponse,
 )
 from app.deps import beach_get_current_user_id
+from app.beach.notifications import create_notification
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/tournaments", tags=["Beach: Tournaments"])
@@ -486,7 +487,24 @@ async def create_tournament(
         row = await database.fetch_one(stmt)
         if not row:
             raise HTTPException(500, "Nie udało się utworzyć turnieju")
-        return {"success": True, "id": int(row["id"])}
+
+        tournament_id = int(row["id"])
+
+        # Notify all active users about new tournament in calendar
+        all_users = await database.fetch_all(
+            select(beach_users.c.id).where(beach_users.c.is_active == True)
+        )
+        all_user_ids = [int(r["id"]) for r in all_users]
+        if all_user_ids:
+            await create_notification(
+                notif_type="new_tournament_calendar",
+                title="Nowy turniej w kalendarzu",
+                body=f"{req.name.strip()}",
+                data={"tournament_id": tournament_id},
+                target_user_ids=all_user_ids,
+            )
+
+        return {"success": True, "id": tournament_id}
     except Exception as e:
         logger.error("create_tournament failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(500, f"create_tournament failed: {e}")
@@ -718,6 +736,7 @@ async def patch_tournament(
         raise HTTPException(404, "Nie znaleziono turnieju")
 
     existing_d = dict(existing)
+    old_invited = set(str(x) for x in (_normalize_event_data(existing_d["data_json"]).get("invited_ids") or []))
 
     update_data: Dict[str, Any] = {}
     fields = getattr(body, "__fields_set__", set())
@@ -771,6 +790,20 @@ async def patch_tournament(
     data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+
+    # Notify newly invited users about tournament assignment
+    new_invited = set(str(x) for x in (data2.get("invited_ids") or []))
+    newly_added = new_invited - old_invited
+    if newly_added:
+        tour_name = row_d.get("name", "Turniej")
+        await create_notification(
+            notif_type="tournament_assigned",
+            title="Przypisano do turnieju",
+            body=f"Zostałeś przypisany do: {tour_name}",
+            data={"tournament_id": tournament_id},
+            target_user_ids=[int(uid) for uid in newly_added],
+        )
+
     return _attach_computed_fields(row_d, data2, None)
 
 
@@ -820,6 +853,8 @@ async def host_update_tournament(
         raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
 
     # Scal tylko dozwolone pola (nie nadpisuj reszty data_json)
+    old_announcements_count = len(data.get("announcements") or [])
+
     if body.announcements is not None:
         data["announcements"] = body.announcements
     if body.invited_team_ids is not None:
@@ -830,6 +865,20 @@ async def host_update_tournament(
         .where(beach_tournaments.c.id == tournament_id)
         .values(data_json=data, updated_at=datetime.now(timezone.utc))
     )
+
+    # Notify invited users about new announcement
+    if body.announcements is not None and len(body.announcements) > old_announcements_count:
+        invited_ids = data.get("invited_ids") or []
+        target_ids = [int(uid) for uid in invited_ids if uid is not None]
+        if target_ids:
+            tour_name = existing_d.get("name", "Turniej")
+            await create_notification(
+                notif_type="new_announcement",
+                title="Nowe ogłoszenie",
+                body=f"Nowe ogłoszenie w: {tour_name}",
+                data={"tournament_id": tournament_id},
+                target_user_ids=target_ids,
+            )
 
     row = await database.fetch_one(
         select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
@@ -882,6 +931,11 @@ async def judge_update_tournament(
             raise HTTPException(403, "Wymagany badge: Obsadowy")
 
     # Aktualizuj tylko dozwolone pola
+    old_judge_ids = set()
+    for j in (data.get("judges") or []):
+        if isinstance(j, dict) and j.get("user_id"):
+            old_judge_ids.add(int(j["user_id"]))
+
     if body.judges is not None:
         data["judges"] = body.judges
 
@@ -895,6 +949,23 @@ async def judge_update_tournament(
         .where(beach_tournaments.c.id == tournament_id)
         .values(data_json=data, updated_at=datetime.now(timezone.utc))
     )
+
+    # Notify newly assigned judges
+    if body.judges is not None:
+        new_judge_ids = set()
+        for j in body.judges:
+            if isinstance(j, dict) and j.get("user_id"):
+                new_judge_ids.add(int(j["user_id"]))
+        newly_assigned = new_judge_ids - old_judge_ids
+        if newly_assigned:
+            tour_name = existing_d.get("name", "Turniej")
+            await create_notification(
+                notif_type="new_match_as_judge",
+                title="Obsada sędziowska",
+                body=f"Zostałeś przypisany jako sędzia: {tour_name}",
+                data={"tournament_id": tournament_id},
+                target_user_ids=list(newly_assigned),
+            )
 
     row = await database.fetch_one(
         select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)

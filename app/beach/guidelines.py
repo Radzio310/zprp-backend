@@ -25,6 +25,7 @@ from app.schemas import (
     BeachGuidelinesListResponse,
 )
 from app.deps import beach_get_current_user_id
+from app.beach.notifications import create_notification
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/guidelines", tags=["Beach: Guidelines"])
@@ -94,6 +95,26 @@ async def _get_tournament_name(tournament_id: int) -> str:
         select(beach_tournaments.c.name).where(beach_tournaments.c.id == tournament_id)
     )
     return row["name"] if row else f"Turniej #{tournament_id}"
+
+
+async def _get_guideline_target_users(tournament_id: Optional[int]) -> List[int]:
+    """Get user IDs to notify about a new guideline."""
+    if tournament_id is not None:
+        # Notify invited users of the tournament
+        row = await database.fetch_one(
+            select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
+        )
+        if row:
+            data = _parse_json(row["data_json"])
+            invited = data.get("invited_ids") or []
+            return [int(uid) for uid in invited if uid is not None]
+        return []
+    else:
+        # Global guideline → notify all active users
+        rows = await database.fetch_all(
+            select(beach_users.c.id).where(beach_users.c.is_active == True)
+        )
+        return [int(r["id"]) for r in rows]
 
 
 def _row_to_item(row: Any) -> BeachGuidelineItem:
@@ -230,6 +251,19 @@ async def create_guideline(
     )
 
     row = await database.fetch_one(stmt)
+
+    # Notify users about new verified guideline
+    if status == "verified":
+        target_ids = await _get_guideline_target_users(body.tournament_id)
+        if target_ids:
+            await create_notification(
+                notif_type="new_guideline",
+                title="Nowa wytyczna",
+                body=f"{body.title.strip()}",
+                data={"guideline_id": int(row["id"]), "tournament_id": body.tournament_id},
+                target_user_ids=target_ids,
+            )
+
     return _row_to_item(row)
 
 

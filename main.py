@@ -77,6 +77,9 @@ from app.beach.beach_proel import router as beach_proel_router
 from app.beach.guidelines import router as beach_guidelines_router
 from app.beach.standings import router as beach_standings_router
 from app.beach.reports import router as beach_reports_router
+from app.beach.notifications import router as beach_notifications_router
+from app.beach.notifications import cleanup_expired_notifications
+from app.beach.notification_generator import run_notification_generator
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -175,6 +178,7 @@ app.include_router(beach_proel_router)
 app.include_router(beach_guidelines_router)
 app.include_router(beach_standings_router)
 app.include_router(beach_reports_router)
+app.include_router(beach_notifications_router)
 
 # NEW: push router
 app.include_router(push_router)
@@ -543,6 +547,7 @@ async def refactor_club_contacts_once_per_utc_day():
 
 _cleanup_task: asyncio.Task | None = None
 _push_task: asyncio.Task | None = None
+_notif_generator_task: asyncio.Task | None = None
 
 async def _cleanup_loop():
     retention_days = int(os.getenv("PROEL_RETENTION_DAYS", "7"))
@@ -582,6 +587,11 @@ async def _cleanup_loop():
             logger.info(
                 f"🧹 PushSchedules cleanup: removed {deleted_push} rows (sent/failed) older than {cutoff_push.isoformat()} UTC"
             )
+
+            # 🧹 Beach notifications cleanup: expired (> 7 days)
+            notif_cleaned = await cleanup_expired_notifications()
+            if notif_cleaned:
+                logger.info(f"🧹 BeachNotifications cleanup: removed {notif_cleaned} expired rows")
 
             # 🧹 DeviceDedup: usuń duplikaty urządzeń tej samej platformy z config_json
             dedup_rows = await database.fetch_all(
@@ -714,16 +724,31 @@ async def startup():
         except Exception:
             pass
 
-    global _cleanup_task, _push_task
+    # Beach users: notification_prefs column
+    _beach_user_migrations = [
+        """ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS notification_prefs JSONB
+           DEFAULT '{"tournament_reminder_24h":true,"tournament_reminder_5h":true,"match_reminder_30min":true,"new_guideline":true,"new_announcement":true,"new_match_my_team":true,"new_match_as_judge":true,"points_awarded":true,"tournament_assigned":true,"new_tournament_calendar":true,"report_reply":true}'::jsonb NOT NULL""",
+    ]
+    for stmt in _beach_user_migrations:
+        try:
+            await database.execute(stmt)
+        except Exception:
+            pass
+
+    global _cleanup_task, _push_task, _notif_generator_task
     _cleanup_task = asyncio.create_task(_cleanup_loop())
 
     # NEW: background scheduler for push queue
     _push_task = asyncio.create_task(run_push_scheduler())
     logger.info("✅ Push scheduler started")
 
+    # NEW: background notification generator (tournament reminders etc.)
+    _notif_generator_task = asyncio.create_task(run_notification_generator())
+    logger.info("✅ Notification generator started")
+
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task
+    global _cleanup_task, _push_task, _notif_generator_task
 
     if _cleanup_task:
         _cleanup_task.cancel()
@@ -736,6 +761,13 @@ async def shutdown():
         _push_task.cancel()
         try:
             await _push_task
+        except asyncio.CancelledError:
+            pass
+
+    if _notif_generator_task:
+        _notif_generator_task.cancel()
+        try:
+            await _notif_generator_task
         except asyncio.CancelledError:
             pass
 

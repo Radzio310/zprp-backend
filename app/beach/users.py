@@ -119,6 +119,7 @@ def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
         app_opens=int(row.get("app_opens") or 0),
         app_version=row.get("app_version"),
         device_ids=list(row.get("device_ids") or []),
+        notification_prefs=_parse_jsonish(row.get("notification_prefs"), {}),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         is_admin=is_admin,
@@ -392,6 +393,13 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
         update_data["device_ids"] = _merge_device_ids(
             list(existing["device_ids"] or []), None, update_data["device_ids"]
         )
+
+    if "notification_prefs" in update_data and update_data["notification_prefs"] is not None:
+        # Merge with existing prefs (partial update)
+        current_prefs = _parse_jsonish(existing.get("notification_prefs"), {})
+        if isinstance(current_prefs, dict):
+            current_prefs.update(update_data["notification_prefs"])
+            update_data["notification_prefs"] = current_prefs
 
     if "password_encrypted" in update_data or "password" in update_data:
         password_encrypted = update_data.pop("password_encrypted", None)

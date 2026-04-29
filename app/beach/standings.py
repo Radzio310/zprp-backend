@@ -26,6 +26,7 @@ from sqlalchemy import select, insert, update
 
 from app.db import database, beach_standings, beach_tournaments, beach_users, beach_admins
 from app.deps import beach_get_current_user_id
+from app.beach.notifications import create_notification
 from app.schemas import (
     AdjustStandingRequest,
     BeachStandingPreviewEntry,
@@ -614,7 +615,37 @@ async def grant_tournament(
 
             granted_count += 1
 
+    # Notify tournament participants about points
+    if granted_count > 0:
+        await _notify_points_awarded(body.tournament_id, tour_name)
+
     return {"success": True, "granted_count": granted_count}
+
+
+async def _notify_points_awarded(tournament_id: int, tour_name: str):
+    """Notify all invited users of a tournament that points were awarded."""
+    tour_row = await database.fetch_one(
+        select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not tour_row:
+        return
+    data_json = tour_row["data_json"] or {}
+    if isinstance(data_json, str):
+        try:
+            data_json = json.loads(data_json)
+        except Exception:
+            return
+    invited = data_json.get("invited_ids") or []
+    target_ids = [int(uid) for uid in invited if uid is not None]
+    if not target_ids:
+        return
+    await create_notification(
+        notif_type="points_awarded",
+        title="Przyznano punkty",
+        body=f"Przyznano punkty za turniej: {tour_name}",
+        data={"tournament_id": tournament_id},
+        target_user_ids=target_ids,
+    )
 
 
 # ─────────────────── POST /beach/standings/revoke-tournament ───────────────────

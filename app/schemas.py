@@ -1100,6 +1100,7 @@ class BeachUserUpdateRequest(BaseModel):
     badges: Optional[Any] = None
     app_version: Optional[str] = None
     device_ids: Optional[List[str]] = None
+    notification_prefs: Optional[Dict[str, bool]] = None
     # is_active celowo poza BeachUserUpdateRequest —
     # status aktywności zmienia wyłącznie endpoint /me/deactivate
 
@@ -1128,6 +1129,7 @@ class BeachUserItem(BaseModel):
     app_version: Optional[str] = None
 
     device_ids: List[str] = Field(default_factory=list)
+    notification_prefs: Dict[str, bool] = Field(default_factory=dict)
 
     created_at: datetime
     updated_at: datetime
