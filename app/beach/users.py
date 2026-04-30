@@ -396,7 +396,7 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
 
     if "notification_prefs" in update_data and update_data["notification_prefs"] is not None:
         # Merge with existing prefs (partial update)
-        current_prefs = _parse_jsonish(existing.get("notification_prefs"), {})
+        current_prefs = _parse_jsonish(dict(existing).get("notification_prefs"), {})
         if isinstance(current_prefs, dict):
             current_prefs.update(update_data["notification_prefs"])
             update_data["notification_prefs"] = current_prefs
