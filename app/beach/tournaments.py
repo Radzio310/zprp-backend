@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import base64
 import json
@@ -28,6 +29,7 @@ from app.schemas import (
 )
 from app.deps import beach_get_current_user_id
 from app.beach.notifications import create_notification
+from app.beach.schedule_notifications import notify_schedule_updated
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/tournaments", tags=["Beach: Tournaments"])
@@ -1007,6 +1009,9 @@ async def schedule_update_tournament(
     if not await _can_manage_tournament_schedule(data, current_user_id):
         raise HTTPException(403, "Brak uprawnień do aktualizacji harmonogramu")
 
+    # Capture old schedule before overwriting (for diff-based notifications)
+    old_schedule = data.get("schedule") if isinstance(data.get("schedule"), dict) else None
+
     # Basic sanity check
     if body.schedule is not None:
         if not isinstance(body.schedule, dict):
@@ -1017,6 +1022,17 @@ async def schedule_update_tournament(
         update(beach_tournaments)
         .where(beach_tournaments.c.id == tournament_id)
         .values(data_json=data, updated_at=datetime.now(timezone.utc))
+    )
+
+    # Fire schedule notifications (fire-and-forget)
+    tour_name = existing_d.get("name", "Turniej")
+    asyncio.ensure_future(
+        notify_schedule_updated(
+            tournament_id=tournament_id,
+            tour_name=tour_name,
+            old_schedule=old_schedule,
+            new_schedule=body.schedule,
+        )
     )
 
     row = await database.fetch_one(

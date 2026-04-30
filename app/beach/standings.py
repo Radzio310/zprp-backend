@@ -15,6 +15,7 @@ Obliczana osobno dla każdej płci (M/K).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import traceback
@@ -618,6 +619,9 @@ async def grant_tournament(
     # Notify tournament participants about points
     if granted_count > 0:
         await _notify_points_awarded(body.tournament_id, tour_name)
+        asyncio.ensure_future(
+            _notify_tournament_ended_other(body.tournament_id, tour_name)
+        )
 
     return {"success": True, "granted_count": granted_count}
 
@@ -646,6 +650,43 @@ async def _notify_points_awarded(tournament_id: int, tour_name: str):
         data={"tournament_id": tournament_id},
         target_user_ids=target_ids,
     )
+
+
+async def _notify_tournament_ended_other(tournament_id: int, tour_name: str):
+    """Notify all active users NOT in the tournament that it has ended and points were given."""
+    try:
+        tour_row = await database.fetch_one(
+            select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
+        )
+        if not tour_row:
+            return
+        data_json = tour_row["data_json"] or {}
+        if isinstance(data_json, str):
+            try:
+                data_json = json.loads(data_json)
+            except Exception:
+                return
+        invited = data_json.get("invited_ids") or []
+        invited_set = {int(uid) for uid in invited if uid is not None}
+
+        all_rows = await database.fetch_all(
+            select(beach_users.c.id).where(beach_users.c.is_active == True)  # noqa: E712
+        )
+        non_participant_ids = [
+            int(r["id"]) for r in all_rows if int(r["id"]) not in invited_set
+        ]
+        if not non_participant_ids:
+            return
+
+        await create_notification(
+            notif_type="tournament_ended_other",
+            title="Zakończono turniej",
+            body=f"Przyznano punkty: {tour_name}",
+            data={"tournament_id": tournament_id},
+            target_user_ids=non_participant_ids,
+        )
+    except Exception as e:
+        logger.error(f"_notify_tournament_ended_other error: {e}")
 
 
 # ─────────────────── POST /beach/standings/revoke-tournament ───────────────────

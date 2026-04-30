@@ -9,7 +9,9 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, insert, select, update
 
+import asyncio
 from app.db import database, beach_app_versions, beach_admins
+from app.beach.notifications import notify_admins
 from app.schemas import (
     BeachCreateVersionRequest,
     BeachUpdateVersionRequest,
@@ -95,7 +97,15 @@ async def create_version(req: BeachCreateVersionRequest, current_user_id: int = 
         row = await database.fetch_one(stmt)
         if not row:
             raise HTTPException(500, "Nie udało się utworzyć wersji")
-        return {"success": True, "id": int(row["id"])}
+        version_id = int(row["id"])
+        asyncio.ensure_future(notify_admins(
+            notif_type="admin_new_version",
+            title="Nowa wersja aplikacji",
+            body=f"Dodano wersję {version} — {name}",
+            data={"version_id": version_id, "version": version, "name": name},
+            exclude_user_id=current_user_id,
+        ))
+        return {"success": True, "id": version_id}
     except Exception as e:
         msg = str(e).lower()
         if "unique" in msg or "duplicate" in msg:

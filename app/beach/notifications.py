@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, update, and_, func as sa_func
 
-from app.db import database, beach_notifications, beach_users, push_schedules
+from app.db import database, beach_notifications, beach_users, beach_admins, push_schedules
 from app.deps import beach_get_current_user_id
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,41 @@ async def create_notification(
 
     return notif_id
 
+
+async def notify_admins(
+    *,
+    notif_type: str,
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+    exclude_user_id: Optional[int] = None,
+) -> None:
+    """
+    Send an in-app + push notification to ALL beach admins.
+
+    Fire-and-forget safe — wraps everything in try/except.
+    Pass `exclude_user_id` to skip the admin who triggered the action.
+    """
+    try:
+        rows = await database.fetch_all(select(beach_admins.c.user_id))
+        admin_ids = [
+            int(r["user_id"]) for r in rows
+            if exclude_user_id is None or int(r["user_id"]) != exclude_user_id
+        ]
+        if not admin_ids:
+            return
+        await create_notification(
+            notif_type=notif_type,
+            title=title,
+            body=body,
+            data=data or {},
+            target_user_ids=admin_ids,
+        )
+    except Exception as e:
+        logger.error(f"notify_admins error ({notif_type}): {e}")
+
+
+# ──────────── Helper: _schedule_push_for_users ────────────
 
 async def _schedule_push_for_users(
     *,

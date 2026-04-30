@@ -16,6 +16,11 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 
 from app.db import database, beach_users, beach_admins
+from app.beach.notifications import notify_admins
+from app.beach.badges import (
+    DEFAULT_LOVER_BADGE_NAME,
+    ensure_default_lover_badge_definition,
+)
 from app.schemas import (
     BeachUserCreateRequest,
     BeachUserUpdateRequest,
@@ -61,6 +66,42 @@ def _extract_badge_names(badges_raw: Any) -> List[str]:
     if isinstance(badges_raw, list):
         return [str(x) for x in badges_raw if x is not None]
     return []
+
+
+def _add_badge_to_jsonish(badges_raw: Any, badge_name: str) -> tuple[Any, bool]:
+    badges = _parse_jsonish(badges_raw, {})
+    if isinstance(badges, dict):
+        if badges.get(badge_name):
+            return badges, False
+        badges[badge_name] = True
+        return badges, True
+    if isinstance(badges, list):
+        if badge_name in badges:
+            return badges, False
+        badges.append(badge_name)
+        return badges, True
+    return {badge_name: True}, True
+
+
+async def _ensure_lover_badge_for_user(user_id: int) -> bool:
+    await ensure_default_lover_badge_definition()
+
+    row = await database.fetch_one(
+        select(beach_users.c.badges).where(beach_users.c.id == user_id)
+    )
+    if not row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    badges, changed = _add_badge_to_jsonish(row["badges"], DEFAULT_LOVER_BADGE_NAME)
+    if not changed:
+        return False
+
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(badges=badges, updated_at=datetime.now(timezone.utc))
+    )
+    return True
 
 
 def _normalize_province(p: Optional[str]) -> Optional[str]:
@@ -214,8 +255,22 @@ async def get_me(user_id: int = Depends(beach_get_current_user_id)):
     if not row_dict.get("is_active", True):
         raise HTTPException(403, "Konto zostało dezaktywowane")
 
+    if await _ensure_lover_badge_for_user(user_id):
+        row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+        row_dict = dict(row)
+
     is_admin = await _check_is_admin(user_id)
     return _to_user_item(row_dict, is_admin=is_admin)
+
+
+@router.post("/me/ensure-lover-badge", response_model=BeachUserItem, summary="Dodaj domyslny badge Beach Handball Lover, jesli go brakuje")
+async def ensure_me_lover_badge(user_id: int = Depends(beach_get_current_user_id)):
+    await _ensure_lover_badge_for_user(user_id)
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(404, "Uzytkownik nie znaleziony")
+    is_admin = await _check_is_admin(user_id)
+    return _to_user_item(dict(row), is_admin=is_admin)
 
 
 @router.post("/me/deactivate", response_model=dict, summary="Dezaktywuj własne konto (BEACH)")
@@ -280,7 +335,9 @@ async def create_user(req: BeachUserCreateRequest):
     province = _normalize_province(req.province)
 
     hashed = _hash_password(password_plain)
+    await ensure_default_lover_badge_definition()
     badges = req.badges if req.badges is not None else {}
+    badges, _ = _add_badge_to_jsonish(badges, DEFAULT_LOVER_BADGE_NAME)
     roles = _normalize_roles(req.roles)
     device_ids = req.device_ids or []
 
@@ -325,7 +382,17 @@ async def create_user(req: BeachUserCreateRequest):
         raise HTTPException(500, f"create_user failed: {e}")
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == int(new_id)))
-    return _to_user_item(dict(row))
+    user_item = _to_user_item(dict(row))
+
+    import asyncio
+    asyncio.ensure_future(notify_admins(
+        notif_type="admin_new_user",
+        title="Nowy użytkownik",
+        body=f"{user_item.full_name} zarejestrował się w aplikacji",
+        data={"user_id": int(new_id)},
+    ))
+
+    return user_item
 
 
 @router.patch("/{user_id}/add-badge", response_model=BeachUserItem, summary="Dodaj badge użytkownikowi (admin)")
@@ -501,6 +568,10 @@ async def login_user(req: BeachLoginRequest):
     updated = await database.fetch_one(
         select(beach_users).where(beach_users.c.id == int(row_dict["id"]))
     )
+    if await _ensure_lover_badge_for_user(int(row_dict["id"])):
+        updated = await database.fetch_one(
+            select(beach_users).where(beach_users.c.id == int(row_dict["id"]))
+        )
 
     is_admin = await _check_is_admin(int(row_dict["id"]))
 

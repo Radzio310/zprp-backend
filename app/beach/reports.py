@@ -41,7 +41,7 @@ from app.schemas import (
     BeachReportAdminListResponse,
 )
 from app.deps import beach_get_current_user_id
-from app.beach.notifications import create_notification
+from app.beach.notifications import create_notification, notify_admins
 
 _RAILWAY_VOLUME = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
 _STATIC_DIR = (
@@ -58,6 +58,24 @@ _bg_tasks: set = set()
 
 # cooldown timestamp for automatic image cleanup (epoch seconds)
 _last_cleanup_ts: float = 0.0
+
+
+async def _notify_admins_new_report(
+    report_id: int,
+    user_name: str,
+    type_label: str,
+    preview: str,
+) -> None:
+    """Fire-and-forget helper: notify all admins about a new user report."""
+    try:
+        await notify_admins(
+            notif_type="admin_new_report",
+            title=f"Nowe zgłoszenie — {type_label}",
+            body=f"{user_name}: {preview}",
+            data={"report_id": report_id},
+        )
+    except Exception as e:
+        logger.error(f"_notify_admins_new_report error: {e}")
 
 
 # ─────────────────── OpenAI title generation ───────────────────
@@ -333,6 +351,14 @@ async def create_report(
     _task = asyncio.create_task(_generate_title_bg(report_id, body.content))
     _bg_tasks.add(_task)
     _task.add_done_callback(_bg_tasks.discard)
+
+    type_label = {"awaria": "Awaria", "pytanie": "Pytanie", "pomysl": "Pomysł", "info": "Info"}.get(body.type, body.type)
+    asyncio.ensure_future(_notify_admins_new_report(
+        report_id=report_id,
+        user_name=user_name,
+        type_label=type_label,
+        preview=body.content[:80],
+    ))
 
     report_row = await _get_report_or_404(report_id)
     msg_row = await database.fetch_one(

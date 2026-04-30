@@ -9,7 +9,9 @@ from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+import asyncio
 from app.db import database, beach_admins, beach_users
+from app.beach.notifications import notify_admins
 from app.schemas import (
     BeachAdminUpsertRequest,
     BeachAdminItem,
@@ -77,6 +79,13 @@ async def upsert_admin(req: BeachAdminUpsertRequest, current_user_id: int = Depe
 
     try:
         await database.execute(stmt)
+        asyncio.ensure_future(notify_admins(
+            notif_type="admin_new_admin",
+            title="Nowy administrator",
+            body=f"{u['full_name']} został dodany jako administrator",
+            data={"user_id": int(u['id'])},
+            exclude_user_id=current_user_id,
+        ))
         return {"success": True}
     except Exception as e:
         logger.error("upsert_admin failed: %s\n%s", e, traceback.format_exc())
@@ -88,7 +97,18 @@ async def delete_admin(user_id: int, current_user_id: int = Depends(beach_get_cu
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
+    removed_row = await database.fetch_one(
+        select(beach_admins.c.full_name).where(beach_admins.c.user_id == user_id)
+    )
     await database.execute(delete(beach_admins).where(beach_admins.c.user_id == user_id))
+    if removed_row:
+        asyncio.ensure_future(notify_admins(
+            notif_type="admin_removed_admin",
+            title="Usunięto administratora",
+            body=f"{removed_row['full_name']} nie jest już administratorem",
+            data={"user_id": user_id},
+            exclude_user_id=current_user_id,
+        ))
     return {"success": True}
 
 

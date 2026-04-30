@@ -8,7 +8,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import select, update
 
+import asyncio
 from app.db import database, beach_users, beach_verification_requests
+from app.beach.notifications import notify_admins
 from app.schemas import (
     BeachVerificationCreateRequest,
     BeachVerificationItem,
@@ -160,7 +162,23 @@ async def create_verification(
             beach_verification_requests.c.id == int(new_id)
         )
     )
-    return _to_item(dict(row))
+    item = _to_item(dict(row))
+
+    # Fetch submitter name for notification
+    user_row = await database.fetch_one(
+        select(beach_users.c.full_name).where(beach_users.c.id == user_id)
+    )
+    user_name = user_row["full_name"] if user_row else f"Użytkownik #{user_id}"
+    role_label = {"judge": "sędzia", "coach": "trener", "player": "zawodnik"}.get(req.role, req.role)
+
+    asyncio.ensure_future(notify_admins(
+        notif_type="admin_new_verification",
+        title="Nowy wniosek weryfikacyjny",
+        body=f"{user_name} złożył wniosek o rolę: {role_label}",
+        data={"verification_id": int(new_id), "user_id": user_id, "role": req.role},
+    ))
+
+    return item
 
 
 # ──────────────────────────────────────────────────
