@@ -912,6 +912,8 @@ beach_app_versions = Table(
     Column("name", String, nullable=False),                               # nazwa wersji
     Column("description", Text, nullable=True),                           # opis zmian
     Column("to_show", Boolean, nullable=False, server_default=text("false")),  # czy pokazywać w appce
+    Column("available_ios", Boolean, nullable=False, server_default=text("false")),  # dostępna w App Store
+    Column("available_android", Boolean, nullable=False, server_default=text("false")),  # dostępna w Play Store
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )

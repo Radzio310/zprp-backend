@@ -1339,6 +1339,8 @@ class BeachVersionItem(BaseModel):
     name: str
     description: Optional[str] = None
     to_show: bool = False
+    available_ios: bool = False
+    available_android: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -1352,6 +1354,8 @@ class BeachCreateVersionRequest(BaseModel):
     name: str
     description: Optional[str] = None
     to_show: Optional[bool] = False
+    available_ios: Optional[bool] = False
+    available_android: Optional[bool] = False
 
 
 class BeachUpdateVersionRequest(BaseModel):
@@ -1359,6 +1363,8 @@ class BeachUpdateVersionRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     to_show: Optional[bool] = None
+    available_ios: Optional[bool] = None
+    available_android: Optional[bool] = None
 
 # ---------------------------- TEAMS (BEACH) ----------------------------
 

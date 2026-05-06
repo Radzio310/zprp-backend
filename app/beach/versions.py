@@ -40,6 +40,8 @@ def _row_to_item(r: Any) -> BeachVersionItem:
         name=str(d.get("name") or ""),
         description=d.get("description"),
         to_show=bool(d.get("to_show") or False),
+        available_ios=bool(d.get("available_ios") or False),
+        available_android=bool(d.get("available_android") or False),
         created_at=d["created_at"],
         updated_at=d["updated_at"],
     )
@@ -53,6 +55,24 @@ async def list_visible_versions():
         .order_by(beach_app_versions.c.id.desc())
     )
     return BeachListVersionsResponse(versions=[_row_to_item(r) for r in rows])
+
+
+@router.get("/latest", response_model=BeachVersionItem, summary="Najnowsza wersja (BEACH) — publiczny endpoint do sprawdzania aktualizacji")
+async def get_latest_version():
+    """Zwraca najnowszą wersję semantycznie (bez auth). Używane przez aplikację do sprawdzania czy dostępna jest aktualizacja."""
+    rows = await database.fetch_all(select(beach_app_versions).order_by(beach_app_versions.c.id.desc()))
+    if not rows:
+        raise HTTPException(404, "Brak wersji")
+
+    def semver_key(r: Any):
+        parts = str(r["version"]).split(".")
+        try:
+            return tuple(int(p) for p in parts)
+        except Exception:
+            return (0, 0, 0)
+
+    latest_row = max(rows, key=semver_key)
+    return _row_to_item(latest_row)
 
 
 @router.get("/all", response_model=BeachListVersionsResponse, summary="Lista wszystkich wersji (BEACH) — wymaga admina")
@@ -79,6 +99,8 @@ async def create_version(req: BeachCreateVersionRequest, current_user_id: int = 
     if not name:
         raise HTTPException(422, "Podaj nazwę wersji")
 
+    available_ios = bool(req.available_ios or False)
+    available_android = bool(req.available_android or False)
     now = datetime.now(timezone.utc)
 
     try:
@@ -89,6 +111,8 @@ async def create_version(req: BeachCreateVersionRequest, current_user_id: int = 
                 name=name,
                 description=description,
                 to_show=to_show,
+                available_ios=available_ios,
+                available_android=available_android,
                 created_at=now,
                 updated_at=now,
             )
@@ -142,6 +166,12 @@ async def update_version(version_id: int, req: BeachUpdateVersionRequest, curren
 
     if req.to_show is not None:
         patch["to_show"] = bool(req.to_show)
+
+    if req.available_ios is not None:
+        patch["available_ios"] = bool(req.available_ios)
+
+    if req.available_android is not None:
+        patch["available_android"] = bool(req.available_android)
 
     if not patch:
         return {"success": True}
