@@ -540,6 +540,82 @@ async def remove_badge_from_user(
     return _to_user_item(dict(row))
 
 
+# ─────────────── Helper: sprawdź czy kolumna istnieje w beach_users ───────────────
+
+def _users_table_has_column(col_name: str) -> bool:
+    return col_name in getattr(beach_users.c, "keys", lambda: [])()
+
+
+# ─────────────── Default Squad endpoints ───────────────
+
+class DefaultSquadUpdateRequest(BaseModel):
+    team_id: int
+    default_players: Optional[List[int]] = None
+    default_companions: Optional[List[int]] = None
+
+
+@router.get("/{user_id}/default-squad", summary="Pobierz domyślny skład użytkownika")
+async def get_user_default_squad(
+    user_id: int,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if current_user_id != user_id and not await _check_is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    if not _users_table_has_column("default_squad_json"):
+        return {"teams": {}}
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    data = _parse_jsonish(dict(row).get("default_squad_json"), {})
+    if not isinstance(data, dict):
+        data = {}
+    return {"teams": data}
+
+
+@router.patch("/{user_id}/default-squad", summary="Zaktualizuj domyślny skład użytkownika")
+async def update_user_default_squad(
+    user_id: int,
+    req: DefaultSquadUpdateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if current_user_id != user_id and not await _check_is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    if not _users_table_has_column("default_squad_json"):
+        return {"teams": {}}
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    current_data = _parse_jsonish(dict(row).get("default_squad_json"), {})
+    if not isinstance(current_data, dict):
+        current_data = {}
+
+    team_key = str(req.team_id)
+    existing_entry = current_data.get(team_key, {})
+    if not isinstance(existing_entry, dict):
+        existing_entry = {}
+
+    if req.default_players is not None:
+        existing_entry["default_players"] = req.default_players
+    if req.default_companions is not None:
+        existing_entry["default_companions"] = req.default_companions
+
+    current_data[team_key] = existing_entry
+
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(default_squad_json=current_data, updated_at=datetime.now(timezone.utc))
+    )
+
+    return {"teams": current_data}
+
+
 @router.patch("/{user_id}", response_model=BeachUserItem)
 async def patch_user(user_id: int, req: BeachUserUpdateRequest):
     existing = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))

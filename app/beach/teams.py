@@ -1532,6 +1532,51 @@ async def get_local_beach_team_squad(team_id: int):
     }
 
 
+class JerseyOverridesUpdateRequest(BaseModel):
+    overrides: Dict[str, str]  # player_id (as string) -> jersey number string
+
+
+@router.get("/local/{team_id}/jersey-overrides", summary="Pobierz nadpisania numerów zawodników")
+async def get_team_jersey_overrides(team_id: int):
+    if not _table_has_column("jersey_overrides"):
+        return {"overrides": {}}
+
+    row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
+    if not row:
+        raise HTTPException(404, "Drużyna nie istnieje")
+
+    raw = dict(row).get("jersey_overrides")
+    if raw is None:
+        return {"overrides": {}}
+    overrides = raw if isinstance(raw, dict) else {}
+    return {"overrides": overrides}
+
+
+@router.patch("/local/{team_id}/jersey-overrides", summary="Zaktualizuj nadpisania numerów zawodników")
+async def patch_team_jersey_overrides(
+    team_id: int,
+    req: JerseyOverridesUpdateRequest,
+):
+    if not _table_has_column("jersey_overrides"):
+        return {"overrides": {}}
+
+    row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
+    if not row:
+        raise HTTPException(404, "Drużyna nie istnieje")
+
+    raw = dict(row).get("jersey_overrides")
+    current_overrides: Dict[str, str] = raw if isinstance(raw, dict) else {}
+    current_overrides.update(req.overrides)
+
+    await database.execute(
+        update(beach_teams)
+        .where(beach_teams.c.id == team_id)
+        .values(jersey_overrides=current_overrides, updated_at=_now_utc())
+    )
+
+    return {"overrides": current_overrides}
+
+
 @router.post("/local", response_model=BeachTeamItem)
 async def create_local_beach_team(req: BeachTeamCreateRequest):
     exists = await database.fetch_one(select(beach_teams.c.id).where(beach_teams.c.id == req.id))

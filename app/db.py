@@ -806,6 +806,9 @@ beach_users = Table(
     # aktywność konta: False = konto dezaktywowane (anonimizacja)
     Column("is_active", Boolean, nullable=False, server_default=text("true")),
 
+    # globalny domyślny skład per drużyna: {"<team_id>": {"default_players": [...], "default_companions": [...]}}
+    Column("default_squad_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
@@ -955,6 +958,9 @@ beach_teams = Table(
     Column("companions_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("historical_players_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("squad_last_synced_at", DateTime(timezone=True), nullable=True),
+
+    # nadpisania numerów zawodników: {"<player_id>": "<custom_number>"}
+    Column("jersey_overrides", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
 
     # pomocniczo: skąd dane i kiedy były ostatnio synchronizowane
     Column("source", String, nullable=False, server_default=text("'zprp'")),
