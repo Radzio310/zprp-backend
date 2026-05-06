@@ -79,6 +79,9 @@ async def create_notification(
         )
     )
 
+    # 1b) Enforce per-user notification limit (keep newest 25)
+    asyncio.ensure_future(_enforce_notif_limit(target_user_ids))
+
     # 2) Optionally schedule FCM push for users with devices + enabled pref
     asyncio.ensure_future(_schedule_push_for_users(
         notif_type=notif_type,
@@ -90,6 +93,32 @@ async def create_notification(
     ))
 
     return notif_id
+
+
+async def _enforce_notif_limit(user_ids: List[int], limit: int = 25) -> None:
+    """Soft-delete oldest notifications beyond `limit` for each user."""
+    try:
+        now = datetime.now(timezone.utc)
+        for user_id in user_ids:
+            rows = await database.fetch_all(
+                select(beach_notifications.c.id, beach_notifications.c.target_user_ids)
+                .where(beach_notifications.c.target_user_ids.any(user_id))
+                .where(beach_notifications.c.expires_at > now)
+                .order_by(beach_notifications.c.created_at.desc())
+            )
+            if len(rows) <= limit:
+                continue
+            for r in rows[limit:]:
+                target_ids = list(r["target_user_ids"] or [])
+                if user_id in target_ids:
+                    target_ids.remove(user_id)
+                    await database.execute(
+                        update(beach_notifications)
+                        .where(beach_notifications.c.id == r["id"])
+                        .values(target_user_ids=target_ids)
+                    )
+    except Exception as e:
+        logger.error(f"_enforce_notif_limit error: {e}")
 
 
 async def notify_admins(

@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 
 import asyncio
 from app.db import database, beach_users, beach_verification_requests
-from app.beach.notifications import notify_admins
+from app.beach.notifications import notify_admins, create_notification
 from app.schemas import (
     BeachVerificationCreateRequest,
     BeachVerificationItem,
@@ -326,6 +326,28 @@ async def patch_verification(
             beach_verification_requests.c.id == request_id
         )
     )
+
+    # Notify the applicant about the decision
+    applicant_id = int(ver["user_id"])
+    role_label = {"judge": "sędzia", "coach": "trener", "player": "zawodnik"}.get(ver["role"], ver["role"])
+    if req.status == "approved":
+        asyncio.ensure_future(create_notification(
+            notif_type="verification_approved",
+            title="✅ Weryfikacja zatwierdzona",
+            body=f"Twój wniosek o rolę {role_label} został zatwierdzony. Witaj w drużynie!",
+            data={"role": ver["role"], "verification_id": request_id},
+            target_user_ids=[applicant_id],
+        ))
+    else:
+        note_part = f"\nUwaga admina: {req.admin_note}" if req.admin_note else ""
+        asyncio.ensure_future(create_notification(
+            notif_type="verification_rejected",
+            title="❌ Weryfikacja odrzucona",
+            body=f"Twój wniosek o rolę {role_label} nie został zatwierdzony.{note_part}",
+            data={"role": ver["role"], "verification_id": request_id, "admin_note": req.admin_note or ""},
+            target_user_ids=[applicant_id],
+        ))
+
     return _to_item(dict(updated_row))
 
 
