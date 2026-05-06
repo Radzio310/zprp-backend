@@ -1105,6 +1105,13 @@ class BeachUserUpdateRequest(BaseModel):
     # status aktywności zmienia wyłącznie endpoint /me/deactivate
 
 
+class BeachDeviceInfo(BaseModel):
+    installation_id: str
+    platform: Optional[str] = None
+    app_version: Optional[str] = None
+    last_seen_at: Optional[datetime] = None
+
+
 class BeachUserItem(BaseModel):
     id: int
 
@@ -1129,6 +1136,7 @@ class BeachUserItem(BaseModel):
     app_version: Optional[str] = None
 
     device_ids: List[str] = Field(default_factory=list)
+    device_infos: List[BeachDeviceInfo] = Field(default_factory=list)
     notification_prefs: Dict[str, bool] = Field(default_factory=dict)
 
     created_at: datetime
@@ -1149,6 +1157,7 @@ class BeachLoginRequest(BaseModel):
 
     # opcjonalnie dopinamy urządzenie / wersję przy logowaniu
     device_id: Optional[str] = None
+    device_platform: Optional[str] = None
     app_version: Optional[str] = None
 
 

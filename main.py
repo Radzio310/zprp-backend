@@ -728,6 +728,8 @@ async def startup():
     _beach_user_migrations = [
         """ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS notification_prefs JSONB
            DEFAULT '{"tournament_reminder_24h":true,"tournament_reminder_5h":true,"match_reminder_30min":true,"new_guideline":true,"new_announcement":true,"new_match_my_team":true,"new_match_as_judge":true,"points_awarded":true,"tournament_assigned":true,"new_tournament_calendar":true,"report_reply":true}'::jsonb NOT NULL""",
+        """ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS device_infos JSONB
+           DEFAULT '{}'::jsonb NOT NULL""",
     ]
     for stmt in _beach_user_migrations:
         try:

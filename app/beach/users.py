@@ -143,6 +143,7 @@ def _normalize_roles(raw: Any) -> Any:
 
 
 def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
+    device_ids = list(row.get("device_ids") or [])
     return BeachUserItem(
         id=int(row["id"]),
         judge_id=row.get("judge_id"),
@@ -159,7 +160,8 @@ def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
         last_login_at=row.get("last_login_at"),
         app_opens=int(row.get("app_opens") or 0),
         app_version=row.get("app_version"),
-        device_ids=list(row.get("device_ids") or []),
+        device_ids=device_ids,
+        device_infos=_device_infos_for_response(row.get("device_infos"), device_ids),
         notification_prefs=_parse_jsonish(row.get("notification_prefs"), {}),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -190,10 +192,80 @@ def _merge_device_ids(
     return out
 
 
+def _normalize_device_platform(platform: Optional[str]) -> Optional[str]:
+    p = (platform or "").strip().lower()
+    if p in {"ios", "android", "web"}:
+        return p
+    return None
+
+
+def _device_infos_dict(raw: Any) -> Dict[str, Dict[str, Any]]:
+    parsed = _parse_jsonish(raw, {})
+    out: Dict[str, Dict[str, Any]] = {}
+    if isinstance(parsed, dict):
+        items = parsed.items()
+    elif isinstance(parsed, list):
+        items = ((x.get("installation_id"), x) for x in parsed if isinstance(x, dict))
+    else:
+        items = []
+    for key, value in items:
+        installation_id = str(
+            (value or {}).get("installation_id") if isinstance(value, dict) else key
+        ).strip() or str(key or "").strip()
+        if not installation_id:
+            continue
+        info = dict(value) if isinstance(value, dict) else {}
+        info["installation_id"] = installation_id
+        platform = _normalize_device_platform(info.get("platform"))
+        if platform:
+            info["platform"] = platform
+        else:
+            info.pop("platform", None)
+        out[installation_id] = info
+    return out
+
+
+def _device_infos_for_response(raw: Any, device_ids: List[str]) -> List[Dict[str, Any]]:
+    infos = _device_infos_dict(raw)
+    result: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for installation_id in device_ids:
+        info = dict(infos.get(installation_id) or {})
+        info["installation_id"] = installation_id
+        result.append(info)
+        seen.add(installation_id)
+    for installation_id, info in infos.items():
+        if installation_id not in seen:
+            result.append(info)
+    return result
+
+
+def _merge_device_infos(
+    existing: Any,
+    installation_id: Optional[str],
+    platform: Optional[str],
+    app_version: Optional[str],
+    seen_at: datetime,
+) -> Dict[str, Dict[str, Any]]:
+    infos = _device_infos_dict(existing)
+    if not installation_id:
+        return infos
+    current = dict(infos.get(installation_id) or {})
+    current["installation_id"] = installation_id
+    normalized_platform = _normalize_device_platform(platform)
+    if normalized_platform:
+        current["platform"] = normalized_platform
+    if app_version:
+        current["app_version"] = app_version
+    current["last_seen_at"] = seen_at.isoformat()
+    infos[installation_id] = current
+    return infos
+
+
 async def _remove_device_from_other_users(installation_id: str, current_user_id: int) -> None:
     """Usuwa installation_id z device_ids wszystkich innych użytkowników (multi-account cleanup)."""
     rows = await database.fetch_all(
-        select(beach_users.c.id, beach_users.c.device_ids).where(
+        select(beach_users.c.id, beach_users.c.device_ids, beach_users.c.device_infos).where(
             beach_users.c.id != current_user_id
         )
     )
@@ -201,10 +273,16 @@ async def _remove_device_from_other_users(installation_id: str, current_user_id:
         ids = list(row["device_ids"] or [])
         if installation_id in ids:
             ids.remove(installation_id)
+            infos = _device_infos_dict(row["device_infos"])
+            infos.pop(installation_id, None)
             await database.execute(
                 update(beach_users)
                 .where(beach_users.c.id == row["id"])
-                .values(device_ids=ids, updated_at=datetime.now(timezone.utc))
+                .values(
+                    device_ids=ids,
+                    device_infos=infos,
+                    updated_at=datetime.now(timezone.utc),
+                )
             )
 
 
@@ -430,6 +508,38 @@ async def add_badge_to_user(
     return _to_user_item(dict(row))
 
 
+@router.patch("/{user_id}/remove-badge", response_model=BeachUserItem, summary="Usuń badge użytkownikowi (admin lub własny badge)")
+async def remove_badge_from_user(
+    user_id: int,
+    badge_name: str = Query(..., description="Nazwa badge'a do usunięcia"),
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    # Allow self-removal OR admin removal
+    if current_user_id != user_id and not await _check_is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    row_d = dict(row)
+    badges_raw = _parse_jsonish(row_d.get("badges"), {})
+
+    if isinstance(badges_raw, dict):
+        badges_raw.pop(badge_name, None)
+    elif isinstance(badges_raw, list):
+        badges_raw = [b for b in badges_raw if b is not None and str(b) != badge_name]
+
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(badges=badges_raw, updated_at=datetime.now(timezone.utc))
+    )
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    return _to_user_item(dict(row))
+
+
 @router.patch("/{user_id}", response_model=BeachUserItem)
 async def patch_user(user_id: int, req: BeachUserUpdateRequest):
     existing = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
@@ -545,6 +655,13 @@ async def login_user(req: BeachLoginRequest):
 
     device_ids = list(row_dict.get("device_ids") or [])
     device_ids = _merge_device_ids(device_ids, req.device_id, None)
+    device_infos = _merge_device_infos(
+        row_dict.get("device_infos"),
+        req.device_id,
+        req.device_platform,
+        req.app_version,
+        now,
+    )
 
     # Multi-account: jeśli installation_id należał do innego usera, usuń go stamtąd
     if req.device_id:
@@ -554,6 +671,7 @@ async def login_user(req: BeachLoginRequest):
         "last_login_at": now,
         "app_opens": (beach_users.c.app_opens + 1),
         "device_ids": device_ids,
+        "device_infos": device_infos,
         "updated_at": now,
     }
     if req.app_version is not None:
@@ -583,6 +701,8 @@ async def login_user(req: BeachLoginRequest):
 
 class SyncDeviceRequest(BaseModel):
     installation_id: str
+    platform: Optional[str] = None
+    app_version: Optional[str] = None
 
 
 @router.post("/me/sync-device", response_model=dict, summary="Synchronizuj device_id zalogowanego usera (BEACH)")
@@ -602,17 +722,33 @@ async def sync_device(req: SyncDeviceRequest, user_id: int = Depends(beach_get_c
     if not row_dict.get("is_active", True):
         raise HTTPException(403, "Konto zostało dezaktywowane")
 
+    now = datetime.now(timezone.utc)
     device_ids = list(row_dict.get("device_ids") or [])
-    if req.installation_id in device_ids:
+    existing_infos = _device_infos_dict(row_dict.get("device_infos"))
+    existing_info = existing_infos.get(req.installation_id) or {}
+    platform = _normalize_device_platform(req.platform)
+    needs_info_update = (
+        bool(platform and existing_info.get("platform") != platform)
+        or bool(req.app_version and existing_info.get("app_version") != req.app_version)
+        or req.installation_id not in existing_infos
+    )
+    if req.installation_id in device_ids and not needs_info_update:
         return {"ok": True, "updated": False}
 
     # Multi-account cleanup
     await _remove_device_from_other_users(req.installation_id, user_id)
 
     device_ids = _merge_device_ids(device_ids, req.installation_id, None)
+    device_infos = _merge_device_infos(
+        row_dict.get("device_infos"),
+        req.installation_id,
+        req.platform,
+        req.app_version,
+        now,
+    )
     await database.execute(
         update(beach_users)
         .where(beach_users.c.id == user_id)
-        .values(device_ids=device_ids, updated_at=datetime.now(timezone.utc))
+        .values(device_ids=device_ids, device_infos=device_infos, updated_at=now)
     )
     return {"ok": True, "updated": True}

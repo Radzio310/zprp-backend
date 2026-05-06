@@ -793,6 +793,7 @@ beach_users = Table(
 
     # identyfikatory urządzeń (np. installation_id) – wiele urządzeń
     Column("device_ids", ARRAY(String), nullable=False, server_default=text("'{}'")),
+    Column("device_infos", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
 
     # preferencje powiadomień: {type: bool}; default = all true
     Column("notification_prefs", JSONB, nullable=False, server_default=text(
