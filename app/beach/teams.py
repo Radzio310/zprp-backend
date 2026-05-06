@@ -7,6 +7,7 @@ from urllib.parse import urlencode, parse_qs, urlparse
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, Depends, HTTPException, Query
 from httpx import AsyncClient
+from pydantic import BaseModel
 from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
