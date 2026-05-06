@@ -498,10 +498,26 @@ async def create_tournament(
         )
         all_user_ids = [int(r["id"]) for r in all_users]
         if all_user_ids:
+            # Build detail line from available fields
+            _cat = (req.category or "").strip()
+            _ct = (req.competition_type or "").strip()
+            _loc = (req.location or "").strip()
+            _date_from = str(req.event_date)[:10] if req.event_date else ""
+            _date_to = str(req.end_date)[:10] if req.end_date else ""
+            _dates = f"{_date_from} – {_date_to}" if _date_to and _date_to != _date_from else _date_from
+            _detail_parts = [p for p in [_cat, _ct] if p]
+            _detail = " · ".join(_detail_parts)
+            _body_parts = [req.name.strip()]
+            if _dates:
+                _body_parts.append(f"📅 {_dates}")
+            if _loc:
+                _body_parts.append(f"📍 {_loc}")
+            if _detail:
+                _body_parts.append(_detail)
             await create_notification(
                 notif_type="new_tournament_calendar",
-                title="Nowy turniej w kalendarzu",
-                body=f"{req.name.strip()}",
+                title="🏆 Nowy turniej w kalendarzu!",
+                body="\n".join(_body_parts),
                 data={"tournament_id": tournament_id},
                 target_user_ids=all_user_ids,
             )
@@ -798,10 +814,24 @@ async def patch_tournament(
     newly_added = new_invited - old_invited
     if newly_added:
         tour_name = row_d.get("name", "Turniej")
+        _ev = row_d.get("event_date")
+        _end = row_d.get("end_date")
+        _loc = (row_d.get("location") or "").strip()
+        _cat = (row_d.get("category") or "").strip()
+        _date_from = str(_ev)[:10] if _ev else ""
+        _date_to = str(_end)[:10] if _end else ""
+        _dates = f"{_date_from} – {_date_to}" if _date_to and _date_to != _date_from else _date_from
+        _body_parts = [tour_name]
+        if _dates:
+            _body_parts.append(f"📅 {_dates}")
+        if _loc:
+            _body_parts.append(f"📍 {_loc}")
+        if _cat:
+            _body_parts.append(_cat)
         await create_notification(
             notif_type="tournament_assigned",
-            title="Przypisano do turnieju",
-            body=f"Zostałeś przypisany do: {tour_name}",
+            title="🏆 Zostałeś przypisany do turnieju!",
+            body="\n".join(_body_parts),
             data={"tournament_id": tournament_id},
             target_user_ids=[int(uid) for uid in newly_added],
         )
@@ -874,10 +904,17 @@ async def host_update_tournament(
         target_ids = [int(uid) for uid in invited_ids if uid is not None]
         if target_ids:
             tour_name = existing_d.get("name", "Turniej")
+            new_ann = body.announcements[old_announcements_count:]
+            ann_preview = new_ann[0].get("text", "") if new_ann and isinstance(new_ann[0], dict) else ""
+            if ann_preview and len(ann_preview) > 100:
+                ann_preview = ann_preview[:100] + "…"
+            ann_body = f"📯 {tour_name}"
+            if ann_preview:
+                ann_body += f"\n\u201c{ann_preview}\u201d"
             await create_notification(
                 notif_type="new_announcement",
-                title="Nowe ogłoszenie",
-                body=f"Nowe ogłoszenie w: {tour_name}",
+                title="📢 Nowe ogłoszenie od Gospodarza",
+                body=ann_body,
                 data={"tournament_id": tournament_id},
                 target_user_ids=target_ids,
             )
@@ -961,10 +998,18 @@ async def judge_update_tournament(
         newly_assigned = new_judge_ids - old_judge_ids
         if newly_assigned:
             tour_name = existing_d.get("name", "Turniej")
+            _ev2 = existing_d.get("event_date")
+            _loc2 = (existing_d.get("location") or "").strip()
+            _date2 = str(_ev2)[:10] if _ev2 else ""
+            _body_j = f"🏆 {tour_name}"
+            if _date2:
+                _body_j += f"\n📅 {_date2}"
+            if _loc2:
+                _body_j += f" · 📍 {_loc2}"
             await create_notification(
                 notif_type="new_match_as_judge",
-                title="Obsada sędziowska",
-                body=f"Zostałeś przypisany jako sędzia: {tour_name}",
+                title="🧑\u200d⚖️ Zostałeś wyznaczony na sędziego!",
+                body=_body_j,
                 data={"tournament_id": tournament_id},
                 target_user_ids=list(newly_assigned),
             )

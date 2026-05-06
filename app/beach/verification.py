@@ -173,8 +173,8 @@ async def create_verification(
 
     asyncio.ensure_future(notify_admins(
         notif_type="admin_new_verification",
-        title="Nowy wniosek weryfikacyjny",
-        body=f"{user_name} złożył wniosek o rolę: {role_label}",
+        title="🔍 Nowy wniosek weryfikacyjny",
+        body=f"👤 {user_name}\nRola: {role_label} — oczekuje na zatwierdzenie.",
         data={"verification_id": int(new_id), "user_id": user_id, "role": req.role},
     ))
 

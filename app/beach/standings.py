@@ -645,8 +645,8 @@ async def _notify_points_awarded(tournament_id: int, tour_name: str):
         return
     await create_notification(
         notif_type="points_awarded",
-        title="Przyznano punkty",
-        body=f"Przyznano punkty za turniej: {tour_name}",
+        title="🏅 Przyznano punkty rankingowe!",
+        body=f"🏆 {tour_name}\nTwoje wyniki z tego turnieju zostały zatwierdzone.",
         data={"tournament_id": tournament_id},
         target_user_ids=target_ids,
     )
@@ -680,8 +680,8 @@ async def _notify_tournament_ended_other(tournament_id: int, tour_name: str):
 
         await create_notification(
             notif_type="tournament_ended_other",
-            title="Zakończono turniej",
-            body=f"Przyznano punkty: {tour_name}",
+            title="🏁 Turniej zakończony",
+            body=f"🏆 {tour_name}\nZaktualizowano wyniki — sprawdź ranking!",
             data={"tournament_id": tournament_id},
             target_user_ids=non_participant_ids,
         )

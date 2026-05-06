@@ -100,8 +100,8 @@ async def create_version(req: BeachCreateVersionRequest, current_user_id: int = 
         version_id = int(row["id"])
         asyncio.ensure_future(notify_admins(
             notif_type="admin_new_version",
-            title="Nowa wersja aplikacji",
-            body=f"Dodano wersję {version} — {name}",
+            title="🚀 Nowa wersja aplikacji",
+            body=f"📦 v{version} — {name}\nDodana do systemu.",
             data={"version_id": version_id, "version": version, "name": name},
             exclude_user_id=current_user_id,
         ))

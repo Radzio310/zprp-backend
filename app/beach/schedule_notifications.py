@@ -249,13 +249,13 @@ async def _notify_inner(
 
         if team_user_ids:
             cnt = len(matches_new_teams)
+            plural = "mecze" if 2 <= cnt <= 4 else "meczów" if cnt > 4 else "mecz"
             await create_notification(
                 notif_type="new_match_my_team",
-                title="Nowy mecz drużyny",
+                title="🏐 Nowy mecz Twojej drużyny",
                 body=(
-                    f"Twoja drużyna ma {cnt} now"
-                    + ("e mecze" if 2 <= cnt <= 4 else "ych meczów" if cnt > 4 else "y mecz")
-                    + f" w: {tour_name}"
+                    f"Twoja drużyna ma {cnt} now{plural} w harmonogramie!\n"
+                    f"🏆 {tour_name}"
                 ),
                 data={"tournament_id": tournament_id, "match_count": cnt},
                 target_user_ids=team_user_ids,
@@ -278,8 +278,8 @@ async def _notify_inner(
                 _schedule_match_push(
                     user_ids=match_user_ids,
                     match_dt=match_dt,
-                    title="Mecz za 30 min",
-                    body=f"{match_label} (g. {start_time}) — {tour_name}",
+                    title="⏱️ Mecz za 30 minut!",
+                    body=f"🏐 {match_label}\ng. {start_time} · {tour_name}",
                     data={"tournament_id": tournament_id, "match_id": match["id"]},
                     notif_type="match_reminder_30min",
                 )
@@ -295,8 +295,8 @@ async def _notify_inner(
 
         await create_notification(
             notif_type="new_match_as_judge",
-            title="Obsada sędziowska — mecz",
-            body=f"{match_label} (g. {start_time}) — {tour_name}",
+            title="🧑\u200d⚖️ Przydzielono Ci mecz",
+            body=f"🏐 {match_label}\ng. {start_time} · {tour_name}",
             data={"tournament_id": tournament_id, "match_id": match["id"]},
             target_user_ids=judge_ids_list,
         )
@@ -307,8 +307,8 @@ async def _notify_inner(
                 _schedule_match_push(
                     user_ids=judge_ids_list,
                     match_dt=match_dt,
-                    title="Mecz za 30 min",
-                    body=f"Twój mecz: {match_label} (g. {start_time}) — {tour_name}",
+                    title="⏱️ Mecz za 30 minut — sędziujesz!",
+                    body=f"🏐 {match_label}\ng. {start_time} · {tour_name}",
                     data={"tournament_id": tournament_id, "match_id": match["id"]},
                     notif_type="match_reminder_30min",
                 )

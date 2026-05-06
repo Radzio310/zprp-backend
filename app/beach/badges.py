@@ -165,8 +165,8 @@ async def create_badge(req: BeachBadgeCreateRequest):
         badge_id = int(row["id"])
         asyncio.ensure_future(notify_admins(
             notif_type="admin_badge_created",
-            title="Nowy badge",
-            body=f"Dodano badge: {req.name.strip()}",
+            title="🎖️ Nowy badge",
+            body=f"✨ Dodano badge: \u201c{req.name.strip()}\u201d",
             data={"badge_id": badge_id, "badge_name": req.name.strip()},
         ))
         return {"success": True, "id": badge_id}
@@ -251,8 +251,8 @@ async def patch_badge(badge_id: int, body: BeachBadgeUpdateRequest):
     if update_data:  # only notify if something actually changed
         asyncio.ensure_future(notify_admins(
             notif_type="admin_badge_edited",
-            title="Edytowano badge",
-            body=f"Badge '{result.name}' został zaktualizowany",
+            title="✏️ Edytowano badge",
+            body=f"🔄 Badge \u201c{result.name}\u201d został zaktualizowany.",
             data={"badge_id": badge_id, "badge_name": result.name},
         ))
     return result
@@ -294,8 +294,8 @@ async def put_badge(badge_id: int, req: BeachBadgeCreateRequest):
     )
     asyncio.ensure_future(notify_admins(
         notif_type="admin_badge_edited",
-        title="Edytowano badge",
-        body=f"Badge '{result.name}' został zaktualizowany",
+        title="✏️ Edytowano badge",
+        body=f"🔄 Badge \u201c{result.name}\u201d został zaktualizowany.",
         data={"badge_id": badge_id, "badge_name": result.name},
     ))
     return result
@@ -314,8 +314,8 @@ async def delete_badge(badge_id: int):
     await database.execute(delete(beach_badges).where(beach_badges.c.id == badge_id))
     asyncio.ensure_future(notify_admins(
         notif_type="admin_badge_deleted",
-        title="Usunięto badge",
-        body=f"Badge '{badge_name}' został usunięty",
+        title="🗑️ Usunięto badge",
+        body=f"❌ Badge \u201c{badge_name}\u201d został usunięty z systemu.",
         data={"badge_id": badge_id, "badge_name": badge_name},
     ))
     return {"success": True, "removed_from_users": removed_from_users}

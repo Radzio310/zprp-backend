@@ -256,10 +256,17 @@ async def create_guideline(
     if status == "verified":
         target_ids = await _get_guideline_target_users(body.tournament_id)
         if target_ids:
+            _guideline_body = f"📌 {body.title.strip()}"
+            if tournament_name:
+                _guideline_body += f"\n🏆 {tournament_name}"
+            content_preview = (body.content or "").strip()
+            if content_preview:
+                preview_short = content_preview[:120] + ("…" if len(content_preview) > 120 else "")
+                _guideline_body += f"\n{preview_short}"
             await create_notification(
                 notif_type="new_guideline",
-                title="Nowa wytyczna",
-                body=f"{body.title.strip()}",
+                title="📚 Nowa wytyczna!",
+                body=_guideline_body,
                 data={"guideline_id": int(row["id"]), "tournament_id": body.tournament_id},
                 target_user_ids=target_ids,
             )

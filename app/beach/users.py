@@ -387,8 +387,8 @@ async def create_user(req: BeachUserCreateRequest):
     import asyncio
     asyncio.ensure_future(notify_admins(
         notif_type="admin_new_user",
-        title="Nowy użytkownik",
-        body=f"{user_item.full_name} zarejestrował się w aplikacji",
+        title="👤 Nowy użytkownik",
+        body=f"✅ {user_item.full_name} założył konto w aplikacji.",
         data={"user_id": int(new_id)},
     ))
 

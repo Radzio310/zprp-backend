@@ -70,8 +70,8 @@ async def _notify_admins_new_report(
     try:
         await notify_admins(
             notif_type="admin_new_report",
-            title=f"Nowe zgłoszenie — {type_label}",
-            body=f"{user_name}: {preview}",
+            title=f"🚨 Nowe zgłoszenie — {type_label}",
+            body=f"👤 {user_name}\n“{preview}”",
             data={"report_id": report_id},
         )
     except Exception as e:
@@ -458,8 +458,8 @@ async def reply_to_report(
         report_title = report_row.get("title") or "Twoje zgłoszenie"
         await create_notification(
             notif_type="report_reply",
-            title="Odpowiedź na zgłoszenie",
-            body=f"Otrzymałeś odpowiedź w: {report_title}",
+            title="💬 Admini odpowiedzieli na Twoje zgłoszenie",
+            body=f"📝 {report_title}\nMasz nową wiadomość — dotknij, aby przeczytać.",
             data={"report_id": report_id},
             target_user_ids=[report_owner_id],
         )

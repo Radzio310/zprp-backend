@@ -81,8 +81,8 @@ async def upsert_admin(req: BeachAdminUpsertRequest, current_user_id: int = Depe
         await database.execute(stmt)
         asyncio.ensure_future(notify_admins(
             notif_type="admin_new_admin",
-            title="Nowy administrator",
-            body=f"{u['full_name']} został dodany jako administrator",
+            title="🛡️ Nowy administrator",
+            body=f"✅ {u['full_name']} został dodany do grona administratorów.",
             data={"user_id": int(u['id'])},
             exclude_user_id=current_user_id,
         ))
@@ -104,8 +104,8 @@ async def delete_admin(user_id: int, current_user_id: int = Depends(beach_get_cu
     if removed_row:
         asyncio.ensure_future(notify_admins(
             notif_type="admin_removed_admin",
-            title="Usunięto administratora",
-            body=f"{removed_row['full_name']} nie jest już administratorem",
+            title="⚠️ Usunięto administratora",
+            body=f"❌ {removed_row['full_name']} nie jest już administratorem.",
             data={"user_id": user_id},
             exclude_user_id=current_user_id,
         ))

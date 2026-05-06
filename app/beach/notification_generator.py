@@ -112,15 +112,27 @@ async def _generate_tournament_reminders():
         target_ids = [int(uid) for uid in invited if uid is not None]
 
         tour_name = r_d.get("name", "Turniej")
+        location = (r_d.get("location") or "").strip()
+        category = (r_d.get("category") or "").strip()
+        competition_type = (r_d.get("competition_type") or "").strip()
+
+        # Build compact detail line: "Kategoria · Miejsce" or "Kategoria" or "Miejsce"
+        detail_parts = [p for p in [category, competition_type] if p]
+        detail_line = " · ".join(detail_parts)
+        if location:
+            detail_line = f"{detail_line} · 📍 {location}" if detail_line else f"📍 {location}"
 
         # ── Participant reminders ──────────────────────────────
         if target_ids:
             # 24h reminder: 22-25h before event
             if 22 <= delta <= 25 and ("tournament_reminder_24h", tid) not in existing_24h:
+                body_24h = f"Jutro grasz! {tour_name}"
+                if detail_line:
+                    body_24h += f"\n{detail_line}"
                 await create_notification(
                     notif_type="tournament_reminder_24h",
-                    title="Turniej jutro!",
-                    body=f"{tour_name} — startuje za ok. 24h",
+                    title="⏰ Turniej jutro!",
+                    body=body_24h,
                     data={"tournament_id": tid},
                     target_user_ids=target_ids,
                 )
@@ -128,10 +140,13 @@ async def _generate_tournament_reminders():
 
             # 5h reminder: 4-6h before event
             if 4 <= delta <= 6 and ("tournament_reminder_5h", tid) not in existing_5h:
+                body_5h = f"Startuje za ok. 5h — {tour_name}"
+                if detail_line:
+                    body_5h += f"\n{detail_line}"
                 await create_notification(
                     notif_type="tournament_reminder_5h",
-                    title="Turniej dziś!",
-                    body=f"{tour_name} — startuje za ok. 5h",
+                    title="🏖️ Turniej dziś — za 5h!",
+                    body=body_5h,
                     data={"tournament_id": tid},
                     target_user_ids=target_ids,
                 )
@@ -142,10 +157,13 @@ async def _generate_tournament_reminders():
             invited_set = {int(uid) for uid in invited if uid is not None}
             non_participant_ids = list(all_active_ids - invited_set)
             if non_participant_ids:
+                body_gen = f"Dziś startuje: {tour_name}"
+                if detail_line:
+                    body_gen += f"\n{detail_line}"
                 await create_notification(
                     notif_type="tournament_reminder_general",
-                    title="Zbliżający się turniej",
-                    body=f"{tour_name} — startuje za ok. 5h",
+                    title="🏐 Turniej w toku",
+                    body=body_gen,
                     data={"tournament_id": tid},
                     target_user_ids=non_participant_ids,
                 )
