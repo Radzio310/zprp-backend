@@ -921,6 +921,18 @@ beach_app_versions = Table(
 Index("ix_beach_app_versions_to_show", beach_app_versions.c.to_show)
 
 # -------------------------
+# BEACH: ustawienia aplikacji (klucz-wartość)
+# -------------------------
+
+beach_app_settings = Table(
+    "beach_app_settings",
+    metadata,
+    Column("key", String, primary_key=True),
+    Column("value", Text, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# -------------------------
 # BEACH: teams (lokalna kopia drużyn plażowych)
 # -------------------------
 

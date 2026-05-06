@@ -80,6 +80,7 @@ from app.beach.reports import router as beach_reports_router
 from app.beach.notifications import router as beach_notifications_router
 from app.beach.notifications import cleanup_expired_notifications
 from app.beach.notification_generator import run_notification_generator
+from app.beach.app_settings import router as beach_app_settings_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -179,6 +180,7 @@ app.include_router(beach_guidelines_router)
 app.include_router(beach_standings_router)
 app.include_router(beach_reports_router)
 app.include_router(beach_notifications_router)
+app.include_router(beach_app_settings_router)
 
 # NEW: push router
 app.include_router(push_router)
