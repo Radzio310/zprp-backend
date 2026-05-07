@@ -29,7 +29,10 @@ from fastapi.responses import FileResponse
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image
 from pydantic import BaseModel
+from sqlalchemy import select
 from starlette.background import BackgroundTask
+
+from app.db import database, beach_tournaments, beach_users
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,8 @@ class SchedulePdfRequest(BaseModel):
     tournament_name: str = ""
     tournament_location: str = ""
     tournament_dates: str = ""  # optional override; computed from days if empty
+    tournament_id: Optional[int] = None   # used to look up judge/host emails
+    exclude_user_id: Optional[int] = None  # current user — excluded from recipients
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -253,6 +258,58 @@ def _ensure_download_dir():
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
+async def _get_judge_host_emails(
+    tournament_id: int,
+    exclude_user_id: Optional[int],
+) -> List[str]:
+    """Return emails of all judges + hosts for the tournament, excluding exclude_user_id."""
+    try:
+        row = await database.fetch_one(
+            select(beach_tournaments.c.data_json).where(
+                beach_tournaments.c.id == tournament_id
+            )
+        )
+        if not row:
+            return []
+        data_json = row["data_json"]
+        if isinstance(data_json, str):
+            import json as _json
+            data_json = _json.loads(data_json)
+        if not isinstance(data_json, dict):
+            return []
+
+        host_ids = {
+            int(h["id"])
+            for h in (data_json.get("hosts") or [])
+            if isinstance(h, dict) and h.get("id") is not None
+        }
+        judge_ids = {
+            int(j["id"])
+            for j in (data_json.get("judges") or [])
+            if isinstance(j, dict) and j.get("id") is not None
+        }
+        head_judge_id = data_json.get("head_judge_id")
+        if isinstance(head_judge_id, int):
+            judge_ids.add(head_judge_id)
+
+        all_ids = host_ids | judge_ids
+        if exclude_user_id is not None:
+            all_ids.discard(int(exclude_user_id))
+
+        if not all_ids:
+            return []
+
+        rows = await database.fetch_all(
+            select(beach_users.c.email).where(
+                beach_users.c.id.in_(list(all_ids))
+            )
+        )
+        return [r["email"] for r in rows if r["email"]]
+    except Exception:
+        logger.warning("Could not fetch judge/host emails for tournament %s", tournament_id, exc_info=True)
+        return []
+
+
 @router.post("/beach/schedule/pdf", summary="Generuj PDF terminarza turnieju")
 async def generate_schedule_pdf(req: SchedulePdfRequest):
     if not os.path.exists(TEMPLATE_PATH):
@@ -348,9 +405,18 @@ async def generate_schedule_pdf(req: SchedulePdfRequest):
         shutil.rmtree(tmp_dir, ignore_errors=True)  # clean working dir
 
         encoded_name = urllib.parse.quote(download_name)
+
+        # ── fetch judge/host emails if tournament_id provided ──
+        judge_host_emails: List[str] = []
+        if req.tournament_id:
+            judge_host_emails = await _get_judge_host_emails(
+                req.tournament_id, req.exclude_user_id
+            )
+
         return {
             "success": True,
             "download_url": f"/beach/schedule/pdf/download/{token}?filename={encoded_name}",
+            "judge_host_emails": judge_host_emails,
         }
     except HTTPException:
         raise
