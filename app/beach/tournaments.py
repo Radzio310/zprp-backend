@@ -41,6 +41,7 @@ class HostUpdateRequest(BaseModel):
     """Dozwolone pola dla Gospodarza zawodów."""
     announcements: Optional[list] = None
     invited_team_ids: Optional[list] = None
+    custom_teams: Optional[list] = None
 
 
 class JudgeUpdateRequest(BaseModel):
@@ -867,22 +868,26 @@ async def host_update_tournament(
     existing_d = dict(existing)
     data = _parse_json(existing_d["data_json"])
 
-    # Sprawdź badge "Gospodarz zawodów"
-    user_row = await database.fetch_one(
-        select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
-    )
-    if not user_row:
-        raise HTTPException(404, "Użytkownik nie znaleziony")
+    # Admin może używać tego endpointu bez badge'a "Gospodarz zawodów"
+    user_is_admin = await _is_admin(current_user_id)
 
-    user_badges = set(_extract_badge_names(user_row["badges"]))
-    if "Gospodarz zawodów" not in user_badges:
-        raise HTTPException(403, "Wymagany badge: Gospodarz zawodów")
+    if not user_is_admin:
+        # Sprawdź badge "Gospodarz zawodów"
+        user_row = await database.fetch_one(
+            select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
+        )
+        if not user_row:
+            raise HTTPException(404, "Użytkownik nie znaleziony")
 
-    # Sprawdź czy user jest hostem tego konkretnego turnieju
-    hosts = data.get("hosts") or []
-    host_ids = {int(h["id"]) for h in hosts if isinstance(h, dict) and "id" in h}
-    if current_user_id not in host_ids:
-        raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
+        user_badges = set(_extract_badge_names(user_row["badges"]))
+        if "Gospodarz zawodów" not in user_badges:
+            raise HTTPException(403, "Wymagany badge: Gospodarz zawodów")
+
+        # Sprawdź czy user jest hostem tego konkretnego turnieju
+        hosts = data.get("hosts") or []
+        host_ids = {int(h["id"]) for h in hosts if isinstance(h, dict) and "id" in h}
+        if current_user_id not in host_ids:
+            raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
 
     # Scal tylko dozwolone pola (nie nadpisuj reszty data_json)
     old_announcements_count = len(data.get("announcements") or [])
@@ -891,6 +896,8 @@ async def host_update_tournament(
         data["announcements"] = body.announcements
     if body.invited_team_ids is not None:
         data["invited_team_ids"] = body.invited_team_ids
+    if body.custom_teams is not None:
+        data["custom_teams"] = body.custom_teams
 
     await database.execute(
         update(beach_tournaments)
