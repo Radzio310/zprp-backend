@@ -427,6 +427,18 @@ async def generate_schedule_pdf(req: SchedulePdfRequest):
 
 
 @router.get(
+    "/beach/tournament/{tournament_id}/judge-host-emails",
+    summary="Adresy e-mail sędziów i gospodarzy turnieju",
+)
+async def get_tournament_judge_host_emails(
+    tournament_id: int,
+    exclude_user_id: Optional[int] = Query(None),
+):
+    emails = await _get_judge_host_emails(tournament_id, exclude_user_id)
+    return {"emails": emails}
+
+
+@router.get(
     "/beach/schedule/pdf/download/{token}",
     summary="Pobierz wygenerowany PDF terminarza (attachment)",
 )

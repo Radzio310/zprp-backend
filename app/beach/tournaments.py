@@ -58,7 +58,7 @@ class SquadUpdateRequest(BaseModel):
     """Aktualizacja selekcji składu dla drużyny w turnieju."""
     team_id: int
     default_players: Optional[List[int]] = None      # player_ids, max 10
-    default_companions: Optional[List[int]] = None   # person_ids, max 2
+    default_companions: Optional[List[int]] = None   # person_ids, max 4
     match_id: Optional[str] = None                   # jeśli override dla konkretnego meczu
     match_players: Optional[List[int]] = None
     match_companions: Optional[List[int]] = None
