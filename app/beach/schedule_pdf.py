@@ -13,6 +13,7 @@ Szablon (app/templates/szablon_terminarz.xlsx):
 import copy
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,7 +28,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Path as ApiPath, Query
 from fastapi.responses import FileResponse
 from openpyxl import load_workbook
-from openpyxl.drawing.image import Image
+from openpyxl.styles import Alignment
 from pydantic import BaseModel
 from sqlalchemy import select
 from starlette.background import BackgroundTask
@@ -146,35 +147,139 @@ def _score_str(m: Dict[str, Any]) -> str:
     return base
 
 
-def _load_media(template_path: str) -> Dict[str, bytes]:
-    """Extract xl/media/* entries from the xlsx zip for image rehydration."""
-    media: Dict[str, bytes] = {}
-    try:
-        with zipfile.ZipFile(template_path, "r") as z:
-            for name in z.namelist():
-                if name.startswith("xl/media/"):
-                    media[name] = z.read(name)
-    except Exception:
-        pass
-    return media
+def _ensure_footer_row(ws, footer_row: int) -> None:
+    """
+    After row deletion the footer row may have lost its merge.
+    Re-apply merge A:G and center alignment explicitly.
+    """
+    merge_str = f"A{footer_row}:G{footer_row}"
+    # Remove any conflicting merge that covers this row
+    for existing in list(ws.merged_cells.ranges):
+        if existing.min_row == footer_row:
+            ws.unmerge_cells(str(existing))
+    ws.merge_cells(merge_str)
+    ws[f"A{footer_row}"].alignment = Alignment(
+        horizontal="center", vertical="center", wrapText=True
+    )
 
 
-def _rehydrate_images(wb, media: Dict[str, bytes]) -> None:
-    """Re-attach images that openpyxl loaded but lost the raw data for."""
-    for ws in wb.worksheets:
-        imgs = list(getattr(ws, "_images", []) or [])
-        ws._images = []
-        for img in imgs:
-            path = (getattr(img, "path", "") or "").lstrip("/")
-            blob = media.get(path)
-            if not blob:
-                continue
-            bio = BytesIO(blob)
-            new_img = Image(bio)
-            new_img.width = img.width
-            new_img.height = img.height
-            new_img.anchor = copy.deepcopy(img.anchor)
-            ws.add_image(new_img)
+def _patch_drawings_into_xlsx(saved_xlsx_path: str, template_path: str) -> None:
+    """
+    openpyxl strips all drawing/media files when it loads and re-saves a workbook.
+    This function re-injects the drawing XML (both images) and media files from the
+    original template into every sheet of the saved file via ZIP surgery.
+
+    Both images in the template are anchored in the header rows (0-5, 0-indexed)
+    so deleting match rows (row 10+) does not move the anchors.
+    """
+    DRAWING_REL_TYPE = (
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
+    )
+    DRAWING_CONTENT_TYPE = (
+        "application/vnd.openxmlformats-officedocument.drawing+xml"
+    )
+    R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+    # ── read template drawing + media ──
+    with zipfile.ZipFile(template_path, "r") as zt:
+        tmpl_drawing_xml = zt.read("xl/drawings/drawing1.xml")
+        tmpl_drawing_rels_xml = zt.read("xl/drawings/_rels/drawing1.xml.rels")
+        media_files = {
+            name: zt.read(name)
+            for name in zt.namelist()
+            if name.startswith("xl/media/")
+        }
+
+    # ── read all files from saved workbook ──
+    with zipfile.ZipFile(saved_xlsx_path, "r") as zs:
+        saved_files = {name: zs.read(name) for name in zs.namelist()}
+
+    new_files = dict(saved_files)
+    new_files.update(media_files)
+
+    # ── find all sheet XMLs ──
+    sheet_paths = sorted(
+        name
+        for name in saved_files
+        if re.match(r"xl/worksheets/sheet\d+\.xml$", name)
+    )
+
+    new_drawing_part_names: List[str] = []
+
+    for idx, sheet_path in enumerate(sheet_paths, start=1):
+        drawing_xml_path = f"xl/drawings/drawing{idx}.xml"
+        drawing_rels_path = f"xl/drawings/_rels/drawing{idx}.xml.rels"
+        drawing_target = f"../drawings/drawing{idx}.xml"
+
+        new_files[drawing_xml_path] = tmpl_drawing_xml
+        new_files[drawing_rels_path] = tmpl_drawing_rels_xml
+        new_drawing_part_names.append(f"/xl/drawings/drawing{idx}.xml")
+
+        # ── patch sheet _rels: add drawing relationship ──
+        rels_path = (
+            sheet_path
+            .replace("xl/worksheets/", "xl/worksheets/_rels/")
+            .replace(".xml", ".xml.rels")
+        )
+        rels_xml = saved_files.get(rels_path, b"").decode("utf-8")
+        if not rels_xml:
+            rels_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                "</Relationships>"
+            )
+
+        # find a free rId (avoid collisions with printerSettings etc.)
+        existing_rids = set(re.findall(r'Id="(rId\d+)"', rels_xml))
+        rid_n = 1
+        while f"rId{rid_n}" in existing_rids:
+            rid_n += 1
+        drawing_rid = f"rId{rid_n}"
+
+        rels_xml = rels_xml.replace(
+            "</Relationships>",
+            f'<Relationship Id="{drawing_rid}" Type="{DRAWING_REL_TYPE}"'
+            f' Target="{drawing_target}"/></Relationships>',
+        )
+        new_files[rels_path] = rels_xml.encode("utf-8")
+
+        # ── patch sheet XML: add <drawing r:id="..."/> before </worksheet> ──
+        sheet_xml = saved_files[sheet_path].decode("utf-8")
+        if "<drawing" not in sheet_xml:
+            # Ensure r: namespace is declared at root (openpyxl usually includes it)
+            if 'xmlns:r=' not in sheet_xml:
+                sheet_xml = sheet_xml.replace(
+                    "<worksheet ",
+                    f'<worksheet xmlns:r="{R_NS}" ',
+                    1,
+                )
+            sheet_xml = sheet_xml.replace(
+                "</worksheet>",
+                f'<drawing r:id="{drawing_rid}"/></worksheet>',
+            )
+        new_files[sheet_path] = sheet_xml.encode("utf-8")
+
+    # ── patch [Content_Types].xml ──
+    ct_xml = saved_files["[Content_Types].xml"].decode("utf-8")
+    if 'Extension="png"' not in ct_xml:
+        ct_xml = ct_xml.replace(
+            "</Types>",
+            '<Default Extension="png" ContentType="image/png"/></Types>',
+        )
+    for part_name in new_drawing_part_names:
+        if part_name not in ct_xml:
+            ct_xml = ct_xml.replace(
+                "</Types>",
+                f'<Override PartName="{part_name}" ContentType="{DRAWING_CONTENT_TYPE}"/></Types>',
+            )
+    new_files["[Content_Types].xml"] = ct_xml.encode("utf-8")
+
+    # ── write patched zip ──
+    tmp_path = saved_xlsx_path + ".patched"
+    with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for name, data in new_files.items():
+            zout.writestr(name, data)
+    os.replace(tmp_path, saved_xlsx_path)
 
 
 def _fill_header(
@@ -337,9 +442,7 @@ async def generate_schedule_pdf(req: SchedulePdfRequest):
     day_indices = sorted(by_day.keys()) or [0]
 
     # ── load template ──
-    media = _load_media(TEMPLATE_PATH)
     wb = load_workbook(TEMPLATE_PATH)
-    _rehydrate_images(wb, media)
     template_ws = wb.active
 
     # ── build (day_idx, chunk_idx, total_chunks, match_list) tuples ──
@@ -389,12 +492,16 @@ async def generate_schedule_pdf(req: SchedulePdfRequest):
         unused = TEMPLATE_MATCH_ROWS - len(chunk)
         if unused > 0:
             ws.delete_rows(FIRST_MATCH_ROW + len(chunk), unused)
+            # Re-apply footer merge + centering (openpyxl may lose it after deletion)
+            _ensure_footer_row(ws, FIRST_MATCH_ROW + len(chunk))
 
     # ── save xlsx and convert to pdf ──
     tmp_dir = tempfile.mkdtemp()
     try:
         xlsx_path = os.path.join(tmp_dir, "terminarz.xlsx")
         wb.save(xlsx_path)
+        # Re-inject drawing + media (openpyxl strips them on load+save)
+        _patch_drawings_into_xlsx(xlsx_path, TEMPLATE_PATH)
         pdf_path = _convert_xlsx_to_pdf(xlsx_path, tmp_dir)
 
         safe_name = (
