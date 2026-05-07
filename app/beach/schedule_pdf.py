@@ -45,7 +45,8 @@ TEMPLATE_PATH = os.path.normpath(
 DOWNLOAD_DIR = "/tmp/schedule_pdf_downloads"
 
 FIRST_MATCH_ROW = 10   # row where first match goes
-MAX_ROWS_PER_SHEET = 30  # matches per sheet before starting an overflow sheet
+TEMPLATE_MATCH_ROWS = 33  # rows 10-42 reserved in template
+MAX_ROWS_PER_SHEET = TEMPLATE_MATCH_ROWS  # matches per sheet before overflow
 
 WEEKDAYS_PL = [
     "poniedziałek", "wtorek", "środa",
@@ -383,6 +384,11 @@ async def generate_schedule_pdf(req: SchedulePdfRequest):
 
         for row_i, m in enumerate(chunk):
             _fill_match_row(ws, FIRST_MATCH_ROW + row_i, m)
+
+        # Delete unused empty rows so footer moves up dynamically
+        unused = TEMPLATE_MATCH_ROWS - len(chunk)
+        if unused > 0:
+            ws.delete_rows(FIRST_MATCH_ROW + len(chunk), unused)
 
     # ── save xlsx and convert to pdf ──
     tmp_dir = tempfile.mkdtemp()
