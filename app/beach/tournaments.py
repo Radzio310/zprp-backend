@@ -501,7 +501,7 @@ async def create_tournament(
             # Build detail line from available fields
             _cat = (req.category or "").strip()
             _ct = (req.competition_type or "").strip()
-            _loc = (req.location or "").strip()
+            _loc = (req.location or "").strip().split("|", 1)[0].strip()
             _date_from = str(req.event_date)[:10] if req.event_date else ""
             _date_to = str(req.end_date)[:10] if req.end_date else ""
             _dates = f"{_date_from} – {_date_to}" if _date_to and _date_to != _date_from else _date_from

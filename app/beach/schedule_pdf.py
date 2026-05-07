@@ -100,7 +100,7 @@ def _stage_label(m: Dict[str, Any]) -> str:
     stage = m.get("stage", "")
     group = m.get("group") or ""
     if stage == "group":
-        return f"GRUPA {group}" if group else "Faza grupowa"
+        return "Każdy z każdym"
     return {
         "quarterfinal": "Ćwierćfinał",
         "semifinal": "Półfinał",
