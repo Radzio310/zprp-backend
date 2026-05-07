@@ -16,13 +16,15 @@ import os
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
+import uuid
 import zipfile
 from collections import defaultdict
 from datetime import date
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path as ApiPath, Query
 from fastapi.responses import FileResponse
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image
@@ -36,6 +38,8 @@ router = APIRouter(tags=["Beach Schedule PDF"])
 TEMPLATE_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "templates", "szablon_terminarz.xlsx")
 )
+
+DOWNLOAD_DIR = "/tmp/schedule_pdf_downloads"
 
 FIRST_MATCH_ROW = 10   # row where first match goes
 MAX_ROWS_PER_SHEET = 30  # matches per sheet before starting an overflow sheet
@@ -245,6 +249,10 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
 
 # ─── endpoint ─────────────────────────────────────────────────────────────────
 
+def _ensure_download_dir():
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
 @router.post("/beach/schedule/pdf", summary="Generuj PDF terminarza turnieju")
 async def generate_schedule_pdf(req: SchedulePdfRequest):
     if not os.path.exists(TEMPLATE_PATH):
@@ -332,13 +340,48 @@ async def generate_schedule_pdf(req: SchedulePdfRequest):
         )
         download_name = f"terminarz_{safe_name}.pdf"
 
-        return FileResponse(
-            path=pdf_path,
-            media_type="application/pdf",
-            filename=download_name,
-            background=BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True),
-        )
+        # ── save to download dir with a one-time token ──
+        _ensure_download_dir()
+        token = str(uuid.uuid4())
+        download_path = os.path.join(DOWNLOAD_DIR, f"{token}.pdf")
+        shutil.copyfile(pdf_path, download_path)
+        shutil.rmtree(tmp_dir, ignore_errors=True)  # clean working dir
+
+        encoded_name = urllib.parse.quote(download_name)
+        return {
+            "success": True,
+            "download_url": f"/beach/schedule/pdf/download/{token}?filename={encoded_name}",
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         logger.exception("Schedule PDF generation failed")
         raise HTTPException(500, detail=str(e))
+
+
+@router.get(
+    "/beach/schedule/pdf/download/{token}",
+    summary="Pobierz wygenerowany PDF terminarza (attachment)",
+)
+async def download_schedule_pdf(
+    token: str = ApiPath(...),
+    filename: str = Query("terminarz.pdf"),
+):
+    _ensure_download_dir()
+    # Validate token is a UUID to prevent path traversal
+    try:
+        uuid.UUID(token)
+    except ValueError:
+        raise HTTPException(400, "Nieprawidłowy token")
+    file_path = os.path.join(DOWNLOAD_DIR, f"{token}.pdf")
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "Plik wygasł lub nie istnieje")
+    return FileResponse(
+        path=file_path,
+        media_type="application/pdf",
+        filename=filename,
+        background=BackgroundTask(
+            lambda: os.remove(file_path) if os.path.exists(file_path) else None
+        ),
+    )
