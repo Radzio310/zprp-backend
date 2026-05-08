@@ -434,12 +434,12 @@ def _fill_regular_team_squad(
 
     # ── Players ──
     if selected_player_ids:
-        # Use only selected players, preserving selection order
+        # Use only selected players, preserving selection order (only those in_squad)
         selected_id_set = set(selected_player_ids)
         id_to_player = {}
         for p in roster:
             pid = p.get("player_id")
-            if pid is not None and pid in selected_id_set and pid not in id_to_player:
+            if pid is not None and pid in selected_id_set and pid not in id_to_player and p.get("in_squad", True):
                 id_to_player[pid] = p
         ordered_players = [id_to_player[pid] for pid in selected_player_ids if pid in id_to_player]
     else:
