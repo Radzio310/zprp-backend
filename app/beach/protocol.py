@@ -195,7 +195,7 @@ def _strikethrough_empty_rows(
 ) -> None:
     """Diagonal cross on empty rows.
 
-    Col B: dashes "-------------------------------------"
+    Col B: dashes "-----------------------------------------------"
     Col C: empty (no diagonal)
     Companions: col D also empty (no diagonal)
     Remaining cols: diagonal border.
@@ -211,7 +211,7 @@ def _strikethrough_empty_rows(
         for col in range(start_col, end_col + 1):
             cell = ws.cell(row=row, column=col)
             if col == 2:  # B – dashes
-                cell.value = "-------------------------------------"
+                cell.value = "-----------------------------------------------"
             elif col in skip_cols:  # C (and D for companions) – empty
                 cell.value = ""
             else:  # diagonal cross
