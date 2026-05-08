@@ -5,7 +5,7 @@ Szablon (app/templates/beach_protocol_template.xlsx):
   Kategoria (krzyżyk "X"):
     Senior M → M5,  Senior K → P5
     Junior M → M6,  Junior K → P6
-    Junior mł M → M7,  Junior mł K → P7
+    Junior mł. M → M7,  Junior mł. K → P7
     Młodzik M → M8,  Młodzik K → P8
   S6  – numer meczu
   B10 – nazwa drużyny gospodarzy
@@ -56,14 +56,14 @@ DOWNLOAD_DIR = "/tmp/beach_protocol_downloads"
 # ── category → cell mapping ──────────────────────────────────────────────────
 
 CATEGORY_CELL: Dict[Tuple[str, str], str] = {
-    ("Senior", "M"):      "M5",
-    ("Senior", "K"):      "P5",
-    ("Junior", "M"):      "M6",
-    ("Junior", "K"):      "P6",
-    ("Junior mł", "M"):   "M7",
-    ("Junior mł", "K"):   "P7",
-    ("Młodzik", "M"):     "M8",
-    ("Młodzik", "K"):     "P8",
+    ("Senior", "M"):       "M5",
+    ("Senior", "K"):       "P5",
+    ("Junior", "M"):       "M6",
+    ("Junior", "K"):       "P6",
+    ("Junior mł.", "M"):   "M7",
+    ("Junior mł.", "K"):   "P7",
+    ("Młodzik", "M"):      "M8",
+    ("Młodzik", "K"):      "P8",
 }
 
 # ── host player rows 15-26, guest 34-45 ──
@@ -223,8 +223,15 @@ def _fill_protocol_sheet(
     gender = match.get("gender", "")
 
     # ── Category checkbox ──
-    cell_key = (category, gender)
+    # Normalize category: strip whitespace, ensure "Junior mł." has dot
+    cat_norm = category.strip()
+    if cat_norm.lower().startswith("junior m") and "mł" in cat_norm.lower():
+        cat_norm = "Junior mł."
+    cell_key = (cat_norm, gender)
     cell_ref = CATEGORY_CELL.get(cell_key)
+    if not cell_ref:
+        # fallback: try without dot
+        cell_ref = CATEGORY_CELL.get((cat_norm.rstrip("."), gender))
     if cell_ref:
         ws[cell_ref] = "X"
 
@@ -402,60 +409,70 @@ def _fill_regular_team_squad(
     team_squads: Dict[str, Any],
     team_rosters: Dict[int, dict],
 ) -> None:
-    """Fill squad from team_squads selection + roster_json data."""
+    """Fill squad from team_squads selection + roster_json data.
+
+    Analogous to BeachNewMatchScreen.tsx buildPlayers/buildCompanions:
+    1. Load ALL players from roster_json
+    2. Apply jersey_overrides
+    3. If squad selection exists (default_players / match_overrides) → only selected
+    4. If no selection → all players from roster (capped at row slots)
+    """
     squad_entry = team_squads.get(team_id_str) or {}
     roster_data = team_rosters.get(team_id_int)
     if not roster_data:
         return  # no roster data at all
 
-    # Determine selected player IDs
+    roster = roster_data.get("roster_json") or []
+    jersey_overrides = roster_data.get("jersey_overrides") or {}
+    companions = roster_data.get("companions_json") or []
+
+    # Determine selected player IDs (match override → default → fallback all)
     match_overrides = squad_entry.get("match_overrides") or {}
     match_override = match_overrides.get(match_id) or {}
     selected_player_ids = match_override.get("players") or squad_entry.get("default_players") or []
     selected_companion_ids = match_override.get("companions") or squad_entry.get("default_companions") or []
 
-    if not selected_player_ids and not selected_companion_ids:
-        return  # no default squad selection — leave empty
-
-    # Build player list from roster
-    roster = roster_data.get("roster_json") or []
-    jersey_overrides = roster_data.get("jersey_overrides") or {}
-
+    # ── Players ──
     if selected_player_ids:
+        # Use only selected players, preserving selection order
         selected_id_set = set(selected_player_ids)
-        # Keep original order from selected_player_ids
         id_to_player = {}
         for p in roster:
             pid = p.get("player_id")
-            if pid and pid in selected_id_set and pid not in id_to_player:
+            if pid is not None and pid in selected_id_set and pid not in id_to_player:
                 id_to_player[pid] = p
         ordered_players = [id_to_player[pid] for pid in selected_player_ids if pid in id_to_player]
+    else:
+        # No selection → fill all roster players (like BeachNewMatchScreen shows all)
+        ordered_players = list(roster)
 
-        for i, row in enumerate(player_rows):
-            if i < len(ordered_players):
-                p = ordered_players[i]
-                pid_str = str(p.get("player_id", ""))
-                jersey = jersey_overrides.get(pid_str) or p.get("jersey_number") or ""
-                ws.cell(row=row, column=1).value = jersey
-                ws.cell(row=row, column=2).value = _format_player_name(
-                    p.get("last_name", ""), p.get("first_name", "")
-                )
+    for i, row in enumerate(player_rows):
+        if i < len(ordered_players):
+            p = ordered_players[i]
+            pid_str = str(p.get("player_id", ""))
+            jersey = jersey_overrides.get(pid_str) or p.get("jersey_number") or ""
+            ws.cell(row=row, column=1).value = jersey
+            ws.cell(row=row, column=2).value = _format_player_name(
+                p.get("last_name", ""), p.get("first_name", "")
+            )
 
-    # Companions
+    # ── Companions ──
     if selected_companion_ids:
-        companions = roster_data.get("companions_json") or []
         selected_comp_set = set(selected_companion_ids)
         id_to_comp = {}
         for c in companions:
             cid = c.get("person_id")
-            if cid and cid in selected_comp_set and cid not in id_to_comp:
+            if cid is not None and cid in selected_comp_set and cid not in id_to_comp:
                 id_to_comp[cid] = c
         ordered_comps = [id_to_comp[cid] for cid in selected_companion_ids if cid in id_to_comp]
+    else:
+        # No selection → fill all companions
+        ordered_comps = list(companions)
 
-        for i, row in enumerate(companion_rows):
-            if i < len(ordered_comps):
-                c = ordered_comps[i]
-                ws.cell(row=row, column=2).value = c.get("full_name", "")
+    for i, row in enumerate(companion_rows):
+        if i < len(ordered_comps):
+            c = ordered_comps[i]
+            ws.cell(row=row, column=2).value = c.get("full_name", "")
 
 
 # ── collect all referee IDs from matches ──────────────────────────────────────
