@@ -443,8 +443,8 @@ def _fill_regular_team_squad(
                 id_to_player[pid] = p
         ordered_players = [id_to_player[pid] for pid in selected_player_ids if pid in id_to_player]
     else:
-        # No selection → fill all roster players (like BeachNewMatchScreen shows all)
-        ordered_players = list(roster)
+        # No selection → fill all in-squad roster players (like BeachNewMatchScreen shows all)
+        ordered_players = [p for p in roster if p.get("in_squad", True)]
 
     for i, row in enumerate(player_rows):
         if i < len(ordered_players):
