@@ -1087,7 +1087,10 @@ def _parse_player_row(
         transfer_ctx["is_transferred"]
         or any("z=dopisz2" in href or "z=usun2" in href for href in status_links)
         or status_bg == "#ffff00"
-    )   
+    )
+
+    # Green bgcolor = player is added to squad (checkbox checked + "Usuń" link)
+    in_squad = status_bg == "#00ff00"
 
     return {
         "player_id": player_id,
@@ -1102,6 +1105,7 @@ def _parse_player_row(
         "zprp_license_number": license_number,
         "zprp_license_valid_for_season": license_valid,
         "is_transferred": is_transferred,
+        "in_squad": in_squad,
         "parent_club_name": transfer_ctx["parent_club_name"],
         "loan_to_club_name": transfer_ctx["loan_to_club_name"],
         "other_team_url": other_team_url,
