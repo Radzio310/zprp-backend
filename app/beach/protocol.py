@@ -36,6 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Path as ApiPath, Query
 from fastapi.responses import FileResponse
 from openpyxl import load_workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 from sqlalchemy import select
 from starlette.background import BackgroundTask
@@ -181,6 +183,32 @@ def _format_player_name(last_name: str, first_name: str) -> str:
 
 def _safe_filename(s: str, max_len: int = 40) -> str:
     return "".join(c if c.isalnum() or c in " _-" else "_" for c in s)[:max_len].strip("_") or "protokol"
+
+
+def _strikethrough_empty_rows(
+    ws,
+    rows: List[int],
+    filled_count: int,
+    *,
+    is_companion: bool = False,
+) -> None:
+    """Merge and strikethrough empty rows.
+
+    Players:    merge A..H, draw a horizontal line.
+    Companions: merge B..H, draw a horizontal line.
+    """
+    strike_font = Font(strikethrough=True, size=11)
+    start_col = 2 if is_companion else 1  # B for companions, A for players
+    end_col = 8  # H
+
+    for idx in range(filled_count, len(rows)):
+        row = rows[idx]
+        start_letter = get_column_letter(start_col)
+        end_letter = get_column_letter(end_col)
+        ws.merge_cells(f"{start_letter}{row}:{end_letter}{row}")
+        cell = ws.cell(row=row, column=start_col)
+        cell.value = "  "
+        cell.font = strike_font
 
 
 def _match_sort_key(m: Dict[str, Any]) -> tuple:
@@ -382,6 +410,7 @@ def _fill_custom_team_squad(
             ws.cell(row=row, column=2).value = _format_player_name(
                 p.get("lastName", ""), p.get("firstName", "")
             )
+    _strikethrough_empty_rows(ws, player_rows, len(selected))
 
     # Companions: filter by defaultCompanions selection
     all_companions = ct.get("companions") or []
@@ -397,6 +426,7 @@ def _fill_custom_team_squad(
             ln = (c.get("lastName") or "").strip()
             fn = (c.get("firstName") or "").strip()
             ws.cell(row=row, column=2).value = f"{ln} {fn}".strip()
+    _strikethrough_empty_rows(ws, companion_rows, len(selected_comp), is_companion=True)
 
 
 def _fill_regular_team_squad(
@@ -455,6 +485,7 @@ def _fill_regular_team_squad(
             ws.cell(row=row, column=2).value = _format_player_name(
                 p.get("last_name", ""), p.get("first_name", "")
             )
+    _strikethrough_empty_rows(ws, player_rows, len(ordered_players))
 
     # ── Companions ──
     if selected_companion_ids:
@@ -473,6 +504,7 @@ def _fill_regular_team_squad(
         if i < len(ordered_comps):
             c = ordered_comps[i]
             ws.cell(row=row, column=2).value = c.get("full_name", "")
+    _strikethrough_empty_rows(ws, companion_rows, len(ordered_comps), is_companion=True)
 
 
 # ── collect all referee IDs from matches ──────────────────────────────────────
