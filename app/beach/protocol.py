@@ -13,15 +13,15 @@ Szablon (app/templates/beach_protocol_template.xlsx):
   B12 – miejsce zawodów (miasto)
   C12 – data (DD.MM.YYYY)
   F12 – godzina meczu
-  Zawodnicy gospodarzy: wiersze 15-26  (A=numer, B=NAZWISKO Imię)
-  Zawodnicy gości:      wiersze 34-45  (A=numer, B=NAZWISKO Imię)
-  Osoby towarzyszące gospodarzy: wiersze 27-30 (B=pełne imię i nazwisko)
-  Osoby towarzyszące gości:      wiersze 46-49 (B=pełne imię i nazwisko)
-  Sędzia boiskowy 1:  B53 (Nazwisko Imię), C53 (miasto)
-  Sędzia boiskowy 2:  B54 (Nazwisko Imię), C54 (miasto)
-  Sekretarz:           B56 (Nazwisko Imię), C56 (miasto)
-  Mierzący czas:       B57 (Nazwisko Imię), C57 (miasto)
-  Sędzia główny:       B59 (Nazwisko Imię), C59 (miasto)
+  Zawodnicy gospodarzy: wiersze 15-30  (A=numer, B=NAZWISKO Imię)  max 16
+  Zawodnicy gości:      wiersze 38-53  (A=numer, B=NAZWISKO Imię)  max 16
+  Osoby towarzyszące gospodarzy: wiersze 31-34 (B=pełne imię i nazwisko)
+  Osoby towarzyszące gości:      wiersze 54-57 (B=pełne imię i nazwisko)
+  Sędzia boiskowy 1:  B61 (Nazwisko Imię), C61 (miasto)
+  Sędzia boiskowy 2:  B62 (Nazwisko Imię), C62 (miasto)
+  Sekretarz:           B64 (Nazwisko Imię), C64 (miasto)
+  Mierzący czas:       B65 (Nazwisko Imię), C65 (miasto)
+  Sędzia główny/delegat: B67 (Nazwisko Imię), C67 (miasto)
 """
 import json as _json
 import logging
@@ -66,11 +66,11 @@ CATEGORY_CELL: Dict[Tuple[str, str], str] = {
     ("Młodzik", "K"):      "P8",
 }
 
-# ── host player rows 15-26, guest 34-45 ──
-HOST_PLAYER_ROWS = list(range(15, 27))     # 15..26 inclusive (12 slots)
-GUEST_PLAYER_ROWS = list(range(34, 46))    # 34..45 inclusive (12 slots)
-HOST_COMPANION_ROWS = list(range(27, 31))  # 27..30 inclusive (4 slots)
-GUEST_COMPANION_ROWS = list(range(46, 50)) # 46..49 inclusive (4 slots)
+# ── host player rows 15-30, guest 38-53 ──
+HOST_PLAYER_ROWS = list(range(15, 31))     # 15..30 inclusive (16 slots)
+GUEST_PLAYER_ROWS = list(range(38, 54))    # 38..53 inclusive (16 slots)
+HOST_COMPANION_ROWS = list(range(31, 35))  # 31..34 inclusive (4 slots)
+GUEST_COMPANION_ROWS = list(range(54, 58)) # 54..57 inclusive (4 slots)
 
 
 # ── request models ────────────────────────────────────────────────────────────
@@ -287,16 +287,16 @@ def _fill_protocol_sheet(
 
     # ── Referees ──
     referees = match.get("referees") or {}
-    _fill_referee(ws, "B53", "C53", referees.get("fieldA"), user_cities)
-    _fill_referee(ws, "B54", "C54", referees.get("fieldB"), user_cities)
-    _fill_referee(ws, "B56", "C56", referees.get("tableSecretary"), user_cities)
-    _fill_referee(ws, "B57", "C57", referees.get("tableTimer"), user_cities)
+    _fill_referee(ws, "B61", "C61", referees.get("fieldA"), user_cities)
+    _fill_referee(ws, "B62", "C62", referees.get("fieldB"), user_cities)
+    _fill_referee(ws, "B64", "C64", referees.get("tableSecretary"), user_cities)
+    _fill_referee(ws, "B65", "C65", referees.get("tableTimer"), user_cities)
 
-    # ── Head judge ──
+    # ── Head judge / delegat ──
     if head_judge_id and head_judge_id in user_cities:
         name, city = user_cities[head_judge_id]
-        ws["B59"] = _format_name_protocol(name)
-        ws["C59"] = city
+        ws["B67"] = _format_name_protocol(name)
+        ws["C67"] = city
 
 
 def _fill_referee(
