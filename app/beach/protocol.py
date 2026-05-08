@@ -37,6 +37,7 @@ from fastapi import APIRouter, HTTPException, Path as ApiPath, Query
 from fastapi.responses import FileResponse
 from openpyxl import load_workbook
 from openpyxl.styles import Font
+from openpyxl.styles.borders import Border, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -192,23 +193,30 @@ def _strikethrough_empty_rows(
     *,
     is_companion: bool = False,
 ) -> None:
-    """Merge and strikethrough empty rows.
+    """Diagonal cross on empty rows (like results.py _merge_and_diagonal_cross).
 
-    Players:    merge A..H, draw a horizontal line.
-    Companions: merge B..H, draw a horizontal line.
+    Players:    cross cells A..H per row.
+    Companions: cross cells B..H per row.
     """
-    strike_font = Font(strikethrough=True, size=11)
+    thin = Side(style="thin", color="000000")
     start_col = 2 if is_companion else 1  # B for companions, A for players
     end_col = 8  # H
 
     for idx in range(filled_count, len(rows)):
         row = rows[idx]
-        start_letter = get_column_letter(start_col)
-        end_letter = get_column_letter(end_col)
-        ws.merge_cells(f"{start_letter}{row}:{end_letter}{row}")
-        cell = ws.cell(row=row, column=start_col)
-        cell.value = "  "
-        cell.font = strike_font
+        for col in range(start_col, end_col + 1):
+            cell = ws.cell(row=row, column=col)
+            cell.value = ""
+            cur = cell.border or Border()
+            cell.border = Border(
+                left=cur.left,
+                right=cur.right,
+                top=cur.top,
+                bottom=cur.bottom,
+                diagonal=thin,
+                diagonalDown=True,
+                diagonalUp=False,
+            )
 
 
 def _match_sort_key(m: Dict[str, Any]) -> tuple:
