@@ -1567,7 +1567,11 @@ async def patch_team_jersey_overrides(
 
     raw = dict(row).get("jersey_overrides")
     current_overrides: Dict[str, str] = raw if isinstance(raw, dict) else {}
-    current_overrides.update(req.overrides)
+
+    if req.overrides:
+        current_overrides.update(req.overrides)
+    else:
+        current_overrides = {}
 
     await database.execute(
         update(beach_teams)
