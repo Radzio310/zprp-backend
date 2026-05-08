@@ -2001,3 +2001,149 @@ async def sync_single_beach_team_squad_to_local(
             "historical_players": len(squad.get("historical_players") or []),
         },
     }
+
+
+# =========================================================
+# Registration list PDF download (lista zgłoszeniowa)
+# =========================================================
+
+import os
+import shutil
+import tempfile
+import uuid
+import zipfile
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
+
+REGLIST_DOWNLOAD_DIR = "/tmp/beach_reglist_downloads"
+REGLIST_DOWNLOAD_TTL = 10 * 60  # 10 min
+
+
+def _ensure_reglist_dir():
+    os.makedirs(REGLIST_DOWNLOAD_DIR, exist_ok=True)
+
+
+def _cleanup_expired_reglist():
+    try:
+        _ensure_reglist_dir()
+        import time
+        now = time.time()
+        for fn in os.listdir(REGLIST_DOWNLOAD_DIR):
+            p = os.path.join(REGLIST_DOWNLOAD_DIR, fn)
+            if os.path.isfile(p):
+                if now - os.stat(p).st_mtime > REGLIST_DOWNLOAD_TTL:
+                    os.remove(p)
+    except Exception:
+        pass
+
+
+class RegistrationListRequest(BaseModel):
+    team_ids: List[int]
+    season_id: str = "8"
+
+
+@router.post("/registration-list", summary="Pobierz listy zgłoszeniowe drużyn z baza.zprp.pl (PDF)")
+async def generate_registration_list(
+    req: RegistrationListRequest,
+    settings: Settings = Depends(get_settings),
+):
+    if not req.team_ids:
+        raise HTTPException(400, detail="Brak team_ids")
+
+    _cleanup_expired_reglist()
+
+    client = await _login_beach_client(settings)
+    try:
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            pdf_paths: List[Tuple[str, str]] = []  # (local_path, filename)
+
+            for tid in req.team_ids:
+                url = f"/zespolyP_PDF.php?ID_sezonP={req.season_id}&ID_zespol={tid}"
+                resp = await client.get(url, cookies=client.cookies)
+                if resp.status_code != 200:
+                    logger.warning("Registration list download failed for team %d: HTTP %d", tid, resp.status_code)
+                    continue
+
+                # Resolve team name for filename
+                row = await database.fetch_one(
+                    select(beach_teams.c.team_name).where(beach_teams.c.id == tid)
+                )
+                team_name = row["team_name"] if row else str(tid)
+                safe_name = re.sub(r"[^\w\s\-]", "", team_name).strip().replace(" ", "_")[:50]
+                fname = f"lista_zgloszeniowa_{safe_name}_{tid}.pdf"
+
+                local_path = os.path.join(tmp_dir, fname)
+                with open(local_path, "wb") as f:
+                    f.write(resp.content)
+                pdf_paths.append((local_path, fname))
+
+            if not pdf_paths:
+                raise HTTPException(404, detail="Nie udało się pobrać żadnej listy zgłoszeniowej")
+
+            _ensure_reglist_dir()
+            token = str(uuid.uuid4())
+
+            if len(pdf_paths) == 1:
+                # Single PDF — serve directly
+                ext = "pdf"
+                download_path = os.path.join(REGLIST_DOWNLOAD_DIR, f"{token}.{ext}")
+                shutil.copyfile(pdf_paths[0][0], download_path)
+                filename = pdf_paths[0][1]
+            else:
+                # Multiple — ZIP
+                ext = "zip"
+                zip_name = f"listy_zgloszeniowe_{len(pdf_paths)}_druzyn.zip"
+                zip_path = os.path.join(tmp_dir, zip_name)
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for fpath, fname in pdf_paths:
+                        zf.write(fpath, fname)
+                download_path = os.path.join(REGLIST_DOWNLOAD_DIR, f"{token}.{ext}")
+                shutil.copyfile(zip_path, download_path)
+                filename = zip_name
+
+            from urllib.parse import quote
+            return {
+                "success": True,
+                "download_url": f"/beach/teams/registration-list/download/{token}?filename={quote(filename)}&ext={ext}",
+                "filename": filename,
+                "count": len(pdf_paths),
+            }
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    finally:
+        await client.aclose()
+
+
+@router.get(
+    "/registration-list/download/{token}",
+    summary="Pobierz wygenerowaną listę zgłoszeniową (PDF lub ZIP)",
+)
+async def download_registration_list(
+    token: str,
+    filename: str = Query("lista_zgloszeniowa.pdf"),
+    ext: str = Query("pdf"),
+):
+    _ensure_reglist_dir()
+    try:
+        uuid.UUID(token)
+    except ValueError:
+        raise HTTPException(400, "Nieprawidłowy token")
+
+    if ext not in ("pdf", "zip"):
+        ext = "pdf"
+
+    file_path = os.path.join(REGLIST_DOWNLOAD_DIR, f"{token}.{ext}")
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "Plik wygasł lub nie istnieje")
+
+    media_types = {"pdf": "application/pdf", "zip": "application/zip"}
+
+    return FileResponse(
+        path=file_path,
+        media_type=media_types.get(ext, "application/octet-stream"),
+        filename=filename,
+        background=BackgroundTask(
+            lambda: os.remove(file_path) if os.path.exists(file_path) else None
+        ),
+    )
