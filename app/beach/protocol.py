@@ -193,30 +193,39 @@ def _strikethrough_empty_rows(
     *,
     is_companion: bool = False,
 ) -> None:
-    """Diagonal cross on empty rows (like results.py _merge_and_diagonal_cross).
+    """Diagonal cross on empty rows.
 
-    Players:    cross cells A..H per row.
-    Companions: cross cells B..H per row.
+    Col B: dashes "-------------------------------------"
+    Col C: empty (no diagonal)
+    Companions: col D also empty (no diagonal)
+    Remaining cols: diagonal border.
     """
     thin = Side(style="thin", color="000000")
     start_col = 2 if is_companion else 1  # B for companions, A for players
     end_col = 8  # H
+    # Columns that stay empty (no diagonal): C=3, and D=4 only for companions
+    skip_cols = {3, 4} if is_companion else {3}
 
     for idx in range(filled_count, len(rows)):
         row = rows[idx]
         for col in range(start_col, end_col + 1):
             cell = ws.cell(row=row, column=col)
-            cell.value = ""
-            cur = cell.border or Border()
-            cell.border = Border(
-                left=cur.left,
-                right=cur.right,
-                top=cur.top,
-                bottom=cur.bottom,
-                diagonal=thin,
-                diagonalDown=True,
-                diagonalUp=False,
-            )
+            if col == 2:  # B – dashes
+                cell.value = "-------------------------------------"
+            elif col in skip_cols:  # C (and D for companions) – empty
+                cell.value = ""
+            else:  # diagonal cross
+                cell.value = ""
+                cur = cell.border or Border()
+                cell.border = Border(
+                    left=cur.left,
+                    right=cur.right,
+                    top=cur.top,
+                    bottom=cur.bottom,
+                    diagonal=thin,
+                    diagonalDown=True,
+                    diagonalUp=False,
+                )
 
 
 def _match_sort_key(m: Dict[str, Any]) -> tuple:
