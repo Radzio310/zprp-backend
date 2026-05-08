@@ -82,6 +82,7 @@ from app.beach.notifications import cleanup_expired_notifications
 from app.beach.notification_generator import run_notification_generator
 from app.beach.app_settings import router as beach_app_settings_router
 from app.beach.schedule_pdf import router as beach_schedule_pdf_router
+from app.beach.protocol import router as beach_protocol_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -183,6 +184,7 @@ app.include_router(beach_reports_router)
 app.include_router(beach_notifications_router)
 app.include_router(beach_app_settings_router)
 app.include_router(beach_schedule_pdf_router)
+app.include_router(beach_protocol_router)
 
 # NEW: push router
 app.include_router(push_router)
