@@ -817,7 +817,7 @@ async def patch_tournament(
         tour_name = row_d.get("name", "Turniej")
         _ev = row_d.get("event_date")
         _end = row_d.get("end_date")
-        _loc = (row_d.get("location") or "").strip()
+        _loc = (row_d.get("location") or "").strip().split("|", 1)[0].strip()
         _cat = (row_d.get("category") or "").strip()
         _date_from = str(_ev)[:10] if _ev else ""
         _date_to = str(_end)[:10] if _end else ""
@@ -1006,7 +1006,7 @@ async def judge_update_tournament(
         if newly_assigned:
             tour_name = existing_d.get("name", "Turniej")
             _ev2 = existing_d.get("event_date")
-            _loc2 = (existing_d.get("location") or "").strip()
+            _loc2 = (existing_d.get("location") or "").strip().split("|", 1)[0].strip()
             _date2 = str(_ev2)[:10] if _ev2 else ""
             _body_j = f"🏆 {tour_name}"
             if _date2:

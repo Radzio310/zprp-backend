@@ -69,6 +69,51 @@ def _normalize_event_data(raw: Any) -> dict:
         return {}
 
 
+def _get_effective_start_dt(data: dict, event_date: datetime) -> datetime:
+    """Return the effective tournament start datetime for 24h reminder scheduling.
+
+    Priority:
+    1. startTime of the earliest match on day 0 from the generated schedule
+       (interpreted as Polish local time: CEST=UTC+2 in summer, CET=UTC+1 in winter)
+    2. Fallback: event_date date at 08:00 UTC (≈09/10 AM Polish time)
+    """
+    schedule = data.get("schedule") or {}
+    matches = schedule.get("matches") or []
+    config = schedule.get("config") or {}
+    days_cfg = config.get("days") or []
+
+    day0_matches = [
+        m for m in matches
+        if (m.get("dayIndex") or 0) == 0 and m.get("startTime")
+    ]
+
+    if day0_matches and days_cfg:
+        day0_matches.sort(key=lambda m: m.get("startTime", "99:99"))
+        first_time_str = day0_matches[0].get("startTime", "")
+        day0_date_str = days_cfg[0].get("date") if days_cfg else None
+
+        if day0_date_str and first_time_str and ":" in first_time_str:
+            try:
+                hh, mm = first_time_str.split(":")
+                month = int(day0_date_str[5:7])
+                utc_offset = 2 if 3 <= month <= 10 else 1  # CEST vs CET
+                tz = timezone(timedelta(hours=utc_offset))
+                naive = datetime(
+                    int(day0_date_str[:4]),
+                    int(day0_date_str[5:7]),
+                    int(day0_date_str[8:10]),
+                    int(hh),
+                    int(mm),
+                )
+                return naive.replace(tzinfo=tz).astimezone(timezone.utc)
+            except Exception:
+                pass
+
+    # Fallback: event_date date at 08:00 UTC
+    d = event_date.date()
+    return datetime(d.year, d.month, d.day, 8, 0, 0, tzinfo=timezone.utc)
+
+
 async def _generate_tournament_reminders():
     """Generate participant reminders (24h, 5h) and general reminders (5h for non-participants)."""
     now = datetime.now(timezone.utc)
@@ -105,14 +150,15 @@ async def _generate_tournament_reminders():
         if event_date.tzinfo is None:
             event_date = event_date.replace(tzinfo=timezone.utc)
 
-        delta = (event_date - now).total_seconds() / 3600  # hours until event
-
         data = _normalize_event_data(r_d["data_json"])
         invited = data.get("invited_ids") or []
         target_ids = [int(uid) for uid in invited if uid is not None]
 
+        effective_start_dt = _get_effective_start_dt(data, event_date)
+        delta = (effective_start_dt - now).total_seconds() / 3600  # hours until effective start
+
         tour_name = r_d.get("name", "Turniej")
-        location = (r_d.get("location") or "").strip()
+        location = (r_d.get("location") or "").strip().split("|", 1)[0].strip()
         category = (r_d.get("category") or "").strip()
         competition_type = (r_d.get("competition_type") or "").strip()
 
