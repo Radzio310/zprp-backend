@@ -1187,13 +1187,13 @@ async def _fill_completed_protocol_sheet(
 
     sig_mapping = [
         # (key, anchor, max_w, max_h, offset_x_px, offset_y_px)
-        ("hostTeamSignature",   "B35", 120, 50, 90, -25),
-        ("guestTeamSignature",  "B58", 120, 50, 90, -25),
-        ("fieldASignature",     "F61",  90, 35, 25, -15),
-        ("fieldBSignature",     "F62",  90, 35, 25, -15),
-        ("tableSigSignature",   "F64",  90, 35, 25, -15),
-        ("tableTimerSignature", "F65",  90, 35, 25, -15),
-        ("headJudgeSignature",  "F67",  90, 35, 25, -15),
+        ("hostTeamSignature",   "B35", 120, 50, 90, -15),
+        ("guestTeamSignature",  "B58", 120, 50, 90, -15),
+        ("fieldASignature",     "F61",  90, 35, 25, -10),
+        ("fieldBSignature",     "F62",  90, 35, 25, -10),
+        ("tableSigSignature",   "F64",  90, 35, 25, -10),
+        ("tableTimerSignature", "F65",  90, 35, 25, -10),
+        ("headJudgeSignature",  "F67",  90, 35, 25, -10),
     ]
 
     for sig_key, anchor, max_w, max_h, off_x, off_y in sig_mapping:
