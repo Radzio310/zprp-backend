@@ -455,8 +455,19 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         for m in g_matches:
             by_day[m.get("dayIndex", 0)].append(m)
 
+        def _match_num_sort_key(x: Dict[str, Any]):
+            mn = x.get("matchNumber") or ""
+            # Extract trailing number after last '/'
+            parts = mn.rsplit("/", 1)
+            try:
+                num = int(parts[-1])
+            except (ValueError, IndexError):
+                num = 999999
+            prefix = parts[0] if len(parts) > 1 else ""
+            return (prefix, num, x.get("order", 0))
+
         for di in sorted(by_day.keys()):
-            day_matches = sorted(by_day[di], key=lambda x: (x.get("matchNumber") or "ZZZ", x.get("order", 0)))
+            day_matches = sorted(by_day[di], key=_match_num_sort_key)
             day_cfg = days[di] if di < len(days) else {}
             day_date = day_cfg.get("date", "")
             if day_date and len(day_date) >= 10:
