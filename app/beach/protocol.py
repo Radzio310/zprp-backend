@@ -1187,12 +1187,13 @@ async def _fill_completed_protocol_sheet(
 
     sig_mapping = [
         # (key, anchor, max_w, max_h, offset_x_px, offset_y_px)
-        ("hostTeamSignature",   "B35", 120, 50, 50, -4),
-        ("guestTeamSignature",  "B58", 120, 50, 50, -4),
-        ("fieldASignature",     "F61",  90, 35, 10, -3),
-        ("fieldBSignature",     "F62",  90, 35, 10, -3),
-        ("tableSigSignature",   "F64",  90, 35, 10, -3),
-        ("tableTimerSignature", "F65",  90, 35, 10, -3),
+        ("hostTeamSignature",   "B35", 120, 50, 90, -25),
+        ("guestTeamSignature",  "B58", 120, 50, 90, -25),
+        ("fieldASignature",     "F61",  90, 35, 25, -15),
+        ("fieldBSignature",     "F62",  90, 35, 25, -15),
+        ("tableSigSignature",   "F64",  90, 35, 25, -15),
+        ("tableTimerSignature", "F65",  90, 35, 25, -15),
+        ("headJudgeSignature",  "F67",  90, 35, 25, -15),
     ]
 
     for sig_key, anchor, max_w, max_h, off_x, off_y in sig_mapping:
@@ -1202,9 +1203,6 @@ async def _fill_completed_protocol_sheet(
             _add_signature_image(ws, image_bytes=img_bytes, anchor_cell=anchor,
                                  max_width_px=max_w, max_height_px=max_h,
                                  offset_x_px=off_x, offset_y_px=off_y)
-
-    # Head judge signature (F67) — check if headJudge has a signature
-    # Head judge is not in the standard signatures dict; skip if not present
 
 
 async def _generate_filled_protocol(
