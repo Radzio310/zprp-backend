@@ -139,15 +139,14 @@
     width: 48%;
     border: 0.5pt solid #ddd;
     border-radius: 4pt;
-    padding: 4pt 6pt;
+    padding: 5pt 7pt;
     font-size: 8pt;
-    page-break-inside: avoid;
   }
   .match-card .mc-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 2pt;
+    margin-bottom: 3pt;
   }
   .match-card .mc-time {
     font-weight: 800;
@@ -164,32 +163,38 @@
     padding: 1pt 4pt;
     border-radius: 2pt;
   }
-  .match-card .mc-teams {
+  .match-card .mc-team-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 4pt;
+    padding: 1.5pt 0;
   }
-  .match-card .mc-team {
+  .match-card .mc-team-name {
     flex: 1;
     font-size: 8pt;
     font-weight: 600;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    padding-right: 4pt;
   }
-  .match-card .mc-team.winner { font-weight: 900; color: {{ accent }}; }
-  .match-card .mc-score {
+  .match-card .mc-team-row.winner .mc-team-name {
+    font-weight: 900;
+    color: {{ accent }};
+  }
+  .match-card .mc-team-score {
     font-weight: 900;
     font-size: 9pt;
     color: #333;
-    white-space: nowrap;
-    padding: 0 4pt;
+    min-width: 14pt;
+    text-align: right;
+  }
+  .match-card .mc-team-row.winner .mc-team-score {
+    color: {{ accent }};
   }
   .match-card .mc-sets {
     font-size: 7pt;
     color: #888;
-    text-align: center;
     margin-top: 1pt;
   }
 
@@ -412,15 +417,18 @@
 <div class="section-desc">Mecze o 3., 5. i 7. miejsce.</div>
 <div class="matches-grid">
 {% for pm in gs.placement_matches %}
-<div class="match-card no-break">
+<div class="match-card">
   <div class="mc-header">
     <span class="mc-time">{{ pm.time or "" }}</span>
     <span class="mc-stage">{{ pm.stage_label }}</span>
   </div>
-  <div class="mc-teams">
-    <span class="mc-team{% if pm.winner == 'A' %} winner{% endif %}">{{ pm.team_a }}</span>
-    <span class="mc-score">{{ pm.score_display }}</span>
-    <span class="mc-team{% if pm.winner == 'B' %} winner{% endif %}" style="text-align: right;">{{ pm.team_b }}</span>
+  <div class="mc-team-row{% if pm.winner == 'A' %} winner{% endif %}">
+    <span class="mc-team-name">{{ pm.team_a }}</span>
+    <span class="mc-team-score">{{ pm.score_a if pm.score_a is not none else "" }}</span>
+  </div>
+  <div class="mc-team-row{% if pm.winner == 'B' %} winner{% endif %}">
+    <span class="mc-team-name">{{ pm.team_b }}</span>
+    <span class="mc-team-score">{{ pm.score_b if pm.score_b is not none else "" }}</span>
   </div>
   {% if pm.sets_display %}<div class="mc-sets">{{ pm.sets_display }}</div>{% endif %}
 </div>
@@ -439,15 +447,18 @@
 {% endif %}
 <div class="matches-grid">
 {% for mc in day.matches %}
-<div class="match-card no-break">
+<div class="match-card">
   <div class="mc-header">
     <span class="mc-time">{{ mc.time or "" }}</span>
     {% if mc.stage_label %}<span class="mc-stage">{{ mc.stage_label }}</span>{% endif %}
   </div>
-  <div class="mc-teams">
-    <span class="mc-team{% if mc.winner == 'A' %} winner{% endif %}">{{ mc.team_a }}</span>
-    <span class="mc-score">{{ mc.score_display }}</span>
-    <span class="mc-team{% if mc.winner == 'B' %} winner{% endif %}" style="text-align: right;">{{ mc.team_b }}</span>
+  <div class="mc-team-row{% if mc.winner == 'A' %} winner{% endif %}">
+    <span class="mc-team-name">{{ mc.team_a }}</span>
+    <span class="mc-team-score">{{ mc.score_a if mc.score_a is not none else "" }}</span>
+  </div>
+  <div class="mc-team-row{% if mc.winner == 'B' %} winner{% endif %}">
+    <span class="mc-team-name">{{ mc.team_b }}</span>
+    <span class="mc-team-score">{{ mc.score_b if mc.score_b is not none else "" }}</span>
   </div>
   {% if mc.sets_display %}<div class="mc-sets">{{ mc.sets_display }}</div>{% endif %}
 </div>
@@ -458,7 +469,7 @@
 
 <!-- ── Standings / Points ── -->
 {% if gs.standings %}
-<div class="section-title">Punktacja ligowa</div>
+<div class="section-title">Punktacja turniejowa</div>
 <div class="section-desc">
   {% if gs.standings_is_multi_tournament %}
   Aktualny ranking po {{ gs.standings_tournament_count }} turniejach. W nawiasie punkty zdobyte w tym turnieju.

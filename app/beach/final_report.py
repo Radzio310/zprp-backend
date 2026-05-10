@@ -16,9 +16,10 @@ import tempfile
 import urllib.parse
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -178,11 +179,9 @@ def _compute_group_table(
     matches: List[Dict[str, Any]],
     advancing_count: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Compute group/round-robin standings from match results."""
+    """Compute group/round-robin standings from match results.
+    Scoring: Win = 2 pts, Loss = 0 pts (matches ResultsView.tsx)."""
     teams: Dict[int, Dict[str, Any]] = {}
-
-    # Scoring: 2:0 win=3pts, 2:1 win=2pts, 1:2 loss=1pt, 0:2 loss=0pts
-    PTS = {(2, 0): (3, 0), (2, 1): (2, 1), (1, 2): (1, 2), (0, 2): (0, 3)}
 
     for m in matches:
         ta, tb = m.get("teamA"), m.get("teamB")
@@ -206,14 +205,13 @@ def _compute_group_table(
         teams[aid]["played"] += 1
         teams[bid]["played"] += 1
 
-        pts_a, pts_b = PTS.get((sa, sb), (0, 0))
-        teams[aid]["pts"] += pts_a
-        teams[bid]["pts"] += pts_b
-
+        # Win = 2 pts, Loss = 0 pts
         if sa > sb:
+            teams[aid]["pts"] += 2
             teams[aid]["won"] += 1
             teams[bid]["lost"] += 1
         else:
+            teams[bid]["pts"] += 2
             teams[bid]["won"] += 1
             teams[aid]["lost"] += 1
 
@@ -306,6 +304,8 @@ def _build_placement_matches(
             result.append({
                 "team_a": _team_name(m.get("teamA")),
                 "team_b": _team_name(m.get("teamB")),
+                "score_a": m.get("scoreA"),
+                "score_b": m.get("scoreB"),
                 "score_display": _score_display(m),
                 "sets_display": _sets_display(m),
                 "winner": w,
@@ -471,6 +471,8 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                     "time": m.get("startTime", ""),
                     "team_a": _team_name(m.get("teamA")),
                     "team_b": _team_name(m.get("teamB")),
+                    "score_a": m.get("scoreA"),
+                    "score_b": m.get("scoreB"),
                     "score_display": _score_display(m),
                     "sets_display": _sets_display(m),
                     "winner": w,
@@ -481,13 +483,20 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         # ── Standings ──
         sd = standings_by_gender.get(gender)
         if sd and sd.rows:
-            gs["standings"] = [r.dict() for r in sd.rows]
+            gs["standings"] = [
+                {
+                    **r.dict(),
+                    "total_points": int(r.total_points),
+                    "tournament_points": int(r.tournament_points) if r.tournament_points is not None else None,
+                }
+                for r in sd.rows
+            ]
             gs["standings_is_multi_tournament"] = sd.tournament_count > 1
             gs["standings_tournament_count"] = sd.tournament_count
 
         gender_sections.append(gs)
 
-    now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    now = datetime.now(ZoneInfo("Europe/Warsaw")).strftime("%d.%m.%Y %H:%M")
 
     return {
         "tournament_name": req.tournament_name.strip() or "Turniej",
