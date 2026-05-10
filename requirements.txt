@@ -28,3 +28,5 @@ Pillow==10.4.0
 reportlab==4.2.2
 cairosvg
 passlib[argon2]>=1.7.4
+weasyprint
+Jinja2
