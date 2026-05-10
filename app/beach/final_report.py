@@ -456,7 +456,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             by_day[m.get("dayIndex", 0)].append(m)
 
         for di in sorted(by_day.keys()):
-            day_matches = sorted(by_day[di], key=lambda x: (x.get("startTime") or "99:99", x.get("order", 0)))
+            day_matches = sorted(by_day[di], key=lambda x: (x.get("matchNumber") or "ZZZ", x.get("order", 0)))
             day_cfg = days[di] if di < len(days) else {}
             day_date = day_cfg.get("date", "")
             if day_date and len(day_date) >= 10:
