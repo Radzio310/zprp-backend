@@ -330,6 +330,13 @@ async def patch_verification(
     # Notify the applicant about the decision
     applicant_id = int(ver["user_id"])
     role_label = {"judge": "sędzia", "coach": "trener", "player": "zawodnik"}.get(ver["role"], ver["role"])
+
+    # Fetch user name for admin notification
+    name_row = await database.fetch_one(
+        select(beach_users.c.full_name).where(beach_users.c.id == applicant_id)
+    )
+    user_name = name_row["full_name"] if name_row else f"Użytkownik #{applicant_id}"
+
     if req.status == "approved":
         asyncio.ensure_future(create_notification(
             notif_type="verification_approved",
@@ -337,6 +344,14 @@ async def patch_verification(
             body=f"Twój wniosek o rolę {role_label} został zatwierdzony. Witaj w drużynie!",
             data={"role": ver["role"], "verification_id": request_id},
             target_user_ids=[applicant_id],
+        ))
+        # Notify all admins about successful verification
+        asyncio.ensure_future(notify_admins(
+            notif_type="admin_verification_approved",
+            title="✅ Weryfikacja zakończona",
+            body=f"👤 {user_name}\nRola: {role_label} — zweryfikowano pomyślnie.",
+            data={"verification_id": request_id, "user_id": applicant_id, "role": ver["role"]},
+            exclude_user_id=admin_user_id,
         ))
     else:
         note_part = f"\nUwaga admina: {req.admin_note}" if req.admin_note else ""
