@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
-    libgdk-pixbuf2.0-0 \
+    libgdk-pixbuf-2.0-0 \
   && rm -rf /var/lib/apt/lists/*
 
 # ✅ LibreOffice lubi pisać cache/config w HOME – ustawiamy na /tmp (bez wpływu na serwer)
