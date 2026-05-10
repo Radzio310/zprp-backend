@@ -154,6 +154,49 @@ async def notify_admins(
         logger.error(f"notify_admins error ({notif_type}): {e}")
 
 
+# ──────────── Broadcast notification to all users ────────────
+
+class BroadcastRequest(BaseModel):
+    title: str
+    body: str
+
+
+@router.post("/broadcast")
+async def broadcast_notification(
+    req: BroadcastRequest,
+    user_id: int = Depends(beach_get_current_user_id),
+):
+    """
+    Send a push + in-app notification to ALL beach users.
+    Only admins can call this.
+    """
+    # Verify admin
+    admin_row = await database.fetch_one(
+        select(beach_admins.c.user_id).where(beach_admins.c.user_id == user_id)
+    )
+    if not admin_row:
+        raise HTTPException(status_code=403, detail="Brak uprawnień administratora")
+
+    if not req.title.strip() or not req.body.strip():
+        raise HTTPException(status_code=400, detail="Tytuł i treść są wymagane")
+
+    # Get ALL user IDs
+    rows = await database.fetch_all(select(beach_users.c.id))
+    all_user_ids = [int(r["id"]) for r in rows]
+    if not all_user_ids:
+        return {"ok": True, "sent_to": 0}
+
+    await create_notification(
+        notif_type="admin_broadcast",
+        title=req.title.strip(),
+        body=req.body.strip(),
+        data={"sender_id": user_id},
+        target_user_ids=all_user_ids,
+    )
+
+    return {"ok": True, "sent_to": len(all_user_ids)}
+
+
 # ──────────── Helper: _schedule_push_for_users ────────────
 
 async def _schedule_push_for_users(
