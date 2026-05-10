@@ -307,7 +307,9 @@ def _build_placement_matches(
                 "score_a": m.get("scoreA"),
                 "score_b": m.get("scoreB"),
                 "score_display": _score_display(m),
-                "sets_display": _sets_display(m),
+                "sets": m.get("sets") or [],
+                "shootout": m.get("shootout"),
+                "match_number": m.get("matchNumber", ""),
                 "winner": w,
                 "stage_label": STAGE_LABELS.get(m.get("stage", ""), ""),
                 "time": m.get("startTime", ""),
@@ -469,12 +471,14 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 w = _winner(m)
                 cards.append({
                     "time": m.get("startTime", ""),
+                    "match_number": m.get("matchNumber", ""),
                     "team_a": _team_name(m.get("teamA")),
                     "team_b": _team_name(m.get("teamB")),
                     "score_a": m.get("scoreA"),
                     "score_b": m.get("scoreB"),
                     "score_display": _score_display(m),
-                    "sets_display": _sets_display(m),
+                    "sets": m.get("sets") or [],
+                    "shootout": m.get("shootout"),
                     "winner": w,
                     "stage_label": _stage_label(m) if mode != "roundRobin" else "",
                 })
