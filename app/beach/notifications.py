@@ -154,11 +154,12 @@ async def notify_admins(
         logger.error(f"notify_admins error ({notif_type}): {e}")
 
 
-# ──────────── Broadcast notification to all users ────────────
+# ──────────── Broadcast notification to tournament participants ────────────
 
 class BroadcastRequest(BaseModel):
     title: str
     body: str
+    target_user_ids: List[int]
 
 
 @router.post("/broadcast")
@@ -167,8 +168,8 @@ async def broadcast_notification(
     user_id: int = Depends(beach_get_current_user_id),
 ):
     """
-    Send a push + in-app notification to ALL beach users.
-    Only admins can call this.
+    Send a push + in-app notification to specified user IDs.
+    Only admins / hosts can call this.
     """
     # Verify admin
     admin_row = await database.fetch_one(
@@ -180,10 +181,15 @@ async def broadcast_notification(
     if not req.title.strip() or not req.body.strip():
         raise HTTPException(status_code=400, detail="Tytuł i treść są wymagane")
 
-    # Get ALL user IDs
-    rows = await database.fetch_all(select(beach_users.c.id))
-    all_user_ids = [int(r["id"]) for r in rows]
-    if not all_user_ids:
+    if not req.target_user_ids:
+        return {"ok": True, "sent_to": 0}
+
+    # Validate that provided user IDs actually exist
+    rows = await database.fetch_all(
+        select(beach_users.c.id).where(beach_users.c.id.in_(req.target_user_ids))
+    )
+    valid_ids = [int(r["id"]) for r in rows]
+    if not valid_ids:
         return {"ok": True, "sent_to": 0}
 
     await create_notification(
@@ -191,10 +197,10 @@ async def broadcast_notification(
         title=req.title.strip(),
         body=req.body.strip(),
         data={"sender_id": user_id},
-        target_user_ids=all_user_ids,
+        target_user_ids=valid_ids,
     )
 
-    return {"ok": True, "sent_to": len(all_user_ids)}
+    return {"ok": True, "sent_to": len(valid_ids)}
 
 
 # ──────────── Helper: _schedule_push_for_users ────────────
