@@ -124,6 +124,8 @@ def _add_signature_image(
     anchor_cell: str,
     max_width_px: int = 220,
     max_height_px: int = 90,
+    offset_x_px: int = 0,
+    offset_y_px: int = 0,
 ) -> bool:
     if not image_bytes:
         return False
@@ -142,7 +144,29 @@ def _add_signature_image(
     else:
         img.width = min(img.width or max_width_px, max_width_px)
         img.height = min(img.height or max_height_px, max_height_px)
-    ws.add_image(img, anchor_cell)
+
+    if offset_x_px or offset_y_px:
+        from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+        from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+        from openpyxl.utils.units import pixels_to_EMU
+
+        col_letter, row_num = coordinate_from_string(anchor_cell)
+        col_idx = column_index_from_string(col_letter) - 1  # 0-based
+        row_idx = row_num - 1  # 0-based
+
+        marker = AnchorMarker(
+            col=col_idx,
+            colOff=pixels_to_EMU(offset_x_px),
+            row=row_idx,
+            rowOff=pixels_to_EMU(offset_y_px),
+        )
+        anchor = OneCellAnchor(_from=marker, ext=None)
+        anchor.ext.cx = pixels_to_EMU(img.width)
+        anchor.ext.cy = pixels_to_EMU(img.height)
+        img.anchor = anchor
+        ws.add_image(img)
+    else:
+        ws.add_image(img, anchor_cell)
     return True
 
 
@@ -1134,35 +1158,50 @@ async def _fill_completed_protocol_sheet(
                 ws[cells["win"]] = "0:0"
 
     # ── 7. Set 3 (shootout) ──
-    if sets_won_host == 1 and sets_won_guest == 1:
+    shootout_shots = data_json.get("shootoutShots") or []
+    has_set3 = len(shootout_shots) > 0 or len(set_results) >= 3
+    if has_set3:
         _fill_shootout(ws, data_json)
         # Shootout "set result"
-        shootout_shots = data_json.get("shootoutShots") or []
         if shootout_shots:
             host_pts = sum(s.get("result", 0) for s in shootout_shots if s.get("team") == "host")
             guest_pts = sum(s.get("result", 0) for s in shootout_shots if s.get("team") == "guest")
             ws["T56"] = f"{host_pts}:{guest_pts}"
             ws["T57"] = "1:0" if host_pts > guest_pts else "0:1"
+    else:
+        # No 3rd set — cross out shootout table and set-3 result cells
+        _diagonal_cross(ws, "T56")  # set-3 pts
+        _diagonal_cross(ws, "T57")  # set-3 win
+        # Cross out all shootout cells (host rows 59-62, guest rows 64-67, cols K-T)
+        for col in _SHOOTOUT_COLS:
+            for r_key in ("shooter", "gk", "penalty", "pts"):
+                _diagonal_cross_rc(ws, _SHOOTOUT_HOST_ROWS[r_key], col)
+                _diagonal_cross_rc(ws, _SHOOTOUT_GUEST_ROWS[r_key], col)
+        # Cross out totals column U
+        _diagonal_cross(ws, "U59")
+        _diagonal_cross(ws, "U64")
 
     # ── 8. Signatures ──
     extras = match_config.get("extras") or {}
     signatures = extras.get("signatures") or {}
 
     sig_mapping = [
-        ("hostTeamSignature", "B35", 120, 50),
-        ("guestTeamSignature", "B58", 120, 50),
-        ("fieldASignature", "F61", 90, 35),
-        ("fieldBSignature", "F62", 90, 35),
-        ("tableSigSignature", "F64", 90, 35),
-        ("tableTimerSignature", "F65", 90, 35),
+        # (key, anchor, max_w, max_h, offset_x_px, offset_y_px)
+        ("hostTeamSignature",   "B35", 120, 50, 50, -4),
+        ("guestTeamSignature",  "B58", 120, 50, 50, -4),
+        ("fieldASignature",     "F61",  90, 35, 10, -3),
+        ("fieldBSignature",     "F62",  90, 35, 10, -3),
+        ("tableSigSignature",   "F64",  90, 35, 10, -3),
+        ("tableTimerSignature", "F65",  90, 35, 10, -3),
     ]
 
-    for sig_key, anchor, max_w, max_h in sig_mapping:
+    for sig_key, anchor, max_w, max_h, off_x, off_y in sig_mapping:
         url = _full_static_url(signatures.get(sig_key) or "")
         if url:
             img_bytes = await _fetch_png_bytes(url)
             _add_signature_image(ws, image_bytes=img_bytes, anchor_cell=anchor,
-                                 max_width_px=max_w, max_height_px=max_h)
+                                 max_width_px=max_w, max_height_px=max_h,
+                                 offset_x_px=off_x, offset_y_px=off_y)
 
     # Head judge signature (F67) — check if headJudge has a signature
     # Head judge is not in the standard signatures dict; skip if not present
