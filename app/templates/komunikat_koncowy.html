@@ -409,6 +409,41 @@
 {% endfor %}
 {% endif %}
 
+<!-- ── Standings (round-robin: show right after table) ── -->
+{% if gs.standings and gs.mode == "roundRobin" %}
+<div class="section-title">Punktacja turniejowa</div>
+<div class="section-desc">
+  {% if gs.standings_is_multi_tournament %}
+  Aktualny ranking po {{ gs.standings_tournament_count }} turniejach. W nawiasie punkty zdobyte w tym turnieju.
+  {% else %}
+  Punkty przyznane na podstawie zajętych miejsc w tym turnieju.
+  {% endif %}
+</div>
+<table class="standings-table no-break">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Drużyna</th>
+      <th class="pts-col">Punkty</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for sr in gs.standings %}
+    <tr>
+      <td class="pos">{{ sr.pos }}</td>
+      <td class="team-name">{{ sr.team_name }}</td>
+      <td class="pts">
+        {{ sr.total_points }}
+        {% if sr.tournament_points is not none %}
+        <span class="tour-pts">(+{{ sr.tournament_points }})</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <!-- ── Knockout Bracket ── -->
 {% if gs.bracket_rounds %}
 <div class="section-title">Drabinka pucharowa</div>
@@ -529,8 +564,8 @@
 {% endfor %}
 {% endif %}
 
-<!-- ── Standings / Points ── -->
-{% if gs.standings %}
+<!-- ── Standings / Points (groups+knockout: show after match cards) ── -->
+{% if gs.standings and gs.mode != "roundRobin" %}
 <div class="section-title">Punktacja turniejowa</div>
 <div class="section-desc">
   {% if gs.standings_is_multi_tournament %}
