@@ -286,8 +286,8 @@ def _fill_header(
     ws, *, name: str, dates: str, location: str, day_hdr: str
 ) -> None:
     ws["C2"] = name
-    ws["C3"] = dates
-    ws["C4"] = location
+    ws["C4"] = dates
+    ws["C5"] = location
     ws["E8"] = day_hdr
 
 
