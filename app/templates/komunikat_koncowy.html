@@ -278,6 +278,10 @@
 {% for gs in gender_sections %}
 {% set gc = gs.gender_color %}
 
+{% if multi_gender and not loop.first %}
+<div class="page-break"></div>
+{% endif %}
+
 <div class="gender-header {{ gs.gender }}">
   {{ gs.gender_label }}
 </div>
