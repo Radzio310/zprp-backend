@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.deps import Settings, get_settings, get_rsa_keys
 from app.utils import fetch_with_correct_encoding
+from app.zprp.schedule import _parse_matches_table
 
 router = APIRouter()
 
@@ -796,10 +797,26 @@ async def obsada_schedule_for_assignment(
         _log_html("obsada/schedule page", html)
 
         parsed = _parse_schedule_assignment_info(html)
+        full_matches = _parse_matches_table(html, context_prefix="obsada")
+
+        # Merge: use full match data as base, overlay assignment metadata
+        merged: List[Dict[str, Any]] = []
+        assignment_meta = parsed.get("matches", {})
+
+        for match_id, match_data in full_matches.items():
+            entry = dict(match_data)
+            id_zawody = entry.get("IdZawody", "")
+            if id_zawody and id_zawody in assignment_meta:
+                entry["_assignment"] = assignment_meta[id_zawody]
+            elif match_id in assignment_meta:
+                entry["_assignment"] = assignment_meta[match_id]
+            else:
+                entry["_assignment"] = None
+            merged.append(entry)
 
         return {
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
             "filters": qs,
-            **parsed,
+            "matches": merged,
         }
