@@ -84,6 +84,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
         raise credentials_exception
     return user_login
 
+
+async def get_jwt_payload(token: str = Depends(oauth2_scheme)) -> dict:
+    """
+    Dekoduje JWT i zwraca pełny payload (wszystkie claimy).
+    Jeśli token jest nieważny lub brak pola 'sub' → 401.
+    """
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        if payload.get("sub") is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    return payload
+
 # =====================================================================
 # BEACH (dodatek) — HMAC token auth jak w Twojej innej aplikacji
 # - nie rusza JWT/OAuth2 z BAZA

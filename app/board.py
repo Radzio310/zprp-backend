@@ -11,8 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, insert, update, delete, case
 
-from app.db import database, board_posts, board_tasks, board_members, board_rankings, board_events
-from app.deps import get_current_user
+from app.db import database, board_posts, board_tasks, board_members, board_rankings, board_events, province_judges
+from app.deps import get_current_user, get_jwt_payload
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,42 @@ def _norm_province(p: str) -> str:
 
 def _row_to_dict(row) -> dict:
     return dict(row._mapping)
+
+
+async def _check_board_write_access(province: str, payload: dict) -> None:
+    """Sprawdza czy użytkownik może zapisywać na tablicę danego województwa.
+    Konta org → zawsze tak. Konta judge → wymagany badge 'Komisja' w province_judges."""
+    account_type = payload.get("account_type", "")
+    if account_type == "org":
+        return
+    judge_id = payload.get("judge_id")
+    if not judge_id or account_type != "judge":
+        raise HTTPException(status_code=403, detail="Brak uprawnień do zapisu na tablicę")
+    prov = _norm_province(province)
+    row = await database.fetch_one(
+        select(province_judges).where(
+            province_judges.c.judge_id == str(judge_id),
+            province_judges.c.province == prov,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=403, detail="Brak uprawnień do zapisu na tablicę")
+    badges = (row._mapping.get("badges") or {})
+    if not badges.get("Komisja"):
+        raise HTTPException(status_code=403, detail="Wymagany badge 'Komisja'")
+
+
+@router.get("/access")
+async def check_board_access(
+    province: str = Query(...),
+    payload: dict = Depends(get_jwt_payload),
+):
+    """Zwraca {can_write: bool} — czy bieżący użytkownik może edytować tablicę prowincji."""
+    try:
+        await _check_board_write_access(province, payload)
+        return {"can_write": True}
+    except HTTPException:
+        return {"can_write": False}
 
 # ---------------------------------------------------------------------------
 # ── POSTS ──────────────────────────────────────────────────────────────────
@@ -75,9 +111,10 @@ async def list_posts(
 @router.post("/posts", status_code=201)
 async def create_post(
     body: CreatePostRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
     prov = _norm_province(body.province)
+    await _check_board_write_access(prov, payload)
     stmt = insert(board_posts).values(
         province=prov,
         type=body.type,
@@ -96,8 +133,12 @@ async def create_post(
 async def update_post(
     post_id: int,
     body: UpdatePostRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_posts.c.province).where(board_posts.c.id == post_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Post nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     values: dict[str, Any] = {}
     if body.type is not None:
         values["type"] = body.type
@@ -129,8 +170,12 @@ async def update_post(
 @router.delete("/posts/{post_id}", status_code=204)
 async def delete_post(
     post_id: int,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_posts.c.province).where(board_posts.c.id == post_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Post nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     stmt = delete(board_posts).where(board_posts.c.id == post_id)
     await database.execute(stmt)
 
@@ -142,8 +187,14 @@ class ReorderPostsRequest(BaseModel):
 @router.post("/posts/reorder", status_code=200)
 async def reorder_posts(
     body: ReorderPostsRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    if body.ordered_ids:
+        first = await database.fetch_one(
+            select(board_posts.c.province).where(board_posts.c.id == body.ordered_ids[0])
+        )
+        if first:
+            await _check_board_write_access(first._mapping["province"], payload)
     for idx, post_id in enumerate(body.ordered_ids):
         await database.execute(
             update(board_posts)
@@ -203,9 +254,10 @@ async def list_tasks(
 @router.post("/tasks", status_code=201)
 async def create_task(
     body: CreateTaskRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
     prov = _norm_province(body.province)
+    await _check_board_write_access(prov, payload)
     stmt = insert(board_tasks).values(
         province=prov,
         title=body.title,
@@ -225,8 +277,12 @@ async def create_task(
 async def update_task(
     task_id: int,
     body: UpdateTaskRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_tasks.c.province).where(board_tasks.c.id == task_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Zadanie nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     values: dict[str, Any] = {}
     if body.title is not None:
         values["title"] = body.title
@@ -262,8 +318,12 @@ async def update_task(
 @router.delete("/tasks/{task_id}", status_code=204)
 async def delete_task(
     task_id: int,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_tasks.c.province).where(board_tasks.c.id == task_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Zadanie nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     stmt = delete(board_tasks).where(board_tasks.c.id == task_id)
     await database.execute(stmt)
 
@@ -306,9 +366,10 @@ async def list_members(
 @router.post("/members", status_code=201)
 async def create_member(
     body: CreateMemberRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
     prov = _norm_province(body.province)
+    await _check_board_write_access(prov, payload)
     stmt = insert(board_members).values(
         province=prov,
         name=body.name,
@@ -325,8 +386,12 @@ async def create_member(
 async def update_member(
     member_id: int,
     body: UpdateMemberRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_members.c.province).where(board_members.c.id == member_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Członek nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     values: dict[str, Any] = {}
     if body.name is not None:
         values["name"] = body.name
@@ -356,8 +421,12 @@ async def update_member(
 @router.delete("/members/{member_id}", status_code=204)
 async def delete_member(
     member_id: int,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_members.c.province).where(board_members.c.id == member_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Członek nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     stmt = delete(board_members).where(board_members.c.id == member_id)
     await database.execute(stmt)
 
@@ -401,9 +470,10 @@ async def list_rankings(
 @router.post("/rankings", status_code=201)
 async def create_ranking(
     body: CreateRankingRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
     prov = _norm_province(body.province)
+    await _check_board_write_access(prov, payload)
     rows_data = [r.model_dump() for r in body.rows]
     stmt = insert(board_rankings).values(
         province=prov,
@@ -418,8 +488,12 @@ async def create_ranking(
 async def update_ranking(
     ranking_id: int,
     body: UpdateRankingRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_rankings.c.province).where(board_rankings.c.id == ranking_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Ranking nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     values: dict[str, Any] = {}
     if body.title is not None:
         values["title"] = body.title
@@ -443,8 +517,12 @@ async def update_ranking(
 @router.delete("/rankings/{ranking_id}", status_code=204)
 async def delete_ranking(
     ranking_id: int,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_rankings.c.province).where(board_rankings.c.id == ranking_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Ranking nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     stmt = delete(board_rankings).where(board_rankings.c.id == ranking_id)
     await database.execute(stmt)
 
@@ -499,9 +577,10 @@ async def list_events(
 @router.post("/events", status_code=201)
 async def create_event(
     body: CreateEventRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
     prov = _norm_province(body.province)
+    await _check_board_write_access(prov, payload)
     stmt = insert(board_events).values(
         province=prov,
         title=body.title,
@@ -522,8 +601,12 @@ async def create_event(
 async def update_event(
     event_id: int,
     body: UpdateEventRequest,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_events.c.province).where(board_events.c.id == event_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Wydarzenie nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     values: dict[str, Any] = {}
     for field in ("title", "description", "date", "time_start", "time_end",
                   "location", "priority", "color", "assignee_id"):
@@ -548,7 +631,11 @@ async def update_event(
 @router.delete("/events/{event_id}", status_code=204)
 async def delete_event(
     event_id: int,
-    _user: str = Depends(get_current_user),
+    payload: dict = Depends(get_jwt_payload),
 ):
+    existing = await database.fetch_one(select(board_events.c.province).where(board_events.c.id == event_id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Wydarzenie nie istnieje")
+    await _check_board_write_access(existing._mapping["province"], payload)
     stmt = delete(board_events).where(board_events.c.id == event_id)
     await database.execute(stmt)

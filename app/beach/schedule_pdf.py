@@ -1,34 +1,29 @@
 """
-Generuje PDF terminarza turnieju beach handball z szablonu xlsx.
+Generuje PDF terminarza turnieju beach handball z szablonu HTML.
 
-Szablon (app/templates/szablon_terminarz.xlsx):
-  C2  – nazwa turnieju
-  C3  – daty (np. "14–16.05.2026")
-  C4  – lokalizacja
-  E8  – nagłówek dnia, np. "DZIEŃ I | 14.05.2026 (poniedziałek)"
-  Wiersz 10+ – mecze:
-      A=Godzina, B=Boisko, C=Kategoria, D=Etap/Grupa,
-      E=Drużyna A, F=Drużyna B, G=Wynik
+Używa Jinja2 + WeasyPrint (tak jak komunikat końcowy).
+Automatycznie wybiera orientację:
+  • pionową  (portrait)  — max. 20 meczów dziennie
+  • poziomą  (landscape) — powyżej 20 meczów dziennie
 """
-import copy
+from __future__ import annotations
+
+import base64
+import io
 import logging
 import os
-import re
 import shutil
-import subprocess
 import tempfile
 import urllib.parse
 import uuid
-import zipfile
 from collections import defaultdict
-from datetime import date
-from io import BytesIO
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Path as ApiPath, Query
 from fastapi.responses import FileResponse
-from openpyxl import load_workbook
-from openpyxl.styles import Alignment
 from pydantic import BaseModel
 from sqlalchemy import select
 from starlette.background import BackgroundTask
@@ -39,15 +34,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Beach Schedule PDF"])
 
-TEMPLATE_PATH = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "templates", "szablon_terminarz.xlsx")
-)
-
+TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
+TEMPLATE_NAME = "terminarz.html"
 DOWNLOAD_DIR = "/tmp/schedule_pdf_downloads"
-
-FIRST_MATCH_ROW = 10   # row where first match goes
-TEMPLATE_MATCH_ROWS = 33  # rows 10-42 reserved in template
-MAX_ROWS_PER_SHEET = TEMPLATE_MATCH_ROWS  # matches per sheet before overflow
 
 WEEKDAYS_PL = [
     "poniedziałek", "wtorek", "środa",
@@ -57,6 +46,17 @@ _ROMAN = {
     1: "I", 2: "II", 3: "III", 4: "IV", 5: "V",
     6: "VI", 7: "VII", 8: "VIII", 9: "IX", 10: "X",
 }
+
+CATEGORY_COLORS = {
+    "Senior": "#E85A30",
+    "Junior": "#3A7FBF",
+    "Junior mł.": "#2BA8A0",
+    "Kadet": "#7A5FC7",
+}
+DEFAULT_ACCENT = "#E85A30"
+
+# Matches per day above which landscape is used
+LANDSCAPE_THRESHOLD = 20
 
 
 # ─── request model ────────────────────────────────────────────────────────────
@@ -68,6 +68,7 @@ class SchedulePdfRequest(BaseModel):
     tournament_dates: str = ""  # optional override; computed from days if empty
     tournament_id: Optional[int] = None   # used to look up judge/host emails
     exclude_user_id: Optional[int] = None  # current user — excluded from recipients
+    category: str = ""
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
