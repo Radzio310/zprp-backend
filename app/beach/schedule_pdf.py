@@ -77,6 +77,35 @@ def _roman(n: int) -> str:
     return _ROMAN.get(n, str(n))
 
 
+def _get_accent(category: str) -> str:
+    return CATEGORY_COLORS.get(category, DEFAULT_ACCENT)
+
+
+def _load_logo_b64() -> str:
+    """Load the BAZA Beach logo and return as base64 PNG."""
+    candidates = [
+        TEMPLATE_DIR / "baza_beach_logo.png",
+        TEMPLATE_DIR / "baza_beach.png",
+        Path(__file__).resolve().parent.parent.parent / "baza_beach.png",
+    ]
+    logo_path = next((p for p in candidates if p.exists()), None)
+    if not logo_path:
+        return ""
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(logo_path)
+        img.thumbnail((300, 300), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, "PNG", optimize=True)
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        logger.warning("Could not resize logo: %s — using raw bytes", e)
+        try:
+            return base64.b64encode(logo_path.read_bytes()).decode()
+        except Exception:
+            return ""
+
+
 def _day_header(day_index: int, date_str: Optional[str]) -> str:
     roman = _roman(day_index + 1)
     if date_str:
@@ -84,24 +113,20 @@ def _day_header(day_index: int, date_str: Optional[str]) -> str:
             d = date.fromisoformat(date_str)
             weekday = WEEKDAYS_PL[d.weekday()]
             formatted = d.strftime("%d.%m.%Y")
-            return f"DZIEŃ {roman} | {formatted} ({weekday})"
+            return f"Dzień {roman}  ·  {formatted}  ({weekday})"
         except Exception:
             pass
-    return f"DZIEŃ {roman}"
+    return f"Dzień {roman}"
 
 
 def _compute_date_range(days: List[Dict[str, Any]]) -> str:
     dates = sorted(d.get("date", "") for d in days if d.get("date"))
     if not dates:
         return ""
-    try:
-        d0 = date.fromisoformat(dates[0])
-        d1 = date.fromisoformat(dates[-1])
-        if d0 == d1:
-            return d0.strftime("%d.%m.%Y")
-        return f"{d0.strftime('%d.%m.%Y')} \u2013 {d1.strftime('%d.%m.%Y')}"
-    except Exception:
-        return f"{dates[0]} \u2013 {dates[-1]}" if len(dates) > 1 else dates[0]
+    fmt = lambda iso: f"{iso[8:10]}.{iso[5:7]}.{iso[:4]}" if len(iso) >= 10 else iso
+    if len(dates) == 1:
+        return fmt(dates[0])
+    return f"{fmt(dates[0])}–{fmt(dates[-1])}"
 
 
 def _stage_label(m: Dict[str, Any]) -> str:
@@ -117,6 +142,7 @@ def _stage_label(m: Dict[str, Any]) -> str:
         "fifth_place": "5. miejsce",
         "seventh_place": "7. miejsce",
         "fifth_semifinal": "Półfinał o 5.",
+        "playoff": "Baraż",
     }.get(stage, stage)
 
 
@@ -144,219 +170,75 @@ def _score_str(m: Dict[str, Any]) -> str:
             if isinstance(s, dict)
         ]
         if parts:
-            return f"{base} ({', '.join(parts)})"
+            return f"{base}  ({', '.join(parts)})"
     return base
 
 
-def _ensure_footer_row(ws, footer_row: int) -> None:
-    """
-    After row deletion the footer row may have lost its merge.
-    Re-apply merge A:G and center alignment explicitly.
-    """
-    merge_str = f"A{footer_row}:G{footer_row}"
-    # Remove any conflicting merge that covers this row
-    for existing in list(ws.merged_cells.ranges):
-        if existing.min_row == footer_row:
-            ws.unmerge_cells(str(existing))
-    ws.merge_cells(merge_str)
-    ws[f"A{footer_row}"].alignment = Alignment(
-        horizontal="center", vertical="center", wrapText=True
-    )
+# ─── context builder ──────────────────────────────────────────────────────────
 
+def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
+    schedule = req.schedule
+    matches: List[Dict[str, Any]] = schedule.get("matches") or []
+    config: Dict[str, Any] = schedule.get("config") or {}
+    days_cfg: List[Dict[str, Any]] = config.get("days") or []
 
-def _patch_drawings_into_xlsx(saved_xlsx_path: str, template_path: str) -> None:
-    """
-    openpyxl strips all drawing/media files when it loads and re-saves a workbook.
-    This function re-injects the drawing XML (both images) and media files from the
-    original template into every sheet of the saved file via ZIP surgery.
+    tournament_name = req.tournament_name.strip() or "Turniej"
+    date_range = req.tournament_dates.strip() or _compute_date_range(days_cfg)
+    location = req.tournament_location.strip()
+    accent = _get_accent(req.category)
+    logo_b64 = _load_logo_b64()
 
-    Both images in the template are anchored in the header rows (0-5, 0-indexed)
-    so deleting match rows (row 10+) does not move the anchors.
-    """
-    DRAWING_REL_TYPE = (
-        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
-    )
-    DRAWING_CONTENT_TYPE = (
-        "application/vnd.openxmlformats-officedocument.drawing+xml"
-    )
-    R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-
-    # ── read template drawing + media ──
-    with zipfile.ZipFile(template_path, "r") as zt:
-        tmpl_drawing_xml = zt.read("xl/drawings/drawing1.xml")
-        tmpl_drawing_rels_xml = zt.read("xl/drawings/_rels/drawing1.xml.rels")
-        media_files = {
-            name: zt.read(name)
-            for name in zt.namelist()
-            if name.startswith("xl/media/")
-        }
-
-    # ── read all files from saved workbook ──
-    with zipfile.ZipFile(saved_xlsx_path, "r") as zs:
-        saved_files = {name: zs.read(name) for name in zs.namelist()}
-
-    new_files = dict(saved_files)
-    new_files.update(media_files)
-
-    # ── find all sheet XMLs ──
-    sheet_paths = sorted(
-        name
-        for name in saved_files
-        if re.match(r"xl/worksheets/sheet\d+\.xml$", name)
-    )
-
-    new_drawing_part_names: List[str] = []
-
-    for idx, sheet_path in enumerate(sheet_paths, start=1):
-        drawing_xml_path = f"xl/drawings/drawing{idx}.xml"
-        drawing_rels_path = f"xl/drawings/_rels/drawing{idx}.xml.rels"
-        drawing_target = f"../drawings/drawing{idx}.xml"
-
-        new_files[drawing_xml_path] = tmpl_drawing_xml
-        new_files[drawing_rels_path] = tmpl_drawing_rels_xml
-        new_drawing_part_names.append(f"/xl/drawings/drawing{idx}.xml")
-
-        # ── patch sheet _rels: add drawing relationship ──
-        rels_path = (
-            sheet_path
-            .replace("xl/worksheets/", "xl/worksheets/_rels/")
-            .replace(".xml", ".xml.rels")
-        )
-        rels_xml = saved_files.get(rels_path, b"").decode("utf-8")
-        if not rels_xml:
-            rels_xml = (
-                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                "</Relationships>"
-            )
-
-        # find a free rId (avoid collisions with printerSettings etc.)
-        existing_rids = set(re.findall(r'Id="(rId\d+)"', rels_xml))
-        rid_n = 1
-        while f"rId{rid_n}" in existing_rids:
-            rid_n += 1
-        drawing_rid = f"rId{rid_n}"
-
-        rels_xml = rels_xml.replace(
-            "</Relationships>",
-            f'<Relationship Id="{drawing_rid}" Type="{DRAWING_REL_TYPE}"'
-            f' Target="{drawing_target}"/></Relationships>',
-        )
-        new_files[rels_path] = rels_xml.encode("utf-8")
-
-        # ── patch sheet XML: add <drawing r:id="..."/> before </worksheet> ──
-        sheet_xml = saved_files[sheet_path].decode("utf-8")
-        if "<drawing" not in sheet_xml:
-            # Ensure r: namespace is declared at root (openpyxl usually includes it)
-            if 'xmlns:r=' not in sheet_xml:
-                sheet_xml = sheet_xml.replace(
-                    "<worksheet ",
-                    f'<worksheet xmlns:r="{R_NS}" ',
-                    1,
-                )
-            sheet_xml = sheet_xml.replace(
-                "</worksheet>",
-                f'<drawing r:id="{drawing_rid}"/></worksheet>',
-            )
-        new_files[sheet_path] = sheet_xml.encode("utf-8")
-
-    # ── patch [Content_Types].xml ──
-    ct_xml = saved_files["[Content_Types].xml"].decode("utf-8")
-    if 'Extension="png"' not in ct_xml:
-        ct_xml = ct_xml.replace(
-            "</Types>",
-            '<Default Extension="png" ContentType="image/png"/></Types>',
-        )
-    for part_name in new_drawing_part_names:
-        if part_name not in ct_xml:
-            ct_xml = ct_xml.replace(
-                "</Types>",
-                f'<Override PartName="{part_name}" ContentType="{DRAWING_CONTENT_TYPE}"/></Types>',
-            )
-    new_files["[Content_Types].xml"] = ct_xml.encode("utf-8")
-
-    # ── write patched zip ──
-    tmp_path = saved_xlsx_path + ".patched"
-    with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-        for name, data in new_files.items():
-            zout.writestr(name, data)
-    os.replace(tmp_path, saved_xlsx_path)
-
-
-def _fill_header(
-    ws, *, name: str, dates: str, location: str, day_hdr: str
-) -> None:
-    ws["C2"] = name
-    ws["C4"] = dates
-    ws["C5"] = location
-    ws["E8"] = day_hdr
-
-
-def _fill_match_row(ws, row: int, m: Dict[str, Any]) -> None:
-    ws.cell(row=row, column=1).value = m.get("startTime") or ""   # A – Godzina
-    ws.cell(row=row, column=2).value = m.get("court") or ""        # B – Boisko
-    ws.cell(row=row, column=3).value = _category_label(m)          # C – Kategoria
-    ws.cell(row=row, column=4).value = _stage_label(m)             # D – Etap/Grupa
-    ws.cell(row=row, column=5).value = _team_name(m.get("teamA"))  # E – Drużyna A
-    ws.cell(row=row, column=6).value = _team_name(m.get("teamB"))  # F – Drużyna B
-    ws.cell(row=row, column=7).value = _score_str(m)               # G – Wynik
-
-
-def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
-    """Convert xlsx → pdf using LibreOffice. Returns the pdf path."""
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
-    if not soffice:
-        raise RuntimeError(
-            "Brak LibreOffice (soffice) w środowisku. Doinstaluj libreoffice w Dockerfile."
+    # Group matches by day, sort by time then order
+    by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for m in matches:
+        by_day[int(m.get("dayIndex") or 0)].append(m)
+    for idx in by_day:
+        by_day[idx].sort(
+            key=lambda m: (m.get("startTime") or "99:99", m.get("order") or 0)
         )
 
-    env = os.environ.copy()
-    env.setdefault("HOME", "/tmp")
-    env.setdefault("XDG_CACHE_HOME", "/tmp")
-    env.setdefault("XDG_CONFIG_HOME", "/tmp")
+    day_indices = sorted(by_day.keys()) or [0]
 
-    profile_dir = os.path.join(out_dir, "lo_profile")
-    os.makedirs(profile_dir, exist_ok=True)
+    # Build day sections
+    days_out: List[Dict[str, Any]] = []
+    for day_idx in day_indices:
+        day_matches = by_day.get(day_idx, [])
+        day_cfg_item = days_cfg[day_idx] if day_idx < len(days_cfg) else {}
+        day_label = _day_header(day_idx, day_cfg_item.get("date"))
 
-    cmd = [
-        soffice,
-        "--headless", "--nologo", "--nolockcheck",
-        "--nodefault", "--norestore",
-        f"-env:UserInstallation=file://{profile_dir}",
-        "--convert-to", "pdf",
-        "--outdir", out_dir,
-        xlsx_path,
-    ]
+        match_rows = []
+        for m in day_matches:
+            match_rows.append({
+                "time": m.get("startTime") or "",
+                "court": str(m.get("court") or ""),
+                "category": _category_label(m),
+                "gender": m.get("gender") or "",
+                "stage": _stage_label(m),
+                "team_a": _team_name(m.get("teamA")),
+                "team_b": _team_name(m.get("teamB")),
+                "score": _score_str(m),
+                "match_number": m.get("matchNumber") or "",
+            })
 
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        timeout=90,
-    )
+        days_out.append({"label": day_label, "matches": match_rows})
 
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"LibreOffice convert failed (code={proc.returncode}). "
-            f"stderr={proc.stderr[:500]}"
-        )
+    # Decide portrait vs landscape based on peak matches per day
+    max_day_matches = max((len(d["matches"]) for d in days_out), default=0)
+    use_landscape = max_day_matches > LANDSCAPE_THRESHOLD
 
-    base = os.path.splitext(os.path.basename(xlsx_path))[0]
-    pdf_path = os.path.join(out_dir, base + ".pdf")
+    now = datetime.now(ZoneInfo("Europe/Warsaw")).strftime("%d.%m.%Y %H:%M")
 
-    if not os.path.exists(pdf_path):
-        pdfs = [p for p in os.listdir(out_dir) if p.lower().endswith(".pdf")]
-        if len(pdfs) == 1:
-            pdf_path = os.path.join(out_dir, pdfs[0])
-        elif pdfs:
-            cand = [p for p in pdfs if os.path.splitext(p)[0] == base]
-            pdf_path = os.path.join(out_dir, (cand or pdfs)[0])
-        else:
-            raise RuntimeError("PDF nie znaleziony po konwersji LibreOffice.")
-
-    return pdf_path
+    return {
+        "tournament_name": tournament_name,
+        "date_range": date_range,
+        "location": location,
+        "accent": accent,
+        "logo_b64": logo_b64,
+        "use_landscape": use_landscape,
+        "days": days_out,
+        "generated_at": now,
+        "category": req.category,
+    }
 
 
 # ─── endpoint ─────────────────────────────────────────────────────────────────
@@ -413,114 +295,54 @@ async def _get_judge_host_emails(
         )
         return [r["email"] for r in rows if r["email"]]
     except Exception:
-        logger.warning("Could not fetch judge/host emails for tournament %s", tournament_id, exc_info=True)
+        logger.warning(
+            "Could not fetch judge/host emails for tournament %s",
+            tournament_id,
+            exc_info=True,
+        )
         return []
 
 
 @router.post("/beach/schedule/pdf", summary="Generuj PDF terminarza turnieju")
 async def generate_schedule_pdf(req: SchedulePdfRequest):
-    if not os.path.exists(TEMPLATE_PATH):
-        raise HTTPException(500, detail=f"Brak szablonu terminarza: {TEMPLATE_PATH}")
+    from jinja2 import Environment, FileSystemLoader
+    import weasyprint
 
-    schedule = req.schedule
-    matches: List[Dict[str, Any]] = schedule.get("matches") or []
-    config: Dict[str, Any] = schedule.get("config") or {}
-    days: List[Dict[str, Any]] = config.get("days") or []
+    template_path = TEMPLATE_DIR / TEMPLATE_NAME
+    if not template_path.exists():
+        raise HTTPException(500, detail=f"Brak szablonu terminarza: {TEMPLATE_NAME}")
 
-    tournament_name = req.tournament_name.strip()
-    date_range = req.tournament_dates.strip() or _compute_date_range(days)
-    location = req.tournament_location.strip()
+    ctx = _build_context(req)
 
-    # ── group matches by day, sort by time ──
-    by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    for m in matches:
-        by_day[int(m.get("dayIndex") or 0)].append(m)
-    for idx in by_day:
-        by_day[idx].sort(
-            key=lambda m: (m.get("startTime") or "99:99", m.get("order") or 0)
-        )
+    env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)))
+    template = env.get_template(TEMPLATE_NAME)
+    html_str = template.render(**ctx)
 
-    day_indices = sorted(by_day.keys()) or [0]
-
-    # ── load template ──
-    wb = load_workbook(TEMPLATE_PATH)
-    template_ws = wb.active
-
-    # ── build (day_idx, chunk_idx, total_chunks, match_list) tuples ──
-    all_chunks: List[tuple] = []
-    for day_idx in day_indices:
-        day_matches = by_day.get(day_idx, [])
-        if day_matches:
-            chunks = [
-                day_matches[i: i + MAX_ROWS_PER_SHEET]
-                for i in range(0, len(day_matches), MAX_ROWS_PER_SHEET)
-            ]
-        else:
-            chunks = [[]]  # empty day still gets one sheet
-        for ci, chunk in enumerate(chunks):
-            all_chunks.append((day_idx, ci, len(chunks), chunk))
-
-    # ── create sheets: reuse template_ws as first, copy for the rest ──
-    created: List[tuple] = []  # (ws, day_idx, ci, total, chunk)
-    for i, (day_idx, ci, total, chunk) in enumerate(all_chunks):
-        ws = template_ws if i == 0 else wb.copy_worksheet(template_ws)
-        created.append((ws, day_idx, ci, total, chunk))
-
-    # ── fill sheets ──
-    for ws, day_idx, ci, total, chunk in created:
-        day_cfg = days[day_idx] if day_idx < len(days) else {}
-        day_hdr = _day_header(day_idx, day_cfg.get("date"))
-        if total > 1:
-            day_hdr += f" cz. {ci + 1}"
-
-        roman = _roman(day_idx + 1)
-        ws.title = f"Dzień {roman}" + (f" ({ci + 1})" if total > 1 else "")
-
-        _fill_header(
-            ws,
-            name=tournament_name,
-            dates=date_range,
-            location=location,
-            day_hdr=day_hdr,
-        )
-        # repeat header rows on each printed page
-        ws.print_title_rows = f"1:{FIRST_MATCH_ROW - 1}"
-
-        for row_i, m in enumerate(chunk):
-            _fill_match_row(ws, FIRST_MATCH_ROW + row_i, m)
-
-        # Delete unused empty rows so footer moves up dynamically
-        unused = TEMPLATE_MATCH_ROWS - len(chunk)
-        if unused > 0:
-            ws.delete_rows(FIRST_MATCH_ROW + len(chunk), unused)
-            # Re-apply footer merge + centering (openpyxl may lose it after deletion)
-            _ensure_footer_row(ws, FIRST_MATCH_ROW + len(chunk))
-
-    # ── save xlsx and convert to pdf ──
     tmp_dir = tempfile.mkdtemp()
     try:
-        xlsx_path = os.path.join(tmp_dir, "terminarz.xlsx")
-        wb.save(xlsx_path)
-        # Re-inject drawing + media (openpyxl strips them on load+save)
-        _patch_drawings_into_xlsx(xlsx_path, TEMPLATE_PATH)
-        pdf_path = _convert_xlsx_to_pdf(xlsx_path, tmp_dir)
+        html_path = os.path.join(tmp_dir, "terminarz.html")
+        pdf_path = os.path.join(tmp_dir, "terminarz.pdf")
+
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_str)
+
+        doc = weasyprint.HTML(filename=html_path)
+        doc.write_pdf(pdf_path)
 
         safe_name = (
-            "".join(c if c.isalnum() or c in " _-" else "_" for c in tournament_name)[:40]
+            "".join(c if c.isalnum() or c in " _-" else "_" for c in req.tournament_name)[:40]
             or "terminarz"
         )
         download_name = f"terminarz_{safe_name}.pdf"
 
-        # ── save to download dir with a one-time token ──
         _ensure_download_dir()
         token = str(uuid.uuid4())
         download_path = os.path.join(DOWNLOAD_DIR, f"{token}.pdf")
         shutil.copyfile(pdf_path, download_path)
-        shutil.rmtree(tmp_dir, ignore_errors=True)  # clean working dir
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
         encoded_name = urllib.parse.quote(download_name)
 
-        # ── fetch judge/host emails if tournament_id provided ──
         judge_host_emails: List[str] = []
         if req.tournament_id:
             judge_host_emails = await _get_judge_host_emails(
@@ -561,7 +383,6 @@ async def download_schedule_pdf(
     filename: str = Query("terminarz.pdf"),
 ):
     _ensure_download_dir()
-    # Validate token is a UUID to prevent path traversal
     try:
         uuid.UUID(token)
     except ValueError:
@@ -577,3 +398,4 @@ async def download_schedule_pdf(
             lambda: os.remove(file_path) if os.path.exists(file_path) else None
         ),
     )
+
