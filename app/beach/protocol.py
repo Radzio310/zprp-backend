@@ -48,7 +48,6 @@ from sqlalchemy import select
 from starlette.background import BackgroundTask
 
 from app.db import database, beach_teams, beach_tournaments, beach_users, beach_proel_matches
-from app.beach.schedule_pdf import _convert_xlsx_to_pdf
 
 try:
     from PIL import Image as PILImage
@@ -58,6 +57,64 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Beach Protocol"])
+
+
+def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
+    """Convert xlsx → pdf using LibreOffice. Returns the pdf path."""
+    import subprocess
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise RuntimeError(
+            "Brak LibreOffice (soffice) w środowisku. Doinstaluj libreoffice w Dockerfile."
+        )
+
+    env = os.environ.copy()
+    env.setdefault("HOME", "/tmp")
+    env.setdefault("XDG_CACHE_HOME", "/tmp")
+    env.setdefault("XDG_CONFIG_HOME", "/tmp")
+
+    profile_dir = os.path.join(out_dir, "lo_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    cmd = [
+        soffice,
+        "--headless", "--nologo", "--nolockcheck",
+        "--nodefault", "--norestore",
+        f"-env:UserInstallation=file://{profile_dir}",
+        "--convert-to", "pdf",
+        "--outdir", out_dir,
+        xlsx_path,
+    ]
+
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        timeout=90,
+    )
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"LibreOffice convert failed (code={proc.returncode}). "
+            f"stderr={proc.stderr[:500]}"
+        )
+
+    base = os.path.splitext(os.path.basename(xlsx_path))[0]
+    pdf_path = os.path.join(out_dir, base + ".pdf")
+
+    if not os.path.exists(pdf_path):
+        pdfs = [p for p in os.listdir(out_dir) if p.lower().endswith(".pdf")]
+        if len(pdfs) == 1:
+            pdf_path = os.path.join(out_dir, pdfs[0])
+        elif pdfs:
+            cand = [p for p in pdfs if os.path.splitext(p)[0] == base]
+            pdf_path = os.path.join(out_dir, (cand or pdfs)[0])
+        else:
+            raise RuntimeError("PDF nie znaleziony po konwersji LibreOffice.")
+
+    return pdf_path
 
 TEMPLATE_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "templates", "beach_protocol_template.xlsx")
