@@ -641,18 +641,17 @@ async def obsada_save(
             "user": payload.user,
         }
 
-        # Set referee values
+        # Set referee values — must send ALL selects to ZPRP form
         field_map = {
-            "NrSedzia_pierwszy": payload.NrSedzia_pierwszy,
-            "NrSedzia_drugi": payload.NrSedzia_drugi,
-            "NrSedzia_delegat": payload.NrSedzia_delegat,
-            "NrSedzia_delegat2": payload.NrSedzia_delegat2,
-            "NrSedzia_sekretarz": payload.NrSedzia_sekretarz,
-            "NrSedzia_czas": payload.NrSedzia_czas,
+            "NrSedzia_pierwszy": payload.NrSedzia_pierwszy or "",
+            "NrSedzia_drugi": payload.NrSedzia_drugi or "",
+            "NrSedzia_delegat": payload.NrSedzia_delegat or "",
+            "NrSedzia_delegat2": payload.NrSedzia_delegat2 or "",
+            "NrSedzia_sekretarz": payload.NrSedzia_sekretarz or "",
+            "NrSedzia_czas": payload.NrSedzia_czas or "",
         }
         for k, v in field_map.items():
-            if v is not None:
-                form_data[k] = v
+            form_data[k] = v
 
         if payload.ukryjObsade:
             form_data["ukryjObsade"] = "1"
@@ -681,10 +680,11 @@ async def obsada_save(
             ("sekretarz", "NrSedzia_sekretarz"),
             ("czas", "NrSedzia_czas"),
         ]:
-            sent_val = field_map.get(sel_name)
-            if sent_val and parsed["slots"].get(slot_label, {}).get("selected_value") != sent_val:
+            sent_val = (field_map.get(sel_name) or "").strip()
+            got_val = (parsed["slots"].get(slot_label, {}).get("selected_value") or "").strip()
+            if sent_val and sent_val != got_val:
+                logger.warning("Verification mismatch slot=%s sent=%r got=%r", slot_label, sent_val, got_val)
                 verification_ok = False
-                break
 
         return {
             "success": verification_ok,
