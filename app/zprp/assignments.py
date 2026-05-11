@@ -477,11 +477,17 @@ class ObsadaSaveRequest(BaseModel):
     IdZawody: str
     user: str
     NrSedzia_pierwszy: Optional[str] = None
+    NrSedzia_pierwszy_name: Optional[str] = None
     NrSedzia_drugi: Optional[str] = None
+    NrSedzia_drugi_name: Optional[str] = None
     NrSedzia_delegat: Optional[str] = None
+    NrSedzia_delegat_name: Optional[str] = None
     NrSedzia_delegat2: Optional[str] = None
+    NrSedzia_delegat2_name: Optional[str] = None
     NrSedzia_sekretarz: Optional[str] = None
+    NrSedzia_sekretarz_name: Optional[str] = None
     NrSedzia_czas: Optional[str] = None
+    NrSedzia_czas_name: Optional[str] = None
     ukryjObsade: Optional[bool] = False
     ukryjObsadeD: Optional[bool] = False
 
@@ -657,12 +663,12 @@ async def obsada_save(
 
         # Merge current values with changes from payload
         field_map = {
-            "NrSedzia_pierwszy": payload.NrSedzia_pierwszy,
-            "NrSedzia_drugi": payload.NrSedzia_drugi,
-            "NrSedzia_delegat": payload.NrSedzia_delegat,
-            "NrSedzia_delegat2": payload.NrSedzia_delegat2,
-            "NrSedzia_sekretarz": payload.NrSedzia_sekretarz,
-            "NrSedzia_czas": payload.NrSedzia_czas,
+            "NrSedzia_pierwszy": (payload.NrSedzia_pierwszy, payload.NrSedzia_pierwszy_name),
+            "NrSedzia_drugi": (payload.NrSedzia_drugi, payload.NrSedzia_drugi_name),
+            "NrSedzia_delegat": (payload.NrSedzia_delegat, payload.NrSedzia_delegat_name),
+            "NrSedzia_delegat2": (payload.NrSedzia_delegat2, payload.NrSedzia_delegat2_name),
+            "NrSedzia_sekretarz": (payload.NrSedzia_sekretarz, payload.NrSedzia_sekretarz_name),
+            "NrSedzia_czas": (payload.NrSedzia_czas, payload.NrSedzia_czas_name),
         }
         slot_to_select = {
             "NrSedzia_pierwszy": "sedzia1",
@@ -672,11 +678,25 @@ async def obsada_save(
             "NrSedzia_sekretarz": "sekretarz",
             "NrSedzia_czas": "czas",
         }
+
+        def _norm(s: str) -> str:
+            return " ".join((s or "").lower().strip().split())
+
         for sel_name, slot_label in slot_to_select.items():
-            new_val = field_map.get(sel_name)
+            new_val, new_name = field_map[sel_name]
             if new_val is not None:
-                # User changed this slot — use the new value
-                form_data[sel_name] = new_val
+                # User changed this slot — try to find correct value by NAME in step1 options
+                resolved_val = new_val  # fallback to sent value
+                if new_name:
+                    new_name_norm = _norm(new_name)
+                    for opt in current["slots"].get(slot_label, {}).get("options", []):
+                        if _norm(opt.get("name", "")) == new_name_norm:
+                            resolved_val = opt["value"]
+                            logger.info("Name lookup: slot=%s name=%r -> value=%r (sent=%r)", slot_label, new_name, resolved_val, new_val)
+                            break
+                    else:
+                        logger.warning("Name lookup FAILED: slot=%s name=%r not found in step1 options, using sent value=%r", slot_label, new_name, new_val)
+                form_data[sel_name] = resolved_val
             else:
                 # Keep current value from form
                 cur_val = current["slots"].get(slot_label, {}).get("selected_value") or ""
@@ -697,7 +717,6 @@ async def obsada_save(
         logger.info("obsada/save step2: submitting form_data keys=%s", list(form_data.keys()))
         for sel_name in slot_to_select:
             logger.info("  %s = %r", sel_name, form_data.get(sel_name, ""))
-
         # Step 3: Submit the complete form
         resp, html = await fetch_with_correct_encoding(
             client,
@@ -738,20 +757,23 @@ async def obsada_save(
             ("sekretarz", "NrSedzia_sekretarz"),
             ("czas", "NrSedzia_czas"),
         ]:
-            sent_val = field_map.get(sel_name)
-            if sent_val is None:
-                continue  # slot not sent, skip verification
+            orig_val, orig_name = field_map.get(sel_name, (None, None))
+            if orig_val is None:
+                continue  # slot not changed by user, skip verification
 
-            sent_val_clean = sent_val.strip()
-            if not sent_val_clean:
-                continue  # clearing slot, skip
-
+            # Check that the slot now has SOME selection
             slot_data = parsed["slots"].get(slot_label, {})
             got_selected_name = _selected_name(slot_data)
 
-            if not got_selected_name:
-                # No selection in response — save may have failed
-                logger.warning("Verification: slot=%s no selection in response (sent val=%r)", slot_label, sent_val_clean)
+            if orig_name:
+                # Verify by name match
+                if _norm(got_selected_name) == _norm(orig_name):
+                    logger.info("Verification OK slot=%s selected_name=%r", slot_label, got_selected_name)
+                else:
+                    logger.warning("Verification MISMATCH slot=%s expected_name=%r got_name=%r", slot_label, orig_name, got_selected_name)
+                    verification_ok = False
+            elif not got_selected_name and orig_val:
+                logger.warning("Verification: slot=%s no selection in response (sent val=%r)", slot_label, orig_val)
                 verification_ok = False
             else:
                 logger.info("Verification OK slot=%s selected_name=%r", slot_label, got_selected_name)
