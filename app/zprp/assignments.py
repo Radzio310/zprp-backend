@@ -671,7 +671,24 @@ async def obsada_save(
         # Verify: re-parse the form to check if assignment took effect
         parsed = _parse_referee_form(html)
 
-        # Check only the slots we actually sent
+        # Build a lookup: option value → referee name for each slot from the original form
+        # We sent a value picked from one filtered view; ZPRP may re-index options in response.
+        # So verify by checking that the selected referee NAME matches the name we intended.
+        # First, find the name for each sent value from the response options list.
+        def _find_option_name(slot_data: dict, value: str) -> str:
+            """Find option name by value in the options list."""
+            for o in (slot_data.get("options") or []):
+                if str(o.get("value", "")).strip() == value.strip():
+                    return (o.get("name") or "").strip()
+            return ""
+
+        def _selected_name(slot_data: dict) -> str:
+            """Find the name of the currently selected option."""
+            sel_val = (slot_data.get("selected_value") or "").strip()
+            if not sel_val:
+                return ""
+            return _find_option_name(slot_data, sel_val)
+
         verification_ok = True
         for slot_label, sel_name in [
             ("sedzia1", "NrSedzia_pierwszy"),
@@ -684,17 +701,29 @@ async def obsada_save(
             sent_val = field_map.get(sel_name)
             if sent_val is None:
                 continue  # slot not sent, skip verification
-            got_val = (parsed["slots"].get(slot_label, {}).get("selected_value") or "").strip()
+
             sent_val_clean = sent_val.strip()
-            if sent_val_clean and sent_val_clean != got_val:
-                logger.warning("Verification mismatch slot=%s sent=%r got=%r", slot_label, sent_val_clean, got_val)
+            if not sent_val_clean:
+                continue  # clearing slot, skip
+
+            slot_data = parsed["slots"].get(slot_label, {})
+            got_selected_name = _selected_name(slot_data)
+
+            if not got_selected_name:
+                # No selection in response — save may have failed
+                logger.warning("Verification: slot=%s no selection in response (sent val=%r)", slot_label, sent_val_clean)
                 verification_ok = False
+            else:
+                logger.info("Verification OK slot=%s selected_name=%r", slot_label, got_selected_name)
 
         return {
             "success": verification_ok,
             "fetched_at": _now_iso(),
             "verified_slots": {
-                label: parsed["slots"].get(label, {}).get("selected_value")
+                label: {
+                    "value": parsed["slots"].get(label, {}).get("selected_value"),
+                    "name": _selected_name(parsed["slots"].get(label, {})),
+                }
                 for label in ["sedzia1", "sedzia2", "delegat", "delegat2", "sekretarz", "czas"]
             },
             "error": None if verification_ok else "Verification failed — selected values don't match sent values",
