@@ -635,13 +635,27 @@ async def obsada_save(
         cookies = await _login_zprp(client, user_plain, pass_plain)
         logger.info("ZPRP obsada/save: login ok IdZawody=%s", payload.IdZawody)
 
+        # Step 1: Load the form page first (like a browser would)
+        # This establishes session state and gives us current values + correct option IDs
+        load_resp, load_html = await fetch_with_correct_encoding(
+            client,
+            "/zawody_UstawSedziow.php",
+            method="POST",
+            data={"IdZawody": payload.IdZawody, "user": payload.user},
+            cookies=cookies,
+        )
+        _log_html("obsada/save step1 (load form)", load_html)
+        current = _parse_referee_form(load_html)
+
+        # Step 2: Build the complete form data — exactly as the browser would submit
+        # The HTML form sends: IdZawody, akcja, all 6 selects, filter radios, checkboxes
+        # NO 'user' field in the save form (it was only used for initial navigation)
         form_data: Dict[str, str] = {
-            "IdZawody": payload.IdZawody,
+            "IdZawody": current["IdZawody"] or payload.IdZawody,
             "akcja": "UstawSedziow",
-            "user": payload.user,
         }
 
-        # Set referee values — only send slots that have a value
+        # Merge current values with changes from payload
         field_map = {
             "NrSedzia_pierwszy": payload.NrSedzia_pierwszy,
             "NrSedzia_drugi": payload.NrSedzia_drugi,
@@ -650,15 +664,41 @@ async def obsada_save(
             "NrSedzia_sekretarz": payload.NrSedzia_sekretarz,
             "NrSedzia_czas": payload.NrSedzia_czas,
         }
-        for k, v in field_map.items():
-            if v is not None:
-                form_data[k] = v
+        slot_to_select = {
+            "NrSedzia_pierwszy": "sedzia1",
+            "NrSedzia_drugi": "sedzia2",
+            "NrSedzia_delegat": "delegat",
+            "NrSedzia_delegat2": "delegat2",
+            "NrSedzia_sekretarz": "sekretarz",
+            "NrSedzia_czas": "czas",
+        }
+        for sel_name, slot_label in slot_to_select.items():
+            new_val = field_map.get(sel_name)
+            if new_val is not None:
+                # User changed this slot — use the new value
+                form_data[sel_name] = new_val
+            else:
+                # Keep current value from form
+                cur_val = current["slots"].get(slot_label, {}).get("selected_value") or ""
+                form_data[sel_name] = cur_val
 
-        if payload.ukryjObsade:
+        # Include current filter radios (keep them as-is)
+        for filt_name in ["TypR", "Odl", "off"]:
+            filt_val = current["filters"].get(filt_name, "")
+            if filt_val:
+                form_data[filt_name] = filt_val
+
+        # Checkboxes
+        if payload.ukryjObsade or current.get("hide_obsada_s"):
             form_data["ukryjObsade"] = "1"
-        if payload.ukryjObsadeD:
+        if payload.ukryjObsadeD or current.get("hide_obsada_d"):
             form_data["ukryjObsadeD"] = "1"
 
+        logger.info("obsada/save step2: submitting form_data keys=%s", list(form_data.keys()))
+        for sel_name in slot_to_select:
+            logger.info("  %s = %r", sel_name, form_data.get(sel_name, ""))
+
+        # Step 3: Submit the complete form
         resp, html = await fetch_with_correct_encoding(
             client,
             "/zawody_UstawSedziow.php",
@@ -666,7 +706,7 @@ async def obsada_save(
             data=form_data,
             cookies=cookies,
         )
-        _log_html("obsada/save response", html)
+        _log_html("obsada/save step3 (submit)", html)
 
         # Verify: re-parse the form to check if assignment took effect
         parsed = _parse_referee_form(html)
