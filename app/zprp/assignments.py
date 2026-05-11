@@ -655,10 +655,12 @@ async def obsada_save(
 
         # Step 2: Build the complete form data — exactly as the browser would submit
         # The HTML form sends: IdZawody, akcja, all 6 selects, filter radios, checkboxes
-        # NO 'user' field in the save form (it was only used for initial navigation)
+        # CRITICAL: submit button name "akcja_edycja" with value "ZAPISZ ZMIANY" must be included
+        # Without it ZPRP treats it as a filter refresh, not a save!
         form_data: Dict[str, str] = {
             "IdZawody": current["IdZawody"] or payload.IdZawody,
             "akcja": "UstawSedziow",
+            "akcja_edycja": "ZAPISZ ZMIANY",
         }
 
         # Merge current values with changes from payload
@@ -689,14 +691,22 @@ async def obsada_save(
                 resolved_val = new_val  # fallback to sent value
                 if new_name:
                     new_name_norm = _norm(new_name)
-                    for opt in current["slots"].get(slot_label, {}).get("options", []):
+                    step1_opts = current["slots"].get(slot_label, {}).get("options", [])
+                    logger.info("Name lookup attempt: slot=%s name=%r norm=%r opts_count=%d", slot_label, new_name, new_name_norm, len(step1_opts))
+                    # Log first 5 options for debugging
+                    for dbg_opt in step1_opts[:5]:
+                        logger.info("  step1 opt: value=%r name=%r norm=%r", dbg_opt.get("value"), dbg_opt.get("name"), _norm(dbg_opt.get("name", "")))
+                    found = False
+                    for opt in step1_opts:
                         if _norm(opt.get("name", "")) == new_name_norm:
                             resolved_val = opt["value"]
-                            logger.info("Name lookup: slot=%s name=%r -> value=%r (sent=%r)", slot_label, new_name, resolved_val, new_val)
+                            logger.info("Name lookup SUCCESS: slot=%s name=%r -> value=%r (sent=%r)", slot_label, new_name, resolved_val, new_val)
+                            found = True
                             break
-                    else:
-                        logger.warning("Name lookup FAILED: slot=%s name=%r not found in step1 options, using sent value=%r", slot_label, new_name, new_val)
+                    if not found:
+                        logger.warning("Name lookup FAILED: slot=%s name=%r not found in %d step1 options, using sent value=%r", slot_label, new_name, len(step1_opts), new_val)
                 form_data[sel_name] = resolved_val
+                logger.info("  SUBMIT %s = %r (name=%r)", sel_name, resolved_val, new_name)
             else:
                 # Keep current value from form
                 cur_val = current["slots"].get(slot_label, {}).get("selected_value") or ""
