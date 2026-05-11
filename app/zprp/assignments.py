@@ -641,7 +641,7 @@ async def obsada_save(
             client,
             "/zawody_UstawSedziow.php",
             method="POST",
-            data={"IdZawody": payload.IdZawody, "user": payload.user},
+            data={"IdZawody": payload.IdZawody, "akcja": "UstawSedziow", "user": payload.user},
             cookies=cookies,
         )
         _log_html("obsada/save step1 (load form)", load_html)
