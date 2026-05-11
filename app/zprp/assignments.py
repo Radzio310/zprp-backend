@@ -263,17 +263,45 @@ def _parse_referee_form(html: str) -> Dict[str, Any]:
 # =====================
 
 def _parse_hall_form(html: str) -> Dict[str, Any]:
-    """Parse zawody_UstawHale.php HTML."""
+    """Parse zawody_UstawHale.php HTML.
+    
+    Returns:
+        IdZawody, halls list, selected_id, select_name (actual <select name=...>),
+        hidden_inputs (all hidden inputs for re-submission), submit_btn (name+value of submit button).
+    """
     soup = BeautifulSoup(html, "html.parser")
 
     id_zawody_input = soup.find("input", attrs={"name": "IdZawody"})
     id_zawody = _clean(id_zawody_input.get("value", "")) if id_zawody_input else ""
 
+    # Collect all hidden inputs for full form re-submission
+    hidden_inputs: Dict[str, str] = {}
+    for inp in soup.find_all("input", attrs={"type": "hidden"}):
+        n = _clean(inp.get("name", ""))
+        v = _clean(inp.get("value", ""))
+        if n:
+            hidden_inputs[n] = v
+
+    # Find the submit button (its name+value must be included in POST, like akcja_edycja)
+    submit_btn: Dict[str, str] = {}
+    for inp in soup.find_all("input", attrs={"type": "submit"}):
+        n = _clean(inp.get("name", ""))
+        v = _clean(inp.get("value", ""))
+        if n:
+            submit_btn = {"name": n, "value": v}
+            break  # take the first save/submit button
+
     sel = soup.find("select")
     halls: List[Dict[str, str]] = []
     selected_id: Optional[str] = None
+    select_name: str = "IdHala"  # fallback default
 
     if sel:
+        # Read the actual select name attribute — critical for correct form submission
+        actual_name = _clean(sel.get("name", ""))
+        if actual_name:
+            select_name = actual_name
+
         for opt in sel.find_all("option"):
             val = _clean(opt.get("value", ""))
             if not val:
@@ -302,6 +330,9 @@ def _parse_hall_form(html: str) -> Dict[str, Any]:
         "IdZawody": id_zawody,
         "halls": halls,
         "selected_id": selected_id,
+        "select_name": select_name,
+        "hidden_inputs": hidden_inputs,
+        "submit_btn": submit_btn,
     }
 
 
@@ -850,7 +881,13 @@ async def obsada_save_hall(
     settings: Settings = Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
-    """Save hall assignment to ZPRP."""
+    """Save hall assignment to ZPRP.
+    
+    2-step process:
+      1. Fetch the hall form to discover the real <select name=...> attribute
+         and any submit button field (name+value) that ZPRP requires.
+      2. Submit the complete form with the correct field names.
+    """
     private_key, _ = keys
     try:
         user_plain = _decrypt_field(private_key, payload.username)
@@ -862,35 +899,75 @@ async def obsada_save_hall(
         cookies = await _login_zprp(client, user_plain, pass_plain)
         logger.info("ZPRP obsada/save-hall: login ok IdZawody=%s hall=%s", payload.IdZawody, payload.hall_id)
 
-        form_data = {
+        # --- Step 1: Fetch the form to get real select name + submit button ---
+        step1_data = {
             "IdZawody": payload.IdZawody,
             "akcja": "UstawHale",
             "user": payload.user,
         }
+        resp1, html1 = await fetch_with_correct_encoding(
+            client,
+            "/zawody_UstawHale.php",
+            method="POST",
+            data=step1_data,
+            cookies=cookies,
+        )
+        parsed1 = _parse_hall_form(html1)
+        select_name = parsed1.get("select_name") or "IdHala"
+        submit_btn = parsed1.get("submit_btn") or {}
+        hidden_inputs = parsed1.get("hidden_inputs") or {}
+        logger.info("ZPRP obsada/save-hall: step1 select_name=%s submit_btn=%s", select_name, submit_btn)
 
-        # The hall select name varies — try common patterns
-        # We'll send it as the first select's name from the form
-        # For ZPRP, the hall select is typically named after a pattern
-        form_data["IdHala"] = payload.hall_id
+        # --- Step 2: Submit with correct field names ---
+        form_data: Dict[str, str] = {
+            "IdZawody": payload.IdZawody,
+            "akcja": "UstawHale",
+        }
+        # Re-include hidden inputs from the form (token, session fields, etc.)
+        for k, v in hidden_inputs.items():
+            if k not in form_data:
+                form_data[k] = v
 
-        resp, html = await fetch_with_correct_encoding(
+        # Set the selected hall using the real select name
+        form_data[select_name] = payload.hall_id
+
+        # Include submit button field — ZPRP uses this to distinguish save vs filter refresh
+        if submit_btn.get("name") and submit_btn.get("value"):
+            form_data[submit_btn["name"]] = submit_btn["value"]
+            logger.info("ZPRP obsada/save-hall: adding submit btn %s=%s", submit_btn["name"], submit_btn["value"])
+
+        resp2, html2 = await fetch_with_correct_encoding(
             client,
             "/zawody_UstawHale.php",
             method="POST",
             data=form_data,
             cookies=cookies,
         )
-        _log_html("obsada/save-hall response", html)
+        _log_html("obsada/save-hall response", html2)
 
-        # Re-parse to verify
-        parsed = _parse_hall_form(html)
-        success = parsed.get("selected_id") == payload.hall_id
+        # Verify: re-parse and check selected_id
+        parsed2 = _parse_hall_form(html2)
+        success = parsed2.get("selected_id") == payload.hall_id
+
+        # Find hall name for response
+        hall_name = ""
+        for h in parsed2.get("halls", []):
+            if h["id"] == payload.hall_id:
+                hall_name = h.get("full_label") or h.get("name") or ""
+                break
+
+        logger.info(
+            "ZPRP obsada/save-hall: step2 success=%s selected=%s wanted=%s",
+            success, parsed2.get("selected_id"), payload.hall_id
+        )
 
         return {
             "success": success,
             "fetched_at": _now_iso(),
-            "selected_id": parsed.get("selected_id"),
-            "error": None if success else "Hall verification failed",
+            "select_name_used": select_name,
+            "selected_id": parsed2.get("selected_id"),
+            "hall_name": hall_name,
+            "error": None if success else f"Hall verification failed: selected={parsed2.get('selected_id')} wanted={payload.hall_id}",
         }
 
 
