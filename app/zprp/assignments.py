@@ -310,112 +310,146 @@ def _parse_hall_form(html: str) -> Dict[str, Any]:
 # =====================
 
 def _parse_schedule_assignment_info(html: str) -> Dict[str, Any]:
-    """Parse schedule page extracting IdZawody, action buttons, assignment status per match."""
+    """
+    Parse schedule page extracting assignment metadata per match.
+    
+    Instead of relying on fragile row/column positions, we find ALL
+    relevant forms on the page ('Sędziowie' and 'Ustaw halę') and
+    extract IdZawody + user from their hidden inputs.
+    Then we look at the surrounding cell content for each match to
+    detect assigned officials.
+    """
     soup = BeautifulSoup(html, "html.parser")
-
-    # Find the main data table (usually second table with border="1")
-    tables = soup.find_all("table", attrs={"border": "1"})
-    data_table = None
-    for t in tables:
-        # The data table has "Lp." header
-        first_row = t.find("tr")
-        if first_row and "Lp." in first_row.get_text():
-            data_table = t
-            break
-
-    if not data_table:
-        return {"matches": {}, "error": "Data table not found"}
-
     matches: Dict[str, Dict[str, Any]] = {}
 
-    for tr in data_table.find_all("tr"):
-        tds = tr.find_all("td")
-        if len(tds) < 10:
+    # 1) Find ALL "Sędziowie" forms — each contains IdZawody + user
+    for form in soup.find_all("form"):
+        action = (form.get("action") or "").strip()
+        if not re.search(r"UstawSedziow", action, re.I):
             continue
 
-        # First td: Lp (e.g. "1.")
-        lp_text = _clean(tds[0].get_text(strip=True))
-        if not re.match(r"^\d+\.$", lp_text):
+        id_input = form.find("input", attrs={"name": "IdZawody"})
+        user_input = form.find("input", attrs={"name": "user"})
+        if not id_input:
             continue
 
-        lp = _safe_int(lp_text)
+        id_zawody = (id_input.get("value") or "").strip()
+        user_val = (user_input.get("value") or "").strip() if user_input else ""
+        if not id_zawody:
+            continue
 
-        # Last td: officials + action buttons
-        last_td = tds[-1]
-
-        # Extract IdZawody from hidden form
-        id_zawody = ""
-        user_val = ""
-        sedzia_form = last_td.find("form", attrs={"action": re.compile(r"UstawSedziow", re.I)})
-        if sedzia_form:
-            id_input = sedzia_form.find("input", attrs={"name": "IdZawody"})
-            if id_input:
-                id_zawody = _clean(id_input.get("value", ""))
-            user_input = sedzia_form.find("input", attrs={"name": "user"})
-            if user_input:
-                user_val = _clean(user_input.get("value", ""))
-
-        has_sedzia_btn = bool(sedzia_form)
-
-        # Hall form
-        hall_td = tds[5] if len(tds) > 5 else None
-        has_hall_btn = False
-        hall_id_zawody = ""
-        if hall_td:
-            hall_form = hall_td.find("form", attrs={"action": re.compile(r"UstawHale", re.I)})
-            if hall_form:
-                has_hall_btn = True
-                h_input = hall_form.find("input", attrs={"name": "IdZawody"})
-                if h_input:
-                    hall_id_zawody = _clean(h_input.get("value", ""))
-
-        # Parse officials column text to detect assignment status
-        officials_text = _clean(last_td.get_text(" ", strip=True))
-        officials_lines = [_clean(ln) for ln in last_td.get_text("\n", strip=True).split("\n") if _clean(ln)]
-
-        # Heuristic: check for <hr> separators and names
-        hrs = last_td.find_all("hr")
-        hr_count = len(hrs)
-
-        # Field refs: first 2 names before first <hr class="cienka-linia"> or first <hr>
-        # Table officials: after second <hr>
-        def _looks_like_name(line: str) -> bool:
-            if "@" in line or re.match(r"^\d+$", line):
-                return False
-            if " " in line and len(line) > 3 and re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", line):
-                return True
-            return False
-
-        name_lines = [ln for ln in officials_lines if _looks_like_name(ln)]
-
-        has_field_refs = len(name_lines) >= 2
+        # Find the containing TD to extract officials info
+        parent_td = form.find_parent("td")
+        officials_names: List[str] = []
+        has_field_refs = False
+        has_table_officials = False
         has_delegate = False
-        has_table_officials = len(name_lines) >= 3
+        hide_obsada_s = False
+        hide_obsada_d = False
 
-        # Check ukryjObsade checkboxes
-        hide_s_cb = last_td.find("input", attrs={"name": "ukryjObsade", "type": "checkbox"})
-        hide_d_cb = last_td.find("input", attrs={"name": "ukryjObsadeD", "type": "checkbox"})
-        hide_obsada_s = bool(hide_s_cb and hide_s_cb.has_attr("checked")) if hide_s_cb else False
-        hide_obsada_d = bool(hide_d_cb and hide_d_cb.has_attr("checked")) if hide_d_cb else False
+        if parent_td:
+            lines = [_clean(ln) for ln in parent_td.get_text("\n", strip=True).split("\n") if _clean(ln)]
 
-        # Check for hall info
-        has_hall = bool(hall_td and hall_td.find("a", href=re.compile(r"maps", re.I))) if hall_td else False
+            def _looks_like_name(line: str) -> bool:
+                if "@" in line or re.fullmatch(r"[\d\s\-+()]+", line):
+                    return False
+                if re.search(r"Sędziowie|Ustaw|ukryj", line, re.I):
+                    return False
+                if " " in line and len(line) > 3 and re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", line):
+                    return True
+                return False
 
-        if id_zawody:
+            officials_names = [ln for ln in lines if _looks_like_name(ln)][:6]
+
+            # Count <hr> separators to determine which sections exist
+            hrs = parent_td.find_all("hr")
+            hr_count = len(hrs)
+
+            # Heuristic: 2+ names = field refs assigned
+            has_field_refs = len(officials_names) >= 2
+            # 3+ names = table officials too
+            has_table_officials = len(officials_names) >= 3
+            # 5+ names = delegate assigned
+            has_delegate = len(officials_names) >= 5
+
+            # Check ukryjObsade checkboxes
+            hide_s_cb = parent_td.find("input", attrs={"name": "ukryjObsade", "type": "checkbox"})
+            hide_d_cb = parent_td.find("input", attrs={"name": "ukryjObsadeD", "type": "checkbox"})
+            hide_obsada_s = bool(hide_s_cb and hide_s_cb.has_attr("checked")) if hide_s_cb else False
+            hide_obsada_d = bool(hide_d_cb and hide_d_cb.has_attr("checked")) if hide_d_cb else False
+
+        matches[id_zawody] = {
+            "IdZawody": id_zawody,
+            "user": user_val,
+            "has_sedzia_btn": True,
+            "has_hall_btn": False,  # will be updated below
+            "has_field_refs": has_field_refs,
+            "has_table_officials": has_table_officials,
+            "has_delegate": has_delegate,
+            "has_hall": False,  # will be updated below
+            "hide_obsada_s": hide_obsada_s,
+            "hide_obsada_d": hide_obsada_d,
+            "officials_names": officials_names,
+        }
+
+    # 2) Find ALL "Ustaw halę" forms
+    for form in soup.find_all("form"):
+        action = (form.get("action") or "").strip()
+        if not re.search(r"UstawHale", action, re.I):
+            continue
+
+        id_input = form.find("input", attrs={"name": "IdZawody"})
+        if not id_input:
+            continue
+
+        id_zawody = (id_input.get("value") or "").strip()
+        if not id_zawody:
+            continue
+
+        if id_zawody in matches:
+            matches[id_zawody]["has_hall_btn"] = True
+        else:
+            # Match has hall button but no referee button
             matches[id_zawody] = {
-                "Lp": lp,
                 "IdZawody": id_zawody,
-                "user": user_val,
-                "has_sedzia_btn": has_sedzia_btn,
-                "has_hall_btn": has_hall_btn,
-                "has_field_refs": has_field_refs,
-                "has_table_officials": has_table_officials,
-                "has_delegate": has_delegate,
-                "has_hall": has_hall,
-                "hide_obsada_s": hide_obsada_s,
-                "hide_obsada_d": hide_obsada_d,
-                "officials_names": name_lines[:6],
+                "user": "",
+                "has_sedzia_btn": False,
+                "has_hall_btn": True,
+                "has_field_refs": False,
+                "has_table_officials": False,
+                "has_delegate": False,
+                "has_hall": False,
+                "hide_obsada_s": False,
+                "hide_obsada_d": False,
+                "officials_names": [],
             }
+
+    # 3) Detect existing hall assignments (Google Maps links near each match)
+    #    A hall TD with a maps link means a hall is already set
+    for a_tag in soup.find_all("a", href=re.compile(r"maps\.google|google.*maps", re.I)):
+        parent_td = a_tag.find_parent("td")
+        if not parent_td:
+            continue
+        # Find the nearest form to associate with an IdZawody
+        parent_tr = parent_td.find_parent("tr")
+        if not parent_tr:
+            continue
+        # Look for UstawHale form in the same row
+        hall_form = parent_tr.find("form", attrs={"action": re.compile(r"UstawHale", re.I)})
+        if hall_form:
+            h_input = hall_form.find("input", attrs={"name": "IdZawody"})
+            if h_input:
+                hid = (h_input.get("value") or "").strip()
+                if hid and hid in matches:
+                    matches[hid]["has_hall"] = True
+        # Also check for UstawSedziow form to get IdZawody
+        ref_form = parent_tr.find("form", attrs={"action": re.compile(r"UstawSedziow", re.I)})
+        if ref_form:
+            r_input = ref_form.find("input", attrs={"name": "IdZawody"})
+            if r_input:
+                rid = (r_input.get("value") or "").strip()
+                if rid and rid in matches:
+                    matches[rid]["has_hall"] = True
 
     return {"matches": matches}
 
