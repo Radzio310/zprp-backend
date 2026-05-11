@@ -343,6 +343,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 all_team_ids.add(t["id"])
 
     genders_present = set(m.get("gender", "M") for m in matches)
+    multi_gender = len(genders_present) > 1
     men_count = len(set(
         t["id"] for m in matches if m.get("gender") == "M"
         for slot in ("teamA", "teamB")
@@ -386,6 +387,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         gs: Dict[str, Any] = {
             "gender": gender,
             "gender_label": "Mężczyźni" if gender == "M" else "Kobiety",
+            "gender_color": ("#2BA8A0" if gender == "M" else "#E85A78") if multi_gender else accent,
             "mode": mode,
             "tables": [],
             "bracket_rounds": [],
@@ -521,6 +523,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         "logo_b64": logo_b64,
         "summary_text": summary_text,
         "gender_sections": gender_sections,
+        "multi_gender": multi_gender,
         "generated_at": now,
     }
 

@@ -53,26 +53,6 @@
     margin-top: 2pt;
   }
 
-  /* ── Section ── */
-  .section-title {
-    font-size: 11pt;
-    font-weight: 900;
-    color: {{ accent }};
-    text-transform: uppercase;
-    letter-spacing: 0.8pt;
-    margin: 16pt 0 4pt 0;
-    padding-bottom: 4pt;
-    border-bottom: 1pt solid {{ accent }}44;
-    page-break-after: avoid;
-  }
-  .section-desc {
-    font-size: 9pt;
-    color: #666;
-    margin-bottom: 4pt;
-    font-style: italic;
-    page-break-after: avoid;
-  }
-
   /* ── Summary ── */
   .summary {
     background: {{ accent }}0D;
@@ -97,38 +77,25 @@
   .gender-header.M { background: #2BA8A0; }
   .gender-header.K { background: #E85A78; }
 
-  /* ── Table (groups / round-robin) ── */
-  .results-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 10pt;
-    font-size: 8.5pt;
-  }
-  .results-table th {
-    background: {{ accent }}18;
-    color: {{ accent }};
+  /* ── Section titles (colored per-gender via inline style) ── */
+  .section-title {
+    font-size: 11pt;
     font-weight: 900;
-    font-size: 7.5pt;
     text-transform: uppercase;
-    letter-spacing: 0.3pt;
-    padding: 4pt 3pt;
-    border-bottom: 1.5pt solid {{ accent }}44;
-    text-align: center;
+    letter-spacing: 0.8pt;
+    margin: 16pt 0 4pt 0;
+    padding-bottom: 4pt;
+    border-bottom-width: 1pt;
+    border-bottom-style: solid;
+    page-break-after: avoid;
   }
-  .results-table th.team-col { text-align: left; min-width: 80pt; }
-  .results-table td {
-    padding: 4pt 3pt;
-    text-align: center;
-    border-bottom: 0.5pt solid #e0e0e0;
+  .section-desc {
+    font-size: 9pt;
+    color: #666;
+    margin-bottom: 4pt;
+    font-style: italic;
+    page-break-after: avoid;
   }
-  .results-table td.team-name {
-    text-align: left;
-    font-weight: 700;
-    max-width: 130pt;
-    overflow: hidden;
-  }
-  .results-table tr.advancing { background: {{ accent }}0A; }
-  .results-table td.pos { font-weight: 900; color: {{ accent }}; width: 20pt; }
 
   /* ── Match cards ── */
   .matches-grid {
@@ -158,10 +125,8 @@
   .match-card .mc-stage {
     font-size: 6.5pt;
     font-weight: 800;
-    color: {{ accent }};
     text-transform: uppercase;
     letter-spacing: 0.3pt;
-    background: {{ accent }}14;
     padding: 1pt 4pt;
     border-radius: 2pt;
   }
@@ -180,19 +145,12 @@
     text-overflow: ellipsis;
     padding-right: 4pt;
   }
-  .match-card .mc-team-row.winner .mc-team-name {
-    font-weight: 900;
-    color: {{ accent }};
-  }
   .match-card .mc-team-score {
     font-weight: 900;
     font-size: 9pt;
     color: #333;
     min-width: 14pt;
     text-align: right;
-  }
-  .match-card .mc-team-row.winner .mc-team-score {
-    color: {{ accent }};
   }
   .match-card .mc-match-num {
     font-size: 6pt;
@@ -228,58 +186,103 @@
     font-size: 7pt;
   }
 
-  /* ── Bracket (knockout tree) ── */
+  /* ── Bracket (knockout tree with connectors) ── */
   .bracket-section { margin-bottom: 12pt; }
-  .bracket-table {
-    border-collapse: collapse;
-    margin: 0 auto;
+  .bracket-wrap {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
     font-size: 8pt;
   }
-  .bracket-table td {
-    padding: 2pt 4pt;
-    vertical-align: middle;
-    white-space: nowrap;
+  .bracket-round {
+    display: flex;
+    flex-direction: column;
+    min-width: 135pt;
   }
-  .bracket-table .br-match {
+  .bracket-round-label {
+    text-align: center;
+    font-size: 7pt;
+    font-weight: 900;
+    text-transform: uppercase;
+    margin-bottom: 6pt;
+    letter-spacing: 0.5pt;
+  }
+  .bracket-round-matches {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+    flex: 1;
+    gap: 4pt;
+  }
+  .br-match-box {
     border: 0.5pt solid #ccc;
     border-radius: 3pt;
-    padding: 3pt 6pt;
-    min-width: 100pt;
     background: #fafafa;
+    overflow: hidden;
   }
-  .bracket-table .br-team {
-    font-weight: 600;
-    font-size: 8pt;
-    display: flex;
-    justify-content: space-between;
-    padding: 1pt 0;
-  }
-  .bracket-table .br-team.winner { font-weight: 900; color: {{ accent }}; }
-  .bracket-table .br-label {
-    font-size: 6.5pt;
-    color: {{ accent }};
+  .br-match-label {
+    font-size: 5.5pt;
     font-weight: 800;
     text-transform: uppercase;
     text-align: center;
-    margin-bottom: 2pt;
+    padding: 1.5pt 4pt;
+    letter-spacing: 0.2pt;
+    color: #fff;
   }
-  .bracket-table .br-connector {
-    border-right: 1pt solid #bbb;
-    width: 12pt;
+  .br-team-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2.5pt 6pt;
+    font-weight: 600;
+    font-size: 7.5pt;
   }
-  .bracket-table .br-connector-top {
+  .br-team-row + .br-team-row {
+    border-top: 0.5pt solid #e0e0e0;
+  }
+  .br-team-row.winner {
+    font-weight: 900;
+  }
+  .br-team-row .br-score {
+    font-weight: 900;
+    min-width: 12pt;
+    text-align: right;
+  }
+  .br-team-row .br-name {
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    padding-right: 4pt;
+  }
+  /* Connector column between bracket rounds */
+  .bracket-connectors {
+    width: 20pt;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+  }
+  .br-conn-pair {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    position: relative;
+  }
+  .br-conn-pair .br-conn-top {
+    flex: 1;
     border-right: 1pt solid #bbb;
     border-bottom: 1pt solid #bbb;
-    width: 12pt;
   }
-  .bracket-table .br-connector-bottom {
+  .br-conn-pair .br-conn-bottom {
+    flex: 1;
     border-right: 1pt solid #bbb;
     border-top: 1pt solid #bbb;
-    width: 12pt;
   }
-  .bracket-table .br-connector-mid {
+  .br-conn-pair .br-conn-mid {
+    position: absolute;
+    right: -1pt;
+    top: 50%;
+    width: 10pt;
     border-top: 1pt solid #bbb;
-    width: 12pt;
   }
 
   /* ── Standings ── */
@@ -304,16 +307,34 @@
     padding: 4pt 6pt;
     border-bottom: 0.5pt solid #eee;
   }
-  .standings-table td.pos { font-weight: 900; color: {{ accent }}; width: 24pt; text-align: center; }
+  .standings-table td.pos { font-weight: 900; width: 24pt; text-align: center; }
   .standings-table td.team-name { font-weight: 700; }
   .standings-table td.pts {
     text-align: center;
     font-weight: 800;
   }
   .standings-table .tour-pts {
-    color: {{ accent }};
     font-weight: 700;
     font-size: 8pt;
+  }
+
+  /* ── Results table ── */
+  .results-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 10pt;
+    font-size: 8.5pt;
+  }
+  .results-table td {
+    padding: 4pt 3pt;
+    text-align: center;
+    border-bottom: 0.5pt solid #e0e0e0;
+  }
+  .results-table td.team-name {
+    text-align: left;
+    font-weight: 700;
+    max-width: 130pt;
+    overflow: hidden;
   }
 
   /* ── Footer ── */
@@ -330,9 +351,6 @@
   .page-break { page-break-before: always; }
   .no-break { page-break-inside: avoid; }
   .text-center { text-align: center; }
-  .mb-4 { margin-bottom: 4pt; }
-  .mb-8 { margin-bottom: 8pt; }
-  .mt-8 { margin-top: 8pt; }
 </style>
 </head>
 <body>
@@ -354,6 +372,7 @@
 
 <!-- ════════════ PER-GENDER SECTIONS ════════════ -->
 {% for gs in gender_sections %}
+{% set gc = gs.gender_color %}
 
 <div class="gender-header {{ gs.gender }}">
   {{ gs.gender_label }}
@@ -361,7 +380,7 @@
 
 <!-- ── Group / Round-Robin Tables ── -->
 {% if gs.tables %}
-<div class="section-title">Tabele wyników</div>
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Tabele wyników</div>
 <div class="section-desc">
   {% if gs.mode == "roundRobin" %}
   Tabela końcowa rozgrywek w systemie każdy z każdym.
@@ -372,27 +391,27 @@
 
 {% for tbl in gs.tables %}
 {% if tbl.group_label %}
-<div style="font-size: 9pt; font-weight: 900; color: {{ accent }}; margin: 6pt 0 3pt 0;">{{ tbl.group_label }}</div>
+<div style="font-size: 9pt; font-weight: 900; color: {{ gc }}; margin: 6pt 0 3pt 0;">{{ tbl.group_label }}</div>
 {% endif %}
 <table class="results-table">
   <thead>
     <tr>
-      <th>#</th>
-      <th class="team-col">Drużyna</th>
-      <th>Pkt</th>
-      <th>M</th>
-      <th>Z</th>
-      <th>P</th>
-      <th>SW</th>
-      <th>SP</th>
-      <th>Brk+</th>
-      <th>Brk−</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3pt; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">#</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3pt; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: left; min-width: 80pt;">Drużyna</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">Pkt</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">M</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">Z</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">P</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">SW</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">SP</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">Brk+</th>
+      <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">Brk−</th>
     </tr>
   </thead>
   <tbody>
     {% for row in tbl.rows %}
-    <tr{% if row.advancing %} class="advancing"{% endif %}>
-      <td class="pos">{{ row.pos }}</td>
+    <tr{% if row.advancing %} style="background: {{ gc }}0A;"{% endif %}>
+      <td style="font-weight: 900; color: {{ gc }}; width: 20pt;">{{ row.pos }}</td>
       <td class="team-name">{{ row.team_name }}</td>
       <td><strong>{{ row.pts }}</strong></td>
       <td>{{ row.played }}</td>
@@ -411,7 +430,7 @@
 
 <!-- ── Standings (round-robin: show right after table) ── -->
 {% if gs.standings and gs.mode == "roundRobin" %}
-<div class="section-title">Punktacja turniejowa</div>
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Punktacja turniejowa</div>
 <div class="section-desc">
   {% if gs.standings_is_multi_tournament %}
   Aktualny ranking po {{ gs.standings_tournament_count }} turniejach. W nawiasie punkty zdobyte w tym turnieju.
@@ -430,12 +449,12 @@
   <tbody>
     {% for sr in gs.standings %}
     <tr>
-      <td class="pos">{{ sr.pos }}</td>
+      <td class="pos" style="color: {{ gc }};">{{ sr.pos }}</td>
       <td class="team-name">{{ sr.team_name }}</td>
       <td class="pts">
         {{ sr.total_points }}
         {% if sr.tournament_points is not none %}
-        <span class="tour-pts">(+{{ sr.tournament_points }})</span>
+        <span class="tour-pts" style="color: {{ gc }};">(+{{ sr.tournament_points }})</span>
         {% endif %}
       </td>
     </tr>
@@ -446,55 +465,69 @@
 
 <!-- ── Knockout Bracket ── -->
 {% if gs.bracket_rounds %}
-<div class="section-title">Drabinka pucharowa</div>
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Drabinka pucharowa</div>
 <div class="section-desc">Przebieg fazy pucharowej turnieju.</div>
 
 <div class="bracket-section no-break">
-<table class="bracket-table">
-  <tr>
+<div class="bracket-wrap">
   {% for round in gs.bracket_rounds %}
-    <td style="vertical-align: top; padding: 0 6pt;">
-      <div style="text-align: center; font-size: 7pt; font-weight: 900; color: {{ accent }}; text-transform: uppercase; margin-bottom: 4pt;">{{ round.label }}</div>
+  {% if not loop.first %}
+  {# Connector column between rounds #}
+  <div class="bracket-connectors">
+    {% for ci in range(round.matches | length) %}
+    <div class="br-conn-pair">
+      <div class="br-conn-top"></div>
+      <div class="br-conn-bottom"></div>
+      <div class="br-conn-mid"></div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="bracket-round">
+    <div class="bracket-round-label" style="color: {{ gc }};">{{ round.label }}</div>
+    <div class="bracket-round-matches">
       {% for bm in round.matches %}
-      <div class="br-match" style="margin-bottom: 6pt;">
-        {% if bm.label %}<div class="br-label">{{ bm.label }}</div>{% endif %}
-        <div class="br-team{% if bm.winner == 'A' %} winner{% endif %}">
-          <span>{{ bm.team_a }}</span>
-          <span>{{ bm.score_a if bm.score_a is not none else "" }}</span>
+      <div class="br-match-box">
+        {% if bm.label %}
+        <div class="br-match-label" style="background: {{ gc }};">{{ bm.label }}</div>
+        {% endif %}
+        <div class="br-team-row{% if bm.winner == 'A' %} winner{% endif %}" style="{% if bm.winner == 'A' %}color: {{ gc }};{% endif %}">
+          <span class="br-name">{{ bm.team_a }}</span>
+          <span class="br-score">{{ bm.score_a if bm.score_a is not none else "" }}</span>
         </div>
-        <div style="border-top: 0.5pt solid #e0e0e0; margin: 1pt 0;"></div>
-        <div class="br-team{% if bm.winner == 'B' %} winner{% endif %}">
-          <span>{{ bm.team_b }}</span>
-          <span>{{ bm.score_b if bm.score_b is not none else "" }}</span>
+        <div class="br-team-row{% if bm.winner == 'B' %} winner{% endif %}" style="{% if bm.winner == 'B' %}color: {{ gc }};{% endif %}">
+          <span class="br-name">{{ bm.team_b }}</span>
+          <span class="br-score">{{ bm.score_b if bm.score_b is not none else "" }}</span>
         </div>
       </div>
       {% endfor %}
-    </td>
+    </div>
+  </div>
   {% endfor %}
-  </tr>
-</table>
+</div>
 </div>
 {% endif %}
 
 <!-- ── Placement matches ── -->
 {% if gs.placement_matches %}
-<div class="section-title">Mecze o miejsca</div>
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Mecze o miejsca</div>
 <div class="section-desc">Mecze o 3., 5. i 7. miejsce.</div>
 <div class="matches-grid">
 {% for pm in gs.placement_matches %}
 <div class="match-card">
   <div class="mc-header">
     <span class="mc-time">{{ pm.time or "" }}</span>
-    <span class="mc-stage">{{ pm.stage_label }}</span>
+    <span class="mc-stage" style="color: {{ gc }}; background: {{ gc }}14;">{{ pm.stage_label }}</span>
     {% if pm.match_number %}<span class="mc-match-num">{{ pm.match_number }}</span>{% endif %}
   </div>
   <div class="mc-team-row{% if pm.winner == 'A' %} winner{% endif %}">
-    <span class="mc-team-name">{{ pm.team_a }}</span>
-    <span class="mc-team-score">{{ pm.score_a if pm.score_a is not none else "" }}</span>
+    <span class="mc-team-name" style="{% if pm.winner == 'A' %}font-weight: 900; color: {{ gc }};{% endif %}">{{ pm.team_a }}</span>
+    <span class="mc-team-score" style="{% if pm.winner == 'A' %}color: {{ gc }};{% endif %}">{{ pm.score_a if pm.score_a is not none else "" }}</span>
   </div>
   <div class="mc-team-row{% if pm.winner == 'B' %} winner{% endif %}">
-    <span class="mc-team-name">{{ pm.team_b }}</span>
-    <span class="mc-team-score">{{ pm.score_b if pm.score_b is not none else "" }}</span>
+    <span class="mc-team-name" style="{% if pm.winner == 'B' %}font-weight: 900; color: {{ gc }};{% endif %}">{{ pm.team_b }}</span>
+    <span class="mc-team-score" style="{% if pm.winner == 'B' %}color: {{ gc }};{% endif %}">{{ pm.score_b if pm.score_b is not none else "" }}</span>
   </div>
   {% if pm.sets %}
   <div class="mc-sets-row">
@@ -519,7 +552,7 @@
 
 <!-- ── All Match Cards ── -->
 {% if gs.match_days %}
-<div class="section-title">Przebieg rozgrywek</div>
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Przebieg rozgrywek</div>
 <div class="section-desc">Wyniki wszystkich meczów turnieju.</div>
 
 {% for day in gs.match_days %}
@@ -531,16 +564,16 @@
 <div class="match-card">
   <div class="mc-header">
     <span class="mc-time">{{ mc.time or "" }}</span>
-    {% if mc.stage_label %}<span class="mc-stage">{{ mc.stage_label }}</span>{% endif %}
+    {% if mc.stage_label %}<span class="mc-stage" style="color: {{ gc }}; background: {{ gc }}14;">{{ mc.stage_label }}</span>{% endif %}
     {% if mc.match_number %}<span class="mc-match-num">{{ mc.match_number }}</span>{% endif %}
   </div>
   <div class="mc-team-row{% if mc.winner == 'A' %} winner{% endif %}">
-    <span class="mc-team-name">{{ mc.team_a }}</span>
-    <span class="mc-team-score">{{ mc.score_a if mc.score_a is not none else "" }}</span>
+    <span class="mc-team-name" style="{% if mc.winner == 'A' %}font-weight: 900; color: {{ gc }};{% endif %}">{{ mc.team_a }}</span>
+    <span class="mc-team-score" style="{% if mc.winner == 'A' %}color: {{ gc }};{% endif %}">{{ mc.score_a if mc.score_a is not none else "" }}</span>
   </div>
   <div class="mc-team-row{% if mc.winner == 'B' %} winner{% endif %}">
-    <span class="mc-team-name">{{ mc.team_b }}</span>
-    <span class="mc-team-score">{{ mc.score_b if mc.score_b is not none else "" }}</span>
+    <span class="mc-team-name" style="{% if mc.winner == 'B' %}font-weight: 900; color: {{ gc }};{% endif %}">{{ mc.team_b }}</span>
+    <span class="mc-team-score" style="{% if mc.winner == 'B' %}color: {{ gc }};{% endif %}">{{ mc.score_b if mc.score_b is not none else "" }}</span>
   </div>
   {% if mc.sets %}
   <div class="mc-sets-row">
@@ -566,7 +599,7 @@
 
 <!-- ── Standings / Points (groups+knockout: show after match cards) ── -->
 {% if gs.standings and gs.mode != "roundRobin" %}
-<div class="section-title">Punktacja turniejowa</div>
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Punktacja turniejowa</div>
 <div class="section-desc">
   {% if gs.standings_is_multi_tournament %}
   Aktualny ranking po {{ gs.standings_tournament_count }} turniejach. W nawiasie punkty zdobyte w tym turnieju.
@@ -586,12 +619,12 @@
   <tbody>
     {% for sr in gs.standings %}
     <tr>
-      <td class="pos">{{ sr.pos }}</td>
+      <td class="pos" style="color: {{ gc }};">{{ sr.pos }}</td>
       <td class="team-name">{{ sr.team_name }}</td>
       <td class="pts">
         {{ sr.total_points }}
         {% if sr.tournament_points is not none %}
-        <span class="tour-pts">(+{{ sr.tournament_points }})</span>
+        <span class="tour-pts" style="color: {{ gc }};">(+{{ sr.tournament_points }})</span>
         {% endif %}
       </td>
     </tr>
