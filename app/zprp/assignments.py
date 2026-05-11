@@ -186,8 +186,8 @@ def _parse_match_header(soup: BeautifulSoup) -> Dict[str, str]:
             if re.match(r"^[A-Z]+\d*[/]\d+$", text):
                 header["match_code"] = text
 
-            # Teams: contains "vs"
-            if "vs" in text.lower() and len(text) > 10:
+            # Teams: contains "vs" and is reasonably short (not a referee list)
+            if "vs" in text.lower() and 10 < len(text) < 150:
                 header["teams"] = text
 
             # Date: contains day-of-week pattern
