@@ -1230,6 +1230,23 @@ beach_notifications = Table(
 )
 
 
+# -------------------------
+# Assignment drafts (obsadowe)
+# -------------------------
+assignment_drafts = Table(
+    "assignment_drafts",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),         # e.g. "ŚLĄSKIE"
+    Column("created_by", String, nullable=False),                   # judge_id or username
+    Column("id_rozgr", String, nullable=True),                     # competition id
+    Column("label", String, nullable=True),                        # user-friendly draft name
+    Column("assignments", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    # assignments: [{ IdZawody, slots: {sedzia1: "5512", ...}, hall_id?, status: "draft"|"submitted" }]
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

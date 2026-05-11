@@ -61,6 +61,8 @@ from app.zprp.schedule import router as schedule_router
 from app.zprp.competitions import router as competitions_router
 from app.zprp.officials import router as officials_router
 from app.zprp.stats import router as zprp_stats_router
+from app.zprp.assignments import router as assignments_router
+from app.assignment_drafts import router as assignment_drafts_router
 
 # -------------------------
 # BEACH routers
@@ -89,7 +91,7 @@ from app.beach.final_report import router as beach_final_report_router
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
 
-from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts
+from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts, assignment_drafts
 
 app = FastAPI(title="BAZA - API")
 
@@ -166,6 +168,8 @@ app.include_router(schedule_router, tags=["zprp"])
 app.include_router(competitions_router, tags=["zprp"])
 app.include_router(officials_router, tags=["zprp"])
 app.include_router(zprp_stats_router, tags=["zprp"])
+app.include_router(assignments_router, tags=["zprp"])
+app.include_router(assignment_drafts_router)
 
 # -------------------------
 # BEACH routers
