@@ -8,6 +8,7 @@ match cards, and standings summary.
 from __future__ import annotations
 
 import base64
+import html as html_mod
 import io
 import logging
 import os
@@ -292,6 +293,209 @@ def _build_bracket_rounds(
     return rounds
 
 
+def _render_bracket_svg(bracket_rounds: List[Dict[str, Any]], color: str) -> str:
+    """Generate an inline SVG bracket tree with proper connecting lines."""
+    if not bracket_rounds:
+        return ""
+
+    # Layout constants (unitless, mapped to pt via viewBox)
+    CARD_W = 155
+    CARD_H = 44
+    CONN_W = 28          # horizontal space for connector lines
+    LABEL_H = 18         # space for round label at top
+    MATCH_GAP = 14       # vertical gap between first-round matches
+    PAD = 6
+
+    num_rounds = len(bracket_rounds)
+    first_count = len(bracket_rounds[0]["matches"])
+
+    slot_h = CARD_H + MATCH_GAP
+
+    # Y-centers for first round (evenly spaced)
+    y_start = LABEL_H + PAD + CARD_H / 2
+    first_centers = [y_start + i * slot_h for i in range(first_count)]
+
+    # Y-centers for subsequent rounds: midpoint of their two source matches
+    all_centers: List[List[float]] = [first_centers]
+    for r in range(1, num_rounds):
+        prev = all_centers[r - 1]
+        new_c: List[float] = []
+        for m in range(len(bracket_rounds[r]["matches"])):
+            a, b = m * 2, m * 2 + 1
+            if b < len(prev):
+                new_c.append((prev[a] + prev[b]) / 2)
+            else:
+                new_c.append(prev[a])
+        all_centers.append(new_c)
+
+    # X position of each round column
+    round_x: List[float] = [0.0]
+    for i in range(1, num_rounds):
+        round_x.append(round_x[-1] + CARD_W + CONN_W)
+
+    total_w = round_x[-1] + CARD_W
+    max_y = max(max(c) for c in all_centers) + CARD_H / 2 + PAD
+    total_h = max(LABEL_H + PAD + first_count * slot_h + PAD, max_y)
+
+    parts: List[str] = []
+    parts.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{total_w}pt" height="{total_h}pt" '
+        f'viewBox="0 0 {total_w} {total_h}" '
+        f'style="font-family: DejaVu Sans, sans-serif; display: block;">'
+    )
+
+    # ── Connector lines (drawn first, behind cards) ──
+    for r_idx in range(num_rounds - 1):
+        curr = all_centers[r_idx]
+        nxt = all_centers[r_idx + 1]
+        x_right = round_x[r_idx] + CARD_W   # right edge of current cards
+        x_left = round_x[r_idx + 1]          # left edge of next cards
+        x_mid = (x_right + x_left) / 2
+
+        for ni in range(len(nxt)):
+            ai, bi = ni * 2, ni * 2 + 1
+            y_a = curr[ai]
+            y_b = curr[bi] if bi < len(curr) else y_a
+            y_m = nxt[ni]
+
+            if bi < len(curr):
+                # Horizontal from match A (right edge) to midpoint
+                parts.append(
+                    f'<line x1="{x_right}" y1="{y_a}" '
+                    f'x2="{x_mid}" y2="{y_a}" stroke="#bbb" stroke-width="1"/>'
+                )
+                # Horizontal from match B (right edge) to midpoint
+                parts.append(
+                    f'<line x1="{x_right}" y1="{y_b}" '
+                    f'x2="{x_mid}" y2="{y_b}" stroke="#bbb" stroke-width="1"/>'
+                )
+                # Vertical connecting A-center to B-center at midpoint
+                parts.append(
+                    f'<line x1="{x_mid}" y1="{y_a}" '
+                    f'x2="{x_mid}" y2="{y_b}" stroke="#bbb" stroke-width="1"/>'
+                )
+                # Horizontal from midpoint to next round card
+                parts.append(
+                    f'<line x1="{x_mid}" y1="{y_m}" '
+                    f'x2="{x_left}" y2="{y_m}" stroke="#bbb" stroke-width="1"/>'
+                )
+            else:
+                # Single source → straight horizontal
+                parts.append(
+                    f'<line x1="{x_right}" y1="{y_a}" '
+                    f'x2="{x_left}" y2="{y_m}" stroke="#bbb" stroke-width="1"/>'
+                )
+
+    # ── Round labels and match cards ──
+    for r_idx, rnd in enumerate(bracket_rounds):
+        rx = round_x[r_idx]
+
+        # Round label
+        parts.append(
+            f'<text x="{rx + CARD_W / 2}" y="{LABEL_H - 4}" '
+            f'text-anchor="middle" font-size="7" font-weight="900" '
+            f'fill="{color}" letter-spacing="0.5">'
+            f'{html_mod.escape(rnd["label"].upper())}</text>'
+        )
+
+        for m_idx, match in enumerate(rnd["matches"]):
+            cy = all_centers[r_idx][m_idx]
+            y = cy - CARD_H / 2
+
+            has_label = bool(match.get("label"))
+            label_h = 13 if has_label else 0
+            team_area_h = CARD_H - label_h
+            team_h = team_area_h / 2
+            name_max_w = CARD_W - 32
+
+            # Card background
+            parts.append(
+                f'<rect x="{rx}" y="{y}" width="{CARD_W}" height="{CARD_H}" '
+                f'rx="3" fill="#fafafa" stroke="#ccc" stroke-width="0.5"/>'
+            )
+
+            # Label bar (colored header)
+            if has_label:
+                esc_lbl = html_mod.escape(match["label"])
+                parts.append(
+                    f'<rect x="{rx}" y="{y}" width="{CARD_W}" height="{label_h}" '
+                    f'rx="3" fill="{color}"/>'
+                )
+                # Square-off bottom corners under label
+                parts.append(
+                    f'<rect x="{rx}" y="{y + label_h - 3}" '
+                    f'width="{CARD_W}" height="3" fill="{color}"/>'
+                )
+                parts.append(
+                    f'<text x="{rx + CARD_W / 2}" y="{y + label_h - 3.5}" '
+                    f'text-anchor="middle" font-size="5" font-weight="800" '
+                    f'fill="white" letter-spacing="0.2">{esc_lbl}</text>'
+                )
+
+            # Clip paths for team name overflow
+            cid_a = f"c{r_idx}{m_idx}a"
+            cid_b = f"c{r_idx}{m_idx}b"
+            ta_y = y + label_h
+            tb_y = ta_y + team_h
+            parts.append(
+                f'<clipPath id="{cid_a}">'
+                f'<rect x="{rx + 5}" y="{ta_y}" width="{name_max_w}" height="{team_h}"/>'
+                f'</clipPath>'
+            )
+            parts.append(
+                f'<clipPath id="{cid_b}">'
+                f'<rect x="{rx + 5}" y="{tb_y}" width="{name_max_w}" height="{team_h}"/>'
+                f'</clipPath>'
+            )
+
+            # Team A
+            is_wa = match.get("winner") == "A"
+            name_a = html_mod.escape(match.get("team_a") or "?")
+            sa = match.get("score_a")
+            sa_s = str(sa) if sa is not None else ""
+            fill_a = color if is_wa else "#333"
+            fw_a = "900" if is_wa else "600"
+            parts.append(
+                f'<text x="{rx + 6}" y="{ta_y + team_h / 2 + 3}" '
+                f'font-size="7.5" font-weight="{fw_a}" fill="{fill_a}" '
+                f'clip-path="url(#{cid_a})">{name_a}</text>'
+            )
+            parts.append(
+                f'<text x="{rx + CARD_W - 6}" y="{ta_y + team_h / 2 + 3}" '
+                f'text-anchor="end" font-size="8" font-weight="900" '
+                f'fill="{fill_a}">{sa_s}</text>'
+            )
+
+            # Separator line
+            parts.append(
+                f'<line x1="{rx + 2}" y1="{tb_y}" '
+                f'x2="{rx + CARD_W - 2}" y2="{tb_y}" '
+                f'stroke="#e0e0e0" stroke-width="0.5"/>'
+            )
+
+            # Team B
+            is_wb = match.get("winner") == "B"
+            name_b = html_mod.escape(match.get("team_b") or "?")
+            sb = match.get("score_b")
+            sb_s = str(sb) if sb is not None else ""
+            fill_b = color if is_wb else "#333"
+            fw_b = "900" if is_wb else "600"
+            parts.append(
+                f'<text x="{rx + 6}" y="{tb_y + team_h / 2 + 3}" '
+                f'font-size="7.5" font-weight="{fw_b}" fill="{fill_b}" '
+                f'clip-path="url(#{cid_b})">{name_b}</text>'
+            )
+            parts.append(
+                f'<text x="{rx + CARD_W - 6}" y="{tb_y + team_h / 2 + 3}" '
+                f'text-anchor="end" font-size="8" font-weight="900" '
+                f'fill="{fill_b}">{sb_s}</text>'
+            )
+
+    parts.append('</svg>')
+    return '\n'.join(parts)
+
+
 def _build_placement_matches(
     matches: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -391,6 +595,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             "mode": mode,
             "tables": [],
             "bracket_rounds": [],
+            "bracket_svg": "",
             "placement_matches": [],
             "match_days": [],
             "standings": None,
@@ -448,6 +653,9 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             ]
             if knockout_matches:
                 gs["bracket_rounds"] = _build_bracket_rounds(knockout_matches)
+                gs["bracket_svg"] = _render_bracket_svg(
+                    gs["bracket_rounds"], gs["gender_color"],
+                )
 
             # Placement
             gs["placement_matches"] = _build_placement_matches(g_matches)

@@ -186,104 +186,8 @@
     font-size: 7pt;
   }
 
-  /* ── Bracket (knockout tree with connectors) ── */
+  /* ── Bracket (SVG-based) ── */
   .bracket-section { margin-bottom: 12pt; }
-  .bracket-wrap {
-    display: flex;
-    align-items: stretch;
-    gap: 0;
-    font-size: 8pt;
-  }
-  .bracket-round {
-    display: flex;
-    flex-direction: column;
-    min-width: 135pt;
-  }
-  .bracket-round-label {
-    text-align: center;
-    font-size: 7pt;
-    font-weight: 900;
-    text-transform: uppercase;
-    margin-bottom: 6pt;
-    letter-spacing: 0.5pt;
-  }
-  .bracket-round-matches {
-    display: flex;
-    flex-direction: column;
-    justify-content: space-around;
-    flex: 1;
-    gap: 4pt;
-  }
-  .br-match-box {
-    border: 0.5pt solid #ccc;
-    border-radius: 3pt;
-    background: #fafafa;
-    overflow: hidden;
-  }
-  .br-match-label {
-    font-size: 5.5pt;
-    font-weight: 800;
-    text-transform: uppercase;
-    text-align: center;
-    padding: 1.5pt 4pt;
-    letter-spacing: 0.2pt;
-    color: #fff;
-  }
-  .br-team-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 2.5pt 6pt;
-    font-weight: 600;
-    font-size: 7.5pt;
-  }
-  .br-team-row + .br-team-row {
-    border-top: 0.5pt solid #e0e0e0;
-  }
-  .br-team-row.winner {
-    font-weight: 900;
-  }
-  .br-team-row .br-score {
-    font-weight: 900;
-    min-width: 12pt;
-    text-align: right;
-  }
-  .br-team-row .br-name {
-    flex: 1;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    padding-right: 4pt;
-  }
-  /* Connector column between bracket rounds */
-  .bracket-connectors {
-    width: 20pt;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-around;
-  }
-  .br-conn-pair {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    position: relative;
-  }
-  .br-conn-pair .br-conn-top {
-    flex: 1;
-    border-right: 1pt solid #bbb;
-    border-bottom: 1pt solid #bbb;
-  }
-  .br-conn-pair .br-conn-bottom {
-    flex: 1;
-    border-right: 1pt solid #bbb;
-    border-top: 1pt solid #bbb;
-  }
-  .br-conn-pair .br-conn-mid {
-    position: absolute;
-    right: -1pt;
-    top: 50%;
-    width: 10pt;
-    border-top: 1pt solid #bbb;
-  }
 
   /* ── Standings ── */
   .standings-table {
@@ -464,48 +368,12 @@
 {% endif %}
 
 <!-- ── Knockout Bracket ── -->
-{% if gs.bracket_rounds %}
+{% if gs.bracket_svg %}
 <div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Drabinka pucharowa</div>
 <div class="section-desc">Przebieg fazy pucharowej turnieju.</div>
 
 <div class="bracket-section no-break">
-<div class="bracket-wrap">
-  {% for round in gs.bracket_rounds %}
-  {% if not loop.first %}
-  {# Connector column between rounds #}
-  <div class="bracket-connectors">
-    {% for ci in range(round.matches | length) %}
-    <div class="br-conn-pair">
-      <div class="br-conn-top"></div>
-      <div class="br-conn-bottom"></div>
-      <div class="br-conn-mid"></div>
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  <div class="bracket-round">
-    <div class="bracket-round-label" style="color: {{ gc }};">{{ round.label }}</div>
-    <div class="bracket-round-matches">
-      {% for bm in round.matches %}
-      <div class="br-match-box">
-        {% if bm.label %}
-        <div class="br-match-label" style="background: {{ gc }};">{{ bm.label }}</div>
-        {% endif %}
-        <div class="br-team-row{% if bm.winner == 'A' %} winner{% endif %}" style="{% if bm.winner == 'A' %}color: {{ gc }};{% endif %}">
-          <span class="br-name">{{ bm.team_a }}</span>
-          <span class="br-score">{{ bm.score_a if bm.score_a is not none else "" }}</span>
-        </div>
-        <div class="br-team-row{% if bm.winner == 'B' %} winner{% endif %}" style="{% if bm.winner == 'B' %}color: {{ gc }};{% endif %}">
-          <span class="br-name">{{ bm.team_b }}</span>
-          <span class="br-score">{{ bm.score_b if bm.score_b is not none else "" }}</span>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-  {% endfor %}
-</div>
+{{ gs.bracket_svg | safe }}
 </div>
 {% endif %}
 
