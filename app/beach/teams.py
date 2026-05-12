@@ -2187,15 +2187,14 @@ import fitz  # pymupdf
 def _parse_registration_list_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
     """
     Parse a registration-list PDF (lista zgłoszeniowa) from baza.zprp.pl.
-    Extracts players with their medical exam validity dates.
 
-    The PDF table rows span multiple text lines:
-        1. KĘDZIORA Karol 1987-12-17 Obrotowy 13 ... P/1410/20
-        OK
-        2026-05-08 2027-05-04
+    Phase 1: plain-text extraction for player names, license numbers, dates.
+    Phase 2: image / drawing / colored-text analysis to detect approval
+             checkmarks (green ✓).  Only players with at least one green
+             approval mark get their medical date stored.
 
-    Each player has 3 dates: birth, ZPRP license, medical exam.
-    The last (3rd) date is the medical exam validity date.
+    Returns list of dicts with keys:
+        last_name, first_name, license_number, medical_valid_until, source
     """
     results: List[Dict[str, Any]] = []
 
@@ -2206,71 +2205,239 @@ def _parse_registration_list_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
         return results
 
     try:
+        # ── Phase 1: plain-text extraction ──
         full_text = ""
         for page in doc:
             full_text += page.get_text("text") + "\n"
+
+        # Truncate at companions section
+        for marker in ["osoby towarzysz", "lp osoby"]:
+            idx = full_text.lower().find(marker)
+            if idx > 0:
+                full_text = full_text[:idx]
+                break
+
+        entry_starts = list(re.finditer(
+            r'(?:^|\n)\s*(\d+)\.\s+([A-ZĄĆĘŁŃÓŚŹŻ])',
+            full_text,
+        ))
+
+        if not entry_starts:
+            logger.warning("Medical exams PDF: no player entries found in text")
+            return results
+
+        players: List[Dict[str, Any]] = []
+        for i, match in enumerate(entry_starts):
+            start = match.start()
+            end = entry_starts[i + 1].start() if i + 1 < len(entry_starts) else len(full_text)
+            block = full_text[start:end].strip()
+
+            lp = int(match.group(1))
+            name_m = re.match(r'\d+\.\s+(\S+)\s+(\S+)', block)
+            if not name_m:
+                continue
+
+            lic_m = re.search(r'\b([A-Z]/\d{3,}/\d{2})\b', block, re.I)
+            dates = re.findall(r'\d{4}-\d{2}-\d{2}', block)
+            med_date = dates[-1] if len(dates) >= 3 else (dates[-1] if len(dates) == 2 else None)
+
+            players.append({
+                "lp": lp,
+                "last_name": name_m.group(1),
+                "first_name": name_m.group(2),
+                "license_number": lic_m.group(1) if lic_m else None,
+                "medical_valid_until": med_date,
+                "approved": False,
+                "has_wzpr": False,
+            })
+
+        # ── Phase 2: detect approval checkmarks ──
+        for page in doc:
+            _detect_approvals_on_page(page, doc, players)
+
+        # ── Build output — only approved players get their date ──
+        for p in players:
+            results.append({
+                "last_name": p["last_name"],
+                "first_name": p["first_name"],
+                "license_number": p["license_number"],
+                "medical_valid_until": p["medical_valid_until"] if p["approved"] else None,
+                "source": "WZPR" if p["has_wzpr"] else None,
+            })
     finally:
         doc.close()
 
-    # Truncate at companions section ("osoby towarzyszące")
-    for marker in ["osoby towarzysz", "lp osoby"]:
-        idx = full_text.lower().find(marker)
-        if idx > 0:
-            full_text = full_text[:idx]
-            break
-
-    # Find all player entry start positions: "N. UPPERCASE..." at start of line
-    entry_starts = list(re.finditer(
-        r'(?:^|\n)\s*(\d+)\.\s+([A-ZĄĆĘŁŃÓŚŹŻ])',
-        full_text,
-    ))
-
-    if not entry_starts:
-        logger.warning("Medical exams PDF: no player entries found in text")
-        return results
-
-    for i, match in enumerate(entry_starts):
-        start = match.start()
-        end = entry_starts[i + 1].start() if i + 1 < len(entry_starts) else len(full_text)
-        block = full_text[start:end].strip()
-
-        # Extract name: "N. LASTNAME Firstname ..."
-        name_m = re.match(r'\d+\.\s+(\S+)\s+(\S+)', block)
-        if not name_m:
-            continue
-        last_name = name_m.group(1)
-        first_name = name_m.group(2)
-
-        # Extract license number (P/NNNN/NN)
-        lic_m = re.search(r'\b([A-Z]/\d{3,}/\d{2})\b', block, re.I)
-        license_number = lic_m.group(1) if lic_m else None
-
-        # Extract all dates (YYYY-MM-DD)
-        dates = re.findall(r'\d{4}-\d{2}-\d{2}', block)
-
-        # The PDF has 3 dates per player: birth, ZPRP license, medical exam.
-        # The last date is the medical exam validity date.
-        medical_date = None
-        if len(dates) >= 3:
-            medical_date = dates[-1]  # 3rd date = medical
-        elif len(dates) == 2:
-            medical_date = dates[-1]  # assume 2nd is medical (ZPRP date missing)
-
-        if not medical_date:
-            continue
-
-        # Check for WZPR source marker
-        source = "WZPR" if "WZPR" in block.upper() else None
-
-        results.append({
-            "last_name": last_name,
-            "first_name": first_name,
-            "license_number": license_number,
-            "medical_valid_until": medical_date,
-            "source": source,
-        })
-
     return results
+
+
+# ── helpers for approval detection ──
+
+
+def _detect_approvals_on_page(
+    page, doc, players: List[Dict[str, Any]],
+) -> None:
+    """Scan a single page for green approval marks and tag matching players."""
+
+    # Step 1 — find y-positions of Lp numbers on this page
+    lp_y: List[Tuple[float, int]] = []
+    companion_y: float = page.rect.height
+
+    text_dict = page.get_text("dict")
+    for block in text_dict.get("blocks", []):
+        for line in block.get("lines", []):
+            line_text = "".join(s.get("text", "") for s in line.get("spans", []))
+            lt = line_text.strip().lower()
+
+            if "osoby towarzysz" in lt:
+                spans = line.get("spans", [])
+                if spans:
+                    companion_y = spans[0]["bbox"][1]
+                continue
+
+            for span in line.get("spans", []):
+                bbox = span.get("bbox", [0, 0, 0, 0])
+                txt = span.get("text", "").strip().rstrip(".")
+                # Lp numbers sit in the leftmost column (x < 55)
+                if bbox[0] < 55 and re.fullmatch(r"\d{1,2}", txt):
+                    n = int(txt)
+                    if 1 <= n <= 50 and bbox[1] < companion_y:
+                        lp_y.append((bbox[1], n))
+
+    lp_y.sort()
+    if not lp_y:
+        return
+
+    page_width = page.rect.width
+    # Approval marks live in the rightmost area of the page
+    approval_x_min = page_width * 0.75
+
+    def _set_approved(y_pos: float, is_wzpr: bool = False) -> None:
+        best_lp = None
+        for row_y, lp in lp_y:
+            if row_y <= y_pos + 5:
+                best_lp = lp
+            else:
+                break
+        if best_lp is not None:
+            for p in players:
+                if p["lp"] == best_lp:
+                    p["approved"] = True
+                    if is_wzpr:
+                        p["has_wzpr"] = True
+                    break
+
+    # ── Method A: colored text spans (checkmarks as font glyphs) ──
+    for block in text_dict.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                bbox = span.get("bbox", [0, 0, 0, 0])
+                if bbox[0] < approval_x_min or bbox[1] > companion_y:
+                    continue
+
+                text = span.get("text", "").strip()
+                color = span.get("color", 0)
+                if not text:
+                    continue
+
+                is_green = False
+                if isinstance(color, int) and color != 0:
+                    r = (color >> 16) & 0xFF
+                    g = (color >> 8) & 0xFF
+                    b = color & 0xFF
+                    is_green = g > 80 and g > r * 1.2 and g > b * 1.2
+
+                if is_green:
+                    _set_approved(bbox[1], "WZPR" in text.upper())
+                elif text in ("\u2713", "\u2714", "\u2611"):  # ✓ ✔ ☑
+                    _set_approved(bbox[1])
+
+    # ── Method B: embedded images (checkmarks as PNG/GIF) ──
+    try:
+        img_infos = page.get_image_info(xrefs=True)
+        xref_class: Dict[int, str] = {}
+
+        for info in img_infos:
+            xref = info.get("xref", 0)
+            if xref == 0:
+                continue
+
+            bbox = info.get("bbox", (0, 0, 0, 0))
+            x0, y0, x1, y1 = bbox
+            w, h = abs(x1 - x0), abs(y1 - y0)
+
+            if w > 60 or h > 60 or w < 2 or h < 2:
+                continue
+            if x0 < approval_x_min or y0 > companion_y:
+                continue
+
+            if xref not in xref_class:
+                xref_class[xref] = _classify_image_color(doc, xref)
+
+            if xref_class[xref] == "green":
+                y_center = (y0 + y1) / 2
+                # WZPR label images are wider than simple checkmarks
+                _set_approved(y_center, is_wzpr=(w > 20))
+    except Exception as e:
+        logger.debug("Medical exams: image analysis unavailable: %s", e)
+
+    # ── Method C: vector drawings (checkmarks as paths) ──
+    try:
+        for d in page.get_drawings():
+            fill = d.get("fill")
+            rect = d.get("rect")
+            if not fill or not rect:
+                continue
+
+            x0, y0, x1, y1 = rect
+            if x0 < approval_x_min or y0 > companion_y:
+                continue
+            w, h = abs(x1 - x0), abs(y1 - y0)
+            if w > 60 or h > 60:
+                continue
+
+            r, g, b = fill
+            if g > 0.4 and g > r * 1.2 and g > b * 1.2:
+                _set_approved((y0 + y1) / 2)
+    except Exception as e:
+        logger.debug("Medical exams: drawings analysis unavailable: %s", e)
+
+
+def _classify_image_color(doc, xref: int) -> str:
+    """Classify a PDF image by its dominant non-white color."""
+    try:
+        pix = fitz.Pixmap(doc, xref)
+        if pix.colorspace and pix.colorspace.n == 1:
+            pix = fitz.Pixmap(fitz.csRGB, pix)
+
+        samples = pix.samples
+        n = pix.n
+        if not samples or n < 3:
+            return "other"
+
+        total_r = total_g = total_b = count = 0
+        step = max(1, len(samples) // (n * 500))  # sample ≤500 pixels
+        for i in range(0, len(samples), n * step):
+            r, g, b = samples[i], samples[i + 1], samples[i + 2]
+            if r > 230 and g > 230 and b > 230:
+                continue
+            if n >= 4 and samples[i + 3] < 50:
+                continue
+            total_r += r
+            total_g += g
+            total_b += b
+            count += 1
+
+        if count < 3:
+            return "other"
+
+        ar, ag, ab = total_r / count, total_g / count, total_b / count
+        if ag > 80 and ag > ar * 1.2 and ag > ab * 1.2:
+            return "green"
+        if ar > 80 and ar > ag * 1.2 and ar > ab * 1.2:
+            return "red"
+        return "other"
+    except Exception:
+        return "other"
 
 
 class MedicalExamsCheckRequest(BaseModel):
@@ -2412,10 +2579,23 @@ async def _check_medical_exams_for_team(
             .values(**update_values)
         )
 
+    # Count only exams that are both approved (stored) AND not expired
+    now_date = _now_utc().date()
+    valid_count = 0
+    for exam in medical_exams.values():
+        vu = exam.get("valid_until")
+        if vu:
+            try:
+                exp = datetime.strptime(vu, "%Y-%m-%d").date()
+                if exp >= now_date:
+                    valid_count += 1
+            except (ValueError, TypeError):
+                pass
+
     return {
         "team_id": team_id,
         "team_name": team_name,
         "total_players": len(in_squad_players),
-        "valid_exams": matched,
+        "valid_exams": valid_count,
         "exams": medical_exams,
     }
