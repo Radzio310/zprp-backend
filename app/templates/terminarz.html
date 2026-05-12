@@ -155,26 +155,20 @@
   /* stage/group */
   td.col-stage {
     font-style: italic;
-    font-size: 7.5pt;
+    font-size: 7pt;
     color: #666;
     white-space: nowrap;
-    width: {{ '55pt' if use_landscape else '48pt' }};
-  }
-
-  /* match number */
-  td.col-num {
-    font-size: 7pt;
-    color: #bbb;
-    text-align: center;
-    white-space: nowrap;
-    width: 24pt;
+    width: {{ '38pt' if use_landscape else '34pt' }};
   }
 
   /* team names */
   td.col-team {
     font-weight: 700;
-    max-width: {{ '160pt' if use_landscape else '100pt' }};
-    overflow: hidden;
+    max-width: {{ '200pt' if use_landscape else '130pt' }};
+    word-break: break-word;
+  }
+  td.col-team.long-name {
+    font-size: {{ '7.5pt' if use_landscape else '7pt' }};
   }
   td.col-team.tbd {
     color: #bbb;
@@ -195,11 +189,25 @@
   /* score */
   td.col-score {
     text-align: center;
-    font-weight: 900;
+    vertical-align: middle;
     white-space: nowrap;
-    width: {{ '50pt' if use_landscape else '42pt' }};
-    font-size: 8.5pt;
-    color: #333;
+    width: {{ '54pt' if use_landscape else '46pt' }};
+    padding: 3pt 5pt;
+  }
+  .score-main {
+    display: block;
+    font-weight: 900;
+    font-size: 9pt;
+    color: #222;
+    line-height: 1.2;
+  }
+  .score-sets {
+    display: block;
+    font-size: 6pt;
+    font-weight: 400;
+    color: #aaa;
+    line-height: 1.3;
+    margin-top: 1pt;
   }
   td.col-score.empty {
     color: #ddd;
@@ -297,7 +305,6 @@
         <th class="th-center">Boisko</th>
         <th class="th-center">Kat.</th>
         <th>Etap / Grupa</th>
-        <th>Nr</th>
         <th class="th-team">Drużyna A</th>
         <th class="th-center">–</th>
         <th class="th-team">Drużyna B</th>
@@ -311,11 +318,15 @@
         <td class="col-court">{{ m.court }}</td>
         <td class="col-cat {{ m.gender }}">{{ m.category }}</td>
         <td class="col-stage">{{ m.stage }}</td>
-        <td class="col-num">{{ m.match_number }}</td>
-        <td class="col-team{% if not m.team_a %} tbd{% endif %}">{{ m.team_a or 'TBD' }}</td>
+        <td class="col-team{% if not m.team_a %} tbd{% elif m.team_a | length > 22 %} long-name{% endif %}">{{ m.team_a or 'TBD' }}</td>
         <td class="col-vs">–</td>
-        <td class="col-team{% if not m.team_b %} tbd{% endif %}">{{ m.team_b or 'TBD' }}</td>
-        <td class="col-score{% if not m.score %} empty{% endif %}">{{ m.score or '–' }}</td>
+        <td class="col-team{% if not m.team_b %} tbd{% elif m.team_b | length > 22 %} long-name{% endif %}">{{ m.team_b or 'TBD' }}</td>
+        <td class="col-score{% if not m.score_main %} empty{% endif %}">
+          {% if m.score_main %}
+          <span class="score-main">{{ m.score_main }}</span>
+          {% if m.score_sets %}<span class="score-sets">{{ m.score_sets }}</span>{% endif %}
+          {% else %}–{% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>

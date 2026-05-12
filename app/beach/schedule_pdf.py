@@ -157,12 +157,14 @@ def _team_name(team: Optional[Dict[str, Any]]) -> str:
     return ""
 
 
-def _score_str(m: Dict[str, Any]) -> str:
+def _score_parts(m: Dict[str, Any]) -> tuple:
+    """Return (score_main, score_sets) as separate strings."""
     a, b = m.get("scoreA"), m.get("scoreB")
     if a is None or b is None:
-        return ""
-    base = f"{a}:{b}"
+        return "", ""
+    score_main = f"{a}:{b}"
     sets = m.get("sets") or []
+    score_sets = ""
     if sets:
         parts = [
             f"{s.get('ptA', '')}:{s.get('ptB', '')}"
@@ -170,8 +172,8 @@ def _score_str(m: Dict[str, Any]) -> str:
             if isinstance(s, dict)
         ]
         if parts:
-            return f"{base}  ({', '.join(parts)})"
-    return base
+            score_sets = ", ".join(parts)
+    return score_main, score_sets
 
 
 # ─── context builder ──────────────────────────────────────────────────────────
@@ -208,6 +210,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
 
         match_rows = []
         for m in day_matches:
+            sm, ss = _score_parts(m)
             match_rows.append({
                 "time": m.get("startTime") or "",
                 "court": str(m.get("court") or ""),
@@ -216,8 +219,8 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                 "stage": _stage_label(m),
                 "team_a": _team_name(m.get("teamA")),
                 "team_b": _team_name(m.get("teamB")),
-                "score": _score_str(m),
-                "match_number": m.get("matchNumber") or "",
+                "score_main": sm,
+                "score_sets": ss,
             })
 
         days_out.append({"label": day_label, "matches": match_rows})
