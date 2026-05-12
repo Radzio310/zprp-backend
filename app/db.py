@@ -976,6 +976,10 @@ beach_teams = Table(
     # nadpisania numerów zawodników: {"<player_id>": "<custom_number>"}
     Column("jersey_overrides", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
 
+    # badania lekarskie: {"<player_id>": {"valid_until": "2027-05-04", "source": "WZPR" | null}}
+    Column("medical_exams_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("medical_exams_checked_at", DateTime(timezone=True), nullable=True),
+
     # pomocniczo: skąd dane i kiedy były ostatnio synchronizowane
     Column("source", String, nullable=False, server_default=text("'zprp'")),
     Column("last_synced_at", DateTime(timezone=True), nullable=True),

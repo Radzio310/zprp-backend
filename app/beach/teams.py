@@ -1522,12 +1522,32 @@ async def get_local_beach_team_squad(team_id: int):
         raise HTTPException(status_code=404, detail="Drużyna nie istnieje")
 
     data = dict(row)
+    # Merge medical exam data into each player record
+    medical_exams = {}
+    if _table_has_column("medical_exams_json"):
+        medical_exams = data.get("medical_exams_json") or {}
+        if not isinstance(medical_exams, dict):
+            medical_exams = {}
+
+    players = data.get("roster_json") if _table_has_column("roster_json") else None
+    if players and medical_exams:
+        for p in players:
+            pid = str(p.get("player_id", ""))
+            exam = medical_exams.get(pid)
+            if exam and isinstance(exam, dict):
+                p["medical_exam_valid_until"] = exam.get("valid_until")
+                p["medical_exam_source"] = exam.get("source")
+            else:
+                p["medical_exam_valid_until"] = None
+                p["medical_exam_source"] = None
+
     return {
         "team": _row_to_item(row).model_dump(),
-        "players": data.get("roster_json") if _table_has_column("roster_json") else None,
+        "players": players,
         "companions": data.get("companions_json") if _table_has_column("companions_json") else None,
         "historical_players": data.get("historical_players_json") if _table_has_column("historical_players_json") else None,
         "squad_last_synced_at": data.get("squad_last_synced_at") if _table_has_column("squad_last_synced_at") else None,
+        "medical_exams_checked_at": data.get("medical_exams_checked_at") if _table_has_column("medical_exams_checked_at") else None,
         "db_has_squad_columns": {
             "roster_json": _table_has_column("roster_json"),
             "companions_json": _table_has_column("companions_json"),
@@ -2155,3 +2175,426 @@ async def download_registration_list(
             lambda: os.remove(file_path) if os.path.exists(file_path) else None
         ),
     )
+
+
+# =========================================================
+# Medical exams — PDF parsing & check
+# =========================================================
+
+import fitz  # pymupdf
+
+
+def _parse_registration_list_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Parse a registration-list PDF (lista zgłoszeniowa) from baza.zprp.pl.
+    Extracts players with their medical exam validity dates.
+
+    Returns list of dicts:
+    [
+        {
+            "last_name": "KĘDZIORA",
+            "first_name": "Karol",
+            "license_number": "P/1410/20",
+            "medical_valid_until": "2027-05-04" | None,
+            "medical_approved": True/False,
+            "source": "WZPR" | None,
+        },
+        ...
+    ]
+    """
+    results: List[Dict[str, Any]] = []
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        logger.warning("Medical exams PDF: failed to open PDF: %s", e)
+        return results
+
+    try:
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            try:
+                _parse_medical_page(page, results)
+            except Exception as e:
+                logger.warning("Medical exams PDF: error parsing page %d: %s", page_num, e)
+    finally:
+        doc.close()
+
+    return results
+
+
+def _parse_medical_page(page, results: List[Dict[str, Any]]) -> None:
+    """Parse a single page of the registration list PDF for player medical exam data."""
+    # Get all text blocks with positions
+    text_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+    blocks = text_dict.get("blocks", [])
+
+    # Collect all text spans with position info
+    spans: List[Dict[str, Any]] = []
+    for block in blocks:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                spans.append({
+                    "text": span.get("text", "").strip(),
+                    "x0": span.get("bbox", [0])[0],
+                    "y0": span.get("bbox", [0, 0])[1],
+                    "x1": span.get("bbox", [0, 0, 0])[2],
+                    "y1": span.get("bbox", [0, 0, 0, 0])[3],
+                    "size": span.get("size", 0),
+                    "color": span.get("color", 0),
+                    "font": span.get("font", ""),
+                })
+
+    if not spans:
+        return
+
+    # Find the header row to determine column positions
+    # Look for "data następnego badania" column header
+    medical_col_x = None
+    license_col_x = None
+    header_y = None
+    name_col_x = None
+
+    for s in spans:
+        t = s["text"].lower()
+        if "nast" in t and "badan" in t:
+            medical_col_x = s["x0"]
+            header_y = s["y0"]
+        elif "lic." in t and "zprp" in t:
+            license_col_x = s["x0"]
+        elif t == "nazwisko i imię" or (t == "nazwisko" and s["x0"] < 300):
+            name_col_x = s["x0"]
+
+    if medical_col_x is None:
+        # Try alternate: "data następnego" on one line
+        for s in spans:
+            t = s["text"].lower()
+            if "data zprp" in t:
+                # The "data następnego badania" is typically the last column
+                # Use position heuristic
+                if s["x0"] > 600:
+                    medical_col_x = s["x0"]
+                    header_y = s["y0"]
+
+    if medical_col_x is None:
+        logger.warning("Medical exams PDF: could not find medical exam column header on page")
+        return
+
+    # Find player data rows
+    # Strategy: group spans by y-coordinate (same row), then extract data by x-position
+
+    # Get all unique y positions (rounded to group spans in same line)
+    def y_key(y: float) -> int:
+        return int(y * 2) // 2  # Group within ~0.5pt
+
+    # Build rows: group spans by y
+    rows_map: Dict[int, List[Dict[str, Any]]] = {}
+    for s in spans:
+        yk = y_key(s["y0"])
+        if yk not in rows_map:
+            rows_map[yk] = []
+        rows_map[yk].append(s)
+
+    # Process rows that are below the header
+    header_yk = y_key(header_y) if header_y else 0
+
+    # Sort rows by y position
+    sorted_yks = sorted(rows_map.keys())
+
+    # Track: we parse numbered rows (Lp starts with digit)
+    for yk in sorted_yks:
+        if yk <= header_yk:
+            continue
+
+        row_spans = sorted(rows_map[yk], key=lambda s: s["x0"])
+        if not row_spans:
+            continue
+
+        # Check if first span is a row number (Lp)
+        first_text = row_spans[0]["text"].strip().rstrip(".")
+        if not re.fullmatch(r"\d+", first_text):
+            continue
+
+        # Extract data from this row
+        row_data = _extract_player_from_pdf_row(row_spans, medical_col_x, license_col_x)
+        if row_data:
+            results.append(row_data)
+
+
+def _extract_player_from_pdf_row(
+    row_spans: List[Dict[str, Any]],
+    medical_col_x: float,
+    license_col_x: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """Extract player medical exam data from a PDF row's spans."""
+    if len(row_spans) < 3:
+        return None
+
+    # Spans are sorted by x. After the Lp number, next spans are name and other fields.
+    # The PDF format from ZPRP typically has these columns:
+    # Lp | nazwisko i imię | data urodzenia | pozycja | nr zawodnika | ... | Lic. ZPRP | data ZPRP | data następnego badania
+
+    last_name = None
+    first_name = None
+    license_number = None
+    medical_date = None
+    medical_approved = False
+    source = None
+
+    # Parse name: usually 2nd and 3rd span (or combined)
+    name_spans = []
+    for i, s in enumerate(row_spans):
+        if i == 0:
+            continue  # Skip Lp
+
+        t = s["text"].strip()
+        # Skip purely numeric or date-like or very short tokens in non-name positions
+        if not t:
+            continue
+
+        # Name spans are typically early in the row (x < 250)
+        if s["x0"] < 250 and not re.fullmatch(r"\d+\.?", t):
+            name_spans.append(t)
+
+    if len(name_spans) >= 2:
+        last_name = name_spans[0].strip()
+        first_name = name_spans[1].strip()
+    elif len(name_spans) == 1:
+        parts = name_spans[0].split()
+        if len(parts) >= 2:
+            last_name = parts[0]
+            first_name = " ".join(parts[1:])
+
+    # Parse license number
+    for s in row_spans:
+        t = s["text"].strip()
+        m = re.search(r"\b([A-Z]/\d{3,}/\d{2})\b", t, re.I)
+        if m:
+            license_number = m.group(1)
+            break
+
+    # Parse medical exam date — find spans near the medical_col_x
+    medical_spans = []
+    for s in row_spans:
+        # Medical column is usually the last column. Check if span x is near medical_col_x
+        if abs(s["x0"] - medical_col_x) < 60 or s["x0"] > medical_col_x - 20:
+            t = s["text"].strip()
+            if re.search(r"\d{4}-\d{2}-\d{2}", t):
+                medical_spans.append(s)
+
+    # The last date in the row is typically the medical exam date
+    # (earlier dates are birth_date and ZPRP license date)
+    all_dates_in_row = []
+    for s in row_spans:
+        for m in re.finditer(r"\d{4}-\d{2}-\d{2}", s["text"]):
+            all_dates_in_row.append({
+                "date": m.group(0),
+                "x0": s["x0"],
+                "span": s,
+            })
+
+    if all_dates_in_row:
+        # Sort by x position, the last one is "data następnego badania"
+        all_dates_in_row.sort(key=lambda d: d["x0"])
+        if len(all_dates_in_row) >= 2:
+            # Last date = medical exam, second to last = ZPRP license date
+            medical_date = all_dates_in_row[-1]["date"]
+        elif len(all_dates_in_row) == 1 and all_dates_in_row[0]["x0"] > medical_col_x - 40:
+            medical_date = all_dates_in_row[0]["date"]
+
+    # Check for approval checkmark
+    # In the PDF, approved exams show a green checkmark or "OK" text near the medical date
+    # We look for green-colored spans or specific markers
+    for s in row_spans:
+        t = s["text"].strip().upper()
+        color = s.get("color", 0)
+
+        # Green color check: color is an integer RGB value in pymupdf
+        # Green typically: 0x008000, 0x00FF00, etc.
+        # OR text contains check mark characters
+        is_green = False
+        if isinstance(color, int) and color != 0:
+            r = (color >> 16) & 0xFF
+            g = (color >> 8) & 0xFF
+            b = color & 0xFF
+            is_green = g > 100 and g > r * 1.5 and g > b * 1.5
+
+        if t in ("OK", "✓", "✔", "V") and (is_green or s["x0"] > medical_col_x - 100):
+            medical_approved = True
+
+        # Detect "WZPR" source label
+        if "WZPR" in t:
+            source = "WZPR"
+
+        # Also look for green check images represented as special chars
+        if is_green and t:
+            medical_approved = True
+
+    # Also check: in the PDF the check status is shown by green markers near the exam date
+    # The ZPRP PDF puts checkmarks in separate image-based elements which pymupdf may not capture
+    # Fallback: if we have a medical_date AND a license that's valid, consider it approved
+    # We detect approval via the "OK" text that appears near medical data columns
+    for s in row_spans:
+        t = s["text"].strip()
+        if t == "OK":
+            medical_approved = True
+
+    if not last_name:
+        return None
+
+    return {
+        "last_name": last_name,
+        "first_name": first_name,
+        "license_number": license_number,
+        "medical_valid_until": medical_date if medical_approved else None,
+        "medical_approved": medical_approved,
+        "source": source,
+    }
+
+
+class MedicalExamsCheckRequest(BaseModel):
+    team_ids: List[int]
+    season_id: str = "8"
+
+
+@router.post("/check-medical-exams", summary="Sprawdź badania lekarskie drużyn (parsowanie listy zgłoszeniowej PDF)")
+async def check_medical_exams(
+    req: MedicalExamsCheckRequest,
+    settings: Settings = Depends(get_settings),
+):
+    """
+    For each team:
+    1. Sync squad from ZPRP
+    2. Download registration list PDF
+    3. Parse PDF for medical exam dates
+    4. Match to stored players and save medical_exams_json
+    """
+    if not req.team_ids:
+        raise HTTPException(400, detail="Brak team_ids")
+
+    client = await _login_beach_client(settings)
+    team_results = []
+
+    try:
+        for tid in req.team_ids:
+            try:
+                result = await _check_medical_exams_for_team(client, tid, req.season_id, settings)
+                team_results.append(result)
+            except Exception as e:
+                logger.warning("Medical exams check failed for team %d: %s", tid, e)
+                team_results.append({
+                    "team_id": tid,
+                    "team_name": None,
+                    "total_players": 0,
+                    "valid_exams": 0,
+                    "exams": {},
+                    "error": str(e),
+                })
+    finally:
+        await client.aclose()
+
+    return {"teams": team_results}
+
+
+async def _check_medical_exams_for_team(
+    client: AsyncClient,
+    team_id: int,
+    season_id: str,
+    settings: Settings,
+) -> Dict[str, Any]:
+    """Check medical exams for a single team."""
+
+    # 1. Sync squad from ZPRP
+    try:
+        row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
+        if row and dict(row).get("squad_url"):
+            squad = await _fetch_squad_for_team(client, squad_url=dict(row)["squad_url"])
+            await _maybe_save_team_squad_to_db(team_id, squad)
+    except Exception as e:
+        logger.warning("Medical exams: squad sync failed for team %d: %s", team_id, e)
+
+    # 2. Download registration list PDF
+    url = f"/zespolyP_PDF.php?ID_sezonP={season_id}&ID_zespol={team_id}"
+    try:
+        resp = await client.get(url, cookies=client.cookies)
+    except Exception as e:
+        logger.warning("Medical exams: PDF download failed for team %d: %s", team_id, e)
+        raise HTTPException(500, detail=f"Nie udało się pobrać listy zgłoszeniowej dla drużyny {team_id}")
+
+    if resp.status_code != 200:
+        logger.warning("Medical exams: PDF download HTTP %d for team %d", resp.status_code, team_id)
+        raise HTTPException(500, detail=f"Błąd pobierania listy zgłoszeniowej (HTTP {resp.status_code})")
+
+    pdf_bytes = resp.content
+    if len(pdf_bytes) < 100:
+        logger.warning("Medical exams: PDF too small (%d bytes) for team %d", len(pdf_bytes), team_id)
+        raise HTTPException(500, detail="Otrzymano pustą lub uszkodzoną listę zgłoszeniową")
+
+    # 3. Parse PDF
+    parsed_players = _parse_registration_list_pdf(pdf_bytes)
+    logger.info("Medical exams: parsed %d players from PDF for team %d", len(parsed_players), team_id)
+
+    # 4. Match parsed players to stored roster
+    row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
+    if not row:
+        raise HTTPException(404, detail=f"Drużyna {team_id} nie istnieje")
+
+    data = dict(row)
+    team_name = data.get("team_name", str(team_id))
+    roster = data.get("roster_json") or [] if _table_has_column("roster_json") else []
+    in_squad_players = [p for p in roster if p.get("in_squad") is not False]
+
+    medical_exams: Dict[str, Dict[str, Any]] = {}
+    matched = 0
+
+    for parsed in parsed_players:
+        if not parsed.get("medical_valid_until"):
+            continue
+
+        # Try matching by license number (primary)
+        player_id = None
+        if parsed.get("license_number"):
+            for rp in roster:
+                if rp.get("zprp_license_number") and rp["zprp_license_number"] == parsed["license_number"]:
+                    player_id = str(rp["player_id"])
+                    break
+
+        # Fallback: match by last_name + first_name
+        if not player_id and parsed.get("last_name"):
+            p_last = (parsed["last_name"] or "").strip().upper()
+            p_first = (parsed.get("first_name") or "").strip().upper()
+            for rp in roster:
+                r_last = (rp.get("last_name") or "").strip().upper()
+                r_first = (rp.get("first_name") or "").strip().upper()
+                if r_last == p_last and r_first == p_first:
+                    player_id = str(rp["player_id"])
+                    break
+
+        if player_id:
+            medical_exams[player_id] = {
+                "valid_until": parsed["medical_valid_until"],
+                "source": parsed.get("source"),
+            }
+            matched += 1
+
+    # 5. Save to DB
+    if _table_has_column("medical_exams_json"):
+        update_values: Dict[str, Any] = {
+            "medical_exams_json": medical_exams,
+        }
+        if _table_has_column("medical_exams_checked_at"):
+            update_values["medical_exams_checked_at"] = _now_utc()
+
+        await database.execute(
+            update(beach_teams)
+            .where(beach_teams.c.id == team_id)
+            .values(**update_values)
+        )
+
+    return {
+        "team_id": team_id,
+        "team_name": team_name,
+        "total_players": len(in_squad_players),
+        "valid_exams": matched,
+        "exams": medical_exams,
+    }

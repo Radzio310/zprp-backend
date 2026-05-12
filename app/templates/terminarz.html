@@ -261,6 +261,65 @@
   .legend-dot.M { background: #2BA8A0; }
   .legend-dot.K { background: #E85A78; }
 
+  /* ── Group preview ── */
+  .groups-preview {
+    margin: 8pt 0 14pt 0;
+    page-break-inside: avoid;
+  }
+  .groups-preview-title {
+    font-size: 8pt;
+    font-weight: 900;
+    color: {{ accent }};
+    text-transform: uppercase;
+    letter-spacing: 0.4pt;
+    margin-bottom: 5pt;
+  }
+  .gender-groups {
+    margin-bottom: 8pt;
+    page-break-inside: avoid;
+  }
+  .gender-groups:last-child {
+    margin-bottom: 0;
+  }
+  .gender-groups-header {
+    font-size: 7.5pt;
+    font-weight: 900;
+    margin-bottom: 4pt;
+  }
+  .gender-groups-header.M { color: #2BA8A0; }
+  .gender-groups-header.K { color: #E85A78; }
+  .group-grid {
+    display: flex;
+    flex-direction: row;
+    gap: 6pt;
+    flex-wrap: wrap;
+  }
+  .group-box {
+    flex: 1;
+    min-width: {{ '105pt' if use_landscape else '92pt' }};
+    border: 0.6pt solid #e5e5e5;
+    border-radius: 4pt;
+    overflow: hidden;
+  }
+  .group-box-title {
+    background: #f6f6f6;
+    color: #555;
+    font-size: 7pt;
+    font-weight: 900;
+    padding: 3pt 5pt;
+    border-bottom: 0.5pt solid #e7e7e7;
+  }
+  .group-team {
+    font-size: 7pt;
+    font-weight: 650;
+    color: #333;
+    padding: 2.5pt 5pt;
+    border-bottom: 0.4pt solid #f0f0f0;
+  }
+  .group-team:last-child {
+    border-bottom: 0;
+  }
+
   /* ── Footer ── */
   .footer {
     margin-top: 18pt;
@@ -311,6 +370,27 @@
 </div>
 {% endif %}
 
+{% if group_previews %}
+<div class="groups-preview">
+  <div class="groups-preview-title">Podgląd grup przed fazą pucharową</div>
+  {% for preview in group_previews %}
+  <div class="gender-groups">
+    <div class="gender-groups-header {{ preview.gender }}">{{ preview.label }}</div>
+    <div class="group-grid">
+      {% for group in preview.groups %}
+      <div class="group-box">
+        <div class="group-box-title">Grupa {{ group.name }}</div>
+        {% for team in group.teams %}
+        <div class="group-team">{{ team.name }}</div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <!-- ════════ PER-DAY SECTIONS ════════ -->
 {% for day in days %}
 {% if not loop.first %}
@@ -345,9 +425,9 @@
         <td class="col-court">{{ m.court }}</td>
         <td class="col-cat {{ m.gender }}">{{ m.category }}</td>
         <td class="col-stage">{{ m.stage }}</td>
-        <td class="col-team{% if not m.team_a %} tbd{% elif m.team_a | length > 22 %} long-name{% endif %}">{{ m.team_a or 'TBD' }}</td>
+        <td class="col-team{% if not m.team_a %} tbd{% elif m.team_a | length > 22 %} long-name{% endif %}">{{ m.team_a }}</td>
         <td class="col-vs">–</td>
-        <td class="col-team{% if not m.team_b %} tbd{% elif m.team_b | length > 22 %} long-name{% endif %}">{{ m.team_b or 'TBD' }}</td>
+        <td class="col-team{% if not m.team_b %} tbd{% elif m.team_b | length > 22 %} long-name{% endif %}">{{ m.team_b }}</td>
         <td class="col-score{% if not m.score_main %} empty{% endif %}">
           {% if m.score_main %}
           <span class="score-main">{{ m.score_main }}</span>

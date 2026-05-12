@@ -178,6 +178,95 @@ def _team_name(team: Optional[Dict[str, Any]]) -> str:
     return ""
 
 
+def _gender_label(gender: str) -> str:
+    return "Mężczyźni" if gender == "M" else "Kobiety" if gender == "K" else gender
+
+
+def _build_group_previews(
+    matches: List[Dict[str, Any]],
+    config: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    knockout_stages = {
+        "quarterfinal",
+        "semifinal",
+        "fifth_semifinal",
+        "final",
+        "third_place",
+        "fifth_place",
+        "seventh_place",
+    }
+    has_knockout = any(m.get("stage") in knockout_stages for m in matches)
+    if not has_knockout:
+        return []
+
+    team_names: Dict[int, str] = {}
+    fallback_groups: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    seen_fallback = set()
+
+    for m in matches:
+        gender = m.get("gender") or ""
+        group = m.get("group") or ""
+        for team in (m.get("teamA"), m.get("teamB")):
+            if not isinstance(team, dict) or team.get("id") is None:
+                continue
+            try:
+                team_id = int(team["id"])
+            except (TypeError, ValueError):
+                continue
+            name = _team_name(team)
+            if name:
+                team_names[team_id] = name
+            if m.get("stage") == "group" and gender and group:
+                key = (gender, group, team_id)
+                if key not in seen_fallback:
+                    fallback_groups[gender][group].append(
+                        {"id": team_id, "name": name or f"#{team_id}"}
+                    )
+                    seen_fallback.add(key)
+
+    previews: List[Dict[str, Any]] = []
+    groups_cfg = config.get("groups") or {}
+
+    for gender in ("M", "K"):
+        gender_cfg = groups_cfg.get(gender) or {}
+        cfg_teams = gender_cfg.get("teams") or {}
+        group_names = sorted(
+            set(cfg_teams.keys()) | set(fallback_groups.get(gender, {}).keys())
+        )
+        groups_out: List[Dict[str, Any]] = []
+
+        for group_name in group_names:
+            teams_out: List[Dict[str, Any]] = []
+            configured_ids = cfg_teams.get(group_name) or []
+            if configured_ids:
+                for raw_id in configured_ids:
+                    try:
+                        team_id = int(raw_id)
+                    except (TypeError, ValueError):
+                        continue
+                    teams_out.append(
+                        {"id": team_id, "name": team_names.get(team_id, f"#{team_id}")}
+                    )
+            else:
+                teams_out = fallback_groups.get(gender, {}).get(group_name, [])
+
+            if teams_out:
+                groups_out.append({"name": group_name, "teams": teams_out})
+
+        if groups_out:
+            previews.append(
+                {
+                    "gender": gender,
+                    "label": _gender_label(gender),
+                    "groups": groups_out,
+                }
+            )
+
+    return previews
+
+
 def _score_parts(m: Dict[str, Any]) -> tuple:
     """Return (score_main, score_sets) as separate strings."""
     a, b = m.get("scoreA"), m.get("scoreB")
@@ -211,6 +300,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
     accent = _get_accent(req.category)
     logo_b64 = _load_logo_b64()
     qr_b64 = _load_qr_b64()
+    group_previews = _build_group_previews(matches, config)
 
     # Group matches by day, sort by time then order
     by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
@@ -262,6 +352,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
         "qr_b64": qr_b64,
         "use_landscape": use_landscape,
         "days": days_out,
+        "group_previews": group_previews,
         "generated_at": now,
         "category": req.category,
     }
