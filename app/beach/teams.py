@@ -2189,18 +2189,13 @@ def _parse_registration_list_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
     Parse a registration-list PDF (lista zgłoszeniowa) from baza.zprp.pl.
     Extracts players with their medical exam validity dates.
 
-    Returns list of dicts:
-    [
-        {
-            "last_name": "KĘDZIORA",
-            "first_name": "Karol",
-            "license_number": "P/1410/20",
-            "medical_valid_until": "2027-05-04" | None,
-            "medical_approved": True/False,
-            "source": "WZPR" | None,
-        },
-        ...
-    ]
+    The PDF table rows span multiple text lines:
+        1. KĘDZIORA Karol 1987-12-17 Obrotowy 13 ... P/1410/20
+        OK
+        2026-05-08 2027-05-04
+
+    Each player has 3 dates: birth, ZPRP license, medical exam.
+    The last (3rd) date is the medical exam validity date.
     """
     results: List[Dict[str, Any]] = []
 
@@ -2211,245 +2206,71 @@ def _parse_registration_list_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
         return results
 
     try:
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            try:
-                _parse_medical_page(page, results)
-            except Exception as e:
-                logger.warning("Medical exams PDF: error parsing page %d: %s", page_num, e)
+        full_text = ""
+        for page in doc:
+            full_text += page.get_text("text") + "\n"
     finally:
         doc.close()
 
-    return results
-
-
-def _parse_medical_page(page, results: List[Dict[str, Any]]) -> None:
-    """Parse a single page of the registration list PDF for player medical exam data."""
-    # Get all text blocks with positions
-    text_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
-    blocks = text_dict.get("blocks", [])
-
-    # Collect all text spans with position info
-    spans: List[Dict[str, Any]] = []
-    for block in blocks:
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                spans.append({
-                    "text": span.get("text", "").strip(),
-                    "x0": span.get("bbox", [0])[0],
-                    "y0": span.get("bbox", [0, 0])[1],
-                    "x1": span.get("bbox", [0, 0, 0])[2],
-                    "y1": span.get("bbox", [0, 0, 0, 0])[3],
-                    "size": span.get("size", 0),
-                    "color": span.get("color", 0),
-                    "font": span.get("font", ""),
-                })
-
-    if not spans:
-        return
-
-    # Find the header row to determine column positions
-    # Look for "data następnego badania" column header
-    medical_col_x = None
-    license_col_x = None
-    header_y = None
-    name_col_x = None
-
-    for s in spans:
-        t = s["text"].lower()
-        if "nast" in t and "badan" in t:
-            medical_col_x = s["x0"]
-            header_y = s["y0"]
-        elif "lic." in t and "zprp" in t:
-            license_col_x = s["x0"]
-        elif t == "nazwisko i imię" or (t == "nazwisko" and s["x0"] < 300):
-            name_col_x = s["x0"]
-
-    if medical_col_x is None:
-        # Try alternate: "data następnego" on one line
-        for s in spans:
-            t = s["text"].lower()
-            if "data zprp" in t:
-                # The "data następnego badania" is typically the last column
-                # Use position heuristic
-                if s["x0"] > 600:
-                    medical_col_x = s["x0"]
-                    header_y = s["y0"]
-
-    if medical_col_x is None:
-        logger.warning("Medical exams PDF: could not find medical exam column header on page")
-        return
-
-    # Find player data rows
-    # Strategy: group spans by y-coordinate (same row), then extract data by x-position
-
-    # Get all unique y positions (rounded to group spans in same line)
-    def y_key(y: float) -> int:
-        return int(y * 2) // 2  # Group within ~0.5pt
-
-    # Build rows: group spans by y
-    rows_map: Dict[int, List[Dict[str, Any]]] = {}
-    for s in spans:
-        yk = y_key(s["y0"])
-        if yk not in rows_map:
-            rows_map[yk] = []
-        rows_map[yk].append(s)
-
-    # Process rows that are below the header
-    header_yk = y_key(header_y) if header_y else 0
-
-    # Sort rows by y position
-    sorted_yks = sorted(rows_map.keys())
-
-    # Track: we parse numbered rows (Lp starts with digit)
-    for yk in sorted_yks:
-        if yk <= header_yk:
-            continue
-
-        row_spans = sorted(rows_map[yk], key=lambda s: s["x0"])
-        if not row_spans:
-            continue
-
-        # Check if first span is a row number (Lp)
-        first_text = row_spans[0]["text"].strip().rstrip(".")
-        if not re.fullmatch(r"\d+", first_text):
-            continue
-
-        # Extract data from this row
-        row_data = _extract_player_from_pdf_row(row_spans, medical_col_x, license_col_x)
-        if row_data:
-            results.append(row_data)
-
-
-def _extract_player_from_pdf_row(
-    row_spans: List[Dict[str, Any]],
-    medical_col_x: float,
-    license_col_x: Optional[float],
-) -> Optional[Dict[str, Any]]:
-    """Extract player medical exam data from a PDF row's spans."""
-    if len(row_spans) < 3:
-        return None
-
-    # Spans are sorted by x. After the Lp number, next spans are name and other fields.
-    # The PDF format from ZPRP typically has these columns:
-    # Lp | nazwisko i imię | data urodzenia | pozycja | nr zawodnika | ... | Lic. ZPRP | data ZPRP | data następnego badania
-
-    last_name = None
-    first_name = None
-    license_number = None
-    medical_date = None
-    medical_approved = False
-    source = None
-
-    # Parse name: usually 2nd and 3rd span (or combined)
-    name_spans = []
-    for i, s in enumerate(row_spans):
-        if i == 0:
-            continue  # Skip Lp
-
-        t = s["text"].strip()
-        # Skip purely numeric or date-like or very short tokens in non-name positions
-        if not t:
-            continue
-
-        # Name spans are typically early in the row (x < 250)
-        if s["x0"] < 250 and not re.fullmatch(r"\d+\.?", t):
-            name_spans.append(t)
-
-    if len(name_spans) >= 2:
-        last_name = name_spans[0].strip()
-        first_name = name_spans[1].strip()
-    elif len(name_spans) == 1:
-        parts = name_spans[0].split()
-        if len(parts) >= 2:
-            last_name = parts[0]
-            first_name = " ".join(parts[1:])
-
-    # Parse license number
-    for s in row_spans:
-        t = s["text"].strip()
-        m = re.search(r"\b([A-Z]/\d{3,}/\d{2})\b", t, re.I)
-        if m:
-            license_number = m.group(1)
+    # Truncate at companions section ("osoby towarzyszące")
+    for marker in ["osoby towarzysz", "lp osoby"]:
+        idx = full_text.lower().find(marker)
+        if idx > 0:
+            full_text = full_text[:idx]
             break
 
-    # Parse medical exam date — find spans near the medical_col_x
-    medical_spans = []
-    for s in row_spans:
-        # Medical column is usually the last column. Check if span x is near medical_col_x
-        if abs(s["x0"] - medical_col_x) < 60 or s["x0"] > medical_col_x - 20:
-            t = s["text"].strip()
-            if re.search(r"\d{4}-\d{2}-\d{2}", t):
-                medical_spans.append(s)
+    # Find all player entry start positions: "N. UPPERCASE..." at start of line
+    entry_starts = list(re.finditer(
+        r'(?:^|\n)\s*(\d+)\.\s+([A-ZĄĆĘŁŃÓŚŹŻ])',
+        full_text,
+    ))
 
-    # The last date in the row is typically the medical exam date
-    # (earlier dates are birth_date and ZPRP license date)
-    all_dates_in_row = []
-    for s in row_spans:
-        for m in re.finditer(r"\d{4}-\d{2}-\d{2}", s["text"]):
-            all_dates_in_row.append({
-                "date": m.group(0),
-                "x0": s["x0"],
-                "span": s,
-            })
+    if not entry_starts:
+        logger.warning("Medical exams PDF: no player entries found in text")
+        return results
 
-    if all_dates_in_row:
-        # Sort by x position, the last one is "data następnego badania"
-        all_dates_in_row.sort(key=lambda d: d["x0"])
-        if len(all_dates_in_row) >= 2:
-            # Last date = medical exam, second to last = ZPRP license date
-            medical_date = all_dates_in_row[-1]["date"]
-        elif len(all_dates_in_row) == 1 and all_dates_in_row[0]["x0"] > medical_col_x - 40:
-            medical_date = all_dates_in_row[0]["date"]
+    for i, match in enumerate(entry_starts):
+        start = match.start()
+        end = entry_starts[i + 1].start() if i + 1 < len(entry_starts) else len(full_text)
+        block = full_text[start:end].strip()
 
-    # Check for approval checkmark
-    # In the PDF, approved exams show a green checkmark or "OK" text near the medical date
-    # We look for green-colored spans or specific markers
-    for s in row_spans:
-        t = s["text"].strip().upper()
-        color = s.get("color", 0)
+        # Extract name: "N. LASTNAME Firstname ..."
+        name_m = re.match(r'\d+\.\s+(\S+)\s+(\S+)', block)
+        if not name_m:
+            continue
+        last_name = name_m.group(1)
+        first_name = name_m.group(2)
 
-        # Green color check: color is an integer RGB value in pymupdf
-        # Green typically: 0x008000, 0x00FF00, etc.
-        # OR text contains check mark characters
-        is_green = False
-        if isinstance(color, int) and color != 0:
-            r = (color >> 16) & 0xFF
-            g = (color >> 8) & 0xFF
-            b = color & 0xFF
-            is_green = g > 100 and g > r * 1.5 and g > b * 1.5
+        # Extract license number (P/NNNN/NN)
+        lic_m = re.search(r'\b([A-Z]/\d{3,}/\d{2})\b', block, re.I)
+        license_number = lic_m.group(1) if lic_m else None
 
-        if t in ("OK", "✓", "✔", "V") and (is_green or s["x0"] > medical_col_x - 100):
-            medical_approved = True
+        # Extract all dates (YYYY-MM-DD)
+        dates = re.findall(r'\d{4}-\d{2}-\d{2}', block)
 
-        # Detect "WZPR" source label
-        if "WZPR" in t:
-            source = "WZPR"
+        # The PDF has 3 dates per player: birth, ZPRP license, medical exam.
+        # The last date is the medical exam validity date.
+        medical_date = None
+        if len(dates) >= 3:
+            medical_date = dates[-1]  # 3rd date = medical
+        elif len(dates) == 2:
+            medical_date = dates[-1]  # assume 2nd is medical (ZPRP date missing)
 
-        # Also look for green check images represented as special chars
-        if is_green and t:
-            medical_approved = True
+        if not medical_date:
+            continue
 
-    # Also check: in the PDF the check status is shown by green markers near the exam date
-    # The ZPRP PDF puts checkmarks in separate image-based elements which pymupdf may not capture
-    # Fallback: if we have a medical_date AND a license that's valid, consider it approved
-    # We detect approval via the "OK" text that appears near medical data columns
-    for s in row_spans:
-        t = s["text"].strip()
-        if t == "OK":
-            medical_approved = True
+        # Check for WZPR source marker
+        source = "WZPR" if "WZPR" in block.upper() else None
 
-    if not last_name:
-        return None
+        results.append({
+            "last_name": last_name,
+            "first_name": first_name,
+            "license_number": license_number,
+            "medical_valid_until": medical_date,
+            "source": source,
+        })
 
-    return {
-        "last_name": last_name,
-        "first_name": first_name,
-        "license_number": license_number,
-        "medical_valid_until": medical_date if medical_approved else None,
-        "medical_approved": medical_approved,
-        "source": source,
-    }
+    return results
 
 
 class MedicalExamsCheckRequest(BaseModel):
