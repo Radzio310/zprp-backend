@@ -1262,6 +1262,63 @@ async def _fill_completed_protocol_sheet(
                                  offset_x_px=off_x, offset_y_px=off_y)
 
 
+def _fill_players_from_match_config(ws, match_config: Dict[str, Any]) -> None:
+    """Fill player and companion rows directly from ProEl matchConfig data.
+
+    This is called for filled protocols as a reliable override — the matchConfig
+    contains the exact players and companions that were part of the match,
+    bypassing the tournament custom_teams lookup which may fail when:
+    - tournament_id is missing/null
+    - custom team ID doesn't match (e.g. was modified after the match started)
+    - the team was created without linking to a tournament
+    """
+    ROLE_SET = {"A", "B", "C", "D"}
+
+    host_players = [p for p in (match_config.get("hostPlayers") or []) if p.get("selected")]
+    guest_players = [p for p in (match_config.get("guestPlayers") or []) if p.get("selected")]
+    host_companions = [
+        c for c in (match_config.get("hostCompanions") or [])
+        if (c.get("role") or "").upper() in ROLE_SET
+    ]
+    guest_companions = [
+        c for c in (match_config.get("guestCompanions") or [])
+        if (c.get("role") or "").upper() in ROLE_SET
+    ]
+
+    if not host_players and not guest_players:
+        return  # No player data in matchConfig — nothing to override
+
+    # ── Host players ──
+    for i, row in enumerate(HOST_PLAYER_ROWS):
+        if i < len(host_players):
+            p = host_players[i]
+            jersey = p.get("number")
+            ws.cell(row=row, column=1).value = str(jersey) if jersey is not None else ""
+            ws.cell(row=row, column=2).value = p.get("name", "")
+    _strikethrough_empty_rows(ws, HOST_PLAYER_ROWS, len(host_players))
+
+    # ── Guest players ──
+    for i, row in enumerate(GUEST_PLAYER_ROWS):
+        if i < len(guest_players):
+            p = guest_players[i]
+            jersey = p.get("number")
+            ws.cell(row=row, column=1).value = str(jersey) if jersey is not None else ""
+            ws.cell(row=row, column=2).value = p.get("name", "")
+    _strikethrough_empty_rows(ws, GUEST_PLAYER_ROWS, len(guest_players))
+
+    # ── Host companions ──
+    for i, row in enumerate(HOST_COMPANION_ROWS):
+        if i < len(host_companions):
+            ws.cell(row=row, column=2).value = host_companions[i].get("name", "")
+    _strikethrough_empty_rows(ws, HOST_COMPANION_ROWS, len(host_companions), is_companion=True)
+
+    # ── Guest companions ──
+    for i, row in enumerate(GUEST_COMPANION_ROWS):
+        if i < len(guest_companions):
+            ws.cell(row=row, column=2).value = guest_companions[i].get("name", "")
+    _strikethrough_empty_rows(ws, GUEST_COMPANION_ROWS, len(guest_companions), is_companion=True)
+
+
 async def _generate_filled_protocol(
     data_json: Dict[str, Any],
     match: Dict[str, Any],
@@ -1296,6 +1353,13 @@ async def _generate_filled_protocol(
         user_cities=user_cities,
         head_judge_id=head_judge_id,
     )
+
+    # 1b. Override player/companion cells with data from matchConfig.
+    # matchConfig.hostPlayers / guestPlayers is the ground truth for filled
+    # protocols — it contains exactly who played, regardless of whether the
+    # tournament custom_teams lookup succeeded or failed above.
+    match_config = data_json.get("matchConfig") or {}
+    _fill_players_from_match_config(ws, match_config)
 
     # 2. Fill match results from ProEl data
     await _fill_completed_protocol_sheet(ws, data_json)
