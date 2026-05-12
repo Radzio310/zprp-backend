@@ -106,6 +106,27 @@ def _load_logo_b64() -> str:
             return ""
 
 
+def _load_qr_b64() -> str:
+    """Load the BAZA Beach QR code and return as base64 PNG."""
+    qr_path = TEMPLATE_DIR / "beach_qr.png"
+    if not qr_path.exists():
+        return ""
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(qr_path)
+        # Keep QR square, resize to 200×200 px
+        img = img.resize((200, 200), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, "PNG", optimize=True)
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        logger.warning("Could not load QR: %s — using raw bytes", e)
+        try:
+            return base64.b64encode(qr_path.read_bytes()).decode()
+        except Exception:
+            return ""
+
+
 def _day_header(day_index: int, date_str: Optional[str]) -> str:
     roman = _roman(day_index + 1)
     if date_str:
@@ -189,6 +210,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
     location = req.tournament_location.strip()
     accent = _get_accent(req.category)
     logo_b64 = _load_logo_b64()
+    qr_b64 = _load_qr_b64()
 
     # Group matches by day, sort by time then order
     by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
@@ -237,6 +259,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
         "location": location,
         "accent": accent,
         "logo_b64": logo_b64,
+        "qr_b64": qr_b64,
         "use_landscape": use_landscape,
         "days": days_out,
         "generated_at": now,
