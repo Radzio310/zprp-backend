@@ -1536,9 +1536,14 @@ async def get_local_beach_team_squad(team_id: int):
             exam = medical_exams.get(pid)
             if exam and isinstance(exam, dict):
                 p["medical_exam_valid_until"] = exam.get("valid_until")
-                p["medical_exam_source"] = exam.get("source")
+                p["medical_exam_has_check"] = exam.get("has_check", False)
+                p["medical_exam_has_wzpr"] = exam.get("has_wzpr", False)
+                # backward compat: source field
+                p["medical_exam_source"] = "WZPR" if exam.get("has_wzpr") else None
             else:
                 p["medical_exam_valid_until"] = None
+                p["medical_exam_has_check"] = False
+                p["medical_exam_has_wzpr"] = False
                 p["medical_exam_source"] = None
 
     return {
@@ -2255,14 +2260,15 @@ def _parse_registration_list_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
         for page in doc:
             _detect_approvals_on_page(page, doc, players)
 
-        # ── Build output — only approved players get their date ──
+        # ── Build output — always include dates; approval flags separate ──
         for p in players:
             results.append({
                 "last_name": p["last_name"],
                 "first_name": p["first_name"],
                 "license_number": p["license_number"],
-                "medical_valid_until": p["medical_valid_until"] if p["approved"] else None,
-                "source": "WZPR" if p["has_wzpr"] else None,
+                "medical_valid_until": p["medical_valid_until"],
+                "has_check": p["approved"],
+                "has_wzpr": p["has_wzpr"],
             })
     finally:
         doc.close()
@@ -2561,7 +2567,8 @@ async def _check_medical_exams_for_team(
         if player_id:
             medical_exams[player_id] = {
                 "valid_until": parsed["medical_valid_until"],
-                "source": parsed.get("source"),
+                "has_check": parsed.get("has_check", False),
+                "has_wzpr": parsed.get("has_wzpr", False),
             }
             matched += 1
 
@@ -2579,10 +2586,12 @@ async def _check_medical_exams_for_team(
             .values(**update_values)
         )
 
-    # Count only exams that are both approved (stored) AND not expired
+    # Count only exams that are approved (has_check or has_wzpr) AND not expired
     now_date = _now_utc().date()
     valid_count = 0
     for exam in medical_exams.values():
+        if not (exam.get("has_check") or exam.get("has_wzpr")):
+            continue
         vu = exam.get("valid_until")
         if vu:
             try:
