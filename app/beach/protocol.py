@@ -27,6 +27,7 @@ import json as _json
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 import urllib.parse
@@ -57,6 +58,32 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Beach Protocol"])
+
+# ── Address formatting ────────────────────────────────────────────────────────
+
+_COUNTRY_NAMES = {
+    "polska", "poland", "niemcy", "germany",
+    "czech republic", "czechy", "słowacja", "slovakia",
+}
+
+
+def _strip_address_to_street_city(address: str) -> str:
+    """Strip Polish postal code (XX-XXX) and trailing country name.
+
+    Examples:
+      "Startowa 36, 43-309 Bielsko-Biała, Polska"  → "Startowa 36, Bielsko-Biała"
+      "ul. Poprzeczna 4, 00-001 Warszawa, Poland"  → "ul. Poprzeczna 4, Warszawa"
+      "Bielsko-Biała"                              → unchanged
+    """
+    if not address:
+        return address
+    # Remove postal code e.g. "43-309 "
+    stripped = re.sub(r"\b\d{2}-\d{3}\s*", "", address)
+    # Split by comma, drop empty parts and trailing country name
+    parts = [p.strip() for p in stripped.split(",") if p.strip()]
+    if parts and parts[-1].lower() in _COUNTRY_NAMES:
+        parts = parts[:-1]
+    return ", ".join(parts)
 
 
 def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
@@ -455,7 +482,7 @@ def _fill_protocol_sheet(
     ws["G10"] = team_b.get("name", "")
 
     # ── Venue, date, time ──
-    ws["B12"] = tournament_location
+    ws["B12"] = _strip_address_to_street_city(tournament_location)
 
     day_index = match.get("dayIndex") or 0
     day_cfg = days[day_index] if day_index < len(days) else {}
@@ -1648,7 +1675,13 @@ async def generate_filled_single(req: FilledProtocolSingleRequest):
     custom_teams = tournament_data.get("custom_teams") or []
     head_judge_id = tournament_data.get("head_judge_id")
     tournament_name = tournament_data.get("name") or ""
-    tournament_location = tournament_data.get("venue_address") or ""
+    # venue_address is not stored in tournament data_json; use the address
+    # saved in matchConfig.extras.venueAddress at the time the match was created
+    tournament_location = (
+        tournament_data.get("venue_address")
+        or (data_json.get("matchConfig") or {}).get("extras", {}).get("venueAddress")
+        or ""
+    )
     category = tournament_data.get("category") or ""
 
     # Find schedule match for this match_number
@@ -1762,7 +1795,17 @@ async def generate_filled_bulk(req: FilledProtocolBulkRequest):
     custom_teams = tournament_data.get("custom_teams") or []
     head_judge_id = tournament_data.get("head_judge_id")
     tournament_name = req.tournament_name or tournament_data.get("name") or ""
-    tournament_location = tournament_data.get("venue_address") or ""
+    # venue_address is not stored in tournament data_json; fall back to any
+    # match's matchConfig.extras.venueAddress
+    _fallback_location = next(
+        (
+            (dj.get("matchConfig") or {}).get("extras", {}).get("venueAddress", "")
+            for dj in matches_by_number.values()
+            if (dj.get("matchConfig") or {}).get("extras", {}).get("venueAddress")
+        ),
+        "",
+    )
+    tournament_location = tournament_data.get("venue_address") or _fallback_location
     category = tournament_data.get("category") or ""
 
     # Build schedule match lookup
