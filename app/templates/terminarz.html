@@ -263,7 +263,7 @@
 
   /* ── Group preview ── */
   .groups-preview {
-    margin: 8pt 0 14pt 0;
+    margin: 8pt 0 15pt 0;
     page-break-inside: avoid;
   }
   .groups-preview-title {
@@ -275,49 +275,103 @@
     margin-bottom: 5pt;
   }
   .gender-groups {
-    margin-bottom: 8pt;
+    margin-bottom: 10pt;
     page-break-inside: avoid;
+    border-radius: 7pt;
+    padding: 7pt;
+    border: 0.7pt solid #ececec;
   }
   .gender-groups:last-child {
     margin-bottom: 0;
   }
+  .gender-groups.M {
+    background: linear-gradient(135deg, #E9FBF8 0%, #FFFFFF 70%);
+    border-color: #B9EAE3;
+  }
+  .gender-groups.K {
+    background: linear-gradient(135deg, #FFF0F4 0%, #FFFFFF 70%);
+    border-color: #F5C5D0;
+  }
   .gender-groups-header {
-    font-size: 7.5pt;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 5pt;
+    font-size: 8pt;
     font-weight: 900;
-    margin-bottom: 4pt;
+    margin-bottom: 6pt;
   }
   .gender-groups-header.M { color: #2BA8A0; }
   .gender-groups-header.K { color: #E85A78; }
+  .gender-dot {
+    width: 7pt;
+    height: 7pt;
+    border-radius: 99pt;
+    display: inline-block;
+  }
+  .gender-dot.M { background: #2BA8A0; }
+  .gender-dot.K { background: #E85A78; }
   .group-grid {
     display: flex;
     flex-direction: row;
-    gap: 6pt;
+    gap: 7pt;
     flex-wrap: wrap;
   }
   .group-box {
     flex: 1;
     min-width: {{ '105pt' if use_landscape else '92pt' }};
-    border: 0.6pt solid #e5e5e5;
-    border-radius: 4pt;
+    border: 0.6pt solid rgba(0,0,0,0.08);
+    border-radius: 6pt;
     overflow: hidden;
+    background: rgba(255,255,255,0.86);
   }
   .group-box-title {
-    background: #f6f6f6;
-    color: #555;
+    color: #fff;
     font-size: 7pt;
     font-weight: 900;
-    padding: 3pt 5pt;
-    border-bottom: 0.5pt solid #e7e7e7;
+    padding: 3.5pt 5pt;
+    letter-spacing: 0.2pt;
+  }
+  .gender-groups.M .group-box-title {
+    background: #2BA8A0;
+  }
+  .gender-groups.K .group-box-title {
+    background: #E85A78;
   }
   .group-team {
-    font-size: 7pt;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4pt;
+    font-size: 7.2pt;
     font-weight: 650;
     color: #333;
-    padding: 2.5pt 5pt;
+    padding: 3pt 5pt;
     border-bottom: 0.4pt solid #f0f0f0;
   }
   .group-team:last-child {
     border-bottom: 0;
+  }
+  .group-team-pos {
+    width: 12pt;
+    height: 12pt;
+    border-radius: 99pt;
+    text-align: center;
+    font-size: 6.2pt;
+    font-weight: 900;
+    line-height: 12pt;
+    flex-shrink: 0;
+  }
+  .gender-groups.M .group-team-pos {
+    color: #167A73;
+    background: #DDF7F3;
+  }
+  .gender-groups.K .group-team-pos {
+    color: #B93658;
+    background: #FFE4EB;
+  }
+  .group-team-name {
+    flex: 1;
   }
 
   /* ── Footer ── */
@@ -374,14 +428,20 @@
 <div class="groups-preview">
   <div class="groups-preview-title">Podgląd grup przed fazą pucharową</div>
   {% for preview in group_previews %}
-  <div class="gender-groups">
-    <div class="gender-groups-header {{ preview.gender }}">{{ preview.label }}</div>
+  <div class="gender-groups {{ preview.gender }}">
+    <div class="gender-groups-header {{ preview.gender }}">
+      <span class="gender-dot {{ preview.gender }}"></span>
+      <span>{{ preview.label }}</span>
+    </div>
     <div class="group-grid">
       {% for group in preview.groups %}
       <div class="group-box">
         <div class="group-box-title">Grupa {{ group.name }}</div>
         {% for team in group.teams %}
-        <div class="group-team">{{ team.name }}</div>
+        <div class="group-team">
+          <span class="group-team-pos">{{ loop.index }}</span>
+          <span class="group-team-name">{{ team.name }}</span>
+        </div>
         {% endfor %}
       </div>
       {% endfor %}
