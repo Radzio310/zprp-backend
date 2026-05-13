@@ -6,6 +6,7 @@ Only the owner (coach_user_id) or an admin can update/delete.
 """
 
 from datetime import datetime, timezone
+import json
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -33,6 +34,13 @@ def _row_to_dict(row: Any) -> dict:
     for k in ("created_at", "updated_at"):
         if k in d and isinstance(d[k], datetime):
             d[k] = d[k].isoformat()
+    # asyncpg can return JSONB columns as raw JSON strings — parse them back
+    for k in ("players", "companions", "default_players", "default_companions"):
+        if k in d and isinstance(d[k], str):
+            try:
+                d[k] = json.loads(d[k])
+            except Exception:
+                pass
     return d
 
 
