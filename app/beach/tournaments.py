@@ -1069,6 +1069,9 @@ async def schedule_update_tournament(
         if not isinstance(body.schedule, dict):
             raise HTTPException(422, "schedule musi być obiektem")
         data["schedule"] = body.schedule
+    else:
+        # Explicit null → delete schedule
+        data.pop("schedule", None)
 
     await database.execute(
         update(beach_tournaments)
