@@ -1251,6 +1251,25 @@ assignment_drafts = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
+# ─────────────────── BEACH: Custom team templates ───────────────────
+
+beach_custom_team_templates = Table(
+    "beach_custom_team_templates",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String, nullable=False),
+    Column("gender", String, nullable=False),                    # "M" | "K"
+    Column("category", String, nullable=False, server_default=text("''")),
+    Column("players", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("companions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("default_players", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("default_companions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("coach_user_id", Integer, nullable=True, index=True),
+    Column("coach_name", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
