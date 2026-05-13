@@ -14,7 +14,7 @@ import unicodedata
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, File, Form, UploadFile
 import httpx
 from pydantic import BaseModel
 from sqlalchemy import select, insert, update, delete
@@ -1098,6 +1098,303 @@ async def schedule_update_tournament(
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
     return _attach_computed_fields(row_d, data2, current_user_id)
+
+
+# ─────────────────── AI SCHEDULE IMPORT ───────────────────
+
+_SCHEDULE_JSON_SCHEMA = """\
+{
+  "config": {
+    "mode": "roundRobin" | "groupsPlusKnockout",
+    "courts": 1 | 2 | 3,
+    "slotInterval": <number, minutes between matches on same court, default 40>,
+    "minTeamBreak": <number, default 15>,
+    "thirdPlace": <boolean>,
+    "fifthPlace": <boolean, optional>,
+    "knockoutFormat": "semis" | "quarters" (optional),
+    "knockoutFormatM": "semis" | "quarters" (optional, per-gender override),
+    "knockoutFormatK": "semis" | "quarters" (optional, per-gender override),
+    "groups": {
+      "M": { "count": 2|3|4, "teams": { "A": [<teamId>, ...], "B": [...], ... } },
+      "K": { "count": 2|3|4, "teams": { "A": [<teamId>, ...], "B": [...], ... } }
+    },
+    "days": [
+      { "date": "YYYY-MM-DD" (optional), "startTime": "HH:mm", "endTime": "HH:mm" }
+    ]
+  },
+  "matches": [
+    {
+      "id": "<unique uuid string>",
+      "stage": "group" | "playoff" | "quarterfinal" | "semifinal" | "fifth_semifinal" | "final" | "third_place" | "fifth_place" | "seventh_place",
+      "gender": "M" | "K",
+      "group": "A" | "B" | "C" | "D" | null,
+      "round": <number, optional>,
+      "court": <number, 1-based>,
+      "dayIndex": <number, 0-based index into days array>,
+      "startTime": "HH:mm" | null,
+      "endTime": "HH:mm" | null,
+      "teamA": { "id": <number>, "name": "<team name>", "gender": "M"|"K" } | null,
+      "teamB": { "id": <number>, "name": "<team name>", "gender": "M"|"K" } | null,
+      "status": "scheduled",
+      "order": <number, sequential>
+    }
+  ],
+  "generated_at": "<ISO timestamp>",
+  "status": "draft"
+}
+"""
+
+
+def _extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extract text from a PDF file using pymupdf."""
+    import fitz  # pymupdf
+    text_parts = []
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+        for page in doc:
+            text_parts.append(page.get_text())
+    return "\n".join(text_parts)
+
+
+def _normalize_team_name(name: str) -> str:
+    """Normalize a team name for fuzzy matching: lowercase, remove accents, extra spaces."""
+    s = unicodedata.normalize("NFKD", name.lower().strip())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _fuzzy_match_score(a: str, b: str) -> float:
+    """Simple token-based similarity score between two normalized strings."""
+    tokens_a = set(a.split())
+    tokens_b = set(b.split())
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = tokens_a & tokens_b
+    union = tokens_a | tokens_b
+    return len(intersection) / len(union)
+
+
+@router.post(
+    "/{tournament_id}/ai-schedule-import",
+    response_model=dict,
+    summary="AI-powered schedule import from PDF files",
+)
+async def ai_schedule_import(
+    tournament_id: int,
+    files: List[UploadFile] = File(..., description="PDF files with schedule (max 3)"),
+    description: str = Form(""),
+    mode: str = Form("groupsPlusKnockout"),
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    """
+    Upload PDF files → extract text → GPT-4o generates ScheduleData JSON → fuzzy-match teams.
+    Returns { schedule, already_invited_ids, new_teams_to_invite, unmatched_teams, warnings }.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "Brak OPENAI_API_KEY w środowisku serwera")
+
+    if len(files) > 3:
+        raise HTTPException(422, "Maksymalnie 3 pliki")
+
+    # ── Auth check ──
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not existing:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+
+    existing_d = dict(existing)
+    data = _parse_json(existing_d["data_json"])
+
+    if not await _can_manage_tournament_schedule(data, current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    # ── Extract text from PDFs ──
+    all_text_parts = []
+    for f in files:
+        if not f.filename:
+            continue
+        file_bytes = await f.read()
+        if not file_bytes:
+            continue
+        try:
+            text = _extract_text_from_pdf(file_bytes)
+            all_text_parts.append(f"--- Plik: {f.filename} ---\n{text}")
+        except Exception as exc:
+            logger.warning("Failed to extract text from %s: %s", f.filename, exc)
+            all_text_parts.append(f"--- Plik: {f.filename} --- (nie udało się odczytać)")
+
+    if not any(t.strip() for t in all_text_parts):
+        raise HTTPException(422, "Nie udało się wyodrębnić tekstu z żadnego pliku")
+
+    extracted_text = "\n\n".join(all_text_parts)
+    # Limit text to ~30k chars to stay within context limits
+    if len(extracted_text) > 30000:
+        extracted_text = extracted_text[:30000] + "\n...(tekst obcięty)"
+
+    # ── Fetch tournament info ──
+    tour_name = existing_d.get("name", "Turniej")
+    tour_category = existing_d.get("category", "")
+    tour_date = str(existing_d.get("event_date", ""))[:10]
+    tour_end_date = str(existing_d.get("end_date", ""))[:10] if existing_d.get("end_date") else tour_date
+
+    # ── Fetch teams ──
+    invited_team_ids = set()
+    for tid in (data.get("invited_team_ids") or []):
+        try:
+            invited_team_ids.add(int(tid))
+        except (ValueError, TypeError):
+            pass
+
+    # Fetch invited teams
+    invited_teams = []
+    if invited_team_ids:
+        rows = await database.fetch_all(
+            select(beach_teams.c.id, beach_teams.c.team_name, beach_teams.c.gender)
+            .where(beach_teams.c.id.in_(list(invited_team_ids)))
+        )
+        invited_teams = [dict(r) for r in rows]
+
+    # Fetch all teams for wider matching
+    all_teams_rows = await database.fetch_all(
+        select(beach_teams.c.id, beach_teams.c.team_name, beach_teams.c.gender, beach_teams.c.category)
+    )
+    all_teams = [dict(r) for r in all_teams_rows]
+
+    # Build team list strings for the prompt
+    invited_teams_str = "\n".join(
+        f"  ID={t['id']}, name=\"{t['team_name']}\", gender={t['gender']}"
+        for t in invited_teams
+    ) if invited_teams else "(brak zaproszonych drużyn)"
+
+    all_teams_str = "\n".join(
+        f"  ID={t['id']}, name=\"{t['team_name']}\", gender={t['gender']}, category={t.get('category','')}"
+        for t in all_teams
+    )
+    # Limit all_teams_str to avoid context overflow
+    if len(all_teams_str) > 15000:
+        all_teams_str = all_teams_str[:15000] + "\n...(lista obcięta)"
+
+    # ── Build prompt ──
+    system_prompt = f"""\
+Jesteś ekspertem od terminarzów turniejów siatkówki plażowej. Twoim zadaniem jest przeczytanie
+wyekstrahowanego tekstu z PDF-ów zawierających terminarz turnieju i wygenerowanie kompletnego
+obiektu ScheduleData w formacie JSON.
+
+WAŻNE ZASADY:
+1. Używaj TYLKO drużyn z podanej listy (dopasuj nazwy — mogą się lekko różnić w dokumentach).
+2. Drużyny już zaproszone do turnieju mają PRIORYTET. Jeśli nazwa pasuje do zaproszonej drużyny, użyj jej ID.
+3. Jeśli drużyna z dokumentu nie pasuje do żadnej zaproszonej, szukaj w pełnej bazie danych.
+4. Jeśli drużyna nie pasuje do nikogo w bazie — ustaw teamA/teamB na null i dodaj ją do listy "unmatched_teams".
+5. Każdy mecz musi mieć unikalne "id" (wygeneruj UUID v4).
+6. Godziny w formacie "HH:mm" (24h).
+7. courts to liczba boisk widoczna w terminarzu.
+8. dayIndex: 0-based — jeśli turniej jest wielodniowy, 0 = pierwszy dzień.
+9. Kolejność meczów (order) musi być sekwencyjna od 0.
+10. Status wszystkich meczów: "scheduled".
+11. Tryb turnieju: {mode}.
+12. Jeśli brakuje informacji o godzinach, użyj typowych godzin (08:00 start, 40 min interwał).
+
+SCHEMAT JSON do wygenerowania:
+{_SCHEDULE_JSON_SCHEMA}
+
+Turniej: "{tour_name}"
+Kategoria: {tour_category}
+Data: {tour_date} — {tour_end_date}
+
+DRUŻYNY JUŻ ZAPROSZONE DO TURNIEJU (priorytet dopasowania):
+{invited_teams_str}
+
+WSZYSTKIE DRUŻYNY W BAZIE DANYCH:
+{all_teams_str}
+
+Dodatkowe instrukcje od użytkownika: {description or "(brak)"}
+
+Odpowiedz WYŁĄCZNIE poprawnym JSON-em z dwoma kluczami:
+- "schedule": pełny obiekt ScheduleData
+- "team_mapping": lista obiektów {{ "doc_name": "<nazwa z dokumentu>", "matched_id": <int|null>, "matched_name": "<nazwa z bazy>"|null, "source": "invited"|"database"|"unmatched" }}
+"""
+
+    user_msg = f"Oto tekst wyekstrahowany z dokumentów terminarza:\n\n{extracted_text}"
+
+    # ── Call OpenAI ──
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=api_key)
+        response = await client.chat.completions.create(
+            model=os.getenv("OPENAI_SCHEDULE_MODEL", "gpt-4o"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            timeout=120,
+        )
+    except Exception as exc:
+        logger.exception("OpenAI schedule import request failed")
+        raise HTTPException(502, f"Błąd komunikacji z OpenAI: {exc}")
+
+    raw_content = (response.choices[0].message.content or "").strip()
+    if not raw_content:
+        raise HTTPException(502, "OpenAI zwrócił pustą odpowiedź")
+
+    try:
+        result = json.loads(raw_content)
+    except json.JSONDecodeError as exc:
+        logger.error("OpenAI returned invalid JSON: %s", raw_content[:500])
+        raise HTTPException(502, f"OpenAI zwrócił niepoprawny JSON: {exc}")
+
+    schedule = result.get("schedule")
+    team_mapping = result.get("team_mapping", [])
+
+    if not schedule or not isinstance(schedule, dict):
+        raise HTTPException(502, "OpenAI nie wygenerował poprawnego terminarza")
+
+    # ── Process team mapping ──
+    warnings = []
+    already_invited_ids = []
+    new_teams_to_invite = []
+    unmatched_teams = []
+
+    for mapping in team_mapping:
+        doc_name = mapping.get("doc_name", "")
+        matched_id = mapping.get("matched_id")
+        source = mapping.get("source", "unmatched")
+
+        if source == "unmatched" or matched_id is None:
+            unmatched_teams.append({
+                "doc_name": doc_name,
+                "matched_name": mapping.get("matched_name"),
+            })
+            warnings.append(f"Nie dopasowano drużyny: \"{doc_name}\"")
+        elif source == "invited":
+            already_invited_ids.append(matched_id)
+        elif source == "database":
+            new_teams_to_invite.append({
+                "id": matched_id,
+                "name": mapping.get("matched_name", ""),
+                "doc_name": doc_name,
+            })
+
+    # ── Validate schedule has required fields ──
+    if "config" not in schedule:
+        raise HTTPException(502, "Wygenerowany terminarz nie zawiera konfiguracji (config)")
+    if "matches" not in schedule:
+        schedule["matches"] = []
+    if "generated_at" not in schedule:
+        schedule["generated_at"] = datetime.now(timezone.utc).isoformat()
+    if "status" not in schedule:
+        schedule["status"] = "draft"
+
+    return {
+        "schedule": schedule,
+        "already_invited_ids": already_invited_ids,
+        "new_teams_to_invite": new_teams_to_invite,
+        "unmatched_teams": unmatched_teams,
+        "warnings": warnings,
+    }
 
 
 # ─────────────────── DELETE ───────────────────
