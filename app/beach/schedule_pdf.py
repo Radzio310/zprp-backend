@@ -12,6 +12,7 @@ import base64
 import io
 import logging
 import os
+import re
 import shutil
 import tempfile
 import urllib.parse
@@ -193,7 +194,45 @@ def _knockout_hints(m: Dict[str, Any]) -> tuple:
     parts = label.split(" vs ", 1)
     hint_a = parts[0].strip() if not (team_a and team_a.get("name")) else ""
     hint_b = (parts[1].strip() if len(parts) > 1 else "") if not (team_b and team_b.get("name")) else ""
+    # Strip "Baraż: " prefix — the stage column already shows "Baraż"
+    if hint_a.startswith("Baraż: "):
+        hint_a = hint_a[len("Baraż: "):]
+    if hint_b.startswith("Baraż: "):
+        hint_b = hint_b[len("Baraż: "):]
     return hint_a, hint_b
+
+
+# Stage abbreviation → stage key mapping for resolving knockout references
+_STAGE_ABBREV = {
+    "ĆF": "quarterfinal",
+    "PF": "semifinal",
+    "SM5": "fifth_semifinal",
+}
+
+
+def _resolve_hint_with_match_nums(hint: str, stage_num_map: Dict[str, Dict[int, str]]) -> str:
+    """Replace stage-based references like 'Zwycięzca ĆF #1' → 'Zwycięzca M15'.
+
+    Only replaces references to other matches (ĆF, PF, SM5).
+    Group-position references ('1. z gr. A') are left as-is.
+    """
+    if not hint:
+        return hint
+    def _replacer(match_obj):
+        prefix = match_obj.group(1)   # e.g. "Zwycięzca " or "Przegrany "
+        abbrev = match_obj.group(2)   # e.g. "ĆF", "PF", "SM5"
+        num_str = match_obj.group(3)  # e.g. "1", "2"
+        stage_key = _STAGE_ABBREV.get(abbrev)
+        if not stage_key:
+            return match_obj.group(0)
+        num = int(num_str)
+        nums_for_stage = stage_num_map.get(stage_key, {})
+        match_label = nums_for_stage.get(num)
+        if match_label:
+            return f"{prefix}{match_label}"
+        return match_obj.group(0)
+    # Pattern: (Zwycięzca|Przegrany) (ĆF|PF|SM5) #(\d+)
+    return re.sub(r'(Zwycięzca |Przegrany )(ĆF|PF|SM5) #(\d+)', _replacer, hint)
 
 
 def _gender_label(gender: str) -> str:
@@ -332,7 +371,52 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
 
     day_indices = sorted(by_day.keys()) or [0]
 
-    # Build day sections
+    # ── First pass: assign per-gender match numbers (M1, M2, K1, K2…) ──
+    gender_counters: Dict[str, int] = {"M": 0, "K": 0}
+    # match_id → match_num_label (e.g. "M3", "K12")
+    match_num_labels: Dict[str, str] = {}
+    # stage_num_map: stage_key → { ordinal_within_gender_stage → match_num_label }
+    # e.g. { "quarterfinal": { 1: "M15", 2: "M16", 3: "K13", 4: "K14" } }
+    # We track per (stage, gender) ordinals separately
+    stage_gender_ordinals: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    # stage_key → { (gender, ordinal) → match_num_label }
+    stage_num_map_full: Dict[str, Dict[str, Dict[int, str]]] = defaultdict(lambda: defaultdict(dict))
+
+    all_matches_ordered: List[Dict[str, Any]] = []
+    for day_idx in day_indices:
+        for m in by_day.get(day_idx, []):
+            kind = m.get("kind") or "match"
+            if kind not in ("court_break", "tournament_opening"):
+                all_matches_ordered.append(m)
+
+    for m in all_matches_ordered:
+        gender = m.get("gender") or ""
+        if gender in gender_counters:
+            gender_counters[gender] += 1
+            num = gender_counters[gender]
+            label = f"{gender}{num}"
+            m_id = m.get("id") or ""
+            if m_id:
+                match_num_labels[m_id] = label
+
+            stage = m.get("stage") or ""
+            if stage:
+                stage_gender_ordinals[stage][gender] += 1
+                ordinal = stage_gender_ordinals[stage][gender]
+                stage_num_map_full[stage][gender][ordinal] = label
+
+    # Build per-gender stage_num_map for hint resolution
+    # For each gender, map stage → { ordinal → match_num_label }
+    stage_num_map_M: Dict[str, Dict[int, str]] = {
+        stage: genders.get("M", {})
+        for stage, genders in stage_num_map_full.items()
+    }
+    stage_num_map_K: Dict[str, Dict[int, str]] = {
+        stage: genders.get("K", {})
+        for stage, genders in stage_num_map_full.items()
+    }
+
+    # ── Second pass: build day sections with match numbers ──
     days_out: List[Dict[str, Any]] = []
     for day_idx in day_indices:
         day_matches = by_day.get(day_idx, [])
@@ -364,14 +448,23 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                 })
                 continue
 
+            gender = m.get("gender") or ""
+            m_id = m.get("id") or ""
+            match_num = match_num_labels.get(m_id, "")
+
             sm, ss = _score_parts(m)
             ha, hb = _knockout_hints(m)
+            # Resolve knockout references (ĆF #1 → M15) using same-gender map
+            snm = stage_num_map_M if gender == "M" else stage_num_map_K
+            ha = _resolve_hint_with_match_nums(ha, snm)
+            hb = _resolve_hint_with_match_nums(hb, snm)
+
             match_rows.append({
                 "type": "match",
                 "time": m.get("startTime") or "",
                 "court": str(m.get("court") or ""),
-                "category": _category_label(m),
-                "gender": m.get("gender") or "",
+                "match_num": match_num,
+                "gender": gender,
                 "stage": _stage_label(m),
                 "team_a": _team_name(m.get("teamA")),
                 "team_b": _team_name(m.get("teamB")),
@@ -383,7 +476,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
 
         days_out.append({"label": day_label, "matches": match_rows})
 
-    # If split_by_courts, duplicate days_out per court
+    # If split_by_courts, build per-court sections (and skip main schedule)
     split_by_courts = req.split_by_courts and courts_count >= 2
     court_sections: List[Dict[str, Any]] = []
     if split_by_courts:
@@ -403,7 +496,10 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
             })
 
     # Decide portrait vs landscape based on peak matches per day
-    max_day_matches = max((len(d["matches"]) for d in days_out), default=0)
+    effective_days = days_out if not split_by_courts else [
+        d for sec in court_sections for d in sec["days"]
+    ]
+    max_day_matches = max((len(d["matches"]) for d in effective_days), default=0)
     use_landscape = max_day_matches > LANDSCAPE_THRESHOLD
 
     now = datetime.now(ZoneInfo("Europe/Warsaw")).strftime("%d.%m.%Y %H:%M")

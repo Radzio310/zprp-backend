@@ -86,6 +86,7 @@
   /* ── Day section ── */
   .day-section {
     margin-bottom: 16pt;
+    page-break-inside: auto;
   }
   .day-header {
     font-size: 10.5pt;
@@ -163,16 +164,16 @@
     text-align: center;
   }
 
-  /* category */
-  td.col-cat {
+  /* match number */
+  td.col-num {
     font-weight: 900;
     text-align: center;
     white-space: nowrap;
-    width: 18pt;
-    font-size: {{ '9pt' if use_landscape else '8.5pt' }};
+    width: 24pt;
+    font-size: {{ '8.5pt' if use_landscape else '8pt' }};
   }
-  td.col-cat.M { color: #2BA8A0; }
-  td.col-cat.K { color: #E85A78; }
+  td.col-num.M { color: #2BA8A0; }
+  td.col-num.K { color: #E85A78; }
 
   /* stage/group */
   td.col-stage {
@@ -407,6 +408,12 @@
   .no-break { page-break-inside: avoid; }
   .page-break { page-break-before: always; }
 
+  /* Keep thead with at least a few tbody rows — avoid orphan headers */
+  table.schedule thead { display: table-header-group; }
+  table.schedule tbody tr { page-break-inside: avoid; }
+  /* Prevent splitting a day section so that only 1-2 rows remain on previous page */
+  table.schedule { page-break-inside: auto; }
+
   /* ── Break row ── */
   tr.row-break td {
     background: #f3f3f3;
@@ -432,6 +439,7 @@
     font-weight: 900;
     color: #E08A00;
     letter-spacing: 0.3pt;
+    text-align: center;
   }
 
   /* ── Court section header ── */
@@ -466,7 +474,7 @@
 {% if m.type == 'tournament_opening' %}
 <tr class="row-opening">
   <td class="col-time">{{ m.time }}</td>
-  <td colspan="7" class="opening-label">🎉 {{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %} — wszystkie boiska</td>
+  <td colspan="7" class="opening-label">🎉 {{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
 </tr>
 {% elif m.type == 'court_break' %}
 <tr class="row-break">
@@ -478,7 +486,7 @@
 <tr class="gender-{{ m.gender }}">
   <td class="col-time">{{ m.time }}</td>
   <td class="col-court">{{ m.court }}</td>
-  <td class="col-cat {{ m.gender }}">{{ m.category }}</td>
+  <td class="col-num {{ m.gender }}">{{ m.match_num }}</td>
   <td class="col-stage">{{ m.stage }}</td>
   {{ team_cell(m.team_a, m.hint_a) }}
   <td class="col-vs">–</td>
@@ -559,16 +567,10 @@
 {% endif %}
 
 <!-- ════════ PER-DAY SECTIONS ════════ -->
+{% if not split_by_courts %}
 {% for day in days %}
-{% if not loop.first %}
-{% set ns = namespace(prev_count=0) %}
-{% for m in days[loop.index0 - 1].matches %}{% set ns.prev_count = ns.prev_count + 1 %}{% endfor %}
-{% if ns.prev_count > 25 %}
-<div class="page-break"></div>
-{% endif %}
-{% endif %}
 
-<div class="day-section">
+<div class="day-section{% if group_previews and loop.first %} page-break{% endif %}">
   <div class="day-header no-break">{{ day.label }}</div>
 
   {% if day.matches %}
@@ -577,7 +579,7 @@
       <tr>
         <th>Godz.</th>
         <th class="th-center">Boisko</th>
-        <th class="th-center">Kat.</th>
+        <th class="th-center">Num.</th>
         <th>Etap / Grupa</th>
         <th class="th-team">Drużyna A</th>
         <th class="th-center">–</th>
@@ -594,11 +596,12 @@
   {% endif %}
 </div>
 {% endfor %}
+{% endif %}
 
 {% if split_by_courts and court_sections %}
 <!-- ════════ COURT-SPLIT SECTIONS ════════ -->
 {% for section in court_sections %}
-<div class="page-break"></div>
+{% if not loop.first %}<div class="page-break"></div>{% endif %}
 <div class="court-section-header">{{ section.court_label }}</div>
 
 {% for day in section.days %}
@@ -610,7 +613,7 @@
       <tr>
         <th>Godz.</th>
         <th class="th-center">Boisko</th>
-        <th class="th-center">Kat.</th>
+        <th class="th-center">Num.</th>
         <th>Etap / Grupa</th>
         <th class="th-team">Drużyna A</th>
         <th class="th-center">–</th>
