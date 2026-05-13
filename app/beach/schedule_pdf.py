@@ -153,15 +153,15 @@ def _compute_date_range(days: List[Dict[str, Any]]) -> str:
     return f"{fmt(dates[0])}–{fmt(dates[-1])}"
 
 
-def _stage_label(m: Dict[str, Any], lower_playoff_labels: Optional[Dict[str, str]] = None) -> str:
+def _stage_label(m: Dict[str, Any], placement_rr_labels: Optional[Dict[str, str]] = None) -> str:
     stage = m.get("stage", "")
     group = m.get("group") or ""
     if stage == "group":
         return f"Grupa {group}" if group else "Każdy z każdym"
-    if stage == "lower_playoff":
-        if lower_playoff_labels and group in lower_playoff_labels:
-            return lower_playoff_labels[group]
-        return "Baraż"
+    if stage == "placement_rr":
+        if placement_rr_labels and group in placement_rr_labels:
+            return placement_rr_labels[group]
+        return "O miejsca"
     return {
         "quarterfinal": "Ćwierćfinał",
         "semifinal": "Półfinał",
@@ -169,7 +169,13 @@ def _stage_label(m: Dict[str, Any], lower_playoff_labels: Optional[Dict[str, str
         "third_place": "3. miejsce",
         "fifth_place": "5. miejsce",
         "seventh_place": "7. miejsce",
-        "fifth_semifinal": "Półfinał o 5.",
+        "fifth_semifinal": "PF o V.",
+        "ninth_semifinal": "PF o IX.",
+        "ninth_place": "9. miejsce",
+        "eleventh_place": "11. miejsce",
+        "thirteenth_semifinal": "PF o XIII.",
+        "thirteenth_place": "13. miejsce",
+        "fifteenth_place": "15. miejsce",
         "playoff": "Baraż",
     }.get(stage, stage)
 
@@ -177,78 +183,44 @@ def _stage_label(m: Dict[str, Any], lower_playoff_labels: Optional[Dict[str, str
 import math as _math
 
 
-def _compute_lower_playoff_labels(
+def _compute_placement_rr_labels(
     matches: List[Dict[str, Any]],
-    config: Dict[str, Any],
 ) -> Dict[str, str]:
-    """Return a dict mapping lower_playoff group name → place range label.
+    """Return a dict mapping placement_rr group name → place range label.
 
-    E.g. "lower_3_K" → "O msc. VII-IX"
+    E.g. "placement_7_K" → "O msc. VII-IX"
     """
     labels: Dict[str, str] = {}
 
-    groups_cfg = config.get("groups") or {}
+    for m in matches:
+        if m.get("stage") != "placement_rr":
+            continue
+        g = m.get("group") or ""
+        if g in labels:
+            continue
+        gm = re.match(r"placement_(\d+)_", g)
+        if not gm:
+            continue
+        tier = int(gm.group(1))
 
-    for gender in ("M", "K"):
-        gender_cfg = groups_cfg.get(gender) or {}
-        group_count = int(gender_cfg.get("count") or 2)
-
-        knockout_format = (
-            config.get(f"knockoutFormat{gender}")
-            or config.get("knockoutFormat")
-            or "semis"
+        # Count matches in this group to derive team count via round-robin formula
+        n_matches = sum(
+            1
+            for m2 in matches
+            if m2.get("stage") == "placement_rr"
+            and m2.get("group") == g
         )
-        knockout_slots = 8 if knockout_format == "quarters" else 4
+        if n_matches > 0:
+            num_teams = round((1 + _math.sqrt(1 + 8 * n_matches)) / 2)
+        else:
+            num_teams = 3  # fallback
 
-        # Regular playoff (baraże) non-advancers: teams that played but didn't go to knockout.
-        # Mirrors getPlayoffInfo logic from the TS side.
-        if knockout_format == "semis":
-            playoff_needed = group_count == 3
-            playoff_advance = 1
-            playoff_size = group_count  # all 2nds play
-        else:  # quarters
-            playoff_needed = group_count == 3
-            playoff_advance = 2
-            playoff_size = group_count  # all 3rds play
-        playoff_non_advancers = (playoff_size - playoff_advance) if playoff_needed else 0
+        start_place = tier
+        end_place = tier + num_teams - 1
 
-        # Collect all lower_playoff groups for this gender, sorted by position.
-        lower_groups_for_gender: List[tuple] = []  # (pos: int, group_name: str)
-        for m in matches:
-            if m.get("stage") != "lower_playoff" or m.get("gender") != gender:
-                continue
-            g = m.get("group") or ""
-            gm = re.match(r"lower_(\d+)_", g)
-            if gm:
-                pos = int(gm.group(1))
-                if (pos, g) not in lower_groups_for_gender:
-                    lower_groups_for_gender.append((pos, g))
-        lower_groups_for_gender.sort()
-
-        # For each lower_playoff group, compute starting place.
-        teams_above = knockout_slots + playoff_non_advancers
-        for pos, grp in lower_groups_for_gender:
-            # Count matches in this group to derive team count via round-robin formula.
-            n_matches = sum(
-                1
-                for m in matches
-                if m.get("stage") == "lower_playoff"
-                and m.get("gender") == gender
-                and m.get("group") == grp
-            )
-            # N*(N-1)/2 = n_matches  →  N = round((1 + sqrt(1+8n)) / 2)
-            if n_matches > 0:
-                num_teams = round((1 + _math.sqrt(1 + 8 * n_matches)) / 2)
-            else:
-                num_teams = group_count  # fallback
-
-            start_place = teams_above + 1
-            end_place = teams_above + num_teams
-            teams_above = end_place  # next lower group starts after this one
-
-            start_r = _roman(start_place)
-            end_r = _roman(end_place)
-            labels[grp] = f"O msc. {start_r}-{end_r}" if start_place != end_place else f"O msc. {start_r}"
+        start_r = _roman(start_place)
+        end_r = _roman(end_place)
+        labels[g] = f"O msc. {start_r}-{end_r}" if start_place != end_place else f"O msc. {start_r}"
 
     return labels
 
@@ -287,6 +259,9 @@ def _knockout_hints(m: Dict[str, Any]) -> tuple:
     # "Baraż N. miejsc: X" → strip everything up to and including ": "
     hint_a = re.sub(r"^Bara\u017c\s+\d+\.\s*miejsc:\s*", "", hint_a)
     hint_b = re.sub(r"^Bara\u017c\s+\d+\.\s*miejsc:\s*", "", hint_b)
+    # Strip placement RR prefix: "O msc. VII-IX: 3. z gr. A" → "3. z gr. A"
+    hint_a = re.sub(r"^O msc\.\s*[^:]+:\s*", "", hint_a)
+    hint_b = re.sub(r"^O msc\.\s*[^:]+:\s*", "", hint_b)
     return hint_a, hint_b
 
 
@@ -295,6 +270,8 @@ _STAGE_ABBREV = {
     "ĆF": "quarterfinal",
     "PF": "semifinal",
     "SM5": "fifth_semifinal",
+    "9PF": "ninth_semifinal",
+    "13PF": "thirteenth_semifinal",
 }
 
 
@@ -319,8 +296,8 @@ def _resolve_hint_with_match_nums(hint: str, stage_num_map: Dict[str, Dict[int, 
         if match_label:
             return f"{prefix}{match_label}"
         return match_obj.group(0)
-    # Pattern: (Zwycięzca|Przegrany) (ĆF|PF|SM5) #(\d+)
-    return re.sub(r'(Zwycięzca |Przegrany )(ĆF|PF|SM5) #(\d+)', _replacer, hint)
+    # Pattern: (Zwycięzca|Przegrany) (ĆF|PF|SM5|9PF|13PF) #(\d+)
+    return re.sub(r'(Zwycięzca |Przegrany )(ĆF|PF|SM5|\d+PF) #(\d+)', _replacer, hint)
 
 
 def _gender_label(gender: str) -> str:
@@ -335,10 +312,16 @@ def _build_group_previews(
         "quarterfinal",
         "semifinal",
         "fifth_semifinal",
+        "ninth_semifinal",
+        "thirteenth_semifinal",
         "final",
         "third_place",
         "fifth_place",
         "seventh_place",
+        "ninth_place",
+        "eleventh_place",
+        "thirteenth_place",
+        "fifteenth_place",
     }
     has_knockout = any(m.get("stage") in knockout_stages for m in matches)
     if not has_knockout:
@@ -447,7 +430,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
     logo_b64 = _load_logo_b64()
     qr_b64 = _load_qr_b64()
     group_previews = _build_group_previews(matches, config) if req.include_groups else []
-    lower_playoff_labels = _compute_lower_playoff_labels(matches, config)
+    placement_rr_labels = _compute_placement_rr_labels(matches)
 
     # Group entries by day, sort by time then order
     by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
@@ -554,7 +537,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                 "court": str(m.get("court") or ""),
                 "match_num": match_num,
                 "gender": gender,
-                "stage": _stage_label(m, lower_playoff_labels),
+                "stage": _stage_label(m, placement_rr_labels),
                 "team_a": _team_name(m.get("teamA")),
                 "team_b": _team_name(m.get("teamB")),
                 "hint_a": ha,

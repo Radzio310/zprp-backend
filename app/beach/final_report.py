@@ -41,10 +41,17 @@ STAGE_LABELS = {
     "quarterfinal": "Ćwierćfinał",
     "semifinal": "Półfinał",
     "fifth_semifinal": "Pf. 5-8",
+    "ninth_semifinal": "Pf. 9-12",
+    "thirteenth_semifinal": "Pf. 13-16",
     "final": "Finał",
     "third_place": "O 3. miejsce",
     "fifth_place": "O 5. miejsce",
     "seventh_place": "O 7. miejsce",
+    "ninth_place": "O 9. miejsce",
+    "eleventh_place": "O 11. miejsce",
+    "thirteenth_place": "O 13. miejsce",
+    "fifteenth_place": "O 15. miejsce",
+    "placement_rr": "O miejsca",
 }
 
 CATEGORY_COLORS = {
@@ -499,8 +506,13 @@ def _render_bracket_svg(bracket_rounds: List[Dict[str, Any]], color: str) -> str
 def _build_placement_matches(
     matches: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Extract placement matches (3rd, 5th, 7th place)."""
-    placement_stages = {"third_place", "fifth_place", "seventh_place"}
+    """Extract placement matches (semis and finals for 3rd-15th place, plus placement round-robins)."""
+    placement_stages = {
+        "fifth_semifinal", "ninth_semifinal", "thirteenth_semifinal",
+        "third_place", "fifth_place", "seventh_place",
+        "ninth_place", "eleventh_place", "thirteenth_place", "fifteenth_place",
+        "placement_rr",
+    }
     result = []
     for m in sorted(matches, key=lambda x: x.get("order", 0)):
         if m.get("stage") in placement_stages:
