@@ -300,8 +300,13 @@ def _build_bracket_rounds(
     return rounds
 
 
-def _render_bracket_svg(bracket_rounds: List[Dict[str, Any]], color: str) -> str:
-    """Generate an inline SVG bracket tree with proper connecting lines."""
+def _render_bracket_svg(
+    bracket_rounds: List[Dict[str, Any]],
+    color: str,
+    third_place: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generate an inline SVG bracket tree with proper connecting lines.
+    Optionally includes a 3rd-place match below the final with dashed connectors."""
     if not bracket_rounds:
         return ""
 
@@ -499,6 +504,153 @@ def _render_bracket_svg(bracket_rounds: List[Dict[str, Any]], color: str) -> str
                 f'fill="{fill_b}">{sb_s}</text>'
             )
 
+    # ── 3rd place match (below final, dashed connectors from SF losers) ──
+    if third_place and num_rounds >= 2:
+        tp_w = _winner(third_place)
+        tp_match = {
+            "team_a": _team_name(third_place.get("teamA")),
+            "team_b": _team_name(third_place.get("teamB")),
+            "score_a": third_place.get("scoreA"),
+            "score_b": third_place.get("scoreB"),
+            "winner": tp_w,
+            "label": "O 3. MIEJSCE",
+        }
+
+        # Position: below the final in the final column
+        final_col_x = round_x[-1]
+        sf_col_idx = num_rounds - 2
+        sf_centers = all_centers[sf_col_idx]
+        final_center = all_centers[-1][0]
+
+        tp_gap = 20
+        final_bottom = final_center + CARD_H / 2
+        tp_cy = final_bottom + tp_gap + CARD_H / 2
+        tp_y = tp_cy - CARD_H / 2
+
+        # Extend SVG height
+        new_h = tp_cy + CARD_H / 2 + PAD
+        if new_h > total_h:
+            total_h = new_h
+            # Update SVG dimensions in the opening tag
+            parts[0] = (
+                f'<svg xmlns="http://www.w3.org/2000/svg" '
+                f'width="{total_w}pt" height="{total_h}pt" '
+                f'viewBox="0 0 {total_w} {total_h}" '
+                f'style="font-family: DejaVu Sans, sans-serif; display: block;">'
+            )
+
+        # Dashed connectors from last SF column to 3rd place
+        sf_right = round_x[sf_col_idx] + CARD_W
+        final_left = final_col_x
+        trunk_x = (sf_right + final_left) / 2
+        last_sf_mid = sf_centers[-1] if sf_centers else final_center
+
+        # Vertical dashed trunk from last SF midpoint down to 3rd-place midpoint
+        dash_len, gap_len = 3, 3
+        dy = last_sf_mid
+        while dy < tp_cy:
+            seg_end = min(dy + dash_len, tp_cy)
+            parts.append(
+                f'<line x1="{trunk_x}" y1="{dy}" x2="{trunk_x}" y2="{seg_end}" '
+                f'stroke="#bbb" stroke-width="0.8" stroke-dasharray="3,3"/>'
+            )
+            dy += dash_len + gap_len
+
+        # Horizontal dashed branch from trunk to 3rd-place card
+        dx = trunk_x
+        while dx < final_col_x:
+            seg_end = min(dx + dash_len, final_col_x)
+            parts.append(
+                f'<line x1="{dx}" y1="{tp_cy}" x2="{seg_end}" y2="{tp_cy}" '
+                f'stroke="#bbb" stroke-width="0.8" stroke-dasharray="3,3"/>'
+            )
+            dx += dash_len + gap_len
+
+        # Render the 3rd place card
+        has_label = True
+        label_h_tp = 13
+        team_area_h = CARD_H - label_h_tp
+        team_h = team_area_h / 2
+        name_max_w = CARD_W - 32
+
+        parts.append(
+            f'<rect x="{final_col_x}" y="{tp_y}" width="{CARD_W}" height="{CARD_H}" '
+            f'rx="3" fill="#fafafa" stroke="#ccc" stroke-width="0.5"/>'
+        )
+        # Label bar
+        parts.append(
+            f'<rect x="{final_col_x}" y="{tp_y}" width="{CARD_W}" height="{label_h_tp}" '
+            f'rx="3" fill="{color}"/>'
+        )
+        parts.append(
+            f'<rect x="{final_col_x}" y="{tp_y + label_h_tp - 3}" '
+            f'width="{CARD_W}" height="3" fill="{color}"/>'
+        )
+        parts.append(
+            f'<text x="{final_col_x + CARD_W / 2}" y="{tp_y + label_h_tp - 3.5}" '
+            f'text-anchor="middle" font-size="5" font-weight="800" '
+            f'fill="white" letter-spacing="0.2">O 3. MIEJSCE</text>'
+        )
+
+        # Clip paths
+        cid_a = "ctp0a"
+        cid_b = "ctp0b"
+        ta_y = tp_y + label_h_tp
+        tb_y = ta_y + team_h
+        parts.append(
+            f'<clipPath id="{cid_a}">'
+            f'<rect x="{final_col_x + 5}" y="{ta_y}" width="{name_max_w}" height="{team_h}"/>'
+            f'</clipPath>'
+        )
+        parts.append(
+            f'<clipPath id="{cid_b}">'
+            f'<rect x="{final_col_x + 5}" y="{tb_y}" width="{name_max_w}" height="{team_h}"/>'
+            f'</clipPath>'
+        )
+
+        # Team A
+        is_wa = tp_match["winner"] == "A"
+        name_a = html_mod.escape(tp_match["team_a"])
+        sa = tp_match["score_a"]
+        sa_s = str(sa) if sa is not None else ""
+        fill_a = color if is_wa else "#333"
+        fw_a = "900" if is_wa else "600"
+        parts.append(
+            f'<text x="{final_col_x + 6}" y="{ta_y + team_h / 2 + 3}" '
+            f'font-size="7.5" font-weight="{fw_a}" fill="{fill_a}" '
+            f'clip-path="url(#{cid_a})">{name_a}</text>'
+        )
+        parts.append(
+            f'<text x="{final_col_x + CARD_W - 6}" y="{ta_y + team_h / 2 + 3}" '
+            f'text-anchor="end" font-size="8" font-weight="900" '
+            f'fill="{fill_a}">{sa_s}</text>'
+        )
+
+        # Separator
+        parts.append(
+            f'<line x1="{final_col_x + 2}" y1="{tb_y}" '
+            f'x2="{final_col_x + CARD_W - 2}" y2="{tb_y}" '
+            f'stroke="#e0e0e0" stroke-width="0.5"/>'
+        )
+
+        # Team B
+        is_wb = tp_match["winner"] == "B"
+        name_b = html_mod.escape(tp_match["team_b"])
+        sb = tp_match["score_b"]
+        sb_s = str(sb) if sb is not None else ""
+        fill_b = color if is_wb else "#333"
+        fw_b = "900" if is_wb else "600"
+        parts.append(
+            f'<text x="{final_col_x + 6}" y="{tb_y + team_h / 2 + 3}" '
+            f'font-size="7.5" font-weight="{fw_b}" fill="{fill_b}" '
+            f'clip-path="url(#{cid_b})">{name_b}</text>'
+        )
+        parts.append(
+            f'<text x="{final_col_x + CARD_W - 6}" y="{tb_y + team_h / 2 + 3}" '
+            f'text-anchor="end" font-size="8" font-weight="900" '
+            f'fill="{fill_b}">{sb_s}</text>'
+        )
+
     parts.append('</svg>')
     return '\n'.join(parts)
 
@@ -608,7 +760,6 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             "tables": [],
             "bracket_rounds": [],
             "bracket_svg": "",
-            "placement_matches": [],
             "match_days": [],
             "standings": None,
             "standings_is_multi_tournament": False,
@@ -663,14 +814,15 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 m for m in g_matches
                 if m.get("stage") in BRACKET_STAGE_ORDER
             ]
+            third_place_match = next(
+                (m for m in g_matches if m.get("stage") == "third_place"), None
+            )
             if knockout_matches:
                 gs["bracket_rounds"] = _build_bracket_rounds(knockout_matches)
                 gs["bracket_svg"] = _render_bracket_svg(
                     gs["bracket_rounds"], gs["gender_color"],
+                    third_place=third_place_match,
                 )
-
-            # Placement
-            gs["placement_matches"] = _build_placement_matches(g_matches)
 
         # ── Match cards by day ──
         by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)

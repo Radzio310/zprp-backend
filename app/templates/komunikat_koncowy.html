@@ -381,47 +381,6 @@
 </div>
 {% endif %}
 
-<!-- ── Placement matches ── -->
-{% if gs.placement_matches %}
-<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Mecze o miejsca</div>
-<div class="section-desc">Mecze o 3., 5. i 7. miejsce.</div>
-<div class="matches-grid">
-{% for pm in gs.placement_matches %}
-<div class="match-card">
-  <div class="mc-header">
-    <span class="mc-time">{{ pm.time or "" }}</span>
-    <span class="mc-stage" style="color: {{ gc }}; background: {{ gc }}14;">{{ pm.stage_label }}</span>
-    {% if pm.match_number %}<span class="mc-match-num">{{ pm.match_number }}</span>{% endif %}
-  </div>
-  <div class="mc-team-row{% if pm.winner == 'A' %} winner{% endif %}">
-    <span class="mc-team-name" style="{% if pm.winner == 'A' %}font-weight: 900; color: {{ gc }};{% endif %}">{{ pm.team_a }}</span>
-    <span class="mc-team-score" style="{% if pm.winner == 'A' %}color: {{ gc }};{% endif %}">{{ pm.score_a if pm.score_a is not none else "" }}</span>
-  </div>
-  <div class="mc-team-row{% if pm.winner == 'B' %} winner{% endif %}">
-    <span class="mc-team-name" style="{% if pm.winner == 'B' %}font-weight: 900; color: {{ gc }};{% endif %}">{{ pm.team_b }}</span>
-    <span class="mc-team-score" style="{% if pm.winner == 'B' %}color: {{ gc }};{% endif %}">{{ pm.score_b if pm.score_b is not none else "" }}</span>
-  </div>
-  {% if pm.sets %}
-  <div class="mc-sets-row">
-    {% for s in pm.sets %}
-    <div class="mc-set-tile">
-      <span class="mc-set-label">Set {{ loop.index }}</span>
-      <span class="mc-set-score">{{ s.ptA }}:{{ s.ptB }}</span>
-    </div>
-    {% endfor %}
-    {% if pm.shootout %}
-    <div class="mc-set-tile">
-      <span class="mc-set-label">Rz.k.</span>
-      <span class="mc-set-score">{{ pm.shootout.a }}:{{ pm.shootout.b }}</span>
-    </div>
-    {% endif %}
-  </div>
-  {% endif %}
-</div>
-{% endfor %}
-</div>
-{% endif %}
-
 <!-- ── All Match Cards ── -->
 {% if gs.match_days %}
 <div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Przebieg rozgrywek</div>
