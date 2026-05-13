@@ -197,6 +197,26 @@
     font-weight: 400;
     font-style: italic;
   }
+  /* TBD cell with knockout hint + handwriting space */
+  td.col-team.tbd-hint {
+    padding: 2pt 5pt 1pt 5pt;
+    vertical-align: bottom;
+  }
+  .tbd-hint-label {
+    display: block;
+    font-size: 6pt;
+    font-weight: 600;
+    color: #aaa;
+    font-style: italic;
+    line-height: 1.2;
+    margin-bottom: 1pt;
+  }
+  .tbd-write-line {
+    display: block;
+    width: 100%;
+    height: 12pt;
+    border-bottom: 0.7pt dotted #ccc;
+  }
 
   /* vs separator */
   td.col-vs {
@@ -386,7 +406,94 @@
 
   .no-break { page-break-inside: avoid; }
   .page-break { page-break-before: always; }
+
+  /* ── Break row ── */
+  tr.row-break td {
+    background: #f3f3f3;
+    border-left: 3pt dashed #ccc !important;
+    color: #888;
+    font-style: italic;
+    font-size: 7.5pt;
+    padding: 4pt 8pt;
+  }
+  tr.row-break td.break-label {
+    font-weight: 700;
+    color: #777;
+  }
+
+  /* ── Tournament opening row ── */
+  tr.row-opening td {
+    background: linear-gradient(135deg, #FFF5E0 0%, #FFFBF0 100%);
+    border-left: 3pt solid #FFB14A !important;
+    font-size: 8pt;
+    padding: 5pt 8pt;
+  }
+  tr.row-opening td.opening-label {
+    font-weight: 900;
+    color: #E08A00;
+    letter-spacing: 0.3pt;
+  }
+
+  /* ── Court section header ── */
+  .court-section-header {
+    font-size: 11pt;
+    font-weight: 900;
+    color: {{ accent }};
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+    margin: 12pt 0 6pt 0;
+    padding: 5pt 10pt;
+    border-bottom: 2pt solid {{ accent }};
+  }
 </style>
+
+{# ── Macro: render a single team cell with TBD hint + writing space ── #}
+{% macro team_cell(name, hint) %}
+{% if not name and hint %}
+<td class="col-team tbd-hint"><span class="tbd-hint-label">{{ hint }}</span><span class="tbd-write-line"></span></td>
+{% elif not name %}
+<td class="col-team tbd"></td>
+{% elif name | length > 22 %}
+<td class="col-team long-name">{{ name }}</td>
+{% else %}
+<td class="col-team">{{ name }}</td>
+{% endif %}
+{% endmacro %}
+
+{# ── Macro: render schedule tbody rows ── #}
+{% macro schedule_rows(matches) %}
+{% for m in matches %}
+{% if m.type == 'tournament_opening' %}
+<tr class="row-opening">
+  <td class="col-time">{{ m.time }}</td>
+  <td colspan="7" class="opening-label">🎉 {{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %} — wszystkie boiska</td>
+</tr>
+{% elif m.type == 'court_break' %}
+<tr class="row-break">
+  <td class="col-time">{{ m.time }}</td>
+  <td class="col-court">{{ m.court }}</td>
+  <td colspan="6" class="break-label">{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
+</tr>
+{% else %}
+<tr class="gender-{{ m.gender }}">
+  <td class="col-time">{{ m.time }}</td>
+  <td class="col-court">{{ m.court }}</td>
+  <td class="col-cat {{ m.gender }}">{{ m.category }}</td>
+  <td class="col-stage">{{ m.stage }}</td>
+  {{ team_cell(m.team_a, m.hint_a) }}
+  <td class="col-vs">–</td>
+  {{ team_cell(m.team_b, m.hint_b) }}
+  <td class="col-score{% if not m.score_main %} empty{% endif %}">
+    {% if m.score_main %}
+    <span class="score-main">{{ m.score_main }}</span>
+    {% if m.score_sets %}<span class="score-sets">{{ m.score_sets }}</span>{% endif %}
+    {% else %}–{% endif %}
+  </td>
+</tr>
+{% endif %}
+{% endfor %}
+{% endmacro %}
+
 </head>
 <body>
 
@@ -479,23 +586,7 @@
       </tr>
     </thead>
     <tbody>
-      {% for m in day.matches %}
-      <tr class="gender-{{ m.gender }}">
-        <td class="col-time">{{ m.time }}</td>
-        <td class="col-court">{{ m.court }}</td>
-        <td class="col-cat {{ m.gender }}">{{ m.category }}</td>
-        <td class="col-stage">{{ m.stage }}</td>
-        <td class="col-team{% if not m.team_a %} tbd{% elif m.team_a | length > 22 %} long-name{% endif %}">{{ m.team_a }}</td>
-        <td class="col-vs">–</td>
-        <td class="col-team{% if not m.team_b %} tbd{% elif m.team_b | length > 22 %} long-name{% endif %}">{{ m.team_b }}</td>
-        <td class="col-score{% if not m.score_main %} empty{% endif %}">
-          {% if m.score_main %}
-          <span class="score-main">{{ m.score_main }}</span>
-          {% if m.score_sets %}<span class="score-sets">{{ m.score_sets }}</span>{% endif %}
-          {% else %}–{% endif %}
-        </td>
-      </tr>
-      {% endfor %}
+      {{ schedule_rows(day.matches) }}
     </tbody>
   </table>
   {% else %}
@@ -503,6 +594,39 @@
   {% endif %}
 </div>
 {% endfor %}
+
+{% if split_by_courts and court_sections %}
+<!-- ════════ COURT-SPLIT SECTIONS ════════ -->
+{% for section in court_sections %}
+<div class="page-break"></div>
+<div class="court-section-header">{{ section.court_label }}</div>
+
+{% for day in section.days %}
+<div class="day-section">
+  <div class="day-header no-break">{{ day.label }}</div>
+  {% if day.matches %}
+  <table class="schedule">
+    <thead>
+      <tr>
+        <th>Godz.</th>
+        <th class="th-center">Boisko</th>
+        <th class="th-center">Kat.</th>
+        <th>Etap / Grupa</th>
+        <th class="th-team">Drużyna A</th>
+        <th class="th-center">–</th>
+        <th class="th-team">Drużyna B</th>
+        <th class="th-center">Wynik</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ schedule_rows(day.matches) }}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endfor %}
+{% endfor %}
+{% endif %}
 
 <!-- ════════ FOOTER ════════ -->
 <div class="footer">

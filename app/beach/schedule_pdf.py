@@ -69,6 +69,8 @@ class SchedulePdfRequest(BaseModel):
     tournament_id: Optional[int] = None   # used to look up judge/host emails
     exclude_user_id: Optional[int] = None  # current user — excluded from recipients
     category: str = ""
+    include_groups: bool = True
+    split_by_courts: bool = False
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -176,6 +178,22 @@ def _team_name(team: Optional[Dict[str, Any]]) -> str:
     if team and team.get("name"):
         return str(team["name"])
     return ""
+
+
+def _knockout_hints(m: Dict[str, Any]) -> tuple:
+    """Extract per-slot knockout hints from knockoutLabel ('X vs Y').
+
+    Returns (hint_a, hint_b) — empty strings when team is already known.
+    """
+    team_a = m.get("teamA")
+    team_b = m.get("teamB")
+    label = m.get("knockoutLabel") or ""
+    if not label:
+        return "", ""
+    parts = label.split(" vs ", 1)
+    hint_a = parts[0].strip() if not (team_a and team_a.get("name")) else ""
+    hint_b = (parts[1].strip() if len(parts) > 1 else "") if not (team_b and team_b.get("name")) else ""
+    return hint_a, hint_b
 
 
 def _gender_label(gender: str) -> str:
@@ -293,6 +311,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
     matches: List[Dict[str, Any]] = schedule.get("matches") or []
     config: Dict[str, Any] = schedule.get("config") or {}
     days_cfg: List[Dict[str, Any]] = config.get("days") or []
+    courts_count: int = int(config.get("courts") or 1)
 
     tournament_name = req.tournament_name.strip() or "Turniej"
     date_range = req.tournament_dates.strip() or _compute_date_range(days_cfg)
@@ -300,9 +319,9 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
     accent = _get_accent(req.category)
     logo_b64 = _load_logo_b64()
     qr_b64 = _load_qr_b64()
-    group_previews = _build_group_previews(matches, config)
+    group_previews = _build_group_previews(matches, config) if req.include_groups else []
 
-    # Group matches by day, sort by time then order
+    # Group entries by day, sort by time then order
     by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for m in matches:
         by_day[int(m.get("dayIndex") or 0)].append(m)
@@ -322,8 +341,33 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
 
         match_rows = []
         for m in day_matches:
+            kind = m.get("kind") or "match"
+
+            if kind == "court_break":
+                match_rows.append({
+                    "type": "court_break",
+                    "time": m.get("startTime") or "",
+                    "end_time": m.get("endTime") or "",
+                    "court": str(m.get("court") or ""),
+                    "label": m.get("label") or "Przerwa",
+                    "duration": m.get("durationMinutes") or 0,
+                })
+                continue
+
+            if kind == "tournament_opening":
+                match_rows.append({
+                    "type": "tournament_opening",
+                    "time": m.get("startTime") or "",
+                    "end_time": m.get("endTime") or "",
+                    "label": m.get("label") or "Otwarcie turnieju",
+                    "duration": m.get("durationMinutes") or 0,
+                })
+                continue
+
             sm, ss = _score_parts(m)
+            ha, hb = _knockout_hints(m)
             match_rows.append({
+                "type": "match",
                 "time": m.get("startTime") or "",
                 "court": str(m.get("court") or ""),
                 "category": _category_label(m),
@@ -331,11 +375,32 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                 "stage": _stage_label(m),
                 "team_a": _team_name(m.get("teamA")),
                 "team_b": _team_name(m.get("teamB")),
+                "hint_a": ha,
+                "hint_b": hb,
                 "score_main": sm,
                 "score_sets": ss,
             })
 
         days_out.append({"label": day_label, "matches": match_rows})
+
+    # If split_by_courts, duplicate days_out per court
+    split_by_courts = req.split_by_courts and courts_count >= 2
+    court_sections: List[Dict[str, Any]] = []
+    if split_by_courts:
+        for court_num in range(1, courts_count + 1):
+            court_days = []
+            for day in days_out:
+                filtered = [
+                    r for r in day["matches"]
+                    if r.get("type") == "tournament_opening"
+                    or str(r.get("court", "")) == str(court_num)
+                ]
+                if filtered:
+                    court_days.append({"label": day["label"], "matches": filtered})
+            court_sections.append({
+                "court_label": f"Boisko {court_num}",
+                "days": court_days,
+            })
 
     # Decide portrait vs landscape based on peak matches per day
     max_day_matches = max((len(d["matches"]) for d in days_out), default=0)
@@ -355,6 +420,8 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
         "group_previews": group_previews,
         "generated_at": now,
         "category": req.category,
+        "split_by_courts": split_by_courts,
+        "court_sections": court_sections,
     }
 
 
