@@ -1282,22 +1282,43 @@ Jesteś ekspertem od terminarzów turniejów siatkówki plażowej. Twoim zadanie
 wyekstrahowanego tekstu z PDF-ów zawierających terminarz turnieju i wygenerowanie kompletnego
 obiektu ScheduleData w formacie JSON.
 
-WAŻNE ZASADY:
-1. Używaj TYLKO drużyn z podanej listy (dopasuj nazwy — mogą się lekko różnić w dokumentach).
-2. Drużyny już zaproszone do turnieju mają PRIORYTET. Jeśli nazwa pasuje do zaproszonej drużyny, użyj jej ID.
-3. Jeśli drużyna z dokumentu nie pasuje do żadnej zaproszonej, szukaj w pełnej bazie danych.
-4. Jeśli drużyna nie pasuje do nikogo w bazie — ustaw teamA/teamB na null i dodaj ją do listy "unmatched_teams".
-5. Każdy mecz musi mieć unikalne "id" (wygeneruj UUID v4).
-6. Godziny w formacie "HH:mm" (24h).
-7. courts to liczba boisk widoczna w terminarzu.
-8. dayIndex: 0-based — jeśli turniej jest wielodniowy, 0 = pierwszy dzień.
-9. Kolejność meczów (order) musi być sekwencyjna od 0.
-10. Status wszystkich meczów: "scheduled".
-11. Tryb turnieju: {mode}.
-12. Jeśli brakuje informacji o godzinach, użyj typowych godzin (08:00 start, 40 min interwał).
+KLUCZOWE ZASADY STRUKTURY TURNIEJU:
+1. Przeanalizuj dokładnie jak wygląda turniej: ile jest grup per płeć, ile drużyn w każdej, jakie mecze pucharowe.
+2. Grupy MUSZĄ być identyczne jak w dokumencie — te same drużyny w tych samych grupach.
+3. Rozmiary grup muszą być jak najbardziej symetryczne (np. 14 drużyn na 4 grupy = 4,4,3,3 — NIE 5,3,3,3).
+4. TYLKO mecze grupowe (stage="group") mają wypełnione teamA i teamB konkretnymi drużynami.
+5. Mecze pucharowe (semifinal, quarterfinal, final, third_place, fifth_place, seventh_place, fifth_semifinal) \
+ZAWSZE mają teamA=null i teamB=null z opisowym knockoutLabel (np. "1. z gr. A vs 2. z gr. B").
+6. Baraże (stage="playoff") też mają teamA=null, teamB=null z knockoutLabel opisującym kto gra.
+7. Rozpoznaj format fazy pucharowej oddzielnie dla M i K:
+   - Jeśli są ćwierćfinały → knockoutFormatM/K = "quarters"
+   - Jeśli od razu półfinały → knockoutFormatM/K = "semis"
+8. Jeśli widzisz baraże 2. miejsc (3 grupy → półfinały) lub 3. miejsc (3 grupy → ćwierćfinały), dodaj playoffMode="playoff".
+9. W config.groups podaj DOKŁADNY podział drużyn na grupy z ich ID (dopasowanymi z bazy).
 
-SCHEMAT JSON do wygenerowania:
+DOPASOWYWANIE DRUŻYN:
+10. Używaj TYLKO drużyn z podanej listy (dopasuj nazwy — mogą się lekko różnić w dokumentach).
+11. Drużyny już zaproszone do turnieju mają PRIORYTET.
+12. Jeśli drużyna nie pasuje do nikogo w bazie — dodaj ją do "unmatched_teams" i NIE używaj w meczach.
+
+TECHNICZNE:
+13. Każdy mecz musi mieć unikalne "id" (wygeneruj UUID v4).
+14. Godziny w formacie "HH:mm" (24h).
+15. courts = liczba boisk widoczna w terminarzu.
+16. dayIndex: 0-based (0 = pierwszy dzień).
+17. order: sekwencyjny od 0, zachowaj kolejność z dokumentu.
+18. Status wszystkich meczów: "scheduled".
+19. Tryb turnieju: {mode}.
+
+SCHEMAT JSON:
 {_SCHEDULE_JSON_SCHEMA}
+
+DODATKOWE POLA config:
+- knockoutFormatM: "semis"|"quarters" (format pucharowy mężczyzn)
+- knockoutFormatK: "semis"|"quarters" (format pucharowy kobiet)
+- playoffMode: "bestPlace"|"playoff" (czy baraże czy najlepsza drużyna z tabeli)
+- groups.M.count: ile grup męskich, groups.M.teams: {{"A": [id1,id2,...], "B": [id3,id4,...], ...}}
+- groups.K.count: ile grup damskich, groups.K.teams: {{"A": [id1,id2,...], "B": [id3,id4,...], ...}}
 
 Turniej: "{tour_name}"
 Kategoria: {tour_category}
