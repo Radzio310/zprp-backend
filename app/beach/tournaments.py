@@ -19,7 +19,7 @@ import httpx
 from pydantic import BaseModel
 from sqlalchemy import select, insert, update, delete
 
-from app.db import database, beach_tournaments, beach_users, beach_admins, beach_proel_matches, beach_standings
+from app.db import database, beach_tournaments, beach_users, beach_admins, beach_proel_matches, beach_standings, beach_teams
 from app.schemas import (
     CreateBeachTournamentRequest,
     UpdateBeachTournamentRequest,
