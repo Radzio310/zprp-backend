@@ -67,6 +67,7 @@ class CreateTemplateRequest(BaseModel):
     companions: List[CustomTeamCompanionModel] = []
     default_players: List[str] = []        # player IDs (string)
     default_companions: List[str] = []     # companion IDs (string)
+    coach_user_id: Optional[int] = None    # optional coach (from team's "Trener opcjonalny")
 
 
 class UpdateTemplateRequest(BaseModel):
@@ -77,6 +78,7 @@ class UpdateTemplateRequest(BaseModel):
     companions: Optional[List[CustomTeamCompanionModel]] = None
     default_players: Optional[List[str]] = None
     default_companions: Optional[List[str]] = None
+    coach_user_id: Optional[int] = None    # use model_fields_set to detect explicit null
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -119,11 +121,15 @@ async def create_template(
     if body.gender not in ("M", "K"):
         raise HTTPException(status_code=422, detail="Pole gender musi być 'M' lub 'K'.")
 
-    # Fetch coach name snapshot
-    user_row = await database.fetch_one(
-        select(beach_users.c.full_name).where(beach_users.c.id == current_user_id)
-    )
-    coach_name = user_row["full_name"] if user_row else None
+    # Fetch coach name snapshot from provided coach_user_id (NOT current_user_id)
+    coach_uid = body.coach_user_id
+    if coach_uid is not None:
+        coach_row = await database.fetch_one(
+            select(beach_users.c.full_name).where(beach_users.c.id == coach_uid)
+        )
+        coach_name = coach_row["full_name"] if coach_row else None
+    else:
+        coach_name = None
 
     pk = await database.execute(
         beach_custom_team_templates.insert().values(
@@ -134,7 +140,7 @@ async def create_template(
             companions=[c.model_dump() for c in body.companions],
             default_players=body.default_players,
             default_companions=body.default_companions,
-            coach_user_id=current_user_id,
+            coach_user_id=coach_uid,
             coach_name=coach_name,
         )
     )
@@ -183,6 +189,17 @@ async def update_template(
         patch["default_players"] = body.default_players
     if body.default_companions is not None:
         patch["default_companions"] = body.default_companions
+    # coach_user_id is updated only when explicitly sent (even as null)
+    if "coach_user_id" in body.model_fields_set:
+        coach_uid = body.coach_user_id
+        if coach_uid is not None:
+            coach_row = await database.fetch_one(
+                select(beach_users.c.full_name).where(beach_users.c.id == coach_uid)
+            )
+            patch["coach_name"] = coach_row["full_name"] if coach_row else None
+        else:
+            patch["coach_name"] = None
+        patch["coach_user_id"] = coach_uid
 
     if patch:
         patch["updated_at"] = datetime.now(timezone.utc)
