@@ -872,7 +872,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         # ── Standings ──
         sd = standings_by_gender.get(gender)
         if sd and sd.rows:
-            gs["standings"] = [
+            standing_rows = [
                 {
                     **r.dict(),
                     "total_points": int(r.total_points),
@@ -880,8 +880,11 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 }
                 for r in sd.rows
             ]
-            gs["standings_is_multi_tournament"] = sd.tournament_count > 1
-            gs["standings_tournament_count"] = sd.tournament_count
+            # Only include standings if at least one team has points > 0
+            if any(sr["total_points"] > 0 for sr in standing_rows):
+                gs["standings"] = standing_rows
+                gs["standings_is_multi_tournament"] = sd.tournament_count > 1
+                gs["standings_tournament_count"] = sd.tournament_count
 
         gender_sections.append(gs)
 
