@@ -1267,132 +1267,17 @@ async def ai_schedule_import(
 
     invited_ids_set = {t['id'] for t in invited_teams}
 
-    # ── Groups-only mode: extract just group divisions ──
-    if mode == "groupsOnly":
-        groups_system_prompt = f"""\
-Jesteś ekspertem od terminarzów turniejów piłki ręcznej plażowej. Twoim zadaniem jest przeczytanie
-wyekstrahowanego tekstu z PDF-ów i wyodrębnienie TYLKO podziału drużyn na grupy.
-
-ZASADY:
-1. Rozpoznaj grupy męskie (M) i damskie (K) — oznaczone zwykle jako MA, MB, MC, MD / KA, KB, KC itd.
-2. Dopasuj nazwy drużyn z dokumentu do poniższej listy zaproszonych drużyn (fuzzy matching — skróty, literki itp.).
-3. Każda drużyna może być TYLKO W JEDNEJ grupie.
-4. Drużyny nie pasujące do żadnej z zaproszonych — dodaj do "unmatched_teams".
-5. Podaj liczbę grup per płeć (count) i przyporządkowanie drużyn (teams).
-6. Rozpoznaj format fazy pucharowej:
-   - 3 grupy → knockoutFormat = "semis"
-   - 4 grupy → knockoutFormat = "quarters"
-   - 2 grupy → knockoutFormat = "semis"
-
-DRUŻYNY ZAPROSZONE DO TURNIEJU (używaj WYŁĄCZNIE tych drużyn):
-{invited_teams_str}
-
-Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
-- "groups": {{"M": {{"count": <int>, "teams": {{"A": [id1,id2,...], "B": [id3,...], ...}}}}, "K": {{"count": <int>, "teams": {{"A": [...], ...}}}}}}
-- "knockoutFormatM": "semis"|"quarters"
-- "knockoutFormatK": "semis"|"quarters"
-- "team_mapping": lista obiektów {{{{ "doc_name": "<nazwa z dokumentu>", "matched_id": <int|null>, "matched_name": "<nazwa z bazy>"|null, "source": "invited"|"unmatched" }}}}
-"""
-        user_msg = f"Oto tekst wyekstrahowany z dokumentów:\n\n{extracted_text}"
-
-        try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(api_key=api_key)
-            response = await client.chat.completions.create(
-                model=os.getenv("OPENAI_SCHEDULE_MODEL", "gpt-4o"),
-                messages=[
-                    {"role": "system", "content": groups_system_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.1,
-                timeout=60,
-            )
-        except Exception as exc:
-            logger.exception("OpenAI groups-only request failed")
-            raise HTTPException(502, f"Błąd komunikacji z OpenAI: {exc}")
-
-        raw = (response.choices[0].message.content or "").strip()
-        if not raw:
-            raise HTTPException(502, "OpenAI zwrócił pustą odpowiedź")
-
-        try:
-            result = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            logger.error("OpenAI returned invalid JSON (groupsOnly): %s", raw[:500])
-            raise HTTPException(502, f"OpenAI zwrócił niepoprawny JSON: {exc}")
-
-        groups = result.get("groups", {})
-        knockout_m = result.get("knockoutFormatM", "semis")
-        knockout_k = result.get("knockoutFormatK", "semis")
-        team_mapping = result.get("team_mapping", [])
-
-        warnings = []
-        unmatched_teams = []
-
-        for mapping in team_mapping:
-            doc_name = mapping.get("doc_name", "")
-            matched_id = mapping.get("matched_id")
-            source = mapping.get("source", "unmatched")
-
-            if source == "unmatched" or matched_id is None:
-                unmatched_teams.append({
-                    "doc_name": doc_name,
-                    "matched_name": mapping.get("matched_name"),
-                })
-                warnings.append(f"Nie dopasowano drużyny: \"{doc_name}\"")
-            elif matched_id not in invited_ids_set:
-                unmatched_teams.append({
-                    "doc_name": doc_name,
-                    "matched_name": mapping.get("matched_name"),
-                })
-                warnings.append(f'Drużyna "{doc_name}" (ID={matched_id}) nie jest zaproszona do turnieju')
-
-        # Validate: no team in multiple groups
-        for gender_key in ["M", "K"]:
-            g_cfg = groups.get(gender_key, {})
-            g_teams = g_cfg.get("teams", {})
-            seen_ids: set = set()
-            for group_name, team_ids_list in g_teams.items():
-                deduped = []
-                for tid in team_ids_list:
-                    if tid in seen_ids:
-                        warnings.append(f'Drużyna ID={tid} była w wielu grupach ({gender_key}) — usunięto duplikat')
-                    elif tid not in invited_ids_set:
-                        warnings.append(f'Drużyna ID={tid} nie jest zaproszona ({gender_key}, gr. {group_name}) — usunięto')
-                    else:
-                        seen_ids.add(tid)
-                        deduped.append(tid)
-                g_teams[group_name] = deduped
-
-        # Build a partial ScheduleConfig for the frontend
-        group_config = {
-            "mode": "groupsPlusKnockout",
-            "courts": 2,
-            "slotInterval": 40,
-            "minTeamBreak": 15,
-            "thirdPlace": True,
-            "knockoutFormatM": knockout_m,
-            "knockoutFormatK": knockout_k,
-            "playoffMode": "playoff",
-            "groups": groups,
-            "days": [],
-        }
-
-        return {
-            "schedule": None,
-            "already_invited_ids": [],
-            "new_teams_to_invite": [],
-            "unmatched_teams": unmatched_teams,
-            "warnings": warnings,
-            "group_config": group_config,
-        }
-
     # ── Build prompt ──
     system_prompt = f"""\
-Jesteś ekspertem od terminarzów turniejów siatkówki plażowej. Twoim zadaniem jest przeczytanie
+Jesteś ekspertem od terminarzów turniejów piłki ręcznej plażowej. Twoim zadaniem jest przeczytanie
 wyekstrahowanego tekstu z PDF-ów zawierających terminarz turnieju i wygenerowanie kompletnego
 obiektu ScheduleData w formacie JSON.
+
+WYKRYWANIE TRYBU DOKUMENTU:
+- Jeśli dokument zawiera PEŁNY terminarz meczów z godzinami i boiskmi → wygeneruj kompletny ScheduleData z meczami.
+- Jeśli dokument zawiera TYLKO podział drużyn na grupy (bez terminarza meczów z godzinami) → ustaw "groups_only": true \
+na poziomie root JSON-a. W tym przypadku wygeneruj "schedule" z poprawnym config (mode, groups, knockoutFormatM/K itp.) \
+ale z PUSTĄ listą meczów (matches: []).
 
 KLUCZOWE ZASADY STRUKTURY TURNIEJU:
 1. Przeanalizuj dokładnie jak wygląda turniej: ile jest grup per płeć, ile drużyn w każdej, jakie mecze pucharowe.
@@ -1442,8 +1327,9 @@ DRUŻYNY ZAPROSZONE DO TURNIEJU (używaj WYŁĄCZNIE tych drużyn):
 
 Dodatkowe instrukcje od użytkownika: {description or "(brak)"}
 
-Odpowiedz WYŁĄCZNIE poprawnym JSON-em z dwoma kluczami:
-- "schedule": pełny obiekt ScheduleData
+Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
+- "groups_only": true/false (czy dokument zawiera TYLKO podział na grupy, bez pełnego terminarza meczów)
+- "schedule": pełny obiekt ScheduleData (z meczami jeśli groups_only=false, z pustymi matches jeśli groups_only=true)
 - "team_mapping": lista obiektów {{{{ "doc_name": "<nazwa z dokumentu>", "matched_id": <int|null>, "matched_name": "<nazwa z bazy>"|null, "source": "invited"|"unmatched" }}}}
 """
 
@@ -1526,6 +1412,45 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z dwoma kluczami:
                     seen_ids.add(tid)
                     deduped.append(tid)
             g_teams[group_name] = deduped
+
+    # ── Groups-only auto-detection ──
+    groups_only = result.get("groups_only", False)
+    if groups_only:
+        # Validate non-invited team IDs in groups
+        for gender_key in ["M", "K"]:
+            g_cfg = groups_cfg.get(gender_key, {})
+            g_teams = g_cfg.get("teams", {})
+            for group_name, team_ids_list in g_teams.items():
+                cleaned = [tid for tid in team_ids_list if tid in invited_ids_set]
+                removed = [tid for tid in team_ids_list if tid not in invited_ids_set]
+                for tid in removed:
+                    warnings.append(f'Drużyna ID={tid} nie jest zaproszona ({gender_key}, gr. {group_name}) — usunięto')
+                g_teams[group_name] = cleaned
+
+        knockout_m = config.get("knockoutFormatM", "semis")
+        knockout_k = config.get("knockoutFormatK", "semis")
+
+        group_config = {
+            "mode": "groupsPlusKnockout",
+            "courts": 2,
+            "slotInterval": 40,
+            "minTeamBreak": 15,
+            "thirdPlace": True,
+            "knockoutFormatM": knockout_m,
+            "knockoutFormatK": knockout_k,
+            "playoffMode": "playoff",
+            "groups": groups_cfg,
+            "days": [],
+        }
+
+        return {
+            "schedule": None,
+            "already_invited_ids": already_invited_ids,
+            "new_teams_to_invite": [],
+            "unmatched_teams": unmatched_teams,
+            "warnings": warnings,
+            "group_config": group_config,
+        }
 
     # ── Validate: only invited team IDs in matches ──
     for m in schedule.get("matches", []):
