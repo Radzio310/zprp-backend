@@ -153,14 +153,21 @@ def _positions_from_knockout(
     teams_count: int,
 ) -> List[Dict[str, Any]]:
     """
-    Oblicza pozycje na podstawie meczów finałowych.
-    Nieprzypisane drużyny (tylko grupowe) dostają pozycje od końca.
+    Oblicza pozycje na podstawie meczów finałowych, barażów i tabel o miejsca.
+    Obsługuje: final, third_place, fifth_place, seventh_place,
+    ninth_place, eleventh_place, thirteenth_place, fifteenth_place,
+    playoff tables (baraże), placement_rr tables.
     """
+    # Direct knockout matches → winner gets lower position, loser gets higher
     stage_to_positions: Dict[str, List[int]] = {
         "final": [1, 2],
         "third_place": [3, 4],
         "fifth_place": [5, 6],
         "seventh_place": [7, 8],
+        "ninth_place": [9, 10],
+        "eleventh_place": [11, 12],
+        "thirteenth_place": [13, 14],
+        "fifteenth_place": [15, 16],
     }
 
     assigned: Dict[int, int] = {}  # team_id → position
@@ -188,12 +195,59 @@ def _positions_from_knockout(
         assigned[winner_id] = positions[0]
         assigned[loser_id] = positions[1]
 
-    # Drużyny nieobjęte meczami finałowymi → pozycje od końca stawki
+    # Playoff (baraż) tables — e.g. playoff_2_M: positions based on table order
+    # Find all playoff groups present
+    playoff_groups = {}
+    for m in matches:
+        if m.get("stage") == "playoff" and m.get("group"):
+            pg = m["group"]
+            if pg not in playoff_groups:
+                playoff_groups[pg] = []
+            playoff_groups[pg].append(m)
+
+    for pg, pg_matches in sorted(playoff_groups.items()):
+        # Determine starting position: teams in this playoff that are NOT
+        # already assigned from knockout matches get positions after assigned ones
+        table = _compute_mini_table(pg_matches)
+        # Find what position this playoff feeds into
+        # Already-assigned teams from this playoff get skipped
+        unassigned_rows = [r for r in table if r["team_id"] not in assigned]
+        if not unassigned_rows:
+            continue
+        # Starting position = lowest unoccupied position after all assigned
+        start_pos = max(assigned.values(), default=0) + 1
+        for r in unassigned_rows:
+            assigned[r["team_id"]] = start_pos
+            start_pos += 1
+
+    # Placement RR tables — e.g. placement_7_K: positions from table order
+    placement_groups = {}
+    for m in matches:
+        if m.get("stage") == "placement_rr" and m.get("group"):
+            pg = m["group"]
+            if pg not in placement_groups:
+                placement_groups[pg] = []
+            placement_groups[pg].append(m)
+
+    for pg, pg_matches in sorted(placement_groups.items()):
+        # Extract tier number from group name (placement_7_K → 7)
+        import re
+        tier_m = re.match(r"placement_(\d+)", pg)
+        tier_start = int(tier_m.group(1)) if tier_m else (max(assigned.values(), default=0) + 1)
+        table = _compute_mini_table(pg_matches)
+        pos = tier_start
+        for r in table:
+            if r["team_id"] not in assigned:
+                assigned[r["team_id"]] = pos
+            pos += 1
+
+    # Remaining unassigned teams → positions from the end
     unassigned = [tid for tid in teams if tid not in assigned]
-    next_pos = len(assigned) + 1
-    for tid in sorted(unassigned):
-        assigned[tid] = next_pos
-        next_pos += 1
+    if unassigned:
+        next_pos = max(assigned.values(), default=0) + 1
+        for tid in sorted(unassigned):
+            assigned[tid] = next_pos
+            next_pos += 1
 
     result = []
     for team_id, pos in sorted(assigned.items(), key=lambda x: x[1]):
@@ -204,6 +258,58 @@ def _positions_from_knockout(
             "teams_count": teams_count,
         })
     return result
+
+
+def _compute_mini_table(
+    matches: List[Dict],
+) -> List[Dict[str, Any]]:
+    """Compute a mini standings table from a set of round-robin matches.
+    Returns list sorted by match points desc, set diff desc, brk diff desc."""
+    stats: Dict[int, Dict] = {}
+
+    for m in matches:
+        ta = m.get("teamA")
+        tb = m.get("teamB")
+        if not ta or not tb:
+            continue
+        ta_id = ta.get("id")
+        tb_id = tb.get("id")
+        if not isinstance(ta_id, int) or not isinstance(tb_id, int):
+            continue
+        for tid, tname in [(ta_id, ta.get("name", "")), (tb_id, tb.get("name", ""))]:
+            if tid not in stats:
+                stats[tid] = {"team_id": tid, "team_name": tname,
+                              "pts": 0, "sw": 0, "sl": 0, "brkp": 0, "brkm": 0}
+
+        sa = m.get("scoreA")
+        sb = m.get("scoreB")
+        if sa is None or sb is None or m.get("status") != "finished":
+            continue
+        sa, sb = int(sa), int(sb)
+        stats[ta_id]["sw"] += sa
+        stats[ta_id]["sl"] += sb
+        stats[tb_id]["sw"] += sb
+        stats[tb_id]["sl"] += sa
+
+        # Beach scoring: Win = 2 pts, Loss = 0 pts (same as groups in beach)
+        if sa > sb:
+            stats[ta_id]["pts"] += 2
+        else:
+            stats[tb_id]["pts"] += 2
+
+        for s in (m.get("sets") or []):
+            pa = s.get("ptA", 0) or 0
+            pb = s.get("ptB", 0) or 0
+            stats[ta_id]["brkp"] += pa
+            stats[ta_id]["brkm"] += pb
+            stats[tb_id]["brkp"] += pb
+            stats[tb_id]["brkm"] += pa
+
+    return sorted(
+        stats.values(),
+        key=lambda r: (r["pts"], r["sw"] - r["sl"], r["brkp"] - r["brkm"]),
+        reverse=True,
+    )
 
 
 def _positions_from_round_robin(
