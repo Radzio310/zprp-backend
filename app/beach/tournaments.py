@@ -44,6 +44,12 @@ class HostUpdateRequest(BaseModel):
     custom_teams: Optional[list] = None
 
 
+class CoachCustomTeamUpdateRequest(BaseModel):
+    """Trener aktualizuje swoją własną drużynę (custom team)."""
+    custom_team_id: str
+    custom_team: dict
+
+
 class JudgeUpdateRequest(BaseModel):
     """Dozwolone pola dla Obsadowego."""
     judges: Optional[list] = None
@@ -934,6 +940,71 @@ async def host_update_tournament(
                 data={"tournament_id": tournament_id},
                 target_user_ids=target_ids,
             )
+
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    row_d = dict(row)
+    data2 = _normalize_event_data(row_d["data_json"])
+    if not data2.get("invited_ids"):
+        data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+    return _attach_computed_fields(row_d, data2, current_user_id)
+
+
+# ─────────────── PATCH coach-custom-team-update (Trener) ─────────────────
+
+@router.patch(
+    "/{tournament_id}/coach-custom-team-update",
+    response_model=BeachTournamentItem,
+    summary="Trener aktualizuje swoją własną drużynę (custom team)",
+)
+async def coach_custom_team_update(
+    tournament_id: int,
+    body: CoachCustomTeamUpdateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not existing:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+
+    existing_d = dict(existing)
+    data = _parse_json(existing_d["data_json"])
+
+    user_is_admin = await _is_admin(current_user_id)
+
+    # Find the custom team and verify coach ownership (or admin)
+    custom_teams = data.get("custom_teams") or []
+    team_idx = None
+    for idx, ct in enumerate(custom_teams):
+        if isinstance(ct, dict) and ct.get("id") == body.custom_team_id:
+            team_idx = idx
+            break
+
+    if team_idx is None:
+        raise HTTPException(404, "Nie znaleziono drużyny")
+
+    if not user_is_admin:
+        existing_ct = custom_teams[team_idx]
+        if existing_ct.get("coach_user_id") != current_user_id:
+            raise HTTPException(403, "Nie jesteś trenerem tej drużyny")
+
+    # Merge: preserve the id and coach_user_id from existing, update the rest
+    updated_ct = body.custom_team
+    updated_ct["id"] = body.custom_team_id
+    # Preserve coach_user_id unless admin explicitly changes it
+    if not user_is_admin and "coach_user_id" in custom_teams[team_idx]:
+        updated_ct["coach_user_id"] = custom_teams[team_idx]["coach_user_id"]
+
+    custom_teams[team_idx] = updated_ct
+    data["custom_teams"] = custom_teams
+
+    await database.execute(
+        update(beach_tournaments)
+        .where(beach_tournaments.c.id == tournament_id)
+        .values(data_json=data, updated_at=datetime.now(timezone.utc))
+    )
 
     row = await database.fetch_one(
         select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
