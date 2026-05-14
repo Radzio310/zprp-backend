@@ -610,17 +610,24 @@ async def list_visible_tournaments(
             for team_id in (data.get("invited_team_ids") or [])
             if isinstance(team_id, int)
         }
+        custom_team_coach_ids = {
+            int(ct["coach_user_id"])
+            for ct in (data.get("custom_teams") or [])
+            if isinstance(ct, dict) and isinstance(ct.get("coach_user_id"), int)
+        }
         include_all = bool((data.get("target") or {}).get("include_all", False))
         user_is_host = current_user_id in host_ids
         user_is_judge = current_user_id in judge_ids
         user_team_invited = bool(user_team_ids & invited_team_ids)
         user_is_invited = str(current_user_id) in invited_set
+        user_is_custom_coach = current_user_id in custom_team_coach_ids
         if not (
             include_all
             or user_is_invited
             or user_is_host
             or user_is_judge
             or user_team_invited
+            or user_is_custom_coach
         ):
             continue
 
