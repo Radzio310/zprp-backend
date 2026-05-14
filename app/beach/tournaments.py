@@ -57,12 +57,14 @@ class ScheduleUpdateRequest(BaseModel):
 
 class SquadUpdateRequest(BaseModel):
     """Aktualizacja selekcji składu dla drużyny w turnieju."""
-    team_id: int
-    default_players: Optional[List[int]] = None      # player_ids, max 10
-    default_companions: Optional[List[int]] = None   # person_ids, max 4
+    team_id: Optional[int] = None                    # regular team id
+    custom_team_id: Optional[str] = None             # custom team id (e.g. "ct_xxx")
+    default_players: Optional[List] = None           # player_ids, max 10
+    default_companions: Optional[List] = None        # person_ids, max 4
     match_id: Optional[str] = None                   # jeśli override dla konkretnego meczu
-    match_players: Optional[List[int]] = None
-    match_companions: Optional[List[int]] = None
+    match_players: Optional[List] = None
+    match_companions: Optional[List] = None
+    signature_url: Optional[str] = None              # per-match coach signature URL
 
 
 class TournamentTitleImageRequest(BaseModel):
@@ -1775,40 +1777,56 @@ async def squad_update_tournament(
     body: SquadUpdateRequest,
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
+    if not body.team_id and not body.custom_team_id:
+        raise HTTPException(400, "Wymagane team_id lub custom_team_id")
+
     existing = await database.fetch_one(
         select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
     )
     if not existing:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
-    is_admin_flag = await _is_admin(current_user_id)
-    if not is_admin_flag:
-        user_row = await database.fetch_one(
-            select(beach_users.c.roles_json).where(beach_users.c.id == current_user_id)
-        )
-        if not user_row:
-            raise HTTPException(404, "Uzytkownik nie znaleziony")
-
-        roles = user_row["roles_json"] or []
-        if isinstance(roles, str):
-            try:
-                roles = json.loads(roles)
-            except Exception:
-                roles = []
-
-        is_coach_of_team = any(
-            isinstance(r, dict)
-            and r.get("type") in ("coach",)
-            and r.get("team_id") == body.team_id
-            for r in roles
-        )
-        if not is_coach_of_team:
-            raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny lub admina")
-
     existing_d = dict(existing)
     data = _parse_json(existing_d["data_json"])
+
+    is_admin_flag = await _is_admin(current_user_id)
+    if not is_admin_flag:
+        if body.custom_team_id:
+            # Check if user is coach of this custom team
+            custom_teams = data.get("custom_teams") or []
+            is_coach_of_custom = any(
+                isinstance(ct, dict)
+                and ct.get("id") == body.custom_team_id
+                and ct.get("coach_user_id") == current_user_id
+                for ct in custom_teams
+            )
+            if not is_coach_of_custom:
+                raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny lub admina")
+        else:
+            user_row = await database.fetch_one(
+                select(beach_users.c.roles_json).where(beach_users.c.id == current_user_id)
+            )
+            if not user_row:
+                raise HTTPException(404, "Uzytkownik nie znaleziony")
+
+            roles = user_row["roles_json"] or []
+            if isinstance(roles, str):
+                try:
+                    roles = json.loads(roles)
+                except Exception:
+                    roles = []
+
+            is_coach_of_team = any(
+                isinstance(r, dict)
+                and r.get("type") in ("coach",)
+                and r.get("team_id") == body.team_id
+                for r in roles
+            )
+            if not is_coach_of_team:
+                raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny lub admina")
+
     team_squads: dict = data.get("team_squads") or {}
-    team_key = str(body.team_id)
+    team_key = body.custom_team_id if body.custom_team_id else str(body.team_id)
     squad_entry: dict = dict(team_squads.get(team_key) or {})
 
     if body.match_id:
@@ -1818,6 +1836,8 @@ async def squad_update_tournament(
             override["players"] = body.match_players
         if body.match_companions is not None:
             override["companions"] = body.match_companions
+        if body.signature_url is not None:
+            override["signature_url"] = body.signature_url
         match_overrides[body.match_id] = override
         squad_entry["match_overrides"] = match_overrides
     else:
