@@ -104,16 +104,16 @@
 
   /* ── Match cards ── */
   .matches-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4pt;
     margin-bottom: 8pt;
-    page-break-inside: auto;
   }
   .matches-row {
     display: flex;
     width: 100%;
     gap: 4pt;
+    margin-bottom: 4pt;
+  }
+  .matches-row.single-card {
+    justify-content: center;
   }
   .match-card {
     width: 48%;
@@ -399,16 +399,16 @@
 
 <!-- ── All Match Cards ── -->
 {% if gs.match_days %}
-<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44; page-break-before: always;">Przebieg rozgrywek</div>
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Przebieg rozgrywek</div>
 <div class="section-desc" style="margin-bottom: 8pt;">Wyniki wszystkich meczów turnieju.</div>
 
 {% for day in gs.match_days %}
 {% if day.label %}
-<div style="font-size: 9pt; font-weight: 800; color: #555; margin: 6pt 0 4pt 0; page-break-after: avoid;">{{ day.label }}</div>
+<div style="font-size: 9pt; font-weight: 800; color: #555; margin: 6pt 0 4pt 0;">{{ day.label }}</div>
 {% endif %}
 <div class="matches-grid">
 {% for pair in day.matches | batch(2) %}
-<div class="matches-row">
+<div class="matches-row{% if pair | length == 1 %} single-card{% endif %}">
 {% for mc in pair %}
 <div class="match-card">
   <div class="mc-header">

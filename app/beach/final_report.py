@@ -920,6 +920,20 @@ async def generate_final_report(req: FinalReportRequest):
     # Build context
     ctx = _build_context(req)
 
+    # Diagnostic logging for page-break debugging
+    for gs in ctx.get("gender_sections", []):
+        g = gs.get("gender", "?")
+        n_days = len(gs.get("match_days", []))
+        day_details = []
+        for d in gs.get("match_days", []):
+            day_details.append(f"{d.get('label', 'no-label')}:{len(d.get('matches', []))} matches")
+        logger.info(
+            f"[FinalReport] gender={g} tables={len(gs.get('tables', []))} "
+            f"bracket={'yes' if gs.get('bracket_svg') else 'no'} "
+            f"match_days={n_days} [{', '.join(day_details)}] "
+            f"standings={'yes' if gs.get('standings') else 'no'}"
+        )
+
     # Render HTML
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)))
     template = env.get_template(TEMPLATE_NAME)
