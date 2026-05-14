@@ -1247,6 +1247,9 @@ async def ai_schedule_import(
         except (ValueError, TypeError):
             pass
 
+    if not invited_team_ids:
+        raise HTTPException(422, "Brak zaproszonych drużyn w turnieju. Dodaj drużyny przed importem AI.")
+
     # Fetch invited teams
     invited_teams = []
     if invited_team_ids:
@@ -1256,25 +1259,13 @@ async def ai_schedule_import(
         )
         invited_teams = [dict(r) for r in rows]
 
-    # Fetch all teams for wider matching
-    all_teams_rows = await database.fetch_all(
-        select(beach_teams.c.id, beach_teams.c.team_name, beach_teams.c.gender, beach_teams.c.category)
-    )
-    all_teams = [dict(r) for r in all_teams_rows]
-
     # Build team list strings for the prompt
     invited_teams_str = "\n".join(
         f"  ID={t['id']}, name=\"{t['team_name']}\", gender={t['gender']}"
         for t in invited_teams
-    ) if invited_teams else "(brak zaproszonych drużyn)"
-
-    all_teams_str = "\n".join(
-        f"  ID={t['id']}, name=\"{t['team_name']}\", gender={t['gender']}, category={t.get('category','')}"
-        for t in all_teams
     )
-    # Limit all_teams_str to avoid context overflow
-    if len(all_teams_str) > 15000:
-        all_teams_str = all_teams_str[:15000] + "\n...(lista obcięta)"
+
+    invited_ids_set = {t['id'] for t in invited_teams}
 
     # ── Build prompt ──
     system_prompt = f"""\
@@ -1297,18 +1288,19 @@ ZAWSZE mają teamA=null i teamB=null z opisowym knockoutLabel (np. "1. z gr. A v
 9. W config.groups podaj DOKŁADNY podział drużyn na grupy z ich ID (dopasowanymi z bazy).
 
 DOPASOWYWANIE DRUŻYN:
-10. Używaj TYLKO drużyn z podanej listy (dopasuj nazwy — mogą się lekko różnić w dokumentach).
-11. Drużyny już zaproszone do turnieju mają PRIORYTET.
-12. Jeśli drużyna nie pasuje do nikogo w bazie — dodaj ją do "unmatched_teams" i NIE używaj w meczach.
+10. Używaj WYŁĄCZNIE drużyn z poniższej listy zaproszonych do turnieju. NIE szukaj drużyn spoza tej listy.
+11. Dopasuj nazwy z dokumentu do nazw z listy — mogą się lekko różnić (skróty, literki itp.).
+12. Jeśli drużyna z dokumentu nie pasuje do żadnej z zaproszonych — dodaj ją do "unmatched_teams" i NIE używaj w meczach.
+13. Każda drużyna może być TYLKO W JEDNEJ grupie. NIE przypisuj tej samej drużyny do wielu grup.
 
 TECHNICZNE:
-13. Każdy mecz musi mieć unikalne "id" (wygeneruj UUID v4).
-14. Godziny w formacie "HH:mm" (24h).
-15. courts = liczba boisk widoczna w terminarzu.
-16. dayIndex: 0-based (0 = pierwszy dzień).
-17. order: sekwencyjny od 0, zachowaj kolejność z dokumentu.
-18. Status wszystkich meczów: "scheduled".
-19. Tryb turnieju: {mode}.
+14. Każdy mecz musi mieć unikalne "id" (wygeneruj UUID v4).
+15. Godziny w formacie "HH:mm" (24h).
+16. courts = liczba boisk widoczna w terminarzu.
+17. dayIndex: 0-based (0 = pierwszy dzień).
+18. order: sekwencyjny od 0, zachowaj kolejność z dokumentu.
+19. Status wszystkich meczów: "scheduled".
+20. Tryb turnieju: {mode}.
 
 SCHEMAT JSON:
 {_SCHEDULE_JSON_SCHEMA}
@@ -1324,17 +1316,14 @@ Turniej: "{tour_name}"
 Kategoria: {tour_category}
 Data: {tour_date} — {tour_end_date}
 
-DRUŻYNY JUŻ ZAPROSZONE DO TURNIEJU (priorytet dopasowania):
+DRUŻYNY ZAPROSZONE DO TURNIEJU (używaj WYŁĄCZNIE tych drużyn):
 {invited_teams_str}
-
-WSZYSTKIE DRUŻYNY W BAZIE DANYCH:
-{all_teams_str}
 
 Dodatkowe instrukcje od użytkownika: {description or "(brak)"}
 
 Odpowiedz WYŁĄCZNIE poprawnym JSON-em z dwoma kluczami:
 - "schedule": pełny obiekt ScheduleData
-- "team_mapping": lista obiektów {{ "doc_name": "<nazwa z dokumentu>", "matched_id": <int|null>, "matched_name": "<nazwa z bazy>"|null, "source": "invited"|"database"|"unmatched" }}
+- "team_mapping": lista obiektów {{{{ "doc_name": "<nazwa z dokumentu>", "matched_id": <int|null>, "matched_name": "<nazwa z bazy>"|null, "source": "invited"|"unmatched" }}}}
 """
 
     user_msg = f"Oto tekst wyekstrahowany z dokumentów terminarza:\n\n{extracted_text}"
@@ -1390,14 +1379,42 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z dwoma kluczami:
                 "matched_name": mapping.get("matched_name"),
             })
             warnings.append(f"Nie dopasowano drużyny: \"{doc_name}\"")
-        elif source == "invited":
+        elif matched_id in invited_ids_set:
             already_invited_ids.append(matched_id)
-        elif source == "database":
-            new_teams_to_invite.append({
-                "id": matched_id,
-                "name": mapping.get("matched_name", ""),
+        else:
+            # Team not in invited list — treat as unmatched
+            unmatched_teams.append({
                 "doc_name": doc_name,
+                "matched_name": mapping.get("matched_name"),
             })
+            warnings.append(f'Drużyna "{doc_name}" (ID={matched_id}) nie jest zaproszona do turnieju')
+
+    # ── Validate: no team in multiple groups ──
+    config = schedule.get("config", {})
+    groups_cfg = config.get("groups", {})
+    for gender_key in ["M", "K"]:
+        g_cfg = groups_cfg.get(gender_key, {})
+        g_teams = g_cfg.get("teams", {})
+        seen_ids: set = set()
+        for group_name, team_ids_list in g_teams.items():
+            deduped = []
+            for tid in team_ids_list:
+                if tid in seen_ids:
+                    warnings.append(f'Drużyna ID={tid} była w wielu grupach ({gender_key}) — usunięto duplikat')
+                else:
+                    seen_ids.add(tid)
+                    deduped.append(tid)
+            g_teams[group_name] = deduped
+
+    # ── Validate: only invited team IDs in matches ──
+    for m in schedule.get("matches", []):
+        for slot in ("teamA", "teamB"):
+            team = m.get(slot)
+            if team and isinstance(team, dict) and team.get("id"):
+                tid = team["id"]
+                if tid not in invited_ids_set:
+                    warnings.append(f'Mecz {m.get("id","?")}: drużyna ID={tid} nie jest zaproszona — usunięto')
+                    m[slot] = None
 
     # ── Validate schedule has required fields ──
     if "config" not in schedule:
