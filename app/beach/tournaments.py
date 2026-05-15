@@ -1288,8 +1288,14 @@ async def schedule_update_tournament(
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
 
     # ── Activity log ──
-    old_match_count = len((old_schedule or {}).get("matches", [])) if isinstance(old_schedule, dict) else 0
-    new_match_count = len((body.schedule or {}).get("matches", [])) if isinstance(body.schedule, dict) else 0
+    def _real_match_count(sched):
+        """Count only real matches (exclude court_break / tournament_opening)."""
+        if not isinstance(sched, dict):
+            return 0
+        return sum(1 for m in sched.get("matches", []) if m.get("kind") not in ("court_break", "tournament_opening"))
+
+    old_match_count = _real_match_count(old_schedule)
+    new_match_count = _real_match_count(body.schedule)
     await log_activity(
         area="tournament",
         action="tournament.schedule_updated",
@@ -1695,7 +1701,7 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
         target_id=str(tournament_id),
         target_label=tour_name,
         details={
-            "matches_count": len(schedule.get("matches", [])),
+            "matches_count": sum(1 for m in schedule.get("matches", []) if m.get("kind") not in ("court_break", "tournament_opening")),
             "warnings_count": len(warnings),
             "unmatched_teams": unmatched_teams,
             "files": [f.filename for f in files if f.filename],
