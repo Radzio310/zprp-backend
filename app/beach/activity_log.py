@@ -200,7 +200,11 @@ async def list_activity_log(
     conditions = []
 
     if area:
-        conditions.append(t.c.area == area)
+        area_list = [a.strip() for a in area.split(",") if a.strip()]
+        if len(area_list) == 1:
+            conditions.append(t.c.area == area_list[0])
+        elif len(area_list) > 1:
+            conditions.append(t.c.area.in_(area_list))
     if actor_user_id is not None:
         conditions.append(t.c.actor_user_id == actor_user_id)
     if target_id:
