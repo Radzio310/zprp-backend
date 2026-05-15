@@ -143,6 +143,18 @@ def _normalize_roles(raw: Any) -> Any:
     return []
 
 
+ROLE_LABELS_PL = {
+    "judge": "Sędzia",
+    "coach": "Trener",
+    "player": "Zawodnik",
+}
+
+
+def _role_label_pl(role_type: Any) -> str:
+    role_key = str(role_type or "").strip()
+    return ROLE_LABELS_PL.get(role_key, role_key or "?")
+
+
 def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
     device_ids = list(row.get("device_ids") or [])
     return BeachUserItem(
@@ -509,7 +521,7 @@ async def create_user(req: BeachUserCreateRequest):
                 _asyncio.ensure_future(notify_admins(
                     notif_type="admin_user_self_verified",
                     title="✅ Automatyczna weryfikacja",
-                    body=f"{req.full_name.strip()} — rola {role.get('type', '?')} zweryfikowana automatycznie przy rejestracji.",
+                    body=f"{req.full_name.strip()} — rola {_role_label_pl(role.get('type'))} zweryfikowana automatycznie przy rejestracji.",
                     data={"user_id": int(new_id)},
                 ))
                 break
@@ -770,7 +782,7 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
                         _asyncio.ensure_future(notify_admins(
                             notif_type="admin_user_self_verified",
                             title="✅ Automatyczna weryfikacja",
-                            body=f"{user_name} — rola {r.get('type', '?')} zweryfikowana automatycznie.",
+                            body=f"{user_name} — rola {_role_label_pl(r.get('type'))} zweryfikowana automatycznie.",
                             data={"user_id": user_id},
                         ))
                         break
