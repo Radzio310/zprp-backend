@@ -26,6 +26,7 @@ from app.schemas import (
 )
 from app.deps import beach_get_current_user_id
 from app.beach.notifications import create_notification
+from app.beach.activity_log import log_activity, get_actor_name
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/guidelines", tags=["Beach: Guidelines"])
@@ -271,6 +272,17 @@ async def create_guideline(
                 target_user_ids=target_ids,
             )
 
+    # ── Activity log ──
+    await log_activity(
+        area="document",
+        action="guideline.created",
+        actor_user_id=current_user_id,
+        actor_name=author_name,
+        target_id=str(row["id"]),
+        target_label=body.title.strip(),
+        details={"status": status, "tournament_id": body.tournament_id},
+    )
+
     return _row_to_item(row)
 
 
@@ -325,6 +337,18 @@ async def update_guideline(
     row = await database.fetch_one(
         select(beach_guidelines).where(beach_guidelines.c.id == guideline_id)
     )
+
+    # ── Activity log ──
+    await log_activity(
+        area="document",
+        action="guideline.updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(guideline_id),
+        target_label=dict(row).get("title", ""),
+        details={"changed_fields": list(update_data.keys())},
+    )
+
     return _row_to_item(row)
 
 
@@ -380,6 +404,18 @@ async def review_guideline(
     row = await database.fetch_one(
         select(beach_guidelines).where(beach_guidelines.c.id == guideline_id)
     )
+
+    # ── Activity log ──
+    await log_activity(
+        area="document",
+        action="guideline.reviewed",
+        actor_user_id=current_user_id,
+        actor_name=reviewer_name,
+        target_id=str(guideline_id),
+        target_label=dict(existing).get("title", ""),
+        details={"status": body.status, "rejection_comment": getattr(body, "rejection_comment", None)},
+    )
+
     return _row_to_item(row)
 
 
@@ -406,4 +442,14 @@ async def delete_guideline(
     await database.execute(
         delete(beach_guidelines).where(beach_guidelines.c.id == guideline_id)
     )
+
+    # ── Activity log ──
+    await log_activity(
+        area="document",
+        action="guideline.deleted",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(guideline_id),
+    )
+
     return {"success": True}

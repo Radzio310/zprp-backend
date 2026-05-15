@@ -12,6 +12,7 @@ from sqlalchemy import delete, insert, select, update
 import asyncio
 from app.db import database, beach_app_versions, beach_admins
 from app.beach.notifications import notify_admins
+from app.beach.activity_log import log_activity, get_actor_name
 from app.schemas import (
     BeachCreateVersionRequest,
     BeachUpdateVersionRequest,
@@ -129,6 +130,7 @@ async def create_version(req: BeachCreateVersionRequest, current_user_id: int = 
             data={"version_id": version_id, "version": version, "name": name},
             exclude_user_id=current_user_id,
         ))
+        await log_activity(area="system", action="version.created", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(version_id), target_label=f"v{version} — {name}")
         return {"success": True, "id": version_id}
     except Exception as e:
         msg = str(e).lower()
@@ -180,6 +182,7 @@ async def update_version(version_id: int, req: BeachUpdateVersionRequest, curren
 
     try:
         await database.execute(update(beach_app_versions).where(beach_app_versions.c.id == version_id).values(**patch))
+        await log_activity(area="system", action="version.updated", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(version_id), details={"changed": list(patch.keys())})
         return {"success": True}
     except Exception as e:
         msg = str(e).lower()
@@ -200,4 +203,5 @@ async def delete_version(version_id: int, current_user_id: int = Depends(beach_g
         raise HTTPException(404, "Nie znaleziono wersji")
 
     await database.execute(delete(beach_app_versions).where(beach_app_versions.c.id == version_id))
+    await log_activity(area="system", action="version.deleted", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(version_id))
     return {"success": True}

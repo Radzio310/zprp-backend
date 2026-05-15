@@ -30,6 +30,7 @@ from app.schemas import (
 from app.deps import beach_get_current_user_id
 from app.beach.notifications import create_notification
 from app.beach.schedule_notifications import notify_schedule_updated
+from app.beach.activity_log import log_activity, get_actor_name, compute_diff, compute_list_diff
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/tournaments", tags=["Beach: Tournaments"])
@@ -531,6 +532,23 @@ async def create_tournament(
                 target_user_ids=all_user_ids,
             )
 
+        await log_activity(
+            area="tournament",
+            action="tournament.created",
+            actor_user_id=current_user_id,
+            actor_name=await get_actor_name(current_user_id),
+            target_id=str(tournament_id),
+            target_label=req.name.strip(),
+            details={
+                "category": req.category,
+                "competition_type": req.competition_type,
+                "event_date": str(req.event_date)[:10] if req.event_date else None,
+                "end_date": str(req.end_date)[:10] if req.end_date else None,
+                "location": (req.location or "").strip() or None,
+                "badge": (req.badge.strip() if req.badge else None),
+            },
+        )
+
         return {"success": True, "id": tournament_id}
     except Exception as e:
         logger.error("create_tournament failed: %s\n%s", e, traceback.format_exc())
@@ -675,13 +693,26 @@ async def generate_tournament_title_image(
     file_path = out_dir / f"{uuid.uuid4().hex}.png"
     file_path.write_bytes(image_bytes)
 
-    return {
+    result = {
         "url": _public_static_url(file_path),
         "prompt": prompt,
         "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "regeneration_count": current_regen_count + 1 if req.regenerate else current_regen_count,
     }
+
+    # ── Activity log ──
+    await log_activity(
+        area="tournament",
+        action="tournament.title_image_generated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(req.tournament_id) if req.tournament_id else None,
+        target_label=req.name.strip(),
+        details={"regenerate": req.regenerate, "model": result["model"]},
+    )
+
+    return result
 
 
 # ─────────────────── GET single ───────────────────
@@ -852,6 +883,29 @@ async def patch_tournament(
             target_user_ids=[int(uid) for uid in newly_added],
         )
 
+    # ── Activity log ──
+    diff_fields = {}
+    for key in ("name", "event_date", "end_date", "location", "category", "competition_type", "badge", "description"):
+        old_val = existing_d.get(key)
+        new_val = row_d.get(key)
+        if key in ("event_date", "end_date"):
+            old_val = str(old_val)[:10] if old_val else None
+            new_val = str(new_val)[:10] if new_val else None
+        if old_val != new_val:
+            diff_fields[key] = {"old": old_val, "new": new_val}
+    if old_invited != new_invited:
+        diff_fields["invited_ids"] = {"added": sorted(newly_added), "removed": sorted(old_invited - new_invited), "count_before": len(old_invited), "count_after": len(new_invited)}
+
+    await log_activity(
+        area="tournament",
+        action="tournament.updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=row_d.get("name", ""),
+        details={"changed_fields": diff_fields} if diff_fields else None,
+    )
+
     return _attach_computed_fields(row_d, data2, None)
 
 
@@ -948,6 +1002,26 @@ async def host_update_tournament(
     data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+
+    # ── Activity log ──
+    details: Dict[str, Any] = {}
+    if body.announcements is not None:
+        details["announcements_count_before"] = old_announcements_count
+        details["announcements_count_after"] = len(body.announcements)
+    if body.invited_team_ids is not None:
+        details["invited_team_ids"] = body.invited_team_ids
+    if body.custom_teams is not None:
+        details["custom_teams_count"] = len(body.custom_teams)
+    await log_activity(
+        area="tournament",
+        action="tournament.host_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=row_d.get("name", ""),
+        details=details or None,
+    )
+
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
@@ -1013,6 +1087,18 @@ async def coach_custom_team_update(
     data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+
+    # ── Activity log ──
+    await log_activity(
+        area="tournament",
+        action="tournament.coach_team_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=row_d.get("name", ""),
+        details={"custom_team_id": body.custom_team_id, "team_name": updated_ct.get("name")},
+    )
+
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
@@ -1108,6 +1194,29 @@ async def judge_update_tournament(
     data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+
+    # ── Activity log ──
+    new_judge_ids_log = set()
+    if body.judges is not None:
+        for j in body.judges:
+            if isinstance(j, dict) and j.get("user_id"):
+                new_judge_ids_log.add(int(j["user_id"]))
+    judge_diff = compute_list_diff(
+        sorted(old_judge_ids), sorted(new_judge_ids_log)
+    ) if body.judges is not None else None
+    await log_activity(
+        area="tournament",
+        action="tournament.judges_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=existing_d.get("name", ""),
+        details={
+            "judges_diff": judge_diff,
+            "head_judge_id": data.get("head_judge_id"),
+        },
+    )
+
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
@@ -1177,6 +1286,20 @@ async def schedule_update_tournament(
     data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+
+    # ── Activity log ──
+    old_match_count = len((old_schedule or {}).get("matches", [])) if isinstance(old_schedule, dict) else 0
+    new_match_count = len((body.schedule or {}).get("matches", [])) if isinstance(body.schedule, dict) else 0
+    await log_activity(
+        area="tournament",
+        action="tournament.schedule_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=tour_name,
+        details={"matches_before": old_match_count, "matches_after": new_match_count, "schedule_cleared": body.schedule is None},
+    )
+
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
@@ -1523,6 +1646,17 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
             "days": [],
         }
 
+        # ── Activity log (groups_only) ──
+        await log_activity(
+            area="tournament",
+            action="tournament.schedule_ai_imported",
+            actor_user_id=current_user_id,
+            actor_name=await get_actor_name(current_user_id),
+            target_id=str(tournament_id),
+            target_label=tour_name,
+            details={"groups_only": True, "files": [f.filename for f in files if f.filename]},
+        )
+
         return {
             "schedule": None,
             "already_invited_ids": already_invited_ids,
@@ -1552,6 +1686,22 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
     if "status" not in schedule:
         schedule["status"] = "draft"
 
+    # ── Activity log ──
+    await log_activity(
+        area="tournament",
+        action="tournament.schedule_ai_imported",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=tour_name,
+        details={
+            "matches_count": len(schedule.get("matches", [])),
+            "warnings_count": len(warnings),
+            "unmatched_teams": unmatched_teams,
+            "files": [f.filename for f in files if f.filename],
+        },
+    )
+
     return {
         "schedule": schedule,
         "already_invited_ids": already_invited_ids,
@@ -1576,10 +1726,12 @@ async def delete_tournament(
         raise HTTPException(403, "Brak uprawnień")
 
     row = await database.fetch_one(
-        select(beach_tournaments.c.id).where(beach_tournaments.c.id == tournament_id)
+        select(beach_tournaments.c.id, beach_tournaments.c.name).where(beach_tournaments.c.id == tournament_id)
     )
     if not row:
         raise HTTPException(404, "Nie znaleziono turnieju")
+
+    deleted_name = row["name"] or ""
 
     # Cofnij punkty ze standings za ten turniej przed usunięciem
     import json as _json
@@ -1617,6 +1769,17 @@ async def delete_tournament(
     await database.execute(
         delete(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
     )
+
+    # ── Activity log ──
+    await log_activity(
+        area="tournament",
+        action="tournament.deleted",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=deleted_name,
+    )
+
     return {"success": True}
 
 
@@ -1664,6 +1827,20 @@ async def update_tournament_attendance(
     data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+
+    # ── Activity log ──
+    old_present = set(str(x) for x in (_normalize_event_data(existing_d["data_json"]).get("present_ids") or []))
+    new_present = set(data2.get("present_ids") or [])
+    await log_activity(
+        area="tournament",
+        action="tournament.attendance_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=existing_d.get("name", ""),
+        details={"count_before": len(old_present), "count_after": len(new_present)},
+    )
+
     return _attach_computed_fields(row_d, data2, None)
 
 
@@ -1926,6 +2103,17 @@ async def squad_update_tournament(
         .values(data_json=data, updated_at=datetime.now(timezone.utc))
     )
 
+    # ── Activity log ──
+    await log_activity(
+        area="tournament",
+        action="tournament.squad_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=existing_d.get("name", ""),
+        details={"team_key": team_key, "match_id": body.match_id},
+    )
+
     return {"success": True}
 
 
@@ -2015,6 +2203,16 @@ async def delete_title_image(
         raise HTTPException(404, "Plik nie istnieje")
 
     file_path.unlink()
+
+    # ── Activity log ──
+    await log_activity(
+        area="tournament",
+        action="tournament.title_image_deleted",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={"filename": filename},
+    )
+
     return {"success": True, "deleted": filename}
 
 
@@ -2047,12 +2245,24 @@ async def generate_standalone_title_image(
     file_path = out_dir / f"{uuid.uuid4().hex}.png"
     file_path.write_bytes(image_bytes)
 
-    return {
+    standalone_result = {
         "filename": file_path.name,
         "url": _public_static_url(file_path),
         "prompt": prompt,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    # ── Activity log ──
+    await log_activity(
+        area="tournament",
+        action="tournament.title_image_generated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_label=req.name.strip(),
+        details={"standalone": True},
+    )
+
+    return standalone_result
 
 
 @router.patch(
@@ -2091,5 +2301,17 @@ async def set_tournament_title_image(
         .where(beach_tournaments.c.id == tournament_id)
         .values(data_json=json.dumps(data, ensure_ascii=False))
     )
+
+    # ── Activity log ──
+    await log_activity(
+        area="tournament",
+        action="tournament.title_image_set",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=dict(row).get("name", ""),
+        details={"url": url},
+    )
+
     return {"success": True, "url": url}
 

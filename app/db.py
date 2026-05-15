@@ -1270,6 +1270,32 @@ beach_custom_team_templates = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 
+# ─────────────────── BEACH: Activity Log (audit history) ───────────────────
+
+beach_activity_log = Table(
+    "beach_activity_log",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    # area: "tournament" | "proel" | "user" | "judge" | "document" | "standings" | "system"
+    Column("area", String, nullable=False, index=True),
+    # e.g. "tournament.created", "proel.match_status_changed", "user.self_verified"
+    Column("action", String, nullable=False),
+    # who performed the action (NULL for system/anonymous)
+    Column("actor_user_id", Integer, nullable=True, index=True),
+    # denormalized full_name at time of action
+    Column("actor_name", String, nullable=True),
+    # primary entity ID (tournament_id, match_number, user_id, etc.)
+    Column("target_id", String, nullable=True, index=True),
+    # human-readable label at time of action
+    Column("target_label", String, nullable=True),
+    # full diff / extra details
+    Column("details_json", JSONB, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index("ix_beach_activity_log_area_created", beach_activity_log.c.area, beach_activity_log.c.created_at.desc())
+Index("ix_beach_activity_log_actor_created", beach_activity_log.c.actor_user_id, beach_activity_log.c.created_at.desc())
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

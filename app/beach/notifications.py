@@ -19,6 +19,7 @@ from sqlalchemy import delete, insert, select, update, and_, func as sa_func
 
 from app.db import database, beach_notifications, beach_users, beach_admins, push_schedules
 from app.deps import beach_get_current_user_id
+from app.beach.activity_log import log_activity, get_actor_name
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,9 @@ async def broadcast_notification(
         data={"sender_id": user_id},
         target_user_ids=valid_ids,
     )
+
+    # ── Activity log ──
+    await log_activity(area="system", action="broadcast.sent", actor_user_id=user_id, actor_name=await get_actor_name(user_id), details={"title": req.title.strip(), "recipients_count": len(valid_ids)})
 
     return {"ok": True, "sent_to": len(valid_ids)}
 

@@ -11,6 +11,7 @@ from sqlalchemy import insert, select, update
 
 from app.db import database, beach_admins, beach_judge_availability, beach_users
 from app.deps import beach_get_current_user_id
+from app.beach.activity_log import log_activity, get_actor_name
 from app.schemas import (
     BeachJudgeAvailabilityItem,
     BeachJudgeAvailabilityListResponse,
@@ -165,13 +166,25 @@ async def put_my_availability(
             self.__getitem__ = lambda self, k: aj if k == "availability_json" else ud
     avail_data = {"availability_json": sanitized, "updated_at": now}
 
-    return BeachJudgeAvailabilityItem(
+    result = BeachJudgeAvailabilityItem(
         user_id=current_user_id,
         full_name=user_row["full_name"] if user_row else "",
         judge_id=user_row["judge_id"] if user_row else None,
         availability_json=sanitized,
         updated_at=now,
     )
+
+    # ── Activity log ──
+    await log_activity(
+        area="judge",
+        action="judge.availability_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(current_user_id),
+        details={"days_count": len(sanitized) if isinstance(sanitized, dict) else 0},
+    )
+
+    return result
 
 
 @router.get(

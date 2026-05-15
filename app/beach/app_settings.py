@@ -7,6 +7,7 @@ from sqlalchemy import insert, select, update
 
 from app.db import database, beach_app_settings, beach_admins
 from app.deps import beach_get_current_user_id
+from app.beach.activity_log import log_activity, get_actor_name
 
 router = APIRouter(prefix="/beach/app-settings", tags=["Beach: App Settings"])
 
@@ -65,6 +66,7 @@ async def set_empty_state_image(
                 updated_at=datetime.now(timezone.utc),
             )
         )
+    await log_activity(area="system", action="app_settings.changed", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), details={"key": EMPTY_STATE_IMAGE_KEY, "action": "set"})
     return {"success": True, "url": url}
 
 
@@ -80,4 +82,5 @@ async def delete_empty_state_image(
     await database.execute(
         beach_app_settings.delete().where(beach_app_settings.c.key == EMPTY_STATE_IMAGE_KEY)
     )
+    await log_activity(area="system", action="app_settings.changed", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), details={"key": EMPTY_STATE_IMAGE_KEY, "action": "delete"})
     return {"success": True}

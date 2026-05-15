@@ -18,6 +18,7 @@ from app.schemas import (
     BeachVerificationsListResponse,
 )
 from app.deps import beach_get_current_user_id
+from app.beach.activity_log import log_activity, get_actor_name
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,16 @@ async def create_verification(
         body=f"👤 {user_name}\nRola: {role_label} — oczekuje na zatwierdzenie.",
         data={"verification_id": int(new_id), "user_id": user_id, "role": req.role},
     ))
+
+    # ── Activity log ──
+    await log_activity(
+        area="verification",
+        action="verification.requested",
+        actor_user_id=user_id,
+        actor_name=user_name,
+        target_id=str(new_id),
+        details={"role": req.role},
+    )
 
     return item
 
@@ -363,6 +374,17 @@ async def patch_verification(
             target_user_ids=[applicant_id],
         ))
 
+    # ── Activity log ──
+    await log_activity(
+        area="verification",
+        action=f"verification.{req.status}",
+        actor_user_id=admin_user_id,
+        actor_name=await get_actor_name(admin_user_id),
+        target_id=str(request_id),
+        target_label=user_name,
+        details={"role": ver["role"], "admin_note": req.admin_note},
+    )
+
     return _to_item(dict(updated_row))
 
 
@@ -382,4 +404,12 @@ async def delete_verification(request_id: int):
             beach_verification_requests.c.id == request_id
         )
     )
+
+    # ── Activity log ──
+    await log_activity(
+        area="verification",
+        action="verification.deleted",
+        target_id=str(request_id),
+    )
+
     return {"success": True}

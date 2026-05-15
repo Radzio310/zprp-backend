@@ -27,6 +27,7 @@ from sqlalchemy import select, insert, update
 
 from app.db import database, beach_standings, beach_tournaments, beach_users, beach_admins
 from app.deps import beach_get_current_user_id
+from app.beach.activity_log import log_activity, get_actor_name
 from app.beach.notifications import create_notification
 from app.schemas import (
     AdjustStandingRequest,
@@ -729,6 +730,9 @@ async def grant_tournament(
             _notify_tournament_ended_other(body.tournament_id, tour_name)
         )
 
+    # ── Activity log ──
+    await log_activity(area="standings", action="standings.points_granted", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(body.tournament_id), target_label=tour_name, details={"granted_count": granted_count})
+
     return {"success": True, "granted_count": granted_count}
 
 
@@ -843,6 +847,9 @@ async def revoke_tournament(
             )
             revoked_count += 1
 
+    # ── Activity log ──
+    await log_activity(area="standings", action="standings.points_revoked", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(body.tournament_id), details={"revoked_count": revoked_count})
+
     return {"success": True, "revoked_count": revoked_count}
 
 
@@ -909,6 +916,9 @@ async def adjust_standing(
             )
         )
 
+    # ── Activity log ──
+    await log_activity(area="standings", action="standings.manual_adjustment", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(body.team_id), details={"points": body.points, "comment": body.comment})
+
     return {"success": True}
 
 
@@ -960,6 +970,10 @@ async def delete_manual_entry(
         .where(beach_standings.c.id == ex_d["id"])
         .values(tournaments_json=new_entries, updated_at=now)
     )
+
+    # ── Activity log ──
+    await log_activity(area="standings", action="standings.manual_deleted", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(team_id), details={"created_at": created_at})
+
     return {"success": True}
 
 
@@ -1057,5 +1071,8 @@ async def purge_orphaned_tournament(
                 .values(tournaments_json=entries, updated_at=now)
             )
             revoked_count += 1
+
+    # ── Activity log ──
+    await log_activity(area="standings", action="standings.orphan_purged", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(tournament_id), details={"revoked_count": revoked_count})
 
     return {"success": True, "revoked_count": revoked_count}

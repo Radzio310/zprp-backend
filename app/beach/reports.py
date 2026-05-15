@@ -42,6 +42,7 @@ from app.schemas import (
 )
 from app.deps import beach_get_current_user_id
 from app.beach.notifications import create_notification, notify_admins
+from app.beach.activity_log import log_activity, get_actor_name
 
 _RAILWAY_VOLUME = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
 _STATIC_DIR = (
@@ -677,6 +678,10 @@ async def update_report_status(
     updated_row = await _get_report_or_404(report_id)
     cnt = await _get_message_count(report_id)
     last = await _get_last_message(report_id)
+
+    # ── Activity log ──
+    await log_activity(area="system", action="report.status_changed", actor_user_id=user_id, actor_name=await get_actor_name(user_id), target_id=str(report_id), details={"new_status": body.status})
+
     return _row_to_report_item(updated_row, cnt, last)
 
 

@@ -15,6 +15,7 @@ from sqlalchemy import delete, select, update
 
 from app.db import beach_admins, beach_custom_team_templates, beach_users, database
 from app.deps import beach_get_current_user_id
+from app.beach.activity_log import log_activity, get_actor_name
 
 router = APIRouter(prefix="/beach/custom-team-templates", tags=["Beach: Custom Team Templates"])
 
@@ -149,6 +150,7 @@ async def create_template(
             beach_custom_team_templates.c.id == pk
         )
     )
+    await log_activity(area="system", action="template.created", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(pk), target_label=body.name.strip())
     return _row_to_dict(row)
 
 
@@ -214,6 +216,7 @@ async def update_template(
             beach_custom_team_templates.c.id == template_id
         )
     )
+    await log_activity(area="system", action="template.updated", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(template_id), target_label=dict(updated).get("name", ""))
     return _row_to_dict(updated)
 
 
@@ -238,3 +241,4 @@ async def delete_template(
             beach_custom_team_templates.c.id == template_id
         )
     )
+    await log_activity(area="system", action="template.deleted", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(template_id), target_label=dict(row).get("name", ""))

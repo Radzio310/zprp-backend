@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 import asyncio
 from app.db import database, beach_admins, beach_users
 from app.beach.notifications import notify_admins
+from app.beach.activity_log import log_activity, get_actor_name
 from app.schemas import (
     BeachAdminUpsertRequest,
     BeachAdminItem,
@@ -86,6 +87,7 @@ async def upsert_admin(req: BeachAdminUpsertRequest, current_user_id: int = Depe
             data={"user_id": int(u['id'])},
             exclude_user_id=current_user_id,
         ))
+        await log_activity(area="system", action="admin.added", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(u["id"]), target_label=u["full_name"])
         return {"success": True}
     except Exception as e:
         logger.error("upsert_admin failed: %s\n%s", e, traceback.format_exc())
@@ -109,6 +111,7 @@ async def delete_admin(user_id: int, current_user_id: int = Depends(beach_get_cu
             data={"user_id": user_id},
             exclude_user_id=current_user_id,
         ))
+    await log_activity(area="system", action="admin.removed", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(user_id), target_label=removed_row["full_name"] if removed_row else "")
     return {"success": True}
 
 

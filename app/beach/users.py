@@ -30,6 +30,7 @@ from app.schemas import (
     BeachLoginResponse,
 )
 from app.deps import get_rsa_keys, beach_create_access_token, beach_get_current_user_id
+from app.beach.activity_log import log_activity, get_actor_name
 
 
 logger = logging.getLogger(__name__)
@@ -388,6 +389,25 @@ async def deactivate_me(user_id: int = Depends(beach_get_current_user_id)):
         )
     )
 
+    # ── Activity log ──
+    await log_activity(
+        area="user",
+        action="user.deactivated",
+        actor_user_id=user_id,
+        actor_name=row_dict.get("full_name", ""),
+        target_id=str(user_id),
+        target_label=row_dict.get("full_name", ""),
+    )
+
+    # ── Notify admins ──
+    import asyncio as _asyncio
+    _asyncio.ensure_future(notify_admins(
+        notif_type="admin_user_deactivated",
+        title="🚫 Użytkownik dezaktywował konto",
+        body=f"{row_dict.get('full_name', 'Użytkownik')} (ID: {user_id}) dezaktywował swoje konto.",
+        data={"user_id": user_id},
+    ))
+
     return {"success": True}
 
 
@@ -470,6 +490,30 @@ async def create_user(req: BeachUserCreateRequest):
         data={"user_id": int(new_id)},
     ))
 
+    # ── Activity log ──
+    await log_activity(
+        area="user",
+        action="user.registered",
+        actor_user_id=int(new_id),
+        actor_name=req.full_name.strip(),
+        target_id=str(new_id),
+        target_label=req.full_name.strip(),
+        details={"roles": roles, "province": province},
+    )
+
+    # ── Self-verification detection ──
+    if isinstance(roles, list):
+        for role in roles:
+            if isinstance(role, dict) and role.get("verified") == "approved":
+                import asyncio as _asyncio
+                _asyncio.ensure_future(notify_admins(
+                    notif_type="admin_user_self_verified",
+                    title="✅ Automatyczna weryfikacja",
+                    body=f"{req.full_name.strip()} — rola {role.get('type', '?')} zweryfikowana automatycznie przy rejestracji.",
+                    data={"user_id": int(new_id)},
+                ))
+                break
+
     return user_item
 
 
@@ -505,6 +549,18 @@ async def add_badge_to_user(
     )
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+
+    # ── Activity log ──
+    await log_activity(
+        area="user",
+        action="user.badge_added",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(user_id),
+        target_label=dict(row).get("full_name", ""),
+        details={"badge_name": badge_name},
+    )
+
     return _to_user_item(dict(row))
 
 
@@ -537,6 +593,18 @@ async def remove_badge_from_user(
     )
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+
+    # ── Activity log ──
+    await log_activity(
+        area="user",
+        action="user.badge_removed",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(user_id),
+        target_label=dict(row).get("full_name", ""),
+        details={"badge_name": badge_name},
+    )
+
     return _to_user_item(dict(row))
 
 
@@ -676,6 +744,37 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
     )
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+
+    # ── Activity log ──
+    changed = {k: v for k, v in update_data.items() if k not in ("updated_at", "password_hash")}
+    await log_activity(
+        area="user",
+        action="user.updated",
+        target_id=str(user_id),
+        target_label=dict(row).get("full_name", ""),
+        details={"changed_fields": list(changed.keys())} if changed else None,
+    )
+
+    # ── Self-verification detection ──
+    if "roles" in update_data:
+        old_roles = _parse_jsonish(dict(existing).get("roles"), [])
+        new_roles = update_data["roles"]
+        if isinstance(old_roles, list) and isinstance(new_roles, list):
+            old_approved = {(r.get("type"), r.get("team_id")) for r in old_roles if isinstance(r, dict) and r.get("verified") == "approved"}
+            for r in new_roles:
+                if isinstance(r, dict) and r.get("verified") == "approved":
+                    key = (r.get("type"), r.get("team_id"))
+                    if key not in old_approved:
+                        import asyncio as _asyncio
+                        user_name = dict(row).get("full_name", f"user#{user_id}")
+                        _asyncio.ensure_future(notify_admins(
+                            notif_type="admin_user_self_verified",
+                            title="✅ Automatyczna weryfikacja",
+                            body=f"{user_name} — rola {r.get('type', '?')} zweryfikowana automatycznie.",
+                            data={"user_id": user_id},
+                        ))
+                        break
+
     return _to_user_item(dict(row))
 
 
@@ -695,7 +794,19 @@ async def delete_user(
     if not row:
         raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
 
+    deleted_name = dict(row).get("full_name", "")
     await database.execute(delete(beach_users).where(beach_users.c.id == user_id))
+
+    # ── Activity log ──
+    await log_activity(
+        area="user",
+        action="user.deleted",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(user_id),
+        target_label=deleted_name,
+    )
+
     return {"success": True}
 
 

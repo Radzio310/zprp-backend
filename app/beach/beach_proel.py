@@ -9,6 +9,7 @@ from app.schemas import (
     BeachProElUpdateMatchRequest,
 )
 from datetime import datetime
+from app.beach.activity_log import log_activity
 
 router = APIRouter(
     prefix="/beach/proel",
@@ -41,6 +42,14 @@ async def create_beach_proel_match(req: BeachProElCreateMatchRequest):
         status=req.status,
     )
     await database.execute(stmt)
+
+    await log_activity(
+        area="proel",
+        action="match.created",
+        target_id=req.match_number,
+        details={"status": req.status},
+    )
+
     return {"success": True}
 
 
@@ -67,6 +76,14 @@ async def update_beach_proel_match(
             status=req.status or "IN_GAME",
         )
         await database.execute(stmt)
+
+        await log_activity(
+            area="proel",
+            action="match.created",
+            target_id=match_number,
+            details={"status": req.status or "IN_GAME", "upsert": True},
+        )
+
         return {"success": True, "created": True}
 
     to_update: dict = {"data_json": req.data_json}
@@ -80,6 +97,16 @@ async def update_beach_proel_match(
         .values(**to_update)
     )
     await database.execute(stmt)
+
+    old_status = dict(row).get("status")
+    if req.status and req.status != old_status:
+        await log_activity(
+            area="proel",
+            action="match.status_changed",
+            target_id=match_number,
+            details={"old_status": old_status, "new_status": req.status},
+        )
+
     return {"success": True}
 
 
@@ -96,6 +123,13 @@ async def delete_beach_proel_match(match_number: str):
     )
     if result == 0:
         raise HTTPException(404, "Nie znaleziono meczu w Beach ProEl'u")
+
+    await log_activity(
+        area="proel",
+        action="match.deleted",
+        target_id=match_number,
+    )
+
     return {"success": True}
 
 

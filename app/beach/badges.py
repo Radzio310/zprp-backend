@@ -12,6 +12,7 @@ from sqlalchemy import select, update, delete, insert
 import asyncio
 from app.db import database, beach_badges, beach_users
 from app.beach.notifications import notify_admins
+from app.beach.activity_log import log_activity
 from app.schemas import (
     BeachBadgeItem,
     BeachBadgeCreateRequest,
@@ -169,6 +170,7 @@ async def create_badge(req: BeachBadgeCreateRequest):
             body=f"✨ Dodano badge: \u201c{req.name.strip()}\u201d",
             data={"badge_id": badge_id, "badge_name": req.name.strip()},
         ))
+        await log_activity(area="system", action="badge.created", target_id=str(badge_id), target_label=req.name.strip())
         return {"success": True, "id": badge_id}
     except Exception as e:
         msg = str(e).lower()
@@ -176,6 +178,7 @@ async def create_badge(req: BeachBadgeCreateRequest):
             raise HTTPException(status_code=409, detail="Badge o takiej nazwie już istnieje")
         logger.error("create_badge failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"create_badge failed: {e}")
+
 
 
 @router.get("/", response_model=BeachBadgesListResponse, summary="Lista badge'y (BEACH)")
@@ -255,6 +258,7 @@ async def patch_badge(badge_id: int, body: BeachBadgeUpdateRequest):
             body=f"🔄 Badge \u201c{result.name}\u201d został zaktualizowany.",
             data={"badge_id": badge_id, "badge_name": result.name},
         ))
+    await log_activity(area="system", action="badge.updated", target_id=str(badge_id), target_label=result.name)
     return result
 
 
@@ -298,6 +302,7 @@ async def put_badge(badge_id: int, req: BeachBadgeCreateRequest):
         body=f"🔄 Badge \u201c{result.name}\u201d został zaktualizowany.",
         data={"badge_id": badge_id, "badge_name": result.name},
     ))
+    await log_activity(area="system", action="badge.updated", target_id=str(badge_id), target_label=result.name)
     return result
 
 
@@ -318,4 +323,5 @@ async def delete_badge(badge_id: int):
         body=f"❌ Badge \u201c{badge_name}\u201d został usunięty z systemu.",
         data={"badge_id": badge_id, "badge_name": badge_name},
     ))
+    await log_activity(area="system", action="badge.deleted", target_id=str(badge_id), target_label=badge_name)
     return {"success": True, "removed_from_users": removed_from_users}
