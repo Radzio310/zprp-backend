@@ -39,20 +39,19 @@ DOWNLOAD_DIR = "/tmp/daily_report_downloads"
 STAGE_LABELS = {
     "group": "Grupa",
     "playoff": "Baraż",
-    "quarterfinal": "Ćwierćfinał",
-    "semifinal": "Półfinał",
-    "fifth_semifinal": "Pf. 5-8",
-    "ninth_semifinal": "Pf. 9-12",
-    "thirteenth_semifinal": "Pf. 13-16",
+    "quarterfinal": "1/4",
+    "semifinal": "1/2",
+    "fifth_semifinal": "SM5",
+    "ninth_semifinal": "PF IX",
+    "thirteenth_semifinal": "PF XIII",
     "final": "Finał",
-    "third_place": "O 3. miejsce",
-    "fifth_place": "O 5. miejsce",
-    "seventh_place": "O 7. miejsce",
-    "ninth_place": "O 9. miejsce",
-    "eleventh_place": "O 11. miejsce",
-    "thirteenth_place": "O 13. miejsce",
-    "fifteenth_place": "O 15. miejsce",
-    "placement_rr": "O miejsca",
+    "third_place": "o 3. miejsce",
+    "fifth_place": "o 5. miejsce",
+    "seventh_place": "o 7. miejsce",
+    "ninth_place": "o 9. miejsce",
+    "eleventh_place": "o 11. miejsce",
+    "thirteenth_place": "o 13. miejsce",
+    "fifteenth_place": "o 15. miejsce",
 }
 
 CATEGORY_COLORS = {
@@ -195,7 +194,13 @@ def _stage_label(m: Dict[str, Any]) -> str:
     group = m.get("group")
     label = STAGE_LABELS.get(stage, "")
     if stage == "group" and group:
-        label = f"Grupa {group}"
+        label = f"gr. {group}"
+    elif stage == "placement_rr" and group:
+        tier_match = re.match(r"placement_(\d+)", group)
+        if tier_match:
+            label = f"O {tier_match.group(1)}. m."
+        else:
+            label = "O miejsca"
     return label
 
 

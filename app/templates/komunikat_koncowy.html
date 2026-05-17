@@ -443,15 +443,19 @@
   {% if mc.sets %}
   <div class="mc-sets-row">
     {% for s in mc.sets %}
+    {% set a_won_set = s.ptA > s.ptB %}
+    {% set b_won_set = s.ptB > s.ptA %}
     <div class="mc-set-tile">
       <span class="mc-set-label">Set {{ loop.index }}</span>
-      <span class="mc-set-score">{{ s.ptA }}:{{ s.ptB }}</span>
+      <span class="mc-set-score"><span style="{% if a_won_set %}font-weight:900; color:{{ gc }};{% endif %}">{{ s.ptA }}</span>:<span style="{% if b_won_set %}font-weight:900; color:{{ gc }};{% endif %}">{{ s.ptB }}</span></span>
     </div>
     {% endfor %}
     {% if mc.shootout %}
+    {% set sh_a_won = mc.shootout.a > mc.shootout.b %}
+    {% set sh_b_won = mc.shootout.b > mc.shootout.a %}
     <div class="mc-set-tile">
-      <span class="mc-set-label">Rz.k.</span>
-      <span class="mc-set-score">{{ mc.shootout.a }}:{{ mc.shootout.b }}</span>
+      <span class="mc-set-label">Set 3</span>
+      <span class="mc-set-score"><span style="{% if sh_a_won %}font-weight:900; color:{{ gc }};{% endif %}">{{ mc.shootout.a }}</span>:<span style="{% if sh_b_won %}font-weight:900; color:{{ gc }};{% endif %}">{{ mc.shootout.b }}</span></span>
     </div>
     {% endif %}
   </div>

@@ -539,9 +539,11 @@
     </div>
     {% endfor %}
     {% if mc.shootout %}
+    {% set sh_a_won = mc.shootout.a > mc.shootout.b %}
+    {% set sh_b_won = mc.shootout.b > mc.shootout.a %}
     <div class="mc-set-tile">
-      <span class="mc-set-label">Rz.k.</span>
-      <span class="mc-set-score">{{ mc.shootout.a }}:{{ mc.shootout.b }}</span>
+      <span class="mc-set-label">Set 3</span>
+      <span class="mc-set-score"><span style="{% if sh_a_won %}font-weight:900; color:{{ gc }};{% endif %}">{{ mc.shootout.a }}</span>:<span style="{% if sh_b_won %}font-weight:900; color:{{ gc }};{% endif %}">{{ mc.shootout.b }}</span></span>
     </div>
     {% endif %}
   </div>
