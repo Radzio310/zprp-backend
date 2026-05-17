@@ -87,6 +87,7 @@ class FinalReportRequest(BaseModel):
     category: str = ""
     competition_type: str = ""
     standings: Optional[List[GenderStandingsData]] = None
+    custom_summary: Optional[str] = None
 
 
 # ──────────── Helpers ────────────
@@ -737,7 +738,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
     if team_parts:
         summary_parts.append(f"W turnieju udział wzięło {' oraz '.join(team_parts)}.")
     summary_parts.append("Poniżej przedstawiono szczegółowe wyniki.")
-    summary_text = " ".join(summary_parts)
+    summary_text = req.custom_summary.strip() if req.custom_summary else " ".join(summary_parts)
 
     # Standings lookup by gender
     standings_by_gender: Dict[str, GenderStandingsData] = {}

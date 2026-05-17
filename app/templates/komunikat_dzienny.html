@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Komunikat po {{ day_number }}. dniu – {{ tournament_name }}</title>
+<style>
+  @page {
+    size: A4;
+    margin: 18mm 14mm 16mm 14mm;
+    @bottom-center {
+      content: "Strona " counter(page) " z " counter(pages);
+      font-size: 8pt;
+      color: #888;
+      font-family: "DejaVu Sans", sans-serif;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", sans-serif;
+    font-size: 9.5pt;
+    color: #222;
+    line-height: 1.4;
+  }
+
+  /* ── Header ── */
+  .header {
+    text-align: center;
+    margin-bottom: 18pt;
+    padding-bottom: 12pt;
+    border-bottom: 2pt solid {{ accent }};
+  }
+  .header img.logo {
+    width: 120pt;
+    height: auto;
+    margin-bottom: 8pt;
+  }
+  .header h1 {
+    font-size: 16pt;
+    font-weight: 900;
+    color: {{ accent }};
+    margin-bottom: 3pt;
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+  }
+  .header .subtitle {
+    font-size: 10pt;
+    color: #555;
+    font-weight: 600;
+  }
+  .header .meta {
+    font-size: 9pt;
+    color: #777;
+    margin-top: 2pt;
+  }
+
+  /* ── Summary ── */
+  .summary {
+    background: {{ accent }}0D;
+    border: 1pt solid {{ accent }}33;
+    border-radius: 6pt;
+    padding: 10pt 14pt;
+    margin-bottom: 14pt;
+    font-size: 10pt;
+    line-height: 1.5;
+  }
+
+  /* ── Section titles ── */
+  .section-title {
+    font-size: 11pt;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.8pt;
+    margin: 16pt 0 4pt 0;
+    padding-bottom: 4pt;
+    border-bottom: 1pt solid {{ accent }}44;
+    color: {{ accent }};
+    page-break-after: avoid;
+  }
+  .section-desc {
+    font-size: 9pt;
+    color: #666;
+    margin-bottom: 6pt;
+    font-style: italic;
+    page-break-after: avoid;
+  }
+
+  /* ── Match cards (from komunikat_koncowy) ── */
+  .matches-grid { margin-bottom: 8pt; }
+  .matches-row {
+    display: flex;
+    width: 100%;
+    gap: 4pt;
+    margin-bottom: 4pt;
+  }
+  .matches-row.single-card { justify-content: center; }
+  .match-card {
+    width: 48%;
+    border: 0.5pt solid #ddd;
+    border-radius: 4pt;
+    padding: 5pt 7pt;
+    font-size: 8pt;
+    page-break-inside: avoid;
+  }
+  .match-card .mc-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 3pt;
+  }
+  .match-card .mc-time {
+    font-weight: 800;
+    color: #777;
+    font-size: 7.5pt;
+  }
+  .match-card .mc-stage {
+    font-size: 6.5pt;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.3pt;
+    padding: 1pt 4pt;
+    border-radius: 2pt;
+  }
+  .match-card .mc-team-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5pt 0;
+  }
+  .match-card .mc-team-name {
+    flex: 1;
+    font-size: 8pt;
+    font-weight: 600;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    padding-right: 4pt;
+  }
+  .match-card .mc-team-score {
+    font-weight: 900;
+    font-size: 9pt;
+    color: #333;
+    min-width: 14pt;
+    text-align: right;
+  }
+  .match-card .mc-match-num {
+    font-size: 6pt;
+    font-weight: 700;
+    color: #aaa;
+    letter-spacing: 0.2pt;
+  }
+  .match-card .mc-sets-row {
+    display: flex;
+    justify-content: center;
+    gap: 3pt;
+    margin-top: 3pt;
+  }
+  .match-card .mc-set-tile {
+    background: #f5f5f5;
+    border: 0.5pt solid #e0e0e0;
+    border-radius: 3pt;
+    padding: 1.5pt 4pt;
+    font-size: 6.5pt;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .match-card .mc-set-label {
+    font-weight: 800;
+    color: #999;
+    text-transform: uppercase;
+    font-size: 5.5pt;
+    letter-spacing: 0.3pt;
+  }
+  .match-card .mc-set-score {
+    font-weight: 900;
+    color: #444;
+    font-size: 7pt;
+  }
+  .match-card .mc-gender-dot {
+    display: inline-block;
+    width: 5pt;
+    height: 5pt;
+    border-radius: 50%;
+    margin-right: 3pt;
+    vertical-align: middle;
+  }
+  .mc-gender-dot.M { background: #2BA8A0; }
+  .mc-gender-dot.K { background: #E85A78; }
+
+  /* ── Disqualifications table ── */
+  .disq-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 10pt;
+    font-size: 8.5pt;
+  }
+  .disq-table th {
+    background: #C62828;
+    color: #fff;
+    font-weight: 900;
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    padding: 4pt 6pt;
+    text-align: left;
+    border-bottom: 1.5pt solid #B71C1C;
+    letter-spacing: 0.3pt;
+  }
+  .disq-table td {
+    padding: 4pt 6pt;
+    border-bottom: 0.5pt solid #eee;
+    vertical-align: top;
+  }
+  .disq-table td.disq-match {
+    font-weight: 800;
+    color: #C62828;
+    white-space: nowrap;
+    width: 50pt;
+  }
+  .disq-table td.disq-player {
+    font-weight: 700;
+  }
+  .disq-table td.disq-moment {
+    font-size: 8pt;
+    color: #666;
+    white-space: nowrap;
+    width: 70pt;
+  }
+  .disq-table td.disq-comment {
+    font-size: 8pt;
+    color: #444;
+    font-style: italic;
+  }
+  .disq-no-data {
+    font-size: 9pt;
+    color: #888;
+    font-style: italic;
+    margin-bottom: 10pt;
+  }
+
+  /* ── Additional notes ── */
+  .notes-box {
+    background: #f8f8f8;
+    border: 0.5pt solid #ddd;
+    border-radius: 4pt;
+    padding: 8pt 12pt;
+    font-size: 9.5pt;
+    line-height: 1.5;
+    margin-bottom: 14pt;
+    white-space: pre-wrap;
+  }
+
+  /* ── Schedule table (from terminarz) ── */
+  .day-header {
+    font-size: 10pt;
+    font-weight: 900;
+    color: {{ accent }};
+    padding: 6pt 0 4pt 0;
+    margin-top: 8pt;
+    border-bottom: 1pt solid {{ accent }}33;
+    page-break-after: avoid;
+  }
+  table.schedule {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 10pt;
+    font-size: 8pt;
+    table-layout: auto;
+  }
+  table.schedule thead tr {
+    background: #f4f4f4;
+  }
+  table.schedule thead th {
+    font-weight: 900;
+    font-size: 7pt;
+    text-transform: uppercase;
+    letter-spacing: 0.3pt;
+    padding: 4pt 3pt;
+    border-bottom: 1.5pt solid #ddd;
+    color: #666;
+    text-align: left;
+  }
+  table.schedule thead th.th-team { min-width: 90pt; }
+  table.schedule thead th.th-center { text-align: center; }
+  table.schedule tbody tr:nth-child(even) { background: #fafafa; }
+  table.schedule tbody tr.gender-M { border-left: 2pt solid #2BA8A0; }
+  table.schedule tbody tr.gender-K { border-left: 2pt solid #E85A78; }
+  table.schedule tbody td {
+    padding: 3.5pt 3pt;
+    border-bottom: 0.5pt solid #eee;
+    vertical-align: middle;
+  }
+  td.col-time {
+    font-weight: 800;
+    color: #444;
+    white-space: nowrap;
+    width: 32pt;
+    text-align: center;
+  }
+  td.col-court {
+    text-align: center;
+    font-weight: 700;
+    font-size: 7.5pt;
+    color: #888;
+    width: 28pt;
+  }
+  td.col-num {
+    text-align: center;
+    font-weight: 800;
+    font-size: 7.5pt;
+    width: 28pt;
+    color: #999;
+  }
+  td.col-num.M { color: #2BA8A0; }
+  td.col-num.K { color: #E85A78; }
+  td.col-stage {
+    font-size: 7pt;
+    font-weight: 700;
+    color: #777;
+    white-space: nowrap;
+    max-width: 60pt;
+  }
+  td.col-team {
+    font-weight: 600;
+    font-size: 8pt;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  td.col-team.tbd {
+    font-style: italic;
+    color: #bbb;
+    min-height: 14pt;
+  }
+  td.col-team.tbd-hint {
+    font-style: italic;
+    color: #999;
+  }
+  .tbd-hint-label {
+    display: block;
+    font-size: 6.5pt;
+    font-weight: 700;
+    color: #aaa;
+    letter-spacing: 0.2pt;
+    margin-bottom: 1pt;
+  }
+  .tbd-write-line {
+    display: block;
+    border-bottom: 0.5pt solid #ccc;
+    height: 10pt;
+  }
+  td.col-vs {
+    text-align: center;
+    font-weight: 900;
+    color: #bbb;
+    width: 14pt;
+    font-size: 7pt;
+  }
+  td.col-score {
+    text-align: center;
+    font-weight: 800;
+    width: 55pt;
+    font-size: 8pt;
+  }
+  td.col-score.empty {
+    color: #ccc;
+    font-weight: 400;
+  }
+  .score-main {
+    display: block;
+    font-weight: 900;
+    font-size: 9pt;
+    color: #333;
+  }
+  .score-sets {
+    display: block;
+    font-weight: 600;
+    font-size: 6.5pt;
+    color: #888;
+    margin-top: 1pt;
+  }
+  /* Break / opening rows */
+  tr.row-break td {
+    background: #f8f8f8;
+    color: #999;
+    font-style: italic;
+    font-size: 7.5pt;
+    padding: 3pt;
+  }
+  tr.row-break td.break-label {
+    font-weight: 700;
+    padding-left: 6pt;
+  }
+  tr.row-opening td {
+    background: #FFFDE7;
+    font-size: 7.5pt;
+    padding: 3pt;
+  }
+  tr.row-opening td.opening-label {
+    font-weight: 700;
+    text-align: center;
+    padding-left: 6pt;
+  }
+
+  /* ── Legend ── */
+  .legend {
+    display: flex;
+    gap: 14pt;
+    margin-bottom: 6pt;
+    font-size: 8pt;
+    color: #666;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4pt;
+  }
+  .legend-dot {
+    width: 7pt;
+    height: 7pt;
+    border-radius: 50%;
+  }
+  .legend-dot.M { background: #2BA8A0; }
+  .legend-dot.K { background: #E85A78; }
+
+  /* ── Footer ── */
+  .footer {
+    margin-top: 20pt;
+    padding-top: 8pt;
+    border-top: 0.5pt solid #ccc;
+    font-size: 7.5pt;
+    color: #999;
+    text-align: center;
+  }
+
+  .page-break { page-break-before: always; }
+  .no-break { page-break-inside: avoid; }
+</style>
+</head>
+
+{# ── Macro: team cell for schedule ── #}
+{% macro team_cell(name, hint) %}
+{% if not name and hint %}
+<td class="col-team tbd-hint"><span class="tbd-hint-label">{{ hint }}</span><span class="tbd-write-line"></span></td>
+{% elif not name %}
+<td class="col-team tbd"></td>
+{% elif name | length > 22 %}
+<td class="col-team" style="font-size: 7pt;">{{ name }}</td>
+{% else %}
+<td class="col-team">{{ name }}</td>
+{% endif %}
+{% endmacro %}
+
+{# ── Macro: schedule rows ── #}
+{% macro schedule_rows(matches) %}
+{% for m in matches %}
+{% if m.type == 'tournament_opening' %}
+<tr class="row-opening">
+  <td class="col-time">{{ m.time }}</td>
+  <td colspan="7" class="opening-label">🎉 {{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
+</tr>
+{% elif m.type == 'court_break' %}
+<tr class="row-break">
+  <td class="col-time">{{ m.time }}</td>
+  <td class="col-court">{{ m.court }}</td>
+  <td colspan="6" class="break-label">{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
+</tr>
+{% else %}
+<tr class="gender-{{ m.gender }}">
+  <td class="col-time">{{ m.time }}</td>
+  <td class="col-court">{{ m.court }}</td>
+  <td class="col-num {{ m.gender }}">{{ m.match_num }}</td>
+  <td class="col-stage">{{ m.stage }}</td>
+  {{ team_cell(m.team_a, m.hint_a) }}
+  <td class="col-vs">–</td>
+  {{ team_cell(m.team_b, m.hint_b) }}
+  <td class="col-score{% if not m.score_main %} empty{% endif %}">
+    {% if m.score_main %}
+    <span class="score-main">{{ m.score_main }}</span>
+    {% if m.score_sets %}<span class="score-sets">{{ m.score_sets }}</span>{% endif %}
+    {% else %}–{% endif %}
+  </td>
+</tr>
+{% endif %}
+{% endfor %}
+{% endmacro %}
+
+<body>
+
+<!-- ════════════ HEADER ════════════ -->
+<div class="header">
+  {% if logo_b64 %}
+  <img class="logo" src="data:image/png;base64,{{ logo_b64 }}" alt="BAZA Beach">
+  {% endif %}
+  <h1>{{ tournament_name }}</h1>
+  <div class="subtitle">Komunikat po {{ day_number }}. dniu zawodów</div>
+  <div class="meta">{{ date_range }}{% if location %} · {{ location }}{% endif %}</div>
+</div>
+
+<!-- ════════════ SUMMARY ════════════ -->
+<div class="summary">
+  {{ summary_text }}
+</div>
+
+<!-- ════════════ MATCH RESULTS ════════════ -->
+{% if match_days %}
+<div class="section-title">Przebieg rozgrywek</div>
+<div class="section-desc">Wyniki meczów rozegranych do końca {{ day_number }}. dnia zawodów.</div>
+
+{% for day in match_days %}
+{% if day.label %}
+<div style="font-size: 9pt; font-weight: 800; color: #555; margin: 6pt 0 4pt 0;">{{ day.label }}</div>
+{% endif %}
+<div class="matches-grid">
+{% for pair in day.matches | batch(2) %}
+<div class="matches-row{% if pair | length == 1 %} single-card{% endif %}">
+{% for mc in pair %}
+<div class="match-card">
+  <div class="mc-header">
+    <span class="mc-time">
+      {% if multi_gender and mc.gender %}<span class="mc-gender-dot {{ mc.gender }}"></span>{% endif %}
+      {{ mc.time or "" }}
+    </span>
+    {% if mc.stage_label %}<span class="mc-stage" style="color: {{ accent }}; background: {{ accent }}14;">{{ mc.stage_label }}</span>{% endif %}
+    {% if mc.match_number %}<span class="mc-match-num">{{ mc.match_number }}</span>{% endif %}
+  </div>
+  <div class="mc-team-row{% if mc.winner == 'A' %} winner{% endif %}">
+    <span class="mc-team-name" style="{% if mc.winner == 'A' %}font-weight: 900; color: {{ accent }};{% endif %}">{{ mc.team_a }}</span>
+    <span class="mc-team-score" style="{% if mc.winner == 'A' %}color: {{ accent }};{% endif %}">{{ mc.score_a if mc.score_a is not none else "" }}</span>
+  </div>
+  <div class="mc-team-row{% if mc.winner == 'B' %} winner{% endif %}">
+    <span class="mc-team-name" style="{% if mc.winner == 'B' %}font-weight: 900; color: {{ accent }};{% endif %}">{{ mc.team_b }}</span>
+    <span class="mc-team-score" style="{% if mc.winner == 'B' %}color: {{ accent }};{% endif %}">{{ mc.score_b if mc.score_b is not none else "" }}</span>
+  </div>
+  {% if mc.sets %}
+  <div class="mc-sets-row">
+    {% for s in mc.sets %}
+    <div class="mc-set-tile">
+      <span class="mc-set-label">Set {{ loop.index }}</span>
+      <span class="mc-set-score">{{ s.ptA }}:{{ s.ptB }}</span>
+    </div>
+    {% endfor %}
+    {% if mc.shootout %}
+    <div class="mc-set-tile">
+      <span class="mc-set-label">Rz.k.</span>
+      <span class="mc-set-score">{{ mc.shootout.a }}:{{ mc.shootout.b }}</span>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+</div>
+{% endfor %}
+</div>
+{% endfor %}
+{% endif %}
+
+<!-- ════════════ DISQUALIFICATIONS ════════════ -->
+{% if has_disqualifications %}
+<div class="section-title" style="color: #C62828; border-bottom-color: #C6282844;">Dyskwalifikacje bezpośrednie</div>
+<div class="section-desc">Informacje o bezpośrednich dyskwalifikacjach (czerwona kartka) odnotowanych podczas turnieju.</div>
+
+<table class="disq-table no-break">
+  <thead>
+    <tr>
+      <th>Mecz</th>
+      <th>Zawodnik / Osoba</th>
+      <th>Drużyna</th>
+      <th>Moment</th>
+      <th>Opis</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for dq in disqualifications %}
+    <tr>
+      <td class="disq-match">{{ dq.match_number }}</td>
+      <td class="disq-player">
+        {% if dq.is_companion %}
+        {{ dq.player_name }} <span style="font-size: 7pt; color: #888;">(os. towarzysząca {{ dq.companion_role }})</span>
+        {% else %}
+        {{ dq.player_name }}{% if dq.player_number %} <span style="font-size: 7pt; color: #888;">#{{ dq.player_number }}</span>{% endif %}
+        {% endif %}
+      </td>
+      <td>{{ dq.team_name }}</td>
+      <td class="disq-moment">{{ dq.moment }}</td>
+      <td class="disq-comment">{{ dq.comment or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<!-- ════════════ ADDITIONAL NOTES ════════════ -->
+{% if has_additional_notes %}
+<div class="section-title">Informacje dodatkowe</div>
+<div class="notes-box">{{ additional_notes }}</div>
+{% endif %}
+
+<!-- ════════════ REMAINING SCHEDULE ════════════ -->
+{% if has_remaining %}
+<div class="page-break"></div>
+<div class="section-title">Terminarz — dalszy przebieg turnieju</div>
+<div class="section-desc">Plan rozgrywek na kolejne dni turnieju.</div>
+
+{% if multi_gender %}
+<div class="legend">
+  <div class="legend-item">
+    <div class="legend-dot M"></div>
+    <span>Mężczyźni</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot K"></div>
+    <span>Kobiety</span>
+  </div>
+</div>
+{% endif %}
+
+{% for day in remaining_days %}
+<div class="day-header no-break">{{ day.label }}</div>
+{% if day.matches %}
+<table class="schedule">
+  <thead>
+    <tr>
+      <th>Godz.</th>
+      <th class="th-center">Boisko</th>
+      <th class="th-center">Num.</th>
+      <th>Etap / Grupa</th>
+      <th class="th-team">Drużyna A</th>
+      <th class="th-center">–</th>
+      <th class="th-team">Drużyna B</th>
+      <th class="th-center">Wynik</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{ schedule_rows(day.matches) }}
+  </tbody>
+</table>
+{% endif %}
+{% endfor %}
+{% endif %}
+
+<!-- ════════════ FOOTER ════════════ -->
+<div class="footer">
+  Wygenerowano automatycznie przez BAZA Beach · {{ generated_at }}
+</div>
+
+</body>
+</html>
