@@ -503,6 +503,19 @@
 <div class="section-title">Przebieg rozgrywek</div>
 <div class="section-desc">Wyniki meczów rozegranych do końca {{ day_number }}. dnia zawodów.</div>
 
+{% if multi_gender %}
+<div class="legend">
+  <div class="legend-item">
+    <div class="legend-dot M"></div>
+    <span>Mężczyźni</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot K"></div>
+    <span>Kobiety</span>
+  </div>
+</div>
+{% endif %}
+
 {% for day in match_days %}
 {% if day.label %}
 <div style="font-size: 9pt; font-weight: 800; color: #555; margin: 6pt 0 4pt 0;">{{ day.label }}</div>
@@ -599,19 +612,6 @@
 {% if has_remaining %}
 <div class="page-break"></div>
 <div class="section-title">Terminarz — dalszy przebieg turnieju</div>
-
-{% if multi_gender %}
-<div class="legend">
-  <div class="legend-item">
-    <div class="legend-dot M"></div>
-    <span>Mężczyźni</span>
-  </div>
-  <div class="legend-item">
-    <div class="legend-dot K"></div>
-    <span>Kobiety</span>
-  </div>
-</div>
-{% endif %}
 
 {% for day in remaining_days %}
 <div class="day-header no-break">{{ day.label }}</div>
