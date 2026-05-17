@@ -101,6 +101,16 @@
     font-size: 8pt;
     page-break-inside: avoid;
   }
+  .match-card.gender-M {
+    border-left: 2.5pt solid #2BA8A0;
+    border-color: #2BA8A044;
+    border-left-color: #2BA8A0;
+  }
+  .match-card.gender-K {
+    border-left: 2.5pt solid #E85A78;
+    border-color: #E85A7844;
+    border-left-color: #E85A78;
+  }
   .match-card .mc-header {
     display: flex;
     justify-content: space-between;
@@ -175,16 +185,7 @@
     color: #444;
     font-size: 7pt;
   }
-  .match-card .mc-gender-dot {
-    display: inline-block;
-    width: 5pt;
-    height: 5pt;
-    border-radius: 50%;
-    margin-right: 3pt;
-    vertical-align: middle;
-  }
-  .mc-gender-dot.M { background: #2BA8A0; }
-  .mc-gender-dot.K { background: #E85A78; }
+
 
   /* ── Disqualifications table ── */
   .disq-table {
@@ -217,12 +218,10 @@
   }
   .disq-table td.disq-player {
     font-weight: 700;
+    width: 140pt;
   }
-  .disq-table td.disq-moment {
-    font-size: 8pt;
-    color: #666;
-    white-space: nowrap;
-    width: 70pt;
+  .disq-table td.disq-team {
+    width: 120pt;
   }
   .disq-table td.disq-comment {
     font-size: 8pt;
@@ -512,29 +511,31 @@
 {% for pair in day.matches | batch(2) %}
 <div class="matches-row{% if pair | length == 1 %} single-card{% endif %}">
 {% for mc in pair %}
-<div class="match-card">
+<div class="match-card{% if mc.gender %} gender-{{ mc.gender }}{% endif %}">
   <div class="mc-header">
     <span class="mc-time">
-      {% if multi_gender and mc.gender %}<span class="mc-gender-dot {{ mc.gender }}"></span>{% endif %}
       {{ mc.time or "" }}
     </span>
     {% if mc.stage_label %}<span class="mc-stage" style="color: {{ accent }}; background: {{ accent }}14;">{{ mc.stage_label }}</span>{% endif %}
     {% if mc.match_number %}<span class="mc-match-num">{{ mc.match_number }}</span>{% endif %}
   </div>
+  {% set gc = '#2BA8A0' if mc.gender == 'M' else '#E85A78' %}
   <div class="mc-team-row{% if mc.winner == 'A' %} winner{% endif %}">
-    <span class="mc-team-name" style="{% if mc.winner == 'A' %}font-weight: 900; color: {{ accent }};{% endif %}">{{ mc.team_a }}</span>
-    <span class="mc-team-score" style="{% if mc.winner == 'A' %}color: {{ accent }};{% endif %}">{{ mc.score_a if mc.score_a is not none else "" }}</span>
+    <span class="mc-team-name" style="{% if mc.winner == 'A' %}font-weight: 900; color: {{ gc }};{% endif %}">{{ mc.team_a }}</span>
+    <span class="mc-team-score" style="{% if mc.winner == 'A' %}color: {{ gc }};{% endif %}">{{ mc.score_a if mc.score_a is not none else "" }}</span>
   </div>
   <div class="mc-team-row{% if mc.winner == 'B' %} winner{% endif %}">
-    <span class="mc-team-name" style="{% if mc.winner == 'B' %}font-weight: 900; color: {{ accent }};{% endif %}">{{ mc.team_b }}</span>
-    <span class="mc-team-score" style="{% if mc.winner == 'B' %}color: {{ accent }};{% endif %}">{{ mc.score_b if mc.score_b is not none else "" }}</span>
+    <span class="mc-team-name" style="{% if mc.winner == 'B' %}font-weight: 900; color: {{ gc }};{% endif %}">{{ mc.team_b }}</span>
+    <span class="mc-team-score" style="{% if mc.winner == 'B' %}color: {{ gc }};{% endif %}">{{ mc.score_b if mc.score_b is not none else "" }}</span>
   </div>
   {% if mc.sets %}
   <div class="mc-sets-row">
     {% for s in mc.sets %}
+    {% set a_won_set = s.ptA > s.ptB %}
+    {% set b_won_set = s.ptB > s.ptA %}
     <div class="mc-set-tile">
       <span class="mc-set-label">Set {{ loop.index }}</span>
-      <span class="mc-set-score">{{ s.ptA }}:{{ s.ptB }}</span>
+      <span class="mc-set-score"><span style="{% if a_won_set %}font-weight:900; color:{{ gc }};{% endif %}">{{ s.ptA }}</span>:<span style="{% if b_won_set %}font-weight:900; color:{{ gc }};{% endif %}">{{ s.ptB }}</span></span>
     </div>
     {% endfor %}
     {% if mc.shootout %}
@@ -564,7 +565,6 @@
       <th>Mecz</th>
       <th>Zawodnik / Osoba</th>
       <th>Drużyna</th>
-      <th>Moment</th>
       <th>Opis</th>
     </tr>
   </thead>
@@ -579,8 +579,7 @@
         {{ dq.player_name }}{% if dq.player_number %} <span style="font-size: 7pt; color: #888;">#{{ dq.player_number }}</span>{% endif %}
         {% endif %}
       </td>
-      <td>{{ dq.team_name }}</td>
-      <td class="disq-moment">{{ dq.moment }}</td>
+      <td class="disq-team">{{ dq.team_name }}</td>
       <td class="disq-comment">{{ dq.comment or "—" }}</td>
     </tr>
     {% endfor %}
@@ -598,7 +597,6 @@
 {% if has_remaining %}
 <div class="page-break"></div>
 <div class="section-title">Terminarz — dalszy przebieg turnieju</div>
-<div class="section-desc">Plan rozgrywek na kolejne dni turnieju.</div>
 
 {% if multi_gender %}
 <div class="legend">
