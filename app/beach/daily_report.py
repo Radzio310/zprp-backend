@@ -198,7 +198,7 @@ def _stage_label(m: Dict[str, Any]) -> str:
     elif stage == "placement_rr" and group:
         tier_match = re.match(r"placement_(\d+)", group)
         if tier_match:
-            label = f"O {tier_match.group(1)}. m."
+            label = f"o {tier_match.group(1)}. miejsce"
         else:
             label = "O miejsca"
     return label
