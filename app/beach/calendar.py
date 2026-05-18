@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 from typing import Any
 
@@ -25,6 +26,7 @@ from app.calendar_storage import (
 from app.deps import beach_get_current_user_id, get_settings
 
 router = APIRouter(prefix="/beach/calendar", tags=["Beach Calendar"])
+logger = logging.getLogger(__name__)
 
 
 def _beach_calendar_user_key(user_id: int) -> str:
@@ -35,12 +37,13 @@ def _frontend_deep_link(settings: Any) -> str:
     return (
         os.getenv("BEACH_FRONTEND_DEEP_LINK", "").strip()
         or getattr(settings, "BEACH_FRONTEND_DEEP_LINK", None)
-        or "bazabeach://settings?calendar=connected"
+        or "bazabeach://more?openSettings=1&calendarConnected=1"
     )
 
 
 def _create_beach_flow(settings: Any) -> Flow:
-    redirect_uri = f"{settings.BACKEND_URL}/beach/calendar/oauth2callback"
+    backend_url = str(settings.BACKEND_URL).rstrip("/")
+    redirect_uri = f"{backend_url}/beach/calendar/oauth2callback"
     client_config = {
         "web": {
             "client_id": settings.GOOGLE_CLIENT_ID,
@@ -160,18 +163,21 @@ async def oauth2callback(
 ):
     user_key = await get_user_login_by_state(state)
     if not user_key or not str(user_key).startswith("beach:"):
+        logger.warning("Beach Google OAuth callback rejected invalid state")
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
     flow = _create_beach_flow(settings)
     try:
         flow.fetch_token(code=code)
     except Exception as exc:
+        logger.exception("Beach Google OAuth token exchange failed")
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}")
 
     creds = flow.credentials
     existing = await get_calendar_tokens(user_key)
     refresh_token = creds.refresh_token or (existing["refresh_token"] if existing else None)
     if not refresh_token:
+        logger.warning("Beach Google OAuth callback did not return refresh token")
         raise HTTPException(status_code=400, detail="Brak refresh token z Google")
 
     await save_calendar_tokens(
