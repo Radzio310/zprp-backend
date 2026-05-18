@@ -115,7 +115,7 @@ def _beach_tournament_payload(tournament: dict[str, Any]) -> BeachCalendarEventU
     if window:
         return BeachCalendarEventUpsert(
             matchId=f"beach-tournament:{tournament['id']}",
-            summary=f"BAZA Beach: {tournament.get('name') or 'Turniej'}",
+            summary=f"☀️ {tournament.get('name') or 'Turniej'}",
             location=location,
             description=description,
             start=BeachCalendarDateTime(dateTime=window[0], timeZone=BEACH_CALENDAR_TIME_ZONE),
@@ -129,7 +129,7 @@ def _beach_tournament_payload(tournament: dict[str, Any]) -> BeachCalendarEventU
         )
     return BeachCalendarEventUpsert(
         matchId=f"beach-tournament:{tournament['id']}",
-        summary=f"BAZA Beach: {tournament.get('name') or 'Turniej'}",
+        summary=f"☀️ {tournament.get('name') or 'Turniej'}",
         location=location,
         description=description,
         start=BeachCalendarDateTime(date=start_date),
@@ -251,6 +251,51 @@ def _event_body(payload: BeachCalendarEventUpsert) -> dict[str, Any]:
     return body
 
 
+def _event_matches_payload(event: dict[str, Any], payload: BeachCalendarEventUpsert) -> bool:
+    summary = str(event.get("summary") or "")
+    return summary == payload.summary or summary == payload.summary.replace("☀️ ", "", 1)
+
+
+def _find_existing_event_id(service: Any, payload: BeachCalendarEventUpsert) -> str | None:
+    match_id = payload.matchId
+    try:
+        response = (
+            service.events()
+            .list(
+                calendarId="primary",
+                privateExtendedProperty=f"bazaBeachMatchId={match_id}",
+                showDeleted=False,
+                singleEvents=False,
+                maxResults=10,
+            )
+            .execute()
+        )
+        items = response.get("items", [])
+        if items:
+            return items[0].get("id")
+    except Exception:
+        logger.exception("Failed to search Google event by extended property")
+
+    try:
+        response = (
+            service.events()
+            .list(
+                calendarId="primary",
+                q=payload.summary.replace("☀️ ", "", 1),
+                showDeleted=False,
+                singleEvents=True,
+                maxResults=10,
+            )
+            .execute()
+        )
+        for event in response.get("items", []):
+            if _event_matches_payload(event, payload):
+                return event.get("id")
+    except Exception:
+        logger.exception("Failed to search Google event by summary")
+    return None
+
+
 async def sync_beach_tournament_google_for_users(
     tournament: dict[str, Any],
     user_ids: list[int],
@@ -262,6 +307,7 @@ async def sync_beach_tournament_google_for_users(
     payload = _beach_tournament_payload(tournament)
     body = _event_body(payload)
     match_id = payload.matchId
+    body["extendedProperties"] = {"private": {"bazaBeachMatchId": match_id}}
     for user_id in sorted({int(uid) for uid in user_ids if uid is not None}):
         user_key = _beach_calendar_user_key(user_id)
         if not await get_calendar_tokens(user_key):
@@ -269,7 +315,7 @@ async def sync_beach_tournament_google_for_users(
         try:
             service = await _google_service(user_key, settings)
             mapping = await get_event_mapping(user_key, match_id)
-            event_id = mapping["event_id"] if mapping else None
+            event_id = mapping if mapping else _find_existing_event_id(service, payload)
             if event_id:
                 try:
                     event = (
@@ -315,7 +361,7 @@ async def delete_beach_tournament_google_for_users(
             try:
                 service.events().delete(
                     calendarId="primary",
-                    eventId=mapping["event_id"],
+                    eventId=mapping,
                 ).execute()
             finally:
                 await delete_event_mapping(user_key, match_id)
@@ -400,6 +446,9 @@ async def upsert_event(
     service = await _google_service(user_key, settings)
     event_id = await get_event_mapping(user_key, payload.matchId)
     body = _event_body(payload)
+    body["extendedProperties"] = {"private": {"bazaBeachMatchId": payload.matchId}}
+    if not event_id:
+        event_id = _find_existing_event_id(service, payload)
 
     if event_id:
         try:
