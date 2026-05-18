@@ -56,7 +56,9 @@ def _create_beach_flow(settings: Any) -> Flow:
     flow = Flow.from_client_config(
         client_config,
         scopes=["https://www.googleapis.com/auth/calendar.events"],
+        autogenerate_code_verifier=False,
     )
+    flow.code_verifier = None
     flow.redirect_uri = redirect_uri
     return flow
 
