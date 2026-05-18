@@ -1220,6 +1220,47 @@ async def judge_update_tournament(
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
+# ─────────────────── helpers for schedule-update logging ───────────────────
+
+def _detect_score_changes(
+    old_schedule: Optional[Dict],
+    new_schedule: Optional[Dict],
+) -> List[Dict[str, Any]]:
+    """Return list of matches whose score or status changed between two schedule versions."""
+    if not old_schedule or not new_schedule:
+        return []
+    old_matches = {
+        m["id"]: m for m in (old_schedule.get("matches") or [])
+        if m.get("id") and m.get("kind") not in ("court_break", "tournament_opening")
+    }
+    changes = []
+    for m in (new_schedule.get("matches") or []):
+        mid = m.get("id")
+        if not mid or m.get("kind") in ("court_break", "tournament_opening"):
+            continue
+        om = old_matches.get(mid)
+        if not om:
+            continue
+        if (
+            om.get("scoreA") != m.get("scoreA")
+            or om.get("scoreB") != m.get("scoreB")
+            or om.get("status") != m.get("status")
+        ):
+            ta = m.get("teamA") or om.get("teamA") or {}
+            tb = m.get("teamB") or om.get("teamB") or {}
+            changes.append({
+                "match_id": mid,
+                "team_a": ta.get("name", "TBD") if isinstance(ta, dict) else "TBD",
+                "team_b": tb.get("name", "TBD") if isinstance(tb, dict) else "TBD",
+                "score_a": m.get("scoreA"),
+                "score_b": m.get("scoreB"),
+                "sets": m.get("sets"),
+                "status": m.get("status"),
+                "gender": m.get("gender", ""),
+            })
+    return changes
+
+
 # ─────────────────── PATCH schedule-update (Admin / Gospodarz zawodów) ───────────────────
 
 @router.patch(
@@ -1289,22 +1330,77 @@ async def schedule_update_tournament(
 
     # ── Activity log ──
     def _real_match_count(sched):
-        """Count only real matches (exclude court_break / tournament_opening)."""
         if not isinstance(sched, dict):
             return 0
         return sum(1 for m in sched.get("matches", []) if m.get("kind") not in ("court_break", "tournament_opening"))
 
     old_match_count = _real_match_count(old_schedule)
     new_match_count = _real_match_count(body.schedule)
-    await log_activity(
-        area="tournament",
-        action="tournament.schedule_updated",
-        actor_user_id=current_user_id,
-        actor_name=await get_actor_name(current_user_id),
-        target_id=str(tournament_id),
-        target_label=tour_name,
-        details={"matches_before": old_match_count, "matches_after": new_match_count, "schedule_cleared": body.schedule is None},
+    actor_name = await get_actor_name(current_user_id)
+
+    # Score save: detect which match scores changed → log as match.score_saved (not schedule_updated)
+    score_changes = _detect_score_changes(old_schedule, body.schedule)
+
+    # Schedule published: status flipped to "published"
+    is_publish = (
+        old_schedule is not None
+        and old_schedule.get("status") != "published"
+        and isinstance(body.schedule, dict)
+        and body.schedule.get("status") == "published"
     )
+
+    if score_changes:
+        for change in score_changes:
+            sa, sb = change["score_a"], change["score_b"]
+            score_str = f"{sa}:{sb}" if sa is not None and sb is not None else "—"
+            sets = change.get("sets") or []
+            sets_str = " ".join(f"{s.get('ptA', '?')}:{s.get('ptB', '?')}" for s in sets) if sets else ""
+            await log_activity(
+                area="tournament",
+                action="match.score_saved",
+                actor_user_id=current_user_id,
+                actor_name=actor_name,
+                target_id=str(tournament_id),
+                target_label=tour_name,
+                details={
+                    "match": f"{change['team_a']} vs {change['team_b']}",
+                    "score": score_str,
+                    "sets": sets_str or None,
+                    "gender": change["gender"],
+                    "status": change["status"],
+                },
+            )
+        # If score save also changed match count (rare), log structural change too
+        if old_match_count != new_match_count:
+            await log_activity(
+                area="tournament",
+                action="tournament.schedule_updated",
+                actor_user_id=current_user_id,
+                actor_name=actor_name,
+                target_id=str(tournament_id),
+                target_label=tour_name,
+                details={"matches_before": old_match_count, "matches_after": new_match_count, "schedule_cleared": False},
+            )
+    elif is_publish:
+        await log_activity(
+            area="tournament",
+            action="tournament.schedule_published",
+            actor_user_id=current_user_id,
+            actor_name=actor_name,
+            target_id=str(tournament_id),
+            target_label=tour_name,
+            details=None,
+        )
+    else:
+        await log_activity(
+            area="tournament",
+            action="tournament.schedule_updated",
+            actor_user_id=current_user_id,
+            actor_name=actor_name,
+            target_id=str(tournament_id),
+            target_label=tour_name,
+            details={"matches_before": old_match_count, "matches_after": new_match_count, "schedule_cleared": body.schedule is None},
+        )
 
     return _attach_computed_fields(row_d, data2, current_user_id)
 

@@ -89,6 +89,7 @@ from app.beach.final_report import router as beach_final_report_router
 from app.beach.daily_report import router as beach_daily_report_router
 from app.beach.custom_team_templates import router as beach_custom_team_templates_router
 from app.beach.activity_log import router as beach_activity_log_router
+from app.beach.calendar import router as beach_calendar_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -197,6 +198,7 @@ app.include_router(beach_final_report_router)
 app.include_router(beach_daily_report_router)
 app.include_router(beach_custom_team_templates_router)
 app.include_router(beach_activity_log_router)
+app.include_router(beach_calendar_router)
 
 # NEW: push router
 app.include_router(push_router)
