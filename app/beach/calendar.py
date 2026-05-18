@@ -279,6 +279,34 @@ class BeachCalendarPrefsPayload(BaseModel):
     googleColorId: dict[str, str] = {}
 
 
+def _deep_merge_calendar_prefs(
+    current: dict[str, Any] | None,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    base = current.copy() if isinstance(current, dict) else {}
+    for key in ("my", "all", "googleColorId"):
+        incoming = patch.get(key)
+        if isinstance(incoming, dict):
+            existing = base.get(key) if isinstance(base.get(key), dict) else {}
+            base[key] = {**existing, **incoming}
+
+    incoming_include = patch.get("includePast")
+    if isinstance(incoming_include, dict):
+        existing_include = base.get("includePast") if isinstance(base.get("includePast"), dict) else {}
+        merged_include = dict(existing_include)
+        for scope in ("my", "all"):
+            incoming_scope = incoming_include.get(scope)
+            if isinstance(incoming_scope, dict):
+                existing_scope = (
+                    merged_include.get(scope)
+                    if isinstance(merged_include.get(scope), dict)
+                    else {}
+                )
+                merged_include[scope] = {**existing_scope, **incoming_scope}
+        base["includePast"] = merged_include
+    return base
+
+
 def _event_time_payload(value: BeachCalendarDateTime) -> dict[str, str]:
     if value.date:
         return {"date": value.date}
@@ -502,7 +530,9 @@ async def save_calendar_prefs(
     payload: BeachCalendarPrefsPayload,
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    value = json.dumps(payload.model_dump(), ensure_ascii=False)
+    current = await _get_beach_calendar_prefs(current_user_id)
+    merged = _deep_merge_calendar_prefs(current, payload.model_dump())
+    value = json.dumps(merged, ensure_ascii=False)
     stmt = pg_insert(beach_app_settings).values(
         key=_beach_calendar_prefs_key(current_user_id),
         value=value,
