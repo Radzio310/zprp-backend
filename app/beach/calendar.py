@@ -13,6 +13,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.calendar_storage import (
     delete_calendar_tokens,
@@ -24,11 +26,13 @@ from app.calendar_storage import (
     save_event_mapping,
     save_oauth_state,
 )
+from app.db import beach_app_settings, database
 from app.deps import beach_get_current_user_id, get_settings
 
 router = APIRouter(prefix="/beach/calendar", tags=["Beach Calendar"])
 logger = logging.getLogger(__name__)
 BEACH_CALENDAR_TIME_ZONE = "Europe/Warsaw"
+BEACH_CALENDAR_PREFS_PREFIX = "beach_calendar_prefs:"
 
 
 def _date_key(value: Any) -> str:
@@ -90,7 +94,53 @@ def _schedule_window(tournament: dict[str, Any], data: dict[str, Any]) -> tuple[
     return _datetime_iso(first[0], first[1]), _datetime_iso(last[0], last[2])
 
 
-def _beach_tournament_payload(tournament: dict[str, Any]) -> BeachCalendarEventUpsert:
+def _normalized_google_color_id(value: Any) -> str | None:
+    color_id = str(value or "").strip()
+    if not color_id or color_id == "0":
+        return None
+    return color_id
+
+
+def _beach_calendar_prefs_key(user_id: int) -> str:
+    return f"{BEACH_CALENDAR_PREFS_PREFIX}{int(user_id)}"
+
+
+async def _get_beach_calendar_prefs(user_id: int) -> dict[str, Any] | None:
+    row = await database.fetch_one(
+        select(beach_app_settings.c.value).where(
+            beach_app_settings.c.key == _beach_calendar_prefs_key(user_id)
+        )
+    )
+    if not row or not row["value"]:
+        return None
+    try:
+        parsed = json.loads(row["value"])
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _google_enabled_for_involved_user(prefs: dict[str, Any] | None) -> bool:
+    if prefs is None:
+        # Legacy users may have connected Google before Beach calendar prefs existed.
+        return True
+    my = prefs.get("my") if isinstance(prefs.get("my"), dict) else {}
+    all_scope = prefs.get("all") if isinstance(prefs.get("all"), dict) else {}
+    return bool(my.get("google") or all_scope.get("google"))
+
+
+def _google_color_for_involved_user(prefs: dict[str, Any] | None) -> str | None:
+    if prefs is None:
+        return "6"
+    color_prefs = prefs.get("googleColorId") if isinstance(prefs.get("googleColorId"), dict) else {}
+    return _normalized_google_color_id(color_prefs.get("my"))
+
+
+def _beach_tournament_payload(
+    tournament: dict[str, Any],
+    *,
+    color_id: str | None = "6",
+) -> BeachCalendarEventUpsert:
     data = tournament.get("data_json") or {}
     if isinstance(data, str):
         try:
@@ -125,7 +175,7 @@ def _beach_tournament_payload(tournament: dict[str, Any]) -> BeachCalendarEventU
                 BeachCalendarReminder(method="popup", minutes=24 * 60),
                 BeachCalendarReminder(method="popup", minutes=120),
             ],
-            colorId="6",
+            colorId=_normalized_google_color_id(color_id),
         )
     return BeachCalendarEventUpsert(
         matchId=f"beach-tournament:{tournament['id']}",
@@ -136,7 +186,7 @@ def _beach_tournament_payload(tournament: dict[str, Any]) -> BeachCalendarEventU
         end=BeachCalendarDateTime(date=_add_days(end_date, 1)),
         allDay=True,
         reminders=[BeachCalendarReminder(method="popup", minutes=24 * 60)],
-        colorId="6",
+        colorId=_normalized_google_color_id(color_id),
     )
 
 
@@ -222,6 +272,13 @@ class BeachCalendarEventUpsert(BaseModel):
     reminders: list[BeachCalendarReminder] = []
 
 
+class BeachCalendarPrefsPayload(BaseModel):
+    my: dict[str, bool] = {}
+    all: dict[str, bool] = {}
+    includePast: dict[str, Any] = {}
+    googleColorId: dict[str, str] = {}
+
+
 def _event_time_payload(value: BeachCalendarDateTime) -> dict[str, str]:
     if value.date:
         return {"date": value.date}
@@ -304,14 +361,20 @@ async def sync_beach_tournament_google_for_users(
     """Best-effort server sync for Google Calendar users involved in a Beach tournament."""
     if not user_ids:
         return
-    payload = _beach_tournament_payload(tournament)
-    body = _event_body(payload)
-    match_id = payload.matchId
-    body["extendedProperties"] = {"private": {"bazaBeachMatchId": match_id}}
     for user_id in sorted({int(uid) for uid in user_ids if uid is not None}):
         user_key = _beach_calendar_user_key(user_id)
         if not await get_calendar_tokens(user_key):
             continue
+        prefs = await _get_beach_calendar_prefs(user_id)
+        if not _google_enabled_for_involved_user(prefs):
+            continue
+        payload = _beach_tournament_payload(
+            tournament,
+            color_id=_google_color_for_involved_user(prefs),
+        )
+        body = _event_body(payload)
+        match_id = payload.matchId
+        body["extendedProperties"] = {"private": {"bazaBeachMatchId": match_id}}
         try:
             service = await _google_service(user_key, settings)
             mapping = await get_event_mapping(user_key, match_id)
@@ -427,6 +490,28 @@ async def oauth2callback(
 async def calendar_status(current_user_id: int = Depends(beach_get_current_user_id)):
     user_key = _beach_calendar_user_key(current_user_id)
     return {"connected": bool(await get_calendar_tokens(user_key))}
+
+
+@router.get("/prefs")
+async def get_calendar_prefs(current_user_id: int = Depends(beach_get_current_user_id)):
+    return await _get_beach_calendar_prefs(current_user_id) or {}
+
+
+@router.post("/prefs")
+async def save_calendar_prefs(
+    payload: BeachCalendarPrefsPayload,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    value = json.dumps(payload.model_dump(), ensure_ascii=False)
+    stmt = pg_insert(beach_app_settings).values(
+        key=_beach_calendar_prefs_key(current_user_id),
+        value=value,
+    ).on_conflict_do_update(
+        index_elements=[beach_app_settings.c.key],
+        set_={"value": value},
+    )
+    await database.execute(stmt)
+    return {"saved": True}
 
 
 @router.post("/disconnect")
