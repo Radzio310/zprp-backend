@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import os
 from typing import Any
@@ -27,6 +28,116 @@ from app.deps import beach_get_current_user_id, get_settings
 
 router = APIRouter(prefix="/beach/calendar", tags=["Beach Calendar"])
 logger = logging.getLogger(__name__)
+BEACH_CALENDAR_TIME_ZONE = "Europe/Warsaw"
+
+
+def _date_key(value: Any) -> str:
+    return str(value or "")[:10]
+
+
+def _add_days(date_value: str, days: int) -> str:
+    base = datetime.date.fromisoformat(date_value)
+    return (base + datetime.timedelta(days=days)).isoformat()
+
+
+def _parse_hhmm(value: Any) -> int | None:
+    if not isinstance(value, str) or ":" not in value:
+        return None
+    try:
+        h, m = value.strip().split(":", 1)
+        hour = int(h)
+        minute = int(m)
+    except Exception:
+        return None
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def _datetime_iso(date_value: str, minutes: int) -> str:
+    return f"{date_value}T{minutes // 60:02d}:{minutes % 60:02d}:00"
+
+
+def _schedule_window(tournament: dict[str, Any], data: dict[str, Any]) -> tuple[str, str] | None:
+    schedule = data.get("schedule")
+    if not isinstance(schedule, dict):
+        return None
+    matches = schedule.get("matches") or []
+    config = schedule.get("config") or {}
+    days = config.get("days") or []
+    slot_interval = int(config.get("slotInterval") or 40)
+    start_date = _date_key(tournament.get("event_date"))
+    slots: list[tuple[str, int, int]] = []
+    for match in matches:
+        if not isinstance(match, dict) or match.get("kind") in ("court_break", "tournament_opening"):
+            continue
+        start_min = _parse_hhmm(match.get("startTime"))
+        if start_min is None:
+            continue
+        day_index = int(match.get("dayIndex") or 0)
+        date_value = None
+        if day_index < len(days) and isinstance(days[day_index], dict):
+            date_value = days[day_index].get("date")
+        if not date_value and start_date:
+            date_value = _add_days(start_date, day_index)
+        if date_value:
+            slots.append((_date_key(date_value), start_min, start_min + slot_interval))
+    if not slots:
+        return None
+    slots.sort(key=lambda item: (item[0], item[1]))
+    first = slots[0]
+    last = max(slots, key=lambda item: (item[0], item[2]))
+    return _datetime_iso(first[0], first[1]), _datetime_iso(last[0], last[2])
+
+
+def _beach_tournament_payload(tournament: dict[str, Any]) -> BeachCalendarEventUpsert:
+    data = tournament.get("data_json") or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    start_date = _date_key(tournament.get("event_date"))
+    end_date = _date_key(tournament.get("end_date") or tournament.get("event_date"))
+    location = str(tournament.get("location") or "").split("|", 1)[0].strip()
+    description = "\n".join(
+        line
+        for line in [
+            f"Kategoria: {tournament.get('category')}" if tournament.get("category") else "",
+            f"Typ rozgrywek: {tournament.get('competition_type')}" if tournament.get("competition_type") else "",
+            f"Termin: {start_date}" + (f" - {end_date}" if end_date and end_date != start_date else ""),
+            "",
+            "Utworzone przez BAZA Beach",
+        ]
+        if line is not None
+    )
+    window = _schedule_window(tournament, data if isinstance(data, dict) else {})
+    if window:
+        return BeachCalendarEventUpsert(
+            matchId=f"beach-tournament:{tournament['id']}",
+            summary=f"BAZA Beach: {tournament.get('name') or 'Turniej'}",
+            location=location,
+            description=description,
+            start=BeachCalendarDateTime(dateTime=window[0], timeZone=BEACH_CALENDAR_TIME_ZONE),
+            end=BeachCalendarDateTime(dateTime=window[1], timeZone=BEACH_CALENDAR_TIME_ZONE),
+            allDay=False,
+            reminders=[
+                BeachCalendarReminder(method="popup", minutes=24 * 60),
+                BeachCalendarReminder(method="popup", minutes=120),
+            ],
+            colorId="6",
+        )
+    return BeachCalendarEventUpsert(
+        matchId=f"beach-tournament:{tournament['id']}",
+        summary=f"BAZA Beach: {tournament.get('name') or 'Turniej'}",
+        location=location,
+        description=description,
+        start=BeachCalendarDateTime(date=start_date),
+        end=BeachCalendarDateTime(date=_add_days(end_date, 1)),
+        allDay=True,
+        reminders=[BeachCalendarReminder(method="popup", minutes=24 * 60)],
+        colorId="6",
+    )
 
 
 def _beach_calendar_user_key(user_id: int) -> str:
@@ -116,8 +227,7 @@ def _event_time_payload(value: BeachCalendarDateTime) -> dict[str, str]:
         return {"date": value.date}
     if value.dateTime:
         payload = {"dateTime": value.dateTime.isoformat()}
-        if value.timeZone:
-            payload["timeZone"] = value.timeZone
+        payload["timeZone"] = value.timeZone or BEACH_CALENDAR_TIME_ZONE
         return payload
     raise HTTPException(status_code=400, detail="Brak daty wydarzenia")
 
@@ -139,6 +249,82 @@ def _event_body(payload: BeachCalendarEventUpsert) -> dict[str, Any]:
     if payload.colorId:
         body["colorId"] = payload.colorId
     return body
+
+
+async def sync_beach_tournament_google_for_users(
+    tournament: dict[str, Any],
+    user_ids: list[int],
+    settings: Any,
+) -> None:
+    """Best-effort server sync for Google Calendar users involved in a Beach tournament."""
+    if not user_ids:
+        return
+    payload = _beach_tournament_payload(tournament)
+    body = _event_body(payload)
+    match_id = payload.matchId
+    for user_id in sorted({int(uid) for uid in user_ids if uid is not None}):
+        user_key = _beach_calendar_user_key(user_id)
+        if not await get_calendar_tokens(user_key):
+            continue
+        try:
+            service = await _google_service(user_key, settings)
+            mapping = await get_event_mapping(user_key, match_id)
+            event_id = mapping["event_id"] if mapping else None
+            if event_id:
+                try:
+                    event = (
+                        service.events()
+                        .update(calendarId="primary", eventId=event_id, body=body)
+                        .execute()
+                    )
+                except Exception:
+                    await delete_event_mapping(user_key, match_id)
+                    event = (
+                        service.events()
+                        .insert(calendarId="primary", body=body)
+                        .execute()
+                    )
+            else:
+                event = service.events().insert(calendarId="primary", body=body).execute()
+            await save_event_mapping(user_key, match_id, event["id"])
+        except Exception:
+            logger.exception(
+                "Failed to sync Beach tournament %s to Google Calendar for user %s",
+                tournament.get("id"),
+                user_id,
+            )
+
+
+async def delete_beach_tournament_google_for_users(
+    tournament_id: int,
+    user_ids: list[int],
+    settings: Any,
+) -> None:
+    if not user_ids:
+        return
+    match_id = f"beach-tournament:{int(tournament_id)}"
+    for user_id in sorted({int(uid) for uid in user_ids if uid is not None}):
+        user_key = _beach_calendar_user_key(user_id)
+        if not await get_calendar_tokens(user_key):
+            continue
+        try:
+            mapping = await get_event_mapping(user_key, match_id)
+            if not mapping:
+                continue
+            service = await _google_service(user_key, settings)
+            try:
+                service.events().delete(
+                    calendarId="primary",
+                    eventId=mapping["event_id"],
+                ).execute()
+            finally:
+                await delete_event_mapping(user_key, match_id)
+        except Exception:
+            logger.exception(
+                "Failed to delete Beach tournament %s from Google Calendar for user %s",
+                tournament_id,
+                user_id,
+            )
 
 
 @router.get("/auth-url")

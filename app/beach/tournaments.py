@@ -27,7 +27,11 @@ from app.schemas import (
     BeachTournamentItem,
     BeachTournamentsListResponse,
 )
-from app.deps import beach_get_current_user_id
+from app.deps import beach_get_current_user_id, get_settings
+from app.beach.calendar import (
+    delete_beach_tournament_google_for_users,
+    sync_beach_tournament_google_for_users,
+)
 from app.beach.notifications import create_notification
 from app.beach.schedule_notifications import notify_schedule_updated
 from app.beach.activity_log import log_activity, get_actor_name, compute_diff, compute_list_diff
@@ -424,6 +428,64 @@ def _attach_computed_fields(
     )
 
 
+def _calendar_involved_user_ids(data: Dict[str, Any]) -> List[int]:
+    ids: set[int] = set()
+    for value in data.get("invited_ids") or []:
+        try:
+            ids.add(int(value))
+        except Exception:
+            pass
+    for host in data.get("hosts") or []:
+        if isinstance(host, dict):
+            value = host.get("id") or host.get("user_id")
+            try:
+                ids.add(int(value))
+            except Exception:
+                pass
+    for judge in data.get("judges") or []:
+        if isinstance(judge, dict):
+            value = judge.get("user_id") or judge.get("id")
+            try:
+                ids.add(int(value))
+            except Exception:
+                pass
+    try:
+        if data.get("head_judge_id") is not None:
+            ids.add(int(data.get("head_judge_id")))
+    except Exception:
+        pass
+    return sorted(ids)
+
+
+async def _sync_tournament_calendar_background(row_d: Dict[str, Any], data: Dict[str, Any]) -> None:
+    tournament = {**row_d, "data_json": data}
+    user_ids = _calendar_involved_user_ids(data)
+    if not user_ids:
+        return
+    try:
+        await sync_beach_tournament_google_for_users(
+            tournament=tournament,
+            user_ids=user_ids,
+            settings=get_settings(),
+        )
+    except Exception:
+        logger.exception("Failed scheduling calendar sync for tournament %s", row_d.get("id"))
+
+
+async def _delete_tournament_calendar_background(tournament_id: int, data: Dict[str, Any]) -> None:
+    user_ids = _calendar_involved_user_ids(data)
+    if not user_ids:
+        return
+    try:
+        await delete_beach_tournament_google_for_users(
+            tournament_id=tournament_id,
+            user_ids=user_ids,
+            settings=get_settings(),
+        )
+    except Exception:
+        logger.exception("Failed scheduling calendar delete for tournament %s", tournament_id)
+
+
 async def _can_manage_tournament_schedule(
     data: Dict[str, Any],
     current_user_id: int,
@@ -548,6 +610,14 @@ async def create_tournament(
                 "badge": (req.badge.strip() if req.badge else None),
             },
         )
+
+        created_row = await database.fetch_one(
+            select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+        )
+        if created_row:
+            created_d = dict(created_row)
+            created_data = _normalize_event_data(created_d["data_json"])
+            asyncio.ensure_future(_sync_tournament_calendar_background(created_d, created_data))
 
         return {"success": True, "id": tournament_id}
     except Exception as e:
@@ -906,6 +976,7 @@ async def patch_tournament(
         details={"changed_fields": diff_fields} if diff_fields else None,
     )
 
+    asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
     return _attach_computed_fields(row_d, data2, None)
 
 
@@ -1022,6 +1093,7 @@ async def host_update_tournament(
         details=details or None,
     )
 
+    asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
@@ -1099,6 +1171,7 @@ async def coach_custom_team_update(
         details={"custom_team_id": body.custom_team_id, "team_name": updated_ct.get("name")},
     )
 
+    asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
@@ -1217,6 +1290,7 @@ async def judge_update_tournament(
         },
     )
 
+    asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
@@ -1402,6 +1476,7 @@ async def schedule_update_tournament(
             details={"matches_before": old_match_count, "matches_after": new_match_count, "schedule_cleared": body.schedule is None},
         )
 
+    asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
@@ -1828,12 +1903,14 @@ async def delete_tournament(
         raise HTTPException(403, "Brak uprawnień")
 
     row = await database.fetch_one(
-        select(beach_tournaments.c.id, beach_tournaments.c.name).where(beach_tournaments.c.id == tournament_id)
+        select(beach_tournaments.c.id, beach_tournaments.c.name, beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
     )
     if not row:
         raise HTTPException(404, "Nie znaleziono turnieju")
 
     deleted_name = row["name"] or ""
+    deleted_data = _normalize_event_data(row["data_json"])
+    asyncio.ensure_future(_delete_tournament_calendar_background(tournament_id, deleted_data))
 
     # Cofnij punkty ze standings za ten turniej przed usunięciem
     import json as _json
@@ -1943,6 +2020,7 @@ async def update_tournament_attendance(
         details={"count_before": len(old_present), "count_after": len(new_present)},
     )
 
+    asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
     return _attach_computed_fields(row_d, data2, None)
 
 
