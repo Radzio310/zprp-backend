@@ -758,6 +758,31 @@ async def startup():
             pass
 
     global _cleanup_task, _push_task, _notif_generator_task
+
+    # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
+    try:
+        await database.execute("""
+            CREATE TABLE IF NOT EXISTS beach_migrations (
+                name VARCHAR PRIMARY KEY,
+                ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        migration_done = await database.fetch_one(
+            "SELECT name FROM beach_migrations WHERE name = 'roles_multiTeam_v1'"
+        )
+        if not migration_done:
+            from app.beach.verification import run_roles_multiTeam_migration
+            count = await run_roles_multiTeam_migration()
+            await database.execute(
+                "INSERT INTO beach_migrations (name) VALUES ('roles_multiTeam_v1')"
+            )
+            logger.info("✅ Migration roles_multiTeam_v1 done — zaktualizowano %d użytkowników", count)
+        else:
+            logger.info("ℹ️ Migration roles_multiTeam_v1 already ran, skipping")
+    except Exception:
+        logger.exception("❌ Migration roles_multiTeam_v1 failed — kontynuuję bez niej")
+    # ──────────────────────────────────────────────────────────────────────
+
     _cleanup_task = asyncio.create_task(_cleanup_loop())
 
     # NEW: background scheduler for push queue

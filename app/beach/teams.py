@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import beach_teams, database
 from app.deps import Settings, get_settings
+from app.beach.verification import expand_roles_for_squad_sync
 from app.schemas import (
     BeachTeamContact,
     BeachTeamCreateRequest,
@@ -1966,6 +1967,22 @@ async def sync_beach_teams_to_local(
         await database.execute(stmt)
         upserted += 1
 
+        # Po zapisaniu składu — zaktualizuj role zarejestrowanych użytkowników
+        if include_squads and squad:
+            roster = squad.get("players") or []
+            companions = squad.get("companions") or []
+            if roster or companions:
+                roles_updated = await expand_roles_for_squad_sync(
+                    team_id=item["id"],
+                    roster=roster,
+                    companions=companions,
+                )
+                if roles_updated:
+                    logger.info(
+                        "sync /local/sync: zaktualizowano role dla %d użytkowników (team_id=%s)",
+                        roles_updated, item["id"],
+                    )
+
     return BeachTeamsSyncResponse(
         success=True,
         fetched=len(fetched),
@@ -2022,6 +2039,21 @@ async def sync_single_beach_team_squad_to_local(
         await database.execute(pg_insert(beach_teams).values(**base_values).on_conflict_do_nothing())
 
     saved = await _maybe_save_team_squad_to_db(team_id, squad)
+
+    # Po zapisaniu składu — zaktualizuj role zarejestrowanych użytkowników
+    roster = squad.get("players") or []
+    companions = squad.get("companions") or []
+    if roster or companions:
+        roles_updated = await expand_roles_for_squad_sync(
+            team_id=team_id,
+            roster=roster,
+            companions=companions,
+        )
+        if roles_updated:
+            logger.info(
+                "sync /local/sync/squad: zaktualizowano role dla %d użytkowników (team_id=%s)",
+                roles_updated, team_id,
+            )
 
     return {
         "success": True,
