@@ -1524,7 +1524,7 @@ def _tokens_match(tokens: List[str], text: str) -> bool:
 async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
     """Return teams whose roster or companions contain a person matching *q*.
 
-    Matching is token-based and order-independent, so 'Damian Wieczorek'
+    Matching is token-based and order-independent: 'Damian Wieczorek'
     matches 'WIECZOREK DAMIAN' and vice versa.
     """
     import json as _json
@@ -1534,17 +1534,12 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
         return {"results": []}
 
     rows = await database.fetch_all(select(beach_teams))
-
     results = []
-    _diag_sample = None  # first team with any squad data
-    _teams_with_companions = 0
-    _teams_with_players = 0
 
     for row in rows:
         data = dict(row)
         matches = []
 
-        # companions_json may come back as a str (sqlite/old driver) — parse defensively
         raw_companions = data.get("companions_json")
         if isinstance(raw_companions, str):
             try:
@@ -1561,23 +1556,6 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
                 raw_players = []
         players = raw_players or []
 
-        if companions:
-            _teams_with_companions += 1
-        if players:
-            _teams_with_players += 1
-
-        if _diag_sample is None and (companions or players):
-            _diag_sample = {
-                "team_id": data.get("id"),
-                "team_name": data.get("team_name"),
-                "companions_count": len(companions),
-                "players_count": len(players),
-                "sample_companion": companions[0] if companions else None,
-                "sample_player": ({"last_name": players[0].get("last_name"), "first_name": players[0].get("first_name")} if players else None),
-                "companions_json_type": type(raw_companions).__name__,
-                "roster_json_type": type(raw_players).__name__,
-            }
-
         for p in players:
             if not isinstance(p, dict):
                 continue
@@ -1585,8 +1563,7 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
             first = p.get("first_name", "") or ""
             combined = f"{last} {first} {first} {last}".strip()
             if _tokens_match(tokens, combined):
-                display = f"{last} {first}".strip()
-                matches.append({"name": display, "role": "player"})
+                matches.append({"name": f"{last} {first}".strip(), "role": "player"})
 
         for c in companions:
             if not isinstance(c, dict):
@@ -1601,16 +1578,7 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
                 "matches": matches,
             })
 
-    return {
-        "results": results,
-        "_debug": {
-            "tokens": tokens,
-            "total_teams": len(rows),
-            "teams_with_companions": _teams_with_companions,
-            "teams_with_players": _teams_with_players,
-            "sample": _diag_sample,
-        },
-    }
+    return {"results": results}
 
 
 @router.get("/local/{team_id}", response_model=BeachTeamItem)
