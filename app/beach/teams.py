@@ -1508,6 +1508,45 @@ async def list_local_beach_teams(
     return BeachTeamsListResponse(teams=[_row_to_item(r) for r in rows])
 
 
+def _normalize_for_search(s: str) -> str:
+    """Lowercase + remove Polish diacritics for fuzzy matching."""
+    import unicodedata
+    return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode("ascii").strip()
+
+
+@router.get("/local/squad-search")
+async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
+    """Return teams whose roster or companions contain a person matching *q*."""
+    needle = _normalize_for_search(q)
+
+    rows = await database.fetch_all(select(beach_teams))
+
+    results = []
+    for row in rows:
+        data = dict(row)
+        matches = []
+
+        players = data.get("roster_json") or []
+        for p in players:
+            full = f"{p.get('last_name', '')} {p.get('first_name', '')}".strip()
+            if needle in _normalize_for_search(full):
+                matches.append({"name": full, "role": "player"})
+
+        companions = data.get("companions_json") or []
+        for c in companions:
+            full = c.get("full_name", "").strip()
+            if needle in _normalize_for_search(full):
+                matches.append({"name": full, "role": "coach"})
+
+        if matches:
+            results.append({
+                "team": _row_to_item(row).model_dump(),
+                "matches": matches,
+            })
+
+    return {"results": results}
+
+
 @router.get("/local/{team_id}", response_model=BeachTeamItem)
 async def get_local_beach_team(team_id: int):
     row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
