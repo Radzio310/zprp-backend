@@ -1527,20 +1527,51 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
     Matching is token-based and order-independent, so 'Damian Wieczorek'
     matches 'WIECZOREK DAMIAN' and vice versa.
     """
+    import json as _json
+
     tokens = [t for t in _normalize_for_search(q).split() if t]
     if not tokens:
         return {"results": []}
 
     rows = await database.fetch_all(select(beach_teams))
 
+    # Diagnostic: log first team that has non-empty companions or roster
+    _diag_logged = False
+
     results = []
     for row in rows:
         data = dict(row)
         matches = []
 
-        players = data.get("roster_json") or []
+        # companions_json may come back as a str (sqlite/old driver) — parse defensively
+        raw_companions = data.get("companions_json")
+        if isinstance(raw_companions, str):
+            try:
+                raw_companions = _json.loads(raw_companions)
+            except Exception:
+                raw_companions = []
+        companions = raw_companions or []
+
+        raw_players = data.get("roster_json")
+        if isinstance(raw_players, str):
+            try:
+                raw_players = _json.loads(raw_players)
+            except Exception:
+                raw_players = []
+        players = raw_players or []
+
+        if not _diag_logged and (companions or players):
+            _diag_logged = True
+            sample_comp = companions[0] if companions else None
+            sample_player = players[0] if players else None
+            logger.info(
+                "squad-search diag | team_id=%r | tokens=%r | companions_count=%d | players_count=%d | sample_comp=%r | sample_player=%r",
+                data.get("id"), tokens, len(companions), len(players), sample_comp, sample_player,
+            )
+
         for p in players:
-            # Combine both orderings so partial first-name and last-name tokens hit too
+            if not isinstance(p, dict):
+                continue
             last = p.get("last_name", "") or ""
             first = p.get("first_name", "") or ""
             combined = f"{last} {first} {first} {last}".strip()
@@ -1548,8 +1579,9 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
                 display = f"{last} {first}".strip()
                 matches.append({"name": display, "role": "player"})
 
-        companions = data.get("companions_json") or []
         for c in companions:
+            if not isinstance(c, dict):
+                continue
             full = c.get("full_name", "") or ""
             if _tokens_match(tokens, full):
                 matches.append({"name": full.strip(), "role": "coach"})
@@ -1560,6 +1592,7 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
                 "matches": matches,
             })
 
+    logger.info("squad-search | q=%r | tokens=%r | total_teams=%d | results=%d", q, tokens, len(rows), len(results))
     return {"results": results}
 
 
