@@ -107,7 +107,7 @@ def _extract_year_highlight_validity(td, season_end_year: Optional[int]) -> Tupl
 
     target_year = str(season_end_year)
 
-    # szukamy zielonego highlightu z rokiem końca sezonu
+    # szukamy zielonego highlightu z datą końca sezonu
     for font in td.find_all("font"):
         year_txt = _norm_space(font.get_text(" ", strip=True))
         style = (font.get("style") or "").lower()
