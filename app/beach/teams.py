@@ -1535,10 +1535,11 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
 
     rows = await database.fetch_all(select(beach_teams))
 
-    # Diagnostic: log first team that has non-empty companions or roster
-    _diag_logged = False
-
     results = []
+    _diag_sample = None  # first team with any squad data
+    _teams_with_companions = 0
+    _teams_with_players = 0
+
     for row in rows:
         data = dict(row)
         matches = []
@@ -1560,14 +1561,22 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
                 raw_players = []
         players = raw_players or []
 
-        if not _diag_logged and (companions or players):
-            _diag_logged = True
-            sample_comp = companions[0] if companions else None
-            sample_player = players[0] if players else None
-            logger.info(
-                "squad-search diag | team_id=%r | tokens=%r | companions_count=%d | players_count=%d | sample_comp=%r | sample_player=%r",
-                data.get("id"), tokens, len(companions), len(players), sample_comp, sample_player,
-            )
+        if companions:
+            _teams_with_companions += 1
+        if players:
+            _teams_with_players += 1
+
+        if _diag_sample is None and (companions or players):
+            _diag_sample = {
+                "team_id": data.get("id"),
+                "team_name": data.get("team_name"),
+                "companions_count": len(companions),
+                "players_count": len(players),
+                "sample_companion": companions[0] if companions else None,
+                "sample_player": ({"last_name": players[0].get("last_name"), "first_name": players[0].get("first_name")} if players else None),
+                "companions_json_type": type(raw_companions).__name__,
+                "roster_json_type": type(raw_players).__name__,
+            }
 
         for p in players:
             if not isinstance(p, dict):
@@ -1592,8 +1601,16 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
                 "matches": matches,
             })
 
-    logger.info("squad-search | q=%r | tokens=%r | total_teams=%d | results=%d", q, tokens, len(rows), len(results))
-    return {"results": results}
+    return {
+        "results": results,
+        "_debug": {
+            "tokens": tokens,
+            "total_teams": len(rows),
+            "teams_with_companions": _teams_with_companions,
+            "teams_with_players": _teams_with_players,
+            "sample": _diag_sample,
+        },
+    }
 
 
 @router.get("/local/{team_id}", response_model=BeachTeamItem)
