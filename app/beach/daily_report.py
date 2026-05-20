@@ -288,6 +288,12 @@ def _build_context(req: DailyReportRequest) -> Dict[str, Any]:
 
     genders_present = set(m.get("gender", "M") for m in played_matches)
     multi_gender = len(genders_present) > 1
+
+    # Gdy jeden rodzaj płci — kolor akcentu odpowiada tej płci
+    if not multi_gender:
+        only_gender = next(iter(genders_present), "M")
+        accent = "#2BA8A0" if only_gender == "M" else "#E85A78"
+
     system_name = "każdy z każdym" if mode == "roundRobin" else "grupowym z fazą pucharową"
 
     day_date = ""
