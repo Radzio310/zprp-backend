@@ -1514,10 +1514,22 @@ def _normalize_for_search(s: str) -> str:
     return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode("ascii").strip()
 
 
+def _tokens_match(tokens: List[str], text: str) -> bool:
+    """All query tokens must appear somewhere in the normalized text (order-independent)."""
+    normalized = _normalize_for_search(text)
+    return all(t in normalized for t in tokens)
+
+
 @router.get("/local/squad-search")
 async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
-    """Return teams whose roster or companions contain a person matching *q*."""
-    needle = _normalize_for_search(q)
+    """Return teams whose roster or companions contain a person matching *q*.
+
+    Matching is token-based and order-independent, so 'Damian Wieczorek'
+    matches 'WIECZOREK DAMIAN' and vice versa.
+    """
+    tokens = [t for t in _normalize_for_search(q).split() if t]
+    if not tokens:
+        return {"results": []}
 
     rows = await database.fetch_all(select(beach_teams))
 
@@ -1528,15 +1540,19 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
 
         players = data.get("roster_json") or []
         for p in players:
-            full = f"{p.get('last_name', '')} {p.get('first_name', '')}".strip()
-            if needle in _normalize_for_search(full):
-                matches.append({"name": full, "role": "player"})
+            # Combine both orderings so partial first-name and last-name tokens hit too
+            last = p.get("last_name", "") or ""
+            first = p.get("first_name", "") or ""
+            combined = f"{last} {first} {first} {last}".strip()
+            if _tokens_match(tokens, combined):
+                display = f"{last} {first}".strip()
+                matches.append({"name": display, "role": "player"})
 
         companions = data.get("companions_json") or []
         for c in companions:
-            full = c.get("full_name", "").strip()
-            if needle in _normalize_for_search(full):
-                matches.append({"name": full, "role": "coach"})
+            full = c.get("full_name", "") or ""
+            if _tokens_match(tokens, full):
+                matches.append({"name": full.strip(), "role": "coach"})
 
         if matches:
             results.append({

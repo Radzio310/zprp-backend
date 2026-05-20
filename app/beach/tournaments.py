@@ -72,9 +72,11 @@ class SquadUpdateRequest(BaseModel):
     custom_team_id: Optional[str] = None             # custom team id (e.g. "ct_xxx")
     default_players: Optional[List] = None           # player_ids, max 10
     default_companions: Optional[List] = None        # person_ids, max 4
+    default_companion_roles: Optional[Dict[str, str]] = None  # personId(str) → "A"|"B"|"C"|"D"
     match_id: Optional[str] = None                   # jeśli override dla konkretnego meczu
     match_players: Optional[List] = None
     match_companions: Optional[List] = None
+    match_companion_roles: Optional[Dict[str, str]] = None  # personId(str) → "A"|"B"|"C"|"D"
     signature_url: Optional[str] = None              # per-match coach signature URL
 
 
@@ -2264,6 +2266,8 @@ async def squad_update_tournament(
             override["players"] = body.match_players
         if body.match_companions is not None:
             override["companions"] = body.match_companions
+        if body.match_companion_roles is not None:
+            override["companion_roles"] = body.match_companion_roles
         if body.signature_url is not None:
             override["signature_url"] = body.signature_url
         match_overrides[body.match_id] = override
@@ -2273,6 +2277,8 @@ async def squad_update_tournament(
             squad_entry["default_players"] = body.default_players
         if body.default_companions is not None:
             squad_entry["default_companions"] = body.default_companions
+        if body.default_companion_roles is not None:
+            squad_entry["default_companion_roles"] = body.default_companion_roles
 
     team_squads[team_key] = squad_entry
     data["team_squads"] = team_squads
