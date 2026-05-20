@@ -148,6 +148,28 @@ def _compute_positions_from_schedule(
     return _positions_from_round_robin(gender_matches, teams, teams_count)
 
 
+def _apply_points_exclusions(
+    positions: List[Dict[str, Any]],
+    excluded_team_ids: set[int],
+) -> List[Dict[str, Any]]:
+    """Remove teams from points calculation and compact places/teams_count."""
+    if not excluded_team_ids:
+        return positions
+    kept = [
+        p for p in positions
+        if int(p.get("team_id", 0)) not in excluded_team_ids
+    ]
+    teams_count = len(kept)
+    return [
+        {
+            **p,
+            "position": idx,
+            "teams_count": teams_count,
+        }
+        for idx, p in enumerate(kept, start=1)
+    ]
+
+
 def _positions_from_knockout(
     matches: List[Dict],
     teams: Dict[int, str],
@@ -543,9 +565,13 @@ async def preview_tournament(
     schedule = data_json.get("schedule") or {}
 
     all_done = _all_finished(schedule)
+    excluded_team_ids = {int(x) for x in (body.excluded_team_ids or [])}
 
     def _build_preview(gender: str) -> List[BeachStandingPreviewEntry]:
-        positions = _compute_positions_from_schedule(schedule, gender)
+        positions = _apply_points_exclusions(
+            _compute_positions_from_schedule(schedule, gender),
+            excluded_team_ids,
+        )
         result = []
         for p in positions:
             pts = (p["teams_count"] - p["position"] + 1) * 10
@@ -655,9 +681,13 @@ async def grant_tournament(
     tour_name = tour_d.get("name", "")
     now = datetime.now(timezone.utc)
     granted_count = 0
+    excluded_team_ids = {int(x) for x in (body.excluded_team_ids or [])}
 
     for gender in ("M", "K"):
-        positions = _compute_positions_from_schedule(schedule, gender)
+        positions = _apply_points_exclusions(
+            _compute_positions_from_schedule(schedule, gender),
+            excluded_team_ids,
+        )
         if not positions:
             continue
 

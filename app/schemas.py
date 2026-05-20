@@ -1626,6 +1626,7 @@ class GrantTournamentRequest(BaseModel):
     competition_type: str
     category: str
     season_id: str
+    excluded_team_ids: List[int] = Field(default_factory=list)
 
 
 class RevokeTournamentRequest(BaseModel):
