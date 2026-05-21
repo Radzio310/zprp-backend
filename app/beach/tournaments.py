@@ -164,6 +164,34 @@ _TITLE_IMAGE_VARIANTS = [
 ]
 
 
+async def _check_name_unique(name: str, year: int, exclude_id: Optional[int] = None) -> None:
+    """
+    Raises HTTPException(409) if a tournament with the same name (case-insensitive, stripped)
+    already exists in the same calendar year.
+    """
+    name_norm = name.strip().lower()
+    all_rows = await database.fetch_all(
+        select(beach_tournaments.c.id, beach_tournaments.c.name, beach_tournaments.c.event_date)
+    )
+    for row in all_rows:
+        if exclude_id is not None and row["id"] == exclude_id:
+            continue
+        row_year = None
+        if row["event_date"]:
+            try:
+                row_year = int(str(row["event_date"])[:4])
+            except (ValueError, TypeError):
+                pass
+        if row_year == year and (row["name"] or "").strip().lower() == name_norm:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "DUPLICATE_TOURNAMENT_NAME",
+                    "message": f"Turniej o nazwie \"{name.strip()}\" już istnieje w sezonie {year}.",
+                },
+            )
+
+
 def _infer_gender_hint(name: str) -> str:
     """
     Infer athlete gender from Polish tournament name keywords.
@@ -537,6 +565,16 @@ async def create_tournament(
     if not req.name or not req.name.strip():
         raise HTTPException(400, "Brak nazwy")
 
+    # Unique name per calendar year
+    _event_year: Optional[int] = None
+    if req.event_date:
+        try:
+            _event_year = int(str(req.event_date)[:4])
+        except (ValueError, TypeError):
+            pass
+    if _event_year:
+        await _check_name_unique(req.name.strip(), _event_year)
+
     now = datetime.now(timezone.utc)
     data = _normalize_event_data(req.data_json)
 
@@ -885,10 +923,20 @@ async def patch_tournament(
     if "end_date" in fields:
         update_data["end_date"] = body.end_date
     if body.name is not None:
-        update_data["name"] = body.name.strip()
+        new_name = body.name.strip()
+        # Unique name per calendar year — use the event_date being set or the existing one
+        _eff_date = body.event_date if body.event_date is not None else existing_d.get("event_date")
+        _year: Optional[int] = None
+        if _eff_date:
+            try:
+                _year = int(str(_eff_date)[:4])
+            except (ValueError, TypeError):
+                pass
+        if _year and new_name.lower() != (existing_d.get("name") or "").strip().lower():
+            await _check_name_unique(new_name, _year, exclude_id=tournament_id)
+        update_data["name"] = new_name
     if "description" in fields:
         update_data["description"] = (body.description or "").strip() or None
-    if "location" in fields:
         update_data["location"] = (body.location or "").strip() or None
     if "category" in fields:
         update_data["category"] = body.category

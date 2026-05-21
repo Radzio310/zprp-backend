@@ -1,3 +1,5 @@
+import asyncio
+import os
 import re
 import logging
 from datetime import datetime, timezone
@@ -1950,21 +1952,28 @@ async def get_beach_team_squad_from_zprp(
 # Sync ZPRP -> local DB
 # =========================================================
 
-@router.post("/local/sync", response_model=BeachTeamsSyncResponse)
-async def sync_beach_teams_to_local(
-    req: BeachTeamsSyncRequest,
-    include_squads: bool = Query(False, description="Czy podczas sync pobierać też składy"),
-    settings: Settings = Depends(get_settings),
-):
+async def _do_sync_teams(
+    settings: Settings,
+    *,
+    season_id: Optional[str] = None,
+    province_id: Optional[str] = None,
+    gender: Optional[str] = None,
+    category_id: Optional[str] = None,
+    club_id: Optional[str] = None,
+    name: Optional[str] = None,
+    sort: Optional[str] = None,
+    include_squads: bool = False,
+) -> Tuple[int, int]:
+    """Pobiera drużyny z ZPRP i zapisuje je lokalnie. Zwraca (fetched, upserted)."""
     fetched = await _fetch_teams_from_zprp(
         settings,
-        season_id=req.season_id,
-        province_id=req.province_id,
-        gender=req.gender,
-        category_id=req.category_id,
-        club_id=req.club_id,
-        name=req.name,
-        sort=req.sort,
+        season_id=season_id,
+        province_id=province_id,
+        gender=gender,
+        category_id=category_id,
+        club_id=club_id,
+        name=name,
+        sort=sort,
         include_squads=include_squads,
     )
 
@@ -2040,7 +2049,6 @@ async def sync_beach_teams_to_local(
         await database.execute(stmt)
         upserted += 1
 
-        # Po zapisaniu składu — zaktualizuj role zarejestrowanych użytkowników
         if include_squads and squad:
             roster = squad.get("players") or []
             companions = squad.get("companions") or []
@@ -2052,13 +2060,39 @@ async def sync_beach_teams_to_local(
                 )
                 if roles_updated:
                     logger.info(
-                        "sync /local/sync: zaktualizowano role dla %d użytkowników (team_id=%s)",
+                        "sync: zaktualizowano role dla %d użytkowników (team_id=%s)",
                         roles_updated, item["id"],
                     )
 
+    return len(fetched), upserted
+
+
+@router.post("/local/sync", response_model=BeachTeamsSyncResponse)
+async def sync_beach_teams_to_local(
+    req: BeachTeamsSyncRequest,
+    include_squads: bool = Query(False, description="Czy podczas sync pobierać też składy"),
+    settings: Settings = Depends(get_settings),
+):
+    save_squad_columns = {
+        "roster_json": _table_has_column("roster_json"),
+        "companions_json": _table_has_column("companions_json"),
+        "historical_players_json": _table_has_column("historical_players_json"),
+        "squad_last_synced_at": _table_has_column("squad_last_synced_at"),
+    }
+    fetched_count, upserted = await _do_sync_teams(
+        settings,
+        season_id=req.season_id,
+        province_id=req.province_id,
+        gender=req.gender,
+        category_id=req.category_id,
+        club_id=req.club_id,
+        name=req.name,
+        sort=req.sort,
+        include_squads=include_squads,
+    )
     return BeachTeamsSyncResponse(
         success=True,
-        fetched=len(fetched),
+        fetched=fetched_count,
         upserted=upserted,
         filters={
             "season_id": req.season_id,
@@ -2713,3 +2747,50 @@ async def _check_medical_exams_for_team(
         "valid_exams": valid_count,
         "exams": medical_exams,
     }
+
+# =========================================================
+# Auto-sync scheduler (uruchamiany jako asyncio.Task)
+# =========================================================
+
+BEACH_SYNC_INTERVAL = int(os.getenv("BEACH_TEAMS_SYNC_INTERVAL_SECONDS", str(60 * 60)))
+
+
+def _current_beach_season_id() -> str:
+    """Zwraca aktualne season_id na podstawie daty.
+
+    Sezon plażowy startuje w sierpniu — przed sierpniem wciąż trwa sezon
+    z poprzedniego roku (np. maj 2026 → sezon 2025/2026 → id=8).
+    Można nadpisać zmienną BEACH_TEAMS_SYNC_SEASON_ID w środowisku.
+    """
+    override = os.getenv("BEACH_TEAMS_SYNC_SEASON_ID", "").strip()
+    if override:
+        return override
+    now = datetime.now(timezone.utc)
+    start_year = now.year if now.month >= 8 else now.year - 1
+    return str(start_year - 2017)
+
+
+async def run_beach_teams_sync_scheduler() -> None:
+    """Synchronizuje wszystkie drużyny + składy z bieżącego sezonu co godzinę."""
+    settings = get_settings()
+    logger.info("🔄 BeachTeams auto-sync started (interval=%ds)", BEACH_SYNC_INTERVAL)
+    while True:
+        season_id = _current_beach_season_id()
+        try:
+            fetched, upserted = await _do_sync_teams(
+                settings,
+                season_id=season_id,
+                include_squads=True,
+            )
+            logger.info(
+                "🔄 BeachTeams auto-sync OK: season_id=%s fetched=%d upserted=%d",
+                season_id, fetched, upserted,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "❌ BeachTeams auto-sync failed (season_id=%s) — retrying in %ds",
+                season_id, BEACH_SYNC_INTERVAL,
+            )
+        await asyncio.sleep(BEACH_SYNC_INTERVAL)

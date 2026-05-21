@@ -403,14 +403,22 @@ def _score_parts(m: Dict[str, Any]) -> tuple:
     score_main = f"{a}:{b}"
     sets = m.get("sets") or []
     score_sets = ""
-    if sets:
-        parts = [
-            f"{s.get('ptA', '')}:{s.get('ptB', '')}"
-            for s in sets
-            if isinstance(s, dict)
-        ]
-        if parts:
-            score_sets = ", ".join(parts)
+    parts = [
+        f"{s.get('ptA', '')}:{s.get('ptB', '')}"
+        for s in sets
+        if isinstance(s, dict)
+    ]
+    shootout = m.get("shootout")
+    if (
+        len(parts) < 3
+        and isinstance(shootout, dict)
+        and shootout.get("a") is not None
+        and shootout.get("b") is not None
+    ):
+        shootout_score = f"{shootout.get('a', '')}:{shootout.get('b', '')}"
+        parts.append(shootout_score)
+    if parts:
+        score_sets = ", ".join(parts)
     return score_main, score_sets
 
 
