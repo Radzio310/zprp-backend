@@ -2766,7 +2766,7 @@ def _current_beach_season_id() -> str:
     if override:
         return override
     now = datetime.now(timezone.utc)
-    start_year = now.year if now.month >= 8 else now.year - 1
+    start_year = now.year if now.month >= 9 else now.year - 1
     return str(start_year - 2017)
 
 
