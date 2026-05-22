@@ -2208,9 +2208,37 @@ async def generate_match_number(
     cat_code = _CATEGORY_CODES.get(effective_category, "")
     cat_gender = f"{cat_code}{gender}" if cat_code else gender
 
-    pattern = f"{prefix}/{cat_gender}/%"
+    sibling_rows = await database.fetch_all(
+        select(
+            beach_tournaments.c.id,
+            beach_tournaments.c.event_date,
+            beach_tournaments.c.competition_type,
+            beach_tournaments.c.category,
+        )
+    )
+    siblings = []
+    effective_competition = row_d.get("competition_type")
+    for sibling in sibling_rows:
+        sd = dict(sibling)
+        if (sd.get("competition_type") or "") != (effective_competition or ""):
+            continue
+        if (sd.get("category") or "") != (effective_category or ""):
+            continue
+        siblings.append(sd)
+    siblings.sort(
+        key=lambda x: (
+            x.get("event_date") or datetime.max.replace(tzinfo=timezone.utc),
+            x.get("id") or 0,
+        )
+    )
+    tournament_ordinal = next(
+        (idx + 1 for idx, item in enumerate(siblings) if item.get("id") == tournament_id),
+        1,
+    )
 
-    # 1) Numbers already used in beach_proel_matches (global — all tournaments)
+    pattern = f"{prefix}/{cat_gender}/{tournament_ordinal}/%"
+
+    # 1) Numbers already used in beach_proel_matches for this tournament ordinal.
     existing_rows = await database.fetch_all(
         select(beach_proel_matches.c.match_number).where(
             beach_proel_matches.c.match_number.like(pattern)
@@ -2219,17 +2247,17 @@ async def generate_match_number(
     seq_nums: list[int] = []
     for r in existing_rows:
         parts = dict(r)["match_number"].split("/")
-        if len(parts) == 3:
+        if len(parts) == 4:
             try:
-                seq_nums.append(int(parts[2]))
+                seq_nums.append(int(parts[3]))
             except ValueError:
                 pass
 
-    # 2) Numbers already assigned in ALL tournament schedules (global uniqueness)
-    all_tour_rows = await database.fetch_all(
-        select(beach_tournaments.c.data_json)
+    # 2) Numbers already assigned in this tournament schedule.
+    current_tour_rows = await database.fetch_all(
+        select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
     )
-    for tour_row in all_tour_rows:
+    for tour_row in current_tour_rows:
         tour_data = _parse_json(dict(tour_row)["data_json"])
         schedule = tour_data.get("schedule") or {}
         for m in (schedule.get("matches") or []):
@@ -2237,16 +2265,25 @@ async def generate_match_number(
             if not mn:
                 continue
             parts = str(mn).split("/")
-            if len(parts) == 3 and parts[0] == prefix and parts[1] == cat_gender:
+            if (
+                len(parts) == 4
+                and parts[0] == prefix
+                and parts[1] == cat_gender
+                and parts[2] == str(tournament_ordinal)
+            ):
                 try:
-                    seq_nums.append(int(parts[2]))
+                    seq_nums.append(int(parts[3]))
                 except ValueError:
                     pass
 
     next_seq = (max(seq_nums) + 1) if seq_nums else 1
-    match_number = f"{prefix}/{cat_gender}/{next_seq}"
+    match_number = f"{prefix}/{cat_gender}/{tournament_ordinal}/{next_seq}"
 
-    return {"match_number": match_number, "prefix": prefix}
+    return {
+        "match_number": match_number,
+        "prefix": prefix,
+        "tournament_ordinal": tournament_ordinal,
+    }
 
 
 # ─────────────────── PATCH squad-update (Admin / Trener druzyny) ───────────────────
