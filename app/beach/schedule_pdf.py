@@ -554,7 +554,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                 "score_sets": ss,
             })
 
-        days_out.append({"label": day_label, "matches": match_rows})
+        days_out.append({"label": day_label, "matches": match_rows, "row_count": len(match_rows)})
 
     # If split_by_courts, build per-day sections where each day lists per-court sub-sections
     split_by_courts = req.split_by_courts and courts_count >= 2

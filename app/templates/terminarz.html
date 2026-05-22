@@ -570,7 +570,7 @@
 {% if not split_by_courts %}
 {% for day in days %}
 
-<div class="day-section{% if group_previews and loop.first %} page-break{% endif %}">
+<div class="day-section{% if (group_previews and loop.first) or (not loop.first and day.row_count >= 5) %} page-break{% endif %}">
   <div class="day-header no-break">{{ day.label }}</div>
 
   {% if day.matches %}
