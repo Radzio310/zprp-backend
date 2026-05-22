@@ -1737,6 +1737,7 @@ TECHNICZNE:
 18. order: sekwencyjny od 0, zachowaj kolejność z dokumentu.
 19. Status wszystkich meczów: "scheduled".
 20. Tryb turnieju: {mode}.
+21. Jeśli tryb=roundRobin, pole "group" we WSZYSTKICH meczach musi być null — w każdy-z-każdym nie ma podziału na grupy.
 
 SCHEMAT JSON:
 {_SCHEDULE_JSON_SCHEMA}
@@ -1892,6 +1893,11 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
             "warnings": warnings,
             "group_config": group_config,
         }
+
+    # ── For roundRobin mode: clear group field on all matches (no group labels) ──
+    if config.get("mode") == "roundRobin":
+        for m in schedule.get("matches", []):
+            m["group"] = None
 
     # ── Validate: only invited team IDs in matches ──
     for m in schedule.get("matches", []):
