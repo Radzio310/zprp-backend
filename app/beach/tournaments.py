@@ -2110,6 +2110,65 @@ _CATEGORY_CODES: dict[str, str] = {
 }
 
 
+def _collect_schedule_genders(data: Dict[str, Any]) -> set[str]:
+    schedule = data.get("schedule") or {}
+    matches = schedule.get("matches") or []
+    genders = {
+        str(m.get("gender"))
+        for m in matches
+        if isinstance(m, dict) and m.get("gender") in ("M", "K")
+    }
+    if genders:
+        return genders
+
+    groups = (schedule.get("config") or {}).get("groups") or {}
+    group_genders: set[str] = set()
+    for g in ("M", "K"):
+        g_cfg = groups.get(g) or {}
+        teams = g_cfg.get("teams") or {}
+        if any(teams.get(group_name) for group_name in ("A", "B", "C", "D")):
+            group_genders.add(g)
+    if group_genders:
+        return group_genders
+
+    custom_teams = data.get("custom_teams") or []
+    return {
+        str(t.get("gender"))
+        for t in custom_teams
+        if isinstance(t, dict) and t.get("gender") in ("M", "K")
+    }
+
+
+async def _tournament_includes_gender(data_json: Any, gender: str) -> bool:
+    data = _parse_json(data_json)
+    schedule_genders = _collect_schedule_genders(data)
+    if schedule_genders:
+        return gender in schedule_genders
+
+    invited_team_ids: list[int] = []
+    for raw_id in data.get("invited_team_ids") or []:
+        try:
+            invited_team_ids.append(int(raw_id))
+        except (TypeError, ValueError):
+            continue
+
+    if invited_team_ids:
+        rows = await database.fetch_all(
+            select(beach_teams.c.gender).where(beach_teams.c.id.in_(invited_team_ids))
+        )
+        invited_genders = {
+            str(r["gender"])
+            for r in rows
+            if r["gender"] in ("M", "K")
+        }
+        if invited_genders:
+            return gender in invited_genders
+
+    # No reliable gender metadata yet: keep it in both baskets to avoid
+    # accidental duplicate ordinals for completely empty legacy tournaments.
+    return True
+
+
 def _strip_diacritics(text: str) -> str:
     nfkd = unicodedata.normalize("NFKD", text)
     return "".join(c for c in nfkd if not unicodedata.combining(c))
@@ -2214,6 +2273,7 @@ async def generate_match_number(
             beach_tournaments.c.event_date,
             beach_tournaments.c.competition_type,
             beach_tournaments.c.category,
+            beach_tournaments.c.data_json,
         )
     )
     siblings = []
@@ -2223,6 +2283,8 @@ async def generate_match_number(
         if (sd.get("competition_type") or "") != (effective_competition or ""):
             continue
         if (sd.get("category") or "") != (effective_category or ""):
+            continue
+        if not await _tournament_includes_gender(sd.get("data_json"), gender):
             continue
         siblings.append(sd)
     siblings.sort(
