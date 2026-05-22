@@ -307,6 +307,139 @@ def _build_bracket_rounds(
     return rounds
 
 
+def _match_card_payload(m: Dict[str, Any]) -> Dict[str, Any]:
+    w = _winner(m)
+    return {
+        "time": m.get("startTime", ""),
+        "match_number": m.get("matchNumber", ""),
+        "team_a": _team_name(m.get("teamA")),
+        "team_b": _team_name(m.get("teamB")),
+        "score_a": m.get("scoreA"),
+        "score_b": m.get("scoreB"),
+        "score_display": _score_display(m),
+        "sets": m.get("sets") or [],
+        "shootout": m.get("shootout"),
+        "winner": w,
+        "stage_label": _stage_label(m),
+    }
+
+
+def _bracket_card_payload(
+    match: Optional[Dict[str, Any]],
+    label: str = "",
+) -> Dict[str, Any]:
+    if not match:
+        return {
+            "team_a": "TBD",
+            "team_b": "TBD",
+            "score_a": None,
+            "score_b": None,
+            "winner": None,
+            "label": label,
+        }
+    return {
+        "team_a": _team_name(match.get("teamA")),
+        "team_b": _team_name(match.get("teamB")),
+        "score_a": match.get("scoreA"),
+        "score_b": match.get("scoreB"),
+        "winner": _winner(match),
+        "label": label or match.get("knockoutLabel", ""),
+    }
+
+
+def _append_svg_match_card(
+    parts: List[str],
+    match: Dict[str, Any],
+    color: str,
+    x: float,
+    y: float,
+    card_w: float,
+    card_h: float,
+    uid: str,
+) -> None:
+    has_label = bool(match.get("label"))
+    label_h = 13 if has_label else 0
+    team_area_h = card_h - label_h
+    team_h = team_area_h / 2
+    name_max_w = card_w - 32
+
+    parts.append(
+        f'<rect x="{x}" y="{y}" width="{card_w}" height="{card_h}" '
+        f'rx="3" fill="#fafafa" stroke="#ccc" stroke-width="0.5"/>'
+    )
+
+    if has_label:
+        esc_lbl = html_mod.escape(str(match["label"]))
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="{card_w}" height="{label_h}" '
+            f'rx="3" fill="{color}"/>'
+        )
+        parts.append(
+            f'<rect x="{x}" y="{y + label_h - 3}" '
+            f'width="{card_w}" height="3" fill="{color}"/>'
+        )
+        parts.append(
+            f'<text x="{x + card_w / 2}" y="{y + label_h - 3.5}" '
+            f'text-anchor="middle" font-size="5" font-weight="800" '
+            f'fill="white" letter-spacing="0.2">{esc_lbl}</text>'
+        )
+
+    cid_a = f"{uid}a"
+    cid_b = f"{uid}b"
+    ta_y = y + label_h
+    tb_y = ta_y + team_h
+    parts.append(
+        f'<clipPath id="{cid_a}">'
+        f'<rect x="{x + 5}" y="{ta_y}" width="{name_max_w}" height="{team_h}"/>'
+        f'</clipPath>'
+    )
+    parts.append(
+        f'<clipPath id="{cid_b}">'
+        f'<rect x="{x + 5}" y="{tb_y}" width="{name_max_w}" height="{team_h}"/>'
+        f'</clipPath>'
+    )
+
+    is_wa = match.get("winner") == "A"
+    name_a = html_mod.escape(match.get("team_a") or "?")
+    sa = match.get("score_a")
+    sa_s = str(sa) if sa is not None else ""
+    fill_a = color if is_wa else "#333"
+    fw_a = "900" if is_wa else "600"
+    parts.append(
+        f'<text x="{x + 6}" y="{ta_y + team_h / 2 + 3}" '
+        f'font-size="7.5" font-weight="{fw_a}" fill="{fill_a}" '
+        f'clip-path="url(#{cid_a})">{name_a}</text>'
+    )
+    parts.append(
+        f'<text x="{x + card_w - 6}" y="{ta_y + team_h / 2 + 3}" '
+        f'text-anchor="end" font-size="8" font-weight="900" '
+        f'fill="{fill_a}">{sa_s}</text>'
+    )
+
+    parts.append(
+        f'<line x1="{x + 2}" y1="{tb_y}" '
+        f'x2="{x + card_w - 2}" y2="{tb_y}" '
+        f'stroke="#e0e0e0" stroke-width="0.5"/>'
+    )
+
+    is_wb = match.get("winner") == "B"
+    name_b = html_mod.escape(match.get("team_b") or "?")
+    sb = match.get("score_b")
+    sb_s = str(sb) if sb is not None else ""
+    fill_b = color if is_wb else "#333"
+    fw_b = "900" if is_wb else "600"
+    parts.append(
+        f'<text x="{x + 6}" y="{tb_y + team_h / 2 + 3}" '
+        f'font-size="7.5" font-weight="{fw_b}" fill="{fill_b}" '
+        f'clip-path="url(#{cid_b})">{name_b}</text>'
+    )
+    parts.append(
+        f'<text x="{x + card_w - 6}" y="{tb_y + team_h / 2 + 3}" '
+        f'text-anchor="end" font-size="8" font-weight="900" '
+        f'fill="{fill_b}">{sb_s}</text>'
+    )
+
+
 def _render_bracket_svg(
     bracket_rounds: List[Dict[str, Any]],
     color: str,
@@ -662,6 +795,297 @@ def _render_bracket_svg(
     return '\n'.join(parts)
 
 
+def _render_mini_bracket_quad_svg(
+    semis: List[Dict[str, Any]],
+    winner_match: Optional[Dict[str, Any]],
+    loser_match: Optional[Dict[str, Any]],
+    color: str,
+    semi_label: str,
+    winner_label: str,
+    loser_label: str,
+) -> str:
+    if len(semis) < 2:
+        return ""
+
+    card_w = 150
+    card_h = 44
+    conn_w = 34
+    label_h = 18
+    gap = 14
+    pad = 6
+
+    left_x = 0
+    right_x = card_w + conn_w
+    semi_y = [label_h + pad, label_h + pad + card_h + gap]
+    semi_centers = [y + card_h / 2 for y in semi_y]
+    winner_cy = sum(semi_centers) / 2
+    winner_y = winner_cy - card_h / 2
+    loser_y = semi_y[1] + card_h + 16
+    loser_cy = loser_y + card_h / 2
+
+    total_w = right_x + card_w
+    total_h = loser_y + card_h + pad
+    mid_x = left_x + card_w + conn_w / 2
+
+    parts: List[str] = []
+    parts.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{total_w}pt" height="{total_h}pt" '
+        f'viewBox="0 0 {total_w} {total_h}" '
+        f'style="font-family: DejaVu Sans, sans-serif; display: block;">'
+    )
+    parts.append(
+        f'<text x="{left_x + card_w / 2}" y="{label_h - 4}" '
+        f'text-anchor="middle" font-size="7" font-weight="900" '
+        f'fill="{color}" letter-spacing="0.5">{html_mod.escape(semi_label.upper())}</text>'
+    )
+    parts.append(
+        f'<text x="{right_x + card_w / 2}" y="{label_h - 4}" '
+        f'text-anchor="middle" font-size="7" font-weight="900" '
+        f'fill="{color}" letter-spacing="0.5">MECZE O MIEJSCA</text>'
+    )
+
+    for cy in semi_centers:
+        parts.append(
+            f'<line x1="{left_x + card_w}" y1="{cy}" '
+            f'x2="{mid_x}" y2="{cy}" stroke="#bbb" stroke-width="1"/>'
+        )
+    parts.append(
+        f'<line x1="{mid_x}" y1="{semi_centers[0]}" '
+        f'x2="{mid_x}" y2="{semi_centers[1]}" stroke="#bbb" stroke-width="1"/>'
+    )
+    parts.append(
+        f'<line x1="{mid_x}" y1="{winner_cy}" '
+        f'x2="{right_x}" y2="{winner_cy}" stroke="#bbb" stroke-width="1"/>'
+    )
+    parts.append(
+        f'<line x1="{mid_x}" y1="{semi_centers[1]}" '
+        f'x2="{mid_x}" y2="{loser_cy}" stroke="#bbb" stroke-width="0.9" '
+        f'stroke-dasharray="3,3"/>'
+    )
+    parts.append(
+        f'<line x1="{mid_x}" y1="{loser_cy}" '
+        f'x2="{right_x}" y2="{loser_cy}" stroke="#bbb" stroke-width="0.9" '
+        f'stroke-dasharray="3,3"/>'
+    )
+
+    _append_svg_match_card(
+        parts,
+        _bracket_card_payload(semis[0], semi_label.upper()),
+        color,
+        left_x,
+        semi_y[0],
+        card_w,
+        card_h,
+        "mq0",
+    )
+    _append_svg_match_card(
+        parts,
+        _bracket_card_payload(semis[1], semi_label.upper()),
+        color,
+        left_x,
+        semi_y[1],
+        card_w,
+        card_h,
+        "mq1",
+    )
+    _append_svg_match_card(
+        parts,
+        _bracket_card_payload(winner_match, winner_label.upper()),
+        color,
+        right_x,
+        winner_y,
+        card_w,
+        card_h,
+        "mqw",
+    )
+    _append_svg_match_card(
+        parts,
+        _bracket_card_payload(loser_match, loser_label.upper()),
+        color,
+        right_x,
+        loser_y,
+        card_w,
+        card_h,
+        "mql",
+    )
+
+    parts.append('</svg>')
+    return '\n'.join(parts)
+
+
+def _render_single_match_svg(
+    match: Dict[str, Any],
+    color: str,
+    label: str,
+) -> str:
+    card_w = 170
+    card_h = 44
+    pad = 6
+    total_w = card_w
+    total_h = card_h + pad * 2
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{total_w}pt" height="{total_h}pt" '
+        f'viewBox="0 0 {total_w} {total_h}" '
+        f'style="font-family: DejaVu Sans, sans-serif; display: block;">'
+    ]
+    _append_svg_match_card(
+        parts,
+        _bracket_card_payload(match, label.upper()),
+        color,
+        0,
+        pad,
+        card_w,
+        card_h,
+        "ms0",
+    )
+    parts.append('</svg>')
+    return '\n'.join(parts)
+
+
+def _group_sort_key(group_name: str) -> Tuple[int, str]:
+    match = re.search(r"(\d+)", group_name or "")
+    return (int(match.group(1)) if match else 999, group_name or "")
+
+
+def _team_count(matches: List[Dict[str, Any]]) -> int:
+    ids = set()
+    for m in matches:
+        for slot in ("teamA", "teamB"):
+            team = m.get(slot)
+            if team and team.get("id") is not None:
+                ids.add(team["id"])
+    return len(ids)
+
+
+def _build_playoff_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    groups = sorted(
+        {
+            m.get("group")
+            for m in matches
+            if m.get("stage") == "playoff" and m.get("group")
+        },
+        key=_group_sort_key,
+    )
+    tables = []
+    for group in groups:
+        group_matches = [
+            m for m in matches
+            if m.get("stage") == "playoff" and m.get("group") == group
+        ]
+        if not group_matches:
+            continue
+        position_match = re.match(r"playoff_(\d+)", group)
+        position = int(position_match.group(1)) if position_match else 0
+        advancing_count = 2 if position >= 3 else 1 if position > 0 else 0
+        title = f"Baraże - {position}. miejsca" if position else "Baraże"
+        tables.append({
+            "title": title,
+            "rows": _compute_group_table(group_matches, advancing_count),
+        })
+    return tables
+
+
+def _build_placement_rr_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    groups = sorted(
+        {
+            m.get("group")
+            for m in matches
+            if m.get("stage") == "placement_rr"
+            and (m.get("group") or "").startswith("placement_")
+        },
+        key=_group_sort_key,
+    )
+    tables = []
+    for group in groups:
+        group_matches = [
+            m for m in matches
+            if m.get("stage") == "placement_rr" and m.get("group") == group
+        ]
+        if not group_matches:
+            continue
+        tier_match = re.match(r"placement_(\d+)", group)
+        tier = int(tier_match.group(1)) if tier_match else 0
+        count = _team_count(group_matches) or len(_compute_group_table(group_matches)) or 3
+        end_place = tier + count - 1 if tier else 0
+        title = f"O miejsca {tier}-{end_place}" if tier and end_place else "O miejsca"
+        tables.append({
+            "title": title,
+            "rows": _compute_group_table(group_matches),
+        })
+    return tables
+
+
+def _build_placement_brackets(matches: List[Dict[str, Any]], color: str) -> List[Dict[str, Any]]:
+    configs = [
+        {
+            "semi_stage": "fifth_semifinal",
+            "winner_stage": "fifth_place",
+            "loser_stage": "seventh_place",
+            "title": "O miejsca V-VIII",
+            "semi_label": "Półfinały o 5. miejsce",
+            "winner_label": "O 5. miejsce",
+            "loser_label": "O 7. miejsce",
+        },
+        {
+            "semi_stage": "ninth_semifinal",
+            "winner_stage": "ninth_place",
+            "loser_stage": "eleventh_place",
+            "title": "O miejsca IX-XII",
+            "semi_label": "Półfinały o 9. miejsce",
+            "winner_label": "O 9. miejsce",
+            "loser_label": "O 11. miejsce",
+        },
+        {
+            "semi_stage": "thirteenth_semifinal",
+            "winner_stage": "thirteenth_place",
+            "loser_stage": "fifteenth_place",
+            "title": "O miejsca XIII-XVI",
+            "semi_label": "Półfinały o 13. miejsce",
+            "winner_label": "O 13. miejsce",
+            "loser_label": "O 15. miejsce",
+        },
+    ]
+
+    sections = []
+    for cfg in configs:
+        semis = sorted(
+            [m for m in matches if m.get("stage") == cfg["semi_stage"]],
+            key=lambda m: m.get("order", 0),
+        )
+        winner_match = next(
+            (m for m in matches if m.get("stage") == cfg["winner_stage"]), None
+        )
+        loser_match = next(
+            (m for m in matches if m.get("stage") == cfg["loser_stage"]), None
+        )
+        if len(semis) >= 2:
+            sections.append({
+                "title": cfg["title"],
+                "svg": _render_mini_bracket_quad_svg(
+                    semis,
+                    winner_match,
+                    loser_match,
+                    color,
+                    cfg["semi_label"],
+                    cfg["winner_label"],
+                    cfg["loser_label"],
+                ),
+            })
+        elif cfg["winner_stage"] == "thirteenth_place" and winner_match:
+            sections.append({
+                "title": "O 13. miejsce",
+                "svg": _render_single_match_svg(
+                    winner_match,
+                    color,
+                    cfg["winner_label"],
+                ),
+            })
+
+    return [s for s in sections if s.get("svg")]
+
+
 def _build_placement_matches(
     matches: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -773,6 +1197,9 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             "tables": [],
             "bracket_rounds": [],
             "bracket_svg": "",
+            "playoff_tables": [],
+            "placement_tables": [],
+            "placement_brackets": [],
             "match_days": [],
             "standings": None,
             "standings_is_multi_tournament": False,
@@ -836,6 +1263,12 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                     gs["bracket_rounds"], gs["gender_color"],
                     third_place=third_place_match,
                 )
+            gs["playoff_tables"] = _build_playoff_tables(g_matches)
+            gs["placement_tables"] = _build_placement_rr_tables(g_matches)
+            gs["placement_brackets"] = _build_placement_brackets(
+                g_matches,
+                gs["gender_color"],
+            )
 
         # ── Match cards by day ──
         by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
@@ -866,20 +1299,10 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
 
             cards = []
             for m in day_matches:
-                w = _winner(m)
-                cards.append({
-                    "time": m.get("startTime", ""),
-                    "match_number": m.get("matchNumber", ""),
-                    "team_a": _team_name(m.get("teamA")),
-                    "team_b": _team_name(m.get("teamB")),
-                    "score_a": m.get("scoreA"),
-                    "score_b": m.get("scoreB"),
-                    "score_display": _score_display(m),
-                    "sets": m.get("sets") or [],
-                    "shootout": m.get("shootout"),
-                    "winner": w,
-                    "stage_label": _stage_label(m) if mode != "roundRobin" else "",
-                })
+                card = _match_card_payload(m)
+                if mode == "roundRobin":
+                    card["stage_label"] = ""
+                cards.append(card)
             gs["match_days"].append({"label": day_label, "matches": cards})
 
         # ── Standings ──

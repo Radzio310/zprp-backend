@@ -101,6 +101,19 @@
   .group-block {
     page-break-inside: avoid;
   }
+  .placement-block {
+    page-break-inside: avoid;
+    margin: 8pt 0 12pt 0;
+  }
+  .placement-title {
+    font-size: 9.5pt;
+    font-weight: 900;
+    text-align: center;
+    margin: 6pt 0 5pt 0;
+  }
+  .placement-table {
+    margin-bottom: 6pt;
+  }
 
   /* ── Match cards ── */
   .matches-grid {
@@ -414,6 +427,70 @@
 {% endif %}
 
 <!-- ── All Match Cards ── -->
+{% if gs.playoff_tables or gs.placement_tables or gs.placement_brackets %}
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Mecze o miejsca</div>
+<div class="section-desc">Baraże, mikrotabele i dodatkowe drabinki decydujące o miejscach poza głównym finałem.</div>
+
+{% for tbl in gs.playoff_tables + gs.placement_tables %}
+<div class="placement-block">
+  <div class="placement-title" style="color: {{ gc }};">{{ tbl.title }}</div>
+  <table class="results-table placement-table">
+    <colgroup>
+      <col style="width: 18pt;">
+      <col>
+      <col style="width: 32pt;">
+      <col style="width: 24pt;">
+      <col style="width: 24pt;">
+      <col style="width: 24pt;">
+      <col style="width: 28pt;">
+      <col style="width: 28pt;">
+      <col style="width: 34pt;">
+      <col style="width: 34pt;">
+    </colgroup>
+    <thead>
+      <tr>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3pt; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">#</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3pt; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: left; min-width: 80pt;">Drużyna</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">Pkt</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">M</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">Z</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">P</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">SW</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">SP</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">Brk+</th>
+        <th style="background: {{ gc }}18; color: {{ gc }}; font-weight: 900; font-size: 7.5pt; text-transform: uppercase; padding: 4pt 3pt; border-bottom: 1.5pt solid {{ gc }}44; text-align: center;">Brk−</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in tbl.rows %}
+      <tr{% if row.advancing %} style="background: {{ gc }}0A;"{% endif %}>
+        <td style="font-weight: 900; color: {{ gc }}; width: 20pt;">{{ row.pos }}</td>
+        <td class="team-name">{{ row.team_name }}</td>
+        <td><strong>{{ row.pts }}</strong></td>
+        <td>{{ row.played }}</td>
+        <td>{{ row.won }}</td>
+        <td>{{ row.lost }}</td>
+        <td>{{ row.sets_won }}</td>
+        <td>{{ row.sets_lost }}</td>
+        <td>{{ row.brk_plus }}</td>
+        <td>{{ row.brk_minus }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endfor %}
+
+{% for bracket in gs.placement_brackets %}
+<div class="placement-block">
+  <div class="placement-title" style="color: {{ gc }};">{{ bracket.title }}</div>
+  <div class="bracket-section no-break">
+  {{ bracket.svg | safe }}
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+
 {% if gs.match_days %}
 <div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Przebieg rozgrywek</div>
 <div class="section-desc" style="margin-bottom: 8pt;">Wyniki wszystkich meczów turnieju.</div>
