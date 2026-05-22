@@ -599,15 +599,20 @@
 {% endif %}
 
 {% if split_by_courts and court_sections %}
-<!-- ════════ COURT-SPLIT SECTIONS ════════ -->
-{% for section in court_sections %}
+<!-- ════════ DAY → COURT SECTIONS ════════ -->
+{% for day_sec in court_sections %}
 {% if not loop.first %}<div class="page-break"></div>{% endif %}
-<div class="court-section-header">{{ section.court_label }}</div>
+<div class="day-header no-break">{{ day_sec.day_label }}</div>
 
-{% for day in section.days %}
+{% if day_sec.openings %}
+<table class="schedule" style="margin-bottom: 6pt;">
+  <tbody>{{ schedule_rows(day_sec.openings) }}</tbody>
+</table>
+{% endif %}
+
+{% for court in day_sec.courts %}
+<div class="court-section-header">{{ court.court_label }}</div>
 <div class="day-section">
-  <div class="day-header no-break">{{ day.label }}</div>
-  {% if day.matches %}
   <table class="schedule">
     <thead>
       <tr>
@@ -622,10 +627,9 @@
       </tr>
     </thead>
     <tbody>
-      {{ schedule_rows(day.matches) }}
+      {{ schedule_rows(court.matches) }}
     </tbody>
   </table>
-  {% endif %}
 </div>
 {% endfor %}
 {% endfor %}

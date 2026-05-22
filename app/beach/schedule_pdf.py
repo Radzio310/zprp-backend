@@ -556,24 +556,30 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
 
         days_out.append({"label": day_label, "matches": match_rows})
 
-    # If split_by_courts, build per-court sections (and skip main schedule)
+    # If split_by_courts, build per-day sections where each day lists per-court sub-sections
     split_by_courts = req.split_by_courts and courts_count >= 2
     court_sections: List[Dict[str, Any]] = []
     if split_by_courts:
-        for court_num in range(1, courts_count + 1):
-            court_days = []
-            for day in days_out:
-                filtered = [
+        for day in days_out:
+            opening_rows = [r for r in day["matches"] if r.get("type") == "tournament_opening"]
+            courts_out: List[Dict[str, Any]] = []
+            for court_num in range(1, courts_count + 1):
+                court_matches = [
                     r for r in day["matches"]
-                    if r.get("type") == "tournament_opening"
-                    or str(r.get("court", "")) == str(court_num)
+                    if r.get("type") != "tournament_opening"
+                    and str(r.get("court", "")) == str(court_num)
                 ]
-                if filtered:
-                    court_days.append({"label": day["label"], "matches": filtered})
-            court_sections.append({
-                "court_label": f"Boisko {court_num}",
-                "days": court_days,
-            })
+                if court_matches:
+                    courts_out.append({
+                        "court_label": f"Boisko {court_num}",
+                        "matches": court_matches,
+                    })
+            if opening_rows or courts_out:
+                court_sections.append({
+                    "day_label": day["label"],
+                    "openings": opening_rows,
+                    "courts": courts_out,
+                })
 
     # Always use portrait orientation.
     use_landscape = False
