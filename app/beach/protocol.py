@@ -24,6 +24,7 @@ Szablon (app/templates/beach_protocol_template.xlsx):
   Sędzia główny/delegat: B67 (Nazwisko Imię), C67 (miasto)
 """
 import json as _json
+import copy
 import logging
 import math
 import os
@@ -41,7 +42,7 @@ from fastapi.responses import FileResponse
 from httpx import AsyncClient
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XlImage
-from openpyxl.styles import Font
+from openpyxl.styles import Alignment, Font
 from openpyxl.styles.borders import Border, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
@@ -392,7 +393,7 @@ def _strikethrough_empty_rows(
     Remaining cols: diagonal border.
     """
     thin = Side(style="thin", color="000000")
-    start_col = 2 if is_companion else 1  # B for companions, A for players
+    start_col = 1  # A for both players and companions; companions also need role cell crossed.
     end_col = 8  # H
     # Columns that stay empty (no diagonal): C=3, and D=4 only for companions
     skip_cols = {3, 4} if is_companion else {3}
@@ -814,6 +815,75 @@ _SHOOTOUT_HOST_ROWS = {"shooter": 59, "gk": 60, "penalty": 61, "pts": 62}
 _SHOOTOUT_GUEST_ROWS = {"shooter": 64, "gk": 65, "penalty": 66, "pts": 67}
 
 
+def _set_page_label(ws, page_no: int, total_pages: int) -> None:
+    ws["P3"] = f"Strona {page_no}/{total_pages}"
+
+
+def _set_progression_capacity() -> int:
+    groups = _SET_COLUMNS[1]["host"]
+    return sum(end_row - start_row + 1 for _, start_row, end_row in groups)
+
+
+def _clear_diagonal(cell) -> None:
+    cur = cell.border or Border()
+    cell.border = Border(
+        left=cur.left,
+        right=cur.right,
+        top=cur.top,
+        bottom=cur.bottom,
+        diagonal=Side(style=None),
+        diagonalDown=False,
+        diagonalUp=False,
+    )
+
+
+def _clear_cell_value_and_diagonal(ws, row: int, col: int) -> None:
+    cell = ws.cell(row=row, column=col)
+    cell.value = None
+    _clear_diagonal(cell)
+
+
+def _clear_set_progression_cells(ws, set_num: int) -> None:
+    for team_groups in _SET_COLUMNS[set_num].values():
+        for col_letter, start_row, end_row in team_groups:
+            col = ord(col_letter) - ord("A") + 1
+            for row in range(start_row, end_row + 1):
+                _clear_cell_value_and_diagonal(ws, row, col)
+
+
+def _clear_shootout_cells(ws) -> None:
+    for col in _SHOOTOUT_COLS:
+        for rows in (_SHOOTOUT_HOST_ROWS, _SHOOTOUT_GUEST_ROWS):
+            for r_key in ("shooter", "gk", "penalty", "pts"):
+                _clear_cell_value_and_diagonal(ws, rows[r_key], col)
+    for cell_ref in ("U59", "U64", "T56", "T57"):
+        cell = ws[cell_ref]
+        cell.value = None
+        _clear_diagonal(cell)
+
+
+def _copy_images_safe(src_ws, dst_ws) -> None:
+    for img in getattr(src_ws, "_images", []) or []:
+        data: Optional[bytes] = None
+        ref = getattr(img, "ref", None)
+        if ref is not None and hasattr(ref, "getvalue"):
+            data = ref.getvalue()
+        if not data:
+            try:
+                data = img._data()
+            except Exception as exc:
+                logger.warning("Beach protocol: could not clone image: %s", exc)
+                continue
+        new_img = XlImage(BytesIO(data))
+        new_img.width = img.width
+        new_img.height = img.height
+        try:
+            new_img.anchor = copy.deepcopy(img.anchor)
+        except Exception:
+            pass
+        dst_ws.add_image(new_img)
+
+
 def _build_player_points(protocol: List[Dict[str, Any]]) -> Dict[str, Dict[int, int]]:
     """Build {team: {jersey: total_points}} from protocol events.
 
@@ -919,10 +989,19 @@ def _get_goal_events_for_set(protocol: List[Dict[str, Any]], set_num: int) -> Li
     ]
 
 
-def _fill_set_progression(ws, set_num: int, protocol: List[Dict[str, Any]]) -> None:
+def _fill_set_progression(
+    ws,
+    set_num: int,
+    protocol: List[Dict[str, Any]],
+    *,
+    page_index: int = 0,
+) -> None:
     """Fill the goal-by-goal progression columns for a set (1 or 2)."""
     goals = _get_goal_events_for_set(protocol, set_num)
     cols = _SET_COLUMNS[set_num]
+    page_capacity = _set_progression_capacity()
+    page_min_pts = page_index * page_capacity
+    page_max_pts = (page_index + 1) * page_capacity
 
     # Running score trackers — these track the row position in each column
     team_score = {"host": 0, "guest": 0}
@@ -952,6 +1031,9 @@ def _fill_set_progression(ws, set_num: int, protocol: List[Dict[str, Any]]) -> N
 
         # Determine the cell: pts maps to row offset
         current_pts = cursor["pts"]
+        if current_pts <= page_min_pts or current_pts > page_max_pts:
+            continue
+        local_pts = current_pts - page_min_pts
 
         # Find the right column group
         gi = cursor["group_idx"]
@@ -965,16 +1047,16 @@ def _fill_set_progression(ws, set_num: int, protocol: List[Dict[str, Any]]) -> N
         #   Pts go 36..69 in group 1 (rows 16..49 = 34 rows)
         if gi == 0:
             threshold = end_row - start_row + 1  # 35
-            if current_pts > threshold and len(grp) > 1:
+            if local_pts > threshold and len(grp) > 1:
                 gi = 1
                 cursor["group_idx"] = 1
                 col_letter, start_row, end_row = grp[gi]
-                row = start_row + (current_pts - threshold - 1)
+                row = start_row + (local_pts - threshold - 1)
             else:
-                row = start_row + (current_pts - 1)
+                row = start_row + (local_pts - 1)
         else:
             threshold_prev = grp[0][2] - grp[0][1] + 1
-            row = start_row + (current_pts - threshold_prev - 1)
+            row = start_row + (local_pts - threshold_prev - 1)
 
         if row > end_row:
             continue  # safety: exceed max rows
@@ -988,7 +1070,7 @@ def _fill_set_progression(ws, set_num: int, protocol: List[Dict[str, Any]]) -> N
     # Cross out the cell after the last entry for each team
     for team in ("host", "guest"):
         cursor = team_cursors[team]
-        current_pts = cursor["pts"]
+        current_pts = min(max(cursor["pts"] - page_min_pts, 0), page_capacity)
         if current_pts == 0:
             continue  # no goals, nothing to cross
 
@@ -1006,7 +1088,12 @@ def _fill_set_progression(ws, set_num: int, protocol: List[Dict[str, Any]]) -> N
             _diagonal_cross(ws, f"{col_letter}{next_row}")
 
 
-def _fill_shootout(ws, data_json: Dict[str, Any]) -> None:
+def _fill_shootout(
+    ws,
+    data_json: Dict[str, Any],
+    *,
+    page_index: int = 0,
+) -> None:
     """Fill the set-3 shootout table."""
     shots: List[Dict[str, Any]] = data_json.get("shootoutShots") or []
     if not shots:
@@ -1021,12 +1108,16 @@ def _fill_shootout(ws, data_json: Dict[str, Any]) -> None:
         elif s.get("team") == "guest":
             guest_shots.append(s)
 
+    page_size = len(_SHOOTOUT_COLS)
+    start_idx = page_index * page_size
+    end_idx = start_idx + page_size
+
     def _write_team_shots(team_shots: List[Dict[str, Any]], rows: Dict[str, int]) -> int:
-        total_pts = 0
-        for i, shot in enumerate(team_shots):
-            if i >= len(_SHOOTOUT_COLS):
+        total_pts = sum(s.get("result", 0) for s in team_shots[:start_idx])
+        for local_i, shot in enumerate(team_shots[start_idx:end_idx]):
+            if local_i >= len(_SHOOTOUT_COLS):
                 break
-            col = _SHOOTOUT_COLS[i]
+            col = _SHOOTOUT_COLS[local_i]
             player = shot.get("player")
             shot_type = shot.get("shotType", "normal")
             secondary = shot.get("secondaryPlayer")
@@ -1057,8 +1148,8 @@ def _fill_shootout(ws, data_json: Dict[str, Any]) -> None:
     guest_total = _write_team_shots(guest_shots, _SHOOTOUT_GUEST_ROWS)
 
     # Cross out unused columns (after last shot through T=col20)
-    host_used = min(len(host_shots), len(_SHOOTOUT_COLS))
-    guest_used = min(len(guest_shots), len(_SHOOTOUT_COLS))
+    host_used = min(max(len(host_shots) - start_idx, 0), len(_SHOOTOUT_COLS))
+    guest_used = min(max(len(guest_shots) - start_idx, 0), len(_SHOOTOUT_COLS))
 
     for i in range(host_used, len(_SHOOTOUT_COLS)):
         col = _SHOOTOUT_COLS[i]
@@ -1084,6 +1175,163 @@ def _fill_shootout(ws, data_json: Dict[str, Any]) -> None:
         ws["T57"] = "0:1"
     else:
         ws["T57"] = f"{host_total}:{guest_total}"
+
+
+def _set_progression_overflows(data_json: Dict[str, Any]) -> Dict[int, bool]:
+    protocol: List[Dict[str, Any]] = data_json.get("protocol") or []
+    capacity = _set_progression_capacity()
+    result: Dict[int, bool] = {}
+    for set_num in (1, 2):
+        totals = {"host": 0, "guest": 0}
+        for ev in _get_goal_events_for_set(protocol, set_num):
+            team = ev.get("team", "")
+            if team not in totals:
+                continue
+            totals[team] += 1 if ev.get("type") == "goal1pt" else 2
+        result[set_num] = any(v > capacity for v in totals.values())
+    return result
+
+
+def _shootout_overflows(data_json: Dict[str, Any]) -> bool:
+    shots: List[Dict[str, Any]] = data_json.get("shootoutShots") or []
+    capacity = len(_SHOOTOUT_COLS)
+    host_count = sum(1 for s in shots if s.get("team") == "host")
+    guest_count = sum(1 for s in shots if s.get("team") == "guest")
+    return host_count > capacity or guest_count > capacity
+
+
+def _compose_protocol_notes_text(data_json: Dict[str, Any]) -> str:
+    notes = data_json.get("protocolNotes") or []
+    sections: List[str] = []
+    for idx, note in enumerate(notes, start=1):
+        text = (note.get("text") or "").strip()
+        if not text:
+            continue
+
+        if note.get("type") == "disqualification":
+            team_label = "Gospodarze" if note.get("linkedTeam") == "host" else "Goscie"
+            subject = (note.get("linkedPlayerName") or "").strip()
+            number = note.get("linkedPlayerNumber")
+            role = note.get("linkedCompanionRole")
+            if role:
+                subject = f"Osoba towarzyszaca {role}" + (f" - {subject}" if subject else "")
+            elif number is not None:
+                subject = f"nr {number}" + (f" - {subject}" if subject else "")
+            header = f"{idx}. Dyskwalifikacja ({team_label}{': ' + subject if subject else ''})"
+        else:
+            header = f"{idx}. Opis"
+        sections.append(f"{header}\n{text}")
+
+    return "\n\n".join(sections).strip()
+
+
+def _fmt_date_ddmmyyyy(iso_ymd: str) -> str:
+    if not iso_ymd:
+        return ""
+    try:
+        parts = iso_ymd.split("-")
+        return f"{parts[2]}.{parts[1]}.{parts[0]}"
+    except Exception:
+        return iso_ymd
+
+
+def _referee_name_from_match_config(match_config: Dict[str, Any], key: str) -> str:
+    ref = (match_config.get("referees") or {}).get(key) or {}
+    return (ref.get("name") or ref.get("fullName") or "").strip()
+
+
+def _sort_protocol_companions(companions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    role_order = {"A": 0, "B": 1, "C": 2, "D": 3}
+    return sorted(
+        companions,
+        key=lambda c: role_order.get((c.get("role") or "").strip().upper(), 99),
+    )
+
+
+def _configure_notes_sheet(ws_notes) -> None:
+    try:
+        ws_notes.page_setup.paperSize = ws_notes.PAPERSIZE_A4
+        ws_notes.page_setup.orientation = ws_notes.ORIENTATION_PORTRAIT
+        ws_notes.sheet_properties.pageSetUpPr.fitToPage = True
+        ws_notes.page_setup.fitToWidth = 1
+        ws_notes.page_setup.fitToHeight = 1
+        ws_notes.page_setup.scale = None
+        ws_notes.print_area = "A1:P45"
+        ws_notes.page_margins.left = 0.7
+        ws_notes.page_margins.right = 0.7
+        ws_notes.page_margins.top = 0.6
+        ws_notes.page_margins.bottom = 0.6
+    except Exception:
+        pass
+
+    for col in range(1, 17):
+        ws_notes.column_dimensions[get_column_letter(col)].width = 6.0
+    ws_notes.column_dimensions["A"].width = 4.5
+    ws_notes.column_dimensions["P"].width = 9.0
+
+
+def _create_protocol_notes_sheet(
+    wb,
+    *,
+    date_ddmmyyyy: str,
+    place: str,
+    notes_text: str,
+    referee1_name: str,
+    referee2_name: str,
+    referee1_sig_bytes: bytes,
+    referee2_sig_bytes: bytes,
+):
+    ws_notes = wb.create_sheet(title="Opis")
+    _configure_notes_sheet(ws_notes)
+
+    ws_notes.merge_cells("A1:J1")
+    ws_notes["A1"] = "Opis do protokolu"
+    ws_notes["A1"].font = Font(size=14, bold=True)
+    ws_notes["A1"].alignment = Alignment(horizontal="left", vertical="center")
+
+    ws_notes.merge_cells("K1:P1")
+    header = ", ".join([part for part in [date_ddmmyyyy, place] if part])
+    ws_notes["K1"] = header
+    ws_notes["K1"].font = Font(size=10)
+    ws_notes["K1"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
+
+    ws_notes.merge_cells("A4:P30")
+    ws_notes["A4"] = notes_text
+    ws_notes["A4"].font = Font(size=12)
+    ws_notes["A4"].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    for row in range(4, 31):
+        ws_notes.row_dimensions[row].height = 18
+    for row in range(32, 39):
+        ws_notes.row_dimensions[row].height = 18
+    ws_notes.row_dimensions[34].height = 55
+    ws_notes.row_dimensions[38].height = 55
+
+    ws_notes.merge_cells("I33:P33")
+    ws_notes["I33"] = referee1_name
+    ws_notes["I33"].font = Font(size=11, bold=True)
+    ws_notes["I33"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    _add_signature_image(
+        ws_notes,
+        image_bytes=referee1_sig_bytes or b"",
+        anchor_cell="K34",
+        max_width_px=180,
+        max_height_px=65,
+    )
+
+    ws_notes.merge_cells("I37:P37")
+    ws_notes["I37"] = referee2_name
+    ws_notes["I37"].font = Font(size=11, bold=True)
+    ws_notes["I37"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    _add_signature_image(
+        ws_notes,
+        image_bytes=referee2_sig_bytes or b"",
+        anchor_cell="K38",
+        max_width_px=180,
+        max_height_px=65,
+    )
+
+    return ws_notes
 
 
 async def _fill_completed_protocol_sheet(
@@ -1179,8 +1427,15 @@ async def _fill_completed_protocol_sheet(
     _fill_player_stats(guest_stats, GUEST_PLAYER_ROWS, "guest")
 
     # ── 4. Companion stats ──
-    host_companions = match_config.get("hostCompanions") or []
-    guest_companions = match_config.get("guestCompanions") or []
+    role_set = {"A", "B", "C", "D"}
+    host_companions = _sort_protocol_companions([
+        c for c in (match_config.get("hostCompanions") or [])
+        if (c.get("role") or "").strip().upper() in role_set
+    ])
+    guest_companions = _sort_protocol_companions([
+        c for c in (match_config.get("guestCompanions") or [])
+        if (c.get("role") or "").strip().upper() in role_set
+    ])
     companions_by_team = {"host": host_companions, "guest": guest_companions}
     companion_penalties = _build_companion_penalties(protocol, companions_by_team)
 
@@ -1303,16 +1558,16 @@ def _fill_players_from_match_config(ws, match_config: Dict[str, Any]) -> None:
 
     host_players = [p for p in (match_config.get("hostPlayers") or []) if p.get("selected")]
     guest_players = [p for p in (match_config.get("guestPlayers") or []) if p.get("selected")]
-    host_companions = [
+    host_companions = _sort_protocol_companions([
         c for c in (match_config.get("hostCompanions") or [])
         if (c.get("role") or "").upper() in ROLE_SET
-    ]
-    guest_companions = [
+    ])
+    guest_companions = _sort_protocol_companions([
         c for c in (match_config.get("guestCompanions") or [])
         if (c.get("role") or "").upper() in ROLE_SET
-    ]
+    ])
 
-    if not host_players and not guest_players:
+    if not host_players and not guest_players and not host_companions and not guest_companions:
         return  # No player data in matchConfig — nothing to override
 
     # ── Host players ──
@@ -1336,12 +1591,20 @@ def _fill_players_from_match_config(ws, match_config: Dict[str, Any]) -> None:
     # ── Host companions ──
     for i, row in enumerate(HOST_COMPANION_ROWS):
         if i < len(host_companions):
+            role = (host_companions[i].get("role") or "").strip().upper()
+            _clear_diagonal(ws.cell(row=row, column=1))
+            _clear_diagonal(ws.cell(row=row, column=2))
+            ws.cell(row=row, column=1).value = role
             ws.cell(row=row, column=2).value = host_companions[i].get("name", "")
     _strikethrough_empty_rows(ws, HOST_COMPANION_ROWS, len(host_companions), is_companion=True)
 
     # ── Guest companions ──
     for i, row in enumerate(GUEST_COMPANION_ROWS):
         if i < len(guest_companions):
+            role = (guest_companions[i].get("role") or "").strip().upper()
+            _clear_diagonal(ws.cell(row=row, column=1))
+            _clear_diagonal(ws.cell(row=row, column=2))
+            ws.cell(row=row, column=1).value = role
             ws.cell(row=row, column=2).value = guest_companions[i].get("name", "")
     _strikethrough_empty_rows(ws, GUEST_COMPANION_ROWS, len(guest_companions), is_companion=True)
 
@@ -1390,6 +1653,63 @@ async def _generate_filled_protocol(
 
     # 2. Fill match results from ProEl data
     await _fill_completed_protocol_sheet(ws, data_json)
+
+    pages = [ws]
+
+    overflow_sets = _set_progression_overflows(data_json)
+    needs_continuation_page = any(overflow_sets.values()) or _shootout_overflows(data_json)
+    if needs_continuation_page:
+        ws2 = wb.copy_worksheet(ws)
+        _copy_images_safe(ws, ws2)
+        try:
+            ws2.title = "Kontynuacja"
+        except Exception:
+            pass
+
+        for set_num in (1, 2):
+            _clear_set_progression_cells(ws2, set_num)
+        _clear_shootout_cells(ws2)
+
+        protocol: List[Dict[str, Any]] = data_json.get("protocol") or []
+        for set_num, overflows in overflow_sets.items():
+            if overflows:
+                _fill_set_progression(ws2, set_num, protocol, page_index=1)
+        if _shootout_overflows(data_json):
+            _fill_shootout(ws2, data_json, page_index=1)
+
+        pages.append(ws2)
+
+    notes_text = _compose_protocol_notes_text(data_json)
+    if notes_text:
+        extras = (match_config.get("extras") or {})
+        signatures = extras.get("signatures") or {}
+        field_a_sig = await _fetch_png_bytes(_full_static_url(signatures.get("fieldASignature") or ""))
+        field_b_sig = await _fetch_png_bytes(_full_static_url(signatures.get("fieldBSignature") or ""))
+
+        date_ddmmyyyy = _fmt_date_ddmmyyyy(match_config.get("matchDate") or "")
+        if not date_ddmmyyyy:
+            day_index = match.get("dayIndex") or 0
+            day_cfg = days[day_index] if day_index < len(days) else {}
+            date_ddmmyyyy = _fmt_date_ddmmyyyy(day_cfg.get("date") or "")
+
+        place = _strip_address_to_street_city(
+            tournament_location or extras.get("venueAddress") or ""
+        )
+        ws_notes = _create_protocol_notes_sheet(
+            wb,
+            date_ddmmyyyy=date_ddmmyyyy,
+            place=place,
+            notes_text=notes_text,
+            referee1_name=_referee_name_from_match_config(match_config, "fieldA"),
+            referee2_name=_referee_name_from_match_config(match_config, "fieldB"),
+            referee1_sig_bytes=field_a_sig,
+            referee2_sig_bytes=field_b_sig,
+        )
+        pages.append(ws_notes)
+
+    total_pages = len(pages)
+    for idx, page in enumerate(pages, start=1):
+        _set_page_label(page, idx, total_pages)
 
     safe_label = _safe_filename(file_label, 60)
     xlsx_name = f"protokol_koncowy_{safe_label}.xlsx"
