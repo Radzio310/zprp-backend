@@ -2387,12 +2387,12 @@ async def squad_update_tournament(
                 raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny lub admina")
         else:
             user_row = await database.fetch_one(
-                select(beach_users.c.roles_json).where(beach_users.c.id == current_user_id)
+                select(beach_users.c.roles).where(beach_users.c.id == current_user_id)
             )
             if not user_row:
                 raise HTTPException(404, "Uzytkownik nie znaleziony")
 
-            roles = user_row["roles_json"] or []
+            roles = user_row["roles"] or []
             if isinstance(roles, str):
                 try:
                     roles = json.loads(roles)
