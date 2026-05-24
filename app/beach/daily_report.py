@@ -13,6 +13,7 @@ import io
 import logging
 import os
 import re
+import unicodedata
 import shutil
 import tempfile
 import urllib.parse
@@ -35,6 +36,17 @@ router = APIRouter(tags=["Beach: Daily Report"])
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 TEMPLATE_NAME = "komunikat_dzienny.html"
 DOWNLOAD_DIR = "/tmp/daily_report_downloads"
+
+_PL_TRANS = str.maketrans("łŁżŻ", "lLzZ")
+
+
+def _safe_filename_part(s: str, max_len: int = 40) -> str:
+    """Transliteruje polskie znaki, zamienia / na _, zachowuje resztę dozwolonych."""
+    s = s.translate(_PL_TRANS)
+    s = unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
+    s = "".join(c if c.isalnum() or c in " _-" else "_" for c in s)
+    return s[:max_len]
+
 
 STAGE_LABELS = {
     "group": "Grupa",
@@ -514,10 +526,7 @@ async def generate_daily_report(req: DailyReportRequest):
         shutil.copyfile(pdf_path, download_path)
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        safe_name = (
-            "".join(c if c.isalnum() or c in " _-" else "_" for c in req.tournament_name)[:40]
-            or "komunikat"
-        )
+        safe_name = _safe_filename_part(req.tournament_name) or "komunikat"
         download_name = f"komunikat_dzien_{req.day_index + 1}_{safe_name}.pdf"
         encoded_name = urllib.parse.quote(download_name)
 

@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 import urllib.parse
 import uuid
 from collections import defaultdict
@@ -38,6 +39,17 @@ router = APIRouter(tags=["Beach Schedule PDF"])
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 TEMPLATE_NAME = "terminarz.html"
 DOWNLOAD_DIR = "/tmp/schedule_pdf_downloads"
+
+_PL_TRANS = str.maketrans("łŁżŻ", "lLzZ")
+
+
+def _safe_filename_part(s: str, max_len: int = 40) -> str:
+    """Transliteruje polskie znaki, zamienia / na _, zachowuje resztę dozwolonych."""
+    s = s.translate(_PL_TRANS)
+    s = unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
+    s = "".join(c if c.isalnum() or c in " _-" else "_" for c in s)
+    return s[:max_len]
+
 
 WEEKDAYS_PL = [
     "poniedziałek", "wtorek", "środa",
@@ -691,10 +703,7 @@ async def generate_schedule_pdf(req: SchedulePdfRequest):
         doc = weasyprint.HTML(filename=html_path)
         doc.write_pdf(pdf_path)
 
-        safe_name = (
-            "".join(c if c.isalnum() or c in " _-" else "_" for c in req.tournament_name)[:40]
-            or "terminarz"
-        )
+        safe_name = _safe_filename_part(req.tournament_name) or "terminarz"
         download_name = f"terminarz_{safe_name}.pdf"
 
         _ensure_download_dir()
