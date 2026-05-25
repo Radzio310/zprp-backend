@@ -626,6 +626,7 @@ def _fill_custom_team_squad(
     # Companions: filter by defaultCompanions selection
     all_companions = ct.get("companions") or []
     default_comp_ids = set(ct.get("defaultCompanions") or [])
+    companion_roles_map: Dict[str, str] = ct.get("defaultCompanionRoles") or {}
     if default_comp_ids:
         selected_comp = [c for c in all_companions if c.get("id") in default_comp_ids]
     else:
@@ -636,6 +637,10 @@ def _fill_custom_team_squad(
             c = selected_comp[i]
             ln = (c.get("lastName") or "").strip()
             fn = (c.get("firstName") or "").strip()
+            role = (companion_roles_map.get(str(c.get("id", ""))) or c.get("role") or "").strip().upper()
+            _clear_diagonal(ws.cell(row=row, column=1))
+            _clear_diagonal(ws.cell(row=row, column=2))
+            ws.cell(row=row, column=1).value = role if role in COMPANION_ROLE_OFFSET else ""
             ws.cell(row=row, column=2).value = f"{ln} {fn}".strip()
     _strikethrough_empty_rows(ws, companion_rows, len(selected_comp), is_companion=True)
 
@@ -701,6 +706,10 @@ def _fill_regular_team_squad(
     _strikethrough_empty_rows(ws, player_rows, len(ordered_players))
 
     # ── Companions ──
+    # Role letters: match override companion_roles → tournament default_companion_roles
+    companion_roles_map: Dict[str, str] = (
+        match_override.get("companion_roles") or squad_entry.get("default_companion_roles") or {}
+    )
     if selected_companion_ids:
         selected_comp_set = set(selected_companion_ids)
         id_to_comp = {}
@@ -716,6 +725,11 @@ def _fill_regular_team_squad(
     for i, row in enumerate(companion_rows):
         if i < len(ordered_comps):
             c = ordered_comps[i]
+            cid_str = str(c.get("person_id", ""))
+            role = (companion_roles_map.get(cid_str) or c.get("role") or "").strip().upper()
+            _clear_diagonal(ws.cell(row=row, column=1))
+            _clear_diagonal(ws.cell(row=row, column=2))
+            ws.cell(row=row, column=1).value = role if role in COMPANION_ROLE_OFFSET else ""
             ws.cell(row=row, column=2).value = c.get("full_name", "")
     _strikethrough_empty_rows(ws, companion_rows, len(ordered_comps), is_companion=True)
 
