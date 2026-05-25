@@ -73,6 +73,7 @@ class SquadUpdateRequest(BaseModel):
     default_players: Optional[List] = None           # player_ids, max 10
     default_companions: Optional[List] = None        # person_ids, max 4
     default_companion_roles: Optional[Dict[str, str]] = None  # personId(str) → "A"|"B"|"C"|"D"
+    protocol_players: Optional[List] = None          # player_ids for protocol sheet (max 15 Senior / 12 other)
     match_id: Optional[str] = None                   # jeśli override dla konkretnego meczu
     match_players: Optional[List] = None
     match_companions: Optional[List] = None
@@ -2432,6 +2433,8 @@ async def squad_update_tournament(
             squad_entry["default_companions"] = body.default_companions
         if body.default_companion_roles is not None:
             squad_entry["default_companion_roles"] = body.default_companion_roles
+        if body.protocol_players is not None:
+            squad_entry["protocol_players"] = body.protocol_players
 
     team_squads[team_key] = squad_entry
     data["team_squads"] = team_squads

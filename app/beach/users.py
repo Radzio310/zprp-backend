@@ -633,6 +633,7 @@ class DefaultSquadUpdateRequest(BaseModel):
     default_players: Optional[List[int]] = None
     default_companions: Optional[List[int]] = None
     default_companion_roles: Optional[Dict[str, str]] = None  # personId(str) → "A"|"B"|"C"|"D"
+    protocol_players: Optional[List[int]] = None
 
 
 @router.get("/{user_id}/default-squad", summary="Pobierz domyślny skład użytkownika")
@@ -687,6 +688,8 @@ async def update_user_default_squad(
         existing_entry["default_companions"] = req.default_companions
     if req.default_companion_roles is not None:
         existing_entry["default_companion_roles"] = req.default_companion_roles
+    if req.protocol_players is not None:
+        existing_entry["protocol_players"] = req.protocol_players
 
     current_data[team_key] = existing_entry
 

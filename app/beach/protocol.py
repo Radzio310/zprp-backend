@@ -667,10 +667,12 @@ def _fill_regular_team_squad(
     jersey_overrides = roster_data.get("jersey_overrides") or {}
     companions = roster_data.get("companions_json") or []
 
-    # Determine selected player IDs (match override → default → fallback all)
+    # Determine selected player IDs (match override → protocol → default → fallback all)
     match_overrides = squad_entry.get("match_overrides") or {}
     match_override = match_overrides.get(match_id) or {}
-    selected_player_ids = match_override.get("players") or squad_entry.get("default_players") or []
+    protocol_ids = squad_entry.get("protocol_players") or []
+    default_ids = match_override.get("players") or squad_entry.get("default_players") or []
+    selected_player_ids = protocol_ids if protocol_ids else default_ids
     selected_companion_ids = match_override.get("companions") or squad_entry.get("default_companions") or []
 
     # ── Players ──
