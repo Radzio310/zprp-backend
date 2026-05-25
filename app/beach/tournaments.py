@@ -66,6 +66,12 @@ class ScheduleUpdateRequest(BaseModel):
     schedule: Optional[dict] = None
 
 
+class SettlementsUpdateRequest(BaseModel):
+    """Zapis konfiguracji rozliczen sedziowskich w data_json.settlements."""
+    settlements: Dict[str, Any]
+    judge_id: Optional[int] = None
+
+
 class SquadUpdateRequest(BaseModel):
     """Aktualizacja selekcji składu dla drużyny w turnieju."""
     team_id: Optional[int] = None                    # regular team id
@@ -1532,6 +1538,83 @@ async def schedule_update_tournament(
 
 
 # ─────────────────── AI SCHEDULE IMPORT ───────────────────
+
+@router.patch(
+    "/{tournament_id}/settlements-update",
+    response_model=BeachTournamentItem,
+    summary="Zapis rozliczen sedziowskich turnieju",
+)
+async def settlements_update_tournament(
+    tournament_id: int,
+    body: SettlementsUpdateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not existing:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+
+    existing_d = dict(existing)
+    data = _parse_json(existing_d["data_json"])
+    incoming = body.settlements or {}
+    if not isinstance(incoming, dict):
+        raise HTTPException(422, "settlements musi byc obiektem")
+
+    is_admin_flag = await _is_admin(current_user_id)
+    head_judge_id = data.get("head_judge_id")
+    is_head_judge = isinstance(head_judge_id, int) and head_judge_id == current_user_id
+    judge_ids = {
+        int(j.get("id"))
+        for j in (data.get("judges") or [])
+        if isinstance(j, dict) and j.get("id") is not None
+    }
+    is_assigned_judge = current_user_id in judge_ids
+
+    if not (is_admin_flag or is_head_judge or is_assigned_judge):
+        raise HTTPException(403, "Brak uprawnien do zapisu rozliczen")
+
+    current_store = data.get("settlements") if isinstance(data.get("settlements"), dict) else {}
+    if is_admin_flag or is_head_judge:
+        data["settlements"] = incoming
+    else:
+        target_id = body.judge_id or current_user_id
+        if int(target_id) != current_user_id:
+            raise HTTPException(403, "Mozesz zapisac tylko swoje rozliczenie")
+        next_store = dict(current_store)
+        next_store["version"] = 1
+        if current_store.get("categoryOverride") is not None:
+            next_store["categoryOverride"] = current_store.get("categoryOverride")
+        judges_current = current_store.get("judges") if isinstance(current_store.get("judges"), dict) else {}
+        judges_incoming = incoming.get("judges") if isinstance(incoming.get("judges"), dict) else {}
+        target_key = str(current_user_id)
+        judges_next = dict(judges_current)
+        judges_next[target_key] = judges_incoming.get(target_key, judges_current.get(target_key, {}))
+        next_store["judges"] = judges_next
+        data["settlements"] = next_store
+
+    await database.execute(
+        update(beach_tournaments)
+        .where(beach_tournaments.c.id == tournament_id)
+        .values(data_json=data, updated_at=datetime.now(timezone.utc))
+    )
+
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    row_d = dict(row)
+    data2 = _normalize_event_data(row_d["data_json"])
+    await log_activity(
+        area="tournament",
+        action="tournament.settlements_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=row_d.get("name", ""),
+        details={"judge_id": body.judge_id},
+    )
+    return _attach_computed_fields(row_d, data2, current_user_id)
+
 
 _SCHEDULE_JSON_SCHEMA = """\
 {

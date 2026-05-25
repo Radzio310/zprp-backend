@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { size: A4; margin: 22mm 18mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: DejaVu Sans, Arial, sans-serif; color: #1d1722; background: #fff; }
+    .hero { border-radius: 22px; padding: 24px; color: #fff; background: linear-gradient(135deg, #2a173d, #7b2d8e 54%, #ff9f45); }
+    .eyebrow { font-size: 10px; font-weight: 800; letter-spacing: 1.6px; opacity: .75; text-transform: uppercase; }
+    h1 { margin: 7px 0 8px; font-size: 30px; line-height: 1.08; }
+    .meta { font-size: 13px; opacity: .88; }
+    .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 18px 0 20px; }
+    .metric { border: 1px solid #eadff2; border-radius: 16px; padding: 14px; background: #fbf8fd; }
+    .metric strong { display: block; font-size: 20px; color: #7b2d8e; }
+    .metric span { display: block; margin-top: 3px; font-size: 10px; font-weight: 800; color: #7d7285; text-transform: uppercase; letter-spacing: .7px; }
+    .judge { break-inside: avoid; margin-top: 14px; border: 1px solid #eadff2; border-radius: 18px; overflow: hidden; }
+    .judge-head { padding: 14px 16px; background: #fbf8fd; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .judge-name { font-size: 17px; font-weight: 900; }
+    .judge-role { margin-top: 3px; font-size: 11px; color: #7d7285; font-weight: 800; }
+    .judge-total { font-size: 22px; color: #f09a31; font-weight: 900; white-space: nowrap; }
+    .judge-body { padding: 14px 16px 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 8px 6px; color: #7d7285; font-size: 10px; letter-spacing: .6px; text-transform: uppercase; border-bottom: 1px solid #eee5f3; }
+    td { padding: 8px 6px; font-size: 12px; border-bottom: 1px solid #f2edf5; }
+    .money { font-weight: 900; }
+    .pill { display: inline-block; border-radius: 999px; padding: 4px 8px; font-size: 10px; font-weight: 900; background: #efe2f7; color: #7b2d8e; }
+    .breakdown { display: grid; grid-template-columns: repeat(6, 1fr); gap: 7px; margin-top: 12px; }
+    .mini { padding: 8px; border-radius: 11px; background: #faf7fc; border: 1px solid #efe6f3; }
+    .mini strong { display: block; font-size: 12px; }
+    .mini span { display: block; margin-top: 2px; font-size: 8px; font-weight: 800; color: #887c91; text-transform: uppercase; }
+    .disclaimer { margin-top: 22px; padding: 14px 16px; border-radius: 16px; background: #fff7e8; border: 1px solid #ffd89d; font-size: 10.5px; line-height: 1.45; color: #6c4b19; }
+    .footer { margin-top: 12px; color: #908697; font-size: 10px; text-align: right; }
+  </style>
+</head>
+<body>
+  <section class="hero">
+    <div class="eyebrow">{{ "Zbiorcze podsumowanie kosztów" if is_bulk else "Rachunek sędziowski" }}</div>
+    <h1>{{ tournament.name or "Turniej" }}</h1>
+    <div class="meta">
+      {{ tournament.date_from[:10] }}{% if tournament.date_to %} - {{ tournament.date_to[:10] }}{% endif %}
+      {% if tournament.location %} · {{ tournament.location }}{% endif %}
+    </div>
+  </section>
+
+  {% if is_bulk %}
+  <section class="summary">
+    <div class="metric"><strong>{{ summary.total }}</strong><span>Łącznie</span></div>
+    <div class="metric"><strong>{{ summary.brutto }}</strong><span>Brutto</span></div>
+    <div class="metric"><strong>{{ summary.travel }}</strong><span>Dojazd</span></div>
+    <div class="metric"><strong>{{ summary.netto }}</strong><span>Netto</span></div>
+    <div class="metric"><strong>{{ summary.tax }}</strong><span>Podatek</span></div>
+    <div class="metric"><strong>{{ summary.costs }}</strong><span>Koszty UP</span></div>
+  </section>
+  {% endif %}
+
+  {% for judge in judges %}
+  <section class="judge">
+    <div class="judge-head">
+      <div>
+        <div class="judge-name">{{ judge.full_name }}</div>
+        <div class="judge-role">{{ judge.role_label }} · {{ judge.category }}{% if judge.city %} · {{ judge.city }}{% endif %}</div>
+      </div>
+      <div class="judge-total">{{ judge.result_fmt.total }}</div>
+    </div>
+    <div class="judge-body">
+      <table>
+        <thead>
+          <tr><th>Dzien</th><th>Data</th><th>Status</th><th>Brutto</th></tr>
+        </thead>
+        <tbody>
+          {% for day in judge.days %}
+          <tr>
+            <td>{{ day.label }}</td>
+            <td>{{ day.date }}</td>
+            <td><span class="pill">{{ "Dojazd" if day.commute else "Miejscowy" }}</span></td>
+            <td class="money">{{ day.brutto_fmt }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="breakdown">
+        <div class="mini"><strong>{{ judge.distance_fmt }}</strong><span>Km</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt.travel }}</strong><span>Dojazd</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt.brutto }}</strong><span>Brutto</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt.costs }}</strong><span>Koszty</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt.tax }}</strong><span>Podatek</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt.netto }}</strong><span>Netto</span></div>
+      </div>
+    </div>
+  </section>
+  {% endfor %}
+
+  <div class="disclaimer">{{ disclaimer }}</div>
+  <div class="footer">Wygenerowano w BAZA Beach · {{ generated_at }}</div>
+</body>
+</html>
