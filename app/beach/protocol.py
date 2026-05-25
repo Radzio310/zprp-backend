@@ -603,11 +603,13 @@ def _fill_custom_team_squad(
     if not ct:
         return
 
-    # Players: filter by defaultPlayers selection
+    # Players: use protocolPlayers if set, else fall back to defaultPlayers
     all_players = ct.get("players") or []
+    protocol_ids = set(ct.get("protocolPlayers") or [])
     default_ids = set(ct.get("defaultPlayers") or [])
-    if default_ids:
-        selected = [p for p in all_players if p.get("id") in default_ids]
+    ids_to_use = protocol_ids if protocol_ids else default_ids
+    if ids_to_use:
+        selected = [p for p in all_players if p.get("id") in ids_to_use]
     else:
         selected = all_players
 
