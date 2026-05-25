@@ -1743,3 +1743,52 @@ class BeachReportAdminListResponse(BaseModel):
     reports: List[BeachReportItem]
     total: int
     stats: BeachReportAdminStats
+
+
+# ─────────────────── Beach: Tutorials ────────────────────────────────────────
+
+class BeachTutorialItem(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+    youtube_id: str
+    color: str
+    order_index: int
+    view_count: int
+    my_watched: bool
+    created_at: datetime
+
+
+class BeachTutorialsListResponse(BaseModel):
+    tutorials: List[BeachTutorialItem]
+
+
+class CreateBeachTutorialRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=1000)
+    youtube_id: str = Field(..., min_length=1, max_length=20)
+    color: str = Field(default="#A78BFA", max_length=20)
+
+
+class UpdateBeachTutorialRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=1000)
+    youtube_id: Optional[str] = Field(None, min_length=1, max_length=20)
+    color: Optional[str] = Field(None, max_length=20)
+
+
+class ReorderBeachTutorialsRequest(BaseModel):
+    ids: List[int]
+
+
+class BeachTutorialStatItem(BaseModel):
+    tutorial_id: int
+    user_id: int
+    user_login: str
+    user_full_name: Optional[str]
+    viewed_at: datetime
+
+
+class BeachTutorialStatsResponse(BaseModel):
+    stats: List[BeachTutorialStatItem]
+    unique_viewers: int

@@ -1296,6 +1296,33 @@ beach_activity_log = Table(
 Index("ix_beach_activity_log_area_created", beach_activity_log.c.area, beach_activity_log.c.created_at.desc())
 Index("ix_beach_activity_log_actor_created", beach_activity_log.c.actor_user_id, beach_activity_log.c.created_at.desc())
 
+# ─────────────────── BEACH: Tutorials ────────────────────────────────────────
+
+beach_tutorials = Table(
+    "beach_tutorials",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String, nullable=False),
+    Column("description", Text, nullable=True),
+    Column("youtube_id", String, nullable=False),           # 11-char YouTube video ID
+    Column("color", String, nullable=False, server_default=text("'#A78BFA'")),
+    Column("order_index", Integer, nullable=False, server_default=text("0"), index=True),
+    Column("view_count", Integer, nullable=False, server_default=text("0")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+beach_tutorial_views = Table(
+    "beach_tutorial_views",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("tutorial_id", Integer, ForeignKey("beach_tutorials.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("user_id", Integer, ForeignKey("beach_users.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("viewed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index("ix_beach_tutorial_views_unique", beach_tutorial_views.c.tutorial_id, beach_tutorial_views.c.user_id, unique=True)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
@@ -1307,4 +1334,5 @@ with engine.connect() as _conn:
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_type ON beach_notifications (type)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_created_at ON beach_notifications (created_at)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_expires_at ON beach_notifications (expires_at)"))
+    _conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_beach_tutorial_views_unique ON beach_tutorial_views (tutorial_id, user_id)"))
     _conn.commit()
