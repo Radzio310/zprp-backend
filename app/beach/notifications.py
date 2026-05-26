@@ -211,6 +211,50 @@ async def send_disq_alert(
     return {"ok": True, "sent_to": len(target_ids)}
 
 
+# ──────────── Disqualification decision notification (to the player) ────────────
+
+class DisqDecisionRequest(BaseModel):
+    player_id: int
+    player_name: str
+    team_name: str
+    ban_matches: int
+    tournament_id: int
+
+
+@router.post("/disq-decision")
+async def send_disq_decision_notification(
+    req: DisqDecisionRequest,
+    user_id: int = Depends(beach_get_current_user_id),
+):
+    """
+    Notify the disqualified player about the final decision.
+    Any authenticated beach user (head judge / admin) may call this.
+    """
+    # Verify target player exists
+    row = await database.fetch_one(
+        select(beach_users.c.id).where(beach_users.c.id == req.player_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Nie znaleziono zawodnika")
+
+    if req.ban_matches == 1:
+        ban_str = "1 mecz"
+    elif req.ban_matches in (2, 3, 4):
+        ban_str = f"{req.ban_matches} mecze"
+    else:
+        ban_str = f"{req.ban_matches} meczów"
+
+    await create_notification(
+        notif_type="player_disqualified",
+        title="Decyzja o dyskwalifikacji",
+        body=f"{req.player_name} ({req.team_name}): zawieszenie na {ban_str}",
+        data={"tournament_id": req.tournament_id, "tab": "disqualifications"},
+        target_user_ids=[req.player_id],
+    )
+
+    return {"ok": True}
+
+
 # ──────────── Broadcast notification to tournament participants ────────────
 
 class BroadcastRequest(BaseModel):
