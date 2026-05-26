@@ -580,6 +580,7 @@
       <th>Mecz</th>
       <th>Zawodnik / Osoba</th>
       <th>Drużyna</th>
+      <th>Zawieszenie</th>
       <th>Opis</th>
     </tr>
   </thead>
@@ -595,6 +596,14 @@
         {% endif %}
       </td>
       <td class="disq-team">{{ dq.team_name }}</td>
+      <td class="disq-comment" style="white-space: nowrap; font-style: normal; font-weight: 700; color: {% if dq.ban_matches and dq.ban_matches > 0 %}#C62828{% else %}#888{% endif %};">
+        {% if dq.ban_matches and dq.ban_matches > 0 %}
+          {% if dq.ban_matches == 1 %}1 mecz
+          {% elif dq.ban_matches in [2, 3, 4] %}{{ dq.ban_matches }} mecze
+          {% else %}{{ dq.ban_matches }} meczów
+          {% endif %}
+        {% else %}—{% endif %}
+      </td>
       <td class="disq-comment">{{ dq.comment or "—" }}</td>
     </tr>
     {% endfor %}
