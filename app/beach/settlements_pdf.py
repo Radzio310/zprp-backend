@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import os
 import shutil
 import tempfile
@@ -18,6 +20,30 @@ from starlette.background import BackgroundTask
 router = APIRouter(tags=["Beach: Settlements PDF"])
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
+ACCENT = "#7b2d8e"
+
+
+def _load_logo_b64() -> str:
+    candidates = [
+        TEMPLATE_DIR / "baza_beach_logo.png",
+        TEMPLATE_DIR / "baza_beach.png",
+        Path(__file__).resolve().parent.parent.parent / "baza_beach.png",
+    ]
+    logo_path = next((p for p in candidates if p.exists()), None)
+    if not logo_path:
+        return ""
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(logo_path)
+        img.thumbnail((300, 300), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, "PNG", optimize=True)
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        try:
+            return base64.b64encode(logo_path.read_bytes()).decode()
+        except Exception:
+            return ""
 TEMPLATE_NAME = "rozliczenia_sedziow.html"
 DOWNLOAD_DIR = "/tmp/beach_settlements_downloads"
 
@@ -109,6 +135,8 @@ def _build_context(req: SettlementPdfRequest) -> Dict[str, Any]:
         "judges": judges,
         "summary": {k: _money(v) for k, v in summary.items()},
         "generated_at": datetime.now(ZoneInfo("Europe/Warsaw")).strftime("%d.%m.%Y %H:%M"),
+        "accent": ACCENT,
+        "logo_b64": _load_logo_b64(),
         "disclaimer": (
             "Wyliczenia zostały przygotowane automatycznie przez aplikację BAZA Beach na podstawie "
             "wprowadzonych danych i obowiązujących w aplikacji tabel pomocniczych. Dokument ma "

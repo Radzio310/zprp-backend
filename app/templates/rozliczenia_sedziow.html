@@ -3,87 +3,255 @@
 <head>
   <meta charset="utf-8">
   <style>
-    @page { size: A4; margin: 18mm 16mm; }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: DejaVu Sans, Arial, sans-serif; color: #1d1722; background: #fff; font-size: 12px; }
+    @page {
+      size: A4;
+      margin: 16mm 14mm 18mm 14mm;
+      @bottom-center {
+        content: "Strona " counter(page) " z " counter(pages);
+        font-family: "DejaVu Sans", sans-serif;
+        font-size: 7pt;
+        color: #aaa;
+      }
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: "DejaVu Sans", sans-serif; font-size: 9pt; color: #222; line-height: 1.4; }
 
-    /* ─── HEADER ─────────────────────────────────────────────── */
-    .header { display: flex; align-items: flex-end; justify-content: space-between; padding-bottom: 14px; border-bottom: 2px solid #1d1722; margin-bottom: 16px; gap: 16px; }
-    .header-left .eyebrow { font-size: 9px; font-weight: 800; letter-spacing: 1.6px; color: #7b2d8e; text-transform: uppercase; margin-bottom: 4px; }
-    .header-left h1 { margin: 0; font-size: 22px; font-weight: 900; line-height: 1.1; }
-    .header-left .meta { margin-top: 4px; font-size: 11px; color: #6a5f72; }
-    .header-right { text-align: right; flex-shrink: 0; }
-    .header-right .logo-text { font-size: 18px; font-weight: 900; letter-spacing: -0.5px; color: #7b2d8e; }
-    .header-right .generated { margin-top: 3px; font-size: 9px; color: #908697; }
+    /* ─── HEADER ────────────────────────────────────────────── */
+    .header {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 12pt;
+      margin-bottom: 16pt;
+      padding-bottom: 10pt;
+      border-bottom: 2pt solid {{ accent }};
+    }
+    .header .logo-wrap {
+      flex-shrink: 0;
+      width: 68pt;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+    }
+    .header img.logo { width: 68pt; height: auto; display: block; }
+    .header .logo-text {
+      font-size: 16pt;
+      font-weight: 900;
+      color: {{ accent }};
+      letter-spacing: -0.5pt;
+    }
+    .header .title-block { flex: 1; text-align: center; }
+    .header .eyebrow {
+      font-size: 7.5pt;
+      font-weight: 900;
+      letter-spacing: 1.4pt;
+      color: {{ accent }};
+      text-transform: uppercase;
+      margin-bottom: 3pt;
+    }
+    .header h1 {
+      font-size: 14pt;
+      font-weight: 900;
+      color: #1a1010;
+      line-height: 1.15;
+      margin-bottom: 3pt;
+    }
+    .header .meta { font-size: 8.5pt; color: #777; }
+    .header .right-wrap {
+      flex-shrink: 0;
+      width: 68pt;
+      text-align: right;
+    }
+    .header .generated { font-size: 7.5pt; color: #aaa; margin-top: 3pt; }
 
     /* ─── BULK SUMMARY ───────────────────────────────────────── */
-    .summary-block { background: #1d1722; border-radius: 14px; padding: 14px 18px; margin-bottom: 18px; }
-    .summary-block-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-    .summary-total-label { font-size: 9px; font-weight: 800; letter-spacing: 1.4px; color: rgba(255,255,255,0.55); text-transform: uppercase; }
-    .summary-total-value { font-size: 30px; font-weight: 900; color: #FFB14A; letter-spacing: -1px; line-height: 1; margin-top: 2px; }
-    .summary-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; border-top: 1px solid rgba(255,255,255,0.12); padding-top: 8px; }
+    .summary-block {
+      background: linear-gradient(135deg, {{ accent }}22 0%, {{ accent }}0A 100%);
+      border: 1pt solid {{ accent }}33;
+      border-radius: 10pt;
+      padding: 12pt 16pt;
+      margin-bottom: 16pt;
+    }
+    .summary-block-top {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12pt;
+      margin-bottom: 10pt;
+      padding-bottom: 10pt;
+      border-bottom: 0.7pt solid {{ accent }}22;
+    }
+    .summary-total-label {
+      font-size: 8pt;
+      font-weight: 900;
+      letter-spacing: 1.2pt;
+      color: {{ accent }};
+      text-transform: uppercase;
+      margin-bottom: 2pt;
+    }
+    .summary-total-value {
+      font-size: 28pt;
+      font-weight: 900;
+      color: {{ accent }};
+      letter-spacing: -1pt;
+      line-height: 1;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 0;
+    }
     .summary-metric { text-align: center; }
-    .summary-metric strong { display: block; font-size: 11px; font-weight: 900; color: #fff; }
-    .summary-metric span { font-size: 7.5px; font-weight: 800; color: rgba(255,255,255,0.50); text-transform: uppercase; letter-spacing: .6px; }
+    .summary-metric strong { display: block; font-size: 10.5pt; font-weight: 900; color: #1a1010; }
+    .summary-metric span {
+      font-size: 7pt;
+      font-weight: 800;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5pt;
+    }
 
-    /* ─── BULK JUDGE GRID ────────────────────────────────────── */
-    .judges-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
-    .judges-grid-single { display: block; }
+    /* ─── JUDGE GRID (bulk 2 col) ────────────────────────────── */
+    .judges-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10pt;
+      margin-bottom: 14pt;
+    }
 
     /* ─── JUDGE CARD ─────────────────────────────────────────── */
-    .judge { break-inside: avoid; border: 1.5px solid #e8e0f0; border-radius: 14px; overflow: hidden; }
-    .judge-head { padding: 11px 13px; background: #faf7fd; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #ede6f5; }
+    .judge {
+      break-inside: avoid;
+      border: 0.8pt solid {{ accent }}22;
+      border-radius: 10pt;
+      overflow: hidden;
+      background: #fff;
+    }
+    .judge-head {
+      padding: 10pt 12pt;
+      background: linear-gradient(135deg, {{ accent }}0F 0%, {{ accent }}05 100%);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8pt;
+      border-bottom: 0.7pt solid {{ accent }}18;
+    }
     .judge-head-left { min-width: 0; }
-    .judge-name { font-size: 13px; font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .judge-role { margin-top: 2px; font-size: 9.5px; color: #7d7285; font-weight: 800; }
+    .judge-name {
+      font-size: 11.5pt;
+      font-weight: 900;
+      color: #1a1010;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .judge-role { margin-top: 1.5pt; font-size: 8pt; color: #888; font-weight: 700; }
     .judge-total-wrap { text-align: right; flex-shrink: 0; }
-    .judge-total-label { font-size: 7.5px; font-weight: 800; letter-spacing: 1px; color: #9b8aaa; text-transform: uppercase; }
-    .judge-total { font-size: 18px; color: #7b2d8e; font-weight: 900; white-space: nowrap; line-height: 1.1; }
+    .judge-total-label { font-size: 6.5pt; font-weight: 900; letter-spacing: 0.8pt; color: #aaa; text-transform: uppercase; }
+    .judge-total { font-size: 16pt; color: {{ accent }}; font-weight: 900; white-space: nowrap; line-height: 1.15; }
 
-    .judge-body { padding: 10px 13px 13px; }
+    .judge-body { padding: 9pt 12pt 11pt; }
 
     /* days table */
-    table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
-    th { text-align: left; padding: 5px 4px; color: #9b8aaa; font-size: 8px; letter-spacing: .5px; text-transform: uppercase; border-bottom: 1px solid #ede6f5; }
-    td { padding: 5px 4px; font-size: 10px; border-bottom: 1px solid #f5f0f8; }
-    .money { font-weight: 900; }
-    .pill { display: inline-block; border-radius: 999px; padding: 2px 7px; font-size: 8.5px; font-weight: 900; }
-    .pill-commute { background: #efe2f7; color: #7b2d8e; }
-    .pill-local { background: #f0f0f0; color: #6a5f72; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 9pt; }
+    th {
+      text-align: left;
+      padding: 4pt 3pt;
+      color: #999;
+      font-size: 7pt;
+      letter-spacing: 0.4pt;
+      text-transform: uppercase;
+      border-bottom: 0.8pt solid {{ accent }}22;
+    }
+    td { padding: 4pt 3pt; font-size: 9pt; border-bottom: 0.4pt solid #f0eff2; }
+    .money { font-weight: 900; color: #1a1010; }
+    .pill {
+      display: inline-block;
+      border-radius: 99pt;
+      padding: 1.5pt 6pt;
+      font-size: 7.5pt;
+      font-weight: 900;
+    }
+    .pill-commute { background: {{ accent }}18; color: {{ accent }}; }
+    .pill-local { background: #f0f0f0; color: #777; }
 
-    /* breakdown row */
-    .breakdown { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin-top: 8px; }
-    .mini { padding: 6px 4px; border-radius: 8px; background: #faf7fc; border: 1px solid #ede6f5; text-align: center; }
-    .mini strong { display: block; font-size: 10px; font-weight: 900; color: #1d1722; }
-    .mini span { display: block; margin-top: 1px; font-size: 7px; font-weight: 800; color: #9b8aaa; text-transform: uppercase; }
+    /* breakdown mini tiles */
+    .breakdown { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4pt; margin-top: 8pt; }
+    .mini {
+      padding: 5pt 3pt;
+      border-radius: 6pt;
+      background: {{ accent }}07;
+      border: 0.6pt solid {{ accent }}18;
+      text-align: center;
+    }
+    .mini strong { display: block; font-size: 9pt; font-weight: 900; color: #1a1010; }
+    .mini span { display: block; margin-top: 1pt; font-size: 6pt; font-weight: 800; color: #aaa; text-transform: uppercase; }
 
-    /* ŁĄCZNIE highlight */
-    .total-row { margin-top: 10px; display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; border-radius: 10px; background: #1d1722; }
-    .total-row-label { font-size: 9px; font-weight: 900; letter-spacing: 1.2px; text-transform: uppercase; color: rgba(255,255,255,0.65); }
-    .total-row-value { font-size: 20px; font-weight: 900; color: #FFB14A; letter-spacing: -0.5px; }
+    /* total bar */
+    .total-row {
+      margin-top: 9pt;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8pt 11pt;
+      border-radius: 8pt;
+      background: {{ accent }};
+    }
+    .total-row-label { font-size: 8pt; font-weight: 900; letter-spacing: 1pt; text-transform: uppercase; color: rgba(255,255,255,0.75); }
+    .total-row-value { font-size: 18pt; font-weight: 900; color: #fff; letter-spacing: -0.5pt; }
 
     /* ─── SINGLE MODE ────────────────────────────────────────── */
-    .judge-single { break-inside: avoid; border: 1.5px solid #e8e0f0; border-radius: 16px; overflow: hidden; margin-bottom: 14px; }
-    .judge-single .judge-head { padding: 14px 16px; }
-    .judge-single .judge-name { font-size: 17px; }
-    .judge-single .judge-total { font-size: 22px; }
-    .judge-single .judge-body { padding: 12px 16px 16px; }
-    .judge-single table td { font-size: 12px; padding: 7px 5px; }
-    .judge-single .breakdown { grid-template-columns: repeat(6, 1fr); gap: 7px; }
-    .judge-single .mini { padding: 8px 6px; }
-    .judge-single .mini strong { font-size: 13px; }
-    .judge-single .mini span { font-size: 8px; }
-    .judge-single .total-row { padding: 12px 16px; }
-    .judge-single .total-row-value { font-size: 26px; }
+    .judge-single {
+      break-inside: avoid;
+      border: 0.8pt solid {{ accent }}22;
+      border-radius: 12pt;
+      overflow: hidden;
+      margin-bottom: 14pt;
+      background: #fff;
+    }
+    .judge-single .judge-head { padding: 13pt 15pt; }
+    .judge-single .judge-name { font-size: 15pt; }
+    .judge-single .judge-total { font-size: 20pt; }
+    .judge-single .judge-body { padding: 11pt 15pt 15pt; }
+    .judge-single table td { font-size: 10pt; padding: 6pt 4pt; }
+    .judge-single .breakdown { grid-template-columns: repeat(6, 1fr); gap: 6pt; }
+    .judge-single .mini { padding: 7pt 5pt; }
+    .judge-single .mini strong { font-size: 12pt; }
+    .judge-single .mini span { font-size: 7pt; }
+    .judge-single .total-row { padding: 11pt 15pt; }
+    .judge-single .total-row-value { font-size: 24pt; }
 
-    /* ─── FOOTER ─────────────────────────────────────────────── */
-    .disclaimer { margin-top: 18px; padding: 11px 14px; border-radius: 12px; background: #fff8ec; border: 1px solid #ffd89d; font-size: 9.5px; line-height: 1.5; color: #6c4b19; }
-    .footer { margin-top: 10px; color: #b0a8b8; font-size: 9px; text-align: right; }
+    /* ─── DISCLAIMER & FOOTER ───────────────────────────────── */
+    .disclaimer {
+      margin-top: 16pt;
+      padding: 9pt 12pt;
+      border-radius: 8pt;
+      background: #fffbf0;
+      border: 0.7pt solid #f0d080;
+      font-size: 8pt;
+      line-height: 1.55;
+      color: #6c4b19;
+    }
+    .footer {
+      margin-top: 8pt;
+      color: #ccc;
+      font-size: 7.5pt;
+      text-align: right;
+    }
   </style>
 </head>
 <body>
+
+  <!-- HEADER -->
   <div class="header">
-    <div class="header-left">
+    <div class="logo-wrap">
+      {% if logo_b64 %}
+      <img class="logo" src="data:image/png;base64,{{ logo_b64 }}" alt="BAZA Beach">
+      {% else %}
+      <span class="logo-text">BAZA</span>
+      {% endif %}
+    </div>
+    <div class="title-block">
       <div class="eyebrow">{{ "Zbiorcze rozliczenie sędziów" if is_bulk else "Rachunek sędziowski" }}</div>
       <h1>{{ tournament.name or "Turniej" }}</h1>
       <div class="meta">
@@ -91,12 +259,12 @@
         {% if tournament.location %} · {{ tournament.location }}{% endif %}
       </div>
     </div>
-    <div class="header-right">
-      <div class="logo-text">BAZA Beach</div>
+    <div class="right-wrap">
       <div class="generated">{{ generated_at }}</div>
     </div>
   </div>
 
+  <!-- BULK SUMMARY -->
   {% if is_bulk %}
   <div class="summary-block">
     <div class="summary-block-top">
@@ -106,7 +274,7 @@
       </div>
       <div style="text-align:right;">
         <div class="summary-total-label">Sędziów</div>
-        <div style="font-size:22px;font-weight:900;color:#fff;line-height:1;margin-top:2px;">{{ judges | length }}</div>
+        <div style="font-size:20pt;font-weight:900;color:#1a1010;line-height:1;margin-top:2pt;">{{ judges | length }}</div>
       </div>
     </div>
     <div class="summary-grid">
@@ -214,6 +382,6 @@
   {% endif %}
 
   <div class="disclaimer">{{ disclaimer }}</div>
-  <div class="footer">Wygenerowano w BAZA Beach · {{ generated_at }}</div>
+  <div class="footer">Wygenerowano przez BAZA Beach · {{ generated_at }}</div>
 </body>
 </html>
