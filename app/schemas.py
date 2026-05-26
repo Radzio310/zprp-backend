@@ -1150,6 +1150,17 @@ class BeachUsersListResponse(BaseModel):
     users: List[BeachUserItem]
 
 
+class BeachClaimedIdentitiesRequest(BaseModel):
+    person_ids: List[int] = Field(default_factory=list)
+    player_ids: List[int] = Field(default_factory=list)
+    exclude_user_id: Optional[int] = None
+
+
+class BeachClaimedIdentitiesResponse(BaseModel):
+    persons: Dict[int, int] = Field(default_factory=dict)  # person_id -> user_id
+    players: Dict[int, int] = Field(default_factory=dict)  # player_id -> user_id
+
+
 class BeachLoginRequest(BaseModel):
     login: str
     password: Optional[str] = None

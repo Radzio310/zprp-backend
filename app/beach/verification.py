@@ -31,6 +31,43 @@ ALLOWED_STATUSES = {"pending", "approved", "rejected"}
 _CURRENT_SEASON_ID = "8"
 
 
+async def _ensure_identity_available(
+    *,
+    role_type: str,
+    person_id: Optional[int] = None,
+    player_id: Optional[int] = None,
+    exclude_user_id: Optional[int] = None,
+) -> None:
+    field_name = None
+    field_value = None
+    if role_type == "coach" and person_id:
+        field_name = "person_id"
+        field_value = int(person_id)
+    elif role_type == "player" and player_id:
+        field_name = "player_id"
+        field_value = int(player_id)
+    if not field_name or not field_value:
+        return
+
+    column = beach_users.c.person_id if field_name == "person_id" else beach_users.c.player_id
+    query = select(beach_users.c.id).where(
+        beach_users.c.is_active == True,  # noqa: E712
+        column == field_value,
+    )
+    if exclude_user_id:
+        query = query.where(beach_users.c.id != int(exclude_user_id))
+    existing = await database.fetch_one(query)
+    if existing:
+        raise HTTPException(
+            409,
+            {
+                "code": "IDENTITY_ALREADY_CLAIMED",
+                "field": field_name,
+                "message": "Konto dla tej osoby juz istnieje.",
+            },
+        )
+
+
 async def _expand_roles_to_all_teams(
     role_type: str,
     person_id: Optional[int],
@@ -389,6 +426,14 @@ async def create_verification(
             },
         )
 
+    meta = req.meta if isinstance(req.meta, dict) else {}
+    await _ensure_identity_available(
+        role_type=req.role,
+        person_id=meta.get("person_id"),
+        player_id=meta.get("player_id"),
+        exclude_user_id=user_id,
+    )
+
     now = datetime.now(timezone.utc)
     stmt = beach_verification_requests.insert().values(
         user_id=user_id,
@@ -468,6 +513,17 @@ async def patch_verification(
 
     ver = dict(ver_row)
     now = datetime.now(timezone.utc)
+
+    if req.status == "approved":
+        meta_for_claim = _parse_jsonish(ver.get("meta"), {})
+        role_for_claim = ver["role"]
+        applicant_id = int(ver["user_id"])
+        await _ensure_identity_available(
+            role_type=role_for_claim,
+            person_id=req.person_id or (meta_for_claim.get("person_id") if isinstance(meta_for_claim, dict) else None),
+            player_id=req.player_id or (meta_for_claim.get("player_id") if isinstance(meta_for_claim, dict) else None),
+            exclude_user_id=applicant_id,
+        )
 
     # Aktualizuj wniosek
     await database.execute(

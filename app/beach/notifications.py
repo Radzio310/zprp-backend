@@ -155,6 +155,62 @@ async def notify_admins(
         logger.error(f"notify_admins error ({notif_type}): {e}")
 
 
+# ──────────── Disqualification alert (field judge → head judge + admins) ────────────
+
+class DisqAlertRequest(BaseModel):
+    tournament_id: int
+    match_number: str
+    player_names: List[str]
+
+
+@router.post("/disq-alert")
+async def send_disq_alert(
+    req: DisqAlertRequest,
+    user_id: int = Depends(beach_get_current_user_id),
+):
+    """
+    Notify head judge + all admins that a match finished with red-card disqualifications.
+    Any authenticated beach user (typically the field judge) may call this.
+    """
+    from app.db import beach_tournaments  # local import avoids circular dep
+
+    if not req.player_names:
+        return {"ok": True, "sent_to": 0}
+
+    # Resolve head judge user_id from tournament data_json
+    tour_row = await database.fetch_one(
+        select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == req.tournament_id)
+    )
+    head_judge_id: Optional[int] = None
+    if tour_row:
+        dj = tour_row["data_json"] or {}
+        hj = dj.get("head_judge_id")
+        if hj is not None:
+            try:
+                head_judge_id = int(hj)
+            except (TypeError, ValueError):
+                pass
+
+    # Collect admin user IDs
+    admin_rows = await database.fetch_all(select(beach_admins.c.user_id))
+    admin_ids = [int(r["user_id"]) for r in admin_rows]
+
+    target_ids = list({*admin_ids, *([head_judge_id] if head_judge_id else [])})
+    if not target_ids:
+        return {"ok": True, "sent_to": 0}
+
+    names_str = ", ".join(req.player_names)
+    await create_notification(
+        notif_type="player_disqualified",
+        title="Czerwona kartka — decyzja oczekuje",
+        body=f"Mecz {req.match_number}: {names_str}",
+        data={"tournament_id": req.tournament_id, "match_id": req.match_number, "tab": "disqualifications"},
+        target_user_ids=target_ids,
+    )
+
+    return {"ok": True, "sent_to": len(target_ids)}
+
+
 # ──────────── Broadcast notification to tournament participants ────────────
 
 class BroadcastRequest(BaseModel):

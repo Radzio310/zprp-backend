@@ -26,6 +26,8 @@ from app.schemas import (
     BeachUserUpdateRequest,
     BeachUserItem,
     BeachUsersListResponse,
+    BeachClaimedIdentitiesRequest,
+    BeachClaimedIdentitiesResponse,
     BeachLoginRequest,
     BeachLoginResponse,
 )
@@ -183,6 +185,78 @@ def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
     )
 
 
+async def _claimed_identity_maps(
+    person_ids: List[int],
+    player_ids: List[int],
+    exclude_user_id: Optional[int] = None,
+) -> tuple[Dict[int, int], Dict[int, int]]:
+    clean_person_ids = sorted({int(x) for x in (person_ids or []) if x is not None})
+    clean_player_ids = sorted({int(x) for x in (player_ids or []) if x is not None})
+    claimed_persons: Dict[int, int] = {}
+    claimed_players: Dict[int, int] = {}
+
+    if clean_person_ids:
+        query = select(beach_users.c.id, beach_users.c.person_id).where(
+            beach_users.c.is_active == True,  # noqa: E712
+            beach_users.c.person_id.in_(clean_person_ids),
+        )
+        if exclude_user_id:
+            query = query.where(beach_users.c.id != int(exclude_user_id))
+        rows = await database.fetch_all(query)
+        claimed_persons = {
+            int(row["person_id"]): int(row["id"])
+            for row in rows
+            if row["person_id"] is not None
+        }
+
+    if clean_player_ids:
+        query = select(beach_users.c.id, beach_users.c.player_id).where(
+            beach_users.c.is_active == True,  # noqa: E712
+            beach_users.c.player_id.in_(clean_player_ids),
+        )
+        if exclude_user_id:
+            query = query.where(beach_users.c.id != int(exclude_user_id))
+        rows = await database.fetch_all(query)
+        claimed_players = {
+            int(row["player_id"]): int(row["id"])
+            for row in rows
+            if row["player_id"] is not None
+        }
+
+    return claimed_persons, claimed_players
+
+
+async def _ensure_identity_available(
+    *,
+    person_id: Optional[int] = None,
+    player_id: Optional[int] = None,
+    exclude_user_id: Optional[int] = None,
+) -> None:
+    claimed_persons, claimed_players = await _claimed_identity_maps(
+        [person_id] if person_id else [],
+        [player_id] if player_id else [],
+        exclude_user_id=exclude_user_id,
+    )
+    if person_id and int(person_id) in claimed_persons:
+        raise HTTPException(
+            409,
+            {
+                "code": "IDENTITY_ALREADY_CLAIMED",
+                "field": "person_id",
+                "message": "Konto dla tej osoby juz istnieje.",
+            },
+        )
+    if player_id and int(player_id) in claimed_players:
+        raise HTTPException(
+            409,
+            {
+                "code": "IDENTITY_ALREADY_CLAIMED",
+                "field": "player_id",
+                "message": "Konto dla tej osoby juz istnieje.",
+            },
+        )
+
+
 async def _check_is_admin(user_id: int) -> bool:
     row = await database.fetch_one(
         select(beach_admins.c.user_id).where(beach_admins.c.user_id == user_id)
@@ -336,6 +410,20 @@ async def list_users(
     return BeachUsersListResponse(users=result)
 
 
+@router.post(
+    "/claimed-identities",
+    response_model=BeachClaimedIdentitiesResponse,
+    summary="Sprawdz zajete identyfikatory osob w aplikacji BEACH",
+)
+async def claimed_identities(req: BeachClaimedIdentitiesRequest):
+    persons, players = await _claimed_identity_maps(
+        req.person_ids,
+        req.player_ids,
+        exclude_user_id=req.exclude_user_id,
+    )
+    return BeachClaimedIdentitiesResponse(persons=persons, players=players)
+
+
 @router.get("/me", response_model=BeachUserItem, summary="Pobierz zalogowanego użytkownika (BEACH)")
 async def get_me(user_id: int = Depends(beach_get_current_user_id)):
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
@@ -450,6 +538,11 @@ async def create_user(req: BeachUserCreateRequest):
     badges, _ = _add_badge_to_jsonish(badges, DEFAULT_LOVER_BADGE_NAME)
     roles = _normalize_roles(req.roles)
     device_ids = req.device_ids or []
+
+    await _ensure_identity_available(
+        person_id=req.person_id,
+        player_id=req.player_id,
+    )
 
     stmt = beach_users.insert().values(
         judge_id=req.judge_id,
@@ -727,6 +820,18 @@ async def patch_user(user_id: int, req: BeachUserUpdateRequest):
 
     if "roles" in update_data:
         update_data["roles"] = _normalize_roles(update_data["roles"])
+
+    if "person_id" in update_data and update_data["person_id"]:
+        await _ensure_identity_available(
+            person_id=int(update_data["person_id"]),
+            exclude_user_id=user_id,
+        )
+
+    if "player_id" in update_data and update_data["player_id"]:
+        await _ensure_identity_available(
+            player_id=int(update_data["player_id"]),
+            exclude_user_id=user_id,
+        )
 
     if "device_ids" in update_data:
         update_data["device_ids"] = _merge_device_ids(

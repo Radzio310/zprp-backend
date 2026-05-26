@@ -1646,6 +1646,140 @@ async def settlements_update_tournament(
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
+# ─────────────────── PATCH disq-update (Sędzia główny / boiskowy / admin) ───────────────────
+
+class DisqUpdateRequest(BaseModel):
+    """Zapis decyzji dyskwalifikacyjnych w data_json.disqualifications."""
+    disqualifications: list
+
+
+@router.patch(
+    "/{tournament_id}/disq-update",
+    response_model=BeachTournamentItem,
+    summary="Aktualizacja decyzji dyskwalifikacyjnych turnieju",
+)
+async def disq_update_tournament(
+    tournament_id: int,
+    body: DisqUpdateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    """
+    Endpoint dla sędziego głównego, sędziego boiskowego lub admina.
+    Zapisuje data_json.disqualifications.
+    Po zapisaniu nowej decyzji (decided_at ustawione) wysyła push do zawodnika i trenerów drużyny.
+    """
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not existing:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+
+    existing_d = dict(existing)
+    data = _parse_json(existing_d["data_json"])
+
+    is_admin_flag = await _is_admin(current_user_id)
+    head_judge_id = data.get("head_judge_id")
+    is_head_judge = isinstance(head_judge_id, int) and head_judge_id == current_user_id
+    judge_ids = {
+        int(j.get("id"))
+        for j in (data.get("judges") or [])
+        if isinstance(j, dict) and j.get("id") is not None
+    }
+    is_assigned_judge = current_user_id in judge_ids
+
+    if not (is_admin_flag or is_head_judge or is_assigned_judge):
+        raise HTTPException(403, "Brak uprawnień do zapisu decyzji dyskwalifikacyjnych")
+
+    # Znajdź nowo zdecydowane wpisy (compared to old list)
+    old_decided_ids = {
+        d.get("id")
+        for d in (data.get("disqualifications") or [])
+        if isinstance(d, dict) and d.get("decided_at")
+    }
+    data["disqualifications"] = body.disqualifications
+
+    await database.execute(
+        update(beach_tournaments)
+        .where(beach_tournaments.c.id == tournament_id)
+        .values(data_json=data, updated_at=datetime.now(timezone.utc))
+    )
+
+    # Wyślij powiadomienia dla nowo zdecydowanych dyskwalifikacji
+    tour_name = existing_d.get("name", "Turniej")
+    for disq in body.disqualifications:
+        if not isinstance(disq, dict):
+            continue
+        if not disq.get("decided_at"):
+            continue
+        if disq.get("id") in old_decided_ids:
+            continue  # Already notified before
+
+        player_name = disq.get("player_name", "Zawodnik")
+        ban_matches = disq.get("ban_matches", 0)
+        ban_str = f"{ban_matches} meczów" if ban_matches else "decyzja w toku"
+        notif_title = "Decyzja o dyskwalifikacji"
+        notif_body = f"{player_name}: zawieszenie na {ban_str} — {tour_name}"
+
+        target_ids: list[int] = []
+        # Player
+        if disq.get("player_id"):
+            try:
+                target_ids.append(int(disq["player_id"]))
+            except (ValueError, TypeError):
+                pass
+
+        # Coaches of the team (via beach_users.roles JSON array)
+        team_id = disq.get("team_id")
+        if team_id:
+            try:
+                from sqlalchemy import text as sa_text
+                coach_rows = await database.fetch_all(
+                    sa_text("""
+                        SELECT id FROM beach_users
+                        WHERE EXISTS (
+                            SELECT 1 FROM jsonb_array_elements(roles) r
+                            WHERE r->>'type' = 'coach'
+                            AND r->>'verified' = 'approved'
+                            AND (r->>'team_id')::int = :team_id
+                        )
+                    """).bindparams(team_id=int(team_id))
+                )
+                for row in coach_rows:
+                    uid = row["id"]
+                    if uid and uid not in target_ids:
+                        target_ids.append(uid)
+            except Exception:
+                pass  # Błąd zapytania — pomijamy trenerów
+
+        if target_ids:
+            await create_notification(
+                notif_type="player_disqualified",
+                title=notif_title,
+                body=notif_body,
+                data={"tournament_id": tournament_id, "disq_id": disq.get("id"), "tab": "disqualifications"},
+                target_user_ids=target_ids,
+            )
+
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    row_d = dict(row)
+    data2 = _normalize_event_data(row_d["data_json"])
+    if not data2.get("invited_ids"):
+        data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
+
+    await log_activity(
+        area="tournament",
+        action="tournament.disqualifications_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=existing_d.get("name", ""),
+        details={"count": len(body.disqualifications)},
+    )
+    return _attach_computed_fields(row_d, data2, current_user_id)
+
+
 _SCHEDULE_JSON_SCHEMA = """\
 {
   "config": {
