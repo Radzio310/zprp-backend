@@ -248,7 +248,8 @@ async def send_disq_decision_notification(
     player_row = await database.fetch_one(
         select(beach_users.c.id).where(beach_users.c.id == req.player_id)
     )
-    if player_row:
+    player_has_account = player_row is not None
+    if player_has_account:
         await create_notification(
             notif_type="player_disqualified",
             title="Decyzja o Twojej dyskwalifikacji",
@@ -259,6 +260,7 @@ async def send_disq_decision_notification(
 
     # ── 2. Team coaches (companions with role TRENER) ──
     coach_user_ids: List[int] = []
+    total_coaches = 0
     if req.team_id is not None:
         team_row = await database.fetch_one(
             select(beach_teams.c.companions_json).where(beach_teams.c.id == req.team_id)
@@ -272,6 +274,7 @@ async def send_disq_decision_notification(
                 and str(c.get("role", "")).upper() == "TRENER"
                 and c.get("person_id") is not None
             ]
+            total_coaches = len(coach_person_ids)
             if coach_person_ids:
                 coach_rows = await database.fetch_all(
                     select(beach_users.c.id).where(
@@ -291,19 +294,25 @@ async def send_disq_decision_notification(
 
     # ── 3. Tournament judges ──
     judge_user_ids: List[int] = []
+    total_judges = 0
     tour_row = await database.fetch_one(
         select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == req.tournament_id)
     )
     if tour_row:
         dj = tour_row["data_json"] or {}
         judges: list = dj.get("judges") or []
+        # Total judges = all assigned to tournament, excluding the caller
+        total_judges = sum(
+            1 for j in judges
+            if isinstance(j, dict) and j.get("id") is not None and int(j["id"]) != user_id
+        )
         already_notified = {req.player_id, *coach_user_ids}
         judge_user_ids = [
             int(j["id"])
             for j in judges
             if isinstance(j, dict) and j.get("id") is not None
             and int(j["id"]) not in already_notified
-            and int(j["id"]) != user_id  # don't notify the caller (they made the decision)
+            and int(j["id"]) != user_id
         ]
 
     if judge_user_ids:
@@ -315,8 +324,12 @@ async def send_disq_decision_notification(
             target_user_ids=judge_user_ids,
         )
 
-    total = (1 if player_row else 0) + len(coach_user_ids) + len(judge_user_ids)
-    return {"ok": True, "sent_to": total}
+    return {
+        "ok": True,
+        "player": {"notified": player_has_account},
+        "coaches": {"notified": len(coach_user_ids), "total": total_coaches},
+        "judges": {"notified": len(judge_user_ids), "total": total_judges},
+    }
 
 
 # ──────────── Broadcast notification to tournament participants ────────────
