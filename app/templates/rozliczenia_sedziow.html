@@ -17,13 +17,14 @@
     .header-right .generated { margin-top: 3px; font-size: 9px; color: #908697; }
 
     /* ─── BULK SUMMARY ───────────────────────────────────────── */
-    .summary-block { background: #1d1722; border-radius: 14px; padding: 16px 20px; margin-bottom: 18px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .summary-block { background: #1d1722; border-radius: 14px; padding: 14px 18px; margin-bottom: 18px; }
+    .summary-block-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
     .summary-total-label { font-size: 9px; font-weight: 800; letter-spacing: 1.4px; color: rgba(255,255,255,0.55); text-transform: uppercase; }
-    .summary-total-value { font-size: 34px; font-weight: 900; color: #FFB14A; letter-spacing: -1px; line-height: 1; margin-top: 2px; }
-    .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; flex-shrink: 0; }
+    .summary-total-value { font-size: 30px; font-weight: 900; color: #FFB14A; letter-spacing: -1px; line-height: 1; margin-top: 2px; }
+    .summary-grid { display: grid; grid-template-columns: repeat(3, auto); gap: 6px 16px; }
     .summary-metric { text-align: right; }
-    .summary-metric strong { display: block; font-size: 13px; font-weight: 900; color: #fff; }
-    .summary-metric span { font-size: 8.5px; font-weight: 800; color: rgba(255,255,255,0.50); text-transform: uppercase; letter-spacing: .6px; }
+    .summary-metric strong { display: block; font-size: 12px; font-weight: 900; color: #fff; }
+    .summary-metric span { font-size: 8px; font-weight: 800; color: rgba(255,255,255,0.50); text-transform: uppercase; letter-spacing: .6px; }
 
     /* ─── BULK JUDGE GRID ────────────────────────────────────── */
     .judges-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
@@ -98,17 +99,19 @@
 
   {% if is_bulk %}
   <div class="summary-block">
-    <div>
-      <div class="summary-total-label">Łącznie ryczałt</div>
-      <div class="summary-total-value">{{ summary.total }}</div>
-    </div>
-    <div class="summary-grid">
-      <div class="summary-metric"><strong>{{ summary.brutto }}</strong><span>Brutto</span></div>
-      <div class="summary-metric"><strong>{{ summary.netto }}</strong><span>Netto</span></div>
-      <div class="summary-metric"><strong>{{ summary.travel }}</strong><span>Dojazd</span></div>
-      <div class="summary-metric"><strong>{{ summary.costs }}</strong><span>Koszty UP</span></div>
-      <div class="summary-metric"><strong>{{ summary.tax }}</strong><span>Podatek</span></div>
-      <div class="summary-metric"><strong>{{ judges | length }}</strong><span>Sędziów</span></div>
+    <div class="summary-block-row">
+      <div>
+        <div class="summary-total-label">Łącznie ryczałt</div>
+        <div class="summary-total-value">{{ summary.total }}</div>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-metric"><strong>{{ summary.brutto }}</strong><span>Brutto</span></div>
+        <div class="summary-metric"><strong>{{ summary.netto }}</strong><span>Netto</span></div>
+        <div class="summary-metric"><strong>{{ summary.travel }}</strong><span>Dojazd</span></div>
+        <div class="summary-metric"><strong>{{ summary.costs }}</strong><span>Koszty UP</span></div>
+        <div class="summary-metric"><strong>{{ summary.tax }}</strong><span>Podatek</span></div>
+        <div class="summary-metric"><strong>{{ judges | length }}</strong><span>Sędziów</span></div>
+      </div>
     </div>
   </div>
 
@@ -142,12 +145,12 @@
           </tbody>
         </table>
         <div class="breakdown">
-          <div class="mini"><strong>{{ judge.distance_fmt }}</strong><span>Km</span></div>
-          <div class="mini"><strong>{{ judge.result_fmt.travel }}</strong><span>Dojazd</span></div>
-          <div class="mini"><strong>{{ judge.result_fmt.brutto }}</strong><span>Brutto</span></div>
-          <div class="mini"><strong>{{ judge.result_fmt.costs }}</strong><span>Koszty</span></div>
-          <div class="mini"><strong>{{ judge.result_fmt.tax }}</strong><span>Podatek</span></div>
-          <div class="mini"><strong>{{ judge.result_fmt.netto }}</strong><span>Netto</span></div>
+          <div class="mini"><strong>{{ judge.distance_fmt_n }}</strong><span>Km</span></div>
+          <div class="mini"><strong>{{ judge.result_fmt_n.travel }}</strong><span>Dojazd</span></div>
+          <div class="mini"><strong>{{ judge.result_fmt_n.brutto }}</strong><span>Brutto</span></div>
+          <div class="mini"><strong>{{ judge.result_fmt_n.costs }}</strong><span>Koszty</span></div>
+          <div class="mini"><strong>{{ judge.result_fmt_n.tax }}</strong><span>Podatek</span></div>
+          <div class="mini"><strong>{{ judge.result_fmt_n.netto }}</strong><span>Netto</span></div>
         </div>
         <div class="total-row">
           <span class="total-row-label">Łącznie</span>
@@ -189,12 +192,12 @@
         </tbody>
       </table>
       <div class="breakdown">
-        <div class="mini"><strong>{{ judge.distance_fmt }}</strong><span>Km</span></div>
-        <div class="mini"><strong>{{ judge.result_fmt.travel }}</strong><span>Dojazd</span></div>
-        <div class="mini"><strong>{{ judge.result_fmt.brutto }}</strong><span>Brutto</span></div>
-        <div class="mini"><strong>{{ judge.result_fmt.costs }}</strong><span>Koszty UP</span></div>
-        <div class="mini"><strong>{{ judge.result_fmt.tax }}</strong><span>Podatek</span></div>
-        <div class="mini"><strong>{{ judge.result_fmt.netto }}</strong><span>Netto</span></div>
+        <div class="mini"><strong>{{ judge.distance_fmt_n }}</strong><span>Km</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt_n.travel }}</strong><span>Dojazd</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt_n.brutto }}</strong><span>Brutto</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt_n.costs }}</strong><span>Koszty UP</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt_n.tax }}</strong><span>Podatek</span></div>
+        <div class="mini"><strong>{{ judge.result_fmt_n.netto }}</strong><span>Netto</span></div>
       </div>
       <div class="total-row">
         <span class="total-row-label">Łącznie do wypłaty</span>

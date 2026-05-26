@@ -50,12 +50,30 @@ def _money(value: Any) -> str:
     return f"{n:,.0f}".replace(",", " ") + " zł"
 
 
+def _money_n(value: Any) -> str:
+    """Number only, no currency unit."""
+    try:
+        n = round(float(value or 0))
+    except Exception:
+        n = 0
+    return f"{n:,.0f}".replace(",", " ")
+
+
 def _km(value: Any) -> str:
     try:
         n = float(value or 0)
     except Exception:
         n = 0
     return f"{n:.1f}".replace(".", ",") + " km"
+
+
+def _km_n(value: Any) -> str:
+    """Number only, no km unit."""
+    try:
+        n = float(value or 0)
+    except Exception:
+        n = 0
+    return f"{n:.1f}".replace(".", ",")
 
 
 def _safe_filename_part(s: str, max_len: int = 44) -> str:
@@ -79,7 +97,9 @@ def _build_context(req: SettlementPdfRequest) -> Dict[str, Any]:
     for j in judges:
         result = j.get("result") or {}
         j["result_fmt"] = {k: _money(result.get(k, 0)) for k in ("travel", "brutto", "costs", "tax", "netto", "total")}
+        j["result_fmt_n"] = {k: _money_n(result.get(k, 0)) for k in ("travel", "brutto", "costs", "tax", "netto", "total")}
         j["distance_fmt"] = _km(j.get("distance_km", 0))
+        j["distance_fmt_n"] = _km_n(j.get("distance_km", 0))
         for day in j.get("days") or []:
             day["brutto_fmt"] = _money(day.get("brutto", 0))
     return {
