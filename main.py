@@ -217,6 +217,7 @@ logger = logging.getLogger("uvicorn")
 _CONTACTS_CLUB_REFACTOR_LOCK_KEY = 987654321
 
 _last_contacts_refactor_utc_day: str | None = None  # np. "2026-01-21"
+_last_backup_utc_day: str | None = None
 
 
 def _norm_text_key(s: str) -> str:
@@ -574,6 +575,15 @@ _push_task: asyncio.Task | None = None
 _notif_generator_task: asyncio.Task | None = None
 _beach_sync_task: asyncio.Task | None = None
 
+
+def _run_backup_sync() -> None:
+    """Synchronous wrapper for run_backup() — called via run_in_executor from cleanup_loop."""
+    import logging as _log
+    _log.getLogger("backup_external").setLevel(_log.INFO)
+    from scripts.backup_external import run_backup
+    run_backup()
+
+
 async def _cleanup_loop():
     retention_days = int(os.getenv("PROEL_RETENTION_DAYS", "7"))
     interval_sec = int(os.getenv("PROEL_CLEANUP_INTERVAL_SECONDS", str(24*60*60)))
@@ -715,6 +725,18 @@ async def _cleanup_loop():
 
             # 🧩 Raz na dobę: scal duplikaty klubów w 'kontakty' (sędziów nie ruszamy)
             await refactor_club_contacts_once_per_utc_day()
+
+            # 🗄️ External backup: raz na dobę UTC, tylko jeśli S3 skonfigurowany
+            global _last_backup_utc_day
+            _today_backup = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if _last_backup_utc_day != _today_backup and os.getenv("BACKUP_S3_BUCKET"):
+                _last_backup_utc_day = _today_backup
+                try:
+                    logger.info("🗄️ External backup: starting...")
+                    await asyncio.get_running_loop().run_in_executor(None, _run_backup_sync)
+                    logger.info("🗄️ External backup: completed")
+                except Exception as _backup_exc:
+                    logger.error("🗄️ External backup FAILED: %s", _backup_exc)
 
         except Exception:
             logger.exception("Cleanup loop error")

@@ -7,5 +7,6 @@ __pycache__/
 
 # Lokalne
 .env
+.env.cloudflare
 service-account.json
 PUSH_ADMIN_KEY.txt

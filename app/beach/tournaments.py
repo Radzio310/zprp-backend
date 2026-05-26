@@ -566,7 +566,21 @@ async def create_tournament(
     req: CreateBeachTournamentRequest,
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    if not await _is_admin(current_user_id):
+    user_row = await database.fetch_one(
+        select(
+            beach_users.c.id,
+            beach_users.c.full_name,
+            beach_users.c.judge_id,
+            beach_users.c.badges,
+        ).where(beach_users.c.id == current_user_id)
+    )
+    if not user_row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    is_admin_user = await _is_admin(current_user_id)
+    user_badges = set(_extract_badge_names(user_row["badges"]))
+    is_host_badge_user = "Gospodarz zawodów" in user_badges
+    if not (is_admin_user or is_host_badge_user):
         raise HTTPException(403, "Brak uprawnień")
 
     if not req.name or not req.name.strip():
@@ -584,6 +598,22 @@ async def create_tournament(
 
     now = datetime.now(timezone.utc)
     data = _normalize_event_data(req.data_json)
+
+    if is_host_badge_user and not is_admin_user:
+        hosts = [
+            h
+            for h in (data.get("hosts") or [])
+            if isinstance(h, dict) and isinstance(h.get("id"), int)
+        ]
+        if not any(int(h["id"]) == current_user_id for h in hosts):
+            hosts.append(
+                {
+                    "id": current_user_id,
+                    "full_name": user_row["full_name"],
+                    "judge_id": user_row["judge_id"] or None,
+                }
+            )
+        data["hosts"] = hosts
 
     if not data.get("invited_ids"):
         data["invited_ids"] = await _compute_invited_ids_for_badge(req.badge, data)
