@@ -82,7 +82,10 @@ def _send_webhook(url: str, message: str, success: bool) -> None:
             payload = {"embeds": [{"title": title, "description": message, "color": color}]}
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"}
+            url, data=data, headers={
+                "Content-Type": "application/json",
+                "User-Agent": "BAZA-Backup/1.0 (zprp-backend)",
+            }
         )
         urllib.request.urlopen(req, timeout=10)
     except Exception as exc:
