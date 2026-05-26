@@ -18,13 +18,13 @@
 
     /* ─── BULK SUMMARY ───────────────────────────────────────── */
     .summary-block { background: #1d1722; border-radius: 14px; padding: 14px 18px; margin-bottom: 18px; }
-    .summary-block-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .summary-block-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
     .summary-total-label { font-size: 9px; font-weight: 800; letter-spacing: 1.4px; color: rgba(255,255,255,0.55); text-transform: uppercase; }
     .summary-total-value { font-size: 30px; font-weight: 900; color: #FFB14A; letter-spacing: -1px; line-height: 1; margin-top: 2px; }
-    .summary-grid { display: grid; grid-template-columns: repeat(3, auto); gap: 6px 16px; }
-    .summary-metric { text-align: right; }
-    .summary-metric strong { display: block; font-size: 12px; font-weight: 900; color: #fff; }
-    .summary-metric span { font-size: 8px; font-weight: 800; color: rgba(255,255,255,0.50); text-transform: uppercase; letter-spacing: .6px; }
+    .summary-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; border-top: 1px solid rgba(255,255,255,0.12); padding-top: 8px; }
+    .summary-metric { text-align: center; }
+    .summary-metric strong { display: block; font-size: 11px; font-weight: 900; color: #fff; }
+    .summary-metric span { font-size: 7.5px; font-weight: 800; color: rgba(255,255,255,0.50); text-transform: uppercase; letter-spacing: .6px; }
 
     /* ─── BULK JUDGE GRID ────────────────────────────────────── */
     .judges-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
@@ -99,19 +99,23 @@
 
   {% if is_bulk %}
   <div class="summary-block">
-    <div class="summary-block-row">
+    <div class="summary-block-top">
       <div>
-        <div class="summary-total-label">Łącznie ryczałt</div>
+        <div class="summary-total-label">Łącznie ryczałt sędziowski</div>
         <div class="summary-total-value">{{ summary.total }}</div>
       </div>
-      <div class="summary-grid">
-        <div class="summary-metric"><strong>{{ summary.brutto }}</strong><span>Brutto</span></div>
-        <div class="summary-metric"><strong>{{ summary.netto }}</strong><span>Netto</span></div>
-        <div class="summary-metric"><strong>{{ summary.travel }}</strong><span>Dojazd</span></div>
-        <div class="summary-metric"><strong>{{ summary.costs }}</strong><span>Koszty UP</span></div>
-        <div class="summary-metric"><strong>{{ summary.tax }}</strong><span>Podatek</span></div>
-        <div class="summary-metric"><strong>{{ judges | length }}</strong><span>Sędziów</span></div>
+      <div style="text-align:right;">
+        <div class="summary-total-label">Sędziów</div>
+        <div style="font-size:22px;font-weight:900;color:#fff;line-height:1;margin-top:2px;">{{ judges | length }}</div>
       </div>
+    </div>
+    <div class="summary-grid">
+      <div class="summary-metric"><strong>{{ summary.brutto }}</strong><span>Brutto</span></div>
+      <div class="summary-metric"><strong>{{ summary.netto }}</strong><span>Netto</span></div>
+      <div class="summary-metric"><strong>{{ summary.travel }}</strong><span>Dojazd</span></div>
+      <div class="summary-metric"><strong>{{ summary.costs }}</strong><span>Koszty UP</span></div>
+      <div class="summary-metric"><strong>{{ summary.tax }}</strong><span>Podatek</span></div>
+      <div class="summary-metric"><strong>{{ summary.total }}</strong><span>Łącznie</span></div>
     </div>
   </div>
 
