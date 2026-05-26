@@ -193,12 +193,25 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 8pt 11pt;
+      padding: 9pt 13pt;
       border-radius: 8pt;
-      background: {{ accent }};
+      background: linear-gradient(135deg, #1e0e28 0%, #2e1540 100%);
+      border: 0.7pt solid {{ accent }}55;
     }
-    .total-row-label { font-size: 8pt; font-weight: 900; letter-spacing: 1pt; text-transform: uppercase; color: rgba(255,255,255,0.75); }
-    .total-row-value { font-size: 18pt; font-weight: 900; color: #fff; letter-spacing: -0.5pt; }
+    .total-row-label {
+      font-size: 7.5pt;
+      font-weight: 900;
+      letter-spacing: 1pt;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.50);
+    }
+    .total-row-value {
+      font-size: 16pt;
+      font-weight: 900;
+      color: #fff;
+      letter-spacing: -0.3pt;
+      white-space: nowrap;
+    }
 
     /* ─── SINGLE MODE ────────────────────────────────────────── */
     .judge-single {
@@ -219,7 +232,7 @@
     .judge-single .mini strong { font-size: 12pt; }
     .judge-single .mini span { font-size: 7pt; }
     .judge-single .total-row { padding: 11pt 15pt; }
-    .judge-single .total-row-value { font-size: 24pt; }
+    .judge-single .total-row-value { font-size: 20pt; white-space: nowrap; }
 
     /* ─── DISCLAIMER & FOOTER ───────────────────────────────── */
     .disclaimer {
