@@ -113,57 +113,81 @@ def _find_soffice() -> tuple[str, Optional[str]]:
 def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
     """Convert xlsx → pdf using LibreOffice. Returns the pdf path."""
     import subprocess
+    import time
     soffice, lo_program_dir = _find_soffice()
     if not soffice:
         raise RuntimeError(
             "Brak LibreOffice (soffice) w środowisku. Doinstaluj libreoffice w Dockerfile."
         )
 
-    env = os.environ.copy()
-    env.setdefault("HOME", "/tmp")
-    env.setdefault("XDG_CACHE_HOME", "/tmp")
-    env.setdefault("XDG_CONFIG_HOME", "/tmp")
+    last_err: Optional[str] = None
+    # Retry on exit code 81 ("user installation already in use" / startup race).
+    # Each attempt gets a brand-new isolated HOME + profile dir.
+    for attempt in range(3):
+        # Fully isolated HOME per invocation: LibreOffice writes lock files
+        # into $HOME/.config/libreoffice/N/user regardless of UserInstallation,
+        # and concurrent / quickly-successive runs sharing HOME=/tmp collide
+        # with exit code 81 and empty stderr.
+        home_dir = tempfile.mkdtemp(prefix="lo_home_", dir="/tmp")
+        profile_dir = tempfile.mkdtemp(prefix="lo_profile_", dir="/tmp")
 
-    if lo_program_dir:
-        # soffice.bin needs these — normally set by the shell wrapper scripts.
-        env["LD_LIBRARY_PATH"] = lo_program_dir + ":" + env.get("LD_LIBRARY_PATH", "")
-        env["URE_BOOTSTRAP"] = f"file://{lo_program_dir}/fundamentalrc"
-        # Force the headless VCL plugin so soffice.bin doesn't look for a display.
-        env["SAL_USE_VCLPLUGIN"] = "svp"
+        env = os.environ.copy()
+        env["HOME"] = home_dir
+        env["XDG_CACHE_HOME"] = os.path.join(home_dir, ".cache")
+        env["XDG_CONFIG_HOME"] = os.path.join(home_dir, ".config")
+        env["TMPDIR"] = home_dir
+        os.makedirs(env["XDG_CACHE_HOME"], exist_ok=True)
+        os.makedirs(env["XDG_CONFIG_HOME"], exist_ok=True)
 
-    # Use a UNIQUE profile dir per invocation. Reusing one across sequential
-    # conversions (as in bulk protocol generation) trips LibreOffice exit code
-    # 81 ("user installation already in use") because stale lock files (.lock
-    # / SingletonLock) from a previous run aren't always cleaned up in time.
-    profile_dir = tempfile.mkdtemp(prefix="lo_profile_", dir="/tmp")
+        if lo_program_dir:
+            # soffice.bin needs these — normally set by the shell wrapper scripts.
+            env["LD_LIBRARY_PATH"] = lo_program_dir + ":" + env.get("LD_LIBRARY_PATH", "")
+            env["URE_BOOTSTRAP"] = f"file://{lo_program_dir}/fundamentalrc"
+            # Force the headless VCL plugin so soffice.bin doesn't look for a display.
+            env["SAL_USE_VCLPLUGIN"] = "svp"
 
-    cmd = [
-        soffice,
-        "--headless", "--nologo", "--nolockcheck",
-        "--nodefault", "--norestore",
-        f"-env:UserInstallation=file://{profile_dir}",
-        "--convert-to", "pdf",
-        "--outdir", out_dir,
-        xlsx_path,
-    ]
+        cmd = [
+            soffice,
+            "--headless", "--nologo", "--nolockcheck",
+            "--nodefault", "--norestore", "--nofirststartwizard",
+            f"-env:UserInstallation=file://{profile_dir}",
+            "--convert-to", "pdf",
+            "--outdir", out_dir,
+            xlsx_path,
+        ]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            timeout=90,
-        )
-
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"LibreOffice convert failed (code={proc.returncode}). "
-                f"stderr={proc.stderr[:500]}"
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                timeout=90,
             )
-    finally:
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        finally:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            shutil.rmtree(home_dir, ignore_errors=True)
+
+        if proc.returncode == 0:
+            break
+
+        last_err = (
+            f"code={proc.returncode} "
+            f"stderr={(proc.stderr or '').strip()[:500]} "
+            f"stdout={(proc.stdout or '').strip()[:200]}"
+        )
+        # Only retry on the specific "in use" / startup race codes.
+        if proc.returncode not in (81, 77):
+            raise RuntimeError(f"LibreOffice convert failed ({last_err})")
+
+        logger.warning("LibreOffice convert attempt %d failed (%s); retrying", attempt + 1, last_err)
+        time.sleep(0.5 * (attempt + 1))
+    else:
+        raise RuntimeError(f"LibreOffice convert failed after retries ({last_err})")
+
+    base = os.path.splitext(os.path.basename(xlsx_path))[0]
+    pdf_path = os.path.join(out_dir, base + ".pdf")
 
     base = os.path.splitext(os.path.basename(xlsx_path))[0]
     pdf_path = os.path.join(out_dir, base + ".pdf")
