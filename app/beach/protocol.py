@@ -87,25 +87,33 @@ def _strip_address_to_street_city(address: str) -> str:
     return ", ".join(parts)
 
 
-def _find_soffice() -> Optional[str]:
-    """Find the LibreOffice executable, preferring the binary over the shell wrapper."""
-    # Prefer soffice.bin directly — the shell wrapper /usr/bin/soffice forks an extra
-    # process which fails in containers with tight PID limits ("Cannot fork").
-    bin_candidates = [
-        "/usr/lib/libreoffice/program/soffice.bin",
-        "/usr/lib64/libreoffice/program/soffice.bin",
-        "/opt/libreoffice/program/soffice.bin",
-    ]
-    for candidate in bin_candidates:
-        if os.path.isfile(candidate):
-            return candidate
-    return shutil.which("soffice") or shutil.which("libreoffice")
+_LO_PROGRAM_DIRS = [
+    "/usr/lib/libreoffice/program",
+    "/usr/lib64/libreoffice/program",
+    "/opt/libreoffice/program",
+]
+
+
+def _find_soffice() -> tuple[str, Optional[str]]:
+    """Return (executable_path, lo_program_dir_or_None).
+
+    Prefers soffice.bin over the shell wrapper — the wrapper calls
+    /usr/bin/soffice → /usr/lib/.../soffice (another script) → exec soffice.bin,
+    and that intermediate fork fails in containers with tight PID limits.
+    When we use soffice.bin directly we must reconstruct the env the wrapper sets.
+    """
+    for d in _LO_PROGRAM_DIRS:
+        bin_path = os.path.join(d, "soffice.bin")
+        if os.path.isfile(bin_path):
+            return bin_path, d
+    fallback = shutil.which("soffice") or shutil.which("libreoffice") or ""
+    return fallback, None
 
 
 def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
     """Convert xlsx → pdf using LibreOffice. Returns the pdf path."""
     import subprocess
-    soffice = _find_soffice()
+    soffice, lo_program_dir = _find_soffice()
     if not soffice:
         raise RuntimeError(
             "Brak LibreOffice (soffice) w środowisku. Doinstaluj libreoffice w Dockerfile."
@@ -115,6 +123,13 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
     env.setdefault("HOME", "/tmp")
     env.setdefault("XDG_CACHE_HOME", "/tmp")
     env.setdefault("XDG_CONFIG_HOME", "/tmp")
+
+    if lo_program_dir:
+        # soffice.bin needs these — normally set by the shell wrapper scripts.
+        env["LD_LIBRARY_PATH"] = lo_program_dir + ":" + env.get("LD_LIBRARY_PATH", "")
+        env["URE_BOOTSTRAP"] = f"file://{lo_program_dir}/fundamentalrc"
+        # Force the headless VCL plugin so soffice.bin doesn't look for a display.
+        env["SAL_USE_VCLPLUGIN"] = "svp"
 
     profile_dir = os.path.join(out_dir, "lo_profile")
     os.makedirs(profile_dir, exist_ok=True)
