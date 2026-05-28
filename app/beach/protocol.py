@@ -131,8 +131,11 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
         # Force the headless VCL plugin so soffice.bin doesn't look for a display.
         env["SAL_USE_VCLPLUGIN"] = "svp"
 
-    profile_dir = os.path.join(out_dir, "lo_profile")
-    os.makedirs(profile_dir, exist_ok=True)
+    # Use a UNIQUE profile dir per invocation. Reusing one across sequential
+    # conversions (as in bulk protocol generation) trips LibreOffice exit code
+    # 81 ("user installation already in use") because stale lock files (.lock
+    # / SingletonLock) from a previous run aren't always cleaned up in time.
+    profile_dir = tempfile.mkdtemp(prefix="lo_profile_", dir="/tmp")
 
     cmd = [
         soffice,
@@ -144,20 +147,23 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
         xlsx_path,
     ]
 
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        timeout=90,
-    )
-
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"LibreOffice convert failed (code={proc.returncode}). "
-            f"stderr={proc.stderr[:500]}"
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            timeout=90,
         )
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"LibreOffice convert failed (code={proc.returncode}). "
+                f"stderr={proc.stderr[:500]}"
+            )
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
     base = os.path.splitext(os.path.basename(xlsx_path))[0]
     pdf_path = os.path.join(out_dir, base + ".pdf")
