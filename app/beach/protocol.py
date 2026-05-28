@@ -87,10 +87,25 @@ def _strip_address_to_street_city(address: str) -> str:
     return ", ".join(parts)
 
 
+def _find_soffice() -> Optional[str]:
+    """Find the LibreOffice executable, preferring the binary over the shell wrapper."""
+    # Prefer soffice.bin directly — the shell wrapper /usr/bin/soffice forks an extra
+    # process which fails in containers with tight PID limits ("Cannot fork").
+    bin_candidates = [
+        "/usr/lib/libreoffice/program/soffice.bin",
+        "/usr/lib64/libreoffice/program/soffice.bin",
+        "/opt/libreoffice/program/soffice.bin",
+    ]
+    for candidate in bin_candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which("soffice") or shutil.which("libreoffice")
+
+
 def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
     """Convert xlsx → pdf using LibreOffice. Returns the pdf path."""
     import subprocess
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    soffice = _find_soffice()
     if not soffice:
         raise RuntimeError(
             "Brak LibreOffice (soffice) w środowisku. Doinstaluj libreoffice w Dockerfile."
