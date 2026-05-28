@@ -97,17 +97,25 @@ _LO_PROGRAM_DIRS = [
 def _find_soffice() -> tuple[str, Optional[str]]:
     """Return (executable_path, lo_program_dir_or_None).
 
-    Prefers soffice.bin over the shell wrapper — the wrapper calls
-    /usr/bin/soffice → /usr/lib/.../soffice (another script) → exec soffice.bin,
-    and that intermediate fork fails in containers with tight PID limits.
-    When we use soffice.bin directly we must reconstruct the env the wrapper sets.
+    Prefers the ``soffice`` shell wrapper because it execs ``oosplash`` which
+    sets up environment variables required by ``soffice.bin``. Falling back to
+    ``soffice.bin`` directly skips that setup and causes silent exit code 81
+    in some container images (empty stderr/stdout — soffice.bin can't even
+    bootstrap to write an error).
     """
+    wrapper = shutil.which("soffice") or shutil.which("libreoffice")
+    if wrapper:
+        # Locate program dir for LD_LIBRARY_PATH / URE_BOOTSTRAP env vars
+        # used as a fallback when wrapper itself doesn't propagate them.
+        for d in _LO_PROGRAM_DIRS:
+            if os.path.isdir(d):
+                return wrapper, d
+        return wrapper, None
     for d in _LO_PROGRAM_DIRS:
         bin_path = os.path.join(d, "soffice.bin")
         if os.path.isfile(bin_path):
             return bin_path, d
-    fallback = shutil.which("soffice") or shutil.which("libreoffice") or ""
-    return fallback, None
+    return "", None
 
 
 def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
@@ -177,6 +185,30 @@ def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
             f"stderr={(proc.stderr or '').strip()[:500]} "
             f"stdout={(proc.stdout or '').strip()[:200]}"
         )
+        # On first failure, run a diagnostic probe to understand environment.
+        if attempt == 0:
+            try:
+                probe_home = tempfile.mkdtemp(prefix="lo_probe_", dir="/tmp")
+                probe_env = env.copy()
+                probe_env["HOME"] = probe_home
+                probe = subprocess.run(
+                    [soffice, "--headless", "--version"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, env=probe_env, timeout=30,
+                )
+                logger.warning(
+                    "LibreOffice probe: exe=%s code=%d stdout=%r stderr=%r xlsx_size=%d xlsx_exists=%s template_path=%s",
+                    soffice, probe.returncode,
+                    (probe.stdout or "").strip()[:200],
+                    (probe.stderr or "").strip()[:200],
+                    os.path.getsize(xlsx_path) if os.path.exists(xlsx_path) else -1,
+                    os.path.exists(xlsx_path),
+                    xlsx_path,
+                )
+                shutil.rmtree(probe_home, ignore_errors=True)
+            except Exception as probe_exc:  # pragma: no cover - diagnostic only
+                logger.warning("LibreOffice probe itself failed: %r", probe_exc)
+
         # Only retry on the specific "in use" / startup race codes.
         if proc.returncode not in (81, 77):
             raise RuntimeError(f"LibreOffice convert failed ({last_err})")
