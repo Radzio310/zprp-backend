@@ -59,6 +59,9 @@ class JudgeUpdateRequest(BaseModel):
     """Dozwolone pola dla Obsadowego."""
     judges: Optional[list] = None
     head_judge_id: Optional[int] = None
+    required_judges: Optional[int] = None
+    required_head_judges: Optional[int] = None
+    judge_colors: Optional[dict] = None
 
 
 class ScheduleUpdateRequest(BaseModel):
@@ -1315,6 +1318,13 @@ async def judge_update_tournament(
     fields_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set())
     if "head_judge_id" in fields_set:
         data["head_judge_id"] = body.head_judge_id  # może być None = reset
+
+    if body.required_judges is not None:
+        data["required_judges"] = body.required_judges
+    if body.required_head_judges is not None:
+        data["required_head_judges"] = body.required_head_judges
+    if body.judge_colors is not None:
+        data["judge_colors"] = body.judge_colors
 
     await database.execute(
         update(beach_tournaments)
