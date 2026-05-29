@@ -2758,11 +2758,23 @@ import unicodedata as _unicodedata
 from difflib import SequenceMatcher as _SequenceMatcher
 
 
+# Characters that NFD cannot decompose canonically — must be pre-mapped.
+# Polish ł/Ł, Scandinavian ø/Ø, South-Slavic đ/Đ, etc.
+_EXCEL_STROKE_MAP = str.maketrans("łŁøØđĐ", "lLoOdD")
+
+
 def _excel_normalize(text: str) -> str:
-    """Lowercase, strip whitespace, remove diacritics."""
+    """Lowercase, strip whitespace, remove diacritics.
+
+    Polish ą/ć/ę/ń/ó/ś/ź/ż all decompose via NFD and are handled automatically.
+    ł/Ł has no canonical NFD decomposition, so it is pre-mapped explicitly.
+    ß is expanded to 'ss'. Other stroke letters (ø, đ) are also pre-mapped.
+    """
     if not text:
         return ""
-    nfd = _unicodedata.normalize("NFD", str(text).strip().lower())
+    # Pre-map stroke letters that NFD cannot decompose.
+    mapped = str(text).strip().translate(_EXCEL_STROKE_MAP).replace("ß", "ss")
+    nfd = _unicodedata.normalize("NFD", mapped.lower())
     return "".join(c for c in nfd if _unicodedata.category(c) != "Mn")
 
 
@@ -2855,6 +2867,10 @@ def _read_excel_cells(file_bytes: bytes, filename: str) -> dict:
                 seen_letters.add(ltr)
         name_str = str(name_val).strip() if name_val is not None else None
         if name_str:
+            # If the protocol sheet doesn't have A/B/C/D in column A,
+            # fall back to assigning the letter by row position.
+            if letter is None:
+                letter = {30: "A", 31: "B", 32: "C", 33: "D"}.get(row)
             companions_raw.append({"row": row, "raw_name": name_str, "raw_letter": letter})
 
     return {
