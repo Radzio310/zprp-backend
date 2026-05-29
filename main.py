@@ -72,7 +72,7 @@ from app.beach.users import router as beach_users_router
 from app.beach.admins import router as beach_admins_router
 from app.beach.tournaments import router as beach_tournaments_router
 from app.beach.versions import router as beach_versions_router
-from app.beach.teams import router as beach_teams_router, run_beach_teams_sync_scheduler
+from app.beach.teams import router as beach_teams_router, run_beach_teams_sync_scheduler, run_beach_medical_check_scheduler
 from app.beach.verification import router as beach_verification_router
 from app.beach.availability import router as beach_availability_router
 from app.beach.beach_proel import router as beach_proel_router
@@ -574,6 +574,7 @@ _cleanup_task: asyncio.Task | None = None
 _push_task: asyncio.Task | None = None
 _notif_generator_task: asyncio.Task | None = None
 _beach_sync_task: asyncio.Task | None = None
+_beach_medical_task: asyncio.Task | None = None
 
 
 def _run_backup_sync() -> None:
@@ -766,7 +767,7 @@ async def startup():
         except Exception:
             pass
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -806,9 +807,13 @@ async def startup():
     _beach_sync_task = asyncio.create_task(run_beach_teams_sync_scheduler())
     logger.info("✅ Beach teams auto-sync scheduler started")
 
+    # Beach medical: sprawdzanie badań lekarskich raz na dobę UTC
+    _beach_medical_task = asyncio.create_task(run_beach_medical_check_scheduler())
+    logger.info("✅ Beach medical check scheduler started")
+
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task
 
     if _cleanup_task:
         _cleanup_task.cancel()
@@ -835,6 +840,13 @@ async def shutdown():
         _beach_sync_task.cancel()
         try:
             await _beach_sync_task
+        except asyncio.CancelledError:
+            pass
+
+    if _beach_medical_task:
+        _beach_medical_task.cancel()
+        try:
+            await _beach_medical_task
         except asyncio.CancelledError:
             pass
 

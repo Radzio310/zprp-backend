@@ -2,7 +2,7 @@ import asyncio
 import os
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, parse_qs, urlparse
 
@@ -3236,3 +3236,85 @@ async def run_beach_teams_sync_scheduler() -> None:
                 season_id, BEACH_SYNC_INTERVAL,
             )
         await asyncio.sleep(BEACH_SYNC_INTERVAL)
+
+
+async def run_beach_medical_check_scheduler() -> None:
+    """Sprawdza badania lekarskie raz na dobę UTC dla drużyn z turniejów bieżącego sezonu."""
+    import json as _json
+    from app.db import beach_tournaments as _bt
+
+    settings = get_settings()
+    logger.info("🏥 BeachMedical check scheduler started")
+
+    while True:
+        try:
+            season_id = _current_beach_season_id()
+            logger.info("🏥 BeachMedical daily check starting (season_id=%s)", season_id)
+
+            # Wyznacz zakres dat dla bieżącego sezonu (wrzesień → sierpień)
+            start_year = int(season_id) + 2017
+            season_start = datetime(start_year, 9, 1, tzinfo=timezone.utc)
+            season_end = datetime(start_year + 1, 9, 1, tzinfo=timezone.utc)
+
+            # Zbierz ID drużyn z turniejów bieżącego sezonu
+            tour_rows = await database.fetch_all(
+                select(_bt.c.data_json).where(
+                    _bt.c.event_date >= season_start,
+                    _bt.c.event_date < season_end,
+                )
+            )
+
+            team_ids: set[int] = set()
+            for tr in tour_rows:
+                dj = tr["data_json"] or {}
+                if isinstance(dj, str):
+                    try:
+                        dj = _json.loads(dj)
+                    except Exception:
+                        continue
+                for tid in (dj.get("invited_team_ids") or []):
+                    try:
+                        team_ids.add(int(tid))
+                    except (ValueError, TypeError):
+                        pass
+
+            if not team_ids:
+                logger.info(
+                    "🏥 BeachMedical: brak drużyn w turniejach sezonu %s — pomijam",
+                    season_id,
+                )
+            else:
+                logger.info("🏥 BeachMedical: sprawdzam %d drużyn", len(team_ids))
+                client = await _login_beach_client(settings)
+                ok = 0
+                failed = 0
+                try:
+                    for tid in sorted(team_ids):
+                        try:
+                            await _check_medical_exams_for_team(client, tid, season_id, settings)
+                            ok += 1
+                        except Exception as exc:
+                            logger.warning(
+                                "🏥 BeachMedical: błąd dla team %d: %s", tid, exc
+                            )
+                            failed += 1
+                finally:
+                    await client.aclose()
+                logger.info(
+                    "🏥 BeachMedical daily check OK=%d FAILED=%d (season=%s)",
+                    ok, failed, season_id,
+                )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("🏥 BeachMedical daily check failed")
+
+        # Śpij do następnej północy UTC
+        now = datetime.now(timezone.utc)
+        next_midnight = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        wait_secs = max(60.0, (next_midnight - now).total_seconds())
+        logger.info("🏥 BeachMedical: następne sprawdzenie za %.1fh", wait_secs / 3600)
+        await asyncio.sleep(wait_secs)
