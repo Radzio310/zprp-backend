@@ -262,6 +262,8 @@
     font-weight: 800;
     font-size: 7.5pt;
     letter-spacing: 0.3pt;
+    background: #f5f5f5;
+    border-bottom: 0.5pt solid #e0e0e0;
   }
   .tie-tile-body { padding: 6pt 8pt 7pt; }
   .tie-criterion {
@@ -270,22 +272,35 @@
     margin-bottom: 5pt;
   }
   .tie-criterion strong { color: #222; }
-  .tie-match-row {
+  .tie-match-card {
+    padding: 4pt 0;
+    border-top: 0.5pt solid #eee;
+  }
+  .tie-match-line {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 3pt 0;
-    border-top: 0.5pt solid #eee;
     font-size: 7.5pt;
+    margin-bottom: 1pt;
   }
-  .tie-match-teams { flex: 1; font-weight: 700; }
-  .tie-match-score {
-    font-weight: 900;
-    min-width: 28pt;
-    text-align: center;
+  .tie-team-name { flex: 1; font-weight: 700; overflow: hidden; }
+  .tie-score-val { font-weight: 900; min-width: 16pt; text-align: right; color: #333; }
+  .tie-chips {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 3pt;
+    margin: 3pt 0;
   }
-  .tie-match-sets { color: #777; font-size: 7pt; margin-left: 6pt; }
-  .tie-match-meta { color: #999; font-size: 6.5pt; text-align: right; min-width: 60pt; }
+  .tie-chip {
+    background: #f0f0f0;
+    border-radius: 3pt;
+    padding: 1pt 5pt;
+    font-size: 6.5pt;
+    font-weight: 700;
+    color: #555;
+  }
+  .tie-match-meta { color: #999; font-size: 6pt; text-align: center; margin-top: 2pt; }
 
   /* ── Results table ── */
   .results-table {
@@ -456,9 +471,9 @@
 </table>
 {% if gs.tie_explanations %}
 {% for te in gs.tie_explanations %}
-<div class="tie-tile no-break">
-  <div class="tie-tile-header" style="background: {{ gc }}22; color: {{ gc }};">
-    Rozstrzygnięcie remisu punktowego: {{ te.teams | join(" · ") }}
+<div class="tie-tile no-break" style="border-left: 3pt solid {{ gc }};">
+  <div class="tie-tile-header" style="color: {{ gc }};">
+    Remis punktowy · {{ te.teams | join(" · ") }}
   </div>
   <div class="tie-tile-body">
     <div class="tie-criterion">
@@ -470,11 +485,23 @@
       {% endif %}
     </div>
     {% for m in te.matches %}
-    <div class="tie-match-row">
-      <div class="tie-match-teams">{{ m.team_a_name }} – {{ m.team_b_name }}</div>
-      <div class="tie-match-score" style="color: {{ gc }};">{% if m.score_a is not none %}{{ m.score_a }}:{{ m.score_b }}{% else %}–{% endif %}</div>
-      <div class="tie-match-sets">{{ m.sets_display }}</div>
-      <div class="tie-match-meta">{{ m.tournament_name }}{% if m.stage_label %}, {{ m.stage_label }}{% endif %}<br>{{ m.tournament_date }}</div>
+    <div class="tie-match-card">
+      <div class="tie-match-line">
+        <div class="tie-team-name">{{ m.team_a_name }}</div>
+        <div class="tie-score-val"{% if m.score_a is not none and m.score_a > m.score_b %} style="color: {{ gc }};"{% endif %}>{% if m.score_a is not none %}{{ m.score_a }}{% else %}–{% endif %}</div>
+      </div>
+      <div class="tie-match-line">
+        <div class="tie-team-name">{{ m.team_b_name }}</div>
+        <div class="tie-score-val"{% if m.score_b is not none and m.score_b > m.score_a %} style="color: {{ gc }};"{% endif %}>{% if m.score_b is not none %}{{ m.score_b }}{% else %}–{% endif %}</div>
+      </div>
+      {% if m.sets_display %}
+      <div class="tie-chips">
+        {% for chip in m.sets_display.split(', ') %}
+        <span class="tie-chip">{{ chip }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <div class="tie-match-meta">{{ m.tournament_name }}{% if m.stage_label %} · {{ m.stage_label }}{% endif %} · {{ m.tournament_date }}</div>
     </div>
     {% endfor %}
   </div>
@@ -650,9 +677,9 @@
 </table>
 {% if gs.tie_explanations %}
 {% for te in gs.tie_explanations %}
-<div class="tie-tile no-break">
-  <div class="tie-tile-header" style="background: {{ gc }}22; color: {{ gc }};">
-    Rozstrzygnięcie remisu punktowego: {{ te.teams | join(" · ") }}
+<div class="tie-tile no-break" style="border-left: 3pt solid {{ gc }};">
+  <div class="tie-tile-header" style="color: {{ gc }};">
+    Remis punktowy · {{ te.teams | join(" · ") }}
   </div>
   <div class="tie-tile-body">
     <div class="tie-criterion">
@@ -664,11 +691,23 @@
       {% endif %}
     </div>
     {% for m in te.matches %}
-    <div class="tie-match-row">
-      <div class="tie-match-teams">{{ m.team_a_name }} – {{ m.team_b_name }}</div>
-      <div class="tie-match-score" style="color: {{ gc }};">{% if m.score_a is not none %}{{ m.score_a }}:{{ m.score_b }}{% else %}–{% endif %}</div>
-      <div class="tie-match-sets">{{ m.sets_display }}</div>
-      <div class="tie-match-meta">{{ m.tournament_name }}{% if m.stage_label %}, {{ m.stage_label }}{% endif %}<br>{{ m.tournament_date }}</div>
+    <div class="tie-match-card">
+      <div class="tie-match-line">
+        <div class="tie-team-name">{{ m.team_a_name }}</div>
+        <div class="tie-score-val"{% if m.score_a is not none and m.score_a > m.score_b %} style="color: {{ gc }};"{% endif %}>{% if m.score_a is not none %}{{ m.score_a }}{% else %}–{% endif %}</div>
+      </div>
+      <div class="tie-match-line">
+        <div class="tie-team-name">{{ m.team_b_name }}</div>
+        <div class="tie-score-val"{% if m.score_b is not none and m.score_b > m.score_a %} style="color: {{ gc }};"{% endif %}>{% if m.score_b is not none %}{{ m.score_b }}{% else %}–{% endif %}</div>
+      </div>
+      {% if m.sets_display %}
+      <div class="tie-chips">
+        {% for chip in m.sets_display.split(', ') %}
+        <span class="tie-chip">{{ chip }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <div class="tie-match-meta">{{ m.tournament_name }}{% if m.stage_label %} · {{ m.stage_label }}{% endif %} · {{ m.tournament_date }}</div>
     </div>
     {% endfor %}
   </div>
