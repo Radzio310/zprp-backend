@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, parse_qs, urlparse
 
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from httpx import AsyncClient
 from pydantic import BaseModel
 from sqlalchemy import and_, delete, func, select, update
