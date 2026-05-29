@@ -2748,6 +2748,367 @@ async def _check_medical_exams_for_team(
         "exams": medical_exams,
     }
 
+
+# =========================================================
+# Excel squad import — helpers
+# =========================================================
+
+import io as _io
+import unicodedata as _unicodedata
+from difflib import SequenceMatcher as _SequenceMatcher
+
+
+def _excel_normalize(text: str) -> str:
+    """Lowercase, strip whitespace, remove diacritics."""
+    if not text:
+        return ""
+    nfd = _unicodedata.normalize("NFD", str(text).strip().lower())
+    return "".join(c for c in nfd if _unicodedata.category(c) != "Mn")
+
+
+def _excel_name_similarity(a: str, b: str) -> float:
+    return _SequenceMatcher(None, a, b).ratio()
+
+
+def _best_name_match(raw: str, candidates: list, key_fn) -> tuple:
+    """Return (best_candidate, best_score). Tries both word orderings of raw."""
+    if not raw or not candidates:
+        return None, 0.0
+    norm_raw = _excel_normalize(raw)
+    parts = norm_raw.split()
+    variants = [norm_raw]
+    if len(parts) >= 2:
+        variants.append(" ".join(reversed(parts)))
+
+    best_score = 0.0
+    best_cand = None
+    for cand in candidates:
+        cand_norm = _excel_normalize(key_fn(cand))
+        for v in variants:
+            score = _excel_name_similarity(v, cand_norm)
+            if score > best_score:
+                best_score = score
+                best_cand = cand
+    return best_cand, best_score
+
+
+def _read_excel_cells(file_bytes: bytes, filename: str) -> dict:
+    """Read squad protocol cells from an .xls or .xlsx file.
+
+    Cells:
+        B10  – team name
+        A15–A29 / B15–B29 – jersey numbers and player names
+        A30–A33 / B30–B33 – companion letters (A-D) and names
+    """
+    name_lower = (filename or "").lower()
+
+    if name_lower.endswith(".xls") and not name_lower.endswith(".xlsx"):
+        import xlrd
+        wb = xlrd.open_workbook(file_contents=file_bytes)
+        ws = wb.sheet_by_index(0)
+
+        def get_cell(row1: int, col1: int):
+            try:
+                val = ws.cell_value(row1 - 1, col1 - 1)
+                return val if val != "" else None
+            except Exception:
+                return None
+    else:
+        import openpyxl
+        wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), data_only=True)
+        ws = wb.active
+
+        def get_cell(row1: int, col1: int):
+            return ws.cell(row=row1, column=col1).value
+
+    team_name_raw = get_cell(10, 2)  # B10
+    if team_name_raw is not None:
+        team_name_raw = str(team_name_raw).strip() or None
+
+    players_raw = []
+    for row in range(15, 30):  # rows 15–29
+        num_val = get_cell(row, 1)
+        name_val = get_cell(row, 2)
+        jersey = None
+        if num_val is not None:
+            try:
+                n = int(float(str(num_val)))
+                if 1 <= n <= 99:
+                    jersey = n
+            except (ValueError, TypeError):
+                pass
+        name_str = str(name_val).strip() if name_val is not None else None
+        if name_str:
+            players_raw.append({"row": row, "raw_name": name_str, "raw_number": jersey})
+
+    companions_raw = []
+    seen_letters: set = set()
+    valid_letters = {"A", "B", "C", "D"}
+    for row in range(30, 34):  # rows 30–33
+        letter_val = get_cell(row, 1)
+        name_val = get_cell(row, 2)
+        letter = None
+        if letter_val is not None:
+            ltr = str(letter_val).strip().upper()
+            if ltr in valid_letters and ltr not in seen_letters:
+                letter = ltr
+                seen_letters.add(ltr)
+        name_str = str(name_val).strip() if name_val is not None else None
+        if name_str:
+            companions_raw.append({"row": row, "raw_name": name_str, "raw_letter": letter})
+
+    return {
+        "team_name_raw": team_name_raw,
+        "players_raw": players_raw,
+        "companions_raw": companions_raw,
+    }
+
+
+# ── Excel squad import — endpoints ────────────────────────────────────────────
+
+class ApplyExcelSquadRequest(BaseModel):
+    tournament_id: int
+    team_id: int
+    protocol_player_ids: List[int]
+    companion_ids: List[int]
+    companion_roles: Dict[str, str]  # str(person_id) → "A"|"B"|"C"|"D"
+    also_update_default: bool = False
+
+
+@router.post("/parse-excel-squad", summary="Parsuj plik Excel i dopasuj skład drużyny")
+async def parse_excel_squad(
+    file: UploadFile = File(...),
+    tournament_id: int = Query(...),
+    team_id: Optional[int] = Query(None),
+    mode: str = Query("user"),
+):
+    """Parse an Excel protocol file (B10=team, A/B 15-29=players, A/B 30-33=companions)
+    and fuzzy-match names against the tournament's team rosters."""
+    import json as _json
+
+    content_length = 0
+    file_bytes = await file.read()
+    if len(file_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(413, "Plik za duży (max 10 MB)")
+
+    filename = file.filename or "upload.xlsx"
+
+    try:
+        cells = _read_excel_cells(file_bytes, filename)
+    except Exception as e:
+        raise HTTPException(422, f"Nie udało się odczytać pliku Excel: {e}")
+
+    team_name_raw = cells["team_name_raw"]
+    players_raw = cells["players_raw"]
+    companions_raw = cells["companions_raw"]
+
+    # ── 1. Resolve tournament ──────────────────────────────────────────────
+    from app.db import beach_tournaments as _bt
+
+    tour_row = await database.fetch_one(
+        select(_bt).where(_bt.c.id == tournament_id)
+    )
+    if not tour_row:
+        raise HTTPException(404, "Turniej nie istnieje")
+
+    tour_data = tour_row["data_json"] or {}
+    if isinstance(tour_data, str):
+        try:
+            tour_data = _json.loads(tour_data)
+        except Exception:
+            tour_data = {}
+
+    invited_ids = [int(x) for x in (tour_data.get("invited_team_ids") or []) if x]
+
+    # ── 2. Determine team_id ───────────────────────────────────────────────
+    matched_team_id: Optional[int] = team_id
+    match_method: Optional[str] = "provided" if team_id else None
+    match_confidence: float = 1.0 if team_id else 0.0
+    matched_team_name: Optional[str] = None
+
+    if not matched_team_id and mode == "admin" and invited_ids:
+        team_rows = await database.fetch_all(
+            select(beach_teams.c.id, beach_teams.c.team_name).where(
+                beach_teams.c.id.in_(invited_ids)
+            )
+        )
+        team_list = [{"id": r["id"], "name": r["team_name"] or ""} for r in team_rows]
+
+        # Method A — name match from B10
+        if team_name_raw:
+            best_score = 0.0
+            best_team = None
+            for t in team_list:
+                score = _excel_name_similarity(
+                    _excel_normalize(team_name_raw), _excel_normalize(t["name"])
+                )
+                if score > best_score:
+                    best_score = score
+                    best_team = t
+            if best_team and best_score >= 0.55:
+                matched_team_id = best_team["id"]
+                matched_team_name = best_team["name"]
+                match_method = "name"
+                match_confidence = best_score
+
+        # Method B — player name matching (fallback, >= 5 matches required)
+        if not matched_team_id and players_raw:
+            player_norms = [_excel_normalize(p["raw_name"]) for p in players_raw]
+            best_count = 0
+            best_team = None
+
+            for t in team_list:
+                t_row = await database.fetch_one(
+                    select(beach_teams.c.roster_json).where(beach_teams.c.id == t["id"])
+                )
+                if not t_row:
+                    continue
+                roster = t_row["roster_json"] or []
+                if isinstance(roster, str):
+                    try:
+                        roster = _json.loads(roster)
+                    except Exception:
+                        roster = []
+
+                count = 0
+                for pn in player_norms:
+                    for player in roster:
+                        if not isinstance(player, dict):
+                            continue
+                        last = _excel_normalize(player.get("last_name") or "")
+                        first = _excel_normalize(player.get("first_name") or "")
+                        for variant in [f"{last} {first}", f"{first} {last}"]:
+                            if _excel_name_similarity(pn, variant) >= 0.85:
+                                count += 1
+                                break
+                if count > best_count:
+                    best_count = count
+                    best_team = t
+
+            if best_team and best_count >= 5:
+                matched_team_id = best_team["id"]
+                matched_team_name = best_team["name"]
+                match_method = "players"
+                match_confidence = min(1.0, best_count / 10)
+
+    # ── 3. Fetch roster & companions ───────────────────────────────────────
+    roster: list = []
+    companions_db: list = []
+
+    if matched_team_id:
+        t_row = await database.fetch_one(
+            select(beach_teams).where(beach_teams.c.id == matched_team_id)
+        )
+        if t_row:
+            t_data = dict(t_row)
+            if not matched_team_name:
+                matched_team_name = t_data.get("team_name")
+            raw_roster = t_data.get("roster_json") or []
+            if isinstance(raw_roster, str):
+                try:
+                    raw_roster = _json.loads(raw_roster)
+                except Exception:
+                    raw_roster = []
+            roster = [p for p in raw_roster if isinstance(p, dict)]
+            raw_comp = t_data.get("companions_json") or []
+            if isinstance(raw_comp, str):
+                try:
+                    raw_comp = _json.loads(raw_comp)
+                except Exception:
+                    raw_comp = []
+            companions_db = [c for c in raw_comp if isinstance(c, dict)]
+
+    # ── 4. Match players ───────────────────────────────────────────────────
+    matched_players = []
+    for p in players_raw:
+        best_p, score = _best_name_match(
+            p["raw_name"],
+            roster,
+            lambda r: f"{r.get('last_name', '')} {r.get('first_name', '')}",
+        )
+        matched_players.append({
+            "row": p["row"],
+            "raw_name": p["raw_name"],
+            "raw_number": p["raw_number"],
+            "matched_player_id": best_p.get("player_id") if best_p and score >= 0.75 else None,
+            "matched_player_name": (
+                f"{best_p.get('last_name', '')} {best_p.get('first_name', '')}".strip()
+                if best_p and score >= 0.75 else None
+            ),
+            "match_confidence": round(score, 3),
+        })
+
+    # ── 5. Match companions ────────────────────────────────────────────────
+    matched_companions = []
+    for c in companions_raw:
+        best_c, score = _best_name_match(
+            c["raw_name"],
+            companions_db,
+            lambda r: r.get("full_name", ""),
+        )
+        matched_companions.append({
+            "row": c["row"],
+            "raw_name": c["raw_name"],
+            "raw_letter": c["raw_letter"],
+            "matched_person_id": best_c.get("person_id") if best_c and score >= 0.70 else None,
+            "matched_person_name": best_c.get("full_name") if best_c and score >= 0.70 else None,
+            "match_confidence": round(score, 3),
+        })
+
+    return {
+        "team_name_raw": team_name_raw,
+        "matched_team_id": matched_team_id,
+        "matched_team_name": matched_team_name,
+        "match_method": match_method,
+        "match_confidence": round(match_confidence, 3),
+        "players": matched_players,
+        "companions": matched_companions,
+    }
+
+
+@router.post("/apply-excel-squad", summary="Zastosuj skład z Excela do turnieju")
+async def apply_excel_squad(body: ApplyExcelSquadRequest):
+    """Apply parsed Excel squad: sets protocol_players and optionally default_players (first 10)."""
+    import json as _json
+    from app.db import beach_tournaments as _bt
+
+    tour_row = await database.fetch_one(
+        select(_bt).where(_bt.c.id == body.tournament_id)
+    )
+    if not tour_row:
+        raise HTTPException(404, "Turniej nie istnieje")
+
+    tour_data = tour_row["data_json"] or {}
+    if isinstance(tour_data, str):
+        try:
+            tour_data = _json.loads(tour_data)
+        except Exception:
+            tour_data = {}
+
+    team_squads: dict = dict(tour_data.get("team_squads") or {})
+    team_key = str(body.team_id)
+    squad_entry: dict = dict(team_squads.get(team_key) or {})
+
+    squad_entry["protocol_players"] = body.protocol_player_ids
+    if body.companion_ids:
+        squad_entry["default_companions"] = body.companion_ids
+    if body.companion_roles:
+        squad_entry["default_companion_roles"] = body.companion_roles
+    if body.also_update_default:
+        squad_entry["default_players"] = body.protocol_player_ids[:10]
+
+    team_squads[team_key] = squad_entry
+    tour_data["team_squads"] = team_squads
+
+    await database.execute(
+        update(_bt)
+        .where(_bt.c.id == body.tournament_id)
+        .values(data_json=tour_data, updated_at=_now_utc())
+    )
+
+    return {"success": True}
+
+
 # =========================================================
 # Auto-sync scheduler (uruchamiany jako asyncio.Task)
 # =========================================================

@@ -24,6 +24,7 @@ lxml
 pymupdf
 openai>=1.40.0
 openpyxl
+xlrd>=2.0.1
 Pillow==10.4.0
 reportlab==4.2.2
 cairosvg
