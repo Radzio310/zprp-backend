@@ -2782,25 +2782,57 @@ def _excel_name_similarity(a: str, b: str) -> float:
     return _SequenceMatcher(None, a, b).ratio()
 
 
+def _name_variants(norm: str) -> list:
+    """All comparison variants of a normalised name.
+
+    Covers:
+    - original                           "rawicz-grotowska jan"
+    - hyphenated segments reversed       "grotowska-rawicz jan"
+    - word order swapped                 "jan rawicz-grotowska"
+    - word order + hyphen reversed       "jan grotowska-rawicz"
+    """
+    def _flip_hyphens(tokens):
+        return ["-".join(reversed(t.split("-"))) if "-" in t else t for t in tokens]
+
+    parts = norm.split()
+    flipped = _flip_hyphens(parts)
+    rev = list(reversed(parts))
+    rev_flipped = _flip_hyphens(rev)
+
+    seen = set()
+    result = []
+    for candidate in [
+        " ".join(parts),
+        " ".join(flipped),
+        " ".join(rev),
+        " ".join(rev_flipped),
+    ]:
+        if candidate not in seen:
+            seen.add(candidate)
+            result.append(candidate)
+    return result
+
+
 def _best_name_match(raw: str, candidates: list, key_fn) -> tuple:
-    """Return (best_candidate, best_score). Tries both word orderings of raw."""
+    """Return (best_candidate, best_score).
+
+    Tries all orderings of raw and each candidate:
+    word-order swap + hyphenated-surname reversal (e.g. RAWICZ-GROTOWSKA ↔ GROTOWSKA-RAWICZ).
+    """
     if not raw or not candidates:
         return None, 0.0
-    norm_raw = _excel_normalize(raw)
-    parts = norm_raw.split()
-    variants = [norm_raw]
-    if len(parts) >= 2:
-        variants.append(" ".join(reversed(parts)))
+    raw_variants = _name_variants(_excel_normalize(raw))
 
     best_score = 0.0
     best_cand = None
     for cand in candidates:
-        cand_norm = _excel_normalize(key_fn(cand))
-        for v in variants:
-            score = _excel_name_similarity(v, cand_norm)
-            if score > best_score:
-                best_score = score
-                best_cand = cand
+        cand_variants = _name_variants(_excel_normalize(key_fn(cand)))
+        for rv in raw_variants:
+            for cv in cand_variants:
+                score = _excel_name_similarity(rv, cv)
+                if score > best_score:
+                    best_score = score
+                    best_cand = cand
     return best_cand, best_score
 
 
@@ -3008,15 +3040,21 @@ async def parse_excel_squad(
 
                 count = 0
                 for pn in player_norms:
+                    pn_variants = _name_variants(pn)
                     for player in roster:
                         if not isinstance(player, dict):
                             continue
                         last = _excel_normalize(player.get("last_name") or "")
                         first = _excel_normalize(player.get("first_name") or "")
-                        for variant in [f"{last} {first}", f"{first} {last}"]:
-                            if _excel_name_similarity(pn, variant) >= 0.75:
-                                count += 1
-                                break
+                        cand_variants = _name_variants(f"{last} {first}") + _name_variants(f"{first} {last}")
+                        matched = any(
+                            _excel_name_similarity(pv, cv) >= 0.75
+                            for pv in pn_variants
+                            for cv in cand_variants
+                        )
+                        if matched:
+                            count += 1
+                            break
                 if count > best_count or (count == best_count and name_score > best_name_score):
                     best_count = count
                     best_team = t
