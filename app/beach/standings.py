@@ -514,11 +514,9 @@ _H2H_STAGE_LABELS: Dict[str, str] = {
 
 def _h2h_stage_label(m: Dict[str, Any]) -> str:
     stage = m.get("stage", "")
-    group = m.get("group")
-    label = _H2H_STAGE_LABELS.get(stage, stage)
-    if stage == "group" and group:
-        label = f"Gr. {group}"
-    return label
+    if stage == "group":
+        return ""  # mecze każdy z każdym – nie potrzebują etykiety fazy
+    return _H2H_STAGE_LABELS.get(stage, stage)
 
 
 @router.get(
