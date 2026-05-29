@@ -2950,30 +2950,50 @@ async def parse_excel_squad(
         )
         team_list = [{"id": r["id"], "name": r["team_name"] or ""} for r in team_rows]
 
-        # Method A — name match from B10
+        # Method A — collect all name candidates (score ≥ 0.55)
+        name_candidates: List[Tuple[float, dict]] = []
         if team_name_raw:
-            best_score = 0.0
-            best_team = None
             for t in team_list:
                 score = _excel_name_similarity(
                     _excel_normalize(team_name_raw), _excel_normalize(t["name"])
                 )
-                if score > best_score:
-                    best_score = score
-                    best_team = t
-            if best_team and best_score >= 0.55:
-                matched_team_id = best_team["id"]
-                matched_team_name = best_team["name"]
+                if score >= 0.55:
+                    name_candidates.append((score, t))
+            name_candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # Method A result — clear winner if top score is ≥ 0.15 ahead of runner-up
+        # (or only one candidate). Ambiguous when e.g. "KPR Lubliniec" matches both
+        # men's AND women's teams with the same name → need player disambiguation.
+        ambiguous: List[Tuple[float, dict]] = []
+        if name_candidates:
+            top_score = name_candidates[0][0]
+            close = [(s, t) for s, t in name_candidates if top_score - s <= 0.15]
+            if len(close) == 1:
+                # Unambiguous
+                matched_team_id = close[0][1]["id"]
+                matched_team_name = close[0][1]["name"]
                 match_method = "name"
-                match_confidence = best_score
+                match_confidence = top_score
+            else:
+                # Multiple teams with near-identical name scores → player disambiguation
+                ambiguous = close
 
-        # Method B — player name matching (fallback, >= 5 matches required)
-        if not matched_team_id and players_raw:
+        # Method B — player matching
+        # Runs either: (a) no name match at all (pure fallback), or
+        #              (b) multiple name candidates need gender disambiguation.
+        check_list: List[Tuple[float, dict]] = ambiguous or (
+            [(0.0, t) for t in team_list] if not matched_team_id and players_raw else []
+        )
+        # Lower threshold when disambiguating (name already matched); higher for discovery
+        min_matches = 2 if ambiguous else 5
+
+        if check_list and players_raw:
             player_norms = [_excel_normalize(p["raw_name"]) for p in players_raw]
-            best_count = 0
+            best_count = -1
             best_team = None
+            best_name_score = 0.0
 
-            for t in team_list:
+            for name_score, t in check_list:
                 t_row = await database.fetch_one(
                     select(beach_teams.c.roster_json).where(beach_teams.c.id == t["id"])
                 )
@@ -2994,18 +3014,25 @@ async def parse_excel_squad(
                         last = _excel_normalize(player.get("last_name") or "")
                         first = _excel_normalize(player.get("first_name") or "")
                         for variant in [f"{last} {first}", f"{first} {last}"]:
-                            if _excel_name_similarity(pn, variant) >= 0.85:
+                            if _excel_name_similarity(pn, variant) >= 0.75:
                                 count += 1
                                 break
-                if count > best_count:
+                if count > best_count or (count == best_count and name_score > best_name_score):
                     best_count = count
                     best_team = t
+                    best_name_score = name_score
 
-            if best_team and best_count >= 5:
+            if best_team and best_count >= min_matches:
                 matched_team_id = best_team["id"]
                 matched_team_name = best_team["name"]
-                match_method = "players"
+                match_method = "name+players" if ambiguous else "players"
                 match_confidence = min(1.0, best_count / 10)
+            elif ambiguous and name_candidates:
+                # Still ambiguous after player check (0 matches both) — fallback to top name score
+                matched_team_id = name_candidates[0][1]["id"]
+                matched_team_name = name_candidates[0][1]["name"]
+                match_method = "name"
+                match_confidence = name_candidates[0][0]
 
     # ── 3. Fetch roster & companions ───────────────────────────────────────
     roster: list = []
