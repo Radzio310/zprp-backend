@@ -1469,7 +1469,31 @@ async def schedule_update_tournament(
     if body.schedule is not None:
         if not isinstance(body.schedule, dict):
             raise HTTPException(422, "schedule musi być obiektem")
-        data["schedule"] = body.schedule
+
+        # Conflict detection: odrzuć jeśli serwer ma nowszą wersję niż klient.
+        # Zapobiega sytuacji gdy stary terminarz (np. sprzed zmiany kolejności)
+        # nadpisze nowszy (już zapisany przez tego lub innego użytkownika).
+        existing_schedule = data.get("schedule") or {}
+        server_saved_at = existing_schedule.get("saved_at")
+        client_saved_at = body.schedule.get("saved_at")
+        if (
+            server_saved_at
+            and client_saved_at
+            and server_saved_at > client_saved_at
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "SCHEDULE_CONFLICT",
+                    "message": "Harmonogram zmieniony przez innego użytkownika. Odśwież dane.",
+                    "server_saved_at": server_saved_at,
+                },
+            )
+
+        # Serwer stempluje czas zapisu — klient nie ustawia saved_at samodzielnie
+        new_schedule = dict(body.schedule)
+        new_schedule["saved_at"] = datetime.now(timezone.utc).isoformat()
+        data["schedule"] = new_schedule
     else:
         # Explicit null → delete schedule
         data.pop("schedule", None)
