@@ -496,6 +496,185 @@ async def list_standings(
     return BeachStandingsListResponse(rows=out)
 
 
+# ─────────────────── GET /beach/standings/h2h ───────────────────
+
+_H2H_STAGE_LABELS: Dict[str, str] = {
+    "group": "Gr.",
+    "playoff": "Baraż",
+    "quarterfinal": "1/4",
+    "semifinal": "1/2",
+    "fifth_semifinal": "SM5",
+    "final": "Finał",
+    "third_place": "o 3. msc.",
+    "fifth_place": "o 5. msc.",
+    "seventh_place": "o 7. msc.",
+    "ninth_place": "o 9. msc.",
+}
+
+
+def _h2h_stage_label(m: Dict[str, Any]) -> str:
+    stage = m.get("stage", "")
+    group = m.get("group")
+    label = _H2H_STAGE_LABELS.get(stage, stage)
+    if stage == "group" and group:
+        label = f"Gr. {group}"
+    return label
+
+
+@router.get(
+    "/h2h",
+    summary="Mecze bezpośrednie między dwiema drużynami w sezonie",
+)
+async def get_h2h_matches(
+    team_a_id: int = Query(..., description="ID drużyny A"),
+    team_b_id: int = Query(..., description="ID drużyny B"),
+    competition_type: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    season_id: Optional[str] = Query(None),
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    """Zwraca mecze bezpośrednie między dwiema drużynami w danym filtrze sezonu.
+    Wynik H2H: wygrane mecze → sety → breakpointy."""
+    # Fetch standings rows for both teams to get tournament IDs
+    def _build_q(team_id: int):
+        q = select(beach_standings.c.tournaments_json).where(
+            beach_standings.c.team_id == team_id
+        )
+        if competition_type:
+            q = q.where(beach_standings.c.competition_type == competition_type)
+        if category:
+            q = q.where(beach_standings.c.category == category)
+        if season_id:
+            q = q.where(beach_standings.c.season_id == season_id)
+        return q
+
+    empty = {
+        "matches": [], "wins_a": 0, "wins_b": 0,
+        "sets_a": 0, "sets_b": 0, "brk_a": 0, "brk_b": 0,
+        "criterion": "equal", "winner_id": None,
+    }
+
+    rows_a, rows_b = await asyncio.gather(
+        database.fetch_all(_build_q(team_a_id)),
+        database.fetch_all(_build_q(team_b_id)),
+    )
+    if not rows_a or not rows_b:
+        return empty
+
+    def _tour_ids(rows) -> set:
+        ids: set = set()
+        for r in rows:
+            for e in (_parse_json(r["tournaments_json"]) or []):
+                if e.get("type") == "tournament" and not e.get("revoked"):
+                    ids.add(int(e["tournament_id"]))
+        return ids
+
+    common_ids = _tour_ids(rows_a) & _tour_ids(rows_b)
+    if not common_ids:
+        return empty
+
+    tour_rows = await database.fetch_all(
+        select(
+            beach_tournaments.c.id,
+            beach_tournaments.c.name,
+            beach_tournaments.c.event_date,
+            beach_tournaments.c.data_json,
+        ).where(beach_tournaments.c.id.in_(list(common_ids)))
+    )
+
+    result_matches: List[Dict[str, Any]] = []
+    wins_a = wins_b = sets_a = sets_b = brk_a = brk_b = 0
+
+    for tr in tour_rows:
+        data = tr["data_json"] or {}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        schedule = data.get("schedule") or {}
+        tour_name = tr["name"] or ""
+        ed = tr["event_date"]
+        tour_date = ed.isoformat()[:10] if hasattr(ed, "isoformat") else str(ed)[:10]
+
+        for m in (schedule.get("matches") or []):
+            ta = m.get("teamA")
+            tb = m.get("teamB")
+            if not ta or not tb:
+                continue
+            ta_id = ta.get("id")
+            tb_id = tb.get("id")
+            is_ab = (ta_id == team_a_id and tb_id == team_b_id)
+            is_ba = (ta_id == team_b_id and tb_id == team_a_id)
+            if not is_ab and not is_ba:
+                continue
+
+            raw_sa, raw_sb = m.get("scoreA"), m.get("scoreB")
+            raw_sets = m.get("sets") or []
+            raw_so = m.get("shootout")
+
+            if is_ab:
+                ma_name, mb_name = ta.get("name", ""), tb.get("name", "")
+                msa, msb = raw_sa, raw_sb
+                m_sets = [{"ptA": s.get("ptA", 0), "ptB": s.get("ptB", 0)} for s in raw_sets]
+                m_so = raw_so
+            else:
+                ma_name, mb_name = tb.get("name", ""), ta.get("name", "")
+                msa, msb = raw_sb, raw_sa
+                m_sets = [{"ptA": s.get("ptB", 0), "ptB": s.get("ptA", 0)} for s in raw_sets]
+                m_so = {"a": raw_so["b"], "b": raw_so["a"]} if isinstance(raw_so, dict) else None
+
+            if msa is not None and msb is not None:
+                if msa > msb:
+                    wins_a += 1
+                elif msb > msa:
+                    wins_b += 1
+                sets_a += int(msa)
+                sets_b += int(msb)
+                for s in m_sets:
+                    brk_a += s.get("ptA", 0)
+                    brk_b += s.get("ptB", 0)
+
+            sets_parts = [f"{s['ptA']}:{s['ptB']}" for s in m_sets]
+            sets_disp = ", ".join(sets_parts)
+            if m_so:
+                sets_disp += f" (rz.k. {m_so.get('a',0)}:{m_so.get('b',0)})"
+
+            result_matches.append({
+                "tournament_id": tr["id"],
+                "tournament_name": tour_name,
+                "tournament_date": tour_date,
+                "team_a_id": team_a_id,
+                "team_a_name": ma_name,
+                "team_b_id": team_b_id,
+                "team_b_name": mb_name,
+                "score_a": msa,
+                "score_b": msb,
+                "sets_display": sets_disp,
+                "stage_label": _h2h_stage_label(m),
+            })
+
+    result_matches.sort(key=lambda x: x["tournament_date"])
+
+    if wins_a != wins_b:
+        criterion, winner_id = "wins", (team_a_id if wins_a > wins_b else team_b_id)
+    elif sets_a != sets_b:
+        criterion, winner_id = "sets", (team_a_id if sets_a > sets_b else team_b_id)
+    elif brk_a != brk_b:
+        criterion, winner_id = "brk", (team_a_id if brk_a > brk_b else team_b_id)
+    else:
+        criterion, winner_id = "equal", None
+
+    return {
+        "matches": result_matches,
+        "wins_a": wins_a, "wins_b": wins_b,
+        "sets_a": sets_a, "sets_b": sets_b,
+        "brk_a": brk_a, "brk_b": brk_b,
+        "criterion": criterion,
+        "winner_id": winner_id,
+    }
+
+
 # ─────────────────── GET /beach/standings/competition-types ───────────────────
 
 @router.get(

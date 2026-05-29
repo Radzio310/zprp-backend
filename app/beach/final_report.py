@@ -90,6 +90,25 @@ class GenderStandingsData(BaseModel):
     tournament_count: int = 1
 
 
+class TieMatchEntry(BaseModel):
+    tournament_name: str
+    tournament_date: str
+    team_a_name: str
+    team_b_name: str
+    score_a: Optional[int] = None
+    score_b: Optional[int] = None
+    sets_display: str = ""
+    stage_label: str = ""
+
+
+class TieExplanation(BaseModel):
+    gender: str                   # "M" | "K"
+    teams: List[str]              # nazwy drużyn w kolejności po rozstrzygnięciu
+    criterion: str                # "wins" | "sets" | "brk" | "equal"
+    winner_name: Optional[str] = None
+    matches: List[TieMatchEntry] = []
+
+
 class FinalReportRequest(BaseModel):
     schedule: Dict[str, Any]
     tournament_name: str = ""
@@ -100,6 +119,7 @@ class FinalReportRequest(BaseModel):
     competition_type: str = ""
     standings: Optional[List[GenderStandingsData]] = None
     custom_summary: Optional[str] = None
+    tie_explanations: Optional[List[TieExplanation]] = None
 
 
 # ──────────── Helpers ────────────
@@ -1194,6 +1214,11 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         for sd in req.standings:
             standings_by_gender[sd.gender] = sd
 
+    # Tie explanations lookup by gender
+    tie_expl_by_gender: Dict[str, list] = {}
+    for te in (req.tie_explanations or []):
+        tie_expl_by_gender.setdefault(te.gender, []).append(te)
+
     # Build per-gender sections
     gender_sections = []
     for gender in ["M", "K"]:
@@ -1216,6 +1241,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             "standings": None,
             "standings_is_multi_tournament": False,
             "standings_tournament_count": 1,
+            "tie_explanations": [],
         }
 
         # ── Tables ──
@@ -1333,6 +1359,25 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 gs["standings"] = standing_rows
                 gs["standings_is_multi_tournament"] = sd.tournament_count > 1
                 gs["standings_tournament_count"] = sd.tournament_count
+
+        # ── Tie explanations ──
+        raw_te = tie_expl_by_gender.get(gender, [])
+        if raw_te:
+            _crit_labels = {
+                "wins": "wygrane mecze bezpośrednie",
+                "sets": "stosunek setów w meczach bezpośrednich",
+                "brk": "stosunek punktów w meczach bezpośrednich",
+                "equal": "ex aequo",
+            }
+            gs["tie_explanations"] = [
+                {
+                    "teams": te.teams,
+                    "winner_name": te.winner_name,
+                    "criterion": _crit_labels.get(te.criterion, te.criterion),
+                    "matches": [m.dict() for m in te.matches],
+                }
+                for te in raw_te
+            ]
 
         gender_sections.append(gs)
 
