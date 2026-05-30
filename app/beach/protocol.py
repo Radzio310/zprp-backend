@@ -470,6 +470,17 @@ def _safe_filename(s: str, max_len: int = 40) -> str:
     return "".join(c if c.isalnum() or c in " _-" else "_" for c in s)[:max_len].strip("_") or "protokol"
 
 
+_PL_TRANS = str.maketrans(
+    "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ",
+    "acelnoszzACELNOSZZ",
+)
+
+
+def _transliterate_pl(s: str) -> str:
+    """Replace Polish diacritics with ASCII equivalents."""
+    return s.translate(_PL_TRANS)
+
+
 def _strikethrough_empty_rows(
     ws,
     rows: List[int],
@@ -520,14 +531,14 @@ def _match_file_label(m: Dict[str, Any], idx: int) -> str:
     """Generate a filename label for a match protocol."""
     mn = m.get("matchNumber")
     if mn:
-        return mn.replace("/", "_").replace("\\", "_")
+        return _transliterate_pl(mn).replace("/", "_").replace("\\", "_")
     # fallback: day + order
     day = (m.get("dayIndex") or 0) + 1
     order = m.get("order", idx)
     team_a = (m.get("teamA") or {}).get("name", "")
     team_b = (m.get("teamB") or {}).get("name", "")
     if team_a and team_b:
-        return _safe_filename(f"{team_a}_vs_{team_b}", 50)
+        return _safe_filename(_transliterate_pl(f"{team_a}_vs_{team_b}"), 50)
     return f"mecz_{idx + 1:03d}"
 
 
@@ -1822,7 +1833,7 @@ async def _generate_filled_protocol(
         _set_page_label(page, idx, total_pages)
 
     safe_label = _safe_filename(file_label, 60)
-    xlsx_name = f"protokol_koncowy_{safe_label}.xlsx"
+    xlsx_name = f"{safe_label}_protokol_koncowy.xlsx"
     xlsx_path = os.path.join(out_dir, xlsx_name)
     wb.save(xlsx_path)
 
@@ -1882,7 +1893,7 @@ async def _generate_single_protocol(
     )
 
     safe_label = _safe_filename(file_label, 60)
-    xlsx_name = f"protokol_{safe_label}.xlsx"
+    xlsx_name = f"{safe_label}_protokol.xlsx"
     xlsx_path = os.path.join(out_dir, xlsx_name)
     wb.save(xlsx_path)
 
@@ -2137,7 +2148,7 @@ async def generate_filled_single(req: FilledProtocolSingleRequest):
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        file_label = req.match_number.replace("/", "_").replace("\\", "_")
+        file_label = _transliterate_pl(req.match_number).replace("/", "_").replace("\\", "_")
         path = await _generate_filled_protocol(
             data_json,
             schedule_match,
