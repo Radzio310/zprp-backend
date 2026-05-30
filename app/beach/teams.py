@@ -2880,7 +2880,22 @@ def _read_excel_cells(file_bytes: bytes, filename: str) -> dict:
                 if 1 <= n <= 99:
                     jersey = n
             except (ValueError, TypeError):
-                pass
+                # Merged-cell fallback: "33 Kowalski Jan" in column A, column B empty.
+                # Split on the first space and try the left part as a jersey number.
+                if name_val is None:
+                    raw_str = str(num_val).strip()
+                    parts = raw_str.split(None, 1)
+                    if len(parts) == 2:
+                        try:
+                            n = int(float(parts[0]))
+                            if 1 <= n <= 99:
+                                jersey = n
+                            name_val = parts[1]
+                        except (ValueError, TypeError):
+                            # No leading number — treat the whole string as the name.
+                            name_val = raw_str
+                    else:
+                        name_val = raw_str
         name_str = str(name_val).strip() if name_val is not None else None
         if name_str:
             players_raw.append({"row": row, "raw_name": name_str, "raw_number": jersey})
@@ -2897,6 +2912,17 @@ def _read_excel_cells(file_bytes: bytes, filename: str) -> dict:
             if ltr in valid_letters and ltr not in seen_letters:
                 letter = ltr
                 seen_letters.add(ltr)
+            elif name_val is None:
+                # Merged-cell fallback: "A Kowalski Jan" in column A, column B empty.
+                raw_str = str(letter_val).strip()
+                parts = raw_str.split(None, 1)
+                if len(parts) == 2 and parts[0].upper() in valid_letters and parts[0].upper() not in seen_letters:
+                    letter = parts[0].upper()
+                    seen_letters.add(letter)
+                    name_val = parts[1]
+                elif len(parts) >= 1:
+                    # No valid leading letter — treat whole string as name only.
+                    name_val = raw_str
         name_str = str(name_val).strip() if name_val is not None else None
         if name_str:
             # If the protocol sheet doesn't have A/B/C/D in column A,
