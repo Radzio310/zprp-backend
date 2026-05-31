@@ -1358,6 +1358,8 @@ def _fmt_date_ddmmyyyy(iso_ymd: str) -> str:
 
 def _referee_name_from_match_config(match_config: Dict[str, Any], key: str) -> str:
     ref = (match_config.get("referees") or {}).get(key) or {}
+    if isinstance(ref, str):
+        return ref.strip()
     return (ref.get("name") or ref.get("fullName") or "").strip()
 
 
