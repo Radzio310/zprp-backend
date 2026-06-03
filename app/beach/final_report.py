@@ -64,6 +64,7 @@ STAGE_LABELS = {
     "eleventh_place": "o 11. miejsce",
     "thirteenth_place": "o 13. miejsce",
     "fifteenth_place": "o 15. miejsce",
+    "placement_rr": "O miejsca",
 }
 
 CATEGORY_COLORS = {

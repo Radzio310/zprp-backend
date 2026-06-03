@@ -1837,9 +1837,24 @@ _SCHEDULE_JSON_SCHEMA = """\
   "matches": [
     {
       "id": "<unique uuid string>",
-      "stage": "group" | "playoff" | "quarterfinal" | "semifinal" | "fifth_semifinal" | "final" | "third_place" | "fifth_place" | "seventh_place",
+      "stage": "group"
+            | "playoff"
+            | "quarterfinal"
+            | "semifinal"
+            | "fifth_semifinal"
+            | "ninth_semifinal"
+            | "thirteenth_semifinal"
+            | "final"
+            | "third_place"
+            | "fifth_place"
+            | "seventh_place"
+            | "ninth_place"
+            | "eleventh_place"
+            | "thirteenth_place"
+            | "fifteenth_place"
+            | "placement_rr",
       "gender": "M" | "K",
-      "group": "A" | "B" | "C" | "D" | null,
+      "group": "A"|"B"|"C"|"D"|"placement_7"|"placement_9"|"placement_13"|null,
       "round": <number, optional>,
       "court": <number, 1-based>,
       "dayIndex": <number, 0-based index into days array>,
@@ -1847,6 +1862,7 @@ _SCHEDULE_JSON_SCHEMA = """\
       "endTime": "HH:mm" | null,
       "teamA": { "id": <number>, "name": "<team name>", "gender": "M"|"K" } | null,
       "teamB": { "id": <number>, "name": "<team name>", "gender": "M"|"K" } | null,
+      "knockoutLabel": "<description of who plays>" | null,
       "status": "scheduled",
       "order": <number, sequential>
     }
@@ -1998,28 +2014,40 @@ KLUCZOWE ZASADY STRUKTURY TURNIEJU:
 4. TYLKO mecze grupowe (stage="group") mają wypełnione teamA i teamB konkretnymi drużynami.
 5. Mecze pucharowe (semifinal, quarterfinal, final, third_place, fifth_place, seventh_place, fifth_semifinal) \
 ZAWSZE mają teamA=null i teamB=null z opisowym knockoutLabel (np. "1. z gr. A vs 2. z gr. B").
-6. Baraże (stage="playoff") też mają teamA=null, teamB=null z knockoutLabel opisującym kto gra.
-7. Rozpoznaj format fazy pucharowej oddzielnie dla M i K:
+6. Baraże eliminacyjne (stage="playoff") mają teamA=null, teamB=null z knockoutLabel opisującym kto gra. \
+Używaj "playoff" TYLKO dla baraży eliminacyjnych (np. 2. z gr. A vs 2. z gr. B, żeby awansować do ćwierćfinałów).
+7. MECZE O MIEJSCA — BARDZO WAŻNE: Jeśli turniej ma mecze o niższe miejsca (VII-IX, IX-XI, XII-XV itp.), \
+użyj odpowiednich stage'ów ZAMIAST "playoff":
+   - Miniturnieje round-robin "O msc. VII-IX" / "O msc. IX-XI" / "O msc. XIII-XVI" → stage="placement_rr", \
+     group="placement_7" (lub "placement_9", "placement_13" itd. od pierwszego miejsca danego miniturnieju), \
+     knockoutLabel="O msc. VII-IX: X. z gr. A vs Y. z gr. B"
+   - Mecz o 9. miejsce → stage="ninth_place", knockoutLabel="Mecz o 9. miejsce: ..."
+   - Mecz o 11. miejsce → stage="eleventh_place", knockoutLabel="Mecz o 11. miejsce: ..."
+   - Mecz o 13. miejsce → stage="thirteenth_place", knockoutLabel="Mecz o 13. miejsce: ..."
+   - Mecz o 15. miejsce → stage="fifteenth_place", knockoutLabel="Mecz o 15. miejsce: ..."
+   - Półfinały o 9. miejsce → stage="ninth_semifinal", knockoutLabel="Półfinał o 9. miejsce: ..."
+   - Półfinały o 13. miejsce → stage="thirteenth_semifinal", knockoutLabel="Półfinał o 13. miejsce: ..."
+8. Rozpoznaj format fazy pucharowej oddzielnie dla M i K:
    - Jeśli są ćwierćfinały → knockoutFormatM/K = "quarters"
    - Jeśli od razu półfinały → knockoutFormatM/K = "semis"
-8. Jeśli widzisz baraże 2. miejsc (3 grupy → półfinały) lub 3. miejsc (3 grupy → ćwierćfinały), dodaj playoffMode="playoff".
-9. W config.groups podaj DOKŁADNY podział drużyn na grupy z ich ID (dopasowanymi z bazy).
+9. Jeśli widzisz baraże 2. miejsc (3 grupy → półfinały) lub 3. miejsc (3 grupy → ćwierćfinały), dodaj playoffMode="playoff".
+10. W config.groups podaj DOKŁADNY podział drużyn na grupy z ich ID (dopasowanymi z bazy).
 
 DOPASOWYWANIE DRUŻYN:
-10. Używaj WYŁĄCZNIE drużyn z poniższej listy zaproszonych do turnieju. NIE szukaj drużyn spoza tej listy.
-11. Dopasuj nazwy z dokumentu do nazw z listy — mogą się lekko różnić (skróty, literki itp.).
-12. Jeśli drużyna z dokumentu nie pasuje do żadnej z zaproszonych — dodaj ją do "unmatched_teams" i NIE używaj w meczach.
-13. Każda drużyna może być TYLKO W JEDNEJ grupie. NIE przypisuj tej samej drużyny do wielu grup.
+11. Używaj WYŁĄCZNIE drużyn z poniższej listy zaproszonych do turnieju. NIE szukaj drużyn spoza tej listy.
+12. Dopasuj nazwy z dokumentu do nazw z listy — mogą się lekko różnić (skróty, literki itp.).
+13. Jeśli drużyna z dokumentu nie pasuje do żadnej z zaproszonych — dodaj ją do "unmatched_teams" i NIE używaj w meczach.
+14. Każda drużyna może być TYLKO W JEDNEJ grupie. NIE przypisuj tej samej drużyny do wielu grup.
 
 TECHNICZNE:
-14. Każdy mecz musi mieć unikalne "id" (wygeneruj UUID v4).
-15. Godziny w formacie "HH:mm" (24h).
-16. courts = liczba boisk widoczna w terminarzu.
-17. dayIndex: 0-based (0 = pierwszy dzień).
-18. order: sekwencyjny od 0, zachowaj kolejność z dokumentu.
-19. Status wszystkich meczów: "scheduled".
-20. Tryb turnieju: {mode}.
-21. Jeśli tryb=roundRobin, pole "group" we WSZYSTKICH meczach musi być null — w każdy-z-każdym nie ma podziału na grupy.
+15. Każdy mecz musi mieć unikalne "id" (wygeneruj UUID v4).
+16. Godziny w formacie "HH:mm" (24h).
+17. courts = liczba boisk widoczna w terminarzu.
+18. dayIndex: 0-based (0 = pierwszy dzień).
+19. order: sekwencyjny od 0, zachowaj kolejność z dokumentu.
+20. Status wszystkich meczów: "scheduled".
+21. Tryb turnieju: {mode}.
+22. Jeśli tryb=roundRobin, pole "group" we WSZYSTKICH meczach musi być null — w każdy-z-każdym nie ma podziału na grupy.
 
 SCHEMAT JSON:
 {_SCHEDULE_JSON_SCHEMA}
