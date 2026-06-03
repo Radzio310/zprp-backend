@@ -84,6 +84,7 @@ class SchedulePdfRequest(BaseModel):
     category: str = ""
     include_groups: bool = True
     split_by_courts: bool = False
+    custom_teams: Optional[List[Dict[str, Any]]] = None  # for resolving negative-ID custom teams
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -302,25 +303,33 @@ _STAGE_ABBREV = {
 def _resolve_hint_with_match_nums(hint: str, stage_num_map: Dict[str, Dict[int, str]]) -> str:
     """Replace stage-based references like 'Zwycięzca ĆF #1' → 'Zwycięzca M15'.
 
-    Only replaces references to other matches (ĆF, PF, SM5).
+    Also handles tier-specific placement references like 'Zwycięzca 12PF #1' → 'Zwycięzca M21'.
     Group-position references ('1. z gr. A') are left as-is.
     """
     if not hint:
         return hint
     def _replacer(match_obj):
         prefix = match_obj.group(1)   # e.g. "Zwycięzca " or "Przegrany "
-        abbrev = match_obj.group(2)   # e.g. "ĆF", "PF", "SM5"
+        abbrev = match_obj.group(2)   # e.g. "ĆF", "PF", "SM5", "12PF"
         num_str = match_obj.group(3)  # e.g. "1", "2"
+        num = int(num_str)
+        # Handle tier-specific placement references like "12PF" (not in _STAGE_ABBREV)
+        tier_m = re.match(r'^(\d+)PF$', abbrev, re.IGNORECASE)
+        if tier_m and abbrev.upper() not in _STAGE_ABBREV:
+            tier = tier_m.group(1)
+            stage_key = f"placement_rr_{tier}"
+            match_label = stage_num_map.get(stage_key, {}).get(num)
+            if match_label:
+                return f"{prefix}{match_label}"
+            return match_obj.group(0)
         stage_key = _STAGE_ABBREV.get(abbrev)
         if not stage_key:
             return match_obj.group(0)
-        num = int(num_str)
-        nums_for_stage = stage_num_map.get(stage_key, {})
-        match_label = nums_for_stage.get(num)
+        match_label = stage_num_map.get(stage_key, {}).get(num)
         if match_label:
             return f"{prefix}{match_label}"
         return match_obj.group(0)
-    # Pattern: (Zwycięzca|Przegrany) (ĆF|PF|SM5|9PF|13PF) #(\d+)
+    # Pattern: (Zwycięzca|Przegrany) (ĆF|PF|SM5|9PF|13PF|12PF|…) #(\d+)
     return re.sub(r'(Zwycięzca |Przegrany )(ĆF|PF|SM5|\d+PF) #(\d+)', _replacer, hint)
 
 
@@ -331,6 +340,7 @@ def _gender_label(gender: str) -> str:
 def _build_group_previews(
     matches: List[Dict[str, Any]],
     config: Dict[str, Any],
+    custom_teams: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     knockout_stages = {
         "quarterfinal",
@@ -356,6 +366,15 @@ def _build_group_previews(
         lambda: defaultdict(list)
     )
     seen_fallback = set()
+
+    # Pre-populate names for custom teams (negative IDs) from the custom_teams list
+    if custom_teams:
+        for idx, ct in enumerate(custom_teams):
+            if not isinstance(ct, dict):
+                continue
+            ct_name = ct.get("name")
+            if ct_name:
+                team_names[-(idx + 1)] = str(ct_name)
 
     for m in matches:
         gender = m.get("gender") or ""
@@ -461,7 +480,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
     accent = _get_accent(req.category)
     logo_b64 = _load_logo_b64()
     qr_b64 = _load_qr_b64()
-    group_previews = _build_group_previews(matches, config) if req.include_groups else []
+    group_previews = _build_group_previews(matches, config, req.custom_teams) if req.include_groups else []
     placement_rr_labels = _compute_placement_rr_labels(matches)
 
     # Group entries by day, sort by time then order
@@ -526,6 +545,34 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
         stage: genders.get("K", {})
         for stage, genders in stage_num_map_full.items()
     }
+
+    # Build per-tier placement maps for "12PF", "9PF"-style references in knockoutLabels.
+    # These point to round=1 matches within "placement_quad_{tier}_{gender}" groups.
+    # Key added to stage_num_map_M/K: "placement_rr_{tier}" → { ordinal → label }
+    tier_semis: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for m in all_matches_ordered:
+        if (m.get("stage") == "placement_rr"
+                and isinstance(m.get("group"), str)
+                and m["group"].startswith("placement_quad_")
+                and m.get("round") == 1):
+            # group format: "placement_quad_{tier}_{gender}"  e.g. "placement_quad_12_M"
+            parts = m["group"].split("_")
+            if len(parts) >= 4:
+                tier_gender_key = f"{parts[2]}:{m.get('gender', '')}"
+                tier_semis[tier_gender_key].append(m)
+    for tier_gender_key, semis in tier_semis.items():
+        tier, gender = tier_gender_key.split(":", 1)
+        sorted_semis = sorted(semis, key=lambda x: x.get("order") or 0)
+        tier_map: Dict[int, str] = {}
+        for idx, sm in enumerate(sorted_semis):
+            lbl = match_num_labels.get(sm.get("id") or "")
+            if lbl:
+                tier_map[idx + 1] = lbl
+        stage_key = f"placement_rr_{tier}"
+        if gender == "M":
+            stage_num_map_M[stage_key] = tier_map
+        elif gender == "K":
+            stage_num_map_K[stage_key] = tier_map
 
     # ── Second pass: build day sections with match numbers ──
     days_out: List[Dict[str, Any]] = []
