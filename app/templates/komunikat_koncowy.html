@@ -312,18 +312,34 @@
 
   /* MVP / Individual awards tile */
   .mvp-section { margin-top: 6pt; margin-bottom: 10pt; }
+  .mvp-row {
+    display: flex;
+    gap: 6pt;
+  }
   .mvp-tile {
+    flex: 1;
     display: flex;
     align-items: center;
     padding: 6pt 10pt;
-    margin-bottom: 4pt;
     border: 1pt solid #e0e0e0;
     border-radius: 7pt;
     page-break-inside: avoid;
   }
-  .mvp-icon { font-size: 14pt; margin-right: 8pt; flex-shrink: 0; }
+  .mvp-badge {
+    width: 30pt;
+    height: 30pt;
+    border-radius: 15pt;
+    text-align: center;
+    line-height: 30pt;
+    font-size: 7pt;
+    font-weight: 900;
+    letter-spacing: 0.3pt;
+    color: #fff;
+    margin-right: 8pt;
+    flex-shrink: 0;
+  }
   .mvp-label { font-size: 7pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4pt; color: #999; }
-  .mvp-name { font-size: 10pt; font-weight: 900; color: #1a1a2e; margin: 1pt 0; }
+  .mvp-name { font-size: 9.5pt; font-weight: 900; color: #1a1a2e; margin: 1pt 0; }
   .mvp-team { font-size: 7.5pt; color: #666; }
 
   /* ── Results table ── */
@@ -544,6 +560,35 @@
 {% endif %}
 {% endif %}
 
+<!-- ── MVP / Nagrody indywidualne ── -->
+{% if gs.mvp %}
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Nagrody indywidualne</div>
+<div class="mvp-section">
+<div class="mvp-row">
+{% if gs.mvp.mvp %}
+<div class="mvp-tile no-break" style="border-left: 3pt solid {{ gc }};">
+  <div class="mvp-badge" style="background: {{ gc }};">MVP</div>
+  <div>
+    <div class="mvp-label" style="color: {{ gc }};">MVP turnieju</div>
+    <div class="mvp-name">{{ gs.mvp.mvp.player_name }}</div>
+    <div class="mvp-team">{{ gs.mvp.mvp.team_name }}</div>
+  </div>
+</div>
+{% endif %}
+{% if gs.mvp.goalkeeper %}
+<div class="mvp-tile no-break" style="border-left: 3pt solid {{ gc }};">
+  <div class="mvp-badge" style="background: {{ gc }};">GK</div>
+  <div>
+    <div class="mvp-label" style="color: {{ gc }};">Najlepszy bramkarz</div>
+    <div class="mvp-name">{{ gs.mvp.goalkeeper.player_name }}</div>
+    <div class="mvp-team">{{ gs.mvp.goalkeeper.team_name }}</div>
+  </div>
+</div>
+{% endif %}
+</div>
+</div>
+{% endif %}
+
 <!-- ── Knockout Bracket ── -->
 {% if gs.bracket_svg %}
 <div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Drabinka pucharowa</div>
@@ -758,33 +803,6 @@
 </div>
 {% endfor %}
 {% endif %}
-{% endif %}
-
-<!-- ── MVP / Nagrody indywidualne ── -->
-{% if gs.mvp %}
-<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Nagrody indywidualne</div>
-<div class="mvp-section">
-{% if gs.mvp.mvp %}
-<div class="mvp-tile no-break" style="border-left: 3pt solid {{ gc }};">
-  <div class="mvp-icon">🏆</div>
-  <div>
-    <div class="mvp-label" style="color: {{ gc }};">MVP turnieju</div>
-    <div class="mvp-name">{{ gs.mvp.mvp.player_name }}</div>
-    <div class="mvp-team">{{ gs.mvp.mvp.team_name }}</div>
-  </div>
-</div>
-{% endif %}
-{% if gs.mvp.goalkeeper %}
-<div class="mvp-tile no-break" style="border-left: 3pt solid {{ gc }};">
-  <div class="mvp-icon">🧤</div>
-  <div>
-    <div class="mvp-label" style="color: {{ gc }};">Najlepszy bramkarz</div>
-    <div class="mvp-name">{{ gs.mvp.goalkeeper.player_name }}</div>
-    <div class="mvp-team">{{ gs.mvp.goalkeeper.team_name }}</div>
-  </div>
-</div>
-{% endif %}
-</div>
 {% endif %}
 
 {% endfor %}
