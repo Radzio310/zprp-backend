@@ -219,22 +219,25 @@ def _compute_placement_rr_labels(
         g = m.get("group") or ""
         if g in labels:
             continue
-        gm = re.match(r"placement_(\d+)", g)
+        # Matches both "placement_12_M" (RR) and "placement_quad_12_M" (bracket)
+        gm = re.match(r"placement_(?:quad_)?(\d+)", g)
         if not gm:
             continue
         tier = int(gm.group(1))
+        is_quad = "quad" in g
 
-        # Count matches in this group to derive team count via round-robin formula
-        n_matches = sum(
-            1
-            for m2 in matches
-            if m2.get("stage") == "placement_rr"
-            and m2.get("group") == g
-        )
-        if n_matches > 0:
-            num_teams = round((1 + _math.sqrt(1 + 8 * n_matches)) / 2)
+        if is_quad:
+            # 4-team mini-bracket — always 4 teams regardless of match count
+            num_teams = 4
         else:
-            num_teams = 3  # fallback
+            # Round-robin: derive team count from match count via triangular formula
+            n_matches = sum(
+                1
+                for m2 in matches
+                if m2.get("stage") == "placement_rr"
+                and m2.get("group") == g
+            )
+            num_teams = round((1 + _math.sqrt(1 + 8 * n_matches)) / 2) if n_matches > 0 else 3
 
         start_place = tier
         end_place = tier + num_teams - 1
