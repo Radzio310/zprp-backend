@@ -418,20 +418,30 @@ def _build_group_previews(
             configured_ids = cfg_teams.get(group_name) or []
             fallback = fallback_groups.get(gender, {}).get(group_name, [])
 
-            # Prefer match-based fallback when available: it always reflects the
-            # actual current group composition (same source as ResultsView).
-            # Fall back to config.groups only when no group matches exist yet.
-            if fallback:
-                teams_out = fallback
-            elif configured_ids:
+            # If config.groups has the seeded order, use it as the authoritative ordering.
+            # Names come from match data (fallback) — which has patched custom team names.
+            # If config.groups is missing, fall back to match-derived order.
+            if configured_ids:
+                fallback_by_id = {entry["id"]: entry["name"] for entry in fallback}
+                configured_set: set[int] = set()
                 for raw_id in configured_ids:
                     try:
                         team_id = int(raw_id)
                     except (TypeError, ValueError):
                         continue
-                    teams_out.append(
-                        {"id": team_id, "name": team_names.get(team_id, f"#{team_id}")}
+                    configured_set.add(team_id)
+                    name = (
+                        fallback_by_id.get(team_id)
+                        or team_names.get(team_id)
+                        or f"#{team_id}"
                     )
+                    teams_out.append({"id": team_id, "name": name})
+                # Append any teams present in matches but missing from config (e.g. extras)
+                for entry in fallback:
+                    if entry["id"] not in configured_set:
+                        teams_out.append(entry)
+            elif fallback:
+                teams_out = fallback
 
             if teams_out:
                 groups_out.append({"name": group_name, "teams": teams_out})
