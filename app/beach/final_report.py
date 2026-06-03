@@ -1106,6 +1106,15 @@ def _build_placement_brackets(matches: List[Dict[str, Any]], color: str) -> List
                     cfg["loser_label"],
                 ),
             })
+        elif cfg["winner_stage"] == "fifth_place" and winner_match:
+            sections.append({
+                "title": "O 5. miejsce",
+                "svg": _render_single_match_svg(
+                    winner_match,
+                    color,
+                    cfg["winner_label"],
+                ),
+            })
         elif cfg["winner_stage"] == "thirteenth_place" and winner_match:
             sections.append({
                 "title": "O 13. miejsce",
