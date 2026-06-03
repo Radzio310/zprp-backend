@@ -89,7 +89,16 @@ class SchedulePdfRequest(BaseModel):
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
 def _roman(n: int) -> str:
-    return _ROMAN.get(n, str(n))
+    if n <= 0:
+        return str(n)
+    vals = [(1000,"M"),(900,"CM"),(500,"D"),(400,"CD"),(100,"C"),(90,"XC"),
+            (50,"L"),(40,"XL"),(10,"X"),(9,"IX"),(5,"V"),(4,"IV"),(1,"I")]
+    s, rem = "", n
+    for v, sym in vals:
+        while rem >= v:
+            s += sym
+            rem -= v
+    return s
 
 
 def _get_accent(category: str) -> str:
@@ -210,7 +219,7 @@ def _compute_placement_rr_labels(
         g = m.get("group") or ""
         if g in labels:
             continue
-        gm = re.match(r"placement_(\d+)_", g)
+        gm = re.match(r"placement_(\d+)", g)
         if not gm:
             continue
         tier = int(gm.group(1))
@@ -481,13 +490,20 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
             if kind not in ("court_break", "tournament_opening"):
                 all_matches_ordered.append(m)
 
+    seq_counter = 0
+    seq_num_labels: Dict[str, str] = {}
+
     for m in all_matches_ordered:
+        m_id = m.get("id") or ""
+        seq_counter += 1
+        if m_id:
+            seq_num_labels[m_id] = str(seq_counter)
+
         gender = m.get("gender") or ""
         if gender in gender_counters:
             gender_counters[gender] += 1
             num = gender_counters[gender]
             label = f"{gender}{num}"
-            m_id = m.get("id") or ""
             if m_id:
                 match_num_labels[m_id] = label
 
@@ -556,6 +572,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                 "time": m.get("startTime") or "",
                 "court": str(m.get("court") or ""),
                 "match_num": match_num,
+                "seq_num": seq_num_labels.get(m_id, ""),
                 "gender": gender,
                 "stage": _stage_label(m, placement_rr_labels),
                 "team_a": _team_name(m.get("teamA")),
@@ -567,6 +584,23 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
             })
 
         days_out.append({"label": day_label, "matches": match_rows, "row_count": len(match_rows)})
+
+    # ── Smart page-break: don't force a new page if the next day fits on remaining space ──
+    # Uses a heuristic: ~30 match rows fit on one A4 portrait continuation page.
+    _ROWS_PER_PAGE = 30
+    _HDR_OVERHEAD = 2  # day header + table header in row-equivalents
+    for i, day in enumerate(days_out):
+        if i == 0:
+            day["force_page_break"] = bool(group_previews)
+        else:
+            prev = days_out[i - 1]
+            prev_total = prev["row_count"] + _HDR_OVERHEAD
+            overflow = prev_total % _ROWS_PER_PAGE
+            if overflow == 0:
+                overflow = _ROWS_PER_PAGE
+            remaining = _ROWS_PER_PAGE - overflow
+            needed = day["row_count"] + _HDR_OVERHEAD
+            day["force_page_break"] = needed > remaining
 
     # If split_by_courts, build per-day sections where each day lists per-court sub-sections
     split_by_courts = req.split_by_courts and courts_count >= 2

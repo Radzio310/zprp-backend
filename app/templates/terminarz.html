@@ -169,11 +169,20 @@
     font-weight: 900;
     text-align: center;
     white-space: nowrap;
-    width: 24pt;
+    width: 28pt;
     font-size: {{ '8.5pt' if use_landscape else '8pt' }};
+    vertical-align: middle;
   }
   td.col-num.M { color: #2BA8A0; }
   td.col-num.K { color: #E85A78; }
+  .seq-num {
+    display: block;
+    font-size: 5.5pt;
+    font-weight: 400;
+    color: #bbb;
+    line-height: 1;
+    margin-bottom: 0.5pt;
+  }
 
   /* stage/group */
   td.col-stage {
@@ -486,7 +495,7 @@
 <tr class="gender-{{ m.gender }}">
   <td class="col-time">{{ m.time }}</td>
   <td class="col-court">{{ m.court }}</td>
-  <td class="col-num {{ m.gender }}">{{ m.match_num }}</td>
+  <td class="col-num {{ m.gender }}">{% if m.seq_num %}<span class="seq-num">({{ m.seq_num }})</span>{% endif %}{{ m.match_num }}</td>
   <td class="col-stage">{{ m.stage }}</td>
   {{ team_cell(m.team_a, m.hint_a) }}
   <td class="col-vs">–</td>
@@ -570,7 +579,7 @@
 {% if not split_by_courts %}
 {% for day in days %}
 
-<div class="day-section{% if (group_previews and loop.first) or (not loop.first and day.row_count >= 5) %} page-break{% endif %}">
+<div class="day-section{% if day.force_page_break %} page-break{% endif %}">
   <div class="day-header no-break">{{ day.label }}</div>
 
   {% if day.matches %}
