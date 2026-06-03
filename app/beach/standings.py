@@ -109,6 +109,83 @@ def _compute_total_points(entries: List[Dict], top_n: int = 0) -> int:
     return sum(tournament_pts) + manual_pts
 
 
+def _counted_tournament_entries(entries: List[Dict], top_n: int = 0) -> List[Dict]:
+    tournament_entries = [
+        e for e in entries
+        if e.get("type") == "tournament" and not e.get("revoked", False)
+    ]
+    tournament_entries.sort(key=lambda e: int(e.get("points", 0)), reverse=True)
+    if top_n > 0:
+        return tournament_entries[:top_n]
+    return tournament_entries
+
+
+def _set_score(s: Dict[str, Any], side: str) -> int:
+    key = "ptA" if side == "A" else "ptB"
+    legacy_key = "scoreA" if side == "A" else "scoreB"
+    try:
+        return int(s.get(key, s.get(legacy_key, 0)) or 0)
+    except Exception:
+        return 0
+
+
+def _empty_overall_stats() -> Dict[str, int]:
+    return {
+        "overall_matches": 0,
+        "overall_wins": 0,
+        "overall_sets_won": 0,
+        "overall_sets_lost": 0,
+        "overall_brk_for": 0,
+        "overall_brk_against": 0,
+    }
+
+
+def _aggregate_team_overall_stats(
+    team_id: int,
+    tournament_ids: set[int],
+    tournament_data_by_id: Dict[int, Dict[str, Any]],
+) -> Dict[str, int]:
+    stats = _empty_overall_stats()
+    for tid in tournament_ids:
+        data = tournament_data_by_id.get(tid) or {}
+        schedule = data.get("schedule") or {}
+        for m in (schedule.get("matches") or []):
+            if m.get("status") != "finished":
+                continue
+            ta = m.get("teamA") or {}
+            tb = m.get("teamB") or {}
+            ta_id = ta.get("id")
+            tb_id = tb.get("id")
+            is_a = ta_id == team_id
+            is_b = tb_id == team_id
+            if not is_a and not is_b:
+                continue
+
+            score_a = m.get("scoreA")
+            score_b = m.get("scoreB")
+            if score_a is None or score_b is None:
+                continue
+            try:
+                sa, sb = int(score_a), int(score_b)
+            except Exception:
+                continue
+
+            team_sets = sa if is_a else sb
+            opp_sets = sb if is_a else sa
+            stats["overall_matches"] += 1
+            stats["overall_sets_won"] += team_sets
+            stats["overall_sets_lost"] += opp_sets
+            if team_sets > opp_sets:
+                stats["overall_wins"] += 1
+
+            for s in (m.get("sets") or []):
+                pa = _set_score(s, "A")
+                pb = _set_score(s, "B")
+                stats["overall_brk_for"] += pa if is_a else pb
+                stats["overall_brk_against"] += pb if is_a else pa
+    return stats
+
+
 def _compute_positions_from_schedule(
     schedule: Dict, gender: str
 ) -> List[Dict[str, Any]]:
@@ -469,13 +546,52 @@ async def list_standings(
     q = q.order_by(beach_standings.c.team_name.asc())
     rows = await database.fetch_all(q)
 
-    out: List[BeachStandingRow] = []
+    parsed_rows: List[Dict[str, Any]] = []
+    all_tournament_ids: set[int] = set()
     for r in rows:
         r_d = dict(r)
         entries = _parse_json(r_d.get("tournaments_json") or [])
         if not isinstance(entries, list):
             entries = []
+        counted_entries = _counted_tournament_entries(entries, top_n)
+        counted_ids = {
+            int(e["tournament_id"])
+            for e in counted_entries
+            if e.get("tournament_id") is not None
+        }
+        all_tournament_ids.update(counted_ids)
+        parsed_rows.append({
+            "row": r_d,
+            "entries": entries,
+            "counted_tournament_ids": counted_ids,
+        })
+
+    tournament_data_by_id: Dict[int, Dict[str, Any]] = {}
+    if all_tournament_ids:
+        tour_rows = await database.fetch_all(
+            select(beach_tournaments.c.id, beach_tournaments.c.data_json).where(
+                beach_tournaments.c.id.in_(list(all_tournament_ids))
+            )
+        )
+        for tr in tour_rows:
+            data = tr["data_json"] or {}
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except Exception:
+                    data = {}
+            tournament_data_by_id[int(tr["id"])] = data if isinstance(data, dict) else {}
+
+    out: List[BeachStandingRow] = []
+    for item in parsed_rows:
+        r_d = item["row"]
+        entries = item["entries"]
         total = _compute_total_points(entries, top_n)
+        overall_stats = _aggregate_team_overall_stats(
+            int(r_d["team_id"]),
+            item["counted_tournament_ids"],
+            tournament_data_by_id,
+        )
         out.append(
             BeachStandingRow(
                 id=r_d["id"],
@@ -488,6 +604,7 @@ async def list_standings(
                 tournaments_json=entries,
                 updated_at=r_d["updated_at"],
                 total_points=total,
+                **overall_stats,
             )
         )
 

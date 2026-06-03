@@ -1625,6 +1625,12 @@ class BeachStandingRow(BaseModel):
     updated_at: datetime
     # computed po stronie API
     total_points: int = 0
+    overall_matches: int = 0
+    overall_wins: int = 0
+    overall_sets_won: int = 0
+    overall_sets_lost: int = 0
+    overall_brk_for: int = 0
+    overall_brk_against: int = 0
 
 
 class BeachStandingsListResponse(BaseModel):
