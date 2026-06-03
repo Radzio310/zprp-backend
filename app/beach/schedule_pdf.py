@@ -388,12 +388,17 @@ def _build_group_previews(
                 continue
             name = _team_name(team)
             if name:
-                team_names[team_id] = name
+                # For custom teams (negative IDs) already pre-seeded from the
+                # custom_teams list, prefer the pre-seeded name (it's up-to-date).
+                # For positive (real) IDs, always take the match name.
+                if team_id >= 0 or team_id not in team_names:
+                    team_names[team_id] = name
             if m.get("stage") == "group" and gender and group:
                 key = (gender, group, team_id)
                 if key not in seen_fallback:
+                    resolved_name = team_names.get(team_id) or name or f"#{team_id}"
                     fallback_groups[gender][group].append(
-                        {"id": team_id, "name": name or f"#{team_id}"}
+                        {"id": team_id, "name": resolved_name}
                     )
                     seen_fallback.add(key)
 
