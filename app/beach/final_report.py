@@ -105,9 +105,10 @@ class TieMatchEntry(BaseModel):
 class TieExplanation(BaseModel):
     gender: str                   # "M" | "K"
     teams: List[str]              # nazwy drużyn w kolejności po rozstrzygnięciu
-    criterion: str                # "wins" | "sets" | "brk" | "equal"
+    criterion: str                # "wins" | "sets" | "brk" | "overall_sets" | "overall_brk" | "equal"
     winner_name: Optional[str] = None
     matches: List[TieMatchEntry] = []
+    stats_rows: Optional[List[Dict[str, str]]] = None  # [{team_name, value}] — for overall-stats ties
 
 
 class FinalReportRequest(BaseModel):
@@ -121,6 +122,7 @@ class FinalReportRequest(BaseModel):
     standings: Optional[List[GenderStandingsData]] = None
     custom_summary: Optional[str] = None
     tie_explanations: Optional[List[TieExplanation]] = None
+    mvp_data: Optional[Dict[str, Any]] = None  # {"M": {mvp: {...}, goalkeeper: {...}}, "K": {...}}
 
 
 # ──────────── Helpers ────────────
@@ -1376,7 +1378,9 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             _crit_labels = {
                 "wins": "wygrane mecze bezpośrednie",
                 "sets": "stosunek setów w meczach bezpośrednich",
-                "brk": "stosunek punktów w meczach bezpośrednich",
+                "brk": "stosunek punktów brk w meczach bezpośrednich",
+                "overall_sets": "stosunek setów (wszystkie mecze w sezonie)",
+                "overall_brk": "stosunek punktów brk (wszystkie mecze w sezonie)",
                 "equal": "ex aequo",
             }
             gs["tie_explanations"] = [
@@ -1385,9 +1389,25 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                     "winner_name": te.winner_name,
                     "criterion": _crit_labels.get(te.criterion, te.criterion),
                     "matches": [m.dict() for m in te.matches],
+                    "stats_rows": te.stats_rows or [],
                 }
                 for te in raw_te
             ]
+
+        # ── MVP / Individual awards ──
+        if req.mvp_data and gender in req.mvp_data:
+            gd = req.mvp_data[gender]
+            mvp_entry = gd.get("mvp")
+            gk_entry = gd.get("goalkeeper")
+            if mvp_entry or gk_entry:
+                gs["mvp"] = {
+                    "mvp": mvp_entry,
+                    "goalkeeper": gk_entry,
+                }
+            else:
+                gs["mvp"] = None
+        else:
+            gs["mvp"] = None
 
         gender_sections.append(gs)
 
