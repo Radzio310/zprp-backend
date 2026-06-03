@@ -14,6 +14,7 @@ from sqlalchemy import (
     MetaData,
     Table,
     Text,
+    UniqueConstraint,
     create_engine,
     func,
     text,
@@ -1295,6 +1296,26 @@ beach_activity_log = Table(
 
 Index("ix_beach_activity_log_area_created", beach_activity_log.c.area, beach_activity_log.c.created_at.desc())
 Index("ix_beach_activity_log_actor_created", beach_activity_log.c.actor_user_id, beach_activity_log.c.created_at.desc())
+
+# ─────────────────── BEACH: MVP Votes ───────────────────
+
+beach_mvp_votes = Table(
+    "beach_mvp_votes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("tournament_id", Integer, nullable=False, index=True),
+    Column("voter_user_id", Integer, nullable=False, index=True),
+    Column("vote_type", String, nullable=False),          # "mvp" | "goalkeeper"
+    Column("player_id", Integer, nullable=True),          # null dla custom team playerów
+    Column("custom_player_id", String, nullable=True),    # "ct_<uuid>:<player_uuid>"
+    Column("player_name", String, nullable=False),
+    Column("team_name", String, nullable=False),
+    Column("jersey_number", String, nullable=True),
+    Column("photo_url", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("tournament_id", "voter_user_id", "vote_type",
+                     name="uq_beach_mvp_vote_per_type"),
+)
 
 # ─────────────────── BEACH: Tutorials ────────────────────────────────────────
 
