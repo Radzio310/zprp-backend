@@ -416,7 +416,14 @@ def _build_group_previews(
         for group_name in group_names:
             teams_out: List[Dict[str, Any]] = []
             configured_ids = cfg_teams.get(group_name) or []
-            if configured_ids:
+            fallback = fallback_groups.get(gender, {}).get(group_name, [])
+
+            # Prefer match-based fallback when available: it always reflects the
+            # actual current group composition (same source as ResultsView).
+            # Fall back to config.groups only when no group matches exist yet.
+            if fallback:
+                teams_out = fallback
+            elif configured_ids:
                 for raw_id in configured_ids:
                     try:
                         team_id = int(raw_id)
@@ -425,8 +432,6 @@ def _build_group_previews(
                     teams_out.append(
                         {"id": team_id, "name": team_names.get(team_id, f"#{team_id}")}
                     )
-            else:
-                teams_out = fallback_groups.get(gender, {}).get(group_name, [])
 
             if teams_out:
                 groups_out.append({"name": group_name, "teams": teams_out})
