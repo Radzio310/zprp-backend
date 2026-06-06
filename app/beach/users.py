@@ -21,6 +21,7 @@ from app.beach.badges import (
     DEFAULT_LOVER_BADGE_NAME,
     ensure_default_lover_badge_definition,
 )
+from app.beach.capabilities import resolve_user_capabilities
 from app.schemas import (
     BeachUserCreateRequest,
     BeachUserUpdateRequest,
@@ -157,7 +158,11 @@ def _role_label_pl(role_type: Any) -> str:
     return ROLE_LABELS_PL.get(role_key, role_key or "?")
 
 
-def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
+def _to_user_item(
+    row: dict,
+    is_admin: bool = False,
+    effective_capabilities: Optional[List[str]] = None,
+) -> BeachUserItem:
     device_ids = list(row.get("device_ids") or [])
     return BeachUserItem(
         id=int(row["id"]),
@@ -182,6 +187,7 @@ def _to_user_item(row: dict, is_admin: bool = False) -> BeachUserItem:
         updated_at=row["updated_at"],
         is_admin=is_admin,
         is_active=bool(row.get("is_active", True)),
+        effective_capabilities=list(effective_capabilities or []),
     )
 
 
@@ -449,7 +455,8 @@ async def get_me(user_id: int = Depends(beach_get_current_user_id)):
         row_dict = dict(row)
 
     is_admin = await _check_is_admin(user_id)
-    return _to_user_item(row_dict, is_admin=is_admin)
+    caps = sorted(await resolve_user_capabilities(row_dict.get("badges")))
+    return _to_user_item(row_dict, is_admin=is_admin, effective_capabilities=caps)
 
 
 @router.post("/me/ensure-lover-badge", response_model=BeachUserItem, summary="Dodaj domyslny badge Beach Handball Lover, jesli go brakuje")
@@ -459,7 +466,8 @@ async def ensure_me_lover_badge(user_id: int = Depends(beach_get_current_user_id
     if not row:
         raise HTTPException(404, "Uzytkownik nie znaleziony")
     is_admin = await _check_is_admin(user_id)
-    return _to_user_item(dict(row), is_admin=is_admin)
+    caps = sorted(await resolve_user_capabilities(dict(row).get("badges")))
+    return _to_user_item(dict(row), is_admin=is_admin, effective_capabilities=caps)
 
 
 @router.post("/me/deactivate", response_model=dict, summary="Dezaktywuj własne konto (BEACH)")
@@ -1013,7 +1021,8 @@ async def login_user(req: BeachLoginRequest):
 
     is_admin = await _check_is_admin(int(row_dict["id"]))
 
-    user_model = _to_user_item(dict(updated), is_admin=is_admin)
+    caps = sorted(await resolve_user_capabilities(dict(updated).get("badges")))
+    user_model = _to_user_item(dict(updated), is_admin=is_admin, effective_capabilities=caps)
     token = beach_create_access_token(user_model.id)
 
     return BeachLoginResponse(user=user_model, token=token)

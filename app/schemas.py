@@ -1145,6 +1145,10 @@ class BeachUserItem(BaseModel):
     is_admin: bool = False
     is_active: bool = True          # ← NOWE
 
+    # Efektywne uprawnienia (suma capabilities ze wszystkich badge'y).
+    # Wypełniane dla /me i logowania; admin ma wszystkie (flaga is_admin).
+    effective_capabilities: List[str] = Field(default_factory=list)
+
 
 class BeachUsersListResponse(BaseModel):
     users: List[BeachUserItem]

@@ -33,6 +33,7 @@ from app.beach.calendar import (
     sync_beach_tournament_google_for_users,
 )
 from app.beach.notifications import create_notification
+from app.beach.capabilities import resolve_user_capabilities
 from app.beach.schedule_notifications import notify_schedule_updated
 from app.beach.activity_log import log_activity, get_actor_name, compute_diff, compute_list_diff
 
@@ -539,7 +540,7 @@ async def _can_manage_tournament_schedule(
     if not user_row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
-    user_badges = set(_extract_badge_names(user_row["badges"]))
+    caps = await resolve_user_capabilities(user_row["badges"])
     host_ids = {
         int(h["id"])
         for h in (data.get("hosts") or [])
@@ -552,7 +553,10 @@ async def _can_manage_tournament_schedule(
     }
     head_judge_id = data.get("head_judge_id")
 
-    if "Gospodarz zawodów" in user_badges and current_user_id in host_ids:
+    # Obsadowy / uprawnienie "gospodarz wszędzie" — zarządza każdym turniejem.
+    if "tournament.actAsHostEverywhere" in caps:
+        return True
+    if "tournament.schedule.edit" in caps and current_user_id in host_ids:
         return True
     if isinstance(head_judge_id, int) and head_judge_id == current_user_id:
         return True
@@ -581,9 +585,9 @@ async def create_tournament(
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
     is_admin_user = await _is_admin(current_user_id)
-    user_badges = set(_extract_badge_names(user_row["badges"]))
-    is_host_badge_user = "Gospodarz zawodów" in user_badges
-    if not (is_admin_user or is_host_badge_user):
+    caps = await resolve_user_capabilities(user_row["badges"])
+    can_create = "tournament.create" in caps or "tournament.actAsHostEverywhere" in caps
+    if not (is_admin_user or can_create):
         raise HTTPException(403, "Brak uprawnień")
 
     if not req.name or not req.name.strip():
@@ -915,8 +919,10 @@ async def get_tournament(
         }
         invited_set = set(str(x) for x in (data.get("invited_ids") or []))
         include_all = bool((data.get("target") or {}).get("include_all", False))
+        caps = await resolve_user_capabilities(user_row["badges"])
         has_access = (
-            row_d.get("badge") in user_badges
+            "tournament.actAsHostEverywhere" in caps
+            or row_d.get("badge") in user_badges
             or include_all
             or str(current_user_id) in invited_set
             or current_user_id in host_ids
@@ -1102,22 +1108,24 @@ async def host_update_tournament(
     user_is_admin = await _is_admin(current_user_id)
 
     if not user_is_admin:
-        # Sprawdź badge "Gospodarz zawodów"
         user_row = await database.fetch_one(
             select(beach_users.c.badges).where(beach_users.c.id == current_user_id)
         )
         if not user_row:
             raise HTTPException(404, "Użytkownik nie znaleziony")
 
-        user_badges = set(_extract_badge_names(user_row["badges"]))
-        if "Gospodarz zawodów" not in user_badges:
-            raise HTTPException(403, "Wymagany badge: Gospodarz zawodów")
+        caps = await resolve_user_capabilities(user_row["badges"])
 
-        # Sprawdź czy user jest hostem tego konkretnego turnieju
-        hosts = data.get("hosts") or []
-        host_ids = {int(h["id"]) for h in hosts if isinstance(h, dict) and "id" in h}
-        if current_user_id not in host_ids:
-            raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
+        # "Gospodarz wszędzie" (Obsadowy) zarządza każdym turniejem.
+        if "tournament.actAsHostEverywhere" not in caps:
+            if "tournament.announcements.edit" not in caps:
+                raise HTTPException(403, "Brak uprawnień do edycji ogłoszeń")
+
+            # Sprawdź czy user jest hostem tego konkretnego turnieju
+            hosts = data.get("hosts") or []
+            host_ids = {int(h["id"]) for h in hosts if isinstance(h, dict) and "id" in h}
+            if current_user_id not in host_ids:
+                raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
 
     # Scal tylko dozwolone pola (nie nadpisuj reszty data_json)
     old_announcements_count = len(data.get("announcements") or [])
@@ -1293,7 +1301,7 @@ async def judge_update_tournament(
     existing_d = dict(existing)
     data = _parse_json(existing_d["data_json"])
 
-    # Sprawdź uprawnienia: admin lub badge Obsadowy
+    # Sprawdź uprawnienia: admin lub uprawnienia do zarządzania sędziami
     is_admin_flag = await _is_admin(current_user_id)
     if not is_admin_flag:
         user_row = await database.fetch_one(
@@ -1301,9 +1309,17 @@ async def judge_update_tournament(
         )
         if not user_row:
             raise HTTPException(404, "Użytkownik nie znaleziony")
-        user_badges = set(_extract_badge_names(user_row["badges"]))
-        if "Obsadowy" not in user_badges:
-            raise HTTPException(403, "Wymagany badge: Obsadowy")
+        caps = await resolve_user_capabilities(user_row["badges"])
+        judge_mgmt_caps = {
+            "tournament.actAsHostEverywhere",
+            "tournament.judges.manageHead",
+            "tournament.judges.addField",
+            "tournament.judges.addTable",
+            "tournament.judges.assignField",
+            "tournament.judges.assignTable",
+        }
+        if not (caps & judge_mgmt_caps):
+            raise HTTPException(403, "Brak uprawnień do zarządzania sędziami")
 
     # Aktualizuj tylko dozwolone pola
     old_judge_ids = set()

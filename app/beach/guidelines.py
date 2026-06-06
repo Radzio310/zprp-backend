@@ -27,6 +27,7 @@ from app.schemas import (
 from app.deps import beach_get_current_user_id
 from app.beach.notifications import create_notification
 from app.beach.activity_log import log_activity, get_actor_name
+from app.beach.capabilities import resolve_user_capabilities
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/guidelines", tags=["Beach: Guidelines"])
@@ -63,13 +64,14 @@ async def _is_admin(user_id: int) -> bool:
 
 
 async def _is_rulemaker(user_id: int) -> bool:
-    """Check if user has the 'Rulemaker' badge."""
+    """Check if user can edit rules (capability 'rules.edit')."""
     row = await database.fetch_one(
         select(beach_users.c.badges).where(beach_users.c.id == user_id)
     )
     if not row:
         return False
-    return "Rulemaker" in _extract_badge_names(row["badges"])
+    caps = await resolve_user_capabilities(row["badges"])
+    return "rules.edit" in caps
 
 
 async def _is_head_judge_of_tournament(user_id: int, tournament_id: int) -> bool:
