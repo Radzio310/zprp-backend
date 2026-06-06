@@ -2683,7 +2683,20 @@ async def squad_update_tournament(
     data = _parse_json(existing_d["data_json"])
 
     is_admin_flag = await _is_admin(current_user_id)
-    if not is_admin_flag:
+
+    # Judges assigned to this tournament (head judge or any listed judge) may also
+    # edit match squads and collect signatures — the frontend shows this UI to them.
+    _head_judge_id = data.get("head_judge_id")
+    _judge_user_ids = {
+        int(j["user_id"])
+        for j in (data.get("judges") or [])
+        if isinstance(j, dict) and j.get("user_id")
+    }
+    is_judge_flag = current_user_id in _judge_user_ids or (
+        isinstance(_head_judge_id, int) and _head_judge_id == current_user_id
+    )
+
+    if not (is_admin_flag or is_judge_flag):
         if body.custom_team_id:
             # Check if user is coach of this custom team
             custom_teams = data.get("custom_teams") or []
@@ -2694,7 +2707,7 @@ async def squad_update_tournament(
                 for ct in custom_teams
             )
             if not is_coach_of_custom:
-                raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny lub admina")
+                raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny, sedziego lub admina")
         else:
             user_row = await database.fetch_one(
                 select(beach_users.c.roles).where(beach_users.c.id == current_user_id)
@@ -2716,7 +2729,7 @@ async def squad_update_tournament(
                 for r in roles
             )
             if not is_coach_of_team:
-                raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny lub admina")
+                raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny, sedziego lub admina")
 
     team_squads: dict = data.get("team_squads") or {}
     team_key = body.custom_team_id if body.custom_team_id else str(body.team_id)
