@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import asyncpg
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, func as sa_func
 from sqlalchemy.exc import IntegrityError
 from passlib.context import CryptContext
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -374,6 +374,16 @@ async def _remove_device_from_other_users(installation_id: str, current_user_id:
 
 
 # ─────────────────── endpoints ───────────────────
+
+@router.get("/public-stats", response_model=dict, summary="Publiczne statystyki aplikacji (bez auth)")
+async def public_stats():
+    """Zwraca liczbę aktywnych użytkowników — endpoint publiczny, bez autoryzacji."""
+    row = await database.fetch_one(
+        select(sa_func.count(beach_users.c.id)).where(beach_users.c.is_active == True)  # noqa: E712
+    )
+    active_users = row[0] if row else 0
+    return {"active_users": active_users}
+
 
 @router.get("/", response_model=BeachUsersListResponse, summary="Lista użytkowników (BEACH)")
 async def list_users(
