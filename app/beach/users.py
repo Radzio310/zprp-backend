@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import re
 import secrets
+import unicodedata
 from datetime import datetime, timezone
 import logging
 import traceback
@@ -16,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 
 from app.db import database, beach_users, beach_admins
-from app.beach.notifications import notify_admins
+from app.beach.notifications import notify_admins, create_notification
 from app.beach.badges import (
     DEFAULT_LOVER_BADGE_NAME,
     ensure_default_lover_badge_definition,
@@ -40,6 +43,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/beach/users", tags=["Beach: Users"])
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+
+
+def _remove_diacritics(s: str) -> str:
+    s = s.replace("ł", "l").replace("Ł", "L")
+    normalized = unicodedata.normalize("NFD", s)
+    return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+
+
+def _build_login(surname: str, name: str) -> str:
+    sn = re.sub(r"\s+", "_", surname.strip())
+    sn = _remove_diacritics(sn).lower()
+    nm = re.sub(r"\s+", "", name.strip())
+    nm = _remove_diacritics(nm).lower()
+    result = f"{sn}_{nm}"
+    result = re.sub(r"_+", "_", result).strip("_")
+    return result
 
 
 def _hash_password(password: str) -> str:
@@ -1081,3 +1100,76 @@ async def sync_device(req: SyncDeviceRequest, user_id: int = Depends(beach_get_c
         .values(device_ids=device_ids, device_infos=device_infos, updated_at=now)
     )
     return {"ok": True, "updated": True}
+
+
+class AdminRenameRequest(BaseModel):
+    surname: str
+    first_name: str
+
+
+@router.patch("/{user_id}/admin-name", response_model=BeachUserItem, summary="Zmień imię i nazwisko użytkownika (admin)")
+async def admin_rename_user(
+    user_id: int,
+    req: AdminRenameRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _check_is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    surname = req.surname.strip().upper()
+    first_name = req.first_name.strip()
+
+    if not surname or not first_name:
+        raise HTTPException(400, "Nazwisko i imię są wymagane")
+
+    full_name = f"{surname} {first_name}"
+    new_login = _build_login(surname, first_name)
+
+    if not new_login:
+        raise HTTPException(400, "Nie można wygenerować loginu z podanych danych")
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not row:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    old_dict = dict(row)
+    old_full_name = old_dict.get("full_name", "")
+    old_login = old_dict.get("login", "")
+
+    if new_login != old_login:
+        conflict = await database.fetch_one(
+            select(beach_users.c.id).where(
+                (beach_users.c.login == new_login) & (beach_users.c.id != user_id)
+            )
+        )
+        if conflict:
+            raise HTTPException(409, f"Login '{new_login}' jest już zajęty przez innego użytkownika")
+
+    now = datetime.now(timezone.utc)
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(full_name=full_name, login=new_login, updated_at=now)
+    )
+
+    admin_name = await get_actor_name(current_user_id)
+    asyncio.ensure_future(create_notification(
+        notif_type="admin_name_changed",
+        title="Dane zaktualizowane przez admina",
+        body=f"Admin zmienił Twoje dane: {old_full_name} → {full_name}. Nowy login: {new_login}",
+        data={"old_full_name": old_full_name, "new_full_name": full_name, "old_login": old_login, "new_login": new_login},
+        target_user_ids=[user_id],
+    ))
+
+    await log_activity(
+        area="user",
+        action="user.admin_name_changed",
+        actor_user_id=current_user_id,
+        actor_name=admin_name,
+        target_id=str(user_id),
+        target_label=old_full_name,
+        details={"old_full_name": old_full_name, "new_full_name": full_name, "old_login": old_login, "new_login": new_login},
+    )
+
+    updated = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    return _to_user_item(dict(updated))
