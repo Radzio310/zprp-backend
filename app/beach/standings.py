@@ -1452,3 +1452,73 @@ async def purge_orphaned_tournament(
     await log_activity(area="standings", action="standings.orphan_purged", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(tournament_id), details={"revoked_count": revoked_count})
 
     return {"success": True, "revoked_count": revoked_count}
+
+
+# ─────────────────── Background scheduler: auto sync team names ───────────────────
+
+_STANDINGS_SYNC_INTERVAL = 24 * 60 * 60  # 24h
+
+
+async def _do_sync_standing_team_names() -> int:
+    """
+    Synchronizuje team_name w beach_standings z aktualną tabelą beach_teams.
+    Dotyczy tylko wierszy, w których jest przynajmniej jeden aktywny (nieodwołany)
+    turniej. Zwraca liczbę zaktualizowanych wierszy.
+    """
+    all_standings = await database.fetch_all(
+        select(beach_standings).where(beach_standings.c.team_id.isnot(None))
+    )
+
+    # Filtruj: tylko wiersze z co najmniej jednym aktywnym turniejem
+    active_rows = []
+    for row in all_standings:
+        entries = _parse_json(dict(row).get("tournaments_json") or [])
+        has_active = any(
+            isinstance(e, dict) and e.get("type") == "tournament" and not e.get("revoked", False)
+            for e in entries
+        )
+        if has_active:
+            active_rows.append(row)
+
+    if not active_rows:
+        return 0
+
+    team_ids = list({r["team_id"] for r in active_rows})
+    teams_rows = await database.fetch_all(
+        select(beach_teams.c.id, beach_teams.c.team_name).where(
+            beach_teams.c.id.in_(team_ids)
+        )
+    )
+    name_map = {r["id"]: r["team_name"] for r in teams_rows}
+
+    now = datetime.now(timezone.utc)
+    updated = 0
+    for row in active_rows:
+        r_d = dict(row)
+        current_name = name_map.get(r_d["team_id"])
+        if current_name and current_name != r_d["team_name"]:
+            await database.execute(
+                update(beach_standings)
+                .where(beach_standings.c.id == r_d["id"])
+                .values(team_name=current_name, updated_at=now)
+            )
+            updated += 1
+
+    return updated
+
+
+async def run_standings_sync_team_names_scheduler() -> None:
+    """Raz na dobę synchronizuje nazwy drużyn w tabeli punktowej."""
+    logger.info("📊 Standings team-names sync scheduler started (interval=24h)")
+    while True:
+        await asyncio.sleep(_STANDINGS_SYNC_INTERVAL)
+        try:
+            updated = await _do_sync_standing_team_names()
+            if updated:
+                logger.info("📊 Standings sync_team_names: zaktualizowano %d wierszy", updated)
+            else:
+                logger.debug("📊 Standings sync_team_names: brak zmian")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("❌ Standings sync_team_names scheduler error")
