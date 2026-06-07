@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, insert, update
 
-from app.db import database, beach_standings, beach_tournaments, beach_users, beach_admins
+from app.db import database, beach_standings, beach_tournaments, beach_teams, beach_users, beach_admins
 from app.deps import beach_get_current_user_id
 from app.beach.activity_log import log_activity, get_actor_name
 from app.beach.notifications import create_notification
@@ -1175,6 +1175,58 @@ async def revoke_tournament(
     await log_activity(area="standings", action="standings.points_revoked", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(body.tournament_id), details={"revoked_count": revoked_count})
 
     return {"success": True, "revoked_count": revoked_count}
+
+
+# ─────────────────── POST /beach/standings/sync-team-names ───────────────────
+
+@router.post(
+    "/sync-team-names",
+    response_model=dict,
+    summary="Synchronizuj nazwy drużyn w tabeli punktowej z aktualną bazą danych",
+)
+async def sync_standing_team_names(
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    await _check_komisja_or_admin(current_user_id)
+
+    all_standings = await database.fetch_all(
+        select(beach_standings).where(beach_standings.c.team_id.isnot(None))
+    )
+    if not all_standings:
+        return {"updated": 0}
+
+    team_ids = list({r["team_id"] for r in all_standings})
+    teams_rows = await database.fetch_all(
+        select(beach_teams.c.id, beach_teams.c.team_name).where(
+            beach_teams.c.id.in_(team_ids)
+        )
+    )
+    name_map = {r["id"]: r["team_name"] for r in teams_rows}
+
+    now = datetime.now(timezone.utc)
+    updated = 0
+    for row in all_standings:
+        r_d = dict(row)
+        current_name = name_map.get(r_d["team_id"])
+        if current_name and current_name != r_d["team_name"]:
+            await database.execute(
+                update(beach_standings)
+                .where(beach_standings.c.id == r_d["id"])
+                .values(team_name=current_name, updated_at=now)
+            )
+            updated += 1
+
+    if updated:
+        await log_activity(
+            area="standings",
+            action="standings.sync_team_names",
+            actor_user_id=current_user_id,
+            actor_name=await get_actor_name(current_user_id),
+            target_id=None,
+            details={"updated": updated},
+        )
+
+    return {"updated": updated}
 
 
 # ─────────────────── PATCH /beach/standings/adjust ───────────────────
