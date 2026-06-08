@@ -42,6 +42,7 @@ def _row_to_item(row, my_watched: bool) -> BeachTutorialItem:
         description=row["description"],
         youtube_id=row["youtube_id"],
         color=row["color"],
+        category=row["category"] if row["category"] else "general",
         order_index=int(row["order_index"]),
         view_count=int(row["view_count"]),
         my_watched=my_watched,
@@ -131,6 +132,7 @@ async def create_tutorial(req: CreateBeachTutorialRequest, current_user_id: int 
             description=req.description.strip() if req.description else None,
             youtube_id=req.youtube_id.strip(),
             color=req.color,
+            category=(req.category or "general").strip() or "general",
             order_index=next_order,
             view_count=0,
             created_at=now,
@@ -181,6 +183,8 @@ async def update_tutorial(
         update_data["youtube_id"] = req.youtube_id.strip()
     if req.color is not None:
         update_data["color"] = req.color
+    if req.category is not None:
+        update_data["category"] = req.category.strip() or "general"
 
     await database.execute(
         update(beach_tutorials).where(beach_tutorials.c.id == tutorial_id).values(**update_data)

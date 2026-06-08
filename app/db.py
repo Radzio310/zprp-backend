@@ -1327,6 +1327,7 @@ beach_tutorials = Table(
     Column("description", Text, nullable=True),
     Column("youtube_id", String, nullable=False),           # 11-char YouTube video ID
     Column("color", String, nullable=False, server_default=text("'#A78BFA'")),
+    Column("category", String, nullable=False, server_default=text("'general'")),  # general | judges | coaches | players
     Column("order_index", Integer, nullable=False, server_default=text("0"), index=True),
     Column("view_count", Integer, nullable=False, server_default=text("0")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),

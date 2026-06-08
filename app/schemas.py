@@ -1774,6 +1774,7 @@ class BeachTutorialItem(BaseModel):
     description: Optional[str]
     youtube_id: str
     color: str
+    category: str
     order_index: int
     view_count: int
     my_watched: bool
@@ -1789,6 +1790,7 @@ class CreateBeachTutorialRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=1000)
     youtube_id: str = Field(..., min_length=1, max_length=20)
     color: str = Field(default="#A78BFA", max_length=20)
+    category: str = Field(default="general", max_length=20)
 
 
 class UpdateBeachTutorialRequest(BaseModel):
@@ -1796,6 +1798,7 @@ class UpdateBeachTutorialRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=1000)
     youtube_id: Optional[str] = Field(None, min_length=1, max_length=20)
     color: Optional[str] = Field(None, max_length=20)
+    category: Optional[str] = Field(None, max_length=20)
 
 
 class ReorderBeachTutorialsRequest(BaseModel):
