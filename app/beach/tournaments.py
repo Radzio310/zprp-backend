@@ -590,6 +590,13 @@ async def create_tournament(
     if not (is_admin_user or can_create):
         raise HTTPException(403, "Brak uprawnień")
 
+    # "Gospodarz zawodów" tworzy turniej przez uprawnienie tournament.create,
+    # ale nie ma globalnego tournament.actAsHostEverywhere — wtedy dopisujemy go
+    # automatycznie do listy gospodarzy, by mógł zarządzać własnym turniejem.
+    is_host_badge_user = (
+        can_create and "tournament.actAsHostEverywhere" not in caps
+    )
+
     if not req.name or not req.name.strip():
         raise HTTPException(400, "Brak nazwy")
 
