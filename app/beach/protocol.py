@@ -363,6 +363,7 @@ class ProtocolBulkRequest(BaseModel):
     tournament_id: Optional[int] = None
     category: str = ""               # "Senior", "Junior", "Junior mł", "Młodzik"
     format: str = "xlsx"             # "xlsx" | "pdf"
+    generated_by: str = ""           # imię i nazwisko użytkownika (do stopki)
 
 
 class ProtocolSingleRequest(BaseModel):
@@ -373,12 +374,14 @@ class ProtocolSingleRequest(BaseModel):
     tournament_id: Optional[int] = None
     category: str = ""
     format: str = "xlsx"
+    generated_by: str = ""           # imię i nazwisko użytkownika (do stopki)
 
 
 class FilledProtocolSingleRequest(BaseModel):
     match_number: str
     tournament_id: Optional[int] = None
     format: str = "pdf"
+    generated_by: str = ""           # imię i nazwisko użytkownika (do stopki)
 
 
 class FilledProtocolBulkRequest(BaseModel):
@@ -386,6 +389,7 @@ class FilledProtocolBulkRequest(BaseModel):
     tournament_id: Optional[int] = None
     tournament_name: str = ""
     format: str = "pdf"
+    generated_by: str = ""           # imię i nazwisko użytkownika (do stopki)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -2065,7 +2069,7 @@ async def generate_bulk_protocols(
     tournament_location = req.tournament_location.strip()
     category = req.category.strip()
 
-    generated_by = await _resolve_generated_by(authorization)
+    generated_by = (req.generated_by or "").strip() or await _resolve_generated_by(authorization)
     generated_at = _now_pl_str()
 
     tmp_dir = tempfile.mkdtemp()
@@ -2158,7 +2162,7 @@ async def generate_single_protocol(
     team_rosters = await _fetch_team_rosters(team_ids)
     user_cities = await _fetch_user_cities(referee_ids)
 
-    generated_by = await _resolve_generated_by(authorization)
+    generated_by = (req.generated_by or "").strip() or await _resolve_generated_by(authorization)
     generated_at = _now_pl_str()
 
     tmp_dir = tempfile.mkdtemp()
@@ -2282,7 +2286,7 @@ async def generate_filled_single(
     team_rosters = await _fetch_team_rosters(team_ids)
     user_cities = await _fetch_user_cities(referee_ids)
 
-    generated_by = await _resolve_generated_by(authorization)
+    generated_by = (req.generated_by or "").strip() or await _resolve_generated_by(authorization)
     generated_at = _now_pl_str()
 
     tmp_dir = tempfile.mkdtemp()
@@ -2419,7 +2423,7 @@ async def generate_filled_bulk(
     team_rosters = await _fetch_team_rosters(team_ids)
     user_cities = await _fetch_user_cities(referee_ids)
 
-    generated_by = await _resolve_generated_by(authorization)
+    generated_by = (req.generated_by or "").strip() or await _resolve_generated_by(authorization)
     generated_at = _now_pl_str()
 
     tmp_dir = tempfile.mkdtemp()
