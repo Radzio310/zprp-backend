@@ -1885,6 +1885,46 @@ async def _resolve_schedule_match(
 
 # ── generate protocol for a single match ──────────────────────────────────────
 
+async def _apply_raw_coach_signatures(
+    ws,
+    match: Dict[str, Any],
+    team_squads: Dict[str, Any],
+) -> None:
+    """Wstaw podpisy trenerów (per-mecz) do surowego protokołu.
+
+    Podpis składu na dany mecz jest zapisywany w
+    ``team_squads[team_key].match_overrides[match_id].signature_url``
+    (zarówno dla zwykłych, jak i customowych drużyn — team_key to str(id)).
+    Wstawiamy go w te same komórki co w gotowych protokołach:
+    B35 dla gospodarzy, B58 dla gości.
+    """
+    match_id = match.get("id") or ""
+    if not match_id or not team_squads:
+        return
+
+    mapping = [
+        (match.get("teamA") or {}, "B35"),
+        (match.get("teamB") or {}, "B58"),
+    ]
+    for team_ref, anchor in mapping:
+        team_id = team_ref.get("id")
+        if team_id is None or team_id == "":
+            continue
+        squad_entry = team_squads.get(str(team_id)) or {}
+        match_overrides = squad_entry.get("match_overrides") or {}
+        override = match_overrides.get(match_id) or {}
+        url = _full_static_url(override.get("signature_url") or "")
+        if not url:
+            continue
+        img_bytes = await _fetch_png_bytes(url)
+        if img_bytes:
+            _add_signature_image(
+                ws, image_bytes=img_bytes, anchor_cell=anchor,
+                max_width_px=150, max_height_px=62,
+                offset_x_px=90, offset_y_px=-21,
+            )
+
+
 async def _generate_single_protocol(
     match: Dict[str, Any],
     *,
@@ -1918,6 +1958,10 @@ async def _generate_single_protocol(
         user_cities=user_cities,
         head_judge_id=head_judge_id,
     )
+
+    # Per-match coach signature (jeśli trener podpisał skład na ten mecz) —
+    # tak jak w gotowych protokołach, podpis drużyny trafia do B35/B58.
+    await _apply_raw_coach_signatures(ws, match, team_squads)
 
     _apply_print_layout(ws)
 
