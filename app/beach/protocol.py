@@ -34,10 +34,16 @@ import tempfile
 import urllib.parse
 import uuid
 import zipfile
+from datetime import datetime
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Path as ApiPath, Query
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
+
+from fastapi import APIRouter, Header, HTTPException, Path as ApiPath, Query
 from fastapi.responses import FileResponse
 from httpx import AsyncClient
 from openpyxl import load_workbook
@@ -50,6 +56,7 @@ from sqlalchemy import select
 from starlette.background import BackgroundTask
 
 from app.db import database, beach_teams, beach_tournaments, beach_users, beach_proel_matches
+from app.deps import beach_verify_access_token, _beach_get_bearer_token
 
 try:
     from PIL import Image as PILImage
@@ -940,13 +947,42 @@ def _set_page_label(ws, page_no: int, total_pages: int) -> None:
     ws["P3"] = f"Strona {page_no}/{total_pages}"
 
 
-def _apply_print_layout(ws) -> None:
+def _now_pl_str() -> str:
+    """Aktualna data i godzina w strefie Europe/Warsaw w formacie DD.MM.YYYY HH:MM:SS."""
+    try:
+        if ZoneInfo is not None:
+            return datetime.now(ZoneInfo("Europe/Warsaw")).strftime("%d.%m.%Y %H:%M:%S")
+    except Exception:
+        pass
+    return datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+
+async def _resolve_generated_by(authorization: Optional[str]) -> str:
+    """Best-effort: imię i nazwisko użytkownika z tokenu Bearer (lub "" gdy brak/błąd)."""
+    try:
+        token = _beach_get_bearer_token(authorization)
+        if not token:
+            return ""
+        payload = beach_verify_access_token(token)
+        uid = int(payload["uid"])
+    except Exception:
+        return ""
+    try:
+        row = await database.fetch_one(
+            select(beach_users.c.full_name).where(beach_users.c.id == uid)
+        )
+        return (row["full_name"] or "").strip() if row else ""
+    except Exception:
+        return ""
+
+
+def _apply_print_layout(ws, *, generated_by: str = "", generated_at: str = "") -> None:
     """Add print-friendly side margins and a subtle auto-generated footer.
 
     - Ensures at least ~0.4" left/right margins so the document fits printer
       hardware margins (nigdy nie zmniejsza już istniejących większych marginesów).
     - Adds a small, grey, centered footer "Wygenerowano automatycznie przez BAZA Beach"
-      in the bottom page margin (jak na pozostałych dokumentach).
+      (z datą/godziną oraz autorem) w dolnym marginesie strony.
     """
     try:
         ws.page_margins.left = max(float(ws.page_margins.left or 0), 0.4)
@@ -955,6 +991,10 @@ def _apply_print_layout(ws) -> None:
         ws.page_margins.footer = 0.2
 
         footer_text = "Wygenerowano automatycznie przez BAZA Beach"
+        ts = (generated_at or "").strip() or _now_pl_str()
+        footer_text += f" \u00b7 {ts}"
+        if generated_by:
+            footer_text += f" \u00b7 przez {generated_by}"
         for hf in (ws.oddFooter, ws.evenFooter):
             hf.center.text = footer_text
             hf.center.size = 7
@@ -1772,6 +1812,8 @@ async def _generate_filled_protocol(
     output_format: str,
     out_dir: str,
     file_label: str,
+    generated_by: str = "",
+    generated_at: str = "",
 ) -> str:
     """Generate a filled (completed match) protocol file. Returns file path."""
     wb = load_workbook(TEMPLATE_PATH)
@@ -1857,7 +1899,7 @@ async def _generate_filled_protocol(
     total_pages = len(pages)
     for idx, page in enumerate(pages, start=1):
         _set_page_label(page, idx, total_pages)
-        _apply_print_layout(page)
+        _apply_print_layout(page, generated_by=generated_by, generated_at=generated_at)
 
     safe_label = _safe_filename(file_label, 60)
     xlsx_name = f"{safe_label}_protokol_koncowy.xlsx"
@@ -1940,6 +1982,8 @@ async def _generate_single_protocol(
     output_format: str,
     out_dir: str,
     file_label: str,
+    generated_by: str = "",
+    generated_at: str = "",
 ) -> str:
     """Generate a single protocol file (xlsx or pdf). Returns file path."""
     wb = load_workbook(TEMPLATE_PATH)
@@ -1963,7 +2007,7 @@ async def _generate_single_protocol(
     # tak jak w gotowych protokołach, podpis drużyny trafia do B35/B58.
     await _apply_raw_coach_signatures(ws, match, team_squads)
 
-    _apply_print_layout(ws)
+    _apply_print_layout(ws, generated_by=generated_by, generated_at=generated_at)
 
     safe_label = _safe_filename(file_label, 60)
     xlsx_name = f"{safe_label}_protokol.xlsx"
@@ -1979,7 +2023,10 @@ async def _generate_single_protocol(
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/beach/protocol/bulk", summary="Generuj surowe protokoły dla wszystkich meczy turnieju")
-async def generate_bulk_protocols(req: ProtocolBulkRequest):
+async def generate_bulk_protocols(
+    req: ProtocolBulkRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     if not os.path.exists(TEMPLATE_PATH):
         raise HTTPException(500, detail=f"Brak szablonu protokołu: {TEMPLATE_PATH}")
 
@@ -2018,6 +2065,9 @@ async def generate_bulk_protocols(req: ProtocolBulkRequest):
     tournament_location = req.tournament_location.strip()
     category = req.category.strip()
 
+    generated_by = await _resolve_generated_by(authorization)
+    generated_at = _now_pl_str()
+
     tmp_dir = tempfile.mkdtemp()
     try:
         protocols_dir = os.path.join(tmp_dir, "protocols")
@@ -2041,6 +2091,8 @@ async def generate_bulk_protocols(req: ProtocolBulkRequest):
                 output_format=output_format,
                 out_dir=protocols_dir,
                 file_label=file_label,
+                generated_by=generated_by,
+                generated_at=generated_at,
             )
             file_paths.append((path, os.path.basename(path)))
 
@@ -2076,7 +2128,10 @@ async def generate_bulk_protocols(req: ProtocolBulkRequest):
 
 
 @router.post("/beach/protocol/single", summary="Generuj surowy protokół dla jednego meczu")
-async def generate_single_protocol(req: ProtocolSingleRequest):
+async def generate_single_protocol(
+    req: ProtocolSingleRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     if not os.path.exists(TEMPLATE_PATH):
         raise HTTPException(500, detail=f"Brak szablonu protokołu: {TEMPLATE_PATH}")
 
@@ -2103,6 +2158,9 @@ async def generate_single_protocol(req: ProtocolSingleRequest):
     team_rosters = await _fetch_team_rosters(team_ids)
     user_cities = await _fetch_user_cities(referee_ids)
 
+    generated_by = await _resolve_generated_by(authorization)
+    generated_at = _now_pl_str()
+
     tmp_dir = tempfile.mkdtemp()
     try:
         file_label = _match_file_label(match, 0)
@@ -2120,6 +2178,8 @@ async def generate_single_protocol(req: ProtocolSingleRequest):
             output_format=output_format,
             out_dir=tmp_dir,
             file_label=file_label,
+            generated_by=generated_by,
+            generated_at=generated_at,
         )
 
         ext = "pdf" if output_format == "pdf" else "xlsx"
@@ -2147,7 +2207,10 @@ async def generate_single_protocol(req: ProtocolSingleRequest):
 # ── filled protocol endpoints ─────────────────────────────────────────────────
 
 @router.post("/beach/protocol/filled/single", summary="Generuj wypełniony protokół dla jednego meczu ProEl")
-async def generate_filled_single(req: FilledProtocolSingleRequest):
+async def generate_filled_single(
+    req: FilledProtocolSingleRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     if not os.path.exists(TEMPLATE_PATH):
         raise HTTPException(500, detail=f"Brak szablonu protokołu: {TEMPLATE_PATH}")
 
@@ -2219,6 +2282,9 @@ async def generate_filled_single(req: FilledProtocolSingleRequest):
     team_rosters = await _fetch_team_rosters(team_ids)
     user_cities = await _fetch_user_cities(referee_ids)
 
+    generated_by = await _resolve_generated_by(authorization)
+    generated_at = _now_pl_str()
+
     tmp_dir = tempfile.mkdtemp()
     try:
         file_label = _transliterate_pl(req.match_number).replace("/", "_").replace("\\", "_")
@@ -2237,6 +2303,8 @@ async def generate_filled_single(req: FilledProtocolSingleRequest):
             output_format=output_format,
             out_dir=tmp_dir,
             file_label=file_label,
+            generated_by=generated_by,
+            generated_at=generated_at,
         )
 
         ext = "pdf" if output_format == "pdf" else "xlsx"
@@ -2262,7 +2330,10 @@ async def generate_filled_single(req: FilledProtocolSingleRequest):
 
 
 @router.post("/beach/protocol/filled/bulk", summary="Generuj wypełnione protokoły dla wielu meczów ProEl")
-async def generate_filled_bulk(req: FilledProtocolBulkRequest):
+async def generate_filled_bulk(
+    req: FilledProtocolBulkRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     if not os.path.exists(TEMPLATE_PATH):
         raise HTTPException(500, detail=f"Brak szablonu protokołu: {TEMPLATE_PATH}")
 
@@ -2348,6 +2419,9 @@ async def generate_filled_bulk(req: FilledProtocolBulkRequest):
     team_rosters = await _fetch_team_rosters(team_ids)
     user_cities = await _fetch_user_cities(referee_ids)
 
+    generated_by = await _resolve_generated_by(authorization)
+    generated_at = _now_pl_str()
+
     tmp_dir = tempfile.mkdtemp()
     try:
         protocols_dir = os.path.join(tmp_dir, "protocols")
@@ -2371,6 +2445,8 @@ async def generate_filled_bulk(req: FilledProtocolBulkRequest):
                 output_format=output_format,
                 out_dir=protocols_dir,
                 file_label=file_label,
+                generated_by=generated_by,
+                generated_at=generated_at,
             )
             file_paths.append((path, os.path.basename(path)))
 
