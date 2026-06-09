@@ -940,6 +940,30 @@ def _set_page_label(ws, page_no: int, total_pages: int) -> None:
     ws["P3"] = f"Strona {page_no}/{total_pages}"
 
 
+def _apply_print_layout(ws) -> None:
+    """Add print-friendly side margins and a subtle auto-generated footer.
+
+    - Ensures at least ~0.4" left/right margins so the document fits printer
+      hardware margins (nigdy nie zmniejsza już istniejących większych marginesów).
+    - Adds a small, grey, centered footer "Wygenerowano automatycznie przez BAZA Beach"
+      in the bottom page margin (jak na pozostałych dokumentach).
+    """
+    try:
+        ws.page_margins.left = max(float(ws.page_margins.left or 0), 0.4)
+        ws.page_margins.right = max(float(ws.page_margins.right or 0), 0.4)
+        ws.page_margins.bottom = max(float(ws.page_margins.bottom or 0), 0.5)
+        ws.page_margins.footer = 0.2
+
+        footer_text = "Wygenerowano automatycznie przez BAZA Beach"
+        for hf in (ws.oddFooter, ws.evenFooter):
+            hf.center.text = footer_text
+            hf.center.size = 7
+            hf.center.font = "Calibri,Italic"
+            hf.center.color = "808080"
+    except Exception:
+        pass
+
+
 def _set_progression_capacity() -> int:
     groups = _SET_COLUMNS[1]["host"]
     return sum(end_row - start_row + 1 for _, start_row, end_row in groups)
@@ -1833,6 +1857,7 @@ async def _generate_filled_protocol(
     total_pages = len(pages)
     for idx, page in enumerate(pages, start=1):
         _set_page_label(page, idx, total_pages)
+        _apply_print_layout(page)
 
     safe_label = _safe_filename(file_label, 60)
     xlsx_name = f"{safe_label}_protokol_koncowy.xlsx"
@@ -1893,6 +1918,8 @@ async def _generate_single_protocol(
         user_cities=user_cities,
         head_judge_id=head_judge_id,
     )
+
+    _apply_print_layout(ws)
 
     safe_label = _safe_filename(file_label, 60)
     xlsx_name = f"{safe_label}_protokol.xlsx"
