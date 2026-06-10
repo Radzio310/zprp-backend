@@ -52,7 +52,7 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.styles.borders import Border, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from starlette.background import BackgroundTask
 
 from app.db import database, beach_teams, beach_tournaments, beach_users, beach_proel_matches
@@ -419,6 +419,41 @@ async def _fetch_tournament_data(tournament_id: int) -> dict:
     if not row:
         return {}
     return _parse_data_json(row["data_json"])
+
+
+async def _record_generated_raw_protocols(tournament_id: Optional[int], match_ids: List[Any]) -> None:
+    """Dopisz wygenerowane ID meczy do data_json.generated_raw_protocols (z deduplikacją).
+
+    Dzięki temu informacja o wygenerowanych surowych protokołach jest wspólna dla
+    całego turnieju (a nie lokalna na urządzeniu).
+    """
+    if not tournament_id or not match_ids:
+        return
+    try:
+        data_json = await _fetch_tournament_data(tournament_id)
+        existing = data_json.get("generated_raw_protocols")
+        if not isinstance(existing, list):
+            existing = []
+        existing_set = {str(x) for x in existing}
+        changed = False
+        for mid in match_ids:
+            if mid is None:
+                continue
+            s = str(mid)
+            if s and s not in existing_set:
+                existing.append(s)
+                existing_set.add(s)
+                changed = True
+        if not changed:
+            return
+        data_json["generated_raw_protocols"] = existing
+        await database.execute(
+            update(beach_tournaments)
+            .where(beach_tournaments.c.id == tournament_id)
+            .values(data_json=data_json)
+        )
+    except Exception:
+        logger.exception("Failed to record generated_raw_protocols")
 
 
 async def _fetch_team_rosters(team_ids: List[int]) -> Dict[int, dict]:
@@ -2258,11 +2293,16 @@ async def generate_bulk_protocols(
         download_path = os.path.join(DOWNLOAD_DIR, f"{token}.{ext}")
         shutil.copyfile(zip_path, download_path)
 
+        # Zapisz w turnieju, które mecze zostały wygenerowane (po stałym ID meczu).
+        generated_match_ids = [m.get("id") for m in matches if m.get("id") is not None]
+        await _record_generated_raw_protocols(req.tournament_id, generated_match_ids)
+
         encoded_name = urllib.parse.quote(zip_name)
         return {
             "success": True,
             "download_url": f"/beach/protocol/download/{token}?filename={encoded_name}&ext={ext}",
             "match_count": len(file_paths),
+            "generated_match_ids": [str(x) for x in generated_match_ids],
         }
     except HTTPException:
         raise
