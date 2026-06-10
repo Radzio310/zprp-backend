@@ -998,7 +998,7 @@ def _apply_print_layout(ws, *, generated_by: str = "", generated_at: str = "") -
         ts = (generated_at or "").strip() or _now_pl_str()
         footer_text += f" \u00b7 {ts}"
         if generated_by:
-            footer_text += f" \u00b7 przez {generated_by}"
+            footer_text += f" \u00b7 {generated_by}"
         for hf in (ws.oddFooter, ws.evenFooter):
             hf.center.text = footer_text
             hf.center.size = 7
