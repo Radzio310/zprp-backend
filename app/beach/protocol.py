@@ -538,6 +538,71 @@ def _match_sort_key(m: Dict[str, Any]) -> tuple:
     return (m.get("dayIndex") or 0, m.get("startTime") or "99:99", m.get("order") or 0)
 
 
+def _compute_banned_for_match(
+    disqualifications: List[Dict[str, Any]],
+    all_matches: List[Dict[str, Any]],
+    team_key: str,
+    match: Dict[str, Any],
+) -> Tuple[set, set]:
+    """Return (banned_player_ids, banned_jerseys) for the given team in the given match.
+
+    Mirrors getBannedJerseys() in MatchDetailModal.tsx: a *decided* disqualification
+    bans the player from the next ``ban_matches`` matches of their team that occur
+    after the match in which the red card was shown. Used to leave an empty row in
+    raw protocols instead of a suspended player (unless the coach set a per-match squad).
+    """
+    banned_ids: set = set()
+    banned_jerseys: set = set()
+    if not disqualifications or not all_matches or team_key in (None, "", "None"):
+        return banned_ids, banned_jerseys
+
+    match_id = match.get("id")
+    match_number = match.get("matchNumber")
+
+    for disq in disqualifications:
+        if disq.get("decided_at") is None or not disq.get("ban_matches"):
+            continue
+        disq_team = disq.get("team_id")
+        if disq_team is None:
+            disq_team = disq.get("custom_team_id")
+        if str(disq_team) != str(team_key):
+            continue
+        red_ref = disq.get("match_id")
+        red_match = next(
+            (m for m in all_matches
+             if m.get("matchNumber") == red_ref or m.get("id") == red_ref),
+            None,
+        )
+        if not red_match:
+            continue
+        red_key = _match_sort_key(red_match)
+        upcoming = [
+            m for m in all_matches
+            if (
+                str((m.get("teamA") or {}).get("id")) == str(team_key)
+                or str((m.get("teamB") or {}).get("id")) == str(team_key)
+            )
+            and _match_sort_key(m) > red_key
+        ]
+        upcoming.sort(key=_match_sort_key)
+        upcoming = upcoming[: int(disq.get("ban_matches") or 0)]
+        in_banned = any(
+            m.get("matchNumber") == match_number or m.get("id") == match_id
+            for m in upcoming
+        )
+        if in_banned:
+            pid = disq.get("player_id")
+            if pid is not None:
+                banned_ids.add(pid)
+            jersey = disq.get("jersey")
+            if jersey is not None:
+                try:
+                    banned_jerseys.add(int(jersey))
+                except (ValueError, TypeError):
+                    pass
+    return banned_ids, banned_jerseys
+
+
 def _match_file_label(m: Dict[str, Any], idx: int) -> str:
     """Generate a filename label for a match protocol."""
     mn = m.get("matchNumber")
@@ -568,6 +633,8 @@ def _fill_protocol_sheet(
     team_rosters: Dict[int, dict],
     user_cities: Dict[int, Tuple[str, str]],
     head_judge_id: Optional[int],
+    disqualifications: Optional[List[Dict[str, Any]]] = None,
+    all_matches: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Fill all protocol cells for a single match."""
 
@@ -624,6 +691,9 @@ def _fill_protocol_sheet(
         team_squads=team_squads,
         custom_teams=custom_teams,
         team_rosters=team_rosters,
+        match=match,
+        disqualifications=disqualifications or [],
+        all_matches=all_matches or [],
     )
     _fill_team_squad(
         ws,
@@ -634,6 +704,9 @@ def _fill_protocol_sheet(
         team_squads=team_squads,
         custom_teams=custom_teams,
         team_rosters=team_rosters,
+        match=match,
+        disqualifications=disqualifications or [],
+        all_matches=all_matches or [],
     )
 
     # ── Referees ──
@@ -676,6 +749,9 @@ def _fill_team_squad(
     team_squads: Dict[str, Any],
     custom_teams: List[Dict[str, Any]],
     team_rosters: Dict[int, dict],
+    match: Optional[Dict[str, Any]] = None,
+    disqualifications: Optional[List[Dict[str, Any]]] = None,
+    all_matches: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Fill player and companion rows for one team."""
     team_id = team_ref.get("id")
@@ -683,6 +759,12 @@ def _fill_team_squad(
         return  # TBD team in knockout — leave empty
 
     team_id_str = str(team_id)
+
+    # Suspended players for THIS match (decided disqualifications) — left as empty
+    # rows in the protocol unless the coach set an explicit per-match squad.
+    banned_ids, banned_jerseys = _compute_banned_for_match(
+        disqualifications or [], all_matches or [], team_id_str, match or {},
+    )
 
     # Check if it's a custom team (string ID starting with "ct_" or negative int)
     is_custom = isinstance(team_id, str) and team_id.startswith("ct_")
@@ -693,11 +775,15 @@ def _fill_team_squad(
             pass
 
     if is_custom:
-        _fill_custom_team_squad(ws, team_id_str, player_rows, companion_rows, custom_teams)
+        _fill_custom_team_squad(
+            ws, team_id_str, player_rows, companion_rows, custom_teams,
+            banned_ids=banned_ids, banned_jerseys=banned_jerseys,
+        )
     else:
         _fill_regular_team_squad(
             ws, int(team_id), team_id_str, player_rows, companion_rows,
             match_id, team_squads, team_rosters,
+            banned_ids=banned_ids, banned_jerseys=banned_jerseys,
         )
 
 
@@ -707,6 +793,9 @@ def _fill_custom_team_squad(
     player_rows: List[int],
     companion_rows: List[int],
     custom_teams: List[Dict[str, Any]],
+    *,
+    banned_ids: Optional[set] = None,
+    banned_jerseys: Optional[set] = None,
 ) -> None:
     """Fill squad from custom_teams data (for manually created teams)."""
     ct = None
@@ -726,6 +815,19 @@ def _fill_custom_team_squad(
         selected = [p for p in all_players if p.get("id") in ids_to_use]
     else:
         selected = all_players
+
+    # Drop suspended players (decided disqualifications) — leaves an empty row.
+    banned_ids = banned_ids or set()
+    banned_jerseys = banned_jerseys or set()
+    if banned_ids or banned_jerseys:
+        def _custom_banned(p: Dict[str, Any]) -> bool:
+            if p.get("id") in banned_ids:
+                return True
+            try:
+                return int(p.get("jerseyNumber")) in banned_jerseys
+            except (ValueError, TypeError):
+                return False
+        selected = [p for p in selected if not _custom_banned(p)]
 
     for i, row in enumerate(player_rows):
         if i < len(selected):
@@ -768,6 +870,9 @@ def _fill_regular_team_squad(
     match_id: str,
     team_squads: Dict[str, Any],
     team_rosters: Dict[int, dict],
+    *,
+    banned_ids: Optional[set] = None,
+    banned_jerseys: Optional[set] = None,
 ) -> None:
     """Fill squad from team_squads selection + roster_json data.
 
@@ -786,12 +891,23 @@ def _fill_regular_team_squad(
     jersey_overrides = roster_data.get("jersey_overrides") or {}
     companions = roster_data.get("companions_json") or []
 
-    # Determine selected player IDs (match override → protocol → default → fallback all)
+    # Determine selected player IDs.
+    # Priority: per-match override (coach changed squad for THIS match) → protocol
+    # squad ("skład do protokołu") → tournament default squad → fallback all roster.
     match_overrides = squad_entry.get("match_overrides") or {}
     match_override = match_overrides.get(match_id) or {}
+    override_player_ids = match_override.get("players") or []
     protocol_ids = squad_entry.get("protocol_players") or []
-    default_ids = match_override.get("players") or squad_entry.get("default_players") or []
-    selected_player_ids = protocol_ids if protocol_ids else default_ids
+    default_ids = squad_entry.get("default_players") or []
+    if override_player_ids:
+        selected_player_ids = override_player_ids
+        coach_overrode = True  # respect the coach's explicit per-match choice
+    elif protocol_ids:
+        selected_player_ids = protocol_ids
+        coach_overrode = False
+    else:
+        selected_player_ids = default_ids
+        coach_overrode = False
     selected_companion_ids = match_override.get("companions") or squad_entry.get("default_companions") or []
 
     # ── Players ──
@@ -807,6 +923,22 @@ def _fill_regular_team_squad(
     else:
         # No selection → fill all in-squad roster players (like BeachNewMatchScreen shows all)
         ordered_players = [p for p in roster if p.get("in_squad", True)]
+
+    # Drop suspended players (decided disqualifications) — leaves an empty row.
+    # Skipped when the coach set an explicit per-match squad (they already chose).
+    banned_ids = banned_ids or set()
+    banned_jerseys = banned_jerseys or set()
+    if not coach_overrode and (banned_ids or banned_jerseys):
+        def _is_banned(p: Dict[str, Any]) -> bool:
+            pid = p.get("player_id")
+            if pid is not None and pid in banned_ids:
+                return True
+            jraw = jersey_overrides.get(str(p.get("player_id", ""))) or p.get("jersey_number") or ""
+            try:
+                return int(jraw) in banned_jerseys
+            except (ValueError, TypeError):
+                return False
+        ordered_players = [p for p in ordered_players if not _is_banned(p)]
 
     for i, row in enumerate(player_rows):
         if i < len(ordered_players):
@@ -1988,6 +2120,8 @@ async def _generate_single_protocol(
     file_label: str,
     generated_by: str = "",
     generated_at: str = "",
+    disqualifications: Optional[List[Dict[str, Any]]] = None,
+    all_matches: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Generate a single protocol file (xlsx or pdf). Returns file path."""
     wb = load_workbook(TEMPLATE_PATH)
@@ -2005,6 +2139,8 @@ async def _generate_single_protocol(
         team_rosters=team_rosters,
         user_cities=user_cities,
         head_judge_id=head_judge_id,
+        disqualifications=disqualifications or [],
+        all_matches=all_matches or [],
     )
 
     # Per-match coach signature (jeśli trener podpisał skład na ten mecz) —
@@ -2058,6 +2194,10 @@ async def generate_bulk_protocols(
     custom_teams = data_json.get("custom_teams") or []
     head_judge_id = data_json.get("head_judge_id")
 
+    # Disqualifications + full schedule (for computing per-match suspensions).
+    disqualifications = data_json.get("disqualifications") or []
+    full_matches = ((data_json.get("schedule") or {}).get("matches")) or matches
+
     # Batch-fetch team rosters and referee cities
     team_ids = _collect_team_ids(matches)
     referee_ids = _collect_referee_ids(matches, head_judge_id)
@@ -2097,6 +2237,8 @@ async def generate_bulk_protocols(
                 file_label=file_label,
                 generated_by=generated_by,
                 generated_at=generated_at,
+                disqualifications=disqualifications,
+                all_matches=full_matches,
             )
             file_paths.append((path, os.path.basename(path)))
 
@@ -2155,6 +2297,10 @@ async def generate_single_protocol(
     custom_teams = data_json.get("custom_teams") or []
     head_judge_id = data_json.get("head_judge_id")
 
+    # Disqualifications + full schedule (for computing per-match suspensions).
+    disqualifications = data_json.get("disqualifications") or []
+    full_matches = ((data_json.get("schedule") or {}).get("matches")) or [match]
+
     # Fetch rosters and cities
     team_ids = _collect_team_ids([match])
     referee_ids = _collect_referee_ids([match], head_judge_id)
@@ -2184,6 +2330,8 @@ async def generate_single_protocol(
             file_label=file_label,
             generated_by=generated_by,
             generated_at=generated_at,
+            disqualifications=disqualifications,
+            all_matches=full_matches,
         )
 
         ext = "pdf" if output_format == "pdf" else "xlsx"
