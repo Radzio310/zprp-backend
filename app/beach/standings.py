@@ -23,9 +23,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, insert, update
+from sqlalchemy import select, insert, update, delete
 
-from app.db import database, beach_standings, beach_tournaments, beach_teams, beach_users, beach_admins
+from app.db import database, beach_standings, beach_tournaments, beach_teams, beach_users, beach_admins, beach_stage_grants
 from app.deps import beach_get_current_user_id
 from app.beach.activity_log import log_activity, get_actor_name
 from app.beach.notifications import create_notification
@@ -37,6 +37,13 @@ from app.schemas import (
     BeachStandingsListResponse,
     GrantTournamentRequest,
     RevokeTournamentRequest,
+    GrantStageRequest,
+    RevokeStageRequest,
+    BeachStageGrantInfo,
+    BeachStageTableRow,
+    BeachStageTournament,
+    BeachStageGroup,
+    BeachStageStandingsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -1177,7 +1184,319 @@ async def revoke_tournament(
     return {"success": True, "revoked_count": revoked_count}
 
 
+# ═══════════════════ STAGE GRANTS (turnieje etapowe, bez punktów) ═══════════════════
+
+STAGE_ORDER = ["quarterfinal", "semifinal", "final"]
+
+
+def _load_schedule(tour_d: Dict[str, Any]) -> Dict[str, Any]:
+    data_json = tour_d.get("data_json") or {}
+    if isinstance(data_json, str):
+        try:
+            data_json = json.loads(data_json)
+        except Exception:
+            data_json = {}
+    return data_json.get("schedule") or {}
+
+
+def _tour_date_str(tour_d: Dict[str, Any]) -> str:
+    date_str = tour_d.get("event_date", "")
+    if hasattr(date_str, "isoformat"):
+        return date_str.isoformat()[:10]
+    if isinstance(date_str, str):
+        return date_str[:10]
+    return ""
+
+
+async def _tournament_has_active_points(
+    tournament_id: int, competition_type: str, category: str, season_id: str
+) -> bool:
+    """True jeśli turniej ma już aktywne (nie-revoked) wpisy punktowe w tej kategorii."""
+    rows = await database.fetch_all(
+        select(beach_standings.c.tournaments_json).where(
+            beach_standings.c.competition_type == competition_type,
+            beach_standings.c.category == category,
+            beach_standings.c.season_id == season_id,
+        )
+    )
+    for r in rows:
+        entries = _parse_json(r["tournaments_json"] or [])
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if (
+                e.get("type") == "tournament"
+                and e.get("tournament_id") == tournament_id
+                and not e.get("revoked", False)
+            ):
+                return True
+    return False
+
+
+# ─────────────────── GET /beach/standings/stage-grant ───────────────────
+
+@router.get(
+    "/stage-grant",
+    response_model=Optional[BeachStageGrantInfo],
+    summary="Stan oznaczenia etapowego turnieju (lub null)",
+)
+async def get_stage_grant(
+    tournament_id: int = Query(...),
+    competition_type: str = Query(...),
+    category: str = Query(...),
+    season_id: str = Query(...),
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    row = await database.fetch_one(
+        select(beach_stage_grants).where(
+            beach_stage_grants.c.tournament_id == tournament_id,
+            beach_stage_grants.c.competition_type == competition_type,
+            beach_stage_grants.c.category == category,
+            beach_stage_grants.c.season_id == season_id,
+        )
+    )
+    if not row:
+        return None
+    d = dict(row)
+    return BeachStageGrantInfo(
+        tournament_id=d["tournament_id"],
+        competition_type=d["competition_type"],
+        category=d["category"],
+        season_id=d["season_id"],
+        stage=d["stage"],
+        advancing_men=d.get("advancing_men", 0) or 0,
+        advancing_women=d.get("advancing_women", 0) or 0,
+    )
+
+
+# ─────────────────── POST /beach/standings/grant-stage ───────────────────
+
+@router.post(
+    "/grant-stage",
+    response_model=dict,
+    summary="Oznaczenie turnieju jako etapowy (bez punktów)",
+)
+async def grant_stage(
+    body: GrantStageRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    await _check_komisja_or_admin(current_user_id)
+
+    tour_row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == body.tournament_id)
+    )
+    if not tour_row:
+        raise HTTPException(404, "Turniej nie znaleziony")
+
+    tour_d = dict(tour_row)
+    schedule = _load_schedule(tour_d)
+
+    if not _all_finished(schedule):
+        raise HTTPException(400, "Nie wszystkie mecze w turnieju są zakończone")
+
+    # Blokada: jeśli turniej ma już aktywne punkty, wymagaj ręcznego cofnięcia
+    if await _tournament_has_active_points(
+        body.tournament_id, body.competition_type, body.category, body.season_id
+    ):
+        raise HTTPException(
+            409,
+            "Turniej ma już przyznane punkty. Cofnij je przed oznaczeniem jako etap.",
+        )
+
+    now = datetime.now(timezone.utc)
+    actor_name = await get_actor_name(current_user_id)
+
+    existing = await database.fetch_one(
+        select(beach_stage_grants).where(
+            beach_stage_grants.c.tournament_id == body.tournament_id,
+            beach_stage_grants.c.competition_type == body.competition_type,
+            beach_stage_grants.c.category == body.category,
+            beach_stage_grants.c.season_id == body.season_id,
+        )
+    )
+
+    # finał = brak awansu
+    adv_men = 0 if body.stage == "final" else max(0, int(body.advancing_men))
+    adv_women = 0 if body.stage == "final" else max(0, int(body.advancing_women))
+
+    if existing:
+        await database.execute(
+            update(beach_stage_grants)
+            .where(beach_stage_grants.c.id == existing["id"])
+            .values(
+                stage=body.stage,
+                advancing_men=adv_men,
+                advancing_women=adv_women,
+                updated_at=now,
+            )
+        )
+    else:
+        await database.execute(
+            insert(beach_stage_grants).values(
+                tournament_id=body.tournament_id,
+                competition_type=body.competition_type,
+                category=body.category,
+                season_id=body.season_id,
+                stage=body.stage,
+                advancing_men=adv_men,
+                advancing_women=adv_women,
+                created_by_id=current_user_id,
+                created_by_name=actor_name,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    await log_activity(
+        area="standings",
+        action="standings.stage_granted",
+        actor_user_id=current_user_id,
+        actor_name=actor_name,
+        target_id=str(body.tournament_id),
+        target_label=tour_d.get("name", ""),
+        details={"stage": body.stage, "advancing_men": adv_men, "advancing_women": adv_women},
+    )
+
+    return {"success": True}
+
+
+# ─────────────────── POST /beach/standings/revoke-stage ───────────────────
+
+@router.post(
+    "/revoke-stage",
+    response_model=dict,
+    summary="Usunięcie oznaczenia etapowego turnieju",
+)
+async def revoke_stage(
+    body: RevokeStageRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    await _check_komisja_or_admin(current_user_id)
+
+    await database.execute(
+        delete(beach_stage_grants).where(
+            beach_stage_grants.c.tournament_id == body.tournament_id,
+            beach_stage_grants.c.competition_type == body.competition_type,
+            beach_stage_grants.c.category == body.category,
+            beach_stage_grants.c.season_id == body.season_id,
+        )
+    )
+
+    await log_activity(
+        area="standings",
+        action="standings.stage_revoked",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(body.tournament_id),
+        details={},
+    )
+
+    return {"success": True}
+
+
+def _build_stage_rows(schedule: Dict[str, Any], gender: str, advancing_count: int) -> List[BeachStageTableRow]:
+    positions = _compute_positions_from_schedule(schedule, gender)
+    rows: List[BeachStageTableRow] = []
+    for p in positions:
+        pos = int(p.get("position", 0))
+        rows.append(
+            BeachStageTableRow(
+                pos=pos,
+                team_id=int(p.get("team_id", 0)),
+                team_name=p.get("team_name", ""),
+                advancing=bool(advancing_count > 0 and pos > 0 and pos <= advancing_count),
+            )
+        )
+    return rows
+
+
+# ─────────────────── GET /beach/standings/stages ───────────────────
+
+@router.get(
+    "/stages",
+    response_model=BeachStageStandingsResponse,
+    summary="Etapy dla kategorii (tabele liczone na żywo ze schematu)",
+)
+async def list_stages(
+    competition_type: str = Query(...),
+    category: str = Query(...),
+    season_id: str = Query(...),
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    markers = await database.fetch_all(
+        select(beach_stage_grants).where(
+            beach_stage_grants.c.competition_type == competition_type,
+            beach_stage_grants.c.category == category,
+            beach_stage_grants.c.season_id == season_id,
+        )
+    )
+    if not markers:
+        return BeachStageStandingsResponse(men=[], women=[])
+
+    marker_list = [dict(m) for m in markers]
+    tournament_ids = list({m["tournament_id"] for m in marker_list})
+
+    tour_rows = await database.fetch_all(
+        select(beach_tournaments).where(beach_tournaments.c.id.in_(tournament_ids))
+    )
+    tours_by_id = {dict(t)["id"]: dict(t) for t in tour_rows}
+
+    # gender -> stage -> list of BeachStageTournament
+    men_by_stage: Dict[str, List[BeachStageTournament]] = {}
+    women_by_stage: Dict[str, List[BeachStageTournament]] = {}
+
+    for m in marker_list:
+        tour_d = tours_by_id.get(m["tournament_id"])
+        if not tour_d:
+            continue
+        schedule = _load_schedule(tour_d)
+        stage = m["stage"]
+        name = tour_d.get("name", "")
+        date_str = _tour_date_str(tour_d)
+        adv_m = m.get("advancing_men", 0) or 0
+        adv_w = m.get("advancing_women", 0) or 0
+
+        men_rows = _build_stage_rows(schedule, "M", adv_m)
+        if men_rows:
+            men_by_stage.setdefault(stage, []).append(
+                BeachStageTournament(
+                    tournament_id=m["tournament_id"],
+                    tournament_name=name,
+                    date=date_str,
+                    advancing_count=adv_m,
+                    rows=men_rows,
+                )
+            )
+        women_rows = _build_stage_rows(schedule, "K", adv_w)
+        if women_rows:
+            women_by_stage.setdefault(stage, []).append(
+                BeachStageTournament(
+                    tournament_id=m["tournament_id"],
+                    tournament_name=name,
+                    date=date_str,
+                    advancing_count=adv_w,
+                    rows=women_rows,
+                )
+            )
+
+    def _to_groups(by_stage: Dict[str, List[BeachStageTournament]]) -> List[BeachStageGroup]:
+        groups: List[BeachStageGroup] = []
+        for stage in STAGE_ORDER:
+            tours = by_stage.get(stage)
+            if not tours:
+                continue
+            tours.sort(key=lambda t: (t.date, t.tournament_name))
+            groups.append(BeachStageGroup(stage=stage, tournaments=tours))
+        return groups
+
+    return BeachStageStandingsResponse(
+        men=_to_groups(men_by_stage),
+        women=_to_groups(women_by_stage),
+    )
+
+
 # ─────────────────── POST /beach/standings/sync-team-names ───────────────────
+
 
 @router.post(
     "/sync-team-names",

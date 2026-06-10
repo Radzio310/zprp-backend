@@ -1073,6 +1073,52 @@ Index(
 )
 
 # -------------------------
+# BEACH: Etapowe turnieje (bez punktów) — tylko marker etapu + awansu
+# Tabela liczona na żywo ze schematu; tutaj trzymamy tylko metadane.
+# -------------------------
+beach_stage_grants = Table(
+    "beach_stage_grants",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    Column("tournament_id", Integer, nullable=False, index=True),
+
+    # klucz rankingowy (jak beach_standings, ale bez gender — etap wspólny dla turnieju)
+    Column("competition_type", String, nullable=False),
+    Column("category", String, nullable=False),
+    Column("season_id", String, nullable=False),
+
+    # etap: "quarterfinal" | "semifinal" | "final"
+    Column("stage", String, nullable=False),
+
+    # liczba awansujących osobno dla M i K (0 = finał / brak awansu)
+    Column("advancing_men", Integer, nullable=False, server_default=text("0")),
+    Column("advancing_women", Integer, nullable=False, server_default=text("0")),
+
+    Column("created_by_id", Integer, nullable=True),
+    Column("created_by_name", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False,
+           server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False,
+           server_default=func.now(), onupdate=func.now()),
+)
+
+Index(
+    "ix_beach_stage_grants_key",
+    beach_stage_grants.c.tournament_id,
+    beach_stage_grants.c.competition_type,
+    beach_stage_grants.c.category,
+    beach_stage_grants.c.season_id,
+    unique=True,
+)
+Index(
+    "ix_beach_stage_grants_filter",
+    beach_stage_grants.c.competition_type,
+    beach_stage_grants.c.category,
+    beach_stage_grants.c.season_id,
+)
+
+# -------------------------
 # BOARD: Tablica Komisji Okręgowej
 # -------------------------
 

@@ -1691,6 +1691,71 @@ class BeachStandingPreviewResponse(BaseModel):
     women_count: int = 0
 
 
+# ---------------------------- STAGE GRANTS (BEACH) ----------------------------
+# Turnieje etapowe: bez punktów, tylko etap + ile drużyn awansuje.
+
+BeachStageKind = Literal["quarterfinal", "semifinal", "final"]
+
+
+class GrantStageRequest(BaseModel):
+    """Oznaczenie turnieju jako etapowy (bez punktów)."""
+    tournament_id: int
+    competition_type: str
+    category: str
+    season_id: str
+    stage: BeachStageKind
+    advancing_men: int = Field(0, ge=0)
+    advancing_women: int = Field(0, ge=0)
+
+
+class RevokeStageRequest(BaseModel):
+    """Usunięcie oznaczenia etapowego."""
+    tournament_id: int
+    competition_type: str
+    category: str
+    season_id: str
+
+
+class BeachStageGrantInfo(BaseModel):
+    """Stan oznaczenia etapowego turnieju (lub null)."""
+    tournament_id: int
+    competition_type: str
+    category: str
+    season_id: str
+    stage: BeachStageKind
+    advancing_men: int = 0
+    advancing_women: int = 0
+
+
+class BeachStageTableRow(BaseModel):
+    """Minimalny wiersz tabeli etapu: miejsce + drużyna + znacznik awansu."""
+    pos: int
+    team_id: int
+    team_name: str
+    advancing: bool = False
+
+
+class BeachStageTournament(BaseModel):
+    """Pojedynczy turniej w obrębie etapu (z tabelą liczoną na żywo)."""
+    tournament_id: int
+    tournament_name: str
+    date: str
+    advancing_count: int = 0
+    rows: List[BeachStageTableRow] = Field(default_factory=list)
+
+
+class BeachStageGroup(BaseModel):
+    """Grupa turniejów jednego etapu dla jednej płci."""
+    stage: BeachStageKind
+    tournaments: List[BeachStageTournament] = Field(default_factory=list)
+
+
+class BeachStageStandingsResponse(BaseModel):
+    """Etapy dla kategorii: per płeć -> lista grup etapów."""
+    men: List[BeachStageGroup] = Field(default_factory=list)
+    women: List[BeachStageGroup] = Field(default_factory=list)
+
+
 # =====================================================================
 # BEACH: Reports (system zgłoszeń user ↔ admin)
 # =====================================================================

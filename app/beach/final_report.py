@@ -124,6 +124,20 @@ class TieExplanation(BaseModel):
     stats_rows: Optional[List[Dict[str, str]]] = None  # [{team_name, value}] — for overall-stats ties
 
 
+class StageGrantData(BaseModel):
+    """Oznaczenie turnieju etapowego dla komunikatu końcowego."""
+    stage: str  # "quarterfinal" | "semifinal" | "final"
+    advancing_men: int = 0
+    advancing_women: int = 0
+
+
+STAGE_LABELS_PL = {
+    "quarterfinal": "Ćwierćfinał",
+    "semifinal": "Półfinał",
+    "final": "Finał",
+}
+
+
 class FinalReportRequest(BaseModel):
     schedule: Dict[str, Any]
     tournament_name: str = ""
@@ -136,6 +150,7 @@ class FinalReportRequest(BaseModel):
     custom_summary: Optional[str] = None
     tie_explanations: Optional[List[TieExplanation]] = None
     mvp_data: Optional[Dict[str, Any]] = None  # {"M": {mvp: {...}, goalkeeper: {...}}, "K": {...}}
+    stage_grant: Optional[StageGrantData] = None  # turniej etapowy (bez punktów)
 
 
 # ──────────── Helpers ────────────
@@ -1268,6 +1283,8 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             "standings_tournament_count": 1,
             "standings_top_n": 0,
             "standings_top_n_phrase": "",
+            "stage_info": None,
+            "stage_rows": [],
             "tie_explanations": [],
         }
 
@@ -1388,6 +1405,36 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 gs["standings_tournament_count"] = sd.tournament_count
                 gs["standings_top_n"] = sd.top_n
                 gs["standings_top_n_phrase"] = _decline_best_tournaments(sd.top_n)
+
+        # ── Stage tournament (etapowy, bez punktów): tabela z oznaczeniem awansu ──
+        if req.stage_grant:
+            from app.beach.standings import _compute_positions_from_schedule
+
+            adv = (
+                req.stage_grant.advancing_men
+                if gender == "M"
+                else req.stage_grant.advancing_women
+            )
+            adv = max(0, int(adv or 0))
+            positions = _compute_positions_from_schedule(req.schedule, gender)
+            if positions:
+                gs["stage_info"] = {
+                    "stage": req.stage_grant.stage,
+                    "stage_label": STAGE_LABELS_PL.get(
+                        req.stage_grant.stage, req.stage_grant.stage
+                    ),
+                    "advancing_count": adv,
+                }
+                gs["stage_rows"] = [
+                    {
+                        "pos": int(p.get("position", 0)),
+                        "team_name": p.get("team_name", ""),
+                        "advancing": bool(
+                            adv > 0 and int(p.get("position", 0)) <= adv
+                        ),
+                    }
+                    for p in positions
+                ]
 
         # ── Tie explanations ──
         raw_te = tie_expl_by_gender.get(gender, [])

@@ -474,6 +474,38 @@
 {% endfor %}
 {% endif %}
 
+<!-- ── Stage tournament (etapowy, bez punktów): klasyfikacja z awansem ── -->
+{% if gs.stage_info %}
+<div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Klasyfikacja — {{ gs.stage_info.stage_label }}</div>
+<div class="section-desc">
+  {% if gs.stage_info.advancing_count and gs.stage_info.advancing_count > 0 %}
+  Drużyny oznaczone awansują do kolejnego etapu (pierwsze {{ gs.stage_info.advancing_count }}).
+  {% else %}
+  Końcowa klasyfikacja turnieju.
+  {% endif %}
+</div>
+<table class="standings-table no-break">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Drużyna</th>
+      <th class="pts-col">Awans</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for sr in gs.stage_rows %}
+    <tr{% if sr.advancing %} style="background: {{ gc }}12;"{% endif %}>
+      <td class="pos" style="color: {{ gc }};">{{ sr.pos }}</td>
+      <td class="team-name">{{ sr.team_name }}</td>
+      <td class="pts" style="text-align: center;">
+        {% if sr.advancing %}<span style="color: {{ gc }}; font-weight: 900;">✓</span>{% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <!-- ── Standings (round-robin: show right after table) ── -->
 {% if gs.standings and gs.mode == "roundRobin" %}
 <div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Punktacja turniejowa</div>
