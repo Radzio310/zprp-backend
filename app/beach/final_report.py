@@ -85,6 +85,18 @@ class StandingRow(BaseModel):
     tournament_points: Optional[float] = None
 
 
+def _decline_best_tournaments(n: int) -> str:
+    """Zwraca poprawnie odmienioną frazę 'N najlepszy turniej/najlepsze turnieje/najlepszych turniejów'."""
+    n = abs(int(n))
+    if n == 1:
+        return f"{n} najlepszy turniej"
+    last_two = n % 100
+    last = n % 10
+    if last in (2, 3, 4) and last_two not in (12, 13, 14):
+        return f"{n} najlepsze turnieje"
+    return f"{n} najlepszych turniejów"
+
+
 class GenderStandingsData(BaseModel):
     gender: str  # "M" | "K"
     rows: List[StandingRow]
@@ -1255,6 +1267,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             "standings_is_multi_tournament": False,
             "standings_tournament_count": 1,
             "standings_top_n": 0,
+            "standings_top_n_phrase": "",
             "tie_explanations": [],
         }
 
@@ -1374,6 +1387,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 gs["standings_is_multi_tournament"] = sd.tournament_count > 1
                 gs["standings_tournament_count"] = sd.tournament_count
                 gs["standings_top_n"] = sd.top_n
+                gs["standings_top_n_phrase"] = _decline_best_tournaments(sd.top_n)
 
         # ── Tie explanations ──
         raw_te = tie_expl_by_gender.get(gender, [])

@@ -511,7 +511,7 @@
 </table>
 {% if gs.standings_top_n and gs.standings_top_n > 0 and gs.standings_tournament_count > gs.standings_top_n %}
 <div class="section-desc" style="font-style: italic;">
-  Do klasyfikacji uwzględniono {{ gs.standings_top_n }} najlepszych turniejów każdej drużyny.
+  Do klasyfikacji uwzględniono {{ gs.standings_top_n_phrase }} każdej drużyny.
 </div>
 {% endif %}
 {% if gs.tie_explanations %}
@@ -761,7 +761,7 @@
 </table>
 {% if gs.standings_top_n and gs.standings_top_n > 0 and gs.standings_tournament_count > gs.standings_top_n %}
 <div class="section-desc" style="font-style: italic;">
-  Do klasyfikacji uwzględniono {{ gs.standings_top_n }} najlepszych turniejów każdej drużyny.
+  Do klasyfikacji uwzględniono {{ gs.standings_top_n_phrase }} każdej drużyny.
 </div>
 {% endif %}
 {% if gs.tie_explanations %}

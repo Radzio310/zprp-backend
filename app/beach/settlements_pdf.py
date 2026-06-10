@@ -107,7 +107,9 @@ def _bank_account(value: Any) -> str:
     digits = re.sub(r"\D", "", str(value or ""))[:26]
     if not digits:
         return ""
-    return " ".join(digits[i : i + 2] for i in range(0, len(digits), 2))
+    parts = [digits[:2]]
+    parts.extend(digits[i : i + 4] for i in range(2, len(digits), 4))
+    return " ".join(part for part in parts if part)
 
 
 def _safe_filename_part(s: str, max_len: int = 44) -> str:
