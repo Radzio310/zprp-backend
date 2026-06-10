@@ -89,6 +89,7 @@ class GenderStandingsData(BaseModel):
     gender: str  # "M" | "K"
     rows: List[StandingRow]
     tournament_count: int = 1
+    top_n: int = 0  # 0 = WSZYSTKIE; >0 = uwzględniono tylko N najlepszych turniejów
 
 
 class TieMatchEntry(BaseModel):
@@ -1253,6 +1254,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             "standings": None,
             "standings_is_multi_tournament": False,
             "standings_tournament_count": 1,
+            "standings_top_n": 0,
             "tie_explanations": [],
         }
 
@@ -1371,6 +1373,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 gs["standings"] = standing_rows
                 gs["standings_is_multi_tournament"] = sd.tournament_count > 1
                 gs["standings_tournament_count"] = sd.tournament_count
+                gs["standings_top_n"] = sd.top_n
 
         # ── Tie explanations ──
         raw_te = tie_expl_by_gender.get(gender, [])

@@ -14,6 +14,13 @@ router = APIRouter(prefix="/beach/app-settings", tags=["Beach: App Settings"])
 
 EMPTY_STATE_IMAGE_KEY = "empty_state_image_url"
 ROLE_CAPS_KEY = "role_caps"
+STANDINGS_CONFIG_KEY = "standings_config"
+
+# top_n == 0 oznacza "WSZYSTKIE" (bez limitu)
+DEFAULT_STANDINGS_CONFIG = {
+    "default_top_n": 0,       # ile najlepszych turniejów pokazywać domyślnie w tabeli punktów
+    "final_report_top_n": 0,  # ile najlepszych turniejów brać do komunikatu końcowego
+}
 
 DEFAULT_ROLE_CAPS = {
     "judge": {
@@ -165,3 +172,66 @@ async def set_role_caps(
         details={"key": ROLE_CAPS_KEY, "action": "set"},
     )
     return req.config
+
+
+# ─── GET standings-config (public) ────────────────────────────────────────────
+
+@router.get("/standings-config", response_model=dict, summary="Konfiguracja tabeli punktów (publiczne)")
+async def get_standings_config():
+    row = await database.fetch_one(
+        select(beach_app_settings).where(beach_app_settings.c.key == STANDINGS_CONFIG_KEY)
+    )
+    if row:
+        try:
+            stored = json.loads(dict(row)["value"])
+            return {**DEFAULT_STANDINGS_CONFIG, **(stored if isinstance(stored, dict) else {})}
+        except Exception:
+            pass
+    return dict(DEFAULT_STANDINGS_CONFIG)
+
+
+# ─── PATCH standings-config (admin) ───────────────────────────────────────────
+
+class StandingsConfigRequest(BaseModel):
+    default_top_n: int = 0
+    final_report_top_n: int = 0
+
+
+@router.patch("/standings-config", response_model=dict, summary="Ustaw konfigurację tabeli punktów (admin)")
+async def set_standings_config(
+    req: StandingsConfigRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
+    config = {
+        "default_top_n": max(0, int(req.default_top_n)),
+        "final_report_top_n": max(0, int(req.final_report_top_n)),
+    }
+    value = json.dumps(config, ensure_ascii=False)
+    existing = await database.fetch_one(
+        select(beach_app_settings).where(beach_app_settings.c.key == STANDINGS_CONFIG_KEY)
+    )
+    if existing:
+        await database.execute(
+            update(beach_app_settings)
+            .where(beach_app_settings.c.key == STANDINGS_CONFIG_KEY)
+            .values(value=value, updated_at=datetime.now(timezone.utc))
+        )
+    else:
+        await database.execute(
+            insert(beach_app_settings).values(
+                key=STANDINGS_CONFIG_KEY,
+                value=value,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+    await log_activity(
+        area="system",
+        action="app_settings.changed",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={"key": STANDINGS_CONFIG_KEY, "action": "set", **config},
+    )
+    return config
