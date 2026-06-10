@@ -146,6 +146,18 @@
       text-overflow: ellipsis;
     }
     .judge-role { margin-top: 1.5pt; font-size: 8pt; color: #888; font-weight: 700; }
+    .bank-account {
+      margin-top: 4pt;
+      display: inline-block;
+      border-radius: 99pt;
+      padding: 2.5pt 7pt;
+      background: {{ accent }}0F;
+      color: #5a4160;
+      font-size: 7.2pt;
+      font-weight: 900;
+      letter-spacing: 0.2pt;
+      white-space: nowrap;
+    }
     .judge-total-wrap { text-align: right; flex-shrink: 0; }
     .judge-total-label { font-size: 6.5pt; font-weight: 900; letter-spacing: 0.8pt; color: #aaa; text-transform: uppercase; }
     .judge-total { font-size: 16pt; color: {{ accent }}; font-weight: 900; white-space: nowrap; line-height: 1.15; }
@@ -306,6 +318,9 @@
         <div class="judge-head-left">
           <div class="judge-name">{{ judge.full_name }}</div>
           <div class="judge-role">{{ judge.role_label }}{% if judge.city %} · {{ judge.city }}{% endif %}</div>
+          {% if judge.bank_account_fmt %}
+          <div class="bank-account">Nr konta: {{ judge.bank_account_fmt }}</div>
+          {% endif %}
         </div>
         <div class="judge-total-wrap">
           <div class="judge-total-label">Łącznie</div>
@@ -353,6 +368,9 @@
       <div class="judge-head-left">
         <div class="judge-name">{{ judge.full_name }}</div>
         <div class="judge-role">{{ judge.role_label }} · {{ judge.category }}{% if judge.city %} · {{ judge.city }}{% endif %}</div>
+        {% if judge.bank_account_fmt %}
+        <div class="bank-account">Nr konta: {{ judge.bank_account_fmt }}</div>
+        {% endif %}
       </div>
       <div class="judge-total-wrap">
         <div class="judge-total-label">Łącznie</div>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import os
+import re
 import shutil
 import tempfile
 import urllib.parse
@@ -102,6 +103,13 @@ def _km_n(value: Any) -> str:
     return f"{n:.1f}".replace(".", ",")
 
 
+def _bank_account(value: Any) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))[:26]
+    if not digits:
+        return ""
+    return " ".join(digits[i : i + 2] for i in range(0, len(digits), 2))
+
+
 def _safe_filename_part(s: str, max_len: int = 44) -> str:
     import unicodedata
 
@@ -126,6 +134,7 @@ def _build_context(req: SettlementPdfRequest) -> Dict[str, Any]:
         j["result_fmt_n"] = {k: _money_n(result.get(k, 0)) for k in ("travel", "brutto", "costs", "tax", "netto", "total")}
         j["distance_fmt"] = _km(j.get("distance_km", 0))
         j["distance_fmt_n"] = _km_n(j.get("distance_km", 0))
+        j["bank_account_fmt"] = _bank_account(j.get("bank_account"))
         for day in j.get("days") or []:
             day["brutto_fmt"] = _money(day.get("brutto", 0))
     return {
