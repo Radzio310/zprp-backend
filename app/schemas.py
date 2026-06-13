@@ -1110,6 +1110,81 @@ class BeachPasswordResetRequest(BaseModel):
     password_encrypted: Optional[str] = None
 
 
+class BeachPasswordResetContactOption(BaseModel):
+    method: Literal["phone", "email"]
+    label: str
+    masked: str
+
+
+class BeachPasswordResetChallengeRequest(BaseModel):
+    login: str = Field(..., min_length=1, max_length=120)
+
+
+class BeachPasswordResetChallengeResponse(BaseModel):
+    ok: bool
+    user_found: bool
+    login: str
+    contact_options: List[BeachPasswordResetContactOption] = Field(default_factory=list)
+    requires_city: bool = True
+    requires_province: bool = True
+    remaining_attempts: int
+    locked: bool = False
+    message: Optional[str] = None
+
+
+class BeachPasswordResetSubmitRequest(BaseModel):
+    login: str = Field(..., min_length=1, max_length=120)
+    contact_method: Optional[Literal["phone", "email"]] = None
+    contact_value: Optional[str] = Field(None, max_length=220)
+    city: Optional[str] = Field(None, max_length=120)
+    province: Optional[str] = Field(None, max_length=80)
+
+
+class BeachPasswordResetSubmitResponse(BaseModel):
+    success: bool
+    remaining_attempts: int
+    request_id: Optional[int] = None
+    message: str
+
+
+class BeachPasswordResetAdminStats(BaseModel):
+    pending: int
+    resolved: int
+    rejected: int
+    failed: int
+
+
+class BeachPasswordResetAdminItem(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    login: str
+    user_name: Optional[str] = None
+    user_phone: Optional[str] = None
+    user_email: Optional[str] = None
+    city: Optional[str] = None
+    province: Optional[str] = None
+    contact_method: Optional[str] = None
+    provided_contact: Optional[str] = None
+    provided_city: Optional[str] = None
+    provided_province: Optional[str] = None
+    status: str
+    attempt_no: int
+    admin_note: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BeachPasswordResetAdminListResponse(BaseModel):
+    requests: List[BeachPasswordResetAdminItem]
+    total: int
+    stats: BeachPasswordResetAdminStats
+
+
+class BeachPasswordResetStatusRequest(BaseModel):
+    status: Literal["pending", "resolved", "rejected"]
+    admin_note: Optional[str] = Field(None, max_length=1000)
+
+
 class BeachDeviceInfo(BaseModel):
     installation_id: str
     platform: Optional[str] = None

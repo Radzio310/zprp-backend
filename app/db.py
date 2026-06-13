@@ -1263,6 +1263,28 @@ beach_report_messages = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
+beach_password_reset_requests = Table(
+    "beach_password_reset_requests",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("beach_users.id", ondelete="CASCADE"), nullable=True, index=True),
+    Column("login", String, nullable=False, index=True),
+    Column("user_name", String, nullable=True),
+    Column("user_phone", String, nullable=True),
+    Column("user_email", String, nullable=True),
+    Column("city", String, nullable=True),
+    Column("province", String, nullable=True),
+    Column("contact_method", String, nullable=True),
+    Column("provided_contact", String, nullable=True),
+    Column("provided_city", String, nullable=True),
+    Column("provided_province", String, nullable=True),
+    Column("status", String, nullable=False, server_default=text("'pending'"), index=True),
+    Column("attempt_no", Integer, nullable=False, server_default=text("1")),
+    Column("admin_note", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
 # -------------------------
 # BEACH: powiadomienia in-app
 # -------------------------
@@ -1402,5 +1424,7 @@ with engine.connect() as _conn:
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_type ON beach_notifications (type)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_created_at ON beach_notifications (created_at)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_notifications_expires_at ON beach_notifications (expires_at)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_password_reset_login ON beach_password_reset_requests (login)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_password_reset_status ON beach_password_reset_requests (status)"))
     _conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_beach_tutorial_views_unique ON beach_tutorial_views (tutorial_id, user_id)"))
     _conn.commit()

@@ -79,6 +79,7 @@ from app.beach.beach_proel import router as beach_proel_router
 from app.beach.guidelines import router as beach_guidelines_router
 from app.beach.standings import router as beach_standings_router, run_standings_sync_team_names_scheduler
 from app.beach.reports import router as beach_reports_router
+from app.beach.password_reset import router as beach_password_reset_router
 from app.beach.notifications import router as beach_notifications_router
 from app.beach.notifications import cleanup_expired_notifications
 from app.beach.notification_generator import run_notification_generator
@@ -194,6 +195,7 @@ app.include_router(beach_proel_router)
 app.include_router(beach_guidelines_router)
 app.include_router(beach_standings_router)
 app.include_router(beach_reports_router)
+app.include_router(beach_password_reset_router)
 app.include_router(beach_notifications_router)
 app.include_router(beach_app_settings_router)
 app.include_router(beach_schedule_pdf_router)
