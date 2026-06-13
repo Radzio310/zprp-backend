@@ -1105,6 +1105,11 @@ class BeachUserUpdateRequest(BaseModel):
     # status aktywności zmienia wyłącznie endpoint /me/deactivate
 
 
+class BeachPasswordResetRequest(BaseModel):
+    password: Optional[str] = None
+    password_encrypted: Optional[str] = None
+
+
 class BeachDeviceInfo(BaseModel):
     installation_id: str
     platform: Optional[str] = None

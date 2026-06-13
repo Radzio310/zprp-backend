@@ -28,6 +28,7 @@ from app.beach.capabilities import resolve_user_capabilities
 from app.schemas import (
     BeachUserCreateRequest,
     BeachUserUpdateRequest,
+    BeachPasswordResetRequest,
     BeachUserItem,
     BeachUsersListResponse,
     BeachClaimedIdentitiesRequest,
@@ -832,8 +833,91 @@ async def update_user_default_squad(
     return {"teams": current_data}
 
 
+def _password_hash_from_reset_request(req: BeachPasswordResetRequest) -> str:
+    if not req.password_encrypted and not req.password:
+        raise HTTPException(400, "Hasło jest wymagane")
+
+    if req.password_encrypted:
+        password_plain = _decrypt_password_from_b64(req.password_encrypted)
+    else:
+        password_plain = str(req.password)
+
+    password_plain = password_plain.strip()
+    if len(password_plain) < 8:
+        raise HTTPException(400, "Hasło musi mieć co najmniej 8 znaków")
+
+    return _hash_password(password_plain)
+
+
+async def _set_user_password(
+    user_id: int,
+    req: BeachPasswordResetRequest,
+    *,
+    actor_user_id: int,
+    admin_reset: bool,
+) -> BeachUserItem:
+    existing = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    if not existing:
+        raise HTTPException(404, "Użytkownik nie znaleziony")
+
+    password_hash = _password_hash_from_reset_request(req)
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == user_id)
+        .values(password_hash=password_hash, updated_at=datetime.now(timezone.utc))
+    )
+
+    row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    row_dict = dict(row)
+    await log_activity(
+        area="user",
+        action="user.password_reset" if admin_reset else "user.password_changed",
+        actor_user_id=actor_user_id,
+        actor_name=await get_actor_name(actor_user_id),
+        target_id=str(user_id),
+        target_label=row_dict.get("full_name", ""),
+    )
+    return _to_user_item(row_dict)
+
+
+@router.patch("/me/password", response_model=BeachUserItem, summary="Zmień własne hasło użytkownika Beach")
+async def change_my_password(
+    req: BeachPasswordResetRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    return await _set_user_password(
+        current_user_id,
+        req,
+        actor_user_id=current_user_id,
+        admin_reset=False,
+    )
+
+
+@router.patch("/{user_id}/password", response_model=BeachUserItem, summary="Reset hasła użytkownika Beach (admin)")
+async def admin_reset_user_password(
+    user_id: int,
+    req: BeachPasswordResetRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _check_is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+    return await _set_user_password(
+        user_id,
+        req,
+        actor_user_id=current_user_id,
+        admin_reset=True,
+    )
+
+
 @router.patch("/{user_id}", response_model=BeachUserItem)
-async def patch_user(user_id: int, req: BeachUserUpdateRequest):
+async def patch_user(
+    user_id: int,
+    req: BeachUserUpdateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if current_user_id != user_id and not await _check_is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień")
+
     existing = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not existing:
         raise HTTPException(404, "Użytkownik nie znaleziony")
