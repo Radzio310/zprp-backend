@@ -1448,8 +1448,9 @@ beach_email_verification_codes = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
-
-Index("ix_email_verification_codes_user_id", beach_email_verification_codes.c.user_id)
+# Indeks po user_id zapewnia już index=True na kolumnie powyżej
+# (ix_email_verification_codes_user_id) — bez osobnego Index(), aby create_all
+# nie próbował go zakładać dwukrotnie.
 
 # -------------------------
 # BEACH: zdarzenia dostarczenia (webhook Brevo)
