@@ -68,15 +68,25 @@ def has_approved_role(roles: Any) -> bool:
     return False
 
 
+def _as_dict(row: Any) -> dict:
+    """Normalize a databases ``Record`` (no ``.get``) or dict into a plain dict."""
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return row
+    return dict(row)
+
+
 def requires_email_gate(user_row: Mapping[str, Any]) -> bool:
     """Whether this account must verify its e-mail before using the app.
 
     Accounts with an approved role are exempt ("luz"). Verified accounts are
     exempt. Everyone else must verify.
     """
-    if bool(user_row.get("email_verified")):
+    row = _as_dict(user_row)
+    if bool(row.get("email_verified")):
         return False
-    return not has_approved_role(user_row.get("roles"))
+    return not has_approved_role(row.get("roles"))
 
 
 # ─────────────────────────── Rate limiter (DB) ───────────────────────────
@@ -133,6 +143,7 @@ async def issue_and_send_code(user_row: Mapping[str, Any], *, enforce_cooldown: 
     Raises ``VerificationError`` (no e-mail / rate limited) or ``EmailDeliveryError``.
     """
     cfg = get_email_config()
+    user_row = _as_dict(user_row)
     user_id = int(user_row["id"])
     email = (user_row.get("email") or "").strip()
     if not email:
@@ -396,7 +407,7 @@ async def maybe_issue_on_register(user_id: int, deadline_days: int) -> Optional[
     has an approved role, or no e-mail). Swallows delivery failure (the user can
     finish via the resend endpoint) but always keeps DB state consistent.
     """
-    user = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
+    user = _as_dict(await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id)))
     if not user:
         return None
     if not requires_email_gate(user):
