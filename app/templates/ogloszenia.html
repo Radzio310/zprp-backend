@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Ogłoszenia – {{ tournament_name }}</title>
+<style>
+  @page {
+    size: A4;
+    margin: 18mm 14mm 16mm 14mm;
+    @bottom-center {
+      content: "Strona " counter(page) " z " counter(pages);
+      font-size: 8pt;
+      color: #888;
+      font-family: "DejaVu Sans", sans-serif;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", sans-serif;
+    font-size: 9.5pt;
+    color: #222;
+    line-height: 1.4;
+  }
+
+  /* ── Header ── */
+  .header {
+    text-align: center;
+    margin-bottom: 16pt;
+    padding-bottom: 12pt;
+    border-bottom: 2pt solid {{ accent }};
+  }
+  .header img.logo {
+    width: 120pt;
+    height: auto;
+    margin-bottom: 8pt;
+  }
+  .header h1 {
+    font-size: 16pt;
+    font-weight: 900;
+    color: {{ accent }};
+    margin-bottom: 3pt;
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+  }
+  .header .subtitle {
+    font-size: 11pt;
+    color: {{ accent }};
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.6pt;
+  }
+  .header .meta {
+    font-size: 9pt;
+    color: #777;
+    margin-top: 2pt;
+  }
+
+  /* ── Summary ── */
+  .summary {
+    background: {{ accent }}0D;
+    border: 1pt solid {{ accent }}33;
+    border-radius: 6pt;
+    padding: 9pt 14pt;
+    margin-bottom: 14pt;
+    font-size: 10pt;
+  }
+  .summary .count-strong { font-weight: 900; color: {{ accent }}; }
+
+  /* ── Announcement card ── */
+  .ann-card {
+    border: 0.7pt solid {{ accent }}33;
+    border-left: 4pt solid {{ accent }};
+    border-radius: 6pt;
+    padding: 9pt 12pt;
+    margin-bottom: 9pt;
+    page-break-inside: avoid;
+  }
+  .ann-row {
+    display: flex;
+    gap: 12pt;
+    align-items: flex-start;
+  }
+  .ann-main { flex: 1; min-width: 0; }
+
+  .ann-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8pt;
+    margin-bottom: 5pt;
+  }
+  .ann-author {
+    font-size: 10.5pt;
+    font-weight: 900;
+    color: #1A2050;
+  }
+  .ann-date {
+    font-size: 8pt;
+    color: #999;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .ann-auds {
+    margin-bottom: 6pt;
+  }
+  .ann-aud {
+    display: inline-block;
+    font-size: 7.5pt;
+    font-weight: 800;
+    color: {{ accent }};
+    background: {{ accent }}14;
+    border: 0.5pt solid {{ accent }}33;
+    padding: 1.5pt 6pt;
+    border-radius: 999pt;
+    margin-right: 4pt;
+  }
+
+  .ann-text {
+    font-size: 9.5pt;
+    color: #333;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+
+  /* ── QR block — subtle, right-aligned ── */
+  .ann-qr {
+    flex-shrink: 0;
+    width: 74pt;
+    text-align: center;
+  }
+  .ann-qr img {
+    width: 64pt;
+    height: 64pt;
+    border: 0.7pt solid #e6e6e6;
+    border-radius: 5pt;
+    padding: 3pt;
+    background: #fff;
+  }
+  .ann-qr .qr-label {
+    font-size: 7.5pt;
+    font-weight: 800;
+    color: {{ accent }};
+    margin-top: 3pt;
+    line-height: 1.2;
+    word-wrap: break-word;
+  }
+  .ann-qr .qr-hint {
+    font-size: 6.5pt;
+    color: #aaa;
+    margin-top: 1pt;
+    text-transform: uppercase;
+    letter-spacing: 0.3pt;
+  }
+
+  /* ── Footer ── */
+  .footer {
+    margin-top: 20pt;
+    padding-top: 8pt;
+    border-top: 0.5pt solid #ccc;
+    font-size: 7.5pt;
+    color: #999;
+    text-align: center;
+  }
+
+  .empty {
+    text-align: center;
+    color: #999;
+    font-size: 10pt;
+    padding: 30pt 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- ════════════ HEADER ════════════ -->
+<div class="header">
+  {% if logo_b64 %}
+  <img class="logo" src="data:image/png;base64,{{ logo_b64 }}" alt="BAZA Beach">
+  {% endif %}
+  <h1>{{ tournament_name }}</h1>
+  <div class="subtitle">Ogłoszenia turnieju{% if audience_label and audience_label != "Wszyscy" %} · {{ audience_label }}{% endif %}</div>
+  {% if date_range or location %}
+  <div class="meta">{{ date_range }}{% if date_range and location %} · {% endif %}{{ location }}</div>
+  {% endif %}
+</div>
+
+<!-- ════════════ SUMMARY ════════════ -->
+<div class="summary">
+  Łącznie <span class="count-strong">{{ total }}</span>
+  {% if total == 1 %}ogłoszenie{% elif total in [2,3,4] %}ogłoszenia{% else %}ogłoszeń{% endif %}{% if audience_label and audience_label != "Wszyscy" %} dla grupy <span class="count-strong">{{ audience_label }}</span>{% endif %}.
+</div>
+
+<!-- ════════════ ITEMS ════════════ -->
+{% if items %}
+{% for it in items %}
+<div class="ann-card">
+  <div class="ann-row">
+    <div class="ann-main">
+      <div class="ann-head">
+        <div class="ann-author">{{ it.author or "Organizator" }}</div>
+        {% if it.date_label %}<div class="ann-date">{{ it.date_label }}</div>{% endif %}
+      </div>
+      {% if it.audience_labels %}
+      <div class="ann-auds">
+        {% for aud in it.audience_labels %}<span class="ann-aud">{{ aud }}</span>{% endfor %}
+      </div>
+      {% endif %}
+      {% if it.text %}<div class="ann-text">{{ it.text }}</div>{% endif %}
+    </div>
+    {% if it.qr_b64 %}
+    <div class="ann-qr">
+      <img src="data:image/png;base64,{{ it.qr_b64 }}" alt="QR">
+      <div class="qr-label">{{ it.button_label }}</div>
+      <div class="qr-hint">Zeskanuj</div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="empty">Brak ogłoszeń do wyświetlenia.</div>
+{% endif %}
+
+<!-- ════════════ FOOTER ════════════ -->
+<div class="footer">
+  Wygenerowano automatycznie przez BAZA Beach · {{ generated_at }}{% if generated_by %} · {{ generated_by }}{% endif %}
+</div>
+
+</body>
+</html>

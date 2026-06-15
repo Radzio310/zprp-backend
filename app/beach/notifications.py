@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, update, and_, func as sa_func
 
@@ -24,6 +24,8 @@ from app.beach.activity_log import log_activity, get_actor_name
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/beach/notifications", tags=["Beach: Notifications"])
+
+MAX_IN_APP_NOTIFICATIONS_PER_USER = 100
 
 
 # ──────────── Models ────────────
@@ -80,7 +82,7 @@ async def create_notification(
         )
     )
 
-    # 1b) Enforce per-user notification limit (keep newest 25)
+    # 1b) Enforce per-user notification limit.
     asyncio.ensure_future(_enforce_notif_limit(target_user_ids))
 
     # 2) Optionally schedule FCM push for users with devices + enabled pref
@@ -96,7 +98,10 @@ async def create_notification(
     return notif_id
 
 
-async def _enforce_notif_limit(user_ids: List[int], limit: int = 25) -> None:
+async def _enforce_notif_limit(
+    user_ids: List[int],
+    limit: int = MAX_IN_APP_NOTIFICATIONS_PER_USER,
+) -> None:
     """Soft-delete oldest notifications beyond `limit` for each user."""
     try:
         now = datetime.now(timezone.utc)
@@ -453,20 +458,40 @@ async def _schedule_push_for_users(
 
 @router.get("/unread")
 async def get_unread_notifications(
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     user_id: int = Depends(beach_get_current_user_id),
 ):
-    """Get all notifications for user that are not read and not expired."""
+    """Get a page of active notifications for the user plus total unread count."""
     now = datetime.now(timezone.utc)
 
-    # target_user_ids @> ARRAY[user_id] AND NOT (read_user_ids @> ARRAY[user_id])
-    stmt = (
+    base_stmt = (
         select(beach_notifications)
         .where(
             beach_notifications.c.target_user_ids.any(user_id),
         )
         .where(beach_notifications.c.expires_at > now)
+    )
+    total = await database.fetch_val(
+        select(sa_func.count())
+        .select_from(beach_notifications)
+        .where(beach_notifications.c.target_user_ids.any(user_id))
+        .where(beach_notifications.c.expires_at > now)
+    )
+    unread_rows = await database.fetch_all(
+        select(beach_notifications.c.read_user_ids)
+        .where(beach_notifications.c.target_user_ids.any(user_id))
+        .where(beach_notifications.c.expires_at > now)
+    )
+    unread_count = sum(
+        1 for r in unread_rows if user_id not in list(r["read_user_ids"] or [])
+    )
+
+    stmt = (
+        base_stmt
         .order_by(beach_notifications.c.created_at.desc())
-        .limit(100)
+        .limit(limit)
+        .offset(offset)
     )
     rows = await database.fetch_all(stmt)
 
@@ -483,8 +508,13 @@ async def get_unread_notifications(
             created_at=r["created_at"].isoformat() if r["created_at"] else "",
         ))
 
-    unread_count = sum(1 for i in items if not i.is_read)
-    return {"items": [i.dict() for i in items], "unread_count": unread_count}
+    return {
+        "items": [i.dict() for i in items],
+        "unread_count": unread_count,
+        "total": int(total or 0),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.post("/mark-read")
