@@ -1206,6 +1206,13 @@ class BeachUserItem(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
 
+    # ── Weryfikacja e-mail (Brevo) ──
+    email_verified: bool = False
+    email_verified_at: Optional[datetime] = None
+    # True gdy konto musi potwierdzić e-mail przed korzystaniem z aplikacji
+    # (brak zatwierdzonej roli i niezweryfikowany e-mail).
+    requires_email_verification: bool = False
+
     login: str
 
     roles: Any = Field(default_factory=list)

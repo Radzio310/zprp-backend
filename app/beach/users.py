@@ -38,6 +38,12 @@ from app.schemas import (
 )
 from app.deps import get_rsa_keys, beach_create_access_token, beach_get_current_user_id
 from app.beach.activity_log import log_activity, get_actor_name
+from app.beach.email_verification import (
+    has_approved_role,
+    maybe_issue_on_register,
+)
+from app.beach.email_config import get_email_config
+from app.beach.email_normalization import normalize_email
 
 
 logger = logging.getLogger(__name__)
@@ -184,6 +190,9 @@ def _to_user_item(
     effective_capabilities: Optional[List[str]] = None,
 ) -> BeachUserItem:
     device_ids = list(row.get("device_ids") or [])
+    parsed_roles = _parse_jsonish(row.get("roles"), [])
+    email_verified = bool(row.get("email_verified") or False)
+    requires_email_verification = (not email_verified) and not has_approved_role(parsed_roles)
     return BeachUserItem(
         id=int(row["id"]),
         judge_id=row.get("judge_id"),
@@ -194,8 +203,11 @@ def _to_user_item(
         city=row.get("city"),
         phone=row.get("phone"),
         email=row.get("email"),
+        email_verified=email_verified,
+        email_verified_at=row.get("email_verified_at"),
+        requires_email_verification=requires_email_verification,
         login=row["login"],
-        roles=_parse_jsonish(row.get("roles"), []),
+        roles=parsed_roles,
         badges=_parse_jsonish(row.get("badges"), {}),
         last_login_at=row.get("last_login_at"),
         app_opens=int(row.get("app_opens") or 0),
@@ -582,6 +594,23 @@ async def create_user(req: BeachUserCreateRequest):
         player_id=req.player_id,
     )
 
+    # ── E-mail: normalizacja + unikalność (case-insensitive) ──
+    email_clean = (req.email or "").strip() or None
+    email_norm = normalize_email(email_clean) if email_clean else None
+    if email_norm:
+        existing_email = await database.fetch_one(
+            select(beach_users.c.id).where(beach_users.c.email_normalized == email_norm)
+        )
+        if existing_email:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "EMAIL_EXISTS",
+                    "field": "email",
+                    "message": "Ten adres e-mail jest już używany przez inne konto.",
+                },
+            )
+
     stmt = beach_users.insert().values(
         judge_id=req.judge_id,
         person_id=req.person_id,
@@ -590,7 +619,9 @@ async def create_user(req: BeachUserCreateRequest):
         province=province,
         city=(req.city or None),
         phone=(req.phone or None),
-        email=(req.email or None),
+        email=email_clean,
+        email_normalized=email_norm,
+        email_verified=False,
         login=req.login.strip(),
         password_hash=hashed,
         roles=roles,
@@ -656,6 +687,20 @@ async def create_user(req: BeachUserCreateRequest):
                     data={"user_id": int(new_id)},
                 ))
                 break
+
+    # ── Weryfikacja e-mail ──
+    # Konta z zatwierdzoną rolą (zawodnik/trener/sędzia) są zwolnione ("luz").
+    # Pozostałe — jeśli podały e-mail — dostają kod od razu (best-effort: brak
+    # dostarczenia nie blokuje rejestracji, użytkownik dokończy przez resend
+    # lub modal w aplikacji). Ustawiany jest też 90-dniowy termin.
+    try:
+        await maybe_issue_on_register(int(new_id), get_email_config().grace_days)
+        # Odśwież flagi (email_verification_deadline mogło się ustawić).
+        refreshed = await database.fetch_one(select(beach_users).where(beach_users.c.id == int(new_id)))
+        if refreshed:
+            user_item = _to_user_item(dict(refreshed))
+    except Exception:
+        logger.exception("create_user: issuing verification code failed (non-fatal)")
 
     return user_item
 

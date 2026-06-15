@@ -96,6 +96,8 @@ from app.beach.activity_log import router as beach_activity_log_router
 from app.beach.calendar import router as beach_calendar_router
 from app.beach.tutorials import router as beach_tutorials_router
 from app.beach.mvp_votes import router as beach_mvp_votes_router
+from app.beach.auth_email import router as beach_auth_email_router
+from app.beach.brevo_webhook import router as beach_brevo_webhook_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -211,6 +213,8 @@ app.include_router(beach_activity_log_router)
 app.include_router(beach_calendar_router)
 app.include_router(beach_tutorials_router)
 app.include_router(beach_mvp_votes_router)
+app.include_router(beach_auth_email_router)
+app.include_router(beach_brevo_webhook_router)
 
 # NEW: push router
 app.include_router(push_router)
@@ -584,6 +588,19 @@ _notif_generator_task: asyncio.Task | None = None
 _beach_sync_task: asyncio.Task | None = None
 _beach_medical_task: asyncio.Task | None = None
 _standings_sync_task: asyncio.Task | None = None
+_email_grace_task: asyncio.Task | None = None
+
+
+async def _email_grace_cleanup_loop():
+    """Daily cleanup of unverified, role-less accounts past their grace deadline."""
+    from app.beach.email_verification import run_email_grace_cleanup
+    interval_sec = int(os.getenv("EMAIL_GRACE_CLEANUP_INTERVAL_SECONDS", str(24 * 60 * 60)))
+    while True:
+        try:
+            await run_email_grace_cleanup()
+        except Exception:
+            logger.exception("email grace cleanup loop error")
+        await asyncio.sleep(interval_sec)
 
 
 def _run_backup_sync() -> None:
@@ -770,6 +787,13 @@ async def startup():
            DEFAULT '{"tournament_reminder_24h":true,"tournament_reminder_5h":true,"match_reminder_30min":true,"new_guideline":true,"new_announcement":true,"new_match_my_team":true,"new_match_as_judge":true,"points_awarded":true,"tournament_assigned":true,"new_tournament_calendar":true,"report_reply":true}'::jsonb NOT NULL""",
         """ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS device_infos JSONB
            DEFAULT '{}'::jsonb NOT NULL""",
+        # ── Weryfikacja e-mail (Brevo) ──
+        "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_normalized VARCHAR",
+        "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false",
+        "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ",
+        "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_delivery_blocked BOOLEAN NOT NULL DEFAULT false",
+        "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_verification_deadline TIMESTAMPTZ",
+        "CREATE INDEX IF NOT EXISTS ix_beach_users_email_normalized ON beach_users (email_normalized)",
     ]
     for stmt in _beach_user_migrations:
         try:
@@ -777,7 +801,23 @@ async def startup():
         except Exception:
             pass
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task
+    # ── Weryfikacja e-mail: backfill email_normalized + partial unique index ──
+    # (idempotentne; tworzy unikalny indeks tylko gdy brak konfliktów po lower/trim)
+    try:
+        from app.beach.email_verification import run_email_normalize_backfill
+        await run_email_normalize_backfill()
+    except Exception:
+        logger.exception("❌ Email normalize backfill failed — kontynuuję bez niej")
+
+    # Fail-fast walidacja konfiguracji e-mail (w produkcji rzuca wyjątek)
+    try:
+        from app.beach.email_config import validate_email_config
+        validate_email_config()
+    except Exception:
+        logger.exception("❌ Walidacja konfiguracji e-mail nie powiodła się")
+        raise
+
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -824,6 +864,10 @@ async def startup():
     # Standings: synchronizacja nazw drużyn raz na dobę
     _standings_sync_task = asyncio.create_task(run_standings_sync_team_names_scheduler())
     logger.info("✅ Standings team-names sync scheduler started")
+
+    # Email verification: dobowe usuwanie niezweryfikowanych kont po terminie (90 dni)
+    _email_grace_task = asyncio.create_task(_email_grace_cleanup_loop())
+    logger.info("✅ Email grace cleanup scheduler started")
 
 @app.on_event("shutdown")
 async def shutdown():

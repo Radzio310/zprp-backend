@@ -22,7 +22,7 @@ from sqlalchemy import (
     Index,
 )
 from databases import Database
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./local.db")
 
@@ -779,6 +779,17 @@ beach_users = Table(
     Column("phone", String, nullable=True),                   # 9 cyfr, bez prefiksu
     Column("email", String, nullable=True),
 
+    # ── Weryfikacja adresu e-mail (Brevo) ──
+    # email_normalized = email po trim()+lower(); unikalny (partial unique index
+    # tworzony przez skrypt migracyjny migrate_email_verification.py).
+    Column("email_normalized", String, nullable=True, index=True),
+    Column("email_verified", Boolean, nullable=False, server_default=text("false")),
+    Column("email_verified_at", DateTime(timezone=True), nullable=True),
+    # Ustawiane przez webhook Brevo przy hard_bounce / invalid.
+    Column("email_delivery_blocked", Boolean, nullable=False, server_default=text("false")),
+    # Termin (90 dni), po którym niezweryfikowane konto bez roli może zostać usunięte.
+    Column("email_verification_deadline", DateTime(timezone=True), nullable=True),
+
     Column("login", String, nullable=False, unique=True, index=True),
     Column("password_hash", String, nullable=False),
 
@@ -1412,6 +1423,65 @@ beach_tutorial_views = Table(
 )
 
 Index("ix_beach_tutorial_views_unique", beach_tutorial_views.c.tutorial_id, beach_tutorial_views.c.user_id, unique=True)
+
+# -------------------------
+# BEACH: kody weryfikacji e-mail
+# -------------------------
+
+beach_email_verification_codes = Table(
+    "email_verification_codes",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("beach_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    # HMAC-SHA256 hex — kod NIGDY nie jest zapisywany jawnie
+    Column("code_hash", String, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True), nullable=True),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_sent_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+Index("ix_email_verification_codes_user_id", beach_email_verification_codes.c.user_id)
+
+# -------------------------
+# BEACH: zdarzenia dostarczenia (webhook Brevo)
+# -------------------------
+
+beach_email_delivery_events = Table(
+    "email_delivery_events",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("provider", String, nullable=False, server_default=text("'brevo'")),
+    Column("event", String, nullable=False, index=True),
+    Column("email", String, nullable=True, index=True),
+    Column("message_id", String, nullable=True, index=True),
+    Column("payload_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# -------------------------
+# BEACH: zdarzenia rate-limitingu (limiter oparty o bazę — działa między instancjami)
+# -------------------------
+
+beach_email_rate_events = Table(
+    "email_rate_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("scope", String, nullable=False),       # np. "send_user" | "verify_ip"
+    Column("ref", String, nullable=False),          # user_id / email / ip
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index("ix_email_rate_events_lookup", beach_email_rate_events.c.scope, beach_email_rate_events.c.ref, beach_email_rate_events.c.created_at)
+
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
