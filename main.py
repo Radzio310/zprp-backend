@@ -99,6 +99,7 @@ from app.beach.mvp_votes import router as beach_mvp_votes_router
 from app.beach.auth_email import router as beach_auth_email_router
 from app.beach.brevo_webhook import router as beach_brevo_webhook_router
 from app.beach.password_reset_email import router as beach_password_reset_email_router
+from app.beach.score import router as beach_score_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -217,6 +218,7 @@ app.include_router(beach_mvp_votes_router)
 app.include_router(beach_auth_email_router)
 app.include_router(beach_brevo_webhook_router)
 app.include_router(beach_password_reset_email_router)
+app.include_router(beach_score_router)
 
 # NEW: push router
 app.include_router(push_router)

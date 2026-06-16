@@ -40,7 +40,7 @@ from app.schemas import (
     BeachReportAdminStats,
     BeachReportAdminListResponse,
 )
-from app.deps import beach_get_current_user_id
+from app.deps import beach_get_current_user_id, beach_get_optional_user_id
 from app.beach.notifications import create_notification, notify_admins
 from app.beach.activity_log import log_activity, get_actor_name
 
@@ -265,8 +265,11 @@ def _msg_row_to_item(row: dict) -> BeachReportMessageItem:
 # ─────────────────── USER endpoints ───────────────────
 
 @router.get("/unread-count", response_model=BeachReportUnreadCountResponse)
-async def get_unread_count(user_id: int = Depends(beach_get_current_user_id)):
+async def get_unread_count(user_id: Optional[int] = Depends(beach_get_optional_user_id)):
     """Liczba zgłoszeń z nową odpowiedzią admina (dla in-app check)."""
+    if user_id is None:
+        return BeachReportUnreadCountResponse(unread_count=0)
+
     row = await database.fetch_one(
         select(sa_func.count(beach_reports.c.id)).where(
             (beach_reports.c.user_id == user_id)

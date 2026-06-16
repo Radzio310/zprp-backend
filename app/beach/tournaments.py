@@ -759,15 +759,17 @@ async def list_tournaments(
     summary="Lista turniejów widocznych dla zalogowanego użytkownika",
 )
 async def list_visible_tournaments(
-    current_user_id: int = Depends(beach_get_current_user_id),
+    current_user_id: Optional[int] = Depends(beach_get_optional_user_id),
 ):
-    user_row = await database.fetch_one(
-        select(beach_users).where(beach_users.c.id == current_user_id)
-    )
-    if not user_row:
+    user_row = None
+    if current_user_id is not None:
+        user_row = await database.fetch_one(
+            select(beach_users).where(beach_users.c.id == current_user_id)
+        )
+    if current_user_id is not None and not user_row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
-    user_team_ids = set(_extract_team_ids(user_row["roles"]))
+    user_team_ids = set(_extract_team_ids(user_row["roles"])) if user_row else set()
 
     rows = await database.fetch_all(
         select(beach_tournaments).order_by(
@@ -805,6 +807,11 @@ async def list_visible_tournaments(
             if isinstance(ct, dict) and isinstance(ct.get("coach_user_id"), int)
         }
         include_all = bool((data.get("target") or {}).get("include_all", False))
+        if current_user_id is None:
+            if include_all:
+                out.append(_attach_computed_fields(r_d, data, None))
+            continue
+
         user_is_host = current_user_id in host_ids
         user_is_judge = current_user_id in judge_ids
         user_team_invited = bool(user_team_ids & invited_team_ids)
