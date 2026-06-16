@@ -31,6 +31,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from app.beach import schedule_pdf
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Beach: Organizational Report"])
@@ -304,42 +306,22 @@ def _build_context(req: OrganizationalReportRequest) -> Dict[str, Any]:
                 "teams": sorted(teams_by_gender[gender].values(), key=lambda x: x.lower()),
             })
 
-    day_sections = []
-    for idx, day in enumerate(days):
-        day_matches = [m for m in matches if int(m.get("dayIndex") or 0) == idx]
-        if not day_matches:
-            continue
-        day_sections.append({
-            "label": _day_label(idx, day.get("date")),
-            "matches": [
-                {
-                    "time": m.get("time") or "",
-                    "court": m.get("court") or "",
-                    "match_number": m.get("matchNumber") or "",
-                    "stage": _stage_label(m),
-                    "gender": m.get("gender") or "",
-                    "team_a": _team_name(m.get("teamA")),
-                    "team_b": _team_name(m.get("teamB")),
-                }
-                for m in day_matches
-            ],
-        })
-    if not day_sections and matches:
-        day_sections.append({
-            "label": "Terminarz",
-            "matches": [
-                {
-                    "time": m.get("time") or "",
-                    "court": m.get("court") or "",
-                    "match_number": m.get("matchNumber") or "",
-                    "stage": _stage_label(m),
-                    "gender": m.get("gender") or "",
-                    "team_a": _team_name(m.get("teamA")),
-                    "team_b": _team_name(m.get("teamB")),
-                }
-                for m in matches
-            ],
-        })
+    # Bogaty terminarz — budowany identycznie jak w generatorze terminarza
+    # (kolumny, numeracja meczów M/K, etapy, wyniki, podpowiedzi pucharowe,
+    # przerwy i otwarcie turnieju). Dzięki temu pola są wypełnione tak samo.
+    sched_ctx = schedule_pdf._build_context(
+        schedule_pdf.SchedulePdfRequest(
+            schedule=req.schedule or {},
+            tournament_name=req.tournament_name,
+            tournament_location=req.tournament_location,
+            tournament_dates=req.tournament_dates,
+            category=req.category,
+            include_groups=True,
+            split_by_courts=False,
+            custom_teams=req.custom_teams,
+        )
+    )
+    schedule_days = sched_ctx.get("days") or []
 
     maps_url = _build_maps_url(req)
     organizer = req.organizer
@@ -378,7 +360,7 @@ def _build_context(req: OrganizationalReportRequest) -> Dict[str, Any]:
         "maps_qr_b64": _make_qr_b64(maps_url),
         "organizer": organizer_ctx,
         "team_sections": team_sections,
-        "day_sections": day_sections,
+        "days": schedule_days,
         "general_info": general_info,
         "accent": accent,
         "logo_b64": _load_logo_b64(),
