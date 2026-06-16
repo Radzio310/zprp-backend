@@ -196,18 +196,19 @@ def _to_user_item(
     is_admin: bool = False,
     effective_capabilities: Optional[List[str]] = None,
     viewer_user_id: Optional[int] = None,
+    hide_if_not_owner: bool = False,
 ) -> BeachUserItem:
     device_ids = list(row.get("device_ids") or [])
     parsed_roles = _parse_jsonish(row.get("roles"), [])
     email_verified = bool(row.get("email_verified") or False)
     requires_email_verification = (not email_verified) and not has_approved_role(parsed_roles)
     email_public = bool(row.get("email_public", True))
-    # Ukryj e-mail przed innymi użytkownikami, gdy oznaczony jako niepubliczny.
-    # Właściciel (viewer == owner) oraz brak kontekstu widza (None = self/admin
-    # panel) widzą pełny adres.
-    is_owner = viewer_user_id is None or viewer_user_id == int(row["id"])
+    # Ukryj e-mail przed INNYMI użytkownikami (kafelki kontaktu), gdy oznaczony
+    # jako niepubliczny. Włączane tylko w endpointach widoku innych użytkowników
+    # (``hide_if_not_owner=True``); własne odpowiedzi (/me, login) pokazują adres.
+    is_owner = viewer_user_id is not None and viewer_user_id == int(row["id"])
     email_value = row.get("email")
-    if not email_public and not is_owner:
+    if hide_if_not_owner and not email_public and not is_owner:
         email_value = None
     return BeachUserItem(
         id=int(row["id"]),
@@ -472,7 +473,9 @@ async def list_users(
             badge_names = set(_extract_badge_names(r_d.get("badges")))
             if badge not in badge_names:
                 continue
-        result.append(_to_user_item(r_d, viewer_user_id=viewer_user_id))
+        result.append(
+            _to_user_item(r_d, viewer_user_id=viewer_user_id, hide_if_not_owner=True)
+        )
     return BeachUsersListResponse(users=result)
 
 
@@ -587,7 +590,7 @@ async def get_user(
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
-    return _to_user_item(dict(row), viewer_user_id=viewer_user_id)
+    return _to_user_item(dict(row), viewer_user_id=viewer_user_id, hide_if_not_owner=True)
 
 
 @router.post("/", response_model=BeachUserItem, summary="Utwórz użytkownika (BEACH)")

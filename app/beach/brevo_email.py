@@ -63,7 +63,9 @@ def _build_html(
     heading: str = "Weryfikacja konta",
     intro: str = "Cześć! Użyj poniższego kodu, aby potwierdzić swój adres e-mail i dokończyć zakładanie konta.",
 ) -> str:
-    spaced = " ".join(list(code))
+    # Same cyfry — odstępy daje letter-spacing (bez ręcznych spacji, by zmieścić
+    # 6 cyfr w jednym wierszu).
+    spaced = code
     logo_url = _logo_url()
     logo_block = (
         f'<img src="{logo_url}" width="84" height="84" alt="{app_name}" '
@@ -91,9 +93,9 @@ def _build_html(
           </div>
         </td></tr>
         <!-- Code -->
-        <tr><td style="padding:20px 30px 6px 30px;" align="center">
-          <div style="display:inline-block;background-color:#FFF4EC;border:1px solid #FFD3B8;border-radius:14px;padding:16px 24px;">
-            <span style="font-size:34px;font-weight:900;letter-spacing:12px;color:#E0531F;font-family:'Courier New',Courier,monospace;">{spaced}</span>
+        <tr><td style="padding:20px 20px 6px 20px;" align="center">
+          <div style="display:inline-block;background-color:#FFF4EC;border:1px solid #FFD3B8;border-radius:14px;padding:14px 22px;">
+            <span style="font-size:30px;font-weight:900;letter-spacing:8px;color:#E0531F;font-family:'Courier New',Courier,monospace;white-space:nowrap;">{spaced}</span>
           </div>
           <div style="margin-top:12px;font-size:13px;color:#6B7587;">Kod jest ważny przez <strong style="color:#41506A;">{expires_minutes} minut</strong>.</div>
         </td></tr>
