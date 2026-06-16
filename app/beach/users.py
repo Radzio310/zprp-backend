@@ -1262,13 +1262,16 @@ class SyncDeviceRequest(BaseModel):
 
 
 @router.post("/me/sync-device", response_model=dict, summary="Synchronizuj device_id zalogowanego usera (BEACH)")
-async def sync_device(req: SyncDeviceRequest, user_id: int = Depends(beach_get_current_user_id)):
+async def sync_device(req: SyncDeviceRequest, user_id: Optional[int] = Depends(beach_get_optional_user_id)):
     """
     Sprawdza czy installation_id jest już w device_ids usera i dodaje je jeśli nie.
     Wywołuj raz na dobę z aplikacji aby utrzymać device_ids aktualne.
     """
     if not req.installation_id or len(req.installation_id) < 5:
         raise HTTPException(400, "Nieprawidłowy installation_id")
+
+    if user_id is None:
+        return {"ok": False, "updated": False, "reason": "unauthorized"}
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not row:

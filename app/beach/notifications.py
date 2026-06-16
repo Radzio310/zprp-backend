@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, update, and_, func as sa_func
 
 from app.db import database, beach_notifications, beach_users, beach_admins, push_schedules
-from app.deps import beach_get_current_user_id
+from app.deps import beach_get_current_user_id, beach_get_optional_user_id
 from app.beach.activity_log import log_activity, get_actor_name
 
 logger = logging.getLogger(__name__)
@@ -458,11 +458,17 @@ async def _schedule_push_for_users(
 
 @router.get("/unread")
 async def get_unread_notifications(
+    count_only: bool = Query(False),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    user_id: int = Depends(beach_get_current_user_id),
+    user_id: Optional[int] = Depends(beach_get_optional_user_id),
 ):
     """Get a page of active notifications for the user plus total unread count."""
+    if user_id is None:
+        if count_only:
+            return {"items": [], "unread_count": 0, "total": 0, "limit": limit, "offset": offset}
+        raise HTTPException(status_code=401, detail="Brak autoryzacji")
+
     now = datetime.now(timezone.utc)
 
     base_stmt = (
@@ -487,13 +493,15 @@ async def get_unread_notifications(
         1 for r in unread_rows if user_id not in list(r["read_user_ids"] or [])
     )
 
-    stmt = (
-        base_stmt
-        .order_by(beach_notifications.c.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
-    rows = await database.fetch_all(stmt)
+    rows = []
+    if not count_only:
+        stmt = (
+            base_stmt
+            .order_by(beach_notifications.c.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = await database.fetch_all(stmt)
 
     items = []
     for r in rows:

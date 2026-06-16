@@ -27,7 +27,7 @@ from app.schemas import (
     BeachTournamentItem,
     BeachTournamentsListResponse,
 )
-from app.deps import beach_get_current_user_id, get_settings
+from app.deps import beach_get_current_user_id, beach_get_optional_user_id, get_settings
 from app.beach.calendar import (
     delete_beach_tournament_google_for_users,
     sync_beach_tournament_google_for_users,
@@ -726,7 +726,7 @@ async def create_tournament(
 async def list_tournaments(
     badge: Optional[str] = Query(None),
     with_user: Optional[int] = Query(None),
-    current_user_id: int = Depends(beach_get_current_user_id),
+    current_user_id: Optional[int] = Depends(beach_get_optional_user_id),
 ):
     q = select(beach_tournaments).order_by(
         beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc()
@@ -743,6 +743,8 @@ async def list_tournaments(
     for r in rows:
         r_d = dict(r)
         data = _normalize_event_data(r_d["data_json"])
+        if current_user_id is None and not bool((data.get("target") or {}).get("include_all", False)):
+            continue
         if not data.get("invited_ids"):
             data["invited_ids"] = await _compute_invited_ids_for_badge(r_d.get("badge"), data)
         out.append(_attach_computed_fields(r_d, data, with_user))
