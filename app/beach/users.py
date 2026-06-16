@@ -1038,9 +1038,16 @@ async def patch_user(
         new_email = (update_data["email"] or "").strip() or None
         update_data["email"] = new_email
         new_norm = normalize_email(new_email) if new_email else None
-        old_norm = dict(existing).get("email_normalized")
-        # Zmiana adresu (po normalizacji) → unikalność + reset weryfikacji.
-        if new_norm != old_norm:
+        existing_row = dict(existing)
+        existing_email = existing_row.get("email")
+        # Porównujemy do FAKTYCZNEGO bieżącego adresu, a nie do kolumny
+        # ``email_normalized`` (która u starszych kont bywa pusta/nieaktualna —
+        # inaczej każdy zapis wyglądałby jak zmiana e-maila i wpadał w 409).
+        existing_norm_actual = normalize_email(existing_email) if existing_email else None
+        stored_norm = existing_row.get("email_normalized")
+
+        if new_norm != existing_norm_actual:
+            # FAKTYCZNA zmiana adresu → unikalność + reset weryfikacji.
             if new_norm:
                 clash = await database.fetch_one(
                     select(beach_users.c.id).where(
@@ -1062,6 +1069,10 @@ async def patch_user(
             update_data["email_normalized"] = new_norm
             update_data["email_verified"] = False
             update_data["email_verified_at"] = None
+        elif stored_norm != new_norm:
+            # Adres bez zmian — tylko uzupełniamy znormalizowaną kolumnę,
+            # bez resetu weryfikacji i bez sprawdzania kolizji.
+            update_data["email_normalized"] = new_norm
 
     if "login" in update_data and update_data["login"] is not None:
         update_data["login"] = update_data["login"].strip()
