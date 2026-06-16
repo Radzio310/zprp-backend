@@ -98,6 +98,7 @@ from app.beach.tutorials import router as beach_tutorials_router
 from app.beach.mvp_votes import router as beach_mvp_votes_router
 from app.beach.auth_email import router as beach_auth_email_router
 from app.beach.brevo_webhook import router as beach_brevo_webhook_router
+from app.beach.password_reset_email import router as beach_password_reset_email_router
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -215,6 +216,7 @@ app.include_router(beach_tutorials_router)
 app.include_router(beach_mvp_votes_router)
 app.include_router(beach_auth_email_router)
 app.include_router(beach_brevo_webhook_router)
+app.include_router(beach_password_reset_email_router)
 
 # NEW: push router
 app.include_router(push_router)
@@ -793,6 +795,7 @@ async def startup():
         "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ",
         "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_delivery_blocked BOOLEAN NOT NULL DEFAULT false",
         "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_verification_deadline TIMESTAMPTZ",
+        "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_public BOOLEAN NOT NULL DEFAULT true",
         "CREATE INDEX IF NOT EXISTS ix_beach_users_email_normalized ON beach_users (email_normalized)",
     ]
     for stmt in _beach_user_migrations:

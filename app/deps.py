@@ -222,3 +222,19 @@ async def beach_get_current_user_id(
         raise HTTPException(status_code=401, detail="Brak autoryzacji")
     payload = beach_verify_access_token(token)
     return int(payload["uid"])
+
+
+async def beach_get_optional_user_id(
+    authorization: Optional[str] = Header(default=None),
+) -> Optional[int]:
+    """Like ``beach_get_current_user_id`` but returns ``None`` instead of 401
+    when there is no / an invalid token. Used to resolve the "viewer" so we can
+    hide private data (e.g. hidden e-mails) from users other than the owner."""
+    token = _beach_get_bearer_token(authorization)
+    if not token:
+        return None
+    try:
+        payload = beach_verify_access_token(token)
+        return int(payload["uid"])
+    except Exception:
+        return None

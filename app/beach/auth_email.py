@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 
@@ -35,6 +36,8 @@ from app.beach.email_verification import (
     verify_email_code,
     verify_email_code_for_user,
     requires_email_gate,
+    request_signup_code,
+    verify_signup_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/auth", tags=["Beach: Email Verification"])
 
 _CODE_RE = re.compile(CODE_REGEX)
+
+_EMAIL_LOGO_PATH = (
+    Path(__file__).resolve().parent.parent / "templates" / "baza_beach_email_logo.png"
+)
+
+
+@router.get("/assets/logo.png", summary="Logo do e-maili (publiczne, do osadzania w treści)")
+async def email_logo():
+    # Public, cacheable image referenced by the verification e-mail (clients like
+    # Gmail block data: URIs, so we serve a real HTTPS image).
+    return FileResponse(
+        _EMAIL_LOGO_PATH,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 # ─────────────────────────── Schemas ───────────────────────────
@@ -116,6 +134,36 @@ def _delivery_error_response(exc: EmailDeliveryError) -> JSONResponse:
 
 
 # ─────────────────────────── Routes ───────────────────────────
+
+@router.post("/signup/request-code", summary="Wyślij kod weryfikacyjny PRZED utworzeniem konta")
+async def signup_request_code(
+    body: ResendRequest,
+    request: Request,
+    x_forwarded_for: Optional[str] = Header(default=None),
+):
+    ip = _client_ip(request, x_forwarded_for)
+    try:
+        result = await request_signup_code(body.email, ip)
+        return JSONResponse(status_code=200, content=result)
+    except VerificationError as exc:
+        return _verification_error_response(exc)
+    except EmailDeliveryError as exc:
+        return _delivery_error_response(exc)
+
+
+@router.post("/signup/verify-code", summary="Potwierdź kod weryfikacyjny PRZED utworzeniem konta")
+async def signup_verify_code(
+    body: VerifyEmailRequest,
+    request: Request,
+    x_forwarded_for: Optional[str] = Header(default=None),
+):
+    ip = _client_ip(request, x_forwarded_for)
+    try:
+        result = await verify_signup_code(body.email, body.code, ip)
+        return JSONResponse(status_code=200, content=result)
+    except VerificationError as exc:
+        return _verification_error_response(exc)
+
 
 @router.post("/verify-email", summary="Potwierdź adres e-mail kodem")
 async def verify_email(

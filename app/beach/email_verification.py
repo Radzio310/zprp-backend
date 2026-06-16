@@ -24,11 +24,19 @@ from app.db import (
     beach_users,
     beach_email_verification_codes as codes_t,
     beach_email_rate_events as rate_t,
+    beach_pre_signup_email_codes as pre_codes_t,
 )
 from app.beach.email_config import get_email_config
 from app.beach.email_masking import mask_email
 from app.beach.email_normalization import normalize_email, is_valid_email
-from app.beach.email_security import generate_code, hash_code, verify_code
+from app.beach.email_security import (
+    generate_code,
+    hash_code,
+    verify_code,
+    hash_code_for_key,
+    verify_code_for_key,
+    signup_key,
+)
 from app.beach.brevo_email import (
     send_verification_code,
     EmailDeliveryError,
@@ -427,6 +435,143 @@ async def maybe_issue_on_register(user_id: int, deadline_days: int) -> Optional[
         kind = getattr(exc, "kind", getattr(exc, "error", "unknown"))
         logger.error("register_code_send_failed user_id=%s reason=%s", user_id, kind)
         return None
+
+
+# ─────────────────────────── Pre-signup verification (przed utworzeniem konta) ───────────────────────────
+
+# Jak długo pre-weryfikacja e-maila jest ważna do dokończenia rejestracji.
+SIGNUP_VERIFIED_WINDOW_SECONDS = 30 * 60
+
+
+async def request_signup_code(email_input: str, ip: str) -> dict:
+    """Wyślij kod na e-mail PRZED utworzeniem konta. Raises VerificationError/EmailDeliveryError."""
+    cfg = get_email_config()
+    if not is_valid_email(email_input):
+        raise VerificationError(error="INVALID_EMAIL", message="Podaj poprawny adres e-mail.", http_status=400)
+    email_norm = normalize_email(email_input)
+
+    existing = await database.fetch_one(
+        select(beach_users.c.id).where(beach_users.c.email_normalized == email_norm)
+    )
+    if existing:
+        raise VerificationError(
+            error="EMAIL_EXISTS",
+            message="Ten adres e-mail jest już używany. Zaloguj się lub użyj innego.",
+            http_status=409,
+        )
+
+    await _enforce_rate("send_user", f"signup:{email_norm}", 1, cfg.resend_seconds)
+    await _enforce_rate("send_email", email_norm, *_SEND_EMAIL_PER_HOUR)
+
+    code = generate_code()
+    code_hash = hash_code_for_key(signup_key(email_norm), code)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=cfg.ttl_minutes)
+
+    async with database.transaction():
+        await database.execute(
+            update(pre_codes_t)
+            .where(and_(pre_codes_t.c.email_normalized == email_norm, pre_codes_t.c.used_at.is_(None)))
+            .values(used_at=now, updated_at=now)
+        )
+        await database.execute(
+            pre_codes_t.insert().values(
+                id=uuid.uuid4(),
+                email_normalized=email_norm,
+                code_hash=code_hash,
+                expires_at=expires_at,
+                used_at=None,
+                verified_at=None,
+                attempts=0,
+                last_sent_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    await _record_rate("send_user", f"signup:{email_norm}")
+    await _record_rate("send_email", email_norm)
+
+    message_id = await send_verification_code(
+        recipient_email=email_input.strip(), recipient_name=None, code=code, expires_minutes=cfg.ttl_minutes
+    )
+    logger.info("signup_code_issued email=%s messageId=%s", mask_email(email_norm), message_id)
+    return {
+        "success": True,
+        "email": mask_email(email_norm),
+        "expires_in_seconds": cfg.ttl_seconds,
+        "resend_available_in_seconds": cfg.resend_seconds,
+    }
+
+
+async def verify_signup_code(email_input: str, code: str, ip: str) -> dict:
+    """Sprawdź kod pre-rejestracji. Po sukcesie oznacza e-mail jako zweryfikowany."""
+    await _enforce_rate("verify_ip", ip or "", *_VERIFY_IP_PER_15MIN)
+    email_norm = normalize_email(email_input)
+    now = datetime.now(timezone.utc)
+
+    async with database.transaction():
+        locked = await database.fetch_one(
+            select(pre_codes_t)
+            .where(and_(pre_codes_t.c.email_normalized == email_norm, pre_codes_t.c.used_at.is_(None)))
+            .order_by(pre_codes_t.c.created_at.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if not locked:
+            raise VerificationError(error="VERIFICATION_CODE_EXPIRED", message="Kod wygasł. Wyślij nowy kod.", http_status=400)
+        if locked["verified_at"] is not None:
+            return {"success": True, "message": "Adres e-mail został potwierdzony."}
+        if _aware(locked["expires_at"]) < now:
+            await database.execute(
+                update(pre_codes_t).where(pre_codes_t.c.id == locked["id"]).values(used_at=now, updated_at=now)
+            )
+            raise VerificationError(error="VERIFICATION_CODE_EXPIRED", message="Kod wygasł. Wyślij nowy kod.", http_status=400)
+
+        attempts = int(locked["attempts"]) + 1
+        await database.execute(
+            update(pre_codes_t).where(pre_codes_t.c.id == locked["id"]).values(attempts=attempts, updated_at=now)
+        )
+        if not verify_code_for_key(signup_key(email_norm), code, locked["code_hash"]):
+            if attempts >= MAX_CODE_ATTEMPTS:
+                await database.execute(
+                    update(pre_codes_t).where(pre_codes_t.c.id == locked["id"]).values(used_at=now, updated_at=now)
+                )
+                raise VerificationError(error="TOO_MANY_ATTEMPTS", message="Zbyt wiele prób. Wyślij nowy kod.", http_status=400)
+            raise VerificationError(error="INVALID_VERIFICATION_CODE", message="Kod jest nieprawidłowy.", http_status=400)
+
+        await database.execute(
+            update(pre_codes_t).where(pre_codes_t.c.id == locked["id"]).values(verified_at=now, updated_at=now)
+        )
+
+    logger.info("signup_code_verified email=%s", mask_email(email_norm))
+    return {"success": True, "message": "Adres e-mail został potwierdzony."}
+
+
+async def is_signup_email_verified(email_norm: str) -> bool:
+    """Czy e-mail został pre-zweryfikowany i nadal w oknie ważności (nieskonsumowany)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=SIGNUP_VERIFIED_WINDOW_SECONDS)
+    row = await database.fetch_one(
+        select(pre_codes_t.c.id).where(
+            and_(
+                pre_codes_t.c.email_normalized == email_norm,
+                pre_codes_t.c.used_at.is_(None),
+                pre_codes_t.c.verified_at.isnot(None),
+                pre_codes_t.c.verified_at >= cutoff,
+            )
+        )
+    )
+    return row is not None
+
+
+async def consume_signup_verification(email_norm: str) -> None:
+    """Zużyj pre-weryfikację po utworzeniu konta, by nie dało się jej użyć ponownie."""
+    now = datetime.now(timezone.utc)
+    await database.execute(
+        update(pre_codes_t)
+        .where(and_(pre_codes_t.c.email_normalized == email_norm, pre_codes_t.c.used_at.is_(None)))
+        .values(used_at=now, updated_at=now)
+    )
 
 
 # ─────────────────────────── Migrations / maintenance ───────────────────────────

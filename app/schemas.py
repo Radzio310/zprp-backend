@@ -1089,6 +1089,8 @@ class BeachUserUpdateRequest(BaseModel):
 
     phone: Optional[str] = None
     email: Optional[str] = None
+    # Widoczność e-maila dla innych użytkowników ("Nie chcę podawać" = false).
+    email_public: Optional[bool] = None
 
     login: Optional[str] = Field(None, min_length=1, max_length=120)
 
@@ -1209,6 +1211,8 @@ class BeachUserItem(BaseModel):
     # ── Weryfikacja e-mail (Brevo) ──
     email_verified: bool = False
     email_verified_at: Optional[datetime] = None
+    # Czy e-mail jest widoczny dla innych użytkowników (właściciel widzi zawsze).
+    email_public: bool = True
     # True gdy konto musi potwierdzić e-mail przed korzystaniem z aplikacji
     # (brak zatwierdzonej roli i niezweryfikowany e-mail).
     requires_email_verification: bool = False

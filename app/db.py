@@ -785,6 +785,9 @@ beach_users = Table(
     Column("email_normalized", String, nullable=True, index=True),
     Column("email_verified", Boolean, nullable=False, server_default=text("false")),
     Column("email_verified_at", DateTime(timezone=True), nullable=True),
+    # Czy e-mail jest widoczny dla innych użytkowników (kafelki kontaktu).
+    # false = "Nie chcę podawać" — adres pozostaje zweryfikowany, ale ukryty.
+    Column("email_public", Boolean, nullable=False, server_default=text("true")),
     # Ustawiane przez webhook Brevo przy hard_bounce / invalid.
     Column("email_delivery_blocked", Boolean, nullable=False, server_default=text("false")),
     # Termin (90 dni), po którym niezweryfikowane konto bez roli może zostać usunięte.
@@ -1467,6 +1470,51 @@ beach_email_delivery_events = Table(
     Column("payload_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
+
+# -------------------------
+# BEACH: kody weryfikacji e-mail PRZED utworzeniem konta (pre-signup)
+# -------------------------
+
+beach_pre_signup_email_codes = Table(
+    "pre_signup_email_codes",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("email_normalized", String, nullable=False, index=True),
+    Column("code_hash", String, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True), nullable=True),       # skonsumowany przy rejestracji
+    Column("verified_at", DateTime(timezone=True), nullable=True),    # poprawny kod wpisany
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_sent_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+# (indeks po email_normalized zapewnia index=True na kolumnie)
+
+# -------------------------
+# BEACH: kody resetu hasła wysyłane na e-mail
+# -------------------------
+
+beach_password_reset_email_codes = Table(
+    "password_reset_email_codes",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("beach_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("code_hash", String, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True), nullable=True),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_sent_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+# (indeks po user_id zapewnia index=True na kolumnie)
 
 # -------------------------
 # BEACH: zdarzenia rate-limitingu (limiter oparty o bazę — działa między instancjami)

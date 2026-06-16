@@ -23,17 +23,34 @@ def generate_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-def hash_code(user_id: int, code: str) -> str:
-    """HMAC-SHA256 of ``"{user_id}:{code}"`` keyed by EMAIL_CODE_SECRET."""
+def hash_code_for_key(key: str, code: str) -> str:
+    """HMAC-SHA256 of ``"{key}:{code}"`` keyed by EMAIL_CODE_SECRET.
+
+    ``key`` binds the code to a context (a user id, or ``"signup:<email>"`` for
+    pre-account verification) so the same code yields different hashes.
+    """
     secret = get_email_config().code_secret
     return hmac.new(
         secret.encode("utf-8"),
-        f"{int(user_id)}:{code}".encode("utf-8"),
+        f"{key}:{code}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
 
 
+def verify_code_for_key(key: str, code: str, expected_hash: str) -> bool:
+    candidate = hash_code_for_key(key, code)
+    return hmac.compare_digest(candidate, expected_hash or "")
+
+
+def hash_code(user_id: int, code: str) -> str:
+    """HMAC-SHA256 bound to a user id (post-account verification)."""
+    return hash_code_for_key(str(int(user_id)), code)
+
+
 def verify_code(user_id: int, code: str, expected_hash: str) -> bool:
     """Constant-time check of ``code`` against a stored hash."""
-    candidate = hash_code(user_id, code)
-    return hmac.compare_digest(candidate, expected_hash or "")
+    return hmac.compare_digest(hash_code(user_id, code), expected_hash or "")
+
+
+def signup_key(email_normalized: str) -> str:
+    return f"signup:{email_normalized}"

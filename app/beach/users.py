@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 import asyncpg
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select, update, delete, func as sa_func
+from sqlalchemy import select, update, delete, and_, func as sa_func
 from sqlalchemy.exc import IntegrityError
 from passlib.context import CryptContext
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -36,11 +36,18 @@ from app.schemas import (
     BeachLoginRequest,
     BeachLoginResponse,
 )
-from app.deps import get_rsa_keys, beach_create_access_token, beach_get_current_user_id
+from app.deps import (
+    get_rsa_keys,
+    beach_create_access_token,
+    beach_get_current_user_id,
+    beach_get_optional_user_id,
+)
 from app.beach.activity_log import log_activity, get_actor_name
 from app.beach.email_verification import (
     has_approved_role,
     maybe_issue_on_register,
+    is_signup_email_verified,
+    consume_signup_verification,
 )
 from app.beach.email_config import get_email_config
 from app.beach.email_normalization import normalize_email
@@ -188,11 +195,20 @@ def _to_user_item(
     row: dict,
     is_admin: bool = False,
     effective_capabilities: Optional[List[str]] = None,
+    viewer_user_id: Optional[int] = None,
 ) -> BeachUserItem:
     device_ids = list(row.get("device_ids") or [])
     parsed_roles = _parse_jsonish(row.get("roles"), [])
     email_verified = bool(row.get("email_verified") or False)
     requires_email_verification = (not email_verified) and not has_approved_role(parsed_roles)
+    email_public = bool(row.get("email_public", True))
+    # Ukryj e-mail przed innymi użytkownikami, gdy oznaczony jako niepubliczny.
+    # Właściciel (viewer == owner) oraz brak kontekstu widza (None = self/admin
+    # panel) widzą pełny adres.
+    is_owner = viewer_user_id is None or viewer_user_id == int(row["id"])
+    email_value = row.get("email")
+    if not email_public and not is_owner:
+        email_value = None
     return BeachUserItem(
         id=int(row["id"]),
         judge_id=row.get("judge_id"),
@@ -202,9 +218,10 @@ def _to_user_item(
         province=row.get("province"),
         city=row.get("city"),
         phone=row.get("phone"),
-        email=row.get("email"),
+        email=email_value,
         email_verified=email_verified,
         email_verified_at=row.get("email_verified_at"),
+        email_public=email_public,
         requires_email_verification=requires_email_verification,
         login=row["login"],
         roles=parsed_roles,
@@ -429,6 +446,7 @@ async def list_users(
     player_id: Optional[int] = Query(None),
     person_id: Optional[int] = Query(None),
     include_inactive: bool = Query(False),
+    viewer_user_id: Optional[int] = Depends(beach_get_optional_user_id),
 ):
     """
     Zwraca listę użytkowników.
@@ -454,7 +472,7 @@ async def list_users(
             badge_names = set(_extract_badge_names(r_d.get("badges")))
             if badge not in badge_names:
                 continue
-        result.append(_to_user_item(r_d))
+        result.append(_to_user_item(r_d, viewer_user_id=viewer_user_id))
     return BeachUsersListResponse(users=result)
 
 
@@ -562,11 +580,14 @@ async def deactivate_me(user_id: int = Depends(beach_get_current_user_id)):
 
 
 @router.get("/{user_id}", response_model=BeachUserItem, summary="Pobierz użytkownika po ID (BEACH)")
-async def get_user(user_id: int):
+async def get_user(
+    user_id: int,
+    viewer_user_id: Optional[int] = Depends(beach_get_optional_user_id),
+):
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not row:
         raise HTTPException(404, "Użytkownik nie znaleziony")
-    return _to_user_item(dict(row))
+    return _to_user_item(dict(row), viewer_user_id=viewer_user_id)
 
 
 @router.post("/", response_model=BeachUserItem, summary="Utwórz użytkownika (BEACH)")
@@ -611,6 +632,32 @@ async def create_user(req: BeachUserCreateRequest):
                 },
             )
 
+    # ── Bramka weryfikacji e-mail dla kont BEZ zatwierdzonej roli ──
+    # Takie konto musi podać e-mail i potwierdzić go kodem PRZED utworzeniem.
+    # Konta z zatwierdzoną rolą (zawodnik/trener/sędzia) są zwolnione ("luz").
+    has_role_approved = has_approved_role(roles)
+    email_pre_verified = False
+    if not has_role_approved:
+        if not email_norm:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "EMAIL_REQUIRED",
+                    "field": "email",
+                    "message": "Adres e-mail jest wymagany do utworzenia konta.",
+                },
+            )
+        if not await is_signup_email_verified(email_norm):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "EMAIL_NOT_VERIFIED",
+                    "field": "email",
+                    "message": "Potwierdź adres e-mail kodem, aby utworzyć konto.",
+                },
+            )
+        email_pre_verified = True
+
     stmt = beach_users.insert().values(
         judge_id=req.judge_id,
         person_id=req.person_id,
@@ -621,7 +668,8 @@ async def create_user(req: BeachUserCreateRequest):
         phone=(req.phone or None),
         email=email_clean,
         email_normalized=email_norm,
-        email_verified=False,
+        email_verified=email_pre_verified,
+        email_verified_at=(now if email_pre_verified else None),
         login=req.login.strip(),
         password_hash=hashed,
         roles=roles,
@@ -694,13 +742,17 @@ async def create_user(req: BeachUserCreateRequest):
     # dostarczenia nie blokuje rejestracji, użytkownik dokończy przez resend
     # lub modal w aplikacji). Ustawiany jest też 90-dniowy termin.
     try:
+        # Zużyj pre-weryfikację (kont bez roli) — jednorazowa.
+        if email_pre_verified and email_norm:
+            await consume_signup_verification(email_norm)
+        # Konta z rolą bez e-maila/weryfikacji: ustaw 90-dniowy termin (gdy dotyczy).
         await maybe_issue_on_register(int(new_id), get_email_config().grace_days)
-        # Odśwież flagi (email_verification_deadline mogło się ustawić).
+        # Odśwież flagi (email_verified / deadline mogły się zmienić).
         refreshed = await database.fetch_one(select(beach_users).where(beach_users.c.id == int(new_id)))
         if refreshed:
             user_item = _to_user_item(dict(refreshed))
     except Exception:
-        logger.exception("create_user: issuing verification code failed (non-fatal)")
+        logger.exception("create_user: post-registration email step failed (non-fatal)")
 
     return user_item
 
@@ -979,7 +1031,33 @@ async def patch_user(
         update_data["phone"] = (update_data["phone"] or "").strip() or None
 
     if "email" in update_data:
-        update_data["email"] = (update_data["email"] or "").strip() or None
+        new_email = (update_data["email"] or "").strip() or None
+        update_data["email"] = new_email
+        new_norm = normalize_email(new_email) if new_email else None
+        old_norm = dict(existing).get("email_normalized")
+        # Zmiana adresu (po normalizacji) → unikalność + reset weryfikacji.
+        if new_norm != old_norm:
+            if new_norm:
+                clash = await database.fetch_one(
+                    select(beach_users.c.id).where(
+                        and_(
+                            beach_users.c.email_normalized == new_norm,
+                            beach_users.c.id != user_id,
+                        )
+                    )
+                )
+                if clash:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "EMAIL_EXISTS",
+                            "field": "email",
+                            "message": "Ten adres e-mail jest już używany przez inne konto.",
+                        },
+                    )
+            update_data["email_normalized"] = new_norm
+            update_data["email_verified"] = False
+            update_data["email_verified_at"] = None
 
     if "login" in update_data and update_data["login"] is not None:
         update_data["login"] = update_data["login"].strip()
