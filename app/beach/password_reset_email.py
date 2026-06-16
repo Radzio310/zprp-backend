@@ -75,6 +75,11 @@ class ResetRequest(BaseModel):
     login: str
 
 
+class ResetVerifyCode(BaseModel):
+    login: str
+    code: str
+
+
 class ResetConfirm(BaseModel):
     login: str
     code: str
@@ -153,6 +158,66 @@ async def request_reset(
         "expires_in_seconds": cfg.ttl_seconds,
         "resend_available_in_seconds": cfg.resend_seconds,
     }
+
+
+@router.post("/verify-code", summary="Sprawdź kod resetu (bez ustawiania hasła)")
+async def verify_reset_code(
+    body: ResetVerifyCode,
+    request: Request,
+    x_forwarded_for: Optional[str] = Header(default=None),
+):
+    """Waliduje 6-cyfrowy kod resetu BEZ jego zużywania ani zmiany hasła.
+
+    Pozwala podzielić flow na etapy: najpierw kod, potem (osobno) nowe hasło.
+    Kod pozostaje ważny — dopiero ``/confirm`` go zużywa. Próby liczone tylko
+    przy błędnym kodzie, więc poprawne wpisanie nie marnuje limitu.
+    """
+    ip = _client_ip(request, x_forwarded_for)
+    login = (body.login or "").strip()
+    code = (body.code or "").strip()
+
+    if not _CODE_RE.match(code):
+        return JSONResponse(status_code=400, content={"success": False, "error": "INVALID_VERIFICATION_CODE", "message": "Kod jest nieprawidłowy."})
+
+    try:
+        await _enforce_rate("verify_ip", ip or "", *_VERIFY_IP_PER_15MIN)
+    except VerificationError as exc:
+        return JSONResponse(status_code=exc.http_status, content={"success": False, "error": exc.error, "message": exc.message})
+
+    user = await database.fetch_one(select(beach_users).where(beach_users.c.login == login))
+    if not user:
+        return JSONResponse(status_code=400, content={"success": False, "error": "INVALID_VERIFICATION_CODE", "message": "Kod jest nieprawidłowy."})
+    user_id = int(dict(user)["id"])
+    now = datetime.now(timezone.utc)
+
+    try:
+        async with database.transaction():
+            locked = await database.fetch_one(
+                select(reset_t)
+                .where(and_(reset_t.c.user_id == user_id, reset_t.c.used_at.is_(None)))
+                .order_by(reset_t.c.created_at.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            if not locked:
+                raise VerificationError(error="VERIFICATION_CODE_EXPIRED", message="Kod wygasł. Wyślij nowy kod.", http_status=400)
+            if _aware(locked["expires_at"]) < now:
+                await database.execute(update(reset_t).where(reset_t.c.id == locked["id"]).values(used_at=now, updated_at=now))
+                raise VerificationError(error="VERIFICATION_CODE_EXPIRED", message="Kod wygasł. Wyślij nowy kod.", http_status=400)
+
+            if not verify_code_for_key(_reset_key(user_id), code, locked["code_hash"]):
+                attempts = int(locked["attempts"]) + 1
+                if attempts >= MAX_CODE_ATTEMPTS:
+                    await database.execute(update(reset_t).where(reset_t.c.id == locked["id"]).values(attempts=attempts, used_at=now, updated_at=now))
+                    raise VerificationError(error="TOO_MANY_ATTEMPTS", message="Zbyt wiele prób. Wyślij nowy kod.", http_status=400)
+                await database.execute(update(reset_t).where(reset_t.c.id == locked["id"]).values(attempts=attempts, updated_at=now))
+                raise VerificationError(error="INVALID_VERIFICATION_CODE", message="Kod jest nieprawidłowy.", http_status=400)
+            # Poprawny kod — NIE zużywamy go (used_at zostaje None), pozwalamy przejść do hasła.
+    except VerificationError as exc:
+        return JSONResponse(status_code=exc.http_status, content={"success": False, "error": exc.error, "message": exc.message})
+
+    logger.info("password_reset_code_verified user_id=%s", user_id)
+    return {"success": True}
 
 
 @router.post("/confirm", summary="Potwierdź kod i ustaw nowe hasło (loguje użytkownika)")
