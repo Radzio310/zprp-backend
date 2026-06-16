@@ -203,12 +203,13 @@ def _to_user_item(
     email_verified = bool(row.get("email_verified") or False)
     requires_email_verification = (not email_verified) and not has_approved_role(parsed_roles)
     email_public = bool(row.get("email_public", True))
-    # Ukryj e-mail przed INNYMI użytkownikami (kafelki kontaktu), gdy oznaczony
-    # jako niepubliczny. Włączane tylko w endpointach widoku innych użytkowników
-    # (``hide_if_not_owner=True``); własne odpowiedzi (/me, login) pokazują adres.
-    is_owner = viewer_user_id is not None and viewer_user_id == int(row["id"])
+    # W widoku katalogu/kontaktów (``hide_if_not_owner=True``) ukrywamy e-mail
+    # oznaczony jako niepubliczny — także we własnym wpisie, bo ta lista
+    # odzwierciedla to, co widzą inni. Adres pozostaje widoczny dla właściciela
+    # w Ustawieniach (/me, login → hide_if_not_owner=False).
+    _ = viewer_user_id  # zachowane dla kompatybilności sygnatury
     email_value = row.get("email")
-    if hide_if_not_owner and not email_public and not is_owner:
+    if hide_if_not_owner and not email_public:
         email_value = None
     return BeachUserItem(
         id=int(row["id"]),
