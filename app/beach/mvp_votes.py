@@ -264,16 +264,55 @@ async def _get_participant_voter_ids(tournament_id: int) -> set:
     return ids
 
 
+async def _get_email_verified_voter_ids(tournament_id: int) -> set:
+    rows = await database.fetch_all(
+        select(beach_mvp_votes.c.voter_user_id)
+        .select_from(
+            beach_mvp_votes.join(
+                beach_users,
+                beach_mvp_votes.c.voter_user_id == beach_users.c.id,
+            )
+        )
+        .where(
+            and_(
+                beach_mvp_votes.c.tournament_id == tournament_id,
+                beach_users.c.email_verified.is_(True),
+            )
+        )
+        .distinct()
+    )
+    return {int(r["voter_user_id"]) for r in rows}
+
+
 async def _build_response(tournament_id: int, voter_user_id: int) -> Dict[str, Any]:
     tallies = await _get_tallies(tournament_id)
     my_votes = await _get_my_votes(tournament_id, voter_user_id)
     participant_ids = await _get_participant_voter_ids(tournament_id)
+    verified_ids = await _get_email_verified_voter_ids(tournament_id)
     participant_tallies = await _get_tallies(tournament_id, voter_ids=participant_ids)
+    verified_tallies = await _get_tallies(tournament_id, voter_ids=verified_ids)
+    participant_verified_ids = participant_ids | verified_ids
+    participant_verified_tallies = await _get_tallies(
+        tournament_id,
+        voter_ids=participant_verified_ids,
+    )
+    viewer_row = await database.fetch_one(
+        select(beach_users.c.email_verified).where(beach_users.c.id == voter_user_id)
+    )
+    viewer_email_verified = bool(viewer_row and viewer_row["email_verified"])
+    viewer_is_participant = voter_user_id in participant_ids
     return {
         **tallies,
         "my_votes": my_votes,
         "participants": participant_tallies,
         "participant_total": len(participant_ids),
+        "verified": verified_tallies,
+        "verified_total": len(verified_ids),
+        "participants_verified": participant_verified_tallies,
+        "participants_verified_total": len(participant_verified_ids),
+        "viewer_is_participant": viewer_is_participant,
+        "viewer_email_verified": viewer_email_verified,
+        "filter_controls_visible": viewer_is_participant or viewer_email_verified,
     }
 
 
