@@ -637,30 +637,16 @@ async def create_user(req: BeachUserCreateRequest):
             )
 
     # ── Bramka weryfikacji e-mail dla kont BEZ zatwierdzonej roli ──
-    # Takie konto musi podać e-mail i potwierdzić go kodem PRZED utworzeniem.
-    # Konta z zatwierdzoną rolą (zawodnik/trener/sędzia) są zwolnione ("luz").
+    # Nowa aplikacja może potwierdzić e-mail kodem PRZED utworzeniem konta.
+    # Publiczna, starsza aplikacja nie zna jeszcze tego kroku, więc NIE blokujemy
+    # tu rejestracji. Konto powstaje jako niezweryfikowane, a
+    # maybe_issue_on_register ustawi deadline i wyśle kod best-effort, jeśli
+    # e-mail został podany. Dzięki temu zachowujemy kompatybilność starego
+    # klienta bez rezygnowania z nowego flow.
     has_role_approved = has_approved_role(roles)
     email_pre_verified = False
-    if not has_role_approved:
-        if not email_norm:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "EMAIL_REQUIRED",
-                    "field": "email",
-                    "message": "Adres e-mail jest wymagany do utworzenia konta.",
-                },
-            )
-        if not await is_signup_email_verified(email_norm):
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "EMAIL_NOT_VERIFIED",
-                    "field": "email",
-                    "message": "Potwierdź adres e-mail kodem, aby utworzyć konto.",
-                },
-            )
-        email_pre_verified = True
+    if not has_role_approved and email_norm:
+        email_pre_verified = await is_signup_email_verified(email_norm)
 
     stmt = beach_users.insert().values(
         judge_id=req.judge_id,
