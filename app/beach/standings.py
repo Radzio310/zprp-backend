@@ -136,6 +136,17 @@ def _set_score(s: Dict[str, Any], side: str) -> int:
         return 0
 
 
+def _sets_with_third_set(m: Dict[str, Any]) -> List[Dict[str, Any]]:
+    sets = [dict(s) for s in (m.get("sets") or []) if isinstance(s, dict)]
+    shootout = m.get("shootout")
+    if len(sets) < 3 and isinstance(shootout, dict):
+        sets.append({
+            "ptA": shootout.get("a", 0),
+            "ptB": shootout.get("b", 0),
+        })
+    return sets
+
+
 def _empty_overall_stats() -> Dict[str, int]:
     return {
         "overall_matches": 0,
@@ -185,7 +196,7 @@ def _aggregate_team_overall_stats(
             if team_sets > opp_sets:
                 stats["overall_wins"] += 1
 
-            for s in (m.get("sets") or []):
+            for s in _sets_with_third_set(m):
                 pa = _set_score(s, "A")
                 pb = _set_score(s, "B")
                 stats["overall_brk_for"] += pa if is_a else pb
@@ -732,19 +743,15 @@ async def get_h2h_matches(
                 continue
 
             raw_sa, raw_sb = m.get("scoreA"), m.get("scoreB")
-            raw_sets = m.get("sets") or []
-            raw_so = m.get("shootout")
-
+            raw_sets = _sets_with_third_set(m)
             if is_ab:
                 ma_name, mb_name = ta.get("name", ""), tb.get("name", "")
                 msa, msb = raw_sa, raw_sb
                 m_sets = [{"ptA": s.get("ptA", 0), "ptB": s.get("ptB", 0)} for s in raw_sets]
-                m_so = raw_so
             else:
                 ma_name, mb_name = tb.get("name", ""), ta.get("name", "")
                 msa, msb = raw_sb, raw_sa
                 m_sets = [{"ptA": s.get("ptB", 0), "ptB": s.get("ptA", 0)} for s in raw_sets]
-                m_so = {"a": raw_so["b"], "b": raw_so["a"]} if isinstance(raw_so, dict) else None
 
             if msa is not None and msb is not None:
                 if msa > msb:
@@ -759,8 +766,6 @@ async def get_h2h_matches(
 
             sets_parts = [f"{s['ptA']}:{s['ptB']}" for s in m_sets]
             sets_disp = ", ".join(sets_parts)
-            if m_so:
-                sets_disp += f" (rz.k. {m_so.get('a',0)}:{m_so.get('b',0)})"
 
             result_matches.append({
                 "tournament_id": tr["id"],

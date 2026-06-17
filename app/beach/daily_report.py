@@ -218,15 +218,21 @@ def _stage_label(m: Dict[str, Any]) -> str:
 
 
 def _sets_display(m: Dict[str, Any]) -> str:
-    sets = m.get("sets") or []
+    sets = _sets_with_third_set(m)
     if not sets:
         return ""
-    parts = [f"{s.get('ptA', 0)}:{s.get('ptB', 0)}" for s in sets]
-    result = ", ".join(parts)
+    return ", ".join(f"{s.get('ptA', 0)}:{s.get('ptB', 0)}" for s in sets)
+
+
+def _sets_with_third_set(m: Dict[str, Any]) -> List[Dict[str, Any]]:
+    sets = [dict(s) for s in (m.get("sets") or []) if isinstance(s, dict)]
     shootout = m.get("shootout")
-    if shootout:
-        result += f" (rz.k. {shootout.get('a', 0)}:{shootout.get('b', 0)})"
-    return result
+    if len(sets) < 3 and isinstance(shootout, dict):
+        sets.append({
+            "ptA": shootout.get("a", 0),
+            "ptB": shootout.get("b", 0),
+        })
+    return sets
 
 
 def _score_parts(m: Dict[str, Any]) -> tuple:
@@ -234,7 +240,7 @@ def _score_parts(m: Dict[str, Any]) -> tuple:
     if a is None or b is None:
         return "", ""
     score_main = f"{a}:{b}"
-    sets = m.get("sets") or []
+    sets = _sets_with_third_set(m)
     score_sets = ""
     if sets:
         parts = [
@@ -371,8 +377,8 @@ def _build_context(req: DailyReportRequest) -> Dict[str, Any]:
                 "score_a": m.get("scoreA"),
                 "score_b": m.get("scoreB"),
                 "score_display": _score_display(m),
-                "sets": m.get("sets") or [],
-                "shootout": m.get("shootout"),
+                "sets": _sets_with_third_set(m),
+                "shootout": None,
                 "winner": w,
                 "stage_label": _stage_label(m) if mode != "roundRobin" else "",
                 "gender": m.get("gender", ""),

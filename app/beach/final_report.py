@@ -198,15 +198,30 @@ def _compute_date_range(days: List[Dict[str, Any]]) -> str:
 
 
 def _sets_display(m: Dict[str, Any]) -> str:
-    sets = m.get("sets") or []
+    sets = _sets_with_third_set(m)
     if not sets:
         return ""
-    parts = [f"{s.get('ptA', 0)}:{s.get('ptB', 0)}" for s in sets]
-    result = ", ".join(parts)
+    return ", ".join(f"{s.get('ptA', 0)}:{s.get('ptB', 0)}" for s in sets)
+
+
+def _normalize_sets_display_text(sets_display: str) -> str:
+    if not sets_display:
+        return ""
+    scores = re.findall(r"(\d+)\s*:\s*(\d+)", sets_display)
+    if scores:
+        return ", ".join(f"{a}:{b}" for a, b in scores)
+    return sets_display.replace("(rz.k.", ",").replace(")", "")
+
+
+def _sets_with_third_set(m: Dict[str, Any]) -> List[Dict[str, Any]]:
+    sets = [dict(s) for s in (m.get("sets") or []) if isinstance(s, dict)]
     shootout = m.get("shootout")
-    if shootout:
-        result += f" (rz.k. {shootout.get('a', 0)}:{shootout.get('b', 0)})"
-    return result
+    if len(sets) < 3 and isinstance(shootout, dict):
+        sets.append({
+            "ptA": shootout.get("a", 0),
+            "ptB": shootout.get("b", 0),
+        })
+    return sets
 
 
 def _score_display(m: Dict[str, Any]) -> str:
@@ -298,7 +313,7 @@ def _compute_group_table(
         teams[bid]["sets_won"] += sb
         teams[bid]["sets_lost"] += sa
 
-        for s in (m.get("sets") or []):
+        for s in _sets_with_third_set(m):
             pa, pb = s.get("ptA", 0), s.get("ptB", 0)
             teams[aid]["brk_plus"] += pa
             teams[aid]["brk_minus"] += pb
@@ -380,8 +395,8 @@ def _match_card_payload(m: Dict[str, Any]) -> Dict[str, Any]:
         "score_a": m.get("scoreA"),
         "score_b": m.get("scoreB"),
         "score_display": _score_display(m),
-        "sets": m.get("sets") or [],
-        "shootout": m.get("shootout"),
+        "sets": _sets_with_third_set(m),
+        "shootout": None,
         "winner": w,
         "stage_label": _stage_label(m),
     }
@@ -1178,8 +1193,8 @@ def _build_placement_matches(
                 "score_a": m.get("scoreA"),
                 "score_b": m.get("scoreB"),
                 "score_display": _score_display(m),
-                "sets": m.get("sets") or [],
-                "shootout": m.get("shootout"),
+                "sets": _sets_with_third_set(m),
+                "shootout": None,
                 "match_number": m.get("matchNumber", ""),
                 "winner": w,
                 "stage_label": _stage_label(m),
@@ -1447,16 +1462,22 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 "overall_brk": "stosunek punktów brk (wszystkie mecze w sezonie)",
                 "equal": "ex aequo",
             }
-            gs["tie_explanations"] = [
-                {
+            gs["tie_explanations"] = []
+            for te in raw_te:
+                matches = []
+                for m in te.matches:
+                    item = m.dict()
+                    item["sets_display"] = _normalize_sets_display_text(
+                        item.get("sets_display", "")
+                    )
+                    matches.append(item)
+                gs["tie_explanations"].append({
                     "teams": te.teams,
                     "winner_name": te.winner_name,
                     "criterion": _crit_labels.get(te.criterion, te.criterion),
-                    "matches": [m.dict() for m in te.matches],
+                    "matches": matches,
                     "stats_rows": te.stats_rows or [],
-                }
-                for te in raw_te
-            ]
+                })
 
         # ── MVP / Individual awards ──
         if req.mvp_data and gender in req.mvp_data:
