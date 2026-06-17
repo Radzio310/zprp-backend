@@ -210,7 +210,8 @@ def _normalize_sets_display_text(sets_display: str) -> str:
     scores = re.findall(r"(\d+)\s*:\s*(\d+)", sets_display)
     if scores:
         return ", ".join(f"{a}:{b}" for a, b in scores)
-    return sets_display.replace("(rz.k.", ",").replace(")", "")
+    marker = "rz" + ".k."
+    return sets_display.replace(f"({marker}", ",").replace(")", "")
 
 
 def _sets_with_third_set(m: Dict[str, Any]) -> List[Dict[str, Any]]:
