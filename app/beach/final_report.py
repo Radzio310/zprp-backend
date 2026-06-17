@@ -1492,18 +1492,18 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             }
             gs["tie_explanations"] = []
             for te in raw_te:
-                matches = []
+                te_matches = []
                 for m in te.matches:
                     item = m.dict()
                     item["sets_display"] = _normalize_sets_display_text(
                         item.get("sets_display", "")
                     )
-                    matches.append(item)
+                    te_matches.append(item)
                 gs["tie_explanations"].append({
                     "teams": te.teams,
                     "winner_name": te.winner_name,
                     "criterion": _crit_labels.get(te.criterion, te.criterion),
-                    "matches": matches,
+                    "matches": te_matches,
                     "stats_rows": te.stats_rows or [],
                 })
 
