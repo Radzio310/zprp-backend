@@ -214,6 +214,33 @@ def _normalize_sets_display_text(sets_display: str) -> str:
     return sets_display.replace(f"({marker}", ",").replace(")", "")
 
 
+def _normalize_gender(value: Any) -> Optional[str]:
+    raw = str(value or "").strip().upper()
+    if raw in {"M", "MEN", "MALE", "MĘŻCZYŹNI", "MEZCZYZNI"}:
+        return "M"
+    if raw in {"K", "W", "F", "WOMEN", "FEMALE", "KOBIETY"}:
+        return "K"
+    return None
+
+
+def _match_gender(m: Dict[str, Any]) -> str:
+    gender = _normalize_gender(m.get("gender"))
+    if gender:
+        return gender
+    for slot in ("teamA", "teamB"):
+        team = m.get(slot)
+        if isinstance(team, dict):
+            gender = _normalize_gender(team.get("gender"))
+            if gender:
+                return gender
+    match_number = str(m.get("matchNumber") or m.get("id") or "")
+    if re.search(r"(^|[/_\-\s])K([/_\-\s]|$)", match_number, flags=re.IGNORECASE):
+        return "K"
+    if re.search(r"(^|[/_\-\s])M([/_\-\s]|$)", match_number, flags=re.IGNORECASE):
+        return "M"
+    return "M"
+
+
 def _sets_with_third_set(m: Dict[str, Any]) -> List[Dict[str, Any]]:
     sets = [dict(s) for s in (m.get("sets") or []) if isinstance(s, dict)]
     shootout = m.get("shootout")
@@ -1229,7 +1256,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             if t and t.get("id"):
                 all_team_ids.add(t["id"])
 
-    genders_present = set(m.get("gender", "M") for m in matches)
+    genders_present = set(_match_gender(m) for m in matches)
     multi_gender = len(genders_present) > 1
 
     # Gdy jeden rodzaj płci — kolor akcentu nagłówka odpowiada tej płci
@@ -1238,12 +1265,12 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         accent = "#2BA8A0" if only_gender == "M" else "#E85A78"
 
     men_count = len(set(
-        t["id"] for m in matches if m.get("gender") == "M"
+        t["id"] for m in matches if _match_gender(m) == "M"
         for slot in ("teamA", "teamB")
         if (t := m.get(slot)) and t.get("id")
     ))
     women_count = len(set(
-        t["id"] for m in matches if m.get("gender") == "K"
+        t["id"] for m in matches if _match_gender(m) == "K"
         for slot in ("teamA", "teamB")
         if (t := m.get(slot)) and t.get("id")
     ))
@@ -1278,7 +1305,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
     # Build per-gender sections
     gender_sections = []
     for gender in ["M", "K"]:
-        g_matches = [m for m in matches if m.get("gender") == gender]
+        g_matches = [m for m in matches if _match_gender(m) == gender]
         if not g_matches:
             continue
 
