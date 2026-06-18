@@ -1583,6 +1583,76 @@ async def search_local_teams_by_squad_member(q: str = Query(..., min_length=2)):
     return {"results": results}
 
 
+class PlayerNameQuery(BaseModel):
+    first_name: str = ""
+    last_name: str = ""
+
+
+class PlayerPhotosRequest(BaseModel):
+    names: List[PlayerNameQuery]
+
+
+@router.post("/local/player-photos")
+async def resolve_player_photos(body: PlayerPhotosRequest):
+    """Resolve ZPRP photos for custom-team players by exact name.
+
+    For every (first_name, last_name) we look across all synced rosters. When
+    exactly ONE distinct player (by player_id) carries that exact name we return
+    that player's photo_url; if several different people share the name it is
+    ambiguous and we return None. Used to enrich custom-team tiles with photos.
+    """
+    import json as _json
+
+    if not body.names:
+        return {"photos": []}
+
+    # Build name → {player_id → photo_url} index across all rosters (one pass).
+    rows = await database.fetch_all(select(beach_teams))
+    index: Dict[str, Dict[Any, Optional[str]]] = {}
+    anon_counter = 0
+    for row in rows:
+        data = dict(row)
+        raw_players = data.get("roster_json")
+        if isinstance(raw_players, str):
+            try:
+                raw_players = _json.loads(raw_players)
+            except Exception:
+                raw_players = []
+        for p in (raw_players or []):
+            if not isinstance(p, dict):
+                continue
+            key = _normalize_for_search(
+                f"{p.get('last_name', '') or ''} {p.get('first_name', '') or ''}"
+            ).strip()
+            if not key:
+                continue
+            pid = p.get("player_id")
+            if pid is None:
+                # No id — treat as its own distinct person so it can't merge.
+                pid = f"_anon_{anon_counter}"
+                anon_counter += 1
+            photo = p.get("photo_url")
+            bucket = index.setdefault(key, {})
+            # Prefer a non-null photo when the same player appears multiple times.
+            if pid not in bucket or (bucket.get(pid) is None and photo):
+                bucket[pid] = photo
+
+    out = []
+    for n in body.names:
+        key = _normalize_for_search(
+            f"{n.last_name or ''} {n.first_name or ''}"
+        ).strip()
+        bucket = index.get(key, {})
+        photo_url = next(iter(bucket.values())) if len(bucket) == 1 else None
+        out.append({
+            "first_name": n.first_name,
+            "last_name": n.last_name,
+            "photo_url": photo_url,
+            "match_count": len(bucket),
+        })
+    return {"photos": out}
+
+
 @router.get("/local/{team_id}", response_model=BeachTeamItem)
 async def get_local_beach_team(team_id: int):
     row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
