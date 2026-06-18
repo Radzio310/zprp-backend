@@ -812,6 +812,7 @@ def _fill_team_squad(
     if is_custom:
         _fill_custom_team_squad(
             ws, team_id_str, player_rows, companion_rows, custom_teams,
+            team_name=team_ref.get("name") or "",
             banned_ids=banned_ids, banned_jerseys=banned_jerseys,
         )
     else:
@@ -822,6 +823,45 @@ def _fill_team_squad(
         )
 
 
+def _resolve_custom_team(
+    team_id: str,
+    team_name: str,
+    custom_teams: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Resolve the custom team referenced by a schedule match.
+
+    The schedule (TournamentDetailModal) references custom teams by a negative
+    integer id ``-(idx + 1)`` derived from the order of ``data_json.custom_teams``,
+    NOT by their real ``"ct_<uuid>"`` id. We therefore resolve in this order:
+      1. exact id match (covers any direct ``"ct_..."`` reference)
+      2. negative-index match into the same custom_teams list (authoritative)
+      3. name match (final fallback, robust against reordering)
+    """
+    # 1) exact id
+    for t in custom_teams:
+        if str(t.get("id")) == team_id:
+            return t
+
+    # 2) negative index: schedule uses id = -(idx + 1)
+    try:
+        n = int(team_id)
+        if n < 0:
+            idx = -n - 1
+            if 0 <= idx < len(custom_teams):
+                return custom_teams[idx]
+    except (ValueError, TypeError):
+        pass
+
+    # 3) by name (case-insensitive)
+    norm = (team_name or "").strip().casefold()
+    if norm:
+        for t in custom_teams:
+            if (t.get("name") or "").strip().casefold() == norm:
+                return t
+
+    return None
+
+
 def _fill_custom_team_squad(
     ws,
     team_id: str,
@@ -829,15 +869,12 @@ def _fill_custom_team_squad(
     companion_rows: List[int],
     custom_teams: List[Dict[str, Any]],
     *,
+    team_name: str = "",
     banned_ids: Optional[set] = None,
     banned_jerseys: Optional[set] = None,
 ) -> None:
     """Fill squad from custom_teams data (for manually created teams)."""
-    ct = None
-    for t in custom_teams:
-        if str(t.get("id")) == team_id:
-            ct = t
-            break
+    ct = _resolve_custom_team(team_id, team_name, custom_teams)
     if not ct:
         return
 
@@ -867,7 +904,7 @@ def _fill_custom_team_squad(
     for i, row in enumerate(player_rows):
         if i < len(selected):
             p = selected[i]
-            jersey = p.get("jerseyNumber", "")
+            jersey = p.get("jerseyNumber") or ""
             ws.cell(row=row, column=1).value = jersey
             ws.cell(row=row, column=2).value = _format_player_name(
                 p.get("lastName", ""), p.get("firstName", "")
