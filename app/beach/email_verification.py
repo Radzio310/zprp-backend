@@ -47,6 +47,12 @@ logger = logging.getLogger(__name__)
 
 MAX_CODE_ATTEMPTS = 5
 
+# Po wysłaniu nowego kodu poprzednie pozostają ważne jeszcze przez ten czas
+# (do końca swojego TTL), aby użytkownik mógł wpisać kod z wcześniejszego maila
+# — opóźnienia w dostawie / ponowne otwarcie modalu nie unieważniają od razu
+# kodu, który właśnie dostał. Weryfikacja akceptuje każdy aktywny kod.
+SUPERSEDE_GRACE_SECONDS = 3 * 60
+
 # Rate-limit policy (scope, limit, window seconds)
 _SEND_EMAIL_PER_HOUR = (5, 3600)
 _VERIFY_IP_PER_15MIN = (10, 900)
@@ -95,6 +101,28 @@ def requires_email_gate(user_row: Mapping[str, Any]) -> bool:
     if bool(row.get("email_verified")):
         return False
     return not has_approved_role(row.get("roles"))
+
+
+async def active_code_state(user_id: int) -> dict:
+    """Stan najnowszego kodu konta — czy jest świeży i ile zostało do resendu.
+
+    Pozwala klientowi NIE wysyłać nowego kodu przy każdym otwarciu modalu, gdy
+    użytkownik ma już ważny kod (każda wysyłka unieważniałaby starsze kody po
+    upływie karencji i powodowała „kod z maila nie działa").
+    """
+    cfg = get_email_config()
+    now = datetime.now(timezone.utc)
+    row = await database.fetch_one(
+        select(codes_t.c.expires_at, codes_t.c.last_sent_at)
+        .where(and_(codes_t.c.user_id == user_id, codes_t.c.used_at.is_(None)))
+        .order_by(codes_t.c.created_at.desc())
+        .limit(1)
+    )
+    if not row or _aware(row["expires_at"]) < now:
+        return {"has_active_code": False, "resend_available_in_seconds": 0}
+    elapsed = (now - _aware(row["last_sent_at"])).total_seconds()
+    remaining = max(0, int(cfg.resend_seconds - elapsed))
+    return {"has_active_code": True, "resend_available_in_seconds": remaining}
 
 
 # ─────────────────────────── Rate limiter (DB) ───────────────────────────
@@ -172,10 +200,19 @@ async def issue_and_send_code(user_row: Mapping[str, Any], *, enforce_cooldown: 
     expires_at = now + timedelta(minutes=cfg.ttl_minutes)
 
     async with database.transaction():
-        # New code invalidates all previous active codes.
+        # Unieważnij tylko kody starsze niż okno karencji — świeżo wysłane
+        # (np. sprzed chwili) zostają ważne równolegle z nowym, bo użytkownik
+        # mógł właśnie odebrać starszego maila.
+        supersede_before = now - timedelta(seconds=SUPERSEDE_GRACE_SECONDS)
         await database.execute(
             update(codes_t)
-            .where(and_(codes_t.c.user_id == user_id, codes_t.c.used_at.is_(None)))
+            .where(
+                and_(
+                    codes_t.c.user_id == user_id,
+                    codes_t.c.used_at.is_(None),
+                    codes_t.c.last_sent_at < supersede_before,
+                )
+            )
             .values(used_at=now, updated_at=now)
         )
         await database.execute(
@@ -249,39 +286,55 @@ async def _verify_with_user(user: Mapping[str, Any], code: str) -> dict:
     now = datetime.now(timezone.utc)
 
     async with database.transaction():
-        # Lock the newest active code row so two concurrent requests serialise.
-        locked = await database.fetch_one(
+        # Zablokuj WSZYSTKIE aktywne kody (serializacja równoległych żądań).
+        # Akceptujemy dowolny z nich, bo świeżo wydany kod nie unieważnia od
+        # razu poprzedniego (SUPERSEDE_GRACE_SECONDS) — użytkownik może wpisać
+        # kod z wcześniejszego maila.
+        active = await database.fetch_all(
             select(codes_t)
             .where(and_(codes_t.c.user_id == user_id, codes_t.c.used_at.is_(None)))
             .order_by(codes_t.c.created_at.desc())
-            .limit(1)
             .with_for_update()
         )
-        if not locked:
-            raise VerificationError(
-                error="VERIFICATION_CODE_EXPIRED",
-                message="Kod wygasł. Wyślij nowy kod.",
-                http_status=400,
-            )
-        if _aware(locked["expires_at"]) < now:
-            await database.execute(
-                update(codes_t).where(codes_t.c.id == locked["id"]).values(used_at=now, updated_at=now)
-            )
+
+        # Odrzuć wygasłe (i oznacz je jako zużyte).
+        live = []
+        for row in active:
+            if _aware(row["expires_at"]) < now:
+                await database.execute(
+                    update(codes_t).where(codes_t.c.id == row["id"]).values(used_at=now, updated_at=now)
+                )
+            else:
+                live.append(row)
+
+        if not live:
             raise VerificationError(
                 error="VERIFICATION_CODE_EXPIRED",
                 message="Kod wygasł. Wyślij nowy kod.",
                 http_status=400,
             )
 
-        attempts = int(locked["attempts"]) + 1
-        await database.execute(
-            update(codes_t).where(codes_t.c.id == locked["id"]).values(attempts=attempts, updated_at=now)
+        matched = next(
+            (row for row in live if verify_code(user_id, code, row["code_hash"])),
+            None,
         )
 
-        if not verify_code(user_id, code, locked["code_hash"]):
-            if attempts >= MAX_CODE_ATTEMPTS:
+        if matched is None:
+            # Zły kod — policz próbę dla każdego aktywnego kodu, by brute-force
+            # pozostał ograniczony niezależnie od liczby aktywnych kodów.
+            hit_cap = False
+            for row in live:
+                attempts = int(row["attempts"]) + 1
                 await database.execute(
-                    update(codes_t).where(codes_t.c.id == locked["id"]).values(used_at=now, updated_at=now)
+                    update(codes_t).where(codes_t.c.id == row["id"]).values(attempts=attempts, updated_at=now)
+                )
+                if attempts >= MAX_CODE_ATTEMPTS:
+                    hit_cap = True
+            if hit_cap:
+                await database.execute(
+                    update(codes_t)
+                    .where(and_(codes_t.c.user_id == user_id, codes_t.c.used_at.is_(None)))
+                    .values(used_at=now, updated_at=now)
                 )
                 logger.info("verify_too_many_attempts user_id=%s", user_id)
                 raise VerificationError(
@@ -295,7 +348,8 @@ async def _verify_with_user(user: Mapping[str, Any], code: str) -> dict:
                 http_status=400,
             )
 
-        # Success — atomically mark user verified, consume code, kill siblings.
+        # Sukces — atomowo oznacz konto jako zweryfikowane i zużyj wszystkie
+        # aktywne kody (także rodzeństwo w oknie karencji).
         await database.execute(
             update(beach_users)
             .where(beach_users.c.id == user_id)
@@ -305,9 +359,6 @@ async def _verify_with_user(user: Mapping[str, Any], code: str) -> dict:
                 email_verification_deadline=None,
                 updated_at=now,
             )
-        )
-        await database.execute(
-            update(codes_t).where(codes_t.c.id == locked["id"]).values(used_at=now, updated_at=now)
         )
         await database.execute(
             update(codes_t)
@@ -469,9 +520,18 @@ async def request_signup_code(email_input: str, ip: str) -> dict:
     expires_at = now + timedelta(minutes=cfg.ttl_minutes)
 
     async with database.transaction():
+        # Karencja jak w torze zalogowanym — nie unieważniaj świeżo wysłanych
+        # kodów, żeby kod z wcześniejszego maila nadal działał.
+        supersede_before = now - timedelta(seconds=SUPERSEDE_GRACE_SECONDS)
         await database.execute(
             update(pre_codes_t)
-            .where(and_(pre_codes_t.c.email_normalized == email_norm, pre_codes_t.c.used_at.is_(None)))
+            .where(
+                and_(
+                    pre_codes_t.c.email_normalized == email_norm,
+                    pre_codes_t.c.used_at.is_(None),
+                    pre_codes_t.c.last_sent_at < supersede_before,
+                )
+            )
             .values(used_at=now, updated_at=now)
         )
         await database.execute(
@@ -511,37 +571,55 @@ async def verify_signup_code(email_input: str, code: str, ip: str) -> dict:
     now = datetime.now(timezone.utc)
 
     async with database.transaction():
-        locked = await database.fetch_one(
+        active = await database.fetch_all(
             select(pre_codes_t)
             .where(and_(pre_codes_t.c.email_normalized == email_norm, pre_codes_t.c.used_at.is_(None)))
             .order_by(pre_codes_t.c.created_at.desc())
-            .limit(1)
             .with_for_update()
         )
-        if not locked:
-            raise VerificationError(error="VERIFICATION_CODE_EXPIRED", message="Kod wygasł. Wyślij nowy kod.", http_status=400)
-        if locked["verified_at"] is not None:
+
+        # Już potwierdzony w którymś aktywnym kodzie → idempotentny sukces.
+        if any(row["verified_at"] is not None for row in active):
             return {"success": True, "message": "Adres e-mail został potwierdzony."}
-        if _aware(locked["expires_at"]) < now:
-            await database.execute(
-                update(pre_codes_t).where(pre_codes_t.c.id == locked["id"]).values(used_at=now, updated_at=now)
-            )
+
+        # Odrzuć wygasłe (oznacz jako zużyte).
+        live = []
+        for row in active:
+            if _aware(row["expires_at"]) < now:
+                await database.execute(
+                    update(pre_codes_t).where(pre_codes_t.c.id == row["id"]).values(used_at=now, updated_at=now)
+                )
+            else:
+                live.append(row)
+
+        if not live:
             raise VerificationError(error="VERIFICATION_CODE_EXPIRED", message="Kod wygasł. Wyślij nowy kod.", http_status=400)
 
-        attempts = int(locked["attempts"]) + 1
-        await database.execute(
-            update(pre_codes_t).where(pre_codes_t.c.id == locked["id"]).values(attempts=attempts, updated_at=now)
+        matched = next(
+            (row for row in live if verify_code_for_key(signup_key(email_norm), code, row["code_hash"])),
+            None,
         )
-        if not verify_code_for_key(signup_key(email_norm), code, locked["code_hash"]):
-            if attempts >= MAX_CODE_ATTEMPTS:
+
+        if matched is None:
+            hit_cap = False
+            for row in live:
+                attempts = int(row["attempts"]) + 1
                 await database.execute(
-                    update(pre_codes_t).where(pre_codes_t.c.id == locked["id"]).values(used_at=now, updated_at=now)
+                    update(pre_codes_t).where(pre_codes_t.c.id == row["id"]).values(attempts=attempts, updated_at=now)
+                )
+                if attempts >= MAX_CODE_ATTEMPTS:
+                    hit_cap = True
+            if hit_cap:
+                await database.execute(
+                    update(pre_codes_t)
+                    .where(and_(pre_codes_t.c.email_normalized == email_norm, pre_codes_t.c.used_at.is_(None)))
+                    .values(used_at=now, updated_at=now)
                 )
                 raise VerificationError(error="TOO_MANY_ATTEMPTS", message="Zbyt wiele prób. Wyślij nowy kod.", http_status=400)
             raise VerificationError(error="INVALID_VERIFICATION_CODE", message="Kod jest nieprawidłowy.", http_status=400)
 
         await database.execute(
-            update(pre_codes_t).where(pre_codes_t.c.id == locked["id"]).values(verified_at=now, updated_at=now)
+            update(pre_codes_t).where(pre_codes_t.c.id == matched["id"]).values(verified_at=now, updated_at=now)
         )
 
     logger.info("signup_code_verified email=%s", mask_email(email_norm))

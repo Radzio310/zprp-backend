@@ -29,6 +29,7 @@ from app.beach.email_security import CODE_REGEX
 from app.beach.brevo_email import EmailDeliveryError
 from app.beach.email_verification import (
     VerificationError,
+    active_code_state,
     email_delivery_to_http,
     issue_and_send_code,
     resend_verification,
@@ -248,6 +249,7 @@ async def email_status(user_id: int = Depends(beach_get_current_user_id)):
     user = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
     if not user:
         return JSONResponse(status_code=404, content={"success": False, "error": "USER_NOT_FOUND"})
+    code_state = await active_code_state(user_id)
     return {
         "success": True,
         "email": mask_email(user["email"]),
@@ -257,4 +259,8 @@ async def email_status(user_id: int = Depends(beach_get_current_user_id)):
         "deadline": user["email_verification_deadline"].isoformat()
         if user["email_verification_deadline"]
         else None,
+        # Czy istnieje świeży aktywny kod — klient dzięki temu nie wysyła
+        # niepotrzebnie nowego przy każdym otwarciu modalu.
+        "has_active_code": code_state["has_active_code"],
+        "resend_available_in_seconds": code_state["resend_available_in_seconds"],
     }
