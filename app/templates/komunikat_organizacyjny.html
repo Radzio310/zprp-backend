@@ -265,6 +265,9 @@
     margin-bottom: 4pt;
     page-break-after: avoid;
   }
+  /* Łamanie stron — identyczne z terminarzem */
+  .no-break { page-break-inside: avoid; }
+  .page-break { page-break-before: always; }
   /* ── Invited team cards (gdy brak podziału na grupy) ── */
   .teams-cards {
     display: flex;
@@ -613,7 +616,7 @@
   {% endif %}
 </div>
 
-<div class="section" style="page-break-inside: auto;{% if schedule_force_new_page %} page-break-before: always;{% endif %}">
+<div class="section" style="page-break-inside: auto; page-break-before: always;">
   <div class="section-title">Terminarz</div>
   {% if days %}
     {% set sched_genders = days | map(attribute='matches') | sum(start=[]) | selectattr('gender') | map(attribute='gender') | select | unique | list %}
@@ -624,8 +627,10 @@
     </div>
     {% endif %}
     {% for day in days %}
-    <div class="day-section">
-      <div class="day-header">{{ day.label }}</div>
+    {# Pierwszy dzień nie potrzebuje własnego łamania — cała sekcja już startuje od nowej strony.
+       Kolejne dni łamią się tak samo jak w terminarzu (day.force_page_break). #}
+    <div class="day-section{% if not loop.first and day.force_page_break %} page-break{% endif %}">
+      <div class="day-header no-break">{{ day.label }}</div>
       {% if day.matches %}
       <table class="schedule">
         <thead>
