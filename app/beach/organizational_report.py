@@ -234,7 +234,54 @@ def _stage_label(m: Dict[str, Any]) -> str:
 
 
 def _gender_label(gender: str) -> str:
-    return "Młodzicy / mężczyźni" if gender == "M" else "Młodziczki / kobiety" if gender == "K" else "Drużyny"
+    return "Mężczyźni" if gender == "M" else "Kobiety" if gender == "K" else "Drużyny"
+
+
+# A4 portrait usable content height (≈297mm − 32mm margins) in pt.
+_PAGE_USABLE_PT = 751.0
+_SCHED_ROW_PT = 15.0
+# "Terminarz" section title + (optional) legend + first day header + table header.
+_SCHED_OVERHEAD_PT = 60.0
+
+
+def _should_force_schedule_page_break(
+    team_sections: List[Dict[str, Any]],
+    has_organizer: bool,
+    schedule_days: List[Dict[str, Any]],
+) -> bool:
+    """Force the schedule onto a fresh page when less than 50% of the first day's
+    matches would fit in the space remaining on page 1 below the preceding sections.
+    Uses a coarse pt-height estimate (exact layout isn't known before rendering)."""
+    if not schedule_days:
+        return False
+    first_day = schedule_days[0] or {}
+    first_day_matches = len(first_day.get("matches") or [])
+    if first_day_matches <= 0:
+        return False
+
+    # Estimated height (pt) consumed before the schedule section.
+    pre = 235.0  # header + "Data i miejsce" + "Adres obiektu"
+    if has_organizer:
+        pre += 60.0
+    pre += 26.0  # "Zaproszone drużyny" title
+
+    for sec in team_sections or []:
+        groups = sec.get("groups") or []
+        if groups:
+            # Groups render side-by-side → block height ≈ header + tallest group.
+            tallest = 0.0
+            for g in groups:
+                teams = g.get("teams") or []
+                tallest = max(tallest, 16.0 + len(teams) * 13.0)
+            pre += 22.0 + tallest + 16.0
+        else:
+            teams = sec.get("teams") or []
+            rows = (len(teams) + 2) // 3  # ~3 cards per row
+            pre += 22.0 + rows * 28.0
+
+    remaining = _PAGE_USABLE_PT - pre
+    rows_fit = max(0.0, (remaining - _SCHED_OVERHEAD_PT) / _SCHED_ROW_PT)
+    return rows_fit < 0.5 * first_day_matches
 
 
 def _time_sort_key(m: Dict[str, Any]) -> tuple:
@@ -356,6 +403,10 @@ def _build_context(req: OrganizationalReportRequest) -> Dict[str, Any]:
     location = req.tournament_location.strip()
     venue_address = req.venue_address.strip() or location
 
+    schedule_force_new_page = _should_force_schedule_page_break(
+        team_sections, organizer_ctx is not None, schedule_days
+    )
+
     return {
         "tournament_name": req.tournament_name.strip() or "Turniej",
         "date_range": date_range,
@@ -366,6 +417,7 @@ def _build_context(req: OrganizationalReportRequest) -> Dict[str, Any]:
         "organizer": organizer_ctx,
         "team_sections": team_sections,
         "days": schedule_days,
+        "schedule_force_new_page": schedule_force_new_page,
         "general_info": general_info,
         "accent": accent,
         "logo_b64": _load_logo_b64(),

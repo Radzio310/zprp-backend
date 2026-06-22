@@ -165,33 +165,91 @@
   .gender-header.M { background: #2BA8A0; }
   .gender-header.K { background: #E85A78; }
   .gender-header.other { background: {{ accent }}; }
-  .teams-grid {
+  /* ── Group preview — IDENTYCZNE z terminarzem ── */
+  .gender-groups {
+    margin-bottom: 10pt;
+    page-break-inside: avoid;
+    border-radius: 7pt;
+    padding: 7pt;
+    border: 0.7pt solid #ececec;
+  }
+  .gender-groups:last-child { margin-bottom: 0; }
+  .gender-groups.M {
+    background: linear-gradient(135deg, #E9FBF8 0%, #FFFFFF 70%);
+    border-color: #B9EAE3;
+  }
+  .gender-groups.K {
+    background: linear-gradient(135deg, #FFF0F4 0%, #FFFFFF 70%);
+    border-color: #F5C5D0;
+  }
+  .gender-groups-header {
     display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 5pt;
+    font-size: 8pt;
+    font-weight: 900;
+    margin-bottom: 6pt;
+  }
+  .gender-groups-header.M { color: #2BA8A0; }
+  .gender-groups-header.K { color: #E85A78; }
+  .gender-dot {
+    width: 7pt;
+    height: 7pt;
+    border-radius: 99pt;
+    display: inline-block;
+  }
+  .gender-dot.M { background: #2BA8A0; }
+  .gender-dot.K { background: #E85A78; }
+  .group-grid {
+    display: flex;
+    flex-direction: row;
     gap: 7pt;
     flex-wrap: wrap;
   }
   .group-box {
-    width: 48%;
-    border: 0.6pt solid #e4e4e4;
-    border-radius: 5pt;
-    padding: 5pt 7pt;
-    margin-bottom: 5pt;
+    flex: 1;
+    min-width: 92pt;
+    border: 0.6pt solid rgba(0,0,0,0.08);
+    border-radius: 6pt;
+    overflow: hidden;
+    background: rgba(255,255,255,0.86);
     page-break-inside: avoid;
   }
-  .group-name {
-    font-size: 8pt;
+  .group-box-title {
+    color: #fff;
+    font-size: 7pt;
     font-weight: 900;
-    color: {{ accent }};
-    margin-bottom: 3pt;
-    text-transform: uppercase;
+    padding: 3.5pt 5pt;
+    letter-spacing: 0.2pt;
   }
-  ul.team-list {
-    padding-left: 12pt;
+  .gender-groups.M .group-box-title { background: #2BA8A0; }
+  .gender-groups.K .group-box-title { background: #E85A78; }
+  .group-team {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4pt;
+    font-size: 7.2pt;
+    font-weight: 650;
+    color: #333;
+    padding: 3pt 5pt;
+    border-bottom: 0.4pt solid #f0f0f0;
   }
-  ul.team-list li {
-    margin-bottom: 1.5pt;
-    font-size: 8.7pt;
+  .group-team:last-child { border-bottom: 0; }
+  .group-team-pos {
+    width: 12pt;
+    height: 12pt;
+    border-radius: 99pt;
+    text-align: center;
+    font-size: 6.2pt;
+    font-weight: 900;
+    line-height: 12pt;
+    flex-shrink: 0;
   }
+  .gender-groups.M .group-team-pos { color: #167A73; background: #DDF7F3; }
+  .gender-groups.K .group-team-pos { color: #B93658; background: #FFE4EB; }
+  .group-team-name { flex: 1; }
 
   .day-section {
     margin-bottom: 10pt;
@@ -517,19 +575,29 @@
   <div class="section-title">Zaproszone drużyny</div>
   {% if team_sections %}
     {% for sec in team_sections %}
-      <div class="gender-header {{ sec.gender if sec.gender in ['M','K'] else 'other' }}">{{ sec.label }}</div>
       {% if sec.groups %}
-      <div class="teams-grid">
-        {% for group in sec.groups %}
-        <div class="group-box">
-          <div class="group-name">{{ group.display_name or ("Grupa " ~ group.name) }}</div>
-          <ul class="team-list">
-            {% for team in group.teams %}<li>{{ team }}</li>{% endfor %}
-          </ul>
+      {# Group layout — IDENTYCZNE z terminarzem (kolorystyka i styl) #}
+      <div class="gender-groups {{ sec.gender }}">
+        <div class="gender-groups-header {{ sec.gender }}">
+          <span class="gender-dot {{ sec.gender }}"></span>
+          <span>{{ sec.label }}</span>
         </div>
-        {% endfor %}
+        <div class="group-grid">
+          {% for group in sec.groups %}
+          <div class="group-box">
+            <div class="group-box-title">{{ group.display_name or ("Grupa " ~ group.name) }}</div>
+            {% for team in group.teams %}
+            <div class="group-team">
+              <span class="group-team-pos">{{ loop.index }}</span>
+              <span class="group-team-name">{{ team }}</span>
+            </div>
+            {% endfor %}
+          </div>
+          {% endfor %}
+        </div>
       </div>
       {% else %}
+      <div class="gender-header {{ sec.gender if sec.gender in ['M','K'] else 'other' }}">{{ sec.label }}</div>
       <div class="teams-cards">
         {% for team in sec.teams %}
         <div class="team-card">
@@ -545,7 +613,7 @@
   {% endif %}
 </div>
 
-<div class="section" style="page-break-inside: auto;">
+<div class="section" style="page-break-inside: auto;{% if schedule_force_new_page %} page-break-before: always;{% endif %}">
   <div class="section-title">Terminarz</div>
   {% if days %}
     {% set sched_genders = days | map(attribute='matches') | sum(start=[]) | selectattr('gender') | map(attribute='gender') | select | unique | list %}
