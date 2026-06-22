@@ -175,10 +175,24 @@ def _compute_date_range(days: List[Dict[str, Any]]) -> str:
     return f"{fmt(dates[0])}–{fmt(dates[-1])}"
 
 
-def _stage_label(m: Dict[str, Any], placement_rr_labels: Optional[Dict[str, str]] = None) -> str:
+def _resolve_mode(config: Optional[Dict[str, Any]], gender: str) -> str:
+    """Per-gender play system, falling back to the shared `mode`."""
+    config = config or {}
+    per = config.get("modeM") if gender == "M" else config.get("modeK")
+    return per or config.get("mode") or "groupsPlusKnockout"
+
+
+def _stage_label(
+    m: Dict[str, Any],
+    placement_rr_labels: Optional[Dict[str, str]] = None,
+    is_global_tour: bool = False,
+) -> str:
     stage = m.get("stage", "")
     group = m.get("group") or ""
     if stage == "group":
+        # Global Tour uses a single group → label it "Global" instead of "Grupa A".
+        if is_global_tour:
+            return "Global"
         return f"Grupa {group}" if group else "Każdy z każdym"
     if stage == "placement_rr":
         if placement_rr_labels and group in placement_rr_labels:
@@ -406,6 +420,7 @@ def _build_group_previews(
     groups_cfg = config.get("groups") or {}
 
     for gender in ("M", "K"):
+        is_global_tour = _resolve_mode(config, gender) == "globalTour"
         gender_cfg = groups_cfg.get(gender) or {}
         cfg_teams = gender_cfg.get("teams") or {}
         group_names = sorted(
@@ -444,7 +459,10 @@ def _build_group_previews(
                 teams_out = fallback
 
             if teams_out:
-                groups_out.append({"name": group_name, "teams": teams_out})
+                display_name = "Global" if is_global_tour else f"Grupa {group_name}"
+                groups_out.append(
+                    {"name": group_name, "display_name": display_name, "teams": teams_out}
+                )
 
         if groups_out:
             previews.append(
@@ -644,7 +662,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                 "match_num": match_num,
                 "seq_num": seq_num_labels.get(m_id, ""),
                 "gender": gender,
-                "stage": _stage_label(m, placement_rr_labels),
+                "stage": _stage_label(m, placement_rr_labels, _resolve_mode(config, gender) == "globalTour"),
                 "team_a": _team_name(m.get("teamA")),
                 "team_b": _team_name(m.get("teamB")),
                 "hint_a": ha,

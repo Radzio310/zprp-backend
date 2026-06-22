@@ -202,11 +202,20 @@ def _team_name(team: Optional[Dict[str, Any]]) -> str:
     return "TBD"
 
 
-def _stage_label(m: Dict[str, Any]) -> str:
+def _resolve_mode(config: Optional[Dict[str, Any]], gender: str) -> str:
+    """Per-gender play system, falling back to the shared `mode`."""
+    config = config or {}
+    per = config.get("modeM") if gender == "M" else config.get("modeK")
+    return per or config.get("mode") or "roundRobin"
+
+
+def _stage_label(m: Dict[str, Any], is_global_tour: bool = False) -> str:
     stage = m.get("stage", "")
     group = m.get("group")
     label = STAGE_LABELS.get(stage, "")
-    if stage == "group" and group:
+    if stage == "group" and is_global_tour:
+        label = "Global"
+    elif stage == "group" and group:
         label = f"gr. {group}"
     elif stage == "placement_rr" and group:
         tier_match = re.match(r"placement_(\d+)", group)
@@ -380,7 +389,7 @@ def _build_context(req: DailyReportRequest) -> Dict[str, Any]:
                 "sets": _sets_with_third_set(m),
                 "shootout": None,
                 "winner": w,
-                "stage_label": _stage_label(m) if mode != "roundRobin" else "",
+                "stage_label": _stage_label(m, _resolve_mode(config, m.get("gender") or "") == "globalTour") if mode != "roundRobin" else "",
                 "gender": m.get("gender", ""),
             })
         match_days.append({"label": day_label, "matches": cards})
@@ -447,7 +456,7 @@ def _build_context(req: DailyReportRequest) -> Dict[str, Any]:
                 "court": str(m.get("court") or ""),
                 "match_num": match_num,
                 "gender": gender,
-                "stage": _stage_label(m),
+                "stage": _stage_label(m, _resolve_mode(config, gender) == "globalTour"),
                 "team_a": _team_name(m.get("teamA")),
                 "team_b": _team_name(m.get("teamB")),
                 "hint_a": ha,

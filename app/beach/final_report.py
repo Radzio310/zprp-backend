@@ -275,11 +275,20 @@ def _team_name(team: Optional[Dict[str, Any]]) -> str:
     return "TBD"
 
 
-def _stage_label(m: Dict[str, Any]) -> str:
+def _resolve_mode(config: Optional[Dict[str, Any]], gender: str) -> str:
+    """Per-gender play system, falling back to the shared `mode`."""
+    config = config or {}
+    per = config.get("modeM") if gender == "M" else config.get("modeK")
+    return per or config.get("mode") or "roundRobin"
+
+
+def _stage_label(m: Dict[str, Any], is_global_tour: bool = False) -> str:
     stage = m.get("stage", "")
     group = m.get("group")
     label = STAGE_LABELS.get(stage, "")
-    if stage == "group" and group:
+    if stage == "group" and is_global_tour:
+        label = "Global"
+    elif stage == "group" and group:
         label = f"gr. {group}"
     elif stage == "placement_rr" and group:
         tier_match = re.match(r"placement_(\d+)", group)
@@ -413,7 +422,7 @@ def _build_bracket_rounds(
     return rounds
 
 
-def _match_card_payload(m: Dict[str, Any]) -> Dict[str, Any]:
+def _match_card_payload(m: Dict[str, Any], is_global_tour: bool = False) -> Dict[str, Any]:
     w = _winner(m)
     return {
         "time": m.get("startTime", ""),
@@ -426,7 +435,7 @@ def _match_card_payload(m: Dict[str, Any]) -> Dict[str, Any]:
         "sets": _sets_with_third_set(m),
         "shootout": None,
         "winner": w,
-        "stage_label": _stage_label(m),
+        "stage_label": _stage_label(m, is_global_tour),
     }
 
 
@@ -1309,11 +1318,14 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         if not g_matches:
             continue
 
+        gmode = _resolve_mode(config, gender)
+        is_global_tour = gmode == "globalTour"
+
         gs: Dict[str, Any] = {
             "gender": gender,
             "gender_label": "Mężczyźni" if gender == "M" else "Kobiety",
             "gender_color": "#2BA8A0" if gender == "M" else "#E85A78",
-            "mode": mode,
+            "mode": gmode,
             "tables": [],
             "bracket_rounds": [],
             "bracket_svg": "",
@@ -1332,7 +1344,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         }
 
         # ── Tables ──
-        if mode == "roundRobin":
+        if gmode == "roundRobin":
             group_matches = [m for m in g_matches if m.get("stage") == "group"]
             if group_matches:
                 rows = _compute_group_table(group_matches)
@@ -1353,7 +1365,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                     if gm:
                         rows = _compute_group_table(gm, advancing_per_group)
                         gs["tables"].append({
-                            "group_label": f"Grupa {gn}",
+                            "group_label": "Global" if is_global_tour else f"Grupa {gn}",
                             "rows": rows,
                         })
             else:
@@ -1370,7 +1382,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                     if gm:
                         rows = _compute_group_table(gm, 2)
                         gs["tables"].append({
-                            "group_label": f"Grupa {gn}",
+                            "group_label": "Global" if is_global_tour else f"Grupa {gn}",
                             "rows": rows,
                         })
 
@@ -1424,8 +1436,8 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
 
             cards = []
             for m in day_matches:
-                card = _match_card_payload(m)
-                if mode == "roundRobin":
+                card = _match_card_payload(m, is_global_tour)
+                if gmode == "roundRobin":
                     card["stage_label"] = ""
                 cards.append(card)
             gs["match_days"].append({"label": day_label, "matches": cards})

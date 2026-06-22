@@ -288,12 +288,17 @@ def _build_context(req: OrganizationalReportRequest) -> Dict[str, Any]:
     team_sections = []
     for gender in sorted(teams_by_gender.keys(), key=lambda g: {"K": 0, "M": 1}.get(g, 2)):
         group_map = groups.get(gender) or {}
+        is_global_tour = schedule_pdf._resolve_mode(config, gender) == "globalTour"
         if group_map:
             team_sections.append({
                 "gender": gender,
                 "label": _gender_label(gender),
                 "groups": [
-                    {"name": group, "teams": sorted(team_map.values(), key=lambda x: x.lower())}
+                    {
+                        "name": group,
+                        "display_name": "Global" if is_global_tour else f"Grupa {group}",
+                        "teams": sorted(team_map.values(), key=lambda x: x.lower()),
+                    }
                     for group, team_map in sorted(group_map.items())
                 ],
                 "teams": [],

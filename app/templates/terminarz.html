@@ -560,7 +560,7 @@
     <div class="group-grid">
       {% for group in preview.groups %}
       <div class="group-box">
-        <div class="group-box-title">Grupa {{ group.name }}</div>
+        <div class="group-box-title">{{ group.display_name or ("Grupa " ~ group.name) }}</div>
         {% for team in group.teams %}
         <div class="group-team">
           <span class="group-team-pos">{{ loop.index }}</span>

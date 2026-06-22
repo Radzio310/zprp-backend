@@ -522,7 +522,7 @@
       <div class="teams-grid">
         {% for group in sec.groups %}
         <div class="group-box">
-          <div class="group-name">Grupa {{ group.name }}</div>
+          <div class="group-name">{{ group.display_name or ("Grupa " ~ group.name) }}</div>
           <ul class="team-list">
             {% for team in group.teams %}<li>{{ team }}</li>{% endfor %}
           </ul>
