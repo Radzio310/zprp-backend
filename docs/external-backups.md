@@ -50,6 +50,7 @@ BACKUP_S3_PREFIX         = backups
 BACKUP_UPLOADS_DIR       = /data/static
 BACKUP_RETENTION_DAYS    = 14
 BACKUP_NOTIFY_WEBHOOK_URL = https://discord.com/api/webhooks/...   ← opcjonalne
+BEACH_DAILY_ACCOUNT_REPORT_WEBHOOK_URL = https://discord.com/api/webhooks/...   ← opcjonalne, gdy inny kanał niż backup
 ```
 
 Po zapisaniu Railway automatycznie zrestartuje serwis.
@@ -62,6 +63,10 @@ Backup uruchamiany jest **raz dziennie** wewnątrz pętli `_cleanup_loop()` w `m
 Pierwsze uruchomienie nastąpi po starcie serwisu (przy każdym restarcie jeśli w danym dniu jeszcze nie był).
 
 Backup jest **pominięty** gdy zmienna `BACKUP_S3_BUCKET` nie jest ustawiona — bezpieczne dla środowisk dev.
+
+Dzienny raport kont BAZA Beach jest wysyłany raz dziennie na `BEACH_DAILY_ACCOUNT_REPORT_WEBHOOK_URL`,
+a jeśli ta zmienna nie jest ustawiona — na `BACKUP_NOTIFY_WEBHOOK_URL`. Raport zawiera te same 4 kategorie
+z zakładki **Użytkownicy** w panelu admina oraz liczbę weryfikacji wykonanych w ostatnich 24h.
 
 ---
 

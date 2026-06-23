@@ -236,6 +236,7 @@ _CONTACTS_CLUB_REFACTOR_LOCK_KEY = 987654321
 
 _last_contacts_refactor_utc_day: str | None = None  # np. "2026-01-21"
 _last_backup_utc_day: str | None = None
+_last_beach_account_report_utc_day: str | None = None
 
 
 def _norm_text_key(s: str) -> str:
@@ -752,6 +753,31 @@ async def _cleanup_loop():
                     logger.info("🗄️ External backup: completed")
                 except Exception as _backup_exc:
                     logger.error("🗄️ External backup FAILED: %s", _backup_exc)
+
+            # Beach account report: once per UTC day to Discord/Slack webhook.
+            # Uses BACKUP_NOTIFY_WEBHOOK_URL by default; can be overridden with
+            # BEACH_DAILY_ACCOUNT_REPORT_WEBHOOK_URL.
+            global _last_beach_account_report_utc_day
+            _today_account_report = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if (
+                _last_beach_account_report_utc_day != _today_account_report
+                and (
+                    os.getenv("BEACH_DAILY_ACCOUNT_REPORT_WEBHOOK_URL")
+                    or os.getenv("BACKUP_NOTIFY_WEBHOOK_URL")
+                )
+            ):
+                _last_beach_account_report_utc_day = _today_account_report
+                try:
+                    from app.beach.daily_account_report import send_daily_beach_account_report
+
+                    logger.info("Beach account daily report: sending...")
+                    sent = await send_daily_beach_account_report()
+                    if sent:
+                        logger.info("Beach account daily report: sent")
+                    else:
+                        logger.info("Beach account daily report: skipped (no webhook)")
+                except Exception as _report_exc:
+                    logger.error("Beach account daily report FAILED: %s", _report_exc)
 
         except Exception:
             logger.exception("Cleanup loop error")
