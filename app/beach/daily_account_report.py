@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 
-from app.db import database, beach_users, beach_verification_requests
+from app.db import database, beach_users
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,7 @@ async def build_beach_account_report_payload(now: Optional[datetime] = None) -> 
             beach_users.c.id,
             beach_users.c.roles,
             beach_users.c.email_verified,
+            beach_users.c.email_verified_at,
         ).where(beach_users.c.is_active == True)  # noqa: E712
     )
 
@@ -104,6 +105,8 @@ async def build_beach_account_report_payload(now: Optional[datetime] = None) -> 
     role_unverified = 0
     verified_no_role = 0
     rest = 0
+    # Udane, samodzielne weryfikacje e-mail z ostatniej doby.
+    email_verified_24h = 0
 
     for row in user_rows:
         has_role = _has_approved_role(row["roles"])
@@ -117,26 +120,16 @@ async def build_beach_account_report_payload(now: Optional[datetime] = None) -> 
         else:
             rest += 1
 
-    verification_rows = await database.fetch_all(
-        select(
-            beach_verification_requests.c.status,
-            beach_verification_requests.c.updated_at,
-        )
-        .where(beach_verification_requests.c.status.in_(["approved", "rejected"]))
-        .where(beach_verification_requests.c.updated_at >= since)
-    )
-    approved_24h = sum(1 for row in verification_rows if row["status"] == "approved")
-    rejected_24h = sum(1 for row in verification_rows if row["status"] == "rejected")
-
-    # Cheap enough to fetch all pending ids; keeps compatibility with the existing database helper.
-    pending_rows = await database.fetch_all(
-        select(beach_verification_requests.c.id).where(
-            beach_verification_requests.c.status == "pending"
-        )
-    )
+        if email_verified:
+            ev_at = row["email_verified_at"]
+            if ev_at is not None:
+                if ev_at.tzinfo is None:
+                    ev_at = ev_at.replace(tzinfo=timezone.utc)
+                if ev_at >= since:
+                    email_verified_24h += 1
 
     total = len(user_rows)
-    done_24h = approved_24h + rejected_24h
+    email_verified_total = verified_with_role + verified_no_role
     fields = [
         {
             "name": "✅ Zweryfikowane z rolą",
@@ -159,10 +152,10 @@ async def build_beach_account_report_payload(now: Optional[datetime] = None) -> 
             "inline": False,
         },
         {
-            "name": "🛡️ Weryfikacje wykonane w 24h",
+            "name": "📧 Potwierdzone e-maile w 24h",
             "value": (
-                f"**{done_24h}**  •  zatwierdzone: **{approved_24h}**  •  odrzucone: **{rejected_24h}**\n"
-                f"Oczekujące teraz: **{len(pending_rows)}**"
+                f"**{email_verified_24h}** w ostatniej dobie\n"
+                f"Łącznie zweryfikowanych: **{email_verified_total}**"
             ),
             "inline": False,
         },
