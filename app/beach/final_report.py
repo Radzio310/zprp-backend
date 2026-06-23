@@ -241,6 +241,13 @@ def _match_gender(m: Dict[str, Any]) -> str:
     return "M"
 
 
+def _is_real_match(m: Dict[str, Any]) -> bool:
+    kind = m.get("kind") or "match"
+    if kind in {"court_break", "tournament_opening"}:
+        return False
+    return kind == "match" or bool(m.get("matchNumber") or m.get("teamA") or m.get("teamB"))
+
+
 def _sets_with_third_set(m: Dict[str, Any]) -> List[Dict[str, Any]]:
     sets = [dict(s) for s in (m.get("sets") or []) if isinstance(s, dict)]
     shootout = m.get("shootout")
@@ -1245,7 +1252,10 @@ def _build_placement_matches(
 def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
     schedule = req.schedule
     config = schedule.get("config") or {}
-    matches: List[Dict[str, Any]] = schedule.get("matches") or []
+    matches: List[Dict[str, Any]] = [
+        m for m in (schedule.get("matches") or []) if _is_real_match(m)
+    ]
+    schedule_for_positions = {**schedule, "matches": matches}
     days: List[Dict[str, Any]] = config.get("days") or []
     mode = config.get("mode", "roundRobin")
     accent = _get_accent(req.category)
@@ -1444,7 +1454,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
 
         # ── Standings ──
         sd = standings_by_gender.get(gender)
-        if sd and sd.rows:
+        if sd and sd.rows and not req.stage_grant:
             standing_rows = [
                 {
                     **r.dict(),
@@ -1471,7 +1481,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 else req.stage_grant.advancing_women
             )
             adv = max(0, int(adv or 0))
-            positions = _compute_positions_from_schedule(req.schedule, gender)
+            positions = _compute_positions_from_schedule(schedule_for_positions, gender)
             if positions:
                 gs["stage_info"] = {
                     "stage": req.stage_grant.stage,
@@ -1492,7 +1502,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                 ]
 
         # ── Tie explanations ──
-        raw_te = tie_expl_by_gender.get(gender, [])
+        raw_te = [] if req.stage_grant else tie_expl_by_gender.get(gender, [])
         if raw_te:
             _crit_labels = {
                 "wins": "wygrane mecze bezpośrednie",

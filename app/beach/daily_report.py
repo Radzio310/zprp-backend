@@ -202,6 +202,13 @@ def _team_name(team: Optional[Dict[str, Any]]) -> str:
     return "TBD"
 
 
+def _is_real_match(m: Dict[str, Any]) -> bool:
+    kind = m.get("kind") or "match"
+    if kind in {"court_break", "tournament_opening"}:
+        return False
+    return kind == "match" or bool(m.get("matchNumber") or m.get("teamA") or m.get("teamB"))
+
+
 def _resolve_mode(config: Optional[Dict[str, Any]], gender: str) -> str:
     """Per-gender play system, falling back to the shared `mode`."""
     config = config or {}
@@ -304,8 +311,7 @@ def _build_context(req: DailyReportRequest) -> Dict[str, Any]:
     remaining_entries = []
     for m in all_matches:
         di = int(m.get("dayIndex") or 0)
-        kind = m.get("kind") or "match"
-        if di <= day_index and kind not in ("court_break", "tournament_opening"):
+        if di <= day_index and _is_real_match(m):
             played_matches.append(m)
         elif di > day_index:
             remaining_entries.append(m)
