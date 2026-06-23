@@ -364,6 +364,10 @@ class ProtocolBulkRequest(BaseModel):
     category: str = ""               # "Senior", "Junior", "Junior mł", "Młodzik"
     format: str = "xlsx"             # "xlsx" | "pdf"
     generated_by: str = ""           # imię i nazwisko użytkownika (do stopki)
+    # Tryb „wszystkie możliwości": każdy mecz może nieść protocol_folder /
+    # protocol_filename (układ ZIP-a w foldery), a syntetyczne ID NIE są zapisywane
+    # jako wygenerowane protokoły.
+    possibilities_mode: bool = False
 
 
 class ProtocolSingleRequest(BaseModel):
@@ -2254,6 +2258,13 @@ async def generate_bulk_protocols(
     if not matches:
         raise HTTPException(400, detail="Brak meczy w terminarzu")
 
+    # Backstop dla trybu „wszystkie możliwości" — konwersja PDF ~90 s/plik.
+    if len(matches) > 300:
+        raise HTTPException(
+            400,
+            detail="Za dużo protokołów do wygenerowania naraz. Wybierz późniejszy etap startowy.",
+        )
+
     # Sort matches
     matches = sorted(matches, key=_match_sort_key)
 
@@ -2292,7 +2303,15 @@ async def generate_bulk_protocols(
         file_paths: List[Tuple[str, str]] = []  # (path, filename)
 
         for idx, m in enumerate(matches):
-            file_label = _match_file_label(m, idx)
+            # Tryb możliwości: czytelna nazwa pary + folder-mecz. Prefiks idx na
+            # dysku zapobiega kolizji basename między folderami.
+            custom_name = (m.get("protocol_filename") or "").strip()
+            custom_folder = (m.get("protocol_folder") or "").strip()
+            if custom_name:
+                clean_name = _safe_filename(_transliterate_pl(custom_name), 60)
+                file_label = f"{idx:03d}_{clean_name}"
+            else:
+                file_label = _match_file_label(m, idx)
             path = await _generate_single_protocol(
                 m,
                 tournament_name=tournament_name,
@@ -2312,7 +2331,19 @@ async def generate_bulk_protocols(
                 disqualifications=disqualifications,
                 all_matches=full_matches,
             )
-            file_paths.append((path, os.path.basename(path)))
+            fname = os.path.basename(path)
+            if custom_name:
+                # Czysta nazwa w ZIP (bez prefiksu idx); etap = folder.
+                ext = os.path.splitext(fname)[1]
+                clean_file = f"{_safe_filename(_transliterate_pl(custom_name), 60)}_protokol{ext}"
+                arcname = (
+                    f"{_safe_filename(_transliterate_pl(custom_folder), 60)}/{clean_file}"
+                    if custom_folder
+                    else clean_file
+                )
+            else:
+                arcname = fname
+            file_paths.append((path, arcname))
 
         # Pack into ZIP
         safe_name = _safe_filename(tournament_name, 40) or "protokoly"
@@ -2320,8 +2351,8 @@ async def generate_bulk_protocols(
         zip_path = os.path.join(tmp_dir, zip_name)
 
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for fpath, fname in file_paths:
-                zf.write(fpath, fname)
+            for fpath, arcname in file_paths:
+                zf.write(fpath, arcname)
 
         # Store with download token
         _ensure_download_dir()
@@ -2331,8 +2362,12 @@ async def generate_bulk_protocols(
         shutil.copyfile(zip_path, download_path)
 
         # Zapisz w turnieju, które mecze zostały wygenerowane (po stałym ID meczu).
-        generated_match_ids = [m.get("id") for m in matches if m.get("id") is not None]
-        await _record_generated_raw_protocols(req.tournament_id, generated_match_ids)
+        # W trybie możliwości ID są syntetyczne — NIE zapisujemy ich.
+        if req.possibilities_mode:
+            generated_match_ids = []
+        else:
+            generated_match_ids = [m.get("id") for m in matches if m.get("id") is not None]
+            await _record_generated_raw_protocols(req.tournament_id, generated_match_ids)
 
         encoded_name = urllib.parse.quote(zip_name)
         return {
