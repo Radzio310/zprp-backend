@@ -1350,6 +1350,8 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
             "standings_top_n_phrase": "",
             "stage_info": None,
             "stage_rows": [],
+            "stage_podium_rows": [],
+            "stage_remaining_rows": [],
             "tie_explanations": [],
         }
 
@@ -1490,7 +1492,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                     ),
                     "advancing_count": adv,
                 }
-                gs["stage_rows"] = [
+                stage_rows = [
                     {
                         "pos": int(p.get("position", 0)),
                         "team_name": p.get("team_name", ""),
@@ -1500,6 +1502,14 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                     }
                     for p in positions
                 ]
+                gs["stage_rows"] = stage_rows
+                if req.stage_grant.stage == "final":
+                    gs["stage_podium_rows"] = [
+                        row for row in stage_rows if 1 <= row["pos"] <= 3
+                    ]
+                    gs["stage_remaining_rows"] = [
+                        row for row in stage_rows if row["pos"] > 3
+                    ]
 
         # ── Tie explanations ──
         raw_te = [] if req.stage_grant else tie_expl_by_gender.get(gender, [])

@@ -247,6 +247,86 @@
     font-size: 8pt;
   }
 
+  /* ── Final-stage podium ── */
+  .podium-wrap {
+    margin: 8pt 0 12pt 0;
+    page-break-inside: avoid;
+  }
+  .podium-row {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 8pt;
+  }
+  .podium-place {
+    flex: 1;
+    max-width: 160pt;
+    text-align: center;
+  }
+  .podium-name {
+    min-height: 24pt;
+    margin-bottom: 5pt;
+    font-size: 8.5pt;
+    font-weight: 900;
+    color: #1a1a2e;
+    line-height: 1.2;
+  }
+  .podium-base {
+    border-radius: 7pt;
+    border: 1pt solid;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .podium-rank {
+    font-size: 16pt;
+    font-weight: 900;
+    color: #fff;
+  }
+  .podium-base.gold {
+    height: 54pt;
+    background: #D4A843;
+    border-color: #B68D2A;
+  }
+  .podium-base.silver {
+    height: 44pt;
+    background: #9BA4B5;
+    border-color: #7E8796;
+  }
+  .podium-base.bronze {
+    height: 36pt;
+    background: #A0785A;
+    border-color: #835E44;
+  }
+  .stage-places-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 10pt;
+    font-size: 8.5pt;
+  }
+  .stage-places-table th {
+    background: #f0f0f0;
+    font-weight: 900;
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    padding: 4pt 6pt;
+    text-align: left;
+    border-bottom: 1.5pt solid #ddd;
+    color: #555;
+  }
+  .stage-places-table td {
+    padding: 4pt 6pt;
+    border-bottom: 0.5pt solid #eee;
+  }
+  .stage-places-table td.pos {
+    width: 36pt;
+    text-align: center;
+    font-weight: 900;
+  }
+  .stage-places-table td.team-name {
+    font-weight: 700;
+  }
+
   /* ── Tie explanation tile ── */
   .tie-tile {
     margin-top: 6pt;
@@ -477,6 +557,46 @@
 <!-- ── Stage tournament (etapowy, bez punktów): klasyfikacja z awansem ── -->
 {% if gs.stage_info %}
 <div class="section-title" style="color: {{ gc }}; border-bottom-color: {{ gc }}44;">Klasyfikacja — {{ gs.stage_info.stage_label }}</div>
+{% if gs.stage_info.stage == "final" %}
+<div class="section-desc">
+  Końcowa klasyfikacja turnieju.
+</div>
+{% if gs.stage_podium_rows %}
+<div class="podium-wrap">
+  <div class="podium-row">
+    {% for podium_pos, podium_class, podium_rank in [(2, "silver", "II"), (1, "gold", "I"), (3, "bronze", "III")] %}
+    {% set pr = (gs.stage_podium_rows | selectattr("pos", "equalto", podium_pos) | list | first) %}
+    {% if pr %}
+    <div class="podium-place">
+      <div class="podium-name">{{ pr.team_name }}</div>
+      <div class="podium-base {{ podium_class }}">
+        <div class="podium-rank">{{ podium_rank }}</div>
+      </div>
+    </div>
+    {% endif %}
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% if gs.stage_remaining_rows %}
+<table class="stage-places-table no-break">
+  <thead>
+    <tr>
+      <th style="width: 42pt;">Miejsce</th>
+      <th>Drużyna</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for sr in gs.stage_remaining_rows %}
+    <tr>
+      <td class="pos" style="color: {{ gc }};">{{ sr.pos }}</td>
+      <td class="team-name">{{ sr.team_name }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% else %}
 <div class="section-desc">
   {% if gs.stage_info.advancing_count and gs.stage_info.advancing_count > 0 %}
   Drużyny oznaczone awansują do kolejnego etapu (pierwsze {{ gs.stage_info.advancing_count }}).
@@ -504,6 +624,7 @@
     {% endfor %}
   </tbody>
 </table>
+{% endif %}
 {% endif %}
 
 <!-- ── Standings (round-robin: show right after table) ── -->
