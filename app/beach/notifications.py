@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import delete, insert, select, update, and_, func as sa_func
+from sqlalchemy import delete, insert, select, update, and_, or_, func as sa_func
 
 from app.db import database, beach_notifications, beach_users, beach_admins, push_schedules
 from app.deps import beach_get_current_user_id, beach_get_optional_user_id
@@ -227,7 +227,9 @@ def _ban_str_pl(n: int) -> str:
 
 
 class DisqDecisionRequest(BaseModel):
-    player_id: int
+    player_id: Optional[int] = None
+    person_id: Optional[int] = None
+    person_kind: str = "player"
     player_name: str
     team_name: str
     ban_matches: int
@@ -249,18 +251,31 @@ async def send_disq_decision_notification(
     ban_str = _ban_str_pl(req.ban_matches)
     notif_data = {"tournament_id": req.tournament_id, "tab": "disqualifications"}
 
-    # ── 1. Player ──
-    player_row = await database.fetch_one(
-        select(beach_users.c.id).where(beach_users.c.id == req.player_id)
-    )
-    player_has_account = player_row is not None
-    if player_has_account:
+    is_companion = req.person_kind == "companion"
+    person_noun = "osoba towarzysząca" if is_companion else "zawodnik"
+    person_noun_acc = "osoby towarzyszącej" if is_companion else "zawodnika"
+
+    # ── 1. Disqualified person ──
+    player_row = None
+    if req.person_id is not None:
+        player_row = await database.fetch_one(
+            select(beach_users.c.id).where(beach_users.c.person_id == req.person_id)
+        )
+    elif req.player_id is not None:
+        player_row = await database.fetch_one(
+            select(beach_users.c.id).where(
+                or_(beach_users.c.player_id == req.player_id, beach_users.c.id == req.player_id)
+            )
+        )
+    player_user_id = int(player_row["id"]) if player_row else None
+    player_has_account = player_user_id is not None
+    if player_user_id is not None:
         await create_notification(
             notif_type="player_disqualified",
             title="Decyzja o Twojej dyskwalifikacji",
-            body=f"Zostałeś zawieszony na {ban_str} ({req.team_name})",
+            body=f"Jako {person_noun} otrzymujesz zawieszenie na {ban_str} ({req.team_name})",
             data=notif_data,
-            target_user_ids=[req.player_id],
+            target_user_ids=[player_user_id],
         )
 
     # ── 2. Team coaches (companions with role TRENER) ──
@@ -286,13 +301,13 @@ async def send_disq_decision_notification(
                         beach_users.c.person_id.in_(coach_person_ids)
                     )
                 )
-                coach_user_ids = [int(r["id"]) for r in coach_rows if int(r["id"]) != req.player_id]
+                coach_user_ids = [int(r["id"]) for r in coach_rows if int(r["id"]) != player_user_id]
 
     if coach_user_ids:
         await create_notification(
             notif_type="player_disqualified",
-            title="Decyzja dyskwalifikacyjna — Twój zawodnik",
-            body=f"{req.player_name} ({req.team_name}): zawieszenie na {ban_str}",
+            title=f"Decyzja dyskwalifikacyjna — {person_noun_acc} z Twojej drużyny",
+            body=f"{req.player_name} ({req.team_name}): {person_noun}, zawieszenie na {ban_str}",
             data=notif_data,
             target_user_ids=coach_user_ids,
         )
@@ -311,7 +326,9 @@ async def send_disq_decision_notification(
             1 for j in judges
             if isinstance(j, dict) and j.get("id") is not None and int(j["id"]) != user_id
         )
-        already_notified = {req.player_id, *coach_user_ids}
+        already_notified = {*coach_user_ids}
+        if player_user_id is not None:
+            already_notified.add(player_user_id)
         judge_user_ids = [
             int(j["id"])
             for j in judges
@@ -324,14 +341,14 @@ async def send_disq_decision_notification(
         await create_notification(
             notif_type="player_disqualified",
             title="Decyzja zatwierdzona",
-            body=f"{req.player_name} ({req.team_name}): zawieszenie na {ban_str}",
+            body=f"{req.player_name} ({req.team_name}): {person_noun}, zawieszenie na {ban_str}",
             data=notif_data,
             target_user_ids=judge_user_ids,
         )
 
     return {
         "ok": True,
-        "player": {"notified": player_has_account},
+        "player": {"notified": player_has_account, "total": 1 if (req.player_id is not None or req.person_id is not None) else 0},
         "coaches": {"notified": len(coach_user_ids), "total": total_coaches},
         "judges": {"notified": len(judge_user_ids), "total": total_judges},
     }

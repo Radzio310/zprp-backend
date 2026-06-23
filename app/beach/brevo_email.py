@@ -7,6 +7,7 @@ bodies are never surfaced to the end user.
 """
 from __future__ import annotations
 
+import html
 import logging
 from typing import Optional
 
@@ -175,6 +176,142 @@ async def send_password_reset_code(
         text_heading="reset hasła",
         text_closing="Jeśli to nie Ty prosiłeś o reset hasła, zignoruj tę wiadomość — hasło pozostanie bez zmian.",
         tag="password-reset",
+    )
+
+
+def _build_password_html(new_password: str, login: str, app_name: str) -> str:
+    """E-mail z nowym hasłem (po resecie przez administratora). Styl jak kod."""
+    safe_password = html.escape(new_password)
+    safe_login = html.escape(login or "")
+    logo_url = _logo_url()
+    logo_block = (
+        f'<img src="{logo_url}" width="84" height="84" alt="{app_name}" '
+        'style="width:84px;height:84px;display:block;margin:0 auto 10px auto;border:0;outline:none;">'
+        if logo_url
+        else ""
+    )
+    login_block = (
+        f'<div style="margin-top:12px;font-size:13px;color:#6B7587;">Login: '
+        f'<strong style="color:#41506A;">{safe_login}</strong></div>'
+        if safe_login
+        else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="pl">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;padding:0;background-color:#F4F6FA;color:#1A2233;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F4F6FA;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;background-color:#FFFFFF;border:1px solid #E6EAF0;border-radius:20px;overflow:hidden;box-shadow:0 6px 24px rgba(20,30,50,0.06);">
+        <!-- Header band -->
+        <tr><td style="background:linear-gradient(135deg,#FF8A3D 0%,#FF6A4A 100%);padding:26px 28px 22px 28px;" align="center">
+          {logo_block}
+          <div style="font-size:19px;font-weight:800;color:#FFFFFF;letter-spacing:0.3px;">{app_name}</div>
+          <div style="margin-top:4px;font-size:13px;color:rgba(255,255,255,0.92);">Reset hasła</div>
+        </td></tr>
+        <!-- Intro -->
+        <tr><td style="padding:26px 30px 6px 30px;" align="center">
+          <div style="font-size:15px;line-height:22px;color:#41506A;">
+            Cześć! Na Twoją prośbę administrator BAZA Beach zresetował hasło do Twojego konta. Poniżej znajdziesz nowe hasło — zaloguj się i zmień je w <strong>Ustawieniach</strong>.
+          </div>
+        </td></tr>
+        <!-- Password -->
+        <tr><td style="padding:20px 20px 6px 20px;" align="center">
+          <div style="display:inline-block;background-color:#FFF4EC;border:1px solid #FFD3B8;border-radius:14px;padding:14px 22px;max-width:100%;">
+            <span style="font-size:22px;font-weight:900;letter-spacing:1px;color:#E0531F;font-family:'Courier New',Courier,monospace;word-break:break-all;">{safe_password}</span>
+          </div>
+          {login_block}
+        </td></tr>
+        <!-- Security note -->
+        <tr><td style="padding:18px 30px 4px 30px;">
+          <div style="background-color:#F4F6FA;border-radius:12px;padding:12px 14px;font-size:12.5px;line-height:18px;color:#55617A;">
+            🔒 Ze względów bezpieczeństwa zmień to hasło po pierwszym zalogowaniu (Ustawienia → Zmiana hasła).
+          </div>
+        </td></tr>
+        <!-- Ignore note -->
+        <tr><td style="padding:14px 30px 28px 30px;" align="center">
+          <div style="font-size:12px;line-height:18px;color:#8A93A6;">
+            Jeśli to nie Ty prosiłeś o reset hasła, skontaktuj się z nami jak najszybciej.
+          </div>
+        </td></tr>
+      </table>
+      <div style="margin-top:16px;font-size:11px;color:#A2AAB8;">Wiadomość wygenerowana automatycznie — nie odpowiadaj na nią.</div>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _build_password_text(new_password: str, login: str, app_name: str) -> str:
+    login_line = f"Login: {login}\n" if login else ""
+    return (
+        f"{app_name} — reset hasła\n\n"
+        "Na Twoją prośbę administrator zresetował hasło do Twojego konta.\n"
+        f"Nowe hasło: {new_password}\n"
+        f"{login_line}\n"
+        "Ze względów bezpieczeństwa zmień to hasło po pierwszym zalogowaniu "
+        "(Ustawienia → Zmiana hasła).\n"
+        "Jeśli to nie Ty prosiłeś o reset hasła, skontaktuj się z nami jak najszybciej."
+    )
+
+
+async def send_new_password_email(
+    recipient_email: str,
+    recipient_name: Optional[str],
+    new_password: str,
+    login: Optional[str],
+) -> str:
+    """Wyślij nowe hasło ustawione przez administratora. Returns Brevo ``messageId``.
+
+    Raises ``EmailDeliveryError`` on any failure.
+    """
+    cfg = get_email_config()
+    if not cfg.brevo_api_key or not cfg.from_email:
+        raise EmailDeliveryError("Brak konfiguracji nadawcy Brevo", kind="config")
+
+    to_entry: dict = {"email": recipient_email}
+    name = (recipient_name or "").strip()
+    if name:
+        to_entry["name"] = name
+
+    app_name = cfg.from_name or "BAZA Beach"
+    payload = {
+        "sender": {"name": app_name, "email": cfg.from_email},
+        "to": [to_entry],
+        "subject": "BAZA Beach - Twoje hasło zostało zresetowane",
+        "htmlContent": _build_password_html(new_password, login or "", app_name),
+        "textContent": _build_password_text(new_password, login or "", app_name),
+        "tags": ["password-reset-done"],
+    }
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "api-key": cfg.brevo_api_key,  # never logged
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+            resp = await client.post(BREVO_URL, headers=headers, json=payload)
+    except httpx.TimeoutException as exc:
+        logger.error("Brevo send timeout")
+        raise EmailDeliveryError("Brevo timeout", kind="timeout") from exc
+    except httpx.HTTPError as exc:
+        logger.error("Brevo network error: %s", type(exc).__name__)
+        raise EmailDeliveryError("Brevo network error", kind="network") from exc
+
+    if resp.status_code in _SUCCESS_STATUSES:
+        message_id: Optional[str] = None
+        try:
+            message_id = resp.json().get("messageId")
+        except Exception:
+            message_id = None
+        logger.info("Brevo new-password send ok status=%s messageId=%s", resp.status_code, message_id)
+        return str(message_id or "")
+
+    kind = _classify_status(resp.status_code)
+    logger.error("Brevo new-password send failed status=%s kind=%s", resp.status_code, kind)
+    raise EmailDeliveryError(
+        "Brevo delivery failed", kind=kind, status_code=resp.status_code
     )
 
 

@@ -1187,6 +1187,18 @@ class BeachPasswordResetStatusRequest(BaseModel):
     admin_note: Optional[str] = Field(None, max_length=1000)
 
 
+class BeachPasswordResetResolveRequest(BaseModel):
+    password: Optional[str] = None
+    password_encrypted: Optional[str] = None
+    send_email: bool = False
+
+
+class BeachPasswordResetResolveResponse(BaseModel):
+    request: BeachPasswordResetAdminItem
+    email_sent: bool = False
+    email_error: Optional[str] = None
+
+
 class BeachDeviceInfo(BaseModel):
     installation_id: str
     platform: Optional[str] = None

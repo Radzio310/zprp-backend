@@ -24,12 +24,20 @@ from app.schemas import (
     BeachPasswordResetChallengeRequest,
     BeachPasswordResetChallengeResponse,
     BeachPasswordResetContactOption,
+    BeachPasswordResetResolveRequest,
+    BeachPasswordResetResolveResponse,
     BeachPasswordResetStatusRequest,
     BeachPasswordResetSubmitRequest,
     BeachPasswordResetSubmitResponse,
 )
 from app.beach.notifications import notify_admins
 from app.beach.activity_log import get_actor_name, log_activity
+from app.beach.users import _hash_password, _decrypt_password_from_b64
+from app.beach.brevo_email import (
+    send_new_password_email,
+    EmailDeliveryError,
+    email_delivery_to_http,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/password-reset", tags=["Beach: Password reset"])
@@ -370,3 +378,117 @@ async def admin_update_status(
         )
     )
     return _row_to_item(dict(updated_row))
+
+
+def _password_strength_error(pw: str) -> Optional[str]:
+    if len(pw) < 8:
+        return "Hasło musi mieć min. 8 znaków."
+    if not re.search(r"[A-ZĄĆĘŁŃÓŚŹŻ]", pw):
+        return "Hasło musi zawierać wielką literę."
+    if not re.search(r"[a-ząćęłńóśźż]", pw):
+        return "Hasło musi zawierać małą literę."
+    if not re.search(r"\d", pw):
+        return "Hasło musi zawierać cyfrę."
+    if not re.search(r"[^A-Za-z0-9ĄĆĘŁŃÓŚŹŻąćęłńóśźż]", pw):
+        return "Hasło musi zawierać znak specjalny."
+    return None
+
+
+@router.post("/admin/{request_id}/resolve", response_model=BeachPasswordResetResolveResponse)
+async def admin_resolve(
+    request_id: int,
+    body: BeachPasswordResetResolveRequest,
+    user_id: int = Depends(beach_get_current_user_id),
+):
+    """Ustaw nowe hasło użytkownika z wniosku, oznacz wniosek jako obsłużony i
+    (opcjonalnie) wyślij nowe hasło mailem."""
+    if not await _is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Brak uprawnień")
+
+    row = await database.fetch_one(
+        select(beach_password_reset_requests).where(
+            beach_password_reset_requests.c.id == request_id
+        )
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Wniosek nie istnieje")
+    req = dict(row)
+    target_user_id = req.get("user_id")
+    if not target_user_id:
+        raise HTTPException(status_code=400, detail="Wniosek nie jest powiązany z kontem")
+
+    if body.password_encrypted:
+        try:
+            password_plain = _decrypt_password_from_b64(body.password_encrypted)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Nie udało się odczytać hasła")
+    elif body.password:
+        password_plain = str(body.password)
+    else:
+        raise HTTPException(status_code=400, detail="Hasło jest wymagane")
+    password_plain = password_plain.strip()
+
+    pw_err = _password_strength_error(password_plain)
+    if pw_err:
+        raise HTTPException(status_code=400, detail=pw_err)
+
+    target = await database.fetch_one(
+        select(beach_users).where(beach_users.c.id == target_user_id)
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
+    target_dict = dict(target)
+
+    now = datetime.now(timezone.utc)
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == target_user_id)
+        .values(password_hash=_hash_password(password_plain), updated_at=now)
+    )
+    await database.execute(
+        update(beach_password_reset_requests)
+        .where(beach_password_reset_requests.c.id == request_id)
+        .values(status="resolved", updated_at=now)
+    )
+
+    await log_activity(
+        area="user",
+        action="user.password_reset",
+        actor_user_id=user_id,
+        actor_name=await get_actor_name(user_id),
+        target_id=str(target_user_id),
+        target_label=target_dict.get("full_name", ""),
+        details={"via": "password_reset_request", "request_id": request_id},
+    )
+
+    email_sent = False
+    email_error: Optional[str] = None
+    if body.send_email:
+        email = (target_dict.get("email") or "").strip()
+        if not email:
+            email_error = "Konto nie ma adresu e-mail."
+        else:
+            try:
+                await send_new_password_email(
+                    email,
+                    target_dict.get("full_name"),
+                    password_plain,
+                    target_dict.get("login") or req.get("login"),
+                )
+                email_sent = True
+            except EmailDeliveryError as exc:
+                _status, email_error = email_delivery_to_http(exc)
+            except Exception as exc:
+                logger.error("resolve password reset email error: %s", exc)
+                email_error = "Nie udało się wysłać maila."
+
+    updated_row = await database.fetch_one(
+        select(beach_password_reset_requests).where(
+            beach_password_reset_requests.c.id == request_id
+        )
+    )
+    return BeachPasswordResetResolveResponse(
+        request=_row_to_item(dict(updated_row)),
+        email_sent=email_sent,
+        email_error=email_error,
+    )
