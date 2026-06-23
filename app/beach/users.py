@@ -1194,6 +1194,15 @@ async def login_user(req: BeachLoginRequest):
     row = await database.fetch_one(
         select(beach_users).where(beach_users.c.login == login_value)
     )
+    # Logowanie adresem e-mail — tylko dla kont ze ZWERYFIKOWANYM adresem.
+    # (Bez weryfikacji e-mail nie ufamy, że adres należy do tej osoby.)
+    if not row and "@" in login_value:
+        row = await database.fetch_one(
+            select(beach_users).where(
+                sa_func.lower(beach_users.c.email) == login_value.lower(),
+                beach_users.c.email_verified == True,  # noqa: E712
+            )
+        )
     if not row:
         raise HTTPException(status_code=401, detail="Nie ma takiego użytkownika")
 
