@@ -619,18 +619,15 @@ def _run_backup_sync() -> None:
 
 
 async def _cleanup_loop():
-    retention_days = int(os.getenv("PROEL_RETENTION_DAYS", "7"))
+    # PROEL_RETENTION_DAYS celowo nieużywane — mecze ProEl nie są auto-kasowane.
     interval_sec = int(os.getenv("PROEL_CLEANUP_INTERVAL_SECONDS", str(24*60*60)))
     short_result_retention_days = int(os.getenv("SHORT_RESULT_RETENTION_DAYS", "10"))
 
     while True:
         try:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-            stmt = delete(saved_matches).where(saved_matches.c.updated_at < cutoff)
-            removed = await database.execute(stmt)
-            logger.info(
-                f"🧹 ProEl cleanup: removed {int(removed or 0)} rows older than {cutoff.isoformat()} UTC"
-            )
+            # ⚠️ Mecze ProEl (proel_matches) są przechowywane BEZTERMINOWO — NIGDY nie są
+            # kasowane automatycznie. Kasowanie wyłącznie ręczne przez DELETE /proel/{nr}.
+            # (Dawne auto-kasowanie po PROEL_RETENTION_DAYS zostało celowo usunięte.)
 
             cutoff_sr = datetime.now(timezone.utc) - timedelta(days=short_result_retention_days)
             stmt_sr = delete(short_result_records).where(short_result_records.c.created_at < cutoff_sr)
@@ -794,6 +791,19 @@ async def startup():
         "ALTER TABLE board_tasks ADD COLUMN IF NOT EXISTS checklist JSONB DEFAULT '[]'",
     ]
     for stmt in _board_migrations:
+        try:
+            await database.execute(stmt)
+        except Exception:
+            pass  # sqlite or column already exists
+
+    # ProEl migrations: kolumna status ("in_progress"|"finished"|"approved").
+    # Backfill: dotychczasowe zakończone mecze (is_finished=true) → 'finished'.
+    # Idempotentne; nie nadpisuje istniejących wartości status.
+    _proel_migrations = [
+        "ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS status VARCHAR NOT NULL DEFAULT 'in_progress'",
+        "UPDATE proel_matches SET status = 'finished' WHERE is_finished = true AND status = 'in_progress'",
+    ]
+    for stmt in _proel_migrations:
         try:
             await database.execute(stmt)
         except Exception:

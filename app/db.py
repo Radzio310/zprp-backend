@@ -550,7 +550,12 @@ saved_matches = Table(
     Column("match_number", String, primary_key=True, index=True),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("data_json", JSON, nullable=False),
+    # is_finished zachowane dla zgodności ze starszymi klientami; backend utrzymuje
+    # je jako pochodną statusu: is_finished = status in ("finished","approved").
     Column("is_finished", Boolean, nullable=False, server_default=text("false")),
+    # NOWE: status meczu — "in_progress" | "finished" | "approved".
+    # Edycja (PUT) blokowana DOPIERO przy "approved", nie przy "finished".
+    Column("status", String, nullable=False, server_default=text("'in_progress'")),
 )
 
 # 21.2) Beach ProEl - mecze (analogiczne do proel_matches, ale status jako String)

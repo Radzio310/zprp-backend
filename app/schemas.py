@@ -856,20 +856,25 @@ class UpsertYoungRefereeRatingsVisibilityRequest(BaseModel):
 
 
 # ------------------------- PROEL SAVED MATCHES -------------------------
+# status: "in_progress" | "finished" | "approved".
+# is_finished zachowane dla zgodności wstecznej (pochodna statusu).
 class CreateSavedMatchRequest(BaseModel):
     match_number: str
     data_json: Any
     is_finished: Optional[bool] = False
+    status: Optional[str] = None
 
 class UpdateSavedMatchRequest(BaseModel):
     data_json: Any
     is_finished: Optional[bool] = None
+    status: Optional[str] = None
 
 class MatchItem(BaseModel):
     match_number: str
     updated_at: datetime
     data_json: Any
     is_finished: bool
+    status: str
 
 class ListSavedMatchesResponse(BaseModel):
     matches: List[MatchItem]
