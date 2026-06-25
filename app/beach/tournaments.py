@@ -751,6 +751,30 @@ async def list_tournaments(
     return BeachTournamentsListResponse(tournaments=out)
 
 
+# ─────────────────── PUBLIC FEED (read-only, no auth) ───────────────────
+
+@router.get(
+    "/public_feed",
+    response_model=BeachTournamentsListResponse,
+    summary="Publiczny, read-only feed wszystkich turniejów (np. dla BAZA — bez logowania)",
+)
+async def list_public_feed_tournaments():
+    """Zwraca wszystkie turnieje w trybie tylko-do-odczytu, bez wymogu logowania
+    i bez filtra `include_all`. Wykorzystywane przez ekran „Co słychać na plaży?"
+    w aplikacji BAZA do prezentacji nadchodzących turniejów."""
+    rows = await database.fetch_all(
+        select(beach_tournaments).order_by(
+            beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc()
+        )
+    )
+    out: List[BeachTournamentItem] = []
+    for r in rows:
+        r_d = dict(r)
+        data = _normalize_event_data(r_d["data_json"])
+        out.append(_attach_computed_fields(r_d, data, None))
+    return BeachTournamentsListResponse(tournaments=out)
+
+
 # ─────────────────── LIST (visible for user) ───────────────────
 
 @router.get(
