@@ -502,11 +502,31 @@ async def _fetch_user_cities(user_ids: List[int]) -> Dict[int, Tuple[str, str]]:
 
 
 def _format_name_protocol(full_name: str) -> str:
-    """Format name as 'Nazwisko Imię' for referee cells."""
-    parts = full_name.strip().split()
-    if len(parts) >= 2:
-        return f"{parts[-1]} {' '.join(parts[:-1])}"
-    return full_name
+    """Format an official's name as 'NAZWISKO Imię' for protocol cells.
+
+    Source data (``beach_users.full_name``) is canonically stored as
+    'NAZWISKO Imię' with the surname uppercased first; some legacy/fallback
+    values arrive as 'Imię Nazwisko'. Decide which by the leading token's case:
+    an uppercase leading token means the surname is already first (keep order,
+    supporting compound surnames spanning several caps tokens), otherwise the
+    surname is the last token. Output is always 'NAZWISKO Imię' (surname
+    uppercased), matching the player name format.
+    """
+    parts = (full_name or "").strip().split()
+    if len(parts) < 2:
+        return (full_name or "").strip()
+    if parts[0].isupper():
+        # Already 'NAZWISKO Imię' — keep order; allow a multi-token surname.
+        i = 1
+        while i < len(parts) - 1 and parts[i].isupper():
+            i += 1
+        surname = " ".join(parts[:i])
+        first = " ".join(parts[i:])
+    else:
+        # Legacy 'Imię Nazwisko' → the last token is the surname.
+        surname = parts[-1]
+        first = " ".join(parts[:-1])
+    return f"{surname.upper()} {first}".strip()
 
 
 def _format_player_name(last_name: str, first_name: str) -> str:
@@ -2101,8 +2121,8 @@ async def _generate_filled_protocol(
             date_ddmmyyyy=date_ddmmyyyy,
             place=place,
             notes_text=notes_text,
-            referee1_name=_referee_name_from_match_config(match_config, "fieldA"),
-            referee2_name=_referee_name_from_match_config(match_config, "fieldB"),
+            referee1_name=_format_name_protocol(_referee_name_from_match_config(match_config, "fieldA")),
+            referee2_name=_format_name_protocol(_referee_name_from_match_config(match_config, "fieldB")),
             referee1_sig_bytes=field_a_sig,
             referee2_sig_bytes=field_b_sig,
         )
