@@ -559,12 +559,17 @@ saved_matches = Table(
 )
 
 # 21.2) Beach ProEl - mecze (analogiczne do proel_matches, ale status jako String)
+# tournament_id / schedule_match_id: kopiowane z data_json.matchConfig.extras, aby
+# wiązać mecz ProEl z konkretnym meczem konkretnego turnieju (match_number bywa
+# współdzielony między turniejami w starszych danych).
 beach_proel_matches = Table(
     "beach_proel_matches", metadata,
     Column("match_number", String, primary_key=True, index=True),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("data_json", JSON, nullable=False),
     Column("status", String, nullable=False, server_default=text("'in_progress'")),
+    Column("tournament_id", Integer, nullable=True, index=True),
+    Column("schedule_match_id", String, nullable=True, index=True),
 )
 
 # 21.1) ProEl - podpisy

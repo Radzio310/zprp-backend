@@ -2633,40 +2633,39 @@ async def generate_match_number(
     cat_code = _CATEGORY_CODES.get(effective_category, "")
     cat_gender = f"{cat_code}{gender}" if cat_code else gender
 
-    sibling_rows = await database.fetch_all(
-        select(
-            beach_tournaments.c.id,
-            beach_tournaments.c.event_date,
-            beach_tournaments.c.competition_type,
-            beach_tournaments.c.category,
-            beach_tournaments.c.data_json,
-        )
+    # Stabilny, globalnie unikalny dyskryminator turnieju w numerze meczu.
+    #
+    # Wcześniej używano pozycji turnieju wśród "rodzeństwa" (sort po event_date),
+    # która PRZESUWAŁA się przy dodaniu/edycji wcześniejszego turnieju → ten sam
+    # numer (np. P/SM/3/1) trafiał do dwóch różnych turniejów i mecze ProEl się
+    # nakładały. Teraz:
+    #   • jeśli ten turniej ma już ponumerowane mecze → trzymamy jego dotychczasowy
+    #     dyskryminator (spójność wewnątrz turnieju, ZERO przenumerowania),
+    #   • w przeciwnym razie używamy tournament_id (unikalny i stały na zawsze).
+    schedule_matches: list = []
+    current_tour_rows = await database.fetch_all(
+        select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
     )
-    siblings = []
-    effective_competition = row_d.get("competition_type")
-    for sibling in sibling_rows:
-        sd = dict(sibling)
-        if (sd.get("competition_type") or "") != (effective_competition or ""):
-            continue
-        if (sd.get("category") or "") != (effective_category or ""):
-            continue
-        if not await _tournament_includes_gender(sd.get("data_json"), gender):
-            continue
-        siblings.append(sd)
-    siblings.sort(
-        key=lambda x: (
-            x.get("event_date") or datetime.max.replace(tzinfo=timezone.utc),
-            x.get("id") or 0,
-        )
-    )
-    tournament_ordinal = next(
-        (idx + 1 for idx, item in enumerate(siblings) if item.get("id") == tournament_id),
-        1,
-    )
+    for tour_row in current_tour_rows:
+        tour_data = _parse_json(dict(tour_row)["data_json"])
+        schedule = tour_data.get("schedule") or {}
+        schedule_matches = schedule.get("matches") or []
 
-    pattern = f"{prefix}/{cat_gender}/{tournament_ordinal}/%"
+    existing_disc: Optional[str] = None
+    for m in schedule_matches:
+        mn = m.get("matchNumber") or m.get("match_number")
+        if not mn:
+            continue
+        parts = str(mn).split("/")
+        if len(parts) == 4 and parts[0] == prefix and parts[1] == cat_gender:
+            existing_disc = parts[2]
+            break
 
-    # 1) Numbers already used in beach_proel_matches for this tournament ordinal.
+    discriminator = existing_disc if existing_disc is not None else str(tournament_id)
+
+    pattern = f"{prefix}/{cat_gender}/{discriminator}/%"
+
+    # 1) Numbers already used in beach_proel_matches for this discriminator.
     existing_rows = await database.fetch_all(
         select(beach_proel_matches.c.match_number).where(
             beach_proel_matches.c.match_number.like(pattern)
@@ -2682,35 +2681,29 @@ async def generate_match_number(
                 pass
 
     # 2) Numbers already assigned in this tournament schedule.
-    current_tour_rows = await database.fetch_all(
-        select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == tournament_id)
-    )
-    for tour_row in current_tour_rows:
-        tour_data = _parse_json(dict(tour_row)["data_json"])
-        schedule = tour_data.get("schedule") or {}
-        for m in (schedule.get("matches") or []):
-            mn = m.get("matchNumber") or m.get("match_number")
-            if not mn:
-                continue
-            parts = str(mn).split("/")
-            if (
-                len(parts) == 4
-                and parts[0] == prefix
-                and parts[1] == cat_gender
-                and parts[2] == str(tournament_ordinal)
-            ):
-                try:
-                    seq_nums.append(int(parts[3]))
-                except ValueError:
-                    pass
+    for m in schedule_matches:
+        mn = m.get("matchNumber") or m.get("match_number")
+        if not mn:
+            continue
+        parts = str(mn).split("/")
+        if (
+            len(parts) == 4
+            and parts[0] == prefix
+            and parts[1] == cat_gender
+            and parts[2] == discriminator
+        ):
+            try:
+                seq_nums.append(int(parts[3]))
+            except ValueError:
+                pass
 
     next_seq = (max(seq_nums) + 1) if seq_nums else 1
-    match_number = f"{prefix}/{cat_gender}/{tournament_ordinal}/{next_seq}"
+    match_number = f"{prefix}/{cat_gender}/{discriminator}/{next_seq}"
 
     return {
         "match_number": match_number,
         "prefix": prefix,
-        "tournament_ordinal": tournament_ordinal,
+        "tournament_ordinal": int(discriminator) if discriminator.isdigit() else discriminator,
     }
 
 

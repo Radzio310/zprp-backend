@@ -895,6 +895,10 @@ class BeachProElMatchItem(BaseModel):
     updated_at: datetime
     data_json: Any
     status: str
+    # Powiązanie z meczem turnieju (z data_json.matchConfig.extras).
+    # Pozwala dopasować mecz ProEl po ID, a nie po współdzielonym match_number.
+    tournament_id: Optional[int] = None
+    schedule_match_id: Optional[str] = None
 
 class BeachProElListMatchesResponse(BaseModel):
     matches: List[BeachProElMatchItem]

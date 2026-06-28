@@ -809,6 +809,46 @@ async def startup():
         except Exception:
             pass  # sqlite or column already exists
 
+    # Beach ProEl: kolumny wiążące mecz z konkretnym meczem turnieju.
+    # match_number bywa współdzielony między turniejami (niestabilny ordinal),
+    # więc dopasowanie po samym numerze pokazywało wyniki obcych meczów.
+    # tournament_id / schedule_match_id pochodzą z data_json.matchConfig.extras.
+    # Backfill jest jednorazowy (tylko wiersze, które jeszcze nie mają wartości).
+    _beach_proel_link_migrations = [
+        "ALTER TABLE beach_proel_matches ADD COLUMN IF NOT EXISTS tournament_id INTEGER",
+        "ALTER TABLE beach_proel_matches ADD COLUMN IF NOT EXISTS schedule_match_id VARCHAR",
+        "CREATE INDEX IF NOT EXISTS ix_beach_proel_matches_tournament_id ON beach_proel_matches (tournament_id)",
+        "CREATE INDEX IF NOT EXISTS ix_beach_proel_matches_schedule_match_id ON beach_proel_matches (schedule_match_id)",
+        # Backfill tournament_id (matchConfig.extras → extras → top-level).
+        # Regex-guard przy rzutowaniu: pojedynczy nietypowy wiersz nie może
+        # wywrócić całego UPDATE (inaczej backfill nie wykonałby się wcale).
+        r"""
+        UPDATE beach_proel_matches SET tournament_id = COALESCE(
+            CASE WHEN data_json->'matchConfig'->'extras'->>'tournamentId' ~ '^[0-9]+$'
+                 THEN (data_json->'matchConfig'->'extras'->>'tournamentId')::int END,
+            CASE WHEN data_json->'extras'->>'tournamentId' ~ '^[0-9]+$'
+                 THEN (data_json->'extras'->>'tournamentId')::int END,
+            CASE WHEN data_json->>'tournamentId' ~ '^[0-9]+$'
+                 THEN (data_json->>'tournamentId')::int END
+        )
+        WHERE tournament_id IS NULL
+        """,
+        # Backfill schedule_match_id (matchConfig.extras → extras → top-level)
+        """
+        UPDATE beach_proel_matches SET schedule_match_id = COALESCE(
+            NULLIF(data_json->'matchConfig'->'extras'->>'scheduleMatchId', ''),
+            NULLIF(data_json->'extras'->>'scheduleMatchId', ''),
+            NULLIF(data_json->>'scheduleMatchId', '')
+        )
+        WHERE schedule_match_id IS NULL
+        """,
+    ]
+    for stmt in _beach_proel_link_migrations:
+        try:
+            await database.execute(stmt)
+        except Exception:
+            pass  # sqlite / kolumna już istnieje / data_json bez extras
+
     # Beach tournament migrations (tylko kolumny dodawane do istniejących tabel,
     # bo nowe tabele tworzy metadata.create_all w db.py)
     _beach_tournament_migrations = [

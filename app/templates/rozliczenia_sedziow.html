@@ -98,7 +98,7 @@
     }
     .summary-grid {
       display: grid;
-      grid-template-columns: repeat(6, 1fr);
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 0;
     }
     .summary-metric { text-align: center; }
@@ -114,7 +114,7 @@
     /* ─── JUDGE GRID (bulk 2 col) ────────────────────────────── */
     .judges-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 10pt;
       margin-bottom: 14pt;
     }
@@ -122,6 +122,8 @@
     /* ─── JUDGE CARD ─────────────────────────────────────────── */
     .judge {
       break-inside: avoid;
+      min-width: 0;
+      max-width: 100%;
       border: 0.8pt solid {{ accent }}22;
       border-radius: 10pt;
       overflow: hidden;
@@ -188,7 +190,7 @@
     .pill-local { background: #f0f0f0; color: #777; }
 
     /* breakdown mini tiles */
-    .breakdown { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4pt; margin-top: 8pt; }
+    .breakdown { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4pt; margin-top: 8pt; }
     .mini {
       padding: 5pt 3pt;
       border-radius: 6pt;
@@ -238,7 +240,7 @@
     .judge-single .judge-total { font-size: 20pt; }
     .judge-single .judge-body { padding: 11pt 15pt 15pt; }
     .judge-single table td { font-size: 10pt; padding: 6pt 4pt; }
-    .judge-single .breakdown { grid-template-columns: repeat(6, 1fr); gap: 6pt; }
+    .judge-single .breakdown { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6pt; }
     .judge-single .mini { padding: 7pt 5pt; }
     .judge-single .mini strong { font-size: 12pt; }
     .judge-single .mini span { font-size: 7pt; }
