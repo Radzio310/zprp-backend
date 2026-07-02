@@ -1158,10 +1158,13 @@ async def host_update_tournament(
 
         # "Gospodarz wszędzie" (Obsadowy) zarządza każdym turniejem.
         if "tournament.actAsHostEverywhere" not in caps:
-            if "tournament.announcements.edit" not in caps:
-                raise HTTPException(403, "Brak uprawnień do edycji ogłoszeń")
-
-            # Sprawdź czy user jest hostem tego konkretnego turnieju
+            # Gospodarz TEGO turnieju (wpisany w data_json.hosts) może edytować
+            # ogłoszenia ORAZ drużyny (invited_team_ids / custom_teams) — spójnie
+            # z frontem, gdzie rola gospodarza (isHost) daje zarówno canEditAnn,
+            # jak i canEditTournamentBasics. Wcześniej cały endpoint był
+            # bramkowany capem "tournament.announcements.edit", przez co gospodarz
+            # bez tego konkretnego capa dostawał 403 przy edycji drużyn (mimo że
+            # front pokazywał mu przycisk "Edytuj drużyny").
             hosts = data.get("hosts") or []
             host_ids = {int(h["id"]) for h in hosts if isinstance(h, dict) and "id" in h}
             if current_user_id not in host_ids:
