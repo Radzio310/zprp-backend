@@ -1873,6 +1873,226 @@ async def disq_update_tournament(
     return _attach_computed_fields(row_d, data2, current_user_id)
 
 
+# ───────────── GET carried-disqualifications (kary z poprzednich turniejów) ─────────────
+
+class CarriedDisqualification(BaseModel):
+    """Niedodsiedziana dyskwalifikacja przeniesiona z wcześniejszego turnieju
+    tej samej kategorii i tego samego sezonu (roku event_date)."""
+    id: str
+    origin_tournament_id: int
+    origin_tournament_name: str
+    origin_event_date: Optional[str] = None
+    match_id: Optional[str] = None
+    team_id: Optional[int] = None
+    custom_team_id: Optional[str] = None
+    team_name: str
+    jersey: int = 0
+    player_id: Optional[int] = None
+    player_name: str
+    player_photo_url: Optional[str] = None
+    companion_role: Optional[str] = None
+    description: str = ""
+    ban_matches: int = 0
+    served_matches: int = 0
+    remaining_ban: int = 0
+    decided_at: Optional[str] = None
+
+
+class CarriedDisqualificationsResponse(BaseModel):
+    carried: List[CarriedDisqualification]
+
+
+def _disq_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _is_match_entry(entry: Any) -> bool:
+    """Odpowiednik frontowego isScheduleMatchEntry()."""
+    if not isinstance(entry, dict):
+        return False
+    return entry.get("kind") not in ("court_break", "tournament_opening")
+
+
+def _match_sort_key(m: dict) -> int:
+    """Odpowiednik frontowego sortKey() z DisqualificationsTab."""
+    parts = str(m.get("startTime") or "00:00").split(":")
+    h = _disq_int(parts[0], 0) if len(parts) > 0 else 0
+    mm = _disq_int(parts[1], 0) if len(parts) > 1 else 0
+    return (_disq_int(m.get("dayIndex"), 0) or 0) * 10000 + (h or 0) * 60 + (mm or 0)
+
+
+def _schedule_matches(data: dict) -> List[dict]:
+    sched = data.get("schedule") or {}
+    matches = sched.get("matches") if isinstance(sched, dict) else None
+    return [m for m in matches if _is_match_entry(m)] if isinstance(matches, list) else []
+
+
+def _team_plays_match(
+    m: dict, team_id: Optional[int], team_name: str, red_gender: Optional[str]
+) -> bool:
+    """Czy drużyna gra w meczu m — mirror predykatu getBannedMatches()."""
+    a = m.get("teamA") if isinstance(m.get("teamA"), dict) else {}
+    b = m.get("teamB") if isinstance(m.get("teamB"), dict) else {}
+    is_my = (
+        (team_id is not None and (a.get("id") == team_id or b.get("id") == team_id))
+        or a.get("name") == team_name
+        or b.get("name") == team_name
+    )
+    if not is_my:
+        return False
+    if red_gender is not None and m.get("gender") != red_gender:
+        return False
+    return True
+
+
+@router.get(
+    "/{tournament_id}/carried-disqualifications",
+    response_model=CarriedDisqualificationsResponse,
+    summary="Niedodsiedziane dyskwalifikacje z wcześniejszych turniejów tej kategorii/sezonu",
+)
+async def carried_disqualifications(
+    tournament_id: int,
+    current_user_id: Optional[int] = Depends(beach_get_optional_user_id),
+):
+    """Zwraca dyskwalifikacje z wcześniejszych turniejów tej samej kategorii i tego
+    samego sezonu (roku event_date), które nie zostały w pełni odbyte, a dotyczą
+    drużyn obecnych w bieżącym turnieju. „Odbyte" mecze liczone są kumulacyjnie ze
+    wszystkich wcześniejszych turniejów sezonu (mecze drużyny po meczu z kartką)."""
+    current = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not current:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+    cur_d = dict(current)
+    cur_data = _parse_json(cur_d["data_json"])
+
+    cur_date = cur_d.get("event_date")
+    year = (str(cur_date) if cur_date is not None else "")[:4]
+    category = cur_d.get("category")
+    comp = cur_d.get("competition_type")
+
+    # Drużyny obecne w bieżącym turnieju
+    present_regular_ids = {
+        _disq_int(tid) for tid in (cur_data.get("invited_team_ids") or [])
+    }
+    present_regular_ids.discard(None)
+    present_custom_names = {
+        str(ct.get("name"))
+        for ct in (cur_data.get("custom_teams") or [])
+        if isinstance(ct, dict) and ct.get("name")
+    }
+    if not present_regular_ids and not present_custom_names:
+        return CarriedDisqualificationsResponse(carried=[])
+
+    # Wcześniejsze turnieje tej samej kategorii + typu rozgrywek + roku
+    rows = await database.fetch_all(
+        select(beach_tournaments)
+        .where(
+            beach_tournaments.c.category == category,
+            beach_tournaments.c.event_date < cur_date,
+        )
+        .order_by(beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc())
+    )
+    parsed_prev: List[dict] = []
+    for r in rows:
+        rd = dict(r)
+        if str(rd.get("event_date") or "")[:4] != year:
+            continue
+        if rd.get("competition_type") != comp:
+            continue
+        data = _parse_json(rd["data_json"])
+        parsed_prev.append({
+            "id": int(rd["id"]),
+            "name": rd.get("name", ""),
+            "event_date": str(rd.get("event_date") or ""),
+            "data": data,
+            "matches": _schedule_matches(data),
+        })
+    if not parsed_prev:
+        return CarriedDisqualificationsResponse(carried=[])
+
+    carried: List[CarriedDisqualification] = []
+
+    for idx, origin in enumerate(parsed_prev):
+        for d in (origin["data"].get("disqualifications") or []):
+            if not isinstance(d, dict):
+                continue
+            ban = _disq_int(d.get("ban_matches"), 0) or 0
+            if ban <= 0 or not d.get("decided_at"):
+                continue
+
+            d_team_id = _disq_int(d.get("team_id"))
+            d_team_name = str(d.get("team_name") or "")
+
+            present = (
+                (d_team_id is not None and d_team_id in present_regular_ids)
+                or (d_team_name in present_custom_names)
+            )
+            if not present:
+                continue
+
+            # Mecz z kartką w turnieju źródłowym
+            match_id = d.get("match_id")
+            red_key = -1
+            red_gender = None
+            if match_id:
+                for m in origin["matches"]:
+                    if m.get("matchNumber") == match_id or m.get("id") == match_id:
+                        red_key = _match_sort_key(m)
+                        red_gender = m.get("gender")
+                        break
+
+            # Mecze „odbywające" ban, chronologicznie: origin po kartce +
+            # wszystkie późniejsze (a wciąż wcześniejsze od bieżącego) turnieje.
+            serving = sorted(
+                (
+                    m for m in origin["matches"]
+                    if _team_plays_match(m, d_team_id, d_team_name, red_gender)
+                    and _match_sort_key(m) > red_key
+                ),
+                key=_match_sort_key,
+            )
+            for later in parsed_prev[idx + 1:]:
+                serving.extend(sorted(
+                    (
+                        m for m in later["matches"]
+                        if _team_plays_match(m, d_team_id, d_team_name, red_gender)
+                    ),
+                    key=_match_sort_key,
+                ))
+
+            served = min(len(serving), ban)
+            remaining = ban - served
+            if remaining <= 0:
+                continue
+
+            carried.append(CarriedDisqualification(
+                id=f"{origin['id']}:{d.get('id')}",
+                origin_tournament_id=origin["id"],
+                origin_tournament_name=origin["name"],
+                origin_event_date=origin["event_date"],
+                match_id=match_id,
+                team_id=d_team_id,
+                custom_team_id=d.get("custom_team_id"),
+                team_name=d_team_name,
+                jersey=_disq_int(d.get("jersey"), 0) or 0,
+                player_id=_disq_int(d.get("player_id")),
+                player_name=str(d.get("player_name") or ""),
+                player_photo_url=d.get("player_photo_url"),
+                companion_role=d.get("companion_role"),
+                description=str(d.get("description") or ""),
+                ban_matches=ban,
+                served_matches=served,
+                remaining_ban=remaining,
+                decided_at=d.get("decided_at"),
+            ))
+
+    return CarriedDisqualificationsResponse(carried=carried)
+
+
 _SCHEDULE_JSON_SCHEMA = """\
 {
   "config": {
