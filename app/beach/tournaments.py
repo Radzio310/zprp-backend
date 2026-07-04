@@ -1261,7 +1261,16 @@ async def coach_custom_team_update(
 
     user_is_admin = await _is_admin(current_user_id)
 
-    # Find the custom team and verify coach ownership (or admin)
+    # Sędzia główny turnieju ma w „Mój zespół" te same akcje co admin
+    # (parytet z squad_update_tournament) — może zarządzać składem KAŻDEJ drużyny
+    # customowej, nie tylko własnej.
+    _head_judge_id = data.get("head_judge_id")
+    is_head_judge = (
+        isinstance(_head_judge_id, int) and _head_judge_id == current_user_id
+    )
+    is_privileged = user_is_admin or is_head_judge
+
+    # Find the custom team and verify coach ownership (or admin / head judge)
     custom_teams = data.get("custom_teams") or []
     team_idx = None
     for idx, ct in enumerate(custom_teams):
@@ -1272,7 +1281,7 @@ async def coach_custom_team_update(
     if team_idx is None:
         raise HTTPException(404, "Nie znaleziono drużyny")
 
-    if not user_is_admin:
+    if not is_privileged:
         existing_ct = custom_teams[team_idx]
         if existing_ct.get("coach_user_id") != current_user_id:
             raise HTTPException(403, "Nie jesteś trenerem tej drużyny")
@@ -1280,8 +1289,8 @@ async def coach_custom_team_update(
     # Merge: preserve the id and coach_user_id from existing, update the rest
     updated_ct = body.custom_team
     updated_ct["id"] = body.custom_team_id
-    # Preserve coach_user_id unless admin explicitly changes it
-    if not user_is_admin and "coach_user_id" in custom_teams[team_idx]:
+    # Preserve coach_user_id unless admin/head judge explicitly changes it
+    if not is_privileged and "coach_user_id" in custom_teams[team_idx]:
         updated_ct["coach_user_id"] = custom_teams[team_idx]["coach_user_id"]
 
     custom_teams[team_idx] = updated_ct
