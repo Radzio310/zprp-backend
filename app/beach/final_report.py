@@ -1171,6 +1171,20 @@ def _build_placement_brackets(matches: List[Dict[str, Any]], color: str) -> List
     ]
 
     sections = []
+    has_main_semifinals = any(m.get("stage") == "semifinal" for m in matches)
+    third_place_match = next(
+        (m for m in matches if m.get("stage") == "third_place"), None
+    )
+    if third_place_match and not has_main_semifinals:
+        sections.append({
+            "title": "O 3. miejsce",
+            "svg": _render_single_match_svg(
+                third_place_match,
+                color,
+                "O 3. miejsce",
+            ),
+        })
+
     for cfg in configs:
         semis = sorted(
             [m for m in matches if m.get("stage") == cfg["semi_stage"]],
@@ -1515,6 +1529,8 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         raw_te = [] if req.stage_grant else tie_expl_by_gender.get(gender, [])
         if raw_te:
             _crit_labels = {
+                "all_points": "suma punkt\u00f3w ze wszystkich turniej\u00f3w sezonu",
+                "last_tournament": "wy\u017csze miejsce w ostatnim turnieju",
                 "wins": "wygrane mecze bezpośrednie",
                 "sets": "stosunek setów w meczach bezpośrednich",
                 "brk": "stosunek punktów brk w meczach bezpośrednich",
