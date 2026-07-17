@@ -988,19 +988,20 @@ def _fill_regular_team_squad(
     companions = roster_data.get("companions_json") or []
 
     # Determine selected player IDs.
-    # Priority: per-match override (coach changed squad for THIS match) → protocol
-    # squad ("skład do protokołu") → tournament default squad → fallback all roster.
+    # Priority: protocol squad ("skład do protokołu" — lista uprawnionych na pusty
+    # protokół, max 15/12) → per-match override (skład na mecz, max 10 — służy
+    # ekranowi meczowemu, nie kartce) → tournament default squad → fallback all roster.
     match_overrides = squad_entry.get("match_overrides") or {}
     match_override = match_overrides.get(match_id) or {}
     override_player_ids = match_override.get("players") or []
     protocol_ids = squad_entry.get("protocol_players") or []
     default_ids = squad_entry.get("default_players") or []
-    if override_player_ids:
-        selected_player_ids = override_player_ids
-        coach_overrode = True  # respect the coach's explicit per-match choice
-    elif protocol_ids:
+    if protocol_ids:
         selected_player_ids = protocol_ids
         coach_overrode = False
+    elif override_player_ids:
+        selected_player_ids = override_player_ids
+        coach_overrode = True  # respect the coach's explicit per-match choice
     else:
         selected_player_ids = default_ids
         coach_overrode = False
