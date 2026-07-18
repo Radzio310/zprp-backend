@@ -360,6 +360,7 @@ class BroadcastRequest(BaseModel):
     title: str
     body: str
     target_user_ids: List[int]
+    tournament_id: Optional[int] = None
 
 
 @router.post("/broadcast")
@@ -392,16 +393,20 @@ async def broadcast_notification(
     if not valid_ids:
         return {"ok": True, "sent_to": 0}
 
+    notification_data: Dict[str, Any] = {"sender_id": user_id}
+    if req.tournament_id is not None:
+        notification_data["tournament_id"] = req.tournament_id
+
     await create_notification(
         notif_type="admin_broadcast",
         title=req.title.strip(),
         body=req.body.strip(),
-        data={"sender_id": user_id},
+        data=notification_data,
         target_user_ids=valid_ids,
     )
 
     # ── Activity log ──
-    await log_activity(area="system", action="broadcast.sent", actor_user_id=user_id, actor_name=await get_actor_name(user_id), details={"title": req.title.strip(), "recipients_count": len(valid_ids)})
+    await log_activity(area="system", action="broadcast.sent", actor_user_id=user_id, actor_name=await get_actor_name(user_id), details={"title": req.title.strip(), "recipients_count": len(valid_ids), "tournament_id": req.tournament_id})
 
     return {"ok": True, "sent_to": len(valid_ids)}
 
