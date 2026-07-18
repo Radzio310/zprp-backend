@@ -87,6 +87,7 @@ async def create_notification(
 
     # 2) Optionally schedule FCM push for users with devices + enabled pref
     asyncio.ensure_future(_schedule_push_for_users(
+        notification_id=int(notif_id),
         notif_type=notif_type,
         title=title,
         body=body,
@@ -415,6 +416,7 @@ async def broadcast_notification(
 
 async def _schedule_push_for_users(
     *,
+    notification_id: int,
     notif_type: str,
     title: str,
     body: str,
@@ -450,7 +452,12 @@ async def _schedule_push_for_users(
             if not device_ids:
                 continue
 
-            push_data = {**data, "notif_type": notif_type}
+            push_data = {
+                **data,
+                "notif_type": notif_type,
+                "notification_id": notification_id,
+                "recipient_user_id": int(user_id),
+            }
 
             for installation_id in device_ids:
                 try:
@@ -560,7 +567,8 @@ async def mark_notifications_read(
         # Append user_id to read_user_ids if not already there
         row = await database.fetch_one(
             select(beach_notifications.c.read_user_ids).where(
-                beach_notifications.c.id == nid
+                beach_notifications.c.id == nid,
+                beach_notifications.c.target_user_ids.any(user_id),
             )
         )
         if not row:
@@ -570,7 +578,10 @@ async def mark_notifications_read(
             read_ids.append(user_id)
             await database.execute(
                 update(beach_notifications)
-                .where(beach_notifications.c.id == nid)
+                .where(
+                    beach_notifications.c.id == nid,
+                    beach_notifications.c.target_user_ids.any(user_id),
+                )
                 .values(read_user_ids=read_ids)
             )
 

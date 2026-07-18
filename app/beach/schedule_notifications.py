@@ -126,7 +126,7 @@ async def _schedule_match_push(
         return  # match already starting soon or in the past
 
     send_hour = int(send_at.timestamp() // 3600)
-    push_data = {**data, "notif_type": notif_type}
+    base_push_data = {**data, "notif_type": notif_type}
 
     rows = await database.fetch_all(
         select(
@@ -144,6 +144,10 @@ async def _schedule_match_push(
         if not prefs.get(notif_type, True):
             continue
         device_ids: List[str] = list(row["device_ids"] or [])
+        push_data = {
+            **base_push_data,
+            "recipient_user_id": int(row["id"]),
+        }
         for installation_id in device_ids:
             try:
                 await database.execute(
