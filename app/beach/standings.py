@@ -214,7 +214,11 @@ def _compute_positions_from_schedule(
     """
     matches = schedule.get("matches") or []
     config = schedule.get("config") or {}
-    mode = config.get("mode", "roundRobin")
+    # Per-gender mode override (modeM/modeK) wins over the shared mode —
+    # same resolution as resolveScheduleMode() in scheduleTypes.ts.
+    per_mode = config.get("modeM") if gender == "M" else config.get("modeK")
+    mode = per_mode or config.get("mode", "roundRobin")
+    lotteries = schedule.get("groupLotteries") or []
 
     gender_matches = [m for m in matches if m.get("gender") == gender]
     if not gender_matches:
@@ -235,9 +239,14 @@ def _compute_positions_from_schedule(
 
     teams_count = len(teams)
 
-    # Tryb: groupsPlusKnockout — pozycje z meczów finałowych
-    if mode == "groupsPlusKnockout":
-        return _positions_from_knockout(gender_matches, teams, teams_count)
+    # Tryby z meczami o miejsca: groupsPlusKnockout i globalTour.
+    # Global Tour: finał → 1-2, mecz o 3. → 3-4, o 5. → 5-6, tabela barażowa
+    # (placement_rr, grupa globaltour_baraz_*) → kolejne wolne pozycje.
+    if mode in ("groupsPlusKnockout", "globalTour"):
+        return _positions_from_knockout(
+            gender_matches, teams, teams_count,
+            lotteries=lotteries, gender=gender,
+        )
 
     # Tryb: roundRobin
     return _positions_from_round_robin(gender_matches, teams, teams_count)
@@ -269,12 +278,14 @@ def _positions_from_knockout(
     matches: List[Dict],
     teams: Dict[int, str],
     teams_count: int,
+    lotteries: Optional[List[Dict]] = None,
+    gender: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Oblicza pozycje na podstawie meczów finałowych, barażów i tabel o miejsca.
     Obsługuje: final, third_place, fifth_place, seventh_place,
     ninth_place, eleventh_place, thirteenth_place, fifteenth_place,
-    playoff tables (baraże), placement_rr tables.
+    playoff tables (baraże), placement_rr tables (w tym baraż Global Tour).
     """
     # Direct knockout matches → winner gets lower position, loser gets higher
     stage_to_positions: Dict[str, List[int]] = {
@@ -326,7 +337,7 @@ def _positions_from_knockout(
     for pg, pg_matches in sorted(playoff_groups.items()):
         # Determine starting position: teams in this playoff that are NOT
         # already assigned from knockout matches get positions after assigned ones
-        table = _compute_mini_table(pg_matches)
+        table = _compute_mini_table(pg_matches, lotteries=lotteries, group=pg, gender=gender)
         # Find what position this playoff feeds into
         # Already-assigned teams from this playoff get skipped
         unassigned_rows = [r for r in table if r["team_id"] not in assigned]
@@ -348,11 +359,13 @@ def _positions_from_knockout(
             placement_groups[pg].append(m)
 
     for pg, pg_matches in sorted(placement_groups.items()):
-        # Extract tier number from group name (placement_7_K → 7)
+        # Extract tier number from group name (placement_7_K → 7).
+        # Global Tour baraż (globaltour_baraz_*) has no tier in its name —
+        # it takes the next free positions after final/third_place (3-5 or 5-7).
         import re
         tier_m = re.match(r"placement_(\d+)", pg)
         tier_start = int(tier_m.group(1)) if tier_m else (max(assigned.values(), default=0) + 1)
-        table = _compute_mini_table(pg_matches)
+        table = _compute_mini_table(pg_matches, lotteries=lotteries, group=pg, gender=gender)
         pos = tier_start
         for r in table:
             if r["team_id"] not in assigned:
@@ -380,10 +393,18 @@ def _positions_from_knockout(
 
 def _compute_mini_table(
     matches: List[Dict],
+    lotteries: Optional[List[Dict]] = None,
+    group: Optional[str] = None,
+    gender: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Compute a mini standings table from a set of round-robin matches.
-    Returns list sorted by match points desc, set diff desc, brk diff desc."""
+
+    Mirrors resolveTiedBucket() in scheduleUtils.ts: match points, then among
+    tied teams the head-to-head chain (points, set diff, sets won, point diff,
+    points for), then the overall chain (same metrics across the whole group),
+    then the referee lottery stored in schedule.groupLotteries."""
     stats: Dict[int, Dict] = {}
+    finished: List[Dict] = []
 
     for m in matches:
         ta = m.get("teamA")
@@ -403,6 +424,7 @@ def _compute_mini_table(
         sb = m.get("scoreB")
         if sa is None or sb is None or m.get("status") != "finished":
             continue
+        finished.append(m)
         sa, sb = int(sa), int(sb)
         stats[ta_id]["sw"] += sa
         stats[ta_id]["sl"] += sb
@@ -423,11 +445,128 @@ def _compute_mini_table(
             stats[tb_id]["brkp"] += pb
             stats[tb_id]["brkm"] += pa
 
-    return sorted(
-        stats.values(),
-        key=lambda r: (r["pts"], r["sw"] - r["sl"], r["brkp"] - r["brkm"]),
-        reverse=True,
-    )
+    rows = sorted(stats.values(), key=lambda r: -r["pts"])
+    result: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(rows):
+        j = i
+        while j < len(rows) and rows[j]["pts"] == rows[i]["pts"]:
+            j += 1
+        result.extend(
+            _resolve_tied_mini_rows(rows[i:j], finished, lotteries, group, gender)
+        )
+        i = j
+    return result
+
+
+def _mini_h2h_stats(
+    team_ids: set, finished: List[Dict]
+) -> Dict[int, Dict[str, int]]:
+    """Head-to-head stats counted only over matches among the tied teams."""
+    h2h = {tid: {"pts": 0, "sw": 0, "sl": 0, "brkp": 0, "brkm": 0}
+           for tid in team_ids}
+    for m in finished:
+        ta_id = (m.get("teamA") or {}).get("id")
+        tb_id = (m.get("teamB") or {}).get("id")
+        if ta_id not in h2h or tb_id not in h2h:
+            continue
+        sa, sb = int(m.get("scoreA")), int(m.get("scoreB"))
+        h2h[ta_id]["sw"] += sa
+        h2h[ta_id]["sl"] += sb
+        h2h[tb_id]["sw"] += sb
+        h2h[tb_id]["sl"] += sa
+        if sa > sb:
+            h2h[ta_id]["pts"] += 2
+        else:
+            h2h[tb_id]["pts"] += 2
+        for s in (m.get("sets") or []):
+            pa = s.get("ptA", 0) or 0
+            pb = s.get("ptB", 0) or 0
+            h2h[ta_id]["brkp"] += pa
+            h2h[ta_id]["brkm"] += pb
+            h2h[tb_id]["brkp"] += pb
+            h2h[tb_id]["brkm"] += pa
+    return h2h
+
+
+def _lottery_resolved_order(
+    tied_ids: List[int],
+    lotteries: Optional[List[Dict]],
+    group: Optional[str],
+    gender: Optional[str],
+) -> Optional[Dict[int, int]]:
+    """Find a referee lottery result for exactly this set of tied teams."""
+    if not lotteries:
+        return None
+    want = sorted(tied_ids)
+    for lot in lotteries:
+        if not isinstance(lot, dict):
+            continue
+        if lot.get("scope") != "group":
+            continue
+        if group is not None and lot.get("group") != group:
+            continue
+        if gender is not None and lot.get("gender") != gender:
+            continue
+        try:
+            ids_sorted = sorted(int(x) for x in (lot.get("tiedTeamIds") or []))
+        except (TypeError, ValueError):
+            continue
+        if ids_sorted != want:
+            continue
+        try:
+            return {int(t): idx for idx, t in enumerate(lot.get("resolvedOrder") or [])}
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _resolve_tied_mini_rows(
+    bucket: List[Dict],
+    finished: List[Dict],
+    lotteries: Optional[List[Dict]],
+    group: Optional[str],
+    gender: Optional[str],
+) -> List[Dict]:
+    """Order a bucket of teams tied on match points, like the app does."""
+    if len(bucket) <= 1:
+        return bucket
+    ids = {r["team_id"] for r in bucket}
+    h2h = _mini_h2h_stats(ids, finished)
+
+    def chain_key(r: Dict) -> tuple:
+        h = h2h[r["team_id"]]
+        return (
+            -h["pts"],
+            -(h["sw"] - h["sl"]),
+            -h["sw"],
+            -(h["brkp"] - h["brkm"]),
+            -h["brkp"],
+            -(r["sw"] - r["sl"]),
+            -r["sw"],
+            -(r["brkp"] - r["brkm"]),
+            -r["brkp"],
+        )
+
+    ordered = sorted(bucket, key=chain_key)
+    result: List[Dict] = []
+    i = 0
+    while i < len(ordered):
+        j = i
+        while j < len(ordered) and chain_key(ordered[j]) == chain_key(ordered[i]):
+            j += 1
+        still_tied = ordered[i:j]
+        if len(still_tied) > 1:
+            lot = _lottery_resolved_order(
+                [r["team_id"] for r in still_tied], lotteries, group, gender
+            )
+            if lot:
+                still_tied.sort(key=lambda r: lot.get(r["team_id"], 999))
+            else:
+                still_tied.sort(key=lambda r: r["team_id"])
+        result.extend(still_tied)
+        i = j
+    return result
 
 
 def _positions_from_round_robin(
