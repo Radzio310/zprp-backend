@@ -494,6 +494,7 @@ def _lottery_resolved_order(
     lotteries: Optional[List[Dict]],
     group: Optional[str],
     gender: Optional[str],
+    scope: str = "group",
 ) -> Optional[Dict[int, int]]:
     """Find a referee lottery result for exactly this set of tied teams."""
     if not lotteries:
@@ -502,7 +503,7 @@ def _lottery_resolved_order(
     for lot in lotteries:
         if not isinstance(lot, dict):
             continue
-        if lot.get("scope") != "group":
+        if lot.get("scope") != scope:
             continue
         if group is not None and lot.get("group") != group:
             continue

@@ -29,6 +29,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from app.beach.standings import _lottery_resolved_order
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Beach: Final Report"])
@@ -315,10 +317,17 @@ def _get_accent(category: str) -> str:
 def _compute_group_table(
     matches: List[Dict[str, Any]],
     advancing_count: int = 0,
+    lotteries: Optional[List[Dict[str, Any]]] = None,
+    group: Optional[str] = None,
+    gender: Optional[str] = None,
+    lottery_scope: str = "group",
 ) -> List[Dict[str, Any]]:
     """Compute group/round-robin standings from match results.
-    Scoring: Win = 2 pts, Loss = 0 pts (matches ResultsView.tsx)."""
+    Scoring: Win = 2 pts, Loss = 0 pts (matches ResultsView.tsx).
+    Ties resolved like the app (scheduleUtils.ts): head-to-head chain among
+    tied teams → overall chain → referee lottery from schedule.groupLotteries."""
     teams: Dict[int, Dict[str, Any]] = {}
+    finished: List[Dict[str, Any]] = []
 
     for m in matches:
         ta, tb = m.get("teamA"), m.get("teamB")
@@ -329,6 +338,7 @@ def _compute_group_table(
             tid = t["id"]
             if tid not in teams:
                 teams[tid] = {
+                    "team_id": tid,
                     "team_name": t.get("name", "?"),
                     "played": 0, "won": 0, "lost": 0,
                     "sets_won": 0, "sets_lost": 0,
@@ -337,6 +347,7 @@ def _compute_group_table(
                 }
         if sa is None or sb is None:
             continue
+        finished.append(m)
 
         aid, bid = ta["id"], tb["id"]
         teams[aid]["played"] += 1
@@ -364,22 +375,96 @@ def _compute_group_table(
             teams[bid]["brk_plus"] += pb
             teams[bid]["brk_minus"] += pa
 
-    # Sort: pts desc, set diff desc, brk diff desc
-    rows = sorted(
-        teams.values(),
-        key=lambda r: (
-            r["pts"],
-            r["sets_won"] - r["sets_lost"],
-            r["brk_plus"] - r["brk_minus"],
-        ),
-        reverse=True,
-    )
+    # Bucket by match points, resolve each tied bucket like the app does.
+    rows = sorted(teams.values(), key=lambda r: -r["pts"])
+    ordered: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(rows):
+        j = i
+        while j < len(rows) and rows[j]["pts"] == rows[i]["pts"]:
+            j += 1
+        ordered.extend(_order_tied_report_rows(
+            rows[i:j], finished, lotteries, group, gender, lottery_scope,
+        ))
+        i = j
 
-    for i, r in enumerate(rows):
+    for i, r in enumerate(ordered):
         r["pos"] = i + 1
         r["advancing"] = i < advancing_count
 
-    return rows
+    return ordered
+
+
+def _order_tied_report_rows(
+    bucket: List[Dict[str, Any]],
+    finished: List[Dict[str, Any]],
+    lotteries: Optional[List[Dict[str, Any]]],
+    group: Optional[str],
+    gender: Optional[str],
+    lottery_scope: str,
+) -> List[Dict[str, Any]]:
+    """Order a bucket of teams tied on match points: H2H chain (points, set
+    diff, sets won, point diff, points for) → overall chain → lottery."""
+    if len(bucket) <= 1:
+        return bucket
+    ids = {r["team_id"] for r in bucket}
+    h2h = {tid: {"pts": 0, "sw": 0, "sl": 0, "brkp": 0, "brkm": 0}
+           for tid in ids}
+    for m in finished:
+        aid = (m.get("teamA") or {}).get("id")
+        bid = (m.get("teamB") or {}).get("id")
+        if aid not in h2h or bid not in h2h:
+            continue
+        sa, sb = int(m.get("scoreA")), int(m.get("scoreB"))
+        h2h[aid]["sw"] += sa
+        h2h[aid]["sl"] += sb
+        h2h[bid]["sw"] += sb
+        h2h[bid]["sl"] += sa
+        if sa > sb:
+            h2h[aid]["pts"] += 2
+        else:
+            h2h[bid]["pts"] += 2
+        for s in _sets_with_third_set(m):
+            pa, pb = s.get("ptA", 0) or 0, s.get("ptB", 0) or 0
+            h2h[aid]["brkp"] += pa
+            h2h[aid]["brkm"] += pb
+            h2h[bid]["brkp"] += pb
+            h2h[bid]["brkm"] += pa
+
+    def chain_key(r: Dict[str, Any]) -> tuple:
+        h = h2h[r["team_id"]]
+        return (
+            -h["pts"],
+            -(h["sw"] - h["sl"]),
+            -h["sw"],
+            -(h["brkp"] - h["brkm"]),
+            -h["brkp"],
+            -(r["sets_won"] - r["sets_lost"]),
+            -r["sets_won"],
+            -(r["brk_plus"] - r["brk_minus"]),
+            -r["brk_plus"],
+        )
+
+    ordered = sorted(bucket, key=chain_key)
+    out: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(ordered):
+        j = i
+        while j < len(ordered) and chain_key(ordered[j]) == chain_key(ordered[i]):
+            j += 1
+        tied = ordered[i:j]
+        if len(tied) > 1:
+            lot = _lottery_resolved_order(
+                [r["team_id"] for r in tied], lotteries, group, gender,
+                scope=lottery_scope,
+            )
+            if lot:
+                tied.sort(key=lambda r: lot.get(r["team_id"], 999))
+            else:
+                tied.sort(key=lambda r: r["team_id"])
+        out.extend(tied)
+        i = j
+    return out
 
 
 # ──────────── Bracket computation ────────────
@@ -1081,7 +1166,11 @@ def _team_count(matches: List[Dict[str, Any]]) -> int:
     return len(ids)
 
 
-def _build_playoff_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_playoff_tables(
+    matches: List[Dict[str, Any]],
+    lotteries: Optional[List[Dict[str, Any]]] = None,
+    gender: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     groups = sorted(
         {
             m.get("group")
@@ -1104,12 +1193,19 @@ def _build_playoff_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         title = f"Baraże - {position}. miejsca" if position else "Baraże"
         tables.append({
             "title": title,
-            "rows": _compute_group_table(group_matches, advancing_count),
+            "rows": _compute_group_table(
+                group_matches, advancing_count,
+                lotteries=lotteries, group=group, gender=gender,
+            ),
         })
     return tables
 
 
-def _build_placement_rr_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_placement_rr_tables(
+    matches: List[Dict[str, Any]],
+    lotteries: Optional[List[Dict[str, Any]]] = None,
+    gender: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     groups = sorted(
         {
             m.get("group")
@@ -1130,7 +1226,10 @@ def _build_placement_rr_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, 
         if group.startswith("globaltour_baraz_"):
             tables.append({
                 "title": "Tabela barażowa",
-                "rows": _compute_group_table(group_matches),
+                "rows": _compute_group_table(
+                    group_matches,
+                    lotteries=lotteries, group=group, gender=gender,
+                ),
             })
             continue
         tier_match = re.match(r"placement_(\d+)", group)
@@ -1140,7 +1239,10 @@ def _build_placement_rr_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, 
         title = f"O miejsca {tier}-{end_place}" if tier and end_place else "O miejsca"
         tables.append({
             "title": title,
-            "rows": _compute_group_table(group_matches),
+            "rows": _compute_group_table(
+                group_matches,
+                lotteries=lotteries, group=group, gender=gender,
+            ),
         })
     return tables
 
@@ -1272,6 +1374,7 @@ def _build_placement_matches(
 def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
     schedule = req.schedule
     config = schedule.get("config") or {}
+    lotteries: List[Dict[str, Any]] = schedule.get("groupLotteries") or []
     matches: List[Dict[str, Any]] = [
         m for m in (schedule.get("matches") or []) if _is_real_match(m)
     ]
@@ -1379,7 +1482,11 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         if gmode == "roundRobin":
             group_matches = [m for m in g_matches if m.get("stage") == "group"]
             if group_matches:
-                rows = _compute_group_table(group_matches)
+                rows = _compute_group_table(
+                    group_matches,
+                    lotteries=lotteries, gender=gender,
+                    lottery_scope="roundRobin",
+                )
                 gs["tables"].append({"group_label": None, "rows": rows})
         else:
             # Groups + knockout
@@ -1395,7 +1502,10 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                         if m.get("stage") == "group" and m.get("group") == gn
                     ]
                     if gm:
-                        rows = _compute_group_table(gm, advancing_per_group)
+                        rows = _compute_group_table(
+                            gm, advancing_per_group,
+                            lotteries=lotteries, group=gn, gender=gender,
+                        )
                         gs["tables"].append({
                             "group_label": "Global" if is_global_tour else f"Grupa {gn}",
                             "rows": rows,
@@ -1412,7 +1522,10 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
                         if m.get("stage") == "group" and m.get("group") == gn
                     ]
                     if gm:
-                        rows = _compute_group_table(gm, 2)
+                        rows = _compute_group_table(
+                            gm, 2,
+                            lotteries=lotteries, group=gn, gender=gender,
+                        )
                         gs["tables"].append({
                             "group_label": "Global" if is_global_tour else f"Grupa {gn}",
                             "rows": rows,
