@@ -1193,17 +1193,22 @@ async def host_update_tournament(
         if target_ids:
             tour_name = existing_d.get("name", "Turniej")
             new_ann = body.announcements[old_announcements_count:]
-            ann_preview = new_ann[0].get("text", "") if new_ann and isinstance(new_ann[0], dict) else ""
+            ann_first = new_ann[0] if new_ann and isinstance(new_ann[0], dict) else {}
+            ann_preview = ann_first.get("text", "")
             if ann_preview and len(ann_preview) > 100:
                 ann_preview = ann_preview[:100] + "…"
             ann_body = f"📯 {tour_name}"
             if ann_preview:
                 ann_body += f"\n\u201c{ann_preview}\u201d"
+            notif_data: Dict[str, Any] = {"tournament_id": tournament_id}
+            # Deep-link: pozwala aplikacji podświetlić konkretne ogłoszenie
+            if ann_first.get("id"):
+                notif_data["announcement_id"] = ann_first.get("id")
             await create_notification(
                 notif_type="new_announcement",
                 title="📢 Nowe ogłoszenie od Gospodarza",
                 body=ann_body,
-                data={"tournament_id": tournament_id},
+                data=notif_data,
                 target_user_ids=target_ids,
             )
 
