@@ -1115,7 +1115,7 @@ def _build_placement_rr_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, 
             m.get("group")
             for m in matches
             if m.get("stage") == "placement_rr"
-            and (m.get("group") or "").startswith("placement_")
+            and (m.get("group") or "").startswith(("placement_", "globaltour_baraz_"))
         },
         key=_group_sort_key,
     )
@@ -1126,6 +1126,12 @@ def _build_placement_rr_tables(matches: List[Dict[str, Any]]) -> List[Dict[str, 
             if m.get("stage") == "placement_rr" and m.get("group") == group
         ]
         if not group_matches:
+            continue
+        if group.startswith("globaltour_baraz_"):
+            tables.append({
+                "title": "Tabela barażowa",
+                "rows": _compute_group_table(group_matches),
+            })
             continue
         tier_match = re.match(r"placement_(\d+)", group)
         tier = int(tier_match.group(1)) if tier_match else 0
