@@ -33,6 +33,7 @@ from app.beach.calendar import (
     sync_beach_tournament_google_for_users,
 )
 from app.beach.notifications import create_notification
+from app.beach.app_settings import get_role_caps
 from app.beach.capabilities import resolve_user_capabilities
 from app.beach.schedule_notifications import notify_schedule_updated
 from app.beach.activity_log import log_activity, get_actor_name, compute_diff, compute_list_diff
@@ -1161,14 +1162,38 @@ async def host_update_tournament(
             # Gospodarz TEGO turnieju (wpisany w data_json.hosts) może edytować
             # ogłoszenia ORAZ drużyny (invited_team_ids / custom_teams) — spójnie
             # z frontem, gdzie rola gospodarza (isHost) daje zarówno canEditAnn,
-            # jak i canEditTournamentBasics. Wcześniej cały endpoint był
-            # bramkowany capem "tournament.announcements.edit", przez co gospodarz
-            # bez tego konkretnego capa dostawał 403 przy edycji drużyn (mimo że
-            # front pokazywał mu przycisk "Edytuj drużyny").
+            # jak i canEditTournamentBasics.
             hosts = data.get("hosts") or []
             host_ids = {int(h["id"]) for h in hosts if isinstance(h, dict) and "id" in h}
             if current_user_id not in host_ids:
-                raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
+                # Nie-gospodarz może przez ten endpoint edytować WYŁĄCZNIE
+                # ogłoszenia — spójnie z frontowym canEditAnn (sędzia główny
+                # lub cap "tournament.announcements.edit": z badge'a albo
+                # z role-caps sędziego tego turnieju). Edycja drużyn pozostaje
+                # dla gospodarza/admina (front: canEditTournamentBasics).
+                head_judge_id = data.get("head_judge_id")
+                is_head_judge = (
+                    isinstance(head_judge_id, int) and head_judge_id == current_user_id
+                )
+                can_edit_ann = is_head_judge or "tournament.announcements.edit" in caps
+                if not can_edit_ann:
+                    judge_ids = {
+                        int(j["id"])
+                        for j in (data.get("judges") or [])
+                        if isinstance(j, dict) and isinstance(j.get("id"), int)
+                    }
+                    if current_user_id in judge_ids:
+                        role_caps = await get_role_caps()
+                        judge_tournament_caps = (
+                            (role_caps.get("judge") or {}).get("tournament") or []
+                        )
+                        can_edit_ann = (
+                            "tournament.announcements.edit" in judge_tournament_caps
+                        )
+                if not can_edit_ann:
+                    raise HTTPException(403, "Nie jesteś gospodarzem tych zawodów")
+                if body.invited_team_ids is not None or body.custom_teams is not None:
+                    raise HTTPException(403, "Edycję drużyn ma tylko gospodarz zawodów")
 
     # Scal tylko dozwolone pola (nie nadpisuj reszty data_json)
     old_announcements_count = len(data.get("announcements") or [])
@@ -1206,7 +1231,7 @@ async def host_update_tournament(
                 notif_data["announcement_id"] = ann_first.get("id")
             await create_notification(
                 notif_type="new_announcement",
-                title="📢 Nowe ogłoszenie od Gospodarza",
+                title="📢 Nowe ogłoszenie",
                 body=ann_body,
                 data=notif_data,
                 target_user_ids=target_ids,
