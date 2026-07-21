@@ -204,7 +204,7 @@ def _team_name(team: Optional[Dict[str, Any]]) -> str:
 
 def _is_real_match(m: Dict[str, Any]) -> bool:
     kind = m.get("kind") or "match"
-    if kind in {"court_break", "tournament_opening"}:
+    if kind in {"court_break", "tournament_opening", "special_event"}:
         return False
     return kind == "match" or bool(m.get("matchNumber") or m.get("teamA") or m.get("teamB"))
 
@@ -415,7 +415,7 @@ def _build_context(req: DailyReportRequest) -> Dict[str, Any]:
     # Count already-played matches per gender for numbering continuity
     for m in all_matches:
         kind = m.get("kind") or "match"
-        if kind in ("court_break", "tournament_opening"):
+        if kind in ("court_break", "tournament_opening", "special_event"):
             continue
         di = int(m.get("dayIndex") or 0)
         g = m.get("gender") or ""
@@ -447,6 +447,19 @@ def _build_context(req: DailyReportRequest) -> Dict[str, Any]:
                     "type": "tournament_opening",
                     "time": m.get("startTime") or "",
                     "label": m.get("label") or "Otwarcie turnieju",
+                    "duration": m.get("durationMinutes") or 0,
+                })
+                continue
+            if kind == "special_event":
+                court_val = m.get("court")
+                all_courts = court_val in (0, "0", None, "")
+                rows.append({
+                    "type": "special_event",
+                    "time": m.get("startTime") or "",
+                    "court": "" if all_courts else str(court_val),
+                    "all_courts": all_courts,
+                    "label": m.get("label") or "Wydarzenie",
+                    "emoji": m.get("emoji") or "",
                     "duration": m.get("durationMinutes") or 0,
                 })
                 continue

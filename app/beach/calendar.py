@@ -73,7 +73,7 @@ def _schedule_window(tournament: dict[str, Any], data: dict[str, Any]) -> tuple[
     start_date = _date_key(tournament.get("event_date"))
     slots: list[tuple[str, int, int]] = []
     for match in matches:
-        if not isinstance(match, dict) or match.get("kind") in ("court_break", "tournament_opening"):
+        if not isinstance(match, dict) or match.get("kind") in ("court_break", "tournament_opening", "special_event"):
             continue
         start_min = _parse_hhmm(match.get("startTime"))
         if start_min is None:

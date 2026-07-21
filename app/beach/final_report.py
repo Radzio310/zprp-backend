@@ -245,7 +245,7 @@ def _match_gender(m: Dict[str, Any]) -> str:
 
 def _is_real_match(m: Dict[str, Any]) -> bool:
     kind = m.get("kind") or "match"
-    if kind in {"court_break", "tournament_opening"}:
+    if kind in {"court_break", "tournament_opening", "special_event"}:
         return False
     return kind == "match" or bool(m.get("matchNumber") or m.get("teamA") or m.get("teamB"))
 

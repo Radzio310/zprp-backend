@@ -404,6 +404,14 @@
   tr.row-opening td.opening-label {
     font-weight: 900; color: #E08A00; letter-spacing: 0.3pt; text-align: center;
   }
+  tr.row-event td {
+    background: linear-gradient(135deg, #F3ECFF 0%, #FBF8FF 100%);
+    border-left: 3pt solid #B86BFF !important;
+    font-size: 8pt; padding: 5pt 8pt;
+  }
+  tr.row-event td.event-label {
+    font-weight: 900; color: #7A3FD0; letter-spacing: 0.3pt; text-align: center;
+  }
 
   .point {
     display: flex;
@@ -488,6 +496,19 @@
   <td class="col-court">{{ m.court }}</td>
   <td colspan="6" class="break-label">{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
 </tr>
+{% elif m.type == 'special_event' %}
+{% if m.all_courts %}
+<tr class="row-event">
+  <td class="col-time">{{ m.time }}</td>
+  <td colspan="7" class="event-label">{% if m.emoji %}{{ m.emoji }} {% endif %}{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
+</tr>
+{% else %}
+<tr class="row-event">
+  <td class="col-time">{{ m.time }}</td>
+  <td class="col-court">{{ m.court }}</td>
+  <td colspan="6" class="event-label">{% if m.emoji %}{{ m.emoji }} {% endif %}{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
+</tr>
+{% endif %}
 {% else %}
 <tr class="gender-{{ m.gender }}">
   <td class="col-time">{{ m.time }}</td>

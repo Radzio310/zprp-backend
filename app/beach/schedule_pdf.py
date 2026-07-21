@@ -547,7 +547,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
     for day_idx in day_indices:
         for m in by_day.get(day_idx, []):
             kind = m.get("kind") or "match"
-            if kind not in ("court_break", "tournament_opening"):
+            if kind not in ("court_break", "tournament_opening", "special_event"):
                 all_matches_ordered.append(m)
 
     seq_counter = 0
@@ -644,6 +644,21 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                 })
                 continue
 
+            if kind == "special_event":
+                court_val = m.get("court")
+                all_courts = court_val in (0, "0", None, "")
+                match_rows.append({
+                    "type": "special_event",
+                    "time": m.get("startTime") or "",
+                    "end_time": m.get("endTime") or "",
+                    "court": "" if all_courts else str(court_val),
+                    "all_courts": all_courts,
+                    "label": m.get("label") or "Wydarzenie",
+                    "emoji": m.get("emoji") or "",
+                    "duration": m.get("durationMinutes") or 0,
+                })
+                continue
+
             gender = m.get("gender") or ""
             m_id = m.get("id") or ""
             match_num = match_num_labels.get(m_id, "")
@@ -695,12 +710,18 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
     court_sections: List[Dict[str, Any]] = []
     if split_by_courts:
         for day in days_out:
-            opening_rows = [r for r in day["matches"] if r.get("type") == "tournament_opening"]
+            # Otwarcia i zdarzenia na wszystkie boiska (court 0) idą nad podziałem na boiska
+            opening_rows = [
+                r for r in day["matches"]
+                if r.get("type") == "tournament_opening"
+                or (r.get("type") == "special_event" and r.get("all_courts"))
+            ]
             courts_out: List[Dict[str, Any]] = []
             for court_num in range(1, courts_count + 1):
                 court_matches = [
                     r for r in day["matches"]
                     if r.get("type") != "tournament_opening"
+                    and not (r.get("type") == "special_event" and r.get("all_courts"))
                     and str(r.get("court", "")) == str(court_num)
                 ]
                 if court_matches:

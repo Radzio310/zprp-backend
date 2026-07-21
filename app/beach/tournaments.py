@@ -1612,12 +1612,12 @@ def _detect_score_changes(
         return []
     old_matches = {
         m["id"]: m for m in (old_schedule.get("matches") or [])
-        if m.get("id") and m.get("kind") not in ("court_break", "tournament_opening")
+        if m.get("id") and m.get("kind") not in ("court_break", "tournament_opening", "special_event")
     }
     changes = []
     for m in (new_schedule.get("matches") or []):
         mid = m.get("id")
-        if not mid or m.get("kind") in ("court_break", "tournament_opening"):
+        if not mid or m.get("kind") in ("court_break", "tournament_opening", "special_event"):
             continue
         om = old_matches.get(mid)
         if not om:
@@ -1737,7 +1737,7 @@ async def schedule_update_tournament(
     def _real_match_count(sched):
         if not isinstance(sched, dict):
             return 0
-        return sum(1 for m in sched.get("matches", []) if m.get("kind") not in ("court_break", "tournament_opening"))
+        return sum(1 for m in sched.get("matches", []) if m.get("kind") not in ("court_break", "tournament_opening", "special_event"))
 
     old_match_count = _real_match_count(old_schedule)
     new_match_count = _real_match_count(body.schedule)
@@ -2070,7 +2070,7 @@ def _is_match_entry(entry: Any) -> bool:
     """Odpowiednik frontowego isScheduleMatchEntry()."""
     if not isinstance(entry, dict):
         return False
-    return entry.get("kind") not in ("court_break", "tournament_opening")
+    return entry.get("kind") not in ("court_break", "tournament_opening", "special_event")
 
 
 def _match_sort_key(m: dict) -> int:
@@ -2674,7 +2674,7 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
         target_id=str(tournament_id),
         target_label=tour_name,
         details={
-            "matches_count": sum(1 for m in schedule.get("matches", []) if m.get("kind") not in ("court_break", "tournament_opening")),
+            "matches_count": sum(1 for m in schedule.get("matches", []) if m.get("kind") not in ("court_break", "tournament_opening", "special_event")),
             "warnings_count": len(warnings),
             "unmatched_teams": unmatched_teams,
             "files": [f.filename for f in files if f.filename],
