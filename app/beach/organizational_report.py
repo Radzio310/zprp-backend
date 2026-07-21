@@ -214,7 +214,12 @@ def _stage_label(m: Dict[str, Any]) -> str:
     if stage == "group":
         return f"Grupa {group}" if group else "Grupa"
     if stage == "placement_rr":
-        return "O miejsca"
+        range_match = re.search(r"O msc\.\s*([^:]+)", m.get("knockoutLabel") or "", re.IGNORECASE)
+        if range_match and not group.startswith("placement_quad_"):
+            return f"Grupa {range_match.group(1).strip()}"
+        if range_match:
+            return f"o {range_match.group(1).strip()}"
+        return "Grupa o miejsca"
     return {
         "playoff": "Baraż",
         "quarterfinal": "Ćwierćfinał",

@@ -765,6 +765,9 @@
 {% for tbl in gs.playoff_tables + gs.placement_tables %}
 <div class="placement-block">
   <div class="placement-title" style="color: {{ gc }};">{{ tbl.title }}</div>
+  {% if tbl.subtitle %}
+  <div class="section-desc" style="margin: -2pt 0 6pt;">{{ tbl.subtitle }}</div>
+  {% endif %}
   <table class="results-table placement-table">
     <colgroup>
       <col style="width: 18pt;">
@@ -795,7 +798,7 @@
     <tbody>
       {% for row in tbl.rows %}
       <tr{% if row.advancing %} style="background: {{ gc }}0A;"{% endif %}>
-        <td style="font-weight: 900; color: {{ gc }}; width: 20pt;">{{ row.pos }}</td>
+        <td style="font-weight: 900; color: {{ gc }}; width: 20pt;">{{ row.display_pos or row.pos }}</td>
         <td class="team-name">{{ row.team_name }}</td>
         <td><strong>{{ row.pts }}</strong></td>
         <td>{{ row.played }}</td>

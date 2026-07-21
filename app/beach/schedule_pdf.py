@@ -282,7 +282,12 @@ def _compute_placement_rr_labels(
 
         start_r = _roman(start_place)
         end_r = _roman(end_place)
-        labels[g] = f"O msc. {start_r}-{end_r}" if start_place != end_place else f"O msc. {start_r}"
+        range_label = f"{start_r}-{end_r}" if start_place != end_place else start_r
+        labels[g] = (
+            f"O msc. {range_label}"
+            if is_quad
+            else f"Grupa {range_label}"
+        )
 
     return labels
 
@@ -935,4 +940,3 @@ async def download_schedule_pdf(
             lambda: os.remove(file_path) if os.path.exists(file_path) else None
         ),
     )
-

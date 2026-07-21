@@ -227,11 +227,16 @@ def _stage_label(m: Dict[str, Any], is_global_tour: bool = False) -> str:
     elif stage == "group" and group:
         label = f"gr. {group}"
     elif stage == "placement_rr" and group:
+        range_match = re.search(r"O msc\.\s*([^:]+)", m.get("knockoutLabel") or "", re.IGNORECASE)
+        if range_match and not group.startswith("placement_quad_"):
+            return f"Grupa {range_match.group(1).strip()}"
+        if range_match:
+            return f"o {range_match.group(1).strip()}"
         tier_match = re.match(r"placement_(\d+)", group)
         if tier_match:
-            label = f"o {tier_match.group(1)}. miejsce"
+            label = f"Grupa od {_roman(int(tier_match.group(1)))}. miejsca"
         else:
-            label = "O miejsca"
+            label = "Grupa o miejsca"
     return label
 
 
