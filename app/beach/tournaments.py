@@ -37,6 +37,11 @@ from app.beach.app_settings import get_role_caps
 from app.beach.capabilities import resolve_user_capabilities
 from app.beach.schedule_notifications import notify_schedule_updated
 from app.beach.activity_log import log_activity, get_actor_name, compute_diff, compute_list_diff
+from app.beach.announcement_audience import (
+    announcement_audiences as _announcement_audiences,
+    announcement_is_visible as _announcement_is_visible,
+    filter_announcements_for_viewer as _filter_announcements_for_viewer,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/tournaments", tags=["Beach: Tournaments"])
@@ -379,6 +384,93 @@ def _extract_team_ids(roles_raw: Any) -> List[int]:
         if isinstance(team_id, int) and team_id not in team_ids:
             team_ids.append(team_id)
     return team_ids
+
+
+async def _announcement_viewer_profile(
+    user_id: Optional[int],
+    user_row: Any = None,
+) -> Dict[str, Any]:
+    if user_id is None:
+        return {
+            "user_id": None,
+            "team_ids": set(),
+            "is_admin": False,
+            "capabilities": set(),
+            "assigned_judge_can_manage": False,
+        }
+
+    if user_row is None:
+        user_row = await database.fetch_one(
+            select(beach_users.c.badges, beach_users.c.roles).where(
+                beach_users.c.id == user_id
+            )
+        )
+    badges = user_row["badges"] if user_row else None
+    roles = user_row["roles"] if user_row else None
+    capabilities = set(await resolve_user_capabilities(badges))
+    role_caps = await get_role_caps()
+    judge_tournament_caps = (
+        (role_caps.get("judge") or {}).get("tournament") or []
+    )
+    return {
+        "user_id": user_id,
+        "team_ids": set(_extract_team_ids(roles)),
+        "is_admin": await _is_admin(user_id),
+        "capabilities": capabilities,
+        "assigned_judge_can_manage": (
+            "tournament.announcements.edit" in judge_tournament_caps
+        ),
+    }
+
+
+async def _announcement_notification_target_ids(
+    data: Dict[str, Any],
+    announcement: Any,
+) -> List[int]:
+    audiences = _announcement_audiences(announcement)
+    if not audiences or any(aud.get("type") == "all" for aud in audiences):
+        result: set[int] = set()
+        for value in data.get("invited_ids") or []:
+            try:
+                result.add(int(value))
+            except (TypeError, ValueError):
+                pass
+        return sorted(result)
+
+    judge_ids = {
+        int(judge["id"])
+        for judge in (data.get("judges") or [])
+        if isinstance(judge, dict) and isinstance(judge.get("id"), int)
+    }
+    head_judge_id = data.get("head_judge_id")
+    if isinstance(head_judge_id, int):
+        judge_ids.add(head_judge_id)
+    invited_team_ids = {
+        int(team_id)
+        for team_id in (data.get("invited_team_ids") or [])
+        if isinstance(team_id, int)
+    }
+    custom_coach_ids = {
+        int(team["coach_user_id"])
+        for team in (data.get("custom_teams") or [])
+        if isinstance(team, dict) and isinstance(team.get("coach_user_id"), int)
+    }
+    rows = await database.fetch_all(select(beach_users.c.id, beach_users.c.roles))
+    target_ids: set[int] = set()
+    for row in rows:
+        candidate_id = int(row["id"])
+        candidate_team_ids = set(_extract_team_ids(row["roles"])) & invited_team_ids
+        if _announcement_is_visible(
+            announcement,
+            user_id=candidate_id,
+            user_team_ids=candidate_team_ids,
+            is_tournament_judge=candidate_id in judge_ids,
+            is_tournament_team_member=bool(
+                candidate_team_ids or candidate_id in custom_coach_ids
+            ),
+        ):
+            target_ids.add(candidate_id)
+    return sorted(target_ids)
 
 
 def _normalize_event_data(data_json: Any) -> Dict[str, Any]:
@@ -729,6 +821,7 @@ async def list_tournaments(
     with_user: Optional[int] = Query(None),
     current_user_id: Optional[int] = Depends(beach_get_optional_user_id),
 ):
+    announcement_viewer = await _announcement_viewer_profile(current_user_id)
     q = select(beach_tournaments).order_by(
         beach_tournaments.c.event_date.asc(), beach_tournaments.c.id.asc()
     )
@@ -748,7 +841,8 @@ async def list_tournaments(
             continue
         if not data.get("invited_ids"):
             data["invited_ids"] = await _compute_invited_ids_for_badge(r_d.get("badge"), data)
-        out.append(_attach_computed_fields(r_d, data, with_user))
+        safe_data = _filter_announcements_for_viewer(data, announcement_viewer)
+        out.append(_attach_computed_fields(r_d, safe_data, with_user))
     return BeachTournamentsListResponse(tournaments=out)
 
 
@@ -769,10 +863,12 @@ async def list_public_feed_tournaments():
         )
     )
     out: List[BeachTournamentItem] = []
+    anonymous_viewer = await _announcement_viewer_profile(None)
     for r in rows:
         r_d = dict(r)
         data = _normalize_event_data(r_d["data_json"])
-        out.append(_attach_computed_fields(r_d, data, None))
+        safe_data = _filter_announcements_for_viewer(data, anonymous_viewer)
+        out.append(_attach_computed_fields(r_d, safe_data, None))
     return BeachTournamentsListResponse(tournaments=out)
 
 
@@ -795,6 +891,10 @@ async def list_visible_tournaments(
         raise HTTPException(404, "Użytkownik nie znaleziony")
 
     user_team_ids = set(_extract_team_ids(user_row["roles"])) if user_row else set()
+    announcement_viewer = await _announcement_viewer_profile(
+        current_user_id,
+        user_row,
+    )
 
     rows = await database.fetch_all(
         select(beach_tournaments).order_by(
@@ -834,7 +934,11 @@ async def list_visible_tournaments(
         include_all = bool((data.get("target") or {}).get("include_all", False))
         if current_user_id is None:
             if include_all:
-                out.append(_attach_computed_fields(r_d, data, None))
+                safe_data = _filter_announcements_for_viewer(
+                    data,
+                    announcement_viewer,
+                )
+                out.append(_attach_computed_fields(r_d, safe_data, None))
             continue
 
         user_is_host = current_user_id in host_ids
@@ -852,7 +956,8 @@ async def list_visible_tournaments(
         ):
             continue
 
-        out.append(_attach_computed_fields(r_d, data, current_user_id))
+        safe_data = _filter_announcements_for_viewer(data, announcement_viewer)
+        out.append(_attach_computed_fields(r_d, safe_data, current_user_id))
 
     return BeachTournamentsListResponse(tournaments=out)
 
@@ -973,7 +1078,9 @@ async def get_tournament(
         if not has_access:
             raise HTTPException(403, "Brak dostępu")
 
-    return _attach_computed_fields(row_d, data, current_user_id)
+    announcement_viewer = await _announcement_viewer_profile(current_user_id)
+    safe_data = _filter_announcements_for_viewer(data, announcement_viewer)
+    return _attach_computed_fields(row_d, safe_data, current_user_id)
 
 
 # ─────────────────── PATCH (admin) ───────────────────
@@ -1213,12 +1320,11 @@ async def host_update_tournament(
 
     # Notify invited users about new announcement
     if body.announcements is not None and len(body.announcements) > old_announcements_count:
-        invited_ids = data.get("invited_ids") or []
-        target_ids = [int(uid) for uid in invited_ids if uid is not None]
+        new_ann = body.announcements[old_announcements_count:]
+        ann_first = new_ann[0] if new_ann and isinstance(new_ann[0], dict) else {}
+        target_ids = await _announcement_notification_target_ids(data, ann_first)
         if target_ids:
             tour_name = existing_d.get("name", "Turniej")
-            new_ann = body.announcements[old_announcements_count:]
-            ann_first = new_ann[0] if new_ann and isinstance(new_ann[0], dict) else {}
             ann_preview = ann_first.get("text", "")
             if ann_preview and len(ann_preview) > 100:
                 ann_preview = ann_preview[:100] + "…"
@@ -1265,7 +1371,9 @@ async def host_update_tournament(
     )
 
     asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
-    return _attach_computed_fields(row_d, data2, current_user_id)
+    announcement_viewer = await _announcement_viewer_profile(current_user_id)
+    safe_data = _filter_announcements_for_viewer(data2, announcement_viewer)
+    return _attach_computed_fields(row_d, safe_data, current_user_id)
 
 
 # ─────────────── PATCH coach-custom-team-update (Trener) ─────────────────
@@ -1352,7 +1460,9 @@ async def coach_custom_team_update(
     )
 
     asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
-    return _attach_computed_fields(row_d, data2, current_user_id)
+    announcement_viewer = await _announcement_viewer_profile(current_user_id)
+    safe_data = _filter_announcements_for_viewer(data2, announcement_viewer)
+    return _attach_computed_fields(row_d, safe_data, current_user_id)
 
 
 # ─────────────────── PATCH judge-update (Obsadowy) ───────────────────
@@ -1486,7 +1596,9 @@ async def judge_update_tournament(
     )
 
     asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
-    return _attach_computed_fields(row_d, data2, current_user_id)
+    announcement_viewer = await _announcement_viewer_profile(current_user_id)
+    safe_data = _filter_announcements_for_viewer(data2, announcement_viewer)
+    return _attach_computed_fields(row_d, safe_data, current_user_id)
 
 
 # ─────────────────── helpers for schedule-update logging ───────────────────
@@ -1696,7 +1808,9 @@ async def schedule_update_tournament(
         )
 
     asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
-    return _attach_computed_fields(row_d, data2, current_user_id)
+    announcement_viewer = await _announcement_viewer_profile(current_user_id)
+    safe_data = _filter_announcements_for_viewer(data2, announcement_viewer)
+    return _attach_computed_fields(row_d, safe_data, current_user_id)
 
 
 # ─────────────────── AI SCHEDULE IMPORT ───────────────────
@@ -1775,7 +1889,9 @@ async def settlements_update_tournament(
         target_label=row_d.get("name", ""),
         details={"judge_id": body.judge_id},
     )
-    return _attach_computed_fields(row_d, data2, current_user_id)
+    announcement_viewer = await _announcement_viewer_profile(current_user_id)
+    safe_data = _filter_announcements_for_viewer(data2, announcement_viewer)
+    return _attach_computed_fields(row_d, safe_data, current_user_id)
 
 
 # ─────────────────── PATCH disq-update (Sędzia główny / boiskowy / admin) ───────────────────
@@ -1909,7 +2025,9 @@ async def disq_update_tournament(
         target_label=existing_d.get("name", ""),
         details={"count": len(body.disqualifications)},
     )
-    return _attach_computed_fields(row_d, data2, current_user_id)
+    announcement_viewer = await _announcement_viewer_profile(current_user_id)
+    safe_data = _filter_announcements_for_viewer(data2, announcement_viewer)
+    return _attach_computed_fields(row_d, safe_data, current_user_id)
 
 
 # ───────────── GET carried-disqualifications (kary z poprzednich turniejów) ─────────────
