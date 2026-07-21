@@ -78,6 +78,22 @@ CATEGORY_COLORS = {
 DEFAULT_ACCENT = "#E85A30"
 
 
+def _roman(n: int) -> str:
+    if n <= 0:
+        return str(n)
+    vals = [
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    ]
+    result, remaining = "", n
+    for value, symbol in vals:
+        while remaining >= value:
+            result += symbol
+            remaining -= value
+    return result
+
+
 # ──────────── Models ────────────
 
 class StandingRow(BaseModel):
@@ -300,11 +316,16 @@ def _stage_label(m: Dict[str, Any], is_global_tour: bool = False) -> str:
     elif stage == "group" and group:
         label = f"gr. {group}"
     elif stage == "placement_rr" and group:
+        range_match = re.search(r"O msc\.\s*([^:]+)", m.get("knockoutLabel") or "", re.IGNORECASE)
+        if range_match and not group.startswith("placement_quad_"):
+            return f"Grupa {range_match.group(1).strip()}"
+        if range_match:
+            return f"o {range_match.group(1).strip()}"
         tier_match = re.match(r"placement_(\d+)", group)
         if tier_match:
-            label = f"o {tier_match.group(1)}. miejsce"
+            label = f"Grupa od {_roman(int(tier_match.group(1)))}. miejsca"
         else:
-            label = "O miejsca"
+            label = "Grupa o miejsca"
     return label
 
 
@@ -1234,15 +1255,37 @@ def _build_placement_rr_tables(
             continue
         tier_match = re.match(r"placement_(\d+)", group)
         tier = int(tier_match.group(1)) if tier_match else 0
-        count = _team_count(group_matches) or len(_compute_group_table(group_matches)) or 3
+        rows = _compute_group_table(
+            group_matches,
+            lotteries=lotteries, group=group, gender=gender,
+        )
+        count = _team_count(group_matches) or len(rows) or 3
         end_place = tier + count - 1 if tier else 0
-        title = f"O miejsca {tier}-{end_place}" if tier and end_place else "O miejsca"
+        title = (
+            f"Grupa o miejsca {_roman(tier)}-{_roman(end_place)}"
+            if tier and end_place and tier != end_place
+            else f"Grupa o miejsce {_roman(tier)}"
+            if tier
+            else "Grupa o miejsca"
+        )
+        for row in rows:
+            local_pos = int(row.get("pos") or 1)
+            row["display_pos"] = _roman(tier + local_pos - 1) if tier else str(local_pos)
+
+        sources: List[str] = []
+        for match in group_matches:
+            pairing = re.sub(
+                r"^O msc\.\s*[^:]+:\s*", "", match.get("knockoutLabel") or "",
+                flags=re.IGNORECASE,
+            )
+            for source in re.split(r"\s+vs\s+", pairing, flags=re.IGNORECASE):
+                compact = re.sub(r"^(\d+)\. z gr\. ([A-Z])$", r"\1\2", source.strip())
+                if compact and compact not in sources:
+                    sources.append(compact)
         tables.append({
             "title": title,
-            "rows": _compute_group_table(
-                group_matches,
-                lotteries=lotteries, group=group, gender=gender,
-            ),
+            "subtitle": f"{' · '.join(sources)} · każdy z każdym" if sources else "",
+            "rows": rows,
         })
     return tables
 
