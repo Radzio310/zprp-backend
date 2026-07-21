@@ -165,6 +165,29 @@ def _day_header(day_index: int, date_str: Optional[str]) -> str:
     return f"Dzień {roman}"
 
 
+# Font PDF-ów (DejaVu Sans) nie zawiera glifów emoji — renderują się jako
+# prostokąt (tofu). Mapujemy emoji zdarzeń na monochromatyczne symbole, które
+# DejaVu Sans zawiera. Działa też dla już zapisanych zdarzeń (mapowanie przy
+# renderowaniu). Nieznane emoji → punktor "•".
+_PDF_EVENT_SYMBOLS: Dict[str, str] = {
+    "🎯": "◎",  # shoot-out contest — bullseye
+    "🏆": "★", "🏅": "★", "⭐": "★", "🌟": "★",
+    "✨": "◆", "🎁": "◆", "📣": "◆", "📢": "◆",
+    "📷": "◆", "📸": "◆", "🍽️": "◆", "🍽": "◆",
+    "🎵": "♪", "🎶": "♪", "🎤": "♪",
+    "☀️": "☀", "☀": "☀",
+    "👥": "●", "🤝": "●",
+    "🎉": "★", "🎊": "★",
+}
+
+
+def _pdf_event_symbol(emoji: Optional[str]) -> str:
+    """Emoji → symbol renderowalny w DejaVu Sans (pusty string, gdy brak)."""
+    if not emoji:
+        return ""
+    return _PDF_EVENT_SYMBOLS.get(emoji, "•")
+
+
 def _compute_date_range(days: List[Dict[str, Any]]) -> str:
     dates = sorted(d.get("date", "") for d in days if d.get("date"))
     if not dates:
@@ -654,7 +677,7 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
                     "court": "" if all_courts else str(court_val),
                     "all_courts": all_courts,
                     "label": m.get("label") or "Wydarzenie",
-                    "emoji": m.get("emoji") or "",
+                    "symbol": _pdf_event_symbol(m.get("emoji")),
                     "duration": m.get("durationMinutes") or 0,
                 })
                 continue

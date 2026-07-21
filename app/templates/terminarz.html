@@ -497,7 +497,7 @@
 {% if m.type == 'tournament_opening' %}
 <tr class="row-opening">
   <td class="col-time">{{ m.time }}</td>
-  <td colspan="7" class="opening-label">🎉 {{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
+  <td colspan="7" class="opening-label">★ {{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
 </tr>
 {% elif m.type == 'court_break' %}
 <tr class="row-break">
@@ -509,13 +509,13 @@
 {% if m.all_courts %}
 <tr class="row-event">
   <td class="col-time">{{ m.time }}</td>
-  <td colspan="7" class="event-label">{% if m.emoji %}{{ m.emoji }} {% endif %}{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
+  <td colspan="7" class="event-label">{% if m.symbol %}{{ m.symbol }} {% endif %}{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
 </tr>
 {% else %}
 <tr class="row-event">
   <td class="col-time">{{ m.time }}</td>
   <td class="col-court">{{ m.court }}</td>
-  <td colspan="6" class="event-label">{% if m.emoji %}{{ m.emoji }} {% endif %}{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
+  <td colspan="6" class="event-label">{% if m.symbol %}{{ m.symbol }} {% endif %}{{ m.label }}{% if m.duration %} ({{ m.duration }} min){% endif %}</td>
 </tr>
 {% endif %}
 {% else %}

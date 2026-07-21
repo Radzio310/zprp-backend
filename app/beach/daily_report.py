@@ -29,6 +29,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from app.beach.schedule_pdf import _pdf_event_symbol
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Beach: Daily Report"])
@@ -459,7 +461,7 @@ def _build_context(req: DailyReportRequest) -> Dict[str, Any]:
                     "court": "" if all_courts else str(court_val),
                     "all_courts": all_courts,
                     "label": m.get("label") or "Wydarzenie",
-                    "emoji": m.get("emoji") or "",
+                    "symbol": _pdf_event_symbol(m.get("emoji")),
                     "duration": m.get("durationMinutes") or 0,
                 })
                 continue
