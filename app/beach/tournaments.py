@@ -1088,16 +1088,13 @@ async def get_tournament(
 @router.patch(
     "/{tournament_id}",
     response_model=BeachTournamentItem,
-    summary="Częściowa edycja turnieju — wymaga admina",
+    summary="Częściowa edycja turnieju — admin lub sędzia główny turnieju",
 )
 async def patch_tournament(
     tournament_id: int,
     body: UpdateBeachTournamentRequest,
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    if not await _is_admin(current_user_id):
-        raise HTTPException(403, "Brak uprawnień")
-
     existing = await database.fetch_one(
         select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
     )
@@ -1105,6 +1102,18 @@ async def patch_tournament(
         raise HTTPException(404, "Nie znaleziono turnieju")
 
     existing_d = dict(existing)
+
+    # Uprawnienia: admin zawsze; sędzia główny tego turnieju zawsze (o widoczności
+    # ikony edycji decyduje front — np. tylko gdy brak gospodarza zawodów).
+    if not await _is_admin(current_user_id):
+        _perm_data = _normalize_event_data(existing_d["data_json"])
+        _hj = _perm_data.get("head_judge_id")
+        try:
+            _is_head_judge = _hj is not None and int(_hj) == current_user_id
+        except (ValueError, TypeError):
+            _is_head_judge = False
+        if not _is_head_judge:
+            raise HTTPException(403, "Brak uprawnień")
     old_invited = set(str(x) for x in (_normalize_event_data(existing_d["data_json"]).get("invited_ids") or []))
 
     update_data: Dict[str, Any] = {}
