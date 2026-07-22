@@ -738,7 +738,12 @@ def _fill_protocol_sheet(
     else:
         ws["C12"] = ""
 
-    ws["F12"] = match.get("startTime") or ""
+    # Godzina meczu = pierwotny czas z terminarza. „Obsuwa" (opóźnienie
+    # ustawione na żywo w aplikacji) ma być widoczna TYLKO w aplikacji, więc
+    # protokół pokazuje originalTime, gdy jest ustawione (obsuwa aktywna).
+    # startTime to fallback dla meczów bez obsuwy oraz dla trwałych zmian
+    # godziny (tryby „rewrite"/„single"), które NIE ustawiają originalTime.
+    ws["F12"] = match.get("originalTime") or match.get("startTime") or ""
 
     # ── Players & companions ──
     _fill_team_squad(
