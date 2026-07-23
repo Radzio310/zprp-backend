@@ -64,13 +64,12 @@
   .gender-head {
     font-size: 10.5pt;
     font-weight: 900;
-    color: {{ accent }};
     text-transform: uppercase;
     letter-spacing: 0.7pt;
     text-align: center;
     padding-bottom: 5pt;
     margin-bottom: 6pt;
-    border-bottom: 1pt solid {{ accent }}55;
+    border-bottom: 1.6pt solid;
   }
 
   .place-row {
@@ -159,7 +158,7 @@
   <div class="sections">
     {% for sec in sections %}
     <div class="section-col{% if sections|length == 1 %} single{% endif %}">
-      <div class="gender-head">{{ sec.label }}</div>
+      <div class="gender-head" style="color: {{ sec.color }}; border-bottom-color: {{ sec.color }};">{{ sec.label }}</div>
       {% for p in sec.places %}
       <div class="place-row{% if p.place <= 3 %} medal medal-{{ p.place }}{% endif %}">
         <div class="rank">{{ p.place }}</div>

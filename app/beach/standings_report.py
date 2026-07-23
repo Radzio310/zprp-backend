@@ -55,6 +55,9 @@ DEFAULT_ACCENT = "#E85A30"
 # Kolory medali (spójne z podium na ekranie Wyników w aplikacji).
 MEDAL_COLORS = {1: "#D4A843", 2: "#9BA4B5", 3: "#A0785A"}
 
+# Akcenty płci — spójne z resztą aplikacji (kafelki drużyn, MVP itd.).
+GENDER_COLORS = {"M": "#3ACCBF", "K": "#FF6482"}
+
 
 class StandingsPlace(BaseModel):
     place: int
@@ -139,6 +142,7 @@ def _build_context(req: StandingsReportRequest) -> dict:
         sections.append({
             "gender": sec.gender,
             "label": sec.label.strip() or ("Mężczyźni" if sec.gender == "M" else "Kobiety"),
+            "color": GENDER_COLORS.get(sec.gender, accent),
             "places": places,
         })
 
