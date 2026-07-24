@@ -1165,6 +1165,15 @@ class BeachPasswordResetAdminStats(BaseModel):
     failed: int
 
 
+class BeachPasswordResetDeviceInfo(BaseModel):
+    """Urządzenie wnioskodawcy — do panelu admina (z flagą możliwości pusha)."""
+    installation_id: str
+    platform: Optional[str] = None
+    app_version: Optional[str] = None
+    last_seen_at: Optional[datetime] = None
+    push_available: bool = False
+
+
 class BeachPasswordResetAdminItem(BaseModel):
     id: int
     user_id: Optional[int] = None
@@ -1183,6 +1192,10 @@ class BeachPasswordResetAdminItem(BaseModel):
     admin_note: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # ── Kontekst konta (do weryfikacji tożsamości + kanał push) ──
+    judge_id: Optional[str] = None
+    devices: List[BeachPasswordResetDeviceInfo] = Field(default_factory=list)
+    push_available: bool = False
 
 
 class BeachPasswordResetAdminListResponse(BaseModel):
@@ -1200,12 +1213,25 @@ class BeachPasswordResetResolveRequest(BaseModel):
     password: Optional[str] = None
     password_encrypted: Optional[str] = None
     send_email: bool = False
+    # Push „magic-login": powiadomienie na zarejestrowane urządzenia użytkownika
+    # z jednorazowym tokenem — dotknięcie loguje i wymusza zmianę hasła.
+    send_push: bool = False
 
 
 class BeachPasswordResetResolveResponse(BaseModel):
     request: BeachPasswordResetAdminItem
     email_sent: bool = False
     email_error: Optional[str] = None
+    push_sent: bool = False
+    push_error: Optional[str] = None
+
+
+class BeachPasswordResetClaimRequest(BaseModel):
+    """Magic-login z powiadomienia push po resecie hasła."""
+    claim_token: str
+    installation_id: Optional[str] = None
+    device_platform: Optional[str] = None
+    app_version: Optional[str] = None
 
 
 class BeachDeviceInfo(BaseModel):

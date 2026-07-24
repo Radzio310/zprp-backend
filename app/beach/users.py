@@ -238,6 +238,7 @@ def _to_user_item(
         updated_at=row["updated_at"],
         is_admin=is_admin,
         is_active=bool(row.get("is_active", True)),
+        must_change_password=bool(row.get("must_change_password") or False),
         effective_capabilities=list(effective_capabilities or []),
     )
 
@@ -951,7 +952,12 @@ async def _set_user_password(
     await database.execute(
         update(beach_users)
         .where(beach_users.c.id == user_id)
-        .values(password_hash=password_hash, updated_at=datetime.now(timezone.utc))
+        .values(
+            password_hash=password_hash,
+            # Nowe hasło ustawione — flaga hasła tymczasowego przestaje obowiązywać.
+            must_change_password=False,
+            updated_at=datetime.now(timezone.utc),
+        )
     )
 
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
@@ -1099,6 +1105,10 @@ async def patch_user(
             update_data["password_hash"] = _hash_password(password_plain)
         elif password:
             update_data["password_hash"] = _hash_password(str(password))
+
+        if "password_hash" in update_data:
+            # Nowe hasło — flaga hasła tymczasowego przestaje obowiązywać.
+            update_data["must_change_password"] = False
 
     if not update_data:
         return _to_user_item(dict(existing))

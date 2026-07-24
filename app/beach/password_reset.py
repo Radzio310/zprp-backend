@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
+import secrets
 import unicodedata
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import insert, select, update, func as sa_func
@@ -15,15 +17,20 @@ from app.db import (
     beach_admins,
     beach_password_reset_requests,
     beach_users,
+    push_schedules,
+    push_tokens,
 )
-from app.deps import beach_get_current_user_id
+from app.deps import beach_create_access_token, beach_get_current_user_id
 from app.schemas import (
+    BeachLoginResponse,
     BeachPasswordResetAdminItem,
     BeachPasswordResetAdminListResponse,
     BeachPasswordResetAdminStats,
     BeachPasswordResetChallengeRequest,
     BeachPasswordResetChallengeResponse,
+    BeachPasswordResetClaimRequest,
     BeachPasswordResetContactOption,
+    BeachPasswordResetDeviceInfo,
     BeachPasswordResetResolveRequest,
     BeachPasswordResetResolveResponse,
     BeachPasswordResetStatusRequest,
@@ -32,7 +39,17 @@ from app.schemas import (
 )
 from app.beach.notifications import notify_admins
 from app.beach.activity_log import get_actor_name, log_activity
-from app.beach.users import _hash_password, _decrypt_password_from_b64
+from app.beach.capabilities import resolve_user_capabilities
+from app.beach.users import (
+    _check_is_admin,
+    _decrypt_password_from_b64,
+    _device_infos_dict,
+    _hash_password,
+    _merge_device_ids,
+    _merge_device_infos,
+    _remove_device_from_other_users,
+    _to_user_item,
+)
 from app.beach.brevo_email import (
     send_new_password_email,
     EmailDeliveryError,
@@ -164,7 +181,74 @@ def _matches_quiz(user: dict, body: BeachPasswordResetSubmitRequest) -> bool:
     return True
 
 
-def _row_to_item(row: dict) -> BeachPasswordResetAdminItem:
+class _UserDeviceContext:
+    """Kontekst konta wnioskodawcy: identyfikator sędziego + urządzenia z flagą pusha."""
+
+    def __init__(self, judge_id: Optional[str], devices: List[BeachPasswordResetDeviceInfo]):
+        self.judge_id = judge_id
+        self.devices = devices
+        self.push_available = any(d.push_available for d in devices)
+
+
+async def _user_device_contexts(user_ids: List[int]) -> Dict[int, _UserDeviceContext]:
+    """Dla listy kont zbierz judge_id + urządzenia (device_infos) i sprawdź,
+    które urządzenia mają token push (FCM) — czyli mogą dostać magic-login."""
+    ids = sorted({int(uid) for uid in user_ids if uid})
+    if not ids:
+        return {}
+
+    rows = await database.fetch_all(
+        select(
+            beach_users.c.id,
+            beach_users.c.judge_id,
+            beach_users.c.device_ids,
+            beach_users.c.device_infos,
+        ).where(beach_users.c.id.in_(ids))
+    )
+
+    all_installation_ids: set[str] = set()
+    parsed: Dict[int, dict] = {}
+    for row in rows:
+        row_dict = dict(row)
+        device_ids = [str(d) for d in (row_dict.get("device_ids") or []) if str(d).strip()]
+        parsed[int(row_dict["id"])] = {
+            "judge_id": row_dict.get("judge_id"),
+            "device_ids": device_ids,
+            "device_infos": _device_infos_dict(row_dict.get("device_infos")),
+        }
+        all_installation_ids.update(device_ids)
+
+    tokens_with_push: set[str] = set()
+    if all_installation_ids:
+        token_rows = await database.fetch_all(
+            select(push_tokens.c.installation_id).where(
+                push_tokens.c.installation_id.in_(sorted(all_installation_ids))
+            )
+        )
+        tokens_with_push = {str(r["installation_id"]) for r in token_rows}
+
+    out: Dict[int, _UserDeviceContext] = {}
+    for uid, data in parsed.items():
+        devices: List[BeachPasswordResetDeviceInfo] = []
+        for installation_id in data["device_ids"]:
+            info = data["device_infos"].get(installation_id) or {}
+            devices.append(
+                BeachPasswordResetDeviceInfo(
+                    installation_id=installation_id,
+                    platform=info.get("platform"),
+                    app_version=info.get("app_version"),
+                    last_seen_at=info.get("last_seen_at"),
+                    push_available=installation_id in tokens_with_push,
+                )
+            )
+        out[uid] = _UserDeviceContext(judge_id=data["judge_id"], devices=devices)
+    return out
+
+
+def _row_to_item(
+    row: dict,
+    device_context: Optional[_UserDeviceContext] = None,
+) -> BeachPasswordResetAdminItem:
     return BeachPasswordResetAdminItem(
         id=row["id"],
         user_id=row.get("user_id"),
@@ -183,6 +267,9 @@ def _row_to_item(row: dict) -> BeachPasswordResetAdminItem:
         admin_note=row.get("admin_note"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        judge_id=device_context.judge_id if device_context else None,
+        devices=device_context.devices if device_context else [],
+        push_available=device_context.push_available if device_context else False,
     )
 
 
@@ -327,7 +414,14 @@ async def admin_list(
         query = query.where(beach_password_reset_requests.c.status != "failed")
 
     rows = await database.fetch_all(query)
-    items = [_row_to_item(dict(row)) for row in rows]
+    row_dicts = [dict(row) for row in rows]
+    contexts = await _user_device_contexts(
+        [r["user_id"] for r in row_dicts if r.get("user_id")]
+    )
+    items = [
+        _row_to_item(r, contexts.get(int(r["user_id"])) if r.get("user_id") else None)
+        for r in row_dicts
+    ]
     return BeachPasswordResetAdminListResponse(
         requests=items,
         total=len(items),
@@ -448,7 +542,13 @@ async def admin_resolve(
     await database.execute(
         update(beach_users)
         .where(beach_users.c.id == target_user_id)
-        .values(password_hash=_hash_password(password_plain), updated_at=now)
+        .values(
+            password_hash=_hash_password(password_plain),
+            # Hasło tymczasowe od admina — apka wymusi ustawienie własnego.
+            # Flaga jest serwerowa, więc zadziała też po aktualizacji apki.
+            must_change_password=True,
+            updated_at=now,
+        )
     )
     await database.execute(
         update(beach_password_reset_requests)
@@ -487,6 +587,57 @@ async def admin_resolve(
                 logger.error("resolve password reset email error: %s", exc)
                 email_error = "Nie udało się wysłać maila."
 
+    # ── Push „magic-login": jednorazowy token, ważny 72 h ──
+    push_sent = False
+    push_error: Optional[str] = None
+    if body.send_push:
+        try:
+            contexts = await _user_device_contexts([int(target_user_id)])
+            ctx = contexts.get(int(target_user_id))
+            push_devices = [d for d in (ctx.devices if ctx else []) if d.push_available]
+            if not push_devices:
+                push_error = "Konto nie ma urządzenia z powiadomieniami."
+            else:
+                claim_token = secrets.token_urlsafe(32)
+                claim_hash = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
+                await database.execute(
+                    update(beach_password_reset_requests)
+                    .where(beach_password_reset_requests.c.id == request_id)
+                    .values(
+                        claim_token_hash=claim_hash,
+                        claim_expires_at=now + timedelta(hours=72),
+                        claim_used_at=None,
+                        updated_at=now,
+                    )
+                )
+                push_data: Dict[str, Any] = {
+                    "notif_type": "password_reset_claim",
+                    "claim_token": claim_token,
+                    "password_reset_request_id": request_id,
+                    "recipient_user_id": int(target_user_id),
+                }
+                send_hour = int(now.timestamp() // 3600)
+                for device in push_devices:
+                    await database.execute(
+                        insert(push_schedules).values(
+                            installation_id=device.installation_id,
+                            send_at_utc=now,
+                            send_hour_utc=send_hour,
+                            title="🔐 Twoje hasło zostało zresetowane",
+                            body="Dotknij, aby zalogować się i ustawić nowe hasło.",
+                            data_json=push_data,
+                            status="pending",
+                            attempts=0,
+                            last_error=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                push_sent = True
+        except Exception as exc:
+            logger.error("resolve password reset push error: %s", exc)
+            push_error = "Nie udało się wysłać powiadomienia push."
+
     updated_row = await database.fetch_one(
         select(beach_password_reset_requests).where(
             beach_password_reset_requests.c.id == request_id
@@ -496,4 +647,115 @@ async def admin_resolve(
         request=_row_to_item(dict(updated_row)),
         email_sent=email_sent,
         email_error=email_error,
+        push_sent=push_sent,
+        push_error=push_error,
     )
+
+
+@router.post("/claim", response_model=BeachLoginResponse)
+async def claim(body: BeachPasswordResetClaimRequest):
+    """Magic-login z powiadomienia push po resecie hasła.
+
+    Jednorazowy token (dostarczony wyłącznie na urządzenia przypięte do konta)
+    loguje użytkownika bez hasła; flaga ``must_change_password`` pozostaje
+    ustawiona, więc apka od razu wymusi ustawienie własnego hasła.
+    """
+    token = (body.claim_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Brak tokenu")
+
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    row = await database.fetch_one(
+        select(beach_password_reset_requests).where(
+            beach_password_reset_requests.c.claim_token_hash == token_hash
+        )
+    )
+    if not row:
+        raise HTTPException(
+            status_code=404, detail="Link wygasł lub jest nieprawidłowy."
+        )
+    req = dict(row)
+
+    now = datetime.now(timezone.utc)
+    if req.get("claim_used_at"):
+        raise HTTPException(
+            status_code=410,
+            detail="To powiadomienie zostało już użyte. Zaloguj się hasłem.",
+        )
+    expires_at = req.get("claim_expires_at")
+    if expires_at is not None and now > expires_at:
+        raise HTTPException(
+            status_code=410,
+            detail="Powiadomienie wygasło. Zaloguj się hasłem z maila lub SMS-a.",
+        )
+
+    target_user_id = req.get("user_id")
+    if not target_user_id:
+        raise HTTPException(status_code=400, detail="Wniosek nie jest powiązany z kontem")
+
+    target = await database.fetch_one(
+        select(beach_users).where(beach_users.c.id == int(target_user_id))
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
+    target_dict = dict(target)
+    if not target_dict.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Konto zostało dezaktywowane")
+
+    # Token jednorazowy — oznacz jako użyty PRZED zwróceniem sesji.
+    await database.execute(
+        update(beach_password_reset_requests)
+        .where(beach_password_reset_requests.c.id == req["id"])
+        .values(claim_used_at=now, updated_at=now)
+    )
+
+    # Dopnij urządzenie i zaktualizuj metadane logowania — jak przy zwykłym loginie.
+    device_ids = _merge_device_ids(
+        list(target_dict.get("device_ids") or []), body.installation_id, None
+    )
+    device_infos = _merge_device_infos(
+        target_dict.get("device_infos"),
+        body.installation_id,
+        body.device_platform,
+        body.app_version,
+        now,
+    )
+    if body.installation_id:
+        await _remove_device_from_other_users(
+            body.installation_id, int(target_dict["id"])
+        )
+    upd_values: Dict[str, Any] = {
+        "last_login_at": now,
+        "app_opens": (beach_users.c.app_opens + 1),
+        "device_ids": device_ids,
+        "device_infos": device_infos,
+        "updated_at": now,
+    }
+    if body.app_version is not None:
+        upd_values["app_version"] = body.app_version
+    await database.execute(
+        update(beach_users)
+        .where(beach_users.c.id == int(target_dict["id"]))
+        .values(**upd_values)
+    )
+
+    await log_activity(
+        area="user",
+        action="user.password_reset_claimed",
+        actor_user_id=int(target_dict["id"]),
+        actor_name=target_dict.get("full_name"),
+        target_id=str(target_dict["id"]),
+        target_label=target_dict.get("full_name", ""),
+        details={"request_id": req["id"]},
+    )
+
+    updated = await database.fetch_one(
+        select(beach_users).where(beach_users.c.id == int(target_dict["id"]))
+    )
+    is_admin = await _check_is_admin(int(target_dict["id"]))
+    caps = sorted(await resolve_user_capabilities(dict(updated).get("badges")))
+    user_model = _to_user_item(
+        dict(updated), is_admin=is_admin, effective_capabilities=caps
+    )
+    session_token = beach_create_access_token(user_model.id)
+    return BeachLoginResponse(user=user_model, token=session_token)
