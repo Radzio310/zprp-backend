@@ -2328,6 +2328,92 @@ def _extract_text_from_pdf(file_bytes: bytes) -> str:
     return "\n".join(text_parts)
 
 
+def _hhmm_to_min(t) -> Optional[int]:
+    if not t or not isinstance(t, str):
+        return None
+    m = re.match(r"^(\d{1,2}):(\d{2})$", t.strip())
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+# Tiery meczów o miejsca: (półfinał, mecz o wyższe miejsce, mecz o niższe miejsce)
+_PLACEMENT_TIERS = [
+    ("fifth_semifinal", "fifth_place", "seventh_place"),
+    ("ninth_semifinal", "ninth_place", "eleventh_place"),
+    ("thirteenth_semifinal", "thirteenth_place", "fifteenth_place"),
+]
+
+
+def _sanitize_imported_schedule(schedule: dict) -> List[str]:
+    """
+    Deterministyczne poprawki terminarza wygenerowanego przez AI — te same, które
+    robi przycisk „Odśwież" w aplikacji. Modyfikuje `schedule` w miejscu i zwraca
+    listę opisów poprawek. Nie zmienia godzin, kolejności ani wyników meczów.
+    """
+    fixes: List[str] = []
+    config = schedule.get("config") or {}
+    matches = [m for m in (schedule.get("matches") or []) if isinstance(m, dict)]
+
+    def _order(m: dict) -> int:
+        try:
+            return int(m.get("order") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # ── 1. slotInterval — dominujący odstęp z realnych godzin ──
+    delta_counts: dict = {}
+    by_day_court: dict = {}
+    for m in matches:
+        if m.get("kind") in ("court_break", "tournament_opening", "special_event"):
+            continue
+        day = m.get("dayIndex")
+        court = m.get("court")
+        if day is None or court is None:
+            continue
+        by_day_court.setdefault((day, court), []).append(m)
+    for group in by_day_court.values():
+        times = sorted(
+            t for t in (_hhmm_to_min(m.get("originalTime") or m.get("startTime")) for m in group)
+            if t is not None
+        )
+        for i in range(1, len(times)):
+            d = times[i] - times[i - 1]
+            if 10 <= d <= 120:
+                delta_counts[d] = delta_counts.get(d, 0) + 1
+    if delta_counts:
+        best_delta = max(delta_counts, key=lambda k: delta_counts[k])
+        if delta_counts[best_delta] >= 3 and best_delta != config.get("slotInterval"):
+            fixes.append(f"Odstęp między meczami: {config.get('slotInterval')} → {best_delta} min (wyliczony z godzin)")
+            config["slotInterval"] = best_delta
+            schedule["config"] = config
+
+    # ── 2. Etapy: para „bezpańskich" baraży → półfinały o miejsca ──
+    for gender in ("M", "K"):
+        gmatches = [m for m in matches if m.get("gender") == gender]
+        for semi_stage, place_stage, consolation_stage in _PLACEMENT_TIERS:
+            has_semis = any(m.get("stage") == semi_stage for m in gmatches)
+            place_match = next((m for m in gmatches if m.get("stage") == place_stage), None)
+            consolation = next((m for m in gmatches if m.get("stage") == consolation_stage), None)
+            if has_semis or not place_match or not consolation:
+                continue
+            place_order = _order(place_match)
+            candidates = [
+                m for m in gmatches
+                if m.get("stage") == "playoff"
+                and not str(m.get("group") or "").startswith("playoff_")
+                and _order(m) < place_order
+            ]
+            if len(candidates) != 2:
+                continue
+            for c in candidates:
+                fixes.append(f"Mecz {gender} (kolejność {_order(c) + 1}): Baraż → {semi_stage}")
+                c["stage"] = semi_stage
+                c["group"] = None
+
+    return fixes
+
+
 def _normalize_team_name(name: str) -> str:
     """Normalize a team name for fuzzy matching: lowercase, remove accents, extra spaces."""
     s = unicodedata.normalize("NFKD", name.lower().strip())
@@ -2475,6 +2561,13 @@ użyj odpowiednich stage'ów ZAMIAST "playoff":
    - Mecz o 15. miejsce → stage="fifteenth_place", knockoutLabel="<źródło A> vs <źródło B>"
    - Półfinały o 9. miejsce → stage="ninth_semifinal", knockoutLabel="<źródło A> vs <źródło B>"
    - Półfinały o 13. miejsce → stage="thirteenth_semifinal", knockoutLabel="<źródło A> vs <źródło B>"
+7a. PÓŁFINAŁY O 5. MIEJSCE — NAJCZĘSTSZY BŁĄD: rozpoznawaj etap po TYM, DO CZEGO PROWADZI mecz, \
+a NIE po jego nazwie w dokumencie. Jeśli ZWYCIĘZCA meczu trafia do meczu o 5. miejsce, a PRZEGRANY do meczu \
+o 7. miejsce → to jest stage="fifth_semifinal", NAWET jeśli dokument nazywa go "Baraż", "PF o V.", \
+"PF o V-VIII" czy podobnie. Analogicznie: zwycięzca→9. miejsce / przegrany→11. miejsce = stage="ninth_semifinal"; \
+zwycięzca→13. / przegrany→15. = stage="thirteenth_semifinal". \
+Słowo "Baraż" używaj TYLKO dla baraży eliminacyjnych awansujących do ćwierćfinałów/półfinałów (patrz punkt 6), \
+NIGDY dla meczów prowadzących do meczów o konkretne niższe miejsce.
 8. Rozpoznaj format fazy pucharowej oddzielnie dla M i K:
    - Jeśli są ćwierćfinały → knockoutFormatM/K = "quarters"
    - Jeśli od razu półfinały → knockoutFormatM/K = "semis"
@@ -2490,6 +2583,9 @@ DOPASOWYWANIE DRUŻYN:
 TECHNICZNE:
 15. Każdy mecz musi mieć unikalne "id" (wygeneruj UUID v4).
 16. Godziny w formacie "HH:mm" (24h).
+16a. slotInterval MUSISZ WYLICZYĆ z realnych godzin w dokumencie — to różnica między godzinami startu \
+kolejnych meczów na TYM SAMYM boisku (np. 10:00, 10:45, 11:30 → slotInterval=45). NIE wpisuj domyślnego 40, \
+jeśli dokument pokazuje inny odstęp. Weź odstęp dominujący (najczęstszy) w fazie grupowej.
 17. courts = liczba boisk widoczna w terminarzu.
 18. dayIndex: 0-based (0 = pierwszy dzień).
 19. order: sekwencyjny od 0, zachowaj kolejność z dokumentu.
@@ -2666,6 +2762,14 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
                 if tid not in invited_ids_set:
                     warnings.append(f'Mecz {m.get("id","?")}: drużyna ID={tid} nie jest zaproszona — usunięto')
                     m[slot] = None
+
+    # ── Deterministyczna sanityzacja (te same poprawki co przycisk „Odśwież") ──
+    try:
+        sanitize_fixes = _sanitize_imported_schedule(schedule)
+        for f in sanitize_fixes:
+            warnings.append(f"Auto-poprawka: {f}")
+    except Exception as exc:  # noqa: BLE001 — sanityzacja nie może wywalić importu
+        logger.warning("Schedule sanitization failed: %s", exc)
 
     # ── Validate schedule has required fields ──
     if "config" not in schedule:
