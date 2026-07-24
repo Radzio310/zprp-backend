@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy import select, update
+from sqlalchemy import func as sa_func, select, update
 
 import asyncio
 from app.db import database, beach_users, beach_verification_requests, beach_teams
@@ -357,12 +357,18 @@ def _parse_jsonish(raw: Any, fallback: Any):
     summary="Liczba oczekujących wniosków weryfikacyjnych (BEACH)",
 )
 async def get_pending_count():
-    rows = await database.fetch_all(
-        select(beach_verification_requests).where(
-            beach_verification_requests.c.status == "pending"
-        )
+    pending_row, total_row = await asyncio.gather(
+        database.fetch_one(
+            select(sa_func.count(beach_verification_requests.c.id)).where(
+                beach_verification_requests.c.status == "pending"
+            )
+        ),
+        database.fetch_one(select(sa_func.count(beach_verification_requests.c.id))),
     )
-    return {"pending_count": len(rows)}
+    return {
+        "pending_count": int(pending_row[0] if pending_row else 0),
+        "total": int(total_row[0] if total_row else 0),
+    }
 
 
 # ──────────────────────────────────────────────────

@@ -32,7 +32,7 @@ async def _is_admin(user_id: int) -> bool:
 
 
 def _empty() -> dict[str, Any]:
-    return {"teams": [], "players": [], "v": 1}
+    return {"teams": [], "players": [], "tournaments": [], "v": 1}
 
 
 def _parse_follows(raw: Any) -> dict[str, Any]:
@@ -46,7 +46,8 @@ def _parse_follows(raw: Any) -> dict[str, Any]:
         return _empty()
     teams = parsed.get("teams") if isinstance(parsed.get("teams"), list) else []
     players = parsed.get("players") if isinstance(parsed.get("players"), list) else []
-    return {"teams": teams, "players": players, "v": 1}
+    tournaments = parsed.get("tournaments") if isinstance(parsed.get("tournaments"), list) else []
+    return {"teams": teams, "players": players, "tournaments": tournaments, "v": 1}
 
 
 async def _get_follows(user_id: int) -> dict[str, Any]:
@@ -79,9 +80,21 @@ class FollowedPlayer(BaseModel):
     position: str | None = None
 
 
+class FollowedTournament(BaseModel):
+    id: int
+    name: str = ""
+    event_date: str = ""
+    end_date: str | None = None
+    location: str | None = None
+    category: str | None = None
+    competition_type: str | None = None
+    title_image_url: str | None = None
+
+
 class FollowsPayload(BaseModel):
     teams: list[FollowedTeam] = Field(default_factory=list)
     players: list[FollowedPlayer] = Field(default_factory=list)
+    tournaments: list[FollowedTournament] = Field(default_factory=list)
 
 
 # ─────────────────── endpoints użytkownika ───────────────────
@@ -105,6 +118,7 @@ async def save_follows(
     data = {
         "teams": [t.model_dump() for t in payload.teams],
         "players": [p.model_dump() for p in payload.players],
+        "tournaments": [t.model_dump() for t in payload.tournaments],
         "v": 1,
     }
     value = json.dumps(data, ensure_ascii=False)
@@ -117,7 +131,12 @@ async def save_follows(
         )
     )
     await database.execute(stmt)
-    return {"saved": True, "teams": len(data["teams"]), "players": len(data["players"])}
+    return {
+        "saved": True,
+        "teams": len(data["teams"]),
+        "players": len(data["players"]),
+        "tournaments": len(data["tournaments"]),
+    }
 
 
 # ─────────────────── statystyki admina ───────────────────
@@ -134,10 +153,11 @@ async def get_stats(current_user_id: int = Depends(beach_get_current_user_id)):
         )
     )
 
-    # user_id -> {teams, players}
+    # user_id -> {teams, players, tournaments}
     per_user: dict[int, dict[str, Any]] = {}
     team_counts: dict[int, dict[str, Any]] = {}
     player_counts: dict[int, dict[str, Any]] = {}
+    tournament_counts: dict[int, dict[str, Any]] = {}
 
     for r in rows:
         key = r["key"]
@@ -148,9 +168,14 @@ async def get_stats(current_user_id: int = Depends(beach_get_current_user_id)):
         data = _parse_follows(r["value"])
         teams = data["teams"]
         players = data["players"]
-        if not teams and not players:
+        tournaments = data["tournaments"]
+        if not teams and not players and not tournaments:
             continue
-        per_user[uid] = {"teams": len(teams), "players": len(players)}
+        per_user[uid] = {
+            "teams": len(teams),
+            "players": len(players),
+            "tournaments": len(tournaments),
+        }
 
         for t in teams:
             if not isinstance(t, dict):
@@ -186,6 +211,26 @@ async def get_stats(current_user_id: int = Depends(beach_get_current_user_id)):
             if not entry["name"] and p.get("full_name"):
                 entry["name"] = p.get("full_name")
 
+        for tr in tournaments:
+            if not isinstance(tr, dict):
+                continue
+            trid = tr.get("id")
+            if trid is None:
+                continue
+            entry = tournament_counts.setdefault(
+                int(trid),
+                {
+                    "id": int(trid),
+                    "name": tr.get("name") or "",
+                    "event_date": tr.get("event_date") or None,
+                    "category": tr.get("category") or None,
+                    "count": 0,
+                },
+            )
+            entry["count"] += 1
+            if not entry["name"] and tr.get("name"):
+                entry["name"] = tr.get("name")
+
     # Dołącz dane użytkowników (full_name, login)
     users: list[dict[str, Any]] = []
     if per_user:
@@ -204,17 +249,20 @@ async def get_stats(current_user_id: int = Depends(beach_get_current_user_id)):
                     "login": (u["login"] if u else None) or "",
                     "teams": counts["teams"],
                     "players": counts["players"],
-                    "total": counts["teams"] + counts["players"],
+                    "tournaments": counts["tournaments"],
+                    "total": counts["teams"] + counts["players"] + counts["tournaments"],
                 }
             )
 
     users.sort(key=lambda x: (-x["total"], x["full_name"]))
     top_teams = sorted(team_counts.values(), key=lambda x: -x["count"])[:20]
     top_players = sorted(player_counts.values(), key=lambda x: -x["count"])[:20]
+    top_tournaments = sorted(tournament_counts.values(), key=lambda x: -x["count"])[:20]
 
     return {
         "followers_count": len(users),
         "top_teams": top_teams,
         "top_players": top_players,
+        "top_tournaments": top_tournaments,
         "users": users,
     }
