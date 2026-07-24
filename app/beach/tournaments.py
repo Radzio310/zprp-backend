@@ -2460,7 +2460,8 @@ KLUCZOWE ZASADY STRUKTURY TURNIEJU:
 5. Mecze pucharowe (semifinal, quarterfinal, final, third_place, fifth_place, seventh_place, fifth_semifinal) \
 ZAWSZE mają teamA=null i teamB=null z opisowym knockoutLabel (np. "1. z gr. A vs 2. z gr. B"). \
 knockoutLabel zawiera WYŁĄCZNIE nazwy/źródła obu uczestników. NIE dodawaj na początku nazwy fazy, ponieważ jest już \
-zapisana w polu stage. Prawidłowo: "1. z gr. A vs 2. z gr. B". Błędnie: "Półfinał: 1. z gr. A vs 2. z gr. B".
+zapisana w polu stage. Prawidłowo: "1. z gr. A vs 2. z gr. B". Błędne są wszystkie prefiksy fazy lub miejsca, np. \
+"Półfinał:", "PF o V:", "7. miejsce:", "Mecz o 9. miejsce:", "Baraż:".
 6. Baraże eliminacyjne (stage="playoff") mają teamA=null, teamB=null z knockoutLabel opisującym kto gra. \
 Używaj "playoff" TYLKO dla baraży eliminacyjnych (np. 2. z gr. A vs 2. z gr. B, żeby awansować do ćwierćfinałów).
 7. MECZE O MIEJSCA — BARDZO WAŻNE: Jeśli turniej ma mecze o niższe miejsca (VII-IX, IX-XI, XII-XV itp.), \
