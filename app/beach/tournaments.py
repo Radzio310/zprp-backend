@@ -2458,7 +2458,9 @@ KLUCZOWE ZASADY STRUKTURY TURNIEJU:
 3. Rozmiary grup muszą być jak najbardziej symetryczne (np. 14 drużyn na 4 grupy = 4,4,3,3 — NIE 5,3,3,3).
 4. TYLKO mecze grupowe (stage="group") mają wypełnione teamA i teamB konkretnymi drużynami.
 5. Mecze pucharowe (semifinal, quarterfinal, final, third_place, fifth_place, seventh_place, fifth_semifinal) \
-ZAWSZE mają teamA=null i teamB=null z opisowym knockoutLabel (np. "1. z gr. A vs 2. z gr. B").
+ZAWSZE mają teamA=null i teamB=null z opisowym knockoutLabel (np. "1. z gr. A vs 2. z gr. B"). \
+knockoutLabel zawiera WYŁĄCZNIE nazwy/źródła obu uczestników. NIE dodawaj na początku nazwy fazy, ponieważ jest już \
+zapisana w polu stage. Prawidłowo: "1. z gr. A vs 2. z gr. B". Błędnie: "Półfinał: 1. z gr. A vs 2. z gr. B".
 6. Baraże eliminacyjne (stage="playoff") mają teamA=null, teamB=null z knockoutLabel opisującym kto gra. \
 Używaj "playoff" TYLKO dla baraży eliminacyjnych (np. 2. z gr. A vs 2. z gr. B, żeby awansować do ćwierćfinałów).
 7. MECZE O MIEJSCA — BARDZO WAŻNE: Jeśli turniej ma mecze o niższe miejsca (VII-IX, IX-XI, XII-XV itp.), \
@@ -2466,12 +2468,12 @@ użyj odpowiednich stage'ów ZAMIAST "playoff":
    - Miniturnieje round-robin "O msc. VII-IX" / "O msc. IX-XI" / "O msc. XIII-XVI" → stage="placement_rr", \
      group="placement_7" (lub "placement_9", "placement_13" itd. od pierwszego miejsca danego miniturnieju), \
      knockoutLabel="O msc. VII-IX: X. z gr. A vs Y. z gr. B"
-   - Mecz o 9. miejsce → stage="ninth_place", knockoutLabel="Mecz o 9. miejsce: ..."
-   - Mecz o 11. miejsce → stage="eleventh_place", knockoutLabel="Mecz o 11. miejsce: ..."
-   - Mecz o 13. miejsce → stage="thirteenth_place", knockoutLabel="Mecz o 13. miejsce: ..."
-   - Mecz o 15. miejsce → stage="fifteenth_place", knockoutLabel="Mecz o 15. miejsce: ..."
-   - Półfinały o 9. miejsce → stage="ninth_semifinal", knockoutLabel="Półfinał o 9. miejsce: ..."
-   - Półfinały o 13. miejsce → stage="thirteenth_semifinal", knockoutLabel="Półfinał o 13. miejsce: ..."
+   - Mecz o 9. miejsce → stage="ninth_place", knockoutLabel="<źródło A> vs <źródło B>"
+   - Mecz o 11. miejsce → stage="eleventh_place", knockoutLabel="<źródło A> vs <źródło B>"
+   - Mecz o 13. miejsce → stage="thirteenth_place", knockoutLabel="<źródło A> vs <źródło B>"
+   - Mecz o 15. miejsce → stage="fifteenth_place", knockoutLabel="<źródło A> vs <źródło B>"
+   - Półfinały o 9. miejsce → stage="ninth_semifinal", knockoutLabel="<źródło A> vs <źródło B>"
+   - Półfinały o 13. miejsce → stage="thirteenth_semifinal", knockoutLabel="<źródło A> vs <źródło B>"
 8. Rozpoznaj format fazy pucharowej oddzielnie dla M i K:
    - Jeśli są ćwierćfinały → knockoutFormatM/K = "quarters"
    - Jeśli od razu półfinały → knockoutFormatM/K = "semis"
@@ -3416,4 +3418,3 @@ async def set_tournament_title_image(
     )
 
     return {"success": True, "url": url}
-
