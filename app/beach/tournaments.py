@@ -1612,11 +1612,48 @@ async def judge_update_tournament(
 
 # ─────────────────── helpers for schedule-update logging ───────────────────
 
+def _normalized_match_sets(value: Any) -> List[Dict[str, Any]]:
+    """Return every set in one stable shape, regardless of the client payload variant."""
+    if not isinstance(value, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for index, raw_set in enumerate(value):
+        if not isinstance(raw_set, dict):
+            continue
+        points_a = raw_set.get(
+            "ptA",
+            raw_set.get("pointsA", raw_set.get("points_a", raw_set.get("a"))),
+        )
+        points_b = raw_set.get(
+            "ptB",
+            raw_set.get("pointsB", raw_set.get("points_b", raw_set.get("b"))),
+        )
+        if points_a is None and points_b is None:
+            continue
+        normalized.append(
+            {
+                "set": raw_set.get("set", raw_set.get("number", index + 1)),
+                "ptA": points_a,
+                "ptB": points_b,
+            }
+        )
+    return normalized
+
+
+def _score_team_name(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("name") or "TBD")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "TBD"
+
+
 def _detect_score_changes(
     old_schedule: Optional[Dict],
     new_schedule: Optional[Dict],
 ) -> List[Dict[str, Any]]:
-    """Return list of matches whose score or status changed between two schedule versions."""
+    """Return matches whose result details changed between schedule versions."""
     if not old_schedule or not new_schedule:
         return []
     old_matches = {
@@ -1631,22 +1668,37 @@ def _detect_score_changes(
         om = old_matches.get(mid)
         if not om:
             continue
+        old_sets = _normalized_match_sets(om.get("sets"))
+        new_sets = _normalized_match_sets(m.get("sets"))
         if (
             om.get("scoreA") != m.get("scoreA")
             or om.get("scoreB") != m.get("scoreB")
+            or old_sets != new_sets
+            or om.get("shootout") != m.get("shootout")
             or om.get("status") != m.get("status")
         ):
             ta = m.get("teamA") or om.get("teamA") or {}
             tb = m.get("teamB") or om.get("teamB") or {}
             changes.append({
                 "match_id": mid,
-                "team_a": ta.get("name", "TBD") if isinstance(ta, dict) else "TBD",
-                "team_b": tb.get("name", "TBD") if isinstance(tb, dict) else "TBD",
+                "match_number": m.get("matchNumber") or om.get("matchNumber"),
+                "team_a": _score_team_name(ta),
+                "team_b": _score_team_name(tb),
+                "previous_score_a": om.get("scoreA"),
+                "previous_score_b": om.get("scoreB"),
                 "score_a": m.get("scoreA"),
                 "score_b": m.get("scoreB"),
-                "sets": m.get("sets"),
+                "previous_sets": old_sets,
+                "sets": new_sets,
+                "previous_shootout": om.get("shootout"),
+                "shootout": m.get("shootout"),
                 "status": m.get("status"),
                 "gender": m.get("gender", ""),
+                "stage": m.get("stage"),
+                "court": m.get("court"),
+                "day": (m.get("dayIndex") + 1) if isinstance(m.get("dayIndex"), int) else None,
+                "start_time": m.get("startTime"),
+                "result_source": m.get("resultSource"),
             })
     return changes
 
@@ -1767,8 +1819,12 @@ async def schedule_update_tournament(
         for change in score_changes:
             sa, sb = change["score_a"], change["score_b"]
             score_str = f"{sa}:{sb}" if sa is not None and sb is not None else "—"
-            sets = change.get("sets") or []
-            sets_str = " ".join(f"{s.get('ptA', '?')}:{s.get('ptB', '?')}" for s in sets) if sets else ""
+            old_sa, old_sb = change["previous_score_a"], change["previous_score_b"]
+            previous_score = (
+                f"{old_sa}:{old_sb}"
+                if old_sa is not None and old_sb is not None
+                else None
+            )
             await log_activity(
                 area="tournament",
                 action="match.score_saved",
@@ -1777,11 +1833,26 @@ async def schedule_update_tournament(
                 target_id=str(tournament_id),
                 target_label=tour_name,
                 details={
+                    "match_id": change["match_id"],
+                    "match_number": change["match_number"],
                     "match": f"{change['team_a']} vs {change['team_b']}",
+                    "team_a": change["team_a"],
+                    "team_b": change["team_b"],
                     "score": score_str,
-                    "sets": sets_str or None,
+                    "score_a": sa,
+                    "score_b": sb,
+                    "sets": change["sets"],
+                    "previous_score": previous_score,
+                    "previous_sets": change["previous_sets"],
+                    "shootout": change["shootout"],
+                    "previous_shootout": change["previous_shootout"],
                     "gender": change["gender"],
                     "status": change["status"],
+                    "stage": change["stage"],
+                    "court": change["court"],
+                    "day": change["day"],
+                    "start_time": change["start_time"],
+                    "result_source": change["result_source"],
                 },
             )
         # If score save also changed match count (rare), log structural change too

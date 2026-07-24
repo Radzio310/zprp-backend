@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, func as sa_func, insert, select, text
+from sqlalchemy import String, cast, delete, func as sa_func, insert, select, text
 
 from app.db import database, beach_activity_log, beach_admins, beach_app_settings, beach_users
 from app.deps import beach_get_current_user_id
@@ -230,6 +230,7 @@ async def list_activity_log(
             (t.c.actor_name.ilike(like_pattern))
             | (t.c.target_label.ilike(like_pattern))
             | (t.c.action.ilike(like_pattern))
+            | (cast(t.c.details_json, String).ilike(like_pattern))
         )
 
     where = sa_func.coalesce(text("TRUE"))
@@ -355,6 +356,7 @@ async def set_retention(
         area="system",
         action="system.retention_changed",
         actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
         details={"retention_days": days},
     )
 
@@ -373,4 +375,14 @@ async def manual_cleanup(
         raise HTTPException(403, "Brak uprawnień")
 
     deleted = await cleanup_old_activity_logs()
-    return {"deleted": deleted}
+    await log_activity(
+        area="system",
+        action="system.cleanup",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={
+            "deleted_count": deleted,
+            "retention_days": await _get_retention_days(),
+        },
+    )
+    return {"deleted": deleted, "deleted_count": deleted}
