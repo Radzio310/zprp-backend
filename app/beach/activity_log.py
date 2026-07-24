@@ -273,11 +273,14 @@ def _activity_field_kind(action: str, key: str, path: List[str]) -> Optional[str
         return "person"
     if lowered in {
         "team_id",
+        "teamid",
         "team_key",
         "custom_team_id",
         "invited_ids",
         "invited_team_ids",
         "present_ids",
+        "tiedteamids",
+        "resolvedorder",
     }:
         return "team"
     if lowered == "tournament_id":

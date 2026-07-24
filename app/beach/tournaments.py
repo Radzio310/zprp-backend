@@ -1741,7 +1741,13 @@ def _detect_score_changes(
 
 def _schedule_log_team(value: Any) -> str:
     if isinstance(value, dict):
-        return str(value.get("name") or "Nieznana drużyna")
+        return str(
+            value.get("name")
+            or value.get("team_name")
+            or value.get("label")
+            or value.get("shortName")
+            or "Nieznana drużyna"
+        )
     if isinstance(value, str) and value.strip():
         return value.strip()
     return "Nieznana drużyna"
@@ -1775,6 +1781,8 @@ def _schedule_log_field_value(field: str, value: Any) -> Any:
         return _schedule_log_team(value)
     if field == "dayIndex":
         return value + 1 if isinstance(value, int) else value
+    if field in {"mainCourtIndex", "sideCourtIndex"}:
+        return value + 1 if isinstance(value, int) else value
     if field == "referees" and isinstance(value, dict):
         names = []
         for role in ("fieldA", "fieldB", "tableSecretary", "tableTimer"):
@@ -1782,7 +1790,23 @@ def _schedule_log_field_value(field: str, value: Any) -> Any:
             if isinstance(referee, dict) and referee.get("name"):
                 names.append(str(referee["name"]))
         return names
+    if field == "referees" and isinstance(value, list):
+        return [
+            str(referee.get("name") or referee.get("full_name"))
+            for referee in value
+            if isinstance(referee, dict)
+            and (referee.get("name") or referee.get("full_name"))
+        ]
     return value
+
+
+def _schedule_log_entry_key(entry: Dict[str, Any], index: int) -> str:
+    for field in ("id", "matchId", "scheduleMatchId"):
+        if entry.get(field) is not None:
+            return f"{field}:{entry[field]}"
+    if entry.get("matchNumber") is not None:
+        return f"matchNumber:{entry['matchNumber']}"
+    return f"position:{index}"
 
 
 def _describe_schedule_changes(
@@ -1817,39 +1841,35 @@ def _describe_schedule_changes(
         if isinstance(new_schedule.get("config"), dict)
         else {}
     )
-    config_fields = (
-        "mode",
-        "modeM",
-        "modeK",
-        "courts",
-        "slotInterval",
-        "minTeamBreak",
-        "thirdPlace",
-        "knockoutFormatM",
-        "knockoutFormatK",
-        "playoffMode",
-    )
+    config_fields = sorted(set(old_config) | set(new_config))
     for field in config_fields:
-        if old_config.get(field) != new_config.get(field):
+        old_value = _schedule_log_field_value(field, old_config.get(field))
+        new_value = _schedule_log_field_value(field, new_config.get(field))
+        if old_value != new_value:
             changed_fields[field] = {
-                "old": old_config.get(field),
-                "new": new_config.get(field),
+                "old": old_value,
+                "new": new_value,
+            }
+
+    for field in sorted(set(old) | set(new_schedule)):
+        if field in {"status", "config", "matches", "generated_at", "saved_at"}:
+            continue
+        if old.get(field) != new_schedule.get(field):
+            changed_fields[field] = {
+                "old": old.get(field),
+                "new": new_schedule.get(field),
             }
 
     ignored_kinds = {"court_break", "tournament_opening", "special_event"}
     old_matches = {
-        str(match["id"]): match
-        for match in (old.get("matches") or [])
-        if isinstance(match, dict)
-        and match.get("id") is not None
-        and match.get("kind") not in ignored_kinds
+        _schedule_log_entry_key(match, index): match
+        for index, match in enumerate(old.get("matches") or [])
+        if isinstance(match, dict) and match.get("kind") not in ignored_kinds
     }
     new_matches = {
-        str(match["id"]): match
-        for match in (new_schedule.get("matches") or [])
-        if isinstance(match, dict)
-        and match.get("id") is not None
-        and match.get("kind") not in ignored_kinds
+        _schedule_log_entry_key(match, index): match
+        for index, match in enumerate(new_schedule.get("matches") or [])
+        if isinstance(match, dict) and match.get("kind") not in ignored_kinds
     }
 
     added_ids = [match_id for match_id in new_matches if match_id not in old_matches]
@@ -1877,6 +1897,7 @@ def _describe_schedule_changes(
         "teamA",
         "teamB",
         "referees",
+        "durationMinutes",
         "order",
     )
     changed_matches = []
@@ -1900,18 +1921,14 @@ def _describe_schedule_changes(
         details["matches_changed"] = changed_matches
 
     old_events = {
-        str(entry["id"]): entry
-        for entry in (old.get("matches") or [])
-        if isinstance(entry, dict)
-        and entry.get("id") is not None
-        and entry.get("kind") in ignored_kinds
+        _schedule_log_entry_key(entry, index): entry
+        for index, entry in enumerate(old.get("matches") or [])
+        if isinstance(entry, dict) and entry.get("kind") in ignored_kinds
     }
     new_events = {
-        str(entry["id"]): entry
-        for entry in (new_schedule.get("matches") or [])
-        if isinstance(entry, dict)
-        and entry.get("id") is not None
-        and entry.get("kind") in ignored_kinds
+        _schedule_log_entry_key(entry, index): entry
+        for index, entry in enumerate(new_schedule.get("matches") or [])
+        if isinstance(entry, dict) and entry.get("kind") in ignored_kinds
     }
     added_event_ids = [
         event_id for event_id in new_events if event_id not in old_events
@@ -1935,6 +1952,8 @@ def _describe_schedule_changes(
         "eventType",
         "dayIndex",
         "court",
+        "courts",
+        "allCourts",
         "startTime",
         "endTime",
         "durationMinutes",

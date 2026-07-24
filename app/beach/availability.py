@@ -186,7 +186,7 @@ async def put_my_availability(
             "changed_fields": {
                 "availability_json": {
                     "old": (
-                        dict(existing).get("availability_json")
+                        _parse_avail(dict(existing).get("availability_json"))
                         if existing
                         else {}
                     ),

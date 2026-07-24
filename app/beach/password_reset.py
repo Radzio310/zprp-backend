@@ -572,7 +572,17 @@ async def admin_resolve(
         actor_name=await get_actor_name(user_id),
         target_id=str(target_user_id),
         target_label=target_dict.get("full_name", ""),
-        details={"via": "password_reset_request", "request_id": request_id},
+        details={
+            "via": "password_reset_request",
+            "request_id": request_id,
+            "change_method": "admin_reset",
+            "changed_fields": {
+                "password": {
+                    "old": "Ukryte ze względów bezpieczeństwa",
+                    "new": "Hasło zostało zmienione",
+                }
+            },
+        },
     )
 
     email_sent = False
