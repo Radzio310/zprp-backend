@@ -145,7 +145,11 @@ async def update_beach_proel_match(
             area="proel",
             action="match.status_changed",
             target_id=match_number,
-            details={"old_status": old_status, "new_status": req.status},
+            details={
+                "changed_fields": {
+                    "status": {"old": old_status, "new": req.status}
+                }
+            },
         )
 
     return {"success": True}

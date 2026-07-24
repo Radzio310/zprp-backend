@@ -184,7 +184,21 @@ async def update_version(version_id: int, req: BeachUpdateVersionRequest, curren
         await database.execute(update(beach_app_versions).where(beach_app_versions.c.id == version_id).values(**patch))
         existing_d = dict(existing)
         version_label = f"v{patch.get('version', existing_d.get('version'))} — {patch.get('name', existing_d.get('name'))}"
-        await log_activity(area="system", action="version.updated", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(version_id), target_label=version_label, details={"changed": list(patch.keys())})
+        await log_activity(
+            area="system",
+            action="version.updated",
+            actor_user_id=current_user_id,
+            actor_name=await get_actor_name(current_user_id),
+            target_id=str(version_id),
+            target_label=version_label,
+            details={
+                "changed_fields": {
+                    field: {"old": existing_d.get(field), "new": value}
+                    for field, value in patch.items()
+                    if field != "updated_at" and existing_d.get(field) != value
+                }
+            },
+        )
         return {"success": True}
     except Exception as e:
         msg = str(e).lower()

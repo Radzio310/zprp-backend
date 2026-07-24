@@ -718,7 +718,19 @@ async def patch_verification(
         actor_name=await get_actor_name(admin_user_id),
         target_id=str(request_id),
         target_label=user_name,
-        details={"role": ver["role"], "admin_note": req.admin_note},
+        details={
+            "role": ver["role"],
+            "changed_fields": {
+                "status": {
+                    "old": ver.get("status"),
+                    "new": req.status,
+                },
+                "admin_note": {
+                    "old": ver.get("admin_note"),
+                    "new": req.admin_note,
+                },
+            },
+        },
     )
 
     return _to_item(dict(updated_row))

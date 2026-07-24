@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import datetime, timezone
 import base64
 import json
@@ -1114,7 +1115,12 @@ async def patch_tournament(
             _is_head_judge = False
         if not _is_head_judge:
             raise HTTPException(403, "Brak uprawnień")
-    old_invited = set(str(x) for x in (_normalize_event_data(existing_d["data_json"]).get("invited_ids") or []))
+    old_event_data = _normalize_event_data(existing_d["data_json"])
+    if not old_event_data.get("invited_ids"):
+        old_event_data["invited_ids"] = await _compute_invited_ids_for_badge(
+            existing_d.get("badge"), old_event_data
+        )
+    old_invited = set(str(x) for x in (old_event_data.get("invited_ids") or []))
 
     update_data: Dict[str, Any] = {}
     fields = getattr(body, "__fields_set__", set())
@@ -1216,8 +1222,11 @@ async def patch_tournament(
             new_val = str(new_val)[:10] if new_val else None
         if old_val != new_val:
             diff_fields[key] = {"old": old_val, "new": new_val}
-    if old_invited != new_invited:
-        diff_fields["invited_ids"] = {"added": sorted(newly_added), "removed": sorted(old_invited - new_invited), "count_before": len(old_invited), "count_after": len(new_invited)}
+    for key in sorted(set(old_event_data) | set(data2)):
+        old_val = old_event_data.get(key)
+        new_val = data2.get(key)
+        if old_val != new_val:
+            diff_fields[key] = {"old": old_val, "new": new_val}
 
     await log_activity(
         area="tournament",
@@ -1260,6 +1269,7 @@ async def host_update_tournament(
 
     existing_d = dict(existing)
     data = _parse_json(existing_d["data_json"])
+    old_host_data = copy.deepcopy(data)
 
     # Admin może używać tego endpointu bez badge'a "Gospodarz zawodów"
     user_is_admin = await _is_admin(current_user_id)
@@ -1361,14 +1371,12 @@ async def host_update_tournament(
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
 
     # ── Activity log ──
-    details: Dict[str, Any] = {}
-    if body.announcements is not None:
-        details["announcements_count_before"] = old_announcements_count
-        details["announcements_count_after"] = len(body.announcements)
-    if body.invited_team_ids is not None:
-        details["invited_team_ids"] = body.invited_team_ids
-    if body.custom_teams is not None:
-        details["custom_teams_count"] = len(body.custom_teams)
+    changed_fields: Dict[str, Any] = {}
+    for field in ("announcements", "invited_team_ids", "custom_teams"):
+        old_value = old_host_data.get(field)
+        new_value = data.get(field)
+        if old_value != new_value:
+            changed_fields[field] = {"old": old_value, "new": new_value}
     await log_activity(
         area="tournament",
         action="tournament.host_updated",
@@ -1376,7 +1384,7 @@ async def host_update_tournament(
         actor_name=await get_actor_name(current_user_id),
         target_id=str(tournament_id),
         target_label=row_d.get("name", ""),
-        details=details or None,
+        details={"changed_fields": changed_fields} if changed_fields else None,
     )
 
     asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
@@ -1433,6 +1441,8 @@ async def coach_custom_team_update(
         if existing_ct.get("coach_user_id") != current_user_id:
             raise HTTPException(403, "Nie jesteś trenerem tej drużyny")
 
+    old_custom_team = copy.deepcopy(custom_teams[team_idx])
+
     # Merge: preserve the id and coach_user_id from existing, update the rest
     updated_ct = body.custom_team
     updated_ct["id"] = body.custom_team_id
@@ -1465,7 +1475,19 @@ async def coach_custom_team_update(
         actor_name=await get_actor_name(current_user_id),
         target_id=str(tournament_id),
         target_label=row_d.get("name", ""),
-        details={"custom_team_id": body.custom_team_id, "team_name": updated_ct.get("name")},
+        details={
+            "custom_team_id": body.custom_team_id,
+            "team_name": updated_ct.get("name"),
+            "changed_fields": {
+                field: {
+                    "old": old_custom_team.get(field),
+                    "new": updated_ct.get(field),
+                }
+                for field in set(old_custom_team) | set(updated_ct)
+                if field != "id"
+                and old_custom_team.get(field) != updated_ct.get(field)
+            },
+        },
     )
 
     asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
@@ -1501,6 +1523,7 @@ async def judge_update_tournament(
 
     existing_d = dict(existing)
     data = _parse_json(existing_d["data_json"])
+    old_judge_data = copy.deepcopy(data)
 
     # Sprawdź uprawnienia: admin lub uprawnienia do zarządzania sędziami
     is_admin_flag = await _is_admin(current_user_id)
@@ -1600,7 +1623,20 @@ async def judge_update_tournament(
         target_label=existing_d.get("name", ""),
         details={
             "judges_diff": judge_diff,
-            "head_judge_id": data.get("head_judge_id"),
+            "changed_fields": {
+                field: {
+                    "old": old_judge_data.get(field),
+                    "new": data.get(field),
+                }
+                for field in (
+                    "judges",
+                    "head_judge_id",
+                    "required_judges",
+                    "required_head_judges",
+                    "judge_colors",
+                )
+                if old_judge_data.get(field) != data.get(field)
+            },
         },
     )
 
@@ -1703,6 +1739,235 @@ def _detect_score_changes(
     return changes
 
 
+def _schedule_log_team(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("name") or "Nieznana drużyna")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "Nieznana drużyna"
+
+
+def _schedule_log_match_label(match: Dict[str, Any]) -> str:
+    number = match.get("matchNumber")
+    prefix = f"Mecz {number}" if number else "Mecz"
+    team_a = _schedule_log_team(match.get("teamA"))
+    team_b = _schedule_log_team(match.get("teamB"))
+    if team_a != "Nieznana drużyna" or team_b != "Nieznana drużyna":
+        return f"{prefix}: {team_a} – {team_b}"
+    if match.get("knockoutLabel"):
+        return f"{prefix}: {match['knockoutLabel']}"
+    return prefix
+
+
+def _schedule_log_event_label(event: Dict[str, Any]) -> str:
+    kind = event.get("kind")
+    if event.get("label"):
+        return str(event["label"])
+    if kind == "tournament_opening":
+        return "Otwarcie turnieju"
+    if kind == "court_break":
+        return "Przerwa na boisku"
+    return "Wydarzenie specjalne"
+
+
+def _schedule_log_field_value(field: str, value: Any) -> Any:
+    if field in {"teamA", "teamB"}:
+        return _schedule_log_team(value)
+    if field == "dayIndex":
+        return value + 1 if isinstance(value, int) else value
+    if field == "referees" and isinstance(value, dict):
+        names = []
+        for role in ("fieldA", "fieldB", "tableSecretary", "tableTimer"):
+            referee = value.get(role)
+            if isinstance(referee, dict) and referee.get("name"):
+                names.append(str(referee["name"]))
+        return names
+    return value
+
+
+def _describe_schedule_changes(
+    old_schedule: Optional[Dict],
+    new_schedule: Optional[Dict],
+) -> Dict[str, Any]:
+    """Build a readable structural diff without duplicating score details."""
+    if not isinstance(new_schedule, dict):
+        return {
+            "schedule_cleared": True,
+            "changed_fields": {
+                "schedule_status": {
+                    "old": (old_schedule or {}).get("status"),
+                    "new": None,
+                }
+            },
+        }
+
+    old = old_schedule if isinstance(old_schedule, dict) else {}
+    details: Dict[str, Any] = {}
+    changed_fields: Dict[str, Any] = {}
+
+    if old.get("status") != new_schedule.get("status"):
+        changed_fields["schedule_status"] = {
+            "old": old.get("status"),
+            "new": new_schedule.get("status"),
+        }
+
+    old_config = old.get("config") if isinstance(old.get("config"), dict) else {}
+    new_config = (
+        new_schedule.get("config")
+        if isinstance(new_schedule.get("config"), dict)
+        else {}
+    )
+    config_fields = (
+        "mode",
+        "modeM",
+        "modeK",
+        "courts",
+        "slotInterval",
+        "minTeamBreak",
+        "thirdPlace",
+        "knockoutFormatM",
+        "knockoutFormatK",
+        "playoffMode",
+    )
+    for field in config_fields:
+        if old_config.get(field) != new_config.get(field):
+            changed_fields[field] = {
+                "old": old_config.get(field),
+                "new": new_config.get(field),
+            }
+
+    ignored_kinds = {"court_break", "tournament_opening", "special_event"}
+    old_matches = {
+        str(match["id"]): match
+        for match in (old.get("matches") or [])
+        if isinstance(match, dict)
+        and match.get("id") is not None
+        and match.get("kind") not in ignored_kinds
+    }
+    new_matches = {
+        str(match["id"]): match
+        for match in (new_schedule.get("matches") or [])
+        if isinstance(match, dict)
+        and match.get("id") is not None
+        and match.get("kind") not in ignored_kinds
+    }
+
+    added_ids = [match_id for match_id in new_matches if match_id not in old_matches]
+    removed_ids = [match_id for match_id in old_matches if match_id not in new_matches]
+    if added_ids:
+        details["matches_added"] = [
+            _schedule_log_match_label(new_matches[match_id])
+            for match_id in added_ids
+        ]
+    if removed_ids:
+        details["matches_removed"] = [
+            _schedule_log_match_label(old_matches[match_id])
+            for match_id in removed_ids
+        ]
+
+    match_fields = (
+        "matchNumber",
+        "dayIndex",
+        "court",
+        "startTime",
+        "endTime",
+        "stage",
+        "group",
+        "round",
+        "teamA",
+        "teamB",
+        "referees",
+        "order",
+    )
+    changed_matches = []
+    for match_id in new_matches.keys() & old_matches.keys():
+        old_match = old_matches[match_id]
+        new_match = new_matches[match_id]
+        match_diff: Dict[str, Any] = {}
+        for field in match_fields:
+            old_value = _schedule_log_field_value(field, old_match.get(field))
+            new_value = _schedule_log_field_value(field, new_match.get(field))
+            if old_value != new_value:
+                match_diff[field] = {"old": old_value, "new": new_value}
+        if match_diff:
+            changed_matches.append(
+                {
+                    "match": _schedule_log_match_label(new_match),
+                    "changed_fields": match_diff,
+                }
+            )
+    if changed_matches:
+        details["matches_changed"] = changed_matches
+
+    old_events = {
+        str(entry["id"]): entry
+        for entry in (old.get("matches") or [])
+        if isinstance(entry, dict)
+        and entry.get("id") is not None
+        and entry.get("kind") in ignored_kinds
+    }
+    new_events = {
+        str(entry["id"]): entry
+        for entry in (new_schedule.get("matches") or [])
+        if isinstance(entry, dict)
+        and entry.get("id") is not None
+        and entry.get("kind") in ignored_kinds
+    }
+    added_event_ids = [
+        event_id for event_id in new_events if event_id not in old_events
+    ]
+    removed_event_ids = [
+        event_id for event_id in old_events if event_id not in new_events
+    ]
+    if added_event_ids:
+        details["events_added"] = [
+            _schedule_log_event_label(new_events[event_id])
+            for event_id in added_event_ids
+        ]
+    if removed_event_ids:
+        details["events_removed"] = [
+            _schedule_log_event_label(old_events[event_id])
+            for event_id in removed_event_ids
+        ]
+
+    event_fields = (
+        "label",
+        "eventType",
+        "dayIndex",
+        "court",
+        "startTime",
+        "endTime",
+        "durationMinutes",
+        "order",
+    )
+    changed_events = []
+    for event_id in new_events.keys() & old_events.keys():
+        old_event = old_events[event_id]
+        new_event = new_events[event_id]
+        event_diff: Dict[str, Any] = {}
+        for field in event_fields:
+            old_value = _schedule_log_field_value(field, old_event.get(field))
+            new_value = _schedule_log_field_value(field, new_event.get(field))
+            if old_value != new_value:
+                event_diff[field] = {"old": old_value, "new": new_value}
+        if event_diff:
+            changed_events.append(
+                {
+                    "event": _schedule_log_event_label(new_event),
+                    "changed_fields": event_diff,
+                }
+            )
+    if changed_events:
+        details["events_changed"] = changed_events
+
+    if changed_fields:
+        details["changed_fields"] = changed_fields
+    details["matches_before"] = len(old_matches)
+    details["matches_after"] = len(new_matches)
+    details["schedule_cleared"] = False
+    return details
+
+
 # ─────────────────── PATCH schedule-update (Admin / Gospodarz zawodów) ───────────────────
 
 @router.patch(
@@ -1795,17 +2060,23 @@ async def schedule_update_tournament(
         data2["invited_ids"] = await _compute_invited_ids_for_badge(row_d.get("badge"), data2)
 
     # ── Activity log ──
-    def _real_match_count(sched):
-        if not isinstance(sched, dict):
-            return 0
-        return sum(1 for m in sched.get("matches", []) if m.get("kind") not in ("court_break", "tournament_opening", "special_event"))
-
-    old_match_count = _real_match_count(old_schedule)
-    new_match_count = _real_match_count(body.schedule)
     actor_name = await get_actor_name(current_user_id)
 
     # Score save: detect which match scores changed → log as match.score_saved (not schedule_updated)
     score_changes = _detect_score_changes(old_schedule, body.schedule)
+    schedule_change_details = _describe_schedule_changes(old_schedule, body.schedule)
+    has_structural_changes = body.schedule is None or any(
+        key in schedule_change_details
+        for key in (
+            "changed_fields",
+            "matches_added",
+            "matches_removed",
+            "matches_changed",
+            "events_added",
+            "events_removed",
+            "events_changed",
+        )
+    )
 
     # Schedule published: status flipped to "published"
     is_publish = (
@@ -1856,7 +2127,7 @@ async def schedule_update_tournament(
                 },
             )
         # If score save also changed match count (rare), log structural change too
-        if old_match_count != new_match_count:
+        if has_structural_changes:
             await log_activity(
                 area="tournament",
                 action="tournament.schedule_updated",
@@ -1864,7 +2135,7 @@ async def schedule_update_tournament(
                 actor_name=actor_name,
                 target_id=str(tournament_id),
                 target_label=tour_name,
-                details={"matches_before": old_match_count, "matches_after": new_match_count, "schedule_cleared": False},
+                details=schedule_change_details,
             )
     elif is_publish:
         await log_activity(
@@ -1874,7 +2145,7 @@ async def schedule_update_tournament(
             actor_name=actor_name,
             target_id=str(tournament_id),
             target_label=tour_name,
-            details=None,
+            details=schedule_change_details,
         )
     else:
         await log_activity(
@@ -1884,7 +2155,7 @@ async def schedule_update_tournament(
             actor_name=actor_name,
             target_id=str(tournament_id),
             target_label=tour_name,
-            details={"matches_before": old_match_count, "matches_after": new_match_count, "schedule_cleared": body.schedule is None},
+            details=schedule_change_details,
         )
 
     asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
@@ -1960,6 +2231,50 @@ async def settlements_update_tournament(
     )
     row_d = dict(row)
     data2 = _normalize_event_data(row_d["data_json"])
+    old_settlement_judges = (
+        current_store.get("judges")
+        if isinstance(current_store.get("judges"), dict)
+        else {}
+    )
+    new_settlement_store = (
+        data.get("settlements")
+        if isinstance(data.get("settlements"), dict)
+        else {}
+    )
+    new_settlement_judges = (
+        new_settlement_store.get("judges")
+        if isinstance(new_settlement_store.get("judges"), dict)
+        else {}
+    )
+    settlement_changes = []
+    for judge_key in sorted(
+        set(old_settlement_judges) | set(new_settlement_judges),
+        key=str,
+    ):
+        old_config = old_settlement_judges.get(judge_key) or {}
+        new_config = new_settlement_judges.get(judge_key) or {}
+        config_diff = {
+            field: {"old": old_config.get(field), "new": new_config.get(field)}
+            for field in set(old_config) | set(new_config)
+            if field not in {"updatedAt", "updatedBy", "routes"}
+            and old_config.get(field) != new_config.get(field)
+        }
+        if config_diff:
+            settlement_changes.append(
+                {
+                    "judge_id": judge_key,
+                    "changed_fields": config_diff,
+                }
+            )
+    settlement_global_changes = {}
+    if current_store.get("categoryOverride") != new_settlement_store.get(
+        "categoryOverride"
+    ):
+        settlement_global_changes["categoryOverride"] = {
+            "old": current_store.get("categoryOverride"),
+            "new": new_settlement_store.get("categoryOverride"),
+        }
+
     await log_activity(
         area="tournament",
         action="tournament.settlements_updated",
@@ -1967,7 +2282,11 @@ async def settlements_update_tournament(
         actor_name=await get_actor_name(current_user_id),
         target_id=str(tournament_id),
         target_label=row_d.get("name", ""),
-        details={"judge_id": body.judge_id},
+        details={
+            "judge_id": body.judge_id,
+            "changed_fields": settlement_global_changes,
+            "settlement_changes": settlement_changes,
+        },
     )
     announcement_viewer = await _announcement_viewer_profile(current_user_id)
     safe_data = _filter_announcements_for_viewer(data2, announcement_viewer)
@@ -2019,6 +2338,7 @@ async def disq_update_tournament(
         raise HTTPException(403, "Brak uprawnień do zapisu decyzji dyskwalifikacyjnych")
 
     # Znajdź nowo zdecydowane wpisy (compared to old list)
+    old_disqualifications = copy.deepcopy(data.get("disqualifications") or [])
     old_decided_ids = {
         d.get("id")
         for d in (data.get("disqualifications") or [])
@@ -2103,7 +2423,15 @@ async def disq_update_tournament(
         actor_name=await get_actor_name(current_user_id),
         target_id=str(tournament_id),
         target_label=existing_d.get("name", ""),
-        details={"count": len(body.disqualifications)},
+        details={
+            "count": len(body.disqualifications),
+            "changed_fields": {
+                "disqualifications": {
+                    "old": old_disqualifications,
+                    "new": body.disqualifications,
+                }
+            },
+        },
     )
     announcement_viewer = await _announcement_viewer_profile(current_user_id)
     safe_data = _filter_announcements_for_viewer(data2, announcement_viewer)
@@ -3006,7 +3334,16 @@ async def update_tournament_attendance(
         actor_name=await get_actor_name(current_user_id),
         target_id=str(tournament_id),
         target_label=existing_d.get("name", ""),
-        details={"count_before": len(old_present), "count_after": len(new_present)},
+        details={
+            "count_before": len(old_present),
+            "count_after": len(new_present),
+            "changed_fields": {
+                "present_ids": {
+                    "old": sorted(old_present),
+                    "new": sorted(new_present),
+                }
+            },
+        },
     )
 
     asyncio.ensure_future(_sync_tournament_calendar_background(row_d, data2))
@@ -3350,6 +3687,7 @@ async def squad_update_tournament(
     team_squads: dict = data.get("team_squads") or {}
     team_key = body.custom_team_id if body.custom_team_id else str(body.team_id)
     squad_entry: dict = dict(team_squads.get(team_key) or {})
+    old_squad_entry = copy.deepcopy(squad_entry)
 
     if body.match_id:
         match_overrides: dict = dict(squad_entry.get("match_overrides") or {})
@@ -3384,6 +3722,48 @@ async def squad_update_tournament(
     )
 
     # ── Activity log ──
+    squad_changed_fields: dict[str, dict] = {}
+    if body.match_id:
+        old_override = (
+            (old_squad_entry.get("match_overrides") or {}).get(body.match_id) or {}
+        )
+        new_override = (
+            (squad_entry.get("match_overrides") or {}).get(body.match_id) or {}
+        )
+        override_fields = {
+            "players": "match_players",
+            "companions": "match_companions",
+            "companion_roles": "match_companion_roles",
+        }
+        for stored_field, display_field in override_fields.items():
+            old_value = old_override.get(stored_field)
+            new_value = new_override.get(stored_field)
+            if old_value != new_value:
+                squad_changed_fields[display_field] = {
+                    "old": old_value,
+                    "new": new_value,
+                }
+        old_signature = bool(old_override.get("signature_url"))
+        new_signature = bool(new_override.get("signature_url"))
+        if old_signature != new_signature:
+            squad_changed_fields["signature"] = {
+                "old": "Dodano" if old_signature else "Brak",
+                "new": "Dodano" if new_signature else "Brak",
+            }
+    else:
+        for field in (
+            "default_players",
+            "default_companions",
+            "default_companion_roles",
+            "protocol_players",
+        ):
+            old_value = old_squad_entry.get(field)
+            new_value = squad_entry.get(field)
+            if old_value != new_value:
+                squad_changed_fields[field] = {
+                    "old": old_value,
+                    "new": new_value,
+                }
     if body.custom_team_id:
         squad_team_name = next(
             (
@@ -3433,6 +3813,7 @@ async def squad_update_tournament(
             "team_name": squad_team_name,
             "match_id": body.match_id,
             "match": squad_match_name,
+            "changed_fields": squad_changed_fields,
         },
     )
 

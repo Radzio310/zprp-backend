@@ -466,8 +466,17 @@ async def admin_update_status(
         target_id=str(request_id),
         target_label=request_data.get("user_name") or request_data.get("login"),
         details={
-            "new_status": body.status,
             "user_id": request_data.get("user_id"),
+            "changed_fields": {
+                "status": {
+                    "old": request_data.get("status"),
+                    "new": body.status,
+                },
+                "admin_note": {
+                    "old": request_data.get("admin_note"),
+                    "new": (body.admin_note or "").strip() or None,
+                },
+            },
         },
     )
 

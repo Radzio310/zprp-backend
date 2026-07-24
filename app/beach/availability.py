@@ -138,7 +138,7 @@ async def put_my_availability(
     now = datetime.now(timezone.utc)
 
     existing = await database.fetch_one(
-        select(beach_judge_availability.c.user_id).where(
+        select(beach_judge_availability).where(
             beach_judge_availability.c.user_id == current_user_id
         )
     )
@@ -181,7 +181,19 @@ async def put_my_availability(
         actor_user_id=current_user_id,
         actor_name=await get_actor_name(current_user_id),
         target_id=str(current_user_id),
-        details={"days_count": len(sanitized) if isinstance(sanitized, dict) else 0},
+        details={
+            "days_count": len(sanitized) if isinstance(sanitized, dict) else 0,
+            "changed_fields": {
+                "availability_json": {
+                    "old": (
+                        dict(existing).get("availability_json")
+                        if existing
+                        else {}
+                    ),
+                    "new": sanitized,
+                }
+            },
+        },
     )
 
     return result

@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import database, beach_tutorials, beach_tutorial_views, beach_admins, beach_users
 from app.deps import beach_get_current_user_id
-from app.beach.activity_log import log_activity
+from app.beach.activity_log import get_actor_name, log_activity
 from app.beach.notifications import create_notification
 from app.schemas import (
     BeachTutorialItem,
@@ -203,8 +203,16 @@ async def update_tutorial(
         area="tutorials",
         action="tutorial.updated",
         actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
         target_id=str(tutorial_id),
         target_label=row["name"],
+        details={
+            "changed_fields": {
+                field: {"old": existing[field], "new": row[field]}
+                for field in update_data
+                if field != "updated_at" and existing[field] != row[field]
+            }
+        },
     ))
 
     return _row_to_item(row, bool(viewed))
@@ -247,6 +255,13 @@ async def reorder_tutorials(req: ReorderBeachTutorialsRequest, current_user_id: 
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
+    existing_rows = await database.fetch_all(
+        select(beach_tutorials.c.id, beach_tutorials.c.name)
+        .order_by(beach_tutorials.c.order_index.asc(), beach_tutorials.c.id.asc())
+    )
+    names_by_id = {int(row["id"]): str(row["name"]) for row in existing_rows}
+    old_order = [str(row["name"]) for row in existing_rows]
+
     for idx, tutorial_id in enumerate(req.ids):
         await database.execute(
             update(beach_tutorials)
@@ -258,6 +273,19 @@ async def reorder_tutorials(req: ReorderBeachTutorialsRequest, current_user_id: 
         area="tutorials",
         action="tutorials.reordered",
         actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={
+            "changed_fields": {
+                "tutorial_order": {
+                    "old": old_order,
+                    "new": [
+                        names_by_id[tutorial_id]
+                        for tutorial_id in req.ids
+                        if tutorial_id in names_by_id
+                    ],
+                }
+            }
+        },
     ))
 
     return {"success": True}

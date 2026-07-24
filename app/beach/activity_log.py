@@ -313,6 +313,13 @@ def _collect_activity_entity_ids(
                     for diff_value in nested.values():
                         if diff_value is not None and not isinstance(diff_value, (dict, list)):
                             buckets[kind].add(diff_value)
+                        elif isinstance(diff_value, (dict, list)):
+                            _collect_activity_entity_ids(
+                                diff_value,
+                                action=action,
+                                path=[*current_path, str(key)],
+                                buckets=buckets,
+                            )
                     continue
             _collect_activity_entity_ids(
                 nested,
@@ -664,11 +671,19 @@ async def _hydrate_activity_items(items: List[Dict[str, Any]]) -> List[Dict[str,
                     )
                 ):
                     result[key] = {
-                        diff_key: resolve_scalar(
-                            item=item,
-                            key=str(key),
-                            path=current_path,
-                            value=diff_value,
+                        diff_key: (
+                            humanize_details(
+                                item,
+                                diff_value,
+                                [*current_path, str(key)],
+                            )
+                            if isinstance(diff_value, (dict, list))
+                            else resolve_scalar(
+                                item=item,
+                                key=str(key),
+                                path=current_path,
+                                value=diff_value,
+                            )
                         )
                         for diff_key, diff_value in nested.items()
                     }
@@ -914,6 +929,7 @@ async def set_retention(
     if not isinstance(days, int) or days < 1:
         raise HTTPException(400, "retention_days must be a positive integer")
 
+    old_days = await _get_retention_days()
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     stmt = (
         pg_insert(beach_app_settings)
@@ -930,7 +946,12 @@ async def set_retention(
         action="system.retention_changed",
         actor_user_id=current_user_id,
         actor_name=await get_actor_name(current_user_id),
-        details={"retention_days": days},
+        details={
+            "retention_days": days,
+            "changed_fields": {
+                "retention_days": {"old": old_days, "new": days}
+            },
+        },
     )
 
     return {"retention_days": days}

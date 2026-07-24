@@ -216,7 +216,23 @@ async def update_template(
             beach_custom_team_templates.c.id == template_id
         )
     )
-    await log_activity(area="system", action="template.updated", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(template_id), target_label=dict(updated).get("name", ""))
+    old_template = dict(row)
+    new_template = dict(updated)
+    template_changed_fields = {
+        field: {"old": old_template.get(field), "new": new_template.get(field)}
+        for field in patch
+        if field != "updated_at"
+        and old_template.get(field) != new_template.get(field)
+    }
+    await log_activity(
+        area="system",
+        action="template.updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(template_id),
+        target_label=new_template.get("name", ""),
+        details={"changed_fields": template_changed_fields},
+    )
     return _row_to_dict(updated)
 
 

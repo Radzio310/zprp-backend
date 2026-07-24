@@ -258,7 +258,25 @@ async def patch_badge(badge_id: int, body: BeachBadgeUpdateRequest):
             body=f"🔄 Badge \u201c{result.name}\u201d został zaktualizowany.",
             data={"badge_id": badge_id, "badge_name": result.name},
         ))
-    await log_activity(area="system", action="badge.updated", target_id=str(badge_id), target_label=result.name)
+    badge_changed_fields = {}
+    old_config = _parse_json(existing["config_json"])
+    if str(existing["name"]) != result.name:
+        badge_changed_fields["name"] = {
+            "old": str(existing["name"]),
+            "new": result.name,
+        }
+    if old_config != result.config_json:
+        badge_changed_fields["config_json"] = {
+            "old": old_config,
+            "new": result.config_json,
+        }
+    await log_activity(
+        area="system",
+        action="badge.updated",
+        target_id=str(badge_id),
+        target_label=result.name,
+        details={"changed_fields": badge_changed_fields},
+    )
     return result
 
 
@@ -302,7 +320,22 @@ async def put_badge(badge_id: int, req: BeachBadgeCreateRequest):
         body=f"🔄 Badge \u201c{result.name}\u201d został zaktualizowany.",
         data={"badge_id": badge_id, "badge_name": result.name},
     ))
-    await log_activity(area="system", action="badge.updated", target_id=str(badge_id), target_label=result.name)
+    badge_changed_fields = {}
+    old_config = _parse_json(existing["config_json"])
+    if old_name != result.name:
+        badge_changed_fields["name"] = {"old": old_name, "new": result.name}
+    if old_config != result.config_json:
+        badge_changed_fields["config_json"] = {
+            "old": old_config,
+            "new": result.config_json,
+        }
+    await log_activity(
+        area="system",
+        action="badge.updated",
+        target_id=str(badge_id),
+        target_label=result.name,
+        details={"changed_fields": badge_changed_fields},
+    )
     return result
 
 

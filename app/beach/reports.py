@@ -669,7 +669,7 @@ async def update_report_status(
     if not await _is_admin(user_id):
         raise HTTPException(status_code=403, detail="Brak uprawnień")
 
-    await _get_report_or_404(report_id)
+    existing_row = await _get_report_or_404(report_id)
 
     now = datetime.now(timezone.utc)
     await database.execute(
@@ -690,7 +690,14 @@ async def update_report_status(
         actor_name=await get_actor_name(user_id),
         target_id=str(report_id),
         target_label=updated_row.get("title") or f"Zgłoszenie od {updated_row.get('user_name', 'użytkownika')}",
-        details={"new_status": body.status},
+        details={
+            "changed_fields": {
+                "status": {
+                    "old": existing_row.get("status"),
+                    "new": body.status,
+                }
+            }
+        },
     )
 
     return _row_to_report_item(updated_row, cnt, last)

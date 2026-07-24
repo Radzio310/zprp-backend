@@ -348,7 +348,14 @@ async def update_guideline(
         actor_name=await get_actor_name(current_user_id),
         target_id=str(guideline_id),
         target_label=dict(row).get("title", ""),
-        details={"changed_fields": list(update_data.keys())},
+        details={
+            "changed_fields": {
+                field: {"old": existing_d.get(field), "new": dict(row).get(field)}
+                for field in update_data
+                if field != "updated_at"
+                and existing_d.get(field) != dict(row).get(field)
+            }
+        },
     )
 
     return _row_to_item(row)
@@ -415,7 +422,13 @@ async def review_guideline(
         actor_name=reviewer_name,
         target_id=str(guideline_id),
         target_label=dict(existing).get("title", ""),
-        details={"status": body.status, "rejection_comment": getattr(body, "rejection_comment", None)},
+        details={
+            "changed_fields": {
+                field: {"old": dict(existing).get(field), "new": dict(row).get(field)}
+                for field in ("status", "rejection_comment")
+                if dict(existing).get(field) != dict(row).get(field)
+            }
+        },
     )
 
     return _row_to_item(row)

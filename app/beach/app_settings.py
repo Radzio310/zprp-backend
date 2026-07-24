@@ -52,6 +52,16 @@ async def _is_admin(user_id: int) -> bool:
     return bool(row)
 
 
+def _stored_json(row, fallback: dict) -> dict:
+    if not row:
+        return fallback
+    try:
+        value = json.loads(dict(row).get("value") or "{}")
+        return value if isinstance(value, dict) else fallback
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback
+
+
 # ─── GET empty-state-image (public) ──────────────────────────────────────────
 
 @router.get("/empty-state-image", response_model=dict, summary="Grafika pustego stanu turniejów (publiczne)")
@@ -97,7 +107,21 @@ async def set_empty_state_image(
                 updated_at=datetime.now(timezone.utc),
             )
         )
-    await log_activity(area="system", action="app_settings.changed", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), details={"key": EMPTY_STATE_IMAGE_KEY, "action": "set"})
+    await log_activity(
+        area="system",
+        action="app_settings.changed",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={
+            "key": EMPTY_STATE_IMAGE_KEY,
+            "changed_fields": {
+                "url": {
+                    "old": dict(existing).get("value") if existing else None,
+                    "new": url,
+                }
+            },
+        },
+    )
     return {"success": True, "url": url}
 
 
@@ -110,10 +134,27 @@ async def delete_empty_state_image(
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
+    existing = await database.fetch_one(
+        select(beach_app_settings).where(beach_app_settings.c.key == EMPTY_STATE_IMAGE_KEY)
+    )
     await database.execute(
         beach_app_settings.delete().where(beach_app_settings.c.key == EMPTY_STATE_IMAGE_KEY)
     )
-    await log_activity(area="system", action="app_settings.changed", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), details={"key": EMPTY_STATE_IMAGE_KEY, "action": "delete"})
+    await log_activity(
+        area="system",
+        action="app_settings.changed",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={
+            "key": EMPTY_STATE_IMAGE_KEY,
+            "changed_fields": {
+                "url": {
+                    "old": dict(existing).get("value") if existing else None,
+                    "new": None,
+                }
+            },
+        },
+    )
     return {"success": True}
 
 
@@ -169,7 +210,15 @@ async def set_role_caps(
         action="app_settings.changed",
         actor_user_id=current_user_id,
         actor_name=await get_actor_name(current_user_id),
-        details={"key": ROLE_CAPS_KEY, "action": "set"},
+        details={
+            "key": ROLE_CAPS_KEY,
+            "changed_fields": {
+                "role_caps": {
+                    "old": _stored_json(existing, DEFAULT_ROLE_CAPS),
+                    "new": req.config,
+                }
+            },
+        },
     )
     return req.config
 
@@ -232,6 +281,14 @@ async def set_standings_config(
         action="app_settings.changed",
         actor_user_id=current_user_id,
         actor_name=await get_actor_name(current_user_id),
-        details={"key": STANDINGS_CONFIG_KEY, "action": "set", **config},
+        details={
+            "key": STANDINGS_CONFIG_KEY,
+            "changed_fields": {
+                "standings_config": {
+                    "old": _stored_json(existing, DEFAULT_STANDINGS_CONFIG),
+                    "new": config,
+                }
+            },
+        },
     )
     return config

@@ -969,6 +969,15 @@ async def _set_user_password(
         actor_name=await get_actor_name(actor_user_id),
         target_id=str(user_id),
         target_label=row_dict.get("full_name", ""),
+        details={
+            "change_method": "admin_reset" if admin_reset else "self_service",
+            "changed_fields": {
+                "password": {
+                    "old": "Ukryte ze względów bezpieczeństwa",
+                    "new": "Hasło zostało zmienione",
+                }
+            },
+        },
     )
     return _to_user_item(row_dict)
 
@@ -1124,13 +1133,39 @@ async def patch_user(
     row = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
 
     # ── Activity log ──
-    changed = {k: v for k, v in update_data.items() if k not in ("updated_at", "password_hash")}
+    existing_d = dict(existing)
+    row_d = dict(row)
+    internal_fields = {
+        "updated_at",
+        "email_normalized",
+        "email_verified",
+        "email_verified_at",
+        "must_change_password",
+        "device_ids",
+        "device_infos",
+        "last_login_at",
+    }
+    changed_fields: dict[str, dict] = {}
+    for field in update_data:
+        if field in internal_fields or field == "password_hash":
+            continue
+        old_value = _parse_jsonish(existing_d.get(field), existing_d.get(field))
+        new_value = _parse_jsonish(row_d.get(field), row_d.get(field))
+        if old_value != new_value:
+            changed_fields[field] = {"old": old_value, "new": new_value}
+    if "password_hash" in update_data:
+        changed_fields["password"] = {
+            "old": "Ukryte ze względów bezpieczeństwa",
+            "new": "Hasło zostało zmienione",
+        }
     await log_activity(
         area="user",
         action="user.updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
         target_id=str(user_id),
         target_label=dict(row).get("full_name", ""),
-        details={"changed_fields": list(changed.keys())} if changed else None,
+        details={"changed_fields": changed_fields} if changed_fields else None,
     )
 
     # ── Self-verification detection ──
@@ -1398,7 +1433,12 @@ async def admin_rename_user(
         actor_name=admin_name,
         target_id=str(user_id),
         target_label=old_full_name,
-        details={"old_full_name": old_full_name, "new_full_name": full_name, "old_login": old_login, "new_login": new_login},
+        details={
+            "changed_fields": {
+                "full_name": {"old": old_full_name, "new": full_name},
+                "login": {"old": old_login, "new": new_login},
+            }
+        },
     )
 
     updated = await database.fetch_one(select(beach_users).where(beach_users.c.id == user_id))
