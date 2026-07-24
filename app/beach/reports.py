@@ -683,7 +683,15 @@ async def update_report_status(
     last = await _get_last_message(report_id)
 
     # ── Activity log ──
-    await log_activity(area="system", action="report.status_changed", actor_user_id=user_id, actor_name=await get_actor_name(user_id), target_id=str(report_id), details={"new_status": body.status})
+    await log_activity(
+        area="system",
+        action="report.status_changed",
+        actor_user_id=user_id,
+        actor_name=await get_actor_name(user_id),
+        target_id=str(report_id),
+        target_label=updated_row.get("title") or f"Zgłoszenie od {updated_row.get('user_name', 'użytkownika')}",
+        details={"new_status": body.status},
+    )
 
     return _row_to_report_item(updated_row, cnt, last)
 

@@ -351,6 +351,7 @@ async def admin_update_status(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Wniosek nie istnieje")
+    request_data = dict(row)
 
     now = datetime.now(timezone.utc)
     await database.execute(
@@ -369,7 +370,11 @@ async def admin_update_status(
         actor_user_id=user_id,
         actor_name=await get_actor_name(user_id),
         target_id=str(request_id),
-        details={"new_status": body.status},
+        target_label=request_data.get("user_name") or request_data.get("login"),
+        details={
+            "new_status": body.status,
+            "user_id": request_data.get("user_id"),
+        },
     )
 
     updated_row = await database.fetch_one(

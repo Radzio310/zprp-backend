@@ -735,6 +735,20 @@ async def patch_verification(
 )
 async def delete_verification(request_id: int):
     from sqlalchemy import delete
+    existing = await database.fetch_one(
+        select(beach_verification_requests).where(
+            beach_verification_requests.c.id == request_id
+        )
+    )
+    existing_d = dict(existing) if existing else {}
+    applicant_name = None
+    if existing_d.get("user_id") is not None:
+        applicant = await database.fetch_one(
+            select(beach_users.c.full_name).where(
+                beach_users.c.id == existing_d["user_id"]
+            )
+        )
+        applicant_name = applicant["full_name"] if applicant else None
     await database.execute(
         delete(beach_verification_requests).where(
             beach_verification_requests.c.id == request_id
@@ -746,6 +760,8 @@ async def delete_verification(request_id: int):
         area="verification",
         action="verification.deleted",
         target_id=str(request_id),
+        target_label=applicant_name,
+        details={"role": existing_d.get("role")},
     )
 
     return {"success": True}

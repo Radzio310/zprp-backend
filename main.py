@@ -879,6 +879,13 @@ async def startup():
         "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_verification_deadline TIMESTAMPTZ",
         "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS email_public BOOLEAN NOT NULL DEFAULT true",
         "CREATE INDEX IF NOT EXISTS ix_beach_users_email_normalized ON beach_users (email_normalized)",
+        # ── Reset haseł: wymuszenie zmiany hasła tymczasowego ──
+        "ALTER TABLE beach_users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT false",
+        # ── Reset haseł: magic-login z powiadomienia push (jednorazowy token) ──
+        "ALTER TABLE beach_password_reset_requests ADD COLUMN IF NOT EXISTS claim_token_hash VARCHAR",
+        "ALTER TABLE beach_password_reset_requests ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ",
+        "ALTER TABLE beach_password_reset_requests ADD COLUMN IF NOT EXISTS claim_used_at TIMESTAMPTZ",
+        "CREATE INDEX IF NOT EXISTS ix_beach_pwd_reset_claim_hash ON beach_password_reset_requests (claim_token_hash)",
     ]
     for stmt in _beach_user_migrations:
         try:

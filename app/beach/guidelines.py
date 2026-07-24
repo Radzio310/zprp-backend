@@ -436,7 +436,9 @@ async def delete_guideline(
         raise HTTPException(403, "Tylko admin może usuwać wytyczne")
 
     existing = await database.fetch_one(
-        select(beach_guidelines.c.id).where(beach_guidelines.c.id == guideline_id)
+        select(beach_guidelines.c.id, beach_guidelines.c.title).where(
+            beach_guidelines.c.id == guideline_id
+        )
     )
     if not existing:
         raise HTTPException(404, "Nie znaleziono wytycznej")
@@ -452,6 +454,7 @@ async def delete_guideline(
         actor_user_id=current_user_id,
         actor_name=await get_actor_name(current_user_id),
         target_id=str(guideline_id),
+        target_label=existing["title"],
     )
 
     return {"success": True}

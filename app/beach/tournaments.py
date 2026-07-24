@@ -3384,6 +3384,43 @@ async def squad_update_tournament(
     )
 
     # ── Activity log ──
+    if body.custom_team_id:
+        squad_team_name = next(
+            (
+                str(team.get("name") or team.get("team_name"))
+                for team in (data.get("custom_teams") or [])
+                if isinstance(team, dict)
+                and str(team.get("id")) == str(body.custom_team_id)
+                and (team.get("name") or team.get("team_name"))
+            ),
+            None,
+        )
+    else:
+        squad_team_row = await database.fetch_one(
+            select(beach_teams.c.team_name).where(
+                beach_teams.c.id == body.team_id
+            )
+        )
+        squad_team_name = squad_team_row["team_name"] if squad_team_row else None
+
+    squad_match_name = None
+    if body.match_id:
+        schedule = data.get("schedule") if isinstance(data.get("schedule"), dict) else {}
+        match_entry = next(
+            (
+                match for match in (schedule.get("matches") or [])
+                if isinstance(match, dict)
+                and str(match.get("id")) == str(body.match_id)
+            ),
+            None,
+        )
+        if match_entry:
+            team_a = match_entry.get("teamA") if isinstance(match_entry.get("teamA"), dict) else {}
+            team_b = match_entry.get("teamB") if isinstance(match_entry.get("teamB"), dict) else {}
+            match_number = match_entry.get("matchNumber")
+            pair = f"{team_a.get('name', 'nieznana drużyna')} – {team_b.get('name', 'nieznana drużyna')}"
+            squad_match_name = f"Mecz {match_number}: {pair}" if match_number else pair
+
     await log_activity(
         area="tournament",
         action="tournament.squad_updated",
@@ -3391,7 +3428,12 @@ async def squad_update_tournament(
         actor_name=await get_actor_name(current_user_id),
         target_id=str(tournament_id),
         target_label=existing_d.get("name", ""),
-        details={"team_key": team_key, "match_id": body.match_id},
+        details={
+            "team_key": team_key,
+            "team_name": squad_team_name,
+            "match_id": body.match_id,
+            "match": squad_match_name,
+        },
     )
 
     return {"success": True}

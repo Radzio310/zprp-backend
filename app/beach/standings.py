@@ -1324,7 +1324,12 @@ async def revoke_tournament(
             revoked_count += 1
 
     # ── Activity log ──
-    await log_activity(area="standings", action="standings.points_revoked", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(body.tournament_id), details={"revoked_count": revoked_count})
+    tour_row = await database.fetch_one(
+        select(beach_tournaments.c.name).where(
+            beach_tournaments.c.id == body.tournament_id
+        )
+    )
+    await log_activity(area="standings", action="standings.points_revoked", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(body.tournament_id), target_label=tour_row["name"] if tour_row else None, details={"revoked_count": revoked_count})
 
     return {"success": True, "revoked_count": revoked_count}
 
@@ -1527,12 +1532,18 @@ async def revoke_stage(
         )
     )
 
+    tour_row = await database.fetch_one(
+        select(beach_tournaments.c.name).where(
+            beach_tournaments.c.id == body.tournament_id
+        )
+    )
     await log_activity(
         area="standings",
         action="standings.stage_revoked",
         actor_user_id=current_user_id,
         actor_name=await get_actor_name(current_user_id),
         target_id=str(body.tournament_id),
+        target_label=tour_row["name"] if tour_row else None,
         details={},
     )
 
@@ -1757,7 +1768,7 @@ async def adjust_standing(
         )
 
     # ── Activity log ──
-    await log_activity(area="standings", action="standings.manual_adjustment", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(body.team_id), details={"points": body.points, "comment": body.comment})
+    await log_activity(area="standings", action="standings.manual_adjustment", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(body.team_id), target_label=body.team_name, details={"points": body.points, "comment": body.comment})
 
     return {"success": True}
 
@@ -1812,7 +1823,7 @@ async def delete_manual_entry(
     )
 
     # ── Activity log ──
-    await log_activity(area="standings", action="standings.manual_deleted", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(team_id), details={"created_at": created_at})
+    await log_activity(area="standings", action="standings.manual_deleted", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(team_id), target_label=ex_d.get("team_name"), details={"created_at": created_at})
 
     return {"success": True}
 
@@ -1889,6 +1900,7 @@ async def purge_orphaned_tournament(
     all_rows = await database.fetch_all(select(beach_standings))
     now = datetime.now(timezone.utc)
     revoked_count = 0
+    orphan_tournament_name = None
 
     for r in all_rows:
         r_d = dict(r)
@@ -1902,6 +1914,8 @@ async def purge_orphaned_tournament(
                 and e.get("tournament_id") == tournament_id
                 and not e.get("revoked", False)
             ):
+                if not orphan_tournament_name and e.get("tournament_name"):
+                    orphan_tournament_name = str(e["tournament_name"])
                 e["revoked"] = True
                 changed = True
         if changed:
@@ -1913,7 +1927,7 @@ async def purge_orphaned_tournament(
             revoked_count += 1
 
     # ── Activity log ──
-    await log_activity(area="standings", action="standings.orphan_purged", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(tournament_id), details={"revoked_count": revoked_count})
+    await log_activity(area="standings", action="standings.orphan_purged", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(tournament_id), target_label=orphan_tournament_name or "Usunięty turniej", details={"revoked_count": revoked_count})
 
     return {"success": True, "revoked_count": revoked_count}
 

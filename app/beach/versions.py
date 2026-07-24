@@ -182,7 +182,9 @@ async def update_version(version_id: int, req: BeachUpdateVersionRequest, curren
 
     try:
         await database.execute(update(beach_app_versions).where(beach_app_versions.c.id == version_id).values(**patch))
-        await log_activity(area="system", action="version.updated", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(version_id), details={"changed": list(patch.keys())})
+        existing_d = dict(existing)
+        version_label = f"v{patch.get('version', existing_d.get('version'))} — {patch.get('name', existing_d.get('name'))}"
+        await log_activity(area="system", action="version.updated", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(version_id), target_label=version_label, details={"changed": list(patch.keys())})
         return {"success": True}
     except Exception as e:
         msg = str(e).lower()
@@ -197,11 +199,17 @@ async def delete_version(version_id: int, current_user_id: int = Depends(beach_g
     if not await _is_admin(current_user_id):
         raise HTTPException(403, "Brak uprawnień")
 
-    row = await database.fetch_one(select(beach_app_versions.c.id).where(beach_app_versions.c.id == version_id))
+    row = await database.fetch_one(
+        select(
+            beach_app_versions.c.id,
+            beach_app_versions.c.version,
+            beach_app_versions.c.name,
+        ).where(beach_app_versions.c.id == version_id)
+    )
     if not row:
         # analogicznie do Twojego zachowania: 404 można potraktować jako OK, ale tu zwracam 404 jawnie
         raise HTTPException(404, "Nie znaleziono wersji")
 
     await database.execute(delete(beach_app_versions).where(beach_app_versions.c.id == version_id))
-    await log_activity(area="system", action="version.deleted", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(version_id))
+    await log_activity(area="system", action="version.deleted", actor_user_id=current_user_id, actor_name=await get_actor_name(current_user_id), target_id=str(version_id), target_label=f"v{row['version']} — {row['name']}")
     return {"success": True}

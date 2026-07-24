@@ -1257,6 +1257,10 @@ class BeachUserItem(BaseModel):
     is_admin: bool = False
     is_active: bool = True          # ← NOWE
 
+    # Hasło tymczasowe (po resecie admina) — apka wymusza ustawienie własnego.
+    # Serwer pamięta flagę, więc działa też po aktualizacji ze starej wersji.
+    must_change_password: bool = False
+
     # Efektywne uprawnienia (suma capabilities ze wszystkich badge'y).
     # Wypełniane dla /me i logowania; admin ma wszystkie (flaga is_admin).
     effective_capabilities: List[str] = Field(default_factory=list)

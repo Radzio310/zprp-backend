@@ -831,6 +831,10 @@ beach_users = Table(
     # aktywność konta: False = konto dezaktywowane (anonimizacja)
     Column("is_active", Boolean, nullable=False, server_default=text("true")),
 
+    # hasło tymczasowe (po resecie admina) — apka wymusza ustawienie własnego;
+    # czyszczone przy każdej zmianie hasła
+    Column("must_change_password", Boolean, nullable=False, server_default=text("false")),
+
     # globalny domyślny skład per drużyna: {"<team_id>": {"default_players": [...], "default_companions": [...]}}
     Column("default_squad_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
 
@@ -1305,6 +1309,11 @@ beach_password_reset_requests = Table(
     Column("status", String, nullable=False, server_default=text("'pending'"), index=True),
     Column("attempt_no", Integer, nullable=False, server_default=text("1")),
     Column("admin_note", Text, nullable=True),
+    # Magic-login z powiadomienia push: jednorazowy token (hash SHA-256),
+    # ważność i znacznik użycia.
+    Column("claim_token_hash", String, nullable=True, index=True),
+    Column("claim_expires_at", DateTime(timezone=True), nullable=True),
+    Column("claim_used_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
