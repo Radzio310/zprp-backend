@@ -283,11 +283,9 @@ def _compute_placement_rr_labels(
         start_r = _roman(start_place)
         end_r = _roman(end_place)
         range_label = f"{start_r}-{end_r}" if start_place != end_place else start_r
-        labels[g] = (
-            f"O msc. {range_label}"
-            if is_quad
-            else f"Grupa {range_label}"
-        )
+        # Zawsze "O msc. X-Y" — także dla round-robin (nie "Grupa X-Y", bo to nie
+        # jest grupa fazy grupowej, tylko miniturniej o konkretne miejsca).
+        labels[g] = f"O msc. {range_label}"
 
     return labels
 
