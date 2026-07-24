@@ -368,6 +368,9 @@ class ProtocolBulkRequest(BaseModel):
     # protocol_filename (układ ZIP-a w foldery), a syntetyczne ID NIE są zapisywane
     # jako wygenerowane protokoły.
     possibilities_mode: bool = False
+    # Nowsze klienty potrafią obsłużyć bezpośredni PDF/XLSX przy jednym
+    # wyniku. Domyślne False zachowuje ZIP dla starszych wersji aplikacji.
+    direct_single_file: bool = False
 
 
 class ProtocolSingleRequest(BaseModel):
@@ -2392,21 +2395,29 @@ async def generate_bulk_protocols(
                 arcname = fname
             file_paths.append((path, arcname))
 
-        # Pack into ZIP
-        safe_name = _safe_filename(tournament_name, 40) or "protokoly"
-        zip_name = f"protokoly_{safe_name}.zip"
-        zip_path = os.path.join(tmp_dir, zip_name)
-
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for fpath, arcname in file_paths:
-                zf.write(fpath, arcname)
+        # Pojedynczy protokół udostępniamy bezpośrednio. ZIP ma sens dopiero
+        # dla co najmniej dwóch plików.
+        is_archive = len(file_paths) >= 2 or not req.direct_single_file
+        if is_archive:
+            safe_name = _safe_filename(tournament_name, 40) or "protokoly"
+            download_name = f"protokoly_{safe_name}.zip"
+            artifact_path = os.path.join(tmp_dir, download_name)
+            with zipfile.ZipFile(artifact_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for fpath, arcname in file_paths:
+                    zf.write(fpath, arcname)
+            ext = "zip"
+        else:
+            artifact_path, arcname = file_paths[0]
+            # W trybie możliwości arcname może zawierać katalog przeznaczony
+            # dla ZIP-a. Przy jednym pliku pobieramy tylko właściwą nazwę.
+            download_name = os.path.basename(arcname)
+            ext = os.path.splitext(download_name)[1].lstrip(".").lower() or output_format
 
         # Store with download token
         _ensure_download_dir()
         token = str(uuid.uuid4())
-        ext = "zip"
         download_path = os.path.join(DOWNLOAD_DIR, f"{token}.{ext}")
-        shutil.copyfile(zip_path, download_path)
+        shutil.copyfile(artifact_path, download_path)
 
         # Zapisz w turnieju, które mecze zostały wygenerowane (po stałym ID meczu).
         # W trybie możliwości ID są syntetyczne — NIE zapisujemy ich.
@@ -2416,12 +2427,14 @@ async def generate_bulk_protocols(
             generated_match_ids = [m.get("id") for m in matches if m.get("id") is not None]
             await _record_generated_raw_protocols(req.tournament_id, generated_match_ids)
 
-        encoded_name = urllib.parse.quote(zip_name)
+        encoded_name = urllib.parse.quote(download_name)
         return {
             "success": True,
             "download_url": f"/beach/protocol/download/{token}?filename={encoded_name}&ext={ext}",
             "match_count": len(file_paths),
             "generated_match_ids": [str(x) for x in generated_match_ids],
+            "is_archive": is_archive,
+            "filename": download_name,
         }
     except HTTPException:
         raise
