@@ -604,6 +604,8 @@ async def create_user(req: BeachUserCreateRequest):
         password_plain = _decrypt_password_from_b64(req.password_encrypted)
     else:
         password_plain = str(req.password)
+    # Spójna polityka: hasło bez białych znaków na końcach (jak przy logowaniu).
+    password_plain = password_plain.strip()
 
     now = datetime.now(timezone.utc)
     province = _normalize_province(req.province)
@@ -1235,6 +1237,9 @@ async def login_user(req: BeachLoginRequest):
         password = _decrypt_password_from_b64(req.password_encrypted)
     else:
         password = str(req.password)
+    # Klawiatury mobilne doklejają spacje po podpowiedziach — hasła w BAZA Beach
+    # nigdy nie zaczynają się ani nie kończą białym znakiem (spójnie z ustawianiem).
+    password = password.strip()
 
     row = await database.fetch_one(
         select(beach_users).where(beach_users.c.login == login_value)
