@@ -327,11 +327,13 @@ def _build_context(req: OrganizationalReportRequest) -> Dict[str, Any]:
             tournament_dates=req.tournament_dates,
             category=req.category,
             include_groups=True,
-            split_by_courts=False,
+            split_by_courts=True,
             custom_teams=req.custom_teams,
         )
     )
     schedule_days = sched_ctx.get("days") or []
+    schedule_split_by_courts = bool(sched_ctx.get("split_by_courts"))
+    schedule_court_sections = sched_ctx.get("court_sections") or []
 
     maps_url = _build_maps_url(req)
     organizer = req.organizer
@@ -371,6 +373,8 @@ def _build_context(req: OrganizationalReportRequest) -> Dict[str, Any]:
         "organizer": organizer_ctx,
         "team_sections": team_sections,
         "days": schedule_days,
+        "schedule_split_by_courts": schedule_split_by_courts,
+        "schedule_court_sections": schedule_court_sections,
         "general_info": general_info,
         "accent": accent,
         "logo_b64": _load_logo_b64(),

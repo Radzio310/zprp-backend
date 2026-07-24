@@ -412,6 +412,16 @@
   tr.row-event td.event-label {
     font-weight: 900; color: #7A3FD0; letter-spacing: 0.3pt; text-align: center;
   }
+  .court-section-header {
+    font-size: 11pt;
+    font-weight: 900;
+    color: {{ accent }};
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+    margin: 12pt 0 6pt 0;
+    padding: 5pt 10pt;
+    border-bottom: 2pt solid {{ accent }};
+  }
 
   .point {
     display: flex;
@@ -647,6 +657,34 @@
       <div class="legend-item"><div class="legend-dot K"></div><span>Kobiety</span></div>
     </div>
     {% endif %}
+  {% endif %}
+  {% if schedule_split_by_courts and schedule_court_sections %}
+    {% for day_sec in schedule_court_sections %}
+    <div class="day-section{% if not loop.first %} page-break{% endif %}">
+      <div class="day-header no-break">{{ day_sec.day_label }}</div>
+      {% for court in day_sec.courts %}
+      <div class="court-section-header">{{ court.court_label }}</div>
+      <table class="schedule">
+        <thead>
+          <tr>
+            <th>Godz.</th>
+            <th class="th-center">Boisko</th>
+            <th class="th-center">Num.</th>
+            <th>Etap</th>
+            <th class="th-team">Drużyna A</th>
+            <th class="th-center">–</th>
+            <th class="th-team">Drużyna B</th>
+            <th class="th-center">Wynik</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ schedule_rows(court.matches) }}
+        </tbody>
+      </table>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  {% elif days %}
     {% for day in days %}
     {# Pierwszy dzień nie potrzebuje własnego łamania — cała sekcja już startuje od nowej strony.
        Kolejne dni łamią się tak samo jak w terminarzu (day.force_page_break). #}

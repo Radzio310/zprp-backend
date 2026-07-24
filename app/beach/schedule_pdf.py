@@ -531,6 +531,35 @@ def _score_parts(m: Dict[str, Any]) -> tuple:
     return score_main, score_sets
 
 
+def _build_court_sections(
+    days: List[Dict[str, Any]],
+    courts_count: int,
+) -> List[Dict[str, Any]]:
+    """Build chronological per-court rows, duplicating all-court events."""
+    court_sections: List[Dict[str, Any]] = []
+    for day in days:
+        courts_out: List[Dict[str, Any]] = []
+        for court_num in range(1, courts_count + 1):
+            court_rows = [
+                row
+                for row in day["matches"]
+                if row.get("type") == "tournament_opening"
+                or (row.get("type") == "special_event" and row.get("all_courts"))
+                or str(row.get("court", "")) == str(court_num)
+            ]
+            if court_rows:
+                courts_out.append({
+                    "court_label": f"Boisko {court_num}",
+                    "matches": court_rows,
+                })
+        if courts_out:
+            court_sections.append({
+                "day_label": day["label"],
+                "courts": courts_out,
+            })
+    return court_sections
+
+
 # ─── context builder ──────────────────────────────────────────────────────────
 
 def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
@@ -735,34 +764,11 @@ def _build_context(req: SchedulePdfRequest) -> Dict[str, Any]:
 
     # If split_by_courts, build per-day sections where each day lists per-court sub-sections
     split_by_courts = req.split_by_courts and courts_count >= 2
-    court_sections: List[Dict[str, Any]] = []
-    if split_by_courts:
-        for day in days_out:
-            # Otwarcia i zdarzenia na wszystkie boiska (court 0) idą nad podziałem na boiska
-            opening_rows = [
-                r for r in day["matches"]
-                if r.get("type") == "tournament_opening"
-                or (r.get("type") == "special_event" and r.get("all_courts"))
-            ]
-            courts_out: List[Dict[str, Any]] = []
-            for court_num in range(1, courts_count + 1):
-                court_matches = [
-                    r for r in day["matches"]
-                    if r.get("type") != "tournament_opening"
-                    and not (r.get("type") == "special_event" and r.get("all_courts"))
-                    and str(r.get("court", "")) == str(court_num)
-                ]
-                if court_matches:
-                    courts_out.append({
-                        "court_label": f"Boisko {court_num}",
-                        "matches": court_matches,
-                    })
-            if opening_rows or courts_out:
-                court_sections.append({
-                    "day_label": day["label"],
-                    "openings": opening_rows,
-                    "courts": courts_out,
-                })
+    court_sections = (
+        _build_court_sections(days_out, courts_count)
+        if split_by_courts
+        else []
+    )
 
     # Always use portrait orientation.
     use_landscape = False

@@ -640,12 +640,6 @@
 {% if not loop.first %}<div class="page-break"></div>{% endif %}
 <div class="day-header no-break">{{ day_sec.day_label }}</div>
 
-{% if day_sec.openings %}
-<table class="schedule" style="margin-bottom: 6pt;">
-  <tbody>{{ schedule_rows(day_sec.openings) }}</tbody>
-</table>
-{% endif %}
-
 {% for court in day_sec.courts %}
 <div class="court-section-header">{{ court.court_label }}</div>
 <div class="day-section">
