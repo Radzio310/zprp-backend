@@ -64,6 +64,40 @@
     line-height: 1.5;
   }
 
+  /* ── Tabela końcowa turnieju (strona tytułowa) ──
+     Zwykła tabela HTML — WeasyPrint łamie ją wierszami na kolejną stronę,
+     bez sztucznych odstępów. */
+  .fc-title {
+    font-size: 10pt;
+    font-weight: 900;
+    color: {{ accent }};
+    text-transform: uppercase;
+    letter-spacing: 0.7pt;
+    margin: 0 0 5pt;
+  }
+  .fc-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 8.6pt; margin-bottom: 14pt; }
+  .fc-table th {
+    padding: 3pt 4pt 4pt;
+    font-size: 9pt;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+    text-align: center;
+  }
+  .fc-table td { padding: 2.6pt 4pt; border-bottom: 0.5pt solid #ececec; }
+  .fc-rank { width: 16pt; text-align: center; font-weight: 900; color: #777; }
+  .fc-team { font-weight: 700; color: #1a1a2e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fc-hint { font-weight: 600; font-style: italic; color: #9a9aa6; font-size: 7.8pt; }
+  .fc-empty { color: #b8b8c0; }
+  td.fc-blank { border-bottom: none; }
+  td.fc-sep, th.fc-sep { border-left: 0.7pt solid #e4e4e4; }
+  .fc-medal-1 { background: #D4A84314; }
+  td.fc-rank.fc-medal-1 { color: #D4A843; }
+  .fc-medal-2 { background: #9BA4B514; }
+  td.fc-rank.fc-medal-2 { color: #9BA4B5; }
+  .fc-medal-3 { background: #A0785A14; }
+  td.fc-rank.fc-medal-3 { color: #A0785A; }
+
   /* ── Gender header ── */
   .gender-header {
     font-size: 12pt;
@@ -477,6 +511,36 @@
 <div class="summary">
   {{ summary_text }}
 </div>
+
+{% if final_classification %}
+<!-- ════════════ TABELA KOŃCOWA TURNIEJU ════════════ -->
+<div class="fc-title">Tabela końcowa turnieju</div>
+<table class="fc-table">
+  <thead>
+    <tr>
+      {% for sec in final_classification.sections %}
+      <th colspan="2" class="{% if not loop.first %}fc-sep{% endif %}" style="color: {{ sec.color }}; border-bottom: 1.4pt solid {{ sec.color }};">{{ sec.label }}</th>
+      {% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in final_classification.rows %}
+    <tr>
+      {% for p in row %}
+      {% if p %}
+      <td class="fc-rank{% if not loop.first %} fc-sep{% endif %}{% if p.place <= 3 %} fc-medal-{{ p.place }}{% endif %}">{{ p.place }}</td>
+      <td class="fc-team{% if p.place <= 3 %} fc-medal-{{ p.place }}{% endif %}">
+        {%- if p.team -%}{{ p.team }}{%- elif p.hint -%}<span class="fc-hint">{{ p.hint }}</span>{%- else -%}<span class="fc-empty">—</span>{%- endif -%}
+      </td>
+      {% else %}
+      <td class="fc-rank fc-blank{% if not loop.first %} fc-sep{% endif %}"></td><td class="fc-team fc-blank"></td>
+      {% endif %}
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 
 <!-- ════════════ PER-GENDER SECTIONS ════════════ -->
 {% for gs in gender_sections %}

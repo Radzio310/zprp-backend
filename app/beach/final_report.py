@@ -169,6 +169,9 @@ class FinalReportRequest(BaseModel):
     tie_explanations: Optional[List[TieExplanation]] = None
     mvp_data: Optional[Dict[str, Any]] = None  # {"M": {mvp: {...}, goalkeeper: {...}}, "K": {...}}
     stage_grant: Optional[StageGrantData] = None  # turniej etapowy (bez punktów)
+    # Tabela końcowa turnieju (opcjonalna): sections z buildStandingsClassification
+    # w aplikacji — [{gender, label, places: [{place, team, hint}]}].
+    final_classification: Optional[List[Dict[str, Any]]] = None
 
 
 # ──────────── Helpers ────────────
@@ -1736,6 +1739,43 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
 
     now = datetime.now(ZoneInfo("Europe/Warsaw")).strftime("%d.%m.%Y %H:%M")
 
+    # ── Tabela końcowa turnieju (opcjonalna, strona tytułowa pod podsumowaniem) ──
+    # Wiersze łączone per-miejsce (kolumny płci obok siebie) — dzięki temu tabela
+    # HTML łamie się naturalnie na kolejną stronę bez sztucznych odstępów.
+    final_classification = None
+    if req.final_classification:
+        fc_sections = []
+        for sec in req.final_classification:
+            places = [
+                {
+                    "place": p.get("place"),
+                    "team": (str(p.get("team") or "")).strip() or None,
+                    "hint": (str(p.get("hint") or "")).strip() or None,
+                }
+                for p in (sec.get("places") or [])
+                if p.get("place") is not None
+            ]
+            if not places:
+                continue
+            gender = str(sec.get("gender") or "")
+            fc_sections.append({
+                "gender": gender,
+                "label": (str(sec.get("label") or "")).strip()
+                or ("Mężczyźni" if gender == "M" else "Kobiety"),
+                "color": "#2BA8A0" if gender == "M" else "#E85A78",
+                "places": places,
+            })
+        if fc_sections:
+            max_rows = max(len(s["places"]) for s in fc_sections)
+            fc_rows = [
+                [
+                    s["places"][i] if i < len(s["places"]) else None
+                    for s in fc_sections
+                ]
+                for i in range(max_rows)
+            ]
+            final_classification = {"sections": fc_sections, "rows": fc_rows}
+
     return {
         "tournament_name": req.tournament_name.strip() or "Turniej",
         "date_range": date_range,
@@ -1745,6 +1785,7 @@ def _build_context(req: FinalReportRequest) -> Dict[str, Any]:
         "summary_text": summary_text,
         "gender_sections": gender_sections,
         "multi_gender": multi_gender,
+        "final_classification": final_classification,
         "generated_at": now,
     }
 

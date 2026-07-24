@@ -111,6 +111,12 @@
     font-weight: 600;
     font-style: italic;
   }
+  .team.hint {
+    color: #9a9aa6;
+    font-size: 8.4pt;
+    font-weight: 600;
+    font-style: italic;
+  }
 
   /* Delikatne wyróżnienie medalowe pierwszych trzech miejsc */
   {% for pl, col in medal_colors.items() %}
@@ -164,6 +170,8 @@
         <div class="rank">{{ p.place }}</div>
         {% if p.team %}
         <div class="team">{{ p.team }}</div>
+        {% elif p.hint %}
+        <div class="team hint">{{ p.hint }}</div>
         {% else %}
         <div class="team empty">—</div>
         {% endif %}

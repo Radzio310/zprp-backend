@@ -62,6 +62,8 @@ GENDER_COLORS = {"M": "#3ACCBF", "K": "#FF6482"}
 class StandingsPlace(BaseModel):
     place: int
     team: Optional[str] = None
+    # Dopisek dla nierozstrzygniętego miejsca, np. „Zwycięzca meczu M22".
+    hint: Optional[str] = None
 
 
 class StandingsSection(BaseModel):
@@ -134,7 +136,11 @@ def _build_context(req: StandingsReportRequest) -> dict:
     sections = []
     for sec in req.sections:
         places = [
-            {"place": p.place, "team": (p.team or "").strip() or None}
+            {
+                "place": p.place,
+                "team": (p.team or "").strip() or None,
+                "hint": (p.hint or "").strip() or None,
+            }
             for p in sorted(sec.places, key=lambda x: x.place)
         ]
         if not places:
