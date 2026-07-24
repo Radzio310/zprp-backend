@@ -719,11 +719,15 @@ def _fill_protocol_sheet(
     # ── Team names ──
     team_a = match.get("teamA") or {}
     team_b = match.get("teamB") or {}
-    ws["B10"] = team_a.get("name", "")
-    ws["G10"] = team_b.get("name", "")
+    _set_fitted_text(ws, "B10", team_a.get("name", ""))
+    _set_fitted_text(ws, "G10", team_b.get("name", ""))
 
     # ── Venue, date, time ──
-    ws["B12"] = _strip_address_to_street_city(tournament_location)
+    _set_fitted_text(
+        ws,
+        "B12",
+        _strip_address_to_street_city(tournament_location),
+    )
 
     day_index = match.get("dayIndex") or 0
     day_cfg = days[day_index] if day_index < len(days) else {}
@@ -783,8 +787,25 @@ def _fill_protocol_sheet(
     # ── Head judge / delegat ──
     if head_judge_id and head_judge_id in user_cities:
         name, city = user_cities[head_judge_id]
-        ws["B67"] = _format_name_protocol(name)
-        ws["C67"] = city
+        _set_fitted_text(ws, "B67", _format_name_protocol(name))
+        _set_fitted_text(ws, "C67", city)
+
+
+def _set_fitted_text(ws, cell_ref: str, value: Any) -> None:
+    """Set single-line text without letting it overflow a fixed-width field.
+
+    The protocol template centers some values (notably referee cities) in
+    merged cells.  LibreOffice otherwise keeps the original font size and
+    clips both ends of text that is wider than the field.  ``shrinkToFit``
+    preserves the template alignment and font size for normal values, while
+    reducing only values that would not fit.
+    """
+    cell = ws[cell_ref]
+    cell.value = value
+    alignment = copy.copy(cell.alignment)
+    alignment.shrinkToFit = True
+    alignment.wrapText = False
+    cell.alignment = alignment
 
 
 def _fill_referee(
@@ -797,10 +818,10 @@ def _fill_referee(
     ref_id = ref.get("id")
     if ref_id and ref_id in user_cities:
         name, city = user_cities[ref_id]
-        ws[name_cell] = _format_name_protocol(name)
-        ws[city_cell] = city
+        _set_fitted_text(ws, name_cell, _format_name_protocol(name))
+        _set_fitted_text(ws, city_cell, city)
     elif ref.get("name"):
-        ws[name_cell] = _format_name_protocol(ref["name"])
+        _set_fitted_text(ws, name_cell, _format_name_protocol(ref["name"]))
 
 
 def _fill_team_squad(
