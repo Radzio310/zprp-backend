@@ -161,13 +161,16 @@ def _sanitize_template_question(raw: Dict[str, Any], index: int) -> Dict[str, An
         raise HTTPException(422, f"Pytanie {index + 1} nie ma treści")
     if len(title) > 240:
         raise HTTPException(422, f"Treść pytania {index + 1} jest za długa")
+    section = str(raw.get("section") or "Pozostałe").strip()[:80] or "Pozostałe"
+    if section == "Twoim głosem":
+        section = "W kilku słowach"
     question: Dict[str, Any] = {
         "id": qid,
         "title": title,
         "description": str(raw.get("description") or "").strip()[:500],
         "type": qtype,
         "required": bool(raw.get("required", False)),
-        "section": str(raw.get("section") or "Pozostałe").strip()[:80] or "Pozostałe",
+        "section": section,
         "enabled_by_default": bool(raw.get("enabled_by_default", True)),
         "additional": not bool(raw.get("enabled_by_default", True)),
     }
@@ -980,9 +983,6 @@ def _validate_answers(
     submit: bool,
 ) -> Dict[str, Any]:
     by_id = {q["id"]: q for q in questions}
-    unknown = set(answers) - set(by_id)
-    if unknown:
-        raise HTTPException(422, f"Nieznane pytania: {', '.join(sorted(unknown))}")
     normalized: Dict[str, Any] = {}
     for qid, question in by_id.items():
         value = answers.get(qid)
@@ -1069,7 +1069,7 @@ async def update_survey_config(
     body: SurveyConfigRequest,
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    tournament, data, old_config, access = await _access(tournament_id, current_user_id)
+    tournament, data, _old_config, access = await _access(tournament_id, current_user_id)
     if not access["can_manage"]:
         raise HTTPException(403, "Brak uprawnień do konfiguracji ankiety")
     invalid_roles = sorted(set(body.enabled_roles) - VALID_ROLES)
@@ -1081,22 +1081,6 @@ async def update_survey_config(
     new_config = _normalized_config(body.model_dump(), access["template"])
     if access["phase"] == "closed":
         raise HTTPException(409, "Zamkniętej ankiety nie można już konfigurować")
-    if access["phase"] == "open":
-        mutable_while_open = {"enabled_roles", "close_after_hours"}
-        comparable_old = {
-            k: v for k, v in old_config.items() if k not in mutable_while_open
-        }
-        comparable_new = {
-            k: v for k, v in new_config.items() if k not in mutable_while_open
-        }
-        if (
-            comparable_old != comparable_new
-            or new_config["close_after_hours"] < old_config["close_after_hours"]
-        ):
-            raise HTTPException(
-                409,
-                "Po otwarciu ankiety można zmieniać role lub wydłużyć czas na odpowiedzi",
-            )
     data["final_survey"] = new_config
     await database.execute(
         update(beach_tournaments)

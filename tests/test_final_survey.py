@@ -211,13 +211,15 @@ def test_submit_accepts_one_to_three_strengths_but_requires_three_priorities():
     assert error.value.status_code == 422
 
 
-def test_draft_may_be_incomplete_and_unknown_questions_fail_closed():
+def test_draft_may_be_incomplete_and_stale_removed_answers_are_ignored():
     questions = _questions(_default_config())
 
     assert _validate_answers({"overall": 7}, questions, submit=False) == {"overall": 7}
-    with pytest.raises(HTTPException) as error:
-        _validate_answers({"future_unknown": "x"}, questions, submit=False)
-    assert error.value.status_code == 422
+    assert _validate_answers(
+        {"overall": 7, "removed_question": "stara odpowiedź"},
+        questions,
+        submit=False,
+    ) == {"overall": 7}
 
 
 def test_not_applicable_is_excluded_from_rating_average():
