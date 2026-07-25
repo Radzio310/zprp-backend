@@ -1418,6 +1418,53 @@ beach_mvp_votes = Table(
                      name="uq_beach_mvp_vote_per_type"),
 )
 
+# ─────────────────── BEACH: Tournament final surveys ───────────────────
+
+beach_tournament_survey_responses = Table(
+    "beach_tournament_survey_responses",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "tournament_id",
+        Integer,
+        ForeignKey("beach_tournaments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("beach_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("status", String, nullable=False, server_default=text("'draft'")),
+    Column("perspective_roles", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("answers_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("respondent_snapshot_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("template_version", Integer, nullable=False, server_default=text("1")),
+    Column("submitted_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+    UniqueConstraint(
+        "tournament_id",
+        "user_id",
+        name="uq_beach_tournament_survey_response_user",
+    ),
+)
+
+Index(
+    "ix_beach_tournament_survey_status",
+    beach_tournament_survey_responses.c.tournament_id,
+    beach_tournament_survey_responses.c.status,
+)
+
 # ─────────────────── BEACH: Tutorials ────────────────────────────────────────
 
 beach_tutorials = Table(

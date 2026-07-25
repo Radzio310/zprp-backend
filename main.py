@@ -98,6 +98,7 @@ from app.beach.activity_log import router as beach_activity_log_router
 from app.beach.calendar import router as beach_calendar_router
 from app.beach.tutorials import router as beach_tutorials_router
 from app.beach.mvp_votes import router as beach_mvp_votes_router
+from app.beach.final_survey import router as beach_final_survey_router
 from app.beach.auth_email import router as beach_auth_email_router
 from app.beach.brevo_webhook import router as beach_brevo_webhook_router
 from app.beach.password_reset_email import router as beach_password_reset_email_router
@@ -219,6 +220,7 @@ app.include_router(beach_activity_log_router)
 app.include_router(beach_calendar_router)
 app.include_router(beach_tutorials_router)
 app.include_router(beach_mvp_votes_router)
+app.include_router(beach_final_survey_router)
 app.include_router(beach_auth_email_router)
 app.include_router(beach_brevo_webhook_router)
 app.include_router(beach_password_reset_email_router)
