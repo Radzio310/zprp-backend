@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.beach.activity_log import get_actor_name, log_activity
 from app.db import (
@@ -20,6 +21,7 @@ from app.db import (
     beach_tournaments,
     beach_users,
     database,
+    login_records,
 )
 from app.deps import beach_get_current_user_id
 
@@ -120,7 +122,7 @@ CORE_QUESTIONS: List[Dict[str, Any]] = [
         "required": True,
         "section": "Podsumowanie",
         "options": AREA_OPTIONS,
-        "min_selections": 3,
+        "min_selections": 1,
         "max_selections": 3,
         "additional": False,
     },
@@ -132,6 +134,7 @@ CORE_QUESTIONS: List[Dict[str, Any]] = [
         "required": True,
         "section": "Podsumowanie",
         "options": AREA_OPTIONS,
+        "min_selections": 3,
         "max_selections": 3,
         "additional": False,
     },
@@ -213,6 +216,7 @@ class SurveyResponseRequest(BaseModel):
     answers: Dict[str, Any]
     perspective_roles: List[str] = Field(default_factory=list)
     submit: bool = False
+    expected_updated_at: Optional[datetime] = None
 
 
 def _obj(raw: Any) -> Dict[str, Any]:
@@ -497,6 +501,8 @@ async def _load_user(user_id: int) -> Dict[str, Any]:
         select(
             beach_users.c.id,
             beach_users.c.full_name,
+            beach_users.c.judge_id,
+            beach_users.c.player_id,
             beach_users.c.roles,
             beach_users.c.badges,
             beach_users.c.is_active,
@@ -564,6 +570,36 @@ async def _team_snapshot(team_ids: List[int]) -> Tuple[List[str], List[str]]:
         [str(row["team_name"]) for row in rows if row["team_name"]],
         list(dict.fromkeys(str(row["gender"]) for row in rows if row["gender"])),
     )
+
+
+async def _respondent_photo(user: Dict[str, Any], team_ids: List[int]) -> Optional[str]:
+    judge_id = str(user.get("judge_id") or "").strip()
+    if judge_id:
+        row = await database.fetch_one(
+            select(login_records.c.photo_url).where(login_records.c.judge_id == judge_id)
+        )
+        if row and str(row["photo_url"] or "").strip():
+            return str(row["photo_url"]).strip()
+
+    player_id = _as_int(user.get("player_id"))
+    if player_id is None or not team_ids:
+        return None
+    rows = await database.fetch_all(
+        select(
+            beach_teams.c.roster_json,
+            beach_teams.c.historical_players_json,
+        ).where(beach_teams.c.id.in_(team_ids))
+    )
+    for row in rows:
+        players = _list(row["roster_json"]) + _list(row["historical_players_json"])
+        for player in players:
+            if (
+                isinstance(player, dict)
+                and _as_int(player.get("player_id")) == player_id
+                and str(player.get("photo_url") or "").strip()
+            ):
+                return str(player["photo_url"]).strip()
+    return None
 
 
 def _serialize_response(row: Any) -> Optional[Dict[str, Any]]:
@@ -715,6 +751,12 @@ async def update_survey_config(
         raise HTTPException(403, "Brak uprawnień do konfiguracji ankiety")
     if not body.enabled_roles:
         raise HTTPException(422, "Udostępnij ankietę co najmniej jednej roli")
+    invalid_roles = sorted(set(body.enabled_roles) - VALID_ROLES)
+    if invalid_roles:
+        raise HTTPException(
+            422,
+            f"Nieobsługiwane role ankiety: {', '.join(invalid_roles)}",
+        )
     new_config = _normalized_config(body.model_dump())
     if access["phase"] == "closed":
         raise HTTPException(409, "Zamkniętej ankiety nie można już konfigurować")
@@ -787,6 +829,7 @@ async def save_survey_response(
     snapshot = {
         "user_id": current_user_id,
         "full_name": user.get("full_name") or f"Użytkownik #{current_user_id}",
+        "photo_url": await _respondent_photo(user, access["team_ids"]),
         "roles": perspectives,
         "role_labels": [ROLE_LABELS[role] for role in perspectives],
         "team_ids": access["team_ids"],
@@ -795,6 +838,28 @@ async def save_survey_response(
     }
     now = datetime.now(timezone.utc)
     existing = await _my_response(tournament_id, current_user_id)
+    if existing and body.expected_updated_at is None:
+        raise HTTPException(
+            409,
+            "Na innym urządzeniu istnieje już nowszy szkic. Odśwież ankietę przed zapisem.",
+        )
+    if not existing and body.expected_updated_at is not None:
+        raise HTTPException(
+            409,
+            "Szkic został usunięty lub zmieniony. Odśwież ankietę przed zapisem.",
+        )
+    if existing and body.expected_updated_at is not None:
+        expected = body.expected_updated_at
+        if expected.tzinfo is None:
+            expected = expected.replace(tzinfo=timezone.utc)
+        actual = existing["updated_at"]
+        if actual.tzinfo is None:
+            actual = actual.replace(tzinfo=timezone.utc)
+        if abs((actual.astimezone(timezone.utc) - expected.astimezone(timezone.utc)).total_seconds()) > 0.001:
+            raise HTTPException(
+                409,
+                "Odpowiedź została w międzyczasie zmieniona na innym urządzeniu. Odśwież ankietę i spróbuj ponownie.",
+            )
     status = "submitted" if body.submit else "draft"
     values = {
         "status": status,
@@ -812,14 +877,20 @@ async def save_survey_response(
             .values(**values)
         )
     else:
-        await database.execute(
-            insert(beach_tournament_survey_responses).values(
-                tournament_id=tournament_id,
-                user_id=current_user_id,
-                created_at=now,
-                **values,
+        try:
+            await database.execute(
+                insert(beach_tournament_survey_responses).values(
+                    tournament_id=tournament_id,
+                    user_id=current_user_id,
+                    created_at=now,
+                    **values,
+                )
             )
-        )
+        except IntegrityError as exc:
+            raise HTTPException(
+                409,
+                "Szkic został właśnie utworzony na innym urządzeniu. Odśwież ankietę przed kolejnym zapisem.",
+            ) from exc
     if body.submit:
         await log_activity(
             area="tournament",
