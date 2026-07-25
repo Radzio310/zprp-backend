@@ -210,6 +210,8 @@ class SurveyConfigRequest(BaseModel):
     additional_question_ids: List[str] = Field(default_factory=list)
     custom_questions: List[Dict[str, Any]] = Field(default_factory=list)
     question_order: List[str] = Field(default_factory=list)
+    open_offset_minutes: int = 0
+    close_after_hours: int = 48
 
 
 class SurveyResponseRequest(BaseModel):
@@ -268,6 +270,8 @@ def _default_config() -> Dict[str, Any]:
         "additional_question_ids": [],
         "custom_questions": [],
         "question_order": list(CORE_IDS),
+        "open_offset_minutes": 0,
+        "close_after_hours": 48,
     }
 
 
@@ -326,7 +330,7 @@ def _normalized_config(raw: Any) -> Dict[str, Any]:
     incoming = _obj(raw)
     base = _default_config()
     roles = [str(x) for x in _list(incoming.get("enabled_roles")) if str(x) in VALID_ROLES]
-    if roles:
+    if "enabled_roles" in incoming:
         base["enabled_roles"] = list(dict.fromkeys(roles))
     additional = [
         str(x)
@@ -345,6 +349,16 @@ def _normalized_config(raw: Any) -> Dict[str, Any]:
         if qid not in order:
             order.append(qid)
     base["question_order"] = list(dict.fromkeys(order))
+    open_offset_minutes = _as_int(incoming.get("open_offset_minutes"))
+    close_after_hours = _as_int(incoming.get("close_after_hours"))
+    base["open_offset_minutes"] = max(
+        -720,
+        min(720, 0 if open_offset_minutes is None else open_offset_minutes),
+    )
+    base["close_after_hours"] = max(
+        1,
+        min(168, 48 if close_after_hours is None else close_after_hours),
+    )
     base["version"] = 1
     base["template_version"] = TEMPLATE_VERSION
     return base
@@ -369,7 +383,11 @@ def _parse_hhmm(value: Any) -> Optional[Tuple[int, int]]:
     return hour, minute
 
 
-def _survey_window(tournament: Dict[str, Any], data: Dict[str, Any]) -> Tuple[Optional[datetime], Optional[datetime]]:
+def _survey_window(
+    tournament: Dict[str, Any],
+    data: Dict[str, Any],
+    survey_config: Dict[str, Any],
+) -> Tuple[Optional[datetime], Optional[datetime]]:
     schedule = _obj(data.get("schedule"))
     config = _obj(schedule.get("config"))
     days = _list(config.get("days"))
@@ -409,7 +427,13 @@ def _survey_window(tournament: Dict[str, Any], data: Dict[str, Any]) -> Tuple[Op
         ends.append(end)
     if not starts:
         return None, None
-    return min(starts).astimezone(timezone.utc), (max(ends) + timedelta(hours=48)).astimezone(timezone.utc)
+    opens_at = min(starts) + timedelta(
+        minutes=int(survey_config.get("open_offset_minutes") or 0)
+    )
+    closes_at = max(ends) + timedelta(
+        hours=int(survey_config.get("close_after_hours") or 48)
+    )
+    return opens_at.astimezone(timezone.utc), closes_at.astimezone(timezone.utc)
 
 
 def _phase(opens_at: Optional[datetime], closes_at: Optional[datetime], now: Optional[datetime] = None) -> str:
@@ -541,7 +565,7 @@ async def _access(
         or "head_judge" in roles
     )
     enabled = [role for role in roles if role in set(config["enabled_roles"])]
-    opens_at, closes_at = _survey_window(tournament, data)
+    opens_at, closes_at = _survey_window(tournament, data, config)
     access = {
         "roles": roles,
         "enabled_roles": enabled,
@@ -749,8 +773,6 @@ async def update_survey_config(
     tournament, data, old_config, access = await _access(tournament_id, current_user_id)
     if not access["can_manage"]:
         raise HTTPException(403, "Brak uprawnień do konfiguracji ankiety")
-    if not body.enabled_roles:
-        raise HTTPException(422, "Udostępnij ankietę co najmniej jednej roli")
     invalid_roles = sorted(set(body.enabled_roles) - VALID_ROLES)
     if invalid_roles:
         raise HTTPException(
@@ -761,14 +783,20 @@ async def update_survey_config(
     if access["phase"] == "closed":
         raise HTTPException(409, "Zamkniętej ankiety nie można już konfigurować")
     if access["phase"] == "open":
-        old_roles = set(old_config["enabled_roles"])
-        new_roles = set(new_config["enabled_roles"])
-        comparable_old = {k: v for k, v in old_config.items() if k != "enabled_roles"}
-        comparable_new = {k: v for k, v in new_config.items() if k != "enabled_roles"}
-        if not old_roles.issubset(new_roles) or comparable_old != comparable_new:
+        mutable_while_open = {"enabled_roles", "close_after_hours"}
+        comparable_old = {
+            k: v for k, v in old_config.items() if k not in mutable_while_open
+        }
+        comparable_new = {
+            k: v for k, v in new_config.items() if k not in mutable_while_open
+        }
+        if (
+            comparable_old != comparable_new
+            or new_config["close_after_hours"] < old_config["close_after_hours"]
+        ):
             raise HTTPException(
                 409,
-                "Po otwarciu ankiety można tylko udostępnić ją dodatkowym rolom",
+                "Po otwarciu ankiety można zmieniać role lub wydłużyć czas na odpowiedzi",
             )
     data["final_survey"] = new_config
     await database.execute(
@@ -787,6 +815,8 @@ async def update_survey_config(
             "enabled_roles": new_config["enabled_roles"],
             "additional_questions": new_config["additional_question_ids"],
             "custom_question_count": len(new_config["custom_questions"]),
+            "open_offset_minutes": new_config["open_offset_minutes"],
+            "close_after_hours": new_config["close_after_hours"],
         },
     )
     tournament, _data, config, access = await _access(tournament_id, current_user_id)
@@ -1115,52 +1145,52 @@ async def get_survey_results(
     nps = next((item for item in aggregates if item["id"] == "return_likelihood"), {})
     eligible_total = await _eligible_total(data, config, role, team, gender)
     respondent_items: List[Dict[str, Any]] = []
-    total_matching = len(rows)
-    if access["phase"] == "closed":
-        search_folded = (search or "").strip().casefold()
-        visible_rows = rows
-        if search_folded:
-            visible_rows = [
-                row
-                for row in visible_rows
-                if search_folded in str(row["respondent"].get("full_name") or "").casefold()
-                or any(search_folded in str(name).casefold() for name in _list(row["respondent"].get("team_names")))
-            ]
-        total_matching = len(visible_rows)
-        start = (page - 1) * page_size
-        for row in visible_rows[start : start + page_size]:
-            respondent_items.append(
-                {
-                    "id": row["id"],
-                    "user_id": row["user_id"],
-                    "respondent": row["respondent"],
-                    "submitted_at": row["submitted_at"],
-                    "updated_at": row["updated_at"],
-                    "overall": row["answers"].get("overall"),
-                }
+    search_folded = (search or "").strip().casefold()
+    visible_rows = rows
+    if search_folded:
+        visible_rows = [
+            row
+            for row in visible_rows
+            if search_folded in str(row["respondent"].get("full_name") or "").casefold()
+            or any(
+                search_folded in str(name).casefold()
+                for name in _list(row["respondent"].get("team_names"))
             )
+        ]
+    total_matching = len(visible_rows)
+    start = (page - 1) * page_size
+    for row in visible_rows[start : start + page_size]:
+        respondent_items.append(
+            {
+                "id": row["id"],
+                "user_id": row["user_id"],
+                "respondent": row["respondent"],
+                "submitted_at": row["submitted_at"],
+                "updated_at": row["updated_at"],
+                "overall": row["answers"].get("overall"),
+            }
+        )
 
     open_answers: List[Dict[str, Any]] = []
-    if access["phase"] == "closed":
-        for question in questions:
-            if question["type"] != "text":
-                continue
-            answers = [
-                {
-                    "response_id": row["id"],
-                    "respondent": row["respondent"],
-                    "text": row["answers"].get(question["id"]),
-                }
-                for row in rows
-                if str(row["answers"].get(question["id"]) or "").strip()
-            ]
-            open_answers.append(
-                {
-                    "question_id": question["id"],
-                    "title": question["title"],
-                    "answers": answers,
-                }
-            )
+    for question in questions:
+        if question["type"] != "text":
+            continue
+        answers = [
+            {
+                "response_id": row["id"],
+                "respondent": row["respondent"],
+                "text": row["answers"].get(question["id"]),
+            }
+            for row in rows
+            if str(row["answers"].get(question["id"]) or "").strip()
+        ]
+        open_answers.append(
+            {
+                "question_id": question["id"],
+                "title": question["title"],
+                "answers": answers,
+            }
+        )
 
     return {
         "tournament_id": tournament_id,
@@ -1176,7 +1206,7 @@ async def get_survey_results(
         "gender_counts": dict(gender_counts),
         "rating_by_role": rating_by_role,
         "open_answers": open_answers,
-        "respondents_locked": access["phase"] != "closed",
+        "respondents_locked": False,
         "respondents": respondent_items,
         "page": page,
         "page_size": page_size,
@@ -1195,8 +1225,6 @@ async def get_survey_response_detail(
     _tournament, _data, config, access = await _access(tournament_id, current_user_id)
     if not access["can_view_results"]:
         raise HTTPException(403, "Brak uprawnień do wyników ankiety")
-    if access["phase"] != "closed":
-        raise HTTPException(409, "Odpowiedzi imienne będą dostępne po zamknięciu ankiety")
     row = await database.fetch_one(
         select(beach_tournament_survey_responses).where(
             and_(

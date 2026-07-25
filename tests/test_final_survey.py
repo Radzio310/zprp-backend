@@ -90,7 +90,7 @@ def test_window_uses_warsaw_time_explicit_end_and_slot_fallback():
         slot_interval=45,
     )
 
-    opens_at, closes_at = _survey_window({}, data)
+    opens_at, closes_at = _survey_window({}, data, _default_config())
 
     # In July Warsaw is UTC+2.
     assert opens_at == datetime(2026, 7, 25, 6, 15, tzinfo=timezone.utc)
@@ -108,7 +108,7 @@ def test_window_handles_match_ending_after_midnight():
         },
     )
 
-    opens_at, closes_at = _survey_window({}, data)
+    opens_at, closes_at = _survey_window({}, data, _default_config())
 
     assert opens_at == datetime(2026, 7, 25, 21, 45, tzinfo=timezone.utc)
     assert closes_at == datetime(2026, 7, 27, 22, 30, tzinfo=timezone.utc)
@@ -125,7 +125,28 @@ def test_window_without_real_matches_returns_waiting_state():
         },
     )
 
-    assert _survey_window({}, data) == (None, None)
+    assert _survey_window({}, data, _default_config()) == (None, None)
+
+
+def test_window_applies_editable_relative_availability():
+    data = _schedule(
+        {
+            "id": "m1",
+            "dayIndex": 0,
+            "startTime": "10:00",
+            "endTime": "10:45",
+        },
+    )
+    config = {
+        **_default_config(),
+        "open_offset_minutes": -60,
+        "close_after_hours": 72,
+    }
+
+    opens_at, closes_at = _survey_window({}, data, config)
+
+    assert opens_at == datetime(2026, 7, 25, 7, 0, tzinfo=timezone.utc)
+    assert closes_at == datetime(2026, 7, 28, 8, 45, tzinfo=timezone.utc)
 
 
 def test_phase_boundaries_are_exact():
@@ -240,6 +261,20 @@ def test_custom_question_is_sanitized_ordered_and_keeps_supported_type():
     assert len(custom["options"]) == 4
     assert questions[1]["id"] == "overall"
     assert "facilities" in [question["id"] for question in questions]
+
+
+def test_config_allows_disabling_every_role_and_clamps_window_values():
+    config = _normalized_config(
+        {
+            "enabled_roles": [],
+            "open_offset_minutes": -9999,
+            "close_after_hours": 9999,
+        }
+    )
+
+    assert config["enabled_roles"] == []
+    assert config["open_offset_minutes"] == -720
+    assert config["close_after_hours"] == 168
 
 
 def test_response_request_accepts_optimistic_lock_timestamp():
