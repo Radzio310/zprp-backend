@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 import re
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -11,11 +12,13 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from app.beach.activity_log import get_actor_name, log_activity
 from app.db import (
     beach_admins,
+    beach_app_settings,
     beach_teams,
     beach_tournament_survey_responses,
     beach_tournaments,
@@ -32,7 +35,6 @@ router = APIRouter(
 )
 
 WARSAW = ZoneInfo("Europe/Warsaw")
-TEMPLATE_VERSION = 1
 
 ROLE_LABELS = {
     "coach": "Trener",
@@ -43,166 +45,51 @@ ROLE_LABELS = {
     "player": "Zawodnik",
 }
 VALID_ROLES = set(ROLE_LABELS)
-DEFAULT_ROLES = ["coach", "field_judge", "host", "head_judge"]
 
-AREA_OPTIONS = [
-    {"value": "courts", "label": "Przygotowanie boisk"},
-    {"value": "sand", "label": "Piasek"},
-    {"value": "organization", "label": "Organizacja"},
-    {"value": "information", "label": "Obieg informacji"},
-    {"value": "schedule", "label": "Terminarz"},
-    {"value": "refereeing", "label": "Obsada sędziowska"},
-    {"value": "accommodation", "label": "Zakwaterowanie"},
-    {"value": "catering", "label": "Wyżywienie"},
-    {"value": "facilities", "label": "Zaplecze obiektu"},
-    {"value": "atmosphere", "label": "Atmosfera i oprawa"},
-    {"value": "safety", "label": "Bezpieczeństwo"},
-    {"value": "app", "label": "Komunikaty i aplikacja"},
-]
-
-
-def _rating(
-    key: str,
-    title: str,
-    *,
-    description: str = "",
-    allow_na: bool = False,
-    additional: bool = False,
-    section: str = "Ocena turnieju",
-) -> Dict[str, Any]:
-    return {
-        "id": key,
-        "title": title,
-        "description": description,
-        "type": "rating",
-        "required": not additional,
-        "section": section,
-        "min": 1,
-        "max": 5,
-        "allow_na": allow_na,
-        "additional": additional,
-    }
-
-
-CORE_QUESTIONS: List[Dict[str, Any]] = [
-    {
-        "id": "overall",
-        "title": "Jak oceniasz cały turniej?",
-        "description": "Przeciągnij lub dotknij liczby, która najlepiej oddaje Twoje wrażenia.",
-        "type": "nps",
-        "required": True,
-        "section": "Pierwsze wrażenie",
-        "min": 1,
-        "max": 10,
-        "additional": False,
-    },
-    _rating("courts", "Przygotowanie boisk"),
-    _rating("sand", "Jakość, głębokość i bezpieczeństwo piasku"),
-    _rating("organization", "Organizacja zawodów"),
-    _rating("information", "Szybkość i czytelność obiegu informacji"),
-    _rating("schedule", "Czytelność, punktualność i sprawiedliwość terminarza"),
-    _rating("refereeing", "Profesjonalizm, komunikacja i spójność obsady sędziowskiej"),
-    _rating("accommodation", "Zakwaterowanie", allow_na=True),
-    _rating("catering", "Wyżywienie", allow_na=True),
-    {
-        "id": "return_likelihood",
-        "title": "Jak bardzo prawdopodobne jest, że ponownie weźmiesz udział?",
-        "description": "0 oznacza „zdecydowanie nie”, 10 — „zdecydowanie tak”.",
-        "type": "nps",
-        "required": True,
-        "section": "Podsumowanie",
-        "min": 0,
-        "max": 10,
-        "additional": False,
-    },
-    {
-        "id": "strengths",
-        "title": "Wybierz maksymalnie trzy najmocniejsze elementy",
-        "type": "multi",
-        "required": True,
-        "section": "Podsumowanie",
-        "options": AREA_OPTIONS,
-        "min_selections": 1,
-        "max_selections": 3,
-        "additional": False,
-    },
-    {
-        "id": "priorities",
-        "title": "Ułóż trzy najważniejsze obszary do poprawy",
-        "description": "Kolejność ma znaczenie — pierwszy element jest najpilniejszy.",
-        "type": "ranking",
-        "required": True,
-        "section": "Podsumowanie",
-        "options": AREA_OPTIONS,
-        "min_selections": 3,
-        "max_selections": 3,
-        "additional": False,
-    },
-    {
-        "id": "open_best",
-        "title": "Co podczas turnieju zadziałało najlepiej?",
-        "type": "text",
-        "required": False,
-        "section": "Twoim głosem",
-        "voice": True,
-        "additional": False,
-    },
-    {
-        "id": "open_improve",
-        "title": "Co powinniśmy poprawić w pierwszej kolejności?",
-        "type": "text",
-        "required": False,
-        "section": "Twoim głosem",
-        "voice": True,
-        "additional": False,
-    },
-    {
-        "id": "open_schedule",
-        "title": "Czy masz uwagi do terminarza lub obiegu informacji?",
-        "type": "text",
-        "required": False,
-        "section": "Twoim głosem",
-        "voice": True,
-        "additional": False,
-    },
-    {
-        "id": "open_refereeing",
-        "title": "Czy chcesz przekazać uwagę dotyczącą sędziowania?",
-        "type": "text",
-        "required": False,
-        "section": "Twoim głosem",
-        "voice": True,
-        "additional": False,
-    },
-    {
-        "id": "open_other",
-        "title": "Co jeszcze chcesz przekazać organizatorom?",
-        "type": "text",
-        "required": False,
-        "section": "Twoim głosem",
-        "voice": True,
-        "additional": False,
-    },
-]
-
-ADDITIONAL_QUESTIONS: List[Dict[str, Any]] = [
-    _rating("facilities", "Sanitariaty, prysznice i czystość obiektu", additional=True, section="Dodatkowe obszary"),
-    _rating("access", "Parking, dojazd i oznaczenie terenu", additional=True, allow_na=True, section="Dodatkowe obszary"),
-    _rating("accreditation", "Akredytacja i przyjęcie drużyn", additional=True, allow_na=True, section="Dodatkowe obszary"),
-    _rating("warmup", "Strefa rozgrzewki i dostępność sprzętu", additional=True, allow_na=True, section="Dodatkowe obszary"),
-    _rating("staff", "Pomoc organizatorów i wolontariuszy", additional=True, section="Dodatkowe obszary"),
-    _rating("safety", "Zabezpieczenie medyczne i bezpieczeństwo", additional=True, allow_na=True, section="Dodatkowe obszary"),
-    _rating("atmosphere", "Atmosfera, oprawa, muzyka i kibice", additional=True, section="Dodatkowe obszary"),
-    _rating("ceremony", "Ceremonia otwarcia, dekoracja i nagrody", additional=True, allow_na=True, section="Dodatkowe obszary"),
-    _rating("app", "Wyniki na żywo, komunikaty i działanie aplikacji", additional=True, allow_na=True, section="Dodatkowe obszary"),
-    _rating("judge_conditions", "Warunki pracy, odpoczynku i odpraw dla sędziów", additional=True, allow_na=True, section="Dodatkowe obszary"),
-    _rating("table_work", "Wyposażenie stolików i obsługa protokołów", additional=True, allow_na=True, section="Dodatkowe obszary"),
-    _rating("team_communication", "Komunikacja z trenerami i drużynami", additional=True, allow_na=True, section="Dodatkowe obszary"),
-]
-
-CORE_IDS = [q["id"] for q in CORE_QUESTIONS]
-ADDITIONAL_BY_ID = {q["id"]: q for q in ADDITIONAL_QUESTIONS}
 VALID_QUESTION_TYPES = {"rating", "nps", "single", "multi", "ranking", "boolean", "text"}
+SURVEY_TEMPLATE_KEY = "final_survey_template_registry"
+SURVEY_TEMPLATE_FILE = Path(__file__).with_name("final_survey_default_template.json")
+
+
+def _load_file_template_raw() -> Dict[str, Any]:
+    try:
+        with SURVEY_TEMPLATE_FILE.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        if not isinstance(value, dict):
+            raise ValueError("Korzeń szablonu musi być obiektem")
+        return value
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Nie można wczytać domyślnego szablonu ankiety: {SURVEY_TEMPLATE_FILE}"
+        ) from exc
+
+
+FILE_TEMPLATE_RAW = _load_file_template_raw()
+TEMPLATE_VERSION = int(FILE_TEMPLATE_RAW.get("version") or 1)
+DEFAULT_ROLES = [
+    str(role)
+    for role in FILE_TEMPLATE_RAW.get("default_roles", [])
+    if str(role) in VALID_ROLES
+]
+_FILE_QUESTIONS = [
+    dict(question)
+    for question in FILE_TEMPLATE_RAW.get("questions", [])
+    if isinstance(question, dict)
+]
+CORE_QUESTIONS = [
+    {**question, "additional": False}
+    for question in _FILE_QUESTIONS
+    if bool(question.get("enabled_by_default", True))
+]
+ADDITIONAL_QUESTIONS = [
+    {**question, "additional": True}
+    for question in _FILE_QUESTIONS
+    if not bool(question.get("enabled_by_default", True))
+]
+CORE_IDS = [question["id"] for question in CORE_QUESTIONS]
+ADDITIONAL_BY_ID = {
+    question["id"]: question for question in ADDITIONAL_QUESTIONS
+}
 
 
 class SurveyConfigRequest(BaseModel):
@@ -219,6 +106,14 @@ class SurveyResponseRequest(BaseModel):
     perspective_roles: List[str] = Field(default_factory=list)
     submit: bool = False
     expected_updated_at: Optional[datetime] = None
+
+
+class SurveyTemplateRequest(BaseModel):
+    expected_version: Optional[int] = None
+    default_roles: List[str] = Field(default_factory=list)
+    open_offset_minutes: int = 0
+    close_after_hours: int = 48
+    questions: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 def _obj(raw: Any) -> Dict[str, Any]:
@@ -254,6 +149,166 @@ def _as_int(value: Any) -> Optional[int]:
         return None
 
 
+def _sanitize_template_question(raw: Dict[str, Any], index: int) -> Dict[str, Any]:
+    qtype = str(raw.get("type") or "text").strip()
+    if qtype not in VALID_QUESTION_TYPES:
+        raise HTTPException(422, f"Nieobsługiwany typ pytania: {qtype}")
+    qid = str(raw.get("id") or "").strip()
+    if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{2,79}", qid):
+        raise HTTPException(422, f"Nieprawidłowy identyfikator pytania {index + 1}")
+    title = str(raw.get("title") or "").strip()
+    if not title:
+        raise HTTPException(422, f"Pytanie {index + 1} nie ma treści")
+    if len(title) > 240:
+        raise HTTPException(422, f"Treść pytania {index + 1} jest za długa")
+    question: Dict[str, Any] = {
+        "id": qid,
+        "title": title,
+        "description": str(raw.get("description") or "").strip()[:500],
+        "type": qtype,
+        "required": bool(raw.get("required", False)),
+        "section": str(raw.get("section") or "Pozostałe").strip()[:80] or "Pozostałe",
+        "enabled_by_default": bool(raw.get("enabled_by_default", True)),
+        "additional": not bool(raw.get("enabled_by_default", True)),
+    }
+    if qtype in {"rating", "nps"}:
+        minimum = _as_int(raw.get("min"))
+        maximum = _as_int(raw.get("max"))
+        minimum = 1 if minimum is None else minimum
+        maximum = 5 if maximum is None else maximum
+        if minimum < 0 or maximum > 10 or maximum <= minimum:
+            raise HTTPException(
+                422,
+                f"Skala pytania „{title}” musi mieścić się w zakresie 0–10",
+            )
+        question.update(
+            {
+                "min": minimum,
+                "max": maximum,
+                "allow_na": bool(raw.get("allow_na", False)),
+                "min_label": str(raw.get("min_label") or "").strip()[:80],
+                "max_label": str(raw.get("max_label") or "").strip()[:80],
+            }
+        )
+    elif qtype in {"single", "multi", "ranking"}:
+        options: List[Dict[str, str]] = []
+        used_values: set[str] = set()
+        for option_index, option in enumerate(_list(raw.get("options"))):
+            if isinstance(option, dict):
+                label = str(option.get("label") or "").strip()
+                value = str(option.get("value") or "").strip()
+            else:
+                label = str(option).strip()
+                value = ""
+            if not value:
+                value = f"option_{option_index + 1}"
+            value = re.sub(r"[^a-zA-Z0-9_-]+", "_", value).strip("_")[:80]
+            if not label or not value or value in used_values:
+                continue
+            used_values.add(value)
+            options.append({"label": label[:120], "value": value})
+        if len(options) < 2:
+            raise HTTPException(
+                422,
+                f"Pytanie „{title}” wymaga co najmniej dwóch odpowiedzi",
+            )
+        question["options"] = options
+        if qtype in {"multi", "ranking"}:
+            maximum = _as_int(raw.get("max_selections")) or len(options)
+            minimum = _as_int(raw.get("min_selections"))
+            minimum = (1 if question["required"] else 0) if minimum is None else minimum
+            maximum = max(1, min(maximum, len(options)))
+            minimum = max(0, min(minimum, maximum))
+            question["min_selections"] = minimum
+            question["max_selections"] = maximum
+    elif qtype == "text":
+        question["voice"] = bool(raw.get("voice", True))
+    return question
+
+
+def _normalize_template(
+    raw: Any,
+    *,
+    version: Optional[int] = None,
+    created_at: Optional[str] = None,
+    created_by: Optional[int] = None,
+) -> Dict[str, Any]:
+    incoming = _obj(raw)
+    questions = [
+        _sanitize_template_question(question, index)
+        for index, question in enumerate(_list(incoming.get("questions")))
+        if isinstance(question, dict)
+    ]
+    if not questions:
+        raise HTTPException(422, "Szablon ankiety musi zawierać co najmniej jedno pytanie")
+    ids = [question["id"] for question in questions]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(422, "Identyfikatory pytań w szablonie nie mogą się powtarzać")
+    roles = [
+        str(role)
+        for role in _list(incoming.get("default_roles"))
+        if str(role) in VALID_ROLES
+    ]
+    open_offset = _as_int(incoming.get("open_offset_minutes"))
+    close_after = _as_int(incoming.get("close_after_hours"))
+    resolved_version = version or _as_int(incoming.get("version")) or 1
+    return {
+        "schema_version": 1,
+        "version": max(1, resolved_version),
+        "default_roles": list(dict.fromkeys(roles)),
+        "open_offset_minutes": max(-720, min(720, open_offset if open_offset is not None else 0)),
+        "close_after_hours": max(1, min(168, close_after if close_after is not None else 48)),
+        "questions": questions,
+        "created_at": created_at or str(incoming.get("created_at") or ""),
+        "created_by": created_by if created_by is not None else _as_int(incoming.get("created_by")),
+    }
+
+
+FILE_TEMPLATE = _normalize_template(FILE_TEMPLATE_RAW)
+
+
+async def _load_template_registry() -> Dict[str, Any]:
+    row = await database.fetch_one(
+        select(beach_app_settings.c.value).where(
+            beach_app_settings.c.key == SURVEY_TEMPLATE_KEY
+        )
+    )
+    stored = _obj(row["value"]) if row else {}
+    templates: List[Dict[str, Any]] = []
+    for raw_template in _list(stored.get("templates")):
+        if not isinstance(raw_template, dict):
+            continue
+        try:
+            templates.append(_normalize_template(raw_template))
+        except HTTPException:
+            continue
+    if not any(template["version"] == FILE_TEMPLATE["version"] for template in templates):
+        templates.insert(0, dict(FILE_TEMPLATE))
+    templates.sort(key=lambda template: template["version"])
+    active_version = _as_int(stored.get("active_version"))
+    if active_version not in {template["version"] for template in templates}:
+        active_version = templates[-1]["version"]
+    return {
+        "schema_version": 1,
+        "active_version": active_version,
+        "templates": templates,
+        "source": "database" if row else "file",
+        "updated_at": row["updated_at"].isoformat() if row and row["updated_at"] else None,
+    }
+
+
+async def _load_survey_template(version: Optional[int] = None) -> Dict[str, Any]:
+    registry = await _load_template_registry()
+    target = version or registry["active_version"]
+    template = next(
+        (item for item in registry["templates"] if item["version"] == target),
+        None,
+    )
+    if template is None:
+        raise HTTPException(409, f"Nie znaleziono wersji {target} szablonu ankiety")
+    return template
+
+
 def _badge_names(value: Any) -> set[str]:
     if isinstance(value, list):
         return {str(x).strip() for x in value if str(x).strip()}
@@ -262,16 +317,35 @@ def _badge_names(value: Any) -> set[str]:
     return set()
 
 
-def _default_config() -> Dict[str, Any]:
+def _template_question_sets(
+    template: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    source = template or FILE_TEMPLATE
+    core = [
+        {**question, "additional": False}
+        for question in source["questions"]
+        if question.get("enabled_by_default", True)
+    ]
+    additional = [
+        {**question, "additional": True}
+        for question in source["questions"]
+        if not question.get("enabled_by_default", True)
+    ]
+    return core, additional
+
+
+def _default_config(template: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    source = template or FILE_TEMPLATE
+    core, _additional = _template_question_sets(source)
     return {
         "version": 1,
-        "template_version": TEMPLATE_VERSION,
-        "enabled_roles": list(DEFAULT_ROLES),
+        "template_version": source["version"],
+        "enabled_roles": list(source["default_roles"]),
         "additional_question_ids": [],
         "custom_questions": [],
-        "question_order": list(CORE_IDS),
-        "open_offset_minutes": 0,
-        "close_after_hours": 48,
+        "question_order": [question["id"] for question in core],
+        "open_offset_minutes": source["open_offset_minutes"],
+        "close_after_hours": source["close_after_hours"],
     }
 
 
@@ -326,16 +400,25 @@ def _sanitize_custom_question(raw: Dict[str, Any], index: int) -> Dict[str, Any]
     return question
 
 
-def _normalized_config(raw: Any) -> Dict[str, Any]:
+def _normalized_config(
+    raw: Any,
+    template: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     incoming = _obj(raw)
-    base = _default_config()
+    source = template or FILE_TEMPLATE
+    core_questions, additional_questions = _template_question_sets(source)
+    core_ids = [question["id"] for question in core_questions]
+    additional_by_id = {
+        question["id"]: question for question in additional_questions
+    }
+    base = _default_config(source)
     roles = [str(x) for x in _list(incoming.get("enabled_roles")) if str(x) in VALID_ROLES]
     if "enabled_roles" in incoming:
         base["enabled_roles"] = list(dict.fromkeys(roles))
     additional = [
         str(x)
         for x in _list(incoming.get("additional_question_ids"))
-        if str(x) in ADDITIONAL_BY_ID
+        if str(x) in additional_by_id
     ]
     base["additional_question_ids"] = list(dict.fromkeys(additional))
     custom: List[Dict[str, Any]] = []
@@ -343,9 +426,9 @@ def _normalized_config(raw: Any) -> Dict[str, Any]:
         if isinstance(q, dict):
             custom.append(_sanitize_custom_question(q, index))
     base["custom_questions"] = custom
-    active_ids = set(CORE_IDS + additional + [q["id"] for q in custom])
+    active_ids = set(core_ids + additional + [q["id"] for q in custom])
     order = [str(x) for x in _list(incoming.get("question_order")) if str(x) in active_ids]
-    for qid in CORE_IDS + additional + [q["id"] for q in custom]:
+    for qid in core_ids + additional + [q["id"] for q in custom]:
         if qid not in order:
             order.append(qid)
     base["question_order"] = list(dict.fromkeys(order))
@@ -360,14 +443,24 @@ def _normalized_config(raw: Any) -> Dict[str, Any]:
         min(168, 48 if close_after_hours is None else close_after_hours),
     )
     base["version"] = 1
-    base["template_version"] = TEMPLATE_VERSION
+    base["template_version"] = source["version"]
     return base
 
 
-def _questions(config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    available: Dict[str, Dict[str, Any]] = {q["id"]: dict(q) for q in CORE_QUESTIONS}
+def _questions(
+    config: Dict[str, Any],
+    template: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    core_questions, additional_questions = _template_question_sets(template)
+    additional_by_id = {
+        question["id"]: question for question in additional_questions
+    }
+    available: Dict[str, Dict[str, Any]] = {
+        question["id"]: dict(question) for question in core_questions
+    }
     for qid in config["additional_question_ids"]:
-        available[qid] = dict(ADDITIONAL_BY_ID[qid])
+        if qid in additional_by_id:
+            available[qid] = dict(additional_by_id[qid])
     for q in config["custom_questions"]:
         available[q["id"]] = dict(q)
     return [available[qid] for qid in config["question_order"] if qid in available]
@@ -544,6 +637,208 @@ async def _is_admin(user_id: int) -> bool:
     return bool(row)
 
 
+def _template_admin_payload(registry: Dict[str, Any]) -> Dict[str, Any]:
+    active = next(
+        template
+        for template in registry["templates"]
+        if template["version"] == registry["active_version"]
+    )
+    return {
+        "template": active,
+        "active_version": registry["active_version"],
+        "versions": [
+            {
+                "version": template["version"],
+                "question_count": len(template["questions"]),
+                "created_at": template.get("created_at") or None,
+                "created_by": template.get("created_by"),
+            }
+            for template in reversed(registry["templates"])
+        ],
+        "source": registry["source"],
+        "updated_at": registry.get("updated_at"),
+        "fallback_file": SURVEY_TEMPLATE_FILE.name,
+    }
+
+
+async def _persist_template_registry(
+    registry: Dict[str, Any],
+) -> None:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "schema_version": 1,
+        "active_version": registry["active_version"],
+        "templates": registry["templates"],
+    }
+    statement = pg_insert(beach_app_settings).values(
+        key=SURVEY_TEMPLATE_KEY,
+        value=json.dumps(payload, ensure_ascii=False),
+        updated_at=now,
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=[beach_app_settings.c.key],
+        set_={
+            "value": statement.excluded.value,
+            "updated_at": now,
+        },
+    )
+    await database.execute(statement)
+
+
+@router.get("/admin/template")
+async def get_admin_survey_template(
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień do szablonu ankiety")
+    return _template_admin_payload(await _load_template_registry())
+
+
+@router.get("/defaults")
+async def get_survey_template_defaults(
+    _current_user_id: int = Depends(beach_get_current_user_id),
+):
+    template = await _load_survey_template()
+    return {
+        "template_version": template["version"],
+        "default_roles": template["default_roles"],
+    }
+
+
+@router.patch("/admin/template")
+async def update_admin_survey_template(
+    body: SurveyTemplateRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień do szablonu ankiety")
+    invalid_roles = sorted(set(body.default_roles) - VALID_ROLES)
+    if invalid_roles:
+        raise HTTPException(
+            422,
+            f"Nieobsługiwane role: {', '.join(invalid_roles)}",
+        )
+    registry = await _load_template_registry()
+    if (
+        body.expected_version is not None
+        and body.expected_version != registry["active_version"]
+    ):
+        raise HTTPException(
+            409,
+            "Szablon został w międzyczasie zmieniony przez innego administratora. Odśwież widok.",
+        )
+    old_template = next(
+        template
+        for template in registry["templates"]
+        if template["version"] == registry["active_version"]
+    )
+    next_version = max(template["version"] for template in registry["templates"]) + 1
+    now = datetime.now(timezone.utc)
+    next_template = _normalize_template(
+        body.model_dump(),
+        version=next_version,
+        created_at=now.isoformat(),
+        created_by=current_user_id,
+    )
+    registry["templates"].append(next_template)
+    registry["active_version"] = next_version
+    registry["source"] = "database"
+    registry["updated_at"] = now.isoformat()
+    await _persist_template_registry(registry)
+    await log_activity(
+        area="system",
+        action="app_settings.final_survey_template_updated",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={
+            "template_version_before": old_template["version"],
+            "template_version_after": next_version,
+            "questions_before": len(old_template["questions"]),
+            "questions_after": len(next_template["questions"]),
+            "default_roles": next_template["default_roles"],
+        },
+    )
+    return _template_admin_payload(registry)
+
+
+@router.post("/admin/template/reset")
+async def reset_admin_survey_template(
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień do szablonu ankiety")
+    registry = await _load_template_registry()
+    old_version = registry["active_version"]
+    next_version = max(template["version"] for template in registry["templates"]) + 1
+    now = datetime.now(timezone.utc)
+    reset_template = _normalize_template(
+        FILE_TEMPLATE_RAW,
+        version=next_version,
+        created_at=now.isoformat(),
+        created_by=current_user_id,
+    )
+    registry["templates"].append(reset_template)
+    registry["active_version"] = next_version
+    registry["source"] = "database"
+    registry["updated_at"] = now.isoformat()
+    await _persist_template_registry(registry)
+    await log_activity(
+        area="system",
+        action="app_settings.final_survey_template_reset",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={
+            "template_version_before": old_version,
+            "template_version_after": next_version,
+            "questions_after": len(reset_template["questions"]),
+        },
+    )
+    return _template_admin_payload(registry)
+
+
+@router.post("/admin/template/{version}/activate")
+async def activate_admin_survey_template_version(
+    version: int,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Brak uprawnień do szablonu ankiety")
+    registry = await _load_template_registry()
+    selected = next(
+        (template for template in registry["templates"] if template["version"] == version),
+        None,
+    )
+    if selected is None:
+        raise HTTPException(404, "Nie znaleziono wybranej wersji szablonu")
+    old_version = registry["active_version"]
+    next_version = max(template["version"] for template in registry["templates"]) + 1
+    now = datetime.now(timezone.utc)
+    restored = _normalize_template(
+        selected,
+        version=next_version,
+        created_at=now.isoformat(),
+        created_by=current_user_id,
+    )
+    registry["templates"].append(restored)
+    registry["active_version"] = next_version
+    registry["source"] = "database"
+    registry["updated_at"] = now.isoformat()
+    await _persist_template_registry(registry)
+    await log_activity(
+        area="system",
+        action="app_settings.final_survey_template_restored",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        details={
+            "template_version_before": old_version,
+            "restored_from_version": version,
+            "template_version_after": next_version,
+            "questions_after": len(restored["questions"]),
+        },
+    )
+    return _template_admin_payload(registry)
+
+
 async def _access(
     tournament_id: int,
     user_id: int,
@@ -558,7 +853,10 @@ async def _access(
         and _as_int(team.get("coach_user_id")) == user_id
         and team.get("gender")
     ]
-    config = _normalized_config(data.get("final_survey"))
+    raw_config = _obj(data.get("final_survey"))
+    requested_template_version = _as_int(raw_config.get("template_version"))
+    template = await _load_survey_template(requested_template_version)
+    config = _normalized_config(raw_config, template)
     manager = (
         await _is_admin(user_id)
         or "host" in roles
@@ -578,6 +876,7 @@ async def _access(
         "opens_at": opens_at,
         "closes_at": closes_at,
         "phase": _phase(opens_at, closes_at),
+        "template": template,
     }
     return tournament, data, config, {**access, "user": user}
 
@@ -661,8 +960,8 @@ def _context_payload(
         "can_view_results": access["can_view_results"],
         "config": config,
         "role_labels": ROLE_LABELS,
-        "questions": _questions(config),
-        "additional_question_bank": ADDITIONAL_QUESTIONS,
+        "questions": _questions(config, access["template"]),
+        "additional_question_bank": _template_question_sets(access["template"])[1],
         "my_response": _serialize_response(my_response),
     }
 
@@ -779,7 +1078,7 @@ async def update_survey_config(
             422,
             f"Nieobsługiwane role ankiety: {', '.join(invalid_roles)}",
         )
-    new_config = _normalized_config(body.model_dump())
+    new_config = _normalized_config(body.model_dump(), access["template"])
     if access["phase"] == "closed":
         raise HTTPException(409, "Zamkniętej ankiety nie można już konfigurować")
     if access["phase"] == "open":
@@ -834,7 +1133,7 @@ async def save_survey_response(
     body: SurveyResponseRequest,
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
-    tournament, _data, config, access = await _access(tournament_id, current_user_id)
+    tournament, data, config, access = await _access(tournament_id, current_user_id)
     if not access["can_respond"]:
         raise HTTPException(403, "Ankieta nie jest udostępniona dla Twojej roli")
     if access["phase"] != "open":
@@ -844,7 +1143,18 @@ async def save_survey_response(
             raise HTTPException(409, "Ankieta jest już zamknięta")
         raise HTTPException(409, "Ankieta oczekuje na gotowy terminarz")
 
-    answers = _validate_answers(body.answers, _questions(config), body.submit)
+    answers = _validate_answers(
+        body.answers,
+        _questions(config, access["template"]),
+        body.submit,
+    )
+    if not _obj(data.get("final_survey")):
+        data["final_survey"] = config
+        await database.execute(
+            update(beach_tournaments)
+            .where(beach_tournaments.c.id == tournament_id)
+            .values(data_json=data, updated_at=datetime.now(timezone.utc))
+        )
     perspectives = [
         role
         for role in dict.fromkeys(body.perspective_roles)
@@ -896,7 +1206,7 @@ async def save_survey_response(
         "perspective_roles": perspectives,
         "answers_json": answers,
         "respondent_snapshot_json": snapshot,
-        "template_version": TEMPLATE_VERSION,
+        "template_version": config["template_version"],
         "updated_at": now,
         "submitted_at": now if body.submit else (existing["submitted_at"] if existing else None),
     }
@@ -974,13 +1284,20 @@ def _question_aggregate(question: Dict[str, Any], rows: List[Dict[str, Any]]) ->
     }
     qtype = question["type"]
     if qtype in {"rating", "nps"}:
+        result["min"] = int(question.get("min", 0))
+        result["max"] = int(question.get("max", 10))
         numeric = [float(value) for value in values if isinstance(value, (int, float))]
         result["average"] = round(sum(numeric) / len(numeric), 2) if numeric else None
         distribution = Counter(str(int(value)) for value in numeric)
         result["distribution"] = dict(sorted(distribution.items(), key=lambda x: int(x[0])))
         if question["id"] == "return_likelihood" and numeric:
-            promoters = sum(1 for value in numeric if value >= 9)
-            detractors = sum(1 for value in numeric if value <= 6)
+            minimum = int(question.get("min", 0))
+            maximum = int(question.get("max", 10))
+            span = max(1, maximum - minimum)
+            promoter_threshold = maximum - max(1, round(span * 0.1))
+            detractor_threshold = minimum + round(span * 0.6)
+            promoters = sum(1 for value in numeric if value >= promoter_threshold)
+            detractors = sum(1 for value in numeric if value <= detractor_threshold)
             result["nps"] = round((promoters - detractors) * 100 / len(numeric))
     elif qtype in {"single", "boolean", "multi"}:
         counter: Counter[str] = Counter()
@@ -1114,7 +1431,7 @@ async def get_survey_results(
             continue
         rows.append(serialized)
 
-    questions = _questions(config)
+    questions = _questions(config, access["template"])
     aggregates = [_question_aggregate(question, rows) for question in questions]
     role_counts: Counter[str] = Counter()
     team_counts: Counter[str] = Counter()
@@ -1238,5 +1555,5 @@ async def get_survey_response_detail(
         raise HTTPException(404, "Nie znaleziono odpowiedzi")
     return {
         "response": _serialize_response(row),
-        "questions": _questions(config),
+        "questions": _questions(config, access["template"]),
     }

@@ -17,6 +17,7 @@ from app.beach.final_survey import (
     SurveyResponseRequest,
     _default_config,
     _normalized_config,
+    _normalize_template,
     _phase,
     _question_aggregate,
     _questions,
@@ -275,6 +276,90 @@ def test_config_allows_disabling_every_role_and_clamps_window_values():
     assert config["enabled_roles"] == []
     assert config["open_offset_minutes"] == -720
     assert config["close_after_hours"] == 168
+
+
+def test_admin_template_controls_questions_scales_and_default_config():
+    template = _normalize_template(
+        {
+            "version": 7,
+            "default_roles": ["player", "table_judge"],
+            "open_offset_minutes": -90,
+            "close_after_hours": 72,
+            "questions": [
+                {
+                    "id": "dynamic_score",
+                    "title": "Jak oceniasz nowy obszar?",
+                    "description": "Skala ustawiona w panelu.",
+                    "type": "rating",
+                    "required": True,
+                    "section": "Nowa sekcja",
+                    "min": 2,
+                    "max": 7,
+                    "allow_na": True,
+                    "enabled_by_default": True,
+                },
+                {
+                    "id": "dynamic_choice",
+                    "title": "Co wybierasz?",
+                    "type": "single",
+                    "required": False,
+                    "section": "Nowa sekcja",
+                    "enabled_by_default": False,
+                    "options": [
+                        {"value": "first", "label": "Pierwsza"},
+                        {"value": "second", "label": "Druga"},
+                    ],
+                },
+            ],
+        }
+    )
+
+    config = _default_config(template)
+    questions = _questions(config, template)
+
+    assert config["template_version"] == 7
+    assert config["enabled_roles"] == ["player", "table_judge"]
+    assert config["open_offset_minutes"] == -90
+    assert config["close_after_hours"] == 72
+    assert [question["id"] for question in questions] == ["dynamic_score"]
+    assert questions[0]["min"] == 2
+    assert questions[0]["max"] == 7
+
+    configured = _normalized_config(
+        {
+            **config,
+            "additional_question_ids": ["dynamic_choice"],
+            "question_order": ["dynamic_choice", "dynamic_score"],
+        },
+        template,
+    )
+    assert [question["id"] for question in _questions(configured, template)] == [
+        "dynamic_choice",
+        "dynamic_score",
+    ]
+
+
+def test_admin_template_rejects_duplicate_question_ids():
+    with pytest.raises(HTTPException) as error:
+        _normalize_template(
+            {
+                "questions": [
+                    {
+                        "id": "duplicate",
+                        "title": "Pierwsze",
+                        "type": "boolean",
+                        "section": "Test",
+                    },
+                    {
+                        "id": "duplicate",
+                        "title": "Drugie",
+                        "type": "boolean",
+                        "section": "Test",
+                    },
+                ]
+            }
+        )
+    assert error.value.status_code == 422
 
 
 def test_response_request_accepts_optimistic_lock_timestamp():
