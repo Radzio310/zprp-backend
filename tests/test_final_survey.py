@@ -63,6 +63,12 @@ def test_default_config_contains_default_roles_and_full_core_template():
     config = _default_config()
 
     assert config["enabled_roles"] == DEFAULT_ROLES
+    schedule_question = next(
+        question for question in _questions(config) if question["id"] == "schedule"
+    )
+    assert schedule_question["title"] == (
+        "Układ meczów, czytelność i przebieg terminarza zawodów"
+    )
     assert [question["id"] for question in _questions(config)] == [
         question["id"] for question in CORE_QUESTIONS
     ]

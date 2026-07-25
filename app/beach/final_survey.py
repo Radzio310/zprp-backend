@@ -159,6 +159,8 @@ def _sanitize_template_question(raw: Dict[str, Any], index: int) -> Dict[str, An
     title = str(raw.get("title") or "").strip()
     if not title:
         raise HTTPException(422, f"Pytanie {index + 1} nie ma treści")
+    if qid == "schedule" and "sprawiedliw" in title.casefold():
+        title = "Układ meczów, czytelność i przebieg terminarza zawodów"
     if len(title) > 240:
         raise HTTPException(422, f"Treść pytania {index + 1} jest za długa")
     section = str(raw.get("section") or "Pozostałe").strip()[:80] or "Pozostałe"

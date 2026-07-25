@@ -69,7 +69,7 @@
     },
     {
       "id": "schedule",
-      "title": "Czytelność, punktualność i sprawiedliwość terminarza",
+      "title": "Układ meczów, czytelność i przebieg terminarza zawodów",
       "description": "",
       "type": "rating",
       "required": true,
