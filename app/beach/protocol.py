@@ -1066,6 +1066,15 @@ def _fill_regular_team_squad(
                 return False
         ordered_players = [p for p in ordered_players if not _is_banned(p)]
 
+    # Zawodnicy spoza rosteru drużyny (import protokołu z Excela) — dopisywani
+    # po zawodnikach z bazy, z surową nazwą i numerem z pliku.
+    extra_players = [
+        e
+        for e in (squad_entry.get("protocol_extra_players") or [])
+        if isinstance(e, dict) and str(e.get("name") or "").strip()
+    ]
+
+    total_players = len(ordered_players) + len(extra_players)
     for i, row in enumerate(player_rows):
         if i < len(ordered_players):
             p = ordered_players[i]
@@ -1075,7 +1084,12 @@ def _fill_regular_team_squad(
             ws.cell(row=row, column=2).value = _format_player_name(
                 p.get("last_name", ""), p.get("first_name", "")
             )
-    _strikethrough_empty_rows(ws, player_rows, len(ordered_players))
+        elif i < total_players:
+            e = extra_players[i - len(ordered_players)]
+            num = e.get("number")
+            ws.cell(row=row, column=1).value = num if num is not None else ""
+            ws.cell(row=row, column=2).value = str(e.get("name")).strip()
+    _strikethrough_empty_rows(ws, player_rows, total_players)
 
     # ── Companions ──
     # Role letters: match override companion_roles → tournament default_companion_roles
@@ -1094,6 +1108,14 @@ def _fill_regular_team_squad(
         # No selection → fill all companions
         ordered_comps = list(companions)
 
+    # Osoby towarzyszące spoza bazy drużyny (import protokołu z Excela).
+    extra_comps = [
+        e
+        for e in (squad_entry.get("protocol_extra_companions") or [])
+        if isinstance(e, dict) and str(e.get("name") or "").strip()
+    ]
+
+    total_comps = len(ordered_comps) + len(extra_comps)
     for i, row in enumerate(companion_rows):
         if i < len(ordered_comps):
             c = ordered_comps[i]
@@ -1103,7 +1125,14 @@ def _fill_regular_team_squad(
             _clear_diagonal(ws.cell(row=row, column=2))
             ws.cell(row=row, column=1).value = role if role in COMPANION_ROLE_OFFSET else ""
             ws.cell(row=row, column=2).value = c.get("full_name", "")
-    _strikethrough_empty_rows(ws, companion_rows, len(ordered_comps), is_companion=True)
+        elif i < total_comps:
+            e = extra_comps[i - len(ordered_comps)]
+            letter = str(e.get("letter") or "").strip().upper()
+            _clear_diagonal(ws.cell(row=row, column=1))
+            _clear_diagonal(ws.cell(row=row, column=2))
+            ws.cell(row=row, column=1).value = letter if letter in COMPANION_ROLE_OFFSET else ""
+            ws.cell(row=row, column=2).value = str(e.get("name")).strip()
+    _strikethrough_empty_rows(ws, companion_rows, total_comps, is_companion=True)
 
 
 # ── collect all referee IDs from matches ──────────────────────────────────────

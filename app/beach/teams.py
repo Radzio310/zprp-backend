@@ -2906,13 +2906,35 @@ def _best_name_match(raw: str, candidates: list, key_fn) -> tuple:
     return best_cand, best_score
 
 
+# Wiersze-etykiety szablonu protokołu (nagłówki, podpisy, meta) — pomijane przy
+# skanowaniu. Dopasowanie po całych słowach na znormalizowanym tekście wiersza,
+# żeby nie łapać nazwisk (np. IMIELSKI nie pasuje do \bimie\b).
+_EXCEL_SKIP_ROW_RE = re.compile(
+    r"\b(zawodnic\w*|nazwisko|imie|druzyn\w*|wynik\w*|podpis\w*|protok\w*"
+    r"|numer|miejsce|godz\w*|widz\w*|data|shoot|jeden na jednego)\b"
+    r"|time\s*out",
+)
+
+# Twardy stop skanowania — wszystko poniżej to blok drużyny B / sędziów / stopka.
+_EXCEL_STOP_ROW_RE = re.compile(
+    r"\b(sedziowie|sekretarz\w*|delegat\w*|miejscowosc|legenda)\b"
+    r"|druzyna b\b|druzyna gosci|podpis oficjela b",
+)
+
+
 def _read_excel_cells(file_bytes: bytes, filename: str) -> dict:
     """Read squad protocol cells from an .xls or .xlsx file.
 
-    Cells:
-        B10  – team name
-        A15–A29 / B15–B29 – jersey numbers and player names
-        A30–A33 / B30–B33 – companion letters (A-D) and names
+    Standardowy szablon: B10 = nazwa drużyny, A/B 15–29 = zawodnicy,
+    A/B 30–33 = osoby towarzyszące. Pliki bywają jednak przesunięte lub
+    lekko uszkodzone, dlatego zamiast sztywnych pozycji klasyfikujemy wiersze
+    po TREŚCI kolumn A/B (zakres 11–60):
+      - numer 1–99 w kolumnie A → zawodnik,
+      - litera A–D w kolumnie A → osoba towarzysząca,
+      - sama nazwa w kolumnie B → zawodnik przed pierwszą osobą tow.,
+        potem osoba towarzysząca (brakujące litery uzupełniamy po kolei),
+      - wiersze-etykiety (nagłówki, podpisy) pomijamy,
+      - twardy stop na bloku drużyny B / sędziów / legendzie.
     """
     name_lower = (filename or "").lower()
 
@@ -2935,71 +2957,105 @@ def _read_excel_cells(file_bytes: bytes, filename: str) -> dict:
         def get_cell(row1: int, col1: int):
             return ws.cell(row=row1, column=col1).value
 
-    team_name_raw = get_cell(10, 2)  # B10
-    if team_name_raw is not None:
-        team_name_raw = str(team_name_raw).strip() or None
+    def _is_label(norm: str) -> bool:
+        return bool(_EXCEL_SKIP_ROW_RE.search(norm) or _EXCEL_STOP_ROW_RE.search(norm))
 
-    players_raw = []
-    for row in range(15, 30):  # rows 15–29
-        num_val = get_cell(row, 1)
-        name_val = get_cell(row, 2)
+    # ── Nazwa drużyny: B10, z fallbackiem na sąsiednie wiersze (przesunięty plik)
+    team_name_raw = None
+    team_name_row = 10
+    for row in (10, 9, 11, 8, 12, 7, 13):
+        val = get_cell(row, 2)
+        s = str(val).strip() if val is not None else ""
+        norm = _excel_normalize(s)
+        if len(norm) >= 3 and not norm.isdigit() and not _is_label(norm):
+            team_name_raw = s
+            team_name_row = row
+            break
+
+    valid_letters = {"A", "B", "C", "D"}
+    players_raw: list = []
+    companions_raw: list = []
+    seen_letters: set = set()
+    companions_started = False
+
+    for row in range(max(11, team_name_row + 1), 61):
+        a_val = get_cell(row, 1)
+        b_val = get_cell(row, 2)
+        a_str = str(a_val).strip() if a_val is not None else ""
+        b_str = str(b_val).strip() if b_val is not None else ""
+        if not a_str and not b_str:
+            continue
+
+        combined_norm = _excel_normalize(f"{a_str} {b_str}")
+        if _EXCEL_STOP_ROW_RE.search(combined_norm):
+            break
+        if _EXCEL_SKIP_ROW_RE.search(combined_norm):
+            continue
+
+        # ── Klasyfikacja kolumny A: numer / litera / scalone "33 Kowalski" ──
         jersey = None
-        if num_val is not None:
+        letter = None
+        name_val = b_str or None
+        if a_str:
             try:
-                n = int(float(str(num_val)))
+                n = int(float(a_str))
                 if 1 <= n <= 99:
                     jersey = n
             except (ValueError, TypeError):
-                # Merged-cell fallback: "33 Kowalski Jan" in column A, column B empty.
-                # Split on the first space and try the left part as a jersey number.
-                if name_val is None:
-                    raw_str = str(num_val).strip()
-                    parts = raw_str.split(None, 1)
+                au = a_str.upper()
+                if au in valid_letters:
+                    letter = au
+                elif not b_str:
+                    # Merged-cell fallback: "33 Kowalski Jan" / "A Kowalski Jan"
+                    parts = a_str.split(None, 1)
                     if len(parts) == 2:
+                        head = parts[0]
                         try:
-                            n = int(float(parts[0]))
+                            n = int(float(head))
                             if 1 <= n <= 99:
                                 jersey = n
                             name_val = parts[1]
                         except (ValueError, TypeError):
-                            # No leading number — treat the whole string as the name.
-                            name_val = raw_str
+                            if head.upper() in valid_letters:
+                                letter = head.upper()
+                                name_val = parts[1]
+                            else:
+                                name_val = a_str
                     else:
-                        name_val = raw_str
-        name_str = str(name_val).strip() if name_val is not None else None
-        if name_str:
-            players_raw.append({"row": row, "raw_name": name_str, "raw_number": jersey})
+                        name_val = a_str
 
-    companions_raw = []
-    seen_letters: set = set()
-    valid_letters = {"A", "B", "C", "D"}
-    for row in range(30, 34):  # rows 30–33
-        letter_val = get_cell(row, 1)
-        name_val = get_cell(row, 2)
-        letter = None
-        if letter_val is not None:
-            ltr = str(letter_val).strip().upper()
-            if ltr in valid_letters and ltr not in seen_letters:
-                letter = ltr
-                seen_letters.add(ltr)
-            elif name_val is None:
-                # Merged-cell fallback: "A Kowalski Jan" in column A, column B empty.
-                raw_str = str(letter_val).strip()
-                parts = raw_str.split(None, 1)
-                if len(parts) == 2 and parts[0].upper() in valid_letters and parts[0].upper() not in seen_letters:
-                    letter = parts[0].upper()
-                    seen_letters.add(letter)
-                    name_val = parts[1]
-                elif len(parts) >= 1:
-                    # No valid leading letter — treat whole string as name only.
-                    name_val = raw_str
         name_str = str(name_val).strip() if name_val is not None else None
-        if name_str:
-            # If the protocol sheet doesn't have A/B/C/D in column A,
-            # fall back to assigning the letter by row position.
-            if letter is None:
-                letter = {30: "A", 31: "B", 32: "C", 33: "D"}.get(row)
-            companions_raw.append({"row": row, "raw_name": name_str, "raw_letter": letter})
+        if not name_str:
+            continue
+        name_norm = _excel_normalize(name_str)
+        if len(name_norm) < 3 or name_norm.replace(" ", "").isdigit():
+            continue
+
+        if letter is not None:
+            if letter in seen_letters:
+                letter = None  # duplikat litery — przydzielimy wolną na końcu
+            else:
+                seen_letters.add(letter)
+            if len(companions_raw) < 4:
+                companions_raw.append({"row": row, "raw_name": name_str, "raw_letter": letter})
+                companions_started = True
+        elif jersey is not None:
+            if len(players_raw) < 15:
+                players_raw.append({"row": row, "raw_name": name_str, "raw_number": jersey})
+        elif companions_started:
+            # Nazwa bez litery po rozpoczęciu bloku osób tow. → kolejna osoba tow.
+            if len(companions_raw) < 4:
+                companions_raw.append({"row": row, "raw_name": name_str, "raw_letter": None})
+        else:
+            # Nazwa bez numeru przed blokiem osób tow. → zawodnik bez numeru
+            if len(players_raw) < 15:
+                players_raw.append({"row": row, "raw_name": name_str, "raw_number": None})
+
+    # Uzupełnij brakujące litery osób towarzyszących wolnymi A–D (po kolei).
+    free_letters = [l for l in ("A", "B", "C", "D") if l not in seen_letters]
+    for comp in companions_raw:
+        if comp["raw_letter"] is None and free_letters:
+            comp["raw_letter"] = free_letters.pop(0)
 
     return {
         "team_name_raw": team_name_raw,
@@ -3010,6 +3066,14 @@ def _read_excel_cells(file_bytes: bytes, filename: str) -> dict:
 
 # ── Excel squad import — endpoints ────────────────────────────────────────────
 
+class ExcelExtraMember(BaseModel):
+    """Osoba z protokołu Excel niedopasowana do rosteru drużyny w bazie —
+    trafia na protokół PDF jako wpis 'spoza składu'."""
+    name: str
+    number: Optional[int] = None   # zawodnicy
+    letter: Optional[str] = None   # osoby towarzyszące (A–D)
+
+
 class ApplyExcelSquadRequest(BaseModel):
     tournament_id: int
     team_id: int
@@ -3017,6 +3081,8 @@ class ApplyExcelSquadRequest(BaseModel):
     companion_ids: List[int]
     companion_roles: Dict[str, str]  # str(person_id) → "A"|"B"|"C"|"D"
     also_update_default: bool = False
+    extra_players: List[ExcelExtraMember] = []
+    extra_companions: List[ExcelExtraMember] = []
 
 
 @router.post("/parse-excel-squad", summary="Parsuj plik Excel i dopasuj skład drużyny")
@@ -3267,6 +3333,18 @@ async def apply_excel_squad(body: ApplyExcelSquadRequest):
     squad_entry: dict = dict(team_squads.get(team_key) or {})
 
     squad_entry["protocol_players"] = body.protocol_player_ids
+    # Zawodnicy/osoby tow. spoza rosteru drużyny — zawsze nadpisywane importem
+    # (ponowny import z poprawionego pliku czyści stare wpisy).
+    squad_entry["protocol_extra_players"] = [
+        {"name": p.name.strip(), "number": p.number}
+        for p in body.extra_players
+        if p.name and p.name.strip()
+    ]
+    squad_entry["protocol_extra_companions"] = [
+        {"name": c.name.strip(), "letter": (c.letter or "").strip().upper() or None}
+        for c in body.extra_companions
+        if c.name and c.name.strip()
+    ]
     if body.companion_ids:
         squad_entry["default_companions"] = body.companion_ids
     if body.companion_roles:
