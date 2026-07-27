@@ -98,6 +98,7 @@ class SquadUpdateRequest(BaseModel):
     match_extra_players: Optional[List] = None       # per-meczowa selekcja spoza rosteru: {name, number, selected}
     match_companion_roles: Optional[Dict[str, str]] = None  # personId(str) → "A"|"B"|"C"|"D"
     signature_url: Optional[str] = None              # per-match coach signature URL
+    mp_warning_accept_player_ids: Optional[List[int]] = None
 
 
 class TournamentTitleImageRequest(BaseModel):
@@ -556,6 +557,8 @@ def _attach_computed_fields(
         location=row_d.get("location"),
         category=row_d.get("category"),
         competition_type=row_d.get("competition_type"),
+        season_id=row_d.get("season_id"),
+        mp_phase=row_d.get("mp_phase"),
         data_json=data,
         updated_at=row_d["updated_at"],
         invited_total=len(invited_set),
@@ -708,6 +711,10 @@ async def create_tournament(
 
     now = datetime.now(timezone.utc)
     data = _normalize_event_data(req.data_json)
+    from app.beach.mp_appearances import infer_mp_phase
+
+    season_id = str(req.season_id or data.get("season_id") or "8")
+    mp_phase = infer_mp_phase(req.name, req.competition_type, req.mp_phase)
 
     if is_host_badge_user and not is_admin_user:
         hosts = [
@@ -740,6 +747,8 @@ async def create_tournament(
                 location=(req.location or "").strip() or None,
                 category=req.category,
                 competition_type=req.competition_type,
+                season_id=season_id,
+                mp_phase=mp_phase,
                 data_json=data,
                 updated_at=now,
             )
@@ -1153,6 +1162,23 @@ async def patch_tournament(
         update_data["category"] = body.category
     if "competition_type" in fields:
         update_data["competition_type"] = body.competition_type
+    if "season_id" in fields:
+        update_data["season_id"] = body.season_id
+    if "mp_phase" in fields:
+        update_data["mp_phase"] = body.mp_phase
+    elif "name" in fields or "competition_type" in fields:
+        from app.beach.mp_appearances import infer_mp_phase
+
+        update_data["mp_phase"] = infer_mp_phase(
+            update_data.get("name", existing_d.get("name")),
+            update_data.get(
+                "competition_type",
+                existing_d.get("competition_type"),
+            ),
+            existing_d.get("mp_phase")
+            if "competition_type" not in fields
+            else None,
+        )
     if body.data_json is not None:
         update_data["data_json"] = _normalize_event_data(body.data_json)
 
@@ -1180,6 +1206,10 @@ async def patch_tournament(
         )
         or existing_d.get("category")
         != update_data.get("category", existing_d.get("category"))
+        or existing_d.get("season_id")
+        != update_data.get("season_id", existing_d.get("season_id"))
+        or existing_d.get("mp_phase")
+        != update_data.get("mp_phase", existing_d.get("mp_phase"))
     )
 
     async with database.transaction():
@@ -1240,7 +1270,7 @@ async def patch_tournament(
 
     # ── Activity log ──
     diff_fields = {}
-    for key in ("name", "event_date", "end_date", "location", "category", "competition_type", "badge", "description"):
+    for key in ("name", "event_date", "end_date", "location", "category", "competition_type", "season_id", "mp_phase", "badge", "description"):
         old_val = existing_d.get(key)
         new_val = row_d.get(key)
         if key in ("event_date", "end_date"):
@@ -3734,6 +3764,118 @@ async def squad_update_tournament(
     squad_entry: dict = dict(team_squads.get(team_key) or {})
     old_squad_entry = copy.deepcopy(squad_entry)
 
+    if body.team_id:
+        from app.beach.mp_appearances import (
+            assert_no_unidentified_final_players,
+            assert_protocol_edit_allowed,
+            validate_final_player_ids,
+        )
+
+        if body.protocol_players is not None:
+            # This call creates the due snapshot from the old list before any
+            # post-cutoff mutation is considered.
+            await assert_protocol_edit_allowed(
+                existing_d,
+                int(body.team_id),
+                current_user_id,
+            )
+        if body.protocol_extra_players is not None:
+            old_active_names = {
+                str(item.get("name") or "").strip().casefold()
+                for item in (old_squad_entry.get("protocol_extra_players") or [])
+                if isinstance(item, dict) and item.get("selected") is not False
+            }
+            added_extras = [
+                item
+                for item in body.protocol_extra_players
+                if not isinstance(item, dict)
+                or (
+                    item.get("selected") is not False
+                    and str(item.get("name") or "").strip().casefold()
+                    not in old_active_names
+                )
+            ]
+            await assert_no_unidentified_final_players(
+                existing_d,
+                added_extras,
+            )
+        if body.match_extra_players is not None:
+            old_override = (
+                (old_squad_entry.get("match_overrides") or {}).get(body.match_id) or {}
+            )
+            old_active_names = {
+                str(item.get("name") or "").strip().casefold()
+                for item in (old_override.get("extra_players") or [])
+                if isinstance(item, dict) and item.get("selected") is not False
+            }
+            added_extras = [
+                item
+                for item in body.match_extra_players
+                if not isinstance(item, dict)
+                or (
+                    item.get("selected") is not False
+                    and str(item.get("name") or "").strip().casefold()
+                    not in old_active_names
+                )
+            ]
+            await assert_no_unidentified_final_players(
+                existing_d,
+                added_extras,
+            )
+
+        player_changes: List[tuple[List, List]] = []
+        if body.match_id and body.match_players is not None:
+            old_override = (
+                (old_squad_entry.get("match_overrides") or {}).get(body.match_id) or {}
+            )
+            player_changes.append((old_override.get("players") or [], body.match_players))
+        elif not body.match_id:
+            if body.default_players is not None:
+                player_changes.append(
+                    (old_squad_entry.get("default_players") or [], body.default_players)
+                )
+            if body.protocol_players is not None:
+                old_protocol = (
+                    old_squad_entry.get("protocol_players")
+                    if "protocol_players" in old_squad_entry
+                    else old_squad_entry.get("default_players")
+                ) or []
+                player_changes.append((old_protocol, body.protocol_players))
+
+        added_player_ids: set[int] = set()
+        for old_values, new_values in player_changes:
+            old_ids = {
+                int(value)
+                for value in old_values
+                if isinstance(value, (int, str)) and str(value).isdigit()
+            }
+            added_player_ids.update(
+                int(value)
+                for value in new_values
+                if isinstance(value, (int, str))
+                and str(value).isdigit()
+                and int(value) not in old_ids
+            )
+        if added_player_ids:
+            await validate_final_player_ids(
+                existing_d,
+                int(body.team_id),
+                sorted(added_player_ids),
+                body.mp_warning_accept_player_ids or [],
+            )
+        accepted_now = sorted(
+            set(body.mp_warning_accept_player_ids or []) & added_player_ids
+        )
+        if accepted_now:
+            acceptances = dict(squad_entry.get("mp_warning_acceptances") or {})
+            accepted_at = datetime.now(timezone.utc).isoformat()
+            for player_id in accepted_now:
+                acceptances[str(player_id)] = {
+                    "accepted_at": accepted_at,
+                    "accepted_by_user_id": current_user_id,
+                }
+            squad_entry["mp_warning_acceptances"] = acceptances
+
     if body.match_id:
         match_overrides: dict = dict(squad_entry.get("match_overrides") or {})
         override = dict(match_overrides.get(body.match_id) or {})
@@ -3867,6 +4009,24 @@ async def squad_update_tournament(
             "changed_fields": squad_changed_fields,
         },
     )
+
+    accepted_warning_ids = sorted(
+        set(body.mp_warning_accept_player_ids or []) & added_player_ids
+    ) if body.team_id else []
+    if accepted_warning_ids:
+        await log_activity(
+            area="tournament",
+            action="mp_appearances.warning_accepted",
+            actor_user_id=current_user_id,
+            actor_name=await get_actor_name(current_user_id),
+            target_id=str(tournament_id),
+            target_label=existing_d.get("name", ""),
+            details={
+                "team_id": body.team_id,
+                "match_id": body.match_id,
+                "player_ids": accepted_warning_ids,
+            },
+        )
 
     return {"success": True}
 

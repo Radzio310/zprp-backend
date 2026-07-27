@@ -1,0 +1,1071 @@
+"""MP elimination appearance verification and protocol-list snapshots.
+
+The module deliberately keeps two concepts separate:
+* positive evidence from a completed ProEl match;
+* a revisioned fallback snapshot of the tournament "Do protokołu" list.
+
+This lets the application enforce the final-entry rule without pretending that
+an administrative list is proof of physical participation.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import unicodedata
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, func, insert, select, update
+
+from app.beach.activity_log import get_actor_name, log_activity
+from app.beach.capabilities import resolve_user_capabilities
+from app.db import (
+    beach_admins,
+    beach_mp_eligibility_settings,
+    beach_proel_matches,
+    beach_teams,
+    beach_tournament_protocol_snapshots,
+    beach_tournaments,
+    beach_users,
+    database,
+)
+from app.deps import beach_get_current_user_id
+
+logger = logging.getLogger(__name__)
+router = APIRouter(
+    prefix="/beach/mp-appearances",
+    tags=["Beach: MP appearances"],
+)
+
+WARSAW = ZoneInfo("Europe/Warsaw")
+DEFAULT_SEASON_ID = "8"
+DEFAULT_ENABLED_CATEGORIES = ["Senior"]
+VALID_CATEGORIES = ["Senior", "Junior", "Junior mł.", "Młodzik", "Dzieci"]
+
+STATUS_PRIORITY = {
+    "approved_proel": 50,
+    "finished_proel": 40,
+    "frozen_confirmed": 30,
+    "frozen_warning": 20,
+    "missing": 0,
+    "insufficient": -10,
+}
+
+
+def _rollout_at() -> datetime:
+    raw = os.getenv("MP_SNAPSHOT_ROLLOUT_AT", "2026-07-27T00:00:00+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return (
+            parsed.replace(tzinfo=timezone.utc)
+            if parsed.tzinfo is None
+            else parsed.astimezone(timezone.utc)
+        )
+    except ValueError:
+        return datetime(2026, 7, 27, tzinfo=timezone.utc)
+
+
+class MpSettingsUpdate(BaseModel):
+    enabled_categories: List[str] = Field(default_factory=list)
+
+
+class SnapshotRefreshRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+    context_tournament_id: Optional[int] = None
+
+
+def _json(raw: Any, fallback: Any = None) -> Any:
+    if raw is None:
+        return {} if fallback is None else fallback
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {} if fallback is None else fallback
+
+
+def _ascii(value: Any) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", str(value or "").lower())
+        if not unicodedata.combining(c)
+    )
+
+
+def infer_mp_phase(name: Any, competition_type: Any, explicit: Any = None) -> Optional[str]:
+    if explicit in ("elimination", "final"):
+        return str(explicit)
+    if str(competition_type or "").strip().upper() != "MP":
+        return None
+    normalized = _ascii(name)
+    return "final" if "final" in normalized else "elimination"
+
+
+def tournament_season_id(row: Dict[str, Any]) -> str:
+    data = _json(row.get("data_json"))
+    explicit = row.get("season_id") or data.get("season_id")
+    if explicit:
+        return str(explicit)
+    return f"unassigned:{_parse_event_date(row.get('event_date')).year}"
+
+
+def tournament_phase(row: Dict[str, Any]) -> Optional[str]:
+    return infer_mp_phase(
+        row.get("name"),
+        row.get("competition_type"),
+        row.get("mp_phase"),
+    )
+
+
+def _numeric_ids(values: Any) -> List[int]:
+    result: List[int] = []
+    seen: set[int] = set()
+    for value in values if isinstance(values, list) else []:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0 and parsed not in seen:
+            seen.add(parsed)
+            result.append(parsed)
+    return result
+
+
+def effective_protocol_ids(squad_entry: Dict[str, Any]) -> List[int]:
+    # Presence of an explicitly empty protocol list is meaningful.  Fall back
+    # only for legacy entries which predate protocol_players.
+    if "protocol_players" in squad_entry:
+        return _numeric_ids(squad_entry.get("protocol_players"))
+    return _numeric_ids(squad_entry.get("default_players"))
+
+
+def _regular_team(match_team: Any) -> Optional[Tuple[int, str]]:
+    if not isinstance(match_team, dict):
+        return None
+    raw_id = match_team.get("id")
+    try:
+        team_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    if team_id <= 0 or str(raw_id).startswith("ct_"):
+        return None
+    return team_id, str(match_team.get("name") or "")
+
+
+def _is_match_cancelled(match: Dict[str, Any]) -> bool:
+    flags = (
+        match.get("cancelled"),
+        match.get("canceled"),
+        match.get("walkover"),
+        match.get("isWalkover"),
+        match.get("isCancelled"),
+    )
+    return any(bool(value) for value in flags)
+
+
+def _schedule_matches(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    schedule = data.get("schedule")
+    if not isinstance(schedule, dict):
+        return []
+    return [
+        match
+        for match in (schedule.get("matches") or [])
+        if isinstance(match, dict) and match.get("kind", "match") == "match"
+    ]
+
+
+def _parse_event_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.astimezone(WARSAW).date()
+    text = str(value or "")[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return datetime.now(WARSAW).date()
+
+
+def _parse_clock(value: Any) -> time:
+    text = str(value or "00:00").strip()
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+    return time(0, 0)
+
+
+def scheduled_match_at(
+    tournament_row: Dict[str, Any],
+    tournament_data: Dict[str, Any],
+    match: Dict[str, Any],
+) -> datetime:
+    schedule = tournament_data.get("schedule")
+    config = schedule.get("config") if isinstance(schedule, dict) else {}
+    days = config.get("days") if isinstance(config, dict) else []
+    try:
+        day_index = max(0, int(match.get("dayIndex") or 0))
+    except (TypeError, ValueError):
+        day_index = 0
+    match_date: Optional[date] = None
+    if isinstance(days, list) and day_index < len(days) and isinstance(days[day_index], dict):
+        raw_day = days[day_index].get("date")
+        if raw_day:
+            try:
+                match_date = date.fromisoformat(str(raw_day)[:10])
+            except ValueError:
+                pass
+    if match_date is None:
+        match_date = _parse_event_date(tournament_row.get("event_date")) + timedelta(days=day_index)
+    clock = _parse_clock(match.get("originalTime") or match.get("startTime"))
+    return datetime.combine(match_date, clock, tzinfo=WARSAW).astimezone(timezone.utc)
+
+
+def first_team_matches(
+    tournament_row: Dict[str, Any],
+    tournament_data: Dict[str, Any],
+) -> Dict[int, Tuple[datetime, str]]:
+    result: Dict[int, Tuple[datetime, str]] = {}
+    for match in _schedule_matches(tournament_data):
+        when = scheduled_match_at(tournament_row, tournament_data, match)
+        for key in ("teamA", "teamB"):
+            parsed = _regular_team(match.get(key))
+            if not parsed:
+                continue
+            team_id, team_name = parsed
+            current = result.get(team_id)
+            if current is None or when < current[0]:
+                result[team_id] = (when, team_name)
+    return result
+
+
+async def _is_admin(user_id: int) -> bool:
+    return bool(
+        await database.fetch_one(
+            select(beach_admins.c.user_id).where(beach_admins.c.user_id == user_id)
+        )
+    )
+
+
+def _is_head_judge(data: Dict[str, Any], user_id: int) -> bool:
+    try:
+        return int(data.get("head_judge_id")) == int(user_id)
+    except (TypeError, ValueError):
+        return False
+
+
+async def _can_view_report(tournament: Dict[str, Any], user_id: int) -> bool:
+    if await _is_admin(user_id):
+        return True
+    data = _json(tournament.get("data_json"))
+    if _is_head_judge(data, user_id):
+        return True
+    for host in data.get("hosts") or []:
+        if not isinstance(host, dict):
+            continue
+        try:
+            if int(host.get("id")) == int(user_id):
+                return True
+        except (TypeError, ValueError):
+            pass
+    for judge in data.get("judges") or []:
+        if not isinstance(judge, dict) or judge.get("role") == "table":
+            continue
+        try:
+            if int(judge.get("user_id") or judge.get("id")) == int(user_id):
+                return True
+        except (TypeError, ValueError):
+            pass
+    user = await database.fetch_one(
+        select(beach_users.c.badges, beach_users.c.roles).where(
+            beach_users.c.id == user_id
+        )
+    )
+    invited_team_ids = {
+        int(value)
+        for value in data.get("invited_team_ids") or []
+        if isinstance(value, int) or str(value).isdigit()
+    }
+    roles = _json(user["roles"], []) if user else []
+    if isinstance(roles, list) and any(
+        isinstance(role, dict)
+        and role.get("type") == "coach"
+        and (
+            isinstance(role.get("team_id"), int)
+            or str(role.get("team_id")).isdigit()
+        )
+        and int(role.get("team_id")) in invited_team_ids
+        for role in roles
+    ):
+        return True
+    capabilities = await resolve_user_capabilities(user["badges"] if user else [])
+    return bool(
+        {"tournament.docs.use", "tournament.actAsHostEverywhere"}
+        & set(capabilities)
+    )
+
+
+async def enabled_categories_for_season(season_id: str) -> List[str]:
+    if str(season_id).startswith("unassigned:"):
+        return []
+    row = await database.fetch_one(
+        select(beach_mp_eligibility_settings.c.enabled_categories).where(
+            beach_mp_eligibility_settings.c.season_id == str(season_id)
+        )
+    )
+    if not row:
+        return (
+            list(DEFAULT_ENABLED_CATEGORIES)
+            if str(season_id) == DEFAULT_SEASON_ID
+            else []
+        )
+    values = _json(row["enabled_categories"], [])
+    return [value for value in values if value in VALID_CATEGORIES]
+
+
+async def _active_snapshot(tournament_id: int, team_id: int) -> Optional[Dict[str, Any]]:
+    row = await database.fetch_one(
+        select(beach_tournament_protocol_snapshots)
+        .where(
+            and_(
+                beach_tournament_protocol_snapshots.c.tournament_id == tournament_id,
+                beach_tournament_protocol_snapshots.c.team_id == team_id,
+                beach_tournament_protocol_snapshots.c.is_active.is_(True),
+            )
+        )
+        .order_by(beach_tournament_protocol_snapshots.c.revision.desc())
+    )
+    return dict(row) if row else None
+
+
+async def create_protocol_snapshot(
+    tournament_row: Dict[str, Any],
+    team_id: int,
+    *,
+    source: str,
+    reason: Optional[str] = None,
+    actor_user_id: Optional[int] = None,
+    force_revision: bool = False,
+    now: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    tournament_id = int(tournament_row["id"])
+    data = _json(tournament_row.get("data_json"))
+    first = first_team_matches(tournament_row, data).get(int(team_id))
+    if not first:
+        return None
+    first_match_at, scheduled_team_name = first
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    active = await _active_snapshot(tournament_id, int(team_id))
+    if active and not force_revision:
+        return active
+
+    squads = data.get("team_squads") if isinstance(data.get("team_squads"), dict) else {}
+    squad_entry = squads.get(str(team_id)) if isinstance(squads.get(str(team_id)), dict) else {}
+    player_ids = effective_protocol_ids(squad_entry)
+    team_row = await database.fetch_one(
+        select(
+            beach_teams.c.team_name,
+            beach_teams.c.gender,
+        ).where(beach_teams.c.id == int(team_id))
+    )
+    team_name = str(team_row["team_name"]) if team_row else scheduled_team_name
+    gender = str(team_row["gender"]) if team_row and team_row["gender"] else None
+    revision = (int(active["revision"]) + 1) if active else 1
+    actor_name = await get_actor_name(actor_user_id) if actor_user_id else None
+
+    async with database.transaction():
+        if active:
+            await database.execute(
+                update(beach_tournament_protocol_snapshots)
+                .where(beach_tournament_protocol_snapshots.c.id == int(active["id"]))
+                .values(is_active=False)
+            )
+        new_id = await database.execute(
+            insert(beach_tournament_protocol_snapshots).values(
+                tournament_id=tournament_id,
+                team_id=int(team_id),
+                season_id=tournament_season_id(tournament_row),
+                category=tournament_row.get("category"),
+                gender=gender,
+                team_name=team_name,
+                revision=revision,
+                first_match_at=first_match_at,
+                frozen_at=now_utc,
+                protocol_player_ids=player_ids,
+                source=source,
+                reason=reason,
+                frozen_by_id=actor_user_id,
+                frozen_by_name=actor_name,
+                supersedes_snapshot_id=int(active["id"]) if active else None,
+                is_active=True,
+            )
+        )
+    row = await database.fetch_one(
+        select(beach_tournament_protocol_snapshots).where(
+            beach_tournament_protocol_snapshots.c.id == int(new_id)
+        )
+    )
+    return dict(row) if row else None
+
+
+async def ensure_due_snapshot(
+    tournament_row: Dict[str, Any],
+    team_id: int,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    if str(tournament_row.get("competition_type") or "").upper() != "MP":
+        return None
+    if tournament_phase(tournament_row) != "elimination":
+        return None
+    data = _json(tournament_row.get("data_json"))
+    first = first_team_matches(tournament_row, data).get(int(team_id))
+    if not first:
+        return None
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if first[0] > now_utc:
+        return None
+    source = "legacy_reconstructed" if first[0] < _rollout_at() else "auto"
+    return await create_protocol_snapshot(
+        tournament_row,
+        int(team_id),
+        source=source,
+        reason=(
+            "Rekonstrukcja danych historycznych po wdrożeniu mechanizmu zamrażania"
+            if source == "legacy_reconstructed"
+            else None
+        ),
+        now=now_utc,
+    )
+
+
+async def assert_protocol_edit_allowed(
+    tournament_row: Dict[str, Any],
+    team_id: int,
+    current_user_id: int,
+) -> None:
+    """Freeze the old source before a post-cutoff edit and reject non-authorities."""
+    season_id = tournament_season_id(tournament_row)
+    if tournament_row.get("category") not in await enabled_categories_for_season(
+        season_id
+    ):
+        return
+    snapshot = await ensure_due_snapshot(tournament_row, team_id)
+    if not snapshot:
+        return
+    data = _json(tournament_row.get("data_json"))
+    if await _is_admin(current_user_id) or _is_head_judge(data, current_user_id):
+        return
+    raise HTTPException(
+        status_code=423,
+        detail={
+            "code": "MP_PROTOCOL_SNAPSHOT_LOCKED",
+            "message": (
+                "Lista „Do protokołu” została zamrożona z chwilą pierwszego meczu. "
+                "Może ją odświeżyć wyłącznie sędzia główny lub administrator."
+            ),
+            "snapshot_revision": snapshot.get("revision"),
+            "frozen_at": snapshot.get("frozen_at"),
+        },
+    )
+
+
+def _played_schedule_matches(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for match in _schedule_matches(data):
+        if str(match.get("status") or "").lower() != "finished":
+            continue
+        if _is_match_cancelled(match):
+            continue
+        if not (_regular_team(match.get("teamA")) and _regular_team(match.get("teamB"))):
+            continue
+        result.append(match)
+    return result
+
+
+def _proel_config(data_json: Any) -> Dict[str, Any]:
+    data = _json(data_json)
+    config = data.get("matchConfig")
+    return config if isinstance(config, dict) else {}
+
+
+def _proel_player_ids(config: Dict[str, Any], team_id: int) -> List[int]:
+    host_id = config.get("hostTeamId")
+    guest_id = config.get("guestTeamId")
+    try:
+        is_host = int(host_id) == int(team_id)
+    except (TypeError, ValueError):
+        is_host = False
+    try:
+        is_guest = int(guest_id) == int(team_id)
+    except (TypeError, ValueError):
+        is_guest = False
+    players = config.get("hostPlayers") if is_host else config.get("guestPlayers") if is_guest else []
+    return _numeric_ids(
+        [
+            player.get("player_id")
+            for player in players if isinstance(player, dict) and player.get("selected") is not False
+        ]
+    )
+
+
+def _match_team_ids(match: Dict[str, Any]) -> List[int]:
+    return [
+        parsed[0]
+        for parsed in (_regular_team(match.get("teamA")), _regular_team(match.get("teamB")))
+        if parsed
+    ]
+
+
+async def _source_evidence(
+    season_id: str,
+    category: str,
+) -> Tuple[Dict[str, Dict[int, Dict[str, Any]]], List[Dict[str, Any]]]:
+    rows = await database.fetch_all(
+        select(beach_tournaments).where(
+            and_(
+                func.upper(beach_tournaments.c.competition_type) == "MP",
+                beach_tournaments.c.category == category,
+            )
+        )
+    )
+    evidence_by_gender: Dict[str, Dict[int, Dict[str, Any]]] = {}
+    source_summaries: List[Dict[str, Any]] = []
+
+    for raw in rows:
+        tournament = dict(raw)
+        if tournament_season_id(tournament) != str(season_id):
+            continue
+        if tournament_phase(tournament) != "elimination":
+            continue
+        data = _json(tournament.get("data_json"))
+        played = _played_schedule_matches(data)
+        if not played:
+            continue
+        proel_rows = await database.fetch_all(
+            select(beach_proel_matches).where(
+                beach_proel_matches.c.tournament_id == int(tournament["id"])
+            )
+        )
+        proel_by_match: Dict[str, Dict[str, Any]] = {}
+        for raw_proel in proel_rows:
+            item = dict(raw_proel)
+            schedule_id = item.get("schedule_match_id")
+            if schedule_id:
+                proel_by_match[str(schedule_id)] = item
+
+        team_ids = sorted({team_id for match in played for team_id in _match_team_ids(match)})
+        team_rows = await database.fetch_all(
+            select(
+                beach_teams.c.id,
+                beach_teams.c.team_name,
+                beach_teams.c.gender,
+            ).where(beach_teams.c.id.in_(team_ids))
+        ) if team_ids else []
+        team_meta = {int(row["id"]): dict(row) for row in team_rows}
+
+        for team_id in team_ids:
+            team_matches = [m for m in played if team_id in _match_team_ids(m)]
+            completed = 0
+            proel_sources: List[Tuple[str, Dict[str, Any]]] = []
+            for match in team_matches:
+                match_id = str(match.get("id") or "")
+                proel = proel_by_match.get(match_id)
+                status = str(proel.get("status") if proel else "").lower()
+                if status not in ("approved", "finished"):
+                    continue
+                completed += 1
+                config = _proel_config(proel.get("data_json"))
+                for player_id in _proel_player_ids(config, team_id):
+                    proel_sources.append((status, {
+                        "tournament_id": int(tournament["id"]),
+                        "tournament_name": tournament.get("name"),
+                        "team_id": team_id,
+                        "team_name": team_meta.get(team_id, {}).get("team_name"),
+                        "match_id": match_id,
+                        "match_number": config.get("matchNumber") or match.get("matchNumber"),
+                        "source": "proel",
+                        "proel_status": status,
+                    }))
+                    gender = str(team_meta.get(team_id, {}).get("gender") or "")
+                    bucket = evidence_by_gender.setdefault(gender, {})
+                    candidate_status = "approved_proel" if status == "approved" else "finished_proel"
+                    _merge_evidence(bucket, player_id, candidate_status, proel_sources[-1][1])
+
+            coverage_complete = bool(team_matches) and completed == len(team_matches)
+            snapshot = None
+            if not coverage_complete:
+                snapshot = await _active_snapshot(int(tournament["id"]), team_id)
+                if snapshot:
+                    frozen_ids = _numeric_ids(_json(snapshot.get("protocol_player_ids"), []))
+                    frozen_status = (
+                        "frozen_confirmed"
+                        if len(frozen_ids) <= 10
+                        and snapshot.get("source") != "legacy_reconstructed"
+                        else "frozen_warning"
+                    )
+                    gender = str(snapshot.get("gender") or team_meta.get(team_id, {}).get("gender") or "")
+                    bucket = evidence_by_gender.setdefault(gender, {})
+                    for player_id in frozen_ids:
+                        _merge_evidence(bucket, player_id, frozen_status, {
+                            "tournament_id": int(tournament["id"]),
+                            "tournament_name": tournament.get("name"),
+                            "team_id": team_id,
+                            "team_name": snapshot.get("team_name") or team_meta.get(team_id, {}).get("team_name"),
+                            "source": "frozen_list",
+                            "snapshot_id": snapshot.get("id"),
+                            "snapshot_revision": snapshot.get("revision"),
+                            "snapshot_source": snapshot.get("source"),
+                            "frozen_at": snapshot.get("frozen_at"),
+                            "players_count": len(frozen_ids),
+                        })
+            source_summaries.append({
+                "tournament_id": int(tournament["id"]),
+                "tournament_name": tournament.get("name"),
+                "team_id": team_id,
+                "team_name": team_meta.get(team_id, {}).get("team_name"),
+                "played_matches": len(team_matches),
+                "completed_proel_matches": completed,
+                "proel_coverage_complete": coverage_complete,
+                "fallback_snapshot_used": bool(snapshot),
+            })
+    return evidence_by_gender, source_summaries
+
+
+def _merge_evidence(
+    bucket: Dict[int, Dict[str, Any]],
+    player_id: int,
+    status: str,
+    source: Dict[str, Any],
+) -> None:
+    current = bucket.get(player_id)
+    if current is None:
+        bucket[player_id] = {"status": status, "sources": [source]}
+        return
+    current["sources"].append(source)
+    if STATUS_PRIORITY[status] > STATUS_PRIORITY[current["status"]]:
+        current["status"] = status
+
+
+def _roster_players(raw: Any) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for player in _json(raw, []):
+        if not isinstance(player, dict):
+            continue
+        try:
+            player_id = int(player.get("player_id"))
+        except (TypeError, ValueError):
+            continue
+        result.append({
+            "player_id": player_id,
+            "first_name": player.get("first_name") or "",
+            "last_name": player.get("last_name") or "",
+            "jersey_number": player.get("jersey_number"),
+            "photo_url": player.get("photo_url"),
+        })
+    return result
+
+
+async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+    tournament = dict(row)
+    data = _json(tournament.get("data_json"))
+    season_id = tournament_season_id(tournament)
+    category = str(tournament.get("category") or "")
+    is_mp = str(tournament.get("competition_type") or "").upper() == "MP"
+    is_final = tournament_phase(tournament) == "final"
+    category_enabled = category in await enabled_categories_for_season(season_id)
+    enforcement_active = is_mp and is_final and category_enabled
+
+    evidence_by_gender, source_summaries = await _source_evidence(season_id, category)
+    target_ids: set[int] = set()
+    for raw_id in data.get("invited_team_ids") or []:
+        try:
+            target_ids.add(int(raw_id))
+        except (TypeError, ValueError):
+            pass
+    for match in _schedule_matches(data):
+        target_ids.update(_match_team_ids(match))
+    team_rows = await database.fetch_all(
+        select(
+            beach_teams.c.id,
+            beach_teams.c.team_name,
+            beach_teams.c.gender,
+            beach_teams.c.roster_json,
+        ).where(beach_teams.c.id.in_(sorted(target_ids)))
+    ) if target_ids else []
+
+    squads = data.get("team_squads") if isinstance(data.get("team_squads"), dict) else {}
+    teams: List[Dict[str, Any]] = []
+    counts = {key: 0 for key in STATUS_PRIORITY}
+    for raw_team in team_rows:
+        team = dict(raw_team)
+        team_id = int(team["id"])
+        gender = str(team.get("gender") or "")
+        entry = squads.get(str(team_id)) if isinstance(squads.get(str(team_id)), dict) else {}
+        selected_ids = set(effective_protocol_ids(entry))
+        if not selected_ids:
+            selected_ids.update(_numeric_ids(entry.get("default_players")))
+        players: List[Dict[str, Any]] = []
+        for player in _roster_players(team.get("roster_json")):
+            evidence = evidence_by_gender.get(gender, {}).get(player["player_id"])
+            status = (
+                evidence["status"]
+                if evidence
+                else "missing" if source_summaries else "insufficient"
+            )
+            counts[status] += 1
+            players.append({
+                **player,
+                "selected_for_protocol": player["player_id"] in selected_ids,
+                "status": status,
+                "eligible": status in (
+                    "approved_proel",
+                    "finished_proel",
+                    "frozen_confirmed",
+                    "frozen_warning",
+                ),
+                "requires_warning_acceptance": status == "frozen_warning",
+                "sources": evidence["sources"] if evidence else [],
+            })
+        teams.append({
+            "team_id": team_id,
+            "team_name": team.get("team_name"),
+            "gender": gender,
+            "players": players,
+        })
+    return {
+        "tournament_id": tournament_id,
+        "tournament_name": tournament.get("name"),
+        "season_id": season_id,
+        "category": category,
+        "is_mp": is_mp,
+        "is_final": is_final,
+        "category_enabled": category_enabled,
+        "enforcement_active": enforcement_active,
+        "preview_only": is_mp and category_enabled and not is_final,
+        "disclaimer": (
+            "Zamrożona lista „Do protokołu” jest dowodem administracyjnym, "
+            "a nie stuprocentowym potwierdzeniem fizycznego udziału w meczu."
+        ),
+        "counts": counts,
+        "teams": sorted(teams, key=lambda item: str(item.get("team_name") or "")),
+        "sources": source_summaries,
+    }
+
+
+async def validate_final_player_ids(
+    tournament_row: Dict[str, Any],
+    team_id: int,
+    player_ids: Sequence[int],
+    accepted_warning_ids: Sequence[int] = (),
+) -> None:
+    if str(tournament_row.get("competition_type") or "").upper() != "MP":
+        return
+    season_id = tournament_season_id(tournament_row)
+    if tournament_phase(tournament_row) != "final":
+        return
+    if tournament_row.get("category") not in await enabled_categories_for_season(season_id):
+        return
+    report = await build_tournament_report(int(tournament_row["id"]))
+    target_team = next(
+        (team for team in report["teams"] if int(team["team_id"]) == int(team_id)),
+        None,
+    )
+    by_id = {
+        int(player["player_id"]): player
+        for player in (target_team.get("players") if target_team else [])
+    }
+    missing: List[int] = []
+    warning: List[int] = []
+    accepted = set(_numeric_ids(list(accepted_warning_ids)))
+    for player_id in _numeric_ids(list(player_ids)):
+        player = by_id.get(player_id)
+        if not player or not player.get("eligible"):
+            missing.append(player_id)
+        elif player.get("requires_warning_acceptance") and player_id not in accepted:
+            warning.append(player_id)
+    if missing:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "MP_APPEARANCE_REQUIRED",
+                "message": "Zawodnik nie ma potwierdzonego występu w eliminacjach MP w tym sezonie.",
+                "player_ids": missing,
+            },
+        )
+    if warning:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "MP_APPEARANCE_WARNING_ACCEPTANCE_REQUIRED",
+                "message": (
+                    "Podstawa to lista „Do protokołu” licząca ponad 10 zawodników. "
+                    "Potwierdź ostrzeżenie, aby dodać zawodnika."
+                ),
+                "player_ids": warning,
+            },
+        )
+
+
+async def assert_no_unidentified_final_players(
+    tournament_row: Dict[str, Any],
+    extra_players: Sequence[Any],
+) -> None:
+    selected_extras = [
+        player
+        for player in extra_players
+        if not isinstance(player, dict) or player.get("selected") is not False
+    ]
+    if not selected_extras:
+        return
+    if str(tournament_row.get("competition_type") or "").upper() != "MP":
+        return
+    if tournament_phase(tournament_row) != "final":
+        return
+    season_id = tournament_season_id(tournament_row)
+    if tournament_row.get("category") not in await enabled_categories_for_season(season_id):
+        return
+    raise HTTPException(
+        409,
+        detail={
+            "code": "MP_IDENTIFIED_PLAYER_REQUIRED",
+            "message": (
+                "W finale MP z aktywną weryfikacją można dodać wyłącznie "
+                "zidentyfikowanego zawodnika z bazy ZPRP."
+            ),
+        },
+    )
+
+
+async def freeze_due_protocol_snapshots(now: Optional[datetime] = None) -> int:
+    rows = await database.fetch_all(
+        select(beach_tournaments).where(
+            func.upper(beach_tournaments.c.competition_type) == "MP"
+        )
+    )
+    frozen = 0
+    for raw in rows:
+        tournament = dict(raw)
+        if tournament_phase(tournament) != "elimination":
+            continue
+        data = _json(tournament.get("data_json"))
+        for team_id in first_team_matches(tournament, data):
+            before = await _active_snapshot(int(tournament["id"]), team_id)
+            after = await ensure_due_snapshot(tournament, team_id, now=now)
+            if after and not before:
+                frozen += 1
+    return frozen
+
+
+async def run_mp_snapshot_scheduler() -> None:
+    while True:
+        try:
+            count = await freeze_due_protocol_snapshots()
+            if count:
+                logger.info("MP protocol snapshots frozen: %d", count)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("MP protocol snapshot scheduler failed")
+        await asyncio.sleep(30)
+
+
+@router.get("/settings", response_model=dict)
+async def get_mp_settings(
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    del current_user_id
+    team_seasons = await database.fetch_all(
+        select(beach_teams.c.season_id, beach_teams.c.season)
+        .where(beach_teams.c.season_id.is_not(None))
+        .distinct()
+    )
+    tournament_seasons = await database.fetch_all(
+        select(beach_tournaments.c.season_id)
+        .where(beach_tournaments.c.season_id.is_not(None))
+        .distinct()
+    )
+    setting_rows = await database.fetch_all(select(beach_mp_eligibility_settings))
+    configured = {str(row["season_id"]): dict(row) for row in setting_rows}
+    seasons: Dict[str, Dict[str, Any]] = {
+        str(row["season_id"]): {
+            "season_id": str(row["season_id"]),
+            "label": row["season"] or str(row["season_id"]),
+        }
+        for row in team_seasons if row["season_id"] is not None
+    }
+    for row in tournament_seasons:
+        season_id = str(row["season_id"])
+        seasons.setdefault(season_id, {"season_id": season_id, "label": season_id})
+    seasons.setdefault(DEFAULT_SEASON_ID, {
+        "season_id": DEFAULT_SEASON_ID,
+        "label": DEFAULT_SEASON_ID,
+    })
+    return {
+        "categories": VALID_CATEGORIES,
+        "seasons": [
+            {
+                **meta,
+                "enabled_categories": (
+                    _json(configured[season_id]["enabled_categories"], [])
+                    if season_id in configured
+                    else (
+                        list(DEFAULT_ENABLED_CATEGORIES)
+                        if season_id == DEFAULT_SEASON_ID
+                        else []
+                    )
+                ),
+                "updated_at": configured.get(season_id, {}).get("updated_at"),
+            }
+            for season_id, meta in sorted(seasons.items(), reverse=True)
+        ],
+    }
+
+
+@router.put("/settings/{season_id}", response_model=dict)
+async def update_mp_settings(
+    season_id: str,
+    body: MpSettingsUpdate,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(403, "Tylko administrator może zmienić kryteria MP")
+    invalid = [value for value in body.enabled_categories if value not in VALID_CATEGORIES]
+    if invalid:
+        raise HTTPException(400, f"Nieprawidłowe kategorie: {', '.join(invalid)}")
+    categories = [value for value in VALID_CATEGORIES if value in set(body.enabled_categories)]
+    actor_name = await get_actor_name(current_user_id)
+    existing = await database.fetch_one(
+        select(beach_mp_eligibility_settings).where(
+            beach_mp_eligibility_settings.c.season_id == season_id
+        )
+    )
+    if existing:
+        await database.execute(
+            update(beach_mp_eligibility_settings)
+            .where(beach_mp_eligibility_settings.c.season_id == season_id)
+            .values(
+                enabled_categories=categories,
+                updated_by_id=current_user_id,
+                updated_by_name=actor_name,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+    else:
+        await database.execute(
+            insert(beach_mp_eligibility_settings).values(
+                season_id=season_id,
+                enabled_categories=categories,
+                updated_by_id=current_user_id,
+                updated_by_name=actor_name,
+            )
+        )
+    await log_activity(
+        area="tournament",
+        action="mp_appearances.settings_updated",
+        actor_user_id=current_user_id,
+        actor_name=actor_name,
+        target_id=season_id,
+        target_label=f"Sezon {season_id}",
+        details={"enabled_categories": categories},
+    )
+    return {"season_id": season_id, "enabled_categories": categories}
+
+
+@router.get("/tournaments/{tournament_id}/report", response_model=dict)
+async def get_tournament_report(
+    tournament_id: int,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+    if not await _can_view_report(dict(row), current_user_id):
+        raise HTTPException(403, "Brak dostępu do dokumentów tego turnieju")
+    return await build_tournament_report(tournament_id)
+
+
+@router.post(
+    "/tournaments/{tournament_id}/teams/{team_id}/snapshot/refresh",
+    response_model=dict,
+)
+async def refresh_protocol_snapshot(
+    tournament_id: int,
+    team_id: int,
+    body: SnapshotRefreshRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+    tournament = dict(row)
+    data = _json(tournament.get("data_json"))
+    can_refresh = await _is_admin(current_user_id) or _is_head_judge(
+        data, current_user_id
+    )
+    if not can_refresh and body.context_tournament_id:
+        context_row = await database.fetch_one(
+            select(beach_tournaments).where(
+                beach_tournaments.c.id == body.context_tournament_id
+            )
+        )
+        if context_row:
+            context = dict(context_row)
+            context_data = _json(context.get("data_json"))
+            can_refresh = (
+                _is_head_judge(context_data, current_user_id)
+                and str(context.get("competition_type") or "").upper() == "MP"
+                and tournament_phase(context) == "final"
+                and tournament_season_id(context)
+                == tournament_season_id(tournament)
+                and context.get("category") == tournament.get("category")
+            )
+    if not can_refresh:
+        raise HTTPException(
+            403,
+            "Zamrożoną listę może odświeżyć tylko administrator lub właściwy sędzia główny",
+        )
+    snapshot = await create_protocol_snapshot(
+        tournament,
+        team_id,
+        source="manual_refresh",
+        reason=body.reason.strip(),
+        actor_user_id=current_user_id,
+        force_revision=True,
+    )
+    if not snapshot:
+        raise HTTPException(400, "Drużyna nie ma zaplanowanego meczu w tym turnieju")
+    await log_activity(
+        area="tournament",
+        action="mp_appearances.snapshot_refreshed",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=str(tournament.get("name") or ""),
+        details={
+            "team_id": team_id,
+            "revision": snapshot.get("revision"),
+            "reason": body.reason.strip(),
+            "context_tournament_id": body.context_tournament_id,
+            "players": len(_json(snapshot.get("protocol_player_ids"), [])),
+        },
+    )
+    return {
+        "success": True,
+        "snapshot_id": snapshot.get("id"),
+        "revision": snapshot.get("revision"),
+        "frozen_at": snapshot.get("frozen_at"),
+    }

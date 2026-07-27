@@ -103,6 +103,11 @@ from app.beach.auth_email import router as beach_auth_email_router
 from app.beach.brevo_webhook import router as beach_brevo_webhook_router
 from app.beach.password_reset_email import router as beach_password_reset_email_router
 from app.beach.score import router as beach_score_router
+from app.beach.mp_appearances import (
+    freeze_due_protocol_snapshots,
+    router as beach_mp_appearances_router,
+    run_mp_snapshot_scheduler,
+)
 
 # NEW: push router + scheduler
 from app.push.push import router as push_router
@@ -225,6 +230,7 @@ app.include_router(beach_auth_email_router)
 app.include_router(beach_brevo_webhook_router)
 app.include_router(beach_password_reset_email_router)
 app.include_router(beach_score_router)
+app.include_router(beach_mp_appearances_router)
 
 # NEW: push router
 app.include_router(push_router)
@@ -600,6 +606,7 @@ _beach_sync_task: asyncio.Task | None = None
 _beach_medical_task: asyncio.Task | None = None
 _standings_sync_task: asyncio.Task | None = None
 _email_grace_task: asyncio.Task | None = None
+_mp_snapshot_task: asyncio.Task | None = None
 
 
 async def _email_grace_cleanup_loop():
@@ -859,6 +866,57 @@ async def startup():
         "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS match_prefix VARCHAR UNIQUE",
         "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS competition_type VARCHAR",
         "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS category VARCHAR",
+        "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS season_id VARCHAR",
+        "ALTER TABLE beach_tournaments ADD COLUMN IF NOT EXISTS mp_phase VARCHAR",
+        "CREATE INDEX IF NOT EXISTS ix_beach_tournaments_season_id ON beach_tournaments (season_id)",
+        "CREATE INDEX IF NOT EXISTS ix_beach_tournaments_mp_phase ON beach_tournaments (mp_phase)",
+        """UPDATE beach_tournaments
+           SET season_id = COALESCE(
+               NULLIF(data_json->>'season_id', ''),
+               CASE WHEN EXTRACT(YEAR FROM event_date) = 2026 THEN '8' END
+           )
+           WHERE season_id IS NULL""",
+        """UPDATE beach_tournaments
+           SET mp_phase = CASE
+               WHEN UPPER(COALESCE(competition_type, '')) <> 'MP' THEN NULL
+               WHEN LOWER(COALESCE(name, '')) LIKE '%finał%'
+                 OR LOWER(COALESCE(name, '')) LIKE '%final%' THEN 'final'
+               ELSE 'elimination'
+           END
+           WHERE mp_phase IS NULL""",
+        """CREATE TABLE IF NOT EXISTS beach_mp_eligibility_settings (
+               season_id VARCHAR PRIMARY KEY,
+               enabled_categories JSONB NOT NULL DEFAULT '["Senior"]'::jsonb,
+               updated_by_id INTEGER,
+               updated_by_name VARCHAR,
+               updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+           )""",
+        """CREATE TABLE IF NOT EXISTS beach_tournament_protocol_snapshots (
+               id SERIAL PRIMARY KEY,
+               tournament_id INTEGER NOT NULL,
+               team_id INTEGER NOT NULL,
+               season_id VARCHAR NOT NULL,
+               category VARCHAR,
+               gender VARCHAR,
+               team_name VARCHAR,
+               revision INTEGER NOT NULL,
+               first_match_at TIMESTAMPTZ NOT NULL,
+               frozen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+               protocol_player_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+               source VARCHAR NOT NULL DEFAULT 'auto',
+               reason TEXT,
+               frozen_by_id INTEGER,
+               frozen_by_name VARCHAR,
+               supersedes_snapshot_id INTEGER,
+               is_active BOOLEAN NOT NULL DEFAULT TRUE,
+               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+               CONSTRAINT uq_beach_protocol_snapshot_revision
+                   UNIQUE (tournament_id, team_id, revision)
+           )""",
+        """CREATE INDEX IF NOT EXISTS ix_beach_protocol_snapshot_active_team
+           ON beach_tournament_protocol_snapshots (tournament_id, team_id, is_active)""",
+        """CREATE INDEX IF NOT EXISTS ix_beach_protocol_snapshot_season
+           ON beach_tournament_protocol_snapshots (season_id)""",
         "ALTER TABLE beach_tutorials ADD COLUMN IF NOT EXISTS category VARCHAR NOT NULL DEFAULT 'general'",
     ]
     for stmt in _beach_tournament_migrations:
@@ -911,7 +969,7 @@ async def startup():
         logger.exception("❌ Walidacja konfiguracji e-mail nie powiodła się")
         raise
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -963,9 +1021,16 @@ async def startup():
     _email_grace_task = asyncio.create_task(_email_grace_cleanup_loop())
     logger.info("✅ Email grace cleanup scheduler started")
 
+    try:
+        await freeze_due_protocol_snapshots()
+    except Exception:
+        logger.exception("Initial MP protocol snapshot pass failed")
+    _mp_snapshot_task = asyncio.create_task(run_mp_snapshot_scheduler())
+    logger.info("✅ MP protocol snapshot scheduler started")
+
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task
 
     if _cleanup_task:
         _cleanup_task.cancel()
@@ -1006,6 +1071,13 @@ async def shutdown():
         _standings_sync_task.cancel()
         try:
             await _standings_sync_task
+        except asyncio.CancelledError:
+            pass
+
+    if _mp_snapshot_task:
+        _mp_snapshot_task.cancel()
+        try:
+            await _mp_snapshot_task
         except asyncio.CancelledError:
             pass
 

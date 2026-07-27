@@ -1422,6 +1422,8 @@ class CreateBeachTournamentRequest(BaseModel):
     location: Optional[str] = None               # NEW — city / venue
     category: Optional[str] = None               # NEW — Senior | Junior | ...
     competition_type: Optional[str] = None       # NEW — Woj / MP / INNE:custom
+    season_id: Optional[str] = None
+    mp_phase: Optional[Literal["elimination", "final"]] = None
     data_json: Optional[Any] = None
 
     @validator("end_date")
@@ -1451,6 +1453,8 @@ class UpdateBeachTournamentRequest(BaseModel):
     location: Optional[Optional[str]] = None        # NEW
     category: Optional[Optional[str]] = None        # NEW
     competition_type: Optional[Optional[str]] = None  # NEW
+    season_id: Optional[Optional[str]] = None
+    mp_phase: Optional[Optional[Literal["elimination", "final"]]] = None
     data_json: Optional[Any] = None
 
     @validator("category")
@@ -1476,6 +1480,8 @@ class BeachTournamentItem(BaseModel):
     location: Optional[str] = None                  # NEW
     category: Optional[str] = None                  # NEW
     competition_type: Optional[str] = None           # NEW
+    season_id: Optional[str] = None
+    mp_phase: Optional[Literal["elimination", "final"]] = None
     data_json: Any = Field(default_factory=dict)
     updated_at: datetime
 

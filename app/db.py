@@ -919,6 +919,10 @@ beach_tournaments = Table(
     Column("location",  String, nullable=True),
     Column("category",  String, nullable=True),
     Column("competition_type", String, nullable=True),
+    # Explicit MP season and phase.  Keeping these outside data_json makes the
+    # eligibility query deterministic and indexable.
+    Column("season_id", String, nullable=True, index=True),
+    Column("mp_phase", String, nullable=True, index=True),
 
     # jak u Ciebie: target/invited_ids/present_ids + dowolne dodatkowe pola
     Column("data_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
@@ -927,6 +931,55 @@ beach_tournaments = Table(
     Column("match_prefix", String, nullable=True, unique=True, index=True),
 
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+# Categories for which an MP final enforces an elimination appearance.  The
+# setting is intentionally versioned by season rather than being a global flag.
+beach_mp_eligibility_settings = Table(
+    "beach_mp_eligibility_settings",
+    metadata,
+    Column("season_id", String, primary_key=True),
+    Column(
+        "enabled_categories",
+        JSONB,
+        nullable=False,
+        server_default=text(r"""'["Senior"]'::jsonb"""),
+    ),
+    Column("updated_by_id", Integer, nullable=True),
+    Column("updated_by_name", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+# Immutable, revisioned copy of a team's "Do protokołu" list.  Exactly one
+# active revision exists per tournament/team; old revisions are kept for audit.
+beach_tournament_protocol_snapshots = Table(
+    "beach_tournament_protocol_snapshots",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("tournament_id", Integer, nullable=False, index=True),
+    Column("team_id", Integer, nullable=False, index=True),
+    Column("season_id", String, nullable=False, index=True),
+    Column("category", String, nullable=True, index=True),
+    Column("gender", String, nullable=True, index=True),
+    Column("team_name", String, nullable=True),
+    Column("revision", Integer, nullable=False),
+    Column("first_match_at", DateTime(timezone=True), nullable=False),
+    Column("frozen_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("protocol_player_ids", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("source", String, nullable=False, server_default=text("'auto'")),
+    Column("reason", Text, nullable=True),
+    Column("frozen_by_id", Integer, nullable=True),
+    Column("frozen_by_name", String, nullable=True),
+    Column("supersedes_snapshot_id", Integer, nullable=True),
+    Column("is_active", Boolean, nullable=False, server_default=text("true"), index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("tournament_id", "team_id", "revision", name="uq_beach_protocol_snapshot_revision"),
+)
+Index(
+    "ix_beach_protocol_snapshot_active_team",
+    beach_tournament_protocol_snapshots.c.tournament_id,
+    beach_tournament_protocol_snapshots.c.team_id,
+    beach_tournament_protocol_snapshots.c.is_active,
 )
 
 # -------------------------
