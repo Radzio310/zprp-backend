@@ -1068,10 +1068,13 @@ def _fill_regular_team_squad(
 
     # Zawodnicy spoza rosteru drużyny (import protokołu z Excela) — dopisywani
     # po zawodnikach z bazy, z surową nazwą i numerem z pliku.
+    # selected=False (odznaczony w aplikacji) → pomijany na kartce.
     extra_players = [
         e
         for e in (squad_entry.get("protocol_extra_players") or [])
-        if isinstance(e, dict) and str(e.get("name") or "").strip()
+        if isinstance(e, dict)
+        and str(e.get("name") or "").strip()
+        and e.get("selected", True)
     ]
 
     total_players = len(ordered_players) + len(extra_players)
@@ -1112,7 +1115,9 @@ def _fill_regular_team_squad(
     extra_comps = [
         e
         for e in (squad_entry.get("protocol_extra_companions") or [])
-        if isinstance(e, dict) and str(e.get("name") or "").strip()
+        if isinstance(e, dict)
+        and str(e.get("name") or "").strip()
+        and e.get("selected", True)
     ]
 
     total_comps = len(ordered_comps) + len(extra_comps)
