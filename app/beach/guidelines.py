@@ -28,6 +28,7 @@ from app.deps import beach_get_current_user_id
 from app.beach.notifications import create_notification
 from app.beach.activity_log import log_activity, get_actor_name
 from app.beach.capabilities import resolve_user_capabilities
+from app.beach.head_judges import is_head_judge
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/beach/guidelines", tags=["Beach: Guidelines"])
@@ -82,8 +83,7 @@ async def _is_head_judge_of_tournament(user_id: int, tournament_id: int) -> bool
     if not row:
         return False
     data = _parse_json(row["data_json"])
-    head_judge_id = data.get("head_judge_id")
-    return isinstance(head_judge_id, int) and head_judge_id == user_id
+    return is_head_judge(data, user_id)
 
 
 async def _get_user_name(user_id: int) -> str:

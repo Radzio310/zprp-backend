@@ -53,6 +53,8 @@ from openpyxl.styles.borders import Border, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 from sqlalchemy import select, update
+
+from app.beach.head_judges import default_head_judge_id
 from starlette.background import BackgroundTask
 
 from app.db import database, beach_teams, beach_tournaments, beach_users, beach_proel_matches
@@ -806,7 +808,12 @@ def _fill_protocol_sheet(
     _fill_referee(ws, "B65", "C65", referees.get("tableTimer"), user_cities)
 
     # ── Head judge / delegat ──
-    if head_judge_id and head_judge_id in user_cities:
+    # Per-match assignment wins. The tournament default is only a compatibility
+    # fallback for historical schedules created before the dedicated slot.
+    match_head_judge = referees.get("headJudge")
+    if match_head_judge:
+        _fill_referee(ws, "B67", "C67", match_head_judge, user_cities)
+    elif head_judge_id and head_judge_id in user_cities:
         name, city = user_cities[head_judge_id]
         _set_fitted_text(ws, "B67", _format_name_protocol(name))
         _set_fitted_text(ws, "C67", city)
@@ -1172,7 +1179,13 @@ def _collect_referee_ids(matches: List[Dict[str, Any]], head_judge_id: Optional[
     ids = set()
     for m in matches:
         refs = m.get("referees") or {}
-        for slot in ("fieldA", "fieldB", "tableSecretary", "tableTimer"):
+        for slot in (
+            "fieldA",
+            "fieldB",
+            "tableSecretary",
+            "tableTimer",
+            "headJudge",
+        ):
             ref = refs.get(slot)
             if ref and ref.get("id"):
                 ids.add(int(ref["id"]))
@@ -2385,7 +2398,7 @@ async def generate_bulk_protocols(
 
     team_squads = data_json.get("team_squads") or {}
     custom_teams = data_json.get("custom_teams") or []
-    head_judge_id = data_json.get("head_judge_id")
+    head_judge_id = default_head_judge_id(data_json)
 
     # Disqualifications + full schedule (for computing per-match suspensions).
     disqualifications = data_json.get("disqualifications") or []
@@ -2528,7 +2541,7 @@ async def generate_single_protocol(
 
     team_squads = data_json.get("team_squads") or {}
     custom_teams = data_json.get("custom_teams") or []
-    head_judge_id = data_json.get("head_judge_id")
+    head_judge_id = default_head_judge_id(data_json)
 
     # Disqualifications + full schedule (for computing per-match suspensions).
     disqualifications = data_json.get("disqualifications") or []
@@ -2636,7 +2649,7 @@ async def generate_filled_single(
     days: List[Dict[str, Any]] = config.get("days") or []
     team_squads = tournament_data.get("team_squads") or {}
     custom_teams = tournament_data.get("custom_teams") or []
-    head_judge_id = tournament_data.get("head_judge_id")
+    head_judge_id = default_head_judge_id(tournament_data)
     tournament_name = tournament_data.get("name") or ""
     # venue_address is not stored in tournament data_json; use the address
     # saved in matchConfig.extras.venueAddress at the time the match was created
@@ -2765,7 +2778,7 @@ async def generate_filled_bulk(
     days: List[Dict[str, Any]] = config.get("days") or []
     team_squads = tournament_data.get("team_squads") or {}
     custom_teams = tournament_data.get("custom_teams") or []
-    head_judge_id = tournament_data.get("head_judge_id")
+    head_judge_id = default_head_judge_id(tournament_data)
     tournament_name = req.tournament_name or tournament_data.get("name") or ""
     # venue_address is not stored in tournament data_json; fall back to any
     # match's matchConfig.extras.venueAddress

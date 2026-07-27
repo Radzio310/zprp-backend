@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from app.beach.activity_log import get_actor_name, log_activity
+from app.beach.head_judges import is_head_judge
 from app.db import (
     beach_admins,
     beach_app_settings,
@@ -585,11 +586,9 @@ def _user_roles(user: Dict[str, Any], data: Dict[str, Any]) -> Tuple[List[str], 
     judges = _list(data.get("judges"))
     invited_ids = {_as_int(x) for x in _list(data.get("invited_team_ids"))}
     invited_ids.discard(None)
-    head_judge_id = _as_int(data.get("head_judge_id"))
-
     if user_id in _ids(hosts):
         result.append("host")
-    if user_id == head_judge_id:
+    if is_head_judge(data, user_id):
         result.append("head_judge")
     judge = next(
         (

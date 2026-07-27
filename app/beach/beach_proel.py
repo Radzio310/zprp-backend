@@ -15,6 +15,7 @@ from app.schemas import (
 )
 from datetime import datetime
 from app.beach.activity_log import get_actor_name, log_activity
+from app.beach.head_judges import head_judge_ids, is_head_judge
 from app.deps import beach_get_current_user_id
 
 router = APIRouter(
@@ -83,10 +84,7 @@ async def _can_manage_match(tournament_id: Optional[int], user_id: int) -> bool:
             allowed_ids.add(int(raw_id))
         except (TypeError, ValueError):
             pass
-    try:
-        allowed_ids.add(int(data.get("head_judge_id")))
-    except (TypeError, ValueError):
-        pass
+    allowed_ids.update(head_judge_ids(data))
     return int(user_id) in allowed_ids
 
 
@@ -95,6 +93,13 @@ async def _can_approve(tournament_id: Optional[int], user_id: int) -> bool:
         return True
     if tournament_id is None:
         return False
+    row = await database.fetch_one(
+        select(beach_tournaments.c.data_json).where(
+            beach_tournaments.c.id == tournament_id
+        )
+    )
+    data = row["data_json"] if row and isinstance(row["data_json"], dict) else {}
+    return is_head_judge(data, user_id)
 
 
 def _selected_team_players(config: dict, side: str) -> tuple[Optional[int], list[int], list[dict]]:
@@ -203,18 +208,6 @@ async def _validate_mp_lineup(
                 tournament,
                 added_unidentified,
             )
-    row = await database.fetch_one(
-        select(beach_tournaments.c.data_json).where(
-            beach_tournaments.c.id == tournament_id
-        )
-    )
-    data = row["data_json"] if row and isinstance(row["data_json"], dict) else {}
-    try:
-        return int(data.get("head_judge_id")) == int(user_id)
-    except (TypeError, ValueError):
-        return False
-
-
 @router.post(
     "/",
     response_model=dict,

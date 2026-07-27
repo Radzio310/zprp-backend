@@ -179,6 +179,7 @@ async def send_disq_alert(
     Any authenticated beach user (typically the field judge) may call this.
     """
     from app.db import beach_tournaments  # local import avoids circular dep
+    from app.beach.head_judges import head_judge_ids
 
     if not req.player_names:
         return {"ok": True, "sent_to": 0}
@@ -187,21 +188,16 @@ async def send_disq_alert(
     tour_row = await database.fetch_one(
         select(beach_tournaments.c.data_json).where(beach_tournaments.c.id == req.tournament_id)
     )
-    head_judge_id: Optional[int] = None
+    tournament_head_judge_ids: List[int] = []
     if tour_row:
         dj = tour_row["data_json"] or {}
-        hj = dj.get("head_judge_id")
-        if hj is not None:
-            try:
-                head_judge_id = int(hj)
-            except (TypeError, ValueError):
-                pass
+        tournament_head_judge_ids = head_judge_ids(dj)
 
     # Collect admin user IDs
     admin_rows = await database.fetch_all(select(beach_admins.c.user_id))
     admin_ids = [int(r["user_id"]) for r in admin_rows]
 
-    target_ids = list({*admin_ids, *([head_judge_id] if head_judge_id else [])})
+    target_ids = list({*admin_ids, *tournament_head_judge_ids})
     if not target_ids:
         return {"ok": True, "sent_to": 0}
 

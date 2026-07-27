@@ -31,6 +31,7 @@ from sqlalchemy import select
 from starlette.background import BackgroundTask
 
 from app.db import database, beach_tournaments, beach_users
+from app.beach.head_judges import head_judge_ids
 
 logger = logging.getLogger(__name__)
 
@@ -826,9 +827,7 @@ async def _get_judge_host_emails(
             for j in (data_json.get("judges") or [])
             if isinstance(j, dict) and j.get("id") is not None
         }
-        head_judge_id = data_json.get("head_judge_id")
-        if isinstance(head_judge_id, int):
-            judge_ids.add(head_judge_id)
+        judge_ids.update(head_judge_ids(data_json))
 
         all_ids = host_ids | judge_ids
         if exclude_user_id is not None:

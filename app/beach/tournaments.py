@@ -4,6 +4,7 @@ import asyncio
 import copy
 from datetime import datetime, timezone
 import base64
+import difflib
 import json
 import logging
 import os
@@ -38,6 +39,14 @@ from app.beach.app_settings import get_role_caps
 from app.beach.capabilities import resolve_user_capabilities
 from app.beach.schedule_notifications import notify_schedule_updated
 from app.beach.activity_log import log_activity, get_actor_name, compute_diff, compute_list_diff
+from app.beach.head_judges import (
+    MAX_HEAD_JUDGES,
+    apply_default_head_judge_to_schedule,
+    head_judge_ids,
+    is_head_judge,
+    sync_legacy_head_judge_fields,
+    validate_schedule_head_judges,
+)
 from app.beach.announcement_audience import (
     announcement_audiences as _announcement_audiences,
     announcement_is_visible as _announcement_is_visible,
@@ -67,6 +76,8 @@ class JudgeUpdateRequest(BaseModel):
     """Dozwolone pola dla Obsadowego."""
     judges: Optional[list] = None
     head_judge_id: Optional[int] = None
+    head_judge_ids: Optional[List[int]] = None
+    default_head_judge_id: Optional[int] = None
     required_judges: Optional[int] = None
     required_head_judges: Optional[int] = None
     judge_colors: Optional[dict] = None
@@ -446,9 +457,7 @@ async def _announcement_notification_target_ids(
         for judge in (data.get("judges") or [])
         if isinstance(judge, dict) and isinstance(judge.get("id"), int)
     }
-    head_judge_id = data.get("head_judge_id")
-    if isinstance(head_judge_id, int):
-        judge_ids.add(head_judge_id)
+    judge_ids.update(head_judge_ids(data))
     invited_team_ids = {
         int(team_id)
         for team_id in (data.get("invited_team_ids") or [])
@@ -589,11 +598,7 @@ def _calendar_involved_user_ids(data: Dict[str, Any]) -> List[int]:
                 ids.add(int(value))
             except Exception:
                 pass
-    try:
-        if data.get("head_judge_id") is not None:
-            ids.add(int(data.get("head_judge_id")))
-    except Exception:
-        pass
+    ids.update(head_judge_ids(data))
     return sorted(ids)
 
 
@@ -650,14 +655,12 @@ async def _can_manage_tournament_schedule(
         for j in (data.get("judges") or [])
         if isinstance(j, dict) and isinstance(j.get("id"), int)
     }
-    head_judge_id = data.get("head_judge_id")
-
     # Obsadowy / uprawnienie "gospodarz wszędzie" — zarządza każdym turniejem.
     if "tournament.actAsHostEverywhere" in caps:
         return True
     if "tournament.schedule.edit" in caps and current_user_id in host_ids:
         return True
-    if isinstance(head_judge_id, int) and head_judge_id == current_user_id:
+    if is_head_judge(data, current_user_id):
         return True
     if current_user_id in judge_ids:
         return True
@@ -1119,12 +1122,7 @@ async def patch_tournament(
     # ikony edycji decyduje front — np. tylko gdy brak gospodarza zawodów).
     if not await _is_admin(current_user_id):
         _perm_data = _normalize_event_data(existing_d["data_json"])
-        _hj = _perm_data.get("head_judge_id")
-        try:
-            _is_head_judge = _hj is not None and int(_hj) == current_user_id
-        except (ValueError, TypeError):
-            _is_head_judge = False
-        if not _is_head_judge:
+        if not is_head_judge(_perm_data, current_user_id):
             raise HTTPException(403, "Brak uprawnień")
     old_event_data = _normalize_event_data(existing_d["data_json"])
     if not old_event_data.get("invited_ids"):
@@ -1353,11 +1351,10 @@ async def host_update_tournament(
                 # lub cap "tournament.announcements.edit": z badge'a albo
                 # z role-caps sędziego tego turnieju). Edycja drużyn pozostaje
                 # dla gospodarza/admina (front: canEditTournamentBasics).
-                head_judge_id = data.get("head_judge_id")
-                is_head_judge = (
-                    isinstance(head_judge_id, int) and head_judge_id == current_user_id
+                can_edit_ann = (
+                    is_head_judge(data, current_user_id)
+                    or "tournament.announcements.edit" in caps
                 )
-                can_edit_ann = is_head_judge or "tournament.announcements.edit" in caps
                 if not can_edit_ann:
                     judge_ids = {
                         int(j["id"])
@@ -1475,11 +1472,8 @@ async def coach_custom_team_update(
     # Sędzia główny turnieju ma w „Mój zespół" te same akcje co admin
     # (parytet z squad_update_tournament) — może zarządzać składem KAŻDEJ drużyny
     # customowej, nie tylko własnej.
-    _head_judge_id = data.get("head_judge_id")
-    is_head_judge = (
-        isinstance(_head_judge_id, int) and _head_judge_id == current_user_id
-    )
-    is_privileged = user_is_admin or is_head_judge
+    is_head_judge_flag = is_head_judge(data, current_user_id)
+    is_privileged = user_is_admin or is_head_judge_flag
 
     # Find the custom team and verify coach ownership (or admin / head judge)
     custom_teams = data.get("custom_teams") or []
@@ -1610,10 +1604,71 @@ async def judge_update_tournament(
     if body.judges is not None:
         data["judges"] = body.judges
 
-    # head_judge_id: obsługa explicit None (reset) vs. brak w body
+    # Pełna lista głównych (maks. 5) z kompatybilnością dla starego,
+    # pojedynczego head_judge_id.
     fields_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set())
-    if "head_judge_id" in fields_set:
-        data["head_judge_id"] = body.head_judge_id  # może być None = reset
+    ids_were_provided = "head_judge_ids" in fields_set
+    default_was_provided = "default_head_judge_id" in fields_set
+    legacy_was_provided = "head_judge_id" in fields_set
+    if ids_were_provided and len(body.head_judge_ids or []) > MAX_HEAD_JUDGES:
+        raise HTTPException(
+            422,
+            f"Turniej może mieć maksymalnie {MAX_HEAD_JUDGES} sędziów głównych",
+        )
+    if ids_were_provided:
+        requested_ids = body.head_judge_ids or []
+    elif legacy_was_provided:
+        requested_ids = (
+            [body.head_judge_id] if body.head_judge_id is not None else []
+        )
+    else:
+        requested_ids = None
+    requested_default = (
+        body.default_head_judge_id
+        if default_was_provided
+        else body.head_judge_id if legacy_was_provided else None
+    )
+    normalized_head_ids, normalized_default_id = sync_legacy_head_judge_fields(
+        data,
+        ids=requested_ids,
+        default_id=requested_default,
+        default_was_provided=default_was_provided or legacy_was_provided,
+    )
+    judge_ids_in_tournament = {
+        int(j.get("id") or j.get("user_id"))
+        for j in (data.get("judges") or [])
+        if isinstance(j, dict) and (j.get("id") or j.get("user_id"))
+    }
+    if any(head_id not in judge_ids_in_tournament for head_id in normalized_head_ids):
+        raise HTTPException(
+            422,
+            "Każdy sędzia główny musi najpierw znajdować się na liście sędziów turnieju",
+        )
+    if normalized_default_id is not None and normalized_default_id not in normalized_head_ids:
+        raise HTTPException(
+            422,
+            "Domyślny sędzia główny musi być sędzią głównym turnieju",
+        )
+
+    proel_rows = await database.fetch_all(
+        select(
+            beach_proel_matches.c.schedule_match_id,
+            beach_proel_matches.c.match_number,
+        ).where(beach_proel_matches.c.tournament_id == tournament_id)
+    )
+    protected_match_keys = {
+        str(value)
+        for row in proel_rows
+        for value in (row["schedule_match_id"], row["match_number"])
+        if value
+    }
+    try:
+        default_stats = apply_default_head_judge_to_schedule(
+            data,
+            protected_match_keys=protected_match_keys,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     if body.required_judges is not None:
         data["required_judges"] = body.required_judges
@@ -1687,12 +1742,15 @@ async def judge_update_tournament(
                 for field in (
                     "judges",
                     "head_judge_id",
+                    "head_judge_ids",
+                    "default_head_judge_id",
                     "required_judges",
                     "required_head_judges",
                     "judge_colors",
                 )
                 if old_judge_data.get(field) != data.get(field)
             },
+            "default_assignment": default_stats,
         },
     )
 
@@ -2103,8 +2161,78 @@ async def schedule_update_tournament(
 
         # Serwer stempluje czas zapisu — klient nie ustawia saved_at samodzielnie
         new_schedule = dict(body.schedule)
+        proel_rows = await database.fetch_all(
+            select(
+                beach_proel_matches.c.schedule_match_id,
+                beach_proel_matches.c.match_number,
+            ).where(beach_proel_matches.c.tournament_id == tournament_id)
+        )
+        protected_match_keys = {
+            str(value)
+            for row in proel_rows
+            for value in (row["schedule_match_id"], row["match_number"])
+            if value
+        }
+        if protected_match_keys and isinstance(existing_schedule, dict):
+            old_matches = {
+                str(key): match
+                for match in existing_schedule.get("matches") or []
+                if isinstance(match, dict)
+                for key in (match.get("id"), match.get("matchNumber"))
+                if key
+            }
+            for match in new_schedule.get("matches") or []:
+                if not isinstance(match, dict):
+                    continue
+                keys = {
+                    str(value)
+                    for value in (match.get("id"), match.get("matchNumber"))
+                    if value
+                }
+                if not (keys & protected_match_keys):
+                    continue
+                old_match = next(
+                    (old_matches.get(key) for key in keys if old_matches.get(key)),
+                    None,
+                )
+                if not isinstance(old_match, dict):
+                    continue
+                old_refs = (
+                    old_match.get("referees")
+                    if isinstance(old_match.get("referees"), dict)
+                    else {}
+                )
+                new_refs = (
+                    dict(match.get("referees"))
+                    if isinstance(match.get("referees"), dict)
+                    else {}
+                )
+                if old_refs.get("headJudge") is not None:
+                    new_refs["headJudge"] = old_refs["headJudge"]
+                else:
+                    new_refs.pop("headJudge", None)
+                if old_refs.get("headJudgeSource") is not None:
+                    new_refs["headJudgeSource"] = old_refs["headJudgeSource"]
+                else:
+                    new_refs.pop("headJudgeSource", None)
+                match["referees"] = new_refs
         new_schedule["saved_at"] = datetime.now(timezone.utc).isoformat()
         data["schedule"] = new_schedule
+        # New matches inherit the tournament default. Existing manual
+        # assignments and live/finished matches are never touched.
+        apply_default_head_judge_to_schedule(
+            data,
+            update_existing_auto=False,
+            protected_match_keys=protected_match_keys,
+        )
+        try:
+            validate_schedule_head_judges(
+                data,
+                data["schedule"],
+                protected_match_keys=protected_match_keys,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     else:
         # Explicit null → delete schedule
         data.pop("schedule", None)
@@ -2264,8 +2392,7 @@ async def settlements_update_tournament(
         raise HTTPException(422, "settlements musi byc obiektem")
 
     is_admin_flag = await _is_admin(current_user_id)
-    head_judge_id = data.get("head_judge_id")
-    is_head_judge = isinstance(head_judge_id, int) and head_judge_id == current_user_id
+    is_head_judge_flag = is_head_judge(data, current_user_id)
     judge_ids = {
         int(j.get("id"))
         for j in (data.get("judges") or [])
@@ -2273,11 +2400,11 @@ async def settlements_update_tournament(
     }
     is_assigned_judge = current_user_id in judge_ids
 
-    if not (is_admin_flag or is_head_judge or is_assigned_judge):
+    if not (is_admin_flag or is_head_judge_flag or is_assigned_judge):
         raise HTTPException(403, "Brak uprawnien do zapisu rozliczen")
 
     current_store = data.get("settlements") if isinstance(data.get("settlements"), dict) else {}
-    if is_admin_flag or is_head_judge:
+    if is_admin_flag or is_head_judge_flag:
         data["settlements"] = incoming
     else:
         target_id = body.judge_id or current_user_id
@@ -2400,8 +2527,7 @@ async def disq_update_tournament(
     data = _parse_json(existing_d["data_json"])
 
     is_admin_flag = await _is_admin(current_user_id)
-    head_judge_id = data.get("head_judge_id")
-    is_head_judge = isinstance(head_judge_id, int) and head_judge_id == current_user_id
+    is_head_judge_flag = is_head_judge(data, current_user_id)
     judge_ids = {
         int(j.get("id"))
         for j in (data.get("judges") or [])
@@ -2409,7 +2535,7 @@ async def disq_update_tournament(
     }
     is_assigned_judge = current_user_id in judge_ids
 
-    if not (is_admin_flag or is_head_judge or is_assigned_judge):
+    if not (is_admin_flag or is_head_judge_flag or is_assigned_judge):
         raise HTTPException(403, "Brak uprawnień do zapisu decyzji dyskwalifikacyjnych")
 
     # Znajdź nowo zdecydowane wpisy (compared to old list)
@@ -2907,6 +3033,152 @@ def _fuzzy_match_score(a: str, b: str) -> float:
     return len(intersection) / len(union)
 
 
+# Prefiksy typu klubu — pomijane przy porównaniu „rdzenia" nazwy (miasto/nazwa własna),
+# bo ten sam zespół bywa zapisany z różnym prefiksem (np. „MKS Sambor" vs „BHT Sambor").
+_CLUB_PREFIX_TOKENS = {
+    "mks", "uks", "ks", "ku", "bht", "spr", "sprp", "kks", "kpr", "lks", "gks",
+    "tks", "muks", "azs", "ots", "ts", "sl", "klub", "sportowy", "uczniowski",
+    "ludowy", "stowarzyszenie", "towarzystwo",
+}
+
+
+def _core_team_name(name: str) -> str:
+    """Nazwa bez prefiksów typu klubu — zostawia tokeny rozróżniające (miasto/nazwa)."""
+    norm = _normalize_team_name(name)
+    tokens = [t for t in norm.split() if t not in _CLUB_PREFIX_TOKENS]
+    return " ".join(tokens) if tokens else norm
+
+
+def _team_similarity(a: str, b: str) -> float:
+    """
+    Podobieństwo nazw drużyn odporne na różne prefiksy klubu i literówki (0..1).
+    Łączy Jaccard po tokenach pełnej nazwy, Jaccard po „rdzeniu" (bez prefiksów)
+    oraz sekwencyjne ratio (łapie literówki).
+    """
+    na, nb = _normalize_team_name(a), _normalize_team_name(b)
+    if not na or not nb:
+        return 0.0
+    ca, cb = _core_team_name(a), _core_team_name(b)
+    jac_full = _fuzzy_match_score(na, nb)
+    jac_core = _fuzzy_match_score(ca, cb)
+    seq_core = difflib.SequenceMatcher(None, ca or na, cb or nb).ratio()
+    return max(jac_full, 0.6 * jac_core + 0.4 * seq_core)
+
+
+def _reconcile_teams_with_invited(
+    schedule: dict, invited_teams: List[dict]
+) -> Dict[str, Any]:
+    """
+    Deterministyczne, wzajemnie jednoznaczne (1:1) dopasowanie drużyn z MECZÓW do
+    zaproszonych — po podobieństwie nazwy, w obrębie tej samej płci. Nadpisuje
+    id/nazwy w meczach, naprawiając typowe błędy AI:
+      • inny prefiks klubu („MKS Sambor Tczew” → „BHT Sambor Tczew”),
+      • literówki,
+      • skolidowanie dwóch różnych drużyn w jedno id (bijekcja tego zakazuje).
+    Zwraca {"assigned": set(id), "unmatched": [nazwa], "fixes": [opis]}.
+    """
+    MATCH_THRESHOLD = 0.34
+    matches = schedule.get("matches") or []
+
+    # Unikalne referencje drużyn z meczów: klucz „gender::znormalizowana nazwa".
+    refs: Dict[str, Dict[str, Any]] = {}
+    for m in matches:
+        gender = m.get("gender")
+        for slot in ("teamA", "teamB"):
+            team = m.get(slot)
+            if isinstance(team, dict) and str(team.get("name") or "").strip():
+                name = str(team["name"]).strip()
+                g = team.get("gender") or gender
+                key = f"{g}::{_normalize_team_name(name)}"
+                refs.setdefault(key, {"gender": g, "name": name})
+
+    invited_by_gender: Dict[Any, List[dict]] = {}
+    for t in invited_teams:
+        invited_by_gender.setdefault(t.get("gender"), []).append(t)
+
+    resolve: Dict[str, dict] = {}
+    unmatched: List[str] = []
+
+    for gender in ("M", "K"):
+        gender_refs = [(k, v) for k, v in refs.items() if v["gender"] == gender]
+        pool = list(invited_by_gender.get(gender, []))
+        # Wszystkie pary (score, ref_key, invited) powyżej progu, potem zachłannie 1:1.
+        pairs = []
+        for k, v in gender_refs:
+            for t in pool:
+                s = _team_similarity(v["name"], t["team_name"])
+                if s >= MATCH_THRESHOLD:
+                    pairs.append((s, k, t))
+        pairs.sort(key=lambda p: p[0], reverse=True)
+        used_refs: set = set()
+        used_ids: set = set()
+        for s, k, t in pairs:
+            if k in used_refs or t["id"] in used_ids:
+                continue
+            resolve[k] = t
+            used_refs.add(k)
+            used_ids.add(t["id"])
+        for k, v in gender_refs:
+            if k not in resolve:
+                unmatched.append(v["name"])
+
+    fixes: List[str] = []
+    for m in matches:
+        gender = m.get("gender")
+        for slot in ("teamA", "teamB"):
+            team = m.get(slot)
+            if not (isinstance(team, dict) and str(team.get("name") or "").strip()):
+                continue
+            g = team.get("gender") or gender
+            key = f"{g}::{_normalize_team_name(str(team['name']).strip())}"
+            match = resolve.get(key)
+            if match:
+                if team.get("id") != match["id"]:
+                    fixes.append(f'Dopasowano „{team.get("name")}” → „{match["team_name"]}”')
+                m[slot] = {"id": match["id"], "name": match["team_name"], "gender": g}
+            else:
+                fixes.append(f'Nie dopasowano drużyny „{team.get("name")}” — pominięto w meczu')
+                m[slot] = None
+
+    return {
+        "assigned": {t["id"] for t in resolve.values()},
+        "unmatched": list(dict.fromkeys(unmatched)),
+        "fixes": list(dict.fromkeys(fixes)),
+    }
+
+
+def _rebuild_groups_from_matches(schedule: dict) -> None:
+    """
+    Odbuduj `config.groups` z FAKTYCZNYCH meczów grupowych, żeby podział na grupy
+    zawsze zgadzał się ze składem meczów (koniec z „drużyna gra, ale nie ma jej w grupie”).
+    Nadpisuje tylko te płcie, które mają mecze grupowe.
+    """
+    matches = schedule.get("matches") or []
+    config = schedule.get("config") or {}
+    rebuilt: Dict[str, Dict[str, List[int]]] = {"M": {}, "K": {}}
+    for m in matches:
+        if m.get("stage") != "group":
+            continue
+        gender = m.get("gender")
+        group = m.get("group")
+        if gender not in ("M", "K") or not group:
+            continue
+        for slot in ("teamA", "teamB"):
+            team = m.get(slot)
+            if isinstance(team, dict) and team.get("id"):
+                lst = rebuilt[gender].setdefault(str(group), [])
+                if team["id"] not in lst:
+                    lst.append(team["id"])
+
+    groups_cfg = config.get("groups") or {}
+    for gender in ("M", "K"):
+        if rebuilt[gender]:
+            teams_sorted = {g: rebuilt[gender][g] for g in sorted(rebuilt[gender].keys())}
+            groups_cfg[gender] = {"count": len(teams_sorted), "teams": teams_sorted}
+    config["groups"] = groups_cfg
+    schedule["config"] = config
+
+
 @router.post(
     "/{tournament_id}/ai-schedule-import",
     response_model=dict,
@@ -3050,8 +3322,13 @@ NIGDY dla meczów prowadzących do meczów o konkretne niższe miejsce.
 
 DOPASOWYWANIE DRUŻYN:
 11. Używaj WYŁĄCZNIE drużyn z poniższej listy zaproszonych do turnieju. NIE szukaj drużyn spoza tej listy.
-12. Dopasuj nazwy z dokumentu do nazw z listy — mogą się lekko różnić (skróty, literki itp.).
-13. Jeśli drużyna z dokumentu nie pasuje do żadnej z zaproszonych — dodaj ją do "unmatched_teams" i NIE używaj w meczach.
+12. Dopasuj nazwy z dokumentu do nazw z listy — mogą się RÓŻNIĆ prefiksem klubu (np. „MKS Sambor Tczew” w dokumencie \
+= „BHT Sambor Tczew” z listy), skrótem lub literówką. Dopasowuj po CZĘŚCI ROZRÓŻNIAJĄCEJ nazwy (miasto / nazwa własna, \
+np. „Sambor Tczew”, „Uniwersytet Warszawski”), a nie po prefiksie typu klubu (MKS/BHT/KS/KU/AZS/SPR/KKS/UKS…). \
+Dopasowanie jest WZAJEMNIE JEDNOZNACZNE: to samo ID może odpowiadać dokładnie JEDNEJ drużynie z dokumentu — NIGDY nie \
+przypisuj jednego ID do dwóch różnych drużyn (np. „KU AZS Uniwersytet Warszawski” i „KS AZS AWF Warszawa” to DWA różne \
+zespoły z różnymi ID). Gdy liczba drużyn się zgadza, dopasuj metodą eliminacji tak, aby każda zaproszona została użyta raz.
+13. Jeśli drużyna z dokumentu naprawdę nie pasuje do żadnej z zaproszonych — dodaj ją do "unmatched_teams" i NIE używaj w meczach.
 14. Każda drużyna może być TYLKO W JEDNEJ grupie. NIE przypisuj tej samej drużyny do wielu grup.
 
 TECHNICZNE:
@@ -3227,14 +3504,28 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
         for m in schedule.get("matches", []):
             m["group"] = None
 
-    # ── Validate: only invited team IDs in matches ──
+    # ── Deterministyczne dopasowanie drużyn 1:1 do zaproszonych (siatka bezpieczeństwa
+    #    nad AI: koryguje różne prefiksy klubu, literówki, kolizje id) + odbudowa grup ──
+    recon = _reconcile_teams_with_invited(schedule, invited_teams)
+    _rebuild_groups_from_matches(schedule)
+
+    # Ostrzeżenia i metadane dopasowania pochodzą teraz z rekonsyliacji, nie z AI.
+    warnings = [
+        w for w in warnings
+        if "nie jest zaproszona" not in w.lower() and "nie dopasowano" not in w.lower()
+    ]
+    warnings.extend(recon["fixes"])
+    for name in recon["unmatched"]:
+        warnings.append(f'Nie dopasowano drużyny: „{name}” — brak podobnej wśród zaproszonych')
+    already_invited_ids = sorted(recon["assigned"])
+    unmatched_teams = [{"doc_name": n, "matched_name": None} for n in recon["unmatched"]]
+
+    # Bezpiecznik: usuń z meczów wszelkie id spoza zaproszonych (nie powinno wystąpić).
     for m in schedule.get("matches", []):
         for slot in ("teamA", "teamB"):
             team = m.get(slot)
             if team and isinstance(team, dict) and team.get("id"):
-                tid = team["id"]
-                if tid not in invited_ids_set:
-                    warnings.append(f'Mecz {m.get("id","?")}: drużyna ID={tid} nie jest zaproszona — usunięto')
+                if team["id"] not in invited_ids_set:
                     m[slot] = None
 
     # ── Deterministyczna sanityzacja (te same poprawki co przycisk „Odśwież") ──
@@ -3714,14 +4005,14 @@ async def squad_update_tournament(
 
     # Judges assigned to this tournament (head judge or any listed judge) may also
     # edit match squads and collect signatures — the frontend shows this UI to them.
-    _head_judge_id = data.get("head_judge_id")
     _judge_user_ids = {
         int(j["user_id"])
         for j in (data.get("judges") or [])
         if isinstance(j, dict) and j.get("user_id")
     }
-    is_judge_flag = current_user_id in _judge_user_ids or (
-        isinstance(_head_judge_id, int) and _head_judge_id == current_user_id
+    is_judge_flag = (
+        current_user_id in _judge_user_ids
+        or is_head_judge(data, current_user_id)
     )
 
     if not (is_admin_flag or is_judge_flag):

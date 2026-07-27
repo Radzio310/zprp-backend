@@ -31,6 +31,7 @@ from starlette.background import BackgroundTask
 
 from app.beach.activity_log import get_actor_name, log_activity
 from app.beach.capabilities import resolve_user_capabilities
+from app.beach.head_judges import is_head_judge as is_tournament_head_judge
 from app.db import (
     beach_admins,
     beach_mp_eligibility_settings,
@@ -359,10 +360,7 @@ async def _is_admin(user_id: int) -> bool:
 
 
 def _is_head_judge(data: Dict[str, Any], user_id: int) -> bool:
-    try:
-        return int(data.get("head_judge_id")) == int(user_id)
-    except (TypeError, ValueError):
-        return False
+    return is_tournament_head_judge(data, user_id)
 
 
 async def _can_view_report(tournament: Dict[str, Any], user_id: int) -> bool:

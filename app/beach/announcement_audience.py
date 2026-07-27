@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from app.beach.head_judges import head_judge_ids, is_head_judge
+
 
 def announcement_audiences(announcement: Any) -> List[dict]:
     if not isinstance(announcement, dict):
@@ -74,9 +76,7 @@ def filter_announcements_for_viewer(
         for judge in (data.get("judges") or [])
         if isinstance(judge, dict) and isinstance(judge.get("id"), int)
     }
-    head_judge_id = data.get("head_judge_id")
-    if isinstance(head_judge_id, int):
-        judge_ids.add(head_judge_id)
+    judge_ids.update(head_judge_ids(data))
     invited_team_ids = {
         int(team_id)
         for team_id in (data.get("invited_team_ids") or [])
@@ -93,7 +93,7 @@ def filter_announcements_for_viewer(
     can_manage = bool(
         viewer.get("is_admin")
         or (user_id is not None and user_id in host_ids)
-        or (isinstance(head_judge_id, int) and user_id == head_judge_id)
+        or (user_id is not None and is_head_judge(data, user_id))
         or "tournament.announcements.edit" in capabilities
         or "tournament.actAsHostEverywhere" in capabilities
         or (is_assigned_judge and viewer.get("assigned_judge_can_manage"))
