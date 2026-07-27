@@ -904,6 +904,7 @@ async def startup():
                first_match_at TIMESTAMPTZ NOT NULL,
                frozen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                protocol_player_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+               protocol_extra_players JSONB NOT NULL DEFAULT '[]'::jsonb,
                source VARCHAR NOT NULL DEFAULT 'auto',
                reason TEXT,
                frozen_by_id INTEGER,
@@ -914,6 +915,9 @@ async def startup():
                CONSTRAINT uq_beach_protocol_snapshot_revision
                    UNIQUE (tournament_id, team_id, revision)
            )""",
+        """ALTER TABLE beach_tournament_protocol_snapshots
+           ADD COLUMN IF NOT EXISTS protocol_extra_players JSONB
+           NOT NULL DEFAULT '[]'::jsonb""",
         """CREATE INDEX IF NOT EXISTS ix_beach_protocol_snapshot_active_team
            ON beach_tournament_protocol_snapshots (tournament_id, team_id, is_active)""",
         """CREATE INDEX IF NOT EXISTS ix_beach_protocol_snapshot_season

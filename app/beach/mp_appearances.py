@@ -217,6 +217,40 @@ def effective_protocol_ids(squad_entry: Dict[str, Any]) -> List[int]:
     return _numeric_ids(squad_entry.get("default_players"))
 
 
+def selected_protocol_extra_players(
+    squad_entry: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in squad_entry.get("protocol_extra_players") or []:
+        if not isinstance(raw, dict) or raw.get("selected") is False:
+            continue
+        name = " ".join(str(raw.get("name") or "").strip().split())
+        key = _ascii(name)
+        if not name or not key or key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "name": name,
+            "number": raw.get("number"),
+            "selected": True,
+        })
+    return result
+
+
+def _external_name_key(value: Any) -> str:
+    return " ".join(_ascii(value).split())
+
+
+def _external_name_parts(value: Any) -> Tuple[str, str]:
+    parts = " ".join(str(value or "").strip().split()).split(" ")
+    if len(parts) <= 1:
+        return "", parts[0] if parts else ""
+    # Imports use the federation convention "NAZWISKO Imię".  Preserve that
+    # convention while still exposing the normal report fields.
+    return " ".join(parts[1:]), parts[0]
+
+
 def _regular_team(match_team: Any) -> Optional[Tuple[int, str]]:
     if not isinstance(match_team, dict):
         return None
@@ -439,6 +473,7 @@ async def create_protocol_snapshot(
     squads = data.get("team_squads") if isinstance(data.get("team_squads"), dict) else {}
     squad_entry = squads.get(str(team_id)) if isinstance(squads.get(str(team_id)), dict) else {}
     player_ids = effective_protocol_ids(squad_entry)
+    extra_players = selected_protocol_extra_players(squad_entry)
     team_row = await database.fetch_one(
         select(
             beach_teams.c.team_name,
@@ -469,6 +504,7 @@ async def create_protocol_snapshot(
                 first_match_at=first_match_at,
                 frozen_at=now_utc,
                 protocol_player_ids=player_ids,
+                protocol_extra_players=extra_players,
                 source=source,
                 reason=reason,
                 frozen_by_id=actor_user_id,
@@ -597,7 +633,11 @@ def _match_team_ids(match: Dict[str, Any]) -> List[int]:
 async def _source_evidence(
     season_id: str,
     category: str,
-) -> Tuple[Dict[str, Dict[int, Dict[str, Any]]], List[Dict[str, Any]]]:
+) -> Tuple[
+    Dict[str, Dict[int, Dict[str, Any]]],
+    Dict[str, Dict[str, Dict[str, Any]]],
+    List[Dict[str, Any]],
+]:
     rows = await database.fetch_all(
         select(beach_tournaments).where(
             and_(
@@ -607,6 +647,7 @@ async def _source_evidence(
         )
     )
     evidence_by_gender: Dict[str, Dict[int, Dict[str, Any]]] = {}
+    external_evidence_by_gender: Dict[str, Dict[str, Dict[str, Any]]] = {}
     source_summaries: List[Dict[str, Any]] = []
 
     for raw in rows:
@@ -675,9 +716,16 @@ async def _source_evidence(
                 snapshot = await _active_snapshot(int(tournament["id"]), team_id)
                 if snapshot:
                     frozen_ids = _numeric_ids(_json(snapshot.get("protocol_player_ids"), []))
+                    frozen_extras = selected_protocol_extra_players({
+                        "protocol_extra_players": _json(
+                            snapshot.get("protocol_extra_players"),
+                            [],
+                        )
+                    })
+                    frozen_total = len(frozen_ids) + len(frozen_extras)
                     frozen_status = (
                         "frozen_confirmed"
-                        if len(frozen_ids) <= 10
+                        if frozen_total <= 10
                         and snapshot.get("source") != "legacy_reconstructed"
                         else "frozen_warning"
                     )
@@ -694,8 +742,39 @@ async def _source_evidence(
                             "snapshot_revision": snapshot.get("revision"),
                             "snapshot_source": snapshot.get("source"),
                             "frozen_at": snapshot.get("frozen_at"),
-                            "players_count": len(frozen_ids),
+                            "players_count": frozen_total,
                         })
+                    external_bucket = external_evidence_by_gender.setdefault(
+                        gender,
+                        {},
+                    )
+                    for extra in frozen_extras:
+                        external_name = str(extra.get("name") or "")
+                        external_key = _external_name_key(external_name)
+                        if not external_key:
+                            continue
+                        _merge_evidence(
+                            external_bucket,
+                            external_key,
+                            "frozen_warning",
+                            {
+                                "tournament_id": int(tournament["id"]),
+                                "tournament_name": tournament.get("name"),
+                                "team_id": team_id,
+                                "team_name": (
+                                    snapshot.get("team_name")
+                                    or team_meta.get(team_id, {}).get("team_name")
+                                ),
+                                "source": "frozen_list",
+                                "snapshot_id": snapshot.get("id"),
+                                "snapshot_revision": snapshot.get("revision"),
+                                "snapshot_source": snapshot.get("source"),
+                                "frozen_at": snapshot.get("frozen_at"),
+                                "players_count": frozen_total,
+                                "external_name": external_name,
+                                "external_number": extra.get("number"),
+                            },
+                        )
             source_summaries.append({
                 "tournament_id": int(tournament["id"]),
                 "tournament_name": tournament.get("name"),
@@ -706,12 +785,12 @@ async def _source_evidence(
                 "proel_coverage_complete": coverage_complete,
                 "fallback_snapshot_used": bool(snapshot),
             })
-    return evidence_by_gender, source_summaries
+    return evidence_by_gender, external_evidence_by_gender, source_summaries
 
 
 def _merge_evidence(
-    bucket: Dict[int, Dict[str, Any]],
-    player_id: int,
+    bucket: Dict[Any, Dict[str, Any]],
+    player_id: Any,
     status: str,
     source: Dict[str, Any],
 ) -> None:
@@ -758,7 +837,11 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
     category_enabled = category in await enabled_categories_for_season(season_id)
     enforcement_active = is_mp and is_final and category_enabled
 
-    evidence_by_gender, source_summaries = await _source_evidence(season_id, category)
+    (
+        evidence_by_gender,
+        external_evidence_by_gender,
+        source_summaries,
+    ) = await _source_evidence(season_id, category)
     current_tournament_team_ids: set[int] = set()
     for raw_id in data.get("invited_team_ids") or []:
         try:
@@ -797,7 +880,28 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
         if not selected_ids:
             selected_ids.update(_numeric_ids(entry.get("default_players")))
         players: List[Dict[str, Any]] = []
-        for player in _roster_players(team.get("roster_json")):
+        roster_players = _roster_players(team.get("roster_json"))
+        roster_name_to_id = {
+            key: int(player["player_id"])
+            for player in roster_players
+            for key in (
+                _external_name_key(
+                    f'{player.get("first_name") or ""} {player.get("last_name") or ""}'
+                ),
+                _external_name_key(
+                    f'{player.get("last_name") or ""} {player.get("first_name") or ""}'
+                ),
+            )
+            if key
+        }
+        roster_name_keys = set(roster_name_to_id)
+        for extra in selected_protocol_extra_players(entry):
+            matched_roster_id = roster_name_to_id.get(
+                _external_name_key(extra.get("name"))
+            )
+            if matched_roster_id:
+                selected_ids.add(matched_roster_id)
+        for player in roster_players:
             evidence = evidence_by_gender.get(gender, {}).get(player["player_id"])
             status = (
                 evidence["status"]
@@ -816,6 +920,44 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
                     "frozen_warning",
                 ),
                 "requires_warning_acceptance": status == "frozen_warning",
+                "sources": evidence["sources"] if evidence else [],
+            })
+        for extra_index, extra in enumerate(
+            selected_protocol_extra_players(entry)
+        ):
+            display_name = str(extra.get("name") or "")
+            external_key = _external_name_key(display_name)
+            if external_key in roster_name_keys:
+                continue
+            evidence = external_evidence_by_gender.get(gender, {}).get(
+                external_key
+            )
+            status = (
+                evidence["status"]
+                if evidence
+                else "missing" if source_summaries else "insufficient"
+            )
+            counts[status] += 1
+            first_name, last_name = _external_name_parts(display_name)
+            players.append({
+                "player_id": -(
+                    team_id * 100_000
+                    + extra_index
+                    + 1
+                ),
+                "first_name": first_name,
+                "last_name": last_name,
+                "display_name": display_name,
+                "jersey_number": extra.get("number"),
+                "photo_url": None,
+                "selected_for_protocol": True,
+                "status": status,
+                # A name imported from Excel is intentionally visible in the
+                # audit report, but cannot satisfy final eligibility without a
+                # stable player_id from the federation database.
+                "eligible": False,
+                "requires_warning_acceptance": False,
+                "is_external": True,
                 "sources": evidence["sources"] if evidence else [],
             })
         teams.append({
@@ -945,6 +1087,8 @@ def _source_keys_for_teams(
 
 
 def _player_export_name(player: Dict[str, Any]) -> str:
+    if player.get("display_name"):
+        return str(player["display_name"])
     return " ".join(
         part
         for part in (
@@ -956,7 +1100,11 @@ def _player_export_name(player: Dict[str, Any]) -> str:
 
 
 def _player_source_label(player: Dict[str, Any]) -> str:
-    labels: List[str] = []
+    labels: List[str] = (
+        ["Spoza składu drużyny · import z Excela"]
+        if player.get("is_external")
+        else []
+    )
     for source in player.get("sources") or []:
         if source.get("source") == "proel":
             labels.append(
@@ -1220,6 +1368,7 @@ def _build_mp_pdf_context(
                 "name": _player_export_name(player),
                 "jersey_number": player.get("jersey_number"),
                 "eligible": bool(player.get("eligible")),
+                "is_external": bool(player.get("is_external")),
                 "status_label": MP_STATUS_LABELS.get(status, status),
                 "status_color": MP_STATUS_COLORS.get(status, "#7A7F89"),
                 "sources": [
@@ -1608,6 +1757,7 @@ async def run_mp_historical_backfill(*, force: bool = False) -> Dict[str, Any]:
                 else {}
             )
             current_ids = effective_protocol_ids(entry)
+            current_extras = selected_protocol_extra_players(entry)
             if not active:
                 created = await create_protocol_snapshot(
                     tournament,
@@ -1624,7 +1774,16 @@ async def run_mp_historical_backfill(*, force: bool = False) -> Dict[str, Any]:
             active_ids = _numeric_ids(
                 _json(active.get("protocol_player_ids"), [])
             )
-            if not active_ids and current_ids:
+            active_extras = selected_protocol_extra_players({
+                "protocol_extra_players": _json(
+                    active.get("protocol_extra_players"),
+                    [],
+                )
+            })
+            if (
+                (not active_ids and current_ids)
+                or (not active_extras and current_extras)
+            ):
                 rebuilt = await create_protocol_snapshot(
                     tournament,
                     team_id,
@@ -1970,7 +2129,10 @@ async def refresh_protocol_snapshot(
             "revision": snapshot.get("revision"),
             "reason": body.reason.strip(),
             "context_tournament_id": body.context_tournament_id,
-            "players": len(_json(snapshot.get("protocol_player_ids"), [])),
+            "players": (
+                len(_json(snapshot.get("protocol_player_ids"), []))
+                + len(_json(snapshot.get("protocol_extra_players"), []))
+            ),
         },
     )
     return {

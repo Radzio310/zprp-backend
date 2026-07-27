@@ -966,6 +966,7 @@ beach_tournament_protocol_snapshots = Table(
     Column("first_match_at", DateTime(timezone=True), nullable=False),
     Column("frozen_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("protocol_player_ids", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("protocol_extra_players", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("source", String, nullable=False, server_default=text("'auto'")),
     Column("reason", Text, nullable=True),
     Column("frozen_by_id", Integer, nullable=True),

@@ -215,6 +215,18 @@
   .col-result { width: 10%; }
   .col-source { width: 39%; }
   .player-name { color: #252c3d; font-weight: 850; }
+  .external-player {
+    display: inline-block;
+    margin-top: 1.4pt;
+    padding: 1pt 3.5pt;
+    border-radius: 5pt;
+    color: #b96a00;
+    background: #fff1d8;
+    font-size: 5.6pt;
+    font-weight: 900;
+    letter-spacing: .15pt;
+    text-transform: uppercase;
+  }
   .jersey { text-align: center; color: #687184; font-weight: 800; }
   .status-pill {
     display: inline-block;
@@ -369,7 +381,12 @@
         <tbody>
           {% for player in section.players %}
           <tr>
-            <td class="player-name">{{ player.name }}</td>
+            <td class="player-name">
+              {{ player.name }}
+              {% if player.is_external %}
+              <br><span class="external-player">Spoza składu · Excel</span>
+              {% endif %}
+            </td>
             <td class="jersey">{{ player.jersey_number or "—" }}</td>
             <td>
               <span class="status-pill" style="--status-color: {{ player.status_color }}; --status-bg: {{ player.status_color }}10;">

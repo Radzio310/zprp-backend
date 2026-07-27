@@ -6,6 +6,7 @@ from app.beach.mp_appearances import (
     _filtered_export_teams,
     _merge_evidence,
     _played_schedule_matches,
+    selected_protocol_extra_players,
     effective_protocol_ids,
     first_team_matches,
     infer_mp_phase,
@@ -162,3 +163,31 @@ def test_export_can_be_limited_to_explicitly_selected_teams():
     body = MpReportExportRequest(format="pdf", team_ids=[22])
     teams = _filtered_export_teams(report, body)
     assert [team["team_id"] for team in teams] == [22]
+
+
+def test_selected_excel_players_are_normalized_and_deduplicated():
+    extras = selected_protocol_extra_players(
+        {
+            "protocol_extra_players": [
+                {"name": "  HEJZA   Mateusz ", "number": 5},
+                {
+                    "name": "HEJZA Mateusz",
+                    "number": 8,
+                    "selected": True,
+                },
+                {
+                    "name": "NIEWYBRANY Adam",
+                    "number": 9,
+                    "selected": False,
+                },
+                {"name": "", "number": 10},
+            ]
+        }
+    )
+    assert extras == [
+        {
+            "name": "HEJZA Mateusz",
+            "number": 5,
+            "selected": True,
+        }
+    ]
