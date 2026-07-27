@@ -106,6 +106,7 @@ from app.beach.score import router as beach_score_router
 from app.beach.mp_appearances import (
     freeze_due_protocol_snapshots,
     router as beach_mp_appearances_router,
+    run_mp_historical_backfill,
     run_mp_snapshot_scheduler,
 )
 
@@ -994,6 +995,20 @@ async def startup():
     except Exception:
         logger.exception("❌ Migration roles_multiTeam_v1 failed — kontynuuję bez niej")
     # ──────────────────────────────────────────────────────────────────────
+
+    # Jednorazowo porządkuje dane sprzed wdrożenia snapshotów MP:
+    # uzupełnia sezon/fazę, wiąże stare mecze ProEl i rekonstruuje zachowane listy.
+    # Marker w beach_migrations sprawia, że kolejne restarty tylko pominą ten krok.
+    try:
+        backfill_result = await run_mp_historical_backfill()
+        if backfill_result.get("skipped"):
+            logger.info("MP historical backfill already ran, skipping")
+        else:
+            logger.info("MP historical backfill completed: %s", backfill_result)
+    except Exception:
+        logger.exception(
+            "MP historical backfill failed — continuing without historical reconstruction"
+        )
 
     _cleanup_task = asyncio.create_task(_cleanup_loop())
 

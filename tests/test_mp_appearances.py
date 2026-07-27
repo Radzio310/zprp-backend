@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 
 from app.beach.mp_appearances import (
+    _embedded_proel_link,
     _merge_evidence,
     _played_schedule_matches,
     effective_protocol_ids,
     first_team_matches,
     infer_mp_phase,
+    season_year_label,
 )
 
 
@@ -14,6 +16,24 @@ def test_mp_phase_prefers_explicit_value_and_infers_final_from_polish_name():
     assert infer_mp_phase("Turniej eliminacyjny", "MP") == "elimination"
     assert infer_mp_phase("Finał MP", "MP", "elimination") == "elimination"
     assert infer_mp_phase("Finał", "Woj") is None
+
+
+def test_season_id_is_presented_as_calendar_year():
+    assert season_year_label("7") == "2025"
+    assert season_year_label("8") == "2026"
+
+
+def test_historical_proel_link_prefers_embedded_match_extras():
+    assert _embedded_proel_link(
+        {
+            "matchConfig": {
+                "extras": {
+                    "tournamentId": "71",
+                    "scheduleMatchId": "match-5",
+                }
+            }
+        }
+    ) == (71, "match-5")
 
 
 def test_effective_protocol_list_does_not_replace_explicit_empty_list():

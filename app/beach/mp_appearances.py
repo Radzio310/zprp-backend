@@ -91,8 +91,14 @@ def _json(raw: Any, fallback: Any = None) -> Any:
 
 
 def _ascii(value: Any) -> str:
+    # NFKD does not decompose Polish ł/Ł, while historical tournament names
+    # commonly use "Finał".  Transliterate it explicitly before stripping
+    # the remaining diacritics.
+    normalized_value = str(value or "").translate(
+        str.maketrans({"ł": "l", "Ł": "L"})
+    )
     return "".join(
-        c for c in unicodedata.normalize("NFKD", str(value or "").lower())
+        c for c in unicodedata.normalize("NFKD", normalized_value.lower())
         if not unicodedata.combining(c)
     )
 
@@ -120,6 +126,13 @@ def tournament_phase(row: Dict[str, Any]) -> Optional[str]:
         row.get("competition_type"),
         row.get("mp_phase"),
     )
+
+
+def season_year_label(season_id: Any) -> str:
+    try:
+        return str(2018 + int(season_id))
+    except (TypeError, ValueError):
+        return str(season_id or "")
 
 
 def _numeric_ids(values: Any) -> List[int]:
@@ -694,6 +707,13 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
             pass
     for match in _schedule_matches(data):
         target_ids.update(_match_team_ids(match))
+    # A newly-created final may not have invited teams yet.  The report must
+    # still show the historical elimination pool instead of an empty screen.
+    target_ids.update(
+        int(source["team_id"])
+        for source in source_summaries
+        if source.get("team_id") is not None
+    )
     team_rows = await database.fetch_all(
         select(
             beach_teams.c.id,
@@ -846,6 +866,241 @@ async def assert_no_unidentified_final_players(
     )
 
 
+def _embedded_proel_link(data_json: Any) -> Tuple[Optional[int], Optional[str]]:
+    data = _json(data_json)
+    candidates: List[Dict[str, Any]] = []
+    config = data.get("matchConfig")
+    if isinstance(config, dict) and isinstance(config.get("extras"), dict):
+        candidates.append(config["extras"])
+    if isinstance(data.get("extras"), dict):
+        candidates.append(data["extras"])
+    candidates.append(data)
+    tournament_id: Optional[int] = None
+    schedule_match_id: Optional[str] = None
+    for source in candidates:
+        raw_tournament_id = (
+            source.get("tournamentId")
+            if source.get("tournamentId") is not None
+            else source.get("tournament_id")
+        )
+        if tournament_id is None and raw_tournament_id is not None:
+            try:
+                tournament_id = int(raw_tournament_id)
+            except (TypeError, ValueError):
+                pass
+        raw_schedule_id = (
+            source.get("scheduleMatchId")
+            if source.get("scheduleMatchId") is not None
+            else source.get("schedule_match_id")
+        )
+        if schedule_match_id is None and raw_schedule_id is not None:
+            schedule_match_id = str(raw_schedule_id)
+    return tournament_id, schedule_match_id
+
+
+def _normalized_match_number(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+async def run_mp_historical_backfill(*, force: bool = False) -> Dict[str, Any]:
+    """One-time reconstruction for tournaments created before MP snapshots.
+
+    It never claims that a reconstructed list was frozen at the historical
+    cutoff.  Such revisions remain labelled ``legacy_reconstructed``.
+    """
+    marker = "mp_historical_backfill_v2"
+    await database.execute(
+        """CREATE TABLE IF NOT EXISTS beach_migrations (
+               name VARCHAR PRIMARY KEY,
+               ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+           )"""
+    )
+    if not force:
+        completed = await database.fetch_one(
+            "SELECT name FROM beach_migrations WHERE name = :name",
+            {"name": marker},
+        )
+        if completed:
+            return {"success": True, "skipped": True, "marker": marker}
+
+    tournament_rows = [
+        dict(row) for row in await database.fetch_all(select(beach_tournaments))
+    ]
+    tournaments_updated = 0
+    schedule_links: Dict[
+        str, List[Tuple[int, str]]
+    ] = {}
+    schedule_links_by_tournament: Dict[
+        Tuple[int, str], Tuple[int, str]
+    ] = {}
+    schedule_links_by_id: Dict[str, List[Tuple[int, str]]] = {}
+
+    for tournament in tournament_rows:
+        values: Dict[str, Any] = {}
+        if not tournament.get("season_id"):
+            event_year = _parse_event_date(tournament.get("event_date")).year
+            derived_season_id = event_year - 2018
+            if derived_season_id > 0:
+                values["season_id"] = str(derived_season_id)
+                tournament["season_id"] = str(derived_season_id)
+        inferred_phase = infer_mp_phase(
+            tournament.get("name"),
+            tournament.get("competition_type"),
+            tournament.get("mp_phase"),
+        )
+        if inferred_phase and not tournament.get("mp_phase"):
+            values["mp_phase"] = inferred_phase
+            tournament["mp_phase"] = inferred_phase
+        if values:
+            await database.execute(
+                update(beach_tournaments)
+                .where(beach_tournaments.c.id == int(tournament["id"]))
+                .values(**values)
+            )
+            tournaments_updated += 1
+
+        data = _json(tournament.get("data_json"))
+        for match in _schedule_matches(data):
+            match_id = match.get("id")
+            if match_id is None:
+                continue
+            link = (int(tournament["id"]), str(match_id))
+            schedule_links_by_id.setdefault(str(match_id), []).append(link)
+            match_number = _normalized_match_number(
+                match.get("matchNumber") or match.get("match_number")
+            )
+            if not match_number:
+                continue
+            schedule_links.setdefault(match_number, []).append(link)
+            schedule_links_by_tournament[
+                (int(tournament["id"]), match_number)
+            ] = link
+
+    proel_links_updated = 0
+    proel_rows = await database.fetch_all(select(beach_proel_matches))
+    for raw_proel in proel_rows:
+        proel = dict(raw_proel)
+        embedded_tournament_id, embedded_match_id = _embedded_proel_link(
+            proel.get("data_json")
+        )
+        # The immutable link embedded in the historical match state is more
+        # authoritative than columns populated by an earlier heuristic.
+        tournament_id = embedded_tournament_id or proel.get("tournament_id")
+        schedule_match_id = embedded_match_id or proel.get("schedule_match_id")
+        config = _proel_config(proel.get("data_json"))
+        match_number = _normalized_match_number(
+            config.get("matchNumber") or proel.get("match_number")
+        )
+
+        if tournament_id is not None and not schedule_match_id and match_number:
+            scoped = schedule_links_by_tournament.get(
+                (int(tournament_id), match_number)
+            )
+            if scoped:
+                schedule_match_id = scoped[1]
+        if tournament_id is None and match_number:
+            candidates = schedule_links.get(match_number) or []
+            if len(candidates) == 1:
+                tournament_id, schedule_match_id = candidates[0]
+        if schedule_match_id and tournament_id is None:
+            candidates = schedule_links_by_id.get(str(schedule_match_id)) or []
+            if len(candidates) == 1:
+                tournament_id = candidates[0][0]
+
+        values = {}
+        if tournament_id is not None and proel.get("tournament_id") != int(
+            tournament_id
+        ):
+            values["tournament_id"] = int(tournament_id)
+        if schedule_match_id is not None and str(
+            proel.get("schedule_match_id") or ""
+        ) != str(schedule_match_id):
+            values["schedule_match_id"] = str(schedule_match_id)
+        if values:
+            await database.execute(
+                update(beach_proel_matches)
+                .where(
+                    beach_proel_matches.c.match_number
+                    == proel["match_number"]
+                )
+                .values(**values)
+            )
+            proel_links_updated += 1
+
+    snapshots_created = 0
+    snapshots_rebuilt = 0
+    now_utc = datetime.now(timezone.utc)
+    for tournament in tournament_rows:
+        if str(tournament.get("competition_type") or "").upper() != "MP":
+            continue
+        if tournament_phase(tournament) != "elimination":
+            continue
+        data = _json(tournament.get("data_json"))
+        squads = (
+            data.get("team_squads")
+            if isinstance(data.get("team_squads"), dict)
+            else {}
+        )
+        for team_id, (first_match_at, _) in first_team_matches(
+            tournament, data
+        ).items():
+            if first_match_at > now_utc:
+                continue
+            active = await _active_snapshot(int(tournament["id"]), team_id)
+            entry = (
+                squads.get(str(team_id))
+                if isinstance(squads.get(str(team_id)), dict)
+                else {}
+            )
+            current_ids = effective_protocol_ids(entry)
+            if not active:
+                created = await create_protocol_snapshot(
+                    tournament,
+                    team_id,
+                    source="legacy_reconstructed",
+                    reason=(
+                        "Jednorazowa rekonstrukcja historycznych turniejów MP"
+                    ),
+                    now=now_utc,
+                )
+                if created:
+                    snapshots_created += 1
+                continue
+            active_ids = _numeric_ids(
+                _json(active.get("protocol_player_ids"), [])
+            )
+            if not active_ids and current_ids:
+                rebuilt = await create_protocol_snapshot(
+                    tournament,
+                    team_id,
+                    source="legacy_reconstructed",
+                    reason=(
+                        "Odbudowa pustego historycznego snapshotu z zachowanej "
+                        "listy „Do protokołu”"
+                    ),
+                    force_revision=True,
+                    now=now_utc,
+                )
+                if rebuilt:
+                    snapshots_rebuilt += 1
+
+    await database.execute(
+        """INSERT INTO beach_migrations (name, ran_at)
+           VALUES (:name, NOW())
+           ON CONFLICT (name) DO UPDATE SET ran_at = EXCLUDED.ran_at""",
+        {"name": marker},
+    )
+    return {
+        "success": True,
+        "skipped": False,
+        "marker": marker,
+        "tournaments_updated": tournaments_updated,
+        "proel_links_updated": proel_links_updated,
+        "snapshots_created": snapshots_created,
+        "snapshots_rebuilt": snapshots_rebuilt,
+    }
+
+
 async def freeze_due_protocol_snapshots(now: Optional[datetime] = None) -> int:
     rows = await database.fetch_all(
         select(beach_tournaments).where(
@@ -899,16 +1154,19 @@ async def get_mp_settings(
     seasons: Dict[str, Dict[str, Any]] = {
         str(row["season_id"]): {
             "season_id": str(row["season_id"]),
-            "label": row["season"] or str(row["season_id"]),
+            "label": season_year_label(row["season_id"]),
         }
         for row in team_seasons if row["season_id"] is not None
     }
     for row in tournament_seasons:
         season_id = str(row["season_id"])
-        seasons.setdefault(season_id, {"season_id": season_id, "label": season_id})
+        seasons.setdefault(
+            season_id,
+            {"season_id": season_id, "label": season_year_label(season_id)},
+        )
     seasons.setdefault(DEFAULT_SEASON_ID, {
         "season_id": DEFAULT_SEASON_ID,
-        "label": DEFAULT_SEASON_ID,
+        "label": season_year_label(DEFAULT_SEASON_ID),
     })
     return {
         "categories": VALID_CATEGORIES,
@@ -979,6 +1237,28 @@ async def update_mp_settings(
         details={"enabled_categories": categories},
     )
     return {"season_id": season_id, "enabled_categories": categories}
+
+
+@router.post("/historical-backfill", response_model=dict)
+async def trigger_historical_backfill(
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    if not await _is_admin(current_user_id):
+        raise HTTPException(
+            403,
+            "Jednorazowy backfill historyczny może uruchomić tylko administrator",
+        )
+    result = await run_mp_historical_backfill(force=True)
+    await log_activity(
+        area="tournament",
+        action="mp_appearances.historical_backfill",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id="all",
+        target_label="Historyczne turnieje MP",
+        details=result,
+    )
+    return result
 
 
 @router.get("/tournaments/{tournament_id}/report", response_model=dict)
