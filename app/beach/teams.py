@@ -1661,13 +1661,98 @@ async def get_local_beach_team(team_id: int):
     return _row_to_item(row)
 
 
+def _tournament_started(event_date: Any) -> bool:
+    """Turniej uznajemy za rozpoczęty od 00:00 czasu PL w dniu startu (event_date)."""
+    if not isinstance(event_date, datetime):
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        tz: Any = ZoneInfo("Europe/Warsaw")
+    except Exception:
+        tz = timezone.utc
+    ev = event_date if event_date.tzinfo else event_date.replace(tzinfo=timezone.utc)
+    return datetime.now(tz).date() >= ev.astimezone(tz).date()
+
+
+def build_roster_snapshot(
+    team_row_data: Dict[str, Any],
+    *,
+    auto: bool,
+    frozen_by: Optional[int] = None,
+    frozen_by_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Kopia rosteru drużyny zamrażana w data_json turnieju (team_squads[id].roster_snapshot).
+
+    Chroni trwający turniej przed zmianami listy zgłoszeniowej na baza.zprp.pl —
+    widoki turnieju i PDF czytają snapshot zamiast żywego beach_teams.roster_json.
+    """
+    return {
+        "players": team_row_data.get("roster_json") or [],
+        "companions": team_row_data.get("companions_json") or [],
+        "frozen_at": _now_utc().isoformat(),
+        "auto": auto,
+        "frozen_by": frozen_by,
+        "frozen_by_name": frozen_by_name,
+    }
+
+
+def roster_snapshot_of(tour_data: Dict[str, Any], team_id: int) -> Optional[Dict[str, Any]]:
+    """Zwraca ważny roster_snapshot drużyny z data_json turnieju albo None."""
+    entry = (tour_data.get("team_squads") or {}).get(str(team_id)) or {}
+    snap = entry.get("roster_snapshot")
+    if isinstance(snap, dict) and isinstance(snap.get("players"), list):
+        return snap
+    return None
+
+
 @router.get("/local/{team_id}/squad")
-async def get_local_beach_team_squad(team_id: int):
+async def get_local_beach_team_squad(team_id: int, tournament_id: Optional[int] = Query(None)):
     row = await database.fetch_one(select(beach_teams).where(beach_teams.c.id == team_id))
     if not row:
         raise HTTPException(status_code=404, detail="Drużyna nie istnieje")
 
     data = dict(row)
+
+    # ── Zamrożony skład turniejowy ────────────────────────────────────────
+    # Z tournament_id: od dnia startu turnieju skład serwujemy ze snapshotu
+    # w data_json turnieju (auto-zamrożenie przy pierwszym odczycie), żeby
+    # zmiany na baza.zprp.pl nie rozsypały trwających rozgrywek. Ręczne
+    # odświeżenie: POST /beach/tournaments/{id}/squad-roster-refresh.
+    players = data.get("roster_json") if _table_has_column("roster_json") else None
+    companions = data.get("companions_json") if _table_has_column("companions_json") else None
+    frozen_snap: Optional[Dict[str, Any]] = None
+    if tournament_id:
+        import json as _json
+        from app.db import beach_tournaments as _bt
+
+        tour_row = await database.fetch_one(select(_bt).where(_bt.c.id == tournament_id))
+        if tour_row:
+            tour_d = dict(tour_row)
+            tour_data = tour_d.get("data_json") or {}
+            if isinstance(tour_data, str):
+                try:
+                    tour_data = _json.loads(tour_data)
+                except Exception:
+                    tour_data = {}
+            frozen_snap = roster_snapshot_of(tour_data, team_id)
+            if (
+                frozen_snap is None
+                and _table_has_column("roster_json")
+                and _tournament_started(tour_d.get("event_date"))
+            ):
+                frozen_snap = build_roster_snapshot(data, auto=True)
+                team_squads = dict(tour_data.get("team_squads") or {})
+                entry = dict(team_squads.get(str(team_id)) or {})
+                entry["roster_snapshot"] = frozen_snap
+                team_squads[str(team_id)] = entry
+                tour_data["team_squads"] = team_squads
+                await database.execute(
+                    update(_bt).where(_bt.c.id == tournament_id).values(data_json=tour_data)
+                )
+            if frozen_snap is not None:
+                players = list(frozen_snap.get("players") or [])
+                companions = list(frozen_snap.get("companions") or [])
+
     # Merge medical exam data into each player record
     medical_exams = {}
     if _table_has_column("medical_exams_json"):
@@ -1675,7 +1760,6 @@ async def get_local_beach_team_squad(team_id: int):
         if not isinstance(medical_exams, dict):
             medical_exams = {}
 
-    players = data.get("roster_json") if _table_has_column("roster_json") else None
     if players and medical_exams:
         for p in players:
             pid = str(p.get("player_id", ""))
@@ -1695,7 +1779,10 @@ async def get_local_beach_team_squad(team_id: int):
     return {
         "team": _row_to_item(row).model_dump(),
         "players": players,
-        "companions": data.get("companions_json") if _table_has_column("companions_json") else None,
+        "companions": companions,
+        "roster_frozen_at": frozen_snap.get("frozen_at") if frozen_snap else None,
+        "roster_frozen_auto": frozen_snap.get("auto", True) if frozen_snap else None,
+        "roster_frozen_by_name": frozen_snap.get("frozen_by_name") if frozen_snap else None,
         "historical_players": data.get("historical_players_json") if _table_has_column("historical_players_json") else None,
         "squad_last_synced_at": data.get("squad_last_synced_at") if _table_has_column("squad_last_synced_at") else None,
         "medical_exams_checked_at": data.get("medical_exams_checked_at") if _table_has_column("medical_exams_checked_at") else None,

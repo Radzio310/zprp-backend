@@ -63,6 +63,299 @@ def _parse_json(raw: Any) -> Any:
         return []
 
 
+def _tournament_entry_matches(entry: Dict[str, Any], tournament_id: int) -> bool:
+    if entry.get("type") != "tournament":
+        return False
+    try:
+        return int(entry.get("tournament_id")) == tournament_id
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalized_classification(value: Any) -> Optional[str]:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+async def sync_tournament_standings_classification(
+    tournament_id: int,
+    competition_type: Optional[str],
+    category: Optional[str],
+) -> Dict[str, int]:
+    """
+    Przenosi zapisane punkty i oznaczenie etapu do aktualnej klasyfikacji
+    turnieju. Wpis turniejowy nie może pozostać np. w MP po zmianie rodzaju
+    rozgrywek na INNE.
+
+    ``season_id`` i ``gender`` pozostają bez zmian, ponieważ nie są polami
+    edytowanymi w danych turnieju.
+    """
+    target_type = _normalized_classification(competition_type)
+    target_category = _normalized_classification(category)
+    now = datetime.now(timezone.utc)
+    moved_rows = 0
+    removed_rows = 0
+    moved_stages = 0
+
+    standing_rows = await database.fetch_all(select(beach_standings))
+    for standing_row in standing_rows:
+        row_d = dict(standing_row)
+        entries = _parse_json(row_d.get("tournaments_json") or [])
+        if not isinstance(entries, list):
+            continue
+
+        tournament_entries = [
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
+            and _tournament_entry_matches(entry, tournament_id)
+        ]
+        if not tournament_entries:
+            continue
+
+        already_in_target = (
+            target_type is not None
+            and target_category is not None
+            and row_d.get("competition_type") == target_type
+            and row_d.get("category") == target_category
+        )
+        if already_in_target:
+            continue
+
+        remaining_entries = [
+            entry
+            for entry in entries
+            if not (
+                isinstance(entry, dict)
+                and _tournament_entry_matches(entry, tournament_id)
+            )
+        ]
+
+        if target_type is not None and target_category is not None:
+            destination = await database.fetch_one(
+                select(beach_standings).where(
+                    beach_standings.c.team_id == row_d["team_id"],
+                    beach_standings.c.competition_type == target_type,
+                    beach_standings.c.category == target_category,
+                    beach_standings.c.season_id == row_d["season_id"],
+                    beach_standings.c.gender == row_d["gender"],
+                )
+            )
+
+            if destination:
+                destination_d = dict(destination)
+                destination_entries = _parse_json(
+                    destination_d.get("tournaments_json") or []
+                )
+                if not isinstance(destination_entries, list):
+                    destination_entries = []
+                destination_entries = [
+                    entry
+                    for entry in destination_entries
+                    if not (
+                        isinstance(entry, dict)
+                        and _tournament_entry_matches(entry, tournament_id)
+                    )
+                ]
+                destination_entries.extend(tournament_entries)
+                await database.execute(
+                    update(beach_standings)
+                    .where(beach_standings.c.id == destination_d["id"])
+                    .values(
+                        tournaments_json=destination_entries,
+                        updated_at=now,
+                    )
+                )
+            elif not remaining_entries:
+                # Najczęstszy przypadek: cały wiersz dotyczy wyłącznie tego
+                # turnieju, więc wystarczy bezpiecznie zmienić jego klucz.
+                await database.execute(
+                    update(beach_standings)
+                    .where(beach_standings.c.id == row_d["id"])
+                    .values(
+                        competition_type=target_type,
+                        category=target_category,
+                        updated_at=now,
+                    )
+                )
+                moved_rows += 1
+                continue
+            else:
+                await database.execute(
+                    insert(beach_standings).values(
+                        team_id=row_d["team_id"],
+                        team_name=row_d["team_name"],
+                        gender=row_d["gender"],
+                        competition_type=target_type,
+                        category=target_category,
+                        season_id=row_d["season_id"],
+                        tournaments_json=tournament_entries,
+                        updated_at=now,
+                    )
+                )
+            moved_rows += 1
+
+        if remaining_entries:
+            await database.execute(
+                update(beach_standings)
+                .where(beach_standings.c.id == row_d["id"])
+                .values(tournaments_json=remaining_entries, updated_at=now)
+            )
+        else:
+            await database.execute(
+                delete(beach_standings).where(
+                    beach_standings.c.id == row_d["id"]
+                )
+            )
+            removed_rows += 1
+
+    stage_rows = await database.fetch_all(
+        select(beach_stage_grants).where(
+            beach_stage_grants.c.tournament_id == tournament_id
+        )
+    )
+    for stage_row in stage_rows:
+        stage_d = dict(stage_row)
+        already_in_target = (
+            target_type is not None
+            and target_category is not None
+            and stage_d.get("competition_type") == target_type
+            and stage_d.get("category") == target_category
+        )
+        if already_in_target:
+            continue
+
+        if target_type is None or target_category is None:
+            await database.execute(
+                delete(beach_stage_grants).where(
+                    beach_stage_grants.c.id == stage_d["id"]
+                )
+            )
+            moved_stages += 1
+            continue
+
+        destination = await database.fetch_one(
+            select(beach_stage_grants).where(
+                beach_stage_grants.c.tournament_id == tournament_id,
+                beach_stage_grants.c.competition_type == target_type,
+                beach_stage_grants.c.category == target_category,
+                beach_stage_grants.c.season_id == stage_d["season_id"],
+            )
+        )
+        if destination:
+            # Po kilku wcześniejszych zmianach rodzaju mogły zostać dwa
+            # markery. Aktualny marker wygrywa, a stary usuwamy.
+            await database.execute(
+                delete(beach_stage_grants).where(
+                    beach_stage_grants.c.id == stage_d["id"]
+                )
+            )
+        else:
+            await database.execute(
+                update(beach_stage_grants)
+                .where(beach_stage_grants.c.id == stage_d["id"])
+                .values(
+                    competition_type=target_type,
+                    category=target_category,
+                    updated_at=now,
+                )
+            )
+        moved_stages += 1
+
+    return {
+        "moved_rows": moved_rows,
+        "removed_rows": removed_rows,
+        "moved_stages": moved_stages,
+    }
+
+
+_classification_repair_done = False
+_classification_repair_lock = asyncio.Lock()
+
+
+async def _repair_standings_classifications_once() -> None:
+    """
+    Jednorazowo naprawia historyczne rozbieżności powstałe przed dodaniem
+    synchronizacji w edycji turnieju.
+    """
+    global _classification_repair_done
+    if _classification_repair_done:
+        return
+
+    async with _classification_repair_lock:
+        if _classification_repair_done:
+            return
+
+        standing_rows = await database.fetch_all(select(beach_standings))
+        stage_rows = await database.fetch_all(select(beach_stage_grants))
+        tournament_ids: set[int] = set()
+        row_classifications: Dict[int, set[tuple[str, str]]] = {}
+
+        for standing_row in standing_rows:
+            row_d = dict(standing_row)
+            entries = _parse_json(row_d.get("tournaments_json") or [])
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("type") != "tournament":
+                    continue
+                try:
+                    tournament_id = int(entry.get("tournament_id"))
+                except (TypeError, ValueError):
+                    continue
+                tournament_ids.add(tournament_id)
+                row_classifications.setdefault(tournament_id, set()).add(
+                    (
+                        str(row_d.get("competition_type") or ""),
+                        str(row_d.get("category") or ""),
+                    )
+                )
+
+        for stage_row in stage_rows:
+            stage_d = dict(stage_row)
+            tournament_id = int(stage_d["tournament_id"])
+            tournament_ids.add(tournament_id)
+            row_classifications.setdefault(tournament_id, set()).add(
+                (
+                    str(stage_d.get("competition_type") or ""),
+                    str(stage_d.get("category") or ""),
+                )
+            )
+
+        if tournament_ids:
+            tournaments = await database.fetch_all(
+                select(
+                    beach_tournaments.c.id,
+                    beach_tournaments.c.competition_type,
+                    beach_tournaments.c.category,
+                ).where(beach_tournaments.c.id.in_(list(tournament_ids)))
+            )
+            for tournament in tournaments:
+                tournament_d = dict(tournament)
+                tournament_id = int(tournament_d["id"])
+                target = (
+                    _normalized_classification(
+                        tournament_d.get("competition_type")
+                    )
+                    or "",
+                    _normalized_classification(tournament_d.get("category"))
+                    or "",
+                )
+                if any(
+                    classification != target
+                    for classification in row_classifications.get(
+                        tournament_id, set()
+                    )
+                ):
+                    await sync_tournament_standings_classification(
+                        tournament_id,
+                        tournament_d.get("competition_type"),
+                        tournament_d.get("category"),
+                    )
+
+        _classification_repair_done = True
+
+
 async def _is_admin(user_id: int) -> bool:
     row = await database.fetch_one(
         select(beach_admins.c.user_id).where(beach_admins.c.user_id == user_id)
@@ -691,6 +984,8 @@ async def list_standings(
     top_n: int = Query(3, ge=0, le=50),
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
+    await _repair_standings_classifications_once()
+
     q = select(beach_standings)
     if competition_type:
         q = q.where(beach_standings.c.competition_type == competition_type)
@@ -952,13 +1247,20 @@ async def get_h2h_matches(
 async def list_competition_types(
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
+    await _repair_standings_classifications_once()
+
     from sqlalchemy import distinct
-    rows = await database.fetch_all(
+    standing_rows = await database.fetch_all(
         select(distinct(beach_standings.c.competition_type)).order_by(
             beach_standings.c.competition_type.asc()
         )
     )
-    types = [r[0] for r in rows if r[0]]
+    stage_rows = await database.fetch_all(
+        select(distinct(beach_stage_grants.c.competition_type)).order_by(
+            beach_stage_grants.c.competition_type.asc()
+        )
+    )
+    types = sorted({r[0] for r in [*standing_rows, *stage_rows] if r[0]})
     return {"competition_types": types}
 
 
@@ -972,13 +1274,23 @@ async def list_competition_types(
 async def list_seasons(
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
+    await _repair_standings_classifications_once()
+
     from sqlalchemy import distinct
-    rows = await database.fetch_all(
+    standing_rows = await database.fetch_all(
         select(distinct(beach_standings.c.season_id)).order_by(
             beach_standings.c.season_id.desc()
         )
     )
-    seasons = [r[0] for r in rows if r[0]]
+    stage_rows = await database.fetch_all(
+        select(distinct(beach_stage_grants.c.season_id)).order_by(
+            beach_stage_grants.c.season_id.desc()
+        )
+    )
+    seasons = sorted(
+        {r[0] for r in [*standing_rows, *stage_rows] if r[0]},
+        reverse=True,
+    )
     return {"seasons": seasons}
 
 
@@ -1397,6 +1709,8 @@ async def get_stage_grant(
     season_id: str = Query(...),
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
+    await _repair_standings_classifications_once()
+
     row = await database.fetch_one(
         select(beach_stage_grants).where(
             beach_stage_grants.c.tournament_id == tournament_id,
@@ -1579,6 +1893,8 @@ async def list_stages(
     season_id: str = Query(...),
     current_user_id: int = Depends(beach_get_current_user_id),
 ):
+    await _repair_standings_classifications_once()
+
     markers = await database.fetch_all(
         select(beach_stage_grants).where(
             beach_stage_grants.c.competition_type == competition_type,

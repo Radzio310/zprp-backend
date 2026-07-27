@@ -487,6 +487,24 @@ async def _fetch_team_rosters(team_ids: List[int]) -> Dict[int, dict]:
     }
 
 
+def _apply_roster_snapshots(
+    team_rosters: Dict[int, dict], team_squads: Dict[str, Any]
+) -> None:
+    """Podmienia żywy roster na zamrożony snapshot turnieju, jeśli istnieje.
+
+    Od dnia startu turnieju skład jest zamrażany w data_json
+    (team_squads[id].roster_snapshot) — PDF musi drukować stan z początku
+    turnieju, a nie aktualny beach_teams.roster_json, który mógł się zmienić
+    na baza.zprp.pl w trakcie rozgrywek. Numery (jersey_overrides) zostają
+    żywe — są edytowane w aplikacji podczas turnieju.
+    """
+    for tid, roster_data in team_rosters.items():
+        snap = (team_squads.get(str(tid)) or {}).get("roster_snapshot")
+        if isinstance(snap, dict) and isinstance(snap.get("players"), list):
+            roster_data["roster_json"] = snap.get("players") or []
+            roster_data["companions_json"] = snap.get("companions") or []
+
+
 async def _fetch_user_cities(user_ids: List[int]) -> Dict[int, Tuple[str, str]]:
     """Fetch full_name and city for users by IDs. Returns {id: (full_name, city)}."""
     if not user_ids:
@@ -2378,6 +2396,7 @@ async def generate_bulk_protocols(
     referee_ids = _collect_referee_ids(matches, head_judge_id)
 
     team_rosters = await _fetch_team_rosters(team_ids)
+    _apply_roster_snapshots(team_rosters, team_squads)
     user_cities = await _fetch_user_cities(referee_ids)
 
     tournament_name = req.tournament_name.strip()
@@ -2520,6 +2539,7 @@ async def generate_single_protocol(
     referee_ids = _collect_referee_ids([match], head_judge_id)
 
     team_rosters = await _fetch_team_rosters(team_ids)
+    _apply_roster_snapshots(team_rosters, team_squads)
     user_cities = await _fetch_user_cities(referee_ids)
 
     generated_by = (req.generated_by or "").strip() or await _resolve_generated_by(authorization)
@@ -2646,6 +2666,7 @@ async def generate_filled_single(
     team_ids = _collect_team_ids([schedule_match])
     referee_ids = _collect_referee_ids([schedule_match], head_judge_id)
     team_rosters = await _fetch_team_rosters(team_ids)
+    _apply_roster_snapshots(team_rosters, team_squads)
     user_cities = await _fetch_user_cities(referee_ids)
 
     generated_by = (req.generated_by or "").strip() or await _resolve_generated_by(authorization)
@@ -2783,6 +2804,7 @@ async def generate_filled_bulk(
     team_ids = _collect_team_ids([m for _, m, _ in all_match_objs])
     referee_ids = _collect_referee_ids([m for _, m, _ in all_match_objs], head_judge_id)
     team_rosters = await _fetch_team_rosters(team_ids)
+    _apply_roster_snapshots(team_rosters, team_squads)
     user_cities = await _fetch_user_cities(referee_ids)
 
     generated_by = (req.generated_by or "").strip() or await _resolve_generated_by(authorization)

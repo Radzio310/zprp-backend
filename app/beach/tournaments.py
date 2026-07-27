@@ -1173,15 +1173,39 @@ async def patch_tournament(
             data_eff["invited_ids"] = await _compute_invited_ids_for_badge(badge_eff, data_eff)
         update_data["data_json"] = data_eff
 
-    await database.execute(
-        update(beach_tournaments)
-        .where(beach_tournaments.c.id == tournament_id)
-        .values(**update_data)
+    classification_changed = (
+        existing_d.get("competition_type")
+        != update_data.get(
+            "competition_type", existing_d.get("competition_type")
+        )
+        or existing_d.get("category")
+        != update_data.get("category", existing_d.get("category"))
     )
 
-    row = await database.fetch_one(
-        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
-    )
+    async with database.transaction():
+        await database.execute(
+            update(beach_tournaments)
+            .where(beach_tournaments.c.id == tournament_id)
+            .values(**update_data)
+        )
+
+        row = await database.fetch_one(
+            select(beach_tournaments).where(
+                beach_tournaments.c.id == tournament_id
+            )
+        )
+        if classification_changed:
+            # Import lokalny zapobiega cyklicznemu importowi routerów.
+            from app.beach.standings import (
+                sync_tournament_standings_classification,
+            )
+
+            await sync_tournament_standings_classification(
+                tournament_id,
+                row["competition_type"],
+                row["category"],
+            )
+
     row_d = dict(row)
     data2 = _normalize_event_data(row_d["data_json"])
     if not data2.get("invited_ids"):
@@ -3845,6 +3869,110 @@ async def squad_update_tournament(
     )
 
     return {"success": True}
+
+
+# ─────────────────── Odśwież zamrożony skład (roster_snapshot) ───────────────────
+
+class RosterRefreshRequest(BaseModel):
+    """Ręczne odświeżenie zamrożonego składu drużyny w turnieju."""
+    team_id: int
+
+
+@router.post(
+    "/{tournament_id}/squad-roster-refresh",
+    response_model=dict,
+    summary="Odswiez zamrozony sklad druzyny (snapshot rosteru na turniej)",
+)
+async def refresh_tournament_roster_snapshot(
+    tournament_id: int,
+    body: RosterRefreshRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    """Nadpisuje team_squads[team_id].roster_snapshot aktualnym stanem lokalnej
+    bazy drużyny (beach_teams). Klient przed wywołaniem robi sync z baza.zprp.pl
+    (POST /beach/teams/local/sync/squad), więc snapshot dostaje świeże dane."""
+    existing = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not existing:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+    existing_d = dict(existing)
+    data = _parse_json(existing_d["data_json"])
+
+    # Uprawnienia: admin / gospodarz / sędzia główny / sędziowie turnieju / trener drużyny
+    allowed = await _can_manage_tournament_schedule(data, current_user_id)
+    if not allowed:
+        user_row = await database.fetch_one(
+            select(beach_users.c.roles).where(beach_users.c.id == current_user_id)
+        )
+        roles = (user_row["roles"] or []) if user_row else []
+        if isinstance(roles, str):
+            try:
+                roles = json.loads(roles)
+            except Exception:
+                roles = []
+        allowed = any(
+            isinstance(r, dict)
+            and r.get("type") in ("coach",)
+            and r.get("team_id") == body.team_id
+            for r in roles
+        )
+    if not allowed:
+        raise HTTPException(403, "Wymagane uprawnienia trenera tej druzyny, sedziego, gospodarza lub admina")
+
+    team_row = await database.fetch_one(
+        select(beach_teams).where(beach_teams.c.id == body.team_id)
+    )
+    if not team_row:
+        raise HTTPException(404, "Druzyna nie istnieje")
+
+    from app.beach.teams import build_roster_snapshot
+
+    actor_name = await get_actor_name(current_user_id)
+    snap = build_roster_snapshot(
+        dict(team_row),
+        auto=False,
+        frozen_by=current_user_id,
+        frozen_by_name=actor_name,
+    )
+
+    team_squads: dict = dict(data.get("team_squads") or {})
+    entry: dict = dict(team_squads.get(str(body.team_id)) or {})
+    old_snap = entry.get("roster_snapshot")
+    old_frozen_at = old_snap.get("frozen_at") if isinstance(old_snap, dict) else None
+    entry["roster_snapshot"] = snap
+    team_squads[str(body.team_id)] = entry
+    data["team_squads"] = team_squads
+
+    await database.execute(
+        update(beach_tournaments)
+        .where(beach_tournaments.c.id == tournament_id)
+        .values(data_json=data, updated_at=datetime.now(timezone.utc))
+    )
+
+    await log_activity(
+        area="tournament",
+        action="tournament.roster_snapshot_refreshed",
+        actor_user_id=current_user_id,
+        actor_name=actor_name,
+        target_id=str(tournament_id),
+        target_label=existing_d.get("name", ""),
+        details={
+            "team_id": body.team_id,
+            "team_name": dict(team_row).get("team_name"),
+            "previous_frozen_at": old_frozen_at,
+            "frozen_at": snap["frozen_at"],
+            "players": len(snap["players"]),
+            "companions": len(snap["companions"]),
+        },
+    )
+
+    return {
+        "success": True,
+        "frozen_at": snap["frozen_at"],
+        "players_count": len(snap["players"]),
+        "companions_count": len(snap["companions"]),
+    }
 
 
 # ─────────────────── TITLE IMAGES GALLERY ───────────────────
