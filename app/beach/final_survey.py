@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -161,15 +161,26 @@ def _sanitize_template_question(raw: Dict[str, Any], index: int) -> Dict[str, An
         raise HTTPException(422, f"Pytanie {index + 1} nie ma treści")
     if qid == "schedule" and "sprawiedliw" in title.casefold():
         title = "Układ meczów, czytelność i przebieg terminarza zawodów"
+    if qid == "priorities" and (
+        "trzy najważniejsze obszary do poprawy" in title.casefold()
+        or "trzech najważniejszych obszarów do poprawy" in title.casefold()
+    ):
+        title = "Wybierz i ułóż maksymalnie trzy obszary, na których warto się skupić"
     if len(title) > 240:
         raise HTTPException(422, f"Treść pytania {index + 1} jest za długa")
     section = str(raw.get("section") or "Pozostałe").strip()[:80] or "Pozostałe"
     if section == "Twoim głosem":
         section = "W kilku słowach"
+    description = str(raw.get("description") or "").strip()[:500]
+    if qid == "priorities" and "pierwszy element jest najpilniejszy" in description.casefold():
+        description = (
+            "Możesz wybrać od jednego do trzech obszarów. "
+            "Kolejność pokazuje ich znaczenie."
+        )
     question: Dict[str, Any] = {
         "id": qid,
         "title": title,
-        "description": str(raw.get("description") or "").strip()[:500],
+        "description": description,
         "type": qtype,
         "required": bool(raw.get("required", False)),
         "section": section,
@@ -222,6 +233,8 @@ def _sanitize_template_question(raw: Dict[str, Any], index: int) -> Dict[str, An
             maximum = _as_int(raw.get("max_selections")) or len(options)
             minimum = _as_int(raw.get("min_selections"))
             minimum = (1 if question["required"] else 0) if minimum is None else minimum
+            if qid == "priorities" and minimum == 3 and maximum == 3:
+                minimum = 1
             maximum = max(1, min(maximum, len(options)))
             minimum = max(0, min(minimum, maximum))
             question["min_selections"] = minimum
@@ -398,8 +411,13 @@ def _sanitize_custom_question(raw: Dict[str, Any], index: int) -> Dict[str, Any]
             raise HTTPException(422, f"Pytanie „{title}” wymaga co najmniej dwóch odpowiedzi")
         question["options"] = options
         if qtype in {"multi", "ranking"}:
-            limit = _as_int(raw.get("max_selections")) or len(options)
-            question["max_selections"] = max(1, min(limit, len(options)))
+            maximum = _as_int(raw.get("max_selections")) or len(options)
+            minimum = _as_int(raw.get("min_selections"))
+            minimum = (1 if question["required"] else 0) if minimum is None else minimum
+            maximum = max(1, min(maximum, len(options)))
+            minimum = max(0, min(minimum, maximum))
+            question["min_selections"] = minimum
+            question["max_selections"] = maximum
     elif qtype == "text":
         question["voice"] = True
     return question
@@ -1240,6 +1258,45 @@ async def save_survey_response(
         access,
         await _my_response(tournament_id, current_user_id),
     )
+
+
+@router.delete("/{tournament_id}/response")
+async def delete_survey_response(
+    tournament_id: int,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    tournament, _data, config, access = await _access(tournament_id, current_user_id)
+    if access["phase"] == "closed":
+        raise HTTPException(
+            409,
+            "Po zakończeniu ankiety nie można już usunąć odpowiedzi",
+        )
+
+    existing = await _my_response(tournament_id, current_user_id)
+    if not existing:
+        raise HTTPException(404, "Nie znaleziono odpowiedzi do usunięcia")
+
+    await database.execute(
+        delete(beach_tournament_survey_responses).where(
+            and_(
+                beach_tournament_survey_responses.c.tournament_id == tournament_id,
+                beach_tournament_survey_responses.c.user_id == current_user_id,
+            )
+        )
+    )
+    await log_activity(
+        area="tournament",
+        action="tournament.final_survey_response_deleted",
+        actor_user_id=current_user_id,
+        actor_name=await get_actor_name(current_user_id),
+        target_id=str(tournament_id),
+        target_label=tournament.get("name") or "",
+        details={
+            "previous_status": existing["status"],
+            "answer_count": len(_obj(existing["answers_json"])),
+        },
+    )
+    return _context_payload(tournament, config, access, None)
 
 
 def _matches_filter(

@@ -3268,13 +3268,23 @@ async def parse_excel_squad(
     # znikali z protokołu. Niedopasowani trafiają jako wpisy spoza składu
     # (extra_players) — z nazwiskiem i numerem wprost z pliku.
     roster_in_squad = [p for p in roster if p.get("in_squad", True)]
+    roster_out_squad = [p for p in roster if not p.get("in_squad", True)]
+    _roster_name = lambda r: f"{r.get('last_name', '')} {r.get('first_name', '')}"
     matched_players = []
     for p in players_raw:
-        best_p, score = _best_name_match(
-            p["raw_name"],
-            roster_in_squad,
-            lambda r: f"{r.get('last_name', '')} {r.get('first_name', '')}",
-        )
+        best_p, score = _best_name_match(p["raw_name"], roster_in_squad, _roster_name)
+        # Priorytet dla NIEDODANYCH do składu: jeśli nazwa z pliku pasuje
+        # LEPIEJ do zawodnika spoza składu (in_squad=False), nie podmieniamy
+        # na podobnego zawodnika ze składu (np. RUTKOWSKI Alan ≠ RUTKOWSKI
+        # Kamil) — wiersz zostaje niedopasowany i trafi do protokołu jako
+        # wpis spoza składu. Fuzzy-poprawa literówek działa dalej, ale tylko
+        # gdy nikt spoza składu nie pasuje mocniej.
+        if roster_out_squad:
+            _out_p, out_score = _best_name_match(
+                p["raw_name"], roster_out_squad, _roster_name
+            )
+            if out_score > score:
+                best_p, score = None, 0.0
         matched_players.append({
             "row": p["row"],
             "raw_name": p["raw_name"],

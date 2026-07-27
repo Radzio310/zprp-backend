@@ -156,12 +156,12 @@
     },
     {
       "id": "priorities",
-      "title": "Ułóż trzy najważniejsze obszary do poprawy",
-      "description": "Kolejność ma znaczenie — pierwszy element jest najpilniejszy.",
+      "title": "Wybierz i ułóż maksymalnie trzy obszary, na których warto się skupić",
+      "description": "Możesz wybrać od jednego do trzech obszarów. Kolejność pokazuje ich znaczenie.",
       "type": "ranking",
       "required": true,
       "section": "Podsumowanie",
-      "min_selections": 3,
+      "min_selections": 1,
       "max_selections": 3,
       "enabled_by_default": true,
       "options": [

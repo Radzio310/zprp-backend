@@ -203,7 +203,7 @@ def test_field_judge_is_not_mistaken_for_table_judge():
     assert custom_names == []
 
 
-def test_submit_accepts_one_to_three_strengths_but_requires_three_priorities():
+def test_submit_accepts_flexible_one_to_three_strengths_and_priorities():
     questions = _questions(_default_config())
     answers = _required_answers()
 
@@ -211,7 +211,11 @@ def test_submit_accepts_one_to_three_strengths_but_requires_three_priorities():
     assert normalized["strengths"] == ["courts"]
     assert normalized["priorities"] == ["information", "schedule", "sand"]
 
-    answers["priorities"] = ["information", "schedule"]
+    answers["priorities"] = ["information"]
+    normalized = _validate_answers(answers, questions, submit=True)
+    assert normalized["priorities"] == ["information"]
+
+    answers["priorities"] = ["information", "schedule", "sand", "courts"]
     with pytest.raises(HTTPException) as error:
         _validate_answers(answers, questions, submit=True)
     assert error.value.status_code == 422
