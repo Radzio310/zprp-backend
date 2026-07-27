@@ -3333,14 +3333,22 @@ async def parse_excel_squad(
             t_data = dict(t_row)
             if not matched_team_name:
                 matched_team_name = t_data.get("team_name")
-            raw_roster = t_data.get("roster_json") or []
+            # Zamrożony skład turniejowy: gdy turniej ma roster_snapshot dla tej
+            # drużyny, dopasowujemy do niego — apka i PDF też czytają snapshot,
+            # więc dopasowanie do żywego rosteru tworzyłoby niewidoczne ID-ki.
+            snap = roster_snapshot_of(tour_data, int(matched_team_id))
+            if snap is not None:
+                raw_roster: Any = snap.get("players") or []
+                raw_comp: Any = snap.get("companions") or []
+            else:
+                raw_roster = t_data.get("roster_json") or []
+                raw_comp = t_data.get("companions_json") or []
             if isinstance(raw_roster, str):
                 try:
                     raw_roster = _json.loads(raw_roster)
                 except Exception:
                     raw_roster = []
             roster = [p for p in raw_roster if isinstance(p, dict)]
-            raw_comp = t_data.get("companions_json") or []
             if isinstance(raw_comp, str):
                 try:
                     raw_comp = _json.loads(raw_comp)
