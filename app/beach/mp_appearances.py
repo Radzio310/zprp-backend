@@ -478,7 +478,7 @@ async def assert_protocol_edit_allowed(
         detail={
             "code": "MP_PROTOCOL_SNAPSHOT_LOCKED",
             "message": (
-                "Lista „Do protokołu” została zamrożona z chwilą pierwszego meczu. "
+                "Lista „Do protokołu” została utrwalona z chwilą pierwszego meczu. "
                 "Może ją odświeżyć wyłącznie sędzia główny lub administrator."
             ),
             "snapshot_revision": snapshot.get("revision"),
@@ -773,7 +773,7 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
         "enforcement_active": enforcement_active,
         "preview_only": is_mp and category_enabled and not is_final,
         "disclaimer": (
-            "Zamrożona lista „Do protokołu” jest dowodem administracyjnym, "
+            "Lista zgłoszeniowa „Do protokołu” jest dowodem administracyjnym, "
             "a nie stuprocentowym potwierdzeniem fizycznego udziału w meczu."
         ),
         "counts": counts,
@@ -828,7 +828,7 @@ async def validate_final_player_ids(
             detail={
                 "code": "MP_APPEARANCE_WARNING_ACCEPTANCE_REQUIRED",
                 "message": (
-                    "Podstawa to lista „Do protokołu” licząca ponad 10 zawodników. "
+                    "Podstawa kwalifikacji pochodzi z listy zgłoszeniowej do turnieju. "
                     "Potwierdź ostrzeżenie, aby dodać zawodnika."
                 ),
                 "player_ids": warning,
@@ -1316,7 +1316,7 @@ async def refresh_protocol_snapshot(
     if not can_refresh:
         raise HTTPException(
             403,
-            "Zamrożoną listę może odświeżyć tylko administrator lub właściwy sędzia główny",
+            "Listę zgłoszeniową może odświeżyć tylko administrator lub właściwy sędzia główny",
         )
     snapshot = await create_protocol_snapshot(
         tournament,
