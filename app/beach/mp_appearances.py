@@ -10,17 +10,24 @@ an administrative list is proof of physical participation.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
+import tempfile
 import unicodedata
+import urllib.parse
+import uuid
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, insert, select, update
+from starlette.background import BackgroundTask
 
 from app.beach.activity_log import get_actor_name, log_activity
 from app.beach.capabilities import resolve_user_capabilities
@@ -56,6 +63,41 @@ STATUS_PRIORITY = {
     "insufficient": -10,
 }
 
+MP_EXPORT_DIR = Path(tempfile.gettempdir()) / "mp_appearance_exports"
+MP_TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
+MP_REPORT_TEMPLATE = "wystepy_mp.html"
+MP_CATEGORY_COLORS = {
+    "Senior": "#E85A30",
+    "Junior": "#3A7FBF",
+    "Junior mł.": "#2BA8A0",
+    "Młodzik": "#7A5FC7",
+    "Dzieci": "#D48A25",
+}
+MP_STATUS_LABELS = {
+    "approved_proel": "ProEl zatwierdzony",
+    "finished_proel": "ProEl zakończony",
+    "frozen_confirmed": "Z listy zgłoszeniowej do turnieju",
+    "frozen_warning": "Z listy zgłoszeniowej do turnieju — sprawdź",
+    "missing": "Brak potwierdzenia",
+    "insufficient": "Niewystarczające dane",
+}
+MP_STATUS_COLORS = {
+    "approved_proel": "#34A853",
+    "finished_proel": "#20AFA8",
+    "frozen_confirmed": "#347FD1",
+    "frozen_warning": "#E58A00",
+    "missing": "#D9443E",
+    "insufficient": "#7A7F89",
+}
+MP_STATUS_SHORT_LABELS = {
+    "approved_proel": "ProEl zatwierdzony",
+    "finished_proel": "ProEl zakończony",
+    "frozen_confirmed": "Lista zgłoszeniowa",
+    "frozen_warning": "Lista — sprawdź",
+    "missing": "Brak potwierdzenia",
+    "insufficient": "Za mało danych",
+}
+
 
 def _rollout_at() -> datetime:
     raw = os.getenv("MP_SNAPSHOT_ROLLOUT_AT", "2026-07-27T00:00:00+00:00")
@@ -77,6 +119,23 @@ class MpSettingsUpdate(BaseModel):
 class SnapshotRefreshRequest(BaseModel):
     reason: str = Field(..., min_length=3, max_length=500)
     context_tournament_id: Optional[int] = None
+
+
+class MpReportExportRequest(BaseModel):
+    format: Literal["pdf", "xlsx"]
+    status: Optional[
+        Literal[
+            "approved_proel",
+            "finished_proel",
+            "frozen_confirmed",
+            "frozen_warning",
+            "missing",
+            "insufficient",
+        ]
+    ] = None
+    gender: Literal["all", "K", "M"] = "all"
+    only_issues: bool = False
+    query: str = Field(default="", max_length=120)
 
 
 def _json(raw: Any, fallback: Any = None) -> Any:
@@ -782,6 +841,439 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
     }
 
 
+def _filtered_export_teams(
+    report: Dict[str, Any],
+    body: MpReportExportRequest,
+) -> List[Dict[str, Any]]:
+    query = body.query.strip().casefold()
+    result: List[Dict[str, Any]] = []
+    for team in report.get("teams") or []:
+        if body.gender != "all" and str(team.get("gender") or "") != body.gender:
+            continue
+        players = []
+        for player in team.get("players") or []:
+            status = str(player.get("status") or "")
+            if body.status and status != body.status:
+                continue
+            if body.only_issues and status not in (
+                "missing",
+                "insufficient",
+                "frozen_warning",
+            ):
+                continue
+            searchable = " ".join(
+                (
+                    str(player.get("first_name") or ""),
+                    str(player.get("last_name") or ""),
+                    str(team.get("team_name") or ""),
+                )
+            ).casefold()
+            if query and query not in searchable:
+                continue
+            players.append(dict(player))
+        if players:
+            result.append({**dict(team), "players": players})
+    return result
+
+
+def _safe_export_name(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = "".join(
+        char if char.isalnum() or char in ("-", "_") else "_"
+        for char in ascii_value
+    )
+    return "_".join(part for part in cleaned.split("_") if part)[:60]
+
+
+def _filtered_export_counts(teams: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {status: 0 for status in MP_STATUS_LABELS}
+    for team in teams:
+        for player in team.get("players") or []:
+            status = str(player.get("status") or "")
+            if status in counts:
+                counts[status] += 1
+    return counts
+
+
+def _player_export_name(player: Dict[str, Any]) -> str:
+    return " ".join(
+        part
+        for part in (
+            str(player.get("last_name") or "").upper(),
+            str(player.get("first_name") or ""),
+        )
+        if part
+    )
+
+
+def _player_source_label(player: Dict[str, Any]) -> str:
+    labels: List[str] = []
+    for source in player.get("sources") or []:
+        if source.get("source") == "proel":
+            labels.append(
+                "ProEl: "
+                + str(
+                    source.get("match_number")
+                    or source.get("match_id")
+                    or "mecz"
+                )
+            )
+        else:
+            labels.append(
+                "Lista zgłoszeniowa: "
+                + str(source.get("tournament_name") or "turniej eliminacyjny")
+            )
+    return " | ".join(dict.fromkeys(labels))
+
+
+def _export_filter_label(body: MpReportExportRequest) -> str:
+    values: List[str] = []
+    if body.status:
+        values.append(MP_STATUS_LABELS[body.status])
+    if body.only_issues:
+        values.append("tylko uwagi")
+    if body.gender != "all":
+        values.append("kobiety" if body.gender == "K" else "mężczyźni")
+    if body.query.strip():
+        values.append(f'szukaj: „{body.query.strip()}”')
+    return " · ".join(values) or "pełny raport"
+
+
+def _write_mp_report_xlsx(
+    path: Path,
+    report: Dict[str, Any],
+    teams: List[Dict[str, Any]],
+    body: MpReportExportRequest,
+) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Występy w MP"
+    accent = "20C6BE"
+    dark = "17212B"
+    muted = "64748B"
+    soft = "E8F8F7"
+    border = Border(bottom=Side(style="thin", color="D9E2E8"))
+
+    sheet.merge_cells("A1:G1")
+    sheet["A1"] = "Sprawdź występy w MP"
+    sheet["A1"].font = Font(size=18, bold=True, color=dark)
+    sheet.merge_cells("A2:G2")
+    sheet["A2"] = (
+        f'{report.get("tournament_name") or "Turniej"} · '
+        f'{report.get("category") or ""} · '
+        f'{season_year_label(report.get("season_id"))}'
+    )
+    sheet["A2"].font = Font(size=11, bold=True, color=muted)
+    sheet.merge_cells("A3:G3")
+    sheet["A3"] = f"Zakres: {_export_filter_label(body)}"
+    sheet["A3"].font = Font(size=10, italic=True, color=muted)
+
+    headers = [
+        "Sekcja",
+        "Zawodnik",
+        "Nr",
+        "Do protokołu",
+        "Status",
+        "Kryterium",
+        "Źródło",
+    ]
+    row_index = 5
+    for cell_index, value in enumerate(headers, 1):
+        cell = sheet.cell(row_index, cell_index, value)
+        cell.fill = PatternFill("solid", fgColor=accent)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.alignment = Alignment(vertical="center")
+    sheet.row_dimensions[row_index].height = 24
+
+    for team in teams:
+        row_index += 1
+        sheet.merge_cells(
+            start_row=row_index,
+            start_column=1,
+            end_row=row_index,
+            end_column=7,
+        )
+        team_cell = sheet.cell(row_index, 1, str(team.get("team_name") or "Drużyna"))
+        team_cell.fill = PatternFill("solid", fgColor=soft)
+        team_cell.font = Font(size=12, bold=True, color=dark)
+        team_cell.alignment = Alignment(vertical="center")
+        sheet.row_dimensions[row_index].height = 23
+
+        protocol = [
+            player
+            for player in team.get("players") or []
+            if player.get("selected_for_protocol")
+        ]
+        remaining = [
+            player
+            for player in team.get("players") or []
+            if not player.get("selected_for_protocol")
+        ]
+        for section_label, players in (
+            ("Skład „Do protokołu”", protocol),
+            ("Pozostali zawodnicy", remaining),
+        ):
+            if not players:
+                continue
+            for player_index, player in enumerate(players):
+                row_index += 1
+                values = [
+                    section_label if player_index == 0 else "",
+                    _player_export_name(player),
+                    player.get("jersey_number"),
+                    "TAK" if player.get("selected_for_protocol") else "NIE",
+                    MP_STATUS_LABELS.get(
+                        str(player.get("status") or ""),
+                        str(player.get("status") or ""),
+                    ),
+                    "Spełnia" if player.get("eligible") else "Nie spełnia",
+                    _player_source_label(player),
+                ]
+                for column, value in enumerate(values, 1):
+                    cell = sheet.cell(row_index, column, value)
+                    cell.border = border
+                    cell.alignment = Alignment(
+                        vertical="top",
+                        wrap_text=column in (1, 5, 7),
+                    )
+                    if column == 6:
+                        cell.font = Font(
+                            bold=True,
+                            color="16803A" if player.get("eligible") else "C9382A",
+                        )
+
+    if not teams:
+        row_index += 1
+        sheet.merge_cells(
+            start_row=row_index,
+            start_column=1,
+            end_row=row_index,
+            end_column=7,
+        )
+        sheet.cell(row_index, 1, "Brak wyników dla wybranych filtrów")
+
+    widths = {
+        "A": 25,
+        "B": 30,
+        "C": 8,
+        "D": 15,
+        "E": 32,
+        "F": 14,
+        "G": 48,
+    }
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+    sheet.freeze_panes = "A6"
+    sheet.sheet_view.showGridLines = False
+
+    sources_sheet = workbook.create_sheet("Źródła eliminacyjne")
+    source_headers = [
+        "Turniej",
+        "Drużyna",
+        "Mecze rozegrane",
+        "ProEl zakończony",
+        "Pełne pokrycie ProEl",
+        "Lista zgłoszeniowa",
+    ]
+    for column, value in enumerate(source_headers, 1):
+        cell = sources_sheet.cell(1, column, value)
+        cell.fill = PatternFill("solid", fgColor=accent)
+        cell.font = Font(bold=True, color="FFFFFF")
+    for row_number, source in enumerate(report.get("sources") or [], 2):
+        values = [
+            source.get("tournament_name"),
+            source.get("team_name"),
+            source.get("played_matches"),
+            source.get("completed_proel_matches"),
+            "TAK" if source.get("proel_coverage_complete") else "NIE",
+            "TAK" if source.get("fallback_snapshot_used") else "NIE",
+        ]
+        for column, value in enumerate(values, 1):
+            sources_sheet.cell(row_number, column, value)
+    for column, width in zip("ABCDEF", (38, 30, 17, 18, 20, 22)):
+        sources_sheet.column_dimensions[column].width = width
+    sources_sheet.freeze_panes = "A2"
+    sources_sheet.sheet_view.showGridLines = False
+    workbook.save(path)
+
+
+def _load_mp_report_logo() -> str:
+    logo_path = MP_TEMPLATE_DIR / "baza_beach_logo.png"
+    if not logo_path.exists():
+        return ""
+    try:
+        return base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    except Exception:
+        logger.exception("Could not load BAZA Beach logo for MP report")
+        return ""
+
+
+def _mp_pdf_player_source(source: Dict[str, Any]) -> Dict[str, str]:
+    if source.get("source") == "proel":
+        match_label = (
+            source.get("match_number")
+            or source.get("match_id")
+            or "mecz"
+        )
+        return {
+            "kind": "proel",
+            "label": (
+                f'{source.get("tournament_name") or "Turniej eliminacyjny"}'
+                f" · ProEl {match_label}"
+            ),
+        }
+    return {
+        "kind": "list",
+        "label": (
+            f'{source.get("tournament_name") or "Turniej eliminacyjny"}'
+            " · lista zgłoszeniowa do turnieju"
+        ),
+    }
+
+
+def _build_mp_pdf_context(
+    report: Dict[str, Any],
+    teams: List[Dict[str, Any]],
+    body: MpReportExportRequest,
+) -> Dict[str, Any]:
+    counts = _filtered_export_counts(teams)
+    category = str(report.get("category") or "")
+    accent = MP_CATEGORY_COLORS.get(category, "#20AFA8")
+    team_context: List[Dict[str, Any]] = []
+
+    for team in teams:
+        protocol = [
+            player
+            for player in team.get("players") or []
+            if player.get("selected_for_protocol")
+        ]
+        remaining = [
+            player
+            for player in team.get("players") or []
+            if not player.get("selected_for_protocol")
+        ]
+
+        def player_context(player: Dict[str, Any]) -> Dict[str, Any]:
+            status = str(player.get("status") or "")
+            return {
+                "name": _player_export_name(player),
+                "jersey_number": player.get("jersey_number"),
+                "eligible": bool(player.get("eligible")),
+                "status_label": MP_STATUS_LABELS.get(status, status),
+                "status_color": MP_STATUS_COLORS.get(status, "#7A7F89"),
+                "sources": [
+                    _mp_pdf_player_source(dict(source))
+                    for source in player.get("sources") or []
+                    if isinstance(source, dict)
+                ],
+            }
+
+        protocol_context = [player_context(player) for player in protocol]
+        remaining_context = [player_context(player) for player in remaining]
+        sections = []
+        if protocol_context:
+            sections.append({
+                "label": "Skład „Do protokołu”",
+                "primary": True,
+                "players": protocol_context,
+            })
+        if remaining_context:
+            sections.append({
+                "label": "Pozostali zawodnicy",
+                "primary": False,
+                "players": remaining_context,
+            })
+        gender = str(team.get("gender") or "")
+        team_context.append({
+            "team_name": team.get("team_name") or "Drużyna",
+            "gender_label": (
+                "Kobiety"
+                if gender == "K"
+                else "Mężczyźni" if gender == "M" else "Drużyna"
+            ),
+            "gender_color": (
+                "#E85A78"
+                if gender == "K"
+                else "#2BA8A0" if gender == "M" else accent
+            ),
+            "protocol": protocol_context,
+            "remaining": remaining_context,
+            "sections": sections,
+        })
+
+    sources = []
+    for source in report.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        complete = bool(source.get("proel_coverage_complete"))
+        sources.append({
+            "team_name": source.get("team_name") or "Drużyna",
+            "tournament_name": source.get("tournament_name") or "Turniej eliminacyjny",
+            "played_matches": int(source.get("played_matches") or 0),
+            "completed_proel_matches": int(
+                source.get("completed_proel_matches") or 0
+            ),
+            "fallback_snapshot_used": bool(
+                source.get("fallback_snapshot_used")
+            ),
+            "color": "#20AFA8" if complete else "#347FD1",
+        })
+
+    return {
+        "tournament_name": report.get("tournament_name") or "Turniej",
+        "category": category,
+        "season_year": season_year_label(report.get("season_id")),
+        "accent": accent,
+        "filter_label": _export_filter_label(body),
+        "players_count": sum(
+            len(team.get("players") or []) for team in teams
+        ),
+        "teams_count": len(teams),
+        "status_cards": [
+            {
+                "status": status,
+                "label": MP_STATUS_SHORT_LABELS[status],
+                "color": MP_STATUS_COLORS[status],
+                "count": counts[status],
+            }
+            for status in MP_STATUS_LABELS
+        ],
+        "teams": team_context,
+        "sources": sources,
+        "disclaimer": report.get("disclaimer") or "",
+        "generated_at": datetime.now(WARSAW).strftime("%d.%m.%Y %H:%M"),
+        "logo_b64": _load_mp_report_logo(),
+    }
+
+
+def _write_mp_report_pdf(
+    path: Path,
+    report: Dict[str, Any],
+    teams: List[Dict[str, Any]],
+    body: MpReportExportRequest,
+) -> None:
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    import weasyprint
+
+    template_path = MP_TEMPLATE_DIR / MP_REPORT_TEMPLATE
+    if not template_path.exists():
+        raise FileNotFoundError(f"Brak szablonu: {MP_REPORT_TEMPLATE}")
+    environment = Environment(
+        loader=FileSystemLoader(str(MP_TEMPLATE_DIR)),
+        autoescape=select_autoescape(("html", "xml")),
+    )
+    template = environment.get_template(MP_REPORT_TEMPLATE)
+    document = template.render(**_build_mp_pdf_context(report, teams, body))
+    weasyprint.HTML(
+        string=document,
+        base_url=str(MP_TEMPLATE_DIR),
+    ).write_pdf(str(path))
+
+
 async def validate_final_player_ids(
     tournament_row: Dict[str, Any],
     team_id: int,
@@ -1274,6 +1766,81 @@ async def get_tournament_report(
     if not await _can_view_report(dict(row), current_user_id):
         raise HTTPException(403, "Brak dostępu do dokumentów tego turnieju")
     return await build_tournament_report(tournament_id)
+
+
+@router.post("/tournaments/{tournament_id}/export", response_model=dict)
+async def generate_tournament_report_export(
+    tournament_id: int,
+    body: MpReportExportRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    row = await database.fetch_one(
+        select(beach_tournaments).where(beach_tournaments.c.id == tournament_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono turnieju")
+    if not await _can_view_report(dict(row), current_user_id):
+        raise HTTPException(403, "Brak dostępu do dokumentów tego turnieju")
+
+    report = await build_tournament_report(tournament_id)
+    teams = _filtered_export_teams(report, body)
+    MP_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    token = str(uuid.uuid4())
+    export_path = MP_EXPORT_DIR / f"{token}.{body.format}"
+    try:
+        if body.format == "pdf":
+            _write_mp_report_pdf(export_path, report, teams, body)
+        else:
+            _write_mp_report_xlsx(export_path, report, teams, body)
+    except Exception as error:
+        export_path.unlink(missing_ok=True)
+        logger.exception("MP appearance report export failed")
+        raise HTTPException(500, f"Nie udało się wygenerować raportu: {error}")
+
+    safe_tournament = _safe_export_name(report.get("tournament_name")) or "turniej"
+    filename = (
+        f"wystepy_mp_{safe_tournament}_{season_year_label(report.get('season_id'))}"
+        f".{body.format}"
+    )
+    return {
+        "success": True,
+        "format": body.format,
+        "download_url": (
+            f"/beach/mp-appearances/export/download/{token}"
+            f"?format={body.format}&filename={urllib.parse.quote(filename)}"
+        ),
+        "teams_count": len(teams),
+        "players_count": sum(len(team.get("players") or []) for team in teams),
+    }
+
+
+@router.get("/export/download/{token}")
+async def download_tournament_report_export(
+    token: str,
+    format: Literal["pdf", "xlsx"] = Query(...),
+    filename: str = Query("wystepy_mp"),
+):
+    try:
+        uuid.UUID(token)
+    except ValueError:
+        raise HTTPException(400, "Nieprawidłowy token")
+    export_path = MP_EXPORT_DIR / f"{token}.{format}"
+    if not export_path.exists():
+        raise HTTPException(404, "Plik wygasł lub nie istnieje")
+    media_type = (
+        "application/pdf"
+        if format == "pdf"
+        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    download_name = Path(filename).name
+    if not download_name.lower().endswith(f".{format}"):
+        download_name = f"{download_name}.{format}"
+    return FileResponse(
+        path=export_path,
+        media_type=media_type,
+        filename=download_name,
+        background=BackgroundTask(lambda: export_path.unlink(missing_ok=True)),
+    )
 
 
 @router.post(

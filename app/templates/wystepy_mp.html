@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Występy w MP – {{ tournament_name }}</title>
+<style>
+  @page {
+    size: A4 landscape;
+    margin: 13mm 12mm 15mm 12mm;
+    @bottom-left {
+      content: "BAZA Beach · Sprawdź występy w MP";
+      font-size: 7.2pt;
+      color: #9298a2;
+      font-family: "DejaVu Sans", sans-serif;
+    }
+    @bottom-right {
+      content: "Strona " counter(page) " z " counter(pages);
+      font-size: 7.2pt;
+      color: #9298a2;
+      font-family: "DejaVu Sans", sans-serif;
+    }
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", sans-serif;
+    color: #1a2030;
+    font-size: 8.5pt;
+    line-height: 1.35;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    min-height: 63pt;
+    padding-bottom: 9pt;
+    margin-bottom: 9pt;
+    border-bottom: 2.5pt solid {{ accent }};
+  }
+  .logo-wrap { width: 78pt; flex-shrink: 0; }
+  .logo { display: block; width: 68pt; height: auto; }
+  .title-wrap { flex: 1; text-align: center; padding: 0 12pt; }
+  .eyebrow {
+    color: {{ accent }};
+    font-size: 7.4pt;
+    font-weight: 900;
+    letter-spacing: 1.1pt;
+    text-transform: uppercase;
+  }
+  h1 {
+    margin-top: 2pt;
+    color: #171d2d;
+    font-size: 18pt;
+    font-weight: 900;
+    letter-spacing: .2pt;
+  }
+  .tournament {
+    margin-top: 2pt;
+    color: #40485a;
+    font-size: 10pt;
+    font-weight: 800;
+  }
+  .header-meta {
+    width: 78pt;
+    flex-shrink: 0;
+    text-align: right;
+    color: #697184;
+    font-size: 7.5pt;
+    line-height: 1.55;
+  }
+  .header-meta strong {
+    display: block;
+    color: #252c3d;
+    font-size: 8.6pt;
+  }
+
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    padding: 6pt 8pt;
+    margin-bottom: 8pt;
+    border: .7pt solid {{ accent }}44;
+    border-radius: 6pt;
+    background: {{ accent }}0C;
+  }
+  .filter-label {
+    flex: 1;
+    color: #596173;
+    font-size: 7.8pt;
+  }
+  .filter-label strong { color: #252c3d; }
+  .filter-total {
+    color: {{ accent }};
+    font-size: 8.2pt;
+    font-weight: 900;
+  }
+
+  .summary-grid {
+    display: flex;
+    gap: 5pt;
+    margin-bottom: 10pt;
+  }
+  .summary-card {
+    flex: 1;
+    min-width: 0;
+    padding: 6pt 6pt 5pt;
+    border: .65pt solid var(--status-color);
+    border-radius: 6pt;
+    background: var(--status-bg);
+  }
+  .summary-value {
+    color: var(--status-color);
+    font-size: 14pt;
+    font-weight: 900;
+    line-height: 1;
+  }
+  .summary-label {
+    margin-top: 3pt;
+    color: #525a6b;
+    font-size: 6.6pt;
+    font-weight: 800;
+    line-height: 1.2;
+  }
+
+  .team-card {
+    margin-bottom: 9pt;
+    border: .7pt solid #dce3e9;
+    border-radius: 7pt;
+    overflow: hidden;
+    break-inside: avoid;
+  }
+  .team-head {
+    display: flex;
+    align-items: center;
+    min-height: 30pt;
+    padding: 5pt 8pt;
+    border-left: 4pt solid var(--gender-color);
+    background: var(--gender-bg);
+  }
+  .team-title {
+    flex: 1;
+    color: #171d2d;
+    font-size: 10.5pt;
+    font-weight: 900;
+  }
+  .team-gender {
+    padding: 2pt 6pt;
+    border: .6pt solid var(--gender-color);
+    border-radius: 10pt;
+    color: var(--gender-color);
+    font-size: 6.5pt;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+  .team-counts {
+    margin-left: 8pt;
+    color: #687184;
+    font-size: 7pt;
+    font-weight: 700;
+  }
+
+  .section-label {
+    display: flex;
+    align-items: center;
+    padding: 5pt 8pt 3pt;
+    color: #4b566a;
+    font-size: 6.9pt;
+    font-weight: 900;
+    letter-spacing: .55pt;
+    text-transform: uppercase;
+  }
+  .section-label.primary { color: var(--gender-color); }
+  .section-label .line {
+    flex: 1;
+    height: .55pt;
+    margin-left: 7pt;
+    background: #e1e6eb;
+  }
+  .section-label .number {
+    margin-left: 7pt;
+    color: #8a919d;
+  }
+
+  table {
+    width: calc(100% - 12pt);
+    margin: 0 6pt 5pt;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+  th {
+    padding: 3.2pt 4pt;
+    color: #727b8c;
+    background: #f4f6f8;
+    border-bottom: .65pt solid #dfe5ea;
+    font-size: 6.2pt;
+    font-weight: 900;
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: .25pt;
+  }
+  td {
+    padding: 3.8pt 4pt;
+    border-bottom: .5pt solid #e9edf0;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  .col-player { width: 22%; }
+  .col-number { width: 5%; text-align: center; }
+  .col-status { width: 24%; }
+  .col-result { width: 10%; }
+  .col-source { width: 39%; }
+  .player-name { color: #252c3d; font-weight: 850; }
+  .jersey { text-align: center; color: #687184; font-weight: 800; }
+  .status-pill {
+    display: inline-block;
+    padding: 1.7pt 5pt;
+    border: .55pt solid var(--status-color);
+    border-radius: 9pt;
+    color: var(--status-color);
+    background: var(--status-bg);
+    font-size: 6.5pt;
+    font-weight: 850;
+  }
+  .result {
+    font-size: 7pt;
+    font-weight: 900;
+  }
+  .result.ok { color: #238443; }
+  .result.no { color: #cf433d; }
+  .source { color: #687184; font-size: 6.8pt; line-height: 1.35; }
+  .source-item + .source-item { margin-top: 1.5pt; }
+  .source-proel { color: #177d77; font-weight: 750; }
+  .source-list { color: #4f78aa; font-weight: 750; }
+
+  .empty {
+    padding: 22pt;
+    border: .8pt dashed #ccd4dc;
+    border-radius: 7pt;
+    color: #7b8390;
+    text-align: center;
+    font-size: 9pt;
+  }
+
+  .sources-title {
+    margin-top: 12pt;
+    padding-top: 7pt;
+    border-top: 1.2pt solid {{ accent }}55;
+    color: {{ accent }};
+    font-size: 9pt;
+    font-weight: 900;
+    letter-spacing: .6pt;
+    text-transform: uppercase;
+    break-after: avoid;
+  }
+  .sources-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5pt;
+    margin-top: 5pt;
+  }
+  .source-card {
+    width: calc(33.333% - 3.5pt);
+    min-height: 34pt;
+    padding: 5pt 6pt;
+    border: .6pt solid #dce3e9;
+    border-left: 2.5pt solid var(--source-color);
+    border-radius: 5pt;
+    background: #fafbfc;
+    break-inside: avoid;
+  }
+  .source-team {
+    color: #283043;
+    font-size: 7.4pt;
+    font-weight: 900;
+  }
+  .source-tournament {
+    margin-top: 1.5pt;
+    color: #747d8c;
+    font-size: 6.4pt;
+  }
+  .source-coverage {
+    margin-top: 2pt;
+    color: var(--source-color);
+    font-size: 6.5pt;
+    font-weight: 850;
+  }
+
+  .disclaimer {
+    margin-top: 10pt;
+    padding: 6pt 8pt;
+    border: .65pt solid #e8b24d66;
+    border-radius: 5pt;
+    background: #fff8e9;
+    color: #7a6335;
+    font-size: 7pt;
+    line-height: 1.4;
+  }
+  .generated {
+    margin-top: 6pt;
+    color: #969ca6;
+    font-size: 6.7pt;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <header class="header">
+    <div class="logo-wrap">
+      {% if logo_b64 %}
+      <img class="logo" src="data:image/png;base64,{{ logo_b64 }}" alt="BAZA Beach">
+      {% endif %}
+    </div>
+    <div class="title-wrap">
+      <div class="eyebrow">Mistrzostwa Polski · weryfikacja eliminacji</div>
+      <h1>Sprawdź występy w MP</h1>
+      <div class="tournament">{{ tournament_name }}</div>
+    </div>
+    <div class="header-meta">
+      <strong>{{ category }}</strong>
+      Sezon {{ season_year }}<br>
+      {{ teams_count }} drużyn · {{ players_count }} zawodników
+    </div>
+  </header>
+
+  <div class="filter-bar">
+    <div class="filter-label">Zakres raportu: <strong>{{ filter_label }}</strong></div>
+    <div class="filter-total">{{ players_count }} wyników w eksporcie</div>
+  </div>
+
+  <div class="summary-grid">
+    {% for card in status_cards %}
+    <div class="summary-card" style="--status-color: {{ card.color }}; --status-bg: {{ card.color }}12;">
+      <div class="summary-value">{{ card.count }}</div>
+      <div class="summary-label">{{ card.label }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if teams %}
+    {% for team in teams %}
+    <section class="team-card" style="--gender-color: {{ team.gender_color }}; --gender-bg: {{ team.gender_color }}0D;">
+      <div class="team-head">
+        <div class="team-title">{{ team.team_name }}</div>
+        <div class="team-gender">{{ team.gender_label }}</div>
+        <div class="team-counts">Do protokołu: {{ team.protocol|length }} · pozostali: {{ team.remaining|length }}</div>
+      </div>
+
+      {% for section in team.sections %}
+      <div class="section-label{% if section.primary %} primary{% endif %}">
+        {{ section.label }}
+        <span class="line"></span>
+        <span class="number">{{ section.players|length }}</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th class="col-player">Zawodnik</th>
+            <th class="col-number">Nr</th>
+            <th class="col-status">Status</th>
+            <th class="col-result">Kryterium</th>
+            <th class="col-source">Źródło</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for player in section.players %}
+          <tr>
+            <td class="player-name">{{ player.name }}</td>
+            <td class="jersey">{{ player.jersey_number or "—" }}</td>
+            <td>
+              <span class="status-pill" style="--status-color: {{ player.status_color }}; --status-bg: {{ player.status_color }}10;">
+                {{ player.status_label }}
+              </span>
+            </td>
+            <td class="result {% if player.eligible %}ok{% else %}no{% endif %}">
+              {% if player.eligible %}Spełnia{% else %}Nie spełnia{% endif %}
+            </td>
+            <td class="source">
+              {% if player.sources %}
+                {% for source in player.sources %}
+                <div class="source-item {% if source.kind == 'proel' %}source-proel{% else %}source-list{% endif %}">
+                  {{ source.label }}
+                </div>
+                {% endfor %}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endfor %}
+    </section>
+    {% endfor %}
+  {% else %}
+    <div class="empty">Brak wyników dla wybranych filtrów.</div>
+  {% endif %}
+
+  {% if sources %}
+  <div class="sources-title">Źródła eliminacyjne</div>
+  <div class="sources-grid">
+    {% for source in sources %}
+    <div class="source-card" style="--source-color: {{ source.color }};">
+      <div class="source-team">{{ source.team_name }}</div>
+      <div class="source-tournament">{{ source.tournament_name }}</div>
+      <div class="source-coverage">
+        ProEl {{ source.completed_proel_matches }}/{{ source.played_matches }}
+        {% if source.fallback_snapshot_used %} · lista zgłoszeniowa{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if disclaimer %}
+  <div class="disclaimer">{{ disclaimer }}</div>
+  {% endif %}
+  <div class="generated">Wygenerowano w aplikacji BAZA Beach · {{ generated_at }}</div>
+</body>
+</html>
