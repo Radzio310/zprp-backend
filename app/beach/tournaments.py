@@ -95,6 +95,7 @@ class SquadUpdateRequest(BaseModel):
     match_id: Optional[str] = None                   # jeśli override dla konkretnego meczu
     match_players: Optional[List] = None
     match_companions: Optional[List] = None
+    match_extra_players: Optional[List] = None       # per-meczowa selekcja spoza rosteru: {name, number, selected}
     match_companion_roles: Optional[Dict[str, str]] = None  # personId(str) → "A"|"B"|"C"|"D"
     signature_url: Optional[str] = None              # per-match coach signature URL
 
@@ -3716,6 +3717,8 @@ async def squad_update_tournament(
             override["players"] = body.match_players
         if body.match_companions is not None:
             override["companions"] = body.match_companions
+        if body.match_extra_players is not None:
+            override["extra_players"] = body.match_extra_players
         if body.match_companion_roles is not None:
             override["companion_roles"] = body.match_companion_roles
         if body.signature_url is not None:
@@ -3755,6 +3758,7 @@ async def squad_update_tournament(
         override_fields = {
             "players": "match_players",
             "companions": "match_companions",
+            "extra_players": "match_extra_players",
             "companion_roles": "match_companion_roles",
         }
         for stored_field, display_field in override_fields.items():

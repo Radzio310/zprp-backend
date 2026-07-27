@@ -1069,9 +1069,17 @@ def _fill_regular_team_squad(
     # Zawodnicy spoza rosteru drużyny (import protokołu z Excela) — dopisywani
     # po zawodnikach z bazy, z surową nazwą i numerem z pliku.
     # selected=False (odznaczony w aplikacji) → pomijany na kartce.
+    # Trener mógł zapisać per-meczową selekcję (match_overrides.extra_players) —
+    # wtedy dla tego meczu wygrywa ona nad flagami z protocol_extra_players.
+    mo_extra_players = match_override.get("extra_players")
+    extra_source = (
+        mo_extra_players
+        if isinstance(mo_extra_players, list)
+        else (squad_entry.get("protocol_extra_players") or [])
+    )
     extra_players = [
         e
-        for e in (squad_entry.get("protocol_extra_players") or [])
+        for e in extra_source
         if isinstance(e, dict)
         and str(e.get("name") or "").strip()
         and e.get("selected", True)
