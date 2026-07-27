@@ -3195,6 +3195,7 @@ def _reconcile_teams_with_invited(
                 unmatched.append(v["name"])
 
     fixes: List[str] = []
+    old_to_new: Dict[Any, Any] = {}  # id nadane przez AI → poprawne id (do zachowania kolejności grup)
     for m in matches:
         gender = m.get("gender")
         for slot in ("teamA", "teamB"):
@@ -3205,6 +3206,9 @@ def _reconcile_teams_with_invited(
             key = f"{g}::{_normalize_team_name(str(team['name']).strip())}"
             match = resolve.get(key)
             if match:
+                old_id = team.get("id")
+                if old_id is not None:
+                    old_to_new[old_id] = match["id"]
                 if team.get("id") != match["id"]:
                     suffix = " (przez eliminację — sprawdź)" if key in resolved_by_elim else ""
                     fixes.append(f'Dopasowano „{team.get("name")}” → „{match["team_name"]}”{suffix}')
@@ -3217,18 +3221,30 @@ def _reconcile_teams_with_invited(
         "assigned": {t["id"] for t in resolve.values()},
         "unmatched": list(dict.fromkeys(unmatched)),
         "fixes": list(dict.fromkeys(fixes)),
+        "old_to_new": old_to_new,
     }
 
 
-def _rebuild_groups_from_matches(schedule: dict) -> None:
+def _rebuild_groups_from_matches(
+    schedule: dict, old_to_new: Optional[Dict[Any, Any]] = None
+) -> None:
     """
     Odbuduj `config.groups` z FAKTYCZNYCH meczów grupowych, żeby podział na grupy
     zawsze zgadzał się ze składem meczów (koniec z „drużyna gra, ale nie ma jej w grupie”).
-    Nadpisuje tylko te płcie, które mają mecze grupowe.
+
+    Kolejność drużyn w grupie = ROZSTAWIENIE z dokumentu (kolejność, w jakiej AI podało
+    je w `config.groups`, zmapowane na poprawne id), a dopiero na końcu ewentualne braki
+    wg kolejności z meczów. Dzięki temu tabela w ResultsView (sortowana wg tej kolejności
+    przed wynikami) pokazuje drużyny w rozstawieniu — dla 2 grup: A = miejsca 1,4,5,8,
+    B = 2,3,6,7. Nadpisuje tylko te płcie, które mają mecze grupowe.
     """
+    old_to_new = old_to_new or {}
     matches = schedule.get("matches") or []
     config = schedule.get("config") or {}
-    rebuilt: Dict[str, Dict[str, List[int]]] = {"M": {}, "K": {}}
+    ai_groups = config.get("groups") or {}
+
+    # Faktyczni członkowie grup wg meczów (już z poprawnymi id), w kolejności wystąpienia.
+    members: Dict[str, Dict[str, List[int]]] = {"M": {}, "K": {}}
     for m in matches:
         if m.get("stage") != "group":
             continue
@@ -3239,15 +3255,35 @@ def _rebuild_groups_from_matches(schedule: dict) -> None:
         for slot in ("teamA", "teamB"):
             team = m.get(slot)
             if isinstance(team, dict) and team.get("id"):
-                lst = rebuilt[gender].setdefault(str(group), [])
+                lst = members[gender].setdefault(str(group), [])
                 if team["id"] not in lst:
                     lst.append(team["id"])
 
-    groups_cfg = config.get("groups") or {}
+    groups_cfg = dict(ai_groups)
     for gender in ("M", "K"):
-        if rebuilt[gender]:
-            teams_sorted = {g: rebuilt[gender][g] for g in sorted(rebuilt[gender].keys())}
-            groups_cfg[gender] = {"count": len(teams_sorted), "teams": teams_sorted}
+        if not members[gender]:
+            continue
+        ai_gender = ai_groups.get(gender) if isinstance(ai_groups.get(gender), dict) else {}
+        ai_teams = (ai_gender or {}).get("teams") or {}
+        ordered_groups: Dict[str, List[int]] = {}
+        for group_letter in sorted(members[gender].keys()):
+            member_ids = members[gender][group_letter]
+            member_set = set(member_ids)
+            ordered: List[int] = []
+            seen: set = set()
+            # 1) kolejność ROZSTAWIENIA z dokumentu (AI), zmapowana na poprawne id
+            for old_id in ai_teams.get(group_letter, []) or []:
+                new_id = old_to_new.get(old_id, old_id)
+                if new_id in member_set and new_id not in seen:
+                    ordered.append(new_id)
+                    seen.add(new_id)
+            # 2) reszta (gdyby czegoś brakowało w rozstawieniu AI) — wg kolejności z meczów
+            for nid in member_ids:
+                if nid not in seen:
+                    ordered.append(nid)
+                    seen.add(nid)
+            ordered_groups[group_letter] = ordered
+        groups_cfg[gender] = {"count": len(ordered_groups), "teams": ordered_groups}
     config["groups"] = groups_cfg
     schedule["config"] = config
 
@@ -3580,7 +3616,7 @@ Odpowiedz WYŁĄCZNIE poprawnym JSON-em z kluczami:
     # ── Deterministyczne dopasowanie drużyn 1:1 do zaproszonych (siatka bezpieczeństwa
     #    nad AI: koryguje różne prefiksy klubu, literówki, kolizje id) + odbudowa grup ──
     recon = _reconcile_teams_with_invited(schedule, invited_teams)
-    _rebuild_groups_from_matches(schedule)
+    _rebuild_groups_from_matches(schedule, recon.get("old_to_new"))
 
     # Ostrzeżenia i metadane dopasowania pochodzą teraz z rekonsyliacji, nie z AI.
     warnings = [
