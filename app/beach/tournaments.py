@@ -1791,6 +1791,89 @@ def _normalized_match_sets(value: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _schedule_match_for_proel_row(
+    schedule: Any,
+    proel_row: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(schedule, dict):
+        return None
+    schedule_match_id = str(proel_row.get("schedule_match_id") or "")
+    match_number = str(proel_row.get("match_number") or "")
+    for match in schedule.get("matches") or []:
+        if not isinstance(match, dict):
+            continue
+        if schedule_match_id and str(match.get("id") or "") == schedule_match_id:
+            return match
+        if match_number and str(match.get("matchNumber") or "") == match_number:
+            return match
+    return None
+
+
+def _match_head_judge_ref(match: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(match, dict):
+        return None
+    referees = match.get("referees")
+    if not isinstance(referees, dict):
+        return None
+    value = referees.get("headJudge")
+    return value if isinstance(value, dict) else None
+
+
+async def _sync_manual_head_judges_to_proel(
+    *,
+    old_schedule: Any,
+    new_schedule: Any,
+    proel_rows: List[Any],
+) -> int:
+    pending_updates: List[tuple[str, Dict[str, Any]]] = []
+    for raw_row in proel_rows:
+        row = dict(raw_row)
+        old_match = _schedule_match_for_proel_row(old_schedule, row)
+        new_match = _schedule_match_for_proel_row(new_schedule, row)
+        if new_match is None:
+            continue
+        old_ref = _match_head_judge_ref(old_match)
+        new_ref = _match_head_judge_ref(new_match)
+        old_identity = (
+            old_ref.get("id"),
+            str(old_ref.get("name") or "").strip(),
+        ) if old_ref else (None, "")
+        new_identity = (
+            new_ref.get("id"),
+            str(new_ref.get("name") or "").strip(),
+        ) if new_ref else (None, "")
+        if old_identity == new_identity:
+            continue
+        if str(row.get("status") or "").upper() == "APPROVED":
+            raise HTTPException(
+                423,
+                "Nie można zmienić sędziego głównego meczu po zatwierdzeniu protokołu.",
+            )
+
+        proel_data = copy.deepcopy(row.get("data_json"))
+        if not isinstance(proel_data, dict):
+            proel_data = {}
+        match_config = proel_data.get("matchConfig")
+        match_config = dict(match_config) if isinstance(match_config, dict) else {}
+        referees = match_config.get("referees")
+        referees = dict(referees) if isinstance(referees, dict) else {}
+        referees["headJudge"] = new_identity[1] or None
+        match_config["referees"] = referees
+        proel_data["matchConfig"] = match_config
+        pending_updates.append((str(row["match_number"]), proel_data))
+
+    for match_number, proel_data in pending_updates:
+        await database.execute(
+            update(beach_proel_matches)
+            .where(beach_proel_matches.c.match_number == match_number)
+            .values(
+                data_json=proel_data,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+    return len(pending_updates)
+
+
 def _score_team_name(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("name") or "TBD")
@@ -2133,6 +2216,7 @@ async def schedule_update_tournament(
 
     # Capture old schedule before overwriting (for diff-based notifications)
     old_schedule = data.get("schedule") if isinstance(data.get("schedule"), dict) else None
+    proel_rows_for_head_sync: List[Any] = []
 
     # Basic sanity check
     if body.schedule is not None:
@@ -2165,57 +2249,17 @@ async def schedule_update_tournament(
             select(
                 beach_proel_matches.c.schedule_match_id,
                 beach_proel_matches.c.match_number,
+                beach_proel_matches.c.status,
+                beach_proel_matches.c.data_json,
             ).where(beach_proel_matches.c.tournament_id == tournament_id)
         )
+        proel_rows_for_head_sync = list(proel_rows)
         protected_match_keys = {
             str(value)
             for row in proel_rows
             for value in (row["schedule_match_id"], row["match_number"])
             if value
         }
-        if protected_match_keys and isinstance(existing_schedule, dict):
-            old_matches = {
-                str(key): match
-                for match in existing_schedule.get("matches") or []
-                if isinstance(match, dict)
-                for key in (match.get("id"), match.get("matchNumber"))
-                if key
-            }
-            for match in new_schedule.get("matches") or []:
-                if not isinstance(match, dict):
-                    continue
-                keys = {
-                    str(value)
-                    for value in (match.get("id"), match.get("matchNumber"))
-                    if value
-                }
-                if not (keys & protected_match_keys):
-                    continue
-                old_match = next(
-                    (old_matches.get(key) for key in keys if old_matches.get(key)),
-                    None,
-                )
-                if not isinstance(old_match, dict):
-                    continue
-                old_refs = (
-                    old_match.get("referees")
-                    if isinstance(old_match.get("referees"), dict)
-                    else {}
-                )
-                new_refs = (
-                    dict(match.get("referees"))
-                    if isinstance(match.get("referees"), dict)
-                    else {}
-                )
-                if old_refs.get("headJudge") is not None:
-                    new_refs["headJudge"] = old_refs["headJudge"]
-                else:
-                    new_refs.pop("headJudge", None)
-                if old_refs.get("headJudgeSource") is not None:
-                    new_refs["headJudgeSource"] = old_refs["headJudgeSource"]
-                else:
-                    new_refs.pop("headJudgeSource", None)
-                match["referees"] = new_refs
         new_schedule["saved_at"] = datetime.now(timezone.utc).isoformat()
         data["schedule"] = new_schedule
         # New matches inherit the tournament default. Existing manual
@@ -2237,11 +2281,18 @@ async def schedule_update_tournament(
         # Explicit null → delete schedule
         data.pop("schedule", None)
 
-    await database.execute(
-        update(beach_tournaments)
-        .where(beach_tournaments.c.id == tournament_id)
-        .values(data_json=data, updated_at=datetime.now(timezone.utc))
-    )
+    async with database.transaction():
+        await database.execute(
+            update(beach_tournaments)
+            .where(beach_tournaments.c.id == tournament_id)
+            .values(data_json=data, updated_at=datetime.now(timezone.utc))
+        )
+        if body.schedule is not None and proel_rows_for_head_sync:
+            await _sync_manual_head_judges_to_proel(
+                old_schedule=old_schedule,
+                new_schedule=data.get("schedule"),
+                proel_rows=proel_rows_for_head_sync,
+            )
 
     # Fire schedule notifications (fire-and-forget)
     tour_name = existing_d.get("name", "Turniej")

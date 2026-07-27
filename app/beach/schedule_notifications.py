@@ -59,7 +59,13 @@ def _extract_referee_user_ids(match: Dict[str, Any]) -> Set[int]:
     """Get all referee user_ids from match.referees."""
     refs = match.get("referees") or {}
     ids: Set[int] = set()
-    for key in ("fieldA", "fieldB", "tableSecretary", "tableTimer"):
+    for key in (
+        "fieldA",
+        "fieldB",
+        "tableSecretary",
+        "tableTimer",
+        "headJudge",
+    ):
         r = refs.get(key)
         if isinstance(r, dict) and isinstance(r.get("id"), int):
             ids.add(r["id"])

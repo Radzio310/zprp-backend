@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 
 MAX_HEAD_JUDGES = 5
@@ -121,6 +127,29 @@ def referee_conflict_slots(
     return conflicts
 
 
+def _scheduled_match_has_started(schedule: Dict[str, Any], match: Dict[str, Any]) -> bool:
+    config = schedule.get("config")
+    days = config.get("days") if isinstance(config, dict) else None
+    if not isinstance(days, list):
+        return False
+    try:
+        day_index = int(match.get("dayIndex") or 0)
+        day = days[day_index]
+        date_value = str(day.get("date") or "").strip()
+        time_value = str(
+            match.get("originalTime") or match.get("startTime") or ""
+        ).strip()
+        if not date_value or not time_value:
+            return False
+        local_zone = ZoneInfo("Europe/Warsaw") if ZoneInfo else timezone.utc
+        starts_at = datetime.fromisoformat(
+            f"{date_value}T{time_value[:5]}:00"
+        ).replace(tzinfo=local_zone)
+        return starts_at <= datetime.now(local_zone)
+    except (IndexError, TypeError, ValueError):
+        return False
+
+
 def validate_schedule_head_judges(
     data: Dict[str, Any],
     schedule: Any,
@@ -190,6 +219,8 @@ def apply_default_head_judge_to_schedule(
 
     for match in schedule.get("matches") or []:
         if not isinstance(match, dict) or match.get("status") != "scheduled":
+            continue
+        if _scheduled_match_has_started(schedule, match):
             continue
         if protected_match_keys and (
             str(match.get("id") or "") in protected_match_keys

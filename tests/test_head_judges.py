@@ -74,6 +74,51 @@ def test_default_skips_a_judge_already_assigned_to_another_role():
     assert "headJudge" not in data["schedule"]["matches"][0]["referees"]
 
 
+def test_changing_default_updates_only_automatic_assignments():
+    data = _data()
+    apply_default_head_judge_to_schedule(data)
+    data["default_head_judge_id"] = 22
+    data["head_judge_id"] = 22
+
+    result = apply_default_head_judge_to_schedule(data)
+    matches = data["schedule"]["matches"]
+
+    assert result["updated"] == 1
+    assert matches[0]["referees"]["headJudge"]["id"] == 22
+    assert matches[0]["referees"]["headJudgeSource"] == "default"
+    assert matches[1]["referees"]["headJudge"]["id"] == 22
+    assert matches[1]["referees"]["headJudgeSource"] == "manual"
+
+
+def test_default_never_changes_a_match_already_created_in_proel():
+    data = _data()
+    data["schedule"]["matches"][0]["referees"] = {
+        "headJudge": {"id": 22, "name": "KOWAL Jan"},
+        "headJudgeSource": "default",
+    }
+
+    result = apply_default_head_judge_to_schedule(
+        data,
+        protected_match_keys={"m1"},
+    )
+
+    assert result["updated"] == 0
+    assert data["schedule"]["matches"][0]["referees"]["headJudge"]["id"] == 22
+
+
+def test_default_skips_a_scheduled_match_whose_start_time_has_passed():
+    data = _data()
+    data["schedule"]["config"] = {"days": [{"date": "2000-01-01"}]}
+    data["schedule"]["matches"][0].update(
+        {"dayIndex": 0, "startTime": "10:00"}
+    )
+
+    result = apply_default_head_judge_to_schedule(data)
+
+    assert result["assigned"] == 0
+    assert "headJudge" not in data["schedule"]["matches"][0]["referees"]
+
+
 def test_duplicate_role_in_same_match_is_rejected():
     data = _data()
     data["schedule"]["matches"][0]["referees"] = {
