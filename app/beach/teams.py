@@ -3262,11 +3262,17 @@ async def parse_excel_squad(
             companions_db = [c for c in raw_comp if isinstance(c, dict)]
 
     # ── 4. Match players ───────────────────────────────────────────────────
+    # Dopasowujemy TYLKO do zawodników aktualnie w składzie (in_squad).
+    # Dopasowanie do wykreślonych z listy zgłoszeniowej tworzyłoby "duchy":
+    # klient i generator PDF filtrują po in_squad, więc tacy zawodnicy
+    # znikali z protokołu. Niedopasowani trafiają jako wpisy spoza składu
+    # (extra_players) — z nazwiskiem i numerem wprost z pliku.
+    roster_in_squad = [p for p in roster if p.get("in_squad", True)]
     matched_players = []
     for p in players_raw:
         best_p, score = _best_name_match(
             p["raw_name"],
-            roster,
+            roster_in_squad,
             lambda r: f"{r.get('last_name', '')} {r.get('first_name', '')}",
         )
         matched_players.append({
