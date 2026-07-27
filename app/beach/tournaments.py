@@ -3148,12 +3148,16 @@ def _reconcile_teams_with_invited(
         invited_by_gender.setdefault(t.get("gender"), []).append(t)
 
     resolve: Dict[str, dict] = {}
+    resolved_by_elim: set = set()  # ref_key dopasowane dopiero przez eliminację
     unmatched: List[str] = []
 
     for gender in ("M", "K"):
         gender_refs = [(k, v) for k, v in refs.items() if v["gender"] == gender]
         pool = list(invited_by_gender.get(gender, []))
-        # Wszystkie pary (score, ref_key, invited) powyżej progu, potem zachłannie 1:1.
+        used_refs: set = set()
+        used_ids: set = set()
+
+        # Przebieg 1 — dopasowania PEWNE (podobieństwo ≥ próg), zachłannie 1:1.
         pairs = []
         for k, v in gender_refs:
             for t in pool:
@@ -3161,14 +3165,31 @@ def _reconcile_teams_with_invited(
                 if s >= MATCH_THRESHOLD:
                     pairs.append((s, k, t))
         pairs.sort(key=lambda p: p[0], reverse=True)
-        used_refs: set = set()
-        used_ids: set = set()
         for s, k, t in pairs:
             if k in used_refs or t["id"] in used_ids:
                 continue
             resolve[k] = t
             used_refs.add(k)
             used_ids.add(t["id"])
+
+        # Przebieg 2 — ELIMINACJA: pozostałe drużyny z dokumentu paruj z pozostałymi
+        # zaproszonymi wg najlepszego podobieństwa, BEZ progu (w tym wymuszenie 1↔1).
+        left_refs = [(k, v) for k, v in gender_refs if k not in used_refs]
+        left_pool = [t for t in pool if t["id"] not in used_ids]
+        res_pairs = [
+            (_team_similarity(v["name"], t["team_name"]), k, t)
+            for k, v in left_refs
+            for t in left_pool
+        ]
+        res_pairs.sort(key=lambda p: p[0], reverse=True)
+        for s, k, t in res_pairs:
+            if k in used_refs or t["id"] in used_ids:
+                continue
+            resolve[k] = t
+            resolved_by_elim.add(k)
+            used_refs.add(k)
+            used_ids.add(t["id"])
+
         for k, v in gender_refs:
             if k not in resolve:
                 unmatched.append(v["name"])
@@ -3185,7 +3206,8 @@ def _reconcile_teams_with_invited(
             match = resolve.get(key)
             if match:
                 if team.get("id") != match["id"]:
-                    fixes.append(f'Dopasowano „{team.get("name")}” → „{match["team_name"]}”')
+                    suffix = " (przez eliminację — sprawdź)" if key in resolved_by_elim else ""
+                    fixes.append(f'Dopasowano „{team.get("name")}” → „{match["team_name"]}”{suffix}')
                 m[slot] = {"id": match["id"], "name": match["team_name"], "gender": g}
             else:
                 fixes.append(f'Nie dopasowano drużyny „{team.get("name")}” — pominięto w meczu')
