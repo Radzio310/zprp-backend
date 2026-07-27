@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 
 from app.beach.mp_appearances import (
+    MpReportExportRequest,
     _embedded_proel_link,
+    _filtered_export_teams,
     _merge_evidence,
     _played_schedule_matches,
     effective_protocol_ids,
@@ -126,3 +128,37 @@ def test_strongest_positive_evidence_wins_without_losing_audit_sources():
     _merge_evidence(bucket, 42, "approved_proel", {"source": "proel"})
     assert bucket[42]["status"] == "approved_proel"
     assert len(bucket[42]["sources"]) == 3
+
+
+def test_export_can_be_limited_to_explicitly_selected_teams():
+    report = {
+        "teams": [
+            {
+                "team_id": 11,
+                "team_name": "Pierwsza",
+                "gender": "K",
+                "players": [
+                    {
+                        "first_name": "Anna",
+                        "last_name": "Nowak",
+                        "status": "approved_proel",
+                    }
+                ],
+            },
+            {
+                "team_id": 22,
+                "team_name": "Druga",
+                "gender": "K",
+                "players": [
+                    {
+                        "first_name": "Ewa",
+                        "last_name": "Kowalska",
+                        "status": "finished_proel",
+                    }
+                ],
+            },
+        ]
+    }
+    body = MpReportExportRequest(format="pdf", team_ids=[22])
+    teams = _filtered_export_teams(report, body)
+    assert [team["team_id"] for team in teams] == [22]

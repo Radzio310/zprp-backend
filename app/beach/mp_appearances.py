@@ -77,7 +77,7 @@ MP_STATUS_LABELS = {
     "approved_proel": "ProEl zatwierdzony",
     "finished_proel": "ProEl zakończony",
     "frozen_confirmed": "Z listy zgłoszeniowej do turnieju",
-    "frozen_warning": "Z listy zgłoszeniowej do turnieju — sprawdź",
+    "frozen_warning": "Z listy zgłoszeniowej do turnieju",
     "missing": "Brak potwierdzenia",
     "insufficient": "Niewystarczające dane",
 }
@@ -93,7 +93,7 @@ MP_STATUS_SHORT_LABELS = {
     "approved_proel": "ProEl zatwierdzony",
     "finished_proel": "ProEl zakończony",
     "frozen_confirmed": "Lista zgłoszeniowa",
-    "frozen_warning": "Lista — sprawdź",
+    "frozen_warning": "Lista zgłoszeniowa",
     "missing": "Brak potwierdzenia",
     "insufficient": "Za mało danych",
 }
@@ -123,6 +123,7 @@ class SnapshotRefreshRequest(BaseModel):
 
 class MpReportExportRequest(BaseModel):
     format: Literal["pdf", "xlsx"]
+    team_ids: List[int] = Field(default_factory=list)
     status: Optional[
         Literal[
             "approved_proel",
@@ -758,14 +759,15 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
     enforcement_active = is_mp and is_final and category_enabled
 
     evidence_by_gender, source_summaries = await _source_evidence(season_id, category)
-    target_ids: set[int] = set()
+    current_tournament_team_ids: set[int] = set()
     for raw_id in data.get("invited_team_ids") or []:
         try:
-            target_ids.add(int(raw_id))
+            current_tournament_team_ids.add(int(raw_id))
         except (TypeError, ValueError):
             pass
     for match in _schedule_matches(data):
-        target_ids.update(_match_team_ids(match))
+        current_tournament_team_ids.update(_match_team_ids(match))
+    target_ids = set(current_tournament_team_ids)
     # A newly-created final may not have invited teams yet.  The report must
     # still show the historical elimination pool instead of an empty screen.
     target_ids.update(
@@ -773,7 +775,7 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
         for source in source_summaries
         if source.get("team_id") is not None
     )
-    team_rows = await database.fetch_all(
+    raw_team_rows = await database.fetch_all(
         select(
             beach_teams.c.id,
             beach_teams.c.team_name,
@@ -781,6 +783,7 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
             beach_teams.c.roster_json,
         ).where(beach_teams.c.id.in_(sorted(target_ids)))
     ) if target_ids else []
+    team_rows = [dict(row) for row in raw_team_rows]
 
     squads = data.get("team_squads") if isinstance(data.get("team_squads"), dict) else {}
     teams: List[Dict[str, Any]] = []
@@ -819,8 +822,28 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
             "team_id": team_id,
             "team_name": team.get("team_name"),
             "gender": gender,
+            "in_tournament": team_id in current_tournament_team_ids,
             "players": players,
         })
+    relevant_source_keys = {
+        (
+            int(source.get("tournament_id") or 0),
+            int(source.get("team_id") or 0),
+        )
+        for team in teams
+        for player in team.get("players") or []
+        for source in player.get("sources") or []
+        if isinstance(source, dict)
+    }
+    visible_source_summaries = [
+        source
+        for source in source_summaries
+        if (
+            int(source.get("tournament_id") or 0),
+            int(source.get("team_id") or 0),
+        ) in relevant_source_keys
+    ]
+
     return {
         "tournament_id": tournament_id,
         "tournament_name": tournament.get("name"),
@@ -836,8 +859,15 @@ async def build_tournament_report(tournament_id: int) -> Dict[str, Any]:
             "a nie stuprocentowym potwierdzeniem fizycznego udziału w meczu."
         ),
         "counts": counts,
-        "teams": sorted(teams, key=lambda item: str(item.get("team_name") or "")),
-        "sources": source_summaries,
+        "teams": sorted(
+            teams,
+            key=lambda item: (
+                {"K": 0, "M": 1}.get(str(item.get("gender") or ""), 2),
+                0 if item.get("in_tournament") else 1,
+                str(item.get("team_name") or "").casefold(),
+            ),
+        ),
+        "sources": visible_source_summaries,
     }
 
 
@@ -847,7 +877,10 @@ def _filtered_export_teams(
 ) -> List[Dict[str, Any]]:
     query = body.query.strip().casefold()
     result: List[Dict[str, Any]] = []
+    selected_team_ids = {int(team_id) for team_id in body.team_ids}
     for team in report.get("teams") or []:
+        if selected_team_ids and int(team.get("team_id") or 0) not in selected_team_ids:
+            continue
         if body.gender != "all" and str(team.get("gender") or "") != body.gender:
             continue
         players = []
@@ -894,6 +927,21 @@ def _filtered_export_counts(teams: Sequence[Dict[str, Any]]) -> Dict[str, int]:
             if status in counts:
                 counts[status] += 1
     return counts
+
+
+def _source_keys_for_teams(
+    teams: Sequence[Dict[str, Any]],
+) -> set[Tuple[int, int]]:
+    return {
+        (
+            int(source.get("tournament_id") or 0),
+            int(source.get("team_id") or 0),
+        )
+        for team in teams
+        for player in team.get("players") or []
+        for source in player.get("sources") or []
+        if isinstance(source, dict)
+    }
 
 
 def _player_export_name(player: Dict[str, Any]) -> str:
@@ -1083,7 +1131,16 @@ def _write_mp_report_xlsx(
         cell = sources_sheet.cell(1, column, value)
         cell.fill = PatternFill("solid", fgColor=accent)
         cell.font = Font(bold=True, color="FFFFFF")
-    for row_number, source in enumerate(report.get("sources") or [], 2):
+    exported_source_keys = _source_keys_for_teams(teams)
+    exported_sources = [
+        source
+        for source in report.get("sources") or []
+        if (
+            int(source.get("tournament_id") or 0),
+            int(source.get("team_id") or 0),
+        ) in exported_source_keys
+    ]
+    for row_number, source in enumerate(exported_sources, 2):
         values = [
             source.get("tournament_name"),
             source.get("team_name"),
@@ -1205,9 +1262,15 @@ def _build_mp_pdf_context(
             "sections": sections,
         })
 
+    exported_source_keys = _source_keys_for_teams(teams)
     sources = []
     for source in report.get("sources") or []:
         if not isinstance(source, dict):
+            continue
+        if (
+            int(source.get("tournament_id") or 0),
+            int(source.get("team_id") or 0),
+        ) not in exported_source_keys:
             continue
         complete = bool(source.get("proel_coverage_complete"))
         sources.append({
