@@ -14,7 +14,11 @@ from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import beach_teams, database
-from app.deps import Settings, get_settings
+from app.deps import (
+    Settings,
+    beach_get_current_user_id,
+    get_settings,
+)
 from app.beach.verification import expand_roles_for_squad_sync
 from app.schemas import (
     BeachTeamContact,
@@ -3170,6 +3174,7 @@ class ApplyExcelSquadRequest(BaseModel):
     also_update_default: bool = False
     extra_players: List[ExcelExtraMember] = []
     extra_companions: List[ExcelExtraMember] = []
+    mp_warning_accept_player_ids: List[int] = []
 
 
 @router.post("/parse-excel-squad", summary="Parsuj plik Excel i dopasuj skład drużyny")
@@ -3421,58 +3426,45 @@ async def parse_excel_squad(
 
 
 @router.post("/apply-excel-squad", summary="Zastosuj skład z Excela do turnieju")
-async def apply_excel_squad(body: ApplyExcelSquadRequest):
-    """Apply parsed Excel squad: sets protocol_players and optionally default_players (first 10)."""
-    import json as _json
-    from app.db import beach_tournaments as _bt
-
-    tour_row = await database.fetch_one(
-        select(_bt).where(_bt.c.id == body.tournament_id)
-    )
-    if not tour_row:
-        raise HTTPException(404, "Turniej nie istnieje")
-
-    tour_data = tour_row["data_json"] or {}
-    if isinstance(tour_data, str):
-        try:
-            tour_data = _json.loads(tour_data)
-        except Exception:
-            tour_data = {}
-
-    team_squads: dict = dict(tour_data.get("team_squads") or {})
-    team_key = str(body.team_id)
-    squad_entry: dict = dict(team_squads.get(team_key) or {})
-
-    squad_entry["protocol_players"] = body.protocol_player_ids
-    # Zawodnicy/osoby tow. spoza rosteru drużyny — zawsze nadpisywane importem
-    # (ponowny import z poprawionego pliku czyści stare wpisy).
-    squad_entry["protocol_extra_players"] = [
-        {"name": p.name.strip(), "number": p.number}
-        for p in body.extra_players
-        if p.name and p.name.strip()
-    ]
-    squad_entry["protocol_extra_companions"] = [
-        {"name": c.name.strip(), "letter": (c.letter or "").strip().upper() or None}
-        for c in body.extra_companions
-        if c.name and c.name.strip()
-    ]
-    if body.companion_ids:
-        squad_entry["default_companions"] = body.companion_ids
-    if body.companion_roles:
-        squad_entry["default_companion_roles"] = body.companion_roles
-    if body.also_update_default:
-        squad_entry["default_players"] = body.protocol_player_ids[:10]
-
-    team_squads[team_key] = squad_entry
-    tour_data["team_squads"] = team_squads
-
-    await database.execute(
-        update(_bt)
-        .where(_bt.c.id == body.tournament_id)
-        .values(data_json=tour_data, updated_at=_now_utc())
+async def apply_excel_squad(
+    body: ApplyExcelSquadRequest,
+    current_user_id: int = Depends(beach_get_current_user_id),
+):
+    """Zastosuj import przez kanoniczną, autoryzowaną walidację składu turnieju."""
+    from app.beach.tournaments import (
+        SquadUpdateRequest,
+        squad_update_tournament,
     )
 
-    return {"success": True}
+    return await squad_update_tournament(
+        tournament_id=body.tournament_id,
+        body=SquadUpdateRequest(
+            team_id=body.team_id,
+            protocol_players=body.protocol_player_ids,
+            protocol_extra_players=[
+                {"name": p.name.strip(), "number": p.number}
+                for p in body.extra_players
+                if p.name and p.name.strip()
+            ],
+            protocol_extra_companions=[
+                {
+                    "name": companion.name.strip(),
+                    "letter": (companion.letter or "").strip().upper() or None,
+                }
+                for companion in body.extra_companions
+                if companion.name and companion.name.strip()
+            ],
+            default_companions=body.companion_ids,
+            default_companion_roles=body.companion_roles,
+            default_players=(
+                body.protocol_player_ids[:10]
+                if body.also_update_default
+                else None
+            ),
+            mp_warning_accept_player_ids=body.mp_warning_accept_player_ids,
+        ),
+        current_user_id=current_user_id,
+    )
 
 
 # =========================================================
