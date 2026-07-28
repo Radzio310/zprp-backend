@@ -1489,14 +1489,16 @@ async def validate_final_player_ids(
     team_id: int,
     player_ids: Sequence[int],
     accepted_warning_ids: Sequence[int] = (),
-) -> None:
+    *,
+    allow_missing: bool = False,
+) -> List[int]:
     if str(tournament_row.get("competition_type") or "").upper() != "MP":
-        return
+        return []
     season_id = tournament_season_id(tournament_row)
     if tournament_phase(tournament_row) != "final":
-        return
+        return []
     if tournament_row.get("category") not in await enabled_categories_for_season(season_id):
-        return
+        return []
     report = await build_tournament_report(int(tournament_row["id"]))
     target_team = next(
         (team for team in report["teams"] if int(team["team_id"]) == int(team_id)),
@@ -1515,7 +1517,7 @@ async def validate_final_player_ids(
             missing.append(player_id)
         elif player.get("requires_warning_acceptance") and player_id not in accepted:
             warning.append(player_id)
-    if missing:
+    if missing and not allow_missing:
         raise HTTPException(
             409,
             detail={
@@ -1536,6 +1538,7 @@ async def validate_final_player_ids(
                 "player_ids": warning,
             },
         )
+    return missing if allow_missing else []
 
 
 async def assert_no_unidentified_final_players(

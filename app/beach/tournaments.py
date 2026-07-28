@@ -4111,6 +4111,7 @@ async def squad_update_tournament(
     data = _parse_json(existing_d["data_json"])
 
     is_admin_flag = await _is_admin(current_user_id)
+    is_head_judge_flag = is_head_judge(data, current_user_id)
 
     # Judges assigned to this tournament (head judge or any listed judge) may also
     # edit match squads and collect signatures — the frontend shows this UI to them.
@@ -4121,7 +4122,7 @@ async def squad_update_tournament(
     }
     is_judge_flag = (
         current_user_id in _judge_user_ids
-        or is_head_judge(data, current_user_id)
+        or is_head_judge_flag
     )
 
     if not (is_admin_flag or is_judge_flag):
@@ -4163,6 +4164,7 @@ async def squad_update_tournament(
     team_key = body.custom_team_id if body.custom_team_id else str(body.team_id)
     squad_entry: dict = dict(team_squads.get(team_key) or {})
     old_squad_entry = copy.deepcopy(squad_entry)
+    overridden_missing_player_ids: List[int] = []
 
     if body.team_id:
         from app.beach.mp_appearances import (
@@ -4257,11 +4259,12 @@ async def squad_update_tournament(
                 and int(value) not in old_ids
             )
         if added_player_ids:
-            await validate_final_player_ids(
+            overridden_missing_player_ids = await validate_final_player_ids(
                 existing_d,
                 int(body.team_id),
                 sorted(added_player_ids),
                 body.mp_warning_accept_player_ids or [],
+                allow_missing=is_admin_flag or is_head_judge_flag,
             )
         accepted_now = sorted(
             set(body.mp_warning_accept_player_ids or []) & added_player_ids
@@ -4425,6 +4428,21 @@ async def squad_update_tournament(
                 "team_id": body.team_id,
                 "match_id": body.match_id,
                 "player_ids": accepted_warning_ids,
+            },
+        )
+    if overridden_missing_player_ids:
+        await log_activity(
+            area="tournament",
+            action="mp_appearances.missing_override",
+            actor_user_id=current_user_id,
+            actor_name=await get_actor_name(current_user_id),
+            target_id=str(tournament_id),
+            target_label=existing_d.get("name", ""),
+            details={
+                "team_id": body.team_id,
+                "match_id": body.match_id,
+                "player_ids": overridden_missing_player_ids,
+                "role": "admin" if is_admin_flag else "head_judge",
             },
         )
 
