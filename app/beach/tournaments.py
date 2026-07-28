@@ -4259,12 +4259,24 @@ async def squad_update_tournament(
                 and str(value).isdigit()
                 and int(value) not in old_ids
             )
+        stored_warning_acceptances = squad_entry.get("mp_warning_acceptances")
+        if not isinstance(stored_warning_acceptances, dict):
+            stored_warning_acceptances = {}
+        stored_warning_acceptance_ids = {
+            int(player_id)
+            for player_id in stored_warning_acceptances.keys()
+            if str(player_id).isdigit()
+        }
+        effective_warning_acceptance_ids = sorted(
+            stored_warning_acceptance_ids
+            | set(body.mp_warning_accept_player_ids or [])
+        )
         if added_player_ids:
             overridden_missing_player_ids = await validate_final_player_ids(
                 existing_d,
                 int(body.team_id),
                 sorted(added_player_ids),
-                body.mp_warning_accept_player_ids or [],
+                effective_warning_acceptance_ids,
                 allow_missing=is_admin_flag or is_head_judge_flag,
             )
         accepted_now = sorted(
