@@ -1818,6 +1818,28 @@ def _build_judge_matches_path(nr_sedzia: Union[str, int], filtr_sezon: Optional[
     return "/index.php?" + urlencode(qs, doseq=True)
 
 
+def _set_query_param(path: str, key: str, value: Optional[str]) -> str:
+    """
+    Nadpisuje (albo usuwa, gdy value=None) parametr w query stringu ścieżki.
+    Potrzebne, bo href 'POKAŻ MECZE' z listy sędziów niesie sezon BIEŻĄCY
+    (np. Filtr_sezon=195 = 2026/2027), a mecze sędziego są w innym sezonie.
+    """
+    p = _ensure_index_php_prefix(path)
+    if not p:
+        return p
+    try:
+        u = urlparse("http://x" + p if p.startswith("/") else "http://x/" + p)
+        qs = {k: v[-1] for k, v in parse_qs(u.query, keep_blank_values=True).items()}
+        if value is None:
+            qs.pop(key, None)
+        else:
+            qs[key] = _clean_spaces(str(value))
+        base = u.path or "/index.php"
+        return (base + "?" + urlencode(qs, doseq=False)) if qs else base
+    except Exception:
+        return p
+
+
 # ----------------------------
 # request models
 # ----------------------------
@@ -1874,6 +1896,21 @@ async def scrape_judge_matches_all_seasons(
 
         soup0 = BeautifulSoup(html0, "html.parser")
         seasons = _parse_seasons_from_page(soup0)
+
+        # Gdy wejściowy href miał sezon, w którym sędzia nie ma nic (np. świeży 195),
+        # select sezonów potrafi być pusty – spróbuj jeszcze raz bez Filtr_sezon.
+        if not seasons and "Filtr_sezon=" in entry_path:
+            retry_path = _set_query_param(entry_path, "Filtr_sezon", None)
+            logger.info("ZPRP judge matches(all): empty seasons, retry without Filtr_sezon path=%s", retry_path)
+            _, html_retry = await fetch_with_correct_encoding(client, retry_path, method="GET", cookies=cookies)
+            _log_html_fingerprint("Judge matches page[entry-retry] fetched", html_retry)
+            soup_retry = BeautifulSoup(html_retry, "html.parser")
+            seasons_retry = _parse_seasons_from_page(soup_retry)
+            if seasons_retry:
+                entry_path = retry_path
+                soup0 = soup_retry
+                seasons = seasons_retry
+
         if not seasons:
             parsed0 = _parse_match_rows_from_soup(soup0)
             return {
@@ -1957,16 +1994,10 @@ async def scrape_judge_matches_one_season(
     else:
         raise HTTPException(400, "Brak matches_href i NrSedzia.")
 
-    # jeżeli matches_href nie miał Filtr_sezon, dopnij go
-    if "Filtr_sezon=" not in base_path:
-        try:
-            u = urlparse("http://x" + base_path)
-            qs = parse_qs(u.query)
-            qs["Filtr_sezon"] = [season_value]
-            path = (u.path or "/index.php") + "?" + urlencode({k: v[0] for k, v in qs.items()}, doseq=True)
-            base_path = path if base_path.startswith("/") else ("/" + path.lstrip("/"))
-        except Exception:
-            pass
+    # ZAWSZE wymuś żądany Filtr_sezon.
+    # matches_href z listy sędziów ma doklejony sezon bieżący (np. Filtr_sezon=195),
+    # więc samo "dopnij gdy brak" powodowało, że wybór sezonu w UI był ignorowany.
+    base_path = _set_query_param(base_path, "Filtr_sezon", season_value)
 
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
