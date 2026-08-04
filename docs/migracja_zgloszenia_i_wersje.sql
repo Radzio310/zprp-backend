@@ -1,15 +1,24 @@
 -- ============================================================================
 -- BAZA — migracja: komunikator zgłoszeń + wersje per platforma + push po judge_id
 --
--- Uruchom RAZ na bazie produkcyjnej (Railway → Postgres → Query / psql).
--- Cała komenda jest idempotentna (IF NOT EXISTS), więc powtórne uruchomienie
--- niczego nie zepsuje.
+-- Uruchom RAZ. Cała komenda jest idempotentna — powtórne uruchomienie niczego
+-- nie zepsuje i NIE cofnie ustawień zrobionych później w panelu (backfille
+-- chroni tabela schema_migrations).
 --
 -- Wstecz kompatybilne: żadna kolumna nie znika, żadna nie zmienia typu.
 -- Starsze wersje aplikacji nie zauważą różnicy.
 -- ============================================================================
 
 BEGIN;
+
+-- ─────────────────── 0) Rejestr wykonanych migracji ───────────────────
+-- Dzięki temu jednorazowe backfille (UPDATE) wykonają się dokładnie raz,
+-- nawet jeśli odpalisz plik drugi raz „na wszelki wypadek”.
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  key        TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- ─────────────────── 1) Zgłoszenia jako wątki ───────────────────
 
@@ -21,11 +30,16 @@ ALTER TABLE user_reports
   ADD COLUMN IF NOT EXISTS updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 -- Stan „nieprzeczytane u admina” przepisujemy z istniejącej kolumny is_read,
--- żeby 61 dotychczasowych zgłoszeń nie zapaliło się nagle wszystkie na czerwono.
-UPDATE user_reports SET unread_by_admin = NOT is_read;
-
--- Wątek sortuje się po updated_at — dla starych wpisów startujemy od daty utworzenia.
-UPDATE user_reports SET updated_at = created_at WHERE updated_at IS NULL;
+-- żeby dotychczasowe zgłoszenia nie zapaliły się nagle wszystkie na czerwono.
+-- Datę sortowania wątku ustawiamy na datę utworzenia.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE key = '2026_08_reports_thread_backfill') THEN
+    UPDATE user_reports SET unread_by_admin = NOT is_read;
+    UPDATE user_reports SET updated_at = created_at;
+    INSERT INTO schema_migrations (key) VALUES ('2026_08_reports_thread_backfill');
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS ix_user_reports_updated_at
   ON user_reports (updated_at DESC);
@@ -62,9 +76,15 @@ ALTER TABLE app_versions
 -- po wdrożeniu zniknęłaby cała historia i przestałoby działać wymuszanie
 -- aktualizacji. Nowe wersje domyślnie mają FALSE — sam odhaczasz platformę
 -- w panelu, gdy wersja pojawi się w sklepie.
-UPDATE app_versions
-   SET available_ios = TRUE, available_android = TRUE
- WHERE created_at < NOW();
+-- Backfill leci tylko przy pierwszym uruchomieniu, więc późniejsze odznaczenie
+-- platformy w panelu nie zostanie cofnięte.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE key = '2026_08_versions_platform_backfill') THEN
+    UPDATE app_versions SET available_ios = TRUE, available_android = TRUE;
+    INSERT INTO schema_migrations (key) VALUES ('2026_08_versions_platform_backfill');
+  END IF;
+END $$;
 
 -- ─────────────────── 4) Push adresowany do sędziego ───────────────────
 
@@ -76,8 +96,20 @@ CREATE INDEX IF NOT EXISTS ix_push_tokens_judge_id
 
 COMMIT;
 
--- ─────────────────── weryfikacja (opcjonalnie) ───────────────────
--- SELECT status, COUNT(*) FROM user_reports GROUP BY status;
--- SELECT version, to_show, available_ios, available_android FROM app_versions
---   ORDER BY created_at DESC LIMIT 10;
--- SELECT COUNT(*) FROM push_tokens WHERE judge_id IS NOT NULL;
+-- ─────────────────── weryfikacja ───────────────────
+\echo ''
+\echo '=== Zgłoszenia wg statusu ==='
+SELECT status, COUNT(*) AS ile FROM user_reports GROUP BY status ORDER BY status;
+
+\echo ''
+\echo '=== Nieprzeczytane u admina ==='
+SELECT COUNT(*) AS nieprzeczytane FROM user_reports WHERE unread_by_admin;
+
+\echo ''
+\echo '=== Ostatnie wersje i ich dostępność ==='
+SELECT version, to_show, available_ios, available_android
+  FROM app_versions ORDER BY created_at DESC LIMIT 10;
+
+\echo ''
+\echo '=== Wykonane migracje ==='
+SELECT key, applied_at FROM schema_migrations ORDER BY applied_at;
