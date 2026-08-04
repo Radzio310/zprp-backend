@@ -196,6 +196,7 @@ async def list_match_events(installation_id: str, limit: int = 100):
             )
         )
         .where(province_match_notifications.c.installation_id == installation_id)
+        .where(province_match_notifications.c.send_at_utc <= _utc_now())
         .order_by(province_match_notifications.c.created_at.desc())
         .limit(limit)
     )

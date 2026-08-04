@@ -114,6 +114,7 @@ from app.beach.mp_appearances import (
 # NEW: push router + scheduler
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
+from app.push.deploy_test_notifications import run_deploy_test_notifications
 from app.province_match_monitor import run_province_match_monitor
 
 from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts, assignment_drafts, province_match_events, province_match_sync_runs
@@ -612,6 +613,16 @@ _standings_sync_task: asyncio.Task | None = None
 _email_grace_task: asyncio.Task | None = None
 _mp_snapshot_task: asyncio.Task | None = None
 _province_match_monitor_task: asyncio.Task | None = None
+_deploy_push_test_task: asyncio.Task | None = None
+
+
+async def _run_deploy_push_test_safely() -> None:
+    try:
+        await run_deploy_test_notifications()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Deploy push test batch failed")
 
 
 async def _email_grace_cleanup_loop():
@@ -822,6 +833,8 @@ async def startup():
         "ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS notification_prefs JSONB NOT NULL DEFAULT '{}'::jsonb",
         "CREATE INDEX IF NOT EXISTS ix_push_tokens_judge_id ON push_tokens (judge_id)",
         "CREATE INDEX IF NOT EXISTS ix_push_tokens_province ON push_tokens (province)",
+        "ALTER TABLE province_match_notifications ADD COLUMN IF NOT EXISTS send_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        "CREATE INDEX IF NOT EXISTS ix_province_match_notifications_send_at_utc ON province_match_notifications (send_at_utc)",
     ]
     for stmt in _province_match_migrations:
         try:
@@ -1007,7 +1020,7 @@ async def startup():
         logger.exception("❌ Walidacja konfiguracji e-mail nie powiodła się")
         raise
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _deploy_push_test_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -1051,6 +1064,7 @@ async def startup():
 
     # NEW: background scheduler for push queue
     _push_task = asyncio.create_task(run_push_scheduler())
+    _deploy_push_test_task = asyncio.create_task(_run_deploy_push_test_safely())
     _province_match_monitor_task = asyncio.create_task(run_province_match_monitor())
     logger.info("Province match monitor started (15 min light / 4 h full)")
     logger.info("✅ Push scheduler started")
@@ -1084,7 +1098,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _deploy_push_test_task
 
     if _cleanup_task:
         _cleanup_task.cancel()
@@ -1104,6 +1118,13 @@ async def shutdown():
         _province_match_monitor_task.cancel()
         try:
             await _province_match_monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    if _deploy_push_test_task:
+        _deploy_push_test_task.cancel()
+        try:
+            await _deploy_push_test_task
         except asyncio.CancelledError:
             pass
 

@@ -67,6 +67,19 @@ PROVINCE_ENV_SUFFIXES: Dict[str, str] = {
     "ZACHODNIOPOMORSKIE": "ZACHODNIOPOMORSKIE",
 }
 
+EVENT_NOTIFICATION_TITLES: Dict[str, str] = {
+    "match_added": "🆕 Nowy mecz w obsadzie",
+    "match_removed": "🗑️ Mecz usunięty",
+    "assignment_removed": "🗑️ Zmiana w Twojej obsadzie",
+    "match_date_changed": "🕒 Zmieniono termin meczu",
+    "lineup_changed": "👥 Zmieniono obsadę meczu",
+    "match_data_changed": "✏️ Zmieniono dane meczu",
+}
+
+
+def notification_title(event_type: str) -> str:
+    return EVENT_NOTIFICATION_TITLES.get(event_type, "🔔 Zmiana w Twoim meczu")
+
 
 def normalize_province(value: Any) -> str:
     raw = unicodedata.normalize("NFD", str(value or ""))
@@ -279,13 +292,48 @@ def _changed(old: Dict[str, Any], new: Dict[str, Any], *keys: str) -> bool:
     return any(old.get(k, "") != new.get(k, "") for k in keys)
 
 
+def _display_match_at(value: Any) -> str:
+    match_at = parse_match_at(value)
+    return match_at.astimezone(WARSAW).strftime("%d.%m.%Y, %H:%M") if match_at else _str(value)
+
+
+def _match_details(state: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    teams = " – ".join(
+        filter(
+            None,
+            [
+                _str(state.get("ID_zespoly_gosp_ZespolNazwa")),
+                _str(state.get("ID_zespoly_gosc_ZespolNazwa")),
+            ],
+        )
+    )
+    if teams:
+        parts.append(teams)
+    match_at = _display_match_at(state.get("data_fakt") or state.get("data_prop"))
+    if match_at:
+        parts.append(match_at)
+    venue = ", ".join(
+        filter(
+            None,
+            [
+                _str(state.get("Hala_nazwa")),
+                _str(state.get("Hala_miasto")),
+            ],
+        )
+    )
+    if venue:
+        parts.append(venue)
+    return " • ".join(parts)
+
+
 def build_change_events(old: Dict[str, Any], new: Dict[str, Any]) -> List[Dict[str, str]]:
     code = _str(new.get("RozgrywkiCode") or old.get("RozgrywkiCode"))
     events: List[Dict[str, str]] = []
     if _changed(old, new, "data_fakt"):
         body = f"Zmieniono datę meczu {code}"
         if _str(new.get("data_fakt")):
-            body += f" na {_str(new.get('data_fakt'))}"
+            body += f" na {_display_match_at(new.get('data_fakt'))}"
         events.append({"event_type": "match_date_changed", "body": body})
     if _changed(old, new, "NrSedzia_pierwszy_nazwisko", "NrSedzia_drugi_nazwisko"):
         names = ", ".join(filter(None, [_str(new.get("NrSedzia_pierwszy_nazwisko")), _str(new.get("NrSedzia_drugi_nazwisko"))]))
@@ -306,7 +354,7 @@ def build_change_events(old: Dict[str, Any], new: Dict[str, Any]) -> List[Dict[s
     if bool(new.get("host_swapped")) and _changed(old, new, "host_swapped"):
         events.append({"event_type": "match_data_changed", "body": f"Zmieniono gospodarza zawodów w meczu {code}"})
     if _changed(old, new, "Hala_nazwa", "Hala_miasto", "Hala_ulica", "Hala_numer"):
-        address = ", ".join(filter(None, [_str(new.get("Hala_miasto")), " ".join(filter(None, [_str(new.get("Hala_ulica")), _str(new.get("Hala_numer"))]))]))
+        address = ", ".join(filter(None, [_str(new.get("Hala_nazwa")), _str(new.get("Hala_miasto")), " ".join(filter(None, [_str(new.get("Hala_ulica")), _str(new.get("Hala_numer"))]))]))
         events.append({"event_type": "match_data_changed", "body": f"Zmieniono adres hali w meczu {code}" + (f" na {address}" if address else "")})
     if _changed(old, new, "RozgrywkiCode"):
         events.append({"event_type": "match_data_changed", "body": f"Zmieniono numer meczu na {code}"})
@@ -316,7 +364,9 @@ def build_change_events(old: Dict[str, Any], new: Dict[str, Any]) -> List[Dict[s
         events.append({"event_type": "match_data_changed", "body": f"Zmieniono dane teleadresowe Gościa w meczu {code}"})
     result_fields = [key for key in FINGERPRINT_FIELDS if key.startswith(("wynik_", "dogrywka_", "karne_", "timeout"))] + ["widzowie"]
     if _changed(old, new, *result_fields):
-        events.append({"event_type": "match_data_changed", "body": f"Edytowano wynik skrócony meczu {code}"})
+        score = ":".join(filter(None, [_str(new.get("wynik_gosp_full")), _str(new.get("wynik_gosc_full"))]))
+        suffix = f": {score}" if score else ""
+        events.append({"event_type": "match_data_changed", "body": f"Edytowano wynik skrócony meczu {code}{suffix}"})
     # Jeden przebieg może wykryć wiele pól; identyczne komunikaty usuwamy.
     return list({(e["event_type"], e["body"]): e for e in events}.values())
 
@@ -397,6 +447,7 @@ async def _create_event(
         "matchNumber": match_code,
         "event_key": event_key,
     }
+    title = notification_title(event_type)
     stmt = (
         pg_insert(province_match_events)
         .values(
@@ -405,7 +456,7 @@ async def _create_event(
             match_id=match_id,
             match_code=match_code,
             event_type=event_type,
-            title="Zmiana w Twoim meczu",
+            title=title,
             body=body,
             data_json=data,
             target_judge_ids=targets,
@@ -443,7 +494,7 @@ async def _create_event(
                 event_id=int(event_id),
                 installation_id=device["installation_id"],
                 judge_id=_str(device["judge_id"]),
-                title="Zmiana w Twoim meczu",
+                title=title,
                 body=body,
                 data_json=data,
                 status=delivery_status,
@@ -573,12 +624,13 @@ async def _upsert_assignment(province: str, match_id: str, judge_id: str, season
     )
     if notify and (not existing or not existing["active"]):
         code = _str(state.get("RozgrywkiCode"))
+        details = _match_details(state)
         return await _create_event(
             province,
             match_id,
             code,
             "match_added",
-            f"Dodano nowy mecz {code}",
+            f"Dodano nowy mecz {code}" + (f" • {details}" if details else ""),
             [judge_id],
             fingerprint(state),
         )

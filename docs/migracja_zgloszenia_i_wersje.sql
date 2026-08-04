@@ -1,19 +1,19 @@
 -- ============================================================================
 -- BAZA — migracja: komunikator zgłoszeń + wersje per platforma + push po judge_id
 --
--- Uruchom RAZ. Cała komenda jest idempotentna — powtórne uruchomienie niczego
--- nie zepsuje i NIE cofnie ustawień zrobionych później w panelu (backfille
--- chroni tabela schema_migrations).
+-- CZYSTY SQL — żadnych komend psql (\echo, \i), więc działa zarówno przez
+-- `psql -f`, jak i po wklejeniu w okno zapytań Postgresa w panelu Railway.
+-- Każde polecenie to osobna instrukcja zakończona średnikiem, bez bloków DO $$,
+-- żeby konsola webowa nie miała problemu z podziałem na instrukcje.
+--
+-- Idempotentne: powtórne uruchomienie niczego nie zepsuje i NIE cofnie ustawień
+-- zrobionych później w panelu (jednorazowe backfille pilnuje schema_migrations).
 --
 -- Wstecz kompatybilne: żadna kolumna nie znika, żadna nie zmienia typu.
--- Starsze wersje aplikacji nie zauważą różnicy.
 -- ============================================================================
 
-BEGIN;
-
 -- ─────────────────── 0) Rejestr wykonanych migracji ───────────────────
--- Dzięki temu jednorazowe backfille (UPDATE) wykonają się dokładnie raz,
--- nawet jeśli odpalisz plik drugi raz „na wszelki wypadek”.
+-- Dzięki niemu jednorazowe UPDATE-y wykonają się dokładnie raz.
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   key        TEXT PRIMARY KEY,
@@ -31,18 +31,27 @@ ALTER TABLE user_reports
 
 -- Stan „nieprzeczytane u admina” przepisujemy z istniejącej kolumny is_read,
 -- żeby dotychczasowe zgłoszenia nie zapaliły się nagle wszystkie na czerwono.
--- Datę sortowania wątku ustawiamy na datę utworzenia.
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE key = '2026_08_reports_thread_backfill') THEN
-    UPDATE user_reports SET unread_by_admin = NOT is_read;
-    UPDATE user_reports SET updated_at = created_at;
-    INSERT INTO schema_migrations (key) VALUES ('2026_08_reports_thread_backfill');
-  END IF;
-END $$;
+-- Warunek NOT EXISTS sprawia, że to wykona się tylko przy pierwszym przebiegu.
+UPDATE user_reports
+   SET unread_by_admin = NOT is_read
+ WHERE NOT EXISTS (
+   SELECT 1 FROM schema_migrations WHERE key = '2026_08_reports_thread_backfill'
+ );
+
+-- Wątek sortuje się po updated_at — dla starych wpisów startujemy od utworzenia.
+UPDATE user_reports
+   SET updated_at = created_at
+ WHERE NOT EXISTS (
+   SELECT 1 FROM schema_migrations WHERE key = '2026_08_reports_thread_backfill'
+ );
+
+INSERT INTO schema_migrations (key)
+VALUES ('2026_08_reports_thread_backfill')
+ON CONFLICT (key) DO NOTHING;
 
 CREATE INDEX IF NOT EXISTS ix_user_reports_updated_at
   ON user_reports (updated_at DESC);
+
 CREATE INDEX IF NOT EXISTS ix_user_reports_unread_by_admin
   ON user_reports (unread_by_admin);
 
@@ -62,6 +71,7 @@ CREATE TABLE IF NOT EXISTS user_report_messages (
 
 CREATE INDEX IF NOT EXISTS ix_user_report_messages_report_id
   ON user_report_messages (report_id);
+
 CREATE INDEX IF NOT EXISTS ix_user_report_messages_created_at
   ON user_report_messages (created_at);
 
@@ -76,15 +86,15 @@ ALTER TABLE app_versions
 -- po wdrożeniu zniknęłaby cała historia i przestałoby działać wymuszanie
 -- aktualizacji. Nowe wersje domyślnie mają FALSE — sam odhaczasz platformę
 -- w panelu, gdy wersja pojawi się w sklepie.
--- Backfill leci tylko przy pierwszym uruchomieniu, więc późniejsze odznaczenie
--- platformy w panelu nie zostanie cofnięte.
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE key = '2026_08_versions_platform_backfill') THEN
-    UPDATE app_versions SET available_ios = TRUE, available_android = TRUE;
-    INSERT INTO schema_migrations (key) VALUES ('2026_08_versions_platform_backfill');
-  END IF;
-END $$;
+UPDATE app_versions
+   SET available_ios = TRUE, available_android = TRUE
+ WHERE NOT EXISTS (
+   SELECT 1 FROM schema_migrations WHERE key = '2026_08_versions_platform_backfill'
+ );
+
+INSERT INTO schema_migrations (key)
+VALUES ('2026_08_versions_platform_backfill')
+ON CONFLICT (key) DO NOTHING;
 
 -- ─────────────────── 4) Push adresowany do sędziego ───────────────────
 
@@ -94,22 +104,13 @@ ALTER TABLE push_tokens
 CREATE INDEX IF NOT EXISTS ix_push_tokens_judge_id
   ON push_tokens (judge_id);
 
-COMMIT;
+-- ─────────────────── 5) Kontrolka na koniec ───────────────────
+-- Jedno zapytanie zamiast czterech, żeby konsola webowa pokazała wynik.
 
--- ─────────────────── weryfikacja ───────────────────
-\echo ''
-\echo '=== Zgłoszenia wg statusu ==='
-SELECT status, COUNT(*) AS ile FROM user_reports GROUP BY status ORDER BY status;
-
-\echo ''
-\echo '=== Nieprzeczytane u admina ==='
-SELECT COUNT(*) AS nieprzeczytane FROM user_reports WHERE unread_by_admin;
-
-\echo ''
-\echo '=== Ostatnie wersje i ich dostępność ==='
-SELECT version, to_show, available_ios, available_android
-  FROM app_versions ORDER BY created_at DESC LIMIT 10;
-
-\echo ''
-\echo '=== Wykonane migracje ==='
-SELECT key, applied_at FROM schema_migrations ORDER BY applied_at;
+SELECT
+  (SELECT COUNT(*) FROM user_reports)                        AS zgloszen_lacznie,
+  (SELECT COUNT(*) FROM user_reports WHERE unread_by_admin)  AS nieprzeczytanych,
+  (SELECT COUNT(*) FROM user_report_messages)                AS wiadomosci,
+  (SELECT COUNT(*) FROM app_versions WHERE available_android) AS wersji_android,
+  (SELECT COUNT(*) FROM app_versions WHERE available_ios)     AS wersji_ios,
+  (SELECT COUNT(*) FROM schema_migrations)                    AS migracji_wykonanych;

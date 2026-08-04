@@ -1,10 +1,20 @@
 import os
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.db import database, province_match_notifications, push_tokens, push_schedules
 from .fcm import send_fcm_message
+
+
+logger = logging.getLogger("app.push.scheduler")
+_scheduler_wakeup = asyncio.Event()
+
+
+def wake_push_scheduler() -> None:
+    """Budzi scheduler po dopisaniu powiadomienia z bliskim terminem wysyłki."""
+    _scheduler_wakeup.set()
 
 def _utc_now():
     return datetime.now(timezone.utc)
@@ -58,9 +68,39 @@ async def _fetch_pending_match_notifications(limit: int = 50):
             province_match_notifications.c.attempts,
         )
         .where(province_match_notifications.c.status == "pending")
-        .order_by(province_match_notifications.c.created_at.asc())
+        .where(province_match_notifications.c.send_at_utc <= now)
+        .order_by(province_match_notifications.c.send_at_utc.asc())
         .limit(limit)
     )
+
+
+async def _next_match_notification_delay(default_seconds: int) -> float:
+    next_due = await database.fetch_val(
+        select(func.min(province_match_notifications.c.send_at_utc)).where(
+            province_match_notifications.c.status == "pending"
+        )
+    )
+    if not next_due:
+        return float(default_seconds)
+    if next_due.tzinfo is None:
+        next_due = next_due.replace(tzinfo=timezone.utc)
+    seconds = (next_due - _utc_now()).total_seconds()
+    return max(0.1, min(float(default_seconds), seconds))
+
+
+async def _wait_for_next_pass(default_seconds: int) -> None:
+    if _scheduler_wakeup.is_set():
+        _scheduler_wakeup.clear()
+        return
+    try:
+        await asyncio.wait_for(
+            _scheduler_wakeup.wait(),
+            timeout=await _next_match_notification_delay(default_seconds),
+        )
+    except asyncio.TimeoutError:
+        pass
+    else:
+        _scheduler_wakeup.clear()
 
 
 async def _claim_match_notification(notification_id: int):
@@ -84,6 +124,10 @@ async def _finish_match_notification(notification_id: int, attempts: int, error:
             "last_error": error[:900],
             "updated_at": now,
         }
+        if not final:
+            values["send_at_utc"] = now + timedelta(
+                seconds=min(300, 15 * (2 ** max(0, attempts - 1)))
+            )
     await database.execute(
         update(province_match_notifications)
         .where(province_match_notifications.c.id == notification_id)
@@ -185,6 +229,7 @@ async def run_push_scheduler():
                         data=row["data_json"] or {},
                     )
                     await _finish_match_notification(notification_id, attempts, None, True)
+                    logger.info("Match push notification %s sent", notification_id)
                 except Exception as exc:
                     await _finish_match_notification(
                         notification_id,
@@ -192,12 +237,18 @@ async def run_push_scheduler():
                         f"Send error: {exc}",
                         attempts >= max_attempts,
                     )
+                    logger.warning(
+                        "Match push notification %s failed on attempt %s: %s",
+                        notification_id,
+                        attempts,
+                        exc,
+                    )
 
         except Exception:
-            # nie przerywamy pętli
-            pass
+            # Nie przerywamy pętli, ale zostawiamy diagnozę w logach Railway.
+            logger.exception("Push scheduler pass failed")
 
-        await asyncio.sleep(interval)
+        await _wait_for_next_pass(interval)
 
 
 def _stripped(value) -> str:

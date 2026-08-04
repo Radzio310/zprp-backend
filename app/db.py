@@ -825,6 +825,7 @@ province_match_notifications = Table(
     Column("title", String, nullable=False),
     Column("body", Text, nullable=False),
     Column("data_json", JSON().with_variant(JSONB, "postgresql"), nullable=False, server_default=text("'{}'")),
+    Column("send_at_utc", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
     Column("status", String, nullable=False, server_default=text("'pending'")),
     Column("attempts", Integer, nullable=False, server_default=text("0")),
     Column("last_error", Text, nullable=True),
