@@ -220,9 +220,61 @@ class UserReportItem(BaseModel):
     content: str
     created_at: datetime
     is_read: bool
+    # ── Pola komunikatora. Wszystkie mają wartości domyślne, więc odpowiedź
+    # nadal pasuje do modeli w starych wersjach aplikacji.
+    status: str = "open"
+    title: Optional[str] = None
+    unread_by_admin: bool = True
+    unread_by_user: bool = False
+    updated_at: Optional[datetime] = None
+    message_count: int = 0
+    last_message: Optional[str] = None
+    last_message_at: Optional[datetime] = None
 
 class ListUserReportsResponse(BaseModel):
     reports: List[UserReportItem]
+
+
+# ---------------------------- Komunikator zgłoszeń ----------------------------
+
+class ReportMessageItem(BaseModel):
+    id: int
+    report_id: int
+    sender_type: str          # "user" | "admin"
+    sender_id: str
+    sender_name: Optional[str] = None
+    content: str
+    attachment_url: Optional[str] = None
+    created_at: datetime
+
+
+class ReportDetailResponse(BaseModel):
+    report: UserReportItem
+    messages: List[ReportMessageItem]
+
+
+class ReportReplyRequest(BaseModel):
+    judge_id: str
+    full_name: Optional[str] = None
+    content: str
+    attachment_url: Optional[str] = None
+
+
+class ReportStatusRequest(BaseModel):
+    status: Literal["open", "in_progress", "closed"]
+
+
+class ReportUnreadCountResponse(BaseModel):
+    unread_count: int
+
+
+class ReportAdminStats(BaseModel):
+    total: int
+    unread: int
+    open: int
+    in_progress: int
+    closed: int
+    by_type: dict
 
 class TargetFilters(BaseModel):
     judge_ids: Optional[List[str]] = None
@@ -955,6 +1007,9 @@ class VersionItem(BaseModel):
     name: str
     description: Optional[str] = None
     to_show: bool = False
+    # Dostępność w sklepach — starsze aplikacje po prostu ignorują te pola.
+    available_ios: bool = False
+    available_android: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -968,6 +1023,8 @@ class CreateVersionRequest(BaseModel):
     name: str
     description: Optional[str] = None
     to_show: Optional[bool] = False
+    available_ios: Optional[bool] = False
+    available_android: Optional[bool] = False
 
 
 class UpdateVersionRequest(BaseModel):
@@ -975,6 +1032,8 @@ class UpdateVersionRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     to_show: Optional[bool] = None
+    available_ios: Optional[bool] = None
+    available_android: Optional[bool] = None
 
 
 # ---------------------------- Niedyspozcyje partnera ----------------------------

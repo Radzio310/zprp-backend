@@ -36,6 +36,7 @@ from app.results import router as results_router
 from app.calendar import router as calendar_router
 from app.silesia import router as silesia_router
 from app.admin import router as admin_router
+from app.reports import router as reports_router
 from app.login_records import router as login_records_router
 from app.proel import router as proel_router
 from app.server_matches import router as matches_router
@@ -113,8 +114,9 @@ from app.beach.mp_appearances import (
 # NEW: push router + scheduler
 from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
+from app.province_match_monitor import run_province_match_monitor
 
-from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts, assignment_drafts
+from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts, assignment_drafts, province_match_events, province_match_sync_runs
 
 app = FastAPI(title="BAZA - API")
 
@@ -166,6 +168,7 @@ app.include_router(results_router)
 app.include_router(calendar_router)
 app.include_router(silesia_router)
 app.include_router(admin_router)
+app.include_router(reports_router)
 app.include_router(login_records_router)
 app.include_router(proel_router)
 app.include_router(matches_router)
@@ -608,6 +611,7 @@ _beach_medical_task: asyncio.Task | None = None
 _standings_sync_task: asyncio.Task | None = None
 _email_grace_task: asyncio.Task | None = None
 _mp_snapshot_task: asyncio.Task | None = None
+_province_match_monitor_task: asyncio.Task | None = None
 
 
 async def _email_grace_cleanup_loop():
@@ -667,6 +671,21 @@ async def _cleanup_loop():
             )
 
             # 🧹 Beach notifications cleanup: expired (> 7 days)
+            # Trwała skrzynka zmian ma 60 dni historii; same snapshoty meczów
+            # zostają. Kaskada usuwa odpowiadające im dostarczenia per urządzenie.
+            await database.execute(
+                delete(province_match_events).where(
+                    province_match_events.c.created_at
+                    < datetime.now(timezone.utc) - timedelta(days=60)
+                )
+            )
+            await database.execute(
+                delete(province_match_sync_runs).where(
+                    province_match_sync_runs.c.started_at
+                    < datetime.now(timezone.utc) - timedelta(days=30)
+                )
+            )
+
             notif_cleaned = await cleanup_expired_notifications()
             if notif_cleaned:
                 logger.info(f"🧹 BeachNotifications cleanup: removed {notif_cleaned} expired rows")
@@ -795,6 +814,20 @@ async def _cleanup_loop():
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    # create_all nie zmienia już istniejącej tabeli push_tokens. Te migracje
+    # uzupełniają kolumny wymagane przez monitor i są idempotentne na Railway.
+    _province_match_migrations = [
+        "ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS judge_id VARCHAR",
+        "ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS province VARCHAR",
+        "ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS notification_prefs JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "CREATE INDEX IF NOT EXISTS ix_push_tokens_judge_id ON push_tokens (judge_id)",
+        "CREATE INDEX IF NOT EXISTS ix_push_tokens_province ON push_tokens (province)",
+    ]
+    for stmt in _province_match_migrations:
+        try:
+            await database.execute(stmt)
+        except Exception:
+            pass
     logger.info("✅ Connected to the database")
 
     # Board migrations: add columns that may be missing on existing installations
@@ -974,7 +1007,7 @@ async def startup():
         logger.exception("❌ Walidacja konfiguracji e-mail nie powiodła się")
         raise
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -1018,6 +1051,8 @@ async def startup():
 
     # NEW: background scheduler for push queue
     _push_task = asyncio.create_task(run_push_scheduler())
+    _province_match_monitor_task = asyncio.create_task(run_province_match_monitor())
+    logger.info("Province match monitor started (15 min light / 4 h full)")
     logger.info("✅ Push scheduler started")
 
     # NEW: background notification generator (tournament reminders etc.)
@@ -1049,7 +1084,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task
 
     if _cleanup_task:
         _cleanup_task.cancel()
@@ -1062,6 +1097,13 @@ async def shutdown():
         _push_task.cancel()
         try:
             await _push_task
+        except asyncio.CancelledError:
+            pass
+
+    if _province_match_monitor_task:
+        _province_match_monitor_task.cancel()
+        try:
+            await _province_match_monitor_task
         except asyncio.CancelledError:
             pass
 

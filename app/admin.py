@@ -1278,6 +1278,10 @@ async def list_versions():
         data = dict(r)
         # backward compatibility: jeśli w DB/rekordzie brak to_show, domyślnie False
         data.setdefault("to_show", False)
+        # Kolumny platform doszły później — gdyby zapytanie trafiło na bazę
+        # sprzed migracji, model i tak dostanie komplet pól.
+        data.setdefault("available_ios", False)
+        data.setdefault("available_android", False)
         versions.append(VersionItem(**data))
     return ListVersionsResponse(versions=versions)
 
@@ -1296,6 +1300,10 @@ async def create_version(req: CreateVersionRequest):
             name=req.name,
             description=req.description or "",
             to_show=req.to_show if req.to_show is not None else False,
+            available_ios=req.available_ios if req.available_ios is not None else False,
+            available_android=(
+                req.available_android if req.available_android is not None else False
+            ),
         )
     )
     return {"success": True}
@@ -1320,6 +1328,10 @@ async def update_version(version_id: int, req: UpdateVersionRequest):
         values["description"] = req.description
     if getattr(req, "to_show", None) is not None:
         values["to_show"] = req.to_show
+    if getattr(req, "available_ios", None) is not None:
+        values["available_ios"] = req.available_ios
+    if getattr(req, "available_android", None) is not None:
+        values["available_android"] = req.available_android
 
     if not values:
         return {"success": True}

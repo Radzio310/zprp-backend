@@ -6,9 +6,19 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, update
 
-from app.db import database, push_tokens, push_schedules, beach_users
+from app.db import (
+    beach_users,
+    database,
+    province_match_events,
+    province_match_notifications,
+    province_match_sync_runs,
+    push_schedules,
+    push_tokens,
+)
+from app.province_match_monitor import configured_provinces, normalize_province
 from .models import (
     PushRegisterRequest,
+    PushIdentityRequest,
     PushScheduleBulkRequest,
     PushClearRequest,
 )
@@ -17,6 +27,51 @@ router = APIRouter(prefix="/push", tags=["push"])
 
 def _utc_now():
     return datetime.now(timezone.utc)
+
+
+async def send_push_to_judges(
+    judge_ids: List[str],
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> int:
+    """
+    Wysyła push NATYCHMIAST na wszystkie urządzenia podanych sędziów.
+
+    W odróżnieniu od push_schedules (który czeka na przebieg schedulera) to jest
+    droga dla rzeczy, które muszą dojść od razu — np. odpowiedź admina na
+    zgłoszenie. Urządzenia bez zapisanego judge_id (starsze wersje aplikacji)
+    po prostu nie dostaną powiadomienia; w aplikacji zostaje im licznik
+    nieprzeczytanych.
+
+    Zwraca liczbę urządzeń, do których poszła wysyłka. Nigdy nie rzuca —
+    powiadomienie nie może wywalić operacji, przy której powstało.
+    """
+    ids = [str(j) for j in judge_ids if j]
+    if not ids:
+        return 0
+    try:
+        rows = await database.fetch_all(
+            select(push_tokens.c.token, push_tokens.c.token_type).where(
+                push_tokens.c.judge_id.in_(ids)
+            )
+        )
+    except Exception:
+        return 0
+
+    from .fcm import send_fcm_message
+
+    sent = 0
+    for row in rows:
+        if row["token_type"] != "device_fcm":
+            continue
+        try:
+            await send_fcm_message(row["token"], title, body, data=data or {})
+            sent += 1
+        except Exception:
+            # Wygasły token jednego urządzenia nie może zablokować reszty.
+            continue
+    return sent
 
 def _send_hour_utc(dt: datetime) -> int:
     return int(dt.timestamp() // 3600)
@@ -47,6 +102,18 @@ async def register(req: PushRegisterRequest):
     existing = await database.fetch_one(stmt)
 
     if existing:
+        identity_values: Dict[str, Any] = {}
+        if req.identity_known:
+            identity_values["judge_id"] = req.judge_id or None
+            identity_values["province"] = normalize_province(req.province) or None
+        elif req.judge_id:
+            # Kompatybilność ze starszą wersją, która wysyła judge_id, ale nie
+            # zna jeszcze identity_known.
+            identity_values["judge_id"] = req.judge_id
+        if req.province and not req.identity_known:
+            identity_values["province"] = normalize_province(req.province) or None
+        if req.notification_prefs:
+            identity_values["notification_prefs"] = req.notification_prefs
         upd = (
             update(push_tokens)
             .where(push_tokens.c.installation_id == req.installation_id)
@@ -55,6 +122,9 @@ async def register(req: PushRegisterRequest):
                 token=req.token,
                 platform=req.platform,
                 app_variant=req.app_variant,
+                # Nie kasujemy zapisanego judge_id, gdy przyjdzie żądanie ze
+                # starszej aplikacji, która tego pola nie zna.
+                **identity_values,
                 updated_at=now,
             )
         )
@@ -66,11 +136,90 @@ async def register(req: PushRegisterRequest):
             token=req.token,
             platform=req.platform,
             app_variant=req.app_variant,
+            judge_id=req.judge_id,
+            province=normalize_province(req.province) or None,
+            notification_prefs=req.notification_prefs or {},
             updated_at=now,
         )
         await database.execute(ins)
 
     return {"ok": True}
+
+
+@router.post("/identity")
+async def update_push_identity(req: PushIdentityRequest):
+    """Aktualizuje/usuwa tożsamość bez ponownego pobierania tokenu FCM."""
+    if not req.installation_id:
+        raise HTTPException(status_code=400, detail="Missing installation_id")
+    values: Dict[str, Any] = {
+        "judge_id": req.judge_id or None,
+        "province": normalize_province(req.province) or None,
+        "updated_at": _utc_now(),
+    }
+    if req.notification_prefs:
+        values["notification_prefs"] = req.notification_prefs
+    changed = await database.execute(
+        update(push_tokens)
+        .where(push_tokens.c.installation_id == req.installation_id)
+        .values(**values)
+    )
+    return {"ok": True, "updated": bool(changed)}
+
+
+@router.get("/match-events")
+async def list_match_events(installation_id: str, limit: int = 100):
+    """Trwała skrzynka powiadomień o zmianach meczów dla jednej instalacji.
+
+    Push i skrzynka są niezależne: jeśli system operacyjny nie pokaże pusha,
+    aplikacja nadal pobierze wpis i scali go z lokalnym panelem powiadomień.
+    """
+    if not installation_id:
+        raise HTTPException(status_code=400, detail="Missing installation_id")
+    limit = max(1, min(200, int(limit)))
+    stmt = (
+        select(
+            province_match_notifications.c.id,
+            province_match_notifications.c.event_id,
+            province_match_notifications.c.title,
+            province_match_notifications.c.body,
+            province_match_notifications.c.data_json,
+            province_match_notifications.c.status,
+            province_match_notifications.c.created_at,
+            province_match_notifications.c.sent_at,
+            province_match_events.c.match_code,
+            province_match_events.c.event_type,
+        )
+        .select_from(
+            province_match_notifications.join(
+                province_match_events,
+                province_match_notifications.c.event_id == province_match_events.c.id,
+            )
+        )
+        .where(province_match_notifications.c.installation_id == installation_id)
+        .order_by(province_match_notifications.c.created_at.desc())
+        .limit(limit)
+    )
+    rows = await database.fetch_all(stmt)
+    return {"items": [dict(row) for row in rows]}
+
+
+@router.get("/match-monitor/status")
+async def match_monitor_status(request: Request, limit: int = 50):
+    """Ostatnie przebiegi i ich rzeczywisty koszt (mecze/detail/eventy)."""
+    admin_key = os.getenv("PUSH_ADMIN_KEY", "")
+    if admin_key and request.headers.get("X-Admin-Key", "") != admin_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    rows = await database.fetch_all(
+        select(province_match_sync_runs)
+        .order_by(province_match_sync_runs.c.started_at.desc())
+        .limit(max(1, min(200, int(limit))))
+    )
+    return {
+        "enabled": os.getenv("ZPRP_MATCH_MONITOR_ENABLED", "true").lower()
+        in ("1", "true", "yes", "on"),
+        "configured_provinces": sorted(configured_provinces().keys()),
+        "runs": [dict(row) for row in rows],
+    }
 
 @router.post("/schedules/clear")
 async def clear(req: PushClearRequest):

@@ -1482,6 +1482,33 @@ def _parse_delegate_cell(td) -> str:
     return _first_name_from_lines(lines)
 
 
+def _parse_delegate_assessment_link(td) -> str:
+    if not td:
+        return ""
+    for anchor in td.find_all("a", href=True):
+        href = _clean_spaces(anchor.get("href", ""))
+        text = _clean_spaces(anchor.get_text(" ", strip=True))
+        low = href.lower()
+        if not href or low.startswith(("javascript:", "mailto:")):
+            continue
+        if "statystyki_sedzia_oc_pdf.php" in low or "ocena" in text.lower() or "statystyki_sedzia" in low:
+            return href.removeprefix("./")
+    return ""
+
+
+def _parse_club_contact_cell(td) -> Dict[str, Any]:
+    if not td:
+        return {"phones": [], "emails": [], "rawLines": []}
+    lines = [
+        _clean_spaces(line)
+        for line in td.get_text("\n", strip=True).split("\n")
+        if _clean_spaces(line) and _clean_spaces(line).lower() != "null"
+    ]
+    emails = sorted(set(re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", " ".join(lines), re.I)))
+    phones = sorted(set(_clean_spaces(x) for x in re.findall(r"\+?\d[\d\s-]{6,}\d", " ".join(lines))))
+    return {"phones": phones, "emails": [x.lower() for x in emails], "rawLines": lines}
+
+
 def _parse_hall_from_title(title: str) -> Dict[str, str]:
     """
     title zwykle: "Nazwa Hali Miasto, Ulica Numer"
@@ -1767,8 +1794,15 @@ def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
         # wynik
         score = _parse_score_cell(tds[7])
 
-        off = _parse_officials_cell(tds[-4])
-        delegate = _parse_delegate_cell(tds[-3])
+        # Aktualny układ ma 14 kolumn: obsada=9, opłata=10, delegat=11,
+        # kontakty=12/13. Fallback zachowuje obsługę starszego układu.
+        officials_td = tds[9] if len(tds) >= 14 else tds[-4]
+        delegate_td = tds[11] if len(tds) >= 14 else tds[-3]
+        off = _parse_officials_cell(officials_td)
+        delegate = _parse_delegate_cell(delegate_td)
+        delegate_note = _parse_delegate_assessment_link(delegate_td)
+        host_contact = _parse_club_contact_cell(tds[12]) if len(tds) >= 14 else {}
+        guest_contact = _parse_club_contact_cell(tds[13]) if len(tds) >= 14 else {}
 
         key = match_id or _clean_spaces(f"{season_label}|{code}|{date_ymd} {time_hm}")
 
@@ -1802,6 +1836,9 @@ def _parse_match_rows_from_soup(soup: BeautifulSoup) -> Dict[str, Any]:
                 "timekeeper": off.get("timekeeper", ""),
                 "delegate": delegate,
             },
+            "delegate_note": delegate_note,
+            "host_contact": host_contact,
+            "guest_contact": guest_contact,
         }
 
         matches[key] = rec

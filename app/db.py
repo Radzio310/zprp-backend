@@ -178,7 +178,43 @@ user_reports = Table(
     nullable=False,
     server_default=text("false")    # ← to dodaj
   ),
+  # ── Komunikator (dołożone bez ruszania kolumn wyżej) ────────────────────
+  # Stare zgłoszenia stają się wątkami: treść pierwszej wiadomości zostaje
+  # w `content`, odpowiedzi lądują w user_report_messages.
+  Column("status", String, nullable=False, server_default=text("'open'")),  # open | in_progress | closed
+  Column("title", Text, nullable=True),          # tytuł generowany przez AI
+  # `is_read` zostaje dla starych klientów; nowy panel patrzy na unread_by_admin
+  # i zapisuje OBIE kolumny naraz, żeby stary APK dalej widział to samo.
+  Column("unread_by_admin", Boolean, nullable=False, server_default=text("true")),
+  Column("unread_by_user", Boolean, nullable=False, server_default=text("false")),
+  Column(
+    "updated_at",
+    DateTime(timezone=True),
+    server_default=func.now(),
+    onupdate=func.now(),
+    nullable=False,
+  ),
 )
+
+# 11b) Wiadomości w wątku zgłoszenia
+user_report_messages = Table(
+  "user_report_messages", metadata,
+  Column("id", Integer, primary_key=True, autoincrement=True),
+  Column(
+    "report_id",
+    Integer,
+    ForeignKey("user_reports.id", ondelete="CASCADE"),
+    nullable=False,
+    index=True,
+  ),
+  Column("sender_type", String, nullable=False),   # "user" | "admin"
+  Column("sender_id", String, nullable=False),     # judge_id nadawcy
+  Column("sender_name", String, nullable=True),
+  Column("content", Text, nullable=False),
+  Column("attachment_url", Text, nullable=True),   # "__archived__" po sprzątaniu
+  Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
 # 12) Wpisy admina
 admin_posts = Table(
   "admin_posts", metadata,
@@ -614,6 +650,13 @@ app_versions = Table(
     Column("name", String, nullable=False),                              # nazwa wersji
     Column("description", Text, nullable=True),                          # opis zmian
     Column("to_show", Boolean, nullable=False, server_default="false"),   # czy pokazywać w aplikacji
+    # Dostępność w sklepach — wersja niewidoczna na danej platformie nie pojawia
+    # się tam ani w nowościach, ani w wymuszaniu aktualizacji.
+    # Istniejące wiersze backfillujemy na TRUE (patrz komenda SQL), żeby po
+    # wdrożeniu nic nie zniknęło użytkownikom; nowe wersje domyślnie FALSE,
+    # żeby przypadkowo nie wypchnąć aktualizacji przed publikacją w sklepie.
+    Column("available_ios", Boolean, nullable=False, server_default=text("false")),
+    Column("available_android", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
@@ -683,6 +726,19 @@ push_tokens = Table(
     Column("token", Text, nullable=False),
     Column("platform", String, nullable=True),     # ios | android | web
     Column("app_variant", String, nullable=True),
+    # Kto siedzi na tym urządzeniu — potrzebne, żeby wysłać push konkretnemu
+    # sędziemu (np. odpowiedź admina na zgłoszenie). Nullable, bo starsze
+    # wersje aplikacji nie wysyłają tego pola przy rejestracji tokenu.
+    Column("judge_id", String, nullable=True, index=True),
+    # Kanoniczny slug województwa (np. SLASKIE).
+    Column("province", String, nullable=True, index=True),
+    # Preferencje są per instalacja, bo ten sam sędzia może mieć kilka urządzeń.
+    Column(
+        "notification_prefs",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    ),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
@@ -704,6 +760,106 @@ push_schedules = Table(
 )
 
 Index("ix_push_sched_install_hour", push_schedules.c.installation_id, push_schedules.c.send_hour_utc)
+
+# -------------------------
+# BAZA: serwerowy monitor meczów wojewódzkich
+# -------------------------
+
+province_matches = Table(
+    "province_matches",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("season", String, nullable=True),
+    Column("match_at", DateTime(timezone=True), nullable=True, index=True),
+    Column("match_code", String, nullable=True, index=True),
+    Column("state_json", JSON().with_variant(JSONB, "postgresql"), nullable=False, server_default=text("'{}'")),
+    Column("fingerprint", String, nullable=False),
+    Column("approved", Boolean, nullable=False, server_default=text("false")),
+    Column("active", Boolean, nullable=False, server_default=text("true")),
+    Column("missing_full_runs", Integer, nullable=False, server_default=text("0")),
+    Column("first_seen_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("last_seen_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("last_deep_checked_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+province_match_judges = Table(
+    "province_match_judges",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("season", String, nullable=True),
+    Column("active", Boolean, nullable=False, server_default=text("true")),
+    Column("missing_runs", Integer, nullable=False, server_default=text("0")),
+    Column("first_seen_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("last_seen_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+Index("ix_province_match_judges_judge", province_match_judges.c.judge_id, province_match_judges.c.active)
+
+province_match_events = Table(
+    "province_match_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("event_key", String, nullable=False, unique=True),
+    Column("province", String, nullable=False, index=True),
+    Column("match_id", String, nullable=False, index=True),
+    Column("match_code", String, nullable=True),
+    Column("event_type", String, nullable=False),
+    Column("title", String, nullable=False),
+    Column("body", Text, nullable=False),
+    Column("data_json", JSON().with_variant(JSONB, "postgresql"), nullable=False, server_default=text("'{}'")),
+    Column("target_judge_ids", JSON().with_variant(JSONB, "postgresql"), nullable=False, server_default=text("'[]'")),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+)
+
+province_match_notifications = Table(
+    "province_match_notifications",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("event_id", Integer, ForeignKey("province_match_events.id", ondelete="CASCADE"), nullable=False),
+    Column("installation_id", String, nullable=False, index=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("title", String, nullable=False),
+    Column("body", Text, nullable=False),
+    Column("data_json", JSON().with_variant(JSONB, "postgresql"), nullable=False, server_default=text("'{}'")),
+    Column("status", String, nullable=False, server_default=text("'pending'")),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+    Column("sent_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    UniqueConstraint("event_id", "installation_id", name="uq_province_match_notification_event_installation"),
+)
+
+province_match_sync_runs = Table(
+    "province_match_sync_runs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("mode", String, nullable=False),
+    Column("cycle_key", String, nullable=False, unique=True),
+    Column("status", String, nullable=False, server_default=text("'running'")),
+    Column("matches_seen", Integer, nullable=False, server_default=text("0")),
+    Column("details_fetched", Integer, nullable=False, server_default=text("0")),
+    Column("events_created", Integer, nullable=False, server_default=text("0")),
+    Column("error", Text, nullable=True),
+    Column("started_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+
+# Krótka, odnawiana dzierżawa per województwo. Chroni przed równoczesnym
+# zapisem lekkiego i pełnego przebiegu także wtedy, gdy Railway ma kilka replik.
+province_match_sync_leases = Table(
+    "province_match_sync_leases",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("holder", String, nullable=False),
+    Column("locked_until", DateTime(timezone=True), nullable=False, index=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
 
 # -------------------------
 # NEW: BAZA VIPs (logowania bez judgeId)
