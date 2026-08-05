@@ -133,7 +133,7 @@ def test_template_has_empty_lead_column():
     ws = wb.active
 
     width = ws.column_dimensions["A"].width
-    assert width is not None and width >= 3, "kolumna ptaszków za wąska: %r" % width
+    assert width is not None and width >= 2, "kolumna ptaszków za wąska: %r" % width
 
     for row in range(1, ws.max_row + 1):
         assert ws.cell(row=row, column=1).value is None, (
@@ -141,14 +141,20 @@ def test_template_has_empty_lead_column():
         )
 
 
-def test_template_keeps_content_centered():
+def test_template_keeps_layout_on_paper():
     """
-    Arkusz drukuje się wyśrodkowany, więc kolumna ptaszków przesuwałaby całą
-    tabelę w prawo o pół swojej szerokości. Prawy margines jest o tę szerokość
-    większy, żeby treść lądowała dokładnie tam, gdzie przed zmianą.
+    Kolumna ptaszków bierze miejsce z LEWEGO MARGINESU i nic więcej.
 
-    Test liczy pozycję lewego brzegu treści na papierze w obu szablonach —
-    inaczej rozjazd widać dopiero na wydruku.
+    Sprawdzamy dwie rzeczy, obie niewidoczne w wartościach komórek:
+     1. lewy brzeg treści na papierze się nie ruszył (arkusz drukuje się
+        wyśrodkowany, więc sama dołożona kolumna przesuwała tabelę w prawo),
+     2. zapas na szerokość NIE zmalał — gdyby miejsce szło z prawego marginesu,
+        obszar wydruku by się skurczył i prawy skraj protokołu wyjechałby na
+        osobną stronę. Dokładnie to się stało przy pierwszej próbie.
+
+    Liczby bezwzględne zależą od tego, jak generator PDF-a przelicza szerokości
+    kolumn na piksele, więc testujemy RÓŻNICE między szablonami — one są od tego
+    przelicznika niezależne.
     """
     old = os.path.join(os.path.dirname(TEMPLATE), "protocol_template_BACKUP_preExamCol.xlsx")
     assert os.path.exists(old), "brak backupu szablonu sprzed dodania kolumny"
@@ -172,24 +178,29 @@ def test_template_keeps_content_centered():
             for i in range(first, last + 1)
         )
 
-    def content_left_mm(path, last_col, body_first_col):
+    def geometry_mm(path, last_col, body_first_col):
         ws = load_workbook(path).active
         w = widths(path)
         scale = (ws.page_setup.scale or 100) / 100.0
         left = float(ws.page_margins.left)
         right = float(ws.page_margins.right)
+        assert left >= 0, "lewy margines wyszedł ujemny — kolumna za szeroka"
         block = px(w, 1, last_col) / 96.0 * scale
         usable = 210.0 / 25.4 - left - right
         lead = px(w, 1, body_first_col - 1) / 96.0 * scale if body_first_col > 1 else 0.0
-        return (left + (usable - block) / 2.0 + lead) * 25.4, block * 25.4
+        content_left = (left + (usable - block) / 2.0 + lead) * 25.4
+        return content_left, (usable - block) * 25.4
 
-    old_left, _ = content_left_mm(old, 59, 1)
-    new_left, new_block = content_left_mm(TEMPLATE, 60, 2)
+    old_left, old_slack = geometry_mm(old, 59, 1)
+    new_left, new_slack = geometry_mm(TEMPLATE, 60, 2)
 
     assert abs(new_left - old_left) < 0.5, (
         "treść protokołu przesunęła się na papierze o %.2f mm" % (new_left - old_left)
     )
-    assert new_block < 200, "wydruk %.1f mm nie mieści się na A4" % new_block
+    assert new_slack > old_slack - 0.5, (
+        "zapas na szerokość zmalał z %.1f mm do %.1f mm — kolumna ptaszków musi "
+        "brać miejsce z LEWEGO marginesu, nie z prawego" % (old_slack, new_slack)
+    )
 
 
 def test_template_matches_code():

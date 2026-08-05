@@ -2275,16 +2275,20 @@ EXAM_MARK_RGB = {
 
 _EXAM_MARK_CACHE: Dict[str, bytes] = {}
 
-# Wiersz zawodnika ma domyślną wysokość 13,2 pt ≈ 17,6 px, a nowa kolumna
-# ~40 px. Znaczek jest więc szeroki i niski: ptaszek po lewej, a przy wariancie
-# WZPR pastylka z dopiskiem NACHODZĄCA na jego prawe ramię — dokładnie tak, jak
-# plakietka w aplikacji. Stackowanie tekstu pod ptaszkiem odpada: przy 15 px
-# wysokości litery miałyby ~3 px i byłyby nieczytelne.
-EXAM_MARK_W = 44
+# Rozmiar znaczka wynika z twardego ograniczenia szablonu, nie z gustu: kolumna
+# ptaszków ma 20 px, bo dokładnie tyle miejsca oddaje jej dawny LEWY MARGINES
+# (0,19685" przy skali 90 %). Szerzej = tabela nie mieści się na A4 i prawy skraj
+# protokołu wyjeżdża na osobną stronę. Wiersz zawodnika ma 13,2 pt ≈ 17,6 px.
+#
+# Dlatego wariant WZPR ma przy ptaszku samo „W", a nie pełne „WZPR": cztery
+# litery w 4,8 mm szerokości dałyby ~1 mm wysokości i byłyby na wydruku
+# nieczytelne. Jedna litera to ~2,3 mm, czyli mniej więcej 6 pt.
+EXAM_MARK_W = 20
 EXAM_MARK_H = 15
 _EXAM_SS = 10  # rysujemy 10x większe i skalujemy w dół — ostre na wydruku
-# Nowa kolumna ma szerokość 7 = 49 px, znaczek 44 px — stąd 2 px zapasu z lewej.
-_EXAM_MARK_OFFSET_X_PX = 2
+# Znaczek zajmuje całą szerokość kolumny; w pionie 1 px zapasu, żeby nie kleił
+# się do linii wiersza.
+_EXAM_MARK_OFFSET_X_PX = 0
 _EXAM_MARK_OFFSET_Y_PX = 1
 
 
@@ -2310,11 +2314,14 @@ def _exam_mark_png(kind: str) -> bytes:
     img = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    # Ptaszek: krótkie ramię w dół-w prawo, długie w górę-w prawo. Wymiary
-    # liczone od WYSOKOŚCI, żeby szersza kanwa (wariant WZPR) go nie rozciągała.
-    p0 = (0.35 * h, 0.52 * h)
-    p1 = (0.62 * h, 0.80 * h)
-    p2 = (1.05 * h, 0.16 * h)
+    # Ptaszek: krótkie ramię w dół-w prawo, długie w górę-w prawo. Wariant WZPR
+    # oddaje prawą część kanwy literze, więc jest odrobinę węższy — ale rysowany
+    # tą samą ręką, żeby oba czytały się jako ten sam znak.
+    span = 0.55 * w if kind == "wzpr" else 0.86 * w
+    x0 = 0.05 * w if kind == "wzpr" else 0.07 * w
+    p0 = (x0, 0.52 * h)
+    p1 = (x0 + 0.30 * span, 0.80 * h)
+    p2 = (x0 + span, 0.16 * h)
     stroke = int(0.105 * h)
 
     if kind == "manual":
@@ -2323,7 +2330,7 @@ def _exam_mark_png(kind: str) -> bytes:
         # Ziarno na sztywno — inaczej każdy worker rysowałby inny ptaszek.
         rnd = random.Random(1337)
         amp = 0.030 * h
-        tail = (1.16 * h, 0.05 * h)
+        tail = (min(w - stroke, x0 + 1.08 * span), 0.05 * h)
 
         def jitter(pt):
             return (pt[0] + rnd.uniform(-amp, amp), pt[1] + rnd.uniform(-amp, amp))
@@ -2351,40 +2358,36 @@ def _exam_mark_png(kind: str) -> bytes:
         d.line([p0, p1, p2], fill=color, width=stroke, joint="curve")
 
     if kind == "wzpr":
-        # Pastylka z dopiskiem — zaczyna się jeszcze NA ramieniu ptaszka, więc
-        # wyraźnie na niego nachodzi, a resztę miejsca ma dla siebie.
+        # Inicjał wciśnięty w prawy skraj kanwy, nachodzący na koniec ptaszka.
+        # Bez pastylki — przy 20 px szerokości ramka zjadałaby cały ptaszek i
+        # znaczek robił się nieczytelną plamą. Zamiast niej biała obwódka wokół
+        # litery: odcina ją od ramienia ptaszka, a nic nie zasłania.
         try:
             from PIL import ImageFont
 
+            text = "W"
             font = None
             for name in ("DejaVuSans-Bold.ttf", "arialbd.ttf", "DejaVuSans.ttf", "arial.ttf"):
                 try:
-                    font = ImageFont.truetype(name, int(0.58 * h))
+                    font = ImageFont.truetype(name, int(0.66 * h))
                     break
                 except Exception:
                     continue
             if font is None:
                 font = ImageFont.load_default()
 
-            text = "WZPR"
             box = d.textbbox((0, 0), text, font=font)
             tw, th = box[2] - box[0], box[3] - box[1]
+            left = w - tw - max(1, int(0.03 * w))
+            top = (h - th) / 2
 
-            pad_x, pad_y = int(0.06 * h), int(0.10 * h)
-            x0 = 0.85 * h  # nachodzi na prawe ramię ptaszka
-            plate = [x0, (h - th) / 2 - pad_y, x0 + tw + 2 * pad_x, (h + th) / 2 + pad_y]
-            d.rounded_rectangle(
-                plate,
-                radius=int(0.22 * h),
-                fill=(255, 255, 255, 242),
-                outline=color,
-                width=max(1, int(0.045 * h)),
-            )
             d.text(
-                (plate[0] + pad_x - box[0], plate[1] + pad_y - box[1]),
+                (left - box[0], top - box[1]),
                 text,
                 font=font,
                 fill=color,
+                stroke_width=max(1, int(0.10 * h)),
+                stroke_fill=(255, 255, 255, 255),
             )
         except Exception:
             pass

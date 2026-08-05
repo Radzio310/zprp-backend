@@ -69,7 +69,7 @@ for letter, dim in ws_old.column_dimensions.items():
         problems.append("szerokość %s -> %s: %r != %r" % (letter, tgt, dim.width, got))
 
 new_a = ws_new.column_dimensions["A"].width
-if new_a is None or new_a < 3:
+if new_a is None or new_a < 2:
     problems.append("nowa kolumna A ma szerokość %r" % new_a)
 
 # 5) wysokości wierszy
@@ -138,8 +138,30 @@ print(
     % (old_block, new_block)
 )
 print("lewy brzeg treści: stary %.2f mm, nowy %.2f mm" % (old_left, new_left))
-if new_block > 205:
-    problems.append("wydruk %.1f mm nie mieści się na A4" % new_block)
+
+
+def usable_mm(ws):
+    return 210.0 - (float(ws.page_margins.left) + float(ws.page_margins.right)) * 25.4
+
+
+old_usable = usable_mm(ws_old)
+new_usable = usable_mm(ws_new)
+print(
+    "obszar wydruku: stary %.1f mm, nowy %.1f mm | zapas: %.1f mm -> %.1f mm"
+    % (old_usable, new_usable, old_usable - old_block, new_usable - new_block)
+)
+# Klucz: zapas NIE MOŻE się zmniejszyć. Kolumna ptaszków bierze miejsce z lewego
+# marginesu, więc obszar wydruku rośnie dokładnie o tyle, o ile rośnie tabela.
+# Gdyby miejsce szło z prawej, zapas zmalałby o szerokość kolumny i prawy skraj
+# protokołu wyjechałby na osobną stronę.
+if (new_usable - new_block) < (old_usable - old_block) - 0.1:
+    problems.append(
+        "zapas na szerokość zmalał z %.1f mm do %.1f mm — kolumna ptaszków musi "
+        "brać miejsce z LEWEGO marginesu, nie z prawego"
+        % (old_usable - old_block, new_usable - new_block)
+    )
+if float(ws_new.page_margins.left) < 0:
+    problems.append("lewy margines wyszedł ujemny — kolumna ptaszków za szeroka")
 if abs(old_left - new_left) > 0.5:
     problems.append(
         "treść przesunęła się na papierze o %.2f mm — popraw kompensację "

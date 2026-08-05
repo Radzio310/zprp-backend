@@ -20,8 +20,15 @@ BACKUP = os.path.join(TPL_DIR, "protocol_template_BACKUP_preExamCol.xlsx")
 OUT = os.path.join(TPL_DIR, "protocol_template.xlsx")
 TMP = os.path.join(TPL_DIR, "_protocol_template_shifted.tmp.xlsx")
 
-NEW_COL_WIDTH = "7"       # 49 px — mieści znaczek 44x15 px z dopiskiem WZPR
 SHIFT = 1
+
+# Szerokość kolumny ptaszków w pikselach (96 dpi, przed skalą wydruku).
+#
+# Górna granica NIE jest kwestią gustu: kolumna musi zmieścić się w dawnym LEWYM
+# MARGINESIE (0,19685" = 5 mm), bo dokładnie tyle marginesu jej oddajemy. Przy
+# skali 90 % daje to 0,19685 * 96 / 0,9 ≈ 21 px, więc 20 px zostawia jeszcze
+# ułamek milimetra marginesu. Szerzej = tabela nie mieści się na A4.
+NEW_COL_PX = 20
 
 
 # ─────────────────── helpery na literach kolumn ───────────────────
@@ -51,6 +58,20 @@ MDW = 7
 
 def col_width_px(width_chars: float) -> int:
     return int(((256 * width_chars + int(128.0 / MDW)) / 256.0) * MDW)
+
+
+def px_to_col_width(px: int) -> float:
+    """Odwrotność `col_width_px` — celuje w środek przedziału, żeby zaokrąglenia
+    w Excelu/LibreOffice nie zeszły o piksel."""
+    width = (px + 0.5) / MDW - int(128.0 / MDW) / 256.0
+    width = round(width, 4)
+    assert col_width_px(width) == px, (
+        "szerokość %r daje %d px, a chcieliśmy %d" % (width, col_width_px(width), px)
+    )
+    return width
+
+
+NEW_COL_WIDTH = "%g" % px_to_col_width(NEW_COL_PX)
 
 
 def shift_cell(ref: str) -> str:
@@ -134,41 +155,53 @@ def transform_sheet(xml: str) -> str:
 
 def compensate_centering(xml: str) -> str:
     """
-    Utrzymuje treść protokołu DOKŁADNIE tam, gdzie była przed dodaniem kolumny.
+    Kolumna ptaszków zjada LEWY MARGINES i nic więcej.
 
     Arkusz drukuje się z `horizontalCentered="1"`, więc wyśrodkowaniu podlega
-    cały obszar wydruku — po dołożeniu kolumny ptaszków środek przesuwał całą
-    tabelę w prawo o pół jej szerokości. Ptaszki mają być dodatkiem NA
-    MARGINESIE, a nie częścią kompozycji.
+    cały obszar wydruku — sama dołożona kolumna przesuwałaby tabelę w prawo o
+    pół swojej szerokości. Ptaszki mają być dodatkiem NA MARGINESIE, a nie
+    częścią kompozycji.
 
-    Poprawka: powiększamy prawy margines o pełną szerokość nowej kolumny.
-    Obszar, w którym liczone jest wyśrodkowanie, kurczy się wtedy dokładnie o
-    tyle, o ile urósł wydruk, więc środek jedzie w lewo o połowę — i tabela
-    ląduje piksel w piksel tam, gdzie była. Dowód:
+    Poprawka: zmniejszamy LEWY margines dokładnie o szerokość nowej kolumny na
+    papierze. To jedyny wariant, który jednocześnie nie rusza treści i NIE
+    POGARSZA mieszczenia się na A4 — i da się to pokazać rachunkiem, bez
+    zgadywania, jak szeroka jest tabela:
 
-        stary lewy brzeg treści = L + (U − W) / 2
-        nowy  lewy brzeg treści = L + (U' − W − a) / 2 + a
-        równość  ⇔  U' = U − a  ⇔  R' = R + a
+        U  = 210 − L − R                    (obszar wydruku, stary)
+        U' = 210 − (L − a) − R = U + a      (nowy — urósł o a)
 
-    gdzie L/R to marginesy, U = 210 mm − L − R, W to szerokość treści,
-    a — szerokość kolumny ptaszków na papierze (czyli po uwzględnieniu skali
-    wydruku).
+        lewy brzeg treści, stary:  L + (U − W)/2
+        lewy brzeg treści, nowy:   (L − a) + (U + a − (W + a))/2 + a
+                                 = L + (U − W)/2                      ✔ bez zmian
+
+        mieszczenie się, stare:  W ≤ U
+        mieszczenie się, nowe:   W + a ≤ U + a  ⇔  W ≤ U              ✔ bez zmian
+
+    Zabranie miejsca z PRAWEJ też utrzymuje treść na miejscu, ale kurczy obszar
+    wydruku o `a` — i wtedy prawy skraj tabeli wyjeżdża na kolejną stronę.
+    Dlatego `a` nie może przekroczyć lewego marginesu (patrz NEW_COL_PX).
     """
     assert 'horizontalCentered="1"' in xml, (
-        "arkusz nie jest wyśrodkowany w poziomie — kompensacja marginesu nie ma "
-        "sensu, trzeba by zamiast tego zmniejszyć lewy margines"
+        "arkusz nie jest wyśrodkowany w poziomie — ten rachunek zakłada "
+        "horizontalCentered i bez niego nie obowiązuje"
     )
 
     scale_m = re.search(r"<pageSetup[^>]*\bscale=\"(\d+)\"", xml)
     scale = int(scale_m.group(1)) / 100.0 if scale_m else 1.0
     # Szerokość kolumny na papierze: piksele (96 dpi) przeskalowane wydrukiem.
-    extra_in = col_width_px(float(NEW_COL_WIDTH)) / 96.0 * scale
+    col_in = NEW_COL_PX / 96.0 * scale
 
-    def bump(m):
-        return "%s%.17g%s" % (m.group(1), float(m.group(2)) + extra_in, m.group(3))
+    def shrink(m):
+        left = float(m.group(2)) - col_in
+        assert left >= 0, (
+            "kolumna ptaszków (%.4f\") jest szersza niż lewy margines (%s\") — "
+            "zmniejsz NEW_COL_PX, inaczej trzeba by ukraść miejsce z prawej i "
+            "tabela nie zmieści się na A4" % (col_in, m.group(2))
+        )
+        return "%s%.17g%s" % (m.group(1), left, m.group(3))
 
-    out, n = re.subn(r'(<pageMargins[^>]*\bright=")([\d.]+)(")', bump, xml)
-    assert n == 1, "nie znalazłem prawego marginesu w pageMargins"
+    out, n = re.subn(r'(<pageMargins[^>]*\bleft=")([\d.]+)(")', shrink, xml)
+    assert n == 1, "nie znalazłem lewego marginesu w pageMargins"
     return out
 
 
