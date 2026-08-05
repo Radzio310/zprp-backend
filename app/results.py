@@ -2178,6 +2178,291 @@ def _player_stats_map(data_json: Dict[str, Any], team: str) -> Dict[int, Dict[st
             continue
     return out
 
+# ============================================================================
+# Ptaszki badań lekarskich w protokole
+# ============================================================================
+#
+# Szablon protocol_template.xlsx dostał JEDNĄ nową, wąską kolumnę PRZED kolumną
+# A — wyłącznie na ptaszki. Cała dotychczasowa zawartość arkusza przesunęła się
+# o kolumnę w prawo.
+#
+# Zamiast przepisywać ~170 literalnych adresów w tym pliku, zakładamy na arkusz
+# nakładkę: ws["A11"] trafia do fizycznego "B11". Wycofanie zmiany to
+# ustawienie PROTOCOL_COL_SHIFT na 0 i przywrócenie
+# protocol_template_BACKUP_preExamCol.xlsx.
+
+PROTOCOL_COL_SHIFT = 1
+
+_A1_RE = re.compile(r"^(\$?)([A-Za-z]{1,3})(\$?)(\d+)$")
+
+
+def _col_to_idx(letters: str) -> int:
+    n = 0
+    for ch in letters.upper():
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _idx_to_col(idx: int) -> str:
+    out = ""
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def shift_ref(ref: str, shift: int = PROTOCOL_COL_SHIFT) -> str:
+    """"A11" -> "B11", "AL15:AV15" -> "AM15:AW15". Obsługuje też "$A$1"."""
+    if not shift:
+        return ref
+    parts = str(ref).split(":")
+    out: List[str] = []
+    for part in parts:
+        m = _A1_RE.match(part.strip())
+        if not m:
+            return ref  # nieznany kształt — lepiej nie ruszać
+        d1, col, d2, row = m.groups()
+        out.append("%s%s%s%s" % (d1, _idx_to_col(_col_to_idx(col) + shift), d2, row))
+    return ":".join(out)
+
+
+class ShiftedWS:
+    """
+    Przezroczysta nakładka na arkusz: adresy w kodzie zostają takie, jak przed
+    dołożeniem kolumny ptaszków, a trafiają o kolumnę dalej.
+
+    Do `wb.copy_worksheet`, `_copy_images_safe` i wstawiania samych ptaszków
+    trzeba brać `.raw` — one operują na fizycznych współrzędnych.
+    """
+
+    __slots__ = ("_ws", "_shift")
+
+    def __init__(self, ws, shift: int = PROTOCOL_COL_SHIFT):
+        self._ws = ws
+        self._shift = shift
+
+    @property
+    def raw(self):
+        return self._ws
+
+    def __getitem__(self, ref):
+        return self._ws[shift_ref(ref, self._shift)]
+
+    def __setitem__(self, ref, value):
+        self._ws[shift_ref(ref, self._shift)] = value
+
+    def merge_cells(self, range_string=None, **kwargs):
+        if range_string is not None:
+            return self._ws.merge_cells(shift_ref(range_string, self._shift), **kwargs)
+        return self._ws.merge_cells(**kwargs)
+
+    def add_image(self, img, anchor=None):
+        if isinstance(anchor, str):
+            anchor = shift_ref(anchor, self._shift)
+        return self._ws.add_image(img, anchor)
+
+    def __getattr__(self, name):
+        return getattr(self._ws, name)
+
+
+# Kolory ptaszków. "manual" jest atramentowy — na wydruku ma wyglądać, jakby
+# sędzia postawił go długopisem, a nie jakby wystawił go system.
+EXAM_MARK_RGB = {
+    "zprp": (46, 158, 91),
+    "wzpr": (47, 158, 126),
+    "manual": (28, 52, 122),
+}
+
+_EXAM_MARK_CACHE: Dict[str, bytes] = {}
+
+# Wiersz zawodnika ma domyślną wysokość 13,2 pt ≈ 17,6 px, a nowa kolumna
+# ~40 px. Znaczek jest więc szeroki i niski: ptaszek po lewej, a przy wariancie
+# WZPR pastylka z dopiskiem NACHODZĄCA na jego prawe ramię — dokładnie tak, jak
+# plakietka w aplikacji. Stackowanie tekstu pod ptaszkiem odpada: przy 15 px
+# wysokości litery miałyby ~3 px i byłyby nieczytelne.
+EXAM_MARK_W = 44
+EXAM_MARK_H = 15
+_EXAM_SS = 10  # rysujemy 10x większe i skalujemy w dół — ostre na wydruku
+# Nowa kolumna ma szerokość 6 ≈ 47 px, znaczek 44 px — stąd 1 px zapasu z lewej.
+_EXAM_MARK_OFFSET_X_PX = 1
+_EXAM_MARK_OFFSET_Y_PX = 1
+
+
+def _exam_mark_png(kind: str) -> bytes:
+    """PNG ze znaczkiem badań. Deterministyczny i cache'owany."""
+    kind = str(kind or "").strip().lower()
+    if kind not in EXAM_MARK_RGB:
+        return b""
+    cached = _EXAM_MARK_CACHE.get(kind)
+    if cached is not None:
+        return cached
+    if PILImage is None:
+        return b""
+
+    try:
+        from PIL import ImageDraw
+    except Exception:
+        return b""
+
+    rgb = EXAM_MARK_RGB[kind]
+    color = rgb + (255,)
+    w, h = EXAM_MARK_W * _EXAM_SS, EXAM_MARK_H * _EXAM_SS
+    img = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    # Ptaszek: krótkie ramię w dół-w prawo, długie w górę-w prawo. Wymiary
+    # liczone od WYSOKOŚCI, żeby szersza kanwa (wariant WZPR) go nie rozciągała.
+    p0 = (0.35 * h, 0.52 * h)
+    p1 = (0.62 * h, 0.80 * h)
+    p2 = (1.05 * h, 0.16 * h)
+    stroke = int(0.105 * h)
+
+    if kind == "manual":
+        # Ślad długopisu: kilka nakładających się pociągnięć o różnej grubości i
+        # kryciu, z rozjechanymi punktami i ogonem wychodzącym poza narożnik.
+        # Ziarno na sztywno — inaczej każdy worker rysowałby inny ptaszek.
+        rnd = random.Random(1337)
+        amp = 0.030 * h
+        tail = (1.16 * h, 0.05 * h)
+
+        def jitter(pt):
+            return (pt[0] + rnd.uniform(-amp, amp), pt[1] + rnd.uniform(-amp, amp))
+
+        def mid(a, b, t):
+            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+        for width_mul, alpha in ((1.25, 120), (1.0, 240), (0.65, 190)):
+            pts = [
+                jitter(p0),
+                jitter(mid(p0, p1, 0.5)),
+                jitter(p1),
+                jitter(mid(p1, p2, 0.35)),
+                jitter(mid(p1, p2, 0.7)),
+                jitter(p2),
+                jitter(tail),
+            ]
+            d.line(
+                pts,
+                fill=rgb + (alpha,),
+                width=max(1, int(stroke * width_mul)),
+                joint="curve",
+            )
+    else:
+        d.line([p0, p1, p2], fill=color, width=stroke, joint="curve")
+
+    if kind == "wzpr":
+        # Pastylka z dopiskiem — zaczyna się jeszcze NA ramieniu ptaszka, więc
+        # wyraźnie na niego nachodzi, a resztę miejsca ma dla siebie.
+        try:
+            from PIL import ImageFont
+
+            font = None
+            for name in ("DejaVuSans-Bold.ttf", "arialbd.ttf", "DejaVuSans.ttf", "arial.ttf"):
+                try:
+                    font = ImageFont.truetype(name, int(0.58 * h))
+                    break
+                except Exception:
+                    continue
+            if font is None:
+                font = ImageFont.load_default()
+
+            text = "WZPR"
+            box = d.textbbox((0, 0), text, font=font)
+            tw, th = box[2] - box[0], box[3] - box[1]
+
+            pad_x, pad_y = int(0.06 * h), int(0.10 * h)
+            x0 = 0.85 * h  # nachodzi na prawe ramię ptaszka
+            plate = [x0, (h - th) / 2 - pad_y, x0 + tw + 2 * pad_x, (h + th) / 2 + pad_y]
+            d.rounded_rectangle(
+                plate,
+                radius=int(0.22 * h),
+                fill=(255, 255, 255, 242),
+                outline=color,
+                width=max(1, int(0.045 * h)),
+            )
+            d.text(
+                (plate[0] + pad_x - box[0], plate[1] + pad_y - box[1]),
+                text,
+                font=font,
+                fill=color,
+            )
+        except Exception:
+            pass
+
+    img = img.resize((EXAM_MARK_W, EXAM_MARK_H), PILImage.LANCZOS)
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    data = bio.getvalue()
+    _EXAM_MARK_CACHE[kind] = data
+    return data
+
+
+def _add_exam_mark(ws_raw, *, row: int, kind: str) -> bool:
+    """
+    Wstawia ptaszek w NOWEJ kolumnie A (fizycznej), czyli tej dołożonej przed
+    dawną kolumną numeru. Dlatego bierze arkusz surowy, nie przesunięty.
+    """
+    data = _exam_mark_png(kind)
+    if not data:
+        return False
+    try:
+        from openpyxl.drawing.spreadsheet_drawing import (
+            AnchorMarker,
+            OneCellAnchor,
+        )
+        from openpyxl.drawing.xdr import XDRPositiveSize2D
+        from openpyxl.utils.units import pixels_to_EMU
+
+        # Każdy obrazek MUSI mieć własny BytesIO — openpyxl trzyma referencję do
+        # strumienia i współdzielenie jednego bufora psuje zapis pliku.
+        img = Image(BytesIO(data))
+        img.width = EXAM_MARK_W
+        img.height = EXAM_MARK_H
+        # Kotwica budowana ręcznie, a nie przez add_image(img, "A11"): tamta
+        # postać zostawia zwykły string i nie da się ustawić przesunięcia, więc
+        # ptaszek kleiłby się do lewej krawędzi komórki.
+        img.anchor = OneCellAnchor(
+            _from=AnchorMarker(
+                col=0,  # FIZYCZNA kolumna A = kolumna ptaszków
+                colOff=pixels_to_EMU(_EXAM_MARK_OFFSET_X_PX),
+                row=row - 1,
+                rowOff=pixels_to_EMU(_EXAM_MARK_OFFSET_Y_PX),
+            ),
+            ext=XDRPositiveSize2D(
+                pixels_to_EMU(EXAM_MARK_W), pixels_to_EMU(EXAM_MARK_H)
+            ),
+        )
+        ws_raw.add_image(img)
+        return True
+    except Exception:
+        logger.warning("Nie udało się wstawić ptaszka badań (wiersz %s)", row, exc_info=True)
+        return False
+
+
+def _player_exam_map_from_cards(cards: List[Any]) -> Dict[int, str]:
+    """
+    number -> "zprp" | "wzpr" | "manual".
+
+    Starsze wersje aplikacji nie wysyłają pola `exam` — wtedy mapa jest pusta,
+    kolumna ptaszków zostaje czysta i wydruk wygląda dokładnie jak dotąd.
+    """
+    out: Dict[int, str] = {}
+    for c in cards or []:
+        if not isinstance(c, dict):
+            continue
+        n = c.get("number")
+        if n is None:
+            continue
+        try:
+            num = int(n)
+        except Exception:
+            continue
+        kind = str(c.get("exam") or "").strip().lower()
+        if kind in EXAM_MARK_RGB:
+            out[num] = kind
+    return out
+
+
 def _player_fullname_map_from_cards(cards: List[Any]) -> Dict[int, str]:
     out: Dict[int, str] = {}
     for c in cards or []:
@@ -2299,6 +2584,8 @@ def _fill_players_block(
     fullnames_by_number: Dict[int, str],
     start_row: int,
     end_row: int,
+    exam_by_number: Optional[Dict[int, str]] = None,
+    mark_ws=None,
 ) -> None:
     """
     Kolumny wg Twojej specyfikacji:
@@ -2311,6 +2598,10 @@ def _fill_players_block(
       - AC: 2' #3 / "---"
       - AF: dyskwalifikacja lub dysq z opisem / "---"
       - AI: zawsze "---"
+
+    Dodatkowo, jeśli podano `exam_by_number` i `mark_ws` (arkusz SUROWY), w
+    nowej kolumnie A ląduje ptaszek badań lekarskich. Zawodnicy bez ważnych
+    badań nie dostają nic — puste miejsce jest tu informacją.
     """
     nums: List[int] = []
     for p in players or []:
@@ -2355,6 +2646,10 @@ def _fill_players_block(
 
         ws[f"A{row}"].value = num
         ws[f"C{row}"].value = (fullnames_by_number.get(num) or "")
+
+        kind = (exam_by_number or {}).get(num)
+        if kind and mark_ws is not None:
+            _add_exam_mark(mark_ws, row=row, kind=kind)
         ws[f"Q{row}"].value = "W" if entered else "-"
         ws[f"S{row}"].value = goals if goals > 0 else "-"
         ws[f"U{row}"].value = str(warning).strip() if isinstance(warning, str) and warning.strip() else "-"
@@ -3431,6 +3726,10 @@ async def generate_protocol_pdf(
     if not guest_names:
         guest_names = _player_fullname_map_from_stats(guest_stats)
 
+    # Badania lekarskie — pusta mapa dla starszych wersji aplikacji.
+    host_exams = _player_exam_map_from_cards(core.get("hostPlayerCards") or [])
+    guest_exams = _player_exam_map_from_cards(core.get("guestPlayerCards") or [])
+
     host_comp_names = _companion_fullname_map(core.get("hostCompanions") or [])
     guest_comp_names = _companion_fullname_map(core.get("guestCompanions") or [])
 
@@ -3467,7 +3766,12 @@ async def generate_protocol_pdf(
         media = _load_template_media_bytes(str(template_path))
         _rehydrate_images_in_workbook(wb, media)
 
-        ws = wb.active
+        # Szablon ma dołożoną kolumnę ptaszków przed dawną kolumną A, więc
+        # adresujemy arkusz przez nakładkę. `ws_raw` jest potrzebny wszędzie
+        # tam, gdzie liczą się współrzędne fizyczne: kopiowanie arkuszy,
+        # przenoszenie obrazków i wstawianie samych ptaszków.
+        ws_raw = wb.active
+        ws = ShiftedWS(ws_raw)
 
         # --- extras (NOWE POLA Z data_json) ---
         mc = data_json.get("matchConfig") or {}
@@ -3608,6 +3912,10 @@ async def generate_protocol_pdf(
         ws["BC65"].value = str(pk_guest_goals)
 
         # --- players numbers + stats ---
+        # UWAGA: ptaszki wstawiamy TU, czyli PRZED wb.copy_worksheet niżej —
+        # dzięki temu _copy_images_safe przeniesie je na stronę 2 i na stronę
+        # rzutów karnych. Przeniesienie tego bloku poniżej kopiowania sprawi,
+        # że ptaszki znikną z kolejnych stron.
         _fill_players_block(
             ws,
             players=core["hostPlayers"],
@@ -3615,6 +3923,8 @@ async def generate_protocol_pdf(
             fullnames_by_number=host_names,
             start_row=11,
             end_row=28,
+            exam_by_number=host_exams,
+            mark_ws=ws_raw,
         )
         _fill_players_block(
             ws,
@@ -3623,6 +3933,8 @@ async def generate_protocol_pdf(
             fullnames_by_number=guest_names,
             start_row=37,
             end_row=54,
+            exam_by_number=guest_exams,
+            mark_ws=ws_raw,
         )
 
         # Osoby towarzyszące gospodarzy
@@ -3761,22 +4073,24 @@ async def generate_protocol_pdf(
 
         ws2 = None
         if needs_timeline_page2:
-            ws2 = wb.copy_worksheet(ws)
-            _copy_images_safe(ws, ws2)
+            ws2_raw = wb.copy_worksheet(ws_raw)
+            _copy_images_safe(ws_raw, ws2_raw)
             try:
-                ws2.title = "Strona 2"
+                ws2_raw.title = "Strona 2"
             except Exception:
                 pass
+            ws2 = ShiftedWS(ws2_raw)
             pages.append(ws2)
 
         ws_shoot = None
         if needs_shootout_page:
-            ws_shoot = wb.copy_worksheet(ws)
-            _copy_images_safe(ws, ws_shoot)
+            ws_shoot_raw = wb.copy_worksheet(ws_raw)
+            _copy_images_safe(ws_raw, ws_shoot_raw)
             try:
-                ws_shoot.title = "Rzuty karne"
+                ws_shoot_raw.title = "Rzuty karne"
             except Exception:
                 pass
+            ws_shoot = ShiftedWS(ws_shoot_raw)
             pages.append(ws_shoot)
 
         ws_notes = None
