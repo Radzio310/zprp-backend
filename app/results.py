@@ -2283,8 +2283,8 @@ _EXAM_MARK_CACHE: Dict[str, bytes] = {}
 EXAM_MARK_W = 44
 EXAM_MARK_H = 15
 _EXAM_SS = 10  # rysujemy 10x większe i skalujemy w dół — ostre na wydruku
-# Nowa kolumna ma szerokość 6 ≈ 47 px, znaczek 44 px — stąd 1 px zapasu z lewej.
-_EXAM_MARK_OFFSET_X_PX = 1
+# Nowa kolumna ma szerokość 7 = 49 px, znaczek 44 px — stąd 2 px zapasu z lewej.
+_EXAM_MARK_OFFSET_X_PX = 2
 _EXAM_MARK_OFFSET_Y_PX = 1
 
 

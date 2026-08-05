@@ -20,7 +20,7 @@ BACKUP = os.path.join(TPL_DIR, "protocol_template_BACKUP_preExamCol.xlsx")
 OUT = os.path.join(TPL_DIR, "protocol_template.xlsx")
 TMP = os.path.join(TPL_DIR, "_protocol_template_shifted.tmp.xlsx")
 
-NEW_COL_WIDTH = "6"       # ~47 px — mieści znaczek 44x15 px z dopiskiem WZPR
+NEW_COL_WIDTH = "7"       # 49 px — mieści znaczek 44x15 px z dopiskiem WZPR
 SHIFT = 1
 
 
@@ -42,6 +42,15 @@ def idx_to_col(idx: int) -> str:
 
 
 CELL_RE = re.compile(r"^(\$?)([A-Z]{1,3})(\$?)(\d+)$")
+
+# Szerokość kolumny (w „znakach") na piksele, wzorem z ECMA-376: wartość w XML-u
+# ma już wliczony 5-pikselowy padding, więc mnożymy wyłącznie przez szerokość
+# najszerszej cyfry (Calibri 11 → 7 px).
+MDW = 7
+
+
+def col_width_px(width_chars: float) -> int:
+    return int(((256 * width_chars + int(128.0 / MDW)) / 256.0) * MDW)
 
 
 def shift_cell(ref: str) -> str:
@@ -120,7 +129,47 @@ def transform_sheet(xml: str) -> str:
         lambda m: m.group(1) + shift_cell(m.group(2)) + m.group(3),
         xml,
     )
-    return xml
+    return compensate_centering(xml)
+
+
+def compensate_centering(xml: str) -> str:
+    """
+    Utrzymuje treść protokołu DOKŁADNIE tam, gdzie była przed dodaniem kolumny.
+
+    Arkusz drukuje się z `horizontalCentered="1"`, więc wyśrodkowaniu podlega
+    cały obszar wydruku — po dołożeniu kolumny ptaszków środek przesuwał całą
+    tabelę w prawo o pół jej szerokości. Ptaszki mają być dodatkiem NA
+    MARGINESIE, a nie częścią kompozycji.
+
+    Poprawka: powiększamy prawy margines o pełną szerokość nowej kolumny.
+    Obszar, w którym liczone jest wyśrodkowanie, kurczy się wtedy dokładnie o
+    tyle, o ile urósł wydruk, więc środek jedzie w lewo o połowę — i tabela
+    ląduje piksel w piksel tam, gdzie była. Dowód:
+
+        stary lewy brzeg treści = L + (U − W) / 2
+        nowy  lewy brzeg treści = L + (U' − W − a) / 2 + a
+        równość  ⇔  U' = U − a  ⇔  R' = R + a
+
+    gdzie L/R to marginesy, U = 210 mm − L − R, W to szerokość treści,
+    a — szerokość kolumny ptaszków na papierze (czyli po uwzględnieniu skali
+    wydruku).
+    """
+    assert 'horizontalCentered="1"' in xml, (
+        "arkusz nie jest wyśrodkowany w poziomie — kompensacja marginesu nie ma "
+        "sensu, trzeba by zamiast tego zmniejszyć lewy margines"
+    )
+
+    scale_m = re.search(r"<pageSetup[^>]*\bscale=\"(\d+)\"", xml)
+    scale = int(scale_m.group(1)) / 100.0 if scale_m else 1.0
+    # Szerokość kolumny na papierze: piksele (96 dpi) przeskalowane wydrukiem.
+    extra_in = col_width_px(float(NEW_COL_WIDTH)) / 96.0 * scale
+
+    def bump(m):
+        return "%s%.17g%s" % (m.group(1), float(m.group(2)) + extra_in, m.group(3))
+
+    out, n = re.subn(r'(<pageMargins[^>]*\bright=")([\d.]+)(")', bump, xml)
+    assert n == 1, "nie znalazłem prawego marginesu w pageMargins"
+    return out
 
 
 def transform_workbook(xml: str) -> str:

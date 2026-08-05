@@ -7,6 +7,8 @@ rzuca żadnego wyjątku — protokół wygeneruje się do końca i będzie wygl�
 wiarygodnie, tylko każda wartość wyląduje o kolumnę obok.
 """
 import os
+import re
+import zipfile
 
 import pytest
 from openpyxl import load_workbook
@@ -137,6 +139,57 @@ def test_template_has_empty_lead_column():
         assert ws.cell(row=row, column=1).value is None, (
             "kolumna ptaszków nie jest pusta w wierszu %d" % row
         )
+
+
+def test_template_keeps_content_centered():
+    """
+    Arkusz drukuje się wyśrodkowany, więc kolumna ptaszków przesuwałaby całą
+    tabelę w prawo o pół swojej szerokości. Prawy margines jest o tę szerokość
+    większy, żeby treść lądowała dokładnie tam, gdzie przed zmianą.
+
+    Test liczy pozycję lewego brzegu treści na papierze w obu szablonach —
+    inaczej rozjazd widać dopiero na wydruku.
+    """
+    old = os.path.join(os.path.dirname(TEMPLATE), "protocol_template_BACKUP_preExamCol.xlsx")
+    assert os.path.exists(old), "brak backupu szablonu sprzed dodania kolumny"
+
+    mdw = 7
+
+    def widths(path):
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("xl/worksheets/sheet1.xml").decode("utf-8", errors="replace")
+        assert 'horizontalCentered="1"' in xml, "arkusz przestał być wyśrodkowany"
+        out = {}
+        for col in re.finditer(r"<col ([^>]*)/>", xml):
+            attrs = dict(re.findall(r'(\w+)="([^"]*)"', col.group(1)))
+            for idx in range(int(attrs["min"]), int(attrs["max"]) + 1):
+                out[idx] = float(attrs.get("width", 8.43))
+        return out
+
+    def px(w, first, last):
+        return sum(
+            int(((256 * w.get(i, 8.43) + int(128.0 / mdw)) / 256.0) * mdw)
+            for i in range(first, last + 1)
+        )
+
+    def content_left_mm(path, last_col, body_first_col):
+        ws = load_workbook(path).active
+        w = widths(path)
+        scale = (ws.page_setup.scale or 100) / 100.0
+        left = float(ws.page_margins.left)
+        right = float(ws.page_margins.right)
+        block = px(w, 1, last_col) / 96.0 * scale
+        usable = 210.0 / 25.4 - left - right
+        lead = px(w, 1, body_first_col - 1) / 96.0 * scale if body_first_col > 1 else 0.0
+        return (left + (usable - block) / 2.0 + lead) * 25.4, block * 25.4
+
+    old_left, _ = content_left_mm(old, 59, 1)
+    new_left, new_block = content_left_mm(TEMPLATE, 60, 2)
+
+    assert abs(new_left - old_left) < 0.5, (
+        "treść protokołu przesunęła się na papierze o %.2f mm" % (new_left - old_left)
+    )
+    assert new_block < 200, "wydruk %.1f mm nie mieści się na A4" % new_block
 
 
 def test_template_matches_code():

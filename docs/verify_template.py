@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """Sprawdza, że nowy szablon to dokładnie stary przesunięty o jedną kolumnę."""
 import os
+import re
+import zipfile
+
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.cell import coordinate_from_string
@@ -79,7 +82,71 @@ for r, dim in ws_old.row_dimensions.items():
 if len(ws_old._images) != len(ws_new._images):
     problems.append("liczba obrazków %d != %d" % (len(ws_old._images), len(ws_new._images)))
 
-# 7) obszar wydruku
+# 7) pozycja treści na papierze — najważniejszy test wizualny
+#
+# Arkusz drukuje się wyśrodkowany, więc sama zgodność komórek nie wystarcza:
+# dołożona kolumna przesuwa środek i cała tabela jedzie w prawo. Liczymy, gdzie
+# ląduje LEWY BRZEG TREŚCI (czyli dawna kolumna A) w obu wersjach.
+MDW = 7
+
+
+def col_widths(path):
+    """
+    Szerokości kolumn 1:1 z XML-a. openpyxl trzyma zakres `<col min max>` pod
+    literą samego `min`, więc odpytanie go o środek zakresu zwraca None i cicho
+    podstawia domyślne 8.43 — przy 60 kolumnach to błąd rzędu metra papieru.
+    """
+    with zipfile.ZipFile(path) as z:
+        xml = z.read("xl/worksheets/sheet1.xml").decode("utf-8", errors="replace")
+    out = {}
+    for col in re.finditer(r"<col ([^>]*)/>", xml):
+        attrs = dict(re.findall(r'(\w+)="([^"]*)"', col.group(1)))
+        for idx in range(int(attrs["min"]), int(attrs["max"]) + 1):
+            out[idx] = float(attrs.get("width", 8.43))
+    return out
+
+
+def col_px(widths, first, last):
+    return sum(
+        int(((256 * widths.get(i, 8.43) + int(128.0 / MDW)) / 256.0) * MDW)
+        for i in range(first, last + 1)
+    )
+
+
+def content_left_mm(ws, widths, first_col, last_col, body_first_col):
+    """Odległość lewego brzegu TREŚCI od krawędzi kartki, w milimetrach."""
+    scale = (ws.page_setup.scale or 100) / 100.0
+    left_in = float(ws.page_margins.left)
+    right_in = float(ws.page_margins.right)
+    page_in = 210.0 / 25.4  # A4 pionowo
+    block_in = col_px(widths, first_col, last_col) / 96.0 * scale
+    usable_in = page_in - left_in - right_in
+    block_left_in = left_in + (usable_in - block_in) / 2.0  # horizontalCentered
+    lead_in = (
+        col_px(widths, first_col, body_first_col - 1) / 96.0 * scale
+        if body_first_col > first_col
+        else 0.0
+    )
+    return (block_left_in + lead_in) * 25.4, block_in * 25.4
+
+
+# stary: A..BG, treść zaczyna się w A; nowy: A..BH, treść zaczyna się w B
+old_left, old_block = content_left_mm(ws_old, col_widths(OLD), 1, 59, 1)
+new_left, new_block = content_left_mm(ws_new, col_widths(NEW), 1, 60, 2)
+print(
+    "szerokość wydruku: stary %.1f mm, nowy %.1f mm (A4 = 210 mm)"
+    % (old_block, new_block)
+)
+print("lewy brzeg treści: stary %.2f mm, nowy %.2f mm" % (old_left, new_left))
+if new_block > 205:
+    problems.append("wydruk %.1f mm nie mieści się na A4" % new_block)
+if abs(old_left - new_left) > 0.5:
+    problems.append(
+        "treść przesunęła się na papierze o %.2f mm — popraw kompensację "
+        "prawego marginesu w shift_template.py" % (new_left - old_left)
+    )
+
+# 8) obszar wydruku
 print("print_area stary:", ws_old.print_area, " nowy:", ws_new.print_area)
 print("scale stary:", ws_old.page_setup.scale, " nowy:", ws_new.page_setup.scale)
 
