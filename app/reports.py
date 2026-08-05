@@ -381,15 +381,23 @@ async def create_report(req: CreateUserReportRequest):
 
 
 @router.get("/{report_id}", response_model=ReportDetailResponse, summary="Wątek zgłoszenia")
-async def get_report(report_id: int, judge_id: str = Query(...)):
+async def get_report(
+    report_id: int,
+    judge_id: str = Query(...),
+    as_user: bool = Query(False),
+):
     row = await database.fetch_one(select(user_reports).where(user_reports.c.id == report_id))
     if not row:
         raise HTTPException(404, detail="Nie znaleziono zgłoszenia")
     data = dict(row)
     is_admin = await _require_access(data, judge_id)
+    is_owner = str(data["judge_id"]) == str(judge_id)
+    if as_user and not is_owner:
+        raise HTTPException(403, detail="Tylko autor może otworzyć zgłoszenie jako użytkownik")
+    viewer_is_admin = is_admin and not (as_user and is_owner)
 
     # Otwarcie wątku = przeczytanie go przez tę stronę.
-    if is_admin and data.get("unread_by_admin"):
+    if viewer_is_admin and data.get("unread_by_admin"):
         await database.execute(
             update(user_reports)
             .where(user_reports.c.id == report_id)
@@ -398,7 +406,7 @@ async def get_report(report_id: int, judge_id: str = Query(...)):
         )
         data["unread_by_admin"] = False
         data["is_read"] = True
-    elif not is_admin and data.get("unread_by_user"):
+    elif not viewer_is_admin and data.get("unread_by_user"):
         await database.execute(
             update(user_reports)
             .where(user_reports.c.id == report_id)
@@ -433,6 +441,10 @@ async def reply(report_id: int, req: ReportReplyRequest):
         raise HTTPException(404, detail="Nie znaleziono zgłoszenia")
     data = dict(row)
     is_admin = await _require_access(data, req.judge_id)
+    is_owner = str(data["judge_id"]) == str(req.judge_id)
+    if req.force_user and not is_owner:
+        raise HTTPException(403, detail="Tylko autor może pisać jako użytkownik")
+    sender_type = "user" if (not is_admin or req.force_user) else "admin"
 
     sender_name = req.full_name
     if not sender_name:
@@ -446,7 +458,7 @@ async def reply(report_id: int, req: ReportReplyRequest):
     await database.execute(
         user_report_messages.insert().values(
             report_id=report_id,
-            sender_type="admin" if is_admin else "user",
+            sender_type=sender_type,
             sender_id=str(req.judge_id),
             sender_name=sender_name,
             content=content,
@@ -458,7 +470,7 @@ async def reply(report_id: int, req: ReportReplyRequest):
     # Odpowiedź admina zamyka jego nieprzeczytane i zapala je użytkownikowi
     # (i odwrotnie). Status "open" przechodzi w "in_progress", gdy admin
     # pierwszy raz odpisze — bez ręcznego klikania.
-    if is_admin:
+    if sender_type == "admin":
         values: Dict[str, Any] = {"unread_by_admin": False, "is_read": True, "unread_by_user": True}
         if data.get("status") == "open":
             values["status"] = "in_progress"
@@ -489,7 +501,11 @@ async def reply(report_id: int, req: ReportReplyRequest):
                 )
             )
 
-    return await get_report(report_id, judge_id=req.judge_id)
+    return await get_report(
+        report_id,
+        judge_id=req.judge_id,
+        as_user=sender_type == "user" and is_owner,
+    )
 
 
 @router.post("/{report_id}/upload-attachment", summary="Wgraj zdjęcie do wiadomości")

@@ -258,6 +258,7 @@ class ReportReplyRequest(BaseModel):
     full_name: Optional[str] = None
     content: str
     attachment_url: Optional[str] = None
+    force_user: bool = False
 
 
 class ReportStatusRequest(BaseModel):
