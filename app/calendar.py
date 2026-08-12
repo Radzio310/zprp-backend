@@ -98,6 +98,52 @@ async def disconnect_calendar(
     return JSONResponse({"disconnected": True})
 
 
+@router.get("/colors", summary="Paleta kolorów wydarzeń Google Calendar")
+async def event_colors(
+    settings=Depends(get_settings),
+    user_login: str = Depends(get_current_user),
+):
+    """Zwraca AKTUALNĄ paletę kolorów wydarzeń z colors.get().
+
+    Od czerwca 2026 Google rozszerzył kolory wydarzeń z 11 do 24 i mapowanie
+    colorId→hex zależy od rolloutu na koncie użytkownika. Dlatego aplikacja
+    nie zgaduje palety, tylko pyta o nią to konto, na którym faktycznie
+    zapisuje wydarzenia — dzięki temu kolor wybrany w BAZIE zawsze wygląda
+    identycznie w Kalendarzu Google.
+    """
+    tokens = await get_calendar_tokens(user_login)
+    if not tokens:
+        raise HTTPException(status_code=404, detail="Kalendarz nie połączony")
+
+    expiry_dt = datetime.datetime.fromisoformat(tokens["expires_at"])
+    creds = Credentials(
+        token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.GOOGLE_CLIENT_ID,
+        client_secret=settings.GOOGLE_CLIENT_SECRET,
+        expiry=expiry_dt,
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        await save_calendar_tokens(
+            user_login,
+            access_token=creds.token,
+            refresh_token=creds.refresh_token,
+            expires_at=creds.expiry.isoformat(),
+        )
+
+    palette = build("calendar", "v3", credentials=creds).colors().get().execute()
+    event_palette = palette.get("event", {}) or {}
+    return {
+        "colors": [
+            {"id": color_id, "hex": defn.get("background")}
+            for color_id, defn in event_palette.items()
+            if defn.get("background")
+        ]
+    }
+
+
 @router.get("/events", summary="Pobierz nadchodzące wydarzenia")
 async def list_events(
     days_ahead: int = Query(30, description="Ile dni do przodu pobrać"),
