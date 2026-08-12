@@ -31,6 +31,18 @@ router = APIRouter(prefix="/game-scores", tags=["Mini-gry — ranking"])
 ALLOWED_GAMES = {"arena", "keeper", "referee", "targets", "juggle"}
 ALLOWED_DIFFICULTIES = {"", "easy", "medium", "hard", "legend"}
 
+# Sufit wyniku per gra — grubo powyżej tego, co da się osiągnąć grając, ale
+# poniżej tego, co wpisałby ktoś podrabiający żądanie. Ranking jest po to, żeby
+# się ścigać, więc niech nie wystarczy jeden curl, aby go zaorać.
+# (Refleks: runda trwa 60 s, więc 300 trafień to jedno co 200 ms — nierealne.)
+SCORE_CAP = {
+    "arena": 1000,
+    "referee": 300,
+    "keeper": 500,
+    "targets": 200,
+    "juggle": 5000,
+}
+
 MAX_SCORE = 1_000_000
 MAX_PLAYERS_SCANNED = 5000  # sufit bezpieczeństwa przy liczeniu pozycji
 
@@ -156,6 +168,13 @@ async def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
     game, difficulty = _validate(payload.game, payload.difficulty)
     judge_id = payload.judge_id.strip()
     name = payload.display_name.strip() or judge_id
+
+    cap = SCORE_CAP.get(game, MAX_SCORE)
+    if payload.score > cap:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Wynik {payload.score} przekracza limit gry ({cap})",
+        )
 
     # Nie zapisujemy wyników gorszych od tego, co gracz już ma na koncie —
     # inaczej reinstalacja aplikacji (pusty AsyncStorage) zasypywałaby tabelę.
