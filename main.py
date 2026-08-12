@@ -55,6 +55,7 @@ from app.baza_vips import router as baza_vips_router
 from app.province_events import router as province_events_router
 from app.province_travel import router as province_travel_router
 from app.mentor_grades import router as mentor_grades_router
+from app.game_scores import router as game_scores_router
 from app.signatures import router as signatures_router
 from app.board import router as board_router
 
@@ -188,6 +189,7 @@ app.include_router(baza_vips_router)
 app.include_router(province_events_router)
 app.include_router(province_travel_router)
 app.include_router(mentor_grades_router)
+app.include_router(game_scores_router)
 app.include_router(signatures_router)
 app.include_router(board_router, tags=["board"])
 

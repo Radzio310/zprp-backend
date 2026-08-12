@@ -1809,6 +1809,38 @@ beach_email_rate_events = Table(
 Index("ix_email_rate_events_lookup", beach_email_rate_events.c.scope, beach_email_rate_events.c.ref, beach_email_rate_events.c.created_at)
 
 
+# -------------------------
+# BAZA: rekordy mini-gier (wspólny ranking)
+# -------------------------
+#
+# Jeden wiersz = jeden rekord życiowy zgłoszony przez aplikację (klient wysyła
+# TYLKO po pobiciu własnego rekordu lokalnego, więc ruch jest znikomy).
+# Historii nie kasujemy — ranking miesięczny liczy MAX(score) z okna czasowego,
+# a ranking wieczny z całej tabeli. Dzięki temu jeden zapis obsługuje oba
+# zakresy i nie trzeba nocnego przeliczania.
+game_scores = Table(
+    "game_scores",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("game", String, nullable=False, index=True),
+    Column("difficulty", String, nullable=False, server_default=text("''")),
+    Column("score", Integer, nullable=False),
+    Column("display_name", String, nullable=False),
+    Column("province", String, nullable=True),
+    # Metryki dodatkowe gry (np. średni i najlepszy czas reakcji w ms).
+    Column("extra", JSON, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index(
+    "ix_game_scores_board",
+    game_scores.c.game,
+    game_scores.c.difficulty,
+    game_scores.c.score,
+)
+
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
