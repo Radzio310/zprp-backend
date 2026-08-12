@@ -627,3 +627,32 @@ async def set_status(report_id: int, req: ReportStatusRequest, judge_id: str = Q
     if not row:
         raise HTTPException(404, detail="Nie znaleziono zgłoszenia")
     return _row_to_item(dict(row))
+
+
+@router.patch(
+    "/{report_id}/admin-unread",
+    response_model=UserReportItem,
+    summary="Oznacz zgłoszenie jako nieprzeczytane dla admina",
+)
+async def set_admin_unread(
+    report_id: int,
+    payload: Dict[str, bool],
+    judge_id: str = Query(...),
+):
+    if not await _is_admin(judge_id):
+        raise HTTPException(403, detail="Tylko admin może zmienić stan odczytu")
+    row = await database.fetch_one(
+        select(user_reports).where(user_reports.c.id == report_id)
+    )
+    if not row:
+        raise HTTPException(404, detail="Nie znaleziono zgłoszenia")
+    unread = bool(payload.get("unread", True))
+    await database.execute(
+        update(user_reports)
+        .where(user_reports.c.id == report_id)
+        .values(unread_by_admin=unread, is_read=not unread)
+    )
+    next_row = await database.fetch_one(
+        select(user_reports).where(user_reports.c.id == report_id)
+    )
+    return _row_to_item(dict(next_row))
