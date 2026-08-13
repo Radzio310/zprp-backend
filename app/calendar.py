@@ -1,7 +1,9 @@
 import base64
 import hashlib
+import re
 import secrets
 import time
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -71,8 +73,61 @@ class EventCreate(BaseModel):
     start: datetime.datetime
     end: datetime.datetime
     location: str
+    # ID klasycznego koloru ("1".."11", colorId) ALBO UUID własnej etykiety
+    # (eventLabelId) — patrz _event_color_field niżej, które z dwóch pól
+    # Google API dostanie ta wartość, rozpoznawane po formacie.
     colorId: str
     reminders: list[dict]  # np. [{"method":"popup","minutes":180}, ...]
+
+
+class EventLabelCreate(BaseModel):
+    name: str | None = None
+    hex: str
+
+
+def _is_valid_hex(value: str) -> bool:
+    return bool(re.fullmatch(r"#[0-9a-fA-F]{6}", value or ""))
+
+
+def _is_label_id(color_id: str) -> bool:
+    # Klasyczne colorId to zawsze krótkie cyfry ("1".."11"); UUID-y etykiet
+    # zawsze mają myślniki — prosty, tani w utrzymaniu rozróżnik bez zmiany
+    # kształtu JSON-a ustawień we froncie.
+    return "-" in (color_id or "")
+
+
+def _event_color_field(color_id: str | None) -> dict:
+    if not color_id:
+        return {}
+    return {"eventLabelId": color_id} if _is_label_id(color_id) else {"colorId": color_id}
+
+
+async def _get_calendar_service(user_login: str, settings):
+    """Credentials + odświeżenie tokena — ten sam wzorzec co w każdym
+    endpoincie kalendarza niżej, wydzielony dla nowych endpointów etykiet,
+    żeby nie dublować kolejny raz i nie ruszać już działających ścieżek."""
+    tokens = await get_calendar_tokens(user_login)
+    if not tokens:
+        raise HTTPException(status_code=404, detail="Kalendarz nie połączony")
+
+    expiry_dt = datetime.datetime.fromisoformat(tokens["expires_at"])
+    creds = Credentials(
+        token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.GOOGLE_CLIENT_ID,
+        client_secret=settings.GOOGLE_CLIENT_SECRET,
+        expiry=expiry_dt,
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        await save_calendar_tokens(
+            user_login,
+            access_token=creds.token,
+            refresh_token=creds.refresh_token,
+            expires_at=creds.expiry.isoformat(),
+        )
+    return build("calendar", "v3", credentials=creds)
 
 
 @router.get("/auth-url", summary="Wygeneruj URL do Google OAuth2")
@@ -204,6 +259,84 @@ async def event_colors(
     }
 
 
+@router.get(
+    "/labels",
+    summary="Etykiety wydarzeń (dowolny hex, do 200 na kalendarz) z konta",
+)
+async def list_event_labels(
+    settings=Depends(get_settings),
+    user_login: str = Depends(get_current_user),
+):
+    """Nowszy system kolorów wydarzeń Google (labelProperties.eventLabels)
+    — w przeciwieństwie do klasycznego colorId (zawsze 11) pozwala na
+    DOWOLNY hex i istnieje per-kalendarz. To właśnie te kolory widać w
+    natywnej apce Google Calendar przy wyborze koloru wydarzenia."""
+    try:
+        service = await _get_calendar_service(user_login, settings)
+        cal = service.calendars().get(calendarId="primary").execute()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Nie udało się pobrać etykiet: {type(e).__name__}: {e}",
+        )
+
+    labels = (cal.get("labelProperties") or {}).get("eventLabels") or []
+    return {
+        "labels": [
+            {
+                "id": label.get("id"),
+                "name": label.get("name") or "",
+                "hex": label.get("backgroundColor"),
+            }
+            for label in labels
+            if label.get("id") and _is_valid_hex(label.get("backgroundColor") or "")
+        ]
+    }
+
+
+@router.post(
+    "/labels",
+    summary="Utwórz nową etykietę wydarzenia z dowolnym kolorem",
+)
+async def create_event_label(
+    payload: EventLabelCreate,
+    settings=Depends(get_settings),
+    user_login: str = Depends(get_current_user),
+):
+    if not _is_valid_hex(payload.hex):
+        raise HTTPException(status_code=400, detail="Nieprawidłowy hex koloru")
+
+    try:
+        service = await _get_calendar_service(user_login, settings)
+        # Patch NADPISUJE całą listę etykiet — trzeba najpierw pobrać
+        # istniejące i dopisać naszą, żeby nie skasować cudzych.
+        cal = service.calendars().get(calendarId="primary").execute()
+        existing = list((cal.get("labelProperties") or {}).get("eventLabels") or [])
+        new_id = str(uuid.uuid4())
+        existing.append(
+            {
+                "id": new_id,
+                "name": (payload.name or "").strip()[:50],
+                "backgroundColor": payload.hex,
+            }
+        )
+        service.calendars().patch(
+            calendarId="primary",
+            body={"labelProperties": {"eventLabels": existing}},
+        ).execute()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Nie udało się utworzyć etykiety: {type(e).__name__}: {e}",
+        )
+
+    return {"id": new_id, "name": (payload.name or "").strip()[:50], "hex": payload.hex}
+
+
 @router.get("/events", summary="Pobierz nadchodzące wydarzenia")
 async def list_events(
     days_ahead: int = Query(30, description="Ile dni do przodu pobrać"),
@@ -291,7 +424,7 @@ async def create_event(
         "start": {"dateTime": payload.start.isoformat()},
         "end": {"dateTime": payload.end.isoformat()},
         "location": payload.location,
-        "colorId": payload.colorId,
+        **_event_color_field(payload.colorId),
         "reminders": {"useDefault": False, "overrides": payload.reminders},
     }
 
@@ -349,7 +482,7 @@ async def update_event(
         "start": {"dateTime": payload.start.isoformat()},
         "end": {"dateTime": payload.end.isoformat()},
         "location": payload.location,
-        "colorId": payload.colorId,
+        **_event_color_field(payload.colorId),
         "reminders": {"useDefault": False, "overrides": payload.reminders},
     }
 
