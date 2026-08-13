@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.sql import and_
 
@@ -9,6 +9,7 @@ from app.db import database, baza_vips
 from app.schemas import (
     BazaVipUpsertRequest,
     BazaVipUpsertResponse,
+    BazaVipCreateRequest,
     BazaVipItem,
     BazaVipUpdateRequest,
     ListBazaVipsResponse,
@@ -98,6 +99,39 @@ async def upsert_from_login(payload: BazaVipUpsertRequest):
     )
 
 
+@router.post("/", response_model=BazaVipItem, status_code=status.HTTP_201_CREATED)
+async def create_vip(payload: BazaVipCreateRequest):
+    """Tworzy nowego VIP-a bez udawania logowania użytkownika."""
+    username = _norm_username(payload.username)
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+
+    existing = await database.fetch_one(
+        select(baza_vips).where(baza_vips.c.username == username)
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="VIP user already exists")
+
+    now = datetime.utcnow()
+    values = {
+        "username": username,
+        "judge_id": (payload.judge_id or None),
+        "province": (payload.province or None),
+        "permissions_json": payload.permissions_json or {},
+        "login_info_json": {},
+        "created_at": now,
+        "updated_at": now,
+        "last_login_at": now,
+    }
+    new_id = await database.execute(baza_vips.insert().values(**values))
+    row = await database.fetch_one(
+        select(baza_vips).where(baza_vips.c.id == int(new_id))
+    )
+    if not row:
+        raise HTTPException(status_code=500, detail="VIP user was not created")
+    return BazaVipItem(**dict(row))
+
+
 @router.get("/{username}", response_model=BazaVipItem)
 async def get_vip(username: str):
     username = _norm_username(username)
@@ -131,17 +165,20 @@ async def update_vip(username: str, payload: BazaVipUpdateRequest):
 
     now = datetime.utcnow()
     update_values: dict[str, Any] = {"updated_at": now}
+    fields_set = getattr(payload, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(payload, "__fields_set__", set())
 
-    if payload.judge_id is not None:
+    if "judge_id" in fields_set:
         update_values["judge_id"] = payload.judge_id or None
 
-    if payload.province is not None:
+    if "province" in fields_set:
         update_values["province"] = payload.province or None
 
-    if payload.permissions_json is not None:
+    if "permissions_json" in fields_set:
         update_values["permissions_json"] = payload.permissions_json or {}
 
-    if payload.login_info_json is not None:
+    if "login_info_json" in fields_set:
         update_values["login_info_json"] = payload.login_info_json or {}
 
     if len(update_values.keys()) == 1:
@@ -158,6 +195,24 @@ async def update_vip(username: str, payload: BazaVipUpdateRequest):
         select(baza_vips).where(baza_vips.c.username == username)
     )
     return BazaVipItem(**dict(row2))
+
+
+@router.delete("/{username}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_vip(username: str) -> Response:
+    username = _norm_username(username)
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+
+    row = await database.fetch_one(
+        select(baza_vips).where(baza_vips.c.username == username)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="VIP user not found")
+
+    await database.execute(
+        baza_vips.delete().where(baza_vips.c.username == username)
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/", response_model=ListBazaVipsResponse)

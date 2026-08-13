@@ -375,6 +375,14 @@ class BazaVipUpsertResponse(BaseModel):
     record: Optional[BazaVipItem] = None
 
 
+class BazaVipCreateRequest(BaseModel):
+    """Jawne utworzenie konta VIP z panelu administratora."""
+    username: str
+    judge_id: Optional[str] = None
+    province: Optional[str] = None
+    permissions_json: Any = Field(default_factory=dict)
+
+
 class BazaVipUpdateRequest(BaseModel):
     """
     Do panelu/admina (lub Twojego narzędzia serwisowego):
