@@ -124,16 +124,26 @@ async def event_colors(
         client_secret=settings.GOOGLE_CLIENT_SECRET,
         expiry=expiry_dt,
     )
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        await save_calendar_tokens(
-            user_login,
-            access_token=creds.token,
-            refresh_token=creds.refresh_token,
-            expires_at=creds.expiry.isoformat(),
+    try:
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            await save_calendar_tokens(
+                user_login,
+                access_token=creds.token,
+                refresh_token=creds.refresh_token,
+                expires_at=creds.expiry.isoformat(),
+            )
+
+        palette = build("calendar", "v3", credentials=creds).colors().get().execute()
+    except Exception as e:
+        # Bez tego FastAPI zwraca gołe "Internal Server Error" bez śladu, co
+        # naprawdę poszło nie tak (odświeżenie tokena? colors.get()? zły
+        # zakres uprawnień?) — a to jedyny nowy kod na tej ścieżce.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google colors.get() nie powiodło się: {type(e).__name__}: {e}",
         )
 
-    palette = build("calendar", "v3", credentials=creds).colors().get().execute()
     event_palette = palette.get("event", {}) or {}
     return {
         "colors": [
