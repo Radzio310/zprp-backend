@@ -102,6 +102,21 @@ def _event_color_field(color_id: str | None) -> dict:
     return {"eventLabelId": color_id} if _is_label_id(color_id) else {"colorId": color_id}
 
 
+def _apply_event_label_version(request):
+    """Google wymaga ?eventLabelVersion=1 w URL-u, żeby w ogóle PRZETWORZYĆ
+    pole eventLabelId przy insert/update/patch — bez tego API po cichu (bez
+    błędu) je ignoruje (dok.: "You must append ?eventLabelVersion=1 to your
+    request URL to process this field"). Doklejamy ręcznie do request.uri
+    zamiast przez kwarg metody, bo statyczny discovery.json spakowany w
+    zainstalowanej wersji google-api-python-client może jeszcze nie znać
+    tego parametru — wtedy kwarg rzuciłby TypeError; edycja URI działa
+    zawsze, niezależnie od wersji biblioteki.
+    """
+    sep = "&" if "?" in request.uri else "?"
+    request.uri = f"{request.uri}{sep}eventLabelVersion=1"
+    return request
+
+
 async def _get_calendar_service(user_login: str, settings):
     """Credentials + odświeżenie tokena — ten sam wzorzec co w każdym
     endpoincie kalendarza niżej, wydzielony dla nowych endpointów etykiet,
@@ -429,7 +444,10 @@ async def create_event(
     }
 
     service = build("calendar", "v3", credentials=creds)
-    created = service.events().insert(calendarId="primary", body=event_body).execute()
+    request = service.events().insert(calendarId="primary", body=event_body)
+    if _is_label_id(payload.colorId):
+        request = _apply_event_label_version(request)
+    created = request.execute()
 
     await save_event_mapping(user_login, payload.matchId, created["id"])
     return {"eventId": created["id"]}
@@ -488,11 +506,14 @@ async def update_event(
 
     service = build("calendar", "v3", credentials=creds)
     try:
-        updated = service.events().update(
+        request = service.events().update(
             calendarId="primary",
             eventId=event_id,
             body=event_body
-        ).execute()
+        )
+        if _is_label_id(payload.colorId):
+            request = _apply_event_label_version(request)
+        updated = request.execute()
     except Exception as e:
         raise HTTPException(
             status_code=500,
