@@ -1,3 +1,8 @@
+import base64
+import hashlib
+import secrets
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
@@ -22,6 +27,43 @@ from app.calendar_utils import create_flow  # Twój helper do Flow
 
 router = APIRouter(prefix="/calendar", tags=["Calendar"])
 
+# ── PKCE (RFC 7636) ──────────────────────────────────────────────────────
+# Google zaczął wymagać code_verifier przy wymianie kodu na token
+# ("invalid_grant: Missing code verifier"), a /auth-url i /oauth2callback
+# tworzą DWIE OSOBNE instancje Flow (osobne requesty) — verifier
+# wygenerowany przy pierwszej ginął, zanim doszło do wymiany kodu przy
+# drugiej. Generujemy parę sami i trzymamy verifier w pamięci pod state
+# (tak samo krótkotrwałe jak sam state — cały roundtrip trwa sekundy).
+# UWAGA: działa tylko dla pojedynczej instancji procesu; przy skalowaniu
+# do wielu replik trzeba by przenieść to do bazy/Redis, tak jak oauth_states.
+_pkce_verifiers: dict[str, tuple[str, float]] = {}
+_PKCE_TTL_SECONDS = 600
+
+
+def _make_pkce_pair() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)[:128]
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return verifier, challenge
+
+
+def _store_pkce_verifier(state: str, verifier: str) -> None:
+    now = time.time()
+    # przy okazji zamiatamy dawno wygasłe wpisy, żeby słownik nie rósł
+    for k in [k for k, (_, ts) in _pkce_verifiers.items() if now - ts > _PKCE_TTL_SECONDS]:
+        _pkce_verifiers.pop(k, None)
+    _pkce_verifiers[state] = (verifier, now)
+
+
+def _pop_pkce_verifier(state: str) -> str | None:
+    entry = _pkce_verifiers.pop(state, None)
+    if not entry:
+        return None
+    verifier, ts = entry
+    if time.time() - ts > _PKCE_TTL_SECONDS:
+        return None
+    return verifier
+
 
 class EventCreate(BaseModel):
     matchId: str
@@ -39,12 +81,16 @@ async def get_auth_url(
     user_login: str = Depends(get_current_user),
 ):
     flow = create_flow(settings)
+    verifier, challenge = _make_pkce_pair()
     auth_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
+        code_challenge=challenge,
+        code_challenge_method="S256",
     )
     await save_oauth_state(user_login, state)
+    _store_pkce_verifier(state, verifier)
     return JSONResponse({"url": auth_url})
 
 
@@ -58,9 +104,13 @@ async def oauth2callback(
     if not user_login:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
+    verifier = _pop_pkce_verifier(state)
     flow = create_flow(settings)
     try:
-        flow.fetch_token(code=code)
+        if verifier:
+            flow.fetch_token(code=code, code_verifier=verifier)
+        else:
+            flow.fetch_token(code=code)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
 
