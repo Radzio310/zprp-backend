@@ -1003,6 +1003,18 @@ class ProElEnsureRequest(BaseModel):
     seed: Optional[Dict[str, Any]] = None
 
 
+class ProElLeaseRequest(BaseModel):
+    match_number: str
+    #: "acquire" — obejmij prowadzenie; "heartbeat" — przedłuż swoje.
+    action: Literal["acquire", "heartbeat"] = "acquire"
+    #: "live" oznacza dodatkowo przejście meczu w fazę LIVE.
+    intent: Literal["live", "edit"] = "live"
+    #: Przejęcie meczu prowadzonego przez kogoś innego. Tylko delegat i admin.
+    force: Optional[bool] = False
+    #: Wymagane przy heartbeat — dowód, że przedłużamy WŁASNY leasing.
+    epoch: Optional[int] = None
+
+
 class ProElLeaseInfo(BaseModel):
     held: bool = False
     expired: Optional[bool] = None

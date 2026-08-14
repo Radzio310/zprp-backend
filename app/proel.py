@@ -2,7 +2,7 @@ import asyncio
 import copy
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select, insert, update, delete, func
 from app.db import database, saved_matches, proel_match_state
 from app.proel_auth import Actor, is_admin, proel_actor, roles_for
@@ -26,6 +26,7 @@ from app.schemas import (
     MatchItem,
     ListSavedMatchesResponse,
     ProElEnsureRequest,
+    ProElLeaseRequest,
     ProElPatchRequest,
     ProElStateResponse,
 )
@@ -537,6 +538,167 @@ async def patch_proel_state(
     }
 
 
+#: Jak długo leasing żyje bez odnowienia. Prowadzący bije serce co 25 s, więc
+#: 90 s daje zapas na dwa nieudane bicia i chwilę bez zasięgu.
+_LEASE_TTL_SECONDS = 90
+#: Aplikacja w tle bije rzadziej — wtedy wydłużamy okno, żeby zminimalizowana
+#: aplikacja prowadzącego nie oddawała meczu po półtorej minuty.
+_LEASE_TTL_BACKGROUND_SECONDS = 300
+
+
+def _lease_active(state: Optional[Dict[str, Any]]) -> bool:
+    until = (state or {}).get("lease_until")
+    if until is None:
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    return until > _now()
+
+
+@router.post(
+    "/lease",
+    response_model=dict,
+    summary="Obejmij albo przedłuż prowadzenie meczu",
+)
+async def lease_proel_match(
+    req: ProElLeaseRequest,
+    actor: Actor = Depends(proel_actor),
+):
+    """W trakcie meczu pisze dokładnie JEDNA osoba.
+
+    Twarda blokada, nie ostrzeżenie: kto nie ma leasingu, nie zapisuje bloba.
+    Przejąć prowadzenie może wyłącznie DELEGAT albo ADMINISTRATOR — sędzia
+    boiskowy i stolikowy widzą wtedy podgląd na żywo, bez akcji przejęcia.
+    """
+    match_number = str(req.match_number or "").strip()
+
+    async with database.transaction():
+        state = await _fetch_state(match_number, for_update=True)
+        if state is None:
+            raise HTTPException(
+                404,
+                detail={
+                    "code": "MATCH_NOT_FOUND",
+                    "message": "Najpierw załóż stan meczu (/proel/ensure).",
+                },
+            )
+
+        doc_status = await _fetch_doc_status(match_number)
+        if doc_status == "approved":
+            raise HTTPException(
+                status.HTTP_423_LOCKED,
+                detail={
+                    "code": "MATCH_APPROVED",
+                    "message": "Mecz jest zatwierdzony.",
+                },
+            )
+
+        held = _lease_active(state)
+        mine = held and state.get("lease_install") == actor.installation_id
+        epoch = int(state.get("lease_epoch") or 0)
+
+        if req.action == "heartbeat":
+            # Bicie serca NIE przejmuje niczego. Gdy leasing wygasł albo ktoś
+            # go przejął, prowadzący ma się o tym dowiedzieć natychmiast.
+            if not mine or (req.epoch is not None and int(req.epoch) != epoch):
+                raise HTTPException(
+                    412,
+                    detail={
+                        "code": "LEASE_LOST",
+                        "message": "Prowadzenie meczu przejął ktoś inny.",
+                        "holder": state.get("lease_name") or "",
+                    },
+                )
+        elif held and not mine:
+            allowed = False
+            if req.force:
+                roles = roles_for(actor, _officials_of(state))
+                allowed = "delegate" in roles or await is_admin(actor.judge_id)
+            if not allowed:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "LEASE_HELD",
+                        "message": "Mecz prowadzi już inna osoba.",
+                        "holder": state.get("lease_name") or "",
+                        "holder_judge_id": state.get("lease_judge_id") or "",
+                    },
+                )
+            epoch += 1  # przejęcie unieważnia bicie serca poprzednika
+        elif not held:
+            epoch += 1
+
+        ttl = (
+            _LEASE_TTL_BACKGROUND_SECONDS
+            if req.intent == "edit"
+            else _LEASE_TTL_SECONDS
+        )
+        values: Dict[str, Any] = {
+            "lease_install": actor.installation_id,
+            "lease_judge_id": actor.judge_id,
+            "lease_name": actor.name,
+            "lease_kind": "app",
+            "lease_epoch": epoch,
+            "lease_until": _now() + timedelta(seconds=ttl),
+            "rev": proel_match_state.c.rev + 1,
+            "updated_at": func.now(),
+        }
+        if req.intent == "live" and state.get("live_started_at") is None:
+            values["live_started_at"] = func.now()
+
+        await database.execute(
+            update(proel_match_state)
+            .where(proel_match_state.c.match_number == match_number)
+            .values(**values)
+        )
+
+        fresh = await _fetch_state(match_number)
+
+    return {
+        "ok": True,
+        "epoch": epoch,
+        "until": (fresh or {}).get("lease_until").isoformat()
+        if (fresh or {}).get("lease_until")
+        else None,
+        "server_now": _now().isoformat(),
+        "rev": int((fresh or {}).get("rev") or 0),
+        "phase": _phase_of(fresh, doc_status),
+        "ttl_seconds": ttl,
+    }
+
+
+@router.delete(
+    "/lease",
+    response_model=dict,
+    summary="Oddaj prowadzenie meczu",
+)
+async def release_proel_lease(
+    match: str = Query(..., description="Numer meczu"),
+    actor: Actor = Depends(proel_actor),
+):
+    """Idempotentne — oddanie cudzego (albo już wygasłego) leasingu to nie błąd."""
+    async with database.transaction():
+        state = await _fetch_state(match, for_update=True)
+        if state is None:
+            return {"ok": True}
+        if state.get("lease_install") != actor.installation_id:
+            return {"ok": True}
+        await database.execute(
+            update(proel_match_state)
+            .where(proel_match_state.c.match_number == match)
+            .values(
+                lease_until=None,
+                lease_install=None,
+                lease_judge_id=None,
+                lease_name=None,
+                lease_kind=None,
+                rev=proel_match_state.c.rev + 1,
+                updated_at=func.now(),
+            )
+        )
+    return {"ok": True}
+
+
 @router.post(
     "/",
     response_model=dict,
@@ -612,7 +774,9 @@ async def _sync_state_after_doc_write(
 )
 async def update_proel_match(
     match_number: str,
-    req: UpdateSavedMatchRequest
+    req: UpdateSavedMatchRequest,
+    x_baza_proel: Optional[str] = Header(None, alias="X-BAZA-Proel"),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
     # Cała ścieżka w JEDNEJ transakcji: blokada wiersza stanu (`FOR UPDATE`)
     # działa tylko wewnątrz transakcji, a reprojekcja musi widzieć overlay
@@ -645,6 +809,29 @@ async def update_proel_match(
         # nakładamy z powrotem w tej samej transakcji, więc działa to także dla
         # wersji aplikacji, które o współpracy nie mają pojęcia.
         state = await _fetch_state(match_number, for_update=True)
+
+        # Twarda blokada prowadzenia — ale WYŁĄCZNIE dla klientów, które o niej
+        # wiedzą (`X-BAZA-Proel: 2`). Stara wersja aplikacji nie potrafiłaby
+        # obsłużyć odrzucenia: po cichu porzuciłaby błąd i grała dalej z
+        # własnego stanu, więc odrzucanie jej zapisów oznaczałoby ciche gubienie
+        # meczu. Zamykanie tej furtki następuje naturalnie, w miarę jak flota
+        # się aktualizuje.
+        if (
+            str(x_baza_proel or "") == "2"
+            and state is not None
+            and _phase_of(state, current_status) == PHASE_LIVE
+            and _lease_active(state)
+            and state.get("lease_install") != str(x_installation_id or "").strip()
+        ):
+            raise HTTPException(
+                412,
+                detail={
+                    "code": "LEASE_LOST",
+                    "message": "Mecz prowadzi teraz inna osoba.",
+                    "holder": state.get("lease_name") or "",
+                },
+            )
+
         projected = _reproject_blob(state, copy.deepcopy(req.data_json))
 
         to_update: dict = {"data_json": projected}
