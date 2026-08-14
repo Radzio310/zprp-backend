@@ -1953,6 +1953,7 @@ async def save_protocol_from_json(
 # EXPORT PROTOCOL PDF FROM ProEl data_json -> XLSX TEMPLATE -> PDF
 # ============================================================
 
+import asyncio
 import os
 import math
 import shutil
@@ -4170,7 +4171,12 @@ async def generate_protocol_pdf(
         wb.save(filled_xlsx)
 
         # --- convert to PDF ---
-        pdf_path = _convert_xlsx_to_pdf(filled_xlsx, td)
+        # `_convert_xlsx_to_pdf` woła `subprocess.run` na LibreOffice, co blokuje
+        # wątek na kilka sekund. Ta funkcja jest `async def`, a serwer startuje
+        # jako `uvicorn main:app` BEZ `--workers`, więc jedna pętla zdarzeń
+        # obsługuje całą flotę: bez `to_thread` generowanie jednego protokołu
+        # zawiesza KAŻDE inne żądanie w tym czasie.
+        pdf_path = await asyncio.to_thread(_convert_xlsx_to_pdf, filled_xlsx, td)
 
         # przygotuj plik do pobrania po tokenie
         _cleanup_expired_downloads()

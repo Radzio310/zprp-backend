@@ -4,6 +4,7 @@ import os
 from sqlalchemy import (
     ARRAY,
     JSON,
+    BigInteger,
     Boolean,
     Column,
     Date,
@@ -592,6 +593,50 @@ saved_matches = Table(
     # NOWE: status meczu — "in_progress" | "finished" | "approved".
     # Edycja (PUT) blokowana DOPIERO przy "approved", nie przy "finished".
     Column("status", String, nullable=False, server_default=text("'in_progress'")),
+)
+
+# 21.05) ProEl - stan współpracy nad meczem (overlay pól + leasing prowadzenia)
+#
+# CELOWO osobna tabela, nie kolumny na `proel_matches`. Powód: lista
+# „Wczytaj z serwera" w aplikacji czyta `GET /proel/?finished=false`
+# (ModulStolikowScreen.tsx:868) i pokazuje KAŻDY wiersz `proel_matches` jako
+# mecz do wznowienia. Gdyby sędzia potwierdzający badania trzy godziny przed
+# meczem zakładał tam wiersz, na liście pojawiłby się widmowy „mecz w toku",
+# a guard 2-minutowy nazwałby go „Mecz w trakcie!". Wiersz w `proel_matches`
+# ma powstawać dopiero przy pierwszym realnym zapisie rozgrywki — tak jak dziś.
+#
+# `fields_json` jest ŹRÓDŁEM PRAWDY dla ścieżek z rejestru (app/proel_fields.py).
+# `proel_matches.data_json` jest widokiem pochodnym: przy KAŻDYM zapisie (także
+# tym ze starej wersji aplikacji, która nic o overlayu nie wie) serwer nakłada
+# overlay z powrotem na blob w tej samej transakcji. Dzięki temu potwierdzenie
+# badań nie znika, gdy telefon prowadzącego wysyła swój pełny snapshot co 60 s.
+proel_match_state = Table(
+    "proel_match_state", metadata,
+    Column("match_number", String, primary_key=True, index=True),
+    # ZPRP `match.Id` — guard przed kolizją RozgrywkiCode między sezonami.
+    Column("zprp_match_id", String, nullable=True, index=True),
+    # {hostTeamName, guestTeamName, matchDate} — druga warstwa guardu.
+    Column("guard_json", JSON, nullable=True),
+    Column("rev", BigInteger, nullable=False, server_default=text("0")),
+    Column("fields_json", JSON, nullable=False, server_default=text("'{}'")),
+    # Ring ostatnich zmian + zużyte op_id (idempotencja ponowień z outboxa).
+    Column("audit_json", JSON, nullable=False, server_default=text("'[]'")),
+    # Znacznik przejścia PRE → LIVE. NULL = faza przedmeczowa.
+    Column("live_started_at", DateTime(timezone=True), nullable=True),
+    # Kopia proel_matches.status, żeby /state nie musiał robić joina.
+    Column("status_cache", String, nullable=True),
+    # Leasing prowadzenia meczu (dokładnie jeden pisarz bloba w fazie LIVE).
+    Column("lease_install", String, nullable=True),
+    Column("lease_judge_id", String, nullable=True),
+    Column("lease_name", String, nullable=True),
+    Column("lease_kind", String, nullable=True),      # 'app' | 'legacy'
+    Column("lease_epoch", Integer, nullable=False, server_default=text("0")),
+    Column("lease_until", DateTime(timezone=True), nullable=True),
+    # Blob przysłany przez starego klienta w czasie cudzego leasingu. Nie
+    # odrzucamy go (stary klient i tak zignorowałby błąd), tylko odkładamy.
+    Column("quarantine_json", JSON, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
 # 21.2) Beach ProEl - mecze (analogiczne do proel_matches, ale status jako String)

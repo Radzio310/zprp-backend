@@ -940,6 +940,98 @@ class MatchItem(BaseModel):
 class ListSavedMatchesResponse(BaseModel):
     matches: List[MatchItem]
 
+
+# ------------------------- PROEL: STAN WSPÓŁPRACY -------------------------
+# Overlay pól + faza + leasing prowadzenia. Osobno od `proel_matches`, bo lista
+# „Wczytaj z serwera" pokazuje każdy wiersz `proel_matches` jako mecz do
+# wznowienia — wiersz założony przez sędziego przed meczem byłby tam widmem.
+
+
+class ProElActorInfo(BaseModel):
+    judge_id: Optional[str] = None
+    name: Optional[str] = None
+    install: Optional[str] = None
+    verified: Optional[bool] = None
+
+
+class ProElOp(BaseModel):
+    #: Identyfikator operacji — pozwala bezpiecznie ponawiać z outboxa.
+    op_id: str
+    #: Ścieżka z zamkniętego rejestru, np. "exam.host.#7".
+    path: str
+    value: Any = None
+    #: sha1 wartości bazowej — tylko dla pól z twardym wykrywaniem konfliktu.
+    if_base: Optional[str] = None
+    #: Świadome wymuszenie (cofnięcie potwierdzenia, podmiana podpisu).
+    force: Optional[bool] = False
+
+
+class ProElPatchRequest(BaseModel):
+    match_number: str
+    #: Rewizja, którą klient widział. DORADCZA — zapis i tak jest stosowany,
+    #: a klient dostaje `stale_base: true`, żeby mógł delikatnie odświeżyć UI.
+    base_rev: Optional[int] = None
+    ops: List[ProElOp]
+
+
+class ProElRejectedOp(BaseModel):
+    op_id: str
+    path: str
+    code: str
+    message: str
+    current: Any = None
+
+
+class ProElPatchResponse(BaseModel):
+    ok: bool
+    rev: int
+    phase: str
+    server_now: datetime
+    stale_base: bool = False
+    applied: List[str] = []
+    rejected: List[ProElRejectedOp] = []
+    fields: Dict[str, Any] = {}
+
+
+class ProElEnsureRequest(BaseModel):
+    match_number: str
+    #: ZPRP `match.Id` — guard przed kolizją RozgrywkiCode między sezonami.
+    zprp_match_id: Optional[str] = None
+    #: {hostTeamName, guestTeamName, matchDate, officials:{rola:{name,judgeId}}}
+    guard: Optional[Dict[str, Any]] = None
+    #: Minimalna konfiguracja meczu, gdyby wiersz trzeba było dopiero założyć.
+    seed: Optional[Dict[str, Any]] = None
+
+
+class ProElLeaseInfo(BaseModel):
+    held: bool = False
+    expired: Optional[bool] = None
+    kind: Optional[str] = None
+    name: Optional[str] = None
+    judge_id: Optional[str] = None
+    epoch: Optional[int] = None
+    until: Optional[str] = None
+    is_you: Optional[bool] = None
+
+
+class ProElStateResponse(BaseModel):
+    match_number: str
+    rev: int
+    phase: str
+    status: Optional[str] = None
+    #: Czy istnieje wiersz stanu współpracy.
+    exists: bool
+    #: Czy istnieje wiersz `proel_matches` (czyli czy mecz był realnie zapisany).
+    doc_exists: bool
+    updated_at: Optional[datetime] = None
+    server_now: datetime
+    lease: ProElLeaseInfo = ProElLeaseInfo()
+    fields: Dict[str, Any] = {}
+    your_roles: List[str] = []
+    #: Sugerowana kadencja odpytywania — zdalny hamulec bez aktualizacji aplikacji.
+    retry_after_ms: int = 4000
+
+
 # ------------------------- BEACH PROEL SAVED MATCHES -------------------------
 
 class BeachProElCreateMatchRequest(BaseModel):

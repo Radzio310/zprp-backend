@@ -141,10 +141,25 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": exc.detail},
-    )
+    """Koperta błędu.
+
+    Klucz "error" zostaje dokładnie taki, jaki był — BAZA_web i starsze
+    ekrany na nim stoją. Dokładamy natomiast PŁASKO zawartość `detail`, gdy
+    jest słownikiem, bo bez tego kod błędu jest nieczytelny dla aplikacji:
+    `utils/proel.ts:26` robi `payload.detail ?? payload`, więc przy
+    `HTTPException(409, detail={"code": "MATCH_EXISTS", ...})` widzi
+    `{"error": {...}}`, a `d.code` jest wtedy `undefined` i `error.code`
+    ląduje jako CAŁY obiekt. Skutek: każde porównanie
+    `err.code === "MATCH_APPROVED"` w aplikacji jest dziś martwe.
+
+    Po tej zmianie `code`/`message` są na wierzchu, więc odzyskują sens także
+    aplikacje, których nikt nie zaktualizował.
+    """
+    content: dict = {"error": exc.detail}
+    if isinstance(exc.detail, dict):
+        # nie pozwalamy nadpisać samego "error"
+        content.update({k: v for k, v in exc.detail.items() if k != "error"})
+    return JSONResponse(status_code=exc.status_code, content=content)
 
 # -------------------------
 # Static files (Railway Volume)
