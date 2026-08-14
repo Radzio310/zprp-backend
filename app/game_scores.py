@@ -1,10 +1,11 @@
 """
 Wspólny ranking mini-gier BAZY.
 
-Model jest celowo ubogi: klient wysyła wiersz TYLKO wtedy, gdy pobił własny
-rekord lokalny, więc tabela rośnie wolno i nie trzeba nic czyścić ani
-przeliczać w tle. Ranking to zwykłe `MAX(score) GROUP BY judge_id` z okna
-czasowego — stąd jeden zapis obsługuje zarówno listę wieczną, jak i miesięczną.
+Model jest celowo ubogi: klient dosyła nowy rekord od razu oraz raz na dobę
+porównuje z serwerem komplet rekordów lokalnych. Serwer zapisuje wyłącznie
+poprawę, więc ponowienia po grze offline są idempotentne, a tabela rośnie wolno.
+Ranking to `MAX(score) GROUP BY judge_id` z okna czasowego — jeden zapis
+obsługuje zarówno listę wieczną, jak i miesięczną.
 
 Tożsamość: `judge_id` (tak jak w całej BAZIE — bez tokenów), a `display_name`
 i `province` przychodzą z ustawień aplikacji i są nadpisywane przy każdym
@@ -83,6 +84,26 @@ class SubmitScoreResponse(BaseModel):
     rank: Optional[int] = None
     total: int = 0
     improved: bool = False
+
+
+class SyncScoreItem(BaseModel):
+    game: str = Field(..., min_length=1, max_length=32)
+    difficulty: str = Field("", max_length=16)
+    score: int = Field(..., ge=0, le=MAX_SCORE)
+    extra: Optional[Dict[str, Any]] = None
+
+
+class SyncScoresRequest(BaseModel):
+    judge_id: str = Field(..., min_length=1, max_length=64)
+    display_name: str = Field(..., min_length=1, max_length=80)
+    province: Optional[str] = Field(None, max_length=64)
+    scores: List[SyncScoreItem]
+
+
+class SyncScoresResponse(BaseModel):
+    ok: bool
+    received: int
+    improved: int
 
 
 def _validate(game: str, difficulty: str) -> tuple[str, str]:
@@ -204,6 +225,77 @@ async def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
     rank = next((e["rank"] for e in board if e["judge_id"] == judge_id), None)
     return SubmitScoreResponse(
         ok=True, rank=rank, total=len(board), improved=improved
+    )
+
+
+@router.post("/sync", response_model=SyncScoresResponse)
+async def sync_scores(payload: SyncScoresRequest) -> SyncScoresResponse:
+    """Dobowa synchronizacja wszystkich lokalnych rekordów jednego gracza.
+
+    Klient wysyła maksymalnie po jednym rekordzie na grę i poziom. Serwer
+    dopisuje wyłącznie wartości lepsze od już zapisanych, więc ponowienie po
+    utracie odpowiedzi albo reinstalacji jest bezpieczne i idempotentne.
+    """
+    if len(payload.scores) > 32:
+        raise HTTPException(status_code=400, detail="Zbyt wiele rekordów")
+
+    judge_id = payload.judge_id.strip()
+    name = payload.display_name.strip() or judge_id
+
+    # Duplikaty w paczce redukujemy do najwyższego wyniku dla danej pary.
+    incoming: Dict[tuple[str, str], SyncScoreItem] = {}
+    for item in payload.scores:
+        game, difficulty = _validate(item.game, item.difficulty)
+        cap = SCORE_CAP.get(game, MAX_SCORE)
+        if item.score > cap:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Wynik {item.score} przekracza limit gry ({cap})",
+            )
+        key = (game, difficulty)
+        previous = incoming.get(key)
+        if previous is None or item.score > previous.score:
+            incoming[key] = item
+
+    existing_query = (
+        select(
+            game_scores.c.game,
+            game_scores.c.difficulty,
+            sa_func.max(game_scores.c.score).label("best"),
+        )
+        .where(game_scores.c.judge_id == judge_id)
+        .group_by(game_scores.c.game, game_scores.c.difficulty)
+    )
+    existing = {
+        (row["game"], row["difficulty"]): int(row["best"] or 0)
+        for row in await database.fetch_all(existing_query)
+    }
+
+    now = datetime.now(timezone.utc)
+    rows: List[Dict[str, Any]] = []
+    for (game, difficulty), item in incoming.items():
+        if item.score <= existing.get((game, difficulty), 0):
+            continue
+        rows.append(
+            {
+                "judge_id": judge_id,
+                "game": game,
+                "difficulty": difficulty,
+                "score": int(item.score),
+                "display_name": name[:80],
+                "province": (payload.province or "").strip()[:64] or None,
+                "extra": item.extra or None,
+                "created_at": now,
+            }
+        )
+
+    if rows:
+        await database.execute_many(game_scores.insert(), rows)
+
+    return SyncScoresResponse(
+        ok=True,
+        received=len(incoming),
+        improved=len(rows),
     )
 
 
