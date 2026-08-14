@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from app.proel_auth import Actor, can_confirm_exams, names_match, roles_for
+from app.proel_auth import (
+    Actor,
+    can_confirm_exams,
+    merge_guard,
+    names_match,
+    roles_for,
+)
+from app.proel_fields import ALL_ROLES
 
 
 def actor(judge_id="5124", name="WITKOWICZ Radosław", install="ins_a"):
@@ -78,14 +85,93 @@ def test_user_can_hold_two_roles():
     assert roles_for(actor(), officials) == {"referee1", "delegate"}
 
 
-def test_no_officials_means_no_roles():
+def test_brak_guarda_to_brak_rol():
+    """`None` znaczy „nie ma nawet gdzie szukać" — inaczej niż pusta obsada."""
     assert roles_for(actor(), None) == set()
-    assert roles_for(actor(), {}) == set()
+
+
+def test_nieznana_obsada_daje_wszystkie_role():
+    """Mecz stolikowy założony ręcznie nie ma i nie będzie miał obsady z ZPRP.
+
+    Odmawianie wszystkim przy pustej liście zamykało jedynego człowieka
+    prowadzącego taki mecz: nie mógłby zapisać ani badań, ani danych
+    pomeczowych. Brak wiedzy o obsadzie to nie to samo, co wiedza, że ktoś do
+    niej nie należy.
+    """
+    assert roles_for(actor(), {}) == ALL_ROLES
+    # Same puste pola to nadal „nic nie wiemy".
+    assert roles_for(actor(), {"referee1": {"name": ""}, "delegate": ""}) == ALL_ROLES
+
+
+def test_znana_obsada_bez_nas_to_zero_rol():
+    """Gdy wiemy, kto sędziuje, i nie ma tam nas — nie piszemy."""
+    officials = {"referee1": {"name": "NOWAK Piotr"}}
+    assert roles_for(actor(name="WITKOWICZ Radosław"), officials) == set()
 
 
 def test_unknown_role_keys_are_ignored():
-    officials = {"kapitan": {"name": "WITKOWICZ Radosław"}}
+    officials = {
+        "referee1": {"name": "NOWAK Piotr"},  # obsada JEST znana
+        "kapitan": {"name": "WITKOWICZ Radosław"},
+    }
     assert roles_for(actor(), officials) == set()
+
+
+# ─────────────────────────── merge_guard ───────────────────────────
+
+
+def test_merge_guard_nie_gubi_numeru_sedziego():
+    """Ekran finalizacji zna obsadę tylko z nazwisk.
+
+    Płytkie `dict.update` zastąpiłoby nim całe `officials` i numery sędziów by
+    przepadły — a numer jest rozstrzygający przy rozpoznawaniu roli.
+    """
+    existing = {
+        "hostTeamName": "Gospodarz",
+        "officials": {
+            "referee1": {"name": "NOWAK Piotr", "judgeId": "5124"},
+            "delegate": {"name": "KOWALSKI Jan", "judgeId": "777"},
+        },
+    }
+    incoming = {
+        "officials": {
+            "referee1": {"name": "NOWAK Piotr"},
+            "delegate": {"name": ""},
+        }
+    }
+    out = merge_guard(existing, incoming)
+    assert out["officials"]["referee1"]["judgeId"] == "5124"
+    assert out["officials"]["delegate"]["judgeId"] == "777"
+    # Pusta nazwa nie kasuje wypełnionej.
+    assert out["officials"]["delegate"]["name"] == "KOWALSKI Jan"
+    assert out["hostTeamName"] == "Gospodarz"
+
+
+def test_merge_guard_dopisuje_nowa_role():
+    existing = {"officials": {"referee1": {"name": "NOWAK Piotr", "judgeId": "5124"}}}
+    incoming = {"officials": {"secretary": {"name": "WITKOWICZ Radosław"}}}
+    out = merge_guard(existing, incoming)
+    assert out["officials"]["referee1"]["judgeId"] == "5124"
+    assert out["officials"]["secretary"]["name"] == "WITKOWICZ Radosław"
+
+
+def test_merge_guard_przyjmuje_poprawke_nazwiska():
+    existing = {"officials": {"referee2": {"name": "NOWAK Piotr"}}}
+    incoming = {"officials": {"referee2": {"name": "NOWAK Piotr Jan"}}}
+    out = merge_guard(existing, incoming)
+    assert out["officials"]["referee2"]["name"] == "NOWAK Piotr Jan"
+
+
+def test_merge_guard_znosi_stary_plaski_ksztalt():
+    existing = {"officials": {"delegate": "KOWALSKI Jan"}}
+    incoming = {"officials": {"delegate": {"name": "KOWALSKI Jan", "judgeId": "777"}}}
+    out = merge_guard(existing, incoming)
+    assert out["officials"]["delegate"]["judgeId"] == "777"
+
+
+def test_merge_guard_bez_niczego_nie_wywraca_sie():
+    assert merge_guard(None, None) == {}
+    assert merge_guard(None, {"hostTeamName": "X"}) == {"hostTeamName": "X"}
 
 
 def test_actor_without_name_or_number_gets_nothing():

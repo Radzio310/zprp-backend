@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select, insert, update, delete, func
 from app.db import database, saved_matches, proel_match_state
-from app.proel_auth import Actor, is_admin, proel_actor, roles_for
+from app.proel_auth import Actor, is_admin, merge_guard, proel_actor, roles_for
 from app.proel_lease import (
     LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
     LEASE_TTL_SECONDS as _LEASE_TTL_SECONDS,
@@ -358,9 +358,7 @@ async def ensure_proel_state(
             if zprp_id and not known:
                 values["zprp_match_id"] = zprp_id
             if guard:
-                merged = dict(state.get("guard_json") or {})
-                merged.update(guard)
-                values["guard_json"] = merged
+                values["guard_json"] = merge_guard(state.get("guard_json"), guard)
             if values:
                 values["updated_at"] = func.now()
                 await database.execute(

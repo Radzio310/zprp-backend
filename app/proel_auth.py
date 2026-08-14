@@ -163,6 +163,22 @@ def names_match(a: Any, b: Any) -> bool:
     return ta.issubset(tb) or tb.issubset(ta)
 
 
+def _crew_is_known(officials: Optional[Dict[str, Any]]) -> bool:
+    """Czy o obsadzie tego meczu wiemy cokolwiek."""
+    if not isinstance(officials, dict):
+        return False
+    for key in _ROLE_KEYS:
+        raw = officials.get(key)
+        if isinstance(raw, dict):
+            if _clean(raw.get("judgeId") or raw.get("judge_id")) or _clean(
+                raw.get("name") or raw.get("fullName")
+            ):
+                return True
+        elif _clean(raw):
+            return True
+    return False
+
+
 def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
     """Zbiór ról aktora w tym meczu.
 
@@ -172,10 +188,19 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
 
     `officials` ma kształt {"referee1": {"name": ..., "judgeId": ...}, ...}
     albo (starsze seedy) {"referee1": "NAZWISKO Imię", ...}.
+
+    OBSADA NIEZNANA = WSZYSTKIE ROLE. Mecz stolikowy założony ręcznie nie ma
+    obsady z ZPRP i nigdy jej mieć nie będzie. Gdybyśmy przy pustej liście
+    odmawiali wszystkim, jedyny człowiek prowadzący taki mecz nie mógłby zapisać
+    ani badań, ani danych pomeczowych — dostawałby „Nie masz roli uprawniającej
+    do tej zmiany" przy każdym dotknięciu. Brak wiedzy o obsadzie to nie to samo
+    co wiedza, że ktoś do niej nie należy: pierwsze przepuszczamy, drugie nie.
     """
     out: Set[str] = set()
     if not isinstance(officials, dict):
         return out
+    if not _crew_is_known(officials):
+        return set(ALL_ROLES)
 
     for key in _ROLE_KEYS:
         raw = officials.get(key)
@@ -199,6 +224,57 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
             out.add(key)
 
     return out & ALL_ROLES
+
+
+def _merge_official(existing: Any, incoming: Any) -> Any:
+    """Scala jeden wpis obsady, nigdy nie tracąc numeru sędziego."""
+    def as_dict(v: Any) -> Dict[str, Any]:
+        if isinstance(v, dict):
+            return dict(v)
+        return {"name": _clean(v)} if _clean(v) else {}
+
+    prev, nxt = as_dict(existing), as_dict(incoming)
+    if not nxt:
+        return existing
+    out = dict(prev)
+    for key, value in nxt.items():
+        # Pusta wartość nie kasuje wypełnionej — ekran, który nie zna numerów,
+        # nie może wymazać tych, które ktoś już przysłał.
+        if _clean(value) or not _clean(out.get(key)):
+            out[key] = value
+    # Numer jest rozstrzygający dla roli i nigdy nie znika przez ekran, który
+    # zna tylko nazwiska.
+    for id_key in ("judgeId", "judge_id"):
+        if _clean(prev.get(id_key)) and not _clean(out.get(id_key)):
+            out[id_key] = prev[id_key]
+    return out
+
+
+def merge_guard(
+    existing: Optional[Dict[str, Any]], incoming: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Scala `guard_json` przy `/ensure`.
+
+    Płytkie `dict.update` gubiłoby tu numery sędziów: ekran finalizacji zna
+    obsadę wyłącznie z nazwisk, więc jego `officials` zastąpiłby w całości
+    wpisy z numerami, które przysłał wcześniej ekran meczu. A numer jest
+    rozstrzygający przy rozpoznawaniu roli.
+    """
+    out: Dict[str, Any] = dict(existing or {})
+    for key, value in (incoming or {}).items():
+        if key != "officials":
+            out[key] = value
+            continue
+        prev_off = out.get("officials")
+        prev_off = dict(prev_off) if isinstance(prev_off, dict) else {}
+        for role in _ROLE_KEYS:
+            if not isinstance(value, dict) or role not in value:
+                continue
+            merged = _merge_official(prev_off.get(role), value.get(role))
+            if merged:
+                prev_off[role] = merged
+        out["officials"] = prev_off
+    return out
 
 
 def can_confirm_exams(roles: Set[str]) -> bool:
