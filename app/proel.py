@@ -6,6 +6,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select, insert, update, delete, func
 from app.db import database, saved_matches, proel_match_state
 from app.proel_auth import Actor, is_admin, proel_actor, roles_for
+from app.proel_lease import (
+    LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
+    LEASE_TTL_SECONDS as _LEASE_TTL_SECONDS,
+    lease_active as _lease_active,
+    legacy_lease_values as _legacy_lease_values,
+    now_utc as _now,
+)
 from app.proel_fields import (
     PHASE_LIVE,
     PHASE_LOCKED,
@@ -30,7 +37,7 @@ from app.schemas import (
     ProElPatchRequest,
     ProElStateResponse,
 )
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +85,6 @@ def _is_finished_for(status: str) -> bool:
 # z rejestru; `proel_matches.data_json` jest widokiem pochodnym. Reprojekcja
 # przy KAŻDYM zapisie jest jedynym powodem, dla którego potwierdzenie badań
 # przeżywa pełny snapshot wysyłany co 60 s przez telefon prowadzącego mecz.
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _as_dict(row: Any) -> Dict[str, Any]:
@@ -538,23 +541,6 @@ async def patch_proel_state(
     }
 
 
-#: Jak długo leasing żyje bez odnowienia. Prowadzący bije serce co 25 s, więc
-#: 90 s daje zapas na dwa nieudane bicia i chwilę bez zasięgu.
-_LEASE_TTL_SECONDS = 90
-#: Aplikacja w tle bije rzadziej — wtedy wydłużamy okno, żeby zminimalizowana
-#: aplikacja prowadzącego nie oddawała meczu po półtorej minuty.
-_LEASE_TTL_BACKGROUND_SECONDS = 300
-
-
-def _lease_active(state: Optional[Dict[str, Any]]) -> bool:
-    until = (state or {}).get("lease_until")
-    if until is None:
-        return False
-    if until.tzinfo is None:
-        until = until.replace(tzinfo=timezone.utc)
-    return until > _now()
-
-
 @router.post(
     "/lease",
     response_model=dict,
@@ -705,7 +691,11 @@ async def release_proel_lease(
     status_code=status.HTTP_201_CREATED,
     summary="Dodaj nowy mecz do ProEl'a"
 )
-async def create_proel_match(req: CreateSavedMatchRequest):
+async def create_proel_match(
+    req: CreateSavedMatchRequest,
+    x_baza_proel: Optional[str] = Header(None, alias="X-BAZA-Proel"),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+):
     existing = await database.fetch_one(
         select(saved_matches)
         .where(saved_matches.c.match_number == req.match_number)
@@ -734,7 +724,12 @@ async def create_proel_match(req: CreateSavedMatchRequest):
 
         if state is not None:
             await _sync_state_after_doc_write(
-                req.match_number, state, data_json, new_status
+                req.match_number,
+                state,
+                data_json,
+                new_status,
+                legacy_writer=str(x_baza_proel or "") != "2",
+                writer_install=str(x_installation_id or "").strip(),
             )
 
     return {"success": True}
@@ -745,6 +740,9 @@ async def _sync_state_after_doc_write(
     state: Dict[str, Any],
     blob: Any,
     status_value: str,
+    *,
+    legacy_writer: bool = False,
+    writer_install: str = "",
 ) -> None:
     """Po zapisie bloba odśwież wiersz stanu: status, faza, rewizja.
 
@@ -752,14 +750,28 @@ async def _sync_state_after_doc_write(
     (`live_signal`), bo stara wersja aplikacji nie zna leasingu i nigdy nie
     zawoła `/lease`. Bez tego mecz prowadzony ze starego telefonu zostałby na
     zawsze w fazie „pre" i dało by się nadpisywać pola przedmeczowe.
+
+    Z tego samego powodu obejmujemy za starego klienta LEASING-WIDMO. Bez niego
+    mecz prowadzony ze starego telefonu wyglądałby dla nowej aplikacji na
+    nieprowadzony przez nikogo — a to jest dokładnie ta sytuacja, w której dwa
+    stoliki zaczynają pisać ten sam protokół. Widmo obejmujemy WYŁĄCZNIE gdy
+    nikt inny nie trzyma prowadzenia; leasingu objętego świadomie nigdy nie
+    podbieramy.
     """
     values: Dict[str, Any] = {
         "status_cache": status_value,
         "rev": proel_match_state.c.rev + 1,
         "updated_at": func.now(),
     }
-    if state.get("live_started_at") is None and live_signal(blob):
+    going_live = state.get("live_started_at") is None and live_signal(blob)
+    if going_live:
         values["live_started_at"] = func.now()
+
+    if legacy_writer and (going_live or state.get("live_started_at") is not None):
+        ghost = _legacy_lease_values(state, writer_install)
+        if ghost:
+            values.update(ghost)
+
     await database.execute(
         update(proel_match_state)
         .where(proel_match_state.c.match_number == match_number)
@@ -860,6 +872,8 @@ async def update_proel_match(
                 state,
                 projected,
                 to_update.get("status", current_status),
+                legacy_writer=str(x_baza_proel or "") != "2",
+                writer_install=str(x_installation_id or "").strip(),
             )
 
     return {"success": True}
