@@ -117,8 +117,8 @@ class ZprpApiClient(ZprpApiCommon):
             'game_types_api'
         ) or {}
         for gt in types.values():
-            if not int(gt.get('Wystartowano', 0)):
-                continue
+            # ZPRP publikuje część przyszłych spotkań przed ustawieniem flagi
+            # `Wystartowano`; puste typy odpadną naturalnie przy pobieraniu rund.
             # Filtr WZPR tylko jeśli podany
             if wzpr_list and gt.get('NazwaWZPR') not in wzpr_list:
                 continue
