@@ -4845,30 +4845,47 @@ async def protocol_audit_entry(
     summary="[admin] Historia generowania protokołów (po meczu lub sędzim)",
 )
 async def protocol_audit_list(
-    match: Optional[str] = Query(None, description="IdZawody albo numer meczu"),
+    match: Optional[str] = Query(None, description="IdZawody albo numer meczu (dokładnie)"),
     judge_id: Optional[str] = Query(None),
     pdf_sha256: Optional[str] = Query(None, description="Skrót pliku, gdy metadane wyczyszczono"),
+    q: Optional[str] = Query(None, description="Szukaj w kodzie, meczu, nazwisku"),
     limit: int = Query(50, ge=1, le=500),
     actor=Depends(proel_actor),
 ):
     await _require_protocol_admin(actor)
-    from sqlalchemy import or_, select as _select
+    from sqlalchemy import func as _func, or_, select as _select
 
     from app.db import database, protocol_audit
 
-    q = _select(protocol_audit)
+    query = _select(protocol_audit)
     m = str(match or "").strip()
     if m:
-        q = q.where(
+        query = query.where(
             or_(protocol_audit.c.match_id == m, protocol_audit.c.match_number == m)
         )
     if judge_id:
-        q = q.where(protocol_audit.c.judge_id == str(judge_id).strip())
+        query = query.where(protocol_audit.c.judge_id == str(judge_id).strip())
     if pdf_sha256:
-        q = q.where(protocol_audit.c.pdf_sha256 == str(pdf_sha256).strip().lower())
+        query = query.where(protocol_audit.c.pdf_sha256 == str(pdf_sha256).strip().lower())
+
+    # Szukanie tekstowe po stronie bazy, a nie filtrowanie doładowanej strony:
+    # inaczej „znajdź mi wszystko od tego sędziego" działałoby wyłącznie w
+    # obrębie ostatnich 50 wpisów i po cichu gubiło starsze.
+    text_q = str(q or "").strip().lower()
+    if text_q:
+        like = "%%%s%%" % text_q
+        query = query.where(
+            or_(
+                _func.lower(protocol_audit.c.code).like(like),
+                _func.lower(protocol_audit.c.match_number).like(like),
+                _func.lower(protocol_audit.c.match_id).like(like),
+                _func.lower(protocol_audit.c.actor_name).like(like),
+                _func.lower(protocol_audit.c.judge_id).like(like),
+            )
+        )
 
     rows = await database.fetch_all(
-        q.order_by(protocol_audit.c.created_at.desc()).limit(limit)
+        query.order_by(protocol_audit.c.created_at.desc()).limit(limit)
     )
     return {"count": len(rows), "items": [_audit_public(r) for r in rows]}
 
