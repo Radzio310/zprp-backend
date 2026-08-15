@@ -3853,6 +3853,65 @@ PROTOCOL_HEADER_MARGIN_IN = 0.5 * _MM_IN
 PROTOCOL_BOTTOM_MARGIN_IN = 2.8 * _MM_IN
 PROTOCOL_FOOTER_MARGIN_IN = 0.0
 
+# ============================================================================
+# Pola, które muszą zostać w jednym wierszu
+# ============================================================================
+#
+# Szablon jest pod tym względem niespójny: „osoba towarzysząca A" ma
+# `wrapText`, B i E mają `shrinkToFit`, C i D nie mają nic. Efekt widać na
+# wydruku — długie nazwisko w rubryce A łamie się na dwa wiersze, choć obok, w
+# rubryce B, to samo nazwisko mieści się w jednej linii.
+#
+# `shrinkToFit` zmniejsza czcionkę TYLKO wtedy, gdy treść się nie mieści.
+# Krótkie miasto („Płock") zachowuje rozmiar z szablonu, a „Piotrków
+# Trybunalski" zjeżdża tyle, ile trzeba. To ta sama metoda, co
+# `_set_fitted_text` w protokole BAZA Beach.
+#
+# Dlaczego nie „niech tekst wyjedzie na sąsiednie komórki": wszystkie te pola
+# to komórki SCALONE, a scalona komórka nie przelewa treści poza swój obszar —
+# ani w Excelu, ani w LibreOffice. Wyjazd w bok wymagałby rozsunięcia scaleń,
+# czyli przebudowy rubryk pod podpisy.
+#
+# Zmierzone przypadki, dla których to jest konieczne (szerokość rubryki kontra
+# potrzebna szerokość tekstu, przy skali wydruku 90 %):
+#   • miejscowość sędziego     17,1 mm ← „Piotrków Trybunalski"  24,7 mm
+#   • nazwisko sędziego        28,6 mm ← podwójne nazwisko       40,9 mm
+#   • osoba towarzysząca A     12,1 mm ← „MALINOWSKI Wojciech"   16,8 mm
+#   • osoba towarzysząca D/E   12,9 mm ← to samo                 13,4 mm
+#   • funkcja D/E              15,0 mm ← „OSOBA TOWARZYSZĄCA"    15,9 mm
+FITTED_TEXT_CELLS: Tuple[str, ...] = (
+    # sędziowie i oficjele — nazwisko i miejscowość
+    "I66", "I67", "I68", "I69", "I70",
+    "W66", "W67", "W68", "W69", "W70",
+    # osoby towarzyszące — nazwisko (gospodarze / goście)
+    "B29", "K29", "R29", "Y29", "AF29",
+    "B55", "K55", "R55", "Y55", "AF55",
+    # osoby towarzyszące — funkcja
+    "A30", "J30", "Q30", "X30", "AE30",
+    "A56", "J56", "Q56", "X56", "AE56",
+    # osoby towarzyszące — licencja
+    "A31", "J31", "Q31", "X31", "AE31",
+    "A57", "J57", "Q57", "X57", "AE57",
+)
+
+# Adres hali (`AL4`) świadomie NIE jest na tej liście: jego rubryka ma 59,5 mm
+# przy tekście 59,3 mm, czyli jest zaprojektowana pod DWA wiersze. Wyłączenie
+# tam zawijania skróciłoby adres zamiast go pokazać.
+
+
+def _apply_fitted_text(ws_raw) -> None:
+    """Jeden wiersz zamiast łamania — bez ruszania scaleń i rozmiarów rubryk."""
+    for logical in FITTED_TEXT_CELLS:
+        try:
+            cell = ws_raw[shift_ref(logical)]
+            alignment = copy.copy(cell.alignment)
+            alignment.shrinkToFit = True
+            alignment.wrapText = False
+            cell.alignment = alignment
+        except Exception:
+            logger.warning("Nie udało się ustawić dopasowania w %s", logical, exc_info=True)
+
+
 _ZPRP_ID_IN_LINK = re.compile(r"[?&](?:IdZawody|Zawody|Mecz|match_id)=([0-9]+)", re.I)
 
 
@@ -3915,6 +3974,10 @@ def _apply_protocol_page_marks(
     header = "IdZawody: %s" % match_id if match_id else ""
 
     for ws in wb.worksheets:
+        # Dopasowanie treści do rubryk — tu, razem z nagłówkiem, bo obie rzeczy
+        # muszą objąć także arkusze powstałe przez `copy_worksheet`.
+        _apply_fitted_text(ws)
+
         pm = ws.page_margins
         pm.top = PROTOCOL_TOP_MARGIN_IN
         pm.header = PROTOCOL_HEADER_MARGIN_IN
