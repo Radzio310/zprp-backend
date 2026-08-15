@@ -54,6 +54,33 @@ class Actor:
         }
 
 
+def header_text(v: Any) -> str:
+    """
+    Tekst z nagłówka HTTP, z naprawionymi polskimi znakami.
+
+    Nagłówki HTTP są ze specyfikacji latin-1 i Starlette tak je dekoduje.
+    Aplikacja wysyła nazwisko w UTF-8, więc „Radosław" dociera jako
+    „RadosÅ‚aw" — dwa bajty UTF-8 odczytane jako dwa znaki latin-1.
+
+    Naprawa to przewinięcie tego z powrotem: bierzemy bajty, jakie faktycznie
+    przyszły po drucie (`encode("latin-1")`), i czytamy je jako UTF-8. Nazwy
+    z samego ASCII przechodzą przez to bez zmian, a cokolwiek, co się nie
+    składa w poprawny UTF-8, zostaje jak było — lepiej pokazać dziwny znak niż
+    uciąć nazwisko.
+
+    Świadomie NIE naprawiamy tego po stronie aplikacji (procent-kodowaniem):
+    naprawa na serwerze działa od razu także dla wersji już zainstalowanych,
+    a te wysyłają nazwiska od kilku wydań.
+    """
+    s = str(v or "").strip()
+    if not s or s.isascii():
+        return s
+    try:
+        return s.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+
+
 def _clean(v: Any) -> str:
     return str(v or "").strip()
 
@@ -114,7 +141,7 @@ async def proel_actor(
     return Actor(
         judge_id=judge_id,
         installation_id=installation_id,
-        name=_clean(x_actor_name),
+        name=header_text(x_actor_name),
         verified=verified,
     )
 

@@ -25,7 +25,7 @@ from fastapi import (
 )
 # Tożsamość aktora — ta sama zależność co przy zapisach ProEl, żeby wgląd w
 # dziennik protokołów miał dokładnie tych samych adminów co reszta systemu.
-from app.proel_auth import proel_actor
+from app.proel_auth import header_text, proel_actor
 from pathlib import Path as SysPath
 from httpx import AsyncClient
 from pydantic import BaseModel
@@ -4194,9 +4194,12 @@ async def generate_protocol_pdf(
     # który przy braku nagłówków rzuca 401. Wersje aplikacji sprzed tej zmiany
     # ich nie wysyłają, a protokół musi się wygenerować także im — wtedy stopka
     # mówi wprost, że autor jest nieznany, zamiast zmyślać nazwisko.
-    actor_name = str(x_actor_name or "").strip()
-    actor_judge_id = str(x_judge_id or "").strip()
-    actor_install = str(x_installation_id or "").strip()
+    # `header_text`, a nie `strip()`: nazwisko jedzie nagłówkiem HTTP, a te są
+    # ze specyfikacji latin-1 — bez naprawy „Radosław" ląduje w stopce
+    # protokołu jako „RadosÅ‚aw".
+    actor_name = header_text(x_actor_name)
+    actor_judge_id = header_text(x_judge_id)
+    actor_install = header_text(x_installation_id)
     actor_verified = await _soft_verify_actor(actor_judge_id, actor_install)
     if actor_name:
         generated_by = actor_name

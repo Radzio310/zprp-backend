@@ -196,3 +196,61 @@ def test_actor_without_name_or_number_gets_nothing():
 )
 def test_can_confirm_exams(roles, expected):
     assert can_confirm_exams(roles) is expected
+
+
+# ─────────────────────── polskie znaki w nagłówkach ───────────────────────
+#
+# Nagłówki HTTP są ze specyfikacji latin-1 i Starlette tak je dekoduje, a
+# aplikacja wysyła nazwisko w UTF-8. Bez naprawy „Radosław" trafiał do stopki
+# protokołu i do dziennika jako „RadosÅ‚aw".
+
+def _as_server_sees(text: str) -> str:
+    """To, co dociera do handlera: bajty UTF-8 odczytane jako latin-1."""
+    return text.encode("utf-8").decode("latin-1")
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "WITKOWICZ Radosław",
+        "ŻÓŁĆ Ćwikła",
+        "ŁUKASZEWSKI Paweł",
+        "MÜLLER Hans",
+    ],
+)
+def test_header_text_repairs_utf8_read_as_latin1(original):
+    from app.proel_auth import header_text
+
+    assert header_text(_as_server_sees(original)) == original
+
+
+def test_header_text_leaves_ascii_alone():
+    from app.proel_auth import header_text
+
+    assert header_text("NOWAK Kamil") == "NOWAK Kamil"
+    assert header_text("  5102138  ") == "5102138"
+
+
+def test_header_text_survives_garbage():
+    """Ciąg, który nie składa się w poprawny UTF-8, ma zostać jak był —
+    lepszy dziwny znak niż ucięte nazwisko."""
+    from app.proel_auth import header_text
+
+    assert header_text("Nowak \xff\xfe Kamil") == "Nowak \xff\xfe Kamil"
+
+
+def test_header_text_empty_and_none():
+    from app.proel_auth import header_text
+
+    assert header_text(None) == ""
+    assert header_text("") == ""
+    assert header_text("   ") == ""
+
+
+def test_header_text_is_idempotent():
+    """Podwójna naprawa nie może psuć — nazwisko przechodzi przez tę funkcję
+    w kilku miejscach (aktor ProEl, dziennik protokołów)."""
+    from app.proel_auth import header_text
+
+    once = header_text(_as_server_sees("WITKOWICZ Radosław"))
+    assert header_text(once) == once
