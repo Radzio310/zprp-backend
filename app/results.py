@@ -17,10 +17,12 @@ from bs4 import BeautifulSoup
 from fastapi import (
     APIRouter,
     Depends,
+    File,
     Header,
     HTTPException,
     Query,
     Request,
+    UploadFile,
     Path as ApiPath,
 )
 # Tożsamość aktora — ta sama zależność co przy zapisach ProEl, żeby wgląd w
@@ -4968,6 +4970,132 @@ async def protocol_verify(
         out["pdf_matches_ledger"] = (
             str(req.pdf_sha256).strip().lower() == str(row["pdf_sha256"] or "").lower()
         )
+    return out
+
+
+_PDF_MARK_RE = {
+    "code": re.compile(r"BazaCode=([^;\s]+)"),
+    "signature": re.compile(r"BazaSig=([^;\s]+)"),
+    "state_sha256": re.compile(r"BazaState=([0-9a-fA-F]+)"),
+}
+_XMP_MARK_RE = re.compile(r"<baza:(\w+)>(.*?)</baza:\1>", re.S)
+
+
+def _extract_pdf_marks(data: bytes) -> Dict[str, str]:
+    """
+    Wyciąga znacznik z metadanych PDF-a — z `/Info` i z XMP naraz.
+
+    Dwa miejsca, bo przeżywają różne rzeczy: `keywords` zachowuje większość
+    narzędzi, XMP bywa jedynym, co zostaje po konwersji, która `/Info` gubi.
+    Bierzemy pierwszą niepustą wartość z każdego pola.
+    """
+    out: Dict[str, str] = {}
+    try:
+        import fitz  # pymupdf
+    except Exception:
+        return out
+
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception:
+        return out
+
+    try:
+        blob = " ".join(
+            str(v or "") for v in (doc.metadata or {}).values()
+        )
+        for key, rx in _PDF_MARK_RE.items():
+            m = rx.search(blob)
+            if m:
+                out[key] = m.group(1)
+
+        try:
+            xmp = doc.get_xml_metadata() or ""
+        except Exception:
+            xmp = ""
+        for key, value in _XMP_MARK_RE.findall(xmp):
+            mapped = {"stateSha256": "state_sha256"}.get(key, key)
+            if mapped in ("code", "signature", "state_sha256") and not out.get(mapped):
+                out[mapped] = value.strip()
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    return out
+
+
+@router.post(
+    "/judge/results/protocol/verify-file",
+    summary="[admin] Sprawdź plik PDF protokołu — znacznik, podpis i zgodność z dziennikiem",
+)
+async def protocol_verify_file(
+    file: UploadFile = File(..., description="Plik PDF protokołu"),
+    actor=Depends(proel_actor),
+):
+    """
+    Weryfikacja od strony pliku, a nie wklejonego tokenu.
+
+    Robi trzy rzeczy naraz, których wklejanie podpisu z ręki nie potrafi:
+      • czyta znacznik samo, więc nikt nie musi grzebać we właściwościach PDF-a,
+      • liczy skrót TEGO egzemplarza i porównuje go z dziennikiem, czyli
+        odpowiada nie tylko „czy nasz", ale „czy nietknięty",
+      • gdy metadane wyczyszczono, próbuje trafić do wpisu po samym skrócie —
+        bo skasowanie znacznika nie zmienia bajtów strony.
+    """
+    await _require_protocol_admin(actor)
+
+    data = await file.read()
+    if not data[:5] == b"%PDF-":
+        raise HTTPException(400, "To nie jest plik PDF")
+
+    marks = _extract_pdf_marks(data)
+    pdf_sha256 = _sha256_bytes(data)
+
+    out: Dict[str, Any] = {
+        "pdf_sha256": pdf_sha256,
+        "has_marks": bool(marks),
+        "code": marks.get("code") or None,
+    }
+
+    signature = marks.get("signature") or ""
+    if signature:
+        ok, claim = _verify_protocol_signature(signature)
+        out["signature_valid"] = ok
+        out["claim"] = claim
+    else:
+        out["signature_valid"] = None
+        out["claim"] = {}
+
+    from sqlalchemy import select as _select
+
+    from app.db import database, protocol_audit
+
+    row = None
+    if marks.get("code"):
+        row = await database.fetch_one(
+            _select(protocol_audit).where(protocol_audit.c.code == marks["code"])
+        )
+        if row is not None:
+            out["found_by"] = "code"
+    if row is None:
+        row = await database.fetch_one(
+            _select(protocol_audit).where(protocol_audit.c.pdf_sha256 == pdf_sha256)
+        )
+        if row is not None:
+            out["found_by"] = "hash"
+
+    if row is None:
+        out["known_in_ledger"] = False
+        return out
+
+    out["known_in_ledger"] = True
+    out["entry"] = _audit_public(row)
+    # Podpis mówi „to nasz plik dla tego stanu", skrót — „to TEN egzemplarz".
+    # Rozjazd między nimi to dokładnie sytuacja „ktoś edytował po wygenerowaniu".
+    out["pdf_matches_ledger"] = pdf_sha256 == str(row["pdf_sha256"] or "")
+    if marks.get("state_sha256"):
+        out["state_matches_ledger"] = marks["state_sha256"] == str(row["state_sha256"] or "")
     return out
 
 
