@@ -1,17 +1,31 @@
 # app/results.py
 
 import base64
+import gzip
+import hashlib
 import json
 import logging
 import random
 import re
+import secrets
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
 
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, Depends, HTTPException, Query, Path as ApiPath
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Path as ApiPath,
+)
+# Tożsamość aktora — ta sama zależność co przy zapisach ProEl, żeby wgląd w
+# dziennik protokołów miał dokładnie tych samych adminów co reszta systemu.
+from app.proel_auth import proel_actor
 from pathlib import Path as SysPath
 from httpx import AsyncClient
 from pydantic import BaseModel
@@ -2266,13 +2280,34 @@ class ShiftedWS:
         return getattr(self._ws, name)
 
 
-# Kolory ptaszków. "manual" jest atramentowy — na wydruku ma wyglądać, jakby
-# sędzia postawił go długopisem, a nie jakby wystawił go system.
+# Whitelista dozwolonych wartości pola `exam`. Zostaje jako mapa (a nie zbiór),
+# bo po tych kluczach chodzi `_player_exam_map_from_cards` i testy; wartości to
+# barwa wiodąca statusu, ta sama co `EXAM_COLORS` po stronie aplikacji.
 EXAM_MARK_RGB = {
     "zprp": (46, 158, 91),
     "wzpr": (47, 158, 126),
     "manual": (28, 52, 122),
 }
+
+# Paleta pieczątki — port z `components/matchDetails/ExamBadge.tsx`, żeby ten
+# sam status wyglądał tak samo w składzie i na wydruku. Zieleń jest o stopień
+# jaśniejsza niż `EXAM_MARK_RGB`: tamta jest do obwódek, ta do wypełnienia.
+_EXAM_RAMP = {
+    "zprp": ("#5FE3C2", "#49D3B0", "#22A06B"),
+    "wzpr": ("#5FE3C2", "#49D3B0", "#22A06B"),
+    "manual": ("#5B84D8", "#3E63BE", "#24408A"),
+}
+_EXAM_RAMP_STOPS = (0.0, 0.46, 1.0)
+_EXAM_CHECK = (247, 255, 251)
+_EXAM_PLATE_BG = (15, 11, 9, 235)
+_EXAM_PLATE_RIM = (95, 227, 194, 107)
+_EXAM_WZPR_TEXT = (141, 240, 212)
+
+# Podpis pod ptaszkiem WZPR. Pełne „WZPR" mieści się w 5,3 mm szerokości z
+# wysokością liter ~1,2 mm (≈3,5 pt) — czytelne, bo PNG jedzie w wysokiej
+# rozdzielczości, ale to granica. Gdyby na papierze okazało się za drobne,
+# jedyna zmiana to podmiana tej stałej na "W".
+EXAM_WZPR_CAPTION = "WZPR"
 
 _EXAM_MARK_CACHE: Dict[str, bytes] = {}
 
@@ -2280,21 +2315,145 @@ _EXAM_MARK_CACHE: Dict[str, bytes] = {}
 # ptaszków ma 20 px, bo dokładnie tyle miejsca oddaje jej dawny LEWY MARGINES
 # (0,19685" przy skali 90 %). Szerzej = tabela nie mieści się na A4 i prawy skraj
 # protokołu wyjeżdża na osobną stronę. Wiersz zawodnika ma 13,2 pt ≈ 17,6 px.
-#
-# Dlatego wariant WZPR ma przy ptaszku samo „W", a nie pełne „WZPR": cztery
-# litery w 4,8 mm szerokości dałyby ~1 mm wysokości i byłyby na wydruku
-# nieczytelne. Jedna litera to ~2,3 mm, czyli mniej więcej 6 pt.
 EXAM_MARK_W = 20
-EXAM_MARK_H = 15
-_EXAM_SS = 10  # rysujemy 10x większe i skalujemy w dół — ostre na wydruku
+EXAM_MARK_H = 16
+# Rysujemy _EXAM_SS razy większe i — w odróżnieniu od poprzedniej wersji — NIE
+# skalujemy w dół. PNG zostaje w pełnej rozdzielczości, a do 20×16 px sprowadza
+# go dopiero rozmiar wyświetlania w arkuszu. Wcześniejszy `resize` zapisywał
+# bitmapę 20×15 px, czyli ~96 DPI — na wydruku znaczek był z tego powodu
+# rozmyty niezależnie od tego, jak starannie go narysowaliśmy.
+_EXAM_SS = 8
 # Znaczek zajmuje całą szerokość kolumny; w pionie 1 px zapasu, żeby nie kleił
-# się do linii wiersza.
+# się do linii wiersza (16 + 1 mieści się w 17,6 px wiersza).
 _EXAM_MARK_OFFSET_X_PX = 0
 _EXAM_MARK_OFFSET_Y_PX = 1
 
 
+def _hex_rgb(value: str) -> Tuple[int, int, int]:
+    v = value.lstrip("#")
+    return (int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16))
+
+
+def _ramp_color(ramp: Tuple[str, ...], stops: Tuple[float, ...], t: float):
+    """Kolor z trójstopniowej rampy w punkcie t∈[0,1] (interpolacja liniowa)."""
+    t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+    cols = [_hex_rgb(c) for c in ramp]
+    for i in range(len(stops) - 1):
+        lo, hi = stops[i], stops[i + 1]
+        if t <= hi or i == len(stops) - 2:
+            k = 0.0 if hi <= lo else (t - lo) / (hi - lo)
+            k = 0.0 if k < 0 else (1.0 if k > 1 else k)
+            a, b = cols[i], cols[i + 1]
+            return tuple(int(round(a[j] + (b[j] - a[j]) * k)) for j in range(3))
+    return cols[-1]
+
+
+def _exam_gradient(size, ramp, stops, start=(0.18, 0.0), end=(0.82, 1.0)):
+    """Gradient liniowy w zadanym kierunku. Liczony raz na rodzaj i cache'owany."""
+    w, h = size
+    sx, sy = start
+    ex, ey = end
+    dx, dy = ex - sx, ey - sy
+    denom = (dx * dx + dy * dy) or 1.0
+    lut = [_ramp_color(ramp, stops, i / 255.0) + (255,) for i in range(256)]
+    px = []
+    for y in range(h):
+        vy = ((y + 0.5) / h - sy) * dy
+        for x in range(w):
+            t = (((x + 0.5) / w - sx) * dx + vy) / denom
+            idx = int(t * 255)
+            px.append(lut[0 if idx < 0 else (255 if idx > 255 else idx)])
+    img = PILImage.new("RGBA", (w, h))
+    img.putdata(px)
+    return img
+
+
+def _exam_gloss(size):
+    """Rozbłysk u góry i ciemny rant u dołu — bez tego kwadrat jest płaski."""
+    w, h = size
+    px = []
+    for y in range(h):
+        for x in range(w):
+            t = (((x + 0.5) / w) + ((y + 0.5) / h)) / 2.0
+            if t <= 0.46:
+                px.append((255, 255, 255, int(round(76 * (1 - t / 0.46)))))
+            else:
+                px.append((11, 60, 40, int(round(51 * (t - 0.46) / 0.54))))
+    img = PILImage.new("RGBA", (w, h))
+    img.putdata(px)
+    return img
+
+
+def _exam_rounded_mask(size, radius: int):
+    from PIL import ImageDraw
+
+    mask = PILImage.new("L", size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, size[0] - 1, size[1] - 1], radius=radius, fill=255
+    )
+    return mask
+
+
+def _exam_draw_check(draw, box, color, stroke: int) -> None:
+    """
+    Ptaszek dokładnie z makiety aplikacji (viewBox 52×52, „M12 27.5 L21.5 37
+    L40 15.5"). Ionicons rysuje go pod innym kątem, a chodzi o to, żeby wydruk
+    i skład miały ten sam znak.
+    """
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    pts = [
+        (x0 + nx * w, y0 + ny * h)
+        for nx, ny in ((12 / 52, 27.5 / 52), (21.5 / 52, 37 / 52), (40 / 52, 15.5 / 52))
+    ]
+    draw.line(pts, fill=color, width=stroke, joint="curve")
+    # PIL nie zna zaokrąglonych końców linii — dokładamy je kółkami.
+    r = stroke / 2.0
+    for px_, py_ in pts:
+        draw.ellipse([px_ - r, py_ - r, px_ + r, py_ + r], fill=color)
+
+
+def _exam_text_strip(text: str, rgb, max_w: int, max_h: int):
+    """
+    Napis dopasowany do prostokąta. Renderujemy w dużej skali i dopiero potem
+    skalujemy — dzięki temu wynik nie zależy od tego, czy w obrazie znalazła się
+    jakakolwiek czcionka TTF (fallback `load_default` to bitmapa 11 px, która
+    bez tego kroku byłaby mikroskopijna względem kanwy).
+    """
+    from PIL import ImageDraw, ImageFont
+
+    font = None
+    for name in ("DejaVuSans-Bold.ttf", "arialbd.ttf", "DejaVuSans.ttf", "arial.ttf"):
+        try:
+            font = ImageFont.truetype(name, 96)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    probe = ImageDraw.Draw(PILImage.new("RGBA", (1, 1)))
+    box = probe.textbbox((0, 0), text, font=font)
+    tw, th = max(1, box[2] - box[0]), max(1, box[3] - box[1])
+
+    layer = PILImage.new("RGBA", (tw, th), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text(
+        (-box[0], -box[1]), text, font=font, fill=tuple(rgb) + (255,)
+    )
+    k = min(max_w / float(tw), max_h / float(th))
+    return layer.resize((max(1, int(tw * k)), max(1, int(th * k))), PILImage.LANCZOS)
+
+
 def _exam_mark_png(kind: str) -> bytes:
-    """PNG ze znaczkiem badań. Deterministyczny i cache'owany."""
+    """
+    PNG ze znaczkiem badań — pieczątka w stylu `ExamBadge` z aplikacji.
+    Deterministyczny i cache'owany (trzy obrazy na cały proces).
+
+      • zprp / manual → squircle z trójstopniowym gradientem i białym ptaszkiem,
+      • wzpr          → ta sama zielona głowa z ptaszkiem, a pod nią ciemna
+                        stopka z podpisem: status ma być rozpoznawalny bez
+                        porównywania odcieni zieleni z sąsiednim wierszem.
+    """
     kind = str(kind or "").strip().lower()
     if kind not in EXAM_MARK_RGB:
         return b""
@@ -2309,91 +2468,77 @@ def _exam_mark_png(kind: str) -> bytes:
     except Exception:
         return b""
 
-    rgb = EXAM_MARK_RGB[kind]
-    color = rgb + (255,)
-    w, h = EXAM_MARK_W * _EXAM_SS, EXAM_MARK_H * _EXAM_SS
-    img = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-
-    # Ptaszek: krótkie ramię w dół-w prawo, długie w górę-w prawo. Wariant WZPR
-    # oddaje prawą część kanwy literze, więc jest odrobinę węższy — ale rysowany
-    # tą samą ręką, żeby oba czytały się jako ten sam znak.
-    span = 0.55 * w if kind == "wzpr" else 0.86 * w
-    x0 = 0.05 * w if kind == "wzpr" else 0.07 * w
-    p0 = (x0, 0.52 * h)
-    p1 = (x0 + 0.30 * span, 0.80 * h)
-    p2 = (x0 + span, 0.16 * h)
-    stroke = int(0.105 * h)
-
-    if kind == "manual":
-        # Ślad długopisu: kilka nakładających się pociągnięć o różnej grubości i
-        # kryciu, z rozjechanymi punktami i ogonem wychodzącym poza narożnik.
-        # Ziarno na sztywno — inaczej każdy worker rysowałby inny ptaszek.
-        rnd = random.Random(1337)
-        amp = 0.030 * h
-        tail = (min(w - stroke, x0 + 1.08 * span), 0.05 * h)
-
-        def jitter(pt):
-            return (pt[0] + rnd.uniform(-amp, amp), pt[1] + rnd.uniform(-amp, amp))
-
-        def mid(a, b, t):
-            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-
-        for width_mul, alpha in ((1.25, 120), (1.0, 240), (0.65, 190)):
-            pts = [
-                jitter(p0),
-                jitter(mid(p0, p1, 0.5)),
-                jitter(p1),
-                jitter(mid(p1, p2, 0.35)),
-                jitter(mid(p1, p2, 0.7)),
-                jitter(p2),
-                jitter(tail),
-            ]
-            d.line(
-                pts,
-                fill=rgb + (alpha,),
-                width=max(1, int(stroke * width_mul)),
-                joint="curve",
-            )
-    else:
-        d.line([p0, p1, p2], fill=color, width=stroke, joint="curve")
+    ss = _EXAM_SS
+    W, H = EXAM_MARK_W * ss, EXAM_MARK_H * ss
+    img = PILImage.new("RGBA", (W, H), (0, 0, 0, 0))
+    ramp = _EXAM_RAMP[kind]
 
     if kind == "wzpr":
-        # Inicjał wciśnięty w prawy skraj kanwy, nachodzący na koniec ptaszka.
-        # Bez pastylki — przy 20 px szerokości ramka zjadałaby cały ptaszek i
-        # znaczek robił się nieczytelną plamą. Zamiast niej biała obwódka wokół
-        # litery: odcina ją od ramienia ptaszka, a nic nie zasłania.
-        try:
-            from PIL import ImageFont
+        # ── pieczątka dwuczęściowa: głowa + stopka z podpisem ──
+        radius = int(0.26 * W)
+        head_h = int(0.60 * H)
 
-            text = "W"
-            font = None
-            for name in ("DejaVuSans-Bold.ttf", "arialbd.ttf", "DejaVuSans.ttf", "arial.ttf"):
-                try:
-                    font = ImageFont.truetype(name, int(0.66 * h))
-                    break
-                except Exception:
-                    continue
-            if font is None:
-                font = ImageFont.load_default()
+        plate = PILImage.new("RGBA", (W, H), _EXAM_PLATE_BG)
+        head = _exam_gradient((W, head_h), ramp, _EXAM_RAMP_STOPS)
+        head.alpha_composite(_exam_gloss((W, head_h)))
+        plate.paste(head, (0, 0), head)
 
-            box = d.textbbox((0, 0), text, font=font)
-            tw, th = box[2] - box[0], box[3] - box[1]
-            left = w - tw - max(1, int(0.03 * w))
-            top = (h - th) / 2
+        mask = _exam_rounded_mask((W, H), radius)
+        img.paste(plate, (0, 0), mask)
 
-            d.text(
-                (left - box[0], top - box[1]),
-                text,
-                font=font,
-                fill=color,
-                stroke_width=max(1, int(0.10 * h)),
-                stroke_fill=(255, 255, 255, 255),
-            )
-        except Exception:
-            pass
+        d = ImageDraw.Draw(img)
+        side = int(0.42 * W)
+        cx, cy = W / 2.0, head_h / 2.0
+        _exam_draw_check(
+            d,
+            (cx - side / 2.0, cy - side / 2.0, cx + side / 2.0, cy + side / 2.0),
+            _EXAM_CHECK,
+            max(1, int(0.085 * W)),
+        )
 
-    img = img.resize((EXAM_MARK_W, EXAM_MARK_H), PILImage.LANCZOS)
+        caption = _exam_text_strip(
+            EXAM_WZPR_CAPTION,
+            _EXAM_WZPR_TEXT,
+            int(W * 0.86),
+            int((H - head_h) * 0.62),
+        )
+        img.alpha_composite(
+            caption,
+            (
+                int((W - caption.width) / 2),
+                int(head_h + ((H - head_h) - caption.height) / 2),
+            ),
+        )
+
+        d.rounded_rectangle(
+            [0, 0, W - 1, H - 1],
+            radius=radius,
+            outline=_EXAM_PLATE_RIM,
+            width=max(1, int(0.35 * ss)),
+        )
+    else:
+        # ── squircle z pełnym wypełnieniem ──
+        side = H - 2 * ss
+        radius = int(0.36 * side)
+        badge = _exam_gradient((side, side), ramp, _EXAM_RAMP_STOPS)
+        badge.alpha_composite(_exam_gloss((side, side)))
+
+        d = ImageDraw.Draw(badge)
+        inner = 0.60 * side
+        off = (side - inner) / 2.0
+        _exam_draw_check(
+            d,
+            (off, off, off + inner, off + inner),
+            _EXAM_CHECK,
+            max(1, int(0.105 * side)),
+        )
+
+        img.paste(
+            badge,
+            (int((W - side) / 2), int((H - side) / 2)),
+            _exam_rounded_mask((side, side), radius),
+        )
+
     bio = BytesIO()
     img.save(bio, format="PNG")
     data = bio.getvalue()
@@ -3239,7 +3384,7 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         # 2) drugi strzał w serii
         write_team_shot(second_team, s)
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from io import BytesIO
 from typing import Callable
 
@@ -3683,16 +3828,411 @@ def _apply_companion_crossouts(ws, *, host_names, host_meta, host_pen, guest_nam
         if _is_empty_companion_block(ltr, names_map=guest_names, meta_map=guest_meta, pen_map=guest_pen):
             _merge_and_diagonal_cross(ws, start_cell=a, end_cell=b)
 
+# ============================================================================
+# Nagłówek i stopka wydruku (IdZawody + kto/kiedy wygenerował)
+# ============================================================================
+#
+# Oba napisy idą przez NAGŁÓWEK i STOPKĘ STRONY, a nie przez komórki. Powód jest
+# twardy: arkusz zajmuje 71 wierszy, które przy skali 90 % wypełniają wysokość
+# A4 co do milimetra. Dołożenie choćby jednego wiersza wypycha ostatnią linię
+# protokołu na drugą stronę, a wstawienie wiersza NAD ramką przesunęłoby o jeden
+# wszystkie ~170 literalnych adresów w tym pliku.
+#
+# Marginesy przestawiamy tak, żeby wysokość obszaru druku została DOKŁADNIE
+# taka sama. Szablon ma górny margines 8 mm i zerowy dolny; dzielimy te same
+# 8 mm na 5,2 mm u góry i 2,8 mm u dołu. Suma się zgadza co do zera, więc blok
+# protokołu tylko przesuwa się o 2,8 mm w górę — i nic poza tym.
+#
+# Liczymy w milimetrach, a nie w zaokrąglonych calach, właśnie po to, żeby ta
+# suma była równa dokładnie, a nie „prawie".
+_MM_IN = 1.0 / 25.4
+PROTOCOL_TOP_MARGIN_IN = 5.2 * _MM_IN
+PROTOCOL_HEADER_MARGIN_IN = 0.5 * _MM_IN
+PROTOCOL_BOTTOM_MARGIN_IN = 2.8 * _MM_IN
+PROTOCOL_FOOTER_MARGIN_IN = 0.0
+
+_ZPRP_ID_IN_LINK = re.compile(r"[?&](?:IdZawody|Zawody|Mecz|match_id)=([0-9]+)", re.I)
+
+
+def _zprp_match_id(data_json: Dict[str, Any]) -> str:
+    """
+    IdZawody — identyfikator meczu w systemie ZPRP, ten sam, który drukuje się
+    w prawym górnym rogu oryginalnego protokołu.
+
+    Świadomie NIE bierzemy `data_json["id"]`: to znacznik czasu nadawany przez
+    aplikację przy budowaniu paczki, a nie identyfikator zawodów. Wpisanie go w
+    nagłówek dałoby liczbę, która wygląda wiarygodnie i nie znaczy nic.
+    """
+    mc = data_json.get("matchConfig") or {}
+    extras = mc.get("extras") or {} if isinstance(mc, dict) else {}
+    for src in (mc, extras, data_json):
+        if not isinstance(src, dict):
+            continue
+        for key in ("matchId", "match_id", "IdZawody", "idZawody", "zawodyId", "Id"):
+            v = str(src.get(key) or "").strip()
+            if v.isdigit():
+                return v
+        for key in ("details_path", "detailsPath", "matchLink", "href", "url"):
+            m = _ZPRP_ID_IN_LINK.search(str(src.get(key) or ""))
+            if m:
+                return m.group(1)
+    return ""
+
+
+def _warsaw_now() -> datetime:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Warsaw"))
+    except Exception:
+        # Bez bazy stref (okrojony obraz) lepiej wydrukować czas serwera niż nic.
+        return datetime.now()
+
+
+def _hf_escape(text: str) -> str:
+    """W nagłówku/stopce arkusza `&` otwiera kod formatujący — trzeba go podwoić."""
+    return str(text or "").replace("&", "&&")
+
+
+def _apply_protocol_page_marks(
+    wb,
+    *,
+    match_id: str,
+    generated_by: str,
+    generated_at: str,
+) -> None:
+    """
+    Nakłada na WSZYSTKIE arkusze skoroszytu nagłówek z IdZawody i stopkę z
+    podpisem generowania. Wołane po `copy_worksheet`, żeby strona uwag i strona
+    rzutów karnych też były opisane — inaczej wyrwana kartka byłaby anonimowa.
+    """
+    footer = "Wygenerowano automatycznie przez użytkownika %s dnia %s" % (
+        generated_by,
+        generated_at,
+    )
+    header = "IdZawody: %s" % match_id if match_id else ""
+
+    for ws in wb.worksheets:
+        pm = ws.page_margins
+        pm.top = PROTOCOL_TOP_MARGIN_IN
+        pm.header = PROTOCOL_HEADER_MARGIN_IN
+        pm.bottom = PROTOCOL_BOTTOM_MARGIN_IN
+        pm.footer = PROTOCOL_FOOTER_MARGIN_IN
+
+        if header:
+            ws.oddHeader.right.text = _hf_escape(header)
+            ws.oddHeader.right.size = 6
+            ws.oddHeader.right.font = "Arial,Regular"
+            ws.oddHeader.right.color = "808080"
+
+        ws.oddFooter.center.text = _hf_escape(footer)
+        ws.oddFooter.center.size = 6
+        ws.oddFooter.center.font = "Arial,Regular"
+        ws.oddFooter.center.color = "808080"
+
+
+# ============================================================================
+# Dziennik generowania protokołów + podpis pliku
+# ============================================================================
+#
+# Dwie warstwy, bo żadna sama nie wystarcza:
+#
+#  1. DZIENNIK NA SERWERZE (`protocol_audit`) — jedyne miejsce, które odpowiada
+#     na pytanie „jak wyglądał oryginał, zanim ktoś przy nim grzebał". Trzyma
+#     pełny stan meczu, więc protokół da się odtworzyć co do treści.
+#  2. PODPIS RSA W PLIKU — pozwala potwierdzić autora, czas i stan komuś, kto ma
+#     sam PDF i klucz publiczny, bez dostępu do bazy.
+#
+# Znacznik w pliku NIE jest zabezpieczeniem sam w sobie: metadane kasuje się
+# jednym poleceniem, a „drukuj do PDF" gubi je same z siebie. Jest wskaźnikiem
+# do dziennika i dowodem integralności — dlatego dziennik zapisuje też
+# `pdf_sha256` i numer meczu, czyli drogi dojścia do wpisu, gdy znacznika już
+# w pliku nie ma.
+
+# Alfabet bez I, L, O, U — kod bywa przepisywany z wydruku ręcznie.
+_AUDIT_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_XMP_NS = "https://baza.zprp.pl/ns/protocol/1.0/"
+
+
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64u_dec(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _protocol_audit_code() -> str:
+    """BZ-XXXX-XXXX. 32^8 ≈ 1,1e12 kombinacji; kolizję i tak łapie klucz główny."""
+    raw = "".join(secrets.choice(_AUDIT_ALPHABET) for _ in range(8))
+    return "BZ-%s-%s" % (raw[:4], raw[4:])
+
+
+def _sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 256), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _canonical_json(obj: Any) -> bytes:
+    """Bajty do podpisu. Sortowane klucze i brak spacji — inaczej ten sam stan
+    dałby dwa różne skróty w zależności od kolejności pól w JSON-ie."""
+    return json.dumps(
+        obj, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _sign_protocol_claim(claim: Dict[str, Any]) -> str:
+    """
+    Podpis RSA-PSS SHA-256 kluczem serwera (`RSA_PRIVATE_KEY`, ten sam, którym
+    szyfrujemy IdZawody przy wysyłce protokołu). Token ma postać
+    `payload_b64.sig_b64`, więc czytelny jest bez klucza — a wiarygodny dopiero
+    z kluczem publicznym.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    payload = _canonical_json(claim)
+    private_key, _ = get_rsa_keys()
+    sig = private_key.sign(
+        payload,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256(),
+    )
+    return "%s.%s" % (_b64u(payload), _b64u(sig))
+
+
+def _verify_protocol_signature(token: str) -> Tuple[bool, Dict[str, Any]]:
+    """(czy podpis jest nasz, odczytany claim). Claim zwracamy także dla podpisu
+    fałszywego — po to, żeby admin widział, co ktoś próbował podstawić."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    claim: Dict[str, Any] = {}
+    try:
+        payload_b64, sig_b64 = str(token or "").split(".", 1)
+        payload = _b64u_dec(payload_b64)
+        claim = json.loads(payload.decode("utf-8"))
+    except Exception:
+        return False, {}
+
+    try:
+        _, public_key = get_rsa_keys()
+        public_key.verify(
+            _b64u_dec(sig_b64),
+            payload,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256(),
+        )
+        return True, claim
+    except (InvalidSignature, Exception):  # noqa: B014 — celowo szeroko
+        return False, claim
+
+
+def _xml_escape(v: Any) -> str:
+    return (
+        str(v or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _protocol_xmp(fields: Dict[str, Any]) -> str:
+    body = "".join(
+        "<baza:%s>%s</baza:%s>" % (k, _xml_escape(v), k)
+        for k, v in fields.items()
+        if str(v or "").strip()
+    )
+    return (
+        '<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description rdf:about="" xmlns:baza="%s">%s</rdf:Description>'
+        "</rdf:RDF></x:xmpmeta>"
+        '<?xpacket end="w"?>' % (_XMP_NS, body)
+    )
+
+
+def _stamp_pdf_metadata(
+    pdf_path: str,
+    *,
+    code: str,
+    signature: str,
+    match_id: str,
+    match_number: str,
+    state_sha256: str,
+    generated_by: str,
+    generated_at_iso: str,
+) -> bool:
+    """
+    Wpisuje znacznik w metadane pliku — niewidocznie na stronie.
+
+    Dwa miejsca naraz, bo przeżywają różne rzeczy: standardowe pola /Info
+    (`subject`, `keywords`) zachowuje większość narzędzi, XMP przeżywa część
+    konwersji, które /Info gubią. Awaria tego kroku NIE może przewrócić
+    generowania — sędzia ma dostać protokół, a ślad i tak został w dzienniku.
+    """
+    try:
+        import fitz  # pymupdf
+    except Exception:
+        logger.warning("Brak pymupdf — PDF bez znacznika audytu (kod %s)", code)
+        return False
+
+    try:
+        doc = fitz.open(pdf_path)
+        try:
+            doc.set_metadata(
+                {
+                    "title": "Protokół zawodów %s" % (match_number or ""),
+                    "author": generated_by,
+                    "subject": "IdZawody %s | %s" % (match_id or "-", code),
+                    "keywords": "BazaCode=%s; BazaState=%s; BazaSig=%s"
+                    % (code, state_sha256, signature),
+                    "creator": "BAZA",
+                    "producer": "BAZA protocol generator",
+                }
+            )
+            doc.set_xml_metadata(
+                _protocol_xmp(
+                    {
+                        "code": code,
+                        "matchId": match_id,
+                        "matchNumber": match_number,
+                        "generatedBy": generated_by,
+                        "generatedAt": generated_at_iso,
+                        "stateSha256": state_sha256,
+                        "signature": signature,
+                    }
+                )
+            )
+            # Zapis obok i podmiana, a nie `saveIncr()`: zapis przyrostowy
+            # potrafi odmówić (linearyzacja, dziwny xref), a wtedy plik zostaje
+            # bez znacznika mimo braku wyjątku.
+            stamped = pdf_path + ".stamped"
+            doc.save(stamped)
+        finally:
+            doc.close()
+        os.replace(stamped, pdf_path)
+        return True
+    except Exception:
+        logger.warning("Nie udało się opisać PDF-a (kod %s)", code, exc_info=True)
+        return False
+
+
+async def _soft_verify_actor(judge_id: str, installation_id: str) -> bool:
+    """
+    Czy para (urządzenie, sędzia) zgadza się z `push_tokens`.
+
+    W odróżnieniu od `proel_actor` NIE rzuca 401 przy niezgodności — tutaj to
+    tylko etykieta w dzienniku. Sędzia, który odmówił zgody na powiadomienia,
+    nigdy nie trafia do `push_tokens`, więc `False` znaczy „nie potwierdzono",
+    a nie „na pewno oszust".
+    """
+    if not judge_id or not installation_id:
+        return False
+    try:
+        from sqlalchemy import select as _select
+
+        from app.db import database, push_tokens
+
+        row = await database.fetch_one(
+            _select(push_tokens.c.judge_id).where(
+                push_tokens.c.installation_id == installation_id
+            )
+        )
+        if row is None:
+            return False
+        return str(row["judge_id"] or "").strip() == judge_id
+    except Exception:
+        logger.warning("protocol_audit: weryfikacja urządzenia nieudana", exc_info=True)
+        return False
+
+
+async def _record_protocol_audit(row: Dict[str, Any]) -> None:
+    """
+    Wpis do dziennika. Świadomie nie przewraca żądania: sędzia stojący przy
+    stoliku ma dostać protokół nawet wtedy, gdy baza akurat nie odpowiada —
+    stratą jest brak wpisu, a nie brak dokumentu. Awaria idzie do logów jako
+    ostrzeżenie, bo to realna dziura w audycie.
+    """
+    try:
+        from app.db import database, protocol_audit
+
+        await database.execute(protocol_audit.insert().values(**row))
+    except Exception:
+        logger.warning(
+            "protocol_audit: nie udało się zapisać wpisu %s", row.get("code"), exc_info=True
+        )
+
+
 @router.post(
     "/judge/results/protocol/pdf",
     summary="Generuj PDF z protokołu na podstawie data_json (ProEl) i szablonu XLSX",
 )
 async def generate_protocol_pdf(
     req: ProtocolPdfRequest,
+    request: Request,
+    x_judge_id: Optional[str] = Header(None, alias="X-Judge-Id"),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+    x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
+    x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
 ):
     data_json = req.data_json or {}
     if not isinstance(data_json, dict):
         raise HTTPException(400, "data_json musi być obiektem JSON")
+
+    # Tożsamość generującego czytana MIĘKKO, w odróżnieniu od `proel_actor`,
+    # który przy braku nagłówków rzuca 401. Wersje aplikacji sprzed tej zmiany
+    # ich nie wysyłają, a protokół musi się wygenerować także im — wtedy stopka
+    # mówi wprost, że autor jest nieznany, zamiast zmyślać nazwisko.
+    actor_name = str(x_actor_name or "").strip()
+    actor_judge_id = str(x_judge_id or "").strip()
+    actor_install = str(x_installation_id or "").strip()
+    actor_verified = await _soft_verify_actor(actor_judge_id, actor_install)
+    if actor_name:
+        generated_by = actor_name
+    elif actor_judge_id:
+        generated_by = "nr %s" % actor_judge_id
+    else:
+        generated_by = "nieznanego"
+    generated_dt = _warsaw_now()
+    generated_at = generated_dt.strftime("%d.%m.%Y %H:%M:%S")
+    generated_at_iso = generated_dt.isoformat()
+    zprp_match_id = _zprp_match_id(data_json)
+    match_number = str((data_json.get("matchConfig") or {}).get("matchNumber") or "").strip()
+
+    # Ślad audytu liczony PRZED generowaniem: skrót stanu ma opisywać to, co
+    # sędzia wysłał, a nie to, co po drodze zrobił z tym generator.
+    audit_code = _protocol_audit_code()
+    state_bytes = _canonical_json(data_json)
+    state_sha256 = _sha256_bytes(state_bytes)
+    try:
+        signature = _sign_protocol_claim(
+            {
+                "v": 1,
+                "c": audit_code,
+                "m": zprp_match_id,
+                "n": match_number,
+                "j": actor_judge_id,
+                "a": actor_name,
+                "t": generated_at_iso,
+                "s": state_sha256,
+            }
+        )
+    except Exception:
+        # Brak/zły RSA_PRIVATE_KEY nie może zatrzymać protokołu — dziennik i tak
+        # zapisze stan, tylko bez dowodu działającego bez dostępu do bazy.
+        signature = ""
+        logger.warning("Nie udało się podpisać protokołu %s", audit_code, exc_info=True)
 
     # --- locate template ---
     template_path = SysPath(__file__).resolve().parent / "templates" / "protocol_template.xlsx"
@@ -4168,6 +4708,15 @@ async def generate_protocol_pdf(
             _fill_shootout_page(ws_shoot, data_json=data_json)
 
 
+        # Nagłówek/stopka DOPIERO tutaj — po wszystkich `copy_worksheet`, żeby
+        # objęły też stronę uwag i stronę rzutów karnych.
+        _apply_protocol_page_marks(
+            wb,
+            match_id=zprp_match_id,
+            generated_by=generated_by,
+            generated_at=generated_at,
+        )
+
         wb.save(filled_xlsx)
 
         # --- convert to PDF ---
@@ -4177,6 +4726,39 @@ async def generate_protocol_pdf(
         # obsługuje całą flotę: bez `to_thread` generowanie jednego protokołu
         # zawiesza KAŻDE inne żądanie w tym czasie.
         pdf_path = await asyncio.to_thread(_convert_xlsx_to_pdf, filled_xlsx, td)
+
+        # Znacznik w metadanych, a potem skrót — w tej kolejności, bo liczy się
+        # suma kontrolna pliku, który dostanie użytkownik.
+        _stamp_pdf_metadata(
+            pdf_path,
+            code=audit_code,
+            signature=signature,
+            match_id=zprp_match_id,
+            match_number=match_number,
+            state_sha256=state_sha256,
+            generated_by=generated_by,
+            generated_at_iso=generated_at_iso,
+        )
+        pdf_sha256 = _sha256_file(pdf_path)
+
+        await _record_protocol_audit(
+            {
+                "code": audit_code,
+                "match_id": zprp_match_id or None,
+                "match_number": match_number or None,
+                "judge_id": actor_judge_id or None,
+                "actor_name": actor_name or None,
+                "installation_id": actor_install or None,
+                "verified": actor_verified,
+                "state_sha256": state_sha256,
+                "pdf_sha256": pdf_sha256,
+                "state_gzip": gzip.compress(state_bytes),
+                "signature": signature or None,
+                "app_version": str(x_app_version or "").strip() or None,
+                "client_ip": (request.client.host if request and request.client else None),
+                "created_at": generated_dt,
+            }
+        )
 
         # przygotuj plik do pobrania po tokenie
         _cleanup_expired_downloads()
@@ -4198,6 +4780,10 @@ async def generate_protocol_pdf(
             "token": token,
             "filename": filename,
             "download_url": f"/judge/results/protocol/pdf/download/{token}?filename={filename}",
+            # Kod audytu wraca do aplikacji świadomie: pozwala sędziemu podać go
+            # przy zgłoszeniu („wygenerowałem BZ-…, coś jest nie tak"), zanim
+            # ktokolwiek zacznie szukać po numerze meczu i godzinie.
+            "audit_code": audit_code,
         }
 
 
@@ -4206,6 +4792,180 @@ async def generate_protocol_pdf(
     except Exception as e:
         logger.error("generate_protocol_pdf error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Nie udało się wygenerować PDF: {e}")
+
+
+# ─────────────────────── dziennik: wgląd dla admina ───────────────────────
+
+
+async def _require_protocol_admin(actor) -> None:
+    from app.proel_auth import is_admin
+
+    if not await is_admin(actor.judge_id):
+        raise HTTPException(403, detail={"code": "ADMIN_REQUIRED", "message": "Brak uprawnień"})
+
+
+def _audit_public(row: Any) -> Dict[str, Any]:
+    """Wpis bez spakowanego stanu — ten wydajemy osobno i tylko na żądanie."""
+    d = dict(row)
+    d.pop("state_gzip", None)
+    created = d.get("created_at")
+    if hasattr(created, "isoformat"):
+        d["created_at"] = created.isoformat()
+    return d
+
+
+@router.get(
+    "/judge/results/protocol/audit/{code}",
+    summary="[admin] Wpis dziennika generowania protokołu (kto, kiedy, jaki stan)",
+)
+async def protocol_audit_entry(
+    code: str = ApiPath(...),
+    actor=Depends(proel_actor),
+):
+    await _require_protocol_admin(actor)
+    from sqlalchemy import select as _select
+
+    from app.db import database, protocol_audit
+
+    row = await database.fetch_one(
+        _select(protocol_audit).where(protocol_audit.c.code == code.strip().upper())
+    )
+    if row is None:
+        raise HTTPException(404, "Nie ma takiego kodu w dzienniku")
+
+    out = _audit_public(row)
+    ok, claim = _verify_protocol_signature(str(row["signature"] or ""))
+    out["signature_valid"] = ok
+    out["signature_claim"] = claim
+    return out
+
+
+@router.get(
+    "/judge/results/protocol/audit",
+    summary="[admin] Historia generowania protokołów (po meczu lub sędzim)",
+)
+async def protocol_audit_list(
+    match: Optional[str] = Query(None, description="IdZawody albo numer meczu"),
+    judge_id: Optional[str] = Query(None),
+    pdf_sha256: Optional[str] = Query(None, description="Skrót pliku, gdy metadane wyczyszczono"),
+    limit: int = Query(50, ge=1, le=500),
+    actor=Depends(proel_actor),
+):
+    await _require_protocol_admin(actor)
+    from sqlalchemy import or_, select as _select
+
+    from app.db import database, protocol_audit
+
+    q = _select(protocol_audit)
+    m = str(match or "").strip()
+    if m:
+        q = q.where(
+            or_(protocol_audit.c.match_id == m, protocol_audit.c.match_number == m)
+        )
+    if judge_id:
+        q = q.where(protocol_audit.c.judge_id == str(judge_id).strip())
+    if pdf_sha256:
+        q = q.where(protocol_audit.c.pdf_sha256 == str(pdf_sha256).strip().lower())
+
+    rows = await database.fetch_all(
+        q.order_by(protocol_audit.c.created_at.desc()).limit(limit)
+    )
+    return {"count": len(rows), "items": [_audit_public(r) for r in rows]}
+
+
+@router.get(
+    "/judge/results/protocol/audit/{code}/state",
+    summary="[admin] Stan meczu, z którego powstał ten protokół (do odtworzenia)",
+)
+async def protocol_audit_state(
+    code: str = ApiPath(...),
+    actor=Depends(proel_actor),
+):
+    """
+    Zwraca dokładnie ten `data_json`, który przyszedł z aplikacji. Wysłany z
+    powrotem na `POST /judge/results/protocol/pdf` odtwarza protokół co do
+    treści — stopka i kod audytu będą inne, i tak ma być: kopia ma dać się
+    odróżnić od oryginału.
+    """
+    await _require_protocol_admin(actor)
+    from sqlalchemy import select as _select
+
+    from app.db import database, protocol_audit
+
+    row = await database.fetch_one(
+        _select(protocol_audit).where(protocol_audit.c.code == code.strip().upper())
+    )
+    if row is None:
+        raise HTTPException(404, "Nie ma takiego kodu w dzienniku")
+
+    raw = gzip.decompress(row["state_gzip"])
+    return {
+        "code": row["code"],
+        "state_sha256": row["state_sha256"],
+        "matches_stored_hash": _sha256_bytes(raw) == row["state_sha256"],
+        "data_json": json.loads(raw.decode("utf-8")),
+    }
+
+
+class ProtocolVerifyRequest(BaseModel):
+    signature: str
+    pdf_sha256: Optional[str] = None
+
+
+@router.post(
+    "/judge/results/protocol/verify",
+    summary="[admin] Sprawdź podpis protokołu (i czy plik jest tym z dziennika)",
+)
+async def protocol_verify(
+    req: ProtocolVerifyRequest,
+    actor=Depends(proel_actor),
+):
+    await _require_protocol_admin(actor)
+    ok, claim = _verify_protocol_signature(req.signature)
+
+    out: Dict[str, Any] = {"signature_valid": ok, "claim": claim}
+    code = str(claim.get("c") or "").strip()
+    if not code:
+        return out
+
+    from sqlalchemy import select as _select
+
+    from app.db import database, protocol_audit
+
+    row = await database.fetch_one(
+        _select(protocol_audit).where(protocol_audit.c.code == code)
+    )
+    if row is None:
+        out["known_in_ledger"] = False
+        return out
+
+    out["known_in_ledger"] = True
+    out["entry"] = _audit_public(row)
+    # Rozróżnienie, na którym wszystko stoi: podpis mówi „to nasz plik dla tego
+    # stanu", a skrót — „to TEN egzemplarz, nikt go po drodze nie tknął".
+    out["state_matches_ledger"] = str(claim.get("s") or "") == str(row["state_sha256"] or "")
+    if req.pdf_sha256:
+        out["pdf_matches_ledger"] = (
+            str(req.pdf_sha256).strip().lower() == str(row["pdf_sha256"] or "").lower()
+        )
+    return out
+
+
+@router.get(
+    "/judge/results/protocol/public-key",
+    summary="Klucz publiczny do weryfikacji podpisu protokołu (PEM)",
+)
+async def protocol_public_key():
+    """Bez autoryzacji — klucz publiczny jest publiczny z definicji, a bez niego
+    dowód „to plik z naszego serwera" działałby wyłącznie przez nasz serwer."""
+    from cryptography.hazmat.primitives import serialization
+
+    _, public_key = get_rsa_keys()
+    pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+    return {"algorithm": "RSA-PSS/SHA-256", "public_key_pem": pem}
 
 
 from fastapi.responses import FileResponse

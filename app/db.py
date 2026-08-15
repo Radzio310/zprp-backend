@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     MetaData,
     Table,
@@ -1883,6 +1884,46 @@ Index(
     game_scores.c.game,
     game_scores.c.difficulty,
     game_scores.c.score,
+)
+
+
+# ─────────────────────── dziennik generowania protokołów ───────────────────────
+#
+# Każde wygenerowanie PDF-a zostawia tu ślad: kto, kiedy i Z JAKIEGO STANU.
+# Stan trzymamy w całości (spakowany), bo bez niego pytanie „jak wyglądał
+# oryginał, zanim ktoś przy nim grzebał" nie ma odpowiedzi — znacznik w samym
+# pliku da się usunąć jednym poleceniem, a „drukuj do PDF" gubi go sam z siebie.
+#
+# `code` jest krótki i czytelny dla człowieka (BZ-8F3A-2C91), bo trafia do
+# metadanych pliku i to po nim admin trafia do wpisu.
+protocol_audit = Table(
+    "protocol_audit",
+    metadata,
+    Column("code", String, primary_key=True),
+    # IdZawody ZPRP i numer meczu — dwie drogi dojścia do wpisu, gdy ktoś
+    # wyczyścił metadane i został sam wydruk.
+    Column("match_id", String, nullable=True, index=True),
+    Column("match_number", String, nullable=True, index=True),
+    Column("judge_id", String, nullable=True, index=True),
+    Column("actor_name", String, nullable=True),
+    Column("installation_id", String, nullable=True),
+    #: True gdy para (installation_id, judge_id) zgadza się z `push_tokens`.
+    Column("verified", Boolean, nullable=False, server_default=text("false")),
+    Column("state_sha256", String, nullable=False, index=True),
+    Column("pdf_sha256", String, nullable=True, index=True),
+    Column("state_gzip", LargeBinary, nullable=False),
+    #: Podpis RSA-PSS: payload_b64.sig_b64. Pozwala potwierdzić autora i stan
+    #: komuś, kto ma sam plik i klucz publiczny — bez dostępu do tej bazy.
+    Column("signature", Text, nullable=True),
+    Column("app_version", String, nullable=True),
+    Column("client_ip", String, nullable=True),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    ),
 )
 
 
