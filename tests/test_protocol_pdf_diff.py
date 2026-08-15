@@ -14,8 +14,25 @@ import pytest
 from app.results import (
     PDF_DIFF_LIMIT,
     _diff_pdf_text,
+    _label_for_value,
     _normalize_pdf_lines,
 )
+
+#: Stan meczu tak, jak leży w dzienniku — z niego bierze się nazwa pola.
+STATE = {
+    "matchConfig": {
+        "matchNumber": "ML/251",
+        "hostTeamName": "KS Vive Kielce",
+        "guestTeamName": "Azoty Puławy",
+        "extras": {
+            "spectatorsCount": "852",
+            "venueCapacity": "2318",
+            "medic": {"fullName": "NOWAK Jan", "number": "12345"},
+        },
+    },
+    "scoreHost": 5,
+    "scoreGuest": 3,
+}
 
 
 # ─────────────────────── normalizacja ───────────────────────
@@ -85,6 +102,69 @@ def test_empty_original_does_not_explode():
     out = _diff_pdf_text("", "Liczba widzów: 853")
     assert out["changes"]
     assert all(c["kind"] == "added" for c in out["changes"])
+
+
+# ─────────────────── nazwa zmienionego pola ───────────────────
+
+def test_label_resolves_field_from_state():
+    """W strumieniu PDF-a stoi gołe „2318" — nazwę pola odzyskujemy ze stanu."""
+    assert _label_for_value(STATE, "2318") == "Pojemność obiektu"
+    assert _label_for_value(STATE, "852") == "Liczba widzów"
+    assert _label_for_value(STATE, "ML/251") == "Numer meczu"
+
+
+def test_label_empty_when_value_unknown():
+    assert _label_for_value(STATE, "99999") == ""
+    assert _label_for_value(None, "2318") == ""
+    assert _label_for_value(STATE, "") == ""
+
+
+def test_label_empty_when_two_fields_share_value():
+    """Dwa pola o tej samej wartości — wolimy nie nazwać niż nazwać źle."""
+    state = {"scoreHost": 5, "scoreGuest": 5}
+    assert _label_for_value(state, "5") == ""
+
+
+def test_swap_split_by_difflib_is_reported_as_one_change():
+    """
+    Regresja z testu na żywo: edytor PDF przestawił układ strumienia, przez co
+    `difflib` zwrócił osobno „usunięto 2318" i „dopisano 2319". Admin widział
+    dwie pozycje zamiast jednej podmiany.
+    """
+    before = "Protokół\n2318\nstopka"
+    after = "Protokół\nstopka\n2319"
+
+    out = _diff_pdf_text(before, after, STATE)
+    assert len(out["changes"]) == 1
+    ch = out["changes"][0]
+    assert ch["kind"] == "changed"
+    assert ch["before"] == "2318"
+    assert ch["after"] == "2319"
+    assert ch["label"] == "Pojemność obiektu"
+
+
+def test_two_swaps_each_get_their_own_label():
+    """Dwie podmiany naraz — każda nazwana swoim polem, nie na krzyż."""
+    before = "Protokół\n852\n2318\nstopka"
+    after = "Protokół\n853\n2319\nstopka"
+
+    out = _diff_pdf_text(before, after, STATE)
+    by_label = {c.get("label"): c for c in out["changes"]}
+    assert by_label["Liczba widzów"]["after"] == "853"
+    assert by_label["Pojemność obiektu"]["after"] == "2319"
+
+
+def test_pos_is_not_leaked_to_client():
+    """`pos` jest wewnętrzną pomocą przy parowaniu — nie ma po co wychodzić."""
+    out = _diff_pdf_text("2318", "2319", STATE)
+    assert all("pos" not in c for c in out["changes"])
+
+
+def test_diff_without_state_still_works():
+    """Wpisy sprzed tej wersji nie mają czym nazwać pola — mają działać dalej."""
+    out = _diff_pdf_text("2318", "2319")
+    assert len(out["changes"]) == 1
+    assert out["changes"][0]["label"] == ""
 
 
 def test_changes_keep_order_of_document():

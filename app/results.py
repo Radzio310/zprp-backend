@@ -4238,12 +4238,141 @@ def _normalize_pdf_lines(text: str) -> List[str]:
 PDF_DIFF_LIMIT = 40
 
 
-def _diff_pdf_text(before: str, after: str) -> Dict[str, Any]:
+#: Pola protokołu, po których admin realnie pyta „co ktoś podmienił".
+#:
+#: Sam diff tekstu widzi wyłącznie gołe wartości: w strumieniu PDF-a komórka
+#: z liczbą widzów to samotny wiersz „2318" bez żadnej etykiety obok — nagłówek
+#: leży w zupełnie innym miejscu strony. Nazwę pola odzyskujemy więc ze STANU
+#: zapisanego w dzienniku: szukamy, które pole miało dokładnie tę wartość.
+#: Lista jest ręczna, nie automatyczna — lepiej nie nazwać zmiany wcale niż
+#: nazwać ją źle.
+PROTOCOL_VALUE_LABELS: List[tuple] = [
+    (("matchConfig", "extras", "spectatorsCount"), "Liczba widzów"),
+    (("matchConfig", "extras", "venueCapacity"), "Pojemność obiektu"),
+    (("matchConfig", "extras", "matchDate"), "Data zawodów"),
+    (("matchConfig", "extras", "matchTime"), "Godzina zawodów"),
+    (("matchConfig", "extras", "medic", "fullName"), "Osoba medyczna"),
+    (("matchConfig", "extras", "medic", "number"), "Nr uprawnień medyka"),
+    (("matchConfig", "matchNumber"), "Numer meczu"),
+    (("matchConfig", "hostTeamName"), "Gospodarz"),
+    (("matchConfig", "guestTeamName"), "Gość"),
+    (("scoreHost",), "Wynik gospodarzy"),
+    (("scoreGuest",), "Wynik gości"),
+    (("halfScore", "host"), "Wynik do przerwy — gospodarze"),
+    (("halfScore", "guest"), "Wynik do przerwy — goście"),
+    (("matchConfig", "extras", "officials", "referee1", "city"), "Miejscowość sędziego 1"),
+    (("matchConfig", "extras", "officials", "referee2", "city"), "Miejscowość sędziego 2"),
+    (("matchConfig", "extras", "officials", "secretary", "city"), "Miejscowość sekretarza"),
+    (("matchConfig", "extras", "officials", "timekeeper", "city"), "Miejscowość mierzącego czas"),
+    (("matchConfig", "extras", "officials", "delegate", "city"), "Miejscowość delegata"),
+]
+
+
+def _dig(obj: Any, path: tuple) -> Any:
+    for key in path:
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(key)
+    return obj
+
+
+def _label_for_value(state: Optional[Dict[str, Any]], value: str) -> str:
+    """
+    Nazwa pola, które w chwili generowania miało dokładnie tę wartość.
+
+    Pusty string, gdy nie ma pewności — niepodpisana zmiana jest uczciwsza od
+    podpisanej błędnie.
+    """
+    needle = str(value or "").strip()
+    if not needle or not isinstance(state, dict):
+        return ""
+    hits = [
+        label
+        for path, label in PROTOCOL_VALUE_LABELS
+        if str(_dig(state, path) if _dig(state, path) is not None else "").strip() == needle
+    ]
+    # Dwa pola o tej samej wartości (np. równy wynik połów) — nie zgadujemy.
+    return hits[0] if len(hits) == 1 else ""
+
+
+#: Jak daleko od siebie mogą leżeć usunięcie i dopisanie, żeby uznać je za
+#: JEDNĄ podmianę. Edytor PDF przesuwa zmienioną wartość o kilka pozycji
+#: w strumieniu tekstu; przy większym rozjeździe to już nie jest ta sama rzecz.
+_SWAP_WINDOW = 3
+
+
+def _pair_value_swaps(changes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Skleja „usunięto X" + „dopisano Y" w jedną podmianę X → Y.
+
+    Po co: `difflib` rozbija podmianę na parę delete+insert, gdy edycja ruszy
+    układ strumienia tekstu — a to jest NORMA przy pliku przepuszczonym przez
+    edytor PDF. Admin widział wtedy dwie pozycje („usunięte 2318", „dopisane
+    2319") i musiał sam się domyślić, że chodzi o tę samą liczbę.
+
+    Parujemy po POŁOŻENIU, nie po nazwie pola: nowa wartość jest z definicji
+    tą, której w zapisanym stanie nie ma, więc etykieta po stronie dopisania
+    nigdy by się nie znalazła.
+    """
+    removed = [c for c in changes if c["kind"] == "removed"]
+    added = [c for c in changes if c["kind"] == "added"]
+    if not removed or not added:
+        return changes
+
+    paired: Dict[int, Dict[str, Any]] = {}
+    used_added: set = set()
+
+    for rc in removed:
+        best = None
+        best_dist = _SWAP_WINDOW + 1
+        for ac in added:
+            if id(ac) in used_added:
+                continue
+            dist = abs(int(ac.get("pos", 0)) - int(rc.get("pos", 0)))
+            if dist < best_dist:
+                best, best_dist = ac, dist
+        # Jedno usunięcie i jedno dopisanie w całym pliku to klasyczna podmiana
+        # jednej wartości — wtedy odległość nie ma znaczenia, nie ma z czym
+        # tego pomylić.
+        lone = len(removed) == 1 and len(added) == 1
+        if best is None and lone:
+            best = added[0]
+        if best is None:
+            continue
+        used_added.add(id(best))
+        paired[id(rc)] = {
+            "kind": "changed",
+            "before": rc["before"],
+            "after": best["after"],
+            # Etykieta zawsze z ORYGINAŁU — to jego wartość leży w dzienniku.
+            "label": rc.get("label") or "",
+        }
+
+    if not paired:
+        return changes
+
+    out: List[Dict[str, Any]] = []
+    for c in changes:
+        if id(c) in paired:
+            out.append(paired[id(c)])
+        elif id(c) in used_added:
+            continue
+        else:
+            out.append(c)
+    return out
+
+
+def _diff_pdf_text(
+    before: str,
+    after: str,
+    state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Co się zmieniło między wydrukiem z chwili generowania a wgranym plikiem.
 
-    Zmiany typu „podmiana wartości" (852 → 853) raportujemy parami, bo tak
-    wygląda realna fałszywka. Dopisane i usunięte wiersze idą osobno.
+    Wynik jest tak prosty, jak się da: jedna pozycja na jedną zmianę, z nazwą
+    pola, gdy da się ją ustalić ze stanu z dziennika. `state` jest opcjonalny —
+    bez niego zostają same wartości.
     """
     import difflib
 
@@ -4267,16 +4396,27 @@ def _diff_pdf_text(before: str, after: str) -> Dict[str, Any]:
                         "kind": "changed",
                         "before": old[i1 + k] if i1 + k < i2 else "",
                         "after": new[j1 + k] if j1 + k < j2 else "",
+                        "pos": i1 + k,
                     }
                 )
         elif tag == "delete":
             changes.extend(
-                {"kind": "removed", "before": old[k], "after": ""} for k in range(i1, i2)
+                {"kind": "removed", "before": old[k], "after": "", "pos": k}
+                for k in range(i1, i2)
             )
         elif tag == "insert":
             changes.extend(
-                {"kind": "added", "before": "", "after": new[k]} for k in range(j1, j2)
+                {"kind": "added", "before": "", "after": new[k], "pos": j1}
+                for k in range(j1, j2)
             )
+
+    for c in changes:
+        c["label"] = _label_for_value(state, c.get("before") or c.get("after") or "")
+
+    changes = _pair_value_swaps(changes)
+    # `pos` służy wyłącznie parowaniu — na zewnątrz to szum.
+    for c in changes:
+        c.pop("pos", None)
 
     return {
         "changes": changes[:PDF_DIFF_LIMIT],
@@ -5289,7 +5429,18 @@ async def protocol_verify_file(
         if stored:
             try:
                 before = gzip.decompress(stored).decode("utf-8")
-                out["text_diff"] = _diff_pdf_text(before, _extract_pdf_text(data))
+                # Stan z dziennika służy WYŁĄCZNIE do nazwania zmienionego pola:
+                # w strumieniu tekstu PDF-a liczba widzów to samotny „2318" bez
+                # etykiety, więc bez tego admin widzi gołe liczby.
+                try:
+                    state_json = json.loads(
+                        gzip.decompress(row["state_gzip"]).decode("utf-8")
+                    )
+                except Exception:
+                    state_json = None
+                out["text_diff"] = _diff_pdf_text(
+                    before, _extract_pdf_text(data), state_json
+                )
             except Exception:
                 logger.warning("Nie udało się porównać treści PDF", exc_info=True)
                 out["text_diff"] = None
