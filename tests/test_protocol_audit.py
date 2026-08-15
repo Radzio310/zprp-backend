@@ -137,3 +137,33 @@ def test_audit_public_drops_state_blob():
     out = r._audit_public(row)
     assert "state_gzip" not in out
     assert out["actor_name"] == "X"
+
+
+def test_audit_public_drops_every_binary_column():
+    """
+    Regresja: `pdf_text_gzip` doszedł później i wersja wycinająca kolumny z
+    NAZWY przepuściła go dalej. FastAPI serializuje `bytes` przez `.decode()`,
+    więc gzip (0x1f 0x8b) wywracał odpowiedź błędem 500 — i to nie tylko przy
+    weryfikacji pliku, ale i na liście wpisów, czyli całe okno dziennika.
+    Dlatego wycinamy po TYPIE: następna kolumna binarna nie zdąży zaszkodzić.
+    """
+    row = {
+        "code": "BZ-1",
+        "state_gzip": gzip.compress(b"{}"),
+        "pdf_text_gzip": gzip.compress("Liczba widzów: 852".encode("utf-8")),
+        "future_blob": bytearray(b"\x1f\x8b\x00"),
+        "mem_blob": memoryview(b"\x1f\x8b\x00"),
+        "created_at": None,
+        "actor_name": "WITKOWICZ Radosław",
+        "pdf_sha256": "ab" * 32,
+    }
+    out = r._audit_public(row)
+
+    assert not any(
+        isinstance(v, (bytes, bytearray, memoryview)) for v in out.values()
+    )
+    # Pola tekstowe muszą przeżyć — to one są treścią wpisu.
+    assert out["actor_name"] == "WITKOWICZ Radosław"
+    assert out["pdf_sha256"] == "ab" * 32
+    # I całość ma się serializować, bo dokładnie tego brakowało.
+    json.dumps(out)

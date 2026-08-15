@@ -4971,9 +4971,23 @@ async def _require_protocol_admin(actor) -> None:
 
 
 def _audit_public(row: Any) -> Dict[str, Any]:
-    """Wpis bez spakowanego stanu — ten wydajemy osobno i tylko na żądanie."""
+    """
+    Wpis dziennika w postaci nadającej się do JSON-a.
+
+    Spakowane blob-y wypadają w całości: stan wydajemy osobnym endpointem i
+    tylko na żądanie, a treść wydruku służy wyłącznie do porównania po stronie
+    serwera.
+
+    Zamiatanie po TYPIE, nie po nazwie, jest tu celowe. Wersja wymieniająca
+    kolumny z nazwy przepuściła `pdf_text_gzip` dodane później i wywracała
+    KAŻDĄ odpowiedź dziennika błędem 500: FastAPI serializuje `bytes` przez
+    `.decode()`, a gzip zaczyna się od bajtu, którego UTF-8 nie zna. Padał
+    wtedy nie tylko podgląd wpisu, ale i lista — czyli całe okno dziennika.
+    """
     d = dict(row)
-    d.pop("state_gzip", None)
+    for key, value in list(d.items()):
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            d.pop(key, None)
     created = d.get("created_at")
     if hasattr(created, "isoformat"):
         d["created_at"] = created.isoformat()
