@@ -52,6 +52,12 @@ def test_parse_path_official():
     assert params == {"role": "delegate", "leaf": "signature"}
 
 
+def test_parse_path_companion():
+    spec, params = parse_path("companion.guest.C.license")
+    assert spec.name == "companion"
+    assert params == {"team": "guest", "id": "C", "leaf": "license"}
+
+
 @pytest.mark.parametrize(
     "bad",
     [
@@ -59,6 +65,8 @@ def test_parse_path_official():
         "exam.both.#7",  # nieznana drużyna
         "matchConfig.hostPlayers",  # goły JSON-pointer
         "official.kapitan.signature",  # nieznana rola
+        "companion.host.F.fullName",  # poza rubrykami A–E
+        "companion.host.A.city",  # osoba towarzysząca nie ma miejscowości
         "",
     ],
 )
@@ -228,6 +236,81 @@ def test_post_field_projection():
     blob = {"matchConfig": {}}
     project({"post.spectatorsCount": entry(350)}, blob)
     assert blob["matchConfig"]["extras"]["spectatorsCount"] == 350
+
+
+# ─────────────────── osoby towarzyszące (rubryki A–E) ───────────────────
+
+
+def test_companion_projection_creates_missing_row():
+    """Trener dopisany w trakcie meczu nie może czekać na snapshot prowadzącego."""
+    blob = {"matchConfig": {}}
+    project(
+        {
+            "companion.host.A.fullName": entry("NOWAK Jan"),
+            "companion.host.A.function": entry("TRENER A"),
+            "companion.host.A.license": entry("A 0628/2022"),
+        },
+        blob,
+    )
+    assert blob["matchConfig"]["hostCompanions"] == [
+        {
+            "id": "A",
+            "fullName": "NOWAK Jan",
+            "function": "TRENER A",
+            "license": "A 0628/2022",
+        }
+    ]
+
+
+def test_companion_projection_updates_existing_row_by_letter():
+    """Kluczem jest LITERA, nie pozycja w tablicy — kolejność bywa różna."""
+    blob = {
+        "matchConfig": {
+            "guestCompanions": [
+                {"id": "B", "fullName": "STARY Wpis", "function": "TRENER B"},
+                {"id": "A", "fullName": "PIERWSZY Adam"},
+            ]
+        }
+    }
+    project({"companion.guest.B.fullName": entry("NOWY Wpis")}, blob)
+    rows = blob["matchConfig"]["guestCompanions"]
+    assert len(rows) == 2
+    assert rows[0] == {
+        "id": "B",
+        "fullName": "NOWY Wpis",
+        "function": "TRENER B",
+    }
+    assert rows[1]["fullName"] == "PIERWSZY Adam"
+
+
+def test_companion_rows_do_not_collide_between_letters():
+    """Dwóch sędziów wypełniających różne rubryki nie nadpisuje się nawzajem."""
+    blob = {"matchConfig": {}}
+    project(
+        {
+            "companion.host.A.fullName": entry("PIERWSZY Adam"),
+            "companion.host.D.fullName": entry("CZWARTY Dawid"),
+        },
+        blob,
+    )
+    by_id = {c["id"]: c["fullName"] for c in blob["matchConfig"]["hostCompanions"]}
+    assert by_id == {"A": "PIERWSZY Adam", "D": "CZWARTY Dawid"}
+
+
+def test_companion_projection_is_idempotent():
+    blob = {"matchConfig": {}}
+    fields = {"companion.host.A.fullName": entry("NOWAK Jan")}
+    project(fields, blob)
+    project(fields, blob)
+    assert blob["matchConfig"]["hostCompanions"] == [
+        {"id": "A", "fullName": "NOWAK Jan"}
+    ]
+
+
+def test_companion_is_writable_in_every_phase():
+    """Spóźniony trener dopisuje się w trakcie meczu, nie tylko przed nim."""
+    spec, _ = parse_path("companion.host.A.fullName")
+    assert set(spec.phases) == {"pre", "live", "post"}
 
 
 # ─────────────────────────── fazy ───────────────────────────

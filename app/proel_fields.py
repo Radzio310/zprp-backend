@@ -233,6 +233,36 @@ def project_official(blob: dict, params: Dict[str, str], value: Any) -> None:
     person[params["leaf"]] = value
 
 
+def project_companion(blob: dict, params: Dict[str, str], value: Any) -> None:
+    """Wstaw pole osoby towarzyszącej do `matchConfig.{team}Companions`.
+
+    Lista jest kluczowana literą A–E, a nie pozycją w tablicy: kolejność
+    wpisów w blobie bywa różna między klientami, a litera jest tym, co widzi
+    sędzia w protokole. Brakujący wpis DOTWORZYMY — inaczej dopisanie osoby
+    towarzyszącej w trakcie meczu przepadałoby do czasu, aż prowadzący wyśle
+    pełny snapshot (a to jest dokładnie sytuacja, dla której ta ścieżka
+    powstała).
+    """
+    cfg = _cfg(blob)
+    key = f"{params['team']}Companions"
+    arr = cfg.get(key)
+    if not isinstance(arr, list):
+        arr = []
+        cfg[key] = arr
+
+    cid = params["id"]
+    target = None
+    for c in arr:
+        if isinstance(c, dict) and str(c.get("id")) == cid:
+            target = c
+            break
+    if target is None:
+        target = {"id": cid}
+        arr.append(target)
+
+    target[params["leaf"]] = value
+
+
 def project_extras_field(key: str) -> ProjectFn:
     def _p(blob: dict, params: Dict[str, str], value: Any) -> None:
         _extras(blob)[key] = value
@@ -249,10 +279,16 @@ def project_cfg_field(key: str) -> ProjectFn:
 
 # ─────────────────────────── rejestr ───────────────────────────
 #
-# ŚWIADOMIE POMINIĘTE na tym etapie: `roster.*` i `companions.*`. Wspólna
-# edycja składu wymaga OR-setu i reguły supersede po gwizdku; zanim to wejdzie,
-# skład zostaje tam, gdzie jest dzisiaj (blob prowadzącego). Nieznana ścieżka
-# jest odrzucana z 422, więc dołożenie ich później niczego nie psuje.
+# ŚWIADOMIE POMINIĘTE na tym etapie: `roster.*`. Wspólna edycja składu wymaga
+# OR-setu i reguły supersede po gwizdku (dochodzą dodania i usunięcia numerów);
+# zanim to wejdzie, skład zostaje tam, gdzie jest dzisiaj (blob prowadzącego).
+# Nieznana ścieżka jest odrzucana z 422, więc dołożenie go później nic nie psuje.
+#
+# `companion.*` NIE wymaga OR-setu i dlatego wchodzi wcześniej: to pięć STAŁYCH
+# rubryk A–E, a nie zbiór o zmiennej liczności. Każda litera jest osobnym
+# kluczem, więc dwóch sędziów wypełniających różne rubryki nigdy nie koliduje,
+# a konflikt na tej samej rubryce rozstrzyga LWW — dokładnie jak przy
+# `official.*`, które ma identyczny kształt (rola → liść).
 
 _POST_EXTRAS = {
     "spectatorsCount": "spectatorsCount",
@@ -301,6 +337,20 @@ def _build_registry() -> List[FieldSpec]:
             roles=ALL_ROLES,
             merge=merge_write_once,
             project=project_official,
+        ),
+        FieldSpec(
+            name="companion",
+            pattern=re.compile(
+                r"^companion\.(?P<team>host|guest)\.(?P<id>[A-E])"
+                r"\.(?P<leaf>fullName|function|license)$"
+            ),
+            # Także w LIVE: osoby towarzyszące dopisuje się i poprawia w trakcie
+            # meczu (spóźniony trener, korekta licencji) — to był główny powód,
+            # dla którego ta ścieżka powstała.
+            phases=ALL_PHASES,
+            roles=ALL_ROLES,
+            merge=merge_lww,
+            project=project_companion,
         ),
     ]
 
