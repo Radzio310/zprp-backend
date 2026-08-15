@@ -860,6 +860,18 @@ async def startup():
             pass
     logger.info("✅ Connected to the database")
 
+    # Dziennik protokołów: `metadata.create_all` zakłada tylko BRAKUJĄCE tabele,
+    # kolumn do istniejącej nie dokłada. Bez tego wdrożenie na bazę, która ma już
+    # `protocol_audit`, wywracałoby każdy zapis wpisu na nieznanej kolumnie.
+    _protocol_audit_migrations = [
+        "ALTER TABLE protocol_audit ADD COLUMN IF NOT EXISTS pdf_text_gzip BYTEA",
+    ]
+    for stmt in _protocol_audit_migrations:
+        try:
+            await database.execute(stmt)
+        except Exception:
+            pass
+
     # Board migrations: add columns that may be missing on existing installations
     _board_migrations = [
         "ALTER TABLE board_posts ADD COLUMN IF NOT EXISTS order_index INTEGER DEFAULT 0",
