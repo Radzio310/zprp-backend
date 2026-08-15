@@ -4193,6 +4193,97 @@ def _stamp_pdf_metadata(
         return False
 
 
+def _extract_pdf_text(data: bytes) -> str:
+    """
+    Tekst wszystkich stron PDF-a, wiersz po wierszu.
+
+    Zapisujemy go przy generowaniu, żeby przy weryfikacji dało się powiedzieć
+    nie tylko „plik został zmieniony", ale też CO. Sam skrót pliku wykrywa
+    każdą edycję, lecz o zmienionej wartości nie mówi nic — a właśnie ona jest
+    pytaniem admina.
+    """
+    try:
+        import fitz  # pymupdf
+    except Exception:
+        return ""
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception:
+        return ""
+    try:
+        return "\n".join(page.get_text() or "" for page in doc)
+    except Exception:
+        return ""
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+
+def _normalize_pdf_lines(text: str) -> List[str]:
+    """Wiersze bez pustych i bez różnic w białych znakach — inaczej diff
+    pokazywałby przesunięcia układu zamiast zmian treści."""
+    out: List[str] = []
+    for raw in str(text or "").splitlines():
+        line = " ".join(raw.split())
+        if line:
+            out.append(line)
+    return out
+
+
+#: Powyżej tylu różnic przestajemy wyliczać — plik przepuszczony przez inny
+#: program potrafi mieć przebudowany cały strumień tekstu i lista zmian robi
+#: się bezużyteczna. Lepiej powiedzieć „przebudowany", niż zasypać admina.
+PDF_DIFF_LIMIT = 40
+
+
+def _diff_pdf_text(before: str, after: str) -> Dict[str, Any]:
+    """
+    Co się zmieniło między wydrukiem z chwili generowania a wgranym plikiem.
+
+    Zmiany typu „podmiana wartości" (852 → 853) raportujemy parami, bo tak
+    wygląda realna fałszywka. Dopisane i usunięte wiersze idą osobno.
+    """
+    import difflib
+
+    old = _normalize_pdf_lines(before)
+    new = _normalize_pdf_lines(after)
+
+    changes: List[Dict[str, str]] = []
+    truncated = False
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, old, new, autojunk=False
+    ).get_opcodes():
+        if tag == "equal":
+            continue
+        if len(changes) >= PDF_DIFF_LIMIT:
+            truncated = True
+            break
+        if tag == "replace":
+            for k in range(max(i2 - i1, j2 - j1)):
+                changes.append(
+                    {
+                        "kind": "changed",
+                        "before": old[i1 + k] if i1 + k < i2 else "",
+                        "after": new[j1 + k] if j1 + k < j2 else "",
+                    }
+                )
+        elif tag == "delete":
+            changes.extend(
+                {"kind": "removed", "before": old[k], "after": ""} for k in range(i1, i2)
+            )
+        elif tag == "insert":
+            changes.extend(
+                {"kind": "added", "before": "", "after": new[k]} for k in range(j1, j2)
+            )
+
+    return {
+        "changes": changes[:PDF_DIFF_LIMIT],
+        "truncated": truncated or len(changes) > PDF_DIFF_LIMIT,
+    }
+
+
 async def _soft_verify_actor(judge_id: str, installation_id: str) -> bool:
     """
     Czy para (urządzenie, sędzia) zgadza się z `push_tokens`.
@@ -4808,6 +4899,10 @@ async def generate_protocol_pdf(
             generated_at_iso=generated_at_iso,
         )
         pdf_sha256 = _sha256_file(pdf_path)
+        # Treść wydruku zapisujemy TERAZ, na gotowym pliku — to jedyny moment,
+        # w którym mamy oryginał w ręku.
+        with open(pdf_path, "rb") as _fh:
+            pdf_text = _extract_pdf_text(_fh.read())
 
         await _record_protocol_audit(
             {
@@ -4821,6 +4916,9 @@ async def generate_protocol_pdf(
                 "state_sha256": state_sha256,
                 "pdf_sha256": pdf_sha256,
                 "state_gzip": gzip.compress(state_bytes),
+                "pdf_text_gzip": (
+                    gzip.compress(pdf_text.encode("utf-8")) if pdf_text else None
+                ),
                 "signature": signature or None,
                 "app_version": str(x_app_version or "").strip() or None,
                 "client_ip": (request.client.host if request and request.client else None),
@@ -5154,11 +5252,37 @@ async def protocol_verify_file(
 
     out["known_in_ledger"] = True
     out["entry"] = _audit_public(row)
-    # Podpis mówi „to nasz plik dla tego stanu", skrót — „to TEN egzemplarz".
-    # Rozjazd między nimi to dokładnie sytuacja „ktoś edytował po wygenerowaniu".
+    # Trzy RÓŻNE pytania, często mylone:
+    #  • podpis           — czy znacznik wystawił nasz serwer,
+    #  • state_sha256     — czy znacznik wskazuje TEN wpis w dzienniku
+    #                       (czyli czy nikt nie przekleił znacznika z innego
+    #                       protokołu); NIC nie mówi o treści strony,
+    #  • pdf_sha256       — czy bajty pliku są te, które wydaliśmy.
+    # Edycja liczby widzów w gotowym PDF-ie zmienia wyłącznie to ostatnie —
+    # dlatego „stan" potrafi się zgadzać przy ewidentnie podrobionym wydruku.
     out["pdf_matches_ledger"] = pdf_sha256 == str(row["pdf_sha256"] or "")
     if marks.get("state_sha256"):
-        out["state_matches_ledger"] = marks["state_sha256"] == str(row["state_sha256"] or "")
+        out["marker_points_to_entry"] = marks["state_sha256"] == str(
+            row["state_sha256"] or ""
+        )
+        # Stara nazwa zostaje dla zgodności z wcześniejszą wersją aplikacji.
+        out["state_matches_ledger"] = out["marker_points_to_entry"]
+
+    # Co konkretnie się zmieniło — tylko gdy plik faktycznie odbiega od
+    # oryginału i mamy z czym porównać.
+    if not out["pdf_matches_ledger"]:
+        stored = row["pdf_text_gzip"]
+        if stored:
+            try:
+                before = gzip.decompress(stored).decode("utf-8")
+                out["text_diff"] = _diff_pdf_text(before, _extract_pdf_text(data))
+            except Exception:
+                logger.warning("Nie udało się porównać treści PDF", exc_info=True)
+                out["text_diff"] = None
+        else:
+            # Wpis sprzed wersji, która zapisuje treść wydruku — wiemy, że plik
+            # jest inny, ale nie mamy oryginału do porównania.
+            out["text_diff"] = None
     return out
 
 

@@ -1912,6 +1912,11 @@ protocol_audit = Table(
     Column("state_sha256", String, nullable=False, index=True),
     Column("pdf_sha256", String, nullable=True, index=True),
     Column("state_gzip", LargeBinary, nullable=False),
+    #: Tekst wydrukowanej strony w chwili wygenerowania (spakowany).
+    #: Bez tego da się powiedzieć TYLKO „plik został zmieniony"; z tym —
+    #: co konkretnie ktoś podmienił. Nullable, bo wpisy sprzed tej wersji
+    #: go nie mają i nie ma skąd go odtworzyć.
+    Column("pdf_text_gzip", LargeBinary, nullable=True),
     #: Podpis RSA-PSS: payload_b64.sig_b64. Pozwala potwierdzić autora i stan
     #: komuś, kto ma sam plik i klucz publiczny — bez dostępu do tej bazy.
     Column("signature", Text, nullable=True),
