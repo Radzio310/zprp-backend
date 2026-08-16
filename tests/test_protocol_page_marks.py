@@ -80,6 +80,7 @@ def _prepared():
         match_id="190756",
         generated_by="WITKOWICZ Radosław",
         generated_at="15.08.2026 15:54:13",
+        audit_code="BZ-0QT9-MGXP",
     )
     return wb
 
@@ -92,8 +93,31 @@ def test_marks_land_on_every_sheet():
         assert ws.oddHeader.right.text == "IdZawody: 190756"
         assert ws.oddFooter.center.text == (
             "Wygenerowano automatycznie przez użytkownika WITKOWICZ Radosław "
-            "dnia 15.08.2026 15:54:13"
+            "dnia 15.08.2026 15:54:13 · BZ-0QT9-MGXP"
         )
+
+
+def test_audit_code_reaches_the_paper():
+    """
+    Znacznik w metadanych ginie przy druku — bez kodu w stopce wydrukowana
+    kartka jest maszynowo anonimowa i nie da się jej powiązać z wpisem.
+    """
+    wb = _prepared()
+    assert "BZ-0QT9-MGXP" in wb.worksheets[0].oddFooter.center.text
+
+
+def test_footer_without_code_has_no_dangling_separator():
+    """Starsze wywołania (bez kodu) nie mogą kończyć się sierocym separatorem."""
+    from openpyxl import load_workbook as _lw
+
+    wb = _lw(TEMPLATE)
+    _apply_protocol_page_marks(
+        wb,
+        match_id="190756",
+        generated_by="X",
+        generated_at="15.08.2026 15:54:13",
+    )
+    assert not wb.worksheets[0].oddFooter.center.text.rstrip().endswith("·")
 
 
 def test_print_area_height_unchanged():

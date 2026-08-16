@@ -3961,16 +3961,29 @@ def _apply_protocol_page_marks(
     match_id: str,
     generated_by: str,
     generated_at: str,
+    audit_code: str = "",
 ) -> None:
     """
     Nakłada na WSZYSTKIE arkusze skoroszytu nagłówek z IdZawody i stopkę z
     podpisem generowania. Wołane po `copy_worksheet`, żeby strona uwag i strona
     rzutów karnych też były opisane — inaczej wyrwana kartka byłaby anonimowa.
+
+    Kod dziennika w stopce jest tu KLUCZOWY, nie ozdobny: znacznik w metadanych
+    PDF-a ginie razem z plikiem w chwili druku, więc bez tego wydrukowana kartka
+    jest maszynowo anonimowa i nie da się jej powiązać z wpisem. Dwanaście
+    znaków tekstem czyta i skaner, i człowiek przepisujący je z ręki — a kosztuje
+    zero milimetrów układu, w przeciwieństwie do kodu 2D.
+
+    Sam kod NICZEGO nie potwierdza. Mówi wyłącznie „ta kartka pochodzi z tego
+    wpisu"; czy widoczna treść jest prawdziwa, rozstrzyga dopiero porównanie
+    z dziennikiem.
     """
     footer = "Wygenerowano automatycznie przez użytkownika %s dnia %s" % (
         generated_by,
         generated_at,
     )
+    if audit_code:
+        footer = "%s · %s" % (footer, audit_code)
     header = "IdZawody: %s" % match_id if match_id else ""
 
     for ws in wb.worksheets:
@@ -5014,6 +5027,7 @@ async def generate_protocol_pdf(
             match_id=zprp_match_id,
             generated_by=generated_by,
             generated_at=generated_at,
+            audit_code=audit_code,
         )
 
         wb.save(filled_xlsx)
@@ -5448,6 +5462,275 @@ async def protocol_verify_file(
             # Wpis sprzed wersji, która zapisuje treść wydruku — wiemy, że plik
             # jest inny, ale nie mamy oryginału do porównania.
             out["text_diff"] = None
+    return out
+
+
+# ─────────────────── sprawdzanie wizualne (zdjęcie kartki) ───────────────────
+#
+# Po co osobna droga, skoro jest już weryfikacja pliku: plik zwykle jest nie do
+# zdobycia. Delegat dostaje do ręki WYDRUK, a wydruk nie ma metadanych, nie ma
+# podpisu i nie ma skrótu — z chwilą druku zostaje z niego sam obraz.
+#
+# Dlatego tu weryfikacja idzie odwrotnie niż przy pliku: zamiast liczyć skrót
+# i porównywać go z dziennikiem, ODCZYTUJEMY to, co widać, i pytamy dziennik,
+# czy tak właśnie było w chwili generowania. Kod `BZ-…` w stopce mówi tylko,
+# o który wpis chodzi — sam z siebie nie potwierdza niczego, bo fałszerz może
+# poprawić liczbę widzów, nie tykając kodu.
+
+SCAN_MAX_BYTES = 12 * 1024 * 1024
+
+_SCAN_MAGIC = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+)
+
+#: Kod dziennika wydrukowany w stopce. Litery i cyfry z alfabetu bez znaków
+#: mylących się przy odczycie (patrz `_AUDIT_ALPHABET`).
+_SCAN_CODE_RE = re.compile(r"\bBZ[-\s]?([0-9A-Z]{4})[-\s]?([0-9A-Z]{4})\b", re.I)
+
+#: Pola czytane ze zdjęcia i porównywane z dziennikiem.
+#: (klucz w odpowiedzi modelu, ścieżka w stanie, etykieta, rodzaj porównania)
+PROTOCOL_SCAN_FIELDS: List[Tuple[str, tuple, str, str]] = [
+    ("match_number", ("matchConfig", "matchNumber"), "Numer meczu", "text"),
+    ("host_team", ("matchConfig", "hostTeamName"), "Gospodarz", "text"),
+    ("guest_team", ("matchConfig", "guestTeamName"), "Gość", "text"),
+    ("score_host", ("scoreHost",), "Wynik gospodarzy", "number"),
+    ("score_guest", ("scoreGuest",), "Wynik gości", "number"),
+    ("half_host", ("halfScore", "host"), "Wynik do przerwy — gospodarze", "number"),
+    ("half_guest", ("halfScore", "guest"), "Wynik do przerwy — goście", "number"),
+    ("spectators", ("matchConfig", "extras", "spectatorsCount"), "Liczba widzów", "number"),
+    ("venue_capacity", ("matchConfig", "extras", "venueCapacity"), "Pojemność obiektu", "number"),
+    ("match_date", ("matchConfig", "extras", "matchDate"), "Data zawodów", "date"),
+    ("match_time", ("matchConfig", "extras", "matchTime"), "Godzina zawodów", "time"),
+    ("medic_name", ("matchConfig", "extras", "medic", "fullName"), "Osoba medyczna", "text"),
+]
+
+_SCAN_SYSTEM_PROMPT = (
+    "Odczytujesz zdjęcie protokołu meczu piłki ręcznej (ZPRP). Wszystkie "
+    "wartości na formularzu są DRUKOWANE, nie odręczne.\n\n"
+    "Zwróć wyłącznie JSON z kluczami: audit_code, match_number, host_team, "
+    "guest_team, score_host, score_guest, half_host, half_guest, spectators, "
+    "venue_capacity, match_date, match_time, medic_name.\n\n"
+    "ZASADY, od których zależy poprawność:\n"
+    "1. Przepisuj DOKŁADNIE to, co widać — nie poprawiaj, nie uzupełniaj, "
+    "nie licz niczego samodzielnie.\n"
+    "2. Gdy pole jest nieczytelne, ucięte, zasłonięte albo puste, wpisz null. "
+    "NIGDY nie zgaduj: zmyślona cyfra zostanie odczytana jako dowód "
+    "fałszerstwa i uderzy w niewinnego człowieka.\n"
+    "3. audit_code to kod ze stopki w formacie BZ-XXXX-XXXX.\n"
+    "4. match_date w formacie dd.mm.rrrr, match_time w formacie gg:mm — tak, "
+    "jak są wydrukowane.\n"
+    "5. Wynik do przerwy to liczby z rubryki połowy, nie wynik końcowy."
+)
+
+
+def _scan_media_type(data: bytes) -> str:
+    for magic, mime in _SCAN_MAGIC:
+        if data.startswith(magic):
+            return mime
+    return ""
+
+
+def _scan_code_from_text(text: str) -> str:
+    """Kod dziennika z dowolnego tekstu — model bywa kreatywny z myślnikami."""
+    m = _SCAN_CODE_RE.search(str(text or ""))
+    return "BZ-%s-%s" % (m.group(1).upper(), m.group(2).upper()) if m else ""
+
+
+async def _read_protocol_photo(data: bytes, media_type: str) -> Dict[str, Any]:
+    """
+    Odczyt pól ze zdjęcia przez model z widzeniem.
+
+    Wydzielone osobno, bo to jedyny kawałek chodzący do sieci — porównanie
+    z dziennikiem jest czystą funkcją i testuje się bez modelu.
+    """
+    import openai
+
+    client = openai.AsyncOpenAI()
+    b64 = base64.b64encode(data).decode("ascii")
+    resp = await client.chat.completions.create(
+        model=os.getenv("PROTOCOL_SCAN_MODEL", "gpt-4o"),
+        response_format={"type": "json_object"},
+        temperature=0,
+        max_tokens=400,
+        messages=[
+            {"role": "system", "content": _SCAN_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Odczytaj pola z tego protokołu."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:%s;base64,%s" % (media_type, b64)},
+                    },
+                ],
+            },
+        ],
+    )
+    raw = (resp.choices[0].message.content or "{}").strip()
+    parsed = json.loads(raw)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _scan_norm_text(s: str) -> str:
+    """
+    Nazwa do porównania: bez wielkości liter i bez ogonków.
+
+    `_norm` samo nie wystarcza, bo `ł` NIE rozkłada się przez NFKD — to osobna
+    litera, a nie „l z kreską". Bez tej podmianki „Azoty Puławy" z dziennika
+    nigdy nie zgodziłoby się z „AZOTY PULAWY" odczytanym ze zdjęcia i każdy
+    skan meldowałby podmienioną nazwę drużyny.
+    """
+    return _norm(str(s or "").replace("ł", "l").replace("Ł", "L"))
+
+
+def _printed_form(value: Any, kind: str) -> str:
+    """Wartość ze stanu w takiej postaci, w jakiej trafiła na papier."""
+    if value is None:
+        return ""
+    if kind == "date":
+        return _fmt_date_ddmmyyyy(value) or ""
+    if kind == "time":
+        return _fmt_time_hhmm(value) or ""
+    return str(value).strip()
+
+
+def _scan_values_match(printed: str, seen: str, kind: str) -> bool:
+    left = " ".join(str(printed or "").split())
+    right = " ".join(str(seen or "").split())
+    if kind == "number":
+        try:
+            return float(left.replace(",", ".")) == float(right.replace(",", "."))
+        except (TypeError, ValueError):
+            return left == right
+    if kind == "text":
+        # Nazwy drużyn bywają drukowane wersalikami, a odczyt bywa mieszany —
+        # różnica wielkości liter ani ogonków nie jest fałszerstwem.
+        return _scan_norm_text(left) == _scan_norm_text(right)
+    return left == right
+
+
+def _compare_scan_to_state(
+    read: Dict[str, Any],
+    state: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Zestawienie odczytu ze zdjęcia ze stanem z dziennika.
+
+    Trzy rozłączne kubełki, bo mieszanie ich jest tu groźne:
+      • `changes`   — pole odczytane PEWNIE i różne od dziennika,
+      • `checked`   — odczytane i zgodne,
+      • `unreadable`— nieodczytane; MILCZYMY o nich, zamiast zgłaszać różnicę.
+
+    Ostatni punkt jest sednem: fałszywe „podrobiony" na rozmazanym zdjęciu
+    kosztuje czyjąś opinię, a brak odpowiedzi kosztuje jedno kolejne zdjęcie.
+    """
+    changes: List[Dict[str, str]] = []
+    checked: List[Dict[str, str]] = []
+    unreadable: List[str] = []
+
+    if not isinstance(state, dict):
+        state = {}
+
+    for key, path, label, kind in PROTOCOL_SCAN_FIELDS:
+        seen_raw = read.get(key)
+        seen = "" if seen_raw is None else str(seen_raw).strip()
+        printed = _printed_form(_dig(state, path), kind)
+
+        if not seen:
+            # Pole puste także w dzienniku — nie ma o czym mówić.
+            if printed:
+                unreadable.append(label)
+            continue
+        if not printed:
+            # Na papierze coś jest, w dzienniku pusto — to też jest różnica.
+            changes.append({"label": label, "before": "—", "after": seen})
+            continue
+        if _scan_values_match(printed, seen, kind):
+            checked.append({"label": label, "value": printed})
+        else:
+            changes.append({"label": label, "before": printed, "after": seen})
+
+    return {"changes": changes, "checked": checked, "unreadable": unreadable}
+
+
+@router.post(
+    "/judge/results/protocol/scan",
+    summary="[admin] Sprawdź protokół ze zdjęcia — papier albo ekran",
+)
+async def protocol_scan(
+    file: UploadFile = File(..., description="Zdjęcie protokołu (JPEG/PNG)"),
+    code: Optional[str] = Query(None, description="Kod BZ-…, gdy stopka nieczytelna"),
+    actor=Depends(proel_actor),
+):
+    await _require_protocol_admin(actor)
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Puste zdjęcie")
+    if len(data) > SCAN_MAX_BYTES:
+        raise HTTPException(413, "Zdjęcie jest za duże — zmniejsz je przed wysłaniem")
+    media_type = _scan_media_type(data)
+    if not media_type:
+        raise HTTPException(400, "To nie jest zdjęcie JPEG ani PNG")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(503, "Odczyt zdjęć nie jest skonfigurowany na serwerze")
+
+    try:
+        read = await _read_protocol_photo(data, media_type)
+    except Exception as e:
+        logger.warning("Nie udało się odczytać zdjęcia protokołu", exc_info=True)
+        raise HTTPException(502, "Nie udało się odczytać zdjęcia: %s" % e)
+
+    out: Dict[str, Any] = {
+        "code": _scan_code_from_text(code or "") or _scan_code_from_text(read.get("audit_code") or ""),
+        "read": read,
+    }
+
+    from sqlalchemy import select as _select
+
+    from app.db import database, protocol_audit
+
+    row = None
+    if out["code"]:
+        row = await database.fetch_one(
+            _select(protocol_audit).where(protocol_audit.c.code == out["code"])
+        )
+        out["found_by"] = "code" if row is not None else None
+
+    # Stopka bywa ucięta albo zamazana — wtedy szukamy po numerze meczu.
+    # Bierzemy NAJNOWSZĄ generację, bo to ona odpowiada temu, co ktoś trzyma
+    # w ręku; starsze wersje admin obejrzy w dzienniku.
+    if row is None:
+        number = str(read.get("match_number") or "").strip()
+        if number:
+            row = await database.fetch_one(
+                _select(protocol_audit)
+                .where(protocol_audit.c.match_number == number)
+                .order_by(protocol_audit.c.created_at.desc())
+            )
+            if row is not None:
+                out["found_by"] = "match_number"
+                out["code"] = row["code"]
+
+    if row is None:
+        out["known_in_ledger"] = False
+        return out
+
+    out["known_in_ledger"] = True
+    out["entry"] = _audit_public(row)
+    ok, claim = _verify_protocol_signature(str(row["signature"] or ""))
+    out["signature_valid"] = ok
+    out["signature_claim"] = claim
+
+    try:
+        state = json.loads(gzip.decompress(row["state_gzip"]).decode("utf-8"))
+    except Exception:
+        logger.warning("Nie udało się rozpakować stanu %s", row["code"], exc_info=True)
+        state = None
+
+    out.update(_compare_scan_to_state(read, state))
+    out["matches_ledger"] = not out["changes"]
     return out
 
 
