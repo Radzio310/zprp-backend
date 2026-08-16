@@ -39,6 +39,10 @@ from app.admin import router as admin_router
 from app.reports import router as reports_router
 from app.login_records import router as login_records_router
 from app.proel import router as proel_router
+from app.proel_zprp import router as proel_zprp_router
+from app.proel_users.users import router as proel_users_router
+from app.proel_users.auth_email import router as proel_users_auth_email_router
+from app.proel_users.password_reset_email import router as proel_users_password_reset_router
 from app.server_matches import router as matches_router
 from app.partner_offtimes import router as partner_offtimes_router
 from app.short_result_records import router as short_result_records_router
@@ -187,6 +191,16 @@ app.include_router(silesia_router)
 app.include_router(admin_router)
 app.include_router(reports_router)
 app.include_router(login_records_router)
+# UWAGA na kolejność: app/proel.py ma catch-all `GET /proel/{match_number:path}`,
+# więc każdy router ze ścieżkami pod /proel/... MUSI stanąć PRZED proel_router —
+# inaczej `/proel/zprp/auth` wpada w `match_number="zprp/auth"`.
+app.include_router(proel_zprp_router)
+# Kolejność wewnątrz rodziny users: dłuższe prefiksy najpierw
+# (`/proel/users/auth/password-reset` przed `/proel/users/auth` przed
+# `/proel/users`), żeby żaden ogólniejszy wzorzec nie połknął szczegółowego.
+app.include_router(proel_users_password_reset_router)
+app.include_router(proel_users_auth_email_router)
+app.include_router(proel_users_router)
 app.include_router(proel_router)
 app.include_router(matches_router)
 app.include_router(partner_offtimes_router)
@@ -867,6 +881,19 @@ async def startup():
         "ALTER TABLE protocol_audit ADD COLUMN IF NOT EXISTS pdf_text_gzip BYTEA",
     ]
     for stmt in _protocol_audit_migrations:
+        try:
+            await database.execute(stmt)
+        except Exception:
+            pass
+
+    # Konta ProEl: partial unique na e-mailu — zwykły UNIQUE odrzucałby drugie
+    # konto bez adresu (NULL ≠ NULL tylko w teorii, praktyka driverów bywa
+    # różna), a unikalność ma obowiązywać wyłącznie tam, gdzie adres JEST.
+    _proel_users_migrations = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_proel_users_email_norm "
+        "ON proel_users (email_normalized) WHERE email_normalized IS NOT NULL",
+    ]
+    for stmt in _proel_users_migrations:
         try:
             await database.execute(stmt)
         except Exception:

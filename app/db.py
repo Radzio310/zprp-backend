@@ -1932,6 +1932,94 @@ protocol_audit = Table(
 )
 
 
+# ─────────────────────── PROEL: konta „per ProEl" ───────────────────────
+#
+# Konta dla osób prowadzących protokół elektroniczny BEZ konta sędziego w BAZA
+# (stolikowi z tokenem meczu, kluby). Schemat 1:1 z `beach_users` minus rzeczy
+# czysto beachowe (role/badges/preferencje powiadomień/skład) — CELOWO osobna
+# tabela, nie kolumna „app" w beach_users: światy mają osobne loginy, osobne
+# sekrety tokenów i żaden kod jednego nie może przypadkiem uwierzytelnić
+# drugiego.
+
+proel_users = Table(
+    "proel_users",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    #: Numer sędziego ZPRP, jeśli osoba go ma — czysto informacyjny.
+    Column("judge_id", String, nullable=True, index=True),
+    Column("full_name", String, nullable=False),              # "NAZWISKO Imię"
+    Column("province", String, nullable=True, index=True),
+    Column("city", String, nullable=True),
+    Column("phone", String, nullable=True),                   # 9 cyfr, bez prefiksu
+    Column("email", String, nullable=True),
+    # email_normalized = trim+lower; partial unique index zakładany w migracji
+    # startowej main.py (zwykły UNIQUE odrzucałby wiele kont bez e-maila).
+    Column("email_normalized", String, nullable=True, index=True),
+    Column("email_verified", Boolean, nullable=False, server_default=text("false")),
+    Column("email_verified_at", DateTime(timezone=True), nullable=True),
+    Column("email_delivery_blocked", Boolean, nullable=False, server_default=text("false")),
+    Column("email_verification_deadline", DateTime(timezone=True), nullable=True),
+    Column("login", String, nullable=False, unique=True, index=True),
+    Column("password_hash", String, nullable=False),
+    Column("last_login_at", DateTime(timezone=True), nullable=True),
+    Column("app_opens", Integer, nullable=False, server_default=text("0")),
+    Column("app_version", String, nullable=True),
+    Column("device_ids", ARRAY(String), nullable=False, server_default=text("'{}'")),
+    Column("device_infos", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("must_change_password", Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+# Kody e-mail ProEl — WŁASNE tabele, nie beachowe. Kod wydany w jednym świecie
+# nie może niczego odblokować w drugim (HMAC i tak jest kluczowany innym
+# kontekstem, ale osobne tabele zamykają temat na poziomie danych).
+
+proel_email_verification_codes = Table(
+    "proel_email_verification_codes",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("user_id", Integer, ForeignKey("proel_users.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("code_hash", String, nullable=False),              # HMAC-SHA256, nigdy jawnie
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True), nullable=True),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_sent_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+proel_pre_signup_email_codes = Table(
+    "proel_pre_signup_email_codes",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("email_normalized", String, nullable=False, index=True),
+    Column("code_hash", String, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True), nullable=True),      # skonsumowany przy rejestracji
+    Column("verified_at", DateTime(timezone=True), nullable=True),   # poprawny kod wpisany
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_sent_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+proel_password_reset_email_codes = Table(
+    "proel_password_reset_email_codes",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("user_id", Integer, ForeignKey("proel_users.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("code_hash", String, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True), nullable=True),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_sent_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
