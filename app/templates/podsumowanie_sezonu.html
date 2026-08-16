@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Podsumowanie sezonu {{ season_label }}</title>
+<style>
+  @page {
+    size: A4;
+    margin: 12mm 11mm 13mm 11mm;
+    @bottom-center {
+      content: "Podsumowanie sezonu {{ season_label }}  ·  strona " counter(page) " z " counter(pages);
+      font-size: 7.6pt;
+      color: #9a9aa6;
+      font-family: "DejaVu Sans", sans-serif;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", sans-serif;
+    font-size: 8.6pt;
+    color: #23212b;
+    line-height: 1.3;
+  }
+
+  /* ───────── nagłówek ───────── */
+  .hero {
+    position: relative;
+    border-radius: 10pt;
+    padding: 12pt 14pt;
+    margin-bottom: 12pt;
+    background: linear-gradient(115deg, {{ accent }} 0%, #5B2FA8 48%, {{ accent2 }} 130%);
+    color: #fff;
+    overflow: hidden;
+  }
+  .hero-row { display: flex; flex-direction: row; align-items: center; gap: 12pt; }
+  .hero .logo-wrap { width: 52pt; flex-shrink: 0; }
+  .hero img.logo { width: 50pt; height: auto; display: block; }
+  .hero-main { flex: 1; min-width: 0; }
+  .kicker {
+    font-size: 7.4pt;
+    font-weight: 800;
+    letter-spacing: 2.4pt;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.72);
+  }
+  .hero h1 {
+    font-size: 21pt;
+    font-weight: 900;
+    letter-spacing: -0.4pt;
+    line-height: 1.05;
+    margin-top: 2pt;
+  }
+  .hero .sub {
+    margin-top: 3pt;
+    font-size: 8.4pt;
+    font-weight: 600;
+    color: rgba(255,255,255,0.80);
+  }
+  .season-badge {
+    flex-shrink: 0;
+    text-align: center;
+    padding: 7pt 11pt;
+    border-radius: 8pt;
+    background: rgba(255,255,255,0.16);
+    border: 0.8pt solid rgba(255,255,255,0.34);
+  }
+  .season-badge .yr { font-size: 19pt; font-weight: 900; letter-spacing: -0.6pt; }
+  .season-badge .lb { font-size: 6.6pt; font-weight: 800; letter-spacing: 1.6pt; color: rgba(255,255,255,0.78); }
+
+  /* ───────── sekcje ───────── */
+  .section { margin-bottom: 11pt; }
+  .section-title {
+    font-size: 9.4pt;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 1.1pt;
+    color: {{ accent }};
+    padding-bottom: 3.5pt;
+    margin-bottom: 7pt;
+    border-bottom: 1.6pt solid {{ accent }}44;
+  }
+  .section-title .muted {
+    float: right;
+    font-size: 7.4pt;
+    font-weight: 700;
+    letter-spacing: 0.5pt;
+    color: #a2a0ac;
+    text-transform: none;
+  }
+
+  /* ───────── KPI ───────── */
+  .kpis { font-size: 0; }
+  .kpi {
+    display: inline-block;
+    vertical-align: top;
+    width: 24.4%;
+    margin: 0 0.8% 6pt 0;
+    padding: 7pt 8pt;
+    border-radius: 7pt;
+    border: 0.7pt solid rgba(0,0,0,0.09);
+    border-left: 2.6pt solid {{ accent }};
+    background: rgba(138,48,208,0.045);
+  }
+  .kpi .v { font-size: 14pt; font-weight: 900; color: #191723; letter-spacing: -0.5pt; }
+  .kpi .l { font-size: 7.2pt; font-weight: 800; color: #56535f; text-transform: uppercase; letter-spacing: 0.5pt; margin-top: 1.5pt; }
+  .kpi .h { font-size: 6.8pt; font-weight: 600; color: #a09eaa; margin-top: 1pt; }
+
+  /* ───────── kolumny ───────── */
+  .cols { display: flex; flex-direction: row; gap: 12pt; align-items: flex-start; }
+  .col { flex: 1; min-width: 0; }
+
+  /* ───────── słupki ───────── */
+  .bar-row { margin-bottom: 4.4pt; page-break-inside: avoid; }
+  .bar-head { display: flex; flex-direction: row; align-items: baseline; gap: 6pt; margin-bottom: 1.6pt; }
+  .bar-label { flex: 1; min-width: 0; font-size: 7.8pt; font-weight: 750; color: #34313d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-value { font-size: 7.8pt; font-weight: 900; color: #191723; }
+  .bar-track { height: 6pt; border-radius: 3pt; background: rgba(0,0,0,0.055); overflow: hidden; }
+  .bar-fill { height: 6pt; border-radius: 3pt; background: {{ accent }}; }
+
+  /* ───────── rankingi ───────── */
+  .rank-block {
+    border: 0.7pt solid rgba(0,0,0,0.09);
+    border-radius: 8pt;
+    padding: 7pt 8pt 6pt 8pt;
+    margin-bottom: 7pt;
+    page-break-inside: avoid;
+  }
+  .rank-block h3 {
+    font-size: 8pt;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.9pt;
+    color: {{ accent }};
+    margin-bottom: 5pt;
+  }
+  .rank-line { display: flex; flex-direction: row; align-items: center; gap: 5pt; margin-bottom: 3.2pt; }
+  .rank-no {
+    width: 13pt; height: 13pt; flex-shrink: 0;
+    border-radius: 50%;
+    text-align: center; line-height: 13pt;
+    font-size: 6.8pt; font-weight: 900;
+    background: rgba(0,0,0,0.07); color: #6a6774;
+  }
+  .rank-line.p1 .rank-no { background: #E8B93E; color: #4a3400; }
+  .rank-line.p2 .rank-no { background: #C3C8D2; color: #3d4350; }
+  .rank-line.p3 .rank-no { background: #D2915A; color: #4a2c0c; }
+  .rank-body { flex: 1; min-width: 0; }
+  .rank-name { font-size: 7.6pt; font-weight: 750; color: #2c2a35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rank-line.p1 .rank-name { font-weight: 900; color: #191723; }
+  .rank-track { height: 3.4pt; border-radius: 2pt; background: rgba(0,0,0,0.05); margin-top: 1.6pt; overflow: hidden; }
+  .rank-fill { height: 3.4pt; border-radius: 2pt; background: {{ accent }}; }
+  .rank-line.p1 .rank-fill { background: {{ accent2 }}; }
+  .rank-val { flex-shrink: 0; font-size: 7.6pt; font-weight: 900; color: #191723; text-align: right; min-width: 40pt; }
+
+  /* ───────── tabela sędziów ───────── */
+  table.judges { width: 100%; border-collapse: collapse; }
+  table.judges thead { display: table-header-group; }
+  table.judges th {
+    font-size: 6.6pt;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+    color: #fff;
+    background: {{ accent }};
+    padding: 4pt 3pt;
+    text-align: right;
+  }
+  table.judges th:first-child, table.judges th.left { text-align: left; }
+  table.judges td {
+    font-size: 7.4pt;
+    padding: 3.4pt 3pt;
+    border-bottom: 0.5pt solid rgba(0,0,0,0.07);
+    text-align: right;
+    color: #3a3743;
+    white-space: nowrap;
+  }
+  table.judges td.left { text-align: left; }
+  table.judges tr { page-break-inside: avoid; }
+  table.judges tbody tr:nth-child(even) td { background: rgba(0,0,0,0.022); }
+  .j-name { font-weight: 800; color: #191723; font-size: 7.6pt; }
+  .j-meta { font-size: 6.4pt; font-weight: 600; color: #a09eaa; }
+  .j-title {
+    display: inline-block;
+    font-size: 6.2pt;
+    font-weight: 800;
+    color: {{ accent }};
+    background: {{ accent }}18;
+    border-radius: 3pt;
+    padding: 0.6pt 3pt;
+    margin-left: 3pt;
+  }
+  .j-place { font-weight: 900; color: #6a6774; }
+  tr.top3 .j-place { color: {{ accent2 }}; }
+  table.judges tfoot td {
+    font-size: 7.6pt;
+    font-weight: 900;
+    color: #191723;
+    background: {{ accent }}12;
+    border-top: 1.2pt solid {{ accent }}55;
+    border-bottom: none;
+    padding: 4.4pt 3pt;
+  }
+
+  .note {
+    margin-top: 10pt;
+    padding-top: 6pt;
+    border-top: 0.7pt solid rgba(0,0,0,0.10);
+    font-size: 6.8pt;
+    color: #a09eaa;
+    line-height: 1.35;
+  }
+  .page-break { page-break-before: always; }
+</style>
+</head>
+<body>
+
+  <!-- ═══════════ HERO ═══════════ -->
+  <div class="hero">
+    <div class="hero-row">
+      {% if logo_b64 %}
+      <div class="logo-wrap"><img class="logo" src="data:image/png;base64,{{ logo_b64 }}" alt="logo"></div>
+      {% endif %}
+      <div class="hero-main">
+        <div class="kicker">BAZA Beach · piłka ręczna plażowa</div>
+        <h1>Podsumowanie sezonu</h1>
+        <div class="sub">
+          Zbiorcze zestawienie pracy sędziów{% if generated_by %} · wygenerował {{ generated_by }}{% endif %} · {{ generated_at }}
+        </div>
+      </div>
+      <div class="season-badge">
+        <div class="yr">{{ season_label }}</div>
+        <div class="lb">SEZON</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ SEZON W LICZBACH ═══════════ -->
+  <div class="section">
+    <div class="section-title">Sezon w liczbach</div>
+    <div class="kpis">
+      {% for k in kpis %}
+      <div class="kpi">
+        <div class="v">{{ k.value }}</div>
+        <div class="l">{{ k.label }}</div>
+        {% if k.hint %}<div class="h">{{ k.hint }}</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- ═══════════ ROZKŁADY ═══════════ -->
+  <div class="cols">
+    {% if months %}
+    <div class="col">
+      <div class="section-title">Turnieje w sezonie</div>
+      {% for b in months %}
+      <div class="bar-row">
+        <div class="bar-head">
+          <div class="bar-label">{{ b.label }}</div>
+          <div class="bar-value">{{ b.display }}</div>
+        </div>
+        <div class="bar-track"><div class="bar-fill" style="width: {{ b.pct }}%; {% if b.color %}background: {{ b.color }};{% endif %}"></div></div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="col">
+      {% if categories %}
+      <div class="section-title">Kategorie</div>
+      {% for b in categories %}
+      <div class="bar-row">
+        <div class="bar-head">
+          <div class="bar-label">{{ b.label }}</div>
+          <div class="bar-value">{{ b.display }}</div>
+        </div>
+        <div class="bar-track"><div class="bar-fill" style="width: {{ b.pct }}%; {% if b.color %}background: {{ b.color }};{% endif %}"></div></div>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      {% if cities %}
+      <div class="section-title" style="margin-top: 10pt;">Najczęstsze miejscowości</div>
+      {% for b in cities %}
+      <div class="bar-row">
+        <div class="bar-head">
+          <div class="bar-label">{{ b.label }}</div>
+          <div class="bar-value">{{ b.display }}</div>
+        </div>
+        <div class="bar-track"><div class="bar-fill" style="width: {{ b.pct }}%; background: {{ accent2 }};"></div></div>
+      </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ═══════════ CZOŁÓWKI ═══════════ -->
+  {% if rankings %}
+  <div class="page-break"></div>
+  <div class="section">
+    <div class="section-title">Czołówki sezonu<span class="muted">najlepsza piątka w każdej kategorii</span></div>
+    <div class="cols">
+      <div class="col">
+        {% for r in rankings %}{% if loop.index0 % 2 == 0 %}
+        <div class="rank-block">
+          <h3>{{ r.label }}</h3>
+          {% for e in r.entries %}
+          <div class="rank-line p{{ e.place }}">
+            <div class="rank-no">{{ e.place }}</div>
+            <div class="rank-body">
+              <div class="rank-name">{{ e.name }}</div>
+              <div class="rank-track"><div class="rank-fill" style="width: {{ e.pct }}%;"></div></div>
+            </div>
+            <div class="rank-val">{{ e.value }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}{% endfor %}
+      </div>
+      <div class="col">
+        {% for r in rankings %}{% if loop.index0 % 2 == 1 %}
+        <div class="rank-block">
+          <h3>{{ r.label }}</h3>
+          {% for e in r.entries %}
+          <div class="rank-line p{{ e.place }}">
+            <div class="rank-no">{{ e.place }}</div>
+            <div class="rank-body">
+              <div class="rank-name">{{ e.name }}</div>
+              <div class="rank-track"><div class="rank-fill" style="width: {{ e.pct }}%;"></div></div>
+            </div>
+            <div class="rank-val">{{ e.value }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}{% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ═══════════ PEŁNE ZESTAWIENIE ═══════════ -->
+  <div class="section">
+    <div class="section-title">Pełne zestawienie sędziów<span class="muted">{{ judges|length }} sędziów</span></div>
+    <table class="judges">
+      <thead>
+        <tr>
+          <th style="width: 16pt;">#</th>
+          <th class="left">Sędzia</th>
+          <th>Turn.</th>
+          <th>MP</th>
+          <th>Woj.</th>
+          <th>Dni</th>
+          <th>Godz.</th>
+          <th>km</th>
+          <th>Mecze</th>
+          <th>Sety</th>
+          <th>Fin.</th>
+          <th>Dojazd</th>
+          <th>Brutto</th>
+          <th>Netto</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for j in judges %}
+        <tr{% if j.place <= 3 %} class="top3"{% endif %}>
+          <td class="j-place">{{ j.place }}</td>
+          <td class="left">
+            <span class="j-name">{{ j.name }}</span>{% if j.title %}<span class="j-title">{{ j.title }}</span>{% endif %}
+            {% if j.judge_id or j.city %}<div class="j-meta">{% if j.judge_id %}nr {{ j.judge_id }}{% endif %}{% if j.judge_id and j.city %} · {% endif %}{% if j.city %}{{ j.city }}{% endif %}</div>{% endif %}
+          </td>
+          <td>{{ j.tournaments }}</td>
+          <td>{{ j.mp }}</td>
+          <td>{{ j.regional }}</td>
+          <td>{{ j.days }}</td>
+          <td>{{ j.hours_fmt }}</td>
+          <td>{{ j.km_fmt }}</td>
+          <td>{{ j.matches }}</td>
+          <td>{{ j.sets }}</td>
+          <td>{{ j.finals }}</td>
+          <td>{{ j.earnings_travel_fmt }}</td>
+          <td>{{ j.earnings_total_fmt }}</td>
+          <td>{{ j.earnings_netto_fmt }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td></td>
+          <td class="left">RAZEM</td>
+          <td>{{ judges|sum(attribute='tournaments') }}</td>
+          <td>{{ judges|sum(attribute='mp') }}</td>
+          <td>{{ judges|sum(attribute='regional') }}</td>
+          <td>{{ judges|sum(attribute='days') }}</td>
+          <td>{{ judges|sum(attribute='hours')|dec1 }}</td>
+          <td>{{ judges|sum(attribute='km')|int_pl }}</td>
+          <td>{{ judges|sum(attribute='matches') }}</td>
+          <td>{{ judges|sum(attribute='sets') }}</td>
+          <td>{{ judges|sum(attribute='finals') }}</td>
+          <td>{{ judges|sum(attribute='earnings_travel')|int_pl }}</td>
+          <td>{{ judges|sum(attribute='earnings_total')|int_pl }}</td>
+          <td>{{ judges|sum(attribute='earnings_netto')|int_pl }}</td>
+        </tr>
+      </tfoot>
+    </table>
+    <div class="note">
+      Kwoty w kolumnach <strong>Dojazd / Brutto / Netto</strong> podane są w złotych.
+      Kolumna <strong>Turn.</strong> to liczba turniejów w obsadzie, <strong>Godz.</strong> to czas
+      realnie spędzony przy boisku (suma rozłącznych przedziałów meczowych), a <strong>km</strong>
+      to łączny dystans dojazdów w jedną stronę pomnożony przez liczbę dni dojazdu.
+    </div>
+    <div class="note">{{ disclaimer }}</div>
+  </div>
+
+</body>
+</html>

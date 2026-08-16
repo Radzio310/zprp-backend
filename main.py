@@ -99,6 +99,7 @@ from app.beach.announcements_report import router as beach_announcements_report_
 from app.beach.organizational_report import router as beach_organizational_report_router
 from app.beach.standings_report import router as beach_standings_report_router
 from app.beach.settlements_pdf import router as beach_settlements_pdf_router
+from app.beach.season_pdf import router as beach_season_pdf_router
 from app.beach.custom_team_templates import router as beach_custom_team_templates_router
 from app.beach.activity_log import router as beach_activity_log_router
 from app.beach.calendar import router as beach_calendar_router
@@ -256,6 +257,7 @@ app.include_router(beach_announcements_report_router)
 app.include_router(beach_organizational_report_router)
 app.include_router(beach_standings_report_router)
 app.include_router(beach_settlements_pdf_router)
+app.include_router(beach_season_pdf_router)
 app.include_router(beach_custom_team_templates_router)
 app.include_router(beach_activity_log_router)
 app.include_router(beach_calendar_router)
