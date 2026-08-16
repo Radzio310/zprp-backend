@@ -4003,6 +4003,20 @@ def _apply_protocol_page_marks(
             ws.oddHeader.right.font = "Arial,Regular"
             ws.oddHeader.right.color = "808080"
 
+        # Kod dziennika CZARNY, nie szary, i grubszy niż reszta opisów.
+        #
+        # To jedyny napis na kartce adresowany do maszyny, a nie do człowieka,
+        # więc rządzą nim inne reguły niż dyskretną stopką. Przy 6 pt w szarości
+        # 808080 aparat dostaje ~40 px wysokości znaku o mizernym kontraście —
+        # i to kontrast, nie rozmiar, wywraca odczyt jako pierwszy. Rozmiar 7 to
+        # maksimum, jakie mieści się w paśmie nagłówka (2,54 mm) bez wjeżdżania
+        # w ramkę protokołu.
+        if audit_code:
+            ws.oddHeader.left.text = _hf_escape(audit_code)
+            ws.oddHeader.left.size = 7
+            ws.oddHeader.left.font = "Arial,Bold"
+            ws.oddHeader.left.color = "000000"
+
         ws.oddFooter.center.text = _hf_escape(footer)
         ws.oddFooter.center.size = 6
         ws.oddFooter.center.font = "Arial,Regular"

@@ -99,11 +99,24 @@ def test_marks_land_on_every_sheet():
 
 def test_audit_code_reaches_the_paper():
     """
-    Znacznik w metadanych ginie przy druku — bez kodu w stopce wydrukowana
-    kartka jest maszynowo anonimowa i nie da się jej powiązać z wpisem.
+    Znacznik w metadanych ginie przy druku — bez kodu na kartce wydruk jest
+    maszynowo anonimowy i nie da się go powiązać z wpisem.
     """
     wb = _prepared()
     assert "BZ-0QT9-MGXP" in wb.worksheets[0].oddFooter.center.text
+
+
+def test_audit_code_is_black_and_bold_for_the_camera():
+    """
+    Kod jest jedynym napisem adresowanym do MASZYNY, więc nie może dzielić
+    dyskretnej szarości ze stopką: to kontrast, nie rozmiar, wywraca odczyt
+    jako pierwszy. Rozmiar ograniczony pasmem nagłówka (2,54 mm).
+    """
+    for ws in _prepared().worksheets:
+        assert ws.oddHeader.left.text == "BZ-0QT9-MGXP"
+        assert ws.oddHeader.left.color == "000000"
+        assert ws.oddHeader.left.font == "Arial,Bold"
+        assert ws.oddHeader.left.size <= 7, "większy kod wjedzie w ramkę protokołu"
 
 
 def test_footer_without_code_has_no_dangling_separator():
