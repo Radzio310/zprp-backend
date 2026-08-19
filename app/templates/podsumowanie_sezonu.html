@@ -285,13 +285,16 @@
     vertical-align: 1pt;
   }
 
-  /* ───────────────── karty sędziów (dwie w rzędzie) ───────────────── */
+  /* ───────────────── karty sędziów (siatka 2 × 4) ─────────────────
+     Karta ma STAŁĄ wysokość — inaczej dłuższe nazwisko rozpychało wiersz
+     i na stronę wchodziło raz 8 kart, a raz 6. Wysokość dobrana tak, by
+     cztery rzędy zmieściły się razem z nagłówkiem rozdziału. */
   .jgrid { font-size: 0; }
   .jcard {
     display: inline-block; vertical-align: top;
-    width: 48.6%; margin: 0 2.8% 7pt 0;
+    width: 48.6%; height: 146pt; margin: 0 2.8% 8pt 0;
     border: 0.8pt solid rgba(0,0,0,0.10); border-radius: 9pt;
-    padding: 7pt 8pt;
+    padding: 8pt 9pt; overflow: hidden;
     page-break-inside: avoid; font-size: 0;
     background: linear-gradient(115deg, #FBF9FE 0%, #FFFFFF 62%);
   }
@@ -310,7 +313,11 @@
   }
   .javatar img { position: relative; width: 26pt; height: 26pt; object-fit: cover; }
   .jhead-main { display: inline-block; vertical-align: top; width: calc(100% - 26pt); padding-left: 6pt; }
-  .jname { font-size: 9.6pt; font-weight: 900; letter-spacing: -0.25pt; line-height: 1.15; }
+  .jname {
+    display: block; font-size: 9.6pt; font-weight: 900;
+    letter-spacing: -0.25pt; line-height: 1.15;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .jmeta { font-size: 6.2pt; font-weight: 600; color: #A29EB2; margin-top: 0.8pt; }
   .jtitle-line { font-size: 6.8pt; font-weight: 900; margin-top: 1.4pt; }
   .jtitle-line .tl {
@@ -324,21 +331,14 @@
   .jstat .v { font-size: 9.6pt; font-weight: 900; letter-spacing: -0.35pt; line-height: 1.1; }
   .jstat .l { font-size: 5.4pt; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4pt; color: #A29EB2; margin-top: 0.4pt; }
 
-  .jspark { font-size: 0; height: 22pt; margin-top: 3pt; }
-  .jspark .b { display: inline-block; height: 22pt; position: relative; text-align: center; }
+  .jspark { font-size: 0; height: 30pt; margin-top: 4pt; }
+  .jspark .b { display: inline-block; height: 30pt; position: relative; text-align: center; }
   .jspark .f {
     position: absolute; left: 24%; right: 24%; bottom: 7pt;
     background: {{ accent }}; border-radius: 1.5pt 1.5pt 0 0; min-height: 1pt;
   }
   .jspark .f.zero { background: rgba(0,0,0,0.10); }
   .jspark .m { position: absolute; left: 0; right: 0; bottom: 0; font-size: 5.4pt; font-weight: 800; color: #BEBACB; }
-
-  .jfoot {
-    font-size: 6pt; font-weight: 650; color: #8D89A0;
-    margin-top: 4pt; padding-top: 3.5pt;
-    border-top: 0.5pt solid rgba(0,0,0,0.07);
-  }
-  .jfoot b { color: #3A3648; font-weight: 800; }
 
   /* ───────────────── pełna tabela (poziomo) ───────────────── */
   .landscape { page: land; page-break-before: always; }
@@ -796,8 +796,8 @@
     <div class="sec-eyebrow">Rozdział 7</div>
     <div class="sec-title">Sędzia po sędzim</div>
     <div class="sec-lead">
-      Karta na każdego sędziego: rozkład turniejów w sezonie, komplet liczb i to,
-      ile dojazdów jest rozliczonych, a ile doliczonych trasą.
+      Karta na każdego sędziego: komplet liczb sezonu i rozkład turniejów
+      w miesiącach, w których sezon faktycznie trwał.
     </div>
   </div>
   {% endif %}
@@ -838,14 +838,10 @@
     <div class="jspark">
       {% for s in c.spark %}
       <div class="b" style="width: {{ c.spark_w }}%;">
-        <div class="f{% if not s.value %} zero{% endif %}" style="height: {{ (s.pct * 0.13 + 1)|round(1) }}pt;"></div>
+        <div class="f{% if not s.value %} zero{% endif %}" style="height: {{ (s.pct * 0.20 + 1)|round(1) }}pt;"></div>
         <div class="m">{{ s.label }}</div>
       </div>
       {% endfor %}
-    </div>
-
-    <div class="jfoot">
-      Dojazdy: <b>{{ c.km_settled }}</b> rozliczonych, <b>{{ c.km_auto }}</b> trasą{% if c.partner %} · partner: <b>{{ c.partner }}</b>{% if c.partner_matches %} ({{ c.partner_matches }}){% endif %}{% endif %}
     </div>
   </div>
   {% endfor %}

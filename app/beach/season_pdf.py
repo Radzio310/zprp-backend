@@ -39,6 +39,9 @@ METRIC_SHORT = {
 }
 TIER_LABEL = {"gold": "ZŁOTO", "silver": "SREBRO", "bronze": "BRĄZ"}
 
+# Karty sędziów: siatka 2 × 4 o stałej wysokości karty (patrz .jcard w szablonie)
+CARDS_PER_PAGE = 8
+
 
 def _load_logo_b64() -> str:
     candidates = [
@@ -208,30 +211,6 @@ def _chunk(items: List[Any], size: int) -> List[List[Any]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def _chunk_first(items: List[Any], first: int, rest: int) -> List[List[Any]]:
-    """
-    Pierwsza strona mieści mniej kart, bo dzieli miejsce z nagłówkiem sekcji.
-    Resztę rozkładamy RÓWNO na potrzebną liczbę stron, żeby ostatnia nie
-    kończyła się jedną samotną kartą i połacią pustki.
-    """
-    if not items:
-        return []
-    head, tail = items[:first], items[first:]
-    if not tail:
-        return [head]
-    pages = -(-len(tail) // rest)  # sufit z dzielenia
-    per = -(-len(tail) // pages)
-    out = [head]
-    i = 0
-    for p in range(pages):
-        # ostatnie strony dostają o jedną kartę mniej, gdy podział jest nierówny
-        take = per if len(tail) - i - per >= pages - p - 1 else per - 1
-        take = max(1, min(take, len(tail) - i))
-        out.append(tail[i : i + take])
-        i += take
-    return out
-
-
 def _build_context(req: SeasonPdfRequest) -> Dict[str, Any]:
     t = req.totals
 
@@ -285,9 +264,9 @@ def _build_context(req: SeasonPdfRequest) -> Dict[str, Any]:
         c["earnings_fmt"] = _int(c.get("earnings_total", 0))
         c["tier_label"] = TIER_LABEL.get(c.get("tier") or "", "")
         c["spark_w"] = round(100 / len(c["spark"]), 3) if c["spark"] else 100
-    # Karty idą po dwie w rzędzie: 6 na pierwszej stronie (dzieli miejsce
-    # z nagłówkiem rozdziału), po 8 na kolejnych — bez pustych przestrzeni.
-    card_pages = _chunk_first(cards, 6, 8)
+    # Karty mają stałą wysokość, więc na KAŻDEJ stronie mieści się pełna
+    # siatka 2 × 4 — także na pierwszej, razem z nagłówkiem rozdziału.
+    card_pages = _chunk(cards, CARDS_PER_PAGE)
 
     # ── kalendarium: kadr liczony z faktycznego zasięgu bąbli ──
     #
