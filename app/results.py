@@ -2612,10 +2612,21 @@ def _add_exam_mark(ws_raw, *, row: int, kind: str) -> bool:
 _STRIKE_COL_FROM = 1
 _STRIKE_COL_TO = 38
 #: Grubość kreski i domyślna wysokość wiersza zawodnika (pt) z szablonu.
-#: Wyraźnie CIEŃSZA niż linie tabeli: przy 0,8 pt kreska czytała się jak druga
+#: Wyraźnie CIEŃSZA niż linie tabeli: ciągła kreska 0,8 pt czytała się jak druga
 #: krawędź wiersza i wzrok gubił, gdzie kończy się jeden zawodnik, a zaczyna
-#: następny. Skreślenie ma być kreską długopisu, a nie linią siatki.
-_STRIKE_THICKNESS_PT = 0.4
+#: następny. Do tego kreska jest PRZERYWANA - pełna linia przez całą szerokość
+#: tabeli wygląda jak element formularza, przerywana od razu czyta się jako
+#: skreślenie zrobione ręką.
+_STRIKE_THICKNESS_PT = 0.5
+#: Gdzie w wierszu leży kreska (0 = góra, 1 = dół). Nie 0,5: przy dokładnym
+#: środku geometrycznym kreska siedziała pod tekstem zamiast przez niego.
+_STRIKE_CENTER_RATIO = 0.42
+#: Wzór kreskowania w pikselach źródła: ile widać, ile przerwy. Źródło jest
+#: szerokie z rozmysłem - obrazek i tak jest rozciągany na całą szerokość
+#: tabeli, więc przy krótkim źródle kreski rozjechałyby się w grube pasy.
+_STRIKE_DASH_ON = 6
+_STRIKE_DASH_OFF = 5
+_STRIKE_SRC_WIDTH = 660
 _STRIKE_DEFAULT_ROW_PT = 13.2
 _EMU_PER_PT = 12700
 
@@ -2634,7 +2645,12 @@ def _strike_png() -> bytes:
     # Jeden piksel wysokości, nie cztery: obrazek jest rozciągany do wysokości
     # kotwicy (ułamek punktu), a wyższe źródło przy zmniejszaniu rozlewa się
     # w renderze na dwa piksele - i cała oszczędność na grubości przepada.
-    img = PILImage.new("RGBA", (16, 1), (40, 40, 40, 255))
+    img = PILImage.new("RGBA", (_STRIKE_SRC_WIDTH, 1), (0, 0, 0, 0))
+    px = img.load()
+    period = _STRIKE_DASH_ON + _STRIKE_DASH_OFF
+    for x in range(_STRIKE_SRC_WIDTH):
+        if x % period < _STRIKE_DASH_ON:
+            px[x, 0] = (40, 40, 40, 255)
     buf = BytesIO()
     img.save(buf, format="PNG")
     data = buf.getvalue()
@@ -2656,7 +2672,7 @@ def _add_strike_line(ws_raw, *, row: int) -> bool:
         height_pt = float(
             getattr(ws_raw.row_dimensions[row], "height", None) or _STRIKE_DEFAULT_ROW_PT
         )
-        mid = height_pt / 2.0
+        mid = height_pt * _STRIKE_CENTER_RATIO
         half = _STRIKE_THICKNESS_PT / 2.0
         top_emu = int(max(0.0, mid - half) * _EMU_PER_PT)
         bottom_emu = int(min(height_pt, mid + half) * _EMU_PER_PT)
@@ -3596,6 +3612,55 @@ async def _fetch_png_bytes(url: str) -> bytes:
         return b""
 
 
+def _trim_ink_margins(data: bytes, pad_ratio: float = 0.04) -> bytes:
+    """
+    Obcina puste marginesy wokół podpisu.
+
+    Podpis powstaje na płótnie o stałych proporcjach, a sędzia rzadko zapisuje
+    je w całości - w pliku zostaje ramka pustego miejsca. Skalowanie takiego
+    obrazka do ramki w protokole skaluje głównie tę pustkę, przez co sam podpis
+    wychodzi mikroskopijny. Po obcięciu ta sama ramka mieści dwa, trzy razy
+    większy podpis, bez ruszania układu arkusza.
+
+    Rozpoznajemy dwa rodzaje plików: z przezroczystym tłem (bierzemy kanał
+    alfa) i z tłem białym (bierzemy jasność). Cokolwiek pójdzie nie tak,
+    oddajemy oryginał - podpis ma się wydrukować nawet wtedy, gdy nie da się
+    go przyciąć.
+    """
+    if PILImage is None or not data:
+        return data
+    try:
+        im = PILImage.open(BytesIO(data))
+        im.load()
+        alpha = None
+        if im.mode in ("RGBA", "LA"):
+            alpha = im.getchannel("A")
+        if alpha is not None and alpha.getextrema()[0] < 250:
+            mask = alpha.point(lambda v: 255 if v > 12 else 0)
+        else:
+            mask = im.convert("L").point(lambda v: 255 if v < 235 else 0)
+        bbox = mask.getbbox()
+        if not bbox:
+            return data
+        w, h = im.size
+        pad_x = int((bbox[2] - bbox[0]) * pad_ratio) + 2
+        pad_y = int((bbox[3] - bbox[1]) * pad_ratio) + 2
+        box = (
+            max(0, bbox[0] - pad_x),
+            max(0, bbox[1] - pad_y),
+            min(w, bbox[2] + pad_x),
+            min(h, bbox[3] + pad_y),
+        )
+        # Za mały wycinek znaczy, że maska złapała szum, a nie podpis.
+        if box[2] - box[0] < 8 or box[3] - box[1] < 4:
+            return data
+        out = BytesIO()
+        im.crop(box).save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return data
+
+
 def _add_signature_image(
     ws,
     *,
@@ -3613,6 +3678,10 @@ def _add_signature_image(
     """
     if not image_bytes:
         return False
+
+    # Jedno miejsce dla wszystkich podpisów w protokole - drużyn, medyka,
+    # oficjeli i tych ze strony uwag.
+    image_bytes = _trim_ink_margins(image_bytes)
 
     bio = BytesIO(image_bytes)
     img = Image(bio)
@@ -3670,11 +3739,64 @@ def _extract_city_from_venue_address(venue_address: str) -> str:
     return parts[-1]
 
 
+#: Układ strony uwag liczony w PUNKTACH, nie w wierszach.
+#:
+#: Tylko w punktach da się odpowiedzieć na pytanie, które tu decyduje o
+#: wszystkim: czy blok podpisów jeszcze mieści się na tej stronie, czy schodzi
+#: na następną. Wiersze mają różne wysokości (linia tekstu, nazwisko, podpis),
+#: więc liczenie „ile wierszy na stronę" dawało układ zależny od długości opisu.
+_NOTES_LINE_PT = 16.5          # jedna linia opisu (czcionka 12)
+_NOTES_HEADER_PT = 18.0        # wiersz „Strona X/Y" + data i miejscowość
+_NOTES_HEADER_GAP_PT = 10.0    # odstęp pod nagłówkiem
+_NOTES_TEXT_GAP_PT = 14.0      # odstęp między końcem opisu a podpisami
+_NOTES_NAME_PT = 16.0          # wiersz z nazwiskiem sędziego
+_NOTES_SIGN_PT = 42.0          # wiersz z samym podpisem
+_NOTES_BETWEEN_PT = 8.0        # przerwa między jednym a drugim sędzią
+#: Wysokość obszaru druku A4 przy marginesach 0,6 cala: (11,69 - 1,2) * 72 pt.
+#: Zaniżone o zapas - lepiej zostawić pasek pustego papieru niż wypchnąć jedną
+#: linijkę na osobną stronę.
+_NOTES_PAGE_BUDGET_PT = 720.0
+#: Ile znaków mieści się w linii przy czcionce 12 na szerokości A..N.
+_NOTES_CHARS_PER_LINE = 74
+#: Wysokość całego bloku podpisów - traktujemy go jako jedną, niepodzielną
+#: całość. Nazwisko na dole jednej strony i podpis na górze następnej to nie
+#: jest podpisany protokół.
+_NOTES_SIGN_BLOCK_PT = (
+    _NOTES_NAME_PT + _NOTES_SIGN_PT + _NOTES_BETWEEN_PT + _NOTES_NAME_PT + _NOTES_SIGN_PT
+)
+
+
+def _wrap_notes_text(text: str, width: int) -> List[str]:
+    """Łamie opis na linie, zachowując akapity wpisane przez sędziego."""
+    out: List[str] = []
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for para in raw.split("\n"):
+        words = para.split()
+        if not words:
+            out.append("")
+            continue
+        line = ""
+        for word in words:
+            candidate = word if not line else line + " " + word
+            if len(candidate) <= width:
+                line = candidate
+                continue
+            if line:
+                out.append(line)
+            # Słowo dłuższe niż cała linia (np. wklejony link) - tniemy je,
+            # bo inaczej wyszłoby poza obszar druku i zniknęło z PDF-a.
+            while len(word) > width:
+                out.append(word[:width])
+                word = word[width:]
+            line = word
+        if line:
+            out.append(line)
+    return out
+
+
 def _create_detailed_notes_sheet(
     wb,
     *,
-    page_no: int,
-    total_pages: int,
     date_ddmmyyyy: str,
     place: str,
     notes_text: str,
@@ -3683,41 +3805,55 @@ def _create_detailed_notes_sheet(
     referee1_sig_bytes: bytes,
     referee2_sig_bytes: bytes,
 ):
+    """
+    Strona (albo strony) szczegółowych uwag sędziów.
+
+    Wysokość opisu jest dowolna, więc arkusz budujemy wiersz po wierszu i sami
+    pilnujemy, gdzie kończy się kartka. Podpisy idą ZARAZ pod opisem - nie na
+    sztywnej pozycji przy dolnej krawędzi. Przy krótkiej uwadze siedzą wysoko,
+    przy długiej schodzą niżej, a gdy opis wypełni całą stronę, przechodzą na
+    następną razem z nagłówkiem.
+
+    Każda linia opisu to osobny wiersz arkusza, a nie jedna wielka scalona
+    komórka. Scalona komórka nie umie pęknąć na granicy stron - przy dłuższym
+    opisie albo zostałaby obcięta, albo w całości zeszłaby na kolejną kartkę.
+
+    Zwraca (arkusz, numery wierszy z nagłówkiem) - po jednym na każdą stronę
+    uwag, żeby wołający mógł wpisać w nie „Strona X/Y" po policzeniu wszystkich
+    stron protokołu.
+    """
     ws_notes = wb.create_sheet(title="Uwagi sędziów")
 
-    # --- Page setup (A4) ---
     try:
         ws_notes.page_setup.paperSize = ws_notes.PAPERSIZE_A4
         ws_notes.page_setup.orientation = ws_notes.ORIENTATION_PORTRAIT
     except Exception:
         pass
 
-    # --- FORCE: jedna strona na szerokość (eliminuje “strona 3” w prawo) ---
+    # Świadomie BEZ „zmieść na jednej stronie": ta strona ma prawo być dłuższa,
+    # a każde skalowanie i tak zmieniłoby wysokość wierszy, czyli rozjechałoby
+    # rachunek, na którym stoi cały podział na strony.
     try:
-        ws_notes.sheet_properties.pageSetUpPr.fitToPage = True
-        ws_notes.page_setup.fitToWidth = 1
-        ws_notes.page_setup.fitToHeight = 1  # jeśli wolisz, możesz dać 0 (automatycznie)
-        ws_notes.page_setup.scale = None
+        ws_notes.sheet_properties.pageSetUpPr.fitToPage = False
+        ws_notes.page_setup.fitToWidth = 0
+        ws_notes.page_setup.fitToHeight = 0
+        ws_notes.page_setup.scale = 100
     except Exception:
         pass
 
-    # print area (żeby LO nie brał “czegoś dalej”)
     try:
-        ws_notes.print_area = "A1:N45"
-    except Exception:
-        pass
-
-    # trochę większe marginesy boczne = “nie ucieka” w prawo
-    try:
-        ws_notes.page_margins.left = 0.7
-        ws_notes.page_margins.right = 0.7
+        ws_notes.page_margins.left = 0.6
+        ws_notes.page_margins.right = 0.6
         ws_notes.page_margins.top = 0.6
         ws_notes.page_margins.bottom = 0.6
+        # Zerowy pasek nagłówka i stopki - inaczej renderer rezerwuje na nie
+        # miejsce, którego nie ma w naszym rachunku wysokości.
+        ws_notes.page_margins.header = 0.0
+        ws_notes.page_margins.footer = 0.0
     except Exception:
         pass
 
-    # Siatka “kartki”
-    for col in ["A","B","C","D","E","F","G","H","I","J","K","L","M","N"]:
+    for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]:
         try:
             ws_notes.column_dimensions[col].width = 6.2
         except Exception:
@@ -3728,87 +3864,106 @@ def _create_detailed_notes_sheet(
     except Exception:
         pass
 
-    # --- Nagłówek ---
-    ws_notes.merge_cells("A1:F1")
-    ws_notes["A1"].value = f"Strona {page_no}/{total_pages}"
-    ws_notes["A1"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    ws_notes["A1"].font = Font(size=10)
-
-    # --- Prawy nagłówek (KROK 3) ---
-    ws_notes.merge_cells("G1:M1")
-
     right_hdr = ""
     if date_ddmmyyyy and place:
-        right_hdr = f"{date_ddmmyyyy}, {place}"
+        right_hdr = date_ddmmyyyy + ", " + place
     elif date_ddmmyyyy:
         right_hdr = date_ddmmyyyy
     elif place:
         right_hdr = place
 
-    ws_notes["G1"].value = right_hdr
-    ws_notes["G1"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
-    ws_notes["G1"].font = Font(size=10)
+    header_rows: List[int] = []
+    page_breaks: List[int] = []
+    state = {"row": 1, "y": 0.0}
 
-    # --- Treść opisu ---
-    # Zostawiamy opis do 30 wierszy, a podpisy zaczynamy zaraz pod nim.
-    ws_notes.merge_cells("A3:N30")
-    ws_notes["A3"].value = (notes_text or "").strip()
-    ws_notes["A3"].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-    ws_notes["A3"].font = Font(size=12)
+    def open_page() -> None:
+        row = int(state["row"])
+        if header_rows:
+            # Łamanie ZA poprzednim wierszem, czyli tuż przed nagłówkiem.
+            page_breaks.append(row - 1)
+        header_rows.append(row)
 
-    for r in range(3, 31):
-        try:
-            ws_notes.row_dimensions[r].height = 18
-        except Exception:
-            pass
+        ws_notes.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+        left = ws_notes.cell(row=row, column=1)
+        left.value = "Strona"  # numer dopisze wołający, po policzeniu stron
+        left.alignment = Alignment(horizontal="left", vertical="center")
+        left.font = Font(size=10)
 
-    # --- Podpisy (bliżej opisu, bardziej wyśrodkowane) ---
-    # Blok podpisów: I..N (zamiast J..N) => całość “wchodzi” bliżej środka
-    # Sędzia 1: nazwa I32..N32, podpis K33 (centrowanie przez kotwicę w K)
-    ws_notes.merge_cells("I32:N32")
-    ws_notes["I32"].value = (referee1_name or "").strip()
-    ws_notes["I32"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws_notes["I32"].font = Font(size=11, bold=True)
+        ws_notes.merge_cells(start_row=row, start_column=7, end_row=row, end_column=13)
+        right = ws_notes.cell(row=row, column=7)
+        right.value = right_hdr
+        right.alignment = Alignment(horizontal="right", vertical="center")
+        right.font = Font(size=10)
 
-    _add_signature_image(
-        ws_notes,
-        image_bytes=referee1_sig_bytes or b"",
-        anchor_cell="K33",
-        max_width_px=180,
-        max_height_px=65,
-        x_offset_px=0,
-        y_offset_px=0,
-    )
+        ws_notes.row_dimensions[row].height = _NOTES_HEADER_PT
+        ws_notes.row_dimensions[row + 1].height = _NOTES_HEADER_GAP_PT
+        state["row"] = row + 2
+        state["y"] = _NOTES_HEADER_PT + _NOTES_HEADER_GAP_PT
 
-    # Sędzia 2: nazwa I36..N36, podpis K37
-    ws_notes.merge_cells("I36:N36")
-    ws_notes["I36"].value = (referee2_name or "").strip()
-    ws_notes["I36"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws_notes["I36"].font = Font(size=11, bold=True)
+    def add_row(height: float) -> int:
+        row = int(state["row"])
+        ws_notes.row_dimensions[row].height = height
+        state["row"] = row + 1
+        state["y"] = state["y"] + height
+        return row
 
-    _add_signature_image(
-        ws_notes,
-        image_bytes=referee2_sig_bytes or b"",
-        anchor_cell="K37",
-        max_width_px=180,
-        max_height_px=65,
-        x_offset_px=0,
-        y_offset_px=0,
-    )
+    open_page()
 
-    # wysokości wierszy w okolicy podpisów (żeby obraz “miał miejsce”)
-    for r in range(31, 39):
-        try:
-            ws_notes.row_dimensions[r].height = 18
-        except Exception:
-            pass
+    for text_line in _wrap_notes_text(notes_text, _NOTES_CHARS_PER_LINE):
+        if state["y"] + _NOTES_LINE_PT > _NOTES_PAGE_BUDGET_PT:
+            open_page()
+        row = add_row(_NOTES_LINE_PT)
+        ws_notes.merge_cells(start_row=row, start_column=1, end_row=row, end_column=14)
+        cell = ws_notes.cell(row=row, column=1)
+        cell.value = text_line
+        cell.alignment = Alignment(horizontal="left", vertical="top")
+        cell.font = Font(size=12)
+
+    # Podpisy: albo cały blok mieści się pod opisem, albo idzie na nową stronę.
+    if state["y"] + _NOTES_TEXT_GAP_PT + _NOTES_SIGN_BLOCK_PT > _NOTES_PAGE_BUDGET_PT:
+        open_page()
+    else:
+        add_row(_NOTES_TEXT_GAP_PT)
+
+    def add_official(name: str, sig_bytes: bytes) -> None:
+        name_row = add_row(_NOTES_NAME_PT)
+        ws_notes.merge_cells(
+            start_row=name_row, start_column=9, end_row=name_row, end_column=14
+        )
+        cell = ws_notes.cell(row=name_row, column=9)
+        cell.value = (name or "").strip()
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.font = Font(size=11, bold=True)
+
+        sign_row = add_row(_NOTES_SIGN_PT)
+        _add_signature_image(
+            ws_notes,
+            image_bytes=sig_bytes or b"",
+            anchor_cell="K" + str(sign_row),
+            max_width_px=190,
+            max_height_px=54,
+        )
+
+    add_official(referee1_name, referee1_sig_bytes)
+    add_row(_NOTES_BETWEEN_PT)
+    add_official(referee2_name, referee2_sig_bytes)
+
+    last_row = int(state["row"]) - 1
     try:
-        ws_notes.row_dimensions[33].height = 55
-        ws_notes.row_dimensions[37].height = 55
+        ws_notes.print_area = "A1:N" + str(last_row)
     except Exception:
         pass
 
-    return ws_notes
+    if page_breaks:
+        try:
+            from openpyxl.worksheet.pagebreak import Break
+
+            for br in page_breaks:
+                ws_notes.row_breaks.append(Break(id=br))
+        except Exception:
+            logger.warning("Nie udało się złamać strony uwag", exc_info=True)
+
+    return ws_notes, header_rows
 
 def _safe_filename_from_match_number(match_number: str) -> str:
     base = (match_number or "mecz").strip().replace("/", "-")
@@ -4864,12 +5019,17 @@ async def generate_protocol_pdf(
             blob = await _fetch_png_bytes(url)
             official_sig_bytes[key] = blob or b""
 
+            # Ramka podpisu sędziego. Większa niż dawne 70x22: po obcięciu
+            # pustych marginesów (patrz `_trim_ink_margins`) w tym samym
+            # miejscu mieści się znacznie więcej samego podpisu, a wiersz
+            # oficjela ma ~19 px, więc w dół wychodzimy o pół wiersza - tyle,
+            # ile zajmuje ogon podpisu, i nie wchodzi to w cudzy tekst.
             ok = _add_signature_image(
                 ws,
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
-                max_width_px=70,
-                max_height_px=22,
+                max_width_px=110,
+                max_height_px=30,
             )
 
             if not ok:
@@ -5083,6 +5243,7 @@ async def generate_protocol_pdf(
             pages.append(ws_shoot)
 
         ws_notes = None
+        notes_header_rows: List[int] = []
         if needs_detailed_notes_page:
             date_ddmmyyyy = _fmt_date_ddmmyyyy(extras.get("matchDate") or "")
             place = _extract_city_from_venue_address(core.get("venueAddress") or "")
@@ -5094,11 +5255,11 @@ async def generate_protocol_pdf(
             ref1_sig = official_sig_bytes.get("referee1", b"")
             ref2_sig = official_sig_bytes.get("referee2", b"")
 
-            # tymczasowo dodamy jako ostatnią, ale numer strony policzymy po ustaleniu total_pages
-            ws_notes = _create_detailed_notes_sheet(
+            # Numery stron znamy dopiero po zbudowaniu wszystkich arkuszy, a
+            # sama strona uwag może zająć więcej niż jedną kartkę - dlatego
+            # helper oddaje wiersze nagłówków, a wpisujemy w nie numery niżej.
+            ws_notes, notes_header_rows = _create_detailed_notes_sheet(
                 wb,
-                page_no=0,               # podmienimy po wyliczeniu total_pages
-                total_pages=0,           # podmienimy po wyliczeniu total_pages
                 date_ddmmyyyy=date_ddmmyyyy,
                 place=place,
                 notes_text=detailed_notes_text,
@@ -5109,9 +5270,12 @@ async def generate_protocol_pdf(
             )
             pages.append(ws_notes)
 
-        # 1) Ustaw numerację stron na wszystkich stronach protokołu (AQ2),
-        #    a na stronie uwag ustawiamy nagłówek "Strona X/X" w A1 (już w helperze).
-        total_pages = len(pages)
+        # 1) Numeracja stron. Arkusz uwag NIE jest jedną stroną - przy długim
+        #    opisie rozlewa się na kilka kartek, więc do sumy wchodzi tyle
+        #    stron, ile nagłówków w nim postawiliśmy.
+        notes_pages = len(notes_header_rows)
+        protocol_pages = len(pages) - (1 if ws_notes is not None else 0)
+        total_pages = protocol_pages + notes_pages
 
         # Arkusze protokołu: AQ2 = STRONA X/N (jak dotychczas)
         if total_pages > 1:
@@ -5122,11 +5286,12 @@ async def generate_protocol_pdf(
         else:
             ws["AQ2"].value = ""
 
-        # Uzupełnij poprawnie page_no/total_pages na stronie uwag (bo helper dostał 0/0)
+        # Strony uwag numerujemy dalej, od miejsca, w którym skończył protokół.
         if ws_notes is not None:
-            page_no = pages.index(ws_notes) + 1  # 1-based
-            ws_notes["A1"].value = f"Strona {page_no}/{total_pages}"
-            # prawy nagłówek (G1) helper już wypełnił – nie ruszamy
+            for i, hdr_row in enumerate(notes_header_rows):
+                ws_notes.cell(row=hdr_row, column=1).value = (
+                    f"Strona {protocol_pages + 1 + i}/{total_pages}"
+                )
 
         # 2) Wypełnij przebieg meczu na stronach 1 oraz (opcjonalnie) 2
         if needs_timeline_page2 and ws2 is not None:
