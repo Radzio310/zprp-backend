@@ -13,6 +13,12 @@ from app.proel_lease import (
     legacy_lease_values as _legacy_lease_values,
     now_utc as _now,
 )
+from app.proel_status import (
+    VALID_STATUSES,
+    is_finished_for,
+    resolve_status,
+    unapprove_requested,
+)
 from app.proel_fields import (
     PHASE_LIVE,
     PHASE_LOCKED,
@@ -47,7 +53,10 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
-_VALID_STATUSES = ("in_progress", "finished", "approved")
+# Status meczu mieszka w liściu `app/proel_status.py` - patrz komentarz tam.
+_VALID_STATUSES = VALID_STATUSES
+_resolve_status = resolve_status
+_is_finished_for = is_finished_for
 
 #: Ile op_id pamiętamy, żeby ponowienie z outboxa nie zadziałało dwa razy.
 _AUDIT_OPS_KEEP = 100
@@ -60,23 +69,6 @@ _MAX_WAIT_SECONDS = 25.0
 #: a nie zdarzenie w pamięci procesu — inaczej zmiana zrobiona przez inny
 #: worker/replikę nigdy by nie obudziła czekającego.
 _WAIT_POLL_SECONDS = 0.8
-
-
-def _resolve_status(status: Optional[str], is_finished: Optional[bool], fallback: str) -> str:
-    """Ustal status na podstawie (priorytetowo) jawnego pola status, a w jego braku
-    starego pola is_finished. is_finished=True z dawnych klientów mapujemy na 'finished'
-    (nigdy na 'approved' — zatwierdzenie to świadoma, osobna akcja)."""
-    if status:
-        s = str(status).strip().lower()
-        if s in _VALID_STATUSES:
-            return s
-    if is_finished is not None:
-        return "finished" if is_finished else "in_progress"
-    return fallback
-
-
-def _is_finished_for(status: str) -> bool:
-    return status in ("finished", "approved")
 
 
 # ════════════════════════ warstwa stanu współpracy ════════════════════════
@@ -804,10 +796,13 @@ async def update_proel_match(
         except (KeyError, IndexError):
             current_status = "finished" if row["is_finished"] else "in_progress"
         if current_status == "approved":
-            raise HTTPException(
-                status.HTTP_423_LOCKED,
-                detail={"code": "MATCH_APPROVED", "message": "Nie można edytować zatwierdzonego meczu"},
-            )
+            # Przepuszczamy WYŁĄCZNIE świadome cofnięcie zatwierdzenia -
+            # patrz `unapprove_requested`.
+            if not unapprove_requested(req.status):
+                raise HTTPException(
+                    status.HTTP_423_LOCKED,
+                    detail={"code": "MATCH_APPROVED", "message": "Nie można edytować zatwierdzonego meczu"},
+                )
 
         # Budujemy słownik pól do aktualizacji
         #
