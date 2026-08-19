@@ -211,7 +211,7 @@ def _build_context(req: SeasonPdfRequest) -> Dict[str, Any]:
         {"label": "Sędziów w obsadach", "value": _int(t.judges), "hint": f"{_int(t.assignments)} obsad łącznie"},
         {"label": "Dni na turniejach", "value": _int(t.days), "hint": "suma dni wszystkich sędziów"},
         {"label": "Godzin przy boisku", "value": _dec1(t.hours), "hint": "czas realnie przepracowany"},
-        {"label": "Kilometrów", "value": _int(t.km), "hint": "dojazdy sędziów łącznie"},
+        {"label": "Kilometrów", "value": _int(t.km), "hint": "tam i z powrotem, z trasami nierozliczonych"},
         {"label": "Meczów", "value": _int(t.matches), "hint": f"{_int(t.sets)} setów"},
         {"label": "Punktów", "value": _int(t.points), "hint": "zdobytych w tych meczach"},
         {"label": "Finałów", "value": _int(t.finals), "hint": "wraz z meczami o 3. miejsce"},
