@@ -163,3 +163,20 @@ def test_podpis_miesci_sie_w_szerokosci_kartki():
     )
 
     assert _NOTES_SIGN_MAX_W_PX < available
+
+
+def test_arkusz_miesci_sie_w_szerokosci_A4():
+    """Sedno „pustej czwartej strony".
+
+    Wszystko, co nie mieści się w szerokości obszaru druku, renderer przenosi
+    na kolejną kartkę - w praktyce wychodzi z tego pusta strona z pionowym
+    paskiem papieru. Arkusz musi mieć zapas, nie mieścić się „na styk".
+    """
+    ws, _ = _build("Krótka uwaga.")
+
+    szerokosc_px = sum(
+        ws.column_dimensions[chr(ord("A") + i)].width * 7 + 5 for i in range(14)
+    )
+    obszar_druku_cali = 8.268 - ws.page_margins.left - ws.page_margins.right
+
+    assert szerokosc_px / 96.0 < obszar_druku_cali * 0.95

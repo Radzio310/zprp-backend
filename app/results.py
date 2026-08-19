@@ -3789,15 +3789,21 @@ _NOTES_BETWEEN_PT = 8.0        # przerwa między jednym a drugim sędzią
 #: Zaniżone o zapas - lepiej zostawić pasek pustego papieru niż wypchnąć jedną
 #: linijkę na osobną stronę.
 _NOTES_PAGE_BUDGET_PT = 720.0
+#: Szerokość kolumn arkusza uwag (jednostki Excela). Suma MUSI zmieścić się w
+#: obszarze druku A4 z zapasem - patrz komentarz przy ustawianiu kolumn.
+_NOTES_COL_WIDTH = 5.6
+_NOTES_EDGE_COL_WIDTH = 4.0
 #: Ile znaków mieści się w linii przy czcionce 12 na szerokości A..N.
-_NOTES_CHARS_PER_LINE = 74
+#: Węższe kolumny to krótsza linia - z zapasem, bo polskie znaki są szersze
+#: niż przeciętna litera, na której stoi jednostka szerokości kolumny.
+_NOTES_CHARS_PER_LINE = 64
 #: Podpis na stronie uwag: od której kolumny i jak duży.
 #: Nazwane, bo to jedyne miejsce, w którym za szeroki obrazek nie psuje układu,
 #: tylko DOKŁADA pustą stronę - renderer wypycha na nią wszystko, co wystaje
 #: poza prawą krawędź obszaru druku.
 _NOTES_SIGN_ANCHOR_COL = "J"
-_NOTES_SIGN_MAX_W_PX = 150
-_NOTES_SIGN_MAX_H_PX = 44
+_NOTES_SIGN_MAX_W_PX = 130
+_NOTES_SIGN_MAX_H_PX = 38
 #: Wysokość całego bloku podpisów - traktujemy go jako jedną, niepodzielną
 #: całość. Nazwisko na dole jednej strony i podpis na górze następnej to nie
 #: jest podpisany protokół.
@@ -3870,14 +3876,18 @@ def _create_detailed_notes_sheet(
     except Exception:
         pass
 
-    # Świadomie BEZ „zmieść na jednej stronie": ta strona ma prawo być dłuższa,
-    # a każde skalowanie i tak zmieniłoby wysokość wierszy, czyli rozjechałoby
-    # rachunek, na którym stoi cały podział na strony.
+    # „Jedna strona wszerz, dowolnie dużo wzdłuż".
+    #
+    # Wysokości NIE ograniczamy - ta strona ma prawo się rozlać, a sami
+    # pilnujemy, gdzie ją złamać. Szerokość ograniczamy na sztywno: to jedyny
+    # bezpiecznik przed pustą kartką z pionowym paskiem papieru, gdyby arkusz
+    # okazał się choć o włos za szeroki. Konwerter tylko ZMNIEJSZA skalę, więc
+    # przy kolumnach, które i tak się mieszczą, zostaje 100% i nasz rachunek
+    # wysokości pozostaje prawdziwy.
     try:
-        ws_notes.sheet_properties.pageSetUpPr.fitToPage = False
-        ws_notes.page_setup.fitToWidth = 0
+        ws_notes.sheet_properties.pageSetUpPr.fitToPage = True
+        ws_notes.page_setup.fitToWidth = 1
         ws_notes.page_setup.fitToHeight = 0
-        ws_notes.page_setup.scale = 100
     except Exception:
         pass
 
@@ -3893,14 +3903,21 @@ def _create_detailed_notes_sheet(
     except Exception:
         pass
 
-    for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]:
+    # Węższe kolumny niż wcześniej i to jest cała treść poprawki na „pustą
+    # czwartą stronę": przy 6,2 arkusz miał 6,81 cala, a obszar druku A4 z
+    # marginesami 0,6 cala ma 7,07. Zapas 3% zjadały różnice w metryce czcionki
+    # po podstawieniu jej przez konwerter - arkusz wychodził o włos za szeroki,
+    # a wszystko, co nie mieści się w szerokości, renderer przenosi na kolejną
+    # kartkę. Stąd brała się pusta strona: był na niej pionowy pasek papieru
+    # bez treści. Teraz arkusz ma 6,21 cala, czyli 12% zapasu.
+    for col in ["B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]:
         try:
-            ws_notes.column_dimensions[col].width = 6.2
+            ws_notes.column_dimensions[col].width = _NOTES_COL_WIDTH
         except Exception:
             pass
     try:
-        ws_notes.column_dimensions["A"].width = 4.5
-        ws_notes.column_dimensions["N"].width = 4.5
+        ws_notes.column_dimensions["A"].width = _NOTES_EDGE_COL_WIDTH
+        ws_notes.column_dimensions["N"].width = _NOTES_EDGE_COL_WIDTH
     except Exception:
         pass
 
@@ -5072,8 +5089,8 @@ async def generate_protocol_pdf(
                 ws,
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
-                max_width_px=90,
-                max_height_px=24,
+                max_width_px=60,
+                max_height_px=16,
             )
 
             if not ok:
