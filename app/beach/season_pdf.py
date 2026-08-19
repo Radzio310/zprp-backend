@@ -208,6 +208,30 @@ def _chunk(items: List[Any], size: int) -> List[List[Any]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+def _chunk_first(items: List[Any], first: int, rest: int) -> List[List[Any]]:
+    """
+    Pierwsza strona mieści mniej kart, bo dzieli miejsce z nagłówkiem sekcji.
+    Resztę rozkładamy RÓWNO na potrzebną liczbę stron, żeby ostatnia nie
+    kończyła się jedną samotną kartą i połacią pustki.
+    """
+    if not items:
+        return []
+    head, tail = items[:first], items[first:]
+    if not tail:
+        return [head]
+    pages = -(-len(tail) // rest)  # sufit z dzielenia
+    per = -(-len(tail) // pages)
+    out = [head]
+    i = 0
+    for p in range(pages):
+        # ostatnie strony dostają o jedną kartę mniej, gdy podział jest nierówny
+        take = per if len(tail) - i - per >= pages - p - 1 else per - 1
+        take = max(1, min(take, len(tail) - i))
+        out.append(tail[i : i + take])
+        i += take
+    return out
+
+
 def _build_context(req: SeasonPdfRequest) -> Dict[str, Any]:
     t = req.totals
 
@@ -260,7 +284,33 @@ def _build_context(req: SeasonPdfRequest) -> Dict[str, Any]:
         c["km_fmt"] = _int(c.get("km", 0))
         c["earnings_fmt"] = _int(c.get("earnings_total", 0))
         c["tier_label"] = TIER_LABEL.get(c.get("tier") or "", "")
-    card_pages = _chunk(cards, 3)
+        c["spark_w"] = round(100 / len(c["spark"]), 3) if c["spark"] else 100
+    # Karty idą po dwie w rzędzie: 6 na pierwszej stronie (dzieli miejsce
+    # z nagłówkiem rozdziału), po 8 na kolejnych — bez pustych przestrzeni.
+    card_pages = _chunk_first(cards, 6, 8)
+
+    # ── kalendarium: kadr liczony z faktycznego zasięgu bąbli ──
+    #
+    # Stały margines nie wystarczał: przy wielu turniejach w jednym tygodniu
+    # bąble rozchodzą się na kolejne pasy w pionie i wyjeżdżały poza kadr.
+    calendar = dict(req.calendar or {})
+    cal_w = float(calendar.get("width") or 700)
+    cal_h = float(calendar.get("height") or 150)
+    cal_pad = float(calendar.get("pad") or 24)
+    bubbles = list(calendar.get("bubbles") or [])
+    if bubbles:
+        left = min(float(b.get("x", 0)) - float(b.get("r", 0)) for b in bubbles)
+        right = max(float(b.get("x", 0)) + float(b.get("r", 0)) for b in bubbles)
+        top = min(float(b.get("y", 0)) - float(b.get("r", 0)) for b in bubbles)
+        bottom = max(float(b.get("y", 0)) + float(b.get("r", 0)) for b in bubbles)
+    else:
+        left, right, top, bottom = 0.0, cal_w, 0.0, cal_h
+    # oś i podpisy miesięcy muszą się zmieścić niezależnie od bąbli
+    vb_x = min(left, 0.0) - 8
+    vb_y = min(top, 0.0) - 8
+    vb_w = max(right, cal_w) + 8 - vb_x
+    vb_h = max(bottom, cal_h + 40) + 8 - vb_y
+    calendar["viewbox"] = f"{vb_x:g} {vb_y:g} {vb_w:g} {vb_h:g}"
 
     # ── tytuły ──
     titles = list(req.titles or [])
@@ -313,7 +363,7 @@ def _build_context(req: SeasonPdfRequest) -> Dict[str, Any]:
         "months": _normalize_bars(req.months),
         "cities": _normalize_bars(req.cities),
         "poland": dict(req.poland or {}),
-        "calendar": dict(req.calendar or {}),
+        "calendar": calendar,
         "workload": workload,
         "medal_metrics": medal_metrics,
         "medal_rows": medal_rows,
