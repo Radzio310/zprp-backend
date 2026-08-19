@@ -875,13 +875,41 @@ async def update_proel_match(
 @router.delete(
     "/{match_number:path}",
     response_model=dict,
-    summary="Usuń mecz ProEl"
+    summary="Usuń mecz ProEl (tylko administrator)"
 )
-async def delete_proel_match(match_number: str):
-    result = await database.execute(
-        delete(saved_matches)
-        .where(saved_matches.c.match_number == match_number)
-    )
+async def delete_proel_match(
+    match_number: str,
+    actor: Actor = Depends(proel_actor),
+):
+    """Kasuje zapis meczu RAZEM ze stanem współpracy nad nim.
+
+    Skasowanie samego `saved_matches` zostawiało osierocony wiersz w
+    `proel_match_state`: aplikacja dalej widziała mecz jako istniejący
+    (`/proel/state` odpowiada z tej tabeli), a jego overlay wracał przy
+    następnym `ensure`. Usunięty ma być mecz, nie połowa meczu.
+
+    Tylko administrator. To jedyny nieodwracalny endpoint w tym module —
+    dostęp mają go mieć ci sami ludzie, którzy widzą przycisk w aplikacji,
+    i lista jest ta sama (`admin_settings.allowed_admins`).
+    """
+    if not await is_admin(actor.judge_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Usuwanie zapisu meczu jest dostępne tylko dla administratora.",
+            },
+        )
+
+    async with database.transaction():
+        await database.execute(
+            delete(proel_match_state)
+            .where(proel_match_state.c.match_number == match_number)
+        )
+        result = await database.execute(
+            delete(saved_matches)
+            .where(saved_matches.c.match_number == match_number)
+        )
     if result == 0:
         raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
     return {"success": True}
