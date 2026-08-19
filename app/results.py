@@ -2612,8 +2612,10 @@ def _add_exam_mark(ws_raw, *, row: int, kind: str) -> bool:
 _STRIKE_COL_FROM = 1
 _STRIKE_COL_TO = 38
 #: Grubość kreski i domyślna wysokość wiersza zawodnika (pt) z szablonu.
-#: Cieńsza niż linie tabeli - ma być skreśleniem, nie drugą krawędzią wiersza.
-_STRIKE_THICKNESS_PT = 0.8
+#: Wyraźnie CIEŃSZA niż linie tabeli: przy 0,8 pt kreska czytała się jak druga
+#: krawędź wiersza i wzrok gubił, gdzie kończy się jeden zawodnik, a zaczyna
+#: następny. Skreślenie ma być kreską długopisu, a nie linią siatki.
+_STRIKE_THICKNESS_PT = 0.4
 _STRIKE_DEFAULT_ROW_PT = 13.2
 _EMU_PER_PT = 12700
 
@@ -2629,7 +2631,10 @@ def _strike_png() -> bytes:
     # zamiast wywracać generowanie całego protokołu.
     if PILImage is None:
         return b""
-    img = PILImage.new("RGBA", (16, 4), (26, 26, 26, 255))
+    # Jeden piksel wysokości, nie cztery: obrazek jest rozciągany do wysokości
+    # kotwicy (ułamek punktu), a wyższe źródło przy zmniejszaniu rozlewa się
+    # w renderze na dwa piksele - i cała oszczędność na grubości przepada.
+    img = PILImage.new("RGBA", (16, 1), (40, 40, 40, 255))
     buf = BytesIO()
     img.save(buf, format="PNG")
     data = buf.getvalue()

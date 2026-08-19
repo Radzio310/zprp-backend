@@ -118,7 +118,10 @@ def test_kreska_jest_w_srodku_wiersza():
     # Cienki pasek w połowie wysokości, a nie na całą komórkę.
     assert anchor.to.rowOff > anchor._from.rowOff
     grubosc = anchor.to.rowOff - anchor._from.rowOff
-    assert 0 < grubosc < 30_000  # < ~2,4 pt
+    # Granica nie jest okrągła z przypadku: 9525 EMU to 0,75 pt, czyli cienka
+    # krawędź tabeli w Excelu. Skreślenie MUSI być cieńsze - grubsza kreska
+    # czyta się jak druga krawędź wiersza i rozmywa granicę między zawodnikami.
+    assert 0 < grubosc < 9_525
 
 
 def test_pusta_mapa_badan_nie_skresla_zawodnikow():
