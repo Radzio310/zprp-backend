@@ -2612,7 +2612,8 @@ def _add_exam_mark(ws_raw, *, row: int, kind: str) -> bool:
 _STRIKE_COL_FROM = 1
 _STRIKE_COL_TO = 38
 #: Grubość kreski i domyślna wysokość wiersza zawodnika (pt) z szablonu.
-_STRIKE_THICKNESS_PT = 1.1
+#: Cieńsza niż linie tabeli - ma być skreśleniem, nie drugą krawędzią wiersza.
+_STRIKE_THICKNESS_PT = 0.8
 _STRIKE_DEFAULT_ROW_PT = 13.2
 _EMU_PER_PT = 12700
 
@@ -2853,10 +2854,16 @@ def _fill_players_block(
 
     for i in range(max_rows):
         row = start_row + i
-        ws[f"AI{row}"].value = "---"  # zawsze
 
         if i >= len(nums):
-            # zostaw pusto jeśli mniej zawodników
+            # Wiersz bez zawodnika: jedna pozioma kreska przez całą szerokość,
+            # ta sama co przy braku badań. Rząd myślników w każdej rubryce
+            # czytał się jak wypełnione pola z wartością "brak" - kreska od
+            # razu mówi „tu nie ma nikogo".
+            if mark_ws is not None and _add_strike_line(mark_ws, row=row):
+                continue
+            # Bez arkusza surowego albo bez Pillow kreski nie narysujemy -
+            # wtedy zostają myślniki, żeby wiersz nie został zupełnie pusty.
             ws[f"A{row}"].value = "--"
             ws[f"C{row}"].value = "-------------------------------------------"
             ws[f"Q{row}"].value = "-"
@@ -2866,7 +2873,10 @@ def _fill_players_block(
             ws[f"Z{row}"].value = "---"
             ws[f"AC{row}"].value = "---"
             ws[f"AF{row}"].value = "---"
+            ws[f"AI{row}"].value = "---"
             continue
+
+        ws[f"AI{row}"].value = "---"  # zawsze
 
         num = nums[i]
         ps = stats_by_number.get(num) or {}
@@ -3359,8 +3369,17 @@ def _shootout_needed(data_json: Dict[str, Any]) -> bool:
 
 def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
     """
-    Strona "RZUTY KARNE" w przebiegu (kolumny AL..AU, wiersze 15..61).
-    Zaczynamy od wiersza 16.
+    Strona "RZUTY KARNE" w przebiegu (kolumny AL..AU). Zaczynamy od wiersza 16,
+    bo 15 zajmuje scalony nagłówek.
+
+    Zasięg bierzemy z `TIMELINE_END_ROW`, a nie z wpisanej na sztywno liczby:
+    tabela przebiegu sięga wiersza 63, a te pętle kończyły się na 61 - dwa
+    ostatnie wiersze zostawały puste, bo strona karnych powstaje z KOPII
+    arkusza i nikt ich potem nie dotykał.
+
+    (Kopia z `wb.copy_worksheet` nie przenosi scaleń, więc w odróżnieniu od
+    strony pierwszej wiersze 31 i 57 są tu zwykłymi komórkami i wypełniamy je
+    razem z resztą.)
     """
     # 1) Nagłówek: merge + tekst
     ws.merge_cells("AL15:AV15")
@@ -3370,7 +3389,7 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
 
     # 2) Wyczyść/ustaw "--" w obu blokach przebiegu żeby nie było śmieci z kopiowanego arkusza
     # lewy blok (AL..AU)
-    for r in range(16, 62):
+    for r in range(16, TIMELINE_END_ROW + 1):
         ws[f"AL{r}"].value = "--"
         ws[f"AN{r}"].value = "--"
         ws[f"AP{r}"].value = "--"
@@ -3378,7 +3397,7 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         ws[f"AU{r}"].value = "--"
 
     # prawy blok (AW..BF) – na stronie karnych nie używamy, więc czyścimy
-    for r in range(15, 62):
+    for r in range(TIMELINE_START_ROW, TIMELINE_END_ROW + 1):
         ws[f"AW{r}"].value = "--"
         ws[f"AY{r}"].value = "--"
         ws[f"BA{r}"].value = "--"
@@ -3421,7 +3440,7 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
 
     # Co 5 kolejek zmieniamy drużynę zaczynającą karne
     for s in range(1, series_count + 1):
-        if row > 61:
+        if row > TIMELINE_END_ROW:
             break  # brak miejsca w szablonie
 
         idx = s - 1
@@ -3436,7 +3455,7 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
 
         def write_team_shot(team: str, series_no: int):
             nonlocal row, host_score, guest_score
-            if row > 61:
+            if row > TIMELINE_END_ROW:
                 return
 
             ws[f"AL{row}"].value = str(series_no)

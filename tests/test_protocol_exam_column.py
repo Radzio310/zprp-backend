@@ -203,6 +203,19 @@ def test_template_keeps_layout_on_paper():
     )
 
 
+
+def _exam_marks(raw, base: int):
+    """Same ptaszki badań spośród obrazków dodanych po `base`.
+
+    Puste wiersze składu dostają teraz kreskę (kotwica DWUKOMÓRKOWA), więc
+    liczenie wszystkich obrazków mówiłoby o czymś innym niż nazwa testu.
+    Ptaszek ma kotwicę jednokomórkową i po tym go rozpoznajemy.
+    """
+    return [
+        im for im in raw._images[base:] if getattr(im.anchor, "to", None) is None
+    ]
+
+
 def test_template_matches_code():
     """
     Numer zawodnika musi wylądować w FIZYCZNEJ kolumnie B, a nazwisko w D.
@@ -243,7 +256,7 @@ def test_template_matches_code():
     assert raw["A12"].value is None
 
     # dwa ptaszki, zakotwiczone w fizycznej kolumnie A
-    marks = raw._images[base_images:]
+    marks = _exam_marks(raw, base_images)
     assert len(marks) == 2
     for img in marks:
         assert img.anchor._from.col == 0
@@ -265,7 +278,7 @@ def test_players_without_exams_get_no_marks():
         exam_by_number={},
         mark_ws=raw,
     )
-    assert len(raw._images) == base_images
+    assert _exam_marks(raw, base_images) == []
 
 
 def test_marks_survive_worksheet_copy():
@@ -291,7 +304,7 @@ def test_marks_survive_worksheet_copy():
         exam_by_number={7: "zprp", 61: "wzpr"},
         mark_ws=raw,
     )
-    assert len(raw._images) == base_images + 2
+    assert len(_exam_marks(raw, base_images)) == 2
 
     page2 = wb.copy_worksheet(raw)
     _copy_images_safe(raw, page2)
@@ -318,4 +331,4 @@ def test_old_client_payload_produces_no_marks():
         mark_ws=raw,
     )
     assert raw["B11"].value == 7
-    assert len(raw._images) == base_images
+    assert _exam_marks(raw, base_images) == []
