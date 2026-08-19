@@ -4,7 +4,7 @@ Zawodnik bez badań zostaje na wydruku - był zgłoszony, więc numer i nazwisko
 muszą być widoczne - ale jego wiersz jest przekreślony na całej szerokości
 tabeli. Testy pilnują trzech rzeczy, z których każda po cichu psuje protokół:
 
-  • zasięgu kreski (fizycznie od B do AJ, czyli wszystko poza kolumną ptaszków),
+  • zasięgu kreski (fizycznie od B do AL, czyli wszystko poza kolumną ptaszków),
   • tego, że kreska trafia w ŚRODEK wiersza, a nie na jego krawędź,
   • i najważniejszego wyjątku: pusta mapa badań znaczy „zapis nic nie wie
     o badaniach", a nie „nikt ich nie ma". Skreślenie całego składu na
@@ -59,7 +59,7 @@ def test_brak_badan_skresla_wiersz():
     assert len(added) == 2  # ptaszek dla 7 + kreska dla 61
 
 
-def test_kreska_idzie_od_B_do_AJ():
+def test_kreska_idzie_od_B_do_AL():
     raw, ws = _sheet()
     base = len(raw._images)
     _fill(raw, ws, {7: "zprp"})
@@ -70,9 +70,9 @@ def test_kreska_idzie_od_B_do_AJ():
     assert len(strikes) == 1
     anchor = strikes[0].anchor
 
-    # Fizyczna kolumna B (0-based 1) do początku AK, czyli prawej krawędzi AJ.
+    # Fizyczna kolumna B (0-based 1) do początku AM, czyli prawej krawędzi AL.
     assert anchor._from.col == _STRIKE_COL_FROM == 1
-    assert anchor.to.col == _STRIKE_COL_TO == 36
+    assert anchor.to.col == _STRIKE_COL_TO == 38
 
 
 def test_kreska_jest_w_srodku_wiersza():

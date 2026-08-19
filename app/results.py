@@ -2594,8 +2594,8 @@ def _add_exam_mark(ws_raw, *, row: int, kind: str) -> bool:
 #
 # Zawodnik bez ważnych badań nie gra, ale ZOSTAJE na protokole: numer i nazwisko
 # muszą być widoczne, bo był zgłoszony do meczu. Skreślamy cały jego wiersz -
-# fizycznie od kolumny B (numer) po AJ (ostatnia kolumna kar), czyli wszystko
-# poza wąską kolumną ptaszków, która i tak zostaje pusta.
+# fizycznie od kolumny B (numer) po AL, czyli wszystko poza wąską kolumną
+# ptaszków, która i tak zostaje pusta.
 #
 # Linia jedzie jako obrazek rozciągnięty kotwicą DWUKOMÓRKOWĄ, a nie jako
 # `Font(strike=True)` na kolejnych komórkach. Powód jest prosty: przekreślenie
@@ -2606,9 +2606,11 @@ def _add_exam_mark(ws_raw, *, row: int, kind: str) -> bool:
 # Kotwica dwukomórkowa daje krawędzie DOKŁADNIE na granicach kolumn, bez
 # przeliczania szerokości na piksele (te zależą od czcionki i skali wydruku).
 
-#: Fizyczne kolumny (0-based): B = 1, koniec = początek AK, czyli prawa krawędź AJ.
+#: Fizyczne kolumny (0-based): B = 1, koniec = początek AM, czyli prawa krawędź AL.
+#: Kotwica dwukomórkowa kończy się NA POCZĄTKU kolumny `to`, więc żeby kreska
+#: objęła AL (37), `to` musi wskazywać kolejną kolumnę.
 _STRIKE_COL_FROM = 1
-_STRIKE_COL_TO = 36
+_STRIKE_COL_TO = 38
 #: Grubość kreski i domyślna wysokość wiersza zawodnika (pt) z szablonu.
 _STRIKE_THICKNESS_PT = 1.1
 _STRIKE_DEFAULT_ROW_PT = 13.2
