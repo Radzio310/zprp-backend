@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 router = APIRouter(tags=["Beach: Season PDF"])
@@ -25,6 +25,19 @@ DOWNLOAD_DIR = "/tmp/beach_season_downloads"
 
 ACCENT = "#8A30D0"
 ACCENT_2 = "#FF7A2F"
+INK = "#1B1826"
+
+MEDAL_COLORS = {1: "#D9A400", 2: "#98A2B3", 3: "#B4703C"}
+METRIC_SHORT = {
+    "tournaments": "Turnieje",
+    "matches": "Mecze",
+    "hours": "Godziny",
+    "km": "Kilometry",
+    "days": "Dni",
+    "finals": "Finały",
+    "earnings": "Wynagr.",
+}
+TIER_LABEL = {"gold": "ZŁOTO", "silver": "SREBRO", "bronze": "BRĄZ"}
 
 
 def _load_logo_b64() -> str:
@@ -92,7 +105,7 @@ class SeasonRankingBlock(BaseModel):
     key: str = ""
     label: str = ""
     unit: str = ""
-    entries: List[SeasonRankingEntry] = []
+    entries: List[SeasonRankingEntry] = Field(default_factory=list)
 
 
 class SeasonJudgeRow(BaseModel):
@@ -116,15 +129,25 @@ class SeasonJudgeRow(BaseModel):
 
 
 class SeasonPdfRequest(BaseModel):
+    # "full_photos" | "full" | "no_cards"
+    variant: str = "full"
     season: str = ""
     season_label: str = ""
     generated_by: str = ""
-    totals: SeasonTotals = SeasonTotals()
-    categories: List[SeasonBar] = []
-    months: List[SeasonBar] = []
-    cities: List[SeasonBar] = []
-    rankings: List[SeasonRankingBlock] = []
-    judges: List[SeasonJudgeRow] = []
+    totals: SeasonTotals = Field(default_factory=SeasonTotals)
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+    categories: List[SeasonBar] = Field(default_factory=list)
+    months: List[SeasonBar] = Field(default_factory=list)
+    cities: List[SeasonBar] = Field(default_factory=list)
+    poland: Dict[str, Any] = Field(default_factory=dict)
+    calendar: Dict[str, Any] = Field(default_factory=dict)
+    workload: Dict[str, Any] = Field(default_factory=dict)
+    medals: Dict[str, Any] = Field(default_factory=dict)
+    rankings: List[SeasonRankingBlock] = Field(default_factory=list)
+    titles: List[Dict[str, Any]] = Field(default_factory=list)
+    duets: List[Dict[str, Any]] = Field(default_factory=list)
+    cards: List[Dict[str, Any]] = Field(default_factory=list)
+    judges: List[SeasonJudgeRow] = Field(default_factory=list)
 
 
 # ─────────────────────────── formatery ───────────────────────────
@@ -143,19 +166,11 @@ def _money(value: Any) -> str:
 
 
 def _km(value: Any) -> str:
-    try:
-        n = float(value or 0)
-    except Exception:
-        n = 0
-    return f"{n:,.0f}".replace(",", " ") + " km"
+    return _int(value) + " km"
 
 
 def _hours(value: Any) -> str:
-    try:
-        n = float(value or 0)
-    except Exception:
-        n = 0
-    return f"{n:.1f}".replace(".", ",") + " h"
+    return _dec1(value) + " h"
 
 
 def _dec1(value: Any) -> str:
@@ -189,8 +204,13 @@ def _normalize_bars(bars: List[SeasonBar]) -> List[Dict[str, Any]]:
     return raw
 
 
+def _chunk(items: List[Any], size: int) -> List[List[Any]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 def _build_context(req: SeasonPdfRequest) -> Dict[str, Any]:
     t = req.totals
+
     judges = [j.model_dump() for j in req.judges]
     for j in judges:
         j["hours_fmt"] = _dec1(j["hours"])
@@ -206,34 +226,101 @@ def _build_context(req: SeasonPdfRequest) -> Dict[str, Any]:
             e["pct"] = round(max(0.0, min(1.0, e.get("share") or 0)) * 100, 2)
         rankings.append({**block.model_dump(), "entries": entries})
 
-    kpis = [
-        {"label": "Turniejów w sezonie", "value": _int(t.tournaments), "hint": f"MP: {_int(t.tournaments_mp)} · wojewódzkie: {_int(t.tournaments_regional)}"},
-        {"label": "Sędziów w obsadach", "value": _int(t.judges), "hint": f"{_int(t.assignments)} obsad łącznie"},
-        {"label": "Dni na turniejach", "value": _int(t.days), "hint": "suma dni wszystkich sędziów"},
-        {"label": "Godzin przy boisku", "value": _dec1(t.hours), "hint": "czas realnie przepracowany"},
-        {"label": "Kilometrów", "value": _int(t.km), "hint": "tam i z powrotem, z trasami nierozliczonych"},
+    # ── medale ──
+    medal_metrics = [
+        {"key": m.get("key"), "label": METRIC_SHORT.get(m.get("key"), m.get("label", ""))}
+        for m in (req.medals.get("metrics") or [])
+    ]
+    medal_rows = list(req.medals.get("rows") or [])
+
+    # ── obciążenie kadry ──
+    workload = dict(req.workload or {})
+    buckets = list(workload.get("buckets") or [])
+    peak_bucket = max([b.get("count", 0) for b in buckets], default=0)
+    for b in buckets:
+        b["pct"] = round(b.get("count", 0) / peak_bucket * 100, 2) if peak_bucket else 0
+    workload["buckets"] = buckets
+    workload["median_fmt"] = _dec1(workload.get("median", 0))
+    workload["mean_fmt"] = _dec1(workload.get("mean", 0))
+
+    # ── karty sędziów: po 3 na stronę, ze skalą sparkline ──
+    cards = list(req.cards or [])
+    for c in cards:
+        months = c.get("months") or []
+        peak = max(months) if months else 0
+        c["spark"] = [
+            {
+                "label": (c.get("month_labels") or [])[i] if i < len(c.get("month_labels") or []) else "",
+                "value": v,
+                "pct": round(v / peak * 100, 1) if peak else 0,
+            }
+            for i, v in enumerate(months)
+        ]
+        c["hours_fmt"] = _dec1(c.get("hours", 0))
+        c["km_fmt"] = _int(c.get("km", 0))
+        c["earnings_fmt"] = _int(c.get("earnings_total", 0))
+        c["tier_label"] = TIER_LABEL.get(c.get("tier") or "", "")
+    card_pages = _chunk(cards, 3)
+
+    # ── tytuły ──
+    titles = list(req.titles or [])
+    for x in titles:
+        x["tier_label"] = TIER_LABEL.get(x.get("tier") or "", "")
+
+    kpis_big = [
+        {"label": "Turniejów w sezonie", "value": _int(t.tournaments),
+         "hint": f"MP: {_int(t.tournaments_mp)} · wojewódzkie: {_int(t.tournaments_regional)}"},
+        {"label": "Sędziów w obsadach", "value": _int(t.judges),
+         "hint": f"{_int(t.assignments)} obsad łącznie"},
+        {"label": "Dni pracy sędziów", "value": _int(t.days),
+         "hint": f"{_hours(t.hours)} realnie przy boisku"},
+    ]
+    kpis_small = [
+        {"label": "Kilometrów", "value": _int(t.km), "hint": "tam i z powrotem"},
         {"label": "Meczów", "value": _int(t.matches), "hint": f"{_int(t.sets)} setów"},
         {"label": "Punktów", "value": _int(t.points), "hint": "zdobytych w tych meczach"},
-        {"label": "Finałów", "value": _int(t.finals), "hint": "wraz z meczami o 3. miejsce"},
+        {"label": "Finałów", "value": _int(t.finals), "hint": "z meczami o 3. miejsce"},
         {"label": "Miejscowości", "value": _int(t.cities), "hint": f"{_int(t.provinces)} województw"},
-        {"label": "Wynagrodzenia brutto", "value": _money(t.earnings_total), "hint": "ryczałty + dojazdy"},
-        {"label": "W tym dojazdy", "value": _money(t.earnings_travel), "hint": "zwrot kosztów podróży"},
-        {"label": "Do wypłaty netto", "value": _money(t.earnings_netto), "hint": "po kosztach i podatku"},
+        {"label": "Brutto", "value": _money(t.earnings_total), "hint": "ryczałty + dojazdy"},
+        {"label": "Dojazdy", "value": _money(t.earnings_travel), "hint": "zwrot kosztów podróży"},
+        {"label": "Netto", "value": _money(t.earnings_netto), "hint": "po kosztach i podatku"},
+    ]
+
+    hero = [
+        {"value": _int(t.tournaments), "label": "turniejów"},
+        {"value": _int(t.judges), "label": "sędziów"},
+        {"value": _int(t.km), "label": "kilometrów"},
+        {"value": _int(t.matches), "label": "meczów"},
     ]
 
     return {
+        "variant": req.variant,
+        "show_cards": req.variant in ("full", "full_photos") and len(cards) > 0,
         "season": req.season,
         "season_label": req.season_label or req.season,
         "generated_by": req.generated_by,
         "generated_at": datetime.now(ZoneInfo("Europe/Warsaw")).strftime("%d.%m.%Y %H:%M"),
         "accent": ACCENT,
         "accent2": ACCENT_2,
+        "ink": INK,
+        "medal_colors": MEDAL_COLORS,
         "logo_b64": _load_logo_b64(),
-        "kpis": kpis,
+        "hero": hero,
+        "kpis_big": kpis_big,
+        "kpis_small": kpis_small,
+        "records": list(req.records or []),
         "categories": _normalize_bars(req.categories),
         "months": _normalize_bars(req.months),
         "cities": _normalize_bars(req.cities),
+        "poland": dict(req.poland or {}),
+        "calendar": dict(req.calendar or {}),
+        "workload": workload,
+        "medal_metrics": medal_metrics,
+        "medal_rows": medal_rows,
         "rankings": rankings,
+        "titles": titles,
+        "duets": list(req.duets or []),
+        "card_pages": card_pages,
         "judges": judges,
         "disclaimer": (
             "Zestawienie przygotowane automatycznie przez aplikację BAZA Beach na podstawie obsad, "
