@@ -3094,6 +3094,23 @@ def _advance_scores_for_events(
     return h, g
 
 
+def _force_h_align(cell, horizontal: str) -> None:
+    """Wymusza poziome wyrównanie, zostawiając resztę stylu bez zmian."""
+    try:
+        al = cell.alignment
+        if al is not None and al.horizontal == horizontal:
+            return
+        cell.alignment = Alignment(
+            horizontal=horizontal,
+            vertical=getattr(al, "vertical", None),
+            wrap_text=getattr(al, "wrap_text", None),
+            shrink_to_fit=getattr(al, "shrinkToFit", None),
+            indent=getattr(al, "indent", 0) or 0,
+        )
+    except Exception:
+        pass
+
+
 def _fill_timeline_half_chunk(
     ws,
     *,
@@ -3118,12 +3135,27 @@ def _fill_timeline_half_chunk(
     # bierzemy tylko te wiersze, które faktycznie wolno ruszać
     rows = [r for r in TIMELINE_ROWS if start_row <= r <= end_row]
 
+    def _align_score(r: int) -> None:
+        """
+        Wynik ma się kleić do dwukropka: gospodarz do prawej, gość do lewej.
+
+        W szablonie DWA wiersze przebiegu (30 i 56, czyli te na styku sekcji
+        formularza) mają wyrównanie do środka zamiast do krawędzi. Przy
+        jednocyfrowym wyniku nikt tego nie zauważał, ale przy dwucyfrowym
+        liczby odsuwały się od dwukropka i cały wpis rozjeżdżał się w bok -
+        stąd „11 : 10" szersze niż wszystko dookoła. Wyrównanie ustawiamy
+        więc sami, w każdym wierszu, zamiast ufać szablonowi.
+        """
+        _force_h_align(ws[f"{col_host_score}{r}"], "right")
+        _force_h_align(ws[f"{col_guest_score}{r}"], "left")
+
     def _write_blank(r: int) -> None:
         ws[f"{col_minute}{r}"].value = "--"
         ws[f"{col_host_action}{r}"].value = "--"
         ws[f"{col_host_score}{r}"].value = "--"
         ws[f"{col_guest_score}{r}"].value = "--"
         ws[f"{col_guest_action}{r}"].value = "--"
+        _align_score(r)
 
     # 1) wypełnij eventami tyle ile się da
     i = 0
@@ -3168,6 +3200,7 @@ def _fill_timeline_half_chunk(
         else:
             ws[f"{col_host_score}{r}"].value = "--"
             ws[f"{col_guest_score}{r}"].value = "--"
+        _align_score(r)
 
         i += 1
 
@@ -3758,6 +3791,13 @@ _NOTES_BETWEEN_PT = 8.0        # przerwa między jednym a drugim sędzią
 _NOTES_PAGE_BUDGET_PT = 720.0
 #: Ile znaków mieści się w linii przy czcionce 12 na szerokości A..N.
 _NOTES_CHARS_PER_LINE = 74
+#: Podpis na stronie uwag: od której kolumny i jak duży.
+#: Nazwane, bo to jedyne miejsce, w którym za szeroki obrazek nie psuje układu,
+#: tylko DOKŁADA pustą stronę - renderer wypycha na nią wszystko, co wystaje
+#: poza prawą krawędź obszaru druku.
+_NOTES_SIGN_ANCHOR_COL = "J"
+_NOTES_SIGN_MAX_W_PX = 150
+_NOTES_SIGN_MAX_H_PX = 44
 #: Wysokość całego bloku podpisów - traktujemy go jako jedną, niepodzielną
 #: całość. Nazwisko na dole jednej strony i podpis na górze następnej to nie
 #: jest podpisany protokół.
@@ -3936,12 +3976,16 @@ def _create_detailed_notes_sheet(
         cell.font = Font(size=11, bold=True)
 
         sign_row = add_row(_NOTES_SIGN_PT)
+        # Kotwica w J, nie w K, i węższa ramka. Od kolumny K do prawej krawędzi
+        # obszaru druku zostaje ~181 px, więc podpis szeroki na 190 px wystawał
+        # POZA kartkę - a wszystko, co wystaje w prawo, renderer wypycha na
+        # dodatkową stronę. Stąd czwarta strona z jednym zawijasem w rogu.
         _add_signature_image(
             ws_notes,
             image_bytes=sig_bytes or b"",
-            anchor_cell="K" + str(sign_row),
-            max_width_px=190,
-            max_height_px=54,
+            anchor_cell=_NOTES_SIGN_ANCHOR_COL + str(sign_row),
+            max_width_px=_NOTES_SIGN_MAX_W_PX,
+            max_height_px=_NOTES_SIGN_MAX_H_PX,
         )
 
     add_official(referee1_name, referee1_sig_bytes)
@@ -4986,15 +5030,15 @@ async def generate_protocol_pdf(
             ws,
             image_bytes=host_sig_bytes,
             anchor_cell=SIGN_ANCHORS["hostTeamSignature"],
-            max_width_px=80,
-            max_height_px=45,
+            max_width_px=74,
+            max_height_px=41,
         )
         _add_signature_image(
             ws,
             image_bytes=guest_sig_bytes,
             anchor_cell=SIGN_ANCHORS["guestTeamSignature"],
-            max_width_px=80,
-            max_height_px=45,
+            max_width_px=74,
+            max_height_px=41,
         )
 
         # 2) podpis medyka
@@ -5004,8 +5048,8 @@ async def generate_protocol_pdf(
             ws,
             image_bytes=medic_sig_bytes,
             anchor_cell=SIGN_ANCHORS["medic"],
-            max_width_px=120,
-            max_height_px=40,
+            max_width_px=112,
+            max_height_px=37,
         )
 
         # 3) podpisy officials
@@ -5028,8 +5072,8 @@ async def generate_protocol_pdf(
                 ws,
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
-                max_width_px=110,
-                max_height_px=30,
+                max_width_px=90,
+                max_height_px=24,
             )
 
             if not ok:

@@ -135,3 +135,31 @@ def test_zawijanie_nie_gubi_slow():
     text = " ".join(f"slowo{i}" for i in range(400))
     lines = _wrap_notes_text(text, 74)
     assert " ".join(lines).split() == text.split()
+
+
+def test_podpis_miesci_sie_w_szerokosci_kartki():
+    """Guard przed pustą stroną: obrazek nie ma prawa wystawać poza kolumnę N.
+
+    Renderer nie przycina tego, co wystaje w prawo - wypycha to na dodatkową
+    stronę. Objawem był jeden zawijas samotnie stojący na czwartej kartce.
+    """
+    from openpyxl.utils import column_index_from_string
+
+    from app.results import (
+        _NOTES_SIGN_ANCHOR_COL,
+        _NOTES_SIGN_MAX_W_PX,
+    )
+
+    ws, _ = _build("Krótka uwaga.")
+
+    def _px(width: float) -> float:
+        return width * 7 + 5
+
+    first = column_index_from_string(_NOTES_SIGN_ANCHOR_COL)
+    last = column_index_from_string("N")
+    available = sum(
+        _px(ws.column_dimensions[chr(ord("A") + c - 1)].width)
+        for c in range(first, last + 1)
+    )
+
+    assert _NOTES_SIGN_MAX_W_PX < available
