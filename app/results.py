@@ -2590,6 +2590,90 @@ def _add_exam_mark(ws_raw, *, row: int, kind: str) -> bool:
         return False
 
 
+# ── Skreślenie wiersza zawodnika bez ważnych badań ──────────────────────────
+#
+# Zawodnik bez ważnych badań nie gra, ale ZOSTAJE na protokole: numer i nazwisko
+# muszą być widoczne, bo był zgłoszony do meczu. Skreślamy cały jego wiersz -
+# fizycznie od kolumny B (numer) po AJ (ostatnia kolumna kar), czyli wszystko
+# poza wąską kolumną ptaszków, która i tak zostaje pusta.
+#
+# Linia jedzie jako obrazek rozciągnięty kotwicą DWUKOMÓRKOWĄ, a nie jako
+# `Font(strike=True)` na kolejnych komórkach. Powód jest prosty: przekreślenie
+# czcionki tnie wyłącznie tam, gdzie stoi tekst, a wiersz jest w większości
+# wypełniony myślnikami i pustkami - wyszłaby z tego linia przerywana w
+# nieregularnych odstępach, czytana raczej jako usterka wydruku niż skreślenie.
+#
+# Kotwica dwukomórkowa daje krawędzie DOKŁADNIE na granicach kolumn, bez
+# przeliczania szerokości na piksele (te zależą od czcionki i skali wydruku).
+
+#: Fizyczne kolumny (0-based): B = 1, koniec = początek AK, czyli prawa krawędź AJ.
+_STRIKE_COL_FROM = 1
+_STRIKE_COL_TO = 36
+#: Grubość kreski i domyślna wysokość wiersza zawodnika (pt) z szablonu.
+_STRIKE_THICKNESS_PT = 1.1
+_STRIKE_DEFAULT_ROW_PT = 13.2
+_EMU_PER_PT = 12700
+
+_STRIKE_PNG_CACHE: Dict[str, bytes] = {}
+
+
+def _strike_png() -> bytes:
+    """Jednolity prostokąt w kolorze długopisu. Rozciąga go dopiero kotwica."""
+    cached = _STRIKE_PNG_CACHE.get("line")
+    if cached is not None:
+        return cached
+    # Ten sam warunek co przy ptaszkach: bez Pillow po prostu nie skreślamy,
+    # zamiast wywracać generowanie całego protokołu.
+    if PILImage is None:
+        return b""
+    img = PILImage.new("RGBA", (16, 4), (26, 26, 26, 255))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    data = buf.getvalue()
+    _STRIKE_PNG_CACHE["line"] = data
+    return data
+
+
+def _add_strike_line(ws_raw, *, row: int) -> bool:
+    """Pozioma kreska przez środek komórek wiersza `row` (arkusz SUROWY)."""
+    data = _strike_png()
+    if not data:
+        return False
+    try:
+        from openpyxl.drawing.spreadsheet_drawing import (
+            AnchorMarker,
+            TwoCellAnchor,
+        )
+
+        height_pt = float(
+            getattr(ws_raw.row_dimensions[row], "height", None) or _STRIKE_DEFAULT_ROW_PT
+        )
+        mid = height_pt / 2.0
+        half = _STRIKE_THICKNESS_PT / 2.0
+        top_emu = int(max(0.0, mid - half) * _EMU_PER_PT)
+        bottom_emu = int(min(height_pt, mid + half) * _EMU_PER_PT)
+
+        # Każdy obrazek MUSI mieć własny BytesIO - openpyxl trzyma referencję
+        # do strumienia i współdzielenie jednego bufora psuje zapis pliku.
+        img = Image(BytesIO(data))
+        img.anchor = TwoCellAnchor(
+            editAs="oneCell",
+            _from=AnchorMarker(
+                col=_STRIKE_COL_FROM, colOff=0, row=row - 1, rowOff=top_emu
+            ),
+            to=AnchorMarker(
+                col=_STRIKE_COL_TO, colOff=0, row=row - 1, rowOff=bottom_emu
+            ),
+        )
+        ws_raw.add_image(img)
+        return True
+    except Exception:
+        logger.warning(
+            "Nie udało się skreślić wiersza zawodnika (wiersz %s)", row, exc_info=True
+        )
+        return False
+
+
 def _player_exam_map_from_cards(cards: List[Any]) -> Dict[int, str]:
     """
     number -> "zprp" | "wzpr" | "manual".
@@ -2801,6 +2885,15 @@ def _fill_players_block(
         kind = (exam_by_number or {}).get(num)
         if kind and mark_ws is not None:
             _add_exam_mark(mark_ws, row=row, kind=kind)
+        elif exam_by_number and mark_ws is not None:
+            # Brak ważnych badań = wiersz skreślony.
+            #
+            # Warunek `exam_by_number` (a nie sam brak `kind`) jest tu istotny:
+            # pusta mapa znaczy, że zapis meczu w ogóle nie niesie informacji
+            # o badaniach - tak wygląda protokół sprzed wprowadzenia tej
+            # kolumny. Skreślenie wtedy CAŁEGO składu byłoby nie tyle surowe,
+            # co po prostu nieprawdziwe.
+            _add_strike_line(mark_ws, row=row)
         ws[f"Q{row}"].value = "W" if entered else "-"
         ws[f"S{row}"].value = goals if goals > 0 else "-"
         ws[f"U{row}"].value = str(warning).strip() if isinstance(warning, str) and warning.strip() else "-"
