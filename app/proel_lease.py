@@ -42,6 +42,26 @@ def lease_active(state: Optional[Dict[str, Any]]) -> bool:
     return until is not None and until > now_utc()
 
 
+def same_judge_lease(state: Optional[Dict[str, Any]], actor_judge_id: str) -> bool:
+    """Czy leasing trzyma TEN SAM sędzia — to samo albo inne jego urządzenie.
+
+    Po to, żeby przesiadka na drugi telefon nie wymagała czekania, aż wygaśnie
+    leasing sprzed przesiadki. Blokada istnieje przeciwko dwóm OSOBOM piszącym
+    jeden protokół; jedna osoba z dwóch swoich urządzeń to nie ten przypadek.
+
+    Warunek jest celowo wąski:
+      • `lease_kind == "app"` — leasing-widmo obejmowane za starą aplikację nie
+        wie, kto go trzyma, i nie wolno go przypisać nikomu,
+      • niepusty numer po OBU stronach — puste równe pustemu uznałoby każdego
+        za właściciela cudzego leasingu.
+    """
+    jid = str(actor_judge_id or "").strip()
+    holder = str((state or {}).get("lease_judge_id") or "").strip()
+    if not jid or not holder or holder != jid:
+        return False
+    return (state or {}).get("lease_kind") == "app"
+
+
 def legacy_lease_values(
     state: Dict[str, Any], writer_install: str
 ) -> Optional[Dict[str, Any]]:

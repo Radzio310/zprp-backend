@@ -1023,7 +1023,11 @@ class ProElLeaseInfo(BaseModel):
     judge_id: Optional[str] = None
     epoch: Optional[int] = None
     until: Optional[str] = None
+    #: Leasing trzyma TO urządzenie.
     is_you: Optional[bool] = None
+    #: Leasing trzyma ten sam sędzia — to samo albo inne jego urządzenie.
+    #: Przejęcie przejdzie wtedy bez `force` i bez czekania na wygaśnięcie.
+    same_judge: Optional[bool] = None
 
 
 class ProElStateResponse(BaseModel):

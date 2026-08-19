@@ -12,6 +12,7 @@ from app.proel_lease import (
     lease_active as _lease_active,
     legacy_lease_values as _legacy_lease_values,
     now_utc as _now,
+    same_judge_lease as _same_judge_lease,
 )
 from app.proel_status import (
     VALID_STATUSES,
@@ -140,7 +141,9 @@ def _reproject_blob(state: Optional[Dict[str, Any]], blob: Any) -> Any:
         return blob
 
 
-def _lease_view(state: Optional[Dict[str, Any]], actor_install: str) -> Dict[str, Any]:
+def _lease_view(
+    state: Optional[Dict[str, Any]], actor_install: str, actor_judge_id: str = ""
+) -> Dict[str, Any]:
     if not state:
         return {"held": False}
     until = state.get("lease_until")
@@ -150,6 +153,7 @@ def _lease_view(state: Optional[Dict[str, Any]], actor_install: str) -> Dict[str
         until = until.replace(tzinfo=timezone.utc)
     if until <= _now():
         return {"held": False, "expired": True}
+    is_you = bool(actor_install and state.get("lease_install") == actor_install)
     return {
         "held": True,
         "kind": state.get("lease_kind") or "app",
@@ -157,9 +161,10 @@ def _lease_view(state: Optional[Dict[str, Any]], actor_install: str) -> Dict[str
         "judge_id": state.get("lease_judge_id") or "",
         "epoch": int(state.get("lease_epoch") or 0),
         "until": until.isoformat(),
-        "is_you": bool(
-            actor_install and state.get("lease_install") == actor_install
-        ),
+        "is_you": is_you,
+        # „To ja, ale na drugim telefonie". Aplikacja pokazuje wtedy zwykłe
+        # wejście w mecz zamiast podglądu na żywo - przejęcie i tak przejdzie.
+        "same_judge": is_you or _same_judge_lease(state, actor_judge_id),
     }
 
 
@@ -249,7 +254,7 @@ async def _build_state_response(
         doc_exists=doc_status is not None,
         updated_at=(state or {}).get("updated_at"),
         server_now=_now(),
-        lease=_lease_view(state, actor.installation_id),
+        lease=_lease_view(state, actor.installation_id, actor.judge_id),
         fields=_overlay_of(state),
         your_roles=sorted(roles),
         retry_after_ms=4000,
@@ -586,8 +591,22 @@ async def lease_proel_match(
                     },
                 )
         elif held and not mine:
-            allowed = False
-            if req.force:
+            # Ten sam sędzia z drugiego urządzenia przechodzi BEZ czekania na
+            # wygaśnięcie i bez `force`.
+            #
+            # Blokada istnieje po to, żeby dwie OSOBY nie pisały jednego
+            # protokołu. Jedna osoba z dwóch swoich telefonów to nie ten
+            # przypadek: telefon padł, przesiadka na tablet, drugie urządzenie
+            # pod ręką - a stary leasing i tak trzyma jeszcze przez chwilę po
+            # ostatniej edycji i blokował własnego właściciela.
+            #
+            # To pełnoprawne PRZEJĘCIE, nie współdzielenie: `lease_install`
+            # przechodzi na nowe urządzenie i epoka rośnie, więc poprzednie
+            # dostanie 412 przy najbliższym biciu serca i przestanie pisać.
+            # Regułę „w danej chwili pisze dokładnie jedno urządzenie"
+            # zachowujemy w całości.
+            allowed = _same_judge_lease(state, actor.judge_id)
+            if not allowed and req.force:
                 roles = roles_for(actor, _officials_of(state))
                 allowed = "delegate" in roles or await is_admin(actor.judge_id)
             if not allowed:
