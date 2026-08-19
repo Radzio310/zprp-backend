@@ -256,3 +256,130 @@ async def zprp_auth(
 )
 async def zprp_logout(payload: ZprpLogoutRequest):
     return await close_session(payload.hash_sesji)
+
+
+# ─────────────────────────── wynik skrócony ───────────────────────────
+#
+# `summary.php` aktualizuje WYŁĄCZNIE te kolumny, których klucze przyszły
+# w żądaniu, a pusty string ustawia NULL. To rozróżnienie jest tu sednem:
+# „nie wiem" (klucz pominięty) to co innego niż „ma być puste" (klucz z ""),
+# i tylko aplikacja wie, które jest które. Dlatego proxy NIE uzupełnia
+# brakujących pól ani nie zamienia None na "" - przepuszcza dokładnie to,
+# co dostało, po sprawdzeniu, że nazwa klucza jest ze słownika ZPRP.
+
+#: Pola przyjmowane przez summary.php (dokumentacja v2.0). Biała lista, bo
+#: literówka w nazwie klucza po stronie aplikacji byłaby po cichu ignorowana
+#: przez upstream - a sędzia zobaczyłby „zapisano" przy niezapisanym polu.
+SUMMARY_FIELDS = frozenset(
+    {
+        "data_fakt",
+        "wynik_gosp_pol", "wynik_gosc_pol",
+        "wynik_gosp_full", "wynik_gosc_full",
+        "wynik_bramki_gosp", "wynik_bramki_gosc",
+        "dogrywka_1_pol_gosp", "dogrywka_1_pol_gosc",
+        "dogrywka_1_full_gosp", "dogrywka_1_full_gosc",
+        "dogrywka_2_pol_gosp", "dogrywka_2_pol_gosc",
+        "dogrywka_2_full_gosp", "dogrywka_2_full_gosc",
+        "dogrywka_karne_gosp", "dogrywka_karne_gosc",
+        "karne_ile_gosp", "karne_bramki_gosp",
+        "karne_ile_gosc", "karne_bramki_gosc",
+        "timeout1_gosp_ii", "timeout1_gosp_ss",
+        "timeout2_gosp_ii", "timeout2_gosp_ss",
+        "timeout3_gosp_ii", "timeout3_gosp_ss",
+        "timeout1_gosc_ii", "timeout1_gosc_ss",
+        "timeout2_gosc_ii", "timeout2_gosc_ss",
+        "timeout3_gosc_ii", "timeout3_gosc_ss",
+        "widzowie",
+    }
+)
+
+
+class ZprpSummaryRequest(BaseModel):
+    hash_sesji: str
+    #: Tylko klucze do zapisania. Pominięty klucz = pole nietknięte,
+    #: klucz z "" = pole wyczyszczone (NULL) po stronie ZPRP.
+    fields: Dict[str, str]
+
+
+async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
+    """Rdzeń wysyłki wyniku skróconego - wydzielony z trasy dla testów."""
+    hash_sesji = (payload.hash_sesji or "").strip()
+    if not hash_sesji:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Brak hash_sesji."},
+        )
+
+    unknown = sorted(set(payload.fields or {}) - SUMMARY_FIELDS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "BAD_FIELDS",
+                "message": f"Nieznane pola wyniku skróconego: {', '.join(unknown)}.",
+            },
+        )
+    if not payload.fields:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Pusty zestaw pól do zapisania."},
+        )
+
+    _require_app_key()
+
+    upstream_payload: Dict[str, Any] = {"hash_sesji": hash_sesji}
+    upstream_payload.update({k: str(v) for k, v in payload.fields.items()})
+
+    status, data = await _call_upstream("summary.php", upstream_payload)
+
+    if status == 200 and str(data.get("status") or "").lower() == "success":
+        return {"status": "success", "message": str(data.get("message") or "")}
+
+    if status == 401:
+        # Sesja wygasła. Aplikacja umie się przelogować z zapamiętanego
+        # materiału i ponowić - dlatego kod przechodzi do niej NIETKNIĘTY,
+        # zamiast zostać spłaszczony do ogólnego „brak uprawnień".
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": str(data.get("code") or "SESSION_EXPIRED"),
+                "message": "Sesja ZPRP wygasła.",
+            },
+        )
+    if status == 403:
+        # Rozróżnienie kluczowe dla komunikatu: PROTOCOL_LOCKED to stan MECZU
+        # (protokół zatwierdzony w ZPRP), a nie błąd sędziego ani nasz. Stąd
+        # 409 Conflict - aplikacja gasi przycisk i tłumaczy, dlaczego.
+        code = str(data.get("code") or "").upper()
+        if code == "PROTOCOL_LOCKED" or not code:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PROTOCOL_LOCKED",
+                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - wyniku nie da się zmienić.",
+                },
+            )
+        logger.error("ProEl ZPRP summary odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "PROEL_CONFIG", "message": "Serwer ZPRP odrzucił aplikację. Zgłoś to administratorowi BAZY."},
+        )
+    if status == 400:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Serwer ZPRP odrzucił dane wyniku skróconego."},
+        )
+
+    logger.warning("ProEl ZPRP summary: nieoczekiwany status=%s", status)
+    raise HTTPException(
+        status_code=502,
+        detail={"code": "UPSTREAM_ERROR", "message": "Nieoczekiwana odpowiedź serwera ZPRP."},
+    )
+
+
+@router.post(
+    "/summary",
+    summary="Zapis wyniku skróconego w ZPRP (aktualizacja częściowa)",
+)
+async def zprp_summary(payload: ZprpSummaryRequest):
+    return await submit_summary(payload)
