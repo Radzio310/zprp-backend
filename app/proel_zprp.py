@@ -26,7 +26,7 @@ import re
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from app.proel_users import rate_limit
@@ -383,3 +383,315 @@ async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
 )
 async def zprp_summary(payload: ZprpSummaryRequest):
     return await submit_summary(payload)
+
+
+# ─────────────────────── statystyki zawodnika ───────────────────────
+#
+# `player_stats.php` działa tak samo jak `summary.php`: aktualizuje wyłącznie
+# przysłane klucze. Różnica jest w adresowaniu - wpis wskazuje się TRÓJKĄ
+# (id_zawody, id_zespol, id_zawodnik), a nie samą sesją, bo jeden mecz ma dwa
+# składy po kilkunastu zawodników.
+#
+# `id_zawodnik` to identyfikator z bazy ZPRP, nie numer koszulki. Aplikacja
+# bierze go z rosteru `pokaz_mecze_szczegoly.php`, gdzie jest KLUCZEM wpisu.
+# Numer koszulki jedzie osobno, w polu `NrKoszulki2`, i służy do zapisania go
+# w protokole - nie do wskazania zawodnika.
+
+#: Pola przyjmowane przez player_stats.php (dokumentacja v2.0). Biała lista
+#: z tego samego powodu co przy wyniku: literówkę upstream zignorowałby po
+#: cichu, a sędzia zobaczyłby „zapisano" przy niezapisanej karze.
+PLAYER_STATS_FIELDS = frozenset(
+    {
+        "NrKoszulki2",
+        "wyjscie",
+        "bramki",
+        "upomnienie",
+        "2minuty",
+        "dyskwalifikacja",
+        "kd",
+        "karne_liczba",
+        "karne_bramki",
+        "karne_liczba_seria",
+        "karne_bramki_seria",
+    }
+)
+
+
+class ZprpPlayerStatsRequest(BaseModel):
+    hash_sesji: str
+    id_zawody: int
+    id_zespol: int
+    id_zawodnik: int
+    #: Tylko pola do zmiany - reszta statystyk zawodnika zostaje nietknięta.
+    fields: Dict[str, str]
+
+
+async def submit_player_stats(payload: ZprpPlayerStatsRequest) -> Dict[str, Any]:
+    """Rdzeń zapisu statystyk jednego zawodnika - wydzielony z trasy dla testów."""
+    hash_sesji = (payload.hash_sesji or "").strip()
+    if not hash_sesji:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Brak hash_sesji."},
+        )
+
+    unknown = sorted(set(payload.fields or {}) - PLAYER_STATS_FIELDS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "BAD_FIELDS",
+                "message": f"Nieznane pola statystyk zawodnika: {', '.join(unknown)}.",
+            },
+        )
+    if not payload.fields:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Pusty zestaw pól do zapisania."},
+        )
+
+    _require_app_key()
+
+    upstream_payload: Dict[str, Any] = {
+        "hash_sesji": hash_sesji,
+        "id_zawody": int(payload.id_zawody),
+        "id_zespol": int(payload.id_zespol),
+        "id_zawodnik": int(payload.id_zawodnik),
+    }
+    upstream_payload.update({k: str(v) for k, v in payload.fields.items()})
+
+    status, data = await _call_upstream("player_stats.php", upstream_payload)
+
+    if status == 200 and str(data.get("status") or "").lower() == "success":
+        return {"status": "success", "message": str(data.get("message") or "")}
+
+    if status == 401:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": str(data.get("code") or "SESSION_EXPIRED"),
+                "message": "Sesja ZPRP wygasła.",
+            },
+        )
+    if status == 404:
+        # „Nie ma takiego zawodnika w kadrze tego meczu" to NIE jest awaria do
+        # ponowienia ani powód, żeby przerwać wysyłkę całego składu. Aplikacja
+        # ma pominąć tego jednego i powiedzieć sędziemu, kogo nie zapisała -
+        # dlatego kod przechodzi osobno, a nie jako ogólny błąd.
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "PLAYER_NOT_IN_SQUAD",
+                "message": "Tego zawodnika nie ma w kadrze meczu po stronie ZPRP.",
+            },
+        )
+    if status == 403:
+        code = str(data.get("code") or "").upper()
+        if code == "PROTOCOL_LOCKED" or not code:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PROTOCOL_LOCKED",
+                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - danych nie da się zmienić.",
+                },
+            )
+        logger.error("ProEl ZPRP player_stats odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "PROEL_CONFIG", "message": "Serwer ZPRP odrzucił aplikację. Zgłoś to administratorowi BAZY."},
+        )
+    if status == 400:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Serwer ZPRP odrzucił statystyki zawodnika."},
+        )
+
+    logger.warning("ProEl ZPRP player_stats: nieoczekiwany status=%s", status)
+    raise HTTPException(
+        status_code=502,
+        detail={"code": "UPSTREAM_ERROR", "message": "Nieoczekiwana odpowiedź serwera ZPRP."},
+    )
+
+
+@router.post(
+    "/player-stats",
+    summary="Zapis statystyk jednego zawodnika w ZPRP (aktualizacja częściowa)",
+)
+async def zprp_player_stats(payload: ZprpPlayerStatsRequest):
+    return await submit_player_stats(payload)
+
+
+# ─────────────────────── załącznik (protokół) ───────────────────────
+#
+# `upload_attachment.php` jest jedynym endpointem, który nie jest JSON-em:
+# przyjmuje multipart z polem plikowym `zalacznik`. Mecz wskazuje sama sesja,
+# więc protokół zawsze ląduje przy tym meczu, do którego sędzia ma token.
+
+#: ZPRP przyjmuje tylko te rozszerzenia. Sprawdzamy je u siebie, żeby zły plik
+#: kosztował jedno „nie" od razu, a nie wysyłkę kilku megabajtów w obie strony.
+ATTACHMENT_EXTENSIONS = {".pdf", ".jpg", ".jpeg"}
+#: Typ podajemy z ROZSZERZENIA, nie z tego, co przysłała aplikacja - React
+#: Native potrafi wysłać „application/octet-stream" dla wszystkiego.
+ATTACHMENT_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+#: Protokół z generatora waży ~200 kB, skan z telefonu kilka MB. 20 MB to
+#: granica, powyżej której to na pewno nie jest protokół.
+ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
+#: Wysyłka pliku ma prawo trwać dłużej niż zapytanie o wynik.
+_UPLOAD_TIMEOUT_S = 60.0
+
+
+def _attachment_extension(filename: str) -> str:
+    name = (filename or "").strip().lower()
+    dot = name.rfind(".")
+    return name[dot:] if dot > 0 else ""
+
+
+async def _post_upstream_file(
+    endpoint: str,
+    data: Dict[str, str],
+    *,
+    filename: str,
+    content: bytes,
+    content_type: str,
+) -> Tuple[int, Dict[str, Any]]:
+    """Multipartowy odpowiednik `_post_upstream` - też jeden punkt sieciowy."""
+    async with httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT_S) as client:
+        resp = await client.post(
+            f"{_base_url()}/{endpoint}",
+            data=data,
+            files={"zalacznik": (filename, content, content_type)},
+        )
+    try:
+        parsed = resp.json()
+    except Exception:
+        parsed = {}
+    return resp.status_code, parsed if isinstance(parsed, dict) else {}
+
+
+async def upload_attachment(
+    *,
+    hash_sesji: str,
+    nazwa: str,
+    filename: str,
+    content: bytes,
+) -> Dict[str, Any]:
+    """Rdzeń wysyłki załącznika - wydzielony z trasy dla testów."""
+    session = (hash_sesji or "").strip()
+    if not session:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Brak hash_sesji."},
+        )
+
+    ext = _attachment_extension(filename)
+    if ext not in ATTACHMENT_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "BAD_FILE",
+                "message": "ZPRP przyjmuje tylko pliki PDF i JPG.",
+            },
+        )
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_FILE", "message": "Pusty plik protokołu."},
+        )
+    if len(content) > ATTACHMENT_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "code": "FILE_TOO_LARGE",
+                "message": "Plik jest za duży, żeby wysłać go do ZPRP.",
+            },
+        )
+
+    _require_app_key()
+
+    label = (nazwa or "").strip() or "Protokół zawodów"
+
+    try:
+        status, data = await _post_upstream_file(
+            "upload_attachment.php",
+            {"hash_sesji": session, "nazwa": label},
+            filename=filename,
+            content=content,
+            content_type=ATTACHMENT_CONTENT_TYPES[ext],
+        )
+    except httpx.TimeoutException:
+        logger.warning("ProEl ZPRP upload timeout (%s B)", len(content))
+        raise HTTPException(
+            status_code=504,
+            detail={"code": "UPSTREAM_TIMEOUT", "message": "Serwer ZPRP nie odpowiada. Spróbuj ponownie."},
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("ProEl ZPRP upload network error err=%s", type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "UPSTREAM_ERROR", "message": "Błąd połączenia z serwerem ZPRP."},
+        )
+
+    if status == 200 and str(data.get("status") or "").lower() == "success":
+        return {"status": "success", "message": str(data.get("message") or "")}
+
+    if status == 401:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": str(data.get("code") or "SESSION_EXPIRED"),
+                "message": "Sesja ZPRP wygasła.",
+            },
+        )
+    if status == 403:
+        code = str(data.get("code") or "").upper()
+        if code == "PROTOCOL_LOCKED" or not code:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PROTOCOL_LOCKED",
+                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - załącznika nie da się dodać.",
+                },
+            )
+        logger.error("ProEl ZPRP upload odrzucony (403 %s) - sprawdź PROEL_APP_KEY", code)
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "PROEL_CONFIG", "message": "Serwer ZPRP odrzucił aplikację. Zgłoś to administratorowi BAZY."},
+        )
+    if status == 400:
+        # Upstream wie o pliku więcej niż my (np. uszkodzony PDF) - jego
+        # komunikat jest konkretniejszy niż nasze „coś nie tak".
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "BAD_FILE",
+                "message": str(data.get("message") or "Serwer ZPRP odrzucił plik protokołu."),
+            },
+        )
+
+    logger.warning("ProEl ZPRP upload: nieoczekiwany status=%s", status)
+    raise HTTPException(
+        status_code=502,
+        detail={"code": "UPSTREAM_ERROR", "message": "Nieoczekiwana odpowiedź serwera ZPRP."},
+    )
+
+
+@router.post(
+    "/attachment",
+    summary="Wysyłka pliku protokołu (PDF/JPG) jako załącznika meczu w ZPRP",
+)
+async def zprp_attachment(
+    hash_sesji: str = Form(...),
+    nazwa: str = Form(""),
+    zalacznik: UploadFile = File(...),
+):
+    content = await zalacznik.read()
+    return await upload_attachment(
+        hash_sesji=hash_sesji,
+        nazwa=nazwa,
+        filename=zalacznik.filename or "protokol.pdf",
+        content=content,
+    )

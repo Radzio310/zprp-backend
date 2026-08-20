@@ -10,7 +10,7 @@ import re
 import secrets
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlencode
 
 from bs4 import BeautifulSoup
@@ -325,11 +325,23 @@ async def short_result(
 # New model: Protocol save
 # =========================
 
+#: Bloki protokołu, które ta droga potrafi wypełnić.
+PROTOCOL_SECTIONS = ("players", "companions", "comment")
+
+
 class ProtocolSaveRequest(BaseModel):
     username: str              # Base64-RSA
     password: str              # Base64-RSA
     details_path: str          # np. "a=zawody&b=protokol&Filtr_sezon=...&IdZawody=..."
     data_json: Dict[str, Any]  # cały JSON meczu (jak w przykładzie)
+    #: Które bloki wypełnić. Brak = wszystkie (tak działała ta droga zawsze).
+    #:
+    #: Odkąd statystyki zawodników mają własny endpoint w API ZPRP, ta droga
+    #: bywa potrzebna WYŁĄCZNIE do tego, czego API nie obsługuje: osób
+    #: towarzyszących i uwag sędziów. Wtedy przychodzi tu ["companions",
+    #: "comment"] i strona protokołu jest otwierana raz, zamiast przechodzić
+    #: przez kilkadziesiąt pól zawodników, które przed chwilą zapisało API.
+    sections: Optional[List[str]] = None
 
 
 def _details_path_to_url(details_path: str) -> str:
@@ -1622,6 +1634,7 @@ async def _apply_protocol_updates_4blocks(
     host_name: str,
     guest_name: str,
     referee_comment: str = "",
+    sections: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """
     Wersja z bardzo obszernym loggingiem:
@@ -1629,6 +1642,8 @@ async def _apply_protocol_updates_4blocks(
     - jakie jersey w HTML wykryto
     - dla KAŻDEGO update: current vs desired, delta-skip, payload/args, response
     """
+
+    do = set(sections) if sections else set(PROTOCOL_SECTIONS)
 
     # request correlation id (żebyś mógł filtrować logi jednego requestu)
     req_id = str(uuid.uuid4())[:8]
@@ -1665,7 +1680,7 @@ async def _apply_protocol_updates_4blocks(
     comp_kinds_order = ["warn", "p2", "disq"]
 
     # ---- players ----
-    for team in ("host", "guest"):
+    for team in ("host", "guest") if "players" in do else ():
         team_stats = stats_map.get(team) or {}
         _dbg("team players processing", req_id=req_id, team=team, players_in_stats=len(team_stats))
 
@@ -1753,7 +1768,7 @@ async def _apply_protocol_updates_4blocks(
                     )
 
     # ---- companions A..E ----
-    for team in ("host", "guest"):
+    for team in ("host", "guest") if "companions" in do else ():
         team_stats = stats_map.get(team) or {}
         _dbg("team companions processing", req_id=req_id, team=team, items_in_stats=len(team_stats))
 
@@ -1819,6 +1834,9 @@ async def _apply_protocol_updates_4blocks(
                     })
                     _dbg("UPDATE companions FAIL", req_id=req_id, team=team, letter=letter, kind=kind, resp=resp_txt)
     # ---- referee comment (zapiszProtok3 -> zawody_zapisz3.php) ----
+    if "comment" not in do:
+        comment_meta = None
+        referee_comment = ""
     if comment_meta:
         inp = comment_meta["inp"]
         args4 = comment_meta["args4"]
@@ -1939,6 +1957,12 @@ async def save_protocol_from_json(
             extras = mc.get("extras") or {}
             ref_comment = extras.get("detailedRefereeNotesText") or ""
 
+            requested = [
+                str(x).strip().lower()
+                for x in (req.sections or [])
+                if str(x).strip().lower() in PROTOCOL_SECTIONS
+            ]
+
             result = await _apply_protocol_updates_4blocks(
                 client,
                 soup,
@@ -1946,6 +1970,7 @@ async def save_protocol_from_json(
                 host_name=host_name,
                 guest_name=guest_name,
                 referee_comment=ref_comment,
+                sections=set(requested) if requested else None,
             )
         finally:
             await client.aclose()
