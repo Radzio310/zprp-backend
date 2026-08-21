@@ -521,6 +521,229 @@ async def zprp_player_stats(payload: ZprpPlayerStatsRequest):
     return await submit_player_stats(payload)
 
 
+# ─────────────────────── osoby towarzyszące ───────────────────────
+#
+# `officials_stats.php` adresuje wpis trójką (id_zawody, id_zespol, id_osoba),
+# tak samo jak statystyki zawodnika. `id_osoba` to identyfikator z bazy ZPRP,
+# a aplikacja bierze go z `pokaz_mecze_szczegoly.php`, gdzie osoby towarzyszące
+# stoją w sekcjach `gosp_osoby` / `gosc_osoby` KLUCZOWANE tym identyfikatorem.
+# Litera A-E z protokołu siedzi w polu `rola` i służy wyłącznie do dopasowania.
+#
+# ⚠ Semantyka jest tu INNA niż przy zawodniku i wyniku. Tam pominięty klucz
+# znaczy „nie ruszaj", a "" znaczy „wyczyść". Tutaj każde pole jest binarne:
+# 1 DOPISUJE karę, 0 ją KASUJE z centralnego systemu. Nie ma stanu „nie wiem",
+# bo API nie pozwala odczytać kar osób towarzyszących - w danych meczu są tylko
+# nazwisko, rola, licencja i funkcja. Aplikacja wysyła więc pełny stan wprost
+# z protokołu i to protokół jest prawdą.
+
+#: Pola przyjmowane przez officials_stats.php (dokumentacja v2.0).
+OFFICIALS_STATS_FIELDS = frozenset(
+    {
+        "upomnienie_U",
+        "wykluczenie_2min",
+        "dyskwalifikacja_D",
+    }
+)
+
+
+class ZprpOfficialsStatsRequest(BaseModel):
+    hash_sesji: str
+    id_zawody: int
+    id_zespol: int
+    id_osoba: int
+    #: Wartości binarne "0"/"1" - patrz uwaga o semantyce powyżej.
+    fields: Dict[str, str]
+
+
+async def submit_officials_stats(payload: ZprpOfficialsStatsRequest) -> Dict[str, Any]:
+    """Rdzeń zapisu kar jednej osoby towarzyszącej - wydzielony z trasy dla testów."""
+    hash_sesji = (payload.hash_sesji or "").strip()
+    if not hash_sesji:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Brak hash_sesji."},
+        )
+
+    unknown = sorted(set(payload.fields or {}) - OFFICIALS_STATS_FIELDS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "BAD_FIELDS",
+                "message": f"Nieznane pola kar osoby towarzyszącej: {', '.join(unknown)}.",
+            },
+        )
+    if not payload.fields:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Pusty zestaw pól do zapisania."},
+        )
+
+    _require_app_key()
+
+    upstream_payload: Dict[str, Any] = {
+        "hash_sesji": hash_sesji,
+        "id_zawody": int(payload.id_zawody),
+        "id_zespol": int(payload.id_zespol),
+        "id_osoba": int(payload.id_osoba),
+    }
+    upstream_payload.update({k: str(v) for k, v in payload.fields.items()})
+
+    status, data = await _call_upstream("officials_stats.php", upstream_payload)
+
+    if status == 200 and str(data.get("status") or "").lower() == "success":
+        return {"status": "success", "message": str(data.get("message") or "")}
+
+    if status == 401:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": str(data.get("code") or "SESSION_EXPIRED"),
+                "message": "Sesja ZPRP wygasła.",
+            },
+        )
+    if status == 404:
+        # Upstream ma tu DWA różne 404 (osoba spoza składu / drużyna spoza
+        # meczu), ale dla aplikacji znaczą to samo: pomiń TĘ pozycję i idź
+        # dalej. Reszta osób ma się zapisać, a sędzia ma się dowiedzieć, kogo
+        # pominęliśmy - dlatego kod przechodzi osobno, a nie jako ogólny błąd.
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "OFFICIAL_NOT_IN_SQUAD",
+                "message": "Tej osoby towarzyszącej nie ma w składzie meczu po stronie ZPRP.",
+            },
+        )
+    if status == 403:
+        code = str(data.get("code") or "").upper()
+        if code == "PROTOCOL_LOCKED" or not code:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PROTOCOL_LOCKED",
+                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - kar nie da się zmienić.",
+                },
+            )
+        logger.error("ProEl ZPRP officials_stats odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "PROEL_CONFIG", "message": "Serwer ZPRP odrzucił aplikację. Zgłoś to administratorowi BAZY."},
+        )
+    if status == 400:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Serwer ZPRP odrzucił kary osoby towarzyszącej."},
+        )
+
+    logger.warning("ProEl ZPRP officials_stats: nieoczekiwany status=%s", status)
+    raise HTTPException(
+        status_code=502,
+        detail={"code": "UPSTREAM_ERROR", "message": "Nieoczekiwana odpowiedź serwera ZPRP."},
+    )
+
+
+@router.post(
+    "/officials-stats",
+    summary="Zapis kar jednej osoby towarzyszącej w ZPRP (1 dopisuje, 0 kasuje)",
+)
+async def zprp_officials_stats(payload: ZprpOfficialsStatsRequest):
+    return await submit_officials_stats(payload)
+
+
+# ─────────────────────── uwagi sędziów (verte) ───────────────────────
+#
+# `match_comment.php` zapisuje jedno pole tekstowe meczu - opis z odwrotnej
+# strony protokołu. Mecz wskazuje się jawnie (`id_zawody`), a upstream sprawdza,
+# czy zgadza się z sesją; rozjazd to 400, nie 401, bo sama sesja jest ważna.
+#
+# ⚠ Pusty string MUSI dojechać jako "" - to świadome wyczyszczenie uwag, a nie
+# brak danych. Dlatego `komentarz` NIE przechodzi tu przez żadne `or ""` ani
+# przez odsiew pustych wartości; to samo rozróżnienie, które respektuje już
+# wynik skrócony.
+
+
+class ZprpMatchCommentRequest(BaseModel):
+    hash_sesji: str
+    id_zawody: int
+    #: Pusty string = wyczyszczenie pola po stronie ZPRP (zapis NULL).
+    komentarz: str = ""
+
+
+async def submit_match_comment(payload: ZprpMatchCommentRequest) -> Dict[str, Any]:
+    """Rdzeń zapisu uwag verte - wydzielony z trasy dla testów."""
+    hash_sesji = (payload.hash_sesji or "").strip()
+    if not hash_sesji:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Brak hash_sesji."},
+        )
+
+    _require_app_key()
+
+    # `komentarz` przepisujemy dosłownie - bez strip(), bez fallbacku. Sędzia
+    # ma prawo zapisać tekst z własnym łamaniem wierszy i ma prawo wyczyścić
+    # pole do zera; jedno i drugie musi dojechać nietknięte.
+    upstream_payload: Dict[str, Any] = {
+        "hash_sesji": hash_sesji,
+        "id_zawody": int(payload.id_zawody),
+        "komentarz": payload.komentarz if payload.komentarz is not None else "",
+    }
+
+    status, data = await _call_upstream("match_comment.php", upstream_payload)
+
+    if status == 200 and str(data.get("status") or "").lower() == "success":
+        return {"status": "success", "message": str(data.get("message") or "")}
+
+    if status == 401:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": str(data.get("code") or "SESSION_EXPIRED"),
+                "message": "Sesja ZPRP wygasła.",
+            },
+        )
+    if status == 403:
+        code = str(data.get("code") or "").upper()
+        if code == "PROTOCOL_LOCKED" or not code:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PROTOCOL_LOCKED",
+                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - uwag nie da się zmienić.",
+                },
+            )
+        logger.error("ProEl ZPRP match_comment odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "PROEL_CONFIG", "message": "Serwer ZPRP odrzucił aplikację. Zgłoś to administratorowi BAZY."},
+        )
+    if status == 400:
+        # Upstream odpowiada 400, gdy `id_zawody` nie pasuje do sesji. To jest
+        # błąd adresowania po NASZEJ stronie, nie sędziego - dostaje własny kod,
+        # bo aplikacja umie na niego odpowiedzieć ponownym uwierzytelnieniem.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "MATCH_MISMATCH",
+                "message": "Sesja ZPRP dotyczy innego meczu niż przesłane uwagi.",
+            },
+        )
+
+    logger.warning("ProEl ZPRP match_comment: nieoczekiwany status=%s", status)
+    raise HTTPException(
+        status_code=502,
+        detail={"code": "UPSTREAM_ERROR", "message": "Nieoczekiwana odpowiedź serwera ZPRP."},
+    )
+
+
+@router.post(
+    "/match-comment",
+    summary="Zapis uwag sędziów (verte) w ZPRP - pusty tekst czyści pole",
+)
+async def zprp_match_comment(payload: ZprpMatchCommentRequest):
+    return await submit_match_comment(payload)
+
+
 # ─────────────────────── załącznik (protokół) ───────────────────────
 #
 # `upload_attachment.php` jest jedynym endpointem, który nie jest JSON-em:
