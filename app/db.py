@@ -640,6 +640,40 @@ proel_match_state = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
+# 21.06) ProEl - archiwum usuniętych zapisów meczów
+#
+# Usunięcie zapisu było do niedawna jedyną nieodwracalną operacją w module: dwa
+# twarde DELETE i tyle. W praktyce sędzia kasuje zapis, żeby posprzątać listę,
+# a nie żeby zniszczyć protokół - i zdarza się, że kasuje nie ten. Dlatego
+# wiersz nie znika, tylko przenosi się TUTAJ na rok.
+#
+# Trzymamy komplet: `data_json` (protokół) i `state_json` (overlay pól razem z
+# tym, kto co wpisał). Bez tego drugiego przywrócenie oddałoby sam wynik, bez
+# śladu autorstwa - a to właśnie ono jest najcenniejsze przy reklamacji.
+proel_deleted_matches = Table(
+    "proel_deleted_matches", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("match_number", String, nullable=False, index=True),
+    Column("zprp_match_id", String, nullable=True, index=True),
+    # Status, jaki mecz miał W CHWILI usunięcia - przy przywracaniu wraca ten sam.
+    Column("status", String, nullable=True),
+    Column("data_json", JSON, nullable=False),
+    # Kopia wiersza proel_match_state (overlay + audyt). NULL, gdy mecz nigdy
+    # nie miał stanu współpracy (starsze zapisy).
+    Column("state_json", JSON, nullable=True),
+    Column("deleted_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+    Column("deleted_by_judge_id", String, nullable=True, index=True),
+    Column("deleted_by_name", String, nullable=True),
+    Column("deleted_by_install", String, nullable=True),
+    Column("deleted_by_verified", Boolean, nullable=False, server_default=text("false")),
+    # Po tej dacie wiersz nadaje się do wyczyszczenia (365 dni od usunięcia).
+    Column("expires_at", DateTime(timezone=True), nullable=True, index=True),
+    # Ustawiane przy przywróceniu - wpis zostaje jako ślad, ale przestaje być
+    # ofertą do przywrócenia po raz drugi.
+    Column("restored_at", DateTime(timezone=True), nullable=True),
+    Column("restored_by_judge_id", String, nullable=True),
+)
+
 # 21.2) Beach ProEl - mecze (analogiczne do proel_matches, ale status jako String)
 # tournament_id / schedule_match_id: kopiowane z data_json.matchConfig.extras, aby
 # wiązać mecz ProEl z konkretnym meczem konkretnego turnieju (match_number bywa

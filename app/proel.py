@@ -4,7 +4,12 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select, insert, update, delete, func
-from app.db import database, saved_matches, proel_match_state
+from app.db import (
+    database,
+    proel_deleted_matches,
+    proel_match_state,
+    saved_matches,
+)
 from app.proel_auth import Actor, is_admin, merge_guard, proel_actor, roles_for
 from app.proel_lease import (
     LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
@@ -44,7 +49,7 @@ from app.schemas import (
     ProElPatchRequest,
     ProElStateResponse,
 )
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -891,6 +896,20 @@ async def update_proel_match(
     return {"success": True}
 
 
+def _state_snapshot(row) -> Dict[str, Any]:
+    """Wiersz `proel_match_state` jako czysty JSON do archiwum.
+
+    Daty zamieniamy na ISO, bo kolumna docelowa jest JSON-em, a `datetime` nie
+    jest serializowalny. Nie wybieramy pól „tych ważnych": przy przywracaniu
+    liczy się komplet, a lista ważnych pól rozjechałaby się z tabelą przy
+    pierwszej nowej kolumnie.
+    """
+    out: Dict[str, Any] = {}
+    for key, value in dict(row).items():
+        out[key] = value.isoformat() if isinstance(value, datetime) else value
+    return out
+
+
 @router.delete(
     "/{match_number:path}",
     response_model=dict,
@@ -907,9 +926,15 @@ async def delete_proel_match(
     (`/proel/state` odpowiada z tej tabeli), a jego overlay wracał przy
     następnym `ensure`. Usunięty ma być mecz, nie połowa meczu.
 
-    Tylko administrator. To jedyny nieodwracalny endpoint w tym module —
-    dostęp mają go mieć ci sami ludzie, którzy widzą przycisk w aplikacji,
-    i lista jest ta sama (`admin_settings.allowed_admins`).
+    Tylko administrator - dostęp mają mieć ci sami ludzie, którzy widzą
+    przycisk w aplikacji, i lista jest ta sama (`admin_settings.allowed_admins`).
+
+    Usunięcie NIE jest już nieodwracalne: komplet (protokół + overlay pól razem
+    z autorstwem) przenosi się najpierw do `proel_deleted_matches` na rok.
+    Sędzia kasuje zapis, żeby posprzątać listę, a nie żeby zniszczyć protokół -
+    i zdarza się, że kasuje nie ten. Przepisanie i skasowanie idą w JEDNEJ
+    transakcji: archiwum bez skasowanego wiersza byłoby duplikatem, a skasowany
+    wiersz bez archiwum - tym samym, co przedtem.
     """
     if not await is_admin(actor.judge_id):
         raise HTTPException(
@@ -921,16 +946,45 @@ async def delete_proel_match(
         )
 
     async with database.transaction():
+        row = await database.fetch_one(
+            select(saved_matches).where(saved_matches.c.match_number == match_number)
+        )
+        if row is None:
+            raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
+
+        state_row = await database.fetch_one(
+            select(proel_match_state).where(
+                proel_match_state.c.match_number == match_number
+            )
+        )
+        state_json = _state_snapshot(state_row) if state_row is not None else None
+
+        await database.execute(
+            proel_deleted_matches.insert().values(
+                match_number=match_number,
+                zprp_match_id=(
+                    state_row["zprp_match_id"] if state_row is not None else None
+                ),
+                status=row["status"],
+                data_json=row["data_json"],
+                state_json=state_json,
+                deleted_by_judge_id=actor.judge_id,
+                deleted_by_name=actor.name,
+                deleted_by_install=actor.install,
+                deleted_by_verified=bool(actor.verified),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=365),
+            )
+        )
+
         await database.execute(
             delete(proel_match_state)
             .where(proel_match_state.c.match_number == match_number)
         )
-        result = await database.execute(
+        await database.execute(
             delete(saved_matches)
             .where(saved_matches.c.match_number == match_number)
         )
-    if result == 0:
-        raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
+
     return {"success": True}
 
 
