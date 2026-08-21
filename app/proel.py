@@ -970,7 +970,7 @@ async def delete_proel_match(
                 state_json=state_json,
                 deleted_by_judge_id=actor.judge_id,
                 deleted_by_name=actor.name,
-                deleted_by_install=actor.install,
+                deleted_by_install=actor.installation_id,
                 deleted_by_verified=bool(actor.verified),
                 expires_at=datetime.now(timezone.utc) + timedelta(days=365),
             )
