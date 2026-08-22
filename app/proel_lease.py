@@ -42,6 +42,47 @@ def lease_active(state: Optional[Dict[str, Any]]) -> bool:
     return until is not None and until > now_utc()
 
 
+#: Bicie serca trafiło we własny, żywy leasing - tylko go przedłużamy.
+HEARTBEAT_OK = "ok"
+#: Leasing wygasł i NIKT go nie ma - prowadzący wraca do swojego meczu.
+HEARTBEAT_RECLAIM = "reclaim"
+#: Mecz prowadzi teraz kto inny - dopiero to jest utrata prowadzenia.
+HEARTBEAT_LOST = "lost"
+
+
+def heartbeat_decision(
+    *,
+    held: bool,
+    mine: bool,
+    epoch: int,
+    claimed_epoch: Optional[int],
+) -> str:
+    """Co zrobić z biciem serca prowadzącego.
+
+    Rozróżnienie, którego wcześniej nie było: **wygaśnięcie to nie przejęcie**.
+
+    Leasing żyje 90 s, a bicie serca idzie co 25 s - ale tylko dopóki telefon
+    liczy czas. Wygaszony ekran albo przełączenie na inną aplikację usypia ten
+    interwał, więc prowadzenie gaśnie samo. Serwer odpowiadał wtedy tym samym
+    412 co przy prawdziwym przejęciu i sędzia dostawał pełnoekranowe „mecz
+    prowadzi teraz ktoś inny", choć nikt niczego nie tknął.
+
+    Skoro leasingu nie ma NIKT, nie ma też kogo skrzywdzić: prowadzący wraca do
+    swojego meczu dokładnie tak, jak zrobiłby to `acquire` (patrz gałąź
+    `not held` w `/proel/lease`).
+
+    Niezgodna epoka przy żywym, własnym leasingu zostaje utratą: to znaczy, że
+    prowadzenie obejęła druga sesja na tym samym urządzeniu i stara musi zamilknąć.
+    """
+    if held and not mine:
+        return HEARTBEAT_LOST
+    if not held:
+        return HEARTBEAT_RECLAIM
+    if claimed_epoch is not None and int(claimed_epoch) != int(epoch):
+        return HEARTBEAT_LOST
+    return HEARTBEAT_OK
+
+
 def same_judge_lease(state: Optional[Dict[str, Any]], actor_judge_id: str) -> bool:
     """Czy leasing trzyma TEN SAM sędzia — to samo albo inne jego urządzenie.
 

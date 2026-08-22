@@ -20,6 +20,9 @@ from app.proel_match_key import (
 from app.proel_lease import (
     LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
     LEASE_TTL_SECONDS as _LEASE_TTL_SECONDS,
+    HEARTBEAT_LOST as _HEARTBEAT_LOST,
+    HEARTBEAT_RECLAIM as _HEARTBEAT_RECLAIM,
+    heartbeat_decision as _heartbeat_decision,
     lease_active as _lease_active,
     legacy_lease_values as _legacy_lease_values,
     now_utc as _now,
@@ -624,9 +627,16 @@ async def lease_proel_match(
         zprp_id = str(state.get("zprp_match_id") or "")
 
         if req.action == "heartbeat":
-            # Bicie serca NIE przejmuje niczego. Gdy leasing wygasł albo ktoś
-            # go przejął, prowadzący ma się o tym dowiedzieć natychmiast.
-            if not mine or (req.epoch is not None and int(req.epoch) != epoch):
+            # Bicie serca NIE przejmuje cudzego prowadzenia - ale wygaśnięcie
+            # własnego przejęciem nie jest i nie wolno go tak nazywać.
+            # Rozstrzyga `heartbeat_decision`, opisana tam do końca.
+            decision = _heartbeat_decision(
+                held=held,
+                mine=bool(mine),
+                epoch=epoch,
+                claimed_epoch=req.epoch,
+            )
+            if decision == _HEARTBEAT_LOST:
                 raise HTTPException(
                     412,
                     detail={
@@ -635,6 +645,9 @@ async def lease_proel_match(
                         "holder": state.get("lease_name") or "",
                     },
                 )
+            if decision == _HEARTBEAT_RECLAIM:
+                # Leasing wygasł, nikt go nie ma - wracamy do swojego meczu.
+                epoch += 1
         elif held and not mine:
             # Ten sam sędzia z drugiego urządzenia przechodzi BEZ czekania na
             # wygaśnięcie i bez `force`.
