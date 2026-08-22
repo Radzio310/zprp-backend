@@ -3916,26 +3916,42 @@ _NOTES_BETWEEN_PT = 8.0        # przerwa między jednym a drugim sędzią
 #: Zaniżone o zapas - lepiej zostawić pasek pustego papieru niż wypchnąć jedną
 #: linijkę na osobną stronę.
 _NOTES_PAGE_BUDGET_PT = 720.0
+#: Kroje strony uwag - WPISANE WPROST, nie odziedziczone z szablonu.
+#:
+#: Szablon stoi na Times New Roman, a w kontenerze jest tylko `fonts-dejavu-core`
+#: (patrz Dockerfile) - żadnego kroju metrycznie zgodnego z Timesem. LibreOffice
+#: podstawiał więc DejaVu Serif, która jest o jedną czwartą SZERSZA, i każdy
+#: rachunek szerokości robiony na metryce Timesa był o tę jedną czwartą za mały.
+#: Skoro i tak drukuje się DejaVu, to ją tu piszemy: wtedy zmierzone szerokości
+#: znaków opisują dokładnie ten krój, który wyjdzie z drukarki.
+_NOTES_BODY_FONT = "DejaVu Serif"
+#: Nazwiska sędziów pod opisem - bezszeryfowo i bez pogrubienia. Szeryfowy
+#: wersalik nad podpisem ciążył bardziej niż sam podpis.
+_NOTES_NAME_FONT = "DejaVu Sans"
 #: Szerokość kolumn arkusza uwag (jednostki Excela).
 #:
-#: 6,1 zamiast 5,6, bo arkusz był o ćwierć szerokości węższy od kartki: opis
-#: kończył się w połowie strony, a prawy margines wychodził dwa razy szerszy od
-#: lewego. Wyżej nie idziemy: `test_arkusz_miesci_sie_w_szerokosci_A4` pilnuje
-#: 5% zapasu do krawędzi obszaru druku, a tamten zapas kupiliśmy pustą czwartą
-#: stroną w protokole sędziego.
-_NOTES_COL_WIDTH = 6.1
+#: 6,05 zamiast 5,6, bo arkusz kończył się grubo przed prawym marginesem kartki.
+#: Przy 6,1 mamy dowód z gotowego PDF: arkusz sięga wtedy dokładnie prawego
+#: marginesu obszaru druku, strona uwag nie ciągnie za sobą pustej kartki i nic
+#: się nie pomniejsza. Schodzimy o włos poniżej tamtej krawędzi (o milimetr),
+#: żeby zaokrąglenia w przeliczniku nie wypchnęły arkusza za kartkę.
+_NOTES_COL_WIDTH = 6.05
 _NOTES_EDGE_COL_WIDTH = 4.0
+#: Ile pikseli daje jedna jednostka szerokości kolumny.
+#:
+#: Wartość ZMIERZONA na gotowym PDF, nie wyprowadzona ze wzoru: przy kolumnach
+#: 4,0 + 12x6,1 opis został ucięty dokładnie na prawym marginesie kartki, czyli
+#: arkusz miał wtedy równo 678 px obszaru druku. Stąd (678 - 14*5) / 81,2 = 7,5.
+#: Wzór z dokumentacji Excela (szerokość cyfry czcionki domyślnej) dawał tu 7,0
+#: i to właśnie ta różnica kosztowała ucięte wyrazy.
+_NOTES_COL_PX_PER_UNIT = 7.5
+#: Piksele dokładane przez arkusz na każdą komórkę (obramowanie i wcięcia).
+_NOTES_COL_PX_PADDING = 5
 
 
-def _excel_col_px(width_chars: float) -> int:
-    """Szerokość kolumny w pikselach (96 dpi) z jednostki Excela.
-
-    Excel liczy tę jednostkę w szerokościach cyfry czcionki domyślnej
-    skoroszytu, plus 5 pikseli na obramowanie i wcięcia. Szablon protokołu ma
-    Times New Roman 10, którego cyfra ma dokładnie pół firetu - czyli 7 pikseli
-    przy 96 dpi.
-    """
-    return int(round(width_chars * 7)) + 5
+def _excel_col_px(width_chars: float) -> float:
+    """Szerokość kolumny w pikselach (96 dpi) z jednostki Excela."""
+    return width_chars * _NOTES_COL_PX_PER_UNIT + _NOTES_COL_PX_PADDING
 
 
 #: Szerokość całego arkusza uwag (kolumny A..N) w pikselach i punktach.
@@ -3944,14 +3960,17 @@ _NOTES_SHEET_PX = (
 )
 _NOTES_SHEET_PT = _NOTES_SHEET_PX * 72.0 / 96.0
 #: Szerokość obszaru druku A4 przy marginesach 0,6 cala: (8,27 - 1,2) * 96 px.
-#: Arkusz szerszy od tego renderer musiałby pomniejszyć (`fitToWidth`), przez co
-#: rozjechałby się rachunek wysokości strony - dlatego zostawiamy zapas.
+#: Arkusz szerszy od tego renderer pomniejsza (`fitToWidth`), przez co rozjechałby
+#: się rachunek wysokości strony liczony w punktach - dlatego zostawiamy zapas.
 _NOTES_PRINT_AREA_PX = 678.0
-#: Czcionka opisu i zapas na różnice metryki po podstawieniu kroju przez
-#: konwerter. Linia dłuższa niż komórka scalona nie zawija się ani nie wystaje -
-#: zostaje UCIĘTA, więc ten zapas jest jedyną obroną przed cichą utratą tekstu.
+#: Czcionka opisu i zapas na wcięcia komórki scalonej oraz na wersję kroju
+#: w kontenerze. Linia dłuższa niż komórka nie zawija się ani nie wystaje -
+#: zostaje UCIĘTA W POŁOWIE SŁOWA, więc ten zapas jest jedyną obroną przed cichą
+#: utratą tekstu.
 _NOTES_FONT_PT = 12.0
-_NOTES_LINE_SAFETY = 0.955
+#: 8% zapasu, nie 4%: obcięte słowo jest błędem, którego w wydruku nie widać bez
+#: porównania z oryginałem, a kilka milimetrów marginesu nie kosztuje nic.
+_NOTES_LINE_SAFETY = 0.92
 #: Ile firetów (jednostek szerokości znaku) mieści się w jednej linii opisu.
 #: Liczone z geometrii arkusza, a nie zgadywane w znakach: znaki mają różne
 #: szerokości i przy stałej liczbie znaków linia z samych „i" kończyła się
@@ -3974,67 +3993,104 @@ _NOTES_SIGN_BLOCK_PT = (
 )
 
 
-#: Szerokości znaków w tysięcznych częściach firetu (em) dla Times New Roman -
-#: czcionki szablonu protokołu.
+#: Szerokości znaków w tysięcznych częściach firetu (em) dla DejaVu Serif -
+#: kroju, którym strona uwag jest wpisana i którym naprawdę się drukuje.
 #:
-#: Zmierzone wprost z pliku kroju. LibreOffice w kontenerze podstawia za nią
-#: Liberation Serif, która jest z Times New Roman METRYCZNIE ZGODNA (to był cel
-#: jej powstania), więc te same liczby opisują wydruk z Excela i ten z serwera.
+#: Zmierzone wprost z pliku kroju. Po co: rubryka opisu to komórka SCALONA,
+#: a taka nie zawija tekstu i nie wylewa go na sąsiednie - obcina. Zawijanie
+#: „co N znaków" musiało zakładać najgorszy przypadek i marnowało ćwierć
+#: szerokości kartki w każdej linii; z prawdziwymi szerokościami linia kończy
+#: się tam, gdzie naprawdę się kończy.
 #:
-#: Po co w ogóle: rubryka opisu to komórka SCALONA, a taka nie zawija tekstu
-#: i nie wylewa go na sąsiednie - obcina. Zawijanie „co N znaków" musiało więc
-#: zakładać najgorszy przypadek i marnowało ćwierć szerokości kartki na każdej
-#: linii. Z prawdziwymi szerokościami linia kończy się tam, gdzie naprawdę się
-#: kończy.
-_TNR_WIDTH_GROUPS: Tuple[Tuple[int, str], ...] = (
-    (180, "'"),
-    (200, "|"),
-    (250, " ,.\u00a0"),
-    (278, "/:;\\ijltł"),
-    (333, "!()-I[]`fr"),
-    (389, "Jsś"),
-    (400, "°"),
-    (408, '"'),
-    (444, "?aceząćęźż„”"),
-    (469, "^"),
-    (480, "{}"),
-    (500, "#$*0123456789_bdghknopquvxyńó–§"),
-    (541, "~"),
-    (556, "FPSŚ"),
-    (564, "+<=>"),
-    (611, "ELTZĘŁŹŻ"),
-    (667, "BCRĆ"),
-    (722, "ADGHKNOQUVXYwĄŃÓ"),
-    (778, "&m"),
-    (833, "%"),
-    (889, "M"),
-    (921, "@"),
-    (944, "W"),
-    (1000, "—…"),
+#: DejaVu jest szeroka: przeciętna litera ma tu ponad pół firetu, podczas gdy
+#: Times ma nieco ponad czterdzieści setnych. Pomiar na metryce Timesa dawał
+#: linie o jedną czwartą za długie - i to one wychodziły poza kartkę.
+_NOTES_WIDTH_GROUPS: Tuple[Tuple[int, str], ...] = (
+    (275, "'"),
+    (310, "j"),
+    (318, " ,.\u00a0"),
+    (320, "il"),
+    (324, "ł"),
+    (337, "/:;\\|"),
+    (338, "-"),
+    (370, "f"),
+    (390, "()[]"),
+    (395, "I"),
+    (401, "J"),
+    (402, "!t"),
+    (460, '"'),
+    (478, "r"),
+    (500, "*_`–°§"),
+    (511, "”"),
+    (513, "sś"),
+    (518, "„"),
+    (527, "zźż"),
+    (536, "?"),
+    (560, "cć"),
+    (564, "x"),
+    (565, "vy"),
+    (592, "eę"),
+    (596, "aą"),
+    (602, "oó"),
+    (606, "k"),
+    (636, "$0123456789{}"),
+    (640, "bdgpq"),
+    (644, "hnuń"),
+    (660, "Y"),
+    (664, "L"),
+    (667, "T"),
+    (669, "Ł"),
+    (673, "P"),
+    (685, "SŚ"),
+    (694, "F"),
+    (695, "ZŹŻ"),
+    (712, "X"),
+    (722, "AVĄ"),
+    (730, "EĘ"),
+    (735, "B"),
+    (747, "K"),
+    (753, "R"),
+    (765, "CĆ"),
+    (799, "G"),
+    (802, "D"),
+    (820, "OQÓ"),
+    (838, "#+<=>^~"),
+    (843, "U"),
+    (856, "w"),
+    (872, "H"),
+    (875, "NŃ"),
+    (890, "&"),
+    (948, "m"),
+    (950, "%"),
+    (1000, "@—…"),
+    (1024, "M"),
+    (1028, "W"),
 )
-_TNR_WIDTHS: Dict[str, int] = {
-    ch: width for width, chars in _TNR_WIDTH_GROUPS for ch in chars
+_NOTES_CHAR_WIDTHS: Dict[str, int] = {
+    ch: width for width, chars in _NOTES_WIDTH_GROUPS for ch in chars
 }
-#: Znak spoza tablicy liczymy jak przeciętną literę. Zaniżenie byłoby groźne
-#: (ucięta linia), zawyżenie kosztuje tylko kawałek marginesu.
-_TNR_DEFAULT_WIDTH = 500
+#: Znak spoza tablicy liczymy jak najszerszą literę małą. Zaniżenie jest tu
+#: groźne (ucięta linia), zawyżenie kosztuje tylko kawałek marginesu.
+_NOTES_DEFAULT_CHAR_WIDTH = 660
 
 
 def _text_width_em1000(text: str) -> int:
     """Szerokość napisu w tysięcznych częściach firetu."""
-    return sum(_TNR_WIDTHS.get(ch, _TNR_DEFAULT_WIDTH) for ch in text or "")
+    return sum(
+        _NOTES_CHAR_WIDTHS.get(ch, _NOTES_DEFAULT_CHAR_WIDTH) for ch in text or ""
+    )
 
 
 def _wrap_notes_text(text: str, budget_em1000: int) -> List[str]:
     """Łamie opis na linie, zachowując akapity wpisane przez sędziego.
 
     Miarą jest RZECZYWISTA szerokość napisu, nie liczba znaków - patrz
-    `_TNR_WIDTH_GROUPS`.
+    `_NOTES_WIDTH_GROUPS`.
     """
     out: List[str] = []
     budget = max(1, int(budget_em1000))
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    space = _TNR_WIDTHS.get(" ", 250)
+    space = _NOTES_CHAR_WIDTHS.get(" ", 318)
 
     def _split_long(word: str) -> List[str]:
         """Słowo szersze niż cała linia (np. wklejony link) - tniemy je."""
@@ -4042,7 +4098,7 @@ def _wrap_notes_text(text: str, budget_em1000: int) -> List[str]:
         cur = ""
         cur_w = 0
         for ch in word:
-            w = _TNR_WIDTHS.get(ch, _TNR_DEFAULT_WIDTH)
+            w = _NOTES_CHAR_WIDTHS.get(ch, _NOTES_DEFAULT_CHAR_WIDTH)
             if cur and cur_w + w > budget:
                 chunks.append(cur)
                 cur, cur_w = ch, w
@@ -4146,8 +4202,9 @@ def _create_detailed_notes_sheet(
         pass
 
     # Szerokość arkusza kontra kartka. Obszar druku A4 przy marginesach 0,6
-    # cala ma 678 px; arkusz ma ich 642, czyli 94,7% - zapas jest, a strona nie
-    # kończy się już w połowie.
+    # cala ma 678 px i tyle samo ma arkusz - to jest szerokość zmierzona na
+    # gotowym wydruku, a nie wyprowadzona ze wzoru. Zapas na obciętą literę
+    # siedzi nie tutaj, tylko w budżecie linii (`_NOTES_LINE_SAFETY`).
     #
     # Ten zapas jest potrzebny dwa razy. Arkusz szerszy od kartki renderer
     # pomniejsza (`fitToWidth`), przez co rozjechałby się rachunek wysokości
@@ -4188,7 +4245,7 @@ def _create_detailed_notes_sheet(
         left = ws_notes.cell(row=row, column=1)
         left.value = "Strona"  # numer dopisze wołający, po policzeniu stron
         left.alignment = Alignment(horizontal="left", vertical="center")
-        left.font = Font(size=10)
+        left.font = Font(name=_NOTES_BODY_FONT, size=10)
 
         # Do kolumny N, czyli do tej samej krawędzi, na której kończy się opis.
         # Przy końcu na M data wisiała pół centymetra przed prawym marginesem
@@ -4197,7 +4254,7 @@ def _create_detailed_notes_sheet(
         right = ws_notes.cell(row=row, column=7)
         right.value = right_hdr
         right.alignment = Alignment(horizontal="right", vertical="center")
-        right.font = Font(size=10)
+        right.font = Font(name=_NOTES_BODY_FONT, size=10)
 
         ws_notes.row_dimensions[row].height = _NOTES_HEADER_PT
         ws_notes.row_dimensions[row + 1].height = _NOTES_HEADER_GAP_PT
@@ -4221,7 +4278,7 @@ def _create_detailed_notes_sheet(
         cell = ws_notes.cell(row=row, column=1)
         cell.value = text_line
         cell.alignment = Alignment(horizontal="left", vertical="top")
-        cell.font = Font(size=12)
+        cell.font = Font(name=_NOTES_BODY_FONT, size=_NOTES_FONT_PT)
 
     # Podpisy: albo cały blok mieści się pod opisem, albo idzie na nową stronę.
     if state["y"] + _NOTES_TEXT_GAP_PT + _NOTES_SIGN_BLOCK_PT > _NOTES_PAGE_BUDGET_PT:
@@ -4236,8 +4293,12 @@ def _create_detailed_notes_sheet(
         )
         cell = ws_notes.cell(row=name_row, column=9)
         cell.value = (name or "").strip()
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.font = Font(size=11, bold=True)
+        # `shrinkToFit`, bo podwójne nazwisko nie ma dokąd się wylać: to komórka
+        # scalona, więc zamiast wyjechać poza rubrykę po prostu by się urwało.
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", shrinkToFit=True
+        )
+        cell.font = Font(name=_NOTES_NAME_FONT, size=11)
 
         sign_row = add_row(_NOTES_SIGN_PT)
         # Kotwica w J, nie w K, i węższa ramka. Od kolumny K do prawej krawędzi

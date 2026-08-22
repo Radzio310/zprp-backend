@@ -167,19 +167,55 @@ def test_linia_zostawia_zapas_do_krawedzi_arkusza():
     assert _NOTES_LINE_BUDGET * 12 / 1000.0 < _NOTES_SHEET_PT
 
 
-def test_opis_z_protokolu_208136_miesci_sie_w_trzech_liniach():
-    """Ten sam opis zajmował cztery linie i kończył się w połowie kartki."""
-    text = (
-        "Zawodnik drużyny gospodarzy z numerem 11 Balicki Grzegorz otrzymał karę "
-        "dyskwalifikacji w 37 min. 33 sekundzie meczu za niebezpieczne, lekkomyślne "
-        "spowodowanie upadku zawodnika znajdującego się w ataku na podstawie "
-        "przepisu 8:5a."
-    )
-    lines = _wrap_notes_text(text, _NOTES_LINE_BUDGET)
-    assert len(lines) == 3
+OPIS_208136 = (
+    "Zawodnik drużyny gospodarzy z numerem 11 Balicki Grzegorz otrzymał karę "
+    "dyskwalifikacji w 37 min. 33 sekundzie meczu za niebezpieczne, lekkomyślne "
+    "spowodowanie upadku zawodnika znajdującego się w ataku na podstawie "
+    "przepisu 8:5a."
+)
+
+
+def test_opis_z_protokolu_208136_wypelnia_linie_i_nie_gubi_slow():
+    """Ten opis wyszedł najpierw w połowie szerokości kartki, a po poprawce
+    z uciętymi końcówkami wyrazów („otrzymał karę dyskwa")."""
+    lines = _wrap_notes_text(OPIS_208136, _NOTES_LINE_BUDGET)
+
+    # Nic nie wystaje poza rubrykę - czyli nic nie zostanie ucięte.
+    assert all(_text_width_em1000(l) <= _NOTES_LINE_BUDGET for l in lines)
+    # Ani jedno słowo nie zostało rozcięte.
+    assert " ".join(lines).split() == OPIS_208136.split()
     # Pełne linie naprawdę dochodzą do krawędzi rubryki, a nie kończą się
     # w trzech czwartych szerokości.
-    assert _text_width_em1000(lines[0]) > 0.9 * _NOTES_LINE_BUDGET
+    assert all(
+        _text_width_em1000(l) > 0.85 * _NOTES_LINE_BUDGET for l in lines[:-1]
+    )
+
+
+def test_krój_opisu_jest_ten_sam_co_zmierzona_tablica_szerokości():
+    """Cała arytmetyka szerokości stoi na metryce JEDNEGO kroju.
+
+    Podmiana czcionki opisu bez podmiany tablicy nie daje żadnego objawu poza
+    wydrukiem z uciętymi słowami - dokładnie tym, który już raz wyszedł, gdy
+    LibreOffice podstawił DejaVu Serif za nieistniejący w kontenerze Times.
+    """
+    from app.results import _NOTES_BODY_FONT, _NOTES_CHAR_WIDTHS
+
+    assert _NOTES_BODY_FONT == "DejaVu Serif"
+    # Kilka znaków kontrolnych wprost z pliku kroju.
+    assert _NOTES_CHAR_WIDTHS["W"] == 1028
+    assert _NOTES_CHAR_WIDTHS["i"] == 320
+    assert _NOTES_CHAR_WIDTHS[" "] == 318
+
+
+def test_nazwiska_sedziow_bezszeryfowo_i_bez_pogrubienia():
+    ws, _ = _build("Krótka uwaga.")
+
+    row = _rows_with(ws, REF1)[0]
+    cell = ws.cell(row=row, column=9)
+    assert cell.font.name == "DejaVu Sans"
+    assert not cell.font.bold
+    # Podwójne nazwisko nie ma dokąd się wylać z komórki scalonej.
+    assert cell.alignment.shrinkToFit
 
 
 def test_podpis_miesci_sie_w_szerokosci_kartki():
@@ -193,35 +229,50 @@ def test_podpis_miesci_sie_w_szerokosci_kartki():
     from app.results import (
         _NOTES_SIGN_ANCHOR_COL,
         _NOTES_SIGN_MAX_W_PX,
+        _excel_col_px,
     )
 
     ws, _ = _build("Krótka uwaga.")
 
-    def _px(width: float) -> float:
-        return width * 7 + 5
-
     first = column_index_from_string(_NOTES_SIGN_ANCHOR_COL)
     last = column_index_from_string("N")
     available = sum(
-        _px(ws.column_dimensions[chr(ord("A") + c - 1)].width)
+        _excel_col_px(ws.column_dimensions[chr(ord("A") + c - 1)].width)
         for c in range(first, last + 1)
     )
 
     assert _NOTES_SIGN_MAX_W_PX < available
 
 
-def test_arkusz_miesci_sie_w_szerokosci_A4():
+def test_arkusz_nie_wychodzi_poza_szerokosc_A4():
     """Sedno „pustej czwartej strony".
 
-    Wszystko, co nie mieści się w szerokości obszaru druku, renderer przenosi
-    na kolejną kartkę - w praktyce wychodzi z tego pusta strona z pionowym
-    paskiem papieru. Arkusz musi mieć zapas, nie mieścić się „na styk".
+    Wszystko, co nie mieści się w szerokości obszaru druku, renderer albo
+    przenosi na kolejną kartkę (pusta strona z pionowym paskiem papieru), albo
+    pomniejsza całą stronę - a wtedy rozjeżdża się rachunek wysokości liczony
+    w punktach.
+
+    Przelicznik jest ZMIERZONY na gotowym PDF (patrz `_NOTES_COL_PX_PER_UNIT`);
+    wcześniej stała tu wartość ze wzoru dla Excela, o 7% za mała, i test
+    przepuszczał arkusz szerszy od kartki.
     """
+    from app.results import _excel_col_px
+
     ws, _ = _build("Krótka uwaga.")
 
     szerokosc_px = sum(
-        ws.column_dimensions[chr(ord("A") + i)].width * 7 + 5 for i in range(14)
+        _excel_col_px(ws.column_dimensions[chr(ord("A") + i)].width)
+        for i in range(14)
     )
     obszar_druku_cali = 8.268 - ws.page_margins.left - ws.page_margins.right
 
-    assert szerokosc_px / 96.0 < obszar_druku_cali * 0.95
+    assert szerokosc_px / 96.0 <= obszar_druku_cali
+
+
+def test_linia_opisu_ma_zapas_do_krawedzi_arkusza():
+    """Rubryka opisu sięga krawędzi arkusza, więc cały zapas na obciętą literę
+    musi siedzieć w budżecie linii."""
+    from app.results import _NOTES_SHEET_PT
+
+    szerokosc_linii_pt = _NOTES_LINE_BUDGET * 12 / 1000.0
+    assert szerokosc_linii_pt < _NOTES_SHEET_PT * 0.95
