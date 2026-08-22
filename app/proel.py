@@ -741,6 +741,14 @@ async def lease_proel_match(
         "rev": int((fresh or {}).get("rev") or 0),
         "phase": _phase_of(fresh, doc_status),
         "ttl_seconds": ttl,
+        # Czy TO wywołanie odebrało prowadzenie komuś innemu.
+        #
+        # Aplikacja pyta o to po nieudanym biciu serca: odzyskanie WŁASNEGO,
+        # wygasłego leasingu ma przejść w ciszy (nikogo nie skrzywdziliśmy),
+        # a odebranie go drugiemu urządzeniu musi się pokazać sędziemu -
+        # inaczej dwa telefony tego samego sędziego odbierałyby sobie mecz
+        # w kółko, co 25 sekund, i nikt by o tym nie wiedział.
+        "took_over": bool(took_over),
     }
 
 
