@@ -26,6 +26,7 @@ from app.db import (
     saved_matches,
 )
 from app.proel_auth import Actor, is_admin, proel_actor
+from app.proel_journal import log_match_event
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,7 @@ async def restore_deleted(
                 data_json=row["data_json"],
                 status=restored_status,
                 is_finished=restored_status in ("finished", "approved"),
+                zprp_match_id=row["zprp_match_id"],
             )
         )
 
@@ -246,5 +248,13 @@ async def restore_deleted(
                 restored_by_judge_id=actor.judge_id,
             )
         )
+
+    await log_match_event(
+        match_number=match_number,
+        event="match.restored",
+        actor=actor,
+        zprp_match_id=str(row["zprp_match_id"] or ""),
+        details={"archive_id": entry_id, "status": restored_status},
+    )
 
     return {"success": True, "match_number": match_number}

@@ -41,6 +41,7 @@ from app.login_records import router as login_records_router
 from app.proel import router as proel_router
 from app.proel_zprp import router as proel_zprp_router
 from app.proel_archive import router as proel_archive_router
+from app.proel_journal import router as proel_journal_router
 from app.proel_users.users import router as proel_users_router
 from app.proel_users.auth_email import router as proel_users_auth_email_router
 from app.proel_users.password_reset_email import router as proel_users_password_reset_router
@@ -199,6 +200,7 @@ app.include_router(login_records_router)
 # inaczej `/proel/zprp/auth` wpada w `match_number="zprp/auth"`.
 app.include_router(proel_zprp_router)
 app.include_router(proel_archive_router)
+app.include_router(proel_journal_router)
 # Kolejność wewnątrz rodziny users: dłuższe prefiksy najpierw
 # (`/proel/users/auth/password-reset` przed `/proel/users/auth` przed
 # `/proel/users`), żeby żaden ogólniejszy wzorzec nie połknął szczegółowego.
@@ -922,6 +924,14 @@ async def startup():
     _proel_migrations = [
         "ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS status VARCHAR NOT NULL DEFAULT 'in_progress'",
         "UPDATE proel_matches SET status = 'finished' WHERE is_finished = true AND status = 'in_progress'",
+        # Guard przed nadpisaniem meczu o tym samym numerze z innego sezonu.
+        "ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS zprp_match_id VARCHAR",
+        "CREATE INDEX IF NOT EXISTS ix_proel_matches_zprp_id ON proel_matches (zprp_match_id)",
+        # Wypełnienie wstecz z bloba: bez tego guard zacząłby działać dopiero
+        # od pierwszego zapisu każdego meczu, czyli dla starych meczów nigdy.
+        "UPDATE proel_matches SET zprp_match_id = data_json->'matchConfig'->>'matchId' "
+        "WHERE zprp_match_id IS NULL "
+        "AND data_json->'matchConfig'->>'matchId' ~ '^[0-9]+$'",
     ]
     for stmt in _proel_migrations:
         try:

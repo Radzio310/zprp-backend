@@ -2,7 +2,7 @@ import asyncio
 import copy
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy import select, insert, update, delete, func
 from app.db import (
     database,
@@ -11,6 +11,7 @@ from app.db import (
     saved_matches,
 )
 from app.proel_auth import Actor, is_admin, merge_guard, proel_actor, roles_for
+from app.proel_journal import client_ip as _client_ip, log_match_event, soft_actor
 from app.proel_lease import (
     LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
     LEASE_TTL_SECONDS as _LEASE_TTL_SECONDS,
@@ -87,6 +88,76 @@ _WAIT_POLL_SECONDS = 0.8
 
 def _as_dict(row: Any) -> Dict[str, Any]:
     return dict(row) if row is not None else {}
+
+
+def _zprp_id_of(blob: Any) -> str:
+    """`data_json.matchConfig.matchId` - identyfikator meczu w bazie ZPRP.
+
+    Czytamy go z BLOBA, a nie z osobnego pola żądania, bo dzięki temu guard
+    działa też dla wersji aplikacji, które o nim nie wiedzą: matchId jedzie
+    w konfiguracji meczu od zawsze.
+    """
+    try:
+        value = (blob or {}).get("matchConfig", {}).get("matchId")
+    except AttributeError:
+        return ""
+    text_id = str(value or "").strip()
+    # Mecze zakładane ręcznie mają identyfikatory syntetyczne (Date.now()-...),
+    # a te nie identyfikują niczego w ZPRP. Bierzemy wyłącznie czyste liczby.
+    return text_id if text_id.isdigit() else ""
+
+
+#: Pola konfiguracji, które wystarczają, żeby narysować wiersz na liście
+#: wyboru meczu. Wszystko poza nimi (składy, badania, przebieg, kary) zostaje
+#: na serwerze do czasu, aż ktoś naprawdę otworzy ten mecz.
+_HEAD_CONFIG_KEYS = (
+    "matchNumber",
+    "matchId",
+    "hostTeamName",
+    "guestTeamName",
+    "isTest",
+)
+
+
+def _match_head(blob: Any) -> Dict[str, Any]:
+    """Nagłówek meczu w kształcie `data_json`, ale bez danych osobowych."""
+    try:
+        config = dict((blob or {}).get("matchConfig") or {})
+    except AttributeError:
+        return {"matchConfig": {}}
+    head = {k: config.get(k) for k in _HEAD_CONFIG_KEYS if k in config}
+    out: Dict[str, Any] = {"matchConfig": head}
+    for key in ("scoreHost", "scoreGuest", "date"):
+        try:
+            if key in blob:
+                out[key] = blob[key]
+        except TypeError:
+            break
+    return out
+
+
+class _MatchIdConflict(Exception):
+    """Sygnał z wnętrza transakcji: blob opisuje inny mecz niż ten pod numerem.
+
+    Osobny wyjątek, a nie `HTTPException` od razu, bo wpis do dziennika MUSI
+    powstać poza transakcją - rzucone w środku, wycofałoby się razem z nią
+    i konflikt nie zostawiłby po sobie żadnego śladu.
+    """
+
+    def __init__(self, known: str, incoming: str) -> None:
+        super().__init__("match id mismatch")
+        self.known = known
+        self.incoming = incoming
+
+
+def _match_id_conflict(known: str, incoming: str) -> bool:
+    """Czy blob opisuje INNY mecz niż ten, który leży pod tym numerem.
+
+    Porównujemy wyłącznie wtedy, gdy obie strony wiedzą, o który mecz chodzi.
+    Pusty identyfikator (mecz ręczny, stary zapis) nigdy nie jest konfliktem -
+    inaczej guard blokowałby zwykłe prowadzenie meczu bez ZPRP.
+    """
+    return bool(known) and bool(incoming) and known != incoming
 
 
 def _overlay_of(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -528,6 +599,21 @@ async def patch_proel_state(
             await _apply_reprojection_to_doc(match_number, refreshed)
 
         final_rev = next_rev if fresh_ops else base_rev
+        changed_paths = [
+            o.path for o in req.ops if str(o.op_id or "") in fresh_ops
+        ]
+
+    # Zdarzenie po transakcji i tylko gdy coś naprawdę weszło. Klucz z pierwszego
+    # op_id gasi ponowienie z outboxa: te same operacje nie dopiszą się drugi raz.
+    if fresh_ops:
+        await log_match_event(
+            match_number=match_number,
+            event="field.changed",
+            actor=actor,
+            zprp_match_id=str(state.get("zprp_match_id") or ""),
+            details={"paths": changed_paths, "rev": final_rev},
+            event_key=f"patch:{match_number}:{fresh_ops[0]}",
+        )
 
     return {
         "ok": True,
@@ -582,6 +668,11 @@ async def lease_proel_match(
         held = _lease_active(state)
         mine = held and state.get("lease_install") == actor.installation_id
         epoch = int(state.get("lease_epoch") or 0)
+        took_over = False
+        going_live = (
+            req.intent == "live" and state.get("live_started_at") is None
+        )
+        zprp_id = str(state.get("zprp_match_id") or "")
 
         if req.action == "heartbeat":
             # Bicie serca NIE przejmuje niczego. Gdy leasing wygasł albo ktoś
@@ -625,6 +716,7 @@ async def lease_proel_match(
                     },
                 )
             epoch += 1  # przejęcie unieważnia bicie serca poprzednika
+            took_over = True
         elif not held:
             epoch += 1
 
@@ -653,6 +745,29 @@ async def lease_proel_match(
         )
 
         fresh = await _fetch_state(match_number)
+
+    # Start prowadzenia i przejęcie stolika - dwa zdarzenia, o które pyta się
+    # najczęściej („kto właściwie prowadził ten mecz"). Bicie serca co 25 s nie
+    # tworzy niczego: klucz zdarzenia zawiera epokę leasingu, a ta zmienia się
+    # wyłącznie przy realnym przejęciu.
+    if going_live:
+        await log_match_event(
+            match_number=match_number,
+            event="match.live_started",
+            actor=actor,
+            zprp_match_id=zprp_id,
+            details={"intent": req.intent},
+            event_key=f"live:{match_number}",
+        )
+    if took_over:
+        await log_match_event(
+            match_number=match_number,
+            event="table.taken_over",
+            actor=actor,
+            zprp_match_id=zprp_id,
+            details={"from": state.get("lease_name") or "", "epoch": epoch},
+            event_key=f"lease:{match_number}:{epoch}",
+        )
 
     return {
         "ok": True,
@@ -707,8 +822,13 @@ async def release_proel_lease(
 )
 async def create_proel_match(
     req: CreateSavedMatchRequest,
+    request: Request,
     x_baza_proel: Optional[str] = Header(None, alias="X-BAZA-Proel"),
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+    x_judge_id: Optional[str] = Header(None, alias="X-Judge-Id"),
+    x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
+    x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
+    x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
 ):
     existing = await database.fetch_one(
         select(saved_matches)
@@ -721,6 +841,11 @@ async def create_proel_match(
         )
 
     new_status = _resolve_status(req.status, req.is_finished, "in_progress")
+    zprp_id = _zprp_id_of(req.data_json)
+
+    # Aktora czytamy MIĘKKO: stara wersja aplikacji nie wysyła nagłówków, a
+    # 401 na zapisie bloba oznaczałby ciche gubienie meczu.
+    actor = await soft_actor(x_judge_id, x_installation_id, x_actor_name)
 
     async with database.transaction():
         state = await _fetch_state(req.match_number, for_update=True)
@@ -733,6 +858,7 @@ async def create_proel_match(
             data_json=data_json,
             status=new_status,
             is_finished=_is_finished_for(new_status),
+            zprp_match_id=zprp_id or None,
         )
         await database.execute(stmt)
 
@@ -745,6 +871,16 @@ async def create_proel_match(
                 legacy_writer=str(x_baza_proel or "") != "2",
                 writer_install=str(x_installation_id or "").strip(),
             )
+
+    await log_match_event(
+        match_number=req.match_number,
+        event="match.created",
+        actor=actor,
+        zprp_match_id=zprp_id,
+        details={"status": new_status},
+        app_version=x_app_version,
+        ip=_client_ip(request, x_forwarded_for),
+    )
 
     return {"success": True}
 
@@ -801,96 +937,169 @@ async def _sync_state_after_doc_write(
 async def update_proel_match(
     match_number: str,
     req: UpdateSavedMatchRequest,
+    request: Request,
     x_baza_proel: Optional[str] = Header(None, alias="X-BAZA-Proel"),
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+    x_judge_id: Optional[str] = Header(None, alias="X-Judge-Id"),
+    x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
+    x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
+    x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
 ):
     # Cała ścieżka w JEDNEJ transakcji: blokada wiersza stanu (`FOR UPDATE`)
     # działa tylko wewnątrz transakcji, a reprojekcja musi widzieć overlay
     # dokładnie taki, jaki obowiązuje w chwili zapisu bloba.
-    async with database.transaction():
-        row = await database.fetch_one(
-            select(saved_matches)
-            .where(saved_matches.c.match_number == match_number)
-        )
-        if not row:
-            raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
-        # Blokada DOPIERO po zatwierdzeniu (status="approved"), NIE po zakończeniu.
-        try:
-            current_status = row["status"] or ("finished" if row["is_finished"] else "in_progress")
-        except (KeyError, IndexError):
-            current_status = "finished" if row["is_finished"] else "in_progress"
-        if current_status == "approved":
-            # Przepuszczamy WYŁĄCZNIE świadome cofnięcie zatwierdzenia -
-            # patrz `unapprove_requested`.
-            if not unapprove_requested(req.status):
+    try:
+        async with database.transaction():
+            row = await database.fetch_one(
+                select(saved_matches)
+                .where(saved_matches.c.match_number == match_number)
+            )
+            if not row:
+                raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
+            # Blokada DOPIERO po zatwierdzeniu (status="approved"), NIE po zakończeniu.
+            try:
+                current_status = row["status"] or ("finished" if row["is_finished"] else "in_progress")
+            except (KeyError, IndexError):
+                current_status = "finished" if row["is_finished"] else "in_progress"
+            if current_status == "approved":
+                # Przepuszczamy WYŁĄCZNIE świadome cofnięcie zatwierdzenia -
+                # patrz `unapprove_requested`.
+                if not unapprove_requested(req.status):
+                    raise HTTPException(
+                        status.HTTP_423_LOCKED,
+                        detail={"code": "MATCH_APPROVED", "message": "Nie można edytować zatwierdzonego meczu"},
+                    )
+
+            # ── Guard: czy to na pewno TEN mecz ────────────────────────────────
+            #
+            # Numer meczu ("OSK/12") jest unikalny w rozgrywkach, ale NIE między
+            # sezonami - a jest kluczem głównym tej tabeli. Bez tego sprawdzenia
+            # mecz z nowego sezonu nadpisywał protokół sprzed roku: `POST` wracał
+            # z 409, aplikacja logowała to do konsoli i szła dalej, a `PUT`
+            # przechodził bez słowa. Leasing tego nie łapał, bo mecz sprzed roku
+            # od dawna nikogo nie ma.
+            try:
+                known_id = str(row["zprp_match_id"] or "").strip()
+            except (KeyError, IndexError):
+                known_id = ""
+            incoming_id = _zprp_id_of(req.data_json)
+            if _match_id_conflict(known_id, incoming_id):
+                raise _MatchIdConflict(known_id, incoming_id)
+
+            # Budujemy słownik pól do aktualizacji
+            #
+            # TU JEST SEDNO CAŁEGO MECHANIZMU. `req.data_json` to pełny snapshot
+            # zbudowany z lokalnego stanu telefonu prowadzącego (MatchScreen wysyła
+            # go co 60 s) — nie wie NIC o tym, co w międzyczasie zmienili inni.
+            # Gdybyśmy zapisali go bez zmian, potwierdzenie badań zrobione przez
+            # sędziego na innym urządzeniu znikałoby w ciągu minuty. Overlay
+            # nakładamy z powrotem w tej samej transakcji, więc działa to także dla
+            # wersji aplikacji, które o współpracy nie mają pojęcia.
+            state = await _fetch_state(match_number, for_update=True)
+
+            # Twarda blokada prowadzenia — ale WYŁĄCZNIE dla klientów, które o niej
+            # wiedzą (`X-BAZA-Proel: 2`). Stara wersja aplikacji nie potrafiłaby
+            # obsłużyć odrzucenia: po cichu porzuciłaby błąd i grała dalej z
+            # własnego stanu, więc odrzucanie jej zapisów oznaczałoby ciche gubienie
+            # meczu. Zamykanie tej furtki następuje naturalnie, w miarę jak flota
+            # się aktualizuje.
+            if (
+                str(x_baza_proel or "") == "2"
+                and state is not None
+                and _phase_of(state, current_status) == PHASE_LIVE
+                and _lease_active(state)
+                and state.get("lease_install") != str(x_installation_id or "").strip()
+            ):
                 raise HTTPException(
-                    status.HTTP_423_LOCKED,
-                    detail={"code": "MATCH_APPROVED", "message": "Nie można edytować zatwierdzonego meczu"},
+                    412,
+                    detail={
+                        "code": "LEASE_LOST",
+                        "message": "Mecz prowadzi teraz inna osoba.",
+                        "holder": state.get("lease_name") or "",
+                    },
                 )
 
-        # Budujemy słownik pól do aktualizacji
-        #
-        # TU JEST SEDNO CAŁEGO MECHANIZMU. `req.data_json` to pełny snapshot
-        # zbudowany z lokalnego stanu telefonu prowadzącego (MatchScreen wysyła
-        # go co 60 s) — nie wie NIC o tym, co w międzyczasie zmienili inni.
-        # Gdybyśmy zapisali go bez zmian, potwierdzenie badań zrobione przez
-        # sędziego na innym urządzeniu znikałoby w ciągu minuty. Overlay
-        # nakładamy z powrotem w tej samej transakcji, więc działa to także dla
-        # wersji aplikacji, które o współpracy nie mają pojęcia.
-        state = await _fetch_state(match_number, for_update=True)
+            projected = _reproject_blob(state, copy.deepcopy(req.data_json))
 
-        # Twarda blokada prowadzenia — ale WYŁĄCZNIE dla klientów, które o niej
-        # wiedzą (`X-BAZA-Proel: 2`). Stara wersja aplikacji nie potrafiłaby
-        # obsłużyć odrzucenia: po cichu porzuciłaby błąd i grała dalej z
-        # własnego stanu, więc odrzucanie jej zapisów oznaczałoby ciche gubienie
-        # meczu. Zamykanie tej furtki następuje naturalnie, w miarę jak flota
-        # się aktualizuje.
-        if (
-            str(x_baza_proel or "") == "2"
-            and state is not None
-            and _phase_of(state, current_status) == PHASE_LIVE
-            and _lease_active(state)
-            and state.get("lease_install") != str(x_installation_id or "").strip()
-        ):
-            raise HTTPException(
-                412,
-                detail={
-                    "code": "LEASE_LOST",
-                    "message": "Mecz prowadzi teraz inna osoba.",
-                    "holder": state.get("lease_name") or "",
-                },
+            to_update: dict = {"data_json": projected}
+            # Uzupełniamy identyfikator meczu, gdy wiersz powstał przed tą kolumną
+            # albo przez `POST` bez konfiguracji. Od tej chwili guard wyżej ma się
+            # o co oprzeć.
+            if incoming_id and not known_id:
+                to_update["zprp_match_id"] = incoming_id
+            # status (lub stare is_finished) — jeśli cokolwiek przyszło, przelicz oba pola
+            if req.status is not None or req.is_finished is not None:
+                new_status = _resolve_status(req.status, req.is_finished, current_status)
+                to_update["status"] = new_status
+                to_update["is_finished"] = _is_finished_for(new_status)
+            # Zawsze przepisujemy updated_at na teraz. `func.now()`, nie
+            # `datetime.utcnow()`: kolumna jest `DateTime(timezone=True)`, więc
+            # naiwny znacznik z Pythona zapisywał się bez strefy i psuł porównania
+            # czasu (m.in. „ostatnia edycja mniej niż 2 min temu"). Zegar bazy jest
+            # jedynym zegarem porządkującym w całym systemie.
+            to_update["updated_at"] = func.now()
+
+            stmt = (
+                update(saved_matches)
+                .where(saved_matches.c.match_number == match_number)
+                .values(**to_update)
             )
+            await database.execute(stmt)
 
-        projected = _reproject_blob(state, copy.deepcopy(req.data_json))
-
-        to_update: dict = {"data_json": projected}
-        # status (lub stare is_finished) — jeśli cokolwiek przyszło, przelicz oba pola
-        if req.status is not None or req.is_finished is not None:
-            new_status = _resolve_status(req.status, req.is_finished, current_status)
-            to_update["status"] = new_status
-            to_update["is_finished"] = _is_finished_for(new_status)
-        # Zawsze przepisujemy updated_at na teraz. `func.now()`, nie
-        # `datetime.utcnow()`: kolumna jest `DateTime(timezone=True)`, więc
-        # naiwny znacznik z Pythona zapisywał się bez strefy i psuł porównania
-        # czasu (m.in. „ostatnia edycja mniej niż 2 min temu"). Zegar bazy jest
-        # jedynym zegarem porządkującym w całym systemie.
-        to_update["updated_at"] = func.now()
-
-        stmt = (
-            update(saved_matches)
-            .where(saved_matches.c.match_number == match_number)
-            .values(**to_update)
+            if state is not None:
+                await _sync_state_after_doc_write(
+                    match_number,
+                    state,
+                    projected,
+                    to_update.get("status", current_status),
+                    legacy_writer=str(x_baza_proel or "") != "2",
+                    writer_install=str(x_installation_id or "").strip(),
+                )
+    except _MatchIdConflict as conflict:
+        # Wpis powstaje PO wycofaniu transakcji - inaczej wycofałby się
+        # razem z nią i odrzucony zapis nie zostawiłby żadnego śladu.
+        await log_match_event(
+            match_number=match_number,
+            event="match.id_conflict",
+            actor=await soft_actor(x_judge_id, x_installation_id, x_actor_name),
+            zprp_match_id=conflict.incoming,
+            details={"known": conflict.known, "incoming": conflict.incoming},
+            app_version=x_app_version,
+            ip=_client_ip(request, x_forwarded_for),
         )
-        await database.execute(stmt)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "MATCH_ID_MISMATCH",
+                "message": (
+                    "Ten numer meczu należy na serwerze do innego meczu "
+                    "(inny sezon albo inne rozgrywki). Zapis wstrzymany, "
+                    "żeby nie nadpisać cudzego protokołu."
+                ),
+                "known": conflict.known,
+                "incoming": conflict.incoming,
+            },
+        ) from conflict
 
-        if state is not None:
-            await _sync_state_after_doc_write(
-                match_number,
-                state,
-                projected,
-                to_update.get("status", current_status),
-                legacy_writer=str(x_baza_proel or "") != "2",
-                writer_install=str(x_installation_id or "").strip(),
+    # Dziennik WYŁĄCZNIE przy faktycznej zmianie statusu. Blob leci co 60 s
+    # przez cały mecz - zapisywanie każdego zapisu zamieniłoby oś czasu meczu
+    # w ścianę identycznych wierszy, w której nie widać niczego.
+    final_status = to_update.get("status", current_status)
+    if final_status != current_status:
+        event = {
+            "finished": "match.finished",
+            "approved": "match.approved",
+            "in_progress": "match.unapproved",
+        }.get(final_status)
+        if event:
+            await log_match_event(
+                match_number=match_number,
+                event=event,
+                actor=await soft_actor(x_judge_id, x_installation_id, x_actor_name),
+                zprp_match_id=incoming_id or known_id,
+                details={"from": current_status, "to": final_status},
+                app_version=x_app_version,
+                ip=_client_ip(request, x_forwarded_for),
             )
 
     return {"success": True}
@@ -985,6 +1194,19 @@ async def delete_proel_match(
             .where(saved_matches.c.match_number == match_number)
         )
 
+    # Po transakcji: wiersz meczu znika, wpis w dzienniku zostaje. To jedyny
+    # ślad, po którym da się później powiedzieć, kto skasował zapis - archiwum
+    # zna to samo, ale archiwum też można wyczyścić po roku.
+    await log_match_event(
+        match_number=match_number,
+        event="match.deleted",
+        actor=actor,
+        zprp_match_id=(
+            str(state_row["zprp_match_id"] or "") if state_row is not None else ""
+        ),
+        details={"status": row["status"]},
+    )
+
     return {"success": True}
 
 
@@ -1002,7 +1224,26 @@ async def list_proel_matches(
         None,
         description="Filtruj po statusie: in_progress | finished | approved"
     ),
+    slim: bool = Query(
+        False,
+        description="Zwróć sam nagłówek meczu zamiast pełnego protokołu",
+    ),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    actor: Actor = Depends(proel_actor),
 ):
+    """Lista meczów - z tożsamością i z projekcją.
+
+    Do niedawna ta trasa nie miała ŻADNEJ autoryzacji i oddawała każdemu, kto
+    zna adres, wszystkie mecze w systemie razem z pełnym `data_json`: nazwiska
+    zawodników, licencje, badania, obsadę i cały przebieg. Aplikacja wołała ją
+    gołym `fetch`, bez nagłówków.
+
+    `slim=true` zwraca sam nagłówek meczu (numer, drużyny, wynik, data) w tym
+    samym kształcie `data_json.matchConfig`, w jakim czyta go lista wyboru -
+    dzięki temu ekran nie musi wiedzieć o zmianie, a pełny protokół pobiera
+    dopiero przy dotknięciu wiersza (`GET /proel/{numer}`).
+    """
     # budujemy bazowy SELECT
     stmt = select(saved_matches)
 
@@ -1022,10 +1263,17 @@ async def list_proel_matches(
         saved_matches.c.match_number.desc()
     )
 
+    stmt = stmt.limit(limit).offset(offset)
+
     rows = await database.fetch_all(stmt)
-    return ListSavedMatchesResponse(
-        matches=[MatchItem(**dict(r)) for r in rows]
-    )
+    items: List[MatchItem] = []
+    for row in rows:
+        data = dict(row)
+        data.pop("zprp_match_id", None)  # nie należy do kształtu MatchItem
+        if slim:
+            data["data_json"] = _match_head(row["data_json"])
+        items.append(MatchItem(**data))
+    return ListSavedMatchesResponse(matches=items)
 
 
 # ⚠ MUSI BYĆ OSTATNIE W PLIKU.

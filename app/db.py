@@ -594,6 +594,18 @@ saved_matches = Table(
     # NOWE: status meczu — "in_progress" | "finished" | "approved".
     # Edycja (PUT) blokowana DOPIERO przy "approved", nie przy "finished".
     Column("status", String, nullable=False, server_default=text("'in_progress'")),
+    # ZPRP `match.Id` przepisane z bloba (`data_json.matchConfig.matchId`).
+    #
+    # Klucz główny tej tabeli to NUMER meczu ("OSK/12"), a ten jest unikalny
+    # w rozgrywkach, NIE między sezonami. Bez tej kolumny mecz z nowego sezonu
+    # nadpisywał protokół meczu o tym samym numerze sprzed roku: `POST` wracał
+    # z 409, aplikacja logowała to do konsoli, a następny `PUT` przechodził.
+    # Guard w `proel_match_state` tego nie łapał, bo stoi wyłącznie w `/ensure`.
+    #
+    # NULL = mecz założony ręcznie (nie ma odpowiednika w ZPRP) albo zapis
+    # sprzed tej kolumny. Guard porównuje tylko wtedy, gdy obie strony wiedzą,
+    # o który mecz chodzi.
+    Column("zprp_match_id", String, nullable=True, index=True),
 )
 
 # 21.05) ProEl - stan współpracy nad meczem (overlay pól + leasing prowadzenia)
@@ -672,6 +684,41 @@ proel_deleted_matches = Table(
     # ofertą do przywrócenia po raz drugi.
     Column("restored_at", DateTime(timezone=True), nullable=True),
     Column("restored_by_judge_id", String, nullable=True),
+)
+
+# 21.07) ProEl - dziennik zdarzeń meczu
+#
+# Do tej pory na pytanie „kto zakończył ten mecz" nie było odpowiedzi. Połowa
+# tożsamości płynęła już po drucie (`X-Judge-Id`, `X-Installation-Id`,
+# `X-Actor-Name` przy KAŻDYM wywołaniu ProEla), ale `POST /proel/` i
+# `PUT /proel/{nr}` w ogóle jej nie czytały - więc założenie, zakończenie
+# i zatwierdzenie meczu były anonimowe.
+#
+# Osobna tabela, nie ring w `proel_match_state.audit_json`: tamten trzyma 50
+# ostatnich zmian PÓL jednego meczu i jest stanem roboczym, który przy każdym
+# zapisie się nadpisuje. Dziennik ma przeżyć mecz, sezon i reklamację.
+#
+# Wpis NIGDY nie blokuje operacji, którą opisuje - `log_match_event` łyka
+# wszystkie wyjątki. Protokół jest ważniejszy od swojej historii.
+proel_activity_log = Table(
+    "proel_activity_log", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("match_number", String, nullable=False, index=True),
+    Column("zprp_match_id", String, nullable=True, index=True),
+    # Nazwa zdarzenia, np. "match.created", "field.changed", "zprp.players_sent".
+    Column("event", String, nullable=False, index=True),
+    Column("actor_judge_id", String, nullable=True, index=True),
+    Column("actor_name", String, nullable=True),
+    Column("actor_install", String, nullable=True),
+    Column("actor_verified", Boolean, nullable=False, server_default=text("false")),
+    # Szczegóły zdarzenia: lista zmienionych ścieżek, stary i nowy status itd.
+    Column("details_json", JSON, nullable=True),
+    Column("app_version", String, nullable=True),
+    Column("client_ip", String, nullable=True),
+    # Klucz idempotencji. Bicie serca leasingu co 25 s nie może mnożyć wpisów,
+    # a ponowienie z outboxa nie może dopisać zdarzenia drugi raz.
+    Column("event_key", String, nullable=True, unique=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
 )
 
 # 21.2) Beach ProEl - mecze (analogiczne do proel_matches, ale status jako String)
@@ -2129,4 +2176,9 @@ with engine.connect() as _conn:
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_password_reset_login ON beach_password_reset_requests (login)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_password_reset_status ON beach_password_reset_requests (status)"))
     _conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_beach_tutorial_views_unique ON beach_tutorial_views (tutorial_id, user_id)"))
+    # Dziennik ProEl: oś czasu meczu i oś czasu całości. Stronicowanie idzie po
+    # `id` malejąco (kursor), więc te dwa indeksy obsługują komplet zapytań.
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_proel_log_match_id ON proel_activity_log (match_number, id DESC)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_proel_log_id_desc ON proel_activity_log (id DESC)"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_proel_log_actor ON proel_activity_log (actor_judge_id, id DESC)"))
     _conn.commit()
