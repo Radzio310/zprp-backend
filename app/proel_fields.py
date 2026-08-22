@@ -297,6 +297,14 @@ _POST_EXTRAS = {
     "detailedRefereeNotes": "detailedRefereeNotes",
     "extraReport": "extraReport",
     "notesText": "detailedRefereeNotesText",
+    # Znacznik „pełne dane meczu poszły do bazy związku".
+    #
+    # Wartość jest nieistotna (True) - całą treść niesie sam wpis overlaya:
+    # `by` mówi KTO, `at` mówi KIEDY. To jest dokładnie ta informacja, której
+    # brakowało sędziemu wracającemu do meczu na drugim telefonie: bez niej
+    # ekran pokazywał zadanie jako niezrobione i namawiał do wysłania składu
+    # drugi raz.
+    "fullDataSent": "fullDataSent",
 }
 
 _CFG_FIELDS = {
