@@ -28,6 +28,10 @@ from fastapi import (
 # Tożsamość aktora — ta sama zależność co przy zapisach ProEl, żeby wgląd w
 # dziennik protokołów miał dokładnie tych samych adminów co reszta systemu.
 from app.proel_auth import header_text, proel_actor
+from app.protocol_shootout import (
+    recorded_shot_count as _recorded_shot_count,
+    shootout_rows as _shootout_rows,
+)
 from pathlib import Path as SysPath
 from httpx import AsyncClient
 from pydantic import BaseModel
@@ -3484,100 +3488,48 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         ws[f"BF{r}"].value = "--"
 
     # 3) Dane karnych
-    shots = data_json.get("penaltyShots") or {}
-    host_arr = shots.get("host") or []
-    guest_arr = shots.get("guest") or []
+    #
+    # Kolejność i treść wierszy liczy `app.protocol_shootout` - lustro reguły
+    # z aplikacji (`getTeamForShotIndex`). Tutejsza wersja liczyła ją własnym
+    # przełącznikiem `flip = not flip` odpalanym w KAŻDEJ serii z przedziału
+    # 6-10 zamiast raz na pięć, więc serie 7 i 9 wychodziły w wydruku
+    # odwrócone, a od serii 11 wszystko było zamienione na stałe.
+    rows = _shootout_rows(
+        data_json.get("penaltyShots") or {},
+        str(data_json.get("penaltyStarterTeam") or "guest"),
+    )
 
-    # ile serii (po 1 strzale na drużynę)
-    series_count = max(len(host_arr), len(guest_arr))
-    if series_count <= 0:
-        return
-
-    # 4) Wpisy od wiersza 16, po 2 wiersze na serię
     row = 16
-    host_score = 0
-    guest_score = 0
-
-    def _shot(arr, idx) -> Optional[Dict[str, Any]]:
-        if idx < 0 or idx >= len(arr):
-            return None
-        x = arr[idx]
-        return x if isinstance(x, dict) else None
-
-    # co 5 serii zmiana startującego:
-    # serie 1-5: host first
-    # serie 6-10: guest first
-    # serie 11-15: host first
-    # itd.
-    # W tej sekcji w kodzie odpowiedzialnej za ustawianie kolejności drużyn do wykonywania karnych
-
-    # Odczytanie drużyny rozpoczynającej karne z JSON
-    penalty_starter_team = data_json.get("penaltyStarterTeam", "guest")
-
-    # Zmienna do kontrolowania, która drużyna jako pierwsza wykonuje rzuty karne
-    flip = False  # Flaga do przełączania kolejności
-
-    # Co 5 kolejek zmieniamy drużynę zaczynającą karne
-    for s in range(1, series_count + 1):
+    for entry in rows:
         if row > TIMELINE_END_ROW:
-            break  # brak miejsca w szablonie
+            # Szablon skończył się przed protokołem. Cicho tego nie zostawiamy:
+            # wydruk gubiący rzut wygląda dokładnie jak wydruk kompletny.
+            logger.warning(
+                "protokół: strona karnych nie pomieściła %s wierszy (mecz %s)",
+                len(rows) - (row - 16),
+                (data_json.get("matchConfig") or {}).get("matchNumber"),
+            )
+            break
+        ws[f"AL{row}"].value = entry["series"]
+        ws[f"AN{row}"].value = entry["host"]
+        ws[f"AU{row}"].value = entry["guest"]
+        ws[f"AP{row}"].value = entry["score_host"]
+        ws[f"AS{row}"].value = entry["score_guest"]
+        row += 1
 
-        idx = s - 1
-
-        # Zmiana kolejności co 5 serii
-        if (s - 1) // 5 % 2 == 1:
-            flip = not flip
-
-        # Jeśli 'penaltyStarterTeam' to 'guest', to 'guest' zaczyna
-        first_team = penalty_starter_team if not flip else ("guest" if penalty_starter_team == "host" else "host")
-        second_team = "guest" if first_team == "host" else "host"
-
-        def write_team_shot(team: str, series_no: int):
-            nonlocal row, host_score, guest_score
-            if row > TIMELINE_END_ROW:
-                return
-
-            ws[f"AL{row}"].value = str(series_no)
-
-            if team == "host":
-                sh = _shot(host_arr, idx)
-                player = sh.get("player") if sh else None
-                result = int(sh.get("result") or 0) if sh else 0
-
-                ws[f"AN{row}"].value = str(int(player)) if player is not None else "--"
-                ws[f"AU{row}"].value = "--"
-
-                if result == 1:
-                    host_score += 1
-                    ws[f"AP{row}"].value = str(host_score)
-                    ws[f"AS{row}"].value = str(guest_score)   # <-- pokaż wynik przeciwnika
-                else:
-                    ws[f"AP{row}"].value = "--"
-                    ws[f"AS{row}"].value = "--"
-
-
-            else:
-                sh = _shot(guest_arr, idx)
-                player = sh.get("player") if sh else None
-                result = int(sh.get("result") or 0) if sh else 0
-
-                ws[f"AN{row}"].value = "--"
-                ws[f"AU{row}"].value = str(int(player)) if player is not None else "--"
-
-                if result == 1:
-                    guest_score += 1
-                    ws[f"AP{row}"].value = str(host_score)    # <-- pokaż wynik gospodarza
-                    ws[f"AS{row}"].value = str(guest_score)
-                else:
-                    ws[f"AP{row}"].value = "--"
-                    ws[f"AS{row}"].value = "--"
-
-            row += 1
-
-        # 1) pierwszy strzał w serii
-        write_team_shot(first_team, s)
-        # 2) drugi strzał w serii
-        write_team_shot(second_team, s)
+    # Miara kontrolna: tyle rubryk z numerem, ile oddanych rzutów. Rozjazd
+    # znaczy, że wydruk zgubił rzut - i ma to zostać w logu, a nie w protokole.
+    printed = sum(
+        1 for e in rows[: row - 16] if e["host"] != "--" or e["guest"] != "--"
+    )
+    recorded = _recorded_shot_count(data_json.get("penaltyShots") or {})
+    if printed != recorded:
+        logger.warning(
+            "protokół: w serii karnych oddano %s rzutów, a wydrukowano %s (mecz %s)",
+            recorded,
+            printed,
+            (data_json.get("matchConfig") or {}).get("matchNumber"),
+        )
 
 from datetime import datetime, date, timezone
 from io import BytesIO
