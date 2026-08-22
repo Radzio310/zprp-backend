@@ -12,6 +12,11 @@ from app.db import (
 )
 from app.proel_auth import Actor, is_admin, merge_guard, proel_actor, roles_for
 from app.proel_journal import client_ip as _client_ip, log_match_event, soft_actor
+from app.proel_match_key import (
+    match_head as _match_head,
+    match_id_conflict as _match_id_conflict,
+    zprp_id_of as _zprp_id_of,
+)
 from app.proel_lease import (
     LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
     LEASE_TTL_SECONDS as _LEASE_TTL_SECONDS,
@@ -90,52 +95,6 @@ def _as_dict(row: Any) -> Dict[str, Any]:
     return dict(row) if row is not None else {}
 
 
-def _zprp_id_of(blob: Any) -> str:
-    """`data_json.matchConfig.matchId` - identyfikator meczu w bazie ZPRP.
-
-    Czytamy go z BLOBA, a nie z osobnego pola żądania, bo dzięki temu guard
-    działa też dla wersji aplikacji, które o nim nie wiedzą: matchId jedzie
-    w konfiguracji meczu od zawsze.
-    """
-    try:
-        value = (blob or {}).get("matchConfig", {}).get("matchId")
-    except AttributeError:
-        return ""
-    text_id = str(value or "").strip()
-    # Mecze zakładane ręcznie mają identyfikatory syntetyczne (Date.now()-...),
-    # a te nie identyfikują niczego w ZPRP. Bierzemy wyłącznie czyste liczby.
-    return text_id if text_id.isdigit() else ""
-
-
-#: Pola konfiguracji, które wystarczają, żeby narysować wiersz na liście
-#: wyboru meczu. Wszystko poza nimi (składy, badania, przebieg, kary) zostaje
-#: na serwerze do czasu, aż ktoś naprawdę otworzy ten mecz.
-_HEAD_CONFIG_KEYS = (
-    "matchNumber",
-    "matchId",
-    "hostTeamName",
-    "guestTeamName",
-    "isTest",
-)
-
-
-def _match_head(blob: Any) -> Dict[str, Any]:
-    """Nagłówek meczu w kształcie `data_json`, ale bez danych osobowych."""
-    try:
-        config = dict((blob or {}).get("matchConfig") or {})
-    except AttributeError:
-        return {"matchConfig": {}}
-    head = {k: config.get(k) for k in _HEAD_CONFIG_KEYS if k in config}
-    out: Dict[str, Any] = {"matchConfig": head}
-    for key in ("scoreHost", "scoreGuest", "date"):
-        try:
-            if key in blob:
-                out[key] = blob[key]
-        except TypeError:
-            break
-    return out
-
-
 class _MatchIdConflict(Exception):
     """Sygnał z wnętrza transakcji: blob opisuje inny mecz niż ten pod numerem.
 
@@ -148,16 +107,6 @@ class _MatchIdConflict(Exception):
         super().__init__("match id mismatch")
         self.known = known
         self.incoming = incoming
-
-
-def _match_id_conflict(known: str, incoming: str) -> bool:
-    """Czy blob opisuje INNY mecz niż ten, który leży pod tym numerem.
-
-    Porównujemy wyłącznie wtedy, gdy obie strony wiedzą, o który mecz chodzi.
-    Pusty identyfikator (mecz ręczny, stary zapis) nigdy nie jest konfliktem -
-    inaczej guard blokowałby zwykłe prowadzenie meczu bez ZPRP.
-    """
-    return bool(known) and bool(incoming) and known != incoming
 
 
 def _overlay_of(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
