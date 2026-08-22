@@ -478,11 +478,32 @@ async def submit_player_stats(payload: ZprpPlayerStatsRequest) -> Dict[str, Any]
         # ponowienia ani powód, żeby przerwać wysyłkę całego składu. Aplikacja
         # ma pominąć tego jednego i powiedzieć sędziemu, kogo nie zapisała -
         # dlatego kod przechodzi osobno, a nie jako ogólny błąd.
+        #
+        # `upstream` niesie ODPOWIEDŹ ZWIĄZKU słowo w słowo. Bez niej odmowa
+        # wygląda z telefonu identycznie niezależnie od tego, czy zawodnika
+        # naprawdę nie ma na liście meczowej, czy nie zgadza się drużyna albo
+        # numer zawodów - a sędzia widzi w API meczu komplet nazwisk i ma pełne
+        # prawo pytać, dlaczego zapis nie przechodzi.
+        logger.info(
+            "ProEl ZPRP player_stats 404: zawody=%s zespol=%s zawodnik=%s pola=%s odp=%s",
+            payload.id_zawody,
+            payload.id_zespol,
+            payload.id_zawodnik,
+            sorted(payload.fields or {}),
+            data,
+        )
         raise HTTPException(
             status_code=404,
             detail={
                 "code": "PLAYER_NOT_IN_SQUAD",
                 "message": "Tego zawodnika nie ma w kadrze meczu po stronie ZPRP.",
+                "upstream": str(data.get("message") or data.get("error") or "")[:300],
+                "sent": {
+                    "id_zawody": int(payload.id_zawody),
+                    "id_zespol": int(payload.id_zespol),
+                    "id_zawodnik": int(payload.id_zawodnik),
+                    "fields": sorted(payload.fields or {}),
+                },
             },
         )
     if status == 403:
@@ -607,11 +628,27 @@ async def submit_officials_stats(payload: ZprpOfficialsStatsRequest) -> Dict[str
         # meczu), ale dla aplikacji znaczą to samo: pomiń TĘ pozycję i idź
         # dalej. Reszta osób ma się zapisać, a sędzia ma się dowiedzieć, kogo
         # pominęliśmy - dlatego kod przechodzi osobno, a nie jako ogólny błąd.
+        logger.info(
+            "ProEl ZPRP officials_stats 404: zawody=%s zespol=%s osoba=%s pola=%s odp=%s",
+            payload.id_zawody,
+            payload.id_zespol,
+            payload.id_osoba,
+            sorted(payload.fields or {}),
+            data,
+        )
         raise HTTPException(
             status_code=404,
             detail={
                 "code": "OFFICIAL_NOT_IN_SQUAD",
                 "message": "Tej osoby towarzyszącej nie ma w składzie meczu po stronie ZPRP.",
+                # Odpowiedź związku słowo w słowo - patrz nota przy zawodnikach.
+                "upstream": str(data.get("message") or data.get("error") or "")[:300],
+                "sent": {
+                    "id_zawody": int(payload.id_zawody),
+                    "id_zespol": int(payload.id_zespol),
+                    "id_osoba": int(payload.id_osoba),
+                    "fields": sorted(payload.fields or {}),
+                },
             },
         )
     if status == 403:
