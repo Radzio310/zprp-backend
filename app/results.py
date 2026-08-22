@@ -487,7 +487,11 @@ def _build_event_counters(data_json: Dict[str, Any]) -> Dict[str, Dict[str, Dict
             counters[team][key]["pk_total"] += 1
         elif t in ("penalty1", "penalty2", "penalty3"):
             counters[team][key]["p2_events"] += 1
-        elif t == "disqualification":
+        elif t in ("disqualification", "disqualificationBlue"):
+            # Licznik `disq` obsługuje WYŁĄCZNIE osoby towarzyszące (zawodnicy
+            # mają własne pole w statystykach), a dla nich obie kartki znaczą to
+            # samo: rubrykę D. Bez niebieskiej trener z dyskwalifikacją
+            # z raportem szedł na formularz jako nieukarany.
             counters[team][key]["disq"] += 1
 
     return counters
@@ -2788,26 +2792,94 @@ def _pick_companion_time(c: Dict[str, Any], *keys: str) -> str:
             return v.strip()
     return ""
 
-def _companion_penalty_strings(comp_list: List[Any]) -> Dict[str, Dict[str, str]]:
+def _companion_events_penalties(
+    data_json: Dict[str, Any],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    Kary osób towarzyszących odczytane z PRZEBIEGU MECZU.
+
+    Drugie źródło obok `matchConfig`, i bez niego wydruk bywał pusty tam, gdzie
+    kary naprawdę padły: flagi ławki wpisuje do konfiguracji dopiero ostatni
+    gwizdek, więc każda paczka złożona z odtworzonego zapisu (dymek po
+    restarcie, „Ostatnie mecze", podgląd archiwalny) przychodziła tu z ławką bez
+    ani jednej kary - mimo że komplet zdarzeń leżał obok, w `protocol`.
+
+    Aplikacja ma już swoją poprawkę (`utils/companionsFromProtocol.ts`), ale ta
+    dojeżdża dopiero z nową wersją, a protokoły składane z zapisów sprzed niej
+    mają się drukować poprawnie od zaraz.
+
+    Zwraca: team -> litera -> {"warn": "MM:00", "p2": ["MM:SS", ...], "disq": "MM:SS"}
+    """
+    out: Dict[str, Dict[str, Dict[str, Any]]] = {"host": {}, "guest": {}}
+
+    for ev in data_json.get("protocol") or []:
+        if not isinstance(ev, dict):
+            continue
+        team = ev.get("team")
+        if team not in ("host", "guest"):
+            continue
+        player = ev.get("player")
+        if not isinstance(player, str):
+            continue
+        letter = player.strip().upper()
+        if letter not in ("A", "B", "C", "D", "E"):
+            continue
+
+        slot = out[team].setdefault(letter, {"warn": "", "p2": [], "disq": ""})
+        try:
+            ms = int(ev.get("time") or 0)
+        except (TypeError, ValueError):
+            ms = 0
+        t = _ms_to_mmss(ms)
+
+        kind = ev.get("type")
+        if kind == "warning":
+            # Upomnienie jest MINUTĄ - protokół nie ma dla niego rubryki na
+            # sekundy. Zaokrąglenie w górę, tak samo jak `warningMinuteClock`
+            # w aplikacji, żeby wydruk nie różnił się od ekranu o sekundę.
+            if not slot["warn"]:
+                minute = max(1, -(-ms // 60000))
+                slot["warn"] = "%02d:00" % minute
+        elif kind in ("penalty1", "penalty2", "penalty3"):
+            if t not in slot["p2"]:
+                slot["p2"].append(t)
+        elif kind in ("disqualification", "disqualificationBlue"):
+            # Niebieska kartka to dyskwalifikacja z raportem - w rubryce D
+            # protokołu obie wyglądają tak samo.
+            if not slot["disq"]:
+                slot["disq"] = t
+
+    return out
+
+
+def _companion_penalty_strings(
+    comp_list: List[Any],
+    events: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, str]]:
     """
     Zwraca mapę:
       "A".."E" -> {"warn": "U - MM:SS" | "---", "p2": "2' - MM:SS" | "---", "disq": "D - MM:SS" | "---"}
     Źródła:
       - upomnienie: warned + warnTime/warningTime/warnedTime (jeśli istnieje)
       - 2 minuty: penaltyTimes[0] (pierwsza 2')
-      - dyskwalifikacja: red + redTime
+      - dyskwalifikacja: red / redBlue + czas
+      - a gdy w konfiguracji nie ma czegoś, co JEST w przebiegu meczu (`events`),
+        wygrywa przebieg. Suma, nie wybór: wydruk nie ma prawa pokazać MNIEJ niż
+        księga zdarzeń.
     """
+    ev_all = events or {}
     out: Dict[str, Dict[str, str]] = {}
-    for c in comp_list or []:
-        if not isinstance(c, dict):
-            continue
-        cid = str(c.get("id") or "").strip().upper()
-        if cid not in ("A", "B", "C", "D", "E"):
-            continue
+    seen = set()
+
+    def _row(cid: str, c: Dict[str, Any]) -> Dict[str, str]:
+        ev = ev_all.get(cid) or {}
 
         # --- warning ---
         warned = bool(c.get("warned")) if "warned" in c else bool(c.get("warn")) if "warn" in c else False
         warn_time = _pick_companion_time(c, "warnTime", "warningTime", "warnedTime", "warning")
+        if ev.get("warn"):
+            warned = True
+            warn_time = warn_time or str(ev["warn"])
         warn_str = f"U - {warn_time}" if (warned and warn_time) else ("U - __:__" if warned else "")
 
         # --- 2' ---
@@ -2819,14 +2891,42 @@ def _companion_penalty_strings(comp_list: List[Any]) -> Dict[str, Dict[str, str]
                 p2_time = first.strip()
         # czasem możesz mieć boola "twoMinutes" bez listy — wtedy wpisz placeholder
         two_min = bool(c.get("twoMinutes")) if "twoMinutes" in c else False
+        ev_p2 = ev.get("p2") or []
+        if ev_p2:
+            two_min = True
+            p2_time = p2_time or str(ev_p2[0])
         p2_str = f"2' - {p2_time}" if p2_time else ("2' - __:__" if two_min else "")
 
-        # --- disq (red) ---
+        # --- disq (czerwona albo czerwona z niebieską) ---
         red = bool(c.get("red")) if "red" in c else bool(c.get("disq")) if "disq" in c else False
-        red_time = _pick_companion_time(c, "redTime", "disqTime", "disqualificationTime")
+        red = red or bool(c.get("redBlue"))
+        red_time = _pick_companion_time(
+            c, "redTime", "redBlueTime", "disqTime", "disqualificationTime"
+        )
+        if ev.get("disq"):
+            red = True
+            red_time = red_time or str(ev["disq"])
         disq_str = f"D - {red_time}" if (red and red_time) else ("D - __:__" if red else "")
 
-        out[cid] = {"warn": warn_str, "p2": p2_str, "disq": disq_str}
+        return {"warn": warn_str, "p2": p2_str, "disq": disq_str}
+
+    for c in comp_list or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "").strip().upper()
+        if cid not in ("A", "B", "C", "D", "E"):
+            continue
+        seen.add(cid)
+        out[cid] = _row(cid, c)
+
+    # Osoba ukarana, której nie ma w konfiguracji - rubryka i tak musi się
+    # wypełnić. Nazwisko weźmie się skądinąd albo zostanie puste, ale kara
+    # z przebiegu meczu nie ma prawa zniknąć z wydruku.
+    for cid in ("A", "B", "C", "D", "E"):
+        if cid in seen:
+            continue
+        if ev_all.get(cid):
+            out[cid] = _row(cid, {})
 
     return out
 
@@ -4924,8 +5024,14 @@ async def generate_protocol_pdf(
     host_comp_meta = _companion_meta_map(core.get("hostCompanions") or [])
     guest_comp_meta = _companion_meta_map(core.get("guestCompanions") or [])
 
-    host_comp_pen = _companion_penalty_strings(core.get("hostCompanions") or [])
-    guest_comp_pen = _companion_penalty_strings(core.get("guestCompanions") or [])
+    # Przebieg meczu jako drugie źródło kar ławki - patrz `_companion_events_penalties`.
+    comp_events = _companion_events_penalties(data_json)
+    host_comp_pen = _companion_penalty_strings(
+        core.get("hostCompanions") or [], comp_events.get("host")
+    )
+    guest_comp_pen = _companion_penalty_strings(
+        core.get("guestCompanions") or [], comp_events.get("guest")
+    )
 
     # winner (A/B) – przy remisie rozstrzygamy z penaltyScore
     winner = ""
