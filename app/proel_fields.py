@@ -305,6 +305,14 @@ _POST_EXTRAS = {
     # ekran pokazywał zadanie jako niezrobione i namawiał do wysłania składu
     # drugi raz.
     "fullDataSent": "fullDataSent",
+    # Znacznik „protokół PDF leży w załącznikach meczu".
+    #
+    # Ta sama konstrukcja i ten sam powód co wyżej. ZPRP nie oddaje listy
+    # załączników żadnym endpointem GET, więc bez tego wpisu drugi telefon (i
+    # ten sam telefon po powrocie z autozapisu) nie ma skąd wiedzieć, że
+    # protokół już tam jest - a wysłany drugi raz zostaje przy meczu jako
+    # drugi plik.
+    "protocolSent": "protocolSent",
 }
 
 _CFG_FIELDS = {
