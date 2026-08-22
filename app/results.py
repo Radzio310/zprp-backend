@@ -2138,6 +2138,8 @@ def _get_match_core(data_json: Dict[str, Any]) -> Dict[str, Any]:
         "hostPlayers": list(mc.get("hostPlayers") or []),
         "guestPlayers": list(mc.get("guestPlayers") or []),
         "venueAddress": (mc.get("venueAddress") or "").strip(),
+        # `Hala_miasto` z ZPRP - miejscowość do nagłówka strony uwag.
+        "venueCity": (mc.get("venueCity") or "").strip(),
         "referee1": (mc.get("referee1") or "").strip(),
         "referee2": (mc.get("referee2") or "").strip(),
         "delegate": (mc.get("delegate") or "").strip(),
@@ -3833,26 +3835,68 @@ def _add_signature_image(
 
     return True
 
+#: Przedrostki, po których wiadomo, że segment adresu to ULICA, a nie miasto.
+_STREET_PREFIXES = ("ul.", "ul ", "al.", "al ", "os.", "os ", "pl.", "pl ", "ulica ")
+
+
+def _looks_like_street(segment: str) -> bool:
+    """Czy ten kawałek adresu jest ulicą z numerem, a nie miejscowością."""
+    s = (segment or "").strip().lower()
+    if not s:
+        return True
+    if any(s.startswith(pref) for pref in _STREET_PREFIXES):
+        return True
+    return any(ch.isdigit() for ch in s)
+
+
 def _extract_city_from_venue_address(venue_address: str) -> str:
     """
-    Heurystyka: venueAddress zwykle ma format:
-      "Hala Relax Piotrków Trybunalski, Stefana Batorego 8"
-    Chcemy wyciągnąć miejscowość do nagłówka: "Piotrków Trybunalski".
+    Miejscowość wyciągnięta z adresu hali - DROGA AWARYJNA.
 
-    Reguła:
-      - bierzemy część przed pierwszym przecinkiem
-      - z niej bierzemy ostatnie 2 wyrazy (fallback: 1 wyraz)
+    Właściwym źródłem jest `matchConfig.venueCity`, czyli `Hala_miasto` z ZPRP
+    zapamiętane przy wczytywaniu meczu (patrz `_notes_place`). Tutaj trafiają
+    tylko mecze złożone ręcznie albo zapisane przez starszą wersję aplikacji.
+
+    Dwa układy adresu, jeden obok drugiego:
+
+      "Hala MOSiR Pszelnik, Siemianowice Śląskie"          ← miasto NA KOŃCU
+      "Hala Relax Piotrków Trybunalski, Stefana Batorego 8" ← miasto w nazwie
+
+    Pierwszy składa sama aplikacja z pól `Hala_*` (nazwa, ulica, miasto), drugi
+    bierze się z tytułu linku do mapy. Rozstrzyga OSTATNI segment: ulica ma numer
+    albo przedrostek („ul.", „al."), miejscowość nie ma ani jednego, ani drugiego.
+
+    Stara reguła znała tylko drugi układ - brała wszystko przed pierwszym
+    przecinkiem i z tego dwa ostatnie wyrazy - więc dla pierwszego drukowała
+    w rogu protokołu „MOSiR Pszelnik", czyli nazwę hali zamiast miejscowości.
     """
     s = (venue_address or "").strip()
     if not s:
         return ""
-    left = s.split(",", 1)[0].strip()
+
+    segments = [seg.strip() for seg in s.split(",") if seg.strip()]
+    if len(segments) >= 2 and not _looks_like_street(segments[-1]):
+        return segments[-1]
+
+    left = segments[0] if segments else ""
     parts = [p for p in left.split() if p.strip()]
     if not parts:
         return ""
     if len(parts) >= 2:
         return " ".join(parts[-2:])
     return parts[-1]
+
+
+def _notes_place(core: Dict[str, Any]) -> str:
+    """Miejscowość do nagłówka strony uwag: „20.08.2026, Siemianowice Śląskie".
+
+    Kolejność jest tu całą treścią: najpierw to, co związek podał WPROST
+    (`Hala_miasto`), a dopiero potem cokolwiek wyciąganego z adresu.
+    """
+    city = str(core.get("venueCity") or "").strip()
+    if city:
+        return city
+    return _extract_city_from_venue_address(core.get("venueAddress") or "")
 
 
 #: Układ strony uwag liczony w PUNKTACH, nie w wierszach.
@@ -3872,14 +3916,49 @@ _NOTES_BETWEEN_PT = 8.0        # przerwa między jednym a drugim sędzią
 #: Zaniżone o zapas - lepiej zostawić pasek pustego papieru niż wypchnąć jedną
 #: linijkę na osobną stronę.
 _NOTES_PAGE_BUDGET_PT = 720.0
-#: Szerokość kolumn arkusza uwag (jednostki Excela). Suma MUSI zmieścić się w
-#: obszarze druku A4 z zapasem - patrz komentarz przy ustawianiu kolumn.
-_NOTES_COL_WIDTH = 5.6
+#: Szerokość kolumn arkusza uwag (jednostki Excela).
+#:
+#: 6,1 zamiast 5,6, bo arkusz był o ćwierć szerokości węższy od kartki: opis
+#: kończył się w połowie strony, a prawy margines wychodził dwa razy szerszy od
+#: lewego. Wyżej nie idziemy: `test_arkusz_miesci_sie_w_szerokosci_A4` pilnuje
+#: 5% zapasu do krawędzi obszaru druku, a tamten zapas kupiliśmy pustą czwartą
+#: stroną w protokole sędziego.
+_NOTES_COL_WIDTH = 6.1
 _NOTES_EDGE_COL_WIDTH = 4.0
-#: Ile znaków mieści się w linii przy czcionce 12 na szerokości A..N.
-#: Węższe kolumny to krótsza linia - z zapasem, bo polskie znaki są szersze
-#: niż przeciętna litera, na której stoi jednostka szerokości kolumny.
-_NOTES_CHARS_PER_LINE = 64
+
+
+def _excel_col_px(width_chars: float) -> int:
+    """Szerokość kolumny w pikselach (96 dpi) z jednostki Excela.
+
+    Excel liczy tę jednostkę w szerokościach cyfry czcionki domyślnej
+    skoroszytu, plus 5 pikseli na obramowanie i wcięcia. Szablon protokołu ma
+    Times New Roman 10, którego cyfra ma dokładnie pół firetu - czyli 7 pikseli
+    przy 96 dpi.
+    """
+    return int(round(width_chars * 7)) + 5
+
+
+#: Szerokość całego arkusza uwag (kolumny A..N) w pikselach i punktach.
+_NOTES_SHEET_PX = (
+    2 * _excel_col_px(_NOTES_EDGE_COL_WIDTH) + 12 * _excel_col_px(_NOTES_COL_WIDTH)
+)
+_NOTES_SHEET_PT = _NOTES_SHEET_PX * 72.0 / 96.0
+#: Szerokość obszaru druku A4 przy marginesach 0,6 cala: (8,27 - 1,2) * 96 px.
+#: Arkusz szerszy od tego renderer musiałby pomniejszyć (`fitToWidth`), przez co
+#: rozjechałby się rachunek wysokości strony - dlatego zostawiamy zapas.
+_NOTES_PRINT_AREA_PX = 678.0
+#: Czcionka opisu i zapas na różnice metryki po podstawieniu kroju przez
+#: konwerter. Linia dłuższa niż komórka scalona nie zawija się ani nie wystaje -
+#: zostaje UCIĘTA, więc ten zapas jest jedyną obroną przed cichą utratą tekstu.
+_NOTES_FONT_PT = 12.0
+_NOTES_LINE_SAFETY = 0.955
+#: Ile firetów (jednostek szerokości znaku) mieści się w jednej linii opisu.
+#: Liczone z geometrii arkusza, a nie zgadywane w znakach: znaki mają różne
+#: szerokości i przy stałej liczbie znaków linia z samych „i" kończyła się
+#: w jednej trzeciej strony, a z samych „W" wyjeżdżała poza kartkę.
+_NOTES_LINE_BUDGET = int(
+    _NOTES_SHEET_PT * _NOTES_LINE_SAFETY / _NOTES_FONT_PT * 1000
+)
 #: Podpis na stronie uwag: od której kolumny i jak duży.
 #: Nazwane, bo to jedyne miejsce, w którym za szeroki obrazek nie psuje układu,
 #: tylko DOKŁADA pustą stronę - renderer wypycha na nią wszystko, co wystaje
@@ -3895,29 +3974,109 @@ _NOTES_SIGN_BLOCK_PT = (
 )
 
 
-def _wrap_notes_text(text: str, width: int) -> List[str]:
-    """Łamie opis na linie, zachowując akapity wpisane przez sędziego."""
+#: Szerokości znaków w tysięcznych częściach firetu (em) dla Times New Roman -
+#: czcionki szablonu protokołu.
+#:
+#: Zmierzone wprost z pliku kroju. LibreOffice w kontenerze podstawia za nią
+#: Liberation Serif, która jest z Times New Roman METRYCZNIE ZGODNA (to był cel
+#: jej powstania), więc te same liczby opisują wydruk z Excela i ten z serwera.
+#:
+#: Po co w ogóle: rubryka opisu to komórka SCALONA, a taka nie zawija tekstu
+#: i nie wylewa go na sąsiednie - obcina. Zawijanie „co N znaków" musiało więc
+#: zakładać najgorszy przypadek i marnowało ćwierć szerokości kartki na każdej
+#: linii. Z prawdziwymi szerokościami linia kończy się tam, gdzie naprawdę się
+#: kończy.
+_TNR_WIDTH_GROUPS: Tuple[Tuple[int, str], ...] = (
+    (180, "'"),
+    (200, "|"),
+    (250, " ,.\u00a0"),
+    (278, "/:;\\ijltł"),
+    (333, "!()-I[]`fr"),
+    (389, "Jsś"),
+    (400, "°"),
+    (408, '"'),
+    (444, "?aceząćęźż„”"),
+    (469, "^"),
+    (480, "{}"),
+    (500, "#$*0123456789_bdghknopquvxyńó–§"),
+    (541, "~"),
+    (556, "FPSŚ"),
+    (564, "+<=>"),
+    (611, "ELTZĘŁŹŻ"),
+    (667, "BCRĆ"),
+    (722, "ADGHKNOQUVXYwĄŃÓ"),
+    (778, "&m"),
+    (833, "%"),
+    (889, "M"),
+    (921, "@"),
+    (944, "W"),
+    (1000, "—…"),
+)
+_TNR_WIDTHS: Dict[str, int] = {
+    ch: width for width, chars in _TNR_WIDTH_GROUPS for ch in chars
+}
+#: Znak spoza tablicy liczymy jak przeciętną literę. Zaniżenie byłoby groźne
+#: (ucięta linia), zawyżenie kosztuje tylko kawałek marginesu.
+_TNR_DEFAULT_WIDTH = 500
+
+
+def _text_width_em1000(text: str) -> int:
+    """Szerokość napisu w tysięcznych częściach firetu."""
+    return sum(_TNR_WIDTHS.get(ch, _TNR_DEFAULT_WIDTH) for ch in text or "")
+
+
+def _wrap_notes_text(text: str, budget_em1000: int) -> List[str]:
+    """Łamie opis na linie, zachowując akapity wpisane przez sędziego.
+
+    Miarą jest RZECZYWISTA szerokość napisu, nie liczba znaków - patrz
+    `_TNR_WIDTH_GROUPS`.
+    """
     out: List[str] = []
+    budget = max(1, int(budget_em1000))
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    space = _TNR_WIDTHS.get(" ", 250)
+
+    def _split_long(word: str) -> List[str]:
+        """Słowo szersze niż cała linia (np. wklejony link) - tniemy je."""
+        chunks: List[str] = []
+        cur = ""
+        cur_w = 0
+        for ch in word:
+            w = _TNR_WIDTHS.get(ch, _TNR_DEFAULT_WIDTH)
+            if cur and cur_w + w > budget:
+                chunks.append(cur)
+                cur, cur_w = ch, w
+            else:
+                cur += ch
+                cur_w += w
+        if cur:
+            chunks.append(cur)
+        return chunks
+
     for para in raw.split("\n"):
         words = para.split()
         if not words:
             out.append("")
             continue
         line = ""
+        line_w = 0
         for word in words:
-            candidate = word if not line else line + " " + word
-            if len(candidate) <= width:
-                line = candidate
+            word_w = _text_width_em1000(word)
+            extra = word_w if not line else space + word_w
+            if line_w + extra <= budget:
+                line = word if not line else line + " " + word
+                line_w += extra
                 continue
             if line:
                 out.append(line)
-            # Słowo dłuższe niż cała linia (np. wklejony link) - tniemy je,
-            # bo inaczej wyszłoby poza obszar druku i zniknęło z PDF-a.
-            while len(word) > width:
-                out.append(word[:width])
-                word = word[width:]
-            line = word
+                line, line_w = "", 0
+            if word_w <= budget:
+                line, line_w = word, word_w
+                continue
+            chunks = _split_long(word)
+            out.extend(chunks[:-1])
+            line = chunks[-1]
+            line_w = _text_width_em1000(line)
         if line:
             out.append(line)
     return out
@@ -3986,13 +4145,15 @@ def _create_detailed_notes_sheet(
     except Exception:
         pass
 
-    # Węższe kolumny niż wcześniej i to jest cała treść poprawki na „pustą
-    # czwartą stronę": przy 6,2 arkusz miał 6,81 cala, a obszar druku A4 z
-    # marginesami 0,6 cala ma 7,07. Zapas 3% zjadały różnice w metryce czcionki
-    # po podstawieniu jej przez konwerter - arkusz wychodził o włos za szeroki,
-    # a wszystko, co nie mieści się w szerokości, renderer przenosi na kolejną
-    # kartkę. Stąd brała się pusta strona: był na niej pionowy pasek papieru
-    # bez treści. Teraz arkusz ma 6,21 cala, czyli 12% zapasu.
+    # Szerokość arkusza kontra kartka. Obszar druku A4 przy marginesach 0,6
+    # cala ma 678 px; arkusz ma ich 642, czyli 94,7% - zapas jest, a strona nie
+    # kończy się już w połowie.
+    #
+    # Ten zapas jest potrzebny dwa razy. Arkusz szerszy od kartki renderer
+    # pomniejsza (`fitToWidth`), przez co rozjechałby się rachunek wysokości
+    # strony liczony w punktach; a wszystko, co mimo to wystaje w prawo,
+    # wypycha na dodatkową kartkę - stąd brała się kiedyś pusta czwarta strona
+    # z pionowym paskiem papieru.
     for col in ["B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]:
         try:
             ws_notes.column_dimensions[col].width = _NOTES_COL_WIDTH
@@ -4029,7 +4190,10 @@ def _create_detailed_notes_sheet(
         left.alignment = Alignment(horizontal="left", vertical="center")
         left.font = Font(size=10)
 
-        ws_notes.merge_cells(start_row=row, start_column=7, end_row=row, end_column=13)
+        # Do kolumny N, czyli do tej samej krawędzi, na której kończy się opis.
+        # Przy końcu na M data wisiała pół centymetra przed prawym marginesem
+        # i nie trzymała się żadnej linii układu.
+        ws_notes.merge_cells(start_row=row, start_column=7, end_row=row, end_column=14)
         right = ws_notes.cell(row=row, column=7)
         right.value = right_hdr
         right.alignment = Alignment(horizontal="right", vertical="center")
@@ -4049,7 +4213,7 @@ def _create_detailed_notes_sheet(
 
     open_page()
 
-    for text_line in _wrap_notes_text(notes_text, _NOTES_CHARS_PER_LINE):
+    for text_line in _wrap_notes_text(notes_text, _NOTES_LINE_BUDGET):
         if state["y"] + _NOTES_LINE_PT > _NOTES_PAGE_BUDGET_PT:
             open_page()
         row = add_row(_NOTES_LINE_PT)
@@ -5396,7 +5560,7 @@ async def generate_protocol_pdf(
         notes_header_rows: List[int] = []
         if needs_detailed_notes_page:
             date_ddmmyyyy = _fmt_date_ddmmyyyy(extras.get("matchDate") or "")
-            place = _extract_city_from_venue_address(core.get("venueAddress") or "")
+            place = _notes_place(core)
 
             # preferuj dane z extras.officials (bo tam masz fullName + signature)
             ref1_name = ((officials.get("referee1") or {}).get("fullName") or core.get("referee1") or "").strip()

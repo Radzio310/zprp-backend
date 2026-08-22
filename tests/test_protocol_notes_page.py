@@ -14,9 +14,12 @@ Testy pilnują trzech rzeczy, których nie widać po samym otwarciu pliku:
 from openpyxl import Workbook
 
 from app.results import (
+    _NOTES_LINE_BUDGET,
     _NOTES_PAGE_BUDGET_PT,
+    _NOTES_SHEET_PT,
     _NOTES_SIGN_BLOCK_PT,
     _create_detailed_notes_sheet,
+    _text_width_em1000,
     _wrap_notes_text,
 )
 
@@ -101,6 +104,10 @@ def test_kazda_strona_ma_wlasny_naglowek():
     for row in header_rows:
         assert ws.cell(row=row, column=1).value == "Strona"
         assert ws.cell(row=row, column=7).value == "20.08.2026, Mysłowice"
+        # Data kończy się na tej samej krawędzi co opis, czyli na kolumnie N.
+        assert any(
+            str(rng) == "G%d:N%d" % (row, row) for rng in ws.merged_cells.ranges
+        )
 
 
 def test_blok_podpisow_nie_wisi_na_krawedzi_strony():
@@ -118,23 +125,61 @@ def test_blok_podpisow_nie_wisi_na_krawedzi_strony():
 
 
 def test_zawijanie_zachowuje_akapity():
-    lines = _wrap_notes_text("pierwszy akapit\n\ndrugi akapit", 74)
+    lines = _wrap_notes_text("pierwszy akapit\n\ndrugi akapit", _NOTES_LINE_BUDGET)
     assert lines[0] == "pierwszy akapit"
     assert lines[1] == ""
     assert lines[2] == "drugi akapit"
 
 
 def test_zawijanie_tnie_slowo_dluzsze_niz_wiersz():
-    long_word = "x" * 200
-    lines = _wrap_notes_text(long_word, 74)
-    assert all(len(l) <= 74 for l in lines)
+    long_word = "x" * 400
+    lines = _wrap_notes_text(long_word, _NOTES_LINE_BUDGET)
+    assert all(_text_width_em1000(l) <= _NOTES_LINE_BUDGET for l in lines)
     assert "".join(lines) == long_word
 
 
 def test_zawijanie_nie_gubi_slow():
     text = " ".join(f"slowo{i}" for i in range(400))
-    lines = _wrap_notes_text(text, 74)
+    lines = _wrap_notes_text(text, _NOTES_LINE_BUDGET)
     assert " ".join(lines).split() == text.split()
+
+
+def test_zadna_linia_nie_wyjezdza_poza_rubryke():
+    """Rubryka opisu to komórka SCALONA - za długa linia nie zawija się ani nie
+    wylewa na sąsiednie, tylko znika z wydruku. Także wtedy, gdy sędzia pisze
+    samymi wersalikami, a te są najszersze."""
+    text = " ".join(["WWWWWWWWWW", "MMMMMMMMMM", "ZAWODNIK", "DYSKWALIFIKACJA"] * 30)
+    for line in _wrap_notes_text(text, _NOTES_LINE_BUDGET):
+        assert _text_width_em1000(line) <= _NOTES_LINE_BUDGET
+
+
+def test_waskie_litery_wypelniaja_linie():
+    """Sedno przejścia z liczenia znaków na pomiar: „il" zajmuje trzy razy mniej
+    miejsca niż „WM", więc takich znaków musi się w linii zmieścić znacznie
+    więcej niż dawne 64."""
+    lines = _wrap_notes_text(" ".join(["il"] * 200), _NOTES_LINE_BUDGET)
+    assert len(lines[0]) > 100
+
+
+def test_linia_zostawia_zapas_do_krawedzi_arkusza():
+    """Budżet linii jest węższy od arkusza - metryka kroju po podstawieniu go
+    przez konwerter nie musi zgadzać się co do promila."""
+    assert _NOTES_LINE_BUDGET * 12 / 1000.0 < _NOTES_SHEET_PT
+
+
+def test_opis_z_protokolu_208136_miesci_sie_w_trzech_liniach():
+    """Ten sam opis zajmował cztery linie i kończył się w połowie kartki."""
+    text = (
+        "Zawodnik drużyny gospodarzy z numerem 11 Balicki Grzegorz otrzymał karę "
+        "dyskwalifikacji w 37 min. 33 sekundzie meczu za niebezpieczne, lekkomyślne "
+        "spowodowanie upadku zawodnika znajdującego się w ataku na podstawie "
+        "przepisu 8:5a."
+    )
+    lines = _wrap_notes_text(text, _NOTES_LINE_BUDGET)
+    assert len(lines) == 3
+    # Pełne linie naprawdę dochodzą do krawędzi rubryki, a nie kończą się
+    # w trzech czwartych szerokości.
+    assert _text_width_em1000(lines[0]) > 0.9 * _NOTES_LINE_BUDGET
 
 
 def test_podpis_miesci_sie_w_szerokosci_kartki():
