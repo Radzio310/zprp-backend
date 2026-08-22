@@ -63,6 +63,7 @@ from app.mentor_grades import router as mentor_grades_router
 from app.game_scores import router as game_scores_router
 from app.signatures import router as signatures_router
 from app.board import router as board_router
+from app.release_stories import router as release_stories_router
 
 from app.zprp.schedule import router as schedule_router
 from app.zprp.competitions import router as competitions_router
@@ -224,6 +225,7 @@ app.include_router(mentor_grades_router)
 app.include_router(game_scores_router)
 app.include_router(signatures_router)
 app.include_router(board_router, tags=["board"])
+app.include_router(release_stories_router)
 
 app.include_router(schedule_router, tags=["zprp"])
 app.include_router(competitions_router, tags=["zprp"])

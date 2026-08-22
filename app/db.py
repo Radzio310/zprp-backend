@@ -741,6 +741,67 @@ app_versions = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
+# Pełnoekranowe premiery nowych wersji (BAZA Release Stories).
+# Konfiguracja slajdów jest dokumentem JSONB, bo zestaw bezpiecznych presetów
+# może rosnąć bez migracji kolumn przy każdym nowym rodzaju animacji.
+release_experiences = Table(
+    "release_experiences",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "version_id",
+        Integer,
+        ForeignKey("app_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    ),
+    Column("status", String, nullable=False, server_default=text("'draft'")),
+    Column(
+        "experience_mode",
+        String,
+        nullable=False,
+        server_default=text("'story_then_changelog'"),
+    ),
+    Column("display_generation", Integer, nullable=False, server_default=text("1")),
+    Column(
+        "headline",
+        String,
+        nullable=False,
+        server_default=text("'BAZA przekracza kolejne granice'"),
+    ),
+    Column("slides", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("published_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
+release_story_assets = Table(
+    "release_story_assets",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "experience_id",
+        Integer,
+        ForeignKey("release_experiences.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("object_key", String(1024), nullable=False, unique=True),
+    Column("original_name", String(512), nullable=True),
+    Column("content_type", String(128), nullable=False, server_default=text("'image/webp'")),
+    Column("width", Integer, nullable=False),
+    Column("height", Integer, nullable=False),
+    Column("byte_size", Integer, nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
 # 23) Niedyspozycje partnera
 partner_offtimes = Table(
     "partner_offtimes",

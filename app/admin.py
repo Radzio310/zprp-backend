@@ -1344,6 +1344,11 @@ async def update_version(version_id: int, req: UpdateVersionRequest):
 
 @router.delete("/versions/{version_id}", response_model=dict, summary="Usuń wersję")
 async def delete_version(version_id: int):
+    # FK posprząta rekordy manifestu, ale pliki są poza PostgreSQL-em.
+    # Usuwamy je z prywatnego R2 zanim wersja zniknie z bazy.
+    from app.release_stories import purge_release_story_media
+
+    await purge_release_story_media(version_id)
     query = delete(app_versions).where(app_versions.c.id == version_id).returning(app_versions.c.id)
     row = await database.fetch_one(query)
     if row is None:
