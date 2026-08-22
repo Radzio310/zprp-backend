@@ -110,6 +110,22 @@ def shootout_rows(
     return rows
 
 
+def shootout_row_slots(
+    timeline_rows: Sequence[int],
+    first_row: int = 16,
+) -> List[int]:
+    """Wiersze arkusza, w których wolno wypisać serię karnych.
+
+    Te same, w których wolno pisać przebieg meczu - a więc BEZ wierszy 31 i 57,
+    gdzie formularz ma szew między sekcjami. Strona karnych szła dotąd prosto
+    przez nie i szesnasty rzut (rozstrzygający przy ośmiu seriach) znikał
+    z wydruku: komórka zostawała napisana, tylko że w miejscu, którego na
+    wydruku nie ma. Krótsze serie kończyły się przed wierszem 31, więc problem
+    pokazywał się wyłącznie po dogrywce.
+    """
+    return [r for r in timeline_rows if r >= first_row]
+
+
 def recorded_shot_count(shots: Dict[str, Any] | None) -> int:
     """Ile rzutów faktycznie oddano - miara kontrolna dla wydruku.
 

@@ -30,6 +30,7 @@ from fastapi import (
 from app.proel_auth import header_text, proel_actor
 from app.protocol_shootout import (
     recorded_shot_count as _recorded_shot_count,
+    shootout_row_slots as _shootout_row_slots,
     shootout_rows as _shootout_rows,
 )
 from pathlib import Path as SysPath
@@ -3499,28 +3500,33 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         str(data_json.get("penaltyStarterTeam") or "guest"),
     )
 
-    row = 16
-    for entry in rows:
-        if row > TIMELINE_END_ROW:
-            # Szablon skończył się przed protokołem. Cicho tego nie zostawiamy:
-            # wydruk gubiący rzut wygląda dokładnie jak wydruk kompletny.
-            logger.warning(
-                "protokół: strona karnych nie pomieściła %s wierszy (mecz %s)",
-                len(rows) - (row - 16),
-                (data_json.get("matchConfig") or {}).get("matchNumber"),
-            )
-            break
-        ws[f"AL{row}"].value = entry["series"]
-        ws[f"AN{row}"].value = entry["host"]
-        ws[f"AU{row}"].value = entry["guest"]
-        ws[f"AP{row}"].value = entry["score_host"]
-        ws[f"AS{row}"].value = entry["score_guest"]
-        row += 1
+    # Wiersze 31 i 57 NIE są wierszami przebiegu - w tych miejscach formularz
+    # ma szew między sekcjami (blok „osoba odpowiedzialna za drużynę"), więc to,
+    # co się w nich napisze, na wydruku nie istnieje. Przebieg meczu omija je od
+    # dawna (`TIMELINE_SKIP_ROWS`), a strona karnych szła prosto przez nie -
+    # i szesnasty rzut, czyli ten rozstrzygający przy ośmiu seriach, znikał
+    # z protokołu bez śladu. Krótsze serie mieściły się przed wierszem 31
+    # i dlatego problem pokazywał się tylko przy dogrywce.
+    slots = _shootout_row_slots(TIMELINE_ROWS)
+    if len(rows) > len(slots):
+        logger.warning(
+            "protokół: strona karnych nie pomieściła %s wierszy (mecz %s)",
+            len(rows) - len(slots),
+            (data_json.get("matchConfig") or {}).get("matchNumber"),
+        )
+    written = 0
+    for entry, r in zip(rows, slots):
+        ws[f"AL{r}"].value = entry["series"]
+        ws[f"AN{r}"].value = entry["host"]
+        ws[f"AU{r}"].value = entry["guest"]
+        ws[f"AP{r}"].value = entry["score_host"]
+        ws[f"AS{r}"].value = entry["score_guest"]
+        written += 1
 
     # Miara kontrolna: tyle rubryk z numerem, ile oddanych rzutów. Rozjazd
     # znaczy, że wydruk zgubił rzut - i ma to zostać w logu, a nie w protokole.
     printed = sum(
-        1 for e in rows[: row - 16] if e["host"] != "--" or e["guest"] != "--"
+        1 for e in rows[:written] if e["host"] != "--" or e["guest"] != "--"
     )
     recorded = _recorded_shot_count(data_json.get("penaltyShots") or {})
     if printed != recorded:
