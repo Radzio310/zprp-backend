@@ -61,7 +61,177 @@ EVENT_LABELS: Dict[str, str] = {
     "zprp.officials_sent": "Kary osób towarzyszących do ZPRP",
     "zprp.comment_sent": "Uwagi verte do ZPRP",
     "zprp.attachment_sent": "Załącznik do ZPRP",
+    "match.reopened": "Wznowienie meczu",
 }
+
+
+# ─────────────────────── pola po ludzku ───────────────────────
+#
+# Dziennik czyta CZŁOWIEK, nie serwer. `post.protocolSent` mówi coś tylko temu,
+# kto zna rejestr pól z `proel_fields`; administrator sprawdzający, co się działo
+# przy meczu, ma prawo zobaczyć „protokół PDF trafił do załączników".
+#
+# Tłumaczenie żyje po stronie serwera razem z nazwami zdarzeń - z tego samego
+# powodu, dla którego `EVENT_LABELS` nie mieszka w panelu: żeby nie było dwóch
+# list, które się rozjadą.
+
+_ROLE_NAMES: Dict[str, str] = {
+    "referee1": "sędzia 1",
+    "referee2": "sędzia 2",
+    "secretary": "sekretarz",
+    "timekeeper": "mierzący czas",
+    "delegate": "delegat",
+}
+
+_LEAF_NAMES: Dict[str, str] = {
+    "fullName": "nazwisko",
+    "city": "miejscowość",
+    "signature": "podpis",
+    "function": "funkcja",
+    "license": "licencja",
+}
+
+_TEAM_NAMES: Dict[str, str] = {"host": "gospodarzy", "guest": "gości"}
+
+#: Pola „po meczu" - klucze z `_POST_EXTRAS` w `app/proel_fields.py`.
+_POST_NAMES: Dict[str, str] = {
+    "spectatorsCount": "liczba widzów",
+    "venueCapacity": "pojemność hali",
+    "eventRegistration": "rejestracja zawodów",
+    "detailedRefereeNotes": "uwagi verte (zaznaczenie)",
+    "extraReport": "dodatkowy raport",
+    "notesText": "treść uwag sędziów",
+    "fullDataSent": "znacznik: pełne dane w bazie ZPRP",
+    "protocolSent": "znacznik: protokół PDF w załącznikach",
+}
+
+_CFG_NAMES: Dict[str, str] = {
+    "referee1": "sędzia 1",
+    "referee2": "sędzia 2",
+    "delegate": "delegat",
+    "timekeeper": "mierzący czas",
+    "secretary": "sekretarz",
+    "venueAddress": "adres hali",
+}
+
+_EXTRAS_NAMES: Dict[str, str] = {
+    "matchDate": "data meczu",
+    "matchTime": "godzina meczu",
+}
+
+#: Znaczniki wysyłki opisujemy zdaniem, nie nazwą pola - bo to jedyne „pola",
+#: których zmiana jest sama w sobie zdarzeniem, a nie poprawką w rubryce.
+_MARK_SENTENCES: Dict[str, str] = {
+    "post.fullDataSent": "pełne dane meczu trafiły do bazy ZPRP",
+    "post.protocolSent": "protokół PDF trafił do załączników meczu",
+}
+
+
+def describe_field(path: str) -> str:
+    """Ścieżka pola z `proel_fields` jako kawałek polskiego zdania."""
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+
+    parts = raw.split(".")
+    head = parts[0]
+
+    if raw in _MARK_SENTENCES:
+        return _MARK_SENTENCES[raw]
+
+    if head == "post" and len(parts) == 2:
+        return _POST_NAMES.get(parts[1], parts[1])
+
+    if head == "cfg" and len(parts) == 2:
+        return _CFG_NAMES.get(parts[1], parts[1])
+
+    if head == "extras" and len(parts) == 2:
+        return _EXTRAS_NAMES.get(parts[1], parts[1])
+
+    if head == "sig" and len(parts) == 3 and parts[1] == "team":
+        return f"podpis {_TEAM_NAMES.get(parts[2], parts[2])}"
+
+    if head == "official" and len(parts) == 3:
+        role = _ROLE_NAMES.get(parts[1], parts[1])
+        return f"{role} - {_LEAF_NAMES.get(parts[2], parts[2])}"
+
+    if head == "companion" and len(parts) == 4:
+        team = _TEAM_NAMES.get(parts[1], parts[1])
+        leaf = _LEAF_NAMES.get(parts[3], parts[3])
+        return f"osoba towarzysząca {parts[2]} {team} - {leaf}"
+
+    if head == "exam" and len(parts) == 3:
+        team = _TEAM_NAMES.get(parts[1], parts[1])
+        number = parts[2].lstrip("#")
+        return f"badania zawodnika nr {number} ({team})"
+
+    # Nieznana ścieżka wraca taka, jaka jest - lepiej techniczna prawda niż
+    # ładne kłamstwo. To także sygnał, że doszło pole bez nazwy.
+    return raw
+
+
+def _join_fields(paths: List[str], limit: int = 3) -> str:
+    named = [describe_field(p) for p in paths if str(p or "").strip()]
+    if not named:
+        return ""
+    if len(named) <= limit:
+        return ", ".join(named)
+    rest = len(named) - limit
+    tail = "pole" if rest == 1 else ("pola" if 2 <= rest <= 4 else "pól")
+    return f"{', '.join(named[:limit])} i {rest} {tail} więcej"
+
+
+_STATUS_NAMES: Dict[str, str] = {
+    "in_progress": "w toku",
+    "finished": "zakończony",
+    "approved": "zatwierdzony",
+    "deleted": "usunięty",
+}
+
+
+def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
+    """Jedno zdanie o tym, co się właściwie stało.
+
+    Podtytuł wiersza w dzienniku. Wcześniej stała tu surowa treść `details_json`
+    - administrator oglądał `{"paths":["post.protocolSent"],"rev":313}` i musiał
+    sam zgadnąć, co to znaczy.
+    """
+    d = details or {}
+    ev = str(event or "")
+
+    if ev == "field.changed":
+        paths = [str(x) for x in (d.get("paths") or []) if str(x or "").strip()]
+        if len(paths) == 1 and paths[0] in _MARK_SENTENCES:
+            # Znacznik wysyłki niesie całą treść sam - „zmieniono" brzmiałoby
+            # tu jak poprawka w rubryce, a to jest fakt z przebiegu meczu.
+            sentence = _MARK_SENTENCES[paths[0]]
+            # Wielka litera TYLKO pierwsza - `capitalize()` zjadałoby skróty
+            # w środku zdania („PDF" na „pdf").
+            return sentence[:1].upper() + sentence[1:]
+        joined = _join_fields(paths)
+        return f"Zmieniono: {joined}" if joined else ""
+
+    if ev == "table.taken_over":
+        who = str(d.get("from") or "").strip()
+        return f"Prowadzenie odebrane urządzeniu: {who}" if who else "Prowadzenie przeszło na inne urządzenie"
+
+    if ev == "match.id_conflict":
+        return (
+            f"W bazie leży mecz {d.get('known') or '?'}, "
+            f"a przyszedł zapis meczu {d.get('incoming') or '?'}"
+        )
+
+    if ev == "protocol.pdf_generated":
+        code = str(d.get("audit_code") or "").strip()
+        return f"Kod dziennika protokołów: {code}" if code else ""
+
+    frm = _STATUS_NAMES.get(str(d.get("from") or ""), "")
+    to = _STATUS_NAMES.get(str(d.get("to") or ""), "")
+    if frm and to:
+        return f"Stan meczu: {frm} → {to}"
+    if to:
+        return f"Stan meczu: {to}"
+    return ""
 
 
 def client_ip(request: Optional[Request], forwarded: Optional[str] = None) -> str:
@@ -187,15 +357,36 @@ async def _require_admin(actor: Actor) -> None:
         )
 
 
+def _effective_event(event: str, details: Optional[Dict[str, Any]]) -> str:
+    """Nazwa zdarzenia poprawiona o to, co widać w szczegółach.
+
+    Do niedawna zdarzenie wybierał sam status DOCELOWY, więc cofnięcie
+    zatwierdzenia (z „approved" do „finished") zapisywało się jako zwykłe
+    zakończenie meczu. Emiter jest już naprawiony, ale wiersze sprzed poprawki
+    leżą w bazie - i to one opisują mecze, o które ktoś zapyta. Prostujemy je
+    przy ODCZYCIE, bo dziennik jest księgą: wpisów się nie przepisuje.
+    """
+    d = details or {}
+    if str(event) == "match.finished" and str(d.get("from") or "") == "approved":
+        return "match.unapproved"
+    return str(event or "")
+
+
 def _row_out(row: Any) -> Dict[str, Any]:
     d = dict(row)
     created = d.get("created_at")
+    details = d.get("details_json") or {}
+    event = _effective_event(str(d.get("event") or ""), details)
     return {
         "id": int(d["id"]),
         "match_number": d.get("match_number") or "",
         "zprp_match_id": d.get("zprp_match_id"),
-        "event": d.get("event") or "",
-        "label": EVENT_LABELS.get(str(d.get("event") or ""), str(d.get("event") or "")),
+        "event": event,
+        "label": EVENT_LABELS.get(event, event),
+        # Jedno zdanie po ludzku - patrz `event_summary`. Panel NIE składa
+        # tego sam, żeby nie powstała druga lista nazw pól.
+        "summary": event_summary(event, details),
+        "fields": [describe_field(x) for x in (details.get("paths") or [])],
         "actor": {
             "judge_id": d.get("actor_judge_id"),
             "name": d.get("actor_name"),

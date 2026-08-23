@@ -1056,11 +1056,18 @@ async def update_proel_match(
     # w ścianę identycznych wierszy, w której nie widać niczego.
     final_status = to_update.get("status", current_status)
     if final_status != current_status:
-        event = {
-            "finished": "match.finished",
-            "approved": "match.approved",
-            "in_progress": "match.unapproved",
-        }.get(final_status)
+        # Zdarzenie opisuje PRZEJŚCIE, nie stan docelowy. Cofnięcie
+        # zatwierdzenia kończy się w „finished" tak samo jak ostatni gwizdek,
+        # więc sam status docelowy nazywał je „Zakończeniem meczu" - a w osi
+        # czasu meczu wyglądało to na drugi koniec tego samego meczu.
+        if current_status == "approved" and final_status != "approved":
+            event = "match.unapproved"
+        else:
+            event = {
+                "finished": "match.finished",
+                "approved": "match.approved",
+                "in_progress": "match.reopened",
+            }.get(final_status)
         if event:
             await log_match_event(
                 match_number=match_number,

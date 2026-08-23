@@ -4891,6 +4891,34 @@ def _extract_pdf_text(data: bytes) -> str:
             pass
 
 
+def _extract_pdf_text_pages(data: bytes) -> List[str]:
+    """Tekst PDF-a STRONA PO STRONIE - do wskazania miejsca zmiany.
+
+    Osobno od `_extract_pdf_text`, bo tamten format leży w dzienniku przy każdej
+    wygenerowanej kartce i nie wolno go ruszyć: dołożenie znaczników stron
+    zamieniłoby każdy stary wpis w jedną wielką różnicę. Numer strony jest
+    potrzebny tylko po stronie pliku WGRANEGO do sprawdzenia, więc liczymy go
+    tutaj i tylko wtedy.
+    """
+    try:
+        import fitz  # pymupdf
+    except Exception:
+        return []
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception:
+        return []
+    try:
+        return [page.get_text() or "" for page in doc]
+    except Exception:
+        return []
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+
 def _normalize_pdf_lines(text: str) -> List[str]:
     """Wiersze bez pustych i bez różnic w białych znakach — inaczej diff
     pokazywałby przesunięcia układu zamiast zmian treści."""
@@ -5032,10 +5060,87 @@ def _pair_value_swaps(changes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+#: Ile znaków może się różnić, żeby uznać to za PODMIANĘ tej samej wartości.
+#: Jedna trzecia długości, minimum jeden - „350" kontra „351" to podmiana,
+#: a „350" kontra „1050" to już inna liczba.
+def _swap_tolerance(text: str) -> int:
+    return max(1, len(text) // 3)
+
+
+def _guess_replaced_fragment(
+    added: str,
+    old_lines: List[str],
+    taken: set,
+) -> tuple:
+    """Czego najprawdopodobniej dotyczy dopisana wartość.
+
+    Zwraca `(zastąpiona wartość, wiersz oryginału, czy to cały wiersz)` albo
+    trzy pustki, gdy odpowiedź nie jest jednoznaczna.
+
+    Po co: edytor PDF potrafi NARYSOWAĆ nową wartość na starej, zamiast ją
+    podmienić. Stary napis zostaje wtedy w strumieniu tekstu (na wydruku
+    niewidoczny, bo zakryty), więc różnica widzi samo dopisanie i admin dostaje
+    „dopisane 351" bez cienia informacji, czego to dotyczy.
+
+    Szukamy dwóch rzeczy naraz, bo tak wyglądają prawdziwe podróbki:
+      • całego wiersza tej samej długości („350" pod „351"),
+      • fragmentu wewnątrz dłuższego wiersza („…przepisu 8:5a." pod „8:5b.").
+
+    I szukamy WĄSKO: ta sama długość, różnica najwyżej w jednej trzeciej znaków,
+    dokładnie jeden kandydat na najlepszym wyniku. Przy dwóch równie bliskich
+    nie zgadujemy - niepodpisana zmiana jest uczciwsza od podpisanej błędnie
+    (ta sama zasada co w `_label_for_value`).
+    """
+    needle = str(added or "").strip()
+    if not needle:
+        return "", "", False
+
+    width = len(needle)
+    limit = _swap_tolerance(needle)
+    scored: List[tuple] = []
+
+    # Porównujemy CAŁE słowa, nie dowolne wycinki. Bez tego „350" pasowałoby do
+    # kawałka „050" w liczbie „1050" - odpowiedź wyglądająca wiarygodnie
+    # i nieprawdziwa, a tego właśnie ten moduł ma nie robić.
+    for line in old_lines:
+        for token in line.split():
+            if len(token) != width or token == needle or token in taken:
+                continue
+            diff = sum(1 for x, y in zip(token, needle) if x != y)
+            if 0 < diff <= limit:
+                whole = token == line
+                # Cały wiersz bije słowo w zdaniu przy tej samej liczbie różnic:
+                # „350" kontra „351" to twardsza odpowiedź niż kawałek zdania.
+                scored.append((diff, 0 if whole else 1, token, line, whole))
+
+    if not scored:
+        return "", "", False
+
+    best = min(s[:2] for s in scored)
+    winners = [s for s in scored if s[:2] == best]
+    # Ten sam kawałek znaleziony w kilku miejscach to nadal jedna odpowiedź.
+    unique = {(w[2], w[3]) for w in winners}
+    if len(unique) != 1:
+        return "", "", False
+    return winners[0][2], winners[0][3], winners[0][4]
+
+
+def _page_of_line(pages_lines: List[List[str]], value: str) -> int:
+    """Numer strony (od 1), na której stoi ten napis. 0 = nie wiadomo."""
+    needle = str(value or "").strip()
+    if not needle:
+        return 0
+    for idx, lines in enumerate(pages_lines):
+        if needle in lines:
+            return idx + 1
+    return 0
+
+
 def _diff_pdf_text(
     before: str,
     after: str,
     state: Optional[Dict[str, Any]] = None,
+    after_pages: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Co się zmieniło między wydrukiem z chwili generowania a wgranym plikiem.
@@ -5080,10 +5185,43 @@ def _diff_pdf_text(
                 for k in range(j1, j2)
             )
 
+    changes = _pair_value_swaps(changes)
+
+    # Dopisanie bez pary: szukamy w oryginale wartości, którą przykryto.
+    taken = {str(c.get("before") or "") for c in changes if c.get("before")}
+    for c in changes:
+        if c.get("kind") != "added" or c.get("before"):
+            continue
+        replaced, line, whole = _guess_replaced_fragment(
+            str(c.get("after") or ""), old, taken
+        )
+        if not replaced:
+            continue
+        taken.add(replaced)
+        c["kind"] = "changed"
+        c["before"] = replaced
+        # Zgadnięte, nie odczytane - ekran ma to powiedzieć wprost.
+        c["guessed"] = True
+        # Otoczenie pokazujemy tylko przy fragmencie zdania: przy podmienionej
+        # liczbie powtarzałoby samą liczbę.
+        if not whole:
+            c["context"] = line
+
+    # Etykieta ZAWSZE po wartości z oryginału: to ona leży w dzienniku.
     for c in changes:
         c["label"] = _label_for_value(state, c.get("before") or c.get("after") or "")
 
-    changes = _pair_value_swaps(changes)
+    # Miejsce zmiany. Numer strony bierzemy z pliku WGRANEGO, bo to jego układ
+    # ogląda człowiek trzymający wydruk w ręku.
+    pages_lines = [_normalize_pdf_lines(t) for t in (after_pages or [])]
+    if pages_lines:
+        for c in changes:
+            page = _page_of_line(pages_lines, str(c.get("after") or ""))
+            if not page:
+                page = _page_of_line(pages_lines, str(c.get("before") or ""))
+            if page:
+                c["page"] = page
+
     # `pos` służy wyłącznie parowaniu — na zewnątrz to szum.
     for c in changes:
         c.pop("pos", None)
@@ -5091,6 +5229,7 @@ def _diff_pdf_text(
     return {
         "changes": changes[:PDF_DIFF_LIMIT],
         "truncated": truncated or len(changes) > PDF_DIFF_LIMIT,
+        "pages": len(pages_lines) or None,
     }
 
 
@@ -6126,7 +6265,10 @@ async def protocol_verify_file(
                 except Exception:
                     state_json = None
                 out["text_diff"] = _diff_pdf_text(
-                    before, _extract_pdf_text(data), state_json
+                    before,
+                    _extract_pdf_text(data),
+                    state_json,
+                    _extract_pdf_text_pages(data)
                 )
             except Exception:
                 logger.warning("Nie udało się porównać treści PDF", exc_info=True)
