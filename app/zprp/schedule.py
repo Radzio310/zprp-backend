@@ -134,6 +134,7 @@ def _parse_hall(td) -> Dict[str, Any]:
         "Hala_miasto": "",
         "Hala_ulica": "",
         "Hala_numer": "",
+        "Hala_pojemnosc": 0,
         "hala_pojemnosc": 0,
     }
     if not td:
@@ -163,6 +164,9 @@ def _parse_hall(td) -> Dict[str, Any]:
         if re.fullmatch(r"\d+", ln):
             cap = int(ln)
             break
+    # Kanoniczny klucz jest zgodny z pozostałymi polami `Hala_*`; lowercase
+    # zostaje jako alias dla starszych wersji aplikacji.
+    out["Hala_pojemnosc"] = cap
     out["hala_pojemnosc"] = cap
     return out
 
@@ -578,6 +582,7 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
             "Hala_nazwa": hall["Hala_nazwa"],
             "Hala_ulica": hall["Hala_ulica"],
             "Hala_numer": hall["Hala_numer"],
+            "Hala_pojemnosc": hall["Hala_pojemnosc"],
             "hala_pojemnosc": hall["hala_pojemnosc"],
             "widzowie": att["widzowie"],
             "widzowie_pct": att["widzowie_pct"],
