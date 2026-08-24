@@ -346,7 +346,7 @@ async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
                 "message": "Sesja ZPRP wygasła.",
             },
         )
-    if status == 403:
+    if status == 403 or str(data.get("code") or "").upper() == "PROTOCOL_LOCKED":
         # Rozróżnienie kluczowe dla komunikatu: PROTOCOL_LOCKED to stan MECZU
         # (protokół zatwierdzony w ZPRP), a nie błąd sędziego ani nasz. Stąd
         # 409 Conflict - aplikacja gasi przycisk i tłumaczy, dlaczego.
@@ -356,7 +356,10 @@ async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
                 status_code=409,
                 detail={
                     "code": "PROTOCOL_LOCKED",
-                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - wyniku nie da się zmienić.",
+                    "message": str(
+                        data.get("message")
+                        or "Protokół tego meczu jest już zatwierdzony w ZPRP - wyniku nie da się zmienić."
+                    ),
                 },
             )
         logger.error("ProEl ZPRP summary odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
@@ -506,14 +509,17 @@ async def submit_player_stats(payload: ZprpPlayerStatsRequest) -> Dict[str, Any]
                 },
             },
         )
-    if status == 403:
+    if status == 403 or str(data.get("code") or "").upper() == "PROTOCOL_LOCKED":
         code = str(data.get("code") or "").upper()
         if code == "PROTOCOL_LOCKED" or not code:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "PROTOCOL_LOCKED",
-                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - danych nie da się zmienić.",
+                    "message": str(
+                        data.get("message")
+                        or "Protokół tego meczu jest już zatwierdzony w ZPRP - danych nie da się zmienić."
+                    ),
                 },
             )
         logger.error("ProEl ZPRP player_stats odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
@@ -651,14 +657,17 @@ async def submit_officials_stats(payload: ZprpOfficialsStatsRequest) -> Dict[str
                 },
             },
         )
-    if status == 403:
+    if status == 403 or str(data.get("code") or "").upper() == "PROTOCOL_LOCKED":
         code = str(data.get("code") or "").upper()
         if code == "PROTOCOL_LOCKED" or not code:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "PROTOCOL_LOCKED",
-                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - kar nie da się zmienić.",
+                    "message": str(
+                        data.get("message")
+                        or "Protokół tego meczu jest już zatwierdzony w ZPRP - kar nie da się zmienić."
+                    ),
                 },
             )
         logger.error("ProEl ZPRP officials_stats odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
@@ -739,14 +748,17 @@ async def submit_match_comment(payload: ZprpMatchCommentRequest) -> Dict[str, An
                 "message": "Sesja ZPRP wygasła.",
             },
         )
-    if status == 403:
+    if status == 403 or str(data.get("code") or "").upper() == "PROTOCOL_LOCKED":
         code = str(data.get("code") or "").upper()
         if code == "PROTOCOL_LOCKED" or not code:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "PROTOCOL_LOCKED",
-                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - uwag nie da się zmienić.",
+                    "message": str(
+                        data.get("message")
+                        or "Protokół tego meczu jest już zatwierdzony w ZPRP - uwag nie da się zmienić."
+                    ),
                 },
             )
         logger.error("ProEl ZPRP match_comment odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
@@ -906,14 +918,17 @@ async def upload_attachment(
                 "message": "Sesja ZPRP wygasła.",
             },
         )
-    if status == 403:
+    if status == 403 or str(data.get("code") or "").upper() == "PROTOCOL_LOCKED":
         code = str(data.get("code") or "").upper()
         if code == "PROTOCOL_LOCKED" or not code:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "PROTOCOL_LOCKED",
-                    "message": "Protokół tego meczu jest już zatwierdzony w ZPRP - załącznika nie da się dodać.",
+                    "message": str(
+                        data.get("message")
+                        or "Protokół tego meczu jest już zatwierdzony w ZPRP - załącznika nie da się dodać."
+                    ),
                 },
             )
         logger.error("ProEl ZPRP upload odrzucony (403 %s) - sprawdź PROEL_APP_KEY", code)

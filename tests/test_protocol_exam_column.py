@@ -332,3 +332,33 @@ def test_old_client_payload_produces_no_marks():
     )
     assert raw["B11"].value == 7
     assert _exam_marks(raw, base_images) == []
+
+
+def test_every_exam_mark_has_the_same_width():
+    """
+    Trzy statusy, jedna szerokość i jedna oś.
+
+    Pieczątka WZPR rozlewała się na całą szerokość kolumny, a zwykły ptaszek
+    i ręczne potwierdzenie były od niej węższe o sześć pikseli. W kolumnie, w
+    której wiersze stoją jeden pod drugim, czytało się to jako krzywo wklejone
+    naklejki - i tak też wyglądało na wydruku. Różnicą statusu ma być stopka
+    z podpisem, nigdy szerokość.
+    """
+    from io import BytesIO
+
+    PILImage = pytest.importorskip("PIL.Image")
+
+    spans = {}
+    for kind in ("zprp", "manual", "wzpr"):
+        data = _exam_mark_png(kind)
+        assert data, "brak PNG dla statusu %r" % kind
+        img = PILImage.open(BytesIO(data)).convert("RGBA")
+        # Obrys liczony z kanału alfa - to jest to, co widać na papierze,
+        # a nie rozmiar kanwy (ta jest wspólna z definicji).
+        box = img.split()[3].getbbox()
+        assert box is not None, "pusty znaczek dla statusu %r" % kind
+        spans[kind] = (box[0], box[2])
+
+    assert len(set(spans.values())) == 1, (
+        "znaczki badań rozjechały się w poziomie: %r" % spans
+    )

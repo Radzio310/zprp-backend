@@ -2341,10 +2341,11 @@ _EXAM_PLATE_BG = (15, 11, 9, 235)
 _EXAM_PLATE_RIM = (95, 227, 194, 107)
 _EXAM_WZPR_TEXT = (141, 240, 212)
 
-# Podpis pod ptaszkiem WZPR. Pełne „WZPR" mieści się w 5,3 mm szerokości z
-# wysokością liter ~1,2 mm (≈3,5 pt) — czytelne, bo PNG jedzie w wysokiej
-# rozdzielczości, ale to granica. Gdyby na papierze okazało się za drobne,
-# jedyna zmiana to podmiana tej stałej na "W".
+# Podpis pod ptaszkiem WZPR. Pieczątka jest teraz tak samo wąska jak zwykły
+# ptaszek (3,7 mm zamiast 5,3 mm), więc napis schodzi do ~1,0 mm wysokości liter
+# (≈2,9 pt). Czytelne, bo PNG jedzie w wysokiej rozdzielczości, ale to granica.
+# Gdyby na papierze okazało się za drobne, jedyna zmiana to podmiana tej stałej
+# na "W" — wtedy o wysokości znowu decyduje stopka, a nie szerokość.
 EXAM_WZPR_CAPTION = "WZPR"
 
 _EXAM_MARK_CACHE: Dict[str, bytes] = {}
@@ -2511,52 +2512,66 @@ def _exam_mark_png(kind: str) -> bytes:
     img = PILImage.new("RGBA", (W, H), (0, 0, 0, 0))
     ramp = _EXAM_RAMP[kind]
 
+    # WSPÓLNA szerokość wszystkich trzech pieczątek i wspólna oś.
+    #
+    # Zwykły ptaszek zawsze był kwadratem o boku `H - 2*ss` wyśrodkowanym
+    # w kolumnie, a pieczątka WZPR rozlewała się na całą jej szerokość. W
+    # kolumnie, w której wiersze stoją jeden pod drugim, ta różnica czytała się
+    # jako krzywo wklejone naklejki - a to nie jest różnica statusu, tylko
+    # skutek tego, że napis „WZPR" potrzebował miejsca. Teraz miejsce dostaje
+    # kosztem własnego napisu, nie kosztem równej kolumny.
+    plate_w = H - 2 * ss
+    plate_x = int((W - plate_w) / 2)
+
     if kind == "wzpr":
         # ── pieczątka dwuczęściowa: głowa + stopka z podpisem ──
-        radius = int(0.26 * W)
+        radius = int(0.26 * plate_w)
         head_h = int(0.60 * H)
 
-        plate = PILImage.new("RGBA", (W, H), _EXAM_PLATE_BG)
-        head = _exam_gradient((W, head_h), ramp, _EXAM_RAMP_STOPS)
-        head.alpha_composite(_exam_gloss((W, head_h)))
+        plate = PILImage.new("RGBA", (plate_w, H), _EXAM_PLATE_BG)
+        head = _exam_gradient((plate_w, head_h), ramp, _EXAM_RAMP_STOPS)
+        head.alpha_composite(_exam_gloss((plate_w, head_h)))
         plate.paste(head, (0, 0), head)
 
-        mask = _exam_rounded_mask((W, H), radius)
-        img.paste(plate, (0, 0), mask)
+        mask = _exam_rounded_mask((plate_w, H), radius)
+        img.paste(plate, (plate_x, 0), mask)
 
         d = ImageDraw.Draw(img)
-        side = int(0.42 * W)
-        cx, cy = W / 2.0, head_h / 2.0
+        side = int(0.42 * plate_w)
+        cx, cy = plate_x + plate_w / 2.0, head_h / 2.0
         _exam_draw_check(
             d,
             (cx - side / 2.0, cy - side / 2.0, cx + side / 2.0, cy + side / 2.0),
             _EXAM_CHECK,
-            max(1, int(0.085 * W)),
+            max(1, int(0.085 * plate_w)),
         )
 
+        # Napis dostaje CAŁĄ szerokość stopki i wyższe pole niż wcześniej -
+        # inaczej zwężenie pieczątki zjadłoby go dwa razy: raz szerokością,
+        # raz proporcją.
         caption = _exam_text_strip(
             EXAM_WZPR_CAPTION,
             _EXAM_WZPR_TEXT,
-            int(W * 0.86),
-            int((H - head_h) * 0.62),
+            int(plate_w * 0.94),
+            int((H - head_h) * 0.72),
         )
         img.alpha_composite(
             caption,
             (
-                int((W - caption.width) / 2),
+                plate_x + int((plate_w - caption.width) / 2),
                 int(head_h + ((H - head_h) - caption.height) / 2),
             ),
         )
 
         d.rounded_rectangle(
-            [0, 0, W - 1, H - 1],
+            [plate_x, 0, plate_x + plate_w - 1, H - 1],
             radius=radius,
             outline=_EXAM_PLATE_RIM,
             width=max(1, int(0.35 * ss)),
         )
     else:
         # ── squircle z pełnym wypełnieniem ──
-        side = H - 2 * ss
+        side = plate_w
         radius = int(0.36 * side)
         badge = _exam_gradient((side, side), ramp, _EXAM_RAMP_STOPS)
         badge.alpha_composite(_exam_gloss((side, side)))
@@ -2573,7 +2588,7 @@ def _exam_mark_png(kind: str) -> bytes:
 
         img.paste(
             badge,
-            (int((W - side) / 2), int((H - side) / 2)),
+            (plate_x, int((H - side) / 2)),
             _exam_rounded_mask((side, side), radius),
         )
 

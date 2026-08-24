@@ -178,8 +178,40 @@ async def test_sesja_wygasla_przechodzi_kodem_do_aplikacji(monkeypatch):
 
 
 async def test_protokol_zatwierdzony_to_409(monkeypatch):
+    upstream_message = "Brak możliwości zmian. Protokół jest już zatwierdzony."
     monkeypatch.setattr(
-        z, "_post_upstream", _upstream(403, {"status": "error", "code": "PROTOCOL_LOCKED"})
+        z,
+        "_post_upstream",
+        _upstream(
+            403,
+            {
+                "status": "error",
+                "code": "PROTOCOL_LOCKED",
+                "message": upstream_message,
+            },
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await submit_summary(_req())
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "PROTOCOL_LOCKED"
+    assert exc.value.detail["message"] == upstream_message
+
+
+async def test_kod_protokolu_jest_wazniejszy_niz_status_http(monkeypatch):
+    monkeypatch.setattr(
+        z,
+        "_post_upstream",
+        _upstream(
+            200,
+            {
+                "status": "error",
+                "code": "PROTOCOL_LOCKED",
+                "message": "Brak możliwości zmian. Protokół jest już zatwierdzony.",
+            },
+        ),
     )
 
     with pytest.raises(HTTPException) as exc:
