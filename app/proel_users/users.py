@@ -152,18 +152,38 @@ def _merge_device_infos(
 
 async def _remove_device_from_other_users(installation_id: str, current_user_id: int) -> None:
     """Multi-account na jednym telefonie: urządzenie należy do OSTATNIO
-    zalogowanego konta."""
+    zalogowanego konta.
+
+    UWAGA NA OPERATOR. `device_ids.contains([...])` NIE jest tu operatorem
+    tablicowym: `ARRAY` z rdzenia SQLAlchemy (`from sqlalchemy import ARRAY`)
+    nie ma własnego `contains`, więc wywołanie schodzi do wersji TEKSTOWEJ
+    (LIKE) i wywraca się na liście jeszcze przed dotknięciem bazy - `TypeError`
+    w środku silnika, czyli 500 na logowaniu. Ponieważ logowanie jest ostatnim
+    krokiem ZAKŁADANIA KONTA i ostatnim krokiem RESETU HASŁA, jeden ten operator
+    przewracał trzy różne rzeczy naraz.
+
+    `any()` rdzeń ARRAY zna i kompiluje do `%(param)s = ANY (device_ids)`.
+    Alternatywą byłoby przejście po wszystkich kontach w Pythonie (tak robi
+    Beach), ale to skan całej tabeli przy każdym logowaniu.
+
+    Czyścimy też `device_infos`: telefon zniknięty z listy urządzeń, ale
+    zostawiony w opisach, dalej wisiałby w panelu admina jako aktywny.
+    """
     database, users_t = _db()
     rows = await database.fetch_all(
-        select(users_t.c.id, users_t.c.device_ids).where(
-            and_(users_t.c.id != current_user_id, users_t.c.device_ids.contains([installation_id]))
+        select(users_t.c.id, users_t.c.device_ids, users_t.c.device_infos).where(
+            and_(users_t.c.id != current_user_id, users_t.c.device_ids.any(installation_id))
         )
     )
     now = datetime.now(timezone.utc)
     for row in rows:
         ids = [d for d in (row["device_ids"] or []) if d != installation_id]
+        infos = _device_infos_dict(row["device_infos"])
+        infos.pop(installation_id, None)
         await database.execute(
-            update(users_t).where(users_t.c.id == row["id"]).values(device_ids=ids, updated_at=now)
+            update(users_t)
+            .where(users_t.c.id == row["id"])
+            .values(device_ids=ids, device_infos=infos, updated_at=now)
         )
 
 
