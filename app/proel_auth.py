@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set
 
@@ -320,36 +321,111 @@ def names_match(a: Any, b: Any) -> bool:
     return ta.issubset(tb) or tb.issubset(ta)
 
 
-def _official_filled(raw: Any) -> bool:
-    """Czy ten wpis obsady w ogóle kogoś wskazuje - nazwiskiem albo numerem."""
+#: Czym API ZPRP wypełnia NIEOBSADZONE role: „--- ---", „---", myślnik, kropka.
+#: Port `isBlankRefereeName` z BAZA/utils/refereeName.ts.
+_PLACEHOLDER_RE = re.compile(r"^[\s\-\u2013\u2014_.\u00b7\u2022]+$")
+
+
+def clean_person_name(value: Any) -> str:
+    """Nazwisko z obsady - pusty string, gdy to w istocie pusty slot."""
+    v = _clean(value)
+    return "" if not v or _PLACEHOLDER_RE.match(v) else v
+
+
+def clean_judge_number(value: Any) -> str:
+    """Numer sędziego z obsady - pusty, gdy to placeholder albo same zera.
+
+    Aplikacja czyści placeholdery w NAZWISKACH przy pobieraniu meczu, ale numeru
+    roli nie czyścił nikt: pusty slot delegata jechał dalej jako `"0"`. Serwer
+    widział wtedy „delegat jest" i żądał jego zgody na zatwierdzenie meczu, w
+    którym delegata nie było wcale - a aplikacja, patrząc na puste nazwisko,
+    pokazywała przycisk sędziemu. Zapalony przycisk i odmowa serwera to ten sam
+    błąd widziany z dwóch stron.
+    """
+    v = _clean(value)
+    if not v or _PLACEHOLDER_RE.match(v):
+        return ""
+    if v.isdigit() and not v.lstrip("0"):
+        return ""
+    return v
+
+
+def official_name(raw: Any) -> str:
+    """Nazwisko z wpisu obsady - wpis bywa słownikiem albo samym napisem."""
     if isinstance(raw, dict):
-        return bool(
-            _clean(raw.get("judgeId") or raw.get("judge_id"))
-            or _clean(raw.get("name") or raw.get("fullName"))
-        )
-    return bool(_clean(raw))
+        return clean_person_name(raw.get("name") or raw.get("fullName"))
+    return clean_person_name(raw)
 
 
-def _crew_is_known(officials: Optional[Dict[str, Any]]) -> bool:
+def official_judge_id(raw: Any) -> str:
+    """Numer sędziego z wpisu obsady."""
+    if isinstance(raw, dict):
+        return clean_judge_number(raw.get("judgeId") or raw.get("judge_id"))
+    return ""
+
+
+def _official_filled(raw: Any) -> bool:
+    """Czy ten wpis obsady wskazuje KOGOKOLWIEK - nazwiskiem albo numerem."""
+    return bool(official_name(raw) or official_judge_id(raw))
+
+
+def crew_is_known(officials: Optional[Dict[str, Any]]) -> bool:
     """Czy o obsadzie tego meczu wiemy cokolwiek."""
     if not isinstance(officials, dict):
         return False
     return any(_official_filled(officials.get(key)) for key in _ROLE_KEYS)
 
 
+#: Nazwa historyczna - używana w tym module od początku.
+_crew_is_known = crew_is_known
+
+
 def merged_officials(
-    state_officials: Optional[Dict[str, Any]], data_json: Any
+    state_officials: Optional[Dict[str, Any]],
+    doc_officials: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Obsada z wiersza stanu, uzupełniona tym, co wie zapisany protokół.
 
     Wiersz stanu jest źródłem lepszym (ma numery sędziów prosto z ZPRP), ale
-    bywa pusty albo częściowy - zakłada go `/ensure`, którego ekran finalizacji
-    nie woła. Wpis wypełniony wygrywa z pustym, niezależnie od źródła.
+    bywa pusty albo częściowy - zakłada go `/ensure` z guardem. Wpis wypełniony
+    wygrywa z pustym, niezależnie od źródła.
     """
-    out = dict(officials_from_blob(data_json))
+    out = dict(doc_officials or {})
     for key, value in (state_officials or {}).items():
         if _official_filled(value):
             out[key] = value
+    return out
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    """Słownik z czegoś, co bywa też tekstem JSON albo śmieciem."""
+    if isinstance(value, str):
+        # Starsze wiersze bywają zapisane jako tekst JSON - klient też to
+        # toleruje (`parseMatchBlob`), więc i my tolerujemy.
+        try:
+            value = json.loads(value)
+        except Exception:  # noqa: BLE001
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def officials_from_config(match_config: Any) -> Dict[str, Any]:
+    """Obsada z `matchConfig` protokołu.
+
+    Osobno od całego bloba, bo trasa stanu czyta z bazy SAMĄ konfigurację
+    (`data_json -> 'matchConfig'`), a nie protokół z przebiegiem i składami.
+    """
+    cfg = _as_dict(match_config)
+    from_extras = _as_dict(_as_dict(cfg.get("extras")).get("officials"))
+
+    out: Dict[str, Any] = {}
+    for key in _ROLE_KEYS:
+        raw = from_extras.get(key)
+        # Starszy zapis trzyma same nazwiska wprost w `matchConfig`.
+        name = official_name(raw) or clean_person_name(cfg.get(key))
+        judge_id = official_judge_id(raw)
+        if name or judge_id:
+            out[key] = {"name": name, "judgeId": judge_id}
     return out
 
 
@@ -357,38 +433,11 @@ def officials_from_blob(data_json: Any) -> Dict[str, Any]:
     """Obsada wyczytana z zapisanego protokołu.
 
     Wiersz stanu współpracy (`proel_match_state.guard_json`) zna obsadę tylko
-    wtedy, gdy ktoś zawołał `/ensure` - a robi to ekran szczegółów meczu, nie
-    ekran finalizacji. Bez tego odczytu reguła „kto może zatwierdzić" trafiałaby
-    na pustą obsadę i przepuszczała każdego, czyli nie robiła nic.
+    wtedy, gdy ktoś zawołał `/ensure` z guardem. Bez tego odczytu reguła „kto
+    może zatwierdzić" trafiałaby na pustą obsadę i przepuszczała każdego, czyli
+    nie robiła nic.
     """
-    if isinstance(data_json, str):
-        # Starsze wiersze bywają zapisane jako tekst JSON - klient też to
-        # toleruje (`parseMatchBlob`), więc i my tolerujemy.
-        try:
-            data_json = json.loads(data_json)
-        except Exception:  # noqa: BLE001
-            return {}
-    cfg = ((data_json or {}) if isinstance(data_json, dict) else {}).get("matchConfig")
-    cfg = cfg if isinstance(cfg, dict) else {}
-    extras = cfg.get("extras") if isinstance(cfg.get("extras"), dict) else {}
-    from_extras = extras.get("officials") if isinstance(extras.get("officials"), dict) else {}
-
-    out: Dict[str, Any] = {}
-    for key in _ROLE_KEYS:
-        raw = from_extras.get(key)
-        name = ""
-        judge_id = ""
-        if isinstance(raw, dict):
-            name = _clean(raw.get("fullName") or raw.get("name"))
-            judge_id = _clean(raw.get("judgeId") or raw.get("judge_id"))
-        else:
-            name = _clean(raw)
-        # Starszy zapis trzyma same nazwiska wprost w `matchConfig`.
-        if not name:
-            name = _clean(cfg.get(key))
-        if name or judge_id:
-            out[key] = {"name": name, "judgeId": judge_id}
-    return out
+    return officials_from_config(_as_dict(data_json).get("matchConfig"))
 
 
 def approve_roles(officials: Optional[Dict[str, Any]]) -> Set[str]:
@@ -447,12 +496,10 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
         raw = officials.get(key)
         if raw is None:
             continue
-        if isinstance(raw, dict):
-            oid = _clean(raw.get("judgeId") or raw.get("judge_id"))
-            oname = raw.get("name") or raw.get("fullName")
-        else:
-            oid = ""
-            oname = raw
+        # Placeholder („--- ---", numer „0") nie jest ani nazwiskiem, ani
+        # numerem - nie ma prawa nikomu dać roli ani nikogo od niej odciąć.
+        oid = official_judge_id(raw)
+        oname = official_name(raw)
 
         if oid:
             if oid == actor.judge_id:

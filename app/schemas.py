@@ -1044,6 +1044,14 @@ class ProElStateResponse(BaseModel):
     lease: ProElLeaseInfo = ProElLeaseInfo()
     fields: Dict[str, Any] = {}
     your_roles: List[str] = []
+    #: Czy TA osoba może zatwierdzić mecz i cofnąć zatwierdzenie.
+    #:
+    #: Regułę („delegat, a gdy go nie ma - sędziowie prowadzący; admin zawsze")
+    #: egzekwuje serwer przy zapisie, więc to on musi też odpowiadać na pytanie
+    #: „czy zapalić przycisk". Aplikacja liczyła to u siebie, z nazwiska w
+    #: ustawieniach i z obsady po lokalnym czyszczeniu - i potrafiła zapalić
+    #: przycisk, który po dotknięciu odmawiał.
+    can_approve: bool = True
     #: Sugerowana kadencja odpytywania — zdalny hamulec bez aktualizacji aplikacji.
     retry_after_ms: int = 4000
 

@@ -13,9 +13,11 @@ from app.db import (
 from app.proel_auth import (
     Actor,
     can_approve,
+    crew_is_known,
     is_admin,
     merge_guard,
     merged_officials,
+    officials_from_config,
     proel_actor,
     roles_for,
 )
@@ -165,6 +167,59 @@ async def _fetch_doc_status(match_number: str) -> Optional[str]:
         return "finished" if row["is_finished"] else "in_progress"
 
 
+async def _fetch_doc_config(match_number: str) -> Any:
+    """Sama `matchConfig` protokołu - bez przebiegu, składów i statystyk.
+
+    `data_json` bywa megabajtem, a do rozstrzygnięcia „kto należy do tej obsady"
+    wystarczy nagłówek meczu. Trasa stanu bywa odpytywana długim pollingiem,
+    więc czytanie tam całego bloba byłoby widoczne.
+    """
+    try:
+        row = await database.fetch_one(
+            select(saved_matches.c.data_json["matchConfig"].label("cfg")).where(
+                saved_matches.c.match_number == match_number
+            )
+        )
+    except Exception:  # noqa: BLE001 — awaria odczytu nie może blokować meczu
+        logger.warning("_fetch_doc_config: nie udało się odczytać konfiguracji", exc_info=True)
+        return None
+    if row is None:
+        return None
+    try:
+        return row["cfg"]
+    except (KeyError, IndexError):
+        return None
+
+
+async def _approval_officials(
+    match_number: str, state: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Obsada, na której stoi prawo do zatwierdzenia - JEDNO źródło.
+
+    Ta sama funkcja odpowiada trasie stanu (pole `can_approve`) i zapisowi
+    (`_require_approver`). Rozjazd między nimi to zapalony przycisk, który po
+    dotknięciu mówi „ta decyzja należy do kogo innego" - a to najgorsza z
+    możliwych odpowiedzi, bo obie strony brzmią pewnie i przeczą sobie.
+
+    Protokół czytamy TYLKO wtedy, gdy wiersz stanu nie zna obsady - czyli gdy
+    nikt nie zawołał `/ensure` z guardem.
+    """
+    officials = _officials_of(state)
+    if crew_is_known(officials):
+        return officials
+    from_doc = officials_from_config(await _fetch_doc_config(match_number))
+    return merged_officials(officials, from_doc)
+
+
+async def _may_approve(
+    match_number: str, state: Optional[Dict[str, Any]], actor: Actor
+) -> bool:
+    """Czy TEN aktor może zatwierdzić ten mecz albo cofnąć zatwierdzenie."""
+    if await is_admin(actor.judge_id):
+        return True
+    return can_approve(actor, await _approval_officials(match_number, state))
+
+
 def _reproject_blob(state: Optional[Dict[str, Any]], blob: Any) -> Any:
     """Nałóż overlay na przychodzący blob. Bezpieczne dla dowolnego kształtu."""
     overlay = _overlay_of(state)
@@ -280,6 +335,9 @@ async def _build_state_response(
     state = await _fetch_state(match_number)
     doc_status = await _fetch_doc_status(match_number)
     phase = _phase_of(state, doc_status)
+    # `your_roles` liczymy z SAMEGO wiersza stanu - dokładnie tak, jak robi to
+    # `/patch`, który z tych ról korzysta. Prawo do zatwierdzenia ma własne,
+    # szersze źródło (patrz `_approval_officials`) i własne pole.
     roles = roles_for(actor, _officials_of(state))
     return ProElStateResponse(
         match_number=match_number,
@@ -293,6 +351,7 @@ async def _build_state_response(
         lease=_lease_view(state, actor.installation_id, actor.judge_id),
         fields=_overlay_of(state),
         your_roles=sorted(roles),
+        can_approve=await _may_approve(match_number, state, actor),
         retry_after_ms=4000,
     )
 
@@ -865,7 +924,7 @@ async def create_proel_match(
 
 async def _require_approver(
     *,
-    row: Any,
+    match_number: str,
     state: Optional[Dict[str, Any]],
     legacy: bool,
     x_judge_id: Optional[str],
@@ -885,15 +944,7 @@ async def _require_approver(
         return
 
     actor = await proel_actor(x_judge_id, x_installation_id, x_actor_name, authorization)
-    if await is_admin(actor.judge_id):
-        return
-
-    try:
-        blob = row["data_json"]
-    except (KeyError, IndexError):
-        blob = None
-    officials = merged_officials(_officials_of(state), blob)
-    if can_approve(actor, officials):
+    if await _may_approve(match_number, state, actor):
         return
 
     raise HTTPException(
@@ -1059,7 +1110,7 @@ async def update_proel_match(
             )
             if (requested_status == "approved") != (current_status == "approved"):
                 await _require_approver(
-                    row=row,
+                    match_number=match_number,
                     state=state,
                     legacy=str(x_baza_proel or "") != "2",
                     x_judge_id=x_judge_id,

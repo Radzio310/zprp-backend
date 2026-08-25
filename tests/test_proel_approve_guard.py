@@ -21,8 +21,11 @@ from app.proel_auth import (
     Actor,
     approve_roles,
     can_approve,
+    clean_judge_number,
+    clean_person_name,
     merged_officials,
     officials_from_blob,
+    officials_from_config,
 )
 
 PROEL_PY = pathlib.Path(__file__).resolve().parents[1] / "app" / "proel.py"
@@ -104,6 +107,52 @@ def test_None_to_nie_to_samo_co_pusta_obsada():
     assert merged_officials(None, None) == {}
 
 
+# ────────────────── pusty slot to NIE jest obsadzona rola ──────────────────
+
+#: Tak wygląda mecz BEZ delegata w danych z ZPRP: nazwisko to placeholder,
+#: a numer roli to zero. Aplikacja czyści nazwisko przy pobieraniu, numeru nie
+#: czyścił nikt - i to wystarczyło, żeby serwer zobaczył delegata.
+CREW_PLACEHOLDER_DELEGATE = dict(
+    CREW_NO_DELEGATE, delegate={"name": "--- ---", "judgeId": "0"}
+)
+
+
+def test_placeholder_w_nazwisku_to_pusty_slot():
+    for junk in ("--- ---", "---", "-", "—", "- -", ".", "  ", "", None, "·"):
+        assert clean_person_name(junk) == "", junk
+    assert clean_person_name("  KOWALSKI Jan ") == "KOWALSKI Jan"
+
+
+def test_zero_w_numerze_to_pusty_slot():
+    for junk in ("0", "00", "--- ---", "-", "", None):
+        assert clean_judge_number(junk) == "", junk
+    assert clean_judge_number("444") == "444"
+    assert clean_judge_number("0444") == "0444"
+
+
+def test_placeholder_delegata_oddaje_decyzje_sedziom():
+    """DOKŁADNIE ten przypadek zapalał przycisk i odmawiał po dotknięciu.
+
+    Serwer widział „delegat jest" (numer „0"), więc żądał zgody delegata,
+    a aplikacja - patrząc na wyczyszczone nazwisko - pokazywała przycisk
+    sędziemu prowadzącemu.
+    """
+    assert approve_roles(CREW_PLACEHOLDER_DELEGATE) == {"referee1", "referee2"}
+    assert can_approve(judge("111"), CREW_PLACEHOLDER_DELEGATE)
+
+
+def test_placeholder_nie_daje_roli_nikomu():
+    """Aktor o numerze „0" nie jest delegatem tylko dlatego, że slot ma zero."""
+    assert not can_approve(judge("0", "--- ---"), CREW_PLACEHOLDER_DELEGATE)
+
+
+def test_placeholder_z_protokolu_tez_znika():
+    blob = {"matchConfig": {"referee1": "KOWALSKI Jan", "delegate": "--- ---"}}
+    out = officials_from_blob(blob)
+    assert out["referee1"]["name"] == "KOWALSKI Jan"
+    assert "delegate" not in out
+
+
 # ────────────────── konto ProEl w swoim własnym meczu ──────────────────
 
 def test_konto_proel_zatwierdza_swoj_mecz_po_nazwisku():
@@ -176,7 +225,7 @@ def test_stan_wygrywa_z_protokolem_ale_tylko_wypelniony():
         "referee1": {"name": "KOWALSKI Jan", "judgeId": "111"},
         "delegate": {"name": "", "judgeId": ""},
     }
-    out = merged_officials(state, blob)
+    out = merged_officials(state, officials_from_blob(blob))
     # Wiersz stanu ma numer prosto z ZPRP - jest lepszym źródłem.
     assert out["referee1"] == {"name": "KOWALSKI Jan", "judgeId": "111"}
     # Ale pusty wpis w stanie nie wymazuje tego, co wie protokół.
@@ -185,7 +234,48 @@ def test_stan_wygrywa_z_protokolem_ale_tylko_wypelniony():
 
 def test_bez_stanu_liczy_sie_sam_protokol():
     blob = {"matchConfig": {"referee1": "KOWALSKI Jan"}}
-    assert merged_officials(None, blob)["referee1"]["name"] == "KOWALSKI Jan"
+    out = merged_officials(None, officials_from_blob(blob))
+    assert out["referee1"]["name"] == "KOWALSKI Jan"
+
+
+def test_sama_konfiguracja_wystarczy():
+    """Trasa stanu czyta z bazy SAMĄ `matchConfig`, nie cały protokół."""
+    cfg = {"extras": {"officials": {"referee1": {"fullName": "KOWALSKI Jan"}}}}
+    assert officials_from_config(cfg)["referee1"]["name"] == "KOWALSKI Jan"
+
+
+# ─────────────────────── lekki odczyt z bazy ───────────────────────
+
+def test_czytamy_sama_konfiguracje_a_nie_caly_protokol():
+    """`data_json` bywa megabajtem, a trasa stanu chodzi długim pollingiem.
+
+    Wyrażenie musi się skompilować do operatora JSON (`->`), inaczej odczyt
+    wywróciłby się dopiero na produkcji - tak jak `contains` na kolumnie
+    tablicowej (patrz `test_proel_device_cleanup`).
+    """
+    from sqlalchemy import JSON, Column, MetaData, String, Table, select
+    from sqlalchemy.dialects import postgresql
+
+    fake = Table(
+        "fake_proel_matches",
+        MetaData(),
+        Column("match_number", String, primary_key=True),
+        Column("data_json", JSON),
+    )
+    stmt = select(fake.c.data_json["matchConfig"].label("cfg")).where(
+        fake.c.match_number == "OSK/12"
+    )
+    # Dialekt jawnie: ogólny renderuje indeks jako `data_json[:param]`, a
+    # operator `->` daje dopiero Postgres - czyli to, co stoi na produkcji.
+    sql = str(stmt.compile(dialect=postgresql.dialect()))
+    assert "->" in sql
+    assert "data_json" in sql
+
+
+def test_protokol_czytamy_TYLKO_gdy_stan_nie_zna_obsady():
+    code = _function_source("_approval_officials")
+    assert "crew_is_known" in code
+    assert code.index("crew_is_known") < code.index("_fetch_doc_config")
 
 
 # ─────────────────────── wpięcie w trasę ───────────────────────
@@ -219,7 +309,23 @@ def test_guard_wymaga_TWARDEJ_tozsamosci():
 
 
 def test_guard_przepuszcza_admina():
-    assert "is_admin" in _function_source("_require_approver")
+    assert "is_admin" in _function_source("_may_approve")
+
+
+def test_przycisk_i_zapis_pytaja_TEGO_SAMEGO():
+    """Sedno całej sprawy.
+
+    Ekran zapala przycisk na podstawie `can_approve` z trasy stanu, a zapis
+    sprawdza to samo prawo jeszcze raz. Gdy każde z tych miejsc liczy je po
+    swojemu, sędzia dostaje przycisk, który po dotknięciu mówi „ta decyzja
+    należy do kogo innego". Obie drogi mają wołać jedną funkcję.
+    """
+    assert "_may_approve" in _function_source("_require_approver")
+    assert "_may_approve" in _function_source("_build_state_response")
+
+
+def test_obsada_do_decyzji_ma_jedno_zrodlo():
+    assert "_approval_officials" in _function_source("_may_approve")
 
 
 def test_starsza_aplikacja_zostaje_przepuszczona():
