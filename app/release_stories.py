@@ -4,8 +4,11 @@ import io
 import json
 import os
 import re
+import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 import jwt
@@ -45,6 +48,9 @@ ALLOWED_ALIGNMENTS = {"top", "center", "bottom"}
 ALLOWED_MODES = {"changelog_only", "story_then_changelog", "story_only"}
 ALLOWED_STATUSES = {"draft", "published"}
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+MAX_VIDEO_UPLOAD_BYTES = 48 * 1024 * 1024
+MIN_VIDEO_DURATION_SECONDS = 2.5
+MAX_VIDEO_DURATION_SECONDS = 10.0
 MAX_SLIDES = 12
 SIGNED_URL_TTL_SECONDS = 24 * 60 * 60
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -55,6 +61,10 @@ class ReleaseStorySlide(BaseModel):
     template: Literal["hero", "feature", "statement", "split", "cta"] = "feature"
     media_key: Optional[str] = None
     media_url: Optional[str] = None
+    media_type: Literal["image", "video"] = "image"
+    poster_key: Optional[str] = None
+    poster_url: Optional[str] = None
+    video_duration_ms: Optional[int] = Field(default=None, ge=1, le=10000)
     kicker: str = Field(default="", max_length=100)
     title: str = Field(default="", max_length=180)
     body: str = Field(default="", max_length=420)
@@ -186,13 +196,13 @@ def _asset_url(object_key: str) -> str:
     )
 
 
-def _put_object(object_key: str, payload: bytes) -> None:
+def _put_object(object_key: str, payload: bytes, content_type: str) -> None:
     config = _storage_config()
     _s3_client(config).put_object(
         Bucket=config["bucket"],
         Key=object_key,
         Body=payload,
-        ContentType="image/webp",
+        ContentType=content_type,
         CacheControl="public, max-age=31536000, immutable",
     )
 
@@ -238,6 +248,162 @@ def _prepare_image(raw: bytes) -> tuple[bytes, int, int]:
     output = io.BytesIO()
     image.save(output, format="WEBP", quality=88, method=6)
     return output.getvalue(), out_w, out_h
+
+
+def _run_media_command(command: list[str], error_detail: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Serwer nie ma jeszcze włączonego procesora filmów (FFmpeg).",
+        ) from exc
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(status_code=422, detail=error_detail) from exc
+
+
+def _video_metadata(path: Path) -> tuple[float, int, int]:
+    result = _run_media_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+            str(path),
+        ],
+        "Nie udało się odczytać parametrów filmu.",
+    )
+    try:
+        metadata = json.loads(result.stdout)
+        stream = next(
+            item for item in metadata.get("streams", []) if item.get("codec_type") == "video"
+        )
+        duration = float(stream.get("duration") or metadata.get("format", {}).get("duration"))
+        width = int(stream["width"])
+        height = int(stream["height"])
+        rotation = int(float((stream.get("tags") or {}).get("rotate") or 0))
+        for side_data in stream.get("side_data_list") or []:
+            if side_data.get("rotation") is not None:
+                rotation = int(float(side_data["rotation"]))
+                break
+    except (KeyError, StopIteration, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Film nie zawiera poprawnej ścieżki obrazu.") from exc
+    if abs(rotation) % 180 == 90:
+        width, height = height, width
+    return duration, width, height
+
+
+def _prepare_video(raw: bytes, suffix: str) -> tuple[bytes, bytes, int, int, int]:
+    with tempfile.TemporaryDirectory(prefix="baza-release-") as temp_dir:
+        directory = Path(temp_dir)
+        source = directory / f"source{suffix or '.mp4'}"
+        output = directory / "release.mp4"
+        poster_png = directory / "poster.png"
+        source.write_bytes(raw)
+
+        duration, width, height = _video_metadata(source)
+        if duration < MIN_VIDEO_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=422,
+                detail="Film musi trwać co najmniej 2,5 sekundy.",
+            )
+        if duration > MAX_VIDEO_DURATION_SECONDS + 0.08:
+            raise HTTPException(
+                status_code=422,
+                detail="Film może trwać maksymalnie 10 sekund.",
+            )
+        if width <= 0 or height <= 0 or abs(width / height - 9 / 16) > 0.035:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Film musi mieć proporcje 9:16 (otrzymano {width}×{height}).",
+            )
+
+        _run_media_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(source),
+                "-map_metadata",
+                "-1",
+                "-vf",
+                "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=30",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "high",
+                "-level",
+                "4.0",
+                "-preset",
+                "medium",
+                "-crf",
+                "22",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                "-t",
+                f"{MAX_VIDEO_DURATION_SECONDS:.1f}",
+                str(output),
+            ],
+            "Nie udało się zoptymalizować filmu. Spróbuj wyeksportować go jako MP4 H.264.",
+        )
+        final_duration, _, _ = _video_metadata(output)
+        poster_at = min(0.4, max(0.05, final_duration * 0.12))
+        _run_media_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{poster_at:.3f}",
+                "-i",
+                str(output),
+                "-frames:v",
+                "1",
+                str(poster_png),
+            ],
+            "Nie udało się przygotować podglądu filmu.",
+        )
+        poster, poster_width, poster_height = _prepare_image(poster_png.read_bytes())
+        return (
+            output.read_bytes(),
+            poster,
+            poster_width,
+            poster_height,
+            min(10000, int(round(final_duration * 1000))),
+        )
+
+
+async def _read_upload_limited(upload: UploadFile, limit: int, label: str) -> bytes:
+    output = io.BytesIO()
+    size = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{label} przekracza dopuszczalny rozmiar.",
+            )
+        output.write(chunk)
+    return output.getvalue()
 
 
 async def _version_row(version_id: int):
@@ -295,11 +461,15 @@ async def _serialize_story(row: Any, *, include_assets: bool = True) -> dict[str
     for slide in slides:
         if not isinstance(slide, dict):
             continue
-        key = str(slide.get("media_key") or "")
-        if key and key in asset_by_key:
-            if key not in signed_by_key:
-                signed_by_key[key] = await run_in_threadpool(_asset_url, key)
-            slide["media_url"] = signed_by_key[key]
+        for key_field, url_field in (
+            ("media_key", "media_url"),
+            ("poster_key", "poster_url"),
+        ):
+            key = str(slide.get(key_field) or "")
+            if key and key in asset_by_key:
+                if key not in signed_by_key:
+                    signed_by_key[key] = await run_in_threadpool(_asset_url, key)
+                slide[url_field] = signed_by_key[key]
 
     data["slides"] = slides
     if include_assets:
@@ -332,7 +502,7 @@ def _clean_and_validate_slides(
     slides: list[ReleaseStorySlide],
     *,
     publishing: bool,
-    allowed_asset_keys: set[str],
+    allowed_asset_types: dict[str, str],
 ) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -353,16 +523,44 @@ def _clean_and_validate_slides(
             if not HEX_COLOR.fullmatch(str(slide.get(field) or "")):
                 raise HTTPException(status_code=422, detail=f"Nieprawidłowy kolor w slajdzie {position + 1}.")
 
+        media_type = str(slide.get("media_type") or "image")
         media_key = str(slide.get("media_key") or "").strip()
-        if media_key and media_key not in allowed_asset_keys:
-            raise HTTPException(status_code=422, detail=f"Nieznana grafika w slajdzie {position + 1}.")
+        poster_key = str(slide.get("poster_key") or "").strip()
+        if media_key and media_key not in allowed_asset_types:
+            raise HTTPException(status_code=422, detail=f"Nieznany materiał w slajdzie {position + 1}.")
+        if poster_key and poster_key not in allowed_asset_types:
+            raise HTTPException(status_code=422, detail=f"Nieznany poster w slajdzie {position + 1}.")
+        if media_key:
+            content_type = allowed_asset_types[media_key]
+            if media_type == "video" and content_type != "video/mp4":
+                raise HTTPException(status_code=422, detail=f"Nieprawidłowy film w slajdzie {position + 1}.")
+            if media_type == "image" and not content_type.startswith("image/"):
+                raise HTTPException(status_code=422, detail=f"Nieprawidłowa grafika w slajdzie {position + 1}.")
+        if media_type == "video":
+            if media_key and not poster_key:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Film w slajdzie {position + 1} nie ma wygenerowanego posteru.",
+                )
+            if poster_key and not allowed_asset_types[poster_key].startswith("image/"):
+                raise HTTPException(status_code=422, detail=f"Nieprawidłowy poster w slajdzie {position + 1}.")
+            video_duration_ms = int(slide.get("video_duration_ms") or 0)
+            if media_key and not 2500 <= video_duration_ms <= 10000:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Film w slajdzie {position + 1} ma nieprawidłowy czas.",
+                )
+            if video_duration_ms:
+                slide["duration_ms"] = video_duration_ms
         if publishing and (not media_key or not str(slide.get("title") or "").strip()):
             raise HTTPException(
                 status_code=422,
-                detail=f"Slajd {position + 1} wymaga grafiki 9:16 i tytułu przed publikacją.",
+                detail=f"Slajd {position + 1} wymaga materiału 9:16 i tytułu przed publikacją.",
             )
         slide["media_key"] = media_key or None
+        slide["poster_key"] = poster_key or None
         slide.pop("media_url", None)
+        slide.pop("poster_url", None)
         cleaned.append(slide)
 
     if publishing and not cleaned:
@@ -409,12 +607,14 @@ async def save_release_story(
     row = await _ensure_experience(version_id)
     current = dict(row)
     assets = await _assets_for(int(current["id"]))
-    allowed_keys = {str(asset["object_key"]) for asset in assets}
+    allowed_asset_types = {
+        str(asset["object_key"]): str(asset["content_type"]) for asset in assets
+    }
     publishing = req.status == "published"
     slides = _clean_and_validate_slides(
         req.slides,
         publishing=publishing,
-        allowed_asset_keys=allowed_keys,
+        allowed_asset_types=allowed_asset_types,
     )
     generation = int(req.display_generation)
     if req.bump_generation:
@@ -443,9 +643,11 @@ async def save_release_story(
     # Klucze są niezmienne, więc żaden opublikowany slajd nie wskazuje na plik,
     # który zmienił zawartość pod tym samym adresem.
     referenced_keys = {
-        str(slide.get("media_key"))
+        str(slide.get(field))
         for slide in slides
-        if isinstance(slide, dict) and slide.get("media_key")
+        if isinstance(slide, dict)
+        for field in ("media_key", "poster_key")
+        if slide.get(field)
     }
     for asset in assets:
         object_key = str(asset["object_key"])
@@ -482,60 +684,138 @@ async def delete_release_story(version_id: int, _admin: str = Depends(require_re
 @router.post(
     "/admin/versions/{version_id}/release-story/assets",
     status_code=status.HTTP_201_CREATED,
-    summary="Wgraj grafikę 9:16 do Cloudflare R2",
+    summary="Wgraj grafikę lub film 9:16 do Cloudflare R2",
 )
 async def upload_release_story_asset(
     version_id: int,
-    image: UploadFile = File(...),
+    image: Optional[UploadFile] = File(None),
+    media: Optional[UploadFile] = File(None),
     _admin: str = Depends(require_release_admin),
 ):
-    raw = await image.read()
+    if bool(image) == bool(media):
+        raise HTTPException(status_code=400, detail="Prześlij dokładnie jeden materiał.")
+    upload = media or image
+    assert upload is not None
+    is_video = media is not None or str(upload.content_type or "").lower().startswith("video/")
+    limit = MAX_VIDEO_UPLOAD_BYTES if is_video else MAX_UPLOAD_BYTES
+    raw = await _read_upload_limited(
+        upload,
+        limit,
+        "Film" if is_video else "Grafika",
+    )
     if not raw:
         raise HTTPException(status_code=400, detail="Pusty plik.")
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Grafika może mieć maksymalnie 12 MB.")
 
     version = dict(await _version_row(version_id))
     experience = dict(await _ensure_experience(version_id))
-    payload, width, height = await run_in_threadpool(_prepare_image, raw)
     config = _storage_config()
-    object_key = (
-        f"{config['prefix']}/v{str(version['version']).strip()}/"
-        f"{uuid.uuid4().hex}.webp"
-    )
-    await run_in_threadpool(_put_object, object_key, payload)
-    try:
-        asset_id = await database.execute(
-            insert(release_story_assets).values(
-                experience_id=int(experience["id"]),
-                object_key=object_key,
-                original_name=(image.filename or "grafika")[:512],
-                content_type="image/webp",
-                width=width,
-                height=height,
-                byte_size=len(payload),
+    prefix = f"{config['prefix']}/v{str(version['version']).strip()}"
+
+    if not is_video:
+        payload, width, height = await run_in_threadpool(_prepare_image, raw)
+        object_key = f"{prefix}/{uuid.uuid4().hex}.webp"
+        await run_in_threadpool(_put_object, object_key, payload, "image/webp")
+        try:
+            asset_id = await database.execute(
+                insert(release_story_assets).values(
+                    experience_id=int(experience["id"]),
+                    object_key=object_key,
+                    original_name=(upload.filename or "grafika")[:512],
+                    content_type="image/webp",
+                    width=width,
+                    height=height,
+                    byte_size=len(payload),
+                )
             )
-        )
+        except Exception:
+            await run_in_threadpool(_delete_object, object_key)
+            raise
+        url = await run_in_threadpool(_asset_url, object_key)
+        return {
+            "media_type": "image",
+            "asset": {
+                "id": int(asset_id),
+                "object_key": object_key,
+                "url": url,
+                "width": width,
+                "height": height,
+                "byte_size": len(payload),
+                "content_type": "image/webp",
+            },
+        }
+
+    suffix = Path(upload.filename or "film.mp4").suffix.lower()[:10] or ".mp4"
+    video, poster, width, height, duration_ms = await run_in_threadpool(
+        _prepare_video, raw, suffix
+    )
+    stem = uuid.uuid4().hex
+    video_key = f"{prefix}/{stem}.mp4"
+    poster_key = f"{prefix}/{stem}-poster.webp"
+    await run_in_threadpool(_put_object, video_key, video, "video/mp4")
+    try:
+        await run_in_threadpool(_put_object, poster_key, poster, "image/webp")
     except Exception:
-        await run_in_threadpool(_delete_object, object_key)
+        await run_in_threadpool(_delete_object, video_key)
         raise
-    url = await run_in_threadpool(_asset_url, object_key)
+
+    try:
+        async with database.transaction():
+            asset_id = await database.execute(
+                insert(release_story_assets).values(
+                    experience_id=int(experience["id"]),
+                    object_key=video_key,
+                    original_name=(upload.filename or "film")[:512],
+                    content_type="video/mp4",
+                    width=width,
+                    height=height,
+                    byte_size=len(video),
+                )
+            )
+            poster_id = await database.execute(
+                insert(release_story_assets).values(
+                    experience_id=int(experience["id"]),
+                    object_key=poster_key,
+                    original_name=f"poster-{(upload.filename or 'film')[:500]}",
+                    content_type="image/webp",
+                    width=width,
+                    height=height,
+                    byte_size=len(poster),
+                )
+            )
+    except Exception:
+        await run_in_threadpool(_delete_object, video_key)
+        await run_in_threadpool(_delete_object, poster_key)
+        raise
+
+    video_url = await run_in_threadpool(_asset_url, video_key)
+    poster_url = await run_in_threadpool(_asset_url, poster_key)
     return {
+        "media_type": "video",
+        "duration_ms": duration_ms,
         "asset": {
             "id": int(asset_id),
-            "object_key": object_key,
-            "url": url,
+            "object_key": video_key,
+            "url": video_url,
             "width": width,
             "height": height,
-            "byte_size": len(payload),
+            "byte_size": len(video),
+            "content_type": "video/mp4",
+        },
+        "poster_asset": {
+            "id": int(poster_id),
+            "object_key": poster_key,
+            "url": poster_url,
+            "width": width,
+            "height": height,
+            "byte_size": len(poster),
             "content_type": "image/webp",
-        }
+        },
     }
 
 
 @router.delete(
     "/admin/versions/{version_id}/release-story/assets/{asset_id}",
-    summary="Usuń grafikę pokazu",
+    summary="Usuń materiał pokazu",
 )
 async def delete_release_story_asset(
     version_id: int,
@@ -554,11 +834,15 @@ async def delete_release_story_asset(
         )
     )
     if not asset:
-        raise HTTPException(status_code=404, detail="Grafika nie istnieje.")
+        raise HTTPException(status_code=404, detail="Materiał nie istnieje.")
     object_key = str(dict(asset)["object_key"])
     slides = _json_value(dict(experience).get("slides"), [])
-    if any(isinstance(slide, dict) and slide.get("media_key") == object_key for slide in slides):
-        raise HTTPException(status_code=409, detail="Grafika jest nadal używana przez slajd.")
+    if any(
+        isinstance(slide, dict)
+        and object_key in {slide.get("media_key"), slide.get("poster_key")}
+        for slide in slides
+    ):
+        raise HTTPException(status_code=409, detail="Materiał jest nadal używany przez slajd.")
     await run_in_threadpool(_delete_object, object_key)
     await database.execute(
         delete(release_story_assets).where(release_story_assets.c.id == asset_id)
