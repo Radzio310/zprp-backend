@@ -10,7 +10,15 @@ from app.db import (
     proel_match_state,
     saved_matches,
 )
-from app.proel_auth import Actor, is_admin, merge_guard, proel_actor, roles_for
+from app.proel_auth import (
+    Actor,
+    can_approve,
+    is_admin,
+    merge_guard,
+    merged_officials,
+    proel_actor,
+    roles_for,
+)
 from app.proel_journal import client_ip as _client_ip, log_match_event, soft_actor
 from app.proel_match_key import (
     match_head as _match_head,
@@ -855,6 +863,52 @@ async def create_proel_match(
     return {"success": True}
 
 
+async def _require_approver(
+    *,
+    row: Any,
+    state: Optional[Dict[str, Any]],
+    legacy: bool,
+    x_judge_id: Optional[str],
+    x_installation_id: Optional[str],
+    x_actor_name: Optional[str],
+    authorization: Optional[str],
+) -> None:
+    """Wpuszcza do zmiany statusu na „zatwierdzony" i z powrotem.
+
+    Starszej wersji aplikacji (bez `X-BAZA-Proel: 2`) NIE pytamy o zgodę - ten
+    sam kompromis co przy twardej blokadzie prowadzenia. Taka wersja nie umie
+    obsłużyć odmowy: porzuciłaby błąd po cichu i grała dalej ze swojego stanu,
+    więc odrzucanie jej zapisów oznaczałoby ciche rozjeżdżanie się protokołu.
+    Furtka zamyka się sama, w miarę jak flota się aktualizuje.
+    """
+    if legacy:
+        return
+
+    actor = await proel_actor(x_judge_id, x_installation_id, x_actor_name, authorization)
+    if await is_admin(actor.judge_id):
+        return
+
+    try:
+        blob = row["data_json"]
+    except (KeyError, IndexError):
+        blob = None
+    officials = merged_officials(_officials_of(state), blob)
+    if can_approve(actor, officials):
+        return
+
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "NOT_AN_APPROVER",
+            "message": (
+                "Zatwierdzenie meczu i jego cofnięcie należą do delegata, a gdy "
+                "delegata nie ma - do sędziów prowadzących. Poproś jedną z tych "
+                "osób albo administratora."
+            ),
+        },
+    )
+
+
 async def _sync_state_after_doc_write(
     match_number: str,
     state: Dict[str, Any],
@@ -914,6 +968,7 @@ async def update_proel_match(
     x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
     x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
     x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
+    authorization: Optional[str] = Header(None),
 ):
     # Cała ścieżka w JEDNEJ transakcji: blokada wiersza stanu (`FOR UPDATE`)
     # działa tylko wewnątrz transakcji, a reprojekcja musi widzieć overlay
@@ -989,6 +1044,30 @@ async def update_proel_match(
                     },
                 )
 
+            # ── Zatwierdzenie i jego cofnięcie to nie jest zwykły zapis ──
+            #
+            # Reguła „delegat, a gdy go nie ma - sędziowie prowadzący" istniała
+            # do tej pory WYŁĄCZNIE w aplikacji, gdzie sterowała widocznością
+            # przycisku i opierała się na nazwisku wpisanym w ustawieniach.
+            # Serwer przyjmował zmianę statusu od każdego, kto znał numer meczu,
+            # więc zatwierdzony protokół potrafiła odtwierdzić osoba spoza tego
+            # meczu - i nie zostawał po tym żaden ślad odmowy.
+            requested_status = (
+                _resolve_status(req.status, req.is_finished, current_status)
+                if (req.status is not None or req.is_finished is not None)
+                else current_status
+            )
+            if (requested_status == "approved") != (current_status == "approved"):
+                await _require_approver(
+                    row=row,
+                    state=state,
+                    legacy=str(x_baza_proel or "") != "2",
+                    x_judge_id=x_judge_id,
+                    x_installation_id=x_installation_id,
+                    x_actor_name=x_actor_name,
+                    authorization=authorization,
+                )
+
             projected = _reproject_blob(state, copy.deepcopy(req.data_json))
 
             to_update: dict = {"data_json": projected}
@@ -999,9 +1078,8 @@ async def update_proel_match(
                 to_update["zprp_match_id"] = incoming_id
             # status (lub stare is_finished) — jeśli cokolwiek przyszło, przelicz oba pola
             if req.status is not None or req.is_finished is not None:
-                new_status = _resolve_status(req.status, req.is_finished, current_status)
-                to_update["status"] = new_status
-                to_update["is_finished"] = _is_finished_for(new_status)
+                to_update["status"] = requested_status
+                to_update["is_finished"] = _is_finished_for(requested_status)
             # Zawsze przepisujemy updated_at na teraz. `func.now()`, nie
             # `datetime.utcnow()`: kolumna jest `DateTime(timezone=True)`, więc
             # naiwny znacznik z Pythona zapisywał się bez strefy i psuł porównania

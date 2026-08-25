@@ -17,6 +17,7 @@ bo inaczej złamalibyśmy aplikacje w terenie.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set
@@ -25,6 +26,27 @@ from fastapi import Header, HTTPException
 from sqlalchemy import select
 
 from app.proel_fields import ALL_ROLES, normalize_name
+
+#: Aktor, który NIE deklaruje numeru sędziego - konto ProEl albo samo urządzenie.
+#:
+#: Do sierpnia 2026 tożsamością mógł być wyłącznie numer sędziego z
+#: baza.zprp.pl, więc każdy, kto wszedł do ProEla kontem ProEl albo profilem
+#: lokalnym, dostawał 401 na WSZYSTKICH trasach z `Depends(proel_actor)`:
+#: liście meczów, stanie, leasingu, patchu. Aplikacja umiała tylko zapisać
+#: dokument meczu (`POST /proel/`, miękki aktor), więc awaria wyglądała jak
+#: „baza ProEl jest pusta".
+#:
+#: Prefiks jest tu po to, żeby takiego identyfikatora NIGDY nie pomylić z
+#: numerem sędziego: nie porównujemy go z rejestrem urządzeń, nie daje roli w
+#: meczu przez numer i nie wchodzi na listę adminów.
+PROEL_ACCOUNT_PREFIX = "proel:"
+DEVICE_PREFIX = "inst:"
+
+
+def is_synthetic_judge_id(value: Any) -> bool:
+    """Czy to identyfikator zastępczy, a nie numer sędziego."""
+    v = str(value or "").strip()
+    return v.startswith(PROEL_ACCOUNT_PREFIX) or v.startswith(DEVICE_PREFIX)
 
 # UWAGA: `app.db` importujemy LENIWIE, wewnątrz funkcji, które naprawdę sięgają
 # do bazy. Import modułu bazy wykonuje `metadata.create_all(engine)`, czyli
@@ -85,14 +107,99 @@ def _clean(v: Any) -> str:
     return str(v or "").strip()
 
 
+async def _load_proel_account(user_id: int) -> Optional[Dict[str, Any]]:
+    """Konto ProEl do tożsamości aktora - nazwisko i to, czy nie jest zablokowane.
+
+    Osobna funkcja, żeby dało się ją podmienić w teście: ścieżka konta kończy
+    się przed dotknięciem `push_tokens`, więc poza tym odczytem cała reguła
+    chodzi bez Postgresa.
+    """
+    from app.db import database, proel_users  # lazy — patrz nota przy imporcie
+
+    row = await database.fetch_one(
+        select(proel_users.c.id, proel_users.c.full_name, proel_users.c.is_active).where(
+            proel_users.c.id == int(user_id)
+        )
+    )
+    return dict(row) if row is not None else None
+
+
+async def account_actor(
+    authorization: Optional[str],
+    installation_id: str = "",
+    name: Optional[str] = None,
+) -> Optional[Actor]:
+    """Aktor przedstawiony TOKENEM konta ProEl.
+
+    Token jest dowodem mocniejszym niż para nagłówków - jest podpisany HMAC-iem
+    serwera - więc taki aktor jest od razu `verified` i nie przechodzi przez
+    rejestr urządzeń. Rejestr odpowiada na pytanie „czy ten telefon należy do
+    tego sędziego", a tu żadnego sędziego nie ma.
+
+    Identyfikatorem jest ZAWSZE `proel:<id konta>`, nigdy numer sędziego wpisany
+    przy zakładaniu konta: ten numer nikt nie sprawdza, a wpuszczony tutaj
+    dawałby prawa w cudzych meczach. Rola w meczu zostaje więc dopasowaniem po
+    nazwisku - dokładnie tak jak dla starszych wpisów obsady bez numerów.
+
+    `None` znaczy „ten nagłówek nic nie wnosi" (brak tokenu, token zły albo
+    wygasły, konto skasowane) i wołający idzie dalej swoją drogą.
+    """
+    from app.proel_users.tokens import _bearer, verify_access_token  # lazy
+
+    token = _bearer(authorization)
+    if not token:
+        return None
+    try:
+        uid = int(verify_access_token(token)["uid"])
+    except HTTPException:
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        account = await _load_proel_account(uid)
+    except Exception:  # noqa: BLE001 — awaria odczytu nie może blokować meczu
+        logger.warning("account_actor: nie udało się odczytać konta ProEl", exc_info=True)
+        return None
+    if account is None:
+        return None
+    if not account.get("is_active", True):
+        # Cisza byłaby tu najgorsza: konto istnieje, token jest poprawny, a
+        # użytkownik dostawałby „Brak tożsamości urządzenia" i nie wiedział, że
+        # to administrator go zablokował.
+        raise HTTPException(
+            403,
+            detail={
+                "code": "ACCOUNT_BLOCKED",
+                "message": "Konto ProEl zostało zablokowane przez administratora.",
+            },
+        )
+
+    return Actor(
+        judge_id=f"{PROEL_ACCOUNT_PREFIX}{uid}",
+        installation_id=_clean(installation_id),
+        name=header_text(name) or _clean(account.get("full_name")),
+        verified=True,
+    )
+
+
 async def proel_actor(
     x_judge_id: Optional[str] = Header(None, alias="X-Judge-Id"),
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
     x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
+    authorization: Optional[str] = Header(None),
 ) -> Actor:
     """Zależność FastAPI: kto wykonuje zapis.
 
-    Reguła weryfikacji jest celowo asymetryczna:
+    Tożsamość ma trzy postacie, w kolejności mocy:
+      • numer sędziego z baza.zprp.pl (para nagłówków, weryfikowana o rejestr
+        urządzeń),
+      • konto ProEl (token HMAC - patrz `account_actor`),
+      • samo urządzenie (`inst:<installation_id>`) - dla profilu lokalnego bez
+        numeru sędziego; nigdy nie jest zweryfikowane i nie daje nic ponad to,
+        co daje znajomość adresu API.
+
+    Reguła weryfikacji numeru sędziego jest celowo asymetryczna:
       • jest wiersz dla tego `installation_id` i zgadza się `judge_id` → verified,
       • jest wiersz, ale z INNYM `judge_id` → 401 (to realny sygnał, nie szum),
       • nie ma wiersza → przepuszczamy jako niezweryfikowanego.
@@ -104,6 +211,14 @@ async def proel_actor(
     judge_id = _clean(x_judge_id)
     installation_id = _clean(x_installation_id)
 
+    # Prawdziwy numer sędziego wygrywa: daje rolę w meczu i prawa admina,
+    # których token konta dać nie może. Token pytamy dopiero, gdy numeru nie ma
+    # albo gdy jest zastępczy.
+    if not judge_id or is_synthetic_judge_id(judge_id):
+        from_account = await account_actor(authorization, installation_id, x_actor_name)
+        if from_account is not None:
+            return from_account
+
     if not judge_id or not installation_id:
         raise HTTPException(
             401,
@@ -113,10 +228,25 @@ async def proel_actor(
             },
         )
 
-    from app.db import database, push_tokens  # lazy — patrz nota przy imporcie
+    if is_synthetic_judge_id(judge_id):
+        # Nie ma tu deklaracji numeru sędziego, więc nie ma czego porównywać z
+        # rejestrem urządzeń - a porównanie zwracałoby ACTOR_MISMATCH na każdym
+        # telefonie, na którym ktoś kiedykolwiek logował się jako sędzia.
+        return Actor(
+            judge_id=judge_id,
+            installation_id=installation_id,
+            name=header_text(x_actor_name),
+            verified=False,
+        )
 
     verified = False
     try:
+        # Import W ŚRODKU: `app/db.py` odpala `create_all` i wymaga żywego
+        # Postgresa. Obietnica niżej („awaria odczytu nie może blokować meczu")
+        # była nieprawdziwa dopóki ta linia stała nad `try` - awaria importu
+        # przewracała całe żądanie.
+        from app.db import database, push_tokens  # lazy — patrz nota przy imporcie
+
         row = await database.fetch_one(
             select(push_tokens.c.judge_id).where(
                 push_tokens.c.installation_id == installation_id
@@ -190,20 +320,104 @@ def names_match(a: Any, b: Any) -> bool:
     return ta.issubset(tb) or tb.issubset(ta)
 
 
+def _official_filled(raw: Any) -> bool:
+    """Czy ten wpis obsady w ogóle kogoś wskazuje - nazwiskiem albo numerem."""
+    if isinstance(raw, dict):
+        return bool(
+            _clean(raw.get("judgeId") or raw.get("judge_id"))
+            or _clean(raw.get("name") or raw.get("fullName"))
+        )
+    return bool(_clean(raw))
+
+
 def _crew_is_known(officials: Optional[Dict[str, Any]]) -> bool:
     """Czy o obsadzie tego meczu wiemy cokolwiek."""
     if not isinstance(officials, dict):
         return False
+    return any(_official_filled(officials.get(key)) for key in _ROLE_KEYS)
+
+
+def merged_officials(
+    state_officials: Optional[Dict[str, Any]], data_json: Any
+) -> Dict[str, Any]:
+    """Obsada z wiersza stanu, uzupełniona tym, co wie zapisany protokół.
+
+    Wiersz stanu jest źródłem lepszym (ma numery sędziów prosto z ZPRP), ale
+    bywa pusty albo częściowy - zakłada go `/ensure`, którego ekran finalizacji
+    nie woła. Wpis wypełniony wygrywa z pustym, niezależnie od źródła.
+    """
+    out = dict(officials_from_blob(data_json))
+    for key, value in (state_officials or {}).items():
+        if _official_filled(value):
+            out[key] = value
+    return out
+
+
+def officials_from_blob(data_json: Any) -> Dict[str, Any]:
+    """Obsada wyczytana z zapisanego protokołu.
+
+    Wiersz stanu współpracy (`proel_match_state.guard_json`) zna obsadę tylko
+    wtedy, gdy ktoś zawołał `/ensure` - a robi to ekran szczegółów meczu, nie
+    ekran finalizacji. Bez tego odczytu reguła „kto może zatwierdzić" trafiałaby
+    na pustą obsadę i przepuszczała każdego, czyli nie robiła nic.
+    """
+    if isinstance(data_json, str):
+        # Starsze wiersze bywają zapisane jako tekst JSON - klient też to
+        # toleruje (`parseMatchBlob`), więc i my tolerujemy.
+        try:
+            data_json = json.loads(data_json)
+        except Exception:  # noqa: BLE001
+            return {}
+    cfg = ((data_json or {}) if isinstance(data_json, dict) else {}).get("matchConfig")
+    cfg = cfg if isinstance(cfg, dict) else {}
+    extras = cfg.get("extras") if isinstance(cfg.get("extras"), dict) else {}
+    from_extras = extras.get("officials") if isinstance(extras.get("officials"), dict) else {}
+
+    out: Dict[str, Any] = {}
     for key in _ROLE_KEYS:
-        raw = officials.get(key)
+        raw = from_extras.get(key)
+        name = ""
+        judge_id = ""
         if isinstance(raw, dict):
-            if _clean(raw.get("judgeId") or raw.get("judge_id")) or _clean(
-                raw.get("name") or raw.get("fullName")
-            ):
-                return True
-        elif _clean(raw):
-            return True
-    return False
+            name = _clean(raw.get("fullName") or raw.get("name"))
+            judge_id = _clean(raw.get("judgeId") or raw.get("judge_id"))
+        else:
+            name = _clean(raw)
+        # Starszy zapis trzyma same nazwiska wprost w `matchConfig`.
+        if not name:
+            name = _clean(cfg.get(key))
+        if name or judge_id:
+            out[key] = {"name": name, "judgeId": judge_id}
+    return out
+
+
+def approve_roles(officials: Optional[Dict[str, Any]]) -> Set[str]:
+    """Kto zamyka protokół i kto może go z powrotem otworzyć.
+
+    Port reguły, którą ekran finalizacji stosuje od początku: gdy w meczu jest
+    delegat, decyzja należy do niego; gdy go nie ma - do sędziów prowadzących.
+    Stolikowi zostają poza tym zbiorem świadomie - protokół zamyka ten, kto go
+    podpisuje.
+
+    Do tej pory reguła istniała WYŁĄCZNIE w aplikacji i sterowała samą
+    widocznością przycisku, a `PUT /proel/{numer}` przyjmował zmianę statusu od
+    każdego, kto znał numer meczu. Zatwierdzony protokół potrafił więc odtwierdzić
+    ktokolwiek - także osoba spoza tego meczu.
+    """
+    if isinstance(officials, dict) and _official_filled(officials.get("delegate")):
+        return {"delegate"}
+    return {"referee1", "referee2"}
+
+
+def can_approve(actor: Actor, officials: Optional[Dict[str, Any]]) -> bool:
+    """Czy ten aktor może zatwierdzić mecz albo cofnąć zatwierdzenie.
+
+    OBSADA NIEZNANA przepuszcza wszystkich - z tego samego powodu, dla którego
+    robi to `roles_for`: mecz stolikowy założony ręcznie nigdy nie będzie miał
+    obsady z ZPRP, a musi dać się zamknąć.
+    """
+    roles = roles_for(actor, officials)
+    return bool(roles & approve_roles(officials))
 
 
 def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
@@ -243,9 +457,16 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
         if oid:
             if oid == actor.judge_id:
                 out.add(key)
-            # Numer jest rozstrzygający: gdy jest i się nie zgadza, nie
-            # ratujemy roli zbieżnością nazwisk (dwóch Kowalskich na mecz).
-            continue
+                continue
+            # Numer jest rozstrzygający: gdy jest po OBU stronach i się nie
+            # zgadza, nie ratujemy roli zbieżnością nazwisk (dwóch Kowalskich
+            # na mecz). Aktor bez numeru - konto ProEl, profil lokalny - nie ma
+            # czego porównywać, więc dla niego zostaje nazwisko, dokładnie tak
+            # jak dla starszych wpisów obsady zapisanych bez numerów. Inaczej
+            # sędzia prowadzący protokół kontem ProEl nie miałby w swoim własnym
+            # meczu żadnej roli.
+            if actor.judge_id and not is_synthetic_judge_id(actor.judge_id):
+                continue
 
         if actor.name and names_match(actor.name, oname):
             out.add(key)

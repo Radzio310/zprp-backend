@@ -32,7 +32,13 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 
-from app.proel_auth import Actor, header_text, is_admin, proel_actor
+from app.proel_auth import (
+    Actor,
+    header_text,
+    is_admin,
+    is_synthetic_judge_id,
+    proel_actor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +273,9 @@ async def soft_actor(
         installation_id=install,
         name=header_text(x_actor_name),
     )
-    if not judge_id or not install:
+    # `proel:` / `inst:` to nie numer sędziego - rejestr urządzeń nie ma go z
+    # czym zestawić, a zapytanie i tak skończyłoby się na `verified = False`.
+    if not judge_id or not install or is_synthetic_judge_id(judge_id):
         return actor
 
     try:
