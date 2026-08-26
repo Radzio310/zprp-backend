@@ -304,6 +304,14 @@ _POST_EXTRAS = {
     "detailedRefereeNotes": "detailedRefereeNotes",
     "extraReport": "extraReport",
     "notesText": "detailedRefereeNotesText",
+    # Znacznik „wynik skrócony jest w bazie związku".
+    #
+    # Ten sam kłopot co niżej, tylko starszy: ślad po wysyłce leżał wyłącznie w
+    # pliku na telefonie, więc drugi telefon - i to samo konto ProEl po
+    # przelogowaniu - pokazywał przystanek „Wyślij wynik skrócony" jako
+    # nietknięty. API związku nie oddaje informacji „czy już zapisano", a
+    # ponowna wysyłka jest wprawdzie bezpieczna, tylko zupełnie zbędna.
+    "shortResultSent": "shortResultSent",
     # Znacznik „pełne dane meczu poszły do bazy związku".
     #
     # Wartość jest nieistotna (True) - całą treść niesie sam wpis overlaya:
