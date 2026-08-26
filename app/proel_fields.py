@@ -133,7 +133,14 @@ def merge_lww(existing: Optional[dict], incoming: Any, force: bool) -> Any:
 
 
 def merge_write_once(existing: Optional[dict], incoming: Any, force: bool) -> Any:
-    """Podpisu nie nadpisujemy po cichu — to dokument, nie pole formularza."""
+    """Podpisu nie nadpisujemy po cichu — to dokument, nie pole formularza.
+
+    Reguła dotyczy WYŁĄCZNIE podpisów. Objęte nią były przez pomyłkę także
+    nazwisko i miejscowość obsady, bo wszystkie trzy liście siedziały w jednej
+    specyfikacji ścieżki. Skutek: dopisany raz delegat nie dawał się już ani
+    poprawić, ani skasować, a sędzia dostawał przy tym komunikat o podpisie -
+    o którym nie było mowy, bo poprawiał nazwisko.
+    """
     if existing is None or force:
         return incoming
     prev = existing.get("v")
@@ -344,14 +351,29 @@ def _build_registry() -> List[FieldSpec]:
             project=project_team_signature,
         ),
         FieldSpec(
-            name="official",
+            name="official_signature",
             pattern=re.compile(
                 r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate)"
-                r"\.(?P<leaf>fullName|city|signature)$"
+                r"\.(?P<leaf>signature)$"
             ),
             phases=ALL_PHASES,
             roles=ALL_ROLES,
             merge=merge_write_once,
+            project=project_official,
+        ),
+        FieldSpec(
+            name="official",
+            pattern=re.compile(
+                r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate)"
+                r"\.(?P<leaf>fullName|city)$"
+            ),
+            phases=ALL_PHASES,
+            roles=ALL_ROLES,
+            # Nazwisko i miejscowość to pola formularza: wpisuje się je, poprawia
+            # i kasuje. Zapis jednokrotny (ten od podpisów) zamykał je po
+            # pierwszym wpisaniu - delegata dopisanego w hali nie dało się już
+            # usunąć, a mecz zostawał „meczem z delegatem" na zawsze.
+            merge=merge_lww,
             project=project_official,
         ),
         FieldSpec(

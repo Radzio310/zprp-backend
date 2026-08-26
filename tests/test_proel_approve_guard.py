@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+from typing import Any
 
 from app.proel_auth import (
     Actor,
@@ -26,6 +27,7 @@ from app.proel_auth import (
     merged_officials,
     officials_from_blob,
     officials_from_config,
+    officials_with_overlay,
 )
 
 PROEL_PY = pathlib.Path(__file__).resolve().parents[1] / "app" / "proel.py"
@@ -242,6 +244,73 @@ def test_sama_konfiguracja_wystarczy():
     """Trasa stanu czyta z bazy SAMĄ `matchConfig`, nie cały protokół."""
     cfg = {"extras": {"officials": {"referee1": {"fullName": "KOWALSKI Jan"}}}}
     assert officials_from_config(cfg)["referee1"]["name"] == "KOWALSKI Jan"
+
+
+# ─────────────── overlay: dopisany i SKASOWANY delegat ───────────────
+
+def overlay(name: Any, **kw) -> dict:
+    """Wpis overlaya w kształcie, jaki zapisuje `/proel/patch`."""
+    return {"official.delegate.fullName": {"v": name, "at": "2026-08-26T07:10:00", **kw}}
+
+
+def test_skasowane_nazwisko_zdejmuje_role():
+    """Sędzia kasuje delegata w ekranie finalizacji i musi móc zatwierdzić.
+
+    Guard z `/ensure` celowo nie daje się wyczyścić pustą wartością, więc sam
+    twierdziłby, że delegat dalej jest - a pole na ekranie byłoby puste.
+    """
+    crew = officials_with_overlay(CREW_WITH_DELEGATE, overlay(""))
+    assert "delegate" not in crew
+    assert approve_roles(crew) == {"referee1", "referee2"}
+    assert can_approve(judge("111"), crew)
+
+
+def test_placeholder_w_overlayu_tez_zdejmuje_role():
+    crew = officials_with_overlay(CREW_WITH_DELEGATE, overlay("--- ---"))
+    assert "delegate" not in crew
+
+
+def test_dopisany_delegat_przejmuje_decyzje():
+    crew = officials_with_overlay(CREW_NO_DELEGATE, overlay("LEWANDOWSKI Marek"))
+    assert approve_roles(crew) == {"delegate"}
+    assert can_approve(judge("0", "LEWANDOWSKI Marek"), crew)
+    assert not can_approve(judge("111"), crew)
+
+
+def test_dopisane_nazwisko_nie_dziedziczy_numeru_po_poprzedniku():
+    """Numer został po człowieku, którego w tym meczu nie ma."""
+    crew = officials_with_overlay(CREW_WITH_DELEGATE, overlay("KOWALCZYK Ewa"))
+    assert crew["delegate"]["name"] == "KOWALCZYK Ewa"
+    assert not crew["delegate"].get("judgeId")
+
+
+def test_poprawka_literowki_numeru_nie_gubi():
+    """To wciąż ten sam człowiek - numer jest przy nim najmocniejszym sygnałem."""
+    crew = officials_with_overlay(CREW_WITH_DELEGATE, overlay("LEWANDOWSKI"))
+    assert crew["delegate"]["judgeId"] == "444"
+
+
+def test_wpis_uniewazniony_jest_pomijany():
+    crew = officials_with_overlay(
+        CREW_WITH_DELEGATE, overlay("", superseded_at="2026-08-26T07:00:00")
+    )
+    assert crew["delegate"]["name"] == "LEWANDOWSKI Marek"
+
+
+def test_obce_sciezki_overlaya_nie_ruszaja_obsady():
+    crew = officials_with_overlay(
+        CREW_WITH_DELEGATE,
+        {"post.spectatorsCount": {"v": 120}, "official.delegate.signature": {"v": "data:..."}},
+    )
+    assert crew == CREW_WITH_DELEGATE
+
+
+def test_overlay_nakladany_jest_ZAWSZE():
+    """Nie tylko wtedy, gdy wiersz stanu nie zna obsady - inaczej skasowanie
+    delegata działałoby wyłącznie na meczach bez guardu."""
+    code = _function_source("_approval_officials")
+    assert "officials_with_overlay" in code
+    assert code.rstrip().endswith("return officials_with_overlay(officials, _overlay_of(state))")
 
 
 # ─────────────────────── lekki odczyt z bazy ───────────────────────

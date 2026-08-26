@@ -14,6 +14,8 @@ from app.proel_fields import (
     PathRejected,
     UnknownPath,
     live_signal,
+    merge_lww,
+    merge_write_once,
     normalize_name,
     parse_path,
     project,
@@ -47,9 +49,22 @@ def test_parse_path_exam():
 
 
 def test_parse_path_official():
+    """Podpis i nazwisko to DWIE różne specyfikacje - i o to tu chodzi.
+
+    Dopóki siedziały w jednej, nazwisko obsady dziedziczyło po podpisie zapis
+    jednokrotny: dopisanego delegata nie dało się już ani poprawić, ani
+    skasować, a odmowa mówiła o podpisie, którego nikt nie dotykał.
+    """
     spec, params = parse_path("official.delegate.signature")
-    assert spec.name == "official"
+    assert spec.name == "official_signature"
+    assert spec.merge is merge_write_once
     assert params == {"role": "delegate", "leaf": "signature"}
+
+    for leaf in ("fullName", "city"):
+        spec, params = parse_path(f"official.delegate.{leaf}")
+        assert spec.name == "official"
+        assert spec.merge is merge_lww
+        assert params == {"role": "delegate", "leaf": leaf}
 
 
 def test_parse_path_companion():

@@ -440,6 +440,51 @@ def officials_from_blob(data_json: Any) -> Dict[str, Any]:
     return officials_from_config(_as_dict(data_json).get("matchConfig"))
 
 
+#: Ścieżka rejestru, którą ekran finalizacji zapisuje nazwisko osoby funkcyjnej.
+_OFFICIAL_NAME_PATH = re.compile(
+    r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate)\.fullName$"
+)
+
+
+def officials_with_overlay(
+    officials: Optional[Dict[str, Any]], overlay: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Obsada po nałożeniu overlaya - to on wie najwięcej i najświeżej.
+
+    Nazwisko wpisane albo SKASOWANE w ekranie finalizacji leci ścieżką rejestru
+    i ląduje w overlayu. Guard z `/ensure` zostaje wtedy nieaktualny i - z
+    rozmysłu - nie daje się wyczyścić pustą wartością (`_merge_official`), więc
+    sam guard twierdziłby, że delegat dalej jest. Sędzia kasował delegata,
+    patrzył na puste pole i dalej nie mógł zatwierdzić meczu.
+
+    Skasowane nazwisko usuwa CAŁY wpis, razem z numerem: numer został po
+    człowieku, którego w tym meczu nie ma. Protokół mówi „delegata nie było" i
+    to jest w tej sprawie zdanie rozstrzygające.
+    """
+    out: Dict[str, Any] = dict(officials or {})
+    for path, entry in (overlay or {}).items():
+        match = _OFFICIAL_NAME_PATH.match(str(path or ""))
+        if not match or not isinstance(entry, dict) or entry.get("superseded_at"):
+            continue
+        role = match.group("role")
+        name = clean_person_name(entry.get("v"))
+        if not name:
+            out.pop(role, None)
+            continue
+        current = out.get(role)
+        current = dict(current) if isinstance(current, dict) else {}
+        previous = official_name(current)
+        current["name"] = name
+        # Numer należy do nazwiska, z którym przyjechał. Gdy w polu jest już
+        # KTO INNY, numer poprzednika nie ma prawa dawać mu roli w tym meczu -
+        # a przy poprawce literówki w tym samym nazwisku zostaje.
+        if previous and not names_match(previous, name):
+            current.pop("judgeId", None)
+            current.pop("judge_id", None)
+        out[role] = current
+    return out
+
+
 def approve_roles(officials: Optional[Dict[str, Any]]) -> Set[str]:
     """Kto zamyka protokół i kto może go z powrotem otworzyć.
 

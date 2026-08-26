@@ -18,6 +18,7 @@ from app.proel_auth import (
     merge_guard,
     merged_officials,
     officials_from_config,
+    officials_with_overlay,
     proel_actor,
     roles_for,
 )
@@ -202,13 +203,14 @@ async def _approval_officials(
     możliwych odpowiedzi, bo obie strony brzmią pewnie i przeczą sobie.
 
     Protokół czytamy TYLKO wtedy, gdy wiersz stanu nie zna obsady - czyli gdy
-    nikt nie zawołał `/ensure` z guardem.
+    nikt nie zawołał `/ensure` z guardem. Overlay nakładamy ZAWSZE i na końcu:
+    to w nim ląduje nazwisko dopisane albo skasowane w ekranie finalizacji.
     """
     officials = _officials_of(state)
-    if crew_is_known(officials):
-        return officials
-    from_doc = officials_from_config(await _fetch_doc_config(match_number))
-    return merged_officials(officials, from_doc)
+    if not crew_is_known(officials):
+        from_doc = officials_from_config(await _fetch_doc_config(match_number))
+        officials = merged_officials(officials, from_doc)
+    return officials_with_overlay(officials, _overlay_of(state))
 
 
 async def _may_approve(
