@@ -22,6 +22,7 @@ from .models import (
     PushScheduleBulkRequest,
     PushClearRequest,
 )
+from .token_cleanup import invalidate_rejected_fcm_token
 
 router = APIRouter(prefix="/push", tags=["push"])
 
@@ -52,7 +53,11 @@ async def send_push_to_judges(
         return 0
     try:
         rows = await database.fetch_all(
-            select(push_tokens.c.token, push_tokens.c.token_type).where(
+            select(
+                push_tokens.c.installation_id,
+                push_tokens.c.token,
+                push_tokens.c.token_type,
+            ).where(
                 push_tokens.c.judge_id.in_(ids)
             )
         )
@@ -68,7 +73,12 @@ async def send_push_to_judges(
         try:
             await send_fcm_message(row["token"], title, body, data=data or {})
             sent += 1
-        except Exception:
+        except Exception as exc:
+            await invalidate_rejected_fcm_token(
+                row["installation_id"],
+                row["token"],
+                exc,
+            )
             # Wygasły token jednego urządzenia nie może zablokować reszty.
             continue
     return sent

@@ -11,6 +11,78 @@ _access_token_cache: Dict[str, Any] = {
     "exp": 0,
 }
 
+
+class FcmSendError(RuntimeError):
+    """Ustrukturyzowany błąd HTTP v1 bez umieszczania tokenu w logach."""
+
+    def __init__(
+        self,
+        *,
+        http_status: int,
+        status: str = "",
+        error_code: str = "",
+        message: str = "",
+    ) -> None:
+        self.http_status = int(http_status)
+        self.status = str(status or "").strip().upper()
+        self.error_code = str(error_code or "").strip().upper()
+        self.fcm_message = str(message or "").strip()
+        labels = " ".join(part for part in (self.status, self.error_code) if part)
+        suffix = f" {labels}" if labels else ""
+        detail = f": {self.fcm_message[:300]}" if self.fcm_message else ""
+        super().__init__(f"FCM error {self.http_status}{suffix}{detail}")
+
+
+def build_fcm_send_error(http_status: int, response_body: str) -> FcmSendError:
+    """Odczytuje oficjalny `google.firebase.fcm.v1.FcmError` z odpowiedzi FCM."""
+
+    status = ""
+    error_code = ""
+    message = ""
+    try:
+        payload = json.loads(response_body)
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            status = str(error.get("status") or "")
+            message = str(error.get("message") or "")
+            details = error.get("details")
+            if isinstance(details, list):
+                for detail in details:
+                    if not isinstance(detail, dict):
+                        continue
+                    candidate = str(detail.get("errorCode") or "").strip()
+                    if candidate:
+                        error_code = candidate
+                        break
+    except (TypeError, ValueError, json.JSONDecodeError):
+        message = str(response_body or "")[:300]
+
+    return FcmSendError(
+        http_status=http_status,
+        status=status,
+        error_code=error_code,
+        message=message,
+    )
+
+
+def is_permanently_invalid_fcm_token(error: BaseException) -> bool:
+    """True wyłącznie, gdy Firebase jednoznacznie unieważnił token urządzenia.
+
+    Samo HTTP 400/404 nie wystarcza: może oznaczać błąd payloadu albo projektu.
+    Usuwanie tokenów w takim przypadku mogłoby wyłączyć wszystkie urządzenia.
+    """
+
+    if not isinstance(error, FcmSendError):
+        return False
+    if error.error_code == "UNREGISTERED":
+        return True
+    message = error.fcm_message.lower()
+    return (
+        error.error_code == "INVALID_ARGUMENT"
+        and "registration token" in message
+        and ("not a valid" in message or "invalid" in message)
+    )
+
 def _load_sa_info() -> Dict[str, Any]:
     b64 = os.getenv("FIREBASE_SA_B64", "")
     if not b64:
@@ -87,4 +159,4 @@ async def send_fcm_message(
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code >= 400:
-            raise RuntimeError(f"FCM error {resp.status_code}: {resp.text[:400]}")
+            raise build_fcm_send_error(resp.status_code, resp.text)

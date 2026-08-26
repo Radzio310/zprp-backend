@@ -6,6 +6,7 @@ from sqlalchemy import func, select, update
 
 from app.db import database, province_match_notifications, push_tokens, push_schedules
 from .fcm import send_fcm_message
+from .token_cleanup import invalidate_rejected_fcm_token
 
 
 logger = logging.getLogger("app.push.scheduler")
@@ -195,7 +196,12 @@ async def run_push_scheduler():
                     await send_fcm_message(token, title, body, data=data_json)
                     await _mark_sent(sid)
                 except Exception as e:
-                    final = attempts >= max_attempts
+                    invalidated = await invalidate_rejected_fcm_token(
+                        installation_id,
+                        token,
+                        e,
+                    )
+                    final = invalidated or attempts >= max_attempts
                     await _mark_failed(sid, attempts, f"Send error: {str(e)}", final=final)
 
             match_notifications = await _fetch_pending_match_notifications(limit=50)
@@ -231,11 +237,16 @@ async def run_push_scheduler():
                     await _finish_match_notification(notification_id, attempts, None, True)
                     logger.info("Match push notification %s sent", notification_id)
                 except Exception as exc:
+                    invalidated = await invalidate_rejected_fcm_token(
+                        row["installation_id"],
+                        _stripped(token_row["token"]),
+                        exc,
+                    )
                     await _finish_match_notification(
                         notification_id,
                         attempts,
                         f"Send error: {exc}",
-                        attempts >= max_attempts,
+                        invalidated or attempts >= max_attempts,
                     )
                     logger.warning(
                         "Match push notification %s failed on attempt %s: %s",
