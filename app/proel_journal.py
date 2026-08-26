@@ -88,6 +88,7 @@ _ROLE_NAMES: Dict[str, str] = {
     "secretary": "sekretarz",
     "timekeeper": "mierzący czas",
     "delegate": "delegat",
+    "delegate2": "delegat 2",
 }
 
 _LEAF_NAMES: Dict[str, str] = {
@@ -117,6 +118,7 @@ _CFG_NAMES: Dict[str, str] = {
     "referee1": "sędzia 1",
     "referee2": "sędzia 2",
     "delegate": "delegat",
+    "delegate2": "delegat 2",
     "timekeeper": "mierzący czas",
     "secretary": "sekretarz",
     "venueAddress": "adres hali",

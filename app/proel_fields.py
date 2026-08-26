@@ -334,6 +334,7 @@ _CFG_FIELDS = {
     "referee1": "referee1",
     "referee2": "referee2",
     "delegate": "delegate",
+    "delegate2": "delegate2",
     "timekeeper": "timekeeper",
     "secretary": "secretary",
     "venueAddress": "venueAddress",
@@ -361,7 +362,7 @@ def _build_registry() -> List[FieldSpec]:
         FieldSpec(
             name="official_signature",
             pattern=re.compile(
-                r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate)"
+                r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate|delegate2)"
                 r"\.(?P<leaf>signature)$"
             ),
             phases=ALL_PHASES,
@@ -372,7 +373,7 @@ def _build_registry() -> List[FieldSpec]:
         FieldSpec(
             name="official",
             pattern=re.compile(
-                r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate)"
+                r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate|delegate2)"
                 r"\.(?P<leaf>fullName|city)$"
             ),
             phases=ALL_PHASES,

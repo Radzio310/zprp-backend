@@ -301,7 +301,14 @@ async def is_admin(judge_id: str) -> bool:
 
 # ─────────────────────────── role w meczu ───────────────────────────
 
-_ROLE_KEYS = ("referee1", "referee2", "secretary", "timekeeper", "delegate")
+_ROLE_KEYS = (
+    "referee1",
+    "referee2",
+    "secretary",
+    "timekeeper",
+    "delegate",
+    "delegate2",
+)
 
 
 def _tokens(s: Any) -> Set[str]:
@@ -442,7 +449,7 @@ def officials_from_blob(data_json: Any) -> Dict[str, Any]:
 
 #: Ścieżka rejestru, którą ekran finalizacji zapisuje nazwisko osoby funkcyjnej.
 _OFFICIAL_NAME_PATH = re.compile(
-    r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate)\.fullName$"
+    r"^official\.(?P<role>referee1|referee2|secretary|timekeeper|delegate|delegate2)\.fullName$"
 )
 
 
@@ -498,7 +505,9 @@ def approve_roles(officials: Optional[Dict[str, Any]]) -> Set[str]:
     każdego, kto znał numer meczu. Zatwierdzony protokół potrafił więc odtwierdzić
     ktokolwiek - także osoba spoza tego meczu.
     """
-    if isinstance(officials, dict) and _official_filled(officials.get("delegate")):
+    if isinstance(officials, dict) and any(
+        _official_filled(officials.get(key)) for key in ("delegate", "delegate2")
+    ):
         return {"delegate"}
     return {"referee1", "referee2"}
 
@@ -548,7 +557,7 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
 
         if oid:
             if oid == actor.judge_id:
-                out.add(key)
+                out.add("delegate" if key == "delegate2" else key)
                 continue
             # Numer jest rozstrzygający: gdy jest po OBU stronach i się nie
             # zgadza, nie ratujemy roli zbieżnością nazwisk (dwóch Kowalskich
@@ -561,7 +570,7 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
                 continue
 
         if actor.name and names_match(actor.name, oname):
-            out.add(key)
+            out.add("delegate" if key == "delegate2" else key)
 
     return out & ALL_ROLES
 

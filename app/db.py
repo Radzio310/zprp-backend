@@ -158,6 +158,27 @@ admin_settings = Table(
     Column("allowed_admins", ARRAY(String), nullable=False, default=[]),
 )
 
+# 10b) Wydarzenie szkoleniowe (kursokonferencja)
+#
+# Jeden wiersz na całą tabelę. JSONB, a nie kolumny, bo to USTAWIENIE -
+# kształt będzie się jeszcze zmieniał, a migracja przy każdym nowym polu
+# byłaby kosztem bez zysku. Wybieramy zawsze najnowszy wiersz, więc
+# wersjonowanie dałoby się dopisać później samym `id`.
+training_event = Table(
+    "training_event",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("updated_by", String, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
 # 11) Zgłoszenia od userów
 user_reports = Table(
   "user_reports", metadata,
@@ -2064,6 +2085,14 @@ protocol_audit = Table(
     Column("signature", Text, nullable=True),
     Column("app_version", String, nullable=True),
     Column("client_ip", String, nullable=True),
+    #: Protokół z ćwiczenia na kursokonferencji.
+    #:
+    #: Wpis POWSTAJE, tak jak przy prawdziwym meczu - inaczej sto protokołów
+    #: wygenerowanych jednego dnia nie zostawiłoby żadnego śladu, a dziennik ma
+    #: odpowiadać na pytanie „kto to zrobił" także wtedy. Różni się tym, że
+    #: panel administratora domyślnie go odfiltrowuje: między prawdziwymi
+    #: protokołami ćwiczenia byłyby szumem.
+    Column("training", Boolean, nullable=False, server_default=text("false")),
     Column(
         "created_at",
         DateTime(timezone=True),

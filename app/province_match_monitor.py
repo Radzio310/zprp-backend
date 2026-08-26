@@ -153,6 +153,7 @@ FINGERPRINT_FIELDS: Sequence[str] = (
     "NrSedzia_sekretarz_nazwisko",
     "NrSedzia_czas_nazwisko",
     "NrSedzia_delegat_nazwisko",
+    "NrSedzia_delegat2_nazwisko",
     "delegate_note",
     "Hala_nazwa",
     "Hala_miasto",
@@ -191,6 +192,7 @@ LIGHT_FIELDS: Sequence[str] = (
     "NrSedzia_sekretarz_nazwisko",
     "NrSedzia_czas_nazwisko",
     "NrSedzia_delegat_nazwisko",
+    "NrSedzia_delegat2_nazwisko",
     "delegate_note",
     "Hala_nazwa",
     "Hala_miasto",
@@ -245,6 +247,7 @@ def _private_to_state(match: Dict[str, Any]) -> Dict[str, Any]:
         "NrSedzia_sekretarz_nazwisko": _str(officials.get("secretary")),
         "NrSedzia_czas_nazwisko": _str(officials.get("timekeeper")),
         "NrSedzia_delegat_nazwisko": _str(officials.get("delegate")),
+        "NrSedzia_delegat2_nazwisko": _str(officials.get("delegate2")),
         "delegate_note": _str(match.get("delegate_note")),
         "Hala_nazwa": _str(venue.get("name")),
         "Hala_miasto": _str(venue.get("city")),
@@ -342,6 +345,7 @@ def build_change_events(old: Dict[str, Any], new: Dict[str, Any]) -> List[Dict[s
         ("NrSedzia_sekretarz_nazwisko", "sędziego sekretarza"),
         ("NrSedzia_czas_nazwisko", "sędziego mierzącego czas"),
         ("NrSedzia_delegat_nazwisko", "delegata"),
+        ("NrSedzia_delegat2_nazwisko", "drugiego delegata"),
     )
     for field, label in role_fields:
         if _changed(old, new, field):
@@ -728,7 +732,10 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
                 old_approved_needs_assessment = bool(
                     old
                     and old["approved"]
-                    and _str(old_state.get("NrSedzia_delegat_nazwisko"))
+                    and (
+                        _str(old_state.get("NrSedzia_delegat_nazwisko"))
+                        or _str(old_state.get("NrSedzia_delegat2_nazwisko"))
+                    )
                     and not _str(old_state.get("delegate_note"))
                 )
                 if not old_approved_needs_assessment and not is_eligible_for_refresh(

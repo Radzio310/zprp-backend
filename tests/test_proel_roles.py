@@ -72,6 +72,14 @@ def test_falls_back_to_name_when_number_missing():
     assert roles_for(actor(), officials) == {"delegate"}
 
 
+def test_drugi_delegat_ma_te_sama_logiczna_role():
+    officials = {
+        "delegate": {"name": "NOWAK Piotr", "judgeId": "111"},
+        "delegate2": {"name": "WITKOWICZ Radosław", "judgeId": "5124"},
+    }
+    assert roles_for(actor(), officials) == {"delegate"}
+
+
 def test_accepts_legacy_flat_string_officials():
     officials = {"referee2": "WITKOWICZ Radosław"}
     assert roles_for(actor(), officials) == {"referee2"}

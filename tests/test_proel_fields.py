@@ -66,6 +66,14 @@ def test_parse_path_official():
         assert spec.merge is merge_lww
         assert params == {"role": "delegate", "leaf": leaf}
 
+    spec, params = parse_path("official.delegate2.signature")
+    assert spec.name == "official_signature"
+    assert params == {"role": "delegate2", "leaf": "signature"}
+
+    spec, params = parse_path("official.delegate2.city")
+    assert spec.name == "official"
+    assert params == {"role": "delegate2", "leaf": "city"}
+
 
 def test_parse_path_companion():
     spec, params = parse_path("companion.guest.C.license")
@@ -245,6 +253,23 @@ def test_official_signature_projection():
         blob["matchConfig"]["extras"]["officials"]["delegate"]["signature"]
         == "/static/d.png"
     )
+
+
+def test_second_delegate_projection():
+    blob = {"matchConfig": {}}
+    project(
+        {
+            "official.delegate2.fullName": entry("ZIELIŃSKA Ewa"),
+            "official.delegate2.city": entry("Kielce"),
+            "official.delegate2.signature": entry("/static/d2.png"),
+        },
+        blob,
+    )
+    assert blob["matchConfig"]["extras"]["officials"]["delegate2"] == {
+        "fullName": "ZIELIŃSKA Ewa",
+        "city": "Kielce",
+        "signature": "/static/d2.png",
+    }
 
 
 def test_post_field_projection():

@@ -41,6 +41,10 @@ CREW_WITH_DELEGATE = {
 CREW_NO_DELEGATE = {
     key: value for key, value in CREW_WITH_DELEGATE.items() if key != "delegate"
 }
+CREW_WITH_TWO_DELEGATES = dict(
+    CREW_WITH_DELEGATE,
+    delegate2={"name": "ZIELIŃSKA Ewa", "judgeId": "555"},
+)
 
 
 def judge(number: str, name: str = "") -> Actor:
@@ -70,6 +74,12 @@ def test_pusty_wpis_delegata_to_brak_delegata():
 
 def test_delegat_zatwierdza():
     assert can_approve(judge("444"), CREW_WITH_DELEGATE)
+
+
+def test_obaj_delegaci_moga_zatwierdzic_ten_sam_mecz():
+    assert approve_roles(CREW_WITH_TWO_DELEGATES) == {"delegate"}
+    assert can_approve(judge("444"), CREW_WITH_TWO_DELEGATES)
+    assert can_approve(judge("555"), CREW_WITH_TWO_DELEGATES)
 
 
 def test_sedzia_prowadzacy_NIE_zatwierdza_gdy_jest_delegat():

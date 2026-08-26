@@ -2127,6 +2127,17 @@ def _safe_int(v: Any, default: int = 0) -> int:
 
 def _get_match_core(data_json: Dict[str, Any]) -> Dict[str, Any]:
     mc = data_json.get("matchConfig") or {}
+    officials = ((mc.get("extras") or {}).get("officials") or {})
+
+    def official_name(key: str) -> str:
+        flat = str(mc.get(key) or "").strip()
+        if flat:
+            return flat
+        person = officials.get(key) or {}
+        if isinstance(person, dict):
+            return str(person.get("fullName") or person.get("name") or "").strip()
+        return str(person or "").strip()
+
     return {
         "matchNumber": (mc.get("matchNumber") or "").strip(),
         "hostName": (mc.get("hostTeamName") or "").strip(),
@@ -2141,17 +2152,37 @@ def _get_match_core(data_json: Dict[str, Any]) -> Dict[str, Any]:
         "venueAddress": (mc.get("venueAddress") or "").strip(),
         # `Hala_miasto` z ZPRP - miejscowość do nagłówka strony uwag.
         "venueCity": (mc.get("venueCity") or "").strip(),
-        "referee1": (mc.get("referee1") or "").strip(),
-        "referee2": (mc.get("referee2") or "").strip(),
-        "delegate": (mc.get("delegate") or "").strip(),
-        "timekeeper": (mc.get("timekeeper") or "").strip(),
-        "secretary": (mc.get("secretary") or "").strip(),
+        "referee1": official_name("referee1"),
+        "referee2": official_name("referee2"),
+        "delegate": official_name("delegate"),
+        "delegate2": official_name("delegate2"),
+        "timekeeper": official_name("timekeeper"),
+        "secretary": official_name("secretary"),
         "hostPlayerCards": list(mc.get("hostPlayerCards") or []),
         "guestPlayerCards": list(mc.get("guestPlayerCards") or []),
         "hostCompanions": list(mc.get("hostCompanions") or []),
         "guestCompanions": list(mc.get("guestCompanions") or []),
 
     }
+
+
+def _protocol_template_name(core: Dict[str, Any]) -> str:
+    return (
+        "protocol_template_2.xlsx"
+        if str(core.get("delegate2") or "").strip()
+        else "protocol_template.xlsx"
+    )
+
+
+def _configure_protocol_page(ws_raw, *, has_second_delegate: bool) -> None:
+    if not has_second_delegate:
+        return
+    # Oryginalne 71 wierszy przy 90% wypełnia A4 co do milimetra. Szablon z
+    # drugim delegatem ma 72 wiersze, dlatego schodzimy o dwa punkty skali.
+    # Zachowuje to jedną stronę A4 bez ruszania szerokości, scaleń i podpisów.
+    ws_raw.page_setup.paperSize = 9  # A4
+    ws_raw.page_setup.orientation = "portrait"
+    ws_raw.page_setup.scale = 88
 
 
 def _place_timeouts(ws, *, team_timeouts: Dict[str, Any], half_ms: int, is_host: bool) -> None:
@@ -4560,7 +4591,12 @@ FITTED_TEXT_CELLS: Tuple[str, ...] = (
 
 def _apply_fitted_text(ws_raw) -> None:
     """Jeden wiersz zamiast łamania — bez ruszania scaleń i rozmiarów rubryk."""
-    for logical in FITTED_TEXT_CELLS:
+    cells = FITTED_TEXT_CELLS
+    # W zwykłym szablonie wiersz 71 jest stopką scaloną przez całą stronę.
+    # Dopiero wariant 72-wierszowy ma tam dane delegata 2.
+    if ws_raw.max_row >= 72:
+        cells = cells + ("I71", "W71")
+    for logical in cells:
         try:
             cell = ws_raw[shift_ref(logical)]
             alignment = copy.copy(cell.alignment)
@@ -4979,6 +5015,7 @@ PROTOCOL_VALUE_LABELS: List[tuple] = [
     (("matchConfig", "extras", "officials", "secretary", "city"), "Miejscowość sekretarza"),
     (("matchConfig", "extras", "officials", "timekeeper", "city"), "Miejscowość mierzącego czas"),
     (("matchConfig", "extras", "officials", "delegate", "city"), "Miejscowość delegata"),
+    (("matchConfig", "extras", "officials", "delegate2", "city"), "Miejscowość delegata 2"),
 ]
 
 
@@ -5333,6 +5370,14 @@ async def generate_protocol_pdf(
     generated_at_iso = generated_dt.isoformat()
     zprp_match_id = _zprp_match_id(data_json)
     match_number = str((data_json.get("matchConfig") or {}).get("matchNumber") or "").strip()
+    # Ćwiczenie z kursokonferencji rozpoznajemy z SAMEGO stanu meczu, a nie z
+    # osobnej flagi w żądaniu. Flagę dałoby się podnieść przy prawdziwym
+    # protokole i wypisać go z dziennika; znacznik w `matchConfig` jedzie razem
+    # z danymi, które i tak trafiają do podpisu, więc kłamstwo kosztowałoby
+    # podrobienie całego stanu meczu.
+    is_training = bool(
+        ((data_json.get("matchConfig") or {}).get("training") or {}).get("eventId")
+    )
 
     # Ślad audytu liczony PRZED generowaniem: skrót stanu ma opisywać to, co
     # sędzia wysłał, a nie to, co po drodze zrobił z tym generator.
@@ -5358,15 +5403,20 @@ async def generate_protocol_pdf(
         signature = ""
         logger.warning("Nie udało się podpisać protokołu %s", audit_code, exc_info=True)
 
-    # --- locate template ---
-    template_path = SysPath(__file__).resolve().parent / "templates" / "protocol_template.xlsx"
+    core = _get_match_core(data_json)
+    has_second_delegate = bool(core.get("delegate2"))
+
+    # Drugi delegat ma własny, dodatkowy wiersz w oficjalnym wzorze. Zwykły
+    # mecz nadal korzysta z dotychczasowego pliku, więc jego układ i wydruk
+    # pozostają bit po bicie po staremu.
+    template_name = _protocol_template_name(core)
+    template_path = SysPath(__file__).resolve().parent / "templates" / template_name
     if not template_path.exists():
         raise HTTPException(
             500,
-            f"Brak szablonu XLSX: {template_path}. Umieść plik w app/templates/protocol_template.xlsx i dodaj do repo.",
+            f"Brak szablonu XLSX: {template_path}. Umieść plik w app/templates/{template_name} i dodaj do repo.",
         )
 
-    core = _get_match_core(data_json)
     half_ms = core["halfTimeMin"] * 60 * 1000
 
     # penalties totals
@@ -5445,6 +5495,9 @@ async def generate_protocol_pdf(
         # tam, gdzie liczą się współrzędne fizyczne: kopiowanie arkuszy,
         # przenoszenie obrazków i wstawianie samych ptaszków.
         ws_raw = wb.active
+        _configure_protocol_page(
+            ws_raw, has_second_delegate=has_second_delegate
+        )
         ws = ShiftedWS(ws_raw)
 
         # --- extras (NOWE POLA Z data_json) ---
@@ -5492,6 +5545,8 @@ async def generate_protocol_pdf(
         _set_cell_fallback(ws, "W68", (officials.get("secretary") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
         _set_cell_fallback(ws, "W69", (officials.get("timekeeper") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
         _set_cell_fallback(ws, "W70", (officials.get("delegate") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        if has_second_delegate:
+            _set_cell_fallback(ws, "W71", (officials.get("delegate2") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
 
                 # --- SIGNATURES (PNG z backendu) ---
         SIGN_ANCHORS = {
@@ -5503,6 +5558,7 @@ async def generate_protocol_pdf(
             "secretary": "AI68",
             "timekeeper": "AI69",
             "delegate": "AI70",
+            "delegate2": "AI71",
         }
 
         # 1) podpisy drużyn
@@ -5544,7 +5600,10 @@ async def generate_protocol_pdf(
 
         official_sig_bytes: Dict[str, bytes] = {}
 
-        for key in ("referee1", "referee2", "secretary", "timekeeper", "delegate"):
+        signature_roles = ["referee1", "referee2", "secretary", "timekeeper", "delegate"]
+        if has_second_delegate:
+            signature_roles.append("delegate2")
+        for key in signature_roles:
             url = _off_sig_url(key)
             blob = await _fetch_png_bytes(url)
             official_sig_bytes[key] = blob or b""
@@ -5740,6 +5799,8 @@ async def generate_protocol_pdf(
         _set_cell_fallback(ws, "I68", core.get("secretary"), OFFICIAL_NAME_FALLBACK)
         _set_cell_fallback(ws, "I69", core.get("timekeeper"), OFFICIAL_NAME_FALLBACK)
         _set_cell_fallback(ws, "I70", core.get("delegate"), OFFICIAL_NAME_FALLBACK)
+        if has_second_delegate:
+            _set_cell_fallback(ws, "I71", core.get("delegate2"), OFFICIAL_NAME_FALLBACK)
 
         # --- timeline (match events) + optional pages (overflow + shootout) ---
         evs1, evs2 = _extract_timeline_events(data_json)
@@ -5904,6 +5965,7 @@ async def generate_protocol_pdf(
                 "signature": signature or None,
                 "app_version": str(x_app_version or "").strip() or None,
                 "client_ip": (request.client.host if request and request.client else None),
+                "training": is_training,
                 "created_at": generated_dt,
             }
         )
