@@ -627,9 +627,18 @@ async def patch_proel_state(
     # Zdarzenie po transakcji i tylko gdy coś naprawdę weszło. Klucz z pierwszego
     # op_id gasi ponowienie z outboxa: te same operacje nie dopiszą się drugi raz.
     if fresh_ops:
+        journal_event = (
+            {
+                "post.shortResultSent": "zprp.summary_sent",
+                "post.fullDataSent": "zprp.full_data_sent",
+                "post.protocolSent": "zprp.attachment_sent",
+            }.get(changed_paths[0], "field.changed")
+            if len(changed_paths) == 1
+            else "field.changed"
+        )
         await log_match_event(
             match_number=match_number,
-            event="field.changed",
+            event=journal_event,
             actor=actor,
             zprp_match_id=str(state.get("zprp_match_id") or ""),
             details={"paths": changed_paths, "rev": final_rev},

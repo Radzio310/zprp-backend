@@ -27,7 +27,8 @@ from fastapi import (
 )
 # Tożsamość aktora — ta sama zależność co przy zapisach ProEl, żeby wgląd w
 # dziennik protokołów miał dokładnie tych samych adminów co reszta systemu.
-from app.proel_auth import header_text, proel_actor
+from app.proel_auth import Actor, header_text, proel_actor
+from app.proel_journal import log_match_event
 from app.protocol_shootout import (
     recorded_shot_count as _recorded_shot_count,
     shootout_row_slots as _shootout_row_slots,
@@ -5905,6 +5906,26 @@ async def generate_protocol_pdf(
                 "client_ip": (request.client.host if request and request.client else None),
                 "created_at": generated_dt,
             }
+        )
+
+        # Dziennik protokołów przechowuje dowód i stan dokumentu, a dziennik
+        # MECZU odpowiada na prostsze pytanie administratora: kto i kiedy
+        # wygenerował PDF dla tego spotkania. Oba wpisy powstają dopiero po
+        # udanej konwersji i ostemplowaniu gotowego pliku.
+        await log_match_event(
+            match_number=match_number,
+            zprp_match_id=zprp_match_id,
+            event="protocol.pdf_generated",
+            actor=Actor(
+                judge_id=actor_judge_id,
+                installation_id=actor_install,
+                name=actor_name,
+                verified=actor_verified,
+            ),
+            details={"audit_code": audit_code},
+            event_key=f"protocol-pdf:{audit_code}",
+            app_version=x_app_version,
+            ip=(request.client.host if request and request.client else None),
         )
 
         # przygotuj plik do pobrania po tokenie

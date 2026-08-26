@@ -37,6 +37,7 @@ def test_sciezki_pol_po_polsku(path, expected):
 
 def test_znaczniki_wysylki_sa_zdaniem_a_nie_nazwa_pola():
     # To jedyne „pola", których zmiana jest sama w sobie zdarzeniem.
+    assert describe_field("post.shortResultSent") == "wynik skrócony trafił do bazy ZPRP"
     assert describe_field("post.protocolSent") == "protokół PDF trafił do załączników meczu"
     assert describe_field("post.fullDataSent") == "pełne dane meczu trafiły do bazy ZPRP"
 
@@ -86,6 +87,36 @@ def test_znacznik_wysylki_mowi_calym_zdaniem():
     assert out == "Protokół PDF trafił do załączników meczu"
     # Wielka litera tylko pierwsza - skrót w środku zdania zostaje skrótem.
     assert "PDF" in out
+
+
+@pytest.mark.parametrize(
+    "path,event,label",
+    [
+        ("post.shortResultSent", "zprp.summary_sent", "Wynik skrócony do ZPRP"),
+        ("post.fullDataSent", "zprp.full_data_sent", "Pełne dane meczu do ZPRP"),
+        (
+            "post.protocolSent",
+            "zprp.attachment_sent",
+            "Protokół PDF wysłany do ZPRP",
+        ),
+    ],
+)
+def test_znacznik_wysylki_jest_osobnym_zdarzeniem(path, event, label):
+    """Nowe i historyczne znaczniki mają odpowiadać wprost „kto wysłał"."""
+    from app.proel_journal import _effective_event
+
+    details = {"paths": [path], "rev": 14}
+    assert _effective_event("field.changed", details) == event
+    assert EVENT_LABELS[event] == label
+    assert event_summary(event, details)
+
+
+def test_wygenerowanie_pdf_ma_czytelna_etykiete_i_kod():
+    assert EVENT_LABELS["protocol.pdf_generated"] == "Wygenerowanie protokołu PDF"
+    assert (
+        event_summary("protocol.pdf_generated", {"audit_code": "BZ-ABCD-1234"})
+        == "Kod dziennika protokołów: BZ-ABCD-1234"
+    )
 
 
 def test_zmiana_statusu_czyta_sie_po_polsku():

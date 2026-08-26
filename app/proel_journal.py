@@ -30,7 +30,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, literal, select
 
 from app.proel_auth import (
     Actor,
@@ -63,10 +63,11 @@ EVENT_LABELS: Dict[str, str] = {
     "field.changed": "Zmiana pól",
     "protocol.pdf_generated": "Wygenerowanie protokołu PDF",
     "zprp.summary_sent": "Wynik skrócony do ZPRP",
+    "zprp.full_data_sent": "Pełne dane meczu do ZPRP",
     "zprp.players_sent": "Statystyki zawodników do ZPRP",
     "zprp.officials_sent": "Kary osób towarzyszących do ZPRP",
     "zprp.comment_sent": "Uwagi verte do ZPRP",
-    "zprp.attachment_sent": "Załącznik do ZPRP",
+    "zprp.attachment_sent": "Protokół PDF wysłany do ZPRP",
     "match.reopened": "Wznowienie meczu",
 }
 
@@ -107,6 +108,7 @@ _POST_NAMES: Dict[str, str] = {
     "detailedRefereeNotes": "uwagi verte (zaznaczenie)",
     "extraReport": "dodatkowy raport",
     "notesText": "treść uwag sędziów",
+    "shortResultSent": "znacznik: wynik skrócony w bazie ZPRP",
     "fullDataSent": "znacznik: pełne dane w bazie ZPRP",
     "protocolSent": "znacznik: protokół PDF w załącznikach",
 }
@@ -128,8 +130,18 @@ _EXTRAS_NAMES: Dict[str, str] = {
 #: Znaczniki wysyłki opisujemy zdaniem, nie nazwą pola - bo to jedyne „pola",
 #: których zmiana jest sama w sobie zdarzeniem, a nie poprawką w rubryce.
 _MARK_SENTENCES: Dict[str, str] = {
+    "post.shortResultSent": "wynik skrócony trafił do bazy ZPRP",
     "post.fullDataSent": "pełne dane meczu trafiły do bazy ZPRP",
     "post.protocolSent": "protokół PDF trafił do załączników meczu",
+}
+
+# Znacznik zadania pomeczowego nie jest zwykłą zmianą rubryki. Powstaje dopiero
+# po potwierdzonym sukcesie wysyłki, więc w dzienniku ma być samodzielnym
+# zdarzeniem, na które administrator może odpowiedzieć „kto i kiedy".
+_SENT_EVENT_BY_PATH: Dict[str, str] = {
+    "post.shortResultSent": "zprp.summary_sent",
+    "post.fullDataSent": "zprp.full_data_sent",
+    "post.protocolSent": "zprp.attachment_sent",
 }
 
 
@@ -230,6 +242,11 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
     if ev == "protocol.pdf_generated":
         code = str(d.get("audit_code") or "").strip()
         return f"Kod dziennika protokołów: {code}" if code else ""
+
+    if ev in _SENT_EVENT_BY_PATH.values():
+        paths = [str(x) for x in (d.get("paths") or []) if str(x or "").strip()]
+        sentence = _MARK_SENTENCES.get(paths[0], "") if len(paths) == 1 else ""
+        return sentence[:1].upper() + sentence[1:] if sentence else ""
 
     frm = _STATUS_NAMES.get(str(d.get("from") or ""), "")
     to = _STATUS_NAMES.get(str(d.get("to") or ""), "")
@@ -353,6 +370,71 @@ async def log_match_event(
 
 # ─────────────────────────── odczyt (admin) ───────────────────────────
 
+_protocol_pdf_backfill_done = False
+
+
+async def _backfill_protocol_pdf_events() -> None:
+    """Przenosi wcześniejsze generowania PDF na wspólną oś czasu meczu.
+
+    Generator od dawna zapisuje dokładny `protocol_audit`, więc utrata tej
+    historii tylko dlatego, że wspólny dziennik powstał później, byłaby
+    sztuczna. Klucz `protocol-pdf:<kod>` zapewnia idempotencję także przy
+    restarcie procesu. Funkcja jest best-effort tak samo jak sam dziennik.
+    """
+    global _protocol_pdf_backfill_done
+    if _protocol_pdf_backfill_done:
+        return
+
+    try:
+        from app.db import database, proel_activity_log, protocol_audit
+
+        event_key = literal("protocol-pdf:") + protocol_audit.c.code
+        rows = await database.fetch_all(
+            select(protocol_audit).where(
+                protocol_audit.c.match_number.isnot(None),
+                protocol_audit.c.match_number != "",
+                ~exists(
+                    select(proel_activity_log.c.id).where(
+                        proel_activity_log.c.event_key == event_key
+                    )
+                ),
+            )
+        )
+        had_failure = False
+        for row in rows:
+            try:
+                await database.execute(
+                    proel_activity_log.insert().values(
+                        match_number=str(row["match_number"] or "").strip(),
+                        zprp_match_id=row["match_id"],
+                        event="protocol.pdf_generated",
+                        actor_judge_id=row["judge_id"],
+                        actor_name=row["actor_name"],
+                        actor_install=row["installation_id"],
+                        actor_verified=bool(row["verified"]),
+                        details_json={"audit_code": row["code"]},
+                        app_version=row["app_version"],
+                        client_ip=row["client_ip"],
+                        event_key=f"protocol-pdf:{row['code']}",
+                        created_at=row["created_at"],
+                    )
+                )
+            except Exception:
+                had_failure = True
+                # Równoległe otwarcie panelu może wygrać wyścig o UNIQUE;
+                # pojedynczy taki wiersz nie może przerwać reszty migracji.
+                logger.debug(
+                    "proel journal: pominięto backfill PDF %s",
+                    row["code"],
+                    exc_info=True,
+                )
+        # Przy realnej awarii ponowimy brakujące wiersze przy kolejnym odczycie.
+        # Kolizja UNIQUE po równoległym odczycie także jest bezpieczna: następne
+        # zapytanie nie wybierze już wstawionego przez drugi proces kodu.
+        _protocol_pdf_backfill_done = not had_failure
+    except Exception:
+        logger.debug("proel journal: backfill PDF nieudany", exc_info=True)
+
 
 async def _require_admin(actor: Actor) -> None:
     if not await is_admin(actor.judge_id):
@@ -375,6 +457,12 @@ def _effective_event(event: str, details: Optional[Dict[str, Any]]) -> str:
     przy ODCZYCIE, bo dziennik jest księgą: wpisów się nie przepisuje.
     """
     d = details or {}
+    if str(event) == "field.changed":
+        paths = [str(x) for x in (d.get("paths") or []) if str(x or "").strip()]
+        if len(paths) == 1 and paths[0] in _SENT_EVENT_BY_PATH:
+            # Prostujemy także wpisy już istniejące w bazie. Dziennik jest
+            # niezmienny, więc nie robimy migracji historycznych wierszy.
+            return _SENT_EVENT_BY_PATH[paths[0]]
     if str(event) == "match.finished" and str(d.get("from") or "") == "approved":
         return "match.unapproved"
     return str(event or "")
@@ -394,7 +482,13 @@ def _row_out(row: Any) -> Dict[str, Any]:
         # Jedno zdanie po ludzku - patrz `event_summary`. Panel NIE składa
         # tego sam, żeby nie powstała druga lista nazw pól.
         "summary": event_summary(event, details),
-        "fields": [describe_field(x) for x in (details.get("paths") or [])],
+        # Dla właściwego zdarzenia wysyłki ścieżka markera jest szczegółem
+        # technicznym, nie „zmienionym polem" do pokazania administratorowi.
+        "fields": (
+            [describe_field(x) for x in (details.get("paths") or [])]
+            if event == "field.changed"
+            else []
+        ),
         "actor": {
             "judge_id": d.get("actor_judge_id"),
             "name": d.get("actor_name"),
@@ -425,6 +519,7 @@ async def journal_matches(
     błędem co `GET /proel/` z pełnymi blobami.
     """
     await _require_admin(actor)
+    await _backfill_protocol_pdf_events()
 
     from app.db import database, proel_activity_log, saved_matches
 
@@ -495,6 +590,7 @@ async def journal_events(
     actor: Actor = Depends(proel_actor),
 ):
     await _require_admin(actor)
+    await _backfill_protocol_pdf_events()
 
     from app.db import database, proel_activity_log
 

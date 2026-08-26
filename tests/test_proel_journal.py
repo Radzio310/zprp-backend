@@ -77,6 +77,10 @@ EMITTED = [
     "match.restored",
     "match.id_conflict",
     "field.changed",
+    "protocol.pdf_generated",
+    "zprp.summary_sent",
+    "zprp.full_data_sent",
+    "zprp.attachment_sent",
 ]
 
 
@@ -137,6 +141,20 @@ def test_brak_aktora_nie_wywraca_wiersza():
 
 def test_brak_daty_nie_wywraca_wiersza():
     assert _row_out(_row(created_at=None))["created_at"] is None
+
+
+def test_historyczny_znacznik_pelnych_danych_jest_wysylka_a_nie_zmiana_pola():
+    out = _row_out(
+        _row(
+            event="field.changed",
+            details_json={"paths": ["post.fullDataSent"], "rev": 18},
+        )
+    )
+    assert out["event"] == "zprp.full_data_sent"
+    assert out["label"] == "Pełne dane meczu do ZPRP"
+    assert out["summary"] == "Pełne dane meczu trafiły do bazy ZPRP"
+    assert out["fields"] == []
+    assert out["actor"]["name"] == "KOWALSKI Jan"
 
 
 # ───────────────────────── client_ip ─────────────────────────
