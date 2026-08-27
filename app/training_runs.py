@@ -27,8 +27,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.db import database, training_run, training_tick
-from app.proel_auth import header_text
 from app.release_stories import require_release_admin
+from app.training_text import actor_text
 from app.training_stage import (
     STAGE_ORDER,
     furthest_stage,
@@ -107,9 +107,9 @@ async def post_training_run(
     # polskimi znakami dawało to np. ``RadosÅ‚aw``. Używamy tej samej naprawy,
     # co dziennik ProEla i generator PDF; identyfikatory przechodzą przez nią
     # bez zmian, bo ASCII jest przypadkiem idempotentnym.
-    judge_id = _clean(header_text(x_judge_id), 80)
-    judge_name = _clean(header_text(x_actor_name), 120)
-    install_id = _clean(header_text(x_installation_id), 120)
+    judge_id = actor_text(x_judge_id, 80)
+    judge_name = actor_text(x_actor_name, 120)
+    install_id = actor_text(x_installation_id, 120)
 
     existing = await database.fetch_one(
         select(
@@ -255,7 +255,7 @@ def _run_row(row: Any, *, with_state: bool = False) -> Dict[str, Any]:
         # Naprawiamy również historyczne wiersze zapisane przed poprawką.
         # Dzięki temu administrator nie musi czekać na ponowne podejście
         # sędziego, żeby zobaczyć poprawne nazwisko.
-        "judgeName": header_text(d.get("judge_name")),
+        "judgeName": actor_text(d.get("judge_name")),
         "attempt": int(d.get("attempt") or 1),
         "stage": d.get("stage"),
         "scoreHost": int(d.get("score_host") or 0),
