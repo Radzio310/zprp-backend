@@ -179,6 +179,79 @@ training_event = Table(
     ),
 )
 
+# 10b) Przebiegi ćwiczeń na kursokonferencji.
+#
+# Dwie tabele, bo to dwa różne rodzaje danych i mieszanie ich kosztowałoby
+# albo miejsce, albo możliwości:
+#
+#   `training_run`  - JEDEN wiersz na podejście sędziego. `data_json` trzyma
+#                     najnowszy pełny stan meczu i jest NADPISYWANY. Dzięki
+#                     temu po zakończeniu (albo po porzuceniu w połowie)
+#                     zostaje komplet danych do obejrzenia, a baza nie zbiera
+#                     stu kopii tego samego protokołu.
+#
+#   `training_tick` - lekka oś czasu, DOPISYWANA. Kilkanaście liczb na takt,
+#                     więc całe wydarzenie mieści się w megabajtach, a panel
+#                     ma z czego narysować przebieg: kto nadążał za meczem,
+#                     kto stał w miejscu, kto odpadł i w której minucie.
+#
+# Kluczem sesji jest `run_id` nadawany w telefonie. Numer meczu kluczem NIE
+# jest - ten sam SPM/1 wróci za rok, a jeden sędzia podchodzi do ćwiczenia
+# więcej niż raz (stąd `attempt`).
+training_run = Table(
+    "training_run",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String, nullable=False, unique=True, index=True),
+    Column("event_id", String, nullable=False, index=True),
+    Column("zprp_match_id", String, nullable=True),
+    Column("match_number", String, nullable=False, index=True),
+    Column("judge_id", String, nullable=True, index=True),
+    Column("judge_name", String, nullable=True),
+    Column("install_id", String, nullable=True),
+    Column("attempt", Integer, nullable=False, server_default=text("1")),
+    Column("stage", String, nullable=False, server_default=text("'first_half'")),
+    Column("score_host", Integer, nullable=False, server_default=text("0")),
+    Column("score_guest", Integer, nullable=False, server_default=text("0")),
+    Column("events_count", Integer, nullable=False, server_default=text("0")),
+    Column("match_ms", BigInteger, nullable=False, server_default=text("0")),
+    # Czas RZECZYWISTY spędzony przy ćwiczeniu, liczony w telefonie. Nie da się
+    # go policzyć z `started_at`/`ended_at`, bo sędzia odkłada telefon.
+    Column("active_ms", BigInteger, nullable=False, server_default=text("0")),
+    Column("data_json", JSONB, nullable=True),
+    Column("app_version", String, nullable=True),
+    Column(
+        "started_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+    Column("ended_at", DateTime(timezone=True), nullable=True),
+    Index("ix_training_run_event_match", "event_id", "match_number"),
+)
+
+training_tick = Table(
+    "training_tick",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String, nullable=False, index=True),
+    Column("at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("match_ms", BigInteger, nullable=False, server_default=text("0")),
+    Column("half", Integer, nullable=False, server_default=text("1")),
+    Column("stage", String, nullable=False, server_default=text("'first_half'")),
+    Column("score_host", Integer, nullable=False, server_default=text("0")),
+    Column("score_guest", Integer, nullable=False, server_default=text("0")),
+    Column("events_count", Integer, nullable=False, server_default=text("0")),
+    Index("ix_training_tick_run_at", "run_id", "at"),
+)
+
 # 11) Zgłoszenia od userów
 user_reports = Table(
   "user_reports", metadata,

@@ -38,6 +38,7 @@ from app.calendar import router as calendar_router
 from app.silesia import router as silesia_router
 from app.admin import router as admin_router
 from app.training import router as training_router
+from app.training_runs import router as training_runs_router
 from app.reports import router as reports_router
 from app.login_records import router as login_records_router
 from app.proel import router as proel_router
@@ -197,6 +198,7 @@ app.include_router(calendar_router)
 app.include_router(silesia_router)
 app.include_router(admin_router)
 app.include_router(training_router)
+app.include_router(training_runs_router)
 app.include_router(reports_router)
 app.include_router(login_records_router)
 # UWAGA na kolejność: app/proel.py ma catch-all `GET /proel/{match_number:path}`,
