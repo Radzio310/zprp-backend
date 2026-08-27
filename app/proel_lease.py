@@ -25,6 +25,25 @@ LEASE_TTL_BACKGROUND_SECONDS = 300
 LEGACY_LEASE_TTL_SECONDS = 180
 
 
+def may_open_state_on_lease(action: str) -> bool:
+    """Czy brak wiersza stanu wolno naprawić zamiast odmawiać.
+
+    `POST /proel/lease` odpowiadał 404, gdy wiersza stanu nie było, i kazał
+    zawołać najpierw `/proel/ensure`. Ekran meczu tego nie robił - `/ensure`
+    wołała wyłącznie konfiguracja, i to dopiero przy pierwszej zmianie pola
+    współdzielonego. Mecz poprowadzony bez tknięcia żadnego z nich nie zostawiał
+    na serwerze śladu prowadzenia, a reszta obsady widziała „Rozegraj w ProElu"
+    dla meczu, który właśnie trwał.
+
+    Nowa aplikacja zakłada ten wiersz sama, ale te w polu jeszcze długo nie -
+    a skutkiem są dwa protokoły jednego meczu. `acquire` ZNACZY „zaczynam
+    prowadzić", więc zakładamy wiersz na miejscu. Bicie serca zostaje przy
+    odmowie: przedłużanie leasingu, którego nikt nie objął, nie ma sensu, a
+    klient odpowiada na 404 objęciem od nowa.
+    """
+    return action == "acquire"
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 

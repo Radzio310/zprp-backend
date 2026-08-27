@@ -696,6 +696,24 @@ async def lease_proel_match(
 
     async with database.transaction():
         state = await _fetch_state(match_number, for_update=True)
+        if state is None and may_open_state_on_lease(req.action):
+            # Sieć bezpieczeństwa dla klientów, które nie wołają `/ensure`
+            # (starsze wydania aplikacji). Strażnik obsady zostaje pusty, czyli
+            # „obsada nieznana" - dokładnie jak przy meczu stolikowym zakładanym
+            # ręcznie. Uzupełni go pierwsze `/ensure`, które przyjdzie później;
+            # `merge_guard` nie kasuje niczego, co już wiemy.
+            await database.execute(
+                insert(proel_match_state).values(
+                    match_number=match_number,
+                    zprp_match_id=None,
+                    guard_json=None,
+                    rev=1,
+                    fields_json={},
+                    audit_json={"log": [], "ops": []},
+                    status_cache=await _fetch_doc_status(match_number),
+                )
+            )
+            state = await _fetch_state(match_number, for_update=True)
         if state is None:
             raise HTTPException(
                 404,

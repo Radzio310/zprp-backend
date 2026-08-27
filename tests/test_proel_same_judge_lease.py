@@ -6,7 +6,7 @@ wygaśnie leasing sprzed przesiadki — dlatego ta reguła ma testy, tak jak res
 arytmetyki leasingu.
 """
 
-from app.proel_lease import same_judge_lease
+from app.proel_lease import may_open_state_on_lease, same_judge_lease
 
 
 def _app_lease(judge_id: str) -> dict:
@@ -40,3 +40,25 @@ def test_leasing_widmo_nigdy_nie_jest_niczyj():
 
 def test_brak_stanu():
     assert same_judge_lease(None, "1234") is False
+
+
+def test_obejmowanie_prowadzenia_zaklada_brakujacy_stan():
+    """`acquire` znaczy „zaczynam prowadzić" - brak wiersza nie może go odbić.
+
+    To jest ta luka, przez którą mecz prowadzony w MatchScreen nie zostawiał na
+    serwerze żadnego śladu: `/lease` odbijał 404, bo wiersz stanu zakłada
+    wyłącznie `/ensure`, a wołał je jedynie ekran konfiguracji i to dopiero przy
+    pierwszej zmianie pola współdzielonego. Reszta obsady widziała wtedy
+    spokojne „Rozegraj w ProElu" dla meczu, który trwał.
+    """
+    assert may_open_state_on_lease("acquire") is True
+
+
+def test_bicie_serca_nie_zaklada_niczego():
+    """Przedłużanie leasingu, którego nikt nie objął, nie ma sensu.
+
+    Klient odpowiada na 404 objęciem prowadzenia od nowa, więc odmowa tutaj
+    niczego nie gubi - a chroni przed zakładaniem wierszy przez klienta, który
+    bije serce w pętli po skasowanym meczu.
+    """
+    assert may_open_state_on_lease("heartbeat") is False
