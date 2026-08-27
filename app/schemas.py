@@ -12,6 +12,9 @@ class EditJudgeRequest(BaseModel):
     KodPocztowy: Optional[str] = None
     Telefon: Optional[str] = None
     Email: Optional[str] = None
+    #: Numer rachunku - SAME CYFRY, bez spacji. Grupowanie po cztery jest
+    #: wyłącznie sposobem wyświetlania w aplikacji; ZPRP przyjmuje ciąg.
+    Konto: Optional[str] = None
 
 class BatchOffTimeRequest(BaseModel):
     username: str     # Base64‑RSA

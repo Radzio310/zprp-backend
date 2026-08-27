@@ -101,8 +101,19 @@ async def edit_judge(
             overrides["Telefon"] = decrypt_field(data.Telefon)
         if data.Email is not None:
             overrides["Email"] = decrypt_field(data.Email)
-        overrides["akcja"] = "ZAPISZ"
+        if data.Konto is not None:
+            # Do ZPRP idzie CIĄG CYFR. Spacje w aplikacji są tylko po to, żeby
+            # numer dało się przeczytać - strona ich nie przyjmuje i sama ich
+            # nie zwraca, więc obcinamy je tutaj, a nie liczymy na ekran.
+            overrides["Konto"] = "".join(
+                ch for ch in decrypt_field(data.Konto) if ch.isdigit()
+            )
+
         form_fields.update(overrides)
+        # `akcja` to WARTOŚĆ PRZYCISKU, nie pole formularza. Wysyłamy ją (bez
+        # niej strona traktuje POST jak zwykłe wejście i nic nie zapisuje), ale
+        # NIE wpisujemy jej do `overrides` - patrz weryfikacja niżej.
+        form_fields["akcja"] = "ZAPISZ"
 
         # 5) Przygotowanie body – percent‑escaping pod ISO‑8859‑2
         body_str = urlencode(form_fields, encoding="iso-8859-2", errors="replace")
@@ -132,8 +143,24 @@ async def edit_judge(
             if name in overrides:
                 result_fields[name] = inp.get("value", "")
 
+        def _same(field: str, sent: str, got: str) -> bool:
+            # Numer konta porównujemy po samych cyfrach: strona potrafi oddać
+            # go z inną interpunkcją, a to nadal ten sam rachunek.
+            if field == "Konto":
+                digits = lambda t: "".join(ch for ch in (t or "") if ch.isdigit())
+                return digits(sent) == digits(got)
+            return sent == got
+
         for k, v in overrides.items():
-            if result_fields.get(k, "") != v:
+            """`akcja` NIE jest tu sprawdzana i nie może być.
+
+            Na stronie ZPRP zapis wywołuje `<button name="akcja" value="ZAPISZ">`,
+            a nie `<input>`. Po przeładowaniu formularza żadne pole o tej nazwie
+            nie istnieje, więc porównanie zawsze wychodziło `ZAPISZ` vs `None` i
+            KAŻDY udany zapis wracał do aplikacji jako błąd. Dlatego `akcja`
+            trafia wprost do wysyłanego ciała, z dala od listy do weryfikacji.
+            """
+            if not _same(k, v, result_fields.get(k, "")):
                 return {
                     "success": False,
                     "error": f"Pole `{k}` nie zostało zapisane (o: `{v}` vs `{result_fields.get(k)}`)"
