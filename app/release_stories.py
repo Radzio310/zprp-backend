@@ -107,6 +107,25 @@ def _semver_key(value: str) -> tuple[int, int, int]:
     return parsed[0], parsed[1], parsed[2]
 
 
+def _recent_available_versions(
+    versions: list[str], current_version: str, limit: int = 3
+) -> list[str]:
+    """Return the newest platform releases up to ``current_version``.
+
+    The public combined-story endpoint deliberately works on a bounded version
+    window, not on the number of stories. A release without a story still
+    occupies a place in the three-release window requested by the app.
+    """
+    current_key = _semver_key(current_version)
+    unique = {
+        str(version).strip()
+        for version in versions
+        if str(version).strip() and _semver_key(str(version)) <= current_key
+    }
+    ordered = sorted(unique, key=_semver_key)
+    return ordered[-max(1, min(int(limit), 3)) :]
+
+
 async def require_release_admin(
     credentials: HTTPAuthorizationCredentials = Security(bearer),
     settings: Settings = Depends(get_settings),
@@ -887,3 +906,65 @@ async def get_published_release_experience(
     if not row or dict(row).get("experience_mode") == "changelog_only":
         return {"experience": None}
     return {"experience": await _serialize_story(row, include_assets=False)}
+
+
+@router.get(
+    "/app/releases/experiences",
+    summary="Pokazy premierowe z maksymalnie trzech ostatnich wersji",
+)
+async def get_recent_published_release_experiences(
+    version: str = Query(..., min_length=1, max_length=40),
+    platform: Literal["ios", "android"] = Query(...),
+    limit: int = Query(default=3, ge=1, le=3),
+):
+    """Return published stories from the recent release window.
+
+    As with the legacy singular endpoint, an outdated application never gets a
+    story over the update prompt. Results are chronological so the client can
+    join them into one coherent premiere.
+    """
+    platform_column = (
+        app_versions.c.available_ios
+        if platform == "ios"
+        else app_versions.c.available_android
+    )
+    available_rows = await database.fetch_all(
+        select(app_versions.c.version).where(platform_column == True)  # noqa: E712
+    )
+    available_versions = [str(dict(item)["version"]) for item in available_rows]
+    latest_version = max(available_versions, key=_semver_key, default="")
+    current_version = version.strip()
+    if current_version != latest_version:
+        return {"experiences": []}
+
+    recent_versions = _recent_available_versions(
+        available_versions, current_version, limit
+    )
+    if not recent_versions:
+        return {"experiences": []}
+
+    rows = await database.fetch_all(
+        select(release_experiences, app_versions.c.version)
+        .select_from(
+            release_experiences.join(
+                app_versions,
+                release_experiences.c.version_id == app_versions.c.id,
+            )
+        )
+        .where(app_versions.c.version.in_(recent_versions))
+        .where(platform_column == True)  # noqa: E712
+        .where(release_experiences.c.status == "published")
+    )
+    story_rows = [
+        row
+        for row in rows
+        if dict(row).get("experience_mode") != "changelog_only"
+    ]
+    story_rows.sort(
+        key=lambda row: _semver_key(str(dict(row).get("version") or ""))
+    )
+    return {
+        "experiences": [
+            await _serialize_story(row, include_assets=False) for row in story_rows
+        ]
+    }

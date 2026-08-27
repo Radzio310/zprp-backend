@@ -1,7 +1,11 @@
 from fastapi import HTTPException
 import pytest
 
-from app.release_stories import ReleaseStorySlide, _clean_and_validate_slides
+from app.release_stories import (
+    ReleaseStorySlide,
+    _clean_and_validate_slides,
+    _recent_available_versions,
+)
 
 
 def _slide(**values):
@@ -59,3 +63,17 @@ def test_legacy_image_slide_remains_compatible():
 
     assert result[0]["media_type"] == "image"
     assert result[0]["poster_key"] is None
+
+
+def test_recent_release_window_counts_versions_without_stories():
+    assert _recent_available_versions(
+        ["1.7.0", "2.0.0", "2.0.1", "2.0.2"], "2.0.1", limit=3
+    ) == ["1.7.0", "2.0.0", "2.0.1"]
+
+
+def test_recent_release_window_is_sorted_and_never_exceeds_three():
+    assert _recent_available_versions(
+        ["2.0.1", "1.9.9", "2.0.0", "2.0.1", "2.1.0"],
+        "2.0.1",
+        limit=3,
+    ) == ["1.9.9", "2.0.0", "2.0.1"]
