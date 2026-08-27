@@ -54,6 +54,7 @@ from app.proel_fields import (
     UnknownPath,
     live_signal,
     parse_path,
+    phase_refusal,
     project,
 )
 from app.schemas import (
@@ -563,10 +564,7 @@ async def patch_proel_state(
                         "op_id": op_id,
                         "path": path,
                         "code": "PHASE_FORBIDDEN",
-                        "message": (
-                            "Tego pola nie można zmieniać na tym etapie meczu "
-                            f"(faza: {phase})."
-                        ),
+                        "message": phase_refusal(spec),
                         "current": (overlay.get(path) or {}).get("v"),
                     }
                 )

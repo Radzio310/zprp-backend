@@ -415,12 +415,25 @@ def _build_registry() -> List[FieldSpec]:
             )
         )
 
+    # Nagłówek protokołu - obsada, hala, data i godzina - jest edytowalny we
+    # WSZYSTKICH fazach, także w LIVE.
+    #
+    # Stało tu wcześniej `(PRE, POST)` i wyglądało to na ostrożność, a było
+    # dziurą: te same nazwiska mają DRUGĄ ścieżkę - `official.*` z
+    # `ALL_PHASES` - więc w trakcie meczu dawało się je poprawić z ekranu
+    # finalizacji, a nie dawało z ekranu konfiguracji. Blokada niczego nie
+    # chroniła; zamykała wyłącznie ten ekran, na którym ludzie to robią.
+    #
+    # A robi się to właśnie w trakcie: sędzia nie dojechał i ktoś wchodzi za
+    # niego, delegat dopisuje się w przerwie, adres hali przyszedł z ZPRP
+    # błędny i widać to dopiero na miejscu. Kto ma prawo zmieniać, pilnuje
+    # nadal `roles=FIELD_REFS`, a zbieg dwóch poprawek rozstrzyga `merge_lww`.
     for key, cfg_key in _CFG_FIELDS.items():
         specs.append(
             FieldSpec(
                 name=f"cfg.{key}",
                 pattern=re.compile(rf"^cfg\.{re.escape(key)}$"),
-                phases=(PHASE_PRE, PHASE_POST),
+                phases=ALL_PHASES,
                 roles=FIELD_REFS,
                 merge=merge_lww,
                 project=project_cfg_field(cfg_key),
@@ -429,12 +442,14 @@ def _build_registry() -> List[FieldSpec]:
         )
 
     # extras.matchDate / matchTime siedzą w `extras`, nie w `matchConfig`.
+    # Ta sama reguła i ten sam powód co wyżej: faktyczna godzina pierwszego
+    # gwizdka bywa poprawiana dopiero wtedy, gdy mecz już trwa.
     for key, extras_key in (("matchDate", "matchDate"), ("matchTime", "matchTime")):
         specs.append(
             FieldSpec(
                 name=f"cfg.{key}",
                 pattern=re.compile(rf"^cfg\.{re.escape(key)}$"),
-                phases=(PHASE_PRE, PHASE_POST),
+                phases=ALL_PHASES,
                 roles=FIELD_REFS,
                 merge=merge_lww,
                 project=project_extras_field(extras_key),
@@ -478,6 +493,30 @@ def project(overlay: Dict[str, Any], blob: dict) -> dict:
         except Exception:  # noqa: BLE001 — projekcja nie może wywrócić zapisu
             continue
     return blob
+
+
+# ─────────────────────────── odmowa po ludzku ───────────────────────────
+
+
+_PHASE_WORDS = {
+    PHASE_PRE: "przed meczem",
+    PHASE_LIVE: "w trakcie meczu",
+    PHASE_POST: "po zakończeniu meczu",
+}
+
+
+def phase_refusal(spec: FieldSpec) -> str:
+    """Zdanie dla sędziego: KIEDY wolno zmienić to pole.
+
+    Odmowa brzmiała dotąd „(faza: live)" - słowem z kodu, nie z hali. Reguła,
+    która kogoś zatrzymuje, ma się wytłumaczyć jego językiem.
+    """
+    words = [_PHASE_WORDS[p] for p in ALL_PHASES if p in spec.phases]
+    if not words:
+        return "Tego pola nie da się już zmienić."
+    if len(words) == 1:
+        return f"To pole wypełnia się {words[0]}."
+    return "To pole zmienia się " + " albo ".join(words) + "."
 
 
 # ─────────────────────────── wykrywanie fazy LIVE ───────────────────────────

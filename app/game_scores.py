@@ -106,6 +106,19 @@ class SyncScoresResponse(BaseModel):
     improved: int
 
 
+class PlayerBestRecord(BaseModel):
+    game: str
+    difficulty: str
+    score: int
+    extra: Optional[Dict[str, Any]] = None
+    created_at: Optional[str] = None
+
+
+class PlayerRecordsResponse(BaseModel):
+    judge_id: str
+    records: List[PlayerBestRecord]
+
+
 def _validate(game: str, difficulty: str) -> tuple[str, str]:
     g = (game or "").strip().lower()
     d = (difficulty or "").strip().lower()
@@ -297,6 +310,45 @@ async def sync_scores(payload: SyncScoresRequest) -> SyncScoresResponse:
         received=len(incoming),
         improved=len(rows),
     )
+
+
+@router.get("/mine", response_model=PlayerRecordsResponse)
+async def player_records(
+    judge_id: str = Query(..., min_length=1, max_length=64),
+) -> PlayerRecordsResponse:
+    """Najlepsze rekordy sędziego do odtworzenia po zmianie telefonu.
+
+    Zwracamy rekord wieczny dla każdej pary gra/poziom. Klient scala go przez
+    MAX z AsyncStorage, więc pobranie nigdy nie obniża wyniku zdobytego offline
+    na bieżącym urządzeniu.
+    """
+    jid = judge_id.strip()
+    rows = await database.fetch_all(
+        select(game_scores)
+        .where(game_scores.c.judge_id == jid)
+        .order_by(
+            game_scores.c.game.asc(),
+            game_scores.c.difficulty.asc(),
+            game_scores.c.score.desc(),
+            game_scores.c.created_at.desc(),
+        )
+    )
+
+    best: Dict[tuple[str, str], PlayerBestRecord] = {}
+    for row in rows:
+        key = (str(row["game"] or ""), str(row["difficulty"] or ""))
+        if key in best:
+            continue
+        created = row["created_at"]
+        best[key] = PlayerBestRecord(
+            game=key[0],
+            difficulty=key[1],
+            score=int(row["score"] or 0),
+            extra=row["extra"] or None,
+            created_at=created.isoformat() if created is not None else None,
+        )
+
+    return PlayerRecordsResponse(judge_id=jid, records=list(best.values()))
 
 
 @router.get("/leaderboard", response_model=LeaderboardResponse)

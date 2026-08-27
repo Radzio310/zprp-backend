@@ -18,6 +18,7 @@ from app.proel_fields import (
     merge_write_once,
     normalize_name,
     parse_path,
+    phase_refusal,
     project,
 )
 
@@ -369,6 +370,48 @@ def test_post_fields_are_post_only():
 def test_notes_are_writable_before_and_after():
     spec, _ = parse_path("post.notesText")
     assert set(spec.phases) == {"pre", "post"}
+
+
+def test_match_header_is_writable_in_every_phase():
+    """Nagłówek protokołu poprawia się także w trakcie meczu.
+
+    Ekran konfiguracji odmawiał zapisu adresu hali w fazie LIVE, choć to
+    dokładnie ten moment, w którym wychodzi, że ZPRP ma zły adres. Te same
+    nazwiska dało się przy tym poprawić ścieżką `official.*`, więc blokada
+    niczego nie chroniła.
+    """
+    for path in (
+        "cfg.venueAddress",
+        "cfg.referee1",
+        "cfg.referee2",
+        "cfg.delegate",
+        "cfg.delegate2",
+        "cfg.secretary",
+        "cfg.timekeeper",
+        "cfg.matchDate",
+        "cfg.matchTime",
+    ):
+        spec, _ = parse_path(path)
+        assert set(spec.phases) == {"pre", "live", "post"}, path
+
+
+def test_match_header_stays_role_guarded():
+    """Otwarcie faz nie może otworzyć pola KAŻDEMU."""
+    spec, _ = parse_path("cfg.venueAddress")
+    assert "referee1" in spec.roles
+    assert "secretary" not in spec.roles
+
+
+def test_phase_refusal_speaks_polish():
+    """Odmowa mówi, kiedy wolno - nie „(faza: live)"."""
+    post_only, _ = parse_path("post.spectatorsCount")
+    assert phase_refusal(post_only) == "To pole wypełnia się po zakończeniu meczu."
+
+    before_after, _ = parse_path("post.notesText")
+    assert (
+        phase_refusal(before_after)
+        == "To pole zmienia się przed meczem albo po zakończeniu meczu."
+    )
 
 
 # ─────────────────────────── live_signal ───────────────────────────
