@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.db import database, training_run, training_tick
+from app.proel_auth import header_text
 from app.release_stories import require_release_admin
 from app.training_stage import (
     STAGE_ORDER,
@@ -102,9 +103,13 @@ async def post_training_run(
             )
 
     stage = normalize_stage(body.stage)
-    judge_id = _clean(x_judge_id, 80)
-    judge_name = _clean(x_actor_name, 120)
-    install_id = _clean(x_installation_id, 120)
+    # Nagłówki HTTP są przez Starlette czytane jak latin-1. Dla nazwisk z
+    # polskimi znakami dawało to np. ``RadosÅ‚aw``. Używamy tej samej naprawy,
+    # co dziennik ProEla i generator PDF; identyfikatory przechodzą przez nią
+    # bez zmian, bo ASCII jest przypadkiem idempotentnym.
+    judge_id = _clean(header_text(x_judge_id), 80)
+    judge_name = _clean(header_text(x_actor_name), 120)
+    install_id = _clean(header_text(x_installation_id), 120)
 
     existing = await database.fetch_one(
         select(
@@ -247,7 +252,10 @@ def _run_row(row: Any, *, with_state: bool = False) -> Dict[str, Any]:
         "matchNumber": d.get("match_number"),
         "zprpMatchId": d.get("zprp_match_id"),
         "judgeId": d.get("judge_id"),
-        "judgeName": d.get("judge_name"),
+        # Naprawiamy również historyczne wiersze zapisane przed poprawką.
+        # Dzięki temu administrator nie musi czekać na ponowne podejście
+        # sędziego, żeby zobaczyć poprawne nazwisko.
+        "judgeName": header_text(d.get("judge_name")),
         "attempt": int(d.get("attempt") or 1),
         "stage": d.get("stage"),
         "scoreHost": int(d.get("score_host") or 0),
@@ -310,6 +318,40 @@ async def list_training_runs(
 
     rows = await database.fetch_all(q.limit(2000))
     return {"runs": [_run_row(r) for r in rows]}
+
+
+@router.delete(
+    "/admin/training/runs/{run_id}",
+    summary="Usunięcie przebiegu ćwiczenia (administrator)",
+)
+async def delete_training_run(
+    run_id: str,
+    judge_id: str = Depends(require_release_admin),
+) -> Dict[str, Any]:
+    """Kasuje JEDEN przebieg razem z jego osią czasu.
+
+    Twardo, bez archiwum - inaczej niż zapis prawdziwego meczu. To jest wpis
+    ćwiczebny, który powstaje głównie po to, żeby ktoś sprawdził, czy przycisk
+    działa; trzymanie takich śmieci przez rok byłoby kosztem bez powodu. Wpis
+    znika też z liczb grupowych, bo te liczy się z tego, co zostało (patrz
+    `utils/trainingStats.ts`), a nie z osobnej sumy.
+    """
+    row = await database.fetch_one(
+        select(training_run.c.id).where(training_run.c.run_id == run_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Nie ma takiego przebiegu.")
+
+    # Oś czasu najpierw: gdyby drugie polecenie padło, zostaje wiersz bez
+    # punktów (da się usunąć ponownie), a nie punkty bez wiersza, których już
+    # nic nie sprząta.
+    await database.execute(
+        training_tick.delete().where(training_tick.c.run_id == run_id)
+    )
+    await database.execute(
+        training_run.delete().where(training_run.c.run_id == run_id)
+    )
+    return {"ok": True, "runId": run_id}
 
 
 @router.get(
