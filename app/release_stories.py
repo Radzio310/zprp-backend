@@ -873,6 +873,7 @@ async def delete_release_story_asset(
 async def get_published_release_experience(
     version: str = Query(..., min_length=1, max_length=40),
     platform: Literal["ios", "android"] = Query(...),
+    historical: bool = Query(default=False),
 ):
     platform_column = (
         app_versions.c.available_ios
@@ -880,7 +881,9 @@ async def get_published_release_experience(
         else app_versions.c.available_android
     )
     available_rows = await database.fetch_all(
-        select(app_versions.c.version).where(platform_column == True)  # noqa: E712
+        select(app_versions.c.version)
+        .where(platform_column == True)  # noqa: E712
+        .where(app_versions.c.to_show == True)  # noqa: E712
     )
     latest_version = max(
         (str(dict(item)["version"]) for item in available_rows),
@@ -888,7 +891,7 @@ async def get_published_release_experience(
         default="",
     )
     # Pokaz historycznej wersji nigdy nie może przykryć monitu o aktualizację.
-    if version.strip() != latest_version:
+    if not historical and version.strip() != latest_version:
         return {"experience": None}
 
     query = (
@@ -899,6 +902,7 @@ async def get_published_release_experience(
             )
         )
         .where(app_versions.c.version == version.strip())
+        .where(app_versions.c.to_show == True)  # noqa: E712
         .where(release_experiences.c.status == "published")
     )
     query = query.where(platform_column == True)  # noqa: E712
@@ -929,7 +933,9 @@ async def get_recent_published_release_experiences(
         else app_versions.c.available_android
     )
     available_rows = await database.fetch_all(
-        select(app_versions.c.version).where(platform_column == True)  # noqa: E712
+        select(app_versions.c.version)
+        .where(platform_column == True)  # noqa: E712
+        .where(app_versions.c.to_show == True)  # noqa: E712
     )
     available_versions = [str(dict(item)["version"]) for item in available_rows]
     latest_version = max(available_versions, key=_semver_key, default="")
@@ -953,6 +959,7 @@ async def get_recent_published_release_experiences(
         )
         .where(app_versions.c.version.in_(recent_versions))
         .where(platform_column == True)  # noqa: E712
+        .where(app_versions.c.to_show == True)  # noqa: E712
         .where(release_experiences.c.status == "published")
     )
     story_rows = [
@@ -968,3 +975,62 @@ async def get_recent_published_release_experiences(
             await _serialize_story(row, include_assets=False) for row in story_rows
         ]
     }
+
+
+@router.get(
+    "/app/releases/catalog",
+    summary="Lekki katalog opublikowanych premier do historii BAZY",
+)
+async def get_published_release_catalog(
+    platform: Literal["ios", "android"] = Query(...),
+):
+    """Return native slide copy only; media is signed after an explicit tap."""
+    platform_column = (
+        app_versions.c.available_ios
+        if platform == "ios"
+        else app_versions.c.available_android
+    )
+    rows = await database.fetch_all(
+        select(
+            release_experiences.c.id,
+            release_experiences.c.version_id,
+            release_experiences.c.display_generation,
+            release_experiences.c.experience_mode,
+            release_experiences.c.headline,
+            release_experiences.c.slides,
+            app_versions.c.version,
+        )
+        .select_from(
+            release_experiences.join(
+                app_versions,
+                release_experiences.c.version_id == app_versions.c.id,
+            )
+        )
+        .where(platform_column == True)  # noqa: E712
+        .where(app_versions.c.to_show == True)  # noqa: E712
+        .where(release_experiences.c.status == "published")
+    )
+    stories = []
+    for row in rows:
+        data = dict(row)
+        if data.get("experience_mode") == "changelog_only":
+            continue
+        slides = _json_value(data.get("slides"), [])
+        titles = [
+            str(slide.get("title") or "").strip()
+            for slide in slides
+            if isinstance(slide, dict) and str(slide.get("title") or "").strip()
+        ]
+        stories.append(
+            {
+                "id": int(data["id"]),
+                "version_id": int(data["version_id"]),
+                "version": str(data.get("version") or ""),
+                "display_generation": int(data.get("display_generation") or 1),
+                "headline": str(data.get("headline") or ""),
+                "slide_count": len(slides),
+                "slide_titles": titles,
+            }
+        )
+    stories.sort(key=lambda story: _semver_key(story["version"]), reverse=True)
+    return {"stories": stories}
