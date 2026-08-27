@@ -1431,6 +1431,83 @@ async def list_proel_matches(
     return ListSavedMatchesResponse(matches=items)
 
 
+@router.get(
+    "/live",
+    response_model=dict,
+    summary="Mecze prowadzone w tej chwili (podgląd administratora)",
+)
+async def list_live_proel_matches(
+    limit: int = Query(60, ge=1, le=200),
+    actor: Actor = Depends(proel_actor),
+):
+    """Kto w tej chwili pisze protokół i którego meczu.
+
+    Jedno zapytanie zamiast listy meczy plus `/state` po kolei dla każdego -
+    ekran podglądu ma pokazać obraz JEDNEJ chwili, a nie kilkunastu odpowiedzi
+    zebranych przez pół minuty.
+
+    Życiem leasingu rządzi `lease_until` (90 s, bicie serca co 25 s), więc
+    warunek „prowadzony teraz" to po prostu nieprzeterminowany leasing. Zegarem
+    jest Postgres, nie telefon pytającego.
+
+    Tylko administrator: to jest podgląd CUDZEJ pracy w toku, razem z
+    nazwiskami prowadzących.
+    """
+    if not await is_admin(actor.judge_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ADMIN_REQUIRED",
+                "message": "Podgląd prowadzonych meczów ma wyłącznie administrator.",
+            },
+        )
+
+    rows = await database.fetch_all(
+        select(proel_match_state)
+        .where(proel_match_state.c.lease_until > _now())
+        .order_by(proel_match_state.c.updated_at.desc())
+        .limit(limit)
+    )
+
+    items: List[Dict[str, Any]] = []
+    for raw in rows:
+        state = _as_dict(raw) or {}
+        match_number = str(state.get("match_number") or "")
+        doc = await database.fetch_one(
+            select(saved_matches.c.data_json, saved_matches.c.status, saved_matches.c.updated_at)
+            .where(saved_matches.c.match_number == match_number)
+        )
+        doc_row = _as_dict(doc) or {}
+        # Sam nagłówek, nigdy pełny blob: podgląd listy nie ma prawa ściągać na
+        # telefon składów, licencji i przebiegu każdego trwającego meczu.
+        head = _match_head(doc_row.get("data_json"))
+        until = state.get("lease_until")
+        items.append(
+            {
+                "match_number": match_number,
+                "zprp_match_id": state.get("zprp_match_id") or "",
+                "phase": _phase_of(state, doc_row.get("status")),
+                "status": doc_row.get("status"),
+                "rev": int(state.get("rev") or 0),
+                "holder": {
+                    "name": state.get("lease_name") or "",
+                    "judge_id": state.get("lease_judge_id") or "",
+                    "kind": state.get("lease_kind") or "app",
+                    "until": until.isoformat() if until is not None else None,
+                    "is_you": bool(
+                        actor.installation_id
+                        and state.get("lease_install") == actor.installation_id
+                    ),
+                },
+                "head": head,
+                "updated_at": state.get("updated_at"),
+                "doc_updated_at": doc_row.get("updated_at"),
+            }
+        )
+
+    return {"matches": items, "server_now": _now().isoformat()}
+
+
 # ⚠ MUSI BYĆ OSTATNIE W PLIKU.
 # `{match_number:path}` łapie wszystko, łącznie z "/state", "/ensure" i
 # "/patch". FastAPI dopasowuje trasy w kolejności rejestracji, więc ta
