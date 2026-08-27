@@ -168,6 +168,21 @@ async def _fetch_doc_status(match_number: str) -> Optional[str]:
         return "finished" if row["is_finished"] else "in_progress"
 
 
+async def _fetch_doc_updated_at(match_number: str) -> Optional[datetime]:
+    """Czas ostatniego pełnego autosave'u, bez czytania ciężkiego data_json."""
+    row = await database.fetch_one(
+        select(saved_matches.c.updated_at).where(
+            saved_matches.c.match_number == match_number
+        )
+    )
+    if row is None:
+        return None
+    try:
+        return row["updated_at"]
+    except (KeyError, IndexError):
+        return None
+
+
 async def _fetch_doc_config(match_number: str) -> Any:
     """Sama `matchConfig` protokołu - bez przebiegu, składów i statystyk.
 
@@ -244,20 +259,23 @@ def _lease_view(
         return {"held": False}
     if until.tzinfo is None:
         until = until.replace(tzinfo=timezone.utc)
-    if until <= _now():
-        return {"held": False, "expired": True}
     is_you = bool(actor_install and state.get("lease_install") == actor_install)
-    return {
-        "held": True,
+    identity = {
         "kind": state.get("lease_kind") or "app",
         "name": state.get("lease_name") or "",
         "judge_id": state.get("lease_judge_id") or "",
         "epoch": int(state.get("lease_epoch") or 0),
         "until": until.isoformat(),
         "is_you": is_you,
-        # „To ja, ale na drugim telefonie". Aplikacja pokazuje wtedy zwykłe
-        # wejście w mecz zamiast podglądu na żywo - przejęcie i tak przejdzie.
         "same_judge": is_you or _same_judge_lease(state, actor_judge_id),
+    }
+    if until <= _now():
+        # Tożsamość ostatniego prowadzącego nadal jest potrzebna, gdy heartbeat
+        # na chwilę wygaśnie, ale pełny autosave pozostaje świeży.
+        return {"held": False, "expired": True, **identity}
+    return {
+        "held": True,
+        **identity,
     }
 
 
@@ -335,7 +353,10 @@ async def _build_state_response(
     match_number: str, actor: Actor
 ) -> ProElStateResponse:
     state = await _fetch_state(match_number)
-    doc_status = await _fetch_doc_status(match_number)
+    doc_status, doc_updated_at = await asyncio.gather(
+        _fetch_doc_status(match_number),
+        _fetch_doc_updated_at(match_number),
+    )
     phase = _phase_of(state, doc_status)
     # `your_roles` liczymy z SAMEGO wiersza stanu - dokładnie tak, jak robi to
     # `/patch`, który z tych ról korzysta. Prawo do zatwierdzenia ma własne,
@@ -348,6 +369,7 @@ async def _build_state_response(
         status=doc_status,
         exists=state is not None,
         doc_exists=doc_status is not None,
+        doc_updated_at=doc_updated_at,
         updated_at=(state or {}).get("updated_at"),
         server_now=_now(),
         lease=_lease_view(state, actor.installation_id, actor.judge_id),

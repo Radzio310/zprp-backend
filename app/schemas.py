@@ -1042,6 +1042,9 @@ class ProElStateResponse(BaseModel):
     exists: bool
     #: Czy istnieje wiersz `proel_matches` (czyli czy mecz był realnie zapisany).
     doc_exists: bool
+    #: Ostatni pełny autosave `data_json`. Oddzielny od `updated_at` stanu,
+    #: który zmienia się również przy heartbeatcie, patchu i zwolnieniu lease.
+    doc_updated_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     server_now: datetime
     lease: ProElLeaseInfo = ProElLeaseInfo()
