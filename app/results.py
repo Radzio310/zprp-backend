@@ -3498,6 +3498,33 @@ def _fill_timeline_pages(
     return True
 
 
+#: Ile protokołów wolno konwertować JEDNOCZEŚNIE.
+#
+# Każda konwersja to osobny proces LibreOffice po kilkaset megabajtów pamięci.
+# `asyncio.to_thread` korzysta z domyślnej puli wątków, a ta dopuszcza ich
+# kilkadziesiąt naraz - i nikt tego dotąd nie ograniczał, bo protokoły powstają
+# zwykle pojedynczo.
+#
+# Kursokonferencja łamie to założenie: sto telefonów kończy ćwiczenie w
+# zbliżonym czasie i każde generuje protokół. Ten sam kontener obsługuje w tym
+# momencie ProEla meczu prowadzonego NAPRAWDĘ, a wyczerpanie pamięci nie kończy
+# się wolniejszym PDF-em, tylko restartem serwera - czyli utratą łączności
+# stolikowi w trakcie meczu.
+#
+# Czekanie na wolne miejsce jest asynchroniczne, więc kolejka nie kosztuje ani
+# wątku, ani pamięci; rośnie wyłącznie czas oczekiwania na plik.
+_PDF_CONCURRENCY = max(1, int(os.getenv("PROTOCOL_PDF_CONCURRENCY", "3")))
+_pdf_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _pdf_slot() -> asyncio.Semaphore:
+    """Semafor zakładany leniwie - w tej pętli zdarzeń, która go użyje."""
+    global _pdf_semaphore
+    if _pdf_semaphore is None:
+        _pdf_semaphore = asyncio.Semaphore(_PDF_CONCURRENCY)
+    return _pdf_semaphore
+
+
 def _convert_xlsx_to_pdf(xlsx_path: str, out_dir: str) -> str:
     """
     Konwersja przez LibreOffice:
@@ -5927,7 +5954,9 @@ async def generate_protocol_pdf(
         # jako `uvicorn main:app` BEZ `--workers`, więc jedna pętla zdarzeń
         # obsługuje całą flotę: bez `to_thread` generowanie jednego protokołu
         # zawiesza KAŻDE inne żądanie w tym czasie.
-        pdf_path = await asyncio.to_thread(_convert_xlsx_to_pdf, filled_xlsx, td)
+        # Miejsce w kolejce PRZED odpaleniem LibreOffice - patrz `_pdf_slot`.
+        async with _pdf_slot():
+            pdf_path = await asyncio.to_thread(_convert_xlsx_to_pdf, filled_xlsx, td)
 
         # Znacznik w metadanych, a potem skrót — w tej kolejności, bo liczy się
         # suma kontrolna pliku, który dostanie użytkownik.
