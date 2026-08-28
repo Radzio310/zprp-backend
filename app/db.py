@@ -1145,6 +1145,142 @@ province_match_sync_leases = Table(
 )
 
 # -------------------------
+# Giełda meczów - wymiana obsady między sędziami
+# -------------------------
+#
+# Trzy tabele, bo odpowiadają na trzy różne pytania:
+#
+#   `match_market_offers`  - co jest wystawione i w jakim stanie,
+#   `match_market_claims`  - kto się zgłosił do której oferty,
+#   `province_module_config` - czy okręg w ogóle ma ten moduł i na jakich zasadach.
+#
+# `match_snapshot` to KOPIA `province_matches.state_json` z chwili wystawienia.
+# Mecz potrafi się zmienić między wystawieniem a decyzją (przesunięty termin,
+# inna hala), a obsadowy musi widzieć to, na co sędzia się wtedy zgadzał - i
+# osobno to, co jest w bazie związku dzisiaj.
+
+match_market_offers = Table(
+    "match_market_offers",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("match_id", String, nullable=False, index=True),
+    Column("match_code", String, nullable=True),
+    # Gniazdo protokołu: sedzia1 | sedzia2 | sekretarz | czas.
+    # Delegaci świadomie poza giełdą - patrz `match_market_rules.TRADEABLE_SLOTS`.
+    Column("slot", String, nullable=False),
+    Column("from_judge_id", String, nullable=False, index=True),
+    Column("reason", Text, nullable=True),
+    Column("status", String, nullable=False, server_default=text("'open'"), index=True),
+    # Do kiedy wolno się zgłaszać. Liczone przy wystawieniu z progu okręgu, żeby
+    # późniejsza zmiana progu nie przesuwała ofert już stojących na giełdzie.
+    Column("deadline_at", DateTime(timezone=True), nullable=True, index=True),
+    Column("match_at", DateTime(timezone=True), nullable=True, index=True),
+    Column(
+        "match_snapshot",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    ),
+    Column("decided_by", String, nullable=True),
+    Column("decided_at", DateTime(timezone=True), nullable=True),
+    Column("applied_at", DateTime(timezone=True), nullable=True),
+    Column("error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+# Jedno gniazdo nie może wisieć na giełdzie dwa razy. Warunek obejmuje WYŁĄCZNIE
+# stany żywe - odrzucona albo wycofana oferta ma prawo zostać w historii obok
+# nowej próby oddania tego samego meczu.
+Index(
+    "uq_match_market_live_slot",
+    match_market_offers.c.province,
+    match_market_offers.c.match_id,
+    match_market_offers.c.slot,
+    unique=True,
+    postgresql_where=text("status IN ('open', 'applying')"),
+)
+Index(
+    "ix_match_market_offers_province_status",
+    match_market_offers.c.province,
+    match_market_offers.c.status,
+)
+
+match_market_claims = Table(
+    "match_market_claims",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "offer_id",
+        Integer,
+        ForeignKey("match_market_offers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("note", Text, nullable=True),
+    Column("status", String, nullable=False, server_default=text("'pending'")),
+    # Kolizje policzone w chwili zgłoszenia - do pokazania, nie do blokowania.
+    # Obsadowy i tak dostaje świeży rachunek przy otwarciu zgłoszenia; ten wpis
+    # mówi, co widział sam zgłaszający, gdy klikał.
+    Column(
+        "conflicts_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    UniqueConstraint("offer_id", "judge_id", name="uq_match_market_claim_offer_judge"),
+)
+
+# Ustawienia okręgu. Wiersza może nie być - wtedy obowiązują wartości domyślne
+# z `match_market_rules`, a moduł jest WYŁĄCZONY. Włączenie jest świadomą
+# decyzją administratora, nie stanem domyślnym.
+province_module_config = Table(
+    "province_module_config",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("market_enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("offer_deadline_hours", Integer, nullable=False, server_default=text("48")),
+    # "own" = własne konto ZPRP_ASSIGN_*, "same_as_sync" = to samo, którym chodzi
+    # monitor meczów. Same hasła zostają w Railway - tu leży wyłącznie wybór.
+    Column("assign_account_mode", String, nullable=False, server_default=text("'own'")),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+
+# `province_match_assignability` - pamiec sondy uprawnien.
+#
+# Sedzia widzi w aplikacji wszystkie swoje mecze, ale okreg obsadza tylko czesc
+# z nich: Superlige, ligi centralne i turnieje mlodziezowe obsadza zwiazek, a
+# konto wojewodzkie nie ma tam czego kliknac. Odpowiedz na pytanie „czy okreg
+# obsadza ten mecz" przychodzi z formularza obsady w ZPRP i kosztuje wejscie na
+# ich serwer, wiec ja zapisujemy. TTL i sens kodow leza w
+# `app.match_market_rules`.
+#
+# To jest PAMIEC PODRECZNA, nie zrodlo prawdy. Skasowanie tej tabeli w niczym
+# nie przeszkadza - sonda zapyta jeszcze raz.
+province_match_assignability = Table(
+    "province_match_assignability",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("assignable", Boolean, nullable=False),
+    # Kod odpowiedzi sondy: OK / NO_FORM / NO_OPTIONS / NO_ACCOUNT / PROBE_FAILED.
+    Column("reason", String, nullable=True),
+    # Nazwisko, ktore konto obsadowe widzialo w gniezdzie przy sprawdzaniu -
+    # wylacznie do diagnostyki, bo rozstrzyga swiezy odczyt przy zapisie.
+    Column("holder", String, nullable=True),
+    # Ktorym kontem pytalismy. Zmiana trybu w panelu uniewaznia stary werdykt.
+    Column("account_mode", String, nullable=True),
+    Column("checked_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
+
+# -------------------------
 # NEW: BAZA VIPs (logowania bez judgeId)
 # -------------------------
 

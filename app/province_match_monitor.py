@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -30,6 +29,15 @@ from app.db import (
     push_tokens,
 )
 from app.deps import get_settings
+# Konta wojewódzkie mieszkają w liściu, bo pytają o nie także moduł giełdy
+# meczów i panel administratora - a żadne z nich nie ma po co ciągnąć za sobą
+# całego crawlera. Nazwy zmiennych i reguła schodzenia do konta monitora są
+# tam opisane w jednym miejscu.
+from app.zprp_accounts import (  # noqa: F401  (re-eksport dla zgodności)
+    PROVINCE_ENV_SUFFIXES,
+    configured_provinces,
+    normalize_province,
+)
 from app.utils import fetch_with_correct_encoding
 from app.zprp.officials import (
     _build_judge_matches_path,
@@ -46,27 +54,6 @@ from app.zprp.schedule import (
 logger = logging.getLogger("app.province_match_monitor")
 WARSAW = ZoneInfo("Europe/Warsaw")
 
-# Suffixy są częścią publicznego kontraktu wdrożeniowego. Nie zmieniać ich bez
-# równoczesnej migracji zmiennych Railway.
-PROVINCE_ENV_SUFFIXES: Dict[str, str] = {
-    "DOLNOSLASKIE": "DOLNOSLASKIE",
-    "KUJAWSKO_POMORSKIE": "KUJAWSKO_POMORSKIE",
-    "LUBELSKIE": "LUBELSKIE",
-    "LUBUSKIE": "LUBUSKIE",
-    "LODZKIE": "LODZKIE",
-    "MALOPOLSKIE": "MALOPOLSKIE",
-    "MAZOWIECKIE": "MAZOWIECKIE",
-    "OPOLSKIE": "OPOLSKIE",
-    "PODKARPACKIE": "PODKARPACKIE",
-    "PODLASKIE": "PODLASKIE",
-    "POMORSKIE": "POMORSKIE",
-    "SLASKIE": "SLASKIE",
-    "SWIETOKRZYSKIE": "SWIETOKRZYSKIE",
-    "WARMINSKO_MAZURSKIE": "WARMINSKO_MAZURSKIE",
-    "WIELKOPOLSKIE": "WIELKOPOLSKIE",
-    "ZACHODNIOPOMORSKIE": "ZACHODNIOPOMORSKIE",
-}
-
 EVENT_NOTIFICATION_TITLES: Dict[str, str] = {
     "match_added": "🆕 Nowy mecz w obsadzie",
     "match_removed": "🗑️ Mecz usunięty",
@@ -79,37 +66,6 @@ EVENT_NOTIFICATION_TITLES: Dict[str, str] = {
 
 def notification_title(event_type: str) -> str:
     return EVENT_NOTIFICATION_TITLES.get(event_type, "🔔 Zmiana w Twoim meczu")
-
-
-def normalize_province(value: Any) -> str:
-    raw = unicodedata.normalize("NFD", str(value or ""))
-    raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
-    raw = re.sub(r"[^A-Z0-9]+", "_", raw.upper()).strip("_")
-    if raw.startswith("WOJEWODZTWO_"):
-        raw = raw[len("WOJEWODZTWO_") :]
-    aliases = {
-        "DOLNY_SLASK": "DOLNOSLASKIE",
-        "KUJAWSKO_POMORSKIE": "KUJAWSKO_POMORSKIE",
-        "LODZKIE": "LODZKIE",
-        "MALOPOLSKIE": "MALOPOLSKIE",
-        "SLASKIE": "SLASKIE",
-        "SWIETOKRZYSKIE": "SWIETOKRZYSKIE",
-        "WARMINSKO_MAZURSKIE": "WARMINSKO_MAZURSKIE",
-        "ZACHODNIO_POMORSKIE": "ZACHODNIOPOMORSKIE",
-    }
-    return aliases.get(raw, raw) if aliases.get(raw, raw) in PROVINCE_ENV_SUFFIXES else ""
-
-
-def configured_provinces() -> Dict[str, tuple[str, str]]:
-    result: Dict[str, tuple[str, str]] = {}
-    for province, suffix in PROVINCE_ENV_SUFFIXES.items():
-        username = os.getenv(f"ZPRP_SYNC_{suffix}_USERNAME", "").strip()
-        password = os.getenv(f"ZPRP_SYNC_{suffix}_PASSWORD", "").strip()
-        if username and password:
-            result[province] = (username, password)
-        elif username or password:
-            logger.warning("Province %s has only one Railway credential; sync disabled", province)
-    return result
 
 
 def _now() -> datetime:

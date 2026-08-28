@@ -9,7 +9,7 @@ import base64
 import datetime
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
@@ -19,6 +19,7 @@ from httpx import AsyncClient
 from pydantic import BaseModel
 
 from app.deps import Settings, get_settings, get_rsa_keys
+from app.match_market_rules import TRADEABLE_SLOTS as _TRADEABLE_SLOTS
 from app.utils import fetch_with_correct_encoding
 from app.zprp.schedule import _parse_matches_table
 
@@ -654,13 +655,329 @@ async def obsada_match_form_filtered(
         }
 
 
+def _norm_name(s: str) -> str:
+    """Nazwisko sprowadzone do porównania - jedna reguła na cały moduł."""
+    return " ".join((s or "").lower().strip().split())
+
+
+def _find_option_name(slot_data: dict, value: str) -> str:
+    """Nazwa opcji o tej wartości albo pusty string."""
+    for o in (slot_data.get("options") or []):
+        if str(o.get("value", "")).strip() == str(value or "").strip():
+            return (o.get("name") or "").strip()
+    return ""
+
+
+def _selected_name(slot_data: dict) -> str:
+    """Nazwa aktualnie wybranej opcji albo pusty string."""
+    sel_val = (slot_data.get("selected_value") or "").strip()
+    return _find_option_name(slot_data, sel_val) if sel_val else ""
+
+
+#: Gniazdo protokołu → nazwa pola w formularzu ZPRP. Pełna szóstka, bo moduł
+#: obsadowego zmienia każde pole. Giełda meczów używa węższego podzbioru -
+#: patrz `app.match_market_rules.TRADEABLE_SLOTS`.
+SLOT_TO_SELECT: Dict[str, str] = {
+    "sedzia1": "NrSedzia_pierwszy",
+    "sedzia2": "NrSedzia_drugi",
+    "delegat": "NrSedzia_delegat",
+    "delegat2": "NrSedzia_delegat2",
+    "sekretarz": "NrSedzia_sekretarz",
+    "czas": "NrSedzia_czas",
+}
+SELECT_TO_SLOT: Dict[str, str] = {v: k for k, v in SLOT_TO_SELECT.items()}
+
+
+#: Gniazda, o które pyta sonda uprawnień. Ta sama czwórka, którą wymienia
+#: giełda - import zamiast kopii, bo rozjazd tych dwóch list oznaczałby, że
+#: sonda przepuszcza mecz, którego zatwierdzenie i tak nie ma jak zapisać.
+_PROBE_SLOTS: Tuple[str, ...] = tuple(_TRADEABLE_SLOTS)
+
+
+async def probe_assignment_rights(
+    client: AsyncClient,
+    cookies: Dict[str, str],
+    id_zawody: str,
+    *,
+    slot: str = "",
+    user: str = "",
+    log_prefix: str = "obsada/probe",
+) -> Dict[str, Any]:
+    """Czy TO konto może ustawić obsadę TEGO meczu - pytanie zadane wprost ZPRP.
+
+    Sędzia widzi w aplikacji wszystkie swoje mecze, ale okręg obsadza tylko
+    część z nich. Superligę, ligi centralne i turnieje młodzieżowe obsadza
+    związek i konto wojewódzkie nie ma tam czego kliknąć. Bez tego sprawdzenia
+    sędzia wystawiłby taki mecz na giełdę, ktoś by się zgłosił, obsadowy by
+    zatwierdził - i dopiero wtedy okazałoby się, że zapisu nie ma jak wykonać.
+    Cała umowa dwóch osób poszłaby w niwecz na ostatnim kroku.
+
+    Odpowiedź bierzemy z tego samego formularza, którym zapisujemy obsadę, więc
+    pytanie i wykonanie chodzą tą samą drogą. Brak listy sędziów znaczy brak
+    uprawnień: ZPRP nie renderuje wtedy pól wyboru w ogóle.
+
+    Zwraca `assignable`, kod powodu i zdanie dla człowieka. NIE rzuca wyjątkiem
+    przy odmowie - odmowa jest tu odpowiedzią, nie awarią.
+    """
+    _, html = await fetch_with_correct_encoding(
+        client,
+        "/zawody_UstawSedziow.php",
+        method="POST",
+        data={"IdZawody": id_zawody, "akcja": "UstawSedziow", "user": user},
+        cookies=cookies,
+    )
+    _log_html(f"{log_prefix} (probe form)", html)
+    parsed = _parse_referee_form(html)
+    slots = parsed.get("slots") or {}
+
+    wanted = str(slot or "").strip()
+    labels = (wanted,) if wanted in _PROBE_SLOTS else _PROBE_SLOTS
+
+    rendered = _select_names_in(html)
+    present = [
+        label for label in labels
+        if slots.get(label, {}).get("select_name") in rendered
+    ]
+    counts = {label: len(slots.get(label, {}).get("options") or []) for label in labels}
+    holder = _selected_name(slots.get(wanted, {})) if wanted else ""
+
+    if not present:
+        logger.info("%s: mecz %s poza zasiegiem tego konta", log_prefix, id_zawody)
+        return {
+            "assignable": False,
+            "reason": "NO_FORM",
+            "message": (
+                "Tego meczu nie obsadza okręg - obsadę ustala związek, więc giełda nie "
+                "ma jak przekazać go innemu sędziemu."
+            ),
+            "holder": "",
+            "option_count": 0,
+            "fetched_at": _now_iso(),
+        }
+
+    if not any(counts.values()):
+        logger.info("%s: mecz %s ma puste listy sedziow", log_prefix, id_zawody)
+        return {
+            "assignable": False,
+            "reason": "NO_OPTIONS",
+            "message": (
+                "Konto obsadowe okręgu otwiera ten mecz, ale nie widzi przy nim żadnego "
+                "sędziego do wyboru - takiej zmiany nie da się zapisać."
+            ),
+            "holder": holder,
+            "option_count": 0,
+            "fetched_at": _now_iso(),
+        }
+
+    return {
+        "assignable": True,
+        "reason": "OK",
+        "message": "",
+        "holder": holder,
+        "option_count": max(counts.values()),
+        "fetched_at": _now_iso(),
+    }
+
+
+def _select_names_in(html: str) -> Set[str]:
+    """Nazwy pól `<select>` obecnych na stronie.
+
+    Puste `<select>` i brak `<select>` to dwie różne odpowiedzi ZPRP - pierwsza
+    znaczy „mecz jest Twój, ale nie ma kogo wybrać", druga „ten mecz nie jest
+    Twój". `_parse_select_options` zwraca w obu wypadkach pustą listę, więc
+    rozróżnienie musi przyjść stąd.
+    """
+    return set(re.findall(r'<select[^>]*?\s+name\s*=\s*["\']([^"\']+)', html or "", re.I))
+
+
+async def apply_referee_assignment(
+    client: AsyncClient,
+    cookies: Dict[str, str],
+    id_zawody: str,
+    changes: Dict[str, Tuple[Optional[str], Optional[str]]],
+    *,
+    user: str = "",
+    keep_hide_s: bool = False,
+    keep_hide_d: bool = False,
+    expect: Optional[Tuple[str, str]] = None,
+    require_name_match: bool = False,
+    log_prefix: str = "obsada/save",
+) -> Dict[str, Any]:
+    """Zapisuje obsadę meczu w ZPRP. JEDYNA droga zapisu w całej aplikacji.
+
+    `changes` to `{nazwa_pola: (wartość, nazwisko)}`; wartość `None` znaczy „nie
+    ruszaj tego gniazda" i wtedy jedzie to, co stoi w formularzu.
+
+    Trzy rzeczy, bez których ta funkcja nie działa, a wygląda, jakby działała:
+
+    1. **`akcja_edycja=ZAPISZ ZMIANY`**. Bez tego pola ZPRP traktuje wysyłkę jak
+       odświeżenie filtra: oddaje poprawną stronę, status 200, i nie zapisuje
+       nic.
+    2. **Rozwiązanie po NAZWISKU.** `value` opcji nie jest stałym numerem
+       sędziego - ZPRP przenumerowuje opcje zależnie od aktywnego filtra, więc
+       wartość wzięta z jednego widoku wskazuje kogo innego w drugim. Dlatego
+       numer wyliczamy z nazwiska na formularzu wczytanym przed chwilą.
+    3. **Weryfikacja po zapisie.** Sprawdzamy, czy w odpowiedzi siedzi ten
+       sędzia, o którego chodziło. Sukces bez tego sprawdzenia jest zgadywaniem.
+
+    `expect` to `(nazwa_pola, oczekiwane_nazwisko)` - strażnik dla giełdy
+    meczów: jeżeli gniazdo nie należy już do osoby, która wystawiła mecz, nie
+    zapisujemy NICZEGO. Ktoś zmienił obsadę poza aplikacją i jego decyzja jest
+    świeższa niż nasza.
+
+    `require_name_match` zamienia zapas „jedzie przysłana wartość" w odmowę.
+    Moduł obsadowego podaje wartość wziętą z formularza, który sam przed chwilą
+    oglądał, więc zapas ma tam sens. Giełda podaje SAMO nazwisko - wartości nie
+    zna i wysyła pustą - a pusta wartość w tym formularzu nie znaczy „zostaw",
+    tylko „wyczyść gniazdo". Sędzia, którego ZPRP nie dopuszcza do tych
+    rozgrywek, skasowałby w ten sposób obsadę zamiast ją przejąć.
+    """
+    # Krok 1: wczytanie formularza, dokładnie tak jak zrobiłaby przeglądarka.
+    # Stąd biorą się aktualne wartości i poprawne numery opcji.
+    _, load_html = await fetch_with_correct_encoding(
+        client,
+        "/zawody_UstawSedziow.php",
+        method="POST",
+        data={"IdZawody": id_zawody, "akcja": "UstawSedziow", "user": user},
+        cookies=cookies,
+    )
+    _log_html(f"{log_prefix} step1 (load form)", load_html)
+    current = _parse_referee_form(load_html)
+
+    if expect:
+        expect_select, expect_name = expect
+        slot_label = SELECT_TO_SLOT.get(expect_select, expect_select)
+        holder = _selected_name(current["slots"].get(slot_label, {}))
+        if _norm_name(holder) != _norm_name(expect_name):
+            logger.warning(
+                "%s: gniazdo %s nalezy do %r, oczekiwano %r - zapis wstrzymany",
+                log_prefix, slot_label, holder, expect_name,
+            )
+            return {
+                "success": False,
+                "code": "SLOT_CHANGED",
+                "fetched_at": _now_iso(),
+                "current_name": holder,
+                "verified_slots": {},
+                "error": (
+                    f"Obsada zmieniła się w bazie związku - w tym gnieździe jest teraz "
+                    f"{holder or 'nikt'}, a nie {expect_name}."
+                ),
+            }
+
+    # Krok 2: komplet pól, tak jak wysyła formularz - sześć selectów, radia
+    # filtrów i checkboxy. Wysłanie samego zmienionego pola kasuje resztę.
+    form_data: Dict[str, str] = {
+        "IdZawody": current["IdZawody"] or id_zawody,
+        "akcja": "UstawSedziow",
+        "akcja_edycja": "ZAPISZ ZMIANY",
+    }
+
+    for sel_name, slot_label in SELECT_TO_SLOT.items():
+        new_val, new_name = changes.get(sel_name, (None, None))
+        if new_val is None:
+            form_data[sel_name] = (
+                current["slots"].get(slot_label, {}).get("selected_value") or ""
+            )
+            continue
+
+        resolved_val = new_val
+        if new_name:
+            wanted = _norm_name(new_name)
+            options = current["slots"].get(slot_label, {}).get("options", [])
+            match = next(
+                (o for o in options if _norm_name(o.get("name", "")) == wanted), None
+            )
+            if match:
+                resolved_val = match["value"]
+                logger.info(
+                    "%s: %s %r -> value=%r (przyszlo %r)",
+                    log_prefix, slot_label, new_name, resolved_val, new_val,
+                )
+            elif require_name_match:
+                logger.warning(
+                    "%s: nazwiska %r nie ma wsrod %d opcji gniazda %s - zapis wstrzymany",
+                    log_prefix, new_name, len(options), slot_label,
+                )
+                return {
+                    "success": False,
+                    "code": "NAME_NOT_IN_OPTIONS",
+                    "fetched_at": _now_iso(),
+                    "verified_slots": {},
+                    "error": (
+                        f"{new_name} nie występuje na liście sędziów, których ZPRP "
+                        f"dopuszcza do tego meczu w roli {slot_label}."
+                    ),
+                }
+            else:
+                logger.warning(
+                    "%s: nazwiska %r nie ma wsrod %d opcji gniazda %s - jedzie wartosc %r",
+                    log_prefix, new_name, len(options), slot_label, new_val,
+                )
+        form_data[sel_name] = resolved_val
+
+    for filt_name in ("TypR", "Odl", "off"):
+        filt_val = current["filters"].get(filt_name, "")
+        if filt_val:
+            form_data[filt_name] = filt_val
+
+    if keep_hide_s or current.get("hide_obsada_s"):
+        form_data["ukryjObsade"] = "1"
+    if keep_hide_d or current.get("hide_obsada_d"):
+        form_data["ukryjObsadeD"] = "1"
+
+    # Krok 3: wysyłka.
+    _, html = await fetch_with_correct_encoding(
+        client,
+        "/zawody_UstawSedziow.php",
+        method="POST",
+        data=form_data,
+        cookies=cookies,
+    )
+    _log_html(f"{log_prefix} step3 (submit)", html)
+    parsed = _parse_referee_form(html)
+
+    # Krok 4: weryfikacja. Porównujemy NAZWISKA, bo numery opcji w odpowiedzi
+    # mogą być przenumerowane względem tych, które wysłaliśmy.
+    verification_ok = True
+    for sel_name, slot_label in SELECT_TO_SLOT.items():
+        sent_val, sent_name = changes.get(sel_name, (None, None))
+        if sent_val is None:
+            continue
+        got_name = _selected_name(parsed["slots"].get(slot_label, {}))
+        if sent_name:
+            if _norm_name(got_name) != _norm_name(sent_name):
+                logger.warning(
+                    "%s: weryfikacja gniazda %s - oczekiwano %r, jest %r",
+                    log_prefix, slot_label, sent_name, got_name,
+                )
+                verification_ok = False
+        elif not got_name and sent_val:
+            logger.warning("%s: gniazdo %s puste po zapisie", log_prefix, slot_label)
+            verification_ok = False
+
+    return {
+        "success": verification_ok,
+        "code": None if verification_ok else "VERIFICATION_FAILED",
+        "fetched_at": _now_iso(),
+        "verified_slots": {
+            label: {
+                "value": parsed["slots"].get(label, {}).get("selected_value"),
+                "name": _selected_name(parsed["slots"].get(label, {})),
+            }
+            for label in SELECT_TO_SLOT.values()
+        },
+        "error": None if verification_ok else "Zapis nie potwierdził się w bazie związku.",
+    }
+
+
 @router.post("/zprp/obsada/save")
 async def obsada_save(
     payload: ObsadaSaveRequest,
     settings: Settings = Depends(get_settings),
     keys=Depends(get_rsa_keys),
 ):
-    """Save referee assignment to ZPRP."""
+    """Zapis obsady z modułu obsadowego - dane logowania z telefonu."""
     private_key, _ = keys
     try:
         user_plain = _decrypt_field(private_key, payload.username)
@@ -668,169 +985,27 @@ async def obsada_save(
     except Exception as e:
         raise HTTPException(400, f"Decryption error: {e}")
 
+    changes: Dict[str, Tuple[Optional[str], Optional[str]]] = {
+        "NrSedzia_pierwszy": (payload.NrSedzia_pierwszy, payload.NrSedzia_pierwszy_name),
+        "NrSedzia_drugi": (payload.NrSedzia_drugi, payload.NrSedzia_drugi_name),
+        "NrSedzia_delegat": (payload.NrSedzia_delegat, payload.NrSedzia_delegat_name),
+        "NrSedzia_delegat2": (payload.NrSedzia_delegat2, payload.NrSedzia_delegat2_name),
+        "NrSedzia_sekretarz": (payload.NrSedzia_sekretarz, payload.NrSedzia_sekretarz_name),
+        "NrSedzia_czas": (payload.NrSedzia_czas, payload.NrSedzia_czas_name),
+    }
+
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
         cookies = await _login_zprp(client, user_plain, pass_plain)
         logger.info("ZPRP obsada/save: login ok IdZawody=%s", payload.IdZawody)
-
-        # Step 1: Load the form page first (like a browser would)
-        # This establishes session state and gives us current values + correct option IDs
-        load_resp, load_html = await fetch_with_correct_encoding(
+        return await apply_referee_assignment(
             client,
-            "/zawody_UstawSedziow.php",
-            method="POST",
-            data={"IdZawody": payload.IdZawody, "akcja": "UstawSedziow", "user": payload.user},
-            cookies=cookies,
+            cookies,
+            payload.IdZawody,
+            changes,
+            user=payload.user,
+            keep_hide_s=bool(payload.ukryjObsade),
+            keep_hide_d=bool(payload.ukryjObsadeD),
         )
-        _log_html("obsada/save step1 (load form)", load_html)
-        current = _parse_referee_form(load_html)
-
-        # Step 2: Build the complete form data — exactly as the browser would submit
-        # The HTML form sends: IdZawody, akcja, all 6 selects, filter radios, checkboxes
-        # CRITICAL: submit button name "akcja_edycja" with value "ZAPISZ ZMIANY" must be included
-        # Without it ZPRP treats it as a filter refresh, not a save!
-        form_data: Dict[str, str] = {
-            "IdZawody": current["IdZawody"] or payload.IdZawody,
-            "akcja": "UstawSedziow",
-            "akcja_edycja": "ZAPISZ ZMIANY",
-        }
-
-        # Merge current values with changes from payload
-        field_map = {
-            "NrSedzia_pierwszy": (payload.NrSedzia_pierwszy, payload.NrSedzia_pierwszy_name),
-            "NrSedzia_drugi": (payload.NrSedzia_drugi, payload.NrSedzia_drugi_name),
-            "NrSedzia_delegat": (payload.NrSedzia_delegat, payload.NrSedzia_delegat_name),
-            "NrSedzia_delegat2": (payload.NrSedzia_delegat2, payload.NrSedzia_delegat2_name),
-            "NrSedzia_sekretarz": (payload.NrSedzia_sekretarz, payload.NrSedzia_sekretarz_name),
-            "NrSedzia_czas": (payload.NrSedzia_czas, payload.NrSedzia_czas_name),
-        }
-        slot_to_select = {
-            "NrSedzia_pierwszy": "sedzia1",
-            "NrSedzia_drugi": "sedzia2",
-            "NrSedzia_delegat": "delegat",
-            "NrSedzia_delegat2": "delegat2",
-            "NrSedzia_sekretarz": "sekretarz",
-            "NrSedzia_czas": "czas",
-        }
-
-        def _norm(s: str) -> str:
-            return " ".join((s or "").lower().strip().split())
-
-        for sel_name, slot_label in slot_to_select.items():
-            new_val, new_name = field_map[sel_name]
-            if new_val is not None:
-                # User changed this slot — try to find correct value by NAME in step1 options
-                resolved_val = new_val  # fallback to sent value
-                if new_name:
-                    new_name_norm = _norm(new_name)
-                    step1_opts = current["slots"].get(slot_label, {}).get("options", [])
-                    logger.info("Name lookup attempt: slot=%s name=%r norm=%r opts_count=%d", slot_label, new_name, new_name_norm, len(step1_opts))
-                    # Log first 5 options for debugging
-                    for dbg_opt in step1_opts[:5]:
-                        logger.info("  step1 opt: value=%r name=%r norm=%r", dbg_opt.get("value"), dbg_opt.get("name"), _norm(dbg_opt.get("name", "")))
-                    found = False
-                    for opt in step1_opts:
-                        if _norm(opt.get("name", "")) == new_name_norm:
-                            resolved_val = opt["value"]
-                            logger.info("Name lookup SUCCESS: slot=%s name=%r -> value=%r (sent=%r)", slot_label, new_name, resolved_val, new_val)
-                            found = True
-                            break
-                    if not found:
-                        logger.warning("Name lookup FAILED: slot=%s name=%r not found in %d step1 options, using sent value=%r", slot_label, new_name, len(step1_opts), new_val)
-                form_data[sel_name] = resolved_val
-                logger.info("  SUBMIT %s = %r (name=%r)", sel_name, resolved_val, new_name)
-            else:
-                # Keep current value from form
-                cur_val = current["slots"].get(slot_label, {}).get("selected_value") or ""
-                form_data[sel_name] = cur_val
-
-        # Include current filter radios (keep them as-is)
-        for filt_name in ["TypR", "Odl", "off"]:
-            filt_val = current["filters"].get(filt_name, "")
-            if filt_val:
-                form_data[filt_name] = filt_val
-
-        # Checkboxes
-        if payload.ukryjObsade or current.get("hide_obsada_s"):
-            form_data["ukryjObsade"] = "1"
-        if payload.ukryjObsadeD or current.get("hide_obsada_d"):
-            form_data["ukryjObsadeD"] = "1"
-
-        logger.info("obsada/save step2: submitting form_data keys=%s", list(form_data.keys()))
-        for sel_name in slot_to_select:
-            logger.info("  %s = %r", sel_name, form_data.get(sel_name, ""))
-        # Step 3: Submit the complete form
-        resp, html = await fetch_with_correct_encoding(
-            client,
-            "/zawody_UstawSedziow.php",
-            method="POST",
-            data=form_data,
-            cookies=cookies,
-        )
-        _log_html("obsada/save step3 (submit)", html)
-
-        # Verify: re-parse the form to check if assignment took effect
-        parsed = _parse_referee_form(html)
-
-        # Build a lookup: option value → referee name for each slot from the original form
-        # We sent a value picked from one filtered view; ZPRP may re-index options in response.
-        # So verify by checking that the selected referee NAME matches the name we intended.
-        # First, find the name for each sent value from the response options list.
-        def _find_option_name(slot_data: dict, value: str) -> str:
-            """Find option name by value in the options list."""
-            for o in (slot_data.get("options") or []):
-                if str(o.get("value", "")).strip() == value.strip():
-                    return (o.get("name") or "").strip()
-            return ""
-
-        def _selected_name(slot_data: dict) -> str:
-            """Find the name of the currently selected option."""
-            sel_val = (slot_data.get("selected_value") or "").strip()
-            if not sel_val:
-                return ""
-            return _find_option_name(slot_data, sel_val)
-
-        verification_ok = True
-        for slot_label, sel_name in [
-            ("sedzia1", "NrSedzia_pierwszy"),
-            ("sedzia2", "NrSedzia_drugi"),
-            ("delegat", "NrSedzia_delegat"),
-            ("delegat2", "NrSedzia_delegat2"),
-            ("sekretarz", "NrSedzia_sekretarz"),
-            ("czas", "NrSedzia_czas"),
-        ]:
-            orig_val, orig_name = field_map.get(sel_name, (None, None))
-            if orig_val is None:
-                continue  # slot not changed by user, skip verification
-
-            # Check that the slot now has SOME selection
-            slot_data = parsed["slots"].get(slot_label, {})
-            got_selected_name = _selected_name(slot_data)
-
-            if orig_name:
-                # Verify by name match
-                if _norm(got_selected_name) == _norm(orig_name):
-                    logger.info("Verification OK slot=%s selected_name=%r", slot_label, got_selected_name)
-                else:
-                    logger.warning("Verification MISMATCH slot=%s expected_name=%r got_name=%r", slot_label, orig_name, got_selected_name)
-                    verification_ok = False
-            elif not got_selected_name and orig_val:
-                logger.warning("Verification: slot=%s no selection in response (sent val=%r)", slot_label, orig_val)
-                verification_ok = False
-            else:
-                logger.info("Verification OK slot=%s selected_name=%r", slot_label, got_selected_name)
-
-        return {
-            "success": verification_ok,
-            "fetched_at": _now_iso(),
-            "verified_slots": {
-                label: {
-                    "value": parsed["slots"].get(label, {}).get("selected_value"),
-                    "name": _selected_name(parsed["slots"].get(label, {})),
-                }
-                for label in ["sedzia1", "sedzia2", "delegat", "delegat2", "sekretarz", "czas"]
-            },
-            "error": None if verification_ok else "Verification failed — selected values don't match sent values",
-        }
 
 
 @router.post("/zprp/obsada/hall-form")
