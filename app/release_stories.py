@@ -14,7 +14,7 @@ from typing import Any, Literal, Optional
 import jwt
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Security, UploadFile, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, insert, select, update
 from starlette.concurrency import run_in_threadpool
@@ -54,6 +54,30 @@ MAX_VIDEO_DURATION_SECONDS = 10.0
 MAX_SLIDES = 12
 SIGNED_URL_TTL_SECONDS = 24 * 60 * 60
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+TARGET_RATIO = 9 / 16
+VIDEO_OUTPUT_WIDTH = 720
+VIDEO_OUTPUT_HEIGHT = 1280
+IMAGE_OUTPUT_WIDTH = 1080
+IMAGE_OUTPUT_HEIGHT = 1920
+# Materiał nigdy nie jest odrzucany za proporcje - zawsze wychodzi 9:16.
+# Blisko celu (nagranie 1080x1920, drobne przycięcie eksportu) dosuwamy kadr,
+# bo ścięcia nikt nie zauważy. Dalej od celu - a tak wygląda każde nagranie
+# ekranu z telefonu 20:9 - kadrowanie zjadłoby pasek stanu i dolne menu, więc
+# cały materiał wpasowujemy w środek, a tło robimy z jego rozmytego zbliżenia.
+MIN_VISIBLE_FRACTION_FOR_CROP = 0.9
+
+
+def _visible_fraction_after_crop(width: int, height: int) -> float:
+    """Jaka część materiału przetrwałaby dosunięcie kadru do 9:16 (1.0 = całość)."""
+    if width <= 0 or height <= 0:
+        return 0.0
+    ratio = width / height
+    return min(ratio / TARGET_RATIO, TARGET_RATIO / ratio)
+
+
+def _needs_blur_frame(width: int, height: int) -> bool:
+    return _visible_fraction_after_crop(width, height) < MIN_VISIBLE_FRACTION_FOR_CROP
 
 
 class ReleaseStorySlide(BaseModel):
@@ -247,26 +271,52 @@ def _prepare_image(raw: bytes) -> tuple[bytes, int, int]:
     width, height = image.size
     if width <= 0 or height <= 0:
         raise HTTPException(status_code=422, detail="Nieprawidłowe wymiary obrazu.")
-    ratio = width / height
-    target_ratio = 9 / 16
-    if abs(ratio - target_ratio) > 0.025:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Grafika musi mieć proporcje 9:16 (otrzymano {width}×{height}).",
-        )
 
-    # Wyrównujemy drobne różnice po cropie i ograniczamy koszt pamięci na telefonie.
-    if width >= 1080 and height >= 1920:
-        out_w, out_h = 1080, 1920
+    # Płótno zawsze 9:16, ograniczone do 1080x1920 - tyle wystarczy telefonowi.
+    out_w, out_h = _image_canvas(width, height)
+    if _needs_blur_frame(width, height):
+        image = _blurred_frame(image, out_w, out_h)
     else:
-        out_w = max(360, width - (width % 9))
-        out_h = int(out_w * 16 / 9)
-    image = ImageOps.fit(image, (out_w, out_h), method=Image.Resampling.LANCZOS)
+        image = ImageOps.fit(image, (out_w, out_h), method=Image.Resampling.LANCZOS)
     if image.mode not in ("RGB", "RGBA"):
         image = image.convert("RGB")
     output = io.BytesIO()
     image.save(output, format="WEBP", quality=88, method=6)
     return output.getvalue(), out_w, out_h
+
+
+def _image_canvas(width: int, height: int) -> tuple[int, int]:
+    """Rozmiar płótna 9:16 pod dany materiał, nie większy niż 1080x1920.
+
+    Płótno musi pomieścić materiał BEZ pomniejszania (stąd wysokość liczona też
+    z szerokości), inaczej kwadratowa albo pozioma grafika lądowałaby w kadrze
+    mniejszym od siebie i traciła ostrość bez powodu.
+    """
+    needed_h = max(height, (width * 16 + 8) // 9)
+    out_h = min(IMAGE_OUTPUT_HEIGHT, max(640, needed_h - (needed_h % 16)))
+    return out_h * 9 // 16, out_h
+
+
+def _blurred_frame(image: Image.Image, out_w: int, out_h: int) -> Image.Image:
+    """Cały materiał w środku, tło z rozmytego zbliżenia tego samego kadru."""
+    filled = ImageOps.fit(image, (out_w, out_h), method=Image.Resampling.LANCZOS)
+    # Rozmycie liczone na miniaturze: ten sam efekt, ułamek kosztu.
+    small = filled.resize(
+        (max(8, out_w // 16), max(8, out_h // 16)), Image.Resampling.LANCZOS
+    )
+    background = (
+        small.filter(ImageFilter.GaussianBlur(4))
+        .resize((out_w, out_h), Image.Resampling.LANCZOS)
+        .convert("RGB")
+    )
+    foreground = image.copy()
+    foreground.thumbnail((out_w, out_h), Image.Resampling.LANCZOS)
+    box = ((out_w - foreground.width) // 2, (out_h - foreground.height) // 2)
+    if foreground.mode == "RGBA":
+        background.paste(foreground, box, foreground)
+    else:
+        background.paste(foreground.convert("RGB"), box)
+    return background
 
 
 def _run_media_command(command: list[str], error_detail: str) -> subprocess.CompletedProcess[str]:
@@ -321,6 +371,81 @@ def _video_metadata(path: Path) -> tuple[float, int, int]:
     return duration, width, height
 
 
+def _video_crop_args() -> list[str]:
+    """Dosunięcie kadru do 9:16 - działa na każdym FFmpeg, więc też jako awaryjne."""
+    box = f"{VIDEO_OUTPUT_WIDTH}:{VIDEO_OUTPUT_HEIGHT}"
+    return [
+        "-vf",
+        f"scale={box}:force_original_aspect_ratio=increase,crop={box},setsar=1,fps=30",
+    ]
+
+
+def _video_frame_args(width: int, height: int) -> list[str]:
+    """Argumenty FFmpeg sprowadzające dowolny materiał do 720x1280.
+
+    Proporcje nie są warunkiem wstępu - są zadaniem do wykonania. Blisko 9:16
+    dosuwamy kadr, dalej (nagranie ekranu 20:9, poziomy klip) wpasowujemy całość
+    na rozmyte tło, żeby nic z obrazu nie zniknęło.
+    """
+    box = f"{VIDEO_OUTPUT_WIDTH}:{VIDEO_OUTPUT_HEIGHT}"
+    if not _needs_blur_frame(width, height):
+        return _video_crop_args()
+
+    # Tło rozmywamy na miniaturze - boxblur na pełnej klatce kosztuje kilka razy
+    # więcej, a różnicy nie widać pod materiałem na wierzchu.
+    bg_w = max(2, VIDEO_OUTPUT_WIDTH // 8)
+    bg_h = max(2, VIDEO_OUTPUT_HEIGHT // 8)
+    graph = (
+        f"[0:v]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,"
+        f"crop={bg_w}:{bg_h},boxblur=6:2,scale={box},setsar=1[bg];"
+        # Wymiar liczony wyrażeniem, nie przez force_divisible_by: ta opcja
+        # pojawiła się dopiero w FFmpeg 4.4, a obraz bazowy bywa starszy.
+        # "-2" pilnuje parzystości, której wymaga yuv420p.
+        f"[0:v]scale=w='if(gt(a,{VIDEO_OUTPUT_WIDTH}/{VIDEO_OUTPUT_HEIGHT}),"
+        f"{VIDEO_OUTPUT_WIDTH},-2)':h='if(gt(a,"
+        f"{VIDEO_OUTPUT_WIDTH}/{VIDEO_OUTPUT_HEIGHT}),-2,{VIDEO_OUTPUT_HEIGHT})':"
+        f"flags=lanczos,setsar=1[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=30,format=yuv420p[v]"
+    )
+    # Ścieżka dźwięku bywa nieobecna (nagranie ekranu bez audio) - stąd "?".
+    return ["-filter_complex", graph, "-map", "[v]", "-map", "0:a?"]
+
+
+def _video_encode_command(source: Path, output: Path, frame_args: list[str]) -> list[str]:
+    return [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source),
+        "-map_metadata",
+        "-1",
+        *frame_args,
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "high",
+        "-level",
+        "4.0",
+        "-preset",
+        "medium",
+        "-crf",
+        "22",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        "-t",
+        f"{MAX_VIDEO_DURATION_SECONDS:.1f}",
+        str(output),
+    ]
+
+
 def _prepare_video(raw: bytes, suffix: str) -> tuple[bytes, bytes, int, int, int]:
     with tempfile.TemporaryDirectory(prefix="baza-release-") as temp_dir:
         directory = Path(temp_dir)
@@ -340,48 +465,28 @@ def _prepare_video(raw: bytes, suffix: str) -> tuple[bytes, bytes, int, int, int
                 status_code=422,
                 detail="Film może trwać maksymalnie 10 sekund.",
             )
-        if width <= 0 or height <= 0 or abs(width / height - 9 / 16) > 0.035:
+        if width <= 0 or height <= 0:
             raise HTTPException(
                 status_code=422,
-                detail=f"Film musi mieć proporcje 9:16 (otrzymano {width}×{height}).",
+                detail="Film nie zawiera poprawnego obrazu.",
             )
 
-        _run_media_command(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(source),
-                "-map_metadata",
-                "-1",
-                "-vf",
-                "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=30",
-                "-c:v",
-                "libx264",
-                "-profile:v",
-                "high",
-                "-level",
-                "4.0",
-                "-preset",
-                "medium",
-                "-crf",
-                "22",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-ac",
-                "2",
-                "-movflags",
-                "+faststart",
-                "-t",
-                f"{MAX_VIDEO_DURATION_SECONDS:.1f}",
-                str(output),
-            ],
-            "Nie udało się zoptymalizować filmu. Spróbuj wyeksportować go jako MP4 H.264.",
-        )
+        # Rozmyta plansza to komfort, nie warunek wejścia. Gdyby FFmpeg na
+        # serwerze nie przyjął tego filtra, film ma i tak wyjść - wtedy po
+        # prostu z kadrowaniem. Odrzucenie materiału jest ostatecznością.
+        attempts = [_video_frame_args(width, height)]
+        if attempts[0] != _video_crop_args():
+            attempts.append(_video_crop_args())
+        for index, frame_args in enumerate(attempts):
+            try:
+                _run_media_command(
+                    _video_encode_command(source, output, frame_args),
+                    "Nie udało się zoptymalizować filmu. Spróbuj wyeksportować go jako MP4 H.264.",
+                )
+                break
+            except HTTPException:
+                if index == len(attempts) - 1:
+                    raise
         final_duration, _, _ = _video_metadata(output)
         poster_at = min(0.4, max(0.05, final_duration * 0.12))
         _run_media_command(
@@ -574,7 +679,7 @@ def _clean_and_validate_slides(
         if publishing and (not media_key or not str(slide.get("title") or "").strip()):
             raise HTTPException(
                 status_code=422,
-                detail=f"Slajd {position + 1} wymaga materiału 9:16 i tytułu przed publikacją.",
+                detail=f"Slajd {position + 1} wymaga materiału i tytułu przed publikacją.",
             )
         slide["media_key"] = media_key or None
         slide["poster_key"] = poster_key or None
@@ -703,7 +808,7 @@ async def delete_release_story(version_id: int, _admin: str = Depends(require_re
 @router.post(
     "/admin/versions/{version_id}/release-story/assets",
     status_code=status.HTTP_201_CREATED,
-    summary="Wgraj grafikę lub film 9:16 do Cloudflare R2",
+    summary="Wgraj grafikę lub film do Cloudflare R2 (dowolne proporcje, wyjście 9:16)",
 )
 async def upload_release_story_asset(
     version_id: int,
