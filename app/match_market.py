@@ -567,6 +567,14 @@ async def get_context(actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
     okręgu - ekran ma wtedy co napisać zamiast pustej listy bez wyjaśnienia.
     """
     cfg = await _config(actor.province) if actor.province else None
+    # Czy zatwierdzona wymiana ma dzis czym pojechac do bazy zwiazku. Ekran
+    # pyta o to raz, przy wejsciu - wczesniej kosztowalo to osobne wywolanie
+    # `/my-matches` przy kazdym odswiezeniu listy.
+    account_ready = (
+        bool(assign_credentials(actor.province, cfg["assign_account_mode"])["configured"])
+        if cfg
+        else False
+    )
     return {
         "judgeId": actor.judge_id,
         "province": actor.province,
@@ -578,6 +586,7 @@ async def get_context(actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
         "enabled": bool(cfg and cfg["market_enabled"]),
         "deadlineHours": cfg["offer_deadline_hours"] if cfg else DEFAULT_DEADLINE_HOURS,
         "approverBadge": APPROVER_BADGE,
+        "accountReady": account_ready,
     }
 
 
@@ -764,6 +773,18 @@ async def _offer_payload(
         "from": _person(_s(offer.get("from_judge_id")), cards.get(_s(offer.get("from_judge_id")))),
         "isMine": _s(offer.get("from_judge_id")) == _s(viewer_id),
         "claimCount": len([c for c in claims if _s(c.get("status")) == "pending"]),
+        # Kto przejal mecz - historia ma powiedziec „oddany KOWALSKIEMU", a nie
+        # samo „przekazany". Nazwisko wybranego jest juz jawne dla obu stron
+        # wymiany, wiec nie odslania niczego nowego.
+        "takerName": next(
+            (
+                _s((cards.get(_s(c.get("judge_id"))) or {}).get("full_name"))
+                for c in claims
+                if _s(c.get("status")) == "chosen"
+            ),
+            "",
+        )
+        or None,
         "myClaim": next(
             (
                 {"id": c["id"], "status": _s(c.get("status")), "note": _s(c.get("note")) or None}
@@ -826,7 +847,17 @@ async def list_offers(
 
     rows = [_row(r) for r in await database.fetch_all(query.limit(200))]
     claims = await _claims_for([int(r["id"]) for r in rows])
-    cards = await _judges_by_id([_s(r["from_judge_id"]) for r in rows])
+    # Wizytowki obejmuja oddajacych ORAZ tych, ktorzy juz mecz przejeli -
+    # bez tego drugiego historia nie ma czym podpisac wpisu.
+    cards = await _judges_by_id(
+        [_s(r["from_judge_id"]) for r in rows]
+        + [
+            _s(c.get("judge_id"))
+            for group in claims.values()
+            for c in group
+            if _s(c.get("status")) == "chosen"
+        ]
+    )
 
     return {
         "scope": scope,
