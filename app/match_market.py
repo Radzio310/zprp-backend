@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from httpx import AsyncClient
 from pydantic import BaseModel
 from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
     database,
@@ -383,24 +384,20 @@ async def _store_verdict(
         "account_mode": _s(mode),
         "checked_at": _now(),
     }
-    updated = await database.execute(
-        update(province_match_assignability)
-        .where(province_match_assignability.c.province == province)
-        .where(province_match_assignability.c.match_id == _s(match_id))
-        .values(**values)
+    # Upsert jedna instrukcja, jak w monitorze meczow i w `admin.py`. Dwie sondy
+    # potrafia trafic na ten sam mecz w tej samej sekundzie - przy zapisie w
+    # dwoch krokach jedna z nich przewrocilaby sie o unikat klucza glownego.
+    await database.execute(
+        pg_insert(province_match_assignability)
+        .values(province=province, match_id=_s(match_id), **values)
+        .on_conflict_do_update(
+            index_elements=[
+                province_match_assignability.c.province,
+                province_match_assignability.c.match_id,
+            ],
+            set_=values,
+        )
     )
-    if not updated:
-        try:
-            await database.execute(
-                insert(province_match_assignability).values(
-                    province=province, match_id=_s(match_id), **values
-                )
-            )
-        except Exception:  # noqa: BLE001
-            # Wyscig dwoch sond o ten sam mecz. Wiersz i tak powstal, a tresc
-            # jest ta sama - to nie jest powod, zeby wywrocic czyjes wejscie na
-            # ekran.
-            logger.debug("gielda: werdykt %s/%s juz zapisany", province, match_id)
 
 
 async def _probe(

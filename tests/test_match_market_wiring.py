@@ -203,3 +203,17 @@ def test_the_gate_cannot_be_skipped_by_a_missing_account():
     source = ast.unparse(FUNCTIONS["_require_assignable"])
     assert "assign_credentials" in source
     assert "NO_ACCOUNT" in source
+
+
+def test_verdict_is_written_with_a_single_upsert():
+    """Dwie sondy potrafią trafić na ten sam mecz w tej samej sekundzie.
+
+    Zapis w dwóch krokach (update, a jak nie poszło to insert) przewracał się
+    wtedy o unikat klucza głównego - a `databases` i tak nie oddaje pewnej
+    liczby zmienionych wierszy, więc krok pierwszy nie miał jak rozstrzygnąć,
+    czy trafił. Stąd jedna instrukcja, jak w monitorze meczów i w `admin.py`.
+    """
+    calls = calls_in("_store_verdict")
+    assert "pg_insert" in calls
+    assert "on_conflict_do_update" in calls
+    assert "update" not in calls
