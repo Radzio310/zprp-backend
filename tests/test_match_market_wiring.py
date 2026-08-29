@@ -217,3 +217,28 @@ def test_verdict_is_written_with_a_single_upsert():
     assert "pg_insert" in calls
     assert "on_conflict_do_update" in calls
     assert "update" not in calls
+
+
+def test_my_matches_reads_the_district_schedule_not_the_push_list():
+    """Sędzia bez zgody na powiadomienia też musi móc oddać mecz.
+
+    `province_match_judges` powstaje z list meczów pobieranych wyłącznie dla
+    sędziów z zarejestrowanym tokenem push, a token powstaje dopiero po zgodzie
+    na powiadomienia. Oparcie o tę tabelę dawało takiemu sędziemu pustą listę
+    bez słowa wyjaśnienia - a on po prostu odmówił powiadomień.
+
+    Terminarz województwa jest niezależny od tego, kto ma aplikację.
+    """
+    source = ast.unparse(FUNCTIONS["my_matches"])
+    assert "province_matches" in source
+    assert "province_match_judges" not in source
+    # O tym, który mecz jest mój, rozstrzyga ta sama reguła, co przy wystawianiu.
+    assert "slots_held_by" in calls_in("my_matches")
+
+
+def test_the_schedule_scan_is_bounded_and_says_so():
+    # Skan terminarza ma bezpiecznik, więc granice muszą być nazwane, a nie
+    # wpisane liczbą w środku zapytania.
+    source = ast.unparse(FUNCTIONS["my_matches"])
+    assert "MY_MATCHES_SCAN_LIMIT" in source
+    assert "MY_MATCHES_HORIZON_DAYS" in source

@@ -41,6 +41,7 @@ from app.db import (
     match_market_claims,
     match_market_offers,
     province_judges,
+    push_tokens,
     province_match_assignability,
     province_match_judges,
     province_matches,
@@ -50,7 +51,6 @@ from app.deps import Settings, get_jwt_payload, get_settings
 from app.match_market_access import (
     APPROVER_BADGE,
     approver_judge_ids,
-    has_approver_badge,
     may_approve,
     may_manage_config,
 )
@@ -62,6 +62,7 @@ from app.match_market_rules import (
     assignability_message,
     can_offer,
     deadline_for,
+    market_pushes_allowed,
     may_claim,
     next_claim_status,
     next_offer_status,
@@ -312,6 +313,19 @@ async def _same_day_matches(
 #: aplikacja pojawi sie w ich logach jako zrodlo klopotow.
 _PROBE_CONCURRENCY = 3
 
+#: Jak daleko w przod siega lista „moich meczow".
+#:
+#: Cztery miesiace to caly rundowy horyzont okregu. Dalej i tak nie ma czego
+#: oddawac, a kazdy dodatkowy tydzien to wiecej stanow meczow do przejrzenia.
+MY_MATCHES_HORIZON_DAYS = 120
+
+#: Ile meczow terminarza przegladamy, szukajac swoich.
+#:
+#: Wojewodztwo rozgrywa w sezonie rzedu kilkuset spotkan; ten limit jest
+#: bezpiecznikiem, a nie miara. Gdyby okazal sie ciasny, lista skroci sie od
+#: konca - czyli od meczow najdalszych, ktorych i tak nie da sie jeszcze oddac.
+MY_MATCHES_SCAN_LIMIT = 600
+
 
 def _verdict_view(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Werdykt sondy w postaci, ktora rozumie ekran."""
@@ -515,6 +529,44 @@ async def _notify(judge_ids: List[str], title: str, body: str, offer: Dict[str, 
         logger.warning("giełda: powiadomienie nieudane", exc_info=True)
 
 
+async def _broadcast_targets(province: str, exclude: str) -> List[str]:
+    """Sedziowie okregu, ktorzy CHCA wiedziec o nowej ofercie.
+
+    To jedyne powiadomienie gieldy wysylane do wszystkich naraz, wiec jedyne,
+    ktore ma wlasny wylacznik. Reszta - „ktos zglosil sie na TWOJ mecz",
+    „wymiane zatwierdzono", „zapis nie przeszedl" - to nastepstwa wlasnych
+    czynnosci adresata i nie chowaja sie za przelacznikiem od listy ofert.
+
+    Preferencje siedza per instalacja, bo ten sam sedzia miewa dwa telefony.
+    Wystarczy, ze JEDNO urzadzenie chce - powiadomienie i tak rozejdzie sie
+    na wszystkie jego urzadzenia, a cisza na wszystkich naraz jest tym, o co
+    prosi ten, kto przelaczyl wylacznik wszedzie.
+    """
+    rows = await database.fetch_all(
+        select(
+            push_tokens.c.judge_id,
+            push_tokens.c.notification_prefs,
+        )
+        .where(push_tokens.c.app_variant == "baza")
+        .where(push_tokens.c.judge_id.is_not(None))
+    )
+    known = await database.fetch_all(
+        select(province_judges.c.judge_id).where(province_judges.c.province == province)
+    )
+    in_province = {_s(_row(r)["judge_id"]) for r in known}
+
+    wanted: Dict[str, bool] = {}
+    for raw in rows:
+        data = _row(raw)
+        judge_id = _s(data.get("judge_id"))
+        if not judge_id or judge_id == _s(exclude) or judge_id not in in_province:
+            continue
+        wanted[judge_id] = wanted.get(judge_id, False) or market_pushes_allowed(
+            data.get("notification_prefs")
+        )
+    return sorted(j for j, ok in wanted.items() if ok)
+
+
 async def _approvers_of(province: str) -> List[str]:
     rows = await database.fetch_all(
         select(
@@ -608,6 +660,19 @@ async def my_matches(
     cfg = await _require_enabled(province)
     now = _now()
 
+    # Czytamy TERMINARZ okregu, a nie liste `province_match_judges`.
+    #
+    # Tamta tabela powstaje z listy meczow sedziego, ktora monitor pobiera
+    # wylacznie dla sedziow majacych zarejestrowany token push - a token powstaje
+    # dopiero, gdy ktos zgodzi sie na powiadomienia. Sedzia, ktory odmowil, nie
+    # mial tam ani jednego wiersza i gielda pokazywala mu pusta liste bez slowa
+    # wyjasnienia. Terminarz wojewodztwa jest niezalezny od tego, kto ma
+    # aplikacje: wypelnia go pelny przebieg monitora kontem okregu.
+    #
+    # O tym, ktory mecz jest MOJ, rozstrzyga `slots_held_by` - numer sedziego
+    # przed nazwiskiem, dokladnie jak przy wystawianiu oferty. Dzieki temu lista
+    # i bramka `POST /offers` odpowiadaja na to samo pytanie tak samo.
+    horizon = now + timedelta(days=MY_MATCHES_HORIZON_DAYS)
     rows = await database.fetch_all(
         select(
             province_matches.c.match_id,
@@ -616,27 +681,19 @@ async def my_matches(
             province_matches.c.state_json,
             province_matches.c.approved,
         )
-        .select_from(
-            province_match_judges.join(
-                province_matches,
-                and_(
-                    province_match_judges.c.province == province_matches.c.province,
-                    province_match_judges.c.match_id == province_matches.c.match_id,
-                ),
-            )
-        )
-        .where(province_match_judges.c.province == province)
-        .where(province_match_judges.c.judge_id == actor.judge_id)
-        .where(province_match_judges.c.active.is_(True))
+        .where(province_matches.c.province == province)
         .where(province_matches.c.active.is_(True))
         .where(
             or_(
                 province_matches.c.match_at.is_(None),
-                province_matches.c.match_at >= now,
+                and_(
+                    province_matches.c.match_at >= now,
+                    province_matches.c.match_at <= horizon,
+                ),
             )
         )
-        .order_by(province_matches.c.match_at.asc())
-        .limit(200)
+        .order_by(province_matches.c.match_at.asc().nulls_last())
+        .limit(MY_MATCHES_SCAN_LIMIT)
     )
 
     match_ids = [_s(_row(r)["match_id"]) for r in rows]
@@ -948,17 +1005,11 @@ async def create_offer(
         "match_code": _s(data.get("match_code")),
         "slot": slot,
     }
-    # Zainteresowani to sędziowie okręgu, którzy mają aplikację - reszta i tak
-    # zobaczy ofertę przy najbliższym wejściu na ekran.
-    others = await database.fetch_all(
-        select(province_judges.c.judge_id).where(province_judges.c.province == province)
-    )
+    # Zainteresowani to sędziowie okręgu, którzy mają aplikację i nie wyłączyli
+    # powiadomień giełdy - reszta i tak zobaczy ofertę przy najbliższym wejściu
+    # na ekran.
     await _notify(
-        [
-            _s(_row(r)["judge_id"])
-            for r in others
-            if _s(_row(r)["judge_id"]) != actor.judge_id
-        ],
+        await _broadcast_targets(province, actor.judge_id),
         "🔁 Mecz do wzięcia",
         f"{actor.full_name or 'Sędzia'} oddaje {_offer_line(offer)}.",
         offer,

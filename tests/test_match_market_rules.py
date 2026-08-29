@@ -14,6 +14,7 @@ from app.match_market_rules import (
     PROBE_BATCH_LIMIT,
     assignability_is_fresh,
     assignability_message,
+    market_pushes_allowed,
     DEFAULT_DEADLINE_HOURS,
     LIVE_OFFER_STATUSES,
     TRADEABLE_SLOTS,
@@ -331,3 +332,40 @@ def test_probe_limit_is_reported_not_guessed():
     # bo ekran pokazuje, ile meczów zostało niesprawdzonych.
     assert PROBE_BATCH_LIMIT > 0
     assert ASSIGNABILITY_TTL_HOURS > 0
+
+
+# ── Przełącznik powiadomień ─────────────────────────────────────────────────
+#
+# Rozsyłka o nowej ofercie idzie do CAŁEGO województwa i jest jedynym
+# powiadomieniem giełdy, które trafia do ludzi niezwiązanych z konkretną
+# wymianą. Dlatego jako jedyne ma własny wyłącznik.
+
+
+def test_market_broadcast_is_on_by_default():
+    # Moduł ma działać od razu po włączeniu w okręgu, a nie dopiero po tym, jak
+    # każdy sędzia odszuka przełącznik w ustawieniach.
+    assert market_pushes_allowed(None)
+    assert market_pushes_allowed({})
+    assert market_pushes_allowed({"notificationTypes": {}})
+
+
+def test_global_switch_wins():
+    assert not market_pushes_allowed({"enabled": False})
+
+
+def test_market_switch_can_be_turned_off():
+    assert not market_pushes_allowed({"notificationTypes": {"matchMarket": False}})
+
+
+def test_other_switches_do_not_silence_the_market():
+    # Sędzia, który wyłączył powiadomienia o zmianach składu, nadal chce
+    # wiedzieć, że ktoś oddaje mecz.
+    assert market_pushes_allowed(
+        {"notificationTypes": {"changeLineup": False, "newMatchAdded": False}}
+    )
+
+
+def test_broken_prefs_do_not_silence_anyone():
+    # Zepsuty kształt preferencji to nie jest zgoda na ciszę.
+    assert market_pushes_allowed("cokolwiek")
+    assert market_pushes_allowed({"notificationTypes": "cokolwiek"})

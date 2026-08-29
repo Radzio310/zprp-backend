@@ -365,3 +365,26 @@ def assignability_is_fresh(
     if hours <= 0:
         return False
     return checked_at + timedelta(hours=hours) > now
+
+
+def market_pushes_allowed(prefs: Any) -> bool:
+    """Czy na to urządzenie wolno wysłać ROZSYŁKĘ o nowej ofercie.
+
+    Dotyczy wyłącznie jednego powiadomienia: „ktoś oddaje mecz", które idzie do
+    całego województwa. Reszta - „ktoś zgłosił się na TWÓJ mecz", „wymianę
+    zatwierdzono", „zapis nie przeszedł" - to następstwa własnych czynności
+    adresata i nie chowa się za przełącznikiem od cudzych ofert.
+
+    Kształt preferencji jest ten sam, co w monitorze meczów
+    (`_prefs_allow`): brak wpisu znaczy ZGODA, bo moduł ma działać od razu po
+    włączeniu w okręgu, a nie dopiero po tym, jak każdy sędzia odszuka
+    przełącznik w ustawieniach.
+    """
+    if not isinstance(prefs, dict):
+        return True
+    if prefs.get("enabled") is False:
+        return False
+    types = prefs.get("notificationTypes")
+    if not isinstance(types, dict):
+        return True
+    return types.get("matchMarket", True) is not False
