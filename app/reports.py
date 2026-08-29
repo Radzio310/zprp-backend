@@ -33,6 +33,7 @@ from app.db import (
     user_report_messages,
     user_reports,
 )
+from app.admin_alerts import notify_admins
 from app.push.push import send_push_to_judges
 from app.schemas import (
     CreateUserReportRequest,
@@ -276,18 +277,19 @@ def _maybe_cleanup() -> None:
 # ─────────────────────────── powiadomienia ───────────────────────────
 
 async def _notify_admins_new_report(report_id: int, name: str, type_key: str, preview: str) -> None:
-    try:
-        ids = await _admin_ids()
-        if not ids:
-            return
-        await send_push_to_judges(
-            ids,
-            title=f"🚨 Nowe zgłoszenie — {TYPE_LABELS.get(type_key, 'Zgłoszenie')}",
-            body=f"👤 {name}\n„{preview}”",
-            data={"type": "admin_new_report", "report_id": str(report_id)},
-        )
-    except Exception as e:
-        logger.warning("_notify_admins_new_report: %s", e)
+    """Nowe zgłoszenie → administratorzy.
+
+    Idzie wspólną drogą (`app.admin_alerts`), żeby wyłącznik powiadomień
+    administracyjnych działał tu tak samo jak przy pozostałych zdarzeniach.
+    Wcześniej ten moduł miał własną wysyłkę i nie dało się go wyciszyć.
+    """
+    await notify_admins(
+        "new_report",
+        TYPE_LABELS.get(type_key, "Zgłoszenie"),
+        f"👤 {name}\n„{preview}”",
+        reference=report_id,
+        extra={"report_id": report_id},
+    )
 
 
 async def _notify_user_reply(report_id: int, judge_id: str, title: str) -> None:

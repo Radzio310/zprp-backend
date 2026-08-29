@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import hashlib
 import time
 from typing import Any, Dict, Optional
 
@@ -133,6 +134,37 @@ async def _get_access_token() -> str:
     _access_token_cache["exp"] = exp
     return token
 
+def notification_tag(data: Optional[Dict[str, Any]], title: str, body: str) -> str:
+    """Znacznik, po ktorym Android odroznia jedno powiadomienie od drugiego.
+
+    DLACZEGO TO ISTNIEJE. Dwa powiadomienia bez wlasnego `tag` potrafia sie na
+    Androidzie zastapic - drugie wchodzi na miejsce pierwszego i uzytkownik
+    widzi tylko ostatnie. Przy zmianie meczu to jest regula, a nie wyjatek:
+    zmiana daty, dopisanie adresu hali i edycja wyniku ida jednym przebiegiem
+    monitora, w odstepie sekund. Sedzia dostawal wtedy jedno powiadomienie
+    zamiast trzech i nie mial pojecia, ze data sie przesunela.
+
+    Zrodlem znacznika jest `event_key`, czyli ten sam identyfikator, ktorym
+    odsiewamy duplikaty w bazie. Dzieki temu POWTORZENIE tego samego zdarzenia
+    nadal zastapi stare powiadomienie zamiast mnozyc kopie, a ROZNE zdarzenia
+    zostaja obok siebie.
+    """
+    payload = data or {}
+    key = str(payload.get("event_key") or "").strip()
+    if key:
+        return f"evt-{key[:32]}"
+    seed = "|".join(
+        [
+            str(payload.get("kind") or ""),
+            str(payload.get("offerId") or ""),
+            str(payload.get("matchNumber") or payload.get("match_id") or ""),
+            title,
+            body,
+        ]
+    )
+    return "gen-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+
 async def send_fcm_message(
     fcm_token: str,
     title: str,
@@ -142,12 +174,24 @@ async def send_fcm_message(
     access_token = await _get_access_token()
     project_id = _get_project_id()
 
+    tag = notification_tag(data, title, body)
     url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
     payload = {
         "message": {
             "token": fcm_token,
             "notification": {"title": title, "body": body},
             "data": {k: str(v) for k, v in (data or {}).items()},
+            "android": {
+                # Bez wlasnego klucza FCM potrafi scalic wiadomosci czekajace na
+                # wylaczony telefon. Tu kazde zdarzenie ma wlasny.
+                "collapse_key": tag,
+                "priority": "high",
+                "notification": {"tag": tag},
+            },
+            "apns": {
+                # Odpowiednik `tag` na iOS. Rozne watki = rozne powiadomienia.
+                "payload": {"aps": {"thread-id": tag}},
+            },
         }
     }
 

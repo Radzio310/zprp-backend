@@ -99,6 +99,23 @@ def is_eligible_for_refresh(state: Dict[str, Any], approved: bool = False, now: 
     return match_at >= (now or _now()) - timedelta(days=31)
 
 
+#: Okno „goracego" przebiegu - mecze, ktore odbywaja sie lada dzien.
+#:
+#: Czternascie dni do przodu i dwa wstecz. Wstecz, bo po meczu jeszcze dlugo
+#: zmienia sie wynik i status protokolu, a to tez sa powiadomienia.
+_HOT_DAYS = max(1, int(os.getenv("ZPRP_MATCH_MONITOR_HOT_DAYS", "14")))
+_HOT_PAST_DAYS = max(0, int(os.getenv("ZPRP_MATCH_MONITOR_HOT_PAST_DAYS", "2")))
+
+#: Zasieg „cieplego" przebiegu - reszta znanego sezonu.
+_WARM_DAYS = max(_HOT_DAYS + 1, int(os.getenv("ZPRP_MATCH_MONITOR_WARM_DAYS", "120")))
+
+#: Ile meczow odpytujemy w jednym przebiegu publicznym.
+#:
+#: Bezpiecznik, nie miara. Po drugiej stronie stoi serwis calego zwiazku i
+#: jestesmy tam gosciem - lepiej dokonczyc w nastepnym przebiegu niz zrobic
+#: szturm. Mecze ida od najblizszych, wiec przyciecie zabiera te najmniej pilne.
+_PUBLIC_LIMIT = max(10, int(os.getenv("ZPRP_MATCH_MONITOR_PUBLIC_LIMIT", "150")))
+
 FINGERPRINT_FIELDS: Sequence[str] = (
     "RozgrywkiCode",
     "data_fakt",
@@ -501,7 +518,22 @@ async def _fetch_details_many(client: AsyncClient, items: Dict[str, Dict[str, An
     return output
 
 
-async def _upsert_match(province: str, match_id: str, state: Dict[str, Any], deep: bool) -> tuple[bool, int]:
+async def _upsert_match(
+    province: str,
+    match_id: str,
+    state: Dict[str, Any],
+    deep: bool,
+    *,
+    seen_in_schedule: bool = True,
+) -> tuple[bool, int]:
+    """Zapisuje stan meczu i wysyla powiadomienia o tym, co sie zmienilo.
+
+    `seen_in_schedule=False` ustawiaja przebiegi publiczne (hot/warm). One pytaja
+    o KONKRETNE identyfikatory, wiec fakt, ze API odpowiedzialo, nie znaczy, ze
+    mecz nadal wisi w terminarzu wojewodztwa. Gdyby zerowaly `missing_full_runs`,
+    mecz przeniesiony do innego okregu nigdy by u nas nie wygasl - pelny przebieg
+    liczylby jego nieobecnosc od zera po kazdym szybkim odpytaniu.
+    """
     now = _now()
     old_row = await database.fetch_one(
         select(province_matches).where(
@@ -517,10 +549,9 @@ async def _upsert_match(province: str, match_id: str, state: Dict[str, Any], dee
         "state_json": state,
         "fingerprint": new_fp,
         "approved": approved,
-        "active": True,
-        "missing_full_runs": 0,
         "last_seen_at": now,
         "updated_at": now,
+        **({"active": True, "missing_full_runs": 0} if seen_in_schedule else {}),
         **({"last_deep_checked_at": now} if deep else {}),
     }
     if not old_row:
@@ -728,6 +759,107 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
     return {"matches_seen": matches_seen, "details_fetched": details_fetched, "events_created": events_created}
 
 
+async def _public_window_states(
+    province: str, since: datetime, until: datetime, limit: int
+) -> Dict[str, Dict[str, Any]]:
+    """Mecze, o ktore warto pytac publiczne API w tym oknie czasu.
+
+    Dwa zawezenia, oba swiadome:
+
+    * tylko mecze, przy ktorych stoi CZYNNY sedzia z naszego wojewodztwa - to
+      jedyni ludzie, do ktorych i tak poszloby powiadomienie, a odpytywanie
+      reszty terminarza byloby obciazaniem cudzego serwera bez adresata;
+    * tylko mecze niezatwierdzone - po zatwierdzeniu protokolu nic sie w nich
+      juz nie zmieni, a `is_eligible_for_refresh` mowi to samo.
+
+    Zwraca stan ZAPISANY, bo to on jest podstawa scalania: odpowiedz publicznego
+    API nadpisuje wylacznie pola, ktore naprawde przyslala.
+    """
+    rows = await database.fetch_all(
+        select(
+            province_matches.c.match_id,
+            province_matches.c.state_json,
+            province_matches.c.approved,
+        )
+        .select_from(
+            province_matches.join(
+                province_match_judges,
+                and_(
+                    province_match_judges.c.province == province_matches.c.province,
+                    province_match_judges.c.match_id == province_matches.c.match_id,
+                ),
+            )
+        )
+        .where(province_matches.c.province == province)
+        .where(province_matches.c.active.is_(True))
+        .where(province_matches.c.approved.is_(False))
+        .where(province_match_judges.c.active.is_(True))
+        .where(province_matches.c.match_at.is_not(None))
+        .where(province_matches.c.match_at >= since)
+        .where(province_matches.c.match_at < until)
+        .order_by(province_matches.c.match_at.asc())
+        .distinct()
+        .limit(limit)
+    )
+    now = _now()
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        state = dict(row["state_json"] or {})
+        if not is_eligible_for_refresh(state, bool(row["approved"]), now):
+            continue
+        out[_str(row["match_id"])] = state
+    return out
+
+
+async def _run_public(province: str, mode: str) -> Dict[str, int]:
+    """Szybki przebieg BEZ LOGOWANIA - publiczne API po znanych numerach meczow.
+
+    To jest sedno trzech predkosci. Lekki przebieg musi sie zalogowac do bazy
+    zwiazku i przejsc liste meczow KAZDEGO sedziego z osobna, wiec jego koszt
+    rosnie z liczba sedziow, a nie meczow. Tutaj pytamy wprost o identyfikatory,
+    ktore juz znamy, publicznym API bez sesji i bez ciasteczek - dziesiec razy
+    taniej i bez ryzyka, ze wygasla sesja wstrzyma powiadomienia.
+
+    Czego ten przebieg NIE robi: nie wykrywa meczow, o ktorych jeszcze nie wiemy,
+    i nie prowadzi tabeli przypisan sedziow. Nowy mecz w terminarzu znajdzie
+    dopiero pelny przebieg - i to jest przyjeta cena, bo mecz dopisany na
+    przyszly miesiac moze poczekac godziny, a zmiana terminu meczu za trzy dni
+    nie moze.
+
+    DOPISANIE SEDZIEGO do meczu, ktory juz znamy, lapie sie tutaj, bo obsada
+    jest w odpowiedzi publicznego API. To najpilniejszy przypadek i zostaje
+    szybki.
+    """
+    now = _now()
+    if mode == "hot":
+        since = now - timedelta(days=_HOT_PAST_DAYS)
+        until = now + timedelta(days=_HOT_DAYS)
+    else:
+        since = now + timedelta(days=_HOT_DAYS)
+        until = now + timedelta(days=_WARM_DAYS)
+
+    known = await _public_window_states(province, since, until, _PUBLIC_LIMIT)
+    if not known:
+        return {"matches_seen": 0, "details_fetched": 0, "events_created": 0}
+
+    async with AsyncClient(follow_redirects=True) as public_client:
+        fresh = await _fetch_details_many(public_client, known)
+
+    events = 0
+    for match_id, state in fresh.items():
+        # `seen_in_schedule=False`: odpowiedz API nie jest dowodem, ze mecz
+        # nadal nalezy do terminarza tego wojewodztwa.
+        _, created = await _upsert_match(
+            province, match_id, state, True, seen_in_schedule=False
+        )
+        events += created
+    return {
+        "matches_seen": len(known),
+        "details_fetched": len(fresh),
+        "events_created": events,
+    }
+
+
 async def _scrape_full_schedule(client: AsyncClient, cookies: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
     _, html0 = await fetch_with_correct_encoding(client, "/index.php?a=terminarz", method="GET", cookies=cookies)
     soup0 = BeautifulSoup(html0, "html.parser")
@@ -895,7 +1027,15 @@ async def _release_province_lease(province: str, holder: str) -> None:
 
 async def _execute_run(province: str, credentials: tuple[str, str], mode: str, interval: int) -> None:
     holder = f"{mode}:{uuid.uuid4().hex}"
-    max_wait = 60 if mode == "light" else min(900, interval)
+    # Szybkie przebiegi NIE stoja w kolejce. Gdy wojewodztwo jest akurat zajete
+    # pelnym crawlem, hot pomija cykl i wroci za piec minut - czekanie
+    # zbudowaloby ogon przebiegow, ktore i tak pytaja o to samo.
+    if mode in ("hot", "warm"):
+        max_wait = 20
+    elif mode == "light":
+        max_wait = 60
+    else:
+        max_wait = min(900, interval)
     if not await _acquire_province_lease(province, holder, max_wait):
         return
     run_id = await _claim_run(province, mode, interval)
@@ -906,6 +1046,9 @@ async def _execute_run(province: str, credentials: tuple[str, str], mode: str, i
     try:
         if mode == "full":
             result = await _run_full(province, *credentials)
+        elif mode in ("hot", "warm"):
+            # Bez danych logowania - publiczne API po znanych identyfikatorach.
+            result = await _run_public(province, mode)
         else:
             result = await _run_light(province, *credentials)
         await database.execute(
@@ -936,10 +1079,28 @@ async def run_province_match_monitor() -> None:
     if os.getenv("ZPRP_MATCH_MONITOR_ENABLED", "true").strip().lower() not in ("1", "true", "yes", "on"):
         logger.info("Province match monitor disabled")
         return
+    # TRZY PREDKOSCI. Kazda odpowiada na inne pytanie i kosztuje co innego:
+    #
+    #   hot  - „czy cos sie zmienilo w meczu, ktory jest lada dzien". Publiczne
+    #          API, bez logowania, tylko mecze z obsada z naszego wojewodztwa.
+    #          Najczestszy i najtanszy.
+    #   warm - to samo dla reszty sezonu. Rzadziej, bo mecz za dwa miesiace nie
+    #          zmienia sie co kwadrans.
+    #   light- jedyny przebieg, ktory prowadzi tabele przypisan sedziow. Musi
+    #          sie logowac i chodzi po liscie meczow KAZDEGO sedziego, wiec jego
+    #          koszt rosnie z liczba sedziow. Odkad zmiany wykrywa hot, jego
+    #          zadaniem jest juz tylko utrzymanie przypisan.
+    #   full - odkrywanie NOWYCH meczow i wygaszanie zniknietych. Najdrozszy,
+    #          najrzadszy.
+    hot_interval = max(120, int(os.getenv("ZPRP_MATCH_MONITOR_HOT_SECONDS", "300")))
+    warm_interval = max(hot_interval, int(os.getenv("ZPRP_MATCH_MONITOR_WARM_SECONDS", "2700")))
     light_interval = max(300, int(os.getenv("ZPRP_MATCH_MONITOR_LIGHT_SECONDS", "900")))
     full_interval = max(light_interval, int(os.getenv("ZPRP_MATCH_MONITOR_FULL_SECONDS", "14400")))
     max_provinces = max(1, int(os.getenv("ZPRP_MATCH_MONITOR_PROVINCE_CONCURRENCY", "2")))
     full_concurrency = max(1, int(os.getenv("ZPRP_MATCH_MONITOR_FULL_PROVINCE_CONCURRENCY", "1")))
+    public_concurrency = max(
+        1, int(os.getenv("ZPRP_MATCH_MONITOR_PUBLIC_PROVINCE_CONCURRENCY", "3"))
+    )
 
     async def mode_loop(mode: str, interval: int, concurrency: int, initial_delay: int = 0) -> None:
         if initial_delay:
@@ -964,7 +1125,12 @@ async def run_province_match_monitor() -> None:
 
     # Pełny crawler nie blokuje lekkich sprawdzeń. Ma osobny, domyślnie
     # pojedynczy worker, więc nawet przy 16 województwach nie robi szturmu.
+    #
+    # Przebiegi publiczne startują z przesunięciem, żeby cztery pętle nie
+    # ruszały w tej samej sekundzie po restarcie procesu.
     await asyncio.gather(
-        mode_loop("light", light_interval, max_provinces),
-        mode_loop("full", full_interval, full_concurrency, initial_delay=5),
+        mode_loop("hot", hot_interval, public_concurrency),
+        mode_loop("warm", warm_interval, public_concurrency, initial_delay=45),
+        mode_loop("light", light_interval, max_provinces, initial_delay=15),
+        mode_loop("full", full_interval, full_concurrency, initial_delay=90),
     )

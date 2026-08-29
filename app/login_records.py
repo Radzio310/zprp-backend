@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.admin_alerts import notify_admins
 from app.db import database, login_records, province_judges
 from app.schemas import (
     CreateLoginRecordRequest,
@@ -47,6 +48,26 @@ def _row_to_login_item(row) -> LoginRecordItem:
 
 
 @router.post("/", response_model=dict, summary="Upsert ostatniego logowania")
+def _clean_name(value) -> str:
+    return " ".join(str(value or "").split()) or "Nowy sędzia"
+
+
+def _new_user_body(full_name, province, app_version) -> str:
+    """Treść powiadomienia o nowym użytkowniku.
+
+    Województwo i wersja aplikacji są tu nie dla ozdoby: to pierwsze dwie
+    rzeczy, o które administrator i tak zapyta, gdy zobaczy nowe nazwisko.
+    """
+    parts = [_clean_name(full_name)]
+    prov = str(province or "").strip()
+    if prov:
+        parts.append(prov.replace("_", "-"))
+    version = str(app_version or "").strip()
+    if version:
+        parts.append(f"wersja {version}")
+    return " · ".join(parts)
+
+
 async def upsert_login(req: CreateLoginRecordRequest):
     """
     - Zawsze nadpisuje: full_name, last_login_at
@@ -61,6 +82,16 @@ async def upsert_login(req: CreateLoginRecordRequest):
         prov_norm = _norm_province(req.province)
         photo_norm = _photo_or_none(getattr(req, "photo_url", None))
         cfg_norm = _config_or_none(getattr(req, "config_json", None))
+
+        # Czy to PIERWSZE logowanie tego sędziego. Pytamy przed zapisem, bo po
+        # nim każdy wiersz wygląda tak samo - `on_conflict_do_update` nie mówi,
+        # czy dopisał, czy nadpisał. Odczyt jest tani i chodzi raz na wejście do
+        # aplikacji.
+        is_new_user = not await database.fetch_val(
+            select(login_records.c.judge_id).where(
+                login_records.c.judge_id == req.judge_id
+            )
+        )
 
         stmt = pg_insert(login_records).values(
             judge_id=req.judge_id,
@@ -100,6 +131,19 @@ async def upsert_login(req: CreateLoginRecordRequest):
         )
 
         await database.execute(stmt)
+
+        # Nowy sędzia w aplikacji → administratorzy. Po zapisie, nie przed:
+        # powiadomienie o użytkowniku, który się nie zapisał, byłoby kłamstwem.
+        # `notify_admins` nigdy nie rzuca, więc logowanie idzie dalej tak czy
+        # inaczej.
+        if is_new_user:
+            await notify_admins(
+                "new_user",
+                _clean_name(req.full_name),
+                _new_user_body(req.full_name, prov_norm, req.app_version),
+                reference=req.judge_id,
+                extra={"judge_id": req.judge_id},
+            )
 
         # ✅ Upsert do province_judges:
         # - province jest wymagane do sensownego wpisu per-województwo
