@@ -370,6 +370,7 @@ async def _build_state_response(
         status=doc_status,
         exists=state is not None,
         doc_exists=doc_status is not None,
+        zprp_match_id=(str((state or {}).get("zprp_match_id") or "").strip() or None),
         doc_updated_at=doc_updated_at,
         updated_at=(state or {}).get("updated_at"),
         server_now=_now(),

@@ -1042,6 +1042,14 @@ class ProElStateResponse(BaseModel):
     exists: bool
     #: Czy istnieje wiersz `proel_matches` (czyli czy mecz był realnie zapisany).
     doc_exists: bool
+    #: `IdZawody` meczu, do którego należy ten wiersz stanu.
+    #:
+    #: Klucz główny to NUMER meczu, a ten sam RozgrywkiCode w innym sezonie to
+    #: inny mecz. Zapis broni się przed tym sam (409 `MATCH_ID_MISMATCH`),
+    #: odczyt nie miał czym - i overlay cudzego meczu (razem z podpisami)
+    #: wjeżdżał do protokołu jako „cudza zmiana". `None` = wiersz bez
+    #: identyfikatora, czyli mecz zakładany ręcznie.
+    zprp_match_id: Optional[str] = None
     #: Ostatni pełny autosave `data_json`. Oddzielny od `updated_at` stanu,
     #: który zmienia się również przy heartbeatcie, patchu i zwolnieniu lease.
     doc_updated_at: Optional[datetime] = None
