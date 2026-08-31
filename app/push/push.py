@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -26,8 +27,21 @@ from .token_cleanup import invalidate_rejected_fcm_token
 
 router = APIRouter(prefix="/push", tags=["push"])
 
+logger = logging.getLogger("app.push")
+
+
 def _utc_now():
     return datetime.now(timezone.utc)
+
+
+def _clean_judge_id(value: Optional[str]) -> Optional[str]:
+    """Numer sędziego bez spacji z brzegów.
+
+    Adresowanie pushy to porównanie tekstów: lista administratorów jest
+    przycinana przy odczycie, więc numer zapisany tu ze spacją nigdy się z nią
+    nie zrówna i taki administrator milczy bez śladu w logu.
+    """
+    return str(value or "").strip() or None
 
 
 async def send_push_to_judges(
@@ -48,13 +62,14 @@ async def send_push_to_judges(
     Zwraca liczbę urządzeń, do których poszła wysyłka. Nigdy nie rzuca —
     powiadomienie nie może wywalić operacji, przy której powstało.
     """
-    ids = [str(j) for j in judge_ids if j]
+    ids = [str(j).strip() for j in judge_ids if str(j or "").strip()]
     if not ids:
         return 0
     try:
         rows = await database.fetch_all(
             select(
                 push_tokens.c.installation_id,
+                push_tokens.c.judge_id,
                 push_tokens.c.token,
                 push_tokens.c.token_type,
             ).where(
@@ -62,18 +77,30 @@ async def send_push_to_judges(
             )
         )
     except Exception:
+        logger.warning("push: odczyt urządzeń nieudany", exc_info=True)
         return 0
 
     from .fcm import send_fcm_message
 
+    # Ile urządzeń odpowiedziało NA SĘDZIEGO, a nie łącznie. Suma nie odróżnia
+    # „poszło na trzy telefony jednego admina" od „poszło do trzech adminów",
+    # a to jest dokładnie ta różnica, o którą chodzi przy cichej wysyłce.
+    delivered: Dict[str, int] = {j: 0 for j in ids}
     sent = 0
     for row in rows:
-        if row["token_type"] != "device_fcm":
+        judge_id = str(row["judge_id"] or "").strip()
+        if row["token_type"] != "device_fcm" or not str(row["token"] or "").strip():
             continue
         try:
             await send_fcm_message(row["token"], title, body, data=data or {})
             sent += 1
+            delivered[judge_id] = delivered.get(judge_id, 0) + 1
         except Exception as exc:
+            logger.warning(
+                "push: wysyłka do instalacji %s nieudana: %s",
+                row["installation_id"],
+                exc,
+            )
             await invalidate_rejected_fcm_token(
                 row["installation_id"],
                 row["token"],
@@ -81,6 +108,15 @@ async def send_push_to_judges(
             )
             # Wygasły token jednego urządzenia nie może zablokować reszty.
             continue
+
+    silent = [j for j, count in delivered.items() if not count]
+    if silent:
+        # Bez tego wpisu „mnie nie przyszło" jest nie do sprawdzenia po fakcie.
+        logger.warning(
+            "push: brak sprawnego urządzenia dla sędziów %s (tytuł: %s)",
+            ",".join(sorted(silent)),
+            title,
+        )
     return sent
 
 def _send_hour_utc(dt: datetime) -> int:
@@ -114,12 +150,12 @@ async def register(req: PushRegisterRequest):
     if existing:
         identity_values: Dict[str, Any] = {}
         if req.identity_known:
-            identity_values["judge_id"] = req.judge_id or None
+            identity_values["judge_id"] = _clean_judge_id(req.judge_id)
             identity_values["province"] = normalize_province(req.province) or None
         elif req.judge_id:
             # Kompatybilność ze starszą wersją, która wysyła judge_id, ale nie
             # zna jeszcze identity_known.
-            identity_values["judge_id"] = req.judge_id
+            identity_values["judge_id"] = _clean_judge_id(req.judge_id)
         if req.province and not req.identity_known:
             identity_values["province"] = normalize_province(req.province) or None
         if req.notification_prefs:
@@ -146,7 +182,7 @@ async def register(req: PushRegisterRequest):
             token=req.token,
             platform=req.platform,
             app_variant=req.app_variant,
-            judge_id=req.judge_id,
+            judge_id=_clean_judge_id(req.judge_id),
             province=normalize_province(req.province) or None,
             notification_prefs=req.notification_prefs or {},
             updated_at=now,
@@ -162,7 +198,7 @@ async def update_push_identity(req: PushIdentityRequest):
     if not req.installation_id:
         raise HTTPException(status_code=400, detail="Missing installation_id")
     values: Dict[str, Any] = {
-        "judge_id": req.judge_id or None,
+        "judge_id": _clean_judge_id(req.judge_id),
         "province": normalize_province(req.province) or None,
         "updated_at": _utc_now(),
     }

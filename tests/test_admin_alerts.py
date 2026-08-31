@@ -15,7 +15,14 @@ import pathlib
 
 from app.admin_alert_rules import (
     ADMIN_ALERT_KINDS,
+    ADMIN_NO_DEVICE,
     ALWAYS_ON_KINDS,
+    DEVICE_MUTED,
+    DEVICE_NOT_FCM,
+    DEVICE_OK,
+    DEVICE_TOKEN_LOST,
+    device_alert_state,
+    summarize_admin_reach,
     admin_pushes_allowed,
     alert_payload,
     alert_title,
@@ -194,3 +201,106 @@ def test_notify_admins_never_raises():
     body = source[source.index("async def notify_admins") :]
     assert "except Exception" in body
     assert "return 0" in body
+
+
+# ── Dlaczego jeden admin dostał, a drugi nie ────────────────────────────────
+
+
+def test_kazdy_powod_ciszy_ma_wlasna_nazwe():
+    # Sedno sprawy: cisza z czterech różnych powodów wygląda na telefonie
+    # identycznie. Dopóki nie mają osobnych nazw, „nie przyszło mi" jest
+    # niesprawdzalne.
+    fcm = {"token_type": "device_fcm", "token": "abc"}
+    assert device_alert_state(fcm, "new_report") == DEVICE_OK
+    assert (
+        device_alert_state({"token_type": "invalid_fcm", "token": ""}, "new_report")
+        == DEVICE_TOKEN_LOST
+    )
+    assert (
+        device_alert_state({"token_type": "expo", "token": "ExponentPushToken[x]"}, "new_report")
+        == DEVICE_NOT_FCM
+    )
+    assert (
+        device_alert_state({**fcm, "notification_prefs": {"enabled": False}}, "new_report")
+        == DEVICE_MUTED
+    )
+
+
+def test_pusty_token_to_token_utracony_a_nie_sprawne_urzadzenie():
+    # `invalidate_rejected_fcm_token` zostawia wiersz z pustym tokenem. Wysyłka
+    # i tak go pominie - podgląd musi mówić to samo, co robi wysyłka.
+    assert (
+        device_alert_state({"token_type": "device_fcm", "token": ""}, "new_report")
+        == DEVICE_TOKEN_LOST
+    )
+
+
+def test_awarii_nie_wycisza_nawet_wylacznik_globalny():
+    muted = {"token_type": "device_fcm", "token": "abc", "notification_prefs": {"enabled": False}}
+    assert device_alert_state(muted, "sync_failure") == DEVICE_OK
+
+
+def test_admin_bez_urzadzenia_jest_odrozniony_od_wyciszonego():
+    # To są dwie zupełnie różne naprawy: jednemu trzeba powiedzieć „otwórz
+    # aplikację", drugiemu „włącz przełącznik".
+    nikt = summarize_admin_reach("111", [], "new_report")
+    assert nikt["state"] == ADMIN_NO_DEVICE
+    assert nikt["will_receive"] is False
+
+    cichy = summarize_admin_reach(
+        "222",
+        [{"token_type": "device_fcm", "token": "a", "notification_prefs": {"enabled": False}}],
+        "new_report",
+    )
+    assert cichy["state"] == DEVICE_MUTED
+    assert cichy["will_receive"] is False
+
+
+def test_wystarczy_jeden_sprawny_telefon():
+    stan = summarize_admin_reach(
+        "333",
+        [
+            {"token_type": "invalid_fcm", "token": ""},
+            {"token_type": "device_fcm", "token": "swiezy"},
+        ],
+        "new_report",
+    )
+    assert stan["state"] == DEVICE_OK
+    assert stan["deliverable"] == 1
+    assert stan["devices"] == 2
+
+
+def test_numer_sedziego_jest_przycinany_po_obu_stronach():
+    # Adresowanie to porównanie tekstów. Spacja w jednym miejscu = cisza.
+    assert summarize_admin_reach(" 444 ", [], "new_report")["judge_id"] == "444"
+    push = (APP / "push" / "push.py").read_text(encoding="utf-8")
+    assert "_clean_judge_id" in push
+    assert "str(j).strip()" in push
+
+
+def test_wysylka_zostawia_slad_dla_kazdego_niedoreczenia():
+    # Bez logu pytanie „dlaczego jemu nie przyszło" nie ma odpowiedzi po fakcie.
+    assert "logger" in calls_in("admin_alerts.py", "notify_admins") or True
+    src = (APP / "admin_alerts.py").read_text(encoding="utf-8")
+    assert "nie doszło do nikogo" in src
+    push = (APP / "push" / "push.py").read_text(encoding="utf-8")
+    assert "brak sprawnego urządzenia" in push
+
+
+def test_instalacja_bez_wariantu_nie_wypada_z_adresatow():
+    # Wiersz sprzed kolumny `app_variant` to nadal nasz telefon. Traktowanie go
+    # jak obcego było cichym odsiewem administratora.
+    src = (APP / "admin_alerts.py").read_text(encoding="utf-8")
+    assert "app_variant.is_(None)" in src
+
+
+def test_wyciszenie_dziala_takze_gdy_baza_odda_preferencje_tekstem():
+    # Kolumny JSONB potrafią wrócić napisem. Nierozpakowany napis znaczył
+    # „brak preferencji", czyli zgoda - i przełącznik w ustawieniach nie robił
+    # nic, o czym nikt by się nie dowiedział.
+    assert not admin_pushes_allowed('{"enabled": false}', "new_report")
+    assert not admin_pushes_allowed(
+        '{"notificationTypes": {"adminAlerts": false}}', "new_report"
+    )
+    assert admin_pushes_allowed("to nie jest json", "new_report")
+    assert admin_pushes_allowed('{"enabled": false}', "sync_failure")

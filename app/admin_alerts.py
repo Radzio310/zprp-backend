@@ -22,13 +22,16 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.admin_alert_rules import (
+    ADMIN_NO_DEVICE,
+    DEVICE_OK,
     admin_pushes_allowed,
     alert_payload,
     alert_title,
     dedup_key,
+    summarize_admin_reach,
 )
 
 logger = logging.getLogger("app.admin_alerts")
@@ -93,7 +96,15 @@ async def _willing_admins(kind: str, exclude: str = "") -> List[str]:
         rows = await database.fetch_all(
             select(push_tokens.c.judge_id, push_tokens.c.notification_prefs)
             .where(push_tokens.c.judge_id.in_(admins))
-            .where(push_tokens.c.app_variant == "baza")
+            .where(
+                or_(
+                    push_tokens.c.app_variant == "baza",
+                    # Wiersz bez wariantu to instalacja sprzed tego pola.
+                    # Nieznany wariant nie może znaczyć „to nie nasz telefon" -
+                    # to jest dokładnie ta cisza, której szukamy.
+                    push_tokens.c.app_variant.is_(None),
+                )
+            )
         )
     except Exception:  # noqa: BLE001
         logger.warning("admin_alerts: odczyt preferencji nieudany", exc_info=True)
@@ -139,16 +150,96 @@ async def notify_admins(
 
         targets = await _willing_admins(kind, exclude_judge_id)
         if not targets:
+            logger.warning(
+                "admin_alerts: %s bez adresatów (ref=%s)", kind, reference
+            )
             return 0
 
         from app.push.push import send_push_to_judges
 
-        return await send_push_to_judges(
+        sent = await send_push_to_judges(
             targets,
             alert_title(kind, subject),
             body,
             alert_payload(kind, reference, extra),
         )
+        # Log JEST tu potrzebny. Bez niego pytanie „dlaczego jeden admin dostał,
+        # a drugi nie" nie ma odpowiedzi: po fakcie nie da się odtworzyć, kto
+        # był adresatem i ile urządzeń odpowiedziało.
+        logger.info(
+            "admin_alerts: %s -> %d adm., %d urz. (ref=%s)",
+            kind,
+            len(targets),
+            sent,
+            reference,
+        )
+        if not sent:
+            logger.warning(
+                "admin_alerts: %s nie doszło do nikogo z %s",
+                kind,
+                ",".join(targets),
+            )
+        return sent
     except Exception:  # noqa: BLE001
         logger.warning("admin_alerts: wysyłka %s nieudana", kind, exc_info=True)
         return 0
+
+
+async def admin_alert_reach(kind: str = "new_report") -> List[Dict[str, Any]]:
+    """Kto z administratorów DOSTANIE powiadomienie tego rodzaju - i dlaczego nie.
+
+    Odpowiedź na jedyne pytanie, którego nie dało się zadać: po cichej wysyłce
+    administrator widzi to samo co przy braku zdarzenia. Tu lejek jest
+    rozpisany na stany z `admin_alert_rules`, więc widać różnicę między
+    „wyciszył", „nie ma go w tabeli urządzeń" i „Firebase odrzucił token".
+
+    Nigdy nie rzuca - podgląd diagnostyczny nie ma prawa wywrócić panelu.
+    """
+    from app.db import database, push_tokens
+
+    try:
+        admins = await admin_judge_ids()
+        if not admins:
+            return []
+        rows = await database.fetch_all(
+            select(
+                push_tokens.c.judge_id,
+                push_tokens.c.token,
+                push_tokens.c.token_type,
+                push_tokens.c.platform,
+                push_tokens.c.app_variant,
+                push_tokens.c.notification_prefs,
+                push_tokens.c.updated_at,
+            ).where(push_tokens.c.judge_id.in_(admins))
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("admin_alerts: podgląd zasięgu nieudany", exc_info=True)
+        return []
+
+    by_judge: Dict[str, List[Dict[str, Any]]] = {a: [] for a in admins}
+    for row in rows:
+        judge_id = str(row["judge_id"] or "").strip()
+        if judge_id in by_judge:
+            by_judge[judge_id].append(dict(row))
+
+    out: List[Dict[str, Any]] = []
+    for judge_id in admins:
+        devices = by_judge.get(judge_id) or []
+        summary = summarize_admin_reach(judge_id, devices, kind)
+        newest = max(
+            (d.get("updated_at") for d in devices if d.get("updated_at")),
+            default=None,
+        )
+        summary["last_seen"] = newest.isoformat() if newest else None
+        summary["platforms"] = sorted(
+            {str(d.get("platform") or "?") for d in devices}
+        )
+        out.append(summary)
+    # Niedostępni na górze - po to się ten podgląd otwiera.
+    out.sort(key=lambda item: (item["state"] == DEVICE_OK, item["judge_id"]))
+    return out
+
+
+#: Stan, który znaczy „serwer nie wie, gdzie szukać tego administratora".
+#: Reeksport dla wołających, żeby nie sięgali po moduł reguł tylko po nazwę.
+NO_DEVICE = ADMIN_NO_DEVICE

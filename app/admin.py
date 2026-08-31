@@ -211,6 +211,27 @@ async def get_admins():
     row = await database.fetch_one(select(admin_settings).limit(1))
     return ListAdminsResponse(allowed_admins=(row["allowed_admins"] if row else []) or [])
 
+@router.get("/alerts/reachability", summary="Kto z adminów dostanie powiadomienie")
+async def admin_alerts_reachability(kind: str = "new_report"):
+    """Lejek powiadomień administracyjnych rozpisany na ludzi.
+
+    ISTNIEJE PO KONKRETNYM ZDARZENIU: przy jednym zgłoszeniu jeden
+    administrator dostał powiadomienie, a drugi nie - i nie dało się ustalić
+    dlaczego, bo każdy odsiew po drodze wygląda tak samo (cisza). Tu widać
+    różnicę: `no_device` (żadne urządzenie nie zgłosiło numeru sędziego),
+    `token_lost` (Firebase odrzucił token), `not_fcm` (instalacja bez FCM),
+    `muted` (właściciel wyciszył ten rodzaj).
+    """
+    from app.admin_alerts import admin_alert_reach
+
+    items = await admin_alert_reach(kind)
+    return {
+        "kind": kind,
+        "items": items,
+        "unreachable": sum(1 for i in items if not i.get("will_receive")),
+    }
+
+
 @router.put("/admins", response_model=Dict[str, bool], summary="Zapisz listę ID adminów")
 async def update_admins(req: UpdateAdminsRequest):
     # Zapisz nową listę

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
 #: Rodzaje zdarzeń, o których zawiadamiamy administratora.
@@ -56,6 +57,23 @@ def alert_title(kind: object, subject: str = "") -> str:
     return f"{head} - {subject}" if subject else head
 
 
+def _as_prefs(raw: Any) -> Any:
+    """Preferencje jako słownik - także wtedy, gdy kolumna wróci tekstem.
+
+    Kolumny JSON/JSONB potrafią wrócić z bazy jako napis (reszta backendu ma na
+    to `_parse_json`). Nierozpakowany napis przechodził tędy jak „brak
+    preferencji", więc wyłącznik powiadomień administracyjnych po prostu nic
+    nie robił - a to jest cichy błąd w obie strony: albo ktoś dostaje to, co
+    wyciszył, albo podgląd zasięgu kłamie, że dostanie.
+    """
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    return raw
+
+
 def admin_pushes_allowed(prefs: Any, kind: object) -> bool:
     """Czy na to urządzenie wolno wysłać powiadomienie tego rodzaju.
 
@@ -68,6 +86,7 @@ def admin_pushes_allowed(prefs: Any, kind: object) -> bool:
     key = str(kind or "").strip()
     if key in ALWAYS_ON_KINDS:
         return True
+    prefs = _as_prefs(prefs)
     if not isinstance(prefs, dict):
         return True
     if prefs.get("enabled") is False:
@@ -117,3 +136,76 @@ def alert_payload(
             continue
         data[str(name)] = str(value)
     return data
+
+
+# ── Dlaczego administrator czegoś nie dostał ────────────────────────────────
+#
+# „Jeden admin dostał powiadomienie, drugi nie" nie da się rozstrzygnąć
+# spojrzeniem na kod wysyłki, bo każdy lejek po drodze odsiewa po cichu:
+# urządzenie bez przypisanego sędziego, token unieważniony przez Firebase i
+# wyciszony rodzaj powiadomień wyglądają na końcu identycznie - nic nie
+# przyszło. Te nazwy stanów są wspólne dla wysyłki (log) i dla panelu
+# (podgląd), żeby administrator czytał to samo, co widać w logu.
+
+#: Urządzenie dostanie to powiadomienie.
+DEVICE_OK = "ok"
+#: Token wyczyszczony po odrzuceniu przez Firebase (`invalidate_rejected_fcm_token`).
+#: Wraca sam przy najbliższym starcie aplikacji - ale dopóki nie wróci, cisza.
+DEVICE_TOKEN_LOST = "token_lost"
+#: Urządzenie zarejestrowane bez tokenu FCM (Expo Go, iOS bez APNs->FCM).
+#: `send_push_to_judges` pomija takie wiersze.
+DEVICE_NOT_FCM = "not_fcm"
+#: Właściciel wyciszył ten rodzaj albo powiadomienia w ogóle.
+DEVICE_MUTED = "muted"
+
+#: Administrator, którego żadne urządzenie nie zgłosiło swojego numeru sędziego.
+#: To jest najczęstsza przyczyna ciszy i JEDYNA, której właściciel telefonu
+#: nie zauważy: aplikacja działa, powiadomienia „są włączone", a serwer po
+#: prostu nie wie, gdzie go szukać.
+ADMIN_NO_DEVICE = "no_device"
+
+
+def device_alert_state(device: Any, kind: object) -> str:
+    """Stan JEDNEGO urządzenia wobec jednego rodzaju powiadomienia."""
+    row = device if isinstance(device, dict) else {}
+    token_type = str(row.get("token_type") or "").strip()
+    token = str(row.get("token") or "").strip()
+    if not admin_pushes_allowed(row.get("notification_prefs"), kind):
+        return DEVICE_MUTED
+    if token_type == "invalid_fcm" or not token:
+        return DEVICE_TOKEN_LOST
+    if token_type != "device_fcm":
+        return DEVICE_NOT_FCM
+    return DEVICE_OK
+
+
+def summarize_admin_reach(judge_id: str, devices: Any, kind: object) -> Dict[str, Any]:
+    """Czy TEN administrator dostanie TEN rodzaj powiadomienia - i dlaczego nie.
+
+    Wystarczy jedno sprawne urządzenie. Stan zbiorczy to stan pierwszego
+    urządzenia, które ma najbliżej do sprawności, bo administratora nie
+    interesuje, że jeden z trzech telefonów ma wygasły token - interesuje go,
+    czy dostanie powiadomienie.
+    """
+    rows = list(devices or [])
+    states = [device_alert_state(row, kind) for row in rows]
+    if not states:
+        state = ADMIN_NO_DEVICE
+    elif DEVICE_OK in states:
+        state = DEVICE_OK
+    else:
+        # Kolejność od najbardziej naprawialnego: token wraca sam przy starcie
+        # aplikacji, brak FCM wymaga innego wydania, wyciszenie to decyzja.
+        for candidate in (DEVICE_TOKEN_LOST, DEVICE_NOT_FCM, DEVICE_MUTED):
+            if candidate in states:
+                state = candidate
+                break
+        else:  # pragma: no cover - lista stanów jest zamknięta
+            state = DEVICE_NOT_FCM
+    return {
+        "judge_id": str(judge_id or "").strip(),
+        "devices": len(rows),
+        "deliverable": sum(1 for s in states if s == DEVICE_OK),
+        "state": state,
+        "will_receive": state == DEVICE_OK,
+    }
