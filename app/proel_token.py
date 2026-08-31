@@ -11,28 +11,45 @@
 #     ad1=<IdZawody>&ad2=ProEl&ad3=1&ad4=<true|false>&sid=<losowe>
 #
 # Odpowiedź jest tekstowa: "OK|<TOKEN>" przy powodzeniu (przy wyłączeniu token
-# jest pusty), "ERROR..." przy odmowie. Strona rozcina ją po „|" i wstawia
-# drugą część do <span id="token_proel_<IdZawody>">.
+# jest pusty), "ERROR" przy odmowie. Strona rozcina ją po „|" i wstawia drugą
+# część do <span id="token_proel_<IdZawody>">.
 #
-# Robimy to po stronie serwera, tak samo jak edycję danych sędziego i zapis
+# NAJPIERW OTWIERAMY LISTĘ, POTEM ZAPISUJEMY. Trzy powody, każdy sam
+# wystarczający:
+#   1. ZPRP odpowiada ERROR na „włącz" dla meczu, który JUŻ jest włączony.
+#      Aplikacja, która nie zna stanu, prosi dokładnie o to i dostaje błąd,
+#      choć wszystko jest w porządku - kod istnieje, tylko go nie widać.
+#   2. Na liście stoi aktualny token. Przy zgodnym stanie oddajemy go bez
+#      ruszania czegokolwiek w ZPRP.
+#   3. To jedyny sposób, żeby odróżnić „nie masz prawa" od „tego meczu nie ma
+#      na Twojej liście" - a te dwie rzeczy naprawia się inaczej.
+#
+# Akcję wykonuje serwer, tak samo jak edycję danych sędziego i zapis
 # niedyspozycyjności: aplikacja przysyła zaszyfrowane RSA poświadczenia, serwer
-# loguje się do ZPRP i wykonuje akcję. Dzięki temu telefon nie musi trzymać
-# żywej sesji ZPRP, a uprawnienia rozstrzyga sam ZPRP - jeśli sędzia nie ma
-# prawa ruszyć tego meczu, dostaniemy stamtąd ERROR i tak to zwrócimy.
+# loguje się do ZPRP i klika. Telefon nie musi trzymać żywej sesji ZPRP.
 
 import base64
 import random
+import re
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from httpx import AsyncClient
 from pydantic import BaseModel
 
+from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from app.deps import get_settings, Settings, get_rsa_keys
 from app.utils import fetch_with_correct_encoding
 
 router = APIRouter()
+
+#: Ile sezonów wstecz wolno przejrzeć w poszukiwaniu meczu. Domyślna strona
+#: pokazuje bieżący sezon i to on pokrywa każdy mecz, który da się jeszcze
+#: rozegrać. Starsze przeglądamy tylko awaryjnie i nie bez końca - to koszt
+#: kolejnych żądań do ZPRP.
+MAX_SEASONS_TO_SCAN = 4
 
 
 class ProelTokenRequest(BaseModel):
@@ -44,6 +61,59 @@ class ProelTokenRequest(BaseModel):
     match_id: str
     #: Czy token ma być włączony.
     enabled: bool
+
+
+def _find_proel_cell(html: str, match_id: str) -> Optional[str]:
+    """Zwraca HTML komórki z checkboxem ProEla dla danego meczu (albo None).
+
+    Komórka jest jedna na wiersz i trzyma naraz link do meczu, checkbox i
+    miejsce na kod. Szukamy po `zapiszProtok3(<IdZawody>,'ProEl'`, bo to
+    jedyne miejsce na stronie, gdzie numer meczu stoi tuż przy tym checkboxie.
+    """
+    marker = re.search(
+        r"zapiszProtok3\(\s*%s\s*,\s*'ProEl'" % re.escape(match_id),
+        html,
+    )
+    if not marker:
+        return None
+    start = html.rfind("<td", 0, marker.start())
+    end = html.find("</td>", marker.start())
+    if start < 0 or end < 0:
+        return None
+    return html[start:end]
+
+
+def _read_proel_cell(cell_html: str) -> Tuple[bool, str]:
+    """(czy włączony, token) - dokładnie tak, jak czyta to aplikacja."""
+    input_tag = re.search(r'<input[^>]*name="ProEl"[^>]*>', cell_html, re.I)
+    enabled = bool(input_tag) and bool(
+        re.search(r"\schecked(\s|=|>)", input_tag.group(0), re.I)
+    )
+
+    token = ""
+    span = re.search(
+        r'id="token_proel_\d+"[^>]*>(.*?)</span>', cell_html, re.I | re.S
+    )
+    if span:
+        raw = re.sub(r"<[^>]*>", " ", span.group(1))
+        raw = re.sub(r"ProEl\s*:", " ", raw, flags=re.I)
+        raw = raw.replace("&nbsp;", " ")
+        token = re.sub(r"\s+", " ", raw).strip()
+
+    return enabled, token
+
+
+def _season_values(html: str) -> List[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    sel = soup.find("select", {"name": "Filtr_sezon"})
+    if not sel:
+        return []
+    out: List[str] = []
+    for opt in sel.find_all("option"):
+        v = (opt.get("value") or "").strip()
+        if v:
+            out.append(v)
+    return out
 
 
 @router.post("/match/proel")
@@ -61,6 +131,7 @@ async def set_match_proel(
     try:
         user_plain = decrypt_field(data.username)
         pass_plain = decrypt_field(data.password)
+        judge_plain = decrypt_field(data.judge_id)
     except Exception as e:
         raise HTTPException(400, f"Decryption error: {e}")
 
@@ -84,11 +155,67 @@ async def set_match_proel(
         )
         if "/index.php" not in resp_login.url.path:
             raise HTTPException(401, "Logowanie nie powiodło się")
-        cookies = dict(resp_login.cookies)
+        # Ciasteczka trzyma klient, nie pojedyncza odpowiedź: sesja powstaje
+        # w PRZEKIEROWANIU, a `resp_login` to już strona docelowa.
+        client.cookies.update(resp_login.cookies)
 
-        # `ad4` jedzie jako "true"/"false", bo strona wysyła tam wprost
-        # javascriptowy `this.checked`. `sid` to cache-buster oryginału -
-        # zostaje, żeby żądanie było nieodróżnialne od tego z przeglądarki.
+        # ── 1) Lista meczów sędziego ────────────────────────────────────────
+        list_path = (
+            f"/index.php?a=statystyki&b=sedzia&NrSedzia={judge_plain}"
+            "&Filtr_sezon="
+        )
+        _, html = await fetch_with_correct_encoding(
+            client, list_path, method="GET"
+        )
+        cell = _find_proel_cell(html, match_id)
+
+        # Mecz ze starszego sezonu nie jest na stronie domyślnej. Zaglądamy do
+        # kolejnych sezonów, ale tylko kilku - patrz MAX_SEASONS_TO_SCAN.
+        if cell is None:
+            for season in _season_values(html)[:MAX_SEASONS_TO_SCAN]:
+                _, html_season = await fetch_with_correct_encoding(
+                    client,
+                    f"/index.php?a=statystyki&b=sedzia&NrSedzia={judge_plain}"
+                    f"&Filtr_sezon={season}",
+                    method="GET",
+                )
+                cell = _find_proel_cell(html_season, match_id)
+                if cell is not None:
+                    break
+
+        if cell is None:
+            raise HTTPException(
+                404,
+                "Tego meczu nie ma na Twojej liście w ZPRP - ProEla można "
+                "włączyć tylko z własnej obsady.",
+            )
+
+        current_enabled, current_token = _read_proel_cell(cell)
+
+        # ── 2) Stan już zgodny = nic nie robimy ─────────────────────────────
+        # To NIE jest optymalizacja, tylko poprawność: ZPRP odpowiada ERROR na
+        # ponowne włączenie i aplikacja pokazywała błąd nad działającym kodem.
+        if current_enabled == bool(data.enabled):
+            return {
+                "success": True,
+                "enabled": current_enabled,
+                "token": current_token if current_enabled else "",
+                "changed": False,
+            }
+
+        # ── 3) Klikamy checkbox ─────────────────────────────────────────────
+        # `ad3` to `this.value` checkboxa (na stronie zawsze "1"), `ad4` to
+        # javascriptowy `this.checked`. `sid` jest cache-busterem oryginału.
+        # Nagłówki dokładamy takie, jakie wysyła przeglądarka przy tym
+        # XMLHttpRequest - żądanie ma być nieodróżnialne od kliknięcia.
+        value_attr = "1"
+        if cell:
+            m_val = re.search(
+                r'<input[^>]*name="ProEl"[^>]*value="([^"]*)"', cell, re.I
+            )
+            if m_val:
+                value_attr = m_val.group(1)
+
         _, body = await fetch_with_correct_encoding(
             client,
             "/zawody_zapisz3.php",
@@ -96,11 +223,14 @@ async def set_match_proel(
             data={
                 "ad1": match_id,
                 "ad2": "ProEl",
-                "ad3": "1",
+                "ad3": value_attr,
                 "ad4": "true" if data.enabled else "false",
                 "sid": str(random.random()),
             },
-            cookies=cookies,
+            headers={
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": f"{settings.ZPRP_BASE_URL.rstrip('/')}{list_path}",
+            },
         )
 
     text = (body or "").strip()
@@ -121,4 +251,5 @@ async def set_match_proel(
         "success": True,
         "enabled": bool(data.enabled),
         "token": token if data.enabled else "",
+        "changed": True,
     }

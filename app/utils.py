@@ -62,6 +62,7 @@ async def fetch_with_correct_encoding(
     data: Optional[dict] = None,
     json: Optional[dict] = None,
     cookies: Optional[dict] = None,
+    headers: Optional[dict] = None,
 ) -> Tuple[httpx.Response, str]:
     """
     Wysyła żądanie i zwraca (response, text) z poprawnym dekodowaniem.
@@ -79,6 +80,9 @@ async def fetch_with_correct_encoding(
         data=data,
         json=json,
         cookies=cookies,
+        # Domyślnie None = nagłówki klienta bez zmian. Potrzebne tam, gdzie
+        # strona ZPRP odpowiada na XMLHttpRequest i patrzy na `Referer`.
+        headers=headers,
         follow_redirects=True,
     )
 
