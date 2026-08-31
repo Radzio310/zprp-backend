@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<title>{{ meta.title or "Statystyki okregowe" }}</title>
+<style>
+  /* Raport idzie na papier i do archiwum, wiec swiadomie jasny - ciemny motyw
+     ekranu wydrukowalby sie jako plama tonera i byl nieczytelny w kopii. */
+  @page {
+    size: A4;
+    margin: 16mm 14mm 18mm 14mm;
+    @bottom-center {
+      content: "Strona " counter(page) " z " counter(pages);
+      font-family: "DejaVu Sans", Arial, sans-serif;
+      font-size: 8pt;
+      color: #8a8f98;
+    }
+  }
+
+  :root {
+    --ink: #14161a;
+    --muted: #6b7280;
+    --line: #dfe3e8;
+    --accent: #1f6f52;
+    --band: #f4f6f8;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: "DejaVu Sans", Arial, sans-serif;
+    font-size: 9pt;
+    color: var(--ink);
+    margin: 0;
+  }
+
+  header.doc {
+    border-bottom: 2.5pt solid var(--accent);
+    padding-bottom: 8pt;
+    margin-bottom: 12pt;
+  }
+  .eyebrow {
+    font-size: 7.5pt;
+    letter-spacing: 1.1pt;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  h1 { font-size: 17pt; margin: 3pt 0 2pt; }
+  .sub { font-size: 9.5pt; color: var(--muted); }
+
+  .meta-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4pt 18pt;
+    margin-top: 7pt;
+    font-size: 8pt;
+    color: var(--muted);
+  }
+  .meta-grid b { color: var(--ink); font-weight: 700; }
+
+  .filters {
+    margin-top: 8pt;
+    padding: 6pt 8pt;
+    background: var(--band);
+    border-left: 2.5pt solid var(--accent);
+    font-size: 8pt;
+  }
+  .filters .lbl {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6pt;
+    font-size: 7pt;
+    color: var(--accent);
+  }
+
+  section.block {
+    margin-top: 14pt;
+    /* Sekcja nie ma sie rozpadac miedzy strony na naglowku - pusty tytul
+       u dolu kartki wyglada jak blad skladu. */
+    break-inside: auto;
+  }
+  section.block > h2 {
+    font-size: 11pt;
+    margin: 0 0 1pt;
+    padding-bottom: 3pt;
+    border-bottom: 1pt solid var(--line);
+    break-after: avoid;
+  }
+  section.block > .hint {
+    font-size: 8pt;
+    color: var(--muted);
+    margin: 3pt 0 6pt;
+    break-after: avoid;
+  }
+
+  .tiles { display: flex; flex-wrap: wrap; gap: 6pt; margin: 6pt 0 8pt; }
+  .tile {
+    flex: 1 1 88pt;
+    border: 0.7pt solid var(--line);
+    border-radius: 3pt;
+    padding: 5pt 7pt;
+    background: var(--band);
+  }
+  .tile .v { font-size: 12pt; font-weight: 700; }
+  .tile .l {
+    font-size: 7pt;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4pt;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 8pt; }
+  thead { display: table-header-group; }
+  th {
+    text-align: left;
+    background: #eceff3;
+    border-bottom: 1pt solid var(--line);
+    padding: 4pt 5pt;
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.4pt;
+    color: #3c424b;
+  }
+  td { padding: 3.4pt 5pt; border-bottom: 0.5pt solid #eef1f4; }
+  tr { break-inside: avoid; }
+  /* Zebra ulatwia wodzenie wzrokiem po szerokiej tabeli na papierze. */
+  tbody tr:nth-child(even) td { background: #fafbfc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .note {
+    margin-top: 5pt;
+    font-size: 7.5pt;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .empty { font-size: 8pt; color: var(--muted); padding: 5pt 0; }
+
+  footer.doc {
+    margin-top: 16pt;
+    padding-top: 6pt;
+    border-top: 0.7pt solid var(--line);
+    font-size: 7.5pt;
+    color: var(--muted);
+  }
+  footer.doc li { margin-bottom: 2pt; }
+</style>
+</head>
+<body>
+
+<header class="doc">
+  <div class="eyebrow">Statystyki okregowe</div>
+  <h1>{{ meta.title or "Raport sezonu" }}</h1>
+  {% if meta.subtitle %}<div class="sub">{{ meta.subtitle }}</div>{% endif %}
+
+  <div class="meta-grid">
+    <div>Okreg: <b>{{ meta.province }}</b></div>
+    <div>Sezon: <b>{{ meta.season }}</b></div>
+    <div>Wygenerowano: <b>{{ generated_at }}</b></div>
+    {% if meta.generated_by %}<div>Przez: <b>{{ meta.generated_by }}</b></div>{% endif %}
+  </div>
+
+  <div class="filters">
+    <span class="lbl">Zakres danych</span><br />
+    {% if meta.filters %}{{ meta.filters | join("; ") }}{% else %}Caly sezon, bez zawezen{% endif %}
+  </div>
+</header>
+
+{% for section in sections %}
+<section class="block">
+  <h2>{{ section.title }}</h2>
+  {% if section.subtitle %}<div class="hint">{{ section.subtitle }}</div>{% endif %}
+
+  {% if section.tiles %}
+  <div class="tiles">
+    {% for tile in section.tiles %}
+    <div class="tile">
+      <div class="v">{{ tile.value }}</div>
+      <div class="l">{{ tile.label }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if section.columns and section.rows %}
+  <table>
+    <thead>
+      <tr>
+        {% for column in section.columns %}
+        <th class="{{ 'num' if column.format not in ('text', 'date') else '' }}">{{ column.label }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in section.rows %}
+      <tr>
+        {% for column in section.columns %}
+        <td class="{{ 'num' if column.format not in ('text', 'date') else '' }}">{{ row.get(column.key) | cell(column.format) }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif not section.tiles %}
+  <div class="empty">Brak danych w tym zakresie.</div>
+  {% endif %}
+
+  {% if section.note %}<div class="note">{{ section.note }}</div>{% endif %}
+</section>
+{% endfor %}
+
+{% if meta.footnotes %}
+<footer class="doc">
+  <ul>
+    {% for note in meta.footnotes %}<li>{{ note }}</li>{% endfor %}
+  </ul>
+</footer>
+{% endif %}
+
+</body>
+</html>

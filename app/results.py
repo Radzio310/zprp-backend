@@ -2107,15 +2107,59 @@ def _ms_to_mmss(ms: Optional[int]) -> str:
     return f"{mm:02d}:{ss:02d}"
 
 
-def _event_minute_from_ms(ms: int) -> int:
-    # minute numbering: 0:00 => 1, 53:12 => 54 (floor + 1)
+def _event_minute_from_ms(ms: int, period_end_ms: int = 0) -> int:
+    """
+    Numeracja minut: 0:00 => 1, 53:12 => 54 (floor + 1).
+
+    `period_end_ms` to koniec okresu, w ktorym lezy zdarzenie - konca pierwszej
+    polowy albo konca meczu. Na tej jednej wartosci zegar STAJE, wiec akcja
+    nalezy jeszcze do ostatniej minuty okresu: gol z 60:00 przy polowach 2 x 30
+    to 60 minuta, a nie 61, bo 61 minuty w tym meczu nie bylo. Analogicznie przy
+    krotszych polowach (2 x 20 -> sufit 40, 2 x 15 -> sufit 30).
+
+    Zdarzenie z 30:00 na POCZATKU drugiej polowy zostaje 31 minuta - sufit
+    liczy sie dla okresu zdarzenia, a nie dla kazdej pelnej minuty.
+    """
     try:
         ms_i = int(ms)
     except Exception:
         ms_i = 0
     if ms_i < 0:
         ms_i = 0
-    return (ms_i // 60000) + 1
+
+    minute = (ms_i // 60000) + 1
+
+    try:
+        end_ms = int(period_end_ms)
+    except Exception:
+        end_ms = 0
+    if end_ms > 0:
+        cap = end_ms // 60000
+        if cap > 0 and minute > cap:
+            return cap
+
+    return minute
+
+
+def _cap_minute_text(value: Any, max_minute: int) -> str:
+    """
+    Minuta zapisana przez aplikacje, przycieta do ostatniej minuty meczu.
+
+    Rubryka upomnienia dostaje gotowy tekst z telefonu, wiec zapisy sprzed
+    poprawki sufitu (patrz `_event_minute_from_ms`) niosa jeszcze "61" przy
+    meczu 2 x 30. Obnizamy WYLACZNIE wartosci niemozliwe - minuta wieksza niz
+    ostatnia minuta meczu jest bledem z definicji, a nie decyzja sedziego.
+    Sufiks ("61'") zostaje nietkniety.
+    """
+    text = str(value or "").strip()
+    if not text or max_minute <= 0:
+        return text
+    m = re.match(r"^(\d{1,3})(.*)$", text)
+    if not m:
+        return text
+    if int(m.group(1)) <= max_minute:
+        return text
+    return f"{max_minute}{m.group(2)}"
 
 
 def _safe_int(v: Any, default: int = 0) -> int:
@@ -3024,6 +3068,8 @@ def _fill_players_block(
     end_row: int,
     exam_by_number: Optional[Dict[int, str]] = None,
     mark_ws=None,
+    # Ostatnia minuta meczu - sufit dla rubryki upomnienia. 0 = bez przycinania.
+    max_minute: int = 0,
 ) -> None:
     """
     Kolumny wg Twojej specyfikacji:
@@ -3108,7 +3154,12 @@ def _fill_players_block(
             _add_strike_line(mark_ws, row=row)
         ws[f"Q{row}"].value = "W" if entered else "-"
         ws[f"S{row}"].value = goals if goals > 0 else "-"
-        ws[f"U{row}"].value = str(warning).strip() if isinstance(warning, str) and warning.strip() else "-"
+        warning_text = (
+            _cap_minute_text(warning, max_minute)
+            if isinstance(warning, str)
+            else ""
+        )
+        ws[f"U{row}"].value = warning_text if warning_text else "-"
 
         ws[f"W{row}"].value = penalty1 if penalty1 else "---"
         ws[f"Z{row}"].value = penalty2 if penalty2 else "---"
@@ -3297,6 +3348,11 @@ def _fill_timeline_half_chunk(
     start_row: int,
     end_row: int,
     half_ms: int,
+    # Koniec okresu, ktorego dotyczy ten kawalek przebiegu. Na nim zegar staje,
+    # wiec to on jest sufitem numeracji minut - patrz `_event_minute_from_ms`.
+    # Domyslne 0 znaczy "bez sufitu": generator podaje te wartosc przy kazdym
+    # wywolaniu, ale testy stylu wypelniaja sam arkusz i minuty ich nie dotycza.
+    period_end_ms: int = 0,
     start_score_host: int,
     start_score_guest: int,
     col_minute: str,
@@ -3344,7 +3400,7 @@ def _fill_timeline_half_chunk(
         r = rows[i]
 
         ms = _ev_ms(ev)
-        minute = _event_minute_from_ms(ms)
+        minute = _event_minute_from_ms(ms, period_end_ms)
 
         team = ev.get("team")
         player = ev.get("player")
@@ -3424,6 +3480,7 @@ def _fill_timeline_pages(
         start_row=TIMELINE_START_ROW,
         end_row=TIMELINE_END_ROW,
         half_ms=half_ms,
+        period_end_ms=half_ms,
         start_score_host=0,
         start_score_guest=0,
         col_minute="AL",
@@ -3440,6 +3497,7 @@ def _fill_timeline_pages(
         start_row=TIMELINE_START_ROW,
         end_row=TIMELINE_END_ROW,
         half_ms=half_ms,
+        period_end_ms=half_ms * 2,
         start_score_host=_safe_int(half_score_host, 0),
         start_score_guest=_safe_int(half_score_guest, 0),
         col_minute="AW",
@@ -3466,6 +3524,7 @@ def _fill_timeline_pages(
         start_row=TIMELINE_START_ROW,
         end_row=TIMELINE_END_ROW,
         half_ms=half_ms,
+        period_end_ms=half_ms,
         start_score_host=h1_after,
         start_score_guest=g1_after,
         col_minute="AL",
@@ -3486,6 +3545,7 @@ def _fill_timeline_pages(
         start_row=TIMELINE_START_ROW,
         end_row=TIMELINE_END_ROW,
         half_ms=half_ms,
+        period_end_ms=half_ms * 2,
         start_score_host=h2_after,
         start_score_guest=g2_after,
         col_minute="AW",
@@ -5690,6 +5750,7 @@ async def generate_protocol_pdf(
             end_row=28,
             exam_by_number=host_exams,
             mark_ws=ws_raw,
+            max_minute=core["halfTimeMin"] * 2,
         )
         _fill_players_block(
             ws,
@@ -5700,6 +5761,7 @@ async def generate_protocol_pdf(
             end_row=54,
             exam_by_number=guest_exams,
             mark_ws=ws_raw,
+            max_minute=core["halfTimeMin"] * 2,
         )
 
         # Osoby towarzyszące gospodarzy

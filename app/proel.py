@@ -783,8 +783,17 @@ async def lease_proel_match(
             # zachowujemy w całości.
             allowed = _same_judge_lease(state, actor.judge_id)
             if not allowed and req.force:
-                roles = roles_for(actor, _officials_of(state))
-                allowed = "delegate" in roles or await is_admin(actor.judge_id)
+                # Przejęcie na siłę: WYŁĄCZNIE administrator.
+                #
+                # Delegat miał to prawo i został go pozbawiony świadomie.
+                # `force` nie jest pomocą przy stoliku, tylko odebraniem
+                # drugiej osobie możliwości zapisu w trakcie meczu -
+                # poprzednie urządzenie dostaje 412 przy najbliższym biciu
+                # serca i przestaje pisać protokół, który ma przed sobą.
+                # Delegat siedzi przy tym samym stole i ma jak powiedzieć
+                # słowo; przy padniętym sprzęcie zostaje wygaśnięcie leasingu
+                # (90 s) albo telefon do administratora.
+                allowed = await is_admin(actor.judge_id)
             if not allowed:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,

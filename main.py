@@ -29,6 +29,7 @@ from app.deps import get_rsa_keys
 from app.auth import router as auth_router
 from app.proxy import router as proxy_router
 from app.edit_judge import router as edit_router
+from app.proel_token import router as proel_token_router
 from app.edit_photo import router as edit_photo_router
 from app.offtime import router as offtime_router
 from app.delegate import router as delegate_router
@@ -64,6 +65,7 @@ from app.badges import router as badges_router
 from app.baza_vips import router as baza_vips_router
 from app.province_events import router as province_events_router
 from app.province_travel import router as province_travel_router
+from app.province_stats_export import router as province_stats_export_router
 from app.mentor_grades import router as mentor_grades_router
 from app.game_scores import router as game_scores_router
 from app.signatures import router as signatures_router
@@ -190,6 +192,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(edit_router)
+# Przełącznik tokenu ProEl przy meczu. Stoi przy rodzinie akcji ZPRP
+# wykonywanych z poświadczeń sędziego (edycja danych, niedyspozycyjność).
+app.include_router(proel_token_router)
 app.include_router(edit_photo_router)
 app.include_router(offtime_router)
 app.include_router(delegate_router)
@@ -233,6 +238,9 @@ app.include_router(badges_router)
 app.include_router(baza_vips_router)
 app.include_router(province_events_router)
 app.include_router(province_travel_router)
+# Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
+# /zprp/statystyki/okreg/..., wiec nie wchodzi pod zaden catch-all.
+app.include_router(province_stats_export_router)
 app.include_router(mentor_grades_router)
 app.include_router(game_scores_router)
 app.include_router(signatures_router)
