@@ -87,3 +87,63 @@ def match_head(blob: Any) -> Dict[str, Any]:
         except TypeError:
             break
     return out
+
+#: Pola zegara i tablicy wyniku - nagłówek meczu PROWADZONEGO W TEJ CHWILI.
+#:
+#: Kafelek „na żywo" w szczegółach meczu musi pokazywać wynik i zegar, a jest
+#: otwarty tak długo, jak długo ktoś patrzy na mecz. Ciągnięcie po to całego
+#: `data_json` (składy, licencje, przebieg, stos cofania) raz na minutę to
+#: kilkadziesiąt kilobajtów transferu w hali, w której zasięg bywa jedyną
+#: rzeczą, jakiej brakuje. Stąd osobna, płaska projekcja.
+#:
+#: `savedAtMs` jest tu kluczowe: bez niego zegar w podglądzie stoi na wartości
+#: sprzed minuty. Z nim aplikacja liczy czas dalej od znacznika - dokładnie
+#: tak, jak robi to pływający dymek aktywnego meczu.
+HEAD_CLOCK_KEYS = (
+    "mainTime",
+    "isFirstHalf",
+    "isGameRunning",
+    "isHalfBreak",
+    "isBreakRunning",
+    "savedAtMs",
+    "breakRemainingMs",
+    "halfBreakRemainingMs",
+    "halfScore",
+    "penaltyShootoutActive",
+    "penaltyShootoutScoreLabel",
+)
+
+#: Pola konfiguracji potrzebne tablicy wyniku ponad `HEAD_CONFIG_KEYS`.
+#: Kolory koszulek, bo tablica maluje nimi nazwy drużyn, i długość połowy,
+#: bez której nie da się powiedzieć, czy zegar dobił do końca czasu.
+HEAD_LIVE_CONFIG_KEYS = HEAD_CONFIG_KEYS + (
+    "hostJerseyColor",
+    "guestJerseyColor",
+    "halfTime",
+    "date",
+    "hala",
+)
+
+
+def live_head(blob: Any) -> Dict[str, Any]:
+    """Nagłówek meczu w toku: wynik, zegar, faza - i nic poza tym.
+
+    Rozszerza `match_head` o stan zegara. Dalej BEZ danych osobowych: składy,
+    licencje, badania i przebieg zostają na serwerze, bo do narysowania
+    tablicy wyniku nie są potrzebne.
+    """
+    out = match_head(blob)
+    try:
+        config = dict((blob or {}).get("matchConfig") or {})
+    except AttributeError:
+        return out
+    out["matchConfig"] = {
+        k: config.get(k) for k in HEAD_LIVE_CONFIG_KEYS if k in config
+    }
+    for key in HEAD_CLOCK_KEYS:
+        try:
+            if key in blob:
+                out[key] = blob[key]
+        except TypeError:
+            break
+    return out

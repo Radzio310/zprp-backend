@@ -24,6 +24,7 @@ from app.proel_auth import (
 )
 from app.proel_journal import client_ip as _client_ip, log_match_event, soft_actor
 from app.proel_match_key import (
+    live_head as _live_head,
     match_head as _match_head,
     match_id_conflict as _match_id_conflict,
     zprp_id_of as _zprp_id_of,
@@ -1430,6 +1431,55 @@ async def list_proel_matches(
             data["data_json"] = _match_head(row["data_json"])
         items.append(MatchItem(**data))
     return ListSavedMatchesResponse(matches=items)
+
+
+@router.get(
+    "/head",
+    response_model=dict,
+    summary="Tablica wyniku meczu w toku (lekka projekcja data_json)",
+)
+async def get_proel_match_head(
+    match: str = Query(..., description="Numer meczu (RozgrywkiCode)"),
+    actor: Actor = Depends(proel_actor),
+):
+    """Wynik, zegar i faza meczu - bez składów, badań i przebiegu.
+
+    ISTNIEJE PO TO, ŻEBY KAFELEK „NA ŻYWO" NIE KOSZTOWAŁ BLOBA. Szczegóły
+    meczu pokazują wynik prowadzonego spotkania tak długo, jak długo ktoś na
+    nie patrzy, i odświeżają go przy każdej zmianie rewizji. Pobieranie w tym
+    rytmie całego `data_json` (składy z licencjami, przebieg, stos cofania)
+    to kilkadziesiąt kilobajtów na minutę w hali, gdzie zasięg bywa jedyną
+    brakującą rzeczą. Pełny blob dalej idzie osobno - dopiero gdy ktoś
+    naprawdę otworzy podgląd meczu.
+
+    Dane osobowe zostają na serwerze: projekcja `live_head` przepuszcza
+    wyłącznie nazwy drużyn, kolory koszulek, wynik i stan zegara.
+    """
+    # Numer przychodzi w tej samej pisowni, co do `/state` - normalizuje go
+    # klient (`proelMatchKey`), bo to on jest kluczem głównym tabeli.
+    match_number = match
+    row = await database.fetch_one(
+        select(
+            saved_matches.c.data_json,
+            saved_matches.c.status,
+            saved_matches.c.updated_at,
+        ).where(saved_matches.c.match_number == match_number)
+    )
+    data = _as_dict(row) or {}
+    if not data:
+        # Brak wiersza to nie błąd: mecz może być dopiero zakładany. Pusty
+        # nagłówek pozwala kafelkowi powiedzieć „jeszcze nic nie wiem"
+        # zamiast pokazać błąd sieci.
+        return {"match_number": match_number, "exists": False, "head": None}
+    return {
+        "match_number": match_number,
+        "exists": True,
+        "status": data.get("status"),
+        "head": _live_head(data.get("data_json")),
+        "updated_at": (
+            data["updated_at"].isoformat() if data.get("updated_at") else None
+        ),
+    }
 
 
 @router.get(

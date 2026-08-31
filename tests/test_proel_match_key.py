@@ -11,7 +11,12 @@ telefon nazwiska, licencje i przebieg wszystkich meczów w systemie.
 """
 from __future__ import annotations
 
-from app.proel_match_key import match_head, match_id_conflict, zprp_id_of
+from app.proel_match_key import (
+    live_head,
+    match_head,
+    match_id_conflict,
+    zprp_id_of,
+)
 
 
 # ───────────────────────── zprp_id_of ─────────────────────────
@@ -101,3 +106,56 @@ def test_naglowek_znosi_smieci_zamiast_bloba():
     assert match_head(None) == {"matchConfig": {}}
     assert match_head("nie-obiekt") == {"matchConfig": {}}
     assert match_head({}) == {"matchConfig": {}}
+
+
+# ── Nagłówek meczu W TOKU ───────────────────────────────────────────────────
+
+
+def test_naglowek_na_zywo_niesie_zegar_a_nie_sklady():
+    # Kafelek „na żywo" odświeża się przy każdej zmianie rewizji, czyli co
+    # minutę przez cały mecz. Gdyby ciągnął pełny blob, kosztowałby składy,
+    # licencje i przebieg za każdym razem.
+    blob = {
+        "matchConfig": {
+            "matchNumber": "SPM/1",
+            "hostTeamName": "KS Test 1",
+            "guestTeamName": "KS Test 2",
+            "hostJerseyColor": "#3a86ff",
+            "halfTime": 30,
+            "hostPlayerCards": [{"fullName": "KOWALSKI Jan", "license": "A"}],
+        },
+        "scoreHost": 8,
+        "scoreGuest": 8,
+        "mainTime": 910000,
+        "isFirstHalf": True,
+        "isGameRunning": True,
+        "savedAtMs": 1_700_000_000_000,
+        "halfScore": {"host": 4, "guest": 5},
+        "protocol": [{"type": "goal"}] * 40,
+        "undoStack": [1, 2, 3],
+    }
+    head = live_head(blob)
+
+    assert head["scoreHost"] == 8
+    assert head["mainTime"] == 910000
+    assert head["savedAtMs"] == 1_700_000_000_000
+    assert head["halfScore"] == {"host": 4, "guest": 5}
+    assert head["matchConfig"]["hostJerseyColor"] == "#3a86ff"
+
+    # Nic, co opisuje LUDZI, nie ma prawa tędy wyjść.
+    assert "hostPlayerCards" not in head["matchConfig"]
+    assert "protocol" not in head
+    assert "undoStack" not in head
+
+
+def test_bez_znacznika_czasu_zegar_nie_ma_od_czego_liczyc():
+    # `savedAtMs` jest tym, co odróżnia żywy zegar od zamrożonej liczby.
+    # Zapis sprzed tego pola po prostu go nie ma - i to musi przejść bez błędu.
+    head = live_head({"matchConfig": {"matchNumber": "SPM/1"}, "mainTime": 1000})
+    assert "savedAtMs" not in head
+    assert head["mainTime"] == 1000
+
+
+def test_smieci_zamiast_bloba_nie_wywracaja_naglowka():
+    for junk in (None, [], "tekst", 7):
+        assert live_head(junk) == {"matchConfig": {}}
