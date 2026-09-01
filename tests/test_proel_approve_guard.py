@@ -166,18 +166,44 @@ def test_placeholder_z_protokolu_tez_znika():
 
 
 # ────────────────── konto ProEl w swoim własnym meczu ──────────────────
+#
+# REGUŁA ZMIENIONA 1 września 2026. Wcześniej konto ProEl dostawało rolę ze
+# zbieżności nazwisk, bo „inaczej sędzia prowadzący protokół kontem ProEl nie
+# zamknąłby własnego protokołu". Zawodziło to w miejscu, którego tamten test nie
+# obejmował: nazwisko aktora przyjeżdżało nagłówkiem `X-Actor-Name` od
+# aplikacji, więc warunek wpuszczenia był deklaracją, a nie dowodem.
+#
+# Teraz drogą do roli jest DOWÓD NUMERU: konto loguje się do baza.zprp.pl
+# (`POST /proel/account/verify-judge`), serwer odczytuje `NrSedzia` i zapisuje
+# `judge_id_verified_at`. Od tej chwili `account_actor` oddaje prawdziwy numer,
+# a rola stoi na porównaniu numerów - dokładnie jak u zalogowanego sędziego.
 
-def test_konto_proel_zatwierdza_swoj_mecz_po_nazwisku():
-    """Konto ProEl nie ma numeru sędziego - jedynym sygnałem jest nazwisko.
+def test_konto_proel_bez_potwierdzenia_nie_zatwierdza():
+    """Samo nazwisko już nie wystarcza - nawet gdy zgadza się z obsadą."""
+    assert not can_approve(proel_account("KOWALSKI Jan"), CREW_NO_DELEGATE)
 
-    Bez tego sędzia prowadzący protokół kontem ProEl nie miałby w SWOIM meczu
-    żadnej roli i nie zamknąłby własnego protokołu.
+
+def test_konto_proel_z_potwierdzonym_numerem_zatwierdza():
+    """Po potwierdzeniu konto ma numer i wchodzi tą samą drogą co sędzia BAZY.
+
+    `account_actor` oddaje wtedy numer zamiast `proel:<id>`, więc aktor jest tu
+    nieodróżnialny od zalogowanego sędziego - i o to chodzi.
     """
-    assert can_approve(proel_account("KOWALSKI Jan"), CREW_NO_DELEGATE)
+    assert can_approve(judge("111", "KOWALSKI Jan"), CREW_NO_DELEGATE)
 
 
 def test_konto_proel_z_cudzym_nazwiskiem_odpada():
     assert not can_approve(proel_account("OBCY Jan"), CREW_NO_DELEGATE)
+
+
+def test_konto_proel_dalej_pracuje_na_meczu_bez_obsady():
+    """Mecz założony ręcznie nie ma obsady z ZPRP i nigdy jej mieć nie będzie.
+
+    Zaostrzenie dotyczy WYŁĄCZNIE meczów, o których obsadzie coś wiemy. Gdyby
+    objęło też te bez obsady, jedyny człowiek prowadzący taki mecz nie mógłby
+    go zamknąć - a nie ma tam kogo podszywać się pod kogo.
+    """
+    assert can_approve(proel_account("KTOKOLWIEK Jan"), {})
 
 
 def test_numer_dalej_rozstrzyga_miedzy_sedziami():

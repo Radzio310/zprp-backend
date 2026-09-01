@@ -118,9 +118,13 @@ async def _load_proel_account(user_id: int) -> Optional[Dict[str, Any]]:
     from app.db import database, proel_users  # lazy — patrz nota przy imporcie
 
     row = await database.fetch_one(
-        select(proel_users.c.id, proel_users.c.full_name, proel_users.c.is_active).where(
-            proel_users.c.id == int(user_id)
-        )
+        select(
+            proel_users.c.id,
+            proel_users.c.full_name,
+            proel_users.c.is_active,
+            proel_users.c.judge_id,
+            proel_users.c.judge_id_verified_at,
+        ).where(proel_users.c.id == int(user_id))
     )
     return dict(row) if row is not None else None
 
@@ -137,10 +141,14 @@ async def account_actor(
     rejestr urządzeń. Rejestr odpowiada na pytanie „czy ten telefon należy do
     tego sędziego", a tu żadnego sędziego nie ma.
 
-    Identyfikatorem jest ZAWSZE `proel:<id konta>`, nigdy numer sędziego wpisany
-    przy zakładaniu konta: ten numer nikt nie sprawdza, a wpuszczony tutaj
-    dawałby prawa w cudzych meczach. Rola w meczu zostaje więc dopasowaniem po
-    nazwisku - dokładnie tak jak dla starszych wpisów obsady bez numerów.
+    Identyfikatorem jest `proel:<id konta>` DOPÓKI konto nie dowiedzie swojego
+    numeru sędziego. Numer wpisany przy zakładaniu konta jest samą deklaracją -
+    nikt go nie sprawdza - więc wpuszczony tutaj dawałby prawa w cudzych meczach.
+
+    Numer POTWIERDZONY (`judge_id_verified_at`, czyli logowanie do baza.zprp.pl
+    przez `POST /proel/account/verify-judge`) jest czymś innym: to ten sam dowód,
+    który ma zalogowany sędzia BAZY. Taki aktor dostaje więc swój prawdziwy numer
+    i rolę rozstrzyga porównanie numerów, a nie zbieżność nazwisk.
 
     `None` znaczy „ten nagłówek nic nie wnosi" (brak tokenu, token zły albo
     wygasły, konto skasowane) i wołający idzie dalej swoją drogą.
@@ -176,10 +184,21 @@ async def account_actor(
             },
         )
 
+    # Numer bierzemy WYŁĄCZNIE ze znacznikiem potwierdzenia. Sam `judge_id` na
+    # koncie to deklaracja z formularza rejestracji.
+    verified_judge_id = (
+        _clean(account.get("judge_id"))
+        if account.get("judge_id_verified_at")
+        else ""
+    )
+
     return Actor(
-        judge_id=f"{PROEL_ACCOUNT_PREFIX}{uid}",
+        judge_id=verified_judge_id or f"{PROEL_ACCOUNT_PREFIX}{uid}",
         installation_id=_clean(installation_id),
-        name=header_text(name) or _clean(account.get("full_name")),
+        # Nazwisko z KONTA wygrywa z nagłówkiem. Nagłówek ustawia aplikacja, a
+        # przy niepotwierdzonym koncie nazwisko przestało już decydować o roli -
+        # ale trafia do historii meczu jako podpis, więc nie może być dowolne.
+        name=_clean(account.get("full_name")) or header_text(name),
         verified=True,
     )
 
@@ -546,6 +565,22 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
     if not _crew_is_known(officials):
         return set(ALL_ROLES)
 
+    # KONTO ProEl NIE DOSTAJE ROLI ZE ZBIEŻNOŚCI NAZWISK.
+    #
+    # Token konta dowodzi, że konto istnieje - nie dowodzi, że jego właściciel
+    # jest tym człowiekiem z obsady. Nazwisko przyjeżdżało dotąd nagłówkiem
+    # `X-Actor-Name`, czyli od aplikacji, więc warunek wpuszczenia był po prostu
+    # deklaracją. Kto wchodzi do meczu tokenem albo kontem ProEl, a chce
+    # zatwierdzać i zapisywać, dowodzi swojego numeru sędziego logowaniem do
+    # baza.zprp.pl (`POST /proel/account/verify-judge`) - wtedy `account_actor`
+    # oddaje prawdziwy numer i rozstrzyga porównanie numerów, wyżej.
+    #
+    # Zalogowanego sędziego BAZY i profilu lokalnego to NIE dotyczy: tam numer
+    # (albo jego brak) pochodzi z logowania do ZPRP, nie z formularza.
+    allow_name_match = not str(actor.judge_id or "").startswith(
+        PROEL_ACCOUNT_PREFIX
+    )
+
     for key in _ROLE_KEYS:
         raw = officials.get(key)
         if raw is None:
@@ -561,15 +596,11 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
                 continue
             # Numer jest rozstrzygający: gdy jest po OBU stronach i się nie
             # zgadza, nie ratujemy roli zbieżnością nazwisk (dwóch Kowalskich
-            # na mecz). Aktor bez numeru - konto ProEl, profil lokalny - nie ma
-            # czego porównywać, więc dla niego zostaje nazwisko, dokładnie tak
-            # jak dla starszych wpisów obsady zapisanych bez numerów. Inaczej
-            # sędzia prowadzący protokół kontem ProEl nie miałby w swoim własnym
-            # meczu żadnej roli.
+            # na mecz).
             if actor.judge_id and not is_synthetic_judge_id(actor.judge_id):
                 continue
 
-        if actor.name and names_match(actor.name, oname):
+        if allow_name_match and actor.name and names_match(actor.name, oname):
             out.add("delegate" if key == "delegate2" else key)
 
     return out & ALL_ROLES

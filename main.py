@@ -921,6 +921,10 @@ async def startup():
     _proel_users_migrations = [
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_proel_users_email_norm "
         "ON proel_users (email_normalized) WHERE email_normalized IS NOT NULL",
+        # Znacznik „numer sędziego DOWIEDZIONY logowaniem do baza.zprp.pl".
+        # Bez niego `judge_id` przy koncie ProEl jest tylko deklaracją.
+        "ALTER TABLE proel_users ADD COLUMN IF NOT EXISTS "
+        "judge_id_verified_at TIMESTAMPTZ",
     ]
     for stmt in _proel_users_migrations:
         try:

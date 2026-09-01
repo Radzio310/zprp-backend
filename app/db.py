@@ -2330,8 +2330,16 @@ proel_users = Table(
     "proel_users",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    #: Numer sędziego ZPRP, jeśli osoba go ma — czysto informacyjny.
+    #: Numer sędziego ZPRP.
+    #:
+    #: Wpisany przy zakładaniu konta jest CZYSTO INFORMACYJNY - nikt go nie
+    #: sprawdza, więc nie wolno na nim opierać żadnego uprawnienia. Dopiero
+    #: `judge_id_verified_at` mówi, że numer został DOWIEDZIONY: konto
+    #: zalogowało się do baza.zprp.pl, a serwer odczytał `NrSedzia` z sesji
+    #: (patrz `app/official_role.py`). Od tej chwili rola w meczu stoi na
+    #: numerze, a nie na zbieżności nazwisk.
     Column("judge_id", String, nullable=True, index=True),
+    Column("judge_id_verified_at", DateTime(timezone=True), nullable=True),
     Column("full_name", String, nullable=False),              # "NAZWISKO Imię"
     Column("province", String, nullable=True, index=True),
     Column("city", String, nullable=True),

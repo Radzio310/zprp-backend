@@ -25,8 +25,9 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from httpx import AsyncClient
+from sqlalchemy import func
 from pydantic import BaseModel
 
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -53,6 +54,51 @@ ROLE_KEYS: List[Tuple[str, List[str], List[str]]] = [
 
 #: Role, które otwierają akcje pomeczowe.
 AUTHORIZED_ROLES = frozenset({"referee1", "referee2", "delegate"})
+
+
+async def _zprp_judge_id_by_login(
+    settings: Settings, user_plain: str, pass_plain: str
+) -> str:
+    """Zaloguj do baza.zprp.pl i oddaj numer sędziego tego konta.
+
+    Ciało formularza idzie w ISO-8859-2, tak jak wysyła je przeglądarka i jak
+    robi to `BAZA/utils/zprpLegacyLogin.ts`. Serwis NIE rozumie UTF-8: hasło z
+    polskim znakiem wysłane po UTF-8 wraca jako „złe hasło", co przy sprawdzaniu
+    uprawnień wyglądałoby na odmowę dostępu.
+    """
+    body = urlencode(
+        {"login": user_plain, "haslo": pass_plain, "from": "/index.php?"},
+        encoding="iso-8859-2",
+        errors="replace",
+    ).encode("ascii")
+
+    async with AsyncClient(
+        base_url=settings.ZPRP_BASE_URL,
+        follow_redirects=True,
+    ) as client:
+        resp = await client.post(
+            "/login.php",
+            content=body,
+            headers={
+                "Content-Type": (
+                    "application/x-www-form-urlencoded; charset=ISO-8859-2"
+                )
+            },
+        )
+        if "/index.php" not in resp.url.path:
+            raise HTTPException(401, "Nieprawidłowy login lub hasło")
+        html = resp.content.decode("iso-8859-2", errors="replace")
+
+    m = re.search(r"NrSedzia=(\d+)", html)
+    if not m:
+        # Konto organizacyjne (klub, okręg) loguje się poprawnie, ale nie jest
+        # niczyim numerem sędziego - i nigdy nie będzie w obsadzie meczu.
+        raise HTTPException(
+            403,
+            "To konto nie ma numeru sędziego, więc nie może być w obsadzie "
+            "meczu.",
+        )
+    return m.group(1)
 
 
 class OfficialRoleRequest(BaseModel):
@@ -118,46 +164,7 @@ async def match_official_role(
         raise HTTPException(400, "match_id musi być numerem IdZawody")
 
     # ── 1) Kim jesteś: logowanie do baza.zprp.pl ────────────────────────────
-    #
-    # Ciało formularza idzie w ISO-8859-2, tak jak wysyła je przeglądarka i jak
-    # robi to `BAZA/utils/zprpLegacyLogin.ts`. Serwis NIE rozumie UTF-8: hasło
-    # z polskim znakiem wysłane po UTF-8 wraca jako „złe hasło", co przy
-    # sprawdzaniu uprawnień wyglądałoby na odmowę dostępu.
-    body = urlencode(
-        {"login": user_plain, "haslo": pass_plain, "from": "/index.php?"},
-        encoding="iso-8859-2",
-        errors="replace",
-    ).encode("ascii")
-
-    async with AsyncClient(
-        base_url=settings.ZPRP_BASE_URL,
-        follow_redirects=True,
-    ) as client:
-        resp = await client.post(
-            "/login.php",
-            content=body,
-            headers={
-                "Content-Type": (
-                    "application/x-www-form-urlencoded; charset=ISO-8859-2"
-                )
-            },
-        )
-        if "/index.php" not in resp.url.path:
-            raise HTTPException(401, "Nieprawidłowy login lub hasło")
-        html = resp.content.decode("iso-8859-2", errors="replace")
-
-    judge_id = ""
-    m = re.search(r"NrSedzia=(\d+)", html)
-    if m:
-        judge_id = m.group(1)
-    if not judge_id:
-        # Konto organizacyjne (klub, okręg) loguje się poprawnie, ale nie jest
-        # niczyim numerem sędziego - i nigdy nie będzie w obsadzie meczu.
-        raise HTTPException(
-            403,
-            "To konto nie ma numeru sędziego, więc nie może być w obsadzie "
-            "meczu.",
-        )
+    judge_id = await _zprp_judge_id_by_login(settings, user_plain, pass_plain)
 
     # ── 2) Czy jesteś w obsadzie: publiczne API rozgrywek ───────────────────
     async with AsyncClient(timeout=30.0) as public:
@@ -187,3 +194,83 @@ async def match_official_role(
         # nieświeże dane meczu, a to jest odczyt prosto ze źródła.
         "authorized": any(r in AUTHORIZED_ROLES for r in roles),
     }
+
+
+# ═══════════════ potwierdzenie numeru sędziego dla konta ProEl ═══════════════
+#
+# Konto ProEl przestało dostawać rolę w meczu ze zbieżności nazwisk (patrz
+# `roles_for` w `app/proel_auth.py`). Token konta dowodzi, że konto istnieje -
+# nie dowodzi, że jego właściciel jest tym człowiekiem z obsady, bo nazwisko
+# przyjeżdżało nagłówkiem od aplikacji.
+#
+# Ten endpoint jest DROGĄ WYJŚCIA i jedyną: konto raz loguje się do
+# baza.zprp.pl, serwer odczytuje `NrSedzia` z sesji i zapisuje go razem ze
+# znacznikiem czasu. Od tej chwili `account_actor` oddaje prawdziwy numer, więc
+# takie konto jest w regule ról nieodróżnialne od zalogowanego sędziego BAZY.
+#
+# Hasło do ZPRP NIE JEST zapisywane. Zapisujemy wyłącznie numer i moment
+# potwierdzenia.
+
+
+class VerifyJudgeRequest(BaseModel):
+    #: Base64-RSA, poświadczenia do baza.zprp.pl.
+    username: str
+    password: str
+
+
+@router.post("/proel/account/verify-judge")
+async def verify_proel_account_judge(
+    data: VerifyJudgeRequest,
+    authorization: Optional[str] = Header(None),
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    from app.db import database, proel_users
+    from app.proel_users.tokens import _bearer, verify_access_token
+
+    token = _bearer(authorization)
+    if not token:
+        raise HTTPException(401, "Zaloguj się na konto ProEl")
+    try:
+        uid = int(verify_access_token(token)["uid"])
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(401, "Niepoprawny token konta ProEl")
+
+    private_key, _ = keys
+
+    def decrypt_field(enc_b64: str) -> str:
+        cipher = base64.b64decode(enc_b64)
+        return private_key.decrypt(cipher, padding.PKCS1v15()).decode("utf-8")
+
+    try:
+        user_plain = decrypt_field(data.username)
+        pass_plain = decrypt_field(data.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+
+    judge_id = await _zprp_judge_id_by_login(settings, user_plain, pass_plain)
+
+    # Jeden numer sędziego = jedno konto ProEl. Bez tego dwie osoby mogłyby
+    # potwierdzić ten sam numer i obie dostałyby rolę w cudzym meczu.
+    taken = await database.fetch_one(
+        proel_users.select().where(
+            (proel_users.c.judge_id == judge_id)
+            & (proel_users.c.judge_id_verified_at.isnot(None))
+            & (proel_users.c.id != uid)
+        )
+    )
+    if taken is not None:
+        raise HTTPException(
+            409,
+            "Ten numer sędziego jest już potwierdzony przy innym koncie ProEl.",
+        )
+
+    await database.execute(
+        proel_users.update()
+        .where(proel_users.c.id == uid)
+        .values(judge_id=judge_id, judge_id_verified_at=func.now())
+    )
+
+    return {"ok": True, "judgeId": judge_id}
