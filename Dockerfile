@@ -30,6 +30,21 @@ ENV HOME=/tmp \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# ✅ Font symboli - bez niego protokół drukuje pustą ramkę zamiast znaku
+# „K w kółku" przy niewykorzystanym rzucie karnym.
+#
+# Sprawdzone (fontTools, cmap): U+24C0 NIE MA ani DejaVu (Sans/Serif, wszystkie
+# odmiany), ani Times New Roman z szablonu, ani Liberation, którym LibreOffice
+# go zastępuje, ani GNU FreeFont, ani Noto Sans/Serif/Symbols2. Ma go dopiero
+# Noto Sans Symbols (v1) i dlatego leży w repozytorium - pakiet apt z Noto
+# ciągnie kilkadziesiąt megabajtów po jeden glif, a jego zawartość zależy od
+# wydania Debiana.
+#
+# LibreOffice dobiera go automatycznie: znak, którego nie ma font komórki,
+# bierze przez fontconfig z dowolnego zainstalowanego. Stąd `fc-cache`.
+COPY app/fonts/NotoSansSymbols-Regular.ttf /usr/local/share/fonts/
+RUN fc-cache -f
+
 # 4. Kopiujemy cały kod aplikacji
 COPY . .
 

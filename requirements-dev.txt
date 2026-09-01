@@ -2,3 +2,6 @@
 pytest>=8.0
 pytest-asyncio>=0.23
 respx>=0.21
+# Czytanie cmap fontu w tescie protokolu (tests/test_protocol_penalty_mark.py):
+# znak "K w kolku" musi byc w dolaczonym Noto Sans Symbols, a nie tylko w komentarzu.
+fonttools>=4.0

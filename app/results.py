@@ -3176,21 +3176,26 @@ def _fill_players_block(
             ws[f"AF{row}"].value = "---"
 
 
-#: Rzut karny NIEWYKORZYSTANY w przebiegu meczu - przekreślone „K".
+#: Rzut karny NIEWYKORZYSTANY w przebiegu meczu - "K w kółku" (U+24C0).
 #:
-#: Chodziło o „K w kółku" (Ⓚ, U+24C0) i tak byłoby najczytelniej, ale tego
-#: znaku NIE MA w żadnym foncie dostępnym przy generowaniu: ani w DejaVu
-#: (jedyny font doinstalowany w obrazie, patrz Dockerfile), ani w Times New
-#: Roman z szablonu, ani w zastępniku Liberation. Brakującego znaku
-#: LibreOffice nie pominie - wstawi pustą ramkę, czyli w oficjalnym protokole
-#: pojawiłby się kwadracik zamiast oznaczenia. To samo dotyczy okalającego
-#: koła składanego (U+20DD) - też go nie ma.
+#: Znak jest jeden i nie zajmuje więcej miejsca niż zwykłe "K" plus jedna
+#: trzecia szerokości, a rubryka przebiegu (dwie wąskie kolumny, ~40 px przy
+#: czcionce 9 pt) mieści "17Ⓚ" z zapasem. Nawiasy "(K)" by się tam nie zmieściły.
 #:
-#: "K" + U+0336 (COMBINING LONG STROKE OVERLAY) jest w KAŻDYM z tych fontów,
-#: nie zajmuje dodatkowej szerokości (znak składający nie ma własnego pola),
-#: a rubryka przebiegu ma tylko dwie wąskie kolumny - „(K)" by się tam nie
-#: zmieściło. Przekreślenie czyta się przy tym wprost: rzut niewykorzystany.
-PENALTY_MISS_MARK = "K̶"
+#: WARUNEK: font `app/fonts/NotoSansSymbols-Regular.ttf` musi być
+#: zainstalowany w obrazie (Dockerfile kopiuje go do /usr/local/share/fonts
+#: i odświeża cache). Sprawdzone w cmapach: U+24C0 nie ma ani DejaVu, ani
+#: Times New Roman, ani Liberation, ani GNU FreeFont, ani Noto
+#: Sans/Serif/Symbols2 - brakującego znaku LibreOffice nie pomija, tylko rysuje
+#: pustą ramkę. `tests/test_protocol_penalty_mark.py` pilnuje, że font leży
+#: w repozytorium i ten znak ma.
+PENALTY_MISS_MARK = "\u24C0"
+
+#: Font dokładany do obrazu wyłącznie po to, żeby `PENALTY_MISS_MARK` miał się
+#: czym narysować. Ścieżka używana przez test - nie przez generator.
+SYMBOL_FONT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSansSymbols-Regular.ttf"
+)
 
 TIMELINE_START_ROW = 15
 TIMELINE_END_ROW = 63
