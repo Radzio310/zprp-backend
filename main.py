@@ -30,6 +30,7 @@ from app.auth import router as auth_router
 from app.proxy import router as proxy_router
 from app.edit_judge import router as edit_router
 from app.proel_token import router as proel_token_router
+from app.official_role import router as official_role_router
 from app.edit_photo import router as edit_photo_router
 from app.offtime import router as offtime_router
 from app.delegate import router as delegate_router
@@ -195,6 +196,7 @@ app.include_router(edit_router)
 # Przełącznik tokenu ProEl przy meczu. Stoi przy rodzinie akcji ZPRP
 # wykonywanych z poświadczeń sędziego (edycja danych, niedyspozycyjność).
 app.include_router(proel_token_router)
+app.include_router(official_role_router)
 app.include_router(edit_photo_router)
 app.include_router(offtime_router)
 app.include_router(delegate_router)

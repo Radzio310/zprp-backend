@@ -1,0 +1,79 @@
+"""Testy rozpoznawania roli sędziego w meczu - czysta logika, bez sieci.
+
+Ta funkcja stoi między stolikowym a akcjami pomeczowymi, więc pomyłka kosztuje
+albo zablokowanego sędziego, albo dostęp dla kogoś spoza obsady.
+"""
+from __future__ import annotations
+
+from app.official_role import AUTHORIZED_ROLES, _name_for, _roles_for
+
+
+MATCH = {
+    "NrSedzia_pierwszy": "1001",
+    "NrSedzia_pierwszy_nazwisko": "KOWALSKI Jan",
+    "NrSedzia_drugi": "1002",
+    "NrSedzia_drugi_nazwisko": "NOWAK Piotr",
+    "NrSedzia_sekretarz": "2001",
+    "NrSedzia_sekretarz_nazwisko": "WIŚNIEWSKA Anna",
+    "NrSedzia_czas": "2002",
+    "NrSedzia_czas_nazwisko": "ZIELIŃSKI Adam",
+    "NrSedzia_delegat": "3001",
+    "NrSedzia_delegat_nazwisko": "LEWANDOWSKI Marek",
+    "NrSedzia_delegat2": "",
+    "NrSedzia_delegat2_nazwisko": "",
+}
+
+
+def test_field_referee_is_authorized():
+    roles = _roles_for(MATCH, "1001")
+    assert roles == ["referee1"]
+    assert any(r in AUTHORIZED_ROLES for r in roles)
+    assert _name_for(MATCH, roles) == "KOWALSKI Jan"
+
+
+def test_second_referee_is_authorized():
+    assert _roles_for(MATCH, "1002") == ["referee2"]
+
+
+def test_delegate_is_authorized():
+    roles = _roles_for(MATCH, "3001")
+    assert roles == ["delegate"]
+    assert any(r in AUTHORIZED_ROLES for r in roles)
+
+
+def test_table_official_is_recognised_but_not_authorized():
+    """Stolikowy MA rolę - i właśnie dlatego umiemy mu to powiedzieć wprost.
+
+    Odmowa „to konto jest sekretarzem tego meczu" jest czymś innym niż
+    „tego konta nie ma w obsadzie" i sędzia przy stoliku musi widzieć różnicę.
+    """
+    roles = _roles_for(MATCH, "2001")
+    assert roles == ["secretary"]
+    assert not any(r in AUTHORIZED_ROLES for r in roles)
+
+
+def test_stranger_has_no_role():
+    assert _roles_for(MATCH, "9999") == []
+
+
+def test_empty_slot_never_matches_empty_judge_id():
+    """Puste pole obsady nie może pasować do pustego numeru.
+
+    Bez tego warunku konto bez numeru sędziego „wchodziło" w każdą nieobsadzoną
+    rolę - w tym w delegata, którego na większości meczów nie ma.
+    """
+    assert _roles_for(MATCH, "") == []
+
+
+def test_second_delegate_counts_as_delegate():
+    match = dict(MATCH, NrSedzia_delegat="", NrSedzia_delegat_nazwisko="",
+                 NrSedzia_delegat2="3002",
+                 NrSedzia_delegat2_nazwisko="DĄBROWSKI Jan")
+    roles = _roles_for(match, "3002")
+    assert roles == ["delegate"]
+    assert _name_for(match, roles) == "DĄBROWSKI Jan"
+
+
+def test_same_person_in_two_roles_keeps_both():
+    match = dict(MATCH, NrSedzia_czas="1001")
+    assert _roles_for(match, "1001") == ["referee1", "timekeeper"]
