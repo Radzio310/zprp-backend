@@ -4,6 +4,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from app.results import (
+    SIGN_ANCHORS,
     _apply_fitted_text,
     _configure_protocol_page,
     _get_match_core,
@@ -56,7 +57,10 @@ def test_second_template_has_dedicated_row_and_a4_print_area():
     assert ws.max_row == 72
     assert "A1:BH72" in str(ws.print_area).replace("$", "")
     anchors = {str(r).split(":")[0] for r in ws.merged_cells.ranges}
-    for logical in ("I71", "W71", "AI71"):
+    # Kotwicę podpisu bierzemy z kodu, a nie z literału: rubryki podpisów już
+    # raz przesunięto (AJ..AL -> AH..AL) i wtedy ten test był jedynym miejscem,
+    # które trzeba było poprawić ręcznie.
+    for logical in ("I71", "W71", SIGN_ANCHORS["delegate2"]):
         assert shift_ref(logical) in anchors
 
 

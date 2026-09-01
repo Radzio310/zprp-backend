@@ -4499,6 +4499,31 @@ OFFICIAL_NAME_FALLBACK = "--------------------------"
 OFFICIAL_CITY_FALLBACK = "     -------------     "
 OFFICIAL_SIGN_FALLBACK = "-------"
 
+#: Kotwice podpisów w protokole - adresy LOGICZNE, czyli o kolumnę mniejsze niż
+#: w pliku szablonu (przesuwa je `ShiftedWS`). Każda musi wskazywać LEWĄ GÓRNĄ
+#: komórkę scalonej rubryki podpisu; kotwica w środku scalenia przesuwa obraz
+#: w prawo i podpis wychodzi poza rubrykę.
+#:
+#: Rubryki oficjeli to w pliku AH..AL (do sierpnia 2026 było AJ..AL - rubryka
+#: miejscowości oddała im dwie kolumny). Pilnuje tego
+#: `tests/test_protocol_signature_anchors.py`.
+SIGN_ANCHORS: Dict[str, str] = {
+    "hostTeamSignature": "F29",
+    "guestTeamSignature": "F55",
+    "medic": "Z63",
+    "referee1": "AG66",
+    "referee2": "AG67",
+    "secretary": "AG68",
+    "timekeeper": "AG69",
+    "delegate": "AG70",
+    "delegate2": "AG71",
+}
+
+#: Ramka podpisu oficjela w pikselach. Szerokość to dokładnie rubryka AH..AL
+#: (5 kolumn po 16 px), wysokość - wiersz oficjela (17,6-19,2 px).
+OFFICIAL_SIGN_MAX_W_PX = 80
+OFFICIAL_SIGN_MAX_H_PX = 18
+
 def _fallback_text(v: Any, fallback: str) -> str:
     s = (v or "").strip() if isinstance(v, str) else str(v).strip() if v is not None else ""
     return s if s else fallback
@@ -4651,7 +4676,9 @@ PROTOCOL_FOOTER_MARGIN_IN = 0.0
 #
 # Zmierzone przypadki, dla których to jest konieczne (szerokość rubryki kontra
 # potrzebna szerokość tekstu, przy skali wydruku 90 %):
-#   • miejscowość sędziego     17,1 mm ← „Piotrków Trybunalski"  24,7 mm
+#   • miejscowość sędziego     12,8 mm ← „Piotrków Trybunalski"  24,7 mm
+#     (rubryka zwężona z ośmiu kolumn na sześć - X..AC zamiast X..AE - żeby
+#      dołożyć miejsca podpisom; `shrinkToFit` tym bardziej jest tu konieczny)
 #   • nazwisko sędziego        28,6 mm ← podwójne nazwisko       40,9 mm
 #   • osoba towarzysząca A     12,1 mm ← „MALINOWSKI Wojciech"   16,8 mm
 #   • osoba towarzysząca D/E   12,9 mm ← to samo                 13,4 mm
@@ -5635,19 +5662,7 @@ async def generate_protocol_pdf(
         if has_second_delegate:
             _set_cell_fallback(ws, "W71", (officials.get("delegate2") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
 
-                # --- SIGNATURES (PNG z backendu) ---
-        SIGN_ANCHORS = {
-            "hostTeamSignature": "F29",
-            "guestTeamSignature": "F55",
-            "medic": "Z63",
-            "referee1": "AI66",
-            "referee2": "AI67",
-            "secretary": "AI68",
-            "timekeeper": "AI69",
-            "delegate": "AI70",
-            "delegate2": "AI71",
-        }
-
+        # --- SIGNATURES (PNG z backendu) ---
         # 1) podpisy drużyn
         host_sig_url = _full_static_url(extras.get("hostTeamSignature") or "")
         guest_sig_url = _full_static_url(extras.get("guestTeamSignature") or "")
@@ -5695,17 +5710,25 @@ async def generate_protocol_pdf(
             blob = await _fetch_png_bytes(url)
             official_sig_bytes[key] = blob or b""
 
-            # Ramka podpisu sędziego. Większa niż dawne 70x22: po obcięciu
-            # pustych marginesów (patrz `_trim_ink_margins`) w tym samym
-            # miejscu mieści się znacznie więcej samego podpisu, a wiersz
-            # oficjela ma ~19 px, więc w dół wychodzimy o pół wiersza - tyle,
-            # ile zajmuje ogon podpisu, i nie wchodzi to w cudzy tekst.
+            # Ramka podpisu sędziego, liczona z rubryki w szablonie, a nie
+            # na oko: AH..AL to pięć kolumn po 1,332 znaku, czyli 5 x 16 px.
+            # Ta sama arytmetyka trzyma ramkę medyka (AA..AG = 7 x 16 = 112).
+            # Rubryka urosła z trzech kolumn na pięć, więc szerokość idzie z
+            # 60 na 80 px - dokładnie tyle, ile jest miejsca, ani piksela
+            # w blok RZUTÓW KARNYCH zaczynający się w AM.
+            #
+            # Wysokość podnosimy razem z nią i to ona zwykle decyduje:
+            # `_add_signature_image` skaluje proporcjonalnie, a podpis po
+            # obcięciu marginesów (`_trim_ink_margins`) jest przeważnie
+            # węższy niż 5:1. Przy 16 px szerokie 80 px zostawałoby puste.
+            # Wiersz oficjela ma 17,6-19,2 px, więc 18 px wypełnia go bez
+            # wchodzenia w wiersz niżej.
             ok = _add_signature_image(
                 ws,
                 image_bytes=blob,
                 anchor_cell=SIGN_ANCHORS[key],
-                max_width_px=60,
-                max_height_px=16,
+                max_width_px=OFFICIAL_SIGN_MAX_W_PX,
+                max_height_px=OFFICIAL_SIGN_MAX_H_PX,
             )
 
             if not ok:
