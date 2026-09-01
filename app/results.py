@@ -4510,7 +4510,9 @@ OFFICIAL_SIGN_FALLBACK = "-------"
 SIGN_ANCHORS: Dict[str, str] = {
     "hostTeamSignature": "F29",
     "guestTeamSignature": "F55",
-    "medic": "Z63",
+    # Rubryka podpisu medyka: w szablonie scalenie AF..AL (dawniej AA..AG).
+    # Zwolnione miejsce po lewej dostała jego rola - patrz `MEDIC_ROLE_CELL`.
+    "medic": "AE63",
     "referee1": "AG66",
     "referee2": "AG67",
     "secretary": "AG68",
@@ -4518,6 +4520,11 @@ SIGN_ANCHORS: Dict[str, str] = {
     "delegate": "AG70",
     "delegate2": "AG71",
 }
+
+#: Rola medyka („lekarz medycyny", „ratownik medyczny", ...). Rubryka V63:AE64
+#: w pliku, czyli logicznie U63. Powstała z połączenia dawnego pustego pola
+#: V63:Z64 z lewą częścią rubryki podpisu.
+MEDIC_ROLE_CELL = "U63"
 
 #: Ramka podpisu oficjela w pikselach. Szerokość to dokładnie rubryka AH..AL
 #: (5 kolumn po 16 px), wysokość - wiersz oficjela (17,6-19,2 px).
@@ -4684,6 +4691,10 @@ PROTOCOL_FOOTER_MARGIN_IN = 0.0
 #   • osoba towarzysząca D/E   12,9 mm ← to samo                 13,4 mm
 #   • funkcja D/E              15,0 mm ← „OSOBA TOWARZYSZĄCA"    15,9 mm
 FITTED_TEXT_CELLS: Tuple[str, ...] = (
+    # medyk — rola (rubryka mieści „pielęgniarka systemu" z zapasem, ale
+    # nazwy funkcji bywają dopisywane ręcznie i mają rosnąć w dół czcionki,
+    # a nie łamać wiersz)
+    MEDIC_ROLE_CELL,
     # sędziowie i oficjele — nazwisko i miejscowość
     "I66", "I67", "I68", "I69", "I70",
     "W66", "W67", "W68", "W69", "W70",
@@ -5632,6 +5643,14 @@ async def generate_protocol_pdf(
         medic = extras.get("medic") or {}
         ws["U61"].value = (medic.get("fullName") or "").strip()
         ws["U62"].value = (medic.get("number") or "").strip()
+        # Rola z wielkiej litery: aplikacja trzyma ją małymi („ratownik
+        # medyczny"), ale na ekranie i na protokole pokazuje jako nazwę własną
+        # rubryki. Pusta rola zostawia rubrykę pustą - medyk bywa nieobecny,
+        # a kreska sugerowałaby, że ktoś tu jest bez wpisanej funkcji.
+        medic_role = (medic.get("role") or "").strip()
+        ws[MEDIC_ROLE_CELL].value = (
+            medic_role[:1].upper() + medic_role[1:] if medic_role else ""
+        )
 
         # widzowie / pojemność
         ws["G62"].value = extras.get("spectatorsCount") if extras.get("spectatorsCount") is not None else ""
