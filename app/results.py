@@ -3176,6 +3176,22 @@ def _fill_players_block(
             ws[f"AF{row}"].value = "---"
 
 
+#: Rzut karny NIEWYKORZYSTANY w przebiegu meczu - przekreślone „K".
+#:
+#: Chodziło o „K w kółku" (Ⓚ, U+24C0) i tak byłoby najczytelniej, ale tego
+#: znaku NIE MA w żadnym foncie dostępnym przy generowaniu: ani w DejaVu
+#: (jedyny font doinstalowany w obrazie, patrz Dockerfile), ani w Times New
+#: Roman z szablonu, ani w zastępniku Liberation. Brakującego znaku
+#: LibreOffice nie pominie - wstawi pustą ramkę, czyli w oficjalnym protokole
+#: pojawiłby się kwadracik zamiast oznaczenia. To samo dotyczy okalającego
+#: koła składanego (U+20DD) - też go nie ma.
+#:
+#: "K" + U+0336 (COMBINING LONG STROKE OVERLAY) jest w KAŻDYM z tych fontów,
+#: nie zajmuje dodatkowej szerokości (znak składający nie ma własnego pola),
+#: a rubryka przebiegu ma tylko dwie wąskie kolumny - „(K)" by się tam nie
+#: zmieściło. Przekreślenie czyta się przy tym wprost: rzut niewykorzystany.
+PENALTY_MISS_MARK = "K̶"
+
 TIMELINE_START_ROW = 15
 TIMELINE_END_ROW = 63
 TIMELINE_SKIP_ROWS = {31, 57}
@@ -3416,7 +3432,7 @@ def _fill_timeline_half_chunk(
         if player is not None:
             ptxt = str(player).strip()
             if isinstance(t, str) and t.startswith("penaltyKick"):
-                ptxt = f"{ptxt}K"
+                ptxt = f"{ptxt}{PENALTY_MISS_MARK if t == 'penaltyKickMissed' else 'K'}"
             if team == "host":
                 host_action = ptxt
             elif team == "guest":
