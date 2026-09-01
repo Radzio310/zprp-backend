@@ -28,6 +28,13 @@ from app.proel_match_key import (
     match_head as _match_head,
     match_id_conflict as _match_id_conflict,
     zprp_id_of as _zprp_id_of,
+    IDENTITY_CONFLICT as _IDENTITY_CONFLICT,
+    IDENTITY_UPGRADE as _IDENTITY_UPGRADE,
+    IDENTITY_OK as _IDENTITY_OK,
+    identity_verdict as _identity_verdict,
+    local_key_from_blob as _local_key_from_blob,
+    local_key_from_guard as _local_key_from_guard,
+    match_identity as _match_identity,
 )
 from app.proel_lease import (
     LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
@@ -36,6 +43,7 @@ from app.proel_lease import (
     HEARTBEAT_RECLAIM as _HEARTBEAT_RECLAIM,
     heartbeat_decision as _heartbeat_decision,
     lease_active as _lease_active,
+    lease_view as _lease_view_pure,
     legacy_lease_values as _legacy_lease_values,
     now_utc as _now,
     same_judge_lease as _same_judge_lease,
@@ -254,31 +262,67 @@ def _reproject_blob(state: Optional[Dict[str, Any]], blob: Any) -> Any:
 def _lease_view(
     state: Optional[Dict[str, Any]], actor_install: str, actor_judge_id: str = ""
 ) -> Dict[str, Any]:
-    if not state:
-        return {"held": False}
-    until = state.get("lease_until")
-    if until is None:
-        return {"held": False}
-    if until.tzinfo is None:
-        until = until.replace(tzinfo=timezone.utc)
-    is_you = bool(actor_install and state.get("lease_install") == actor_install)
-    identity = {
-        "kind": state.get("lease_kind") or "app",
-        "name": state.get("lease_name") or "",
-        "judge_id": state.get("lease_judge_id") or "",
-        "epoch": int(state.get("lease_epoch") or 0),
-        "until": until.isoformat(),
-        "is_you": is_you,
-        "same_judge": is_you or _same_judge_lease(state, actor_judge_id),
-    }
-    if until <= _now():
-        # Tożsamość ostatniego prowadzącego nadal jest potrzebna, gdy heartbeat
-        # na chwilę wygaśnie, ale pełny autosave pozostaje świeży.
-        return {"held": False, "expired": True, **identity}
-    return {
-        "held": True,
-        **identity,
-    }
+    """Widok leasingu dla `/state`. Reguła siedzi w `app.proel_lease`, bo to
+    ona przesądza, czy sędzia zobaczy swój mecz, czy cudzy podgląd - a tam da
+    się ją przetestować bez żywej bazy."""
+    return _lease_view_pure(state, actor_install, actor_judge_id)
+
+
+#: Pola leasingu czyszczone, gdy wiersz zmienia właściciela.
+_LEASE_CLEARED = {
+    "lease_until": None,
+    "lease_install": None,
+    "lease_judge_id": None,
+    "lease_name": None,
+    "lease_kind": None,
+}
+
+
+def _incoming_identity(zprp_id: str, local_key: str) -> str:
+    return _match_identity(zprp_id, local_key)
+
+
+def _identity_guard(
+    state: Optional[Dict[str, Any]], zprp_id: str, local_key: str
+) -> Dict[str, Any]:
+    """Czy przychodzący mecz może rozporządzać wierszem pod tym numerem.
+
+    Zwraca pola do dopisania (może być pusto) albo odmawia 409. Reguła siedzi
+    w `proel_match_key.identity_verdict` i tam jest opisana do końca; tutaj
+    zostaje sam skutek dla bazy.
+
+    Awans (mecz z rozgrywek wchodzi na wiersz zajęty przez mecz ręczny) kasuje
+    leasing poprzednika i podbija epokę: numer należy do rozgrywek, a poprzednie
+    urządzenie ma się o tym dowiedzieć przy najbliższym biciu serca zamiast
+    pisać dalej w wiersz, który przestał być jego.
+    """
+    known = _match_identity(
+        (state or {}).get("zprp_match_id"), (state or {}).get("local_key")
+    )
+    incoming = _incoming_identity(zprp_id, local_key)
+    verdict = _identity_verdict(known, incoming)
+    if verdict == _IDENTITY_CONFLICT:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "MATCH_ID_MISMATCH",
+                "message": (
+                    "Ten numer meczu należy na serwerze do innego meczu "
+                    "(inne drużyny albo inny sezon). Sprawdź numer meczu."
+                ),
+            },
+        )
+    if verdict == _IDENTITY_OK:
+        return {}
+    values: Dict[str, Any] = {}
+    if zprp_id:
+        values["zprp_match_id"] = zprp_id
+    if local_key:
+        values["local_key"] = local_key
+    if verdict == _IDENTITY_UPGRADE:
+        values.update(_LEASE_CLEARED)
+        values["lease_epoch"] = int((state or {}).get("lease_epoch") or 0) + 1
+    return values
 
 
 def _officials_of(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -372,6 +416,7 @@ async def _build_state_response(
         exists=state is not None,
         doc_exists=doc_status is not None,
         zprp_match_id=(str((state or {}).get("zprp_match_id") or "").strip() or None),
+        local_key=(str((state or {}).get("local_key") or "").strip() or None),
         doc_updated_at=doc_updated_at,
         updated_at=(state or {}).get("updated_at"),
         server_now=_now(),
@@ -444,6 +489,10 @@ async def ensure_proel_state(
 
     guard = dict(req.guard or {})
     zprp_id = str(req.zprp_match_id or "").strip() or None
+    # Odcisk liczy SERWER, z nazw drużyn, które i tak przyszły w guardzie.
+    # Aplikacja nie wysyła tu niczego nowego, więc guard działa także dla
+    # wersji, które o nim nie wiedzą.
+    local_key = _local_key_from_guard(match_number, guard) or None
 
     async with database.transaction():
         state = await _fetch_state(match_number, for_update=True)
@@ -452,6 +501,7 @@ async def ensure_proel_state(
                 insert(proel_match_state).values(
                     match_number=match_number,
                     zprp_match_id=zprp_id,
+                    local_key=local_key,
                     guard_json=guard or None,
                     rev=1,
                     fields_json={},
@@ -460,22 +510,12 @@ async def ensure_proel_state(
                 )
             )
         else:
-            # Guard: ten sam RozgrywkiCode w innym sezonie to INNY mecz.
-            known = str(state.get("zprp_match_id") or "").strip()
-            if known and zprp_id and known != zprp_id:
-                raise HTTPException(
-                    status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "MATCH_ID_MISMATCH",
-                        "message": (
-                            "Ten numer meczu należy na serwerze do innego meczu. "
-                            "Odśwież listę meczów."
-                        ),
-                    },
-                )
-            values: Dict[str, Any] = {}
-            if zprp_id and not known:
-                values["zprp_match_id"] = zprp_id
+            # Guard: ten sam numer w innym sezonie ALBO z innymi drużynami to
+            # INNY mecz. Odmowa, awans albo dopisanie tożsamości - patrz
+            # `_identity_guard`.
+            values: Dict[str, Any] = _identity_guard(
+                state, zprp_id or "", local_key or ""
+            )
             if guard:
                 values["guard_json"] = merge_guard(state.get("guard_json"), guard)
             if values:
@@ -695,6 +735,12 @@ async def lease_proel_match(
     boiskowy i stolikowy widzą wtedy podgląd na żywo, bez akcji przejęcia.
     """
     match_number = str(req.match_number or "").strip()
+    # Czym ten mecz się przedstawia. Do niedawna `/lease` nie pytał o to wcale
+    # i obejmował prowadzenie na wierszu DOWOLNEGO meczu o tym numerze - tak
+    # mecz zakładany ręcznie odbierał prowadzenie meczowi z rozgrywek.
+    lease_zprp_id = str(req.zprp_match_id or "").strip()
+    lease_guard = dict(req.guard or {})
+    lease_local_key = _local_key_from_guard(match_number, lease_guard)
 
     async with database.transaction():
         state = await _fetch_state(match_number, for_update=True)
@@ -707,8 +753,13 @@ async def lease_proel_match(
             await database.execute(
                 insert(proel_match_state).values(
                     match_number=match_number,
-                    zprp_match_id=None,
-                    guard_json=None,
+                    # Wiersz zakładany tutaj rodził się BEZ TOŻSAMOŚCI, więc
+                    # przypadał pierwszemu, kto wszedł na ekran meczu - a numer
+                    # zajmował dla wszystkich pozostałych. Teraz przedstawia się
+                    # tym, czym przedstawił się obejmujący prowadzenie.
+                    zprp_match_id=lease_zprp_id or None,
+                    local_key=lease_local_key or None,
+                    guard_json=lease_guard or None,
                     rev=1,
                     fields_json={},
                     audit_json={"log": [], "ops": []},
@@ -724,6 +775,17 @@ async def lease_proel_match(
                     "message": "Najpierw załóż stan meczu (/proel/ensure).",
                 },
             )
+
+        # Tożsamość PRZED czymkolwiek innym: jeżeli ten wiersz należy do innego
+        # meczu, nie ma o czym rozmawiać - ani o leasingu, ani o fazie LIVE.
+        identity_values = _identity_guard(state, lease_zprp_id, lease_local_key)
+        if identity_values:
+            await database.execute(
+                update(proel_match_state)
+                .where(proel_match_state.c.match_number == match_number)
+                .values(**identity_values, updated_at=func.now())
+            )
+            state = await _fetch_state(match_number, for_update=True)
 
         doc_status = await _fetch_doc_status(match_number)
         if doc_status == "approved":
@@ -888,7 +950,17 @@ async def release_proel_lease(
     match: str = Query(..., description="Numer meczu"),
     actor: Actor = Depends(proel_actor),
 ):
-    """Idempotentne — oddanie cudzego (albo już wygasłego) leasingu to nie błąd."""
+    """Idempotentne — oddanie cudzego (albo już wygasłego) leasingu to nie błąd.
+
+    ZERUJEMY WYŁĄCZNIE `lease_until`, czyli samo prawo do pisania. Tożsamość
+    (`lease_install`, `lease_judge_id`, `lease_name`) ZOSTAJE i to jest cała
+    poprawka: aplikacja uznaje mecz za żywy także przez dwie minuty po ostatnim
+    autozapisie, więc między wyjściem z meczu a wygaśnięciem tego okna pytała
+    o stan i dostawała „ktoś tu jest, nie wiadomo kto". Nie wiadomo kto znaczyło
+    dla niej „ktoś inny" - i sędzia dostawał podgląd na żywo własnego meczu
+    zamiast „Wróć do meczu". Reszta systemu patrzy na `lease_until` i widzi
+    dokładnie to samo co dotąd: leasingu nie ma nikt.
+    """
     async with database.transaction():
         state = await _fetch_state(match, for_update=True)
         if state is None:
@@ -900,10 +972,6 @@ async def release_proel_lease(
             .where(proel_match_state.c.match_number == match)
             .values(
                 lease_until=None,
-                lease_install=None,
-                lease_judge_id=None,
-                lease_name=None,
-                lease_kind=None,
                 rev=proel_match_state.c.rev + 1,
                 updated_at=func.now(),
             )
@@ -1132,6 +1200,20 @@ async def update_proel_match(
             # nakładamy z powrotem w tej samej transakcji, więc działa to także dla
             # wersji aplikacji, które o współpracy nie mają pojęcia.
             state = await _fetch_state(match_number, for_update=True)
+
+            # ── Guard, warstwa druga: mecz BEZ identyfikatora ZPRP ──────────
+            #
+            # Sprawdzenie wyżej porównuje `match.Id`, którego mecz zakładany
+            # ręcznie ani szkoleniowy nie ma - dla nich było więc puste
+            # i przepuszczało wszystko. Wiersz stanu zna dodatkowo odcisk
+            # (numer + obie drużyny), więc tutaj rozpoznajemy również je.
+            if _identity_verdict(
+                _match_identity(
+                    (state or {}).get("zprp_match_id"), (state or {}).get("local_key")
+                ),
+                _match_identity(incoming_id, _local_key_from_blob(req.data_json)),
+            ) == _IDENTITY_CONFLICT:
+                raise _MatchIdConflict(known_id, incoming_id)
 
             # Twarda blokada prowadzenia — ale WYŁĄCZNIE dla klientów, które o niej
             # wiedzą (`X-BAZA-Proel: 2`). Stara wersja aplikacji nie potrafiłaby

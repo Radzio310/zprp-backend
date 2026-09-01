@@ -722,6 +722,11 @@ proel_match_state = Table(
     Column("match_number", String, primary_key=True, index=True),
     # ZPRP `match.Id` — guard przed kolizją RozgrywkiCode między sezonami.
     Column("zprp_match_id", String, nullable=True, index=True),
+    # Odcisk meczu BEZ identyfikatora ZPRP (numer + obie drużyny). Druga
+    # warstwa tego samego guardu: mecz zakładany ręcznie żadnego `match.Id`
+    # nie ma, więc pierwsza warstwa go nie widziała i wchodził w wiersz
+    # prawdziwego meczu o tym samym numerze. Liczy go `proel_match_key`.
+    Column("local_key", String, nullable=True),
     # {hostTeamName, guestTeamName, matchDate} — druga warstwa guardu.
     Column("guard_json", JSON, nullable=True),
     Column("rev", BigInteger, nullable=False, server_default=text("0")),
@@ -2419,4 +2424,7 @@ with engine.connect() as _conn:
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_proel_log_match_id ON proel_activity_log (match_number, id DESC)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_proel_log_id_desc ON proel_activity_log (id DESC)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_proel_log_actor ON proel_activity_log (actor_judge_id, id DESC)"))
+    # Odcisk meczu bez identyfikatora ZPRP. `create_all` nie dokłada kolumn do
+    # istniejących tabel, a ta tabela na produkcji istnieje od dawna.
+    _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS local_key varchar"))
     _conn.commit()

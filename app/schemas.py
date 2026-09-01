@@ -1016,6 +1016,13 @@ class ProElLeaseRequest(BaseModel):
     force: Optional[bool] = False
     #: Wymagane przy heartbeat — dowód, że przedłużamy WŁASNY leasing.
     epoch: Optional[int] = None
+    #: Czym ten mecz się przedstawia. Bez tego `/lease` obejmował prowadzenie
+    #: na wierszu DOWOLNEGO meczu o tym numerze - mecz zakładany ręcznie
+    #: odbierał w ten sposób prowadzenie meczowi z rozgrywek. Oba pola są
+    #: opcjonalne, bo starsza aplikacja ich nie wysyła i ma dalej działać.
+    zprp_match_id: Optional[str] = None
+    #: Ten sam kształt co w `/ensure` - serwer bierze z niego nazwy drużyn.
+    guard: Optional[Dict[str, Any]] = None
 
 
 class ProElLeaseInfo(BaseModel):
@@ -1050,6 +1057,10 @@ class ProElStateResponse(BaseModel):
     #: wjeżdżał do protokołu jako „cudza zmiana". `None` = wiersz bez
     #: identyfikatora, czyli mecz zakładany ręcznie.
     zprp_match_id: Optional[str] = None
+    #: Odcisk meczu bez identyfikatora ZPRP (numer + drużyny). Dzięki niemu
+    #: aplikacja rozpozna „ten wiersz należy do innego meczu" także tam, gdzie
+    #: żadnego `match.Id` nie ma.
+    local_key: Optional[str] = None
     #: Ostatni pełny autosave `data_json`. Oddzielny od `updated_at` stanu,
     #: który zmienia się również przy heartbeatcie, patchu i zwolnieniu lease.
     doc_updated_at: Optional[datetime] = None

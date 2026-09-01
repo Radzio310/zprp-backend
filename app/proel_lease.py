@@ -155,3 +155,48 @@ def legacy_lease_values(
     if not mine:
         values["lease_epoch"] = int(state.get("lease_epoch") or 0) + 1
     return values
+
+
+def lease_view(
+    state: Optional[Dict[str, Any]],
+    actor_install: str,
+    actor_judge_id: str = "",
+) -> Dict[str, Any]:
+    """Kto trzyma prowadzenie - i czy to przypadkiem nie pytający.
+
+    TOŻSAMOŚĆ WYCHODZI STĄD ZAWSZE, TAKŻE PRZY ODDANYM LEASINGU.
+    To nie jest ozdoba, tylko naprawa konkretnej usterki. Aplikacja uznaje mecz
+    za prowadzony na żywo także wtedy, gdy leasingu nie ma NIKT, ale pełny
+    autozapis jest świeży (`hasRecentProelAutosave` w `utils/proelRoute.ts`) -
+    autozapis idzie co 60 s, a okno świeżości ma 120 s. Wcześniej oddanie
+    leasingu kasowało `lease_install`, więc odpowiedź nie miała już czym
+    udowodnić, że tym ostatnim prowadzącym jest sam pytający: `is_you`
+    i `same_judge` przychodziły puste, aplikacja czytała to jako „prowadzi ktoś
+    inny" i pokazywała sędziemu podgląd JEGO WŁASNEGO meczu, z którego przed
+    chwilą wyszedł.
+
+    Sygnał obecności przeżywał oddanie leasingu, a tożsamość nie - a jedno bez
+    drugiego zawsze wskaże obcego.
+    """
+    if not state:
+        return {"held": False}
+    until = _as_aware(state.get("lease_until"))
+    is_you = bool(actor_install and state.get("lease_install") == actor_install)
+    identity = {
+        "kind": state.get("lease_kind") or "app",
+        "name": state.get("lease_name") or "",
+        "judge_id": state.get("lease_judge_id") or "",
+        "epoch": int(state.get("lease_epoch") or 0),
+        "until": until.isoformat() if until is not None else None,
+        "is_you": is_you,
+        "same_judge": is_you or same_judge_lease(state, actor_judge_id),
+    }
+    if until is None:
+        # Leasing ODDANY przy wyjściu z meczu. Nikt go nie trzyma, ale wiadomo,
+        # kto trzymał go ostatni - i to musi dojść do aplikacji.
+        return {"held": False, "expired": False, **identity}
+    if until <= now_utc():
+        # Tożsamość ostatniego prowadzącego nadal jest potrzebna, gdy heartbeat
+        # na chwilę wygaśnie, ale pełny autosave pozostaje świeży.
+        return {"held": False, "expired": True, **identity}
+    return {"held": True, **identity}

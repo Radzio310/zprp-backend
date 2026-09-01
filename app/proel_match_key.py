@@ -147,3 +147,135 @@ def live_head(blob: Any) -> Dict[str, Any]:
         except TypeError:
             break
     return out
+
+
+# ─────────────────────────── TOŻSAMOŚĆ MECZU ───────────────────────────
+#
+# `zprp_match_id` zamykał kolizję numerów tylko połowicznie, bo działa
+# WYŁĄCZNIE wtedy, gdy obie strony znają identyfikator z bazy ZPRP. A numery
+# powtarzają najczęściej dokładnie te mecze, które go nie mają: zakładane
+# ręcznie i szkoleniowe. Mecz ręczny "SL/123" wchodził więc w wiersz stanu
+# prawdziwego "SL/123", obejmował leasing i odbierał prowadzenie sędziemu,
+# który sędziował naprawdę.
+#
+# Stąd druga warstwa: ODCISK LOKALNY, czyli numer razem z nazwami drużyn.
+# Liczy go wyłącznie serwer i wyłącznie z danych, które i tak dostaje
+# (`/ensure` niesie obsadę i drużyny, blob niesie `matchConfig`) - dzięki temu
+# nie ma drugiej implementacji normalizacji po stronie aplikacji, która mogłaby
+# się z tą rozjechać, i działa też dla starych wersji aplikacji.
+#
+# CZEGO ODCISK NIE ZAŁATWI, świadomie: ręcznej KOPII prawdziwego meczu, czyli
+# tego samego numeru i tych samych drużyn. Taki mecz jest nieodróżnialny od
+# oryginału po samych danych. Rozstrzyga go dopiero drabina niżej: mecz z bazy
+# ZPRP jest silniejszy od ręcznego i odbiera mu wiersz.
+
+#: Polskie znaki złożone rozkładają się na literę bazową - dwie osoby wpisujące
+#: tę samą drużynę różnią się zwykle właśnie ogonkiem albo kropką.
+_FOLD = str.maketrans(
+    {
+        "Ą": "A", "Ć": "C", "Ę": "E", "Ł": "L", "Ń": "N",
+        "Ó": "O", "Ś": "S", "Ź": "Z", "Ż": "Z",
+    }
+)
+
+
+def _fold(value: Any) -> str:
+    """Nazwa drużyny sprowadzona do porównywalnej postaci.
+
+    Zostają wyłącznie litery i cyfry: kropki, myślniki, spacje i wielkość liter
+    dzielą ten sam klub na kilka bytów, a nie o taki podział tu chodzi.
+    """
+    text = str(value or "").strip().upper().translate(_FOLD)
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def local_key_of(match_number: Any, host: Any, guest: Any) -> str:
+    """Odcisk meczu bez identyfikatora ZPRP: numer plus obie drużyny.
+
+    Pusty, gdy którejś drużyny nie znamy - a to nie jest przeoczenie. Sam numer
+    nie identyfikuje niczego (właśnie o to rozbiła się pierwsza wersja guardu),
+    a odcisk zbudowany z połowy danych blokowałby mecze, o których nic nie wiemy.
+    Pusty odcisk znaczy „nie wiem, który to mecz" i nigdy nikogo nie blokuje.
+    """
+    number = _fold(match_number)
+    a = _fold(host)
+    b = _fold(guest)
+    if not number or not a or not b:
+        return ""
+    return f"{number}|{a}|{b}"
+
+
+def local_key_from_blob(blob: Any) -> str:
+    """Odcisk policzony z `data_json.matchConfig` - dla zapisu bloba."""
+    try:
+        config = (blob or {}).get("matchConfig") or {}
+    except AttributeError:
+        return ""
+    return local_key_of(
+        config.get("matchNumber"),
+        config.get("hostTeamName"),
+        config.get("guestTeamName"),
+    )
+
+
+def local_key_from_guard(match_number: Any, guard: Any) -> str:
+    """Odcisk policzony z ładunku `/ensure` - ten sam kształt co z bloba."""
+    data = guard if isinstance(guard, dict) else {}
+    return local_key_of(
+        match_number, data.get("hostTeamName"), data.get("guestTeamName")
+    )
+
+
+def match_identity(zprp_id: Any, local_key: Any) -> str:
+    """Kim jest ten mecz: `zprp:<id>`, `local:<odcisk>` albo nic.
+
+    Identyfikator z bazy ZPRP wygrywa z odciskiem, bo jest mocniejszy: mówi
+    o konkretnym wpisie w rozgrywkach, a nie o zbieżności nazw.
+    """
+    zprp = str(zprp_id or "").strip()
+    if zprp:
+        return f"zprp:{zprp}"
+    local = str(local_key or "").strip()
+    return f"local:{local}" if local else ""
+
+
+def identity_rank(identity: Any) -> int:
+    """Siła tożsamości: 2 = wpis w ZPRP, 1 = odcisk lokalny, 0 = nie wiadomo."""
+    text = str(identity or "")
+    if text.startswith("zprp:"):
+        return 2
+    if text.startswith("local:"):
+        return 1
+    return 0
+
+
+#: Tożsamości się zgadzają albo jednej ze stron brakuje - wpuszczamy.
+IDENTITY_OK = "ok"
+#: Wiersz nie wiedział, czyj jest - zapisujemy tożsamość przychodzącego.
+IDENTITY_ADOPT = "adopt"
+#: Mecz z bazy ZPRP wchodzi na wiersz zajęty przez mecz ręczny. Wiersz zmienia
+#: właściciela, a leasing ręcznego przepada - numer należy do rozgrywek.
+IDENTITY_UPGRADE = "upgrade"
+#: Dwa różne mecze pod jednym numerem - odmawiamy.
+IDENTITY_CONFLICT = "conflict"
+
+
+def identity_verdict(known: Any, incoming: Any) -> str:
+    """Czy przychodzący mecz może rozporządzać wierszem pod tym numerem.
+
+    Drabina, a nie proste porównanie, bo kolejność wejścia jest przypadkowa.
+    Gdyby liczyło się „kto pierwszy", ręczna kopia założona kwadrans przed
+    meczem odbierałaby wiersz meczowi z rozgrywek - czyli dokładnie temu, który
+    ten numer naprawdę nosi.
+    """
+    inc = str(incoming or "")
+    kn = str(known or "")
+    if not inc:
+        return IDENTITY_OK
+    if not kn:
+        return IDENTITY_ADOPT
+    if kn == inc:
+        return IDENTITY_OK
+    if identity_rank(inc) > identity_rank(kn):
+        return IDENTITY_UPGRADE
+    return IDENTITY_CONFLICT

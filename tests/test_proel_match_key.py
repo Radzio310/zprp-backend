@@ -159,3 +159,87 @@ def test_bez_znacznika_czasu_zegar_nie_ma_od_czego_liczyc():
 def test_smieci_zamiast_bloba_nie_wywracaja_naglowka():
     for junk in (None, [], "tekst", 7):
         assert live_head(junk) == {"matchConfig": {}}
+
+
+# ─────────────────────── TOŻSAMOŚĆ MECZU (odcisk lokalny) ───────────────────
+
+from app.proel_match_key import (  # noqa: E402
+    IDENTITY_ADOPT,
+    IDENTITY_CONFLICT,
+    IDENTITY_OK,
+    IDENTITY_UPGRADE,
+    identity_verdict,
+    local_key_from_blob,
+    local_key_from_guard,
+    local_key_of,
+    match_identity,
+)
+
+
+def test_odcisk_nie_rozroznia_zapisu_tej_samej_druzyny():
+    # Dwie osoby przy jednym stoliku wpisują ten sam mecz ręcznie i różnią się
+    # ogonkiem albo kropką. To MUSI zostać jednym meczem, inaczej guard
+    # rozdzieliłby współpracę, która działa dziś.
+    a = local_key_of("SL/123", "Łączpol Gdańsk", "MKS Kraków")
+    b = local_key_of("sl/123", "LACZPOL GDANSK", "M.K.S. Krakow")
+    assert a == b != ""
+
+
+def test_odcisk_rozroznia_dwa_mecze_pod_jednym_numerem():
+    oficjalny = local_key_of("SL/123", "Gdańsk", "Łódź")
+    reczny = local_key_of("SL/123", "Poznań", "Kraków")
+    assert oficjalny != reczny
+
+
+def test_bez_obu_druzyn_odcisku_nie_ma():
+    # Pusty odcisk znaczy „nie wiem, który to mecz" i nigdy nikogo nie blokuje.
+    # Sam numer nie identyfikuje niczego - o to rozbiła się pierwsza wersja.
+    assert local_key_of("SL/123", "Gdańsk", "") == ""
+    assert local_key_of("SL/123", "", "Łódź") == ""
+    assert local_key_of("", "Gdańsk", "Łódź") == ""
+
+
+def test_odcisk_z_bloba_i_z_ensure_to_ta_sama_wartosc():
+    # Gdyby te dwie drogi liczyły inaczej, mecz blokowałby sam siebie: raz
+    # przedstawiłby się przy zakładaniu wiersza, a raz przy zapisie bloba.
+    blob = {
+        "matchConfig": {
+            "matchNumber": "SL/123",
+            "hostTeamName": "Gdańsk",
+            "guestTeamName": "Łódź",
+        }
+    }
+    guard = {"hostTeamName": "Gdańsk", "guestTeamName": "Łódź"}
+    assert local_key_from_blob(blob) == local_key_from_guard("SL/123", guard) != ""
+
+
+def test_smieci_zamiast_bloba_nie_wywracaja_odcisku():
+    for junk in (None, [], "tekst", 7):
+        assert local_key_from_blob(junk) == ""
+        assert local_key_from_guard("SL/1", junk) == ""
+
+
+def test_identyfikator_zprp_wygrywa_z_odciskiem():
+    assert match_identity("8891", "SL123|A|B") == "zprp:8891"
+    assert match_identity("", "SL123|A|B") == "local:SL123|A|B"
+    assert match_identity("", "") == ""
+
+
+def test_niewiedza_ktorejkolwiek_strony_nikogo_nie_blokuje():
+    # Stara wersja aplikacji nie przedstawia się wcale. Ma dalej działać.
+    assert identity_verdict("zprp:1", "") == IDENTITY_OK
+    assert identity_verdict("", "zprp:1") == IDENTITY_ADOPT
+    assert identity_verdict("zprp:1", "zprp:1") == IDENTITY_OK
+
+
+def test_dwa_rozne_mecze_pod_jednym_numerem_to_konflikt():
+    assert identity_verdict("zprp:1", "zprp:2") == IDENTITY_CONFLICT
+    assert identity_verdict("local:A", "local:B") == IDENTITY_CONFLICT
+
+
+def test_mecz_z_rozgrywek_odbiera_wiersz_recznemu():
+    # Kolejność wejścia jest przypadkowa: ręczna kopia założona kwadrans przed
+    # meczem nie może odebrać numeru meczowi, który ten numer naprawdę nosi.
+    assert identity_verdict("local:SL123|A|B", "zprp:8891") == IDENTITY_UPGRADE
+    # W drugą stronę NIGDY - ręczny nie wypycha meczu z rozgrywek.
+    assert identity_verdict("zprp:8891", "local:SL123|A|B") == IDENTITY_CONFLICT
