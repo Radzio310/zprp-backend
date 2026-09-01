@@ -270,6 +270,20 @@ def project_companion(blob: dict, params: Dict[str, str], value: Any) -> None:
     target[params["leaf"]] = value
 
 
+def project_medic(blob: dict, params: Dict[str, str], value: Any) -> None:
+    """Wstaw pole medyka do `matchConfig.extras.medic`.
+
+    Kształt jest taki sam jak u oficjeli (jedna osoba, kilka liści), tylko
+    bez roli w kluczu - medyk jest jeden.
+    """
+    ex = _extras(blob)
+    medic = ex.get("medic")
+    if not isinstance(medic, dict):
+        medic = {}
+        ex["medic"] = medic
+    medic[params["leaf"]] = value
+
+
 def project_extras_field(key: str) -> ProjectFn:
     def _p(blob: dict, params: Dict[str, str], value: Any) -> None:
         _extras(blob)[key] = value
@@ -354,7 +368,14 @@ def _build_registry() -> List[FieldSpec]:
         FieldSpec(
             name="team_signature",
             pattern=re.compile(r"^sig\.team\.(?P<team>host|guest)$"),
-            phases=(PHASE_PRE, PHASE_POST),
+            # ALL_PHASES, tak samo jak `official_signature` obok. Wcześniejsze
+            # (PRE, POST) było przeoczeniem, nie regułą: podpis osoby
+            # odpowiedzialnej bywa zbierany w przerwie (spóźniony kierownik,
+            # zmiana osoby na ławce), a odmowa w fazie LIVE nie chroniła
+            # niczego - podpis i tak lądował w blobie telefonu. Zostawał tylko
+            # POZA rejestrem, czyli dokładnie w tym stanie, w którym kasował go
+            # pełny zapis z drugiego urządzenia.
+            phases=ALL_PHASES,
             roles=ALL_ROLES,
             merge=merge_write_once,
             project=project_team_signature,
@@ -398,6 +419,35 @@ def _build_registry() -> List[FieldSpec]:
             roles=ALL_ROLES,
             merge=merge_lww,
             project=project_companion,
+        ),
+        # ── medyk ──────────────────────────────────────────────────────────
+        #
+        # Do tej pory medyk jechał WYŁĄCZNIE w blobie prowadzącego. Skutek był
+        # taki sam jak przy każdym polu spoza rejestru: drugie urządzenie
+        # wysyłało swój pełny snapshot, w którym medyka nie było, reprojekcja
+        # nie miała czego nałożyć z powrotem i dane po prostu znikały z ProEla
+        # - mimo że na telefonie, który je wpisał, leżały nietknięte.
+        #
+        # Podpis ma osobną specyfikację, bo rządzi się inną regułą: zapis
+        # jednokrotny, tak jak wszystkie pozostałe podpisy. Nazwisko, numer
+        # licencji i rola to zwykłe pola formularza - poprawia się je i kasuje,
+        # więc idą przez LWW (patrz `official`, gdzie ten sam podział powstał
+        # po tym, jak write-once zabetonował dopisanego delegata).
+        FieldSpec(
+            name="medic_signature",
+            pattern=re.compile(r"^medic\.(?P<leaf>signature)$"),
+            phases=ALL_PHASES,
+            roles=ALL_ROLES,
+            merge=merge_write_once,
+            project=project_medic,
+        ),
+        FieldSpec(
+            name="medic",
+            pattern=re.compile(r"^medic\.(?P<leaf>fullName|number|role)$"),
+            phases=ALL_PHASES,
+            roles=ALL_ROLES,
+            merge=merge_lww,
+            project=project_medic,
         ),
     ]
 

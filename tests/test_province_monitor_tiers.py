@@ -234,3 +234,24 @@ def test_fast_passes_do_not_queue_behind_the_crawler():
     source = ast.unparse(FUNCTIONS["_execute_run"])
     assert "hot" in source and "warm" in source
     assert "max_wait = 20" in source
+
+
+# ── Zapytanie o okno czasu ──────────────────────────────────────────────────
+
+
+def test_okno_publiczne_nie_uzywa_distinct():
+    """`SELECT DISTINCT` + `ORDER BY` po kolumnie spoza listy = błąd Postgresa.
+
+    Tak właśnie wyglądało to zapytanie: złączenie z tabelą sędziów mnożyło
+    wiersze (kilku sędziów przy jednym meczu), więc doszedł `DISTINCT`, a
+    sortowanie po `match_at` zostało. Postgres odrzucał to za każdym razem:
+
+        InvalidColumnReferenceError: for SELECT DISTINCT, ORDER BY expressions
+        must appear in select list
+
+    Czyli szybki przebieg publiczny nie odpytał ANI JEDNEGO meczu - po cichu,
+    bo wyjątek lądował w logu pętli w tle. Warunek „stoi przy nim czynny
+    sędzia" jest teraz podzapytaniem EXISTS, które wierszy nie mnoży.
+    """
+    assert "distinct" not in calls_in("_public_window_states")
+    assert "exists" in calls_in("_public_window_states")

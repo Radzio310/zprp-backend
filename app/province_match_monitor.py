@@ -775,30 +775,42 @@ async def _public_window_states(
     Zwraca stan ZAPISANY, bo to on jest podstawa scalania: odpowiedz publicznego
     API nadpisuje wylacznie pola, ktore naprawde przyslala.
     """
+    # „Stoi przy nim czynny sedzia" to WARUNEK, a nie zrodlo kolumn - stad
+    # EXISTS zamiast zlaczenia.
+    #
+    # Wczesniej bylo tu zlaczenie z `province_match_judges`, ktore mnozylo
+    # wiersze (kilku sedziow przy jednym meczu), wiec trzeba bylo dolozyc
+    # `DISTINCT`. A Postgres na `SELECT DISTINCT` wymaga, zeby KAZDE wyrazenie
+    # z `ORDER BY` stalo w liscie kolumn - `match_at` tam nie stalo i zapytanie
+    # wywracalo sie za kazdym razem:
+    #
+    #   asyncpg.exceptions.InvalidColumnReferenceError: for SELECT DISTINCT,
+    #   ORDER BY expressions must appear in select list
+    #
+    # Czyli szybki przebieg publiczny (`hot`/`warm`) nie odpytal ani jednego
+    # meczu. EXISTS nie mnozy wierszy, wiec `DISTINCT` znika razem z problemem,
+    # a sortowanie po godzinie meczu zostaje.
+    stoi_przy_nim_czynny_sedzia = (
+        select(province_match_judges.c.match_id)
+        .where(province_match_judges.c.province == province_matches.c.province)
+        .where(province_match_judges.c.match_id == province_matches.c.match_id)
+        .where(province_match_judges.c.active.is_(True))
+        .exists()
+    )
     rows = await database.fetch_all(
         select(
             province_matches.c.match_id,
             province_matches.c.state_json,
             province_matches.c.approved,
         )
-        .select_from(
-            province_matches.join(
-                province_match_judges,
-                and_(
-                    province_match_judges.c.province == province_matches.c.province,
-                    province_match_judges.c.match_id == province_matches.c.match_id,
-                ),
-            )
-        )
         .where(province_matches.c.province == province)
         .where(province_matches.c.active.is_(True))
         .where(province_matches.c.approved.is_(False))
-        .where(province_match_judges.c.active.is_(True))
+        .where(stoi_przy_nim_czynny_sedzia)
         .where(province_matches.c.match_at.is_not(None))
         .where(province_matches.c.match_at >= since)
         .where(province_matches.c.match_at < until)
         .order_by(province_matches.c.match_at.asc())
-        .distinct()
         .limit(limit)
     )
     now = _now()

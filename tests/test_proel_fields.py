@@ -464,3 +464,102 @@ def test_normalize_name_matches_the_typescript_port_exactly():
     assert normalize_name("Łukasz") == "łukasz"
     # spacje zwijane, wielkość liter bez znaczenia
     assert normalize_name("  NOWAK   Piotr  ") == "nowak piotr"
+
+
+# ─────────────────────── medyk i podpisy (utrata danych) ───────────────────────
+#
+# Zgłoszenie z hali: podpisy osób odpowiedzialnych i dane medyka zniknęły z
+# ProEla, choć na telefonie, który je zebrał, leżały nietknięte. Sędzia
+# przechodził między dwoma urządzeniami. Przyczyna: te pola nie miały ścieżki w
+# rejestrze (medyk) albo nikt ich na tę ścieżkę nie wysyłał (ekran konfiguracji),
+# więc pełny snapshot z drugiego urządzenia nie miał ich skąd odzyskać.
+
+
+def test_parse_path_medic_signature_is_write_once():
+    spec, params = parse_path("medic.signature")
+    assert spec.name == "medic_signature"
+    assert params == {"leaf": "signature"}
+    assert spec.merge is merge_write_once
+
+
+@pytest.mark.parametrize("leaf", ["fullName", "number", "role"])
+def test_parse_path_medic_data_is_lww(leaf):
+    """Nazwisko, licencja i rola to pola formularza - muszą dać się poprawić.
+
+    Ten sam podział co przy `official.*`, gdzie zapis jednokrotny zabetonował
+    kiedyś dopisanego delegata.
+    """
+    spec, params = parse_path(f"medic.{leaf}")
+    assert spec.name == "medic"
+    assert params == {"leaf": leaf}
+    assert spec.merge is merge_lww
+
+
+def test_parse_path_medic_rejects_unknown_leaf():
+    with pytest.raises(UnknownPath):
+        parse_path("medic.city")
+
+
+def test_medic_projection_shape_matches_app_blob():
+    """Projekcja musi trafić dokładnie w `matchConfig.extras.medic`.
+
+    Aplikacja czyta stamtąd (`extras.medic.signature` itd.) - inny kształt
+    znaczyłby, że dane są na serwerze, a na ekranie ich nie widać.
+    """
+    blob = {"matchConfig": {}}
+    overlay = {
+        "medic.fullName": entry("KOWALSKI Jan"),
+        "medic.number": entry("12345"),
+        "medic.role": entry("ratownik"),
+        "medic.signature": entry("/sig/medic.png"),
+    }
+    out = project(overlay, blob)
+    assert out["matchConfig"]["extras"]["medic"] == {
+        "fullName": "KOWALSKI Jan",
+        "number": "12345",
+        "role": "ratownik",
+        "signature": "/sig/medic.png",
+    }
+
+
+def test_signatures_and_medic_survive_full_blob_overwrite():
+    """SEDNO ZGŁOSZENIA.
+
+    Drugie urządzenie wysyła pełny snapshot, w którym nie ma ani podpisów, ani
+    medyka. Po reprojekcji jedno i drugie nadal tam jest.
+    """
+    overlay = {
+        "sig.team.host": entry("/sig/host.png"),
+        "sig.team.guest": entry("/sig/guest.png"),
+        "medic.fullName": entry("NOWAK Anna"),
+        "medic.signature": entry("/sig/medic.png"),
+    }
+    foreign_blob = {"matchConfig": {"matchNumber": "OSK/12", "extras": {}}}
+
+    out = project(overlay, foreign_blob)
+
+    ex = out["matchConfig"]["extras"]
+    assert ex["hostTeamSignature"] == "/sig/host.png"
+    assert ex["guestTeamSignature"] == "/sig/guest.png"
+    assert ex["medic"]["fullName"] == "NOWAK Anna"
+    assert ex["medic"]["signature"] == "/sig/medic.png"
+
+
+def test_cleared_signature_stays_cleared():
+    """Pusty wpis to też wpis - skasowany podpis nie ma prawa wrócić."""
+    overlay = {"sig.team.host": entry("")}
+    blob = {"matchConfig": {"extras": {"hostTeamSignature": "/sig/stary.png"}}}
+    out = project(overlay, blob)
+    assert out["matchConfig"]["extras"]["hostTeamSignature"] == ""
+
+
+def test_team_signature_allowed_in_every_phase():
+    """Podpis osoby odpowiedzialnej bywa zbierany w przerwie.
+
+    Odmowa w fazie LIVE niczego nie chroniła: podpis i tak lądował w blobie
+    telefonu, tyle że POZA rejestrem - czyli dokładnie tam, gdzie kasował go
+    zapis z drugiego urządzenia.
+    """
+    spec, _ = parse_path("sig.team.host")
+    official, _ = parse_path("official.referee1.signature")
+    assert spec.phases == official.phases
