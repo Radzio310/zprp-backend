@@ -2413,6 +2413,43 @@ proel_password_reset_email_codes = Table(
 )
 
 
+# Mecze dopisane RECZNIE do statystyk okregowych.
+#
+# Powod istnienia: sa rozgrywki, ktorych ZPRP w ogole nie prowadzi w systemie -
+# przede wszystkim mecze miedzypanstwowe (turnieje EHF w Szczyrku). Sedziowie
+# okregu obsluguja przy nich stolik, ale w eksporcie terminarza nie ma po nich
+# sladu, wiec bez tej tabeli znikaja z kazdego zestawienia.
+#
+# Wiersz stad NIGDY nie wchodzi do rozliczen finansowych - nie ma dla tych
+# rozgrywek zadnej tabeli stawek ZPRP, a zgadnieta kwota wygladalaby jak dane.
+#
+# `source_key` jest naturalnym kluczem importu (zrodlo + wojewodztwo + sezon +
+# data + druzyny). Dzieki niemu ten sam arkusz wgrany drugi raz niczego nie
+# duplikuje.
+province_manual_matches = Table(
+    "province_manual_matches",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("source_key", String, nullable=False, unique=True, index=True),
+    Column("province", String, nullable=False, index=True),
+    Column("season", String, nullable=False, index=True),
+    Column("comp_code", String, nullable=False),          # "EHF"
+    Column("match_code", String, nullable=False),         # "EHF/1"
+    Column("played_at", DateTime(timezone=True), nullable=True),
+    Column("home", String, nullable=False, server_default=""),
+    Column("away", String, nullable=False, server_default=""),
+    Column("hall", String, nullable=False, server_default=""),
+    Column("city", String, nullable=False, server_default=""),
+    # Nazwiska obsady tak, jak zapisal je autor arkusza ("Pazur L."). Numerow
+    # sedziowskich zrodlo nie zna - dopasowanie po nazwisku robi przegladarka,
+    # bo tylko ona ma wczytana liste sedziow okregu.
+    Column("officials", JSON, nullable=False, server_default="{}"),
+    Column("source", String, nullable=False, server_default=""),   # skad to jest
+    Column("note", String, nullable=False, server_default=""),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

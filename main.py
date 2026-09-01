@@ -67,6 +67,10 @@ from app.baza_vips import router as baza_vips_router
 from app.province_events import router as province_events_router
 from app.province_travel import router as province_travel_router
 from app.province_stats_export import router as province_stats_export_router
+from app.province_manual_matches import (
+    router as province_manual_matches_router,
+    seed_from_file as seed_manual_matches,
+)
 from app.mentor_grades import router as mentor_grades_router
 from app.game_scores import router as game_scores_router
 from app.signatures import router as signatures_router
@@ -243,6 +247,9 @@ app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
 # /zprp/statystyki/okreg/..., wiec nie wchodzi pod zaden catch-all.
 app.include_router(province_stats_export_router)
+# Mecze dopisane recznie (miedzypanstwowe EHF). Ten sam prefiks rodziny
+# /zprp/statystyki/okreg/, wiec kolejnosc rejestracji jest tu bez znaczenia.
+app.include_router(province_manual_matches_router)
 app.include_router(mentor_grades_router)
 app.include_router(game_scores_router)
 app.include_router(signatures_router)
@@ -901,6 +908,16 @@ async def startup():
         except Exception:
             pass
     logger.info("✅ Connected to the database")
+
+    # Mecze dopisane ręcznie (międzypaństwowe EHF) - jednorazowy zaczyn
+    # z pliku w repozytorium. Idempotentny: drugie i każde kolejne
+    # uruchomienie nie wstawia już nic, bo rozstrzyga o tym `source_key`.
+    try:
+        _seeded = seed_manual_matches()
+        if _seeded:
+            logger.info("✅ Dopisano ręcznie %s meczów międzypaństwowych", _seeded)
+    except Exception as exc:  # zaczyn nie może zatrzymać startu backendu
+        logger.warning("Zaczyn ręcznych meczów pominięty: %s", exc)
 
     # Dziennik protokołów: `metadata.create_all` zakłada tylko BRAKUJĄCE tabele,
     # kolumn do istniejącej nie dokłada. Bez tego wdrożenie na bazę, która ma już

@@ -1,0 +1,19 @@
+{
+  "source": "Arkusz obsad stolikowych okregu, sezon 2025/2026",
+  "note": "Mecz miedzypanstwowy - ZPRP nie prowadzi go w rozgrywkach. Dopisany recznie, nie wchodzi do rozliczen.",
+  "province": "ŚLĄSKIE",
+  "season": "2025/2026",
+  "comp_code": "EHF",
+  "matches": [
+    {"date": "2026-04-11", "time": "16:30", "home": "POLSKA K 2010", "away": "Czechy K 2010", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Pazur L.", "mierzacy_czas": "Ziemiański"},
+    {"date": "2026-04-12", "time": "10:00", "home": "POLSKA K 2010", "away": "Czechy K 2010", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Zubek", "mierzacy_czas": "Jędrycha"},
+    {"date": "2026-05-15", "time": "16:30", "home": "POLSKA M 2010", "away": "WĘGRY M 2010", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Schiwon", "mierzacy_czas": "Szostok"},
+    {"date": "2026-05-16", "time": "16:30", "home": "POLSKA M 2010", "away": "WĘGRY M 2010", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Schiwon", "mierzacy_czas": "Musialik"},
+    {"date": "2026-05-29", "time": "17:00", "home": "POLSKA K 2010", "away": "TURCJA K 2010", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Gajos", "mierzacy_czas": "Musialik"},
+    {"date": "2026-05-30", "time": "16:00", "home": "POLSKA K 2010", "away": "TURCJA K 2010", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Gajos", "mierzacy_czas": "Musialik"},
+    {"date": "2026-07-05", "time": "17:00", "home": "POLSKA K 2008", "away": "ISLANDIA K 2008", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Jędrycha", "mierzacy_czas": "Dymitruk"},
+    {"date": "2026-07-07", "time": "17:00", "home": "POLSKA K 2008", "away": "ISLANDIA K 2008", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Schiwon", "mierzacy_czas": "Kopiec"},
+    {"date": "2026-07-22", "time": "15:00", "home": "POLSKA M 2008", "away": "IZRAEL M 2008", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Pytlik A.", "mierzacy_czas": "Pytlik K."},
+    {"date": "2026-07-23", "time": "11:00", "home": "POLSKA M 2008", "away": "IZRAEL M 2008", "hall": "Szczyrk COS, Plażowa 7", "city": "Szczyrk", "sekretarz": "Pazur L.", "mierzacy_czas": "Musialik"}
+  ]
+}
