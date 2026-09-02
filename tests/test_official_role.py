@@ -5,7 +5,12 @@ albo zablokowanego sędziego, albo dostęp dla kogoś spoza obsady.
 """
 from __future__ import annotations
 
-from app.official_role import AUTHORIZED_ROLES, _name_for, _roles_for
+from app.official_role import (
+    AUTHORIZED_ROLES,
+    _name_for,
+    _roles_for,
+    is_authorized,
+)
 
 
 MATCH = {
@@ -77,3 +82,44 @@ def test_second_delegate_counts_as_delegate():
 def test_same_person_in_two_roles_keeps_both():
     match = dict(MATCH, NrSedzia_czas="1001")
     assert _roles_for(match, "1001") == ["referee1", "timekeeper"]
+
+
+# ─────────────────────── furtka administratora ───────────────────────
+#
+# Administrator aplikacji odblokowuje akcje pomeczowe niezależnie od obsady.
+# Reguła jest krótka, więc łatwo ją przy okazji odwrócić - stąd te cztery
+# przypadki: obie drogi osobno, obie naraz i brak obu.
+
+
+def test_admin_spoza_obsady_ma_dostep():
+    """Sedzia spoza obsady, ale administrator - akcje otwarte.
+
+    To jest cala tresc furtki: numer 9999 nie prowadzi tego meczu i nigdy nie
+    dostanie roli, a mimo to ma dokonczyc protokol.
+    """
+    roles = _roles_for(MATCH, "9999")
+    assert roles == []
+    assert is_authorized(roles, admin=True)
+
+
+def test_stolikowy_bedacy_adminem_ma_dostep():
+    """Sekretarz meczu, ktory jest administratorem.
+
+    Rola z obsady nie wystarcza (`secretary` nie jest w AUTHORIZED_ROLES), wiec
+    o dostepie decyduje wylacznie druga droga. Gdyby ktos kiedys zamienil `or`
+    na `and`, ten test zapali sie pierwszy.
+    """
+    roles = _roles_for(MATCH, "2001")
+    assert roles == ["secretary"]
+    assert not is_authorized(roles, admin=False)
+    assert is_authorized(roles, admin=True)
+
+
+def test_sedzia_boiskowy_nie_potrzebuje_admina():
+    """Obsada dziala dalej sama z siebie - furtka niczego nie przejela."""
+    assert is_authorized(_roles_for(MATCH, "1001"), admin=False)
+
+
+def test_obcy_bez_admina_nie_wchodzi():
+    """Brak obsady i brak admina to jedyny wynik odmowny."""
+    assert not is_authorized(_roles_for(MATCH, "9999"), admin=False)

@@ -56,15 +56,36 @@ ROLE_KEYS: List[Tuple[str, List[str], List[str]]] = [
 AUTHORIZED_ROLES = frozenset({"referee1", "referee2", "delegate"})
 
 
+def is_authorized(roles: List[str], admin: bool) -> bool:
+    """Czy ta osoba może wykonać akcje pomeczowe tego meczu.
+
+    DWIE DROGI, nie jedna. Pierwsza to obsada: sędzia boiskowy albo delegat.
+    Druga to administrator aplikacji - i nie jest to obejście reguły, tylko jej
+    druga część. Ktoś musi móc dokończyć protokół, gdy sędzia z obsady zgubił
+    telefon albo pomylił konto; do dziś jedynym wyjściem było wysłanie kogoś
+    z obsady po hasło, czyli najgorsza możliwa odpowiedź.
+
+    Osobna funkcja, bo to JEDYNE zdanie, które rozstrzyga o dostępie - i musi
+    dać się przetestować bez sieci i bez bazy.
+    """
+    return bool(admin) or any(r in AUTHORIZED_ROLES for r in roles)
+
+
 async def _zprp_judge_id_by_login(
     settings: Settings, user_plain: str, pass_plain: str
-) -> str:
-    """Zaloguj do baza.zprp.pl i oddaj numer sędziego tego konta.
+) -> Tuple[str, str]:
+    """Zaloguj do baza.zprp.pl i oddaj `(numer sędziego, nazwisko i imię)`.
 
     Ciało formularza idzie w ISO-8859-2, tak jak wysyła je przeglądarka i jak
     robi to `BAZA/utils/zprpLegacyLogin.ts`. Serwis NIE rozumie UTF-8: hasło z
     polskim znakiem wysłane po UTF-8 wraca jako „złe hasło", co przy sprawdzaniu
     uprawnień wyglądałoby na odmowę dostępu.
+
+    Nazwisko jest BEST-EFFORT i wolno mu być puste. Do obsady meczu bierzemy je
+    stamtąd, gdzie obsada naprawdę stoi (publiczne API rozgrywek); tutaj potrzeba
+    go tylko wtedy, gdy zalogowanego NIE MA w obsadzie - czyli przy administratorze.
+    Nieudany odczyt profilu nie może wywrócić sprawdzenia uprawnień, więc idzie
+    w `try` i kończy się pustym napisem.
     """
     body = urlencode(
         {"login": user_plain, "haslo": pass_plain, "from": "/index.php?"},
@@ -89,16 +110,37 @@ async def _zprp_judge_id_by_login(
             raise HTTPException(401, "Nieprawidłowy login lub hasło")
         html = resp.content.decode("iso-8859-2", errors="replace")
 
-    m = re.search(r"NrSedzia=(\d+)", html)
-    if not m:
-        # Konto organizacyjne (klub, okręg) loguje się poprawnie, ale nie jest
-        # niczyim numerem sędziego - i nigdy nie będzie w obsadzie meczu.
-        raise HTTPException(
-            403,
-            "To konto nie ma numeru sędziego, więc nie może być w obsadzie "
-            "meczu.",
-        )
-    return m.group(1)
+        m = re.search(r"NrSedzia=(\d+)", html)
+        if not m:
+            # Konto organizacyjne (klub, okręg) loguje się poprawnie, ale nie
+            # jest niczyim numerem sędziego - i nigdy nie będzie w obsadzie.
+            raise HTTPException(
+                403,
+                "To konto nie ma numeru sędziego, więc nie może być w obsadzie "
+                "meczu.",
+            )
+        judge_id = m.group(1)
+
+        full_name = ""
+        try:
+            # Import LENIWY: `app.baza_web` ciągnie za sobą własne zależności,
+            # a ten moduł ma się dać zaimportować także bez nich.
+            from app.baza_web import _parse_profile_from_edit_form
+
+            prof = await client.get(
+                f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_id}"
+            )
+            parsed = _parse_profile_from_edit_form(
+                prof.content.decode("iso-8859-2", errors="replace")
+            )
+            values = (parsed or {}).get("values", {}) or {}
+            last = _clean(values.get("Nazwisko"))
+            first = _clean(values.get("Imie"))
+            full_name = f"{last} {first}".strip()
+        except Exception:  # noqa: BLE001 — nazwisko to ozdoba, nie dowód
+            full_name = ""
+
+    return judge_id, full_name
 
 
 class OfficialRoleRequest(BaseModel):
@@ -164,7 +206,9 @@ async def match_official_role(
         raise HTTPException(400, "match_id musi być numerem IdZawody")
 
     # ── 1) Kim jesteś: logowanie do baza.zprp.pl ────────────────────────────
-    judge_id = await _zprp_judge_id_by_login(settings, user_plain, pass_plain)
+    judge_id, full_name = await _zprp_judge_id_by_login(
+        settings, user_plain, pass_plain
+    )
 
     # ── 2) Czy jesteś w obsadzie: publiczne API rozgrywek ───────────────────
     async with AsyncClient(timeout=30.0) as public:
@@ -185,14 +229,31 @@ async def match_official_role(
         )
 
     roles = _roles_for(match, judge_id)
+
+    # ── 3) Furtka administratora ────────────────────────────────────────────
+    #
+    # Administrator aplikacji odblokowuje akcje pomeczowe NIEZALEŻNIE od obsady.
+    # Nie jest to obejście reguły, tylko jej druga część: ktoś musi móc dokończyć
+    # protokół, gdy sędzia z obsady zgubił telefon albo pomylił konto - a dziś
+    # jedynym wyjściem było wysłanie kogoś z obsady po hasło.
+    #
+    # Lista adminów jest TA SAMA, z której korzysta reszta aplikacji
+    # (`admin_settings.allowed_admins` przez `is_admin`), a numer, po którym
+    # sprawdzamy, pochodzi z zalogowania do baza.zprp.pl - nie z nagłówka.
+    from app.proel_auth import is_admin  # lazy — patrz nota w tamtym module
+
+    admin = await is_admin(judge_id)
+
     return {
         "ok": True,
         "judgeId": judge_id,
-        "fullName": _name_for(match, roles),
+        # Z obsady, gdy jest w obsadzie; z profilu ZPRP, gdy wchodzi adminem.
+        "fullName": _name_for(match, roles) or full_name,
         "roles": roles,
+        "admin": admin,
         # Rozstrzygnięcie zapada TU, nie w aplikacji: telefon może mieć
         # nieświeże dane meczu, a to jest odczyt prosto ze źródła.
-        "authorized": any(r in AUTHORIZED_ROLES for r in roles),
+        "authorized": is_authorized(roles, admin),
     }
 
 
@@ -250,7 +311,7 @@ async def verify_proel_account_judge(
     except Exception as e:
         raise HTTPException(400, f"Decryption error: {e}")
 
-    judge_id = await _zprp_judge_id_by_login(settings, user_plain, pass_plain)
+    judge_id, _ = await _zprp_judge_id_by_login(settings, user_plain, pass_plain)
 
     # Jeden numer sędziego = jedno konto ProEl. Bez tego dwie osoby mogłyby
     # potwierdzić ten sam numer i obie dostałyby rolę w cudzym meczu.
