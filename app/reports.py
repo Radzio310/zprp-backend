@@ -492,16 +492,19 @@ async def reply(report_id: int, req: ReportReplyRequest):
             .where(user_reports.c.id == report_id)
             .values(unread_by_admin=True, is_read=False, unread_by_user=False)
         )
-        ids = await _admin_ids()
-        if ids:
-            _spawn(
-                send_push_to_judges(
-                    ids,
-                    title="💬 Nowa wiadomość w zgłoszeniu",
-                    body=f"👤 {data['full_name']}\n„{content[:90]}”",
-                    data={"type": "admin_report_reply", "report_id": str(report_id)},
-                )
+        # Odpowiedź użytkownika jest częścią TEGO SAMEGO wątku. Wcześniej szła
+        # boczną drogą bez trwałej skrzynki i ze starym typem payloadu, przez co
+        # admin nie miał ciągłości rozmowy ani poprawnego deep-linku.
+        _spawn(
+            notify_admins(
+                "report_reply",
+                data.get("title") or "Zgłoszenie",
+                f"👤 {data['full_name']}\n„{content[:90]}”",
+                reference=report_id,
+                extra={"report_id": report_id},
+                exclude_judge_id=str(req.judge_id),
             )
+        )
 
     return await get_report(
         report_id,

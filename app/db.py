@@ -1029,6 +1029,45 @@ push_tokens = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
+# Trwała skrzynka zdarzeń administracyjnych. Push jest tylko kanałem
+# dostarczenia — administrator ma zobaczyć ten sam alert również po ponownym
+# wejściu do aplikacji, nawet jeśli system operacyjny zgubił baner.
+#
+# Jeden wiersz przypada na administratora, nie na urządzenie. Dzięki temu zmiana
+# telefonu nie urywa historii, a kilka telefonów tego samego admina nie mnoży
+# wpisów w panelu.
+admin_alert_notifications = Table(
+    "admin_alert_notifications",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("kind", String, nullable=False, index=True),
+    Column("reference", String, nullable=True, index=True),
+    # NULL oznacza zdarzenie, którego celowo nie deduplikujemy. Unikalność pary
+    # chroni przed dwoma wpisami tego samego alertu po ponowieniu operacji.
+    Column("event_key", String, nullable=True),
+    Column("title", String, nullable=False),
+    Column("body", Text, nullable=False),
+    Column(
+        "data_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    ),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    ),
+    UniqueConstraint(
+        "judge_id",
+        "event_key",
+        name="uq_admin_alert_notification_judge_event",
+    ),
+)
+
 push_schedules = Table(
     "push_schedules",
     metadata,
@@ -2458,6 +2497,53 @@ province_manual_matches = Table(
     Column("source", String, nullable=False, server_default=""),   # skad to jest
     Column("note", String, nullable=False, server_default=""),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+
+# ─────────────────────────── Dodatkowy raport ───────────────────────────
+#
+# Raport sędziów / delegata: opisy czerwonych kartek, kar ławki i incydentów,
+# które trafiają na osobny formularz związku (patrz `app/extra_report_pdf.py`).
+#
+# Dlaczego OSOBNA tabela, a nie pole w blobie ProEla: opis jednego incydentu
+# to setki znaków, a blob jedzie w całości przy każdym zapisie meczu. Do tego
+# raport ma żyć dłużej niż mecz w aplikacji - delegat pisze go czasem dzień
+# później, z innego urządzenia niż to, na którym mecz był prowadzony.
+#
+# KLUCZ. `match_key` to `matchId` z ZPRP, a dla meczów zakładanych ręcznie
+# `n:<numer>`. Sam numer meczu kluczem być nie może: ten sam numer w innym
+# sezonie to inny mecz (patrz `app/proel_match_key.py`). Numer i identyfikator
+# ZPRP zostają obok - do diagnozy, nie do wyszukiwania.
+extra_reports = Table(
+    "extra_reports",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("match_key", String, nullable=False, index=True),
+    Column("kind", String, nullable=False),  # "referees" | "delegate"
+    Column("match_number", String, nullable=True, index=True),
+    Column("zprp_match_id", String, nullable=True, index=True),
+    Column("entries", JSON, nullable=False, server_default="[]"),
+    Column("updated_by", String, nullable=True),
+    Column("updated_by_name", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("generated_by", String, nullable=True),
+    Column("generated_by_name", String, nullable=True),
+    Column("generated_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("match_key", "kind", name="uq_extra_reports_key_kind"),
+)
+
+# Adresaci raportu wg kategorii rozgrywek. Kategorię liczy aplikacja z numeru
+# meczu (`utils/matchCategoryColor.ts`) - tu trzymamy tylko przypisanie
+# kategoria -> skrzynki, żeby dało się je zmienić bez wydawania nowego APK.
+extra_report_recipients = Table(
+    "extra_report_recipients",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String, nullable=False),
+    Column("categories", JSON, nullable=False, server_default="[]"),
+    Column("emails", JSON, nullable=False, server_default="[]"),
+    Column("order_index", Integer, nullable=False, server_default="0"),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
 

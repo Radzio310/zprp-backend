@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, update
 
 from app.db import (
+    admin_alert_notifications,
     beach_users,
     database,
     province_match_events,
@@ -247,6 +248,41 @@ async def list_match_events(installation_id: str, limit: int = 100):
         .limit(limit)
     )
     rows = await database.fetch_all(stmt)
+    return {"items": [dict(row) for row in rows]}
+
+
+@router.get("/admin-alerts")
+async def list_admin_alerts(installation_id: str, limit: int = 100):
+    """Trwała skrzynka alertów admina przypisana do zalogowanej instalacji.
+
+    Nie przyjmujemy ``judge_id`` z klienta. Tożsamość bierzemy z rekordu
+    urządzenia, a następnie sprawdzamy ją względem tej samej listy adminów,
+    której używa wysyłka push.
+    """
+    if not installation_id:
+        raise HTTPException(status_code=400, detail="Missing installation_id")
+
+    device = await database.fetch_one(
+        select(push_tokens.c.judge_id).where(
+            push_tokens.c.installation_id == installation_id
+        )
+    )
+    judge_id = _clean_judge_id(device["judge_id"] if device else None)
+    if not judge_id:
+        return {"items": []}
+
+    from app.admin_alerts import admin_judge_ids
+
+    if judge_id not in await admin_judge_ids():
+        return {"items": []}
+
+    limit = max(1, min(200, int(limit)))
+    rows = await database.fetch_all(
+        select(admin_alert_notifications)
+        .where(admin_alert_notifications.c.judge_id == judge_id)
+        .order_by(admin_alert_notifications.c.created_at.desc())
+        .limit(limit)
+    )
     return {"items": [dict(row) for row in rows]}
 
 

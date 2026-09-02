@@ -54,6 +54,10 @@ from app.proel_users.password_reset_email import router as proel_users_password_
 from app.server_matches import router as matches_router
 from app.partner_offtimes import router as partner_offtimes_router
 from app.short_result_records import router as short_result_records_router
+from app.extra_reports import (
+    admin_router as extra_report_admin_router,
+    router as extra_report_router,
+)
 from app.young_referees import router as young_referees_router
 from app.agent_docs import router as agent_docs_router
 from app.agent_chat import router as agent_chat_router
@@ -232,6 +236,9 @@ app.include_router(proel_router)
 app.include_router(matches_router)
 app.include_router(partner_offtimes_router)
 app.include_router(short_result_records_router)
+# Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
+app.include_router(extra_report_router)
+app.include_router(extra_report_admin_router)
 app.include_router(young_referees_router)
 app.include_router(agent_docs_router)
 app.include_router(agent_chat_router)

@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import or_, select
+from sqlalchemy import insert, or_, select
 
 from app.admin_alert_rules import (
     ADMIN_NO_DEVICE,
@@ -155,13 +155,42 @@ async def notify_admins(
             )
             return 0
 
+        from app.db import admin_alert_notifications, database
         from app.push.push import send_push_to_judges
+
+        title = alert_title(kind, subject)
+        data = alert_payload(kind, reference, extra)
+
+        # Najpierw skrzynka, potem push. Baner może nie dojść, ale zdarzenie nie
+        # może przez to zniknąć z aplikacji. Każdy admin dostaje jeden wpis bez
+        # względu na liczbę swoich telefonów.
+        for judge_id in targets:
+            values = {
+                "judge_id": judge_id,
+                "kind": str(kind or "").strip(),
+                "reference": str(reference or "").strip() or None,
+                "event_key": key or None,
+                "title": title,
+                "body": body,
+                "data_json": data,
+            }
+            try:
+                await database.execute(insert(admin_alert_notifications).values(**values))
+            except Exception:  # noqa: BLE001
+                # Powtórzenie tego samego event_key jest prawidłową deduplikacją;
+                # awaria skrzynki również nie może zatrzymać właściwej operacji.
+                logger.info(
+                    "admin_alerts: wpis skrzynki pominięty (%s, %s)",
+                    kind,
+                    judge_id,
+                    exc_info=True,
+                )
 
         sent = await send_push_to_judges(
             targets,
-            alert_title(kind, subject),
+            title,
             body,
-            alert_payload(kind, reference, extra),
+            data,
         )
         # Log JEST tu potrzebny. Bez niego pytanie „dlaczego jeden admin dostał,
         # a drugi nie" nie ma odpowiedzi: po fakcie nie da się odtworzyć, kto
