@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional, Set
 from fastapi import Header, HTTPException
 from sqlalchemy import select
 
+from app.proel_elevation import verify_elevation_token
 from app.proel_fields import ALL_ROLES, normalize_name
 
 #: Aktor, który NIE deklaruje numeru sędziego - konto ProEl albo samo urządzenie.
@@ -66,15 +67,25 @@ class Actor:
     #: False oznacza „nie potrafimy potwierdzić", nie „na pewno oszust".
     verified: bool = False
     roles: Set[str] = field(default_factory=set)
+    #: Tożsamość potwierdzona tokenem sesji podniesionej, a nie rejestrem
+    #: urządzeń - czyli protokół kończy ktoś inny niż właściciel telefonu.
+    #: Do AUDYTU, nie do uprawnień: co wolno, liczy `roles_for` i `is_admin`.
+    elevated: bool = False
 
     def as_by(self) -> Dict[str, Any]:
         """Kształt zapisywany w overlayu i audycie."""
-        return {
+        out: Dict[str, Any] = {
             "judge_id": self.judge_id,
             "name": self.name,
             "install": self.installation_id,
             "verified": self.verified,
         }
+        # Klucz pojawia się WYŁĄCZNIE przy sesji podniesionej. Dopisywanie
+        # `"elevated": false` do każdego zapisu zmieniłoby kształt wszystkich
+        # dotychczasowych wpisów w overlayu bez żadnego zysku.
+        if self.elevated:
+            out["elevated"] = True
+        return out
 
 
 def header_text(v: Any) -> str:
@@ -207,11 +218,15 @@ async def proel_actor(
     x_judge_id: Optional[str] = Header(None, alias="X-Judge-Id"),
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
     x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
+    x_elevation: Optional[str] = Header(None, alias="X-Elevation"),
     authorization: Optional[str] = Header(None),
 ) -> Actor:
     """Zależność FastAPI: kto wykonuje zapis.
 
-    Tożsamość ma trzy postacie, w kolejności mocy:
+    Tożsamość ma cztery postacie, w kolejności mocy:
+      • sesja podniesiona (`X-Elevation` - patrz `app/proel_elevation.py`):
+        numer potwierdzony hasłem do baza.zprp.pl, więc rejestru urządzeń już
+        nie pytamy,
       • numer sędziego z baza.zprp.pl (para nagłówków, weryfikowana o rejestr
         urządzeń),
       • konto ProEl (token HMAC - patrz `account_actor`),
@@ -230,6 +245,35 @@ async def proel_actor(
     """
     judge_id = _clean(x_judge_id)
     installation_id = _clean(x_installation_id)
+
+    # ── Sesja podniesiona ────────────────────────────────────────────────
+    #
+    # PRZED wszystkim innym, bo to jedyna postać tożsamości, przy której
+    # niezgodność z rejestrem urządzeń jest STANEM NORMALNYM: sędzia boiskowy
+    # kończy protokół na telefonie stolikowego. Bez tego wyprzedzenia jego
+    # zapisy leciały z 401 ACTOR_MISMATCH - z pełnymi uprawnieniami na ekranie
+    # i odmową przy każdym dotknięciu.
+    #
+    # Nagłówek `X-Judge-Id` musi się zgadzać z numerem w tokenie. Nie dlatego,
+    # że nagłówek jest dowodem czegokolwiek - dowodem jest podpis - tylko po to,
+    # żeby cichy rozjazd (aplikacja podmieniła jedno, a nie drugie) nie zapisał
+    # czynności na kogoś innego, niż mówi token.
+    elevation = verify_elevation_token(x_elevation or "")
+    if elevation is not None:
+        elevated_judge = _clean(elevation.get("jid"))
+        if not judge_id or judge_id == elevated_judge:
+            return Actor(
+                judge_id=elevated_judge,
+                installation_id=installation_id,
+                name=header_text(x_actor_name),
+                verified=True,
+                elevated=True,
+            )
+        logger.warning(
+            "proel_actor: token podniesienia na numer %s przy nagłówku %s",
+            elevated_judge,
+            judge_id,
+        )
 
     # Prawdziwy numer sędziego wygrywa: daje rolę w meczu i prawa admina,
     # których token konta dać nie może. Token pytamy dopiero, gdy numeru nie ma

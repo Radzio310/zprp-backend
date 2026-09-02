@@ -1058,6 +1058,7 @@ async def _require_approver(
     x_judge_id: Optional[str],
     x_installation_id: Optional[str],
     x_actor_name: Optional[str],
+    x_elevation: Optional[str],
     authorization: Optional[str],
 ) -> None:
     """Wpuszcza do zmiany statusu na „zatwierdzony" i z powrotem.
@@ -1071,7 +1072,16 @@ async def _require_approver(
     if legacy:
         return
 
-    actor = await proel_actor(x_judge_id, x_installation_id, x_actor_name, authorization)
+    # Nagłówki przekazujemy PO NAZWACH. Pozycyjnie ta lista już raz urosła w
+    # środku (`x_elevation` przed `authorization`) i cicha zamiana tych dwóch
+    # znaczyłaby: token konta ProEl czytany jako token podniesienia.
+    actor = await proel_actor(
+        x_judge_id=x_judge_id,
+        x_installation_id=x_installation_id,
+        x_actor_name=x_actor_name,
+        x_elevation=x_elevation,
+        authorization=authorization,
+    )
     if await _may_approve(match_number, state, actor):
         return
 
@@ -1145,6 +1155,7 @@ async def update_proel_match(
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
     x_judge_id: Optional[str] = Header(None, alias="X-Judge-Id"),
     x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
+    x_elevation: Optional[str] = Header(None, alias="X-Elevation"),
     x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
     x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
     authorization: Optional[str] = Header(None),
@@ -1258,6 +1269,7 @@ async def update_proel_match(
                     x_judge_id=x_judge_id,
                     x_installation_id=x_installation_id,
                     x_actor_name=x_actor_name,
+                    x_elevation=x_elevation,
                     authorization=authorization,
                 )
 

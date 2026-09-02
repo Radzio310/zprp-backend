@@ -290,6 +290,24 @@ async def match_official_role(
     from app.proel_auth import is_admin  # lazy — patrz nota w tamtym module
 
     admin = await is_admin(judge_id)
+    authorized = is_authorized(roles, admin)
+
+    # ── 4) Dowód tożsamości na czas dokończenia protokołu ───────────────────
+    #
+    # Bez niego uprawnienie kończyło się na ekranie: aplikacja odblokowywała
+    # przyciski, a serwer odrzucał każdy zapis, bo instalacja należy do
+    # stolikowego (`ACTOR_MISMATCH` w `proel_actor`). Token jest jedynym
+    # miejscem, w którym da się to powiedzieć uczciwie - powstaje TU, zaraz po
+    # sprawdzeniu hasła, i tylko dla kogoś, kto to sprawdzenie przeszedł.
+    #
+    # Szczegóły i uzasadnienie krótkiego życia: `app/proel_elevation.py`.
+    from app.proel_elevation import create_elevation_token, token_expires_at
+
+    elevation = (
+        create_elevation_token(judge_id, admin=admin, match_id=match_id)
+        if authorized
+        else ""
+    )
 
     return {
         "ok": True,
@@ -302,7 +320,11 @@ async def match_official_role(
         "crew": _authorized_crew(match) if admin else [],
         # Rozstrzygnięcie zapada TU, nie w aplikacji: telefon może mieć
         # nieświeże dane meczu, a to jest odczyt prosto ze źródła.
-        "authorized": is_authorized(roles, admin),
+        "authorized": authorized,
+        # Dowód tożsamości dla zapisów wykonanych na cudzym urządzeniu.
+        # Pusty, gdy uprawnienia nie ma - nie ma czego dowodzić.
+        "elevation": elevation,
+        "elevationExpiresAt": token_expires_at(elevation) if elevation else 0,
     }
 
 
