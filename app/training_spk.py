@@ -35,6 +35,7 @@ from app.db import database, saved_matches, spk_reference, spk_run
 from app.proel_auth import Actor, is_admin, proel_actor
 from app.training_spk_score import grade, score_run
 from app.training_spk_pdf import SpkPdfError, build_slides_pdf
+from app.training_spk_meta import meta_from_blob
 from app.training_spk_slides import slides_from_timeline
 from app.zprp_accounts import normalize_province
 
@@ -138,31 +139,6 @@ async def _current_reference() -> Optional[Dict[str, Any]]:
     return dict(row) if row is not None else None
 
 
-def _meta_from_blob(blob: Dict[str, Any]) -> Dict[str, Any]:
-    """Co ekran startowy i PDF muszą wiedzieć o tym meczu.
-
-    Czytamy z tego samego dokumentu, z którego bierze się oś czasu - bo tylko
-    tak wynik na ekranie startowym i wynik, z którym porównujemy podejście, są
-    na pewno tym samym wynikiem.
-    """
-    cfg = blob.get("matchConfig") if isinstance(blob.get("matchConfig"), dict) else {}
-    cfg = cfg or {}
-    half = str(blob.get("halfScore") or "").split("-")
-    return {
-        "matchNumber": str(cfg.get("matchNumber") or SPK_MATCH_NUMBER),
-        "zprpMatchId": str(cfg.get("matchId") or ""),
-        "hostTeamName": str(cfg.get("hostTeamName") or ""),
-        "guestTeamName": str(cfg.get("guestTeamName") or ""),
-        "date": str(blob.get("date") or cfg.get("dateTime") or ""),
-        "finalHost": str(blob.get("scoreHost") or ""),
-        "finalGuest": str(blob.get("scoreGuest") or ""),
-        "halfHost": half[0].strip() if len(half) > 0 else "",
-        "halfGuest": half[1].strip() if len(half) > 1 else "",
-        "hostPlayers": blob.get("hostPlayers") or [],
-        "guestPlayers": blob.get("guestPlayers") or [],
-    }
-
-
 class ReferenceImportResult(BaseModel):
     ok: bool
     found: bool
@@ -220,7 +196,7 @@ async def import_reference(
             ),
         )
 
-    meta = _meta_from_blob(blob)
+    meta = meta_from_blob(blob)
     await database.execute(
         spk_reference.insert().values(
             match_number=SPK_MATCH_NUMBER,
@@ -252,6 +228,10 @@ async def get_reference(actor: Actor = Depends(proel_actor)) -> Dict[str, Any]:
         "hasReference": True,
         "matchNumber": ref["match_number"],
         "events": len(ref["timeline"] or []),
+        # Liczba SLAJDÓW to nie liczba zdarzeń: akcje z tej samej sekundy
+        # („bramka i kara") składają się w jedno polecenie. Panel pokazuje
+        # przy materiale, ile stron naprawdę z tego wyjdzie.
+        "slides": len(slides_from_timeline(ref["timeline"] or [])),
         "meta": ref["meta"] or {},
         "source": ref["source"],
         "updatedBy": ref["updated_by"],
@@ -323,7 +303,7 @@ async def save_run(
         )
 
     blob = body.dataJson if isinstance(body.dataJson, dict) else {}
-    mine_meta = _meta_from_blob(blob)
+    mine_meta = meta_from_blob(blob)
     mode = "slides" if body.mode == "slides" else "video"
 
     report = score_run(

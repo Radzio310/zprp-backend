@@ -3122,7 +3122,7 @@ def _fill_players_block(
             ws[f"AI{row}"].value = "---"
             continue
 
-        ws[f"AI{row}"].value = "---"  # zawsze
+        # Rubryka Kd (kara dodatkowa) wypelnia sie nizej razem z reszta statystyk.
 
         num = nums[i]
         ps = stats_by_number.get(num) or {}
@@ -3135,6 +3135,10 @@ def _fill_players_block(
         penalty3 = (ps.get("penalty3") or "").strip()
         disq_time = (ps.get("disqualification") or "").strip()
         disq_desc = (ps.get("disqualificationDesc") or "").strip()
+        # Kara dodatkowa (Kd): kolumna AJ szablonu, czyli "AI" przed nakladka
+        # ShiftedWS. Czas jak przy karach 2-minutowych ("MM:SS"), bez wplywu
+        # na drabinke I-III - patrz PlayerStats.penaltyExtra w aplikacji.
+        penalty_extra = (ps.get("penaltyExtra") or "").strip()
         has_red = bool(ps.get("hasRedCard") or False)
 
         ws[f"A{row}"].value = num
@@ -3174,6 +3178,8 @@ def _fill_players_block(
                 ws[f"AF{row}"].value = disq_desc
         else:
             ws[f"AF{row}"].value = "---"
+
+        ws[f"AI{row}"].value = penalty_extra if penalty_extra else "---"
 
 
 #: Rzut karny NIEWYKORZYSTANY w przebiegu meczu - "K w kółku" (U+24C0).
