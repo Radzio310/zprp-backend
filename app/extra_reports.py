@@ -107,6 +107,12 @@ class GeneratePdfBody(BaseModel):
     signatureUrls: List[str] = Field(default_factory=list)
     matchNumber: Optional[str] = None
     zprpMatchId: Optional[str] = None
+    #: Treść wprost w żądaniu - dla MECZU TESTOWEGO, którego raportu nie ma
+    #: w bazie (isTest blokuje zapis). Używana WYŁĄCZNIE, gdy pod kluczem nic
+    #: nie leży - przy prawdziwym meczu treść zapisana wygrywa zawsze, żeby
+    #: nie dało się wysłać do związku raportu innego niż ten, który widzi
+    #: reszta obsady.
+    entries: Optional[List[Dict[str, Any]]] = None
 
 
 class RecipientGroup(BaseModel):
@@ -286,7 +292,10 @@ async def generate_pdf(
     """Składa PDF z ZAPISANEJ treści i odnotowuje, kto go wygenerował.
 
     Treść bierzemy z bazy, nie z żądania - inaczej dałoby się wysłać do związku
-    raport inny niż ten, który widzą pozostali członkowie obsady.
+    raport inny niż ten, który widzą pozostali członkowie obsady. Jedyny
+    wyjątek: klucz, pod którym NIC nie leży, może dostać treść w żądaniu -
+    tak składa raport MECZ TESTOWY, którego zapis jest zablokowany (isTest).
+    Plik powstaje naprawdę, w bazie nie zostaje nic - jak protokół ćwiczeniowy.
     """
     _check_kind(kind)
 
@@ -295,12 +304,12 @@ async def generate_pdf(
             (extra_reports.c.match_key == match_key) & (extra_reports.c.kind == kind)
         )
     )
-    if not row:
+    if not row and not body.entries:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Ten raport nie ma jeszcze treści.",
         )
-    entries = dict(row).get("entries") or []
+    entries = (dict(row).get("entries") or []) if row else (body.entries or [])
 
     # Podpisy z protokołu - te same, którymi sędziowie podpisali arkusz.
     signatures: List[bytes] = []
@@ -330,17 +339,22 @@ async def generate_pdf(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
     now = datetime.now(timezone.utc)
-    await database.execute(
-        extra_reports.update()
-        .where(extra_reports.c.id == dict(row)["id"])
-        .values(
-            generated_by=actor.judge_id or None,
-            generated_by_name=actor.name or None,
-            generated_at=now,
+    # Ślad „kto wygenerował" tylko przy raporcie ZAPISANYM - mecz testowy
+    # (treść z żądania, bez wiersza) świadomie nie zostawia w bazie niczego.
+    if row:
+        await database.execute(
+            extra_reports.update()
+            .where(extra_reports.c.id == dict(row)["id"])
+            .values(
+                generated_by=actor.judge_id or None,
+                generated_by_name=actor.name or None,
+                generated_at=now,
+            )
         )
-    )
 
-    filename = _filename(kind, body.matchNumber or dict(row).get("match_number"))
+    filename = _filename(
+        kind, body.matchNumber or (dict(row).get("match_number") if row else None)
+    )
     # Plik zostaje też pod tokenem - „Pobierz na telefon" otwiera ten adres
     # systemowo i raport ląduje w pobranych, jak protokół PDF.
     token = stash_for_download(pdf)
