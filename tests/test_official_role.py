@@ -9,6 +9,7 @@ from app.official_role import (
     AUTHORIZED_ROLES,
     _name_for,
     _roles_for,
+    _authorized_crew,
     is_authorized,
 )
 
@@ -123,3 +124,48 @@ def test_sedzia_boiskowy_nie_potrzebuje_admina():
 def test_obcy_bez_admina_nie_wchodzi():
     """Brak obsady i brak admina to jedyny wynik odmowny."""
     assert not is_authorized(_roles_for(MATCH, "9999"), admin=False)
+
+
+# ───────────── obsada do zapisu w ZPRP (tylko dla admina) ─────────────
+
+
+def test_crew_zawiera_wylacznie_role_uprawnione():
+    """Sekretarz i czasomierzysta NIE moga otworzyc sesji zapisu.
+
+    Gdyby weszli na te liste, administrator probowalby ich numerami i dostawal
+    odmowy - a przy okazji lista mowilaby nieprawde o tym, kto ma prawo pisac.
+    """
+    crew = _authorized_crew(MATCH)
+    assert [c["role"] for c in crew] == ["referee1", "referee2", "delegate"]
+    assert [c["judgeId"] for c in crew] == ["1001", "1002", "3001"]
+
+
+def test_crew_niesie_nazwiska_do_pokazania():
+    crew = _authorized_crew(MATCH)
+    assert crew[0]["fullName"] == "KOWALSKI Jan"
+    assert crew[2]["fullName"] == "LEWANDOWSKI Marek"
+
+
+def test_crew_pomija_puste_gniazda():
+    """Pusty slot delegata nie moze wyprodukowac wpisu z pustym numerem."""
+    match = dict(MATCH, NrSedzia_delegat="", NrSedzia_delegat_nazwisko="")
+    crew = _authorized_crew(match)
+    assert all(c["judgeId"] for c in crew)
+    assert [c["role"] for c in crew] == ["referee1", "referee2"]
+
+
+def test_crew_bez_duplikatow():
+    """Ten sam czlowiek w dwoch gniazdach daje JEDEN wpis.
+
+    Inaczej administrator probowalby tym samym numerem dwa razy, a przy odmowie
+    czekalby dwa razy dluzej na ten sam wynik.
+    """
+    match = dict(MATCH, NrSedzia_delegat2="3001", NrSedzia_delegat2_nazwisko="LEWANDOWSKI Marek")
+    ids = [c["judgeId"] for c in _authorized_crew(match)]
+    assert len(ids) == len(set(ids))
+
+
+def test_drugi_delegat_wchodzi_na_liste():
+    match = dict(MATCH, NrSedzia_delegat2="3002", NrSedzia_delegat2_nazwisko="DĄBROWSKI Jan")
+    ids = [c["judgeId"] for c in _authorized_crew(match)]
+    assert "3002" in ids

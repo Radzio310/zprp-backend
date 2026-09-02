@@ -172,6 +172,53 @@ def _roles_for(match: Dict[str, Any], judge_id: str) -> List[str]:
     return out
 
 
+def _authorized_crew(match: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Numery sędziów, którzy mają w ZPRP prawo pisać do TEGO meczu.
+
+    PO CO TO ISTNIEJE. Oficjalne API ZPRP autoryzuje parą `(IdZawody,
+    nr_sedzia)` - bez hasła. Administrator aplikacji, którego w obsadzie nie
+    ma, dostanie tam odmowę własnym numerem, choć u nas jest uprawniony do
+    dokończenia protokołu. Ta lista pozwala mu otworzyć sesję numerem sędziego
+    prowadzącego ten mecz.
+
+    SKĄD TE NUMERY. Wyłącznie z publicznego API rozgrywek, z obsady TEGO
+    JEDNEGO meczu - tej samej odpowiedzi, którą i tak czytamy, żeby rozpoznać
+    rolę. To NIE jest przeszukiwanie bazy użytkowników ani dopasowywanie po
+    nazwisku: `login_records` odpowiada na pytanie „kto używa aplikacji", a nie
+    „kto prowadzi ten mecz", i szukanie tam numerów wróciłoby do zbieżności
+    nazwisk, którą świadomie zamknęliśmy.
+
+    ODDAJEMY TO WYŁĄCZNIE ADMINISTRATOROWI. Numer sędziego jest w publicznym
+    API jawny, ale para z `IdZawody` jest w ZPRP kluczem do zapisu - więc lista
+    wychodzi stąd tylko dla konta, które przeszło logowanie i jest na liście
+    administratorów.
+
+    CZEGO TO NIE NAPRAWIA: wpis po stronie ZPRP będzie podpisany numerem
+    sędziego, a nie administratora. Nasz dziennik zapisuje prawdę (kto
+    naprawdę wykonał czynność), dziennik ZPRP tej prawdy mieć nie będzie - i
+    aplikacja musi to powiedzieć wprost, zanim ktoś naciśnie.
+    """
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for role, id_keys, name_keys in ROLE_KEYS:
+        if role not in AUTHORIZED_ROLES:
+            continue
+        for idx, key in enumerate(id_keys):
+            nr = _clean(match.get(key))
+            if not nr or nr in seen:
+                continue
+            seen.add(nr)
+            name_key = name_keys[idx] if idx < len(name_keys) else ""
+            out.append(
+                {
+                    "role": role,
+                    "judgeId": nr,
+                    "fullName": _clean(match.get(name_key)) if name_key else "",
+                }
+            )
+    return out
+
+
 def _name_for(match: Dict[str, Any], roles: List[str]) -> str:
     for role, _, name_keys in ROLE_KEYS:
         if role not in roles:
@@ -251,6 +298,8 @@ async def match_official_role(
         "fullName": _name_for(match, roles) or full_name,
         "roles": roles,
         "admin": admin,
+        # Obsada uprawniona do zapisu w ZPRP - TYLKO dla administratora.
+        "crew": _authorized_crew(match) if admin else [],
         # Rozstrzygnięcie zapada TU, nie w aplikacji: telefon może mieć
         # nieświeże dane meczu, a to jest odczyt prosto ze źródła.
         "authorized": is_authorized(roles, admin),
