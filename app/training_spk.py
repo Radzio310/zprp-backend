@@ -33,6 +33,7 @@ from sqlalchemy import desc, func, select
 
 from app.db import database, saved_matches, spk_reference, spk_run
 from app.proel_auth import Actor, is_admin, proel_actor
+from app.spk_pdf_link import create_pdf_token, token_expires_at, verify_pdf_token
 from app.training_spk_score import grade, score_run
 from app.training_spk_pdf import SpkPdfError, build_slides_pdf
 from app.training_spk_meta import meta_from_blob
@@ -471,15 +472,13 @@ def summarize_by_province(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-@admin_router.get("/slides.pdf", summary="Materiał szkoleniowy jako prezentacja")
-async def slides_pdf(actor: Actor = Depends(proel_actor)) -> Response:
-    """Prezentacja do wyświetlenia grupie - jedna akcja na stronę.
+async def _slides_response() -> Response:
+    """Prezentacja złożona z obowiązującego wzorca - jedna akcja na stronę.
 
-    Składana NA ŻĄDANIE z obowiązującego wzorca, a nie trzymana jako plik.
-    Poprawka jednej akcji ma iść w materiał sama; plik w repozytorium wymagałby
-    pamiętania o złożeniu go od nowa, a o tym się zapomina dokładnie raz.
+    Składana NA ŻĄDANIE, a nie trzymana jako plik. Poprawka jednej akcji ma iść
+    w materiał sama; plik w repozytorium wymagałby pamiętania o złożeniu go od
+    nowa, a o tym się zapomina dokładnie raz.
     """
-    await _require_admin(actor)
     ref = await _current_reference()
     if ref is None:
         raise HTTPException(404, "Wzorzec nie został jeszcze wczytany.")
@@ -491,6 +490,60 @@ async def slides_pdf(actor: Actor = Depends(proel_actor)) -> Response:
         content=data,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": 'attachment; filename="szkolenie-spk1.pdf"'
+            "Content-Disposition": 'attachment; filename="prezentacja-SPK1.pdf"'
         },
     )
+
+
+class SlidesLink(BaseModel):
+    ok: bool = True
+    #: Ścieżka z podpisem - adres publiczny składa aplikacja, bo to ONA go zna.
+    path: str
+    expiresAt: int
+
+
+@admin_router.post("/slides-link", response_model=SlidesLink, summary="Adres materiału")
+async def slides_link(actor: Actor = Depends(proel_actor)) -> SlidesLink:
+    """Podpisany adres, pod którym menedżer pobierania weźmie prezentację.
+
+    PO CO OSOBNY ADRES, skoro trasa poniżej istnieje. Bo tamta sprawdza
+    nagłówki aktora, a systemowy menedżer pobierania żadnych nie niesie -
+    dostałby 403. Reszta aplikacji pobiera PDF-y właśnie przez adres (protokół
+    meczu w `MatchSummaryScreen`), więc materiał ma to robić tak samo: plik
+    ląduje w Pobranych, bez pytania o katalog.
+
+    ADRES ZWRACAMY JAKO ŚCIEŻKĘ, nie jako pełny URL. Serwer stoi za proxy i
+    jego własne wyobrażenie o swoim adresie bywa nieprawdziwe (schemat http
+    zamiast https); aplikacja zna adres backendu na pewno, bo się z nim łączy.
+
+    Sprawdzamy TU, że wzorzec w ogóle jest - inaczej sędzia dostałby adres,
+    który po naciśnięciu otwiera pustą stronę z błędem gdzieś w przeglądarce,
+    zamiast zdania na ekranie.
+    """
+    await _require_admin(actor)
+    if await _current_reference() is None:
+        raise HTTPException(404, "Wzorzec nie został jeszcze wczytany.")
+    token = create_pdf_token(str(actor.judge_id or ""))
+    return SlidesLink(
+        path="/training/spk/slides.pdf?t=" + token,
+        expiresAt=token_expires_at(token),
+    )
+
+
+@router.get("/slides.pdf", summary="Materiał szkoleniowy (adres podpisany)")
+async def slides_pdf_signed(t: str = Query("", description="Podpis z /slides-link")) -> Response:
+    """Trasa dla menedżera pobierania - uprawnienie siedzi w adresie.
+
+    Token jest tu CAŁYM uprawnieniem, więc wygasły to odmowa, a nie zejście na
+    inną ścieżkę. Żyje minuty i otwiera wyłącznie ten jeden materiał.
+    """
+    if verify_pdf_token(t) is None:
+        raise HTTPException(403, "Adres materiału wygasł. Poproś o nowy w panelu.")
+    return await _slides_response()
+
+
+@admin_router.get("/slides.pdf", summary="Materiał szkoleniowy (nagłówki aktora)")
+async def slides_pdf(actor: Actor = Depends(proel_actor)) -> Response:
+    """To samo, ale dla wywołania z nagłówkami - zostaje do diagnostyki."""
+    await _require_admin(actor)
+    return await _slides_response()
