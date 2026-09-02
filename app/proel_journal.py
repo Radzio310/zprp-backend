@@ -68,6 +68,9 @@ EVENT_LABELS: Dict[str, str] = {
     "zprp.officials_sent": "Kary osób towarzyszących do ZPRP",
     "zprp.comment_sent": "Uwagi verte do ZPRP",
     "zprp.attachment_sent": "Protokół PDF wysłany do ZPRP",
+    # SMS nie idzie do bazy ZPRP, tylko wiadomością na numer z ustaleń
+    # rozgrywek - stąd inna rodzina zdarzenia niż `zprp.*`.
+    "match.sms_sent": "Zgłoszenie wyniku SMS-em",
     "match.reopened": "Wznowienie meczu",
 }
 
@@ -112,6 +115,7 @@ _POST_NAMES: Dict[str, str] = {
     "shortResultSent": "znacznik: wynik skrócony w bazie ZPRP",
     "fullDataSent": "znacznik: pełne dane w bazie ZPRP",
     "protocolSent": "znacznik: protokół PDF w załącznikach",
+    "smsSent": "znacznik: zgłoszenie SMS-em otwarte",
 }
 
 _CFG_NAMES: Dict[str, str] = {
@@ -135,6 +139,7 @@ _MARK_SENTENCES: Dict[str, str] = {
     "post.shortResultSent": "wynik skrócony trafił do bazy ZPRP",
     "post.fullDataSent": "pełne dane meczu trafiły do bazy ZPRP",
     "post.protocolSent": "protokół PDF trafił do załączników meczu",
+    "post.smsSent": "zgłoszenie wyniku poszło SMS-em",
 }
 
 # Znacznik zadania pomeczowego nie jest zwykłą zmianą rubryki. Powstaje dopiero
@@ -144,6 +149,7 @@ _SENT_EVENT_BY_PATH: Dict[str, str] = {
     "post.shortResultSent": "zprp.summary_sent",
     "post.fullDataSent": "zprp.full_data_sent",
     "post.protocolSent": "zprp.attachment_sent",
+    "post.smsSent": "match.sms_sent",
 }
 
 

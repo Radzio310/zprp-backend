@@ -901,6 +901,8 @@ async def startup():
         "CREATE INDEX IF NOT EXISTS ix_push_tokens_province ON push_tokens (province)",
         "ALTER TABLE province_match_notifications ADD COLUMN IF NOT EXISTS send_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS ix_province_match_notifications_send_at_utc ON province_match_notifications (send_at_utc)",
+        # `create_all` nie dokłada kolumn do tabeli, która już istnieje.
+        "ALTER TABLE province_manual_matches ADD COLUMN IF NOT EXISTS kind VARCHAR NOT NULL DEFAULT 'match'",
     ]
     for stmt in _province_match_migrations:
         try:

@@ -342,6 +342,17 @@ _POST_EXTRAS = {
     # protokół już tam jest - a wysłany drugi raz zostaje przy meczu jako
     # drugi plik.
     "protocolSent": "protocolSent",
+    # Znacznik „zgłoszenie wyniku SMS-em zostało otwarte".
+    #
+    # Ostatni z czterech przystanków pomeczowych, który tego znacznika nie miał:
+    # ślad leżał wyłącznie w pliku na telefonie, więc sędzia boiskowy wchodzący
+    # na SWOIM urządzeniu widział „Wyślij wynik SMS-em" jako nietknięte, choć
+    # stolikowy wysłał wiadomość godzinę wcześniej - i wysyłał drugi raz.
+    #
+    # Ponowna wysyłka nikomu nie szkodzi (to wiadomość, nie zapis w bazie), więc
+    # ten wpis niczego nie blokuje. Ma tylko przestać namawiać do zbędnej roboty
+    # i pokazać, KTO oraz KIEDY to zrobił.
+    "smsSent": "smsSent",
 }
 
 _CFG_FIELDS = {

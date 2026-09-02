@@ -2423,6 +2423,14 @@ proel_password_reset_email_codes = Table(
 # Wiersz stad NIGDY nie wchodzi do rozliczen finansowych - nie ma dla tych
 # rozgrywek zadnej tabeli stawek ZPRP, a zgadnieta kwota wygladalaby jak dane.
 #
+# Tabela niesie DWA rodzaje dopiskow, rozroznia je kolumna `kind`:
+#   "match"     - caly mecz, ktorego w ZPRP nie ma wcale (EHF). Powstaje z niego
+#                 nowa pozycja w statystykach.
+#   "officials" - sama OBSADA STOLIKOWA doklejana do meczu, ktory w ZPRP JEST,
+#                 tylko ma pusty stolik. Mecz zostaje danymi ZPRP; reczna jest
+#                 wylacznie informacja, kto przy tym stoliku siedzial - a to
+#                 akurat okreg wie lepiej niz terminarz.
+#
 # `source_key` jest naturalnym kluczem importu (zrodlo + wojewodztwo + sezon +
 # data + druzyny). Dzieki niemu ten sam arkusz wgrany drugi raz niczego nie
 # duplikuje.
@@ -2431,6 +2439,9 @@ province_manual_matches = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("source_key", String, nullable=False, unique=True, index=True),
+    # "match"    - caly mecz, ktorego ZPRP w ogole nie ma (miedzypanstwowe EHF)
+    # "officials"- LATKA OBSADY na mecz, ktory w ZPRP jest, ale ma pusty stolik
+    Column("kind", String, nullable=False, server_default="match"),
     Column("province", String, nullable=False, index=True),
     Column("season", String, nullable=False, index=True),
     Column("comp_code", String, nullable=False),          # "EHF"

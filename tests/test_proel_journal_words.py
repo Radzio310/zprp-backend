@@ -153,3 +153,15 @@ def test_stary_wpis_o_cofnieciu_prostuje_sie_przy_odczycie():
         == "match.finished"
     )
     assert _effective_event("match.approved", {"from": "finished", "to": "approved"}) == "match.approved"
+
+
+def test_znacznik_smsa_ma_wlasne_zdanie_i_wlasne_zdarzenie():
+    """SMS nie idzie do bazy ZPRP, wiec nie moze udawac wysylki do ZPRP.
+
+    Przez chwile byl jedynym z czterech przystankow pomeczowych bez znacznika
+    na serwerze - drugi telefon pokazywal go jako niezrobiony. Skoro juz tam
+    trafil, musi tez mowic o sobie prawde: to wiadomosc na numer z ustalen
+    rozgrywek, a nie zapis w bazie zwiazku.
+    """
+    assert describe_field("post.smsSent") == "zgłoszenie wyniku poszło SMS-em"
+    assert EVENT_LABELS["match.sms_sent"] == "Zgłoszenie wyniku SMS-em"
