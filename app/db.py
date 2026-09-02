@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     MetaData,
     Table,
@@ -250,6 +251,83 @@ training_tick = Table(
     Column("score_guest", Integer, nullable=False, server_default=text("0")),
     Column("events_count", Integer, nullable=False, server_default=text("0")),
     Index("ix_training_tick_run_at", "run_id", "at"),
+)
+
+# 10c) Szkolenie STAŁE na jednym meczu (Superpuchar SPK/1).
+#
+# Osobno od `training_run`, choć obie tabele trzymają „przebieg ćwiczenia".
+# Tamta należy do kursokonferencji: ma `event_id`, okno czasowe i wiele meczów,
+# a punktem odniesienia jest konsensus grupy. Ta jest stała, dotyczy JEDNEGO
+# meczu i ma wzorzec - oficjalny protokół, z którym każde podejście da się
+# porównać zdarzenie po zdarzeniu. To inne pytanie i inne progi, więc wspólna
+# tabela znaczyłaby mieszanie dwóch zestawień w jednym.
+#
+# `spk_reference` - wzorzec. Jeden obowiązujący wiersz (bierzemy najnowszy),
+# ale bez `unique`, żeby dało się podejrzeć poprzednią wersję po korekcie.
+spk_reference = Table(
+    "spk_reference",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("match_number", String, nullable=False, index=True),
+    Column("zprp_match_id", String, nullable=True),
+    # Oś czasu w kształcie `ProtocolEvent` - dokładnie tym, który zapisuje
+    # aplikacja. Bez tłumaczenia na własny format: każde tłumaczenie to miejsce,
+    # w którym wzorzec i przebieg mogą zacząć znaczyć co innego.
+    Column("timeline", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    # Składy, nazwy drużyn, wynik, data - wszystko, czego potrzebuje ekran
+    # startowy i PDF z akcjami.
+    Column("meta", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    #: "proel" (import z protokołu) albo "manual" (poprawiony ręcznie).
+    Column("source", String, nullable=False, server_default=text("'proel'")),
+    Column("updated_by", String, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
+# `spk_run` - jedno podejście jednego sędziego. Bez limitu podejść, więc
+# `run_id` z telefonu jest kluczem, a `attempt` tylko numerem porządkowym.
+#
+# Województwo zapisujemy W CHWILI PODEJŚCIA, a nie doczytujemy przy
+# zestawieniu: sędzia zmienia okręg, a wynik należy do tego, w którym wtedy
+# był. Zestawienie sprzed roku nie ma prawa zmienić się samo.
+spk_run = Table(
+    "spk_run",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String, nullable=False, unique=True, index=True),
+    Column("judge_id", String, nullable=True, index=True),
+    Column("judge_name", String, nullable=True),
+    Column("province", String, nullable=True, index=True),
+    #: "baza" (numer sędziego), "proel" (konto ProEl), "device" (profil lokalny).
+    Column("account_kind", String, nullable=False, server_default=text("'device'")),
+    Column("install_id", String, nullable=True),
+    Column("attempt", Integer, nullable=False, server_default=text("1")),
+    #: "video" (nagranie, czas oceniany) albo "slides" (prezentacja).
+    Column("mode", String, nullable=False, server_default=text("'video'")),
+    Column("score", Numeric(5, 1), nullable=True),
+    Column("score_json", JSONB, nullable=True),
+    Column("data_json", JSONB, nullable=True),
+    Column("app_version", String, nullable=True),
+    Column(
+        "started_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+    Column("ended_at", DateTime(timezone=True), nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+    Index("ix_spk_run_province_score", "province", "score"),
 )
 
 # 11) Zgłoszenia od userów
