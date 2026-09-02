@@ -2546,6 +2546,25 @@ extra_report_recipients = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
+# Adresaci dodatkowego raportu PER OKRĘG.
+#
+# Osobna tabela, a nie kolejna kolumna w `extra_report_recipients`, bo to jest
+# inne pytanie. Tamta odpowiada „kto czyta tę kategorię rozgrywek w całym
+# kraju"; ta - „kto czyta ją w TYM okręgu". Rozgrywki od II ligi w dół prowadzą
+# związki wojewódzkie, więc raport z meczu młodzieżowego w Katowicach nie ma po
+# co jechać do Gdańska.
+#
+# Klucz to SLUG bez ogonków (`SLASKIE`), ten sam, którym reszta serwera nazywa
+# województwa (`normalize_province` w `app/zprp_accounts.py`). Nazwa z ogonkami
+# i herb powstają z niego po stronie aplikacji.
+extra_report_province_recipients = Table(
+    "extra_report_province_recipients",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("emails", JSON, nullable=False, server_default="[]"),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

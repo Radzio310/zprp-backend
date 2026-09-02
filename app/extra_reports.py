@@ -41,10 +41,17 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from starlette.background import BackgroundTask
 
-from app.db import database, extra_report_recipients, extra_reports
+from app.db import (
+    database,
+    extra_report_province_recipients,
+    extra_report_recipients,
+    extra_reports,
+)
 from app.extra_report_download import download_path_for, stash_for_download
 from app.extra_report_pdf import ExtraReportError, build_extra_report_pdf
+from app.extra_report_scope import fetch_match_province, is_province_scoped
 from app.proel_auth import Actor, is_admin, proel_actor
+from app.zprp_accounts import normalize_province
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +118,16 @@ class RecipientGroup(BaseModel):
 
 class RecipientGroups(BaseModel):
     groups: List[RecipientGroup] = Field(default_factory=list)
+
+
+class ProvinceRecipients(BaseModel):
+    #: Slug bez ogonków - `SLASKIE`. Nazwa i herb powstają z niego w aplikacji.
+    province: str
+    emails: List[str] = Field(default_factory=list)
+
+
+class ProvinceRecipientList(BaseModel):
+    provinces: List[ProvinceRecipients] = Field(default_factory=list)
 
 
 # ─────────────────────────── pomocnicze ───────────────────────────
@@ -376,12 +393,31 @@ async def download_extra_report_pdf(
 
 
 @router.get("/recipients/for-category/{category}", summary="Adresaci dla kategorii")
-async def recipients_for_category(category: str) -> Dict[str, Any]:
-    """Skrzynki przypisane do kategorii rozgrywek.
+async def recipients_for_category(
+    category: str,
+    match_id: Optional[str] = Query(
+        None,
+        description=(
+            "IdZawody - pozwala dołożyć adresatów OKRĘGU prowadzącego te "
+            "rozgrywki. Bez niego odpowiedź jest taka jak dawniej."
+        ),
+    ),
+) -> Dict[str, Any]:
+    """Skrzynki, do których ma trafić raport z tego meczu.
 
     Kategorię liczy aplikacja z numeru meczu - ta sama funkcja, z której żyją
     kolorowe plakietki na kaflach (`utils/matchCategoryColor.ts`). Serwer nie
     powtarza tego rozpoznania, żeby nie było dwóch odpowiedzi na jedno pytanie.
+
+    DWIE WARSTWY, ŚWIADOMIE SUMOWANE. Grupy kategorii odpowiadają na pytanie
+    „kto czyta tę rozgrywkę w kraju", adresaci okręgu - „kto czyta ją tutaj".
+    Rozgrywki od II ligi w dół prowadzą związki wojewódzkie, więc bez drugiej
+    warstwy raport z meczu młodzieżowego jechał tam, gdzie ktoś wpisał adres
+    pierwszy. Suma, a nie zastąpienie: związek bywa umawiany na kopię, a to
+    była dotąd jedyna droga, którą raport w ogóle wychodził.
+
+    `match_id` jest OPCJONALNY i musi taki zostać: starsze wersje aplikacji go
+    nie wysyłają, a odpowiedź bez niego ma być dokładnie tą, którą znały.
     """
     cat = (category or "").strip()
     rows = await database.fetch_all(
@@ -394,7 +430,28 @@ async def recipients_for_category(category: str) -> Dict[str, Any]:
         if cat and cat in (d.get("categories") or []):
             groups.append(d.get("name") or "")
             emails.extend(d.get("emails") or [])
-    return {"category": cat, "groups": groups, "emails": normalize_emails(emails)}
+
+    province = ""
+    if match_id and is_province_scoped(cat):
+        province = await fetch_match_province(match_id)
+        if province:
+            row = await database.fetch_one(
+                select(extra_report_province_recipients).where(
+                    extra_report_province_recipients.c.province == province
+                )
+            )
+            if row is not None:
+                emails.extend(dict(row).get("emails") or [])
+
+    return {
+        "category": cat,
+        "groups": groups,
+        "emails": normalize_emails(emails),
+        # Pusty, gdy okręg nie ma tu nic do rzeczy albo gdy ZPRP nie
+        # odpowiedziało. Aplikacja pokazuje to sędziemu, zamiast milczeć.
+        "province": province,
+        "provinceScoped": is_province_scoped(cat),
+    }
 
 
 @admin_router.get("/recipients", response_model=RecipientGroups, summary="Grupy adresatów")
@@ -446,3 +503,75 @@ async def save_recipients(
             )
 
     return await list_recipients(actor)  # type: ignore[arg-type]
+
+
+# ────────────────────── adresaci per okręg ──────────────────────
+
+
+@admin_router.get(
+    "/province-recipients",
+    response_model=ProvinceRecipientList,
+    summary="Adresaci per okręg",
+)
+async def list_province_recipients(
+    actor: Actor = Depends(proel_actor),
+) -> ProvinceRecipientList:
+    await _require_admin(actor)
+    rows = await database.fetch_all(
+        select(extra_report_province_recipients).order_by(
+            extra_report_province_recipients.c.province
+        )
+    )
+    return ProvinceRecipientList(
+        provinces=[
+            ProvinceRecipients(
+                province=dict(r)["province"],
+                emails=dict(r).get("emails") or [],
+            )
+            for r in rows
+        ]
+    )
+
+
+@admin_router.put(
+    "/province-recipients",
+    response_model=ProvinceRecipientList,
+    summary="Zapis adresatów per okręg",
+)
+async def save_province_recipients(
+    body: ProvinceRecipientList,
+    actor: Actor = Depends(proel_actor),
+) -> ProvinceRecipientList:
+    """Nadpisuje CAŁĄ konfigurację, tak samo jak grupy kategorii.
+
+    Okręg BEZ ADRESÓW nie zostaje pustym wierszem - znika. Pusty wiersz i brak
+    wiersza znaczą dokładnie to samo („nikt tu nie czyta"), a dwa zapisy tego
+    samego stanu to dwa miejsca, w których panel może pokazać co innego.
+
+    Nazwę województwa sprowadzamy do sluga tą samą funkcją, co reszta serwera.
+    Nieznana nazwa wypada - lepiej stracić literówkę przy zapisie niż trzymać
+    w bazie okręg, którego nikt nigdy nie odnajdzie.
+    """
+    await _require_admin(actor)
+
+    now = datetime.now(timezone.utc)
+    async with database.transaction():
+        await database.execute(extra_report_province_recipients.delete())
+        seen: set = set()
+        for entry in body.provinces:
+            province = normalize_province(entry.province)
+            if not province or province in seen:
+                continue
+            emails = normalize_emails(entry.emails)
+            if not emails:
+                continue
+            seen.add(province)
+            await database.execute(
+                extra_report_province_recipients.insert().values(
+                    province=province,
+                    emails=emails,
+                    updated_at=now,
+                )
+            )
+
+    return await list_province_recipients(actor)  # type: ignore[arg-type]

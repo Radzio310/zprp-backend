@@ -65,7 +65,12 @@ def normalize_province(value: Any) -> str:
     województwem - i to jest odpowiedź, nie błąd: wołający sam decyduje, czy
     pominąć wiersz, czy odmówić.
     """
-    raw = unicodedata.normalize("NFD", str(value or ""))
+    # Ł NIE JEST literą ze znakiem diakrytycznym - to osobny znak Unicode i NFD
+    # go nie rozkłada. Bez tej podmiany „ŁÓDZKIE" i „MAŁOPOLSKIE" wychodziły
+    # stąd jako pusty napis, czyli „to nie jest województwo": oba okręgi
+    # przepadały po cichu przy każdym dopasowaniu po nazwie.
+    raw = str(value or "").replace("Ł", "L").replace("ł", "l")
+    raw = unicodedata.normalize("NFD", raw)
     raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
     raw = re.sub(r"[^A-Z0-9]+", "_", raw.upper()).strip("_")
     if raw.startswith("WOJEWODZTWO_"):
