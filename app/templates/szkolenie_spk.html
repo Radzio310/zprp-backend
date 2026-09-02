@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>{{ head.matchNumber }} — materiał szkoleniowy</title>
+<style>
+  /* Prezentacja, nie dokument: A4 POZIOMO, jedna akcja na stronę, pismo
+     widoczne z końca sali. Marginesy są wąskie z rozmysłu - na rzutniku każdy
+     centymetr białego brzegu to stracona wysokość liter. */
+  @page {
+    size: A4 landscape;
+    margin: 10mm;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: "DejaVu Sans", sans-serif;
+    color: {{ ink }};
+    background: {{ cream }};
+  }
+
+  /* Każda strona to jeden „ekran". Wysokość liczona od formatu A4 poziomo
+     (297 x 210 mm) minus marginesy - bez tego treść pływałaby po stronie
+     zamiast stać na środku. */
+  .slide {
+    height: 190mm;
+    page-break-after: always;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  .slide:last-child { page-break-after: auto; }
+
+  .rail {
+    height: 4pt;
+    background: {{ accent }};
+    border-radius: 2pt;
+    flex: 0 0 auto;
+  }
+
+  .top {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 8pt 2pt 0 2pt;
+    font-size: 10pt;
+    color: {{ muted }};
+    font-weight: 700;
+    letter-spacing: 0.4pt;
+  }
+
+  .body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 0 14mm;
+  }
+
+  .clock {
+    font-size: 62pt;
+    font-weight: 900;
+    color: {{ accent }};
+    line-height: 1;
+    letter-spacing: -1pt;
+  }
+  .phase {
+    font-size: 12pt;
+    font-weight: 700;
+    color: {{ muted }};
+    text-transform: uppercase;
+    letter-spacing: 1.2pt;
+    margin-top: 6pt;
+  }
+
+  /* Polecenie. Rozmiar schodzi wraz z długością zdania - liczy go generator,
+     bo tylko on wie, ile znaków ma najdłuższa akcja w tym materiale. Klasa
+     zamiast stylu przy elemencie, żeby dało się to zobaczyć w jednym miejscu. */
+  .action {
+    margin-top: 22pt;
+    font-weight: 900;
+    line-height: 1.15;
+  }
+  .action.s1 { font-size: 40pt; }
+  .action.s2 { font-size: 32pt; }
+  .action.s3 { font-size: 25pt; }
+
+  /* Druga akcja w tej samej sytuacji dostaje własny wiersz i cieńszy krój.
+     Sklejona w jedno zdanie ciągiem gubiła się na rzutniku - nikt nie czyta
+     czterdziestopunktowego tekstu do końca linii. */
+  .also {
+    margin-top: 10pt;
+    font-size: 20pt;
+    font-weight: 700;
+    color: {{ accent }};
+  }
+
+  .foot {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 9pt;
+    color: {{ muted }};
+    padding: 0 2pt 4pt 2pt;
+  }
+  .foot .brand { font-weight: 900; letter-spacing: 1pt; }
+
+  /* ── okładka ── */
+  .cover .body { padding: 0 20mm; }
+  .cover .kicker {
+    font-size: 12pt;
+    font-weight: 800;
+    letter-spacing: 3pt;
+    text-transform: uppercase;
+    color: {{ muted }};
+  }
+  .cover h1 {
+    font-size: 34pt;
+    font-weight: 900;
+    line-height: 1.12;
+    margin-top: 14pt;
+  }
+  .cover .number {
+    margin-top: 12pt;
+    font-size: 20pt;
+    font-weight: 900;
+    color: {{ accent }};
+    letter-spacing: 1pt;
+  }
+  .cover .facts {
+    margin-top: 18pt;
+    font-size: 12pt;
+    color: {{ muted }};
+    font-weight: 600;
+  }
+  .cover .howto {
+    margin-top: 26pt;
+    font-size: 11pt;
+    color: {{ ink }};
+    border: 1pt solid {{ accent }}44;
+    background: {{ accent }}0D;
+    border-radius: 8pt;
+    padding: 12pt 18pt;
+    max-width: 190mm;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<section class="slide cover">
+  <div class="rail"></div>
+  <div class="top">
+    <span>BAZA · ProEl</span>
+    <span>materiał szkoleniowy</span>
+  </div>
+  <div class="body">
+    <div class="kicker">Sprawdź się w meczu</div>
+    <h1>{{ head.teams or "Mecz szkoleniowy" }}</h1>
+    <div class="number">{{ head.matchNumber }}</div>
+    <div class="facts">
+      {%- set facts = [] -%}
+      {%- if head.date %}{% set _ = facts.append(head.date) %}{% endif -%}
+      {%- if head.result %}{% set _ = facts.append("wynik " ~ head.result) %}{% endif -%}
+      {%- if head.halfResult %}{% set _ = facts.append("do przerwy " ~ head.halfResult) %}{% endif -%}
+      {{ facts | join(" · ") }}
+    </div>
+    <div class="howto">
+      Kolejne strony to akcje meczu w kolejności, w jakiej się wydarzyły —
+      <strong>{{ slides | length }}</strong> do zapisania.
+      Przy każdej podany jest czas gry: ustawienie go jest częścią zadania.
+    </div>
+  </div>
+  <div class="foot">
+    <span class="brand">BAZA</span>
+    <span>{{ slides | length }} akcji</span>
+  </div>
+</section>
+
+{% for slide in slides %}
+<section class="slide">
+  <div class="rail"></div>
+  <div class="top">
+    <span>{{ head.matchNumber }}</span>
+    <span>{{ head.teams }}</span>
+  </div>
+  <div class="body">
+    <div class="clock">{{ slide.clock }}</div>
+    <div class="phase">
+      {%- if slide.shootout -%}
+        seria rzutów karnych
+      {%- else -%}
+        {{ slide.half }}. połowa
+      {%- endif -%}
+    </div>
+    <div class="action {{ slide.sizeClass }}">{{ slide.actions[0] }}</div>
+    {% for extra in slide.actions[1:] %}
+    <div class="also">…oraz {{ extra[:1] | lower }}{{ extra[1:] }}</div>
+    {% endfor %}
+  </div>
+  <div class="foot">
+    <span class="brand">BAZA</span>
+    <span>{{ slide.n }} / {{ slides | length }}</span>
+  </div>
+</section>
+{% endfor %}
+
+</body>
+</html>

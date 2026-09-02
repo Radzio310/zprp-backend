@@ -186,7 +186,14 @@ async def send_fcm_message(
                 # wylaczony telefon. Tu kazde zdarzenie ma wlasny.
                 "collapse_key": tag,
                 "priority": "high",
-                "notification": {"tag": tag},
+                # Ten kanał aplikacja zakłada jako MAX. Bez jawnego channel_id
+                # Android potrafi skierować zdalny push do fallbacku FCM, który
+                # na części telefonów jest cichy albo wcześniej wyłączony.
+                "notification": {
+                    "tag": tag,
+                    "channel_id": "default",
+                    "sound": "default",
+                },
             },
             "apns": {
                 # Odpowiednik `tag` na iOS. Rozne watki = rozne powiadomienia.

@@ -500,7 +500,10 @@ async def reply(report_id: int, req: ReportReplyRequest):
                 "report_reply",
                 data.get("title") or "Zgłoszenie",
                 f"👤 {data['full_name']}\n„{content[:90]}”",
-                reference=report_id,
+                # Odpowiedzi w jednym wątku mogą przyjść wielokrotnie. Pusty
+                # klucz wyłącza deduplikację, a report_id nadal jedzie osobno
+                # jako cel nawigacji do właściwej rozmowy.
+                reference="",
                 extra={"report_id": report_id},
                 exclude_judge_id=str(req.judge_id),
             )

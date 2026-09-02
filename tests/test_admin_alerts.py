@@ -176,6 +176,33 @@ def test_reports_go_through_the_shared_path():
     assert "send_push_to_judges" not in calls_in("reports.py", "_notify_admins_new_report")
 
 
+def test_report_reply_keeps_the_same_shared_admin_thread():
+    source = ast.unparse(
+        next(
+            n
+            for n in ast.walk(tree("reports.py"))
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "reply"
+        )
+    )
+    assert "notify_admins" in calls_in("reports.py", "reply")
+    assert "report_reply" in source
+    assert "admin_report_reply" not in source
+    # Kilka odpowiedzi do tego samego zgłoszenia to kilka zdarzeń, ale każda
+    # nadal niesie report_id do otwarcia właściwego wątku.
+    assert "reference=''" in source
+    assert "'report_id': report_id" in source
+
+
+def test_admin_alert_is_saved_before_push_is_sent():
+    source = (APP / "admin_alerts.py").read_text(encoding="utf-8")
+    body = source[source.index("async def notify_admins") :]
+    assert "admin_alert_notifications" in body
+    assert body.index("insert(admin_alert_notifications)") < body.index(
+        "send_push_to_judges("
+    )
+
+
 def test_new_user_is_announced_only_once():
     # `on_conflict_do_update` nie mówi, czy dopisał, czy nadpisał - stąd odczyt
     # PRZED zapisem. Bez niego każde wejście do aplikacji byłoby „nowym

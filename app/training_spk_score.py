@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.training_spk_slides import action_text, format_clock
+
 #: Do którego momentu uznajemy, że dwa zdarzenia to to samo zdarzenie.
 MATCH_WINDOW_MS = 90_000
 
@@ -194,6 +196,12 @@ def _pair_events(
         used.add(best["i"])
         matched.append(
             {
+                # Zdanie o zdarzeniu składa TEN SAM moduł, co slajdy i PDF.
+                # Aplikacja dostaje gotowy tekst, bo inaczej reguła nazywania
+                # akcji istniałaby po obu stronach i przy pierwszej poprawce
+                # ekran wyników zacząłby mówić co innego niż prezentacja.
+                "text": action_text(ref),
+                "clock": format_clock(ref["time"]),
                 "type": ref["type"],
                 "team": ref["team"],
                 "refTime": ref["time"],
@@ -208,6 +216,9 @@ def _pair_events(
         )
 
     extra = [e for e in attempt if e["i"] not in used]
+    for event in missed + extra:
+        event["text"] = action_text(event)
+        event["clock"] = format_clock(event["time"])
     return matched, missed, extra
 
 

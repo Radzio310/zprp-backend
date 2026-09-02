@@ -34,7 +34,7 @@ from sqlalchemy import desc, func, select
 from app.db import database, saved_matches, spk_reference, spk_run
 from app.proel_auth import Actor, is_admin, proel_actor
 from app.training_spk_score import grade, score_run
-from app.training_spk_pdf import SpkPdfError, build_slides_markdown, build_slides_pdf
+from app.training_spk_pdf import SpkPdfError, build_slides_pdf
 from app.training_spk_slides import slides_from_timeline
 from app.zprp_accounts import normalize_province
 
@@ -512,21 +512,5 @@ async def slides_pdf(actor: Actor = Depends(proel_actor)) -> Response:
         media_type="application/pdf",
         headers={
             "Content-Disposition": 'attachment; filename="szkolenie-spk1.pdf"'
-        },
-    )
-
-
-@admin_router.get("/slides.md", summary="Materiał szkoleniowy jako Markdown")
-async def slides_markdown(actor: Actor = Depends(proel_actor)) -> Response:
-    await _require_admin(actor)
-    ref = await _current_reference()
-    if ref is None:
-        raise HTTPException(404, "Wzorzec nie został jeszcze wczytany.")
-    text = build_slides_markdown(ref["timeline"] or [], ref["meta"] or {})
-    return Response(
-        content=text.encode("utf-8"),
-        media_type="text/markdown; charset=utf-8",
-        headers={
-            "Content-Disposition": 'attachment; filename="szkolenie-spk1.md"'
         },
     )

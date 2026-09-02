@@ -196,3 +196,22 @@ def test_pusty_wzorzec_nie_wywraca_oceny():
     out = score_run([], [ev(1000)])
     assert out["counts"]["extra"] == 1
     assert isinstance(out["score"], float)
+
+
+def test_zdarzenia_niosa_gotowe_zdanie_i_zegar():
+    """Ekran wyników nie skleja zdań sam - dostaje je z tego samego modułu,
+    z którego żyją slajdy i PDF. Inaczej ta sama akcja brzmiałaby inaczej w
+    prezentacji i w podsumowaniu."""
+    out = score_run([ev(600_000, player=16)], [])
+    missed = out["missed"][0]
+    assert missed["text"] == "Bramka gospodarzy nr 16"
+    assert missed["clock"] == "10:00"
+
+    out = score_run([ev(600_000, player=16)], [ev(600_000, player=16)])
+    assert out["matched"][0]["text"] == "Bramka gospodarzy nr 16"
+    assert out["matched"][0]["clock"] == "10:00"
+
+
+def test_zdarzenie_nadmiarowe_tez_ma_zdanie():
+    out = score_run([], [ev(60_000, kind="penalty1", team="guest", player=7)])
+    assert out["extra"][0]["text"] == "Kara 2 minut dla gości nr 7"
