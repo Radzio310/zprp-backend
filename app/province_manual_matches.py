@@ -10,9 +10,13 @@ TRZY ZASADY, ktore nie moga sie zgubic przy dalszych zmianach:
 1. Wiersz stad jest ZAWSZE oznaczony jako dopisany recznie. Statystyka, ktora
    miesza dane z ZPRP z danymi wklepanymi z arkusza i nie mowi ktore sa ktore,
    jest gorsza od statystyki niepelnej.
-2. Wiersz stad NIGDY nie wchodzi do rozliczen finansowych. Dla tych rozgrywek
-   nie istnieje zadna tabela stawek ZPRP, a kwota zgadnieta wygladalaby
-   dokladnie tak samo jak kwota policzona.
+2. Rozliczenie zalezy od RODZAJU dopisku, nie od tego, ze jest reczny:
+   - `kind="match"` (EHF) NIE wchodzi do rozliczen wcale. Dla rozgrywek
+     miedzypanstwowych nie istnieje zadna tabela stawek ZPRP, a kwota
+     zgadnieta wygladalaby dokladnie tak samo jak kwota policzona.
+   - `kind="officials"` liczy sie NORMALNIE. Mecz jest prawdziwy i pochodzi
+     z ZPRP - data, hala, szczebel, stawka. Reczne jest tylko to, kto siedzial
+     przy stoliku, a to akurat okreg wie lepiej niz terminarz.
 3. Import jest IDEMPOTENTNY. `source_key` to naturalny klucz wiersza, wiec ten
    sam arkusz wgrany drugi raz niczego nie zdublikuje.
 """
@@ -37,7 +41,9 @@ router = APIRouter(
     tags=["Statystyki okregowe: dopiski"],
 )
 
-SEED_FILE = Path(__file__).resolve().parent / "data" / "manual_matches_seed.json"
+DATA_DIR = Path(__file__).resolve().parent / "data"
+# Kolejnosc bez znaczenia - kazdy plik niesie swoj `kind`.
+SEED_FILES = ("manual_matches_seed.json", "manual_officials_seed.json")
 
 # Terminarz ZPRP i arkusze okregowe podaja godziny lokalne, bez strefy.
 WARSAW = ZoneInfo("Europe/Warsaw")
@@ -83,6 +89,9 @@ def _parse_ts(date: str, time: str) -> Optional[datetime]:
 
 
 class ManualMatchIn(BaseModel):
+    # Wypelniane TYLKO dla `kind="officials"`: numer meczu w ZPRP, do ktorego
+    # doklejamy obsade. Dla `kind="match"` numer nadajemy sami.
+    code: str = ""
     date: str
     time: str = ""
     home: str = ""
@@ -94,6 +103,9 @@ class ManualMatchIn(BaseModel):
 
 
 class ManualImportRequest(BaseModel):
+    # "match" - caly mecz spoza systemu ZPRP; "officials" - sama obsada
+    # doklejana do meczu, ktory w ZPRP jest, ale ma pusty stolik.
+    kind: str = Field(default="match")
     province: str
     season: str
     comp_code: str = Field(default="EHF")
@@ -105,6 +117,7 @@ class ManualImportRequest(BaseModel):
 class ManualMatchOut(BaseModel):
     id: int
     sourceKey: str
+    kind: str
     province: str
     season: str
     comp: str
@@ -132,6 +145,7 @@ def _row_out(row: Any) -> ManualMatchOut:
     return ManualMatchOut(
         id=row["id"],
         sourceKey=row["source_key"],
+        kind=row["kind"] or "match",
         province=row["province"],
         season=row["season"],
         comp=row["comp_code"],
@@ -158,9 +172,24 @@ def _rows_from_payload(payload: ManualImportRequest) -> List[Dict[str, Any]]:
     # Numeracja idzie po dacie, zeby "EHF/1" oznaczalo zawsze ten sam mecz
     # niezaleznie od kolejnosci wierszy w arkuszu.
     ordered = sorted(payload.matches, key=lambda m: ((m.date or ""), (m.time or "")))
+    kind = (payload.kind or "match").strip() or "match"
     comp = payload.comp_code.strip()
     for index, m in enumerate(ordered, start=1):
+        if kind == "officials":
+            # Latka obsady wskazuje ISTNIEJACY mecz ZPRP, wiec numer przychodzi
+            # z arkusza i musi zostac dokladnie taki. Bez niego nie ma czego
+            # doklejac, a zgadywanie po druzynach konczyloby sie doklejeniem
+            # obsady do rewanzu.
+            match_code = m.code.strip()
+            if not match_code:
+                continue
+            comp_code = match_code.rsplit("/", 1)[0] if "/" in match_code else match_code
+        else:
+            match_code = comp + "/" + str(index)
+            comp_code = comp
         key = source_key(payload.province, payload.season, m.date, m.home, m.away)
+        if kind == "officials":
+            key = key + ".obsada"
         if key in seen:
             continue
         seen.add(key)
@@ -172,10 +201,11 @@ def _rows_from_payload(payload: ManualImportRequest) -> List[Dict[str, Any]]:
         rows.append(
             {
                 "source_key": key,
+                "kind": kind,
                 "province": payload.province.strip(),
                 "season": payload.season.strip(),
-                "comp_code": comp,
-                "match_code": comp + "/" + str(index),
+                "comp_code": comp_code,
+                "match_code": match_code,
                 "played_at": _parse_ts(m.date, m.time),
                 "home": m.home.strip(),
                 "away": m.away.strip(),
@@ -223,21 +253,26 @@ async def import_manual_matches(payload: ManualImportRequest) -> Dict[str, Any]:
 
 
 def seed_from_file() -> int:
-    """Jednorazowy zaczyn z pliku w repozytorium.
+    """Jednorazowy zaczyn z plikow w repozytorium.
 
     Wolany przy starcie aplikacji i celowo napisany tak, zeby drugie i kazde
     kolejne uruchomienie nic nie robilo. Uzywa synchronicznego `engine`, bo
     `database` (async) nie jest jeszcze polaczone na tym etapie - to ten sam
     sposob, w ktory `db.py` zaklada tabele.
     """
-    if not SEED_FILE.exists():
-        return 0
-    try:
-        raw = json.loads(SEED_FILE.read_text(encoding="utf-8"))
-        payload = ManualImportRequest(**raw)
-        rows = _rows_from_payload(payload)
-    except Exception:
-        # Zly plik zaczynu nie moze zatrzymac startu calego backendu.
+    rows: List[Dict[str, Any]] = []
+    for name in SEED_FILES:
+        path = DATA_DIR / name
+        if not path.exists():
+            continue
+        try:
+            payload = ManualImportRequest(**json.loads(path.read_text(encoding="utf-8")))
+            rows.extend(_rows_from_payload(payload))
+        except Exception:
+            # Zly plik zaczynu nie moze zatrzymac startu calego backendu ani
+            # przeszkodzic pozostalym plikom.
+            continue
+    if not rows:
         return 0
 
     inserted = 0

@@ -1,0 +1,73 @@
+{
+ "kind": "officials",
+ "province": "ŚLĄSKIE",
+ "season": "2025/2026",
+ "comp_code": "",
+ "source": "Uzupelnienie terminarza o obsady stolikowe prowadzone przez okreg",
+ "note": "Obsada stolikowa dopisana recznie - w terminarzu ZPRP to pole zostalo puste. Sam mecz pochodzi z ZPRP.",
+ "matches": [
+  {
+   "code": "IMD/1",
+   "date": "2025-09-17",
+   "time": "18:30",
+   "home": "SPR Górnik Zabrze",
+   "away": "MKS Olimpia MEDEX Piekary Śląskie",
+   "sekretarz": "Leszczyniak",
+   "mierzacy_czas": "Schiwon"
+  },
+  {
+   "code": "IIM4/22",
+   "date": "2025-10-16",
+   "time": "20:00",
+   "home": "MKS WiRy Siódemka Mysłowice",
+   "away": "MKS Olimpia Medex II Piekary Śląskie",
+   "sekretarz": "Zubek Marcin",
+   "mierzacy_czas": "Leszczyniak"
+  },
+  {
+   "code": "IIK4/7",
+   "date": "2025-10-18",
+   "time": "18:00",
+   "home": "SPR Sośnica II Gliwice",
+   "away": "Ruch Chorzów Handball",
+   "sekretarz": "Schiwon",
+   "mierzacy_czas": "Krawczyk"
+  },
+  {
+   "code": "IIK4/8",
+   "date": "2025-10-18",
+   "time": "12:00",
+   "home": "START II Pietrowice Wielkie",
+   "away": "SPR Pogoń Zabrze",
+   "sekretarz": "Winkler",
+   "mierzacy_czas": "Jędrycha"
+  },
+  {
+   "code": "IIK4/5",
+   "date": "2025-10-19",
+   "time": "15:00",
+   "home": "MKS Start Michałkowice",
+   "away": "AZS AGH Kraków",
+   "sekretarz": "Pytlik A.",
+   "mierzacy_czas": "Kopiec"
+  },
+  {
+   "code": "IMD/46",
+   "date": "2025-10-19",
+   "time": "17:00",
+   "home": "CMC VIRTU VIRET Zawiercie",
+   "away": "SPR Górnik Zabrze",
+   "sekretarz": "Krawczyk",
+   "mierzacy_czas": "Poloczek"
+  },
+  {
+   "code": "IIK4/10",
+   "date": "2025-10-26",
+   "time": "11:00",
+   "home": "Ruch Chorzów Handball",
+   "away": "SPR Pogoń Zabrze",
+   "sekretarz": "Zubek A.",
+   "mierzacy_czas": "MUSIALIK Paweł"
+  }
+ ]
+}
