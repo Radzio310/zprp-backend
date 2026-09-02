@@ -35,11 +35,14 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from starlette.background import BackgroundTask
 
 from app.db import database, extra_report_recipients, extra_reports
+from app.extra_report_download import download_path_for, stash_for_download
 from app.extra_report_pdf import ExtraReportError, build_extra_report_pdf
 from app.proel_auth import Actor, is_admin, proel_actor
 
@@ -320,9 +323,14 @@ async def generate_pdf(
         )
     )
 
+    filename = _filename(kind, body.matchNumber or dict(row).get("match_number"))
+    # Plik zostaje też pod tokenem - „Pobierz na telefon" otwiera ten adres
+    # systemowo i raport ląduje w pobranych, jak protokół PDF.
+    token = stash_for_download(pdf)
     return {
-        "filename": _filename(kind, body.matchNumber or dict(row).get("match_number")),
+        "filename": filename,
         "pdfBase64": base64.b64encode(pdf).decode("ascii"),
+        "downloadUrl": f"/extra-report/pdf/download/{token}?filename={filename}",
         "generatedAt": now.isoformat(),
         "generatedByName": actor.name or None,
     }
@@ -332,6 +340,36 @@ def _filename(kind: str, match_number: Optional[str]) -> str:
     safe = re.sub(r"[^A-Za-z0-9]+", "-", str(match_number or "mecz")).strip("-")
     label = "sedziow" if kind == "referees" else "delegata"
     return f"raport-{label}-{safe or 'mecz'}.pdf"
+
+
+# ─────────────────────────── pobieranie na telefon ───────────────────────────
+#
+# Mechanika (token, TTL, sprzątanie) mieszka w `app/extra_report_download.py` -
+# module-liściu bez `app.db`, żeby testy jednostkowe mogły go zaimportować
+# bez bazy. Tu zostaje sam endpoint.
+
+
+@router.get("/pdf/download/{token}", summary="Pobierz złożony raport (attachment)")
+async def download_extra_report_pdf(
+    token: str,
+    filename: str = Query("raport.pdf"),
+) -> FileResponse:
+    file_path = download_path_for(token)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="Plik wygasł lub nie istnieje")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename) or "raport.pdf"
+    return FileResponse(
+        path=file_path,
+        media_type="application/pdf",
+        filename=safe_name,
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "Cache-Control": "no-store",
+        },
+        background=BackgroundTask(
+            lambda: os.remove(file_path) if os.path.exists(file_path) else None
+        ),
+    )
 
 
 # ─────────────────────────── adresaci ───────────────────────────

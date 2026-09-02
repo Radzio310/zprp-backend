@@ -244,3 +244,46 @@ def test_wideo_zaznacza_dokladnie_jedno_pole():
             assert doc.page_count == 1
         finally:
             doc.close()
+
+
+# ── pobieranie na telefon ────────────────────────────────────────────────────
+#
+# „Pobierz na telefon" otwiera adres z tokenem systemowo (jak protokół PDF),
+# więc plik musi naprawdę leżeć pod tokenem i sam po sobie sprzątać.
+
+
+def test_odklada_plik_pod_tokenem(tmp_path, monkeypatch):
+    from app import extra_report_download as dl
+
+    monkeypatch.setattr(dl, "DOWNLOAD_DIR", str(tmp_path))
+    token = dl.stash_for_download(b"%PDF-1.7 tresc")
+    # Token idzie w adres URL i w nazwę pliku - musi być czystym UUID.
+    import uuid as uuid_mod
+
+    uuid_mod.UUID(token)
+    assert (tmp_path / f"{token}.pdf").read_bytes() == b"%PDF-1.7 tresc"
+    assert dl.download_path_for(token) == str(tmp_path / f"{token}.pdf")
+
+
+def test_zly_token_nie_dotyka_dysku(tmp_path, monkeypatch):
+    from app import extra_report_download as dl
+
+    monkeypatch.setattr(dl, "DOWNLOAD_DIR", str(tmp_path))
+    # Próba wyjścia ze ścieżki i token spoza kształtu UUID - oba odbite.
+    assert dl.download_path_for("../../etc/passwd") is None
+    assert dl.download_path_for("nie-uuid") is None
+
+
+def test_przeterminowany_plik_znika_przy_nastepnym_odlozeniu(tmp_path, monkeypatch):
+    import os
+    import time
+
+    from app import extra_report_download as dl
+
+    monkeypatch.setattr(dl, "DOWNLOAD_DIR", str(tmp_path))
+    old = tmp_path / "stary.pdf"
+    old.write_bytes(b"x")
+    stamp = time.time() - dl.DOWNLOAD_TTL_SECONDS - 5
+    os.utime(old, (stamp, stamp))
+    dl.stash_for_download(b"%PDF nowy")
+    assert not old.exists()
