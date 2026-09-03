@@ -80,3 +80,60 @@ class TestNaglowekMeczu:
         m = meta_from_blob({"matchConfig": {"hostTeamName": None}, "scoreHost": None})
         assert m["hostTeamName"] == ""
         assert m["finalHost"] == ""
+
+
+class TestMedyk:
+    """Opieka medyczna: publiczne API ZPRP jej nie zna, protokół tak."""
+
+    def _with_medic(self, **medic):
+        return {"matchConfig": {"extras": {"medic": medic}}}
+
+    def test_komplet_z_protokolu(self):
+        from app.training_spk_meta import medic_from_blob
+
+        out = medic_from_blob(
+            self._with_medic(
+                fullName="KOWALSKA Anna",
+                role="ratownik medyczny",
+                number="PWZ 12345",
+            )
+        )
+        assert out == {
+            "fullName": "KOWALSKA Anna",
+            "role": "ratownik medyczny",
+            "number": "PWZ 12345",
+        }
+
+    def test_podpis_nigdy_nie_wychodzi(self):
+        from app.training_spk_meta import medic_from_blob
+
+        out = medic_from_blob(
+            self._with_medic(fullName="KOWALSKA Anna", signature="bazgroł")
+        )
+        assert "signature" not in out
+
+    def test_rola_schodzi_do_malych_liter(self):
+        # Aplikacja trzyma role małymi (`utils/medicRoles.ts`) i tylko takie
+        # trafiają w listę wyboru - „Lekarz Medycyny" wypadłby poza nią.
+        from app.training_spk_meta import medic_from_blob
+
+        out = medic_from_blob(self._with_medic(role="Lekarz Medycyny"))
+        assert out["role"] == "lekarz medycyny"
+
+    def test_puste_pola_nie_trafiaja_do_wyniku(self):
+        from app.training_spk_meta import medic_from_blob
+
+        assert medic_from_blob(self._with_medic(fullName="", role="  ")) == {}
+
+    def test_brak_medyka_to_pusty_slownik_a_nie_blad(self):
+        from app.training_spk_meta import medic_from_blob
+
+        assert medic_from_blob({}) == {}
+        assert medic_from_blob({"matchConfig": {"extras": {}}}) == {}
+        assert medic_from_blob({"matchConfig": {"extras": {"medic": "nie obiekt"}}}) == {}
+
+    def test_naglowek_meczu_niesie_medyka(self):
+        m = meta_from_blob(
+            {"matchConfig": {"extras": {"medic": {"fullName": "NOWAK Jan"}}}}
+        )
+        assert m["medic"] == {"fullName": "NOWAK Jan"}

@@ -184,6 +184,52 @@ def penalty_stats_from(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def config_without_signatures(config: Any) -> Dict[str, Any]:
+    """Konfiguracja meczu z wyczyszczonymi podpisami.
+
+    Sędzia ćwiczący przejmuje mecz po przerwie razem z całą pierwszą połową -
+    ale NIE razem z podpisami ludzi, którzy ten mecz naprawdę prowadzili.
+    Podpis jest potwierdzeniem obecności złożonym przez konkretnego człowieka;
+    przeniesiony do cudzego ćwiczenia byłby cudzym podpisem pod protokołem,
+    którego ten człowiek nigdy nie widział.
+
+    Nazwisko, rola i numer licencji medyka ZOSTAJĄ - to dane meczu, nie
+    potwierdzenie. Tak samo nazwiska sędziów w obsadzie.
+    """
+    if not isinstance(config, dict):
+        return {}
+
+    out = dict(config)
+    extras = out.get("extras")
+    if not isinstance(extras, dict):
+        return out
+
+    extras = dict(extras)
+    extras.pop("hostTeamSignature", None)
+    extras.pop("guestTeamSignature", None)
+
+    medic = extras.get("medic")
+    if isinstance(medic, dict):
+        medic = dict(medic)
+        medic.pop("signature", None)
+        extras["medic"] = medic
+
+    officials = extras.get("officials")
+    if isinstance(officials, dict):
+        cleaned: Dict[str, Any] = {}
+        for role, person in officials.items():
+            if isinstance(person, dict):
+                person = dict(person)
+                # `PersonWithSign` - nazwisko zostaje, podpis nie.
+                person.pop("signature", None)
+                person.pop("sign", None)
+            cleaned[role] = person
+        extras["officials"] = cleaned
+
+    out["extras"] = extras
+    return out
+
+
 def state_after_first_half(
     blob: Dict[str, Any],
     *,
@@ -210,7 +256,7 @@ def state_after_first_half(
     )
 
     state: Dict[str, Any] = {
-        "matchConfig": blob.get("matchConfig") or {},
+        "matchConfig": config_without_signatures(blob.get("matchConfig")),
         # ── zegar ──
         "mainTime": half_ms,
         "breakTime": 0,

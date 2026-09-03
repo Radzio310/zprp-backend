@@ -55,6 +55,40 @@ def half_scores(blob: Dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
+#: Pola opieki medycznej, które wolno przenieść z oficjalnego protokołu.
+#:
+#: PODPISU TU NIE MA I NIE BĘDZIE. Nazwisko, rola i numer licencji to dane
+#: meczu - były w protokole i sędzia ćwiczący ma je dostać, żeby nie zgadywał,
+#: kto siedział przy stoliku medycznym. Podpis jest natomiast POTWIERDZENIEM
+#: obecności złożonym przez konkretnego człowieka; przeniesiony do cudzego
+#: ćwiczenia byłby cudzym podpisem pod nieprawdziwym protokołem.
+MEDIC_FIELDS = ("fullName", "role", "number")
+
+
+def medic_from_blob(blob: Dict[str, Any]) -> Dict[str, str]:
+    """Medyk z oficjalnego protokołu - bez podpisu.
+
+    Publiczne API ZPRP opieki medycznej nie zna: `pokaz_mecze_szczegoly.php`
+    oddaje przy meczu wyłącznie trenerów i osoby towarzyszące drużyn. Jedynym
+    miejscem, w którym medyk istnieje, jest protokół wypełniony przez sędziów -
+    czyli dokument, z którego i tak powstaje wzorzec.
+    """
+    cfg = blob.get("matchConfig") if isinstance(blob, dict) else None
+    extras = cfg.get("extras") if isinstance(cfg, dict) else None
+    medic = extras.get("medic") if isinstance(extras, dict) else None
+    if not isinstance(medic, dict):
+        return {}
+
+    out: Dict[str, str] = {}
+    for key in MEDIC_FIELDS:
+        value = _text(medic.get(key))
+        if value:
+            # Rola jedzie małymi literami - tak trzyma ją aplikacja
+            # (`utils/medicRoles.ts`) i tak musi trafić w listę wyboru.
+            out[key] = value.lower() if key == "role" else value
+    return out
+
+
 def meta_from_blob(blob: Dict[str, Any]) -> Dict[str, Any]:
     """Co ekran startowy, karta w panelu i PDF muszą wiedzieć o tym meczu.
 
@@ -78,4 +112,5 @@ def meta_from_blob(blob: Dict[str, Any]) -> Dict[str, Any]:
         "halfGuest": half_guest,
         "hostPlayers": blob.get("hostPlayers") or [],
         "guestPlayers": blob.get("guestPlayers") or [],
+        "medic": medic_from_blob(blob),
     }

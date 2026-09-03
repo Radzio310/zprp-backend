@@ -177,3 +177,63 @@ class TestStanNaPrzerwie:
     @pytest.mark.parametrize("junk", [None, "tekst", 7, []])
     def test_dokument_innego_typu_nie_wywraca(self, junk):
         assert state_after_first_half(junk)["protocol"] == []
+
+
+class TestPodpisy:
+    """Podpis jest potwierdzeniem człowieka, nie daną meczu."""
+
+    def _cfg(self):
+        return {
+            "matchConfig": {
+                "hostTeamName": "Lubin",
+                "extras": {
+                    "hostTeamSignature": "bazgroł gospodarzy",
+                    "guestTeamSignature": "bazgroł gości",
+                    "medic": {
+                        "fullName": "KOWALSKA Anna",
+                        "role": "ratownik medyczny",
+                        "number": "PWZ 12345",
+                        "signature": "bazgroł medyka",
+                    },
+                    "officials": {
+                        "referee1": {"fullName": "NOWAK Jan", "signature": "bazgroł"},
+                    },
+                },
+            }
+        }
+
+    def test_podpisy_druzyn_znikaja(self):
+        cfg = state_after_first_half(self._cfg())["matchConfig"]
+        assert "hostTeamSignature" not in cfg["extras"]
+        assert "guestTeamSignature" not in cfg["extras"]
+
+    def test_medyk_zostaje_bez_podpisu(self):
+        medic = state_after_first_half(self._cfg())["matchConfig"]["extras"]["medic"]
+        assert medic["fullName"] == "KOWALSKA Anna"
+        assert medic["role"] == "ratownik medyczny"
+        assert medic["number"] == "PWZ 12345"
+        assert "signature" not in medic
+
+    def test_obsada_zostaje_bez_podpisow(self):
+        officials = state_after_first_half(self._cfg())["matchConfig"]["extras"][
+            "officials"
+        ]
+        assert officials["referee1"]["fullName"] == "NOWAK Jan"
+        assert "signature" not in officials["referee1"]
+
+    def test_reszta_konfiguracji_nietknieta(self):
+        cfg = state_after_first_half(self._cfg())["matchConfig"]
+        assert cfg["hostTeamName"] == "Lubin"
+
+    def test_konfiguracja_bez_extras_nie_wywraca(self):
+        cfg = state_after_first_half({"matchConfig": {"hostTeamName": "X"}})[
+            "matchConfig"
+        ]
+        assert cfg == {"hostTeamName": "X"}
+
+    def test_zrodlowy_dokument_nie_jest_modyfikowany(self):
+        # Wzorzec leży w bazie i ma zostać nietknięty - kopiujemy, nie tniemy
+        # w miejscu.
+        blob = self._cfg()
+        state_after_first_half(blob)
+        assert blob["matchConfig"]["extras"]["medic"]["signature"] == "bazgroł medyka"
