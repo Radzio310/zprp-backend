@@ -300,3 +300,33 @@ def test_pelny_przebieg_nie_gasi_meczow_swiezo_widzianych_gdzie_indziej():
     src = ast.unparse(FUNCTIONS["_mark_missing_full_matches"])
     assert "last_seen_at" in src
     assert "_FULL_MISS_GRACE_HOURS" in src
+
+
+# ── Kolumny JSON jako napis (asyncpg bez kodeka jsonb) ───────────────────────
+
+
+def test_preferencje_w_napisie_umieja_odmowic():
+    """Napis '{"enabled": false}' przechodzil jako "nie-slownik", czyli zgoda."""
+    assert _monitor._prefs_allow('{"enabled": false}', "match_added") is False
+    assert _monitor._prefs_allow('{"enabled": true}', "match_added") is True
+    assert _monitor._prefs_allow("nie-json", "match_added") is True
+
+
+def test_stan_z_bazy_przechodzi_przez_parser_kolumny_json():
+    """`dict("...")` na napisie rzuca ValueError - monitor umieral na PIERWSZYM
+    istniejacym wierszu i nowe mecze (powierzona II liga) nie dochodzily do
+    zapisu. Kazdy odczyt stanu idzie przez `state_dict`."""
+    import ast as _ast
+    for name in ("_upsert_match", "_run_light", "_run_full", "_public_window_states"):
+        src_fn = _ast.unparse(FUNCTIONS[name])
+        assert "state_dict" in src_fn, name
+        assert 'dict(old_row["state_json"]' not in src_fn.replace("state_dict", "X"), name
+
+
+def test_szczegoly_przyjmuja_oba_ksztalty_odpowiedzi():
+    """Swiezy mecz bez danych protokolu wraca GOLA LISTA `[[{...}]]` zamiast
+    `{"0": [...]}` - odrzucanie jej odcinalo takim meczom numery sedziow."""
+    import ast as _ast
+    src_fn = _ast.unparse(FUNCTIONS["_fetch_public_details"])
+    assert "isinstance(payload, list)" in src_fn
+    assert "payload[0]" in src_fn

@@ -12,6 +12,7 @@ wpadłoby w `match_number="archive/..."` i zamiast listy archiwum wróciłoby
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -45,6 +46,28 @@ async def _require_admin(actor: Actor) -> None:
                 "message": "Archiwum usuniętych meczów jest dostępne tylko dla administratora.",
             },
         )
+
+
+def _json_value(raw: Any) -> Any:
+    """Kolumna JSON w ksztalcie, w jakim ja zapisano - niezaleznie od sterownika.
+
+    asyncpg pod `databases` bez kodeka jsonb oddaje JSONB surowym NAPISEM.
+    W archiwum leza i obiekty, i listy, wiec parsujemy do dowolnego ksztaltu;
+    napis nie do sparsowania wraca bez zmian - lepszy surowy wpis niz zaden.
+    """
+    if isinstance(raw, (dict, list)) or raw is None:
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return raw
+    return raw
 
 
 def _summary(row) -> Dict[str, Any]:
@@ -152,8 +175,10 @@ async def get_deleted(
         )
 
     out = _summary(row)
-    out["data_json"] = row["data_json"]
-    out["state_json"] = row["state_json"]
+    # Przez parser, nie wprost: kolumna JSON potrafi wrocic z bazy surowym
+    # napisem (asyncpg bez kodeka jsonb), a panel oczekuje obiektu.
+    out["data_json"] = _json_value(row["data_json"])
+    out["state_json"] = _json_value(row["state_json"])
     return out
 
 
@@ -216,14 +241,20 @@ async def restore_deleted(
         await database.execute(
             saved_matches.insert().values(
                 match_number=match_number,
-                data_json=row["data_json"],
+                # Sparsowane, nie surowe: napis wstawiony w kolumne JSON
+                # zakodowalby sie DRUGI raz i przywrocony mecz bylby dla
+                # aplikacji nieczytelny.
+                data_json=_json_value(row["data_json"]),
                 status=restored_status,
                 is_finished=restored_status in ("finished", "approved"),
                 zprp_match_id=row["zprp_match_id"],
             )
         )
 
-        state = row["state_json"]
+        # Napisowy stan wygladal jak "nie-slownik" i przywracanie PO CICHU
+        # gubilo stan wspolpracy nad meczem - te sama chorobe mial monitor
+        # okregu, patrz nota przy `state_dict` w province_match_monitor.
+        state = _json_value(row["state_json"])
         if isinstance(state, dict) and state.get("match_number"):
             # Kolumny czasowe wróciły z archiwum jako ISO; wstawiamy tylko te
             # pola, które faktycznie odtwarzają współpracę nad meczem. Leasing

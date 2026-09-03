@@ -33,6 +33,14 @@ from app.deps import get_settings
 # meczów i panel administratora - a żadne z nich nie ma po co ciągnąć za sobą
 # całego crawlera. Nazwy zmiennych i reguła schodzenia do konta monitora są
 # tam opisane w jednym miejscu.
+# `state_dict` zamiast golego `dict(...)` na kolumnach JSON: asyncpg pod
+# `databases` bez kodeka jsonb oddaje JSONB SUROWYM NAPISEM, a
+# `dict("...")` na niepustym napisie rzuca ValueError. Monitor umieral przez
+# to na PIERWSZYM istniejacym wierszu, ktorego stan probowal odczytac -
+# nowe mecze (np. powierzona II liga z dopiero co opublikowana obsada)
+# nie dochodzily do zapisu, a niczego nie odswiezal. Lokalnie (SQLite w
+# testach) kolumna wraca slownikiem, wiec pekalo wylacznie na produkcji.
+from app.match_market_rules import state_dict
 from app.zprp_accounts import (  # noqa: F401  (re-eksport dla zgodności)
     PROVINCE_ENV_SUFFIXES,
     configured_provinces,
@@ -386,6 +394,11 @@ def build_change_events(old: Dict[str, Any], new: Dict[str, Any]) -> List[Dict[s
 
 
 def _prefs_allow(prefs: Any, event_type: str) -> bool:
+    if isinstance(prefs, (str, bytes, bytearray)):
+        # Ten sam sterownikowy kaprys, co przy stanie meczu - patrz nota przy
+        # imporcie `state_dict`. Bez parsowania napis '{"enabled": false}'
+        # przechodzil jako "nie-slownik", czyli ZGODA na powiadomienie.
+        prefs = state_dict(prefs)
     if not isinstance(prefs, dict):
         return True
     if prefs.get("enabled") is False:
@@ -531,7 +544,20 @@ async def _fetch_public_details(client: AsyncClient, match_id: str) -> Optional[
                 continue
             response.raise_for_status()
             payload = response.json()
-            return payload if isinstance(payload, dict) else None
+            if isinstance(payload, dict):
+                return payload
+            # Drugi ksztalt tej samej odpowiedzi: swiezy mecz bez danych
+            # protokolu wraca GOLA LISTA `[[{...}]]` zamiast `{"0": [...]}`
+            # (patrz IIM4/1 sezonu 2026/2027). Odrzucanie jej znaczylo, ze
+            # takim meczom nigdy nie dochodzily numery sedziow ani status
+            # protokolu. `[null]` to z kolei "nic nie mam" - zostaje None.
+            if (
+                isinstance(payload, list)
+                and payload
+                and isinstance(payload[0], list)
+            ):
+                return {"0": payload[0]}
+            return None
         except Exception:
             if attempt >= retries:
                 return None
@@ -594,7 +620,7 @@ async def _upsert_match(
     if not old_row:
         await database.execute(insert(province_matches).values(province=province, match_id=match_id, **values))
         return True, 0
-    old = dict(old_row["state_json"] or {})
+    old = state_dict(old_row["state_json"])
     await database.execute(
         update(province_matches)
         .where(and_(province_matches.c.province == province, province_matches.c.match_id == match_id))
@@ -752,7 +778,7 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
                         and_(province_matches.c.province == province, province_matches.c.match_id == match_id)
                     )
                 )
-                old_state = dict(old["state_json"] or {}) if old else {}
+                old_state = state_dict(old["state_json"]) if old else {}
                 old_approved_needs_assessment = bool(
                     old
                     and old["approved"]
@@ -789,7 +815,7 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
                             and_(province_matches.c.province == province, province_matches.c.match_id == match_id)
                         )
                     )
-                    chosen = _merge_partial_state(dict(old["state_json"] or {}) if old else None, shallow)
+                    chosen = _merge_partial_state(state_dict(old["state_json"]) if old else None, shallow)
                 _, created = await _upsert_match(province, match_id, chosen, match_id in deep_states)
                 events_created += created
             events_created += await _mark_missing_assignments(province, judge_id, seen_ids)
@@ -853,7 +879,7 @@ async def _public_window_states(
     now = _now()
     out: Dict[str, Dict[str, Any]] = {}
     for row in rows:
-        state = dict(row["state_json"] or {})
+        state = state_dict(row["state_json"])
         if not is_eligible_for_refresh(state, bool(row["approved"]), now):
             continue
         out[_str(row["match_id"])] = state
@@ -1012,7 +1038,7 @@ async def _run_full(province: str, username: str, password: str) -> Dict[str, in
                         and_(province_matches.c.province == province, province_matches.c.match_id == match_id)
                     )
                 )
-                chosen = _merge_partial_state(dict(old["state_json"] or {}) if old else None, shallow)
+                chosen = _merge_partial_state(state_dict(old["state_json"]) if old else None, shallow)
             _, created = await _upsert_match(province, match_id, chosen, match_id in deep_states)
             events_created += created if baseline else 0
         events_created += await _mark_missing_full_matches(province, seen_ids)
