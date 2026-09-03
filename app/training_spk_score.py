@@ -51,6 +51,31 @@ STRICT_TOLERANCE_MS = 2_000
 #: Rodzaje zdarzeń, którym wolno mieć luźniejszy zegar.
 GOAL_TYPES = frozenset({"goal", "penaltyKickScored", "penaltyKickMissed"})
 
+#: Rodzaje, przy których czas jest CZĘŚCIĄ ZDARZENIA, a nie jego okolicznością.
+#:
+#: Kara ma w protokole moment, od którego liczy się jej koniec; czas dla drużyny
+#: ma minutę, w której go przyznano. Bramka takiego zobowiązania nie niesie -
+#: ważne jest, że padła i kto ją zdobył. Ten podział rozstrzyga, co jest
+#: oceniane po czasie w trybie skróconego nagrania.
+TIMED_TYPES = frozenset(
+    {
+        "warning",
+        "penalty1",
+        "penalty2",
+        "penalty3",
+        "disqualification",
+        "disqualificationBlue",
+        "teamTime",
+    }
+)
+
+#: Tolerancja czasu w trybie skróconego nagrania - luźna z rozmysłu.
+#:
+#: Materiał jest cięty, więc zegar hali pojawia się na ekranie nierówno i nie
+#: zawsze przy samej akcji. Dwie sekundy karałyby tu za montaż, nie za pracę
+#: sędziego; dziesięć sekund nadal wyłapuje karę wpisaną „gdzieś w tej połowie".
+CONDENSED_TOLERANCE_MS = 10_000
+
 #: Rodzaje, które w ogóle rozpoznajemy. Cokolwiek innego pomijamy po obu
 #: stronach - nieznany rodzaj po jednej stronie zamieniłby się w karę dla
 #: sędziego za coś, czego ocena nawet nie rozumie.
@@ -87,6 +112,21 @@ WEIGHTS_NO_TIMING: Dict[str, int] = {
     "events": 70,
     "players": 30,
 }
+
+#: Skrócone nagranie: czas zostaje, ale jako kryterium LUŹNE.
+#:
+#: Ocenia się w nim wyłącznie czas kar, wykluczeń i czasów dla drużyny - przy
+#: bramkach materiał jest pocięty i zegar nic nie mówi. Dziesięć punktów na sto
+#: to dokładnie tyle, żeby wpisanie kary w przypadkowej minucie było widoczne w
+#: wyniku, a nie żeby o nim decydowało.
+WEIGHTS_CONDENSED: Dict[str, int] = {
+    "events": 60,
+    "players": 30,
+    "timing": 10,
+}
+
+#: Od której połowy liczymy przy skróconym nagraniu.
+CONDENSED_FROM_HALF = 2
 
 
 def _int(value: Any, default: int = 0) -> int:
@@ -140,8 +180,16 @@ def normalize_events(raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def tolerance_for(kind: str) -> int:
-    """Ile sekund rozjazdu wolno mieć temu rodzajowi zdarzenia."""
+def tolerance_for(kind: str, *, mode: str = "video") -> int:
+    """Ile sekund rozjazdu wolno mieć temu rodzajowi zdarzenia.
+
+    Przy skróconym nagraniu tolerancja jest jedna i luźna dla wszystkiego -
+    materiał jest cięty, więc rozróżnianie bramek od kar co do sekundy nie ma
+    tam podstawy. To, CO wchodzi do oceny czasu, rozstrzyga `TIMED_TYPES`, a
+    nie ta funkcja.
+    """
+    if mode == "condensed":
+        return CONDENSED_TOLERANCE_MS
     return GOAL_TOLERANCE_MS if kind in GOAL_TYPES else STRICT_TOLERANCE_MS
 
 
@@ -150,6 +198,7 @@ def _pair_events(
     attempt: List[Dict[str, Any]],
     *,
     ignore_time: bool = False,
+    mode: str = "video",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """(dopasowane, pominięte, nadmiarowe).
 
@@ -211,7 +260,8 @@ def _pair_events(
                 "myPlayer": best["player"],
                 "playerOk": ref["player"] == best["player"],
                 "shootout": ref["shootout"],
-                "timeOk": abs(best["time"] - ref["time"]) <= tolerance_for(ref["type"]),
+                "timeOk": abs(best["time"] - ref["time"])
+                <= tolerance_for(ref["type"], mode=mode),
             }
         )
 
@@ -220,6 +270,15 @@ def _pair_events(
         event["text"] = action_text(event)
         event["clock"] = format_clock(event["time"])
     return matched, missed, extra
+
+
+def _in_condensed_scope(event: Dict[str, Any]) -> bool:
+    """Czy to zdarzenie wchodzi do oceny skróconego nagrania.
+
+    Rzuty karne zostają zawsze: seria odbywa się po meczu i jest właśnie tym,
+    co skrót pokazuje na końcu.
+    """
+    return bool(event.get("shootout")) or _int(event.get("half"), 1) >= CONDENSED_FROM_HALF
 
 
 def _pct(part: float, whole: float) -> float:
@@ -239,16 +298,36 @@ def score_run(
     """Pełna ocena jednego podejścia.
 
     `mode`:
-      * "video"  - sędzia prowadził przy nagraniu, czas jest oceniany,
-      * "slides" - sędzia prowadził przy prezentacji, czas NIE jest oceniany.
+      * "video"     - pełne nagranie, czas oceniany dla wszystkiego,
+      * "slides"    - prezentacja, czas NIE jest oceniany,
+      * "condensed" - skrócone nagranie: liczymy DOPIERO OD DRUGIEJ POŁOWY, a
+        czas oceniamy wyłącznie przy karach, wykluczeniach i czasach dla
+        drużyny, i to luźno.
+
+    DLACZEGO SKRÓT ODCINA PIERWSZĄ POŁOWĘ PO OBU STRONACH. Sędzia dostaje ją
+    wczytaną gotową, prosto z wzorca - gdyby weszła do oceny, każde podejście
+    zaczynałoby od kilkudziesięciu zdarzeń trafionych bez jednego naciśnięcia.
+    Wynik mówiłby wtedy o tym, ile meczu dostał w prezencie, a nie o tym, ile
+    poprowadził.
 
     Zwracany kształt jest jednocześnie tym, co pokazuje ekran wyników - nie ma
     drugiego liczenia po stronie aplikacji. Jedna odpowiedź, jedno źródło.
     """
     reference = normalize_events(reference_events)
     attempt = normalize_events(attempt_events)
+
+    if mode == "condensed":
+        reference = [e for e in reference if _in_condensed_scope(e)]
+        attempt = [e for e in attempt if _in_condensed_scope(e)]
+
     matched, missed, extra = _pair_events(
-        reference, attempt, ignore_time=(mode == "slides")
+        reference,
+        attempt,
+        # Przy skrócie kolejność jest pewniejsza niż zegar: materiał jest cięty,
+        # więc dopasowanie po czasie rozjeżdżałoby pary tam, gdzie sędzia
+        # pracował poprawnie.
+        ignore_time=(mode in ("slides", "condensed")),
+        mode=mode,
     )
 
     total_ref = len(reference)
@@ -268,11 +347,21 @@ def score_run(
     )
 
     timed = [m for m in matched if not m["shootout"]]
+    if mode == "condensed":
+        # Czas bramki w ciętym materiale nie mówi nic o pracy sędziego.
+        timed = [m for m in timed if m["type"] in TIMED_TYPES]
     timing_pct = _pct(len([m for m in timed if m["timeOk"]]), len(timed))
 
     if mode == "slides":
         weights = WEIGHTS_NO_TIMING
         parts = {"events": events_pct, "players": players_pct}
+    elif mode == "condensed":
+        weights = WEIGHTS_CONDENSED
+        parts = {
+            "events": events_pct,
+            "players": players_pct,
+            "timing": timing_pct,
+        }
     else:
         weights = WEIGHTS
         parts = {

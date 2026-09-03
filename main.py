@@ -916,6 +916,10 @@ async def startup():
         "CREATE INDEX IF NOT EXISTS ix_province_match_notifications_send_at_utc ON province_match_notifications (send_at_utc)",
         # `create_all` nie dokłada kolumn do tabeli, która już istnieje.
         "ALTER TABLE province_manual_matches ADD COLUMN IF NOT EXISTS kind VARCHAR NOT NULL DEFAULT 'match'",
+        # Wzorzec sprawdzianu SPK/1 istnieje na produkcji od pierwszego importu,
+        # więc kolumny z dokumentem meczu nie założy `create_all`. Bez niej
+        # ćwiczenie od drugiej połowy nie ma skąd wziąć stanu na przerwie.
+        "ALTER TABLE spk_reference ADD COLUMN IF NOT EXISTS blob JSONB NOT NULL DEFAULT '{}'::jsonb",
     ]
     for stmt in _province_match_migrations:
         try:

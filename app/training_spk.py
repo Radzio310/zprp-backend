@@ -36,6 +36,7 @@ from app.proel_auth import Actor, is_admin, proel_actor
 from app.spk_pdf_link import create_pdf_token, token_expires_at, verify_pdf_token
 from app.training_spk_score import grade, score_run
 from app.training_spk_pdf import SpkPdfError, build_slides_pdf
+from app.training_spk_halftime import state_after_first_half
 from app.training_spk_meta import meta_from_blob
 from app.training_spk_slides import slides_from_timeline
 from app.zprp_accounts import normalize_province
@@ -204,6 +205,7 @@ async def import_reference(
             zprp_match_id=meta.get("zprpMatchId") or None,
             timeline=timeline,
             meta=meta,
+            blob=blob,
             source="proel",
             updated_by=str(actor.name or actor.judge_id or "").strip() or None,
             updated_at=datetime.now(timezone.utc),
@@ -246,7 +248,7 @@ async def get_reference(actor: Actor = Depends(proel_actor)) -> Dict[str, Any]:
 
 @router.get("/brief", summary="Dane meczu szkoleniowego")
 async def brief(
-    mode: str = Query("video", description="video albo slides"),
+    mode: str = Query("video", description="video, condensed albo slides"),
     actor: Actor = Depends(proel_actor),
 ) -> Dict[str, Any]:
     """Co telefon musi wiedzieć, zanim sędzia zacznie.
@@ -255,6 +257,11 @@ async def brief(
     sędzia czyta z niej polecenia. Przy nagraniu byłaby kluczem odpowiedzi
     leżącym w pamięci telefonu, więc jej nie wysyłamy. Ocenę i tak liczy serwer,
     aplikacja nie ma po co znać wzorca wcześniej.
+
+    STAN NA PRZERWIE WYCHODZI TYLKO PRZY SKRÓCONYM NAGRANIU. Zawiera pierwszą
+    połowę wzorca, więc jest częścią klucza odpowiedzi - ale tam pierwsza
+    połowa nie jest oceniana ani przez sędziego prowadzona, tylko wczytana.
+    Wysłanie go w pozostałych trybach oddawałoby połowę meczu za darmo.
     """
     ref = await _current_reference()
     if ref is None:
@@ -276,12 +283,26 @@ async def brief(
     }
     if mode == "slides":
         out["slides"] = slides_from_timeline(ref["timeline"] or [], ref["meta"] or {})
+    if mode == "condensed":
+        blob = ref["blob"] if isinstance(ref["blob"], dict) else {}
+        if not blob:
+            # Wzorzec wczytany starszym wydaniem serwera nie ma przy sobie
+            # dokumentu meczu. Mówimy o tym wprost - inaczej sędzia dostałby
+            # pusty mecz i zaczynał drugą połowę od 0:0.
+            out["startState"] = None
+            out["startStateReason"] = (
+                "Ten wzorzec został wczytany bez pełnego dokumentu meczu. "
+                "Wczytaj wzorzec ponownie w panelu, żeby ćwiczenie od drugiej "
+                "połowy miało od czego zacząć."
+            )
+        else:
+            out["startState"] = state_after_first_half(blob)
     return out
 
 
 class RunIn(BaseModel):
     runId: str
-    #: "video" albo "slides".
+    #: "video", "condensed" albo "slides".
     mode: str = "video"
     appVersion: Optional[str] = None
     #: Pełny stan meczu - ten sam kształt, co dokument ProEla.
@@ -305,7 +326,9 @@ async def save_run(
 
     blob = body.dataJson if isinstance(body.dataJson, dict) else {}
     mine_meta = meta_from_blob(blob)
-    mode = "slides" if body.mode == "slides" else "video"
+    # Tryb rozstrzyga o CAŁEJ ocenie, więc nieznana wartość nie ma prawa przejść
+    # dalej jako ona sama - wpada na najostrzejszy tryb, nie na najłagodniejszy.
+    mode = body.mode if body.mode in ("slides", "condensed") else "video"
 
     report = score_run(
         ref["timeline"] or [],

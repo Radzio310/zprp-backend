@@ -41,12 +41,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from starlette.background import BackgroundTask
 
-from app.db import (
-    database,
-    extra_report_province_recipients,
-    extra_report_recipients,
-    extra_reports,
-)
+# `app.db` wchodzi LENIWIE, wewnątrz funkcji (konwencja jak w proel_journal):
+# import na górze buduje cały schemat przy imporcie modułu, a to wywraca
+# testy czystych helperów (_clean_signatures, _row_to_item) bez Postgresa.
 from app.extra_report_download import download_path_for, stash_for_download
 from app.extra_report_pdf import ExtraReportError, build_extra_report_pdf
 from app.extra_report_scope import fetch_match_province, is_province_scoped
@@ -72,11 +69,17 @@ class ExtraReportBody(BaseModel):
     entries: List[Dict[str, Any]] = Field(default_factory=list)
     matchNumber: Optional[str] = None
     zprpMatchId: Optional[str] = None
+    #: Podpisy złożone POD RAPORTEM - ścieżki PNG z /signatures/upload,
+    #: w stałej kolejności (sędziowie [ref1, ref2], delegat [delegat]).
+    #: `None` = nie ruszaj zapisanych: autozapis treści leci bez tego pola
+    #: i nie może skasować podpisu złożonego wcześniej.
+    signatures: Optional[List[str]] = None
 
 
 class ExtraReportItem(BaseModel):
     kind: str
     entries: List[Dict[str, Any]]
+    signatures: List[str] = Field(default_factory=list)
     updatedBy: Optional[str] = None
     updatedByName: Optional[str] = None
     updatedAt: Optional[str] = None
@@ -150,11 +153,19 @@ def _iso(value: Any) -> Optional[str]:
         return str(value)
 
 
+def _clean_signatures(raw: Any) -> List[str]:
+    """Lista podpisów z bazy/żądania - same napisy, przycięte, bez None."""
+    if not isinstance(raw, list):
+        return []
+    return [str(s or "").strip() for s in raw]
+
+
 def _row_to_item(row: Any) -> ExtraReportItem:
     d = dict(row)
     return ExtraReportItem(
         kind=d["kind"],
         entries=d.get("entries") or [],
+        signatures=_clean_signatures(d.get("signatures")),
         updatedBy=d.get("updated_by"),
         updatedByName=d.get("updated_by_name"),
         updatedAt=_iso(d.get("updated_at")),
@@ -224,6 +235,8 @@ async def get_reports(match_key: str) -> ExtraReportPair:
     i odwrotnie. Pisać wolno tylko w swoim - o tym rozstrzyga aplikacja, bo to
     ona wie, w jakiej roli ktoś w tej chwili siedzi przy telefonie.
     """
+    from app.db import database, extra_reports
+
     rows = await database.fetch_all(
         select(extra_reports).where(extra_reports.c.match_key == match_key)
     )
@@ -244,6 +257,8 @@ async def save_report(
     body: ExtraReportBody,
     actor: Actor = Depends(proel_actor),
 ) -> ExtraReportItem:
+    from app.db import database, extra_reports
+
     _check_kind(kind)
     now = datetime.now(timezone.utc)
 
@@ -260,6 +275,11 @@ async def save_report(
         "updated_by_name": actor.name or None,
         "updated_at": now,
     }
+    # Podpisy raportowe nadpisujemy TYLKO, gdy żądanie je niesie - autozapis
+    # treści (bez pola) nie może skasować podpisu złożonego wcześniej.
+    # W drugą stronę te podpisy nie idą nigdy: blob meczu ich nie widzi.
+    if body.signatures is not None:
+        values["signatures"] = _clean_signatures(body.signatures)
     if existing:
         await database.execute(
             extra_reports.update()
@@ -297,6 +317,8 @@ async def generate_pdf(
     tak składa raport MECZ TESTOWY, którego zapis jest zablokowany (isTest).
     Plik powstaje naprawdę, w bazie nie zostaje nic - jak protokół ćwiczeniowy.
     """
+    from app.db import database, extra_reports
+
     _check_kind(kind)
 
     row = await database.fetch_one(
@@ -433,6 +455,8 @@ async def recipients_for_category(
     `match_id` jest OPCJONALNY i musi taki zostać: starsze wersje aplikacji go
     nie wysyłają, a odpowiedź bez niego ma być dokładnie tą, którą znały.
     """
+    from app.db import database, extra_report_province_recipients, extra_report_recipients
+
     cat = (category or "").strip()
     rows = await database.fetch_all(
         select(extra_report_recipients).order_by(extra_report_recipients.c.order_index)
@@ -470,6 +494,8 @@ async def recipients_for_category(
 
 @admin_router.get("/recipients", response_model=RecipientGroups, summary="Grupy adresatów")
 async def list_recipients(actor: Actor = Depends(proel_actor)) -> RecipientGroups:
+    from app.db import database, extra_report_recipients
+
     await _require_admin(actor)
     rows = await database.fetch_all(
         select(extra_report_recipients).order_by(extra_report_recipients.c.order_index)
@@ -497,6 +523,8 @@ async def save_recipients(
     Zapis wiersz po wierszu wymagałby śledzenia usunięć po stronie aplikacji,
     a grup jest kilkanaście, nie kilkanaście tysięcy.
     """
+    from app.db import database, extra_report_recipients
+
     await _require_admin(actor)
 
     now = datetime.now(timezone.utc)
@@ -530,6 +558,8 @@ async def save_recipients(
 async def list_province_recipients(
     actor: Actor = Depends(proel_actor),
 ) -> ProvinceRecipientList:
+    from app.db import database, extra_report_province_recipients
+
     await _require_admin(actor)
     rows = await database.fetch_all(
         select(extra_report_province_recipients).order_by(
@@ -566,6 +596,8 @@ async def save_province_recipients(
     Nieznana nazwa wypada - lepiej stracić literówkę przy zapisie niż trzymać
     w bazie okręg, którego nikt nigdy nie odnajdzie.
     """
+    from app.db import database, extra_report_province_recipients
+
     await _require_admin(actor)
 
     now = datetime.now(timezone.utc)

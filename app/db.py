@@ -277,6 +277,16 @@ spk_reference = Table(
     # Składy, nazwy drużyn, wynik, data - wszystko, czego potrzebuje ekran
     # startowy i PDF z akcjami.
     Column("meta", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # CAŁY dokument meczu, z którego wzorzec powstał.
+    #
+    # Po co, skoro `timeline` i `meta` już z niego wyszły: tryb skróconego
+    # nagrania wczytuje sędziemu PIERWSZĄ POŁOWĘ jako gotowy stan meczu, a do
+    # tego trzeba rzeczy, których w osi czasu nie ma - kafelków kar, upomnień,
+    # czasów dla drużyny i składów. Trzymamy je razem z wzorcem, a nie sięgamy
+    # po nie do `saved_matches`, bo wzorzec ma być zamrożony: poprawka
+    # protokołu w ProElu nie może po cichu zmienić stanu, od którego zaczynają
+    # sędziowie w trakcie ćwiczenia.
+    Column("blob", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     #: "proel" (import z protokołu) albo "manual" (poprawiony ręcznie).
     Column("source", String, nullable=False, server_default=text("'proel'")),
     Column("updated_by", String, nullable=True),
@@ -2607,6 +2617,11 @@ extra_reports = Table(
     Column("generated_by", String, nullable=True),
     Column("generated_by_name", String, nullable=True),
     Column("generated_at", DateTime(timezone=True), nullable=True),
+    # Podpisy złożone POD RAPORTEM (ścieżki PNG z /signatures/upload) - dla
+    # raportu pisanego dzień po meczu, gdy protokół podpisów nie ma. Kolejność
+    # stała: sędziowie [ref1, ref2], delegat [delegat]. To NIE są podpisy
+    # meczu i nigdy do bloba meczu nie wracają - działa tylko w tę stronę.
+    Column("signatures", JSON, nullable=True),
     UniqueConstraint("match_key", "kind", name="uq_extra_reports_key_kind"),
 )
 
@@ -2666,4 +2681,7 @@ with engine.connect() as _conn:
     # Odcisk meczu bez identyfikatora ZPRP. `create_all` nie dokłada kolumn do
     # istniejących tabel, a ta tabela na produkcji istnieje od dawna.
     _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS local_key varchar"))
+    # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
+    # `create_all` kolumny nie dołoży.
+    _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))
     _conn.commit()
