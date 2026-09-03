@@ -35,7 +35,7 @@ TEMPLATE = os.path.join(
 
 #: Wiersze bloku użytego w testach: dwaj zawodnicy, reszta pusta.
 START_ROW = 11
-END_ROW = 28
+END_ROW = 26
 ROW_PLAYER_1 = 11  # numer 7
 ROW_PLAYER_2 = 12  # numer 61
 EMPTY_ROWS = list(range(13, END_ROW + 1))

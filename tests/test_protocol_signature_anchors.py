@@ -26,7 +26,7 @@ from app.results import (
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "app" / "templates"
 
-#: Oficjele mają rubryki w wierszach 66..70; wariant z drugim delegatem dokłada 71.
+#: Oficjele mają rubryki w wierszach 62..66; wariant z drugim delegatem dokłada 67.
 OFFICIAL_KEYS = ["referee1", "referee2", "secretary", "timekeeper", "delegate"]
 
 #: Szerokość kolumny rubryki podpisu w znakach - wszystkie X..AL są równe.
@@ -157,9 +157,9 @@ def test_medyk_rola_i_podpis_maja_swoje_rubryki(template):
 def test_miejscowosc_trafia_w_swoja_rubryke(template):
     """Miejscowość oficjela ma własne scalenie i kod musi celować w jego początek."""
     ws = _load(template)
-    rows = [66, 67, 68, 69, 70]
+    rows = [62, 63, 64, 65, 66]
     if template.endswith("_2.xlsx"):
-        rows.append(71)
+        rows.append(67)
     for row in rows:
         raw = shift_ref(f"W{row}")
         rng = _merged_range_at(ws, raw)

@@ -54,13 +54,13 @@ def test_second_delegate_name_survives_extras_only_shape():
 
 def test_second_template_has_dedicated_row_and_a4_print_area():
     ws = load_workbook(TEMPLATE).active
-    assert ws.max_row == 72
-    assert "A1:BH72" in str(ws.print_area).replace("$", "")
+    assert ws.max_row == 68
+    assert "A1:BH68" in str(ws.print_area).replace("$", "")
     anchors = {str(r).split(":")[0] for r in ws.merged_cells.ranges}
     # Kotwicę podpisu bierzemy z kodu, a nie z literału: rubryki podpisów już
     # raz przesunięto (AJ..AL -> AH..AL) i wtedy ten test był jedynym miejscem,
     # które trzeba było poprawić ręcznie.
-    for logical in ("I71", "W71", SIGN_ANCHORS["delegate2"]):
+    for logical in ("I67", "W67", SIGN_ANCHORS["delegate2"]):
         assert shift_ref(logical) in anchors
 
 
@@ -71,8 +71,8 @@ def test_second_template_keeps_one_page_a4_settings():
     assert ws.page_setup.orientation == "portrait"
     assert ws.page_setup.scale == 88
 
-    # Po przeskalowaniu wariant 72-wierszowy jest nawet odrobinę niższy niż
-    # dotychczasowy, sprawdzony wydruk 71-wierszowy przy 90%. Nie ma więc
+    # Po przeskalowaniu wariant 68-wierszowy jest nawet odrobinę niższy niż
+    # standardowy, sprawdzony wydruk 67-wierszowy przy 90%. Nie ma więc
     # powodu, by LibreOffice przerzucił stopkę na drugą kartkę A4.
     standard = load_workbook(STANDARD_TEMPLATE).active
     assert _sheet_height_points(ws) * 0.88 <= (
@@ -83,7 +83,7 @@ def test_second_template_keeps_one_page_a4_settings():
 def test_second_delegate_name_and_city_are_shrunk_not_wrapped():
     ws = load_workbook(TEMPLATE).active
     _apply_fitted_text(ws)
-    for logical in ("I71", "W71"):
+    for logical in ("I67", "W67"):
         alignment = ws[shift_ref(logical)].alignment
         assert alignment.shrinkToFit is True
         assert not alignment.wrapText

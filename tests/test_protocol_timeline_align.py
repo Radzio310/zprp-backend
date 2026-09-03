@@ -3,7 +3,7 @@
 Gospodarz jest wyrównany do prawej, gość do lewej - dzięki temu każdy wpis
 wygląda tak samo, niezależnie od tego, czy wynik jest jedno- czy dwucyfrowy.
 
-W szablonie dwa wiersze przebiegu (30 i 56, na styku sekcji formularza) miały
+W szablonie dwa wiersze przebiegu (28 i 52, na styku sekcji formularza) miały
 wyrównanie do ŚRODKA. Przy jednocyfrowym wyniku nikt tego nie widział, ale
 przy dwucyfrowym liczby odsuwały się od dwukropka i wpis rozjeżdżał się w bok:
 „11 : 10" wyglądało szerzej niż wszystko dookoła. Dlatego wyrównanie ustawiamy
@@ -29,7 +29,7 @@ TEMPLATE = os.path.join(
 )
 
 #: Wiersze, w których szablon miał wyrównanie do środka.
-CROOKED_ROWS = [30, 56]
+CROOKED_ROWS = [28, 52]
 
 
 def _sheet():

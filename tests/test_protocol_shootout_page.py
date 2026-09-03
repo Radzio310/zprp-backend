@@ -2,7 +2,7 @@
 
 Strona karnych powstaje z KOPII arkusza protokołu, więc każdy wiersz przebiegu,
 którego nie nadpiszemy, zostaje pusty na wydruku. Pętle czyszczące kończyły się
-na wierszu 61, a tabela sięga 63 - dwa ostatnie wiersze wychodziły z drukarki
+przed końcem tabeli - dwa ostatnie wiersze wychodziły z drukarki
 puste, w środku tabeli pełnej „--".
 
 To jest dokładnie ten rodzaj usterki, który nie rzuca wyjątku i który widać
@@ -58,7 +58,7 @@ def test_oba_bloki_wypelnione_do_konca_tabeli():
 
 
 def test_ostatnie_dwa_wiersze_tez_maja_mysliniki():
-    """Regresja wprost: 62 i 63 wypadały poza zakres czyszczenia."""
+    """Regresja: dwa końcowe wiersze nie wypadają poza czyszczenie."""
     raw, ws = _shootout_sheet({})
 
     for r in (TIMELINE_END_ROW - 1, TIMELINE_END_ROW):

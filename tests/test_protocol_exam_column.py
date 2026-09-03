@@ -236,7 +236,7 @@ def test_template_matches_code():
         stats_by_number={7: {"entered": True, "goals": 3}},
         fullnames_by_number={7: "KOZAK Mikołaj", 61: "RAJCA Oliwier"},
         start_row=11,
-        end_row=28,
+        end_row=26,
         exam_by_number={7: "zprp", 61: "manual"},
         mark_ws=raw,
     )
@@ -274,7 +274,7 @@ def test_players_without_exams_get_no_marks():
         stats_by_number={},
         fullnames_by_number={},
         start_row=11,
-        end_row=28,
+        end_row=26,
         exam_by_number={},
         mark_ws=raw,
     )
@@ -300,7 +300,7 @@ def test_marks_survive_worksheet_copy():
         stats_by_number={},
         fullnames_by_number={},
         start_row=11,
-        end_row=28,
+        end_row=26,
         exam_by_number={7: "zprp", 61: "wzpr"},
         mark_ws=raw,
     )
@@ -326,7 +326,7 @@ def test_old_client_payload_produces_no_marks():
         stats_by_number={},
         fullnames_by_number={7: "KOZAK Mikołaj"},
         start_row=11,
-        end_row=28,
+        end_row=26,
         exam_by_number=_player_exam_map_from_cards([{"number": 7}]),
         mark_ws=raw,
     )

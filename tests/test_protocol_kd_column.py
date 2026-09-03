@@ -1,7 +1,7 @@
 """
 Rubryka Kd (kara dodatkowa) w protokole.
 
-Szablon ma nagłówek „Kd" w FIZYCZNEJ kolumnie AJ (AJ10 gospodarze, AJ36
+Szablon ma nagłówek „Kd" w FIZYCZNEJ kolumnie AJ (AJ10 gospodarze, AJ34
 goście). Kod pisze pod adresem „AI" przez nakładkę ShiftedWS, więc rozjazd
 szablonu i PROTOCOL_COL_SHIFT wpisałby czas kary o kolumnę obok - bez żadnego
 wyjątku. Ten plik pilnuje obu stron: że nagłówek stoi tam, gdzie kod celuje,
@@ -33,7 +33,7 @@ def test_kd_header_sits_in_physical_aj():
     for path in (TEMPLATE, TEMPLATE_2):
         ws = load_workbook(path).active
         assert ws["AJ10"].value == "Kd", path
-        assert ws["AJ36"].value == "Kd", path
+        assert ws["AJ34"].value == "Kd", path
 
 
 def test_penalty_extra_lands_in_kd_cell():
@@ -50,7 +50,7 @@ def test_penalty_extra_lands_in_kd_cell():
         },
         fullnames_by_number={7: "KOZAK Mikołaj", 61: "RAJCA Oliwier"},
         start_row=11,
-        end_row=28,
+        end_row=26,
         exam_by_number={},
         mark_ws=raw,
     )
@@ -75,7 +75,7 @@ def test_old_payload_without_penalty_extra_keeps_dashes():
         stats_by_number={7: {"entered": True}},
         fullnames_by_number={7: "KOZAK Mikołaj"},
         start_row=11,
-        end_row=28,
+        end_row=26,
         exam_by_number={},
         mark_ws=raw,
     )

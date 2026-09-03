@@ -127,26 +127,26 @@ def test_licznik_oddanych_rzutow_pomija_puste_rundy():
 
 # ───────────────────────── miejsce w szablonie ─────────────────────────
 
-#: Tak wygląda lista wierszy przebiegu w `app/results.py`: 15-63 bez szwów.
-TIMELINE_ROWS = [r for r in range(15, 64) if r not in {31, 57}]
+#: Tak wygląda lista wierszy przebiegu w `app/results.py`: 15-59 bez szwów.
+TIMELINE_ROWS = [r for r in range(15, 60) if r not in {29, 53}]
 
 
 def test_seria_omija_wiersze_szwu_formularza():
     from app.protocol_shootout import shootout_row_slots
 
     slots = shootout_row_slots(TIMELINE_ROWS)
-    assert 31 not in slots
-    assert 57 not in slots
+    assert 29 not in slots
+    assert 53 not in slots
     assert slots[0] == 16
 
 
-def test_szesnasty_rzut_nie_lezy_juz_na_szwie():
-    # Osiem serii to szesnaście wierszy. Szesnasty trafiał dokładnie w wiersz
-    # 31 i znikał z wydruku - stąd „brakuje ostatniego rzutu" po dogrywce.
+def test_czternasty_rzut_nie_lezy_juz_na_szwie():
+    # Siedem serii to czternaście wierszy. Czternasty trafiał dokładnie w wiersz
+    # 29 i znikał z wydruku - stąd „brakuje ostatniego rzutu" po dogrywce.
     from app.protocol_shootout import shootout_row_slots
 
     slots = shootout_row_slots(TIMELINE_ROWS)
-    assert slots[15] == 32
+    assert slots[13] == 30
 
 
 def test_kazda_seria_z_meczu_208136_ma_gdzie_wejsc():

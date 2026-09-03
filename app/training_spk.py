@@ -138,7 +138,17 @@ async def _current_reference() -> Optional[Dict[str, Any]]:
         .order_by(desc(spk_reference.c.updated_at))
         .limit(1)
     )
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    ref = dict(row)
+    # Meta liczymy z dokumentu meczu NA ŻYWO, a nie z kolumny zapisanej przy
+    # imporcie. Zapisana meta zamarza w kształcie z tamtego dnia i każde jej
+    # ulepszenie (medyk, wynik do przerwy) czekałoby na ponowny import wzorca -
+    # a dokument, z którego się ją liczy, leży w wierszu obok.
+    blob = ref.get("blob")
+    if isinstance(blob, dict) and blob:
+        ref["meta"] = meta_from_blob(blob)
+    return ref
 
 
 class ReferenceImportResult(BaseModel):

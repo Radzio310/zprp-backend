@@ -2221,9 +2221,9 @@ def _protocol_template_name(core: Dict[str, Any]) -> str:
 def _configure_protocol_page(ws_raw, *, has_second_delegate: bool) -> None:
     if not has_second_delegate:
         return
-    # Oryginalne 71 wierszy przy 90% wypełnia A4 co do milimetra. Szablon z
-    # drugim delegatem ma 72 wiersze, dlatego schodzimy o dwa punkty skali.
-    # Zachowuje to jedną stronę A4 bez ruszania szerokości, scaleń i podpisów.
+    # Wariant z drugim delegatem ma o jeden wiersz więcej niż standardowy,
+    # dlatego schodzimy o dwa punkty skali. Kompaktowe szablony 67/68-wierszowe
+    # zachowują dokładnie wysokość dawnych 71/72-wierszowych odpowiedników.
     ws_raw.page_setup.paperSize = 9  # A4
     ws_raw.page_setup.orientation = "portrait"
     ws_raw.page_setup.scale = 88
@@ -3203,12 +3203,18 @@ SYMBOL_FONT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSansSymbols-Regular.ttf"
 )
 
+PROTOCOL_PLAYER_ROWS = 16
+HOST_PLAYER_START_ROW = 11
+HOST_PLAYER_END_ROW = HOST_PLAYER_START_ROW + PROTOCOL_PLAYER_ROWS - 1
+GUEST_PLAYER_START_ROW = 35
+GUEST_PLAYER_END_ROW = GUEST_PLAYER_START_ROW + PROTOCOL_PLAYER_ROWS - 1
+
 TIMELINE_START_ROW = 15
-TIMELINE_END_ROW = 63
-TIMELINE_SKIP_ROWS = {31, 57}
+TIMELINE_END_ROW = 59
+TIMELINE_SKIP_ROWS = {29, 53}
 
 TIMELINE_ROWS = [r for r in range(TIMELINE_START_ROW, TIMELINE_END_ROW + 1) if r not in TIMELINE_SKIP_ROWS]
-TIMELINE_MAX_ROWS = len(TIMELINE_ROWS)  # było 47, teraz będzie 45
+TIMELINE_MAX_ROWS = len(TIMELINE_ROWS)  # 43 pozycje na każdą połowę
 
 def _filter_protocol_events_for_timeline(protocol: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -3401,7 +3407,7 @@ def _fill_timeline_half_chunk(
         """
         Wynik ma się kleić do dwukropka: gospodarz do prawej, gość do lewej.
 
-        W szablonie DWA wiersze przebiegu (30 i 56, czyli te na styku sekcji
+        W szablonie DWA wiersze przebiegu (28 i 52, czyli te na styku sekcji
         formularza) mają wyrównanie do środka zamiast do krawędzi. Przy
         jednocyfrowym wyniku nikt tego nie zauważał, ale przy dwucyfrowym
         liczby odsuwały się od dwukropka i cały wpis rozjeżdżał się w bok -
@@ -3720,12 +3726,12 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
     bo 15 zajmuje scalony nagłówek.
 
     Zasięg bierzemy z `TIMELINE_END_ROW`, a nie z wpisanej na sztywno liczby:
-    tabela przebiegu sięga wiersza 63, a te pętle kończyły się na 61 - dwa
+    tabela przebiegu ma własną granicę, a te pętle kończyły się przed nią - dwa
     ostatnie wiersze zostawały puste, bo strona karnych powstaje z KOPII
     arkusza i nikt ich potem nie dotykał.
 
     (Kopia z `wb.copy_worksheet` nie przenosi scaleń, więc w odróżnieniu od
-    strony pierwszej wiersze 31 i 57 są tu zwykłymi komórkami i wypełniamy je
+    strony pierwszej wiersze 29 i 53 są tu zwykłymi komórkami i wypełniamy je
     razem z resztą.)
     """
     # 1) Nagłówek: merge + tekst
@@ -3763,12 +3769,12 @@ def _fill_shootout_page(ws, *, data_json: Dict[str, Any]) -> None:
         str(data_json.get("penaltyStarterTeam") or "guest"),
     )
 
-    # Wiersze 31 i 57 NIE są wierszami przebiegu - w tych miejscach formularz
+    # Wiersze 29 i 53 NIE są wierszami przebiegu - w tych miejscach formularz
     # ma szew między sekcjami (blok „osoba odpowiedzialna za drużynę"), więc to,
     # co się w nich napisze, na wydruku nie istnieje. Przebieg meczu omija je od
     # dawna (`TIMELINE_SKIP_ROWS`), a strona karnych szła prosto przez nie -
-    # i szesnasty rzut, czyli ten rozstrzygający przy ośmiu seriach, znikał
-    # z protokołu bez śladu. Krótsze serie mieściły się przed wierszem 31
+    # i czternasty rzut, czyli ten rozstrzygający przy siedmiu seriach, znikał
+    # z protokołu bez śladu. Krótsze serie mieściły się przed wierszem 29
     # i dlatego problem pokazywał się tylko przy dogrywce.
     slots = _shootout_row_slots(TIMELINE_ROWS)
     if len(rows) > len(slots):
@@ -4535,23 +4541,23 @@ OFFICIAL_SIGN_FALLBACK = "-------"
 #: miejscowości oddała im dwie kolumny). Pilnuje tego
 #: `tests/test_protocol_signature_anchors.py`.
 SIGN_ANCHORS: Dict[str, str] = {
-    "hostTeamSignature": "F29",
-    "guestTeamSignature": "F55",
+    "hostTeamSignature": "F27",
+    "guestTeamSignature": "F51",
     # Rubryka podpisu medyka: w szablonie scalenie AF..AL (dawniej AA..AG).
     # Zwolnione miejsce po lewej dostała jego rola - patrz `MEDIC_ROLE_CELL`.
-    "medic": "AE63",
-    "referee1": "AG66",
-    "referee2": "AG67",
-    "secretary": "AG68",
-    "timekeeper": "AG69",
-    "delegate": "AG70",
-    "delegate2": "AG71",
+    "medic": "AE59",
+    "referee1": "AG62",
+    "referee2": "AG63",
+    "secretary": "AG64",
+    "timekeeper": "AG65",
+    "delegate": "AG66",
+    "delegate2": "AG67",
 }
 
-#: Rola medyka („lekarz medycyny", „ratownik medyczny", ...). Rubryka V63:AE64
-#: w pliku, czyli logicznie U63. Powstała z połączenia dawnego pustego pola
-#: V63:Z64 z lewą częścią rubryki podpisu.
-MEDIC_ROLE_CELL = "U63"
+#: Rola medyka („lekarz medycyny”, „ratownik medyczny”, ...). Rubryka V59:AE60
+#: w pliku, czyli logicznie U59. Powstała z połączenia dawnego pustego pola
+#: V59:Z60 z lewą częścią rubryki podpisu.
+MEDIC_ROLE_CELL = "U59"
 
 #: Ramka podpisu oficjela w pikselach. Szerokość to dokładnie rubryka AH..AL
 #: (5 kolumn po 16 px), wysokość - wiersz oficjela (17,6-19,2 px).
@@ -4646,16 +4652,16 @@ def _apply_companion_crossouts(ws, *, host_names, host_meta, host_pen, guest_nam
     Jeśli B-E są puste dla danej drużyny => scal + diagonal.
     """
     HOST_RANGES = {
-        "B": ("J29", "P32"),
-        "C": ("Q29", "W32"),
-        "D": ("X29", "AD32"),
-        "E": ("AE29", "AK32"),
+        "B": ("J27", "P30"),
+        "C": ("Q27", "W30"),
+        "D": ("X27", "AD30"),
+        "E": ("AE27", "AK30"),
     }
     GUEST_RANGES = {
-        "B": ("J55", "P58"),
-        "C": ("Q55", "W58"),
-        "D": ("X55", "AD58"),
-        "E": ("AE55", "AK58"),
+        "B": ("J51", "P54"),
+        "C": ("Q51", "W54"),
+        "D": ("X51", "AD54"),
+        "E": ("AE51", "AK54"),
     }
 
     for ltr, (a, b) in HOST_RANGES.items():
@@ -4671,10 +4677,10 @@ def _apply_companion_crossouts(ws, *, host_names, host_meta, host_pen, guest_nam
 # ============================================================================
 #
 # Oba napisy idą przez NAGŁÓWEK i STOPKĘ STRONY, a nie przez komórki. Powód jest
-# twardy: arkusz zajmuje 71 wierszy, które przy skali 90 % wypełniają wysokość
-# A4 co do milimetra. Dołożenie choćby jednego wiersza wypycha ostatnią linię
-# protokołu na drugą stronę, a wstawienie wiersza NAD ramką przesunęłoby o jeden
-# wszystkie ~170 literalnych adresów w tym pliku.
+# twardy: kompaktowy arkusz ma 67 wierszy, lecz dzięki wyższym wierszom składów
+# zachowuje dokładnie wysokość dawnego układu 71-wierszowego. Przy skali 90 %
+# wypełnia A4 co do milimetra. Dołożenie wysokości wypchnęłoby ostatnią linię
+# protokołu na drugą stronę.
 #
 # Marginesy przestawiamy tak, żeby wysokość obszaru druku została DOKŁADNIE
 # taka sama. Szablon ma górny margines 8 mm i zerowy dolny; dzielimy te same
@@ -4723,17 +4729,17 @@ FITTED_TEXT_CELLS: Tuple[str, ...] = (
     # a nie łamać wiersz)
     MEDIC_ROLE_CELL,
     # sędziowie i oficjele — nazwisko i miejscowość
-    "I66", "I67", "I68", "I69", "I70",
-    "W66", "W67", "W68", "W69", "W70",
+    "I62", "I63", "I64", "I65", "I66",
+    "W62", "W63", "W64", "W65", "W66",
     # osoby towarzyszące — nazwisko (gospodarze / goście)
-    "B29", "K29", "R29", "Y29", "AF29",
-    "B55", "K55", "R55", "Y55", "AF55",
+    "B27", "K27", "R27", "Y27", "AF27",
+    "B51", "K51", "R51", "Y51", "AF51",
     # osoby towarzyszące — funkcja
-    "A30", "J30", "Q30", "X30", "AE30",
-    "A56", "J56", "Q56", "X56", "AE56",
+    "A28", "J28", "Q28", "X28", "AE28",
+    "A52", "J52", "Q52", "X52", "AE52",
     # osoby towarzyszące — licencja
-    "A31", "J31", "Q31", "X31", "AE31",
-    "A57", "J57", "Q57", "X57", "AE57",
+    "A29", "J29", "Q29", "X29", "AE29",
+    "A53", "J53", "Q53", "X53", "AE53",
 )
 
 # Adres hali (`AL4`) świadomie NIE jest na tej liście: jego rubryka ma 59,5 mm
@@ -4744,10 +4750,10 @@ FITTED_TEXT_CELLS: Tuple[str, ...] = (
 def _apply_fitted_text(ws_raw) -> None:
     """Jeden wiersz zamiast łamania — bez ruszania scaleń i rozmiarów rubryk."""
     cells = FITTED_TEXT_CELLS
-    # W zwykłym szablonie wiersz 71 jest stopką scaloną przez całą stronę.
-    # Dopiero wariant 72-wierszowy ma tam dane delegata 2.
-    if ws_raw.max_row >= 72:
-        cells = cells + ("I71", "W71")
+    # W zwykłym szablonie wiersz 67 jest stopką scaloną przez całą stronę.
+    # Dopiero wariant 68-wierszowy ma tam dane delegata 2.
+    if ws_raw.max_row >= 68:
+        cells = cells + ("I67", "W67")
     for logical in cells:
         try:
             cell = ws_raw[shift_ref(logical)]
@@ -5668,8 +5674,8 @@ async def generate_protocol_pdf(
 
         # medyk
         medic = extras.get("medic") or {}
-        ws["U61"].value = (medic.get("fullName") or "").strip()
-        ws["U62"].value = (medic.get("number") or "").strip()
+        ws["U57"].value = (medic.get("fullName") or "").strip()
+        ws["U58"].value = (medic.get("number") or "").strip()
         # Rola z wielkiej litery: aplikacja trzyma ją małymi („ratownik
         # medyczny"), ale na ekranie i na protokole pokazuje jako nazwę własną
         # rubryki. Pusta rola zostawia rubrykę pustą - medyk bywa nieobecny,
@@ -5680,33 +5686,33 @@ async def generate_protocol_pdf(
         )
 
         # widzowie / pojemność
-        ws["G62"].value = extras.get("spectatorsCount") if extras.get("spectatorsCount") is not None else ""
-        ws["Q62"].value = extras.get("venueCapacity") if extras.get("venueCapacity") is not None else ""
+        ws["G58"].value = extras.get("spectatorsCount") if extras.get("spectatorsCount") is not None else ""
+        ws["Q58"].value = extras.get("venueCapacity") if extras.get("venueCapacity") is not None else ""
 
-        # szczegółowe uwagi sędziów: brak -> O61, verte -> S61
-        ws["O61"].value = "X" if not detailed_notes else ""
-        ws["S61"].value = "X" if detailed_notes else ""
+        # szczegółowe uwagi sędziów: brak -> O57, verte -> S57
+        ws["O57"].value = "X" if not detailed_notes else ""
+        ws["S57"].value = "X" if detailed_notes else ""
 
-        # rejestracja zawodów: tak -> O63, nie -> S63
+        # rejestracja zawodów: tak -> O59, nie -> S59
         event_reg = bool(extras.get("eventRegistration")) if extras.get("eventRegistration") is not None else False
-        ws["O63"].value = "X" if event_reg else ""
-        ws["S63"].value = "X" if not event_reg else ""
+        ws["O59"].value = "X" if event_reg else ""
+        ws["S59"].value = "X" if not event_reg else ""
 
-        # dodatkowy raport: tak -> O64, nie -> S64
+        # dodatkowy raport: tak -> O60, nie -> S60
         extra_report = bool(extras.get("extraReport")) if extras.get("extraReport") is not None else False
-        ws["O64"].value = "X" if extra_report else ""
-        ws["S64"].value = "X" if not extra_report else ""
+        ws["O60"].value = "X" if extra_report else ""
+        ws["S60"].value = "X" if not extra_report else ""
 
-        # miejscowości sędziów (W66..W70)
+        # miejscowości sędziów (W62..W66)
         officials = extras.get("officials") or {}
 
-        _set_cell_fallback(ws, "W66", (officials.get("referee1") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
-        _set_cell_fallback(ws, "W67", (officials.get("referee2") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
-        _set_cell_fallback(ws, "W68", (officials.get("secretary") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
-        _set_cell_fallback(ws, "W69", (officials.get("timekeeper") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
-        _set_cell_fallback(ws, "W70", (officials.get("delegate") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W62", (officials.get("referee1") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W63", (officials.get("referee2") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W64", (officials.get("secretary") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W65", (officials.get("timekeeper") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+        _set_cell_fallback(ws, "W66", (officials.get("delegate") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
         if has_second_delegate:
-            _set_cell_fallback(ws, "W71", (officials.get("delegate2") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
+            _set_cell_fallback(ws, "W67", (officials.get("delegate2") or {}).get("city"), OFFICIAL_CITY_FALLBACK)
 
         # --- SIGNATURES (PNG z backendu) ---
         # 1) podpisy drużyn
@@ -5787,7 +5793,7 @@ async def generate_protocol_pdf(
         ws["C4"].value = core["hostName"]
         ws["D9"].value = core["hostName"]
         ws["C7"].value = core["guestName"]
-        ws["D35"].value = core["guestName"]
+        ws["D33"].value = core["guestName"]
 
         ws["AL6"].value = str(core["scoreHost"])
         ws["AQ6"].value = str(core["scoreGuest"])
@@ -5800,10 +5806,10 @@ async def generate_protocol_pdf(
         _place_timeouts(ws, team_timeouts=tt_guest, half_ms=half_ms, is_host=False)
 
         # --- penalties totals ---
-        ws["AN65"].value = str(pk_host_total)
-        ws["AR65"].value = str(pk_host_goals)
-        ws["AY65"].value = str(pk_guest_total)
-        ws["BC65"].value = str(pk_guest_goals)
+        ws["AN61"].value = str(pk_host_total)
+        ws["AR61"].value = str(pk_host_goals)
+        ws["AY61"].value = str(pk_guest_total)
+        ws["BC61"].value = str(pk_guest_goals)
 
         # --- players numbers + stats ---
         # UWAGA: ptaszki wstawiamy TU, czyli PRZED wb.copy_worksheet niżej —
@@ -5815,8 +5821,8 @@ async def generate_protocol_pdf(
             players=core["hostPlayers"],
             stats_by_number=host_stats,
             fullnames_by_number=host_names,
-            start_row=11,
-            end_row=28,
+            start_row=HOST_PLAYER_START_ROW,
+            end_row=HOST_PLAYER_END_ROW,
             exam_by_number=host_exams,
             mark_ws=ws_raw,
             max_minute=core["halfTimeMin"] * 2,
@@ -5826,26 +5832,26 @@ async def generate_protocol_pdf(
             players=core["guestPlayers"],
             stats_by_number=guest_stats,
             fullnames_by_number=guest_names,
-            start_row=37,
-            end_row=54,
+            start_row=GUEST_PLAYER_START_ROW,
+            end_row=GUEST_PLAYER_END_ROW,
             exam_by_number=guest_exams,
             mark_ws=ws_raw,
             max_minute=core["halfTimeMin"] * 2,
         )
 
         # Osoby towarzyszące gospodarzy
-        ws["B29"].value  = host_comp_names.get("A", "")
-        ws["K29"].value  = host_comp_names.get("B", "")
-        ws["R29"].value  = host_comp_names.get("C", "")
-        ws["Y29"].value  = host_comp_names.get("D", "")
-        ws["AF29"].value = host_comp_names.get("E", "")
+        ws["B27"].value  = host_comp_names.get("A", "")
+        ws["K27"].value  = host_comp_names.get("B", "")
+        ws["R27"].value  = host_comp_names.get("C", "")
+        ws["Y27"].value  = host_comp_names.get("D", "")
+        ws["AF27"].value = host_comp_names.get("E", "")
 
         # Osoby towarzyszące gości
-        ws["B55"].value  = guest_comp_names.get("A", "")
-        ws["K55"].value  = guest_comp_names.get("B", "")
-        ws["R55"].value  = guest_comp_names.get("C", "")
-        ws["Y55"].value  = guest_comp_names.get("D", "")
-        ws["AF55"].value = guest_comp_names.get("E", "")
+        ws["B51"].value  = guest_comp_names.get("A", "")
+        ws["K51"].value  = guest_comp_names.get("B", "")
+        ws["R51"].value  = guest_comp_names.get("C", "")
+        ws["Y51"].value  = guest_comp_names.get("D", "")
+        ws["AF51"].value = guest_comp_names.get("E", "")
 
         # =========================
         # FUNKCJA + LICENCJA osób towarzyszących
@@ -5853,92 +5859,92 @@ async def generate_protocol_pdf(
         # =========================
 
         # GOSPODARZE:
-        # A: function A30, license A31
-        ws["A30"].value  = host_comp_meta.get("A", {}).get("function", "")
-        ws["A31"].value  = host_comp_meta.get("A", {}).get("license", "")
+        # A: function A28, license A29
+        ws["A28"].value  = host_comp_meta.get("A", {}).get("function", "")
+        ws["A29"].value  = host_comp_meta.get("A", {}).get("license", "")
 
-        # B: function J30, license J31
-        ws["J30"].value  = host_comp_meta.get("B", {}).get("function", "")
-        ws["J31"].value  = host_comp_meta.get("B", {}).get("license", "")
+        # B: function J28, license J29
+        ws["J28"].value  = host_comp_meta.get("B", {}).get("function", "")
+        ws["J29"].value  = host_comp_meta.get("B", {}).get("license", "")
 
-        # C: function Q30, license Q31
-        ws["Q30"].value  = host_comp_meta.get("C", {}).get("function", "")
-        ws["Q31"].value  = host_comp_meta.get("C", {}).get("license", "")
+        # C: function Q28, license Q29
+        ws["Q28"].value  = host_comp_meta.get("C", {}).get("function", "")
+        ws["Q29"].value  = host_comp_meta.get("C", {}).get("license", "")
 
-        # D: function X30, license X31
-        ws["X30"].value  = host_comp_meta.get("D", {}).get("function", "")
-        ws["X31"].value  = host_comp_meta.get("D", {}).get("license", "")
+        # D: function X28, license X29
+        ws["X28"].value  = host_comp_meta.get("D", {}).get("function", "")
+        ws["X29"].value  = host_comp_meta.get("D", {}).get("license", "")
 
-        # E: function AE30, license AE31
-        ws["AE30"].value = host_comp_meta.get("E", {}).get("function", "")
-        ws["AE31"].value = host_comp_meta.get("E", {}).get("license", "")
+        # E: function AE28, license AE29
+        ws["AE28"].value = host_comp_meta.get("E", {}).get("function", "")
+        ws["AE29"].value = host_comp_meta.get("E", {}).get("license", "")
 
 
         # GOŚCIE:
-        # A: function A56, license A57
-        ws["A56"].value  = guest_comp_meta.get("A", {}).get("function", "")
-        ws["A57"].value  = guest_comp_meta.get("A", {}).get("license", "")
+        # A: function A52, license A53
+        ws["A52"].value  = guest_comp_meta.get("A", {}).get("function", "")
+        ws["A53"].value  = guest_comp_meta.get("A", {}).get("license", "")
 
-        # B: function J56, license J57
-        ws["J56"].value  = guest_comp_meta.get("B", {}).get("function", "")
-        ws["J57"].value  = guest_comp_meta.get("B", {}).get("license", "")
+        # B: function J52, license J53
+        ws["J52"].value  = guest_comp_meta.get("B", {}).get("function", "")
+        ws["J53"].value  = guest_comp_meta.get("B", {}).get("license", "")
 
-        # C: function Q56, license Q57
-        ws["Q56"].value  = guest_comp_meta.get("C", {}).get("function", "")
-        ws["Q57"].value  = guest_comp_meta.get("C", {}).get("license", "")
+        # C: function Q52, license Q53
+        ws["Q52"].value  = guest_comp_meta.get("C", {}).get("function", "")
+        ws["Q53"].value  = guest_comp_meta.get("C", {}).get("license", "")
 
-        # D: function X56, license X57
-        ws["X56"].value  = guest_comp_meta.get("D", {}).get("function", "")
-        ws["X57"].value  = guest_comp_meta.get("D", {}).get("license", "")
+        # D: function X52, license X53
+        ws["X52"].value  = guest_comp_meta.get("D", {}).get("function", "")
+        ws["X53"].value  = guest_comp_meta.get("D", {}).get("license", "")
 
-        # E: function AE56, license AE57
-        ws["AE56"].value = guest_comp_meta.get("E", {}).get("function", "")
-        ws["AE57"].value = guest_comp_meta.get("E", {}).get("license", "")
+        # E: function AE52, license AE53
+        ws["AE52"].value = guest_comp_meta.get("E", {}).get("function", "")
+        ws["AE53"].value = guest_comp_meta.get("E", {}).get("license", "")
 
 
         # --- Kary osób towarzyszących (format: U/2'/D - MM:SS) ---
 
-        # HOST A..E (row 31)
-        ws["A32"].value  = host_comp_pen.get("A", {}).get("warn", "---")
-        ws["D32"].value  = host_comp_pen.get("A", {}).get("p2", "---")
-        ws["G32"].value  = host_comp_pen.get("A", {}).get("disq", "---")
+        # HOST A..E (row 30)
+        ws["A30"].value  = host_comp_pen.get("A", {}).get("warn", "---")
+        ws["D30"].value  = host_comp_pen.get("A", {}).get("p2", "---")
+        ws["G30"].value  = host_comp_pen.get("A", {}).get("disq", "---")
 
-        ws["J32"].value  = host_comp_pen.get("B", {}).get("warn", "---")
-        ws["L32"].value  = host_comp_pen.get("B", {}).get("p2", "---")
-        ws["O32"].value  = host_comp_pen.get("B", {}).get("disq", "---")
+        ws["J30"].value  = host_comp_pen.get("B", {}).get("warn", "---")
+        ws["L30"].value  = host_comp_pen.get("B", {}).get("p2", "---")
+        ws["O30"].value  = host_comp_pen.get("B", {}).get("disq", "---")
 
-        ws["Q32"].value  = host_comp_pen.get("C", {}).get("warn", "---")
-        ws["S32"].value  = host_comp_pen.get("C", {}).get("p2", "---")
-        ws["V32"].value  = host_comp_pen.get("C", {}).get("disq", "---")
+        ws["Q30"].value  = host_comp_pen.get("C", {}).get("warn", "---")
+        ws["S30"].value  = host_comp_pen.get("C", {}).get("p2", "---")
+        ws["V30"].value  = host_comp_pen.get("C", {}).get("disq", "---")
 
-        ws["X32"].value  = host_comp_pen.get("D", {}).get("warn", "---")
-        ws["Z32"].value  = host_comp_pen.get("D", {}).get("p2", "---")
-        ws["AC32"].value = host_comp_pen.get("D", {}).get("disq", "---")
+        ws["X30"].value  = host_comp_pen.get("D", {}).get("warn", "---")
+        ws["Z30"].value  = host_comp_pen.get("D", {}).get("p2", "---")
+        ws["AC30"].value = host_comp_pen.get("D", {}).get("disq", "---")
 
-        ws["AE32"].value = host_comp_pen.get("E", {}).get("warn", "---")
-        ws["AH32"].value = host_comp_pen.get("E", {}).get("p2", "---")
-        ws["AJ32"].value = host_comp_pen.get("E", {}).get("disq", "---")
+        ws["AE30"].value = host_comp_pen.get("E", {}).get("warn", "---")
+        ws["AH30"].value = host_comp_pen.get("E", {}).get("p2", "---")
+        ws["AJ30"].value = host_comp_pen.get("E", {}).get("disq", "---")
 
-        # GUEST A..E (row 56)
-        ws["A58"].value  = guest_comp_pen.get("A", {}).get("warn", "---")
-        ws["D58"].value  = guest_comp_pen.get("A", {}).get("p2", "---")
-        ws["G58"].value  = guest_comp_pen.get("A", {}).get("disq", "---")
+        # GUEST A..E (row 54)
+        ws["A54"].value  = guest_comp_pen.get("A", {}).get("warn", "---")
+        ws["D54"].value  = guest_comp_pen.get("A", {}).get("p2", "---")
+        ws["G54"].value  = guest_comp_pen.get("A", {}).get("disq", "---")
 
-        ws["J58"].value  = guest_comp_pen.get("B", {}).get("warn", "---")
-        ws["L58"].value  = guest_comp_pen.get("B", {}).get("p2", "---")
-        ws["O58"].value  = guest_comp_pen.get("B", {}).get("disq", "---")
+        ws["J54"].value  = guest_comp_pen.get("B", {}).get("warn", "---")
+        ws["L54"].value  = guest_comp_pen.get("B", {}).get("p2", "---")
+        ws["O54"].value  = guest_comp_pen.get("B", {}).get("disq", "---")
 
-        ws["Q58"].value  = guest_comp_pen.get("C", {}).get("warn", "---")
-        ws["S58"].value  = guest_comp_pen.get("C", {}).get("p2", "---")
-        ws["V58"].value  = guest_comp_pen.get("C", {}).get("disq", "---")
+        ws["Q54"].value  = guest_comp_pen.get("C", {}).get("warn", "---")
+        ws["S54"].value  = guest_comp_pen.get("C", {}).get("p2", "---")
+        ws["V54"].value  = guest_comp_pen.get("C", {}).get("disq", "---")
 
-        ws["X58"].value  = guest_comp_pen.get("D", {}).get("warn", "---")
-        ws["Z58"].value  = guest_comp_pen.get("D", {}).get("p2", "---")
-        ws["AC58"].value = guest_comp_pen.get("D", {}).get("disq", "---")
+        ws["X54"].value  = guest_comp_pen.get("D", {}).get("warn", "---")
+        ws["Z54"].value  = guest_comp_pen.get("D", {}).get("p2", "---")
+        ws["AC54"].value = guest_comp_pen.get("D", {}).get("disq", "---")
 
-        ws["AE58"].value = guest_comp_pen.get("E", {}).get("warn", "---")
-        ws["AH58"].value = guest_comp_pen.get("E", {}).get("p2", "---")
-        ws["AJ58"].value = guest_comp_pen.get("E", {}).get("disq", "---")
+        ws["AE54"].value = guest_comp_pen.get("E", {}).get("warn", "---")
+        ws["AH54"].value = guest_comp_pen.get("E", {}).get("p2", "---")
+        ws["AJ54"].value = guest_comp_pen.get("E", {}).get("disq", "---")
 
         # --- Companion crossouts (B-E) if empty ---
         _apply_companion_crossouts(
@@ -5952,13 +5958,13 @@ async def generate_protocol_pdf(
         )
 
         # Sędziowie
-        _set_cell_fallback(ws, "I66", core.get("referee1"), OFFICIAL_NAME_FALLBACK)
-        _set_cell_fallback(ws, "I67", core.get("referee2"), OFFICIAL_NAME_FALLBACK)
-        _set_cell_fallback(ws, "I68", core.get("secretary"), OFFICIAL_NAME_FALLBACK)
-        _set_cell_fallback(ws, "I69", core.get("timekeeper"), OFFICIAL_NAME_FALLBACK)
-        _set_cell_fallback(ws, "I70", core.get("delegate"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I62", core.get("referee1"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I63", core.get("referee2"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I64", core.get("secretary"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I65", core.get("timekeeper"), OFFICIAL_NAME_FALLBACK)
+        _set_cell_fallback(ws, "I66", core.get("delegate"), OFFICIAL_NAME_FALLBACK)
         if has_second_delegate:
-            _set_cell_fallback(ws, "I71", core.get("delegate2"), OFFICIAL_NAME_FALLBACK)
+            _set_cell_fallback(ws, "I67", core.get("delegate2"), OFFICIAL_NAME_FALLBACK)
 
         # --- timeline (match events) + optional pages (overflow + shootout) ---
         evs1, evs2 = _extract_timeline_events(data_json)

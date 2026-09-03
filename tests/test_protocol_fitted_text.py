@@ -55,7 +55,7 @@ def test_fitted_cells_are_unique():
 
 def test_covers_referee_cities_and_names():
     """Miejscowość sędziego to przypadek, od którego się zaczęło."""
-    for row in range(66, 71):
+    for row in range(62, 67):
         assert "W%d" % row in FITTED_TEXT_CELLS
         assert "I%d" % row in FITTED_TEXT_CELLS
 
@@ -64,10 +64,10 @@ def test_covers_all_companion_letters_both_teams():
     """Braki w tej liście objawiają się dokładnie tym, co naprawiamy: jedna
     rubryka łamie tekst, sąsiednia nie."""
     for col in ("B", "K", "R", "Y", "AF"):
-        assert "%s29" % col in FITTED_TEXT_CELLS  # nazwisko, gospodarze
-        assert "%s55" % col in FITTED_TEXT_CELLS  # nazwisko, goście
+        assert "%s27" % col in FITTED_TEXT_CELLS  # nazwisko, gospodarze
+        assert "%s51" % col in FITTED_TEXT_CELLS  # nazwisko, goście
     for col in ("A", "J", "Q", "X", "AE"):
-        for row in (30, 31, 56, 57):  # funkcja i licencja, obie drużyny
+        for row in (28, 29, 52, 53):  # funkcja i licencja, obie drużyny
             assert "%s%d" % (col, row) in FITTED_TEXT_CELLS
 
 
@@ -76,7 +76,7 @@ def test_covers_all_companion_letters_both_teams():
 def test_apply_sets_shrink_and_clears_wrap():
     ws = _ws()
     # W szablonie „osoba A" ma zawijanie — to źródło łamania na dwa wiersze.
-    assert ws[shift_ref("B29")].alignment.wrapText is True
+    assert ws[shift_ref("B27")].alignment.wrapText is True
 
     _apply_fitted_text(ws)
 
@@ -128,8 +128,8 @@ def test_applied_to_every_sheet():
     )
     assert len(wb.worksheets) == 2
     for ws in wb.worksheets:
-        assert ws[shift_ref("W69")].alignment.shrinkToFit is True
-        assert not ws[shift_ref("B29")].alignment.wrapText
+        assert ws[shift_ref("W65")].alignment.shrinkToFit is True
+        assert not ws[shift_ref("B27")].alignment.wrapText
 
 
 def test_survives_save(tmp_path):
@@ -142,8 +142,8 @@ def test_survives_save(tmp_path):
     wb.save(out)
 
     ws = load_workbook(out).active
-    assert ws[shift_ref("W69")].alignment.shrinkToFit is True
-    assert not ws[shift_ref("B29")].alignment.wrapText
+    assert ws[shift_ref("W65")].alignment.shrinkToFit is True
+    assert not ws[shift_ref("B27")].alignment.wrapText
 
 
 # ─────────────────────── geometria (dlaczego to w ogóle trzeba) ───────────────────────
@@ -178,8 +178,8 @@ def _cell_mm(ws, widths, logical: str) -> float:
 @pytest.mark.parametrize(
     "logical,sample",
     [
-        ("W69", "Piotrków Trybunalski"),
-        ("B29", "MALINOWSKI Wojciech"),
+        ("W65", "Piotrków Trybunalski"),
+        ("B27", "MALINOWSKI Wojciech"),
     ],
 )
 def test_these_really_do_not_fit(logical, sample):
