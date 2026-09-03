@@ -9,6 +9,7 @@ import logging
 
 from app.utils import fetch_with_correct_encoding
 from app.deps import get_settings, get_rsa_keys
+from app.province_offtime_sync import refresh_central_snapshot_after_user_change
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 
@@ -137,6 +138,22 @@ async def _submit_offtime(
         logger.error("_submit_offtime error: %s", e, exc_info=True)
         raise
 
+
+async def _refresh_server_snapshot(client: AsyncClient, judge_id: str) -> None:
+    """Best-effort: zapis ZPRP jest ważniejszy niż odświeżenie naszego cache."""
+    try:
+        count = await refresh_central_snapshot_after_user_change(client, judge_id)
+        logger.info(
+            "Central offtime snapshot refreshed after user change judge=%s entries=%s",
+            judge_id,
+            count,
+        )
+    except Exception:
+        logger.exception(
+            "Central offtime snapshot refresh failed after user change judge=%s",
+            judge_id,
+        )
+
 # ----------------- ENDPOINTS -----------------
 
 @router.post("/judge/offtimes/create", summary="Dodaj nową niedyspozycyjność")
@@ -165,6 +182,7 @@ async def create_offtime(
                     "IdOffT": ""
                 }
             )
+            await _refresh_server_snapshot(client, judge_plain)
         finally:
             await client.aclose()
         return {"success": True}
@@ -199,6 +217,7 @@ async def update_offtime(
                     "info": req.Info
                 }
             )
+            await _refresh_server_snapshot(client, judge_plain)
         finally:
             await client.aclose()
         return {"success": True}
@@ -228,6 +247,7 @@ async def delete_offtime(
                 action_str="Usun",
                 overrides={"IdOffT": req.IdOffT}
             )
+            await _refresh_server_snapshot(client, judge_plain)
         finally:
             await client.aclose()
         return {"success": True}

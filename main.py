@@ -144,6 +144,7 @@ from app.push.push import router as push_router
 from app.push.scheduler import run_push_scheduler
 from app.push.deploy_test_notifications import run_deploy_test_notifications
 from app.province_match_monitor import run_province_match_monitor
+from app.province_offtime_sync import run_province_offtime_sync
 
 from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts, assignment_drafts, province_match_events, province_match_sync_runs
 
@@ -692,6 +693,7 @@ _standings_sync_task: asyncio.Task | None = None
 _email_grace_task: asyncio.Task | None = None
 _mp_snapshot_task: asyncio.Task | None = None
 _province_match_monitor_task: asyncio.Task | None = None
+_province_offtime_sync_task: asyncio.Task | None = None
 _deploy_push_test_task: asyncio.Task | None = None
 
 
@@ -1153,7 +1155,7 @@ async def startup():
         logger.exception("❌ Walidacja konfiguracji e-mail nie powiodła się")
         raise
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _deploy_push_test_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -1199,7 +1201,9 @@ async def startup():
     _push_task = asyncio.create_task(run_push_scheduler())
     _deploy_push_test_task = asyncio.create_task(_run_deploy_push_test_safely())
     _province_match_monitor_task = asyncio.create_task(run_province_match_monitor())
+    _province_offtime_sync_task = asyncio.create_task(run_province_offtime_sync())
     logger.info("Province match monitor started (15 min light / 4 h full)")
+    logger.info("Central offtime sync started (2 h)")
     logger.info("✅ Push scheduler started")
 
     # NEW: background notification generator (tournament reminders etc.)
@@ -1231,7 +1235,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _deploy_push_test_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task
 
     if _cleanup_task:
         _cleanup_task.cancel()
@@ -1251,6 +1255,13 @@ async def shutdown():
         _province_match_monitor_task.cancel()
         try:
             await _province_match_monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    if _province_offtime_sync_task:
+        _province_offtime_sync_task.cancel()
+        try:
+            await _province_offtime_sync_task
         except asyncio.CancelledError:
             pass
 

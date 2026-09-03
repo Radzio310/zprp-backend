@@ -2131,6 +2131,8 @@ def _parse_offtime_rows(html: str) -> Dict[str, Any]:
         date_from = _clean_spaces(tds[1].get_text(" ", strip=True))
         date_to = _clean_spaces(tds[2].get_text(" ", strip=True))
         info = _clean_spaces(tds[3].get_text(" ", strip=True))
+        id_input = tr.find("input", attrs={"name": "IdOffT"})
+        source_id = _clean_spaces(id_input.get("value", "") if id_input else "")
 
         # Historia edycji: szukamy td z img[src*=Info-ikona] – jego title to historia
         # WAŻNE: NIE używamy _clean_spaces na title (kolapsa \n między wpisami historii)
@@ -2152,6 +2154,7 @@ def _parse_offtime_rows(html: str) -> Dict[str, Any]:
 
         offtimes.append({
             "lp": lp,
+            "id": source_id,
             "created_by": t0_title,  # "[user] YYYY-MM-DD HH:MM:SS"
             "date_from": date_from,
             "date_to": date_to,
@@ -2172,7 +2175,7 @@ def _parse_offtime_rows(html: str) -> Dict[str, Any]:
 
 def _build_offtime_path(nr_sedzia: Union[str, int]) -> str:
     nr = _clean_spaces(str(nr_sedzia))
-    return f"/index.php?a=sedzia&b=offtime&NrSedzia={nr}"
+    return f"/index.php?a=sedzia&b=off&NrSedzia={nr}"
 
 
 @router.post("/zprp/sedziowie/niedyspozycje/scrape")

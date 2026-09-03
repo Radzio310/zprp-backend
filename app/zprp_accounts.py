@@ -4,8 +4,9 @@
 #
 # Dwie role, świadomie rozdzielone:
 #
-#   `sync`   - konto monitora meczów. Tylko czyta: otwiera listy meczów sędziów
-#              i terminarz województwa, żeby wykryć zmiany i wysłać push.
+#   `sync`   - konto monitorów tylko do odczytu: otwiera listy meczów sędziów,
+#              terminarz województwa i centralne niedyspozycje, żeby utrzymać
+#              powiadomienia oraz kalendarz okręgowy.
 #   `assign` - konto obsadowe. ZAPISUJE obsadę w bazie związku, gdy administrator
 #              albo obsadowy zatwierdzi wymianę meczu na giełdzie.
 #

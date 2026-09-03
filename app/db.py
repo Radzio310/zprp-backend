@@ -103,6 +103,65 @@ silesia_offtimes = Table(
          server_default=func.now(), onupdate=func.now())
 )
 
+# Centralne niedyspozycje pobierane z baza.zprp.pl przez konto komisji.
+#
+# Są osobnym snapshotem, a nie częścią ``silesia_offtimes.data_json``. Dzięki
+# temu zapis kalendarza okręgowego z telefonu nie może przypadkiem cofnąć
+# świeższej kopii danych centralnych. Endpointy /silesia/offtimes/* składają oba
+# źródła dopiero przy odczycie.
+province_central_offtimes = Table(
+    "province_central_offtimes",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("full_name", String, nullable=False),
+    Column("city", String, nullable=True),
+    Column(
+        "data_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column("source_total", Integer, nullable=False, server_default=text("0")),
+    Column("source_deleted", Integer, nullable=False, server_default=text("0")),
+    Column("active", Boolean, nullable=False, server_default=text("true")),
+    Column("missing_roster_runs", Integer, nullable=False, server_default=text("0")),
+    Column("last_error", Text, nullable=True),
+    Column("last_attempt_at", DateTime(timezone=True), nullable=True),
+    Column("synced_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+Index(
+    "ix_province_central_offtimes_active",
+    province_central_offtimes.c.province,
+    province_central_offtimes.c.active,
+)
+
+# Dziennik cykli synchronizacji. ``cycle_key`` zapewnia, że przy kilku
+# replikach Railway tylko jedna z nich wykona dany dwugodzinny przebieg.
+province_offtime_sync_runs = Table(
+    "province_offtime_sync_runs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("cycle_key", String, nullable=False, unique=True),
+    Column("status", String, nullable=False, server_default=text("'running'")),
+    Column("officials_seen", Integer, nullable=False, server_default=text("0")),
+    Column("officials_with_link", Integer, nullable=False, server_default=text("0")),
+    Column("judges_synced", Integer, nullable=False, server_default=text("0")),
+    Column("entries_active", Integer, nullable=False, server_default=text("0")),
+    Column("errors_count", Integer, nullable=False, server_default=text("0")),
+    Column("error", Text, nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+
 # (6) Mecze do oddania
 matches_to_offer = Table(
     "matches_to_offer",

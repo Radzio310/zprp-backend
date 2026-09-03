@@ -8,7 +8,7 @@ import json
 import os
 import shutil
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import (
     APIRouter,
@@ -22,7 +22,13 @@ from fastapi import (
 )
 from sqlalchemy import select, insert, update, delete, func
 
-from app.db import database, announcements, silesia_offtimes
+from app.db import (
+    database,
+    announcements,
+    province_central_offtimes,
+    province_offtime_sync_runs,
+    silesia_offtimes,
+)
 from app.notify_utils import schedule_province_push
 from app.schemas import (
     # Announcements
@@ -42,6 +48,10 @@ from app.deps import get_rsa_keys
 
 from cryptography.hazmat.primitives.asymmetric import padding
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from app.zprp_accounts import configured_provinces, normalize_province
+from app.release_stories import require_release_admin
+
+CENTRAL_OFFTIME_SOURCE = "ZPRP_CENTRAL_SYNC"
 
 # -------------------------
 # Static files (Railway Volume)
@@ -564,6 +574,188 @@ async def delete_announcement(ann_id: int):
 # ==================  OFFTIMES (OKRĘGOWE)  ===================
 # ============================================================
 
+def _json_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (JSONDecodeError, TypeError):
+            return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _is_central_zprp_entry(item: dict[str, Any]) -> bool:
+    """Rozpoznaj nowy wpis źródłowy i jego starszą kopię wysyłaną z telefonu."""
+    source = str(item.get("source") or "").strip().upper()
+    if source == CENTRAL_OFFTIME_SOURCE:
+        return True
+    category = str(
+        item.get("category_name") or item.get("categoryName") or ""
+    ).strip().upper()
+    is_global = bool(item.get("is_global") or item.get("isGlobal"))
+    is_match = bool(item.get("isMatch") or item.get("is_match"))
+    return category == "BAZOWA" and is_global and not is_match
+
+
+def _without_client_central(value: Any) -> list[dict[str, Any]]:
+    # Centralna część ma jednego właściciela: crawler ZPRP. Dzięki temu nawet
+    # starsza wersja aplikacji, która nadal ją odsyła, nie cofnie snapshotu.
+    return [item for item in _json_list(value) if not _is_central_zprp_entry(item)]
+
+
+def _same_province(left: Any, right: Any) -> bool:
+    left_norm = normalize_province(left)
+    right_norm = normalize_province(right)
+    if left_norm and right_norm:
+        return left_norm == right_norm
+    return str(left or "").strip().upper() == str(right or "").strip().upper()
+
+
+def _dedupe_offtime_entries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    positions: dict[str, int] = {}
+    for item in items:
+        item_id = str(item.get("id") or "").strip()
+        key = item_id or "|".join(
+            str(item.get(name) or "")
+            for name in ("source", "from", "to", "info", "category_name")
+        )
+        if key in positions:
+            # Późniejszy element wygrywa. Snapshot centralny dokładamy po danych
+            # okręgowych, więc jest autorytatywny także podczas migracji.
+            result[positions[key]] = item
+        else:
+            positions[key] = len(result)
+            result.append(item)
+    return result
+
+
+def _newest_datetime(*values: Any) -> datetime:
+    valid = [value for value in values if isinstance(value, datetime)]
+    if not valid:
+        return datetime.now().astimezone()
+    return max(
+        valid,
+        key=lambda value: (
+            value.replace(tzinfo=None) if value.tzinfo is not None else value
+        ),
+    )
+
+
+async def _composed_offtime_records(
+    *,
+    province: Optional[str] = None,
+    judge_id: Optional[str] = None,
+) -> list[OfftimeRecord]:
+    """Złóż okręgowy zapis użytkownika i centralny snapshot ZPRP przy odczycie."""
+    district_query = select(silesia_offtimes)
+    if judge_id is not None:
+        district_query = district_query.where(silesia_offtimes.c.judge_id == judge_id)
+    district_rows = await database.fetch_all(district_query)
+    if province:
+        district_rows = [
+            row for row in district_rows if _same_province(row["province"], province)
+        ]
+
+    central_query = select(province_central_offtimes)
+    if judge_id is not None:
+        central_query = central_query.where(
+            province_central_offtimes.c.judge_id == judge_id
+        )
+    province_key = normalize_province(province) if province else ""
+    if province and province_key:
+        central_query = central_query.where(
+            province_central_offtimes.c.province == province_key
+        )
+    central_rows = await database.fetch_all(central_query)
+    if province and not province_key:
+        central_rows = [
+            row for row in central_rows if _same_province(row["province"], province)
+        ]
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in district_rows:
+        row_province = normalize_province(row["province"]) or str(row["province"])
+        key = (row_province, str(row["judge_id"]))
+        group = groups.setdefault(
+            key,
+            {
+                "judge_id": str(row["judge_id"]),
+                "province": str(row["province"]),
+                "full_name": str(row["full_name"] or ""),
+                "city": row["city"],
+                "district": [],
+                "central": [],
+                "updated_at": row["updated_at"],
+                "central_synced_at": None,
+            },
+        )
+        # Legacy BAZOWA zostaje chwilowo jako fallback. Usuniemy ją dopiero,
+        # gdy dla tego sędziego istnieje już prawidłowy snapshot serwerowy.
+        group["district"].extend(_json_list(row["data_json"]))
+        group["updated_at"] = _newest_datetime(
+            group["updated_at"], row["updated_at"]
+        )
+
+    for row in central_rows:
+        row_province = normalize_province(row["province"]) or str(row["province"])
+        key = (row_province, str(row["judge_id"]))
+        # Nieaktywny snapshot oznacza „sędzia zniknął z listy okręgu”. Dla
+        # /self nadal zwracamy pustą, autorytatywną część centralną, aby telefon
+        # wyczyścił cache. W /all nie tworzymy natomiast osieroconego kafelka.
+        if not row["active"] and key not in groups and judge_id is None:
+            continue
+        group = groups.setdefault(
+            key,
+            {
+                "judge_id": str(row["judge_id"]),
+                "province": str(province or row["province"]),
+                "full_name": str(row["full_name"] or ""),
+                "city": row["city"],
+                "district": [],
+                "central": [],
+                "updated_at": row["synced_at"],
+                "central_synced_at": row["synced_at"],
+            },
+        )
+        if not group["full_name"]:
+            group["full_name"] = str(row["full_name"] or "")
+        if not group["city"]:
+            group["city"] = row["city"]
+        group["central"] = _json_list(row["data_json"]) if row["active"] else []
+        group["central_synced_at"] = row["synced_at"]
+        group["updated_at"] = _newest_datetime(
+            group["updated_at"], row["synced_at"]
+        )
+
+    records = [
+        OfftimeRecord(
+            judge_id=group["judge_id"],
+            province=group["province"],
+            full_name=group["full_name"] or f"Sędzia {group['judge_id']}",
+            city=group["city"],
+            data_json=_dedupe_offtime_entries(
+                [
+                    *(
+                        _without_client_central(group["district"])
+                        if group["central_synced_at"]
+                        else group["district"]
+                    ),
+                    *group["central"],
+                ]
+            ),
+            updated_at=group["updated_at"],
+            central_synced_at=group["central_synced_at"],
+            central_source=(
+                CENTRAL_OFFTIME_SOURCE if group["central_synced_at"] else None
+            ),
+        )
+        for group in groups.values()
+    ]
+    records.sort(key=lambda item: (item.full_name.casefold(), item.judge_id))
+    return records
+
 @router_off.post(
     "/set",
     status_code=status.HTTP_200_OK,
@@ -587,6 +779,11 @@ async def set_offtimes(req: SetOfftimesRequest):
             raise HTTPException(status_code=400, detail="Niepoprawny JSON w data_json")
     else:
         data_json_obj = raw
+
+    # Starsze aplikacje odsyłają do tego endpointu także lokalną kopię wpisów
+    # BAZOWA. Od teraz centralny snapshot pochodzi wyłącznie z ZPRP i nie wolno
+    # go nadpisywać zawartością telefonu.
+    data_json_obj = _without_client_central(data_json_obj)
 
     # Postgres: ON CONFLICT (judge_id, province)
     # SQLite: w razie czego zadziała jako zwykły INSERT, ale rekomendowana migracja na composite PK
@@ -618,23 +815,13 @@ async def get_my_offtimes(
     judge_id: str,
     province: str = Query(..., description="Województwo, np. 'ŚLĄSKIE'"),
 ):
-    row = await database.fetch_one(
-        select(silesia_offtimes).where(
-            (silesia_offtimes.c.judge_id == judge_id)
-            & (silesia_offtimes.c.province == province)
-        )
+    records = await _composed_offtime_records(
+        province=province,
+        judge_id=judge_id,
     )
-    if not row:
+    if not records:
         raise HTTPException(status_code=404, detail="Brak zapisanych niedyspozycji")
-
-    return OfftimeRecord(
-        judge_id=row["judge_id"],
-        province=row["province"],
-        full_name=row["full_name"],
-        city=row["city"],
-        data_json=row["data_json"],
-        updated_at=row["updated_at"],
-    )
+    return records[0]
 
 
 @router_off.delete(
@@ -669,24 +856,71 @@ async def delete_offtimes(
     summary="Lista wszystkich niedyspozycji (opcjonalnie filtrowana po province)",
 )
 async def list_all_offtimes(province: Optional[str] = Query(None)):
-    q = select(silesia_offtimes)
-    if province:
-        q = q.where(silesia_offtimes.c.province == province)
-    rows = await database.fetch_all(q)
-
     return ListAllOfftimesResponse(
-        records=[
-            OfftimeRecord(
-                judge_id=r["judge_id"],
-                province=r["province"],
-                full_name=r["full_name"],
-                city=r["city"],
-                data_json=r["data_json"],
-                updated_at=r["updated_at"],
-            )
-            for r in rows
-        ]
+        records=await _composed_offtime_records(province=province)
     )
+
+
+@router_off.get(
+    "/central-sync/status",
+    summary="Stan automatycznej synchronizacji centralnych niedyspozycji",
+)
+async def central_offtime_sync_status(
+    province: Optional[str] = Query(None),
+    _admin: str = Depends(require_release_admin),
+):
+    """Diagnostyka bez loginów i haseł — bezpieczna do pokazania w panelu."""
+    province_key = normalize_province(province) if province else ""
+    if province and not province_key:
+        raise HTTPException(status_code=400, detail="Nieznane województwo")
+    run_query = select(province_offtime_sync_runs).order_by(
+        province_offtime_sync_runs.c.started_at.desc()
+    )
+    snapshot_query = select(province_central_offtimes)
+    if province_key:
+        run_query = run_query.where(
+            province_offtime_sync_runs.c.province == province_key
+        )
+        snapshot_query = snapshot_query.where(
+            province_central_offtimes.c.province == province_key
+        )
+    runs = await database.fetch_all(run_query.limit(20))
+    snapshots = await database.fetch_all(snapshot_query)
+    configured = set(configured_provinces().keys())
+    return {
+        "enabled": os.getenv("ZPRP_OFFTIME_SYNC_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on"),
+        "interval_seconds": max(
+            3600, int(os.getenv("ZPRP_OFFTIME_SYNC_SECONDS", "7200"))
+        ),
+        "configured_provinces": sorted(
+            ([province_key] if province_key in configured else [])
+            if province_key
+            else configured
+        ),
+        "snapshots": {
+            "total": len(snapshots),
+            "active": sum(1 for row in snapshots if row["active"]),
+            "last_synced_at": max(
+                (row["synced_at"] for row in snapshots), default=None
+            ),
+        },
+        "recent_runs": [
+            {
+                "province": row["province"],
+                "status": row["status"],
+                "officials_seen": row["officials_seen"],
+                "officials_with_link": row["officials_with_link"],
+                "judges_synced": row["judges_synced"],
+                "entries_active": row["entries_active"],
+                "errors_count": row["errors_count"],
+                "error": row["error"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+            }
+            for row in runs
+        ],
+    }
 
 
 # -------------------------

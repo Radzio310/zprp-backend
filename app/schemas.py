@@ -135,6 +135,8 @@ class OfftimeRecord(BaseModel):
   city: Optional[str]
   data_json: Any
   updated_at: datetime
+  central_synced_at: Optional[datetime] = None
+  central_source: Optional[str] = None
 
 
 class ListOfftimesResponse(BaseModel):
