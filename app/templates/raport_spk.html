@@ -1,0 +1,168 @@
+<!doctype html>
+{# Raport wyników sprawdzianu SPK/1 - okładka z liczbami, rozkład ocen,
+   zestawienie okręgów (tylko raport ogólnopolski) i ranking sędziów.
+
+   Ten sam charakter co materiał szkoleniowy (szkolenie_spk.html): krem, atrament,
+   miedziany akcent - raport i prezentacja mają wyglądać jak jedna rodzina. #}
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: A4;
+    margin: 16mm 14mm;
+    @bottom-center {
+      content: "Sprawdzian SPK/1 · " string(scope) " · strona " counter(page) " z " counter(pages);
+      font-size: 8pt;
+      color: {{ muted }};
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", "Segoe UI", sans-serif;
+    color: {{ ink }};
+    background: {{ cream }};
+    margin: 0;
+    font-size: 10pt;
+  }
+  .scope-anchor { string-set: scope "{{ scope }}"; }
+
+  .cover {
+    border-bottom: 2pt solid {{ accent }};
+    padding-bottom: 8mm;
+    margin-bottom: 8mm;
+  }
+  .kicker {
+    font-size: 9pt;
+    letter-spacing: 2pt;
+    text-transform: uppercase;
+    color: {{ accent }};
+    font-weight: 700;
+  }
+  h1 { font-size: 22pt; margin: 2mm 0 1mm; }
+  .scope-line { color: {{ muted }}; font-size: 10pt; }
+
+  .stats { display: flex; gap: 4mm; margin: 6mm 0; }
+  .stat {
+    flex: 1;
+    border: 0.6pt solid {{ muted }}44;
+    border-radius: 3mm;
+    padding: 3mm 4mm;
+  }
+  .stat .value { font-size: 17pt; font-weight: 900; color: {{ accent }}; }
+  .stat .label { font-size: 8pt; color: {{ muted }}; text-transform: uppercase; letter-spacing: 0.8pt; }
+
+  h2 {
+    font-size: 12pt;
+    margin: 7mm 0 2.5mm;
+    letter-spacing: 0.6pt;
+    text-transform: uppercase;
+    color: {{ ink }};
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left;
+    font-size: 8pt;
+    text-transform: uppercase;
+    letter-spacing: 0.6pt;
+    color: {{ muted }};
+    border-bottom: 1pt solid {{ accent }};
+    padding: 1.6mm 2mm;
+  }
+  td { padding: 1.8mm 2mm; border-bottom: 0.4pt solid {{ muted }}33; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.top td { font-weight: 700; }
+  .medal { color: {{ accent }}; font-weight: 900; }
+
+  .bucket-row { display: flex; align-items: center; gap: 3mm; margin: 1.2mm 0; }
+  .bucket-label { width: 34mm; font-size: 9pt; }
+  .bucket-bar-wrap { flex: 1; background: {{ muted }}22; border-radius: 2mm; height: 5mm; }
+  .bucket-bar { background: {{ accent }}; border-radius: 2mm; height: 5mm; }
+  .bucket-count { width: 20mm; text-align: right; font-size: 9pt; color: {{ muted }}; }
+
+  .note { font-size: 8.5pt; color: {{ muted }}; margin-top: 2mm; }
+</style>
+</head>
+<body>
+<div class="scope-anchor"></div>
+
+<section class="cover">
+  <div class="kicker">Superpuchar PGNiG · szkolenie stałe</div>
+  <h1>{{ title }}</h1>
+  <div class="scope-line">
+    Zakres: <b>{{ scope }}</b> · wygenerowano {{ generatedAt }}{% if generatedBy %} · {{ generatedBy }}{% endif %}
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="value">{{ judges }}</div><div class="label">sędziów</div></div>
+    <div class="stat"><div class="value">{{ attempts }}</div><div class="label">podejść ocenianych</div></div>
+    <div class="stat"><div class="value">{{ avg if avg is not none else "—" }}</div><div class="label">średnia</div></div>
+    <div class="stat"><div class="value">{{ median if median is not none else "—" }}</div><div class="label">mediana</div></div>
+    <div class="stat"><div class="value">{{ best if best is not none else "—" }}</div><div class="label">najlepszy wynik</div></div>
+  </div>
+  {% if guidedAttempts %}
+  <div class="note">
+    Poza liczbami: {{ guidedAttempts }} podejść w trybie nauki w aplikacji
+    (prowadzenie za rękę) - celowo nie wchodzą do średnich ani rankingu.
+  </div>
+  {% endif %}
+</section>
+
+{% if gradeBuckets %}
+<h2>Rozkład ocen</h2>
+{% for b in gradeBuckets %}
+<div class="bucket-row">
+  <div class="bucket-label">{{ b.label }}</div>
+  <div class="bucket-bar-wrap"><div class="bucket-bar" style="width: {{ b.percent }}%;"></div></div>
+  <div class="bucket-count">{{ b.count }} ({{ b.percent }}%)</div>
+</div>
+{% endfor %}
+<div class="note">Liczone z najlepszego podejścia każdego sędziego - wytrwałość w ćwiczeniu nie obniża wyniku.</div>
+{% endif %}
+
+{% if byProvince %}
+<h2>Okręgi</h2>
+<table>
+  <thead>
+    <tr><th>Okręg</th><th class="num">Sędziów</th><th class="num">Średnia</th><th class="num">Mediana</th><th class="num">Najlepszy</th></tr>
+  </thead>
+  <tbody>
+    {% for p in byProvince %}
+    <tr{% if loop.index <= 3 %} class="top"{% endif %}>
+      <td>{% if loop.index == 1 %}<span class="medal">1.</span>{% else %}{{ loop.index }}.{% endif %} {{ p.province }}</td>
+      <td class="num">{{ p.judges }}</td>
+      <td class="num">{{ p.avg }}</td>
+      <td class="num">{{ p.median }}</td>
+      <td class="num">{{ p.best }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if ranking %}
+<h2>Ranking sędziów</h2>
+<table>
+  <thead>
+    <tr><th style="width: 10mm;">Msc</th><th>Sędzia</th>{% if byProvince %}<th>Okręg</th>{% endif %}<th>Tryb</th><th class="num">Podejście</th><th class="num">Wynik</th></tr>
+  </thead>
+  <tbody>
+    {% for r in ranking %}
+    <tr{% if r.place <= 3 %} class="top"{% endif %}>
+      <td>{% if r.place <= 3 %}<span class="medal">{{ r.place }}.</span>{% else %}{{ r.place }}.{% endif %}</td>
+      <td>{{ r.judgeName }}</td>
+      {% if byProvince %}<td>{{ r.province }}</td>{% endif %}
+      <td>{{ r.mode }}</td>
+      <td class="num">{{ r.attempt }}</td>
+      <td class="num"><b>{{ r.score }}</b></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<h2>Ranking sędziów</h2>
+<div class="note">Jeszcze nikt nie ukończył ocenianego podejścia w tym zakresie.</div>
+{% endif %}
+
+</body>
+</html>

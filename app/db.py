@@ -381,6 +381,9 @@ spk_run = Table(
     Column("score", Numeric(5, 1), nullable=True),
     Column("score_json", JSONB, nullable=True),
     Column("data_json", JSONB, nullable=True),
+    #: Ocena słowna od modelu językowego: {"summary", "model", "generatedAt"}.
+    #: NULL = jeszcze się pisze albo się nie udała - klient dopyta.
+    Column("ai_json", JSONB, nullable=True),
     Column("app_version", String, nullable=True),
     Column(
         "started_at",

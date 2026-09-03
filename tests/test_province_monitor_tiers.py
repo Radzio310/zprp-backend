@@ -255,3 +255,48 @@ def test_okno_publiczne_nie_uzywa_distinct():
     """
     assert "distinct" not in calls_in("_public_window_states")
     assert "exists" in calls_in("_public_window_states")
+
+
+# ── Mecze spoza terminarza okregu (powierzona II liga, turnieje) ─────────────
+
+
+def test_puste_pola_obsady_z_api_nie_kasuja_prywatnej_listy():
+    """Publiczne API bywa ubozsze od prywatnej listy sedziego.
+
+    Przy czesci rozgrywek oddaje puste pola obsady, ktore lista zna - a po
+    nadpisaniu pustka mecz przestawal byc "moj" (`slots_held_by` nie mial po
+    czym szukac) i znikal z gieldy meczow.
+    """
+    base = {
+        "Id": "7",
+        "data_fakt": "2026-10-05 18:00",
+        "NrSedzia_pierwszy_nazwisko": "KOWALSKI Jan",
+        "NrSedzia_drugi_nazwisko": "STARY Piotr",
+    }
+    payload = {
+        "0": [
+            {
+                "Id": "7",
+                "NrSedzia_pierwszy_nazwisko": "",
+                "NrSedzia_drugi_nazwisko": "NOWY Marek",
+                "Hala_miasto": "",
+            }
+        ]
+    }
+    state = _api_to_state(payload, base)
+    assert state["NrSedzia_pierwszy_nazwisko"] == "KOWALSKI Jan"
+    assert state["NrSedzia_drugi_nazwisko"] == "NOWY Marek"
+    # Pola spoza obsady nadpisuja sie jak dotad - wzbogacamy tylko obsade.
+    assert state["Hala_miasto"] == ""
+
+
+def test_pelny_przebieg_nie_gasi_meczow_swiezo_widzianych_gdzie_indziej():
+    """Terminarz wojewodztwa nie jest jedynym zrodlem prawdy.
+
+    Mecz powierzonej grupy II ligi zyje na prywatnych listach sedziow, a w
+    terminarzu okregu nie wystepuje - pelny przebieg gasil go po dwoch
+    obiegach z falszywym "Usunieto Twoj mecz" i mecz znikal z gieldy.
+    """
+    src = ast.unparse(FUNCTIONS["_mark_missing_full_matches"])
+    assert "last_seen_at" in src
+    assert "_FULL_MISS_GRACE_HOURS" in src

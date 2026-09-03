@@ -85,3 +85,34 @@ class TestRozdzielnoscTokenow:
 
     def test_publicznosci_sa_rozne(self):
         assert spk_pdf_link.TOKEN_AUDIENCE != proel_elevation.TOKEN_AUDIENCE
+
+
+class TestRodzajDokumentu:
+    """Adres prezentacji jest do pokazania sali; raport niesie nazwiska.
+
+    Jeden token nie ma prawa otwierać obu - rozstrzyga `doc` w payloadzie,
+    a stare tokeny bez `doc` znaczą prezentację, bo tylko ją wtedy
+    podpisywaliśmy.
+    """
+
+    def test_domyslnie_prezentacja(self):
+        from app.spk_pdf_link import create_pdf_token, verify_pdf_token
+
+        payload = verify_pdf_token(create_pdf_token("1234"))
+        assert payload["doc"] == "slides"
+        assert "prov" not in payload
+
+    def test_raport_niesie_doc_i_okreg(self):
+        from app.spk_pdf_link import create_pdf_token, verify_pdf_token
+
+        token = create_pdf_token("1234", doc="report", province="LUBELSKIE")
+        payload = verify_pdf_token(token)
+        assert payload["doc"] == "report"
+        assert payload["prov"] == "LUBELSKIE"
+
+    def test_raport_ogolnopolski_bez_okregu(self):
+        from app.spk_pdf_link import create_pdf_token, verify_pdf_token
+
+        payload = verify_pdf_token(create_pdf_token("1234", doc="report"))
+        assert payload["doc"] == "report"
+        assert "prov" not in payload

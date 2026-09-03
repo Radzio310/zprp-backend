@@ -337,3 +337,15 @@ def test_every_state_read_goes_through_the_parser():
     assert "state_dict(offer.get('match_snapshot'))" in ast.unparse(
         FUNCTIONS["_offer_payload"]
     )
+
+
+def test_dateless_matches_survive_the_scan_limit():
+    """Mecz "termin do ustalenia" nie moze wypadac przez bezpiecznik LIMIT.
+
+    W jednym zapytaniu mecze bez daty sortowaly sie na koniec (`nulls_last`),
+    wiec LIMIT ucinal wlasnie je - wbrew wlasnemu opisowi o "meczach
+    najdalszych". Osobne zapytanie zdejmuje je spod tego bezpiecznika.
+    """
+    source = ast.unparse(FUNCTIONS["my_matches"])
+    assert "undated_rows" in source
+    assert "nulls_last" not in source

@@ -749,7 +749,7 @@ async def my_matches(
     # przed nazwiskiem, dokladnie jak przy wystawianiu oferty. Dzieki temu lista
     # i bramka `POST /offers` odpowiadaja na to samo pytanie tak samo.
     horizon = now + timedelta(days=MY_MATCHES_HORIZON_DAYS)
-    rows = await database.fetch_all(
+    base_query = (
         select(
             province_matches.c.match_id,
             province_matches.c.match_code,
@@ -759,18 +759,27 @@ async def my_matches(
         )
         .where(province_matches.c.province == province)
         .where(province_matches.c.active.is_(True))
-        .where(
-            or_(
-                province_matches.c.match_at.is_(None),
-                and_(
-                    province_matches.c.match_at >= now,
-                    province_matches.c.match_at <= horizon,
-                ),
+    )
+    dated_rows = await database.fetch_all(
+        base_query.where(
+            and_(
+                province_matches.c.match_at >= now,
+                province_matches.c.match_at <= horizon,
             )
         )
-        .order_by(province_matches.c.match_at.asc().nulls_last())
+        .order_by(province_matches.c.match_at.asc())
         .limit(MY_MATCHES_SCAN_LIMIT)
     )
+    # Mecze BEZ daty osobnym zapytaniem. W jednym sortowały się na koniec
+    # (`nulls_last`), więc bezpiecznik LIMIT ucinał właśnie JE - wbrew własnemu
+    # opisowi o „meczach najdalszych". A „termin do ustalenia" to często
+    # dokładnie ten mecz, który sędzia chce oddać najwcześniej.
+    undated_rows = await database.fetch_all(
+        base_query.where(province_matches.c.match_at.is_(None)).limit(
+            MY_MATCHES_SCAN_LIMIT
+        )
+    )
+    rows = list(dated_rows) + list(undated_rows)
 
     match_ids = [_s(_row(r)["match_id"]) for r in rows]
     live = await database.fetch_all(

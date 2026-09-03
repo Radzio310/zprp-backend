@@ -99,6 +99,14 @@ def is_eligible_for_refresh(state: Dict[str, Any], approved: bool = False, now: 
     return match_at >= (now or _now()) - timedelta(days=31)
 
 
+#: Jak swiezo widziany mecz jest bezpieczny od wygaszania przez pelny przebieg.
+#:
+#: Doba z zapasem: pelne przebiegi chodza raz na dobe, lekkie co kilkanascie
+#: minut. Mecz zywy na czyjejs prywatnej liscie ma `last_seen_at` sprzed minut;
+#: mecz naprawde usuniety znika takze z list sedziow, wiec jego znacznik szybko
+#: sie starzeje i wygaszanie rusza jak dotad.
+_FULL_MISS_GRACE_HOURS = max(1, int(os.getenv("ZPRP_MATCH_MONITOR_FULL_MISS_GRACE_HOURS", "26")))
+
 #: Okno „goracego" przebiegu - mecze, ktore odbywaja sie lada dzien.
 #:
 #: Czternascie dni do przodu i dwa wstecz. Wstecz, bo po meczu jeszcze dlugo
@@ -245,6 +253,31 @@ def _schedule_to_state(match: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 
+#: Pola obsady, ktorych PUSTA odpowiedz publicznego API nie ma prawa kasowac.
+#:
+#: Prywatna lista sedziego zna pelna obsade swoich meczow; publiczne API bywa
+#: ubozsze i przy czesci rozgrywek (szczebel centralny, powierzone grupy)
+#: oddaje te pola puste. Nadpisanie pustka wycinalo nazwiska, a na nich stoi
+#: cala gielda ("moj mecz" = `slots_held_by` po tych polach) i powiadomienia o
+#: zmianach obsady. Zdjecie sedziego z meczu i tak wychodzi inna droga:
+#: mecz znika z jego prywatnej listy (`_mark_missing_assignments`), a stan
+#: odswieza kolejny lekki przebieg.
+_CREW_STATE_KEYS = (
+    "NrSedzia_pierwszy",
+    "NrSedzia_pierwszy_nazwisko",
+    "NrSedzia_drugi",
+    "NrSedzia_drugi_nazwisko",
+    "NrSedzia_sekretarz",
+    "NrSedzia_sekretarz_nazwisko",
+    "NrSedzia_czas",
+    "NrSedzia_czas_nazwisko",
+    "NrSedzia_delegat",
+    "NrSedzia_delegat_nazwisko",
+    "NrSedzia_delegat2",
+    "NrSedzia_delegat2_nazwisko",
+)
+
+
 def _api_to_state(payload: Dict[str, Any], base: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     rows = payload.get("0")
     match = rows[0] if isinstance(rows, list) and rows else None
@@ -252,7 +285,11 @@ def _api_to_state(payload: Dict[str, Any], base: Dict[str, Any]) -> Optional[Dic
         return None
     state = dict(base)
     for key, value in match.items():
-        state[key] = _str(value) if not isinstance(value, (dict, list)) else value
+        incoming = _str(value) if not isinstance(value, (dict, list)) else value
+        if key in _CREW_STATE_KEYS and incoming == "" and _str(base.get(key)):
+            # Wzbogacamy, nie zubozamy - patrz nota przy `_CREW_STATE_KEYS`.
+            continue
+        state[key] = incoming
     state["Id"] = _str(match.get("Id") or base.get("Id"))
     state["RozgrywkiCode"] = _str(match.get("RozgrywkiCode") or base.get("RozgrywkiCode"))
     state["data_fakt"] = _str(match.get("data_fakt") or match.get("data_prop") or base.get("data_fakt"))
@@ -898,6 +935,15 @@ async def _scrape_full_schedule(client: AsyncClient, cookies: Dict[str, str]) ->
 
 async def _mark_missing_full_matches(province: str, seen_ids: set[str]) -> int:
     cutoff = _now() - timedelta(days=31)
+    # Terminarz wojewodztwa NIE jest jedynym zrodlem prawdy o tym, co zyje.
+    # Prywatne listy sedziow wnosza mecze, ktorych terminarz w ogole nie
+    # pokazuje - okreg potrafi obsadzac rozgrywki spoza wlasnej siatki
+    # (powierzona grupa II ligi, turniej centralny). Taki mecz lekki przebieg
+    # widzi co kilkanascie minut, a pelny NIGDY - i po dwoch pelnych
+    # przebiegach gasl z falszywym powiadomieniem "Usunieto Twoj mecz",
+    # znikajac przy tym z gieldy. Nieobecnosc liczymy wiec tylko meczom,
+    # ktorych OD DAWNA nie widzial zaden przebieg.
+    fresh_floor = _now() - timedelta(hours=_FULL_MISS_GRACE_HOURS)
     rows = await database.fetch_all(
         select(province_matches)
         .where(province_matches.c.province == province)
@@ -909,6 +955,9 @@ async def _mark_missing_full_matches(province: str, seen_ids: set[str]) -> int:
     for row in rows:
         match_id = _str(row["match_id"])
         if match_id in seen_ids:
+            continue
+        last_seen = row["last_seen_at"]
+        if last_seen is not None and last_seen >= fresh_floor:
             continue
         missing = int(row["missing_full_runs"] or 0) + 1
         active = missing < 2

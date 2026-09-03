@@ -145,3 +145,42 @@ def build_slides_pdf(
         import shutil
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+REPORT_TEMPLATE_NAME = "raport_spk.html"
+
+
+def render_report_html(context: Dict[str, Any]) -> str:
+    """Gotowy HTML raportu wyników - kontekst składa `training_spk_report.py`.
+
+    Osobno od PDF z tego samego powodu, co przy prezentacji: podgląd w
+    przeglądarce bez WeasyPrinta to najszybsza droga do poprawki układu.
+    """
+    from jinja2 import Environment, FileSystemLoader  # lazy — patrz nagłówek
+
+    env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=True)
+    return env.get_template(REPORT_TEMPLATE_NAME).render(
+        cream=CREAM, ink=INK, accent=ACCENT, muted=MUTED, **context
+    )
+
+
+def build_report_pdf(context: Dict[str, Any]) -> bytes:
+    """Raport wyników jako jeden plik PDF."""
+    html = render_report_html(context)
+
+    import weasyprint  # lazy — patrz nagłówek modułu
+
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        html_path = os.path.join(tmp_dir, "raport.html")
+        with open(html_path, "w", encoding="utf-8") as handle:
+            handle.write(html)
+        return weasyprint.HTML(filename=html_path).write_pdf()
+    finally:
+        try:
+            for name in os.listdir(tmp_dir):
+                os.remove(os.path.join(tmp_dir, name))
+            os.rmdir(tmp_dir)
+        except OSError:
+            logger.warning("SPK: nie udało się posprzątać katalogu %s", tmp_dir)
+

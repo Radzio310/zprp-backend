@@ -922,6 +922,9 @@ async def startup():
         # więc kolumny z dokumentem meczu nie założy `create_all`. Bez niej
         # ćwiczenie od drugiej połowy nie ma skąd wziąć stanu na przerwie.
         "ALTER TABLE spk_reference ADD COLUMN IF NOT EXISTS blob JSONB NOT NULL DEFAULT '{}'::jsonb",
+        # Ocena AI podejścia - tabela podejść istnieje na produkcji, więc
+        # kolumny nie dołoży `create_all`.
+        "ALTER TABLE spk_run ADD COLUMN IF NOT EXISTS ai_json JSONB",
     ]
     for stmt in _province_match_migrations:
         try:

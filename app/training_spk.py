@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -35,12 +36,14 @@ from app.db import database, saved_matches, spk_reference, spk_run
 from app.proel_auth import Actor, is_admin, proel_actor
 from app.spk_pdf_link import create_pdf_token, token_expires_at, verify_pdf_token
 from app.training_spk_score import grade, score_run
-from app.training_spk_pdf import SpkPdfError, build_slides_pdf
+from app.training_spk_pdf import SpkPdfError, build_report_pdf, build_slides_pdf
+from app.training_spk_ai import AI_MODEL, ai_messages, clean_ai_summary
 from app.training_spk_entries import entered_players
 from app.training_spk_halftime import state_after_first_half
 from app.training_spk_meta import meta_from_blob
+from app.training_spk_report import report_context
 from app.training_spk_shootout import shootout_shots
-from app.training_spk_slides import slides_from_timeline
+from app.training_spk_slides import action_text, format_clock, slides_from_timeline
 from app.zprp_accounts import normalize_province
 
 logger = logging.getLogger(__name__)
@@ -416,7 +419,74 @@ async def save_run(
             spk_run.update().where(spk_run.c.run_id == body.runId).values(**values)
         )
 
+    # Ocena słowna pisze się W TLE - OpenAI potrafi myśleć dziesięć sekund i
+    # miewa gorsze dni, a sędzia stoi przed ekranem wyniku i czeka na liczbę.
+    # Liczba wychodzi od razu; tekst dojedzie, a klient o niego dopyta.
+    asyncio.create_task(_write_ai_summary(body.runId, report))
+
     return {"ok": True, "runId": body.runId, "report": report}
+
+
+async def _write_ai_summary(run_id: str, report: Dict[str, Any]) -> None:
+    """Dopisuje ocenę modelu do zapisanego podejścia. Porażka = brak, nie błąd."""
+    try:
+        import openai
+
+        client = openai.AsyncOpenAI()
+        resp = await client.chat.completions.create(
+            model=AI_MODEL,
+            messages=ai_messages(report),
+            max_tokens=320,
+            temperature=0.5,
+        )
+        summary = clean_ai_summary(resp.choices[0].message.content)
+        if not summary:
+            return
+        await database.execute(
+            spk_run.update()
+            .where(spk_run.c.run_id == run_id)
+            .values(
+                ai_json={
+                    "summary": summary,
+                    "model": AI_MODEL,
+                    "generatedAt": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+    except Exception:  # noqa: BLE001 — ocena słowna jest dodatkiem, nie warunkiem
+        logger.warning("SPK: ocena AI dla %s nie powstała", run_id, exc_info=True)
+
+
+@router.get("/run-ai", summary="Ocena AI mojego podejścia")
+async def run_ai(
+    runId: str = Query(..., min_length=4),
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    """Tekst oceny, gdy już jest - klient dopytuje po zapisie.
+
+    Tylko WŁASNE podejście: wpis musi się zgadzać z tożsamością pytającego
+    (numer sędziego albo urządzenie). Cudze oceny są w panelu administratora.
+    """
+    row = await database.fetch_one(select(spk_run).where(spk_run.c.run_id == runId))
+    if row is None:
+        raise HTTPException(404, "Nie ma takiego podejścia.")
+    data = dict(row)
+    who = await _identity(actor)
+    mine = (
+        (who["judge_id"] and data.get("judge_id") == who["judge_id"])
+        or (
+            actor.installation_id
+            and data.get("install_id") == actor.installation_id
+        )
+    )
+    if not mine and not await is_admin(actor.judge_id):
+        raise HTTPException(403, "To podejście należy do kogoś innego.")
+    ai = data.get("ai_json") if isinstance(data.get("ai_json"), dict) else None
+    return {
+        "ok": True,
+        "status": "ready" if ai and ai.get("summary") else "pending",
+        "summary": (ai or {}).get("summary", ""),
+    }
 
 
 @router.get("/runs/mine", summary="Moje podejścia")
@@ -609,7 +679,8 @@ async def slides_pdf_signed(t: str = Query("", description="Podpis z /slides-lin
     Token jest tu CAŁYM uprawnieniem, więc wygasły to odmowa, a nie zejście na
     inną ścieżkę. Żyje minuty i otwiera wyłącznie ten jeden materiał.
     """
-    if verify_pdf_token(t) is None:
+    payload = verify_pdf_token(t)
+    if payload is None or payload.get("doc", "slides") != "slides":
         raise HTTPException(403, "Adres materiału wygasł. Poproś o nowy w panelu.")
     return await _slides_response()
 
@@ -619,3 +690,141 @@ async def slides_pdf(actor: Actor = Depends(proel_actor)) -> Response:
     """To samo, ale dla wywołania z nagłówkami - zostaje do diagnostyki."""
     await _require_admin(actor)
     return await _slides_response()
+
+
+# ─────────────────────────── podgląd podejścia ───────────────────────────
+
+
+@admin_router.get("/runs/{run_id}", summary="Jedno podejście w szczegółach")
+async def run_detail(
+    run_id: str,
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    """Wszystko, co panel pokaże o jednym podejściu - „co kto klikał".
+
+    Trzy warstwy: pełny raport oceny (różnice zdarzenie po zdarzeniu), ocena
+    słowna AI i PRZEBIEG WPISÓW sędziego - jego protokół zamieniony na zdania
+    tym samym modułem, którym mówią slajdy. Panel niczego nie składa sam, bo
+    wtedy to samo zdarzenie brzmiałoby inaczej w prezentacji i w podglądzie.
+    """
+    await _require_admin(actor)
+    row = await database.fetch_one(select(spk_run).where(spk_run.c.run_id == run_id))
+    if row is None:
+        raise HTTPException(404, "Nie ma takiego podejścia.")
+    data = dict(row)
+
+    blob = data.get("data_json") if isinstance(data.get("data_json"), dict) else {}
+    clicks: List[Dict[str, Any]] = []
+    for event in blob.get("protocol") or []:
+        if not isinstance(event, dict):
+            continue
+        text = action_text(event)
+        if not text:
+            continue
+        clicks.append(
+            {
+                "clock": format_clock(event.get("time")),
+                "half": int(event.get("half") or 1),
+                "shootout": bool(event.get("shootout")),
+                "text": text,
+            }
+        )
+        if len(clicks) >= 400:
+            break
+
+    ai = data.get("ai_json") if isinstance(data.get("ai_json"), dict) else None
+    return {
+        "ok": True,
+        "run": {
+            "runId": data["run_id"],
+            "judgeId": data["judge_id"],
+            "judgeName": data["judge_name"],
+            "province": data["province"],
+            "accountKind": data["account_kind"],
+            "attempt": data["attempt"],
+            "mode": data["mode"],
+            "score": float(data["score"]) if data["score"] is not None else None,
+            "report": data.get("score_json") or None,
+            "ai": (ai or {}).get("summary", ""),
+            "appVersion": data.get("app_version"),
+            "endedAt": data["ended_at"].isoformat() if data["ended_at"] else None,
+            "clicks": clicks,
+        },
+    }
+
+
+# ─────────────────────────── raport wyników PDF ───────────────────────────
+
+
+class ReportLinkIn(BaseModel):
+    #: Pusto = raport ogólnopolski; nazwa okręgu = raport jednego okręgu.
+    province: str = ""
+
+
+@admin_router.post(
+    "/report-link", response_model=SlidesLink, summary="Adres raportu wyników"
+)
+async def report_link(
+    body: ReportLinkIn,
+    actor: Actor = Depends(proel_actor),
+) -> SlidesLink:
+    """Podpisany adres raportu - ta sama droga, którą jedzie prezentacja.
+
+    Okręg siedzi W TOKENIE, nie w parametrze adresu: podpisanego linku nie da
+    się wtedy przepisać na inny okręg. Osobny `doc`, bo adres prezentacji jest
+    do pokazania sali, a raport niesie nazwiska i wyniki sędziów.
+    """
+    await _require_admin(actor)
+    token = create_pdf_token(
+        str(actor.judge_id or ""),
+        doc="report",
+        province=normalize_province(body.province) or body.province.strip().upper(),
+    )
+    return SlidesLink(
+        path="/training/spk/report.pdf?t=" + token,
+        expiresAt=token_expires_at(token),
+    )
+
+
+async def _report_response(province: str, issued_by: str) -> Response:
+    rows = await database.fetch_all(
+        select(spk_run).order_by(desc(spk_run.c.ended_at)).limit(5000)
+    )
+    runs = [
+        {
+            "runId": d["run_id"],
+            "judgeId": d["judge_id"],
+            "judgeName": d["judge_name"],
+            "province": d["province"],
+            "attempt": d["attempt"],
+            "mode": d["mode"],
+            "score": float(d["score"]) if d["score"] is not None else None,
+        }
+        for d in (dict(r) for r in rows)
+    ]
+    context = report_context(runs, province=province, generated_by=issued_by)
+    try:
+        data = build_report_pdf(context)
+    except Exception as exc:  # noqa: BLE001 — WeasyPrint mówi po swojemu
+        logger.warning("SPK: raport PDF nie powstał", exc_info=True)
+        raise HTTPException(500, "Nie udało się złożyć raportu.") from exc
+    scope = (province or "POLSKA").replace(" ", "-")
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="raport-SPK1-{scope}.pdf"'
+        },
+    )
+
+
+@router.get("/report.pdf", summary="Raport wyników (adres podpisany)")
+async def report_pdf_signed(
+    t: str = Query("", description="Podpis z /report-link"),
+) -> Response:
+    payload = verify_pdf_token(t)
+    if payload is None or payload.get("doc") != "report":
+        raise HTTPException(403, "Adres raportu wygasł. Poproś o nowy w panelu.")
+    return await _report_response(
+        str(payload.get("prov") or ""), str(payload.get("by") or "")
+    )
