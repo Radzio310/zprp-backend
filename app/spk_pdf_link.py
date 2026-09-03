@@ -72,12 +72,25 @@ def _ttl_seconds() -> int:
     return int(raw) if raw.isdigit() and int(raw) > 0 else _DEFAULT_TTL_SECONDS
 
 
-def create_pdf_token(issued_by: str = "", *, ttl_seconds: Optional[int] = None) -> str:
-    """Token = payload_b64.sig_b64; payload {by, iat, exp, v, aud}.
+def create_pdf_token(
+    issued_by: str = "",
+    *,
+    ttl_seconds: Optional[int] = None,
+    doc: str = "slides",
+    province: str = "",
+) -> str:
+    """Token = payload_b64.sig_b64; payload {by, iat, exp, v, aud, doc, [prov]}.
 
     `by` jest ZAPISEM AUDYTOWYM, nie warunkiem - mówi, kto poprosił o adres.
-    Trasa materiału nie pyta o nic więcej, bo token otwiera jeden konkretny
-    plik i nic poza nim.
+
+    `doc` mówi, KTÓRY plik token otwiera: "slides" (prezentacja) albo
+    "report" (raport wyników). Bez tego adres prezentacji - pomyślany do
+    pokazania całej sali - otwierałby też raport z nazwiskami i wynikami
+    sędziów, a to zupełnie inna waga danych. Stare tokeny bez `doc` znaczą
+    prezentację, bo tylko ją wtedy podpisywaliśmy.
+
+    `prov` zawęża raport do jednego okręgu - siedzi w tokenie, a nie w osobnym
+    parametrze adresu, żeby nie dało się podmienić okręgu w podpisanym linku.
     """
     now = int(time.time())
     payload = {
@@ -86,7 +99,11 @@ def create_pdf_token(issued_by: str = "", *, ttl_seconds: Optional[int] = None) 
         "exp": now + int(ttl_seconds or _ttl_seconds()),
         "v": 1,
         "aud": TOKEN_AUDIENCE,
+        "doc": str(doc or "slides").strip() or "slides",
     }
+    prov = str(province or "").strip()
+    if prov:
+        payload["prov"] = prov
     payload_b64 = _b64url_encode(
         json.dumps(payload, separators=(",", ":")).encode("utf-8")
     )

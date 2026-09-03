@@ -369,3 +369,38 @@ def test_broken_prefs_do_not_silence_anyone():
     # Zepsuty kształt preferencji to nie jest zgoda na ciszę.
     assert market_pushes_allowed("cokolwiek")
     assert market_pushes_allowed({"notificationTypes": "cokolwiek"})
+
+
+# ── Kolumna JSON jako napis ──────────────────────────────────────────────────
+from app.match_market_rules import state_dict  # noqa: E402
+
+
+def test_state_dict_przyjmuje_kazdy_ksztalt_kolumny():
+    """Slownik przechodzi, napis sie parsuje, smieci znacza brak stanu.
+
+    Pierwsza awaria gieldy na produkcji to `'str' object has no attribute
+    'get'`: asyncpg pod `databases` oddal JSONB surowym napisem i cala lista
+    "moich meczow" polegla o format kolumny.
+    """
+    assert state_dict({"a": 1}) == {"a": 1}
+    assert state_dict('{"NrSedzia_pierwszy": "123"}') == {"NrSedzia_pierwszy": "123"}
+    assert state_dict(b'{"x": 1}') == {"x": 1}
+    assert state_dict("") == {}
+    assert state_dict("   ") == {}
+    assert state_dict(None) == {}
+    assert state_dict("[1, 2]") == {}
+    assert state_dict("nie-json") == {}
+    assert state_dict(123) == {}
+
+
+def test_slots_held_by_dziala_na_stanie_z_napisu():
+    state = '{"NrSedzia_pierwszy": "1847", "NrSedzia_pierwszy_nazwisko": "KOWALSKI Jan"}'
+    assert slots_held_by(state_dict(state), "1847") == ["sedzia1"]
+
+
+def test_preferencje_w_napisie_nadal_umieja_odmowic():
+    # Bez parsowania napis '{"enabled": false}' przechodzil jako "nie-slownik",
+    # czyli ZGODA - i powiadomienie szlo do kogos, kto je wylaczyl.
+    assert market_pushes_allowed('{"enabled": false}') is False
+    assert market_pushes_allowed('{"enabled": true}') is True
+    assert market_pushes_allowed("cokolwiek")

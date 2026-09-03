@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable, List, Optional
 
 #: Odznaka dająca prawo zatwierdzania. Ta sama nazwa co w module Beacha, gdzie
@@ -28,12 +29,21 @@ def normalize_province(value: Any) -> str:
 
 
 def badge_names(badges_raw: Any) -> List[str]:
-    """Nazwy odznak z obu kształtów, w jakich leżą w bazie.
+    """Nazwy odznak z każdego kształtu, w jakim leżą w bazie.
 
     Starsze wiersze mają listę, nowsze słownik `{nazwa: true}` z wyłączonymi
     odznakami zapisanymi jako `false` - i te ostatnie muszą wypaść, bo wyłączona
-    odznaka nie jest odznaką.
+    odznaka nie jest odznaką. Kolumna JSON potrafi do tego wrócić z bazy jako
+    SUROWY NAPIS (asyncpg pod `databases` bez kodeka jsonb nie dekoduje
+    niczego) - obsadowy z odznaką w napisie wychodził wtedy bez uprawnień,
+    czego nie widać było na kontach administratorów, bo te przechodzą inną
+    bramką.
     """
+    if isinstance(badges_raw, str) and badges_raw.strip():
+        try:
+            badges_raw = json.loads(badges_raw)
+        except ValueError:
+            return []
     if isinstance(badges_raw, dict):
         return [str(k) for k, v in badges_raw.items() if v]
     if isinstance(badges_raw, (list, tuple, set)):

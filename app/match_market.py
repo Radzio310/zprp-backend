@@ -73,6 +73,7 @@ from app.match_market_rules import (
     slot_label,
     slot_select_name,
     slots_held_by,
+    state_dict,
 )
 from app.proel_auth import is_admin
 from app.push.push import send_push_to_judges
@@ -216,7 +217,7 @@ def _person(judge_id: str, card: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _match_view(state: Dict[str, Any], match_at: Any) -> Dict[str, Any]:
     """Mecz sprowadzony do tego, co widać na kaflu."""
-    state = state or {}
+    state = state_dict(state)
     hall = " ".join(
         p for p in (_s(state.get("Hala_nazwa")), _s(state.get("Hala_miasto"))) if p
     )
@@ -309,7 +310,7 @@ async def _same_day_matches(
     out: Dict[str, List[Dict[str, str]]] = {}
     for raw in rows:
         data = _row(raw)
-        state = data.get("state_json") or {}
+        state = state_dict(data.get("state_json"))
         card = {
             "matchId": _s(data["match_id"]),
             "matchCode": _s(data.get("match_code")),
@@ -788,7 +789,9 @@ async def my_matches(
     mine: List[Tuple[Dict[str, Any], Dict[str, Any], List[str]]] = []
     for raw in rows:
         data = _row(raw)
-        state = data.get("state_json") or {}
+        # `state_dict`, nie gole `.get`: kolumna JSON bywa napisem i to o nią,
+        # a nie o dane, kładła się cała lista (patrz nota przy `state_dict`).
+        state = state_dict(data.get("state_json"))
         held = slots_held_by(state, actor.judge_id, actor.full_name)
         if not held:
             # Sędzia jest przy meczu (wie o tym `province_match_judges`), ale w
@@ -923,7 +926,7 @@ async def _offer_payload(
         "decidedAt": _iso(offer.get("decided_at")),
         "appliedAt": _iso(offer.get("applied_at")),
         "error": _s(offer.get("error")) or None,
-        "match": _match_view(offer.get("match_snapshot") or {}, offer.get("match_at")),
+        "match": _match_view(state_dict(offer.get("match_snapshot")), offer.get("match_at")),
         "from": _person(_s(offer.get("from_judge_id")), cards.get(_s(offer.get("from_judge_id")))),
         "isMine": _s(offer.get("from_judge_id")) == _s(viewer_id),
         "claimCount": len([c for c in claims if _s(c.get("status")) == "pending"]),
@@ -1098,7 +1101,7 @@ async def create_offer(
     if not match:
         raise HTTPException(404, "Nie znam tego meczu w Twoim okręgu.")
     data = _row(match)
-    state = data.get("state_json") or {}
+    state = state_dict(data.get("state_json"))
 
     if slot not in slots_held_by(state, actor.judge_id, actor.full_name):
         raise HTTPException(403, "To nie jest Twoje gniazdo w tym meczu.")
@@ -1467,7 +1470,9 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
     # Wlasne kolizje dostaje kazdy - to jego wlasny terminarz i to jest
     # informacja, ktorej potrzebuje ZANIM sie zglosi.
     payload["myConflicts"] = fresh.get(actor.judge_id, [])
-    payload["slotHolder"] = slot_holder_name(offer.get("match_snapshot") or {}, offer["slot"])
+    payload["slotHolder"] = slot_holder_name(
+        state_dict(offer.get("match_snapshot")), offer["slot"]
+    )
 
     # Mecz mógł zostać PRZENIESIONY po wystawieniu oferty. Kafel pokazuje migawkę
     # z chwili wystawienia - na to zgadzał się oddający i tego nie ruszamy - więc
@@ -1483,7 +1488,7 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
     )
     live_row = _row(live) if live else {}
     live_at = live_row.get("match_at")
-    live_state = live_row.get("state_json") or {}
+    live_state = state_dict(live_row.get("state_json"))
     payload["matchNow"] = (
         {
             "matchAt": _iso(live_at),
@@ -1667,7 +1672,7 @@ async def approve_offer(
             "NO_ACCOUNT",
         )
 
-    holder = slot_holder_name(offer.get("match_snapshot") or {}, offer["slot"])
+    holder = slot_holder_name(state_dict(offer.get("match_snapshot")), offer["slot"])
     if not holder:
         # Migawka mogla dopasowac gniazdo po NUMERZE i nie miec nazwiska. Bez
         # `expect` zapis nie sprawdza, kto siedzi w gniezdzie DZIS - a to jedyne,
@@ -1682,7 +1687,8 @@ async def approve_offer(
             )
         )
         holder = slot_holder_name(
-            (_row(current) if current else {}).get("state_json") or {}, offer["slot"]
+            state_dict((_row(current) if current else {}).get("state_json")),
+            offer["slot"],
         )
     if not holder:
         return await fail(

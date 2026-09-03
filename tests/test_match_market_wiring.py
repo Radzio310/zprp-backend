@@ -327,3 +327,13 @@ def test_conflicts_come_from_the_schedule_not_the_push_list():
     source = code_of("_same_day_matches")
     assert "province_match_judges" not in source
     assert "_holds_any_role" in source
+
+
+def test_every_state_read_goes_through_the_parser():
+    """`state_json` i `match_snapshot` bywaja napisem - gole `.get` sie o nie
+    wywraca, wiec kazda granica odczytu przechodzi przez `state_dict`."""
+    for name in ("my_matches", "_same_day_matches", "create_offer", "_match_view"):
+        assert "state_dict" in ast.unparse(FUNCTIONS[name]), name
+    assert "state_dict(offer.get('match_snapshot'))" in ast.unparse(
+        FUNCTIONS["_offer_payload"]
+    )

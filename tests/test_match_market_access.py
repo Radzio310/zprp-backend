@@ -112,3 +112,15 @@ def test_admins_are_added_even_without_a_province_row():
 def test_empty_input_is_survivable():
     assert approver_judge_ids([], SLASK) == []
     assert approver_judge_ids(None, SLASK) == []
+
+
+def test_badges_in_a_raw_json_string_still_count():
+    """Kolumna JSON bywa napisem (asyncpg bez kodeka) - odznaka musi przezyc.
+
+    Obsadowy z odznaka w napisie wychodzil bez uprawnien; na kontach
+    administratorow nie bylo tego widac, bo te przechodza inna bramka.
+    """
+    assert badge_names('["Obsadowy"]') == ["Obsadowy"]
+    assert badge_names('{"Obsadowy": true, "Mentor": false}') == ["Obsadowy"]
+    assert badge_names("nie-json") == []
+    assert badge_names("") == []

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from datetime import datetime, timedelta
@@ -164,6 +165,32 @@ def next_claim_status(current: object, action: object) -> Optional[str]:
 def offer_is_live(status: object) -> bool:
     """Czy oferta wciąż zajmuje gniazdo."""
     return str(status or "") in LIVE_OFFER_STATUSES
+
+
+def state_dict(value: Any) -> Dict[str, Any]:
+    """Kolumna JSON jako słownik - niezależnie od sterownika bazy.
+
+    SQLite w testach oddaje słownik, ale asyncpg pod `databases` potrafi oddać
+    SUROWY NAPIS: bez zarejestrowanego kodeka typu jsonb nie dekoduje niczego.
+    Pierwsze zgłoszenie z produkcji to dokładnie `'str' object has no attribute
+    'get'` w `slots_held_by` - cała lista „moich meczów" kładła się o FORMAT
+    kolumny, nie o jej treść. Napis nie do sparsowania znaczy „brak stanu",
+    nie awarię.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return {}
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 #: Gniazdo → (pole z NUMEREM sędziego, pole z nazwiskiem) w `state_json`
@@ -380,6 +407,9 @@ def market_pushes_allowed(prefs: Any) -> bool:
     włączeniu w okręgu, a nie dopiero po tym, jak każdy sędzia odszuka
     przełącznik w ustawieniach.
     """
+    if isinstance(prefs, (str, bytes, bytearray)):
+        # Ten sam sterownikowy kaprys, co przy stanie meczu - patrz `state_dict`.
+        prefs = state_dict(prefs)
     if not isinstance(prefs, dict):
         return True
     if prefs.get("enabled") is False:
