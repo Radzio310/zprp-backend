@@ -42,6 +42,26 @@ def calls_in(name: str) -> set[str]:
     return out
 
 
+def code_of(name: str) -> str:
+    """Źródło funkcji BEZ jej docstringa.
+
+    Komentarz bywa dokładnie o tym, czego w kodzie już nie ma („czytamy
+    terminarz, a NIE `province_match_judges`"), więc test szukający nazwy
+    tabeli potykał się o wyjaśnienie, dlaczego jej tam nie ma.
+    """
+    node = FUNCTIONS[name]
+    body = [
+        sub
+        for sub in node.body
+        if not (
+            isinstance(sub, ast.Expr)
+            and isinstance(sub.value, ast.Constant)
+            and isinstance(sub.value.value, str)
+        )
+    ]
+    return chr(10).join(ast.unparse(sub) for sub in body)
+
+
 def routes() -> list[tuple[str, str, str]]:
     """(metoda, ścieżka, nazwa funkcji) dla każdej trasy modułu."""
     found = []
@@ -242,3 +262,68 @@ def test_the_schedule_scan_is_bounded_and_says_so():
     source = ast.unparse(FUNCTIONS["my_matches"])
     assert "MY_MATCHES_SCAN_LIMIT" in source
     assert "MY_MATCHES_HORIZON_DAYS" in source
+
+
+def test_a_failed_probe_is_not_a_refusal():
+    """„Nie udało się sprawdzić" to nie „okręg tego nie obsadza".
+
+    `_store_verdict` z tego samego powodu nie zapisuje PROBE_FAILED do pamięci:
+    zerwana odpowiedź zablokowałaby mecz na całą dobę. W jednej odpowiedzi skutek
+    był ten sam - po jednym potknięciu serwera związku CAŁA lista meczów do
+    oddania lądowała w sekcji „poza giełdą" i sędzia nie miał czego wybrać.
+    O wystawieniu decyduje i tak twarda bramka przy `POST /offers`.
+    """
+    source = ast.unparse(FUNCTIONS["_probe_view"])
+    assert "PROBE_FAILED" in source
+    assert "'assignable': None" in source
+
+
+def test_my_matches_separates_waiting_from_broken():
+    # „Czeka w kolejce" i „pytaliśmy, nie doszło" to dwie różne wiadomości.
+    source = ast.unparse(FUNCTIONS["my_matches"])
+    assert "probeFailed" in source
+    # Gniazdo, które już wisi na giełdzie, nie może udawać „do oddania" -
+    # wcześniej wiersz stał na liście, a w środku czekał wygaszony przycisk.
+    assert "free_slots" in source
+
+
+def test_offer_creation_asks_about_the_slot_and_survives_the_race():
+    """Sonda pyta o TO gniazdo, a wyścig kończy się odmową, nie pięćsetką."""
+    source = ast.unparse(FUNCTIONS["create_offer"])
+    assert "slot=slot" in source
+    # Ta sama, ludzka odmowa przy sprawdzeniu i przy naruszeniu unikatu.
+    assert source.count("To gniazdo już wisi na giełdzie.") >= 2
+
+
+def test_withdrawal_locks_the_row_like_the_decisions_do():
+    """Wycofanie nie może wejść w środek zapisu do ZPRP.
+
+    Bez rygla odczytywało `open`, nadpisywało `applying` stanem `cancelled`, a
+    zatwierdzanie po powrocie z bazy związku i tak stawiało `done`: obsada
+    zmieniona, a oddający przekonany, że mecz wrócił do niego.
+    """
+    source = ast.unparse(FUNCTIONS["withdraw_offer"])
+    assert "with_for_update" in source
+    assert "match_market_offers.c.status ==" in source
+
+
+def test_zprp_write_never_goes_without_a_name_in_the_slot():
+    """`expect` to jedyna osłona przed nadpisaniem świeższej decyzji."""
+    source = ast.unparse(FUNCTIONS["approve_offer"])
+    assert "SLOT_UNKNOWN" in source
+    assert "expect=(select_name, holder)" in source
+    # Porzucony zapis da się powtórzyć - inaczej oferta wisi w `applying` na
+    # zawsze i nikt jej nie odzyska.
+    assert "_apply_is_stale" in source
+
+
+def test_conflicts_come_from_the_schedule_not_the_push_list():
+    """Kolizje liczymy tak samo, jak „moje mecze" - ze stanu meczu.
+
+    Sędzia, który odmówił powiadomień, nie ma wierszy w `province_match_judges`,
+    więc wychodził ZAWSZE „bez kolizji" - a obsadowy czytał to jako zgodę i
+    wsadzał go na drugi mecz tego samego dnia.
+    """
+    source = code_of("_same_day_matches")
+    assert "province_match_judges" not in source
+    assert "_holds_any_role" in source

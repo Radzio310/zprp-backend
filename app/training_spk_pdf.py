@@ -71,7 +71,9 @@ def _size_class(text: str) -> str:
 
 
 def build_slides_context(
-    timeline: Any, meta: Optional[Dict[str, Any]] = None
+    timeline: Any,
+    meta: Optional[Dict[str, Any]] = None,
+    shootout: Any = None,
 ) -> Dict[str, Any]:
     """Wszystko, czego potrzebuje szablon - i nic ponad to.
 
@@ -80,7 +82,7 @@ def build_slides_context(
     złożenie PDF-a jest już mechaniczne.
     """
     slides: List[Dict[str, Any]] = []
-    for slide in slides_from_timeline(timeline, meta):
+    for slide in slides_from_timeline(timeline, meta, shootout=shootout):
         entry = dict(slide)
         entry["sizeClass"] = _size_class(entry["actions"][0])
         slides.append(entry)
@@ -96,7 +98,9 @@ def build_slides_context(
 
 
 def render_slides_html(
-    timeline: Any, meta: Optional[Dict[str, Any]] = None
+    timeline: Any,
+    meta: Optional[Dict[str, Any]] = None,
+    shootout: Any = None,
 ) -> str:
     """Gotowy HTML prezentacji. Osobno od PDF, bo bywa potrzebny sam.
 
@@ -105,7 +109,7 @@ def render_slides_html(
     """
     from jinja2 import Environment, FileSystemLoader  # lazy — patrz nagłówek
 
-    context = build_slides_context(timeline, meta)
+    context = build_slides_context(timeline, meta, shootout=shootout)
     if not context["slides"]:
         raise SpkPdfError(
             "Wzorzec nie ma ani jednej akcji - nie ma z czego złożyć materiału."
@@ -114,13 +118,17 @@ def render_slides_html(
     return env.get_template(TEMPLATE_NAME).render(**context)
 
 
-def build_slides_pdf(timeline: Any, meta: Optional[Dict[str, Any]] = None) -> bytes:
+def build_slides_pdf(
+    timeline: Any,
+    meta: Optional[Dict[str, Any]] = None,
+    shootout: Any = None,
+) -> bytes:
     """Cała prezentacja jako jeden plik PDF.
 
     Pusta oś czasu kończy się BŁĘDEM, a nie plikiem z samą okładką: materiał bez
     akcji wygląda na gotowy i dopiero na sali okazuje się pusty.
     """
-    html = render_slides_html(timeline, meta)
+    html = render_slides_html(timeline, meta, shootout=shootout)
 
     import weasyprint  # lazy — patrz nagłówek modułu
 

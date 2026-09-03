@@ -36,8 +36,10 @@ from app.proel_auth import Actor, is_admin, proel_actor
 from app.spk_pdf_link import create_pdf_token, token_expires_at, verify_pdf_token
 from app.training_spk_score import grade, score_run
 from app.training_spk_pdf import SpkPdfError, build_slides_pdf
+from app.training_spk_entries import entered_players
 from app.training_spk_halftime import state_after_first_half
 from app.training_spk_meta import meta_from_blob
+from app.training_spk_shootout import shootout_shots
 from app.training_spk_slides import slides_from_timeline
 from app.zprp_accounts import normalize_province
 
@@ -244,7 +246,14 @@ async def get_reference(actor: Actor = Depends(proel_actor)) -> Dict[str, Any]:
         # Liczba SLAJDÓW to nie liczba zdarzeń: akcje z tej samej sekundy
         # („bramka i kara") składają się w jedno polecenie. Panel pokazuje
         # przy materiale, ile stron naprawdę z tego wyjdzie.
-        "slides": len(slides_from_timeline(ref["timeline"] or [])),
+        "slides": len(
+            slides_from_timeline(
+                ref["timeline"] or [],
+                shootout=shootout_shots(
+                    ref["blob"] if isinstance(ref["blob"], dict) else {}
+                ),
+            )
+        ),
         "meta": ref["meta"] or {},
         "source": ref["source"],
         "updatedBy": ref["updated_by"],
@@ -293,13 +302,24 @@ async def brief(
         "meta": ref["meta"] or {},
         "attempts": int(mine or 0),
     }
+    blob = ref["blob"] if isinstance(ref["blob"], dict) else {}
     if mode in ("slides", "guided"):
         # Tryb prowadzony w aplikacji to prezentacja z wykrywaniem wykonania -
         # klucz odpowiedzi i tak jest wtedy na ekranie, więc slajdy lecą tak
         # samo jak przy zwykłej prezentacji.
-        out["slides"] = slides_from_timeline(ref["timeline"] or [], ref["meta"] or {})
+        out["slides"] = slides_from_timeline(
+            ref["timeline"] or [],
+            ref["meta"] or {},
+            shootout=shootout_shots(blob),
+        )
+    if mode == "guided":
+        # Kto naprawdę wszedł na boisko. TYLKO w prowadzeniu za rękę: w
+        # pozostałych trybach rubryka wejścia jest częścią ćwiczenia i jej
+        # gotowa lista byłaby oddaniem punktów za darmo. Tutaj cały wzorzec
+        # i tak stoi na ekranie, a bez tej listy ćwiczący kończył mecz z
+        # pustymi wejściami zawodników, którzy nic nie przeskrobali.
+        out["entries"] = entered_players(blob)
     if mode == "condensed":
-        blob = ref["blob"] if isinstance(ref["blob"], dict) else {}
         if not blob:
             # Wzorzec wczytany starszym wydaniem serwera nie ma przy sobie
             # dokumentu meczu. Mówimy o tym wprost - inaczej sędzia dostałby
@@ -530,7 +550,12 @@ async def _slides_response() -> Response:
     if ref is None:
         raise HTTPException(404, "Wzorzec nie został jeszcze wczytany.")
     try:
-        data = build_slides_pdf(ref["timeline"] or [], ref["meta"] or {})
+        blob = ref["blob"] if isinstance(ref["blob"], dict) else {}
+        data = build_slides_pdf(
+            ref["timeline"] or [],
+            ref["meta"] or {},
+            shootout=shootout_shots(blob),
+        )
     except SpkPdfError as exc:
         raise HTTPException(409, str(exc))
     return Response(

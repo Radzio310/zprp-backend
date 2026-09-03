@@ -113,8 +113,47 @@ def _slide_event(event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def shootout_slide(shot: Dict[str, Any]) -> Dict[str, Any]:
+    """Jeden rzut serii jako slajd - „trafienie" albo „pudło", po nazwisku.
+
+    Kształt jest ten sam, co slajdu z osi czasu, więc prezentacja, PDF i
+    prowadzenie w aplikacji nie muszą wiedzieć, że seria przyszła z innego
+    pola dokumentu. W miejscu zegara stoi NUMER SERII: rzuty po meczu nie mają
+    czasu gry, a pusty duży zegar zostawiał na stronie dziurę.
+    """
+    team = str(shot.get("team") or "").strip()
+    player = str(shot.get("player") or "").strip()
+    scored = bool(shot.get("scored"))
+    round_no = int(shot.get("round") or 0)
+    who = f" nr {player}" if player else ""
+    text = (
+        f"Seria karnych, rzut {round_no}: {TEAM_IS.get(team, '')}{who} - "
+        f"{'trafienie' if scored else 'pudło'}"
+    ).strip()
+    return {
+        "n": 0,
+        "half": 2,
+        "timeMs": 0,
+        "clock": str(round_no or ""),
+        "shootout": True,
+        "actions": [text],
+        "events": [
+            {
+                "type": "penaltyKickScored" if scored else "penaltyKickMissed",
+                "team": team,
+                "player": player,
+                # Który to rzut tej drużyny - po tym paruje je telefon.
+                "shot": int(shot.get("shotIndex") or 0),
+            }
+        ],
+        "text": text,
+    }
+
+
 def slides_from_timeline(
-    timeline: Any, meta: Dict[str, Any] | None = None
+    timeline: Any,
+    meta: Dict[str, Any] | None = None,
+    shootout: Any = None,
 ) -> List[Dict[str, Any]]:
     """Lista slajdów w kolejności meczu.
 
@@ -128,6 +167,11 @@ def slides_from_timeline(
     wykonał akcję ze slajdu - z samego zdania nie dałoby się tego odczytać bez
     parsowania własnych tekstów, a to jest prosta droga do rozjazdu przy
     pierwszej zmianie sformułowania.
+
+    SERIA RZUTÓW KARNYCH DOCHODZI NA KOŃCU, z osobnego pola dokumentu
+    (`shootout`, patrz `training_spk_shootout.py`) - w osi czasu jej nie ma.
+    Bez niej materiał kończył się ostatnią akcją drugiej połowy i zostawiał
+    ćwiczącego z remisem, jakby mecz na tym się skończył.
     """
     events = [e for e in (timeline or []) if isinstance(e, dict)]
     events = [e for e in events if action_text(e)]
@@ -137,11 +181,11 @@ def slides_from_timeline(
     for event in events:
         text = action_text(event)
         time_ms = int(event.get("time") or 0)
-        shootout = bool(event.get("shootout"))
+        in_shootout = bool(event.get("shootout"))
         last = slides[-1] if slides else None
         same_action = (
             last is not None
-            and last["shootout"] == shootout
+            and last["shootout"] == in_shootout
             and abs(last["timeMs"] - time_ms) <= SAME_ACTION_MS
         )
         if same_action:
@@ -155,12 +199,16 @@ def slides_from_timeline(
                 "half": int(event.get("half") or 1),
                 "timeMs": time_ms,
                 "clock": format_clock(time_ms),
-                "shootout": shootout,
+                "shootout": in_shootout,
                 "actions": [text],
                 "events": [_slide_event(event)],
                 "text": text,
             }
         )
+
+    for shot in shootout or []:
+        if isinstance(shot, dict):
+            slides.append(shootout_slide(shot))
 
     # Numerację nadajemy PO scaleniu - inaczej slajdy miałyby dziury tam, gdzie
     # dwie akcje trafiły na jeden ekran.

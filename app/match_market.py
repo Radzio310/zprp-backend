@@ -43,7 +43,6 @@ from app.db import (
     province_judges,
     push_tokens,
     province_match_assignability,
-    province_match_judges,
     province_matches,
     province_module_config,
 )
@@ -58,12 +57,14 @@ from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
     DEFAULT_DEADLINE_HOURS,
     PROBE_BATCH_LIMIT,
+    SLOT_STATE_FIELDS,
     assignability_is_fresh,
     assignability_message,
     can_offer,
     deadline_for,
     market_pushes_allowed,
     may_claim,
+    names_match,
     next_claim_status,
     next_offer_status,
     normalize_deadline_hours,
@@ -239,40 +240,68 @@ def _match_view(state: Dict[str, Any], match_at: Any) -> Dict[str, Any]:
     }
 
 
+#: Pola stanu meczu, ktore mowia "ten czlowiek tu jest".
+#:
+#: Gniazda gieldowe PLUS delegat: delegata gielda nie wymienia, ale delegowanie
+#: na dwa mecze tego samego dnia jest kolizja dokladnie tak samo.
+_ROLE_STATE_FIELDS: Tuple[Tuple[str, str], ...] = tuple(SLOT_STATE_FIELDS.values()) + (
+    ("NrSedzia_delegat", "NrSedzia_delegat_nazwisko"),
+)
+
+
+def _holds_any_role(state: Dict[str, Any], judge_id: str, full_name: str) -> bool:
+    """Czy ten sedzia jest przy tym meczu w JAKIEJKOLWIEK roli.
+
+    Numer przed nazwiskiem, jak w `slots_held_by`: gdy stan niesie numer, on
+    rozstrzyga, a nazwisko zostaje dla meczow, ktorych monitor nie sprawdzil
+    gleboko.
+    """
+    wanted = _s(judge_id)
+    for id_field, name_field in _ROLE_STATE_FIELDS:
+        raw_id = _s((state or {}).get(id_field))
+        if raw_id:
+            if wanted and raw_id == wanted:
+                return True
+            continue
+        if full_name and names_match((state or {}).get(name_field), full_name):
+            return True
+    return False
+
+
 async def _same_day_matches(
-    province: str, judge_ids: List[str], match_at: Optional[datetime], skip_match_id: str
+    province: str,
+    judges: Dict[str, str],
+    match_at: Optional[datetime],
+    skip_match_id: str,
 ) -> Dict[str, List[Dict[str, str]]]:
     """Inne mecze tych sędziów w TYM dniu - jedyna kolizja, której jesteśmy pewni.
+
+    Czytamy TERMINARZ okręgu, a nie `province_match_judges`. Tamta tabela
+    powstaje wyłącznie dla sędziów z zarejestrowanym tokenem push (monitor
+    pobiera listy meczów tylko im), więc sędzia, który odmówił powiadomień,
+    ZAWSZE wychodził „bez kolizji" - a obsadowy czytał to jako zgodę i wsadzał
+    go na drugi mecz tego dnia. Terminarz jest niezależny od tego, kto ma
+    aplikację; o obecności rozstrzyga stan meczu, tak samo jak przy „moich
+    meczach" (patrz nota w `my_matches`).
 
     Dzień liczymy w dobie kalendarzowej UTC. Mecze okręgowe grają się po
     południu, więc przesunięcie strefy nie ma jak przenieść meczu na sąsiedni
     dzień - a doba to i tak przybliżenie: dwa mecze o 10:00 i o 20:00 w różnych
     halach są kolizją dla człowieka, choć zegar ich nie wyklucza.
     """
-    ids = sorted({_s(j) for j in judge_ids if _s(j)})
-    if not ids or match_at is None:
+    wanted = {_s(j): _s(n) for j, n in (judges or {}).items() if _s(j)}
+    if not wanted or match_at is None:
         return {}
     day_start = match_at.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = await database.fetch_all(
         select(
-            province_match_judges.c.judge_id,
             province_matches.c.match_id,
             province_matches.c.match_code,
             province_matches.c.match_at,
             province_matches.c.state_json,
         )
-        .select_from(
-            province_match_judges.join(
-                province_matches,
-                and_(
-                    province_match_judges.c.province == province_matches.c.province,
-                    province_match_judges.c.match_id == province_matches.c.match_id,
-                ),
-            )
-        )
-        .where(province_match_judges.c.province == province)
-        .where(province_match_judges.c.judge_id.in_(ids))
-        .where(province_match_judges.c.active.is_(True))
+        .where(province_matches.c.province == province)
+        .where(province_matches.c.active.is_(True))
         .where(province_matches.c.match_id != _s(skip_match_id))
         .where(province_matches.c.match_at >= day_start)
         .where(province_matches.c.match_at < day_start + timedelta(days=1))
@@ -281,14 +310,15 @@ async def _same_day_matches(
     for raw in rows:
         data = _row(raw)
         state = data.get("state_json") or {}
-        out.setdefault(_s(data["judge_id"]), []).append(
-            {
-                "matchId": _s(data["match_id"]),
-                "matchCode": _s(data.get("match_code")),
-                "matchAt": _iso(data.get("match_at")),
-                "hall": _s(state.get("Hala_miasto")),
-            }
-        )
+        card = {
+            "matchId": _s(data["match_id"]),
+            "matchCode": _s(data.get("match_code")),
+            "matchAt": _iso(data.get("match_at")),
+            "hall": _s(state.get("Hala_miasto")),
+        }
+        for judge_id, full_name in wanted.items():
+            if _holds_any_role(state, judge_id, full_name):
+                out.setdefault(judge_id, []).append(card)
     return out
 
 
@@ -341,9 +371,28 @@ def _verdict_view(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _probe_view(verdict: Dict[str, Any]) -> Dict[str, Any]:
-    """Swieza odpowiedz sondy w tym samym ksztalcie, co werdykt z pamieci."""
+    """Swieza odpowiedz sondy w tym samym ksztalcie, co werdykt z pamieci.
+
+    NIEUDANA sonda to NIE odmowa. `_store_verdict` z tego samego powodu nie
+    zapisuje PROBE_FAILED do pamieci - zerwana odpowiedz zablokowalaby mecz na
+    cala dobe. Tu jest to samo w skali jednej odpowiedzi: mecz zostaje
+    NIEROZSTRZYGNIETY (`assignable: None`), a nie "poza gielda". Inaczej jedno
+    potkniecie serwera zwiazku kasowalo cala liste meczow do oddania, choc
+    nikt nie stwierdzil, ze okreg ich nie obsadza. O wystawieniu decyduje i tak
+    twarda bramka `_require_assignable` przy `POST /offers`, ktora sonduje ten
+    JEDEN mecz od nowa i odmawia po ludzku.
+    """
+    reason = _s(verdict.get("reason")) or (
+        "OK" if verdict.get("assignable") else "NO_FORM"
+    )
+    if reason == "PROBE_FAILED":
+        return {
+            "assignable": None,
+            "reason": reason,
+            "message": _s(verdict.get("message")) or assignability_message(reason),
+            "checkedAt": None,
+        }
     ok = bool(verdict.get("assignable"))
-    reason = _s(verdict.get("reason")) or ("OK" if ok else "NO_FORM")
     return {
         "assignable": ok,
         "reason": reason,
@@ -420,8 +469,19 @@ async def _probe(
     creds: Dict[str, Any],
     match_ids: List[str],
     settings: Settings,
+    *,
+    slot: str = "",
+    store: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
-    """Pyta baze zwiazku o wskazane mecze - jedno logowanie na cala paczke."""
+    """Pyta baze zwiazku o wskazane mecze - jedno logowanie na cala paczke.
+
+    `slot` zawezza pytanie do JEDNEGO gniazda. Bez niego sonda uznaje mecz za
+    obsadzalny, gdy okreg ma liste sedziow przy DOWOLNYM gniazdzie - a wymienia
+    sie konkretne, wiec pusta lista przy "czasie" wychodzila dopiero przy
+    zapisie, po umowie dwoch osob. Odpowiedzi na pytanie o gniazdo NIE
+    zapisujemy (`store=False`): pamiec jest kluczowana meczem, a "nie ma listy
+    przy czasie" nie znaczy "okreg nie obsadza tego meczu".
+    """
     targets = [_s(m) for m in match_ids if _s(m)]
     if not targets:
         return {}
@@ -441,6 +501,7 @@ async def _probe(
                             client,
                             cookies,
                             match_id,
+                            slot=slot,
                             log_prefix=f"gielda/sonda/{province}",
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -452,7 +513,8 @@ async def _probe(
                             "holder": "",
                         }
                     out[match_id] = verdict
-                    await _store_verdict(province, match_id, mode, verdict)
+                    if store:
+                        await _store_verdict(province, match_id, mode, verdict)
 
             await asyncio.gather(*(one(m) for m in targets))
     except Exception as exc:  # noqa: BLE001
@@ -469,13 +531,20 @@ async def _probe(
 
 
 async def _require_assignable(
-    province: str, cfg: Dict[str, Any], match_id: str, settings: Settings
+    province: str,
+    cfg: Dict[str, Any],
+    match_id: str,
+    settings: Settings,
+    *,
+    slot: str = "",
 ) -> None:
     """Twarda bramka przed wystawieniem meczu. Odmowa mowi, dlaczego.
 
-    Werdykt z pamieci wystarcza, dopoki jest swiezy. Gdy go nie ma, pytamy tu i
-    teraz o TEN jeden mecz - to jedno wejscie na strone zwiazku przy czynnosci,
-    ktora sedzia wykonuje kilka razy w sezonie.
+    Zapamietane NIE dotyczy calego meczu i wystarcza, zeby odmowic bez pytania.
+    Zapamietane TAK mowi jednak o MECZU, a wymieniamy GNIAZDO - dlatego przy
+    wystawianiu pytamy jeszcze raz, wprost o to gniazdo. To jedno wejscie na
+    strone zwiazku przy czynnosci, ktora sedzia wykonuje kilka razy w sezonie, i
+    tanszy blad niz "zapisu nie ma jak wykonac" odkryty po umowie dwoch osob.
     """
     creds = assign_credentials(province, cfg["assign_account_mode"])
     if not creds["configured"]:
@@ -484,12 +553,18 @@ async def _require_assignable(
     mode = _s(creds["mode"])
     cached = await _cached_verdicts(province, [match_id], mode, _now())
     verdict = cached.get(_s(match_id))
-    if verdict is not None:
-        if verdict.get("assignable"):
-            return
+    if verdict is not None and not verdict.get("assignable"):
         raise HTTPException(409, assignability_message(verdict.get("reason")))
 
-    fresh = await _probe(province, mode, creds, [_s(match_id)], settings)
+    fresh = await _probe(
+        province,
+        mode,
+        creds,
+        [_s(match_id)],
+        settings,
+        slot=_s(slot),
+        store=not _s(slot),
+    )
     answer = fresh.get(_s(match_id)) or {}
     if answer.get("assignable"):
         return
@@ -751,13 +826,20 @@ async def my_matches(
 
     out: List[Dict[str, Any]] = []
     unchecked = 0
+    probe_failed = 0
     for data, state, held in mine:
         match_id = _s(data["match_id"])
         verdict = verdict_for(match_id)
         if verdict["assignable"] is None:
             unchecked += 1
+            # "Pytalismy i nie doszlo" to inna wiadomosc niz "jeszcze nie
+            # pytalismy" - pierwsza mowi o awarii po drugiej stronie.
+            if verdict["reason"] == "PROBE_FAILED":
+                probe_failed += 1
         offerable = can_offer(data.get("match_at"), now, cfg["offer_deadline_hours"])
         approved = bool(data.get("approved"))
+        # Gniazda, które NIE wiszą już na giełdzie - tylko one dają się oddać.
+        free_slots = [s for s in held if (match_id, s) not in taken]
         blocked = None
         if verdict["assignable"] is False:
             blocked = verdict["message"]
@@ -767,6 +849,15 @@ async def my_matches(
             blocked = (
                 f"Za późno - mecz można oddać najpóźniej "
                 f"{cfg['offer_deadline_hours']} h przed pierwszym gwizdkiem."
+            )
+        elif not free_slots:
+            # Bez tego wiersz stał na liście „do oddania", a w środku czekał
+            # trwale wygaszony przycisk bez słowa wyjaśnienia - sędzia nie
+            # wiedział, że sam to gniazdo już wystawił.
+            blocked = (
+                "Twoje gniazdo w tym meczu już wisi na giełdzie."
+                if len(held) == 1
+                else "Wszystkie Twoje gniazda w tym meczu już wiszą na giełdzie."
             )
         out.append(
             {
@@ -781,7 +872,12 @@ async def my_matches(
                     }
                     for slot in held
                 ],
-                "canOffer": bool(offerable) and not approved and verdict["assignable"] is not False,
+                "canOffer": (
+                    bool(offerable)
+                    and not approved
+                    and bool(free_slots)
+                    and verdict["assignable"] is not False
+                ),
                 "blockedReason": blocked,
                 "assignable": verdict["assignable"],
                 "assignableReason": verdict["reason"],
@@ -796,6 +892,10 @@ async def my_matches(
         # Ile meczów czeka jeszcze na sprawdzenie uprawnień. Liczba, której się
         # nie pokazuje, wygląda jak komplet - a to nie jest komplet.
         "unchecked": unchecked,
+        # Ile z nich to POTKNIĘCIE bazy związku, a nie kolejka do sprawdzenia.
+        # Ekran pisze wtedy o awarii i zostawia mecze do wystawienia zamiast
+        # gasić całą listę.
+        "probeFailed": probe_failed,
         "probeLimit": PROBE_BATCH_LIMIT,
     }
 
@@ -847,6 +947,29 @@ async def _offer_payload(
             ),
             None,
         ),
+        # Chetni PRZY LIScIE i tylko dla oddajacego: zakladka "Moje" obiecuje
+        # portrety tych, ktorzy sie zglosili, a brala je z pola, ktorego ta
+        # odpowiedz nie miala - wiec zawsze pokazywala zapasowy licznik.
+        # Notatki i cudze kolizje zostaja w widoku decyzji (`GET /offers/{id}`):
+        # lista potrzebuje twarzy, nie rozpisek.
+        "claims": (
+            [
+                {
+                    "id": c["id"],
+                    "status": _s(c.get("status")),
+                    "note": None,
+                    "createdAt": _iso(c.get("created_at")),
+                    "person": _person(
+                        _s(c.get("judge_id")), cards.get(_s(c.get("judge_id")))
+                    ),
+                    "conflicts": [],
+                }
+                for c in claims
+                if _s(c.get("status")) in ("pending", "chosen")
+            ]
+            if _s(offer.get("from_judge_id")) == _s(viewer_id)
+            else []
+        ),
     }
 
 
@@ -874,14 +997,39 @@ async def list_offers(
     query = select(match_market_offers).where(match_market_offers.c.province == province)
     if scope == "market":
         # Cudze mecze, które wciąż zbierają zgłoszenia.
-        query = query.where(match_market_offers.c.status == "open").where(
-            match_market_offers.c.from_judge_id != actor.judge_id
+        #
+        # Po terminie oferta ZNIKA z giełdy, choć w bazie zostaje otwarta (stan
+        # `expired` nie ma dziś kto ustawić). Wcześniej wisiała z podpisem
+        # „Czeka na chętnych" i bez przycisku - `canClaim` po stronie aplikacji
+        # odcinał zgłoszenie po terminie, więc kafel był ślepy. Właściciel widzi
+        # ją dalej w „Moich", z podpisem o terminie.
+        query = (
+            query.where(match_market_offers.c.status == "open")
+            .where(match_market_offers.c.from_judge_id != actor.judge_id)
+            .where(
+                or_(
+                    match_market_offers.c.deadline_at.is_(None),
+                    match_market_offers.c.deadline_at > _now(),
+                )
+            )
         )
         query = query.order_by(match_market_offers.c.match_at.asc().nulls_last())
     elif scope == "mine":
-        query = query.where(match_market_offers.c.from_judge_id == actor.judge_id).where(
-            match_market_offers.c.status.in_(("open", "applying"))
+        # „Moje" to moje SPRAWY, nie tylko moje oferty: zgłoszenie na cudzy mecz
+        # też tu należy. Wcześniej trzeba go było szukać w giełdzie po plakietce,
+        # a po terminie albo po wycofaniu oferty ślad znikał bez wyjaśnienia.
+        claimed = await database.fetch_all(
+            select(match_market_claims.c.offer_id)
+            .where(match_market_claims.c.judge_id == actor.judge_id)
+            .where(match_market_claims.c.status == "pending")
         )
+        claimed_ids = [int(_row(r)["offer_id"]) for r in claimed]
+        query = query.where(
+            or_(
+                match_market_offers.c.from_judge_id == actor.judge_id,
+                match_market_offers.c.id.in_(claimed_ids or [-1]),
+            )
+        ).where(match_market_offers.c.status.in_(("open", "applying")))
         query = query.order_by(match_market_offers.c.created_at.desc())
     else:
         # Historia: moje rozstrzygnięte oferty ORAZ te, o które się starałem.
@@ -901,15 +1049,16 @@ async def list_offers(
 
     rows = [_row(r) for r in await database.fetch_all(query.limit(200))]
     claims = await _claims_for([int(r["id"]) for r in rows])
-    # Wizytowki obejmuja oddajacych ORAZ tych, ktorzy juz mecz przejeli -
-    # bez tego drugiego historia nie ma czym podpisac wpisu.
+    # Wizytowki obejmuja oddajacych, tych, ktorzy mecz przejeli (inaczej historia
+    # nie ma czym podpisac wpisu), ORAZ chetnych - z nich powstaja portrety w
+    # zakladce "Moje".
     cards = await _judges_by_id(
         [_s(r["from_judge_id"]) for r in rows]
         + [
             _s(c.get("judge_id"))
             for group in claims.values()
             for c in group
-            if _s(c.get("status")) == "chosen"
+            if _s(c.get("status")) in ("pending", "chosen")
         ]
     )
 
@@ -979,9 +1128,9 @@ async def create_offer(
     # obsadza ten mecz. Bez tego można by wystawić spotkanie ligi centralnej,
     # którego konto wojewódzkie nie ma prawa tknąć - i dowiedzieć się o tym
     # dopiero przy zatwierdzaniu, gdy oddający dawno przestał szukać zastępstwa.
-    await _require_assignable(province, cfg, _s(req.match_id), settings)
+    await _require_assignable(province, cfg, _s(req.match_id), settings, slot=slot)
 
-    offer_id = await database.fetch_val(
+    insertion = (
         insert(match_market_offers)
         .values(
             province=province,
@@ -997,6 +1146,26 @@ async def create_offer(
         )
         .returning(match_market_offers.c.id)
     )
+    try:
+        offer_id = await database.fetch_val(insertion)
+    except Exception:  # noqa: BLE001
+        # Sonda uprawnien wyzej to kilka sekund na cudzym serwerze i ktos mogl w
+        # tym czasie wystawic to samo gniazdo. Unikat `uq_match_market_live_slot`
+        # konczyl to piecsetka - a to zwykla, wytlumaczalna odmowa. Sprawdzamy
+        # przez PONOWNY odczyt, bo klasa wyjatku zalezy od sterownika bazy.
+        again = await database.fetch_one(
+            select(match_market_offers.c.id).where(
+                and_(
+                    match_market_offers.c.province == province,
+                    match_market_offers.c.match_id == _s(req.match_id),
+                    match_market_offers.c.slot == slot,
+                    match_market_offers.c.status.in_(("open", "applying")),
+                )
+            )
+        )
+        if again:
+            raise HTTPException(409, "To gniazdo już wisi na giełdzie.")
+        raise
 
     offer = {
         "id": offer_id,
@@ -1021,8 +1190,15 @@ async def create_offer(
 async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
     province = _require_province(actor)
     async with database.transaction():
+        # RYGIEL na wierszu, jak przy zatwierdzaniu i odrzucaniu. Bez niego
+        # wycofanie potrafilo wejsc w SRODEK zapisu do ZPRP: odczytywalo `open`,
+        # nadpisywalo `applying` stanem `cancelled`, a zatwierdzanie po powrocie
+        # z bazy zwiazku i tak stawialo `done`. Obsada zmieniona, a oddajacy
+        # przekonany, ze mecz wrocil do niego.
         row = await database.fetch_one(
-            select(match_market_offers).where(match_market_offers.c.id == offer_id)
+            select(match_market_offers)
+            .where(match_market_offers.c.id == offer_id)
+            .with_for_update()
         )
         if not row:
             raise HTTPException(404, "Nie ma takiej oferty.")
@@ -1032,11 +1208,30 @@ async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) ->
         target = next_offer_status(offer["status"], "withdraw")
         if not target:
             raise HTTPException(409, "Tej oferty nie da się już wycofać.")
-        await database.execute(
+        # Kogo to obchodzi: ci, ktorych zgloszenie WLASNIE gasimy. Wczesniej
+        # powiadomienie szlo do wszystkich wierszy, wiec ktos, kto wycofal sie
+        # tydzien temu, dostawal "mecz wrocil do wlasciciela".
+        interested = [
+            _s(_row(r)["judge_id"])
+            for r in await database.fetch_all(
+                select(match_market_claims.c.judge_id)
+                .where(match_market_claims.c.offer_id == offer_id)
+                .where(match_market_claims.c.status.in_(("pending", "chosen")))
+            )
+        ]
+        changed = await database.fetch_val(
             update(match_market_offers)
             .where(match_market_offers.c.id == offer_id)
+            .where(match_market_offers.c.status == _s(offer["status"]))
             .values(status=target, updated_at=func.now())
+            .returning(match_market_offers.c.id)
         )
+        if not changed:
+            raise HTTPException(
+                409,
+                "Ta oferta zmieniła w tej chwili stan - odśwież ekran i sprawdź, "
+                "co się z nią stało.",
+            )
         await database.execute(
             update(match_market_claims)
             .where(match_market_claims.c.offer_id == offer_id)
@@ -1044,11 +1239,8 @@ async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) ->
             .values(status="declined", updated_at=func.now())
         )
 
-    claim_rows = await database.fetch_all(
-        select(match_market_claims.c.judge_id).where(match_market_claims.c.offer_id == offer_id)
-    )
     await _notify(
-        [_s(_row(r)["judge_id"]) for r in claim_rows],
+        interested,
         "↩️ Mecz wrócił do właściciela",
         f"{actor.full_name or 'Sędzia'} wycofał {_offer_line(offer)}.",
         offer,
@@ -1081,7 +1273,10 @@ async def create_claim(
 
     conflicts = (
         await _same_day_matches(
-            province, [actor.judge_id], offer.get("match_at"), _s(offer["match_id"])
+            province,
+            {actor.judge_id: actor.full_name},
+            offer.get("match_at"),
+            _s(offer["match_id"]),
         )
     ).get(actor.judge_id, [])
 
@@ -1160,6 +1355,24 @@ async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor)) ->
 # ─────────────────────────── decyzja obsadowego ───────────────────────────
 
 
+#: Po ilu minutach zapis w bazie zwiazku uznajemy za PORZUCONY.
+#:
+#: Stan `applying` zamyka oferte na czas zapisu i tylko to samo wywolanie
+#: potrafi go zdjac. Gdy nasz proces przerwal sie w trakcie (restart, zerwane
+#: polaczenie z telefonem), wiersz zostawal w `applying` NA ZAWSZE: mecz ani nie
+#: wracal na gielde, ani nie byl zapisany, a oddajacy nie mial go jak wycofac.
+#: Piec minut to zapas na wolna odpowiedz ZPRP i na powtorne logowanie.
+STALE_APPLY_MINUTES = 5
+
+
+def _apply_is_stale(updated_at: Any, now: datetime) -> bool:
+    """Czy `applying` na tym wierszu to slad po przerwanym zapisie."""
+    if not isinstance(updated_at, datetime):
+        return True
+    stamp = updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=timezone.utc)
+    return stamp + timedelta(minutes=STALE_APPLY_MINUTES) <= now
+
+
 async def _require_approver(actor: Actor, province: str) -> None:
     if not may_approve(
         is_admin=actor.is_admin,
@@ -1208,15 +1421,29 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
 
     # Kolizje liczymy ŚWIEŻO, a nie z chwili zgłoszenia: między jednym a drugim
     # obsadowy mógł dopisać chętnemu inny mecz tego dnia.
+    #
+    # Pytającego dokładamy ZAWSZE. `myConflicts` niżej brało się z tej samej
+    # tablicy, więc dopóki ktoś się nie zgłosił, jego własne kolizje wychodziły
+    # puste - czyli dokładnie wtedy, gdy są mu potrzebne.
+    who = {
+        _s(c["judge_id"]): _s((cards.get(_s(c["judge_id"])) or {}).get("full_name"))
+        for c in claims
+    }
+    who[actor.judge_id] = actor.full_name
     fresh = await _same_day_matches(
-        province,
-        [_s(c["judge_id"]) for c in claims],
-        offer.get("match_at"),
-        _s(offer["match_id"]),
+        province, who, offer.get("match_at"), _s(offer["match_id"])
     )
 
     payload = await _offer_payload(offer, cards, claims, viewer_id=actor.judge_id)
-    payload["canApprove"] = approver and _s(offer["status"]) == "open"
+    # Do rozstrzygniecia jest oferta otwarta ORAZ ta z PORZUCONYM zapisem: bez
+    # tego drugiego przypadku utknietej wymiany nie ma jak odzyskac z aplikacji.
+    payload["canApprove"] = approver and (
+        _s(offer["status"]) == "open"
+        or (
+            _s(offer["status"]) == "applying"
+            and _apply_is_stale(offer.get("updated_at"), _now())
+        )
+    )
 
     # Komplet chetnych - z nazwiskami, notatkami i cudzym terminarzem - widza
     # WYLACZNIE ci, ktorzy maja nim rozstrzygac: obsadowy, administrator i sam
@@ -1241,6 +1468,37 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
     # informacja, ktorej potrzebuje ZANIM sie zglosi.
     payload["myConflicts"] = fresh.get(actor.judge_id, [])
     payload["slotHolder"] = slot_holder_name(offer.get("match_snapshot") or {}, offer["slot"])
+
+    # Mecz mógł zostać PRZENIESIONY po wystawieniu oferty. Kafel pokazuje migawkę
+    # z chwili wystawienia - na to zgadzał się oddający i tego nie ruszamy - więc
+    # bieżący termin dokładamy osobno i TYLKO wtedy, gdy się różni. Bez tego
+    # chętny zgłaszał się na godzinę, której już nie ma.
+    live = await database.fetch_one(
+        select(province_matches.c.match_at, province_matches.c.state_json).where(
+            and_(
+                province_matches.c.province == province,
+                province_matches.c.match_id == _s(offer["match_id"]),
+            )
+        )
+    )
+    live_row = _row(live) if live else {}
+    live_at = live_row.get("match_at")
+    live_state = live_row.get("state_json") or {}
+    payload["matchNow"] = (
+        {
+            "matchAt": _iso(live_at),
+            "hall": " ".join(
+                x
+                for x in (
+                    _s(live_state.get("Hala_nazwa")),
+                    _s(live_state.get("Hala_miasto")),
+                )
+                if x
+            ),
+        }
+        if live_at is not None and live_at != offer.get("match_at")
+        else None
+    )
     return payload
 
 
@@ -1270,6 +1528,17 @@ async def reject_offer(
                 updated_at=func.now(),
             )
         )
+        # Kogo to obchodzi: oddajacy i ci, ktorych zgloszenie WLASNIE gasimy.
+        # Wczesniej powiadomienie szlo do wszystkich wierszy, wiec ktos, kto
+        # wycofal zgloszenie tygodnie temu, dostawal wiadomosc o cudzej decyzji.
+        interested = [
+            _s(_row(r)["judge_id"])
+            for r in await database.fetch_all(
+                select(match_market_claims.c.judge_id)
+                .where(match_market_claims.c.offer_id == offer_id)
+                .where(match_market_claims.c.status.in_(("pending", "chosen")))
+            )
+        ]
         await database.execute(
             update(match_market_claims)
             .where(match_market_claims.c.offer_id == offer_id)
@@ -1277,12 +1546,9 @@ async def reject_offer(
             .values(status="declined", updated_at=func.now())
         )
 
-    claim_rows = await database.fetch_all(
-        select(match_market_claims.c.judge_id).where(match_market_claims.c.offer_id == offer_id)
-    )
     reason = _s(req.reason)
     await _notify(
-        [_s(offer["from_judge_id"])] + [_s(_row(r)["judge_id"]) for r in claim_rows],
+        [_s(offer["from_judge_id"])] + interested,
         "🚫 Wymiana odrzucona",
         f"{_offer_line(offer)} zostaje bez zmian." + (f" Powód: {reason}" if reason else ""),
         offer,
@@ -1315,6 +1581,9 @@ async def approve_offer(
         province = _s(offer["province"])
         await _require_approver(actor, province)
 
+        stale = _s(offer["status"]) == "applying" and _apply_is_stale(
+            offer.get("updated_at"), _now()
+        )
         claim_row = await database.fetch_one(
             select(match_market_claims).where(
                 and_(
@@ -1326,10 +1595,20 @@ async def approve_offer(
         if not claim_row:
             raise HTTPException(404, "Nie ma takiego zgłoszenia przy tej ofercie.")
         claim = _row(claim_row)
-        if _s(claim["status"]) != "pending":
+        # Przy drugiej probie zgloszenie jest juz `chosen` - to ten sam chetny,
+        # ten sam mecz, tylko zapis nie doszedl do konca.
+        allowed = ("pending", "chosen") if stale else ("pending",)
+        if _s(claim["status"]) not in allowed:
             raise HTTPException(409, "To zgłoszenie zostało już rozstrzygnięte.")
 
-        target = next_offer_status(offer["status"], "approve")
+        # Druga proba dla zapisu, ktory UTKNAL (`stale` wyzej). Zwykle `applying`
+        # znaczy "trwa", ale gdy nasze wywolanie przerwalo sie w polowie, nikt tego
+        # wiersza juz nie ruszy. Po `STALE_APPLY_MINUTES` wolno wiec sprobowac
+        # ponownie: skutek zapisu jest ten sam (to samo nazwisko w tym samym
+        # gniezdzie), a `expect` sprawdza po drodze, kto siedzi tam dzisiaj.
+        target = next_offer_status(offer["status"], "approve") or (
+            "applying" if stale else None
+        )
         if not target:
             raise HTTPException(409, "Ta oferta została już rozstrzygnięta.")
 
@@ -1389,6 +1668,29 @@ async def approve_offer(
         )
 
     holder = slot_holder_name(offer.get("match_snapshot") or {}, offer["slot"])
+    if not holder:
+        # Migawka mogla dopasowac gniazdo po NUMERZE i nie miec nazwiska. Bez
+        # `expect` zapis nie sprawdza, kto siedzi w gniezdzie DZIS - a to jedyne,
+        # przed czym ten straznik chroni: nadpisaniem swiezszej decyzji podjetej
+        # poza aplikacja. Dosypujemy nazwisko z biezacego stanu meczu.
+        current = await database.fetch_one(
+            select(province_matches.c.state_json).where(
+                and_(
+                    province_matches.c.province == province,
+                    province_matches.c.match_id == _s(offer["match_id"]),
+                )
+            )
+        )
+        holder = slot_holder_name(
+            (_row(current) if current else {}).get("state_json") or {}, offer["slot"]
+        )
+    if not holder:
+        return await fail(
+            "Nie wiem, kto zajmuje dziś to gniazdo w bazie związku, a bez tego "
+            "zapis mógłby nadpisać świeższą decyzję obsadowego. Odśwież mecze "
+            "okręgu i spróbuj ponownie.",
+            "SLOT_UNKNOWN",
+        )
     select_name = slot_select_name(offer["slot"])
     taker_name = _s(taker.get("full_name"))
     if not taker_name:
@@ -1408,7 +1710,7 @@ async def approve_offer(
                 cookies,
                 _s(offer["match_id"]),
                 {select_name: ("", taker_name)},
-                expect=(select_name, holder) if holder else None,
+                expect=(select_name, holder),
                 # Giełda nie zna numeru opcji - podaje samo nazwisko. Bez tego
                 # nienalezione nazwisko wysłałoby pustą wartość, czyli WYCZYŚCIŁO
                 # gniazdo zamiast je przejąć.
