@@ -141,3 +141,37 @@ def test_naglowek_materialu():
     assert head["teams"] == "Zagłębie - MKS"
     assert head["result"] == "30:24"
     assert head["halfResult"] == "15:12"
+
+
+class TestAkcjeJakoDane:
+    """Slajd niesie akcje także jako dane - do wykrywania wykonania."""
+
+    def test_kazda_akcja_ma_rodzaj_druzyne_i_numer(self):
+        out = slides_from_timeline(
+            [{"type": "goal", "team": "host", "time": 60_000, "half": 1, "player": 16}]
+        )
+        assert out[0]["events"] == [{"type": "goal", "team": "host", "player": "16"}]
+
+    def test_akcje_scalone_na_jednym_slajdzie_maja_osobne_wpisy(self):
+        out = slides_from_timeline(
+            [
+                {"type": "goal", "team": "host", "time": 60_000, "half": 1, "player": 16},
+                {"type": "penalty2", "team": "guest", "time": 60_400, "half": 1, "player": 7},
+            ]
+        )
+        assert len(out) == 1
+        assert [e["type"] for e in out[0]["events"]] == ["goal", "penalty2"]
+
+    def test_numer_z_liczby_zmiennoprzecinkowej_bez_ogona(self):
+        # ProEl potrafi oddać numer jako 16.0 - "16.0" nigdy nie zrówna się
+        # z "16" wpisanym na telefonie.
+        out = slides_from_timeline(
+            [{"type": "goal", "team": "host", "time": 0, "half": 1, "player": "16.0"}]
+        )
+        assert out[0]["events"][0]["player"] == "16"
+
+    def test_akcja_bez_numeru_ma_pusty_numer_a_nie_none(self):
+        out = slides_from_timeline(
+            [{"type": "teamTime", "team": "host", "time": 0, "half": 1}]
+        )
+        assert out[0]["events"][0]["player"] == ""

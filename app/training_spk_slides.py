@@ -101,6 +101,18 @@ def _join_actions(actions: List[str]) -> str:
     return " i ".join([head] + [r[:1].lower() + r[1:] for r in rest])
 
 
+def _slide_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Akcja slajdu jako dane - do wykrywania wykonania, nie do pokazywania."""
+    player = str(event.get("player") if event.get("player") is not None else "").strip()
+    if player.endswith(".0"):
+        player = player[:-2]
+    return {
+        "type": str(event.get("type") or "").strip(),
+        "team": str(event.get("team") or "").strip(),
+        "player": player,
+    }
+
+
 def slides_from_timeline(
     timeline: Any, meta: Dict[str, Any] | None = None
 ) -> List[Dict[str, Any]]:
@@ -110,6 +122,12 @@ def slides_from_timeline(
     gotowy tekst. Aplikacja ma go tylko pokazać i - w trybie prezentacji -
     ustawić z niego zegar; nie ma niczego doliczać, bo wtedy PDF i ekran
     zaczęłyby się różnić.
+
+    Obok tekstu slajd niesie te same akcje JAKO DANE (`events`): rodzaj,
+    drużynę i numer. Tryb prowadzenia w aplikacji sprawdza po nich, czy sędzia
+    wykonał akcję ze slajdu - z samego zdania nie dałoby się tego odczytać bez
+    parsowania własnych tekstów, a to jest prosta droga do rozjazdu przy
+    pierwszej zmianie sformułowania.
     """
     events = [e for e in (timeline or []) if isinstance(e, dict)]
     events = [e for e in events if action_text(e)]
@@ -128,6 +146,7 @@ def slides_from_timeline(
         )
         if same_action:
             last["actions"].append(text)
+            last["events"].append(_slide_event(event))
             last["text"] = _join_actions(last["actions"])
             continue
         slides.append(
@@ -138,6 +157,7 @@ def slides_from_timeline(
                 "clock": format_clock(time_ms),
                 "shootout": shootout,
                 "actions": [text],
+                "events": [_slide_event(event)],
                 "text": text,
             }
         )

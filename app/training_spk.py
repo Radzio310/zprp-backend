@@ -248,7 +248,9 @@ async def get_reference(actor: Actor = Depends(proel_actor)) -> Dict[str, Any]:
 
 @router.get("/brief", summary="Dane meczu szkoleniowego")
 async def brief(
-    mode: str = Query("video", description="video, condensed albo slides"),
+    mode: str = Query(
+        "video", description="video, condensed, slides albo guided"
+    ),
     actor: Actor = Depends(proel_actor),
 ) -> Dict[str, Any]:
     """Co telefon musi wiedzieć, zanim sędzia zacznie.
@@ -281,7 +283,10 @@ async def brief(
         "meta": ref["meta"] or {},
         "attempts": int(mine or 0),
     }
-    if mode == "slides":
+    if mode in ("slides", "guided"):
+        # Tryb prowadzony w aplikacji to prezentacja z wykrywaniem wykonania -
+        # klucz odpowiedzi i tak jest wtedy na ekranie, więc slajdy lecą tak
+        # samo jak przy zwykłej prezentacji.
         out["slides"] = slides_from_timeline(ref["timeline"] or [], ref["meta"] or {})
     if mode == "condensed":
         blob = ref["blob"] if isinstance(ref["blob"], dict) else {}
@@ -302,7 +307,7 @@ async def brief(
 
 class RunIn(BaseModel):
     runId: str
-    #: "video", "condensed" albo "slides".
+    #: "video", "condensed", "slides" albo "guided" (nauka w aplikacji).
     mode: str = "video"
     appVersion: Optional[str] = None
     #: Pełny stan meczu - ten sam kształt, co dokument ProEla.
@@ -328,16 +333,20 @@ async def save_run(
     mine_meta = meta_from_blob(blob)
     # Tryb rozstrzyga o CAŁEJ ocenie, więc nieznana wartość nie ma prawa przejść
     # dalej jako ona sama - wpada na najostrzejszy tryb, nie na najłagodniejszy.
-    mode = body.mode if body.mode in ("slides", "condensed") else "video"
+    mode = body.mode if body.mode in ("slides", "condensed", "guided") else "video"
 
     report = score_run(
         ref["timeline"] or [],
         blob.get("protocol"),
-        mode=mode,
+        # Nauka w aplikacji liczy się jak prezentacja (kolejność i numery, bez
+        # czasu) - własnego trybu w silniku nie ma, bo różni się WYŁĄCZNIE tym,
+        # że sędzia był prowadzony. To rozróżnienie niesie zapisany `mode`.
+        mode="slides" if mode == "guided" else mode,
         reference_meta=ref["meta"] or {},
         attempt_meta=mine_meta,
     )
     report["grade"] = grade(report["score"])
+    report["mode"] = mode
 
     who = await _identity(actor)
     previous = await database.fetch_val(
@@ -462,6 +471,11 @@ def summarize_by_province(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     best: Dict[str, Dict[str, Any]] = {}
     for run in runs:
         if run.get("score") is None:
+            continue
+        # Nauka w aplikacji prowadzi za rękę, więc gwarantuje niemal komplet
+        # zdarzeń - w zestawieniu mówiłaby nieprawdę. Widać ją na liście
+        # podejść, do średnich nie wchodzi.
+        if run.get("mode") == "guided":
             continue
         key = str(run.get("judgeId") or run.get("runId"))
         current = best.get(key)
