@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
     CREW_STATE_FIELDS,
+    apply_known_swaps,
     crew_judge_ids,
     with_slot_holder,
     PROBE_BATCH_LIMIT,
@@ -471,3 +472,81 @@ def test_delegaci_sa_w_obsadzie_choc_nie_w_gieldzie():
     assert set(TRADEABLE_SLOTS) < set(CREW_STATE_FIELDS)
     assert "delegat" in CREW_STATE_FIELDS
     assert "delegat2" in CREW_STATE_FIELDS
+
+
+# ─────────────── pamiec wlasnych wymian nalozona na migawke ───────────────
+#
+# Zgloszone dwa razy tego samego wieczora (2026-09-05): po wymianie sedzia,
+# ktory mecz PRZEJAL, nie widzial go na liscie "Oddaj mecz". `with_slot_holder`
+# poprawia migawke w chwili zapisu, ale to nie pomaga wymianie zapisanej
+# wczesniej. Dlatego lista naklada jeszcze wlasna pamiec gieldy.
+
+SWAP = {
+    "slot": "sedzia1",
+    "from_judge_id": "111",
+    "from_name": "WITKOWICZ Radoslaw",
+    "to_judge_id": "222",
+    "to_name": "WITKOWICZ Krzysztof",
+}
+
+
+def test_wlasna_wymiana_oddaje_mecz_temu_kto_go_przejal():
+    state = {"NrSedzia_pierwszy": "111", "NrSedzia_pierwszy_nazwisko": "WITKOWICZ Radoslaw"}
+    assert slots_held_by(state, "222", "WITKOWICZ Krzysztof") == []
+    fixed = apply_known_swaps(state, [SWAP])
+    assert slots_held_by(fixed, "222", "WITKOWICZ Krzysztof") == ["sedzia1"]
+    # I przestaje byc meczem oddajacego - on go wlasnie oddal.
+    assert slots_held_by(fixed, "111", "WITKOWICZ Radoslaw") == []
+
+
+def test_migawka_bez_numeru_dopasowuje_sie_nazwiskiem():
+    """Lekki przebieg monitora czyta liste meczow, ktora podaje same nazwiska."""
+    state = {"NrSedzia_pierwszy_nazwisko": "Radoslaw WITKOWICZ"}
+    fixed = apply_known_swaps(state, [SWAP])
+    assert fixed["NrSedzia_pierwszy"] == "222"
+    assert fixed["NrSedzia_pierwszy_nazwisko"] == "WITKOWICZ Krzysztof"
+
+
+def test_kto_trzeci_w_gniezdzie_wygrywa_z_nasza_pamiecia():
+    """Obsadowy zmienil obsade recznie w ZPRP - nasza pamiec jest starsza."""
+    state = {"NrSedzia_pierwszy": "999", "NrSedzia_pierwszy_nazwisko": "NOWAK Jan"}
+    assert apply_known_swaps(state, [SWAP]) == state
+
+
+def test_puste_gniazdo_nie_przyjmuje_wymiany():
+    # ZPRP wpisuje "0" przy zdjetym sedziu - to nie jest oddajacy.
+    assert apply_known_swaps({"NrSedzia_pierwszy": "0"}, [SWAP]) == {"NrSedzia_pierwszy": "0"}
+
+
+def test_lancuch_wymian_tego_samego_gniazda_sklada_sie_po_kolei():
+    """Wymiana "w te i z powrotem" - oba zgloszenia z tego wieczora."""
+    back = {
+        "slot": "sedzia1",
+        "from_judge_id": "222",
+        "from_name": "WITKOWICZ Krzysztof",
+        "to_judge_id": "111",
+        "to_name": "WITKOWICZ Radoslaw",
+    }
+    state = {"NrSedzia_pierwszy": "111", "NrSedzia_pierwszy_nazwisko": "WITKOWICZ Radoslaw"}
+    fixed = apply_known_swaps(state, [SWAP, back])
+    assert fixed["NrSedzia_pierwszy"] == "111"
+    assert slots_held_by(fixed, "111", "WITKOWICZ Radoslaw") == ["sedzia1"]
+
+
+def test_wymiana_innego_gniazda_nie_rusza_mojego():
+    state = {
+        "NrSedzia_pierwszy": "111",
+        "NrSedzia_drugi": "333",
+        "NrSedzia_drugi_nazwisko": "KOWALSKI Piotr",
+    }
+    fixed = apply_known_swaps(state, [{**SWAP, "slot": "sedzia2", "from_judge_id": "333"}])
+    assert fixed["NrSedzia_pierwszy"] == "111"
+    assert fixed["NrSedzia_drugi"] == "222"
+
+
+def test_brak_wymian_zostawia_migawke_w_spokoju():
+    state = {"NrSedzia_pierwszy": "111"}
+    assert apply_known_swaps(state, []) == state
+    assert apply_known_swaps(state, [{"slot": "kibic"}]) == state
+    # Kopia, nie zmiana w miejscu.
+    assert apply_known_swaps(state, [SWAP]) is not state

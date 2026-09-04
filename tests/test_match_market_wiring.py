@@ -482,3 +482,25 @@ def test_the_rest_of_the_crew_hears_it_from_the_market():
     calls = calls_in("approve_offer")
     assert "crew_judge_ids" in calls
     assert "text_crew_changed" in calls
+
+
+def test_my_matches_never_forgets_our_own_swaps():
+    """Zgloszone DWA razy: mecz przejety wymiana nie wraca na liste.
+
+    Migawka terminarza nadazy dopiero z monitorem, wiec lista naklada na nia
+    wlasna pamiec gieldy - wymiany potwierdzone w bazie zwiazku. Bez tego
+    zapisana wymiana jest widoczna w ZPRP i niewidoczna w aplikacji.
+    """
+    calls = calls_in("my_matches")
+    assert "_applied_swaps" in calls
+    assert "apply_known_swaps" in calls
+
+
+def test_only_confirmed_swaps_count_as_memory():
+    """Zamowienie, ktore nie przeszlo, nic o obsadzie nie mowi."""
+    source = code_of("_applied_swaps")
+    assert "'done'" in source
+    assert "applied_at" in source
+    # Wybrany chetny, nie dowolne zgloszenie - inaczej mecz "przejmowaliby"
+    # wszyscy, ktorzy sie na niego zglosili.
+    assert "'chosen'" in source

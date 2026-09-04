@@ -73,6 +73,7 @@ from app.match_market_access import (
 )
 from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
+    apply_known_swaps,
     DEFAULT_DEADLINE_HOURS,
     PROBE_BATCH_LIMIT,
     SLOT_STATE_FIELDS,
@@ -319,10 +320,18 @@ async def _same_day_matches(
         .where(province_matches.c.match_at >= day_start)
         .where(province_matches.c.match_at < day_start + timedelta(days=1))
     )
+    # Wymiany zapisane przez giełdę nakładamy tak samo, jak na liście „moich
+    # meczów". Właśnie tu jest to najważniejsze: sędzia bierze mecz przez
+    # giełdę, a chwilę później zgłasza się na drugi tego samego dnia - i to
+    # pierwszy mecz miałby ostrzec obsadowego, gdyby migawka o nim wiedziała.
+    swaps = await _applied_swaps(province, [_s(_row(r)["match_id"]) for r in rows])
     out: Dict[str, List[Dict[str, str]]] = {}
     for raw in rows:
         data = _row(raw)
-        state = state_dict(data.get("state_json"))
+        state = apply_known_swaps(
+            state_dict(data.get("state_json")),
+            swaps.get(_s(data["match_id"]), ()),
+        )
         card = {
             "matchId": _s(data["match_id"]),
             "matchCode": _s(data.get("match_code")),
@@ -587,6 +596,65 @@ async def _require_assignable(
 
 
 # ─────────────────────────── migawka terminarza ───────────────────────────
+
+
+async def _applied_swaps(province: str, match_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """Wymiany zapisane w bazie związku, po meczach - od najstarszej.
+
+    Własna pamięć giełdy o tym, kto komu oddał gniazdo. Migawka terminarza
+    dowiaduje się o tym od monitora, więc bywa o kilkanaście minut z tyłu; ta
+    tabela wie od razu, bo to ona zamawiała zapis. Bierzemy tylko wymiany
+    POTWIERDZONE w ZPRP (`status="done"`, `applied_at`) - zamówienie, które nie
+    przeszło, nic o obsadzie nie mówi.
+    """
+    if not match_ids:
+        return {}
+    rows = await database.fetch_all(
+        select(
+            match_market_offers.c.match_id,
+            match_market_offers.c.slot,
+            match_market_offers.c.from_judge_id,
+            match_market_claims.c.judge_id.label("to_judge_id"),
+        )
+        .select_from(
+            match_market_offers.join(
+                match_market_claims,
+                and_(
+                    match_market_claims.c.offer_id == match_market_offers.c.id,
+                    match_market_claims.c.status == "chosen",
+                ),
+            )
+        )
+        .where(match_market_offers.c.province == province)
+        .where(match_market_offers.c.status == "done")
+        .where(match_market_offers.c.applied_at.isnot(None))
+        .where(match_market_offers.c.match_id.in_(match_ids))
+        .order_by(match_market_offers.c.applied_at.asc())
+    )
+    if not rows:
+        return {}
+    # Nazwiska, bo migawka z lekkiego przebiegu monitora nie ma numerów i
+    # rygiel „w gnieździe stoi oddający" ma wtedy tylko nazwisko do porównania.
+    cards = await _judges_by_id(
+        [_s(_row(r)["from_judge_id"]) for r in rows]
+        + [_s(_row(r)["to_judge_id"]) for r in rows]
+    )
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for raw in rows:
+        row = _row(raw)
+        match_id = _s(row["match_id"])
+        giver = _s(row["from_judge_id"])
+        taker = _s(row["to_judge_id"])
+        out.setdefault(match_id, []).append(
+            {
+                "slot": _s(row["slot"]),
+                "from_judge_id": giver,
+                "from_name": _s((cards.get(giver) or {}).get("full_name")),
+                "to_judge_id": taker,
+                "to_name": _s((cards.get(taker) or {}).get("full_name")),
+            }
+        )
+    return out
 
 
 async def _sync_slot_holder(
@@ -922,6 +990,10 @@ async def my_matches(
     rows = list(dated_rows) + list(undated_rows)
 
     match_ids = [_s(_row(r)["match_id"]) for r in rows]
+    # Migawka mówi, co monitor zdążył zobaczyć; ta tabela - co giełda sama
+    # zapisała. Bez tego sędzia, który mecz właśnie przejął, nie widział go na
+    # liście „Oddaj mecz" do najbliższego przebiegu monitora.
+    swaps = await _applied_swaps(province, match_ids)
     live = await database.fetch_all(
         select(
             match_market_offers.c.id,
@@ -940,12 +1012,16 @@ async def my_matches(
         data = _row(raw)
         # `state_dict`, nie gole `.get`: kolumna JSON bywa napisem i to o nią,
         # a nie o dane, kładła się cała lista (patrz nota przy `state_dict`).
-        state = state_dict(data.get("state_json"))
+        state = apply_known_swaps(
+            state_dict(data.get("state_json")),
+            swaps.get(_s(data["match_id"]), ()),
+        )
         held = slots_held_by(state, actor.judge_id, actor.full_name)
         if not held:
-            # Sędzia jest przy meczu (wie o tym `province_match_judges`), ale w
-            # gnieździe giełdowym go nie ma - czyli jest delegatem. Nie ma tu
-            # czego oddać.
+            # Sędziego nie ma w żadnym gnieździe giełdowym tego meczu - ani w
+            # migawce, ani w naszej pamięci wymian. Albo jest delegatem (a
+            # delegatem się nie handluje), albo obsadę zmieniono ręcznie w ZPRP
+            # i migawka jeszcze o tym nie wie; to drugie domyka monitor.
             continue
         mine.append((data, state, held))
 
@@ -1250,7 +1326,16 @@ async def create_offer(
     if not match:
         raise HTTPException(404, "Nie znam tego meczu w Twoim okręgu.")
     data = _row(match)
-    state = state_dict(data.get("state_json"))
+    # Ta sama poprawka, co na liście „Oddaj mecz": migawka bywa o przebieg
+    # monitora z tyłu, a giełda pamięta własne wymiany. Bez tego mecz stałby na
+    # liście, a wystawienie go kończyłoby się odmową „to nie Twoje gniazdo" -
+    # czyli dokładnie tą sprzecznością, przed którą lista miała chronić. Poprawiona
+    # migawka idzie też do `match_snapshot`, bo z niej powstaje strażnik `expect`
+    # przy zapisie do ZPRP.
+    state = apply_known_swaps(
+        state_dict(data.get("state_json")),
+        (await _applied_swaps(province, [_s(req.match_id)])).get(_s(req.match_id), ()),
+    )
 
     if slot not in slots_held_by(state, actor.judge_id, actor.full_name):
         raise HTTPException(403, "To nie jest Twoje gniazdo w tym meczu.")

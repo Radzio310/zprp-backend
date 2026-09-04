@@ -472,3 +472,46 @@ def crew_judge_ids(state: Mapping[str, Any], exclude: Iterable[object] = ()) -> 
             continue
         out.append(raw)
     return out
+
+
+def apply_known_swaps(
+    state: Mapping[str, Any],
+    swaps: Iterable[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Stan meczu z dopisanymi wymianami, które giełda SAMA zapisała.
+
+    Migawkę terminarza wypełnia monitor, więc zaraz po zatwierdzonej wymianie
+    siedzi w niej jeszcze poprzedni sędzia. `with_slot_holder` poprawia ją w
+    chwili zapisu, ale to poprawka w JEDNĄ stronę: nie pomoże wymianie zapisanej
+    przed jej wdrożeniem ani takiej, przy której samo odświeżenie się nie udało.
+    Dlatego lista „moich meczów" nakłada tu jeszcze WŁASNĄ pamięć giełdy -
+    zatwierdzone i potwierdzone w bazie związku wymiany, o których migawka może
+    nie wiedzieć. Giełda nie ma prawa zapomnieć, co sama zrobiła.
+
+    Rygiel jest ostry: wymiana wchodzi TYLKO wtedy, gdy w gnieździe stoi
+    dokładnie ten, kto mecz oddał. Gdy stoi tam kto trzeci, świat poszedł dalej
+    (obsadowy zmienił obsadę ręcznie w ZPRP) i nasza pamięć jest nieaktualna -
+    wtedy rządzi migawka. `swaps` przychodzą od najstarszej, żeby łańcuch
+    wymian tego samego gniazda złożył się po kolei.
+
+    Każda wymiana to `{"slot", "from_judge_id", "from_name", "to_judge_id",
+    "to_name"}`.
+    """
+    out = dict(state or {})
+    for swap in swaps:
+        fields = SLOT_STATE_FIELDS.get(str((swap or {}).get("slot") or "").strip())
+        if not fields:
+            continue
+        id_field, name_field = fields
+        giver_id = str(swap.get("from_judge_id") or "").strip()
+        raw_id = str(out.get(id_field) or "").strip()
+        if raw_id:
+            # Numer w migawce rozstrzyga - tak samo jak w `slots_held_by`.
+            if not giver_id or raw_id != giver_id:
+                continue
+        elif not names_match(out.get(name_field), swap.get("from_name")):
+            # Migawka bez numeru (lekki przebieg monitora) - zostaje nazwisko.
+            continue
+        out[id_field] = str(swap.get("to_judge_id") or "").strip()
+        out[name_field] = str(swap.get("to_name") or "").strip()
+    return out

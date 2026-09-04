@@ -13,6 +13,7 @@ CO TU JEST, A CZEGO NIE MA:
     sezonami);
   • złożenie PDF na żądanie (`POST .../pdf`) razem ze śladem „kto i kiedy";
   • rozwiązanie adresatów po kategorii rozgrywek.
+  • opcjonalna kopia PDF przez webhook Discord przypisany grupie lub okręgowi.
 
 Nie ma tu WYSYŁKI maila. Raport wychodzi z poczty sędziego, z jego adresu -
 odpowiedź związku ma wrócić do niego, a nie do skrzynki aplikacji. Serwer daje
@@ -412,7 +413,7 @@ async def generate_pdf(
                     filename=filename,
                 ),
             )
-            if recipients["provinceScoped"] and not recipients["province"]:
+            if recipients["discordProvinceUnresolved"]:
                 discord["warning"] = "Nie ustalono okręgu — kopia okręgowa nie została wysłana."
         except Exception:
             # Awaria konfiguracji lub transportu nie zabiera gotowego PDF.
@@ -521,6 +522,7 @@ async def _resolve_recipients(category: str, match_id: Optional[str]) -> Dict[st
                 targets.append({"name": d.get("name") or "Grupa ligowa", "url": d["discord_webhook_url"]})
 
     province = ""
+    province_unresolved = False
     if match_id and is_province_scoped(cat):
         province = await fetch_match_province(match_id)
         if province:
@@ -534,6 +536,16 @@ async def _resolve_recipients(category: str, match_id: Optional[str]) -> Dict[st
                 if dict(row).get("discord_webhook_url"):
                     targets.append({"name": province, "url": dict(row)["discord_webhook_url"]})
 
+    if is_province_scoped(cat) and not province:
+        # Bez skonfigurowanych webhooków funkcja jest wyłączona, więc brak
+        # okręgu nie powinien dokładać ostrzeżenia o nieużywanej wysyłce.
+        province_unresolved = await database.fetch_one(
+            select(extra_report_province_recipients.c.province)
+            .where(extra_report_province_recipients.c.discord_webhook_url.isnot(None))
+            .where(extra_report_province_recipients.c.discord_webhook_url != "")
+            .limit(1)
+        ) is not None
+
     return {
         "category": cat,
         "groups": groups,
@@ -543,6 +555,7 @@ async def _resolve_recipients(category: str, match_id: Optional[str]) -> Dict[st
         "province": province,
         "provinceScoped": is_province_scoped(cat),
         "discordDestinations": [t["name"] for t in targets],
+        "discordProvinceUnresolved": province_unresolved,
         "_discordTargets": targets,
     }
 
