@@ -11,6 +11,9 @@ from datetime import datetime, timedelta, timezone
 
 from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
+    CREW_STATE_FIELDS,
+    crew_judge_ids,
+    with_slot_holder,
     PROBE_BATCH_LIMIT,
     assignability_is_fresh,
     assignability_message,
@@ -404,3 +407,67 @@ def test_preferencje_w_napisie_nadal_umieja_odmowic():
     assert market_pushes_allowed('{"enabled": false}') is False
     assert market_pushes_allowed('{"enabled": true}') is True
     assert market_pushes_allowed("cokolwiek")
+
+
+# ─────────────────── migawka meczu po zapisanej wymianie ───────────────────
+#
+# Zgloszone z terenu 2026-09-05: sedzia zrobil wymiane "w tę i z powrotem" i
+# meczu, ktory wlasnie odzyskal, nie widzial na liscie "Oddaj mecz". Migawke
+# terminarza wypelnia monitor, wiec do jego przebiegu w gniezdzie siedzial
+# poprzednik - a wiersz nie powstawal wcale, wiec nie mial nawet czego
+# wytlumaczyc.
+
+
+def test_migawka_dostaje_nowego_gospodarza_gniazda():
+    state = {
+        "NrSedzia_pierwszy": "111",
+        "NrSedzia_pierwszy_nazwisko": "WITKOWICZ Krzysztof",
+        "NrSedzia_drugi": "222",
+        "NrSedzia_drugi_nazwisko": "NOWAK Jan",
+    }
+    patched = with_slot_holder(state, "sedzia1", "333", "WITKOWICZ Radoslaw")
+    assert patched["NrSedzia_pierwszy"] == "333"
+    assert patched["NrSedzia_pierwszy_nazwisko"] == "WITKOWICZ Radoslaw"
+    # Gniazdo obok zostaje nietkniete - wymiana dotyczy JEDNEJ roli.
+    assert patched["NrSedzia_drugi"] == "222"
+    # Kopia, nie zmiana w miejscu: wolajacy porownuje stary stan z nowym.
+    assert state["NrSedzia_pierwszy"] == "111"
+
+
+def test_poprawiona_migawka_oddaje_mecz_wlascicielowi():
+    """To jest cala poprawka, w jednym zdaniu."""
+    state = {"NrSedzia_pierwszy": "111", "NrSedzia_pierwszy_nazwisko": "WITKOWICZ Krzysztof"}
+    assert slots_held_by(state, "333", "WITKOWICZ Radoslaw") == []
+    patched = with_slot_holder(state, "sedzia1", "333", "WITKOWICZ Radoslaw")
+    assert slots_held_by(patched, "333", "WITKOWICZ Radoslaw") == ["sedzia1"]
+
+
+def test_gniazdo_spoza_mapy_nie_psuje_migawki():
+    state = {"NrSedzia_pierwszy": "111"}
+    assert with_slot_holder(state, "kibic", "333", "X") == state
+
+
+def test_obsada_do_powiadomienia_bez_stron_wymiany():
+    state = {
+        "NrSedzia_pierwszy": "111",
+        "NrSedzia_drugi": "222",
+        "NrSedzia_sekretarz": "0",
+        "NrSedzia_czas": "",
+        "NrSedzia_delegat": "444",
+    }
+    # "0" przy pustym nazwisku to ZPRP-owe "nikogo tu nie ma", nie numer.
+    assert crew_judge_ids(state) == ["111", "222", "444"]
+    assert crew_judge_ids(state, exclude=["111", "444"]) == ["222"]
+    assert crew_judge_ids({}) == []
+
+
+def test_ten_sam_sedzia_w_dwoch_gniazdach_dostaje_jedno_powiadomienie():
+    state = {"NrSedzia_sekretarz": "222", "NrSedzia_czas": "222"}
+    assert crew_judge_ids(state) == ["222"]
+
+
+def test_delegaci_sa_w_obsadzie_choc_nie_w_gieldzie():
+    """Delegat niczym nie handluje, ale ocenia to, co zobaczy w sobote."""
+    assert set(TRADEABLE_SLOTS) < set(CREW_STATE_FIELDS)
+    assert "delegat" in CREW_STATE_FIELDS
+    assert "delegat2" in CREW_STATE_FIELDS

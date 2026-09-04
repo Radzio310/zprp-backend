@@ -80,7 +80,7 @@ def match_of(offer: Mapping[str, Any]) -> str:
 
 
 def match_gen(offer: Mapping[str, Any]) -> str:
-    """„meczu IIM4/1" - dopełniacz, po „obsada" i po „wymiany".
+    """„meczu IIM4/1" - po „obsada", po „wymiany" i po „w".
 
     Osobna forma, bo „obsada mecz IIM4/1" widać od pierwszego spojrzenia. To
     ta sama zasada, co przy rolach: przyimek albo rządzący rzeczownik wybiera
@@ -259,6 +259,29 @@ def giver_released(offer: Mapping[str, Any], taker_name: Any) -> tuple[str, str]
             f"jako {slot_as(offer.get('slot'))}",
             when_of(offer),
             "Obsada jest już zmieniona w bazie związku - nie musisz tam być",
+        ),
+    )
+
+
+def crew_changed(
+    offer: Mapping[str, Any], taker_name: Any, giver_name: Any = ""
+) -> tuple[str, str]:
+    """Wymiana zapisana - do POZOSTAŁEJ obsady meczu.
+
+    Ci ludzie niczego nie oddawali ani nie brali, ale w sobotę staną przy tym
+    samym stoliku - i dowiedzieć się o zmianie partnera mają prawo od razu.
+    Zdanie jest nazwowe („Nowy sędzia 1: ..."), bo forma narzędnika roli
+    („sędzią 1", „mierzącym czas") byłaby trzecią tabelą odmiany na jedno
+    powiadomienie, a każda taka tabela to kolejne miejsce na literówkę.
+    """
+    who = judge(taker_name)
+    before = _s(giver_name)
+    return (
+        "🔁 Zmiana w Twoim meczu",
+        _join(
+            f"Nowy {slot_as(offer.get('slot'))} w {match_gen(offer)}: {who}",
+            before and f"Wcześniej: {before}",
+            when_of(offer),
         ),
     )
 

@@ -56,6 +56,7 @@ from app.match_market_notify import (
     apply_failed as text_apply_failed,
     claim_created as text_claim_created,
     claim_lost as text_claim_lost,
+    crew_changed as text_crew_changed,
     giver_released as text_giver_released,
     offer_created as text_offer_created,
     offer_rejected as text_offer_rejected,
@@ -78,6 +79,7 @@ from app.match_market_rules import (
     assignability_is_fresh,
     assignability_message,
     can_offer,
+    crew_judge_ids,
     deadline_for,
     market_pushes_allowed,
     may_claim,
@@ -91,10 +93,12 @@ from app.match_market_rules import (
     slot_select_name,
     slots_held_by,
     state_dict,
+    with_slot_holder,
 )
 from app.proel_auth import is_admin
 from app.push.push import send_push_to_judges
 from app.zprp.assignments import (
+    SELECT_TO_SLOT,
     _login_zprp,
     apply_referee_assignment,
     probe_assignment_rights,
@@ -580,6 +584,71 @@ async def _require_assignable(
     raise HTTPException(
         409, _s(answer.get("message")) or assignability_message(answer.get("reason"))
     )
+
+
+# ─────────────────────────── migawka terminarza ───────────────────────────
+
+
+async def _sync_slot_holder(
+    province: str,
+    match_id: str,
+    slot: str,
+    judge_id: str,
+    full_name: str,
+) -> Dict[str, Any]:
+    """Wpisuje nowego gospodarza gniazda do migawki terminarza okręgu.
+
+    Zapis w bazie związku właśnie przeszedł, ale `province_matches.state_json`
+    wypełnia monitor przy własnym przebiegu - i do tej chwili giełda pokazywała
+    STARY stan gniazda. Sędzia, który mecz odzyskał wymianą w drugą stronę, nie
+    widział go na liście „Oddaj mecz", bo `slots_held_by` czytało tam
+    poprzednika, a lista nie miała nawet czego wygasić: wiersz po prostu nie
+    powstawał. Migawkę poprawia więc ta czynność, która ją unieważniła.
+
+    Oddaje poprawiony stan meczu - albo pusty słownik, gdy nie było czego
+    poprawić. Całość jest osłonięta, bo obsada w ZPRP jest już zmieniona:
+    nieudane odświeżenie WŁASNEJ kopii nie ma prawa zamienić udanej wymiany w
+    błąd. Monitor doczyta prawdę przy najbliższym przebiegu.
+
+    Odcisk stanu liczymy od nowa świadomie. Monitor po nim poznaje, czy jest o
+    czym powiadamiać obsadę - a o TEJ zmianie giełda mówi sama, w chwili, w
+    której się dzieje. Zostawiony stary odcisk kazałby ogłosić ją drugi raz.
+    """
+    try:
+        row = await database.fetch_one(
+            select(province_matches.c.state_json).where(
+                and_(
+                    province_matches.c.province == province,
+                    province_matches.c.match_id == match_id,
+                )
+            )
+        )
+        state = state_dict(_row(row).get("state_json")) if row else {}
+        if not state:
+            return {}
+        patched = with_slot_holder(state, slot, judge_id, full_name)
+        # Import lokalny: monitor ciągnie za sobą scraper z bs4 i httpx, a
+        # router giełdy nie ma powodu budzić go przy starcie aplikacji.
+        from app.province_match_monitor import fingerprint
+
+        await database.execute(
+            update(province_matches)
+            .where(
+                and_(
+                    province_matches.c.province == province,
+                    province_matches.c.match_id == match_id,
+                )
+            )
+            .values(
+                state_json=patched,
+                fingerprint=fingerprint(patched),
+                updated_at=func.now(),
+            )
+        )
+        return patched
+    except Exception:
+        logger.exception("giełda: nie udało się odświeżyć migawki meczu %s", match_id)
+        return {}
 
 
 # ─────────────────────────── powiadomienia ───────────────────────────
@@ -1907,6 +1976,21 @@ async def approve_offer(
         .values(status="declined", updated_at=func.now())
     )
 
+    # Nazwisko bierzemy z WERYFIKACJI formularza, a nie z listy okręgu: to ta
+    # postać („NAZWISKO Imię") stoi w migawce i zapisze ją potem monitor.
+    # Nazwisko z listy okręgu bywa odwrócone i ta sama obsada wyglądałaby na
+    # dwa różne stany.
+    verified = (result.get("verified_slots") or {}).get(
+        SELECT_TO_SLOT.get(select_name, select_name), {}
+    )
+    patched = await _sync_slot_holder(
+        province,
+        _s(offer["match_id"]),
+        _s(offer["slot"]),
+        _s(claim["judge_id"]),
+        _s(verified.get("name")) or taker_name,
+    )
+
     await _log(
         "zprp_applied",
         province=province,
@@ -1932,6 +2016,18 @@ async def approve_offer(
     await _notify(
         [_s(_row(r)["judge_id"]) for r in others],
         text_claim_lost(offer),
+        offer,
+    )
+    # Reszta obsady - drugi sędzia, stolik, delegat. Wcześniej mówił im o tym
+    # monitor, gdy zauważył różnicę w migawce; skoro migawka jest już
+    # poprawiona, nie ma czego zauważyć, więc wiadomość należy do giełdy. Przy
+    # okazji dochodzi natychmiast, a nie po przebiegu monitora.
+    await _notify(
+        crew_judge_ids(
+            patched,
+            exclude=[_s(offer["from_judge_id"]), _s(claim["judge_id"])],
+        ),
+        text_crew_changed(offer, taker_name, _s(giver.get("full_name"))),
         offer,
     )
 

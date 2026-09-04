@@ -446,3 +446,39 @@ def test_notify_takes_a_ready_pair_not_loose_strings():
     node = FUNCTIONS["_notify"]
     args = [a.arg for a in node.args.args]
     assert args == ["judge_ids", "text", "offer"], args
+
+
+# ─────────────────── migawka terminarza po wymianie ───────────────────
+
+
+def test_applied_swap_refreshes_the_province_snapshot():
+    """Zgloszone z terenu: wymiana "w tę i z powrotem" i mecz nie wraca.
+
+    `province_matches.state_json` wypelnia monitor, wiec do jego przebiegu
+    gielda czytala w gniezdzie poprzednika i `slots_held_by` nie oddawalo
+    wlascicielowi jego wlasnego meczu. Odswiezenie migawki nalezy do czynnosci,
+    ktora ja uniewaznila - inaczej lista klamie i nawet nie ma czego wygasic.
+    """
+    calls = calls_in("approve_offer")
+    assert "_sync_slot_holder" in calls
+    source = code_of("approve_offer")
+    # Po ZAPISIE, nie zamiast niego: migawka idzie za potwierdzona zmiana.
+    assert source.index("apply_referee_assignment") < source.index("_sync_slot_holder")
+
+
+def test_snapshot_refresh_never_breaks_a_saved_swap():
+    """Obsada w ZPRP jest juz zmieniona - kopia nie ma prawa tego przewrocic."""
+    node = FUNCTIONS["_sync_slot_holder"]
+    assert any(isinstance(n, ast.Try) for n in ast.walk(node))
+    source = ast.unparse(node)
+    # Nazwiska i numeru nie sklejamy tutaj - to robi sprawdzony lisc.
+    assert "with_slot_holder" in source
+    # Odcisk stanu liczony od nowa, zeby monitor nie oglosil tego drugi raz.
+    assert "fingerprint" in source
+
+
+def test_the_rest_of_the_crew_hears_it_from_the_market():
+    """Skoro migawka jest poprawiona, monitor nie zauwazy zmiany obsady."""
+    calls = calls_in("approve_offer")
+    assert "crew_judge_ids" in calls
+    assert "text_crew_changed" in calls

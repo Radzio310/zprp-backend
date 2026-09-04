@@ -16,6 +16,7 @@ from app.match_market_notify import (
     apply_failed,
     claim_created,
     claim_lost,
+    crew_changed,
     giver_released,
     judge,
     match_of,
@@ -220,6 +221,7 @@ def test_no_body_ends_without_a_full_stop():
         apply_failed(offer(), "B"),
         taker_won(offer()),
         giver_released(offer(), "A"),
+        crew_changed(offer(), "A", "B"),
         claim_lost(offer()),
     ):
         assert title
@@ -243,3 +245,28 @@ def test_each_sentence_starts_with_a_capital():
             first = sentence.strip()[:1]
             assert first == first.upper(), (first, body)
         assert "IIM4/1" in body
+
+
+# ─────────────────────── reszta obsady ───────────────────────
+#
+# Wczesniej o zmianie partnera mowil monitor, gdy zauwazyl roznice w migawce
+# terminarza. Odkad gielda poprawia migawke sama (zeby oddany mecz wracal na
+# liste), monitor nie ma czego zauwazyc - i wiadomosc nalezy do gieldy.
+
+
+def test_crew_learns_who_replaced_whom():
+    title, body = crew_changed(offer(), "Krzysztof WITKOWICZ", "Radosław WITKOWICZ")
+    assert title == "🔁 Zmiana w Twoim meczu"
+    assert body.startswith("Nowy sędzia 1 w meczu IIM4/1: Krzysztof WITKOWICZ.")
+    assert "Wcześniej: Radosław WITKOWICZ." in body
+    assert "Sob. 12 września, 14:00" in body
+
+
+def test_crew_message_declines_the_table_role():
+    _, body = crew_changed(offer(slot="czas"), "NOWAK Jan")
+    assert body.startswith("Nowy mierzący czas w meczu IIM4/1: NOWAK Jan.")
+
+
+def test_crew_message_without_the_previous_name_still_reads():
+    _, body = crew_changed(offer(match_at=None), "NOWAK Jan", "")
+    assert body == "Nowy sędzia 1 w meczu IIM4/1: NOWAK Jan."

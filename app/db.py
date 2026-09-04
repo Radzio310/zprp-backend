@@ -2755,6 +2755,7 @@ extra_report_recipients = Table(
     Column("name", String, nullable=False),
     Column("categories", JSON, nullable=False, server_default="[]"),
     Column("emails", JSON, nullable=False, server_default="[]"),
+    Column("discord_webhook_url", String, nullable=True),
     Column("order_index", Integer, nullable=False, server_default="0"),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
@@ -2775,6 +2776,7 @@ extra_report_province_recipients = Table(
     metadata,
     Column("province", String, primary_key=True),
     Column("emails", JSON, nullable=False, server_default="[]"),
+    Column("discord_webhook_url", String, nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
@@ -2804,6 +2806,8 @@ with engine.connect() as _conn:
     # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
     # `create_all` kolumny nie dołoży.
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))
+    _conn.execute(text("ALTER TABLE extra_report_recipients ADD COLUMN IF NOT EXISTS discord_webhook_url varchar"))
+    _conn.execute(text("ALTER TABLE extra_report_province_recipients ADD COLUMN IF NOT EXISTS discord_webhook_url varchar"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS approver_badges json"))
     # Dziennik giełdy powstał później niż sama giełda, więc oferty sprzed jego
     # wprowadzenia nie mają ani jednego wpisu. Dopisujemy je WSTECZ z własnych

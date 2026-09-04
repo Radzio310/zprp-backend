@@ -45,6 +45,7 @@ from starlette.background import BackgroundTask
 # import na górze buduje cały schemat przy imporcie modułu, a to wywraca
 # testy czystych helperów (_clean_signatures, _row_to_item) bez Postgresa.
 from app.extra_report_download import download_path_for, stash_for_download
+from app.extra_report_discord import normalize_webhook_url, report_payload, send_report_copies
 from app.extra_report_pdf import ExtraReportError, build_extra_report_pdf
 from app.extra_report_scope import fetch_match_province, is_province_scoped
 from app.proel_auth import Actor, is_admin, proel_actor
@@ -116,6 +117,10 @@ class GeneratePdfBody(BaseModel):
     #: nie dało się wysłać do związku raportu innego niż ten, który widzi
     #: reszta obsady.
     entries: Optional[List[Dict[str, Any]]] = None
+    #: Kategoria z tej samej funkcji klienta co przy rozwiązywaniu adresatów.
+    #: Brak w starszej aplikacji = bez automatycznej wysyłki Discord.
+    category: str = ""
+    localOnly: bool = False
 
 
 class RecipientGroup(BaseModel):
@@ -123,6 +128,9 @@ class RecipientGroup(BaseModel):
     name: str
     categories: List[str] = Field(default_factory=list)
     emails: List[str] = Field(default_factory=list)
+    #: None = zachowaj konfigurację przy zapisie ze starszej aplikacji.
+    #: Pusty napis = świadome wyłączenie wysyłki.
+    discordWebhookUrl: Optional[str] = Field(None, max_length=512)
 
 
 class RecipientGroups(BaseModel):
@@ -133,6 +141,7 @@ class ProvinceRecipients(BaseModel):
     #: Slug bez ogonków - `SLASKIE`. Nazwa i herb powstają z niego w aplikacji.
     province: str
     emails: List[str] = Field(default_factory=list)
+    discordWebhookUrl: Optional[str] = Field(None, max_length=512)
 
 
 class ProvinceRecipientList(BaseModel):
@@ -222,6 +231,13 @@ async def _require_admin(actor: Actor) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Adresatów raportu zmienia wyłącznie administrator.",
         )
+
+
+def _webhook_for_save(value: Optional[str], previous: Any = "") -> str:
+    try:
+        return normalize_webhook_url(previous if value is None else value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 # ─────────────────────────── treść raportu ───────────────────────────
@@ -380,12 +396,37 @@ async def generate_pdf(
     # Plik zostaje też pod tokenem - „Pobierz na telefon" otwiera ten adres
     # systemowo i raport ląduje w pobranych, jak protokół PDF.
     token = stash_for_download(pdf)
+    discord: Dict[str, Any] = {"status": "skipped", "deliveries": []}
+    # Tylko zapisany raport, nowy klient z kategorią i prawdziwy mecz.
+    # Inline/test pozostaje generowaniem pliku bez wysyłki do osób trzecich.
+    if row and body.category.strip() and not body.localOnly and body.entries is None:
+        try:
+            stored = dict(row)
+            mid = stored.get("zprp_match_id") or (match_key if match_key.isdigit() else None)
+            recipients = await _resolve_recipients(body.category, mid)
+            discord = await send_report_copies(
+                targets=recipients["_discordTargets"], pdf=pdf, filename=filename,
+                payload=report_payload(
+                    kind=kind, match_number=stored.get("match_number") or body.matchNumber or "",
+                    names=body.names, teams=body.teams, generated_at=now.isoformat(),
+                    filename=filename,
+                ),
+            )
+            if recipients["provinceScoped"] and not recipients["province"]:
+                discord["warning"] = "Nie ustalono okręgu — kopia okręgowa nie została wysłana."
+        except Exception:
+            # Awaria konfiguracji lub transportu nie zabiera gotowego PDF.
+            # Nie logujemy wyjątku: URL webhooka zawiera sekret.
+            logger.warning("Extra report Discord dispatch failed")
+            discord = {"status": "failed", "deliveries": [],
+                       "warning": "Nie udało się wysłać kopii do Discorda."}
     return {
         "filename": filename,
         "pdfBase64": base64.b64encode(pdf).decode("ascii"),
         "downloadUrl": f"/extra-report/pdf/download/{token}?filename={filename}",
         "generatedAt": now.isoformat(),
         "generatedByName": actor.name or None,
+        "discord": discord,
     }
 
 
@@ -455,6 +496,13 @@ async def recipients_for_category(
     `match_id` jest OPCJONALNY i musi taki zostać: starsze wersje aplikacji go
     nie wysyłają, a odpowiedź bez niego ma być dokładnie tą, którą znały.
     """
+    resolved = await _resolve_recipients(category, match_id)
+    # Sekrety trafiają tylko do endpointów admina i serwerowego transportu.
+    resolved.pop("_discordTargets")
+    return resolved
+
+
+async def _resolve_recipients(category: str, match_id: Optional[str]) -> Dict[str, Any]:
     from app.db import database, extra_report_province_recipients, extra_report_recipients
 
     cat = (category or "").strip()
@@ -463,11 +511,14 @@ async def recipients_for_category(
     )
     emails: List[str] = []
     groups: List[str] = []
+    targets: List[Dict[str, str]] = []
     for row in rows:
         d = dict(row)
         if cat and cat in (d.get("categories") or []):
             groups.append(d.get("name") or "")
             emails.extend(d.get("emails") or [])
+            if d.get("discord_webhook_url"):
+                targets.append({"name": d.get("name") or "Grupa ligowa", "url": d["discord_webhook_url"]})
 
     province = ""
     if match_id and is_province_scoped(cat):
@@ -480,6 +531,8 @@ async def recipients_for_category(
             )
             if row is not None:
                 emails.extend(dict(row).get("emails") or [])
+                if dict(row).get("discord_webhook_url"):
+                    targets.append({"name": province, "url": dict(row)["discord_webhook_url"]})
 
     return {
         "category": cat,
@@ -489,6 +542,8 @@ async def recipients_for_category(
         # odpowiedziało. Aplikacja pokazuje to sędziemu, zamiast milczeć.
         "province": province,
         "provinceScoped": is_province_scoped(cat),
+        "discordDestinations": [t["name"] for t in targets],
+        "_discordTargets": targets,
     }
 
 
@@ -507,6 +562,7 @@ async def list_recipients(actor: Actor = Depends(proel_actor)) -> RecipientGroup
                 name=dict(r).get("name") or "",
                 categories=dict(r).get("categories") or [],
                 emails=dict(r).get("emails") or [],
+                discordWebhookUrl=dict(r).get("discord_webhook_url") or "",
             )
             for r in rows
         ]
@@ -529,8 +585,16 @@ async def save_recipients(
 
     now = datetime.now(timezone.utc)
     async with database.transaction():
+        existing = [dict(r) for r in await database.fetch_all(select(extra_report_recipients))]
+        by_id = {r["id"]: r for r in existing}
+        # Zgodność ze starszym klientem, który wysyła maile bez pola webhooka.
+        prepared = []
+        for group in body.groups:
+            previous = by_id.get(group.id, {})
+            url = _webhook_for_save(group.discordWebhookUrl, previous.get("discord_webhook_url"))
+            prepared.append((group, url))
         await database.execute(extra_report_recipients.delete())
-        for index, group in enumerate(body.groups):
+        for index, (group, url) in enumerate(prepared):
             name = (group.name or "").strip()
             if not name:
                 continue
@@ -539,6 +603,7 @@ async def save_recipients(
                     name=name,
                     categories=normalize_categories(group.categories),
                     emails=normalize_emails(group.emails),
+                    discord_webhook_url=url or None,
                     order_index=index,
                     updated_at=now,
                 )
@@ -571,6 +636,7 @@ async def list_province_recipients(
             ProvinceRecipients(
                 province=dict(r)["province"],
                 emails=dict(r).get("emails") or [],
+                discordWebhookUrl=dict(r).get("discord_webhook_url") or "",
             )
             for r in rows
         ]
@@ -588,7 +654,7 @@ async def save_province_recipients(
 ) -> ProvinceRecipientList:
     """Nadpisuje CAŁĄ konfigurację, tak samo jak grupy kategorii.
 
-    Okręg BEZ ADRESÓW nie zostaje pustym wierszem - znika. Pusty wiersz i brak
+    Okręg bez adresów i webhooka nie zostaje pustym wierszem - znika. Pusty wiersz i brak
     wiersza znaczą dokładnie to samo („nikt tu nie czyta"), a dwa zapisy tego
     samego stanu to dwa miejsca, w których panel może pokazać co innego.
 
@@ -602,20 +668,35 @@ async def save_province_recipients(
 
     now = datetime.now(timezone.utc)
     async with database.transaction():
-        await database.execute(extra_report_province_recipients.delete())
-        seen: set = set()
+        existing = {
+            dict(r)["province"]: dict(r)
+            for r in await database.fetch_all(select(extra_report_province_recipients))
+        }
+        prepared = []
+        included = set()
         for entry in body.provinces:
             province = normalize_province(entry.province)
-            if not province or province in seen:
+            if not province or province in included:
                 continue
-            emails = normalize_emails(entry.emails)
-            if not emails:
+            included.add(province)
+            url = _webhook_for_save(
+                entry.discordWebhookUrl, existing.get(province, {}).get("discord_webhook_url"),
+            )
+            prepared.append((province, normalize_emails(entry.emails), url))
+        # Starszy panel pomija okręgi bez maili. Takie pominięcie nie wyłącza
+        # webhooka; nowy panel wysyła jawne "" przy usunięciu jego adresu.
+        for province, previous in existing.items():
+            if province not in included and previous.get("discord_webhook_url"):
+                prepared.append((province, [], previous["discord_webhook_url"]))
+        await database.execute(extra_report_province_recipients.delete())
+        for province, emails, url in prepared:
+            if not emails and not url:
                 continue
-            seen.add(province)
             await database.execute(
                 extra_report_province_recipients.insert().values(
                     province=province,
                     emails=emails,
+                    discord_webhook_url=url or None,
                     updated_at=now,
                 )
             )

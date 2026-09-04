@@ -16,7 +16,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 #: Gniazda protokołu, którymi wolno się wymieniać, wraz z nazwą pola w
 #: formularzu ZPRP `zawody_UstawSedziow.php`.
@@ -418,3 +418,57 @@ def market_pushes_allowed(prefs: Any) -> bool:
     if not isinstance(types, dict):
         return True
     return types.get("matchMarket", True) is not False
+
+
+#: Gniazdo → (numer, nazwisko) dla CAŁEJ obsady, także tej spoza giełdy.
+#:
+#: Delegaci nie handlują gniazdami, ale mecz z nimi dzielą - a to znaczy, że o
+#: zmianie w obsadzie mają prawo wiedzieć. Stąd osobny słownik zamiast
+#: dosypywania delegatów do `SLOT_STATE_FIELDS`, którego jedynym zadaniem jest
+#: mówić, co da się oddać.
+CREW_STATE_FIELDS: Dict[str, Tuple[str, str]] = {
+    **SLOT_STATE_FIELDS,
+    "delegat": ("NrSedzia_delegat", "NrSedzia_delegat_nazwisko"),
+    "delegat2": ("NrSedzia_delegat2", "NrSedzia_delegat2_nazwisko"),
+}
+
+
+def with_slot_holder(
+    state: Mapping[str, Any],
+    slot: object,
+    judge_id: object,
+    full_name: object,
+) -> Dict[str, Any]:
+    """Migawka meczu z nowym gospodarzem gniazda - KOPIA, nie zmiana w miejscu.
+
+    Po zapisie wymiany w bazie związku migawka okręgu wie jeszcze swoje, bo
+    wypełnia ją monitor przy własnym przebiegu. Do tego czasu `slots_held_by`
+    czytało w gnieździe poprzednika i mecz, który sędzia właśnie odzyskał,
+    znikał mu z listy „Oddaj mecz" bez słowa wyjaśnienia. Nazwisko wchodzi w
+    postaci ZPRP („NAZWISKO Imię"), czyli tej samej, którą później zapisze
+    monitor - inaczej ta sama obsada wyglądałaby na dwa różne stany.
+    """
+    fields = CREW_STATE_FIELDS.get(str(slot or "").strip())
+    patched = dict(state or {})
+    if not fields:
+        return patched
+    id_field, name_field = fields
+    patched[id_field] = str(judge_id or "").strip()
+    patched[name_field] = str(full_name or "").strip()
+    return patched
+
+
+def crew_judge_ids(state: Mapping[str, Any], exclude: Iterable[object] = ()) -> List[str]:
+    """Numery sędziów, którzy zostają przy tym meczu.
+
+    „0" przy pustym nazwisku to ZPRP-owy sposób powiedzenia „nikogo tu nie ma"
+    (patrz nota o polach obsady w monitorze), więc nie jest numerem sędziego.
+    """
+    skip = {str(item or "").strip() for item in exclude if str(item or "").strip()}
+    out: List[str] = []
+    for id_field, _name_field in CREW_STATE_FIELDS.values():
+        raw = str((state or {}).get(id_field) or "").strip()
+        if not raw or raw == "0" or raw in skip or raw in out:
+            continue
+        out.append(raw)
+    return out
