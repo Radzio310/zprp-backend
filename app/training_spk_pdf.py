@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import tempfile
@@ -149,6 +150,43 @@ def build_slides_pdf(
 
 REPORT_TEMPLATE_NAME = "raport_spk.html"
 
+#: Druga barwa okładki - jaśniejsza miedź, ta sama, którą tonuje się ikonę
+#: powiadomienia. Gradient z jednym kolorem jest płaski jak kartka.
+ACCENT_2 = "#C38E70"
+
+#: Herby okręgów - te same pliki, co w aplikacji, tylko pomniejszone do
+#: rozmiaru, w jakim drukuje je raport.
+CRESTS_DIR = TEMPLATE_DIR / "okregi"
+LOGO_FILE = TEMPLATE_DIR / "baza_logo.png"
+
+
+def _b64(path: Path) -> str:
+    """Obraz jako base64 albo pusto. WeasyPrint nie sięgnie po plik sam."""
+    try:
+        return base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        logger.warning("SPK: nie udało się wczytać obrazu %s", path)
+        return ""
+
+
+def _crest_images(context: Dict[str, Any]) -> Dict[str, str]:
+    """Tylko te herby, które w tym raporcie naprawdę występują.
+
+    Szesnaście herbów w każdym PDF-ie to ćwierć megabajta na okręgi, których w
+    zestawieniu nie ma. Zbieramy nazwy z gotowego kontekstu, bo to on wie, co
+    zostanie narysowane.
+    """
+    wanted = {str(context.get("scopeCrest") or "")}
+    for key in ("byProvince", "ranking", "guided"):
+        for row in context.get(key) or []:
+            wanted.add(str(row.get("crest") or ""))
+    out: Dict[str, str] = {}
+    for slug in sorted(w for w in wanted if w):
+        data = _b64(CRESTS_DIR / f"{slug}.png")
+        if data:
+            out[slug] = data
+    return out
+
 
 def render_report_html(context: Dict[str, Any]) -> str:
     """Gotowy HTML raportu wyników - kontekst składa `training_spk_report.py`.
@@ -160,7 +198,14 @@ def render_report_html(context: Dict[str, Any]) -> str:
 
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=True)
     return env.get_template(REPORT_TEMPLATE_NAME).render(
-        cream=CREAM, ink=INK, accent=ACCENT, muted=MUTED, **context
+        cream=CREAM,
+        ink=INK,
+        accent=ACCENT,
+        accent2=ACCENT_2,
+        muted=MUTED,
+        logo_b64=_b64(LOGO_FILE),
+        crests=_crest_images(context),
+        **context,
     )
 
 

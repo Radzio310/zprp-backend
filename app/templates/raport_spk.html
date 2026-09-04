@@ -1,167 +1,326 @@
-<!doctype html>
-{# Raport wyników sprawdzianu SPK/1 - okładka z liczbami, rozkład ocen,
-   zestawienie okręgów (tylko raport ogólnopolski) i ranking sędziów.
+<!DOCTYPE html>
+{# Raport wyników sprawdzianu SPK/1.
 
-   Ten sam charakter co materiał szkoleniowy (szkolenie_spk.html): krem, atrament,
-   miedziany akcent - raport i prezentacja mają wyglądać jak jedna rodzina. #}
+   Ten sam język wizualny, co raporty BAZA Beach (`podsumowanie_sezonu.html`):
+   pełnostronicowa okładka z gradientem i logo, wiersz wielkich liczb, sekcje
+   z „brwiami" nad tytułem, karty KPI, słupki i tabele bez ramek.
+
+   Barwy idą z generatora - miedź BAZY, nie fiolet plaży. Herby okręgów
+   przychodzą jako obrazy base64 (`crests`), bo WeasyPrint nie ma dostępu do
+   plików aplikacji, a raport ma pokazywać te same herby, co panel. #}
 <html lang="pl">
 <head>
 <meta charset="utf-8">
+<title>{{ title }} - raport {{ scope }}</title>
 <style>
   @page {
-    size: A4;
-    margin: 16mm 14mm;
-    @bottom-center {
-      content: "Sprawdzian SPK/1 · " string(scope) " · strona " counter(page) " z " counter(pages);
-      font-size: 8pt;
-      color: {{ muted }};
+    size: A4 portrait;
+    margin: 16mm 14mm 15mm 14mm;
+    @bottom-left {
+      content: "{{ title }} · {{ scope }}";
+      font-size: 7.4pt; color: #A9A099; font-family: "DejaVu Sans", sans-serif;
+    }
+    @bottom-right {
+      content: counter(page) " / " counter(pages);
+      font-size: 7.4pt; color: #A9A099; font-family: "DejaVu Sans", sans-serif;
     }
   }
-  * { box-sizing: border-box; }
+  @page cover { margin: 0; @bottom-left { content: ""; } @bottom-right { content: ""; } }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    font-family: "DejaVu Sans", "Segoe UI", sans-serif;
+    font-family: "DejaVu Sans", sans-serif;
+    font-size: 8.8pt;
     color: {{ ink }};
-    background: {{ cream }};
-    margin: 0;
-    font-size: 10pt;
+    line-height: 1.34;
   }
-  .scope-anchor { string-set: scope "{{ scope }}"; }
+  .page { page-break-before: always; }
+  .nobreak { page-break-inside: avoid; }
 
+  /* ───────────────── okładka ───────────────── */
   .cover {
-    border-bottom: 2pt solid {{ accent }};
-    padding-bottom: 8mm;
-    margin-bottom: 8mm;
+    page: cover;
+    position: relative;
+    width: 210mm; height: 297mm; overflow: hidden;
+    background: linear-gradient(150deg, #14110E 0%, {{ accent }} 58%, {{ accent2 }} 118%);
+    color: #fff;
   }
-  .kicker {
-    font-size: 9pt;
-    letter-spacing: 2pt;
-    text-transform: uppercase;
-    color: {{ accent }};
-    font-weight: 700;
+  .cover-inner { position: absolute; top: 0; left: 0; right: 0; bottom: 0; padding: 26mm 22mm 20mm 22mm; }
+  .cover-logo { width: 26mm; height: auto; display: block; margin-bottom: 11mm; }
+  .cover-kicker {
+    font-size: 8.4pt; font-weight: 800; letter-spacing: 3.6pt;
+    text-transform: uppercase; color: rgba(255,255,255,0.74);
   }
-  h1 { font-size: 22pt; margin: 2mm 0 1mm; }
-  .scope-line { color: {{ muted }}; font-size: 10pt; }
+  .cover h1 { font-size: 34pt; font-weight: 900; line-height: 1.03; letter-spacing: -1.2pt; margin-top: 5mm; }
+  .cover-scope {
+    font-size: 52pt; font-weight: 900; line-height: 0.94;
+    letter-spacing: -2.4pt; color: rgba(255,255,255,0.96); margin-top: 4mm;
+  }
+  .cover-crest { width: 30mm; height: 30mm; margin-top: 6mm; opacity: 0.95; }
+  .cover-rule { width: 34mm; height: 1.6mm; background: #fff; margin: 7mm 0 6mm 0; border-radius: 1mm; }
+  .cover-lead { font-size: 11pt; font-weight: 600; color: rgba(255,255,255,0.88); max-width: 122mm; }
+  .cover-hero { position: absolute; left: 22mm; right: 22mm; bottom: 38mm; font-size: 0; }
+  .cover-hero .h {
+    display: inline-block; width: 25%; vertical-align: bottom;
+    border-left: 0.7pt solid rgba(255,255,255,0.34); padding-left: 4mm;
+  }
+  .cover-hero .h:first-child { border-left: none; padding-left: 0; }
+  .cover-hero .hv { font-size: 22pt; font-weight: 900; letter-spacing: -0.9pt; }
+  .cover-hero .hl {
+    font-size: 7.6pt; font-weight: 800; letter-spacing: 1.4pt;
+    text-transform: uppercase; color: rgba(255,255,255,0.72); margin-top: 1mm;
+  }
+  .cover-foot {
+    position: absolute; left: 22mm; right: 22mm; bottom: 20mm;
+    font-size: 8.4pt; font-weight: 600; color: rgba(255,255,255,0.70);
+    border-top: 0.7pt solid rgba(255,255,255,0.26); padding-top: 4mm;
+  }
 
-  .stats { display: flex; gap: 4mm; margin: 6mm 0; }
-  .stat {
-    flex: 1;
-    border: 0.6pt solid {{ muted }}44;
-    border-radius: 3mm;
-    padding: 3mm 4mm;
-  }
-  .stat .value { font-size: 17pt; font-weight: 900; color: {{ accent }}; }
-  .stat .label { font-size: 8pt; color: {{ muted }}; text-transform: uppercase; letter-spacing: 0.8pt; }
+  /* ───────────────── nagłówki sekcji ───────────────── */
+  .sec-head { margin-bottom: 8pt; }
+  .sec-eyebrow { font-size: 7pt; font-weight: 900; letter-spacing: 2.6pt; text-transform: uppercase; color: {{ accent }}; }
+  .sec-title { font-size: 19pt; font-weight: 900; letter-spacing: -0.7pt; margin-top: 1.5pt; }
+  .sec-lead { font-size: 8.6pt; font-weight: 600; color: #7C7269; margin-top: 3pt; max-width: 142mm; }
+  .block { margin-top: 14pt; }
 
-  h2 {
-    font-size: 12pt;
-    margin: 7mm 0 2.5mm;
-    letter-spacing: 0.6pt;
-    text-transform: uppercase;
-    color: {{ ink }};
+  /* ───────────────── KPI ───────────────── */
+  .kpi-row { font-size: 0; }
+  .kpi {
+    display: inline-block; vertical-align: top; width: 24.25%;
+    margin: 0 1% 6pt 0; padding: 8pt 9pt;
+    border-radius: 7pt; border: 0.7pt solid rgba(0,0,0,0.09);
+    border-left: 2.4pt solid {{ accent }};
+    background: #FBF7F3;
   }
+  .kpi:nth-child(4n) { margin-right: 0; }
+  .kpi .v { font-size: 15pt; font-weight: 900; letter-spacing: -0.5pt; }
+  .kpi .l { font-size: 7pt; font-weight: 800; color: #6B6159; text-transform: uppercase; letter-spacing: 0.5pt; margin-top: 1.5pt; }
+
+  /* ───────────────── słupki ───────────────── */
+  .bar-row { margin-bottom: 5pt; page-break-inside: avoid; }
+  .bar-head { font-size: 0; margin-bottom: 1.8pt; }
+  .bar-label { display: inline-block; width: 72%; font-size: 8pt; font-weight: 750; color: #40382F; }
+  .bar-value { display: inline-block; width: 28%; text-align: right; font-size: 8pt; font-weight: 900; color: {{ accent }}; }
+  .bar-track { height: 6pt; border-radius: 3pt; background: rgba(0,0,0,0.055); }
+  .bar-fill { height: 6pt; border-radius: 3pt; background: {{ accent }}; }
+
+  /* ───────────────── tabele ───────────────── */
   table { width: 100%; border-collapse: collapse; }
   th {
-    text-align: left;
-    font-size: 8pt;
-    text-transform: uppercase;
-    letter-spacing: 0.6pt;
-    color: {{ muted }};
-    border-bottom: 1pt solid {{ accent }};
-    padding: 1.6mm 2mm;
+    font-size: 6.6pt; font-weight: 900; text-transform: uppercase; letter-spacing: 0.5pt;
+    color: #7C7269; padding: 5pt 3pt; text-align: left;
+    border-bottom: 1.2pt solid {{ accent }};
   }
-  td { padding: 1.8mm 2mm; border-bottom: 0.4pt solid {{ muted }}33; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  tr.top td { font-weight: 700; }
-  .medal { color: {{ accent }}; font-weight: 900; }
+  th.num, td.num { text-align: right; }
+  td { font-size: 8.4pt; padding: 4.6pt 3pt; border-bottom: 0.5pt solid rgba(0,0,0,0.07); }
+  tr { page-break-inside: avoid; }
+  td.name { font-weight: 800; }
+  td.score { font-weight: 900; font-size: 9.4pt; color: {{ accent }}; }
+  .crest { width: 11pt; height: 11pt; vertical-align: -2.4pt; margin-right: 3.5pt; }
+  .place {
+    display: inline-block; width: 13pt; height: 13pt; line-height: 13pt; text-align: center;
+    border-radius: 50%; font-size: 6.8pt; font-weight: 900; color: #fff; background: #C9BDB3;
+  }
+  .place.p1 { background: #C9A227; }
+  .place.p2 { background: #A8A29E; }
+  .place.p3 { background: #B0764E; }
+  .muted { color: #9A9089; font-weight: 600; }
 
-  .bucket-row { display: flex; align-items: center; gap: 3mm; margin: 1.2mm 0; }
-  .bucket-label { width: 34mm; font-size: 9pt; }
-  .bucket-bar-wrap { flex: 1; background: {{ muted }}22; border-radius: 2mm; height: 5mm; }
-  .bucket-bar { background: {{ accent }}; border-radius: 2mm; height: 5mm; }
-  .bucket-count { width: 20mm; text-align: right; font-size: 9pt; color: {{ muted }}; }
-
-  .note { font-size: 8.5pt; color: {{ muted }}; margin-top: 2mm; }
+  /* ───────────────── nauka w aplikacji ───────────────── */
+  .note {
+    margin-top: 7pt; padding: 7pt 9pt; border-radius: 7pt;
+    background: #FBF7F3; border-left: 2.4pt solid #C9BDB3;
+    font-size: 8pt; font-weight: 600; color: #6B6159;
+  }
+  .empty {
+    margin-top: 12pt; padding: 14pt; border-radius: 9pt;
+    border: 0.9pt dashed rgba(0,0,0,0.18); text-align: center;
+    font-size: 9.4pt; font-weight: 750; color: #7C7269;
+  }
 </style>
 </head>
 <body>
-<div class="scope-anchor"></div>
 
+<!-- ───────────────── OKŁADKA ───────────────── -->
 <section class="cover">
-  <div class="kicker">Superpuchar PGNiG · szkolenie stałe</div>
-  <h1>{{ title }}</h1>
-  <div class="scope-line">
-    Zakres: <b>{{ scope }}</b> · wygenerowano {{ generatedAt }}{% if generatedBy %} · {{ generatedBy }}{% endif %}
+  <div class="cover-inner">
+    {% if logo_b64 %}<img class="cover-logo" src="data:image/png;base64,{{ logo_b64 }}" alt="">{% endif %}
+    <div class="cover-kicker">{{ subtitle }}</div>
+    <h1>{{ title }}</h1>
+    <div class="cover-scope">{{ scope }}</div>
+    {% if scopeCrest and crests.get(scopeCrest) %}
+      <img class="cover-crest" src="data:image/png;base64,{{ crests[scopeCrest] }}" alt="">
+    {% endif %}
+    <div class="cover-rule"></div>
+    <div class="cover-lead">
+      Porównanie protokołów sędziów z oficjalnym protokołem meczu Superpucharu -
+      zdarzenie po zdarzeniu. Liczy się najlepsze podejście każdego sędziego.
+    </div>
+
+    <div class="cover-hero">
+      <div class="h"><div class="hv">{{ judges }}</div><div class="hl">sędziów</div></div>
+      <div class="h"><div class="hv">{{ attempts }}</div><div class="hl">podejść</div></div>
+      <div class="h"><div class="hv">{{ avg if avg is not none else "—" }}</div><div class="hl">średnia</div></div>
+      <div class="h"><div class="hv">{{ best if best is not none else "—" }}</div><div class="hl">najlepszy</div></div>
+    </div>
+
+    <div class="cover-foot">
+      Wygenerowano {{ generatedAt }}{% if generatedBy %} · {{ generatedBy }}{% endif %} · BAZA
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────── LICZBY ───────────────── -->
+<section class="page">
+  <div class="sec-head">
+    <div class="sec-eyebrow">Zestawienie</div>
+    <div class="sec-title">{{ scope }}</div>
+    <div class="sec-lead">
+      {% if empty %}
+        W tym zakresie nie ma jeszcze ani jednego zapisanego podejścia.
+      {% else %}
+        Wynik to zgodność protokołu sędziego z oficjalnym: zdarzenia, numery
+        zawodniczek i - przy pełnym nagraniu - czas zdarzeń.
+      {% endif %}
+    </div>
   </div>
 
-  <div class="stats">
-    <div class="stat"><div class="value">{{ judges }}</div><div class="label">sędziów</div></div>
-    <div class="stat"><div class="value">{{ attempts }}</div><div class="label">podejść ocenianych</div></div>
-    <div class="stat"><div class="value">{{ avg if avg is not none else "—" }}</div><div class="label">średnia</div></div>
-    <div class="stat"><div class="value">{{ median if median is not none else "—" }}</div><div class="label">mediana</div></div>
-    <div class="stat"><div class="value">{{ best if best is not none else "—" }}</div><div class="label">najlepszy wynik</div></div>
+  {% if empty %}
+    <div class="empty">Brak podejść do pokazania.</div>
+  {% else %}
+
+  <div class="kpi-row">
+    <div class="kpi"><div class="v">{{ judges }}</div><div class="l">sędziów w rankingu</div></div>
+    <div class="kpi"><div class="v">{{ attempts }}</div><div class="l">podejść ocenianych</div></div>
+    <div class="kpi"><div class="v">{{ median if median is not none else "—" }}</div><div class="l">mediana</div></div>
+    <div class="kpi"><div class="v">{{ worst if worst is not none else "—" }}</div><div class="l">najsłabszy wynik</div></div>
   </div>
-  {% if guidedAttempts %}
-  <div class="note">
-    Poza liczbami: {{ guidedAttempts }} podejść w trybie nauki w aplikacji
-    (prowadzenie za rękę) - celowo nie wchodzą do średnich ani rankingu.
+
+  {% if gradeBuckets %}
+  <div class="block">
+    <div class="sec-head"><div class="sec-eyebrow">Rozkład ocen</div></div>
+    {% for b in gradeBuckets %}
+    <div class="bar-row">
+      <div class="bar-head">
+        <span class="bar-label">{{ b.label }}</span>
+        <span class="bar-value">{{ b.count }} · {{ b.percent }}%</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill" style="width: {{ b.width }}%;"></div></div>
+    </div>
+    {% endfor %}
+    <div class="note">
+      Liczone z najlepszego podejścia każdego sędziego - wytrwałość w ćwiczeniu
+      nie ma prawa obniżać wyniku.
+    </div>
   </div>
+  {% endif %}
+
+  {% if byProvince %}
+  <div class="block">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Okręgi</div>
+      <div class="sec-lead">Średnia z najlepszych podejść sędziów danego okręgu.</div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Okręg</th><th class="num">Sędziów</th><th class="num">Średnia</th>
+          <th class="num">Mediana</th><th class="num">Najlepszy</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in byProvince %}
+        <tr>
+          <td class="name">
+            {% if crests.get(p.crest) %}<img class="crest" src="data:image/png;base64,{{ crests[p.crest] }}" alt="">{% endif %}{{ p.province }}
+          </td>
+          <td class="num">{{ p.judges }}</td>
+          <td class="num score">{{ p.avg }}</td>
+          <td class="num">{{ p.median }}</td>
+          <td class="num">{{ p.best }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
   {% endif %}
 </section>
 
-{% if gradeBuckets %}
-<h2>Rozkład ocen</h2>
-{% for b in gradeBuckets %}
-<div class="bucket-row">
-  <div class="bucket-label">{{ b.label }}</div>
-  <div class="bucket-bar-wrap"><div class="bucket-bar" style="width: {{ b.percent }}%;"></div></div>
-  <div class="bucket-count">{{ b.count }} ({{ b.percent }}%)</div>
-</div>
-{% endfor %}
-<div class="note">Liczone z najlepszego podejścia każdego sędziego - wytrwałość w ćwiczeniu nie obniża wyniku.</div>
-{% endif %}
-
-{% if byProvince %}
-<h2>Okręgi</h2>
-<table>
-  <thead>
-    <tr><th>Okręg</th><th class="num">Sędziów</th><th class="num">Średnia</th><th class="num">Mediana</th><th class="num">Najlepszy</th></tr>
-  </thead>
-  <tbody>
-    {% for p in byProvince %}
-    <tr{% if loop.index <= 3 %} class="top"{% endif %}>
-      <td>{% if loop.index == 1 %}<span class="medal">1.</span>{% else %}{{ loop.index }}.{% endif %} {{ p.province }}</td>
-      <td class="num">{{ p.judges }}</td>
-      <td class="num">{{ p.avg }}</td>
-      <td class="num">{{ p.median }}</td>
-      <td class="num">{{ p.best }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-
+<!-- ───────────────── RANKING ───────────────── -->
 {% if ranking %}
-<h2>Ranking sędziów</h2>
-<table>
-  <thead>
-    <tr><th style="width: 10mm;">Msc</th><th>Sędzia</th>{% if byProvince %}<th>Okręg</th>{% endif %}<th>Tryb</th><th class="num">Podejście</th><th class="num">Wynik</th></tr>
-  </thead>
-  <tbody>
-    {% for r in ranking %}
-    <tr{% if r.place <= 3 %} class="top"{% endif %}>
-      <td>{% if r.place <= 3 %}<span class="medal">{{ r.place }}.</span>{% else %}{{ r.place }}.{% endif %}</td>
-      <td>{{ r.judgeName }}</td>
-      {% if byProvince %}<td>{{ r.province }}</td>{% endif %}
-      <td>{{ r.mode }}</td>
-      <td class="num">{{ r.attempt }}</td>
-      <td class="num"><b>{{ r.score }}</b></td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<h2>Ranking sędziów</h2>
-<div class="note">Jeszcze nikt nie ukończył ocenianego podejścia w tym zakresie.</div>
+<section class="page">
+  <div class="sec-head">
+    <div class="sec-eyebrow">Ranking</div>
+    <div class="sec-title">Sędziowie</div>
+    <div class="sec-lead">Najlepsze podejście każdego sędziego, od najwyższego wyniku.</div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 22pt;">Msc</th><th>Sędzia</th>
+        {% if not isProvince %}<th>Okręg</th>{% endif %}
+        <th>Tryb</th><th class="num">Podejście</th><th class="num">Data</th><th class="num">Wynik</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in ranking %}
+      <tr>
+        <td><span class="place{% if r.place <= 3 %} p{{ r.place }}{% endif %}">{{ r.place }}</span></td>
+        <td class="name">{{ r.judgeName }}</td>
+        {% if not isProvince %}
+        <td>
+          {% if crests.get(r.crest) %}<img class="crest" src="data:image/png;base64,{{ crests[r.crest] }}" alt="">{% endif %}{{ r.province }}
+        </td>
+        {% endif %}
+        <td class="muted">{{ r.mode }}</td>
+        <td class="num muted">{{ r.attempt }}</td>
+        <td class="num muted">{{ r.date }}</td>
+        <td class="num score">{{ r.score }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<!-- ───────────────── NAUKA W APLIKACJI ───────────────── -->
+{% if guided %}
+<section class="page">
+  <div class="sec-head">
+    <div class="sec-eyebrow">Poza rankingiem</div>
+    <div class="sec-title">Nauka w aplikacji</div>
+    <div class="sec-lead">
+      Tryb prowadzony za rękę: aplikacja podaje kolejne akcje, więc gwarantuje
+      niemal komplet zdarzeń. W rankingu i średnich okręgów mówiłby nieprawdę,
+      ale pokazuje, kto ćwiczył - i z jakim skutkiem.
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Sędzia</th>
+        {% if not isProvince %}<th>Okręg</th>{% endif %}
+        <th class="num">Podejście</th><th class="num">Data</th><th class="num">Wynik</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for g in guided %}
+      <tr>
+        <td class="name">{{ g.judgeName }}</td>
+        {% if not isProvince %}
+        <td>
+          {% if crests.get(g.crest) %}<img class="crest" src="data:image/png;base64,{{ crests[g.crest] }}" alt="">{% endif %}{{ g.province }}
+        </td>
+        {% endif %}
+        <td class="num muted">{{ g.attempt }}</td>
+        <td class="num muted">{{ g.date }}</td>
+        <td class="num score">{{ g.score if g.score is not none else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
 {% endif %}
 
 </body>

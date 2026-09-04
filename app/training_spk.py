@@ -753,6 +753,35 @@ async def run_detail(
     }
 
 
+@admin_router.get("/runs/{run_id}/state", summary="Protokół podejścia")
+async def run_state(
+    run_id: str,
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    """Pełny dokument meczu z tego podejścia - do podglądu w panelu.
+
+    OSOBNA TRASA, bo to setki kilobajtów: lista podejść i karta szczegółów mają
+    być lekkie, a stan meczu schodzi dopiero wtedy, gdy administrator naprawdę
+    chce zobaczyć protokół. Kształt jest ten sam, co dokument ProEla, więc
+    panel podaje go wprost do `MatchSummaryScreen` - tak samo jak przy podglądzie
+    zapisu w zakładce protokołów.
+    """
+    await _require_admin(actor)
+    row = await database.fetch_one(
+        select(spk_run.c.run_id, spk_run.c.data_json).where(spk_run.c.run_id == run_id)
+    )
+    if row is None:
+        raise HTTPException(404, "Nie ma takiego podejścia.")
+    data = dict(row)
+    blob = data.get("data_json") if isinstance(data.get("data_json"), dict) else {}
+    if not blob:
+        raise HTTPException(
+            409,
+            "To podejście zapisało się bez dokumentu meczu - nie ma czego pokazać.",
+        )
+    return {"ok": True, "runId": data["run_id"], "dataJson": blob}
+
+
 # ─────────────────────────── raport wyników PDF ───────────────────────────
 
 
