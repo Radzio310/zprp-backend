@@ -1998,7 +1998,12 @@ async def approve_offer(
             )
         )
         holder = slot_holder_name(
-            state_dict((_row(current) if current else {}).get("state_json")),
+            apply_known_swaps(
+                state_dict((_row(current) if current else {}).get("state_json")),
+                (await _applied_swaps(province, [_s(offer["match_id"])])).get(
+                    _s(offer["match_id"]), ()
+                ),
+            ),
             offer["slot"],
         )
     if not holder:

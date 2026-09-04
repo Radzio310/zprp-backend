@@ -504,3 +504,14 @@ def test_only_confirmed_swaps_count_as_memory():
     # Wybrany chetny, nie dowolne zgloszenie - inaczej mecz "przejmowaliby"
     # wszyscy, ktorzy sie na niego zglosili.
     assert "'chosen'" in source
+
+
+def test_every_gate_reads_the_same_corrected_state():
+    """Lista i bramka musza odpowiadac na to samo pytanie tak samo.
+
+    Gdyby "Oddaj mecz" pokazywalo mecz poprawiony pamiecia gieldy, a
+    `POST /offers` sprawdzal samą migawke, wystawienie konczyloby sie odmowa
+    "to nie Twoje gniazdo" - sprzecznoscia gorsza niz brak wiersza.
+    """
+    for name in ("my_matches", "create_offer", "_same_day_matches"):
+        assert "apply_known_swaps" in calls_in(name), name
