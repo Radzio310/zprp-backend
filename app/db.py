@@ -1429,6 +1429,60 @@ match_market_claims = Table(
     UniqueConstraint("offer_id", "judge_id", name="uq_match_market_claim_offer_judge"),
 )
 
+# Dziennik giełdy meczów - kto, kiedy i co zrobił.
+#
+# Stany na `match_market_offers` mówią, GDZIE sprawa jest teraz; ten dziennik
+# mówi, JAK do tego doszło. Bez niego historia okręgu gubiła wszystko, co
+# nadpisał późniejszy stan: wycofane zgłoszenia, nieudane zapisy do bazy
+# związku (razem z kodem odmowy) i ponowienia po nich, a przy odrzuceniu -
+# nazwisko tego, kto odrzucił.
+#
+# Wiersze są NIEZMIENNE i nigdy nie kasujemy ich razem z ofertą (`offer_id`
+# bez klucza obcego, świadomie): dziennik ma przeżyć swój przedmiot.
+#
+# `payload` trzyma to, co dotyczy tylko danego rodzaju zdarzenia - notatkę
+# chętnego, kod odmowy ZPRP, poprzednie i nowe ustawienia okręgu. Kolumny
+# zostają dla tego, po czym się filtruje.
+match_market_events = Table(
+    "match_market_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    # Zdarzenia konfiguracji okręgu nie dotyczą żadnej oferty - stąd nullable.
+    Column("offer_id", Integer, nullable=True, index=True),
+    Column("match_id", String, nullable=True, index=True),
+    Column("match_code", String, nullable=True),
+    Column("slot", String, nullable=True),
+    # Rodzaj zdarzenia - katalog w `app/match_market_journal.py`.
+    Column("kind", String, nullable=False, index=True),
+    # Kto to zrobił. Numer sędziego, bo nazwisko może się zmienić na liście
+    # okręgu, a dziennik ma zostać przy tej samej osobie. Nazwisko zapisujemy
+    # OBOK, w postaci z chwili zdarzenia - sędzia skreślony z listy nie może
+    # zniknąć z historii.
+    Column("actor_judge_id", String, nullable=True, index=True),
+    Column("actor_name", String, nullable=True),
+    # Osoba, KTÓREJ zdarzenie dotyczy, gdy różni się od sprawcy: chętny wybrany
+    # przez obsadowego, oddający przy odrzuceniu.
+    Column("subject_judge_id", String, nullable=True, index=True),
+    Column("subject_name", String, nullable=True),
+    Column("ok", Boolean, nullable=True),
+    Column("message", Text, nullable=True),
+    Column(
+        "payload",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    ),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+)
+
+Index(
+    "ix_match_market_events_province_time",
+    match_market_events.c.province,
+    match_market_events.c.created_at.desc(),
+)
+
+
 # Ustawienia okręgu. Wiersza może nie być - wtedy obowiązują wartości domyślne
 # z `match_market_rules`, a moduł jest WYŁĄCZONY. Włączenie jest świadomą
 # decyzją administratora, nie stanem domyślnym.
@@ -2751,4 +2805,41 @@ with engine.connect() as _conn:
     # `create_all` kolumny nie dołoży.
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS approver_badges json"))
+    # Dziennik giełdy powstał później niż sama giełda, więc oferty sprzed jego
+    # wprowadzenia nie mają ani jednego wpisu. Dopisujemy je WSTECZ z własnych
+    # stempli czasu wiersza - tyle, ile z nich wynika: wystawienie zawsze, a
+    # rozstrzygnięcie i zapis tam, gdzie stemple istnieją. Sprawca jest znany
+    # tylko przy wystawieniu i decyzji (`from_judge_id`, `decided_by`);
+    # nazwiska nie dorabiamy, bo dziennik ma nie kłamać - panel pokaże numer.
+    #
+    # Idempotentne przez `NOT EXISTS` na parze (kind, offer_id): drugi start
+    # serwera nie dosypie tych samych wpisów, a wpisy prawdziwe (dopisane już
+    # przez działający moduł) blokują dopisanie zapasowych.
+    for kind, stamp_column, extra_where, actor_column in (
+        ("offer_created", "created_at", "", "from_judge_id"),
+        ("decision_approved", "decided_at", "AND o.decided_at IS NOT NULL", "decided_by"),
+        ("zprp_applied", "applied_at", "AND o.applied_at IS NOT NULL", "decided_by"),
+    ):
+        _conn.execute(
+            text(
+                f"""
+                INSERT INTO match_market_events
+                    (province, offer_id, match_id, match_code, slot, kind,
+                     actor_judge_id, ok, message, payload, created_at)
+                SELECT o.province, o.id, o.match_id, o.match_code, o.slot, '{kind}',
+                       o.{actor_column},
+                       NULL,
+                       'Wpis odtworzony ze stanu oferty - dziennik zaczął działać później.',
+                       '{{"backfilled": true}}',
+                       o.{stamp_column}
+                FROM match_market_offers o
+                WHERE o.{stamp_column} IS NOT NULL
+                  {extra_where}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM match_market_events e
+                      WHERE e.offer_id = o.id AND e.kind = '{kind}'
+                  )
+                """
+            )
+        )
     _conn.commit()

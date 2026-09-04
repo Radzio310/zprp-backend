@@ -37,6 +37,7 @@ from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
+    match_market_events,
     database,
     match_market_claims,
     match_market_offers,
@@ -47,6 +48,10 @@ from app.db import (
     province_module_config,
 )
 from app.deps import Settings, get_jwt_payload, get_settings
+from app.match_market_journal import (
+    config_diff_message,
+    kinds_in_group,
+)
 from app.match_market_access import (
     APPROVER_BADGE,
     approver_judge_ids,
@@ -568,6 +573,47 @@ async def _require_assignable(
 
 
 # ─────────────────────────── powiadomienia ───────────────────────────
+
+
+async def _log(
+    kind: str,
+    *,
+    province: str,
+    actor: Optional[Actor] = None,
+    offer: Optional[Dict[str, Any]] = None,
+    subject_id: str = "",
+    subject_name: str = "",
+    ok: Optional[bool] = None,
+    message: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Dopisuje wiersz do dziennika giełdy.
+
+    NIGDY nie przewraca czynności, którą opisuje. Dziennik jest świadkiem, nie
+    stroną: gdyby zapis wpisu potrafił wywrócić zatwierdzenie wymiany, obsada w
+    bazie związku byłaby już zmieniona, a telefon dostałby błąd i kazał
+    próbować drugi raz. Potknięcie dziennika idzie więc do logu serwera.
+    """
+    try:
+        await database.execute(
+            insert(match_market_events).values(
+                province=province,
+                offer_id=int(offer["id"]) if offer and offer.get("id") is not None else None,
+                match_id=_s((offer or {}).get("match_id")) or None,
+                match_code=_s((offer or {}).get("match_code")) or None,
+                slot=_s((offer or {}).get("slot")) or None,
+                kind=kind,
+                actor_judge_id=(actor.judge_id if actor else None),
+                actor_name=(actor.full_name if actor else None),
+                subject_judge_id=_s(subject_id) or None,
+                subject_name=_s(subject_name) or None,
+                ok=ok,
+                message=_s(message) or None,
+                payload=payload or {},
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("giełda: nie udało się dopisać do dziennika (%s)", kind)
 
 
 def _offer_data(offer: Dict[str, Any]) -> Dict[str, str]:
@@ -1197,6 +1243,14 @@ async def create_offer(
         "match_code": _s(data.get("match_code")),
         "slot": slot,
     }
+    await _log(
+        "offer_created",
+        province=province,
+        actor=actor,
+        offer=offer,
+        message=_s(req.reason),
+        payload={"slotLabel": slot_label(slot), "deadlineHours": cfg["offer_deadline_hours"]},
+    )
     # Zainteresowani to sędziowie okręgu, którzy mają aplikację i nie wyłączyli
     # powiadomień giełdy - reszta i tak zobaczy ofertę przy najbliższym wejściu
     # na ekran.
@@ -1262,6 +1316,13 @@ async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) ->
             .values(status="declined", updated_at=func.now())
         )
 
+    await _log(
+        "offer_withdrawn",
+        province=province,
+        actor=actor,
+        offer=offer,
+        payload={"claimsDropped": len(interested)},
+    )
     await _notify(
         interested,
         "↩️ Mecz wrócił do właściciela",
@@ -1341,6 +1402,14 @@ async def create_claim(
             .returning(match_market_claims.c.id)
         )
 
+    await _log(
+        "claim_created",
+        province=province,
+        actor=actor,
+        offer=offer,
+        message=_s(req.note),
+        payload={"conflicts": len(conflicts), "again": bool(existing)},
+    )
     await _notify(
         await _approvers_of(province),
         "🙋 Zgłoszenie na mecz",
@@ -1372,6 +1441,18 @@ async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor)) ->
         .where(match_market_claims.c.id == claim["id"])
         .values(status=target, updated_at=func.now())
     )
+    # Dziennik potrzebuje meczu, a zgłoszenie zna tylko ofertę - dociągamy ją
+    # osobno, bo to jedyne miejsce, które jej nie czytało.
+    parent = await database.fetch_one(
+        select(match_market_offers).where(match_market_offers.c.id == offer_id)
+    )
+    if parent:
+        await _log(
+            "claim_withdrawn",
+            province=_s(_row(parent)["province"]),
+            actor=actor,
+            offer=_row(parent),
+        )
     return {"id": claim["id"], "status": target}
 
 
@@ -1579,6 +1660,16 @@ async def reject_offer(
         )
 
     reason = _s(req.reason)
+    await _log(
+        "decision_rejected",
+        province=_s(offer["province"]),
+        actor=actor,
+        offer=offer,
+        subject_id=_s(offer["from_judge_id"]),
+        ok=False,
+        message=reason,
+        payload={"claimsDropped": len(interested)},
+    )
     await _notify(
         [_s(offer["from_judge_id"])] + interested,
         "🚫 Wymiana odrzucona",
@@ -1667,6 +1758,19 @@ async def approve_offer(
     giver = cards.get(_s(offer["from_judge_id"])) or {}
     taker = cards.get(_s(claim["judge_id"])) or {}
 
+    # DECYZJA idzie do dziennika osobno od jej SKUTKU w bazie związku. To dwie
+    # różne rzeczy i przy nieudanym zapisie tylko tak widać, że obsadowy zrobił
+    # swoje, a nie przeszło coś dalej.
+    await _log(
+        "decision_approved",
+        province=province,
+        actor=actor,
+        offer=offer,
+        subject_id=_s(claim["judge_id"]),
+        subject_name=_s(taker.get("full_name")),
+        payload={"claimId": int(claim["id"]), "retry": bool(stale)},
+    )
+
     async def fail(message: str, code: str) -> Dict[str, Any]:
         """Oferta wraca na giełdę, chętny do puli, a obsadowy dostaje powód."""
         await database.execute(
@@ -1688,6 +1792,17 @@ async def approve_offer(
             "⚠️ Wymiana niezapisana",
             f"{_offer_line(offer)}: {message}",
             offer,
+        )
+        await _log(
+            "zprp_failed",
+            province=province,
+            actor=actor,
+            offer=offer,
+            subject_id=_s(claim["judge_id"]),
+            subject_name=_s(taker.get("full_name")),
+            ok=False,
+            message=message,
+            payload={"code": code},
         )
         logger.warning("giełda: zapis nieudany offer=%s code=%s %s", offer_id, code, message)
         return {"id": offer_id, "status": "open", "applied": False, "code": code, "error": message}
@@ -1777,6 +1892,17 @@ async def approve_offer(
         .values(status="declined", updated_at=func.now())
     )
 
+    await _log(
+        "zprp_applied",
+        province=province,
+        actor=actor,
+        offer=offer,
+        subject_id=_s(claim["judge_id"]),
+        subject_name=taker_name,
+        ok=True,
+        payload={"from": _s(giver.get("full_name")), "slotLabel": slot_label(offer["slot"])},
+    )
+
     line = _offer_line(offer)
     await _notify(
         [_s(claim["judge_id"])],
@@ -1856,6 +1982,141 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
     return {"provinces": out}
 
 
+@router.get(
+    "/admin/provinces/{province}/journal",
+    summary="Dziennik giełdy w województwie - kto, kiedy, co",
+)
+async def admin_journal(
+    province: str,
+    group: str = Query("", description="Grupa zdarzen: offers|claims|decisions|config. Pusto = wszystkie."),
+    q: str = Query("", description="Szukanie po nazwisku, numerze meczu albo tresci wpisu."),
+    since: str = Query("", description="Od tej daty (ISO). Pusto = bez dolnej granicy."),
+    until: str = Query("", description="Do tej daty (ISO). Pusto = bez gornej granicy."),
+    limit: int = Query(80, ge=1, le=400),
+    before_id: int = Query(0, ge=0, description="Strona nastepna: id ostatniego wpisu poprzedniej."),
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    """Pelna historia gieldy jednego okregu, od najnowszego wpisu.
+
+    Nalezy do ADMINISTRATORA APLIKACJI, nie do obsadowego: to rejestr czyjejs
+    pracy, razem z powodami odrzucen i trescia notatek. Obsadowy widzi to, co
+    dotyczy jego decyzji, w widoku samej oferty.
+
+    Wpisy sa niezmienne i nie znikaja razem z oferta, wiec dziennik pokazuje
+    rowniez sprawy dawno zamkniete - dlatego strona jest wprost ograniczona, a
+    kolejna dochodzi przez `before_id` (nie offsetem: dopisany w tym czasie wpis
+    przesunalby cala liste i jeden by sie zgubil).
+    """
+    if not may_manage_config(is_admin=actor.is_admin):
+        raise HTTPException(403, "Dziennik giełdy należy do administratora aplikacji.")
+    key = normalize_province(province)
+    if not key:
+        raise HTTPException(400, "Nie znam takiego województwa.")
+
+    query = select(match_market_events).where(match_market_events.c.province == key)
+
+    wanted = _s(group)
+    if wanted:
+        kinds = kinds_in_group(wanted)
+        if not kinds:
+            raise HTTPException(400, "Nie znam takiej grupy zdarzeń.")
+        query = query.where(match_market_events.c.kind.in_(kinds))
+
+    needle = _s(q)
+    if needle:
+        # Szukamy po tym, co administrator ma pod reka: nazwisko (sprawcy albo
+        # osoby, ktorej sprawa dotyczy), numer meczu i tresc wpisu - tam siedza
+        # powody odrzucen i kody odmowy ZPRP.
+        like = f"%{needle.lower()}%"
+        query = query.where(
+            or_(
+                func.lower(func.coalesce(match_market_events.c.actor_name, "")).like(like),
+                func.lower(func.coalesce(match_market_events.c.subject_name, "")).like(like),
+                func.lower(func.coalesce(match_market_events.c.match_code, "")).like(like),
+                func.lower(func.coalesce(match_market_events.c.message, "")).like(like),
+                func.coalesce(match_market_events.c.match_id, "").like(f"%{needle}%"),
+            )
+        )
+
+    def parse_stamp(raw: str, field: str) -> Optional[datetime]:
+        text_value = _s(raw)
+        if not text_value:
+            return None
+        try:
+            stamp = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(400, f"Data w polu {field} nie jest poprawna.")
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+    lower = parse_stamp(since, "since")
+    upper = parse_stamp(until, "until")
+    if lower:
+        query = query.where(match_market_events.c.created_at >= lower)
+    if upper:
+        query = query.where(match_market_events.c.created_at <= upper)
+    if before_id:
+        query = query.where(match_market_events.c.id < before_id)
+
+    rows = await database.fetch_all(
+        query.order_by(match_market_events.c.id.desc()).limit(limit)
+    )
+    events = [_row(r) for r in rows]
+
+    # Liczniki grup licza sie na TYM SAMYM sicie co lista, ale BEZ pigulki grupy:
+    # pigulka ma mowic, ile jest do zobaczenia po jej dotknieciu, a nie ile
+    # zostalo po jej wlasnym odsiewie.
+    counts_query = select(
+        match_market_events.c.kind, func.count().label("n")
+    ).where(match_market_events.c.province == key)
+    if needle:
+        like = f"%{needle.lower()}%"
+        counts_query = counts_query.where(
+            or_(
+                func.lower(func.coalesce(match_market_events.c.actor_name, "")).like(like),
+                func.lower(func.coalesce(match_market_events.c.subject_name, "")).like(like),
+                func.lower(func.coalesce(match_market_events.c.match_code, "")).like(like),
+                func.lower(func.coalesce(match_market_events.c.message, "")).like(like),
+                func.coalesce(match_market_events.c.match_id, "").like(f"%{needle}%"),
+            )
+        )
+    if lower:
+        counts_query = counts_query.where(match_market_events.c.created_at >= lower)
+    if upper:
+        counts_query = counts_query.where(match_market_events.c.created_at <= upper)
+    by_kind = {
+        _s(_row(r)["kind"]): int(_row(r)["n"])
+        for r in await database.fetch_all(counts_query.group_by(match_market_events.c.kind))
+    }
+
+    return {
+        "province": key,
+        "events": [
+            {
+                "id": int(e["id"]),
+                "kind": _s(e["kind"]),
+                "offerId": int(e["offer_id"]) if e.get("offer_id") is not None else None,
+                "matchId": _s(e.get("match_id")) or None,
+                "matchCode": _s(e.get("match_code")) or None,
+                "slot": _s(e.get("slot")) or None,
+                "slotLabel": slot_label(e.get("slot")) if e.get("slot") else None,
+                "actorId": _s(e.get("actor_judge_id")) or None,
+                "actorName": _s(e.get("actor_name")) or None,
+                "subjectId": _s(e.get("subject_judge_id")) or None,
+                "subjectName": _s(e.get("subject_name")) or None,
+                "ok": e.get("ok"),
+                "message": _s(e.get("message")) or None,
+                "payload": state_dict(e.get("payload")),
+                "at": _iso(e.get("created_at")),
+            }
+            for e in events
+        ],
+        "byKind": by_kind,
+        "total": sum(by_kind.values()),
+        # Pusto = nie ma nastepnej strony; inaczej to `before_id` do kolejnego pytania.
+        "nextBefore": int(events[-1]["id"]) if len(events) == limit else None,
+    }
+
+
 @router.put("/admin/provinces/{province}", summary="Ustawienia giełdy w województwie")
 async def admin_set_province(
     province: str, req: ProvinceConfigRequest, actor: Actor = Depends(market_actor)
@@ -1895,6 +2156,17 @@ async def admin_set_province(
         await database.execute(
             insert(province_module_config).values(province=key, **values)
         )
+
+    await _log(
+        "config_changed",
+        province=key,
+        actor=actor,
+        message=config_diff_message(
+            _row(current) if current else None,
+            {k: v for k, v in values.items() if k != "updated_by"},
+        ),
+        payload={"fields": [k for k in values if k != "updated_by"]},
+    )
 
     cfg = await _config(key)
     return {

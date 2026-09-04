@@ -349,3 +349,66 @@ def test_dateless_matches_survive_the_scan_limit():
     source = ast.unparse(FUNCTIONS["my_matches"])
     assert "undated_rows" in source
     assert "nulls_last" not in source
+
+
+# ─────────────────────────── dziennik giełdy ───────────────────────────
+
+
+def test_every_state_changing_route_writes_to_the_journal():
+    """Rejestr jest PELNY albo go nie ma.
+
+    Trasa, ktora zmienia stan i nie dopisuje wpisu, robi w historii dziure -
+    a dziennik czyta sie wlasnie po to, zeby wiedziec, czego w stanach nie
+    widac (wycofane zgloszenia, nieudane zapisy, kto co odrzucil).
+    """
+    for name in (
+        "create_offer",
+        "withdraw_offer",
+        "create_claim",
+        "withdraw_claim",
+        "reject_offer",
+        "approve_offer",
+        "admin_set_province",
+    ):
+        assert "_log" in calls_in(name), f"{name} nie pisze do dziennika"
+
+
+def test_the_journal_never_breaks_the_action_it_describes():
+    """Dziennik jest swiadkiem, nie strona.
+
+    Gdyby zapis wpisu potrafil rzucic, zatwierdzenie wymiany wracaloby bledem
+    PO zmianie obsady w bazie zwiazku - obsadowy probowalby drugi raz, a mecz
+    byl juz przepisany. Stad `try/except` wokol calego zapisu.
+    """
+    node = FUNCTIONS["_log"]
+    assert any(isinstance(sub, ast.Try) for sub in ast.walk(node)), "_log bez oslony"
+    source = code_of("_log")
+    assert "logger.exception" in source
+
+
+def test_decision_and_its_zprp_outcome_are_separate_entries():
+    """Decyzja obsadowego i skutek zapisu to DWA zdarzenia.
+
+    Przy nieudanym zapisie tylko tak widac, ze obsadowy zrobil swoje, a nie
+    przeszlo cos dalej - jeden wspolny wpis kazalby zgadywac.
+    """
+    source = ast.unparse(FUNCTIONS["approve_offer"])
+    assert "'decision_approved'" in source
+    assert "'zprp_applied'" in source
+    assert "'zprp_failed'" in source
+
+
+def test_journal_is_read_only_by_the_app_admin():
+    paths = {(m, p) for m, p, _ in routes()}
+    assert ("get", "/admin/provinces/{province}/journal") in paths
+    calls = calls_in("admin_journal")
+    assert "may_manage_config" in calls
+    # Okreg podaje sie sluggiem - bez normalizacji "ŚLĄSKIE" nie trafiloby w nic.
+    assert "normalize_province" in calls
+
+
+def test_journal_pages_by_cursor_not_by_offset():
+    """Strona liczona offsetem gubi wpis, gdy w tym czasie dojdzie nowy."""
+    source = code_of("admin_journal")
+    assert "before_id" in source
+    assert ".offset(" not in source
