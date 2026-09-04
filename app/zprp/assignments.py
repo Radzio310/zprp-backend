@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.deps import Settings, get_settings, get_rsa_keys
 from app.match_market_rules import TRADEABLE_SLOTS as _TRADEABLE_SLOTS
+from app.match_market_rules import names_match
 from app.utils import fetch_with_correct_encoding
 from app.zprp.schedule import _parse_matches_table
 
@@ -660,6 +661,38 @@ def _norm_name(s: str) -> str:
     return " ".join((s or "").lower().strip().split())
 
 
+def _same_person(a: str, b: str) -> bool:
+    """Czy dwa zapisy nazwiska wskazuja tego samego czlowieka.
+
+    Formularz ZPRP podpisuje opcje "WITKOWICZ Krzysztof", a lista sedziow
+    okregu (skad gielda bierze nazwisko biorcy) bywa prowadzona jako
+    "Krzysztof WITKOWICZ". Doslowne porownanie wstrzymywalo zapis z kodem
+    NAME_NOT_IN_OPTIONS, choc sedzia stal na liscie 811 opcji - stad porownanie
+    zbioru czlonow, to samo, ktorym gielda rozpoznaje "moj mecz".
+    """
+    if _norm_name(a) == _norm_name(b):
+        return True
+    return names_match(a, b)
+
+
+def _resolve_option(options: List[Dict[str, Any]], wanted_name: str) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Opcja formularza dla nazwiska: (trafienie, kandydaci).
+
+    Doslowne trafienie wygrywa zawsze. Bez niego liczy sie zbior czlonow -
+    ale JEDNO trafienie: gdy pasuje kilku ("NOWAK Jan Pawel" i "NOWAK Jan
+    Piotr" dla "Jan Nowak"), nie zgadujemy, bo zapisalibysmy do obsady nie
+    tego czlowieka. Wtedy wraca pusta para i pelna lista kandydatow.
+    """
+    wanted = _norm_name(wanted_name)
+    exact = next((o for o in options if _norm_name(o.get("name", "")) == wanted), None)
+    if exact:
+        return exact, [exact]
+    candidates = [o for o in options if names_match(o.get("name", ""), wanted_name)]
+    if len(candidates) == 1:
+        return candidates[0], candidates
+    return None, candidates
+
+
 def _find_option_name(slot_data: dict, value: str) -> str:
     """Nazwa opcji o tej wartości albo pusty string."""
     for o in (slot_data.get("options") or []):
@@ -883,17 +916,33 @@ async def apply_referee_assignment(
 
         resolved_val = new_val
         if new_name:
-            wanted = _norm_name(new_name)
             options = current["slots"].get(slot_label, {}).get("options", [])
-            match = next(
-                (o for o in options if _norm_name(o.get("name", "")) == wanted), None
-            )
+            match, candidates = _resolve_option(options, new_name)
             if match:
                 resolved_val = match["value"]
                 logger.info(
-                    "%s: %s %r -> value=%r (przyszlo %r)",
-                    log_prefix, slot_label, new_name, resolved_val, new_val,
+                    "%s: %s %r -> value=%r jako %r (przyszlo %r)",
+                    log_prefix, slot_label, new_name, resolved_val,
+                    match.get("name"), new_val,
                 )
+            elif len(candidates) > 1:
+                # Kilku pasuje - to nie jest brak na liscie, tylko niejasnosc, i
+                # ma sie tak nazwac. Zgadywanie zapisaloby do obsady kogos innego.
+                names = ", ".join(str(o.get("name", "")) for o in candidates[:5])
+                logger.warning(
+                    "%s: nazwisko %r pasuje do %d opcji gniazda %s (%s) - zapis wstrzymany",
+                    log_prefix, new_name, len(candidates), slot_label, names,
+                )
+                return {
+                    "success": False,
+                    "code": "NAME_AMBIGUOUS",
+                    "fetched_at": _now_iso(),
+                    "verified_slots": {},
+                    "error": (
+                        f"{new_name} pasuje do kilku sędziów na liście ZPRP dla roli "
+                        f"{slot_label} ({names}). Wskaż w bazie związku ręcznie."
+                    ),
+                }
             elif require_name_match:
                 logger.warning(
                     "%s: nazwiska %r nie ma wsrod %d opcji gniazda %s - zapis wstrzymany",
@@ -938,7 +987,9 @@ async def apply_referee_assignment(
     parsed = _parse_referee_form(html)
 
     # Krok 4: weryfikacja. Porównujemy NAZWISKA, bo numery opcji w odpowiedzi
-    # mogą być przenumerowane względem tych, które wysłaliśmy.
+    # mogą być przenumerowane względem tych, które wysłaliśmy. Ta sama miara,
+    # co przy wyborze opcji - inaczej "Krzysztof WITKOWICZ" zapisałby się jako
+    # "WITKOWICZ Krzysztof" i zaraz potem oblał własną weryfikację.
     verification_ok = True
     for sel_name, slot_label in SELECT_TO_SLOT.items():
         sent_val, sent_name = changes.get(sel_name, (None, None))
@@ -946,7 +997,7 @@ async def apply_referee_assignment(
             continue
         got_name = _selected_name(parsed["slots"].get(slot_label, {}))
         if sent_name:
-            if _norm_name(got_name) != _norm_name(sent_name):
+            if not _same_person(got_name, sent_name):
                 logger.warning(
                     "%s: weryfikacja gniazda %s - oczekiwano %r, jest %r",
                     log_prefix, slot_label, sent_name, got_name,
