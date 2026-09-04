@@ -290,6 +290,64 @@ def test_puste_pola_obsady_z_api_nie_kasuja_prywatnej_listy():
     assert state["Hala_miasto"] == ""
 
 
+def test_nazwisko_nie_zostaje_bez_swojego_numeru():
+    """Zdjecie sedziego z meczu MUSI zabrac tez nazwisko.
+
+    ZPRP po wyczyszczeniu gniazda wpisuje w kolumne numeru "0" i zostawia
+    puste nazwisko. Bramka chroniaca obsade przed pustka zachowywala wtedy
+    nazwisko czlowieka, ktorego przy meczu juz nie ma - w stanie zostawal
+    numer "0" obok starego nazwiska, a gielda pokazywala obsade widmo.
+    Numer jest odpowiedzia o CALA role: skoro API go podalo, rzadzi para.
+    """
+    base = {
+        "Id": "208137",
+        "NrSedzia_pierwszy": "5124",
+        "NrSedzia_pierwszy_nazwisko": "WITKOWICZ Radoslaw",
+        "NrSedzia_drugi_nazwisko": "STARY Piotr",
+    }
+    payload = {
+        "0": [
+            {
+                "Id": "208137",
+                # Gniazdo wyczyszczone przez okreg.
+                "NrSedzia_pierwszy": "0",
+                "NrSedzia_pierwszy_nazwisko": "",
+                # O drugim sedzim API milczy - tego nie ruszamy.
+                "NrSedzia_drugi_nazwisko": "",
+            }
+        ]
+    }
+    state = _api_to_state(payload, base)
+    assert state["NrSedzia_pierwszy"] == "0"
+    assert state["NrSedzia_pierwszy_nazwisko"] == ""
+    assert state["NrSedzia_drugi_nazwisko"] == "STARY Piotr"
+
+
+def test_obsadzona_rola_z_api_nadpisuje_stara_pare():
+    """Powierzona grupa II ligi oddaje pelne numery i nazwiska.
+
+    Sprawdzone wprost na publicznym API (IIM4, SLASKIE): mecz obsadzony ma
+    numer i nazwisko, wiec zmiana sedziego musi wejsc w calosci.
+    """
+    base = {
+        "Id": "191335",
+        "NrSedzia_pierwszy": "5124",
+        "NrSedzia_pierwszy_nazwisko": "WITKOWICZ Radoslaw",
+    }
+    payload = {
+        "0": [
+            {
+                "Id": "191335",
+                "NrSedzia_pierwszy": "865",
+                "NrSedzia_pierwszy_nazwisko": "LESIAK Urszula",
+            }
+        ]
+    }
+    state = _api_to_state(payload, base)
+    assert state["NrSedzia_pierwszy"] == "865"
+    assert state["NrSedzia_pierwszy_nazwisko"] == "LESIAK Urszula"
+
+
 def test_pelny_przebieg_nie_gasi_meczow_swiezo_widzianych_gdzie_indziej():
     """Terminarz wojewodztwa nie jest jedynym zrodlem prawdy.
 

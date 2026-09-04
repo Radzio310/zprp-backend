@@ -261,29 +261,40 @@ def _schedule_to_state(match: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 
-#: Pola obsady, ktorych PUSTA odpowiedz publicznego API nie ma prawa kasowac.
+#: Pary (numer, nazwisko) obsady. Pusta odpowiedz publicznego API nie ma prawa
+#: kasowac tych pol - ale NAZWISKO NIGDY NIE ZOSTAJE SAMO, bez swojego numeru.
 #:
-#: Prywatna lista sedziego zna pelna obsade swoich meczow; publiczne API bywa
-#: ubozsze i przy czesci rozgrywek (szczebel centralny, powierzone grupy)
-#: oddaje te pola puste. Nadpisanie pustka wycinalo nazwiska, a na nich stoi
-#: cala gielda ("moj mecz" = `slots_held_by` po tych polach) i powiadomienia o
-#: zmianach obsady. Zdjecie sedziego z meczu i tak wychodzi inna droga:
-#: mecz znika z jego prywatnej listy (`_mark_missing_assignments`), a stan
-#: odswieza kolejny lekki przebieg.
-_CREW_STATE_KEYS = (
-    "NrSedzia_pierwszy",
-    "NrSedzia_pierwszy_nazwisko",
-    "NrSedzia_drugi",
-    "NrSedzia_drugi_nazwisko",
-    "NrSedzia_sekretarz",
-    "NrSedzia_sekretarz_nazwisko",
-    "NrSedzia_czas",
-    "NrSedzia_czas_nazwisko",
-    "NrSedzia_delegat",
-    "NrSedzia_delegat_nazwisko",
-    "NrSedzia_delegat2",
-    "NrSedzia_delegat2_nazwisko",
+#: Prywatna lista sedziego zna pelna obsade swoich meczow, a publiczne API bywa
+#: ubozsze i przy czesci rozgrywek oddaje te pola puste. Nadpisanie pustka
+#: wycinalo nazwiska, a na nich stoi cala gielda ("moj mecz" = `slots_held_by`
+#: po tych polach) i powiadomienia o zmianach obsady.
+#:
+#: Sama obecnosc pola to jednak za slaby warunek, zeby cokolwiek zachowywac.
+#: ZPRP po zdjeciu sedziego wpisuje w kolumne numeru "0" przy PUSTYM nazwisku,
+#: wiec pierwsza wersja tej bramki zostawiala w stanie nazwisko czlowieka,
+#: ktorego przy meczu juz nie ma - numer "0" obok "WITKOWICZ Radoslaw".
+#: Sprawdzone wprost na publicznym API: powierzona grupa II ligi (IIM4,
+#: SLASKIE) oddaje przy obsadzonych meczach PELNE numery i nazwiska
+#: (np. 865 "LESIAK Urszula"), a puste gniazda jako "" albo "0". Numer jest
+#: wiec wiarygodna odpowiedzia o cala role: gdy API go podaje - w tym "0" -
+#: rzadzi API; gdy milczy, zostaje to, co wiemy z prywatnej listy.
+_CREW_FIELD_PAIRS = (
+    ("NrSedzia_pierwszy", "NrSedzia_pierwszy_nazwisko"),
+    ("NrSedzia_drugi", "NrSedzia_drugi_nazwisko"),
+    ("NrSedzia_sekretarz", "NrSedzia_sekretarz_nazwisko"),
+    ("NrSedzia_czas", "NrSedzia_czas_nazwisko"),
+    ("NrSedzia_delegat", "NrSedzia_delegat_nazwisko"),
+    ("NrSedzia_delegat2", "NrSedzia_delegat2_nazwisko"),
 )
+
+#: Pole obsady -> pole z NUMEREM tej samej roli (numer wskazuje sam na siebie).
+_CREW_ID_FIELD: Dict[str, str] = {
+    field: id_field
+    for id_field, name_field in _CREW_FIELD_PAIRS
+    for field in (id_field, name_field)
+}
+
+_CREW_STATE_KEYS = tuple(_CREW_ID_FIELD)
 
 
 def _api_to_state(payload: Dict[str, Any], base: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -294,8 +305,16 @@ def _api_to_state(payload: Dict[str, Any], base: Dict[str, Any]) -> Optional[Dic
     state = dict(base)
     for key, value in match.items():
         incoming = _str(value) if not isinstance(value, (dict, list)) else value
-        if key in _CREW_STATE_KEYS and incoming == "" and _str(base.get(key)):
-            # Wzbogacamy, nie zubozamy - patrz nota przy `_CREW_STATE_KEYS`.
+        if (
+            key in _CREW_STATE_KEYS
+            and incoming == ""
+            and _str(base.get(key))
+            and not _str(match.get(_CREW_ID_FIELD[key]))
+        ):
+            # Wzbogacamy, nie zubozamy - patrz nota przy `_CREW_FIELD_PAIRS`.
+            # Ostatni warunek: API nie powiedzialo o tej roli NIC. Gdy podalo
+            # numer (choćby "0" = gniazdo puste), jego odpowiedz rzadzi CALA
+            # para i nazwisko schodzi razem z numerem.
             continue
         state[key] = incoming
     state["Id"] = _str(match.get("Id") or base.get("Id"))
