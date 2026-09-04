@@ -51,9 +51,46 @@ def badge_names(badges_raw: Any) -> List[str]:
     return []
 
 
-def has_approver_badge(badges_raw: Any) -> bool:
-    """Czy wśród odznak jest odznaka obsadowego."""
-    return APPROVER_BADGE in badge_names(badges_raw)
+def normalize_approver_badges(value: Any) -> List[str]:
+    """Lista odznak uprawnionych do rozstrzygania wymian - z każdego kształtu.
+
+    Okręg wybiera odznaki sam (kolumna `approver_badges` w konfiguracji), a ta
+    funkcja sprowadza wybór do porządku: kolumna JSON bywa napisem (asyncpg bez
+    kodeka), stare wpisy bywają słownikiem `{nazwa: true}`, a duplikaty i puste
+    wpisy wypadają. PUSTKA znaczy DOMYŚLNIE odznaka obsadowego - brak zaznaczeń
+    nie może zostawić okręgu z giełdą, której nikt nie rozstrzyga.
+    """
+    raw = value
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raw = ""
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = []
+    if isinstance(raw, dict):
+        raw = [k for k, v in raw.items() if v]
+    out: List[str] = []
+    for item in raw if isinstance(raw, (list, tuple, set)) else []:
+        name = str(item or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return out or [APPROVER_BADGE]
+
+
+def has_approver_badge(
+    badges_raw: Any, allowed_badges: Optional[Iterable[str]] = None
+) -> bool:
+    """Czy wśród odznak jest któraś z uprawnionych (domyślnie: obsadowego)."""
+    wanted = {
+        str(b or "").strip()
+        for b in (allowed_badges or (APPROVER_BADGE,))
+        if str(b or "").strip()
+    }
+    return any(name in wanted for name in badge_names(badges_raw))
 
 
 def may_approve(
@@ -62,19 +99,23 @@ def may_approve(
     province: Any,
     judge_province: Any,
     badges_raw: Any,
+    allowed_badges: Optional[Iterable[str]] = None,
 ) -> bool:
     """Czy ten człowiek może rozstrzygać wymiany w tym województwie.
 
     `judge_province` to województwo z `province_judges` - a nie to, które
     przyszło z telefonu. Województwo w tokenie ustawia sobie sam użytkownik w
     ustawieniach aplikacji i nie może być podstawą do decyzji o cudzej obsadzie.
+
+    `allowed_badges` to wybór okręgu (`normalize_approver_badges`); bez niego
+    obowiązuje domyślna odznaka obsadowego. Administrator przechodzi zawsze.
     """
     if is_admin:
         return True
     prov = normalize_province(province)
     if not prov or normalize_province(judge_province) != prov:
         return False
-    return has_approver_badge(badges_raw)
+    return has_approver_badge(badges_raw, allowed_badges)
 
 
 def may_manage_config(*, is_admin: bool) -> bool:
@@ -92,6 +133,7 @@ def approver_judge_ids(
     province: Any,
     *,
     admin_ids: Optional[Iterable[Any]] = None,
+    allowed_badges: Optional[Iterable[str]] = None,
 ) -> List[str]:
     """Numery ludzi, do których ma pójść powiadomienie o nowym zgłoszeniu.
 
@@ -106,7 +148,7 @@ def approver_judge_ids(
         data = dict(row._mapping) if hasattr(row, "_mapping") else dict(row or {})
         if normalize_province(data.get("province")) != prov:
             continue
-        if not has_approver_badge(data.get("badges")):
+        if not has_approver_badge(data.get("badges"), allowed_badges):
             continue
         judge_id = str(data.get("judge_id") or "").strip()
         if judge_id:

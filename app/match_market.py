@@ -50,8 +50,10 @@ from app.deps import Settings, get_jwt_payload, get_settings
 from app.match_market_access import (
     APPROVER_BADGE,
     approver_judge_ids,
+    badge_names,
     may_approve,
     may_manage_config,
+    normalize_approver_badges,
 )
 from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
@@ -127,16 +129,6 @@ class Actor:
         self.badges = (row or {}).get("badges")
         self.known = row is not None
 
-    @property
-    def is_approver(self) -> bool:
-        return may_approve(
-            is_admin=self.is_admin,
-            province=self.province,
-            judge_province=self.province,
-            badges_raw=self.badges,
-        )
-
-
 async def market_actor(payload: Dict[str, Any] = Depends(get_jwt_payload)) -> Actor:
     judge_id = _s(payload.get("judge_id"))
     if not judge_id:
@@ -176,6 +168,7 @@ async def _config(province: str) -> Dict[str, Any]:
             data.get("offer_deadline_hours", DEFAULT_DEADLINE_HOURS)
         ),
         "assign_account_mode": _s(data.get("assign_account_mode")) or "own",
+        "approver_badges": normalize_approver_badges(data.get("approver_badges")),
     }
 
 
@@ -644,6 +637,7 @@ async def _broadcast_targets(province: str, exclude: str) -> List[str]:
 
 
 async def _approvers_of(province: str) -> List[str]:
+    cfg = await _config(province)
     rows = await database.fetch_all(
         select(
             province_judges.c.judge_id,
@@ -651,7 +645,9 @@ async def _approvers_of(province: str) -> List[str]:
             province_judges.c.badges,
         ).where(province_judges.c.province == province)
     )
-    return approver_judge_ids([_row(r) for r in rows], province)
+    return approver_judge_ids(
+        [_row(r) for r in rows], province, allowed_badges=cfg["approver_badges"]
+    )
 
 
 # ─────────────────────────── modele ───────────────────────────
@@ -679,6 +675,7 @@ class ProvinceConfigRequest(BaseModel):
     market_enabled: Optional[bool] = None
     offer_deadline_hours: Optional[int] = None
     assign_account_mode: Optional[str] = None
+    approver_badges: Optional[List[str]] = None
 
 
 # ─────────────────────────── kontekst ekranu ───────────────────────────
@@ -700,17 +697,31 @@ async def get_context(actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
         if cfg
         else False
     )
+    allowed = cfg["approver_badges"] if cfg else [APPROVER_BADGE]
     return {
         "judgeId": actor.judge_id,
         "province": actor.province,
         "fullName": actor.full_name,
         "photoUrl": actor.photo_url,
         "knownInProvince": actor.known and bool(actor.province),
-        "isApprover": actor.is_approver,
+        "isApprover": may_approve(
+            is_admin=actor.is_admin,
+            province=actor.province,
+            judge_province=actor.province,
+            badges_raw=actor.badges,
+            allowed_badges=allowed,
+        ),
         "isAdmin": actor.is_admin,
         "enabled": bool(cfg and cfg["market_enabled"]),
         "deadlineHours": cfg["offer_deadline_hours"] if cfg else DEFAULT_DEADLINE_HOURS,
-        "approverBadge": APPROVER_BADGE,
+        # Plakietka przy nazwisku: odznaka, która NAPRAWDĘ daje to prawo w tym
+        # okręgu - odkąd okręg sam wybiera odznaki, nie zawsze jest to
+        # "Obsadowy". Dla administratora bez odznaki zostaje pierwsza z listy;
+        # aplikacja i tak podpisuje go wtedy "Admin".
+        "approverBadge": next(
+            (n for n in badge_names(actor.badges) if n in set(allowed)),
+            allowed[0] if allowed else APPROVER_BADGE,
+        ),
         "accountReady": account_ready,
     }
 
@@ -1386,16 +1397,21 @@ def _apply_is_stale(updated_at: Any, now: datetime) -> bool:
 
 
 async def _require_approver(actor: Actor, province: str) -> None:
+    # Odznaki uprawnione do rozstrzygania wybiera okręg w konfiguracji -
+    # domyślnie sam obsadowy, ale bywa też Komisja czy inna rola okręgowa.
+    cfg = await _config(province)
+    allowed = cfg["approver_badges"]
     if not may_approve(
         is_admin=actor.is_admin,
         province=province,
         judge_province=actor.province,
         badges_raw=actor.badges,
+        allowed_badges=allowed,
     ):
         raise HTTPException(
             403,
             "Rozstrzyganie wymian należy do administratora i do sędziów z odznaką "
-            f"{APPROVER_BADGE} w tym okręgu.",
+            f"{' / '.join(allowed)} w tym okręgu.",
         )
 
 
@@ -1410,11 +1426,13 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
     province = _s(offer["province"])
 
     mine = _s(offer["from_judge_id"]) == actor.judge_id
+    cfg = await _config(province)
     approver = may_approve(
         is_admin=actor.is_admin,
         province=province,
         judge_province=actor.province,
         badges_raw=actor.badges,
+        allowed_badges=cfg["approver_badges"],
     )
     if not mine and not approver and actor.province != province:
         raise HTTPException(403, "To zgłoszenie należy do innego okręgu.")
@@ -1828,6 +1846,7 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
                     cfg.get("offer_deadline_hours", DEFAULT_DEADLINE_HOURS)
                 ),
                 "assignAccountMode": mode,
+                "approverBadges": normalize_approver_badges(cfg.get("approver_badges")),
                 "accounts": account_status(province, mode),
                 "openOffers": pending.get(province, 0),
                 "updatedBy": _s(cfg.get("updated_by")) or None,
@@ -1861,6 +1880,10 @@ async def admin_set_province(
         values["offer_deadline_hours"] = normalize_deadline_hours(req.offer_deadline_hours)
     if mode:
         values["assign_account_mode"] = mode
+    if req.approver_badges is not None:
+        # Pusty wybór NIE wyłącza rozstrzygania - normalizacja wraca do odznaki
+        # obsadowego, żeby okręg nie został z giełdą, której nikt nie domknie.
+        values["approver_badges"] = normalize_approver_badges(req.approver_badges)
 
     if current:
         await database.execute(
@@ -1879,5 +1902,6 @@ async def admin_set_province(
         "marketEnabled": cfg["market_enabled"],
         "deadlineHours": cfg["offer_deadline_hours"],
         "assignAccountMode": cfg["assign_account_mode"],
+        "approverBadges": cfg["approver_badges"],
         "accounts": account_status(key, cfg["assign_account_mode"]),
     }

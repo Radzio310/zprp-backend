@@ -1441,6 +1441,10 @@ province_module_config = Table(
     # "own" = własne konto ZPRP_ASSIGN_*, "same_as_sync" = to samo, którym chodzi
     # monitor meczów. Same hasła zostają w Railway - tu leży wyłącznie wybór.
     Column("assign_account_mode", String, nullable=False, server_default=text("'own'")),
+    # Odznaki, które w tym okręgu WIDZĄ zgłoszenia i rozstrzygają wymiany na
+    # giełdzie meczów. Pusta/brakująca lista = domyślnie "Obsadowy";
+    # administrator aplikacji przechodzi zawsze, niezależnie od listy.
+    Column("approver_badges", JSON, nullable=True),
     Column("updated_by", String, nullable=True),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
@@ -2746,4 +2750,5 @@ with engine.connect() as _conn:
     # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
     # `create_all` kolumny nie dołoży.
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))
+    _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS approver_badges json"))
     _conn.commit()

@@ -124,3 +124,47 @@ def test_badges_in_a_raw_json_string_still_count():
     assert badge_names('{"Obsadowy": true, "Mentor": false}') == ["Obsadowy"]
     assert badge_names("nie-json") == []
     assert badge_names("") == []
+
+
+# ── Odznaki rozstrzygajace wybiera okreg ─────────────────────────────────────
+from app.match_market_access import normalize_approver_badges  # noqa: E402
+
+
+def test_okregowa_lista_odznak_zastepuje_domyslna():
+    base = dict(is_admin=False, province=SLASK, judge_province=SLASK)
+    # Komisja przechodzi, gdy okreg ja wskazal...
+    assert may_approve(**base, badges_raw=["Komisja"], allowed_badges=["Komisja"])
+    # ...a sam Obsadowy wtedy NIE wystarcza, skoro okreg go nie wybral.
+    assert not may_approve(
+        **base, badges_raw={APPROVER_BADGE: True}, allowed_badges=["Komisja"]
+    )
+    # Admin przechodzi zawsze, niezaleznie od listy.
+    assert may_approve(
+        is_admin=True,
+        province=SLASK,
+        judge_province="",
+        badges_raw=None,
+        allowed_badges=["Komisja"],
+    )
+
+
+def test_normalize_approver_badges_kazdy_ksztalt_i_pustka():
+    assert normalize_approver_badges(None) == [APPROVER_BADGE]
+    assert normalize_approver_badges([]) == [APPROVER_BADGE]
+    assert normalize_approver_badges(["Komisja", "Komisja", "", "Mentor"]) == [
+        "Komisja",
+        "Mentor",
+    ]
+    # Kolumna JSON bywa napisem (asyncpg bez kodeka jsonb).
+    assert normalize_approver_badges('["Komisja"]') == ["Komisja"]
+    assert normalize_approver_badges('{"Komisja": true, "Mentor": false}') == ["Komisja"]
+    assert normalize_approver_badges("nie-json") == [APPROVER_BADGE]
+
+
+def test_powiadomienia_o_zgloszeniu_ida_do_wybranych_odznak():
+    rows = [
+        {"judge_id": "1", "province": SLASK, "badges": [APPROVER_BADGE]},
+        {"judge_id": "2", "province": SLASK, "badges": ["Komisja"]},
+    ]
+    assert approver_judge_ids(rows, SLASK, allowed_badges=["Komisja"]) == ["2"]
+    assert approver_judge_ids(rows, SLASK) == ["1"]
