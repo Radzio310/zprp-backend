@@ -52,6 +52,16 @@ from app.match_market_journal import (
     config_diff_message,
     kinds_in_group,
 )
+from app.match_market_notify import (
+    apply_failed as text_apply_failed,
+    claim_created as text_claim_created,
+    claim_lost as text_claim_lost,
+    giver_released as text_giver_released,
+    offer_created as text_offer_created,
+    offer_rejected as text_offer_rejected,
+    offer_withdrawn as text_offer_withdrawn,
+    taker_won as text_taker_won,
+)
 from app.match_market_access import (
     APPROVER_BADGE,
     approver_judge_ids,
@@ -627,14 +637,18 @@ def _offer_data(offer: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-def _offer_line(offer: Dict[str, Any]) -> str:
-    """„OSK/12 · sędzia 1" - jedna linijka opisu do treści powiadomienia."""
-    code = _s(offer.get("match_code")) or "mecz"
-    return f"{code} · {slot_label(offer.get('slot'))}"
+async def _notify(
+    judge_ids: List[str],
+    text: Tuple[str, str],
+    offer: Dict[str, Any],
+) -> None:
+    """Wysyłka, która nigdy nie wywraca operacji, przy której powstała.
 
-
-async def _notify(judge_ids: List[str], title: str, body: str, offer: Dict[str, Any]) -> None:
-    """Wysyłka, która nigdy nie wywraca operacji, przy której powstała."""
+    Treść przychodzi GOTOWA z `app.match_market_notify` - para (tytuł, treść).
+    Zdania nie składają się tutaj po to, żeby dały się sprawdzić testem, a nie
+    przeczytać pierwszy raz na czyimś telefonie.
+    """
+    title, body = text
     targets = sorted({_s(j) for j in judge_ids if _s(j)})
     if not targets:
         return
@@ -1256,8 +1270,12 @@ async def create_offer(
     # na ekran.
     await _notify(
         await _broadcast_targets(province, actor.judge_id),
-        "🔁 Mecz do wzięcia",
-        f"{actor.full_name or 'Sędzia'} oddaje {_offer_line(offer)}.",
+        # Migawka i termin są w wierszu meczu, nie w skróconym opisie oferty -
+        # a to one mówią sędziemu „czy mam wtedy czas".
+        text_offer_created(
+            {**offer, "match_at": data.get("match_at"), "match_snapshot": state},
+            actor.full_name,
+        ),
         offer,
     )
     return {"id": offer_id, "status": "open"}
@@ -1325,8 +1343,7 @@ async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) ->
     )
     await _notify(
         interested,
-        "↩️ Mecz wrócił do właściciela",
-        f"{actor.full_name or 'Sędzia'} wycofał {_offer_line(offer)}.",
+        text_offer_withdrawn(offer, actor.full_name),
         offer,
     )
     return {"id": offer_id, "status": target}
@@ -1412,8 +1429,7 @@ async def create_claim(
     )
     await _notify(
         await _approvers_of(province),
-        "🙋 Zgłoszenie na mecz",
-        f"{actor.full_name or 'Sędzia'} chce wziąć {_offer_line(offer)}.",
+        text_claim_created(offer, actor.full_name),
         offer,
     )
     return {"id": claim_id, "status": "pending", "conflicts": conflicts}
@@ -1660,6 +1676,11 @@ async def reject_offer(
         )
 
     reason = _s(req.reason)
+    # Nazwisko oddającego, żeby powiadomienie mówiło, KTO zostaje przy meczu -
+    # jedno zapytanie na czynność, która i tak dzieje się rzadko.
+    giver_card = (await _judges_by_id([_s(offer["from_judge_id"])])).get(
+        _s(offer["from_judge_id"])
+    ) or {}
     await _log(
         "decision_rejected",
         province=_s(offer["province"]),
@@ -1672,8 +1693,7 @@ async def reject_offer(
     )
     await _notify(
         [_s(offer["from_judge_id"])] + interested,
-        "🚫 Wymiana odrzucona",
-        f"{_offer_line(offer)} zostaje bez zmian." + (f" Powód: {reason}" if reason else ""),
+        text_offer_rejected(offer, _s(giver_card.get("full_name")), reason),
         offer,
     )
     return {"id": offer_id, "status": target}
@@ -1787,12 +1807,7 @@ async def approve_offer(
             .where(match_market_claims.c.id == claim["id"])
             .values(status=next_claim_status("chosen", "release") or "pending", updated_at=func.now())
         )
-        await _notify(
-            [actor.judge_id],
-            "⚠️ Wymiana niezapisana",
-            f"{_offer_line(offer)}: {message}",
-            offer,
-        )
+        await _notify([actor.judge_id], text_apply_failed(offer, message), offer)
         await _log(
             "zprp_failed",
             province=province,
@@ -1903,17 +1918,10 @@ async def approve_offer(
         payload={"from": _s(giver.get("full_name")), "slotLabel": slot_label(offer["slot"])},
     )
 
-    line = _offer_line(offer)
-    await _notify(
-        [_s(claim["judge_id"])],
-        "✅ Masz nowy mecz",
-        f"{line} jest Twój. Obsadę zapisano w bazie związku.",
-        offer,
-    )
+    await _notify([_s(claim["judge_id"])], text_taker_won(offer), offer)
     await _notify(
         [_s(offer["from_judge_id"])],
-        "✅ Mecz oddany",
-        f"{line} przejmuje {taker_name}.",
+        text_giver_released(offer, taker_name),
         offer,
     )
     others = await database.fetch_all(
@@ -1923,8 +1931,7 @@ async def approve_offer(
     )
     await _notify(
         [_s(_row(r)["judge_id"]) for r in others],
-        "🔁 Mecz zajęty",
-        f"{line} trafił do innego sędziego.",
+        text_claim_lost(offer),
         offer,
     )
 

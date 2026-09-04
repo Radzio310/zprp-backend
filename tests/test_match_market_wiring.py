@@ -412,3 +412,37 @@ def test_journal_pages_by_cursor_not_by_offset():
     source = code_of("admin_journal")
     assert "before_id" in source
     assert ".offset(" not in source
+
+
+# ─────────────────────────── treści powiadomień ───────────────────────────
+
+
+def test_notification_texts_come_from_the_tested_leaf():
+    """Zdania powiadomień NIE skladaja sie w trasach.
+
+    Sklejanie technicznej etykiety z czasownikiem dalo „IIM4/1 · sedzia 1
+    przejmuje Krzysztof WITKOWICZ" - numer meczu na miejscu podmiotu. Tresci
+    mieszkaja w `app.match_market_notify`, bo tam daja sie sprawdzic testem.
+    """
+    for name in (
+        "create_offer",
+        "withdraw_offer",
+        "create_claim",
+        "reject_offer",
+        "approve_offer",
+    ):
+        calls = calls_in(name)
+        assert any(c.startswith("text_") for c in calls), f"{name} sklada tresc sam"
+
+
+def test_the_label_that_caused_it_is_gone():
+    # `_offer_line` produkowal „IIM4/1 · sedzia 1" i wchodzil wprost w zdania.
+    assert "_offer_line" not in SOURCE
+    assert " · " not in SOURCE
+
+
+def test_notify_takes_a_ready_pair_not_loose_strings():
+    """Jeden argument tresci znaczy, ze nie da sie wyslac zdania z palca."""
+    node = FUNCTIONS["_notify"]
+    args = [a.arg for a in node.args.args]
+    assert args == ["judge_ids", "text", "offer"], args
