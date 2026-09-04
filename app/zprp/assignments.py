@@ -881,7 +881,15 @@ async def apply_referee_assignment(
         expect_select, expect_name = expect
         slot_label = SELECT_TO_SLOT.get(expect_select, expect_select)
         holder = _selected_name(current["slots"].get(slot_label, {}))
-        if _norm_name(holder) != _norm_name(expect_name):
+        # `_same_person`, nie porownanie tekstow: ta sama osoba przychodzi tu w
+        # dwoch kolejnosciach czlonow. Formularz ZPRP podpisuje opcje "NAZWISKO
+        # Imie", a lista sedziow okregu bywa prowadzona jako "Imie NAZWISKO" -
+        # i to z niej bierze sie nazwisko w migawce meczu, na ktorej stoi
+        # `expect`. Doslowne porownanie wstrzymywalo wiec zapis komunikatem
+        # "jest teraz WITKOWICZ Krzysztof, a nie Krzysztof WITKOWICZ", czyli
+        # sprzeciwem wobec tej samej osoby. Ta sama miara, co przy wyborze opcji
+        # i przy weryfikacji po zapisie - trzy kroki, jedno pojecie tozsamosci.
+        if not _same_person(holder, expect_name):
             logger.warning(
                 "%s: gniazdo %s nalezy do %r, oczekiwano %r - zapis wstrzymany",
                 log_prefix, slot_label, holder, expect_name,

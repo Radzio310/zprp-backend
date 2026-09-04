@@ -87,3 +87,48 @@ async def test_stranger_is_still_refused(http):
     assert out["success"] is False
     assert out["code"] == "NAME_NOT_IN_OPTIONS"
     assert len(fake.calls) == 1
+
+
+# ─────────────── straznik `expect` i kolejnosc czlonow ───────────────
+#
+# Zgloszone z produkcji 2026-09-05, drugi raz ta sama przyczyna: zapis
+# wstrzymany komunikatem "w tym gniezdzie jest teraz WITKOWICZ Krzysztof, a nie
+# Krzysztof WITKOWICZ" - czyli sprzeciwem wobec TEJ SAMEJ osoby. Formularz ZPRP
+# podpisuje opcje "NAZWISKO Imie", a nazwisko w migawce meczu pochodzi z listy
+# sedziow okregu, ktora bywa prowadzona odwrotnie.
+
+
+def test_straznik_gniazda_rozumie_kolejnosc_czlonow():
+    from app.zprp.assignments import _same_person
+
+    assert _same_person("WITKOWICZ Krzysztof", "Krzysztof WITKOWICZ")
+    assert _same_person("Krzysztof WITKOWICZ", "WITKOWICZ Krzysztof")
+
+
+def test_straznik_gniazda_nadal_odrzuca_kogo_innego():
+    """Rygiel ma chronic przed nadpisaniem swiezszej decyzji obsadowego."""
+    from app.zprp.assignments import _same_person
+
+    assert not _same_person("WITKOWICZ Radoslaw", "Krzysztof WITKOWICZ")
+    assert not _same_person("", "Krzysztof WITKOWICZ")
+    # Samo nazwisko to za malo - w okregu jest dwoch WITKOWICZOW.
+    assert not _same_person("WITKOWICZ", "Krzysztof WITKOWICZ")
+
+
+def test_zapis_nie_uzywa_juz_doslownego_porownania_w_strazniku():
+    """AST: trzy kroki zapisu musza miec JEDNO pojecie tozsamosci."""
+    import ast
+    import pathlib
+
+    source = (pathlib.Path(__file__).resolve().parents[1] / "app" / "zprp" / "assignments.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "apply_referee_assignment"
+    )
+    body = ast.unparse(fn)
+    assert "_same_person(holder, expect_name)" in body
+    assert "_norm_name(holder)" not in body

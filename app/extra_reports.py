@@ -36,7 +36,9 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -54,8 +56,30 @@ from app.zprp_accounts import normalize_province
 
 logger = logging.getLogger(__name__)
 
+
+class _RecipientAdminRoute(APIRoute):
+    """Walidacja body działa przed endpointem; logujemy przyczynę, nie sekrety."""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request):
+            try:
+                return await original(request)
+            except RequestValidationError as exc:
+                for error in exc.errors():
+                    # Nie logujemy body, input, ctx ani całego wyjątku: jest tam URL.
+                    logger.warning(
+                        "Extra report config validation rejected: field=%s type=%s",
+                        error.get("loc"), error.get("type"),
+                    )
+                raise
+
+        return handler
+
+
 router = APIRouter(prefix="/extra-report", tags=["Dodatkowy raport"])
-admin_router = APIRouter(prefix="/admin/extra-report", tags=["Dodatkowy raport: admin"])
+admin_router = APIRouter(prefix="/admin/extra-report", tags=["Dodatkowy raport: admin"], route_class=_RecipientAdminRoute)
 
 KINDS = ("referees", "delegate")
 
@@ -234,11 +258,14 @@ async def _require_admin(actor: Actor) -> None:
         )
 
 
-def _webhook_for_save(value: Optional[str], previous: Any = "") -> str:
+def _webhook_for_save(value: Optional[str], previous: Any = "", *, location: Optional[List[Any]] = None) -> str:
     try:
         return normalize_webhook_url(previous if value is None else value)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+        # Tylko lokalizacja i nasz stały komunikat, nigdy URL ani token.
+        logger.warning("Extra report webhook rejected (%s): %s", location or "discordWebhookUrl", str(exc))
+        detail = [{"loc": location, "msg": str(exc), "type": "value_error"}] if location else str(exc)
+        raise HTTPException(status_code=422, detail=detail) from None
 
 
 # ─────────────────────────── treść raportu ───────────────────────────
@@ -602,9 +629,12 @@ async def save_recipients(
         by_id = {r["id"]: r for r in existing}
         # Zgodność ze starszym klientem, który wysyła maile bez pola webhooka.
         prepared = []
-        for group in body.groups:
+        for index, group in enumerate(body.groups):
             previous = by_id.get(group.id, {})
-            url = _webhook_for_save(group.discordWebhookUrl, previous.get("discord_webhook_url"))
+            url = _webhook_for_save(
+                group.discordWebhookUrl, previous.get("discord_webhook_url"),
+                location=["body", "groups", index, "discordWebhookUrl"],
+            )
             prepared.append((group, url))
         await database.execute(extra_report_recipients.delete())
         for index, (group, url) in enumerate(prepared):
@@ -687,13 +717,14 @@ async def save_province_recipients(
         }
         prepared = []
         included = set()
-        for entry in body.provinces:
+        for index, entry in enumerate(body.provinces):
             province = normalize_province(entry.province)
             if not province or province in included:
                 continue
             included.add(province)
             url = _webhook_for_save(
                 entry.discordWebhookUrl, existing.get(province, {}).get("discord_webhook_url"),
+                location=["body", "provinces", index, "discordWebhookUrl"],
             )
             prepared.append((province, normalize_emails(entry.emails), url))
         # Starszy panel pomija okręgi bez maili. Takie pominięcie nie wyłącza

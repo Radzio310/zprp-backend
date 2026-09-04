@@ -31,30 +31,37 @@ def normalize_webhook_url(value: str | None) -> str:
     raw = (value or "").strip()
     if not raw:
         return ""
-    error = ValueError("Podaj adres HTTPS webhooka Discord (opcjonalnie z thread_id).")
+    if len(raw) > 512:
+        raise ValueError("Adres webhooka jest za długi (maksymalnie 512 znaków).")
+    if any(c.isspace() for c in raw):
+        raise ValueError("Adres webhooka zawiera spację lub znak nowej linii. Skopiuj URL ponownie z Discorda.")
     try:
         url = urlsplit(raw)
-        match = WEBHOOK_PATH.fullmatch(url.path)
-        if (
-            len(raw) > 512 or any(c.isspace() for c in raw)
-            or url.scheme != "https" or url.hostname not in HOSTS
-            or url.port not in (None, 443) or url.username or url.password
-            or url.fragment or not match
-        ):
-            raise error
-        query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
-        if set(query) - {"wait", "thread_id"}:
-            raise error
-        thread = query.get("thread_id")
-        if thread and (len(thread) != 1 or not re.fullmatch(r"[0-9]+", thread[0])):
-            raise error
-        host = "discord.com" if url.hostname == "discordapp.com" else url.hostname
-        return urlunsplit((
-            "https", host, f"/api/webhooks/{match[1]}/{match[2]}",
-            urlencode({"thread_id": thread[0]}) if thread else "", "",
-        ))
+        port = url.port
     except (ValueError, TypeError):
-        raise error from None
+        raise ValueError("Adres webhooka ma niepoprawny format URL.") from None
+    if url.scheme != "https" or url.hostname not in HOSTS or port not in (None, 443) or url.username or url.password:
+        raise ValueError("Wklej pełny adres HTTPS webhooka z domeny Discord, nie sam token ani link do kanału.")
+    match = WEBHOOK_PATH.fullmatch(url.path)
+    if not match:
+        raise ValueError("Adres webhooka musi mieć ścieżkę /api/webhooks/ID/TOKEN (opcjonalnie z wersją API).")
+    if url.fragment:
+        raise ValueError("Adres webhooka nie może zawierać fragmentu po znaku #.")
+    try:
+        query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        raise ValueError("Parametry webhooka po znaku ? mają niepoprawny format.") from None
+    if set(query) - {"wait", "thread_id", "with_components"}:
+        raise ValueError("Adres webhooka zawiera nieobsługiwane parametry. Dozwolone: wait, thread_id, with_components.")
+    thread = query.get("thread_id")
+    if thread and (len(thread) != 1 or not re.fullmatch(r"[0-9]+", thread[0])):
+        raise ValueError("Parametr thread_id musi zawierać jeden liczbowy identyfikator wątku Discord.")
+    # wait ustawiamy sami przy wysyłce; raport nie używa components.
+    host = "discord.com" if url.hostname == "discordapp.com" else url.hostname
+    return urlunsplit((
+        "https", host, f"/api/webhooks/{match[1]}/{match[2]}",
+        urlencode({"thread_id": thread[0]}) if thread else "", "",
+    ))
 
 
 def unique_targets(targets: list[dict[str, str]]) -> list[dict[str, str]]:

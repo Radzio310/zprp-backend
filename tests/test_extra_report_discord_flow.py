@@ -10,7 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import Column, DateTime, Integer, JSON, MetaData, String, Table, create_engine
 
 from app import extra_reports as reports
@@ -202,3 +204,80 @@ async def test_invalid_webhook_cannot_erase_existing_configuration(report_db):
         )]), ACTOR)
     assert error.value.status_code == 422
     assert (await reports.list_recipients(ACTOR)).groups[0].name == "II liga"
+
+
+@pytest.fixture
+async def report_client(report_db):
+    # Pełny HTTP/JSON/Pydantic, bez importu main.py uruchamiającego produkcyjną DB.
+    app = FastAPI()
+    app.include_router(reports.router)
+    app.include_router(reports.admin_router)
+    app.dependency_overrides[reports.proel_actor] = lambda: ACTOR
+
+    @app.exception_handler(HTTPException)
+    async def production_error_envelope(request, exc):
+        # main.py oddaje HTTPException w `error`, nie w standardowym `detail`.
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        yield client
+
+
+@pytest.mark.parametrize("url", [
+    URL, URL.replace("discord.com/api/", "discordapp.com/api/v10/"),
+    URL + "?wait=true", URL + "?with_components=true", URL + "?thread_id=42",
+    "https://discord.com/api/webhooks/2345678901234567890/" + "aB9_" * 17 + "--",
+])
+async def test_group_save_over_http_accepts_full_url(report_client, url):
+    body = {"groups": [{
+        "name": "Superliga", "categories": ["SPM", "SPK", "OSM", "OSK", "SM", "SK"],
+        "emails": ["first@test.pl", "second@test.pl"], "discordWebhookUrl": url,
+    }]}
+    response = await report_client.put("/admin/extra-report/recipients", json=body)
+    assert response.status_code == 200
+    group = response.json()["groups"][0]
+    assert group["discordWebhookUrl"] == reports.normalize_webhook_url(url)
+    assert group["emails"] == body["groups"][0]["emails"]
+    # Edycja istniejącej grupy zwraca do serwera również id.
+    again = await report_client.put("/admin/extra-report/recipients", json=response.json())
+    assert again.status_code == 200
+    reports.send_report_copies.assert_not_called()  # sam zapis nie wysyła na Discord
+
+
+async def test_http_422_explains_field_and_keeps_previous_groups(report_client, report_db, caplog):
+    await seed(report_db)
+    response = await report_client.put("/admin/extra-report/recipients", json={"groups": [{
+        "name": "Superliga", "emails": ["first@test.pl"], "discordWebhookUrl": URL + "?thread_id=bad",
+    }]})
+    assert response.status_code == 422
+    error = response.json()["error"][0]
+    assert error["loc"] == ["body", "groups", 0, "discordWebhookUrl"]
+    assert "thread_id" in error["msg"]
+    assert "test_token" not in response.text + caplog.text
+    assert "Extra report webhook rejected" in caplog.text
+    assert (await reports.list_recipients(ACTOR)).groups[0].name == "II liga"
+
+
+async def test_http_model_validation_uses_detail_envelope(report_client, caplog):
+    response = await report_client.put("/admin/extra-report/recipients", json={"groups": [{
+        "name": "Superliga", "categories": "OSM", "discordWebhookUrl": URL,
+    }]})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "groups", 0, "categories"]
+    assert "Extra report config validation rejected" in caplog.text
+    assert "categories" in caplog.text
+    assert "test_token" not in caplog.text
+
+
+async def test_province_save_over_http_and_invalid_url_preserves_state(report_client, caplog):
+    path = "/admin/extra-report/province-recipients"
+    body = {"provinces": [{"province": "SLASKIE", "emails": [], "discordWebhookUrl": URL}]}
+    response = await report_client.put(path, json=body)
+    assert response.status_code == 200
+    body["provinces"][0]["discordWebhookUrl"] = "test_token"
+    rejected = await report_client.put(path, json=body)
+    assert rejected.status_code == 422
+    assert rejected.json()["error"][0]["loc"] == ["body", "provinces", 0, "discordWebhookUrl"]
+    assert "test_token" not in rejected.text + caplog.text
+    stored = await report_client.get(path)
+    assert stored.json()["provinces"][0]["discordWebhookUrl"] == URL

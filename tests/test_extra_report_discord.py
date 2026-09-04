@@ -33,6 +33,7 @@ def test_normalization_deduplicates_alias_version_wait_and_keeps_thread():
     assert discord.normalize_webhook_url("  ") == ""
     alias = URL.replace("discord.com/api/", "discordapp.com/api/v10/") + "/?wait=false"
     assert discord.normalize_webhook_url(alias) == URL
+    assert discord.normalize_webhook_url(URL + "?with_components=true&wait=false") == URL
     assert discord.unique_targets([
         {"url": URL, "name": "II liga"},
         {"url": alias, "name": "SLASKIE"},

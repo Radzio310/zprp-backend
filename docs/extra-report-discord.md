@@ -88,6 +88,24 @@ Nowy klient przesyła `category` i `localOnly` do endpointu generowania PDF.
 Starszy backend zignoruje nowe pola; nowa aplikacja toleruje brak `discord`
 w odpowiedzi. Starszy klient na nowym backendzie generuje plik bez kopii Discord.
 
+## Diagnostyka zapisu 422
+
+Sam wpis `PUT /admin/extra-report/recipients ... 422` nie wskazuje przyczyny.
+Zapis konfiguracji nie wysyła niczego na Discord, więc nie jest to odpowiedź
+Discorda na próbę wysłania PDF. Błąd może dotyczyć dowolnej grupy w przesłanej
+liście albo kształtu całego żądania, nie tylko właśnie edytowanego webhooka.
+
+Panel odczytuje zarówno `error` (koperta HTTPException z `main.py`), jak i
+`detail` (walidacja FastAPI), a komunikat zostaje przy przycisku zapisu.
+Backend loguje `Extra report webhook rejected` z przyczyną walidacji URL lub
+`Extra report config validation rejected` z polem i typem błędu modelu.
+Żaden z tych wpisów nie zawiera tokena, body ani wejściowych wartości pól.
+Nieudany zapis nie usuwa poprzedniej konfiguracji.
+
+Pełny adres Discord z liczbowym ID i tokenem jest obsługiwany także z wersją
+API oraz parametrami `wait`, `thread_id` i `with_components`. Ostatni parametr
+nie wpływa na raport bez komponentów; `wait=true` ustawiamy przy wysyłce PDF.
+
 ## Testy bez zewnętrznych wysyłek
 
 ```sh
