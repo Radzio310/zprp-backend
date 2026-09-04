@@ -47,7 +47,8 @@ MIN_SIMILARITY_GENERAL = 0.20
 
 class AgentQueryRequest(BaseModel):
     messages: List[ChatMessage]
-    model: Optional[str] = "llama-3.1-8b-instant"
+    # Podpowiedz, nie rozkaz - wygaszone nazwy backend podmienia sam.
+    model: Optional[str] = None
     temperature: float = 0.2
     # limit długości odpowiedzi
     max_tokens: int = 2048
@@ -432,7 +433,7 @@ async def agent_query(payload: AgentQueryRequest):
 
         reply = await groq_chat_completion(
             messages=groq_messages,
-            model=payload.model or "llama-3.1-8b-instant",
+            model=payload.model,  # o modelu decyduje groq_client.resolve_model
             temperature=effective_temperature,
             max_tokens=payload.max_tokens or 2048,
         )
@@ -469,7 +470,7 @@ async def agent_query(payload: AgentQueryRequest):
 
         reply = await groq_chat_completion(
             messages=groq_messages,
-            model=payload.model or "llama-3.1-8b-instant",
+            model=payload.model,  # o modelu decyduje groq_client.resolve_model
             temperature=effective_temperature,
             max_tokens=payload.max_tokens or 2048,
         )
@@ -699,7 +700,7 @@ async def agent_query(payload: AgentQueryRequest):
 
         reply = await groq_chat_completion(
             messages=groq_messages,
-            model=payload.model or "llama-3.1-8b-instant",
+            model=payload.model,  # o modelu decyduje groq_client.resolve_model
             temperature=effective_temperature,
             max_tokens=payload.max_tokens or 2048,
         )
@@ -748,7 +749,7 @@ async def agent_query(payload: AgentQueryRequest):
 
     reply = await groq_chat_completion(
         messages=groq_messages,
-        model=payload.model or "llama-3.1-8b-instant",
+        model=payload.model,  # o modelu decyduje groq_client.resolve_model
         temperature=effective_temperature,
         max_tokens=payload.max_tokens or 2048,
     )
