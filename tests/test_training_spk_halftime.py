@@ -117,6 +117,16 @@ class TestSiodemki:
 
 
 class TestStanNaPrzerwie:
+    def test_kontenery_serii_karnych_sa_puste_a_nie_none(self):
+        # Ekran meczu czyta ``penaltyShots.host`` w pierwszym renderze -
+        # ``None`` wywracał moduł stolikowy przy wejściu w skrót nagrania.
+        st = state_after_first_half(blob())
+        assert st["penaltyShots"] == {"host": [], "guest": []}
+        assert st["penaltyScores"] == {"host": 0, "guest": 0}
+        assert st["penaltyResults"] == {"host": [None] * 5, "guest": [None] * 5}
+        assert st["activeTeamTimeout"] == {"host": False, "guest": False}
+        assert st["penaltyShootoutScoreLabel"] is None
+
     def test_zegar_stoi_na_koncu_pierwszej_polowy(self):
         st = state_after_first_half(blob())
         assert st["mainTime"] == HALF
@@ -154,8 +164,8 @@ class TestStanNaPrzerwie:
     def test_seria_karnych_znika_w_calosci(self):
         st = state_after_first_half(blob())
         assert st["penaltyShootoutFinished"] is False
-        assert st["penaltyShootoutScoreLabel"] == ""
-        assert st["penaltyShots"] is None
+        assert st["penaltyShootoutScoreLabel"] is None
+        assert st["penaltyShots"] == {"host": [], "guest": []}
 
     def test_stos_cofania_startuje_pusty(self):
         # Sędzia nie wpisywał pierwszej połowy, więc nie ma czego cofać.
@@ -167,6 +177,58 @@ class TestStanNaPrzerwie:
     def test_sklady_ida_bez_zmian(self):
         st = state_after_first_half(blob())
         assert st["hostPlayerStats"] == [{"number": 16, "goals": 9}]
+
+    def test_rubryki_kar_z_drugiej_polowy_znikaja_ze_skladow(self):
+        # Z terenu (SPK/1): zawodniczka 17 miała I 25:56 i II 37:27, a 7 - I
+        # 49:04. Na przerwie aplikacja odbudowała z tych rubryk AKTYWNE kary
+        # z 49. minuty i pokazała je jako trwające.
+        st = state_after_first_half(
+            blob(
+                hostPlayerStats=[
+                    {"number": 17, "goals": 1, "warning": "9'", "penalty1": "25:56", "penalty2": "37:27"},
+                    {"number": 7, "goals": 0, "penalty1": "49:04"},
+                    {"number": 3, "goals": 5, "warning": "41'", "disqualification": "55:10", "hasRedCard": True},
+                ]
+            )
+        )
+        by = {p["number"]: p for p in st["hostPlayerStats"]}
+        assert by[17]["penalty1"] == "25:56" and by[17]["penalty2"] == ""
+        assert by[17]["warning"] == "9'"
+        assert by[7]["penalty1"] == ""
+        assert by[3]["warning"] == "" and by[3]["disqualification"] == ""
+        assert by[3]["hasRedCard"] is False
+
+    def test_wykluczenia_dosuwaja_sie_do_poczatku(self):
+        # Pierwsze z II połowy, drugie z I (zapis po korekcie kolejności):
+        # zostaje jedno i ma być „pierwszym", inaczej aplikacja czyta
+        # dyskwalifikację z numeru rubryki.
+        st = state_after_first_half(
+            blob(guestPlayerStats=[{"number": 9, "goals": 0, "penalty1": "44:00", "penalty2": "12:00", "penalty3": "58:00"}])
+        )
+        p = st["guestPlayerStats"][0]
+        assert (p["penalty1"], p["penalty2"], p["penalty3"]) == ("12:00", "", "")
+
+    def test_rubryka_bez_czasu_zostaje(self):
+        st = state_after_first_half(blob(hostPlayerStats=[{"number": 5, "goals": 0, "warning": "tak"}]))
+        assert st["hostPlayerStats"][0]["warning"] == "tak"
+
+    def test_sankcje_osob_towarzyszacych_z_drugiej_polowy_znikaja(self):
+        st = state_after_first_half(
+            blob(
+                matchConfig={
+                    "matchNumber": "SPK/1",
+                    "halfTime": 30,
+                    "hostCompanions": [
+                        {"id": "A", "warned": True, "warningTime": "51:51"},
+                        {"id": "B", "warned": True, "warningTime": "12:00", "twoMinutes": True, "penaltyTimes": ["52:12"]},
+                    ],
+                }
+            )
+        )
+        comps = {c["id"]: c for c in st["matchConfig"]["hostCompanions"]}
+        assert comps["A"]["warned"] is False and comps["A"]["warningTime"] == ""
+        assert comps["B"]["warned"] is True
+        assert comps["B"]["twoMinutes"] is False and comps["B"]["penaltyTimes"] == []
 
     def test_pusty_dokument_nie_wywraca(self):
         st = state_after_first_half({})

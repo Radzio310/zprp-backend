@@ -402,6 +402,24 @@ spk_run = Table(
     Index("ix_spk_run_province_score", "province", "score"),
 )
 
+# `spk_settings` - ustawienia sprawdzianu, które NIE wynikają z wzorca:
+# adresy nagrań (pełnego i skrótu). Jeden wiersz JSONB, jak `training_event`,
+# bo to ustawienie, którego kształt jeszcze urośnie.
+spk_settings = Table(
+    "spk_settings",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("updated_by", String, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
 # 11) Zgłoszenia od userów
 user_reports = Table(
   "user_reports", metadata,

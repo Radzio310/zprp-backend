@@ -32,7 +32,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 
-from app.db import database, saved_matches, spk_reference, spk_run
+from app.db import database, saved_matches, spk_reference, spk_run, spk_settings
 from app.proel_auth import Actor, is_admin, proel_actor
 from app.spk_pdf_link import create_pdf_token, token_expires_at, verify_pdf_token
 from app.training_spk_score import grade, score_run
@@ -44,6 +44,7 @@ from app.training_spk_meta import meta_from_blob
 from app.training_spk_report import report_context
 from app.training_spk_shootout import shootout_shots
 from app.training_spk_slides import action_text, format_clock, slides_from_timeline
+from app.training_spk_video import video_clock
 from app.zprp_accounts import normalize_province
 
 logger = logging.getLogger(__name__)
@@ -335,7 +336,91 @@ async def brief(
             )
         else:
             out["startState"] = state_after_first_half(blob)
+        # Kotwice zegara: same pary czasów, bez treści zdarzeń - patrz
+        # `training_spk_video.py`. Bramki dociągane do sekundy ze wzorca.
+        out["videoClock"] = video_clock(ref["timeline"] or [])
+    # Adresy nagrań nie są kluczem odpowiedzi - idą w każdym trybie, a
+    # ekran startowy pokazuje ten właściwy dla wybranej drogi.
+    out["videoLinks"] = await video_links()
     return out
+
+
+# ─────────────────────────── nagrania ───────────────────────────
+
+#: Adres skrótu z chwili wdrożenia. Zmienia go administrator w panelu;
+#: ten wpis obowiązuje tylko dopóki w bazie nic nie ma.
+DEFAULT_VIDEO_LINKS: Dict[str, str] = {
+    "full": "",
+    "condensed": "https://iframe.mediadelivery.net/play/431457/7fcafe9d-84aa-4c69-aa6f-e04cadfaccc6",
+}
+
+
+async def video_links() -> Dict[str, str]:
+    """Adresy nagrań: z bazy, a gdy jej brak - domyślne."""
+    links = dict(DEFAULT_VIDEO_LINKS)
+    try:
+        row = await database.fetch_one(
+            select(spk_settings.c.payload).order_by(spk_settings.c.id.desc()).limit(1)
+        )
+    except Exception:  # noqa: BLE001 - brak tabeli nie może zabrać briefu
+        logger.warning("spk_settings: odczyt nieudany", exc_info=True)
+        return links
+    payload = (dict(row).get("payload") if row else None) or {}
+    stored = payload.get("videoLinks") if isinstance(payload, dict) else None
+    if isinstance(stored, dict):
+        for key in ("full", "condensed"):
+            if key in stored:
+                links[key] = str(stored.get(key) or "").strip()
+    return links
+
+
+class VideoLinksIn(BaseModel):
+    full: str = ""
+    condensed: str = ""
+
+
+def _clean_link(value: str, label: str) -> str:
+    text = (value or "").strip()
+    if text and not (text.startswith("https://") or text.startswith("http://")):
+        raise HTTPException(400, f"Adres nagrania ({label}) musi zaczynać się od https://.")
+    return text
+
+
+@router.get("/video-links", summary="Adresy nagrań sprawdzianu")
+async def get_video_links(actor: Actor = Depends(proel_actor)) -> Dict[str, Any]:
+    return {"ok": True, "links": await video_links()}
+
+
+@admin_router.put("/video-links", summary="Zapis adresów nagrań (administrator)")
+async def put_video_links(
+    body: VideoLinksIn, actor: Actor = Depends(proel_actor)
+) -> Dict[str, Any]:
+    await _require_admin(actor)
+    links = {
+        "full": _clean_link(body.full, "cały mecz"),
+        "condensed": _clean_link(body.condensed, "skrót"),
+    }
+    existing = await database.fetch_one(
+        select(spk_settings.c.id, spk_settings.c.payload)
+        .order_by(spk_settings.c.id.desc())
+        .limit(1)
+    )
+    if existing:
+        row = dict(existing)
+        payload = dict(row.get("payload") or {})
+        payload["videoLinks"] = links
+        await database.execute(
+            spk_settings.update()
+            .where(spk_settings.c.id == row["id"])
+            .values(payload=payload, updated_by=actor.judge_id)
+        )
+    else:
+        await database.execute(
+            spk_settings.insert().values(
+                payload={"videoLinks": links}, updated_by=actor.judge_id
+            )
+        )
+    return {"ok": True, "links": links}
 
 
 class RunIn(BaseModel):

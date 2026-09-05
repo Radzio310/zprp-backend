@@ -28,6 +28,14 @@
 # CZEGO ŚWIADOMIE NIE PRZELICZAMY. Bramek przy nazwiskach - aplikacja wylicza
 # je z protokołu sama (`resolvePlayerGoalsFromProtocol`), więc przeliczanie ich
 # tutaj byłoby drugim źródłem prawdy i pierwszą okazją do rozjazdu.
+#
+# CO NATOMIAST MUSIMY PRZYCIĄĆ W SKŁADACH: rubryki kar przy nazwiskach
+# (`penalty1..3`, `disqualification`, `penaltyExtra` z czasem „MM:SS" i
+# `warning` z minutą „9'") oraz sankcje osób towarzyszących. Aplikacja
+# odbudowuje z tych rubryk kafelki kar na boisku (`buildTilesFromStats`),
+# więc kara z 49. minuty przepuszczona w kolumnie wracała jako AKTYWNA kara
+# na przerwie, a trzecie wykluczenie z drugiej połowy stawało się
+# dyskwalifikacją, zanim sędzia zaczął ćwiczyć.
 
 from __future__ import annotations
 
@@ -112,6 +120,108 @@ def _first_half_warnings(tiles: Any, half_ms: int) -> List[Dict[str, Any]]:
         if digits and int(digits) >= limit:
             continue
         out.append(t)
+    return out
+
+
+def _time_text_ms(raw: Any) -> Optional[int]:
+    """Czas z rubryki protokołu w milisekundach.
+
+    Rubryki kar niosą „MM:SS", upomnienia „9'", a starsze zapisy samą minutę.
+    Nierozpoznany zapis daje ``None`` - wołający decyduje, co z nim zrobić.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if ":" in text:
+        mm, _, ss = text.partition(":")
+        mm_digits = "".join(ch for ch in mm if ch.isdigit())
+        ss_digits = "".join(ch for ch in ss if ch.isdigit())
+        if not mm_digits:
+            return None
+        return (int(mm_digits) * 60 + (int(ss_digits) if ss_digits else 0)) * 1000
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return int(digits) * 60_000 if digits else None
+
+
+def _keep_time(raw: Any, half_ms: int) -> bool:
+    """Czy rubryka z czasem należy do pierwszej połowy.
+
+    Rubryka bez rozpoznawalnego czasu ZOSTAJE - to ten sam wybór, co przy
+    upomnieniach: sankcja zgubiona po cichu jest gorsza niż sankcja o minutę
+    za daleko.
+    """
+    ms = _time_text_ms(raw)
+    return ms is None or ms < half_ms
+
+
+#: Rubryki zawodnika z czasem sankcji.
+_PLAYER_TIME_FIELDS = (
+    "warning",
+    "penalty1",
+    "penalty2",
+    "penalty3",
+    "disqualification",
+    "disqualificationDesc",
+    "penaltyExtra",
+)
+
+
+def _first_half_player_stats(stats: Any, half_ms: int) -> List[Any]:
+    """Składy z rubrykami kar przyciętymi do pierwszej połowy.
+
+    Wykluczenia są numerowane KOLEJNOŚCIĄ, nie czasem: po odcięciu drugiego
+    trzecie nie może zostać „trzecim", bo aplikacja czyta z tego numeru
+    dyskwalifikację. Zachowane wykluczenia dosuwamy więc do początku.
+    """
+    if not isinstance(stats, list):
+        return []
+    out: List[Any] = []
+    for p in stats:
+        if not isinstance(p, dict):
+            continue
+        q = dict(p)
+        for key in _PLAYER_TIME_FIELDS:
+            if key in q and not _keep_time(q.get(key), half_ms):
+                q[key] = ""
+        kept = [q.get(k) for k in ("penalty1", "penalty2", "penalty3") if q.get(k)]
+        for idx, key in enumerate(("penalty1", "penalty2", "penalty3")):
+            if key in q or idx < len(kept):
+                q[key] = kept[idx] if idx < len(kept) else ""
+        if "hasRedCard" in q:
+            q["hasRedCard"] = bool(q.get("disqualification") or q.get("disqualificationDesc"))
+        out.append(q)
+    return out
+
+
+def _first_half_companions(companions: Any, half_ms: int) -> Any:
+    """Osoby towarzyszące: flagi sankcji zostają tylko z czasem z pierwszej połowy.
+
+    Flaga bez czasu (starszy zapis) zostaje - jak wszędzie tu, brak znacznika
+    nie jest dowodem na drugą połowę.
+    """
+    if not isinstance(companions, list):
+        return companions
+    out: List[Any] = []
+    for c in companions:
+        if not isinstance(c, dict):
+            continue
+        q = dict(c)
+        if "warningTime" in q and not _keep_time(q.get("warningTime"), half_ms):
+            q["warningTime"] = ""
+            q["warned"] = False
+        if "redTime" in q and not _keep_time(q.get("redTime"), half_ms):
+            q["redTime"] = ""
+            q["red"] = False
+        if "redBlueTime" in q and not _keep_time(q.get("redBlueTime"), half_ms):
+            q["redBlueTime"] = ""
+            q["redBlue"] = False
+        times = q.get("penaltyTimes")
+        if isinstance(times, list):
+            kept = [t for t in times if _keep_time(t, half_ms)]
+            q["penaltyTimes"] = kept
+            if not kept and len(times) > 0:
+                q["twoMinutes"] = False
+        out.append(q)
     return out
 
 
@@ -255,8 +365,13 @@ def state_after_first_half(
         else {"host": 0, "guest": 0}
     )
 
+    config = config_without_signatures(blob.get("matchConfig"))
+    for key in ("hostCompanions", "guestCompanions"):
+        if key in config:
+            config[key] = _first_half_companions(config.get(key), half_ms)
+
     state: Dict[str, Any] = {
-        "matchConfig": config_without_signatures(blob.get("matchConfig")),
+        "matchConfig": config,
         # ── zegar ──
         "mainTime": half_ms,
         "breakTime": 0,
@@ -280,19 +395,25 @@ def state_after_first_half(
         "warningTiles": _first_half_warnings(blob.get("warningTiles"), half_ms),
         "goalHistory": _first_half_goal_history(blob.get("goalHistory"), half_ms),
         # ── składy ──
-        # Bez zmian: bramki przy nazwiskach wylicza aplikacja z protokołu.
-        "hostPlayerStats": blob.get("hostPlayerStats") or [],
-        "guestPlayerStats": blob.get("guestPlayerStats") or [],
+        # Bramki przy nazwiskach wylicza aplikacja z protokołu; rubryki kar
+        # przycinamy tutaj, bo z nich aplikacja odbudowuje kary na boisku.
+        "hostPlayerStats": _first_half_player_stats(blob.get("hostPlayerStats"), half_ms),
+        "guestPlayerStats": _first_half_player_stats(blob.get("guestPlayerStats"), half_ms),
         # ── rzeczy, których na przerwie nie ma ──
-        "penaltyScores": None,
-        "penaltyResults": None,
+        # STAN POCZĄTKOWY, NIE ``None``. Ekran meczu wznawia te kontenery
+        # wprost (``setPenaltyShots(saved.penaltyShots)``) i pierwszy render
+        # czyta ``penaltyShots.host``. ``None`` w tym miejscu wywracał cały
+        # moduł stolikowy przy wejściu w skrót nagrania. Kształty są dokładnie
+        # takie, z jakimi ekran startuje sam.
+        "penaltyScores": {"host": 0, "guest": 0},
+        "penaltyResults": {"host": [None] * 5, "guest": [None] * 5},
         "currentPenaltyRound": 0,
-        "penaltyShots": None,
+        "penaltyShots": {"host": [], "guest": []},
         "penaltyStarterTeam": None,
         "penaltyShootoutActive": False,
         "penaltyShootoutFinished": False,
-        "penaltyShootoutScoreLabel": "",
-        "activeTeamTimeout": False,
+        "penaltyShootoutScoreLabel": None,
+        "activeTeamTimeout": {"host": False, "guest": False},
         "activeTimeoutTeam": None,
         # Cofanie zaczyna się od zera: sędzia nie ma prawa cofać cudzych
         # zdarzeń z pierwszej połowy, bo ich nie wpisywał.
