@@ -11,6 +11,7 @@ Testy pilnują trzech rzeczy, których nie widać po samym otwarciu pliku:
   • każda strona uwag dostaje własny nagłówek, więc numeracja „Strona X/Y"
     ma gdzie usiąść.
 """
+import pytest
 from openpyxl import Workbook
 
 from app.results import (
@@ -27,12 +28,12 @@ REF1 = "WITKOWICZ Radosław"
 REF2 = "WITKOWICZ Krzysztof"
 
 
-def _build(text: str):
+def _build(text: str, *, place: str = "Mysłowice", date_ddmmyyyy: str = "20.08.2026"):
     wb = Workbook()
     ws, header_rows = _create_detailed_notes_sheet(
         wb,
-        date_ddmmyyyy="20.08.2026",
-        place="Mysłowice",
+        date_ddmmyyyy=date_ddmmyyyy,
+        place=place,
         notes_text=text,
         referee1_name=REF1,
         referee2_name=REF2,
@@ -103,11 +104,22 @@ def test_kazda_strona_ma_wlasny_naglowek():
 
     for row in header_rows:
         assert ws.cell(row=row, column=1).value == "Strona"
-        assert ws.cell(row=row, column=7).value == "20.08.2026, Mysłowice"
+        assert ws.cell(row=row, column=7).value == "Mysłowice, 20.08.2026"
         # Data kończy się na tej samej krawędzi co opis, czyli na kolumnie N.
         assert any(
             str(rng) == "G%d:N%d" % (row, row) for rng in ws.merged_cells.ranges
         )
+
+
+@pytest.mark.parametrize("place,date_ddmmyyyy,expected", [
+    ("Mysłowice", "20.08.2026", "Mysłowice, 20.08.2026"),
+    ("Mysłowice", "", "Mysłowice"),
+    ("", "20.08.2026", "20.08.2026"),
+    ("", "", ""),
+])
+def test_naglowek_miejscowosc_przed_data_bez_zbednego_przecinka(place, date_ddmmyyyy, expected):
+    ws, header_rows = _build("Krótka uwaga.", place=place, date_ddmmyyyy=date_ddmmyyyy)
+    assert ws.cell(row=header_rows[0], column=7).value == expected
 
 
 def test_blok_podpisow_nie_wisi_na_krawedzi_strony():

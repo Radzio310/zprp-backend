@@ -515,3 +515,122 @@ def apply_known_swaps(
         out[id_field] = str(swap.get("to_judge_id") or "").strip()
         out[name_field] = str(swap.get("to_name") or "").strip()
     return out
+
+
+# ── Żywa obsada ─────────────────────────────────────────────────────────────
+#
+# Migawka terminarza jest PAMIĘCIĄ, nie prawdą. Wypełnia ją monitor w swoim
+# rytmie, a mecz bez daty nie łapie się na żaden z szybkich przebiegów - jego
+# obsada w migawce potrafi być sprzed godzin. Sędzia widział przez to na liście
+# „Oddaj mecz" spotkanie, z którego okręg zdążył go już zdjąć, a nie widział
+# tego, które właśnie dostał. Dlatego lista i bramka wystawienia pytają o
+# obsadę bazę związku W TEJ CHWILI (publiczne API po numerze meczu), a migawka
+# zostaje wyłącznie na wypadek, gdy związek nie odpowie - i wtedy MÓWI, że to
+# ostatni znany stan.
+#
+# Tu mieszkają same granice i porządek tego pytania; sieć jest w module giełdy.
+
+#: Ile meczów jedno otwarcie arkusza sprawdza w bazie związku.
+#:
+#: Sędzia ma w sezonie kilkadziesiąt meczów, ale tylko część przed sobą; sześć
+#: dziesiątek mieści każdy realny terminarz. Reszta dostaje ostatni znany stan
+#: z podpisem - limit, którego nie widać, wygląda jak komplet.
+LIVE_CREW_LIMIT = 60
+
+#: Ile sekund łącznie czekamy na odpowiedzi publicznego API.
+#:
+#: Otwarcie arkusza ma być chwilą, nie postojem: po tym czasie to, co doszło,
+#: jest żywe, a reszta wraca z migawki jako „ostatni znany stan".
+LIVE_CREW_BUDGET_SECONDS = 12.0
+
+#: Ile sekund ma jedna odpowiedź. Monitor czeka pół minuty, bo jemu wolno;
+#: tutaj po drugiej stronie stoi człowiek z otwartym ekranem.
+LIVE_CREW_REQUEST_SECONDS = 8.0
+
+#: Jak długo świeżo sprawdzona obsada uchodzi za aktualną.
+#:
+#: Arkusz woła serwer dwa razy pod rząd - szybko po listę i zaraz potem po
+#: werdykty okręgu. Drugie wołanie nie ma pytać związku od nowa o to samo.
+#: Półtorej minuty pokrywa oba, a nie zasłania zmiany, o którą sędzia wróci
+#: zapytać za kwadrans.
+LIVE_CREW_TTL_SECONDS = 90
+
+#: Podpis meczu, którego obsady NIE udało się sprawdzić na żywo.
+LIVE_CREW_NOTE = (
+    "Nie udało się sprawdzić obsady w bazie związku - to ostatni znany stan."
+)
+
+#: Ile numerów meczów przyjmujemy z telefonu w jednym zapytaniu.
+#:
+#: Lokalna lista sędziego ma sezon, nie tydzień; dwie setki mieszczą ją całą,
+#: a odcinają zapytanie, które nie przyszło z aplikacji.
+APP_MATCH_IDS_LIMIT = 200
+
+
+def clean_match_ids(raw: Any, limit: int = APP_MATCH_IDS_LIMIT) -> List[str]:
+    """Numery meczów z telefonu, oczyszczone: same cyfry, bez powtórek, po kolei.
+
+    Kolejność ZOSTAJE, bo aplikacja przysyła najbliższe najpierw, a limit
+    sprawdzeń na żywo tnie od końca. Cokolwiek innego niż lista cyfr to śmieć,
+    nie błąd: brak numeru nic nie psuje, serwer ma jeszcze własną migawkę.
+    """
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Iterable):
+        return []
+    out: List[str] = []
+    seen: Set[str] = set()
+    for item in raw:
+        value = str(item or "").strip()
+        if not value.isdigit() or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+        if len(out) >= max(0, int(limit)):
+            break
+    return out
+
+
+def crew_is_fresh(
+    checked_at: Optional[datetime],
+    now: datetime,
+    ttl_seconds: object = LIVE_CREW_TTL_SECONDS,
+) -> bool:
+    """Czy obsadę z migawki wolno podać jako żywą bez pytania związku.
+
+    Świeżość znaczy „głębokie sprawdzenie publicznym API przed chwilą" - to
+    samo pytanie, które zadalibyśmy teraz, więc odpowiedź jest ta sama. Brak
+    znacznika to brak świeżości; znacznik z przyszłości (zegary baz) uchodzi za
+    świeży, jak przy werdyktach uprawnień.
+    """
+    if checked_at is None:
+        return False
+    try:
+        seconds = max(0, int(ttl_seconds))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        seconds = LIVE_CREW_TTL_SECONDS
+    if seconds <= 0:
+        return False
+    return checked_at + timedelta(seconds=seconds) > now
+
+
+def live_check_order(
+    app_ids: Iterable[object],
+    held_ids: Iterable[object],
+    limit: int = LIVE_CREW_LIMIT,
+) -> List[str]:
+    """Które mecze sprawdzić na żywo i w jakiej kolejności.
+
+    Najpierw to, co sędzia ma na telefonie - to jest lista, którą widzi i o
+    którą pyta. Potem to, co migawka uważa za jego - łapie mecz, którego
+    telefon jeszcze nie pobrał. Bez powtórek, obcięte do `limit`, bo każdy
+    numer to osobne wejście na serwer związku.
+    """
+    out: List[str] = []
+    seen: Set[str] = set()
+    for source in (app_ids, held_ids):
+        for item in source:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+    return out[: max(0, int(limit))]

@@ -12,6 +12,10 @@ from datetime import datetime, timedelta, timezone
 from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
     CREW_STATE_FIELDS,
+    LIVE_CREW_TTL_SECONDS,
+    clean_match_ids,
+    crew_is_fresh,
+    live_check_order,
     apply_known_swaps,
     crew_judge_ids,
     with_slot_holder,
@@ -550,3 +554,35 @@ def test_brak_wymian_zostawia_migawke_w_spokoju():
     assert apply_known_swaps(state, [{"slot": "kibic"}]) == state
     # Kopia, nie zmiana w miejscu.
     assert apply_known_swaps(state, [SWAP]) is not state
+
+
+# ── żywa obsada ─────────────────────────────────────────────────────────────
+
+
+def test_numery_z_telefonu_sa_czyszczone_i_w_kolejnosci():
+    # Kolejność zostaje (najbliższe najpierw), śmieci i powtórki odpadają.
+    assert clean_match_ids(["208137", " 208138 ", "208137", "abc", "", None, 12]) == [
+        "208137",
+        "208138",
+        "12",
+    ]
+    # Napis to nie lista numerów - inaczej "208137" rozsypałby się na cyfry.
+    assert clean_match_ids("208137") == []
+    assert clean_match_ids(None) == []
+    assert clean_match_ids([str(i) for i in range(500)], limit=3) == ["0", "1", "2"]
+
+
+def test_swieze_glebokie_sprawdzenie_nie_pyta_drugi_raz():
+    assert crew_is_fresh(NOW - timedelta(seconds=30), NOW)
+    assert not crew_is_fresh(NOW - timedelta(seconds=LIVE_CREW_TTL_SECONDS + 1), NOW)
+    assert not crew_is_fresh(None, NOW)
+    # Znacznik z przyszłości to zegar bazy, nie błąd.
+    assert crew_is_fresh(NOW + timedelta(seconds=5), NOW)
+    assert not crew_is_fresh(NOW, NOW, ttl_seconds=0)
+    assert crew_is_fresh(NOW - timedelta(seconds=10), NOW, ttl_seconds="zepsute")
+
+
+def test_telefon_ma_pierwszenstwo_a_limit_tnie_od_konca():
+    assert live_check_order(["3", "1"], ["1", "2", "4"], limit=3) == ["3", "1", "2"]
+    assert live_check_order([], ["", None, "5"]) == ["5"]
+    assert live_check_order(["9"], ["9"]) == ["9"]

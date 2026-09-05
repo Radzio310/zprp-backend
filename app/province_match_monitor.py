@@ -552,12 +552,23 @@ async def _create_event(
     return 1
 
 
-async def _fetch_public_details(client: AsyncClient, match_id: str) -> Optional[Dict[str, Any]]:
-    retries = max(0, int(os.getenv("ZPRP_MATCH_MONITOR_DETAIL_RETRIES", "2")))
+async def _fetch_public_details(
+    client: AsyncClient,
+    match_id: str,
+    *,
+    timeout: float = 30.0,
+    retries: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    # `timeout` i `retries` z zewnatrz: monitorowi wolno czekac pol minuty i
+    # probowac trzy razy, ale gielda pyta tym samym API przy OTWARTYM ekranie
+    # sedziego i dostaje krotsza smycz. Domyslne wartosci to dotychczasowe.
+    if retries is None:
+        retries = max(0, int(os.getenv("ZPRP_MATCH_MONITOR_DETAIL_RETRIES", "2")))
+    retries = max(0, int(retries))
     url = "https://rozgrywki.zprp.pl/api/pokaz_mecze_szczegoly.php"
     for attempt in range(retries + 1):
         try:
-            response = await client.get(url, params={"Zawody": match_id}, timeout=30.0)
+            response = await client.get(url, params={"Zawody": match_id}, timeout=timeout)
             if response.status_code in (408, 425, 429, 500, 502, 503, 504) and attempt < retries:
                 await asyncio.sleep(0.4 * (2**attempt))
                 continue

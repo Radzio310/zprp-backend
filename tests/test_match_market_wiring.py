@@ -249,7 +249,9 @@ def test_my_matches_reads_the_district_schedule_not_the_push_list():
 
     Terminarz województwa jest niezależny od tego, kto ma aplikację.
     """
-    source = ast.unparse(FUNCTIONS["my_matches"])
+    # `code_of`, nie `ast.unparse`: opis funkcji mówi wprost, DLACZEGO tej
+    # tabeli tu nie ma - a test szuka nazwy tabeli w kodzie, nie w wyjaśnieniu.
+    source = code_of("my_matches")
     assert "province_matches" in source
     assert "province_match_judges" not in source
     # O tym, który mecz jest mój, rozstrzyga ta sama reguła, co przy wystawianiu.
@@ -515,3 +517,84 @@ def test_every_gate_reads_the_same_corrected_state():
     """
     for name in ("my_matches", "create_offer", "_same_day_matches"):
         assert "apply_known_swaps" in calls_in(name), name
+
+
+# ─────────────────────────── żywa obsada ───────────────────────────
+#
+# Zgłoszone z terenu: mecz, z którego okręg zdjął sędziego w ZPRP, wisiał na
+# liście „Oddaj mecz", a mecz odzyskany wymianą raz był, raz go nie było -
+# „wczoraj mogłem, dziś nie mogę". Migawka terminarza to pamięć monitora, nie
+# prawda; o tym, czy mecz jest mój, rozstrzyga baza związku w chwili pytania.
+
+
+def test_my_matches_has_a_post_route_for_the_phones_list():
+    """Starsza aplikacja woła GET i ma dostać tę samą, żywą odpowiedź."""
+    paths = {(m, p) for m, p, _ in routes()}
+    assert ("get", "/my-matches") in paths
+    assert ("post", "/my-matches") in paths
+    assert "clean_match_ids" in calls_in("post_my_matches")
+    for name in ("get_my_matches", "post_my_matches"):
+        assert "my_matches" in calls_in(name), name
+
+
+def test_the_list_asks_the_union_before_it_answers():
+    assert "_live_crews" in calls_in("my_matches")
+    source = code_of("my_matches")
+    # Migawka wskazuje kandydatów; o wyniku decyduje żywy stan - dlatego
+    # ostatnie `slots_held_by` stoi PO sprawdzeniu, nie przed nim.
+    assert source.index("_live_crews") < source.index("slots_held_by(state")
+    # Wiersz, którego nie udało się sprawdzić, jest podpisany, a ich liczba
+    # wychodzi na zewnątrz - lista bez tego wyglądałaby na komplet prawdy.
+    assert "liveChecked" in source
+    assert "liveFailed" in source
+    assert "LIVE_CREW_NOTE" in source
+
+
+def test_offer_gate_and_list_answer_the_same_question():
+    source = code_of("create_offer")
+    assert "_live_crews" in calls_in("create_offer")
+    assert source.index("_live_crews") < source.index("slots_held_by")
+    # Milczący związek nie jest odmową - zostaje migawka z pamięcią wymian.
+    assert "apply_known_swaps" in calls_in("create_offer")
+    # Mecz, którego okręg nie znał, dostaje wiersz TYLKO za poręczeniem telefonu.
+    assert "vouched={match_id}" in source
+
+
+def test_live_check_is_bounded_and_admits_what_it_skipped():
+    source = code_of("_live_crews")
+    assert "LIVE_CREW_BUDGET_SECONDS" in source
+    assert "LIVE_CREW_REQUEST_SECONDS" in source
+    # Po budżecie reszta pytań jest ODWOŁYWANA, nie dokańczana w tle.
+    assert "task.cancel()" in source
+    assert "LIVE_CREW_LIMIT" in code_of("my_matches")
+
+
+def test_live_check_never_breaks_the_answer_it_serves():
+    """Kopia w migawce to skutek uboczny; odpowiedź dla sędziego nie zależy od niej."""
+    node = FUNCTIONS["_live_crews"]
+    assert any(isinstance(n, ast.Try) for n in ast.walk(node))
+    # Utrwala TA SAMA funkcja, którą pisze monitor - jeden pisarz migawki.
+    assert "_upsert_match" in calls_in("_live_crews")
+
+
+def test_a_phone_cannot_plant_a_match_it_does_not_hold():
+    """Numer z aplikacji to nie dowód; obsada z bazy związku - tak."""
+    source = code_of("_live_crews")
+    # Tak drukuje to `ast.unparse` - z nawiasem wokół zaprzeczenia.
+    assert "match_id not in known and (not (match_id in vouched and holds))" in source
+    assert "seen_in_schedule=match_id in vouched and holds" in source
+
+
+def test_numbers_are_matched_in_the_database_and_scans_are_ordered():
+    source = code_of("my_matches")
+    assert "as_string()" in source
+    assert "by_number" in source
+    # Każde ograniczone zapytanie ma kolejność - limit bez niej tasował listę.
+    assert source.count(".limit(MY_MATCHES_SCAN_LIMIT)") == 2
+    assert source.count(".order_by(") >= 3
+
+
+def test_fresh_deep_checks_are_not_asked_twice():
+    # Arkusz woła serwer dwa razy pod rząd; drugie wołanie nie pyta związku od nowa.
+    assert "crew_is_fresh" in calls_in("my_matches")
+    assert "last_deep_checked_at" in code_of("my_matches")

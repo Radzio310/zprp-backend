@@ -4078,7 +4078,7 @@ def _extract_city_from_venue_address(venue_address: str) -> str:
 
 
 def _notes_place(core: Dict[str, Any]) -> str:
-    """Miejscowość do nagłówka strony uwag: „20.08.2026, Siemianowice Śląskie".
+    """Miejscowość do nagłówka strony uwag: „Siemianowice Śląskie, 20.08.2026".
 
     Kolejność jest tu całą treścią: najpierw to, co związek podał WPROST
     (`Hala_miasto`), a dopiero potem cokolwiek wyciąganego z adresu.
@@ -4096,7 +4096,7 @@ def _notes_place(core: Dict[str, Any]) -> str:
 #: na następną. Wiersze mają różne wysokości (linia tekstu, nazwisko, podpis),
 #: więc liczenie „ile wierszy na stronę" dawało układ zależny od długości opisu.
 _NOTES_LINE_PT = 16.5          # jedna linia opisu (czcionka 12)
-_NOTES_HEADER_PT = 18.0        # wiersz „Strona X/Y" + data i miejscowość
+_NOTES_HEADER_PT = 18.0        # wiersz „Strona X/Y" + miejscowość i data
 _NOTES_HEADER_GAP_PT = 10.0    # odstęp pod nagłówkiem
 _NOTES_TEXT_GAP_PT = 14.0      # odstęp między końcem opisu a podpisami
 _NOTES_NAME_PT = 16.0          # wiersz z nazwiskiem sędziego
@@ -4414,7 +4414,7 @@ def _create_detailed_notes_sheet(
 
     right_hdr = ""
     if date_ddmmyyyy and place:
-        right_hdr = date_ddmmyyyy + ", " + place
+        right_hdr = place + ", " + date_ddmmyyyy
     elif date_ddmmyyyy:
         right_hdr = date_ddmmyyyy
     elif place:

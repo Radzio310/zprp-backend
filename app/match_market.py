@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from httpx import AsyncClient
@@ -75,13 +75,20 @@ from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
     apply_known_swaps,
     DEFAULT_DEADLINE_HOURS,
+    LIVE_CREW_BUDGET_SECONDS,
+    LIVE_CREW_LIMIT,
+    LIVE_CREW_NOTE,
+    LIVE_CREW_REQUEST_SECONDS,
     PROBE_BATCH_LIMIT,
     SLOT_STATE_FIELDS,
     assignability_is_fresh,
     assignability_message,
     can_offer,
+    clean_match_ids,
+    crew_is_fresh,
     crew_judge_ids,
     deadline_for,
+    live_check_order,
     market_pushes_allowed,
     may_claim,
     names_match,
@@ -371,11 +378,13 @@ _PROBE_CONCURRENCY = 3
 #: oddawac, a kazdy dodatkowy tydzien to wiecej stanow meczow do przejrzenia.
 MY_MATCHES_HORIZON_DAYS = 120
 
-#: Ile meczow terminarza przegladamy, szukajac swoich.
+#: Ile wierszy BEZ numerow sedziow przegladamy, szukajac swoich po nazwisku.
 #:
-#: Wojewodztwo rozgrywa w sezonie rzedu kilkuset spotkan; ten limit jest
-#: bezpiecznikiem, a nie miara. Gdyby okazal sie ciasny, lista skroci sie od
-#: konca - czyli od meczow najdalszych, ktorych i tak nie da sie jeszcze oddac.
+#: Wiersze z numerami znajduje samo zapytanie (`->>` po gniazdach), bez limitu.
+#: Ten bezpiecznik dotyczy tylko resztki z lekkiego przebiegu monitora, ktorej
+#: glebokie sprawdzenie jeszcze nie doszlo - garstki, nie terminarza. Zapytania
+#: pod nim maja stala kolejnosc: limit bez `ORDER BY` oddawal ROZNE wiersze przy
+#: kolejnych wolaniach i ten sam mecz raz byl na liscie, raz nie.
 MY_MATCHES_SCAN_LIMIT = 600
 
 
@@ -719,6 +728,104 @@ async def _sync_slot_holder(
         return {}
 
 
+#: Ile pytań do publicznego API idzie naraz przy sprawdzaniu obsady na żywo.
+#:
+#: Szóstka jak w monitorze - ta sama grzeczność wobec tego samego serwera
+#: związku. Przy sześćdziesięciu meczach to dziesięć rund, a odpowiedzi
+#: przychodzą w ułamkach sekundy.
+_LIVE_CONCURRENCY = 6
+
+
+def _row_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Kolumny wiersza terminarza wyliczone z żywego stanu meczu.
+
+    Te same reguły, którymi monitor wypełnia wiersz przy zapisie - inaczej
+    lista liczyłaby próg czasowy od innej daty niż ta, którą właśnie dostała.
+    """
+    # Import lokalny - ten sam powód, co w `_sync_slot_holder`.
+    from app.province_match_monitor import parse_match_at
+
+    return {
+        "match_code": _s(state.get("RozgrywkiCode")) or None,
+        "match_at": parse_match_at(state.get("data_fakt") or state.get("data_prop")),
+        "approved": _s(state.get("protocol_status")) == "approved",
+        "state_json": state,
+    }
+
+
+async def _live_crews(
+    province: str,
+    actor: Actor,
+    bases: Dict[str, Dict[str, Any]],
+    known: Set[str],
+    vouched: Set[str],
+) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    """Obsada TYCH meczów z bazy związku w tej chwili - i jej ślad w migawce.
+
+    `bases` to migawki, na które nakłada się odpowiedź publicznego API tą samą
+    regułą, co w monitorze (`_api_to_state`: puste pole nie kasuje, numer „0"
+    kasuje całą parę). Zwraca żywe stany i numery meczów bez odpowiedzi. Czas
+    jest ograniczony budżetem: co doszło - jest żywe, reszta wraca do migawki
+    i zostaje PODPISANA jako ostatni znany stan. Pytanie o cudzą obsadę przy
+    otwartym ekranie nie ma prawa trwać pół minuty.
+
+    Utrwalenie idzie tą samą funkcją, którą pisze monitor, więc migawka okręgu
+    zdrowieje przy okazji, a obsada dostaje te same powiadomienia, które
+    dostałaby z jego przebiegu - tylko wcześniej. Nowy wiersz powstaje wyłącznie
+    dla meczu, za którym ręczy telefon (`vouched`) I w którym sędzia naprawdę
+    stoi w gnieździe: numer przysłany z aplikacji to nie dowód, obsada z bazy
+    związku - tak. Zapis jest osłonięty: odpowiedź dla sędziego nie zależy od
+    tego, czy kopia się udała.
+    """
+    if not bases:
+        return {}, []
+    # Import lokalny - ten sam powód, co w `_sync_slot_holder`.
+    from app.province_match_monitor import _api_to_state, _fetch_public_details, _upsert_match
+
+    fresh: Dict[str, Dict[str, Any]] = {}
+    semaphore = asyncio.Semaphore(_LIVE_CONCURRENCY)
+
+    async def one(client: AsyncClient, match_id: str, base: Dict[str, Any]) -> None:
+        async with semaphore:
+            payload = await _fetch_public_details(
+                client, match_id, timeout=LIVE_CREW_REQUEST_SECONDS, retries=1
+            )
+        state = _api_to_state(payload or {}, base)
+        if state:
+            fresh[match_id] = state
+
+    async with AsyncClient(follow_redirects=True) as client:
+        tasks = [
+            asyncio.ensure_future(one(client, match_id, base))
+            for match_id, base in bases.items()
+        ]
+        _done, pending = await asyncio.wait(tasks, timeout=LIVE_CREW_BUDGET_SECONDS)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+    failed = [match_id for match_id in bases if match_id not in fresh]
+
+    for match_id, state in fresh.items():
+        holds = bool(slots_held_by(state, actor.judge_id, actor.full_name))
+        if match_id not in known and not (match_id in vouched and holds):
+            continue
+        try:
+            await _upsert_match(
+                province,
+                match_id,
+                state,
+                True,
+                # Lista z telefonu to ta sama prywatna lista sędziego, z której
+                # czyta lekki przebieg - i tak samo jak on ręczy, że mecz żyje.
+                # Sama odpowiedź API takim dowodem nie jest (patrz `_upsert_match`).
+                seen_in_schedule=match_id in vouched and holds,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("giełda: nie udało się utrwalić żywej obsady meczu %s", match_id)
+    return fresh, failed
+
+
 # ─────────────────────────── powiadomienia ───────────────────────────
 
 
@@ -927,7 +1034,7 @@ async def get_context(actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
 
 
 @router.get("/my-matches", summary="Moje najbliższe mecze - co da się oddać")
-async def my_matches(
+async def get_my_matches(
     verify: int = Query(
         0,
         ge=0,
@@ -940,60 +1047,200 @@ async def my_matches(
     actor: Actor = Depends(market_actor),
     settings: Settings = Depends(get_settings),
 ) -> Dict[str, Any]:
+    """Droga starszej aplikacji - bez listy z telefonu.
+
+    Odpowiedź jest ta sama i tak samo żywa; różnica jest jedna: kandydatów do
+    sprawdzenia wskazuje wyłącznie migawka okręgu, więc mecz, o którym okręg
+    jeszcze nie wie, tu nie wejdzie. Nowsza aplikacja domyka to trasą POST.
+    """
+    return await my_matches(actor, settings, bool(verify), [])
+
+
+class MyMatchesRequest(BaseModel):
+    """Lista meczów z telefonu - te, które sędzia widzi w zakładce „Mecze"."""
+
+    match_ids: List[str] = []
+    verify: bool = False
+
+
+@router.post("/my-matches", summary="Moje mecze - razem z listą z telefonu")
+async def post_my_matches(
+    req: MyMatchesRequest,
+    actor: Actor = Depends(market_actor),
+    settings: Settings = Depends(get_settings),
+) -> Dict[str, Any]:
+    return await my_matches(actor, settings, req.verify, clean_match_ids(req.match_ids))
+
+
+async def my_matches(
+    actor: Actor,
+    settings: Settings,
+    verify: bool,
+    app_ids: List[str],
+) -> Dict[str, Any]:
+    """Moje mecze do oddania - obsada sprawdzona w bazie związku W TEJ CHWILI.
+
+    Migawka terminarza to pamięć, nie prawda: wypełnia ją monitor w swoim
+    rytmie, a mecz bez daty nie łapie się na żaden z jego szybkich przebiegów.
+    Sędzia widział przez to na liście spotkanie, z którego okręg zdążył go już
+    zdjąć, a nie widział tego, które właśnie dostał - i za każdym razem „wczoraj
+    działało". Dlatego migawka służy tu tylko do WSKAZANIA kandydatów, a o tym,
+    czy mecz jest mój, rozstrzyga publiczne API po numerze meczu. Gdy związek
+    nie odpowie, wraca ostatni znany stan i jest tak PODPISANY.
+
+    Kandydaci, w tej kolejności:
+
+    * lista z telefonu (`app_ids`) - to, co sędzia widzi i o co pyta;
+    * terminarz okręgu: wiersze z NUMEREM sędziego w którymś z gniazd giełdy
+      (dokładne, bez limitu - sędzia ma kilkadziesiąt meczów, nie tysiące);
+    * wiersze BEZ numerów, czyli z lekkiego przebiegu monitora, gdzie zostaje
+      nazwisko - tych jest garstka, ale sito jest ograniczone bezpiecznikiem.
+
+    Czytamy TERMINARZ okręgu, a nie `province_match_judges`: tamta tabela
+    powstaje z list meczów sędziów z tokenem push, a sędzia, który odmówił
+    powiadomień, nie ma tam ani wiersza. Terminarz województwa jest niezależny
+    od tego, kto ma aplikację.
+    """
     province = _require_province(actor)
     cfg = await _require_enabled(province)
     now = _now()
-
-    # Czytamy TERMINARZ okregu, a nie liste `province_match_judges`.
-    #
-    # Tamta tabela powstaje z listy meczow sedziego, ktora monitor pobiera
-    # wylacznie dla sedziow majacych zarejestrowany token push - a token powstaje
-    # dopiero, gdy ktos zgodzi sie na powiadomienia. Sedzia, ktory odmowil, nie
-    # mial tam ani jednego wiersza i gielda pokazywala mu pusta liste bez slowa
-    # wyjasnienia. Terminarz wojewodztwa jest niezalezny od tego, kto ma
-    # aplikacje: wypelnia go pelny przebieg monitora kontem okregu.
-    #
-    # O tym, ktory mecz jest MOJ, rozstrzyga `slots_held_by` - numer sedziego
-    # przed nazwiskiem, dokladnie jak przy wystawianiu oferty. Dzieki temu lista
-    # i bramka `POST /offers` odpowiadaja na to samo pytanie tak samo.
     horizon = now + timedelta(days=MY_MATCHES_HORIZON_DAYS)
+
+    columns = (
+        province_matches.c.match_id,
+        province_matches.c.match_code,
+        province_matches.c.match_at,
+        province_matches.c.state_json,
+        province_matches.c.approved,
+        province_matches.c.last_deep_checked_at,
+    )
     base_query = (
-        select(
-            province_matches.c.match_id,
-            province_matches.c.match_code,
-            province_matches.c.match_at,
-            province_matches.c.state_json,
-            province_matches.c.approved,
-        )
+        select(*columns)
         .where(province_matches.c.province == province)
         .where(province_matches.c.active.is_(True))
     )
+    in_window = and_(
+        province_matches.c.match_at >= now,
+        province_matches.c.match_at <= horizon,
+    )
+    # `->>` na kolumnie JSONB: numer w gnieździe porównujemy w bazie, nie w
+    # Pythonie po przewinięciu całego terminarza. Wcześniej lista brała
+    # pierwsze sześćset meczów bez daty W DOWOLNEJ KOLEJNOŚCI (bez `ORDER BY`)
+    # i na początku sezonu, gdy dat nie ma prawie nikt, ten sam mecz raz się
+    # łapał, a raz nie - stąd „wczoraj mogłem, dziś nie mogę".
+    slot_numbers = [
+        province_matches.c.state_json[id_field].as_string()
+        for id_field, _name_field in SLOT_STATE_FIELDS.values()
+    ]
+    by_number = or_(*[column == actor.judge_id for column in slot_numbers])
+    numbered_rows = await database.fetch_all(
+        base_query.where(or_(province_matches.c.match_at.is_(None), in_window))
+        .where(by_number)
+        .order_by(province_matches.c.match_at.asc(), province_matches.c.match_id.asc())
+    )
+    # Wiersze bez żadnego numeru - lekki przebieg monitora zna same nazwiska,
+    # a głębokie sprawdzenie jeszcze nie doszło. Nazwisko rozstrzyga niżej,
+    # w `slots_held_by`. Mecze BEZ daty osobnym zapytaniem: w jednym sortowały
+    # się na koniec, więc bezpiecznik LIMIT ucinał właśnie je - a „termin do
+    # ustalenia" to często dokładnie ten mecz, który sędzia chce oddać.
+    without_numbers = and_(*[func.coalesce(column, "") == "" for column in slot_numbers])
     dated_rows = await database.fetch_all(
-        base_query.where(
-            and_(
-                province_matches.c.match_at >= now,
-                province_matches.c.match_at <= horizon,
-            )
-        )
-        .order_by(province_matches.c.match_at.asc())
+        base_query.where(without_numbers)
+        .where(in_window)
+        .order_by(province_matches.c.match_at.asc(), province_matches.c.match_id.asc())
         .limit(MY_MATCHES_SCAN_LIMIT)
     )
-    # Mecze BEZ daty osobnym zapytaniem. W jednym sortowały się na koniec
-    # (`nulls_last`), więc bezpiecznik LIMIT ucinał właśnie JE - wbrew własnemu
-    # opisowi o „meczach najdalszych". A „termin do ustalenia" to często
-    # dokładnie ten mecz, który sędzia chce oddać najwcześniej.
     undated_rows = await database.fetch_all(
-        base_query.where(province_matches.c.match_at.is_(None)).limit(
-            MY_MATCHES_SCAN_LIMIT
-        )
+        base_query.where(without_numbers)
+        .where(province_matches.c.match_at.is_(None))
+        .order_by(province_matches.c.match_code.asc(), province_matches.c.match_id.asc())
+        .limit(MY_MATCHES_SCAN_LIMIT)
     )
-    rows = list(dated_rows) + list(undated_rows)
+    rows: Dict[str, Dict[str, Any]] = {}
+    for raw in list(numbered_rows) + list(dated_rows) + list(undated_rows):
+        data = _row(raw)
+        rows.setdefault(_s(data["match_id"]), data)
+    # Mecze z telefonu, których terminarz wyżej nie wskazał - także wygaszone:
+    # o tym, czy żyją, powie za chwilę baza związku, nie nasz znacznik.
+    phoned = [mid for mid in app_ids if mid not in rows]
+    if phoned:
+        for raw in await database.fetch_all(
+            select(*columns)
+            .where(province_matches.c.province == province)
+            .where(province_matches.c.match_id.in_(phoned))
+        ):
+            data = _row(raw)
+            rows.setdefault(_s(data["match_id"]), data)
 
-    match_ids = [_s(_row(r)["match_id"]) for r in rows]
     # Migawka mówi, co monitor zdążył zobaczyć; ta tabela - co giełda sama
     # zapisała. Bez tego sędzia, który mecz właśnie przejął, nie widział go na
     # liście „Oddaj mecz" do najbliższego przebiegu monitora.
-    swaps = await _applied_swaps(province, match_ids)
+    swaps = await _applied_swaps(province, list(rows))
+
+    def remembered(match_id: str) -> Dict[str, Any]:
+        # `state_dict`, nie gołe `.get`: kolumna JSON bywa napisem i to o nią,
+        # a nie o dane, kładła się cała lista (patrz nota przy `state_dict`).
+        data = rows.get(match_id) or {}
+        return apply_known_swaps(state_dict(data.get("state_json")), swaps.get(match_id, ()))
+
+    held_ids = [
+        match_id
+        for match_id in rows
+        if slots_held_by(remembered(match_id), actor.judge_id, actor.full_name)
+    ]
+
+    # Sprawdzenie na żywo. Świeżo sprawdzone głęboko (przed chwilą pytał o nie
+    # monitor albo poprzednie wołanie tego arkusza) uchodzą za żywe bez
+    # kolejnego pytania - arkusz woła serwer dwa razy pod rząd.
+    order = live_check_order(app_ids, held_ids, LIVE_CREW_LIMIT)
+    bases: Dict[str, Dict[str, Any]] = {}
+    trusted: Set[str] = set()
+    for match_id in order:
+        data = rows.get(match_id)
+        if data and crew_is_fresh(data.get("last_deep_checked_at"), now):
+            trusted.add(match_id)
+            continue
+        bases[match_id] = state_dict(data.get("state_json")) if data else {}
+    fresh, _failed = await _live_crews(
+        province, actor, bases, known=set(rows), vouched=set(app_ids)
+    )
+    live_ids = set(fresh) | trusted
+
+    # Kandydaci ponad limit sprawdzeń zostają z migawki - i są PODPISANI.
+    ordered = set(order)
+    candidates = order + [match_id for match_id in held_ids if match_id not in ordered]
+    mine: List[Tuple[str, Dict[str, Any], Dict[str, Any], List[str], bool]] = []
+    for match_id in candidates:
+        data = dict(rows.get(match_id) or {})
+        if match_id in fresh:
+            state = fresh[match_id]
+            # Data i status protokołu też z żywego stanu - termin mógł się
+            # zmienić, a wiersz mógł dopiero co powstać.
+            data.update(_row_from_state(state))
+        else:
+            state = remembered(match_id)
+        held = slots_held_by(state, actor.judge_id, actor.full_name)
+        if not held:
+            # Sędziego nie ma w żadnym gnieździe giełdowym tego meczu - w bazie
+            # związku, a gdy ta milczy: ani w migawce, ani w pamięci wymian.
+            # Delegat albo obsada zmieniona - to nie jest jego mecz do oddania.
+            continue
+        match_at = data.get("match_at")
+        if match_at is not None and (match_at < now or match_at > horizon):
+            continue
+        mine.append((match_id, data, state, held, match_id in live_ids))
+    # Najbliższe najpierw, mecze bez terminu na końcu - w stałej kolejności,
+    # żeby lista nie tasowała się między otwarciami.
+    mine.sort(
+        key=lambda item: (
+            item[1].get("match_at") is None,
+            item[1].get("match_at") or now,
+            _s(item[1].get("match_code")),
+            item[0],
+        )
+    )
+
+    match_ids = [item[0] for item in mine]
     live = await database.fetch_all(
         select(
             match_market_offers.c.id,
@@ -1007,33 +1254,14 @@ async def my_matches(
     )
     taken = {(_s(_row(o)["match_id"]), _s(_row(o)["slot"])): _row(o) for o in live}
 
-    mine: List[Tuple[Dict[str, Any], Dict[str, Any], List[str]]] = []
-    for raw in rows:
-        data = _row(raw)
-        # `state_dict`, nie gole `.get`: kolumna JSON bywa napisem i to o nią,
-        # a nie o dane, kładła się cała lista (patrz nota przy `state_dict`).
-        state = apply_known_swaps(
-            state_dict(data.get("state_json")),
-            swaps.get(_s(data["match_id"]), ()),
-        )
-        held = slots_held_by(state, actor.judge_id, actor.full_name)
-        if not held:
-            # Sędziego nie ma w żadnym gnieździe giełdowym tego meczu - ani w
-            # migawce, ani w naszej pamięci wymian. Albo jest delegatem (a
-            # delegatem się nie handluje), albo obsadę zmieniono ręcznie w ZPRP
-            # i migawka jeszcze o tym nie wie; to drugie domyka monitor.
-            continue
-        mine.append((data, state, held))
-
     # Uprawnienia okręgu. Werdykty z pamięci są darmowe; `verify=1` dopytuje
     # bazę związku o te mecze, których jeszcze nie znamy - najbliższe najpierw,
-    # bo `rows` przyszły posortowane po dacie.
+    # bo `mine` jest już posortowane po dacie.
     creds = assign_credentials(province, cfg["assign_account_mode"])
     account_ready = bool(creds["configured"])
     mode = _s(creds["mode"])
-    ids = [_s(d["match_id"]) for d, _st, _h in mine]
-    cached = await _cached_verdicts(province, ids, mode, now) if account_ready else {}
-    missing = [m for m in ids if m not in cached]
+    cached = await _cached_verdicts(province, match_ids, mode, now) if account_ready else {}
+    missing = [m for m in match_ids if m not in cached]
     probed: Dict[str, Dict[str, Any]] = {}
     if verify and account_ready and missing:
         probed = await _probe(province, mode, creds, missing[:PROBE_BATCH_LIMIT], settings)
@@ -1055,8 +1283,8 @@ async def my_matches(
     out: List[Dict[str, Any]] = []
     unchecked = 0
     probe_failed = 0
-    for data, state, held in mine:
-        match_id = _s(data["match_id"])
+    live_failed = 0
+    for match_id, data, state, held, checked in mine:
         verdict = verdict_for(match_id)
         if verdict["assignable"] is None:
             unchecked += 1
@@ -1064,6 +1292,8 @@ async def my_matches(
             # pytalismy" - pierwsza mowi o awarii po drugiej stronie.
             if verdict["reason"] == "PROBE_FAILED":
                 probe_failed += 1
+        if not checked:
+            live_failed += 1
         offerable = can_offer(data.get("match_at"), now, cfg["offer_deadline_hours"])
         approved = bool(data.get("approved"))
         # Gniazda, które NIE wiszą już na giełdzie - tylko one dają się oddać.
@@ -1110,6 +1340,10 @@ async def my_matches(
                 "assignable": verdict["assignable"],
                 "assignableReason": verdict["reason"],
                 "checkedAt": verdict["checkedAt"],
+                # Czy obsada tego wiersza pochodzi z bazy związku sprzed chwili.
+                # Gdy nie - kafel mówi, że to ostatni znany stan.
+                "liveChecked": checked,
+                "liveNote": "" if checked else LIVE_CREW_NOTE,
             }
         )
     return {
@@ -1125,6 +1359,9 @@ async def my_matches(
         # gasić całą listę.
         "probeFailed": probe_failed,
         "probeLimit": PROBE_BATCH_LIMIT,
+        # Ile wierszy na liście pokazuje ostatni znany stan zamiast obsady z
+        # bazy związku - ta sama zasada: liczba wychodzi na zewnątrz.
+        "liveFailed": live_failed,
     }
 
 
@@ -1315,27 +1552,45 @@ async def create_offer(
     if not slot_is_tradeable(slot):
         raise HTTPException(400, "Tym gniazdem nie wolno się wymieniać przez giełdę.")
 
+    match_id = _s(req.match_id)
     match = await database.fetch_one(
         select(province_matches).where(
             and_(
                 province_matches.c.province == province,
-                province_matches.c.match_id == _s(req.match_id),
+                province_matches.c.match_id == match_id,
             )
         )
     )
-    if not match:
-        raise HTTPException(404, "Nie znam tego meczu w Twoim okręgu.")
-    data = _row(match)
-    # Ta sama poprawka, co na liście „Oddaj mecz": migawka bywa o przebieg
-    # monitora z tyłu, a giełda pamięta własne wymiany. Bez tego mecz stałby na
-    # liście, a wystawienie go kończyłoby się odmową „to nie Twoje gniazdo" -
-    # czyli dokładnie tą sprzecznością, przed którą lista miała chronić. Poprawiona
-    # migawka idzie też do `match_snapshot`, bo z niej powstaje strażnik `expect`
-    # przy zapisie do ZPRP.
-    state = apply_known_swaps(
-        state_dict(data.get("state_json")),
-        (await _applied_swaps(province, [_s(req.match_id)])).get(_s(req.match_id), ()),
+    data = _row(match) if match else {}
+    # Obsada z bazy związku W TEJ CHWILI - ta sama droga, co na liście „Oddaj
+    # mecz", żeby lista i bramka odpowiadały na to samo pytanie tak samo. Sędzia
+    # wybrał ten mecz z listy, więc telefon za niego ręczy (`vouched`): mecz,
+    # o którym okręg jeszcze nie wiedział, dostaje tu swój wiersz - o ile w
+    # bazie związku naprawdę stoi w nim ten sędzia.
+    fresh, _failed = await _live_crews(
+        province,
+        actor,
+        {match_id: state_dict(data.get("state_json"))},
+        known={match_id} if match else set(),
+        vouched={match_id},
     )
+    if match_id in fresh:
+        state = fresh[match_id]
+        data.update(_row_from_state(state))
+    elif not match:
+        raise HTTPException(
+            404,
+            "Nie znam tego meczu w Twoim okręgu, a baza związku nie odpowiada. "
+            "Spróbuj za chwilę.",
+        )
+    else:
+        # Związek milczy - zostaje migawka z pamięcią własnych wymian giełdy.
+        # Poprawiona migawka idzie też do `match_snapshot`, bo z niej powstaje
+        # strażnik `expect` przy zapisie do ZPRP.
+        state = apply_known_swaps(
+            state_dict(data.get("state_json")),
+            (await _applied_swaps(province, [match_id])).get(match_id, ()),
+        )
 
     if slot not in slots_held_by(state, actor.judge_id, actor.full_name):
         raise HTTPException(403, "To nie jest Twoje gniazdo w tym meczu.")

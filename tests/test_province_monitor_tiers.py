@@ -388,3 +388,16 @@ def test_szczegoly_przyjmuja_oba_ksztalty_odpowiedzi():
     src_fn = _ast.unparse(FUNCTIONS["_fetch_public_details"])
     assert "isinstance(payload, list)" in src_fn
     assert "payload[0]" in src_fn
+
+
+def test_szczegoly_daja_sie_odpytac_na_krotszej_smyczy():
+    """Giełda pyta tym samym API przy OTWARTYM ekranie sędziego.
+
+    Monitorowi wolno czekać pół minuty i próbować trzy razy; giełda dostaje
+    własny limit i liczbę prób, a domyślne wartości zostają monitora.
+    """
+    import ast as _ast
+    node = FUNCTIONS["_fetch_public_details"]
+    kwonly = {arg.arg for arg in node.args.kwonlyargs}
+    assert {"timeout", "retries"} <= kwonly
+    assert "timeout=timeout" in _ast.unparse(node)
