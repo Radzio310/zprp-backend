@@ -1483,6 +1483,82 @@ Index(
 )
 
 
+# ── Bomby: zgłoszenia, że sędziego nie było na meczu ────────────────────────
+#
+# Rejestr okręgowy prowadzony przez komisję sędziowską. Wiersz mówi o CUDZEJ
+# rzetelności, więc trzyma się tu wszystko, co pozwala go później sprawdzić:
+# kto zgłosił, o kim, w jakiej roli, przy którym meczu - i co się z tym
+# zgłoszeniem stało.
+#
+# MIGAWKA MECZU, nie klucz obcy do terminarza. Zgłaszać wolno przy każdym
+# meczu z listy sędziego, także centralnym albo turniejowym, którego okręg u
+# siebie nie ma - a rejestr ma się czytać po latach, gdy tamten mecz dawno
+# wypadł z bazy. Numer meczu, data i drużyny są więc KOPIĄ z chwili zgłoszenia.
+match_bombs = Table(
+    "match_bombs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    # Okręg AUTORA - to jego komisja prowadzi rejestr i to ona go czyta.
+    Column("province", String, nullable=False, index=True),
+    # Rok początku sezonu (2025 = 2025/26); NULL dla meczu bez daty, bo
+    # zgadywanie przestawiłoby wpis w cudzym rankingu.
+    Column("season", Integer, nullable=True, index=True),
+    Column("match_id", String, nullable=False, index=True),
+    Column("match_code", String, nullable=True),
+    Column("match_at", DateTime(timezone=True), nullable=True),
+    Column("host_team", String, nullable=True),
+    Column("guest_team", String, nullable=True),
+    Column("hall", String, nullable=True),
+    # Czy obsadę dało się potwierdzić terminarzem okręgu ("province"), czy
+    # przyszła z aplikacji ("app"). Komisja ma prawo wiedzieć, którego wpisu
+    # nikt poza autorem nie potwierdził.
+    Column("crew_source", String, nullable=False, server_default=text("'app'")),
+    # Kogo dotyczy. Numer, gdy rozpoznany na liście okręgu - nazwisko ZAWSZE, w
+    # postaci z chwili zgłoszenia: sędzia skreślony z listy nie może zniknąć z
+    # rejestru.
+    Column("subject_judge_id", String, nullable=True, index=True),
+    Column("subject_name", String, nullable=False),
+    Column("subject_slot", String, nullable=False),
+    Column("author_judge_id", String, nullable=False, index=True),
+    Column("author_name", String, nullable=False),
+    Column("author_slot", String, nullable=True),
+    Column("note", Text, nullable=True),
+    # "active" | "withdrawn" (autor się rozmyślił) | "voided" (komisja
+    # unieważniła). Dwie ostatnie to RÓŻNE rzeczy i rejestr je rozróżnia.
+    Column("status", String, nullable=False, server_default=text("'active'")),
+    Column("void_reason", Text, nullable=True),
+    Column("void_by", String, nullable=True),
+    Column("void_by_name", String, nullable=True),
+    Column("voided_at", DateTime(timezone=True), nullable=True),
+    Column("withdrawn_at", DateTime(timezone=True), nullable=True),
+    # Kiedy o zgłoszeniu dowiedziała się osoba zgłoszona. NULL znaczy „jeszcze
+    # nie" - doba karencji jest po to, żeby cofnięta pomyłka nie zdążyła
+    # narobić hałasu.
+    Column("subject_notified_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+# Ten sam człowiek nie zgłasza tej samej osoby przy tym samym meczu dwa razy.
+# Warunek na `status` puszcza ponowne zgłoszenie po cofnięciu - to ta sama
+# sprawa, więc nie mnożymy wierszy, ale i nie zabraniamy zmiany zdania.
+Index(
+    "uq_match_bombs_live",
+    match_bombs.c.match_id,
+    match_bombs.c.subject_slot,
+    match_bombs.c.author_judge_id,
+    unique=True,
+    postgresql_where=text("status = 'active'"),
+    sqlite_where=text("status = 'active'"),
+)
+Index(
+    "ix_match_bombs_province_season",
+    match_bombs.c.province,
+    match_bombs.c.season,
+    match_bombs.c.created_at.desc(),
+)
+
+
 # Ustawienia okręgu. Wiersza może nie być - wtedy obowiązują wartości domyślne
 # z `match_market_rules`, a moduł jest WYŁĄCZONY. Włączenie jest świadomą
 # decyzją administratora, nie stanem domyślnym.

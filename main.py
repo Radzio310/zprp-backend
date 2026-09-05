@@ -46,6 +46,7 @@ from app.training_spk import (
     router as training_spk_router,
 )
 from app.match_market import router as match_market_router
+from app.match_bombs import router as match_bombs_router
 from app.reports import router as reports_router
 from app.login_records import router as login_records_router
 from app.proel import router as proel_router
@@ -225,6 +226,7 @@ app.include_router(training_spk_admin_router)
 # Giełda meczów. Własny prefiks `/match-market`, więc nie wchodzi pod żaden
 # catch-all - kolejność nie ma tu znaczenia, ale trzyma się rodziny modułów BAZA.
 app.include_router(match_market_router)
+app.include_router(match_bombs_router)
 app.include_router(reports_router)
 app.include_router(login_records_router)
 # UWAGA na kolejność: app/proel.py ma catch-all `GET /proel/{match_number:path}`,
@@ -1234,6 +1236,12 @@ async def startup():
     except Exception:
         logger.exception("Initial MP protocol snapshot pass failed")
     _mp_snapshot_task = asyncio.create_task(run_mp_snapshot_scheduler())
+
+    # Zgłoszona nieobecność dociera do zgłoszonego dopiero po dobie - tyle trwa
+    # okno na cofnięcie pomyłki. Przejście musi być w tle, bo powiadomienie
+    # odroczone w pamięci procesu zjadłby pierwszy restart Railway.
+    from app.match_bombs import run_bomb_notice_sweep
+    _bomb_notice_task = asyncio.create_task(run_bomb_notice_sweep())
     logger.info("✅ MP protocol snapshot scheduler started")
 
 @app.on_event("shutdown")
