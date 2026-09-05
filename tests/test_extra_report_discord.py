@@ -3,7 +3,7 @@ import json
 import urllib.error
 from email import policy
 from email.parser import BytesParser
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -44,13 +44,38 @@ def test_normalization_deduplicates_alias_version_wait_and_keeps_thread():
     ]
 
 
+@pytest.mark.parametrize("suffix", ["", "?"])
+def test_empty_query_does_not_reach_python310_strict_parser(monkeypatch, suffix):
+    # Python 3.10 z Dockerfile: parse_qs('', strict_parsing=True) rzuca
+    # ValueError. Python 3.14 używany lokalnie oddaje {}, maskując regresję.
+    parser = Mock(side_effect=ValueError("bad query field: ''"))
+    monkeypatch.setattr(discord, "parse_qs", parser)
+    assert discord.normalize_webhook_url(URL + suffix) == URL
+    parser.assert_not_called()
+
+
+@pytest.mark.parametrize("query", ["wait", "thread_id", "wait=true&", "&thread_id=42"])
+def test_nonempty_malformed_query_still_rejected(query):
+    with pytest.raises(ValueError, match="Parametry webhooka"):
+        discord.normalize_webhook_url(URL + "?" + query)
+
+
 def test_older_clients_preserve_webhooks_and_empty_string_disables():
     assert _webhook_for_save(RecipientGroup(name="Liga").discordWebhookUrl, URL) == URL
     assert _webhook_for_save(ProvinceRecipients(province="SLASKIE").discordWebhookUrl, URL) == URL
     assert _webhook_for_save("", URL) == ""
 
 
-def test_real_multipart_contains_exact_pdf_and_wait_confirmation(monkeypatch):
+@pytest.mark.parametrize("query", ["", "?thread_id=42"])
+def test_real_multipart_contains_exact_pdf_and_wait_confirmation(monkeypatch, query):
+    native_parse_qs = discord.parse_qs
+
+    def parse_qs_python310(value, **kwargs):
+        if not value and kwargs.get("strict_parsing"):
+            raise ValueError("bad query field: ''")
+        return native_parse_qs(value, **kwargs)
+
+    monkeypatch.setattr(discord, "parse_qs", parse_qs_python310)
     pdf = b"%PDF-1.7\n\x00\xff\r\nbinary report"
     payload = discord.report_payload(
         kind="referees", match_number="IIM4/1", names=["ŻÓŁĆ Jan @everyone"],
@@ -79,9 +104,9 @@ def test_real_multipart_contains_exact_pdf_and_wait_confirmation(monkeypatch):
         return Opener()
 
     monkeypatch.setattr(discord.urllib.request, "build_opener", build_opener)
-    assert discord._send_pdf_sync(URL + "?thread_id=42", payload, pdf, "raport.pdf") == "987654"
+    assert discord._send_pdf_sync(URL + query, payload, pdf, "raport.pdf") == "987654"
     request = captured["request"]
-    assert request.full_url == URL + "?thread_id=42&wait=true"
+    assert request.full_url == URL + (query + "&" if query else "?") + "wait=true"
     assert captured["timeout"] == 10
     assert "BAZA-ExtraReport" in request.get_header("User-agent")
     msg = BytesParser(policy=policy.default).parsebytes(

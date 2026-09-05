@@ -48,7 +48,9 @@ def normalize_webhook_url(value: str | None) -> str:
     if url.fragment:
         raise ValueError("Adres webhooka nie może zawierać fragmentu po znaku #.")
     try:
-        query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+        # Python 3.10 (Dockerfile) odrzuca pusty query w trybie strict, choć
+        # URL bez parametrów jest prawidłowy. Nowszy Python zwraca tu {}.
+        query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True) if url.query else {}
     except ValueError:
         raise ValueError("Parametry webhooka po znaku ? mają niepoprawny format.") from None
     if set(query) - {"wait", "thread_id", "with_components"}:

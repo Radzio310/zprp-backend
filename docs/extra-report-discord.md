@@ -90,6 +90,15 @@ w odpowiedzi. Starszy klient na nowym backendzie generuje plik bez kopii Discord
 
 ## Diagnostyka zapisu 422
 
+Naprawiona przyczyna: Python 3.10 z `Dockerfile` rzuca `ValueError` dla
+`parse_qs('', strict_parsing=True)`, podczas gdy lokalny Python 3.14 zwraca
+`{}`. Dlatego prawidłowy webhook bez `?` dostawał komunikat o błędnych
+parametrach. Puste `url.query` pomija teraz parser i oznacza brak parametrów;
+ścisła walidacja niepustych parametrów pozostaje bez zmian. Dotyczy to
+zarówno zapisu konfiguracji, jak i ponownej normalizacji przed wysyłką PDF.
+Testy odtwarzają starsze zachowanie parsera niezależnie od lokalnej wersji
+Pythona, także przy zapisie grup i okręgów przez HTTP.
+
 Sam wpis `PUT /admin/extra-report/recipients ... 422` nie wskazuje przyczyny.
 Zapis konfiguracji nie wysyła niczego na Discord, więc nie jest to odpowiedź
 Discorda na próbę wysłania PDF. Błąd może dotyczyć dowolnej grupy w przesłanej

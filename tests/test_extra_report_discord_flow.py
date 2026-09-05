@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import Column, DateTime, Integer, JSON, MetaData, String, Table, create_engine
 
 from app import extra_reports as reports
+from app import extra_report_discord as discord
 from app.proel_auth import Actor
 
 URL = "https://discord.com/api/webhooks/123456/test_token"
@@ -206,8 +207,17 @@ async def test_invalid_webhook_cannot_erase_existing_configuration(report_db):
     assert (await reports.list_recipients(ACTOR)).groups[0].name == "II liga"
 
 
-@pytest.fixture
-async def report_client(report_db):
+@pytest.fixture(params=["native", "python310_empty_query"])
+async def report_client(report_db, monkeypatch, request):
+    if request.param == "python310_empty_query":
+        native_parse_qs = discord.parse_qs
+
+        def parse_qs_python310(query, **kwargs):
+            if not query and kwargs.get("strict_parsing"):
+                raise ValueError("bad query field: ''")
+            return native_parse_qs(query, **kwargs)
+
+        monkeypatch.setattr(discord, "parse_qs", parse_qs_python310)
     # Pełny HTTP/JSON/Pydantic, bez importu main.py uruchamiającego produkcyjną DB.
     app = FastAPI()
     app.include_router(reports.router)
