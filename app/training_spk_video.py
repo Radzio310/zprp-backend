@@ -63,12 +63,8 @@ GOALS: Tuple[Tuple[int, int, str, int, bool], ...] = (
     (_ms(7, 40), 54, "guest", 66, True),
     (_ms(7, 48), 54, "host", 13, False),
     (_ms(7, 55), 56, "host", 20, False),
-    (_ms(8, 11), 56, "host", 20, False),
-    # Arkusz podaje tu czas wideo 7:47 przy 57. minucie - między wierszami
-    # 8:11 (56.) i 8:37 (60.). To nie może być prawdą, bo wideo nie cofa się
-    # do wcześniejszej akcji; wpis stoi w środku sąsiadów, do poprawki w
-    # arkuszu, gdy nagranie się zmieni.
-    (_ms(8, 24), 57, "guest", 36, False),
+    (_ms(8, 3), 56, "host", 20, False),
+    (_ms(8, 11), 57, "guest", 36, False),
     (_ms(8, 37), 60, "host", 3, True),
     (_ms(8, 46), 60, "host", 8, False),
 )
