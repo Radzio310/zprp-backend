@@ -79,6 +79,25 @@ class ShortResultRequest(BaseModel):
     timeout3_gosc_ii: str
     timeout3_gosc_ss: str
     widzowie: Optional[str] = ""
+    #: Pola stoją już w orientacji NOMINALNEJ (jak kolumny w bazie ZPRP).
+    #:
+    #: Starsze wydania aplikacji wysyłały pola w kolejności protokołu i ta
+    #: droga przestawiała je sama po wykryciu ikony zamiany gospodarza na
+    #: stronie meczu. Aplikacja liczy dziś orientację u siebie, tą samą regułą
+    #: co dla oficjalnego API, i mówi o tym tym znacznikiem. Bez niego zostaje
+    #: dawne zachowanie, żeby wydanie 2.0.1 dalej wysyłało poprawnie.
+    pola_nominalne: bool = False
+
+
+def _legacy_swap_needed(host_swapped: bool, pola_nominalne: bool) -> bool:
+    """Czy stara droga ma jeszcze sama przestawić strony.
+
+    Dwa przestawienia (aplikacja + backend) dają lustro, a zero przestawień
+    przy starym wydaniu zostawia kolejność protokołu w kolumnach nominalnych.
+    Przestawiamy więc dokładnie wtedy, gdy mecz ma zamianę, a aplikacja
+    orientacji nie policzyła.
+    """
+    return bool(host_swapped) and not bool(pola_nominalne)
 
 
 def _decrypt_field(enc_b64: str, private_key) -> str:
@@ -300,8 +319,12 @@ async def short_result(
                 "widzowie": req.widzowie or ""
             }
 
-            if host_swapped:
+            if _legacy_swap_needed(host_swapped, req.pola_nominalne):
                 overrides = _swap_gosp_gosc(overrides)
+            logger.info(
+                "short_result: IdZawody=%s zamiana=%s pola_nominalne=%s",
+                match_id, host_swapped, req.pola_nominalne,
+            )
 
             ok = await _submit_short_result(
                 client,

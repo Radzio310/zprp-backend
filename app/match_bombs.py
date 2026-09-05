@@ -55,6 +55,7 @@ from app.match_market import Actor, market_actor
 from app.match_market_access import badge_names
 from app.match_market_rules import CREW_STATE_FIELDS, state_dict
 from app.push.push import send_push_to_judges
+from app.zprp_accounts import normalize_province
 
 logger = logging.getLogger("app.match_bombs")
 
@@ -156,9 +157,44 @@ async def _match_crew(province: str, match_id: str, fallback: Any) -> tuple[List
     return crew_from_payload(fallback or ()), "app"
 
 
-def _view(bomb: Dict[str, Any], viewer: str, is_commission: bool) -> Dict[str, Any]:
+async def _photos(bombs: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Zdjęcia sędziów, których dotyczą te wpisy - jednym zapytaniem.
+
+    Twarz mówi „to o mnie" szybciej niż nazwisko, a rejestr czyta się z listy.
+    Numer, nie nazwisko: to samo nazwisko bywa zapisane w dwóch kolejnościach i
+    dwie osoby o tym samym nazwisku istnieją naprawdę.
+    """
+    ids = sorted(
+        {
+            _s(b.get(field))
+            for b in bombs
+            for field in ("subject_judge_id", "author_judge_id")
+            if _s(b.get(field))
+        }
+    )
+    if not ids:
+        return {}
+    rows = await database.fetch_all(
+        select(province_judges.c.judge_id, province_judges.c.photo_url).where(
+            province_judges.c.judge_id.in_(ids)
+        )
+    )
+    return {
+        _s(_row(r)["judge_id"]): _s(_row(r).get("photo_url"))
+        for r in rows
+        if _s(_row(r).get("photo_url"))
+    }
+
+
+def _view(
+    bomb: Dict[str, Any],
+    viewer: str,
+    is_commission: bool,
+    photos: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """Zgłoszenie tak, jak wolno je zobaczyć TEMU widzowi."""
     show_author = author_is_visible(bomb, viewer, is_commission=is_commission)
+    gallery = photos or {}
     return {
         "id": int(bomb["id"]),
         "matchId": _s(bomb.get("match_id")),
@@ -179,6 +215,12 @@ def _view(bomb: Dict[str, Any], viewer: str, is_commission: bool) -> Dict[str, A
         # dostaje każdy, bo bez tego nie wiedziałby, co wolno mu cofnąć.
         "authorName": _s(bomb.get("author_name")) if show_author else "",
         "authorJudgeId": _s(bomb.get("author_judge_id")) if show_author else "",
+        "subjectPhotoUrl": gallery.get(_s(bomb.get("subject_judge_id")), ""),
+        # Zdjęcie autora idzie tą samą drogą, co jego nazwisko - komu nie wolno
+        # znać jednego, temu nie wolno i drugiego.
+        "authorPhotoUrl": (
+            gallery.get(_s(bomb.get("author_judge_id")), "") if show_author else ""
+        ),
         "mine": _s(bomb.get("author_judge_id")) == _s(viewer),
         "aboutMe": _s(bomb.get("subject_judge_id")) == _s(viewer) and bool(viewer),
         "voidReason": _s(bomb.get("void_reason")) or None,
@@ -254,6 +296,7 @@ async def bombs_for_match(
         .order_by(match_bombs.c.created_at.asc())
     )
     bombs = [_row(r) for r in rows]
+    photos = await _photos(bombs)
     refusal = may_report(match_at, _now(), is_commission=commission)
     return {
         "matchId": _s(match_id),
@@ -263,7 +306,7 @@ async def bombs_for_match(
         # Powód, dla którego zgłoszenie jest dziś niemożliwe - do napisania na
         # kaflu. Pusty znaczy „wolno".
         "refusal": refusal or ("" if province else "Nie ma Cię na liście sędziów okręgu."),
-        "bombs": [_view(b, actor.judge_id, commission) for b in bombs],
+        "bombs": [_view(b, actor.judge_id, commission, photos) for b in bombs],
     }
 
 
@@ -320,7 +363,8 @@ async def report_bomb(
         raise HTTPException(409, "Już zgłosiłeś nieobecność tej osoby przy tym meczu.")
 
     values = {
-        "province": province,
+        # Zawsze slug - jedna postać w kolumnie, po której potem filtrujemy.
+        "province": normalize_province(province) or province,
         "season": season_of(req.match_at),
         "match_id": _s(req.match_id),
         "match_code": _s(req.match_code) or None,
@@ -438,14 +482,18 @@ async def registry(
     kaflu sędziego i w podsumowaniu miesiąca. Aplikacja grupuje i podpisuje, ale
     nie liczy drugi raz po swojemu.
     """
-    wanted = _s(province).upper()
+    # Okręg sprowadzamy do SLUGA (`SLASKIE`, `KUJAWSKO_POMORSKIE`) - tej samej
+    # postaci, w której trzyma go lista sędziów okręgu i w której zapisujemy
+    # wiersze. Bez tego „ŚLĄSKIE" z ogonkami pytało o okręg, którego w bazie nie
+    # ma, i rejestr pokazywał pustkę zamiast swoich wpisów.
+    wanted = normalize_province(province) or _s(province).upper()
     commission = _is_commission(actor)
     if not commission:
         raise HTTPException(
             403,
             "Rejestr zgłoszeń prowadzi komisja sędziowska - ten ekran należy do niej.",
         )
-    if not actor.is_admin and wanted != _s(actor.province).upper():
+    if not actor.is_admin and wanted != normalize_province(actor.province):
         raise HTTPException(403, "Komisja czyta rejestr własnego okręgu.")
 
     rows = [
@@ -508,7 +556,7 @@ async def registry(
             ],
         },
         "ranking": rank_bombs(tally.values()),
-        "bombs": [_view(r, actor.judge_id, True) for r in chosen],
+        "bombs": [_view(r, actor.judge_id, True, await _photos(chosen)) for r in chosen],
     }
 
 

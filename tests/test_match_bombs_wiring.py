@@ -153,3 +153,29 @@ def test_rules_live_in_the_leaf_not_in_the_routes():
     """Kazda regula ma jedno miejsce - inaczej ekran i serwer rozjada sie."""
     for name in ("REPORT_WINDOW_DAYS", "COUNTED_STATUSES", "SEASON_START_MONTH"):
         assert name not in SOURCE, f"{name} przepisane do trasy"
+
+
+def test_province_is_always_a_slug():
+    """Zgloszone z terenu: rejestr pokazywal pustke po wlasnym okregu.
+
+    Lista sedziow trzyma okreg SLUGIEM ("SLASKIE"), a ekran pytal nazwa z
+    ogonkami ("SLASKIE" z Ś i Ą) - czyli o okreg, ktorego w bazie nie ma. Jedna
+    postac po obu stronach, ustalana przez `normalize_province`.
+    """
+    assert "normalize_province" in calls_in("registry")
+    assert "normalize_province" in calls_in("report_bomb")
+
+
+def test_faces_come_from_the_province_list_in_one_query():
+    """Zdjecie na kafelku nie moze kosztowac zapytania na wiersz."""
+    assert "_photos" in calls_in("registry")
+    assert "_photos" in calls_in("bombs_for_match")
+    source = code_of("_photos")
+    assert "in_(ids)" in source
+
+
+def test_the_authors_face_follows_the_authors_name():
+    """Komu nie wolno znac nazwiska, temu nie wolno i zdjecia."""
+    source = code_of("_view")
+    assert "if show_author else ''" in source.replace('"', "'")
+    assert source.count("show_author") >= 2
