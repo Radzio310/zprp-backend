@@ -153,25 +153,48 @@ async def test_zly_token_nie_wywraca_tylko_nic_nie_wnosi(monkeypatch):
     assert e.value.detail["code"] == "ACTOR_REQUIRED"
 
 
-# ─────────────────── pierwszeństwo numeru sędziego ───────────────────
+# ─────────────────── pierwszeństwo aktywnego konta ProEl ───────────────────
 
 @pytest.mark.asyncio
-async def test_prawdziwy_numer_sedziego_wygrywa_z_tokenem(monkeypatch):
-    """Sędzia z konta BAZA nie może stracić roli przez token konta ProEl."""
-    async def _load(_uid: int):
-        raise AssertionError("token nie powinien być w ogóle pytany")
-
-    monkeypatch.setattr(proel_auth, "_load_proel_account", _load)
-
-    # Numer prawdziwy -> normalna ścieżka; rejestr urządzeń może być
-    # niedostępny (tak jest w tym środowisku) i to nie ma prawa nic zmienić.
+async def test_token_proel_wygrywa_z_numerem_poprzedniego_sedziego(account):
+    """Pozostałości BAZY nie mogą nadać podpisu ani uprawnień ProElowi."""
     actor = await proel_actor(
         x_judge_id="12345",
         x_installation_id="telefon-1",
-        x_actor_name="KOWALSKI Jan",
+        x_actor_name="POPRZEDNI Piotr",
         authorization=bearer(7),
     )
-    assert actor.judge_id == "12345"
+    assert actor.judge_id == "proel:7"
+    assert actor.name == ACCOUNT["full_name"]
+    assert actor.verified is True
+    assert account["user_id"] == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", ["Bearer invalid-token", f"Bearer {create_access_token(7, ttl_seconds=-1)}"])
+async def test_zla_sesja_nie_spada_na_poprzedniego_sedziego(token):
+    with pytest.raises(HTTPException) as err:
+        await proel_actor("12345", "telefon-1", "POPRZEDNI Piotr", None, token)
+    assert err.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_potwierdzony_numer_konta_wygrywa_z_poprzednim(monkeypatch):
+    async def _load(_uid):
+        return {**ACCOUNT, "judge_id": "98765", "judge_id_verified_at": "2026-09-06"}
+    monkeypatch.setattr(proel_auth, "_load_proel_account", _load)
+    actor = await proel_actor("12345", "telefon-1", "POPRZEDNI Piotr", None, bearer())
+    assert actor.judge_id == "98765"
+    assert actor.name == ACCOUNT["full_name"]
+
+
+@pytest.mark.asyncio
+async def test_brak_nazwiska_konta_nie_odtwarza_starego_naglowka(monkeypatch):
+    async def _load(_uid):
+        return {**ACCOUNT, "full_name": ""}
+    monkeypatch.setattr(proel_auth, "_load_proel_account", _load)
+    actor = await proel_actor("12345", "telefon-1", "POPRZEDNI Piotr", None, bearer())
+    assert actor.name == "Konto ProEl #7"
 
 
 # ─────────────────── samo urządzenie (profil lokalny) ───────────────────

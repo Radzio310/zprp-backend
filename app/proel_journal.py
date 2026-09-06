@@ -34,6 +34,7 @@ from sqlalchemy import exists, func, literal, select
 
 from app.proel_auth import (
     Actor,
+    DEVICE_PREFIX,
     header_text,
     is_admin,
     is_synthetic_judge_id,
@@ -353,15 +354,32 @@ async def soft_actor(
     x_judge_id: Optional[str] = None,
     x_installation_id: Optional[str] = None,
     x_actor_name: Optional[str] = None,
+    authorization: Optional[str] = None,
+    x_elevation: Optional[str] = None,
 ) -> Optional[Actor]:
     """Aktor bez rzucania 401.
 
-    Wzorzec `_soft_verify_actor` z generatora protokołów: brak nagłówków to
-    normalna sytuacja (stara aplikacja, gość bez powiadomień), a nie błąd.
+    Wspólny resolver dla dziennika i PDF: brak nagłówków to normalna sytuacja
+    (stara aplikacja, gość bez powiadomień), a nie błąd.
     Zwraca `None`, gdy nie ma czego zapisać.
     """
     judge_id = str(x_judge_id or "").strip()
     install = str(x_installation_id or "").strip()
+    if (isinstance(authorization, str) and authorization.strip()) or (
+        isinstance(x_elevation, str) and x_elevation.strip()
+    ):
+        try:
+            return await proel_actor(
+                x_judge_id=x_judge_id,
+                x_installation_id=x_installation_id,
+                x_actor_name=x_actor_name,
+                authorization=authorization,
+                x_elevation=x_elevation,
+            )
+        except Exception:
+            # Stare zapisy nadal mogą działać bez sesji, ale brak dowodu
+            # aktualnego konta nie może oznaczać podpisu poprzedniego sędziego.
+            return Actor(judge_id=f"{DEVICE_PREFIX}{install}", installation_id=install) if install else None
     if not judge_id and not install:
         return None
 

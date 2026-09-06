@@ -1022,6 +1022,8 @@ async def create_proel_match(
     x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
     x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
     x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None, alias="X-Elevation"),
 ):
     existing = await database.fetch_one(
         select(saved_matches)
@@ -1038,7 +1040,10 @@ async def create_proel_match(
 
     # Aktora czytamy MIĘKKO: stara wersja aplikacji nie wysyła nagłówków, a
     # 401 na zapisie bloba oznaczałby ciche gubienie meczu.
-    actor = await soft_actor(x_judge_id, x_installation_id, x_actor_name)
+    actor = await soft_actor(
+        x_judge_id, x_installation_id, x_actor_name,
+        authorization=authorization, x_elevation=x_elevation,
+    )
 
     absorbed: Dict[str, Any] = {}
     async with database.transaction():
@@ -1217,7 +1222,10 @@ async def update_proel_match(
 ):
     # Aktor MIĘKKO, jeden na całą trasę: podpisuje potwierdzenia badań
     # wchłonięte z bloba (patrz `absorb_blob_exams`).
-    actor = await soft_actor(x_judge_id, x_installation_id, x_actor_name)
+    actor = await soft_actor(
+        x_judge_id, x_installation_id, x_actor_name,
+        authorization=authorization, x_elevation=x_elevation,
+    )
     absorbed: Dict[str, Any] = {}
     # Cała ścieżka w JEDNEJ transakcji: blokada wiersza stanu (`FOR UPDATE`)
     # działa tylko wewnątrz transakcji, a reprojekcja musi widzieć overlay
@@ -1387,7 +1395,7 @@ async def update_proel_match(
         await log_match_event(
             match_number=match_number,
             event="match.id_conflict",
-            actor=await soft_actor(x_judge_id, x_installation_id, x_actor_name),
+            actor=actor,
             zprp_match_id=conflict.incoming,
             details={"known": conflict.known, "incoming": conflict.incoming},
             app_version=x_app_version,

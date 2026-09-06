@@ -27,8 +27,8 @@ from fastapi import (
 )
 # Tożsamość aktora — ta sama zależność co przy zapisach ProEl, żeby wgląd w
 # dziennik protokołów miał dokładnie tych samych adminów co reszta systemu.
-from app.proel_auth import Actor, header_text, proel_actor
-from app.proel_journal import log_match_event
+from app.proel_auth import proel_actor
+from app.proel_journal import log_match_event, soft_actor
 from app.protocol_shootout import (
     recorded_shot_count as _recorded_shot_count,
     shootout_row_slots as _shootout_row_slots,
@@ -5467,35 +5467,6 @@ def _diff_pdf_text(
     }
 
 
-async def _soft_verify_actor(judge_id: str, installation_id: str) -> bool:
-    """
-    Czy para (urządzenie, sędzia) zgadza się z `push_tokens`.
-
-    W odróżnieniu od `proel_actor` NIE rzuca 401 przy niezgodności — tutaj to
-    tylko etykieta w dzienniku. Sędzia, który odmówił zgody na powiadomienia,
-    nigdy nie trafia do `push_tokens`, więc `False` znaczy „nie potwierdzono",
-    a nie „na pewno oszust".
-    """
-    if not judge_id or not installation_id:
-        return False
-    try:
-        from sqlalchemy import select as _select
-
-        from app.db import database, push_tokens
-
-        row = await database.fetch_one(
-            _select(push_tokens.c.judge_id).where(
-                push_tokens.c.installation_id == installation_id
-            )
-        )
-        if row is None:
-            return False
-        return str(row["judge_id"] or "").strip() == judge_id
-    except Exception:
-        logger.warning("protocol_audit: weryfikacja urządzenia nieudana", exc_info=True)
-        return False
-
-
 async def _record_protocol_audit(row: Dict[str, Any]) -> None:
     """
     Wpis do dziennika. Świadomie nie przewraca żądania: sędzia stojący przy
@@ -5575,6 +5546,8 @@ async def generate_protocol_pdf(
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
     x_actor_name: Optional[str] = Header(None, alias="X-Actor-Name"),
     x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None, alias="X-Elevation"),
 ):
     data_json = req.data_json or {}
     if not isinstance(data_json, dict):
@@ -5584,13 +5557,16 @@ async def generate_protocol_pdf(
     # który przy braku nagłówków rzuca 401. Wersje aplikacji sprzed tej zmiany
     # ich nie wysyłają, a protokół musi się wygenerować także im — wtedy stopka
     # mówi wprost, że autor jest nieznany, zamiast zmyślać nazwisko.
-    # `header_text`, a nie `strip()`: nazwisko jedzie nagłówkiem HTTP, a te są
-    # ze specyfikacji latin-1 — bez naprawy „Radosław" ląduje w stopce
-    # protokołu jako „RadosÅ‚aw".
-    actor_name = header_text(x_actor_name)
-    actor_judge_id = header_text(x_judge_id)
-    actor_install = header_text(x_installation_id)
-    actor_verified = await _soft_verify_actor(actor_judge_id, actor_install)
+    # Ten sam resolver co historia meczu: token konta ProEl przed nagłówkami
+    # pozostałymi po sędzim BAZY; dla starszych aplikacji także naprawa UTF-8.
+    actor = await soft_actor(
+        x_judge_id, x_installation_id, x_actor_name,
+        authorization=authorization, x_elevation=x_elevation,
+    )
+    actor_name = actor.name if actor else ""
+    actor_judge_id = actor.judge_id if actor else ""
+    actor_install = actor.installation_id if actor else ""
+    actor_verified = bool(actor and actor.verified)
     if actor_name:
         generated_by = actor_name
     elif actor_judge_id:
@@ -6222,12 +6198,7 @@ async def generate_protocol_pdf(
             match_number=match_number,
             zprp_match_id=zprp_match_id,
             event="protocol.pdf_generated",
-            actor=Actor(
-                judge_id=actor_judge_id,
-                installation_id=actor_install,
-                name=actor_name,
-                verified=actor_verified,
-            ),
+            actor=actor,
             details={"audit_code": audit_code},
             event_key=f"protocol-pdf:{audit_code}",
             app_version=x_app_version,

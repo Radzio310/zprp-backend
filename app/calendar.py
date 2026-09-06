@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request
 import datetime
 
@@ -298,6 +299,18 @@ async def list_event_labels(
         )
 
     labels = (cal.get("labelProperties") or {}).get("eventLabels") or []
+
+    # Kolor kalendarza głównego = kafelek kategorii „domyślnej" niedyspozycji
+    # (wydarzenie bez wybranego koloru nosi w Google kolor kalendarza).
+    # Dodatek, nie warunek: bez niego etykiety i tak wracają.
+    calendar_color = None
+    try:
+        entry = service.calendarList().get(calendarId="primary").execute()
+        background = entry.get("backgroundColor") or ""
+        calendar_color = background if _is_valid_hex(background) else None
+    except Exception:
+        calendar_color = None
+
     return {
         "labels": [
             {
@@ -307,7 +320,8 @@ async def list_event_labels(
             }
             for label in labels
             if label.get("id") and _is_valid_hex(label.get("backgroundColor") or "")
-        ]
+        ],
+        "calendarColor": calendar_color,
     }
 
 
@@ -388,19 +402,29 @@ async def list_events(
     time_min = now.isoformat() + "Z"
     time_max = (now + datetime.timedelta(days=days_ahead)).isoformat() + "Z"
 
-    events = (
-        build("calendar", "v3", credentials=creds)
-        .events()
-        .list(
-            calendarId="primary",
-            timeMin=time_min,
-            timeMax=time_max,
-            singleEvents=True,
-            orderBy="startTime",
-        )
-        .execute()
-        .get("items", [])
+    service = build("calendar", "v3", credentials=creds)
+    list_kwargs = dict(
+        calendarId="primary",
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+        orderBy="startTime",
     )
+    try:
+        # eventLabelVersion=1: bez tego parametru Google pomija w odpowiedzi
+        # pole eventLabelId i wydarzenie z własną etykietą wygląda jak bez
+        # koloru - aplikacja wrzuciłaby je do kategorii domyślnej.
+        events = (
+            _apply_event_label_version(service.events().list(**list_kwargs))
+            .execute()
+            .get("items", [])
+        )
+    except HttpError as e:
+        # Gdyby API odrzuciło parametr przy listowaniu: import ma działać
+        # jak dotąd (bez etykiet), a nie stanąć.
+        if getattr(getattr(e, "resp", None), "status", None) != 400:
+            raise
+        events = service.events().list(**list_kwargs).execute().get("items", [])
     return events
 
 

@@ -209,7 +209,7 @@ async def account_actor(
         # Nazwisko z KONTA wygrywa z nagłówkiem. Nagłówek ustawia aplikacja, a
         # przy niepotwierdzonym koncie nazwisko przestało już decydować o roli -
         # ale trafia do historii meczu jako podpis, więc nie może być dowolne.
-        name=_clean(account.get("full_name")) or header_text(name),
+        name=_clean(account.get("full_name")) or f"Konto ProEl #{uid}",
         verified=True,
     )
 
@@ -227,9 +227,9 @@ async def proel_actor(
       • sesja podniesiona (`X-Elevation` - patrz `app/proel_elevation.py`):
         numer potwierdzony hasłem do baza.zprp.pl, więc rejestru urządzeń już
         nie pytamy,
+      • konto ProEl (token HMAC - patrz `account_actor`),
       • numer sędziego z baza.zprp.pl (para nagłówków, weryfikowana o rejestr
         urządzeń),
-      • konto ProEl (token HMAC - patrz `account_actor`),
       • samo urządzenie (`inst:<installation_id>`) - dla profilu lokalnego bez
         numeru sędziego; nigdy nie jest zweryfikowane i nie daje nic ponad to,
         co daje znajomość adresu API.
@@ -275,13 +275,22 @@ async def proel_actor(
             judge_id,
         )
 
-    # Prawdziwy numer sędziego wygrywa: daje rolę w meczu i prawa admina,
-    # których token konta dać nie może. Token pytamy dopiero, gdy numeru nie ma
-    # albo gdy jest zastępczy.
-    if not judge_id or is_synthetic_judge_id(judge_id):
+    # Podpisany token konta rozstrzyga PRZED deklaracją z nagłówka. Telefon
+    # mógł wcześniej należeć do innego sędziego BAZY; jego numer nie może
+    # podpisywać czynności aktualnie zalogowanego użytkownika ProEl.
+    if isinstance(authorization, str) and authorization.strip():
         from_account = await account_actor(authorization, installation_id, x_actor_name)
         if from_account is not None:
             return from_account
+        # Nie spadamy na dawny numer/nazwisko ani po wygaśnięciu sesji,
+        # ani przy niedostępnym koncie. Wymagamy ponownego logowania.
+        raise HTTPException(
+            401,
+            detail={
+                "code": "ACTOR_REQUIRED",
+                "message": "Nie można potwierdzić konta ProEl. Zaloguj się ponownie.",
+            },
+        )
 
     if not judge_id or not installation_id:
         raise HTTPException(
