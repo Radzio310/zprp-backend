@@ -22,7 +22,18 @@ from app.proel_auth import (
     proel_actor,
     roles_for,
 )
-from app.proel_journal import client_ip as _client_ip, log_match_event, soft_actor
+from app.proel_exams import (
+    absorb_blob_exams,
+    ensure_state_row,
+    journal_absorbed,
+    kick_promotion,
+)
+from app.proel_journal import (
+    client_ip as _client_ip,
+    exam_events_from_ops,
+    log_match_event,
+    soft_actor,
+)
 from app.proel_match_key import (
     live_head as _live_head,
     match_head as _match_head,
@@ -58,6 +69,7 @@ from app.proel_fields import (
     PHASE_LIVE,
     PHASE_LOCKED,
     PHASE_POST,
+    has_manual_exams,
     PHASE_PRE,
     PathRejected,
     UnknownPath,
@@ -689,23 +701,39 @@ async def patch_proel_state(
     # Zdarzenie po transakcji i tylko gdy coś naprawdę weszło. Klucz z pierwszego
     # op_id gasi ponowienie z outboxa: te same operacje nie dopiszą się drugi raz.
     if fresh_ops:
-        journal_event = (
-            {
-                "post.shortResultSent": "zprp.summary_sent",
-                "post.fullDataSent": "zprp.full_data_sent",
-                "post.protocolSent": "zprp.attachment_sent",
-            }.get(changed_paths[0], "field.changed")
-            if len(changed_paths) == 1
-            else "field.changed"
+        # Badania mają własne zdarzenia z nazwiskiem zawodnika - „Zmiana pól:
+        # badania zawodnika nr 77" nie mówiła administratorowi, KOGO to dotyczy.
+        exam_events = exam_events_from_ops(
+            [(o.path, o.value) for o in req.ops if str(o.op_id or "") in fresh_ops]
         )
-        await log_match_event(
-            match_number=match_number,
-            event=journal_event,
-            actor=actor,
-            zprp_match_id=str(state.get("zprp_match_id") or ""),
-            details={"paths": changed_paths, "rev": final_rev},
-            event_key=f"patch:{match_number}:{fresh_ops[0]}",
-        )
+        if exam_events:
+            for journal_event, details in exam_events:
+                await log_match_event(
+                    match_number=match_number,
+                    event=journal_event,
+                    actor=actor,
+                    zprp_match_id=str(state.get("zprp_match_id") or ""),
+                    details={**details, "rev": final_rev},
+                    event_key=f"patch:{match_number}:{fresh_ops[0]}:{journal_event}",
+                )
+        else:
+            journal_event = (
+                {
+                    "post.shortResultSent": "zprp.summary_sent",
+                    "post.fullDataSent": "zprp.full_data_sent",
+                    "post.protocolSent": "zprp.attachment_sent",
+                }.get(changed_paths[0], "field.changed")
+                if len(changed_paths) == 1
+                else "field.changed"
+            )
+            await log_match_event(
+                match_number=match_number,
+                event=journal_event,
+                actor=actor,
+                zprp_match_id=str(state.get("zprp_match_id") or ""),
+                details={"paths": changed_paths, "rev": final_rev},
+                event_key=f"patch:{match_number}:{fresh_ops[0]}",
+            )
 
     return {
         "ok": True,
@@ -1012,8 +1040,25 @@ async def create_proel_match(
     # 401 na zapisie bloba oznaczałby ciche gubienie meczu.
     actor = await soft_actor(x_judge_id, x_installation_id, x_actor_name)
 
+    absorbed: Dict[str, Any] = {}
     async with database.transaction():
         state = await _fetch_state(req.match_number, for_update=True)
+        # Ręczne potwierdzenia z ekranu konfiguracji jadą WYŁĄCZNIE w kartach
+        # zawodników. Wciągamy je do overlaya PRZED reprojekcją (po niej karty
+        # niosłyby już stan overlaya) - stąd bierze się wpis „kto i kiedy" w
+        # dzienniku i stąd awans z bazy związku wie, o kogo pytać. Blob bez
+        # wiersza stanu (starsza aplikacja) dostaje go, gdy niesie taki ptaszek.
+        if state is None and has_manual_exams(req.data_json):
+            state = await ensure_state_row(req.match_number, req.data_json)
+        if state is not None:
+            absorbed = await absorb_blob_exams(
+                req.match_number,
+                state,
+                req.data_json,
+                actor,
+                str(x_installation_id or "").strip(),
+            )
+            state = absorbed["state"]
         # Nakładamy overlay JUŻ na pierwszy zapis: sędzia mógł potwierdzić
         # badania na długo przed tym, jak stolikowy w ogóle otworzył mecz.
         data_json = _reproject_blob(state, copy.deepcopy(req.data_json))
@@ -1046,6 +1091,16 @@ async def create_proel_match(
         app_version=x_app_version,
         ip=_client_ip(request, x_forwarded_for),
     )
+    await journal_absorbed(
+        req.match_number,
+        zprp_id,
+        absorbed,
+        actor,
+        app_version=x_app_version,
+        ip=_client_ip(request, x_forwarded_for),
+    )
+    # Awans z bazy związku idzie W TLE - zapis meczu nie czeka na cudzy serwer.
+    kick_promotion(req.match_number)
 
     return {"success": True}
 
@@ -1160,6 +1215,10 @@ async def update_proel_match(
     x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
     authorization: Optional[str] = Header(None),
 ):
+    # Aktor MIĘKKO, jeden na całą trasę: podpisuje potwierdzenia badań
+    # wchłonięte z bloba (patrz `absorb_blob_exams`).
+    actor = await soft_actor(x_judge_id, x_installation_id, x_actor_name)
+    absorbed: Dict[str, Any] = {}
     # Cała ścieżka w JEDNEJ transakcji: blokada wiersza stanu (`FOR UPDATE`)
     # działa tylko wewnątrz transakcji, a reprojekcja musi widzieć overlay
     # dokładnie taki, jaki obowiązuje w chwili zapisu bloba.
@@ -1273,6 +1332,20 @@ async def update_proel_match(
                     authorization=authorization,
                 )
 
+            # Ręczne potwierdzenia badań z kart zawodników - do overlaya PRZED
+            # reprojekcją, ten sam powód i ta sama kolejność, co przy `POST`.
+            if state is None and has_manual_exams(req.data_json):
+                state = await ensure_state_row(match_number, req.data_json)
+            if state is not None:
+                absorbed = await absorb_blob_exams(
+                    match_number,
+                    state,
+                    req.data_json,
+                    actor,
+                    str(x_installation_id or "").strip(),
+                )
+                state = absorbed["state"]
+
             projected = _reproject_blob(state, copy.deepcopy(req.data_json))
 
             to_update: dict = {"data_json": projected}
@@ -1355,12 +1428,24 @@ async def update_proel_match(
             await log_match_event(
                 match_number=match_number,
                 event=event,
-                actor=await soft_actor(x_judge_id, x_installation_id, x_actor_name),
+                actor=actor,
                 zprp_match_id=incoming_id or known_id,
                 details={"from": current_status, "to": final_status},
                 app_version=x_app_version,
                 ip=_client_ip(request, x_forwarded_for),
             )
+
+    await journal_absorbed(
+        match_number,
+        incoming_id or known_id,
+        absorbed,
+        actor,
+        app_version=x_app_version,
+        ip=_client_ip(request, x_forwarded_for),
+    )
+    # Awans z bazy związku idzie W TLE, z ryglem czasu w środku - blob
+    # przychodzi co minutę, a związek pytamy najwyżej co pięć.
+    kick_promotion(match_number)
 
     return {"success": True}
 

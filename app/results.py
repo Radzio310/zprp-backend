@@ -5513,6 +5513,57 @@ async def _record_protocol_audit(row: Dict[str, Any]) -> None:
         )
 
 
+async def _with_exam_overlay(data_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Blob DO WYDRUKU z nałożonymi wpisami badań z overlaya.
+
+    Telefon generuje protokół ze SWOJEGO stanu, a ten o awansie z bazy związku
+    (`proel_exams`) ani o potwierdzeniu z drugiego urządzenia nie musi jeszcze
+    wiedzieć. Overlay jest źródłem prawdy o badaniach - nakładamy więc jego
+    wpisy na karty zawodników przed rysowaniem ptaszków, dokładnie tak, jak
+    robi to zapis bloba. TYLKO badania: reszta overlaya nie ma prawa podmieniać
+    tego, co sędzia widzi na ekranie i co podpisał odciskiem stanu.
+
+    Dwie odmowy, obie twarde: ćwiczenie i mecz testowy nie dostają cudzych
+    badań spod prawdziwego numeru, a wiersz stanu innego meczu o tym samym
+    numerze (inny sezon) jest cudzy - ten sam guard, co przy zapisie bloba.
+    Wszystko best-effort: protokół jest ważniejszy od swojej dekoracji.
+    """
+    mc = data_json.get("matchConfig") if isinstance(data_json, dict) else None
+    if not isinstance(mc, dict):
+        return data_json
+    if mc.get("isTest") or (mc.get("training") or {}).get("eventId"):
+        return data_json
+    number = str(mc.get("matchNumber") or "").strip()
+    if not number:
+        return data_json
+    try:
+        from sqlalchemy import select as _select
+
+        from app.db import database, proel_match_state
+        from app.proel_fields import project
+        from app.proel_match_key import match_id_conflict
+
+        row = await database.fetch_one(
+            _select(proel_match_state.c.fields_json, proel_match_state.c.zprp_match_id).where(
+                proel_match_state.c.match_number == number
+            )
+        )
+        if row is None:
+            return data_json
+        if match_id_conflict(str(row["zprp_match_id"] or ""), _zprp_match_id(data_json)):
+            return data_json
+        overlay = row["fields_json"]
+        if not isinstance(overlay, dict):
+            return data_json
+        exams = {path: entry for path, entry in overlay.items() if str(path).startswith("exam.")}
+        if not exams:
+            return data_json
+        return project(exams, copy.deepcopy(data_json))
+    except Exception:  # noqa: BLE001
+        logger.warning("protokół PDF: nie nałożono overlaya badań", exc_info=True)
+        return data_json
+
+
 @router.post(
     "/judge/results/protocol/pdf",
     summary="Generuj PDF z protokołu na podstawie data_json (ProEl) i szablonu XLSX",
@@ -5583,6 +5634,10 @@ async def generate_protocol_pdf(
         # zapisze stan, tylko bez dowodu działającego bez dostępu do bazy.
         signature = ""
         logger.warning("Nie udało się podpisać protokołu %s", audit_code, exc_info=True)
+
+    # Overlay badań na blob do wydruku - PO policzeniu odcisku stanu, bo odcisk
+    # opisuje to, co przysłał sędzia, a nie to, co dołożył serwer.
+    data_json = await _with_exam_overlay(data_json)
 
     core = _get_match_core(data_json)
     has_second_delegate = bool(core.get("delegate2"))

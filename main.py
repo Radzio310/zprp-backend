@@ -695,6 +695,7 @@ _standings_sync_task: asyncio.Task | None = None
 _email_grace_task: asyncio.Task | None = None
 _mp_snapshot_task: asyncio.Task | None = None
 _province_match_monitor_task: asyncio.Task | None = None
+_exam_promotion_task: asyncio.Task | None = None
 _province_offtime_sync_task: asyncio.Task | None = None
 _deploy_push_test_task: asyncio.Task | None = None
 
@@ -1160,7 +1161,7 @@ async def startup():
         logger.exception("❌ Walidacja konfiguracji e-mail nie powiodła się")
         raise
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task, _exam_promotion_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -1242,11 +1243,18 @@ async def startup():
     # odroczone w pamięci procesu zjadłby pierwszy restart Railway.
     from app.match_bombs import run_bomb_notice_sweep
     _bomb_notice_task = asyncio.create_task(run_bomb_notice_sweep())
+
+    # Ręczne potwierdzenia badań, które związek ma już jako „OK", awansują
+    # także w meczach, przy których nikt nie zapisuje już bloba (po ostatnim
+    # gwizdku, przed zatwierdzeniem) - patrz `app/proel_exams.py`.
+    from app.proel_exams import run_exam_promotion_sweep
+    _exam_promotion_task = asyncio.create_task(run_exam_promotion_sweep())
+    logger.info("✅ ProEl exam promotion sweep started")
     logger.info("✅ MP protocol snapshot scheduler started")
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task, _exam_promotion_task
 
     if _cleanup_task:
         _cleanup_task.cancel()
@@ -1273,6 +1281,13 @@ async def shutdown():
         _province_offtime_sync_task.cancel()
         try:
             await _province_offtime_sync_task
+        except asyncio.CancelledError:
+            pass
+
+    if _exam_promotion_task:
+        _exam_promotion_task.cancel()
+        try:
+            await _exam_promotion_task
         except asyncio.CancelledError:
             pass
 

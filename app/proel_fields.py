@@ -614,3 +614,328 @@ def live_signal(blob: Any) -> bool:
         if isinstance(v, list) and len(v) > 0:
             return True
     return False
+
+
+# ─────────── badania: co mówi baza związku i co przysłał blob ───────────
+#
+# Trzy pytania, wszystkie bez bazy i bez sieci (spięcie jest w `proel_exams`):
+#
+#  * jaki status badań daje rekord zawodnika z `pokaz_mecze_szczegoly.php`
+#    (bliźniak `parseExamMarkFromRoster` z BAZA/utils/playerExam.ts),
+#  * które ręczne potwierdzenia przyszły W BLOBIE, a overlay o nich nie wie -
+#    ekran konfiguracji zapisuje badania wyłącznie w kartach zawodników, więc
+#    takie potwierdzenie nie zostawiało śladu ani w overlayu, ani w dzienniku
+#    (SK/5, GAKIDOVA nr 77: ręczny ptaszek bez wpisu „kto i kiedy"),
+#  * które ręczne potwierdzenia baza związku ma już jako „OK" - to jest awans
+#    `manual -> zprp/wzpr`, który krata dopuszcza od zawsze, a nikt go nie robił.
+
+#: Wartości `badania_ZPRP` / `badania_WZPR` znaczące „OK". Szersze niż to, co
+#: API wysyła dziś, z tego samego powodu, co po stronie aplikacji.
+EXAM_OK_TOKENS = frozenset({"OK", "TAK", "1", "T", "Y", "YES"})
+
+#: Skąd wziął się wpis badań w overlayu (`src`). `patch` stawia trasa
+#: `/proel/patch`; te dwa są nowe i rozróżnialne, bo cofnięcie z bloba wolno
+#: przyjąć tylko wpisowi, który z bloba przyszedł.
+EXAM_SRC_BLOB = "blob"
+EXAM_SRC_ZPRP = "zprp"
+
+#: Strona w blobie -> klucz rosteru w odpowiedzi API. Zawsze nominalnie:
+#: `mapApiDetailsToBasics` buduje karty gospodarzy z `gosp` bez względu na
+#: znacznik zamiany gospodarza (`zamiana`), więc i tu nie ma czego obracać.
+ROSTER_KEY_BY_TEAM: Dict[str, str] = {"host": "gosp", "guest": "gosc"}
+
+
+def exam_mark_from_roster(raw: Any) -> str:
+    """Rekord zawodnika z API -> `zprp` / `wzpr` / `none`. ZPRP wygrywa z WZPR."""
+    if not isinstance(raw, dict):
+        return "none"
+
+    def ok(value: Any) -> bool:
+        return str(value or "").strip().upper() in EXAM_OK_TOKENS
+
+    if ok(raw.get("badania_ZPRP")):
+        return "zprp"
+    if ok(raw.get("badania_WZPR")):
+        return "wzpr"
+    return "none"
+
+
+def exam_path(team: str, number: Any) -> str:
+    """Ścieżka overlaya badań - ta sama, którą buduje `examPath` w aplikacji."""
+    return f"exam.{team}.#{str(number).strip()}"
+
+
+def card_number(card: Any) -> Optional[int]:
+    """Numer koszulki z karty albo rekordu API; poza 1-999 to „bez numeru"."""
+    raw = card.get("number", card.get("NrKoszulki")) if isinstance(card, dict) else None
+    try:
+        num = int(str(raw or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return num if 1 <= num <= 999 else None
+
+
+def _player_name(card: Any) -> str:
+    if not isinstance(card, dict):
+        return ""
+    full = str(card.get("fullName") or "").strip()
+    if full:
+        return full
+    # Rekord API: nazwisko i imię osobno, w tej kolejności - jak w kartach.
+    return " ".join(
+        part
+        for part in (
+            str(card.get("nazwisko") or "").strip(),
+            str(card.get("imie") or "").strip(),
+        )
+        if part
+    )
+
+
+def blob_exam_cards(blob: Any) -> List[Dict[str, Any]]:
+    """Karty zawodników z numerem: `{path, team, number, name, mark}`.
+
+    Karta bez numeru nie ma ścieżki w overlayu, więc zostaje poza tym
+    mechanizmem - dokładnie tak, jak w arkuszu, który bez numeru zapisuje
+    badanie wyłącznie u siebie.
+    """
+    if not isinstance(blob, dict):
+        return []
+    out: List[Dict[str, Any]] = []
+    # Odczyt BEZ `_cards`: tamto przez `_cfg` dopisuje pusty `matchConfig` do
+    # bloba, a tu dostajemy prosto obiekt zadania - nic w nim nie zmieniamy.
+    config = blob.get("matchConfig")
+    if not isinstance(config, dict):
+        return []
+    for team in ROSTER_KEY_BY_TEAM:
+        cards = config.get(f"{team}PlayerCards")
+        for card in cards if isinstance(cards, list) else []:
+            number = card_number(card)
+            if number is None:
+                continue
+            mark = str((card or {}).get("exam") or "none").strip().lower()
+            out.append(
+                {
+                    "path": exam_path(team, number),
+                    "team": team,
+                    "number": number,
+                    "name": _player_name(card),
+                    "mark": mark if mark in EXAM_RANK else "none",
+                }
+            )
+    return out
+
+
+def has_manual_exams(blob: Any) -> bool:
+    return any(card["mark"] == "manual" for card in blob_exam_cards(blob))
+
+
+def live_exam_entries(overlay: Any) -> Dict[str, Dict[str, Any]]:
+    """Żywe wpisy badań z overlaya: ścieżka -> `{team, number, name, mark, entry}`."""
+    out: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(overlay, dict):
+        return out
+    for path, entry in overlay.items():
+        if not isinstance(entry, dict) or entry.get("superseded_at"):
+            continue
+        try:
+            spec, params = parse_path(str(path))
+        except UnknownPath:
+            continue
+        if spec.name != "exam":
+            continue
+        value = entry.get("v") if isinstance(entry.get("v"), dict) else {}
+        mark = str(value.get("mark") or "none").strip().lower()
+        out[str(path)] = {
+            "team": params["team"],
+            "number": int(params["num"]),
+            "name": str(value.get("name") or "").strip(),
+            "mark": mark if mark in EXAM_RANK else "none",
+            "entry": entry,
+        }
+    return out
+
+
+def manual_exam_candidates(overlay: Any, blob: Any) -> List[Dict[str, Any]]:
+    """Ręczne potwierdzenia, o które warto zapytać związek.
+
+    Z overlaya i z kart bloba razem: potwierdzenie z ekranu konfiguracji bywa
+    tylko w kartach (starsza aplikacja, blob sprzed wchłonięcia), a to ono
+    najczęściej czeka na awans.
+    """
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    live = live_exam_entries(overlay)
+    for path, item in live.items():
+        if item["mark"] != "manual":
+            continue
+        seen.add(path)
+        out.append(
+            {"path": path, "team": item["team"], "number": item["number"], "name": item["name"]}
+        )
+    for card in blob_exam_cards(blob):
+        if card["mark"] != "manual" or card["path"] in seen:
+            continue
+        current = live.get(card["path"])
+        if current is not None and exam_rank(current["mark"]) > exam_rank("manual"):
+            continue  # overlay już wie lepiej
+        seen.add(card["path"])
+        out.append(
+            {"path": card["path"], "team": card["team"], "number": card["number"], "name": card["name"]}
+        )
+    return out
+
+
+def roster_marks(payload: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """Statusy badań z odpowiedzi API, po stronach bloba: `host` / `guest`."""
+    out: Dict[str, List[Dict[str, Any]]] = {team: [] for team in ROSTER_KEY_BY_TEAM}
+    if not isinstance(payload, dict):
+        return out
+    for team, key in ROSTER_KEY_BY_TEAM.items():
+        roster = payload.get(key)
+        if isinstance(roster, dict):
+            players = list(roster.values())
+        elif isinstance(roster, list):
+            players = roster
+        else:
+            players = []
+        for raw in players:
+            if not isinstance(raw, dict):
+                continue
+            out[team].append(
+                {
+                    "number": card_number(raw),
+                    "name": _player_name(raw),
+                    "mark": exam_mark_from_roster(raw),
+                }
+            )
+    return out
+
+
+def _same_person(a: Any, b: Any) -> bool:
+    """To samo nazwisko mimo innej kolejnosci czlonow (NAZWISKO Imie / Imie NAZWISKO)."""
+    left, right = normalize_name(a), normalize_name(b)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return set(left.split()) == set(right.split())
+
+
+def promotions_for(
+    candidates: List[Dict[str, Any]],
+    marks_by_team: Dict[str, List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Które ręczne znaczniki związek już zastąpił własnym statusem.
+
+    Dopasowanie NAJPIERW po numerze, potem po znormalizowanym nazwisku - ta
+    sama para kluczy, co w `project_exam`. Numer w rosterze API jest
+    wiarygodny, a nazwisko ratuje zawodnika, któremu numer zmieniono tuż
+    przed gwizdkiem.
+    """
+    out: List[Dict[str, Any]] = []
+    for cand in candidates:
+        players = marks_by_team.get(str(cand.get("team") or ""), []) or []
+        hit = None
+        number = cand.get("number")
+        want = str(cand.get("name") or "")
+        if number is not None:
+            by_number = next((p for p in players if p.get("number") == number), None)
+            # Numer to TA SAMA OSOBA tylko wtedy, gdy nazwisko sie zgadza (albo
+            # ktoras strona nazwiska nie ma). Sprawdzone na SK/5: karta z
+            # wymyslonym nazwiskiem i numerem 5 dostawalaby "OK" prawdziwej
+            # zawodniczki z numerem 5 - awans na cudzych badaniach.
+            if by_number is not None and (
+                not normalize_name(want)
+                or not normalize_name(by_number.get("name"))
+                or _same_person(want, by_number.get("name"))
+            ):
+                hit = by_number
+        if hit is None and normalize_name(want):
+            hit = next((p for p in players if _same_person(want, p.get("name"))), None)
+        if hit is None or str(hit.get("mark") or "none") not in EXAM_FROM_API:
+            continue
+        out.append(
+            {
+                "path": cand["path"],
+                "team": cand["team"],
+                "number": number,
+                "name": str(cand.get("name") or hit.get("name") or "").strip(),
+                "mark": str(hit["mark"]),
+            }
+        )
+    return out
+
+
+def exam_entry(
+    mark: str,
+    name: str,
+    *,
+    rev: int,
+    at: str,
+    by: Dict[str, Any],
+    src: str,
+) -> Dict[str, Any]:
+    """Wpis overlaya w kształcie, jaki zapisuje `/proel/patch`."""
+    return {
+        "v": {"mark": str(mark), "name": str(name or "").strip()},
+        "rev": int(rev),
+        "at": str(at),
+        "by": dict(by or {}),
+        "src": str(src),
+        "superseded_at": None,
+    }
+
+
+def adopt_blob_exams(
+    overlay: Any,
+    blob: Any,
+    *,
+    rev: int,
+    at: str,
+    by: Dict[str, Any],
+    install: str,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Wciągnij do overlaya ręczne potwierdzenia z kart bloba. KOPIA, nie zmiana.
+
+    Reguły, obie ostre:
+
+    * ręczny ptaszek na karcie wchodzi tylko tam, gdzie overlay nie ma nic
+      albo ma mniej (`none`); wyższy stopień z API zostaje,
+    * karta BEZ badania cofa wyłącznie wpis, który przyszedł z bloba
+      (`src == "blob"`) i to z TEGO SAMEGO urządzenia. Snapshot z drugiego
+      telefonu, który o potwierdzeniu nie wie, nie ma prawa go skasować -
+      to jest dokładnie ta sytuacja, dla której powstała reprojekcja.
+
+    Zwraca (overlay po zmianie, potwierdzone, cofnięte); listy niosą
+    `{team, number, name}` do dziennika.
+    """
+    out = dict(overlay) if isinstance(overlay, dict) else {}
+    confirmed: List[Dict[str, Any]] = []
+    withdrawn: List[Dict[str, Any]] = []
+    live = live_exam_entries(out)
+    own = str(install or "").strip()
+    for card in blob_exam_cards(blob):
+        current = live.get(card["path"])
+        player = {"team": card["team"], "number": card["number"], "name": card["name"]}
+        if card["mark"] == "manual":
+            if current is not None and exam_rank(current["mark"]) >= exam_rank("manual"):
+                continue
+            out[card["path"]] = exam_entry(
+                "manual", card["name"], rev=rev, at=at, by=by, src=EXAM_SRC_BLOB
+            )
+            confirmed.append(player)
+        elif card["mark"] == "none":
+            if current is None or current["mark"] != "manual":
+                continue
+            entry = current["entry"]
+            if str(entry.get("src") or "") != EXAM_SRC_BLOB:
+                continue
+            author = str(((entry.get("by") or {}).get("install")) or "").strip()
+            if not own or author != own:
+                continue
+            out[card["path"]] = exam_entry(
+                "none", card["name"], rev=rev, at=at, by=by, src=EXAM_SRC_BLOB
+            )
+            withdrawn.append(player)
+    return out, confirmed, withdrawn

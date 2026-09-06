@@ -27,7 +27,7 @@ dopisywanym logu gubi i dubluje wiersze.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy import exists, func, literal, select
@@ -39,6 +39,7 @@ from app.proel_auth import (
     is_synthetic_judge_id,
     proel_actor,
 )
+from app.proel_fields import UnknownPath, parse_path
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,11 @@ EVENT_LABELS: Dict[str, str] = {
     # rozgrywek - stąd inna rodzina zdarzenia niż `zprp.*`.
     "match.sms_sent": "Zgłoszenie wyniku SMS-em",
     "match.reopened": "Wznowienie meczu",
+    # Badania mają własne zdarzenia, a nie „Zmianę pól": administrator pyta
+    # „kto potwierdził nr 77 i kiedy", nie „które ścieżki overlaya się zmieniły".
+    "exam.confirmed": "Potwierdzenie badań",
+    "exam.withdrawn": "Cofnięcie potwierdzenia badań",
+    "exam.promoted": "Badania potwierdzone przez ZPRP",
 }
 
 
@@ -207,6 +213,61 @@ def _join_fields(paths: List[str], limit: int = 3) -> str:
     return f"{', '.join(named[:limit])} i {rest} {tail} więcej"
 
 
+#: Skąd przyszło potwierdzenie - dziennik ma odpowiadać na „gdzie to zrobiono".
+_EXAM_SOURCE_NOTES: Dict[str, str] = {
+    "config": "w ekranie konfiguracji",
+    "sheet": "w arkuszu „Sprawdź badania”",
+}
+
+
+def exam_players_sentence(players: Any) -> str:
+    """„nr 77 GAKIDOVA Ivana (gospodarzy), nr 3 NOWAK Anna (gości)"."""
+    parts: List[str] = []
+    for raw in players or []:
+        if not isinstance(raw, dict):
+            continue
+        number = str(raw.get("number") or "").strip()
+        name = str(raw.get("name") or "").strip()
+        team = _TEAM_NAMES.get(str(raw.get("team") or ""), "")
+        who = " ".join(x for x in (f"nr {number}" if number else "", name) if x)
+        if team:
+            who = f"{who} ({team})" if who else team
+        if who:
+            parts.append(who)
+    return ", ".join(parts)
+
+
+def exam_events_from_ops(changed: List[Tuple[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+    """Przyjęte operacje patcha -> zdarzenia badań, albo `[]`, gdy to nie same badania.
+
+    Patch mieszany (badania i podpis w jednym) zostaje zwykłą „Zmianą pól" -
+    lepsza jedna ogólna prawda niż dwa wpisy, z których jeden gubi część.
+    """
+    confirmed: List[Dict[str, Any]] = []
+    withdrawn: List[Dict[str, Any]] = []
+    for path, value in changed:
+        try:
+            spec, params = parse_path(str(path))
+        except UnknownPath:
+            return []
+        if spec.name != "exam":
+            return []
+        v = value if isinstance(value, dict) else {}
+        player = {
+            "team": params.get("team", ""),
+            "number": params.get("num", ""),
+            "name": str(v.get("name") or "").strip(),
+        }
+        mark = str(v.get("mark") or "none").strip().lower()
+        (withdrawn if mark == "none" else confirmed).append(player)
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    if confirmed:
+        out.append(("exam.confirmed", {"players": confirmed, "source": "sheet"}))
+    if withdrawn:
+        out.append(("exam.withdrawn", {"players": withdrawn, "source": "sheet"}))
+    return out
+
+
 _STATUS_NAMES: Dict[str, str] = {
     "in_progress": "w toku",
     "finished": "zakończony",
@@ -250,6 +311,17 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
     if ev == "protocol.pdf_generated":
         code = str(d.get("audit_code") or "").strip()
         return f"Kod dziennika protokołów: {code}" if code else ""
+
+    if ev in ("exam.confirmed", "exam.withdrawn", "exam.promoted"):
+        who = exam_players_sentence(d.get("players"))
+        if ev == "exam.promoted":
+            head = "Baza związku potwierdziła badania"
+            tail = " - ręczny znacznik zastąpiony"
+            return f"{head}: {who}{tail}" if who else f"{head}{tail}"
+        head = "Potwierdzono ręcznie" if ev == "exam.confirmed" else "Cofnięto potwierdzenie"
+        note = _EXAM_SOURCE_NOTES.get(str(d.get("source") or ""), "")
+        sentence = f"{head}: {who}" if who else f"{head} badania"
+        return f"{sentence} - {note}" if note else sentence
 
     if ev in _SENT_EVENT_BY_PATH.values():
         paths = [str(x) for x in (d.get("paths") or []) if str(x or "").strip()]
