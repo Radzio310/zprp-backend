@@ -565,6 +565,34 @@ async def list_json_files():
     ]
     return ListJsonFilesResponse(files=files)
 
+@router.get("/json_files/manifest", summary="Lekki spis plikow JSON (bez tresci)")
+async def json_files_manifest():
+    """
+    Sam spis: klucz, czy wlaczony i kiedy zmieniony - bez zawartosci.
+
+    Aplikacja odpytuje to co godzine, zeby wiedziec, czy w ogole jest po co
+    pobierac przepisy albo regulaminy. Pelna lista (/json_files) niesie tresc
+    KAZDEGO pliku, czyli grubo ponad megabajt - odpytywanie jej w tle byloby
+    marnowaniem transferu po obu stronach.
+
+    MUSI byc zadeklarowane PRZED "/json_files/{key}", bo inaczej FastAPI
+    potraktuje "manifest" jako nazwe pliku.
+    """
+    rows = await database.fetch_all(
+        select(json_files.c.key, json_files.c.enabled, json_files.c.updated_at)
+    )
+    return {
+        "files": [
+            {
+                "key": r["key"],
+                "enabled": bool(r["enabled"]),
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.get("/json_files/{key}", response_model=GetJsonFileResponse, summary="Pobierz konkretny plik JSON")
 async def get_json_file(key: str):
     row = await database.fetch_one(select(json_files).where(json_files.c.key == key))
