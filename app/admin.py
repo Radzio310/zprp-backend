@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 import bcrypt
+from app.okreg_rates_manifest import build_rates_manifest
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, insert, update, delete, and_, or_
@@ -652,6 +653,15 @@ def _row_to_rate_item(r: dict) -> OkregRateItem:
     )
 
 # UWAGA: ten endpoint MUSI być przed /okreg_rates/{province}
+@router.get("/okreg_rates/manifest", summary="Lekki indeks zmian stawek, bez tabel kwot")
+async def get_okreg_rates_manifest():
+    rows = await database.fetch_all(select(
+        okreg_rates.c.id, okreg_rates.c.province, okreg_rates.c.enabled,
+        okreg_rates.c.valid_from, okreg_rates.c.valid_to, okreg_rates.c.updated_at,
+    ))
+    return JSONResponse(build_rates_manifest(rows, _warsaw_today()), headers={"Cache-Control": "no-store"})
+
+
 @router.get("/okreg_rates/all", response_model=ListOkregRateVersionsResponse, summary="Lista WSZYSTKICH wersji stawek (admin/debug)")
 async def list_okreg_rates_all(province: str = ""):
     q = select(okreg_rates)

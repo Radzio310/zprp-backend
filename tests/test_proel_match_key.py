@@ -80,6 +80,9 @@ FULL_BLOB = {
         "hostPlayers": ["7", "9", "11"],
         "hostPlayerCards": [{"number": 7, "license": "12345"}],
         "referee1": "NOWAK Adam",
+        "secretary": "KORNEK Mikołaj",
+        "venueCity": "Siemianowice Śląskie",
+        "extras": {"hostTeamSignature": "data:image/png;base64,AAAA"},
     },
 }
 
@@ -93,11 +96,19 @@ def test_naglowek_niesie_to_co_rysuje_wiersz_listy():
     assert head["date"].startswith("2026-08-14")
 
 
-def test_naglowek_nie_niesie_danych_osobowych_ani_przebiegu():
+def test_naglowek_niesie_obsade_i_miejsce_pod_wyszukiwarke():
+    """Archiwum szuka po sędziach i miastach także w Bazie ProEl (2026-09-06)."""
+    head = match_head(FULL_BLOB)
+    assert head["matchConfig"]["referee1"] == "NOWAK Adam"
+    assert head["matchConfig"]["secretary"] == "KORNEK Mikołaj"
+    assert head["matchConfig"]["venueCity"] == "Siemianowice Śląskie"
+
+
+def test_naglowek_nie_niesie_danych_zawodnikow_podpisow_ani_przebiegu():
     head = match_head(FULL_BLOB)
     assert "hostPlayers" not in head["matchConfig"]
     assert "hostPlayerCards" not in head["matchConfig"]
-    assert "referee1" not in head["matchConfig"]
+    assert "extras" not in head["matchConfig"]
     assert "protocol" not in head
     assert "hostPlayerStats" not in head
 

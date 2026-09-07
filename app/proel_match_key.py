@@ -25,6 +25,19 @@ HEAD_CONFIG_KEYS = (
     "hostTeamName",
     "guestTeamName",
     "isTest",
+    # Obsada i miejsce (od 2026-09-06): to, co stoi na kafelku archiwum i po
+    # czym sędzia szuka meczu. W bazie związku są publiczne; dane osobowe
+    # zawodników - składy, licencje, badania - i podpisy (`extras`) nadal
+    # zostają za drzwiami.
+    "referee1",
+    "referee2",
+    "delegate",
+    "delegate2",
+    "secretary",
+    "timekeeper",
+    "venueCity",
+    "venueAddress",
+    "hala",
 )
 
 #: Pola najwyższego poziomu bloba, które niesie nagłówek listy.
@@ -121,7 +134,6 @@ HEAD_LIVE_CONFIG_KEYS = HEAD_CONFIG_KEYS + (
     "guestJerseyColor",
     "halfTime",
     "date",
-    "hala",
 )
 
 
