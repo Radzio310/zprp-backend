@@ -42,6 +42,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from app.deps import Settings, get_rsa_keys, get_settings
 from app.utils import fetch_with_correct_encoding
+from app.protocol_category import HeaderMarks, header_marks
 from starlette.background import BackgroundTask
 
 from openpyxl.styles import Alignment, Font
@@ -3903,6 +3904,39 @@ def _set_yes_no_x(ws, *, yes_cell: str, no_cell: str, value: Any, yes_when_true:
         ws[no_cell].value = "X" if v else ""
 
 
+def _mark_protocol_header(ws_raw, *, match_number: Any, player_names: List[Any]) -> HeaderMarks:
+    """
+    Krzyżyki i napisy kratki „ZAWODY" w nagłówku - patrz `app/protocol_category.py`.
+
+    Adresy w znacznikach są FIZYCZNE (jak w Excelu), dlatego piszemy wprost do
+    arkusza, a nie przez `ShiftedWS`. Nadpisany napis (np. LIGA CENTRALNA w
+    miejscu SUPERLIGA) dostaje policzony rozmiar czcionki, a do tego
+    `shrinkToFit` jak nazwiska oficjeli - gdyby DIN Pro okazał się szerszy od
+    oszacowania, LibreOffice zmniejszy go jeszcze sam. Napis dwuwierszowy
+    dostaje zamiast tego zawijanie (Excel nie łączy obu ustawień).
+    """
+    marks = header_marks(match_number, player_names)
+    for ref in marks.crosses:
+        cell = ws_raw[ref]
+        cell.value = "X"
+        alignment = copy.copy(cell.alignment)
+        alignment.horizontal = "center"
+        alignment.vertical = "center"
+        cell.alignment = alignment
+    for label in marks.labels:
+        cell = ws_raw[label.cell]
+        cell.value = label.text
+        font = copy.copy(cell.font)
+        font.sz = label.size_pt
+        cell.font = font
+        alignment = copy.copy(cell.alignment)
+        alignment.wrapText = label.wrap
+        alignment.shrinkToFit = not label.wrap
+        alignment.vertical = "center"
+        cell.alignment = alignment
+    return marks
+
+
 async def _fetch_png_bytes(url: str) -> bytes:
     """
     Pobiera obraz PNG/JPG z URL. Zwraca bytes albo b'' gdy brak/nieprawidłowy.
@@ -5845,9 +5879,21 @@ async def generate_protocol_pdf(
         ws["AY1"].value = core["matchNumber"]
         ws["AL4"].value = core.get("venueAddress") or ""
         ws["C4"].value = core["hostName"]
-        ws["D9"].value = core["hostName"]
         ws["C7"].value = core["guestName"]
-        ws["D33"].value = core["guestName"]
+        # Nazwa drużyny w wierszach 9 i 33: scalenie zaczyna się od fizycznej
+        # kolumny D (logicznie C), tuż za etykietą „A (nazwa)" w B:C - bliżej
+        # lewej krawędzi niż dawne E:U. Szablony mają to scalenie od 2026-09-07.
+        ws["C9"].value = core["hostName"]
+        ws["C33"].value = core["guestName"]
+
+        # Kratka „ZAWODY": rodzaj rozgrywek, wiek i płeć z numeru meczu, a gdy
+        # numer nie ma litery płci - ze składów obu drużyn. Adresy fizyczne,
+        # stąd `ws_raw`. Nierozpoznany numer zostawia kratkę pustą jak dotąd.
+        _mark_protocol_header(
+            ws_raw,
+            match_number=core["matchNumber"],
+            player_names=[*host_names.values(), *guest_names.values()],
+        )
 
         ws["AL6"].value = str(core["scoreHost"])
         ws["AQ6"].value = str(core["scoreGuest"])
