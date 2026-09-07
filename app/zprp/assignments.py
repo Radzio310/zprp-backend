@@ -20,7 +20,12 @@ from pydantic import BaseModel
 
 from app.deps import Settings, get_settings, get_rsa_keys
 from app.match_market_rules import TRADEABLE_SLOTS as _TRADEABLE_SLOTS
-from app.match_market_rules import names_match
+from app.match_market_rules import (
+    assignability_message,
+    crew_label,
+    names_match,
+    season_start_year,
+)
 from app.utils import fetch_with_correct_encoding
 from app.zprp.schedule import _parse_matches_table
 
@@ -734,6 +739,7 @@ async def probe_assignment_rights(
     *,
     slot: str = "",
     user: str = "",
+    referer: str = "",
     log_prefix: str = "obsada/probe",
 ) -> Dict[str, Any]:
     """Czy TO konto może ustawić obsadę TEGO meczu - pytanie zadane wprost ZPRP.
@@ -751,6 +757,11 @@ async def probe_assignment_rights(
 
     Zwraca `assignable`, kod powodu i zdanie dla człowieka. NIE rzuca wyjątkiem
     przy odmowie - odmowa jest tu odpowiedzią, nie awarią.
+
+    `user` i `referer` to to, co niesie przycisk „Sędziowie" na stronie meczu
+    (pole ukryte i adres strony); trasa sędziego podaje je, żeby zapytanie
+    wyglądało jak z przeglądarki. `slots` w odpowiedzi to zestawienie szóstki
+    gniazd (kto stoi, ile opcji) - dla raportu w panelu, nie do zapisu.
     """
     _, html = await fetch_with_correct_encoding(
         client,
@@ -758,10 +769,18 @@ async def probe_assignment_rights(
         method="POST",
         data={"IdZawody": id_zawody, "akcja": "UstawSedziow", "user": user},
         cookies=cookies,
+        headers={"Referer": referer} if referer else None,
     )
     _log_html(f"{log_prefix} (probe form)", html)
     parsed = _parse_referee_form(html)
     slots = parsed.get("slots") or {}
+    summary = {
+        label: {
+            "holder": _selected_name(slots.get(label, {})),
+            "options": len(slots.get(label, {}).get("options") or []),
+        }
+        for label in SLOT_TO_SELECT
+    }
 
     wanted = str(slot or "").strip()
     labels = (wanted,) if wanted in _PROBE_SLOTS else _PROBE_SLOTS
@@ -785,6 +804,7 @@ async def probe_assignment_rights(
             ),
             "holder": "",
             "option_count": 0,
+            "slots": {},
             "fetched_at": _now_iso(),
         }
 
@@ -799,6 +819,7 @@ async def probe_assignment_rights(
             ),
             "holder": holder,
             "option_count": 0,
+            "slots": summary,
             "fetched_at": _now_iso(),
         }
 
@@ -808,6 +829,7 @@ async def probe_assignment_rights(
         "message": "",
         "holder": holder,
         "option_count": max(counts.values()),
+        "slots": summary,
         "fetched_at": _now_iso(),
     }
 
@@ -830,10 +852,12 @@ async def apply_referee_assignment(
     changes: Dict[str, Tuple[Optional[str], Optional[str]]],
     *,
     user: str = "",
+    referer: str = "",
     keep_hide_s: bool = False,
     keep_hide_d: bool = False,
     expect: Optional[Tuple[str, str]] = None,
     require_name_match: bool = False,
+    forbid_elsewhere: str = "",
     log_prefix: str = "obsada/save",
 ) -> Dict[str, Any]:
     """Zapisuje obsadę meczu w ZPRP. JEDYNA droga zapisu w całej aplikacji.
@@ -864,7 +888,18 @@ async def apply_referee_assignment(
     zna i wysyła pustą - a pusta wartość w tym formularzu nie znaczy „zostaw",
     tylko „wyczyść gniazdo". Sędzia, którego ZPRP nie dopuszcza do tych
     rozgrywek, skasowałby w ten sposób obsadę zamiast ją przejąć.
+
+    `forbid_elsewhere` to nazwisko, które NIE MA PRAWA stać w żadnym innym
+    gnieździe tego meczu - dla giełdy nazwisko chętnego. Formularz niesie całą
+    szóstkę, więc to jedyne miejsce, które widzi obsadę taką, jaka jest w
+    bazie związku W TEJ SEKUNDZIE: chętny mógł wejść do tej obsady po
+    zgłoszeniu (inną wymianą albo ręcznie w ZPRP), a jeden człowiek nie stanie
+    w dwóch gniazdach. Odmowa ma własny kod, bo nie jest kolizją terminarza.
+
+    `referer` to adres strony meczu, z której przeglądarka wysłałaby ten
+    formularz - trasa sędziego podaje go, żeby wysyłka wyglądała jak kliknięcie.
     """
+    headers = {"Referer": referer} if referer else None
     # Krok 1: wczytanie formularza, dokładnie tak jak zrobiłaby przeglądarka.
     # Stąd biorą się aktualne wartości i poprawne numery opcji.
     _, load_html = await fetch_with_correct_encoding(
@@ -873,9 +908,39 @@ async def apply_referee_assignment(
         method="POST",
         data={"IdZawody": id_zawody, "akcja": "UstawSedziow", "user": user},
         cookies=cookies,
+        headers=headers,
     )
     _log_html(f"{log_prefix} step1 (load form)", load_html)
     current = _parse_referee_form(load_html)
+
+    if forbid_elsewhere:
+        touched = {
+            SELECT_TO_SLOT.get(sel, sel)
+            for sel, (val, _name) in changes.items()
+            if val is not None
+        }
+        for slot_label, slot_data in current["slots"].items():
+            if slot_label in touched:
+                continue
+            holder = _selected_name(slot_data)
+            if holder and _same_person(holder, forbid_elsewhere):
+                logger.warning(
+                    "%s: %r stoi juz w gniezdzie %s - zapis wstrzymany",
+                    log_prefix, forbid_elsewhere, slot_label,
+                )
+                return {
+                    "success": False,
+                    "code": "ALREADY_IN_CREW",
+                    "fetched_at": _now_iso(),
+                    "current_name": holder,
+                    "role": slot_label,
+                    "verified_slots": {},
+                    "error": (
+                        f"{forbid_elsewhere} stoi już w tym meczu jako "
+                        f"{crew_label(slot_label)} - jeden człowiek nie stanie w "
+                        "dwóch gniazdach."
+                    ),
+                }
 
     if expect:
         expect_select, expect_name = expect
@@ -990,6 +1055,7 @@ async def apply_referee_assignment(
         method="POST",
         data=form_data,
         cookies=cookies,
+        headers=headers,
     )
     _log_html(f"{log_prefix} step3 (submit)", html)
     parsed = _parse_referee_form(html)
@@ -1027,6 +1093,296 @@ async def apply_referee_assignment(
             for label in SELECT_TO_SLOT.values()
         },
         "error": None if verification_ok else "Zapis nie potwierdził się w bazie związku.",
+    }
+
+
+# =====================
+# Trasa sędziego - mecz spoza obsady okręgu
+# =====================
+#
+# Konto wojewódzkie nie ma meczu ligi centralnej w swoim terminarzu, ale ma go
+# na liście meczów SĘDZIEGO („Sędziowie i Delegaci" -> „Mecze sędziego") i
+# tam, na stronie meczu, stoi ten sam przycisk „Sędziowie", co przy meczach
+# własnych. Idziemy więc drogą, którą przeszedłby obsadowy w przeglądarce:
+# lista meczów sędziego -> strona meczu -> formularz. Po drodze bierzemy z
+# przycisku pole `user`, którego bezpośrednia sonda nie zna, i upewniamy się,
+# że konto w ogóle WIDZI ten mecz. Odmowa na którymś kroku ma własny kod, bo
+# „nie ma go na liście" i „jest, ale bez przycisku" to dwie różne wiadomości.
+#
+# Czy ZPRP PRZYJMIE zapis dla meczu spoza województwa konta, rozstrzyga
+# dopiero weryfikacja po wysyłce w `apply_referee_assignment` - trasa sama
+# niczego nie zapisuje.
+
+_RE_ID_ZAWODY = re.compile(r"IdZawody=(\d+)")
+
+
+def zprp_season_label(moment: Optional[datetime.datetime] = None) -> str:
+    """Bieżący sezon w zapisie listy meczów sędziego: „2026/2027".
+
+    Granica 1 września jest ta sama, co w giełdzie (`season_start_year`), więc
+    trasa i lista „moich meczów" pytają o ten sam sezon.
+    """
+    start = season_start_year(moment or datetime.datetime.now(datetime.timezone.utc))
+    return f"{start}/{start + 1}"
+
+
+def _parse_judge_matches_page(html: str) -> Dict[str, Any]:
+    """Lista meczów sędziego (`?a=statystyki&b=sedzia&NrSedzia=…`).
+
+    Oddaje nazwisko z nagłówka tabeli, sezony z filtra i wiersze meczów: numer,
+    IdZawody i odnośnik do strony meczu - dokładnie to, co obsadowy widzi i w
+    co by kliknął. Komórki daty i drużyn idą do raportu, nie do decyzji.
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    judge_name = ""
+    edit = soup.find("a", href=re.compile(r"b=edycja", re.I))
+    if edit is not None:
+        holder = edit.find_parent("td")
+        if holder is not None:
+            judge_name = _clean(
+                holder.get_text(" ", strip=True).replace(edit.get_text(strip=True), "")
+            )
+
+    seasons: List[Dict[str, Any]] = []
+    sel = soup.find("select", attrs={"name": "Filtr_sezon"})
+    for opt in (sel.find_all("option") if sel is not None else []):
+        value = _clean(opt.get("value") or "")
+        if value:
+            seasons.append(
+                {
+                    "value": value,
+                    "label": _clean(opt.get_text()),
+                    "selected": opt.has_attr("selected"),
+                }
+            )
+
+    rows: List[Dict[str, Any]] = []
+    for a_tag in soup.find_all("a", href=_RE_ID_ZAWODY):
+        href = (a_tag.get("href") or "").replace("&amp;", "&")
+        if not re.search(r"b=protokol", href, re.I):
+            continue
+        found = _RE_ID_ZAWODY.search(href)
+        code = _clean(a_tag.get_text())
+        if not found or not code:
+            continue
+        tr = a_tag.find_parent("tr")
+        cells = (
+            [_clean(td.get_text(" ", strip=True)) for td in tr.find_all("td")]
+            if tr is not None
+            else []
+        )
+        rows.append(
+            {
+                "id_zawody": found.group(1),
+                "code": code,
+                "href": href,
+                "when": cells[3] if len(cells) > 3 else "",
+                "host": cells[6] if len(cells) > 6 else "",
+                "guest": cells[8] if len(cells) > 8 else "",
+            }
+        )
+    return {"judge_name": judge_name, "seasons": seasons, "rows": rows}
+
+
+def _find_crew_form(html: str, id_zawody: str = "") -> Dict[str, Any]:
+    """Formularz „Sędziowie" na stronie meczu - obecność i pole `user`.
+
+    To ten sam formularz, który obsadowy widzi jako przycisk. Bez niego konto
+    nie ma czego kliknąć i trasa nie ma po co iść dalej.
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    wanted = str(id_zawody or "").strip()
+    for form in soup.find_all("form"):
+        if not re.search(r"UstawSedziow", form.get("action") or "", re.I):
+            continue
+        id_input = form.find("input", attrs={"name": "IdZawody"})
+        found = _clean(id_input.get("value") or "") if id_input is not None else ""
+        if wanted and found and found != wanted:
+            continue
+        user_input = form.find("input", attrs={"name": "user"})
+        return {
+            "present": True,
+            "user": _clean(user_input.get("value") or "") if user_input is not None else "",
+            "id_zawody": found,
+        }
+    return {"present": False, "user": "", "id_zawody": ""}
+
+
+async def walk_judge_route(
+    client: AsyncClient,
+    cookies: Dict[str, str],
+    *,
+    judge_id: str,
+    id_zawody: str = "",
+    match_code: str = "",
+    season_label: str = "",
+    page_cache: Optional[Dict[str, Any]] = None,
+    log_prefix: str = "obsada/trasa",
+) -> Dict[str, Any]:
+    """Droga obsadowego do meczu spoza terminarza okręgu - krok po kroku.
+
+    1. Lista meczów sędziego w bieżącym sezonie (`season_label` w zapisie
+       związku, „2026/2027"; filtr przestawiamy tylko, gdy strona otworzyła
+       inny). Mecz wskazuje `id_zawody`, a gdy go nie znamy - numer meczu.
+    2. Strona meczu z tej listy i jej przycisk „Sędziowie" z polem `user`.
+
+    Oddaje `ok`, kod (`OK` / `NOT_ON_LIST` / `NO_FORM`), zdanie dla człowieka,
+    `user` i `detail_path` do wysyłki formularza oraz `steps` do raportu w
+    panelu. NIE zapisuje niczego. `page_cache` pozwala sondzie nie pobierać
+    listy tego samego sędziego przy każdym z jego meczów.
+    """
+    steps: List[Dict[str, Any]] = []
+
+    def step(key: str, ok: bool, title: str, detail: str) -> None:
+        steps.append({"key": key, "ok": bool(ok), "title": title, "detail": detail})
+
+    def refusal(reason: str, message: str, **extra: Any) -> Dict[str, Any]:
+        out = {
+            "ok": False,
+            "reason": reason,
+            "message": message,
+            "user": "",
+            "id_zawody": "",
+            "code": "",
+            "judge_name": "",
+            "season": "",
+            "detail_path": "",
+            "when": "",
+            "host": "",
+            "guest": "",
+            "steps": steps,
+        }
+        out.update(extra)
+        return out
+
+    judge = str(judge_id or "").strip()
+    wanted_id = str(id_zawody or "").strip()
+    wanted_code = re.sub(r"\s+", "", str(match_code or "")).upper()
+    if not judge.isdigit():
+        step("list", False, "Mecze sędziego", "Brak numeru sędziego.")
+        return refusal(
+            "NOT_ON_LIST",
+            "Nie znam numeru sędziego, więc nie mam czyjej listy meczów otworzyć.",
+        )
+
+    async def load_list(season_value: str = "") -> Dict[str, Any]:
+        cache_key = f"{judge}|{season_value}"
+        if page_cache is not None and cache_key in page_cache:
+            return page_cache[cache_key]
+        path = f"/index.php?a=statystyki&b=sedzia&NrSedzia={judge}"
+        if season_value:
+            path += f"&Filtr_sezon={season_value}"
+        _, html = await fetch_with_correct_encoding(
+            client, path, method="GET", cookies=cookies
+        )
+        _log_html(f"{log_prefix} (lista meczow sedziego)", html)
+        page = _parse_judge_matches_page(html)
+        page["path"] = path
+        if page_cache is not None:
+            page_cache[cache_key] = page
+        return page
+
+    page = await load_list()
+    selected = next((s for s in page["seasons"] if s["selected"]), None)
+    if season_label and (selected is None or selected["label"] != season_label):
+        option = next((s for s in page["seasons"] if s["label"] == season_label), None)
+        if option is not None:
+            page = await load_list(option["value"])
+            selected = option
+    season = selected["label"] if selected else ""
+    whose = page["judge_name"] or f"sędziego {judge}"
+
+    row = None
+    for candidate in page["rows"]:
+        if wanted_id and candidate["id_zawody"] == wanted_id:
+            row = candidate
+            break
+        if (
+            not wanted_id
+            and wanted_code
+            and re.sub(r"\s+", "", candidate["code"]).upper() == wanted_code
+        ):
+            row = candidate
+            break
+    if row is None:
+        label = wanted_code or f"o Id {wanted_id}"
+        step(
+            "list",
+            False,
+            "Mecze sędziego",
+            f"Na liście {whose} ({season or 'bieżący sezon'}) nie ma meczu {label}.",
+        )
+        logger.info("%s: mecz %s nie jest na liscie sedziego %s", log_prefix, label, judge)
+        return refusal(
+            "NOT_ON_LIST",
+            assignability_message("NOT_ON_LIST"),
+            judge_name=page["judge_name"],
+            season=season,
+        )
+    step(
+        "list",
+        True,
+        "Mecze sędziego",
+        f"{row['code']} jest na liście {whose} ({season or 'bieżący sezon'}).",
+    )
+
+    href = row["href"]
+    if href.startswith("?"):
+        detail_path = "/index.php" + href
+    elif href.startswith("/"):
+        detail_path = href
+    else:
+        detail_path = "/" + href
+    _, match_html = await fetch_with_correct_encoding(
+        client,
+        detail_path,
+        method="GET",
+        cookies=cookies,
+        headers={"Referer": page["path"]},
+    )
+    _log_html(f"{log_prefix} (strona meczu)", match_html)
+    form = _find_crew_form(match_html, row["id_zawody"])
+    if not form["present"]:
+        step(
+            "match",
+            False,
+            "Strona meczu",
+            f"Strona meczu {row['code']} nie ma przycisku Sędziowie dla tego konta.",
+        )
+        logger.info("%s: mecz %s bez przycisku Sedziowie", log_prefix, row["code"])
+        return refusal(
+            "NO_FORM",
+            assignability_message("NO_FORM"),
+            id_zawody=row["id_zawody"],
+            code=row["code"],
+            judge_name=page["judge_name"],
+            season=season,
+            detail_path=detail_path,
+            when=row["when"],
+            host=row["host"],
+            guest=row["guest"],
+        )
+    step(
+        "match",
+        True,
+        "Strona meczu",
+        f"Przycisk Sędziowie jest; formularz idzie jako user={form['user'] or 'puste'}.",
+    )
+    return {
+        "ok": True,
+        "reason": "OK",
+        "message": "",
+        "user": form["user"],
+        "id_zawody": row["id_zawody"],
+        "code": row["code"],
+        "judge_name": page["judge_name"],
+        "season": season,
+        "detail_path": detail_path,
+        "when": row["when"],
+        "host": row["host"],
+        "guest": row["guest"],
+        "steps": steps,
     }
 
 

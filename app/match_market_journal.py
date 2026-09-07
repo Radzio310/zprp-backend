@@ -145,6 +145,8 @@ CONFIG_FIELD_LABELS: Dict[str, str] = {
     "offer_deadline_hours": "próg oddania (h)",
     "assign_account_mode": "konto obsadowe",
     "approver_badges": "odznaki rozstrzygające",
+    "foreign_matches_enabled": "mecze spoza okręgu",
+    "managed_prefixes": "ligi powierzone",
 }
 
 
@@ -154,6 +156,13 @@ def _config_value(field: str, value: Any) -> str:
     if field == "approver_badges":
         items = value if isinstance(value, (list, tuple)) else []
         return ", ".join(str(x) for x in items) or "brak"
+    if field == "foreign_matches_enabled":
+        return "wymiana włączona" if value else "wymiana wyłączona"
+    if field == "managed_prefixes":
+        if value is None:
+            return "domyślne"
+        items = value if isinstance(value, (list, tuple)) else []
+        return ", ".join(str(x) for x in items) or "żadna"
     if field == "assign_account_mode":
         return "własne konto" if _s(value) == "own" else "to samo, co monitor"
     return _s(value) or "brak"

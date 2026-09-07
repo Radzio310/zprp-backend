@@ -42,6 +42,25 @@ def calls_in(name: str) -> set[str]:
     return out
 
 
+def defaults_of(name: str) -> dict[str, str]:
+    """Parametr → jego wartość domyślna, tak jak stoi w kodzie.
+
+    Budżety i limity giełdy mieszkają w liściu reguł, a funkcje biorą je jako
+    domyślne wartości parametrów. Test pilnuje, że nikt nie wpisał liczby z
+    palca obok stałej, która ma o tym decydować.
+    """
+    node = FUNCTIONS[name]
+    args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+    values = list(node.args.defaults) + list(node.args.kw_defaults)
+    out: dict[str, str] = {}
+    for arg, value in zip(args[len(args) - len(node.args.defaults) :], node.args.defaults):
+        out[arg.arg] = ast.unparse(value)
+    for arg, value in zip(node.args.kwonlyargs, node.args.kw_defaults):
+        if value is not None:
+            out[arg.arg] = ast.unparse(value)
+    return out
+
+
 def code_of(name: str) -> str:
     """Źródło funkcji BEZ jej docstringa.
 
@@ -562,7 +581,11 @@ def test_offer_gate_and_list_answer_the_same_question():
 
 def test_live_check_is_bounded_and_admits_what_it_skipped():
     source = code_of("_live_crews")
-    assert "LIVE_CREW_BUDGET_SECONDS" in source
+    # Budżet wchodzi PARAMETREM (`budget`) ze wspólną wartością domyślną, bo
+    # ponowne sprawdzenie JEDNEGO meczu nie ma się ścigać z całym terminarzem.
+    assert "timeout=budget" in source
+    assert defaults_of("_live_crews")["budget"] == "LIVE_CREW_BUDGET_SECONDS"
+    assert defaults_of("my_matches")["budget"] == "LIVE_CREW_BUDGET_SECONDS"
     assert "LIVE_CREW_REQUEST_SECONDS" in source
     # Po budżecie reszta pytań jest ODWOŁYWANA, nie dokańczana w tle.
     assert "task.cancel()" in source
@@ -598,3 +621,213 @@ def test_fresh_deep_checks_are_not_asked_twice():
     # Arkusz woła serwer dwa razy pod rząd; drugie wołanie nie pyta związku od nowa.
     assert "crew_is_fresh" in calls_in("my_matches")
     assert "last_deep_checked_at" in code_of("my_matches")
+
+
+# ── Cztery rygle zgłoszone 2026-09-07 ───────────────────────────────────────
+
+
+def test_a_vouched_match_is_never_dropped_in_silence():
+    """Milczenie związku nie jest odpowiedzią „to nie Twój mecz".
+
+    Mecz z listy telefonu, którego obsady nie potwierdziliśmy, ZOSTAJE na
+    liście z podpisem i z możliwością ponownego sprawdzenia. Wcześniej wypadał
+    bez słowa i sędzia widział listę bez meczu, który ma.
+    """
+    source = code_of("my_matches")
+    assert "unconfirmed.append(match_id)" in source
+    assert "match_id not in live_ids and match_id in vouched" in source
+    assert "UNCONFIRMED_NOTE" in source
+    assert "'unconfirmed': True" in source
+
+
+def test_the_single_match_recheck_has_its_own_budget():
+    """Jeden mecz pytany osobno nie dzieli budżetu z całym terminarzem."""
+    source = code_of("post_my_match_recheck")
+    assert "budget=RECHECK_BUDGET_SECONDS" in source
+    assert "verify=True" in source
+    # Odpowiedź ma KSZTAŁT listy „moich meczów" - ekran nie uczy się drugiego.
+    assert "my_matches" in calls_in("post_my_match_recheck")
+
+
+def test_dateless_matches_from_closed_seasons_are_refused_twice():
+    """Sezon odsiewa lista I bramka wystawienia - w dwóch miejscach, nie w jednym.
+
+    Mecz bez terminu nie ma czego minąć, więc bez tego wisiał na giełdzie rok
+    po zakończeniu rozgrywek. Bramka stoi osobno, bo starsza aplikacja pyta o
+    wystawienie tego, co ma u siebie.
+    """
+    assert "past_season" in calls_in("my_matches")
+    assert "past_season" in calls_in("create_offer")
+    # O sezonie rozstrzyga kolumna wiersza, nie domysł ekranu.
+    assert "province_matches.c.season" in code_of("my_matches")
+    assert "province_matches.c.first_seen_at" in code_of("my_matches")
+
+
+def test_you_cannot_claim_a_match_you_already_have():
+    """Partner oddaje drugie gniazdo TEGO SAMEGO meczu - jeden człowiek nie stanie w dwóch."""
+    source = code_of("create_claim")
+    assert "_viewer_roles" in calls_in("create_claim")
+    assert "ALREADY_IN_CREW" in source
+    # Odmowa stoi PRZED zapisem zgłoszenia.
+    assert source.index("ALREADY_IN_CREW") < source.index("match_market_claims")
+
+
+def test_the_offer_tile_knows_i_am_already_in_this_crew():
+    """Kafel mówi „Masz już ten mecz" zamiast przycisku, który odmówi po dotknięciu."""
+    assert "_viewer_roles" in calls_in("list_offers")
+    assert "_viewer_roles" in calls_in("get_offer")
+    assert "'myCrewLabel': _s(my_crew_label)" in code_of("_offer_payload")
+
+
+def test_conflicts_are_recounted_before_every_zprp_write():
+    """Kolizja liczy się PRZY ZAPISIE, nie w chwili zgłoszenia.
+
+    Obsadowy zatwierdza wymiany jedna po drugiej i to poprzednia decyzja mogła
+    dać temu sędziemu mecz w tym dniu. Kolizja wstrzymuje zapis; przejście nad
+    nią jest świadome (`force`) i idzie do dziennika.
+    """
+    source = code_of("approve_offer")
+    assert "_same_day_matches" in calls_in("approve_offer")
+    assert "SAME_DAY_CONFLICT" in source
+    assert "not req.force" in source
+    # Odmowa PRZED zamknięciem oferty stanem `applying`.
+    assert source.index("SAME_DAY_CONFLICT") < source.index("status=target")
+    # Dziennik odnotowuje wymuszenie.
+    assert "'forced': bool(clash)" in source
+
+
+def test_forcing_is_off_unless_asked():
+    """Starsza aplikacja nie wymusi zapisu przez przypadek."""
+    node = next(
+        n
+        for n in ast.walk(TREE)
+        if isinstance(n, ast.ClassDef) and n.name == "ApproveRequest"
+    )
+    forced = [
+        ast.unparse(sub.value)
+        for sub in node.body
+        if isinstance(sub, ast.AnnAssign) and getattr(sub.target, "id", "") == "force"
+    ]
+    assert forced == ["False"]
+
+
+# ─────────────────────────── mecze spoza okręgu ───────────────────────────
+
+
+def apply_call_keywords() -> set[str]:
+    node = FUNCTIONS["approve_offer"]
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+            if sub.func.id == "apply_referee_assignment":
+                return {kw.arg for kw in sub.keywords}
+    pytest.fail("nie znalazłem wywołania rdzenia zapisu")
+
+
+def test_foreign_matches_are_filtered_by_the_tested_leaf():
+    """O tym, które gniazda wolno oddać, decyduje liść, nie warunek w trasie.
+
+    Mecz spoza obsady okręgu (I liga i wyżej, obca II liga) oddaje stolik
+    zawsze, a boisko dopiero po włączeniu w panelu - i ta reguła ma jedno
+    miejsce, sprawdzane testem bez bazy.
+    """
+    assert "offerable_slots" in calls_in("my_matches")
+    source = code_of("my_matches")
+    assert "foreign_matches_enabled" in source
+    assert "managed_prefixes" in source
+    # Liczba zdjętych wierszy wychodzi na zewnątrz - jak każdy inny limit.
+    assert "foreignHidden" in source
+
+
+def test_offer_gate_refuses_field_slots_of_foreign_matches_unless_enabled():
+    source = code_of("create_offer")
+    assert "FOREIGN_OFF" in source
+    assert "is_managed_by_province" in calls_in("create_offer")
+    assert "FIELD_SLOTS" in source
+    # Sonda meczu spoza okręgu idzie trasą sędziego - tą samą, co zapis.
+    assert "walk=" in source.replace(" ", "")
+
+
+def test_foreign_matches_take_the_judge_route_in_probe_and_write():
+    """Sonda i zapis mają iść TĄ SAMĄ drogą.
+
+    Gdyby sonda pytała prosto o formularz, a zapis szedł trasą sędziego (albo
+    odwrotnie), lista i decyzja odpowiadałyby na dwa różne pytania.
+    """
+    assert "walk_judge_route" in calls_in("_probe")
+    assert "walk_judge_route" in calls_in("approve_offer")
+    keywords = apply_call_keywords()
+    for needed in ("user", "referer", "expect", "require_name_match", "forbid_elsewhere"):
+        assert needed in keywords, needed
+    # Wyłączenie wymiany po wystawieniu oferty ma się rozbić tu, nie w ZPRP.
+    assert "FOREIGN_OFF" in code_of("approve_offer")
+
+
+def test_the_taker_is_checked_against_the_crew_before_applying():
+    """Chętny, który stoi już w tym meczu, nie przechodzi do zapisu.
+
+    Zgłoszenie było ważne, gdy je składał; potem mógł wejść do tej obsady inną
+    wymianą. Sprawdzenie stoi PRZED zamknięciem oferty stanem `applying`, a
+    zgłoszenie schodzi - i to wycofanie ma przeżyć wycofanie transakcji.
+    """
+    source = code_of("approve_offer")
+    assert "_roles_of" in calls_in("approve_offer")
+    assert source.index("_roles_of(") < source.index("status=target")
+    assert "_ClaimImpossible" in source
+    assert "ALREADY_IN_CREW" in source
+    # Zgłoszenie schodzi przez tabelę przejść, nie literałem z palca.
+    assert "'decline'" in source
+    # Chętny dowiaduje się o tym z powiadomienia, nie z ciszy.
+    assert "text_claim_impossible" in calls_in("approve_offer")
+    # Wyjątek jest obsługiwany POZA transakcją - `try` obejmuje `async with`.
+    node = FUNCTIONS["approve_offer"]
+    wrapped = any(
+        isinstance(sub, ast.Try)
+        and any(isinstance(inner, ast.AsyncWith) for inner in sub.body)
+        and any(
+            isinstance(h.type, ast.Name) and h.type.id == "_ClaimImpossible"
+            for h in sub.handlers
+        )
+        for sub in ast.walk(node)
+    )
+    assert wrapped, "wycofanie zgłoszenia cofnęłoby się razem z transakcją"
+
+
+def test_a_taker_seen_on_the_form_does_not_return_to_the_pool():
+    # `fail()` zwykle oddaje chętnego do puli; przy ALREADY_IN_CREW z
+    # formularza to nie ma sensu - jego zgłoszenie schodzi.
+    source = code_of("approve_offer")
+    assert "impossible = code == 'ALREADY_IN_CREW'" in source
+
+
+def test_route_check_is_admin_only_and_never_writes():
+    paths = {(m, p) for m, p, _ in routes()}
+    assert ("post", "/admin/provinces/{province}/route-check") in paths
+    calls = calls_in("admin_route_check")
+    assert "may_manage_config" in calls
+    assert "normalize_province" in calls
+    assert "walk_judge_route" in calls
+    assert "probe_assignment_rights" in calls
+    # Podgląd: nic w bazie związku, nic w pamięci sondy, nic w dzienniku.
+    assert "apply_referee_assignment" not in calls
+    assert "_store_verdict" not in calls
+    assert "_log" not in calls
+
+
+def test_config_carries_the_foreign_switch_and_the_managed_leagues():
+    assert "foreign_matches_enabled" in code_of("_config")
+    assert "managed_prefixes_for" in calls_in("_config")
+    setter = code_of("admin_set_province")
+    assert "foreign_matches_enabled" in setter
+    # Powrót do katalogu domyślnego jest osobną decyzją, bo `None` w
+    # żądaniu znaczy „nie ruszaj", a pusta lista - „żadna".
+    assert "reset_managed_prefixes" in setter
+    for name in ("admin_provinces", "admin_set_province", "get_context"):
+        assert "foreignMatchesEnabled" in code_of(name), name
+        assert "managedPrefixes" in code_of(name), name
+
+
+def test_not_on_list_is_not_remembered():
+    # Lista sędziego z chwili pytania to nie wyrok na dobę - obsada może
+    # wejść do bazy związku za godzinę.
+    source = code_of("_store_verdict")
+    assert "NOT_ON_LIST" in source

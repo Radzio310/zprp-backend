@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 #: Gniazda protokołu, którymi wolno się wymieniać, wraz z nazwą pola w
@@ -359,6 +359,17 @@ ASSIGNABILITY_MESSAGES: Dict[str, str] = {
         "Spróbuj za chwilę."
     ),
     "UNCHECKED": "Sprawdzimy uprawnienia okręgu, zanim wystawisz ten mecz.",
+    # Dwa kody z trasy sędziego (mecz spoza obsady okręgu) - patrz sekcja
+    # „Poziom rozgrywek i mecze spoza okręgu" na końcu pliku.
+    "NOT_ON_LIST": (
+        "Konto okręgu nie widzi tego meczu na liście meczów sędziego w bazie "
+        "związku, więc nie ma jak wejść w jego obsadę."
+    ),
+    "FOREIGN_OFF": (
+        "Ten mecz jest spoza obsady okręgu - obsadę boiskową ustala związek albo "
+        "okręg prowadzący te rozgrywki. Wymianę takich meczów okręg może włączyć "
+        "w panelu administratora."
+    ),
 }
 
 
@@ -431,6 +442,50 @@ CREW_STATE_FIELDS: Dict[str, Tuple[str, str]] = {
     "delegat": ("NrSedzia_delegat", "NrSedzia_delegat_nazwisko"),
     "delegat2": ("NrSedzia_delegat2", "NrSedzia_delegat2_nazwisko"),
 }
+
+#: Podpis roli dla człowieka - także tej, którą giełda nie handluje.
+CREW_LABELS: Dict[str, str] = {
+    **SLOT_LABELS,
+    "delegat": "delegat",
+    "delegat2": "drugi delegat",
+}
+
+
+def crew_label(role: object) -> str:
+    """Podpis roli; nieznaną oddajemy bez zmiany, jak `slot_label`."""
+    key = str(role or "").strip()
+    return CREW_LABELS.get(key, key)
+
+
+def roles_held_by(
+    state: Mapping[str, Any],
+    judge_id: object,
+    full_name: object = "",
+) -> List[str]:
+    """WSZYSTKIE role tego sędziego w meczu - z delegatami, nie tylko gniazda.
+
+    Odpowiada na inne pytanie niż `slots_held_by`: nie „co mogę oddać", ale
+    „czy jestem przy tym meczu". Stąd bierze się rygiel zgłoszenia: gdy partner
+    wystawia DRUGIE gniazdo tego samego meczu, wziąć go nie da się fizycznie -
+    jeden człowiek nie stanie w dwóch gniazdach. To nie kolizja terminarza
+    (ta jest ostrzeżeniem dla obsadowego), tylko rzecz niemożliwa.
+
+    Numer przed nazwiskiem, dokładnie jak w `slots_held_by`.
+    """
+    wanted_id = str(judge_id or "").strip()
+    out: List[str] = []
+    for role, (id_field, name_field) in CREW_STATE_FIELDS.items():
+        raw_id = str((state or {}).get(id_field) or "").strip()
+        if raw_id:
+            # „0" to ZPRP-owe „nikogo tu nie ma", nie numer sędziego.
+            if raw_id == "0":
+                continue
+            if wanted_id and raw_id == wanted_id:
+                out.append(role)
+            continue
+        if full_name and names_match((state or {}).get(name_field), full_name):
+            out.append(role)
+    return out
 
 
 def with_slot_holder(
@@ -634,3 +689,259 @@ def live_check_order(
             seen.add(value)
             out.append(value)
     return out[: max(0, int(limit))]
+
+
+# ── Sezon rozgrywkowy ───────────────────────────────────────────────────────
+#
+# Mecz BEZ DATY nie ma terminu, który mógłby minąć, więc nie schodzi z listy sam
+# z siebie: powierzona II liga sprzed roku wisiała w migawce okręgu obok tego,
+# co sędzia poprowadzi w niedzielę - i dawała się wystawić na giełdę, choć
+# obsady tamtego meczu nikt już nie zmienia. Mecz z datą odsiewa okno „od dziś
+# w przód"; tutaj mieszka odpowiedź dla meczów bez terminu.
+#
+# Granica sezonu to 1 września - ta sama, którą liczy aplikacja
+# (`BAZA/utils/seasonWindow.ts`). Nic tu nie woła zegara: chwila wchodzi
+# argumentem, jak wszędzie w tym liściu.
+
+SEASON_START_MONTH = 9
+SEASON_START_DAY = 1
+
+#: Ile dni PRZED 1 września wiersz należy już do nadchodzącego sezonu.
+#:
+#: Obsady na pierwsze kolejki wchodzą do bazy w wakacje, a mecz „powierzony"
+#: bez terminu pojawia się tam najwcześniej. Liczony po dacie pierwszego
+#: zobaczenia wpadłby wtedy do sezonu, który właśnie się skończył - i giełda
+#: odmówiłaby wystawienia meczu, który sędzia dostał tydzień wcześniej.
+SEASON_PRESEASON_DAYS = 60
+
+
+def season_start_year(moment: datetime) -> int:
+    """Rok, w którym zaczął się sezon obejmujący tę chwilę."""
+    if (moment.month, moment.day) >= (SEASON_START_MONTH, SEASON_START_DAY):
+        return moment.year
+    return moment.year - 1
+
+
+def season_label(start_year: object) -> str:
+    """„2026/27" - tak sezon podpisuje aplikacja i tak mówimy o nim sędziemu."""
+    try:
+        year = int(start_year)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    return f"{year}/{str(year + 1)[-2:]}"
+
+
+def parse_season_start(value: object) -> Optional[int]:
+    """Rok początku sezonu z zapisu ZPRP („2026/2027", „2026/27", „2026").
+
+    `None` znaczy „nie da się przeczytać" - i wtedy o sezonie rozstrzyga data
+    pierwszego zobaczenia wiersza, nie domysł. Kolumna `season` bywa pusta
+    (mecz z prywatnej listy sędziego) albo niesie coś, czego nie znamy.
+    """
+    text = str(value or "").strip()
+    match = re.match(r"^(\d{4})(?![0-9])", text)
+    if not match:
+        return None
+    year = int(match.group(1))
+    # Sezon 1900 albo 2400 to nie sezon, tylko przypadkowa liczba w polu.
+    return year if 2000 <= year <= 2100 else None
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """Naiwny znacznik czytamy jako UTC - inaczej porównanie rzuca wyjątkiem.
+
+    Postgres oddaje `first_seen_at` ze strefą, SQLite w testach bez niej.
+    """
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def past_season(
+    season: object,
+    first_seen_at: Optional[datetime],
+    now: datetime,
+    *,
+    preseason_days: object = SEASON_PRESEASON_DAYS,
+) -> bool:
+    """Czy ten mecz jest z sezonu, który się już skończył.
+
+    Sezon z kolumny rozstrzyga, gdy da się go przeczytać - to zapis związku,
+    nie nasz domysł. Bez niego zostaje data pierwszego zobaczenia wiersza w
+    bazie okręgu, z zapasem `preseason_days` na obsady wpisywane przed
+    1 września. Brak jednego i drugiego znaczy „nie wiem", a „nie wiem" nigdy
+    nie blokuje (patrz reguła o nieudanej sondzie uprawnień).
+    """
+    current = season_start_year(now)
+    start = parse_season_start(season)
+    if start is not None:
+        return start < current
+    if first_seen_at is None:
+        return False
+    try:
+        grace = max(0, int(preseason_days))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        grace = SEASON_PRESEASON_DAYS
+    cutoff = datetime(
+        current, SEASON_START_MONTH, SEASON_START_DAY, tzinfo=timezone.utc
+    ) - timedelta(days=grace)
+    return _as_utc(first_seen_at) < cutoff
+
+
+# ── Poziom rozgrywek i mecze spoza okręgu ───────────────────────────────────
+#
+# Sędzia okręgu prowadzi także mecze, których jego okręg NIE obsadza: I ligę i
+# wyżej obsadza związek, a II ligę - okręg, któremu związek POWIERZYŁ daną
+# grupę (Śląsk prowadzi grupę 4). Boiskowego gniazda takiego meczu okręg nie
+# zmienia z własnego terminarza; stolik obsadza zawsze okręg gospodarza hali,
+# czyli własny. Stąd trzy pojęcia: POZIOM z kodu rozgrywek, LISTA LIG
+# POWIERZONYCH okręgowi i GNIAZDA, które wolno oddać.
+#
+# Poziom liczymy z PIERWSZEGO członu numeru meczu („IIM4/1" -> „IIM4",
+# „IMD/3" -> „IMD", „S/PPK/2" -> „S"), tak jak aplikacja w
+# `utils/matchNumber.ts`: puchar okręgowy z członem „PP" w środku numeru nie
+# jest Pucharem Polski.
+#
+# Mecz spoza okręgu wolno wystawić boiskowo dopiero, gdy okręg włączy to w
+# panelu - a wtedy sonda i zapis idą „trasą sędziego" (patrz
+# `app.zprp.assignments.walk_judge_route`), nie prosto do formularza.
+
+#: Gniazda boiskowe - tych okręg nie zmienia w meczu spoza swojej obsady.
+FIELD_SLOTS: Tuple[str, ...] = ("sedzia1", "sedzia2")
+
+#: Gniazda stolikowe - obsadza je zawsze okręg gospodarza hali.
+TABLE_SLOTS: Tuple[str, ...] = ("sekretarz", "czas")
+
+#: Początki kodów rozgrywek od I ligi w górę - obsadza związek.
+#:
+#: „IM"/„IK" łapią grupy I ligi (IMD, IKA), „LC" Ligę Centralną, „OS" i „SP"
+#: obie superligi, „MP" mistrzostwa Polski, „PP" Puchar Polski. II liga
+#: („IIM…") tu NIE pasuje, bo zaczyna się od „II", a III liga („IIIM") od „III".
+_CENTRAL_STARTS: Tuple[str, ...] = ("IM", "IK", "LC", "OS", "SP", "MP", "PP")
+
+#: Kody centralne za krótkie na `startswith` - dokładne trafienie.
+_CENTRAL_EXACT: Set[str] = {"SM", "SK", "LSM", "LSK"}
+
+_SECOND_STARTS: Tuple[str, ...] = ("IIM", "IIK")
+
+#: II ligi powierzone okręgom przez związek - katalog domyślny.
+#:
+#: Ten sam, który aplikacja trzyma w `utils/provinceTravel.ts`
+#: (`OKREG_EXTRA_PREFIXES_BY_PROVINCE`); klucz to województwo w postaci
+#: `zprp_accounts.normalize_province`. Okręg może go nadpisać w panelu -
+#: `managed_prefixes_for` bierze wtedy listę z bazy zamiast stąd.
+DEFAULT_MANAGED_PREFIXES: Dict[str, Tuple[str, ...]] = {
+    "SLASKIE": ("IIM4", "IIK4"),
+    "DOLNOSLASKIE": ("IIM1",),
+    "MAZOWIECKIE": ("IIM3", "IIK3"),
+    "POMORSKIE": ("IIM2", "IIK2"),
+    "WIELKOPOLSKIE": ("IIK1",),
+}
+
+_PREFIX_RE = re.compile(r"^[A-Z0-9]{1,10}$")
+
+
+def match_code_prefix(code: object) -> str:
+    """Pierwszy człon numeru meczu, wielkimi literami („IIM4/1" -> „IIM4")."""
+    text = str(code or "").strip().upper()
+    return text.split("/", 1)[0].strip() if text else ""
+
+
+def league_level(code: object) -> str:
+    """„central" (I liga i wyżej), „second" (II liga) albo „okreg" (reszta).
+
+    Pusty kod to „okreg": o meczu bez numeru nie wiemy nic, a „nie wiem" nie
+    ma prawa odbierać sędziemu prawa do oddania meczu (ta sama zasada, co przy
+    nieudanej sondzie). O tym, czy okręg NAPRAWDĘ obsadza taki mecz, i tak
+    rozstrzyga formularz w bazie związku.
+    """
+    prefix = match_code_prefix(code)
+    if not prefix:
+        return "okreg"
+    if prefix.startswith(_SECOND_STARTS):
+        return "second"
+    if prefix in _CENTRAL_EXACT or prefix.startswith(_CENTRAL_STARTS):
+        return "central"
+    return "okreg"
+
+
+def normalize_prefixes(value: Any) -> Optional[List[str]]:
+    """Lista prefiksów z każdego kształtu kolumny; `None` = nie ustawiono.
+
+    Rozróżnienie „nie ustawiono" od „pusta lista" jest tu treścią, nie
+    drobiazgiem: brak wpisu znaczy „weź katalog domyślny", a pusta lista -
+    „ten okręg nie prowadzi żadnej II ligi" (związek może grupę odebrać).
+    Kolumna JSON bywa napisem (asyncpg bez kodeka), stare wpisy słownikiem;
+    śmieci i powtórki wypadają, litery idą wielkie, bo tak pisze je ZPRP.
+    """
+    raw = value
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        try:
+            raw = json.loads(stripped)
+        except ValueError:
+            raw = re.split(r"[\s,;]+", stripped)
+    if isinstance(raw, dict):
+        raw = [k for k, v in raw.items() if v]
+    if not isinstance(raw, (list, tuple, set)):
+        return None
+    out: List[str] = []
+    for item in raw:
+        text = str(item or "").strip().upper()
+        if _PREFIX_RE.match(text) and text not in out:
+            out.append(text)
+    return out
+
+
+def managed_prefixes_for(province: object, override: Any = None) -> List[str]:
+    """Ligi powierzone temu okręgowi: nadpisanie z panelu albo katalog."""
+    custom = normalize_prefixes(override)
+    if custom is not None:
+        return custom
+    key = str(province or "").strip().upper()
+    return list(DEFAULT_MANAGED_PREFIXES.get(key, ()))
+
+
+def is_managed_by_province(code: object, managed_prefixes: Any) -> bool:
+    """Czy obsadę TEGO meczu ustala okręg z własnego terminarza.
+
+    Rozgrywki okręgowe zawsze; II liga i wyżej tylko wtedy, gdy kod zaczyna się
+    od jednego z prefiksów powierzonych okręgowi („IIM4/1" przy „IIM4").
+    """
+    if league_level(code) == "okreg":
+        return True
+    prefix = match_code_prefix(code)
+    return any(prefix.startswith(p) for p in (normalize_prefixes(managed_prefixes) or []))
+
+
+def offerable_slots(
+    held: Iterable[object],
+    code: object,
+    managed_prefixes: Any,
+    foreign_enabled: object,
+) -> Tuple[List[str], List[str]]:
+    """Gniazda sędziego w tym meczu: (wolno oddać, zatrzymane przez okręg).
+
+    Mecz obsadzany przez okręg oddaje wszystkie. W meczu spoza okręgu stolik
+    wolno oddać zawsze (obsadza go okręg gospodarza hali, czyli własny), a
+    gniazda boiskowe dopiero po włączeniu wymiany takich meczów w panelu.
+    Zatrzymane gniazda wracają osobno, żeby wołający mógł je policzyć.
+    """
+    slots = [str(s or "").strip() for s in (held or []) if str(s or "").strip()]
+    if is_managed_by_province(code, managed_prefixes):
+        return slots, []
+    allowed: List[str] = []
+    kept: List[str] = []
+    for slot in slots:
+        if slot in TABLE_SLOTS or (slot in FIELD_SLOTS and bool(foreign_enabled)):
+            allowed.append(slot)
+        else:
+            kept.append(slot)
+    return allowed, kept

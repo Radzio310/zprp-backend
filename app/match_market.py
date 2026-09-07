@@ -54,7 +54,9 @@ from app.match_market_journal import (
 )
 from app.match_market_notify import (
     apply_failed as text_apply_failed,
+    conflict_sentence,
     claim_created as text_claim_created,
+    claim_impossible as text_claim_impossible,
     claim_lost as text_claim_lost,
     crew_changed as text_crew_changed,
     giver_released as text_giver_released,
@@ -75,6 +77,7 @@ from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
     apply_known_swaps,
     DEFAULT_DEADLINE_HOURS,
+    FIELD_SLOTS,
     LIVE_CREW_BUDGET_SECONDS,
     LIVE_CREW_LIMIT,
     LIVE_CREW_NOTE,
@@ -87,14 +90,24 @@ from app.match_market_rules import (
     clean_match_ids,
     crew_is_fresh,
     crew_judge_ids,
+    crew_label,
     deadline_for,
+    is_managed_by_province,
+    league_level,
     live_check_order,
+    managed_prefixes_for,
     market_pushes_allowed,
     may_claim,
     names_match,
     next_claim_status,
     next_offer_status,
     normalize_deadline_hours,
+    normalize_prefixes,
+    offerable_slots,
+    past_season,
+    roles_held_by,
+    season_label,
+    season_start_year,
     slot_holder_name,
     slot_is_tradeable,
     slot_label,
@@ -110,6 +123,8 @@ from app.zprp.assignments import (
     _login_zprp,
     apply_referee_assignment,
     probe_assignment_rights,
+    walk_judge_route,
+    zprp_season_label,
 )
 from app.zprp_accounts import account_status, assign_credentials, normalize_province
 
@@ -196,6 +211,12 @@ async def _config(province: str) -> Dict[str, Any]:
         ),
         "assign_account_mode": _s(data.get("assign_account_mode")) or "own",
         "approver_badges": normalize_approver_badges(data.get("approver_badges")),
+        # Mecze spoza obsady okręgu - patrz sekcja „Poziom rozgrywek" w liściu
+        # reguł. Wymiana domyślnie WYŁĄCZONA; lista lig powierzonych z panelu
+        # albo z katalogu domyślnego (`managed_prefixes_custom` mówi, która).
+        "foreign_matches_enabled": bool(data.get("foreign_matches_enabled", False)),
+        "managed_prefixes": managed_prefixes_for(province, data.get("managed_prefixes")),
+        "managed_prefixes_custom": normalize_prefixes(data.get("managed_prefixes")) is not None,
     }
 
 
@@ -261,32 +282,62 @@ def _match_view(state: Dict[str, Any], match_at: Any) -> Dict[str, Any]:
     }
 
 
-#: Pola stanu meczu, ktore mowia "ten czlowiek tu jest".
-#:
-#: Gniazda gieldowe PLUS delegat: delegata gielda nie wymienia, ale delegowanie
-#: na dwa mecze tego samego dnia jest kolizja dokladnie tak samo.
-_ROLE_STATE_FIELDS: Tuple[Tuple[str, str], ...] = tuple(SLOT_STATE_FIELDS.values()) + (
-    ("NrSedzia_delegat", "NrSedzia_delegat_nazwisko"),
-)
-
-
 def _holds_any_role(state: Dict[str, Any], judge_id: str, full_name: str) -> bool:
     """Czy ten sedzia jest przy tym meczu w JAKIEJKOLWIEK roli.
 
-    Numer przed nazwiskiem, jak w `slots_held_by`: gdy stan niesie numer, on
-    rozstrzyga, a nazwisko zostaje dla meczow, ktorych monitor nie sprawdzil
-    gleboko.
+    Katalog rol (gniazda gieldy PLUS delegaci) i porzadek "numer przed
+    nazwiskiem" mieszkaja w lisciu: `roles_held_by`. Dwa katalogi rol w jednym
+    module rozjechalyby sie przy pierwszej poprawce - a stad bierze sie i
+    kolizja terminarza, i rygiel zgloszenia na wlasny mecz.
     """
-    wanted = _s(judge_id)
-    for id_field, name_field in _ROLE_STATE_FIELDS:
-        raw_id = _s((state or {}).get(id_field))
-        if raw_id:
-            if wanted and raw_id == wanted:
-                return True
-            continue
-        if full_name and names_match((state or {}).get(name_field), full_name):
-            return True
-    return False
+    return bool(roles_held_by(state, judge_id, full_name))
+
+
+async def _roles_of(
+    province: str,
+    match_ids: List[str],
+    judge_id: str,
+    full_name: str,
+) -> Dict[str, str]:
+    """Rola TEGO sędziego w tych meczach - podpis roli albo pusto.
+
+    Giełda nie ma prawa proponować „Biorę" na mecz, który sędzia już prowadzi:
+    partner wystawia DRUGIE gniazdo tego samego spotkania, a jeden człowiek nie
+    stanie w dwóch. Kafel ma to powiedzieć od razu, zamiast odmowy po
+    dotknięciu - a serwer i tak odmawia, bo o tym decyduje `create_claim`.
+
+    Czytamy migawkę terminarza z pamięcią własnych wymian giełdy, tą samą
+    drogą, co lista „moich meczów" i kolizje - jedno pojęcie „mam ten mecz".
+    """
+    wanted = [_s(m) for m in match_ids if _s(m)]
+    if not wanted:
+        return {}
+    rows = await database.fetch_all(
+        select(province_matches.c.match_id, province_matches.c.state_json)
+        .where(province_matches.c.province == province)
+        .where(province_matches.c.match_id.in_(wanted))
+    )
+    states = {_s(_row(r)["match_id"]): state_dict(_row(r).get("state_json")) for r in rows}
+    swaps = await _applied_swaps(province, list(states))
+    out: Dict[str, str] = {}
+    for match_id, state in states.items():
+        roles = roles_held_by(
+            apply_known_swaps(state, swaps.get(match_id, ())),
+            judge_id,
+            full_name,
+        )
+        if roles:
+            out[match_id] = crew_label(roles[0])
+    return out
+
+
+async def _viewer_roles(
+    province: str,
+    match_ids: List[str],
+    actor: Actor,
+) -> Dict[str, str]:
+    """Rola PYTAJĄCEGO w tych meczach - `_roles_of` dla człowieka z tokenu."""
+    return await _roles_of(province, match_ids, actor.judge_id, actor.full_name)
 
 
 async def _same_day_matches(
@@ -387,6 +438,23 @@ MY_MATCHES_HORIZON_DAYS = 120
 #: kolejnych wolaniach i ten sam mecz raz byl na liscie, raz nie.
 MY_MATCHES_SCAN_LIMIT = 600
 
+#: Co mówimy o meczu, za który ręczy telefon, a którego związek nie potwierdził.
+#:
+#: Nie „nie masz tego meczu" - tego nie wiemy. Wiemy tylko, że publiczne API nie
+#: odpowiedziało w wyznaczonym czasie, a to jest wiadomość o AWARII PO DRUGIEJ
+#: STRONIE, nie o obsadzie.
+UNCONFIRMED_NOTE = (
+    "Nie potwierdziliśmy w bazie związku, czy ten mecz jest Twój - "
+    "związek nie odpowiedział na czas. Sprawdź go jeszcze raz."
+)
+
+#: Ile czekamy na obsadę JEDNEGO meczu przy ponownym sprawdzeniu.
+#:
+#: Wspólny budżet listy dzieli się na kilkadziesiąt meczów, więc ten, który
+#: sędzia właśnie chce oddać, przegrywał wyścig z resztą terminarza. Tu pytanie
+#: jest jedno i ma prawo potrwać.
+RECHECK_BUDGET_SECONDS = 25.0
+
 
 def _verdict_view(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Werdykt sondy w postaci, ktora rozumie ekran."""
@@ -469,7 +537,10 @@ async def _store_verdict(
     tego nie obsadza" i blokowalby mecz na cala dobe z powodu jednej zerwanej
     odpowiedzi.
     """
-    if _s(verdict.get("reason")) == "PROBE_FAILED":
+    if _s(verdict.get("reason")) in ("PROBE_FAILED", "NOT_ON_LIST"):
+        # NOT_ON_LIST mówi o LIŚCIE SĘDZIEGO z chwili pytania - obsada może
+        # wejść do bazy związku za godzinę. Zapamiętana odmowa blokowałaby
+        # mecz na dobę bez pytania; niech sonda spyta jeszcze raz.
         return
     values = {
         "assignable": bool(verdict.get("assignable")),
@@ -503,8 +574,14 @@ async def _probe(
     *,
     slot: str = "",
     store: bool = True,
+    walk_ids: Optional[Set[str]] = None,
+    giver_id: str = "",
 ) -> Dict[str, Dict[str, Any]]:
     """Pyta baze zwiazku o wskazane mecze - jedno logowanie na cala paczke.
+
+    Mecze z `walk_ids` (spoza obsady okregu) ida TRASA SEDZIEGO: lista meczow
+    oddajacego (`giver_id`) -> strona meczu -> formularz - ta sama droga, ktora
+    pojdzie zapis. Odmowa na trasie ma wlasny kod (NOT_ON_LIST / NO_FORM).
 
     `slot` zawezza pytanie do JEDNEGO gniazda. Bez niego sonda uznaje mecz za
     obsadzalny, gdy okreg ma liste sedziow przy DOWOLNYM gniazdzie - a wymienia
@@ -518,6 +595,11 @@ async def _probe(
         return {}
     out: Dict[str, Dict[str, Any]] = {}
     gate = asyncio.Semaphore(_PROBE_CONCURRENCY)
+    walking = {_s(m) for m in (walk_ids or ()) if _s(m)}
+    # Lista meczow sedziego jest jedna na sedziego - trasa dzieli ja miedzy
+    # jego mecze zamiast pobierac przy kazdym od nowa.
+    pages: Dict[str, Any] = {}
+    season = zprp_season_label(_now())
 
     try:
         async with AsyncClient(
@@ -525,16 +607,43 @@ async def _probe(
         ) as client:
             cookies = await _login_zprp(client, creds["username"], creds["password"])
 
+            async def ask(match_id: str) -> Dict[str, Any]:
+                """Sonda jednego meczu: prosto do formularza albo trasa sedziego."""
+                user = ""
+                referer = ""
+                if match_id in walking:
+                    route = await walk_judge_route(
+                        client,
+                        cookies,
+                        judge_id=giver_id,
+                        id_zawody=match_id,
+                        season_label=season,
+                        page_cache=pages,
+                        log_prefix=f"gielda/trasa/{province}",
+                    )
+                    if not route["ok"]:
+                        return {
+                            "assignable": False,
+                            "reason": _s(route.get("reason")) or "NO_FORM",
+                            "message": _s(route.get("message")),
+                            "holder": "",
+                        }
+                    user = _s(route.get("user"))
+                    referer = _s(route.get("detail_path"))
+                return await probe_assignment_rights(
+                    client,
+                    cookies,
+                    match_id,
+                    slot=slot,
+                    user=user,
+                    referer=referer,
+                    log_prefix=f"gielda/sonda/{province}",
+                )
+
             async def one(match_id: str) -> None:
                 async with gate:
                     try:
-                        verdict = await probe_assignment_rights(
-                            client,
-                            cookies,
-                            match_id,
-                            slot=slot,
-                            log_prefix=f"gielda/sonda/{province}",
-                        )
+                        verdict = await ask(match_id)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("gielda: sonda %s nieudana: %s", match_id, exc)
                         verdict = {
@@ -547,7 +656,16 @@ async def _probe(
                     if store:
                         await _store_verdict(province, match_id, mode, verdict)
 
-            await asyncio.gather(*(one(m) for m in targets))
+            # Mecze idace trasa sedziego po kolei: pierwszy pobiera liste
+            # sedziego, nastepne biora ja z `pages`. Reszta rownolegle.
+            async def walk_all() -> None:
+                for match_id in targets:
+                    if match_id in walking:
+                        await one(match_id)
+
+            await asyncio.gather(
+                walk_all(), *(one(m) for m in targets if m not in walking)
+            )
     except Exception as exc:  # noqa: BLE001
         # Nie udalo sie nawet zalogowac - zaden mecz nie zostaje rozstrzygniety.
         logger.warning("gielda: logowanie konta obsadowego %s nieudane: %s", province, exc)
@@ -568,8 +686,13 @@ async def _require_assignable(
     settings: Settings,
     *,
     slot: str = "",
+    walk: bool = False,
+    giver_id: str = "",
 ) -> None:
     """Twarda bramka przed wystawieniem meczu. Odmowa mowi, dlaczego.
+
+    `walk` = mecz spoza obsady okregu: sonda idzie trasa sedziego (`giver_id`),
+    ta sama, ktora pojdzie zapis przy zatwierdzeniu.
 
     Zapamietane NIE dotyczy calego meczu i wystarcza, zeby odmowic bez pytania.
     Zapamietane TAK mowi jednak o MECZU, a wymieniamy GNIAZDO - dlatego przy
@@ -595,6 +718,8 @@ async def _require_assignable(
         settings,
         slot=_s(slot),
         store=not _s(slot),
+        walk_ids={_s(match_id)} if walk else None,
+        giver_id=giver_id,
     )
     answer = fresh.get(_s(match_id)) or {}
     if answer.get("assignable"):
@@ -759,6 +884,7 @@ async def _live_crews(
     bases: Dict[str, Dict[str, Any]],
     known: Set[str],
     vouched: Set[str],
+    budget: float = LIVE_CREW_BUDGET_SECONDS,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """Obsada TYCH meczów z bazy związku w tej chwili - i jej ślad w migawce.
 
@@ -799,7 +925,7 @@ async def _live_crews(
             asyncio.ensure_future(one(client, match_id, base))
             for match_id, base in bases.items()
         ]
-        _done, pending = await asyncio.wait(tasks, timeout=LIVE_CREW_BUDGET_SECONDS)
+        _done, pending = await asyncio.wait(tasks, timeout=budget)
         for task in pending:
             task.cancel()
         if pending:
@@ -969,6 +1095,10 @@ class ClaimRequest(BaseModel):
 
 class ApproveRequest(BaseModel):
     claim_id: int
+    #: Świadome przejście nad kolizją terminarza - patrz bramka w `approve_offer`.
+    #: Domyślnie `False`, więc starsza aplikacja nigdy nie wymusi zapisu przez
+    #: przypadek.
+    force: bool = False
 
 
 class RejectRequest(BaseModel):
@@ -980,6 +1110,20 @@ class ProvinceConfigRequest(BaseModel):
     offer_deadline_hours: Optional[int] = None
     assign_account_mode: Optional[str] = None
     approver_badges: Optional[List[str]] = None
+    #: Wymiana meczów spoza obsady okręgu (boiskowe gniazda I ligi i wyżej
+    #: oraz obcych II lig). Domyślnie wyłączona - patrz liść reguł.
+    foreign_matches_enabled: Optional[bool] = None
+    #: II ligi powierzone okręgowi; pusta lista = żadna. Powrót do katalogu
+    #: domyślnego idzie osobnym polem, bo `None` znaczy tu „nie ruszaj".
+    managed_prefixes: Optional[List[str]] = None
+    reset_managed_prefixes: Optional[bool] = None
+
+
+class RouteCheckRequest(BaseModel):
+    """Sprawdzenie trasy sędziego dla jednego meczu - bez zapisu."""
+
+    match_code: str
+    judge_id: Optional[str] = None
 
 
 # ─────────────────────────── kontekst ekranu ───────────────────────────
@@ -1027,6 +1171,13 @@ async def get_context(actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
             allowed[0] if allowed else APPROVER_BADGE,
         ),
         "accountReady": account_ready,
+        # Mecze spoza obsady okręgu - czy okręg włączył ich wymianę i które
+        # II ligi prowadzi. Ekran nie odsiewa nimi niczego (lista przychodzi z
+        # serwera już odsiana); to wiedza do podpisów i na przyszłość.
+        "foreignMatchesEnabled": bool(cfg and cfg["foreign_matches_enabled"]),
+        "managedPrefixes": (
+            cfg["managed_prefixes"] if cfg else managed_prefixes_for(actor.province)
+        ),
     }
 
 
@@ -1063,6 +1214,40 @@ class MyMatchesRequest(BaseModel):
     verify: bool = False
 
 
+class RecheckRequest(BaseModel):
+    """Jeden mecz do ponownego sprawdzenia w bazie związku."""
+
+    match_id: str
+
+
+@router.post("/my-matches/recheck", summary="Sprawdź obsadę jednego meczu jeszcze raz")
+async def post_my_match_recheck(
+    req: RecheckRequest,
+    actor: Actor = Depends(market_actor),
+    settings: Settings = Depends(get_settings),
+) -> Dict[str, Any]:
+    """Ten jeden mecz, pytany bez pośpiechu.
+
+    Odpowiedź ma KSZTAŁT LISTY „moich meczów" z jednym wierszem - żeby ekran
+    wstawił go na miejsce niepotwierdzonego, nie ucząc się drugiego kształtu.
+    Trasa istnieje, bo mecz bez daty nie łapie się na szybkie przebiegi
+    monitora, a wspólny budżet listy dzieli się na kilkadziesiąt numerów.
+    """
+    match_id = _s(req.match_id)
+    if not match_id:
+        raise HTTPException(400, "Brak numeru meczu.")
+    data = await my_matches(
+        actor, settings, verify=True, app_ids=[match_id], budget=RECHECK_BUDGET_SECONDS
+    )
+    # Tylko ten jeden wiersz. Lista i tak przegląda terminarz, ale ekran pytał o
+    # KONKRETNY mecz i musi wiedzieć, czy właśnie ten wrócił - pusta odpowiedź
+    # znaczy „nie ma go już na Twojej liście do oddania", a nie „nie wiem".
+    data["matches"] = [
+        row for row in data["matches"] if _s(row.get("matchId")) == match_id
+    ]
+    return data
+
+
 @router.post("/my-matches", summary="Moje mecze - razem z listą z telefonu")
 async def post_my_matches(
     req: MyMatchesRequest,
@@ -1077,6 +1262,7 @@ async def my_matches(
     settings: Settings,
     verify: bool,
     app_ids: List[str],
+    budget: float = LIVE_CREW_BUDGET_SECONDS,
 ) -> Dict[str, Any]:
     """Moje mecze do oddania - obsada sprawdzona w bazie związku W TEJ CHWILI.
 
@@ -1113,6 +1299,11 @@ async def my_matches(
         province_matches.c.state_json,
         province_matches.c.approved,
         province_matches.c.last_deep_checked_at,
+        # Sezon i pierwsze zobaczenie - po nich poznajemy mecz BEZ DATY z
+        # minionego sezonu. Taki nie ma terminu, który mógłby minąć, więc bez
+        # tego wisiał na liście „Oddaj mecz" bez końca.
+        province_matches.c.season,
+        province_matches.c.first_seen_at,
     )
     base_query = (
         select(*columns)
@@ -1192,6 +1383,7 @@ async def my_matches(
     # Sprawdzenie na żywo. Świeżo sprawdzone głęboko (przed chwilą pytał o nie
     # monitor albo poprzednie wołanie tego arkusza) uchodzą za żywe bez
     # kolejnego pytania - arkusz woła serwer dwa razy pod rząd.
+    vouched = {_s(m) for m in app_ids if _s(m)}
     order = live_check_order(app_ids, held_ids, LIVE_CREW_LIMIT)
     bases: Dict[str, Dict[str, Any]] = {}
     trusted: Set[str] = set()
@@ -1202,7 +1394,7 @@ async def my_matches(
             continue
         bases[match_id] = state_dict(data.get("state_json")) if data else {}
     fresh, _failed = await _live_crews(
-        province, actor, bases, known=set(rows), vouched=set(app_ids)
+        province, actor, bases, known=set(rows), vouched=vouched, budget=budget
     )
     live_ids = set(fresh) | trusted
 
@@ -1210,6 +1402,15 @@ async def my_matches(
     ordered = set(order)
     candidates = order + [match_id for match_id in held_ids if match_id not in ordered]
     mine: List[Tuple[str, Dict[str, Any], Dict[str, Any], List[str], bool]] = []
+    # Mecze, za które ręczy telefon, a o których związek nie zdążył odpowiedzieć.
+    # MILCZENIE NIE JEST ODPOWIEDZIĄ „to nie Twój mecz": dotąd taki wiersz był
+    # po cichu pomijany i sędzia widział listę bez meczu, który ma - bez jednego
+    # słowa dlaczego (patrz zasada „zero cichych blokad").
+    unconfirmed: List[str] = []
+    # Mecze spoza obsady okręgu, w których sędzia stoi TYLKO boiskowo, a okręg
+    # nie włączył wymiany takich meczów. Schodzą z listy (decyzja: nie
+    # proponować), a liczba wychodzi w odpowiedzi.
+    foreign_hidden = 0
     for match_id in candidates:
         data = dict(rows.get(match_id) or {})
         if match_id in fresh:
@@ -1224,9 +1425,30 @@ async def my_matches(
             # Sędziego nie ma w żadnym gnieździe giełdowym tego meczu - w bazie
             # związku, a gdy ta milczy: ani w migawce, ani w pamięci wymian.
             # Delegat albo obsada zmieniona - to nie jest jego mecz do oddania.
+            if match_id not in live_ids and match_id in vouched:
+                unconfirmed.append(match_id)
+            continue
+        # Gniazda, które w TYM meczu wolno oddać. Mecz obsadzany przez okręg
+        # oddaje wszystkie; w meczu spoza okręgu (I liga i wyżej, obca II liga)
+        # stolik zawsze, boisko dopiero po włączeniu wymiany w panelu.
+        held, _kept = offerable_slots(
+            held,
+            _s(data.get("match_code")) or _s(state.get("RozgrywkiCode")),
+            cfg["managed_prefixes"],
+            cfg["foreign_matches_enabled"],
+        )
+        if not held:
+            foreign_hidden += 1
             continue
         match_at = data.get("match_at")
         if match_at is not None and (match_at < now or match_at > horizon):
+            continue
+        if match_at is None and past_season(
+            data.get("season"), data.get("first_seen_at"), now
+        ):
+            # Mecz bez terminu z zamkniętego sezonu. Nie ma czego oddawać:
+            # obsady tamtych spotkań nikt już nie zmienia, a wiersz nie znika
+            # sam, bo nie ma daty, która by minęła.
             continue
         mine.append((match_id, data, state, held, match_id in live_ids))
     # Najbliższe najpierw, mecze bez terminu na końcu - w stałej kolejności,
@@ -1264,7 +1486,23 @@ async def my_matches(
     missing = [m for m in match_ids if m not in cached]
     probed: Dict[str, Dict[str, Any]] = {}
     if verify and account_ready and missing:
-        probed = await _probe(province, mode, creds, missing[:PROBE_BATCH_LIMIT], settings)
+        # Mecze spoza obsady okręgu sonda sprawdza TRASĄ SĘDZIEGO - tą samą,
+        # którą pójdzie zapis - a nie prostym wejściem w formularz.
+        codes = {item[0]: _s(item[1].get("match_code")) for item in mine}
+        batch = missing[:PROBE_BATCH_LIMIT]
+        probed = await _probe(
+            province,
+            mode,
+            creds,
+            batch,
+            settings,
+            walk_ids={
+                m
+                for m in batch
+                if not is_managed_by_province(codes.get(m), cfg["managed_prefixes"])
+            },
+            giver_id=actor.judge_id,
+        )
 
     def verdict_for(match_id: str) -> Dict[str, Any]:
         if not account_ready:
@@ -1346,6 +1584,33 @@ async def my_matches(
                 "liveNote": "" if checked else LIVE_CREW_NOTE,
             }
         )
+    # Niepotwierdzone na KOŃCU listy i z otwartą przyłbicą: kafel mówi, że
+    # obsady nie potwierdziliśmy, i daje sprawdzić ten jeden mecz jeszcze raz
+    # (`POST /my-matches/recheck` - bez wspólnego budżetu, więc bez wyścigu z
+    # resztą terminarza). Wystawienie i tak przechodzi przez twardą bramkę
+    # `create_offer`, więc nic nie wyjdzie na giełdę bez potwierdzenia.
+    for match_id in unconfirmed:
+        data = dict(rows.get(match_id) or {})
+        state = state_dict(data.get("state_json"))
+        out.append(
+            {
+                "matchId": match_id,
+                "match": _match_view(state, data.get("match_at")),
+                "slots": [],
+                "canOffer": False,
+                "blockedReason": UNCONFIRMED_NOTE,
+                "assignable": None,
+                "assignableReason": "UNCHECKED",
+                "checkedAt": None,
+                "liveChecked": False,
+                "liveNote": LIVE_CREW_NOTE,
+                # Osobne pole, nie samo `liveChecked`: tam chodzi o świeżość
+                # obsady, tu o to, że nie wiemy nawet, czy mecz jest jego.
+                "unconfirmed": True,
+            }
+        )
+        live_failed += 1
+
     return {
         "province": province,
         "deadlineHours": cfg["offer_deadline_hours"],
@@ -1362,6 +1627,10 @@ async def my_matches(
         # Ile wierszy na liście pokazuje ostatni znany stan zamiast obsady z
         # bazy związku - ta sama zasada: liczba wychodzi na zewnątrz.
         "liveFailed": live_failed,
+        # Ile meczów spoza obsady okręgu zeszło z listy, bo sędzia stoi w nich
+        # tylko boiskowo, a okręg nie włączył wymiany takich meczów.
+        "foreignHidden": foreign_hidden,
+        "foreignEnabled": cfg["foreign_matches_enabled"],
     }
 
 
@@ -1374,6 +1643,7 @@ async def _offer_payload(
     claims: List[Dict[str, Any]],
     *,
     viewer_id: str,
+    my_crew_label: str = "",
 ) -> Dict[str, Any]:
     return {
         "id": offer["id"],
@@ -1391,6 +1661,10 @@ async def _offer_payload(
         "match": _match_view(state_dict(offer.get("match_snapshot")), offer.get("match_at")),
         "from": _person(_s(offer.get("from_judge_id")), cards.get(_s(offer.get("from_judge_id")))),
         "isMine": _s(offer.get("from_judge_id")) == _s(viewer_id),
+        # Rola pytającego w TYM meczu - pusto, gdy nie ma go w obsadzie. Kafel
+        # pisze wtedy „Masz już ten mecz" zamiast przycisku „Biorę"; zgłoszenia
+        # i tak nie przyjmie serwer (`create_claim`).
+        "myCrewLabel": _s(my_crew_label),
         "claimCount": len([c for c in claims if _s(c.get("status")) == "pending"]),
         # Kto przejal mecz - historia ma powiedziec „oddany KOWALSKIEMU", a nie
         # samo „przekazany". Nazwisko wybranego jest juz jawne dla obu stron
@@ -1527,11 +1801,18 @@ async def list_offers(
         ]
     )
 
+    # Które z tych meczów pytający już prowadzi - jedno zapytanie na całą listę.
+    my_roles = await _viewer_roles(province, [_s(r["match_id"]) for r in rows], actor)
+
     return {
         "scope": scope,
         "offers": [
             await _offer_payload(
-                r, cards, claims.get(int(r["id"]), []), viewer_id=actor.judge_id
+                r,
+                cards,
+                claims.get(int(r["id"]), []),
+                viewer_id=actor.judge_id,
+                my_crew_label=my_roles.get(_s(r["match_id"]), ""),
             )
             for r in rows
         ],
@@ -1594,8 +1875,29 @@ async def create_offer(
 
     if slot not in slots_held_by(state, actor.judge_id, actor.full_name):
         raise HTTPException(403, "To nie jest Twoje gniazdo w tym meczu.")
+    # Mecz spoza obsady okręgu: boiskowe gniazdo wolno wystawić dopiero, gdy
+    # okręg włączył wymianę takich meczów; stolik zawsze. Lista już to
+    # odsiała, ale bramka stoi osobno - starsza aplikacja pyta o to, co ma.
+    match_code = _s(data.get("match_code")) or _s(state.get("RozgrywkiCode"))
+    managed = is_managed_by_province(match_code, cfg["managed_prefixes"])
+    if not managed and slot in FIELD_SLOTS and not cfg["foreign_matches_enabled"]:
+        raise HTTPException(
+            409,
+            detail={"code": "FOREIGN_OFF", "message": assignability_message("FOREIGN_OFF")},
+        )
     if data.get("approved"):
         raise HTTPException(409, "Protokół tego meczu jest już zatwierdzony.")
+    if data.get("match_at") is None and past_season(
+        data.get("season"), data.get("first_seen_at"), now
+    ):
+        # Mecz bez terminu z zamkniętego sezonu. Lista go nie pokazuje, ale
+        # bramka musi stać osobno: starsza aplikacja pyta o wystawienie tego,
+        # co ma u siebie, i odmowa jest tu jedyną odpowiedzią.
+        raise HTTPException(
+            409,
+            "Ten mecz jest z minionego sezonu - giełda wymienia obsadę tylko w "
+            f"sezonie {season_label(season_start_year(now))}.",
+        )
     if not can_offer(data.get("match_at"), now, cfg["offer_deadline_hours"]):
         raise HTTPException(
             409,
@@ -1620,7 +1922,17 @@ async def create_offer(
     # obsadza ten mecz. Bez tego można by wystawić spotkanie ligi centralnej,
     # którego konto wojewódzkie nie ma prawa tknąć - i dowiedzieć się o tym
     # dopiero przy zatwierdzaniu, gdy oddający dawno przestał szukać zastępstwa.
-    await _require_assignable(province, cfg, _s(req.match_id), settings, slot=slot)
+    await _require_assignable(
+        province,
+        cfg,
+        _s(req.match_id),
+        settings,
+        slot=slot,
+        # Mecz spoza terminarza okręgu sondujemy trasą sędziego - tą samą,
+        # którą pójdzie zapis przy zatwierdzeniu.
+        walk=not managed,
+        giver_id=actor.judge_id,
+    )
 
     insertion = (
         insert(match_market_offers)
@@ -1781,6 +2093,30 @@ async def create_claim(
     if refusal:
         raise HTTPException(409, refusal)
 
+    # Nie wolno wziąć meczu, który już prowadzisz. Partner wystawia DRUGIE
+    # gniazdo tego samego spotkania, a jeden człowiek nie stanie w dwóch - to
+    # nie kolizja terminarza (ta jest ostrzeżeniem dla obsadowego), tylko rzecz
+    # niemożliwa. Pytamy migawkę z pamięcią wymian giełdy, tą samą drogą, co
+    # lista „moich meczów": bez sieci, bo zgłoszenie to jedno dotknięcie.
+    my_role = (await _viewer_roles(province, [_s(offer["match_id"])], actor)).get(
+        _s(offer["match_id"]), ""
+    )
+    if not my_role:
+        # Migawki mogło nie być (mecz spoza terminarza okręgu) - zostaje
+        # migawka z chwili wystawienia oferty, czyli to, co widział oddający.
+        roles = roles_held_by(
+            state_dict(offer.get("match_snapshot")), actor.judge_id, actor.full_name
+        )
+        my_role = crew_label(roles[0]) if roles else ""
+    if my_role:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "ALREADY_IN_CREW",
+                "message": f"Masz już ten mecz - stoisz w nim jako {my_role}.",
+            },
+        )
+
     conflicts = (
         await _same_day_matches(
             province,
@@ -1894,6 +2230,21 @@ async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor)) ->
 STALE_APPLY_MINUTES = 5
 
 
+class _ClaimImpossible(Exception):
+    """Chętny stoi już w tym meczu - wyjątek wewnętrzny `approve_offer`.
+
+    Rzucany W transakcji, obsługiwany POZA nią: wycofanie zgłoszenia ma zostać
+    w bazie, a wyjątek w środku transakcji cofnąłby je razem z resztą.
+    """
+
+    def __init__(self, claim: Dict[str, Any], offer: Dict[str, Any], name: str, role: str):
+        super().__init__(role)
+        self.claim = claim
+        self.offer = offer
+        self.name = name
+        self.role = role
+
+
 def _apply_is_stale(updated_at: Any, now: datetime) -> bool:
     """Czy `applying` na tym wierszu to slad po przerwanym zapisie."""
     if not isinstance(updated_at, datetime):
@@ -1970,7 +2321,15 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
         province, who, offer.get("match_at"), _s(offer["match_id"])
     )
 
-    payload = await _offer_payload(offer, cards, claims, viewer_id=actor.judge_id)
+    payload = await _offer_payload(
+        offer,
+        cards,
+        claims,
+        viewer_id=actor.judge_id,
+        my_crew_label=(await _viewer_roles(province, [_s(offer["match_id"])], actor)).get(
+            _s(offer["match_id"]), ""
+        ),
+    )
     # Do rozstrzygniecia jest oferta otwarta ORAZ ta z PORZUCONYM zapisem: bez
     # tego drugiego przypadku utknietej wymiany nie ma jak odzyskac z aplikacji.
     payload["canApprove"] = approver and (
@@ -2123,62 +2482,156 @@ async def approve_offer(
     trzymać transakcję otwartą przez całe wywołanie HTTP, blokowalibyśmy wiersz
     na czas cudzego serwera.
     """
-    async with database.transaction():
-        row = await database.fetch_one(
-            select(match_market_offers).where(match_market_offers.c.id == offer_id).with_for_update()
-        )
-        if not row:
-            raise HTTPException(404, "Nie ma takiej oferty.")
-        offer = _row(row)
-        province = _s(offer["province"])
-        await _require_approver(actor, province)
+    try:
+        async with database.transaction():
+            row = await database.fetch_one(
+                select(match_market_offers).where(match_market_offers.c.id == offer_id).with_for_update()
+            )
+            if not row:
+                raise HTTPException(404, "Nie ma takiej oferty.")
+            offer = _row(row)
+            province = _s(offer["province"])
+            await _require_approver(actor, province)
 
-        stale = _s(offer["status"]) == "applying" and _apply_is_stale(
-            offer.get("updated_at"), _now()
-        )
-        claim_row = await database.fetch_one(
-            select(match_market_claims).where(
-                and_(
-                    match_market_claims.c.id == req.claim_id,
-                    match_market_claims.c.offer_id == offer_id,
+            stale = _s(offer["status"]) == "applying" and _apply_is_stale(
+                offer.get("updated_at"), _now()
+            )
+            claim_row = await database.fetch_one(
+                select(match_market_claims).where(
+                    and_(
+                        match_market_claims.c.id == req.claim_id,
+                        match_market_claims.c.offer_id == offer_id,
+                    )
                 )
             )
-        )
-        if not claim_row:
-            raise HTTPException(404, "Nie ma takiego zgłoszenia przy tej ofercie.")
-        claim = _row(claim_row)
-        # Przy drugiej probie zgloszenie jest juz `chosen` - to ten sam chetny,
-        # ten sam mecz, tylko zapis nie doszedl do konca.
-        allowed = ("pending", "chosen") if stale else ("pending",)
-        if _s(claim["status"]) not in allowed:
-            raise HTTPException(409, "To zgłoszenie zostało już rozstrzygnięte.")
+            if not claim_row:
+                raise HTTPException(404, "Nie ma takiego zgłoszenia przy tej ofercie.")
+            claim = _row(claim_row)
+            # Przy drugiej probie zgloszenie jest juz `chosen` - to ten sam chetny,
+            # ten sam mecz, tylko zapis nie doszedl do konca.
+            allowed = ("pending", "chosen") if stale else ("pending",)
+            if _s(claim["status"]) not in allowed:
+                raise HTTPException(409, "To zgłoszenie zostało już rozstrzygnięte.")
 
-        # Druga proba dla zapisu, ktory UTKNAL (`stale` wyzej). Zwykle `applying`
-        # znaczy "trwa", ale gdy nasze wywolanie przerwalo sie w polowie, nikt tego
-        # wiersza juz nie ruszy. Po `STALE_APPLY_MINUTES` wolno wiec sprobowac
-        # ponownie: skutek zapisu jest ten sam (to samo nazwisko w tym samym
-        # gniezdzie), a `expect` sprawdza po drodze, kto siedzi tam dzisiaj.
-        target = next_offer_status(offer["status"], "approve") or (
-            "applying" if stale else None
-        )
-        if not target:
-            raise HTTPException(409, "Ta oferta została już rozstrzygnięta.")
+            # Druga proba dla zapisu, ktory UTKNAL (`stale` wyzej). Zwykle `applying`
+            # znaczy "trwa", ale gdy nasze wywolanie przerwalo sie w polowie, nikt tego
+            # wiersza juz nie ruszy. Po `STALE_APPLY_MINUTES` wolno wiec sprobowac
+            # ponownie: skutek zapisu jest ten sam (to samo nazwisko w tym samym
+            # gniezdzie), a `expect` sprawdza po drodze, kto siedzi tam dzisiaj.
+            target = next_offer_status(offer["status"], "approve") or (
+                "applying" if stale else None
+            )
+            if not target:
+                raise HTTPException(409, "Ta oferta została już rozstrzygnięta.")
 
+            # KOLIZJE PRZELICZAMY TERAZ, nie z chwili zgłoszenia. Obsadowy
+            # zatwierdza wymiany jedna po drugiej i to WŁAŚNIE poprzednia decyzja
+            # mogła dać temu sędziemu mecz w tym dniu - giełda zapisuje ją także do
+            # migawki (`_sync_slot_holder`), więc widzimy ją od razu. Zgłoszenie
+            # sprzed godziny nie wie o niczym, co stało się po nim.
+            #
+            # Kolizja WSTRZYMUJE zapis. Obsadowy może przejść nad nią świadomie
+            # (`force`), bo wie o okręgu rzeczy, których nie wie terminarz - i to
+            # przejście idzie do dziennika.
+            taker_card = (await _judges_by_id([_s(claim["judge_id"])])).get(
+                _s(claim["judge_id"])
+            ) or {}
+            # CHĘTNY NIE MOŻE JUŻ STAĆ W TYM MECZU. Zgłoszenie było ważne, gdy je
+            # składał; od tego czasu mógł wejść do tej obsady inną wymianą albo
+            # ręcznie w bazie związku. Jeden człowiek nie stanie w dwóch gniazdach,
+            # więc to nie jest ostrzeżenie (jak kolizja), tylko odmowa bez „mimo":
+            # zgłoszenie schodzi samo, a chętny dostaje o tym wiadomość. To samo
+            # pytanie zada raz jeszcze formularz ZPRP w chwili zapisu
+            # (`forbid_elsewhere`) - migawka jest sprzed chwili, formularz z tej
+            # sekundy.
+            taken_role = (
+                await _roles_of(
+                    province,
+                    [_s(offer["match_id"])],
+                    _s(claim["judge_id"]),
+                    _s(taker_card.get("full_name")),
+                )
+            ).get(_s(offer["match_id"]), "")
+            if taken_role:
+                raise _ClaimImpossible(
+                    claim, offer, _s(taker_card.get("full_name")), taken_role
+                )
+            clash = (
+                await _same_day_matches(
+                    province,
+                    {_s(claim["judge_id"]): _s(taker_card.get("full_name"))},
+                    offer.get("match_at"),
+                    _s(offer["match_id"]),
+                )
+            ).get(_s(claim["judge_id"]), [])
+            if clash and not req.force:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "SAME_DAY_CONFLICT",
+                        "message": (
+                            "Ten sędzia ma już mecz tego dnia: "
+                            f"{conflict_sentence(clash)}. Zapis wstrzymany."
+                        ),
+                        "conflicts": [dict(card) for card in clash],
+                    },
+                )
+
+            await database.execute(
+                update(match_market_offers)
+                .where(match_market_offers.c.id == offer_id)
+                .values(
+                    status=target,
+                    decided_by=actor.judge_id,
+                    decided_at=func.now(),
+                    error=None,
+                    updated_at=func.now(),
+                )
+            )
+            await database.execute(
+                update(match_market_claims)
+                .where(match_market_claims.c.id == claim["id"])
+                .values(status="chosen", updated_at=func.now())
+            )
+    except _ClaimImpossible as blocked:
+        # Poza transakcją, bo wyjątek w jej środku cofnąłby to wycofanie.
         await database.execute(
-            update(match_market_offers)
-            .where(match_market_offers.c.id == offer_id)
+            update(match_market_claims)
+            .where(match_market_claims.c.id == blocked.claim["id"])
             .values(
-                status=target,
-                decided_by=actor.judge_id,
-                decided_at=func.now(),
-                error=None,
+                status=next_claim_status("pending", "decline") or "declined",
                 updated_at=func.now(),
             )
         )
-        await database.execute(
-            update(match_market_claims)
-            .where(match_market_claims.c.id == claim["id"])
-            .values(status="chosen", updated_at=func.now())
+        who = blocked.name or "Ten sędzia"
+        await _log(
+            "claim_withdrawn",
+            province=province,
+            actor=actor,
+            offer=blocked.offer,
+            subject_id=_s(blocked.claim["judge_id"]),
+            subject_name=blocked.name,
+            ok=False,
+            message=(
+                f"Zgłoszenie zeszło przy zatwierdzaniu: {who} stoi już w tym meczu "
+                f"jako {blocked.role}."
+            ),
+            payload={"code": "ALREADY_IN_CREW", "role": blocked.role},
+        )
+        await _notify(
+            [_s(blocked.claim["judge_id"])],
+            text_claim_impossible(blocked.offer, blocked.role),
+            blocked.offer,
+        )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "ALREADY_IN_CREW",
+                "message": (
+                    f"{who} stoi już w tym meczu jako {blocked.role}, więc nie może "
+                    "wziąć drugiego gniazda. Zgłoszenie zostało wycofane."
+                ),
+            },
         )
 
     cfg = await _config(province)
@@ -2197,11 +2650,23 @@ async def approve_offer(
         offer=offer,
         subject_id=_s(claim["judge_id"]),
         subject_name=_s(taker.get("full_name")),
-        payload={"claimId": int(claim["id"]), "retry": bool(stale)},
+        payload={
+            "claimId": int(claim["id"]),
+            "retry": bool(stale),
+            # Zatwierdzenie NAD kolizją to inna decyzja niż zwykłe - dziennik
+            # ma o niej mówić wprost, razem z tym, ile meczów tego dnia było.
+            "forced": bool(clash),
+            "conflicts": len(clash),
+        },
     )
 
-    async def fail(message: str, code: str) -> Dict[str, Any]:
-        """Oferta wraca na giełdę, chętny do puli, a obsadowy dostaje powód."""
+    async def fail(message: str, code: str, role: str = "") -> Dict[str, Any]:
+        """Oferta wraca na giełdę, chętny do puli, a obsadowy dostaje powód.
+
+        Wyjątek: chętny, który stoi już w tym meczu (formularz ZPRP zobaczył
+        to w chwili zapisu, kod ALREADY_IN_CREW), NIE wraca do puli - jego
+        zgłoszenie schodzi, a on dostaje o tym wiadomość z nazwą roli.
+        """
         await database.execute(
             update(match_market_offers)
             .where(match_market_offers.c.id == offer_id)
@@ -2211,11 +2676,23 @@ async def approve_offer(
                 updated_at=func.now(),
             )
         )
+        impossible = code == "ALREADY_IN_CREW"
         await database.execute(
             update(match_market_claims)
             .where(match_market_claims.c.id == claim["id"])
-            .values(status=next_claim_status("chosen", "release") or "pending", updated_at=func.now())
+            .values(
+                status=(
+                    (next_claim_status("pending", "decline") or "declined")
+                    if impossible
+                    else (next_claim_status("chosen", "release") or "pending")
+                ),
+                updated_at=func.now(),
+            )
         )
+        if impossible:
+            await _notify(
+                [_s(claim["judge_id"])], text_claim_impossible(offer, role), offer
+            )
         await _notify([actor.judge_id], text_apply_failed(offer, message), offer)
         await _log(
             "zprp_failed",
@@ -2277,21 +2754,56 @@ async def approve_offer(
             "NO_NAME",
         )
 
+    # Mecz spoza obsady okręgu: zapis idzie TRASĄ SĘDZIEGO (lista meczów
+    # oddającego -> strona meczu -> formularz), a boiskowe gniazdo tylko przy
+    # włączonej wymianie takich meczów - okręg mógł ją wyłączyć już po
+    # wystawieniu oferty i wtedy decyzja ma się o to rozbić tu, nie w ZPRP.
+    managed = is_managed_by_province(offer.get("match_code"), cfg["managed_prefixes"])
+    if (
+        not managed
+        and _s(offer["slot"]) in FIELD_SLOTS
+        and not cfg["foreign_matches_enabled"]
+    ):
+        return await fail(assignability_message("FOREIGN_OFF"), "FOREIGN_OFF")
+
     try:
         async with AsyncClient(
             base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
         ) as client:
             cookies = await _login_zprp(client, creds["username"], creds["password"])
+            user = ""
+            referer = ""
+            if not managed:
+                route = await walk_judge_route(
+                    client,
+                    cookies,
+                    judge_id=_s(offer["from_judge_id"]),
+                    id_zawody=_s(offer["match_id"]),
+                    season_label=zprp_season_label(_now()),
+                    log_prefix=f"gielda/trasa/offer-{offer_id}",
+                )
+                if not route["ok"]:
+                    return await fail(
+                        _s(route.get("message")) or assignability_message(route.get("reason")),
+                        _s(route.get("reason")) or "NO_FORM",
+                    )
+                user = _s(route.get("user"))
+                referer = _s(route.get("detail_path"))
             result = await apply_referee_assignment(
                 client,
                 cookies,
                 _s(offer["match_id"]),
                 {select_name: ("", taker_name)},
+                user=user,
+                referer=referer,
                 expect=(select_name, holder),
                 # Giełda nie zna numeru opcji - podaje samo nazwisko. Bez tego
                 # nienalezione nazwisko wysłałoby pustą wartość, czyli WYCZYŚCIŁO
                 # gniazdo zamiast je przejąć.
                 require_name_match=True,
+                # Chętny nie może stać już w innym gnieździe tego meczu -
+                # formularz widzi obsadę z tej sekundy, migawka sprzed chwili.
+                forbid_elsewhere=taker_name,
                 log_prefix=f"gielda/offer-{offer_id}",
             )
     except Exception as exc:  # noqa: BLE001
@@ -2302,6 +2814,7 @@ async def approve_offer(
         return await fail(
             _s(result.get("error")) or "Zapis nie potwierdził się w bazie związku.",
             _s(result.get("code")) or "VERIFICATION_FAILED",
+            role=crew_label(result.get("role")) if result.get("role") else "",
         )
 
     await database.execute(
@@ -2421,6 +2934,10 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
                 ),
                 "assignAccountMode": mode,
                 "approverBadges": normalize_approver_badges(cfg.get("approver_badges")),
+                "foreignMatchesEnabled": bool(cfg.get("foreign_matches_enabled", False)),
+                "managedPrefixes": managed_prefixes_for(province, cfg.get("managed_prefixes")),
+                "managedPrefixesDefault": managed_prefixes_for(province),
+                "managedPrefixesCustom": normalize_prefixes(cfg.get("managed_prefixes")) is not None,
                 "accounts": account_status(province, mode),
                 "openOffers": pending.get(province, 0),
                 "updatedBy": _s(cfg.get("updated_by")) or None,
@@ -2593,6 +3110,13 @@ async def admin_set_province(
         # Pusty wybór NIE wyłącza rozstrzygania - normalizacja wraca do odznaki
         # obsadowego, żeby okręg nie został z giełdą, której nikt nie domknie.
         values["approver_badges"] = normalize_approver_badges(req.approver_badges)
+    if req.foreign_matches_enabled is not None:
+        values["foreign_matches_enabled"] = bool(req.foreign_matches_enabled)
+    if req.reset_managed_prefixes:
+        # NULL w kolumnie = katalog domyślny z liścia reguł.
+        values["managed_prefixes"] = None
+    elif req.managed_prefixes is not None:
+        values["managed_prefixes"] = normalize_prefixes(req.managed_prefixes) or []
 
     if current:
         await database.execute(
@@ -2623,5 +3147,163 @@ async def admin_set_province(
         "deadlineHours": cfg["offer_deadline_hours"],
         "assignAccountMode": cfg["assign_account_mode"],
         "approverBadges": cfg["approver_badges"],
+        "foreignMatchesEnabled": cfg["foreign_matches_enabled"],
+        "managedPrefixes": cfg["managed_prefixes"],
+        "managedPrefixesDefault": managed_prefixes_for(key),
+        "managedPrefixesCustom": cfg["managed_prefixes_custom"],
         "accounts": account_status(key, cfg["assign_account_mode"]),
     }
+
+
+@router.post(
+    "/admin/provinces/{province}/route-check",
+    summary="Sprawdź trasę sędziego do meczu spoza obsady okręgu - bez zapisu",
+)
+async def admin_route_check(
+    province: str,
+    req: RouteCheckRequest,
+    actor: Actor = Depends(market_actor),
+    settings: Settings = Depends(get_settings),
+) -> Dict[str, Any]:
+    """Przechodzi trasę sędziego krok po kroku i mówi, co widzi.
+
+    Czy ZPRP przyjmie ZAPIS dla meczu spoza województwa konta, wie dopiero
+    pierwsza prawdziwa wymiana - ale wszystko przed zapisem (lista meczów
+    sędziego, przycisk „Sędziowie", formularz z listami, kto stoi w gniazdach)
+    da się obejrzeć bez dotykania obsady. Administrator włącza wymianę takich
+    meczów po tym raporcie, nie na ślepo. Niczego nie zapisujemy: ani w bazie
+    związku, ani w pamięci sondy, ani w dzienniku - to podgląd.
+    """
+    if not may_manage_config(is_admin=actor.is_admin):
+        raise HTTPException(403, "To sprawdzenie należy do administratora aplikacji.")
+    key = normalize_province(province)
+    if not key:
+        raise HTTPException(400, "Nie znam takiego województwa.")
+    code = _s(req.match_code)
+    if not code:
+        raise HTTPException(400, "Podaj numer meczu, np. IMD/3.")
+    judge = _s(req.judge_id) or actor.judge_id
+    cfg = await _config(key)
+    creds = assign_credentials(key, cfg["assign_account_mode"])
+    if not creds["configured"]:
+        raise HTTPException(409, assignability_message("NO_ACCOUNT"))
+
+    report: Dict[str, Any] = {
+        "province": key,
+        "judgeId": judge,
+        "judgeName": "",
+        "matchCode": code,
+        "matchId": "",
+        "season": "",
+        "when": "",
+        "teams": "",
+        "level": league_level(code),
+        "managed": is_managed_by_province(code, cfg["managed_prefixes"]),
+        "foreignEnabled": cfg["foreign_matches_enabled"],
+        "user": "",
+        "steps": [],
+        "slots": {},
+        "verdict": {"assignable": None, "reason": "UNCHECKED", "message": ""},
+    }
+    prefix = f"gielda/trasa/{key}"
+    try:
+        async with AsyncClient(
+            base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
+        ) as client:
+            try:
+                cookies = await _login_zprp(client, creds["username"], creds["password"])
+            except HTTPException as exc:
+                report["steps"].append(
+                    {
+                        "key": "login",
+                        "ok": False,
+                        "title": "Logowanie do bazy związku",
+                        "detail": _s(exc.detail),
+                    }
+                )
+                report["verdict"] = {
+                    "assignable": None,
+                    "reason": "PROBE_FAILED",
+                    "message": assignability_message("PROBE_FAILED"),
+                }
+                return report
+            route = await walk_judge_route(
+                client,
+                cookies,
+                judge_id=judge,
+                match_code=code,
+                season_label=zprp_season_label(_now()),
+                log_prefix=prefix,
+            )
+            report.update(
+                {
+                    "judgeName": _s(route.get("judge_name")),
+                    "matchId": _s(route.get("id_zawody")),
+                    "season": _s(route.get("season")),
+                    "when": _s(route.get("when")),
+                    "teams": " - ".join(
+                        p for p in (_s(route.get("host")), _s(route.get("guest"))) if p
+                    ),
+                    "user": _s(route.get("user")),
+                    "steps": list(route.get("steps") or []),
+                }
+            )
+            if not route["ok"]:
+                report["verdict"] = {
+                    "assignable": False,
+                    "reason": _s(route.get("reason")) or "NO_FORM",
+                    "message": _s(route.get("message")),
+                }
+                return report
+            form = await probe_assignment_rights(
+                client,
+                cookies,
+                _s(route["id_zawody"]),
+                user=_s(route.get("user")),
+                referer=_s(route.get("detail_path")),
+                log_prefix=prefix,
+            )
+            ok = bool(form.get("assignable"))
+            slots = form.get("slots") or {}
+            holders = "; ".join(
+                f"{crew_label(label)}: {_s(data.get('holder')) or 'nikt'}"
+                for label, data in slots.items()
+            )
+            report["steps"].append(
+                {
+                    "key": "form",
+                    "ok": ok,
+                    "title": "Formularz obsady",
+                    "detail": (
+                        f"{int(form.get('option_count') or 0)} sędziów na listach. {holders}"
+                        if ok
+                        else _s(form.get("message"))
+                    ),
+                }
+            )
+            report["slots"] = slots
+            report["verdict"] = {
+                "assignable": ok,
+                "reason": _s(form.get("reason")) or ("OK" if ok else "NO_FORM"),
+                "message": "" if ok else _s(form.get("message")),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gielda: sprawdzenie trasy %s/%s nieudane: %s", key, code, exc)
+        report["steps"].append(
+            {
+                "key": "network",
+                "ok": False,
+                "title": "Baza związku",
+                "detail": f"Nie odpowiedziała: {exc}",
+            }
+        )
+        report["verdict"] = {
+            "assignable": None,
+            "reason": "PROBE_FAILED",
+            "message": assignability_message("PROBE_FAILED"),
+        }
+    logger.info(
+        "gielda: trasa %s sedzia=%s mecz=%s -> %s",
+        key, judge, code, report["verdict"]["reason"],
+    )
+    return report

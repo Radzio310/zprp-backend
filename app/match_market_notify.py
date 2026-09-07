@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, List, Mapping, Optional
 
 from app.match_market_rules import SLOT_LABELS
 
@@ -295,3 +295,47 @@ def claim_lost(offer: Mapping[str, Any]) -> tuple[str, str]:
             "Twoje zgłoszenie nie zostało wybrane",
         ),
     )
+
+
+def claim_impossible(offer: Mapping[str, Any], role_label: Any) -> tuple[str, str]:
+    """Chętny stoi już w tym meczu - do niego, gdy obsadowy próbował zatwierdzić.
+
+    Zgłoszenie było ważne w chwili złożenia; w tę obsadę wszedł potem inną
+    wymianą albo ręcznie w bazie związku. Jeden człowiek nie stanie w dwóch
+    gniazdach, więc zgłoszenie schodzi samo - i ma o tym powiedzieć.
+    """
+    role = _s(role_label)
+    return (
+        "🔁 Zgłoszenie zeszło",
+        _join(
+            f"Stoisz już w {match_gen(offer)}" + (f" jako {role}" if role else ""),
+            "Nie da się wziąć w nim drugiego gniazda, więc zgłoszenie zostało wycofane",
+        ),
+    )
+
+
+def conflict_sentence(conflicts: Iterable[Mapping[str, Any]]) -> str:
+    """„IIM4/1 o 14:00 w Gliwicach" - kolizje jednym zdaniem.
+
+    Ta sama treść, którą aplikacja składa w `conflictLine` (`matchMarketView`).
+    Serwer potrzebuje jej przy odmowie zapisu, żeby obsadowy nie musiał szukać
+    w liście, CO właściwie koliduje.
+    """
+    parts: List[str] = []
+    for card in conflicts or ():
+        code = str((card or {}).get("matchCode") or "").strip()
+        hall = str((card or {}).get("hall") or "").strip()
+        raw = str((card or {}).get("matchAt") or "").strip()
+        when = ""
+        if raw:
+            try:
+                when = datetime.fromisoformat(raw).strftime("%H:%M")
+            except ValueError:
+                when = ""
+        piece = code or "mecz bez numeru"
+        if when:
+            piece = f"{piece} o {when}"
+        if hall:
+            piece = f"{piece} w {hall}"
+        parts.append(piece)
+    return ", ".join(parts)

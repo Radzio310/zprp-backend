@@ -270,3 +270,17 @@ def test_crew_message_declines_the_table_role():
 def test_crew_message_without_the_previous_name_still_reads():
     _, body = crew_changed(offer(match_at=None), "NOWAK Jan", "")
     assert body == "Nowy sędzia 1 w meczu IIM4/1: NOWAK Jan."
+
+
+def test_claim_impossible_names_the_match_and_the_role():
+    from app.match_market_notify import claim_impossible
+
+    title, body = claim_impossible({"match_code": "IIM4/1", "slot": "sedzia1"}, "sędzia 2")
+    assert title
+    assert "IIM4/1" in body
+    assert "sędzia 2" in body
+    assert "wycofane" in body
+    # Bez roli zdanie jest krótsze, nie dziurawe.
+    _, short = claim_impossible({"match_code": "IIM4/1"}, "")
+    assert "jako" not in short
+    assert ".." not in short

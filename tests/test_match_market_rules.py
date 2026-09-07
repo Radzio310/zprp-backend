@@ -586,3 +586,183 @@ def test_telefon_ma_pierwszenstwo_a_limit_tnie_od_konca():
     assert live_check_order(["3", "1"], ["1", "2", "4"], limit=3) == ["3", "1", "2"]
     assert live_check_order([], ["", None, "5"]) == ["5"]
     assert live_check_order(["9"], ["9"]) == ["9"]
+
+
+# ── Role w meczu i sezon rozgrywkowy ───────────────────────────────────────
+
+from app.match_market_rules import (  # noqa: E402
+    SEASON_PRESEASON_DAYS,
+    crew_label,
+    parse_season_start,
+    past_season,
+    roles_held_by,
+    season_label,
+    season_start_year,
+)
+
+_NOW = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+
+
+def test_roles_cover_the_whole_crew_not_only_tradeable_slots():
+    state = {
+        "NrSedzia_pierwszy": "5124",
+        "NrSedzia_delegat": "77",
+        "NrSedzia_delegat_nazwisko": "KOWALSKI Jan",
+    }
+    assert roles_held_by(state, "5124", "") == ["sedzia1"]
+    assert roles_held_by(state, "77", "") == ["delegat"]
+    assert roles_held_by(state, "999", "") == []
+
+
+def test_zero_in_a_slot_is_nobody():
+    """„0" to ZPRP-owe „nikogo tu nie ma", nie numer sedziego."""
+    assert roles_held_by({"NrSedzia_czas": "0"}, "0", "") == []
+
+
+def test_role_matches_by_name_when_the_number_is_missing():
+    state = {"NrSedzia_drugi_nazwisko": "WITKOWICZ Radosław"}
+    assert roles_held_by(state, "5124", "Radosław WITKOWICZ") == ["sedzia2"]
+    assert roles_held_by(state, "5124", "Krzysztof WITKOWICZ") == []
+
+
+def test_every_role_has_a_label():
+    for role in ("sedzia1", "sedzia2", "sekretarz", "czas", "delegat", "delegat2"):
+        assert crew_label(role)
+    assert crew_label("kibic") == "kibic"
+
+
+def test_season_starts_on_the_first_of_september():
+    assert season_start_year(datetime(2026, 9, 1, tzinfo=timezone.utc)) == 2026
+    assert season_start_year(datetime(2026, 8, 31, tzinfo=timezone.utc)) == 2025
+    assert season_label(2026) == "2026/27"
+    assert season_label(1999) == "1999/00"
+    assert season_label("nic") == ""
+
+
+def test_season_is_read_from_the_union_notation():
+    assert parse_season_start("2026/2027") == 2026
+    assert parse_season_start("2026/27") == 2026
+    assert parse_season_start(" 2026 ") == 2026
+    assert parse_season_start("") is None
+    assert parse_season_start(None) is None
+    assert parse_season_start("39") is None
+    assert parse_season_start("1899/1900") is None
+
+
+def test_closed_season_is_recognised_by_the_column_first():
+    assert past_season("2025/2026", None, _NOW) is True
+    assert past_season("2026/2027", None, _NOW) is False
+    # Kolumna rozstrzyga NAWET wbrew starej dacie pierwszego zobaczenia.
+    old = datetime(2025, 10, 1, tzinfo=timezone.utc)
+    assert past_season("2026/2027", old, _NOW) is False
+
+
+def test_without_a_season_the_first_sighting_decides_with_a_preseason_grace():
+    assert past_season("", datetime(2026, 3, 1, tzinfo=timezone.utc), _NOW) is True
+    # Obsady na pierwsze kolejki wchodzą w wakacje - to już nowy sezon.
+    assert past_season("", datetime(2026, 8, 20, tzinfo=timezone.utc), _NOW) is False
+    assert past_season("", datetime(2026, 9, 5, tzinfo=timezone.utc), _NOW) is False
+    # Zapas liczy się od 1 września wstecz.
+    edge = datetime(2026, 9, 1, tzinfo=timezone.utc) - timedelta(days=SEASON_PRESEASON_DAYS)
+    assert past_season("", edge - timedelta(minutes=1), _NOW) is True
+    assert past_season("", edge + timedelta(minutes=1), _NOW) is False
+
+
+def test_not_knowing_never_blocks():
+    """Ta sama regula, co przy nieudanej sondzie uprawnien: brak wiedzy to nie odmowa."""
+    assert past_season(None, None, _NOW) is False
+    assert past_season("", None, _NOW) is False
+
+
+def test_naive_timestamps_do_not_explode():
+    """SQLite oddaje znacznik bez strefy, Postgres ze strefa - obie drogi licza sie tak samo."""
+    assert past_season("", datetime(2026, 3, 1), _NOW) is True
+    assert past_season("", datetime(2026, 8, 20), _NOW) is False
+
+
+# ─────────────────────────── mecze spoza okręgu ───────────────────────────
+
+from app.match_market_rules import (  # noqa: E402
+    DEFAULT_MANAGED_PREFIXES,
+    FIELD_SLOTS,
+    TABLE_SLOTS,
+    is_managed_by_province,
+    league_level,
+    managed_prefixes_for,
+    match_code_prefix,
+    normalize_prefixes,
+    offerable_slots,
+)
+
+
+def test_league_level_reads_the_first_segment_of_the_match_number():
+    assert match_code_prefix("IIM4/1") == "IIM4"
+    assert match_code_prefix(" imd/3 ") == "IMD"
+    assert match_code_prefix("S/PPK/2") == "S"
+    assert league_level("IIM4/1") == "second"
+    assert league_level("IIK4/12") == "second"
+    for central in ("IMD/3", "IKA/7", "LCM/5", "LC/2", "OSM/12", "OSK/1", "SM/3", "SK/9",
+                    "LSM/1", "SPM/4", "PP/1", "MP/4"):
+        assert league_level(central) == "central", central
+    # III liga zaczyna się od „III", nie od „IIM"; młodzież i puchar okręgowy
+    # z członem PP w środku numeru to rozgrywki okręgu.
+    for okreg in ("IIIM/9", "IIIK/2", "MłM1213/3", "JMM/3", "DzK/1", "S/PPK/2", "", None):
+        assert league_level(okreg) == "okreg", okreg
+
+
+def test_managed_leagues_come_from_the_panel_or_the_catalog():
+    assert managed_prefixes_for("SLASKIE") == ["IIM4", "IIK4"]
+    assert managed_prefixes_for("OPOLSKIE") == []
+    assert managed_prefixes_for("SLASKIE", None) == ["IIM4", "IIK4"]
+    assert managed_prefixes_for("SLASKIE", ["iim4"]) == ["IIM4"]
+    # Pusta lista to DECYZJA okręgu (nie prowadzi żadnej II ligi), nie brak.
+    assert managed_prefixes_for("SLASKIE", []) == []
+    # Kolumna JSON bywa napisem; lista z palca też przechodzi.
+    assert managed_prefixes_for("SLASKIE", '["IIK4"]') == ["IIK4"]
+    assert managed_prefixes_for("SLASKIE", "IIM4, IIK4") == ["IIM4", "IIK4"]
+
+
+def test_normalize_prefixes_tells_unset_from_empty():
+    assert normalize_prefixes(None) is None
+    assert normalize_prefixes("") is None
+    assert normalize_prefixes("   ") is None
+    assert normalize_prefixes(42) is None
+    assert normalize_prefixes([]) == []
+    assert normalize_prefixes(["IIM4", "iim4", " ", "zły/kod", "IIK4"]) == ["IIM4", "IIK4"]
+    assert normalize_prefixes({"IIM4": True, "IIK4": False}) == ["IIM4"]
+    assert normalize_prefixes(b'["IIM4"]') == ["IIM4"]
+
+
+def test_catalog_keys_are_normalized_province_keys():
+    # Klucz spoza słownika `zprp_accounts` nie trafiłby w żaden okręg.
+    from app.zprp_accounts import normalize_province
+
+    for key in DEFAULT_MANAGED_PREFIXES:
+        assert normalize_province(key) == key, key
+
+
+def test_district_manages_its_own_and_entrusted_leagues():
+    assert is_managed_by_province("IIIM/9", []) is True
+    assert is_managed_by_province("IIM4/1", ["IIM4", "IIK4"]) is True
+    assert is_managed_by_province("IIM3/1", ["IIM4", "IIK4"]) is False
+    assert is_managed_by_province("IMD/3", ["IIM4", "IIK4"]) is False
+    # Gdyby związek powierzył okręgowi całą I ligę - prefiks decyduje.
+    assert is_managed_by_province("IMD/3", ["IM"]) is True
+    # Bez numeru nie wiemy nic, a „nie wiem" nie odbiera prawa do oddania.
+    assert is_managed_by_province("", []) is True
+
+
+def test_foreign_match_keeps_field_slots_until_the_district_opens_them():
+    held = ["sedzia1", "sekretarz"]
+    assert offerable_slots(held, "IIM4/1", ["IIM4"], False) == (held, [])
+    assert offerable_slots(held, "IMD/3", ["IIM4"], False) == (["sekretarz"], ["sedzia1"])
+    assert offerable_slots(held, "IMD/3", ["IIM4"], True) == (held, [])
+    assert offerable_slots(["sedzia2"], "IIM3/7", ["IIM4"], False) == ([], ["sedzia2"])
+    # Stolik obsadza okręg gospodarza hali - zawsze do oddania.
+    assert offerable_slots(["czas"], "OSM/12", [], False) == (["czas"], [])
+    assert offerable_slots([], "IMD/3", [], False) == ([], [])
+
+
+def test_field_and_table_slots_cover_the_tradeable_four():
+    assert set(FIELD_SLOTS) | set(TABLE_SLOTS) == set(TRADEABLE_SLOTS)
+    assert not set(FIELD_SLOTS) & set(TABLE_SLOTS)

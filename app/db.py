@@ -1593,6 +1593,14 @@ province_module_config = Table(
     # giełdzie meczów. Pusta/brakująca lista = domyślnie "Obsadowy";
     # administrator aplikacji przechodzi zawsze, niezależnie od listy.
     Column("approver_badges", JSON, nullable=True),
+    # Wymiana meczów SPOZA obsady okręgu (I liga i wyżej, obce II ligi) -
+    # boiskowe gniazda takich meczów wchodzą na giełdę dopiero po włączeniu,
+    # a zapis idzie wtedy „trasą sędziego". Domyślnie wyłączone, świadomie.
+    Column("foreign_matches_enabled", Boolean, nullable=False, server_default=text("false")),
+    # II ligi powierzone temu okręgowi (lista prefiksów, np. ["IIM4", "IIK4"]).
+    # NULL = katalog domyślny z `match_market_rules.DEFAULT_MANAGED_PREFIXES`;
+    # pusta lista = okręg nie prowadzi żadnej II ligi.
+    Column("managed_prefixes", JSON, nullable=True),
     Column("updated_by", String, nullable=True),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
@@ -2903,6 +2911,8 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE extra_report_recipients ADD COLUMN IF NOT EXISTS discord_webhook_url varchar"))
     _conn.execute(text("ALTER TABLE extra_report_province_recipients ADD COLUMN IF NOT EXISTS discord_webhook_url varchar"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS approver_badges json"))
+    _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS foreign_matches_enabled boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS managed_prefixes json"))
     # Dziennik giełdy powstał później niż sama giełda, więc oferty sprzed jego
     # wprowadzenia nie mają ani jednego wpisu. Dopisujemy je WSTECZ z własnych
     # stempli czasu wiersza - tyle, ile z nich wynika: wystawienie zawsze, a

@@ -134,4 +134,17 @@ def test_every_config_field_has_a_human_label():
         "offer_deadline_hours",
         "assign_account_mode",
         "approver_badges",
+        "foreign_matches_enabled",
+        "managed_prefixes",
     }
+
+
+def test_config_diff_reads_the_foreign_switch_and_the_managed_leagues():
+    message = config_diff_message(
+        {"foreign_matches_enabled": False, "managed_prefixes": None},
+        {"foreign_matches_enabled": True, "managed_prefixes": ["IIM4"]},
+    )
+    assert "mecze spoza okręgu: wymiana wyłączona → wymiana włączona" in message
+    assert "ligi powierzone: domyślne → IIM4" in message
+    # Pusta lista to decyzja („żadna"), nie brak wpisu („domyślne").
+    assert "żadna" in config_diff_message({"managed_prefixes": ["IIM4"]}, {"managed_prefixes": []})

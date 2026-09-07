@@ -637,7 +637,7 @@ def _pick_best(rows: List[dict]) -> Optional[dict]:
     def k(r: dict):
         vf = r.get("valid_from") or date.min
         ua = r.get("updated_at") or datetime.min
-        return (vf, ua)
+        return (vf, ua, r.get("id") or 0)
 
     return sorted(rows, key=k, reverse=True)[0]
 
