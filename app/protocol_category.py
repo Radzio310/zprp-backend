@@ -81,6 +81,13 @@ COMPETITION_TOKENS: Dict[str, Tuple[str, str]] = {
     "PPM": ("pp", "M"),
     "PPK": ("pp", "K"),
     "PP": ("pp", ""),
+    # Runda centralna Pucharu Polski ma kod „PM" / „PK", nie „PPM": numery
+    # z bazy ZPRP to „L/PM/1" (2025/2026 i 2026/2027), a „PPM"/„PPK" zostaje
+    # przy eliminacjach wojewódzkich („E/PPM/1", „S/PPK/2"). Wśród 21
+    # przedrostków okręgowych z obu sezonów nie ma „PM" ani „PK", więc
+    # kolizja z członem okręgu nie zachodzi.
+    "PM": ("pp", "M"),
+    "PK": ("pp", "K"),
     "JM": ("junior", "M"),
     "JK": ("junior", "K"),
     "JmM": ("junior_ml", "M"),
