@@ -26,7 +26,14 @@ Oba braki domyka ten moduł, w JEDNYM miejscu prawdy - overlayu:
   telefonu prowadzącego niczego nie cofa; generator PDF nakłada overlay na
   blob do wydruku, więc ptaszek na protokole też się zmienia,
 * `run_exam_promotion_sweep` - przebieg w tle dla meczów, przy których nikt
-  już nie zapisuje bloba (po ostatnim gwizdku, przed zatwierdzeniem).
+  nie zapisuje bloba (skonfigurowanych, jeszcze nierozpoczętych).
+
+GRANICA CZASOWA (decyzja z 2026-09-08): awans dzieje się WYŁĄCZNIE przed
+pierwszym gwizdkiem (`PHASE_PRE`). Protokół ma mówić, co było wiadomo w
+chwili rozpoczęcia meczu - ręczny ptaszek postawiony, bo baza związku nie
+miała wtedy badań, jest prawdą o TYM meczu i potwierdzenie dosłane nazajutrz
+nie ma prawa jej przepisać. W rozgrywkach centralnych dochodzi drugi rygiel:
+awans na WZPR jest tam odebraniem prawa gry, więc nie zachodzi wcale.
 
 Reguły bez bazy i bez sieci mieszkają w `app/proel_fields.py` i mają testy;
 tutaj jest wyłącznie ich spięcie z bazą, siecią i dziennikiem.
@@ -47,14 +54,18 @@ from app.db import database, proel_match_state, saved_matches
 from app.proel_auth import Actor
 from app.proel_fields import (
     EXAM_SRC_ZPRP,
+    PHASE_PRE,
     PathRejected,
     adopt_blob_exams,
     exam_entry,
+    exam_recheck_from_blob,
     manual_exam_candidates,
     merge_exam,
+    phase_of,
     promotions_for,
     roster_marks,
 )
+from app.protocol_category import exam_requirement_for_code
 from app.proel_journal import log_match_event
 from app.proel_match_key import local_key_from_blob, zprp_id_of
 
@@ -71,8 +82,8 @@ PROMOTION_SWEEP_S = 600
 #: Ile meczów jeden przebieg w tle bierze pod uwagę.
 PROMOTION_SWEEP_BATCH = 40
 
-#: Jak stare zapisy jeszcze sprawdzamy. Awans ma sens do zatwierdzenia
-#: protokołu, a zatwierdza się w ciągu dni, nie tygodni.
+#: Jak stare wiersze jeszcze sprawdzamy. Awans ma sens do pierwszego
+#: gwizdka, a mecz konfiguruje się najwyżej kilka dni przed terminem.
 PROMOTION_LOOKBACK_DAYS = 7
 
 #: Ile sekund ma publiczne API na odpowiedź - pytamy przy zapisie bloba, więc
@@ -239,6 +250,41 @@ async def journal_absorbed(
         )
 
 
+async def journal_exam_recheck(
+    match_number: str,
+    zprp_match_id: Optional[str],
+    blob: Any,
+    actor: Optional[Actor],
+    *,
+    app_version: Optional[str] = None,
+    ip: Optional[str] = None,
+) -> None:
+    """Wpis za sprawdzenie badań w bazie związku przed pierwszym gwizdkiem.
+
+    `event_key` bierze GODZINĘ sprawdzenia, więc blob wysyłany co minutę
+    przez cały mecz dopisuje to zdarzenie dokładnie raz. Dziennik nigdy nie
+    rzuca (patrz `log_match_event`), więc i to wołanie nie wywróci zapisu.
+    """
+    check = exam_recheck_from_blob(blob)
+    if not check:
+        return
+    await log_match_event(
+        match_number=match_number,
+        event="exam.rechecked",
+        actor=actor,
+        zprp_match_id=zprp_match_id,
+        details={
+            "players": check["players"],
+            "at": check["at"],
+            "clock": check["clock"],
+            "source": "start",
+        },
+        event_key=f"exam:recheck:{match_number}:{check['at']}",
+        app_version=app_version,
+        ip=ip,
+    )
+
+
 # ───────────────────────── awans z bazy związku ─────────────────────────
 
 
@@ -290,6 +336,15 @@ async def promote_manual_exams(match_number: str, *, force: bool = False) -> Dic
     if str(state.get("status_cache") or "") == "approved":
         return {"skipped": "approved"}
 
+    # Nadpisywanie ręcznych potwierdzeń kończy się z pierwszym gwizdkiem.
+    #
+    # Decyzja z 2026-09-08. Protokół ma mówić, co było wiadomo w chwili
+    # rozpoczęcia meczu: jeżeli sędzia potwierdził badania ręcznie, bo baza
+    # związku ich wtedy nie miała, to ręczny ptaszek jest PRAWDĄ o tym meczu
+    # i potwierdzenie dosłane nazajutrz nie ma prawa jej przepisać.
+    if phase_of(state, doc.get("status")) != PHASE_PRE:
+        return {"skipped": "started"}
+
     blob = doc.get("data_json") if isinstance(doc.get("data_json"), dict) else {}
     overlay = state.get("fields_json") if isinstance(state.get("fields_json"), dict) else {}
     candidates = manual_exam_candidates(overlay, blob)
@@ -314,7 +369,13 @@ async def promote_manual_exams(match_number: str, *, force: bool = False) -> Dic
     if not payload:
         return {"skipped": "no_answer"}
 
-    promotions = promotions_for(candidates, roster_marks(payload))
+    # Próg rozgrywki: w Superlidze awans „ręczne -> WZPR" odebrałby prawo gry
+    # zawodniczce, którą sędzia dopuścił - patrz `promotions_for`.
+    promotions = promotions_for(
+        candidates,
+        roster_marks(payload),
+        exam_requirement_for_code(number),
+    )
     if not promotions:
         return {"promoted": []}
 
@@ -419,27 +480,39 @@ def kick_promotion(match_number: str) -> None:
 
 
 async def _sweep_once() -> int:
+    """Mecze PRZED pierwszym gwizdkiem, przy których nikt nie zapisuje bloba.
+
+    Przebieg szedł po `saved_matches` ze statusem „w toku"/„zakończony", bo
+    awans wolno było robić do zatwierdzenia protokołu. Od 2026-09-08 wolno go
+    robić tylko do rozpoczęcia meczu, a mecz jeszcze nierozpoczęty często NIE
+    MA wiersza w `saved_matches` - blob powstaje razem z ekranem meczu. Stąd
+    pytamy o wiersze stanu bez `live_started_at`: to dokładnie te mecze, które
+    ktoś skonfigurował i którym związek może jeszcze dosłać badania.
+    """
     since = _now() - timedelta(days=PROMOTION_LOOKBACK_DAYS)
     rows = await database.fetch_all(
-        select(saved_matches.c.match_number, saved_matches.c.data_json)
-        .where(saved_matches.c.status.in_(("in_progress", "finished")))
-        .where(saved_matches.c.updated_at >= since)
-        .order_by(saved_matches.c.updated_at.desc())
+        select(
+            proel_match_state.c.match_number,
+            proel_match_state.c.fields_json,
+        )
+        .where(proel_match_state.c.live_started_at.is_(None))
+        .where(proel_match_state.c.updated_at >= since)
+        .order_by(proel_match_state.c.updated_at.desc())
         .limit(PROMOTION_SWEEP_BATCH)
     )
     checked = 0
     for raw in rows:
         row = _as_dict(raw)
         number = str(row.get("match_number") or "").strip()
-        blob = row.get("data_json") if isinstance(row.get("data_json"), dict) else {}
-        state = _as_dict(
+        overlay = row.get("fields_json") if isinstance(row.get("fields_json"), dict) else {}
+        doc = _as_dict(
             await database.fetch_one(
-                select(proel_match_state.c.fields_json).where(
-                    proel_match_state.c.match_number == number
+                select(saved_matches.c.data_json).where(
+                    saved_matches.c.match_number == number
                 )
             )
         )
-        overlay = state.get("fields_json") if isinstance(state.get("fields_json"), dict) else {}
+        blob = doc.get("data_json") if isinstance(doc.get("data_json"), dict) else {}
         if not manual_exam_candidates(overlay, blob):
             continue
         await _promote_safely(number)
@@ -448,7 +521,7 @@ async def _sweep_once() -> int:
 
 
 async def run_exam_promotion_sweep() -> None:
-    """Pętla w tle: mecze bez świeżych zapisów bloba też dostają awans."""
+    """Pętla w tle: mecze przed gwizdkiem, przy których nikt nie zapisuje bloba."""
     await asyncio.sleep(120)
     while True:
         try:

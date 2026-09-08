@@ -1,9 +1,21 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import json
+
+
+def json_value(value, fallback):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return fallback
+    return value if isinstance(value, type(fallback)) else fallback
 
 
 def pair_matches(judge_ids, state):
     """No surname fallback: unknown identity never grants access."""
+    judge_ids = json_value(judge_ids, [])
+    state = json_value(state, {})
     refs = {str(state.get(key) or "").strip() for key in ("NrSedzia_pierwszy", "NrSedzia_drugi")}
     return len(set(judge_ids)) == 2 and "" not in refs and refs == set(judge_ids)
 
@@ -13,7 +25,7 @@ def may_manage(admin, actor_id, actor_province, badges, province, config):
         return True
     if actor_province != province or not config or not config.get("enabled"):
         return False
-    managers = config.get("manager_ids") or []
+    managers = json_value(config.get("manager_ids"), [])
     return actor_id in managers if managers else "Komisja sędziowska" in badges
 
 

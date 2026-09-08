@@ -174,6 +174,40 @@ def classify_match_code(code: object) -> MatchKind:
 
 
 # ---------------------------------------------------------------------------
+# Badania lekarskie a rodzaj rozgrywek
+# ---------------------------------------------------------------------------
+#
+# Decyzja z 2026-09-08: w rozgrywkach centralnych badania podpisane przez
+# związek WOJEWÓDZKI nie uprawniają do gry. Liczą się dokładnie tyle, co brak
+# badań, a zawodnika wpuszcza na boisko dopiero ręczne potwierdzenie sędziego
+# - i to ono, nie WZPR, staje potem na protokole niebieskim ptaszkiem.
+#
+# Superpuchar jest na liście, choć w zgłoszeniu go nie było: gra go superliga
+# w meczu prowadzonym centralnie. Mistrzostw Polski na niej NIE MA - w bazie
+# ZPRP to zwykle turnieje finałowe młodzieży, a numer nie mówi której.
+#
+# Bliźniak `ZPRP_EXAM_COMPETITIONS` z `BAZA/utils/matchCompetition.ts`.
+# Sam próg („czy TEN znacznik wystarcza") mieszka w `app/proel_fields.py`,
+# tak jak w aplikacji mieszka w `utils/playerExam.ts` - tutaj jest wyłącznie
+# odwzorowanie numeru meczu na próg.
+
+ZPRP_EXAM_COMPETITIONS: frozenset = frozenset(
+    {"superliga", "superpuchar", "liga_centralna", "i_liga", "pp"}
+)
+
+
+def exam_requirement_for_code(code: object) -> str:
+    """„zprp" dla rozgrywek centralnych, „any" dla wszystkich pozostałych.
+
+    Nierozpoznany numer (mecz ręczny, ćwiczenie, pusty) zostaje przy „any" -
+    zaostrzenie reguły na podstawie zgadywania odebrałoby prawo gry
+    zawodnikom, o których nic nie wiemy.
+    """
+    kind = classify_match_code(code)
+    return "zprp" if kind.competition in ZPRP_EXAM_COMPETITIONS else "any"
+
+
+# ---------------------------------------------------------------------------
 # Płeć ze składów
 # ---------------------------------------------------------------------------
 

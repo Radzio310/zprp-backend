@@ -26,6 +26,7 @@ from app.proel_exams import (
     absorb_blob_exams,
     ensure_state_row,
     journal_absorbed,
+    journal_exam_recheck,
     kick_promotion,
 )
 from app.proel_journal import (
@@ -79,6 +80,7 @@ from app.proel_fields import (
     UnknownPath,
     live_signal,
     parse_path,
+    phase_of,
     phase_refusal,
     project,
 )
@@ -157,14 +159,8 @@ def _overlay_of(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _phase_of(state: Optional[Dict[str, Any]], status_value: Optional[str]) -> str:
-    """Faza meczu — jedna reguła dla całego systemu."""
-    if status_value == "approved":
-        return PHASE_LOCKED
-    if status_value == "finished":
-        return PHASE_POST
-    if state and state.get("live_started_at") is not None:
-        return PHASE_LIVE
-    return PHASE_PRE
+    """Faza meczu - reguła mieszka w `proel_fields`, bo pyta o nią też awans badań."""
+    return phase_of(state, status_value)
 
 
 async def _fetch_state(
@@ -1136,6 +1132,14 @@ async def create_proel_match(
         app_version=x_app_version,
         ip=_client_ip(request, x_forwarded_for),
     )
+    await journal_exam_recheck(
+        req.match_number,
+        zprp_id,
+        req.data_json,
+        actor,
+        app_version=x_app_version,
+        ip=_client_ip(request, x_forwarded_for),
+    )
     # Awans z bazy związku idzie W TLE - zapis meczu nie czeka na cudzy serwer.
     kick_promotion(req.match_number)
 
@@ -1480,6 +1484,14 @@ async def update_proel_match(
         match_number,
         incoming_id or known_id,
         absorbed,
+        actor,
+        app_version=x_app_version,
+        ip=_client_ip(request, x_forwarded_for),
+    )
+    await journal_exam_recheck(
+        match_number,
+        incoming_id or known_id,
+        req.data_json,
         actor,
         app_version=x_app_version,
         ip=_client_ip(request, x_forwarded_for),

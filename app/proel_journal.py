@@ -79,6 +79,7 @@ EVENT_LABELS: Dict[str, str] = {
     "exam.confirmed": "Potwierdzenie badań",
     "exam.withdrawn": "Cofnięcie potwierdzenia badań",
     "exam.promoted": "Badania potwierdzone przez ZPRP",
+    "exam.rechecked": "Sprawdzenie badań w bazie związku",
 }
 
 
@@ -312,6 +313,18 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
     if ev == "protocol.pdf_generated":
         code = str(d.get("audit_code") or "").strip()
         return f"Kod dziennika protokołów: {code}" if code else ""
+
+    if ev == "exam.rechecked":
+        # Dowód na to, że ręczny ptaszek postawiono PO sprawdzeniu.
+        who = exam_players_sentence(d.get("players"))
+        # Godzina od telefonu (czas hali); ISO z bloba to tylko zapas.
+        at = str(d.get("at") or "")
+        clock = str(d.get("clock") or "").strip() or (
+            at[11:16] if len(at) >= 16 else ""
+        )
+        head = "Baza związku nadal bez badań"
+        sentence = f"{head}: {who}" if who else head
+        return f"{sentence} (sprawdzono {clock})" if clock else sentence
 
     if ev in ("exam.confirmed", "exam.withdrawn", "exam.promoted"):
         who = exam_players_sentence(d.get("players"))

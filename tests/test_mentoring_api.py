@@ -1,0 +1,106 @@
+"""Endpoint tests with isolated schema and async mocks: never import app.db."""
+import importlib.util
+import sys
+import types
+import unittest
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+from sqlalchemy import MetaData, Table, Column, String, JSON, DateTime, Boolean
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from fastapi import HTTPException
+from app.mentoring_tables import define_tables
+
+
+def load_api():
+    metadata = MetaData()
+    fake_db = types.ModuleType("app.db")
+    names = ("mentoring_config", "mentoring_pairs", "mentoring_members", "mentoring_assignments", "mentoring_audit")
+    for name, table in zip(names, define_tables(metadata)):
+        setattr(fake_db, name, table)
+    fake_db.province_judges = Table("province_judges", metadata, Column("judge_id", String, primary_key=True), Column("province", String), Column("full_name", String), Column("photo_url", String))
+    fake_db.province_matches = Table("province_matches", metadata, Column("match_id", String), Column("province", String), Column("state_json", JSON), Column("match_at", DateTime), Column("updated_at", DateTime), Column("active", Boolean))
+    fake_db.database = AsyncMock()
+    transaction = AsyncMock()
+    fake_db.database.transaction = lambda: transaction
+    fake_market = types.ModuleType("app.match_market")
+    fake_market.Actor = type("Actor", (), {})
+    fake_market.market_actor = lambda: None
+    spec = importlib.util.spec_from_file_location("mentoring_isolated_test", Path(__file__).parents[1] / "app" / "mentoring.py")
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {"app.db": fake_db, "app.match_market": fake_market}):
+        spec.loader.exec_module(module)
+    return module, fake_db
+
+
+class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.api, self.db = load_api()
+        self.actor = types.SimpleNamespace(judge_id="admin", is_admin=True, province="ŚLĄSKIE", badges={})
+        self.people = [{"judge_id": j, "province": "ŚLĄSKIE"} for j in ["1", "2", "3"]]
+
+    async def test_conflict_does_not_write_pair(self):
+        self.db.database.fetch_one.side_effect = [None, {"judge_id": "1", "pair_id": "existing"}]
+        self.db.database.fetch_all.return_value = self.people
+        with self.assertRaises(HTTPException) as error:
+            await self.api.create_pair(self.api.PairRequest(province="ŚLĄSKIE", judge_ids=["1", "2"], mentor_ids=["3"]), self.actor)
+        self.assertEqual(error.exception.status_code, 409)
+        # Only the transaction lock; no insert before validation completes.
+        self.assertEqual(self.db.database.execute.await_count, 1)
+        self.assertEqual([c.name for c in self.db.mentoring_members.primary_key], ["judge_id"])
+
+    async def test_commission_cannot_select_foreign_mentor(self):
+        self.actor.is_admin = False
+        self.db.database.fetch_all.return_value = [*self.people[:2], {"judge_id": "3", "province": "OPOLSKIE"}]
+        with self.assertRaises(HTTPException) as error:
+            await self.api.validate_people(self.actor, "ŚLĄSKIE", ["1", "2"], ["3"])
+        self.assertEqual(error.exception.status_code, 403)
+
+    async def test_admin_can_mix_provinces(self):
+        self.db.database.fetch_all.return_value = [*self.people[:2], {"judge_id": "3", "province": "OPOLSKIE"}]
+        await self.api.validate_people(self.actor, "ŚLĄSKIE", ["1", "2"], ["3"])
+
+    async def test_self_mentoring_rejected(self):
+        with self.assertRaises(HTTPException) as error:
+            await self.api.validate_people(self.actor, "ŚLĄSKIE", ["1", "2"], ["1"])
+        self.assertEqual(error.exception.status_code, 422)
+
+    async def test_revoked_link_cannot_read_or_change_preferences(self):
+        self.db.database.fetch_one.side_effect = [{"id": "pair", "judge_ids": ["1", "2"], "province": "ŚLĄSKIE"}, None]
+        with self.assertRaises(HTTPException) as error:
+            await self.api.preferences("pair", self.api.Preferences(show_home=True, notify=True), self.actor)
+        self.assertEqual(error.exception.status_code, 403)
+        self.db.database.execute.assert_not_awaited()
+
+    async def test_end_preserves_audit_but_frees_members(self):
+        self.db.database.fetch_one.side_effect = [{"id": "pair", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"]}, None]
+        await self.api.end_pair("pair", self.actor)
+        statements = [str(call.args[0]) for call in self.db.database.execute.await_args_list]
+        self.assertTrue(any("DELETE FROM mentoring_active_members" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO mentoring_audit" in sql for sql in statements))
+        self.assertFalse(any("DELETE FROM mentoring_pairs" in sql for sql in statements))
+
+    async def test_feed_is_read_only_and_handles_database_json_strings(self):
+        self.db.database.fetch_one.side_effect = [{"id": "pair", "judge_ids": '["1", "2"]'}, {"mentor_id": "admin"}]
+        state = {"NrSedzia_pierwszy": "1", "NrSedzia_drugi": "2", "data_fakt": "2026-10-10", "delegate_note": "private", "token": "secret", "roster_gosp": {"medical": "private"}}
+        self.db.database.fetch_all.return_value = [{"match_id": "123", "province": "ŚLĄSKIE", "state_json": json.dumps(state)}]
+        result = await self.api.matches("pair", self.actor)
+        item = result["matches"][0]
+        self.assertEqual(item["type"], "mentoring")
+        self.assertFalse(item["isMyMatch"])
+        self.assertNotIn("delegate_note", item)
+        self.assertNotIn("token", item)
+        self.assertNotIn("roster_gosp", item)
+
+    async def test_latest_snapshot_wins_after_province_transfer(self):
+        self.db.database.fetch_one.side_effect = [{"id": "pair", "judge_ids": ["1", "2"]}, {"mentor_id": "admin"}]
+        self.db.database.fetch_all.return_value = [
+            {"match_id": "123", "province": "OPOLSKIE", "state_json": {"NrSedzia_pierwszy": "1", "NrSedzia_drugi": "3"}},
+            {"match_id": "123", "province": "ŚLĄSKIE", "state_json": {"NrSedzia_pierwszy": "1", "NrSedzia_drugi": "2"}},
+        ]
+        result = await self.api.matches("pair", self.actor)
+        self.assertEqual(result["matches"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

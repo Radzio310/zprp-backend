@@ -12,11 +12,13 @@ def define_tables(metadata):
         Column("province", String, nullable=False),
         Column("judge_ids", JSON, nullable=False),
         Column("created_by", String, nullable=False),
+        Column("baseline_at", DateTime(timezone=True)),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("ended_at", DateTime(timezone=True)))
     members = Table("mentoring_active_members", metadata,
         Column("judge_id", String, primary_key=True),
-        Column("pair_id", String, ForeignKey("mentoring_pairs.id"), nullable=False))
+        Column("pair_id", String, ForeignKey("mentoring_pairs.id"), nullable=False),
+        Column("seen_at", DateTime(timezone=True)))
     mentors = Table("mentoring_assignments", metadata,
         Column("pair_id", String, ForeignKey("mentoring_pairs.id"), primary_key=True),
         Column("mentor_id", String, primary_key=True),

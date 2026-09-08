@@ -48,6 +48,26 @@ FIELD_REFS = frozenset({ROLE_REFEREE1, ROLE_REFEREE2, ROLE_DELEGATE})
 # none < manual < wzpr < zprp. Kolejność jest istotna: status z API ZPRP
 # zawsze wygrywa z potwierdzeniem ręcznym (patrz `applyManualExam`).
 EXAM_RANK: Dict[str, int] = {"none": 0, "manual": 1, "wzpr": 2, "zprp": 3}
+
+#: Próg badań w rozgrywce: „any" - wystarcza każde potwierdzenie, „zprp" -
+#: WZPR nie uprawnia do gry. Który mecz ma który próg, mówi
+#: `app/protocol_category.exam_requirement_for_code`; bliźniak reguły stoi
+#: w `BAZA/utils/playerExam.ts` (`examMeetsRequirement`).
+EXAM_REQUIREMENT_ANY = "any"
+EXAM_REQUIREMENT_ZPRP = "zprp"
+
+
+def exam_mark_meets(mark: Any, requirement: str = EXAM_REQUIREMENT_ANY) -> bool:
+    """Czy badania tego stopnia wystarczają w rozgrywce o takim progu.
+
+    Krata `EXAM_RANK` zostaje bez zmian: `wzpr` jest w niej WYŻEJ niż
+    `manual`, bo to prawda o tym, kto potwierdził badania. Próg jest osobnym
+    pytaniem - o prawo gry - i dlatego nie mieszamy go do rangi.
+    """
+    m = str(mark or "none").strip().lower()
+    if m in ("zprp", "manual"):
+        return True
+    return m == "wzpr" and requirement != EXAM_REQUIREMENT_ZPRP
 EXAM_FROM_API = ("zprp", "wzpr")
 
 
@@ -104,6 +124,22 @@ class FieldSpec:
 
 
 # ─────────────────────────── reguły scalania ───────────────────────────
+
+
+def phase_of(state: Optional[Dict[str, Any]], status_value: Any) -> str:
+    """Faza meczu - jedna reguła dla całego systemu.
+
+    Mieszkała w `app/proel.py`, ale pyta o nią też awans badań (który wolno
+    robić wyłącznie PRZED pierwszym gwizdkiem), a stamtąd nie ma jak jej
+    zaimportować bez cyklu.
+    """
+    if status_value == "approved":
+        return PHASE_LOCKED
+    if status_value == "finished":
+        return PHASE_POST
+    if state and state.get("live_started_at") is not None:
+        return PHASE_LIVE
+    return PHASE_PRE
 
 
 def merge_exam(existing: Optional[dict], incoming: Any, force: bool) -> Any:
@@ -726,6 +762,48 @@ def blob_exam_cards(blob: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def exam_recheck_from_blob(blob: Any) -> Optional[Dict[str, Any]]:
+    """`matchConfig.examCheck` z bloba, znormalizowane albo `None`.
+
+    Telefon zapisuje tu OSTATNIE pytanie do bazy związku zadane przed
+    pierwszym gwizdkiem i listę zawodników, którzy nadal nie mieli badań.
+    To jedyny dowód na to, że ręczny ptaszek postawiono z powodu, a nie
+    zamiast sprawdzenia - dlatego jedzie w blobie, a nie w pamięci ekranu.
+
+    Pusta lista zwraca `None`: „sprawdzone, komplet" nie jest zdarzeniem,
+    o którym warto zawracać głowę dziennikowi.
+    """
+    core = blob.get("matchConfig") if isinstance(blob, dict) else None
+    raw = core.get("examCheck") if isinstance(core, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    at = str(raw.get("at") or "").strip()
+    if not at:
+        return None
+    # Godzina z zegarka sędziego - telefon podaje ją gotową, bo mecz gra
+    # się w hali, a nie w UTC. Starszy zapis bez niej po prostu jej nie ma.
+    clock = str(raw.get("clock") or "").strip()[:5]
+    players: List[Dict[str, Any]] = []
+    for item in raw.get("missing") or []:
+        if not isinstance(item, dict):
+            continue
+        team = str(item.get("team") or "").strip()
+        if team not in ("host", "guest"):
+            continue
+        mark = str(item.get("mark") or "none").strip().lower()
+        players.append(
+            {
+                "team": team,
+                "number": item.get("number"),
+                "name": str(item.get("name") or "").strip(),
+                "mark": mark if mark in EXAM_RANK else "none",
+            }
+        )
+    if not players:
+        return None
+    return {"at": at, "clock": clock, "players": players}
+
+
 def has_manual_exams(blob: Any) -> bool:
     return any(card["mark"] == "manual" for card in blob_exam_cards(blob))
 
@@ -825,8 +903,13 @@ def _same_person(a: Any, b: Any) -> bool:
 def promotions_for(
     candidates: List[Dict[str, Any]],
     marks_by_team: Dict[str, List[Dict[str, Any]]],
+    requirement: str = EXAM_REQUIREMENT_ANY,
 ) -> List[Dict[str, Any]]:
     """Które ręczne znaczniki związek już zastąpił własnym statusem.
+
+    `requirement` broni progu rozgrywki: w Superlidze awans „ręczne -> WZPR"
+    byłby ODEBRANIEM prawa gry zawodniczce, którą sędzia potwierdził, mimo
+    że w kracie jest awansem. Ręczny ptaszek zostaje wtedy na miejscu.
 
     Dopasowanie NAJPIERW po numerze, potem po znormalizowanym nazwisku - ta
     sama para kluczy, co w `project_exam`. Numer w rosterze API jest
@@ -854,6 +937,8 @@ def promotions_for(
         if hit is None and normalize_name(want):
             hit = next((p for p in players if _same_person(want, p.get("name"))), None)
         if hit is None or str(hit.get("mark") or "none") not in EXAM_FROM_API:
+            continue
+        if not exam_mark_meets(hit.get("mark"), requirement):
             continue
         out.append(
             {

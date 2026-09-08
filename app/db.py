@@ -2891,6 +2891,9 @@ metadata.create_all(engine)
 
 # Indexes created separately with IF NOT EXISTS to survive restarts
 with engine.connect() as _conn:
+    _conn.execute(text("ALTER TABLE mentoring_pairs ADD COLUMN IF NOT EXISTS baseline_at timestamptz"))
+    _conn.execute(text("ALTER TABLE mentoring_active_members ADD COLUMN IF NOT EXISTS seen_at timestamptz"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mentoring_mentor ON mentoring_assignments (mentor_id, ended_at)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_user_id ON beach_reports (user_id)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_status ON beach_reports (status)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_report_messages_report_id ON beach_report_messages (report_id)"))

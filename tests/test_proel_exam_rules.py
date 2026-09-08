@@ -20,9 +20,15 @@ from app.proel_fields import (
     has_manual_exams,
     manual_exam_candidates,
     project,
+    PHASE_PRE,
+    exam_mark_meets,
+    exam_recheck_from_blob,
+    phase_of,
     promotions_for,
     roster_marks,
 )
+from app.proel_journal import event_summary
+from app.protocol_category import exam_requirement_for_code
 
 
 def blob(host=None, guest=None):
@@ -196,3 +202,118 @@ def test_promotion_by_number_needs_the_same_person():
     # Karta bez nazwiska: numer wystarcza, bo nie ma czego porownac.
     cands = manual_exam_candidates({}, blob(host=[{"number": 5, "exam": "manual"}]))
     assert promotions_for(cands, marks)[0]["path"] == "exam.host.#5"
+
+
+# ---------------------------------------------------------------------------
+# Prog badan w rozgrywce (decyzja z 2026-09-08)
+# ---------------------------------------------------------------------------
+
+
+def test_which_competitions_need_zprp_exams():
+    for number in ("SK/5", "OSM/12", "LSM/3", "LC/7", "LCK/7", "IM/4",
+                   "PP/2", "PPK/2", "SPM/1", "S/PPK/2"):
+        assert exam_requirement_for_code(number) == "zprp", number
+    # II i III liga, mlodziez, Mistrzostwa Polski i mecz nierozpoznany
+    # zostaja przy WZPR. „IIM4/1" to pulapka czytania numeru przez
+    # `includes`: zawiera „IM", a I liga wymaga badan ZPRP.
+    for number in ("IIM4/1", "IIIK/2", "JM/8", "MlK/9", "MP/3", "MPK/4", ""):
+        assert exam_requirement_for_code(number) == "any", number
+
+
+def test_which_marks_meet_the_threshold():
+    for mark in ("zprp", "manual"):
+        assert exam_mark_meets(mark, "zprp")
+        assert exam_mark_meets(mark)
+    assert exam_mark_meets("wzpr")
+    assert not exam_mark_meets("wzpr", "zprp")
+    assert not exam_mark_meets("none", "zprp")
+    assert not exam_mark_meets(None)
+
+
+def test_manual_is_not_promoted_to_wzpr_in_central_competitions():
+    """Awans w kracie, ale odebranie prawa gry - wiec nie zachodzi."""
+    cands = manual_exam_candidates(
+        {}, blob(host=[{"number": 77, "fullName": "GAKIDOVA Ivana", "exam": "manual"}])
+    )
+    marks = {"host": [{"number": 77, "name": "GAKIDOVA Ivana", "mark": "wzpr"}], "guest": []}
+    assert promotions_for(cands, marks, "zprp") == []
+    # Bez progu (II liga, mlodziez) awans dziala jak dotad.
+    assert promotions_for(cands, marks)[0]["mark"] == "wzpr"
+    # ZPRP awansuje w kazdej rozgrywce.
+    marks["host"][0]["mark"] = "zprp"
+    assert promotions_for(cands, marks, "zprp")[0]["mark"] == "zprp"
+
+
+def test_phase_of_says_when_the_match_started():
+    assert phase_of(None, None) == PHASE_PRE
+    assert phase_of({"live_started_at": None}, "in_progress") == PHASE_PRE
+    assert phase_of({"live_started_at": "2026-09-08T18:00:00"}, "in_progress") != PHASE_PRE
+    assert phase_of({}, "finished") != PHASE_PRE
+    assert phase_of({}, "approved") != PHASE_PRE
+
+
+# ---------------------------------------------------------------------------
+# Slad po sprawdzeniu badan w bazie zwiazku (decyzja z 2026-09-08)
+# ---------------------------------------------------------------------------
+
+
+def recheck_blob(check):
+    b = blob()
+    b["matchConfig"]["examCheck"] = check
+    return b
+
+
+def test_recheck_from_blob_reads_the_negative_answer():
+    got = exam_recheck_from_blob(
+        recheck_blob(
+            {
+                "at": "2026-09-08T18:32:07.000Z",
+                "missing": [
+                    {"team": "host", "number": 77, "name": "GAKIDOVA Ivana", "mark": "wzpr"},
+                    {"team": "guest", "number": 3, "name": "NOWAK Anna", "mark": "none"},
+                ],
+            }
+        )
+    )
+    assert got["at"].startswith("2026-09-08T18:32")
+    assert [p["mark"] for p in got["players"]] == ["wzpr", "none"]
+    assert got["players"][0]["team"] == "host"
+
+
+def test_recheck_from_blob_is_quiet_when_there_is_nothing_to_say():
+    # Komplet badan i stara aplikacja wygladaja tu tak samo: bez wpisu.
+    assert exam_recheck_from_blob(blob()) is None
+    assert exam_recheck_from_blob(recheck_blob({"at": "", "missing": []})) is None
+    assert exam_recheck_from_blob(recheck_blob({"at": "2026-09-08T18:32:07Z"})) is None
+    assert exam_recheck_from_blob(None) is None
+
+
+def test_recheck_from_blob_drops_junk():
+    got = exam_recheck_from_blob(
+        recheck_blob(
+            {
+                "at": "2026-09-08T18:32:07Z",
+                "missing": [
+                    "nie obiekt",
+                    {"team": "obcy", "number": 1},
+                    {"team": "host", "number": 9, "mark": "cokolwiek"},
+                ],
+            }
+        )
+    )
+    assert got["players"] == [
+        {"team": "host", "number": 9, "name": "", "mark": "none"}
+    ]
+
+
+def test_recheck_sentence_names_the_hour():
+    text = event_summary(
+        "exam.rechecked",
+        {
+            "at": "2026-09-08T18:32:07Z",
+            "players": [{"team": "host", "number": 77, "name": "GAKIDOVA Ivana"}],
+        },
+    )
+    assert "18:32" in text
+    assert "nr 77" in text
+    assert "nadal bez badan" in text.replace("ń", "n")

@@ -90,6 +90,26 @@ def test_player_exam_map_from_cards():
     }
 
 
+def test_wzpr_gets_no_mark_in_central_competitions():
+    """Decyzja z 2026-09-08: WZPR w Superlidze nie uprawnia do gry.
+
+    Kolumna ptaszkow powstaje wylacznie w `_player_exam_map_from_cards`, wiec
+    ten jeden filtr obsluguje karty z bloba, z overlaya i ze starej aplikacji.
+    """
+    cards = [
+        {"number": 1, "exam": "zprp"},
+        {"number": 7, "exam": "wzpr"},
+        {"number": 9, "exam": "manual"},
+    ]
+    assert _player_exam_map_from_cards(cards, "zprp") == {1: "zprp", 9: "manual"}
+    # Bez progu wydruk wyglada dokladnie jak dotad.
+    assert _player_exam_map_from_cards(cards) == {
+        1: "zprp",
+        7: "wzpr",
+        9: "manual",
+    }
+
+
 def test_player_exam_map_empty_for_old_clients():
     assert _player_exam_map_from_cards([]) == {}
     assert _player_exam_map_from_cards(None) == {}

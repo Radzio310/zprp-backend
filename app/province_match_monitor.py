@@ -495,6 +495,7 @@ async def _create_event(
         "match_id": match_id,
         "matchNumber": match_code,
         "event_key": event_key,
+        **({"mentoring_previous_refs": [previous_state.get("NrSedzia_pierwszy"), previous_state.get("NrSedzia_drugi")]} if previous_state else {}),
     }
     title = notification_title(event_type)
     stmt = (
@@ -654,6 +655,8 @@ async def _upsert_match(
     }
     if not old_row:
         await database.execute(insert(province_matches).values(province=province, match_id=match_id, **values))
+        from app.mentoring_notifications import enqueue_recent_assignments
+        await enqueue_recent_assignments(province, match_id)
         return True, 0
     old = state_dict(old_row["state_json"])
     await database.execute(
@@ -661,6 +664,8 @@ async def _upsert_match(
         .where(and_(province_matches.c.province == province, province_matches.c.match_id == match_id))
         .values(**values)
     )
+    from app.mentoring_notifications import enqueue_recent_assignments
+    await enqueue_recent_assignments(province, match_id)
     if old_row["fingerprint"] == new_fp:
         return False, 0
     targets = await _target_judges(province, match_id)
@@ -792,6 +797,10 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
     settings = get_settings()
     baseline = await _province_has_baseline(province)
     matches_seen = details_fetched = events_created = 0
+    from app.mentoring_notifications import monitored_judges, baseline_seen
+    from app.mentoring_rules import season_bounds
+    mentored = set(await monitored_judges(province))
+    season_start, season_end = season_bounds()
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as private_client, AsyncClient(follow_redirects=True) as public_client:
         cookies = await _login_zprp_and_get_cookies(private_client, username, password)
         for judge_id in judge_ids:
@@ -824,13 +833,15 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
                     )
                     and not _str(old_state.get("delegate_note"))
                 )
-                if not old_approved_needs_assessment and not is_eligible_for_refresh(
+                match_at = parse_match_at(state.get("data_fakt"))
+                needs_mentoring_history = judge_id in mentored and match_at and season_start <= match_at < season_end and (not old or not old_state.get("NrSedzia_pierwszy") or not old_state.get("NrSedzia_drugi"))
+                if not needs_mentoring_history and not old_approved_needs_assessment and not is_eligible_for_refresh(
                     state, bool(old and old["approved"])
                 ):
                     continue
                 seen_ids.add(match_id)
                 matches_seen += 1
-                if not old or _projection_changed(old_state, state, LIGHT_FIELDS):
+                if needs_mentoring_history or not old or _projection_changed(old_state, state, LIGHT_FIELDS):
                     candidates[match_id] = state
                 else:
                     await database.execute(
@@ -855,6 +866,7 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
                 _, created = await _upsert_match(province, match_id, chosen, match_id in deep_states)
                 events_created += created
             events_created += await _mark_missing_assignments(province, judge_id, seen_ids)
+            await baseline_seen(judge_id)
     return {"matches_seen": matches_seen, "details_fetched": details_fetched, "events_created": events_created}
 
 

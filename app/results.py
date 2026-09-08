@@ -42,7 +42,12 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from app.deps import Settings, get_rsa_keys, get_settings
 from app.utils import fetch_with_correct_encoding
-from app.protocol_category import HeaderMarks, header_marks
+from app.proel_fields import exam_mark_meets
+from app.protocol_category import (
+    HeaderMarks,
+    exam_requirement_for_code,
+    header_marks,
+)
 from starlette.background import BackgroundTask
 
 from openpyxl.styles import Alignment, Font
@@ -2849,12 +2854,20 @@ def _add_strike_line(ws_raw, *, row: int) -> bool:
         return False
 
 
-def _player_exam_map_from_cards(cards: List[Any]) -> Dict[int, str]:
+def _player_exam_map_from_cards(
+    cards: List[Any], requirement: str = "any"
+) -> Dict[int, str]:
     """
     number -> "zprp" | "wzpr" | "manual".
 
     Starsze wersje aplikacji nie wysyłają pola `exam` — wtedy mapa jest pusta,
     kolumna ptaszków zostaje czysta i wydruk wygląda dokładnie jak dotąd.
+
+    `requirement` to próg rozgrywki. W Superlidze, Lidze Centralnej, I lidze,
+    Pucharze Polski i Superpucharze badania WZPR nie uprawniają do gry, więc
+    NIE dostają ptaszka - dokładnie jak brak badań. Ten jeden filtr wystarcza
+    na cały wydruk: karta bywa z overlaya, z bloba i ze starej aplikacji, ale
+    kolumna ptaszków powstaje wyłącznie tutaj.
     """
     out: Dict[int, str] = {}
     for c in cards or []:
@@ -2868,7 +2881,7 @@ def _player_exam_map_from_cards(cards: List[Any]) -> Dict[int, str]:
         except Exception:
             continue
         kind = str(c.get("exam") or "").strip().lower()
-        if kind in EXAM_MARK_RGB:
+        if kind in EXAM_MARK_RGB and exam_mark_meets(kind, requirement):
             out[num] = kind
     return out
 
@@ -5691,8 +5704,13 @@ async def generate_protocol_pdf(
         guest_names = _player_fullname_map_from_stats(guest_stats)
 
     # Badania lekarskie — pusta mapa dla starszych wersji aplikacji.
-    host_exams = _player_exam_map_from_cards(core.get("hostPlayerCards") or [])
-    guest_exams = _player_exam_map_from_cards(core.get("guestPlayerCards") or [])
+    exam_requirement = exam_requirement_for_code(match_number)
+    host_exams = _player_exam_map_from_cards(
+        core.get("hostPlayerCards") or [], exam_requirement
+    )
+    guest_exams = _player_exam_map_from_cards(
+        core.get("guestPlayerCards") or [], exam_requirement
+    )
 
     host_comp_names = _companion_fullname_map(core.get("hostCompanions") or [])
     guest_comp_names = _companion_fullname_map(core.get("guestCompanions") or [])

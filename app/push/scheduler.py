@@ -46,6 +46,7 @@ async def _get_token(installation_id: str):
         push_tokens.c.token,
         push_tokens.c.platform,
         push_tokens.c.app_variant,
+        push_tokens.c.judge_id,
     ).where(push_tokens.c.installation_id == installation_id)
     return await database.fetch_one(stmt)
 

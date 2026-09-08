@@ -132,9 +132,39 @@ def test_roster_comes_from_the_monitors_fetcher_on_a_short_leash():
     assert "ROSTER_TIMEOUT_S" in source
 
 
-def test_sweep_only_touches_unapproved_matches_with_manual_marks():
+def test_recheck_reaches_the_journal_from_the_blob():
+    """Bez ANI JEDNEGO dodatkowego wywolania z hali.
+
+    Telefon zapisuje wynik sprawdzenia w konfiguracji meczu, a blob i tak
+    jedzie na serwer sekundy pozniej - stad wpis w dzienniku.
+    """
+    source = code_of(EXAMS["journal_exam_recheck"])
+    assert "exam_recheck_from_blob" in calls_in(EXAMS["journal_exam_recheck"])
+    assert "'exam.rechecked'" in source or '"exam.rechecked"' in source
+    # Klucz z godzina sprawdzenia: blob co minute nie dopisze wpisu drugi raz.
+    assert "event_key" in source
+    # Oba wejscia zapisu bloba (POST i PUT) musza wolac ten sam slad.
+    assert PROEL_SRC.count("journal_exam_recheck(") == 2
+    """Decyzja z 2026-09-08: recznego ptaszka nadpisuje sie tylko PRZED meczem.
+
+    Protokol ma mowic, co bylo wiadomo w chwili rozpoczecia meczu.
+    """
+    source = code_of(EXAMS["promote_manual_exams"])
+    assert "phase_of" in calls_in(EXAMS["promote_manual_exams"])
+    assert "PHASE_PRE" in source
+    assert "'started'" in source
+
+
+def test_promotion_respects_the_competition_threshold():
+    """W Superlidze awans „reczne -> WZPR" odebralby prawo gry."""
+    assert "exam_requirement_for_code" in calls_in(EXAMS["promote_manual_exams"])
+
+
+def test_sweep_only_touches_matches_before_the_first_whistle():
     source = code_of(EXAMS["_sweep_once"])
-    assert "'in_progress', 'finished'" in source
+    # Mecz jeszcze nierozpoczety czesto NIE MA wiersza w `saved_matches`,
+    # wiec przebieg pyta o wiersze stanu bez `live_started_at`.
+    assert "live_started_at" in source
     assert "manual_exam_candidates" in calls_in(EXAMS["_sweep_once"])
     assert "PROMOTION_SWEEP_BATCH" in source
     loop = code_of(EXAMS["run_exam_promotion_sweep"])
