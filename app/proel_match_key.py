@@ -25,6 +25,11 @@ HEAD_CONFIG_KEYS = (
     "hostTeamName",
     "guestTeamName",
     "isTest",
+    # Skąd wzięło się prowadzenie i pod jakim kluczem leży wiersz.
+    # Bez nich lista nie wie, że wznowienie ma pytać o klucz
+    # szkoleniowy, a nie o czysty numer meczu widoczny na kafelku.
+    "origin",
+    "proelKey",
     # Obsada i miejsce (od 2026-09-06): to, co stoi na kafelku archiwum i po
     # czym sędzia szuka meczu. W bazie związku są publiczne; dane osobowe
     # zawodników - składy, licencje, badania - i podpisy (`extras`) nadal

@@ -244,6 +244,8 @@ app.include_router(proel_users_router)
 app.include_router(proel_router)
 app.include_router(matches_router)
 app.include_router(partner_offtimes_router)
+from app.mentoring import router as mentoring_router
+app.include_router(mentoring_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)

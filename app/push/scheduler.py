@@ -211,6 +211,10 @@ async def run_push_scheduler():
                     continue
                 attempts = int(row["attempts"] or 0) + 1
                 token_row = await _get_token(row["installation_id"])
+                from app.mentoring_notifications import delivery_allowed
+                if not await delivery_allowed(row["data_json"] or {}, token_row):
+                    await _finish_match_notification(notification_id, attempts, "Mentoring access revoked or muted", True)
+                    continue
                 if not token_row:
                     await _finish_match_notification(
                         notification_id,

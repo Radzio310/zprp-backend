@@ -2883,6 +2883,9 @@ extra_report_province_recipients = Table(
 )
 
 
+from app.mentoring_tables import define_tables as _define_mentoring_tables
+mentoring_config, mentoring_pairs, mentoring_members, mentoring_assignments, mentoring_audit = _define_mentoring_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

@@ -47,6 +47,10 @@ from app.proel_match_key import (
     local_key_from_guard as _local_key_from_guard,
     match_identity as _match_identity,
 )
+from app.proel_training_key import (
+    TRAINING_KEY_LIKE,
+    key_conflicts_with_blob,
+)
 from app.proel_lease import (
     LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
     LEASE_TTL_SECONDS as _LEASE_TTL_SECONDS,
@@ -335,6 +339,33 @@ def _identity_guard(
         values.update(_LEASE_CLEARED)
         values["lease_epoch"] = int((state or {}).get("lease_epoch") or 0) + 1
     return values
+
+
+def _guard_training_key(match_number: str, blob: Any) -> None:
+    """Mecz szkoleniowy zapisuje się WYŁĄCZNIE pod własnym kluczem.
+
+    Ostatni metr obrony przed kolizją numerów. Aplikacja liczy klucz sama
+    (`utils/matchProvenance.ts`), ale numer meczu jedzie stąd na serwer z
+    kilkunastu miejsc i o przedrostku da się w którymś zapomnieć. Skutkiem
+    byłoby ćwiczenie piszące w wiersz prawdziwego meczu - czyli dokładnie to,
+    co ta zmiana ma zamknąć.
+
+    Odmowa jest głośna (409 z własnym kodem), bo cicha oznaczałaby mecz
+    prowadzony w próżnię. Blob starej aplikacji, który o pochodzeniu nic nie
+    mówi, przechodzi bez pytania.
+    """
+    if not key_conflicts_with_blob(match_number, blob):
+        return
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail={
+            "code": "TRAINING_KEY_MISMATCH",
+            "message": (
+                "Mecz szkoleniowy zapisuje sie pod wlasnym kluczem, a mecz "
+                "oficjalny pod numerem meczu. Zaktualizuj aplikacje."
+            ),
+        },
+    )
 
 
 def _officials_of(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1025,6 +1056,7 @@ async def create_proel_match(
     authorization: Optional[str] = Header(None),
     x_elevation: Optional[str] = Header(None, alias="X-Elevation"),
 ):
+    _guard_training_key(req.match_number, req.data_json)
     existing = await database.fetch_one(
         select(saved_matches)
         .where(saved_matches.c.match_number == req.match_number)
@@ -1227,6 +1259,7 @@ async def update_proel_match(
         authorization=authorization, x_elevation=x_elevation,
     )
     absorbed: Dict[str, Any] = {}
+    _guard_training_key(match_number, req.data_json)
     # Cała ścieżka w JEDNEJ transakcji: blokada wiersza stanu (`FOR UPDATE`)
     # działa tylko wewnątrz transakcji, a reprojekcja musi widzieć overlay
     # dokładnie taki, jaki obowiązuje w chwili zapisu bloba.
@@ -1581,6 +1614,13 @@ async def list_proel_matches(
         False,
         description="Zwróć sam nagłówek meczu zamiast pełnego protokołu",
     ),
+    training: bool = Query(
+        False,
+        description=(
+            "true = mecze szkoleniowe (klucz z przedrostkiem podejścia); "
+            "domyślnie wyłącznie mecze prowadzone naprawdę"
+        ),
+    ),
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
     actor: Actor = Depends(proel_actor),
@@ -1599,6 +1639,20 @@ async def list_proel_matches(
     """
     # budujemy bazowy SELECT
     stmt = select(saved_matches)
+
+    # Ćwiczenia i mecze prowadzone naprawdę to dwie różne listy.
+    #
+    # Klucz szkoleniowy niesie przedrostek podejścia, więc rozdzielenie
+    # sprowadza się do zapytania o przedrostek - i idzie po indeksie
+    # klucza głównego. Domyślnie oddajemy WYŁĄCZNIE mecze prawdziwe:
+    # wersje aplikacji sprzed tej zmiany pytają bez parametru i nie mają
+    # prawa zobaczyć cudzych ćwiczeń pomieszanych z protokołami.
+    if training:
+        stmt = stmt.where(saved_matches.c.match_number.ilike(TRAINING_KEY_LIKE))
+    else:
+        stmt = stmt.where(
+            ~saved_matches.c.match_number.ilike(TRAINING_KEY_LIKE)
+        )
 
     # jeżeli użytkownik podał finished, dodajemy WHERE
     if finished is not None:
@@ -1709,9 +1763,12 @@ async def list_live_proel_matches(
             },
         )
 
+    # Bez ćwiczeń: to jest podgląd pracy, która się liczy. Kursokonferencja
+    # z dwudziestoma podejściami zasypałaby go w pół minuty.
     rows = await database.fetch_all(
         select(proel_match_state)
         .where(proel_match_state.c.lease_until > _now())
+        .where(~proel_match_state.c.match_number.ilike(TRAINING_KEY_LIKE))
         .order_by(proel_match_state.c.updated_at.desc())
         .limit(limit)
     )

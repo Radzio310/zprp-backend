@@ -433,6 +433,8 @@ def _prefs_allow(prefs: Any, event_type: str) -> bool:
 
 
 async def _active_judge_ids(province: str) -> List[str]:
+    from app.mentoring_notifications import monitored_judges
+    mentored_ids = await monitored_judges(province)
     token_rows = await database.fetch_all(
         select(push_tokens.c.judge_id, push_tokens.c.province)
         .where(push_tokens.c.app_variant == "baza")
@@ -449,7 +451,7 @@ async def _active_judge_ids(province: str) -> List[str]:
         for row in known_rows
     }
     return sorted(
-        {
+        set(mentored_ids) | {
             _str(row["judge_id"])
             for row in token_rows
             if _str(row["judge_id"])
@@ -479,6 +481,7 @@ async def _create_event(
     body: str,
     judge_ids: Iterable[str],
     state_fp: str,
+    previous_state: Optional[Dict[str, Any]] = None,
 ) -> int:
     targets = sorted({_str(j) for j in judge_ids if _str(j)})
     if not targets:
@@ -549,6 +552,8 @@ async def _create_event(
                 constraint="uq_province_match_notification_event_installation"
             )
         )
+    from app.mentoring_notifications import enqueue
+    await enqueue(int(event_id), previous_state)
     return 1
 
 
@@ -669,6 +674,7 @@ async def _upsert_match(
             event["body"],
             targets,
             new_fp,
+            previous_state=old,
         )
     return False, created
 
