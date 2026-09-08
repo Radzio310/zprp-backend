@@ -44,7 +44,11 @@ from app.schemas import (
     SetOfftimesRequest,
     ToggleReactionRequest,
 )
-from app.deps import get_rsa_keys
+from app.deps import get_optional_jwt_payload, get_rsa_keys
+from app.province_guard import (
+    ensure_announcement_write,
+    ensure_offtimes_write,
+)
 
 from cryptography.hazmat.primitives.asymmetric import padding
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -216,6 +220,7 @@ async def create_announcement(
     province: str = Form(...),  # ⬅ plaintext województwo
     image: Optional[UploadFile] = File(None),
     keys=Depends(get_rsa_keys),
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
     """
     Tworzy ogłoszenie przypisane do konkretnego `province`.
@@ -228,6 +233,13 @@ async def create_announcement(
     content_plain   = content
     link_plain      = link
     province_plain  = province
+
+    # Ogłoszenie okręgowe zakłada News Master tego okręgu albo administrator.
+    # Numer sędziego bierzemy z tokenu, nie z formularza - ten drugi wypełnia
+    # nadawca i nie jest żadnym dowodem tożsamości.
+    await ensure_announcement_write(
+        token_payload, province=province_plain, action="Dodanie ogłoszenia"
+    )
 
     # domyślnie brak obrazka
     image_url = None
@@ -287,6 +299,7 @@ async def update_announcement(
     province: Optional[str] = Form(None),  # ⬅ NOWE – opcjonalna zmiana województwa
     image: Optional[UploadFile] = File(None),
     keys=Depends(get_rsa_keys),
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
     private_key, _ = keys
 
@@ -295,6 +308,21 @@ async def update_announcement(
     title_plain     = _decrypt_field(title, private_key) if title else None
     content_plain   = content
     link_plain      = link
+
+    # Sprawdzamy okręg, w którym ogłoszenie LEŻY, a przy przenosinach także
+    # ten, do którego ma trafić - inaczej Master jednego okręgu wrzucałby
+    # wpisy do cudzego.
+    current = await database.fetch_one(
+        select(announcements.c.province).where(announcements.c.id == ann_id)
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+    await ensure_announcement_write(
+        token_payload,
+        province=current["province"],
+        action="Edycja ogłoszenia",
+        extra_province=province,
+    )
 
     image_url = None
     if image:
@@ -470,7 +498,11 @@ async def add_comment(ann_id: int, payload: AddCommentRequest):
     response_model=AnnouncementResponse,
     summary="Przypnij / odepnij komentarz w ogłoszeniu",
 )
-async def pin_comment(ann_id: int, payload: PinCommentRequest):
+async def pin_comment(
+    ann_id: int,
+    payload: PinCommentRequest,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
     """
     Ustawia flagę is_pinned dla konkretnego komentarza w JSON-ie ogłoszenia.
     Widoczne globalnie dla wszystkich użytkowników.
@@ -480,6 +512,11 @@ async def pin_comment(ann_id: int, payload: PinCommentRequest):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    # Przypięcie widzi cały okręg, więc należy do moderacji.
+    await ensure_announcement_write(
+        token_payload, province=row["province"], action="Przypięcie komentarza"
+    )
 
     comments = row["comments"] or []
     if not isinstance(comments, list):
@@ -512,7 +549,11 @@ async def pin_comment(ann_id: int, payload: PinCommentRequest):
     response_model=AnnouncementResponse,
     summary="Usuń komentarz z ogłoszenia",
 )
-async def delete_comment(ann_id: int, payload: DeleteCommentRequest):
+async def delete_comment(
+    ann_id: int,
+    payload: DeleteCommentRequest,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
     """
     Usuwa wybrany komentarz z JSON-a comments ogłoszenia.
     Zmiana jest globalna dla wszystkich użytkowników.
@@ -522,6 +563,11 @@ async def delete_comment(ann_id: int, payload: DeleteCommentRequest):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    # Kasowanie cudzego komentarza to moderacja, nie porządki we własnym wpisie.
+    await ensure_announcement_write(
+        token_payload, province=row["province"], action="Usunięcie komentarza"
+    )
 
     comments = row["comments"] or []
     if not isinstance(comments, list):
@@ -549,12 +595,22 @@ async def delete_comment(ann_id: int, payload: DeleteCommentRequest):
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Usuń ogłoszenie (wraz z plikiem, jeśli istnieje)",
 )
-async def delete_announcement(ann_id: int):
+async def delete_announcement(
+    ann_id: int,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
     row = await database.fetch_one(
-        select(announcements.c.image_url).where(announcements.c.id == ann_id)
+        select(announcements.c.image_url, announcements.c.province).where(
+            announcements.c.id == ann_id
+        )
     )
     if not row:
         raise HTTPException(status_code=404, detail="Ogłoszenie nie istnieje")
+
+    # Kasowanie szło dotąd po samym numerze wpisu, bez pytania kto kasuje.
+    await ensure_announcement_write(
+        token_payload, province=row["province"], action="Usunięcie ogłoszenia"
+    )
 
     image_url = row["image_url"]
     if image_url:
@@ -761,7 +817,10 @@ async def _composed_offtime_records(
     status_code=status.HTTP_200_OK,
     summary="Ustaw lub nadpisz niedyspozycje sędziego w okręgu",
 )
-async def set_offtimes(req: SetOfftimesRequest):
+async def set_offtimes(
+    req: SetOfftimesRequest,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
     """
     Upsert po (judge_id, province).
     `data_json` może być już obiektem/listą albo stringiem JSON.
@@ -770,6 +829,15 @@ async def set_offtimes(req: SetOfftimesRequest):
     full_name   = req.full_name
     city_plain  = req.city
     province    = req.province
+
+    # Po swoich pisze każdy zalogowany, po cudzych tylko Calendar Master
+    # okręgu albo administrator - endpoint przyjmował dotąd DOWOLNY numer.
+    await ensure_offtimes_write(
+        token_payload,
+        province=province,
+        target_judge_id=judge_plain,
+        action="Zapis niedyspozycji",
+    )
 
     raw = req.data_json
     if isinstance(raw, str):
@@ -835,9 +903,17 @@ async def delete_offtimes(
     # Body z autoryzacją (zostawiam jak u Ciebie – nieużywane pola, ale pilnują schematu):
     req: SetOfftimesRequest = Depends(),
     keys=Depends(get_rsa_keys),
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
     private_key, _ = keys
     judge_plain = _decrypt_field(judge_id_enc, private_key)
+
+    await ensure_offtimes_write(
+        token_payload,
+        province=province,
+        target_judge_id=judge_plain,
+        action="Usunięcie niedyspozycji",
+    )
 
     deleted = await database.execute(
         delete(silesia_offtimes).where(

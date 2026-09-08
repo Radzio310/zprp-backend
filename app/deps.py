@@ -63,6 +63,13 @@ def get_rsa_keys():
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
+#: To samo, ale bez odsyłania z kwitkiem, gdy nagłówka nie ma.
+#: Trasy z okresem przejściowym muszą ODRÓŻNIĆ „nie podał tokenu" od
+#: „podał zły token", a `auto_error=True` zamienia oba w to samo 401.
+oauth2_scheme_optional = OAuth2PasswordBearer(
+    tokenUrl="/auth/login", auto_error=False
+)
+
 credentials_exception = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
     detail="Could not validate credentials",
@@ -97,6 +104,38 @@ async def get_jwt_payload(token: str = Depends(oauth2_scheme)) -> dict:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
+    return payload
+
+async def get_optional_jwt_payload(
+    token: str | None = Depends(oauth2_scheme_optional),
+) -> dict | None:
+    """Payload tokenu albo `None`, gdy żądanie przyszło bez niego.
+
+    Trasy okręgowe przyjmowały zapis od każdego, kto znał adres, i nie da
+    się tego domknąć jednym ruchem: aplikacje w telefonach ludzi wysyłają
+    dziś część żądań bez nagłówka. Ta zależność pozwala sprawdzić
+    uprawnienie temu, kto token przysłał, i przepuścić resztę do czasu
+    wygaśnięcia starych wersji (patrz `app/province_guard.py`).
+
+    Token WYGASŁY albo niezrozumiały traktujemy jak brak tokenu, czyli też
+    `None`. Wygląda to na ustępstwo, a jest jedyną uczciwą odpowiedzią: BAZA
+    nie odnawia tokenu w tle (`getToken` oddaje to, co leży w SecureStore, bez
+    patrzenia na datę), więc twarde 401 wywracałoby zapis każdemu, kto od
+    dawna się nie logował - a bramka i tak nie wpuszcza takiego żądania dalej
+    niż anonimowego. Po zamknięciu okresu przejściowego dostanie czytelne
+    „zaloguj się ponownie" zamiast komunikatu o kryptografii.
+    """
+    if not token:
+        return None
+    settings = get_settings()
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+    except JWTError:
+        return None
+    if payload.get("sub") is None:
+        return None
     return payload
 
 # =====================================================================

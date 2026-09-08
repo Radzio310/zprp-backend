@@ -80,9 +80,23 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO mentoring_audit" in sql for sql in statements))
         self.assertFalse(any("DELETE FROM mentoring_pairs" in sql for sql in statements))
 
+    async def test_management_keeps_ended_pairs_and_mentor_history(self):
+        self.db.database.fetch_all.side_effect = [
+            self.people,
+            [{"id": "ended", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": "date"}],
+            [{"pair_id": "ended", "mentor_id": "3", "ended_at": "date"}],
+            [],
+        ]
+        self.db.database.fetch_one.return_value = None
+        result = await self.api.management("ŚLĄSKIE", self.actor)
+        self.assertEqual(result["pairs"][0]["mentor_ids"], [])
+        self.assertEqual(result["pairs"][0]["mentor_history_ids"], ["3"])
+        query = str(self.db.database.fetch_all.await_args_list[1].args[0])
+        self.assertNotIn("ended_at IS NULL", query)
+
     async def test_feed_is_read_only_and_handles_database_json_strings(self):
         self.db.database.fetch_one.side_effect = [{"id": "pair", "judge_ids": '["1", "2"]'}, {"mentor_id": "admin"}]
-        state = {"NrSedzia_pierwszy": "1", "NrSedzia_drugi": "2", "data_fakt": "2026-10-10", "delegate_note": "private", "token": "secret", "roster_gosp": {"medical": "private"}}
+        state = {"NrSedzia_pierwszy": "1", "NrSedzia_drugi": "2", "data_fakt": "2026-10-10", "Link": "private-action-url", "delegate_note": "private", "token": "secret", "roster_gosp": {"medical": "private"}}
         self.db.database.fetch_all.return_value = [{"match_id": "123", "province": "ŚLĄSKIE", "state_json": json.dumps(state)}]
         result = await self.api.matches("pair", self.actor)
         item = result["matches"][0]
@@ -90,6 +104,7 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(item["isMyMatch"])
         self.assertNotIn("delegate_note", item)
         self.assertNotIn("token", item)
+        self.assertNotIn("Link", item)
         self.assertNotIn("roster_gosp", item)
 
     async def test_latest_snapshot_wins_after_province_transfer(self):

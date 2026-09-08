@@ -79,12 +79,17 @@ async def management(province: str = "", actor: Actor = Depends(market_actor)):
     if not actor.is_admin:
         query = query.where(province_judges.c.province == province)
     people = [{k: dict(r).get(k) for k in ("judge_id", "full_name", "province", "photo_url")} for r in await database.fetch_all(query)]
-    records = await database.fetch_all(select(pairs).where(pairs.c.province == province).where(pairs.c.ended_at.is_(None)))
-    links = await database.fetch_all(select(assignments).where(assignments.c.ended_at.is_(None)))
+    # Managers see the active configuration and the archive. Ending a pair revokes
+    # access for mentors, but must not erase who was responsible for it.
+    records = await database.fetch_all(select(pairs).where(pairs.c.province == province).order_by(pairs.c.created_at.desc()))
+    links = await database.fetch_all(select(assignments).select_from(assignments.join(pairs, assignments.c.pair_id == pairs.c.id)).where(pairs.c.province == province))
     occupied = await database.fetch_all(select(members.c.judge_id))
     return {"config": await configuration(province), "people": people,
         "occupied": [r["judge_id"] for r in occupied if actor.is_admin or r["judge_id"] in {p["judge_id"] for p in people}],
-        "pairs": [{**dict(r), "judge_ids": json_value(r["judge_ids"], []), "mentor_ids": [a["mentor_id"] for a in links if a["pair_id"] == r["id"]]} for r in records]}
+        "pairs": [{**dict(r), "judge_ids": json_value(r["judge_ids"], []),
+            "mentor_ids": [a["mentor_id"] for a in links if a["pair_id"] == r["id"] and a["ended_at"] is None],
+            "mentor_history_ids": list(dict.fromkeys(a["mentor_id"] for a in links if a["pair_id"] == r["id"]))}
+            for r in records]}
 
 
 @router.put("/config/{province}")
@@ -197,7 +202,7 @@ async def matches(pair_id: str, actor: Actor = Depends(market_actor)):
         if not pair_matches(pair["judge_ids"], state):
             continue
         # Do not expose private notes/contacts in the mentoring feed.
-        safe = {k: v for k, v in state.items() if k in {"Id", "RozgrywkiCode", "data_fakt", "data_prop", "season", "runda", "kolejka", "protocol_status", "host_swapped", "Nazwa", "Link", "Id_rozgrywki", "ID_sezon"} or k.startswith(("NrSedzia", "ID_zespoly", "Hala_", "wynik_", "dogrywka_", "karne_"))}
+        safe = {k: v for k, v in state.items() if k in {"Id", "RozgrywkiCode", "data_fakt", "data_prop", "season", "runda", "kolejka", "protocol_status", "host_swapped", "Nazwa", "Id_rozgrywki", "ID_sezon"} or k.startswith(("NrSedzia", "ID_zespoly", "Hala_", "wynik_", "dogrywka_", "karne_"))}
         safe.update({"Id": row["match_id"], "province": row["province"], "mentoringPairId": pair_id, "type": "mentoring", "isMyMatch": False})
         result.append(safe)
     result.sort(key=lambda m: str(m.get("data_fakt") or ""))

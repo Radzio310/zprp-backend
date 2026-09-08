@@ -20,6 +20,7 @@ Dopasowanie wymaga identyfikatorów obu boiskowych, w dowolnej kolejności. Brak
 - Nowy podgląd jest osobnym komponentem, nie formularzem edycji meczu. Dostępne są publiczne informacje o spotkaniu, składy i mapa. Nie ma zapisu wyniku, raportu, rozliczenia ani uruchomienia ProEla.
 - Nie dopisuje meczów podopiecznych do własnych plików meczów/statystyk. Dane mentoringu pozostają w pamięci, powiązane z kontem, i są ponownie pobierane po powrocie aplikacji na pierwszy plan.
 - Widoczność na głównym i powiadomienia są niezależnymi ustawieniami per mentor i para. Ukryta para pozostaje w rozwijanej sekcji „Moje pary”.
+- Zakończenie opieki nie usuwa pary. Administrator i uprawniona komisja widzą ją w rozwijanej historii razem z mentorami, natomiast aktywne członkostwa podopiecznych są zwalniane.
 - Własny mecz mentora nie jest dublowany na głównym; otrzymuje znacznik „Podopieczni”. Dotychczasowe wejście we własny mecz zachowuje uprawnienia.
 - Serwer natychmiast odmawia dostępu po zakończeniu opieki. Otwarty interfejs sprawdza relację co minutę, przy wznowieniu aplikacji oraz przed pobraniem składów. Nie ma możliwości zdalnego usunięcia już obejrzanej treści na urządzeniu offline.
 - Zdarzenia trafiają do istniejącej kolejki push. Przed wysłaniem następuje ponowne sprawdzenie relacji, wyciszenia, czasu przydziału oraz konta urządzenia. Wejście z powiadomienia prowadzi do ograniczonego podglądu.
