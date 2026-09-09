@@ -3,9 +3,10 @@
 ## Kolejność wdrożenia
 
 1. Wdrożyć backend. Standardowy start `app.db` tworzy tabele mentoringu i uzupełnia kolumny pierwszej synchronizacji. Nie należy importować `app.db` tylko w celu uruchomienia testów — otwiera rzeczywistą bazę.
-2. Wdrożyć aplikację. Administrator wchodzi do okręgowego **Więcej → Mentorzy i pary**. Może tworzyć pary bez włączania zarządzania komisji.
+2. Wdrożyć aplikację. Administrator zarządza całą Polską w **Panel admina → Mentoring**. Widzi mapę 16 okręgów, ich aktywne pary i mentorów oraz może tworzyć pary między okręgami bez włączania dostępu komisji.
 3. Dla wybranego okręgu administrator włącza zarządzanie okręgowe. Pusta lista zarządzających oznacza istniejącą odznakę **Komisja sędziowska**; lista niepusta zastępuje ten dostęp wskazanymi osobami. Wyłączenie tej opcji odbiera zarządzanie komisji, nie kończy automatycznie istniejącej opieki.
 4. Utworzyć dwóch podopiecznych i przypisać mentorów. Jedno aktywne członkostwo podopiecznego jest zabezpieczone kluczem głównym i transakcją. Bycie mentorem innej pary nie jest blokowane.
+5. Uprawniona komisja korzysta z **modułu okręgowego → Więcej → Mentorzy i pary**. Ten wariant nie pokazuje mapy kraju ani przełączników dostępu i pozwala wybierać wyłącznie osoby z własnego okręgu.
 
 ## Dane i synchronizacja
 

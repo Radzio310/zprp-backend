@@ -60,6 +60,25 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         self.db.database.fetch_all.return_value = [*self.people[:2], {"judge_id": "3", "province": "OPOLSKIE"}]
         await self.api.validate_people(self.actor, "ŚLĄSKIE", ["1", "2"], ["3"])
 
+    async def test_country_overview_is_admin_only(self):
+        self.actor.is_admin = False
+        with self.assertRaises(HTTPException) as error:
+            await self.api.admin_overview(self.actor)
+        self.assertEqual(error.exception.status_code, 403)
+        self.db.database.fetch_all.assert_not_awaited()
+
+    async def test_country_overview_contains_empty_and_active_provinces(self):
+        self.db.database.fetch_all.side_effect = [
+            [{"province": "ŚLĄSKIE", "enabled": True, "manager_ids": ["3"]}],
+            [{"province": "ŚLĄSKIE", "count": 2}],
+            [{"province": "ŚLĄSKIE", "count": 3}],
+        ]
+        result = await self.api.admin_overview(self.actor)
+        slaskie = next(row for row in result["provinces"] if row["province"] == "ŚLĄSKIE")
+        opolskie = next(row for row in result["provinces"] if row["province"] == "OPOLSKIE")
+        self.assertEqual((slaskie["enabled"], slaskie["active_pairs"], slaskie["active_mentors"]), (True, 2, 3))
+        self.assertEqual((opolskie["enabled"], opolskie["active_pairs"]), (False, 0))
+
     async def test_self_mentoring_rejected(self):
         with self.assertRaises(HTTPException) as error:
             await self.api.validate_people(self.actor, "ŚLĄSKIE", ["1", "2"], ["1"])

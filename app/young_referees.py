@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Any, Dict
 import json
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, insert, update, delete, or_
 
 from app.db import (
@@ -14,6 +14,9 @@ from app.db import (
     young_referee_rating_templates,
     young_referee_ratings_visibility,
 )
+from app.deps import get_optional_jwt_payload
+from app.province_access import MASTER_TEACH
+from app.province_guard import ensure_province_write
 from app.schemas import (
     CreateYoungRefereeRequest,
     UpdateYoungRefereeRequest,
@@ -54,6 +57,43 @@ def _json_from_row(raw: Any) -> Any:
         return raw
 
 
+# ----------------- Kto może zmieniać listę młodych sędziów -----------------
+#
+# Lista młodych sędziów należy do OKRĘGU, więc pisze po niej Teach Master tego
+# okręgu albo administrator aplikacji - dokładnie tak, jak decyduje o tym panel
+# admina i jak od 2026-09-09 pokazuje kosz w aplikacji.
+#
+# Do dziś nie sprawdzało tego NIC: trzy poniższe endpointy przyjmowały żądanie
+# od kogokolwiek, bez logowania. Ograniczenie „tylko admin" żyło wyłącznie
+# w aplikacji, a wystarczyło jedno żądanie z zewnątrz, żeby skasować cudzego
+# młodego sędziego.
+#
+# Okres przejściowy należy do `province_guard`: żądanie BEZ tokenu przechodzi
+# i zostawia ostrzeżenie w logu, dopóki na Railway nie stanie
+# `PROVINCE_WRITE_STRICT=1`. Bez tego wgranie samego backendu odcięłoby
+# wszystkich, którzy mają w telefonie starszą aplikację - ta wysyła te żądania
+# bez nagłówka `Authorization`.
+#
+# Okręg bierzemy Z REKORDU W BAZIE, a nie z treści żądania: przy usuwaniu numer
+# okręgu w ogóle nie przychodzi, a przy edycji dałoby się go podmienić i pisać
+# po cudzym okręgu z uprawnieniem u siebie.
+
+
+async def _ensure_young_referee_write(
+    token_payload: Optional[dict],
+    *,
+    province: Any,
+    action: str,
+) -> None:
+    """Wpuszcza Teach Mastera okręgu albo admina. Nic nie zwraca - albo rzuca."""
+    await ensure_province_write(
+        token_payload,
+        province=province,
+        kind=MASTER_TEACH,
+        action=action,
+    )
+
+
 # ----------------- CRUD: młodzi sędziowie -----------------
 
 
@@ -63,10 +103,21 @@ def _json_from_row(raw: Any) -> Any:
     status_code=status.HTTP_201_CREATED,
     summary="Dodaj młodego sędziego",
 )
-async def create_young_referee(req: CreateYoungRefereeRequest):
+async def create_young_referee(
+    req: CreateYoungRefereeRequest,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
     province = _normalize_province(req.province)
     if not province:
         raise HTTPException(status_code=400, detail="Pole 'province' jest wymagane")
+
+    # Nowy rekord nie ma jeszcze wiersza w bazie, więc okręg bierzemy z żądania -
+    # i to on musi być okręgiem, w którym piszący jest Teach Masterem.
+    await _ensure_young_referee_write(
+        token_payload,
+        province=province,
+        action="Dodanie młodego sędziego",
+    )
 
     values = {
         "full_name": req.full_name,
@@ -156,13 +207,35 @@ async def get_young_referee(referee_id: int):
     response_model=YoungRefereeItem,
     summary="Zaktualizuj młodego sędziego",
 )
-async def update_young_referee(referee_id: int, req: UpdateYoungRefereeRequest):
+async def update_young_referee(
+    referee_id: int,
+    req: UpdateYoungRefereeRequest,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
     # sprawdź czy istnieje
     row = await database.fetch_one(
         select(young_referees).where(young_referees.c.id == referee_id)
     )
     if row is None:
         raise HTTPException(status_code=404, detail="Młody sędzia nie znaleziony")
+
+    await _ensure_young_referee_write(
+        token_payload,
+        province=row["province"],
+        action="Zmiana danych młodego sędziego",
+    )
+
+    # Przeniesienie do innego okręgu musi przejść przez OBIE listy - inaczej
+    # Master jednego okręgu wypychałby swoich młodych do cudzego, mając
+    # uprawnienie wyłącznie u siebie. Tak samo robi bramka ogłoszeń.
+    if req.province is not None:
+        target_province = _normalize_province(req.province)
+        if target_province and target_province != _normalize_province(row["province"]):
+            await _ensure_young_referee_write(
+                token_payload,
+                province=target_province,
+                action="Przeniesienie młodego sędziego do innego okręgu",
+            )
 
     values: Dict[str, Any] = {}
     if req.full_name is not None:
@@ -200,7 +273,26 @@ async def update_young_referee(referee_id: int, req: UpdateYoungRefereeRequest):
     response_model=Dict[str, bool],
     summary="Usuń młodego sędziego",
 )
-async def delete_young_referee(referee_id: int):
+async def delete_young_referee(
+    referee_id: int,
+    token_payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
+    # Okręg czytamy PRZED skasowaniem - potem nie ma już z czego go wziąć,
+    # a to on rozstrzyga, czy piszący ma tu cokolwiek do powiedzenia.
+    row = await database.fetch_one(
+        select(young_referees.c.province).where(young_referees.c.id == referee_id)
+    )
+    if row is None:
+        # Aplikacja traktuje 404 jak „już usunięty" i idzie dalej, więc nie ma
+        # po co pytać o uprawnienia do rekordu, którego nie ma.
+        raise HTTPException(status_code=404, detail="Młody sędzia nie znaleziony")
+
+    await _ensure_young_referee_write(
+        token_payload,
+        province=row["province"],
+        action="Usunięcie młodego sędziego",
+    )
+
     stmt = delete(young_referees).where(young_referees.c.id == referee_id)
     result = await database.execute(stmt)
     if not result:

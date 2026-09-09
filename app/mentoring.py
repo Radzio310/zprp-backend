@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update, delete, text
+from sqlalchemy import select, update, delete, text, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db import (database, province_judges, province_matches, mentoring_config as config,
     mentoring_pairs as pairs, mentoring_members as members, mentoring_assignments as assignments,
@@ -13,6 +13,14 @@ from app.match_market_access import badge_names
 from app.mentoring_rules import may_manage, pair_matches, season_bounds, json_value
 
 router = APIRouter(prefix="/mentoring", tags=["Mentoring"])
+
+PROVINCES = (
+    "DOLNOŚLĄSKIE", "KUJAWSKO-POMORSKIE", "LUBELSKIE", "LUBUSKIE",
+    "ŁÓDZKIE", "MAŁOPOLSKIE", "MAZOWIECKIE", "OPOLSKIE",
+    "PODKARPACKIE", "PODLASKIE", "POMORSKIE", "ŚLĄSKIE",
+    "ŚWIĘTOKRZYSKIE", "WARMIŃSKO-MAZURSKIE", "WIELKOPOLSKIE",
+    "ZACHODNIOPOMORSKIE",
+)
 
 
 def now():
@@ -69,6 +77,34 @@ async def access(actor: Actor = Depends(market_actor)):
     cfg = await configuration(actor.province)
     return {"isAdmin": actor.is_admin, "province": actor.province, "judgeId": actor.judge_id,
         "canManage": may_manage(actor.is_admin, actor.judge_id, actor.province, badge_names(actor.badges), actor.province, cfg)}
+
+
+@router.get("/admin/overview")
+async def admin_overview(actor: Actor = Depends(market_actor)):
+    """Small country-wide dashboard; detailed people are fetched only on demand."""
+    if not actor.is_admin:
+        raise HTTPException(403, "Ten widok jest dostępny wyłącznie dla administratora.")
+    config_rows = await database.fetch_all(select(config))
+    pair_rows = await database.fetch_all(
+        select(pairs.c.province, func.count(pairs.c.id).label("count"))
+        .where(pairs.c.ended_at.is_(None)).group_by(pairs.c.province)
+    )
+    mentor_rows = await database.fetch_all(
+        select(pairs.c.province, func.count(func.distinct(assignments.c.mentor_id)).label("count"))
+        .select_from(pairs.join(assignments, assignments.c.pair_id == pairs.c.id))
+        .where(pairs.c.ended_at.is_(None)).where(assignments.c.ended_at.is_(None))
+        .group_by(pairs.c.province)
+    )
+    config_by = {row["province"]: row for row in config_rows}
+    pair_by = {row["province"]: int(row["count"] or 0) for row in pair_rows}
+    mentor_by = {row["province"]: int(row["count"] or 0) for row in mentor_rows}
+    return {"provinces": [{
+        "province": province,
+        "enabled": bool(config_by.get(province) and config_by[province]["enabled"]),
+        "manager_ids": json_value(config_by[province]["manager_ids"], []) if province in config_by else [],
+        "active_pairs": pair_by.get(province, 0),
+        "active_mentors": mentor_by.get(province, 0),
+    } for province in PROVINCES]}
 
 
 @router.get("/management")
