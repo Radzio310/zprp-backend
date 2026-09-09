@@ -60,6 +60,26 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         self.db.database.fetch_all.return_value = [*self.people[:2], {"judge_id": "3", "province": "OPOLSKIE"}]
         await self.api.validate_people(self.actor, "ŚLĄSKIE", ["1", "2"], ["3"])
 
+    def test_pair_scope_uses_admin_only_bucket_for_two_judge_provinces(self):
+        people = [
+            {"judge_id": "1", "province": "MAZOWIECKIE"},
+            {"judge_id": "2", "province": "LUBELSKIE"},
+            {"judge_id": "3", "province": "MAZOWIECKIE"},
+        ]
+        self.assertEqual(self.api.pair_scope(["1", "2"], people), self.api.CROSS_PROVINCE)
+        self.assertEqual(self.api.pair_scope(["1", "3"], people), "MAZOWIECKIE")
+
+    def test_pair_scope_rejects_judge_without_province(self):
+        with self.assertRaises(HTTPException) as error:
+            self.api.pair_scope(
+                ["1", "2"],
+                [
+                    {"judge_id": "1", "province": "MAZOWIECKIE"},
+                    {"judge_id": "2", "province": ""},
+                ],
+            )
+        self.assertEqual(error.exception.status_code, 422)
+
     async def test_country_overview_is_admin_only(self):
         self.actor.is_admin = False
         with self.assertRaises(HTTPException) as error:
@@ -76,13 +96,46 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         result = await self.api.admin_overview(self.actor)
         slaskie = next(row for row in result["provinces"] if row["province"] == "ŚLĄSKIE")
         opolskie = next(row for row in result["provinces"] if row["province"] == "OPOLSKIE")
+        cross = next(row for row in result["provinces"] if row["province"] == self.api.CROSS_PROVINCE)
         self.assertEqual((slaskie["enabled"], slaskie["active_pairs"], slaskie["active_mentors"]), (True, 2, 3))
         self.assertEqual((opolskie["enabled"], opolskie["active_pairs"]), (False, 0))
+        self.assertEqual((cross["enabled"], cross["admin_only"]), (False, True))
 
     async def test_self_mentoring_rejected(self):
         with self.assertRaises(HTTPException) as error:
             await self.api.validate_people(self.actor, "ŚLĄSKIE", ["1", "2"], ["1"])
         self.assertEqual(error.exception.status_code, 422)
+
+    async def test_judge_can_read_own_pair_and_active_mentors(self):
+        self.actor.judge_id = "1"
+        self.db.database.fetch_one.side_effect = [
+            {"judge_id": "1", "pair_id": "pair"},
+            {
+                "id": "pair",
+                "province": "MAZOWIECKIE",
+                "judge_ids": '["1", "2"]',
+                "created_by": "admin",
+                "created_at": "date",
+                "ended_at": None,
+            },
+        ]
+        self.db.database.fetch_all.side_effect = [
+            [{"mentor_id": "3"}],
+            [
+                {"judge_id": "2", "full_name": "Drugi Sędzia", "province": "MAZOWIECKIE", "photo_url": "judge.jpg"},
+                {"judge_id": "1", "full_name": "Pierwszy Sędzia", "province": "MAZOWIECKIE", "photo_url": "first.jpg"},
+                {"judge_id": "3", "full_name": "Mentor", "province": "ŚLĄSKIE", "photo_url": "mentor.jpg"},
+            ],
+        ]
+        result = await self.api.my_pair(self.actor)
+        self.assertEqual([person["judge_id"] for person in result["pair"]["judges"]], ["1", "2"])
+        self.assertEqual(result["pair"]["mentors"][0]["full_name"], "Mentor")
+        self.assertNotIn("show_home", result["pair"]["mentors"][0])
+
+    async def test_judge_without_pair_gets_empty_relation(self):
+        self.db.database.fetch_one.return_value = None
+        self.assertEqual(await self.api.my_pair(self.actor), {"pair": None})
+        self.db.database.fetch_all.assert_not_awaited()
 
     async def test_revoked_link_cannot_read_or_change_preferences(self):
         self.db.database.fetch_one.side_effect = [{"id": "pair", "judge_ids": ["1", "2"], "province": "ŚLĄSKIE"}, None]

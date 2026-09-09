@@ -10,7 +10,7 @@ from app.db import (database, province_judges, province_matches, mentoring_confi
     mentoring_audit as audit)
 from app.match_market import market_actor, Actor
 from app.match_market_access import badge_names
-from app.mentoring_rules import may_manage, pair_matches, season_bounds, json_value
+from app.mentoring_rules import CROSS_PROVINCE, may_manage, pair_matches, season_bounds, json_value
 
 router = APIRouter(prefix="/mentoring", tags=["Mentoring"])
 
@@ -21,6 +21,7 @@ PROVINCES = (
     "ŚWIĘTOKRZYSKIE", "WARMIŃSKO-MAZURSKIE", "WIELKOPOLSKIE",
     "ZACHODNIOPOMORSKIE",
 )
+ADMIN_SCOPES = (*PROVINCES, CROSS_PROVINCE)
 
 
 def now():
@@ -28,11 +29,17 @@ def now():
 
 
 async def configuration(province):
+    if province == CROSS_PROVINCE:
+        return {"province": CROSS_PROVINCE, "enabled": False, "manager_ids": []}
     row = await database.fetch_one(select(config).where(config.c.province == province))
     return {**dict(row), "manager_ids": json_value(row["manager_ids"], [])} if row else {"province": province, "enabled": False, "manager_ids": []}
 
 
 async def require_manager(actor, province):
+    if province == CROSS_PROVINCE:
+        if not actor.is_admin:
+            raise HTTPException(403, "Parami międzyokręgowymi zarządza wyłącznie administrator.")
+        return
     if not may_manage(actor.is_admin, actor.judge_id, actor.province, badge_names(actor.badges), province, await configuration(province)):
         raise HTTPException(403, "Brak uprawnień do zarządzania mentoringiem tego okręgu.")
 
@@ -70,6 +77,17 @@ async def validate_people(actor, province, judge_ids, mentor_ids):
         raise HTTPException(422, "Nie znaleziono wszystkich wybranych sędziów.")
     if not actor.is_admin and any(str(r["province"]).strip().upper() != province for r in rows):
         raise HTTPException(403, "Komisja może wybierać wyłącznie osoby ze swojego okręgu.")
+    return rows
+
+
+def pair_scope(judge_ids, people):
+    """Wspólny okręg pary albo specjalny, admin-only koszyk międzyokręgowy."""
+    wanted = {str(value).strip() for value in judge_ids}
+    judge_rows = [row for row in people if str(row["judge_id"]).strip() in wanted]
+    if len(judge_rows) != len(wanted) or any(not str(row["province"] or "").strip() for row in judge_rows):
+        raise HTTPException(422, "Każdy podopieczny musi mieć przypisany okręg.")
+    provinces = {str(row["province"]).strip().upper() for row in judge_rows}
+    return next(iter(provinces)) if len(provinces) == 1 else CROSS_PROVINCE
 
 
 @router.get("/access")
@@ -104,7 +122,8 @@ async def admin_overview(actor: Actor = Depends(market_actor)):
         "manager_ids": json_value(config_by[province]["manager_ids"], []) if province in config_by else [],
         "active_pairs": pair_by.get(province, 0),
         "active_mentors": mentor_by.get(province, 0),
-    } for province in PROVINCES]}
+        "admin_only": province == CROSS_PROVINCE,
+    } for province in ADMIN_SCOPES]}
 
 
 @router.get("/management")
@@ -133,6 +152,8 @@ async def set_config(province: str, req: ConfigRequest, actor: Actor = Depends(m
     if not actor.is_admin:
         raise HTTPException(403, "Tylko administrator włącza zarządzanie okręgowe.")
     province = province.strip().upper()
+    if province == CROSS_PROVINCE:
+        raise HTTPException(422, "Pary międzyokręgowe nie mają uprawnień komisji.")
     rows = await database.fetch_all(select(province_judges).where(province_judges.c.judge_id.in_(req.manager_ids)))
     if len(rows) != len(set(req.manager_ids)) or any(r["province"] != province for r in rows):
         raise HTTPException(422, "Zarządzający muszą należeć do tego okręgu.")
@@ -145,11 +166,14 @@ async def set_config(province: str, req: ConfigRequest, actor: Actor = Depends(m
 
 @router.post("/pairs")
 async def create_pair(req: PairRequest, actor: Actor = Depends(market_actor)):
-    province = req.province.strip().upper()
+    requested_province = req.province.strip().upper()
     async with database.transaction():
         await database.execute(text("SELECT pg_advisory_xact_lock(7419021)"))
-        await require_manager(actor, province)
-        await validate_people(actor, province, req.judge_ids, req.mentor_ids)
+        await require_manager(actor, requested_province)
+        people = await validate_people(actor, requested_province, req.judge_ids, req.mentor_ids)
+        province = pair_scope(req.judge_ids, people)
+        if province == CROSS_PROVINCE and not actor.is_admin:
+            raise HTTPException(403, "Parę z dwóch okręgów może utworzyć wyłącznie administrator.")
         if await database.fetch_one(select(members).where(members.c.judge_id.in_(req.judge_ids))):
             raise HTTPException(409, "Jeden z sędziów należy już do aktywnej pary.")
         pair_id = str(uuid4())
@@ -158,8 +182,8 @@ async def create_pair(req: PairRequest, actor: Actor = Depends(market_actor)):
             await database.execute(members.insert().values(judge_id=judge, pair_id=pair_id))
         for mentor in req.mentor_ids:
             await database.execute(assignments.insert().values(pair_id=pair_id, mentor_id=mentor, show_home=True, notify=True))
-        await log(actor, "created", req.model_dump(), pair_id)
-    return {"id": pair_id}
+        await log(actor, "created", {**req.model_dump(), "province": province}, pair_id)
+    return {"id": pair_id, "province": province}
 
 
 async def active_pair(pair_id):
@@ -205,6 +229,66 @@ async def mentor_link(pair_id, judge_id):
     if not link:
         raise HTTPException(403, "Opieka nad tą parą zakończyła się lub nie została przydzielona.")
     return pair, dict(link)
+
+
+@router.get("/my-pair")
+async def my_pair(actor: Actor = Depends(market_actor)):
+    """Read-only relation card for a judge's settings screen."""
+    membership = await database.fetch_one(
+        select(members).where(members.c.judge_id == actor.judge_id)
+    )
+    if not membership:
+        return {"pair": None}
+
+    pair_row = await database.fetch_one(
+        select(pairs)
+        .where(pairs.c.id == membership["pair_id"])
+        .where(pairs.c.ended_at.is_(None))
+    )
+    if not pair_row:
+        return {"pair": None}
+
+    judge_ids = json_value(pair_row["judge_ids"], [])
+    mentor_rows = await database.fetch_all(
+        select(assignments.c.mentor_id)
+        .where(assignments.c.pair_id == pair_row["id"])
+        .where(assignments.c.ended_at.is_(None))
+        .order_by(assignments.c.started_at)
+    )
+    mentor_ids = [str(row["mentor_id"]) for row in mentor_rows]
+    person_ids = set(judge_ids + mentor_ids)
+    person_rows = (
+        await database.fetch_all(
+            select(province_judges).where(province_judges.c.judge_id.in_(person_ids))
+        )
+        if person_ids
+        else []
+    )
+    people = {
+        str(row["judge_id"]): {
+            key: dict(row).get(key)
+            for key in ("judge_id", "full_name", "province", "photo_url")
+        }
+        for row in person_rows
+    }
+
+    def safe_person(judge_id):
+        return people.get(
+            str(judge_id),
+            {"judge_id": str(judge_id), "full_name": f"Sędzia {judge_id}"},
+        )
+
+    return {
+        "pair": {
+            "id": pair_row["id"],
+            "province": pair_row["province"],
+            "created_at": pair_row["created_at"],
+            "judge_ids": judge_ids,
+            "mentor_ids": mentor_ids,
+            "judges": [safe_person(judge_id) for judge_id in judge_ids],
+            "mentors": [safe_person(mentor_id) for mentor_id in mentor_ids],
+        }
+    }
 
 
 @router.get("/mine")

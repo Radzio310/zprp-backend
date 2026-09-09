@@ -1,6 +1,6 @@
 import unittest
 from datetime import datetime, timezone
-from app.mentoring_rules import pair_matches, may_manage, season_bounds
+from app.mentoring_rules import CROSS_PROVINCE, pair_matches, may_manage, season_bounds
 
 
 class MentoringRulesTests(unittest.TestCase):
@@ -20,6 +20,8 @@ class MentoringRulesTests(unittest.TestCase):
     def test_admin_cross_province_only(self):
         self.assertTrue(may_manage(True, "1", "ŚLĄSKIE", [], "OPOLSKIE", None))
         self.assertFalse(may_manage(False, "1", "ŚLĄSKIE", ["Komisja sędziowska"], "OPOLSKIE", {"enabled": True, "manager_ids": ["1"]}))
+        self.assertTrue(may_manage(True, "1", "ŚLĄSKIE", [], CROSS_PROVINCE, None))
+        self.assertFalse(may_manage(False, "1", CROSS_PROVINCE, ["Komisja sędziowska"], CROSS_PROVINCE, {"enabled": True, "manager_ids": ["1"]}))
 
     def test_current_season_boundary(self):
         self.assertEqual(season_bounds(datetime(2026, 8, 31, tzinfo=timezone.utc))[0].year, 2025)

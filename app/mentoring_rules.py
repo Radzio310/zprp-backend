@@ -3,6 +3,11 @@ from zoneinfo import ZoneInfo
 import json
 
 
+# Osobny koszyk administracyjny dla par złożonych z sędziów dwóch okręgów.
+# Nie jest województwem i nigdy nie może odziedziczyć uprawnień komisji.
+CROSS_PROVINCE = "MIĘDZYOKRĘGOWE"
+
+
 def json_value(value, fallback):
     if isinstance(value, str):
         try:
@@ -23,6 +28,8 @@ def pair_matches(judge_ids, state):
 def may_manage(admin, actor_id, actor_province, badges, province, config):
     if admin:
         return True
+    if province == CROSS_PROVINCE:
+        return False
     if actor_province != province or not config or not config.get("enabled"):
         return False
     managers = json_value(config.get("manager_ids"), [])
