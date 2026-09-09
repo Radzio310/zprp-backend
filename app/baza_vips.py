@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Any, Optional
 
@@ -6,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.sql import and_
 
 from app.db import database, baza_vips
+from app.vip_tabs import tab_access_from_login_info, tabs_meta
 from app.schemas import (
     BazaVipUpsertRequest,
     BazaVipUpsertResponse,
@@ -20,6 +22,47 @@ router = APIRouter(prefix="/baza_vips", tags=["baza_vips"])
 
 def _norm_username(u: str) -> str:
     return (u or "").strip()
+
+
+def _merge_login_info(previous: Any, incoming: Any) -> dict:
+    """
+    Scalanie, nie podmiana. Klient przy logowaniu awaryjnym wysyla
+    login_info_json BEZ "tabs" - podmiana skasowalaby wykryte zakladki
+    i konto po cichu straciloby moduly az do kolejnego poprawnego logowania.
+    """
+    base = _as_dict(previous)
+    base.update(_as_dict(incoming))
+    return base
+
+
+def _as_dict(value: Any) -> dict:
+    """JSONB potrafi wrocic napisem - wtedy trzeba go rozpakowac, nie zgubic."""
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _item(row) -> BazaVipItem:
+    """Rekord + policzony werdykt zakladek w jednym miejscu, zeby nie umknal."""
+    data = dict(row)
+    data["tab_access"] = tab_access_from_login_info(data.get("login_info_json"))
+    return BazaVipItem(**data)
+
+
+@router.get("/tabs_meta")
+async def get_tabs_meta():
+    """
+    Mapa "ktora zakladka ZPRP zasila ktory modul" dla panelu admina w BAZA.
+    UWAGA: musi byc zarejestrowana PRZED GET /{username}, inaczej catch-all
+    potraktuje "tabs_meta" jak login VIP-a.
+    """
+    return tabs_meta()
 
 
 @router.post("/upsert_from_login", response_model=BazaVipUpsertResponse)
@@ -77,7 +120,9 @@ async def upsert_from_login(payload: BazaVipUpsertRequest):
             update_values["province"] = (payload.province or None)
 
         if payload.login_info_json is not None:
-            update_values["login_info_json"] = payload.login_info_json or {}
+            update_values["login_info_json"] = _merge_login_info(
+                dict(row).get("login_info_json"), payload.login_info_json
+            )
 
         await database.execute(
             baza_vips.update()
@@ -95,7 +140,7 @@ async def upsert_from_login(payload: BazaVipUpsertRequest):
     return BazaVipUpsertResponse(
         success=True,
         created=created,
-        record=BazaVipItem(**dict(row)),
+        record=_item(row),
     )
 
 
@@ -129,7 +174,7 @@ async def create_vip(payload: BazaVipCreateRequest):
     )
     if not row:
         raise HTTPException(status_code=500, detail="VIP user was not created")
-    return BazaVipItem(**dict(row))
+    return _item(row)
 
 
 @router.get("/{username}", response_model=BazaVipItem)
@@ -144,7 +189,7 @@ async def get_vip(username: str):
     if not row:
         raise HTTPException(status_code=404, detail="VIP user not found")
 
-    return BazaVipItem(**dict(row))
+    return _item(row)
 
 
 @router.patch("/{username}", response_model=BazaVipItem)
@@ -183,7 +228,7 @@ async def update_vip(username: str, payload: BazaVipUpdateRequest):
 
     if len(update_values.keys()) == 1:
         # tylko updated_at => nic nie zmieniono
-        return BazaVipItem(**dict(row))
+        return _item(row)
 
     await database.execute(
         baza_vips.update()
@@ -194,7 +239,7 @@ async def update_vip(username: str, payload: BazaVipUpdateRequest):
     row2 = await database.fetch_one(
         select(baza_vips).where(baza_vips.c.username == username)
     )
-    return BazaVipItem(**dict(row2))
+    return _item(row2)
 
 
 @router.delete("/{username}", status_code=status.HTTP_204_NO_CONTENT)
@@ -236,4 +281,4 @@ async def list_vips(
         stmt = stmt.where(and_(*conds))
 
     rows = await database.fetch_all(stmt)
-    return ListBazaVipsResponse(records=[BazaVipItem(**dict(r)) for r in rows])
+    return ListBazaVipsResponse(records=[_item(r) for r in rows])

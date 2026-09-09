@@ -18,6 +18,7 @@ from app.deps import get_settings, Settings
 from datetime import datetime
 from sqlalchemy import select
 from app.db import database, baza_vips
+from app.vip_tabs import compute_tab_access
 
 router = APIRouter(prefix="/baza_web", tags=["BAZA Web"])
 
@@ -48,6 +49,10 @@ class BazaWebLoginResponse(BaseModel):
 
     # NOWE: VIP
     vip: VipSummary | None = None
+
+    # NOWE: co konto ZPRP realnie jest w stanie zasilic (patrz app/vip_tabs.py).
+    # None => nie wiadomo (konto sedziego albo blad) - klient wtedy nie przycina.
+    tab_access: dict | None = None
 
 
 class BazaWebProfileRequest(BaseModel):
@@ -549,6 +554,11 @@ async def baza_web_login(
 
         vip_payload = None
 
+        # Co to konto realnie jest w stanie zasilic (Terminarz / Rozgrywki /
+        # Statystyki / Sedziowie i Delegaci). Liczone raz, tutaj, bo tylko tu
+        # widzimy swieze menu ZPRP.
+        tab_access = compute_tab_access(available_tabs)
+
         # zapis do VIP TYLKO jeśli brak judge_id
         if not (judge_id or "").strip():
             created, vip_record = await _vip_upsert_from_login(
@@ -572,17 +582,7 @@ async def baza_web_login(
             "display_name": display_name or "",
             "available_tabs": available_tabs or [],
             "vip": vip_payload,         # <-- dla kont z judgeId będzie null
-        }
-
-
-        return {
-            "success": True,
-            "judge_id": judge_id or None,
-            "error": None,
-            "account_type": account_type,
-            "display_name": display_name or "",
-            "available_tabs": available_tabs or [],
-            "vip": {"created": created, "record": vip_record},
+            "tab_access": tab_access,
         }
 
     except HTTPException as e:
@@ -594,6 +594,7 @@ async def baza_web_login(
             "display_name": None,
             "available_tabs": None,
             "vip": None,
+            "tab_access": None,
         }
     except Exception as e:
         return {
@@ -604,6 +605,7 @@ async def baza_web_login(
             "display_name": None,
             "available_tabs": None,
             "vip": None,
+            "tab_access": None,
         }
 
 

@@ -373,6 +373,10 @@ class BazaVipItem(BaseModel):
     updated_at: datetime
     last_login_at: datetime
 
+    # Wyliczane (nie ma tego w tabeli): co konto ZPRP realnie jest w stanie
+    # zasilic. Panel admina rysuje z tego ostrzezenia przy nadawaniu uprawnien.
+    tab_access: Optional[Any] = None
+
 
 class BazaVipUpsertResponse(BaseModel):
     success: bool

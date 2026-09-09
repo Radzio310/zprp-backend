@@ -88,7 +88,12 @@ def _log_html_fingerprint(prefix: str, html: str) -> None:
     logger.info("%s html_len=%s title='%s'", prefix, len(html or ""), title)
 
 
-def _extract_menu_href_from_page(html: str, label_regex: str, href_regex: str) -> str:
+def _extract_menu_href_from_page(
+    html: str,
+    label_regex: str,
+    href_regex: str,
+    human_label: str = "",
+) -> str:
     soup = BeautifulSoup(html, "html.parser")
     rx_label = re.compile(label_regex, re.I)
     rx_href = re.compile(href_regex, re.I)
@@ -99,7 +104,14 @@ def _extract_menu_href_from_page(html: str, label_regex: str, href_regex: str) -
 
     href = _absorb_href_keep_relative(a.get("href", "") if a else "")
     if not href:
-        raise HTTPException(500, f"Nie znaleziono linku menu: {label_regex}")
+        # Brak zakladki w menu to nie awaria serwera, tylko zakres konta ZPRP.
+        # 403 z czytelnym zdaniem, zeby klient mial co pokazac zamiast regexa.
+        raise HTTPException(
+            403,
+            "To konto na baza.zprp.pl nie ma zakładki „"
+            + (human_label or label_regex)
+            + "”, więc nie ma skąd pobrać tych danych.",
+        )
 
     logger.info("Menu link found label_regex='%s' href='%s'", label_regex, href)
     return href
@@ -572,6 +584,7 @@ async def scrape_officials_full(
             html_home,
             label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
             href_regex=r"\ba=sedzia\b",
+            human_label="Sędziowie i Delegaci",
         )
 
         _, html0 = await fetch_with_correct_encoding(client, sedzia_href, method="GET", cookies=cookies)
@@ -681,6 +694,7 @@ async def scrape_officials_lite(
             html_home,
             label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
             href_regex=r"\ba=sedzia\b",
+            human_label="Sędziowie i Delegaci",
         )
 
         _, html0 = await fetch_with_correct_encoding(client, sedzia_href, method="GET", cookies=cookies)
