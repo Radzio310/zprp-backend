@@ -30,6 +30,7 @@ from app.proel_exams import (
     kick_promotion,
 )
 from app.proel_journal import (
+    _SENT_EVENT_BY_PATH,
     client_ip as _client_ip,
     exam_events_from_ops,
     log_match_event,
@@ -745,20 +746,27 @@ async def patch_proel_state(
                 )
         else:
             journal_event = (
-                {
-                    "post.shortResultSent": "zprp.summary_sent",
-                    "post.fullDataSent": "zprp.full_data_sent",
-                    "post.protocolSent": "zprp.attachment_sent",
-                }.get(changed_paths[0], "field.changed")
+                _SENT_EVENT_BY_PATH.get(changed_paths[0], "field.changed")
                 if len(changed_paths) == 1
                 else "field.changed"
             )
+            # Okoliczności wysyłki - patrz `meta` w `ProElOp`. Doklejamy je
+            # WYŁĄCZNIE przy zdarzeniu wysyłki i tylko z jednej operacji:
+            # „czym i czyim kontem" opisuje konkretną czynność, a zbiorcza
+            # zmiana pól nie jest żadną czynnością wysyłkową.
+            extra: Dict[str, Any] = {}
+            if journal_event != "field.changed":
+                for o in req.ops:
+                    if str(o.op_id or "") in fresh_ops and o.path == changed_paths[0]:
+                        if isinstance(o.meta, dict):
+                            extra = {k: v for k, v in o.meta.items() if v is not None}
+                        break
             await log_match_event(
                 match_number=match_number,
                 event=journal_event,
                 actor=actor,
                 zprp_match_id=str(state.get("zprp_match_id") or ""),
-                details={"paths": changed_paths, "rev": final_rev},
+                details={"paths": changed_paths, "rev": final_rev, **extra},
                 event_key=f"patch:{match_number}:{fresh_ops[0]}",
             )
 

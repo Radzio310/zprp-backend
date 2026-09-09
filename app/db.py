@@ -9,6 +9,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     LargeBinary,
@@ -654,6 +655,140 @@ okreg_rates = Table(
         onupdate=func.now(),
     ),
 )
+
+# 18.1b) Stawki CENTRALNE (jedna tabela krajowa, WERSJONOWANE)
+#
+# Odpowiednik `okreg_rates`, tylko bez wojewodztwa: Tabela Ryczaltow
+# Sedziowskich ZPRP obowiazuje w calym kraju. Wersja jest wybierana DATA MECZU,
+# nie dzisiejsza - inaczej kazda nowa uchwala przeliczylaby archiwum i
+# statystyki rozliczonych sezonow rozjechalyby sie z przelewami.
+#
+# `content` to PELNA, juz scalona tabela (kszalt `calcRates.json` bez bloku
+# roznicowego). Klient niczego nie scala - wybiera wiersz i czyta.
+central_rates = Table(
+    "central_rates",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("content", JSON, nullable=False),
+    # krotki opis dla czlowieka, np. numer uchwaly
+    Column("label", String, nullable=True),
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("valid_from", Date, nullable=True),
+    Column("valid_to", Date, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+
+# 18.1c) Moduły okręgowe włączane per województwo
+#
+# `active_provinces` mówi tylko „okręg działa albo nie". Statystyki sędziego
+# i Rozliczenia to dwie osobne rzeczy, włączane niezależnie - okręg może chcieć
+# pokazać sędziom ich mecze, a nie chcieć jeszcze pokazywać kwot. Tabela jest
+# ogólna (moduł jako tekst), żeby kolejny moduł nie wymagał migracji.
+province_modules = Table(
+    "province_modules",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("module", String, primary_key=True),  # "stats" | "settlements"
+    Column("enabled", Boolean, nullable=False, server_default=text("false")),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+
+# 18.1d) Mecze sędziego do statystyk i rozliczeń
+#
+# Jeden wiersz = JEDNA OBSADA (sędzia + mecz + rola). Trzymamy FAKTY, nie kwoty:
+# stawka potrafi się zmienić uchwałą wstecz, a przeliczenie kilkuset wierszy
+# jest darmowe. Dzięki temu przełącznik „uwzględniaj przyszłe mecze" jest
+# zwykłym filtrem zapytania, a nie drugim zestawem danych.
+#
+# `origin`:
+#   "district" - mecz z terminarza okręgu (`province_matches`)
+#   "outside"  - mecz spoza okręgu z listy meczów sędziego; wchodzą TYLKO
+#                role stolikowe, bo boiskowych spoza okręgu okręg nie rozlicza
+province_settlement_matches = Table(
+    "province_settlement_matches",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("match_key", String, primary_key=True),
+    Column("season", String, nullable=True, index=True),
+    Column("match_at", DateTime(timezone=True), nullable=True, index=True),
+    Column("match_code", String, nullable=True),
+    Column("role", String, nullable=True),
+    Column("level", String, nullable=True),      # cup | district | central
+    Column("origin", String, nullable=False, server_default=text("'district'")),
+    Column("city", String, nullable=True),
+    Column("hall", String, nullable=True),
+    Column("home_city", String, nullable=True),
+    Column("teams", String, nullable=True),
+    Column("round_text", String, nullable=True),
+    Column("series_text", String, nullable=True),
+    Column("distance_km", Float, nullable=True),
+    Column("distance_source", String, nullable=True),
+    Column("approved", Boolean, nullable=True),
+    Column("active", Boolean, nullable=False, server_default=text("true")),
+    Column("first_seen_at", DateTime(timezone=True), server_default=func.now()),
+    Column("last_seen_at", DateTime(timezone=True), server_default=func.now()),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+
+# 18.1e) Przebiegi odświeżania - żeby było widać, kiedy dane ostatnio zeszły
+province_settlement_runs = Table(
+    "province_settlement_runs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("kind", String, nullable=False),  # "cron" | "manual"
+    Column("started_at", DateTime(timezone=True), server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("ok", Boolean, nullable=True),
+    Column("judges", Integer, nullable=True),
+    Column("matches", Integer, nullable=True),
+    Column("outside_matches", Integer, nullable=True),
+    Column("error", String, nullable=True),
+)
+
+
+# 18.1f) Wygenerowane dokumenty - numeracja SL/01/2026/1
+#
+# Numer musi być niepowtarzalny w obrębie okręgu, miesiąca i rodzaju dokumentu,
+# bo trafia do księgowości. Licznik prowadzi baza, a nie człowiek.
+province_settlement_documents = Table(
+    "province_settlement_documents",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("kind", String, nullable=False),        # "zestawienie" | "przejazdy"
+    Column("period_year", Integer, nullable=False),
+    Column("period_month", Integer, nullable=False),
+    Column("seq", Integer, nullable=False),
+    Column("number", String, nullable=False),
+    Column("date_from", Date, nullable=True),
+    Column("date_to", Date, nullable=True),
+    Column("include_future", Boolean, nullable=False, server_default=text("false")),
+    Column("judge_ids", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("totals_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 
 # 18.2) Tabele odległości okręgowych per województwo
 okreg_distances = Table(

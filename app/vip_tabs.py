@@ -161,26 +161,42 @@ def _module_verdict(spec: dict[str, Any], present: set[str]) -> dict[str, Any]:
     return {"ok": not missing, "missing": labels_for(missing), "partial": False}
 
 
+def _unknown_access() -> dict[str, Any]:
+    return {
+        "known": False,
+        "tabs": [],
+        "labels": dict(TAB_LABELS),
+        "missing": [],
+        "features": {},
+        "feature_labels": {},
+        "modules": {},
+    }
+
+
 def compute_tab_access(available_tabs: Iterable[Any] | None) -> dict[str, Any]:
     """
     Zdejmuje z listy etykiet menu gotowy werdykt dla kazdej funkcji i kazdego modulu.
 
-    Uwaga: `available_tabs=None` znaczy "nie wiem", a nie "nic nie ma". Wtedy
-    zwracamy `known=False` i klient ma NIE przycinac uprawnien - inaczej stary
-    rekord bez zakladek po cichu zamknalby dziala jace konto.
+    Trzy przypadki dostaja `known=False`, czyli "nie wiem" zamiast "nic nie ma":
+    - None (konto sedziego, blad logowania, stary rekord bez zapisu),
+    - pusta lista (menu w ogole sie nie sparsowalo),
+    - lista bez ANI JEDNEJ znanej zakladki (ZPRP zmienil etykiety albo znacznik).
+
+    Ostatnie dwa to zabezpieczenie przed regresja scrapowania: gdyby
+    `_extract_menu_tabs` przestal cokolwiek zwracac, wersja "wiem, ze nic nie ma"
+    zgasilaby moduly WSZYSTKIM kontom naraz. Lepiej wpuscic i pozwolic
+    odmowic backendowi przy konkretnym zapytaniu (403 z czytelnym zdaniem).
     """
     if available_tabs is None:
-        return {
-            "known": False,
-            "tabs": [],
-            "labels": dict(TAB_LABELS),
-            "missing": [],
-            "features": {},
-            "feature_labels": {},
-            "modules": {},
-        }
+        return _unknown_access()
 
-    present = set(tab_keys_from_labels(available_tabs))
+    labels = list(available_tabs)
+    if not labels:
+        return _unknown_access()
+
+    present = set(tab_keys_from_labels(labels))
+    if not present:
+        return _unknown_access()
 
     features = {
         feature: (tab in present) for feature, tab in FEATURE_TABS.items()

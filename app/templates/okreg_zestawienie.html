@@ -1,0 +1,220 @@
+{# Zestawienie ekwiwalentów sędziowskich - A4 poziomo.
+
+   Następca papierowego „ZESTAWIENIE 18/S/2025". Zachowany układ kolumn, który
+   księgowość czyta od lat, ale bez rubryki „Potwierdzenie odbioru" i bez
+   dopisku o zgodzie na przetwarzanie danych - dokument nie jest zgodą.
+
+   Barwy z logo okręgu: granat #0B4F9E i złoto #F0A500. #}
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<style>
+  @page {
+    size: A4 landscape;
+    margin: 12mm 12mm 14mm 12mm;
+    @bottom-right {
+      content: "str. " counter(page) " z " counter(pages);
+      font-family: "DejaVu Sans", sans-serif;
+      font-size: 7.5pt;
+      color: #8a93a6;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", sans-serif;
+    font-size: 8.6pt;
+    color: #1d2433;
+    margin: 0;
+    line-height: 1.35;
+  }
+
+  /* ---------- nagłówek ---------- */
+  .head { width: 100%; border-collapse: collapse; margin-bottom: 3mm; }
+  .head td { vertical-align: middle; padding: 0; }
+  .head .logo { width: 26mm; }
+  .head .logo img { width: 24mm; }
+
+  .org-name { font-size: 12pt; font-weight: bold; color: #0B4F9E; letter-spacing: .2pt; }
+  .org-addr { font-size: 8pt; color: #5a6478; margin-top: .8mm; }
+
+  .doc-box { text-align: right; }
+  .doc-kind {
+    font-size: 7.5pt; letter-spacing: 1.6pt; text-transform: uppercase;
+    color: #8a93a6; font-weight: bold;
+  }
+  .doc-number {
+    font-size: 17pt; font-weight: bold; color: #0B4F9E;
+    margin-top: .5mm; letter-spacing: .3pt;
+  }
+  .doc-period { font-size: 8.5pt; color: #3d4658; margin-top: .8mm; }
+
+  .rule { height: 1.6mm; margin: 2mm 0 3.5mm 0; background: #0B4F9E; }
+  .rule-gold { height: 1.6mm; width: 38mm; background: #F0A500; float: left; }
+
+  .title {
+    font-size: 13.5pt; font-weight: bold; color: #16233c;
+    margin: 0 0 1mm 0; letter-spacing: .2pt;
+  }
+  .subtitle { font-size: 8.5pt; color: #5a6478; margin-bottom: 3mm; }
+
+  /* ---------- tabela ---------- */
+  table.grid { width: 100%; border-collapse: collapse; }
+  table.grid thead { display: table-header-group; }
+  table.grid th {
+    background: #0B4F9E; color: #fff; font-size: 7.6pt; font-weight: bold;
+    padding: 2.2mm 1.8mm; text-align: right; border: .3pt solid #0B4F9E;
+    line-height: 1.2;
+  }
+  table.grid th.l { text-align: left; }
+  table.grid th.c { text-align: center; }
+  table.grid td {
+    padding: 1.8mm; border: .3pt solid #d7dce6; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.grid td.l { text-align: left; }
+  table.grid td.c { text-align: center; }
+  table.grid tbody tr:nth-child(even) td { background: #f4f7fc; }
+  table.grid tr { page-break-inside: avoid; }
+
+  .lp { color: #8a93a6; width: 9mm; }
+  .name { font-weight: bold; color: #16233c; }
+  .muted { color: #7a8398; font-size: 7.6pt; }
+  .strong-col { background: #fff8e8 !important; font-weight: bold; color: #7a4d00; }
+
+  /* wiersz sumy */
+  tr.total td {
+    border-top: 1.2pt solid #0B4F9E;
+    background: #eaf1fb;
+    font-weight: bold; font-size: 9.4pt; color: #0B4F9E;
+    padding: 2.6mm 1.8mm;
+  }
+  tr.total td.gold { background: #F0A500; color: #2a1c00; }
+
+  /* ---------- podsumowanie i stopka ---------- */
+  /* „Słownie" bierze PEŁNĄ szerokość. Wcześniej stało w tabeli obok uwag
+     i przy węższym renderze uwagi ściskały się do pionowego paska, rozpychając
+     przy okazji tabelę kwot. Uwagi zeszły na sam dół - patrz `.footnote`. */
+  .words {
+    margin-top: 4mm;
+    border: .4pt solid #d7dce6; border-left: 2mm solid #F0A500;
+    padding: 2.4mm 3mm; background: #fffdf7;
+  }
+  .words .label {
+    font-size: 7pt; letter-spacing: 1.2pt; text-transform: uppercase;
+    color: #8a93a6; font-weight: bold;
+  }
+  .words .value { font-size: 9.6pt; color: #16233c; margin-top: 1mm; }
+
+  .footnote {
+    margin-top: 6mm; padding-top: 2mm; border-top: .4pt solid #e3e8f0;
+    font-size: 7.2pt; color: #8a93a6; line-height: 1.55;
+  }
+  .footnote b { color: #5a6478; }
+
+  .signs { width: 100%; border-collapse: collapse; margin-top: 12mm; }
+  .signs td { width: 33.3%; text-align: center; padding: 0 4mm; vertical-align: bottom; }
+  .sign-line { border-top: .5pt solid #98a1b4; padding-top: 1.4mm; }
+  .sign-label { font-size: 7.4pt; color: #7a8398; }
+
+  .empty {
+    border: .4pt dashed #cfd6e2; padding: 10mm; text-align: center;
+    color: #7a8398; font-size: 9pt; border-radius: 2mm;
+  }
+</style>
+</head>
+<body>
+
+<table class="head">
+  <tr>
+    {% if logo %}<td class="logo"><img src="data:image/png;base64,{{ logo }}" alt="" /></td>{% endif %}
+    <td>
+      <div class="org-name">{{ org_name }}</div>
+      {% if org_address %}<div class="org-addr">{{ org_address }}</div>{% endif %}
+    </td>
+    <td class="doc-box">
+      <div class="doc-kind">Zestawienie</div>
+      <div class="doc-number">{{ document_number }}</div>
+      <div class="doc-period">{{ period_label }}</div>
+    </td>
+  </tr>
+</table>
+
+<div class="rule"><div class="rule-gold"></div></div>
+
+<div class="title">Zestawienie ekwiwalentów sędziowskich</div>
+<div class="subtitle">
+  {{ judges_count }} {{ judges_word }} &middot; {{ matches_count }} {{ matches_word }}
+  {%- if include_future %} &middot; <b>uwzględniono mecze jeszcze nierozegrane</b>{% endif %}
+  &middot; wystawiono {{ generated_at }}
+</div>
+
+{% if rows %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th class="c">Lp</th>
+      <th class="l">Nazwisko i imię</th>
+      <th class="c">Mecze</th>
+      <th>Ekwiwalent brutto</th>
+      <th>Koszt uzyskania 20%</th>
+      <th>Kwota do opodatkowania</th>
+      <th>Podatek 12%</th>
+      <th>Razem do wypłaty</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td class="c lp">{{ loop.index }}</td>
+      <td class="l name">
+        {{ row.name or row.judge_id }}
+        {%- if row.future %} <span class="muted">(w tym {{ row.future }} nierozegr.)</span>{% endif %}
+      </td>
+      <td class="c">{{ row.matches }}</td>
+      <td>{{ row.gross | money }}</td>
+      <td>{{ row.costs | money }}</td>
+      <td>{{ row.taxable | money }}</td>
+      <td>{{ row.tax | money }}</td>
+      <td class="strong-col">{{ row.net | money }}</td>
+    </tr>
+    {% endfor %}
+    <tr class="total">
+      <td></td>
+      <td class="l">RAZEM</td>
+      <td class="c">{{ totals.matches }}</td>
+      <td>{{ totals.gross | money }}</td>
+      <td>{{ totals.costs | money }}</td>
+      <td>{{ totals.taxable | money }}</td>
+      <td>{{ totals.tax | money }}</td>
+      <td class="gold">{{ totals.net | money }}</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="words">
+  <div class="label">Słownie do wypłaty</div>
+  <div class="value">{{ total_in_words }}</div>
+</div>
+
+<table class="signs">
+  <tr>
+    <td><div class="sign-line"><div class="sign-label">Sporządził</div></div></td>
+    <td><div class="sign-line"><div class="sign-label">Sprawdzono pod względem formalnym i rachunkowym</div></div></td>
+    <td><div class="sign-line"><div class="sign-label">Zatwierdził</div></div></td>
+  </tr>
+</table>
+
+<div class="footnote">
+  <b>Podstawa:</b> Tabela Ryczałtów Sędziowskich ZPRP oraz stawki okręgowe obowiązujące
+  w dniu każdego meczu. &nbsp;&middot;&nbsp;
+  <b>Koszty uzyskania i podatek</b> liczone od sumy ekwiwalentów sędziego za wskazany okres.
+  &nbsp;&middot;&nbsp; Kwoty przejazdów rozliczane są odrębnie – Listą kosztów przejazdów.
+</div>
+{% else %}
+<div class="empty">Brak rozliczeń w wybranym okresie.</div>
+{% endif %}
+
+</body>
+</html>

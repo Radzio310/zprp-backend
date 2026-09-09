@@ -1,0 +1,591 @@
+"""
+Pobieranie danych do statystyk sedziego i rozliczen okregu.
+
+DWA ZRODLA, bo okreg placi za dwie rozne rzeczy:
+
+  1. Mecze WLASNE - z `province_matches`, ktore utrzymuje juz
+     `province_match_monitor`. Nic nie scrapujemy drugi raz; czytamy `state_json`
+     i rozkladamy obsade na role.
+  2. Mecze SPOZA okregu - z prywatnej listy meczow KAZDEGO sedziego. Wchodza
+     wylacznie role STOLIKOWE: boiskowych na szczeblu centralnym okreg nie
+     rozlicza, wiec ciagniecie ich tylko zawyzaloby rachunek i czas pobierania.
+
+Odswiezanie jest DWUTOROWE (decyzja uzytkownika z 09.09.2026): raz na dobe
+kontem `sync` z Railway, a na zadanie - poswiadczeniami VIP-a z panelu. Dzieki
+temu okreg bez zmiennych srodowiskowych tez dziala, tyle ze recznie.
+
+Trzymamy FAKTY, nie kwoty. Stawka potrafi zmienic sie uchwala wstecz, a
+przeliczenie kilkuset wierszy jest darmowe - patrz `settlement_engine`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import unicodedata
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
+from urllib.parse import urlencode
+
+from bs4 import BeautifulSoup
+from httpx import AsyncClient
+from sqlalchemy import and_, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from app import settlement_rates as R
+from app.db import (
+    database,
+    okreg_distances,
+    province_judges,
+    province_matches,
+    province_modules,
+    province_settlement_matches,
+    province_settlement_runs,
+)
+from app.deps import get_settings
+from app.settlement_distances import DistanceIndex, resolve_distances
+from app.zprp_accounts import configured_provinces, credentials_for
+from app.zprp.officials import (  # scrapery, ktore juz istnieja - nie piszemy drugich
+    _build_judge_matches_path,
+    _extract_menu_href_from_page,
+    _login_zprp_and_get_cookies,
+    _parse_match_rows_from_soup,
+    _parse_officials_page,
+    _parse_seasons_from_page,
+)
+from app.utils import fetch_with_correct_encoding
+
+logger = logging.getLogger(__name__)
+
+#: Ile sezonow wstecz ciagniemy z prywatnej listy sedziego. Rozliczenia dotycza
+#: biezacego sezonu, ale przelom sierpnia i wrzesnia potrafi miec oba naraz.
+OUTSIDE_SEASONS = 2
+
+#: Odstep miedzy zapytaniami o liste meczow sedziego. ZPRP to jedna maszyna
+#: zwiazku, a nie API z limitem - walenie w nia setka rownoleglych polaczen
+#: jest niegrzeczne i konczy sie odcieciem.
+JUDGE_REQUEST_DELAY = 0.35
+
+SYNC_INTERVAL_HOURS = 24
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _s(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _norm_name(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", _s(value)).lower()
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return " ".join(text.split())
+
+
+def _parse_when(value: Any) -> Optional[datetime]:
+    text = _s(value)
+    if not text:
+        return None
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?", text)
+    if not match:
+        return None
+    year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    hour = int(match.group(4) or 0)
+    minute = int(match.group(5) or 0)
+    try:
+        return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _state(raw: Any) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        import json
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Wlaczanie modulu
+# ---------------------------------------------------------------------------
+
+async def module_enabled(province: str, module: str) -> bool:
+    row = await database.fetch_one(
+        select(province_modules.c.enabled).where(
+            and_(
+                province_modules.c.province == R.province_key(province),
+                province_modules.c.module == module,
+            )
+        )
+    )
+    return bool(row and row["enabled"])
+
+
+async def enabled_provinces(module: str) -> list[str]:
+    rows = await database.fetch_all(
+        select(province_modules.c.province).where(
+            and_(province_modules.c.module == module, province_modules.c.enabled.is_(True))
+        )
+    )
+    return [_s(row["province"]) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Zrodlo 1: mecze wlasne okregu
+# ---------------------------------------------------------------------------
+
+def _district_assignments(state: dict, judges: dict[str, dict]) -> list[dict]:
+    """Rozklada obsade jednego meczu na wiersze (sedzia + rola)."""
+    out: list[dict] = []
+    for id_field, role in (
+        ("NrSedzia_pierwszy", R.ROLE_FIELD),
+        ("NrSedzia_drugi", R.ROLE_FIELD),
+        ("NrSedzia_sekretarz", R.ROLE_TABLE),
+        ("NrSedzia_czas", R.ROLE_TABLE),
+        ("NrSedzia_delegat", R.ROLE_DELEGATE),
+        ("NrSedzia_delegat2", R.ROLE_DELEGATE),
+    ):
+        judge_id = _s(state.get(id_field))
+        # „0" to PUSTE GNIAZDO, nie sedzia - ZPRP tak zapisuje zdjeta obsade.
+        if not judge_id or judge_id == "0":
+            continue
+        if judge_id not in judges:
+            continue
+        out.append({"judge_id": judge_id, "role": role})
+    return out
+
+
+async def _collect_district(province: str, judges: dict[str, dict]) -> list[dict]:
+    rows = await database.fetch_all(
+        select(province_matches).where(
+            and_(
+                province_matches.c.province == province,
+                province_matches.c.active.is_(True),
+            )
+        )
+    )
+
+    collected: list[dict] = []
+    for row in rows:
+        state = _state(row["state_json"])
+        code = _s(state.get("RozgrywkiCode") or row["match_code"])
+        if R.is_test_competition(code):
+            continue
+        match_id = _s(row["match_id"])
+        when = row["match_at"] or _parse_when(state.get("data_fakt"))
+        city = _s(state.get("Hala_miasto"))
+        hall = _s(state.get("Hala_nazwa"))
+        teams = " - ".join(
+            x for x in (
+                _s(state.get("ID_zespoly_gosp_ZespolNazwa")),
+                _s(state.get("ID_zespoly_gosc_ZespolNazwa")),
+            ) if x
+        )
+
+        for entry in _district_assignments(state, judges):
+            collected.append({
+                "match_key": f"d:{match_id}",
+                "judge_id": entry["judge_id"],
+                "season": _s(row["season"] or state.get("season")),
+                "match_at": when,
+                "match_code": code,
+                "role": entry["role"],
+                "level": R.match_level(code),
+                "origin": "district",
+                "city": city,
+                "hall": hall,
+                "teams": teams,
+                "round_text": _s(state.get("runda") or state.get("Runda")) or None,
+                "series_text": _s(state.get("kolejka") or state.get("Kolejka")) or None,
+                "approved": bool(row["approved"]) if row["approved"] is not None else None,
+            })
+    return collected
+
+
+# ---------------------------------------------------------------------------
+# Zrodlo 2: stoliki spoza okregu, z prywatnej listy sedziego
+# ---------------------------------------------------------------------------
+
+def _role_in_row(record: dict, judge_name: str) -> Optional[str]:
+    """
+    Rola sedziego w JEGO wlasnym meczu.
+
+    Prywatna lista podaje obsade NAZWISKAMI, nie numerami, wiec dopasowujemy po
+    nazwisku - tak samo jak `roleForMatch` w aplikacji. Priorytet delegat ->
+    stolikowy -> boiskowy, bo ta sama osoba nie bywa dwoma naraz.
+    """
+    me = _norm_name(judge_name)
+    if not me:
+        return None
+    officials = record.get("officials") or {}
+    if _norm_name(officials.get("delegate")) == me:
+        return R.ROLE_DELEGATE
+    if _norm_name(officials.get("secretary")) == me or _norm_name(officials.get("timekeeper")) == me:
+        return R.ROLE_TABLE
+    if _norm_name(officials.get("referee1")) == me or _norm_name(officials.get("referee2")) == me:
+        return R.ROLE_FIELD
+    return None
+
+
+async def _collect_outside(
+    client: AsyncClient,
+    cookies: dict,
+    judges: dict[str, dict],
+    district_ids: set[str],
+) -> list[dict]:
+    """
+    Stoliki spoza okregu. Jedno zapytanie na sedziego, po kolei.
+
+    Mecz, ktory okreg juz zna z wlasnego terminarza, POMIJAMY - inaczej ten sam
+    mecz wszedlby do rozliczenia dwa razy, raz z kazdego zrodla.
+    """
+    collected: list[dict] = []
+
+    for judge_id, judge in judges.items():
+        name = _s(judge.get("full_name"))
+        if not name:
+            continue
+        try:
+            entry_path = _build_judge_matches_path(judge_id, None)
+            _, html = await fetch_with_correct_encoding(
+                client, entry_path, method="GET", cookies=cookies
+            )
+            soup = BeautifulSoup(html, "html.parser")
+            seasons = _parse_seasons_from_page(soup)
+            season_values = [
+                _s(item.get("value")) for item in (seasons or []) if _s(item.get("value"))
+            ][:OUTSIDE_SEASONS] or [None]
+
+            for season_value in season_values:
+                if season_value is not None:
+                    path = _build_judge_matches_path(judge_id, season_value)
+                    _, html = await fetch_with_correct_encoding(
+                        client, path, method="GET", cookies=cookies
+                    )
+                    soup = BeautifulSoup(html, "html.parser")
+                parsed = _parse_match_rows_from_soup(soup)
+
+                for key, record in (parsed.get("matches") or {}).items():
+                    match_id = _s(record.get("IdZawody")) or _s(key)
+                    if match_id in district_ids:
+                        continue
+                    code = _s(record.get("match_code"))
+                    if not code or R.is_test_competition(code):
+                        continue
+                    role = _role_in_row(record, name)
+                    # ⚠ TYLKO STOLIKI. Boiskowych spoza okregu okreg nie rozlicza.
+                    if role != R.ROLE_TABLE:
+                        continue
+
+                    venue = ((record.get("hall") or {}).get("venue") or {})
+                    teams = record.get("teams") or {}
+                    collected.append({
+                        "match_key": f"o:{match_id}",
+                        "judge_id": judge_id,
+                        "season": _s(record.get("season")),
+                        "match_at": _parse_when(record.get("data_fakt")),
+                        "match_code": code,
+                        "role": role,
+                        "level": R.match_level(code),
+                        "origin": "outside",
+                        "city": _s(venue.get("city")),
+                        "hall": _s(venue.get("name")),
+                        "teams": " - ".join(x for x in (_s(teams.get("host")), _s(teams.get("guest"))) if x),
+                        "round_text": None,
+                        "series_text": None,
+                        "approved": None,
+                    })
+                await asyncio.sleep(JUDGE_REQUEST_DELAY)
+        except Exception as exc:
+            # Jeden sedzia bez listy nie moze wywalic calego okregu.
+            logger.warning("[settlement] lista meczow sedziego %s: %s", judge_id, exc)
+            continue
+
+    return collected
+
+
+# ---------------------------------------------------------------------------
+# Sedziowie okregu i ich miasta
+# ---------------------------------------------------------------------------
+
+async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dict[str, dict]:
+    """
+    Sedziowie okregu z ich miastem zamieszkania.
+
+    Miasto jest niezbedne: bez niego nie ma jak policzyc dojazdu. Bierzemy je
+    z zakladki „Sedziowie i Delegaci"; gdy konta na nia nie wpuszczaja, zostaja
+    nazwiska z `province_judges` i rozliczenie pokaze „brak dojazdu" zamiast
+    zmyslac kilometry.
+    """
+    judges: dict[str, dict] = {}
+
+    rows = await database.fetch_all(
+        select(province_judges).where(province_judges.c.province == province)
+    )
+    for row in rows:
+        judges[_s(row["judge_id"])] = {
+            "judge_id": _s(row["judge_id"]),
+            "full_name": _s(row["full_name"]),
+            "city": "",
+        }
+
+    try:
+        _, home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
+        href = _extract_menu_href_from_page(
+            home,
+            label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
+            href_regex=r"\ba=sedzia\b",
+            human_label="Sędziowie i Delegaci",
+        )
+        _, page = await fetch_with_correct_encoding(client, href, method="GET", cookies=cookies)
+        parsed = _parse_officials_page(page, current_offset=0)
+
+        def absorb(payload: dict) -> None:
+            for judge_id, item in (payload.get("officials") or {}).items():
+                key = _s(judge_id)
+                if not key:
+                    return
+                entry = judges.setdefault(key, {"judge_id": key, "full_name": "", "city": ""})
+                entry["full_name"] = _s(item.get("name")) or entry["full_name"]
+                entry["city"] = _s(item.get("city")) or entry["city"]
+
+        absorb(parsed)
+
+        # Lista sedziow jest STRONICOWANA. Pierwsza strona to zwykle 10 nazwisk,
+        # a okreg ma ich pare setek - bez przejscia po offsetach rozliczenie
+        # objeloby garstke ludzi i nikt by nie zauwazyl, ze reszty brakuje.
+        paging = parsed.get("paging") or {}
+        base_qs = dict(parsed.get("base_qs") or {})
+        base_qs["a"] = "sedzia"
+        base_qs.setdefault("Filtr_archiwum", "1")
+        base_qs["count"] = str(int(paging.get("count") or 10))
+        for offset in range(1, int(paging.get("max_offset") or 0) + 1):
+            qs = dict(base_qs)
+            qs["offset"] = str(offset)
+            _, extra = await fetch_with_correct_encoding(
+                client, "/index.php?" + urlencode(qs, doseq=True), method="GET", cookies=cookies
+            )
+            absorb(_parse_officials_page(extra, current_offset=offset))
+    except Exception as exc:
+        logger.warning("[settlement] lista sedziow okregu %s: %s", province, exc)
+
+    return {k: v for k, v in judges.items() if v.get("full_name")}
+
+
+# ---------------------------------------------------------------------------
+# Zapis
+# ---------------------------------------------------------------------------
+
+async def _store(province: str, rows: list[dict], judges: dict[str, dict]) -> int:
+    now = _now()
+    seen: set[tuple[str, str]] = set()
+
+    for row in rows:
+        judge = judges.get(row["judge_id"]) or {}
+        values = {
+            "province": province,
+            "judge_id": row["judge_id"],
+            "match_key": row["match_key"],
+            "season": row.get("season"),
+            "match_at": row.get("match_at"),
+            "match_code": row.get("match_code"),
+            "role": row.get("role"),
+            "level": row.get("level"),
+            "origin": row.get("origin"),
+            "city": row.get("city"),
+            "hall": row.get("hall"),
+            "home_city": _s(judge.get("city")),
+            "teams": row.get("teams"),
+            "round_text": row.get("round_text"),
+            "series_text": row.get("series_text"),
+            "distance_km": row.get("distance_km"),
+            "distance_source": row.get("distance_source"),
+            "approved": row.get("approved"),
+            "active": True,
+            "last_seen_at": now,
+            "updated_at": now,
+        }
+        statement = pg_insert(province_settlement_matches).values(**values)
+        await database.execute(
+            statement.on_conflict_do_update(
+                index_elements=[
+                    province_settlement_matches.c.province,
+                    province_settlement_matches.c.judge_id,
+                    province_settlement_matches.c.match_key,
+                ],
+                set_={k: v for k, v in values.items() if k not in ("province", "judge_id", "match_key")},
+            )
+        )
+        seen.add((row["judge_id"], row["match_key"]))
+
+    # Obsady, ktorych ten przebieg NIE widzial, gasna. Nie kasujemy ich: mecz
+    # zdjety i przywrocony ma wrocic z ta sama historia, a nie jako nowy.
+    stale = await database.fetch_all(
+        select(
+            province_settlement_matches.c.judge_id,
+            province_settlement_matches.c.match_key,
+        ).where(
+            and_(
+                province_settlement_matches.c.province == province,
+                province_settlement_matches.c.active.is_(True),
+            )
+        )
+    )
+    dropped = 0
+    for row in stale:
+        key = (_s(row["judge_id"]), _s(row["match_key"]))
+        if key in seen:
+            continue
+        await database.execute(
+            update(province_settlement_matches)
+            .where(
+                and_(
+                    province_settlement_matches.c.province == province,
+                    province_settlement_matches.c.judge_id == key[0],
+                    province_settlement_matches.c.match_key == key[1],
+                )
+            )
+            .values(active=False, updated_at=now)
+        )
+        dropped += 1
+    return dropped
+
+
+# ---------------------------------------------------------------------------
+# Przebieg
+# ---------------------------------------------------------------------------
+
+async def refresh_province(
+    province: str,
+    *,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    kind: str = "cron",
+    with_outside: bool = True,
+) -> dict:
+    """
+    Pelne odswiezenie danych okregu.
+
+    `username`/`password` podaje panel (poswiadczenia VIP-a); bez nich schodzimy
+    do konta `sync` z Railway. Brak obu to nie awaria, tylko okreg jeszcze
+    nieskonfigurowany - i tak to raportujemy.
+    """
+    province = R.province_key(province) if not province.isupper() else province.strip().upper()
+    settings = get_settings()
+
+    run_id = await database.execute(
+        insert(province_settlement_runs).values(
+            province=province, kind=kind, started_at=_now()
+        )
+    )
+
+    async def finish(ok: bool, **fields: Any) -> dict:
+        await database.execute(
+            update(province_settlement_runs)
+            .where(province_settlement_runs.c.id == int(run_id))
+            .values(finished_at=_now(), ok=ok, **fields)
+        )
+        return {"province": province, "ok": ok, **fields}
+
+    credentials = (username, password) if username and password else credentials_for(province, "sync")
+    if not credentials or not credentials[0] or not credentials[1]:
+        return await finish(False, error="Brak konta ZPRP dla tego okręgu")
+
+    try:
+        async with AsyncClient(
+            base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
+        ) as client, AsyncClient(follow_redirects=True, timeout=30.0) as public:
+            cookies = await _login_zprp_and_get_cookies(client, credentials[0], credentials[1])
+
+            judges = await _load_judges(client, cookies, province)
+            if not judges:
+                return await finish(False, error="Nie udało się odczytać listy sędziów okręgu")
+
+            district = await _collect_district(province, judges)
+            district_ids = {row["match_key"].split(":", 1)[1] for row in district}
+
+            outside: list[dict] = []
+            if with_outside:
+                outside = await _collect_outside(client, cookies, judges, district_ids)
+
+            rows = district + outside
+
+            # --- odleglosci ---
+            distance_row = await database.fetch_one(
+                select(okreg_distances.c.content).where(okreg_distances.c.province == province)
+            )
+            index = DistanceIndex(_state(distance_row["content"]) if distance_row else None)
+
+            pairs = []
+            for row in rows:
+                home = _s((judges.get(row["judge_id"]) or {}).get("city"))
+                city = _s(row.get("city"))
+                if home and city:
+                    pairs.append((home, city))
+
+            resolved = await resolve_distances(pairs, index, client=public)
+            for row in rows:
+                home = _s((judges.get(row["judge_id"]) or {}).get("city"))
+                city = _s(row.get("city"))
+                hit = resolved.get((home, city)) if home and city else None
+                row["distance_km"] = hit[0] if hit else None
+                row["distance_source"] = hit[1] if hit else "none"
+
+            await _store(province, rows, judges)
+
+        return await finish(
+            True,
+            judges=len(judges),
+            matches=len(rows),
+            outside_matches=len(outside),
+        )
+    except Exception as exc:
+        logger.exception("[settlement] odświeżanie %s nie powiodło się", province)
+        return await finish(False, error=str(exc)[:500])
+
+
+async def last_run(province: str) -> Optional[dict]:
+    row = await database.fetch_one(
+        select(province_settlement_runs)
+        .where(province_settlement_runs.c.province == province)
+        .order_by(province_settlement_runs.c.started_at.desc())
+        .limit(1)
+    )
+    return dict(row) if row else None
+
+
+async def run_settlement_sync_scheduler() -> None:
+    """
+    Dobowa petla.
+
+    Chodzi po wojewodztwach, ktore maja WLACZONY modul (statystyki albo
+    rozliczenia) i skonfigurowane konto `sync`. Bledy jednego okregu nie
+    zatrzymuja pozostalych.
+    """
+    await asyncio.sleep(90)  # niech serwer najpierw wstanie
+    while True:
+        try:
+            wanted = set(await enabled_provinces("stats")) | set(await enabled_provinces("settlements"))
+            configured = configured_provinces()
+            for province in sorted(wanted):
+                if province not in configured:
+                    logger.info("[settlement] %s: moduł włączony, ale brak konta sync", province)
+                    continue
+                previous = await last_run(province)
+                if previous and previous.get("finished_at"):
+                    age = _now() - previous["finished_at"]
+                    if age < timedelta(hours=SYNC_INTERVAL_HOURS):
+                        continue
+                logger.info("[settlement] odświeżam %s", province)
+                await refresh_province(province, kind="cron")
+        except Exception:
+            logger.exception("[settlement] pętla dobowa")
+        await asyncio.sleep(30 * 60)

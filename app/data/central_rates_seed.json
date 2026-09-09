@@ -1,0 +1,760 @@
+{
+  "schema": 1,
+  "_opis": "Zrodlo prawdy dla stawek centralnych. Kazda wersja to PELNA, juz scalona tabela - klient nie robi zadnego merge, tylko wybiera wersje data meczu.",
+  "versions": [
+    {
+      "content": {
+        "okręgowe": {
+          "boiskowy": [
+            {
+              "range": [
+                0,
+                0
+              ],
+              "value": 117
+            },
+            {
+              "range": [
+                0,
+                15
+              ],
+              "value": 139
+            },
+            {
+              "range": [
+                15,
+                30
+              ],
+              "value": 152
+            },
+            {
+              "range": [
+                30,
+                45
+              ],
+              "value": 166
+            },
+            {
+              "range": [
+                45,
+                60
+              ],
+              "value": 181
+            },
+            {
+              "range": [
+                60,
+                80
+              ],
+              "value": 194
+            },
+            {
+              "range": [
+                80,
+                100
+              ],
+              "value": 208
+            },
+            {
+              "range": [
+                100,
+                10000
+              ],
+              "value": 222
+            }
+          ],
+          "stolikowy": [
+            {
+              "range": [
+                0,
+                0
+              ],
+              "value": 77
+            },
+            {
+              "range": [
+                0,
+                15
+              ],
+              "value": 91
+            },
+            {
+              "range": [
+                15,
+                30
+              ],
+              "value": 105
+            },
+            {
+              "range": [
+                30,
+                45
+              ],
+              "value": 118
+            },
+            {
+              "range": [
+                45,
+                60
+              ],
+              "value": 132
+            },
+            {
+              "range": [
+                60,
+                80
+              ],
+              "value": 146
+            },
+            {
+              "range": [
+                80,
+                100
+              ],
+              "value": 160
+            },
+            {
+              "range": [
+                100,
+                1000000
+              ],
+              "value": 174
+            }
+          ]
+        },
+        "weekend": {
+          "boiskowy": {
+            "II liga": {
+              "below100": 195,
+              "100to300": 245,
+              "above300": 245
+            },
+            "1/16 i 1/8PP": {
+              "below100": 264,
+              "100to300": 314,
+              "above300": 474
+            },
+            "LC": {
+              "below100": 339,
+              "100to300": 389,
+              "above300": 549
+            },
+            "I liga": {
+              "below100": 339,
+              "100to300": 389,
+              "above300": 549
+            },
+            "OSM": {
+              "below100": 1000,
+              "100to300": 1050,
+              "above300": 1210
+            },
+            "OSK": {
+              "below100": 600,
+              "100to300": 650,
+              "above300": 810
+            },
+            "SM": {
+              "below100": 1000,
+              "100to300": 1050,
+              "above300": 1210
+            },
+            "SK": {
+              "below100": 600,
+              "100to300": 650,
+              "above300": 810
+            },
+            "1/4 i 1/2PP": {
+              "below100": 339,
+              "100to300": 389,
+              "above300": 549
+            },
+            "Finał PP": {
+              "below100": 529,
+              "100to300": 579,
+              "above300": 739
+            },
+            "el. PP": {
+              "below100": 195,
+              "100to300": 245,
+              "above300": 245
+            },
+            "1/2PP": {
+              "below100": 339,
+              "100to300": 389,
+              "above300": 549
+            }
+          },
+          "stolikowy": {
+            "II liga": 63,
+            "1/16 i 1/8PP": 97,
+            "LC": 97,
+            "I liga": 97,
+            "OSM": 120,
+            "OSK": 120,
+            "SM": 120,
+            "SK": 120,
+            "1/4 i 1/2PP": 97,
+            "Finał PP": 103,
+            "el. PP": 97,
+            "1/2PP": 97
+          }
+        },
+        "weekday": {
+          "boiskowy": {
+            "II liga": {
+              "below100": 247,
+              "100to300": 297,
+              "above300": 297
+            },
+            "1/16 i 1/8PP": {
+              "below100": 327,
+              "100to300": 377,
+              "above300": 537
+            },
+            "LC": {
+              "below100": 408,
+              "100to300": 458,
+              "above300": 618
+            },
+            "I liga": {
+              "below100": 408,
+              "100to300": 458,
+              "above300": 618
+            },
+            "OSM": {
+              "below100": 1150,
+              "100to300": 1200,
+              "above300": 1360
+            },
+            "OSK": {
+              "below100": 750,
+              "100to300": 800,
+              "above300": 960
+            },
+            "SM": {
+              "below100": 1150,
+              "100to300": 1200,
+              "above300": 1360
+            },
+            "SK": {
+              "below100": 750,
+              "100to300": 800,
+              "above300": 960
+            },
+            "1/4 i 1/2PP": {
+              "below100": 408,
+              "100to300": 458,
+              "above300": 618
+            },
+            "Finał PP": {
+              "below100": 592,
+              "100to300": 642,
+              "above300": 802
+            },
+            "el. PP": {
+              "below100": 247,
+              "100to300": 297,
+              "above300": 297
+            },
+            "1/2PP": {
+              "below100": 408,
+              "100to300": 458,
+              "above300": 618
+            }
+          },
+          "stolikowy": {
+            "II liga": 63,
+            "1/16 i 1/8PP": 97,
+            "LC": 97,
+            "I liga": 97,
+            "OSM": 120,
+            "OSK": 120,
+            "SM": 120,
+            "SK": 120,
+            "1/4 i 1/2PP": 97,
+            "Finał PP": 103,
+            "el. PP": 97,
+            "1/2PP": 97
+          }
+        },
+        "MP": {
+          "boiskowy": {
+            "1/16 i 1/8MP": {
+              "below100": 115,
+              "100to300": 165,
+              "above300": 325
+            },
+            "1/4MP": {
+              "below100": 155,
+              "100to300": 205,
+              "above300": 365
+            },
+            "Finał MP": {
+              "below100": 195,
+              "100to300": 245,
+              "above300": 405
+            }
+          },
+          "stolikowy": {
+            "1/16 i 1/8MP": 34,
+            "1/4MP": 51,
+            "Finał MP": 74
+          }
+        },
+        "delegat": {
+          "weekend": {
+            "OSM": {
+              "below100": 500,
+              "100to300": 550,
+              "above300": 710
+            },
+            "OSK": {
+              "below100": 350,
+              "100to300": 400,
+              "above300": 560
+            },
+            "SM": {
+              "below100": 500,
+              "100to300": 550,
+              "above300": 710
+            },
+            "SK": {
+              "below100": 350,
+              "100to300": 400,
+              "above300": 560
+            },
+            "below100": 264,
+            "100to300": 314,
+            "above300": 474
+          },
+          "weekday": {
+            "OSM": {
+              "below100": 650,
+              "100to300": 700,
+              "above300": 860
+            },
+            "OSK": {
+              "below100": 500,
+              "100to300": 550,
+              "above300": 710
+            },
+            "SM": {
+              "below100": 650,
+              "100to300": 700,
+              "above300": 860
+            },
+            "SK": {
+              "below100": 500,
+              "100to300": 550,
+              "above300": 710
+            },
+            "below100": 356,
+            "100to300": 406,
+            "above300": 566
+          }
+        },
+        "kilometrowka": {
+          "CENTRALA": 0.8,
+          "DOLNOŚLĄSKIE": 0.9,
+          "KUJAWSKO-POMORSKIE": 0,
+          "LUBELSKIE": 0,
+          "LUBUSKIE": 0,
+          "ŁÓDZKIE": 0,
+          "MAŁOPOLSKIE": 0,
+          "MAZOWIECKIE": 0,
+          "OPOLSKIE": 0,
+          "PODKARPACKIE": 0,
+          "PODLASKIE": 0,
+          "POMORSKIE": 0,
+          "ŚLĄSKIE": 0,
+          "ŚWIĘTOKRZYSKIE": 0,
+          "WARMIŃSKO-MAZURSKIE": 0,
+          "WIELKOPOLSKIE": 0,
+          "ZACHODNIOPOMORSKIE": 0
+        }
+      },
+      "enabled": true,
+      "valid_from": null,
+      "valid_to": "2026-08-31",
+      "label": "Tabela do 31.08.2026"
+    },
+    {
+      "content": {
+        "okręgowe": {
+          "boiskowy": [
+            {
+              "range": [
+                0,
+                0
+              ],
+              "value": 117
+            },
+            {
+              "range": [
+                0,
+                15
+              ],
+              "value": 139
+            },
+            {
+              "range": [
+                15,
+                30
+              ],
+              "value": 152
+            },
+            {
+              "range": [
+                30,
+                45
+              ],
+              "value": 166
+            },
+            {
+              "range": [
+                45,
+                60
+              ],
+              "value": 181
+            },
+            {
+              "range": [
+                60,
+                80
+              ],
+              "value": 194
+            },
+            {
+              "range": [
+                80,
+                100
+              ],
+              "value": 208
+            },
+            {
+              "range": [
+                100,
+                10000
+              ],
+              "value": 222
+            }
+          ],
+          "stolikowy": [
+            {
+              "range": [
+                0,
+                0
+              ],
+              "value": 77
+            },
+            {
+              "range": [
+                0,
+                15
+              ],
+              "value": 91
+            },
+            {
+              "range": [
+                15,
+                30
+              ],
+              "value": 105
+            },
+            {
+              "range": [
+                30,
+                45
+              ],
+              "value": 118
+            },
+            {
+              "range": [
+                45,
+                60
+              ],
+              "value": 132
+            },
+            {
+              "range": [
+                60,
+                80
+              ],
+              "value": 146
+            },
+            {
+              "range": [
+                80,
+                100
+              ],
+              "value": 160
+            },
+            {
+              "range": [
+                100,
+                1000000
+              ],
+              "value": 174
+            }
+          ]
+        },
+        "weekend": {
+          "boiskowy": {
+            "II liga": {
+              "below100": 195,
+              "100to300": 245,
+              "above300": 245
+            },
+            "1/16 i 1/8PP": {
+              "below100": 264,
+              "100to300": 314,
+              "above300": 474
+            },
+            "LC": {
+              "below100": 339,
+              "100to300": 389,
+              "above300": 549
+            },
+            "I liga": {
+              "below100": 339,
+              "100to300": 389,
+              "above300": 549
+            },
+            "OSM": {
+              "below100": 1000,
+              "100to300": 1050,
+              "above300": 1210
+            },
+            "OSK": {
+              "below100": 600,
+              "100to300": 650,
+              "above300": 810
+            },
+            "SM": {
+              "below100": 1000,
+              "100to300": 1050,
+              "above300": 1210
+            },
+            "SK": {
+              "below100": 600,
+              "100to300": 650,
+              "above300": 810
+            },
+            "1/4 i 1/2PP": {
+              "below100": 339,
+              "100to300": 389,
+              "above300": 549
+            },
+            "Finał PP": {
+              "below100": 529,
+              "100to300": 579,
+              "above300": 739
+            },
+            "el. PP": {
+              "below100": 195,
+              "100to300": 245,
+              "above300": 245
+            },
+            "1/2PP": {
+              "below100": 529,
+              "100to300": 579,
+              "above300": 739
+            }
+          },
+          "stolikowy": {
+            "II liga": 110,
+            "1/16 i 1/8PP": 110,
+            "LC": 110,
+            "I liga": 110,
+            "OSM": 120,
+            "OSK": 120,
+            "SM": 120,
+            "SK": 120,
+            "1/4 i 1/2PP": 110,
+            "Finał PP": 110,
+            "el. PP": 110,
+            "1/2PP": 110
+          }
+        },
+        "weekday": {
+          "boiskowy": {
+            "II liga": {
+              "below100": 247,
+              "100to300": 297,
+              "above300": 297
+            },
+            "1/16 i 1/8PP": {
+              "below100": 327,
+              "100to300": 377,
+              "above300": 537
+            },
+            "LC": {
+              "below100": 408,
+              "100to300": 458,
+              "above300": 618
+            },
+            "I liga": {
+              "below100": 408,
+              "100to300": 458,
+              "above300": 618
+            },
+            "OSM": {
+              "below100": 1150,
+              "100to300": 1200,
+              "above300": 1360
+            },
+            "OSK": {
+              "below100": 750,
+              "100to300": 800,
+              "above300": 960
+            },
+            "SM": {
+              "below100": 1150,
+              "100to300": 1200,
+              "above300": 1360
+            },
+            "SK": {
+              "below100": 750,
+              "100to300": 800,
+              "above300": 960
+            },
+            "1/4 i 1/2PP": {
+              "below100": 408,
+              "100to300": 458,
+              "above300": 618
+            },
+            "Finał PP": {
+              "below100": 592,
+              "100to300": 642,
+              "above300": 802
+            },
+            "el. PP": {
+              "below100": 247,
+              "100to300": 297,
+              "above300": 297
+            },
+            "1/2PP": {
+              "below100": 592,
+              "100to300": 642,
+              "above300": 802
+            }
+          },
+          "stolikowy": {
+            "II liga": 110,
+            "1/16 i 1/8PP": 110,
+            "LC": 110,
+            "I liga": 110,
+            "OSM": 120,
+            "OSK": 120,
+            "SM": 120,
+            "SK": 120,
+            "1/4 i 1/2PP": 110,
+            "Finał PP": 110,
+            "el. PP": 110,
+            "1/2PP": 110
+          }
+        },
+        "MP": {
+          "boiskowy": {
+            "1/16 i 1/8MP": {
+              "below100": 170,
+              "100to300": 221,
+              "above300": 376
+            },
+            "1/4MP": {
+              "below100": 210,
+              "100to300": 260,
+              "above300": 415
+            },
+            "Finał MP": {
+              "below100": 250,
+              "100to300": 300,
+              "above300": 450
+            }
+          },
+          "stolikowy": {
+            "1/16 i 1/8MP": 50,
+            "1/4MP": 50,
+            "Finał MP": 60
+          }
+        },
+        "delegat": {
+          "weekend": {
+            "OSM": {
+              "below100": 500,
+              "100to300": 550,
+              "above300": 710
+            },
+            "OSK": {
+              "below100": 350,
+              "100to300": 400,
+              "above300": 560
+            },
+            "SM": {
+              "below100": 500,
+              "100to300": 550,
+              "above300": 710
+            },
+            "SK": {
+              "below100": 350,
+              "100to300": 400,
+              "above300": 560
+            },
+            "below100": 264,
+            "100to300": 314,
+            "above300": 474
+          },
+          "weekday": {
+            "OSM": {
+              "below100": 650,
+              "100to300": 700,
+              "above300": 860
+            },
+            "OSK": {
+              "below100": 500,
+              "100to300": 550,
+              "above300": 710
+            },
+            "SM": {
+              "below100": 650,
+              "100to300": 700,
+              "above300": 860
+            },
+            "SK": {
+              "below100": 500,
+              "100to300": 550,
+              "above300": 710
+            },
+            "below100": 356,
+            "100to300": 406,
+            "above300": 566
+          }
+        },
+        "kilometrowka": {
+          "CENTRALA": 0.8,
+          "DOLNOŚLĄSKIE": 0.9,
+          "KUJAWSKO-POMORSKIE": 0,
+          "LUBELSKIE": 0,
+          "LUBUSKIE": 0,
+          "ŁÓDZKIE": 0,
+          "MAŁOPOLSKIE": 0,
+          "MAZOWIECKIE": 0,
+          "OPOLSKIE": 0,
+          "PODKARPACKIE": 0,
+          "PODLASKIE": 0,
+          "POMORSKIE": 0,
+          "ŚLĄSKIE": 0,
+          "ŚWIĘTOKRZYSKIE": 0,
+          "WARMIŃSKO-MAZURSKIE": 0,
+          "WIELKOPOLSKIE": 0,
+          "ZACHODNIOPOMORSKIE": 0
+        }
+      },
+      "enabled": true,
+      "valid_from": "2026-09-01",
+      "valid_to": null,
+      "label": "Uchwala nr 44/26 Zarzadu ZPRP z 28.08.2026"
+    }
+  ]
+}

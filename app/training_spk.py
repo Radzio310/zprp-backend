@@ -337,8 +337,9 @@ async def brief(
         else:
             out["startState"] = state_after_first_half(blob)
         # Kotwice zegara: same pary czasów, bez treści zdarzeń - patrz
-        # `training_spk_video.py`. Bramki dociągane do sekundy ze wzorca.
-        out["videoClock"] = video_clock(ref["timeline"] or [])
+        # `training_spk_video.py`. Czasy są w arkuszu plansz co do sekundy,
+        # więc wzorzec nie jest już do niczego potrzebny.
+        out["videoClock"] = video_clock()
     # Adresy nagrań nie są kluczem odpowiedzi - idą w każdym trybie, a
     # ekran startowy pokazuje ten właściwy dla wybranej drogi.
     out["videoLinks"] = await video_links()
@@ -351,7 +352,10 @@ async def brief(
 #: ten wpis obowiązuje tylko dopóki w bazie nic nie ma.
 DEFAULT_VIDEO_LINKS: Dict[str, str] = {
     "full": "",
-    "condensed": "https://iframe.mediadelivery.net/play/431457/7fcafe9d-84aa-4c69-aa6f-e04cadfaccc6",
+    # Nagranie Z PLANSZAMI - po każdej sytuacji 15-sekundowy opis. Kotwice
+    # w `training_spk_video.py` są zmierzone w TYM nagraniu, więc podmiana
+    # adresu bez podmiany kotwic rozjedzie zegar.
+    "condensed": "https://iframe.mediadelivery.net/play/431457/2183341f-9116-4969-9aa1-1c7a05d0934d",
 }
 
 

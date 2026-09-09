@@ -73,6 +73,13 @@ from app.baza_web import router as baza_web_router
 from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
 from app.baza_vips import router as baza_vips_router
+from app.central_rates import router as central_rates_router, seed_central_rates
+from app.province_settlements import (
+    router as province_settlements_router,
+    stats_router as province_stats_router,
+)
+from app.province_settlement_sync import run_settlement_sync_scheduler
+from app.province_settlement_pdf import router as province_settlement_pdf_router
 from app.province_events import router as province_events_router
 from app.province_travel import router as province_travel_router
 from app.province_stats_export import router as province_stats_export_router
@@ -260,6 +267,14 @@ app.include_router(baza_web_router)
 app.include_router(province_judges_router)
 app.include_router(badges_router)
 app.include_router(baza_vips_router)
+# Stawki centralne: wlasny prefiks /admin/central_rates, wiec nie koliduje
+# z trasami w app/admin.py.
+app.include_router(central_rates_router)
+# Rozliczenia i statystyki okregowe: wlasne prefiksy /province/settlements
+# i /province/stats, wiec nie koliduja z niczym.
+app.include_router(province_settlements_router)
+app.include_router(province_stats_router)
+app.include_router(province_settlement_pdf_router)
 app.include_router(province_events_router)
 app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
@@ -1252,6 +1267,18 @@ async def startup():
     from app.proel_exams import run_exam_promotion_sweep
     _exam_promotion_task = asyncio.create_task(run_exam_promotion_sweep())
     logger.info("✅ ProEl exam promotion sweep started")
+
+    # Tabela Ryczaltow Sedziowskich: wersje startowe wchodza tylko do PUSTEJ
+    # tabeli, wiec restart nigdy nie cofnie kwoty poprawionej przez czlowieka.
+    try:
+        await seed_central_rates()
+    except Exception:
+        logger.exception("Central rates seed failed")
+
+    # Dobowe odswiezanie danych do statystyk i rozliczen okregowych. Chodzi
+    # tylko po wojewodztwach z WLACZONYM modulem i skonfigurowanym kontem sync.
+    _settlement_sync_task = asyncio.create_task(run_settlement_sync_scheduler())
+    logger.info("✅ Province settlement sync started (24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")
 
 @app.on_event("shutdown")

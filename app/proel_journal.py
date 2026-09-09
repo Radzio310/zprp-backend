@@ -30,6 +30,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from pydantic import BaseModel
 from sqlalchemy import exists, func, literal, select
 
 from app.proel_auth import (
@@ -70,6 +71,12 @@ EVENT_LABELS: Dict[str, str] = {
     "zprp.officials_sent": "Kary osób towarzyszących do ZPRP",
     "zprp.comment_sent": "Uwagi verte do ZPRP",
     "zprp.attachment_sent": "Protokół PDF wysłany do ZPRP",
+    # Nieudana próba wysyłki. Dziennik ma odpowiadać na pytanie „czemu dane nie
+    # doszły", a nie tylko „kiedy doszły" - bez tego wpisu mecz, którego nie
+    # udało się wysłać, wygląda w dzienniku identycznie jak mecz, którego nikt
+    # nie próbował wysłać.
+    "zprp.send_failed": "Nieudana próba wysyłki do ZPRP",
+    "zprp.send_queued": "Wysyłka odłożona do dosyłki",
     # SMS nie idzie do bazy ZPRP, tylko wiadomością na numer z ustaleń
     # rozgrywek - stąd inna rodzina zdarzenia niż `zprp.*`.
     "match.sms_sent": "Zgłoszenie wyniku SMS-em",
@@ -278,6 +285,128 @@ _STATUS_NAMES: Dict[str, str] = {
 }
 
 
+#: Co próbowaliśmy wysłać - po ludzku, w mianowniku.
+_SEND_BLOCK_NAMES: Dict[str, str] = {
+    "full": "pełnych danych meczu",
+    "summary": "wyniku skróconego",
+    "players": "statystyk zawodników",
+    "officials": "kar osób towarzyszących",
+    "comment": "uwag verte",
+    "attachment": "protokołu PDF",
+    "numbers": "numerów koszulek",
+}
+
+
+#: Czym wykonano wysyłkę. Dwie drogi, dwie zupełnie różne odpowiedzi na
+#: reklamację - oficjalne API pisze pojedyncze pola, formularz wypełnia rubryki
+#: protokołu na stronie związku POŚWIADCZENIAMI konkretnego konta.
+_ROUTE_NAMES: Dict[str, str] = {
+    "official": "oficjalnym API",
+    "legacy": "drogą awaryjną (formularz na baza.zprp.pl)",
+    "mixed": "częściowo oficjalnym API, częściowo formularzem",
+}
+
+
+def send_context_sentence(details: Optional[Dict[str, Any]]) -> str:
+    """Okoliczności wysyłki: czym, czyim kontem i po ilu podejściach.
+
+    Dziennik odpowiada na pytanie „kto to zrobił" nagłówkiem wiersza (`actor`),
+    ale przy wysyłce do ZPRP samo nazwisko nie wystarcza: czynność wykonuje
+    OSOBA, a przepuszcza ją KONTO - i przy podniesionych uprawnieniach to bywają
+    dwie różne tożsamości. Administrator spoza obsady otwiera sesję numerem
+    sędziego prowadzącego, bo własnym numerem baza związku by go nie wpuściła.
+    To musi być w dzienniku napisane wprost, inaczej wpis mówi nieprawdę o tym,
+    czyim numerem podpisano zapis po tamtej stronie.
+    """
+    d = details or {}
+    bits: List[str] = []
+
+    route = _ROUTE_NAMES.get(str(d.get("via") or "").strip(), "")
+    if route:
+        bits.append(route)
+
+    # Konto formularza. Podajemy je TYLKO przy drodze awaryjnej, bo tylko tam
+    # w ogóle padło hasło - oficjalne API autoryzuje samym numerem.
+    account = str(d.get("zprp_account") or "").strip()
+    if account:
+        bits.append(f"kontem {account}")
+
+    judge = str(d.get("zprp_judge") or "").strip()
+    on_behalf = str(d.get("on_behalf") or "").strip()
+    if judge and on_behalf:
+        bits.append(f"numerem sędziego {judge} ({on_behalf})")
+    elif judge:
+        bits.append(f"numerem sędziego {judge}")
+    elif on_behalf:
+        bits.append(f"numerem sędziego {on_behalf}")
+
+    if d.get("admin") is True:
+        bits.append("dostęp z uprawnień administratora")
+
+    attempts = d.get("attempts")
+    if isinstance(attempts, int) and attempts > 1:
+        bits.append(f"po {attempts} podejściach")
+
+    return ", ".join(bits)
+
+
+def send_attempt_sentence(event: str, details: Optional[Dict[str, Any]]) -> str:
+    """Jedno zdanie o nieudanej próbie wysyłki.
+
+    Administrator czyta dziennik, żeby odpowiedzieć sędziemu na pytanie „czemu
+    moje dane nie doszły". Odpowiedź musi być w tym jednym wierszu, a nie w
+    rozwiniętych szczegółach - stąd numer próby, ile jednak przeszło i DOSŁOWNA
+    odpowiedź związku, gdy jakaś przyszła. To ostatnie jest tu najważniejsze:
+    bez cytatu z ZPRP każda odmowa wygląda tak samo.
+    """
+    d = details or {}
+    what = _SEND_BLOCK_NAMES.get(str(d.get("what") or ""), "danych meczu")
+
+    head = (
+        f"Wysyłka {what} odłożona do dosyłki"
+        if str(event) == "zprp.send_queued"
+        else f"Nie udało się wysłać {what}"
+    )
+
+    bits: List[str] = []
+    attempt = d.get("attempt")
+    of = d.get("of")
+    if isinstance(attempt, int) and attempt > 0:
+        bits.append(f"próba {attempt} z {of}" if isinstance(of, int) and of > 0 else f"próba {attempt}")
+    sent = d.get("sent")
+    if isinstance(sent, int) and sent > 0:
+        bits.append(f"zapisano {sent}")
+    left = d.get("left")
+    if isinstance(left, int) and left > 0:
+        bits.append(f"bez zapisu {left}")
+
+    reason = str(d.get("reason") or "").strip()
+    upstream = str(d.get("upstream") or "").strip()
+    tail = ""
+    if upstream:
+        tail = f' Odpowiedź ZPRP: "{upstream[:200]}".'
+    elif reason:
+        tail = f" {reason[:200]}"
+
+    # Okoliczności doklejamy do NAWIASU, a nie na koniec: cytat z ZPRP ma
+    # zostać ostatnią rzeczą w wierszu, bo to on rozstrzyga, co dalej robić.
+    context = send_context_sentence(d)
+    if context:
+        bits.append(context)
+
+    return (head + (f" ({', '.join(bits)})" if bits else "") + "." + tail).strip()
+
+
+def _with_context(sentence: str, details: Optional[Dict[str, Any]]) -> str:
+    """Zdanie o wysyłce plus jej okoliczności, gdy aplikacja je podała.
+
+    Wiersze sprzed tej zmiany okoliczności nie mają i mają wyglądać dokładnie
+    tak, jak wyglądały - dziennik jest księgą, a nie widokiem do przepisania.
+    """
+    context = send_context_sentence(details)
+    return f"{sentence} - {context}" if context else sentence
+
+
 def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
     """Jedno zdanie o tym, co się właściwie stało.
 
@@ -296,7 +425,7 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
             sentence = _MARK_SENTENCES[paths[0]]
             # Wielka litera TYLKO pierwsza - `capitalize()` zjadałoby skróty
             # w środku zdania („PDF" na „pdf").
-            return sentence[:1].upper() + sentence[1:]
+            return _with_context(sentence[:1].upper() + sentence[1:], d)
         joined = _join_fields(paths)
         return f"Zmieniono: {joined}" if joined else ""
 
@@ -337,10 +466,17 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
         sentence = f"{head}: {who}" if who else f"{head} badania"
         return f"{sentence} - {note}" if note else sentence
 
+    if ev in ("zprp.send_failed", "zprp.send_queued"):
+        return send_attempt_sentence(ev, d)
+
     if ev in _SENT_EVENT_BY_PATH.values():
         paths = [str(x) for x in (d.get("paths") or []) if str(x or "").strip()]
         sentence = _MARK_SENTENCES.get(paths[0], "") if len(paths) == 1 else ""
-        return sentence[:1].upper() + sentence[1:] if sentence else ""
+        if not sentence:
+            # Wiersz bez ścieżki (starszy klient) - samo zdarzenie już mówi, co
+            # poszło, więc zostaje sam kontekst zamiast pustki.
+            return send_context_sentence(d)
+        return _with_context(sentence[:1].upper() + sentence[1:], d)
 
     frm = _STATUS_NAMES.get(str(d.get("from") or ""), "")
     to = _STATUS_NAMES.get(str(d.get("to") or ""), "")
@@ -684,6 +820,76 @@ async def journal_matches(
             }
         )
     return {"matches": out, "has_more": len(rows) == limit}
+
+
+#: Zdarzenia, KTÓRE WOLNO ZGŁOSIĆ APLIKACJI.
+#
+# Reszta dziennika powstaje po stronie serwera przy operacji, którą opisuje -
+# i tak ma zostać, bo wpis „zatwierdzono protokół" musi znaczyć, że protokół
+# NAPRAWDĘ został zatwierdzony, a nie że ktoś tak powiedział. Nieudana próba
+# wysyłki jest inna: dzieje się WYŁĄCZNIE na telefonie, między aplikacją a
+# serwerem związku, i serwer BAZY nie ma jak się o niej dowiedzieć.
+_CLIENT_REPORTABLE = {"zprp.send_failed", "zprp.send_queued"}
+
+
+class JournalEventIn(BaseModel):
+    match_number: str
+    event: str
+    zprp_match_id: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+    #: Klucz idempotencji - dosyłka z kolejki nie ma dopisywać drugiego wiersza.
+    event_key: Optional[str] = None
+    app_version: Optional[str] = None
+
+
+@router.post(
+    "/event",
+    summary="Zgłoszenie zdarzenia z aplikacji (tylko nieudane wysyłki)",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def journal_event_from_app(
+    payload: JournalEventIn,
+    request: Request,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+    x_forwarded_for: Optional[str] = Header(None),
+):
+    """Dziennikowy wpis o czymś, co widzi tylko telefon.
+
+    Świadomie BEZ 401 przy braku tożsamości: `soft_actor` oddaje `None`, a wpis
+    bez nazwiska jest wart więcej niż brak wpisu. Świadomie też bez błędu przy
+    obcym zdarzeniu - aplikacja nie ma tu czego naprawiać, a odmowa kończyłaby
+    się w `catch` i tak.
+    """
+    event = str(payload.event or "").strip()
+    if event not in _CLIENT_REPORTABLE:
+        return None
+
+    # Nagłówki czytamy JAWNIE i wołamy resolver ręcznie - `soft_actor` ma
+    # zwykłe wartości domyślne zamiast `Header(...)`, więc jako `Depends`
+    # FastAPI wziąłby je za parametry zapytania i tożsamość przepadłaby po
+    # cichu. Tak samo robią wszystkie pozostałe miejsca.
+    actor = await soft_actor(
+        x_judge_id,
+        x_installation_id,
+        x_actor_name,
+        authorization=authorization,
+        x_elevation=x_elevation,
+    )
+    await log_match_event(
+        match_number=payload.match_number,
+        event=event,
+        actor=actor,
+        zprp_match_id=payload.zprp_match_id,
+        details=payload.details,
+        event_key=payload.event_key,
+        app_version=payload.app_version,
+        ip=client_ip(request, x_forwarded_for),
+    )
+    return None
 
 
 @router.get(

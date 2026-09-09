@@ -772,6 +772,42 @@ class UpdateOkregRateVersionRequest(BaseModel):
     valid_from: Optional[date] = None
     valid_to: Optional[date] = None
 
+# ====== STAWKI CENTRALNE (krajowe, wersjonowane) ======
+
+class CentralRateItem(BaseModel):
+    id: int
+    content: Any
+    label: Optional[str] = None
+    enabled: bool
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
+    updated_at: Optional[datetime] = None
+
+
+class ListCentralRateVersionsResponse(BaseModel):
+    files: List[CentralRateItem]
+
+
+class GetCentralRateResponse(BaseModel):
+    file: Optional[CentralRateItem] = None
+
+
+class CreateCentralRateVersionRequest(BaseModel):
+    content: Any
+    label: Optional[str] = None
+    enabled: bool = True
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
+
+
+class UpdateCentralRateVersionRequest(BaseModel):
+    content: Optional[Any] = None
+    label: Optional[str] = None
+    enabled: Optional[bool] = None
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
+
+
 # ====== DISTANCES (okręgowe) ======
 
 class OkregDistanceItem(BaseModel):
@@ -973,6 +1009,14 @@ class ProElOp(BaseModel):
     if_base: Optional[str] = None
     #: Świadome wymuszenie (cofnięcie potwierdzenia, podmiana podpisu).
     force: Optional[bool] = False
+    #: Okoliczności czynności - WYŁĄCZNIE do dziennika meczu, nigdy do overlaya.
+    #
+    # Znacznik wysyłki („pełne dane poszły do ZPRP") jest jedynym polem, którego
+    # zmiana jest sama w sobie zdarzeniem, a nie poprawką w rubryce. Dziennik ma
+    # o nim powiedzieć nie tylko KTO i KIEDY, ale też CZYM: oficjalnym API czy
+    # formularzem drogi awaryjnej, i którym kontem, bo przy podniesionych
+    # uprawnieniach to nie musi być konto właściciela telefonu.
+    meta: Optional[Dict[str, Any]] = None
 
 
 class ProElPatchRequest(BaseModel):
