@@ -14,7 +14,7 @@ import bcrypt
 from app.okreg_rates_manifest import build_rates_manifest
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import select, insert, update, delete, and_, or_
+from sqlalchemy import select, insert, update, delete, and_, or_, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
@@ -610,7 +610,18 @@ async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
     stmt = (
         pg_insert(json_files)
         .values(key=key, content=req.content, enabled=req.enabled)
-        .on_conflict_do_update(index_elements=[json_files.c.key], set_={"content": req.content, "enabled": req.enabled})
+        # `updated_at` USTAWIAMY WPROST. Kolumna ma w `db.py` `onupdate=func.now()`,
+        # ale to hak SQLAlchemy odpalany wylacznie przy `Table.update()` - przy
+        # `INSERT ... ON CONFLICT DO UPDATE` nie ma prawa zadzialac i nie
+        # dzialal. Data stala wiec na chwili pierwszego wstawienia, a to po niej
+        # aplikacja poznaje, ze plik sie zmienil (`services/documentsSync.ts`
+        # porownuje odcisk `enabled|updated_at`). Skutek: ZADNA edycja admina
+        # nie docierala do telefonow w tle - ani przepisy, ani ryczalty, ani
+        # kontakty czy hale. Odswiezalo sie to dopiero przy logowaniu.
+        .on_conflict_do_update(
+            index_elements=[json_files.c.key],
+            set_={"content": req.content, "enabled": req.enabled, "updated_at": func.now()},
+        )
     )
     try:
         await database.execute(stmt)
