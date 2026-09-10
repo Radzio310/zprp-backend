@@ -27,6 +27,7 @@ from app.db import (
     proel_match_state,
     saved_matches,
 )
+from app.proel_admin_guard import proel_admin_guard
 from app.proel_auth import Actor, is_admin, proel_actor
 from app.proel_bulk_delete_rules import (
     APPROVED_MESSAGE,
@@ -40,7 +41,16 @@ from app.proel_journal import log_match_event
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/proel/archive", tags=["ProEl: archiwum"])
+# Bramka na CAŁYM routerze: tu nie ma trasy, która nie należy do admina -
+# archiwum to cudze skasowane protokoły, a `bulk_delete` kasuje hurtem. Numer
+# sędziego z nagłówka jest samą deklaracją, więc bramka żąda jego dowodu
+# (`app/proel_admin_guard.py`), a odmowę 403 dla nie-admina wystawia dalej
+# `_require_admin`. Nowa trasa dopisana niżej jest chroniona od pierwszego dnia.
+router = APIRouter(
+    prefix="/proel/archive",
+    tags=["ProEl: archiwum"],
+    dependencies=[Depends(proel_admin_guard)],
+)
 
 #: Ile trzymamy usunięty zapis. Ta sama wartość, którą wpisuje `delete`.
 RETENTION_DAYS = 365

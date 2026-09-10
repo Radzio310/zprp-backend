@@ -27,6 +27,7 @@ from fastapi import (
 )
 # Tożsamość aktora — ta sama zależność co przy zapisach ProEl, żeby wgląd w
 # dziennik protokołów miał dokładnie tych samych adminów co reszta systemu.
+from app.proel_admin_guard import proel_admin_guard
 from app.proel_auth import proel_actor
 from app.proel_journal import log_match_event, soft_actor
 from app.protocol_shootout import (
@@ -6304,6 +6305,13 @@ async def generate_protocol_pdf(
 
 
 # ─────────────────────── dziennik: wgląd dla admina ───────────────────────
+#
+# Każda trasa niżej ma `dependencies=[Depends(proel_admin_guard)]`: dziennik
+# protokołów i sprawdzanie plików to wgląd w CUDZE mecze, a numer sędziego
+# admina z nagłówka `X-Judge-Id` jest tylko deklaracją. Bramka żąda jego dowodu
+# (token BAZY w `X-Admin-Token`, sesja podniesiona albo token konta ProEl -
+# `app/proel_admin_guard.py`), a odmowę 403 dla nie-admina wystawia dalej
+# `_require_protocol_admin`.
 
 
 async def _require_protocol_admin(actor) -> None:
@@ -6340,6 +6348,7 @@ def _audit_public(row: Any) -> Dict[str, Any]:
 @router.get(
     "/judge/results/protocol/audit/{code}",
     summary="[admin] Wpis dziennika generowania protokołu (kto, kiedy, jaki stan)",
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def protocol_audit_entry(
     code: str = ApiPath(...),
@@ -6366,6 +6375,7 @@ async def protocol_audit_entry(
 @router.get(
     "/judge/results/protocol/audit",
     summary="[admin] Historia generowania protokołów (po meczu lub sędzim)",
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def protocol_audit_list(
     match: Optional[str] = Query(None, description="IdZawody albo numer meczu (dokładnie)"),
@@ -6416,6 +6426,7 @@ async def protocol_audit_list(
 @router.get(
     "/judge/results/protocol/audit/{code}/state",
     summary="[admin] Stan meczu, z którego powstał ten protokół (do odtworzenia)",
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def protocol_audit_state(
     code: str = ApiPath(...),
@@ -6455,6 +6466,7 @@ class ProtocolVerifyRequest(BaseModel):
 @router.post(
     "/judge/results/protocol/verify",
     summary="[admin] Sprawdź podpis protokołu (i czy plik jest tym z dziennika)",
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def protocol_verify(
     req: ProtocolVerifyRequest,
@@ -6546,6 +6558,7 @@ def _extract_pdf_marks(data: bytes) -> Dict[str, str]:
 @router.post(
     "/judge/results/protocol/verify-file",
     summary="[admin] Sprawdź plik PDF protokołu — znacznik, podpis i zgodność z dziennikiem",
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def protocol_verify_file(
     file: UploadFile = File(..., description="Plik PDF protokołu"),
@@ -6849,6 +6862,7 @@ def _compare_scan_to_state(
 @router.post(
     "/judge/results/protocol/scan",
     summary="[admin] Sprawdź protokół ze zdjęcia — papier albo ekran",
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def protocol_scan(
     file: UploadFile = File(..., description="Zdjęcie protokołu (JPEG/PNG)"),

@@ -287,6 +287,12 @@ async def match_official_role(
     # Lista adminów jest TA SAMA, z której korzysta reszta aplikacji
     # (`admin_settings.allowed_admins` przez `is_admin`), a numer, po którym
     # sprawdzamy, pochodzi z zalogowania do baza.zprp.pl - nie z nagłówka.
+    #
+    # Dlatego TA trasa nie potrzebuje bramki `app/proel_admin_guard.py`:
+    # bramka istnieje po to, żeby numer admina z `X-Judge-Id` czymś podeprzeć,
+    # a tutaj numer jest już wynikiem sprawdzenia hasła w baza.zprp.pl. To
+    # zresztą ta sama trasa, która taki dowód WYDAJE - token podniesienia
+    # niżej jest jednym z trzech, które bramka uznaje.
     from app.proel_auth import is_admin  # lazy — patrz nota w tamtym module
 
     admin = await is_admin(judge_id)

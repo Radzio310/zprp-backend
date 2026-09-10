@@ -22,6 +22,12 @@ from app.proel_auth import (
     proel_actor,
     roles_for,
 )
+from app.proel_admin_guard import (
+    AdminRights,
+    admin_rights,
+    proel_admin_guard,
+    proel_admin_rights,
+)
 from app.proel_exams import (
     absorb_blob_exams,
     ensure_state_row,
@@ -252,12 +258,21 @@ async def _approval_officials(
 
 
 async def _may_approve(
-    match_number: str, state: Optional[Dict[str, Any]], actor: Actor
+    match_number: str,
+    state: Optional[Dict[str, Any]],
+    actor: Actor,
+    rights: AdminRights,
 ) -> bool:
-    """Czy TEN aktor może zatwierdzić ten mecz albo cofnąć zatwierdzenie."""
-    if await is_admin(actor.judge_id):
+    """Czy TEN aktor może zatwierdzić ten mecz albo cofnąć zatwierdzenie.
+
+    Obsada NAJPIERW, administrator jako druga droga. Kolejność ma znaczenie:
+    delegat, który przy okazji jest administratorem, zatwierdza własny mecz
+    jako delegat - i nie musi tego dowodzić tokenem BAZY (`AdminRights`,
+    `app/proel_admin_guard.py`), bo prawa administratora wcale tu nie używa.
+    """
+    if can_approve(actor, await _approval_officials(match_number, state)):
         return True
-    return can_approve(actor, await _approval_officials(match_number, state))
+    return await rights.granted(actor)
 
 
 def _reproject_blob(state: Optional[Dict[str, Any]], blob: Any) -> Any:
@@ -436,7 +451,7 @@ async def _apply_reprojection_to_doc(
 
 
 async def _build_state_response(
-    match_number: str, actor: Actor
+    match_number: str, actor: Actor, rights: AdminRights
 ) -> ProElStateResponse:
     state = await _fetch_state(match_number)
     doc_status, doc_updated_at = await asyncio.gather(
@@ -463,7 +478,7 @@ async def _build_state_response(
         lease=_lease_view(state, actor.installation_id, actor.judge_id),
         fields=_overlay_of(state),
         your_roles=sorted(roles),
-        can_approve=await _may_approve(match_number, state, actor),
+        can_approve=await _may_approve(match_number, state, actor, rights),
         retry_after_ms=4000,
     )
 
@@ -482,6 +497,7 @@ async def get_proel_state(
         0.0, ge=0.0, description="Ile sekund czekać na zmianę (0 = odpowiedz od razu)"
     ),
     actor: Actor = Depends(proel_actor),
+    rights: AdminRights = Depends(proel_admin_rights),
 ):
     """Jedyny endpoint odpytywany na żywo. Czyta wyłącznie wąskie kolumny —
     nigdy `data_json`, który potrafi mieć setki kilobajtów.
@@ -504,7 +520,7 @@ async def get_proel_state(
                 break
             await asyncio.sleep(_WAIT_POLL_SECONDS)
 
-    return await _build_state_response(match, actor)
+    return await _build_state_response(match, actor, rights)
 
 
 @router.post(
@@ -515,6 +531,7 @@ async def get_proel_state(
 async def ensure_proel_state(
     req: ProElEnsureRequest,
     actor: Actor = Depends(proel_actor),
+    rights: AdminRights = Depends(proel_admin_rights),
 ):
     """Zakłada WYŁĄCZNIE wiersz stanu — nigdy wiersza w `proel_matches`.
 
@@ -566,7 +583,7 @@ async def ensure_proel_state(
                     .values(**values)
                 )
 
-    return await _build_state_response(match_number, actor)
+    return await _build_state_response(match_number, actor, rights)
 
 
 @router.post(
@@ -577,12 +594,17 @@ async def ensure_proel_state(
 async def patch_proel_state(
     req: ProElPatchRequest,
     actor: Actor = Depends(proel_actor),
+    rights: AdminRights = Depends(proel_admin_rights),
 ):
     """Zapis polowy. Sukces CZĘŚCIOWY jest normalnym wynikiem — czternaście
     przełączeń badań nie może polec dlatego, że jeden podpis był już złożony.
     """
     match_number = str(req.match_number or "").strip()
-    admin = await is_admin(actor.judge_id)
+    # Administrator pisze pole mimo braku roli i wygrywa scalanie. Pytamy o to
+    # DOPIERO wtedy, gdy rola z obsady nie wystarcza - sędzia, który ma rolę,
+    # nie potrzebuje uprawnień admina i nie ma czego dowodzić. Wynik jest
+    # zapamiętany na całe żądanie, więc pętla operacji nie czyta listy adminów
+    # po raz drugi (`app/proel_admin_guard.py`).
 
     async with database.transaction():
         state = await _fetch_state(match_number, for_update=True)
@@ -652,7 +674,11 @@ async def patch_proel_state(
                 )
                 continue
 
-            if not admin and spec.roles and not (roles & spec.roles):
+            if (
+                spec.roles
+                and not (roles & spec.roles)
+                and not await rights.granted(actor)
+            ):
                 rejected.append(
                     {
                         "op_id": op_id,
@@ -666,7 +692,9 @@ async def patch_proel_state(
 
             try:
                 merged_value = spec.merge(
-                    overlay.get(path), op.value, bool(op.force) or admin
+                    overlay.get(path),
+                    op.value,
+                    bool(op.force) or await rights.granted(actor),
                 )
             except PathRejected as exc:
                 rejected.append(
@@ -790,6 +818,7 @@ async def patch_proel_state(
 async def lease_proel_match(
     req: ProElLeaseRequest,
     actor: Actor = Depends(proel_actor),
+    rights: AdminRights = Depends(proel_admin_rights),
 ):
     """W trakcie meczu pisze dokładnie JEDNA osoba.
 
@@ -918,7 +947,11 @@ async def lease_proel_match(
                 # Delegat siedzi przy tym samym stole i ma jak powiedzieć
                 # słowo; przy padniętym sprzęcie zostaje wygaśnięcie leasingu
                 # (90 s) albo telefon do administratora.
-                allowed = await is_admin(actor.judge_id)
+                # Numer admina z nagłówka to deklaracja - `AdminRights`
+                # żąda jego dowodu. Bez dowodu przejęcia nie ma, ale żądanie
+                # idzie dalej: odmowę wystawia niżej „Mecz prowadzi już inna
+                # osoba", tak samo jak każdemu spoza tej roli.
+                allowed = await rights.granted(actor)
             if not allowed:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
@@ -1164,6 +1197,7 @@ async def _require_approver(
     x_actor_name: Optional[str],
     x_elevation: Optional[str],
     authorization: Optional[str],
+    rights: AdminRights,
 ) -> None:
     """Wpuszcza do zmiany statusu na „zatwierdzony" i z powrotem.
 
@@ -1186,7 +1220,7 @@ async def _require_approver(
         x_elevation=x_elevation,
         authorization=authorization,
     )
-    if await _may_approve(match_number, state, actor):
+    if await _may_approve(match_number, state, actor, rights):
         return
 
     raise HTTPException(
@@ -1262,6 +1296,7 @@ async def update_proel_match(
     x_elevation: Optional[str] = Header(None, alias="X-Elevation"),
     x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
     x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
     authorization: Optional[str] = Header(None),
 ):
     # Aktor MIĘKKO, jeden na całą trasę: podpisuje potwierdzenia badań
@@ -1383,6 +1418,12 @@ async def update_proel_match(
                     x_actor_name=x_actor_name,
                     x_elevation=x_elevation,
                     authorization=authorization,
+                    rights=admin_rights(
+                        request=request,
+                        admin_token=x_admin_token,
+                        authorization=authorization,
+                        app_version=x_app_version,
+                    ),
                 )
 
             # Ręczne potwierdzenia badań z kart zawodników - do overlaya PRZED
@@ -1528,7 +1569,11 @@ def _state_snapshot(row) -> Dict[str, Any]:
 @router.delete(
     "/{match_number:path}",
     response_model=dict,
-    summary="Usuń mecz ProEl (tylko administrator)"
+    summary="Usuń mecz ProEl (tylko administrator)",
+    # Trasa admina i nic ponadto, więc bramka odmawia tu TWARDO: numer sędziego
+    # z nagłówka jest deklaracją i sam nie ma prawa kasować cudzego protokołu
+    # (`app/proel_admin_guard.py`). 403 dla nie-admina zostaje jak dotąd, niżej.
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def delete_proel_match(
     match_number: str,
@@ -1779,6 +1824,9 @@ async def get_proel_match_head(
     "/live",
     response_model=dict,
     summary="Mecze prowadzone w tej chwili (podgląd administratora)",
+    # Podgląd CUDZEJ pracy w toku razem z nazwiskami - trasa admina, bramka
+    # twarda (`app/proel_admin_guard.py`).
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def list_live_proel_matches(
     limit: int = Query(60, ge=1, le=200),

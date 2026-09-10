@@ -42,9 +42,11 @@ from app.db import (
     province_modules,
     province_settlement_matches,
     province_settlement_runs,
+    zprp_match_venues,
 )
 from app.deps import get_settings
 from app.settlement_distances import DistanceIndex, resolve_distances
+from app.settlement_venues import fetch_venue, looks_like_city, pretty_city
 from app.settlement_province import canonical, spellings
 from app.settlement_runs import run_is_active
 from app.zprp_accounts import configured_provinces, credentials_for
@@ -369,7 +371,10 @@ async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dic
                     return
                 entry = judges.setdefault(key, {"judge_id": key, "full_name": "", "city": ""})
                 entry["full_name"] = _s(item.get("name")) or entry["full_name"]
-                entry["city"] = _s(item.get("city")) or entry["city"]
+                # Lista sedziow podaje miasto razem z kodem pocztowym, czasem
+                # z ulica po przecinku. Na Liscie kosztow przejazdow ma stac
+                # sama miejscowosc, i po niej szuka sie w tabeli odleglosci.
+                entry["city"] = pretty_city(item.get("city")) or entry["city"]
 
         absorb(parsed)
 
@@ -392,6 +397,98 @@ async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dic
         logger.warning("[settlement] lista sedziow okregu %s: %s", province, exc)
 
     return {k: v for k, v in judges.items() if v.get("full_name")}
+
+
+# ---------------------------------------------------------------------------
+# Hale meczow (miasto z publicznego API)
+# ---------------------------------------------------------------------------
+
+#: Ile zapytan o hale naraz. Publiczne API rozgrywek to jedna maszyna zwiazku.
+VENUE_CONCURRENCY = 6
+
+#: Po tylu dniach pytamy o hale drugi raz - ale TYLKO przy meczach, ktore
+#: dopiero maja sie odbyc. Hali rozegranego meczu nikt juz nie zmieni.
+VENUE_TTL_DAYS = 14
+
+
+async def _resolve_venues(
+    client: AsyncClient, wanted: dict[str, Optional[datetime]]
+) -> dict[str, dict]:
+    """
+    Miasto i nazwa hali kazdego meczu - z publicznego API, z pamiecia w bazie.
+
+    ⚠ To jest miejsce, w ktorym rozstrzyga sie CALA lista kosztow przejazdow.
+    Terminarz podaje hale jednym napisem i scraper zgaduje, gdzie konczy sie
+    nazwa obiektu, a zaczyna miasto; przy dwuczlonowej nazwie „miastem" zostawala
+    hala i trasa wygladala jak „Bystra-Hala Sportowa-Bystra", a odleglosc szla do
+    Google z nazwa obiektu. API podaje `Hala_miasto` wprost.
+
+    Pierwszy przebieg okregu pyta o kazdy mecz swojej obsady raz, nastepne czytaja
+    `zprp_match_venues` i pytaja tylko o mecze nowe oraz jeszcze nierozegrane.
+    """
+    if not wanted:
+        return {}
+
+    now = _now()
+    cached: dict[str, dict] = {}
+    ids = sorted(wanted.keys())
+    # Porcjami - `IN` z kilkoma tysiacami wartosci potrafi przekroczyc limit
+    # parametrow zapytania.
+    for start in range(0, len(ids), 500):
+        rows = await database.fetch_all(
+            select(zprp_match_venues).where(
+                zprp_match_venues.c.match_id.in_(ids[start : start + 500])
+            )
+        )
+        for row in rows:
+            cached[_s(row["match_id"])] = dict(row)
+
+    stale: list[str] = []
+    for match_id, match_at in wanted.items():
+        hit = cached.get(match_id)
+        if not hit or not _s(hit.get("city")):
+            stale.append(match_id)
+            continue
+        fetched_at = hit.get("fetched_at")
+        upcoming = match_at is None or match_at >= now - timedelta(days=1)
+        if upcoming and (fetched_at is None or (now - fetched_at) > timedelta(days=VENUE_TTL_DAYS)):
+            stale.append(match_id)
+
+    if stale:
+        semaphore = asyncio.Semaphore(VENUE_CONCURRENCY)
+
+        async def one(match_id: str) -> None:
+            # Zapytanie I zapis pod tym samym semaforem: bez tego kilkaset zadan
+            # naraz siadaloby na pule polaczen do bazy.
+            async with semaphore:
+                venue = await fetch_venue(client, match_id)
+                if not venue:
+                    return
+                cached[match_id] = {**venue, "match_id": match_id, "fetched_at": now}
+                statement = pg_insert(zprp_match_venues).values(
+                    match_id=match_id,
+                    city=venue["city"],
+                    hall=venue["hall"],
+                    street=venue["street"],
+                    number=venue["number"],
+                    fetched_at=now,
+                )
+                await database.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[zprp_match_venues.c.match_id],
+                        set_={
+                            "city": venue["city"],
+                            "hall": venue["hall"],
+                            "street": venue["street"],
+                            "number": venue["number"],
+                            "fetched_at": now,
+                        },
+                    )
+                )
+
+        await asyncio.gather(*(one(match_id) for match_id in stale))
+
+    return cached
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +640,28 @@ async def refresh_province(
                 outside = await _collect_outside(client, cookies, judges, district_ids)
 
             rows = district + outside
+
+            # --- miasta hal ---
+            # Publiczne API meczu zamiast zgadywania z terminarza. Pytamy tylko
+            # o mecze WLASNEJ obsady, wiec to kilkaset zapytan, nie kilka tysiecy.
+            wanted_ids: dict[str, Optional[datetime]] = {}
+            for row in rows:
+                match_id = _s(str(row["match_key"]).split(":", 1)[-1])
+                if match_id and match_id not in wanted_ids:
+                    wanted_ids[match_id] = row.get("match_at")
+            venues = await _resolve_venues(public, wanted_ids)
+            for row in rows:
+                match_id = _s(str(row["match_key"]).split(":", 1)[-1])
+                venue = venues.get(match_id) or {}
+                scraped = _s(row.get("city"))
+                # API jest zrodlem prawdy; napis z terminarza wchodzi tylko
+                # wtedy, gdy w ogole wyglada na miejscowosc. Inaczej mecz zostaje
+                # bez dojazdu - to widac i da sie poprawic, w przeciwienstwie do
+                # kilometrow policzonych do nazwy hali.
+                row["city"] = _s(venue.get("city")) or (
+                    pretty_city(scraped) if looks_like_city(scraped) else ""
+                )
+                row["hall"] = _s(venue.get("hall")) or _s(row.get("hall"))
 
             # --- odleglosci ---
             distance_row = await database.fetch_one(

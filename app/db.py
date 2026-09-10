@@ -790,6 +790,24 @@ province_settlement_documents = Table(
 )
 
 
+# 18.1g) Hala meczu z publicznego API rozgrywek
+#
+# Terminarz podaje halę jednym napisem i scraper zgaduje, gdzie kończy się jej
+# nazwa, a zaczyna miasto. API (`pokaz_mecze_szczegoly.php`) podaje `Hala_miasto`
+# wprost - a to od miasta zależy dopasowanie do tabeli odległości. Pamiętamy
+# odpowiedzi, żeby każde odświeżenie okręgu nie kosztowało tysięcy zapytań.
+zprp_match_venues = Table(
+    "zprp_match_venues",
+    metadata,
+    Column("match_id", String, primary_key=True),   # IdZawody
+    Column("city", String, nullable=True),
+    Column("hall", String, nullable=True),
+    Column("street", String, nullable=True),
+    Column("number", String, nullable=True),
+    Column("fetched_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+
 # 18.2) Tabele odległości okręgowych per województwo
 okreg_distances = Table(
     "okreg_distances",

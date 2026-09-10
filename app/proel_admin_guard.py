@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -240,3 +242,157 @@ async def proel_admin_guard(
             log.warning("[proel_admin_guard] awaria bramki - przepuszczam", exc_info=True)
             return None
     return await check_proel_admin(actor, **kwargs)
+
+
+# ─────────────── uprawnienie admina W MECZU (miękka odmiana) ───────────────
+#
+# Nie każde `is_admin(actor.judge_id)` jest bramką trasy. W `app/proel.py`
+# administrator bywa DODATKIEM do tego, co aktor i tak może w tym meczu:
+#
+#   * `_may_approve`     - zatwierdzenie należy do delegata (a gdy go nie ma,
+#     do sędziów prowadzących); admin jest tu drugą drogą,
+#   * `POST /proel/patch`- admin pisze pole mimo braku roli i wygrywa scalanie,
+#   * `POST /proel/lease` z `force` - przejęcie prowadzenia komuś innemu.
+#
+# Twarda odmowa byłaby w tych miejscach GORSZA od dziury, którą zamykamy:
+# delegat, który przy okazji jest administratorem, przestałby zatwierdzać
+# własny mecz, a sędzia z obsady - zapisywać pola, do których ma rolę. Odmowa
+# przyszłaby przy tym w hali, w trakcie meczu, za coś, o co nikt nie prosił.
+#
+# Dlatego niedowiedziony numer admina nie odbija żądania - traci sam DODATEK:
+# aktor zostaje ze swoimi rolami z obsady i idzie dalej tą samą drogą, co
+# każdy sędzia. Gdy ról nie ma, odmowę wystawia jak dotąd sama trasa, swoim
+# komunikatem („Nie masz roli uprawniającej do tej zmiany", „Mecz prowadzi już
+# inna osoba"), więc nikt nie dostaje komunikatu o administratorze w miejscu,
+# w którym administratorem być nie musi.
+#
+# Okres przejściowy działa tu tak samo: dopóki `PROEL_ADMIN_STRICT` nie jest
+# ustawione, uprawnienie ZOSTAJE (zmienia się tylko wpis w logu), po zamknięciu
+# furtki - znika.
+
+#: Jak często ten sam niedowiedziony admin trafia do logu (sekundy).
+#:
+#: `GET /proel/state` odpytuje prowadzące urządzenie co kilka sekund, a
+#: `_may_approve` siedzi w jego odpowiedzi. Wpis przy każdym odpytaniu
+#: zasypałby log Railway dokładnie tym jednym zdaniem i schował pod nim resztę
+#: - a do zamknięcia furtki wystarczy wiedzieć, ŻE taki admin przychodzi.
+SOFT_LOG_EVERY_SECONDS = 600
+
+#: (numer, ścieżka, powód) -> kiedy ostatnio poszło do logu.
+_soft_log_seen: dict[tuple[str, str, str], float] = {}
+
+
+def _soft_log_due(key: tuple[str, str, str], now: Optional[float] = None) -> bool:
+    """Czy ten sam wpis wolno powtórzyć. Pamięć jest procesu, nie bazy."""
+    stamp = time.monotonic() if now is None else now
+    last = _soft_log_seen.get(key)
+    if last is not None and stamp - last < SOFT_LOG_EVERY_SECONDS:
+        return False
+    if len(_soft_log_seen) > 500:
+        # Restart Railway czyści to i tak; chodzi tylko o to, żeby słownik nie
+        # rósł w nieskończoność przy tysiącu różnych numerów.
+        _soft_log_seen.clear()
+    _soft_log_seen[key] = stamp
+    return True
+
+
+@dataclass
+class AdminRights:
+    """Pytanie „czy TEN aktor ma tu uprawnienia administratora" z dowodem.
+
+    Liczone LENIWIE i zapamiętywane na czas żądania: `POST /proel/patch`
+    przechodzi kilkanaście operacji w pętli i żadna z nich nie ma powodu
+    czytać listy adminów po raz drugi. Aktor, który adminem nie jest, kosztuje
+    jeden odczyt listy i ani jednego wpisu w logu.
+    """
+
+    admin_token: Optional[str] = None
+    account_header: bool = False
+    method: str = ""
+    path: str = ""
+    client: str = ""
+    user_agent: str = ""
+    app_version: str = ""
+    _decided: dict[str, bool] = field(default_factory=dict, repr=False)
+
+    async def granted(self, actor: Actor) -> bool:
+        key = _clean(actor.judge_id)
+        if key not in self._decided:
+            self._decided[key] = await self._decide(actor)
+        return self._decided[key]
+
+    async def _decide(self, actor: Actor) -> bool:
+        try:
+            if not await claims_admin(actor.judge_id):
+                return False
+        except Exception:  # noqa: BLE001
+            # Bez listy nie wiemy, czy to admin. Uprawnienia DODATKOWEGO nie
+            # przyznajemy w ciemno - aktor zostaje ze swoimi rolami z obsady.
+            log.warning("[proel_admin_guard] odczyt listy adminow nieudany", exc_info=True)
+            return False
+
+        proof, reason = identity_proof(
+            actor, admin_token=self.admin_token, account_header=self.account_header
+        )
+        if proof is not None:
+            return True
+
+        strict = strict_mode()
+        if _soft_log_due((_clean(actor.judge_id), self.path, reason)):
+            log.warning(
+                "[proel_admin_guard] uprawnienie admina w meczu niedowiedzione: "
+                "%s %s powod=%s judge_id=%s urzadzenie=%s tryb=%s skutek=%s "
+                "klient=%s wersja=%s ua=%s",
+                (self.method or "").upper(),
+                self.path or "-",
+                reason,
+                actor.judge_id or "-",
+                "potwierdzone" if actor.verified else "niepotwierdzone",
+                "twardy" if strict else "przejsciowy",
+                "role_z_obsady" if strict else "uprawnienie_zostaje",
+                self.client or "-",
+                self.app_version or "-",
+                (self.user_agent or "-")[:120],
+            )
+        # Okres przejściowy: uprawnienie zostaje, zmienia się tylko log.
+        return not strict
+
+
+def admin_rights(
+    *,
+    request: Optional[Request] = None,
+    admin_token: Optional[str] = None,
+    authorization: Optional[str] = None,
+    app_version: Optional[str] = None,
+) -> AdminRights:
+    """`AdminRights` z tego, co przyszło - także tam, gdzie nagłówki bierze
+    sama trasa (`PUT /proel/{numer}` czyta je po nazwach)."""
+    return AdminRights(
+        admin_token=admin_token,
+        account_header=bool(_clean(authorization)),
+        method=(request.method if request is not None else ""),
+        path=(request.url.path if request is not None else ""),
+        client=(request.client.host if request is not None and request.client else ""),
+        user_agent=(request.headers.get("user-agent", "") if request is not None else ""),
+        app_version=app_version or "",
+    )
+
+
+async def proel_admin_rights(
+    request: Request,
+    x_admin_token: Optional[str] = Header(None, alias=ADMIN_TOKEN_HEADER),
+    authorization: Optional[str] = Header(None),
+    x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
+) -> AdminRights:
+    """Zależność dla tras, w których admin tylko ROZSZERZA swoje uprawnienia.
+
+    Sama niczego nie odrzuca i nie czyta bazy - decyzja zapada dopiero przy
+    `await rights.granted(actor)`, czyli w miejscu, w którym uprawnienie
+    administratora naprawdę byłoby użyte.
+    """
+    return admin_rights(
+        request=request,
+        admin_token=x_admin_token,
+        authorization=authorization,
+        app_version=x_app_version,
+    )

@@ -147,7 +147,7 @@ def _mark_shared_travel(matches: list[SettledMatch]) -> None:
             continue
         if item.match_at is None:
             continue
-        place = _city_key(item.city or item.hall)
+        place = _city_key(item.city)
         if not place:
             continue
         groups.setdefault((item.judge_id, place), []).append(item)
@@ -222,7 +222,10 @@ def settle_match(
         level=level,
         role=assignment.role,
         origin=assignment.origin,
-        city=assignment.city or assignment.hall,
+        # TYLKO miasto. Nazwa hali w tym polu psula i trase na wydruku
+        # („Bystra-Hala Sportowa-Bystra"), i dopasowanie do tabeli odleglosci -
+        # patrz `settlement_venues`. Mecz bez miasta ma zostac bez dojazdu.
+        city=assignment.city,
         home_city=assignment.home_city,
         teams=assignment.teams,
         distance_km=distance,

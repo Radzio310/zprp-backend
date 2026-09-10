@@ -413,8 +413,41 @@ def test_guard_wymaga_TWARDEJ_tozsamosci():
     assert "soft_actor" not in code
 
 
-def test_guard_przepuszcza_admina():
-    assert "is_admin" in _function_source("_may_approve")
+def test_guard_przepuszcza_admina_z_dowodem_numeru():
+    """Admin jest drugą drogą, ale numer z nagłówka musi być czymś podparty.
+
+    `is_admin(actor.judge_id)` samo w sobie było dziurą: `proel_actor` oddaje
+    aktora także wtedy, gdy pary nagłówków nie ma w rejestrze urządzeń, więc
+    półjawny numer administratora wystarczał do cofnięcia cudzego
+    zatwierdzenia. Dowodu żąda `AdminRights` (`app/proel_admin_guard.py`).
+    """
+    code = _function_source("_may_approve")
+    assert "rights.granted" in code
+    assert "is_admin" not in code
+
+
+def test_obsada_rozstrzyga_PRZED_adminem():
+    """Delegat, który przy okazji jest adminem, zatwierdza jako delegat.
+
+    Inaczej po zamknięciu furtki (`PROEL_ADMIN_STRICT=1`) przestałby
+    zatwierdzać własny mecz z hali - za uprawnienie, którego wcale nie używa.
+    """
+    code = _function_source("_may_approve")
+    assert code.index("can_approve") < code.index("rights.granted")
+
+
+def test_prawo_do_zatwierdzenia_dostaje_bramke_miekka_nie_twarda():
+    """Trasa zapisu nie ma prawa odbić meczu za sam numer admina w nagłówku.
+
+    `_may_approve` woła `granted`, które nigdy nie rzuca: niedowiedziony admin
+    traci sam dodatek i zostaje ze swoimi rolami z obsady, a odmowę - jeśli
+    ról nie ma - wystawia jak dotąd `_require_approver` swoim komunikatem.
+    """
+    code = _function_source("_require_approver")
+    assert "rights" in code
+    # Odmowa zostaje TA SAMA co dotąd - o delegacie i sędziach prowadzących,
+    # nie o administratorze i tokenie.
+    assert "NOT_AN_APPROVER" in code
 
 
 def test_przycisk_i_zapis_pytaja_TEGO_SAMEGO():

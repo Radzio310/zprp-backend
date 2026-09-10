@@ -326,3 +326,200 @@ def test_podpisany_adres_materialu_zostaje_poza_bramka():
     # na zwykłym routerze, inaczej materiał przestałby się pobierać.
     signed = [r for r in _routes("training_spk.py") if r[1] == "get" and r[2] == "/slides.pdf"]
     assert ("router", "get", "/slides.pdf", "") in signed
+
+
+# ── uprawnienie admina W MECZU (miękka odmiana) ──────────────────────────
+#
+# Zatwierdzenie meczu, `POST /proel/patch` i przejęcie prowadzenia to nie są
+# trasy admina: administrator tylko ROZSZERZA tam to, co aktor i tak może.
+# Niedowiedziony numer ma stracić sam dodatek, nigdy całe żądanie.
+
+
+@pytest.fixture(autouse=True)
+def czysta_pamiec_logu():
+    """Log miękkiej bramki jest dławiony w pamięci procesu - test zaczyna od zera."""
+    guard._soft_log_seen.clear()
+    yield
+    guard._soft_log_seen.clear()
+
+
+def rights(*, admin_token=None, account_header=False, path="/proel/patch"):
+    return guard.AdminRights(
+        admin_token=admin_token,
+        account_header=account_header,
+        method="POST",
+        path=path,
+    )
+
+
+async def test_zwykly_sedzia_nie_dostaje_dodatku_i_nie_trafia_do_logu(caplog):
+    with caplog.at_level("WARNING"):
+        assert await rights().granted(actor("8")) is False
+    assert not caplog.records
+
+
+async def test_dowiedziony_admin_ma_uprawnienie_w_obu_trybach(monkeypatch):
+    for strict_value in ("", "1"):
+        monkeypatch.setenv(guard.STRICT_ENV, strict_value)
+        assert await rights(admin_token=baza_jwt()).granted(actor()) is True
+        assert await rights().granted(actor(elevated=True, verified=True)) is True
+        assert await rights(account_header=True).granted(actor(verified=True)) is True
+
+
+async def test_w_okresie_przejsciowym_uprawnienie_zostaje_ale_zostawia_slad(caplog):
+    with caplog.at_level("WARNING"):
+        assert await rights().granted(actor()) is True
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "[proel_admin_guard] uprawnienie admina w meczu niedowiedzione" in text
+    assert "powod=brak_tokenu" in text
+    assert "judge_id=999" in text
+    assert "skutek=uprawnienie_zostaje" in text
+
+
+async def test_po_zamknieciu_furtki_dodatek_znika_ZAMIAST_odmowy(strict, caplog):
+    # Sedno miękkiej odmiany: żadnego wyjątku. Delegat, który przy okazji jest
+    # adminem, ma dalej zatwierdzać swój mecz jako delegat, a sędzia z obsady
+    # zapisywać pola, do których ma rolę - odmowę (jeśli w ogóle) wystawia
+    # trasa, swoim dotychczasowym komunikatem.
+    with caplog.at_level("WARNING"):
+        assert await rights().granted(actor()) is False
+    assert "skutek=role_z_obsady" in " ".join(r.getMessage() for r in caplog.records)
+
+
+async def test_awaria_listy_adminow_nie_wywraca_zadania(monkeypatch, strict):
+    async def broken(judge_id):
+        raise RuntimeError("baza lezy")
+
+    monkeypatch.setattr(guard, "claims_admin", broken)
+    assert await rights().granted(actor()) is False
+
+
+async def test_lista_adminow_czytana_RAZ_na_zadanie(monkeypatch):
+    # `POST /proel/patch` przechodzi kilkanaście operacji w pętli i każda pyta
+    # o uprawnienie - listy adminów nie ma powodu czytać po raz drugi.
+    calls = []
+
+    async def counting(judge_id):
+        calls.append(judge_id)
+        return str(judge_id) == ADMIN
+
+    monkeypatch.setattr(guard, "claims_admin", counting)
+    r = rights(admin_token=baza_jwt())
+    for _ in range(5):
+        assert await r.granted(actor()) is True
+    assert len(calls) == 1
+
+
+async def test_ten_sam_niedowiedziony_admin_nie_zasypuje_logu(caplog):
+    # `GET /proel/state` odpytuje co kilka sekund - wpis przy każdym odpytaniu
+    # schowałby pod sobą resztę logu Railway.
+    r = rights(path="/proel/state")
+    with caplog.at_level("WARNING"):
+        for _ in range(4):
+            assert await r.granted(actor()) is True
+    assert len([x for x in caplog.records if "niedowiedzione" in x.getMessage()]) == 1
+
+
+async def test_po_odczekaniu_wpis_wraca():
+    key = ("999", "/proel/state", guard.REASON_NO_TOKEN)
+    assert guard._soft_log_due(key, now=0.0) is True
+    assert guard._soft_log_due(key, now=guard.SOFT_LOG_EVERY_SECONDS - 1) is False
+    assert guard._soft_log_due(key, now=guard.SOFT_LOG_EVERY_SECONDS + 1) is True
+
+
+def test_zaleznosc_miekka_niczego_nie_czyta_przed_uzyciem():
+    # `proel_admin_rights` nie dotyka bazy: gdyby czytała listę adminów przy
+    # każdym żądaniu, `GET /proel/state` płaciłby za to co kilka sekund.
+    import inspect
+
+    code = inspect.getsource(guard.proel_admin_rights)
+    assert "claims_admin" not in code
+    assert "Depends(proel_actor)" not in code
+
+
+# ── okablowanie tras, które zostały bez bramki ───────────────────────────
+
+HARD = "[Depends(proel_admin_guard)]"
+SOFT = "Depends(proel_admin_rights)"
+
+
+def _route(filename: str, method: str, path: str):
+    found = [r for r in _routes(filename) if r[1] == method and r[2] == path]
+    assert len(found) == 1, (filename, method, path, found)
+    return found[0]
+
+
+@pytest.mark.parametrize(
+    "filename, method, path",
+    [
+        # cudzy protokół kasowany hurtem i pojedynczo
+        ("proel.py", "delete", "/{match_number:path}"),
+        # podgląd cudzej pracy w toku razem z nazwiskami prowadzących
+        ("proel.py", "get", "/live"),
+        # dziennik: kto co zmienił w cudzym meczu
+        ("proel_journal.py", "get", "/matches"),
+        ("proel_journal.py", "get", ""),
+        # dziennik protokołów PDF i sprawdzanie plików
+        ("results.py", "get", "/judge/results/protocol/audit"),
+        ("results.py", "get", "/judge/results/protocol/audit/{code}"),
+        ("results.py", "get", "/judge/results/protocol/audit/{code}/state"),
+        ("results.py", "post", "/judge/results/protocol/verify"),
+        ("results.py", "post", "/judge/results/protocol/verify-file"),
+        ("results.py", "post", "/judge/results/protocol/scan"),
+    ],
+)
+def test_trasy_admina_maja_bramke_twarda(filename, method, path):
+    assert _route(filename, method, path)[3] == HARD
+
+
+def test_cale_archiwum_jest_trase_admina():
+    # Bramka na routerze, nie na trasach: nowa trasa w archiwum ma być
+    # chroniona bez pamiętania o tym.
+    assert "proel_admin_guard" in _router_dependencies("proel_archive.py", "router")
+
+
+def test_zgloszenie_zdarzenia_z_aplikacji_zostaje_poza_bramka():
+    # `POST /proel/journal/event` wysyła KAŻDA aplikacja po nieudanej wysyłce
+    # do ZPRP - bramka zamieniłaby dziennik awarii w dziennik samych adminów.
+    assert _route("proel_journal.py", "post", "/event")[3] == ""
+
+
+def _route_function(filename: str, method: str, path: str) -> ast.AST:
+    """Funkcja trasy - po dekoratorze `@router.<metoda>("<sciezka>")`."""
+    for node in ast.walk(_tree(filename)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if (
+                isinstance(dec, ast.Call)
+                and isinstance(dec.func, ast.Attribute)
+                and dec.func.attr == method
+                and dec.args
+                and isinstance(dec.args[0], ast.Constant)
+                and dec.args[0].value == path
+            ):
+                return node
+    raise AssertionError((filename, method, path))
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [("get", "/state"), ("post", "/ensure"), ("post", "/patch"), ("post", "/lease")],
+)
+def test_trasy_meczowe_dostaly_bramke_MIEKKA(method, path):
+    # Tu admin tylko rozszerza uprawnienia, więc twarda bramka odbijałaby w
+    # hali sędziego z obsady, który przy okazji jest administratorem: żadna z
+    # tych tras nie ma `proel_admin_guard`, każda dostaje `AdminRights`.
+    assert _route("proel.py", method, path)[3] == ""
+    fn = _route_function("proel.py", method, path)
+    defaults = ast.unparse(fn.args)
+    assert SOFT in defaults, defaults
+
+
+def test_zapis_meczu_przekazuje_dowod_do_reguly_zatwierdzania():
+    # `PUT /proel/{numer}` buduje aktora sam z nagłówków, więc token BAZY musi
+    # dojechać do `_may_approve` osobno - inaczej admin traciłby prawo do
+    # zatwierdzenia dokładnie tam, gdzie go używa.
+    source = (APP_DIR / "proel.py").read_text(encoding="utf-8")
+    assert 'x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")' in source
+    assert "rights=admin_rights(" in source

@@ -41,6 +41,7 @@ from app.proel_auth import (
     is_synthetic_judge_id,
     proel_actor,
 )
+from app.proel_admin_guard import proel_admin_guard
 from app.proel_fields import UnknownPath, parse_path
 
 logger = logging.getLogger(__name__)
@@ -749,9 +750,15 @@ def _row_out(row: Any) -> Dict[str, Any]:
     }
 
 
+# Dwa odczyty niżej to trasy ADMINA - dziennik pokazuje, kto co zmienił w
+# cudzym meczu, razem z nazwiskami. Numer admina z nagłówka jest deklaracją,
+# więc bramka żąda jego dowodu (`app/proel_admin_guard.py`); odmowę 403 dla
+# nie-admina wystawia dalej `_require_admin`. `POST /proel/journal/event`
+# zostaje BEZ bramki: zgłasza je każda aplikacja po nieudanej wysyłce.
 @router.get(
     "/matches",
     summary="Mecze widziane od strony dziennika - jeden wiersz na mecz",
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def journal_matches(
     q: Optional[str] = Query(None, description="Fragment numeru meczu"),
@@ -895,6 +902,7 @@ async def journal_event_from_app(
 @router.get(
     "",
     summary="Zdarzenia dziennika - stronicowanie kursorem po id",
+    dependencies=[Depends(proel_admin_guard)],
 )
 async def journal_events(
     match: Optional[str] = Query(None, description="Numer meczu"),
