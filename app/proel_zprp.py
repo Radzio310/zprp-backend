@@ -111,6 +111,30 @@ def _require_app_key() -> str:
     return key
 
 
+#: Zdanie dla sędziego, gdy ZPRP wyłączył ProEla przy meczu.
+PROEL_INACTIVE_MESSAGE = (
+    "Baza ZPRP ma wyłączony dostęp ProEl dla tego meczu - oficjalna droga "
+    "nic nie zapisze, dopóki ktoś go nie włączy."
+)
+
+
+def _raise_if_inactive(data: Dict[str, Any]) -> None:
+    """403 `PROEL_INACTIVE` = przełącznik ProEl przy meczu jest wyłączony.
+
+    Odpowiedź upstreamu (10.09.2026): `{"status": "error", "code":
+    "PROEL_INACTIVE", "message": "Dostep ProEl dla tego meczu jest
+    wylaczony."}`. To stan MECZU po stronie ZPRP, nie nasz klucz - a wszystkie
+    trasy mówiły o nim „Serwer ZPRP odrzucił aplikację. Zgłoś to
+    administratorowi", co wysyłało sędziego po pomoc w złe miejsce. 403
+    zostaje 403: to nie awaria, którą naprawi ponowienie w pętli.
+    """
+    if str(data.get("code") or "").upper() == "PROEL_INACTIVE":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "PROEL_INACTIVE", "message": PROEL_INACTIVE_MESSAGE},
+        )
+
+
 class ZprpAuthRequest(BaseModel):
     """Wariant A: samo `token`. Wariant B: `id_zawody` + `nr_sedzia`."""
 
@@ -196,6 +220,7 @@ async def authorize(payload: ZprpAuthRequest, client_ip: str) -> Dict[str, Any]:
             },
         )
     if status == 403:
+        _raise_if_inactive(data)
         # INVALID_APP_IDENTIFIER = zły app_key albo ProEl wyłączony po ich
         # stronie. To NASZ problem konfiguracyjny, nie użytkownika — stąd 502
         # i alarmowy log (sygnał do rotacji klucza).
@@ -362,6 +387,7 @@ async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
                     ),
                 },
             )
+        _raise_if_inactive(data)
         logger.error("ProEl ZPRP summary odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
         raise HTTPException(
             status_code=502,
@@ -522,6 +548,7 @@ async def submit_player_stats(payload: ZprpPlayerStatsRequest) -> Dict[str, Any]
                     ),
                 },
             )
+        _raise_if_inactive(data)
         logger.error("ProEl ZPRP player_stats odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
         raise HTTPException(
             status_code=502,
@@ -670,6 +697,7 @@ async def submit_officials_stats(payload: ZprpOfficialsStatsRequest) -> Dict[str
                     ),
                 },
             )
+        _raise_if_inactive(data)
         logger.error("ProEl ZPRP officials_stats odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
         raise HTTPException(
             status_code=502,
@@ -761,6 +789,7 @@ async def submit_match_comment(payload: ZprpMatchCommentRequest) -> Dict[str, An
                     ),
                 },
             )
+        _raise_if_inactive(data)
         logger.error("ProEl ZPRP match_comment odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
         raise HTTPException(
             status_code=502,
@@ -931,6 +960,7 @@ async def upload_attachment(
                     ),
                 },
             )
+        _raise_if_inactive(data)
         logger.error("ProEl ZPRP upload odrzucony (403 %s) - sprawdź PROEL_APP_KEY", code)
         raise HTTPException(
             status_code=502,

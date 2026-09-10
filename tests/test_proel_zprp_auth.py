@@ -147,6 +147,29 @@ async def test_upstream_403_is_our_config_problem_not_users(monkeypatch):
     assert e.value.detail["code"] == "PROEL_CONFIG"
 
 
+async def test_upstream_403_proel_inactive_is_match_state_not_config(monkeypatch):
+    """10.09.2026: ZPRP wyłączył ProEla przy meczu TEST/2 i odpowiadał 403
+    PROEL_INACTIVE, a sędzia czytał „Serwer ZPRP odrzucił aplikację. Zgłoś to
+    administratorowi". To stan meczu - własny kod, własne zdanie, zostaje 403."""
+    monkeypatch.setattr(
+        z,
+        "_post_upstream",
+        _upstream(
+            403,
+            {
+                "status": "error",
+                "code": "PROEL_INACTIVE",
+                "message": "Dostep ProEl dla tego meczu jest wylaczony.",
+            },
+        ),
+    )
+    with pytest.raises(HTTPException) as e:
+        await authorize(ZprpAuthRequest(token="X8R2K"), "ip")
+    assert e.value.status_code == 403
+    assert e.value.detail["code"] == "PROEL_INACTIVE"
+    assert "wyłączony dostęp ProEl" in e.value.detail["message"]
+
+
 async def test_upstream_timeout_maps_to_504(monkeypatch):
     async def boom(endpoint, payload):
         raise httpx.ReadTimeout("slow")

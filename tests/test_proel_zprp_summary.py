@@ -233,6 +233,18 @@ async def test_zly_app_key_to_nasza_awaria_nie_stan_meczu(monkeypatch):
     assert exc.value.detail["code"] == "PROEL_CONFIG"
 
 
+async def test_proel_wylaczony_przy_meczu_to_stan_meczu(monkeypatch):
+    monkeypatch.setattr(
+        z, "_post_upstream", _upstream(403, {"status": "error", "code": "PROEL_INACTIVE"})
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await submit_summary(_req())
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "PROEL_INACTIVE"
+
+
 async def test_zla_struktura_to_400(monkeypatch):
     monkeypatch.setattr(z, "_post_upstream", _upstream(400, {"status": "error"}))
 
