@@ -763,6 +763,27 @@ province_settlement_runs = Table(
     Column("matches", Integer, nullable=True),
     Column("outside_matches", Integer, nullable=True),
     Column("error", String, nullable=True),
+    # Znak zycia przebiegu - pobranie sezonow wstecz trwa dluzej niz regula
+    # „trup po 25 min" liczona od startu. Patrz `settlement_runs.run_is_active`.
+    Column("heartbeat_at", DateTime(timezone=True), nullable=True),
+    # Jakie sezony objal przebieg, np. „2026/2027" albo „2026/2027,2025/2026".
+    Column("seasons", String, nullable=True),
+)
+
+
+# 18.1e2) Sezony pobrane w CALOSCI co najmniej raz
+#
+# Pierwsze odswiezenie okregu wczytuje wszystkie sezony, kolejne tylko biezacy,
+# a reczne nadrabia te, ktorych tu nie ma. Wiersz powstaje dopiero wtedy, gdy
+# przebieg przeszedl liste meczow KAZDEGO sedziego dla tego sezonu bez bledu.
+province_settlement_seasons = Table(
+    "province_settlement_seasons",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("season", String, primary_key=True),
+    Column("completed_at", DateTime(timezone=True), nullable=False),
+    Column("run_id", Integer, nullable=True),
+    Column("matches", Integer, nullable=True),
 )
 
 
@@ -3093,6 +3114,10 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS approver_badges json"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS foreign_matches_enabled boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS managed_prefixes json"))
+    # Odswiezanie danych okregu sezonami: znak zycia i zakres przebiegu.
+    # Tabela przebiegow istnieje na produkcji, wiec `create_all` ich nie doloży.
+    _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz"))
+    _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS seasons varchar"))
     # Dziennik giełdy powstał później niż sama giełda, więc oferty sprzed jego
     # wprowadzenia nie mają ani jednego wpisu. Dopisujemy je WSTECZ z własnych
     # stempli czasu wiersza - tyle, ile z nich wynika: wystawienie zawsze, a

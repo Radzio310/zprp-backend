@@ -389,12 +389,20 @@ async def status(province: str = Query(...)):
             "started_at": iso(run.get("started_at")),
             "finished_at": iso(run.get("finished_at")),
             # Klient sledzi przebieg w tle po `id` i tym znaczniku.
-            "running": run_is_active(run.get("started_at"), run.get("finished_at"), now),
+            "running": run_is_active(
+                run.get("started_at"),
+                run.get("finished_at"),
+                now,
+                run.get("heartbeat_at"),
+            ),
             "ok": run.get("ok"),
             "judges": run.get("judges"),
             "matches": run.get("matches"),
             "outside_matches": run.get("outside_matches"),
             "error": run.get("error"),
+            # Jakie sezony objal przebieg - pierwszy i reczny potrafia ich
+            # miec kilkanascie, zwykly tylko biezacy.
+            "seasons": [s for s in str(run.get("seasons") or "").split(",") if s],
         } if run else None,
     }
 
@@ -585,6 +593,11 @@ class RefreshRequest(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     with_outside: bool = True
+    #: Reczne puszczenie z panelu: sprawdz, czy kazdy sezon byl chociaz raz
+    #: pobrany w calosci, i nadrob brakujace. Automatyczne odswiezenie z ekranu
+    #: sedziego tego NIE wysyla - pobiera tylko biezacy sezon. Patrz
+    #: `settlement_seasons.plan_seasons`.
+    full_check: bool = False
 
 
 #: Zadania w tle trzymamy w zbiorze - asyncio trzyma do nich tylko slaba
@@ -607,7 +620,12 @@ async def refresh(payload: RefreshRequest):
 
     now = _now()
     previous = await last_run(key)
-    if previous and run_is_active(previous.get("started_at"), previous.get("finished_at"), now):
+    if previous and run_is_active(
+        previous.get("started_at"),
+        previous.get("finished_at"),
+        now,
+        previous.get("heartbeat_at"),
+    ):
         return {"province": key, "started": False, "running": True, "run_id": previous.get("id")}
 
     with_credentials = bool(payload.username and payload.password)
@@ -632,6 +650,7 @@ async def refresh(payload: RefreshRequest):
             password=payload.password,
             kind="manual",
             with_outside=payload.with_outside,
+            full_check=payload.full_check,
             run_id=run_id,
         )
     )

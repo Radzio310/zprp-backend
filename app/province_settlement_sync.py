@@ -42,7 +42,14 @@ from app.db import (
     province_modules,
     province_settlement_matches,
     province_settlement_runs,
+    province_settlement_seasons,
     zprp_match_venues,
+)
+from app.settlement_seasons import (
+    in_scope,
+    normalize_season_label,
+    plan_seasons,
+    season_of,
 )
 from app.deps import get_settings
 from app.settlement_distances import DistanceIndex, resolve_distances
@@ -62,9 +69,11 @@ from app.utils import fetch_with_correct_encoding
 
 logger = logging.getLogger(__name__)
 
-#: Ile sezonow wstecz ciagniemy z prywatnej listy sedziego. Rozliczenia dotycza
-#: biezacego sezonu, ale przelom sierpnia i wrzesnia potrafi miec oba naraz.
-OUTSIDE_SEASONS = 2
+#: Ktore sezony pobiera przebieg, decyduje `settlement_seasons.plan_seasons`:
+#: pierwsze pobranie okregu - wszystkie od poczatku, potem sam biezacy, a reczne
+#: z panelu nadrabia sezony nigdy nie pobrane w calosci. Dotad byla tu stala
+#: lista dwoch sezonow, a mecze okregowe sprzed biezacego sezonu nie wchodzily
+#: wcale - monitor okregu trzyma tylko biezacy terminarz.
 
 #: Odstep miedzy zapytaniami o liste meczow sedziego. ZPRP to jedna maszyna
 #: zwiazku, a nie API z limitem - walenie w nia setka rownoleglych polaczen
@@ -251,81 +260,175 @@ def _role_in_row(record: dict, judge_name: str) -> Optional[str]:
     return None
 
 
+async def _judge_season_pages(
+    client: AsyncClient, cookies: dict, judge_id: str
+) -> tuple[BeautifulSoup, dict[str, str], str]:
+    """
+    Lista meczow sedziego w sezonie domyslnym i mapa `RRRR/RRRR -> Filtr_sezon`.
+
+    Wartosci `Filtr_sezon` to identyfikatory ZPRP (np. 195 = 2026/2027), wiec
+    dopasowujemy po ETYKIECIE sezonu, a nie po kolejnosci na liscie.
+    """
+    entry_path = _build_judge_matches_path(judge_id, None)
+    _, html = await fetch_with_correct_encoding(client, entry_path, method="GET", cookies=cookies)
+    soup = BeautifulSoup(html, "html.parser")
+    options: dict[str, str] = {}
+    selected = ""
+    for item in _parse_seasons_from_page(soup) or []:
+        label = normalize_season_label(item.get("label")) or normalize_season_label(item.get("value"))
+        value = _s(item.get("value"))
+        if not label or not value or label in options:
+            continue
+        options[label] = value
+        if item.get("selected"):
+            selected = label
+    return soup, options, selected
+
+
+def _records_from_page(soup: BeautifulSoup) -> Optional[dict]:
+    """
+    Mecze z jednej strony sezonu. `None` = to nie jest lista meczow (awaria).
+
+    Brak tabeli na poprawnej stronie (jest wybor sezonu) to sezon BEZ meczow -
+    inaczej sedzia, ktory w danym sezonie nie sedziowal, blokowalby uznanie
+    calego sezonu za pobrany.
+    """
+    try:
+        return _parse_match_rows_from_soup(soup).get("matches") or {}
+    except Exception:
+        return {} if soup.find("select", attrs={"name": "Filtr_sezon"}) else None
+
+
+async def discover_seasons(client: AsyncClient, cookies: dict, judges: dict[str, dict]) -> set[str]:
+    """Sezony dostepne na liscie meczow sedziego - z pierwszej strony, ktora odpowie."""
+    for judge_id in list(judges)[:5]:
+        try:
+            _, options, _ = await _judge_season_pages(client, cookies, judge_id)
+        except Exception as exc:
+            logger.warning("[settlement] sezony z listy sedziego %s: %s", judge_id, exc)
+            continue
+        if options:
+            return set(options)
+    return set()
+
+
 async def _collect_outside(
     client: AsyncClient,
     cookies: dict,
     judges: dict[str, dict],
     district_ids: set[str],
-) -> list[dict]:
+    *,
+    seasons: list[str],
+    current: str,
+    beat: Any,
+) -> tuple[list[dict], dict[str, bool]]:
     """
-    Stoliki spoza okregu. Jedno zapytanie na sedziego, po kolei.
+    Mecze z prywatnych list sedziow - sezon po sezonie, sedzia po sedzi.
 
-    Mecz, ktory okreg juz zna z wlasnego terminarza, POMIJAMY - inaczej ten sam
-    mecz wszedlby do rozliczenia dwa razy, raz z kazdego zrodla.
+    Oddaje wiersze i mape `sezon -> czy KAZDY sedzia dal sie odczytac`. Tylko
+    sezon z samymi „tak" wolno uznac za pobrany w calosci.
+
+    Co wchodzi:
+      - spoza okregu: TYLKO stoliki (boiskowych centralnych okreg nie rozlicza);
+      - mecze okregowe MINIONYCH sezonow: w kazdej roli. Monitor okregu trzyma
+        wylacznie biezacy terminarz, wiec dla historii lista sedziego jest
+        jedynym zrodlem - bez tego minione sezony mialy same stoliki.
+
+    Mecz, ktory okreg juz zna z wlasnego terminarza, POMIJAMY - inaczej wszedlby
+    do rozliczenia dwa razy, raz z kazdego zrodla.
     """
     collected: list[dict] = []
+    season_ok = {label: True for label in seasons}
 
     for judge_id, judge in judges.items():
         name = _s(judge.get("full_name"))
         if not name:
             continue
         try:
-            entry_path = _build_judge_matches_path(judge_id, None)
-            _, html = await fetch_with_correct_encoding(
-                client, entry_path, method="GET", cookies=cookies
-            )
-            soup = BeautifulSoup(html, "html.parser")
-            seasons = _parse_seasons_from_page(soup)
-            season_values = [
-                _s(item.get("value")) for item in (seasons or []) if _s(item.get("value"))
-            ][:OUTSIDE_SEASONS] or [None]
+            entry_soup, options, selected = await _judge_season_pages(client, cookies, judge_id)
+        except Exception as exc:
+            # Jeden sedzia bez listy nie moze wywalic calego okregu - ale sezon
+            # bez niego nie jest pobrany w calosci.
+            logger.warning("[settlement] lista meczow sedziego %s: %s", judge_id, exc)
+            for label in seasons:
+                season_ok[label] = False
+            await beat()
+            continue
+        if not options:
+            logger.warning("[settlement] lista meczow sedziego %s bez wyboru sezonu", judge_id)
+            for label in seasons:
+                season_ok[label] = False
+            await beat()
+            continue
 
-            for season_value in season_values:
-                if season_value is not None:
-                    path = _build_judge_matches_path(judge_id, season_value)
+        for label in seasons:
+            value = options.get(label)
+            if not value:
+                # Tego sezonu nie ma na liscie sedziego - nie ma w nim meczow.
+                continue
+            try:
+                if label == selected:
+                    soup = entry_soup
+                else:
+                    path = _build_judge_matches_path(judge_id, value)
                     _, html = await fetch_with_correct_encoding(
                         client, path, method="GET", cookies=cookies
                     )
                     soup = BeautifulSoup(html, "html.parser")
-                parsed = _parse_match_rows_from_soup(soup)
+            except Exception as exc:
+                logger.warning("[settlement] sedzia %s, sezon %s: %s", judge_id, label, exc)
+                season_ok[label] = False
+                continue
 
-                for key, record in (parsed.get("matches") or {}).items():
-                    match_id = _s(record.get("IdZawody")) or _s(key)
-                    if match_id in district_ids:
-                        continue
-                    code = _s(record.get("match_code"))
-                    if not code or R.is_test_competition(code):
-                        continue
-                    role = _role_in_row(record, name)
-                    # ⚠ TYLKO STOLIKI. Boiskowych spoza okregu okreg nie rozlicza.
-                    if role != R.ROLE_TABLE:
-                        continue
+            records = _records_from_page(soup)
+            if records is None:
+                season_ok[label] = False
+                continue
 
-                    venue = ((record.get("hall") or {}).get("venue") or {})
-                    teams = record.get("teams") or {}
-                    collected.append({
-                        "match_key": f"o:{match_id}",
-                        "judge_id": judge_id,
-                        "season": _s(record.get("season")),
-                        "match_at": _parse_when(record.get("data_fakt")),
-                        "match_code": code,
-                        "role": role,
-                        "level": R.match_level(code),
-                        "origin": "outside",
-                        "city": _s(venue.get("city")),
-                        "hall": _s(venue.get("name")),
-                        "teams": " - ".join(x for x in (_s(teams.get("host")), _s(teams.get("guest"))) if x),
-                        "round_text": None,
-                        "series_text": None,
-                        "approved": None,
-                    })
-                await asyncio.sleep(JUDGE_REQUEST_DELAY)
-        except Exception as exc:
-            # Jeden sedzia bez listy nie moze wywalic calego okregu.
-            logger.warning("[settlement] lista meczow sedziego %s: %s", judge_id, exc)
-            continue
+            past = label != current
+            for key, record in records.items():
+                match_id = _s(record.get("IdZawody")) or _s(key)
+                if match_id in district_ids:
+                    continue
+                code = _s(record.get("match_code"))
+                if not code or R.is_test_competition(code):
+                    continue
+                role = _role_in_row(record, name)
+                if not role:
+                    continue
+                level = R.match_level(code)
+                own = past and level in ("district", "cup")
+                # ⚠ Spoza okregu TYLKO STOLIKI. Boiskowych centralnych okreg nie rozlicza.
+                if not own and role != R.ROLE_TABLE:
+                    continue
 
-    return collected
+                venue = ((record.get("hall") or {}).get("venue") or {})
+                teams = record.get("teams") or {}
+                collected.append({
+                    # Klucz „d:" jak w terminarzu okregu - gdyby monitor kiedys
+                    # zobaczyl ten mecz, trafi w TEN SAM wiersz, nie w drugi.
+                    "match_key": f"{'d' if own else 'o'}:{match_id}",
+                    "judge_id": judge_id,
+                    "season": label,
+                    "match_at": _parse_when(record.get("data_fakt")),
+                    "match_code": code,
+                    "role": role,
+                    "level": level,
+                    "origin": "district" if own else "outside",
+                    "city": _s(venue.get("city")),
+                    "hall": _s(venue.get("name")),
+                    "teams": " - ".join(x for x in (_s(teams.get("host")), _s(teams.get("guest"))) if x),
+                    "round_text": None,
+                    "series_text": None,
+                    "approved": None,
+                })
+            await asyncio.sleep(JUDGE_REQUEST_DELAY)
+
+        # Znak zycia po kazdym sedzim - pobranie wstecz trwa dluzej niz regula
+        # „trup po 25 min" liczona od startu.
+        await beat()
+
+    return collected, season_ok
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +598,21 @@ async def _resolve_venues(
 # Zapis
 # ---------------------------------------------------------------------------
 
-async def _store(province: str, rows: list[dict], judges: dict[str, dict]) -> int:
+async def _store(
+    province: str,
+    rows: list[dict],
+    judges: dict[str, dict],
+    *,
+    scope: Optional[set[str]] = None,
+    current: str = "",
+) -> int:
+    """
+    Zapis obsad i gaszenie tych, ktorych przebieg nie widzial.
+
+    ⚠ Gasimy WYLACZNIE w sezonach, ktore przebieg pobieral (`scope`). Przebieg
+    samego biezacego sezonu nie widzi historii - bez tej granicy kazde dobowe
+    odswiezenie zgasiloby wszystkie minione sezony.
+    """
     now = _now()
     seen: set[tuple[str, str]] = set()
 
@@ -543,6 +660,7 @@ async def _store(province: str, rows: list[dict], judges: dict[str, dict]) -> in
         select(
             province_settlement_matches.c.judge_id,
             province_settlement_matches.c.match_key,
+            province_settlement_matches.c.match_at,
         ).where(
             and_(
                 province_settlement_matches.c.province == province,
@@ -554,6 +672,9 @@ async def _store(province: str, rows: list[dict], judges: dict[str, dict]) -> in
     for row in stale:
         key = (_s(row["judge_id"]), _s(row["match_key"]))
         if key in seen:
+            continue
+        # Sezon, ktorego ten przebieg nie pobieral - nie jego sprawa.
+        if not in_scope(row["match_at"], scope, current=current):
             continue
         await database.execute(
             update(province_settlement_matches)
@@ -591,10 +712,16 @@ async def refresh_province(
     password: Optional[str] = None,
     kind: str = "cron",
     with_outside: bool = True,
+    full_check: bool = False,
     run_id: Optional[int] = None,
 ) -> dict:
     """
-    Pelne odswiezenie danych okregu.
+    Odswiezenie danych okregu - SEZONAMI.
+
+    Ktore sezony, decyduje `settlement_seasons.plan_seasons`: pierwsze pobranie
+    w historii okregu bierze wszystkie od poczatku, kolejne (takze dobowe) tylko
+    biezacy, a `full_check` - reczne puszczenie z panelu - nadrabia sezony
+    nigdy nie pobrane w calosci.
 
     `username`/`password` podaje panel (poswiadczenia VIP-a); bez nich schodzimy
     do konta `sync` z Railway. Brak obu to nie awaria, tylko okreg jeszcze
@@ -622,6 +749,26 @@ async def refresh_province(
     if not credentials or not credentials[0] or not credentials[1]:
         return await finish(False, error="Brak konta ZPRP dla tego okręgu")
 
+    async def beat() -> None:
+        """Znak zycia przebiegu - patrz `settlement_runs.run_is_active`."""
+        try:
+            await database.execute(
+                update(province_settlement_runs)
+                .where(province_settlement_runs.c.id == int(run_id))
+                .values(heartbeat_at=_now())
+            )
+        except Exception:
+            pass  # znak zycia to wygoda, nie warunek przebiegu
+
+    async def pulse() -> None:
+        # Co minute przez CALY przebieg - takze na etapie hal i odleglosci,
+        # ktory przy pobraniu wszystkich sezonow potrafi trwac dlugo.
+        while True:
+            await asyncio.sleep(60)
+            await beat()
+
+    pulse_task = asyncio.create_task(pulse())
+
     try:
         async with AsyncClient(
             base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
@@ -632,12 +779,52 @@ async def refresh_province(
             if not judges:
                 return await finish(False, error="Nie udało się odczytać listy sędziów okręgu")
 
-            district = await _collect_district(province, judges)
+            # --- ktore sezony ---
+            current = season_of(_now())
+            done_rows = await database.fetch_all(
+                select(province_settlement_seasons.c.season).where(
+                    province_settlement_seasons.c.province == province
+                )
+            )
+            completed = {_s(row["season"]) for row in done_rows}
+            available = await discover_seasons(client, cookies, judges) if with_outside else set()
+            plan = plan_seasons(
+                available=available,
+                completed=completed,
+                current=current,
+                full_check=full_check,
+            )
+            scope = set(plan)
+            await database.execute(
+                update(province_settlement_runs)
+                .where(province_settlement_runs.c.id == int(run_id))
+                .values(seasons=",".join(plan), heartbeat_at=_now())
+            )
+            logger.info(
+                "[settlement] %s: sezony %s (pobrane w calosci: %d, reczne sprawdzenie: %s)",
+                province, plan, len(completed), full_check,
+            )
+
+            # Terminarz okregu tylko z sezonow tego przebiegu - reszta zostaje,
+            # jak jest (patrz `_store`).
+            district = [
+                row for row in await _collect_district(province, judges)
+                if in_scope(row.get("match_at"), scope, current=current)
+            ]
             district_ids = {row["match_key"].split(":", 1)[1] for row in district}
 
             outside: list[dict] = []
+            season_ok: dict[str, bool] = {}
             if with_outside:
-                outside = await _collect_outside(client, cookies, judges, district_ids)
+                outside, season_ok = await _collect_outside(
+                    client,
+                    cookies,
+                    judges,
+                    district_ids,
+                    seasons=plan,
+                    current=current,
+                    beat=beat,
+                )
 
             rows = district + outside
 
@@ -684,7 +871,35 @@ async def refresh_province(
                 row["distance_km"] = hit[0] if hit else None
                 row["distance_source"] = hit[1] if hit else "none"
 
-            await _store(province, rows, judges)
+            await _store(province, rows, judges, scope=scope, current=current)
+
+            # Rejestr sezonow pobranych w CALOSCI: tylko te, w ktorych lista
+            # KAZDEGO sedziego dala sie odczytac. Sezon z dziura zostaje poza
+            # rejestrem, wiec reczne puszczenie sprobuje go jeszcze raz.
+            for label in plan:
+                if not (with_outside and season_ok.get(label)):
+                    continue
+                count = sum(
+                    1 for row in rows
+                    if in_scope(row.get("match_at"), {label}, current=current)
+                )
+                stamp = _now()
+                statement = pg_insert(province_settlement_seasons).values(
+                    province=province,
+                    season=label,
+                    completed_at=stamp,
+                    run_id=int(run_id),
+                    matches=count,
+                )
+                await database.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[
+                            province_settlement_seasons.c.province,
+                            province_settlement_seasons.c.season,
+                        ],
+                        set_={"completed_at": stamp, "run_id": int(run_id), "matches": count},
+                    )
+                )
 
         return await finish(
             True,
@@ -695,6 +910,8 @@ async def refresh_province(
     except Exception as exc:
         logger.exception("[settlement] odświeżanie %s nie powiodło się", province)
         return await finish(False, error=str(exc)[:500])
+    finally:
+        pulse_task.cancel()
 
 
 async def last_run(province: str) -> Optional[dict]:
@@ -726,7 +943,10 @@ async def run_settlement_sync_scheduler() -> None:
                     continue
                 previous = await last_run(province)
                 if previous and run_is_active(
-                    previous.get("started_at"), previous.get("finished_at"), _now()
+                    previous.get("started_at"),
+                    previous.get("finished_at"),
+                    _now(),
+                    previous.get("heartbeat_at"),
                 ):
                     # Ktos wlasnie odswieza z panelu - nie dublujemy przebiegu.
                     continue

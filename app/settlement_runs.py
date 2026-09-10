@@ -36,12 +36,22 @@ def run_is_active(
     started_at: Optional[datetime],
     finished_at: Optional[datetime],
     now: datetime,
+    heartbeat_at: Optional[datetime] = None,
 ) -> bool:
-    """Czy przebieg jeszcze trwa (i nie jest trupem po restarcie)."""
+    """
+    Czy przebieg jeszcze trwa (i nie jest trupem po restarcie).
+
+    `heartbeat_at` - znak zycia, ktory przebieg stawia po kazdym sedzim.
+    Pobranie wszystkich sezonow wstecz trwa dluzej niz `RUN_STALE_AFTER`, a
+    liczone od samego startu uznaloby zywy przebieg za trupa i pozwolilo
+    odpalic drugi rownolegle. Trupa wykrywamy po ciszy, nie po dlugosci.
+    """
     started = _aware(started_at)
     if started is None or finished_at is not None:
         return False
-    return _aware(now) - started < RUN_STALE_AFTER
+    beat = _aware(heartbeat_at)
+    last = max(started, beat) if beat else started
+    return _aware(now) - last < RUN_STALE_AFTER
 
 
 def cooldown_left(

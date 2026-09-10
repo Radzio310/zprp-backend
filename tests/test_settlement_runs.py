@@ -24,6 +24,18 @@ def test_trup_po_restarcie_nie_blokuje_okregu_na_zawsze():
     assert run_is_active(started, None, NOW) is False
 
 
+def test_dlugi_przebieg_z_znakiem_zycia_nie_jest_trupem():
+    # Pobranie sezonow wstecz trwa dluzej niz regula liczona od startu.
+    started = NOW - RUN_STALE_AFTER - timedelta(minutes=30)
+    assert run_is_active(started, None, NOW, NOW - timedelta(minutes=2)) is True
+
+
+def test_cisza_po_znaku_zycia_to_trup():
+    started = NOW - timedelta(hours=2)
+    beat = NOW - RUN_STALE_AFTER - timedelta(seconds=1)
+    assert run_is_active(started, None, NOW, beat) is False
+
+
 def test_czas_bez_strefy_traktujemy_jak_utc():
     naive = (NOW - timedelta(minutes=2)).replace(tzinfo=None)
     assert run_is_active(naive, None, NOW) is True
