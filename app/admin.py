@@ -12,10 +12,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import bcrypt
 from app.okreg_rates_manifest import build_rates_manifest
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, insert, update, delete, and_, or_, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from app.admin_guard import admin_write_guard
 
 from app.db import (
     database,
@@ -113,7 +115,11 @@ from app.schemas import (
 # Router & constants
 # ---------------------------------------------------------------------
 
-router = APIRouter(prefix="/admin", tags=["Admin"])
+# Bramka na CAŁYM routerze: odczyty przepuszcza, zapisy sprawdza (patrz
+# `app/admin_guard.py`). Zapis wykonywany przez zwykłego użytkownika trzeba
+# świadomie wpisać do `PUBLIC_WRITES` - inaczej po zamknięciu okresu
+# przejściowego dostanie 401.
+router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(admin_write_guard)])
 
 MASTER_PIN_HASH = os.getenv("MASTER_PIN_HASH", "")
 

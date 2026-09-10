@@ -25,7 +25,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import insert, or_, select, update
 
@@ -34,6 +34,7 @@ try:
 except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
+from app.admin_guard import admin_write_guard
 from app.db import central_rates, database
 from app.schemas import (
     CentralRateItem,
@@ -45,7 +46,13 @@ from app.schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/admin/central_rates", tags=["central_rates"])
+# Odczyty (manifest, wersje, tabela dnia) zostają otwarte - aplikacja liczy z
+# nich pieniądze także przed zalogowaniem. Zapisy sprawdza `app/admin_guard.py`.
+router = APIRouter(
+    prefix="/admin/central_rates",
+    tags=["central_rates"],
+    dependencies=[Depends(admin_write_guard)],
+)
 
 SEED_PATH = os.path.join(os.path.dirname(__file__), "data", "central_rates_seed.json")
 
