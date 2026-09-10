@@ -1,0 +1,452 @@
+
+
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Expires" content="0" />
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+<meta http-equiv="Cache-Control" content="post-check=0, pre-check=0" />
+<meta http-equiv="Pragma" content="no-cache" />
+	
+<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-2" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>ZPRP</title>
+<link rel="stylesheet" href="config/styl.css" type="text/css" />
+
+<script src="JSCal/src/js/jscal2.js"></script>
+<script src="JSCal/src/js/lang/pl.js"></script>
+<link rel="stylesheet" type="text/css" href="JSCal/src/css/jscal2.css"/>
+<link rel="stylesheet" type="text/css" href="JSCal/src/css/border-radius.css" />
+<link rel="stylesheet" type="text/css" href="JSCal/src/css/steel/steel.css" />
+<link rel="shortcut icon" href="pliki/favicon.ico" />
+<script type="text/javascript" src="Jq/jquery-1.11.2.min.js" ></script>
+</head>
+
+<body>
+<script type="text/javascript" src="js/xlsx.js" ></script>
+<script type="text/javascript" src="js/FileSaver.js" ></script>
+<script>
+function s2ab(s) {
+	if(typeof ArrayBuffer !== 'undefined') {
+		var buf = new ArrayBuffer(s.length);
+		var view = new Uint8Array(buf);
+		for (var i=0; i!=s.length; ++i) view[i] = s.charCodeAt(i) & 0xFF;
+		return buf;
+	} else {
+		var buf = new Array(s.length);
+		for (var i=0; i!=s.length; ++i) buf[i] = s.charCodeAt(i) & 0xFF;
+		return buf;
+	}
+}
+
+
+function export_table_to_excel(id, type, fn) {
+var wb = XLSX.utils.table_to_book(document.getElementById(id), {sheet:"Sheet JS"});
+var wbout = XLSX.write(wb, {bookType:type, bookSST:true, type: 'binary'});
+var fname = fn || 'Tabela.' + type;
+try {
+	saveAs(new Blob([s2ab(wbout)],{type:"application/octet-stream"}), fname);
+} catch(e) { if(typeof console != 'undefined') console.log(e, wbout); }
+return wbout;
+}
+
+function doit(type, fn) { return export_table_to_excel('table', type || 'xlsx', fn); }
+</script>
+
+
+
+<script type="text/javascript" src="wz_tooltip/wz_tooltip.js"></script>
+<script language="javascript">
+function maskujKlawisze(AEvent, AMaska)
+{
+    if (window.Event) {
+        kodKlawisza = AEvent.which;
+    } else {
+        kodKlawisza = AEvent.keyCode;
+    }
+
+    if (kodKlawisza == 13) {
+        return true;  // Enter
+    };
+    if (kodKlawisza == 8) {
+        return true;  // Backspace
+    };
+
+
+    if (kodKlawisza == 0) {
+        return true;  // klawisze sterujące
+    };
+
+    klawisz = String.fromCharCode(kodKlawisza);
+
+    if (AMaska.indexOf(klawisz) == -1) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+function capitalize(str) {
+    var tempArray = str.split(' ');
+    for (var i = 0; i < tempArray.length; i++) {
+	    tempArray[i] = tempArray[i].substr(0,1).toUpperCase() + tempArray[i].substr(1).toLowerCase();
+      // tempArray[i] = tempArray[i].charAt(0).toUpperCase() + tempArray[i].substring(1);
+    }
+    return tempArray.join(' ');  
+}
+function Kod_pocztowy(wartosc){
+ if(wartosc.value.length==2 && wartosc.value.indexOf('-')==-1) wartosc.value+='-';
+}
+function Czas(wartosc){
+ if(wartosc.value.length==2 && wartosc.value.indexOf(':')==-1) wartosc.value+=':';
+}
+
+</SCRIPT> 
+
+<table width="100%" border="0" style="height:100%">
+  <tr>
+    <td>
+	<table border="0">
+  <tr>
+   <td align="right" valign="top" colspan="3"><font style="font-family:Arial">
+    <a href="http://rozgrywki.zprp.pl/api/" title="API" target="_blank">API</a>
+    |
+   <a href="http://rozgrywki.zprp.pl?Sezon=195" title="rozgrywki.zprp.pl" target="_blank">rozgrywki.zprp.pl</a>
+    | 
+   <small>Sezon[H]: </small>
+2026/2027  
+    | 
+   <small>Sezon[P]: </small>
+2025/2026   
+   |
+   <small>Zalogowany: </small>Artur JĘDRYCHA | <small></small> Śląski Związek Piłki Ręcznej 
+ | <a href="?a=konto">konto</a> | <small>
+ <span id="session-warning" style="display:blok">
+    Sesja wygaśnie za <span id="session-time"></span>
+    <button class="przycisk" onClick="refreshSession()">Przedłuż</button>
+</span> | <a href="login.php?def=logout">wyloguj</a></font>
+
+<script>
+const WARNING_AT = 60; // sekundy
+let lastRemaining = null;
+
+function formatTime(sec) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function checkSession() {
+    fetch('/session_status.php', { cache: 'no-store' })
+        .then(r => r.json())
+        .then(data => {
+
+            if (!data.logged) {
+                localStorage.setItem('logout', Date.now());
+                window.location.href = "/index.php?a=rozgrywki&b=zespoly&IdRozgr=12024&Filtr_sezon=195&Filtr_woj=12";
+                return;
+            }
+
+            lastRemaining = data.remaining;
+            document.getElementById('session-time').textContent =
+                formatTime(data.remaining);
+
+            if (data.remaining <= WARNING_AT) {
+                document.getElementById('session-warning').style.color = 'red';
+            } else {
+                document.getElementById('session-warning').style.color = 'black';
+            }
+        });
+}
+
+// przedłużenie = ping
+function refreshSession() {
+    fetch('/session_guard.php', { method: 'POST' })
+        .then(() => checkSession());
+}
+
+// synchronizacja między kartami
+window.addEventListener('storage', e => {
+    if (e.key === 'logout') {
+        window.location.href = "/index.php?a=rozgrywki&b=zespoly&IdRozgr=12024&Filtr_sezon=195&Filtr_woj=12";
+    }
+});
+
+// polling
+checkSession();
+setInterval(checkSession, 1000);
+</script>
+
+
+</td>
+ 
+ </tr>
+  <tr>
+    <td align="left" width="5%"><a href="http://www.zprp.pl/" title="Związek Piłki Ręcznej w Polsce" target="_blank"><img src="pliki/logo.jpg" /></a></td>
+    <td align="left"><a href="http://www.zprp.pl/" title="Związek Piłki Ręcznej w Polsce" target="_blank"><img src="pliki/zprp.png" /></a>
+	
+	</td>
+	<td align="right" width="5%">
+	<!--<img src="pliki/ZPRP_100_300.png" width="150" /> -->
+	<!--<a href="https://handball23.com/" target="_blank"><img src="pliki/SPECIAL_PRIMARY_FORM_HORIZONTAL.png" height="150" /></a> -->
+	
+	</td>
+  </tr>
+</table>	</td>
+  </tr>
+
+  
+  
+  <tr>
+    <td align="left">
+<hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />
+<a style="vertical-align:bottom" href="index.php" title="Strona początkowa" target="_self"><img style="vertical-align:bottom" src="pliki/domek.png" height="20" border="0" /></a>
+<a href="?a=terminarz"  class="przycisk" >Terminarz</a>	
+	<a href="?a=rozgrywki&amp;Filtr_sezon=195&amp;Filtr_woj=12" class="przycisk2">Rozgrywki</a>
+
+
+	<a href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195&amp;b=tabela&amp;IdRozgr=12024"  class="przycisk" >Statystyki</a>
+
+	<a href="?a=sedzia&amp;Filtr_archiwum=1"  class="przycisk" >Sędziowie i Delegaci</a>
+ 
+	
+
+</td>
+</tr>
+  <tr>
+    <td align="left" valign="top" style="height:400px">
+<hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />
+<style>
+#tabelka {
+  font-family: Arial;
+  border-collapse: collapse;
+  font-size:11px;
+}
+
+#tabelka td, #tabelka th {
+  border: 1px solid #ddd;
+  padding: 5px;
+}
+
+#tabelka tr:nth-child(even){background-color: #f2f2f2;}
+
+#tabelka tr:hover {background-color: #ddd;}
+
+#tabelka th {
+  padding-top: 5px;
+  padding-bottom: 5px;
+  text-align: center;
+  background-color: #666666;
+  color: white;
+}
+</style>
+
+
+<table border="1" cellpadding="3" cellspacing="0" style="font-size:12px; font-family:Arial" >
+  <tr>
+    <td colspan="2"><b>II Liga Kobiet gr. 4</b> (2026/2027) <font color="#FF0000">nieaktywny</font> </td>
+  </tr>
+  <tr>
+    <td colspan="2"><font color="#999999"><i>Klikając w nazwę drużyny przejdziesz do jej składu.</i></font></td>
+  </tr>
+  <tr>
+    <td>Drużyny uczestniczące w rozgrywkach</td>
+    <td>Drużyny spełniające kryteria rozgrywek <a class="przycisk3" href="?a=zespoly&amp;Filtr_sezon=195&amp;Filtr_kategoria=1&amp;Filtr_plec=K&amp;Filtr_woj=12">Uprawnione</a><br />
+      Płeć: <b>K</b>, Kategoria: <b>Senior</b>, Woj: <b>SL</b> </td>
+  </tr>
+  <tr>
+    <td valign="top"><table width="100%" border="1" frame="void" rules="rows" cellpadding="3" cellspacing="0" style="font-size:12px; font-family:Arial;" >
+        <tr align="center">
+          <td>Lp</td>
+		  <td>&nbsp;</td>
+          <td>Nazwa</td>
+          <td>&nbsp;</td>
+        </tr>
+                <tr align="center">
+          <td align="right">1.</td>
+		  <td>
+<a href="zespoly_PDF.php?ID_sezon=195&amp;ID_zespol=5192" target="_blank"><img src="pliki/pdf2.png" alt="Pobierz PDF" width="20" border="0" /></a>
+		  
+		  </td>
+          <td align="left">            <a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=5192">MKS Start Michałkowice  (SL) </a>
+                      </td>
+          <td align="right">
+                        <a class="przycisk3" target="_blank" href="?a=klub&amp;b=edycja&amp;NrKlubu=2851">SZCZEGÓŁY KLUBU</a>
+          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">2.</td>
+		  <td>
+<a href="zespoly_PDF.php?ID_sezon=195&amp;ID_zespol=17583" target="_blank"><img src="pliki/pdf2.png" alt="Pobierz PDF" width="20" border="0" /></a>
+		  
+		  </td>
+          <td align="left">            <a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=17583">SPR Sośnica II Gliwice  (SL) </a>
+                      </td>
+          <td align="right">
+                        <a class="przycisk3" target="_blank" href="?a=klub&amp;b=edycja&amp;NrKlubu=4893">SZCZEGÓŁY KLUBU</a>
+          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">3.</td>
+		  <td>
+<a href="zespoly_PDF.php?ID_sezon=195&amp;ID_zespol=18442" target="_blank"><img src="pliki/pdf2.png" alt="Pobierz PDF" width="20" border="0" /></a>
+		  
+		  </td>
+          <td align="left">            <a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=18442">Beskidzki Handball  (SL) </a>
+                      </td>
+          <td align="right">
+                        <a class="przycisk3" target="_blank" href="?a=klub&amp;b=edycja&amp;NrKlubu=4986">SZCZEGÓŁY KLUBU</a>
+          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">4.</td>
+		  <td>
+<a href="zespoly_PDF.php?ID_sezon=195&amp;ID_zespol=18447" target="_blank"><img src="pliki/pdf2.png" alt="Pobierz PDF" width="20" border="0" /></a>
+		  
+		  </td>
+          <td align="left">            <a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=18447">MLUKS Tułowice  (OP) </a>
+                      </td>
+          <td align="right">
+                        <a class="przycisk3" target="_blank" href="?a=klub&amp;b=edycja&amp;NrKlubu=4268">SZCZEGÓŁY KLUBU</a>
+          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">5.</td>
+		  <td>
+<a href="zespoly_PDF.php?ID_sezon=195&amp;ID_zespol=18448" target="_blank"><img src="pliki/pdf2.png" alt="Pobierz PDF" width="20" border="0" /></a>
+		  
+		  </td>
+          <td align="left">            <a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=18448">MUKS Skałka Śląsk Świętochłowice  (SL) </a>
+                      </td>
+          <td align="right">
+                        <a class="przycisk3" target="_blank" href="?a=klub&amp;b=edycja&amp;NrKlubu=2091">SZCZEGÓŁY KLUBU</a>
+          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">6.</td>
+		  <td>
+<a href="zespoly_PDF.php?ID_sezon=195&amp;ID_zespol=18449" target="_blank"><img src="pliki/pdf2.png" alt="Pobierz PDF" width="20" border="0" /></a>
+		  
+		  </td>
+          <td align="left">            <a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=18449">SPR Pogoń II Zabrze  (SL) </a>
+                      </td>
+          <td align="right">
+                        <a class="przycisk3" target="_blank" href="?a=klub&amp;b=edycja&amp;NrKlubu=964">SZCZEGÓŁY KLUBU</a>
+          </td>
+        </tr>
+         <tr>
+ 
+
+<td colspan="3" title="">
+<a href="SpisPobierz2.php?a=mailZbiorczyks_slzpr.txt" target="_blank">PobierzSpisAdresów (3)</a><br />
+</td>
+
+
+</tr>
+
+      </table></td>
+    <td valign="top">      <table width="100%" border="1" frame="void" rules="rows" cellpadding="3" cellspacing="0" style="font-size:12px; font-family:Arial;" >
+        <tr align="center">
+          <td>Lp</td>
+          <td>Nazwa</td>
+          <td>Drużyna w innych rozgrywkach</td>
+          <td align="left"><form method="get">
+              <input type="hidden" name="a" value="rozgrywki" />
+              <input type="hidden" name="b" value="zespoly" />
+              <input type="hidden" name="IdRozgr" value="12024" />
+              <input type="hidden" name="IdSezon" value="" />
+              <select name="Filtr_woj" onchange="this.form.submit()" style="width:70px; font-size:12px; font-family:Arial">
+                <option value="">---</option>
+                                <option value="19" >DOR (1)</option>
+                                <option value="1" >DS (9)</option>
+                                <option value="2" >KP (1)</option>
+                                <option value="3" >LU (3)</option>
+                                <option value="4" >LB (1)</option>
+                                <option value="5" >LD (2)</option>
+                                <option value="7" >MA (1)</option>
+                                <option value="8" >OP (2)</option>
+                                <option value="9" >PK (2)</option>
+                                <option value="10" >PD (1)</option>
+                                <option value="11" >PM (2)</option>
+                                <option value="12" selected="selected">SL (12)</option>
+                                <option value="13" >SK (1)</option>
+                                <option value="18" >WN (2)</option>
+                                <option value="6" >MZ (12)</option>
+                                <option value="14" >WP (9)</option>
+                                <option value="16" >ZP (5)</option>
+                              </select>
+            </form></td>
+        </tr>
+                <tr align="center">
+          <td align="right">1.</td>
+          <td align="left"><a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=15153">Sośnica Gliwice (SL)</a> </td>
+          <td align="left">            <small><a href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12009">LOTTO Superliga kobiet</a></small><br />
+                      </td>
+          <td align="left"><small><i>Wyczerpano limit zgłoszeń.</i></small>          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">2.</td>
+          <td align="left"><a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=14108">SPR Pogoń Zabrze (SL)</a> </td>
+          <td align="left">            <small><a href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12013">I Liga Kobiet Grupa B</a></small><br />
+                      </td>
+          <td align="left"><small><i>Wyczerpano limit zgłoszeń.</i></small>          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">3.</td>
+          <td align="left"><a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=17088">MTS Żory (SL)</a> </td>
+          <td align="left">            <small><a href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12011">Liga Centralna Kobiet</a></small><br />
+                      </td>
+          <td align="left"><small><i>Wyczerpano limit zgłoszeń.</i></small>          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">4.</td>
+          <td align="left"><a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=6117">KS Zgoda Ruda Śląska (SL)</a> </td>
+          <td align="left">            <small><a href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12013">I Liga Kobiet Grupa B</a></small><br />
+                      </td>
+          <td align="left"><small><i>Wyczerpano limit zgłoszeń.</i></small>          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">5.</td>
+          <td align="left"><a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=16190">SPR Grunwald Ruda Śląska (SL)</a> </td>
+          <td align="left">            <small><a href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12013">I Liga Kobiet Grupa B</a></small><br />
+                      </td>
+          <td align="left"><small><i>Wyczerpano limit zgłoszeń.</i></small>          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">6.</td>
+          <td align="left"><a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=17584">START Pietrowice Wielkie (SL)</a> </td>
+          <td align="left">            <small><a href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12013">I Liga Kobiet Grupa B</a></small><br />
+                      </td>
+          <td align="left"><small><i>Wyczerpano limit zgłoszeń.</i></small>          </td>
+        </tr>
+                <tr align="center">
+          <td align="right">7.</td>
+          <td align="left"><a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=17582">Handball Ruch (SL)</a> </td>
+          <td align="left">            <small><a href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12013">I Liga Kobiet Grupa B</a></small><br />
+                      </td>
+          <td align="left"><small><i>Wyczerpano limit zgłoszeń.</i></small>          </td>
+        </tr>
+              </table></td>
+  </tr>
+</table>
+</td>
+  </tr>
+
+	</td>
+  </tr>
+
+
+  <tr>
+    <td align="right">
+<hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />	
+			<div align="right">
+        <p><font size="1" face="Tahoma">&copy; <em>by</em> ZPRP | <em>designed by</em> Pilar (Domtel-Sport) 2013-2026 &nbsp; &nbsp; &nbsp; &nbsp; Czas: 0.030005 s. | Pamięć: 1.5 megabytes</font></p>
+		</div> </td>
+  </tr>
+</table>
+
+
+
+</body>
+</html>

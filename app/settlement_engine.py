@@ -56,6 +56,8 @@ class Assignment:
     distance_km: Optional[float] = None
     distance_source: Optional[str] = None
     approved: Optional[bool] = None
+    #: Stolikowy zostal przy stoliku sam - patrz `settlement_rates.triple_table_allowed`.
+    triple_table: bool = False
 
 
 @dataclass
@@ -89,6 +91,8 @@ class SettledMatch:
     #: ZPRP. W rachunku widac go tylko wtedy, gdy panel doliczyl takie obsady
     #: przelacznikiem - wiersz dostaje wtedy znacznik.
     zprp_reason: Optional[str] = None
+    #: Ryczałt policzony x3, bo stolikowy został sam.
+    triple_table: bool = False
 
 
 @dataclass
@@ -188,6 +192,11 @@ def settle_match(
     gross = 0.0
     km_rate = 0.0
     status = "computed"
+    # Znacznik z bazy dziala tylko tam, gdzie regula na to pozwala: stolik
+    # OKREGOWY w okregu, ktory ma te opcje wlaczona.
+    triple = bool(assignment.triple_table) and R.triple_table_allowed(
+        assignment.match_code, assignment.role, province
+    )
 
     if distance is None:
         status = "missing-distance"
@@ -211,6 +220,9 @@ def settle_match(
         )
         if gross <= 0:
             status = "missing-rate"
+        elif triple:
+            # Stolikowy sam przy stoliku: ryczałt x3, dojazd bez zmian.
+            gross *= R.TRIPLE_TABLE_FACTOR
 
     return SettledMatch(
         match_key=assignment.match_key,
@@ -240,6 +252,7 @@ def settle_match(
         stage_guessed=bool(stage_hit and not stage_hit[1]),
         status=status,
         zprp_reason=R.zprp_settlement_reason(assignment.match_code, assignment.role),
+        triple_table=triple,
     )
 
 

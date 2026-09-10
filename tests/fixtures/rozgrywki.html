@@ -1,0 +1,555 @@
+
+
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Expires" content="0" />
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+<meta http-equiv="Cache-Control" content="post-check=0, pre-check=0" />
+<meta http-equiv="Pragma" content="no-cache" />
+	
+<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-2" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>ZPRP</title>
+<link rel="stylesheet" href="config/styl.css" type="text/css" />
+
+<script src="JSCal/src/js/jscal2.js"></script>
+<script src="JSCal/src/js/lang/pl.js"></script>
+<link rel="stylesheet" type="text/css" href="JSCal/src/css/jscal2.css"/>
+<link rel="stylesheet" type="text/css" href="JSCal/src/css/border-radius.css" />
+<link rel="stylesheet" type="text/css" href="JSCal/src/css/steel/steel.css" />
+<link rel="shortcut icon" href="pliki/favicon.ico" />
+<script type="text/javascript" src="Jq/jquery-1.11.2.min.js" ></script>
+</head>
+
+<body>
+<script type="text/javascript" src="js/xlsx.js" ></script>
+<script type="text/javascript" src="js/FileSaver.js" ></script>
+<script>
+function s2ab(s) {
+	if(typeof ArrayBuffer !== 'undefined') {
+		var buf = new ArrayBuffer(s.length);
+		var view = new Uint8Array(buf);
+		for (var i=0; i!=s.length; ++i) view[i] = s.charCodeAt(i) & 0xFF;
+		return buf;
+	} else {
+		var buf = new Array(s.length);
+		for (var i=0; i!=s.length; ++i) buf[i] = s.charCodeAt(i) & 0xFF;
+		return buf;
+	}
+}
+
+
+function export_table_to_excel(id, type, fn) {
+var wb = XLSX.utils.table_to_book(document.getElementById(id), {sheet:"Sheet JS"});
+var wbout = XLSX.write(wb, {bookType:type, bookSST:true, type: 'binary'});
+var fname = fn || 'Tabela.' + type;
+try {
+	saveAs(new Blob([s2ab(wbout)],{type:"application/octet-stream"}), fname);
+} catch(e) { if(typeof console != 'undefined') console.log(e, wbout); }
+return wbout;
+}
+
+function doit(type, fn) { return export_table_to_excel('table', type || 'xlsx', fn); }
+</script>
+
+
+
+<script type="text/javascript" src="wz_tooltip/wz_tooltip.js"></script>
+<script language="javascript">
+function maskujKlawisze(AEvent, AMaska)
+{
+    if (window.Event) {
+        kodKlawisza = AEvent.which;
+    } else {
+        kodKlawisza = AEvent.keyCode;
+    }
+
+    if (kodKlawisza == 13) {
+        return true;  // Enter
+    };
+    if (kodKlawisza == 8) {
+        return true;  // Backspace
+    };
+
+
+    if (kodKlawisza == 0) {
+        return true;  // klawisze sterujące
+    };
+
+    klawisz = String.fromCharCode(kodKlawisza);
+
+    if (AMaska.indexOf(klawisz) == -1) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+function capitalize(str) {
+    var tempArray = str.split(' ');
+    for (var i = 0; i < tempArray.length; i++) {
+	    tempArray[i] = tempArray[i].substr(0,1).toUpperCase() + tempArray[i].substr(1).toLowerCase();
+      // tempArray[i] = tempArray[i].charAt(0).toUpperCase() + tempArray[i].substring(1);
+    }
+    return tempArray.join(' ');  
+}
+function Kod_pocztowy(wartosc){
+ if(wartosc.value.length==2 && wartosc.value.indexOf('-')==-1) wartosc.value+='-';
+}
+function Czas(wartosc){
+ if(wartosc.value.length==2 && wartosc.value.indexOf(':')==-1) wartosc.value+=':';
+}
+
+</SCRIPT> 
+
+<table width="100%" border="0" style="height:100%">
+  <tr>
+    <td>
+	<table border="0">
+  <tr>
+   <td align="right" valign="top" colspan="3"><font style="font-family:Arial">
+    <a href="http://rozgrywki.zprp.pl/api/" title="API" target="_blank">API</a>
+    |
+   <a href="http://rozgrywki.zprp.pl?Sezon=195" title="rozgrywki.zprp.pl" target="_blank">rozgrywki.zprp.pl</a>
+    | 
+   <small>Sezon[H]: </small>
+2026/2027  
+    | 
+   <small>Sezon[P]: </small>
+2025/2026   
+   |
+   <small>Zalogowany: </small>Artur JĘDRYCHA | <small></small> Śląski Związek Piłki Ręcznej 
+ | <a href="?a=konto">konto</a> | <small>
+ <span id="session-warning" style="display:blok">
+    Sesja wygaśnie za <span id="session-time"></span>
+    <button class="przycisk" onClick="refreshSession()">Przedłuż</button>
+</span> | <a href="login.php?def=logout">wyloguj</a></font>
+
+<script>
+const WARNING_AT = 60; // sekundy
+let lastRemaining = null;
+
+function formatTime(sec) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function checkSession() {
+    fetch('/session_status.php', { cache: 'no-store' })
+        .then(r => r.json())
+        .then(data => {
+
+            if (!data.logged) {
+                localStorage.setItem('logout', Date.now());
+                window.location.href = "/index.php?a=rozgrywki&Filtr_sezon=195&Filtr_woj=12";
+                return;
+            }
+
+            lastRemaining = data.remaining;
+            document.getElementById('session-time').textContent =
+                formatTime(data.remaining);
+
+            if (data.remaining <= WARNING_AT) {
+                document.getElementById('session-warning').style.color = 'red';
+            } else {
+                document.getElementById('session-warning').style.color = 'black';
+            }
+        });
+}
+
+// przedłużenie = ping
+function refreshSession() {
+    fetch('/session_guard.php', { method: 'POST' })
+        .then(() => checkSession());
+}
+
+// synchronizacja między kartami
+window.addEventListener('storage', e => {
+    if (e.key === 'logout') {
+        window.location.href = "/index.php?a=rozgrywki&Filtr_sezon=195&Filtr_woj=12";
+    }
+});
+
+// polling
+checkSession();
+setInterval(checkSession, 1000);
+</script>
+
+
+</td>
+ 
+ </tr>
+  <tr>
+    <td align="left" width="5%"><a href="http://www.zprp.pl/" title="Związek Piłki Ręcznej w Polsce" target="_blank"><img src="pliki/logo.jpg" /></a></td>
+    <td align="left"><a href="http://www.zprp.pl/" title="Związek Piłki Ręcznej w Polsce" target="_blank"><img src="pliki/zprp.png" /></a>
+	
+	</td>
+	<td align="right" width="5%">
+	<!--<img src="pliki/ZPRP_100_300.png" width="150" /> -->
+	<!--<a href="https://handball23.com/" target="_blank"><img src="pliki/SPECIAL_PRIMARY_FORM_HORIZONTAL.png" height="150" /></a> -->
+	
+	</td>
+  </tr>
+</table>	</td>
+  </tr>
+
+  
+  
+  <tr>
+    <td align="left">
+<hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />
+<a style="vertical-align:bottom" href="index.php" title="Strona początkowa" target="_self"><img style="vertical-align:bottom" src="pliki/domek.png" height="20" border="0" /></a>
+<a href="?a=terminarz"  class="przycisk" >Terminarz</a>	
+	<a href="?a=rozgrywki&amp;Filtr_sezon=195&amp;Filtr_woj=12" class="przycisk2">Rozgrywki</a>
+
+
+	<a href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195"  class="przycisk" >Statystyki</a>
+
+	<a href="?a=sedzia&amp;Filtr_archiwum=1"  class="przycisk" >Sędziowie i Delegaci</a>
+ 
+	
+
+</td>
+</tr>
+  <tr>
+    <td align="left" valign="top" style="height:400px">
+<hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />
+<style>
+#tabelka {
+  font-family: Arial;
+  border-collapse: collapse;
+  font-size:11px;
+}
+
+#tabelka td, #tabelka th {
+  border: 1px solid #ddd;
+  padding: 5px;
+}
+
+#tabelka tr:nth-child(even){background-color: #f2f2f2;}
+
+#tabelka tr:hover {background-color: #ddd;}
+
+#tabelka th {
+  padding-top: 5px;
+  padding-bottom: 5px;
+  text-align: center;
+  background-color: #666666;
+  color: white;
+}
+</style>
+
+
+<!--<table border="1" cellpadding="2" cellspacing="0" style="font-size:12px; font-family:Arial" > -->
+<table id="tabelka">
+  <form method="get">
+    <input type="hidden" name="a" value="rozgrywki" />
+    <input type="hidden" name="sort" value="" />
+    <input type="hidden" name="Filtr_sezon" value="195" />
+    <input type="hidden" name="Filtr_woj" value="12" />
+    <input type="hidden" name="Filtr_klub" value="" />
+    <input type="hidden" name="Filtr_kategoria" value="" />
+    <input type="hidden" name="Filtr_plec" value="" />
+    <tr align="center">
+      <th>Lp</th>
+      <th><a href="?a=rozgrywki&amp;Filtr_woj=12&amp;Filtr_kategoria=&amp;Filtr_sezon=195&amp;Filtr_plec=&amp;Nazwa=&amp;sort=Nazwa"><small>Nazwa</small></a><br />
+        <input type='text' name='Nazwa' value="" size="25%">
+      </th>
+      <th><small>Płeć</small><br />
+        <select name="Filtr_plec" onchange="this.form.submit()" style="width:50px; font-size:12px; font-family:Arial">
+          <option value="">---</option>
+          <option value="K" >Kobiety</option>
+          <option value="M" >Mężczyźni</option>
+		  <option value="X" >Mix</option>
+        </select>
+      </th>
+      <th><small>Kategoria</small><br />
+        <select name="Filtr_kategoria" onchange="this.form.submit()" style="width:100px; font-size:12px; font-family:Arial">
+          <option value="">---</option>
+                    <option value="1" >Senior (2)</option>
+                    <option value="2" >Junior (1)</option>
+                    <option value="3" >Junior mł. (2)</option>
+                    <option value="4" >Młodzik (2)</option>
+                  </select>
+      </th>
+      <th><small>Woj</small><br />
+        <select name="Filtr_woj" onchange="this.form.submit()" style="width:50px; font-size:12px; font-family:Arial" disabled="disabled">
+          <option value="">---</option>
+                    <option value="20" >DRK (13)</option>
+                    <option value="1" >DS (8)</option>
+                    <option value="2" >KP (1)</option>
+                    <option value="3" >LU (6)</option>
+                    <option value="4" >LB (6)</option>
+                    <option value="5" >LD (3)</option>
+                    <option value="7" >MA (7)</option>
+                    <option value="8" >OP (8)</option>
+                    <option value="9" >PK (1)</option>
+                    <option value="10" >PD (1)</option>
+                    <option value="11" >PM (9)</option>
+                    <option value="12" selected="selected">SL (7)</option>
+                    <option value="13" >SK (6)</option>
+                    <option value="6" >MZ (5)</option>
+                    <option value="14" >WP (8)</option>
+                  </select>
+      </th>
+      <th><small>Kod</small></th>
+	  <th><small>Typ</small><br />
+        <select name="Filtr_typ" onchange="this.form.submit()" style="font-size:12px; font-family:Arial">
+          <option value="">---</option>
+                    <option value="1" >SL</option>
+                    <option value="2" >LC</option>
+                    <option value="3" >PP</option>
+                    <option value="4" >MP</option>
+                    <option value="5" >I</option>
+                    <option value="6" >II</option>
+                    <option value="7" >III</option>
+                    <option value="8" >Mł</option>
+                  </select>
+	  
+	  </th>
+      <th><small>Sezon</small><br />
+        <select name="Filtr_sezon" onchange="this.form.submit()" style="width:90px; font-size:12px; font-family:Arial">
+          <option value="">---</option>
+                    <option value="195" selected="selected">2026/2027 (7)</option>
+                    <option value="194" >2025/2026 (14)</option>
+                    <option value="193" >2024/2025 (14)</option>
+                    <option value="192" >2023/2024 (14)</option>
+                    <option value="191" >2022/2023 (13)</option>
+                    <option value="190" >2021/2022 (14)</option>
+                    <option value="188" >2020/2021 (12)</option>
+                    <option value="187" >2019/2020 (14)</option>
+                    <option value="186" >2018/2019 (13)</option>
+                    <option value="185" >2017/2018 (15)</option>
+                    <option value="184" >2016/2017 (14)</option>
+                    <option value="164" >2015/2016 (14)</option>
+                    <option value="147" >2014/2015 (14)</option>
+                    <option value="104" >2013/2014 (15)</option>
+                  </select>
+      </th>
+      <th>Stan</th>
+	  <th>Regulamin</th>
+      <th>Liczba<br />
+        wymaganych<br />
+        drużyn</th>
+      <th>Liczba<br />
+        zgłoszonych<br />
+        drużyn</th>
+      <th><a href="?a=rozgrywki&b=dodaj&ID_sezon=195" class="przycisk">PRZYPISANIE ROZGRYWEK W SEZONIE</a></th>
+      <th><input class="przycisk3" name="akcja" type="submit" value="SZUKAJ" /></th>
+    </tr>
+  </form>
+    <tr>
+    <td align="right" title="12024">1.</td>
+    <td align="left">II Liga Kobiet gr. 4	</td>
+    <td align="left">K</td>
+    <td align="left">Senior</td>
+    <td align="left">SL</td>
+    <td align="left">IIK4</td>
+	<td align="center">II</td>
+    <td align="left">2026/2027</td>
+    <td align="left"><font color=red>nieaktywny</font></td>
+	<td align="left">
+&nbsp;	
+	</td>
+    <td align="left">6</td>
+        <td align="left" >6</td>
+    <td>
+	<a class="przycisk3" href="?a=rundy&amp;IdRozgr=12024&amp;Filtr_sezon=195&Filtr_woj=12">Rundy &nbsp;&nbsp;3</a>
+    <a class="przycisk3" href="?a=kolejki&amp;IdRozgr=12024&amp;Filtr_sezon=195&Filtr_woj=12">Kolejki</a>
+	<a class="przycisk3" href="?a=zawody&amp;IdRozgr=12024&amp;Filtr_sezon=195&Filtr_woj=12">Zawody</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12024&amp;Filtr_sezon=195&Filtr_woj=12">Drużyny</a> 
+	<a class="przycisk3" href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195&amp;IdRozgr=12024&Filtr_woj=12">Tabela</a>
+	<a class="przycisk3" href="?a=terminarz&amp;Filtr_sezon=195&amp;IdRozgr=12024&amp;IdRundy=ALL&Filtr_woj=12">Terminarz</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=edycja&amp;IdRozgr=12024&amp;Filtr_sezon=195&Filtr_woj=12">Edycja</a>
+      	  
+	  
+    </td>
+  </tr>
+    <tr>
+    <td align="right" title="12023">2.</td>
+    <td align="left">II Liga Mężczyzn gr. 4	</td>
+    <td align="left">M</td>
+    <td align="left">Senior</td>
+    <td align="left">SL</td>
+    <td align="left">IIM4</td>
+	<td align="center">II</td>
+    <td align="left">2026/2027</td>
+    <td align="left">aktywny</td>
+	<td align="left">
+&nbsp;	
+	</td>
+    <td align="left">10</td>
+        <td align="left" >10</td>
+    <td>
+	<a class="przycisk3" href="?a=rundy&amp;IdRozgr=12023&amp;Filtr_sezon=195&Filtr_woj=12">Rundy &nbsp;&nbsp;2</a>
+    <a class="przycisk3" href="?a=kolejki&amp;IdRozgr=12023&amp;Filtr_sezon=195&Filtr_woj=12">Kolejki</a>
+	<a class="przycisk3" href="?a=zawody&amp;IdRozgr=12023&amp;Filtr_sezon=195&Filtr_woj=12">Zawody</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12023&amp;Filtr_sezon=195&Filtr_woj=12">Drużyny</a> 
+	<a class="przycisk3" href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195&amp;IdRozgr=12023&Filtr_woj=12">Tabela</a>
+	<a class="przycisk3" href="?a=terminarz&amp;Filtr_sezon=195&amp;IdRozgr=12023&amp;IdRundy=ALL&Filtr_woj=12">Terminarz</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=edycja&amp;IdRozgr=12023&amp;Filtr_sezon=195&Filtr_woj=12">Edycja</a>
+      	  
+	  
+    </td>
+  </tr>
+    <tr>
+    <td align="right" title="12094">3.</td>
+    <td align="left">Rozgrywki Regionalne - Młodzicy	</td>
+    <td align="left">M</td>
+    <td align="left">Młodzik</td>
+    <td align="left">SL</td>
+    <td align="left">S/MłMR</td>
+	<td align="center"><font color=red>BRAK</font></td>
+    <td align="left">2026/2027</td>
+    <td align="left"><font color=red>nieaktywny</font></td>
+	<td align="left">
+&nbsp;	
+	</td>
+    <td align="left">12</td>
+        <td align="left" bgcolor="#CCCCCC">0</td>
+    <td>
+	<a class="przycisk3" href="?a=rundy&amp;IdRozgr=12094&amp;Filtr_sezon=195&Filtr_woj=12">Rundy &nbsp;&nbsp;0</a>
+    <a class="przycisk3" href="?a=kolejki&amp;IdRozgr=12094&amp;Filtr_sezon=195&Filtr_woj=12">Kolejki</a>
+	<a class="przycisk3" href="?a=zawody&amp;IdRozgr=12094&amp;Filtr_sezon=195&Filtr_woj=12">Zawody</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12094&amp;Filtr_sezon=195&Filtr_woj=12">Drużyny</a> 
+	<a class="przycisk3" href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195&amp;IdRozgr=12094&Filtr_woj=12">Tabela</a>
+	<a class="przycisk3" href="?a=terminarz&amp;Filtr_sezon=195&amp;IdRozgr=12094&amp;IdRundy=ALL&Filtr_woj=12">Terminarz</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=edycja&amp;IdRozgr=12094&amp;Filtr_sezon=195&Filtr_woj=12">Edycja</a>
+            <a class="przycisk3" href="?a=rozgrywki&amp;b=usun&amp;IdRozgr=12094&amp;Filtr_sezon=195&Filtr_woj=12">Usuń</a>
+      	  
+	  
+    </td>
+  </tr>
+    <tr>
+    <td align="right" title="12095">4.</td>
+    <td align="left">Rozgrywki Regionalne - Młodziczki	</td>
+    <td align="left">K</td>
+    <td align="left">Młodzik</td>
+    <td align="left">SL</td>
+    <td align="left">S/MłKR</td>
+	<td align="center"><font color=red>BRAK</font></td>
+    <td align="left">2026/2027</td>
+    <td align="left"><font color=red>nieaktywny</font></td>
+	<td align="left">
+&nbsp;	
+	</td>
+    <td align="left">14</td>
+        <td align="left" bgcolor="#CCCCCC">0</td>
+    <td>
+	<a class="przycisk3" href="?a=rundy&amp;IdRozgr=12095&amp;Filtr_sezon=195&Filtr_woj=12">Rundy &nbsp;&nbsp;0</a>
+    <a class="przycisk3" href="?a=kolejki&amp;IdRozgr=12095&amp;Filtr_sezon=195&Filtr_woj=12">Kolejki</a>
+	<a class="przycisk3" href="?a=zawody&amp;IdRozgr=12095&amp;Filtr_sezon=195&Filtr_woj=12">Zawody</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12095&amp;Filtr_sezon=195&Filtr_woj=12">Drużyny</a> 
+	<a class="przycisk3" href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195&amp;IdRozgr=12095&Filtr_woj=12">Tabela</a>
+	<a class="przycisk3" href="?a=terminarz&amp;Filtr_sezon=195&amp;IdRozgr=12095&amp;IdRundy=ALL&Filtr_woj=12">Terminarz</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=edycja&amp;IdRozgr=12095&amp;Filtr_sezon=195&Filtr_woj=12">Edycja</a>
+            <a class="przycisk3" href="?a=rozgrywki&amp;b=usun&amp;IdRozgr=12095&amp;Filtr_sezon=195&Filtr_woj=12">Usuń</a>
+      	  
+	  
+    </td>
+  </tr>
+    <tr>
+    <td align="right" title="12083">5.</td>
+    <td align="left">Śląska Liga Juniorek	</td>
+    <td align="left">K</td>
+    <td align="left">Junior</td>
+    <td align="left">SL</td>
+    <td align="left">S/JK</td>
+	<td align="center">Mł</td>
+    <td align="left">2026/2027</td>
+    <td align="left"><font color=red>nieaktywny</font></td>
+	<td align="left">
+&nbsp;	
+	</td>
+    <td align="left">5</td>
+        <td align="left" bgcolor="#CCCCCC">0</td>
+    <td>
+	<a class="przycisk3" href="?a=rundy&amp;IdRozgr=12083&amp;Filtr_sezon=195&Filtr_woj=12">Rundy &nbsp;&nbsp;1</a>
+    <a class="przycisk3" href="?a=kolejki&amp;IdRozgr=12083&amp;Filtr_sezon=195&Filtr_woj=12">Kolejki</a>
+	<a class="przycisk3" href="?a=zawody&amp;IdRozgr=12083&amp;Filtr_sezon=195&Filtr_woj=12">Zawody</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12083&amp;Filtr_sezon=195&Filtr_woj=12">Drużyny</a> 
+	<a class="przycisk3" href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195&amp;IdRozgr=12083&Filtr_woj=12">Tabela</a>
+	<a class="przycisk3" href="?a=terminarz&amp;Filtr_sezon=195&amp;IdRozgr=12083&amp;IdRundy=ALL&Filtr_woj=12">Terminarz</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=edycja&amp;IdRozgr=12083&amp;Filtr_sezon=195&Filtr_woj=12">Edycja</a>
+      	  
+	  
+    </td>
+  </tr>
+    <tr>
+    <td align="right" title="12084">6.</td>
+    <td align="left">Śląska Liga Juniorek Młodszych	</td>
+    <td align="left">K</td>
+    <td align="left">Junior mł.</td>
+    <td align="left">SL</td>
+    <td align="left">S/JmK</td>
+	<td align="center">Mł</td>
+    <td align="left">2026/2027</td>
+    <td align="left"><font color=red>nieaktywny</font></td>
+	<td align="left">
+&nbsp;	
+	</td>
+    <td align="left">9</td>
+        <td align="left" bgcolor="#CCCCCC">0</td>
+    <td>
+	<a class="przycisk3" href="?a=rundy&amp;IdRozgr=12084&amp;Filtr_sezon=195&Filtr_woj=12">Rundy &nbsp;&nbsp;1</a>
+    <a class="przycisk3" href="?a=kolejki&amp;IdRozgr=12084&amp;Filtr_sezon=195&Filtr_woj=12">Kolejki</a>
+	<a class="przycisk3" href="?a=zawody&amp;IdRozgr=12084&amp;Filtr_sezon=195&Filtr_woj=12">Zawody</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12084&amp;Filtr_sezon=195&Filtr_woj=12">Drużyny</a> 
+	<a class="przycisk3" href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195&amp;IdRozgr=12084&Filtr_woj=12">Tabela</a>
+	<a class="przycisk3" href="?a=terminarz&amp;Filtr_sezon=195&amp;IdRozgr=12084&amp;IdRundy=ALL&Filtr_woj=12">Terminarz</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=edycja&amp;IdRozgr=12084&amp;Filtr_sezon=195&Filtr_woj=12">Edycja</a>
+      	  
+	  
+    </td>
+  </tr>
+    <tr>
+    <td align="right" title="12085">7.</td>
+    <td align="left">Śląska Liga Juniorów Młodszych	</td>
+    <td align="left">M</td>
+    <td align="left">Junior mł.</td>
+    <td align="left">SL</td>
+    <td align="left">S/JmM</td>
+	<td align="center">Mł</td>
+    <td align="left">2026/2027</td>
+    <td align="left"><font color=red>nieaktywny</font></td>
+	<td align="left">
+&nbsp;	
+	</td>
+    <td align="left">12</td>
+        <td align="left" bgcolor="#CCCCCC">0</td>
+    <td>
+	<a class="przycisk3" href="?a=rundy&amp;IdRozgr=12085&amp;Filtr_sezon=195&Filtr_woj=12">Rundy &nbsp;&nbsp;1</a>
+    <a class="przycisk3" href="?a=kolejki&amp;IdRozgr=12085&amp;Filtr_sezon=195&Filtr_woj=12">Kolejki</a>
+	<a class="przycisk3" href="?a=zawody&amp;IdRozgr=12085&amp;Filtr_sezon=195&Filtr_woj=12">Zawody</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=zespoly&amp;IdRozgr=12085&amp;Filtr_sezon=195&Filtr_woj=12">Drużyny</a> 
+	<a class="przycisk3" href="?a=statystyki&amp;b=tabela&amp;Filtr_sezon=195&amp;IdRozgr=12085&Filtr_woj=12">Tabela</a>
+	<a class="przycisk3" href="?a=terminarz&amp;Filtr_sezon=195&amp;IdRozgr=12085&amp;IdRundy=ALL&Filtr_woj=12">Terminarz</a>
+	<a class="przycisk3" href="?a=rozgrywki&amp;b=edycja&amp;IdRozgr=12085&amp;Filtr_sezon=195&Filtr_woj=12">Edycja</a>
+      	  
+	  
+    </td>
+  </tr>
+  </table>
+</td>
+  </tr>
+
+	</td>
+  </tr>
+
+
+  <tr>
+    <td align="right">
+<hr style=" height:2px; background-color:#6C6C6C; margin-bottom:4px; margin-top:0px " />	
+			<div align="right">
+        <p><font size="1" face="Tahoma">&copy; <em>by</em> ZPRP | <em>designed by</em> Pilar (Domtel-Sport) 2013-2026 &nbsp; &nbsp; &nbsp; &nbsp; Czas: 0.00963 s. | Pamięć: 1.5 megabytes</font></p>
+		</div> </td>
+  </tr>
+</table>
+
+
+
+</body>
+</html>

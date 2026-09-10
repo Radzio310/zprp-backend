@@ -257,6 +257,36 @@ def zprp_settlement_reason(code: Any, role: Any) -> Optional[str]:
 
 
 # -------------------------
+# Potrojny ryczalt stolikowego
+# -------------------------
+
+#: Ile razy wiecej dostaje stolikowy, ktory zostal przy stoliku sam.
+TRIPLE_TABLE_FACTOR = 3
+
+#: Okregi z ta opcja. Na razie tylko Slask (decyzja uzytkownika z 10.09.2026);
+#: wlaczenie kolejnego okregu to dopisanie klucza, bez zmian w regule.
+TRIPLE_TABLE_PROVINCES = frozenset({"SLASKIE"})
+
+
+def triple_table_allowed(code: Any, role: Any, province: Any) -> bool:
+    """
+    Czy dla tej obsady wolno wlaczyc potrojny ryczalt.
+
+    Sytuacja: na meczu OKREGOWYM stolik prowadzi jedna osoba, bo stolikowy
+    z klubu sie nie stawil. Sedzia robi wtedy robote za trzech i tyle dostaje;
+    dojazd zostaje normalny, a klub gospodarza placi te sama trzykrotnosc.
+
+    ⚠ Tylko stoliki OKREGOWE. Stoliki lig centralnych (II liga w gore) i puchar
+    wojewodzki, ktory placi ich stawkami, sa poza ta opcja.
+    """
+    if str(role or "").strip() != ROLE_TABLE:
+        return False
+    if is_provincial_cup(code) or match_level(code) != "district":
+        return False
+    return province_key(province) in TRIPLE_TABLE_PROVINCES
+
+
+# -------------------------
 # Etap pucharu
 # -------------------------
 

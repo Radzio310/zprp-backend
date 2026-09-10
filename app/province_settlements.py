@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 
 from app import settlement_engine as E
 from app import settlement_rates as R
@@ -26,6 +26,7 @@ from app.db import (
     okreg_rates,
     province_judges,
     province_modules,
+    province_match_overrides,
     province_settlement_matches,
 )
 from app.province_settlement_sync import (
@@ -130,6 +131,18 @@ async def _assignments(
     # odsianie go tutaj zabraloby ja bezpowrotnie.
     rows = await database.fetch_all(query)
 
+    # Reczne wyjatki na meczu - tu potrzebny jest tylko potrojny ryczałt
+    # stolikowego. Jeden slownik na okreg, zamiast zapytania na mecz.
+    marked = await database.fetch_all(
+        select(province_match_overrides.c.match_key).where(
+            and_(
+                province_match_overrides.c.province == province,
+                province_match_overrides.c.triple_table.is_(True),
+            )
+        )
+    )
+    triple_keys = {str(row["match_key"]) for row in marked}
+
     out: list[E.Assignment] = []
     for row in rows:
         out.append(
@@ -149,6 +162,7 @@ async def _assignments(
                 distance_km=float(row["distance_km"]) if row["distance_km"] is not None else None,
                 distance_source=row["distance_source"],
                 approved=row["approved"],
+                triple_table=str(row["match_key"]) in triple_keys,
             )
         )
     return out
@@ -225,7 +239,10 @@ def _match_json(match: E.SettledMatch) -> dict:
         "code": match.match_code,
         "category": match.category,
         "level": match.level,
-        "role": match.role,
+        # ⚠ „x3" doklejamy do ROLI, bo to jedyne pole, ktore aplikacja sedziego
+        # juz pokazuje przy meczu - dzieki temu potrojny ryczałt widac bez
+        # wydawania nowego builda. W bazie rola zostaje czysta.
+        "role": match.role + (" x3" if match.triple_table else ""),
         "origin": match.origin,
         "city": match.city,
         "teams": match.teams,
@@ -241,6 +258,7 @@ def _match_json(match: E.SettledMatch) -> dict:
         "stage_guessed": match.stage_guessed,
         "status": match.status,
         "zprp_reason": match.zprp_reason,
+        "triple_table": match.triple_table,
     }
 
 
@@ -434,6 +452,33 @@ async def summary(
     }
 
 
+async def _solo_table_matches(province: str, keys: list[str]) -> set[str]:
+    """
+    Mecze, na ktorych przy stoliku stal JEDEN sedzia.
+
+    Tylko tam wolno zaproponowac potrojny ryczałt - a liczbe stolikowych zna
+    caly okreg, nie pojedynczy sedzia, wiec pytamy o nia osobno.
+    """
+    if not keys:
+        return set()
+    rows = await database.fetch_all(
+        select(
+            province_settlement_matches.c.match_key,
+            func.count().label("crew"),
+        )
+        .where(
+            and_(
+                province_settlement_matches.c.province == province,
+                province_settlement_matches.c.match_key.in_(keys),
+                province_settlement_matches.c.role == R.ROLE_TABLE,
+                province_settlement_matches.c.active.is_(True),
+            )
+        )
+        .group_by(province_settlement_matches.c.match_key)
+    )
+    return {str(row["match_key"]) for row in rows if int(row["crew"] or 0) == 1}
+
+
 async def _judge_payload(
     key: str,
     judge_id: str,
@@ -462,12 +507,21 @@ async def _judge_payload(
     if entry is None:
         names = await _judge_names(key)
         entry = E.JudgeSettlement(judge_id=judge_id, judge_name=names.get(judge_id, ""))
+    payload = _entry_json(entry, with_matches=True)
+    solo = await _solo_table_matches(key, [item.match_key for item in entry.matches])
+    for row in payload.get("rows") or []:
+        row["triple_allowed"] = bool(
+            row["match_key"] in solo
+            and str(row["role"]).startswith(R.ROLE_TABLE)
+            and R.triple_table_allowed(row["code"], R.ROLE_TABLE, key)
+        )
+
     return {
         "province": key,
         "period": data["period"],
         "include_future": include_future,
         "include_zprp": include_zprp,
-        "entry": _entry_json(entry, with_matches=True),
+        "entry": payload,
         "travel": [_travel_json(r) for r in E.travel_rows([entry])],
         # Obsady ZPRP tego sedziego. Doliczone przelacznikiem siedza tez
         # w `entry.rows` ze znacznikiem `zprp_reason`; niedoliczone - tylko tu,

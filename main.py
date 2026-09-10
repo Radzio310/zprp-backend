@@ -81,6 +81,8 @@ from app.province_settlements import (
 )
 from app.province_settlement_sync import run_settlement_sync_scheduler
 from app.province_settlement_pdf import router as province_settlement_pdf_router
+from app.province_clubs import router as province_clubs_router
+from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
 from app.province_travel import router as province_travel_router
 from app.province_stats_export import router as province_stats_export_router
@@ -279,6 +281,8 @@ app.include_router(central_rates_router)
 app.include_router(province_settlements_router)
 app.include_router(province_stats_router)
 app.include_router(province_settlement_pdf_router)
+# Panel klubow: /province/clubs. Wlasny prefiks, wiec nie wchodzi pod catch-all.
+app.include_router(province_clubs_router)
 app.include_router(province_events_router)
 app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
@@ -1283,6 +1287,10 @@ async def startup():
     # tylko po wojewodztwach z WLACZONYM modulem i skonfigurowanym kontem sync.
     _settlement_sync_task = asyncio.create_task(run_settlement_sync_scheduler())
     logger.info("✅ Province settlement sync started (24 h)")
+    # Kluby i druzyny sezonu do Panelu klubow - osobna petla, zeby dluga lista
+    # klubow nie opoznila pobrania meczow.
+    _clubs_sync_task = asyncio.create_task(run_clubs_sync_scheduler())
+    logger.info("✅ Province clubs sync started (24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")
 
 @app.on_event("shutdown")

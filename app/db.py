@@ -829,6 +829,110 @@ zprp_match_venues = Table(
 )
 
 
+# 18.1h) Panel klubów: rozgrywki i drużyny z sezonu
+#
+# Drzewo SEZON -> ROZGRYWKI -> DRUŻYNA -> KLUB, zczytywane kontem komisyjnym
+# (patrz `province_clubs_scrape`). Jedna drużyna gra czasem w dwóch
+# rozgrywkach, stąd `competition_id` w kluczu.
+province_competitions = Table(
+    "province_competitions",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("season", String, primary_key=True),          # "2026/2027"
+    Column("competition_id", String, primary_key=True),  # IdRozgr
+    Column("season_id", String, nullable=True),          # numer sezonu w ZPRP (195)
+    Column("name", String, nullable=False, server_default=""),
+    Column("code", String, nullable=True),               # IIK4, S/JmM
+    Column("gender", String, nullable=True),
+    Column("category", String, nullable=True),
+    Column("kind", String, nullable=True),
+    Column("state", String, nullable=True),
+    Column("teams_required", Integer, nullable=True),
+    Column("teams_registered", Integer, nullable=True),
+    Column("fetched_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+province_club_teams = Table(
+    "province_club_teams",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("season", String, primary_key=True),
+    Column("team_id", String, primary_key=True),
+    Column("competition_id", String, primary_key=True),
+    Column("team_name", String, nullable=False, server_default=""),
+    # Klucz porównania z nazwą gospodarza w meczu - mecze nie niosą numeru drużyny.
+    Column("name_key", String, nullable=False, server_default="", index=True),
+    Column("team_province", String, nullable=True),
+    Column("club_id", String, nullable=True, index=True),
+    Column("category", String, nullable=True),
+    Column("gender", String, nullable=True),
+    Column("competition_name", String, nullable=True),
+    Column("competition_code", String, nullable=True),
+    Column("fetched_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Ustawienia klubu: nazwa do pokazania i to, czy okręg w ogóle go obciąża.
+province_clubs = Table(
+    "province_clubs",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("club_id", String, primary_key=True),
+    Column("display_name", String, nullable=True),
+    Column("settles_via_district", Boolean, nullable=False, server_default=text("true")),
+    Column("settles_since", Date, nullable=True),
+    Column("note", String, nullable=True),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Wpłaty i wypłaty. Saldo liczy się z nich i z obciążeń meczowych - nie trzymamy
+# go w kolumnie, bo poprawiona wstecz stawka ma je zmieniać sama.
+province_club_entries = Table(
+    "province_club_entries",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("club_id", String, nullable=False, index=True),
+    Column("team_id", String, nullable=True),
+    Column("team_name", String, nullable=True),
+    Column("season", String, nullable=True, index=True),
+    Column("kind", String, nullable=False),              # "in" | "out"
+    Column("amount", Float, nullable=False),
+    Column("description", String, nullable=True),
+    Column("day", Date, nullable=True),
+    Column("source", String, nullable=True),             # "manual" | "excel"
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Ręczne wyjątki na meczu: nie licz go klubowi, przenieś na inną drużynę
+# (zmiana gospodarza) albo policz stolikowemu potrójny ryczałt.
+province_match_overrides = Table(
+    "province_match_overrides",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("match_key", String, primary_key=True),
+    Column("excluded", Boolean, nullable=False, server_default=text("false")),
+    Column("team_id", String, nullable=True),
+    Column("team_name", String, nullable=True),
+    Column("triple_table", Boolean, nullable=False, server_default=text("false")),
+    Column("note", String, nullable=True),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Rejestr sezonów pobranych w całości - jak przy rozliczeniach.
+province_club_seasons = Table(
+    "province_club_seasons",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("season", String, primary_key=True),
+    Column("completed_at", DateTime(timezone=True), nullable=False),
+    Column("competitions", Integer, nullable=True),
+    Column("teams", Integer, nullable=True),
+)
+
+
 # 18.2) Tabele odległości okręgowych per województwo
 okreg_distances = Table(
     "okreg_distances",
