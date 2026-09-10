@@ -695,6 +695,10 @@ async def my_stats(
     judge_id: str = Query(...),
     season: Optional[str] = Query(None, description="np. 2026/2027; brak = wszystko"),
     brief: bool = Query(False, description="Same sumy, bez listy meczów - dla kafla na ekranie Więcej"),
+    include_future: bool = Query(
+        False,
+        description="Wlicz mecze jeszcze nierozegrane - przełącznik jak w rozliczeniu",
+    ),
 ):
     key = require_province(province)
     if not await module_enabled(key, "stats"):
@@ -712,10 +716,17 @@ async def my_stats(
 
     now = _now()
     matches: list[dict] = []
+    # Lista sezonow ze WSZYSTKICH meczow, zanim odfiltrujemy wybrany. Dotad
+    # liczona byla po filtrze, wiec po wyborze sezonu (aplikacja wybiera
+    # najnowszy od razu) pigulki kurczyly sie do jednej i minione sezony
+    # znikaly z ekranu.
+    all_seasons: set[str] = set()
     for row in rows:
         when = row["match_at"]
         day = when.date() if when else None
         season_label = _season_of(day)
+        if season_label:
+            all_seasons.add(season_label)
         if season and season_label != season:
             continue
         code = str(row["match_code"] or "")
@@ -738,37 +749,40 @@ async def my_stats(
 
     matches.sort(key=lambda m: m["match_at"] or "", reverse=True)
 
-    seasons = sorted({m["season"] for m in matches if m["season"]}, reverse=True)
-    played = [m for m in matches if not m["future"]]
+    seasons = sorted(all_seasons, reverse=True)
+    # Co wchodzi do sum: domyslnie tylko rozegrane, z przelacznikiem takze
+    # przyszle - ta sama umowa co `include_future` w rozliczeniu.
+    counted = matches if include_future else [m for m in matches if not m["future"]]
 
     def tally(field: str) -> dict[str, int]:
         out: dict[str, int] = {}
-        for item in played:
+        for item in counted:
             value = str(item.get(field) or "").strip()
             if value:
                 out[value] = out.get(value, 0) + 1
         return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
 
     by_month: dict[str, int] = {}
-    for item in played:
+    for item in counted:
         if item["day"]:
             by_month[item["day"][:7]] = by_month.get(item["day"][:7], 0) + 1
 
-    distances = [m["distance_km"] for m in played if m["distance_km"] is not None]
+    distances = [m["distance_km"] for m in counted if m["distance_km"] is not None]
 
     return {
         "province": key,
         "judge_id": judge_id,
         "season": season,
         "seasons": seasons,
+        "include_future": include_future,
         "totals": {
-            "matches": len(played),
+            "matches": len(counted),
             "future": sum(1 for m in matches if m["future"]),
-            "district": sum(1 for m in played if m["origin"] == "district"),
-            "outside": sum(1 for m in played if m["origin"] == "outside"),
+            "district": sum(1 for m in counted if m["origin"] == "district"),
+            "outside": sum(1 for m in counted if m["origin"] == "outside"),
             "km": round(sum(distances) * R.ROUND_TRIP, 1),
-            "cities": len({m["city"] for m in played if m["city"]}),
-            "halls": len({m["hall"] for m in played if m["hall"]}),
+            "cities": len({m["city"] for m in counted if m["city"]}),
+            "halls": len({m["hall"] for m in counted if m["hall"]}),
             "longest_km": max(distances) if distances else 0,
         },
         "by_category": tally("category"),
