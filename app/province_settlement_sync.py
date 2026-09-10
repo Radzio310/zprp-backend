@@ -41,6 +41,7 @@ from app.db import (
     province_matches,
     province_modules,
     province_settlement_matches,
+    province_settlement_judges,
     province_settlement_runs,
     province_settlement_seasons,
     zprp_match_venues,
@@ -502,6 +503,39 @@ async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dic
     return {k: v for k, v in judges.items() if v.get("full_name")}
 
 
+async def _store_judges(province: str, judges: dict[str, dict]) -> None:
+    """
+    Kopia nazwisk z listy „Sedziowie i Delegaci".
+
+    ⚠ `province_judges` prowadzi czlowiek w panelu okregu i potrafi nie miec
+    kogos, kto ma obsady (sedzia dopisany w ZPRP w trakcie sezonu). Bez tej
+    kopii zestawienie pokazywalo goly NUMER sedziego, a taki numer szedl dalej
+    na PDF dla ksiegowosci.
+    """
+    now = _now()
+    for judge_id, judge in judges.items():
+        name = _s(judge.get("full_name"))
+        if not name:
+            continue
+        values = {
+            "province": province,
+            "judge_id": _s(judge_id),
+            "full_name": name,
+            "home_city": _s(judge.get("city")),
+            "updated_at": now,
+        }
+        statement = pg_insert(province_settlement_judges).values(**values)
+        await database.execute(
+            statement.on_conflict_do_update(
+                index_elements=[
+                    province_settlement_judges.c.province,
+                    province_settlement_judges.c.judge_id,
+                ],
+                set_={k: v for k, v in values.items() if k not in ("province", "judge_id")},
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # Hale meczow (miasto z publicznego API)
 # ---------------------------------------------------------------------------
@@ -778,6 +812,7 @@ async def refresh_province(
             judges = await _load_judges(client, cookies, province)
             if not judges:
                 return await finish(False, error="Nie udało się odczytać listy sędziów okręgu")
+            await _store_judges(province, judges)
 
             # --- ktore sezony ---
             current = season_of(_now())

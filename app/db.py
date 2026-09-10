@@ -921,6 +921,22 @@ province_match_overrides = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# 18.1i) Nazwiska sędziów z listy okręgu, zapamiętane przy pobieraniu rozliczeń
+#
+# `province_judges` prowadzi człowiek w panelu i potrafi nie mieć kogoś, kto ma
+# obsady. Bez tej kopii zestawienie pokazywało goły NUMER sędziego - i taki
+# numer trafiał na PDF dla księgowości.
+province_settlement_judges = Table(
+    "province_settlement_judges",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("full_name", String, nullable=True),
+    Column("home_city", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+
 # Rejestr sezonów pobranych w całości - jak przy rozliczeniach.
 province_club_seasons = Table(
     "province_club_seasons",

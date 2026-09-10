@@ -27,6 +27,7 @@ from app.db import (
     province_judges,
     province_modules,
     province_match_overrides,
+    province_settlement_judges,
     province_settlement_matches,
 )
 from app.province_settlement_sync import (
@@ -107,11 +108,36 @@ async def _versions(province: str) -> tuple[list[dict], list[dict]]:
 
 
 async def _judge_names(province: str) -> dict[str, str]:
+    """
+    Nazwiska do zestawienia: lista okregu, a dziury zatyka kopia z pobierania.
+
+    ⚠ `province_judges` prowadzi czlowiek i potrafi nie miec kogos, kto ma
+    obsady - wtedy w zestawieniu i na PDF stal goly numer („465"). Kopia
+    z listy „Sedziowie i Delegaci" (`province_settlement_judges`) jest zapasem,
+    a nie zrodlem prawdy: lista okregu wygrywa, gdy ma nazwisko.
+    """
+    out: dict[str, str] = {}
+
+    backup = await database.fetch_all(
+        select(
+            province_settlement_judges.c.judge_id,
+            province_settlement_judges.c.full_name,
+        ).where(province_settlement_judges.c.province == province)
+    )
+    for row in backup:
+        name = str(row["full_name"] or "").strip()
+        if name:
+            out[str(row["judge_id"])] = name
+
     rows = await database.fetch_all(
         select(province_judges.c.judge_id, province_judges.c.full_name)
         .where(province_judges.c.province.in_(spellings(province)))
     )
-    return {str(r["judge_id"]): str(r["full_name"] or "") for r in rows}
+    for row in rows:
+        name = str(row["full_name"] or "").strip()
+        if name:
+            out[str(row["judge_id"])] = name
+    return out
 
 
 async def _assignments(
