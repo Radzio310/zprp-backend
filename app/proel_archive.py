@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
 
 from app.db import (
@@ -27,6 +28,14 @@ from app.db import (
     saved_matches,
 )
 from app.proel_auth import Actor, is_admin, proel_actor
+from app.proel_bulk_delete_rules import (
+    APPROVED_MESSAGE,
+    MAX_BULK,
+    PinThrottle,
+    lock_message,
+    normalize_keys,
+    plan_bulk_delete,
+)
 from app.proel_journal import log_match_event
 
 logger = logging.getLogger(__name__)
@@ -289,3 +298,119 @@ async def restore_deleted(
     )
 
     return {"success": True, "match_number": match_number}
+
+
+# ─────────────────────────── grupowe usuwanie ───────────────────────────
+
+
+class BulkDeleteRequest(BaseModel):
+    keys: List[str] = Field(default_factory=list)
+    pin: str = ""
+
+
+_pin_throttle = PinThrottle()
+
+
+@router.post(
+    "/bulk_delete",
+    summary="Usuń grupowo zapisy meczów do archiwum (administrator, PIN)",
+)
+async def bulk_delete(
+    req: BulkDeleteRequest,
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    """Sprzątanie listy ze śmieci: mecze w toku, ćwiczenia, testy.
+
+    Każdy zapis przechodzi TĘ SAMĄ archiwizację co pojedyncze usunięcie
+    (`archive_and_delete_match`), więc leży w archiwum rok i da się go
+    przywrócić, a dziennik ma przy nim swój wpis `match.deleted` z `bulk`.
+    PIN sprawdzamy tutaj, w tym samym żądaniu - arkusz w aplikacji go tylko
+    zbiera. Reguły: `app/proel_bulk_delete_rules.py`.
+    """
+    await _require_admin(actor)
+
+    keys = normalize_keys(req.keys)
+    if not keys:
+        raise HTTPException(
+            400,
+            detail={"code": "EMPTY", "message": "Nie zaznaczono żadnego zapisu."},
+        )
+    if len(keys) > MAX_BULK:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "TOO_MANY",
+                "message": f"Naraz można usunąć najwyżej {MAX_BULK} zapisów.",
+            },
+        )
+
+    who = actor.judge_id
+    if _pin_throttle.blocked(who):
+        raise HTTPException(
+            429,
+            detail={
+                "code": "PIN_LOCKED",
+                "message": lock_message(_pin_throttle.seconds_left(who)),
+            },
+        )
+    # Leniwie: `app.admin` ciągnie za sobą pół aplikacji.
+    from app.admin import pin_is_valid
+
+    if not await pin_is_valid(who, req.pin):
+        _pin_throttle.fail(who)
+        raise HTTPException(
+            403,
+            detail={
+                "code": "PIN_INVALID",
+                "message": "Nieprawidłowy PIN - nic nie zostało usunięte.",
+            },
+        )
+    _pin_throttle.reset(who)
+
+    rows = await database.fetch_all(
+        select(saved_matches.c.match_number, saved_matches.c.status).where(
+            saved_matches.c.match_number.in_(keys)
+        )
+    )
+    plan = plan_bulk_delete(keys, {r["match_number"]: r["status"] for r in rows})
+
+    from app.proel import archive_and_delete_match
+
+    deleted: List[str] = []
+    missing: List[str] = list(plan["missing"])
+    refused: List[Dict[str, str]] = list(plan["refused"])
+    failed: List[Dict[str, str]] = []
+    batch = len(plan["delete"])
+    for key in plan["delete"]:
+        try:
+            outcome = await archive_and_delete_match(
+                key,
+                actor,
+                refuse_approved=True,
+                extra_details={"bulk": True, "batch": batch},
+            )
+        except Exception:  # noqa: BLE001 - jeden zapis nie zatrzymuje reszty
+            logger.warning("ProEl: grupowe usuwanie %s nieudane", key, exc_info=True)
+            failed.append(
+                {
+                    "key": key,
+                    "message": "Nie udało się usunąć tego zapisu. Spróbuj jeszcze raz.",
+                }
+            )
+            continue
+        if outcome == "deleted":
+            deleted.append(key)
+        elif outcome == "missing":
+            missing.append(key)
+        else:
+            refused.append(
+                {"key": key, "reason": "approved", "message": APPROVED_MESSAGE}
+            )
+
+    return {
+        "deleted": deleted,
+        "missing": missing,
+        "refused": refused,
+        "failed": failed,
+        "retention_days": RETENTION_DAYS,
+    }

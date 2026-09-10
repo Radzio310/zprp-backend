@@ -51,6 +51,7 @@ from app.extra_report_download import download_path_for, stash_for_download
 from app.extra_report_discord import normalize_webhook_url, report_payload, send_report_copies
 from app.extra_report_pdf import ExtraReportError, build_extra_report_pdf
 from app.extra_report_scope import fetch_match_province, is_province_scoped
+from app.proel_admin_guard import proel_admin_guard
 from app.proel_auth import Actor, is_admin, proel_actor
 from app.zprp_accounts import normalize_province
 
@@ -79,7 +80,14 @@ class _RecipientAdminRoute(APIRoute):
 
 
 router = APIRouter(prefix="/extra-report", tags=["Dodatkowy raport"])
-admin_router = APIRouter(prefix="/admin/extra-report", tags=["Dodatkowy raport: admin"], route_class=_RecipientAdminRoute)
+# Bramka na CAŁYM routerze: numer admina z nagłówka musi być czymś dowiedziony
+# (app/proel_admin_guard.py). Odmowę 403 dla nie-admina daje dalej `_require_admin`.
+admin_router = APIRouter(
+    prefix="/admin/extra-report",
+    tags=["Dodatkowy raport: admin"],
+    route_class=_RecipientAdminRoute,
+    dependencies=[Depends(proel_admin_guard)],
+)
 
 KINDS = ("referees", "delegate")
 

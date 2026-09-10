@@ -208,6 +208,55 @@ def category_label(code: Any) -> str:
 
 
 # -------------------------
+# Kto rozlicza obsade
+# -------------------------
+
+#: Powody, dla ktorych obsada NIE wchodzi do rozliczenia okregu.
+ZPRP_FIELD = "zprp_field"
+ZPRP_DELEGATE = "zprp_delegate"
+ZPRP_MP_TABLE = "zprp_mp_table"
+
+#: Opis powodu dla czlowieka - ten sam tekst w aplikacji, na webie i w PDF.
+ZPRP_REASONS: dict[str, str] = {
+    ZPRP_FIELD: "sędzia boiskowy na meczu obsadzanym przez ZPRP",
+    ZPRP_DELEGATE: "delegat na meczu obsadzanym przez ZPRP",
+    ZPRP_MP_TABLE: "stolik na Mistrzostwach Polski, rozliczany osobno przez ZPRP",
+}
+
+#: Rozgrywki ZPRP bez stawki w zadnej tabeli (Superpuchar, mecze EHF) -
+#: `match_level` widzi je jako "unknown", a obsadza je centrala.
+_ZPRP_ONLY_PREFIXES = ("SPM", "SPK", "EHF")
+
+
+def zprp_settlement_reason(code: Any, role: Any) -> Optional[str]:
+    """
+    Powod, dla ktorego te obsade rozlicza ZPRP, a nie okreg - albo None.
+
+    Decyzja uzytkownika z 10.09.2026. Z rozliczenia okregu wypada wszystko,
+    co obsadza ZPRP: boiskowi i delegaci na meczach centralnych (ligi od II
+    w gore, baraze, Mistrzostwa Polski, Puchar Polski, Superpuchar, EHF) oraz
+    stoliki Mistrzostw Polski, ktore ZPRP rozlicza osobno. Zostaja mecze
+    okregowe w kazdej roli, puchar wojewodzki i stoliki lig oraz Pucharu Polski.
+
+    ⚠ Puchar wojewodzki („S/PPK/2") placi stawkami II ligi, wiec `match_level`
+    widzi go jako "central" - ale to mecz OKREGU i zostaje. Dlatego rozstrzyga
+    sie go tu pierwszy.
+    """
+    if is_provincial_cup(code):
+        return None
+    if match_level(code) not in ("central", "cup") and competition_prefix(code) not in _ZPRP_ONLY_PREFIXES:
+        return None
+    role_text = str(role or "").strip()
+    if role_text == ROLE_FIELD:
+        return ZPRP_FIELD
+    if role_text == ROLE_DELEGATE:
+        return ZPRP_DELEGATE
+    if role_text == ROLE_TABLE and code_key(code).startswith("MP"):
+        return ZPRP_MP_TABLE
+    return None
+
+
+# -------------------------
 # Etap pucharu
 # -------------------------
 

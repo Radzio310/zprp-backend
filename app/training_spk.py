@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 
 from app.db import database, saved_matches, spk_reference, spk_run, spk_settings
+from app.proel_admin_guard import proel_admin_guard
 from app.proel_auth import Actor, is_admin, proel_actor
 from app.spk_pdf_link import create_pdf_token, token_expires_at, verify_pdf_token
 from app.training_spk_score import grade, score_run
@@ -50,8 +51,13 @@ from app.zprp_accounts import normalize_province
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/training/spk", tags=["Szkolenie: Superpuchar"])
+# Bramka na CAŁYM routerze: numer admina z nagłówka musi być czymś dowiedziony
+# (app/proel_admin_guard.py). Adres podpisany `/training/spk/slides.pdf` stoi
+# na `router`, więc menedżer pobierania bez nagłówków dalej go dostaje.
 admin_router = APIRouter(
-    prefix="/admin/training/spk", tags=["Szkolenie: Superpuchar (admin)"]
+    prefix="/admin/training/spk",
+    tags=["Szkolenie: Superpuchar (admin)"],
+    dependencies=[Depends(proel_admin_guard)],
 )
 
 #: Mecz, na którym stoi to szkolenie. Klucz w ProElu jest zapisany wielkimi

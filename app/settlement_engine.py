@@ -13,6 +13,7 @@ Podzial obowiazkow:
 
 from __future__ import annotations
 
+import calendar
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -84,6 +85,10 @@ class SettledMatch:
     stage: Optional[str] = None
     stage_guessed: bool = False
     status: str = "computed"
+    #: Powod z `settlement_rates.zprp_settlement_reason`, gdy te obsade rozlicza
+    #: ZPRP. W rachunku widac go tylko wtedy, gdy panel doliczyl takie obsady
+    #: przelacznikiem - wiersz dostaje wtedy znacznik.
+    zprp_reason: Optional[str] = None
 
 
 @dataclass
@@ -231,6 +236,7 @@ def settle_match(
         stage=stage_hit[0] if stage_hit else None,
         stage_guessed=bool(stage_hit and not stage_hit[1]),
         status=status,
+        zprp_reason=R.zprp_settlement_reason(assignment.match_code, assignment.role),
     )
 
 
@@ -244,6 +250,7 @@ def settle_judges(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     include_future: bool = False,
+    include_zprp: bool = False,
     names: Optional[dict[str, str]] = None,
 ) -> list[JudgeSettlement]:
     """
@@ -253,6 +260,10 @@ def settle_judges(
     lezą w bazie niezaleznie, a przelacznik decyduje, czy mecz jeszcze
     nierozegrany wchodzi do sumy. Dzieki temu odpowiedz „ile bedzie" i „ile
     jest" pochodzi z tego samego zrodla i nie ma jak sie rozjechac.
+
+    `include_zprp` dziala tak samo: obsady rozliczane przez ZPRP (patrz
+    `settlement_rates.zprp_settlement_reason`) leza w bazie, a przelacznik
+    decyduje, czy wchodza do sumy. Domyslnie NIE - to rozliczenie okregu.
     """
     central_versions = list(central_versions or [])
     province_versions = list(province_versions or [])
@@ -264,6 +275,10 @@ def settle_judges(
         if date_from and (when is None or when < date_from):
             continue
         if date_to and (when is None or when > date_to):
+            continue
+        # Odsiew PRZED rachunkiem: prog 200 zl i podatek licza sie od sumy tego,
+        # co wyplaca OKREG - Superliga nie moze podbic podatku od juniorow.
+        if not include_zprp and R.zprp_settlement_reason(assignment.match_code, assignment.role):
             continue
         item = settle_match(
             assignment,
@@ -333,6 +348,131 @@ def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int]:
         "travel": sum(e.travel for e in entries),
         "total": sum(e.total for e in entries),
     }
+
+
+# ---------------------------------------------------------------------------
+# Obsady rozliczane przez ZPRP
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ZprpMatch:
+    """
+    Obsada, ktora rozlicza ZPRP, nie okreg. BEZ kwot - okreg ich nie wyplaca,
+    a ekran potrzebuje jej tylko po to, zeby mecz nie zniknal bez slowa.
+    """
+
+    match_key: str
+    judge_id: str
+    match_at: Optional[datetime]
+    day: Optional[date]
+    match_code: str
+    category: str
+    role: str
+    city: str
+    teams: str
+    future: bool
+    reason: str
+
+
+def zprp_matches(
+    assignments: Iterable[Assignment],
+    *,
+    now: datetime,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    include_future: bool = False,
+) -> list[ZprpMatch]:
+    """
+    Obsady ZPRP z okresu - z TYMI SAMYMI filtrami okresu i przyszlych meczow,
+    co w `settle_judges`. Inaczej ekran mowilby „1 mecz poza rozliczeniem"
+    o meczu z innego miesiaca albo o takim, ktory sie jeszcze nie odbyl.
+    """
+    out: list[ZprpMatch] = []
+    for assignment in assignments:
+        reason = R.zprp_settlement_reason(assignment.match_code, assignment.role)
+        if not reason:
+            continue
+        when = assignment.match_at.date() if assignment.match_at else None
+        if date_from and (when is None or when < date_from):
+            continue
+        if date_to and (when is None or when > date_to):
+            continue
+        future = _is_future(assignment.match_at, now)
+        if future and not include_future:
+            continue
+        out.append(
+            ZprpMatch(
+                match_key=assignment.match_key,
+                judge_id=assignment.judge_id,
+                match_at=assignment.match_at,
+                day=when,
+                match_code=assignment.match_code,
+                category=R.category_label(assignment.match_code),
+                role=assignment.role,
+                city=assignment.city or assignment.hall,
+                teams=assignment.teams,
+                future=future,
+                reason=reason,
+            )
+        )
+    out.sort(key=lambda m: (m.match_at or datetime.min.replace(tzinfo=timezone.utc), m.match_key))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Miesiac po miesiacu
+# ---------------------------------------------------------------------------
+
+def monthly_totals(
+    assignments: Iterable[Assignment],
+    *,
+    province: str,
+    central_versions: Iterable[Any],
+    province_versions: Iterable[Any],
+    now: datetime,
+    include_future: bool = False,
+    include_zprp: bool = False,
+) -> list[dict[str, int]]:
+    """
+    Sumy kazdego miesiaca, w ktorym cos jest - do siatki sezonow.
+
+    Wola `settle_judges` miesiac po miesiacu, zamiast liczyc sezon jednym
+    przebiegiem: podatek i prog 200 zl licza sie od sumy MIESIACA, wiec kwota
+    w kafelku siatki musi wyjsc z dokladnie tego rachunku, ktory pokaze sie
+    po kliknieciu w ten miesiac.
+    """
+    assignments = list(assignments)
+    central_versions = list(central_versions or [])
+    province_versions = list(province_versions or [])
+
+    months: set[tuple[int, int]] = set()
+    for assignment in assignments:
+        if assignment.match_at is None:
+            continue
+        if not include_zprp and R.zprp_settlement_reason(assignment.match_code, assignment.role):
+            continue
+        if not include_future and _is_future(assignment.match_at, now):
+            continue
+        day = assignment.match_at.date()
+        months.add((day.year, day.month))
+
+    out: list[dict[str, int]] = []
+    for year, month in sorted(months):
+        entries = settle_judges(
+            assignments,
+            province=province,
+            central_versions=central_versions,
+            province_versions=province_versions,
+            now=now,
+            date_from=date(year, month, 1),
+            date_to=date(year, month, calendar.monthrange(year, month)[1]),
+            include_future=include_future,
+            include_zprp=include_zprp,
+        )
+        totals = totals_of(entries)
+        if totals["matches"]:
+            out.append({"year": year, "month": month, **totals})
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -147,6 +147,7 @@
 <div class="subtitle">
   {{ judges_count }} {{ judges_word }} &middot; {{ matches_count }} {{ matches_word }}
   {%- if include_future %} &middot; <b>uwzględniono mecze jeszcze nierozegrane</b>{% endif %}
+  {%- if include_zprp %} &middot; <b>z obsadami rozliczanymi przez ZPRP</b>{% endif %}
   &middot; wystawiono {{ generated_at }}
 </div>
 
@@ -210,7 +211,11 @@
   <b>Podstawa:</b> Tabela Ryczałtów Sędziowskich ZPRP oraz stawki okręgowe obowiązujące
   w dniu każdego meczu. &nbsp;&middot;&nbsp;
   <b>Koszty uzyskania i podatek</b> liczone od sumy ekwiwalentów sędziego za wskazany okres.
-  &nbsp;&middot;&nbsp; Kwoty przejazdów rozliczane są odrębnie – Listą kosztów przejazdów.
+  &nbsp;&middot;&nbsp; Kwoty przejazdów rozliczane są odrębnie, Listą kosztów przejazdów.
+  {%- if not include_zprp %}
+  &nbsp;&middot;&nbsp; Zestawienie nie obejmuje obsad rozliczanych przez ZPRP: sędziów boiskowych
+  i delegatów na meczach centralnych oraz stolików Mistrzostw Polski.
+  {%- endif %}
 </div>
 {% else %}
 <div class="empty">Brak rozliczeń w wybranym okresie.</div>

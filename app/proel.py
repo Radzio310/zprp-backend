@@ -1560,12 +1560,35 @@ async def delete_proel_match(
             },
         )
 
+    outcome = await archive_and_delete_match(match_number, actor)
+    if outcome == "missing":
+        raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
+    return {"success": True}
+
+
+async def archive_and_delete_match(
+    match_number: str,
+    actor: Actor,
+    *,
+    refuse_approved: bool = False,
+    extra_details: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Archiwizacja + usunięcie jednego zapisu. Zwraca "deleted", "missing"
+    albo "approved" (tylko przy `refuse_approved`).
+
+    Wspólna dla pojedynczego usunięcia i grupowego (`app/proel_archive.py`),
+    żeby oba zostawiały ten sam komplet w archiwum i ten sam wpis w dzienniku.
+    Uprawnienia sprawdza wołający. Status czytamy W transakcji: między
+    zaznaczeniem na liście a usunięciem ktoś mógł protokół zatwierdzić.
+    """
     async with database.transaction():
         row = await database.fetch_one(
             select(saved_matches).where(saved_matches.c.match_number == match_number)
         )
         if row is None:
-            raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
+            return "missing"
+        if refuse_approved and (row["status"] or "") == "approved":
+            return "approved"
 
         state_row = await database.fetch_one(
             select(proel_match_state).where(
@@ -1610,10 +1633,10 @@ async def delete_proel_match(
         zprp_match_id=(
             str(state_row["zprp_match_id"] or "") if state_row is not None else ""
         ),
-        details={"status": row["status"]},
+        details={"status": row["status"], **(extra_details or {})},
     )
 
-    return {"success": True}
+    return "deleted"
 
 
 @router.get(

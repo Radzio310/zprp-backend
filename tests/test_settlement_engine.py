@@ -198,12 +198,15 @@ def test_brak_odleglosci_nie_wywala_rachunku():
 
 
 def test_mecz_bez_stawki_ma_wlasny_status():
-    [entry] = settle([make("e", "EHF/1", R.ROLE_FIELD, at("2026-10-04T10:00"))])
+    # Obsady ZPRP doliczamy jawnie - domyslnie nie wchodza do rozliczenia okregu.
+    [entry] = settle([make("e", "EHF/1", R.ROLE_FIELD, at("2026-10-04T10:00"))], include_zprp=True)
     assert entry.matches[0].status == "missing-rate"
 
 
 def test_puchar_bez_rundy_jest_oznaczony_jako_zgadywany():
-    [entry] = settle([make("p", "PPM/23", R.ROLE_FIELD, at("2026-10-04T10:00"), km=50)])
+    [entry] = settle(
+        [make("p", "PPM/23", R.ROLE_FIELD, at("2026-10-04T10:00"), km=50)], include_zprp=True
+    )
     match = entry.matches[0]
     assert match.stage == "1/16 i 1/8PP"
     assert match.stage_guessed is True

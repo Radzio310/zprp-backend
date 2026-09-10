@@ -183,19 +183,25 @@ def _rule_matches(filters: Optional[dict], judge_id: Optional[str], province: Op
 
 @router.post("/validate_pin", response_model=ValidatePinResponse, summary="Walidacja PIN-u admina")
 async def validate_pin(req: ValidatePinRequest):
-    # 0) Master PIN ma pierwszeństwo
-    if MASTER_PIN_HASH:
-        if bcrypt.checkpw(req.pin.encode(), MASTER_PIN_HASH.encode()):
-            return ValidatePinResponse(valid=True)
+    return ValidatePinResponse(valid=await pin_is_valid(req.judge_id, req.pin))
 
-    # 1) per-judge
-    row = await database.fetch_one(select(admin_pins).where(admin_pins.c.judge_id == req.judge_id))
+
+async def pin_is_valid(judge_id: str, pin: str) -> bool:
+    """PIN admina - ta sama reguła dla panelu i dla grupowego usuwania ProEla.
+
+    Master PIN ma pierwszeństwo, potem PIN przypisany do numeru sędziego.
+    """
+    code = str(pin or "")
+    if not code:
+        return False
+    if MASTER_PIN_HASH and bcrypt.checkpw(code.encode(), MASTER_PIN_HASH.encode()):
+        return True
+    row = await database.fetch_one(
+        select(admin_pins).where(admin_pins.c.judge_id == str(judge_id or ""))
+    )
     if not row:
-        return ValidatePinResponse(valid=False)
-
-    pin_hash = row["pin_hash"].encode()
-    valid = bcrypt.checkpw(req.pin.encode(), pin_hash)
-    return ValidatePinResponse(valid=valid)
+        return False
+    return bcrypt.checkpw(code.encode(), row["pin_hash"].encode())
 
 @router.put("/update_pin", status_code=status.HTTP_200_OK, summary="Ustaw lub zaktualizuj PIN admina")
 async def update_pin(req: UpdatePinRequest):

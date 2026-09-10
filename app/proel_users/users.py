@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from app.beach.email_normalization import normalize_email
 from app.deps import get_rsa_keys
 # proel_auth importuje bazę leniwie — bezpieczny na poziomie modułu.
+from app.proel_admin_guard import proel_admin_guard
 from app.proel_auth import proel_actor
 from app.proel_users.email_flows import (
     consume_signup_verification,
@@ -506,6 +507,13 @@ async def sync_device(
 # Uwierzytelnianie jak cały panel admina BAZA: nagłówki aktora ProEl + lista
 # `admin_settings.allowed_admins`. NIE token konta ProEl — admin panelu zwykle
 # w ogóle nie ma konta ProEl.
+#
+# Każda trasa niżej ma `dependencies=[Depends(proel_admin_guard)]`: sam numer
+# z nagłówka to deklaracja, bramka żąda jego dowodu (app/proel_admin_guard.py).
+# Router jest wspólny z trasami `/me`, więc bramka wisi na trasach, nie na nim.
+
+_ADMIN_GUARD = [Depends(proel_admin_guard)]
+
 
 async def _require_admin(actor) -> None:
     from app.proel_auth import is_admin
@@ -514,7 +522,7 @@ async def _require_admin(actor) -> None:
         raise HTTPException(403, detail={"code": "ADMIN_REQUIRED", "message": "Brak uprawnień"})
 
 
-@router.get("/admin/list", summary="[admin] Lista kont ProEl")
+@router.get("/admin/list", summary="[admin] Lista kont ProEl", dependencies=_ADMIN_GUARD)
 async def admin_list_users(
     query: Optional[str] = Query(None, description="Szukaj w nazwisku, loginie, e-mailu, telefonie, nr sędziego"),
     offset: int = Query(0, ge=0),
@@ -549,7 +557,7 @@ async def admin_list_users(
     }
 
 
-@router.get("/admin/{user_id}", summary="[admin] Szczegóły konta ProEl")
+@router.get("/admin/{user_id}", summary="[admin] Szczegóły konta ProEl", dependencies=_ADMIN_GUARD)
 async def admin_get_user(user_id: int, actor=Depends(proel_actor)):
     await _require_admin(actor)
     u = await _fetch_me(user_id)
@@ -561,7 +569,7 @@ async def admin_get_user(user_id: int, actor=Depends(proel_actor)):
     return item
 
 
-@router.post("/admin/{user_id}/toggle-active", summary="[admin] Zablokuj / odblokuj konto")
+@router.post("/admin/{user_id}/toggle-active", summary="[admin] Zablokuj / odblokuj konto", dependencies=_ADMIN_GUARD)
 async def admin_toggle_active(user_id: int, actor=Depends(proel_actor)):
     await _require_admin(actor)
     database, users_t = _db()
@@ -576,7 +584,7 @@ async def admin_toggle_active(user_id: int, actor=Depends(proel_actor)):
     return {"success": True, "is_active": new_state}
 
 
-@router.post("/admin/{user_id}/reset-password", summary="[admin] Reset hasła — tymczasowe e-mailem")
+@router.post("/admin/{user_id}/reset-password", summary="[admin] Reset hasła — tymczasowe e-mailem", dependencies=_ADMIN_GUARD)
 async def admin_reset_password(user_id: int, actor=Depends(proel_actor)):
     await _require_admin(actor)
     database, users_t = _db()
@@ -617,7 +625,7 @@ async def admin_reset_password(user_id: int, actor=Depends(proel_actor)):
     return {"success": True, "sent_to": email}
 
 
-@router.delete("/admin/{user_id}", summary="[admin] Dezaktywacja i anonimizacja konta")
+@router.delete("/admin/{user_id}", summary="[admin] Dezaktywacja i anonimizacja konta", dependencies=_ADMIN_GUARD)
 async def admin_delete_user(user_id: int, actor=Depends(proel_actor)):
     """Miękkie usunięcie: konto zostaje w bazie (spójność ewentualnych śladów),
     ale traci dane osobowe i możliwość logowania."""

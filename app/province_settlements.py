@@ -160,34 +160,56 @@ async def load_settlement(
     year: int,
     month: int,
     include_future: bool = False,
+    include_zprp: bool = False,
     judge_ids: Optional[list[str]] = None,
 ) -> dict:
-    """Jedno wejscie dla panelu, aplikacji i PDF-ow."""
+    """
+    Jedno wejscie dla panelu, aplikacji i PDF-ow.
+
+    `include_zprp` - czy doliczyc obsady rozliczane przez ZPRP (boiskowi
+    i delegaci na meczach centralnych, stoliki MP). Domyslnie NIE, bo to jest
+    rozliczenie OKREGU. Przelacznik ma tylko panel webowy; aplikacja sedziego
+    nie przekazuje go nigdy.
+    """
     province = require_province(province)
     date_from, date_to = month_range(year, month)
     central_versions, province_versions = await _versions(province)
     names = await _judge_names(province)
     assignments = await _assignments(province, judge_ids=judge_ids)
+    now = _now()
 
     entries = E.settle_judges(
         assignments,
         province=province,
         central_versions=central_versions,
         province_versions=province_versions,
-        now=_now(),
+        now=now,
         date_from=date_from,
         date_to=date_to,
         include_future=include_future,
+        include_zprp=include_zprp,
         names=names,
+    )
+    # Obsady ZPRP liczymy ZAWSZE, niezaleznie od przelacznika: wylaczone musza
+    # sie wytlumaczyc („1 mecz poza rozliczeniem okregu"), zamiast znikac bez
+    # slowa, a przelacznik pokazuje, ile ich dojdzie.
+    zprp = E.zprp_matches(
+        assignments,
+        now=now,
+        date_from=date_from,
+        date_to=date_to,
+        include_future=include_future,
     )
 
     return {
         "province": province,
         "period": {"year": year, "month": month, "from": date_from.isoformat(), "to": date_to.isoformat()},
         "include_future": include_future,
+        "include_zprp": include_zprp,
         "entries": entries,
         "totals": E.totals_of(entries),
         "travel": E.travel_rows(entries),
+        "zprp": zprp,
     }
 
 
@@ -218,6 +240,37 @@ def _match_json(match: E.SettledMatch) -> dict:
         "stage": match.stage,
         "stage_guessed": match.stage_guessed,
         "status": match.status,
+        "zprp_reason": match.zprp_reason,
+    }
+
+
+def _zprp_json(match: E.ZprpMatch) -> dict:
+    """Obsada rozliczana przez ZPRP - BEZ kwot, bo okreg ich nie wyplaca."""
+    return {
+        "match_key": match.match_key,
+        "judge_id": match.judge_id,
+        "match_at": match.match_at.isoformat() if match.match_at else None,
+        "day": match.day.isoformat() if match.day else None,
+        "code": match.match_code,
+        "category": match.category,
+        "role": match.role,
+        "city": match.city,
+        "teams": match.teams,
+        "future": match.future,
+        "reason": match.reason,
+        "reason_label": R.ZPRP_REASONS.get(match.reason, ""),
+    }
+
+
+def _zprp_summary(matches: list[E.ZprpMatch], *, included: bool) -> dict:
+    reasons: dict[str, int] = {}
+    for item in matches:
+        reasons[item.reason] = reasons.get(item.reason, 0) + 1
+    return {
+        "included": included,
+        "count": len(matches),
+        "judges": len({m.judge_id for m in matches}),
+        "reasons": reasons,
     }
 
 
@@ -352,19 +405,66 @@ async def summary(
     year: int = Query(...),
     month: int = Query(...),
     include_future: bool = Query(False),
+    include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
 ):
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
 
-    data = await load_settlement(key, year=year, month=month, include_future=include_future)
+    data = await load_settlement(
+        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+    )
     return {
         "province": data["province"],
         "period": data["period"],
         "include_future": include_future,
+        "include_zprp": include_zprp,
         "totals": data["totals"],
         "entries": [_entry_json(e, with_matches=False) for e in data["entries"]],
+        "zprp": _zprp_summary(data["zprp"], included=include_zprp),
         "document_number_hint": await next_document_number(key, year, month, "zestawienie", peek=True),
+    }
+
+
+async def _judge_payload(
+    key: str,
+    judge_id: str,
+    *,
+    year: int,
+    month: int,
+    include_future: bool,
+    include_zprp: bool,
+) -> dict:
+    """
+    Wspolna tresc `/judge/{id}` i `/me`.
+
+    Osobna funkcja, a nie wolanie jednej trasy z drugiej: trasa wolana wprost
+    dostaje za niepodany parametr obiekt `Query(False)`, ktory jest PRAWDZIWY -
+    aplikacja sedziego dostalaby wtedy po cichu obsady ZPRP.
+    """
+    data = await load_settlement(
+        key,
+        year=year,
+        month=month,
+        include_future=include_future,
+        include_zprp=include_zprp,
+        judge_ids=[judge_id],
+    )
+    entry = next((e for e in data["entries"] if e.judge_id == judge_id), None)
+    if entry is None:
+        names = await _judge_names(key)
+        entry = E.JudgeSettlement(judge_id=judge_id, judge_name=names.get(judge_id, ""))
+    return {
+        "province": key,
+        "period": data["period"],
+        "include_future": include_future,
+        "include_zprp": include_zprp,
+        "entry": _entry_json(entry, with_matches=True),
+        "travel": [_travel_json(r) for r in E.travel_rows([entry])],
+        # Obsady ZPRP tego sedziego. Doliczone przelacznikiem siedza tez
+        # w `entry.rows` ze znacznikiem `zprp_reason`; niedoliczone - tylko tu,
+        # zeby ekran mogl powiedziec, czemu mecz nie ma kwoty.
+        "zprp": [_zprp_json(m) for m in data["zprp"] if m.judge_id == judge_id],
     }
 
 
@@ -375,22 +475,17 @@ async def judge_detail(
     year: int = Query(...),
     month: int = Query(...),
     include_future: bool = Query(False),
+    include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
 ):
     key = require_province(province)
-    data = await load_settlement(
-        key, year=year, month=month, include_future=include_future, judge_ids=[judge_id]
+    return await _judge_payload(
+        key,
+        judge_id,
+        year=year,
+        month=month,
+        include_future=include_future,
+        include_zprp=include_zprp,
     )
-    entry = next((e for e in data["entries"] if e.judge_id == judge_id), None)
-    if entry is None:
-        names = await _judge_names(key)
-        entry = E.JudgeSettlement(judge_id=judge_id, judge_name=names.get(judge_id, ""))
-    return {
-        "province": key,
-        "period": data["period"],
-        "include_future": include_future,
-        "entry": _entry_json(entry, with_matches=True),
-        "travel": [_travel_json(r) for r in E.travel_rows([entry])],
-    }
 
 
 @router.get("/travel", summary="Lista kosztów przejazdów za miesiąc")
@@ -399,12 +494,18 @@ async def travel(
     year: int = Query(...),
     month: int = Query(...),
     include_future: bool = Query(False),
+    include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
     judge_ids: Optional[str] = Query(None, description="Numery sędziów po przecinku"),
 ):
     key = require_province(province)
     ids = [x.strip() for x in (judge_ids or "").split(",") if x.strip()] or None
     data = await load_settlement(
-        key, year=year, month=month, include_future=include_future, judge_ids=ids
+        key,
+        year=year,
+        month=month,
+        include_future=include_future,
+        include_zprp=include_zprp,
+        judge_ids=ids,
     )
     rows = [_travel_json(r) for r in data["travel"]]
     return {
@@ -416,7 +517,7 @@ async def travel(
     }
 
 
-@router.get("/me", summary="Moje rozliczenie - dla aplikacji sędziego")
+@router.get("/me", summary="Moje rozliczenie okręgowe - dla aplikacji sędziego")
 async def mine(
     province: str = Query(...),
     judge_id: str = Query(...),
@@ -427,9 +528,52 @@ async def mine(
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
-    return await judge_detail(
-        judge_id, province=key, year=year, month=month, include_future=include_future
+    # „Moje rozliczenie OKREGOWE": obsady ZPRP nigdy nie wchodza tu do kwot -
+    # decyzja uzytkownika z 10.09.2026. Ekran dostaje je osobno, bez pieniedzy.
+    return await _judge_payload(
+        key,
+        judge_id,
+        year=year,
+        month=month,
+        include_future=include_future,
+        include_zprp=False,
     )
+
+
+@router.get("/months", summary="Sumy miesiąc po miesiącu - do siatki sezonów")
+async def months(
+    province: str = Query(...),
+    include_future: bool = Query(False),
+    include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
+    judge_id: Optional[str] = Query(None, description="Tylko ten sędzia (aplikacja sędziego)"),
+):
+    """
+    Kwoty kazdego miesiaca, w ktorym cos jest - do mapy ciepla w wyborze okresu.
+
+    Liczy tym samym rachunkiem co `/summary` za pojedynczy miesiac, wiec kwota
+    w kafelku siatki to kwota, ktora pokaze sie po kliknieciu w ten miesiac.
+    """
+    key = require_province(province)
+    if not await module_enabled(key, "settlements"):
+        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    central_versions, province_versions = await _versions(key)
+    assignments = await _assignments(key, judge_ids=[judge_id] if judge_id else None)
+    rows = E.monthly_totals(
+        assignments,
+        province=key,
+        central_versions=central_versions,
+        province_versions=province_versions,
+        now=_now(),
+        include_future=include_future,
+        include_zprp=include_zprp,
+    )
+    return {
+        "province": key,
+        "judge_id": judge_id,
+        "include_future": include_future,
+        "include_zprp": include_zprp,
+        "months": rows,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +694,7 @@ async def my_stats(
     province: str = Query(...),
     judge_id: str = Query(...),
     season: Optional[str] = Query(None, description="np. 2026/2027; brak = wszystko"),
+    brief: bool = Query(False, description="Same sumy, bez listy meczów - dla kafla na ekranie Więcej"),
 ):
     key = require_province(province)
     if not await module_enabled(key, "stats"):
@@ -631,5 +776,7 @@ async def my_stats(
         "by_level": tally("level"),
         "by_city": tally("city"),
         "by_month": dict(sorted(by_month.items())),
-        "matches": matches,
+        # Kafel na ekranie Wiecej potrzebuje tylko sum - lista meczow sezonu
+        # to najciezsza czesc odpowiedzi.
+        "matches": [] if brief else matches,
     }

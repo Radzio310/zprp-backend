@@ -138,6 +138,7 @@
   {{ judges_count }} {{ judges_word }} &middot; {{ rows|length }} {{ trips_word }}
   &middot; {{ total_km | km }} łącznie
   {%- if include_future %} &middot; <b>uwzględniono mecze jeszcze nierozegrane</b>{% endif %}
+  {%- if include_zprp %} &middot; <b>z obsadami rozliczanymi przez ZPRP</b>{% endif %}
 </div>
 
 {% if rows %}
@@ -147,7 +148,7 @@
       <th class="c">Lp</th>
       <th class="l">Nazwisko i imię</th>
       <th class="c">Data</th>
-      <th class="l">Skąd – dokąd</th>
+      <th class="l">Skąd - dokąd</th>
       <th>Odległość (km)</th>
       <th>Suma (km)</th>
       <th>Stawka</th>
@@ -196,8 +197,11 @@
 <div class="footnote">
   <b>Odległość</b> podana w jedną stronę; <b>suma</b> obejmuje przejazd w obie strony.
   &nbsp;&middot;&nbsp; Stawka za kilometr wynika ze szczebla rozgrywek: mecze okręgowe
-  rozliczane są stawką wojewódzką, rozgrywki centralne – stawką ZPRP.
+  rozliczane są stawką wojewódzką, rozgrywki centralne stawką ZPRP.
   &nbsp;&middot;&nbsp; Kilka spotkań dzieci w jednej hali tego samego dnia stanowi jeden wyjazd.
+  {%- if not include_zprp %}
+  &nbsp;&middot;&nbsp; Lista nie obejmuje przejazdów na obsady rozliczane przez ZPRP.
+  {%- endif %}
 </div>
 {% else %}
 <div class="empty">Brak przejazdów do rozliczenia w wybranym okresie.</div>

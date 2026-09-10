@@ -97,7 +97,7 @@ def _org(province: str) -> dict[str, str]:
     if hit:
         return hit
     pretty = display(province).title()
-    return {"name": f"Związek Piłki Ręcznej – {pretty}", "address": ""}
+    return {"name": f"Związek Piłki Ręcznej - {pretty}", "address": ""}
 
 
 def _plural(count: int, one: str, few: str, many: str) -> str:
@@ -203,6 +203,8 @@ class PdfRequest(BaseModel):
     year: int
     month: int
     include_future: bool = False
+    #: Doliczyc obsady rozliczane przez ZPRP (przelacznik panelu webowego).
+    include_zprp: bool = False
     #: Puste = wszyscy sedziowie okregu z tego miesiaca.
     judge_ids: list[str] = []
     created_by: Optional[str] = None
@@ -219,6 +221,7 @@ async def zestawienie_pdf(payload: PdfRequest):
         year=payload.year,
         month=payload.month,
         include_future=payload.include_future,
+        include_zprp=payload.include_zprp,
         judge_ids=payload.judge_ids or None,
     )
     entries = data["entries"]
@@ -232,7 +235,9 @@ async def zestawienie_pdf(payload: PdfRequest):
         month=payload.month,
         judge_ids=[e.judge_id for e in entries],
         include_future=payload.include_future,
-        totals=totals,
+        # Znacznik przelacznika jedzie w sumach - tabela dokumentow nie ma na
+        # niego kolumny, a `create_all` nie dopisuje kolumn do istniejacej tabeli.
+        totals={**totals, "include_zprp": payload.include_zprp},
         created_by=payload.created_by,
     )
 
@@ -249,6 +254,7 @@ async def zestawienie_pdf(payload: PdfRequest):
             ),
             "generated_at": datetime.now(timezone.utc).strftime("%d.%m.%Y"),
             "include_future": payload.include_future,
+            "include_zprp": payload.include_zprp,
             "judges_count": totals["judges"],
             "judges_word": _plural(totals["judges"], "sędzia", "sędziów", "sędziów"),
             "matches_count": totals["matches"],
@@ -287,6 +293,7 @@ async def przejazdy_pdf(payload: PdfRequest):
         year=payload.year,
         month=payload.month,
         include_future=payload.include_future,
+        include_zprp=payload.include_zprp,
         judge_ids=payload.judge_ids or None,
     )
     travel = data["travel"]
@@ -299,7 +306,7 @@ async def przejazdy_pdf(payload: PdfRequest):
             {
                 "judge_id": item.judge_id,
                 "name": item.judge_name,
-                "day_label": item.day.strftime("%d.%m.%Y") if item.day else "—",
+                "day_label": item.day.strftime("%d.%m.%Y") if item.day else "-",
                 "route": item.route,
                 "one_way_km": item.one_way_km,
                 "total_km": item.total_km,
@@ -321,7 +328,12 @@ async def przejazdy_pdf(payload: PdfRequest):
         month=payload.month,
         judge_ids=sorted({r["judge_id"] for r in rows}),
         include_future=payload.include_future,
-        totals={"amount": total_amount, "km": total_km, "trips": len(rows)},
+        totals={
+            "amount": total_amount,
+            "km": total_km,
+            "trips": len(rows),
+            "include_zprp": payload.include_zprp,
+        },
         created_by=payload.created_by,
     )
 
@@ -337,6 +349,7 @@ async def przejazdy_pdf(payload: PdfRequest):
                 payload.year, payload.month, date_to, include_future=payload.include_future
             ),
             "include_future": payload.include_future,
+            "include_zprp": payload.include_zprp,
             "judges_count": judges_count,
             "judges_word": _plural(judges_count, "sędzia", "sędziów", "sędziów"),
             "trips_word": _plural(len(rows), "wyjazd", "wyjazdy", "wyjazdów"),
