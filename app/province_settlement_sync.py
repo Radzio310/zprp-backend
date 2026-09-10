@@ -45,6 +45,8 @@ from app.db import (
 )
 from app.deps import get_settings
 from app.settlement_distances import DistanceIndex, resolve_distances
+from app.settlement_province import canonical, spellings
+from app.settlement_runs import run_is_active
 from app.zprp_accounts import configured_provinces, credentials_for
 from app.zprp.officials import (  # scrapery, ktore juz istnieja - nie piszemy drugich
     _build_judge_matches_path,
@@ -118,15 +120,26 @@ def _state(raw: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 async def module_enabled(province: str, module: str) -> bool:
-    row = await database.fetch_one(
+    """
+    Czy modul jest wlaczony w okregu.
+
+    Pytamy WSZYSTKIMI pisowniami. Pierwsza wersja zapisywala "ŚLĄSKIE", a pytala
+    o "SLASKIE" - wlaczony modul odpowiadal wiec „wylaczony", a odswiezanie
+    konczylo sie odmowa. Wiersze sprzed poprawki leza w bazie do najblizszego
+    przelaczenia (patrz `set_module`).
+    """
+    names = spellings(province)
+    if not names:
+        return False
+    rows = await database.fetch_all(
         select(province_modules.c.enabled).where(
             and_(
-                province_modules.c.province == R.province_key(province),
+                province_modules.c.province.in_(names),
                 province_modules.c.module == module,
             )
         )
     )
-    return bool(row and row["enabled"])
+    return any(bool(row["enabled"]) for row in rows)
 
 
 async def enabled_provinces(module: str) -> list[str]:
@@ -135,7 +148,8 @@ async def enabled_provinces(module: str) -> list[str]:
             and_(province_modules.c.module == module, province_modules.c.enabled.is_(True))
         )
     )
-    return [_s(row["province"]) for row in rows]
+    # Klucz kont Railway - z nim porownuje sie `configured_provinces()`.
+    return sorted({canonical(row["province"]) for row in rows} - {""})
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +181,7 @@ async def _collect_district(province: str, judges: dict[str, dict]) -> list[dict
     rows = await database.fetch_all(
         select(province_matches).where(
             and_(
-                province_matches.c.province == province,
+                province_matches.c.province.in_(spellings(province)),
                 province_matches.c.active.is_(True),
             )
         )
@@ -328,7 +342,7 @@ async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dic
     judges: dict[str, dict] = {}
 
     rows = await database.fetch_all(
-        select(province_judges).where(province_judges.c.province == province)
+        select(province_judges).where(province_judges.c.province.in_(spellings(province)))
     )
     for row in rows:
         judges[_s(row["judge_id"])] = {
@@ -463,6 +477,16 @@ async def _store(province: str, rows: list[dict], judges: dict[str, dict]) -> in
 # Przebieg
 # ---------------------------------------------------------------------------
 
+async def start_run(province: str, kind: str) -> int:
+    """Wiersz przebiegu, zanim cokolwiek ruszy - jego numer dostaje klient."""
+    new_id = await database.execute(
+        insert(province_settlement_runs).values(
+            province=canonical(province) or province, kind=kind, started_at=_now()
+        )
+    )
+    return int(new_id)
+
+
 async def refresh_province(
     province: str,
     *,
@@ -470,6 +494,7 @@ async def refresh_province(
     password: Optional[str] = None,
     kind: str = "cron",
     with_outside: bool = True,
+    run_id: Optional[int] = None,
 ) -> dict:
     """
     Pelne odswiezenie danych okregu.
@@ -478,14 +503,15 @@ async def refresh_province(
     do konta `sync` z Railway. Brak obu to nie awaria, tylko okreg jeszcze
     nieskonfigurowany - i tak to raportujemy.
     """
-    province = R.province_key(province) if not province.isupper() else province.strip().upper()
+    province = canonical(province)
+    if not province:
+        return {"province": "", "ok": False, "error": "Nieznane województwo"}
     settings = get_settings()
 
-    run_id = await database.execute(
-        insert(province_settlement_runs).values(
-            province=province, kind=kind, started_at=_now()
-        )
-    )
+    # Przebieg na zadanie ma juz swoj wiersz - zalozyl go endpoint, zeby od razu
+    # oddac klientowi numer do sledzenia. Petla dobowa zaklada go tutaj.
+    if run_id is None:
+        run_id = await start_run(province, kind)
 
     async def finish(ok: bool, **fields: Any) -> dict:
         await database.execute(
@@ -520,7 +546,7 @@ async def refresh_province(
 
             # --- odleglosci ---
             distance_row = await database.fetch_one(
-                select(okreg_distances.c.content).where(okreg_distances.c.province == province)
+                select(okreg_distances.c.content).where(okreg_distances.c.province.in_(spellings(province)))
             )
             index = DistanceIndex(_state(distance_row["content"]) if distance_row else None)
 
@@ -555,7 +581,7 @@ async def refresh_province(
 async def last_run(province: str) -> Optional[dict]:
     row = await database.fetch_one(
         select(province_settlement_runs)
-        .where(province_settlement_runs.c.province == province)
+        .where(province_settlement_runs.c.province == (canonical(province) or province))
         .order_by(province_settlement_runs.c.started_at.desc())
         .limit(1)
     )
@@ -580,6 +606,11 @@ async def run_settlement_sync_scheduler() -> None:
                     logger.info("[settlement] %s: moduł włączony, ale brak konta sync", province)
                     continue
                 previous = await last_run(province)
+                if previous and run_is_active(
+                    previous.get("started_at"), previous.get("finished_at"), _now()
+                ):
+                    # Ktos wlasnie odswieza z panelu - nie dublujemy przebiegu.
+                    continue
                 if previous and previous.get("finished_at"):
                     age = _now() - previous["finished_at"]
                     if age < timedelta(hours=SYNC_INTERVAL_HOURS):

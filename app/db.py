@@ -1123,6 +1123,27 @@ proel_activity_log = Table(
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
 )
 
+# 21.08) ProEl - podsumowanie meczu do statystyk
+#
+# Panel „Statystyki ProEla" pokazuje WSZYSTKIE mecze naraz, a blob jednego
+# meczu (składy, przebieg, stos cofania) potrafi ważyć setki kilobajtów.
+# Czytanie ich wszystkich przy każdym otwarciu panelu to ten sam błąd, który
+# kiedyś zrobił z `GET /proel/` kilkunastomegabajtowe żądanie.
+#
+# Tu leży mecz spłaszczony do liczb (`app/proel_stats_rules.match_summary`),
+# bez danych osobowych zawodników. Wiersz przelicza się TYLKO wtedy, gdy
+# `proel_matches.updated_at` jest inne niż zapamiętane `source_updated_at` -
+# pierwsze otwarcie panelu płaci za wszystkie mecze, każde następne za te,
+# które się od tamtej pory zmieniły. Tabela jest pochodna: można ją w każdej
+# chwili wyczyścić, odtworzy się sama.
+proel_match_stats = Table(
+    "proel_match_stats", metadata,
+    Column("match_number", String, primary_key=True),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
+    Column("summary_json", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("computed_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
 # 21.2) Beach ProEl - mecze (analogiczne do proel_matches, ale status jako String)
 # tournament_id / schedule_match_id: kopiowane z data_json.matchConfig.extras, aby
 # wiązać mecz ProEl z konkretnym meczem konkretnego turnieju (match_number bywa

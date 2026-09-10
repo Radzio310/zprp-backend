@@ -8,6 +8,7 @@ wlasna reke - inaczej po miesiacu bylyby trzy rachunki zamiast jednego.
 
 from __future__ import annotations
 
+import asyncio
 import calendar
 import logging
 from datetime import date, datetime, timezone
@@ -31,13 +32,30 @@ from app.province_settlement_sync import (
     last_run,
     module_enabled,
     refresh_province,
+    start_run,
 )
+from app.settlement_province import canonical, display, spellings
+from app.settlement_runs import cooldown_left, run_is_active
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/province/settlements", tags=["province_settlements"])
 
 MODULES = ("stats", "settlements")
+
+
+def require_province(province: str) -> str:
+    """
+    Klucz naszych tabel (np. "SLASKIE") albo 400.
+
+    Kazde wejscie tego modulu przechodzi tedy. Pierwsza wersja zapisywala
+    wojewodztwo tak, jak przyslal je klient ("ŚLĄSKIE"), a pytala o "SLASKIE" -
+    wlaczony modul odpowiadal wiec „wylaczony". Patrz `app/settlement_province.py`.
+    """
+    key = canonical(province)
+    if not key:
+        raise HTTPException(400, f"Nieznane województwo: {province}")
+    return key
 
 #: Skroty tablic rejestracyjnych - czesc numeru dokumentu (SL/01/2026/1).
 PROVINCE_SHORT: dict[str, str] = {
@@ -81,7 +99,7 @@ async def _versions(province: str) -> tuple[list[dict], list[dict]]:
     )
     province_rows = await database.fetch_all(
         select(okreg_rates)
-        .where(okreg_rates.c.province == province)
+        .where(okreg_rates.c.province.in_(spellings(province)))
         .order_by(okreg_rates.c.id.asc())
     )
     return [dict(r) for r in central_rows], [dict(r) for r in province_rows]
@@ -90,7 +108,7 @@ async def _versions(province: str) -> tuple[list[dict], list[dict]]:
 async def _judge_names(province: str) -> dict[str, str]:
     rows = await database.fetch_all(
         select(province_judges.c.judge_id, province_judges.c.full_name)
-        .where(province_judges.c.province == province)
+        .where(province_judges.c.province.in_(spellings(province)))
     )
     return {str(r["judge_id"]): str(r["full_name"] or "") for r in rows}
 
@@ -145,7 +163,7 @@ async def load_settlement(
     judge_ids: Optional[list[str]] = None,
 ) -> dict:
     """Jedno wejscie dla panelu, aplikacji i PDF-ow."""
-    province = province.strip().upper()
+    province = require_province(province)
     date_from, date_to = month_range(year, month)
     central_versions, province_versions = await _versions(province)
     names = await _judge_names(province)
@@ -249,9 +267,14 @@ class ModuleToggleRequest(BaseModel):
 @router.get("/modules", summary="Które okręgi mają włączone Statystyki i Rozliczenia")
 async def list_modules():
     rows = await database.fetch_all(select(province_modules))
+    # Klucz odpowiedzi to NAZWA dla czlowieka ("ŚLĄSKIE"), bo tak identyfikuje
+    # wojewodztwa aplikacja. Wiersze sprzed ujednolicenia zapisu i po nim zlewaja
+    # sie tu w jeden wpis.
     out: dict[str, dict[str, bool]] = {}
     for row in rows:
-        out.setdefault(str(row["province"]), {})[str(row["module"])] = bool(row["enabled"])
+        entry = out.setdefault(display(row["province"]), {})
+        module = str(row["module"])
+        entry[module] = entry.get(module, False) or bool(row["enabled"])
     return {"modules": MODULES, "provinces": out}
 
 
@@ -259,11 +282,23 @@ async def list_modules():
 async def set_module(province: str, module: str, payload: ModuleToggleRequest):
     if module not in MODULES:
         raise HTTPException(400, f"Nieznany moduł: {module}")
-    key = province.strip().upper()
-    if not key:
-        raise HTTPException(400, "Brak województwa")
+    key = require_province(province)
 
     from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    # Wiersze pod inna pisownia (sprzed ujednolicenia) znikaja przy pierwszym
+    # przelaczeniu - inaczej dwa wiersze tego samego okregu moglyby mowic dwie
+    # rozne rzeczy.
+    legacy = [name for name in spellings(key) if name != key]
+    if legacy:
+        await database.execute(
+            province_modules.delete().where(
+                and_(
+                    province_modules.c.province.in_(legacy),
+                    province_modules.c.module == module,
+                )
+            )
+        )
 
     statement = pg_insert(province_modules).values(
         province=key, module=module, enabled=payload.enabled
@@ -274,7 +309,7 @@ async def set_module(province: str, module: str, payload: ModuleToggleRequest):
             set_={"enabled": payload.enabled},
         )
     )
-    return {"province": key, "module": module, "enabled": payload.enabled}
+    return {"province": display(key), "module": module, "enabled": payload.enabled}
 
 
 # ---------------------------------------------------------------------------
@@ -283,21 +318,30 @@ async def set_module(province: str, module: str, payload: ModuleToggleRequest):
 
 @router.get("/status", summary="Kiedy dane okręgu schodziły ostatni raz")
 async def status(province: str = Query(...)):
-    key = province.strip().upper()
+    key = require_province(province)
     run = await last_run(key)
+    now = _now()
+
+    def iso(value):
+        return value.isoformat() if value else None
+
     return {
         "province": key,
+        "display": display(key),
         "stats_enabled": await module_enabled(key, "stats"),
         "settlements_enabled": await module_enabled(key, "settlements"),
         "last_run": {
-            "kind": run.get("kind") if run else None,
-            "started_at": run["started_at"].isoformat() if run and run.get("started_at") else None,
-            "finished_at": run["finished_at"].isoformat() if run and run.get("finished_at") else None,
-            "ok": run.get("ok") if run else None,
-            "judges": run.get("judges") if run else None,
-            "matches": run.get("matches") if run else None,
-            "outside_matches": run.get("outside_matches") if run else None,
-            "error": run.get("error") if run else None,
+            "id": run.get("id"),
+            "kind": run.get("kind"),
+            "started_at": iso(run.get("started_at")),
+            "finished_at": iso(run.get("finished_at")),
+            # Klient sledzi przebieg w tle po `id` i tym znaczniku.
+            "running": run_is_active(run.get("started_at"), run.get("finished_at"), now),
+            "ok": run.get("ok"),
+            "judges": run.get("judges"),
+            "matches": run.get("matches"),
+            "outside_matches": run.get("outside_matches"),
+            "error": run.get("error"),
         } if run else None,
     }
 
@@ -309,7 +353,7 @@ async def summary(
     month: int = Query(...),
     include_future: bool = Query(False),
 ):
-    key = province.strip().upper()
+    key = require_province(province)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
 
@@ -332,7 +376,7 @@ async def judge_detail(
     month: int = Query(...),
     include_future: bool = Query(False),
 ):
-    key = province.strip().upper()
+    key = require_province(province)
     data = await load_settlement(
         key, year=year, month=month, include_future=include_future, judge_ids=[judge_id]
     )
@@ -357,7 +401,7 @@ async def travel(
     include_future: bool = Query(False),
     judge_ids: Optional[str] = Query(None, description="Numery sędziów po przecinku"),
 ):
-    key = province.strip().upper()
+    key = require_province(province)
     ids = [x.strip() for x in (judge_ids or "").split(",") if x.strip()] or None
     data = await load_settlement(
         key, year=year, month=month, include_future=include_future, judge_ids=ids
@@ -380,7 +424,7 @@ async def mine(
     month: int = Query(...),
     include_future: bool = Query(False),
 ):
-    key = province.strip().upper()
+    key = require_province(province)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
     return await judge_detail(
@@ -399,21 +443,57 @@ class RefreshRequest(BaseModel):
     with_outside: bool = True
 
 
-@router.post("/refresh", summary="Wymuś odświeżenie danych okręgu")
+#: Zadania w tle trzymamy w zbiorze - asyncio trzyma do nich tylko slaba
+#: referencje i porzucony task potrafi zniknac w polowie pobierania.
+_BACKGROUND: set = set()
+
+
+@router.post("/refresh", summary="Wymuś odświeżenie danych okręgu (w tle)")
 async def refresh(payload: RefreshRequest):
-    key = payload.province.strip().upper()
+    """
+    Zaczyna pobieranie W TLE i od razu oddaje numer przebiegu.
+
+    Pelne pobranie okregu to kilkaset zapytan do ZPRP i trwa minuty - czekanie
+    na nie w jednym zapytaniu HTTP konczylo sie przekroczeniem czasu po stronie
+    telefonu. Klient sledzi przebieg przez `/status` (`last_run.id`).
+    """
+    key = require_province(payload.province)
     if not (await module_enabled(key, "stats") or await module_enabled(key, "settlements")):
-        raise HTTPException(403, "Żaden moduł okręgowy nie jest włączony")
-    result = await refresh_province(
-        key,
-        username=payload.username,
-        password=payload.password,
-        kind="manual",
-        with_outside=payload.with_outside,
+        raise HTTPException(403, "Żaden moduł okręgowy nie jest włączony w tym okręgu")
+
+    now = _now()
+    previous = await last_run(key)
+    if previous and run_is_active(previous.get("started_at"), previous.get("finished_at"), now):
+        return {"province": key, "started": False, "running": True, "run_id": previous.get("id")}
+
+    with_credentials = bool(payload.username and payload.password)
+    if previous and not with_credentials:
+        left = cooldown_left(previous.get("finished_at"), previous.get("ok"), now)
+        if left is not None:
+            minutes = max(1, round(left.total_seconds() / 60))
+            # Zadnej cichej blokady: klient dostaje zdanie do pokazania.
+            return {
+                "province": key,
+                "started": False,
+                "running": False,
+                "run_id": previous.get("id"),
+                "message": f"Dane odświeżono przed chwilą - kolejne odświeżenie możliwe za {minutes} min.",
+            }
+
+    run_id = await start_run(key, "manual")
+    task = asyncio.create_task(
+        refresh_province(
+            key,
+            username=payload.username,
+            password=payload.password,
+            kind="manual",
+            with_outside=payload.with_outside,
+            run_id=run_id,
+        )
     )
-    if not result.get("ok"):
-        raise HTTPException(502, result.get("error") or "Odświeżanie nie powiodło się")
-    return result
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+    return {"province": key, "started": True, "running": True, "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +551,7 @@ async def my_stats(
     judge_id: str = Query(...),
     season: Optional[str] = Query(None, description="np. 2026/2027; brak = wszystko"),
 ):
-    key = province.strip().upper()
+    key = require_province(province)
     if not await module_enabled(key, "stats"):
         raise HTTPException(403, "Moduł Statystyk nie jest włączony w tym okręgu")
 

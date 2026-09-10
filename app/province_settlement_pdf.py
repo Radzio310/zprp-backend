@@ -33,7 +33,9 @@ from app.province_settlements import (
     load_settlement,
     month_range,
     province_short,
+    require_province,
 )
+from app.settlement_province import display
 from app.settlement_words import amount_in_words, money, number
 
 logger = logging.getLogger(__name__)
@@ -94,7 +96,7 @@ def _org(province: str) -> dict[str, str]:
     hit = ORG_DETAILS.get(key)
     if hit:
         return hit
-    pretty = province.strip().title()
+    pretty = display(province).title()
     return {"name": f"Związek Piłki Ręcznej – {pretty}", "address": ""}
 
 
@@ -208,7 +210,7 @@ class PdfRequest(BaseModel):
 
 @router.post("/zestawienie", summary="PDF: zestawienie ekwiwalentów sędziowskich")
 async def zestawienie_pdf(payload: PdfRequest):
-    province = payload.province.strip().upper()
+    province = require_province(payload.province)
     if not await module_enabled(province, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
 
@@ -276,7 +278,7 @@ async def zestawienie_pdf(payload: PdfRequest):
 
 @router.post("/przejazdy", summary="PDF: lista kosztów przejazdów")
 async def przejazdy_pdf(payload: PdfRequest):
-    province = payload.province.strip().upper()
+    province = require_province(payload.province)
     if not await module_enabled(province, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
 
@@ -357,7 +359,7 @@ async def documents(
 ):
     query = (
         select(province_settlement_documents)
-        .where(province_settlement_documents.c.province == province.strip().upper())
+        .where(province_settlement_documents.c.province == require_province(province))
         .order_by(province_settlement_documents.c.created_at.desc())
         .limit(limit)
     )
