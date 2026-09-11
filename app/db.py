@@ -477,6 +477,9 @@ user_report_messages = Table(
   Column("sender_name", String, nullable=True),
   Column("content", Text, nullable=False),
   Column("attachment_url", Text, nullable=True),   # "__archived__" po sprzątaniu
+  # Kilka zdjęć w jednej wiadomości (od 11.09.2026). `attachment_url` dalej
+  # niesie PIERWSZE z nich - starsze wersje aplikacji czytają tylko tamto pole.
+  Column("attachment_urls", JSONB, nullable=True),
   Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
@@ -1199,6 +1202,21 @@ saved_matches = Table(
     # sprzed tej kolumny. Guard porównuje tylko wtedy, gdy obie strony wiedzą,
     # o który mecz chodzi.
     Column("zprp_match_id", String, nullable=True, index=True),
+    # Wersja TREŚCI meczu i jej autor (`app/proel_doc_version.py`). Rośnie
+    # wyłącznie przy przyjętym pełnym zapisie; bicie serca, patch pola i sama
+    # zmiana statusu jej nie ruszają. Bez tego telefon nie miał czym odróżnić
+    # "ktoś inny zmienił protokół" od "mój zapis doszedł, tylko odpowiedź nie".
+    # 0 = wiersz sprzed wersjonowania - nie ma z czym porównać.
+    Column("doc_rev", Integer, nullable=False, server_default=text("0")),
+    Column("doc_writer_install", String, nullable=True),
+    Column("doc_writer_judge", String, nullable=True),
+    Column("doc_writer_name", String, nullable=True),
+    Column("doc_written_at", DateTime(timezone=True), nullable=True),
+    # Zapis szkoleniowy przeniesiony do oficjalnego (`app/proel_promote_rules.py`).
+    # Wiersz szkoleniowy zostaje nietknięty i wskazuje, dokąd poszedł protokół.
+    Column("promoted_to", String, nullable=True),
+    Column("promoted_at", DateTime(timezone=True), nullable=True),
+    Column("promoted_from_rev", Integer, nullable=True),
 )
 
 # 21.05) ProEl - stan współpracy nad meczem (overlay pól + leasing prowadzenia)
@@ -1282,6 +1300,33 @@ proel_deleted_matches = Table(
     # ofertą do przywrócenia po raz drugi.
     Column("restored_at", DateTime(timezone=True), nullable=True),
     Column("restored_by_judge_id", String, nullable=True),
+)
+
+# 21.065) ProEl - historia wersji treści, które przegrały
+#
+# Konflikt wersji (`app/proel_doc_version.py`) kończy się wyborem sędziego,
+# a wybór zawsze kogoś kosztuje: albo telefon porzuca swoją treść, albo serwer
+# traci cudzą. Żadna z nich nie znika bez śladu - ląduje tutaj na rok, żeby
+# administrator mógł przy reklamacji zobaczyć, co było w wersji, która
+# przegrała. `reason`: "rejected_local" (telefon oddał swoją) albo
+# "overwritten_by_choice" (sędzia nadpisał wersję z serwera swoją).
+proel_doc_history = Table(
+    "proel_doc_history", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("match_number", String, nullable=False, index=True),
+    Column("doc_rev", Integer, nullable=True),
+    Column("data_json", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("status", String, nullable=True),
+    Column("writer_install", String, nullable=True),
+    Column("writer_judge", String, nullable=True),
+    Column("writer_name", String, nullable=True),
+    Column("written_at", DateTime(timezone=True), nullable=True),
+    Column("archived_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+    Column("archived_by_judge", String, nullable=True),
+    Column("archived_by_name", String, nullable=True),
+    Column("archived_by_install", String, nullable=True),
+    Column("reason", String, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=True, index=True),
 )
 
 # 21.07) ProEl - dziennik zdarzeń meczu
@@ -3263,6 +3308,18 @@ with engine.connect() as _conn:
     # Odcisk meczu bez identyfikatora ZPRP. `create_all` nie dokłada kolumn do
     # istniejących tabel, a ta tabela na produkcji istnieje od dawna.
     _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS local_key varchar"))
+    # Wersja treści meczu i przeniesienie zapisu szkoleniowego do oficjalnego.
+    # `proel_matches` istnieje na produkcji od dawna, więc `create_all` tych
+    # kolumn nie dołoży. `DEFAULT 0` bez przepisywania tabeli (Postgres 11+),
+    # a 0 znaczy "nigdy niewersjonowany" i niczego nie blokuje.
+    _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS doc_rev integer NOT NULL DEFAULT 0"))
+    _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS doc_writer_install varchar"))
+    _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS doc_writer_judge varchar"))
+    _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS doc_writer_name varchar"))
+    _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS doc_written_at timestamptz"))
+    _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_to varchar"))
+    _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_at timestamptz"))
+    _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_from_rev integer"))
     # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
     # `create_all` kolumny nie dołoży.
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))

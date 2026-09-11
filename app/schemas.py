@@ -250,6 +250,9 @@ class ReportMessageItem(BaseModel):
     sender_name: Optional[str] = None
     content: str
     attachment_url: Optional[str] = None
+    # Wszystkie zdjęcia wiadomości, w kolejności wysłania. Starsze wiadomości
+    # dostają tu jednoelementową listę z `attachment_url`.
+    attachment_urls: List[str] = []
     created_at: datetime
 
 
@@ -263,6 +266,9 @@ class ReportReplyRequest(BaseModel):
     full_name: Optional[str] = None
     content: str
     attachment_url: Optional[str] = None
+    # Nowe wersje aplikacji wysyłają tu wszystkie zdjęcia, a w `attachment_url`
+    # pierwsze z nich - starszy backend zapisze wtedy przynajmniej jedno.
+    attachment_urls: Optional[List[str]] = None
     force_user: bool = False
 
 
@@ -981,9 +987,33 @@ class MatchItem(BaseModel):
     data_json: Any
     is_finished: bool
     status: str
+    # Wersja treści (`app/proel_doc_version.py`). Wszystkie opcjonalne:
+    # starsza aplikacja ich nie czyta, a lista niesie z nich tylko
+    # `promoted_to` - reszta przychodzi przy pobraniu jednego meczu.
+    doc_rev: Optional[int] = None
+    doc_written_at: Optional[datetime] = None
+    doc_writer_name: Optional[str] = None
+    #: Czy ostatnią wersję treści zapisało TO urządzenie (`X-Installation-Id`).
+    doc_writer_is_you: Optional[bool] = None
+    #: Klucz oficjalnego meczu, do którego przeniesiono ten zapis szkoleniowy.
+    promoted_to: Optional[str] = None
 
 class ListSavedMatchesResponse(BaseModel):
     matches: List[MatchItem]
+
+
+class ProElHistoryRequest(BaseModel):
+    """Wersja z telefonu, która przegrała w arkuszu konfliktu.
+
+    Sędzia wybrał wersję z serwera, więc jego lokalna treść znika z telefonu.
+    Zanim zniknie, telefon odkłada ją tutaj - na rok, do wglądu administratora.
+    """
+    key: str
+    data_json: Any = None
+    status: Optional[str] = None
+    #: Wersja serwera, na której telefon budował przegraną treść.
+    base_rev: Optional[int] = None
+    reason: str = "rejected_local"
 
 
 # ------------------------- PROEL: STAN WSPÓŁPRACY -------------------------
@@ -1090,6 +1120,16 @@ class ProElLeaseInfo(BaseModel):
     same_judge: Optional[bool] = None
 
 
+class ProElDocWriter(BaseModel):
+    """Autor ostatniej wersji treści - BEZ cudzego identyfikatora instalacji.
+
+    Telefon pyta tylko "czy to ja", więc tylko na to dostaje odpowiedź.
+    """
+    install_is_you: bool = False
+    judge_id: Optional[str] = None
+    name: Optional[str] = None
+
+
 class ProElStateResponse(BaseModel):
     match_number: str
     rev: int
@@ -1129,6 +1169,16 @@ class ProElStateResponse(BaseModel):
     can_approve: bool = True
     #: Sugerowana kadencja odpytywania — zdalny hamulec bez aktualizacji aplikacji.
     retry_after_ms: int = 4000
+    #: Wersja TREŚCI meczu. `rev` wyżej rośnie przy każdym biciu serca i
+    #: patchu, więc nie mówi nic o tym, czy ktoś zmienił protokół; ta rośnie
+    #: wyłącznie przy przyjętym pełnym zapisie (`app/proel_doc_version.py`).
+    #: 0 = wiersz nigdy niewersjonowany albo brak wiersza meczu.
+    doc_rev: int = 0
+    doc_written_at: Optional[datetime] = None
+    doc_writer: Optional[ProElDocWriter] = None
+    #: Zapis szkoleniowy przeniesiony do oficjalnego - klucz oficjalnego meczu.
+    promoted_to: Optional[str] = None
+    promoted_from_rev: Optional[int] = None
 
 
 # ------------------------- BEACH PROEL SAVED MATCHES -------------------------

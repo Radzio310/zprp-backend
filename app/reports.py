@@ -35,6 +35,14 @@ from app.db import (
 )
 from app.admin_alerts import notify_admins
 from app.push.push import send_push_to_judges
+from app.report_attachments import (
+    AttachmentError,
+    archived_values,
+    last_message_preview,
+    message_attachments,
+    normalize_attachments,
+    notification_line,
+)
 from app.schemas import (
     CreateUserReportRequest,
     ListUserReportsResponse,
@@ -142,6 +150,7 @@ def _msg_to_item(row: dict) -> ReportMessageItem:
         sender_name=row.get("sender_name"),
         content=row["content"],
         attachment_url=row.get("attachment_url"),
+        attachment_urls=message_attachments(row),
         created_at=row["created_at"],
     )
 
@@ -170,15 +179,23 @@ async def _thread_stats(report_ids: List[int]) -> Dict[int, dict]:
         select(
             user_report_messages.c.report_id,
             user_report_messages.c.content,
+            user_report_messages.c.attachment_url,
+            user_report_messages.c.attachment_urls,
             user_report_messages.c.created_at,
         )
         .where(user_report_messages.c.report_id.in_(list(stats.keys())))
         .order_by(user_report_messages.c.created_at.desc())
     )
+    seen: set = set()
     for r in last_rows:
         entry = stats.get(r["report_id"])
-        if entry and entry["last"] is None:
-            entry["last"] = r["content"]
+        if not entry or r["report_id"] in seen:
+            continue
+        seen.add(r["report_id"])
+        # Wiadomość z samym zdjęciem ma pustą treść - karta wątku pokazywała
+        # wtedy pusty podgląd.
+        row = dict(r)
+        entry["last"] = last_message_preview(row["content"], len(message_attachments(row)))
     return stats
 
 
@@ -242,7 +259,11 @@ async def _cleanup_old_attachments(days: int = 60) -> int:
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     rows = await database.fetch_all(
-        select(user_report_messages.c.id, user_report_messages.c.attachment_url).where(
+        select(
+            user_report_messages.c.id,
+            user_report_messages.c.attachment_url,
+            user_report_messages.c.attachment_urls,
+        ).where(
             (user_report_messages.c.created_at < cutoff)
             & (user_report_messages.c.attachment_url.isnot(None))
             & (user_report_messages.c.attachment_url != "__archived__")
@@ -250,17 +271,21 @@ async def _cleanup_old_attachments(days: int = 60) -> int:
     )
     removed = 0
     for row in rows:
-        path = _url_to_fs_path(row["attachment_url"])
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-                removed += 1
-            except Exception:
-                continue
+        data = dict(row)
+        # Wszystkie zdjęcia wiadomości, nie tylko pierwsze - reszta zostałaby
+        # na wolumenie na zawsze.
+        for url in message_attachments(data):
+            path = _url_to_fs_path(url)
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    removed += 1
+                except Exception:
+                    continue
         await database.execute(
             update(user_report_messages)
-            .where(user_report_messages.c.id == row["id"])
-            .values(attachment_url="__archived__")
+            .where(user_report_messages.c.id == data["id"])
+            .values(**archived_values(data))
         )
     return removed
 
@@ -435,7 +460,7 @@ async def get_report(
 )
 async def reply(report_id: int, req: ReportReplyRequest):
     content = (req.content or "").strip()
-    if not content and not req.attachment_url:
+    if not content and not req.attachment_url and not req.attachment_urls:
         raise HTTPException(400, detail="Wiadomość nie może być pusta")
 
     row = await database.fetch_one(select(user_reports).where(user_reports.c.id == report_id))
@@ -443,6 +468,12 @@ async def reply(report_id: int, req: ReportReplyRequest):
         raise HTTPException(404, detail="Nie znaleziono zgłoszenia")
     data = dict(row)
     is_admin = await _require_access(data, req.judge_id)
+    try:
+        attachments = normalize_attachments(report_id, req.attachment_url, req.attachment_urls)
+    except AttachmentError as exc:
+        raise HTTPException(400, detail=str(exc))
+    if not content and not attachments:
+        raise HTTPException(400, detail="Wiadomość nie może być pusta")
     is_owner = str(data["judge_id"]) == str(req.judge_id)
     if req.force_user and not is_owner:
         raise HTTPException(403, detail="Tylko autor może pisać jako użytkownik")
@@ -464,7 +495,10 @@ async def reply(report_id: int, req: ReportReplyRequest):
             sender_id=str(req.judge_id),
             sender_name=sender_name,
             content=content,
-            attachment_url=req.attachment_url,
+            # Pierwsze zdjęcie zostaje w starym polu - starsze wersje aplikacji
+            # czytają tylko je.
+            attachment_url=attachments[0] if attachments else None,
+            attachment_urls=attachments or None,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -499,7 +533,8 @@ async def reply(report_id: int, req: ReportReplyRequest):
             notify_admins(
                 "report_reply",
                 data.get("title") or "Zgłoszenie",
-                f"👤 {data['full_name']}\n„{content[:90]}”",
+                # Sama fotka dawała tu pusty cytat `„”`.
+                f"👤 {data['full_name']}\n{notification_line(content, len(attachments))}",
                 # Odpowiedzi w jednym wątku mogą przyjść wielokrotnie. Pusty
                 # klucz wyłącza deduplikację, a report_id nadal jedzie osobno
                 # jako cel nawigacji do właściwej rozmowy.
@@ -550,17 +585,19 @@ async def delete_report(report_id: int, judge_id: str = Query(...)):
 
     # Pliki idą razem z wątkiem — inaczej zostałyby sierotami na wolumenie.
     msgs = await database.fetch_all(
-        select(user_report_messages.c.attachment_url).where(
-            user_report_messages.c.report_id == report_id
-        )
+        select(
+            user_report_messages.c.attachment_url,
+            user_report_messages.c.attachment_urls,
+        ).where(user_report_messages.c.report_id == report_id)
     )
     for m in msgs:
-        path = _url_to_fs_path(m["attachment_url"] or "")
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
+        for url in message_attachments(dict(m)):
+            path = _url_to_fs_path(url)
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
     await database.execute(
         user_report_messages.delete().where(user_report_messages.c.report_id == report_id)

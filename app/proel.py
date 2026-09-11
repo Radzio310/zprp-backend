@@ -7,6 +7,7 @@ from sqlalchemy import select, insert, update, delete, func
 from app.db import (
     database,
     proel_deleted_matches,
+    proel_doc_history,
     proel_match_state,
     saved_matches,
 )
@@ -57,7 +58,36 @@ from app.proel_match_key import (
 )
 from app.proel_training_key import (
     TRAINING_KEY_LIKE,
+    is_training_key,
     key_conflicts_with_blob,
+)
+from app.proel_doc_version import (
+    CLIENT_REASONS as _HISTORY_CLIENT_REASONS,
+    HISTORY_RETENTION_DAYS as _HISTORY_RETENTION_DAYS,
+    MAX_HISTORY_BYTES as _MAX_HISTORY_BYTES,
+    REASON_OVERWRITTEN as _REASON_OVERWRITTEN,
+    REASON_REJECTED_LOCAL as _REASON_REJECTED_LOCAL,
+    conflict_event_key,
+    is_stale_write,
+    iso as _iso,
+    json_value as _json_value,
+    parse_base_rev,
+    parse_overwrite,
+    payload_bytes,
+    same_install,
+    should_archive_on_overwrite,
+    should_bump,
+    stale_detail,
+    writer_view,
+)
+from app.proel_promote_rules import (
+    REASON_MISSING as _PROMOTE_MISSING,
+    PromotionFacts,
+    official_blob,
+    official_blob_is_clean,
+    official_key_for,
+    promoted_detail,
+    promotion_verdict,
 )
 from app.proel_lease import (
     LEASE_TTL_BACKGROUND_SECONDS as _LEASE_TTL_BACKGROUND_SECONDS,
@@ -68,6 +98,9 @@ from app.proel_lease import (
     lease_active as _lease_active,
     lease_view as _lease_view_pure,
     legacy_lease_values as _legacy_lease_values,
+    # Używane w `/lease` od dawna, ale nigdy nie zaimportowane: objęcie
+    # prowadzenia meczu bez wiersza stanu kończyło się NameError (500).
+    may_open_state_on_lease,
     now_utc as _now,
     same_judge_lease as _same_judge_lease,
 )
@@ -103,6 +136,7 @@ from app.schemas import (
     ProElLeaseRequest,
     ProElPatchRequest,
     ProElStateResponse,
+    ProElHistoryRequest,
 )
 from datetime import datetime, timedelta, timezone
 
@@ -158,6 +192,28 @@ class _MatchIdConflict(Exception):
         self.incoming = incoming
 
 
+class _DocStale(Exception):
+    """Sygnał z wnętrza transakcji: telefon buduje na starszej wersji treści.
+
+    Osobny wyjątek z tego samego powodu co `_MatchIdConflict`: odmowa ma
+    zostawić wpis w dzienniku, a wpis zrobiony w środku transakcji wycofałby
+    się razem z nią.
+    """
+
+    def __init__(
+        self,
+        current_rev: int,
+        writer_name: Optional[str],
+        written_at: Any,
+        base_rev: Optional[int],
+    ) -> None:
+        super().__init__("doc stale")
+        self.current_rev = int(current_rev or 0)
+        self.writer_name = writer_name
+        self.written_at = written_at
+        self.base_rev = base_rev
+
+
 def _overlay_of(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not state:
         return {}
@@ -197,19 +253,28 @@ async def _fetch_doc_status(match_number: str) -> Optional[str]:
         return "finished" if row["is_finished"] else "in_progress"
 
 
-async def _fetch_doc_updated_at(match_number: str) -> Optional[datetime]:
-    """Czas ostatniego pełnego autosave'u, bez czytania ciężkiego data_json."""
+async def _fetch_doc_meta(match_number: str) -> Dict[str, Any]:
+    """Status, czas autosave'u i wersja treści - JEDNYM zapytaniem, bez bloba.
+
+    `/state` odpytuje się długim pollingiem, więc każde zapytanie mniej jest
+    tu widoczne. Wcześniej status i czas szły dwoma osobnymi odczytami; wersja
+    treści byłaby trzecim. Pusty słownik = wiersza meczu nie ma.
+    """
     row = await database.fetch_one(
-        select(saved_matches.c.updated_at).where(
-            saved_matches.c.match_number == match_number
-        )
+        select(
+            saved_matches.c.status,
+            saved_matches.c.is_finished,
+            saved_matches.c.updated_at,
+            saved_matches.c.doc_rev,
+            saved_matches.c.doc_written_at,
+            saved_matches.c.doc_writer_install,
+            saved_matches.c.doc_writer_judge,
+            saved_matches.c.doc_writer_name,
+            saved_matches.c.promoted_to,
+            saved_matches.c.promoted_from_rev,
+        ).where(saved_matches.c.match_number == match_number)
     )
-    if row is None:
-        return None
-    try:
-        return row["updated_at"]
-    except (KeyError, IndexError):
-        return None
+    return _as_dict(row)
 
 
 async def _fetch_doc_config(match_number: str) -> Any:
@@ -454,10 +519,15 @@ async def _build_state_response(
     match_number: str, actor: Actor, rights: AdminRights
 ) -> ProElStateResponse:
     state = await _fetch_state(match_number)
-    doc_status, doc_updated_at = await asyncio.gather(
-        _fetch_doc_status(match_number),
-        _fetch_doc_updated_at(match_number),
+    doc = await _fetch_doc_meta(match_number)
+    # Ta sama reguła co w `_fetch_doc_status`: pusty status starego wiersza
+    # wynika z `is_finished`.
+    doc_status = (
+        (doc.get("status") or ("finished" if doc.get("is_finished") else "in_progress"))
+        if doc
+        else None
     )
+    doc_updated_at = doc.get("updated_at")
     phase = _phase_of(state, doc_status)
     # `your_roles` liczymy z SAMEGO wiersza stanu - dokładnie tak, jak robi to
     # `/patch`, który z tych ról korzysta. Prawo do zatwierdzenia ma własne,
@@ -480,6 +550,17 @@ async def _build_state_response(
         your_roles=sorted(roles),
         can_approve=await _may_approve(match_number, state, actor, rights),
         retry_after_ms=4000,
+        doc_rev=int(doc.get("doc_rev") or 0),
+        doc_written_at=doc.get("doc_written_at"),
+        # Autor bez surowej instalacji - patrz `writer_view`.
+        doc_writer=writer_view(
+            doc.get("doc_writer_install"),
+            doc.get("doc_writer_judge"),
+            doc.get("doc_writer_name"),
+            actor.installation_id,
+        ),
+        promoted_to=(str(doc.get("promoted_to") or "").strip() or None),
+        promoted_from_rev=doc.get("promoted_from_rev"),
     )
 
 
@@ -1076,6 +1157,101 @@ async def release_proel_lease(
 
 
 @router.post(
+    "/history",
+    response_model=dict,
+    summary="Odłóż do historii wersję z telefonu, która przegrała w konflikcie",
+)
+async def post_proel_history(
+    req: ProElHistoryRequest,
+    actor: Actor = Depends(proel_actor),
+):
+    """Sędzia wybrał wersję z serwera - jego lokalna treść znika z telefonu.
+
+    Zanim zniknie, telefon odkłada ją tutaj. Nikt jej nie przywraca
+    automatycznie: to ślad na wypadek reklamacji ("miałem to w telefonie"),
+    który administrator czyta w `GET /proel/archive/history`.
+
+    Stoi PRZED `POST /`, choć `POST` nie ma zachłannej ścieżki - kolejność
+    tras w tym pliku i tak ma znaczenie (patrz nota nad endpointami stanu),
+    a nowa trasa nie powinna jej sprawdzać na produkcji.
+    """
+    key = str(req.key or "").strip()
+    if not key:
+        raise HTTPException(
+            422, detail={"code": "BAD_MATCH_NUMBER", "message": "Brak klucza meczu."}
+        )
+    reason = str(req.reason or "").strip() or _REASON_REJECTED_LOCAL
+    if reason not in _HISTORY_CLIENT_REASONS:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "BAD_REASON",
+                "message": (
+                    "Telefon może odłożyć do historii wyłącznie własną wersję, "
+                    "która przegrała w wyborze (rejected_local)."
+                ),
+            },
+        )
+    if not isinstance(req.data_json, dict):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "BAD_DATA",
+                "message": "Brak treści meczu do odłożenia - oczekiwano całego protokołu.",
+            },
+        )
+    if payload_bytes(req.data_json) > _MAX_HISTORY_BYTES:
+        raise HTTPException(
+            413,
+            detail={
+                "code": "TOO_LARGE",
+                "message": (
+                    "Ta wersja meczu jest za duża, żeby odłożyć ją do historii "
+                    f"(limit {_MAX_HISTORY_BYTES // (1024 * 1024)} MB)."
+                ),
+            },
+        )
+
+    exists = await database.fetch_val(
+        select(saved_matches.c.match_number).where(saved_matches.c.match_number == key)
+    )
+    if exists is None:
+        raise HTTPException(
+            404,
+            detail={
+                "code": "MATCH_NOT_FOUND",
+                "message": (
+                    "Na serwerze nie ma meczu o tym kluczu, więc nie ma do czego "
+                    "dołączyć tej wersji."
+                ),
+            },
+        )
+
+    status_value = str(req.status or "").strip()[:32] or None
+    new_id = await database.fetch_val(
+        insert(proel_doc_history)
+        .values(
+            match_number=key,
+            doc_rev=req.base_rev,
+            data_json=req.data_json,
+            status=status_value,
+            # Autorem przegranej treści jest ten telefon - to jego wersja.
+            writer_install=actor.installation_id or None,
+            writer_judge=actor.judge_id or None,
+            writer_name=actor.name or None,
+            written_at=None,
+            archived_by_judge=actor.judge_id or None,
+            archived_by_name=actor.name or None,
+            archived_by_install=actor.installation_id or None,
+            reason=reason,
+            expires_at=_now() + timedelta(days=_HISTORY_RETENTION_DAYS),
+        )
+        .returning(proel_doc_history.c.id)
+    )
+    return {"success": True, "id": int(new_id)}
+
+
+@router.post(
     "/",
     response_model=dict,
     status_code=status.HTTP_201_CREATED,
@@ -1095,10 +1271,29 @@ async def create_proel_match(
 ):
     _guard_training_key(req.match_number, req.data_json)
     existing = await database.fetch_one(
-        select(saved_matches)
-        .where(saved_matches.c.match_number == req.match_number)
+        select(
+            saved_matches.c.match_number,
+            saved_matches.c.promoted_to,
+            saved_matches.c.promoted_from_rev,
+        ).where(saved_matches.c.match_number == req.match_number)
     )
     if existing:
+        # Zapis szkoleniowy przeniesiony do oficjalnego mówi od razu, dokąd
+        # pisać. Samo "już istnieje" posłałoby telefon do `PUT`, który i tak
+        # odmówi - tym razem z właściwym powodem, ale o jedno żądanie później.
+        promoted_to = str(existing["promoted_to"] or "").strip()
+        if promoted_to:
+            official_rev = await database.fetch_val(
+                select(saved_matches.c.doc_rev).where(
+                    saved_matches.c.match_number == promoted_to
+                )
+            )
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=promoted_detail(
+                    promoted_to, official_rev, existing["promoted_from_rev"]
+                ),
+            )
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={"code": "MATCH_EXISTS", "message": "Mecz o takim numerze już istnieje"},
@@ -1137,14 +1332,26 @@ async def create_proel_match(
         # badania na długo przed tym, jak stolikowy w ogóle otworzył mecz.
         data_json = _reproject_blob(state, copy.deepcopy(req.data_json))
 
-        stmt = insert(saved_matches).values(
-            match_number=req.match_number,
-            data_json=data_json,
-            status=new_status,
-            is_finished=_is_finished_for(new_status),
-            zprp_match_id=zprp_id or None,
+        # Pierwsza wersja treści (1) razem z autorem - patrz
+        # `app/proel_doc_version.py`. Czas przez `RETURNING`, żeby telefon
+        # dostał znacznik z zegara bazy, a nie z zegara procesu.
+        stmt = (
+            insert(saved_matches)
+            .values(
+                match_number=req.match_number,
+                data_json=data_json,
+                status=new_status,
+                is_finished=_is_finished_for(new_status),
+                zprp_match_id=zprp_id or None,
+                doc_rev=1,
+                doc_writer_install=str(x_installation_id or "").strip() or None,
+                doc_writer_judge=((actor.judge_id if actor else "") or None),
+                doc_writer_name=((actor.name if actor else "") or None),
+                doc_written_at=func.now(),
+            )
+            .returning(saved_matches.c.doc_rev, saved_matches.c.doc_written_at)
         )
-        await database.execute(stmt)
+        created = _as_dict(await database.fetch_one(stmt))
 
         if state is not None:
             await _sync_state_after_doc_write(
@@ -1184,7 +1391,11 @@ async def create_proel_match(
     # Awans z bazy związku idzie W TLE - zapis meczu nie czeka na cudzy serwer.
     kick_promotion(req.match_number)
 
-    return {"success": True}
+    return {
+        "success": True,
+        "doc_rev": int(created.get("doc_rev") or 1),
+        "doc_written_at": _iso(created.get("doc_written_at")),
+    }
 
 
 async def _require_approver(
@@ -1298,6 +1509,10 @@ async def update_proel_match(
     x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
     x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
     authorization: Optional[str] = Header(None),
+    # Wersja treści, na której telefon zbudował ten zapis, i świadomy wybór
+    # w arkuszu konfliktu. Oba OPCJONALNE: bez nich zapis działa jak dotąd.
+    x_proel_base_rev: Optional[str] = Header(None, alias="X-Proel-Base-Rev"),
+    x_proel_overwrite: Optional[str] = Header(None, alias="X-Proel-Overwrite"),
 ):
     # Aktor MIĘKKO, jeden na całą trasę: podpisuje potwierdzenia badań
     # wchłonięte z bloba (patrz `absorb_blob_exams`).
@@ -1307,14 +1522,27 @@ async def update_proel_match(
     )
     absorbed: Dict[str, Any] = {}
     _guard_training_key(match_number, req.data_json)
+    my_install = str(x_installation_id or "").strip()
+    base_rev = parse_base_rev(x_proel_base_rev)
+    overwrite = parse_overwrite(x_proel_overwrite)
+    new_doc_rev = 0
+    new_written_at: Any = None
+    archived_id: Optional[int] = None
+    replaced: Dict[str, Any] = {}
     # Cała ścieżka w JEDNEJ transakcji: blokada wiersza stanu (`FOR UPDATE`)
     # działa tylko wewnątrz transakcji, a reprojekcja musi widzieć overlay
     # dokładnie taki, jaki obowiązuje w chwili zapisu bloba.
     try:
         async with database.transaction():
+            # Bez `data_json`: blob czytamy niżej raz, pod blokadą wiersza,
+            # razem z wersją treści - tam jest potrzebny do porównania.
             row = await database.fetch_one(
-                select(saved_matches)
-                .where(saved_matches.c.match_number == match_number)
+                select(
+                    saved_matches.c.match_number,
+                    saved_matches.c.status,
+                    saved_matches.c.is_finished,
+                    saved_matches.c.zprp_match_id,
+                ).where(saved_matches.c.match_number == match_number)
             )
             if not row:
                 raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
@@ -1372,6 +1600,66 @@ async def update_proel_match(
                 _match_identity(incoming_id, _local_key_from_blob(req.data_json)),
             ) == _IDENTITY_CONFLICT:
                 raise _MatchIdConflict(known_id, incoming_id)
+
+            # ── Wersja treści: czy telefon widział to, co tu leży ─────────────
+            #
+            # Czytamy ją POD BLOKADĄ wiersza meczu i PO blokadzie wiersza stanu
+            # - ta sama kolejność co w `/patch` (stan, potem mecz), więc zapis
+            # i patch tego samego meczu nie zakleszczą się nawzajem. Bez blokady
+            # dwa telefony z tą samą wersją bazową przeszłyby oba, a drugi po
+            # cichu nadpisałby pierwszego - dokładnie to, przed czym ta kontrola
+            # stoi. Blob jest tu, bo niżej porównujemy go z przychodzącym.
+            version = _as_dict(
+                await database.fetch_one(
+                    select(
+                        saved_matches.c.data_json,
+                        saved_matches.c.doc_rev,
+                        saved_matches.c.doc_writer_install,
+                        saved_matches.c.doc_writer_judge,
+                        saved_matches.c.doc_writer_name,
+                        saved_matches.c.doc_written_at,
+                        saved_matches.c.promoted_to,
+                        saved_matches.c.promoted_from_rev,
+                    )
+                    .where(saved_matches.c.match_number == match_number)
+                    .with_for_update()
+                )
+            )
+            current_doc_rev = int(version.get("doc_rev") or 0)
+
+            # Zapis szkoleniowy przeniesiony do oficjalnego nie przyjmuje już
+            # treści. Dwa protokoły jednego meczu, oba żywe, rozjechałyby się
+            # przy pierwszym autozapisie - telefon ma pisać do oficjalnego.
+            promoted_to = str(version.get("promoted_to") or "").strip()
+            if promoted_to:
+                official_rev = await database.fetch_val(
+                    select(saved_matches.c.doc_rev).where(
+                        saved_matches.c.match_number == promoted_to
+                    )
+                )
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail=promoted_detail(
+                        promoted_to, official_rev, version.get("promoted_from_rev")
+                    ),
+                )
+
+            # Cudza, nowsza treść, której telefon nie widział - reguła
+            # w `is_stale_write`. Stary klient bez nagłówka nigdy tu nie wpada.
+            if is_stale_write(
+                base_rev,
+                current_doc_rev,
+                version.get("doc_writer_install"),
+                my_install,
+                doc_exists=bool(version),
+                overwrite=overwrite,
+            ):
+                raise _DocStale(
+                    current_doc_rev,
+                    version.get("doc_writer_name"),
+                    version.get("doc_written_at"),
+                    base_rev,
+                )
 
             # Twarda blokada prowadzenia — ale WYŁĄCZNIE dla klientów, które o niej
             # wiedzą (`X-BAZA-Proel: 2`). Stara wersja aplikacji nie potrafiłaby
@@ -1443,6 +1731,54 @@ async def update_proel_match(
             projected = _reproject_blob(state, copy.deepcopy(req.data_json))
 
             to_update: dict = {"data_json": projected}
+
+            # Wersję podbija wyłącznie prawdziwa zmiana treści (`should_bump`).
+            # Zatwierdzenie i cofnięcie niosą pełny blob, ale są decyzją
+            # o statusie; zapis bajt w bajt taki sam nie zmienia autorstwa.
+            approval_transition = (requested_status == "approved") != (
+                current_status == "approved"
+            )
+            if should_bump(
+                approval_transition=approval_transition,
+                content_changed=projected != _json_value(version.get("data_json")),
+            ):
+                to_update["doc_rev"] = saved_matches.c.doc_rev + 1
+                to_update["doc_writer_install"] = my_install or None
+                to_update["doc_writer_judge"] = (actor.judge_id if actor else "") or None
+                to_update["doc_writer_name"] = (actor.name if actor else "") or None
+                to_update["doc_written_at"] = func.now()
+
+            # Świadomy wybór własnej wersji w arkuszu konfliktu. Telefon
+            # widział wersję serwera (dlatego jego wersja bazowa się zgadza),
+            # ale ta wersja i tak przegrywa - więc zanim zniknie, trafia do
+            # historii. Własnej treści tego urządzenia nie odkładamy: to
+            # ponowienie zapisu, a nie czyjakolwiek strata.
+            if version and should_archive_on_overwrite(
+                overwrite, version.get("doc_writer_install"), my_install
+            ):
+                archived_id = await database.fetch_val(
+                    insert(proel_doc_history)
+                    .values(
+                        match_number=match_number,
+                        doc_rev=current_doc_rev,
+                        data_json=_json_value(version.get("data_json")),
+                        status=current_status,
+                        writer_install=version.get("doc_writer_install"),
+                        writer_judge=version.get("doc_writer_judge"),
+                        writer_name=version.get("doc_writer_name"),
+                        written_at=version.get("doc_written_at"),
+                        archived_by_judge=(actor.judge_id if actor else "") or None,
+                        archived_by_name=(actor.name if actor else "") or None,
+                        archived_by_install=my_install or None,
+                        reason=_REASON_OVERWRITTEN,
+                        expires_at=_now() + timedelta(days=_HISTORY_RETENTION_DAYS),
+                    )
+                    .returning(proel_doc_history.c.id)
+                )
+                replaced = {
+                    "replaced_rev": current_doc_rev,
+                    "replaced_writer": version.get("doc_writer_name") or "",
+                }
             # Uzupełniamy identyfikator meczu, gdy wiersz powstał przed tą kolumną
             # albo przez `POST` bez konfiguracji. Od tej chwili guard wyżej ma się
             # o co oprzeć.
@@ -1463,8 +1799,11 @@ async def update_proel_match(
                 update(saved_matches)
                 .where(saved_matches.c.match_number == match_number)
                 .values(**to_update)
+                .returning(saved_matches.c.doc_rev, saved_matches.c.doc_written_at)
             )
-            await database.execute(stmt)
+            written = _as_dict(await database.fetch_one(stmt))
+            new_doc_rev = int(written.get("doc_rev") or 0)
+            new_written_at = written.get("doc_written_at")
 
             if state is not None:
                 await _sync_state_after_doc_write(
@@ -1475,6 +1814,28 @@ async def update_proel_match(
                     legacy_writer=str(x_baza_proel or "") != "2",
                     writer_install=str(x_installation_id or "").strip(),
                 )
+    except _DocStale as stale:
+        # Wpis PO wycofaniu transakcji, z kluczem gaszącym ponowienia: telefon
+        # z przeterminowaną wersją ponawia zapis w rytmie autozapisu, a oś
+        # czasu meczu ma pokazać jedną odmowę, nie ścianę identycznych.
+        await log_match_event(
+            match_number=match_number,
+            event="match.doc_conflict",
+            actor=actor,
+            zprp_match_id=_zprp_id_of(req.data_json),
+            details={
+                "base_rev": stale.base_rev,
+                "doc_rev": stale.current_rev,
+                "writer_name": stale.writer_name or "",
+            },
+            event_key=conflict_event_key(match_number, stale.current_rev, my_install),
+            app_version=x_app_version,
+            ip=_client_ip(request, x_forwarded_for),
+        )
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=stale_detail(stale.current_rev, stale.writer_name, stale.written_at),
+        ) from stale
     except _MatchIdConflict as conflict:
         # Wpis powstaje PO wycofaniu transakcji - inaczej wycofałby się
         # razem z nią i odrzucony zapis nie zostawiłby żadnego śladu.
@@ -1545,11 +1906,26 @@ async def update_proel_match(
         app_version=x_app_version,
         ip=_client_ip(request, x_forwarded_for),
     )
+    if archived_id is not None:
+        await log_match_event(
+            match_number=match_number,
+            event="match.overwritten_by_choice",
+            actor=actor,
+            zprp_match_id=incoming_id or known_id,
+            details={**replaced, "history_id": archived_id, "doc_rev": new_doc_rev},
+            app_version=x_app_version,
+            ip=_client_ip(request, x_forwarded_for),
+        )
+
     # Awans z bazy związku idzie W TLE, z ryglem czasu w środku - blob
     # przychodzi co minutę, a związek pytamy najwyżej co pięć.
     kick_promotion(match_number)
 
-    return {"success": True}
+    return {
+        "success": True,
+        "doc_rev": new_doc_rev,
+        "doc_written_at": _iso(new_written_at),
+    }
 
 
 def _state_snapshot(row) -> Dict[str, Any]:
@@ -1684,6 +2060,269 @@ async def archive_and_delete_match(
     return "deleted"
 
 
+# ═══════════════ zapis szkoleniowy jako oficjalny (administrator) ═══════════════
+#
+# Trasa mieszka w `app/proel_archive.py` (router admina z PIN-em), reguły
+# w `app/proel_promote_rules.py`. Tutaj zostaje wyłącznie praca na bazie -
+# z tego samego powodu co `archive_and_delete_match`: oficjalny wiersz ma
+# powstać tą samą drogą co przy zwykłym `POST` (stan współpracy, badania,
+# tożsamość), a te pomocniki są prywatne dla tego modułu.
+
+
+def _json_obj(raw: Any) -> Dict[str, Any]:
+    value = _json_value(raw)
+    return value if isinstance(value, dict) else {}
+
+
+async def _promotion_facts(key: str, *, lock: bool = False) -> Dict[str, Any]:
+    """Fakty o jednym kluczu dla `promotion_verdict` - na sucho albo pod blokadą.
+
+    Ta sama funkcja zbiera je dla sprawdzenia bez zapisu i dla samego zapisu,
+    żeby "wolno" z podglądu i "wolno" z przeniesienia nie mogły się rozjechać.
+    Z `lock=True` woła się WEWNĄTRZ transakcji i blokuje wiersze w kolejności
+    stan -> mecz, tej samej co `PUT` i `/patch`.
+    """
+    official = official_key_for(key)
+    facts = PromotionFacts(key=key)
+    ctx: Dict[str, Any] = {
+        "official_key": official,
+        "facts": facts,
+        "training_doc": {},
+        "official_state": None,
+    }
+    if not is_training_key(key) or not official:
+        return ctx
+
+    training_state = await _fetch_state(key, for_update=lock)
+    doc_q = select(
+        saved_matches.c.status,
+        saved_matches.c.is_finished,
+        saved_matches.c.doc_rev,
+        saved_matches.c.promoted_to,
+        # Sama konfiguracja: werdykt nie potrzebuje przebiegu ani składów.
+        saved_matches.c.data_json["matchConfig"].label("cfg"),
+    ).where(saved_matches.c.match_number == key)
+    if lock:
+        doc_q = doc_q.with_for_update()
+    doc = _as_dict(await database.fetch_one(doc_q))
+    ctx["training_doc"] = doc
+    if not doc:
+        return ctx
+
+    facts.training_exists = True
+    facts.promoted_to = str(doc.get("promoted_to") or "").strip() or None
+    facts.config = _json_obj(doc.get("cfg"))
+    facts.training_lease_active = _lease_active(training_state)
+    facts.training_lease_holder = str((training_state or {}).get("lease_name") or "")
+
+    official_doc = await database.fetch_one(
+        select(saved_matches.c.status, saved_matches.c.is_finished).where(
+            saved_matches.c.match_number == official
+        )
+    )
+    if official_doc is not None:
+        facts.official_status = official_doc["status"] or (
+            "finished" if official_doc["is_finished"] else "in_progress"
+        )
+
+    zprp = _zprp_id_of({"matchConfig": facts.config})
+    if zprp:
+        # Ten sam mecz z rozgrywek pod INNYM kluczem nieszkoleniowym - drugi
+        # protokół jednego meczu to dokładnie to, czego nie zakładamy.
+        twin = await database.fetch_one(
+            select(saved_matches.c.match_number)
+            .where(saved_matches.c.zprp_match_id == zprp)
+            .where(~saved_matches.c.match_number.ilike(TRAINING_KEY_LIKE))
+            .where(saved_matches.c.match_number != official)
+            .limit(1)
+        )
+        if twin is not None:
+            facts.zprp_twin_key = twin["match_number"]
+
+    official_state = await _fetch_state(official, for_update=lock)
+    ctx["official_state"] = official_state
+    if official_state:
+        facts.official_lease_active = _lease_active(official_state)
+        facts.official_lease_holder = str(official_state.get("lease_name") or "")
+        facts.official_zprp_id = official_state.get("zprp_match_id")
+        facts.official_local_key = official_state.get("local_key")
+        facts.official_overlay_nonempty = bool(_overlay_of(official_state))
+    return ctx
+
+
+def _promotion_outcome(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Odmowa albo brak w kształcie odpowiedzi trasy; `None` = wolno."""
+    verdict = promotion_verdict(ctx["facts"])
+    if verdict is None:
+        return None
+    outcome = "missing" if verdict["reason"] == _PROMOTE_MISSING else "refused"
+    return {"outcome": outcome, "official_key": ctx["official_key"], **verdict}
+
+
+async def promotion_check(key: str) -> Dict[str, Any]:
+    """Sprawdzenie na sucho: wszystkie warunki, zero zapisów."""
+    ctx = await _promotion_facts(key)
+    return _promotion_outcome(ctx) or {
+        "outcome": "eligible",
+        "official_key": ctx["official_key"],
+    }
+
+
+async def promote_training_match(
+    key: str, actor: Actor, *, batch: int = 1
+) -> Dict[str, Any]:
+    """Przenosi JEDEN zapis szkoleniowy pod oficjalny numer.
+
+    Zwraca `{"outcome": "promoted" | "missing" | "refused", "official_key", ...}`.
+    Warunki sprawdzamy DRUGI raz, pod blokadą: między podglądem a zapisem
+    ktoś mógł objąć prowadzenie albo założyć oficjalny mecz.
+
+    Oficjalny wiersz powstaje tak jak przy zwykłym `POST`: wiersz stanu
+    z tożsamością meczu, ręczne potwierdzenia badań wciągnięte do overlaya
+    (podpisane administratorem, bo to on tworzy ten zapis), reprojekcja
+    i odświeżenie stanu. Wersja treści startuje od 1, z administratorem jako
+    autorem. Blob szkoleniowy zostaje nietknięty - dostaje tylko wskazanie,
+    dokąd poszedł protokół.
+    """
+    absorbed: Dict[str, Any] = {}
+    async with database.transaction():
+        ctx = await _promotion_facts(key, lock=True)
+        refusal = _promotion_outcome(ctx)
+        if refusal is not None:
+            return refusal
+
+        official = ctx["official_key"]
+        training_doc = ctx["training_doc"]
+        full = await database.fetch_one(
+            select(saved_matches.c.data_json).where(saved_matches.c.match_number == key)
+        )
+        blob = _json_obj(full["data_json"] if full is not None else None)
+        new_blob = official_blob(
+            blob,
+            key,
+            _now().isoformat(timespec="seconds"),
+            actor.name or actor.judge_id,
+        )
+        if not official_blob_is_clean(official, new_blob):
+            # Nie do osiągnięcia po werdykcie (ćwiczenia i testy odpadają
+            # wcześniej) - ale oficjalny protokół, który strażnik zapisu
+            # uznałby za szkoleniowy, byłby gorszy niż brak przeniesienia.
+            raise RuntimeError(f"oficjalna kopia {key} nadal wygląda na szkoleniową")
+
+        status_value = str(training_doc.get("status") or "") or (
+            "finished" if training_doc.get("is_finished") else "in_progress"
+        )
+        zprp_id = _zprp_id_of(new_blob)
+        from_rev = int(training_doc.get("doc_rev") or 0)
+
+        state = ctx["official_state"]
+        if state is None:
+            # `ON CONFLICT DO NOTHING` w środku - równoległe `/ensure` tego
+            # samego numeru nie wywróci przeniesienia.
+            await ensure_state_row(official, new_blob)
+        state = await _fetch_state(official, for_update=True)
+        identity_values = _identity_guard(state, zprp_id, _local_key_from_blob(new_blob))
+        if identity_values:
+            await database.execute(
+                update(proel_match_state)
+                .where(proel_match_state.c.match_number == official)
+                .values(**identity_values, updated_at=func.now())
+            )
+            state = await _fetch_state(official, for_update=True)
+
+        absorbed = await absorb_blob_exams(
+            official, state, new_blob, actor, actor.installation_id
+        )
+        state = absorbed["state"]
+        projected = _reproject_blob(state, copy.deepcopy(new_blob))
+
+        await database.execute(
+            insert(saved_matches).values(
+                match_number=official,
+                data_json=projected,
+                status=status_value,
+                is_finished=bool(training_doc.get("is_finished")),
+                zprp_match_id=zprp_id or None,
+                doc_rev=1,
+                doc_writer_install=actor.installation_id or None,
+                doc_writer_judge=actor.judge_id or None,
+                doc_writer_name=actor.name or None,
+                doc_written_at=func.now(),
+            )
+        )
+        await _sync_state_after_doc_write(
+            official,
+            state,
+            projected,
+            status_value,
+            legacy_writer=False,
+            writer_install=actor.installation_id,
+        )
+        await database.execute(
+            update(saved_matches)
+            .where(saved_matches.c.match_number == key)
+            .values(
+                promoted_to=official,
+                promoted_at=func.now(),
+                promoted_from_rev=from_rev,
+                # Przeniesienie to nie edycja protokołu - "ostatnia zmiana"
+                # zapisu szkoleniowego zostaje tam, gdzie była.
+                updated_at=saved_matches.c.updated_at,
+            )
+        )
+
+    details = {
+        "from": key,
+        "to": official,
+        "from_rev": from_rev,
+        "batch": batch,
+        "bulk": batch > 1,
+    }
+    await log_match_event(
+        match_number=key,
+        event="match.promoted",
+        actor=actor,
+        zprp_match_id=zprp_id,
+        details={**details, "side": "training"},
+    )
+    await log_match_event(
+        match_number=official,
+        event="match.promoted",
+        actor=actor,
+        zprp_match_id=zprp_id,
+        details={**details, "side": "official"},
+    )
+    await journal_absorbed(official, zprp_id, absorbed, actor)
+    kick_promotion(official)
+    return {"outcome": "promoted", "official_key": official}
+
+
+def _match_item(
+    row: Dict[str, Any], *, my_install: str = "", with_version: bool = False
+) -> MatchItem:
+    """Wiersz `proel_matches` w kształcie `MatchItem` - pola wybrane jawnie.
+
+    Wcześniej szedł tu cały wiersz przez `**`, a nowe kolumny wersji niosą
+    identyfikator instalacji autora, który nie ma prawa wyjść z serwera.
+    Lista dostaje tylko `promoted_to`; wersję treści niesie pobranie
+    jednego meczu (`with_version`).
+    """
+    item: Dict[str, Any] = {
+        "match_number": row["match_number"],
+        "updated_at": row["updated_at"],
+        "data_json": row["data_json"],
+        "is_finished": row["is_finished"],
+        "status": row["status"],
+        "promoted_to": (str(row.get("promoted_to") or "").strip() or None),
+    }
+    if with_version:
+        item["doc_rev"] = int(row.get("doc_rev") or 0)
+        item["doc_written_at"] = row.get("doc_written_at")
+        item["doc_writer_name"] = str(row.get("doc_writer_name") or "").strip() or None
+        item["doc_writer_is_you"] = same_install(row.get("doc_writer_install"), my_install)
+    return MatchItem(**item)
+
+
 @router.get(
     "/",
     response_model=ListSavedMatchesResponse,
@@ -1764,10 +2403,11 @@ async def list_proel_matches(
     items: List[MatchItem] = []
     for row in rows:
         data = dict(row)
-        data.pop("zprp_match_id", None)  # nie należy do kształtu MatchItem
         if slim:
             data["data_json"] = _match_head(row["data_json"])
-        items.append(MatchItem(**data))
+        # Pola jawnie (`_match_item`): kolumny wersji niosą identyfikator
+        # instalacji autora, a z listy wychodzi z nich tylko `promoted_to`.
+        items.append(_match_item(data))
     return ListSavedMatchesResponse(matches=items)
 
 
@@ -1933,4 +2573,6 @@ async def get_proel_match(
                 "message": "Nie znaleziono meczu w ProEl'u",
             },
         )
-    return MatchItem(**dict(row))
+    # Z wersją treści: telefon wchodzący do meczu porównuje ją ze swoją
+    # wersją bazową, zanim cokolwiek zapisze.
+    return _match_item(dict(row), my_install=actor.installation_id, with_version=True)

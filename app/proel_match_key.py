@@ -45,6 +45,23 @@ HEAD_CONFIG_KEYS = (
     "hala",
 )
 
+def _training_head(config: Dict[str, Any]) -> Any:
+    """`matchConfig.training` przycięte do samego `eventId`, albo `None`.
+
+    Lista wiersza szkoleniowego musi wiedzieć, że to ćwiczenie z
+    kursokonferencji (wznowienie, filtr, blokada przeniesienia do
+    oficjalnych), a nagłówek gubił to pole w całości. Reszta `training`
+    (wyniki, oceny) zostaje za drzwiami razem z resztą bloba.
+    """
+    training = config.get("training")
+    if not isinstance(training, dict):
+        return None
+    event_id = training.get("eventId")
+    if not str(event_id or "").strip():
+        return None
+    return {"eventId": event_id}
+
+
 #: Pola najwyższego poziomu bloba, które niesie nagłówek listy.
 #:
 #: `penaltyScore` jest tu nie dla ozdoby: listy meczów rysują z niego wynik
@@ -98,6 +115,9 @@ def match_head(blob: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "matchConfig": {k: config.get(k) for k in HEAD_CONFIG_KEYS if k in config}
     }
+    training = _training_head(config)
+    if training is not None:
+        out["matchConfig"]["training"] = training
     for key in HEAD_TOP_KEYS:
         try:
             if key in blob:
@@ -157,6 +177,9 @@ def live_head(blob: Any) -> Dict[str, Any]:
     out["matchConfig"] = {
         k: config.get(k) for k in HEAD_LIVE_CONFIG_KEYS if k in config
     }
+    training = _training_head(config)
+    if training is not None:
+        out["matchConfig"]["training"] = training
     for key in HEAD_CLOCK_KEYS:
         try:
             if key in blob:

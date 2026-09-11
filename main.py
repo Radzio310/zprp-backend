@@ -81,6 +81,7 @@ from app.province_settlements import (
 )
 from app.province_settlement_sync import run_settlement_sync_scheduler
 from app.province_settlement_pdf import router as province_settlement_pdf_router
+from app.province_assignments import router as province_assignments_router
 from app.province_clubs import router as province_clubs_router
 from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
@@ -283,6 +284,7 @@ app.include_router(province_stats_router)
 app.include_router(province_settlement_pdf_router)
 # Panel klubow: /province/clubs. Wlasny prefiks, wiec nie wchodzi pod catch-all.
 app.include_router(province_clubs_router)
+app.include_router(province_assignments_router)
 app.include_router(province_events_router)
 app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
@@ -953,6 +955,9 @@ async def startup():
         # Ocena AI podejścia - tabela podejść istnieje na produkcji, więc
         # kolumny nie dołoży `create_all`.
         "ALTER TABLE spk_run ADD COLUMN IF NOT EXISTS ai_json JSONB",
+        # Kilka zdjęć w jednej wiadomości zgłoszenia - tabela wiadomości istnieje
+        # na produkcji, więc kolumny nie dołoży `create_all`.
+        "ALTER TABLE user_report_messages ADD COLUMN IF NOT EXISTS attachment_urls JSONB",
     ]
     for stmt in _province_match_migrations:
         try:

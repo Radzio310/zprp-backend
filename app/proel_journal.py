@@ -64,6 +64,11 @@ EVENT_LABELS: Dict[str, str] = {
     "match.deleted": "Usunięcie zapisu",
     "match.restored": "Przywrócenie zapisu",
     "match.id_conflict": "Odrzucony zapis (inny mecz)",
+    # Wersja treści (`app/proel_doc_version.py`) i przeniesienie zapisu
+    # szkoleniowego do oficjalnego (`app/proel_promote_rules.py`).
+    "match.doc_conflict": "Odrzucony zapis (nowsza wersja na serwerze)",
+    "match.overwritten_by_choice": "Nadpisanie wersji z serwera wyborem sędziego",
+    "match.promoted": "Przeniesienie do oficjalnego zapisu",
     "field.changed": "Zmiana pól",
     "protocol.pdf_generated": "Wygenerowanie protokołu PDF",
     "zprp.summary_sent": "Wynik skrócony do ZPRP",
@@ -438,6 +443,29 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
         return (
             f"W bazie leży mecz {d.get('known') or '?'}, "
             f"a przyszedł zapis meczu {d.get('incoming') or '?'}"
+        )
+
+    # Trzy zdarzenia wersji treści mają własne zdania PRZED ogólną gałęzią
+    # statusu na końcu: niosą `from`/`to` z kluczami meczów, a tamta czytałaby
+    # je jako statusy i oddawała pusty podtytuł.
+    if ev == "match.doc_conflict":
+        writer = str(d.get("writer_name") or "").strip() or "inne urządzenie"
+        return (
+            f"Zapis zbudowany na wersji {d.get('base_rev', '?')}, a na serwerze "
+            f"leży wersja {d.get('doc_rev', '?')} ({writer})"
+        )
+
+    if ev == "match.overwritten_by_choice":
+        writer = str(d.get("replaced_writer") or "").strip() or "nieznany autor"
+        return (
+            f"Wersja {d.get('replaced_rev', '?')} z serwera ({writer}) odłożona "
+            "do historii i zastąpiona wersją z telefonu"
+        )
+
+    if ev == "match.promoted":
+        return (
+            f"Zapis szkoleniowy {d.get('from') or '?'} przeniesiony do "
+            f"oficjalnego meczu {d.get('to') or '?'}"
         )
 
     if ev == "protocol.pdf_generated":

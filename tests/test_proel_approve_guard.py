@@ -401,9 +401,16 @@ def test_zapis_meczu_pyta_o_prawo_do_zatwierdzenia():
 
 
 def test_guard_stoi_przed_zapisem_do_bazy():
-    """Odmowa po zapisie byłaby odmową po fakcie."""
+    """Odmowa po zapisie byłaby odmową po fakcie.
+
+    Zapis bloba idzie przez `fetch_one(stmt)`, bo `RETURNING` oddaje nową
+    wersję treści (`app/proel_doc_version.py`). Odłożenie nadpisywanej wersji
+    do historii to też zapis - i też musi stać za strażnikiem.
+    """
     code = _function_source("update_proel_match")
-    assert code.index("_require_approver") < code.index("database.execute(stmt)")
+    guard = code.index("_require_approver")
+    assert guard < code.index("database.fetch_one(stmt)")
+    assert guard < code.index("insert(proel_doc_history)")
 
 
 def test_guard_wymaga_TWARDEJ_tozsamosci():

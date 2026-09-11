@@ -120,9 +120,21 @@ class PinThrottle:
         self._fails.pop(who, None)
 
 
-def lock_message(seconds_left: int) -> str:
+def lock_message(
+    seconds_left: int,
+    *,
+    action: str = "Usuwanie",
+    outcome: str = "nic nie zostało usunięte",
+) -> str:
+    """Komunikat blokady PIN-u.
+
+    Licznik pomyłek jest jeden na administratora i wspólny dla wszystkich
+    tras z PIN-em (usuwanie, przenoszenie zapisów szkoleniowych) - zgadywanie
+    na jednej trasie nie może dawać świeżych prób na drugiej. Zmienia się
+    tylko to, co komunikat mówi o skutku.
+    """
     minutes = max(1, (int(seconds_left) + 59) // 60)
     return (
-        "Za dużo błędnych PIN-ów. Usuwanie wróci za "
-        f"{minutes} min - nic nie zostało usunięte."
+        f"Za dużo błędnych PIN-ów. {action} wróci za "
+        f"{minutes} min - {outcome}."
     )

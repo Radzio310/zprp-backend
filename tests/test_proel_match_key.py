@@ -119,6 +119,26 @@ def test_naglowek_znosi_smieci_zamiast_bloba():
     assert match_head({}) == {"matchConfig": {}}
 
 
+def test_naglowek_niesie_znacznik_cwiczenia_i_nic_wiecej_z_training():
+    """Lista zapisów szkoleniowych musi odróżnić ćwiczenie z kursu od meczu
+    z terminarza - bez tego wiersz serwera wyglądał jak zwykły mecz."""
+    blob = {
+        "matchConfig": {
+            "matchNumber": "SPM/1",
+            "training": {"eventId": "ev-42", "grades": [{"judge": "X", "note": 5}]},
+        }
+    }
+    head = match_head(blob)
+    assert head["matchConfig"]["training"] == {"eventId": "ev-42"}
+    assert live_head(blob)["matchConfig"]["training"] == {"eventId": "ev-42"}
+
+
+def test_naglowek_bez_eventid_nie_dostaje_pustego_training():
+    for training in ({}, {"eventId": ""}, {"eventId": "  "}, None, "napis"):
+        head = match_head({"matchConfig": {"matchNumber": "A/1", "training": training}})
+        assert "training" not in head["matchConfig"]
+
+
 # ── Nagłówek meczu W TOKU ───────────────────────────────────────────────────
 
 

@@ -24,6 +24,7 @@ from sqlalchemy import delete, func, or_, select
 from app.db import (
     database,
     proel_deleted_matches,
+    proel_doc_history,
     proel_match_state,
     saved_matches,
 )
@@ -37,7 +38,13 @@ from app.proel_bulk_delete_rules import (
     normalize_keys,
     plan_bulk_delete,
 )
+from app.proel_doc_version import HISTORY_RETENTION_DAYS
 from app.proel_journal import log_match_event
+from app.proel_promote_rules import (
+    FAILED_MESSAGE as PROMOTE_FAILED_MESSAGE,
+    PIN_INVALID_MESSAGE as PROMOTE_PIN_INVALID_MESSAGE,
+    promote_lock_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +63,14 @@ router = APIRouter(
 RETENTION_DAYS = 365
 
 
-async def _require_admin(actor: Actor) -> None:
+async def _require_admin(
+    actor: Actor,
+    message: str = "Archiwum usuniętych meczów jest dostępne tylko dla administratora.",
+) -> None:
     if not await is_admin(actor.judge_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "ADMIN_REQUIRED",
-                "message": "Archiwum usuniętych meczów jest dostępne tylko dla administratora.",
-            },
+            detail={"code": "ADMIN_REQUIRED", "message": message},
         )
 
 
@@ -175,6 +182,103 @@ async def list_deleted(
         "items": [_summary(r) for r in rows],
         "retention_days": RETENTION_DAYS,
     }
+
+
+# ─────────────────────── historia wersji treści ───────────────────────
+#
+# ⚠ Te dwie trasy MUSZĄ stać przed `GET /{entry_id}` niżej: `/history`
+# pasuje do tamtego wzorca jako `entry_id="history"`, a FastAPI nie szuka
+# dalej po błędzie walidacji liczby - wróciłoby 422 zamiast listy.
+
+_HISTORY_ADMIN_MESSAGE = "Historia wersji meczów jest dostępna tylko dla administratora."
+
+
+def _history_summary(row) -> Dict[str, Any]:
+    """Wpis historii BEZ bloba - do listy (ten sam powód co `_summary`)."""
+    return {
+        "id": row["id"],
+        "match_number": row["match_number"],
+        "doc_rev": row["doc_rev"],
+        "status": row["status"],
+        "reason": row["reason"],
+        "writer_judge": row["writer_judge"],
+        "writer_name": row["writer_name"],
+        "written_at": row["written_at"],
+        "archived_at": row["archived_at"],
+        "archived_by_judge": row["archived_by_judge"],
+        "archived_by_name": row["archived_by_name"],
+        "expires_at": row["expires_at"],
+    }
+
+
+async def _purge_expired_history() -> int:
+    """Leniwe czyszczenie historii po roku - ta sama zasada co `_purge_expired`."""
+    try:
+        return await database.execute(
+            delete(proel_doc_history).where(
+                proel_doc_history.c.expires_at.is_not(None),
+                proel_doc_history.c.expires_at < datetime.now(timezone.utc),
+            )
+        )
+    except Exception:
+        logger.warning("ProEl historia: czyszczenie przeterminowanych nie powiodło się", exc_info=True)
+        return 0
+
+
+@router.get("/history", summary="Historia wersji treści, które przegrały (administrator)")
+async def list_doc_history(
+    actor: Actor = Depends(proel_actor),
+    key: Optional[str] = Query(None, description="Klucz meczu (numer albo klucz szkoleniowy)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> Dict[str, Any]:
+    """Wersje, które przegrały w wyborze sędziego - najnowsze najpierw.
+
+    Bez blobów: pełną treść wpisu oddaje `GET /history/{id}`.
+    """
+    await _require_admin(actor, _HISTORY_ADMIN_MESSAGE)
+    await _purge_expired_history()
+
+    columns = [c for c in proel_doc_history.c if c.name != "data_json"]
+    total_q = select(func.count()).select_from(proel_doc_history)
+    rows_q = select(*columns).order_by(proel_doc_history.c.archived_at.desc(), proel_doc_history.c.id.desc())
+    if key and key.strip():
+        # Wielkość liter bez znaczenia: aplikacja podnosi klucze na granicy
+        # sieci, ale administrator wpisuje je z ręki.
+        clause = func.upper(proel_doc_history.c.match_number) == key.strip().upper()
+        total_q = total_q.where(clause)
+        rows_q = rows_q.where(clause)
+
+    total = await database.fetch_val(total_q)
+    rows = await database.fetch_all(rows_q.limit(limit).offset(offset))
+    return {
+        "total": int(total or 0),
+        "items": [_history_summary(r) for r in rows],
+        "retention_days": HISTORY_RETENTION_DAYS,
+    }
+
+
+@router.get("/history/{entry_id}", summary="Wpis historii wersji w całości (administrator)")
+async def get_doc_history(
+    entry_id: int,
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    await _require_admin(actor, _HISTORY_ADMIN_MESSAGE)
+    row = await database.fetch_one(
+        select(proel_doc_history).where(proel_doc_history.c.id == entry_id)
+    )
+    if row is None:
+        raise HTTPException(
+            404,
+            detail={"code": "NOT_FOUND", "message": "Nie ma takiego wpisu w historii wersji."},
+        )
+    out = _history_summary(row)
+    # Surowe identyfikatory instalacji tylko tutaj, u administratora: po nich
+    # łączy się wpis z konkretnym telefonem przy reklamacji.
+    out["writer_install"] = row["writer_install"]
+    out["archived_by_install"] = row["archived_by_install"]
+    out["data_json"] = _json_value(row["data_json"])
+    return out
 
 
 @router.get("/{entry_id}", summary="Usunięty zapis meczu w całości (administrator)")
@@ -424,3 +528,125 @@ async def bulk_delete(
         "failed": failed,
         "retention_days": RETENTION_DAYS,
     }
+
+
+# ─────────────── zapis szkoleniowy jako oficjalny ───────────────
+
+
+class PromoteTrainingRequest(BaseModel):
+    keys: List[str] = Field(default_factory=list)
+    pin: str = ""
+    #: Same sprawdzenia, bez zapisu i bez PIN-u - arkusz pokazuje, co przejdzie.
+    dry_run: bool = False
+
+
+@router.post(
+    "/promote_training",
+    summary="Ustaw zapis szkoleniowy jako oficjalny (administrator, PIN)",
+)
+async def promote_training(
+    req: PromoteTrainingRequest,
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    """Przenosi zapisy szkoleniowe pod oficjalne numery - pojedynczo albo hurtem.
+
+    Każdy klucz sprawdzany i przenoszony osobno, we własnej transakcji
+    (`promote_training_match` w `app/proel.py`): jeden zajęty numer nie
+    zatrzymuje reszty. `dry_run` odpowiada na pytanie "co przejdzie" bez PIN-u
+    i bez zapisu - PIN chroni zapis, a nie wiedzę o tym, co jest zajęte.
+    PIN-owy licznik pomyłek jest ten sam co przy grupowym usuwaniu.
+    Reguły: `app/proel_promote_rules.py`.
+    """
+    await _require_admin(
+        actor, "Przenoszenie zapisów szkoleniowych do oficjalnych należy do administratora."
+    )
+
+    keys = normalize_keys(req.keys)
+    if not keys:
+        raise HTTPException(
+            400,
+            detail={"code": "EMPTY", "message": "Nie zaznaczono żadnego zapisu."},
+        )
+    if len(keys) > MAX_BULK:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "TOO_MANY",
+                "message": f"Naraz można przenieść najwyżej {MAX_BULK} zapisów.",
+            },
+        )
+
+    if not req.dry_run:
+        who = actor.judge_id
+        if _pin_throttle.blocked(who):
+            raise HTTPException(
+                429,
+                detail={
+                    "code": "PIN_LOCKED",
+                    "message": promote_lock_message(_pin_throttle.seconds_left(who)),
+                },
+            )
+        from app.admin import pin_is_valid
+
+        if not await pin_is_valid(who, req.pin):
+            _pin_throttle.fail(who)
+            raise HTTPException(
+                403,
+                detail={"code": "PIN_INVALID", "message": PROMOTE_PIN_INVALID_MESSAGE},
+            )
+        _pin_throttle.reset(who)
+
+    from app.proel import promote_training_match, promotion_check
+
+    promoted: List[Dict[str, str]] = []
+    eligible: List[Dict[str, str]] = []
+    missing: List[str] = []
+    refused: List[Dict[str, str]] = []
+    failed: List[Dict[str, str]] = []
+    batch = len(keys)
+    for key in keys:
+        try:
+            if req.dry_run:
+                out = await promotion_check(key)
+            else:
+                out = await promote_training_match(key, actor, batch=batch)
+        except Exception:  # noqa: BLE001 - jeden zapis nie zatrzymuje reszty
+            logger.warning("ProEl: przeniesienie %s do oficjalnych nieudane", key, exc_info=True)
+            failed.append(
+                {
+                    "key": key,
+                    "message": (
+                        "Nie udało się sprawdzić tego zapisu. Spróbuj jeszcze raz."
+                        if req.dry_run
+                        else PROMOTE_FAILED_MESSAGE
+                    ),
+                }
+            )
+            continue
+        outcome = out.get("outcome")
+        pair = {"key": key, "official_key": out.get("official_key") or ""}
+        if outcome == "eligible":
+            eligible.append(pair)
+        elif outcome == "promoted":
+            promoted.append(pair)
+        elif outcome == "missing":
+            missing.append(key)
+        else:
+            refused.append(
+                {
+                    "key": key,
+                    "reason": str(out.get("reason") or ""),
+                    "message": str(out.get("message") or ""),
+                }
+            )
+
+    result: Dict[str, Any] = {
+        "dry_run": bool(req.dry_run),
+        "promoted": promoted,
+        "missing": missing,
+        "refused": refused,
+        "failed": failed,
+    }
+    if req.dry_run:
+        result["eligible"] = eligible
+    return result
