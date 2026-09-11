@@ -50,3 +50,55 @@ def parse_club_filter(raw: Optional[str]) -> Optional[set[str]]:
         return None
     ids = {part.strip() for part in str(raw).split(",") if part.strip()}
     return ids or None
+
+
+# ---------------------------------------------------------------------------
+# Rozliczenie sezonu poza systemem
+# ---------------------------------------------------------------------------
+
+#: Wpis, ktorym sezon rozliczony poza aplikacja schodzi do zera. Wstecz nie
+#: dopisujemy klubom wplat (decyzja z 11.09.2026), wiec bez niego kazdy klub
+#: minionego sezonu wisial na minusie.
+SEASON_CLOSE_SOURCE = "season-close"
+
+
+def entry_bucket(kind: Any, source: Any) -> str:
+    """Trzy kubelki salda: wplata, wyplata i rozliczenie sezonu poza systemem."""
+    if str(source or "").strip() == SEASON_CLOSE_SOURCE:
+        return "settled"
+    return "out" if str(kind or "").strip().lower().startswith("out") else "in"
+
+
+def closing_amounts(
+    balances: dict[str, float],
+    existing: dict[str, float],
+    selected: Optional[set[str]] = None,
+) -> dict[str, float]:
+    """
+    Kwota wpisu „rozliczenie sezonu" na klub, po ktorej saldo sezonu = 0.
+
+    Saldo juz zawiera poprzedni wpis, wiec nowa kwota to stara MINUS saldo: dlug
+    powieksza wpis (mecz doszedl po zamknieciu), nadwyzka go zmniejsza (mecz
+    zdjety), nigdy ponizej zera - 0 znaczy, ze wpis znika. Klubu bez dlugu
+    i bez wpisu nie ruszamy: nadplaty sie nie zeruje.
+
+    `selected` zaweza do wskazanych klubow; bez niego - kazdy klub na minusie
+    i kazdy, kto ma juz wpis.
+    """
+    if selected is None:
+        candidates = {club_id for club_id, value in balances.items() if value < 0} | set(existing)
+    else:
+        candidates = set(selected)
+    out: dict[str, float] = {}
+    for club_id in sorted(candidates):
+        balance = round(float(balances.get(club_id, 0) or 0), 2)
+        before = round(float(existing.get(club_id, 0) or 0), 2)
+        if before <= 0 and balance >= 0:
+            continue
+        out[club_id] = max(0.0, round(before - balance, 2))
+    return out
+
+
+def closing_day(season_end: date, today: date) -> date:
+    """Data wpisu: koniec sezonu, a dla sezonu, ktory jeszcze trwa - dzisiaj."""
+    return min(season_end, today)

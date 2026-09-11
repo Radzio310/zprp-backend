@@ -24,8 +24,7 @@ PROV_RAW = json.loads(
     io.open(ROOT.parent / "BAZA" / "assets" / "data" / "okregowe" / "slaskieCalcRates.json", encoding="utf-8").read()
 )
 PROV_VERSIONS = [
-    {"id": 10, "valid_from": "2026-09-01", "valid_to": None, "enabled": True,
-     "content": {**PROV_RAW, "kilometrowka": {"ŚLĄSKIE": 0.7}}},
+    {"id": 10, "valid_from": "2026-09-01", "valid_to": None, "enabled": True, "content": PROV_RAW},
 ]
 
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
@@ -129,7 +128,7 @@ def _district_and_league():
 def test_boiskowy_superligi_nie_wchodzi_do_sumy_ani_do_podatku():
     [entry] = settle(_district_and_league())
     assert [m.match_key for m in entry.matches] == ["d"]
-    assert entry.gross == 132
+    assert entry.gross == 117
     # Superliga nie podbila sumy ponad prog 200 zl.
     assert entry.costs == 0
     assert entry.travel == round(20 * 0.7 * 2)
@@ -141,7 +140,7 @@ def test_przelacznik_przywraca_obsady_zprp_ze_znacznikiem():
     league = entry.matches[1]
     assert league.zprp_reason == R.ZPRP_FIELD
     assert entry.matches[0].zprp_reason is None
-    assert entry.gross > 132
+    assert entry.gross > 117
 
 
 def test_sedzia_z_samymi_obsadami_zprp_znika_z_zestawienia():

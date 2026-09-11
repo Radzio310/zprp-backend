@@ -21,10 +21,9 @@ CENTRAL_VERSIONS = [
 PROV_RAW = json.loads(
     io.open(ROOT.parent / "BAZA" / "assets" / "data" / "okregowe" / "slaskieCalcRates.json", encoding="utf-8").read()
 )
-# Slask ma od 01.09.2026 kilometrowke 0,70 zl/km - wzorzec w repo jest starszy.
+# Slask od 01.09.2026: stala stawka za mecz + kilometrowka 0,70 zl/km (kopia serwera).
 PROV_VERSIONS = [
-    {"id": 10, "valid_from": "2026-09-01", "valid_to": None, "enabled": True,
-     "content": {**PROV_RAW, "kilometrowka": {"ŚLĄSKIE": 0.7}}},
+    {"id": 10, "valid_from": "2026-09-01", "valid_to": None, "enabled": True, "content": PROV_RAW},
 ]
 
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
@@ -60,12 +59,12 @@ def settle(assignments, **kwargs):
 def test_pojedynczy_mecz_okregowy():
     [entry] = settle([make("m1", "S/JMM/7", R.ROLE_FIELD, at("2026-10-04T10:00"))])
     [match] = entry.matches
-    assert match.gross == 132          # Junior ml., prog 15-30 km
+    assert match.gross == 117          # Junior ml., stala stawka od 01.09.2026
     assert match.km_rate == 0.7        # stawka wojewodzka
     assert match.travel == round(20 * 0.7 * 2)   # 28 zl, w obie strony
-    assert entry.gross == 132
+    assert entry.gross == 117
     assert entry.costs == 0            # ponizej progu 200 zl
-    assert entry.tax == 16
+    assert entry.tax == 14
     assert entry.total == entry.net + entry.travel
 
 
@@ -78,17 +77,19 @@ def test_stolik_ligowy_spoza_okregu_placi_kilometrowka_centralna():
 
 
 def test_podatek_liczy_sie_od_SUMY_miesiaca():
-    """Trzy mecze po 132 zl: mecz po meczu koszty nie przyslugiwalyby wcale."""
+    """Trzy mecze po 117 zl: mecz po meczu koszty nie przyslugiwalyby wcale."""
     entries = settle([
         make("a", "S/JMM/7", R.ROLE_FIELD, at("2026-10-04T10:00"), city="Zabrze"),
         make("b", "S/JMM/7", R.ROLE_FIELD, at("2026-10-11T10:00"), city="Bytom"),
         make("c", "S/JMM/7", R.ROLE_FIELD, at("2026-10-14T10:00"), city="Gliwice"),
     ])
     entry = entries[0]
-    assert entry.gross == 396
-    assert entry.costs == 79           # 20% od sumy, bo 396 > 200
-    assert entry.tax == 38
-    assert entry.net == 358
+    assert entry.gross == 351
+    assert entry.costs == 70           # 20% od sumy, bo 351 > 200
+    assert entry.tax == 34
+    assert entry.net == 317
+    # Kilometrowka dochodzi PO podatku.
+    assert entry.total == entry.net + entry.travel
 
 
 # ------------------------------------------------------- przyszle mecze
@@ -99,7 +100,7 @@ def test_przyszly_mecz_domyslnie_nie_wchodzi():
         make("bedzie", "S/JMM/7", R.ROLE_FIELD, at("2026-11-08T10:00")),
     ])
     assert entries[0].match_count == 1
-    assert entries[0].gross == 132
+    assert entries[0].gross == 117
 
 
 def test_przelacznik_dolacza_przyszle_i_je_oznacza():
@@ -113,7 +114,7 @@ def test_przelacznik_dolacza_przyszle_i_je_oznacza():
     entry = entries[0]
     assert entry.match_count == 2
     assert entry.future_count == 1
-    assert entry.gross == 264
+    assert entry.gross == 234
     assert [m.future for m in entry.matches] == [False, True]
 
 
@@ -239,5 +240,5 @@ def test_sumy_okregu():
     totals = E.totals_of(entries)
     assert totals["judges"] == 1
     assert totals["matches"] == 2
-    assert totals["gross"] == 132 + 110
+    assert totals["gross"] == 117 + 110
     assert totals["total"] == entries[0].total

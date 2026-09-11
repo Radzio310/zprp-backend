@@ -23,16 +23,18 @@ from typing import Any, Optional
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import and_, delete, insert, select
+from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import club_charges as C
 from app import province_clubs_bulk as B
+from app import province_clubs_scope as S
 from app import settlement_engine as E
 from app import settlement_rates as R
 from app.db import (
     database,
     province_club_entries,
+    province_club_season_closures,
     province_club_seasons,
     province_club_teams,
     province_clubs,
@@ -153,11 +155,15 @@ async def _teams(province: str, season: str) -> tuple[dict[str, C.TeamRef], dict
                 "gender": ref.gender,
                 "province": _s(row["team_province"]),
                 "competitions": [],
+                "codes": [],
             },
         )
         label = _s(row["competition_name"])
         if label and label not in entry["competitions"]:
             entry["competitions"].append(label)
+        code = _s(row["competition_code"])
+        if code and code not in entry["codes"]:
+            entry["codes"].append(code)
     return by_id, by_key, meta
 
 
@@ -286,6 +292,8 @@ def _charge_json(row: C.ChargeRow, province: str) -> dict:
         "category": row.category,
         "city": row.city,
         "host_name": row.host_name,
+        "guest_name": row.guest_name,
+        "teams": row.teams,
         "team_id": row.team_id,
         "team_name": row.team_name,
         "club_id": row.club_id,
@@ -346,6 +354,85 @@ async def status(province: str = Query(...)):
     }
 
 
+async def _season_clubs(key: str, season: str, *, include_future: bool = False) -> dict:
+    """
+    Kluby sezonu z saldami - bez filtrow listy.
+
+    Kto nalezy do sezonu, rozstrzyga `province_clubs_scope`: klub z meczem albo
+    wpisem w tym sezonie i klub z druzyna w zasiegu okregu. Sam wiersz ustawien
+    NIE wystarcza - pobieranie zaklada go kazdemu klubowi z kazdego sezonu i stad
+    bralo sie „0 druzyn".
+
+    Trzy kubelki pieniedzy: wplaty, wyplaty i rozliczenie sezonu poza systemem
+    (`source="season-close"`). To ostatnie nie jest wplata, tylko zapis, ze sezon
+    rozliczono poza aplikacja - ale saldo liczy je tak samo.
+    """
+    data = await load_clubs(key, season, include_future=include_future)
+    charges: list[C.ChargeRow] = data["charges"]
+    meta: dict[str, dict] = data["teams_meta"]
+    settings: dict[str, dict] = data["settings"]
+
+    charged = C.club_totals(charges)
+    money: dict[str, dict[str, float]] = {}
+    for row in data["entries"]:
+        entry = money.setdefault(_s(row["club_id"]), {"in": 0.0, "out": 0.0, "settled": 0.0})
+        entry[B.entry_bucket(row["kind"], row.get("source"))] += float(row["amount"] or 0)
+
+    teams_of: dict[str, list[dict]] = {}
+    for item in meta.values():
+        teams_of.setdefault(item["club_id"], []).append(item)
+    club_ids = S.season_club_ids(
+        meta.values(),
+        [row.club_id for row in charges if row.club_id] + list(money.keys()),
+    )
+
+    clubs: dict[str, dict] = {}
+    for club_id in sorted(club_ids):
+        row = settings.get(club_id) or {}
+        totals = charged.get(club_id) or {"charged": 0, "matches": 0}
+        paid = money.get(club_id) or {"in": 0.0, "out": 0.0, "settled": 0.0}
+        clubs[club_id] = {
+            "club_id": club_id,
+            "name": _club_name(settings, meta, club_id),
+            "settles_via_district": bool(row.get("settles_via_district", True)),
+            "settles_since": row["settles_since"].isoformat() if row.get("settles_since") else None,
+            "note": _s(row.get("note")),
+            "teams": sorted(teams_of.get(club_id, []), key=lambda item: item["name"]),
+            "paid_in": round(paid["in"], 2),
+            "paid_out": round(paid["out"], 2),
+            "settled": round(paid["settled"], 2),
+            "charged": totals["charged"],
+            "matches": totals["matches"],
+            "balance": C.balance(
+                paid_in=paid["in"] + paid["settled"],
+                paid_out=paid["out"],
+                charged=totals["charged"],
+            ),
+        }
+    return {"clubs": clubs, "charges": charges}
+
+
+async def _closure(key: str, season: str, clubs: dict[str, dict]) -> Optional[dict]:
+    """Sezon rozliczony poza systemem: kto i kiedy, a kwoty na zywo z wpisow."""
+    row = await database.fetch_one(
+        select(province_club_season_closures).where(
+            and_(
+                province_club_season_closures.c.province == key,
+                province_club_season_closures.c.season == season,
+            )
+        )
+    )
+    if row is None:
+        return None
+    settled = [club["settled"] for club in clubs.values() if club["settled"] > 0]
+    return {
+        "closed_at": row["closed_at"].isoformat() if row["closed_at"] else None,
+        "closed_by": _s(row["closed_by"]) or None,
+        "clubs": len(settled),
+        "amount": round(sum(settled), 2),
+    }
+
+
 @router.get("", summary="Lista klubów z saldami")
 async def list_clubs(
     province: str = Query(...),
@@ -361,66 +448,44 @@ async def list_clubs(
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
     season = _s(season) or season_of(_now())
 
-    data = await load_clubs(key, season, include_future=include_future)
-    charges: list[C.ChargeRow] = data["charges"]
-    meta: dict[str, dict] = data["teams_meta"]
-    settings: dict[str, dict] = data["settings"]
-
-    charged = C.club_totals(charges)
-    money: dict[str, dict[str, float]] = {}
-    for row in data["entries"]:
-        entry = money.setdefault(_s(row["club_id"]), {"in": 0.0, "out": 0.0})
-        entry["in" if _s(row["kind"]) == "in" else "out"] += float(row["amount"] or 0)
-
-    club_ids = {item["club_id"] for item in meta.values() if item["club_id"]}
-    club_ids |= set(charged.keys()) | set(money.keys()) | set(settings.keys())
+    base = await _season_clubs(key, season, include_future=include_future)
+    charges: list[C.ChargeRow] = base["charges"]
 
     needle = team_key(q) if q else ""
     clubs: list[dict] = []
-    for club_id in sorted(club_ids):
-        teams = [item for item in meta.values() if item["club_id"] == club_id]
+    for club in base["clubs"].values():
+        teams = club["teams"]
         if category:
             teams = [item for item in teams if item["category"] == category]
         if gender:
             teams = [item for item in teams if item["gender"] == gender]
         if (category or gender) and not teams:
             continue
-
-        name = _club_name(settings, meta, club_id)
-        if needle and needle not in team_key(name) and not any(
+        if needle and needle not in team_key(club["name"]) and not any(
             needle in team_key(item["name"]) for item in teams
         ):
             continue
-
-        row = settings.get(club_id) or {}
-        totals = charged.get(club_id) or {"charged": 0, "matches": 0}
-        paid = money.get(club_id) or {"in": 0.0, "out": 0.0}
-        balance = C.balance(paid_in=paid["in"], paid_out=paid["out"], charged=totals["charged"])
-        if only_debt and balance >= 0:
+        if only_debt and club["balance"] >= 0:
             continue
-
         clubs.append(
             {
-                "club_id": club_id,
-                "name": name,
-                "settles_via_district": bool(row.get("settles_via_district", True)),
-                "settles_since": row["settles_since"].isoformat() if row.get("settles_since") else None,
-                "note": _s(row.get("note")),
-                "teams": sorted(teams, key=lambda item: item["name"]),
+                **club,
+                "teams": teams,
                 "categories": sorted({item["category"] for item in teams if item["category"]}),
-                "paid_in": round(paid["in"], 2),
-                "paid_out": round(paid["out"], 2),
-                "charged": totals["charged"],
-                "matches": totals["matches"],
-                "balance": balance,
             }
         )
 
     unassigned = [_charge_json(row, key) for row in charges if row.status == C.UNASSIGNED]
+    # Mecze bez druzyny zdjete recznie z obciazen. Nie siedza na koncie zadnego
+    # klubu, wiec bez tej listy nie daloby sie ich przywrocic.
+    dismissed = [
+        _charge_json(row, key) for row in charges if row.status == C.EXCLUDED and not row.club_id
+    ]
     totals = {
         "clubs": len(clubs),
         "paid_in": round(sum(item["paid_in"] for item in clubs), 2),
         "paid_out": round(sum(item["paid_out"] for item in clubs), 2),
+        "settled": round(sum(item["settled"] for item in clubs), 2),
         "charged": sum(item["charged"] for item in clubs),
         "balance": sum(item["balance"] for item in clubs),
         "matches": sum(item["matches"] for item in clubs),
@@ -434,6 +499,8 @@ async def list_clubs(
         "clubs": clubs,
         "totals": totals,
         "unassigned": unassigned,
+        "dismissed": dismissed,
+        "closure": await _closure(key, season, base["clubs"]),
     }
 
 
@@ -466,8 +533,10 @@ async def club_detail(
     entries = [row for row in data["entries"] if _s(row["club_id"]) == club_id]
     teams = [item for item in data["teams_meta"].values() if item["club_id"] == club_id]
 
-    paid_in = sum(float(row["amount"] or 0) for row in entries if _s(row["kind"]) == "in")
-    paid_out = sum(float(row["amount"] or 0) for row in entries if _s(row["kind"]) == "out")
+    buckets = {"in": 0.0, "out": 0.0, "settled": 0.0}
+    for row in entries:
+        buckets[B.entry_bucket(row["kind"], row.get("source"))] += float(row["amount"] or 0)
+    paid_in, paid_out, settled = buckets["in"], buckets["out"], buckets["settled"]
     charged = sum(row.amount for row in charges if row.status == C.CHARGED)
     per_team = C.team_totals(charges)
     settings = data["settings"].get(club_id) or {}
@@ -483,8 +552,9 @@ async def club_detail(
             "note": _s(settings.get("note")),
             "paid_in": round(paid_in, 2),
             "paid_out": round(paid_out, 2),
+            "settled": round(settled, 2),
             "charged": charged,
-            "balance": C.balance(paid_in=paid_in, paid_out=paid_out, charged=charged),
+            "balance": C.balance(paid_in=paid_in + settled, paid_out=paid_out, charged=charged),
             "matches": sum(1 for row in charges if row.status == C.CHARGED),
         },
         "teams": [
@@ -765,6 +835,169 @@ async def refresh(payload: RefreshRequest):
     return {"province": key, "started": True, "running": True, "run_id": run_id}
 
 
+class SeasonCloseRequest(BaseModel):
+    province: str
+    season: str
+    #: Kluby do rozliczenia; bez listy - kazdy klub na minusie i kazdy z wpisem.
+    club_ids: Optional[list[str]] = None
+    #: Sam podglad do okna potwierdzenia: co by sie zmienilo, bez zapisu.
+    dry_run: bool = False
+    closed_by: Optional[str] = None
+
+
+class SeasonReopenRequest(BaseModel):
+    province: str
+    season: str
+
+
+def _closing_filter(key: str, season: str):
+    return and_(
+        province_club_entries.c.province == key,
+        province_club_entries.c.season == season,
+        province_club_entries.c.source == B.SEASON_CLOSE_SOURCE,
+    )
+
+
+@router.post("/season/close", summary="Rozlicz sezon - salda klubów do zera wpisem poza systemem")
+async def close_season(payload: SeasonCloseRequest):
+    """
+    Sezon rozliczony poza aplikacja.
+
+    Wstecz nie dopisujemy klubom wplat (decyzja z 11.09.2026), wiec bez tego
+    kazdy klub minionego sezonu wisial na minusie. Rozliczenie dopisuje kazdemu
+    wskazanemu klubowi JEDEN wpis „Rozliczenie sezonu ... poza systemem" na kwote
+    dlugu; ponowne tylko ten wpis poprawia (`province_clubs_bulk.closing_amounts`).
+    Mecze i obciazenia zostaja bez zmian. Cofniecie usuwa wpisy i znacznik.
+    """
+    key = require_province(payload.province)
+    season = _s(payload.season)
+    _, season_end = season_range(season)
+    selected = set(_bulk_ids(payload.club_ids)) if payload.club_ids else None
+
+    clubs = (await _season_clubs(key, season))["clubs"]
+    rows = await database.fetch_all(
+        select(province_club_entries)
+        .where(_closing_filter(key, season))
+        .order_by(province_club_entries.c.id.asc())
+    )
+    existing: dict[str, list[dict]] = {}
+    for row in rows:
+        existing.setdefault(_s(row["club_id"]), []).append(dict(row))
+    before = {
+        club_id: round(sum(float(item["amount"] or 0) for item in items), 2)
+        for club_id, items in existing.items()
+    }
+    # Saldo co do grosza - lista pokazuje je zaokraglone do zlotych.
+    exact = {
+        club_id: round(club["paid_in"] + club["settled"] - club["paid_out"] - club["charged"], 2)
+        for club_id, club in clubs.items()
+    }
+    plan = B.closing_amounts(exact, before, selected)
+
+    changes = sorted(
+        (
+            {
+                "club_id": club_id,
+                "name": (clubs.get(club_id) or {}).get("name") or club_id,
+                "before": before.get(club_id, 0.0),
+                "amount": amount,
+                "change": round(amount - before.get(club_id, 0.0), 2),
+            }
+            for club_id, amount in plan.items()
+            if abs(amount - before.get(club_id, 0.0)) >= 0.005 or len(existing.get(club_id, [])) > 1
+        ),
+        key=lambda item: (-item["change"], item["name"]),
+    )
+    summary = {
+        "clubs": len(changes),
+        "amount": round(sum(item["change"] for item in changes), 2),
+        "changes": changes,
+    }
+    if payload.dry_run or not changes:
+        return {"success": True, "saved": False, **summary}
+
+    now = _now()
+    day = B.closing_day(season_end, now.date())
+    note = f"Rozliczenie sezonu {season} poza systemem"
+    by = _s(payload.closed_by) or None
+    async with database.transaction():
+        for club_id, amount in plan.items():
+            entries = existing.get(club_id, [])
+            # Jeden wpis na klub i sezon: nadmiarowe znikaja, zostaje aktualna kwota.
+            for extra in entries[1:]:
+                await database.execute(
+                    delete(province_club_entries).where(province_club_entries.c.id == extra["id"])
+                )
+            if amount <= 0:
+                if entries:
+                    await database.execute(
+                        delete(province_club_entries).where(province_club_entries.c.id == entries[0]["id"])
+                    )
+                continue
+            if not entries:
+                await database.execute(
+                    insert(province_club_entries).values(
+                        province=key,
+                        club_id=club_id,
+                        team_id=None,
+                        team_name=None,
+                        season=season,
+                        kind="in",
+                        amount=amount,
+                        description=note,
+                        day=day,
+                        source=B.SEASON_CLOSE_SOURCE,
+                        created_by=by,
+                        created_at=now,
+                    )
+                )
+            elif abs(float(entries[0]["amount"] or 0) - amount) >= 0.005:
+                await database.execute(
+                    update(province_club_entries)
+                    .where(province_club_entries.c.id == entries[0]["id"])
+                    .values(amount=amount, day=day, description=note, created_by=by, created_at=now)
+                )
+
+        statement = pg_insert(province_club_season_closures).values(
+            province=key, season=season, closed_at=now, closed_by=by
+        )
+        await database.execute(
+            statement.on_conflict_do_update(
+                index_elements=[
+                    province_club_season_closures.c.province,
+                    province_club_season_closures.c.season,
+                ],
+                set_={"closed_at": now, "closed_by": by},
+            )
+        )
+    return {"success": True, "saved": True, **summary}
+
+
+@router.post("/season/reopen", summary="Cofnij rozliczenie sezonu")
+async def reopen_season(payload: SeasonReopenRequest):
+    key = require_province(payload.province)
+    season = _s(payload.season)
+    season_range(season)
+    existing = await database.fetch_all(
+        select(province_club_entries.c.amount).where(_closing_filter(key, season))
+    )
+    async with database.transaction():
+        await database.execute(delete(province_club_entries).where(_closing_filter(key, season)))
+        await database.execute(
+            delete(province_club_season_closures).where(
+                and_(
+                    province_club_season_closures.c.province == key,
+                    province_club_season_closures.c.season == season,
+                )
+            )
+        )
+    return {
+        "success": True,
+        "removed": len(existing),
+        "amount": round(sum(float(row["amount"] or 0) for row in existing), 2),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Excel
 # ---------------------------------------------------------------------------
@@ -784,6 +1017,9 @@ async def export_xlsx(
     _, _, meta = await _teams(key, season)
     settings = await _club_settings(key)
     wanted = B.parse_club_filter(club_ids)
+    # Bez zaznaczenia - tylko druzyny, ktore moga okregowi cos zaplacic (bez
+    # rywali z innych wojewodztw z grup II ligi).
+    home = S.home_province(meta.values())
 
     rows = []
     for item in sorted(meta.values(), key=lambda value: (value["category"], value["name"])):
@@ -792,6 +1028,8 @@ async def export_xlsx(
         if gender and item["gender"] != gender:
             continue
         if wanted is not None and item["club_id"] not in wanted:
+            continue
+        if wanted is None and not S.team_in_scope(item, home):
             continue
         rows.append(
             {

@@ -113,6 +113,9 @@ class ChargeRow:
     moved: bool = False
     triple: bool = False
     referees: list[RefereeShare] = field(default_factory=list)
+    #: „Gospodarz - Gość" z obsady i sam gosc - panel pokazuje, kto z kim gral.
+    teams: str = ""
+    guest_name: str = ""
 
 
 def _as_date(value: Any) -> Optional[date]:
@@ -151,6 +154,21 @@ def host_from_teams(
         if normalize(candidate) in known:
             return candidate
     return parts[0]
+
+
+def guest_from_teams(teams: Any, host: Any) -> str:
+    """
+    Gosc z napisu „Gospodarz - Gość": to, co stoi za gospodarzem.
+
+    Gospodarz z terminarza bywa zapisany inaczej niz w napisie obsady - wtedy
+    tekst za pierwszym „ - ". Bez separatora goscia nie znamy.
+    """
+    text = " ".join(str(teams or "").split())
+    host_text = " ".join(str(host or "").split())
+    if host_text and text.startswith(host_text + " - "):
+        return text[len(host_text) + 3:]
+    parts = text.split(" - ")
+    return " - ".join(parts[1:]) if len(parts) > 1 else ""
 
 
 def category_matches(
@@ -269,9 +287,10 @@ def build_charges(
     grouped: dict[str, ChargeRow] = {}
     for item in settled:
         row = grouped.get(item.match_key)
+        teams = " ".join(str(getattr(item, "teams", "") or "").split())
         if row is None:
             host = hosts.get(item.match_key, "") or host_from_teams(
-                getattr(item, "teams", ""), known=index.keys, key_of=normalize
+                teams, known=index.keys, key_of=normalize
             )
             row = ChargeRow(
                 match_key=item.match_key,
@@ -281,8 +300,15 @@ def build_charges(
                 category=item.category,
                 city=item.city,
                 host_name=host,
+                teams=teams,
+                guest_name=guest_from_teams(teams, host),
             )
             grouped[item.match_key] = row
+        elif teams and not row.teams:
+            # Pierwsza obsada meczu bywa bez napisu druzyn - bierzemy z kolejnej.
+            row.host_name = row.host_name or host_from_teams(teams, known=index.keys, key_of=normalize)
+            row.teams = teams
+            row.guest_name = guest_from_teams(teams, row.host_name)
         row.gross += int(item.gross or 0)
         row.travel += int(item.travel or 0)
         row.triple = row.triple or bool(getattr(item, "triple_table", False))

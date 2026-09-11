@@ -24,8 +24,7 @@ PROV_RAW = json.loads(
     io.open(ROOT.parent / "BAZA" / "assets" / "data" / "okregowe" / "slaskieCalcRates.json", encoding="utf-8").read()
 )
 PROV_VERSIONS = [
-    {"id": 10, "valid_from": "2026-09-01", "valid_to": None, "enabled": True,
-     "content": {**PROV_RAW, "kilometrowka": {"ŚLĄSKIE": 0.7}}},
+    {"id": 10, "valid_from": "2026-09-01", "valid_to": None, "enabled": True, "content": PROV_RAW},
 ]
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 

@@ -913,7 +913,7 @@ province_club_entries = Table(
     Column("amount", Float, nullable=False),
     Column("description", String, nullable=True),
     Column("day", Date, nullable=True),
-    Column("source", String, nullable=True),             # "manual" | "excel" | "bulk"
+    Column("source", String, nullable=True),             # "manual" | "excel" | "bulk" | "season-close"
     Column("created_by", String, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
 )
@@ -959,6 +959,18 @@ province_club_seasons = Table(
     Column("completed_at", DateTime(timezone=True), nullable=False),
     Column("competitions", Integer, nullable=True),
     Column("teams", Integer, nullable=True),
+)
+
+# Sezon rozliczony poza systemem: kto i kiedy go zamknął. Same kwoty siedzą we
+# wpisach klubów (`province_club_entries`, source="season-close"), więc saldo
+# i suma rozliczenia liczą się na żywo z jednego miejsca.
+province_club_season_closures = Table(
+    "province_club_season_closures",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("season", String, primary_key=True),
+    Column("closed_at", DateTime(timezone=True), nullable=False),
+    Column("closed_by", String, nullable=True),
 )
 
 

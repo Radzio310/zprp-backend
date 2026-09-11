@@ -20,8 +20,12 @@ SEED = json.loads(io.open(ROOT / "app" / "data" / "central_rates_seed.json", enc
 BOOK_OLD = SEED["versions"][0]["content"]
 BOOK_NEW = SEED["versions"][1]["content"]
 
-PROV_SLASKIE = json.loads(
-    io.open(ROOT.parent / "BAZA" / "assets" / "data" / "okregowe" / "slaskieCalcRates.json", encoding="utf-8").read()
+OKREGOWE = ROOT.parent / "BAZA" / "assets" / "data" / "okregowe"
+# Wersja od 01.09.2026 (kopia serwera): stala stawka za mecz + kilometrowka.
+PROV_SLASKIE = json.loads(io.open(OKREGOWE / "slaskieCalcRates.json", encoding="utf-8").read())
+# Wersja 01.01-31.08.2026: ryczalt rosl progami odleglosci, kilometrowka 0.
+PROV_SLASKIE_PROGI = json.loads(
+    io.open(OKREGOWE / "STAWKI - wersjonowanie" / "slaskie wersje" / "slaskie_do_31_08_2026.json", encoding="utf-8").read()
 )
 
 SOBOTA_STARA = date(2026, 3, 7)
@@ -127,11 +131,38 @@ def test_puchar_wojewodzki_placi_stawka_ii_ligi():
     assert _gross("S/PPK/2", R.ROLE_FIELD, 50, SOBOTA_NOWA, BOOK_NEW) == 195
 
 
-def test_okregowy_czyta_tabele_wojewodzka():
-    # Slaska tabela, Junior ml., prog 15-30 km = 132 zl.
-    assert _gross("S/JMM/7", R.ROLE_FIELD, 20, SOBOTA_NOWA, BOOK_NEW) == 132
-    # Mecz na miejscu ma wlasny prog [0,0].
-    assert _gross("S/JMM/7", R.ROLE_FIELD, 0, SOBOTA_NOWA, BOOK_NEW) == 102
+def test_okregowy_od_01_09_2026_to_stala_stawka():
+    # Od 01.09.2026 odleglosc nie zmienia ryczaltu - dojazd idzie kilometrowka.
+    for km in (0, 20, 150):
+        assert _gross("S/JMM/7", R.ROLE_FIELD, km, SOBOTA_NOWA, BOOK_NEW) == 117
+        assert _gross("S/JMM/7", R.ROLE_TABLE, km, SOBOTA_NOWA, BOOK_NEW) == 77
+    assert _gross("S/IIIM/4", R.ROLE_FIELD, 20, SOBOTA_NOWA, BOOK_NEW) == 131
+
+
+def test_delegat_okregowy_weekend_tanszy_i_doplata_za_100_km():
+    sroda = date(2026, 9, 9)
+    assert _gross("S/JMM/7", R.ROLE_DELEGATE, 20, sroda, BOOK_NEW) == 356
+    assert _gross("S/JMM/7", R.ROLE_DELEGATE, 20, SOBOTA_NOWA, BOOK_NEW) == 264
+    assert _gross("S/JMM/7", R.ROLE_DELEGATE, 120, SOBOTA_NOWA, BOOK_NEW) == 314
+
+
+def test_okregowy_do_31_08_2026_rosl_progami():
+    # Junior ml., prog 15-30 km = 152 zl; mecz na miejscu ma wlasny prog [0,0].
+    assert _gross("S/JMM/7", R.ROLE_FIELD, 20, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 152
+    assert _gross("S/JMM/7", R.ROLE_FIELD, 0, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 117
+    assert _gross("S/JMM/7", R.ROLE_TABLE, 50, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 132
+    # Mlodzik ml. na miejscu 117 jak w aplikacji - sekcja "mecze" miala tu 119.
+    assert _gross("S/MLM1213/2", R.ROLE_FIELD, 0, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 117
+
+
+def test_delegat_do_31_08_2026_jak_tabela_c_zprp():
+    # Tabela C: 264 zl w sobote i niedziele, 356 w dni robocze, +50 zl powyzej
+    # 100 km. Serwer czytal "mecze" (356 na kazdy dzien), aplikacja - sekcje dni.
+    sroda = date(2026, 3, 4)
+    assert _gross("S/JMM/7", R.ROLE_DELEGATE, 20, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 264
+    assert _gross("S/JMM/7", R.ROLE_DELEGATE, 120, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 314
+    assert _gross("S/JMM/7", R.ROLE_DELEGATE, 20, sroda, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 356
+    assert _gross("S/JMM/7", R.ROLE_DELEGATE, 120, sroda, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 406
 
 
 def test_okregowy_bez_tabeli_wojewodzkiej_schodzi_do_galezi_okregowej():
@@ -161,10 +192,9 @@ def test_kilometrowka_centralna_dla_wszystkiego_od_ii_ligi():
 
 
 def test_kilometrowka_okregowa_bierze_sie_z_tabeli_wojewodztwa():
-    # Wzorzec w repo ma jeszcze 0; prawdziwa stawka schodzi z serwera.
-    assert _km("S/JMM/7") == 0.0
-    podmieniona = {**PROV_SLASKIE, "kilometrowka": {"ŚLĄSKIE": 0.7}}
-    assert _km("S/JMM/7", prov=podmieniona) == 0.7
+    assert _km("S/JMM/7") == 0.7
+    podmieniona = {**PROV_SLASKIE, "kilometrowka": {"ŚLĄSKIE": 0.5}}
+    assert _km("S/JMM/7", prov=podmieniona) == 0.5
 
 
 def test_dojazd_zawsze_w_obie_strony():
