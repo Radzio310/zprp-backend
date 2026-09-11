@@ -828,6 +828,19 @@ zprp_match_venues = Table(
     Column("fetched_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# Nazwiska sędziów z publicznego API meczu (`NrSedzia_*` + `_nazwisko`).
+# Zapas dla kogoś, kogo lista okręgu nie nazywa - w zestawieniu stał wtedy goły
+# numer („465"). Numer sędziego jest w ZPRP globalny, stąd brak kolumny okręgu.
+zprp_judges_seen = Table(
+    "zprp_judges_seen",
+    metadata,
+    Column("judge_id", String, primary_key=True),
+    Column("full_name", String, nullable=False),     # „Wojciech BLOCH"
+    Column("home_city", String, nullable=True),
+    Column("match_id", String, nullable=True),       # mecz, z którego wzięliśmy dane
+    Column("seen_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 
 # 18.1h) Panel klubów: rozgrywki i drużyny z sezonu
 #
@@ -900,7 +913,7 @@ province_club_entries = Table(
     Column("amount", Float, nullable=False),
     Column("description", String, nullable=True),
     Column("day", Date, nullable=True),
-    Column("source", String, nullable=True),             # "manual" | "excel"
+    Column("source", String, nullable=True),             # "manual" | "excel" | "bulk"
     Column("created_by", String, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
 )

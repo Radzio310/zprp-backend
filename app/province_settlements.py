@@ -36,6 +36,8 @@ from app.province_settlement_sync import (
     refresh_province,
     start_run,
 )
+from app.settlement_names import fill_missing_names, judge_names
+from app.settlement_names_rules import is_missing_name
 from app.settlement_province import canonical, display, spellings
 from app.settlement_runs import cooldown_left, run_is_active
 
@@ -44,6 +46,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/province/settlements", tags=["province_settlements"])
 
 MODULES = ("stats", "settlements")
+
+#: Tyle najdluzej zestawienie czeka na nazwiska z obsad meczow (patrz
+#: `settlement_names`). Co nie zdazy, dojdzie przy nastepnym otwarciu.
+NAME_FILL_SECONDS = 6.0
 
 
 def require_province(province: str) -> str:
@@ -109,35 +115,13 @@ async def _versions(province: str) -> tuple[list[dict], list[dict]]:
 
 async def _judge_names(province: str) -> dict[str, str]:
     """
-    Nazwiska do zestawienia: lista okregu, a dziury zatyka kopia z pobierania.
+    Nazwiska do zestawienia - trzy zrodla, patrz `settlement_names`.
 
     ⚠ `province_judges` prowadzi czlowiek i potrafi nie miec kogos, kto ma
-    obsady - wtedy w zestawieniu i na PDF stal goly numer („465"). Kopia
-    z listy „Sedziowie i Delegaci" (`province_settlement_judges`) jest zapasem,
-    a nie zrodlem prawdy: lista okregu wygrywa, gdy ma nazwisko.
+    obsady, albo miec zamiast nazwiska jego NUMER - wtedy w zestawieniu i na
+    PDF stal goly „465". Taka dziure lata nazwisko z obsady meczu w API ZPRP.
     """
-    out: dict[str, str] = {}
-
-    backup = await database.fetch_all(
-        select(
-            province_settlement_judges.c.judge_id,
-            province_settlement_judges.c.full_name,
-        ).where(province_settlement_judges.c.province == province)
-    )
-    for row in backup:
-        name = str(row["full_name"] or "").strip()
-        if name:
-            out[str(row["judge_id"])] = name
-
-    rows = await database.fetch_all(
-        select(province_judges.c.judge_id, province_judges.c.full_name)
-        .where(province_judges.c.province.in_(spellings(province)))
-    )
-    for row in rows:
-        name = str(row["full_name"] or "").strip()
-        if name:
-            out[str(row["judge_id"])] = name
-    return out
+    return await judge_names(province)
 
 
 async def _assignments(
@@ -217,6 +201,27 @@ async def load_settlement(
     names = await _judge_names(province)
     assignments = await _assignments(province, judge_ids=judge_ids)
     now = _now()
+
+    # Sedzia bez nazwiska nie czeka na dobowe odswiezenie: jego mecz w API ZPRP
+    # mowi, jak sie nazywa (`settlement_names`). Tylko ci z tego miesiaca i z
+    # limitem czasu - wolne API nie moze trzymac zestawienia.
+    unnamed = {
+        item.judge_id
+        for item in assignments
+        if is_missing_name(names.get(item.judge_id, ""), item.judge_id)
+        and (item.match_at is None or date_from <= item.match_at.date() <= date_to)
+    }
+    if unnamed:
+        try:
+            await asyncio.wait_for(
+                fill_missing_names(province, only=unnamed, limit=20),
+                timeout=NAME_FILL_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.info("[settlement] %s: nazwiska z obsad nie zdazyly w limicie", province)
+        except Exception as exc:
+            logger.warning("[settlement] %s: nazwiska z obsad meczow: %s", province, exc)
+        names = await _judge_names(province)
 
     entries = E.settle_judges(
         assignments,

@@ -54,7 +54,14 @@ from app.settlement_seasons import (
 )
 from app.deps import get_settings
 from app.settlement_distances import DistanceIndex, resolve_distances
-from app.settlement_venues import fetch_venue, looks_like_city, pretty_city
+from app.settlement_names import fill_missing_names, judge_cities, remember_officials
+from app.settlement_names_rules import officials_from_payload
+from app.settlement_venues import (
+    fetch_details_payload,
+    looks_like_city,
+    pretty_city,
+    venue_from_payload,
+)
 from app.settlement_province import canonical, spellings
 from app.settlement_runs import run_is_active
 from app.zprp_accounts import configured_provinces, credentials_for
@@ -598,8 +605,17 @@ async def _resolve_venues(
             # Zapytanie I zapis pod tym samym semaforem: bez tego kilkaset zadan
             # naraz siadaloby na pule polaczen do bazy.
             async with semaphore:
-                venue = await fetch_venue(client, match_id)
-                if not venue:
+                payload = await fetch_details_payload(client, match_id)
+                if payload is None:
+                    return
+                # Ta sama odpowiedz niesie obsade z numerami i nazwiskami -
+                # zapisujemy ja przy okazji, zeby sedzia, ktorego lista okregu
+                # nie nazywa, nie zostal w zestawieniu golym numerem.
+                officials = officials_from_payload(payload)
+                if officials:
+                    await remember_officials(officials, match_id=match_id, now=now)
+                venue = venue_from_payload(payload)
+                if not (venue["city"] or venue["hall"]):
                     return
                 cached[match_id] = {**venue, "match_id": match_id, "fetched_at": now}
                 statement = pg_insert(zprp_match_venues).values(
@@ -885,6 +901,14 @@ async def refresh_province(
                 )
                 row["hall"] = _s(venue.get("hall")) or _s(row.get("hall"))
 
+            # --- miasta sedziow, ktorym lista okregu go nie podala ---
+            # Obsada meczu w API podaje tez miasto sedziego. Bez niego nie ma jak
+            # policzyc dojazdu i mecz stal jako „brak dojazdu".
+            no_city = [judge_id for judge_id, judge in judges.items() if not _s(judge.get("city"))]
+            if no_city:
+                for judge_id, city in (await judge_cities(no_city)).items():
+                    judges[judge_id]["city"] = city
+
             # --- odleglosci ---
             distance_row = await database.fetch_one(
                 select(okreg_distances.c.content).where(okreg_distances.c.province.in_(spellings(province)))
@@ -907,6 +931,13 @@ async def refresh_province(
                 row["distance_source"] = hit[1] if hit else "none"
 
             await _store(province, rows, judges, scope=scope, current=current)
+
+            # Nazwiska dla sedziow, ktorych lista okregu nie nazwala (w zestawieniu
+            # stal goly numer) - ze WSZYSTKICH sezonow, nie tylko z tego przebiegu.
+            try:
+                await fill_missing_names(province, client=public, limit=200)
+            except Exception as exc:
+                logger.warning("[settlement] %s: nazwiska z obsad meczow: %s", province, exc)
 
             # Rejestr sezonow pobranych w CALOSCI: tylko te, w ktorych lista
             # KAZDEGO sedziego dala sie odczytac. Sezon z dziura zostaje poza

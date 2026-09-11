@@ -345,9 +345,57 @@ def settle_judges(
     return sorted(by_judge.values(), key=lambda e: (_sort_name(e.judge_name), e.judge_id))
 
 
-def _sort_name(value: str) -> str:
-    """Sortowanie po nazwisku, po polsku, bez ogonkow psujacych kolejnosc."""
-    return unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode().upper()
+#: Polska kolejnosc liter. Stary klucz zamienial tekst na ASCII i gubil „Ł"
+#: („Łukasik" ladowal miedzy U), a do tego sortowal po IMIENIU - ZPRP podaje
+#: nazwiska jako „Imie NAZWISKO".
+_PL_ALPHABET = "AĄBCĆDEĘFGHIJKLŁMNŃOÓPQRSŚTUVWXYZŹŻ"
+_PL_RANK = {letter: index for index, letter in enumerate(_PL_ALPHABET)}
+
+
+def _letter_rank(char: str) -> int:
+    rank = _PL_RANK.get(char)
+    if rank is None:
+        # Obce litery (Ü, É) ida jako litera bazowa; spacja i lacznik przed literami.
+        rank = _PL_RANK.get(unicodedata.normalize("NFKD", char)[:1], -1)
+    return rank
+
+
+def _collate(text: str) -> tuple:
+    return tuple(_letter_rank(char) for char in text.upper())
+
+
+def split_judge_name(value: str) -> "tuple[str, str] | None":
+    """
+    „Imie NAZWISKO" z ZPRP -> (nazwisko, imiona).
+
+    Nazwisko to czlony pisane wersalikami, takze dwuczlonowe („KOWALSKA-NOWAK",
+    „KOWALSKA NOWAK"); dwa imiona („Anna Maria") zostaja imionami. Napis juz
+    odwrocony („KOWALSKI Jan") tez sie zgadza. Bez wersalikow - ostatni czlon.
+    Sam numer albo pusto: None, taki sedzia idzie na koniec listy.
+
+    Ta sama regula siedzi w BAZA_web (`components/settlements/judgeName.ts`),
+    zeby lista na ekranie i PDF mialy jedna kolejnosc.
+    """
+    tokens = str(value or "").split()
+    if not tokens or all(token.isdigit() for token in tokens):
+        return None
+    caps = [token == token.upper() and token != token.lower() for token in tokens]
+    if any(caps) and not all(caps):
+        surname = " ".join(token for token, cap in zip(tokens, caps) if cap)
+        given = " ".join(token for token, cap in zip(tokens, caps) if not cap)
+        return surname, given
+    if len(tokens) == 1:
+        return tokens[0], ""
+    return tokens[-1], " ".join(tokens[:-1])
+
+
+def _sort_name(value: str) -> tuple:
+    """Kolejnosc zestawien i przejazdow: NAZWISKO, potem imiona, po polsku."""
+    parts = split_judge_name(value)
+    if parts is None:
+        return (1, (), ())
+    surname, given = parts
+    return (0, _collate(surname), _collate(given))
 
 
 def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int]:

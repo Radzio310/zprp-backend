@@ -116,12 +116,12 @@ def venue_from_payload(payload: Any) -> dict[str, str]:
     return {"city": "", "hall": "", "street": "", "number": ""}
 
 
-async def fetch_venue(
-    client: Any, match_id: Any, *, timeout: float = 20.0
-) -> Optional[dict[str, str]]:
+async def fetch_details_payload(client: Any, match_id: Any, *, timeout: float = 20.0) -> Any:
     """
-    Hala jednego meczu z publicznego API. `None` = nie udalo sie zapytac.
+    Surowa odpowiedz API jednego meczu. `None` = nie udalo sie zapytac.
 
+    Jedno zapytanie niesie i hale, i obsade z nazwiskami - pobieranie okregu
+    bierze z niego oba (patrz `settlement_names_rules.officials_from_payload`).
     Klucza nie potrzeba - to samo publiczne API, ktorym monitor meczow okregu
     dobiera obsade.
     """
@@ -131,8 +131,18 @@ async def fetch_venue(
     try:
         response = await client.get(DETAILS_URL, params={"Zawody": key}, timeout=timeout)
         response.raise_for_status()
-        venue = venue_from_payload(response.json())
+        return response.json()
     except Exception as exc:
-        logger.debug("[settlement] hala meczu %s: %s", key, exc)
+        logger.debug("[settlement] szczegoly meczu %s: %s", key, exc)
         return None
+
+
+async def fetch_venue(
+    client: Any, match_id: Any, *, timeout: float = 20.0
+) -> Optional[dict[str, str]]:
+    """Hala jednego meczu z publicznego API. `None` = nie udalo sie zapytac."""
+    payload = await fetch_details_payload(client, match_id, timeout=timeout)
+    if payload is None:
+        return None
+    venue = venue_from_payload(payload)
     return venue if (venue["city"] or venue["hall"]) else None

@@ -27,6 +27,7 @@ from sqlalchemy import and_, delete, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import club_charges as C
+from app import province_clubs_bulk as B
 from app import settlement_engine as E
 from app import settlement_rates as R
 from app.db import (
@@ -609,6 +610,94 @@ async def set_club(club_id: str, payload: SettingsRequest):
     return {"success": True}
 
 
+class BulkSettingsRequest(BaseModel):
+    province: str
+    club_ids: list[str] = []
+    settles_via_district: bool = True
+    settles_since: Optional[date] = None
+    updated_by: Optional[str] = None
+
+
+class BulkEntryRequest(BaseModel):
+    province: str
+    season: Optional[str] = None
+    club_ids: list[str] = []
+    kind: str = "in"                       # "in" = wpłata, "out" = wypłata
+    amount: float = 0.0
+    description: Optional[str] = None
+    day: Optional[date] = None
+    created_by: Optional[str] = None
+
+
+def _bulk_ids(raw: list[str]) -> list[str]:
+    try:
+        return B.clean_club_ids(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.put("/settings/bulk", summary="Akcja grupowa: rozliczanie przez okręg")
+async def set_clubs_bulk(payload: BulkSettingsRequest):
+    key = require_province(payload.province)
+    club_ids = _bulk_ids(payload.club_ids)
+    now = _now()
+    settles = bool(payload.settles_via_district)
+    since = B.settles_since(settles, payload.settles_since, now.date())
+
+    # Nazwa i notatka klubu zostają - akcja grupowa rusza tylko rozliczanie.
+    async with database.transaction():
+        for club_id in club_ids:
+            values = {
+                "province": key,
+                "club_id": club_id,
+                "settles_via_district": settles,
+                "settles_since": since,
+                "updated_by": _s(payload.updated_by) or None,
+                "updated_at": now,
+            }
+            statement = pg_insert(province_clubs).values(**values)
+            await database.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[province_clubs.c.province, province_clubs.c.club_id],
+                    set_={k: v for k, v in values.items() if k not in ("province", "club_id")},
+                )
+            )
+    return {"success": True, "updated": len(club_ids)}
+
+
+@router.post("/entries/bulk", summary="Akcja grupowa: ta sama wpłata albo wypłata dla wielu klubów")
+async def add_entries_bulk(payload: BulkEntryRequest):
+    key = require_province(payload.province)
+    club_ids = _bulk_ids(payload.club_ids)
+    amount = round(abs(float(payload.amount or 0)), 2)
+    if amount <= 0:
+        raise HTTPException(400, "Kwota musi być większa od zera")
+
+    now = _now()
+    season = _s(payload.season) or season_of(now)
+    rows = [
+        {
+            "province": key,
+            "club_id": club_id,
+            "team_id": None,
+            "team_name": None,
+            "season": season,
+            "kind": "out" if _s(payload.kind).lower().startswith("out") else "in",
+            "amount": amount,
+            "description": _s(payload.description) or None,
+            "day": payload.day or now.date(),
+            "source": "bulk",
+            "created_by": _s(payload.created_by) or None,
+            "created_at": now,
+        }
+        for club_id in club_ids
+    ]
+    # Wszystko albo nic: połowa klubów z opłatą i połowa bez to gorsze niż błąd.
+    async with database.transaction():
+        await database.execute_many(insert(province_club_entries), rows)
+    return {"success": True, "saved": len(rows)}
+
+
 @router.put("/matches/{match_key}/override", summary="Wyjątek na meczu")
 async def set_override(match_key: str, payload: OverrideRequest):
     key = require_province(payload.province)
@@ -686,17 +775,23 @@ async def export_xlsx(
     season: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     gender: Optional[str] = Query(None),
+    club_ids: Optional[str] = Query(
+        None, description="Numery klubów po przecinku - szablon tylko dla zaznaczonych"
+    ),
 ):
     key = require_province(province)
     season = _s(season) or season_of(_now())
     _, _, meta = await _teams(key, season)
     settings = await _club_settings(key)
+    wanted = B.parse_club_filter(club_ids)
 
     rows = []
     for item in sorted(meta.values(), key=lambda value: (value["category"], value["name"])):
         if category and item["category"] != category:
             continue
         if gender and item["gender"] != gender:
+            continue
+        if wanted is not None and item["club_id"] not in wanted:
             continue
         rows.append(
             {
@@ -711,7 +806,8 @@ async def export_xlsx(
 
     label = " ".join(x for x in [display(key), season, category or "", gender or ""] if x).strip()
     data = build_workbook(rows, title=f"Wpłaty i wypłaty klubów - {label}")
-    name = f"kluby_{key}_{season.replace('/', '_')}{'_' + category if category else ''}.xlsx"
+    suffix = ("_" + category if category else "") + ("_zaznaczone" if wanted else "")
+    name = f"kluby_{key}_{season.replace('/', '_')}{suffix}.xlsx"
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
