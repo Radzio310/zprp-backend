@@ -33,6 +33,7 @@ from httpx import AsyncClient
 from sqlalchemy import and_, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import settlement_origin as O
 from app import settlement_rates as R
 from app.db import (
     database,
@@ -329,6 +330,7 @@ async def _collect_outside(
     seasons: list[str],
     current: str,
     beat: Any,
+    own_prefixes: Optional[set[str]] = None,
 ) -> tuple[list[dict], dict[str, bool]]:
     """
     Mecze z prywatnych list sedziow - sezon po sezonie, sedzia po sedzi.
@@ -340,7 +342,9 @@ async def _collect_outside(
       - spoza okregu: TYLKO stoliki (boiskowych centralnych okreg nie rozlicza);
       - mecze okregowe MINIONYCH sezonow: w kazdej roli. Monitor okregu trzyma
         wylacznie biezacy terminarz, wiec dla historii lista sedziego jest
-        jedynym zrodlem - bez tego minione sezony mialy same stoliki.
+        jedynym zrodlem - bez tego minione sezony mialy same stoliki;
+      - ale mecz INNEGO okregu (przedrostek „L/" przy naszym „S/") idzie jak
+        spoza okregu takze w minionym sezonie - patrz `settlement_origin`.
 
     Mecz, ktory okreg juz zna z wlasnego terminarza, POMIJAMY - inaczej wszedlby
     do rozliczenia dwa razy, raz z kazdego zrodla.
@@ -405,7 +409,9 @@ async def _collect_outside(
                 if not role:
                     continue
                 level = R.match_level(code)
-                own = past and level in ("district", "cup")
+                # Mecz innego okregu z listy minionego sezonu nie jest nasz, choc
+                # szczebel ma okregowy (decyzja uzytkownika z 11.09.2026).
+                own = past and O.own_past_match(code, own_prefixes or ())
                 # ⚠ Spoza okregu TYLKO STOLIKI. Boiskowych centralnych okreg nie rozlicza.
                 if not own and role != R.ROLE_TABLE:
                     continue
@@ -742,6 +748,113 @@ async def _store(
 
 
 # ---------------------------------------------------------------------------
+# Historia zapisana stara regula
+# ---------------------------------------------------------------------------
+
+async def _own_prefixes(province: str) -> set[str]:
+    """Przedrostki numerow NASZEGO okregu - z jego terminarza (`settlement_origin`)."""
+    rows = await database.fetch_all(
+        select(province_matches.c.match_code, province_matches.c.state_json).where(
+            province_matches.c.province.in_(spellings(province))
+        )
+    )
+    codes = [_s(_state(row["state_json"]).get("RozgrywkiCode") or row["match_code"]) for row in rows]
+    return O.own_prefixes(codes)
+
+
+async def fix_history(province: str, *, own: Optional[set[str]] = None) -> dict:
+    """
+    Obsady minionych sezonow zapisane regula sprzed 11.09.2026 - bez sieci.
+
+    Do 11.09.2026 kazdy mecz okregowy z listy sedziego minionego sezonu szedl
+    jako nasz, takze mecz INNEGO okregu („L/MłK/20" w rozliczeniu Slaska). Teraz
+    liczy sie jak w biezacym sezonie: stolik przechodzi na klucz „o:" (mecz spoza
+    okregu), boiskowy i delegat gasna. Werdykt daje `settlement_origin.history_fix`,
+    tu jest tylko zapis. Nie kasujemy - zgaszona obsada zostaje w historii.
+
+    Idempotentne: drugie wywolanie nie ma juz czego poprawiac, wiec wola je kazde
+    odswiezenie i start petli dobowej.
+    """
+    province = canonical(province) or province
+    if own is None:
+        own = await _own_prefixes(province)
+    if not own:
+        # Bez terminarza nie wiemy, ktore przedrostki sa nasze - nie zgadujemy.
+        return {"moved": 0, "dropped": 0}
+
+    current = season_of(_now())
+    rows = await database.fetch_all(
+        select(province_settlement_matches).where(
+            and_(
+                province_settlement_matches.c.province == province,
+                province_settlement_matches.c.active.is_(True),
+                province_settlement_matches.c.match_key.like("d:%"),
+            )
+        )
+    )
+    now = _now()
+    moved = dropped = 0
+    for row in rows:
+        verdict = O.history_fix(
+            match_key=row["match_key"],
+            match_code=row["match_code"],
+            role=row["role"],
+            season=_s(row["season"]) or season_of(row["match_at"]),
+            first_seen=row["first_seen_at"],
+            current=current,
+            own=own,
+        )
+        if verdict == O.KEEP:
+            continue
+        judge_id = _s(row["judge_id"])
+        old_key = _s(row["match_key"])
+        async with database.transaction():
+            if verdict == O.OUTSIDE:
+                values = dict(row)
+                values.update(
+                    match_key="o:" + old_key.split(":", 1)[1],
+                    origin="outside",
+                    active=True,
+                    updated_at=now,
+                )
+                statement = pg_insert(province_settlement_matches).values(**values)
+                await database.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[
+                            province_settlement_matches.c.province,
+                            province_settlement_matches.c.judge_id,
+                            province_settlement_matches.c.match_key,
+                        ],
+                        set_={
+                            k: v for k, v in values.items()
+                            if k not in ("province", "judge_id", "match_key")
+                        },
+                    )
+                )
+                moved += 1
+            else:
+                dropped += 1
+            await database.execute(
+                update(province_settlement_matches)
+                .where(
+                    and_(
+                        province_settlement_matches.c.province == province,
+                        province_settlement_matches.c.judge_id == judge_id,
+                        province_settlement_matches.c.match_key == old_key,
+                    )
+                )
+                .values(active=False, updated_at=now)
+            )
+    if moved or dropped:
+        logger.info(
+            "[settlement] %s: mecze innych okregow w minionych sezonach - "
+            "%d stolikow jako spoza okregu, %d obsad zgaszonych",
+            province, moved, dropped,
+        )
+    return {"moved": moved, "dropped": dropped}
+
+
+# ---------------------------------------------------------------------------
 # Przebieg
 # ---------------------------------------------------------------------------
 
@@ -820,6 +933,11 @@ async def refresh_province(
     pulse_task = asyncio.create_task(pulse())
 
     try:
+        # Nasze przedrostki numerow i poprawka historii zapisanej stara regula -
+        # sama baza, bez ZPRP (patrz `fix_history`).
+        own = await _own_prefixes(province)
+        await fix_history(province, own=own)
+
         async with AsyncClient(
             base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
         ) as client, AsyncClient(follow_redirects=True, timeout=30.0) as public:
@@ -875,6 +993,7 @@ async def refresh_province(
                     seasons=plan,
                     current=current,
                     beat=beat,
+                    own_prefixes=own,
                 )
 
             rows = district + outside
@@ -999,6 +1118,16 @@ async def run_settlement_sync_scheduler() -> None:
     zatrzymuja pozostalych.
     """
     await asyncio.sleep(90)  # niech serwer najpierw wstanie
+    # Raz po starcie: historia zapisana stara regula (mecze innych okregow
+    # w minionych sezonach) - bez czekania na dobowe odswiezenie, ktore rusza
+    # dopiero 24 h po poprzednim. Sama baza, bez ZPRP.
+    try:
+        for province in sorted(
+            set(await enabled_provinces("stats")) | set(await enabled_provinces("settlements"))
+        ):
+            await fix_history(province)
+    except Exception:
+        logger.exception("[settlement] poprawka historii")
     while True:
         try:
             wanted = set(await enabled_provinces("stats")) | set(await enabled_provinces("settlements"))
