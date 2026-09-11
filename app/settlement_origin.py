@@ -64,14 +64,25 @@ def is_other_district(code: Any, own: Iterable[str]) -> bool:
     return bool(prefix and mine and prefix not in mine)
 
 
+def _district_level(code: Any) -> bool:
+    """
+    Szczebel, ktory z listy minionego sezonu wchodzi jak wlasny.
+
+    ⚠ Puchar wojewodzki („S/PPK/2") ma szczebel „central", bo placi stawkami
+    II ligi - ale to mecz OKREGU i okreg rozlicza go w KAZDEJ roli. Bez tego
+    warunku z minionych sezonow wchodzily same jego stoliki (poprawka 11.09.2026).
+    """
+    return R.match_level(code) in _OWN_LEVELS or R.is_provincial_cup(code)
+
+
 def own_past_match(code: Any, own: Iterable[str]) -> bool:
     """
     Mecz minionego sezonu z listy sedziego liczony jak WLASNY, czyli w kazdej roli.
 
-    Szczebel jak dotad (rozgrywki okregowe i puchary), ale bez meczow innych
-    okregow - te ida jak w biezacym sezonie: tylko stolik, jako mecz spoza okregu.
+    Rozgrywki okregowe, puchary i puchar wojewodzki - ale bez meczow innych
+    okregow: te ida jak w biezacym sezonie, tylko stolik, jako mecz spoza okregu.
     """
-    return R.match_level(code) in _OWN_LEVELS and not is_other_district(code, own)
+    return _district_level(code) and not is_other_district(code, own)
 
 
 def collected_after_season(first_seen: Optional[datetime], season: str) -> bool:
@@ -104,6 +115,6 @@ def history_fix(
         return KEEP
     if not collected_after_season(first_seen, season):
         return KEEP
-    if R.match_level(match_code) not in _OWN_LEVELS or not is_other_district(match_code, own):
+    if not _district_level(match_code) or not is_other_district(match_code, own):
         return KEEP
     return OUTSIDE if str(role or "").strip() == R.ROLE_TABLE else DROP

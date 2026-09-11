@@ -136,6 +136,12 @@ def is_children_competition(code: Any) -> bool:
     return competition_prefix(code) in ("DZM", "DZK")
 
 
+#: Kategoria stawek turnieju dzieci (DzM/DzK). W danych stawek jest dopiero od
+#: 01.09.2026 - starsze wersje jej nie maja i `calculate_gross` schodzi wtedy
+#: do "Inne", tak jak liczono te mecze wczesniej.
+CHILDREN_CATEGORY = "Dzieci"
+
+
 def match_level(code: Any) -> str:
     """
     Szczebel meczu: "cup" | "district" | "central" | "unknown".
@@ -171,6 +177,8 @@ def district_category(code: Any) -> str:
         return "Junior"
     if prefix in ("IIIM", "IIIK"):
         return "III liga"
+    if prefix in ("DZM", "DZK"):
+        return CHILDREN_CATEGORY
     return "Inne"
 
 
@@ -547,9 +555,12 @@ def calculate_gross(
         return cup_gross(central_book, stage[0], role, distance_km, when)
 
     if is_district_competition(code):
-        from_province = provincial_gross(
-            province_content, distance_km, district_category(code), role, when
-        )
+        category = district_category(code)
+        from_province = provincial_gross(province_content, distance_km, category, role, when)
+        if not from_province and category == CHILDREN_CATEGORY:
+            # Stawka turnieju dzieci obowiazuje od 01.09.2026; wersja sprzed tej
+            # daty jej nie ma i mecz dzieci liczy sie tam jak "Inne".
+            from_province = provincial_gross(province_content, distance_km, "Inne", role, when)
         if from_province > 0:
             return from_province
         fallback = district_fallback(central_book, distance_km, role)

@@ -38,6 +38,12 @@ def test_past_match_of_another_district_is_not_ours():
     assert own_past_match("MPJMM/19", {"S"})            # puchary jak dotad
 
 
+def test_provincial_cup_is_our_match():
+    # „S/PPK/2" placi stawkami II ligi, ale to mecz okregu - liczy sie w kazdej roli.
+    assert own_past_match("S/PPK/2", {"S"})
+    assert not own_past_match("L/PPK/3", {"S"})
+
+
 def test_collected_after_season():
     assert collected_after_season(AFTER, "2025/2026")
     assert not collected_after_season(DURING, "2025/2026")

@@ -137,8 +137,10 @@ def test_dzieci_w_jednej_hali_placa_dojazd_raz():
     placily = [m for m in entry.matches if m.travel]
     assert len(placily) == 1
     assert sum(1 for m in entry.matches if m.travel_shared) == 2
-    # Ryczałt za mecz zostaje pelny przy kazdym - znika sam dojazd.
-    assert all(m.gross > 0 for m in entry.matches)
+    # Ryczałt za mecz zostaje pelny przy kazdym - znika sam dojazd. Od
+    # 01.09.2026 turniej dzieci ma wlasna stawke: 40 zl za mecz.
+    assert all(m.gross == 40 for m in entry.matches)
+    assert entry.gross == 120
 
 
 def test_juniorzy_w_jednej_hali_placa_dojazd_za_kazdy_mecz():

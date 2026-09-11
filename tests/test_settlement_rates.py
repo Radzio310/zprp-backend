@@ -69,6 +69,12 @@ def test_kategorie_okregowe():
     assert R.district_category("S/IIIM/4") == "III liga"
 
 
+def test_turniej_dzieci_ma_wlasna_kategorie():
+    assert R.district_category("S/DZM/3") == "Dzieci"
+    assert R.district_category("S/DZK/1") == "Dzieci"
+    assert R.category_label("S/DZM/3") == "Dzieci"
+
+
 # --------------------------------------------------------------------- etapy
 
 @pytest.mark.parametrize(
@@ -153,6 +159,22 @@ def test_okregowy_do_31_08_2026_rosl_progami():
     assert _gross("S/JMM/7", R.ROLE_TABLE, 50, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 132
     # Mlodzik ml. na miejscu 117 jak w aplikacji - sekcja "mecze" miala tu 119.
     assert _gross("S/MLM1213/2", R.ROLE_FIELD, 0, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 117
+
+
+def test_turniej_dzieci_40_zl_za_mecz_od_01_09_2026():
+    for km in (0, 20, 150):
+        assert _gross("S/DZM/3", R.ROLE_FIELD, km, SOBOTA_NOWA, BOOK_NEW) == 40
+        assert _gross("S/DZK/1", R.ROLE_FIELD, km, SOBOTA_NOWA, BOOK_NEW) == 40
+    # Stawka turnieju dotyczy boiskowego (tak jak kalkulator w BAZA) - stolikowy
+    # na meczu dzieci zostaje przy zwyklej stawce okregowej.
+    assert _gross("S/DZM/3", R.ROLE_TABLE, 20, SOBOTA_NOWA, BOOK_NEW) == 77
+
+
+def test_turniej_dzieci_przed_01_09_2026_liczy_sie_jak_inne():
+    # Zasada 40 zl obowiazuje od 01.09.2026. Wersja do 31.08.2026 nie ma
+    # kategorii "Dzieci", wiec mecz dzieci idzie progami "Inne" jak dotad.
+    assert _gross("S/DZM/3", R.ROLE_FIELD, 20, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 152
+    assert _gross("S/DZM/3", R.ROLE_TABLE, 20, SOBOTA_STARA, BOOK_OLD, prov=PROV_SLASKIE_PROGI) == 105
 
 
 def test_delegat_do_31_08_2026_jak_tabela_c_zprp():

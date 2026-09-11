@@ -30,12 +30,13 @@ from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 from httpx import AsyncClient
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import settlement_origin as O
 from app import settlement_rates as R
 from app.db import (
+    app_migrations,
     database,
     okreg_distances,
     province_judges,
@@ -340,9 +341,10 @@ async def _collect_outside(
 
     Co wchodzi:
       - spoza okregu: TYLKO stoliki (boiskowych centralnych okreg nie rozlicza);
-      - mecze okregowe MINIONYCH sezonow: w kazdej roli. Monitor okregu trzyma
-        wylacznie biezacy terminarz, wiec dla historii lista sedziego jest
-        jedynym zrodlem - bez tego minione sezony mialy same stoliki;
+      - mecze okregowe i puchar wojewodzki MINIONYCH sezonow: w kazdej roli.
+        Monitor okregu trzyma wylacznie biezacy terminarz, wiec dla historii
+        lista sedziego jest jedynym zrodlem - bez tego minione sezony mialy
+        same stoliki;
       - ale mecz INNEGO okregu (przedrostek „L/" przy naszym „S/") idzie jak
         spoza okregu takze w minionym sezonie - patrz `settlement_origin`.
 
@@ -762,6 +764,62 @@ async def _own_prefixes(province: str) -> set[str]:
     return O.own_prefixes(codes)
 
 
+async def _claim_once(name: str) -> bool:
+    """
+    Jednorazowa poprawka danych: pierwsze wolanie oddaje True i zostawia slad.
+
+    Bez sladu kazdy restart serwera powtarzalby poprawke, a ta ponizej kasuje
+    rejestr sezonow - czyli konczylaby sie pobraniem calej historii z ZPRP.
+    """
+    row = await database.fetch_one(
+        select(app_migrations.c.name).where(app_migrations.c.name == name)
+    )
+    if row is not None:
+        return False
+    await database.execute(
+        pg_insert(app_migrations)
+        .values(name=name, ran_at=_now())
+        .on_conflict_do_nothing(index_elements=[app_migrations.c.name])
+    )
+    return True
+
+
+async def recheck_past_seasons(province: str) -> list[str]:
+    """
+    Raz: minione sezony do pobrania jeszcze raz, juz nowa regula.
+
+    Puchar wojewodzki minionych sezonow wchodzil tylko dla stolikowych - jego
+    numer („S/PPK/2") ma szczebel centralny, wiec `own` go nie lapal i obsad
+    boiskowych nigdy nie pobralismy. Baza sama ich nie odtworzy, wiec kasujemy
+    wpisy sezonow z rejestru: `plan_seasons` uzna je za niepobrane i RECZNE
+    odswiezenie (`full_check`) sciagnie je ponownie. Dobowa petla tego nie robi -
+    pobranie wstecz to setki zapytan do ZPRP i ma isc na zadanie czlowieka.
+    """
+    if not await _claim_once(f"settlement-past-seasons-{province}"):
+        return []
+    current = season_of(_now())
+    rows = await database.fetch_all(
+        select(province_settlement_seasons.c.season).where(
+            province_settlement_seasons.c.province == province
+        )
+    )
+    stale = sorted(s for s in {_s(row["season"]) for row in rows} if s and s < current)
+    if not stale:
+        return []
+    await database.execute(
+        delete(province_settlement_seasons).where(
+            and_(
+                province_settlement_seasons.c.province == province,
+                province_settlement_seasons.c.season.in_(stale),
+            )
+        )
+    )
+    logger.info(
+        "[settlement] %s: minione sezony do pobrania jeszcze raz: %s", province, ", ".join(stale)
+    )
+    return stale
+
+
 async def fix_history(province: str, *, own: Optional[set[str]] = None) -> dict:
     """
     Obsady minionych sezonow zapisane regula sprzed 11.09.2026 - bez sieci.
@@ -950,6 +1008,10 @@ async def refresh_province(
 
             # --- ktore sezony ---
             current = season_of(_now())
+            # Reczne odswiezenie jest tez momentem na jednorazowe nadrobienie
+            # historii nowa regula - patrz `recheck_past_seasons`.
+            if full_check:
+                await recheck_past_seasons(province)
             done_rows = await database.fetch_all(
                 select(province_settlement_seasons.c.season).where(
                     province_settlement_seasons.c.province == province

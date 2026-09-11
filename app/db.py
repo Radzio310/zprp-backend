@@ -787,6 +787,18 @@ province_settlement_seasons = Table(
 )
 
 
+# Ślad po jednorazowych poprawkach danych.
+#
+# Bez niego każdy restart serwera powtarzałby poprawkę, a ta, która kasuje
+# rejestr sezonów, kończyłaby się pobieraniem całej historii z ZPRP od nowa.
+app_migrations = Table(
+    "app_migrations",
+    metadata,
+    Column("name", String, primary_key=True),
+    Column("ran_at", DateTime(timezone=True), nullable=False),
+)
+
+
 # 18.1f) Wygenerowane dokumenty - numeracja SL/01/2026/1
 #
 # Numer musi być niepowtarzalny w obrębie okręgu, miesiąca i rodzaju dokumentu,
