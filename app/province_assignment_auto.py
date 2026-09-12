@@ -43,9 +43,11 @@ from app.assignment_context import (
     need_from_state,
 )
 from app.assignment_distances import fill_missing, load_book
+from app.assignment_grades import backfill_grades
 from app.assignment_people import fold
 from app.assignment_report import build_report, plan_rows
 from app.db import (
+    badges as badges_table,
     database,
     province_assignment_runs,
     province_judge_blocks,
@@ -101,6 +103,39 @@ async def _season_window() -> tuple[date, date]:
     return date(start_year, 9, 1), today + timedelta(days=120)
 
 
+
+async def _badge_look() -> dict[str, dict]:
+    """
+    Odznaki okregu razem z kolorem i ikona - tak, jak widzi je reszta panelu.
+
+    Kolor i ikona siedza w `meta_json` definicji odznaki, a przy sedzim leza
+    same NAZWY. Bez tej mapy zakladka Sedziowie rysowalaby szare pigulki,
+    podczas gdy wszedzie indziej te same odznaki maja swoje barwy - a odznaka
+    rozpoznawana po kolorze przestaje wtedy dzialac.
+
+    ⚠ Klucz to nazwa bez ogonkow i wielkosci liter: „Mlodzi" i „Młodzi" to
+    jedna odznaka.
+    """
+    out: dict[str, dict] = {}
+    try:
+        rows = await database.fetch_all(select(badges_table))
+    except Exception:
+        logger.exception("obsada: nie udało się pobrać definicji odznak")
+        return out
+    for row in rows:
+        name = _s(row["name"])
+        if not name:
+            continue
+        meta = state_dict(row["meta_json"])
+        out[fold(name)] = {
+            "name": name,
+            "color": _s(meta.get("color")) or "",
+            "icon": _s(meta.get("icon")) or "",
+            "description": _s(meta.get("description")),
+        }
+    return out
+
+
 @router.get("/judges", summary="Sędziowie okręgu z parametrami automatu")
 async def judges(
     province: str = Query(...),
@@ -113,7 +148,12 @@ async def judges(
     tylko sędziów, których śledzi monitor, a terminarz zna wszystkich.
     """
     key = require_province(province)
+    # Uprawnienia zbieraja sie przy okazji otwierania meczow, wiec przy pierwszym
+    # wejsciu na te zakladke tabela bywa pusta i przy nazwiskach nie byloby liter.
+    # Raz, kontem monitora - patrz `backfill_grades`.
+    await backfill_grades(key)
     roster = await load_roster(key)
+    look = await _badge_look()
     season_from, season_to = await _season_window()
     busy, _load = await load_busy(key, roster, date_from=season_from, date_to=season_to)
 
@@ -192,6 +232,8 @@ async def judges(
         "season": season_of(_now()),
         "judges": rows,
         "days": list(DAY_NAMES),
+        # Kolor i ikona odznaki - raz na odpowiedź, nie przy każdym sędzim.
+        "badge_look": look,
         "totals": {
             "judges": len(rows),
             "league": sum(1 for row in rows if row["league"]),
@@ -541,6 +583,12 @@ async def run_auto(payload: AutoRequest):
     if end < start:
         raise HTTPException(400, "Koniec zakresu nie może być przed jego początkiem")
 
+    # RAZ na okreg: uprawnienia do szczebli. Zbieraja sie przy okazji otwierania
+    # meczow, wiec tuz po wdrozeniu tabela jest pusta - a bez liter automat nie
+    # odrozni stolika ligowego od okregowego. Kolejne przebiegi mijaja to bez
+    # kosztu, bo slad siedzi w `app_migrations`.
+    grades = await backfill_grades(key)
+
     roster = await load_roster(key)
     if not roster.judges:
         raise HTTPException(400, "Okręg nie ma jeszcze listy sędziów")
@@ -567,6 +615,11 @@ async def run_auto(payload: AutoRequest):
     )
     report["skipped"] = skipped
     report["distances"] = {**book.stats, **distances}
+    report["grades"] = {
+        "known": sum(1 for judge in roster.judges.values() if judge.letters),
+        "total": len(roster.judges),
+        **({"backfill": grades} if grades.get("ran") else {}),
+    }
 
     rows = plan_rows(plan, needs)
     run_id = await database.fetch_val(

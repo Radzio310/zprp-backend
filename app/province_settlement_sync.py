@@ -770,18 +770,12 @@ async def _claim_once(name: str) -> bool:
 
     Bez sladu kazdy restart serwera powtarzalby poprawke, a ta ponizej kasuje
     rejestr sezonow - czyli konczylaby sie pobraniem calej historii z ZPRP.
+    Sama mechanika mieszka w `app/one_time.py`, bo korzysta z niej takze
+    uzupelnianie uprawnien w module obsadowego.
     """
-    row = await database.fetch_one(
-        select(app_migrations.c.name).where(app_migrations.c.name == name)
-    )
-    if row is not None:
-        return False
-    await database.execute(
-        pg_insert(app_migrations)
-        .values(name=name, ran_at=_now())
-        .on_conflict_do_nothing(index_elements=[app_migrations.c.name])
-    )
-    return True
+    from app.one_time import claim_once
+
+    return await claim_once(name)
 
 
 async def recheck_past_seasons(province: str) -> list[str]:

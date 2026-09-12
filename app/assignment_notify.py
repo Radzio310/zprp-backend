@@ -111,6 +111,11 @@ async def numbers_by_name(province: str, names: Iterable[Any]) -> dict[str, str]
     return out
 
 
+#: Pola migawki opisujace hale. Ta sama czworka, na ktorej monitor rozpoznaje
+#: „Zmieniono adres hali" - stad jeden komunikat dla obu drog.
+HALL_FIELDS = ("Hala_nazwa", "Hala_miasto", "Hala_ulica", "Hala_numer")
+
+
 async def announce_lineup(
     province: str,
     match_id: str,
@@ -123,15 +128,82 @@ async def announce_lineup(
 
     `changes` to `{gniazdo: (numer_sedziego, nazwisko)}` - wylacznie gniazda,
     ktore faktycznie zmienilismy. Pusty numer znaczy „gniazdo zdjete".
+    """
+    from app.match_market_rules import with_slot_holder
+
+    # Numer sedziego, gdy panel go nie podal - po nazwisku z listy okregu.
+    missing = [
+        _s(name) for judge_id, name in changes.values() if not _s(judge_id) and _s(name)
+    ]
+    found = await numbers_by_name(province, missing) if missing else {}
+
+    def patch(state: Mapping[str, Any]) -> dict:
+        out = dict(state)
+        for slot, (judge_id, full_name) in changes.items():
+            crew_slot = SLOT_TO_CREW.get(_s(slot))
+            if not crew_slot:
+                continue
+            number = _s(judge_id) or found.get(name_key(full_name), "")
+            out = with_slot_holder(out, crew_slot, number, _s(full_name))
+        return out
+
+    return await announce_change(province, match_id, patch, actor=actor)
+
+
+async def announce_hall(
+    province: str,
+    match_id: str,
+    hall: Mapping[str, Any],
+    *,
+    actor: Optional[str] = None,
+) -> dict:
+    """
+    To samo dla HALI: migawka dostaje nowy adres, obsada - powiadomienie.
+
+    Zmiana hali obchodzi sedziow nie mniej niz zmiana skladu - to inny dojazd,
+    a czasem inne miasto. Monitor ma na to gotowy komunikat („Zmieniono adres
+    hali w meczu X"), wiec i tu nie piszemy wlasnego.
+    """
+    values = {
+        "Hala_nazwa": _s(hall.get("name")),
+        "Hala_miasto": _s(hall.get("city")),
+        "Hala_ulica": _s(hall.get("street") or hall.get("address")),
+        "Hala_numer": _s(hall.get("number")),
+    }
+
+    def patch(state: Mapping[str, Any]) -> dict:
+        out = dict(state)
+        for field, value in values.items():
+            # Pustego pola NIE wpisujemy: formularz hal nie zawsze rozbija adres
+            # na ulice i numer, a nadpisanie pustka skasowaloby to, co wiemy.
+            if value:
+                out[field] = value
+        return out
+
+    return await announce_change(province, match_id, patch, actor=actor)
+
+
+async def announce_change(
+    province: str,
+    match_id: str,
+    patch: Any,
+    *,
+    actor: Optional[str] = None,
+) -> dict:
+    """
+    Rdzen: poprawia migawke meczu i oglasza zmiane tak, jak zrobilby to monitor.
+
+    `patch` dostaje obecny stan i oddaje nowy - dzieki temu ta sama droga obsluguje
+    i obsade, i hale, i cokolwiek jeszcze panel bedzie umial zapisac.
 
     Calosc jest oslonieta: zapis w bazie zwiazku JUZ przeszedl, wiec nieudane
-    odswiezenie wlasnej kopii nie ma prawa zamienic udanej obsady w blad.
+    odswiezenie wlasnej kopii nie ma prawa zamienic udanego zapisu w blad.
     Monitor doczyta prawde przy najblizszym przebiegu.
     """
     from sqlalchemy import and_, func, select, update
 
     from app.db import database, province_match_judges, province_matches
-    from app.match_market_rules import state_dict, with_slot_holder
+    from app.match_market_rules import state_dict
     from app.settlement_province import spellings
     from app.province_match_monitor import (
         _create_event,
@@ -175,23 +247,7 @@ async def announce_lineup(
             result["error"] = "Migawka meczu jest pusta"
             return result
 
-        # Numer sedziego, gdy panel go nie podal - po nazwisku z listy okregu.
-        # Bez numeru powiadomienie nie ma kogo powiadomic, a nazwisko mamy zawsze.
-        missing = [
-            _s(name)
-            for judge_id, name in changes.values()
-            if not _s(judge_id) and _s(name)
-        ]
-        found = await numbers_by_name(province, missing) if missing else {}
-
-        new = dict(old)
-        for slot, (judge_id, full_name) in changes.items():
-            crew_slot = SLOT_TO_CREW.get(_s(slot))
-            if not crew_slot:
-                continue
-            number = _s(judge_id) or found.get(name_key(full_name), "")
-            new = with_slot_holder(new, crew_slot, number, _s(full_name))
-
+        new = patch(old)
         if new == old:
             return result
 

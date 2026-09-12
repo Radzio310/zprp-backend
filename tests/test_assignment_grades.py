@@ -1,3 +1,5 @@
+import pytest
+
 from app.assignment_grades import options_grades
 from app.assignment_people import name_key
 
@@ -56,3 +58,48 @@ def test_an_empty_form_is_not_an_error():
     assert options_grades({}) == {}
     assert options_grades({"slots": {}}) == {}
     assert options_grades({"slots": {"a": {"options": None}}}) == {}
+
+
+# ── jednorazowe uzupełnienie ────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_backfill_without_a_monitor_account_does_nothing_and_keeps_the_claim(monkeypatch):
+    """Brak konta NIE zajmuje śladu - konto może dojść jutro."""
+    import app.assignment_grades as G
+
+    claimed: list[str] = []
+    monkeypatch.setattr("app.zprp_accounts.credentials_for", lambda *a, **k: None)
+    monkeypatch.setattr("app.one_time.claim_once", _remember(claimed))
+
+    result = await G.backfill_grades("SLASKIE")
+    assert result["ran"] is False
+    assert "konta" in result["reason"]
+    assert claimed == []          # ślad wolny - poprawka wydarzy się później
+
+
+@pytest.mark.anyio
+async def test_backfill_runs_only_once(monkeypatch):
+    import app.assignment_grades as G
+
+    monkeypatch.setattr("app.zprp_accounts.credentials_for", lambda *a, **k: ("u", "p"))
+    monkeypatch.setattr("app.one_time.claim_once", _always(False))
+
+    result = await G.backfill_grades("SLASKIE")
+    assert result["ran"] is False
+    assert result["reason"] == "już wykonane"
+
+
+def _remember(sink):
+    async def claim(name):
+        sink.append(name)
+        return True
+
+    return claim
+
+
+def _always(value):
+    async def claim(_name):
+        return value
+
+    return claim

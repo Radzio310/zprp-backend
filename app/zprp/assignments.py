@@ -553,6 +553,12 @@ class ObsadaSaveHallRequest(BaseModel):
     IdZawody: str
     user: str
     hall_id: str
+    #: Panel obsadowego: okręg i rozbity adres hali. Po udanym zapisie migawka
+    #: terminarza dostaje nowy adres, a obsada powiadomienie - bez czekania na
+    #: monitor. Patrz `app/assignment_notify.py`.
+    province: Optional[str] = None
+    hall: Optional[Dict[str, str]] = None
+    actor: Optional[str] = None
 
 
 class ObsadaScheduleRequest(BaseModel):
@@ -1612,7 +1618,7 @@ async def obsada_save_hall(
             success, parsed2.get("selected_id"), payload.hall_id
         )
 
-        return {
+        result: Dict[str, Any] = {
             "success": success,
             "fetched_at": _now_iso(),
             "select_name_used": select_name,
@@ -1620,6 +1626,33 @@ async def obsada_save_hall(
             "hall_name": hall_name,
             "error": None if success else f"Hall verification failed: selected={parsed2.get('selected_id')} wanted={payload.hall_id}",
         }
+
+    if payload.province and success:
+        # Osłonięte: hala w bazie związku już stoi, więc nieudane powiadomienie
+        # nie ma prawa zamienić udanego zapisu w błąd.
+        try:
+            from app.assignment_notify import announce_hall
+
+            chosen = dict(payload.hall or {})
+            if not chosen.get("name"):
+                for option in parsed2.get("halls", []):
+                    if option.get("id") == payload.hall_id:
+                        chosen = {
+                            "name": option.get("name", ""),
+                            "city": option.get("city", ""),
+                            "address": option.get("address", ""),
+                        }
+                        break
+            result["announced"] = await announce_hall(
+                payload.province,
+                payload.IdZawody,
+                chosen,
+                actor=payload.actor or payload.judge_id,
+            )
+        except Exception:
+            logger.exception("obsada/save-hall: zapis przeszedł, powiadomienie nie")
+            result["announced"] = {"changed": False, "events": 0, "error": "notify-failed"}
+    return result
 
 
 @router.post("/zprp/obsada/schedule-for-assignment")

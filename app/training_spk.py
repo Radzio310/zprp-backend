@@ -36,6 +36,14 @@ from app.db import database, saved_matches, spk_reference, spk_run, spk_settings
 from app.proel_admin_guard import proel_admin_guard
 from app.proel_auth import Actor, is_admin, proel_actor
 from app.spk_pdf_link import create_pdf_token, token_expires_at, verify_pdf_token
+from app.spk_province_gate import (
+    create_province_token,
+    generate_password,
+    normalize_password,
+    passwords_match,
+    token_expires_at as province_token_expires_at,
+    verify_province_token,
+)
 from app.training_spk_score import grade, score_run
 from app.training_spk_pdf import SpkPdfError, build_report_pdf, build_slides_pdf
 from app.training_spk_ai import AI_MODEL, ai_messages, clean_ai_summary
@@ -46,7 +54,7 @@ from app.training_spk_report import report_context
 from app.training_spk_shootout import shootout_shots
 from app.training_spk_slides import action_text, format_clock, slides_from_timeline
 from app.training_spk_video import video_clock
-from app.zprp_accounts import normalize_province
+from app.zprp_accounts import PROVINCE_ENV_SUFFIXES, normalize_province
 
 logger = logging.getLogger(__name__)
 
@@ -790,19 +798,19 @@ async def slides_pdf(actor: Actor = Depends(proel_actor)) -> Response:
 # ─────────────────────────── podgląd podejścia ───────────────────────────
 
 
-@admin_router.get("/runs/{run_id}", summary="Jedno podejście w szczegółach")
-async def run_detail(
-    run_id: str,
-    actor: Actor = Depends(proel_actor),
-) -> Dict[str, Any]:
+async def _run_detail_payload(run_id: str) -> Dict[str, Any]:
     """Wszystko, co panel pokaże o jednym podejściu - „co kto klikał".
 
     Trzy warstwy: pełny raport oceny (różnice zdarzenie po zdarzeniu), ocena
     słowna AI i PRZEBIEG WPISÓW sędziego - jego protokół zamieniony na zdania
     tym samym modułem, którym mówią slajdy. Panel niczego nie składa sam, bo
     wtedy to samo zdarzenie brzmiałoby inaczej w prezentacji i w podglądzie.
+
+    OSOBNA FUNKCJA, BO CZYTELNIKÓW JEST DWÓCH: administrator (trasa niżej) i
+    sędzia, który otworzył wyniki swojego okręgu hasłem. Mają zobaczyć dokładnie
+    to samo - dwa podobne składania znaczyłyby, że przy pierwszej poprawce
+    zaczną mówić co innego. Uprawnienie sprawdza wołający, nie ta funkcja.
     """
-    await _require_admin(actor)
     row = await database.fetch_one(select(spk_run).where(spk_run.c.run_id == run_id))
     if row is None:
         raise HTTPException(404, "Nie ma takiego podejścia.")
@@ -848,11 +856,7 @@ async def run_detail(
     }
 
 
-@admin_router.get("/runs/{run_id}/state", summary="Protokół podejścia")
-async def run_state(
-    run_id: str,
-    actor: Actor = Depends(proel_actor),
-) -> Dict[str, Any]:
+async def _run_state_payload(run_id: str) -> Dict[str, Any]:
     """Pełny dokument meczu z tego podejścia - do podglądu w panelu.
 
     OSOBNA TRASA, bo to setki kilobajtów: lista podejść i karta szczegółów mają
@@ -861,7 +865,6 @@ async def run_state(
     panel podaje go wprost do `MatchSummaryScreen` - tak samo jak przy podglądzie
     zapisu w zakładce protokołów.
     """
-    await _require_admin(actor)
     row = await database.fetch_one(
         select(spk_run.c.run_id, spk_run.c.data_json).where(spk_run.c.run_id == run_id)
     )
@@ -875,6 +878,24 @@ async def run_state(
             "To podejście zapisało się bez dokumentu meczu - nie ma czego pokazać.",
         )
     return {"ok": True, "runId": data["run_id"], "dataJson": blob}
+
+
+@admin_router.get("/runs/{run_id}", summary="Jedno podejście w szczegółach")
+async def run_detail(
+    run_id: str,
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    await _require_admin(actor)
+    return await _run_detail_payload(run_id)
+
+
+@admin_router.get("/runs/{run_id}/state", summary="Protokół podejścia")
+async def run_state(
+    run_id: str,
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    await _require_admin(actor)
+    return await _run_state_payload(run_id)
 
 
 # ─────────────────────────── raport wyników PDF ───────────────────────────
@@ -951,4 +972,340 @@ async def report_pdf_signed(
         raise HTTPException(403, "Adres raportu wygasł. Poproś o nowy w panelu.")
     return await _report_response(
         str(payload.get("prov") or ""), str(payload.get("by") or "")
+    )
+
+
+# ───────────────── dostęp okręgu do własnych wyników ─────────────────
+#
+# DO TEJ PORY WYNIKI WIDZIAŁ TYLKO ADMINISTRATOR i to była świadoma decyzja:
+# lista niesie nazwiska i liczby, które czyta się jak ranking. Okręgi jednak
+# pytają o nie same - to ich sędziowie i ich szkolenie. Odpowiedź jest
+# pośrednia: administrator otwiera okręg po okręgu, a hasło rozstrzyga, czy
+# przed wynikami stoi ktoś, komu je podano. Reguły hasła siedzą w
+# `app/spk_province_gate.py`, tutaj jest tylko rozmowa z bazą i z aplikacją.
+#
+# SĘDZIA WIDZI TO SAMO CO ADMINISTRATOR, taka była decyzja - z podejściami
+# kolegów z okręgu włącznie. Dlatego trasy niżej wołają DOKŁADNIE te same
+# funkcje (`_run_detail_payload`, `_run_state_payload`, `summarize_by_province`),
+# a nie własne, podobne składania.
+
+#: Klucz rygli w jedynym wierszu `spk_settings` - obok `videoLinks`.
+PROVINCE_ACCESS_KEY = "provinceAccess"
+
+
+def _access_entry(raw: Any) -> Dict[str, Any]:
+    """Jeden rygiel sprowadzony do kształtu, na który można liczyć."""
+    data = raw if isinstance(raw, dict) else {}
+    return {
+        "enabled": bool(data.get("enabled")),
+        "password": normalize_password(data.get("password")),
+        "updatedAt": str(data.get("updatedAt") or "") or None,
+        "updatedBy": str(data.get("updatedBy") or "") or None,
+    }
+
+
+async def province_access_map() -> Dict[str, Dict[str, Any]]:
+    """Rygle wszystkich okręgów z bazy. Brak wiersza = nikt nic nie otworzył."""
+    try:
+        row = await database.fetch_one(
+            select(spk_settings.c.payload).order_by(spk_settings.c.id.desc()).limit(1)
+        )
+    except Exception:  # noqa: BLE001 - brak tabeli nie może wywrócić ekranu
+        logger.warning("spk_settings: odczyt rygli nieudany", exc_info=True)
+        return {}
+    payload = (dict(row).get("payload") if row else None) or {}
+    stored = payload.get(PROVINCE_ACCESS_KEY) if isinstance(payload, dict) else None
+    if not isinstance(stored, dict):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, value in stored.items():
+        province = normalize_province(key)
+        if province:
+            out[province] = _access_entry(value)
+    return out
+
+
+async def _save_province_access(
+    province: str, enabled: bool, password: str, by: str
+) -> Dict[str, Any]:
+    """Zapis jednego rygla. Reszta okręgów zostaje nietknięta."""
+    entry = {
+        "enabled": bool(enabled),
+        "password": normalize_password(password),
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "updatedBy": str(by or "").strip() or None,
+    }
+    existing = await database.fetch_one(
+        select(spk_settings.c.id, spk_settings.c.payload)
+        .order_by(spk_settings.c.id.desc())
+        .limit(1)
+    )
+    if existing:
+        row = dict(existing)
+        payload = dict(row.get("payload") or {})
+        access = dict(payload.get(PROVINCE_ACCESS_KEY) or {})
+        access[province] = entry
+        payload[PROVINCE_ACCESS_KEY] = access
+        await database.execute(
+            spk_settings.update()
+            .where(spk_settings.c.id == row["id"])
+            .values(payload=payload, updated_by=by)
+        )
+    else:
+        await database.execute(
+            spk_settings.insert().values(
+                payload={PROVINCE_ACCESS_KEY: {province: entry}}, updated_by=by
+            )
+        )
+    return entry
+
+
+class ProvinceAccessIn(BaseModel):
+    province: str
+    enabled: bool = False
+    #: Puste przy włączaniu = wylosuj nowe. Podane = to jest hasło okręgu.
+    password: str = ""
+
+
+@admin_router.get("/province-access", summary="Rygle wyników okręgów")
+async def admin_province_access(actor: Actor = Depends(proel_actor)) -> Dict[str, Any]:
+    """Wszystkie szesnaście okręgów, z hasłami.
+
+    HASŁA JAWNIE, i to jest właściwa odpowiedź: administrator ma je komuś
+    podać. Skrót kryptograficzny dawałby tu pole „nie do odczytania" i zmuszał
+    do losowania nowego hasła za każdym razem, gdy ktoś zapyta, jakie jest
+    obecne. Ta lista stoi już za bramką numeru administratora.
+    """
+    await _require_admin(actor)
+    access = await province_access_map()
+    return {
+        "ok": True,
+        "provinces": [
+            {"province": province, **(access.get(province) or _access_entry(None))}
+            for province in sorted(PROVINCE_ENV_SUFFIXES)
+        ],
+    }
+
+
+@admin_router.put("/province-access", summary="Zapis rygla okręgu")
+async def admin_save_province_access(
+    body: ProvinceAccessIn, actor: Actor = Depends(proel_actor)
+) -> Dict[str, Any]:
+    await _require_admin(actor)
+    province = normalize_province(body.province)
+    if not province:
+        raise HTTPException(400, "Nie znam takiego okręgu.")
+    password = normalize_password(body.password)
+    # Włączenie bez hasła musi COŚ znaczyć, a jedyne sensowne znaczenie to
+    # „wylosuj". Pusty rygiel z zapalonym światłem byłby drzwiami bez zamka.
+    if body.enabled and not password:
+        password = generate_password()
+    entry = await _save_province_access(
+        province, body.enabled, password, str(actor.judge_id or "")
+    )
+    return {"ok": True, "province": province, **entry}
+
+
+@router.get("/province-gate", summary="Czy mój okręg udostępnia wyniki")
+async def province_gate(actor: Actor = Depends(proel_actor)) -> Dict[str, Any]:
+    """Co aplikacja ma zrobić z kaflem „wyniki mojego okręgu".
+
+    OKRĘG BIERZEMY Z KONTA, nie z pytania na ekranie - konto BAZY ma go w
+    `login_records`, konto ProEl we własnej tabeli (patrz `_identity`). Pusty
+    okręg to profil lokalny bez konta: wtedy aplikacja pyta, o który okręg
+    chodzi, i rozstrzyga samo hasło.
+
+    HASŁA TU NIE MA i nie będzie - ta trasa jest otwarta dla każdego, kto ma
+    aplikację. Oddajemy jego DŁUGOŚĆ, bo z niej aplikacja buduje pole na hasło
+    (sześć okienek zamiast jednej kreski). Przy haśle losowym z trzydziestu
+    dwóch znaków sama długość nie zbliża nikogo do odgadnięcia.
+    """
+    who = await _identity(actor)
+    access = await province_access_map()
+    mine = who["province"]
+    mine_entry = (access.get(mine) or {}) if mine else {}
+    return {
+        "ok": True,
+        "province": mine,
+        "enabled": bool(mine_entry.get("enabled")),
+        "passwordLength": len(str(mine_entry.get("password") or "")),
+        #: Okręgi z otwartymi wynikami - do wyboru z listy herbów, gdy konto
+        #: nie mówi, skąd jest sędzia.
+        "openProvinces": [
+            {
+                "province": province,
+                "passwordLength": len(str(entry.get("password") or "")),
+            }
+            for province, entry in sorted(access.items())
+            if entry.get("enabled")
+        ],
+    }
+
+
+class ProvinceUnlockIn(BaseModel):
+    #: Pusto = mój okręg z konta.
+    province: str = ""
+    password: str = ""
+
+
+class ProvinceUnlocked(BaseModel):
+    ok: bool = True
+    province: str
+    token: str
+    expiresAt: int
+
+
+@router.post(
+    "/province-unlock",
+    response_model=ProvinceUnlocked,
+    summary="Otwórz wyniki okręgu hasłem",
+)
+async def province_unlock(
+    body: ProvinceUnlockIn, actor: Actor = Depends(proel_actor)
+) -> ProvinceUnlocked:
+    """Hasło w zamian za token okręgu - patrz `app/spk_province_gate.py`.
+
+    TYLKO SWÓJ OKRĘG, gdy konto mówi, który to jest. Hasło krąży po grupie
+    okręgowej i prędzej czy później wypłynie dalej; wtedy jedyne, co je
+    powstrzyma przed otwarciem cudzych wyników, to ten warunek. Gdy konta nie
+    ma (profil lokalny), okręgu nie ma z czym porównać i rozstrzyga samo hasło -
+    to świadomie słabszy przypadek, nie przeoczenie.
+
+    ODMOWA MÓWI, CZEGO DOTYCZY: inny okręg, zamknięte wyniki i złe hasło to
+    trzy różne zdania. Jedno „brak dostępu" na wszystko kazałoby sędziemu
+    zgadywać, czy pomylił się w haśle, czy jego okręg jeszcze nic nie otworzył.
+    """
+    who = await _identity(actor)
+    mine = who["province"]
+    wanted = normalize_province(body.province) or mine
+    if not wanted:
+        raise HTTPException(400, "Nie wiem, o który okręg pytasz.")
+    if mine and wanted != mine:
+        raise HTTPException(403, "Wyniki otwiera się tylko we własnym okręgu.")
+
+    access = await province_access_map()
+    entry = access.get(wanted) or {}
+    if not entry.get("enabled"):
+        raise HTTPException(403, "Ten okręg nie udostępnia jeszcze swoich wyników.")
+    if not passwords_match(body.password, entry.get("password")):
+        raise HTTPException(403, "Hasło nie pasuje do tego okręgu.")
+
+    token = create_province_token(wanted, str(actor.judge_id or ""))
+    return ProvinceUnlocked(
+        province=wanted, token=token, expiresAt=province_token_expires_at(token)
+    )
+
+
+def _province_from_token(token: str) -> str:
+    """Okręg z podpisanego tokenu albo odmowa. Nic pośredniego."""
+    payload = verify_province_token(token)
+    if payload is None:
+        raise HTTPException(403, "Dostęp do wyników wygasł. Wpisz hasło jeszcze raz.")
+    province = normalize_province(payload.get("prov"))
+    if not province:
+        raise HTTPException(403, "Ten dostęp nie wskazuje żadnego okręgu.")
+    return province
+
+
+@router.get("/province/runs", summary="Wyniki okręgu (po haśle)")
+async def province_runs(
+    t: str = Query("", description="Token z /province-unlock"),
+    limit: int = Query(500, ge=1, le=2000),
+) -> Dict[str, Any]:
+    """Podejścia jednego okręgu plus jego wiersz zestawienia.
+
+    Zestawienie liczy `summarize_by_province` - ta sama funkcja, co w panelu.
+    Druga arytmetyka znaczyłaby, że średnia okręgu w aplikacji i w panelu
+    rozjadą się przy pierwszej zmianie reguły.
+    """
+    province = _province_from_token(t)
+    rows = await database.fetch_all(
+        select(spk_run)
+        .where(spk_run.c.province == province)
+        .order_by(desc(spk_run.c.ended_at))
+        .limit(limit)
+    )
+    runs = [
+        {
+            "runId": d["run_id"],
+            "judgeId": d["judge_id"],
+            "judgeName": d["judge_name"],
+            "province": d["province"],
+            "accountKind": d["account_kind"],
+            "attempt": d["attempt"],
+            "mode": d["mode"],
+            "score": float(d["score"]) if d["score"] is not None else None,
+            "counts": (d["score_json"] or {}).get("counts") if d["score_json"] else None,
+            "parts": (d["score_json"] or {}).get("parts") if d["score_json"] else None,
+            "endedAt": d["ended_at"].isoformat() if d["ended_at"] else None,
+        }
+        for d in (dict(r) for r in rows)
+    ]
+    summary = next(
+        (row for row in summarize_by_province(runs) if row["province"] == province),
+        None,
+    )
+    return {"ok": True, "province": province, "runs": runs, "summary": summary}
+
+
+@router.get("/province/runs/{run_id}", summary="Podejście z mojego okręgu")
+async def province_run_detail(
+    run_id: str,
+    t: str = Query("", description="Token z /province-unlock"),
+) -> Dict[str, Any]:
+    """Szczegóły podejścia - wyłącznie z okręgu, który token otwiera.
+
+    Warunek okręgu sprawdzamy PO odczytaniu wiersza, a nie ufamy temu, że
+    aplikacja poda numer z własnej listy: numer podejścia jest jawny w jej
+    pamięci, więc bez tego warunku token jednego okręgu otwierałby cudze
+    podejścia przez sam podmieniony adres.
+    """
+    province = _province_from_token(t)
+    payload = await _run_detail_payload(run_id)
+    if normalize_province(payload["run"].get("province")) != province:
+        raise HTTPException(403, "To podejście jest z innego okręgu.")
+    return payload
+
+
+@router.get("/province/runs/{run_id}/state", summary="Protokół podejścia z okręgu")
+async def province_run_state(
+    run_id: str,
+    t: str = Query("", description="Token z /province-unlock"),
+) -> Dict[str, Any]:
+    province = _province_from_token(t)
+    row = await database.fetch_one(
+        select(spk_run.c.province).where(spk_run.c.run_id == run_id)
+    )
+    if row is None:
+        raise HTTPException(404, "Nie ma takiego podejścia.")
+    if normalize_province(dict(row).get("province")) != province:
+        raise HTTPException(403, "To podejście jest z innego okręgu.")
+    return await _run_state_payload(run_id)
+
+
+class ProvinceReportIn(BaseModel):
+    token: str = ""
+
+
+@router.post(
+    "/province/report-link",
+    response_model=SlidesLink,
+    summary="Adres raportu mojego okręgu",
+)
+async def province_report_link(
+    body: ProvinceReportIn, actor: Actor = Depends(proel_actor)
+) -> SlidesLink:
+    """Raport PDF okręgu dla sędziego, który otworzył wyniki hasłem.
+
+    Okręg przepisujemy Z TOKENU do podpisu PDF-a, a nie z ciała zapytania -
+    inaczej ktokolwiek z ważnym dostępem do własnego okręgu wyprosiłby raport
+    dowolnego innego.
+    """
+    province = _province_from_token(body.token)
+    token = create_pdf_token(
+        str(actor.judge_id or ""), doc="report", province=province
+    )
+    return SlidesLink(
+        path="/training/spk/report.pdf?t=" + token,
+        expiresAt=token_expires_at(token),
     )
