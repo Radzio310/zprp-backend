@@ -114,6 +114,7 @@ async def load_roster(province: str) -> Roster:
         province_judge_pauses,
         province_judge_settings,
         province_judges,
+        silesia_offtimes,
         zprp_judge_grades,
     )
 

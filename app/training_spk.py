@@ -1126,6 +1126,10 @@ async def province_gate(actor: Actor = Depends(proel_actor)) -> Dict[str, Any]:
     mine_entry = (access.get(mine) or {}) if mine else {}
     return {
         "ok": True,
+        #: Kto pyta - tym samym kluczem podpisany jest wydany dostęp. Aplikacja
+        #: porównuje go z zapamiętanym i nie podsuwa cudzego tokenu po zmianie
+        #: konta na tym samym telefonie.
+        "accountKey": who["judge_id"],
         "province": mine,
         "enabled": bool(mine_entry.get("enabled")),
         "passwordLength": len(str(mine_entry.get("password") or "")),
@@ -1153,6 +1157,8 @@ class ProvinceUnlocked(BaseModel):
     province: str
     token: str
     expiresAt: int
+    #: Konto, któremu dostęp przyznano - patrz `_province_for_actor`.
+    owner: str = ""
 
 
 @router.post(
@@ -1171,6 +1177,13 @@ async def province_unlock(
     ma (profil lokalny), okręgu nie ma z czym porównać i rozstrzyga samo hasło -
     to świadomie słabszy przypadek, nie przeoczenie.
 
+    ADMINISTRATORA TEN WARUNEK NIE DOTYCZY i to nie jest wyjątek zrobiony dla
+    wygody. Administrator ogląda podejścia WSZYSTKICH okręgów w panelu, bez
+    żadnego hasła (`/admin/training/spk/runs`) - więc tutaj nie ma czego przed
+    nim chronić, a zamknięte drzwi odbierałyby mu jedyny sposób, żeby zobaczyć,
+    co naprawdę widzi okręg po włączeniu wyników. Hasło zostaje wymagane także
+    dla niego: ta sama droga, którą przejdzie sędzia, sprawdza się sama.
+
     ODMOWA MÓWI, CZEGO DOTYCZY: inny okręg, zamknięte wyniki i złe hasło to
     trzy różne zdania. Jedno „brak dostępu" na wszystko kazałoby sędziemu
     zgadywać, czy pomylił się w haśle, czy jego okręg jeszcze nic nie otworzył.
@@ -1180,7 +1193,7 @@ async def province_unlock(
     wanted = normalize_province(body.province) or mine
     if not wanted:
         raise HTTPException(400, "Nie wiem, o który okręg pytasz.")
-    if mine and wanted != mine:
+    if mine and wanted != mine and not await is_admin(actor.judge_id):
         raise HTTPException(403, "Wyniki otwiera się tylko we własnym okręgu.")
 
     access = await province_access_map()
@@ -1190,20 +1203,44 @@ async def province_unlock(
     if not passwords_match(body.password, entry.get("password")):
         raise HTTPException(403, "Hasło nie pasuje do tego okręgu.")
 
-    token = create_province_token(wanted, str(actor.judge_id or ""))
+    # Podpisujemy ROZWIĄZANĄ tożsamością (`_identity`), nie surowym nagłówkiem:
+    # ten sam człowiek wchodzący raz numerem BAZY, raz kontem ProEl z
+    # potwierdzonym numerem, ma być jedną osobą - i nie wpisywać hasła dwa razy.
+    owner = who["judge_id"]
+    token = create_province_token(wanted, owner)
     return ProvinceUnlocked(
-        province=wanted, token=token, expiresAt=province_token_expires_at(token)
+        province=wanted,
+        token=token,
+        expiresAt=province_token_expires_at(token),
+        owner=owner,
     )
 
 
-def _province_from_token(token: str) -> str:
-    """Okręg z podpisanego tokenu albo odmowa. Nic pośredniego."""
+async def _province_for_actor(token: str, actor: Actor) -> str:
+    """Okręg z podpisanego tokenu - ale TYLKO dla konta, któremu go wydano.
+
+    DOSTĘP NALEŻY DO CZŁOWIEKA, NIE DO TELEFONU. Bez tego warunku wystarczyło
+    wylogować się i wejść na tym samym urządzeniu innym kontem, żeby zastać
+    wyniki otwarte - hasło wpisał ktoś inny, a token leżał w pamięci aplikacji
+    i otwierał je każdemu następnemu. Porównujemy ROZWIĄZANĄ tożsamość
+    (`_identity`), więc ten sam sędzia wracający raz numerem BAZY, raz kontem
+    ProEl z potwierdzonym numerem, hasła nie wpisuje drugi raz.
+
+    Profil lokalny bez konta ma pusty klucz i wtedy warunek przepuszcza -
+    porównywać nie ma czego. To ten sam świadomie słabszy przypadek, co przy
+    samym otwieraniu okręgu: bez konta rozstrzyga wyłącznie hasło.
+    """
     payload = verify_province_token(token)
     if payload is None:
         raise HTTPException(403, "Dostęp do wyników wygasł. Wpisz hasło jeszcze raz.")
     province = normalize_province(payload.get("prov"))
     if not province:
         raise HTTPException(403, "Ten dostęp nie wskazuje żadnego okręgu.")
+    who = await _identity(actor)
+    if str(payload.get("by") or "") != who["judge_id"]:
+        raise HTTPException(
+            403, "Ten dostęp do wyników należy do innego konta. Wpisz hasło."
+        )
     return province
 
 
@@ -1211,6 +1248,7 @@ def _province_from_token(token: str) -> str:
 async def province_runs(
     t: str = Query("", description="Token z /province-unlock"),
     limit: int = Query(500, ge=1, le=2000),
+    actor: Actor = Depends(proel_actor),
 ) -> Dict[str, Any]:
     """Podejścia jednego okręgu plus jego wiersz zestawienia.
 
@@ -1218,7 +1256,7 @@ async def province_runs(
     Druga arytmetyka znaczyłaby, że średnia okręgu w aplikacji i w panelu
     rozjadą się przy pierwszej zmianie reguły.
     """
-    province = _province_from_token(t)
+    province = await _province_for_actor(t, actor)
     rows = await database.fetch_all(
         select(spk_run)
         .where(spk_run.c.province == province)
@@ -1252,6 +1290,7 @@ async def province_runs(
 async def province_run_detail(
     run_id: str,
     t: str = Query("", description="Token z /province-unlock"),
+    actor: Actor = Depends(proel_actor),
 ) -> Dict[str, Any]:
     """Szczegóły podejścia - wyłącznie z okręgu, który token otwiera.
 
@@ -1260,7 +1299,7 @@ async def province_run_detail(
     pamięci, więc bez tego warunku token jednego okręgu otwierałby cudze
     podejścia przez sam podmieniony adres.
     """
-    province = _province_from_token(t)
+    province = await _province_for_actor(t, actor)
     payload = await _run_detail_payload(run_id)
     if normalize_province(payload["run"].get("province")) != province:
         raise HTTPException(403, "To podejście jest z innego okręgu.")
@@ -1271,8 +1310,9 @@ async def province_run_detail(
 async def province_run_state(
     run_id: str,
     t: str = Query("", description="Token z /province-unlock"),
+    actor: Actor = Depends(proel_actor),
 ) -> Dict[str, Any]:
-    province = _province_from_token(t)
+    province = await _province_for_actor(t, actor)
     row = await database.fetch_one(
         select(spk_run.c.province).where(spk_run.c.run_id == run_id)
     )
@@ -1301,7 +1341,7 @@ async def province_report_link(
     inaczej ktokolwiek z ważnym dostępem do własnego okręgu wyprosiłby raport
     dowolnego innego.
     """
-    province = _province_from_token(body.token)
+    province = await _province_for_actor(body.token, actor)
     token = create_pdf_token(
         str(actor.judge_id or ""), doc="report", province=province
     )

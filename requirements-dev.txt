@@ -5,3 +5,6 @@ respx>=0.21
 # Czytanie cmap fontu w tescie protokolu (tests/test_protocol_penalty_mark.py):
 # znak "K w kolku" musi byc w dolaczonym Noto Sans Symbols, a nie tylko w komentarzu.
 fonttools>=4.0
+# Straznik nazw (tests/test_no_undefined_names.py): import przeniesiony do wnetrza
+# funkcji latwo zgubic, a `NameError` wychodzi dopiero na produkcji.
+pyflakes>=3.0

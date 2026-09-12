@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 #: szczebli wystarczy, zeby tabela uprawnien przestala byc pusta.
 BACKFILL_FORMS = 6
 
+#: Budzet czasu na cale uzupelnienie. Odpala sie wewnatrz zadania, na ktore
+#: czeka czlowiek (pierwszy przebieg automatu), wiec nie moze wisiec bez konca:
+#: gdy ZPRP zwalnia, konczymy tym, co zdazylismy zebrac. Reszta doczyta sie
+#: przy otwieraniu meczow w panelu.
+BACKFILL_BUDGET_SECONDS = 40.0
+#: Limit na POJEDYNCZE zadanie - jeden zawieszony formularz nie zjada calosci.
+BACKFILL_TIMEOUT = 20.0
+
 #: Litery, ktore cokolwiek znacza dla automatu. Reszta („[MECZ]", smieci
 #: z formatowania) nie ma po co zajmowac miejsca w tabeli.
 KNOWN_LETTERS = frozenset(
@@ -167,6 +175,8 @@ async def backfill_grades(province: str, *, limit: int = BACKFILL_FORMS) -> dict
     username, password = creds
     seen: set[str] = set()
     try:
+        import time
+
         from httpx import AsyncClient
 
         from app.config import get_settings
@@ -175,11 +185,20 @@ async def backfill_grades(province: str, *, limit: int = BACKFILL_FORMS) -> dict
         from app.zprp.schedule import _login_zprp_and_get_cookies
 
         settings = get_settings()
+        deadline = time.monotonic() + BACKFILL_BUDGET_SECONDS
         async with AsyncClient(
-            base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
+            base_url=settings.ZPRP_BASE_URL,
+            follow_redirects=True,
+            timeout=BACKFILL_TIMEOUT,
         ) as client:
             cookies = await _login_zprp_and_get_cookies(client, username, password)
             for match_id in picked.values():
+                if time.monotonic() > deadline:
+                    out["reason"] = "budżet czasu wyczerpany"
+                    logger.info(
+                        "obsada %s: uzupełnianie uprawnień przerwane po budżecie", province
+                    )
+                    break
                 try:
                     _, html = await fetch_with_correct_encoding(
                         client,
