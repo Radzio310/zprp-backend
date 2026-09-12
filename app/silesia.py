@@ -31,6 +31,7 @@ from app.db import (
     province_offtime_sync_runs,
     silesia_offtimes,
 )
+from app.calendar_feed_rules import judge_key
 from app.ical_feed import is_feed_entry
 from app.notify_utils import schedule_province_push
 from app.schemas import (
@@ -805,19 +806,20 @@ async def _composed_offtime_records(
     # okręgowego i centralnego - też doklejane DOPIERO przy odczycie.
     # W widoku okręgu wchodzą tylko te, które sędzia udostępnił; pytając o
     # siebie (`/self/{judge_id}`) widzi wszystkie swoje.
-    judge_keys = {key[1] for key in groups}
+    # Numer porównujemy ZNORMALIZOWANY (`judge_key`): kalendarz należy do numeru
+    # z tokenu, a doklejamy go do wierszy kalendarza okręgowego, gdzie ten sam
+    # sędzia bywa zapisany z zerem wiodącym.
+    judge_keys = {judge_key(key[1]) for key in groups}
     if judge_keys:
         feed_query = select(judge_calendar_feeds).where(
             judge_calendar_feeds.c.enabled.is_(True)
         )
-        if judge_id is not None:
-            feed_query = feed_query.where(
-                judge_calendar_feeds.c.judge_id == judge_id
-            )
+        wanted_owner = judge_key(judge_id) if judge_id is not None else None
         feed_rows = [
             row
             for row in await database.fetch_all(feed_query)
-            if str(row["judge_id"]) in judge_keys
+            if judge_key(row["judge_id"]) in judge_keys
+            and (wanted_owner is None or judge_key(row["judge_id"]) == wanted_owner)
             and (judge_id is not None or bool(row["shared_with_province"]))
         ]
         if feed_rows:
@@ -830,11 +832,11 @@ async def _composed_offtime_records(
             )
             by_judge: dict[str, list[dict[str, Any]]] = {}
             for snapshot in snapshots:
-                by_judge.setdefault(str(snapshot["judge_id"]), []).extend(
+                by_judge.setdefault(judge_key(snapshot["judge_id"]), []).extend(
                     _json_list(snapshot["data_json"])
                 )
             for key, group in groups.items():
-                group["feeds"] = by_judge.get(key[1], [])
+                group["feeds"] = by_judge.get(judge_key(key[1]), [])
 
     records = [
         OfftimeRecord(

@@ -18,6 +18,7 @@ pierwszeństwo dopasowania.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -29,11 +30,17 @@ from sqlalchemy import delete, func, select
 from app.calendar_feed_rules import (
     MAX_FEEDS_PER_JUDGE,
     FeedUrlError,
+    judge_key,
     mask_feed_url,
     normalize_feed_url,
 )
 from app.calendar_feed_sync import sync_feed
-from app.db import database, judge_calendar_feeds, judge_feed_offtimes
+from app.db import (
+    database,
+    judge_calendar_feeds,
+    judge_feed_offtimes,
+    silesia_offtimes,
+)
 from app.deps import get_jwt_payload
 
 router = APIRouter(prefix="/calendar/feeds", tags=["Kalendarze sędziego"])
@@ -70,9 +77,50 @@ def _owner(payload: Dict[str, Any]) -> str:
     return judge_id
 
 
-def _public(row: Any) -> Dict[str, Any]:
+def _json_entries(raw: Any) -> List[Dict[str, Any]]:
+    """Lista wpisów z kolumny JSON - także gdy sterownik odda ją NAPISEM."""
+    data = raw
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            return []
+    return [item for item in list(data or []) if isinstance(item, dict)]
+
+
+def _entry_span(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ile wpisów i dokąd sięgają - żeby było widać ZASIĘG planu.
+
+    USOS oddaje pod `upcoming_ical` tylko najbliższe zajęcia, więc samo „125
+    wpisów" nie mówi, czy plan obejmuje przyszły miesiąc, czy kończy się za
+    tydzień. Aplikacja pokazuje ten zakres wprost przy kalendarzu.
+    """
+    starts = sorted(str(item.get("from") or "") for item in entries)
+    ends = sorted(str(item.get("to") or "") for item in entries)
+    return {
+        "count": len(entries),
+        "first_at": starts[0] if starts else None,
+        "last_at": ends[-1] if ends else None,
+    }
+
+
+async def _spans(feed_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not feed_ids:
+        return {}
+    rows = await database.fetch_all(
+        select(judge_feed_offtimes).where(judge_feed_offtimes.c.feed_id.in_(feed_ids))
+    )
+    return {
+        str(row["feed_id"]): _entry_span(_json_entries(row["data_json"]))
+        for row in rows
+    }
+
+
+def _public(row: Any, span: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Kalendarz w postaci, którą wolno pokazać - BEZ pełnego adresu."""
     return {
+        "first_at": (span or {}).get("first_at"),
+        "last_at": (span or {}).get("last_at"),
         "id": str(row["id"]),
         "name": str(row["name"] or ""),
         "url_masked": mask_feed_url(str(row["url"] or "")),
@@ -110,7 +158,8 @@ async def list_feeds(payload: dict = Depends(get_jwt_payload)) -> Dict[str, Any]
         .where(judge_calendar_feeds.c.judge_id == judge_id)
         .order_by(judge_calendar_feeds.c.created_at)
     )
-    return {"feeds": [_public(row) for row in rows]}
+    spans = await _spans([str(row["id"]) for row in rows])
+    return {"feeds": [_public(row, spans.get(str(row["id"]))) for row in rows]}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Dodaj kalendarz")
@@ -157,7 +206,11 @@ async def add_feed(
     # godzin. Nieudane nie cofa dodania - powód zostaje przy kalendarzu.
     row = await _row(feed_id, judge_id)
     result = await sync_feed(row)
-    return {"feed": _public(await _row(feed_id, judge_id)), "sync": result}
+    spans = await _spans([feed_id])
+    return {
+        "feed": _public(await _row(feed_id, judge_id), spans.get(feed_id)),
+        "sync": result,
+    }
 
 
 @router.patch("/{feed_id}", summary="Zmień ustawienia kalendarza")
@@ -196,13 +249,14 @@ async def update_feed(
         )
 
     fresh = await _row(feed_id, judge_id)
-    result = None
+    result: Optional[Dict[str, Any]] = None
     # Nowy adres albo zmieniona nazwa (wchodzi w treść wpisów) = nowe wpisy.
     if url_changed or "name" in values or "color" in values:
         if bool(fresh["enabled"]):
             result = await sync_feed(fresh)
             fresh = await _row(feed_id, judge_id)
-    return {"feed": _public(fresh), "sync": result}
+    spans = await _spans([feed_id])
+    return {"feed": _public(fresh, spans.get(feed_id)), "sync": result}
 
 
 @router.delete(
@@ -223,6 +277,60 @@ async def remove_feed(
     )
 
 
+@router.get("/{feed_id}/preview", summary="Co serwer ma w tym kalendarzu")
+async def preview_feed(
+    feed_id: str = Path(...), payload: dict = Depends(get_jwt_payload)
+) -> Dict[str, Any]:
+    """Diagnostyka: wpisy w snapshocie i to, czy DOJDĄ do kalendarza sędziego.
+
+    Powstało z konkretnej sytuacji: kalendarz pokazywał „125 wpisów", a na
+    siatce nie było ich wcale. Wpisy dokleja się do wierszy kalendarza
+    okręgowego po numerze sędziego, więc gdy numer z tokenu i numer w tamtym
+    wierszu różnią się zapisem (zero wiodące), dopasowanie po cichu nie
+    znajdowało nic. Tu widać oba numery, wynik porównania i próbkę wpisów.
+    """
+    judge_id = _owner(payload)
+    await _row(feed_id, judge_id)
+
+    snapshot = await database.fetch_one(
+        select(judge_feed_offtimes).where(judge_feed_offtimes.c.feed_id == feed_id)
+    )
+    entries = _json_entries(snapshot["data_json"] if snapshot is not None else [])
+    entries.sort(key=lambda item: str(item.get("from") or ""))
+
+    owner_key = judge_key(judge_id)
+    district = await database.fetch_all(select(silesia_offtimes))
+    rows = [
+        {
+            "province": str(row["province"]),
+            "judge_id": str(row["judge_id"]),
+            "matches": judge_key(row["judge_id"]) == owner_key,
+        }
+        for row in district
+        if judge_key(row["judge_id"]) == owner_key
+        or str(row["judge_id"]) == str(judge_id)
+    ]
+
+    return {
+        "owner_judge_id": judge_id,
+        "owner_key": owner_key,
+        "district_rows": rows,
+        # Pusto = wpisy nie mają się do czego dokleić: sędzia nie ma jeszcze
+        # wiersza kalendarza okręgowego w żadnym województwie.
+        "will_show_in_calendar": any(row["matches"] for row in rows),
+        **_entry_span(entries),
+        "sample": [
+            {
+                "from": item.get("from"),
+                "to": item.get("to"),
+                "info": item.get("info"),
+                "location": item.get("location"),
+            }
+            for item in entries[:10]
+        ],
+    }
+
+
 @router.post("/{feed_id}/refresh", summary="Odśwież teraz")
 async def refresh_feed(
     feed_id: str = Path(...), payload: dict = Depends(get_jwt_payload)
@@ -235,4 +343,8 @@ async def refresh_feed(
             detail="Ten kalendarz jest wyłączony - włącz go, żeby pobrać wpisy.",
         )
     result = await sync_feed(row)
-    return {"feed": _public(await _row(feed_id, judge_id)), "sync": result}
+    spans = await _spans([feed_id])
+    return {
+        "feed": _public(await _row(feed_id, judge_id), spans.get(feed_id)),
+        "sync": result,
+    }

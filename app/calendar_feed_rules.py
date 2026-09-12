@@ -107,6 +107,21 @@ def mask_feed_url(url: str) -> str:
     return f"{base} · …{tail}" if tail else base
 
 
+def judge_key(value) -> str:
+    """Numer sędziego sprowadzony do porównywalnej postaci.
+
+    Ten sam sędzia bywa zapisany różnie: „03390" w kalendarzu okręgowym i
+    „3390" w tokenie z logowania (albo odwrotnie), czasem ze spacją. Kalendarz
+    należy do numeru z TOKENU, a doklejamy go do wierszy kalendarza okręgowego,
+    więc porównanie znak w znak potrafiło po cichu nie znaleźć nic - i wpisy z
+    planu zajęć nigdzie się nie pokazywały, mimo że serwer je miał.
+    """
+    text = str(value or "").strip().replace(" ", "")
+    if text.isdigit():
+        return text.lstrip("0") or "0"
+    return text.upper()
+
+
 def feed_due(
     last_sync_at: Optional[datetime],
     *,

@@ -194,15 +194,18 @@ async def load_roster(province: str) -> Roster:
         )
     )
     feed_ids = [str(row["id"]) for row in blocking]
+    feed_entries: dict[str, list] = {}
     if feed_ids:
+        from app.calendar_feed_rules import judge_key
+
         for row in await database.fetch_all(
             select(judge_feed_offtimes).where(
                 judge_feed_offtimes.c.feed_id.in_(feed_ids)
             )
         ):
-            judge_id = _s(row["judge_id"])
-            if judge_id:
-                entries.setdefault(judge_id, []).extend(_json_list(row["data_json"]))
+            key = judge_key(row["judge_id"])
+            if key:
+                feed_entries.setdefault(key, []).extend(_json_list(row["data_json"]))
 
     for row in people:
         judge_id = _s(row["judge_id"])
@@ -219,7 +222,15 @@ async def load_roster(province: str) -> Roster:
             needs_experienced=own.get("needs_experienced", False),
             preferred_days=own.get("preferred_days", ()),
         )
-        offtimes, temp_cities = O.parse_entries(entries.get(judge_id, ()))
+        # Kalendarze dokładamy po ZNORMALIZOWANYM numerze - w rejestrze okręgu i
+        # w tokenie ten sam sędzia bywa zapisany inaczej (zero wiodące).
+        from app.calendar_feed_rules import judge_key as _judge_key
+
+        own_entries = [
+            *entries.get(judge_id, ()),
+            *feed_entries.get(_judge_key(judge_id), ()),
+        ]
+        offtimes, temp_cities = O.parse_entries(own_entries)
         roster.offtimes[judge_id] = offtimes
         roster.cities[judge_id] = temp_cities
 
