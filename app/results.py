@@ -3301,20 +3301,34 @@ def _filter_protocol_events_for_timeline(protocol: List[Dict[str, Any]]) -> List
                 orig_time = extra_raw.get("origTime")
                 penalty_flag = bool(extra_raw.get("penalty", False))
 
-            # Nas interesuje tylko cofnięcie zwykłej bramki, nie ewentualnych karnych
-            if penalty_flag:
-                continue
+            # Cofnięcie bramki z RZUTU KARNEGO zabiera cały rzut.
+            #
+            # Do 12.09.2026 stało tu `if penalty_flag: continue`, czyli karnego
+            # nie ruszaliśmy wcale - a wtedy sędzia cofał bramkę, licznik
+            # karnych schodził do zera (aplikacja odejmuje `total` i `goals`),
+            # ale w przebiegu meczu w protokole PDF dalej stał wiersz „karny -
+            # trafiony" z nieaktualnym wynikiem. Protokół mówił wtedy co innego
+            # niż tabela nad nim.
+            #
+            # Regulaminowo to jest jedno zdarzenie: cofnięta bramka z karnego
+            # znaczy, że rzutu nie było (pomyłka przy stoliku). Gdyby rzut się
+            # odbył, a bramka nie padła, sędzia notuje pudło - i to jest osobny
+            # wpis, którego nikt tu nie rusza.
+            wanted_type = "penaltyKickScored" if penalty_flag else "goal"
 
-            # Szukamy od końca ostatniego pasującego eventu "goal"
+            # Szukamy od końca ostatniego pasującego zdarzenia
             for i in range(len(filtered) - 1, -1, -1):
                 prev = filtered[i]
                 if not isinstance(prev, dict):
                     continue
-                if prev.get("type") != "goal":
+                if prev.get("type") != wanted_type:
                     continue
                 if prev.get("team") != team:
                     continue
-                if prev.get("player") != player:
+                # Numer bywa napisem po jednej stronie i liczbą po drugiej -
+                # porównanie surowych wartości gubiło wtedy dopasowanie i
+                # cofnięta bramka zostawała w przebiegu.
+                if str(prev.get("player")) != str(player):
                     continue
 
                 prev_time = prev.get("time")

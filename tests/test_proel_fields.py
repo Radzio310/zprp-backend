@@ -402,6 +402,45 @@ def test_match_header_stays_role_guarded():
     assert "secretary" not in spec.roles
 
 
+# ─────────────────────── kolory koszulek ───────────────────────
+
+
+def test_jersey_colors_are_in_the_registry():
+    """Kolor koszulki musi mieć własną ścieżkę, bo inaczej ginie.
+
+    Jechał wyłącznie w blobie `matchConfig` - a pole spoza rejestru kasuje
+    pierwszy pełny zapis z drugiego urządzenia, bo serwer nie ma czego nałożyć
+    z powrotem. Tablica wyniku malowała wtedy nazwy drużyn czym innym niż
+    stolik.
+    """
+    for path, key in (
+        ("cfg.hostJerseyColor", "hostJerseyColor"),
+        ("cfg.guestJerseyColor", "guestJerseyColor"),
+    ):
+        spec, _ = parse_path(path)
+        assert spec.name == path, path
+        blob: dict = {"matchConfig": {}}
+        project({path: entry("#101010")}, blob)
+        assert blob["matchConfig"][key] == "#101010", path
+
+
+def test_jersey_colors_are_open_to_the_whole_crew():
+    """Koszulki ustawia się przy stoliku, nie w gronie sędziów.
+
+    `FIELD_REFS` - właściwe dla nagłówka protokołu - odbiłby zapis sekretarzowi
+    i mierzącemu czas. Odmowa byłaby przy tym CICHA: kolor i tak wszedłby do
+    bloba, tylko poza rejestrem, czyli dokładnie tam, skąd znika.
+    """
+    spec, _ = parse_path("cfg.hostJerseyColor")
+    assert {"secretary", "timekeeper"} <= spec.roles
+
+
+def test_jersey_colors_are_writable_in_every_phase():
+    """Zły kolor widać dopiero, gdy obie drużyny wybiegną na boisko."""
+    spec, _ = parse_path("cfg.guestJerseyColor")
+    assert set(spec.phases) == {"pre", "live", "post"}
+
+
 def test_phase_refusal_speaks_polish():
     """Odmowa mówi, kiedy wolno - nie „(faza: live)"."""
     post_only, _ = parse_path("post.spectatorsCount")

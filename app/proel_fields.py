@@ -401,6 +401,21 @@ _CFG_FIELDS = {
     "venueAddress": "venueAddress",
 }
 
+#: Pola konfiguracji, które wypełnia KTOKOLWIEK z obsady — nie tylko sędziowie.
+#:
+#: Kolory koszulek ustala się przy stoliku, razem z resztą ustawień meczu, i robi
+#: to zwykle sekretarz albo mierzący czas. `FIELD_REFS` — właściwe dla nagłówka
+#: protokołu obok — odbiłby im ten zapis, a odmowa byłaby CICHA: kolor i tak
+#: wszedłby do bloba, tylko poza rejestrem, czyli dokładnie w stan, w którym
+#: ginie przy pełnym zapisie z drugiego urządzenia. Tak działo się do tej pory.
+#:
+#: `ALL_PHASES`, bo źle wybrany kolor poprawia się wtedy, kiedy się to zauważy —
+#: a zauważa się po pierwszym gwizdku, gdy obie drużyny wybiegną na boisko.
+_CFG_OPEN_FIELDS = {
+    "hostJerseyColor": "hostJerseyColor",
+    "guestJerseyColor": "guestJerseyColor",
+}
+
 
 def _build_registry() -> List[FieldSpec]:
     specs: List[FieldSpec] = [
@@ -535,6 +550,18 @@ def _build_registry() -> List[FieldSpec]:
                 merge=merge_lww,
                 project=project_cfg_field(cfg_key),
                 skip_if_equals_seed=True,
+            )
+        )
+
+    for key, cfg_key in _CFG_OPEN_FIELDS.items():
+        specs.append(
+            FieldSpec(
+                name=f"cfg.{key}",
+                pattern=re.compile(rf"^cfg\.{re.escape(key)}$"),
+                phases=ALL_PHASES,
+                roles=ALL_ROLES,
+                merge=merge_lww,
+                project=project_cfg_field(cfg_key),
             )
         )
 

@@ -426,6 +426,12 @@ _ROUTE_NAMES: Dict[str, str] = {
     "official": "oficjalnym API",
     "legacy": "drogą awaryjną (formularz na baza.zprp.pl)",
     "mixed": "częściowo oficjalnym API, częściowo formularzem",
+    # Znacznik postawiony NIE przez wysyłkę, tylko przez odczyt: aplikacja nie
+    # miała śladu po zapisie, więc przed zatwierdzeniem meczu zapytała bazę
+    # związku wprost i zastała tam komplet danych. Dziennik musi to rozróżniać,
+    # bo „wysłaliśmy" i „sprawdziliśmy, że jest" odpowiadają na inne pytanie -
+    # przy drugim nie wiadomo, KTO to właściwie wysłał.
+    "proof": "potwierdzone odczytem z bazy ZPRP",
 }
 
 

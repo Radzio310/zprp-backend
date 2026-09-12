@@ -183,9 +183,24 @@ def _require_app_key() -> str:
 
 
 #: Zdanie dla sędziego, gdy ZPRP wyłączył ProEla przy meczu.
+#: To zdanie jest JEDYNĄ rzeczą, która dociera do NIEZAKTUALIZOWANYCH
+#: aplikacji - i dlatego niesie instrukcję, a nie samą diagnozę.
+#:
+#: Nowe wydania włączają przełącznik same (aplikacja, `utils/proelGate.ts`):
+#: serwer nie ma czym, bo żądanie zapisu przychodzi z `hash_sesji`, a
+#: przełącznikiem klika się loginem i hasłem sędziego do baza.zprp.pl, których
+#: w tym żądaniu nie ma i być nie powinno. Starsze wydania pokazują więc
+#: wyłącznie tę treść - i albo powie im ona, gdzie nacisnąć, albo nie powie
+#: nikt. Jedno wdrożenie tutaj naprawia to we wszystkich zainstalowanych
+#: wersjach naraz, bez żadnego builda.
+#:
+#: Kafelek ProEl w szczegółach meczu istnieje od 2.0.2, a arkusz „Włącz ProEl
+#: i wyślij" od 2.0.3a - stąd druga droga w treści, dla wydań starszych.
 PROEL_INACTIVE_MESSAGE = (
-    "Baza ZPRP ma wyłączony dostęp ProEl dla tego meczu - oficjalna droga "
-    "nic nie zapisze, dopóki ktoś go nie włączy."
+    "Baza ZPRP ma wyłączony dostęp ProEl dla tego meczu - dopóki ktoś go nie "
+    "włączy, oficjalna droga nic nie zapisze. Włącz go kafelkiem ProEl "
+    "w szczegółach meczu, a jeśli go tam nie ma - checkboxem ProEl przy meczu "
+    "na liście w bazie ZPRP. Potem spróbuj wysłać jeszcze raz."
 )
 
 
