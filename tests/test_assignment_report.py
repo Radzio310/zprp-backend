@@ -84,7 +84,7 @@ def test_each_judge_has_his_own_line():
     plan, needs = sample()
     report = build_report(plan, needs, judges={"1": JAN, "2": ANNA})
     first = report["judges"][0]
-    assert first["name"] == "KOWALSKI Jan"       # dwa mecze, wiec na gorze
+    assert first["name"] == "KOWALSKI Jan"       # dwa mecze, więc na górze
     assert first["matches"] == 2
     assert first["city"] == "Gliwice"
     assert first["km"]["avg"] == 40.0

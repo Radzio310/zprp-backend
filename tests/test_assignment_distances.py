@@ -42,7 +42,7 @@ def test_missing_lists_only_what_nobody_knows():
     page = book({("bielsko biala", "gliwice"): 78.0})
     pairs = [
         ("Gliwice", "Zabrze"),        # tabela
-        ("Gliwice", "Bielsko-Biała"), # pamiec
+        ("Gliwice", "Bielsko-Biała"), # pamięć
         ("Gliwice", "Gliwice"),       # to samo miasto
         ("Gliwice", "Szczecin"),      # nikt nie wie
         ("Szczecin", "Gliwice"),      # ta sama para odwrotnie

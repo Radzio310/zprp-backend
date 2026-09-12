@@ -1,31 +1,31 @@
 """
-Po zapisie obsady w ZPRP: poprawiamy WLASNA migawke i sami mowimy o zmianie.
+Po zapisie obsady w ZPRP: poprawiamy WŁASNĄ migawkę i sami mówimy o zmianie.
 
-Decyzja uzytkownika z 12.09.2026: „puszczenie obsady przez panel i zapisanie do
-ZPRP powinno kazdorazowo informowac o zmianach ten system na serwerze - ale
-w taki sposob, aby przejscie automatu potem nie zdublowalo takiego
+Decyzja użytkownika z 12.09.2026: „puszczenie obsady przez panel i zapisanie do
+ZPRP powinno każdorazowo informować o zmianach ten system na serwerze - ale
+w taki sposób, aby przejście automatu potem nie zdublowało takiego
 powiadomienia".
 
-Jak to dziala i dlaczego akurat tak:
+Jak to działa i dlaczego akurat tak:
 
-  1. WPISUJEMY NOWA OBSADE DO MIGAWKI (`province_matches.state_json`) i liczymy
-     odcisk od nowa. To jest caly sekret braku duplikatu: monitor powiadamia
-     wtedy, gdy odcisk swiezego pobrania ROZNI SIE od zapamietanego. Skoro
-     zapamietany juz niesie te obsade, monitor nie ma o czym mowic.
-  2. POWIADAMIAMY SAMI, tym samym kanalem (`province_match_events`) i tymi
-     samymi slowami, co monitor - `build_change_events` jest importowane, nie
-     przepisane. Klucz zdarzenia (`event_key`) liczy sie z tych samych czlonow,
-     wiec nawet gdyby monitor jednak sie odezwal, baza odrzuci powtorke.
-  3. PROWADZIMY REJESTR OBSAD (`province_match_judges`): nowy sedzia dostaje
-     wpis i „Dodano nowy mecz", zdjety - wygaszenie wpisu i „Usunieto Twoj
-     mecz". Bez tego monitor uznalby nowego sedziego za odkrycie i ogloszil go
-     drugi raz, a zdjetemu liczylby nieobecnosc przez dwa przebiegi.
+  1. WPISUJEMY NOWĄ OBSADĘ DO MIGAWKI (`province_matches.state_json`) i liczymy
+     odcisk od nowa. To jest cały sekret braku duplikatu: monitor powiadamia
+     wtedy, gdy odcisk świeżego pobrania RÓŻNI SIĘ od zapamiętanego. Skoro
+     zapamiętany już niesie tę obsadę, monitor nie ma o czym mówić.
+  2. POWIADAMIAMY SAMI, tym samym kanałem (`province_match_events`) i tymi
+     samymi słowami, co monitor - `build_change_events` jest importowane, nie
+     przepisane. Klucz zdarzenia (`event_key`) liczy się z tych samych członów,
+     więc nawet gdyby monitor jednak się odezwał, baza odrzuci powtórkę.
+  3. PROWADZIMY REJESTR OBSAD (`province_match_judges`): nowy sędzia dostaje
+     wpis i „Dodano nowy mecz", zdjęty - wygaszenie wpisu i „Usunięto Twój
+     mecz". Bez tego monitor uznałby nowego sędziego za odkrycie i ogłosił go
+     drugi raz, a zdjętemu liczyłby nieobecność przez dwa przebiegi.
 
-Wzorzec: `_sync_slot_holder` z gieldy meczow - ta sama mysl („czynnosc, ktora
-uniewaznila migawke, sama ja poprawia"), tylko dla calej szostki gniazd.
+Wzorzec: `_sync_slot_holder` z giełdy meczów - ta sama myśl („czynność, która
+unieważniła migawkę, sama ja poprawia"), tylko dla całej szóstki gniazd.
 
-⚠ Numer sedziego bierzemy z NASZEJ listy okregu, nie z formularza ZPRP:
-`value` opcji w tamtym formularzu nie jest stalym numerem sedziego.
+⚠ Numer sędziego bierzemy z NASZEJ listy okręgu, nie z formularza ZPRP:
+`value` opcji w tamtym formularzu nie jest stałym numerem sędziego.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from app.assignment_people import name_key
 
 logger = logging.getLogger(__name__)
 
-#: Gniazdo modulu obsadowego -> gniazdo migawki meczu (`CREW_STATE_FIELDS`).
+#: Gniazdo modułu obsadowego -> gniazdo migawki meczu (`CREW_STATE_FIELDS`).
 SLOT_TO_CREW: dict[str, str] = {
     "pierwszy": "sedzia1",
     "drugi": "sedzia2",
@@ -47,7 +47,7 @@ SLOT_TO_CREW: dict[str, str] = {
     "delegat2": "delegat2",
 }
 
-#: Gniazdo formularza ZPRP (`SELECT_TO_SLOT`) -> gniazdo modulu obsadowego.
+#: Gniazdo formularza ZPRP (`SELECT_TO_SLOT`) -> gniazdo modułu obsadowego.
 FORM_TO_SLOT: dict[str, str] = {value: key for key, value in SLOT_TO_CREW.items()}
 
 
@@ -56,7 +56,7 @@ def _s(value: Any) -> str:
 
 
 def crew_ids(state: Mapping[str, Any]) -> set[str]:
-    """Numery sedziow stojacych przy meczu. „0" to puste gniazdo, nie czlowiek."""
+    """Numery sędziów stojących przy meczu. „0" to puste gniazdo, nie człowiek."""
     from app.match_market_rules import crew_judge_ids
 
     return set(crew_judge_ids(state))
@@ -67,11 +67,11 @@ def changes_from_draft(
     people: Mapping[str, Any],
 ) -> dict[str, tuple[str, str]]:
     """
-    Gniazda wyslane do ZPRP przelozone na `{gniazdo: (numer, nazwisko)}`.
+    Gniazda wysłane do ZPRP przełożone na `{gniazdo: (numer, nazwisko)}`.
 
-    `drafted` to gniazda modulu obsadowego z numerem sedziego, `people` to nasza
-    lista okregu (numer -> nazwisko). Nazwisko bierze sie STAD, a nie
-    z formularza ZPRP - patrz nota na gorze pliku.
+    `drafted` to gniazda modułu obsadowego z numerem sędziego, `people` to nasza
+    lista okręgu (numer -> nazwisko). Nazwisko bierze się STĄD, a nie
+    z formularza ZPRP - patrz nota na górze pliku.
     """
     out: dict[str, tuple[str, str]] = {}
     for slot, value in drafted.items():
@@ -85,10 +85,10 @@ def changes_from_draft(
 
 async def numbers_by_name(province: str, names: Iterable[Any]) -> dict[str, str]:
     """
-    Nazwisko -> numer sedziego z listy okregu.
+    Nazwisko -> numer sędziego z listy okręgu.
 
     ⚠ Klucz liczy `name_key`, bo ZPRP podpisuje opcje „NOWAK Jan", a lista
-    okregu bywa prowadzona jako „Jan Nowak" - to ten sam czlowiek.
+    okręgu bywa prowadzona jako „Jan Nowak" - to ten sam człowiek.
     """
     wanted = {name_key(name) for name in names if name_key(name)}
     if not wanted:
@@ -111,8 +111,8 @@ async def numbers_by_name(province: str, names: Iterable[Any]) -> dict[str, str]
     return out
 
 
-#: Pola migawki opisujace hale. Ta sama czworka, na ktorej monitor rozpoznaje
-#: „Zmieniono adres hali" - stad jeden komunikat dla obu drog.
+#: Pola migawki opisujące hale. Ta sama czwórka, na której monitor rozpoznaje
+#: „Zmieniono adres hali" - stąd jeden komunikat dla obu dróg.
 HALL_FIELDS = ("Hala_nazwa", "Hala_miasto", "Hala_ulica", "Hala_numer")
 
 
@@ -122,16 +122,17 @@ async def announce_lineup(
     changes: Mapping[str, tuple[Any, Any]],
     *,
     actor: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> dict:
     """
-    Wpisuje zapisana obsade do migawki i rozsyla powiadomienia.
+    Wpisuje zapisana obsadę do migawki i rozsyła powiadomienia.
 
-    `changes` to `{gniazdo: (numer_sedziego, nazwisko)}` - wylacznie gniazda,
-    ktore faktycznie zmienilismy. Pusty numer znaczy „gniazdo zdjete".
+    `changes` to `{gniazdo: (numer_sedziego, nazwisko)}` - wyłącznie gniazda,
+    które faktycznie zmieniliśmy. Pusty numer znaczy „gniazdo zdjęte".
     """
     from app.match_market_rules import with_slot_holder
 
-    # Numer sedziego, gdy panel go nie podal - po nazwisku z listy okregu.
+    # Numer sędziego, gdy panel go nie podal - po nazwisku z listy okręgu.
     missing = [
         _s(name) for judge_id, name in changes.values() if not _s(judge_id) and _s(name)
     ]
@@ -147,7 +148,7 @@ async def announce_lineup(
             out = with_slot_holder(out, crew_slot, number, _s(full_name))
         return out
 
-    return await announce_change(province, match_id, patch, actor=actor)
+    return await announce_change(province, match_id, patch, actor=actor, run_id=run_id)
 
 
 async def announce_hall(
@@ -160,9 +161,9 @@ async def announce_hall(
     """
     To samo dla HALI: migawka dostaje nowy adres, obsada - powiadomienie.
 
-    Zmiana hali obchodzi sedziow nie mniej niz zmiana skladu - to inny dojazd,
+    Zmiana hali obchodzi sędziów nie mniej niż zmiana składu - to inny dojazd,
     a czasem inne miasto. Monitor ma na to gotowy komunikat („Zmieniono adres
-    hali w meczu X"), wiec i tu nie piszemy wlasnego.
+    hali w meczu X"), więc i tu nie piszemy własnego.
     """
     values = {
         "Hala_nazwa": _s(hall.get("name")),
@@ -175,7 +176,7 @@ async def announce_hall(
         out = dict(state)
         for field, value in values.items():
             # Pustego pola NIE wpisujemy: formularz hal nie zawsze rozbija adres
-            # na ulice i numer, a nadpisanie pustka skasowaloby to, co wiemy.
+            # na ulice i numer, a nadpisanie pustka skasowałoby to, co wiemy.
             if value:
                 out[field] = value
         return out
@@ -189,16 +190,17 @@ async def announce_change(
     patch: Any,
     *,
     actor: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> dict:
     """
-    Rdzen: poprawia migawke meczu i oglasza zmiane tak, jak zrobilby to monitor.
+    Rdzeń: poprawia migawkę meczu i ogłasza zmianę tak, jak zrobiłby to monitor.
 
-    `patch` dostaje obecny stan i oddaje nowy - dzieki temu ta sama droga obsluguje
-    i obsade, i hale, i cokolwiek jeszcze panel bedzie umial zapisac.
+    `patch` dostaje obecny stan i oddaje nowy - dzięki temu ta sama droga obsługuje
+    i obsadę, i hale, i cokolwiek jeszcze panel będzie umiał zapisać.
 
-    Calosc jest oslonieta: zapis w bazie zwiazku JUZ przeszedl, wiec nieudane
-    odswiezenie wlasnej kopii nie ma prawa zamienic udanego zapisu w blad.
-    Monitor doczyta prawde przy najblizszym przebiegu.
+    Całość jest osłonięta: zapis w bazie związku JUŻ przeszedł, więc nieudane
+    odświeżenie własnej kopii nie ma prawa zamienić udanego zapisu w błąd.
+    Monitor doczyta prawdę przy najbliższym przebiegu.
     """
     from sqlalchemy import and_, func, select, update
 
@@ -229,9 +231,9 @@ async def announce_change(
                 province_matches.c.province,
             ).where(
                 and_(
-                    # Pisownia okregu w migawce bywa inna niz ta z panelu
-                    # („ŚLĄSKIE" i „SLASKIE") - szukamy po wszystkich, a dalej
-                    # piszemy juz DOKLADNIE ta, ktora stoi w wierszu.
+                    # Pisownia okręgu w migawce bywa inna niż ta z panelu
+                    # („ŚLĄSKIE" i „ŚLĄSKIE") - szukamy po wszystkich, a dalej
+                    # piszemy już DOKŁADNIE ta, która stoi w wierszu.
                     province_matches.c.province.in_(spellings(province)),
                     province_matches.c.match_id == _s(match_id),
                 )
@@ -275,8 +277,8 @@ async def announce_change(
         season = _s(row["season"])
         details = _match_details(new)
 
-        # Rejestr obsad prowadzimy tak samo, jak monitor - razem z jego wlasnym
-        # „Dodano nowy mecz", zeby tresc powiadomienia byla jedna dla wszystkich.
+        # Rejestr obsad prowadzimy tak samo, jak monitor - razem z jego własnym
+        # „Dodano nowy mecz", żeby treść powiadomienia była jedna dla wszystkich.
         for judge_id in added:
             created += await _upsert_assignment(
                 province, _s(match_id), judge_id, season, True, new
@@ -292,8 +294,8 @@ async def announce_change(
                         province_match_judges.c.judge_id == judge_id,
                     )
                 )
-                # `missing_runs=2` mowi monitorowi „juz policzone" - inaczej
-                # doliczylby swoje dwa przebiegi i ogloszil to samo raz jeszcze.
+                # `missing_runs=2` mówi monitorowi „już policzone" - inaczej
+                # doliczyłby swoje dwa przebiegi i ogłosił to samo raz jeszcze.
                 .values(active=False, missing_runs=2, updated_at=func.now())
             )
             created += await _create_event(
@@ -319,6 +321,11 @@ async def announce_change(
                     previous_state=old,
                 )
 
+        # Historia zmian: tylko wtedy, gdy wiemy, z którego przebiegu pochodzą.
+        # Ręczna poprawka przy meczu nie ma czego cofać przebiegiem.
+        if run_id is not None:
+            await _record_changes(province, match_id, code, old, new, run_id, actor)
+
         result["events"] = created
         logger.info(
             "obsada %s/%s: %s dodanych, %s zdjętych, %s powiadomień (%s)",
@@ -334,3 +341,60 @@ async def announce_change(
         logger.exception("obsada: nie udało się ogłosić zmiany w meczu %s", match_id)
         result["error"] = str(exc)
         return result
+
+
+async def _record_changes(
+    province: str,
+    match_id: str,
+    code: str,
+    old: Mapping[str, Any],
+    new: Mapping[str, Any],
+    run_id: int,
+    actor: Optional[str],
+) -> int:
+    """
+    Zapisuje, CO dokładnie zmienił ten przebieg - z osobą, która stała tam przedtem.
+
+    `before_id` jest tu najważniejszy: bez niego cofnięcie umiałoby tylko
+    zwolnić gniazdo, a nie przywrócić stan sprzed automatu.
+
+    Osłonięte: obsada w bazie związku już stoi. Brak wpisu w historii odbiera
+    możliwość cofnięcia, ale nie unieważnia zapisu - i lepiej powiedzieć o tym
+    w logu, niż wywrócić udaną publikację.
+    """
+    from sqlalchemy import insert
+
+    from app.db import database, province_assignment_changes
+    from app.match_market_rules import CREW_STATE_FIELDS
+
+    rows = []
+    for slot, (id_field, name_field) in CREW_STATE_FIELDS.items():
+        was_id, was_name = _s(old.get(id_field)), _s(old.get(name_field))
+        now_id, now_name = _s(new.get(id_field)), _s(new.get(name_field))
+        if (was_id, was_name) == (now_id, now_name):
+            continue
+        rows.append(
+            {
+                "province": province,
+                "run_id": int(run_id),
+                "match_id": _s(match_id),
+                "match_code": code or None,
+                # Gniazdo zapisujemy w słowniku MODUŁU („pierwszy"), nie
+                # formularza ZPRP („sedzia1") - cofanie mówi tym samym językiem,
+                # co reszta panelu.
+                "slot": FORM_TO_SLOT.get(slot, slot),
+                "judge_id": now_id or None,
+                "judge_name": now_name or None,
+                "before_id": was_id or None,
+                "before_name": was_name or None,
+                "created_by": actor or None,
+            }
+        )
+    if not rows:
+        return 0
+    try:
+        await database.execute_many(insert(province_assignment_changes), rows)
+        return len(rows)
+    except Exception:
+        logger.exception("obsada: nie udało się zapisać historii zmian meczu %s", match_id)
+        return 0

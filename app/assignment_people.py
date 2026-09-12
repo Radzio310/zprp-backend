@@ -1,24 +1,24 @@
 """
-Modul obsadowego - kim jest sedzia i kto moze z kim stanac przy meczu.
+Moduł obsadowego - kim jest sędzia i kto może z kim stanąć przy meczu.
 
-MODUL-LISC: bez bazy i sieci, zeby regula chodzila w tescie.
+MODUŁ-LIŚĆ: bez bazy i sieci, żeby reguła chodziła w teście.
 
-Skad wiemy, kim jest sedzia (decyzje uzytkownika z 11.09.2026):
+Skąd wiemy, kim jest sędzia (decyzje użytkownika z 11.09.2026):
   - UPRAWNIENIA DO SZCZEBLI z formularza obsady ZPRP, litery w nawiasach przy
     nazwisku: (SL) Superliga, (LC) ligi centralne, (PP) Puchar Polski,
-    (MP) Mistrzostwa Polski, (I) (II) (III) ligi, (Mł) mlodziez. „Sedzia
-    ligowy" to (II) i wyzej. „Licencja A" to sedzia CENTRALNY boiskowy, czyli
+    (MP) Mistrzostwa Polski, (I) (II) (III) ligi, (Mł) młodzież. „Sędzia
+    ligowy" to (II) i wyżej. „Licencja A" to sędzia CENTRALNY boiskowy, czyli
     (I), (LC) albo (SL).
-  - ODZNAKI OKREGU, bo baza zwiazku bywa nieaktualna: „Ligowcy" (aktywny
-    ligowiec - to ona rozstrzyga, czy ktos NAPRAWDE dzis sedziuje ligi),
-    „Stolikowi" (preferowani na stoliki okregowe), „Mlodzi" (nigdy dwoje
-    razem w jednej parze, najlepiej doswiadczony z mlodym).
+  - ODZNAKI OKRĘGU, bo baza związku bywa nieaktualna: „Ligowcy" (aktywny
+    ligowiec - to ona rozstrzyga, czy ktoś NAPRAWDE dziś sędziuje ligi),
+    „Stolikowi" (preferowani na stoliki okręgowe), „Młodzi" (nigdy dwoje
+    razem w jednej parze, najlepiej doświadczony z młodym).
 
-Kryteria stolikow ligowych (te same slowa, co uzytkownik):
-  - Superliga i ligi centralne: min. 1 sedzia ligowy albo delegat, druga osoba
-    z licencja A; preferowani dwaj ligowcy albo delegaci,
-  - I i II liga: min. 1 osoba z licencja A,
-  - stoliki okregowe: bez wymogu, ale najpierw sedziowie z odznaka „Stolikowi".
+Kryteria stolików ligowych (te same słowa, co użytkownik):
+  - Superliga i ligi centralne: min. 1 sędzia ligowy albo delegat, druga osoba
+    z licencją A; preferowani dwaj ligowcy albo delegaci,
+  - I i II liga: min. 1 osoba z licencją A,
+  - stoliki okręgowe: bez wymogu, ale najpierw sędziowie z odznaka „Stolikowi".
 """
 
 from __future__ import annotations
@@ -29,18 +29,18 @@ from typing import Any, Iterable, Optional
 
 from app import settlement_rates as R
 
-#: „Sedzia ligowy" to uprawnienie do II ligi i wyzej.
+#: „Sędzia ligowy" to uprawnienie do II ligi i wyżej.
 LEAGUE_LETTERS = frozenset({"II", "I", "LC", "SL"})
-#: „Licencja A" - sedzia centralny boiskowy.
+#: „Licencja A" - sędzia centralny boiskowy.
 CENTRAL_LETTERS = frozenset({"I", "LC", "SL"})
 
-#: Odznaki okregu, po ktorych automat rozpoznaje ludzi.
+#: Odznaki okręgu, po których automat rozpoznaje ludzi.
 BADGE_LEAGUE = "Ligowcy"
 BADGE_TABLE = "Stolikowi"
 BADGE_YOUNG = "Młodzi"
 BADGE_DELEGATE = "Delegaci"
 
-#: Rozgrywki, w ktorych stolik ma wymagania (prefiksy z numeru meczu).
+#: Rozgrywki, w których stolik ma wymagania (prefiksy z numeru meczu).
 SUPERLEAGUE_PREFIXES = frozenset({"SM", "SK", "OSM", "OSK"})
 CENTRAL_LEAGUE_PREFIXES = frozenset({"LCM", "LCK"})
 LEAGUE_TABLE_PREFIXES = frozenset({"IM", "IK", "IIM", "IIK"})
@@ -48,12 +48,12 @@ LEAGUE_TABLE_PREFIXES = frozenset({"IM", "IK", "IIM", "IIK"})
 
 def fold(value: Any) -> str:
     """
-    Napis bez ogonkow i wielkosci liter - do porownywania odznak i liter.
+    Napis bez ogonków i wielkości liter - do porównywania odznak i liter.
 
-    ⚠ „ł" NIE jest „l" z ogonkiem, tylko osobnym znakiem, wiec rozklad NFD go
-    nie tyka - trzeba go podmienic recznie. Bez tego uprawnienie „(Mł)" raz
-    zapisywaloby sie jako „MŁ", raz jako „ML", a odznaka „Młodzi" nie pasowalaby
-    do „Mlodzi". Ta sama poprawka, co w tabeli odleglosci (`_strip_dia`).
+    ⚠ „ł" NIE jest „l" z ogonkiem, tylko osobnym znakiem, więc rozkład NFD go
+    nie tyka - trzeba go podmienić ręcznie. Bez tego uprawnienie „(Mł)" raz
+    zapisywałoby się jako „MŁ", raz jako „ML", a odznaka „Młodzi" nie pasowałaby
+    do „Młodzi". Ta sama poprawka, co w tabeli odległości (`_strip_dia`).
     """
     text = str(value or "").strip().lower().replace("ł", "l")
     text = unicodedata.normalize("NFD", text)
@@ -67,13 +67,13 @@ def letter_key(value: Any) -> str:
 
 def name_key(value: Any) -> str:
     """
-    Klucz nazwiska niezalezny od kolejnosci czlonow.
+    Klucz nazwiska niezależny od kolejności członów.
 
-    ZPRP podpisuje opcje „NOWAK Jan", a lista sedziow okregu bywa prowadzona
-    jako „Jan Nowak" - to ten sam czlowiek i ma miec ten sam klucz. Ta sama
-    mysl, co `names_match` w gieldzie, tylko w postaci klucza, bo uprawnienia
-    z formularza zapisujemy do tabeli, a tabela potrzebuje czegos stalego.
-    Inicjaly („J.") odpadaja - nie odrozniaja nikogo, a psuja porownanie.
+    ZPRP podpisuje opcje „NOWAK Jan", a lista sędziów okręgu bywa prowadzona
+    jako „Jan Nowak" - to ten sam człowiek i ma mieć ten sam klucz. Ta sama
+    myśl, co `names_match` w giełdzie, tylko w postaci klucza, bo uprawnienia
+    z formularza zapisujemy do tabeli, a tabela potrzebuje czegoś stałego.
+    Inicjały („J.") odpadają - nie odróżniają nikogo, a psują porównanie.
     """
     cleaned = "".join(ch if ch.isalnum() else " " for ch in fold(value))
     parts = sorted(part for part in cleaned.split() if len(part) > 1)
@@ -82,21 +82,21 @@ def name_key(value: Any) -> str:
 
 @dataclass
 class Judge:
-    """Sedzia okregu widziany przez automat."""
+    """Sędzia okręgu widziany przez automat."""
 
     judge_id: str
     name: str
     city: str = ""
     #: Litery z formularza ZPRP, np. {"MP", "II", "III", "ML"}.
     letters: frozenset[str] = frozenset()
-    #: Odznaki okregu, znormalizowane przez `fold`.
+    #: Odznaki okręgu, znormalizowane przez `fold`.
     badges: frozenset[str] = frozenset()
-    #: Rola z listy ZPRP: sedzia / delegat / stolikowy.
+    #: Rola z listy ZPRP: sędzia / delegat / stolikowy.
     roles: frozenset[str] = frozenset()
-    #: Ustawienia z modulu obsadowego.
+    #: Ustawienia z modułu obsadowego.
     needs_experienced: bool = False
     preferred_days: frozenset[int] = frozenset()
-    #: Ile meczow ma juz w oknie - do rownego podzialu.
+    #: Ile meczów ma już w oknie - do równego podziału.
     load: int = 0
 
     def has_badge(self, name: str) -> bool:
@@ -107,14 +107,14 @@ class Judge:
 
     @property
     def league(self) -> bool:
-        """Sedzia ligowy: (II) i wyzej ALBO odznaka „Ligowcy"."""
+        """Sędzia ligowy: (II) i wyżej ALBO odznaka „Ligowcy"."""
         return self.has_badge(BADGE_LEAGUE) or any(
             letter_key(letter) in self.letters for letter in LEAGUE_LETTERS
         )
 
     @property
     def central(self) -> bool:
-        """Licencja A: sedzia centralny boiskowy - (I), (LC) albo (SL)."""
+        """Licencja A: sędzia centralny boiskowy - (I), (LC) albo (SL)."""
         return any(letter_key(letter) in self.letters for letter in CENTRAL_LETTERS)
 
     @property
@@ -159,8 +159,8 @@ def table_rule(code: Any) -> dict[str, int]:
     """
     Czego wymaga STOLIK w tych rozgrywkach.
 
-    `league_or_delegate` i `central` to minimalna liczba osob przy stoliku
-    z danym uprawnieniem. Rozgrywki okregowe nie wymagaja niczego.
+    `league_or_delegate` i `central` to minimalna liczba osób przy stoliku
+    z danym uprawnieniem. Rozgrywki okręgowe nie wymagają niczego.
     """
     prefix = R.competition_prefix(code)
     if prefix in SUPERLEAGUE_PREFIXES or prefix in CENTRAL_LEAGUE_PREFIXES:
@@ -171,7 +171,7 @@ def table_rule(code: Any) -> dict[str, int]:
 
 
 def table_pair_ok(people: Iterable[Judge], code: Any) -> tuple[bool, str]:
-    """Czy taki stolik spelnia wymagania szczebla. Zwraca powod odmowy."""
+    """Czy taki stolik spełnia wymagania szczebla. Zwraca powód odmowy."""
     rule = table_rule(code)
     if not rule:
         return True, ""
@@ -192,11 +192,11 @@ def pair_ok(
     blocked: Iterable[tuple[str, str]] = (),
 ) -> tuple[bool, str]:
     """
-    Czy tych dwoje moze stanac razem w jednym meczu.
+    Czy tych dwoje może stanąć razem w jednym meczu.
 
-    Trzy twarde zasady: nie ten sam czlowiek, nie para „nigdy razem", nie dwoje
-    mlodych. Do tego znacznik „wymaga doswiadczonego partnera" - wtedy drugi
-    musi miec licencje A (sedzia centralny boiskowy).
+    Trzy twarde zasady: nie ten sam człowiek, nie para „nigdy razem", nie dwoje
+    młodych. Do tego znacznik „wymaga doświadczonego partnera" - wtedy drugi
+    musi mieć licencję A (sędzia centralny boiskowy).
     """
     if partner is None:
         return True, ""
@@ -216,10 +216,10 @@ def pair_ok(
 
 def prefers_day(judge: Judge, weekday: Optional[int]) -> bool:
     """
-    Czy to jeden z dni, ktore sedzia woli.
+    Czy to jeden z dni, które sędzia woli.
 
-    Brak wskazanych dni znaczy „kazdy dzien pasuje" - inaczej pierwszy obieg
-    automatu omijalby wszystkich, ktorzy nic nie wybrali.
+    Brak wskazanych dni znaczy „każdy dzień pasuje" - inaczej pierwszy obieg
+    automatu omijałby wszystkich, którzy nic nie wybrali.
     """
     if not judge.preferred_days or weekday is None:
         return True
@@ -227,6 +227,6 @@ def prefers_day(judge: Judge, weekday: Optional[int]) -> bool:
 
 
 def is_local(judge: Judge, host_city: Any) -> bool:
-    """Sedzia z miasta gospodarza - unikamy, ale nie zakazujemy."""
+    """Sędzia z miasta gospodarza - unikamy, ale nie zakazujemy."""
     city = fold(host_city)
     return bool(city) and fold(judge.city) == city

@@ -942,6 +942,42 @@ province_assignment_runs = Table(
     Column("applied_count", Integer, nullable=True),
 )
 
+# Co przebieg automatu FAKTYCZNIE zmienił w bazie związku.
+#
+# Bez tego „cofnij" nie ma czego cofać: `province_assignment_runs` trzyma PLAN,
+# a plan to jeszcze nie obsada - człowiek część propozycji odznacza, część
+# zapisów potrafi nie przejść. Tutaj ląduje wyłącznie to, co przeszło, razem
+# z tym, KTO STAŁ W GNIEŹDZIE PRZEDTEM - i to `before_id` jest całą wartością
+# tej tabeli, bo bez niego cofnięcie umiałoby tylko zwolnić gniazdo.
+province_assignment_changes = Table(
+    "province_assignment_changes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("run_id", Integer, nullable=True, index=True),
+    Column("match_id", String, nullable=False, index=True),
+    Column("match_code", String, nullable=True),
+    Column("slot", String, nullable=False),
+    # Kto stanął w gnieździe.
+    Column("judge_id", String, nullable=True),
+    Column("judge_name", String, nullable=True),
+    # Kto stał tam przedtem. Puste = gniazdo było wolne.
+    Column("before_id", String, nullable=True),
+    Column("before_name", String, nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+    # Wypełnione, gdy zmianę cofnięto. Wiersz zostaje - historia ma pokazywać
+    # także to, co zostało odwołane, razem z powodem.
+    Column("undone_at", DateTime(timezone=True), nullable=True),
+    Column("undo_note", String, nullable=True),
+)
+Index(
+    "ix_province_assignment_changes_run",
+    province_assignment_changes.c.province,
+    province_assignment_changes.c.run_id,
+)
+
+
 # Odległości miasto-miasto policzone przez Google - pamięć, żeby nie pytać (i nie
 # płacić) drugi raz. Tabela okręgu (`okreg_distances`) jest zawsze pierwsza.
 city_distances = Table(

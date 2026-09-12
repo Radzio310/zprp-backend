@@ -1,23 +1,23 @@
 """
-Swiat automatu obsady zbudowany z bazy: sedziowie, niedyspozycje, pary, kilometry.
+Świat automatu obsady zbudowany z bazy: sędziowie, niedyspozycje, pary, kilometry.
 
-Tu i tylko tu spotykaja sie tabele z regulami. `assignment_auto` nie wie, ze
-istnieje Postgres, a ten modul nie wie, co to punkty - dzieki temu regule da sie
-sprawdzic testem, a zapytania zoptymalizowac bez dotykania regul.
+Tu i tylko tu spotykają się tabele z regułami. `assignment_auto` nie wie, że
+istnieje Postgres, a ten moduł nie wie, co to punkty - dzięki temu regule da się
+sprawdzić testem, a zapytania zoptymalizować bez dotykania reguł.
 
-Skad co bierzemy:
-  - KTO           `province_judges` (okreg + odznaki panelu),
+Skąd co bierzemy:
+  - KTO           `province_judges` (okręg + odznaki panelu),
   - UPRAWNIENIA   `zprp_judge_grades` po kluczu nazwiska - litery (SL)(LC)(I)…
-                  zbierane przy kazdym otwarciu formularza obsady,
+                  zbierane przy każdym otwarciu formularza obsady,
   - MIASTO        `silesia_offtimes` / `province_central_offtimes` (kalendarz
-                  niesie miasto sedziego), a czasowa zmiana miasta („TEMP_CITY")
+                  niesie miasto sędziego), a czasową zmianą miasta („TEMP_CITY")
                   przestawia je na wskazane dni,
-  - NIEDYSPOZYCJE te same kalendarze, przez `offtime_rules` - ta sama regula,
+  - NIEDYSPOZYCJE te same kalendarze, przez `offtime_rules` - ta sama reguła,
                   co w telefonie,
   - USTAWIENIA    `province_judge_settings`, `_blocks`, `_pauses`, `_pairs`,
-  - OBCIAZENIE    `province_matches` - mecze, ktore sedzia juz ma w zakresie.
+  - OBCIĄŻENIE    `province_matches` - mecze, które sędzia już ma w zakresie.
 
-⚠ `state_json` i kazda inna kolumna JSON potrafi wrocic z bazy SUROWYM NAPISEM
+⚠ `state_json` i każda inna kolumna JSON potrafi wrócić z bazy SUROWYM NAPISEM
 (asyncpg bez kodeka jsonb) - dlatego wszystko idzie przez `state_dict`.
 """
 
@@ -37,9 +37,9 @@ from app.match_market_access import badge_names
 from app.match_market_rules import state_dict
 from app.settlement_province import spellings
 
-# ⚠ `app.db` laczy sie z Postgresem JUZ PRZY IMPORCIE, wiec wchodzi do srodka
-# funkcji, ktore go potrzebuja. Dzieki temu reguly z tego modulu - `Roster`,
-# `need_from_state`, `build_context` - chodza w tescie bez bazy.
+# ⚠ `app.db` łączy się z Postgresem JUŻ PRZY IMPORCIE, więc wchodzi do środka
+# funkcji, które go potrzebują. Dzięki temu reguły z tego modułu - `Roster`,
+# `need_from_state`, `build_context` - chodzą w teście bez bazy.
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def _s(value: Any) -> str:
 
 
 def _json_list(value: Any) -> list:
-    """Kolumna JSON do listy - takze wtedy, gdy wrocila napisem."""
+    """Kolumna JSON do listy - także wtedy, gdy wróciła napisem."""
     if isinstance(value, (bytes, bytearray)):
         try:
             value = value.decode("utf-8")
@@ -68,7 +68,7 @@ def _json_list(value: Any) -> list:
 
 
 class Roster:
-    """Sedziowie okregu razem z tym, czego automat o nich nie policzy sam."""
+    """Sędziowie okręgu razem z tym, czego automat o nich nie policzy sam."""
 
     __slots__ = ("judges", "offtimes", "cities", "pauses", "pairs", "blocks", "settings", "grades")
 
@@ -103,7 +103,7 @@ class Roster:
 
 
 async def load_roster(province: str) -> Roster:
-    """Jedno pobranie na przebieg - potem juz tylko odczyt z pamieci."""
+    """Jedno pobranie na przebieg - potem już tylko odczyt z pamięci."""
     from sqlalchemy import and_, select
 
     from app.db import (
@@ -145,8 +145,8 @@ async def load_roster(province: str) -> Roster:
     }
     roster.settings = settings
 
-    # Kalendarze: okregowy i centralny. Miasto bierzemy z tego, ktory je ma -
-    # wpis centralny bywa swiezszy, a okregowy pelniejszy.
+    # Kalendarze: okręgowy i centralny. Miasto bierzemy z tego, który je ma -
+    # wpis centralny bywa świeższy, a okręgowy pełniejszy.
     cities: dict[str, str] = {}
     entries: dict[str, list] = {}
     for table in (silesia_offtimes, province_central_offtimes):
@@ -185,7 +185,7 @@ async def load_roster(province: str) -> Roster:
     for row in await database.fetch_all(
         select(province_judge_pauses).where(province_judge_pauses.c.province.in_(names))
     ):
-        # Przerwy starsze niz tydzien nie maja po co wisiec - patrz `prune_pauses`.
+        # Przerwy starsze niż tydzień nie mają po co wisieć - patrz `prune_pauses`.
         if row["date_to"] and row["date_to"] < today - timedelta(days=7):
             continue
         roster.pauses.setdefault(_s(row["judge_id"]), []).append(
@@ -200,8 +200,8 @@ async def load_roster(province: str) -> Roster:
             roster.blocks.add((left, right))
             roster.blocks.add((right, left))
 
-    # Pary: wlasna lista okregu wygrywa, lista ZPRP uzupelnia braki (decyzja
-    # uzytkownika z 11.09.2026). Para jest obustronna, wiec zapisujemy ja w obie.
+    # Pary: własna lista okręgu wygrywa, lista ZPRP uzupełnia braki (decyzja
+    # użytkownika z 11.09.2026). Para jest obustronna, więc zapisujemy ja w obie.
     for source in ("zprp", "own"):
         for row in await database.fetch_all(
             select(province_judge_pairs).where(
@@ -220,7 +220,7 @@ async def load_roster(province: str) -> Roster:
 
 
 async def manual_match_ids(province: str) -> set[str]:
-    """Mecze ukladane recznie - automat ich nie rusza."""
+    """Mecze układane ręcznie - automat ich nie rusza."""
     from sqlalchemy import select
 
     from app.db import database, province_match_manual
@@ -243,10 +243,10 @@ def need_from_state(
     slots: Optional[Iterable[str]] = None,
 ) -> MatchNeed:
     """
-    Jeden mecz przelozony na „czego temu meczowi brakuje".
+    Jeden mecz przełożony na „czego temu meczowi brakuje".
 
-    Obsadzamy WYLACZNIE puste gniazda: kto juz stoi, zostaje. `slots` zawezaja
-    to jeszcze bardziej - obsadowy moze poprosic o same stoliki albo o jedno
+    Obsadzamy WYŁĄCZNIE puste gniazda: kto już stoi, zostaje. `slots` zawężają
+    to jeszcze bardziej - obsadowy może poprosić o same stoliki albo o jedno
     gniazdo w jednym meczu.
     """
     wanted = {str(item).strip() for item in slots} if slots is not None else None
@@ -271,7 +271,7 @@ def need_from_state(
                 taken.append(known or make_judge(person.get("number"), person.get("name")))
                 continue
             if person and _s(person.get("name")):
-                # Ktos stoi, ale bez numeru - i tak nie ma tu wolnego miejsca.
+                # Ktoś stoi, ale bez numeru - i tak nie ma tu wolnego miejsca.
                 taken.append(make_judge("", person.get("name")))
                 continue
             if wanted is None or slot in wanted:
@@ -302,10 +302,10 @@ async def load_busy(
     date_to: date,
 ) -> tuple[dict[str, list[BusyMatch]], dict[str, int]]:
     """
-    Mecze, ktore sedziowie JUZ maja w zakresie: kolizje dnia i rowny podzial.
+    Mecze, które sędziowie JUŻ mają w zakresie: kolizje dnia i równy podział.
 
-    Jedno zapytanie o caly zakres zamiast pytania na sedziego - okreg ma ich
-    dwustu, a mecze i tak czytamy w calosci.
+    Jedno zapytanie o cały zakres zamiast pytania na sędziego - okręg ma ich
+    dwustu, a mecze i tak czytamy w całości.
     """
     from sqlalchemy import and_, select
 
@@ -356,7 +356,7 @@ def build_context(
     load: Mapping[str, int] | None = None,
     only_judges: Optional[Iterable[str]] = None,
 ) -> Context:
-    """Swiat gotowy do podania automatowi."""
+    """Świat gotowy do podania automatowi."""
     people = dict(roster.judges)
     if only_judges is not None:
         wanted = {str(item).strip() for item in only_judges if str(item).strip()}
@@ -375,7 +375,7 @@ def build_context(
 
 
 def distance_pairs(needs: Sequence[MatchNeed], roster: Roster) -> list[tuple[str, str]]:
-    """Wszystkie kombinacje miasto sedziego - miasto hali z tego przebiegu."""
+    """Wszystkie kombinacje miasto sędziego - miasto hali z tego przebiegu."""
     halls = {need.host_city for need in needs if need.host_city}
     cities: set[str] = set()
     for judge in roster.judges.values():

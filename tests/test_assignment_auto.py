@@ -3,7 +3,7 @@ from datetime import datetime
 from app.assignment_auto import BusyMatch, Context, MatchNeed, build_plan, can_make_both
 from app.assignment_people import fold, make_judge
 
-# Maly swiat: cztery miasta i znane odleglosci miedzy nimi.
+# Maly świat: cztery miasta i znane odległości miedzy nimi.
 KM = {
     ("gliwice", "zabrze"): 12,
     ("gliwice", "katowice"): 28,
@@ -70,7 +70,7 @@ def test_closest_available_wins():
 
 
 def test_local_referee_is_the_last_resort():
-    # Gospodarz gra w Katowicach, wiec Pawel jest miejscowy - wchodzi Anna z Zabrza.
+    # Gospodarz gra w Katowicach, więc Pawel jest miejscowy - wchodzi Anna z Zabrza.
     plan = build_plan([match(city="Katowice", field=1)], world([ANNA, PAWEL]))
     assert names(plan) == ["NOWAK Anna"]
     # Gdy nie ma nikogo innego, miejscowy jednak wchodzi i automat to pisze.
@@ -108,7 +108,7 @@ def test_judge_who_needs_an_experienced_partner_gets_one():
 
 def test_preferred_days_win_in_the_first_round():
     picky = make_judge("8", "PIĄTKOWY Piotr", city="Katowice", letters=["II"], preferred_days=[4])
-    # Mecz wypada w poniedzialek, wiec Piotr wchodzi dopiero w drugim obiegu.
+    # Mecz wypada w poniedzialek, więc Piotr wchodzi dopiero w drugim obiegu.
     plan = build_plan([match(city="Katowice", field=1)], world([picky, ANNA]))
     assert names(plan) == ["NOWAK Anna"]
     # Sam Piotr: pierwszy obieg go omija, drugi bierze i to zapisuje.
@@ -149,7 +149,7 @@ def test_same_day_match_with_time_to_spare_is_allowed_as_a_last_resort():
 
 
 def test_work_is_shared_between_matches():
-    # Dwa mecze w Gliwicach w rozne dni: Anna jest blizej, ale nie bierze obu.
+    # Dwa mecze w Gliwicach w różne dni: Anna jest blizej, ale nie bierze obu.
     first = match(match_id="1", code="S/JmM/1", city="Gliwice", when="2026-10-05T18:00", field=1)
     second = match(match_id="2", code="S/JmM/2", city="Gliwice", when="2026-10-12T18:00", field=1)
     plan = build_plan([first, second], world([PAWEL, ANNA]))
@@ -176,3 +176,29 @@ def test_travel_feasibility_between_two_matches():
     assert not can_make_both(at_ten, datetime(2026, 10, 5, 12, 0), 60)
     # Bez terminu nie wiemy nic i nie blokujemy.
     assert can_make_both(None, at_six, 10)
+
+
+def test_a_match_without_a_date_can_still_be_filled():
+    """
+    Mecz bez terminu obsadza się, ale bez sprawdzania czasu.
+
+    Bez godziny nie ma jak spytać o niedyspozycję ani o kolizję z innym meczem
+    tego dnia - i to jest ŚWIADOMA zgoda, nie przeoczenie. Automat bierze takie
+    mecze wyłącznie na wyraźne życzenie (`include_undated`), żeby dało się
+    zobaczyć, kto w ogóle wchodzi w rachubę.
+    """
+    busy = {"3": [BusyMatch(moment=datetime(2026, 10, 5, 17, 0), city="Bielsko-Biała", match_id="x")]}
+    ctx = world([PAWEL, ANNA], busy=busy)
+    plan = build_plan([match(city="Zabrze", when=None, field=2)], ctx)
+    assert len(plan.proposals) == 2
+    assert not plan.gaps
+    # Termin nieznany, więc mecz tego samego dnia nikogo nie wyklucza.
+    assert set(names(plan)) == {"NOWAK Anna", "ZIELIŃSKI Paweł"}
+
+
+def test_preferred_days_do_not_block_a_match_without_a_date():
+    picky = make_judge("8", "PIĄTKOWY Piotr", city="Katowice", letters=["II"], preferred_days=[4])
+    plan = build_plan([match(city="Gliwice", when=None, field=1)], world([picky]))
+    assert names(plan) == ["PIĄTKOWY Piotr"]
+    # Skoro nie wiadomo, w jaki dzień gra, pierwszy obieg go nie omija.
+    assert plan.proposals[0].round_no == 1

@@ -1,19 +1,19 @@
 """
-Uprawnienia sedziow do szczebli - zbierane z formularza obsady ZPRP.
+Uprawnienia sędziów do szczebli - zbierane z formularza obsady ZPRP.
 
-Litery w nawiasach przy nazwisku na liscie wyboru sedziego to jedyne miejsce,
-w ktorym baza zwiazku mowi nam, kto ma jakie uprawnienia: (SL) Superliga,
+Litery w nawiasach przy nazwisku na liście wyboru sędziego to jedyne miejsce,
+w którym baza związku mówi nam, kto ma jakie uprawnienia: (SL) Superliga,
 (LC) ligi centralne, (PP) Puchar Polski, (MP) Mistrzostwa Polski, (I) (II) (III)
-ligi, (Mł) mlodziez. Automat obsady bez nich nie odrozni stolika ligowego od
-okregowego - a osobnej listy uprawnien ZPRP nie wystawia.
+ligi, (Mł) młodzież. Automat obsady bez nich nie odróżni stolika ligowego od
+okręgowego - a osobnej listy uprawnień ZPRP nie wystawia.
 
-Zbieramy je WIEC PRZY OKAZJI: za kazdym razem, gdy panel otwiera formularz
-meczu, zapamietujemy to, co w nim stalo. Nic nie kasujemy - brak kogos na
-JEDNEJ liscie (filtr potrafi ja przyciac) nie znaczy, ze stracil uprawnienia.
+Zbieramy je WIĘC PRZY OKAZJI: za każdym razem, gdy panel otwiera formularz
+meczu, zapamiętujemy to, co w nim stało. Nic nie kasujemy - brak kogoś na
+JEDNEJ liście (filtr potrafi ją przyciąć) nie znaczy, że stracił uprawnienia.
 
 ⚠ Kluczem jest NAZWISKO, nie numer: `value` opcji w tym formularzu nie jest
-stalym numerem sedziego (ZPRP przenumerowuje opcje zaleznie od filtra). Klucz
-liczy `name_key`, wiec „NOWAK Jan" i „Jan Nowak" trafiaja w to samo miejsce.
+stałym numerem sędziego (ZPRP przenumerowuje opcje zależnie od filtra). Klucz
+liczy `name_key`, więc „NOWAK Jan" i „Jan Nowak" trafiają w to samo miejsce.
 """
 
 from __future__ import annotations
@@ -25,21 +25,21 @@ from app.assignment_people import letter_key, name_key
 
 logger = logging.getLogger(__name__)
 
-#: Ile formularzy otwiera jednorazowe uzupelnienie. Jeden formularz oddaje CALA
-#: liste sedziow, ktorych konto moze obsadzic na tym szczeblu - kilka roznych
-#: szczebli wystarczy, zeby tabela uprawnien przestala byc pusta.
+#: Ile formularzy otwiera jednorazowe uzupełnienie. Jeden formularz oddaje CAŁA
+#: listę sędziów, których konto może obsadzić na tym szczeblu - kilka różnych
+#: szczebli wystarczy, żeby tabela uprawnień przestała być pusta.
 BACKFILL_FORMS = 6
 
-#: Budzet czasu na cale uzupelnienie. Odpala sie wewnatrz zadania, na ktore
-#: czeka czlowiek (pierwszy przebieg automatu), wiec nie moze wisiec bez konca:
-#: gdy ZPRP zwalnia, konczymy tym, co zdazylismy zebrac. Reszta doczyta sie
-#: przy otwieraniu meczow w panelu.
+#: Budżet czasu na całe uzupełnienie. Odpala się wewnątrz zadania, na które
+#: czeka człowiek (pierwszy przebieg automatu), więc nie może wisieć bez końca:
+#: gdy ZPRP zwalnia, kończymy tym, co zdążyliśmy zebrać. Reszta doczyta się
+#: przy otwieraniu meczów w panelu.
 BACKFILL_BUDGET_SECONDS = 40.0
-#: Limit na POJEDYNCZE zadanie - jeden zawieszony formularz nie zjada calosci.
+#: Limit na POJEDYNCZE zadanie - jeden zawieszony formularz nie zjada całości.
 BACKFILL_TIMEOUT = 20.0
 
-#: Litery, ktore cokolwiek znacza dla automatu. Reszta („[MECZ]", smieci
-#: z formatowania) nie ma po co zajmowac miejsca w tabeli.
+#: Litery, które cokolwiek znaczą dla automatu. Reszta („[MECZ]", śmieci
+#: z formatowania) nie ma po co zajmować miejsca w tabeli.
 KNOWN_LETTERS = frozenset(
     letter_key(item) for item in ("SL", "LC", "PP", "MP", "I", "II", "III", "Mł")
 )
@@ -49,8 +49,8 @@ def options_grades(parsed: Mapping[str, Any]) -> dict[str, tuple[str, list[str]]
     """
     Sparsowany formularz -> `{klucz nazwiska: (nazwisko, litery)}`.
 
-    Ta sama osoba stoi w kilku gniazdach naraz, wiec litery z nich SUMUJEMY:
-    lista dla stolika bywa przyciagnieta filtrem i pokazuje mniej niz boiskowa.
+    Ta sama osoba stoi w kilku gniazdach naraz, więc litery z nich SUMUJEMY:
+    lista dla stolika bywa przyciągnięta filtrem i pokazuje mniej niż boiskowa.
     """
     out: dict[str, tuple[str, set[str]]] = {}
     slots = parsed.get("slots") if isinstance(parsed, Mapping) else None
@@ -72,11 +72,11 @@ def options_grades(parsed: Mapping[str, Any]) -> dict[str, tuple[str, list[str]]
 
 async def remember_grades(parsed: Mapping[str, Any]) -> int:
     """
-    Zapisuje zebrane uprawnienia. Oddaje, ilu ludzi dotyczyl zapis.
+    Zapisuje zebrane uprawnienia. Oddaje, ilu ludzi dotyczył zapis.
 
-    Osloniete: to czynnosc uboczna przy otwieraniu formularza. Gdyby zapis
-    padl, obsadowy ma zobaczyc formularz, a nie blad - automat przy nastepnym
-    otwarciu dowie sie tego samego.
+    Osłonięte: to czynność uboczna przy otwieraniu formularza. Gdyby zapis
+    padł, obsadowy ma zobaczyć formularz, a nie błąd - automat przy następnym
+    otwarciu dowie się tego samego.
     """
     grades = options_grades(parsed)
     if not grades:
@@ -106,20 +106,20 @@ async def remember_grades(parsed: Mapping[str, Any]) -> int:
 
 async def backfill_grades(province: str, *, limit: int = BACKFILL_FORMS) -> dict:
     """
-    RAZ na okreg: otwieramy kilka formularzy obsady i zapisujemy litery.
+    RAZ na okręg: otwieramy kilka formularzy obsady i zapisujemy litery.
 
-    Po co: uprawnienia zbieraja sie przy okazji, gdy obsadowy otwiera mecz -
-    wiec zaraz po wdrozeniu tabela jest PUSTA, a automat nie odrozni wtedy
-    stolika ligowego od okregowego (`table_rule` patrzy na litery). Zamiast
-    kazac czlowiekowi klikac po meczach, robimy to sami, kontem monitora.
+    Po co: uprawnienia zbierają się przy okazji, gdy obsadowy otwiera mecz -
+    więc zaraz po wdrożeniu tabela jest PUSTA, a automat nie odróżni wtedy
+    stolika ligowego od okręgowego (`table_rule` patrzy na litery). Zamiast
+    kazać człowiekowi klikać po meczach, robimy to sami, kontem monitora.
 
-    Wybieramy mecze z ROZNYCH rozgrywek, bo lista opcji w formularzu zalezy od
-    szczebla: jeden formularz II ligi i jeden okregowy daja razem wiecej niz
-    szesc formularzy tej samej rozgrywki.
+    Wybieramy mecze z RÓŻNYCH rozgrywek, bo lista opcji w formularzu zależy od
+    szczebla: jeden formularz II ligi i jeden okręgowy dają razem więcej niż
+    sześć formularzy tej samej rozgrywki.
 
-    Slad w `app_migrations` sprawia, ze to sie nie powtarza - takze wtedy, gdy
-    Railway wstanie dziesiec razy albo gdy automat puszcza dwoch ludzi naraz.
-    Brak konta monitora NIE zajmuje sladu: konto moze dojsc jutro.
+    Ślad w `app_migrations` sprawia, że to się nie powtarza - także wtedy, gdy
+    Railway wstanie dziesięć razy albo gdy automat puszcza dwóch ludzi naraz.
+    Brak konta monitora NIE zajmuje śladu: konto może dojść jutro.
     """
     from app.one_time import claim_once
     from app.zprp_accounts import credentials_for
@@ -134,8 +134,8 @@ async def backfill_grades(province: str, *, limit: int = BACKFILL_FORMS) -> dict
         out["reason"] = "już wykonane"
         return out
 
-    # ⚠ `app.db` laczy sie z Postgresem przy imporcie, wiec wchodzi dopiero tutaj,
-    # PO bramkach - inaczej nawet „nie ma czego robic" wymagaloby bazy.
+    # ⚠ `app.db` łączy się z Postgresem przy imporcie, więc wchodzi dopiero tutaj,
+    # PO bramkach - inaczej nawet „nie ma czego robić" wymagałoby bazy.
     from sqlalchemy import and_, select
 
     from app.db import database, province_matches
@@ -157,7 +157,7 @@ async def backfill_grades(province: str, *, limit: int = BACKFILL_FORMS) -> dict
         .limit(600)
     )
 
-    # Po jednym meczu z rozgrywek - patrz nota wyzej.
+    # Po jednym meczu z rozgrywek - patrz nota wyżej.
     picked: dict[str, str] = {}
     for row in rows:
         code = str(row["match_code"] or "").strip()
@@ -228,9 +228,9 @@ async def backfill_grades(province: str, *, limit: int = BACKFILL_FORMS) -> dict
         )
         return out
     except Exception as exc:
-        # Slad juz zajety - i tak ma byc. Uprawnienia i tak doczytaja sie przy
-        # pierwszym meczu otwartym w panelu, a automat dziala bez nich, tylko
-        # ostrozniej. Powtarzanie logowania przy kazdym przebiegu byloby gorsze.
+        # Ślad już zajęty - i tak ma być. Uprawnienia i tak doczytają się przy
+        # pierwszym meczu otwartym w panelu, a automat działa bez nich, tylko
+        # ostrożniej. Powtarzanie logowania przy każdym przebiegu byłoby gorsze.
         logger.exception("obsada: jednorazowe uzupełnienie uprawnień nie doszło do skutku")
         out["reason"] = str(exc)
         return out

@@ -1,17 +1,17 @@
 """
-Raport z przebiegu automatu - to, co obsadowy ma zobaczyc po nacisnieciu guzika.
+Raport z przebiegu automatu - to, co obsadowy ma zobaczyć po naciśnięciu guzika.
 
-MODUL-LISC: bez bazy i sieci. Dostaje gotowy plan i mecze, oddaje slownik, ktory
+MODUŁ-LIŚĆ: bez bazy i sieci. Dostaje gotowy plan i mecze, oddaje słownik, który
 tak samo dobrze wchodzi do odpowiedzi HTTP, jak do szablonu PDF.
 
-Uzytkownik poprosil o trzy rzeczy wprost: KTO ile ma meczow w zakresie, oraz
-SREDNI, NAJWIEKSZY i NAJMNIEJSZY przejazd. Reszta jest po to, zeby dalo sie
-zobaczyc, czy plan jest dobry: ile gniazd zostalo pustych i dlaczego, jak
-rozklada sie obciazenie i ile meczow dostala kazda rozgrywka.
+Użytkownik poprosił o trzy rzeczy wprost: KTO ile ma meczów w zakresie, oraz
+ŚREDNI, NAJWIĘKSZY i NAJMNIEJSZY przejazd. Reszta jest po to, żeby dało się
+zobaczyć, czy plan jest dobry: ile gniazd zostało pustych i dlaczego, jak
+rozkłada się obciążenie i ile meczów dostała każda rozgrywka.
 
-⚠ Kilometry liczymy W JEDNA STRONE - tak, jak podaje je tabela odleglosci.
-Rozliczenia mnoza je przez dwa (`R.ROUND_TRIP`), bo placa za droge tam i z
-powrotem; tutaj chodzi o to, jak daleko sedzia ma na mecz.
+⚠ Kilometry liczymy W JEDNA STRONĘ - tak, jak podaje je tabela odległości.
+Rozliczenia mnożą je przez dwa (`R.ROUND_TRIP`), bo płacą za drogę tam i z
+powrotem; tutaj chodzi o to, jak daleko sędzia ma na mecz.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from app.assignment_auto import Gap, MatchNeed, Plan, Proposal
 from app.assignment_people import Judge
 
-#: Podpisy gniazd dla czlowieka - te same slowa, co w panelu.
+#: Podpisy gniazd dla człowieka - te same słowa, co w panelu.
 SLOT_LABELS: dict[str, str] = {
     "pierwszy": "sędzia I",
     "drugi": "sędzia II",
@@ -43,11 +43,11 @@ def _round(value: Optional[float], places: int = 1) -> Optional[float]:
 
 def why_without_km(reasons: Iterable[Any]) -> list[str]:
     """
-    Uzasadnienie BEZ samej odleglosci.
+    Uzasadnienie BEZ samej odległości.
 
-    Kilometry stoja w planie osobno (znaczek „12 km" przy nazwisku), wiec
-    powtorzone w uzasadnieniu czytaja sie jak zacinajaca sie plyta: „12 km ·
-    dzien preferowany 12 km". Lista `reasons` zostaje pelna - to z niej zyje
+    Kilometry stoją w planie osobno (znaczek „12 km" przy nazwisku), więc
+    powtórzone w uzasadnieniu czytają się jak zacinająca się płyta: „12 km ·
+    dzień preferowany 12 km". Lista `reasons` zostaje pełna - to z niej żyje
     tekst raportu.
     """
     out: list[str] = []
@@ -63,7 +63,7 @@ def why_without_km(reasons: Iterable[Any]) -> list[str]:
 
 
 def _spread(values: Sequence[float]) -> dict:
-    """Suma, srednia, najwiekszy i najmniejszy - albo same puste pola."""
+    """Suma, średnia, największy i najmniejszy - albo same puste pola."""
     if not values:
         return {"total": 0.0, "avg": None, "max": None, "min": None, "count": 0}
     return {
@@ -102,9 +102,9 @@ def build_report(
     """
     Liczby z jednego przebiegu automatu.
 
-    `load_before` to mecze, ktore sedzia MIAL juz w zakresie przed przebiegiem -
-    bez tego „rowny podzial" wygladalby na rowny tylko w obrebie nowych obsad,
-    a sedzia z pieciu meczami stalby obok tego z zerem jako rowni.
+    `load_before` to mecze, które sędzia MIAŁ już w zakresie przed przebiegiem -
+    bez tego „równy podział" wyglądałby na równy tylko w obrębie nowych obsad,
+    a sędzia z pięciu meczami stałby obok tego z zerem jako równi.
     """
     people = dict(judges or {})
     before = dict(load_before or {})
@@ -140,7 +140,7 @@ def build_report(
                 "total": int(line.get("before", 0)) + line["matches"],
             }
         )
-    # Najpierw ci z najwieksza liczba meczow - tam najlatwiej zobaczyc przechyl.
+    # Najpierw ci z największa liczba meczów - tam najłatwiej zobaczyć przechył.
     judge_rows.sort(key=lambda row: (-row["total"], -row["matches"], row["name"]))
 
     all_km = [float(item.km) for item in plan.proposals if item.km is not None]

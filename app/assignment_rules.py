@@ -1,18 +1,18 @@
 """
-Modul obsadowego - czego mecz potrzebuje i czego mu brakuje.
+Moduł obsadowego - czego mecz potrzebuje i czego mu brakuje.
 
-MODUL-LISC: bez bazy i sieci, zeby regula chodzila w tescie.
+MODUŁ-LIŚĆ: bez bazy i sieci, żeby reguła chodziła w teście.
 
-Decyzje uzytkownika z 11.09.2026 (Slask, ale regula jest ogolna):
-  - DWOCH sedziow boiskowych wszedzie od Mlodzika w gore; Mlodzik mlodszy
-    i Dzieci moga miec jednego,
-  - DWOCH stolikowych tak samo, ale JEDEN stolikowy to nie blad: klub czesto
-    daje swojego, wiec brak drugiego jest tylko lekka roznica, a nie dziura,
-  - DELEGATA na meczach okregowych nie ma nigdy, na II lidze zdarza sie bardzo
-    rzadko - nigdy nie liczy sie jako brak, pokazujemy go tylko, gdy jest.
+Decyzje użytkownika z 11.09.2026 (Śląsk, ale reguła jest ogólna):
+  - DWÓCH sędziów boiskowych wszędzie od Młodzika w górę; Młodzik młodszy
+    i Dzieci mogą mieć jednego,
+  - DWÓCH stolikowych tak samo, ale JEDEN stolikowy to nie błąd: klub często
+    daje swojego, więc brak drugiego jest tylko lekka różnica, a nie dziura,
+  - DELEGATA na meczach okręgowych nie ma nigdy, na II lidze zdarza się bardzo
+    rzadko - nigdy nie liczy się jako brak, pokazujemy go tylko, gdy jest.
 
-Stad trzy rozne stany, nie dwa: „dziura" (brakuje kogos, kogo musimy wystawic),
-„lekka roznica" (jeden stolikowy zamiast dwoch) i „komplet".
+Stąd trzy różne stany, nie dwa: „dziura" (brakuje kogoś, kogo musimy wystawić),
+„lekka różnica" (jeden stolikowy zamiast dwóch) i „komplet".
 """
 
 from __future__ import annotations
@@ -21,13 +21,13 @@ from typing import Any, Iterable, Mapping, Optional
 
 from app import settlement_rates as R
 
-#: Gniazda obsady w kolejnosci, w jakiej pokazuje je formularz ZPRP.
+#: Gniazda obsady w kolejności, w jakiej pokazuje je formularz ZPRP.
 FIELD_SLOTS = ("pierwszy", "drugi")
 TABLE_SLOTS = ("sekretarz", "czas")
 DELEGATE_SLOTS = ("delegat", "delegat2")
 SLOTS = FIELD_SLOTS + TABLE_SLOTS + DELEGATE_SLOTS
 
-#: Kategorie, w ktorych wystarczy jeden boiskowy i jeden stolikowy.
+#: Kategorie, w których wystarczy jeden boiskowy i jeden stolikowy.
 SMALL_PREFIXES = frozenset({"DZM", "DZK", "MLM1213", "MLK1213"})
 
 #: Stany gniazda i meczu.
@@ -41,18 +41,18 @@ def _s(value: Any) -> str:
 
 
 def crew_needs(code: Any) -> dict[str, int]:
-    """Ilu ludzi ma stanac przy tym meczu: boiskowi i stolik."""
+    """Ilu ludzi ma stanąć przy tym meczu: boiskowi i stolik."""
     small = R.competition_prefix(code) in SMALL_PREFIXES
     return {"field": 1 if small else 2, "table": 1 if small else 2}
 
 
 def slot_person(state: Mapping[str, Any], slot: str) -> Optional[dict[str, str]]:
     """
-    Kto stoi w gniezdzie: numer i nazwisko, albo None.
+    Kto stoi w gnieździe: numer i nazwisko, albo None.
 
-    ⚠ „0" to PUSTE GNIAZDO, nie sedzia - tak ZPRP zapisuje zdjeta obsade.
-    Nazwisko bez numeru tez jest czlowiekiem: terminarz podaje same nazwiska,
-    numery dochodza dopiero z publicznego API.
+    ⚠ „0" to PUSTE GNIAZDO, nie sędzia - tak ZPRP zapisuje zdjęta obsadę.
+    Nazwisko bez numeru też jest człowiekiem: terminarz podaje same nazwiska,
+    numery dochodzą dopiero z publicznego API.
     """
     number = _s(state.get(f"NrSedzia_{slot}"))
     name = _s(state.get(f"NrSedzia_{slot}_nazwisko"))
@@ -62,7 +62,7 @@ def slot_person(state: Mapping[str, Any], slot: str) -> Optional[dict[str, str]]
 
 
 def crew(state: Mapping[str, Any]) -> dict[str, Optional[dict[str, str]]]:
-    """Cala szostka gniazd meczu."""
+    """Cała szóstka gniazd meczu."""
     return {slot: slot_person(state, slot) for slot in SLOTS}
 
 
@@ -72,10 +72,10 @@ def _have(people: Mapping[str, Optional[dict[str, str]]], slots: Iterable[str]) 
 
 def crew_status(state: Mapping[str, Any], code: Any) -> dict:
     """
-    Stan obsady meczu: dziury, lekkie roznice i komplet.
+    Stan obsady meczu: dziury, lekkie różnice i komplet.
 
-    Dziura = brakujacy boiskowy albo PUSTY stolik. Jeden stolikowy zamiast dwoch
-    to `soft` - obsadowy ma to widziec, ale nie jako blad do poprawienia.
+    Dziura = brakujący boiskowy albo PUSTY stolik. Jeden stolikowy zamiast dwóch
+    to `soft` - obsadowy ma to widzieć, ale nie jako błąd do poprawienia.
     """
     people = crew(state)
     needs = crew_needs(code)
@@ -111,10 +111,10 @@ def match_category(code: Any) -> str:
 
 def competition_key(code: Any) -> str:
     """
-    Rozgrywki, do ktorych nalezy mecz: numer bez ostatniego czlonu.
+    Rozgrywki, do których należy mecz: numer bez ostatniego członu.
 
-    „IIK4/1" -> „IIK4", „S/JmM/12" -> „S/JmM". Po tym grupujemy liste i budujemy
-    filtr rozgrywek - `competition_prefix` skleilby razem cale wojewodztwa.
+    „IIK4/1" -> „IIK4", „S/JmM/12" -> „S/JmM". Po tym grupujemy listę i budujemy
+    filtr rozgrywek - `competition_prefix` skleiłby razem całe województwa.
     """
     text = " ".join(_s(code).split())
     parts = [part for part in text.split("/") if part]

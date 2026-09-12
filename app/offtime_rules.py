@@ -1,21 +1,21 @@
 """
-Niedyspozycje sedziego - czy jest wolny o danej godzinie.
+Niedyspozycje sędziego - czy jest wolny o danej godzinie.
 
-MODUL-LISC: bez bazy i sieci, zeby regula chodzila w tescie.
+MODUŁ-LIŚĆ: bez bazy i sieci, żeby reguła chodziła w teście.
 
-Dotad cala arytmetyka godzin siedziala w przegladarce
-(`BAZA_web/components/unavailability/unavailabilityLogic.ts`), a serwer umial
-tylko „ten sam dzien". Automat obsady musi to umiec sam, wiec regula jest tu
-przeniesiona 1:1 - te same przypadki, te same krawedzie.
+Dotąd cała arytmetyka godzin siedziała w przeglądarce
+(`BAZA_web/components/unavailability/unavailabilityLogic.ts`), a serwer umiał
+tylko „ten sam dzień". Automat obsady musi to umieć sam, więc reguła jest tu
+przeniesiona 1:1 - te same przypadki, te same krawędzie.
 
-⚠ CZAS. Wpisy niedyspozycji z telefonu przychodza BEZ strefy i znacza czas
-POLSKI; centralny snapshot ZPRP ma prawidlowy UTC. Terminy meczow w bazie
+⚠ CZAS. Wpisy niedyspozycji z telefonu przychodzą BEZ strefy i znaczą czas
+POLSKI; centralny snapshot ZPRP ma prawidłowy UTC. Terminy meczów w bazie
 (`province_matches.match_at`) to z kolei czas polski PODPISANY jako UTC - tak
-zapisuje je pobieranie. Dlatego wszystko sprowadzamy do sciany zegara
-w Europe/Warsaw: `as_local` przyjmuje oba ksztalty.
+zapisuje je pobieranie. Dlatego wszystko sprowadzamy do ściany zegara
+w Europe/Warsaw: `as_local` przyjmuje oba kształty.
 
 ⚠ MECZ w kalendarzu trwa 2 godziny od startu (tak liczy to aplikacja), a wpis
-„BAZOWA" i wpis bez godziny koncowej sa CALODNIOWE.
+„BAZOWA" i wpis bez godziny końcowej sa CAŁODNIOWE.
 """
 
 from __future__ import annotations
@@ -29,13 +29,13 @@ try:  # zoneinfo jest w bibliotece standardowej od 3.9
     from zoneinfo import ZoneInfo
 
     WARSAW = ZoneInfo("Europe/Warsaw")
-except Exception:  # pragma: no cover - bez bazy stref liczymy po scianie zegara
+except Exception:  # pragma: no cover - bez bazy stref liczymy po ścianie zegara
     WARSAW = None  # type: ignore[assignment]
 
-#: Mecz w kalendarzu sedziego zajmuje dwie godziny od startu.
+#: Mecz w kalendarzu sędziego zajmuje dwie godziny od startu.
 MATCH_HOURS = 2
 
-#: Domyslny zapas przy porownaniu z niedyspozycja - tyle samo co w aplikacji.
+#: Domyślny zapas przy porównaniu z niedyspozycja - tyle samo co w aplikacji.
 DEFAULT_TOLERANCE_MINUTES = 30
 
 
@@ -50,11 +50,11 @@ def _fold(value: Any) -> str:
 
 def as_local(value: Any) -> Optional[datetime]:
     """
-    Dowolny zapis czasu jako NAIWNA sciana zegara w Polsce.
+    Dowolny zapis czasu jako NAIWNA ściana zegara w Polsce.
 
     Napis ze strefa idzie przez konwersje do Europe/Warsaw, napis bez strefy
     zostaje jak stoi, a `datetime` z `tzinfo=UTC` z naszej bazy traktujemy jak
-    czas polski - bo tak go tam zapisano (patrz naglowek modulu).
+    czas polski - bo tak go tam zapisano (patrz nagłówek modułu).
     """
     if value is None or value == "":
         return None
@@ -78,10 +78,10 @@ def as_local(value: Any) -> Optional[datetime]:
 
 def match_moment(value: Any) -> Optional[datetime]:
     """
-    Termin meczu z bazy jako sciana zegara.
+    Termin meczu z bazy jako ściana zegara.
 
-    ⚠ `province_matches.match_at` ma `tzinfo=UTC`, ale niesie godzine POLSKA.
-    Konwersja stref przesunelaby mecz o dwie godziny, wiec strefe zdejmujemy.
+    ⚠ `province_matches.match_at` ma `tzinfo=UTC`, ale niesie godzinę POLSKA.
+    Konwersja stref przesunęłaby mecz o dwie godziny, więc strefę zdejmujemy.
     """
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)
@@ -90,7 +90,7 @@ def match_moment(value: Any) -> Optional[datetime]:
 
 @dataclass(frozen=True)
 class Offtime:
-    """Jeden wpis niedyspozycji sprowadzony do przedzialu."""
+    """Jeden wpis niedyspozycji sprowadzony do przedziału."""
 
     start: datetime
     end: datetime
@@ -104,7 +104,7 @@ class Offtime:
 
 @dataclass(frozen=True)
 class TempCity:
-    """Czasowa zmiana miasta sedziego (wyjazd) - liczy sie do kilometrow."""
+    """Czasowa zmiana miasta sędziego (wyjazd) - liczy się do kilometrów."""
 
     start: datetime
     end: datetime
@@ -138,7 +138,7 @@ def _is_bazowa(name: Any) -> bool:
 
 
 def parse_entries(raw: Any) -> tuple[list[Offtime], list[TempCity]]:
-    """Wpisy z `data_json` sedziego jako przedzialy i zmiany miasta."""
+    """Wpisy z `data_json` sędziego jako przedziały i zmiany miasta."""
     offtimes: list[Offtime] = []
     cities: list[TempCity] = []
     if not isinstance(raw, Iterable) or isinstance(raw, (str, bytes)):
@@ -170,8 +170,8 @@ def parse_entries(raw: Any) -> tuple[list[Offtime], list[TempCity]]:
         elif bazowa:
             kind = "BAZOWE"
             all_day = True
-            # „Bazowa" z realnym zakresem trwa do konca dnia `to`; minuta roznicy
-            # to zapis jednodniowy, a nie przedzial.
+            # „Bazowa" z realnym zakresem trwa do końca dnia `to`; minuta różnicy
+            # to zapis jednodniowy, a nie przedział.
             end = _day_end(end_raw) if end_raw and (end_raw - start) > timedelta(minutes=1) else _day_end(start)
             start = _day_start(start)
         else:
@@ -199,10 +199,10 @@ def blocking_offtime(
     tolerance_minutes: int = DEFAULT_TOLERANCE_MINUTES,
 ) -> Optional[Offtime]:
     """
-    Wpis, ktory zajmuje sedziemu ten termin - albo None.
+    Wpis, który zajmuje sędziemu ten termin - albo None.
 
-    Zapas dziala TYLKO przy krawedziach: wpis konczacy sie kwadrans przed meczem
-    nie blokuje, ale wpis w srodku dnia blokuje niezaleznie od zapasu. Tak samo
+    Zapas działa TYLKO przy krawędziach: wpis kończący się kwadrans przed meczem
+    nie blokuje, ale wpis w środku dnia blokuje niezależnie od zapasu. Tak samo
     liczy to aplikacja.
     """
     if moment is None:
@@ -223,12 +223,12 @@ def is_available_at(
     *,
     tolerance_minutes: int = DEFAULT_TOLERANCE_MINUTES,
 ) -> bool:
-    """Czy sedzia jest wolny w tym terminie. Brak terminu = nie wiemy, wiec wolny."""
+    """Czy sędzia jest wolny w tym terminie. Brak terminu = nie wiemy, więc wolny."""
     return blocking_offtime(offtimes, moment, tolerance_minutes=tolerance_minutes) is None
 
 
 def busy_minutes_on_day(offtimes: Iterable[Offtime], day: date) -> int:
-    """Ile minut tego dnia sedzia ma zajete - do mikropodgladu w panelu."""
+    """Ile minut tego dnia sędzia ma zajęte - do mikropodglądu w panelu."""
     start = datetime.combine(day, time.min)
     end = datetime.combine(day, time.max)
     total = 0
@@ -241,7 +241,7 @@ def busy_minutes_on_day(offtimes: Iterable[Offtime], day: date) -> int:
 
 
 def city_at(base_city: str, cities: Iterable[TempCity], moment: Optional[datetime]) -> str:
-    """Miasto sedziego w danym dniu - z czasowa zmiana, gdy akurat gdzies wyjechal."""
+    """Miasto sędziego w danym dniu - z czasową zmianą, gdy akurat gdzieś wyjechał."""
     if moment is not None:
         for item in cities:
             if item.start <= moment <= item.end:

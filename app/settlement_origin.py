@@ -1,21 +1,21 @@
 """
-Czy mecz z listy sedziego to mecz NASZEGO okregu - regula dla minionych sezonow.
+Czy mecz z listy sędziego to mecz NASZEGO okręgu - reguła dla minionych sezonów.
 
-MODUL-LISC: bez bazy i sieci, zeby regula chodzila w tescie.
+MODUŁ-LIŚĆ: bez bazy i sieci, żeby reguła chodziła w teście.
 
-Monitor okregu trzyma tylko biezacy terminarz, wiec mecze minionych sezonow
-znamy wylacznie z prywatnych list sedziow. Na tych listach sa tez mecze INNYCH
-okregow - sedzia ze Slaska w meczu ligi lubelskiej („L/MłK/20"). Dotad kazdy
-mecz okregowy z listy minionego sezonu szedl jako nasz, we wszystkich rolach,
-a ten sam mecz w biezacym sezonie wchodzi tylko dla stolikowego, jako mecz
-spoza okregu. Decyzja uzytkownika z 11.09.2026: minione sezony licza sie tak
+Monitor okręgu trzyma tylko bieżący terminarz, więc mecze minionych sezonów
+znamy wyłącznie z prywatnych list sędziów. Na tych listach sa też mecze INNYCH
+okręgów - sędzia ze Śląska w meczu ligi lubelskiej („L/MłK/20"). Dotąd każdy
+mecz okręgowy z listy minionego sezonu szedł jako nasz, we wszystkich rolach,
+a ten sam mecz w bieżącym sezonie wchodzi tylko dla stolikowego, jako mecz
+spoza okręgu. Decyzja użytkownika z 11.09.2026: minione sezony liczą się tak
 samo.
 
-Przynaleznosc rozpoznajemy po PRZEDROSTKU numeru („S/" to Slask, „L/"
-Lubelskie). Nasze przedrostki bierzemy z WLASNEGO terminarza okregu zamiast
-trzymac mape wojewodztw - numeracji ZPRP nie mamy skad potwierdzic, a terminarz
-jest faktem. Numer bez przedrostka („JMM/3", „IIIM/9") nie mowi nic, wiec
-zostaje nasz, jak dotad.
+Przynależność rozpoznajemy po PRZEDROSTKU numeru („S/" to Śląsk, „L/"
+Lubelskie). Nasze przedrostki bierzemy z WŁASNEGO terminarza okręgu zamiast
+trzymać mape województw - numeracji ZPRP nie mamy skąd potwierdzić, a terminarz
+jest faktem. Numer bez przedrostka („JMM/3", „IIIM/9") nie mówi nic, więc
+zostaje nasz, jak dotąd.
 """
 
 from __future__ import annotations
@@ -28,22 +28,22 @@ from app import settlement_rates as R
 from app.proel_stats_rules import prefix_of
 from app.settlement_seasons import season_of
 
-#: Tyle meczow z danym przedrostkiem musi stac w naszym terminarzu, zeby uznac
-#: go za nasz - jeden zablakany numer nie przypisze okregowi cudzej ligi.
+#: Tyle meczów z danym przedrostkiem musi stać w naszym terminarzu, żeby uznać
+#: go za nasz - jeden zabłąkany numer nie przypisze okręgowi cudzej ligi.
 MIN_OWN_MATCHES = 2
 
-#: Werdykty `history_fix` dla obsady zapisanej stara regula.
+#: Werdykty `history_fix` dla obsady zapisanej stara reguła.
 KEEP = "keep"
 OUTSIDE = "outside"
 DROP = "drop"
 
-#: Szczeble, ktore z listy minionego sezonu wchodza jak wlasne - bez zmian
-#: wzgledem dotychczasowej reguly, dochodzi tylko warunek przedrostka.
+#: Szczeble, które z listy minionego sezonu wchodzą jak własne - bez zmian
+#: względem dotychczasowej reguły, dochodzi tylko warunek przedrostka.
 _OWN_LEVELS = ("district", "cup")
 
 
 def own_prefixes(codes: Iterable[Any], *, min_matches: int = MIN_OWN_MATCHES) -> set[str]:
-    """Przedrostki numerow z terminarza okregu: rozgrywki okregowe i puchar wojewodzki."""
+    """Przedrostki numerów z terminarza okręgu: rozgrywki okręgowe i puchar wojewódzki."""
     counts: Counter = Counter()
     for code in codes:
         prefix = prefix_of(code)
@@ -54,10 +54,10 @@ def own_prefixes(codes: Iterable[Any], *, min_matches: int = MIN_OWN_MATCHES) ->
 
 def is_other_district(code: Any, own: Iterable[str]) -> bool:
     """
-    Numer z przedrostkiem okregu, ktory NIE jest naszym.
+    Numer z przedrostkiem okręgu, który NIE jest naszym.
 
     Bez przedrostka albo bez wiedzy o naszych przedrostkach nie wiemy nic - wtedy
-    mecz NIE jest obcy (zostaje, jak byl), zamiast po cichu wypasc z rozliczenia.
+    mecz NIE jest obcy (zostaje, jak był), zamiast po cichu wypaść z rozliczenia.
     """
     prefix = prefix_of(code)
     mine = set(own or ())
@@ -66,27 +66,27 @@ def is_other_district(code: Any, own: Iterable[str]) -> bool:
 
 def _district_level(code: Any) -> bool:
     """
-    Szczebel, ktory z listy minionego sezonu wchodzi jak wlasny.
+    Szczebel, który z listy minionego sezonu wchodzi jak własny.
 
-    ⚠ Puchar wojewodzki („S/PPK/2") ma szczebel „central", bo placi stawkami
-    II ligi - ale to mecz OKREGU i okreg rozlicza go w KAZDEJ roli. Bez tego
-    warunku z minionych sezonow wchodzily same jego stoliki (poprawka 11.09.2026).
+    ⚠ Puchar wojewódzki („S/PPK/2") ma szczebel „central", bo płaci stawkami
+    II ligi - ale to mecz OKRĘGU i okręg rozlicza go w KAŻDEJ roli. Bez tego
+    warunku z minionych sezonów wchodziły same jego stoliki (poprawka 11.09.2026).
     """
     return R.match_level(code) in _OWN_LEVELS or R.is_provincial_cup(code)
 
 
 def own_past_match(code: Any, own: Iterable[str]) -> bool:
     """
-    Mecz minionego sezonu z listy sedziego liczony jak WLASNY, czyli w kazdej roli.
+    Mecz minionego sezonu z listy sędziego liczony jak WŁASNY, czyli w każdej roli.
 
-    Rozgrywki okregowe, puchary i puchar wojewodzki - ale bez meczow innych
-    okregow: te ida jak w biezacym sezonie, tylko stolik, jako mecz spoza okregu.
+    Rozgrywki okręgowe, puchary i puchar wojewódzki - ale bez meczów innych
+    okręgów: te idą jak w bieżącym sezonie, tylko stolik, jako mecz spoza okręgu.
     """
     return _district_level(code) and not is_other_district(code, own)
 
 
 def collected_after_season(first_seen: Optional[datetime], season: str) -> bool:
-    """Obsada zapisana dopiero PO sezonie - czyli z listy sedziego, nie z terminarza."""
+    """Obsada zapisana dopiero PO sezonie - czyli z listy sędziego, nie z terminarza."""
     seen = season_of(first_seen)
     return bool(seen and season and seen > season)
 
@@ -102,12 +102,12 @@ def history_fix(
     own: Iterable[str],
 ) -> str:
     """
-    Co zrobic z obsada zapisana regula sprzed 11.09.2026.
+    Co zrobić z obsada zapisana reguła sprzed 11.09.2026.
 
-    Dotyczy wylacznie obsad „d:" z minionych sezonow, ktore przyszly z listy
-    sedziego (zapisane po koncu sezonu) - terminarz okregu to nasza kaskada
-    i jego nie ruszamy. Mecz innego okregu: stolik przechodzi na „o:" (jak
-    w biezacym sezonie), kazda inna rola gasnie.
+    Dotyczy wyłącznie obsad „d:" z minionych sezonów, które przyszły z listy
+    sędziego (zapisane po końcu sezonu) - terminarz okręgu to nasza kaskada
+    i jego nie ruszamy. Mecz innego okręgu: stolik przechodzi na „o:" (jak
+    w bieżącym sezonie), każda inna rola gaśnie.
     """
     if not str(match_key or "").startswith("d:"):
         return KEEP

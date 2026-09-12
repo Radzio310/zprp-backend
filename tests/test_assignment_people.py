@@ -27,7 +27,7 @@ def test_league_is_second_division_and_up():
 
 
 def test_badge_decides_when_zprp_is_out_of_date():
-    # Odznaka „Ligowcy" robi ligowca nawet bez liter - baza zwiazku bywa stara.
+    # Odznaka „Ligowcy" robi ligowca nawet bez liter - baza związku bywa stara.
     assert judge("KTOŚ Nowy", letters=["Mł"], badges=["Ligowcy"]).league
 
 
@@ -81,7 +81,7 @@ def test_needs_experienced_partner_requires_licence_a():
     ok, why = pair_ok(fragile, STOLIKOWY)
     assert not ok and "licencją A" in why
     assert pair_ok(fragile, CENTRALNY)[0]
-    # Zasada dziala w obie strony, niezaleznie od kolejnosci gniazd.
+    # Zasada działa w obie strony, niezależnie od kolejności gniazd.
     assert not pair_ok(STOLIKOWY, fragile)[0]
 
 

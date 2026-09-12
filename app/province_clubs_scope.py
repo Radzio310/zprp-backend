@@ -1,23 +1,23 @@
 """
-Panel klubow - ktore kluby naleza do sezonu.
+Panel klubów - które kluby należą do sezonu.
 
-MODUL-LISC: bez bazy i sieci, zeby regula chodzila w tescie.
+MODUŁ-LIŚĆ: bez bazy i sieci, żeby reguła chodziła w teście.
 
-⚠ Tabela `province_clubs` trzyma KAZDY klub, ktory kiedykolwiek pojawil sie na
-liscie druzyn: pobieranie dopisuje go tam przy pierwszym spotkaniu, zeby mial
-nazwe i ustawienia. Lista sezonu doklejala wszystkie te wiersze, wiec klub
-z innego sezonu wisial w kazdym sezonie z „0 druzyn" (zgloszenie 11.09.2026).
+⚠ Tabela `province_clubs` trzyma KAŻDY klub, który kiedykolwiek pojawił się na
+liście drużyn: pobieranie dopisuje go tam przy pierwszym spotkaniu, żeby miał
+nazwę i ustawienia. Lista sezonu doklejała wszystkie te wiersze, więc klub
+z innego sezonu wisiał w każdym sezonie z „0 drużyn" (zgłoszenie 11.09.2026).
 
-Drugie zrodlo szumu to grupy II ligi prowadzone przez okreg. Na ich listach sa
-tez rywale z innych wojewodztw (AZS AGH Krakow, kluby z Kielc i Pulaw), a oni
-okregowi nic nie placa - u siebie maja stoliki ze swojego okregu.
+Drugie źródło szumu to grupy II ligi prowadzone przez okręg. Na ich listach sa
+też rywale z innych województw (AZS AGH Kraków, kluby z Kielc i Puław), a oni
+okręgowi nic nie płacą - u siebie mają stoliki ze swojego okręgu.
 
-Klub nalezy do sezonu, gdy:
-  - ma w nim mecz na koncie (w kazdym statusie) albo wplate / wyplate -
-    pieniadze nie moga zniknac z widoku,
-  - albo gra w rozgrywkach OKREGOWYCH (tam gospodarz placi okregowi, nawet gdy
-    jest z sasiedniego wojewodztwa),
-  - albo jest z NASZEGO wojewodztwa i gra w rozgrywkach centralnych.
+Klub należy do sezonu, gdy:
+  - ma w nim mecz na koncie (w każdym statusie) albo wpłatę / wypłatę -
+    pieniądze nie mogą zniknąć z widoku,
+  - albo gra w rozgrywkach OKRĘGOWYCH (tam gospodarz płaci okręgowi, nawet gdy
+    jest z sąsiedniego województwa),
+  - albo jest z NASZEGO województwa i gra w rozgrywkach centralnych.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from app import settlement_rates as R
 
 
 def is_district_code(code: Any) -> bool:
-    """Rozgrywki okregu: III liga i nizej oraz puchar wojewodzki („S/PPK")."""
+    """Rozgrywki okręgu: III liga i niżej oraz puchar wojewódzki („S/PPK")."""
     return R.is_provincial_cup(code) or R.match_level(code) == "district"
 
 
@@ -43,11 +43,11 @@ def _plays_district(team: dict) -> bool:
 
 def home_province(teams: Iterable[dict]) -> str:
     """
-    Kod naszego wojewodztwa na listach druzyn („SL").
+    Kod naszego województwa na listach drużyn („SL").
 
-    Nie trzymamy mapy okreg -> kod: bierzemy najczestszy kod wsrod druzyn
-    rozgrywek okregowych, a bez nich - wsrod wszystkich druzyn sezonu. Remis
-    rozstrzyga alfabet, zeby wynik nie zalezal od kolejnosci pobierania.
+    Nie trzymamy mapy okręg -> kod: bierzemy najczęstszy kod wśród drużyn
+    rozgrywek okręgowych, a bez nich - wśród wszystkich drużyn sezonu. Remis
+    rozstrzyga alfabet, żeby wynik nie zależał od kolejności pobierania.
     """
     teams = list(teams)
     counts = Counter(_province(team) for team in teams if _province(team) and _plays_district(team))
@@ -59,7 +59,7 @@ def home_province(teams: Iterable[dict]) -> str:
 
 
 def team_in_scope(team: dict, home: str) -> bool:
-    """Druzyna, ktora moze okregowi cos zaplacic."""
+    """Drużyna, która może okręgowi coś zapłacić."""
     if _plays_district(team):
         return True
     province = _province(team)
@@ -68,8 +68,8 @@ def team_in_scope(team: dict, home: str) -> bool:
 
 def season_club_ids(teams: Iterable[dict], active: Iterable[Any]) -> set[str]:
     """
-    Kluby sezonu: kazdy z meczem albo wpisem (`active`) i kazdy z druzyna
-    w zasiegu okregu. Sam wiersz ustawien klubu NIE wystarcza.
+    Kluby sezonu: każdy z meczem albo wpisem (`active`) i każdy z drużyna
+    w zasięgu okręgu. Sam wiersz ustawień klubu NIE wystarcza.
     """
     teams = list(teams)
     home = home_province(teams)

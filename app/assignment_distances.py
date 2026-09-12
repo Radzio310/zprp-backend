@@ -1,24 +1,24 @@
 """
-Kilometry dla automatu obsady: NAJPIERW tabela okregu, potem pamiec, na koncu Google.
+Kilometry dla automatu obsady: NAJPIERW tabela okręgu, potem pamięć, na końcu Google.
 
-Decyzja uzytkownika z 12.09.2026: „liczac kilometry liczyc je z tabeli
-odleglosci, a nie recznie z Google API wszystko. Tylko brakujace kombinacje
-miasto sedziego - miasto hali mozesz z Google'a". Tak wiec:
+Decyzja użytkownika z 12.09.2026: „licząc kilometry liczyć je z tabeli
+odległości, a nie ręcznie z Google API wszystko. Tylko brakujące kombinacje
+miasto sędziego - miasto hali możesz z Google'a". Tak więc:
 
   1. to samo miasto        -> 0 km, bez pytania kogokolwiek,
-  2. `okreg_distances`     -> tabela zmierzona przez okreg, ta sama, ktora
-                              rozlicza przejazdy (jeden slownik pojec),
-  3. `city_distances`      -> para, o ktora juz kiedys pytalismy Google,
-  4. Google Distance Matrix-> tylko pary, ktorych nie ma nigdzie wyzej,
+  2. `okreg_distances`     -> tabela zmierzona przez okręg, ta sama, która
+                              rozlicza przejazdy (jeden słownik pojęć),
+  3. `city_distances`      -> para, o którą już kiedyś pytaliśmy Google,
+  4. Google Distance Matrix-> tylko pary, których nie ma nigdzie wyżej,
                               i od razu zapisane do `city_distances`.
 
-Automat pyta o odleglosc TYSIACE razy (kazdy sedzia x kazdy mecz), a `Context`
-oczekuje zwyklej funkcji - dlatego caly zbior par wypelniamy PRZED ukladaniem
-planu, a w trakcie liczenia jest juz tylko odczyt ze slownika w pamieci.
+Automat pyta o odległość TYSIĄCE razy (każdy sędzia x każdy mecz), a `Context`
+oczekuje zwykłej funkcji - dlatego cały zbiór par wypełniamy PRZED układaniem
+planu, a w trakcie liczenia jest już tylko odczyt ze słownika w pamięci.
 
-⚠ Brak odleglosci NIE jest zerem. Automat karze „nie wiemy" osobna waga, a
-raport pokazuje, ilu par nie znamy - inaczej sedzia z drugiego konca
-wojewodztwa wygladalby na najblizszego.
+⚠ Brak odległości NIE jest zerem. Automat karze „nie wiemy" osobna waga, a
+raport pokazuje, ilu par nie znamy - inaczej sędzia z drugiego końca
+województwa wyglądałby na najbliższego.
 """
 
 from __future__ import annotations
@@ -35,21 +35,21 @@ from app.settlement_province import spellings
 
 logger = logging.getLogger(__name__)
 
-#: Ile par jednego przebiegu wolno dopytac Google. Zapora na rachunek: przy
-#: pierwszym uruchomieniu w nowym okregu brakowac moze setek par, a lepiej
-#: uzupelniac je po kawalku niz wystawic sobie fakture jednym klikiem.
+#: Ile par jednego przebiegu wolno dopytać Google. Zapora na rachunek: przy
+#: pierwszym uruchomieniu w nowym okręgu brakować może setek par, a lepiej
+#: uzupełniać je po kawałku niż wystawić sobie fakturę jednym klikiem.
 GOOGLE_BUDGET = 120
 
 
 class DistanceBook:
-    """Odleglosci gotowe do czytania - tabela okregu plus zapamietane pary."""
+    """Odległości gotowe do czytania - tabela okręgu plus zapamiętane pary."""
 
     __slots__ = ("index", "_cache", "_asked", "from_table", "from_memory", "from_google")
 
     def __init__(self, index: DistanceIndex, cache: dict[tuple[str, str], float] | None = None):
         self.index = index
         self._cache: dict[tuple[str, str], float] = dict(cache or {})
-        #: Pary, o ktore pytano i ktorych NIE znalazl nikt - zeby nie pytac w kolko.
+        #: Pary, o które pytano i których NIE znalazł nikt - żeby nie pytać w kółko.
         self._asked: set[tuple[str, str]] = set()
         self.from_table = 0
         self.from_memory = 0
@@ -81,7 +81,7 @@ class DistanceBook:
         return None
 
     def missing(self, pairs: Iterable[tuple[Any, Any]]) -> list[tuple[str, str]]:
-        """Pary, ktorych nie zna ani tabela, ani pamiec - kandydatki do Google."""
+        """Pary, których nie zna ani tabela, ani pamięć - kandydatki do Google."""
         out: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
         for origin, destination in pairs:
@@ -116,9 +116,9 @@ class DistanceBook:
 
 
 async def load_book(province: str) -> DistanceBook:
-    """Tabela okregu plus wszystko, co juz kiedys policzyl Google."""
-    # Import lokalny: `app.db` laczy sie z Postgresem przy imporcie, a sama
-    # ksiega odleglosci jest czysta - dzieki temu chodzi w tescie bez bazy.
+    """Tabela okręgu plus wszystko, co już kiedyś policzył Google."""
+    # Import lokalny: `app.db` łączy się z Postgresem przy imporcie, a sama
+    # księga odległości jest czysta - dzięki temu chodzi w teście bez bazy.
     from sqlalchemy import select
 
     from app.db import city_distances, database, okreg_distances
@@ -130,7 +130,7 @@ async def load_book(province: str) -> DistanceBook:
     )
     content = row["content"] if row else None
     if isinstance(content, (str, bytes, bytearray)):
-        # ⚠ Kolumna JSON potrafi wrocic SUROWYM NAPISEM (asyncpg bez kodeka).
+        # ⚠ Kolumna JSON potrafi wrócić SUROWYM NAPISEM (asyncpg bez kodeka).
         import json
 
         try:
@@ -158,18 +158,18 @@ async def fill_missing(
     client: Any = None,
 ) -> dict:
     """
-    Dopytuje Google o pary, ktorych nie zna nikt, i ZAPISUJE je na zawsze.
+    Dopytuje Google o pary, których nie zna nikt, i ZAPISUJE je na zawsze.
 
-    Zapis idzie do `city_distances`, wiec nastepny przebieg - i nastepny miesiac -
-    ma te pare za darmo. Bez klucza do Google konczy sie po cichu: automat
-    policzy plan z tym, co wie, a raport pokaze, ile par zostalo nieznanych.
+    Zapis idzie do `city_distances`, więc następny przebieg - i następny miesiąc -
+    ma tę parę za darmo. Bez klucza do Google kończy się po cichu: automat
+    policzy plan z tym, co wie, a raport pokaze, ile par zostało nieznanych.
     """
     todo = book.missing(pairs)[: max(0, int(budget))]
     if not todo:
         return {"asked": 0, "saved": 0, "missing": 0}
 
-    # Import po odsianiu pustego przebiegu: `app.db` laczy sie z Postgresem juz
-    # przy imporcie, a „nie ma czego dopytac" nie potrzebuje zadnej bazy.
+    # Import po odsianiu pustego przebiegu: `app.db` łączy się z Postgresem już
+    # przy imporcie, a „nie ma czego dopytać" nie potrzebuje żadnej bazy.
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from app.db import city_distances, database
@@ -198,7 +198,7 @@ async def fill_missing(
                 )
                 saved += 1
             except Exception:
-                # Pamiec jest wygoda, nie warunkiem. Plan i tak ma juz te liczbe.
+                # Pamięć jest wygoda, nie warunkiem. Plan i tak ma już tę liczbę.
                 logger.exception("obsada: nie udało się zapamiętać odległości %s-%s", left, right)
     finally:
         if own_client:

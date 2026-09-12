@@ -1,32 +1,32 @@
 """
-Automat obsady - kto ma stanac przy ktorym meczu.
+Automat obsady - kto ma stanąć przy którym meczu.
 
-MODUL-LISC: bez bazy i sieci. Wszystko, co wie o swiecie, dostaje w `Context`
-jako dane i funkcje - dzieki temu cala regula chodzi w tescie, a nie na
+MODUŁ-LIŚĆ: bez bazy i sieci. Wszystko, co wie o świecie, dostaje w `Context`
+jako dane i funkcje - dzięki temu cała reguła chodzi w teście, a nie na
 produkcji.
 
-KRYTERIA UZYTKOWNIKA (11.09.2026), w kolejnosci waznosci:
+KRYTERIA UŻYTKOWNIKA (11.09.2026), w kolejności ważności:
 
-  TWARDE - automat ich nie zlamie, nawet kosztem pustego gniazda:
-    1. niedyspozycja sedziego,
-    2. mecz tego samego dnia, na ktory fizycznie nie da sie zdazyc (z zapasem),
-    3. para wykluczona przez okreg,
-    4. dwoje mlodych sedziow w jednej parze,
-    5. znacznik „wymaga doswiadczonego partnera" (partner z licencja A),
-    6. wymagania stolikow ligowych (Superliga i LC: ligowiec albo delegat plus
+  TWARDE - automat ich nie złamie, nawet kosztem pustego gniazda:
+    1. niedyspozycja sędziego,
+    2. mecz tego samego dnia, na który fizycznie nie da się zdążyć (z zapasem),
+    3. para wykluczona przez okręg,
+    4. dwoje młodych sędziów w jednej parze,
+    5. znacznik „wymaga doświadczonego partnera" (partner z licencją A),
+    6. wymagania stolików ligowych (Superliga i LC: ligowiec albo delegat plus
        licencja A; I i II liga: licencja A),
-    7. przerwa sedziego (pauza) i drugie gniazdo w tym samym meczu.
+    7. przerwa sędziego (pauza) i drugie gniazdo w tym samym meczu.
 
-  MIEKKIE - licza sie punktami, mniej znaczy lepiej:
-    - KILOMETRY, bo to glowne kryterium,
-    - sedzia z miasta gospodarza (unikamy),
-    - rowny podzial (kto ma juz duzo, dostaje mniej chetnie),
-    - dzien spoza preferowanych przez sedziego,
-    - mecz tego samego dnia, na ktory ZDAZY - ostatecznosc,
-    - premia za ustalona pare i za odznake „Stolikowi" na stoliku okregowym.
+  MIĘKKIE - liczą się punktami, mniej znaczy lepiej:
+    - KILOMETRY, bo to główne kryterium,
+    - sędzia z miasta gospodarza (unikamy),
+    - równy podział (kto ma już dużo, dostaje mniej chętnie),
+    - dzień spoza preferowanych przez sędziego,
+    - mecz tego samego dnia, na który ZDĄŻY - ostateczność,
+    - premia za ustaloną parę i za odznakę „Stolikowi" na stoliku okręgowym.
 
-DWA OBIEGI: pierwszy obsadza wylacznie w dniach preferowanych przez sedziego,
-drugi dobiera reszte. Sedzia bez wskazanych dni pasuje do kazdego obiegu.
+DWA OBIEGI: pierwszy obsadza wyłącznie w dniach preferowanych przez sędziego,
+drugi dobiera resztę. Sędzia bez wskazanych dni pasuje do każdego obiegu.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 from app.assignment_people import Judge, is_local, pair_ok, table_pair_ok, table_rule
 
-#: Wagi punktowe. Kilometr to jeden punkt - reszta jest wyskalowana wzgledem niego.
+#: Wagi punktowe. Kilometr to jeden punkt - reszta jest wyskalowana względem niego.
 W_KM = 1.0
 W_LOCAL = 400.0
 W_LOAD = 35.0
@@ -47,9 +47,9 @@ W_UNKNOWN_KM = 90.0
 B_PAIR = 250.0
 B_TABLE_BADGE = 60.0
 
-#: Ile kilometrow na godzine zaklada automat, liczac czy sedzia zdazy z meczu na mecz.
+#: Ile kilometrów na godzinę zakłada automat, licząc czy sędzia zdąży z meczu na mecz.
 TRAVEL_KMH = 60.0
-#: Mecz trwa dwie godziny, a do tego zapas na protokol i dojazd.
+#: Mecz trwa dwie godziny, a do tego zapas na protokół i dojazd.
 MATCH_HOURS = 2.0
 SAFETY_MINUTES = 45
 
@@ -59,7 +59,7 @@ TABLE_SLOTS = ("sekretarz", "czas")
 
 @dataclass
 class BusyMatch:
-    """Mecz, ktory sedzia juz ma - wlasny albo wlasnie przydzielony."""
+    """Mecz, który sędzia już ma - własny albo właśnie przydzielony."""
 
     moment: Optional[datetime]
     city: str
@@ -75,15 +75,15 @@ class MatchNeed:
     moment: Optional[datetime]
     day: Optional[date]
     host_city: str
-    #: Nazwy druzyn - do raportu i PDF, nie do decyzji.
+    #: Nazwy drużyn - do raportu i PDF, nie do decyzji.
     host: str = ""
     guest: str = ""
     hall: str = ""
     field_needed: list[str] = field(default_factory=list)
     table_needed: list[str] = field(default_factory=list)
-    #: Kto juz stoi w tym meczu - nie dostanie drugiego gniazda.
+    #: Kto już stoi w tym meczu - nie dostanie drugiego gniazda.
     crew_ids: set[str] = field(default_factory=set)
-    #: Obsada obecna w gniazdach boiskowych i stolikowych (do regul par).
+    #: Obsada obecna w gniazdach boiskowych i stolikowych (do reguł par).
     crew_field: list[Judge] = field(default_factory=list)
     crew_table: list[Judge] = field(default_factory=list)
 
@@ -94,24 +94,24 @@ class MatchNeed:
 
 @dataclass
 class Context:
-    """Swiat automatu podany z zewnatrz."""
+    """Świat automatu podany z zewnątrz."""
 
     judges: Mapping[str, Judge]
-    #: Czy sedzia jest wolny w tym terminie (niedyspozycje).
+    #: Czy sędzia jest wolny w tym terminie (niedyspozycje).
     available: Callable[[str, Optional[datetime]], bool]
-    #: Czy sedzia ma przerwe w tym dniu.
+    #: Czy sędzia ma przerwę w tym dniu.
     paused: Callable[[str, Optional[date]], bool]
-    #: Miasto sedziego w danym dniu (z czasowa zmiana miasta).
+    #: Miasto sędziego w danym dniu (z czasową zmianą miasta).
     city_of: Callable[[str, Optional[date]], str]
-    #: Odleglosc miasto - miasto; None znaczy „nie wiemy".
+    #: Odległość miasto - miasto; None znaczy „nie wiemy".
     km: Callable[[str, str], Optional[float]]
-    #: Mecze, ktore sedzia juz ma (klucz: numer sedziego).
+    #: Mecze, które sędzia już ma (klucz: numer sędziego).
     busy: Mapping[str, list[BusyMatch]] = field(default_factory=dict)
-    #: Ustalone pary: numer sedziego -> numer partnera.
+    #: Ustalone pary: numer sędziego -> numer partnera.
     partner_of: Mapping[str, str] = field(default_factory=dict)
-    #: Pary, ktorych nie wolno stawiac razem.
+    #: Pary, których nie wolno stawiać razem.
     blocked: set[tuple[str, str]] = field(default_factory=set)
-    #: Ile meczow sedzia ma juz w oknie - punkt wyjscia do rownego podzialu.
+    #: Ile meczów sędzia ma już w oknie - punkt wyjścia do równego podziału.
     load: dict[str, int] = field(default_factory=dict)
 
 
@@ -132,7 +132,7 @@ class Proposal:
 
 @dataclass
 class Gap:
-    """Gniazdo, ktorego automat nie obsadzil, i powod."""
+    """Gniazdo, którego automat nie obsadził, i powód."""
 
     match_id: str
     code: str
@@ -153,7 +153,7 @@ class Plan:
 
 
 def travel_minutes(km: Optional[float]) -> float:
-    """Ile jedzie sie tyle kilometrow. Bez odleglosci zakladamy godzine."""
+    """Ile jedzie się tyle kilometrów. Bez odległości zakładamy godzinę."""
     if km is None:
         return 60.0
     return (float(km) / TRAVEL_KMH) * 60.0
@@ -165,11 +165,11 @@ def can_make_both(
     km: Optional[float],
 ) -> bool:
     """
-    Czy da sie zdazyc z jednego meczu na drugi.
+    Czy da się zdążyć z jednego meczu na drugi.
 
-    Mecz trwa dwie godziny, do tego dojazd i zapas bezpieczenstwa. Bez terminu
-    (ktoregokolwiek) nie wiemy nic - i wtedy NIE blokujemy, bo „nie wiem" nie
-    moze odbierac sedziemu meczu.
+    Mecz trwa dwie godziny, do tego dojazd i zapas bezpieczeństwa. Bez terminu
+    (któregokolwiek) nie wiemy nic - i wtedy NIE blokujemy, bo „nie wiem" nie
+    może odbierać sędziemu meczu.
     """
     if first is None or second is None:
         return True
@@ -180,7 +180,7 @@ def can_make_both(
 def _same_day_state(
     ctx: Context, judge_id: str, need: MatchNeed
 ) -> tuple[bool, bool]:
-    """(ma mecz tego dnia, da sie zdazyc na oba)."""
+    """(ma mecz tego dnia, da się zdążyć na oba)."""
     if need.day is None:
         return False, True
     same_day = [
@@ -200,7 +200,7 @@ def _same_day_state(
 def _hard_reason(
     ctx: Context, judge: Judge, need: MatchNeed, *, round_no: int
 ) -> Optional[str]:
-    """Powod, dla ktorego ten sedzia w ogole nie wchodzi w rachube."""
+    """Powód, dla którego ten sędzia w ogóle nie wchodzi w rachubę."""
     if judge.judge_id in need.crew_ids:
         return "już stoi w tym meczu"
     if ctx.paused(judge.judge_id, need.day):
@@ -282,7 +282,7 @@ def _candidates(
     load: Mapping[str, int],
     taken_ids: set[str],
 ) -> tuple[list[tuple[float, Judge, list[str], Optional[float]]], dict[str, int]]:
-    """Kandydaci posortowani od najlepszego, plus licznik powodow odmowy."""
+    """Kandydaci posortowani od najlepszego, plus licznik powodów odmowy."""
     out: list[tuple[float, Judge, list[str], Optional[float]]] = []
     refused: dict[str, int] = {}
     for judge in ctx.judges.values():
@@ -306,7 +306,7 @@ def _candidates(
 
 
 def _explain(refused: Mapping[str, int]) -> str:
-    """Najczestszy powod, dla ktorego gniazdo zostalo puste."""
+    """Najczęstszy powód, dla którego gniazdo zostało puste."""
     if not refused:
         return "brak sędziów na liście okręgu"
     top = sorted(refused.items(), key=lambda item: (-item[1], item[0]))[:2]
@@ -320,11 +320,11 @@ def build_plan(
     rounds: int = 2,
 ) -> Plan:
     """
-    Ulozenie obsady dla pustych gniazd.
+    Ułożenie obsady dla pustych gniazd.
 
-    Idziemy meczami po kolei, w dwoch obiegach: pierwszy trzyma sie dni
-    preferowanych przez sedziow, drugi dobiera reszte. Obsadzamy WYLACZNIE
-    puste gniazda - kto juz stoi, zostaje (decyzja uzytkownika).
+    Idziemy meczami po kolei, w dwóch obiegach: pierwszy trzyma się dni
+    preferowanych przez sędziów, drugi dobiera resztę. Obsadzamy WYŁĄCZNIE
+    puste gniazda - kto już stoi, zostaje (decyzja użytkownika).
     """
     plan = Plan()
     load = dict(ctx.load)
@@ -341,7 +341,7 @@ def build_plan(
         load=load,
     )
 
-    # Stan gniazd w trakcie ukladania: mecz -> gniazdo -> sedzia.
+    # Stan gniazd w trakcie układania: mecz -> gniazdo -> sędzia.
     filled: dict[str, dict[str, Judge]] = {}
     open_slots: dict[str, dict[str, list[str]]] = {
         need.match_id: {"field": list(need.field_needed), "table": list(need.table_needed)}
@@ -360,7 +360,7 @@ def build_plan(
                     taken = set(need.crew_ids) | {
                         judge.judge_id for judge in filled.get(need.match_id, {}).values()
                     }
-                    # Partner do reguly par: ten, kto juz stoi w tej samej grupie.
+                    # Partner do reguły par: ten, kto już stoi w tej samej grupie.
                     group_people = list(
                         need.crew_field if kind == "field" else need.crew_table
                     ) + [
@@ -386,7 +386,7 @@ def build_plan(
                         if kind == "table" and table_rule(need.code):
                             crew = [person for person in group_people if person] + [judge]
                             # Wymagania stolika sprawdzamy dopiero, gdy stolik
-                            # bedzie pelny - inaczej pierwszy wybor blokowalby drugi.
+                            # będzie pełny - inaczej pierwszy wybór blokowałby drugi.
                             remaining = len(slots.get("table") or []) - 1
                             if remaining <= 0:
                                 ok, why = table_pair_ok(crew, need.code)

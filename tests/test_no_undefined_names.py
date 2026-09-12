@@ -88,7 +88,7 @@ def test_every_import_from_app_db_points_at_something_real():
     import ast
 
     available = _module_level_names(ROOT / "app" / "db.py")
-    # `db.py` dostawia tabele mentoringu w krotce - AST tego nie rozpakuje.
+    # `db.py` dostawia tabelę mentoringu w krotce - AST tego nie rozpakuje.
     available |= {
         "mentoring_config",
         "mentoring_pairs",

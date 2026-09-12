@@ -1,21 +1,21 @@
 """
-Modul obsadowego: zakladka Sedziowie i automat obsady.
+Moduł obsadowego: zakładka Sędziowie i automat obsady.
 
-Osobny prefiks (`/province/assignment`, w liczbie pojedynczej), bo lista meczow
-(`/province/assignments`) ma trase `/{match_id}` - kazda nowa sciezka wpadalaby
+Osobny prefiks (`/province/assignment`, w liczbie pojedynczej), bo lista meczów
+(`/province/assignments`) ma trasę `/{match_id}` - każda nowa ścieżka wpadałaby
 tam jako numer meczu.
 
 Co tu jest:
-  - KATALOG SEDZIOW okregu z tym, czego ZPRP nie wie: odznaki, uprawnienia,
-    miasto, krotkie statystyki, mikro-podglad niedyspozycji i ustawienia
-    automatu (wymaga doswiadczonego partnera, preferowane dni, pary, przerwy,
+  - KATALOG SĘDZIÓW okręgu z tym, czego ZPRP nie wie: odznaki, uprawnienia,
+    miasto, krótkie statystyki, mikro-podgląd niedyspozycji i ustawienia
+    automatu (wymaga doświadczonego partnera, preferowane dni, pary, przerwy,
     pary „nigdy razem"),
   - AUTOMAT: jeden przebieg to propozycje do PUSTYCH gniazd plus raport.
-    Przebieg zapisujemy w `province_assignment_runs`, zeby dalo sie do niego
-    wrocic, pobrac PDF i zobaczyc, co wlasciwie wtedy zaproponowal.
+    Przebieg zapisujemy w `province_assignment_runs`, żeby dało się do niego
+    wrócić, pobrać PDF i zobaczyć, co właściwie wtedy zaproponował.
 
-Automat NICZEGO nie zapisuje w ZPRP. Propozycje ida do panelu, czlowiek
-decyduje, a zapis idzie ta sama jedyna droga, co dotad
+Automat NICZEGO nie zapisuje w ZPRP. Propozycje idą do panelu, człowiek
+decyduje, a zapis idzie ta sama jedyna droga, co dotąd
 (`/zprp/obsada/save` -> `apply_referee_assignment`).
 """
 
@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, delete, insert, select, update
+from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import assignment_rules as A
@@ -45,10 +45,11 @@ from app.assignment_context import (
 from app.assignment_distances import fill_missing, load_book
 from app.assignment_grades import backfill_grades
 from app.assignment_people import fold
-from app.assignment_report import build_report, plan_rows
+from app.assignment_report import build_report, plan_rows, slot_label
 from app.db import (
     badges as badges_table,
     database,
+    province_assignment_changes,
     province_assignment_runs,
     province_judge_blocks,
     province_judge_pairs,
@@ -67,11 +68,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/province/assignment", tags=["province_assignments"])
 
-#: Ile dni pokazuje mikro-podglad niedyspozycji przy sedzim.
+#: Ile dni pokazuje mikro-podgląd niedyspozycji przy sędzim.
 PREVIEW_DAYS = 14
-#: Ile dni do przodu liczy sie jako „nadchodzace" w krotkich statystykach.
+#: Ile dni do przodu liczy się jako „nadchodzące" w krótkich statystykach.
 UPCOMING_DAYS = 30
-#: Zapora na jeden przebieg automatu - wiecej meczow naraz nikt i tak nie przejrzy.
+#: Zapora na jeden przebieg automatu - więcej meczów naraz nikt i tak nie przejrzy.
 MAX_MATCHES = 400
 
 DAY_NAMES = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela")
@@ -93,6 +94,22 @@ def _day_start(day: date) -> datetime:
     return datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
 
 
+def _window(start: date, end: date, undated: bool):
+    """
+    Warunek na termin meczu, z opcjonalnym miejscem dla meczów BEZ TERMINU.
+
+    Mecz bez daty nie ma jak wpaść w zakres dat, a przeoczyć go najłatwiej -
+    więc lista obsadowego pokazuje go zawsze. Automat to co innego: bez godziny
+    nie sprawdzi niedyspozycji ani kolizji, więc bierze go dopiero na wyraźne
+    życzenie (patrz `AutoRequest.include_undated`).
+    """
+    dated = and_(
+        province_matches.c.match_at >= _day_start(start),
+        province_matches.c.match_at < _day_start(end + timedelta(days=1)),
+    )
+    return or_(dated, province_matches.c.match_at.is_(None)) if undated else dated
+
+
 # ───────────────────────────── katalog sędziów ─────────────────────────────
 
 
@@ -106,14 +123,14 @@ async def _season_window() -> tuple[date, date]:
 
 async def _badge_look() -> dict[str, dict]:
     """
-    Odznaki okregu razem z kolorem i ikona - tak, jak widzi je reszta panelu.
+    Odznaki okręgu razem z kolorem i ikona - tak, jak widzi je reszta panelu.
 
-    Kolor i ikona siedza w `meta_json` definicji odznaki, a przy sedzim leza
-    same NAZWY. Bez tej mapy zakladka Sedziowie rysowalaby szare pigulki,
-    podczas gdy wszedzie indziej te same odznaki maja swoje barwy - a odznaka
-    rozpoznawana po kolorze przestaje wtedy dzialac.
+    Kolor i ikona siedzą w `meta_json` definicji odznaki, a przy sędzim leżą
+    same NAZWY. Bez tej mapy zakładka Sędziowie rysowałaby szare pigułki,
+    podczas gdy wszędzie indziej te same odznaki mają swoje barwy - a odznaka
+    rozpoznawana po kolorze przestaje wtedy działać.
 
-    ⚠ Klucz to nazwa bez ogonkow i wielkosci liter: „Mlodzi" i „Młodzi" to
+    ⚠ Klucz to nazwa bez ogonków i wielkości liter: „Młodzi" i „Młodzi" to
     jedna odznaka.
     """
     out: dict[str, dict] = {}
@@ -148,8 +165,8 @@ async def judges(
     tylko sędziów, których śledzi monitor, a terminarz zna wszystkich.
     """
     key = require_province(province)
-    # Uprawnienia zbieraja sie przy okazji otwierania meczow, wiec przy pierwszym
-    # wejsciu na te zakladke tabela bywa pusta i przy nazwiskach nie byloby liter.
+    # Uprawnienia zbierają się przy okazji otwierania meczów, więc przy pierwszym
+    # wejściu na te zakładkę tabela bywa pusta i przy nazwiskach nie byłoby liter.
     # Raz, kontem monitora - patrz `backfill_grades`.
     await backfill_grades(key)
     roster = await load_roster(key)
@@ -209,7 +226,7 @@ async def judges(
                         default=None,
                     ),
                 },
-                # Mikro-podglad: ile minut dnia jest zajete. 1440 to caly dzien.
+                # Mikro-podgląd: ile minut dnia jest zajęte. 1440 to cały dzień.
                 "preview": [
                     {"day": day.isoformat(), "minutes": roster.busy_minutes(judge_id, day)}
                     for day in preview_days
@@ -381,10 +398,10 @@ async def drop_pause(pause_id: int, province: str = Query(...)):
 
 async def _prune_pauses(province: str) -> int:
     """
-    Przerwy, ktore skonczyly sie ponad tydzien temu, znikaja.
+    Przerwy, które skończyły się ponad tydzień temu, znikają.
 
-    Decyzja uzytkownika: „zakres wiecej niz tydzien wstecz znika, bo po co nam".
-    Sprzatamy przy okazji dopisywania - lista przerw nie zdazy urosnac.
+    Decyzja użytkownika: „zakres więcej niż tydzień wstecz znika, bo po co nam".
+    Sprzątamy przy okazji dopisywania - lista przerw nie zdąży urosnąć.
     """
     cutoff = _now().date() - timedelta(days=7)
     return await database.execute(
@@ -406,11 +423,11 @@ class PairRequest(BaseModel):
 @router.post("/judges/{judge_id}/pairs", summary="Para sędziowska okręgu")
 async def set_pair(judge_id: str, payload: PairRequest):
     """
-    Wlasna para okregu - rownorzedna z para z listy ZPRP.
+    Własna para okręgu - równorzędna z para z listy ZPRP.
 
-    Para jest obustronna, wiec stara para OBU osob ustepuje miejsca nowej.
-    Inaczej zostalby w bazie trojkat, w ktorym kazdy ma inne zdanie o tym,
-    z kim sedziuje.
+    Para jest obustronna, więc stara para OBU osób ustępuje miejsca nowej.
+    Inaczej zostałby w bazie trójkąt, w którym każdy ma inne zdanie o tym,
+    z kim sędziuje.
     """
     key = require_province(payload.province)
     partner = _s(payload.partner_id)
@@ -516,6 +533,11 @@ class AutoRequest(BaseModel):
     #: Puste = cała lista okręgu.
     judge_ids: list[str] = []
     rounds: int = 2
+    #: Także mecze BEZ TERMINU. Domyślnie ich nie ruszamy - bez godziny nie da
+    #: się sprawdzić ani niedyspozycji, ani kolizji z innym meczem tego dnia,
+    #: więc automat stawia tam ludzi „w ciemno". Do próbnego przebiegu bywa
+    #: jednak przydatne: widać, kto w ogóle wchodzi w rachubę.
+    include_undated: bool = False
     #: Dopytać Google o brakujące pary miast (tabela odległości ma pierwszeństwo).
     use_google: bool = True
     created_by: Optional[str] = None
@@ -535,13 +557,12 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
             and_(
                 province_matches.c.province.in_(spellings(key)),
                 province_matches.c.active.is_(True),
-                province_matches.c.match_at >= _day_start(start),
-                province_matches.c.match_at < _day_start(end + timedelta(days=1)),
+                _window(start, end, payload.include_undated),
             )
         )
     )
 
-    skipped = {"manual": 0, "outside": 0, "complete": 0, "no_hall": 0}
+    skipped = {"manual": 0, "outside": 0, "complete": 0, "no_hall": 0, "undated": 0}
     needs = []
     for row in rows:
         state = state_dict(row["state_json"])
@@ -563,10 +584,13 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
         if not need.field_needed and not need.table_needed:
             skipped["complete"] += 1
             continue
+        if need.day is None and not payload.include_undated:
+            skipped["undated"] += 1
+            continue
         if not need.host_city:
-            # Bez miasta hali nie policzymy ani kilometrow, ani dojazdu. Mecz
-            # zostaje na liscie obsadowego, ale automat go nie tyka - zgadywanie
-            # trasy bylo by gorsze niz uczciwe „uzupelnij hale".
+            # Bez miasta hali nie policzymy ani kilometrów, ani dojazdu. Mecz
+            # zostaje na liście obsadowego, ale automat go nie tyka - zgadywanie
+            # trasy było by gorsze niż uczciwe „uzupełnij hale".
             skipped["no_hall"] += 1
             continue
         needs.append(need)
@@ -583,10 +607,10 @@ async def run_auto(payload: AutoRequest):
     if end < start:
         raise HTTPException(400, "Koniec zakresu nie może być przed jego początkiem")
 
-    # RAZ na okreg: uprawnienia do szczebli. Zbieraja sie przy okazji otwierania
-    # meczow, wiec tuz po wdrozeniu tabela jest pusta - a bez liter automat nie
-    # odrozni stolika ligowego od okregowego. Kolejne przebiegi mijaja to bez
-    # kosztu, bo slad siedzi w `app_migrations`.
+    # RAZ na okręg: uprawnienia do szczebli. Zbierają się przy okazji otwierania
+    # meczów, więc tuż po wdrożeniu tabela jest pusta - a bez liter automat nie
+    # odróżni stolika ligowego od okręgowego. Kolejne przebiegi mijają to bez
+    # kosztu, bo ślad siedzi w `app_migrations`.
     grades = await backfill_grades(key)
 
     roster = await load_roster(key)
@@ -697,6 +721,16 @@ async def run_detail(run_id: int, province: str = Query(...)):
     key = require_province(province)
     row = await _run_row(key, run_id)
     report = state_dict(row["report_json"]) or {}
+    changes = await database.fetch_all(
+        select(province_assignment_changes)
+        .where(
+            and_(
+                province_assignment_changes.c.province == key,
+                province_assignment_changes.c.run_id == int(run_id),
+            )
+        )
+        .order_by(province_assignment_changes.c.id)
+    )
     return {
         "id": int(row["id"]),
         "province": key,
@@ -709,6 +743,25 @@ async def run_detail(run_id: int, province: str = Query(...)):
         "gaps": report.get("gaps_detail") or [],
         "applied_at": _iso(row["applied_at"]),
         "applied_count": row["applied_count"],
+        # Co ten przebieg FAKTYCZNIE zmienił w bazie związku - z osobą, która
+        # stała w gnieździe przedtem. To z tego żyje cofanie.
+        "changes": [
+            {
+                "id": int(item["id"]),
+                "match_id": _s(item["match_id"]),
+                "code": _s(item["match_code"]),
+                "slot": _s(item["slot"]),
+                "slot_label": slot_label(item["slot"]),
+                "judge_id": _s(item["judge_id"]),
+                "judge_name": _s(item["judge_name"]),
+                "before_id": _s(item["before_id"]),
+                "before_name": _s(item["before_name"]),
+                "at": _iso(item["created_at"]),
+                "undone_at": _iso(item["undone_at"]),
+                "undo_note": _s(item["undo_note"]),
+            }
+            for item in changes
+        ],
     }
 
 
@@ -797,3 +850,199 @@ async def run_pdf(run_id: int, province: str = Query(...)):
     # `_to_pdf` zostawia plik w katalogu rozliczeń - ścieżka pobrania jest tam,
     # bo to ta sama, jednorazowa furtka na token.
     return {"success": True, **result}
+
+
+# ──────────────────────── cofanie i optymalizacja ────────────────────────
+
+
+
+def _still_ours(state: dict, slot: str, judge_id: str) -> bool:
+    """
+    Czy w tym gnieździe nadal stoi ten, kogo wpisał automat.
+
+    Jeżeli nie - ktoś poprawił obsadę ręcznie i to gniazdo przestaje nas
+    obchodzić: ani go nie cofamy, ani nie proponujemy tam nikogo innego.
+    """
+    person = A.slot_person(state, slot) or {}
+    return _s(person.get("number")) == _s(judge_id)
+
+
+@router.get("/runs/{run_id}/undo", summary="Plan cofnięcia przebiegu")
+async def run_undo_plan(run_id: int, province: str = Query(...)):
+    """
+    Co trzeba wysłać do ZPRP, żeby cofnąć ten przebieg.
+
+    Sam PLAN - niczego nie zapisuje. Gniazda, w których od przebiegu ktoś
+    stanął ręcznie, wracają w `kept` i zostają nietknięte: automat nie kasuje
+    cudzej poprawki tylko dlatego, że sam coś tam wcześniej wpisał.
+    """
+    key = require_province(province)
+    await _run_row(key, run_id)
+    from app.assignment_undo import undo_plan
+
+    return await undo_plan(key, int(run_id))
+
+
+class UndoneRequest(BaseModel):
+    province: str
+    change_ids: list[int] = []
+    note: Optional[str] = None
+
+
+@router.post("/runs/{run_id}/undone", summary="Ślad cofnięcia")
+async def run_mark_undone(run_id: int, payload: UndoneRequest):
+    """Które zmiany faktycznie udało się cofnąć. Wiersze zostają w historii."""
+    key = require_province(payload.province)
+    await _run_row(key, run_id)
+    from app.assignment_undo import mark_undone
+
+    count = await mark_undone(key, payload.change_ids, payload.note or "")
+    return {"success": True, "undone": count}
+
+
+class OptimizeRequest(BaseModel):
+    province: str
+    #: Pominąć gniazda, których ktoś tknął ręcznie po przebiegu.
+    keep_manual: bool = True
+    use_google: bool = True
+
+
+@router.post("/runs/{run_id}/optimize", summary="Czy dziś da się ułożyć lepiej")
+async def run_optimize(run_id: int, payload: OptimizeRequest):
+    """
+    Liczy obsadę tych samych meczów JESZCZE RAZ, na dzisiejszych danych.
+
+    Od tamtego przebiegu mogło się zmienić wszystko, co automat bierze pod
+    uwagę: doszły niedyspozycje i przerwy, uzupełniły się odległości, ktoś
+    dołożył obsady ręcznie. Porównujemy więc obecny układ z nowym i mówimy,
+    czy warto cokolwiek ruszać - remis nie jest powodem do przestawiania ludzi.
+
+    Niczego nie zapisuje. Zmiany wykonuje panel, po zatwierdzeniu.
+    """
+    key = require_province(payload.province)
+    row = await _run_row(key, run_id)
+
+    changes = await database.fetch_all(
+        select(province_assignment_changes).where(
+            and_(
+                province_assignment_changes.c.province == key,
+                province_assignment_changes.c.run_id == int(run_id),
+                province_assignment_changes.c.undone_at.is_(None),
+            )
+        )
+    )
+    if not changes:
+        return {
+            "run_id": int(run_id),
+            "comparison": None,
+            "reason": "ten przebieg nie zapisał jeszcze żadnej obsady",
+        }
+
+    match_ids = sorted({_s(item["match_id"]) for item in changes})
+    touched = {(_s(item["match_id"]), _s(item["slot"])) for item in changes}
+
+    roster = await load_roster(key)
+    if not roster.judges:
+        raise HTTPException(400, "Okręg nie ma jeszcze listy sędziów")
+
+    rows = await database.fetch_all(
+        select(province_matches).where(
+            and_(
+                province_matches.c.province.in_(spellings(key)),
+                province_matches.c.match_id.in_(match_ids),
+            )
+        )
+    )
+
+    # Obecny układ TYCH gniazd - punkt odniesienia dla porównania.
+    book = await load_book(key)
+    before: list[dict] = []
+    needs = []
+    states: dict[str, dict] = {}
+    for row_match in rows:
+        state = state_dict(row_match["state_json"])
+        match_id = _s(row_match["match_id"])
+        code = _s(state.get("RozgrywkiCode") or row_match["match_code"])
+        states[match_id] = state
+        wanted = [slot for (mid, slot) in touched if mid == match_id]
+        for slot in wanted:
+            person = A.slot_person(state, slot) or {}
+            judge_id = _s(person.get("number"))
+            judge = roster.judges.get(judge_id)
+            city = roster.city_of(judge_id, None) if judge else ""
+            before.append(
+                {
+                    "match_id": match_id,
+                    "slot": slot,
+                    "code": code,
+                    "judge_id": judge_id,
+                    "name": _s(person.get("name")),
+                    "km": book.km(city, _s(state.get("Hala_miasto"))) if judge else None,
+                }
+            )
+        # Do ponownego ułożenia zwalniamy WYŁĄCZNIE gniazda z tego przebiegu -
+        # reszta obsady meczu zostaje i liczy się przy regułach par.
+        need = need_from_state(match_id, state, code, row_match["match_at"], roster, slots=wanted)
+        if payload.keep_manual:
+            # Gniazdo, w którym od przebiegu ktoś stanął ręcznie, nie jest już
+            # nasze - zostawiamy je w spokoju.
+            ours = {
+                _s(item["slot"])
+                for item in changes
+                if _s(item["match_id"]) == match_id
+                and _still_ours(state, _s(item["slot"]), _s(item["judge_id"]))
+            }
+            need.field_needed = [slot for slot in need.field_needed if slot in ours]
+            need.table_needed = [slot for slot in need.table_needed if slot in ours]
+        if need.field_needed or need.table_needed:
+            needs.append(need)
+
+    if not needs:
+        return {
+            "run_id": int(run_id),
+            "comparison": None,
+            "reason": "wszystkie gniazda z tego przebiegu zmienił już człowiek",
+        }
+
+    if payload.use_google:
+        await fill_missing(book, distance_pairs(needs, roster))
+
+    start = row["date_from"] or _now().date()
+    end = row["date_to"] or (start + timedelta(days=30))
+    busy, load = await load_busy(key, roster, date_from=start, date_to=end)
+    ctx = build_context(roster, book, busy=busy, load=load)
+    plan = build_plan(needs, ctx, rounds=2)
+
+    after = [
+        {
+            "match_id": item.match_id,
+            "slot": item.slot,
+            "code": item.code,
+            "judge_id": item.judge_id,
+            "name": item.judge_name,
+            "km": item.km,
+            "reasons": item.reasons,
+        }
+        for item in plan.proposals
+    ]
+
+    from app.assignment_undo import compare
+
+    comparison = compare(before, after)
+    for move in comparison["moves"]:
+        move["slot_label"] = slot_label(move.get("slot"))
+    return {
+        "run_id": int(run_id),
+        "comparison": comparison,
+        "gaps": [
+            {
+                "match_id": item.match_id,
+                "code": item.code,
+                "slot": item.slot,
+                "slot_label": slot_label(item.slot),
+                "reason": item.reason,
+            }
+            for item in plan.gaps
+        ],
+        "distances": book.stats,
+    }

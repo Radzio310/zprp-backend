@@ -19,7 +19,7 @@ def test_letters_are_read_from_the_option_badges():
 
 
 def test_letters_from_all_slots_are_summed():
-    # Lista stolikowa bywa przycieta filtrem i pokazuje mniej niz boiskowa.
+    # Lista stolikowa bywa przycieta filtrem i pokazuje mniej niż boiskowa.
     parsed = form(
         [option("KOWALSKI Jan", ["II", "III"])],
         [option("KOWALSKI Jan", ["MP"])],

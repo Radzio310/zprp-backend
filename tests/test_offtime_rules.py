@@ -18,7 +18,7 @@ def test_time_with_zone_becomes_polish_wall_clock():
 
 
 def test_match_time_keeps_its_hour():
-    # ⚠ W bazie termin meczu ma tzinfo=UTC, ale niesie godzine POLSKA.
+    # ⚠ W bazie termin meczu ma tzinfo=UTC, ale niesie godzinę POLSKA.
     stored = datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc)
     assert match_moment(stored) == datetime(2026, 10, 4, 17, 0)
 
@@ -43,9 +43,9 @@ def test_tolerance_works_only_at_the_edges():
     )
     # Kwadrans przed koncem - zapas wystarcza.
     assert is_available_at(offtimes, datetime(2026, 10, 4, 15, 45), tolerance_minutes=30)
-    # Srodek przedzialu przy zwyklym zapasie - zajety.
+    # Srodek przedziału przy zwyklym zapasie - zajęty.
     assert not is_available_at(offtimes, datetime(2026, 10, 4, 14, 0), tolerance_minutes=30)
-    # ⚠ Zapas wiekszy niz polowa przedzialu sprawia, ze KAZDA chwila jest „przy
+    # ⚠ Zapas wiekszy niż polowa przedziału sprawia, ze KAŻDA chwila jest „przy
     # krawedzi" - tak samo liczy to aplikacja i tak ma zostac.
     assert is_available_at(offtimes, datetime(2026, 10, 4, 14, 0), tolerance_minutes=120)
 
