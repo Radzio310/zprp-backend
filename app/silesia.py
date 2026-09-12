@@ -25,10 +25,13 @@ from sqlalchemy import select, insert, update, delete, func
 from app.db import (
     database,
     announcements,
+    judge_calendar_feeds,
+    judge_feed_offtimes,
     province_central_offtimes,
     province_offtime_sync_runs,
     silesia_offtimes,
 )
+from app.ical_feed import is_feed_entry
 from app.notify_utils import schedule_province_push
 from app.schemas import (
     # Announcements
@@ -660,6 +663,17 @@ def _without_client_central(value: Any) -> list[dict[str, Any]]:
     return [item for item in _json_list(value) if not _is_central_zprp_entry(item)]
 
 
+def _without_feed_entries(value: Any) -> list[dict[str, Any]]:
+    """Wpisy z kalendarzy sędziego (iCal) należą do serwera, nie do telefonu.
+
+    Aplikacja dostaje je w odczycie razem z resztą, więc przy zapisie odesłałaby
+    je z powrotem - i zostałyby w kalendarzu okręgowym na zawsze, także po
+    usunięciu kalendarza albo odwołaniu zajęć. Odcinamy je w obie strony: przy
+    zapisie i przy składaniu odpowiedzi.
+    """
+    return [item for item in _json_list(value) if not is_feed_entry(item)]
+
+
 def _same_province(left: Any, right: Any) -> bool:
     left_norm = normalize_province(left)
     right_norm = normalize_province(right)
@@ -743,6 +757,7 @@ async def _composed_offtime_records(
                 "city": row["city"],
                 "district": [],
                 "central": [],
+                "feeds": [],
                 "updated_at": row["updated_at"],
                 "central_synced_at": None,
             },
@@ -771,6 +786,7 @@ async def _composed_offtime_records(
                 "city": row["city"],
                 "district": [],
                 "central": [],
+                "feeds": [],
                 "updated_at": row["synced_at"],
                 "central_synced_at": row["synced_at"],
             },
@@ -785,6 +801,41 @@ async def _composed_offtime_records(
             group["updated_at"], row["synced_at"]
         )
 
+    # Kalendarze sędziego (plan zajęć, grafik pracy). Trzecie źródło obok
+    # okręgowego i centralnego - też doklejane DOPIERO przy odczycie.
+    # W widoku okręgu wchodzą tylko te, które sędzia udostępnił; pytając o
+    # siebie (`/self/{judge_id}`) widzi wszystkie swoje.
+    judge_keys = {key[1] for key in groups}
+    if judge_keys:
+        feed_query = select(judge_calendar_feeds).where(
+            judge_calendar_feeds.c.enabled.is_(True)
+        )
+        if judge_id is not None:
+            feed_query = feed_query.where(
+                judge_calendar_feeds.c.judge_id == judge_id
+            )
+        feed_rows = [
+            row
+            for row in await database.fetch_all(feed_query)
+            if str(row["judge_id"]) in judge_keys
+            and (judge_id is not None or bool(row["shared_with_province"]))
+        ]
+        if feed_rows:
+            snapshots = await database.fetch_all(
+                select(judge_feed_offtimes).where(
+                    judge_feed_offtimes.c.feed_id.in_(
+                        [str(row["id"]) for row in feed_rows]
+                    )
+                )
+            )
+            by_judge: dict[str, list[dict[str, Any]]] = {}
+            for snapshot in snapshots:
+                by_judge.setdefault(str(snapshot["judge_id"]), []).extend(
+                    _json_list(snapshot["data_json"])
+                )
+            for key, group in groups.items():
+                group["feeds"] = by_judge.get(key[1], [])
+
     records = [
         OfftimeRecord(
             judge_id=group["judge_id"],
@@ -793,12 +844,13 @@ async def _composed_offtime_records(
             city=group["city"],
             data_json=_dedupe_offtime_entries(
                 [
-                    *(
+                    *_without_feed_entries(
                         _without_client_central(group["district"])
                         if group["central_synced_at"]
                         else group["district"]
                     ),
                     *group["central"],
+                    *group.get("feeds", []),
                 ]
             ),
             updated_at=group["updated_at"],
@@ -852,6 +904,9 @@ async def set_offtimes(
     # BAZOWA. Od teraz centralny snapshot pochodzi wyłącznie z ZPRP i nie wolno
     # go nadpisywać zawartością telefonu.
     data_json_obj = _without_client_central(data_json_obj)
+    # To samo dotyczy wpisów z kalendarzy sędziego - ich właścicielem jest
+    # serwer, a telefon dostaje je tylko do pokazania.
+    data_json_obj = _without_feed_entries(data_json_obj)
 
     # Postgres: ON CONFLICT (judge_id, province)
     # SQLite: w razie czego zadziała jako zwykły INSERT, ale rekomendowana migracja na composite PK

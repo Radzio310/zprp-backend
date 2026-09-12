@@ -144,6 +144,70 @@ Index(
     province_central_offtimes.c.active,
 )
 
+# Kalendarze sędziego w formacie iCal: plan zajęć z uczelni, grafik w pracy,
+# dowolny inny kalendarz z linkiem. Serwer czyta je cyklicznie
+# (``app/calendar_feed_sync.py``), a wpisy trafiają do OSOBNEJ tabeli niżej -
+# tak samo jak niedyspozycje centralne, żeby zapis z telefonu nie mógł ich
+# skasować, a one nie mogły skasować wpisów ręcznych.
+#
+# ⚠ ``url`` jest sekretem: link do planu zajęć zawiera klucz dostępu. Nie wraca
+# do aplikacji w całości (patrz ``app/calendar_feeds.py``) i nie trafia do logów.
+judge_calendar_feeds = Table(
+    "judge_calendar_feeds",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("name", String, nullable=False),
+    Column("url", Text, nullable=False),
+    Column("color", String, nullable=True),
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    # Czy zajęcia z tego kalendarza blokują automat obsady i giełdę meczów.
+    Column("blocks_assignment", Boolean, nullable=False, server_default=text("true")),
+    # Czy widzi je okręg (Match Master), czy tylko właściciel.
+    Column(
+        "shared_with_province", Boolean, nullable=False, server_default=text("true")
+    ),
+    Column("last_status", String, nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("last_sync_at", DateTime(timezone=True), nullable=True),
+    Column("entry_count", Integer, nullable=False, server_default=text("0")),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+# Wpisy pobrane z kalendarza - jeden wiersz na kalendarz, cała lista w JSON.
+# Nieudane pobranie NIE czyści tej tabeli: lepiej pokazać wczorajszy plan niż
+# ogłosić, że sędzia jest wolny zawsze.
+judge_feed_offtimes = Table(
+    "judge_feed_offtimes",
+    metadata,
+    Column("feed_id", String, primary_key=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column(
+        "data_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column(
+        "synced_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+)
+
 # Dziennik cykli synchronizacji. ``cycle_key`` zapewnia, że przy kilku
 # replikach Railway tylko jedna z nich wykona dany dwugodzinny przebieg.
 province_offtime_sync_runs = Table(

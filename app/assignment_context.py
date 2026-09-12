@@ -126,6 +126,8 @@ async def load_roster(province: str) -> Roster:
 
     from app.db import (
         database,
+        judge_calendar_feeds,
+        judge_feed_offtimes,
         province_central_offtimes,
         province_judge_blocks,
         province_judge_pairs,
@@ -179,6 +181,28 @@ async def load_roster(province: str) -> Roster:
             if city:
                 cities.setdefault(judge_id, city)
             entries.setdefault(judge_id, []).extend(_json_list(row["data_json"]))
+
+    # Kalendarze sędziego (plan zajęć, grafik pracy). Wchodzą TYLKO te, przy
+    # których sędzia zostawił „blokuje obsadę" - kalendarz urodzin nie ma
+    # zajmować terminu, a plan zajęć ma.
+    blocking = await database.fetch_all(
+        select(judge_calendar_feeds).where(
+            and_(
+                judge_calendar_feeds.c.enabled.is_(True),
+                judge_calendar_feeds.c.blocks_assignment.is_(True),
+            )
+        )
+    )
+    feed_ids = [str(row["id"]) for row in blocking]
+    if feed_ids:
+        for row in await database.fetch_all(
+            select(judge_feed_offtimes).where(
+                judge_feed_offtimes.c.feed_id.in_(feed_ids)
+            )
+        ):
+            judge_id = _s(row["judge_id"])
+            if judge_id:
+                entries.setdefault(judge_id, []).extend(_json_list(row["data_json"]))
 
     for row in people:
         judge_id = _s(row["judge_id"])

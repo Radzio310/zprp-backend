@@ -37,6 +37,7 @@ from app.delegate import router as delegate_router
 from app.judge_documents import router as judge_documents_router
 from app.results import router as results_router
 from app.calendar import router as calendar_router
+from app.calendar_feeds import router as calendar_feeds_router
 from app.silesia import router as silesia_router
 from app.admin import router as admin_router
 from app.training import router as training_router
@@ -158,6 +159,7 @@ from app.push.scheduler import run_push_scheduler
 from app.push.deploy_test_notifications import run_deploy_test_notifications
 from app.province_match_monitor import run_province_match_monitor
 from app.province_offtime_sync import run_province_offtime_sync
+from app.calendar_feed_sync import run_calendar_feed_sync
 
 from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts, assignment_drafts, province_match_events, province_match_sync_runs
 
@@ -228,6 +230,9 @@ app.include_router(offtime_router)
 app.include_router(delegate_router)
 app.include_router(judge_documents_router)
 app.include_router(results_router)
+# Kalendarze sędziego PRZED trasami Google: `/calendar/events/{match_id:path}`
+# z tamtego routera złapałoby ścieżkę `/calendar/feeds/...`.
+app.include_router(calendar_feeds_router)
 app.include_router(calendar_router)
 app.include_router(silesia_router)
 app.include_router(admin_router)
@@ -1240,8 +1245,10 @@ async def startup():
     _deploy_push_test_task = asyncio.create_task(_run_deploy_push_test_safely())
     _province_match_monitor_task = asyncio.create_task(run_province_match_monitor())
     _province_offtime_sync_task = asyncio.create_task(run_province_offtime_sync())
+    _calendar_feed_task = asyncio.create_task(run_calendar_feed_sync())
     logger.info("Province match monitor started (15 min light / 4 h full)")
     logger.info("Central offtime sync started (2 h)")
+    logger.info("Kalendarze sędziów (iCal) start (co 6 h)")
     logger.info("✅ Push scheduler started")
 
     # NEW: background notification generator (tournament reminders etc.)
