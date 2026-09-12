@@ -942,6 +942,32 @@ province_assignment_runs = Table(
     Column("applied_count", Integer, nullable=True),
 )
 
+# Ustawienia klubu DLA OBSADY - osobno od rozliczeniowych (`province_clubs`).
+#
+# To dwie różne rozmowy z klubem: tamta jest o pieniądzach, ta o tym, kogo klub
+# stawia przy stoliku, gdy gra u siebie. Trzymanie ich w jednej tabeli kusiłoby,
+# żeby „rozlicza przez okręg" zaczęło coś znaczyć dla automatu - a nie znaczy.
+province_club_assignment = Table(
+    "province_club_assignment",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("club_id", String, primary_key=True),
+    # Ilu stolikowych klub daje z własnych ludzi, grając u siebie (0, 1 albo 2).
+    # Automat obsadza wtedy o tylu mniej.
+    Column("table_by_club", Integer, nullable=False, server_default=text("0")),
+    # Klub prosi, żeby nie wysyłać tu sędziów z tego samego miasta.
+    Column("avoid_local", Boolean, nullable=False, server_default=text("false")),
+    Column("note", String, nullable=True),
+    Column("updated_by", String, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+
 # Co przebieg automatu FAKTYCZNIE zmienił w bazie związku.
 #
 # Bez tego „cofnij" nie ma czego cofać: `province_assignment_runs` trzyma PLAN,

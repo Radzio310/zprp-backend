@@ -44,11 +44,22 @@ GOOGLE_BUDGET = 120
 class DistanceBook:
     """Odległości gotowe do czytania - tabela okręgu plus zapamiętane pary."""
 
-    __slots__ = ("index", "_cache", "_asked", "from_table", "from_memory", "from_google")
+    __slots__ = (
+        "index", "_cache", "_asked", "_seen",
+        "from_table", "from_memory", "from_google",
+    )
 
     def __init__(self, index: DistanceIndex, cache: dict[tuple[str, str], float] | None = None):
         self.index = index
         self._cache: dict[tuple[str, str], float] = dict(cache or {})
+        #: Odpowiedzi po SUROWEJ parze napisów.
+        #:
+        #: ⚠ Automat pyta o odległość ~130 tysięcy razy przy jednym przebiegu
+        #: (każdy sędzia razy każde gniazdo), a `normalize_city` to kilka
+        #: wyrażeń regularnych na wywołanie - bez tej pamięci same odległości
+        #: zjadały sześć z siedmiu sekund przebiegu. Miast jest kilkadziesiąt,
+        #: więc słownik zostaje malutki, a trafia prawie zawsze.
+        self._seen: dict[tuple[str, str], Optional[float]] = {}
         #: Pary, o które pytano i których NIE znalazł nikt - żeby nie pytać w kółko.
         self._asked: set[tuple[str, str]] = set()
         self.from_table = 0
@@ -65,6 +76,14 @@ class DistanceBook:
 
     def km(self, origin: Any, destination: Any) -> Optional[float]:
         """Kilometry albo None. Funkcja dla `Context.km` - czysty odczyt."""
+        raw = (str(origin or ""), str(destination or ""))
+        if raw in self._seen:
+            return self._seen[raw]
+        value = self._lookup(origin, destination)
+        self._seen[raw] = value
+        return value
+
+    def _lookup(self, origin: Any, destination: Any) -> Optional[float]:
         key = self.key(origin, destination)
         if key is None:
             return None
@@ -97,6 +116,9 @@ class DistanceBook:
         return out
 
     def remember(self, key: tuple[str, str], km: Optional[float]) -> None:
+        # Nowa odpowiedź unieważnia pamięć po surowych napisach - inaczej para,
+        # o którą pytaliśmy przed Google'em, na zawsze zostałaby nieznana.
+        self._seen.clear()
         if km is None:
             self._asked.add(key)
             return

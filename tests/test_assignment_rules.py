@@ -1,5 +1,7 @@
 from app.assignment_rules import (
     COMPLETE,
+    is_bye,
+    teams_known,
     GAP,
     SOFT,
     competition_key,
@@ -104,3 +106,44 @@ def test_competition_key_drops_the_match_number():
 def test_category_comes_from_the_code():
     assert match_category("S/JmM/12")
     assert match_category("IIK4/1")
+
+
+# ── mecze, których nie będzie ────────────────────────────────────────────────
+
+
+def test_a_paused_team_is_not_a_match_to_fill():
+    """
+    Przy nieparzystej liczbie drużyn jedna pauzuje, a terminarz zapisuje to jak
+    zwykły mecz - z numerem, halą i pustymi gniazdami. Automat wysyłał tam
+    ludzi na spotkanie, którego nie będzie.
+    """
+    assert is_bye(
+        {
+            "ID_zespoly_gosp_ZespolNazwa": "Zespół nr 2",
+            "ID_zespoly_gosc_ZespolNazwa": "SPR Sośnica Gliwice pauzuje",
+        }
+    )
+    assert is_bye({"ID_zespoly_gosp_ZespolNazwa": "KS Bystra - PAUZA"})
+    assert is_bye({"ID_zespoly_gosc_ZespolNazwa": "wolny los"})
+
+
+def test_a_normal_match_is_not_a_bye():
+    assert not is_bye(
+        {
+            "ID_zespoly_gosp_ZespolNazwa": "GKS Katowice",
+            "ID_zespoly_gosc_ZespolNazwa": "SPR Sośnica Gliwice",
+        }
+    )
+    assert not is_bye({})
+
+
+def test_a_match_without_both_teams_is_flagged_but_not_refused():
+    # Mecz z drabinki: hala i termin bywają znane, pary jeszcze nie.
+    assert not teams_known({"ID_zespoly_gosc_ZespolNazwa": "KS Bystra"})
+    assert not teams_known({})
+    assert teams_known(
+        {
+            "ID_zespoly_gosp_ZespolNazwa": "GKS Katowice",
+            "ID_zespoly_gosc_ZespolNazwa": "KS Bystra",
+        }
+    )

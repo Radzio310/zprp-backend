@@ -30,6 +30,11 @@ SLOTS = FIELD_SLOTS + TABLE_SLOTS + DELEGATE_SLOTS
 #: Kategorie, w których wystarczy jeden boiskowy i jeden stolikowy.
 SMALL_PREFIXES = frozenset({"DZM", "DZK", "MLM1213", "MLK1213"})
 
+#: Napisy, którymi terminarz oznacza mecz, który się NIE ODBĘDZIE. W rozgrywkach
+#: o nieparzystej liczbie drużyn jedna w każdej kolejce pauzuje, a ZPRP zapisuje
+#: to jako zwykły wiersz terminarza - z halą, numerem i pustymi gniazdami obsady.
+PAUSE_MARKS = ("pauzuj", "pauza", "wolny los", "bye")
+
 #: Stany gniazda i meczu.
 COMPLETE = "complete"
 SOFT = "soft"
@@ -121,3 +126,36 @@ def competition_key(code: Any) -> str:
     if len(parts) < 2:
         return text
     return "/".join(parts[:-1])
+
+
+def is_bye(state: Mapping[str, Any]) -> bool:
+    """
+    Czy to mecz, którego NIE BĘDZIE - pauza drużyny albo wolny los.
+
+    Przy nieparzystej liczbie drużyn jedna w każdej kolejce pauzuje, a terminarz
+    zapisuje to jak zwykły mecz: jest numer, bywa hala, gniazda obsady stoją
+    puste. Automat brał taki wiersz za mecz do obsadzenia i wysyłał ludzi na
+    spotkanie, które się nie odbędzie.
+
+    ⚠ Rozpoznajemy to po NAZWIE DRUŻYNY („SPR Sośnica Gliwice pauzuje"), bo
+    osobnego znacznika w danych nie ma.
+    """
+    for field in ("ID_zespoly_gosp_ZespolNazwa", "ID_zespoly_gosc_ZespolNazwa"):
+        name = _s((state or {}).get(field)).lower()
+        if any(mark in name for mark in PAUSE_MARKS):
+            return True
+    return False
+
+
+def teams_known(state: Mapping[str, Any]) -> bool:
+    """
+    Czy wiadomo, kto z kim gra.
+
+    Terminarz miewa wiersze z jedną drużyną albo bez żadnej - mecz z drabinki,
+    którego pary jeszcze nie znamy. Obsadzać go MOŻNA (hala i termin bywają
+    już ustalone), ale warto o tym powiedzieć, bo taki mecz najczęściej jeszcze
+    się przesunie.
+    """
+    host = _s((state or {}).get("ID_zespoly_gosp_ZespolNazwa"))
+    guest = _s((state or {}).get("ID_zespoly_gosc_ZespolNazwa"))
+    return bool(host and guest)

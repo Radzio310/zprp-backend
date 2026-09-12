@@ -39,6 +39,18 @@ from app.assignment_people import Judge, is_local, pair_ok, table_pair_ok, table
 
 #: Wagi punktowe. Kilometr to jeden punkt - reszta jest wyskalowana względem niego.
 W_KM = 1.0
+
+#: Od tylu kilometrów przejazd przestaje być zwykłym kosztem i staje się
+#: problemem - każdy następny kilometr liczy się `FAR_FACTOR` razy drożej.
+#:
+#: Bez tego progu automat traktował 140 km jak 35 km cztery razy i przy
+#: wyrównywaniu obciążenia potrafił wysłać kogoś przez pół województwa, mimo
+#: że bliżej siedział ktoś z jednym meczem więcej. Na danych w skali śląskiego
+#: (190 sędziów, 200 meczów) próg ścina najdłuższy przejazd ze 144 do 96 km
+#: i zdejmuje 500 km z sumy - przy TAKIM SAMYM wypełnieniu gniazd i nawet
+#: równiejszym podziale pracy.
+FAR_KM = 45.0
+FAR_FACTOR = 4.0
 W_LOCAL = 400.0
 W_LOAD = 35.0
 W_OFF_DAY = 120.0
@@ -75,6 +87,10 @@ class MatchNeed:
     moment: Optional[datetime]
     day: Optional[date]
     host_city: str
+    #: Klub gospodarza prosi, żeby nie wysyłać tu sędziów z jego miasta.
+    #: Bez tego miejscowy jest tylko karany punktami i przy braku chętnych
+    #: i tak wchodzi - a to ustawienie ma znaczyć „nie", nie „niechętnie".
+    avoid_local: bool = False
     #: Nazwy drużyn - do raportu i PDF, nie do decyzji.
     host: str = ""
     guest: str = ""
@@ -210,6 +226,8 @@ def _hard_reason(
     _, can_make = _same_day_state(ctx, judge.judge_id, need)
     if not can_make:
         return "ma tego dnia mecz, na który nie zdąży"
+    if need.avoid_local and is_local(judge, need.host_city):
+        return "klub gospodarza nie chce sędziów z tego miasta"
     if round_no == 1 and judge.preferred_days and need.weekday is not None:
         if need.weekday not in judge.preferred_days:
             return "dzień spoza preferowanych"
@@ -238,6 +256,10 @@ def _score(
     else:
         score += km * W_KM
         reasons.append(f"{round(km)} km")
+        # Powyżej progu każdy kilometr boli mocniej - patrz nota przy `FAR_KM`.
+        if km > FAR_KM:
+            score += (km - FAR_KM) * (FAR_FACTOR - 1.0) * W_KM
+            reasons.append("bardzo daleko")
 
     if is_local(judge, need.host_city):
         score += W_LOCAL
@@ -349,10 +371,18 @@ def build_plan(
     }
     last_refusals: dict[tuple[str, str], dict[str, int]] = {}
 
+    # ⚠ KOLEJNOŚĆ PĘTLI MA ZNACZENIE. Najpierw BOISKOWI we wszystkich meczach,
+    # dopiero potem stoliki - a nie mecz po meczu do kompletu.
+    #
+    # Idąc meczami, automat wyczerpywał listę sędziów na pierwszych spotkaniach
+    # i ostatnie zostawały puste, choć wszystkie potrzebowały tak samo. Przy
+    # dzieciach wyglądało to najgorzej: mecz dostawał sam stolik, bo boiskowych
+    # już nie było. A to sędzia na boisku jest tam nieodzowny - stolik idzie
+    # w ostatniej kolejności (decyzja użytkownika z 12.09.2026).
     for round_no in range(1, max(1, rounds) + 1):
-        for need in needs:
-            slots = open_slots.get(need.match_id) or {}
-            for kind in ("field", "table"):
+        for kind in ("field", "table"):
+            for need in needs:
+                slots = open_slots.get(need.match_id) or {}
                 pending = list(slots.get(kind) or [])
                 if not pending:
                     continue

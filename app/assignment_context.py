@@ -70,7 +70,10 @@ def _json_list(value: Any) -> list:
 class Roster:
     """Sędziowie okręgu razem z tym, czego automat o nich nie policzy sam."""
 
-    __slots__ = ("judges", "offtimes", "cities", "pauses", "pairs", "blocks", "settings", "grades")
+    __slots__ = (
+        "judges", "offtimes", "cities", "pauses", "pairs", "blocks", "settings",
+        "grades", "clubs",
+    )
 
     def __init__(self) -> None:
         self.judges: dict[str, Judge] = {}
@@ -81,6 +84,8 @@ class Roster:
         self.blocks: set[tuple[str, str]] = set()
         self.settings: dict[str, dict] = {}
         self.grades: dict[str, list[str]] = {}
+        #: Ustawienia klubu dla obsady, po kluczu nazwy drużyny gospodarza.
+        self.clubs: dict[str, dict] = {}
 
     def available(self, judge_id: str, moment: Optional[datetime]) -> bool:
         return O.is_available_at(self.offtimes.get(judge_id, ()), moment)
@@ -97,6 +102,19 @@ class Roster:
             return home
         moment = datetime.combine(day, datetime.min.time())
         return O.city_at(home, self.cities.get(judge_id, ()), moment)
+
+    def club_for(self, host: Any) -> dict:
+        """
+        Ustawienia klubu gospodarza - po NAZWIE drużyny.
+
+        ⚠ Mecze nie niosą numeru klubu, tylko nazwę drużyny, więc dopasowanie
+        idzie tą samą drogą, co obciążenia w panelu klubów (`team_key`).
+        Nieznana nazwa to pusty słownik, nie wyjątek: brak ustawień znaczy
+        „wszystko po staremu".
+        """
+        from app.province_clubs_scrape import team_key
+
+        return self.clubs.get(team_key(host), {})
 
     def busy_minutes(self, judge_id: str, day: date) -> int:
         return O.busy_minutes_on_day(self.offtimes.get(judge_id, ()), day)
@@ -181,6 +199,8 @@ async def load_roster(province: str) -> Roster:
         roster.offtimes[judge_id] = offtimes
         roster.cities[judge_id] = temp_cities
 
+    roster.clubs = await _club_rules(province)
+
     today = datetime.now().date()
     for row in await database.fetch_all(
         select(province_judge_pauses).where(province_judge_pauses.c.province.in_(names))
@@ -219,6 +239,61 @@ async def load_roster(province: str) -> Roster:
     return roster
 
 
+async def _club_rules(province: str) -> dict[str, dict]:
+    """
+    Ustawienia obsadowe klubów, gotowe do szukania po nazwie drużyny gospodarza.
+
+    Klucz to `team_key` nazwy drużyny, bo tylko nazwę niesie mecz. Jeden klub
+    ma zwykle kilka drużyn (młodziczki, juniorzy, dzieci) i wszystkie dziedziczą
+    to samo ustawienie - stolik stawia KLUB, nie rocznik.
+    """
+    from sqlalchemy import and_, select
+
+    from app.db import database, province_club_assignment, province_club_teams
+    from app.province_clubs_scrape import team_key
+    from app.settlement_seasons import season_of
+
+    out: dict[str, dict] = {}
+    rows = await database.fetch_all(
+        select(province_club_assignment).where(
+            province_club_assignment.c.province.in_(spellings(province))
+        )
+    )
+    if not rows:
+        return out
+    by_club = {
+        _s(row["club_id"]): {
+            "club_id": _s(row["club_id"]),
+            "table_by_club": int(row["table_by_club"] or 0),
+            "avoid_local": bool(row["avoid_local"]),
+            "note": _s(row["note"]),
+        }
+        for row in rows
+    }
+
+    season = season_of(datetime.now())
+    teams = await database.fetch_all(
+        select(
+            province_club_teams.c.club_id,
+            province_club_teams.c.team_name,
+            province_club_teams.c.name_key,
+        ).where(
+            and_(
+                province_club_teams.c.province.in_(spellings(province)),
+                province_club_teams.c.season == season,
+            )
+        )
+    )
+    for row in teams:
+        rules = by_club.get(_s(row["club_id"]))
+        if not rules:
+            continue
+        key = _s(row["name_key"]) or team_key(row["team_name"])
+        if key:
+            out.setdefault(key, rules)
+    return out
+
+
 async def manual_match_ids(province: str) -> set[str]:
     """Mecze układane ręcznie - automat ich nie rusza."""
     from sqlalchemy import select
@@ -250,8 +325,16 @@ def need_from_state(
     gniazdo w jednym meczu.
     """
     wanted = {str(item).strip() for item in slots} if slots is not None else None
-    needs = A.crew_needs(code)
+    needs = dict(A.crew_needs(code))
     local = O.match_moment(moment) if moment else None
+
+    # Klub gospodarza bywa umówiony, że stolik stawia z własnych ludzi - wtedy
+    # okręg posyła o tylu mniej. Nigdy poniżej zera i nigdy dla boiskowych:
+    # tych zapewnia okręg zawsze.
+    club = roster.club_for(state.get("ID_zespoly_gosp_ZespolNazwa"))
+    from_club = max(0, min(int(club.get("table_by_club", 0) or 0), needs["table"]))
+    if from_club:
+        needs["table"] = needs["table"] - from_club
 
     crew_ids: set[str] = set()
     crew_field: list[Judge] = []
@@ -283,6 +366,7 @@ def need_from_state(
         moment=local,
         day=local.date() if local else None,
         host_city=_s(state.get("Hala_miasto")),
+        avoid_local=bool(club.get("avoid_local")),
         host=_s(state.get("ID_zespoly_gosp_ZespolNazwa")),
         guest=_s(state.get("ID_zespoly_gosc_ZespolNazwa")),
         hall=_s(state.get("Hala_nazwa")),

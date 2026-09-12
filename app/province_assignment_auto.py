@@ -562,7 +562,15 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
         )
     )
 
-    skipped = {"manual": 0, "outside": 0, "complete": 0, "no_hall": 0, "undated": 0}
+    skipped = {
+        "manual": 0,
+        "outside": 0,
+        "complete": 0,
+        "no_hall": 0,
+        "undated": 0,
+        # Mecze, których nie będzie: pauza drużyny albo wolny los.
+        "bye": 0,
+    }
     needs = []
     for row in rows:
         state = state_dict(row["state_json"])
@@ -579,6 +587,11 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
             continue
         if match_id in manual:
             skipped["manual"] += 1
+            continue
+        if A.is_bye(state):
+            # Wiersz terminarza z pauzującą drużyną wygląda jak mecz, ale nikt
+            # na niego nie pojedzie.
+            skipped["bye"] += 1
             continue
         need = need_from_state(match_id, state, code, row["match_at"], roster, slots=payload.slots)
         if not need.field_needed and not need.table_needed:
@@ -1046,3 +1059,156 @@ async def run_optimize(run_id: int, payload: OptimizeRequest):
         ],
         "distances": book.stats,
     }
+
+
+# ─────────────────────────── kluby w obsadzie ───────────────────────────
+
+
+@router.get("/clubs", summary="Kluby okręgu i ich ustawienia obsadowe")
+async def clubs(province: str = Query(...), q: Optional[str] = Query(None)):
+    """
+    Kluby z tego samego źródła, co panel klubów - ale z innymi ustawieniami.
+
+    Tam rozmowa jest o pieniądzach, tutaj o tym, kogo klub stawia przy stoliku,
+    gdy gra u siebie. Liczba drużyn i mecze u siebie są po to, żeby obsadowy
+    wiedział, ile ta decyzja waży: klub z dwiema drużynami to co innego niż
+    klub z dwunastoma.
+    """
+    from app.db import province_club_assignment, province_club_teams
+    from app.province_clubs_scrape import team_key
+
+    key = require_province(province)
+    season = season_of(_now())
+
+    teams = await database.fetch_all(
+        select(
+            province_club_teams.c.club_id,
+            province_club_teams.c.team_name,
+            province_club_teams.c.name_key,
+            province_club_teams.c.category,
+        ).where(
+            and_(
+                province_club_teams.c.province.in_(spellings(key)),
+                province_club_teams.c.season == season,
+            )
+        )
+    )
+    rules = {
+        _s(row["club_id"]): row
+        for row in await database.fetch_all(
+            select(province_club_assignment).where(
+                province_club_assignment.c.province.in_(spellings(key))
+            )
+        )
+    }
+
+    # Ile meczów U SIEBIE ma każda drużyna w tym sezonie - stąd waga ustawienia.
+    hosted: dict[str, int] = {}
+    for row in await database.fetch_all(
+        select(province_matches.c.state_json).where(
+            and_(
+                province_matches.c.province.in_(spellings(key)),
+                province_matches.c.active.is_(True),
+            )
+        )
+    ):
+        host = _s(state_dict(row["state_json"]).get("ID_zespoly_gosp_ZespolNazwa"))
+        if host:
+            hosted[team_key(host)] = hosted.get(team_key(host), 0) + 1
+
+    grouped: dict[str, dict] = {}
+    for row in teams:
+        club_id = _s(row["club_id"])
+        if not club_id:
+            continue
+        name = _s(row["team_name"])
+        entry = grouped.setdefault(
+            club_id,
+            {
+                "club_id": club_id,
+                "name": name,
+                "teams": [],
+                "matches_at_home": 0,
+                "table_by_club": 0,
+                "avoid_local": False,
+                "note": "",
+            },
+        )
+        entry["teams"].append({"name": name, "category": _s(row["category"])})
+        entry["matches_at_home"] += hosted.get(_s(row["name_key"]) or team_key(name), 0)
+        # Nazwa klubu: najkrótsza z nazw drużyn czyta się najbliżej nazwy klubu
+        # („SPR Sośnica Gliwice" zamiast „SPR Sośnica Gliwice Młodziczki II").
+        if name and len(name) < len(entry["name"]):
+            entry["name"] = name
+
+    for club_id, entry in grouped.items():
+        rule = rules.get(club_id)
+        if rule is None:
+            continue
+        entry["table_by_club"] = int(rule["table_by_club"] or 0)
+        entry["avoid_local"] = bool(rule["avoid_local"])
+        entry["note"] = _s(rule["note"])
+
+    rows = sorted(grouped.values(), key=lambda item: fold(item["name"]))
+    if q and q.strip():
+        needle = fold(q)
+        rows = [
+            row
+            for row in rows
+            if needle in fold(row["name"])
+            or any(needle in fold(team["name"]) for team in row["teams"])
+        ]
+
+    return {
+        "province": key,
+        "display": display(key),
+        "season": season,
+        "clubs": rows,
+        "totals": {
+            "clubs": len(rows),
+            "with_own_table": sum(1 for row in rows if row["table_by_club"]),
+            "avoid_local": sum(1 for row in rows if row["avoid_local"]),
+        },
+    }
+
+
+class ClubRuleRequest(BaseModel):
+    province: str
+    #: Ilu stolikowych klub stawia z własnych ludzi, grając u siebie (0-2).
+    table_by_club: int = 0
+    avoid_local: bool = False
+    note: Optional[str] = None
+    updated_by: Optional[str] = None
+
+
+@router.put("/clubs/{club_id}", summary="Ustawienia obsadowe klubu")
+async def save_club_rule(club_id: str, payload: ClubRuleRequest):
+    from app.db import province_club_assignment
+
+    key = require_province(payload.province)
+    values = {
+        "province": key,
+        "club_id": _s(club_id),
+        # Więcej niż dwóch stolikowych nie ma przy żadnym meczu.
+        "table_by_club": max(0, min(2, int(payload.table_by_club or 0))),
+        "avoid_local": bool(payload.avoid_local),
+        "note": _s(payload.note) or None,
+        "updated_by": _s(payload.updated_by) or None,
+        "updated_at": _now(),
+    }
+    await database.execute(
+        pg_insert(province_club_assignment)
+        .values(**values)
+        .on_conflict_do_update(
+            index_elements=[
+                province_club_assignment.c.province,
+                province_club_assignment.c.club_id,
+            ],
+            set_={
+                column: values[column]
+                for column in values
+                if column not in ("province", "club_id")
+            },
+        )
+    )
+    return {"success": True, "club_id": _s(club_id), "table_by_club": values["table_by_club"]}

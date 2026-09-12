@@ -205,26 +205,68 @@ def build_report(
     }
 
 
+def taken_slots(need: Optional[MatchNeed]) -> list[dict]:
+    """
+    Kto już stoi przy tym meczu - gniazda, których automat nie tykał.
+
+    To NIE jest luka w planie: obsadzamy wyłącznie puste gniazda (decyzja
+    użytkownika), więc zajęte trzeba pokazać osobno, żeby nie wyglądało na
+    przeoczenie.
+    """
+    if need is None:
+        return []
+    out: list[dict] = []
+    for group, people in (("field", need.crew_field), ("table", need.crew_table)):
+        for judge in people:
+            if not judge or not judge.name:
+                continue
+            out.append({"group": group, "name": judge.name, "judge_id": judge.judge_id})
+    return out
+
+
 def plan_rows(plan: Plan, needs: Sequence[MatchNeed]) -> list[dict]:
-    """Propozycje pogrupowane po meczu - do panelu i do tabeli w PDF."""
+    """
+    PEŁNY obraz meczu, nie same propozycje.
+
+    Panel musi pokazać trzy rzeczy naraz, inaczej obsadowy nie wie, co się
+    stało: kogo automat właśnie postawił, KTO JUŻ STAŁ w gnieździe (i dlatego
+    automat go nie tknął) oraz które gniazdo zostało puste i dlaczego. Sama
+    lista propozycji wygląda przy meczu dzieci tak, jakby automat zapomniał
+    o sędzim boiskowym - a on po prostu już tam był.
+    """
     by_match = {need.match_id: need for need in needs}
-    grouped: dict[str, dict] = {}
+    gaps_by_match: dict[str, list[Gap]] = {}
+    for item in plan.gaps:
+        gaps_by_match.setdefault(item.match_id, []).append(item)
+    # Karta powstaje dla KAŻDEGO meczu z listy, także dla takiego, w którym
+    # automat nikogo nie postawił - bo właśnie tam trzeba pokazać powód.
+    grouped: dict[str, dict] = {
+        need.match_id: {
+            "match_id": need.match_id,
+            "code": need.code,
+            "day": need.day.isoformat() if need.day else None,
+            "time": need.moment.strftime("%H:%M") if need.moment else "",
+            "city": need.host_city,
+            "hall": need.hall,
+            "host": need.host,
+            "guest": need.guest,
+            "slots": [],
+            "taken": taken_slots(need),
+            "gaps": [
+                {
+                    "slot": gap.slot,
+                    "slot_label": slot_label(gap.slot),
+                    "reason": gap.reason,
+                }
+                for gap in gaps_by_match.get(need.match_id, ())
+            ],
+        }
+        for need in needs
+    }
     for item in plan.proposals:
-        need = by_match.get(item.match_id)
-        entry = grouped.setdefault(
-            item.match_id,
-            {
-                "match_id": item.match_id,
-                "code": item.code,
-                "day": need.day.isoformat() if need and need.day else None,
-                "time": need.moment.strftime("%H:%M") if need and need.moment else "",
-                "city": need.host_city if need else "",
-                "hall": need.hall if need else "",
-                "host": need.host if need else "",
-                "guest": need.guest if need else "",
-                "slots": [],
-            },
-        )
+        entry = grouped.get(item.match_id)
+        if entry is None:
+            continue
         entry["slots"].append(
             {
                 "slot": item.slot,

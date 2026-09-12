@@ -148,3 +148,33 @@ def test_plan_rows_carry_both_lists():
     [slot] = [s for s in plan_rows(plan, needs)[0]["slots"] if s["slot"] == "pierwszy"]
     assert slot["reasons"] == ["20 km"]
     assert slot["why"] == []
+
+
+def test_a_match_shows_who_already_stands_there():
+    """
+    Gniazdo zajęte to NIE luka w planie.
+
+    Przy meczu dzieci (jeden boiskowy, jeden stolikowy) automat widział sędziego
+    I już wpisanego i dokładał sam stolik - a panel pokazywał wtedy samą tę
+    jedną propozycję, jakby o boiskowym zapomniał.
+    """
+    jan = make_judge("77", "KOWALSKI Jan", city="Gliwice")
+    item = need("1", "S/DzK/10", field=[], table=["sekretarz"])
+    item.crew_field = [jan]
+    plan = Plan(proposals=[proposal("1", "S/DzK/10", "sekretarz", ANNA, 14)])
+
+    [row] = plan_rows(plan, [item])
+    assert [slot["slot"] for slot in row["slots"]] == ["sekretarz"]
+    assert row["taken"] == [{"group": "field", "name": "KOWALSKI Jan", "judge_id": "77"}]
+
+
+def test_a_match_with_no_proposal_still_gets_a_card_with_the_reason():
+    item = need("1", "S/DzK/10", field=["pierwszy"], table=[])
+    plan = Plan(
+        gaps=[Gap(match_id="1", code="S/DzK/10", slot="pierwszy", reason="niedyspozycja (6)")]
+    )
+    [row] = plan_rows(plan, [item])
+    assert row["slots"] == []
+    assert row["gaps"] == [
+        {"slot": "pierwszy", "slot_label": "sędzia I", "reason": "niedyspozycja (6)"}
+    ]
