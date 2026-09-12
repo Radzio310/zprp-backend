@@ -27,7 +27,7 @@ dopisywanym logu gubi i dubluje wiersze.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel
@@ -43,6 +43,7 @@ from app.proel_auth import (
 )
 from app.proel_admin_guard import proel_admin_guard
 from app.proel_fields import UnknownPath, parse_path
+from app.proel_lease import _as_aware, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,11 @@ EVENT_LABELS: Dict[str, str] = {
     "zprp.players_sent": "Statystyki zawodników do ZPRP",
     "zprp.officials_sent": "Kary osób towarzyszących do ZPRP",
     "zprp.comment_sent": "Uwagi verte do ZPRP",
+    # Wysyłka pełnych danych zaczęła się, ale nie zgłosiła końca. To NIE jest
+    # osobne zdarzenie w bazie - powstaje przy odczycie z samego początku serii,
+    # gdy zabrakło jej domknięcia (patrz `collapse_full_data_run`).
+    "zprp.full_data_running": "Trwa wysyłka pełnych danych",
+    "zprp.full_data_stalled": "Przerwana wysyłka pełnych danych",
     "zprp.attachment_sent": "Protokół PDF wysłany do ZPRP",
     # Nieudana próba wysyłki. Dziennik ma odpowiadać na pytanie „czemu dane nie
     # doszły", a nie tylko „kiedy doszły" - bez tego wpisu mecz, którego nie
@@ -93,6 +99,13 @@ EVENT_LABELS: Dict[str, str] = {
     "exam.withdrawn": "Cofnięcie potwierdzenia badań",
     "exam.promoted": "Badania potwierdzone przez ZPRP",
     "exam.rechecked": "Sprawdzenie badań w bazie związku",
+    # Podpisy mają własne zdarzenie z tego samego powodu co badania: „Zmiana
+    # pól: sędzia 1 - podpis" nie odpowiadała na pytanie „czy protokół jest
+    # podpisany i przez kogo".
+    "match.signed": "Podpis pod protokołem",
+    "match.signature_removed": "Usunięcie podpisu",
+    # Raport dodatkowy: samo złożenie PDF-u, nie ptaszek „był raport" w polach.
+    "report.submitted": "Złożenie raportu dodatkowego",
 }
 
 
@@ -124,6 +137,15 @@ _LEAF_NAMES: Dict[str, str] = {
 }
 
 _TEAM_NAMES: Dict[str, str] = {"host": "gospodarzy", "guest": "gości"}
+
+#: Medyk ma własną gałąź rejestru (jedna osoba, bez roli w kluczu). Bez tych
+#: nazw `medic.signature` wracało do panelu jako surowa ścieżka techniczna.
+_MEDIC_NAMES: Dict[str, str] = {
+    "fullName": "nazwisko",
+    "number": "numer",
+    "role": "rola",
+    "signature": "podpis",
+}
 
 #: Pola „po meczu" - klucze z `_POST_EXTRAS` w `app/proel_fields.py`.
 _POST_NAMES: Dict[str, str] = {
@@ -174,6 +196,26 @@ _SENT_EVENT_BY_PATH: Dict[str, str] = {
 }
 
 
+def is_signature_path(path: Any) -> bool:
+    """Czy ta ścieżka rejestru pól jest podpisem pod protokołem."""
+    parts = str(path or "").split(".")
+    if len(parts) == 3 and parts[0] == "sig" and parts[1] == "team":
+        return True
+    if len(parts) == 3 and parts[0] == "official" and parts[2] == "signature":
+        return True
+    return len(parts) == 2 and parts[0] == "medic" and parts[1] == "signature"
+
+
+def signature_who(path: Any) -> str:
+    """Kto się podpisał: „sędzia 1", „drużyna gospodarzy", „medyk"."""
+    parts = str(path or "").split(".")
+    if parts[0] == "sig" and len(parts) == 3:
+        return f"drużyna {_TEAM_NAMES.get(parts[2], parts[2])}"
+    if parts[0] == "official" and len(parts) == 3:
+        return _ROLE_NAMES.get(parts[1], parts[1])
+    return "medyk"
+
+
 def describe_field(path: str) -> str:
     """Ścieżka pola z `proel_fields` jako kawałek polskiego zdania."""
     raw = str(path or "").strip()
@@ -207,6 +249,9 @@ def describe_field(path: str) -> str:
         leaf = _LEAF_NAMES.get(parts[3], parts[3])
         return f"osoba towarzysząca {parts[2]} {team} - {leaf}"
 
+    if head == "medic" and len(parts) == 2:
+        return f"medyk - {_MEDIC_NAMES.get(parts[1], _LEAF_NAMES.get(parts[1], parts[1]))}"
+
     if head == "exam" and len(parts) == 3:
         team = _TEAM_NAMES.get(parts[1], parts[1])
         number = parts[2].lstrip("#")
@@ -215,6 +260,24 @@ def describe_field(path: str) -> str:
     # Nieznana ścieżka wraca taka, jaka jest - lepiej techniczna prawda niż
     # ładne kłamstwo. To także sygnał, że doszło pole bez nazwy.
     return raw
+
+
+def _fields_word(n: int) -> str:
+    """„pole" / „pola" / „pól" - odmiana po polsku."""
+    if n == 1:
+        return "pole"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "pola"
+    return "pól"
+
+
+def _entries_word(n: int) -> str:
+    """„opis" / „opisy" / „opisów" - pozycje raportu dodatkowego."""
+    if n == 1:
+        return "opis"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "opisy"
+    return "opisów"
 
 
 def _join_fields(paths: List[str], limit: int = 3) -> str:
@@ -227,6 +290,12 @@ def _join_fields(paths: List[str], limit: int = 3) -> str:
     tail = "pole" if rest == 1 else ("pola" if 2 <= rest <= 4 else "pól")
     return f"{', '.join(named[:limit])} i {rest} {tail} więcej"
 
+
+#: Rodzaje raportu dodatkowego - klucz `kind` z `app/extra_reports.py`.
+_REPORT_KINDS: Dict[str, str] = {
+    "referee": "raport sędziów",
+    "delegate": "raport delegata",
+}
 
 #: Skąd przyszło potwierdzenie - dziennik ma odpowiadać na „gdzie to zrobiono".
 _EXAM_SOURCE_NOTES: Dict[str, str] = {
@@ -250,6 +319,53 @@ def exam_players_sentence(players: Any) -> str:
         if who:
             parts.append(who)
     return ", ".join(parts)
+
+
+def signature_events_from_ops(
+    changed: List[Tuple[str, Any]],
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Przyjęte operacje patcha -> zdarzenia podpisów, albo `[]`, gdy to nie podpisy.
+
+    Patch mieszany (podpis i zwykłe pole razem) zostaje „Zmianą pól" - ta sama
+    zasada co przy badaniach: lepsza jedna ogólna prawda niż dwa wpisy, z
+    których jeden gubi część.
+
+    W szczegółach NIE MA samego podpisu. Obrazek waży kilkadziesiąt kilobajtów
+    i nie jest informacją dla administratora; dziennik niesie „kto" i „czy
+    złożony", bo tylko o to ktokolwiek pyta.
+    """
+    signed: List[Dict[str, Any]] = []
+    removed: List[Dict[str, Any]] = []
+    for path, value in changed:
+        if not is_signature_path(path):
+            return []
+        entry = {"path": str(path), "who": signature_who(path)}
+        (signed if str(value or "").strip() else removed).append(entry)
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    if signed:
+        out.append(("match.signed", {"signatures": signed}))
+    if removed:
+        out.append(("match.signature_removed", {"signatures": removed}))
+    return out
+
+
+def _signature_who_list(details: Optional[Dict[str, Any]]) -> str:
+    """„sędzia 1, drużyna gospodarzy" - z nowych szczegółów albo ze ścieżek."""
+    d = details or {}
+    names: List[str] = []
+    for raw in d.get("signatures") or []:
+        if isinstance(raw, dict):
+            who = str(raw.get("who") or "").strip() or signature_who(raw.get("path"))
+            if who:
+                names.append(who)
+    if not names:
+        # Wiersze sprzed tego zdarzenia mają same ścieżki - patrz `_effective_event`.
+        names = [signature_who(p) for p in (d.get("paths") or []) if is_signature_path(p)]
+    seen: List[str] = []
+    for n in names:
+        if n not in seen:
+            seen.append(n)
+    return ", ".join(seen)
 
 
 def exam_events_from_ops(changed: List[Tuple[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
@@ -433,7 +549,13 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
             # w środku zdania („PDF" na „pdf").
             return _with_context(sentence[:1].upper() + sentence[1:], d)
         joined = _join_fields(paths)
-        return f"Zmieniono: {joined}" if joined else ""
+        if not joined:
+            return ""
+        # Liczba PRZED wyliczeniem: wiersz scalony z kilkunastu poprawek ma
+        # powiedzieć wprost, ile ich było, zanim urwie listę na trzeciej.
+        if len(paths) > 1:
+            return f"Zmieniono {len(paths)} {_fields_word(len(paths))}: {joined}"
+        return f"Zmieniono: {joined}"
 
     if ev == "table.taken_over":
         who = str(d.get("from") or "").strip()
@@ -495,8 +617,43 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
         sentence = f"{head}: {who}" if who else f"{head} badania"
         return f"{sentence} - {note}" if note else sentence
 
+    if ev in ("match.signed", "match.signature_removed"):
+        who = _signature_who_list(d)
+        if not d.get("signatures"):
+            # Wiersz sprzed tego zdarzenia niesie same ścieżki, bez wartości -
+            # nie wiemy, czy podpis doszedł, czy zniknął, więc nie zgadujemy.
+            return f"Podpis: {who}" if who else "Podpis pod protokołem"
+        many = "," in who
+        if ev == "match.signed":
+            head = "Złożono podpisy" if many else "Złożono podpis"
+        else:
+            head = "Usunięto podpisy" if many else "Usunięto podpis"
+        return f"{head}: {who}" if who else head
+
+    if ev == "report.submitted":
+        kind = _REPORT_KINDS.get(str(d.get("kind") or ""), "")
+        head = f"Złożono {kind}" if kind else "Złożono raport dodatkowy"
+        try:
+            entries = int(d.get("entries") or 0)
+        except (TypeError, ValueError):
+            entries = 0
+        return f"{head} ({entries} {_entries_word(entries)})" if entries else head
+
     if ev in ("zprp.send_failed", "zprp.send_queued"):
         return send_attempt_sentence(ev, d)
+
+    if ev in ("zprp.full_data_running", "zprp.full_data_stalled"):
+        # Wiersz powstał z POCZĄTKU serii, więc liczba pod nim mówi, ile żądań
+        # zdążyło dojść - i to jest cała odpowiedź na pytanie „ile z tego
+        # weszło do bazy związku, zanim się urwało".
+        parts = int(d.get("merged") or 1)
+        many = f"{parts} zapisów doszło" if parts > 1 else "jeden zapis doszedł"
+        if ev == "zprp.full_data_running":
+            return f"Wysyłka w toku - {many}, czekamy na potwierdzenie końca"
+        return (
+            f"Wysyłka nie zgłosiła końca - {many}, "
+            "reszty danych może nie być w bazie ZPRP"
+        )
 
     if ev in _SENT_EVENT_BY_PATH.values():
         paths = [str(x) for x in (d.get("paths") or []) if str(x or "").strip()]
@@ -723,6 +880,16 @@ async def _require_admin(actor: Actor) -> None:
         )
 
 
+#: Żądania, z których składa się JEDNA wysyłka pełnych danych meczu.
+#
+# Każde z nich zapisuje serwer w chwili, gdy je przepuszcza do ZPRP - i to jest
+# POCZĄTEK serii, niezależny od tego, czy telefon dożyje jej końca. Koniec
+# zgłasza aplikacja osobno (`POST /proel/zprp/full-data-done`), bo po żadnym
+# pojedynczym żądaniu nie da się poznać, że było ostatnie: osoby towarzyszące
+# bywa że nie idą wcale, a uwagi bez zmian nie wychodzą z telefonu.
+_FULL_DATA_PARTS = ("zprp.players_sent", "zprp.officials_sent", "zprp.comment_sent")
+
+
 def _effective_event(event: str, details: Optional[Dict[str, Any]]) -> str:
     """Nazwa zdarzenia poprawiona o to, co widać w szczegółach.
 
@@ -739,9 +906,261 @@ def _effective_event(event: str, details: Optional[Dict[str, Any]]) -> str:
             # Prostujemy także wpisy już istniejące w bazie. Dziennik jest
             # niezmienny, więc nie robimy migracji historycznych wierszy.
             return _SENT_EVENT_BY_PATH[paths[0]]
+        # Podpisy zebrane przed tą zmianą leżą w bazie jako zwykła „Zmiana
+        # pól". Prostujemy je przy odczycie tak samo jak znaczniki wysyłki -
+        # administrator pyta „czy protokół jest podpisany", nie „które ścieżki
+        # overlaya się zmieniły".
+        if paths and all(is_signature_path(p) for p in paths):
+            return "match.signed"
     if str(event) == "match.finished" and str(d.get("from") or "") == "approved":
         return "match.unapproved"
+    # Początek serii bez jej końca - znacznik dokłada `collapse_full_data_run`
+    # przy odczycie, bo dopiero wtedy widać, czy koniec kiedykolwiek przyszedł.
+    if str(event) in _FULL_DATA_PARTS:
+        if d.get("stalled"):
+            return "zprp.full_data_stalled"
+        if d.get("running"):
+            return "zprp.full_data_running"
     return str(event or "")
+
+
+#: Ile czasu może dzielić dwie zmiany pól, żeby dziennik uznał je za jedną pracę.
+#
+# Formularz wysyła KAŻDE pole osobno (patrz kolejka w aplikacji), więc wpisanie
+# osoby towarzyszącej to trzy wiersze, a skład sztabu - kilkanaście. Panel
+# pokazywał ścianę wpisów „Zmieniono: osoba towarzysząca B gości - licencja",
+# przez którą nie było widać ani podpisów, ani wysyłek.
+_FIELD_MERGE_WINDOW_S = 300
+
+
+def _actor_key(row: Dict[str, Any]) -> Tuple[str, str]:
+    return (str(row.get("actor_judge_id") or ""), str(row.get("actor_install") or ""))
+
+
+def _gap_seconds(newer: Any, older: Any) -> Optional[float]:
+    # `_as_aware` z jednego powodu: Postgres oddaje czas ze strefą, a SQLite
+    # w testach bez niej. Odejmowanie takiej pary rzuca TypeError, a wtedy
+    # „nie wiem, ile minęło" udawałoby „minęło za dużo".
+    try:
+        return float((_as_aware(newer) - _as_aware(older)).total_seconds())
+    except Exception:
+        return None
+
+
+#: Wysyłki, które mogą trafić do dziennika DWA razy: raz od serwera w chwili
+#: wysyłania (`app/proel_send_journal.py`), raz ze znacznika zapisanego przez
+#: telefon po sukcesie. To jest ta sama czynność, więc w panelu ma być jednym
+#: wierszem - zostaje ten ze znacznika, bo niesie okoliczności („czyim kontem,
+#: po ilu podejściach").
+_SEND_EVENTS = set(_SENT_EVENT_BY_PATH.values()) | {
+    "zprp.players_sent",
+    "zprp.officials_sent",
+    "zprp.comment_sent",
+}
+_SEND_DEDUP_WINDOW_S = 900
+
+
+def collapse_duplicate_sends(
+    rows: Sequence[Any],
+    window_s: int = _SEND_DEDUP_WINDOW_S,
+) -> List[Dict[str, Any]]:
+    """Dwa zapisy tej samej wysyłki -> jeden wiersz.
+
+    Powtórna wysyłka po dłuższej chwili zostaje osobnym wierszem: okno jest
+    krótkie z rozmysłu, bo „wysłałem jeszcze raz po poprawce" to inny fakt niż
+    „ta sama wysyłka zapisana z dwóch stron".
+    """
+    out: List[Dict[str, Any]] = []
+    kept: Dict[str, Dict[str, Any]] = {}
+    for raw in rows:
+        row = dict(raw)
+        details = dict(row.get("details_json") or {})
+        row["details_json"] = details
+        event = _effective_event(str(row.get("event") or ""), details)
+        if event in _SEND_EVENTS:
+            prev = kept.get(event)
+            if prev is not None:
+                gap = _gap_seconds(prev.get("created_at"), row.get("created_at"))
+                if gap is not None and 0 <= gap <= window_s:
+                    prev_details = prev["details_json"]
+                    prev_details["merged"] = int(prev_details.get("merged") or 1) + 1
+                    continue
+            kept[event] = row
+        out.append(row)
+    return out
+
+
+#: Jak długo po pierwszym żądaniu serii może przyjść jej koniec.
+#
+# Pełne dane to kilkanaście żądań plus ponowienia (`FULL_SEND_ATTEMPTS`), a
+# między seriami są przerwy - pół godziny mieści najdłuższą realną wysyłkę
+# razem z nimi.
+_FULL_DATA_WINDOW_S = 1800
+#: Dopóki tyle nie minie, brak końca znaczy „jeszcze trwa", nie „przerwane".
+_FULL_DATA_GRACE_S = 600
+
+
+def _absorb_row(host: Dict[str, Any], row: Dict[str, Any]) -> None:
+    """Wciąga wiersz w inny: liczba surowych wpisów i godzina najstarszego."""
+    details = host["details_json"]
+    details["merged"] = int(details.get("merged") or 1) + 1
+    oldest = details.get("_oldest_at") or host.get("created_at")
+    mine = row.get("created_at")
+    if mine is not None and (oldest is None or mine < oldest):
+        oldest = mine
+    details["_oldest_at"] = oldest
+
+
+def collapse_full_data_run(
+    rows: Sequence[Any],
+    window_s: int = _FULL_DATA_WINDOW_S,
+    grace_s: int = _FULL_DATA_GRACE_S,
+    now: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Seria „Zapisz pełne dane meczu" -> JEDEN wiersz.
+
+    Administrator pyta „czy pełne dane poszły", a dziennik odpowiadał na to
+    czterema wierszami pod rząd: statystyki zawodników, kary osób
+    towarzyszących, uwagi verte i dopiero znacznik z telefonu. Składamy je przy
+    ODCZYCIE (surowe wpisy zostają w bazie) w jeden z dwóch wyników:
+
+      • jest koniec serii -> zostaje wiersz końca, a części wsiąkają w niego
+        jako `merged` i `since`,
+      • nie ma końca -> zostaje POCZĄTEK serii, opisany jako przesyłanie
+        przerwane (albo trwające, gdy zaczęło się przed chwilą).
+
+    Ograniczenie świadome: wiersze przychodzą stronami, więc seria rozcięta
+    granicą strony zostaje na tej starszej pokazana jako przerwana. Okno jest
+    krótsze od strony dziennika, więc zdarza się to rzadko, a pomyłka idzie w
+    stronę ostrożną - „sprawdź" zamiast „na pewno doszło".
+    """
+    prepared: List[Dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        row["details_json"] = dict(row.get("details_json") or {})
+        prepared.append(row)
+
+    def event_of(row: Dict[str, Any]) -> str:
+        return str(row.get("event") or "")
+
+    def match_of(row: Dict[str, Any]) -> str:
+        return str(row.get("zprp_match_id") or row.get("match_number") or "")
+
+    ends = [r for r in prepared if event_of(r) == "zprp.full_data_sent"]
+
+    orphans: Dict[str, List[Dict[str, Any]]] = {}
+    kept: List[Dict[str, Any]] = []
+    for row in prepared:
+        if event_of(row) not in _FULL_DATA_PARTS:
+            kept.append(row)
+            continue
+        host = None
+        for end in ends:
+            if match_of(end) != match_of(row):
+                continue
+            # Koniec jest MŁODSZY od swoich części - ujemny odstęp znaczy, że
+            # to koniec poprzedniej wysyłki, a nie tej.
+            gap = _gap_seconds(end.get("created_at"), row.get("created_at"))
+            if gap is not None and 0 <= gap <= window_s:
+                host = end
+                break
+        if host is not None:
+            _absorb_row(host, row)
+            continue
+        orphans.setdefault(match_of(row), []).append(row)
+        kept.append(row)
+
+    # Osierocone części jednej serii: zostaje NAJSTARSZA, czyli początek.
+    # Wiersze idą od najnowszego, więc to ostatnia w grupie.
+    drop: set = set()
+    for group in orphans.values():
+        i = 0
+        while i < len(group):
+            run = [group[i]]
+            j = i + 1
+            while j < len(group):
+                gap = _gap_seconds(run[0].get("created_at"), group[j].get("created_at"))
+                if gap is None or not (0 <= gap <= window_s):
+                    break
+                run.append(group[j])
+                j += 1
+            start = run[-1]
+            for row in run[:-1]:
+                _absorb_row(start, row)
+                drop.add(id(row))
+            fresh = False
+            if now is not None:
+                gap = _gap_seconds(now, start.get("created_at"))
+                fresh = gap is not None and gap <= grace_s
+            start["details_json"]["stalled" if not fresh else "running"] = True
+            i = j
+
+    out = [row for row in kept if id(row) not in drop]
+    for row in out:
+        details = row.get("details_json") or {}
+        oldest = details.pop("_oldest_at", None)
+        if oldest is not None and details.get("merged"):
+            details["since"] = (
+                oldest.isoformat() if hasattr(oldest, "isoformat") else str(oldest)
+            )
+    return out
+
+
+def merge_field_changes(
+    rows: Sequence[Any],
+    window_s: int = _FIELD_MERGE_WINDOW_S,
+) -> List[Dict[str, Any]]:
+    """Sąsiadujące „Zmiany pól" jednej osoby w jednym posiedzeniu -> jeden wiersz.
+
+    Scalamy przy ODCZYCIE, nie przy zapisie: dziennik jest księgą, więc surowe
+    wiersze zostają w bazie, a scalony wiersz niesie ich liczbę (`merged`) i
+    godzinę najstarszej poprawki (`since`).
+
+    Scalamy TYLKO zwykłe zmiany pól tego samego autora. Znacznik wysyłki,
+    podpis i badania mają własne zdarzenia, więc `_effective_event` wyprowadza
+    je z tej gałęzi jeszcze przed porównaniem.
+    """
+    out: List[Dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        details = dict(row.get("details_json") or {})
+        row["details_json"] = details
+        if _effective_event(str(row.get("event") or ""), details) != "field.changed":
+            out.append(row)
+            continue
+
+        prev = out[-1] if out else None
+        prev_details = dict(prev.get("details_json") or {}) if prev else {}
+        mergeable = (
+            prev is not None
+            and _effective_event(str(prev.get("event") or ""), prev_details)
+            == "field.changed"
+            and _actor_key(prev) == _actor_key(row)
+        )
+        if mergeable and prev is not None:
+            # Wiersze idą od najnowszego, więc „poprzedni" jest młodszy.
+            oldest = prev_details.get("_oldest_at") or prev.get("created_at")
+            gap = _gap_seconds(oldest, row.get("created_at"))
+            if gap is not None and 0 <= gap <= window_s:
+                paths = list(prev_details.get("paths") or [])
+                for p in details.get("paths") or []:
+                    if p not in paths:
+                        paths.append(p)
+                prev_details["paths"] = paths
+                prev_details["merged"] = int(prev_details.get("merged") or 1) + 1
+                prev_details["_oldest_at"] = row.get("created_at")
+                prev["details_json"] = prev_details
+                continue
+        out.append(row)
+
+    for row in out:
+        details = row.get("details_json") or {}
+        oldest = details.pop("_oldest_at", None)
+        if oldest is not None and details.get("merged"):
+            details["since"] = (
+                oldest.isoformat() if hasattr(oldest, "isoformat") else str(oldest)
+            )
+    return out
 
 
 def _row_out(row: Any) -> Dict[str, Any]:
@@ -762,9 +1181,13 @@ def _row_out(row: Any) -> Dict[str, Any]:
         # technicznym, nie „zmienionym polem" do pokazania administratorowi.
         "fields": (
             [describe_field(x) for x in (details.get("paths") or [])]
-            if event == "field.changed"
+            if event in ("field.changed", "match.signed", "match.signature_removed")
             else []
         ),
+        # Ile surowych wpisów stoi za tym wierszem i od kiedy - patrz
+        # `merge_field_changes`. Wiersz niescalony ma 1 i `None`.
+        "merged": int(details.get("merged") or 1),
+        "since": details.get("since"),
         "actor": {
             "judge_id": d.get("actor_judge_id"),
             "name": d.get("actor_name"),
@@ -959,9 +1382,22 @@ async def journal_events(
         stmt = stmt.where(log.c.id < int(before_id))
 
     rows = await database.fetch_all(stmt.limit(limit))
-    items = [_row_out(r) for r in rows]
+    # Kursor liczymy z SUROWYCH wierszy, zanim scalanie zabierze te najstarsze
+    # ze strony - inaczej „Starsze zdarzenia" przeskakiwałyby wpisy.
+    next_cursor = int(rows[-1]["id"]) if len(rows) == limit else None
+    # Kolejność trzech scaleń nie jest dowolna: najpierw gasną duplikaty tej
+    # samej wysyłki (inaczej seria wsiąkłaby w wiersz, który zaraz zniknie),
+    # potem składa się seria pełnych danych, a na końcu zwykłe zmiany pól.
+    items = [
+        _row_out(r)
+        for r in merge_field_changes(
+            collapse_full_data_run(
+                collapse_duplicate_sends(rows), now=now_utc()
+            )
+        )
+    ]
     return {
         "events": items,
-        "next_cursor": items[-1]["id"] if len(items) == limit else None,
+        "next_cursor": next_cursor,
         "labels": EVENT_LABELS,
     }

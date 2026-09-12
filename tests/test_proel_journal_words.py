@@ -53,11 +53,18 @@ def test_nieznana_sciezka_wraca_bez_zmian():
 
 
 def test_zmiana_pol_wymienia_je_po_polsku():
+    # Liczba stoi PRZED wyliczeniem (12.09.2026): wiersz bywa scalony z
+    # kilkunastu poprawek, a lista i tak urywa się na trzeciej nazwie.
     out = event_summary(
         "field.changed",
         {"paths": ["post.spectatorsCount", "sig.team.host"], "rev": 7},
     )
-    assert out == "Zmieniono: liczba widzów, podpis gospodarzy"
+    assert out == "Zmieniono 2 pola: liczba widzów, podpis gospodarzy"
+
+
+def test_jedno_pole_zostaje_bez_liczby():
+    out = event_summary("field.changed", {"paths": ["post.notesText"], "rev": 7})
+    assert out == "Zmieniono: treść uwag sędziów"
 
 
 def test_dluga_lista_pol_sie_skraca_z_odmiana():

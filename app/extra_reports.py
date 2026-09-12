@@ -425,6 +425,17 @@ async def generate_pdf(
                 generated_at=now,
             )
         )
+        # Dziennik meczu: złożenie raportu to CZYNNOŚĆ, a nie ptaszek „był
+        # raport" w polach protokołu. Klucz raportu to IdZawody, więc mecz
+        # wskazujemy tak samo jak przy wysyłkach (`app/proel_send_journal.py`).
+        from app.proel_send_journal import log_by_zprp_id
+
+        await log_by_zprp_id(
+            "report.submitted",
+            zprp_match_id=match_key,
+            actor=actor,
+            details={"kind": kind, "entries": len(entries)},
+        )
 
     filename = _filename(
         kind, body.matchNumber or (dict(row).get("match_number") if row else None)

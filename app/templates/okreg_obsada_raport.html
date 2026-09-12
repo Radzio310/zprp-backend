@@ -1,0 +1,297 @@
+{# Raport z przebiegu automatu obsady - A4 poziomo.
+
+   Ten sam papier firmowy, co „okreg_zestawienie.html" i „okreg_przejazdy.html":
+   granat #0B4F9E, zloto #F0A500, ta sama siatka i ta sama stopka. Obsadowy ma
+   trzymac w reku dokument okregu, a nie wydruk z innego programu.
+
+   Trzy rzeczy, o ktore prosil uzytkownik, sa na pierwszym ekranie: KTO ile ma
+   meczow oraz sredni, najwiekszy i najmniejszy przejazd. Reszta - propozycje
+   mecz po meczu i puste gniazda z powodem - idzie nizej. #}
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<style>
+  @page {
+    size: A4 landscape;
+    margin: 12mm 12mm 14mm 12mm;
+    @bottom-right {
+      content: "str. " counter(page) " z " counter(pages);
+      font-family: "DejaVu Sans", sans-serif;
+      font-size: 7.5pt;
+      color: #8a93a6;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", sans-serif;
+    font-size: 8.6pt;
+    color: #1d2433;
+    margin: 0;
+    line-height: 1.35;
+  }
+
+  /* ---------- nagłówek ---------- */
+  .head { width: 100%; border-collapse: collapse; margin-bottom: 3mm; }
+  .head td { vertical-align: middle; padding: 0; }
+  .head .logo { width: 26mm; }
+  .head .logo img { width: 24mm; }
+
+  .org-name { font-size: 12pt; font-weight: bold; color: #0B4F9E; letter-spacing: .2pt; }
+  .org-addr { font-size: 8pt; color: #5a6478; margin-top: .8mm; }
+
+  .doc-box { text-align: right; }
+  .doc-kind {
+    font-size: 7.5pt; letter-spacing: 1.6pt; text-transform: uppercase;
+    color: #8a93a6; font-weight: bold;
+  }
+  .doc-number { font-size: 17pt; font-weight: bold; color: #0B4F9E; margin-top: .5mm; }
+  .doc-period { font-size: 8.5pt; color: #3d4658; margin-top: .8mm; }
+
+  .rule { height: 1.6mm; margin: 2mm 0 3.5mm 0; background: #0B4F9E; }
+  .rule-gold { height: 1.6mm; width: 38mm; background: #F0A500; float: left; }
+
+  .title { font-size: 13.5pt; font-weight: bold; color: #16233c; margin: 0 0 1mm 0; }
+  .subtitle { font-size: 8.5pt; color: #5a6478; margin-bottom: 3.5mm; }
+
+  /* ---------- kafle liczb ---------- */
+  table.tiles { width: 100%; border-collapse: separate; border-spacing: 2mm 0; margin-bottom: 4mm; }
+  table.tiles td {
+    width: 20%; border: .4pt solid #d7dce6; border-top: 1.4mm solid #0B4F9E;
+    padding: 2.4mm 3mm; background: #f7f9fd;
+  }
+  table.tiles td.gold { border-top-color: #F0A500; background: #fffdf7; }
+  .tile-label {
+    font-size: 6.8pt; letter-spacing: 1.1pt; text-transform: uppercase;
+    color: #8a93a6; font-weight: bold;
+  }
+  .tile-value { font-size: 15pt; font-weight: bold; color: #0B4F9E; margin-top: .6mm; }
+  .tile-value.warm { color: #7a4d00; }
+  .tile-note { font-size: 7.2pt; color: #7a8398; margin-top: .4mm; }
+
+  /* ---------- tabele ---------- */
+  table.grid { width: 100%; border-collapse: collapse; margin-bottom: 4mm; }
+  table.grid thead { display: table-header-group; }
+  table.grid th {
+    background: #0B4F9E; color: #fff; font-size: 7.6pt; font-weight: bold;
+    padding: 2.2mm 1.8mm; text-align: right; border: .3pt solid #0B4F9E; line-height: 1.2;
+  }
+  table.grid th.l { text-align: left; }
+  table.grid th.c { text-align: center; }
+  table.grid td {
+    padding: 1.8mm; border: .3pt solid #d7dce6; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.grid td.l { text-align: left; }
+  table.grid td.c { text-align: center; }
+  table.grid tbody tr:nth-child(even) td { background: #f4f7fc; }
+  table.grid tr { page-break-inside: avoid; }
+
+  .lp { color: #8a93a6; width: 9mm; }
+  .name { font-weight: bold; color: #16233c; }
+  .muted { color: #7a8398; font-size: 7.6pt; }
+  .strong-col { background: #fff8e8 !important; font-weight: bold; color: #7a4d00; }
+
+  .chip {
+    display: inline-block; padding: .3mm 1.4mm; margin-right: 1mm;
+    border: .3pt solid #c9d3e4; border-radius: 1mm;
+    font-size: 6.6pt; color: #4a5568; background: #fff;
+  }
+  .chip.gold { border-color: #e6c375; background: #fffaf0; color: #7a4d00; }
+
+  h2.section {
+    font-size: 9.6pt; color: #16233c; margin: 5mm 0 2mm 0;
+    padding-bottom: 1.2mm; border-bottom: .5pt solid #d7dce6;
+  }
+  .match-code { font-weight: bold; color: #0B4F9E; }
+  .reasons { color: #7a8398; font-size: 7.2pt; }
+
+  .footnote {
+    margin-top: 6mm; padding-top: 2mm; border-top: .4pt solid #e3e8f0;
+    font-size: 7.2pt; color: #8a93a6; line-height: 1.55;
+  }
+  .footnote b { color: #5a6478; }
+
+  .empty {
+    border: .4pt dashed #cfd6e2; padding: 8mm; text-align: center;
+    color: #7a8398; font-size: 9pt;
+  }
+</style>
+</head>
+<body>
+
+<table class="head">
+  <tr>
+    {% if logo %}<td class="logo"><img src="data:image/png;base64,{{ logo }}" alt="" /></td>{% endif %}
+    <td>
+      <div class="org-name">{{ org_name }}</div>
+      {% if org_address %}<div class="org-addr">{{ org_address }}</div>{% endif %}
+    </td>
+    <td class="doc-box">
+      <div class="doc-kind">Obsada</div>
+      <div class="doc-number">przebieg {{ run_id }}</div>
+      <div class="doc-period">{{ period_label }}</div>
+    </td>
+  </tr>
+</table>
+
+<div class="rule"><div class="rule-gold"></div></div>
+
+<div class="title">Raport z automatu obsady</div>
+<div class="subtitle">
+  {{ report.matches }} meczów &middot; {{ report.filled }} z {{ report.slots }} gniazd obsadzonych
+  {%- if report.gaps %} &middot; <b>{{ report.gaps }} bez obsady</b>{% endif %}
+  &middot; {{ report.judges_used }} sędziów &middot; wygenerowano {{ generated_at }}
+</div>
+
+<table class="tiles">
+  <tr>
+    <td>
+      <div class="tile-label">Obsadzone gniazda</div>
+      <div class="tile-value">{{ report.filled }}</div>
+      <div class="tile-note">z {{ report.slots }} pustych w zakresie</div>
+    </td>
+    <td>
+      <div class="tile-label">Średni przejazd</div>
+      <div class="tile-value">{{ travel.avg if travel.avg is not none else "-" }}{% if travel.avg is not none %} km{% endif %}</div>
+      <div class="tile-note">w jedną stronę</div>
+    </td>
+    <td>
+      <div class="tile-label">Najdalej</div>
+      <div class="tile-value">{{ travel.max if travel.max is not none else "-" }}{% if travel.max is not none %} km{% endif %}</div>
+      <div class="tile-note">najkrócej {{ travel.min if travel.min is not none else "-" }}{% if travel.min is not none %} km{% endif %}</div>
+    </td>
+    <td>
+      <div class="tile-label">Łącznie kilometrów</div>
+      <div class="tile-value">{{ travel.total }} km</div>
+      <div class="tile-note">
+        {%- if travel.unknown %}{{ travel.unknown }} bez znanej odległości{% else %}wszystkie trasy znane{% endif %}
+      </div>
+    </td>
+    <td class="gold">
+      <div class="tile-label">Podział pracy</div>
+      <div class="tile-value warm">{{ balance.min }} - {{ balance.max }}</div>
+      <div class="tile-note">meczów na sędziego w zakresie</div>
+    </td>
+  </tr>
+</table>
+
+<h2 class="section">Kto ile ma meczów</h2>
+{% if judges %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th class="c">Lp</th>
+      <th class="l">Nazwisko i imię</th>
+      <th class="l">Miasto</th>
+      <th class="c">Z automatu</th>
+      <th class="c">Miał wcześniej</th>
+      <th class="c">Razem</th>
+      <th>Średnio km</th>
+      <th>Najdalej km</th>
+      <th>Najbliżej km</th>
+      <th>Razem km</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in judges %}
+    <tr>
+      <td class="c lp">{{ loop.index }}</td>
+      <td class="l name">
+        {{ row.name }}
+        {%- for badge in row.badges %} <span class="chip">{{ badge }}</span>{% endfor %}
+      </td>
+      <td class="l">{{ row.city or "-" }}</td>
+      <td class="c">{{ row.matches }}</td>
+      <td class="c muted">{{ row.before or 0 }}</td>
+      <td class="c strong-col">{{ row.total }}</td>
+      <td>{{ row.km.avg if row.km.avg is not none else "-" }}</td>
+      <td>{{ row.km.max if row.km.max is not none else "-" }}</td>
+      <td>{{ row.km.min if row.km.min is not none else "-" }}</td>
+      <td>{{ row.km.total }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Automat nie obsadził żadnego gniazda w tym zakresie.</div>
+{% endif %}
+
+{% if plan %}
+<h2 class="section">Propozycje mecz po meczu</h2>
+<table class="grid">
+  <thead>
+    <tr>
+      <th class="l">Termin</th>
+      <th class="l">Mecz</th>
+      <th class="l">Gospodarz - Gość</th>
+      <th class="l">Miasto</th>
+      <th class="l">Obsada</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for match in plan %}
+    <tr>
+      <td class="l">
+        {{ match.day or "bez terminu" }}{% if match.time %} <span class="muted">{{ match.time }}</span>{% endif %}
+      </td>
+      <td class="l match-code">{{ match.code }}</td>
+      <td class="l">{{ match.host }}{% if match.guest %} - {{ match.guest }}{% endif %}</td>
+      <td class="l">{{ match.city or "-" }}</td>
+      <td class="l">
+        {% for slot in match.slots %}
+          <div>
+            <b>{{ slot.slot_label }}:</b> {{ slot.name }}
+            {%- if slot.km is not none %} <span class="chip">{{ slot.km }} km</span>{% endif %}
+            {%- if slot.round > 1 %} <span class="chip gold">drugi obieg</span>{% endif %}
+            <span class="reasons">{{ (slot.why or slot.reasons) | join(" • ") }}</span>
+          </div>
+        {% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if gaps %}
+<h2 class="section">Gniazda bez obsady</h2>
+<table class="grid">
+  <thead>
+    <tr>
+      <th class="l">Termin</th>
+      <th class="l">Mecz</th>
+      <th class="l">Gniazdo</th>
+      <th class="l">Dlaczego automat nikogo nie postawił</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for gap in gaps %}
+    <tr>
+      <td class="l">{{ gap.day or "bez terminu" }}</td>
+      <td class="l match-code">{{ gap.code }}</td>
+      <td class="l">{{ gap.slot_label }}</td>
+      <td class="l muted">{{ gap.reason }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<div class="footnote">
+  <b>Kilometry</b> liczone w jedną stronę, najpierw z tabeli odległości okręgu, a dla par
+  spoza niej z Google Maps (trasa samochodem). &nbsp;&middot;&nbsp;
+  <b>Automat</b> obsadza wyłącznie puste gniazda i nie zapisuje niczego w bazie związku -
+  każdą propozycję zatwierdza obsadowy. &nbsp;&middot;&nbsp;
+  Pierwszy obieg trzyma się dni preferowanych przez sędziów, drugi dobiera resztę.
+  {%- if report.skipped %}
+  &nbsp;&middot;&nbsp; Pominięto:
+  {{ report.skipped.complete or 0 }} z pełną obsadą,
+  {{ report.skipped.manual or 0 }} układanych ręcznie,
+  {{ report.skipped.no_hall or 0 }} bez miasta hali.
+  {%- endif %}
+</div>
+
+</body>
+</html>

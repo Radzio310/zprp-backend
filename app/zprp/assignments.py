@@ -528,6 +528,14 @@ class ObsadaSaveRequest(BaseModel):
     NrSedzia_czas_name: Optional[str] = None
     ukryjObsade: Optional[bool] = False
     ukryjObsadeD: Optional[bool] = False
+    #: Panel obsadowego (BAZA_web). Gdy poda okręg i numery sędziów z NASZEJ
+    #: listy, po udanym zapisie od razu poprawiamy migawkę terminarza i sami
+    #: rozsyłamy powiadomienia - patrz `app/assignment_notify.py`. Bez tych pól
+    #: wszystko zostaje po staremu i o zmianie powie monitor przy swoim
+    #: przebiegu, czyli po kilku minutach.
+    province: Optional[str] = None
+    assigned: Optional[Dict[str, str]] = None
+    actor: Optional[str] = None
 
 
 class ObsadaHallFormRequest(BaseModel):
@@ -604,6 +612,12 @@ async def obsada_match_form(
         _log_html("obsada/match-form", html)
 
         parsed = _parse_referee_form(html)
+        # Przy okazji zapamietujemy uprawnienia do szczebli - litery w nawiasach
+        # przy nazwisku to jedyne miejsce, w ktorym ZPRP je podaje, a automat
+        # obsady bez nich nie odrozni stolika ligowego od okregowego.
+        from app.assignment_grades import remember_grades
+
+        await remember_grades(parsed)
 
         return {
             "fetched_at": _now_iso(),
@@ -1412,7 +1426,7 @@ async def obsada_save(
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
         cookies = await _login_zprp(client, user_plain, pass_plain)
         logger.info("ZPRP obsada/save: login ok IdZawody=%s", payload.IdZawody)
-        return await apply_referee_assignment(
+        result = await apply_referee_assignment(
             client,
             cookies,
             payload.IdZawody,
@@ -1421,6 +1435,53 @@ async def obsada_save(
             keep_hide_s=bool(payload.ukryjObsade),
             keep_hide_d=bool(payload.ukryjObsadeD),
         )
+
+    if payload.province and result.get("success"):
+        result["announced"] = await _announce_saved_lineup(payload, changes, result)
+    return result
+
+
+async def _announce_saved_lineup(
+    payload: "ObsadaSaveRequest",
+    changes: Dict[str, Tuple[Optional[str], Optional[str]]],
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Zapis przeszedł - poprawiamy własną migawkę i mówimy o tym obsadzie.
+
+    Bierzemy WYŁĄCZNIE gniazda, które faktycznie wysłaliśmy (`value is None`
+    znaczy „nie ruszaj"), a nazwisko - to potwierdzone po zapisie, czyli w takim
+    zapisie, w jakim trzyma je baza związku. Numer sędziego przychodzi z panelu,
+    bo `value` opcji formularza nie jest stałym numerem.
+
+    Osłonięte: obsada w ZPRP jest już zmieniona i nieudane powiadomienie nie ma
+    prawa zamienić udanego zapisu w błąd.
+    """
+    try:
+        from app.assignment_notify import FORM_TO_SLOT, announce_lineup
+
+        assigned = payload.assigned or {}
+        verified = result.get("verified_slots") or {}
+        wanted: Dict[str, Tuple[str, str]] = {}
+        for select_name, form_slot in SELECT_TO_SLOT.items():
+            sent_value, sent_name = changes.get(select_name, (None, None))
+            if sent_value is None:
+                continue
+            slot = FORM_TO_SLOT.get(form_slot)
+            if not slot:
+                continue
+            name = (verified.get(form_slot) or {}).get("name") or sent_name or ""
+            wanted[slot] = (str(assigned.get(slot) or "").strip(), str(name).strip())
+        if not wanted:
+            return {"changed": False, "events": 0}
+        return await announce_lineup(
+            payload.province or "",
+            payload.IdZawody,
+            wanted,
+            actor=payload.actor or payload.judge_id,
+        )
+    except Exception:
+        logger.exception("obsada/save: zapis przeszedł, powiadomienie nie")
+        return {"changed": False, "events": 0, "error": "notify-failed"}
 
 
 @router.post("/zprp/obsada/hall-form")

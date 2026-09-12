@@ -802,6 +802,164 @@ app_migrations = Table(
 )
 
 
+# ---------------------------------------------------------------------------
+# Moduł obsadowego
+#
+# To, czego ZPRP o sędzim nie wie, a automat obsady wiedzieć musi: preferowane
+# dni, wymóg doświadczonego partnera, pary, przerwy i pary „nigdy razem".
+# ---------------------------------------------------------------------------
+
+province_judge_settings = Table(
+    "province_judge_settings",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("full_name", String, nullable=True),
+    # Automat dostawia mu wyłącznie sędziego centralnego boiskowego (I, LC, SL).
+    Column("needs_experienced", Boolean, nullable=False, server_default=text("false")),
+    # Dni tygodnia, w które sędzia woli sędziować: 0 = poniedziałek, 6 = niedziela.
+    Column(
+        "preferred_days",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column("note", String, nullable=True),
+    Column("updated_by", String, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+# Pary, których automat nie postawi razem. Jeden sędzia może mieć ich kilka.
+province_judge_blocks = Table(
+    "province_judge_blocks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("other_judge_id", String, nullable=False, index=True),
+    Column("reason", String, nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Przerwy sędziego: chwilowo poza automatem. Zakresów może być kilka, a te
+# starsze niż tydzień sprzątamy przy odczycie - po co komu zeszłoroczny urlop.
+province_judge_pauses = Table(
+    "province_judge_pauses",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("date_from", Date, nullable=False),
+    Column("date_to", Date, nullable=False),
+    Column("reason", String, nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Pary sędziowskie: „own" układa obsadowy, „zprp" przychodzi z listy związku
+# („Para z: NAZWISKO Imię"). Własna wygrywa, ZPRP uzupełnia braki.
+province_judge_pairs = Table(
+    "province_judge_pairs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("partner_id", String, nullable=False),
+    Column("source", String, nullable=False, server_default=text("'own'")),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Uprawnienia do szczebli z formularza obsady ZPRP: (SL)(LC)(PP)(MP)(I)(II)(III)(Mł).
+#
+# ⚠ Kluczem jest NAZWISKO, nie numer: `value` opcji w formularzu ZPRP nie jest
+# stałym numerem sędziego (przenumerowuje je filtr), a nazwisko jest jedynym
+# stałym podpisem opcji. Zbieramy je przy każdym otwarciu formularza.
+zprp_judge_grades = Table(
+    "zprp_judge_grades",
+    metadata,
+    Column("name_key", String, primary_key=True),
+    Column("full_name", String, nullable=False),
+    Column(
+        "letters",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+# Mecze, które obsadowy układa RĘCZNIE - automat ich nie rusza.
+province_match_manual = Table(
+    "province_match_manual",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Przebiegi automatu: plan, raport i ślad publikacji do ZPRP.
+province_assignment_runs = Table(
+    "province_assignment_runs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+    Column("date_from", Date, nullable=True),
+    Column("date_to", Date, nullable=True),
+    Column(
+        "params_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    ),
+    Column(
+        "plan_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column(
+        "report_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    ),
+    Column("applied_at", DateTime(timezone=True), nullable=True),
+    Column("applied_count", Integer, nullable=True),
+)
+
+# Odległości miasto-miasto policzone przez Google - pamięć, żeby nie pytać (i nie
+# płacić) drugi raz. Tabela okręgu (`okreg_distances`) jest zawsze pierwsza.
+city_distances = Table(
+    "city_distances",
+    metadata,
+    Column("from_key", String, primary_key=True),
+    Column("to_key", String, primary_key=True),
+    Column("km", Float, nullable=False),
+    Column("source", String, nullable=False, server_default=text("'google'")),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+
 # 18.1f) Wygenerowane dokumenty - numeracja SL/01/2026/1
 #
 # Numer musi być niepowtarzalny w obrębie okręgu, miesiąca i rodzaju dokumentu,

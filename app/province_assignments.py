@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import and_, or_, select
 
 from app import assignment_rules as A
+from app import settlement_origin as O
 from app import settlement_rates as R
 from app.db import (
     database,
@@ -75,6 +76,29 @@ async def _managed_prefixes(province: str) -> list[str]:
         )
     )
     return managed_prefixes_for(province, row["managed_prefixes"] if row else None)
+
+
+async def own_prefixes_of(province: str) -> set[str]:
+    """
+    Przedrostki numerow NASZEGO okregu - wyczytane z jego wlasnego terminarza.
+
+    Migawka trzyma nie tylko mecze okregu: monitor sledzi TAKZE mecze z list
+    poszczegolnych sedziow, wiec sedzia ze Slaska sedziujacy w Kujawsko-Pomorskiem
+    wnosi do niej „K/IIIM". Na liscie obsadowego takie mecze nie maja czego
+    szukac - okreg ich nie obsadza. Rozpoznajemy je tak samo, jak rozliczenia:
+    po przedrostku numeru, a nasze przedrostki bierzemy z faktow, nie z mapy
+    wojewodztw (`app/settlement_origin.py`).
+    """
+    rows = await database.fetch_all(
+        select(province_matches.c.match_code, province_matches.c.state_json).where(
+            province_matches.c.province.in_(spellings(province))
+        )
+    )
+    codes = [
+        _s(state_dict(row["state_json"]).get("RozgrywkiCode") or row["match_code"])
+        for row in rows
+    ]
+    return O.own_prefixes(codes)
 
 
 async def _competition_names(province: str) -> dict[str, str]:
@@ -177,6 +201,7 @@ async def list_matches(
     key = require_province(province)
     managed = await _managed_prefixes(key)
     names = await _competition_names(key)
+    own = await own_prefixes_of(key)
 
     start = date_from or (None if include_past else _now().date())
     where = [
@@ -206,6 +231,9 @@ async def list_matches(
         # Zakres: tylko to, co obsadza okreg - rozgrywki okregowe, puchar
         # wojewodzki i grupy II ligi powierzone temu okregowi.
         if not is_managed_by_province(code, managed):
+            continue
+        # Mecz innego okregu z listy sedziego - obsadza go tamten okreg.
+        if O.is_other_district(code, own):
             continue
         window.append(_item(row, state, code, names))
 

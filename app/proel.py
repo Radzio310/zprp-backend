@@ -41,6 +41,7 @@ from app.proel_journal import (
     client_ip as _client_ip,
     exam_events_from_ops,
     log_match_event,
+    signature_events_from_ops,
     soft_actor,
 )
 from app.proel_match_key import (
@@ -840,11 +841,16 @@ async def patch_proel_state(
     if fresh_ops:
         # Badania mają własne zdarzenia z nazwiskiem zawodnika - „Zmiana pól:
         # badania zawodnika nr 77" nie mówiła administratorowi, KOGO to dotyczy.
-        exam_events = exam_events_from_ops(
-            [(o.path, o.value) for o in req.ops if str(o.op_id or "") in fresh_ops]
-        )
-        if exam_events:
-            for journal_event, details in exam_events:
+        ops_changed = [
+            (o.path, o.value) for o in req.ops if str(o.op_id or "") in fresh_ops
+        ]
+        exam_events = exam_events_from_ops(ops_changed)
+        # Podpisy tak samo jak badania: administrator pyta „czy protokół jest
+        # podpisany i przez kogo", a nie „które ścieżki overlaya się zmieniły".
+        # Sam obrazek podpisu do dziennika NIE trafia.
+        special_events = exam_events or signature_events_from_ops(ops_changed)
+        if special_events:
+            for journal_event, details in special_events:
                 await log_match_event(
                     match_number=match_number,
                     event=journal_event,

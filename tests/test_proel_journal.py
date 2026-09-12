@@ -81,6 +81,15 @@ EMITTED = [
     "zprp.summary_sent",
     "zprp.full_data_sent",
     "zprp.attachment_sent",
+    # Od 12.09.2026 ślad wysyłki zapisuje także SERWER w chwili wysyłania
+    # (`app/proel_send_journal.py`), więc trzy etykiety bez emitera przestały
+    # być martwe.
+    "zprp.players_sent",
+    "zprp.officials_sent",
+    "zprp.comment_sent",
+    "match.signed",
+    "match.signature_removed",
+    "report.submitted",
 ]
 
 

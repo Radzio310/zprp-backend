@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -46,6 +47,76 @@ TOKEN_RE = re.compile(r"^[A-Z0-9]{5}$")
 # machnął się w literce, nawet ich nie zauważy.
 TOKEN_LIMITS = (("proel_auth_token_ip", 8, 60), ("proel_auth_token_ip_h", 40, 3600))
 JUDGE_LIMITS = (("proel_auth_judge_ip", 20, 60),)
+
+
+# ────────────────── ślad wysyłki w dzienniku meczu ──────────────────
+#
+# Dziennik meczu dotąd wiedział o wysyłce tylko tyle, ile zdążył zapisać
+# telefon PO sukcesie (marker `post.*`). Gdy tamten zapis nie doszedł, mecz
+# wyglądał jak nietknięty. Tędy idzie każda wysyłka do ZPRP, więc to jest
+# miejsce, w którym ślad powstaje bez pytania telefonu o zgodę.
+# Szczegóły i zasada „nigdy nie wywraca wysyłki": `app/proel_send_journal.py`.
+
+
+async def _journal_send(
+    event: str,
+    *,
+    id_zawody: Any,
+    judge_id: Optional[str],
+    install: Optional[str],
+    actor_name: Optional[str],
+    authorization: Optional[str] = None,
+    elevation: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    event_key: Optional[str] = None,
+    mark_task: Optional[str] = None,
+) -> None:
+    """Wpis do dziennika meczu, a przy `mark_task` także znacznik zadania.
+
+    Jedno miejsce na oba ślady, bo oba potrzebują tego samego: rozpoznanej
+    tożsamości wysyłającego i meczu spod `id_zawody`. Znacznik dopisuje SERWER,
+    żeby kafle zadań pomeczowych zapalały się na każdym telefonie - powody
+    w `app/proel_post_marks.py`.
+    """
+    try:
+        from app.proel_journal import soft_actor
+        from app.proel_post_marks import mark_post_task
+        from app.proel_send_journal import log_by_zprp_id
+
+        actor = await soft_actor(
+            judge_id,
+            install,
+            actor_name,
+            authorization=authorization,
+            x_elevation=elevation,
+        )
+        await log_by_zprp_id(
+            event,
+            zprp_match_id=id_zawody,
+            actor=actor,
+            details={"src": "server", **(details or {})},
+            event_key=event_key,
+        )
+        if mark_task:
+            await mark_post_task(
+                mark_task,
+                zprp_match_id=id_zawody,
+                actor=actor,
+                note={"event": event},
+            )
+    except Exception:
+        logger.debug("ProEl ZPRP: ślad wysyłki nieudany", exc_info=True)
+
+
+def _hour_key(event: str, id_zawody: Any) -> str:
+    """Klucz idempotencji na godzinę - dla wysyłek po jednym wywołaniu na osobę.
+
+    „Zapisz pełne dane meczu" to kilkanaście wywołań `player_stats.php` pod
+    rząd. Dziennik ma z tego zrobić jeden wiersz „Statystyki zawodników do
+    ZPRP", a nie listę nazwisk technicznych wpisów.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    return f"zprp:{id_zawody}:{event}:{stamp}"
 
 
 def _base_url() -> str:
@@ -324,6 +395,10 @@ class ZprpSummaryRequest(BaseModel):
     #: Tylko klucze do zapisania. Pominięty klucz = pole nietknięte,
     #: klucz z "" = pole wyczyszczone (NULL) po stronie ZPRP.
     fields: Dict[str, str]
+    #: Mecz, którego dotyczy wysyłka - WYŁĄCZNIE do dziennika meczu.
+    #: Upstream dostaje sesję i pola, nic więcej; starsza aplikacja tego nie
+    #: wysyła i wtedy po prostu nie ma wpisu, dokładnie jak dotąd.
+    id_zawody: Optional[int] = None
 
 
 async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
@@ -410,8 +485,29 @@ async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
     "/summary",
     summary="Zapis wyniku skróconego w ZPRP (aktualizacja częściowa)",
 )
-async def zprp_summary(payload: ZprpSummaryRequest):
-    return await submit_summary(payload)
+async def zprp_summary(
+    payload: ZprpSummaryRequest,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+):
+    out = await submit_summary(payload)
+    await _journal_send(
+        "zprp.summary_sent",
+        id_zawody=payload.id_zawody,
+        judge_id=x_judge_id,
+        install=x_installation_id,
+        actor_name=x_actor_name,
+        authorization=authorization,
+        elevation=x_elevation,
+        details={"fields": len(payload.fields or {})},
+        # Wynik skrócony to JEDNO żądanie, więc sukces tutaj jest całą prawdą
+        # o zadaniu - znacznik idzie od razu.
+        mark_task="shortResultSent",
+    )
+    return out
 
 
 # ─────────────────────── statystyki zawodnika ───────────────────────
@@ -571,8 +667,26 @@ async def submit_player_stats(payload: ZprpPlayerStatsRequest) -> Dict[str, Any]
     "/player-stats",
     summary="Zapis statystyk jednego zawodnika w ZPRP (aktualizacja częściowa)",
 )
-async def zprp_player_stats(payload: ZprpPlayerStatsRequest):
-    return await submit_player_stats(payload)
+async def zprp_player_stats(
+    payload: ZprpPlayerStatsRequest,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+):
+    out = await submit_player_stats(payload)
+    await _journal_send(
+        "zprp.players_sent",
+        id_zawody=payload.id_zawody,
+        judge_id=x_judge_id,
+        install=x_installation_id,
+        actor_name=x_actor_name,
+        authorization=authorization,
+        elevation=x_elevation,
+        event_key=_hour_key("zprp.players_sent", payload.id_zawody),
+    )
+    return out
 
 
 # ─────────────────────── osoby towarzyszące ───────────────────────
@@ -720,8 +834,26 @@ async def submit_officials_stats(payload: ZprpOfficialsStatsRequest) -> Dict[str
     "/officials-stats",
     summary="Zapis kar jednej osoby towarzyszącej w ZPRP (1 dopisuje, 0 kasuje)",
 )
-async def zprp_officials_stats(payload: ZprpOfficialsStatsRequest):
-    return await submit_officials_stats(payload)
+async def zprp_officials_stats(
+    payload: ZprpOfficialsStatsRequest,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+):
+    out = await submit_officials_stats(payload)
+    await _journal_send(
+        "zprp.officials_sent",
+        id_zawody=payload.id_zawody,
+        judge_id=x_judge_id,
+        install=x_installation_id,
+        actor_name=x_actor_name,
+        authorization=authorization,
+        elevation=x_elevation,
+        event_key=_hour_key("zprp.officials_sent", payload.id_zawody),
+    )
+    return out
 
 
 # ─────────────────────── uwagi sędziów (verte) ───────────────────────
@@ -818,8 +950,25 @@ async def submit_match_comment(payload: ZprpMatchCommentRequest) -> Dict[str, An
     "/match-comment",
     summary="Zapis uwag sędziów (verte) w ZPRP - pusty tekst czyści pole",
 )
-async def zprp_match_comment(payload: ZprpMatchCommentRequest):
-    return await submit_match_comment(payload)
+async def zprp_match_comment(
+    payload: ZprpMatchCommentRequest,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+):
+    out = await submit_match_comment(payload)
+    await _journal_send(
+        "zprp.comment_sent",
+        id_zawody=payload.id_zawody,
+        judge_id=x_judge_id,
+        install=x_installation_id,
+        actor_name=x_actor_name,
+        authorization=authorization,
+        elevation=x_elevation,
+    )
+    return out
 
 
 # ─────────────────────── załącznik (protokół) ───────────────────────
@@ -992,11 +1141,116 @@ async def zprp_attachment(
     hash_sesji: str = Form(...),
     nazwa: str = Form(""),
     zalacznik: UploadFile = File(...),
+    # Mecz wskazuje sesja, więc upstreamowi ten numer nie jest potrzebny -
+    # dziennikowi tak. Starsza aplikacja go nie wysyła i wtedy wpisu nie ma.
+    id_zawody: Optional[int] = Form(None),
+    # Czy ten plik JEST protokołem meczu. Upstream nie rozróżnia dokumentów, a
+    # kafel „protokół w załącznikach" nie może zapalać się od dowolnego pliku -
+    # więc mówi nam to wołający. Brak = nie odhaczamy niczego.
+    is_protocol: Optional[str] = Form(None),
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
 ):
     content = await zalacznik.read()
-    return await upload_attachment(
+    filename = zalacznik.filename or "protokol.pdf"
+    out = await upload_attachment(
         hash_sesji=hash_sesji,
         nazwa=nazwa,
-        filename=zalacznik.filename or "protokol.pdf",
+        filename=filename,
         content=content,
     )
+    await _journal_send(
+        "zprp.attachment_sent",
+        id_zawody=id_zawody,
+        judge_id=x_judge_id,
+        install=x_installation_id,
+        actor_name=x_actor_name,
+        authorization=authorization,
+        elevation=x_elevation,
+        details={"file": str(nazwa or filename), "bytes": len(content)},
+        # Załącznik jest jednym żądaniem, więc sukces tutaj zamyka sprawę - ale
+        # odhaczamy WYŁĄCZNIE protokół. Zdjęcia złożone w PDF z ekranu
+        # szczegółów jadą tą samą trasą i nie mają prawa zapalić kafla, który
+        # mówi o czym innym.
+        mark_task=(
+            "protocolSent"
+            if str(is_protocol or "").strip().lower() in ("1", "true", "yes")
+            else None
+        ),
+    )
+    return out
+
+
+# ─────────────────── koniec wysyłki pełnych danych ───────────────────
+#
+# „Zapisz pełne dane meczu" to nie jedno żądanie, tylko seria: numery koszulek,
+# statystyki kilkunastu zawodników, osoby towarzyszące, uwagi. Serwer widzi
+# każde z nich osobno i po żadnym nie wie, czy było ostatnie - osoby
+# towarzyszące bywa że nie idą wcale, a uwagi bez zmian nie wychodzą z telefonu.
+#
+# Stąd para sygnałów, którą dziennik składa przy ODCZYCIE:
+#   • POCZĄTEK - pierwsze żądanie serii, zapisywane przez serwer bez pytania
+#     telefonu o zdanie (`zprp.players_sent` / `zprp.officials_sent`),
+#   • KONIEC - ta trasa, wołana przez aplikację po potwierdzonym sukcesie.
+#
+# Brakujący koniec nie jest awarią, tylko informacją: dziennik pokazuje wtedy
+# sam początek jako przesyłanie przerwane. To dokładnie ta wiedza, której
+# brakowało przy LCM/5 - „próbowali i nie doszło" wygląda inaczej niż „nikt nie
+# próbował", a dotąd oba wyglądały tak samo, czyli na pusto.
+
+
+class ZprpFullDataDoneRequest(BaseModel):
+    #: Mecz w bazie ZPRP. Bez niego nie ma czego odhaczyć ani gdzie zapisać.
+    id_zawody: int
+    #: Którą drogą poszło - „official" / „legacy" / „mixed". Do dziennika.
+    via: Optional[str] = None
+    #: Po ilu seriach się udało (patrz `sendFullMatchDataWithRetries`).
+    attempts: Optional[int] = None
+    players: Optional[int] = None
+    officials: Optional[int] = None
+
+
+@router.post(
+    "/full-data-done",
+    summary="Potwierdzenie końca wysyłki pełnych danych meczu",
+)
+async def zprp_full_data_done(
+    payload: ZprpFullDataDoneRequest,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+):
+    """Zamyka serię wysyłki: wpis do dziennika i znacznik zadania.
+
+    Niczego nie wysyła do ZPRP - to sygnał o tym, co już poszło. Dlatego jest
+    bezpieczna do powtórzenia: klucz godzinowy gasi duplikat wpisu, a znacznik
+    raz postawiony zostaje z pierwszym podpisem.
+    """
+    details: Dict[str, Any] = {}
+    if payload.via:
+        details["via"] = str(payload.via)
+    if payload.attempts:
+        details["attempts"] = int(payload.attempts)
+    if payload.players is not None:
+        details["players"] = int(payload.players)
+    if payload.officials is not None:
+        details["officials"] = int(payload.officials)
+
+    await _journal_send(
+        "zprp.full_data_sent",
+        id_zawody=payload.id_zawody,
+        judge_id=x_judge_id,
+        install=x_installation_id,
+        actor_name=x_actor_name,
+        authorization=authorization,
+        elevation=x_elevation,
+        details=details,
+        event_key=_hour_key("zprp.full_data_sent", payload.id_zawody),
+        mark_task="fullDataSent",
+    )
+    return {"status": "success"}

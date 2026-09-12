@@ -82,6 +82,7 @@ from app.province_settlements import (
 from app.province_settlement_sync import run_settlement_sync_scheduler
 from app.province_settlement_pdf import router as province_settlement_pdf_router
 from app.province_assignments import router as province_assignments_router
+from app.province_assignment_auto import router as province_assignment_auto_router
 from app.province_clubs import router as province_clubs_router
 from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
@@ -285,6 +286,7 @@ app.include_router(province_settlement_pdf_router)
 # Panel klubow: /province/clubs. Wlasny prefiks, wiec nie wchodzi pod catch-all.
 app.include_router(province_clubs_router)
 app.include_router(province_assignments_router)
+app.include_router(province_assignment_auto_router)
 app.include_router(province_events_router)
 app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
