@@ -1174,7 +1174,8 @@ async def clubs(province: str = Query(...), q: Optional[str] = Query(None)):
 
 class ClubRuleRequest(BaseModel):
     province: str
-    #: Ilu stolikowych klub stawia z własnych ludzi, grając u siebie (0-2).
+    #: Czy klub stawia JEDNEGO stolikowego z własnych ludzi (0 albo 1).
+    #: Okręg daje zawsze co najmniej jednego, więc więcej niż jeden nie ma sensu.
     table_by_club: int = 0
     avoid_local: bool = False
     note: Optional[str] = None
@@ -1189,8 +1190,9 @@ async def save_club_rule(club_id: str, payload: ClubRuleRequest):
     values = {
         "province": key,
         "club_id": _s(club_id),
-        # Więcej niż dwóch stolikowych nie ma przy żadnym meczu.
-        "table_by_club": max(0, min(2, int(payload.table_by_club or 0))),
+        # ⚠ Najwyżej JEDEN od klubu: okręg nigdy nie zostawia stolika całkiem
+        # klubowi - albo daje jednego, albo obu.
+        "table_by_club": max(0, min(1, int(payload.table_by_club or 0))),
         "avoid_local": bool(payload.avoid_local),
         "note": _s(payload.note) or None,
         "updated_by": _s(payload.updated_by) or None,
@@ -1212,3 +1214,63 @@ async def save_club_rule(club_id: str, payload: ClubRuleRequest):
         )
     )
     return {"success": True, "club_id": _s(club_id), "table_by_club": values["table_by_club"]}
+
+
+class ClubBulkRequest(BaseModel):
+    province: str
+    club_ids: list[str] = []
+    #: Które ustawienie zmieniamy. Pominięte zostaje takie, jakie było -
+    #: akcja grupowa nie ma prawa skasować niczego przy okazji.
+    table_by_club: Optional[int] = None
+    avoid_local: Optional[bool] = None
+    updated_by: Optional[str] = None
+
+
+@router.put("/clubs/bulk", summary="Akcja grupowa: to samo ustawienie dla wielu klubów")
+async def save_clubs_bulk(payload: ClubBulkRequest):
+    """
+    Ta sama deklaracja dla zaznaczonych klubów.
+
+    Zmieniamy WYŁĄCZNIE pola podane w żądaniu. Notatka i to drugie ustawienie
+    zostają nietknięte - inaczej zaznaczenie dwudziestu klubów po to, żeby
+    zapisać jedną rzecz, po cichu kasowałoby resztę.
+
+    Numery klubów przechodzą przez tę samą bramkę, co akcje grupowe w panelu
+    klubów (`clean_club_ids`): bez pustych, bez powtórzeń i z limitem.
+    """
+    from app.db import province_club_assignment
+    from app.province_clubs_bulk import clean_club_ids
+
+    key = require_province(payload.province)
+    try:
+        club_ids = clean_club_ids(payload.club_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if payload.table_by_club is None and payload.avoid_local is None:
+        raise HTTPException(400, "Nie wskazano, co zmienić")
+
+    now = _now()
+    patch: dict[str, Any] = {"updated_by": _s(payload.updated_by) or None, "updated_at": now}
+    if payload.table_by_club is not None:
+        # ⚠ Najwyżej jeden od klubu - okręg zawsze daje co najmniej jednego.
+        patch["table_by_club"] = max(0, min(1, int(payload.table_by_club)))
+    if payload.avoid_local is not None:
+        patch["avoid_local"] = bool(payload.avoid_local)
+
+    async with database.transaction():
+        for club_id in club_ids:
+            values = {"province": key, "club_id": club_id, **patch}
+            await database.execute(
+                pg_insert(province_club_assignment)
+                .values(**values)
+                .on_conflict_do_update(
+                    index_elements=[
+                        province_club_assignment.c.province,
+                        province_club_assignment.c.club_id,
+                    ],
+                    # Do istniejącego wiersza wchodzi SAM `patch` - pola spoza
+                    # niego zostają takie, jakie były.
+                    set_=patch,
+                )
+            )
+    return {"success": True, "updated": len(club_ids)}

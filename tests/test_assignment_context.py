@@ -151,21 +151,26 @@ def test_a_club_that_seats_one_table_official_gets_one_from_us():
     assert need.field_needed == ["pierwszy", "drugi"]      # boiskowych zawsze my
 
 
-def test_a_club_that_seats_the_whole_table_gets_nobody():
+def test_the_province_always_seats_at_least_one_table_official():
+    """
+    Okręg daje albo jednego, albo obu - nigdy nikogo.
+
+    Przy dzieciach stolik jest jednoosobowy, więc deklaracja klubu nie ma czego
+    odjąć: ten jeden i tak jedzie od nas.
+    """
+    roster = club_roster({"table_by_club": 1})
+    state = {**STATE, "ID_zespoly_gosp_ZespolNazwa": "GKS Katowice"}
+    need = need_from_state("1", state, "DZM/4", None, roster)
+    assert need.table_needed == ["sekretarz"]
+    assert need.field_needed == ["pierwszy"]
+
+
+def test_even_a_bigger_declaration_does_not_empty_the_table():
+    # Gdyby kiedyś do bazy trafiło 2, reguła i tak zostawia jednego od okręgu.
     roster = club_roster({"table_by_club": 2})
     state = {**STATE, "ID_zespoly_gosp_ZespolNazwa": "GKS Katowice"}
     need = need_from_state("1", state, "S/JmM/12", None, roster)
-    assert need.table_needed == []
-    assert need.field_needed == ["pierwszy", "drugi"]
-
-
-def test_the_club_rule_never_goes_below_zero():
-    # Dzieci mają JEDNO gniazdo stolikowe, a klub deklaruje dwóch.
-    roster = club_roster({"table_by_club": 2})
-    state = {**STATE, "ID_zespoly_gosp_ZespolNazwa": "GKS Katowice"}
-    need = need_from_state("1", state, "DZM/4", None, roster)
-    assert need.table_needed == []
-    assert need.field_needed == ["pierwszy"]
+    assert need.table_needed == ["sekretarz"]
 
 
 def test_the_rule_follows_the_club_not_the_age_group():

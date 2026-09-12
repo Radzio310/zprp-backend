@@ -952,8 +952,9 @@ province_club_assignment = Table(
     metadata,
     Column("province", String, primary_key=True),
     Column("club_id", String, primary_key=True),
-    # Ilu stolikowych klub daje z własnych ludzi, grając u siebie (0, 1 albo 2).
-    # Automat obsadza wtedy o tylu mniej.
+    # Czy klub daje JEDNEGO stolikowego z własnych ludzi, grając u siebie.
+    # ⚠ Okręg zawsze posyła co najmniej jednego, więc to pole jest 0 albo 1:
+    # całego stolika klubowi nie zostawiamy.
     Column("table_by_club", Integer, nullable=False, server_default=text("0")),
     # Klub prosi, żeby nie wysyłać tu sędziów z tego samego miasta.
     Column("avoid_local", Boolean, nullable=False, server_default=text("false")),

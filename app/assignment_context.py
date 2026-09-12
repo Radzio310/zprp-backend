@@ -328,13 +328,17 @@ def need_from_state(
     needs = dict(A.crew_needs(code))
     local = O.match_moment(moment) if moment else None
 
-    # Klub gospodarza bywa umówiony, że stolik stawia z własnych ludzi - wtedy
-    # okręg posyła o tylu mniej. Nigdy poniżej zera i nigdy dla boiskowych:
-    # tych zapewnia okręg zawsze.
+    # Klub gospodarza bywa umówiony, że jednego stolikowego stawia z własnych
+    # ludzi - wtedy okręg posyła o jednego mniej.
+    #
+    # ⚠ OKRĘG DAJE ZAWSZE CO NAJMNIEJ JEDNEGO (decyzja użytkownika z 12.09.2026):
+    # albo jednego, albo obu, nigdy nikogo. Przy dzieciach, gdzie stolik jest
+    # jednoosobowy, deklaracja klubu nie ma więc czego odjąć - ten jeden i tak
+    # jedzie od nas. Boiskowych to nie dotyczy w ogóle: tych zapewnia okręg.
     club = roster.club_for(state.get("ID_zespoly_gosp_ZespolNazwa"))
-    from_club = max(0, min(int(club.get("table_by_club", 0) or 0), needs["table"]))
-    if from_club:
-        needs["table"] = needs["table"] - from_club
+    from_club = max(0, int(club.get("table_by_club", 0) or 0))
+    if from_club and needs["table"] > 0:
+        needs["table"] = max(1, needs["table"] - from_club)
 
     crew_ids: set[str] = set()
     crew_field: list[Judge] = []
