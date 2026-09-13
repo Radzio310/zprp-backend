@@ -100,11 +100,20 @@ def is_stale_write(
     *,
     doc_exists: bool = True,
     overwrite: bool = False,
+    content_changed: bool = True,
 ) -> bool:
     """Czy zapis buduje na treści starszej niż ta, którą ktoś INNY już zapisał.
 
     Kolejność warunków jest kolejnością "czego nie wolno pomylić z konfliktem":
 
+    * zapis, który NICZEGO w treści nie zmienia - nie ma tam cudzej pracy do
+      stracenia, więc nie ma też sporu. To ta sama myśl, co w `should_bump`
+      niżej ("zapis bajt w bajt taki sam nie jest zmianą treści"), tyle że
+      po stronie wpuszczania. Wpadało tu cofnięcie zatwierdzenia, które odsyła
+      DOKŁADNIE treść z serwera ze zmienionym statusem: przy wierszu sprzed
+      wersjonowania (`doc_rev` 0) i cudzym autorze warunek niżej odmawiał,
+      choć nie było czego bronić - i zatwierdzonego meczu nie dawało się
+      cofnąć w ogóle;
     * brak nagłówka - stara aplikacja, zachowanie sprzed tej zmiany;
     * wersja bazowa `0` przy ISTNIEJĄCYM protokole - telefon zaczął mecz od
       zera i myśli, że na serwerze nic nie ma. Świeży, pusty mecz nie ma prawa
@@ -124,6 +133,8 @@ def is_stale_write(
 
     Wszystko inne to cudza treść, której telefon nie widział.
     """
+    if not content_changed:
+        return False
     if base_rev is None:
         return False
     if int(base_rev) == 0 and doc_exists and not overwrite:
@@ -183,7 +194,10 @@ def iso(value: Any) -> Optional[str]:
 
 
 def stale_detail(
-    current_rev: int, writer_name: Optional[str], written_at: Any
+    current_rev: int,
+    writer_name: Optional[str],
+    written_at: Any,
+    base_rev: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Treść odmowy 409 `DOC_STALE`.
 
@@ -197,6 +211,10 @@ def stale_detail(
         "code": "DOC_STALE",
         "message": STALE_MESSAGE,
         "doc_rev": int(current_rev or 0),
+        # Wersja, z którą telefon przyszedł - bez niej odmowa jest nie do
+        # odtworzenia po fakcie, a raport z telefonu pokazuje tylko jedną
+        # stronę porównania.
+        "base_rev": base_rev,
         "writer_name": (str(writer_name or "").strip() or None),
         "written_at": iso(written_at),
         "writer_install_is_you": False,

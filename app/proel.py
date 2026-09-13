@@ -1652,6 +1652,14 @@ async def update_proel_match(
 
             # Cudza, nowsza treść, której telefon nie widział - reguła
             # w `is_stale_write`. Stary klient bez nagłówka nigdy tu nie wpada.
+            #
+            # Zapis identyczny z tym, co już leży, nie jest sporem: nie ma tam
+            # cudzej pracy do stracenia. Tak wygląda cofnięcie zatwierdzenia,
+            # które odsyła treść pobraną przed chwilą z serwera - przy wierszu
+            # sprzed wersjonowania odbijało się o bezpiecznik bez powodu.
+            incoming_unchanged = _json_value(req.data_json) == _json_value(
+                version.get("data_json")
+            )
             if is_stale_write(
                 base_rev,
                 current_doc_rev,
@@ -1659,6 +1667,7 @@ async def update_proel_match(
                 my_install,
                 doc_exists=bool(version),
                 overwrite=overwrite,
+                content_changed=not incoming_unchanged,
             ):
                 raise _DocStale(
                     current_doc_rev,
@@ -1840,7 +1849,9 @@ async def update_proel_match(
         )
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            detail=stale_detail(stale.current_rev, stale.writer_name, stale.written_at),
+            detail=stale_detail(
+                stale.current_rev, stale.writer_name, stale.written_at, stale.base_rev
+            ),
         ) from stale
     except _MatchIdConflict as conflict:
         # Wpis powstaje PO wycofaniu transakcji - inaczej wycofałby się

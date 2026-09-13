@@ -162,15 +162,22 @@ def test_telefon_moze_zglosic_tylko_swoja_przegrana_wersje():
 
 def test_odmowa_niesie_wersje_autora_i_czas_w_detail():
     at = datetime(2026, 9, 11, 18, 30, tzinfo=timezone.utc)
-    out = stale_detail(7, "  KOWALSKI Jan ", at)
+    out = stale_detail(7, "  KOWALSKI Jan ", at, 3)
     assert out == {
         "code": "DOC_STALE",
         "message": STALE_MESSAGE,
         "doc_rev": 7,
+        # Wersja, z ktora przyszedl telefon - bez niej odmowy nie da sie
+        # odtworzyc po fakcie z samego raportu z telefonu.
+        "base_rev": 3,
         "writer_name": "KOWALSKI Jan",
         "written_at": "2026-09-11T18:30:00+00:00",
         "writer_install_is_you": False,
     }
+
+
+def test_odmowa_bez_wersji_bazowej_ma_ja_jawnie_pusta():
+    assert stale_detail(7, None, None)["base_rev"] is None
 
 
 def test_odmowa_bez_autora_nie_wywraca_sie():
@@ -234,3 +241,44 @@ def test_bez_dlugich_myslnikow_w_nowych_modulach():
     for name in ("proel_doc_version.py", "proel_promote_rules.py"):
         text = (root / name).read_text(encoding="utf-8")
         assert "—" not in text and "–" not in text, name
+
+
+# ─────────────── zapis, ktory niczego nie zmienia, nie jest sporem ───────────
+#
+# Zgloszenie 13.09.2026: zatwierdzonego meczu nie dawalo sie cofnac. Cofniecie
+# odsyla DOKLADNIE tresc pobrana z serwera ze zmienionym statusem, ale wiersz
+# sprzed wersjonowania (`doc_rev` 0) z cudzym autorem odbijal je pierwszym
+# warunkiem - mimo ze nie bylo tam czego bronic.
+
+
+def test_zapis_bez_zmiany_tresci_przechodzi_mimo_cudzej_wersji():
+    assert (
+        is_stale_write(3, 9, "inny-telefon", "moj-telefon", content_changed=False)
+        is False
+    )
+
+
+def test_zapis_bez_zmiany_tresci_przechodzi_takze_przy_wersji_zero():
+    # Ta sama sytuacja, co u zglaszajacego: wiersz nigdy nieponumerowany,
+    # autor obcy, telefon przychodzi z baza 0.
+    assert (
+        is_stale_write(
+            0, 0, "inny-telefon", "moj-telefon", doc_exists=True, content_changed=False
+        )
+        is False
+    )
+
+
+def test_ta_sama_sytuacja_ze_ZMIENIONA_trescia_dalej_jest_sporem():
+    assert (
+        is_stale_write(
+            0, 0, "inny-telefon", "moj-telefon", doc_exists=True, content_changed=True
+        )
+        is True
+    )
+
+
+def test_domyslnie_zapis_jest_traktowany_jak_zmiana_tresci():
+    # Bez jawnego argumentu regula ma dzialac jak przed zmiana - stary
+    # wolajacy nie moze po cichu dostac lagodniejszego bezpiecznika.
+    assert is_stale_write(3, 9, "inny-telefon", "moj-telefon") is True
