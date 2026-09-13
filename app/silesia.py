@@ -33,6 +33,10 @@ from app.db import (
 )
 from app.calendar_feed_rules import judge_key
 from app.ical_feed import is_feed_entry
+from app.province_match_offtimes import (
+    province_match_entries,
+    without_client_duplicates,
+)
 from app.notify_utils import schedule_province_push
 from app.schemas import (
     # Announcements
@@ -759,6 +763,7 @@ async def _composed_offtime_records(
                 "district": [],
                 "central": [],
                 "feeds": [],
+                "matches": [],
                 "updated_at": row["updated_at"],
                 "central_synced_at": None,
             },
@@ -788,6 +793,7 @@ async def _composed_offtime_records(
                 "district": [],
                 "central": [],
                 "feeds": [],
+                "matches": [],
                 "updated_at": row["synced_at"],
                 "central_synced_at": row["synced_at"],
             },
@@ -838,6 +844,19 @@ async def _composed_offtime_records(
             for key, group in groups.items():
                 group["feeds"] = by_judge.get(judge_key(key[1]), [])
 
+    # Mecze sędziego. Czwarte źródło - też doklejane DOPIERO przy odczycie,
+    # prosto z tabel monitora meczów, który odświeża je co kilkanaście minut.
+    #
+    # Tylko widok okręgowy (`judge_id is None`). Telefon ma własną listę meczów
+    # w `matches.json` i rysuje ją sam, więc dostając te same mecze jeszcze raz
+    # z `/self` pokazałby każdy dwa razy - do czasu, aż wyjdzie nowa BAZA.
+    if judge_id is None and judge_keys:
+        match_by_judge = await province_match_entries(
+            province, judge_keys=judge_keys
+        )
+        for key, group in groups.items():
+            group["matches"] = match_by_judge.get(judge_key(key[1]), [])
+
     records = [
         OfftimeRecord(
             judge_id=group["judge_id"],
@@ -846,13 +865,19 @@ async def _composed_offtime_records(
             city=group["city"],
             data_json=_dedupe_offtime_entries(
                 [
-                    *_without_feed_entries(
-                        _without_client_central(group["district"])
-                        if group["central_synced_at"]
-                        else group["district"]
+                    # Wpisy meczowe z telefonu zostają, POZA tymi, których
+                    # świeższy odpowiednik właśnie dokładamy z serwera.
+                    *without_client_duplicates(
+                        _without_feed_entries(
+                            _without_client_central(group["district"])
+                            if group["central_synced_at"]
+                            else group["district"]
+                        ),
+                        group.get("matches", []),
                     ),
                     *group["central"],
                     *group.get("feeds", []),
+                    *group.get("matches", []),
                 ]
             ),
             updated_at=group["updated_at"],
