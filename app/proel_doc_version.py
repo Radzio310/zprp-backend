@@ -287,3 +287,25 @@ def payload_bytes(value: Any) -> int:
         return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
     except (TypeError, ValueError):
         return MAX_HISTORY_BYTES + 1
+
+
+def write_changes_content(*, status_only: bool, incoming: Any, stored: Any) -> bool:
+    """Czy ten zapis w ogóle zmienia treść meczu.
+
+    Odpowiedź karmi `is_stale_write`: zapis, który niczego nie zmienia, nie ma
+    z czym kolidować, więc nie jest sporem o wersję.
+
+    Dwie drogi do "nie":
+      * `status_only` - cofnięcie zatwierdzenia, które treści nie przepisuje
+        (`unapprove_only` w `app/proel_status.py`),
+      * treść przysłana jest równa tej zapisanej - telefon odesłał to, co sam
+        przed chwilą przeczytał z serwera.
+
+    Oba przypadki odbijały się wcześniej o pierwszy warunek `is_stale_write`,
+    który wersję bazową 0 czyta jako "telefon nie widział serwera". Dla wierszy
+    sprzed numerowania wersji (`doc_rev` 0, autor nieznany) znaczyło to, że
+    zatwierdzonego meczu nie dawało się cofnąć niczym.
+    """
+    if status_only:
+        return False
+    return json_value(incoming) != json_value(stored)

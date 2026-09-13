@@ -70,6 +70,7 @@ from app.proel_doc_version import (
     REASON_REJECTED_LOCAL as _REASON_REJECTED_LOCAL,
     conflict_event_key,
     is_stale_write,
+    write_changes_content,
     iso as _iso,
     json_value as _json_value,
     parse_base_rev,
@@ -109,6 +110,7 @@ from app.proel_status import (
     VALID_STATUSES,
     is_finished_for,
     resolve_status,
+    unapprove_only as _unapprove_only,
     unapprove_requested,
 )
 from app.proel_fields import (
@@ -1566,6 +1568,30 @@ async def update_proel_match(
                         detail={"code": "MATCH_APPROVED", "message": "Nie można edytować zatwierdzonego meczu"},
                     )
 
+            # ── Cofnięcie zatwierdzenia to decyzja o STATUSIE ──────────────
+            #
+            # Zatwierdzony protokół jest zamrożony: od chwili zatwierdzenia nie
+            # przeszedł tędy żaden zapis treści (warunek wyżej), więc to, co
+            # leży w bazie, JEST treścią zatwierdzoną. Telefon przysyła przy
+            # cofnięciu pełny blob, bo tak zbudowana jest ta trasa - ale nie ma
+            # w nim nic, czego serwer by nie miał, a może być mniej (kopia
+            # sprzed zatwierdzenia z drugiego urządzenia).
+            #
+            # Dlatego cofnięcie zmienia WYŁĄCZNIE status i zostawia treść, jaka
+            # jest. Dwa skutki, oba zamierzone:
+            #   * nie da się nim nadpisać zatwierdzonej treści starszą kopią,
+            #   * nie ma o co pytać bezpiecznika wersji - zapis, który niczego
+            #     w treści nie zmienia, nie ma z czym kolidować.
+            #
+            # To ostatnie było prawdziwą usterką (zgłoszenie 13.09.2026):
+            # wiersze sprzed numerowania wersji (`doc_rev` 0) z nieznanym
+            # autorem odbijały KAŻDE cofnięcie - pierwszym warunkiem
+            # `is_stale_write`, który wersję bazową 0 czyta jako "telefon nie
+            # widział serwera". Zatwierdzonego meczu nie dawało się wtedy
+            # cofnąć niczym poza starą wersją aplikacji, która nagłówka wersji
+            # w ogóle nie wysyła.
+            status_only = _unapprove_only(current_status, req.status)
+
             # ── Guard: czy to na pewno TEN mecz ────────────────────────────────
             #
             # Numer meczu ("OSK/12") jest unikalny w rozgrywkach, ale NIE między
@@ -1654,12 +1680,10 @@ async def update_proel_match(
             # w `is_stale_write`. Stary klient bez nagłówka nigdy tu nie wpada.
             #
             # Zapis identyczny z tym, co już leży, nie jest sporem: nie ma tam
-            # cudzej pracy do stracenia. Tak wygląda cofnięcie zatwierdzenia,
-            # które odsyła treść pobraną przed chwilą z serwera - przy wierszu
-            # sprzed wersjonowania odbijało się o bezpiecznik bez powodu.
-            incoming_unchanged = _json_value(req.data_json) == _json_value(
-                version.get("data_json")
-            )
+            # cudzej pracy do stracenia. Tak samo cofnięcie zatwierdzenia,
+            # które treści w ogóle nie rusza - regułę trzyma
+            # `write_changes_content`.
+            saved_doc = _json_value(version.get("data_json"))
             if is_stale_write(
                 base_rev,
                 current_doc_rev,
@@ -1667,7 +1691,11 @@ async def update_proel_match(
                 my_install,
                 doc_exists=bool(version),
                 overwrite=overwrite,
-                content_changed=not incoming_unchanged,
+                content_changed=write_changes_content(
+                    status_only=status_only,
+                    incoming=req.data_json,
+                    stored=version.get("data_json"),
+                ),
             ):
                 raise _DocStale(
                     current_doc_rev,
@@ -1745,7 +1773,10 @@ async def update_proel_match(
 
             projected = _reproject_blob(state, copy.deepcopy(req.data_json))
 
-            to_update: dict = {"data_json": projected}
+            # Cofnięcie zatwierdzenia zostawia treść, jaka jest - patrz
+            # `unapprove_only` w `app/proel_status.py`. Dalej `projected` służy
+            # już tylko do wiersza stanu, a i tam podstawiamy treść zapisaną.
+            to_update: dict = {} if status_only else {"data_json": projected}
 
             # Wersję podbija wyłącznie prawdziwa zmiana treści (`should_bump`).
             # Zatwierdzenie i cofnięcie niosą pełny blob, ale są decyzją
@@ -1824,7 +1855,9 @@ async def update_proel_match(
                 await _sync_state_after_doc_write(
                     match_number,
                     state,
-                    projected,
+                    # Treść zapisana, bo cofnięcie jej nie przepisuje. Gdy wiersz
+                    # jej nie ma, zostaje to, co przyszło - lepsze niż nic.
+                    saved_doc if status_only and saved_doc is not None else projected,
                     to_update.get("status", current_status),
                     legacy_writer=str(x_baza_proel or "") != "2",
                     writer_install=str(x_installation_id or "").strip(),

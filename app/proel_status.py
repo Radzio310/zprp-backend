@@ -55,3 +55,22 @@ def unapprove_requested(req_status: Optional[str]) -> bool:
     """
     s = str(req_status or "").strip().lower()
     return s in VALID_STATUSES and s != "approved"
+
+
+def unapprove_only(current_status: Optional[str], req_status: Optional[str]) -> bool:
+    """Czy ten zapis JEDYNIE zdejmuje zatwierdzenie - treści nie rusza.
+
+    Zatwierdzony protokół jest zamrożony: od chwili zatwierdzenia nie przeszedł
+    przez zapis bloba ani jeden bajt treści, więc to, co leży w bazie, JEST
+    treścią zatwierdzoną. Telefon przysyła przy cofnięciu pełny blob, bo tak
+    zbudowana jest ta trasa - ale nie ma w nim nic, czego serwer by nie miał,
+    a może być mniej (kopia sprzed zatwierdzenia z drugiego urządzenia).
+
+    Stąd reguła: przy cofnięciu zmieniamy sam status. Dwa skutki, oba
+    zamierzone - zatwierdzonej treści nie da się nadpisać starszą kopią, a
+    bezpiecznik wersji nie ma o co pytać, bo zapis niczego w treści nie zmienia.
+    """
+    return (
+        str(current_status or "").strip().lower() == "approved"
+        and unapprove_requested(req_status)
+    )
