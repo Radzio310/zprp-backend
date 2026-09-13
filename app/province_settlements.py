@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, select
 
 from app import settlement_engine as E
+from app import settlement_buckets as B
 from app import settlement_rates as R
 from app.db import (
     central_rates,
@@ -843,6 +844,10 @@ async def my_stats(
             "category": R.category_label(code),
             "level": R.match_level(code),
             "role": str(row["role"] or ""),
+            # Kubelek statystyk: mecz okregu / stolik ligowy / reszta ligowych.
+            # Liczy go JEDNO miejsce (`settlement_buckets`), zeby ekran i kafel
+            # na „Wiecej" nie mialy wlasnych, rozjezdzajacych sie regul.
+            "bucket": B.bucket_of(code, row["role"]),
             "origin": str(row["origin"] or ""),
             "city": str(row["city"] or ""),
             "hall": str(row["hall"] or ""),
@@ -882,8 +887,14 @@ async def my_stats(
         "totals": {
             "matches": len(counted),
             "future": sum(1 for m in matches if m["future"]),
+            # `district`/`outside` mowia o ZRODLE (terminarz okregu kontra
+            # lista sedziego) i zostaja dla zgodnosci ze starszymi ekranami.
+            # O SZCZEBLU mowi dopiero `by_bucket` nizej.
             "district": sum(1 for m in counted if m["origin"] == "district"),
             "outside": sum(1 for m in counted if m["origin"] == "outside"),
+            # Ile obsad w kazdym kubelku - z tego kafel na „Wiecej" bierze
+            # liczbe zgodna z tym, co pokaze ekran po filtrze.
+            "by_bucket": B.counts(counted),
             "km": round(sum(distances) * R.ROUND_TRIP, 1),
             "cities": len({m["city"] for m in counted if m["city"]}),
             "halls": len({m["hall"] for m in counted if m["hall"]}),
