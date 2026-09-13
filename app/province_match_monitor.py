@@ -332,6 +332,17 @@ def _changed(old: Dict[str, Any], new: Dict[str, Any], *keys: str) -> bool:
     return any(old.get(k, "") != new.get(k, "") for k in keys)
 
 
+def _was_added(old: Dict[str, Any], new: Dict[str, Any], *keys: str) -> bool:
+    """Czy któreś z pól dopiero się POJAWIŁO - wcześniej puste, teraz z treścią.
+
+    Odpowiednik `wasAdded` z aplikacji (`utils/matchNotificationsEngine.ts`).
+    Rozróżnienie „dodano" od „edytowano" musi wychodzić z tej samej reguły po
+    obu stronach, bo obie opisują to samo zdarzenie temu samemu sędziemu -
+    raz w dzwonku w aplikacji, raz powiadomieniem systemowym.
+    """
+    return any(not _str(old.get(k)) and bool(_str(new.get(k))) for k in keys)
+
+
 def _display_match_at(value: Any) -> str:
     match_at = parse_match_at(value)
     return match_at.astimezone(WARSAW).strftime("%d.%m.%Y, %H:%M") if match_at else _str(value)
@@ -407,7 +418,12 @@ def build_change_events(old: Dict[str, Any], new: Dict[str, Any]) -> List[Dict[s
     if _changed(old, new, *result_fields):
         score = ":".join(filter(None, [_str(new.get("wynik_gosp_full")), _str(new.get("wynik_gosc_full"))]))
         suffix = f": {score}" if score else ""
-        events.append({"event_type": "match_data_changed", "body": f"Edytowano wynik skrócony meczu {code}{suffix}"})
+        # Pierwsze wpisanie wyniku to DODANIE, nie edycja. Powiadomienie
+        # systemowe mówiło „Edytowano" także wtedy, gdy wynik pojawiał się po
+        # raz pierwszy - a dzwonek w aplikacji w tej samej chwili mówił
+        # „Dodano". Jedno zdarzenie nie może mieć dwóch opisów.
+        verb = "Dodano" if _was_added(old, new, *result_fields) else "Edytowano"
+        events.append({"event_type": "match_data_changed", "body": f"{verb} wynik skrócony meczu {code}{suffix}"})
     # Jeden przebieg może wykryć wiele pól; identyczne komunikaty usuwamy.
     return list({(e["event_type"], e["body"]): e for e in events}.values())
 

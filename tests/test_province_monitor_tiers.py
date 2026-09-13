@@ -401,3 +401,65 @@ def test_szczegoly_daja_sie_odpytac_na_krotszej_smyczy():
     kwonly = {arg.arg for arg in node.args.kwonlyargs}
     assert {"timeout", "retries"} <= kwonly
     assert "timeout=timeout" in _ast.unparse(node)
+
+
+# ── „Dodano" kontra „Edytowano" przy wyniku skróconym ────────────────────
+#
+# To samo zdarzenie dociera do sędziego dwiema drogami: dzwonkiem w aplikacji
+# (`BAZA/utils/matchNotificationsEngine.ts`) i powiadomieniem systemowym stąd.
+# Monitor mówił „Edytowano" ZAWSZE, także przy pierwszym wpisaniu wyniku -
+# telefon pokazywał wtedy dwa różne opisy jednej rzeczy.
+
+
+def _result_body(old: dict, new: dict) -> str:
+    events = [
+        e
+        for e in build_change_events(old, new)
+        if "wynik skrócony" in e["body"]
+    ]
+    assert len(events) == 1, events
+    return events[0]["body"]
+
+
+def test_pierwszy_wynik_to_dodanie():
+    old = dict(STORED)
+    new = dict(STORED, wynik_gosp_full="28", wynik_gosc_full="24")
+    assert _result_body(old, new) == "Dodano wynik skrócony meczu OSM/12: 28:24"
+
+
+def test_poprawka_wyniku_to_edycja():
+    old = dict(STORED, wynik_gosp_full="28", wynik_gosc_full="24")
+    new = dict(STORED, wynik_gosp_full="29", wynik_gosc_full="24")
+    assert _result_body(old, new) == "Edytowano wynik skrócony meczu OSM/12: 29:24"
+
+
+def test_dopisana_liczba_widzow_tez_jest_dodaniem():
+    # Widzowie należą do tego samego formularza, a aplikacja liczy ich tak samo.
+    old = dict(STORED, wynik_gosp_full="28", wynik_gosc_full="24")
+    new = dict(old, widzowie="320")
+    assert _result_body(old, new).startswith("Dodano wynik skrócony")
+
+
+def test_skasowanie_wyniku_nie_jest_dodaniem():
+    old = dict(STORED, wynik_gosp_full="28", wynik_gosc_full="24")
+    new = dict(STORED, wynik_gosp_full="", wynik_gosc_full="")
+    assert _result_body(old, new) == "Edytowano wynik skrócony meczu OSM/12"
+
+
+def test_aplikacja_i_serwer_uzywaja_tych_samych_slow():
+    """Gdyby ktoś zmienił czasownik po jednej stronie, ten test upadnie.
+
+    Sam napis, nie cała reguła - ale to właśnie napis widzi sędzia i to on
+    rozjechał się między dzwonkiem a powiadomieniem systemowym.
+    """
+    engine = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "BAZA"
+        / "utils"
+        / "matchNotificationsEngine.ts"
+    )
+    if not engine.exists():
+        pytest.skip("Repozytorium aplikacji nie jest obok backendu")
+    text = engine.read_text(encoding="utf-8")
+    assert 'anyAddedInResult ? "Dodano" : "Edytowano"' in text
+    assert "Dodano" in SOURCE and "Edytowano" in SOURCE
