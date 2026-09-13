@@ -23,6 +23,7 @@ from app.proel_doc_version import (
     STALE_MESSAGE,
     conflict_event_key,
     is_stale_write,
+    parse_base_seen,
     iso,
     parse_base_rev,
     parse_overwrite,
@@ -282,3 +283,59 @@ def test_domyslnie_zapis_jest_traktowany_jak_zmiana_tresci():
     # Bez jawnego argumentu regula ma dzialac jak przed zmiana - stary
     # wolajacy nie moze po cichu dostac lagodniejszego bezpiecznika.
     assert is_stale_write(3, 9, "inny-telefon", "moj-telefon") is True
+
+
+# ───────── Wersja bazowa 0: zalozenie czy odczyt? (13.09.2026) ─────────
+#
+# Raport z telefonu (mecz TEST/2, zatwierdzenie):
+#   wersja bazowa 0 | serwer doc_rev 0, autor NIEZNANY | 409 DOC_STALE
+#
+# Zero znaczy dwie przeciwne rzeczy, a serwer widzial tylko liczbe:
+#   * "swiezy mecz, zakladam ze na serwerze nic nie ma" - tu odmowa CHRONI
+#     cudzy, porzucony protokol,
+#   * "odczytalem ten wiersz i on naprawde jest na wersji 0" - tu odmowa
+#     blokowala wszystko, bo wierszy sprzed numerowania wersji nie dalo sie
+#     ruszyc zadnym zapisem z nowej aplikacji.
+
+
+def test_naglowek_odczytu_czyta_sie_po_ludzku():
+    assert parse_base_seen("1") is True
+    assert parse_base_seen("true") is True
+    assert parse_base_seen(None) is False
+    assert parse_base_seen("") is False
+    assert parse_base_seen("0") is False
+
+
+def test_odczytana_wersja_zero_przechodzi_mimo_obcego_autora():
+    assert (
+        is_stale_write(
+            0, 0, None, "moj-telefon", doc_exists=True, base_seen=True
+        )
+        is False
+    )
+
+
+def test_ZALOZONA_wersja_zero_dalej_chroni_cudzy_protokol():
+    # Swiezy mecz z drugiego telefonu - to jest powod, dla ktorego ten warunek
+    # w ogole powstal (LCM/6, 11.09.2026).
+    assert (
+        is_stale_write(
+            0, 0, None, "moj-telefon", doc_exists=True, base_seen=False
+        )
+        is True
+    )
+
+
+def test_odczyt_nie_rozbraja_prawdziwego_sporu_wersji():
+    # Serwer poszedl do przodu OD CZASU naszego odczytu - to juz nie jest
+    # "wiem, co tam lezy", tylko zwykla przeterminowana wersja.
+    assert (
+        is_stale_write(
+            3, 9, "inny-telefon", "moj-telefon", doc_exists=True, base_seen=True
+        )
+        is True
+    )
+
+
+def test_brak_naglowka_zachowuje_sie_jak_przed_zmiana():
+    assert is_stale_write(0, 0, None, "moj-telefon", doc_exists=True) is True

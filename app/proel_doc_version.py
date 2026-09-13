@@ -31,6 +31,8 @@ from typing import Any, Dict, Optional
 BASE_REV_HEADER = "X-Proel-Base-Rev"
 #: Nagłówek świadomego wyboru w arkuszu konfliktu.
 OVERWRITE_HEADER = "X-Proel-Overwrite"
+#: Nagłówek "tę wersję bazową ODCZYTAŁEM u ciebie" - patrz `is_stale_write`.
+BASE_SEEN_HEADER = "X-Proel-Base-Seen"
 #: Jedyna znana wartość `X-Proel-Overwrite`: "wybrałem swoją wersję, widząc
 #: aktualną wersję serwera".
 OVERWRITE_CONFLICT = "conflict"
@@ -83,6 +85,16 @@ def parse_overwrite(raw: Any) -> bool:
     return str(raw or "").strip().lower() == OVERWRITE_CONFLICT
 
 
+def parse_base_seen(raw: Any) -> bool:
+    """Czy telefon ODCZYTAŁ podaną wersję bazową z tego wiersza.
+
+    Rozstrzyga dwuznaczność wersji `0`, która dla serwera wygląda tak samo
+    w dwóch przeciwnych sytuacjach - patrz `is_stale_write`. Brak nagłówka
+    znaczy "nie wiadomo", czyli zachowanie sprzed tej zmiany.
+    """
+    return str(raw or "").strip() in ("1", "true", "yes")
+
+
 def same_install(a: Any, b: Any) -> bool:
     """To samo urządzenie - wyłącznie przy niepustych identyfikatorach po OBU
     stronach. Puste równe pustemu uznałoby każdego starego klienta za autora
@@ -101,6 +113,7 @@ def is_stale_write(
     doc_exists: bool = True,
     overwrite: bool = False,
     content_changed: bool = True,
+    base_seen: bool = False,
 ) -> bool:
     """Czy zapis buduje na treści starszej niż ta, którą ktoś INNY już zapisał.
 
@@ -120,10 +133,13 @@ def is_stale_write(
       nadpisać protokołu, który napisał kto inny (porzucony mecz na drugim
       telefonie), także w wierszu sprzed wersjonowania - dlatego ten warunek
       stoi PRZED "nigdy niewersjonowany". Nieznany autor to autor obcy.
-      Wyjątek: świadomy wybór w arkuszu konfliktu (`overwrite`). Telefon
-      widział wtedy wersję serwera i wysyła ją jako bazową - dla wiersza
-      niewersjonowanego to jest właśnie `0`, a bez wyjątku sędzia nie
-      mógłby wybrać swojej wersji nigdy;
+      DWA wyjątki, oba znaczą "wiem, co tam leży":
+        - świadomy wybór w arkuszu konfliktu (`overwrite`),
+        - `base_seen`: telefon ODCZYTAŁ ten wiersz i wersja `0` jest jego
+          prawdziwą wersją, a nie założeniem. Bez tego rozróżnienia wiersze
+          sprzed numerowania wersji nie przyjmowały ŻADNEGO zapisu z nowej
+          aplikacji - ani zatwierdzenia, ani cofnięcia (zgłoszenie 13.09.2026,
+          mecz TEST/2: baza 0, serwer 0, autor nieznany);
     * wiersz nigdy niewersjonowany (`0`) - nie ma z czym porównać, a wersja
       bazowa większa od zera pochodzi ze starej lokalnej kopii;
     * ta sama wersja - telefon zna dokładnie to, co leży na serwerze;
@@ -137,7 +153,7 @@ def is_stale_write(
         return False
     if base_rev is None:
         return False
-    if int(base_rev) == 0 and doc_exists and not overwrite:
+    if int(base_rev) == 0 and doc_exists and not overwrite and not base_seen:
         return not same_install(writer_install, my_install)
     current = int(current_rev or 0)
     if current == 0:

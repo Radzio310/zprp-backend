@@ -74,6 +74,7 @@ from app.proel_doc_version import (
     iso as _iso,
     json_value as _json_value,
     parse_base_rev,
+    parse_base_seen,
     parse_overwrite,
     payload_bytes,
     same_install,
@@ -1521,6 +1522,7 @@ async def update_proel_match(
     # w arkuszu konfliktu. Oba OPCJONALNE: bez nich zapis działa jak dotąd.
     x_proel_base_rev: Optional[str] = Header(None, alias="X-Proel-Base-Rev"),
     x_proel_overwrite: Optional[str] = Header(None, alias="X-Proel-Overwrite"),
+    x_proel_base_seen: Optional[str] = Header(None, alias="X-Proel-Base-Seen"),
 ):
     # Aktor MIĘKKO, jeden na całą trasę: podpisuje potwierdzenia badań
     # wchłonięte z bloba (patrz `absorb_blob_exams`).
@@ -1533,6 +1535,10 @@ async def update_proel_match(
     my_install = str(x_installation_id or "").strip()
     base_rev = parse_base_rev(x_proel_base_rev)
     overwrite = parse_overwrite(x_proel_overwrite)
+    # „Wersję bazową odczytałem u ciebie” - rozstrzyga dwuznaczność wersji 0,
+    # która dla świeżego meczu znaczy „nic tam nie ma”, a po odczycie wiersza
+    # sprzed numerowania wersji znaczy „tyle właśnie tam jest”.
+    base_seen = parse_base_seen(x_proel_base_seen)
     new_doc_rev = 0
     new_written_at: Any = None
     archived_id: Optional[int] = None
@@ -1691,6 +1697,7 @@ async def update_proel_match(
                 my_install,
                 doc_exists=bool(version),
                 overwrite=overwrite,
+                base_seen=base_seen,
                 content_changed=write_changes_content(
                     status_only=status_only,
                     incoming=req.data_json,
