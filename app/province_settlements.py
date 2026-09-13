@@ -291,6 +291,10 @@ def _match_json(match: E.SettledMatch) -> dict:
         "status": match.status,
         "zprp_reason": match.zprp_reason,
         "triple_table": match.triple_table,
+        # Turniej dzieci - po tych polach listy sklejaja mecze w jedna karte.
+        "tournament_key": match.tournament_key,
+        "tournament_size": match.tournament_size,
+        "rate_shared": match.rate_shared,
     }
 
 

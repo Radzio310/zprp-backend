@@ -512,6 +512,37 @@ def provincial_gross(
     return value_from_node(root, role_node.get(category), distance_km, key)
 
 
+def children_rate_defined(content: Any, role: str, when: date) -> bool:
+    """Czy wersja stawek okregu zna kategorie turnieju dzieci.
+
+    To jest przelacznik miedzy DWOMA sposobami rozliczania turnieju:
+
+    * ZNA (Slaskie od 01.09.2026) - kazdy mecz placi swoja stawke dziecieca
+      (40 zl), a wspolny jest tylko dojazd,
+    * NIE ZNA (wszystkie starsze wersje) - turniej placi JEDNA stawke okregowa
+      za caly dzien. Wczesniej kazdy mecz liczyl sie wtedy jak pelny mecz
+      okregowy i dzien dzieci wychodzil kilkaset zlotych.
+
+    Regula jest OGOLNA, nie slaska: okreg, ktory dopisze sobie stawke dzieciec,
+    automatycznie przechodzi na rozliczanie za mecz.
+    """
+    root = _as_dict(content)
+    if not root:
+        return False
+    key = day_key(when)
+    main = deref(root, root.get("mecze")) or root
+    mode = deref(root, main.get(key)) if isinstance(main, dict) and (main.get("weekend") or main.get("weekday")) else main
+    for candidate in (
+        (mode or {}).get(role) if isinstance(mode, dict) else None,
+        (main or {}).get(role) if isinstance(main, dict) else None,
+        (_as_dict(root.get(key)) or {}).get(role),
+    ):
+        node = deref(root, candidate)
+        if isinstance(node, dict):
+            return node.get(CHILDREN_CATEGORY) is not None
+    return False
+
+
 def district_fallback(book: Any, distance_km: float, role: str) -> float:
     """Gdy wojewodztwo nie ma wlasnej tabeli - galaz `okregowe` tabeli centralnej."""
     if role == ROLE_DELEGATE:

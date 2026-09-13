@@ -21,9 +21,6 @@ from typing import Any, Iterable, Optional
 
 from app import settlement_rates as R
 
-#: Przerwa, ponizej ktorej kolejny mecz to jeszcze ten sam wyjazd.
-TRIP_GAP_SECONDS = 3 * 60 * 60
-
 
 def _city_key(value: Any) -> str:
     """Miasto do porownania: bez ogonkow, bez interpunkcji, malymi literami."""
@@ -93,6 +90,13 @@ class SettledMatch:
     zprp_reason: Optional[str] = None
     #: Ryczałt policzony x3, bo stolikowy został sam.
     triple_table: bool = False
+    #: Znacznik turnieju dzieci - wspolny dla wszystkich meczow tego dnia w tej
+    #: samej hali. Listy sklejaja po nim jedna karte turnieju.
+    tournament_key: Optional[str] = None
+    #: Ile meczow liczy ten turniej (1 = mecz poza turniejem).
+    tournament_size: int = 1
+    #: Stawke za ten mecz zaplacil pierwszy mecz turnieju (stare wersje stawek).
+    rate_shared: bool = False
 
 
 @dataclass
@@ -128,45 +132,95 @@ def _is_future(when: Optional[datetime], now: datetime) -> bool:
     return when > now
 
 
-def _mark_shared_travel(matches: list[SettledMatch]) -> None:
-    """
-    Dojazd za WYJAZD, ale TYLKO w rozgrywkach dzieci (DzM/DzK).
+def _tournament_groups(
+    matches: list[SettledMatch],
+) -> dict[tuple[str, str, str], list[SettledMatch]]:
+    """Turnieje dzieci: sedzia + DZIEN + miejsce.
 
     Dzien dzieci to w praktyce turniej: kilkanascie spotkan pod rzad w jednej
-    hali, na ktore sedzia przyjechal raz. Kazda inna kategoria liczy dojazd przy
-    KAZDYM meczu - decyzja uzytkownika z 09.09.2026.
+    hali, na ktore sedzia przyjechal raz i przy ktorych przesiedzial caly dzien.
 
-    Placi mecz NAJWCZESNIEJSZY. Kotwica idzie za OSTATNIM meczem wyjazdu, bo
-    turniej 9:00-11:00-13:00 to jeden wyjazd, mimo ze skrajne mecze dzieli
-    wiecej niz prog. Mecze bez godziny maja ten sam znacznik dnia, wiec przerwa
-    wynosi zero i skleja sie w „ten sam dzien, ta sama hala".
+    ⚠ NIE dzielimy po kategorii. DzM i DzK tego samego dnia w tej samej hali to
+    JEDEN turniej - decyzja uzytkownika z 13.09.2026. Sedzia jedzie raz i siedzi
+    raz, niezaleznie od tego, czy graja chlopcy, czy dziewczeta.
+
+    ⚠ Granica to CALY DZIEN, nie przerwa miedzy meczami. Wczesniej dojazd
+    sklejal sie lancuchem trzech godzin i przy dluzszej przerwie ten sam dzien
+    potrafil rozpasc sie na dwa wyjazdy. Stawka i dojazd musza grupowac sie
+    identycznie, inaczej jedna stawka szla z dwoma dojazdami.
 
     Ta sama regula stoi w `BAZA/utils/tripTravel.ts` i w `mergeTripTravel`
-    w BAZA_web - rozjazd oznaczalby, ze aplikacja i lista przejazdow placa za
-    inna liczbe dojazdow.
+    w BAZA_web - rozjazd oznaczalby, ze aplikacja sedziego i zestawienie okregu
+    placa za co innego.
     """
-    groups: dict[tuple[str, str], list[SettledMatch]] = {}
+    groups: dict[tuple[str, str, str], list[SettledMatch]] = {}
     for item in matches:
         if not R.is_children_competition(item.match_code):
             continue
-        if item.match_at is None:
+        if item.day is None:
+            # Mecz bez daty nie ma sie z czym skleic - placi po swojemu.
             continue
         place = _city_key(item.city)
         if not place:
             continue
-        groups.setdefault((item.judge_id, place), []).append(item)
+        groups.setdefault((item.judge_id, item.day.isoformat(), place), []).append(item)
+    return groups
 
-    for group in groups.values():
-        if len(group) < 2:
+
+def _mark_tournaments(
+    matches: list[SettledMatch],
+    *,
+    province_versions: Iterable[Any],
+) -> None:
+    """Dojazd raz na turniej, a przy starych stawkach - takze stawka raz.
+
+    DOJAZD placi zawsze mecz NAJWCZESNIEJSZY z turnieju; pozostale dostaja
+    znacznik `travel_shared`.
+
+    STAWKA zalezy od wersji stawek okregu obowiazujacej w dniu meczu:
+
+    * wersja ZNA kategorie „Dzieci" - kazdy mecz placi swoja (40 zl na Slasku
+      od 01.09.2026), nie ruszamy niczego,
+    * wersja jej NIE ZNA - caly turniej placi JEDNA stawke okregowa. Dotad
+      kazdy mecz liczyl sie tam jak pelny mecz okregowy i trzy mecze dzieci
+      wychodzily kilkaset zlotych za jeden dzien w hali.
+
+    Znacznik turnieju (`tournament_key`) dostaja WSZYSTKIE mecze grupy, takze
+    przy stawce za mecz - listy w aplikacji i na BAZA_web sklejaja po nim
+    turniej w jedna karte, niezaleznie od tego, jak policzyla sie stawka.
+    """
+    for group in _tournament_groups(matches).values():
+        ordered = sorted(
+            group,
+            key=lambda m: (m.match_at or datetime.min.replace(tzinfo=timezone.utc), m.match_key),
+        )
+        first = ordered[0]
+        key = f"dz:{first.judge_id}:{first.day}:{_city_key(first.city)}"
+        for item in ordered:
+            item.tournament_key = key
+            item.tournament_size = len(ordered)
+
+        if len(ordered) < 2:
             continue
-        ordered = sorted(group, key=lambda m: (m.match_at, m.match_key))  # type: ignore[arg-type]
-        anchor = ordered[0].match_at
+
         for item in ordered[1:]:
-            gap = (item.match_at - anchor).total_seconds()  # type: ignore[operator]
-            if gap < TRIP_GAP_SECONDS:
-                item.travel_shared = True
-                item.travel = 0
-            anchor = item.match_at
+            item.travel_shared = True
+            item.travel = 0
+
+        # Stawka dziecieca jest liczona OD DNIA MECZU, wiec o sposobie
+        # rozliczenia decyduje wersja z dnia turnieju, nie dzisiejsza.
+        provincial = R.pick_version(province_versions, first.day)
+        content = (
+            (provincial or {}).get("content")
+            if isinstance(provincial, dict)
+            else getattr(provincial, "content", None)
+        )
+        if R.children_rate_defined(content, first.role, first.day):
+            continue
+
+        for item in ordered[1:]:
+            item.gross = 0
+            item.rate_shared = True
 
 
 def settle_match(
@@ -307,9 +361,9 @@ def settle_judges(
             continue
         settled.append(item)
 
-    # Sklejanie wyjazdow MUSI isc po odsiewie, bo dojazd placi najwczesniejszy
-    # mecz Z TYCH, ktore weszly do rozliczenia.
-    _mark_shared_travel(settled)
+    # Sklejanie turnieju MUSI isc po odsiewie, bo dojazd i stawke placi
+    # najwczesniejszy mecz Z TYCH, ktore weszly do rozliczenia.
+    _mark_tournaments(settled, province_versions=province_versions)
 
     by_judge: dict[str, JudgeSettlement] = {}
     for item in settled:

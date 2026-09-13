@@ -26,6 +26,25 @@ PROV_VERSIONS = [
     {"id": 10, "valid_from": "2026-09-01", "valid_to": None, "enabled": True, "content": PROV_RAW},
 ]
 
+# Wersja sprzed 01.09.2026: bez kategorii „Dzieci" i bez kilometrowki - dokladnie
+# to, po czym liczyly sie stare sezony slaskie.
+OLD_PROV_RAW = json.loads(
+    io.open(
+        ROOT.parent
+        / "BAZA"
+        / "assets"
+        / "data"
+        / "okregowe"
+        / "STAWKI - wersjonowanie"
+        / "slaskie wersje"
+        / "slaskie_do_31_08_2026.json",
+        encoding="utf-8",
+    ).read()
+)
+OLD_PROV_VERSIONS = [
+    {"id": 9, "valid_from": None, "valid_to": "2026-08-31", "enabled": True, "content": OLD_PROV_RAW},
+]
+
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 
 
@@ -151,6 +170,109 @@ def test_juniorzy_w_jednej_hali_placa_dojazd_za_kazdy_mecz():
     entry = entries[0]
     assert all(m.travel > 0 for m in entry.matches)
     assert entry.travel == 2 * round(20 * 0.7 * 2)
+
+
+def test_turniej_dzieci_to_caly_dzien_a_nie_trzy_godziny():
+    """Mecze o 9:00 i 15:00 to jeden turniej, mimo szesciu godzin przerwy.
+
+    Dotad sklejal je lancuch trzech godzin i taki dzien rozpadal sie na dwa
+    wyjazdy - a sedzia przyjechal raz i przesiedzial w hali caly dzien.
+    """
+    entries = settle([
+        make("d1", "S/DZM/1", R.ROLE_FIELD, at("2026-10-04T09:00"), city="Zabrze"),
+        make("d2", "S/DZM/2", R.ROLE_FIELD, at("2026-10-04T15:00"), city="Zabrze"),
+    ])
+    entry = entries[0]
+    assert sum(1 for m in entry.matches if m.travel) == 1
+    assert {m.tournament_key for m in entry.matches} == {entry.matches[0].tournament_key}
+    assert all(m.tournament_size == 2 for m in entry.matches)
+
+
+def test_dzm_i_dzk_w_jednej_hali_to_JEDEN_turniej():
+    """Sedzia jedzie raz i siedzi raz - plec rozgrywek tego nie dzieli."""
+    entries = settle([
+        make("m1", "S/DZM/1", R.ROLE_FIELD, at("2026-10-04T09:00"), city="Zabrze"),
+        make("k1", "S/DZK/1", R.ROLE_FIELD, at("2026-10-04T11:00"), city="Zabrze"),
+    ])
+    entry = entries[0]
+    assert len({m.tournament_key for m in entry.matches}) == 1
+    assert sum(1 for m in entry.matches if m.travel) == 1
+
+
+def test_turniej_po_starych_stawkach_placi_JEDNA_stawke():
+    """Wersja sprzed 01.09.2026 nie zna kategorii „Dzieci".
+
+    Dotad kazdy mecz liczyl sie tam jak pelny mecz okregowy i trzy mecze
+    dzieci wychodzily 351 zl za jeden dzien w hali.
+    """
+    entries = E.settle_judges(
+        [
+            make("d1", "S/DZM/1", R.ROLE_FIELD, at("2026-06-13T11:00"), city="Chorzow"),
+            make("d2", "S/DZM/2", R.ROLE_FIELD, at("2026-06-13T12:30"), city="Chorzow"),
+            make("d3", "S/DZM/3", R.ROLE_FIELD, at("2026-06-13T14:00"), city="Chorzow"),
+        ],
+        province="ŚLĄSKIE",
+        central_versions=CENTRAL_VERSIONS,
+        province_versions=OLD_PROV_VERSIONS,
+        now=NOW,
+        names={"5124": "KOWALSKI Jan"},
+    )
+    entry = entries[0]
+    # Kwota stawki mieszka na serwerze i bywa zmieniana - test pilnuje REGULY:
+    # caly turniej placi tyle, co JEDEN mecz okregowy, a nie tyle razy ile
+    # meczow. (Dla soboty 13.06.2026 to 152 zl zamiast 456 zl.)
+    one_rate = entry.matches[0].gross
+    assert one_rate > 0
+    assert entry.gross == one_rate
+    assert [m.gross for m in entry.matches] == [one_rate, 0, 0]
+    assert [m.rate_shared for m in entry.matches] == [False, True, True]
+    # Dojazd tez raz - i po tej wersji stawek wychodzi zero, bo stary Slask
+    # nie placil kilometrowki wcale.
+    assert sum(1 for m in entry.matches if m.travel_shared) == 2
+
+
+def test_nowe_stawki_dalej_placa_za_KAZDY_mecz():
+    """Gdy wersja zna „Dzieci", grupowanie dotyczy wylacznie dojazdu."""
+    entries = settle([
+        make("d1", "S/DZM/1", R.ROLE_FIELD, at("2026-10-04T09:00"), city="Zabrze"),
+        make("d2", "S/DZM/2", R.ROLE_FIELD, at("2026-10-04T10:30"), city="Zabrze"),
+    ])
+    entry = entries[0]
+    assert [m.gross for m in entry.matches] == [40, 40]
+    assert not any(m.rate_shared for m in entry.matches)
+
+
+def test_turniej_w_innym_dniu_to_inny_turniej():
+    entries = E.settle_judges(
+        [
+            make("d1", "S/DZM/1", R.ROLE_FIELD, at("2026-06-13T11:00"), city="Chorzow"),
+            make("d2", "S/DZM/2", R.ROLE_FIELD, at("2026-06-14T11:00"), city="Chorzow"),
+        ],
+        province="ŚLĄSKIE",
+        central_versions=CENTRAL_VERSIONS,
+        province_versions=OLD_PROV_VERSIONS,
+        now=NOW,
+        names={"5124": "KOWALSKI Jan"},
+    )
+    entry = entries[0]
+    assert all(m.gross > 0 for m in entry.matches)
+    assert not any(m.rate_shared for m in entry.matches)
+    assert len({m.tournament_key for m in entry.matches}) == 2
+
+
+def test_pojedynczy_mecz_dzieci_nie_jest_turniejem():
+    entries = E.settle_judges(
+        [make("d1", "S/DZM/1", R.ROLE_FIELD, at("2026-06-13T11:00"), city="Chorzow")],
+        province="ŚLĄSKIE",
+        central_versions=CENTRAL_VERSIONS,
+        province_versions=OLD_PROV_VERSIONS,
+        now=NOW,
+        names={"5124": "KOWALSKI Jan"},
+    )
+    [match] = entries[0].matches
+    assert match.gross > 0
+    assert match.tournament_size == 1
+    assert match.rate_shared is False
 
 
 def test_dzieci_w_innej_hali_to_inny_wyjazd():
