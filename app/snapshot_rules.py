@@ -50,16 +50,26 @@ MILESTONE_RETENTION_DAYS = 90
 #: wtedy, gdy nie da się jej przechować.
 MAX_SNAPSHOT_BYTES = 512 * 1024
 
-#: Minimalny odstęp między migawkami jednego meczu. Autozapis chodzi co 60 s,
-#: więc częściej i tak nie wnosi nic - a bez tego jeden klient w pętli
-#: zapisywałby setki wersji na minutę.
-MIN_INTERVAL_SECONDS = 20
+#: ODSTĘPU MIĘDZY MIGAWKAMI NIE MA - i to jest decyzja, nie przeoczenie.
+#:
+#: Stało tu 20 s i zjadało dokładnie to, po co ta funkcja powstała. Aplikacja
+#: zapisuje mecz nie tylko taktem 60-sekundowym: KAŻDA akcja sędziego - bramka,
+#: upomnienie, kara, cofnięcie - woła `saveNow` i idzie na serwer od razu.
+#: Akcje dzielą sekundy, więc odstęp wycinał całe serie i w historii zostawał
+#: co dwudziesty moment meczu. Sędzia ma mieć mecz KROK PO KROKU.
+#:
+#: Czym więc bronimy bazy, skoro nie odstępem:
+#:   * ODCISK TREŚCI - zapis, który niczego nie zmienił, nie tworzy wiersza
+#:     (a to jest dokładnie kształt klienta w pętli),
+#:   * LIMIT DOBOWY niżej - twardy sufit niezależny od tempa.
+#: Te dwie zapory nie mają skutku ubocznego w postaci gubienia prawdziwych
+#: chwil meczu, a odstęp miał.
 
 #: Twardy limit na mecz na dobę. Realny mecz to ~200 migawek (konfiguracja,
-#: 60-90 minut gry, wypełnianie protokołu), więc to dwukrotny zapas.
-#: Po przekroczeniu zbieramy WYŁĄCZNIE kamienie milowe - ich jest kilka
-#: i to one są ważne.
-MAX_PER_MATCH_PER_DAY = 400
+#: 60-90 minut gry, wypełnianie protokołu); po zmniejszeniu odstępu wyżej
+#: gęstość rośnie, więc zapas też. Po przekroczeniu zbieramy WYŁĄCZNIE
+#: kamienie milowe - ich jest kilka i to one są ważne.
+MAX_PER_MATCH_PER_DAY = 600
 
 # ─────────────────────────── odchudzanie ───────────────────────────
 
@@ -220,8 +230,22 @@ def unpack(payload: Optional[bytes]) -> Any:
         return None
 
 
+#: Pola, które zmieniają się przy KAŻDYM zapisie, nie niosąc treści meczu.
+#:
+#: `savedAtMs` to znacznik „kiedy to zapisano" dokładany przez telefon w każdym
+#: takcie (`computeClockFields`). Liczony do odcisku sprawiał, że KAŻDA migawka
+#: wyglądała na nową - odsiew powtórek nie działał wcale, a mecz stojący
+#: z zapauzowanym zegarem zużywał limit dobowy na kopie tej samej chwili.
+#:
+#: Zegar (`mainTime`) zostaje w odcisku ŚWIADOMIE: gdy idzie, to naprawdę
+#: zmienia stan meczu i taka migawka ma prawo powstać.
+_VOLATILE_KEYS = ("savedAtMs",)
+
+
 def snapshot_hash(blob: Any) -> str:
     """Odcisk treści PO odchudzeniu - po nim odsiewamy powtórki."""
+    if isinstance(blob, dict):
+        blob = {k: v for k, v in blob.items() if k not in _VOLATILE_KEYS}
     raw = json.dumps(blob, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -287,18 +311,20 @@ def may_store(
     last_at: Optional[datetime],
     today_count: int,
     milestone: Optional[str],
+    from_device: bool = False,
 ) -> Tuple[bool, str]:
     """Czy wolno odłożyć tę migawkę - i dlaczego nie, gdy nie wolno.
 
     Kamień milowy przechodzi ZAWSZE. Limit dobowy i odstęp bronią przed
     klientem w pętli, a nie przed meczem, który naprawdę się dzieje.
+
+    `last_at` i `from_device` zostają w podpisie, choć dziś nic nie rozstrzygają
+    (odstępu między migawkami nie ma - patrz nota wyżej). Wołający i tak
+    je zna, a przywrócenie jakiegokolwiek progu nie powinno wymagać zmiany
+    wszystkich wywołań.
     """
     if milestone:
         return True, ""
     if today_count >= MAX_PER_MATCH_PER_DAY:
         return False, "limit"
-    if last_at is not None:
-        stamp = last_at if last_at.tzinfo else last_at.replace(tzinfo=timezone.utc)
-        if (now - stamp).total_seconds() < MIN_INTERVAL_SECONDS:
-            return False, "za_czesto"
     return True, ""

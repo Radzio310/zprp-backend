@@ -159,7 +159,11 @@ async def record_snapshot(
         )
 
         allowed, why = may_store(
-            now=stamp, last_at=(prev or {}).get("created_at"), today_count=today, milestone=mark
+            now=stamp,
+            last_at=(prev or {}).get("created_at"),
+            today_count=today,
+            milestone=mark,
+            from_device=(source == "device"),
         )
         if not allowed:
             return why

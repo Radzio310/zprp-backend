@@ -15,7 +15,6 @@ from app.snapshot_rules import (
     MAX_PER_MATCH_PER_DAY,
     MAX_SNAPSHOT_BYTES,
     MILESTONE_RETENTION_DAYS,
-    MIN_INTERVAL_SECONDS,
     RETENTION_DAYS,
     expires_at,
     is_stripped,
@@ -234,12 +233,17 @@ def test_normalny_takt_przechodzi():
     assert ok and why == ""
 
 
-def test_klient_w_petli_nie_zaleje_bazy():
+def test_klient_w_petli_bronimy_ODCISKIEM_a_nie_odstepem():
+    """Zapis tuz po poprzednim przechodzi - bo to zwykle tempo akcji sedziego.
+
+    Petle zatrzymuje odcisk tresci (powtorka nie tworzy wiersza) i limit
+    dobowy. Odstep zjadal cale serie prawdziwych zdarzen, wiec go nie ma.
+    """
     ok, why = may_store(
-        now=NOW, last_at=NOW - timedelta(seconds=MIN_INTERVAL_SECONDS - 1),
+        now=NOW, last_at=NOW - timedelta(milliseconds=200),
         today_count=10, milestone=None,
     )
-    assert not ok and why == "za_czesto"
+    assert ok and why == ""
 
 
 def test_limit_dobowy_zatrzymuje_zwykle_migawki():
@@ -260,8 +264,58 @@ def test_pierwsza_migawka_meczu_nie_ma_z_czym_porownac_odstepu():
     assert ok
 
 
-def test_znacznik_bez_strefy_nie_wywraca_porownania():
-    """Sterowniki oddaja czas raz ze strefa, raz bez - to nie moze decydowac."""
-    naive = (NOW - timedelta(seconds=5)).replace(tzinfo=None)
+def test_znacznik_bez_strefy_nie_wywraca_zapisu():
+    """Sterowniki oddaja czas raz ze strefa, raz bez - to nie moze niczego
+    wywrocic ani zatrzymac."""
+    naive = (NOW - timedelta(seconds=1)).replace(tzinfo=None)
     ok, why = may_store(now=NOW, last_at=naive, today_count=1, milestone=None)
-    assert not ok and why == "za_czesto"
+    assert ok and why == ""
+
+
+# ──────── odcisk nie moze liczyc znacznika zapisu (14.09.2026) ────────
+#
+# Blob niesie `savedAtMs` - znacznik "kiedy to zapisano", dokladany przez
+# telefon w KAZDYM takcie. Liczony do odcisku sprawial, ze kazda migawka
+# wygladala na nowa: odsiew powtorek nie dzialal wcale, a mecz stojacy
+# z zapauzowanym zegarem zuzywal limit dobowy na kopie tej samej chwili.
+
+
+def test_sam_znacznik_zapisu_to_NIE_jest_nowa_tresc():
+    a = {"savedAtMs": 1000, "mainTime": 5000, "scoreHost": 2}
+    b = {"savedAtMs": 9999, "mainTime": 5000, "scoreHost": 2}
+    assert snapshot_hash(a) == snapshot_hash(b)
+
+
+def test_ale_ZEGAR_ktory_poszedl_to_juz_inna_chwila():
+    """Zegar zostaje w odcisku swiadomie - gdy idzie, stan meczu sie zmienia."""
+    a = {"savedAtMs": 1000, "mainTime": 5000}
+    b = {"savedAtMs": 1000, "mainTime": 6000}
+    assert snapshot_hash(a) != snapshot_hash(b)
+
+
+def test_KAZDA_akcja_sedziego_ma_swoja_wersje():
+    """Sedno zgloszenia 14.09.2026. Bramka, upomnienie, kara i cofniecie wolaja
+    `saveNow` i ida na serwer od razu - dziela sekundy. Odstep zjadal cale
+    serie i w historii zostawal co dwudziesty moment meczu."""
+    for gap_ms in (100, 900, 2500, 5000):
+        ok, why = may_store(
+            now=NOW, last_at=NOW - timedelta(milliseconds=gap_ms),
+            today_count=10, milestone=None,
+        )
+        assert ok and why == "", gap_ms
+
+
+def test_dosylka_z_telefonu_przechodzi_tak_samo():
+    """Paczka po ciszy niesie chwile gesto obok siebie - i ma je zachowac."""
+    ok, _ = may_store(
+        now=NOW, last_at=NOW, today_count=10, milestone=None, from_device=True
+    )
+    assert ok
+
+
+def test_ale_limit_dobowy_obowiazuje_TAKZE_telefon():
+    ok, why = may_store(
+        now=NOW, last_at=None, today_count=MAX_PER_MATCH_PER_DAY,
+        milestone=None, from_device=True,
+    )
+    assert not ok and why == "limit"
