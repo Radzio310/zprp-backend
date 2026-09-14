@@ -50,6 +50,7 @@ from app.match_market import router as match_market_router
 from app.match_bombs import router as match_bombs_router
 from app.reports import router as reports_router
 from app.login_records import router as login_records_router
+from app.privacy_consents import router as privacy_consents_router
 from app.proel import router as proel_router
 from app.proel_zprp import router as proel_zprp_router
 from app.proel_archive import router as proel_archive_router
@@ -246,6 +247,7 @@ app.include_router(match_market_router)
 app.include_router(match_bombs_router)
 app.include_router(reports_router)
 app.include_router(login_records_router)
+app.include_router(privacy_consents_router)
 # UWAGA na kolejność: app/proel.py ma catch-all `GET /proel/{match_number:path}`,
 # więc każdy router ze ścieżkami pod /proel/... MUSI stanąć PRZED proel_router —
 # inaczej `/proel/zprp/auth` wpada w `match_number="zprp/auth"`.

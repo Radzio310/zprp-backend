@@ -3565,6 +3565,37 @@ extra_report_province_recipients = Table(
 )
 
 
+# Potwierdzenia zapoznania się z klauzulą informacyjną RODO.
+#
+# Osobna tabela, a nie kolumny przy użytkowniku, bo liczy się HISTORIA: gdy
+# treść klauzuli się zmienia, podnosimy wersję i pytamy ponownie, a poprzednie
+# potwierdzenie musi zostać. Kolumny przy koncie nadpisywałyby je i za rok nie
+# dałoby się odpowiedzieć, na jaką treść ktoś się wtedy zgodził.
+#
+# Dwa światy w jednej tabeli (`subject_type`): konto ProEl ma własny
+# identyfikator, a sędzia logujący się do baza.zprp.pl - swój numer sędziego.
+# Ten sam człowiek może mieć jedno, drugie albo oba, i to są osobne zgody.
+privacy_consents = Table(
+    "privacy_consents",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("subject_type", String, nullable=False, index=True),   # "proel" | "zprp"
+    Column("subject_id", String, nullable=False, index=True),
+    Column("version", Integer, nullable=False),
+    #: Nazwisko w chwili potwierdzenia - do listy audytowej. Konto może
+    #: zmienić nazwisko albo zniknąć, a wpis ma zostać czytelny.
+    Column("full_name", String, nullable=True),
+    #: Dobrowolna zgoda na numer telefonu. Oddzielona od potwierdzenia
+    #: klauzuli, bo tylko ona jest zgodą w rozumieniu RODO i tylko ją da się
+    #: wycofać bez unieruchamiania konta.
+    Column("phone_consent", Boolean, nullable=False, server_default=text("false")),
+    Column("source", String, nullable=False, server_default="login"),  # signup|login|in_app
+    Column("app_version", String, nullable=True),
+    Column("accepted_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+
 from app.mentoring_tables import define_tables as _define_mentoring_tables
 mentoring_config, mentoring_pairs, mentoring_members, mentoring_assignments, mentoring_audit = _define_mentoring_tables(metadata)
 
@@ -3573,6 +3604,15 @@ metadata.create_all(engine)
 
 # Indexes created separately with IF NOT EXISTS to survive restarts
 with engine.connect() as _conn:
+    # Jedno potwierdzenie na podmiot i wersję. Ponowne kliknięcie tej samej
+    # wersji (druga instalacja, powrót z ProEla) ma NADPISAĆ wpis, a nie
+    # rozmnażać go - inaczej lista audytowa zamieniłaby się w dziennik wejść.
+    _conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_privacy_consents_subject_version "
+            "ON privacy_consents (subject_type, subject_id, version)"
+        )
+    )
     _conn.execute(text("ALTER TABLE mentoring_pairs ADD COLUMN IF NOT EXISTS baseline_at timestamptz"))
     _conn.execute(text("ALTER TABLE mentoring_active_members ADD COLUMN IF NOT EXISTS seen_at timestamptz"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mentoring_mentor ON mentoring_assignments (mentor_id, ended_at)"))
