@@ -23,17 +23,22 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+
+from app.season_rules import season_label_full, season_start_year
 from typing import Iterable, Optional, Union
 
 _SEASON_RE = re.compile(r"(\d{4})\s*[/-]\s*(\d{2,4})")
 
 
 def season_of(when: Optional[Union[date, datetime]]) -> str:
-    """Sezon meczu: `2026/2027` od wrzesnia 2026. Brak daty = pusty napis."""
-    if when is None:
-        return ""
-    year = when.year if when.month >= 9 else when.year - 1
-    return f"{year}/{year + 1}"
+    """Sezon meczu: `2026/2027` od SIERPNIA 2026. Brak daty = pusty napis.
+
+    Regula mieszka w `app/season_rules.py`, wspolna dla calego backendu. Do
+    14.09.2026 bylo tu wlasne liczenie z granica wrzesniowa - i mecz z konca
+    sierpnia trafial w rozliczeniach do poprzedniego sezonu.
+    """
+    year = season_start_year(when)
+    return season_label_full(year) if year is not None else ""
 
 
 def normalize_season_label(text: object) -> str:

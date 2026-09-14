@@ -161,6 +161,10 @@ from app.push.deploy_test_notifications import run_deploy_test_notifications
 from app.province_match_monitor import run_province_match_monitor
 from app.province_offtime_sync import run_province_offtime_sync
 from app.calendar_feed_sync import run_calendar_feed_sync
+from app.proel_snapshots import (
+    router as proel_snapshots_router,
+    run_snapshot_cleanup,
+)
 
 from app.db import database, saved_matches, short_result_records, login_records, province_judges, json_files, push_schedules, signatures, board_posts, assignment_drafts, province_match_events, province_match_sync_runs
 
@@ -257,6 +261,8 @@ app.include_router(proel_journal_router)
 # Statystyki PRZED `proel_router`: tamten ma `/proel/{match_number}`
 # i zjadłby „stats" jako numer meczu.
 app.include_router(proel_stats_router)
+# Migawki meczu - z tego samego powodu przed `proel_router`.
+app.include_router(proel_snapshots_router)
 # Kolejność wewnątrz rodziny users: dłuższe prefiksy najpierw
 # (`/proel/users/auth/password-reset` przed `/proel/users/auth` przed
 # `/proel/users`), żeby żaden ogólniejszy wzorzec nie połknął szczegółowego.
@@ -1248,9 +1254,13 @@ async def startup():
     _province_match_monitor_task = asyncio.create_task(run_province_match_monitor())
     _province_offtime_sync_task = asyncio.create_task(run_province_offtime_sync())
     _calendar_feed_task = asyncio.create_task(run_calendar_feed_sync())
+    # Sprzątanie migawek meczu - PARTIAMI, żeby pierwsze uruchomienie po
+    # dłuższej przerwie nie zablokowało zapisów (`app/proel_snapshots.py`).
+    _snapshot_cleanup_task = asyncio.create_task(run_snapshot_cleanup())
     logger.info("Province match monitor started (15 min light / 4 h full)")
     logger.info("Central offtime sync started (2 h)")
     logger.info("Kalendarze sędziów (iCal) start (co 6 h)")
+    logger.info("Sprzątanie migawek meczu start (co 1 h)")
     logger.info("✅ Push scheduler started")
 
     # NEW: background notification generator (tournament reminders etc.)

@@ -217,12 +217,19 @@ def test_reszta_obsady_widzi_sam_fakt():
 @pytest.mark.parametrize(
     "stamp,expected",
     [
+        # Granica jest SIERPNIOWA (14.09.2026) - patrz `app/season_rules.py`.
+        # Zgloszenie: mecz z 29.08.2026 nalezy do sezonu 2026/2027, bo pierwsze
+        # mecze i przydzialy sa w bazie zwiazku juz w sierpniu. Do tej pory
+        # wpadal do poprzedniego sezonu - w bombach, statystykach i
+        # rozliczeniach naraz.
+        (datetime(2026, 8, 1, tzinfo=timezone.utc), 2026),
+        (datetime(2026, 8, 29, tzinfo=timezone.utc), 2026),
         (datetime(2026, 9, 1, tzinfo=timezone.utc), 2026),
-        (datetime(2026, 8, 31, tzinfo=timezone.utc), 2025),
+        (datetime(2026, 7, 31, tzinfo=timezone.utc), 2025),
         (datetime(2027, 6, 30, tzinfo=timezone.utc), 2026),
     ],
 )
-def test_sezon_zaczyna_sie_pierwszego_wrzesnia(stamp, expected):
+def test_sezon_zaczyna_sie_pierwszego_sierpnia(stamp, expected):
     assert season_of(stamp) == expected
 
 

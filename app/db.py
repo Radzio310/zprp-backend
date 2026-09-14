@@ -1614,6 +1614,72 @@ proel_doc_history = Table(
     Column("expires_at", DateTime(timezone=True), nullable=True, index=True),
 )
 
+# 21.066) ProEl - migawki z KAŻDEGO przyjętego zapisu treści
+#
+# Historia wyżej trzyma tylko wersje przegrane w sporze, a `proel_matches`
+# trzyma jedną, bieżącą. Gdy protokół zepsuje się po cichu - skasowany skład,
+# nadpisany przebieg, ktoś na cudzym urządzeniu - nie ma do czego wrócić.
+# Ta tabela odpowiada na dwa pytania naraz: „jak ten mecz wyglądał o 18:40"
+# i „kto to zmienił".
+#
+# TREŚĆ JEST SKOMPRESOWANA I ODCHUDZONA - reguły w `app/snapshot_rules.py`.
+# Podpisy nie wchodzą (są w overlayu, który i tak nakłada się przy zapisie),
+# a wszystko, po czym się szuka, stoi w osobnych kolumnach: do środka nigdy
+# nie zaglądamy zapytaniem. Zmierzone: ~12 KB bloba schodzi do ~1,5 KB.
+#
+# DWA ŹRÓDŁA. `server` to migawka z zapisu, który serwer widział sam.
+# `device` przysyła telefon po ciszy sieciowej - to DEKLARACJA urządzenia,
+# nie obserwacja serwera, i panel musi to rozróżniać.
+proel_match_snapshots = Table(
+    "proel_match_snapshots", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    # Klucz kanoniczny meczu (`proelMatchKey`) - ten sam, co w `proel_matches`.
+    Column("match_number", String, nullable=False, index=True),
+    # IdZawody; NULL dla meczu zakładanego ręcznie, który go nigdy nie ma.
+    Column("zprp_match_id", String, nullable=True),
+    # Rok startu sezonu (2026 = 2026/2027), granica SIERPNIOWA - patrz
+    # `app/season_rules.py`. NULL, gdy mecz nie ma czytelnej daty.
+    Column("season", Integer, nullable=True),
+    Column("doc_rev", Integer, nullable=True),
+    # Odcisk treści PO odchudzeniu. Para z numerem meczu jest unikalna, więc
+    # zapis, który niczego nie zmienił, nie tworzy drugiego wiersza.
+    Column("content_hash", String, nullable=False),
+    # zlib(json(blob bez podpisów)). NULL = treść była za duża; wiersz zostaje,
+    # żeby wersja była widoczna w osi czasu mimo braku treści.
+    Column("payload", LargeBinary, nullable=True),
+    # zlib(json(overlay bez wartości podpisów)). Overlay NIE jest wersjonowany
+    # nigdzie indziej - bez tego historia uwag i obsady nie istnieje.
+    Column("overlay", LargeBinary, nullable=True),
+    # Rozmiar PRZED kompresją - po nim widać, dlaczego czegoś nie ma.
+    Column("payload_bytes", Integer, nullable=True),
+    Column("phase", String, nullable=True),
+    Column("status", String, nullable=True),
+    # start / live / halftime / end / approve / unapprove / conflict / restore.
+    # NULL = zwykły takt autozapisu. Kamienie milowe żyją dłużej.
+    Column("milestone", String, nullable=True, index=True),
+    # Do listy bez rozpakowywania treści.
+    Column("score_host", Integer, nullable=True),
+    Column("score_guest", Integer, nullable=True),
+    Column("main_time_ms", Integer, nullable=True),
+    Column("first_half", Boolean, nullable=True),
+    Column("protocol_len", Integer, nullable=True),
+    Column("signatures_count", Integer, nullable=True),
+    Column("writer_judge", String, nullable=True),
+    Column("writer_name", String, nullable=True),
+    Column("writer_install", String, nullable=True),
+    # "server" albo "device" - patrz nota wyżej.
+    Column("source", String, nullable=False, server_default=text("'server'")),
+    # Kiedy ta wersja POWSTAŁA. Dla migawek z telefonu to jego czas, nie nasz.
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+    # Kiedy DOTARŁA do serwera. Równe `created_at` dla źródła "server";
+    # przy dosyłce po ciszy sieciowej te dwie liczby się rozjeżdżają i to
+    # właśnie po nich widać, że telefon pracował poza zasięgiem.
+    Column("received_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=True, index=True),
+    UniqueConstraint("match_number", "content_hash", name="uq_snapshot_match_hash"),
+    Index("ix_snapshot_match_time", "match_number", "created_at"),
+)
+
 # 21.07) ProEl - dziennik zdarzeń meczu
 #
 # Do tej pory na pytanie „kto zakończył ten mecz" nie było odpowiedzi. Połowa
@@ -3526,6 +3592,11 @@ extra_reports = Table(
     # stała: sędziowie [ref1, ref2], delegat [delegat]. To NIE są podpisy
     # meczu i nigdy do bloba meczu nie wracają - działa tylko w tę stronę.
     Column("signatures", JSON, nullable=True),
+    # Rejestracja zawodow (video) - para kratek TAK/NIE na formularzu PDF.
+    # NULL = sędzia jeszcze nie wybrał i generowanie jest wtedy zablokowane:
+    # do 14.09.2026 brak danych z ProEla stawiał za niego krzyżyk przy NIE,
+    # czyli twierdzenie na dokumencie, którego nigdy nie widział.
+    Column("video", Boolean, nullable=True),
     UniqueConstraint("match_key", "kind", name="uq_extra_reports_key_kind"),
 )
 
@@ -3648,6 +3719,7 @@ with engine.connect() as _conn:
     # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
     # `create_all` kolumny nie dołoży.
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))
+    _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS video boolean"))
     _conn.execute(text("ALTER TABLE extra_report_recipients ADD COLUMN IF NOT EXISTS discord_webhook_url varchar"))
     _conn.execute(text("ALTER TABLE extra_report_province_recipients ADD COLUMN IF NOT EXISTS discord_webhook_url varchar"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS approver_badges json"))

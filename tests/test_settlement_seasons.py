@@ -13,9 +13,17 @@ CURRENT = "2026/2027"
 AVAILABLE = ["2026/2027", "2025/2026", "2024/2025", "2023/2024"]
 
 
-def test_sezon_od_wrzesnia():
+def test_sezon_od_sierpnia():
+    """Granica sierpniowa (14.09.2026) - patrz `app/season_rules.py`.
+
+    UWAGA NA SKUTEK: to jest regula, po ktorej rozliczenia i statystyki okregu
+    przypisuja mecz do sezonu. Mecze z SIERPNIA przeskoczyly do sezonu
+    nastepnego - tam, gdzie naleza wedlug bazy zwiazku.
+    """
+    assert season_of(date(2026, 8, 1)) == "2026/2027"
+    assert season_of(date(2026, 8, 29)) == "2026/2027"
     assert season_of(date(2026, 9, 1)) == "2026/2027"
-    assert season_of(date(2026, 8, 31)) == "2025/2026"
+    assert season_of(date(2026, 7, 31)) == "2025/2026"
     assert season_of(datetime(2027, 3, 5, tzinfo=timezone.utc)) == "2026/2027"
     assert season_of(None) == ""
 

@@ -107,6 +107,7 @@ from app.proel_lease import (
     now_utc as _now,
     same_judge_lease as _same_judge_lease,
 )
+from app.proel_snapshots import carry_snapshots, drop_snapshots, record_snapshot
 from app.proel_status import (
     VALID_STATUSES,
     is_finished_for,
@@ -1977,6 +1978,27 @@ async def update_proel_match(
             ip=_client_ip(request, x_forwarded_for),
         )
 
+    # ── Migawka tej wersji ────────────────────────────────────────────
+    #
+    # PO zatwierdzeniu transakcji i w OSOBNEJ - gdyby szła w tej samej, jej
+    # błąd wycofałby zapis protokołu. `record_snapshot` nigdy nie rzuca:
+    # archiwum jest dodatkiem i nie ma prawa dotknąć meczu w toku. Reguły
+    # (co zdejmujemy, limity, kamienie milowe) siedzą w
+    # `app/snapshot_rules.py`, zapis w `app/proel_snapshots.py`.
+    await record_snapshot(
+        match_number=match_number,
+        # Treść PO reprojekcji overlaya - dokładnie ta, która poszła do bazy.
+        blob=saved_doc if status_only and saved_doc is not None else projected,
+        overlay=_overlay_of(state),
+        doc_rev=new_doc_rev,
+        status=final_status,
+        phase=_phase_of(state, final_status),
+        zprp_match_id=incoming_id or known_id,
+        writer_judge=(actor.judge_id if actor else None),
+        writer_name=(actor.name if actor else None),
+        writer_install=my_install,
+    )
+
     # Awans z bazy związku idzie W TLE, z ryglem czasu w środku - blob
     # przychodzi co minutę, a związek pytamy najwyżej co pięć.
     kick_promotion(match_number)
@@ -2103,6 +2125,10 @@ async def archive_and_delete_match(
             delete(saved_matches)
             .where(saved_matches.c.match_number == match_number)
         )
+
+    # Migawki znikają razem z meczem. Usunięty zapis nie ma prawa wracać
+    # w panelu historii - to samo dotyczy kosza, który czyści się po roku.
+    await drop_snapshots(match_number)
 
     # Po transakcji: wiersz meczu znika, wpis w dzienniku zostaje. To jedyny
     # ślad, po którym da się później powiedzieć, kto skasował zapis - archiwum
@@ -2331,12 +2357,18 @@ async def promote_training_match(
             )
         )
 
+    # Historia idzie ZA meczem. Bez tego oś czasu zaczynałaby się od chwili
+    # awansu, jakby wcześniej nic nie było: wiersze zostają pod kluczem
+    # szkoleniowym, którego panel już nie szuka.
+    carried = await carry_snapshots(key, official)
+
     details = {
         "from": key,
         "to": official,
         "from_rev": from_rev,
         "batch": batch,
         "bulk": batch > 1,
+        "snapshots": carried,
     }
     await log_match_event(
         match_number=key,

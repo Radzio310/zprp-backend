@@ -27,6 +27,12 @@ import unicodedata
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from app.season_rules import (
+    SEASON_START_MONTH as _SEASON_START_MONTH,
+    season_label_short,
+    season_start_year,
+)
+
 #: Odznaka, która daje wgląd w rejestr okręgu i prawo unieważniania.
 COMMISSION_BADGE = "Komisja sędziowska"
 
@@ -46,7 +52,9 @@ SUBJECT_NOTICE_DELAY_HOURS = 24
 #: Miesiąc, od którego liczy się sezon (wrzesień). Ta sama granica, co w
 #: `BAZA/utils/seasonWindow.ts` - rejestr i przełącznik sezonu w aplikacji muszą
 #: dzielić mecz na sezony tak samo, inaczej ranking nie zgadza się z listą.
-SEASON_START_MONTH = 9
+# Granica sezonu przyjeżdża z `app/season_rules.py` - jedna na cały backend.
+# Do 14.09.2026 stało tu `9` i sierpniowe mecze wpadały do poprzedniego sezonu.
+SEASON_START_MONTH = _SEASON_START_MONTH
 
 #: Gniazda obsady, których zgłoszenie może dotyczyć - CAŁA obsada, nie tylko
 #: giełdowa czwórka. Delegat też bywa nieobecny.
@@ -212,24 +220,19 @@ def find_in_crew(
 
 
 def season_of(match_at: Optional[datetime]) -> Optional[int]:
-    """Sezon jako ROK jego początku - 2025 znaczy 2025/26.
+    """Sezon jako ROK jego początku - 2026 znaczy 2026/2027.
 
-    Jedna liczba, bo po niej da się sortować i porównywać bez rozbierania
-    etykiety. `None` dla meczu bez daty: nie wiadomo, do którego sezonu
-    należy, a zgadywanie przestawiłoby wpis w cudzym rankingu.
+    Sama reguła mieszka w `app/season_rules.py` i jest wspólna dla całego
+    backendu. Tu została nazwa, pod którą wołają ją bomby i statystyki.
     """
     if not isinstance(match_at, datetime):
         return None
-    return match_at.year if match_at.month >= SEASON_START_MONTH else match_at.year - 1
+    return season_start_year(match_at)
 
 
 def season_label(year: Any) -> str:
-    """„2025/26" - etykieta na przełączniku, ta sama co w aplikacji."""
-    try:
-        start = int(year)
-    except (TypeError, ValueError):
-        return ""
-    return f"{start}/{str((start + 1) % 100).zfill(2)}"
+    """„2026/27" - etykieta na przełączniku, ta sama co w aplikacji."""
+    return season_label_short(year)
 
 
 def report_window_end(match_at: Optional[datetime]) -> Optional[datetime]:

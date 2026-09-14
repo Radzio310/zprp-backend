@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.proel_admin_guard import proel_admin_guard
 from app.privacy_consent_rules import (
     CONTROLLER_EMAIL,
     CONTROLLER_NAME,
@@ -129,6 +130,45 @@ async def get_consent(subject_type: str, subject_id: str) -> ConsentState:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return ConsentState(**state)
+
+
+@router.get(
+    "/consents",
+    summary="[admin] Kto i kiedy potwierdził klauzulę",
+    dependencies=[Depends(proel_admin_guard)],
+)
+async def list_consents(
+    subject_type: Optional[str] = None,
+    version: Optional[int] = None,
+    limit: int = 500,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Lista potwierdzeń - po to w ogóle je zapisujemy.
+
+    Bez tego widoku tabela byłaby zbiorem wierszy, których nikt nie umie
+    odczytać, a pytanie „kto został poinformowany" nadal zostawałoby bez
+    odpowiedzi. Za bramką administratora, bo to dane osobowe.
+    """
+    from app.db import database, privacy_consents
+
+    query = select(privacy_consents)
+    if subject_type:
+        try:
+            query = query.where(
+                privacy_consents.c.subject_type == normalize_subject_type(subject_type)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    if version is not None:
+        query = query.where(privacy_consents.c.version == normalize_version(version))
+
+    query = query.order_by(privacy_consents.c.accepted_at.desc())
+    query = query.limit(max(1, min(int(limit or 500), 2000))).offset(max(0, int(offset or 0)))
+
+    rows = [dict(row) for row in await database.fetch_all(query)]
+    for row in rows:
+        row["id"] = str(row.get("id"))
+    return {"items": rows, "count": len(rows), "current_version": CURRENT_CLAUSE_VERSION}
 
 
 @router.post("/consent", response_model=ConsentState, summary="Zapisz potwierdzenie klauzuli")

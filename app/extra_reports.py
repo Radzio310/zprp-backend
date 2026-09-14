@@ -108,12 +108,18 @@ class ExtraReportBody(BaseModel):
     #: `None` = nie ruszaj zapisanych: autozapis treści leci bez tego pola
     #: i nie może skasować podpisu złożonego wcześniej.
     signatures: Optional[List[str]] = None
+    #: Rejestracja zawodów (video) - TAK/NIE na formularzu. Ta sama umowa co
+    #: przy podpisach: `None` znaczy „nie ruszaj", a nie „ustaw na nie".
+    #: Autozapis treści leci bez tego pola i nie może skasować wyboru.
+    video: Optional[bool] = None
 
 
 class ExtraReportItem(BaseModel):
     kind: str
     entries: List[Dict[str, Any]]
     signatures: List[str] = Field(default_factory=list)
+    #: `None` = nikt jeszcze nie wybrał; aplikacja blokuje wtedy generowanie.
+    video: Optional[bool] = None
     updatedBy: Optional[str] = None
     updatedByName: Optional[str] = None
     updatedAt: Optional[str] = None
@@ -208,6 +214,7 @@ def _row_to_item(row: Any) -> ExtraReportItem:
         kind=d["kind"],
         entries=d.get("entries") or [],
         signatures=_clean_signatures(d.get("signatures")),
+        video=d.get("video"),
         updatedBy=d.get("updated_by"),
         updatedByName=d.get("updated_by_name"),
         updatedAt=_iso(d.get("updated_at")),
@@ -332,6 +339,9 @@ async def save_report(
     # W drugą stronę te podpisy nie idą nigdy: blob meczu ich nie widzi.
     if body.signatures is not None:
         values["signatures"] = _clean_signatures(body.signatures)
+    # To samo dla rejestracji zawodów - patrz `ExtraReportBody.video`.
+    if body.video is not None:
+        values["video"] = bool(body.video)
     if existing:
         await database.execute(
             extra_reports.update()
