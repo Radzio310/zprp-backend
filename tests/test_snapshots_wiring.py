@@ -227,3 +227,16 @@ def test_overlay_przywracamy_tylko_na_zyczenie():
     jest osobna, swiadoma decyzja - nie skutkiem ubocznym."""
     body = function_source("app/proel_snapshots.py", "RestoreRequest")
     assert "restore_overlay: bool = False" in body
+
+
+def test_zalozenie_meczu_TEZ_zostawia_migawke():
+    """Mecz powstaje POST-em, nie PUT-em.
+
+    Bez tego historia zaczynalaby sie od pierwszego autozapisu, a wersja
+    poczatkowa - sklad, obsada, kolory, zanim ktokolwiek cokolwiek zmienil -
+    nie istnialaby wcale. To byl realny brak: panel pokazywal "0 wersji"
+    dla meczu, ktory dopiero co zalozono.
+    """
+    body = function_source("app/proel.py", "create_proel_match")
+    assert "record_snapshot" in body
+    assert "milestone='start'" in body or 'milestone="start"' in body

@@ -1398,6 +1398,25 @@ async def create_proel_match(
         app_version=x_app_version,
         ip=_client_ip(request, x_forwarded_for),
     )
+    # PIERWSZA migawka meczu - kamień milowy „start".
+    #
+    # Mecz zakładany jest POST-em, a nie PUT-em, więc bez tej linijki historia
+    # zaczynałaby się dopiero od pierwszego autozapisu. Akurat ta wersja jest
+    # cenna: pokazuje, z czym mecz ruszył (skład, obsada, kolory) - zanim
+    # ktokolwiek cokolwiek w nim zmienił.
+    await record_snapshot(
+        match_number=req.match_number,
+        blob=req.data_json,
+        doc_rev=int(created.get("doc_rev") or 1),
+        status=new_status,
+        phase="pre",
+        zprp_match_id=zprp_id,
+        writer_judge=(actor.judge_id if actor else None),
+        writer_name=(actor.name if actor else None),
+        writer_install=str(x_installation_id or "").strip() or None,
+        milestone="start",
+    )
+
     # Awans z bazy związku idzie W TLE - zapis meczu nie czeka na cudzy serwer.
     kick_promotion(req.match_number)
 
