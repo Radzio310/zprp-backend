@@ -33,6 +33,8 @@ from pydantic import BaseModel
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from app.deps import get_settings, Settings, get_rsa_keys
+from app.proel_auth import APPROVE_ROLES as _APPROVE_ROLES
+from app.proel_fields import same_judge_number
 
 router = APIRouter()
 
@@ -52,8 +54,19 @@ ROLE_KEYS: List[Tuple[str, List[str], List[str]]] = [
     ("timekeeper", ["NrSedzia_czas"], ["NrSedzia_czas_nazwisko"]),
 ]
 
-#: Role, które otwierają akcje pomeczowe.
+#: Role, które otwierają akcje pomeczowe - i zatwierdzenie protokołu.
+#:
+#: JEDNA lista na oba pytania (decyzja 14.09.2026). Wcześniej zatwierdzenie
+#: miało własny, węższy zbiór (`approve_roles` w `app/proel_auth.py`: sam
+#: delegat, gdy mecz go ma) i dokładnie stąd brały się komunikaty, w których
+#: każdy kolejny zalogowany słyszał, że to nie on. Równość pilnuje asercja
+#: niżej, żeby rozjazd nie wrócił po cichu przy następnej zmianie.
 AUTHORIZED_ROLES = frozenset({"referee1", "referee2", "delegate"})
+
+assert AUTHORIZED_ROLES == frozenset(_APPROVE_ROLES), (
+    "Akcje pomeczowe i zatwierdzenie muszą mieć TEN SAM zbiór ról - "
+    "dwie listy na jedno pytanie już raz dały ciąg sprzecznych komunikatów."
+)
 
 
 def is_authorized(roles: List[str], admin: bool) -> bool:
@@ -166,7 +179,10 @@ def _roles_for(match: Dict[str, Any], judge_id: str) -> List[str]:
     out: List[str] = []
     for role, id_keys, _ in ROLE_KEYS:
         for key in id_keys:
-            if _clean(match.get(key)) and _clean(match.get(key)) == judge_id:
+            # Zapis numeru nie moze decydowac o roli: obsada z publicznego API
+            # i profil z logowania potrafia roznic sie zerem wiodacym, a skutkiem
+            # bylby sedzia z obsady slyszacy "tego konta nie ma w obsadzie".
+            if same_judge_number(match.get(key), judge_id):
                 out.append(role)
                 break
     return out
@@ -217,6 +233,22 @@ def _authorized_crew(match: Dict[str, Any]) -> List[Dict[str, str]]:
                 }
             )
     return out
+
+
+def _delegate_name(match: Dict[str, Any]) -> str:
+    """Nazwisko delegata z obsady ZPRP albo pustka.
+
+    Do PODPOWIEDZI, nie do uprawnienia: od 14.09.2026 zatwierdzają i sędziowie,
+    i delegat, więc ta wartość niczego już nie otwiera ani nie zamyka. Służy
+    jednemu zdaniu przed zatwierdzeniem - „ten mecz ma delegata, zwykle to on
+    zamyka protokół" - które ma być prawdziwe także wtedy, gdy nazwisko nie
+    zostało wpisane w ekranie finalizacji.
+    """
+    for key in ("NrSedzia_delegat_nazwisko", "NrSedzia_delegat2_nazwisko"):
+        name = _clean(match.get(key))
+        if name and name != "--- ---":
+            return name
+    return ""
 
 
 def _name_for(match: Dict[str, Any], roles: List[str]) -> str:
@@ -327,6 +359,18 @@ async def match_official_role(
         # Rozstrzygnięcie zapada TU, nie w aplikacji: telefon może mieć
         # nieświeże dane meczu, a to jest odczyt prosto ze źródła.
         "authorized": authorized,
+        # To samo pytanie, osobno nazwane - żeby aplikacja nie liczyła go sama.
+        #
+        # Liczyła: rolę brała stąd (numery z ZPRP), ale „czy mecz ma delegata"
+        # z pola tekstowego na ekranie finalizacji. Gdy te dwa źródła się
+        # rozjechały, prawdziwy delegat dostawał odmowę ze zdaniem, że zrobi to
+        # sędzia prowadzący. Dziś zbiory są równe, więc odpowiedź jest jedna -
+        # ale ma przyjechać STĄD, bo tu jest źródło.
+        "canApprove": authorized,
+        # Delegat tego meczu z obsady ZPRP - do zdania „ten mecz ma delegata",
+        # które aplikacja pokazuje sędziemu przed zatwierdzeniem. Puste, gdy
+        # delegata nie ma. To podpowiedź, nie uprawnienie.
+        "delegateName": _delegate_name(match),
         # Dowód tożsamości dla zapisów wykonanych na cudzym urządzeniu.
         # Pusty, gdy uprawnienia nie ma - nie ma czego dowodzić.
         "elevation": elevation,

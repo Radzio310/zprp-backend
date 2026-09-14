@@ -169,3 +169,81 @@ def test_drugi_delegat_wchodzi_na_liste():
     match = dict(MATCH, NrSedzia_delegat2="3002", NrSedzia_delegat2_nazwisko="DĄBROWSKI Jan")
     ids = [c["judgeId"] for c in _authorized_crew(match)]
     assert "3002" in ids
+
+
+# ───────── Jedna lista na akcje pomeczowe I zatwierdzenie (14.09.2026) ─────────
+#
+# Zgloszenie 13.09.2026: sekretarz slyszal "sedzia albo delegat", sedzia po
+# zalogowaniu "delegat albo administrator", delegat - "tylko administrator".
+# Kazdy komunikat byl osobno poprawny, bo opisywal INNE uprawnienie. Dwie listy
+# na jedno pytanie "czy wolno mi dokonczyc ten mecz" to bylo sedno usterki.
+
+def test_akcje_pomeczowe_i_zatwierdzenie_maja_TEN_SAM_zbior():
+    from app.proel_auth import APPROVE_ROLES
+
+    assert set(AUTHORIZED_ROLES) == set(APPROVE_ROLES)
+
+
+def test_delegat_do_podpowiedzi_bierze_sie_z_obsady_ZPRP():
+    """Zdanie „ten mecz ma delegata" ma byc prawdziwe takze wtedy, gdy nazwiska
+    nie wpisano w ekranie finalizacji - stad czytamy je z obsady."""
+    from app.official_role import _delegate_name
+
+    assert _delegate_name(MATCH) == "LEWANDOWSKI Marek"
+
+
+def test_drugi_delegat_tez_liczy_sie_do_podpowiedzi():
+    from app.official_role import _delegate_name
+
+    match = dict(MATCH)
+    match["NrSedzia_delegat_nazwisko"] = ""
+    match["NrSedzia_delegat2_nazwisko"] = "ZIELIŃSKA Ewa"
+    assert _delegate_name(match) == "ZIELIŃSKA Ewa"
+
+
+def test_placeholder_delegata_to_BRAK_delegata_w_podpowiedzi():
+    """„--- ---" to puste gniazdo obsady, nie czlowiek - patrz utils/refereeName.ts."""
+    from app.official_role import _delegate_name
+
+    match = dict(MATCH, NrSedzia_delegat_nazwisko="--- ---")
+    assert _delegate_name(match) == ""
+
+
+def test_brak_delegata_oddaje_pustke_a_nie_None():
+    from app.official_role import _delegate_name
+
+    match = dict(MATCH, NrSedzia_delegat_nazwisko="", NrSedzia_delegat2_nazwisko="")
+    assert _delegate_name(match) == ""
+
+
+# ───────── Zapis numeru nie moze decydowac o roli (14.09.2026) ─────────
+#
+# Obsada przyjezdza z publicznego API rozgrywek, a numer zalogowanego -
+# z profilu ZPRP. Te same dane, dwie drogi, a zapis potrafi sie roznic zerem
+# wiodacym albo spacja. Porownanie znak w znak konczylo sie wtedy zdaniem
+# "tego konta nie ma w obsadzie tego meczu" - czyli sedzia z obsady nie mial
+# jak dokonczyc wlasnego protokolu na cudzym tablecie.
+
+def test_zero_wiodace_nie_odbiera_roli():
+    match = dict(MATCH, NrSedzia_pierwszy="01001")
+    assert "referee1" in _roles_for(match, "1001")
+
+
+def test_zero_wiodace_po_drugiej_stronie_tez_nie():
+    assert "referee1" in _roles_for(MATCH, "01001")
+
+
+def test_spacja_w_numerze_nie_odbiera_roli():
+    match = dict(MATCH, NrSedzia_delegat=" 3001 ")
+    assert "delegate" in _roles_for(match, "3001")
+
+
+def test_rozne_numery_dalej_sa_roznymi_ludzmi():
+    assert _roles_for(MATCH, "1003") == []
+    assert _roles_for(MATCH, "10010") == []
+
+
+def test_puste_gniazdo_nie_dopasowuje_sie_do_pustki():
+    """Pusty slot obsady nie moze dac roli komus bez numeru."""
+    match = dict(MATCH, NrSedzia_delegat="", NrSedzia_delegat2="")
+    assert _roles_for(match, "") == []

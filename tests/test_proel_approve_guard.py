@@ -57,17 +57,27 @@ def proel_account(name: str, uid: int = 7) -> Actor:
 
 # ─────────────────────────── sama reguła ───────────────────────────
 
-def test_z_delegatem_decyduje_delegat():
-    assert approve_roles(CREW_WITH_DELEGATE) == {"delegate"}
+def test_zatwierdzaja_sedziowie_I_delegat_rownolegle():
+    """Zmiana z 14.09.2026: jeden zbior na akcje pomeczowe i zatwierdzenie.
+
+    Wczesniej mecz z delegatem zatwierdzal WYLACZNIE delegat - i to z tej
+    asymetrii bral sie ciag sprzecznych komunikatow (zgloszenie 13.09.2026):
+    sekretarz slyszal "sedzia albo delegat", sedzia "delegat", delegat - ze
+    nikt z obecnych.
+    """
+    assert approve_roles(CREW_WITH_DELEGATE) == {"referee1", "referee2", "delegate"}
 
 
-def test_bez_delegata_decyduja_sedziowie():
-    assert approve_roles(CREW_NO_DELEGATE) == {"referee1", "referee2"}
+def test_zbior_nie_zalezy_juz_od_obsady():
+    for crew in (CREW_WITH_DELEGATE, CREW_NO_DELEGATE, {}, None):
+        assert approve_roles(crew) == {"referee1", "referee2", "delegate"}
 
 
-def test_pusty_wpis_delegata_to_brak_delegata():
-    crew = dict(CREW_NO_DELEGATE, delegate={"name": "", "judgeId": ""})
-    assert approve_roles(crew) == {"referee1", "referee2"}
+def test_zbior_jest_kopia_a_nie_wspolnym_stanem():
+    """Wolajacy nie moze zepsuc reguly wszystkim innym."""
+    out = approve_roles(CREW_NO_DELEGATE)
+    out.add("secretary")
+    assert approve_roles(CREW_NO_DELEGATE) == {"referee1", "referee2", "delegate"}
 
 
 # ─────────────────────────── kto wchodzi ───────────────────────────
@@ -77,14 +87,30 @@ def test_delegat_zatwierdza():
 
 
 def test_obaj_delegaci_moga_zatwierdzic_ten_sam_mecz():
-    assert approve_roles(CREW_WITH_TWO_DELEGATES) == {"delegate"}
     assert can_approve(judge("444"), CREW_WITH_TWO_DELEGATES)
     assert can_approve(judge("555"), CREW_WITH_TWO_DELEGATES)
 
 
-def test_sedzia_prowadzacy_NIE_zatwierdza_gdy_jest_delegat():
-    """Ta sama asymetria co w aplikacji - decyzja należy do delegata."""
-    assert not can_approve(judge("111"), CREW_WITH_DELEGATE)
+def test_sedzia_prowadzacy_zatwierdza_TAKZE_gdy_jest_delegat():
+    """Sedno zmiany 14.09.2026.
+
+    Delegat nie traci nic - dochodza mu sedziowie. To, ze zwykle protokol
+    zamyka delegat, aplikacja mowi PYTANIEM przed zatwierdzeniem, a nie
+    odmowa po dotknieciu.
+    """
+    assert can_approve(judge("111"), CREW_WITH_DELEGATE)
+    assert can_approve(judge("222"), CREW_WITH_DELEGATE)
+    assert can_approve(judge("444"), CREW_WITH_DELEGATE)
+
+
+def test_stolikowi_dalej_zostaja_poza_zbiorem():
+    """Protokol zamyka ten, kto go PODPISUJE - sekretarz i mierzacy czas nie."""
+    crew = dict(
+        CREW_WITH_DELEGATE,
+        timekeeper={"name": "CZASOWY Jan", "judgeId": "666"},
+    )
+    assert not can_approve(judge("333"), crew)
+    assert not can_approve(judge("666"), crew)
 
 
 def test_obaj_sedziowie_zatwierdzaja_gdy_delegata_nie_ma():
@@ -142,14 +168,14 @@ def test_zero_w_numerze_to_pusty_slot():
     assert clean_judge_number("0444") == "0444"
 
 
-def test_placeholder_delegata_oddaje_decyzje_sedziom():
-    """DOKŁADNIE ten przypadek zapalał przycisk i odmawiał po dotknięciu.
+def test_placeholder_delegata_nie_odbiera_nikomu_zatwierdzenia():
+    """DOKLADNIE ten przypadek zapalal przycisk i odmawial po dotknieciu.
 
-    Serwer widział „delegat jest" (numer „0"), więc żądał zgody delegata,
-    a aplikacja - patrząc na wyczyszczone nazwisko - pokazywała przycisk
-    sędziemu prowadzącemu.
+    Serwer widzial "delegat jest" (numer "0") i zadal zgody delegata, a
+    aplikacja - patrzac na wyczyszczone nazwisko - pokazywala przycisk
+    sedziemu. Po zmianie na parytet ten rozjazd nie ma jak zaboleć: zbior
+    nie zalezy juz od tego, czy delegat w meczu jest.
     """
-    assert approve_roles(CREW_PLACEHOLDER_DELEGATE) == {"referee1", "referee2"}
     assert can_approve(judge("111"), CREW_PLACEHOLDER_DELEGATE)
 
 
@@ -297,8 +323,9 @@ def test_skasowane_nazwisko_zdejmuje_role():
     """
     crew = officials_with_overlay(CREW_WITH_DELEGATE, overlay(""))
     assert "delegate" not in crew
-    assert approve_roles(crew) == {"referee1", "referee2"}
     assert can_approve(judge("111"), crew)
+    # Numer skasowanego delegata nie otwiera juz niczego - nie ma go w obsadzie.
+    assert not can_approve(judge("444"), crew)
 
 
 def test_placeholder_w_overlayu_tez_zdejmuje_role():
@@ -306,11 +333,13 @@ def test_placeholder_w_overlayu_tez_zdejmuje_role():
     assert "delegate" not in crew
 
 
-def test_dopisany_delegat_przejmuje_decyzje():
+def test_dopisany_delegat_DOCHODZI_do_sedziow():
+    """Delegat wpisany w ekranie finalizacji zyskuje prawo do zatwierdzenia -
+    ale go nikomu nie odbiera. Wczesniej odbieral, i sedzia, ktory przed
+    chwila mogl zatwierdzic, po wpisaniu delegata juz nie mogl."""
     crew = officials_with_overlay(CREW_NO_DELEGATE, overlay("LEWANDOWSKI Marek"))
-    assert approve_roles(crew) == {"delegate"}
     assert can_approve(judge("0", "LEWANDOWSKI Marek"), crew)
-    assert not can_approve(judge("111"), crew)
+    assert can_approve(judge("111"), crew)
 
 
 def test_dopisane_nazwisko_nie_dziedziczy_numeru_po_poprzedniku():

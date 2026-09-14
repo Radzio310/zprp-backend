@@ -27,7 +27,7 @@ from fastapi import Header, HTTPException
 from sqlalchemy import select
 
 from app.proel_elevation import verify_elevation_token
-from app.proel_fields import ALL_ROLES, normalize_name
+from app.proel_fields import ALL_ROLES, normalize_name, same_judge_number
 
 #: Aktor, który NIE deklaruje numeru sędziego - konto ProEl albo samo urządzenie.
 #:
@@ -564,28 +564,42 @@ def officials_with_overlay(
     return out
 
 
-def approve_roles(officials: Optional[Dict[str, Any]]) -> Set[str]:
-    """Kto zamyka protokół i kto może go z powrotem otworzyć.
+#: Kto zamyka protokół i kto może go z powrotem otworzyć.
+#:
+#: TEN SAM ZBIÓR, co akcje pomeczowe (`AUTHORIZED_ROLES` w
+#: `app/official_role.py`) - i to jest cała zmiana z 14.09.2026.
+#:
+#: Do tej pory było inaczej: gdy w meczu był delegat, zatwierdzenie należało
+#: WYŁĄCZNIE do niego. Reguła była sama w sobie sensowna (protokół zamyka ten,
+#: kto go czyta na końcu), ale stała obok drugiej, szerszej - wysyłkę do ZPRP
+#: i protokół PDF wykonywał sędzia ALBO delegat. Dwie listy na jedno pytanie
+#: „czy wolno mi dokończyć ten mecz" dawały ciąg komunikatów, w którym każdy
+#: kolejny zalogowany słyszał, że to nie on: sekretarz, że sędzia albo delegat,
+#: sędzia, że delegat, delegat - że nikt z obecnych (zgłoszenie 13.09.2026).
+#:
+#: Stolikowi zostają poza tym zbiorem świadomie: protokół zamyka ten, kto go
+#: podpisuje. Delegat nie traci nic - dochodzą mu sędziowie prowadzący, a to,
+#: że zwykle zamyka protokół on, mówi aplikacja pytaniem przed zatwierdzeniem,
+#: a nie odmową.
+APPROVE_ROLES: Set[str] = {"referee1", "referee2", "delegate"}
 
-    Port reguły, którą ekran finalizacji stosuje od początku: gdy w meczu jest
-    delegat, decyzja należy do niego; gdy go nie ma - do sędziów prowadzących.
-    Stolikowi zostają poza tym zbiorem świadomie - protokół zamyka ten, kto go
-    podpisuje.
 
-    Do tej pory reguła istniała WYŁĄCZNIE w aplikacji i sterowała samą
-    widocznością przycisku, a `PUT /proel/{numer}` przyjmował zmianę statusu od
-    każdego, kto znał numer meczu. Zatwierdzony protokół potrafił więc odtwierdzić
-    ktokolwiek - także osoba spoza tego meczu.
+def approve_roles(officials: Optional[Dict[str, Any]] = None) -> Set[str]:
+    """Role uprawnione do zatwierdzenia - patrz `APPROVE_ROLES`.
+
+    Argument zostaje dla zgodności wywołań: zbiór nie zależy już od obsady,
+    ale trasy podają ją dalej i nie ma powodu, żeby o tym pamiętały.
     """
-    if isinstance(officials, dict) and any(
-        _official_filled(officials.get(key)) for key in ("delegate", "delegate2")
-    ):
-        return {"delegate"}
-    return {"referee1", "referee2"}
+    return set(APPROVE_ROLES)
 
 
 def can_approve(actor: Actor, officials: Optional[Dict[str, Any]]) -> bool:
     """Czy ten aktor może zatwierdzić mecz albo cofnąć zatwierdzenie.
+
+    Zatwierdzenie i jego COFNIĘCIE mają ten sam zbiór (decyzja 14.09.2026):
+    jedna reguła na oba kierunki nie ma jak się rozjechać, a druga - „cofa
+    tylko ten, kto zatwierdził" - wymagałaby pamiętania autora i drugiej
+    odpowiedzi na to samo pytanie.
 
     OBSADA NIEZNANA przepuszcza wszystkich - z tego samego powodu, dla którego
     robi to `roles_for`: mecz stolikowy założony ręcznie nigdy nie będzie miał
@@ -644,7 +658,8 @@ def roles_for(actor: Actor, officials: Optional[Dict[str, Any]]) -> Set[str]:
         oname = official_name(raw)
 
         if oid:
-            if oid == actor.judge_id:
+            # Zapis numeru nie moze decydowac o roli - patrz `same_judge_number`.
+            if same_judge_number(oid, actor.judge_id):
                 out.add("delegate" if key == "delegate2" else key)
                 continue
             # Numer jest rozstrzygający: gdy jest po OBU stronach i się nie

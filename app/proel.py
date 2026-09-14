@@ -1447,10 +1447,13 @@ async def _require_approver(
         status.HTTP_403_FORBIDDEN,
         detail={
             "code": "NOT_AN_APPROVER",
+            # JEDNO zdanie o obsadzie w całym systemie - to samo, które mówi
+            # welon akcji pomeczowych i podpowiedź pod przyciskiem. Gdy każdy
+            # komunikat wymienia inny zbiór osób, sędzia przy stoliku słyszy,
+            # że aplikacja zmienia zdanie (zgłoszenie 13.09.2026).
             "message": (
-                "Zatwierdzenie meczu i jego cofnięcie należą do delegata, a gdy "
-                "delegata nie ma - do sędziów prowadzących. Poproś jedną z tych "
-                "osób albo administratora."
+                "Mecz zatwierdza i cofa zatwierdzenie sędzia prowadzący, "
+                "delegat tego meczu albo administrator. Poproś jedną z tych osób."
             ),
         },
     )

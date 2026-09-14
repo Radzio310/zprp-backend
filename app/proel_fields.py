@@ -80,6 +80,33 @@ def exam_rank(mark: Any) -> int:
 # bo po tym kluczu dopasowujemy zawodnika przy projekcji.
 
 
+def judge_number_key(value: Any) -> str:
+    """Numer sedziego sprowadzony do porownywalnej postaci.
+
+    Ten sam czlowiek bywa zapisany roznie: "03390" w obsadzie z publicznego API
+    rozgrywek i "3390" w profilu z logowania, czasem ze spacja. Porownanie znak
+    w znak potrafi wtedy po cichu nie znalezc nic - a skutkiem jest sedzia
+    z obsady, ktory na cudzym tablecie slyszy "tego konta nie ma w obsadzie
+    tego meczu" i nie ma jak dokonczyc wlasnego protokolu.
+
+    Numeryczne porownujemy bez zer wiodacych, nienumeryczne (np. "proel:12")
+    wielkoscia liter - te drugie nie sa numerami i nie maja jak sie zderzyc
+    z pierwszymi.
+    """
+    text = str(value or "").strip().replace(" ", "")
+    if not text:
+        return ""
+    if text.isdigit():
+        return text.lstrip("0") or "0"
+    return text.upper()
+
+
+def same_judge_number(a: Any, b: Any) -> bool:
+    """Czy to ten sam numer sedziego - odporne na zapis. Pustka != pustka."""
+    left = judge_number_key(a)
+    return bool(left) and left == judge_number_key(b)
+
+
 def normalize_name(s: Any) -> str:
     txt = unicodedata.normalize("NFKD", str(s or ""))
     txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
