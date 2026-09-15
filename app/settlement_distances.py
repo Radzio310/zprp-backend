@@ -119,6 +119,65 @@ def extract_pairs(content: Any) -> list[tuple[str, str, float]]:
     return out
 
 
+def _iso_day(value) -> str:
+    """„2026-09-05T18:00", datetime, „05.09.2026" -> „2026-09-05"."""
+    if value is None:
+        return ""
+    if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+        return f"{value.year:04d}-{value.month:02d}-{value.day:02d}"
+    text = str(value).strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    if len(text) >= 10 and text[2] == "." and text[5] == ".":
+        return f"{text[6:10]}-{text[3:5]}-{text[0:2]}"
+    return ""
+
+
+def pick_distance_table(content: Any, day: Any = None) -> Any:
+    """
+    Wersja tabeli obowiazujaca w dniu meczu.
+
+    Tabele okregow mierzy sie na nowo co kilka sezonow, a kilometry z nich
+    wchodza do rozliczen - czyli do kwot, ktore sedzia JUZ dostal. Ten modul
+    przelicza rozliczenia takze dla sezonow minionych, wiec bez wyboru wersja
+    nowa przeliczylaby archiwum i pokazala inne kwoty niz przelewy.
+
+    Ksztalt tresci (ten sam po stronie aplikacji, patrz
+    `BAZA/utils/okregowe/distanceVersion.ts`):
+
+        { validFrom, cities, edges, previous: [{ validFrom, validUntil, ... }] }
+
+    Korzen to wersja NAJNOWSZA - dzieki temu wolajacy, ktorego data nie
+    obchodzi (automat obsadowy planuje mecze przyszle), dostaje wlasciwa
+    tabele bez zadnej zmiany u siebie. Tresc bez wersji przechodzi bez zmian.
+    """
+    if not isinstance(content, dict):
+        return content
+    previous = content.get("previous")
+    if not isinstance(previous, list) or not previous:
+        return content
+
+    iso = _iso_day(day)
+    root_from = str(content.get("validFrom") or "").strip()
+    if not iso or not root_from:
+        return content
+    if iso >= root_from:
+        return content
+
+    older = [v for v in previous if isinstance(v, dict) and v.get("edges")]
+    older.sort(key=lambda v: str(v.get("validFrom") or ""), reverse=True)
+    for version in older:
+        start = str(version.get("validFrom") or "").strip()
+        end = str(version.get("validUntil") or "").strip()
+        if start and iso < start:
+            continue
+        if end and iso > end:
+            continue
+        return version
+    # Mecz starszy niz wszystko, co zmierzono - liczymy najstarsza znana tabela.
+    return older[-1] if older else content
+
+
 class DistanceIndex:
     """Indeks budowany RAZ, odpytywany tysiace razy."""
 
@@ -153,6 +212,40 @@ class DistanceIndex:
                 if hit is not None:
                     return hit
         return None
+
+
+class VersionedDistanceIndex:
+    """
+    Jeden indeks NA WERSJE tabeli, wybierany data meczu.
+
+    `DistanceIndex` buduje sie raz i odpytuje tysiace razy, wiec przy kilku
+    wersjach nie ma sensu budowac wszystkich z gory: wersja archiwalna bywa
+    potrzebna tylko dla kilku meczow w calym przebiegu. Stad leniwe tworzenie
+    i pamiec po kluczu wersji.
+    """
+
+    __slots__ = ("_content", "_by_version")
+
+    def __init__(self, content: Any = None) -> None:
+        self._content = content
+        self._by_version: dict[str, DistanceIndex] = {}
+
+    def for_day(self, day: Any = None) -> DistanceIndex:
+        table = pick_distance_table(self._content, day)
+        key = str((table or {}).get("validFrom") or "") if isinstance(table, dict) else ""
+        hit = self._by_version.get(key)
+        if hit is None:
+            hit = DistanceIndex(table)
+            self._by_version[key] = hit
+        return hit
+
+    def lookup(self, origin: Any, destination: Any, day: Any = None):
+        return self.for_day(day).lookup(origin, destination)
+
+    @property
+    def pairs(self) -> int:
+        """Ile par zna wersja obowiazujaca dzis - do raportu."""
+        return self.for_day(None).pairs
 
 
 async def google_distance(client: Any, origin: str, destination: str) -> Optional[float]:

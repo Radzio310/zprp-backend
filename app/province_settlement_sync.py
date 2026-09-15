@@ -55,7 +55,11 @@ from app.settlement_seasons import (
     season_of,
 )
 from app.deps import get_settings
-from app.settlement_distances import DistanceIndex, resolve_distances
+from app.settlement_distances import (
+    VersionedDistanceIndex,
+    pick_distance_table,
+    resolve_distances,
+)
 from app.settlement_names import fill_missing_names, judge_cities, remember_officials
 from app.settlement_names_rules import officials_from_payload
 from app.settlement_venues import (
@@ -1088,20 +1092,53 @@ async def refresh_province(
             distance_row = await database.fetch_one(
                 select(okreg_distances.c.content).where(okreg_distances.c.province.in_(spellings(province)))
             )
-            index = DistanceIndex(_state(distance_row["content"]) if distance_row else None)
+            # WERSJA TABELY WEDLUG DNIA MECZU, nie wedlug dzisiaj.
+            #
+            # Ten przebieg liczy kilometry takze dla sezonow minionych, a tabele
+            # okregow bywaja mierzone na nowo. Bez tego pierwsza aktualizacja
+            # tabeli przeliczylaby cale archiwum i sedzia zobaczylby przy meczu
+            # sprzed roku inna kwote niz ta, ktora dostal na konto.
+            #
+            # Grupujemy mecze po wersji: `resolve_distances` dostaje jeden
+            # indeks naraz, a pamiec zapytan do Google jest wspolna, bo
+            # odleglosc miedzy dwoma miastami nie zalezy od wersji tabeli.
+            book = VersionedDistanceIndex(_state(distance_row["content"]) if distance_row else None)
 
-            pairs = []
+            by_version: dict[str, list] = {}
             for row in rows:
                 home = _s((judges.get(row["judge_id"]) or {}).get("city"))
                 city = _s(row.get("city"))
+                if not (home and city):
+                    continue
+                table = pick_distance_table(
+                    _state(distance_row["content"]) if distance_row else None,
+                    row.get("match_at"),
+                )
+                key = str((table or {}).get("validFrom") or "") if isinstance(table, dict) else ""
+                by_version.setdefault(key, []).append((row, home, city))
+
+            google_cache: dict = {}
+            resolved_by_version: dict[str, dict] = {}
+            for key, entries in by_version.items():
+                day = entries[0][0].get("match_at") if entries else None
+                resolved_by_version[key] = await resolve_distances(
+                    [(home, city) for _, home, city in entries],
+                    book.for_day(day),
+                    client=public,
+                    cache=google_cache,
+                )
+
+            for row in rows:
+                home = _s((judges.get(row["judge_id"]) or {}).get("city"))
+                city = _s(row.get("city"))
+                hit = None
                 if home and city:
-                    pairs.append((home, city))
-
-            resolved = await resolve_distances(pairs, index, client=public)
-            for row in rows:
-                home = _s((judges.get(row["judge_id"]) or {}).get("city"))
-                city = _s(row.get("city"))
-                hit = resolved.get((home, city)) if home and city else None
+                    table = pick_distance_table(
+                        _state(distance_row["content"]) if distance_row else None,
+                        row.get("match_at"),
+                    )
+                    key = str((table or {}).get("validFrom") or "") if isinstance(table, dict) else ""
+                    hit = (resolved_by_version.get(key) or {}).get((home, city))
                 row["distance_km"] = hit[0] if hit else None
                 row["distance_source"] = hit[1] if hit else "none"
 

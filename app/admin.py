@@ -932,6 +932,41 @@ async def list_okreg_distances():
     ]
     return ListOkregDistancesResponse(files=files)
 
+@router.get("/okreg_distances/manifest", summary="Manifest tabel odległości - bez treści")
+async def okreg_distances_manifest():
+    """
+    Lekki spis tabel: województwo, czy włączona, kiedy zmieniona i od kiedy
+    obowiązuje najnowsza wersja.
+
+    Aplikacja odświeża tabele w tle (`services/distancesSync.ts`), a pełna
+    lista razem z treściami waży już setki kilobajtów na województwo. Pytanie
+    co godzinę o cały komplet byłoby marnotrawstwem transferu po obu stronach,
+    więc najpierw pytamy o ten manifest i ściągamy tylko to, co się zmieniło.
+
+    MUSI stać PRZED trasą "/okreg_distances/{province}" - inaczej FastAPI
+    dopasuje "manifest" jako nazwę województwa i zwróci 404.
+    """
+    rows = await database.fetch_all(select(okreg_distances))
+    files = []
+    for r in rows:
+        raw = r["content"]
+        try:
+            parsed = raw if isinstance(raw, (dict, list)) else json.loads(raw)
+        except Exception:
+            parsed = None
+        valid_from = parsed.get("validFrom") if isinstance(parsed, dict) else None
+        versions = parsed.get("previous") if isinstance(parsed, dict) else None
+        files.append(
+            {
+                "province": r["province"],
+                "enabled": bool(r["enabled"]),
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+                "valid_from": valid_from if isinstance(valid_from, str) else None,
+                "versions": (1 + len(versions)) if isinstance(versions, list) else 1,
+            }
+        )
+    return {"files": files}
+
 @router.get("/okreg_distances/{province}", response_model=GetOkregDistanceResponse, summary="Pobierz tabelę odległości dla województwa")
 async def get_okreg_distance(province: str):
     prov = province.upper()
