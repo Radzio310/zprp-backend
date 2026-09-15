@@ -79,7 +79,13 @@ def test_migracja_nazywa_kolumne_ktora_naprawde_istnieje(table, column):
 
 @pytest.mark.parametrize(
     "column",
-    ["last_event_type", "last_event_team", "last_event_player", "last_event_ms"],
+    [
+        "last_event_type",
+        "last_event_team",
+        "last_event_player",
+        "last_event_ms",
+        "last_event_tag",
+    ],
 )
 def test_kolumny_ostatniego_zdarzenia_maja_migracje(column):
     """Tabela migawek stoi na produkcji od wdrożenia historii wersji."""

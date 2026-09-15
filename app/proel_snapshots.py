@@ -81,6 +81,20 @@ def _int(value: Any) -> Optional[int]:
         return None
 
 
+def _short_tag(value: Any) -> Optional[str]:
+    """Krótki znacznik zdarzenia - dziś numer czasu dla drużyny („T1", „T2").
+
+    Pole `extra` protokołu niesie dwie zupełnie różne rzeczy: przy czasie dla
+    drużyny krótki znacznik, a przy usuniętej bramce CAŁY obiekt JSON z czasem
+    pierwotnym. Do kafelka nadaje się wyłącznie to pierwsze, więc bierzemy
+    tylko napis krótki i niebędący JSON-em - reszta przepada świadomie.
+    """
+    text = str(value or "").strip()
+    if not text or len(text) > 8 or text[0] in "{[":
+        return None
+    return text
+
+
 def _last_event(protocol: Any) -> Dict[str, Any]:
     """Ostatnie zdarzenie protokołu - do kafelka w panelu.
 
@@ -99,6 +113,9 @@ def _last_event(protocol: Any) -> Dict[str, Any]:
         "last_event_team": str(last.get("team") or "") or None,
         "last_event_player": _int(last.get("player")),
         "last_event_ms": _int(last.get("time")),
+        # Czas dla drużyny nie ma zawodnika - ma numer („T2"). Bez tego kafelek
+        # pokazywał przy nim numer 0, czyli zawodnika, którego nie ma.
+        "last_event_tag": _short_tag(last.get("extra")),
     }
 
 
@@ -503,6 +520,7 @@ def _public_row(row: Any) -> Dict[str, Any]:
                 "team": row["last_event_team"],
                 "player": row["last_event_player"],
                 "ms": row["last_event_ms"],
+                "tag": row["last_event_tag"],
             }
             if row["last_event_type"]
             else None

@@ -1672,6 +1672,9 @@ proel_match_snapshots = Table(
     Column("last_event_team", String, nullable=True),
     Column("last_event_player", Integer, nullable=True),
     Column("last_event_ms", Integer, nullable=True),
+    #: Krótki znacznik zdarzenia - numer czasu dla drużyny („T1"). Czas dla
+    #: drużyny nie ma zawodnika, więc bez tego kafelek pokazywał przy nim 0.
+    Column("last_event_tag", String, nullable=True),
     Column("signatures_count", Integer, nullable=True),
     Column("writer_judge", String, nullable=True),
     Column("writer_name", String, nullable=True),
@@ -3734,6 +3737,7 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_team varchar"))
     _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_player integer"))
     _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_ms integer"))
+    _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_tag varchar"))
     # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
     # `create_all` kolumny nie dołoży.
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))

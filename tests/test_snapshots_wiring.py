@@ -268,12 +268,19 @@ def test_wiersz_migawki_niesie_OSTATNIE_ZDARZENIE_protokolu():
     head = function_source("app/proel_snapshots.py", "_head")
     assert "_last_event(protocol)" in head
 
+    fields = (
+        "last_event_type",
+        "last_event_team",
+        "last_event_player",
+        "last_event_ms",
+        "last_event_tag",
+    )
     row = function_source("app/proel_snapshots.py", "_public_row")
-    for field in ("last_event_type", "last_event_team", "last_event_player", "last_event_ms"):
+    for field in fields:
         assert field in row, field
 
     schema = source("app/db.py")
-    for column in ("last_event_type", "last_event_team", "last_event_player", "last_event_ms"):
+    for column in fields:
         assert column in schema, column
 
 
@@ -292,6 +299,42 @@ def test_pusty_protokol_nie_udaje_zdarzenia():
     assert got["last_event_type"] == "warning"
     assert got["last_event_player"] == 7
     assert got["last_event_ms"] == 812000
+
+
+def test_czas_dla_druzyny_niesie_swoj_numer_a_nie_zawodnika():
+    """Czas dla druzyny zawodnika NIE MA - w protokole ma numer „T2".
+
+    Bez tego kafelek pokazywal przy nim zawodnika nr 0, czyli takiego, ktorego
+    nie ma na zadnej liscie meczowej.
+    """
+    from app.proel_snapshots import _last_event
+
+    got = _last_event(
+        [{"type": "teamTime", "team": "guest", "extra": "T2", "time": 1320000}]
+    )
+    assert got["last_event_tag"] == "T2"
+
+
+def test_do_plakietki_nie_wchodzi_caly_JSON_z_usunietej_bramki():
+    """To samo pole `extra` niesie przy usunietej bramce caly obiekt JSON.
+
+    Kafelek nie ma go gdzie pokazac, a proba zmiescilaby w plakietce polowe
+    zapisu czasu pierwotnego.
+    """
+    from app.proel_snapshots import _last_event
+
+    got = _last_event(
+        [
+            {
+                "type": "goalRemoved",
+                "team": "host",
+                "player": 7,
+                "extra": '{"origTime": 1200, "penalty": false}',
+                "time": 1300,
+            }
+        ]
+    )
+    assert got["last_event_tag"] is None
 
 
 # ── slady w dzienniku: kazda dziura ma sie wytlumaczyc ───────────
