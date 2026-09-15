@@ -473,3 +473,31 @@ def test_przywrocenie_budzi_pozostale_urzadzenia():
     """
     body = function_source("app/proel_snapshots.py", "restore_snapshot")
     assert "proel_match_state.c.rev + 1" in body
+
+
+def test_historia_nalezy_do_meczu_ktory_ISTNIEJE():
+    """Dowolny klucz zakladal w panelu mecz-widmo.
+
+    Tak wygladal mecz "W/JmK/3" obok prowadzonego naprawde zapisu
+    szkoleniowego "T-.../W/JmK/3" (zgloszenie 15.09.2026): telefon dosylal
+    historie pod GOLYM numerem, a serwer przyjmowal ja bez pytania - razem
+    z wpisami w dzienniku pod numerem, ktorego w ProElu nie ma.
+
+    Odmowa, a nie ciche przyjecie: telefon ma zatrzymac paczke i sprobowac
+    ponownie, gdy mecz juz bedzie.
+    """
+    body = function_source("app/proel_snapshots.py", "upload_device_snapshots")
+    assert "MATCH_NOT_FOUND" in body
+    assert "saved_matches.c.match_number == key" in body
+
+
+def test_wlasne_prowadzenie_nie_blokuje_przywrocenia():
+    """Odmowa dla SIEBIE samego znaczyla: poczekaj na koniec meczu, ktorego
+    sam nie mozesz skonczyc, bo wlasnie go prowadzisz.
+
+    Cudze prowadzenie blokuje dalej - tam przywrocona wersja naprawde
+    zniknelaby pod najblizszym autozapisem obcego telefonu.
+    """
+    body = function_source("app/proel_snapshots.py", "restore_snapshot")
+    assert "same_judge_number" in body
+    assert "LEASE_ACTIVE" in body

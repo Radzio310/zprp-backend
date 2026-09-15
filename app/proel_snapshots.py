@@ -628,6 +628,7 @@ async def restore_snapshot(
     from app.proel_doc_version import restore_install
     from app.proel_fields import project
     from app.proel_journal import log_match_event
+    from app.proel_fields import same_judge_number
     from app.proel_lease import lease_active
     from app.snapshot_rules import merge_signatures_forward
 
@@ -668,7 +669,17 @@ async def restore_snapshot(
         select(proel_match_state).where(proel_match_state.c.match_number == key)
     )
     state_dict = dict(state) if state is not None else None
-    if lease_active(state_dict):
+    # Prowadzenie blokuje przywrócenie tylko wtedy, gdy trzyma je KTOŚ INNY.
+    #
+    # Własne prowadzenie nie jest przeszkodą: to ten sam człowiek podejmuje
+    # obie decyzje, a jego telefon dowie się o cofnięciu natychmiast - zapis
+    # przywrócenia nie jest podpisany żadnym urządzeniem (`restore_install`),
+    # więc najbliższy autozapis odbija się o bezpiecznik i ekran pyta o wersję
+    # od razu. Odmowa w tej sytuacji znaczyła tylko tyle: „poczekaj na koniec
+    # meczu, którego sam nie możesz skończyć, bo właśnie go prowadzisz".
+    if lease_active(state_dict) and not same_judge_number(
+        (state_dict or {}).get("lease_judge_id"), actor.judge_id
+    ):
         holder = str((state_dict or {}).get("lease_name") or "").strip()
         raise HTTPException(
             409,
@@ -829,7 +840,36 @@ async def upload_device_snapshots(
 
     items = list(body.snapshots or [])[:MAX_BATCH]
     if not items:
-        return {"accepted": 0, "skipped": 0}
+        return {"accepted": 0, "skipped": 0, "failed": 0}
+
+    # HISTORIA NALEŻY DO MECZU, KTÓRY ISTNIEJE.
+    #
+    # Bez tego warunku dowolny klucz zakładał w panelu mecz-widmo: wiersze
+    # migawek i wpisy w dzienniku pod numerem, którego nie ma w ProElu. Tak
+    # właśnie wyglądał mecz „W/JmK/3" obok prowadzonego naprawdę zapisu
+    # szkoleniowego „T-.../W/JmK/3" (zgłoszenie 15.09.2026) - telefon dosyłał
+    # historię pod GOŁYM numerem zamiast pod kluczem wiersza.
+    #
+    # Odmowa, a nie ciche przyjęcie: telefon ma zatrzymać paczkę i spróbować
+    # ponownie, gdy mecz na serwerze już będzie (zakłada go pierwszy zapis).
+    from app.db import database, saved_matches
+
+    known = await database.fetch_val(
+        select(saved_matches.c.match_number).where(
+            saved_matches.c.match_number == key
+        )
+    )
+    if known is None:
+        raise HTTPException(
+            404,
+            detail={
+                "code": "MATCH_NOT_FOUND",
+                "message": (
+                    "Nie ma w ProElu meczu o tym kluczu, więc nie ma do czego "
+                    "dołączyć historii wersji."
+                ),
+            },
+        )
 
     accepted = 0
     skipped = 0

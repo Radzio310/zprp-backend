@@ -7,11 +7,12 @@ from datetime import datetime
 from io import BytesIO
 from typing import Optional, List
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select, insert, update, delete, func
 
 from app.db import database, signatures
+from app.signature_time import parse_signed_at
 
 try:
     import cairosvg  # type: ignore
@@ -130,6 +131,10 @@ class SignatureResponse(BaseModel):
     image_url: str
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    #: Kiedy podpis ZOSTAŁ ZŁOŻONY na ekranie telefonu. Puste dla podpisów
+    #: sprzed 15.09.2026 i dla klientów, które tego nie wysyłają - wtedy
+    #: jedynym stemplem zostaje `created_at`, czyli moment dotarcia.
+    signed_at: Optional[datetime] = None
 
 
 class ListSignaturesResponse(BaseModel):
@@ -146,6 +151,7 @@ def _row_to_response(row) -> SignatureResponse:
         image_url=m["image_url"],
         created_at=m.get("created_at"),
         updated_at=m.get("updated_at"),
+        signed_at=m.get("signed_at"),
     )
 
 
@@ -193,7 +199,18 @@ async def _upload_to_png_url(image: UploadFile) -> str:
     response_model=SignatureResponse,
     response_model_exclude_none=True,
 )
-async def upload_signature(image: UploadFile = File(...)):
+async def upload_signature(
+    image: UploadFile = File(...),
+    signed_at: Optional[str] = Form(default=None),
+):
+    """Przyjmij podpis; `signed_at` jest OPCJONALNE i nigdy nie blokuje wysyłki.
+
+    Pole wysyła aplikacja, która zebrała podpis bez zasięgu i dosyła go
+    później - bez niego stempel mówiłby o chwili odzyskania sieci, a nie
+    o chwili podpisania. Wartość niewiarygodną (zły zegar telefonu)
+    odrzuca `parse_signed_at` i zostaje samo `created_at`: lepszy brak
+    stempla niż stempel nieprawdziwy.
+    """
     image_url = await _upload_to_png_url(image)
 
     stmt = (
@@ -202,6 +219,7 @@ async def upload_signature(image: UploadFile = File(...)):
             judge_id="system",
             judge_name=None,
             image_url=image_url,
+            signed_at=parse_signed_at(signed_at),
         )
         .returning(signatures)
     )

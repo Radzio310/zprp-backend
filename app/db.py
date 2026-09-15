@@ -1779,6 +1779,12 @@ signatures = Table(
     # ścieżka do pliku w static, np. "/static/<uuid>.<ext>"
     Column("image_url", String, nullable=False),
 
+    # Kiedy podpis ZOSTAŁ ZŁOŻONY (czas z urządzenia). Różni się od
+    # `created_at` tylko wtedy, gdy podpis czekał w kolejce dosyłkowej na
+    # powrót sieci - patrz `app/signature_time.py`. Puste dla wszystkiego,
+    # co powstało przed 15.09.2026.
+    Column("signed_at", DateTime(timezone=True), nullable=True),
+
     # timestamps
     Column(
         "created_at",
@@ -3740,6 +3746,9 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_tag varchar"))
     # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
     # `create_all` kolumny nie dołoży.
+    # Czas złożenia podpisu - kolumna dołożona 15.09.2026 do tabeli, która
+    # istnieje na produkcji od dawna, więc `create_all` sam jej nie doda.
+    _conn.execute(text("ALTER TABLE signatures ADD COLUMN IF NOT EXISTS signed_at timestamptz"))
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS video boolean"))
     _conn.execute(text("ALTER TABLE extra_report_recipients ADD COLUMN IF NOT EXISTS discord_webhook_url varchar"))
