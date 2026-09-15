@@ -122,6 +122,82 @@ def same_judge_lease(state: Optional[Dict[str, Any]], actor_judge_id: str) -> bo
     return (state or {}).get("lease_kind") == "app"
 
 
+#: Leasing zwykłej aplikacji.
+LEASE_KIND_APP = "app"
+#: Leasing objęty SIŁĄ przez administratora. Osobny rodzaj, bo żadna droga
+#: „na dowód" nie ma prawa go cofnąć - administrator rozstrzygnął spór przy
+#: stoliku i to rozstrzygnięcie ma się utrzymać do końca meczu albo do
+#: wygaśnięcia leasingu.
+LEASE_KIND_ADMIN = "admin"
+
+
+def may_take_over_as_same_judge(
+    state: Optional[Dict[str, Any]],
+    actor_judge_id: str,
+    *,
+    verified: bool,
+) -> bool:
+    """Czy wolno przejąć prowadzenie na skróty, jako ten sam sędzia.
+
+    Skrót istnieje po to, żeby przesiadka na własny drugi telefon nie czekała,
+    aż wygaśnie stary leasing (`same_judge_lease`). Problem w tym, że numer
+    sędziego jedzie w nagłówku i sam z siebie NICZEGO nie dowodzi - a serwer
+    do niedawna oddawał numer prowadzącego w treści odmowy. Kto ją przeczytał,
+    mógł przedstawić się tym numerem i przejąć cudzy protokół bez `force`
+    i bez uprawnień administratora.
+
+    Dlatego skrót wymaga tożsamości, która NIE jest samą deklaracją:
+    urządzenie z rejestru powiadomień, konto ProEl albo sesja podniesiona
+    hasłem do baza.zprp.pl. Wszystkie trzy ustawia `proel_actor`.
+
+    ⚠ ODMOWA TU NIKOGO NIE BLOKUJE - tylko każe poczekać. Sędzia bez
+    weryfikacji obejmie prowadzenie zwyczajnie, gdy stary leasing wygaśnie
+    (90 s, a przy zminimalizowanej aplikacji do 5 minut). Gdyby było inaczej,
+    ta reguła odbierałaby mecz komuś, kto tylko odmówił zgody na powiadomienia
+    - a to jest cena nie do przyjęcia za zamknięcie drogi na skróty.
+    """
+    if not verified:
+        return False
+    return same_judge_lease(state, actor_judge_id)
+
+
+def may_reclaim_lead(
+    state: Optional[Dict[str, Any]],
+    *,
+    doc_writer_install: Any,
+    actor_install: Any,
+) -> bool:
+    """Czy to urządzenie może ODZYSKAĆ prowadzenie, które ktoś mu zabrał.
+
+    Dowodem jest AUTORSTWO WERSJI, która leży na serwerze: to urządzenie
+    napisało protokół, z którego ten mecz się składa. Nie „kto pierwszy", nie
+    „kto z obsady", nie „kto zobaczył komunikat" - bo wtedy odzyskiwanie byłoby
+    po prostu drugim przyciskiem do przejmowania.
+
+    Autorstwa nie da się zadeklarować: żeby nim zostać, trzeba przepchnąć pełny
+    zapis przez bramkę wersji, a ta odrzuca zapis zbudowany w ciemno na cudzym
+    protokole (`app/proel_doc_version.py`).
+
+    Trzy „nie", każde świadome:
+      • leasingu nie ma albo jest MÓJ - nie ma czego odzyskiwać, od tego jest
+        zwykłe objęcie prowadzenia,
+      • leasing objął administrator siłą - jego rozstrzygnięcie zostaje,
+      • pusty identyfikator po którejkolwiek stronie - puste równe pustemu
+        uczyniłoby autorem każdego.
+    """
+    mine = str(actor_install or "").strip()
+    writer = str(doc_writer_install or "").strip()
+    if not mine or not writer or mine != writer:
+        return False
+    if not lease_active(state):
+        return False
+    if str((state or {}).get("lease_install") or "").strip() == mine:
+        return False
+    if (state or {}).get("lease_kind") == LEASE_KIND_ADMIN:
+        return False
+    return True
+
+
 def legacy_lease_values(
     state: Dict[str, Any], writer_install: str
 ) -> Optional[Dict[str, Any]]:

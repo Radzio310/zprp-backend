@@ -995,6 +995,8 @@ class MatchItem(BaseModel):
     doc_writer_name: Optional[str] = None
     #: Czy ostatnią wersję treści zapisało TO urządzenie (`X-Installation-Id`).
     doc_writer_is_you: Optional[bool] = None
+    #: Czy tę wersję położyło przywrócenie przez administratora.
+    doc_restored: Optional[bool] = None
     #: Klucz oficjalnego meczu, do którego przeniesiono ten zapis szkoleniowy.
     promoted_to: Optional[str] = None
 
@@ -1088,8 +1090,10 @@ class ProElEnsureRequest(BaseModel):
 
 class ProElLeaseRequest(BaseModel):
     match_number: str
-    #: "acquire" — obejmij prowadzenie; "heartbeat" — przedłuż swoje.
-    action: Literal["acquire", "heartbeat"] = "acquire"
+    #: "acquire" — obejmij prowadzenie; "heartbeat" — przedłuż swoje;
+    #: "reclaim" — odzyskaj prowadzenie, które ktoś zabrał urządzeniu będącemu
+    #: autorem wersji leżącej na serwerze (patrz `may_reclaim_lead`).
+    action: Literal["acquire", "heartbeat", "reclaim"] = "acquire"
     #: "live" oznacza dodatkowo przejście meczu w fazę LIVE.
     intent: Literal["live", "edit"] = "live"
     #: Przejęcie meczu prowadzonego przez kogoś innego. Tylko delegat i admin.
@@ -1126,6 +1130,10 @@ class ProElDocWriter(BaseModel):
     Telefon pyta tylko "czy to ja", więc tylko na to dostaje odpowiedź.
     """
     install_is_you: bool = False
+    #: Wersję położyło PRZYWRÓCENIE przez administratora, a nie zapis
+    #: z urządzenia. Telefon pyta o to osobno, bo przywrócona wersja bywa
+    #: starsza niż jego własna i różnić się może samym czasem meczu.
+    is_restore: bool = False
     judge_id: Optional[str] = None
     name: Optional[str] = None
 

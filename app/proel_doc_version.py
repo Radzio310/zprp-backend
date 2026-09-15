@@ -241,6 +241,7 @@ def stale_detail(
     writer_name: Optional[str],
     written_at: Any,
     base_rev: Optional[int] = None,
+    restored: bool = False,
 ) -> Dict[str, Any]:
     """Treść odmowy 409 `DOC_STALE`.
 
@@ -261,6 +262,12 @@ def stale_detail(
         "writer_name": (str(writer_name or "").strip() or None),
         "written_at": iso(written_at),
         "writer_install_is_you": False,
+        # Wersję położyło PRZYWRÓCENIE, a nie cudzy telefon. Telefon traktuje
+        # te dwie odmowy inaczej: cudzy zapis w trakcie gry zostawia sam
+        # znaczek przy nagłówku (decyzja 11.09.2026), a cofnięcie meczu przez
+        # administratora pyta od razu - dalsza gra na wersji, której serwer
+        # i tak nie przyjmie, jest gorsza niż jedno pytanie.
+        "restored": bool(restored),
     }
 
 
@@ -284,6 +291,13 @@ def writer_view(
         return None
     return {
         "install_is_you": same_install(install, my_install),
+        # Przywrócenie NIE jest zapisem żadnego urządzenia i telefon musi to
+        # wiedzieć osobno. Sam `install_is_you` mówi tylko „to nie Ty" - a to
+        # za mało: wersja przywrócona bywa STARSZA od tej na telefonie i różni
+        # się od niej czasem, którego odcisk treści świadomie nie widzi. Bez
+        # tego znacznika autozapis przebudowywał się na niej po cichu i całe
+        # przywrócenie znikało bez śladu (zgłoszenie 15.09.2026).
+        "is_restore": is_restore_write(install),
         "judge_id": judge or None,
         "name": name or None,
     }

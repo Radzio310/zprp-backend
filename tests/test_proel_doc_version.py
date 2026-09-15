@@ -176,7 +176,18 @@ def test_odmowa_niesie_wersje_autora_i_czas_w_detail():
         "writer_name": "KOWALSKI Jan",
         "written_at": "2026-09-11T18:30:00+00:00",
         "writer_install_is_you": False,
+        "restored": False,
     }
+
+
+def test_odmowa_mowi_ze_to_bylo_przywrocenie():
+    """Telefon traktuje te dwie odmowy inaczej.
+
+    Cudzy zapis w trakcie gry zostawia sam znaczek przy naglowku (decyzja
+    11.09.2026). Cofniecie meczu przez administratora pyta od razu: dalsza gra
+    na wersji, ktorej serwer i tak nie przyjmie, jest gorsza niz jedno pytanie.
+    """
+    assert stale_detail(7, "ADMIN", None, 3, True)["restored"] is True
 
 
 def test_odmowa_bez_wersji_bazowej_ma_ja_jawnie_pusta():
@@ -191,13 +202,41 @@ def test_odmowa_bez_autora_nie_wywraca_sie():
 
 def test_autor_nie_zdradza_cudzej_instalacji():
     view = writer_view("inny-telefon", "12345", "NOWAK Adam", "moj-telefon")
-    assert view == {"install_is_you": False, "judge_id": "12345", "name": "NOWAK Adam"}
+    assert view == {
+        "install_is_you": False,
+        "is_restore": False,
+        "judge_id": "12345",
+        "name": "NOWAK Adam",
+    }
     assert "inny-telefon" not in str(view)
 
 
 def test_autor_to_ja():
     view = writer_view("moj-telefon", "", "", "moj-telefon")
-    assert view == {"install_is_you": True, "judge_id": None, "name": None}
+    assert view == {
+        "install_is_you": True,
+        "is_restore": False,
+        "judge_id": None,
+        "name": None,
+    }
+
+
+def test_przywrocenie_to_nie_zapis_zadnego_urzadzenia():
+    """Nawet gdy przywracał administrator z TEGO telefonu.
+
+    Bez tego rozróżnienia autozapis tego samego telefonu przebudowywał się na
+    przywróconej wersji i po cichu ją kasował - a przywrócenie różniące się
+    samym czasem meczu nie zostawiało po sobie nawet pytania.
+    """
+    from app.proel_doc_version import restore_install
+
+    view = writer_view(
+        restore_install("moj-telefon"), "12345", "WITKOWICZ Radosław", "moj-telefon"
+    )
+    assert view["install_is_you"] is False
+    assert view["is_restore"] is True
+    # Kto przywrócił - zostaje. Znika wyłącznie prawo do „to mój zapis".
+    assert view["name"] == "WITKOWICZ Radosław"
 
 
 def test_nic_nie_wiadomo_o_autorze():

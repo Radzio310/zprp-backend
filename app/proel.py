@@ -71,6 +71,7 @@ from app.proel_doc_version import (
     REASON_OVERWRITTEN as _REASON_OVERWRITTEN,
     REASON_REJECTED_LOCAL as _REASON_REJECTED_LOCAL,
     conflict_event_key,
+    is_restore_write,
     is_stale_write,
     write_changes_content,
     iso as _iso,
@@ -106,6 +107,10 @@ from app.proel_lease import (
     # Używane w `/lease` od dawna, ale nigdy nie zaimportowane: objęcie
     # prowadzenia meczu bez wiersza stanu kończyło się NameError (500).
     may_open_state_on_lease,
+    LEASE_KIND_ADMIN as _LEASE_KIND_ADMIN,
+    LEASE_KIND_APP as _LEASE_KIND_APP,
+    may_reclaim_lead as _may_reclaim_lead,
+    may_take_over_as_same_judge as _may_take_over_as_same_judge,
     now_utc as _now,
     same_judge_lease as _same_judge_lease,
 )
@@ -213,12 +218,14 @@ class _DocStale(Exception):
         writer_name: Optional[str],
         written_at: Any,
         base_rev: Optional[int],
+        restored: bool = False,
     ) -> None:
         super().__init__("doc stale")
         self.current_rev = int(current_rev or 0)
         self.writer_name = writer_name
         self.written_at = written_at
         self.base_rev = base_rev
+        self.restored = bool(restored)
 
 
 def _overlay_of(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -282,6 +289,23 @@ async def _fetch_doc_meta(match_number: str) -> Dict[str, Any]:
         ).where(saved_matches.c.match_number == match_number)
     )
     return _as_dict(row)
+
+
+async def _fetch_doc_writer_install(match_number: str) -> str:
+    """Urządzenie, które napisało wersję leżącą na serwerze.
+
+    Osobny, wąski odczyt: pyta o to WYŁĄCZNIE spór o prowadzenie, a zwykłe
+    objęcie i bicie serca nie mają powodu dotykać wiersza meczu.
+    """
+    try:
+        row = await database.fetch_one(
+            select(saved_matches.c.doc_writer_install).where(
+                saved_matches.c.match_number == match_number
+            )
+        )
+    except Exception:  # noqa: BLE001 - brak odpowiedzi to „nie wiem, kto pisał"
+        return ""
+    return str(_as_dict(row).get("doc_writer_install") or "").strip()
 
 
 async def _fetch_doc_config(match_number: str) -> Any:
@@ -986,6 +1010,11 @@ async def lease_proel_match(
         mine = held and state.get("lease_install") == actor.installation_id
         epoch = int(state.get("lease_epoch") or 0)
         took_over = False
+        #: Czy TO wywołanie odebrało prowadzenie siłą (administrator) albo
+        #: odzyskało je dla autora protokołu. Obie muszą istnieć poza gałęzią
+        #: sporu - niżej czyta je zapis wiersza i dziennik meczu.
+        forced = False
+        reclaimed = False
         going_live = (
             req.intent == "live" and state.get("live_started_at") is None
         )
@@ -1028,7 +1057,29 @@ async def lease_proel_match(
             # dostanie 412 przy najbliższym biciu serca i przestanie pisać.
             # Regułę „w danej chwili pisze dokładnie jedno urządzenie"
             # zachowujemy w całości.
-            allowed = _same_judge_lease(state, actor.judge_id)
+            #
+            # Skrót wymaga tożsamości INNEJ NIŻ DEKLARACJA - numer sędziego
+            # jedzie w nagłówku i sam z siebie niczego nie dowodzi. Brak
+            # weryfikacji nie zamyka drogi, tylko każe poczekać na wygaśnięcie;
+            # całość opisana przy `may_take_over_as_same_judge`.
+            allowed = _may_take_over_as_same_judge(
+                state, actor.judge_id, verified=actor.verified
+            )
+
+            # Odzyskanie prowadzenia przez AUTORA wersji leżącej na serwerze.
+            #
+            # Osobna akcja, nie ukryta gałąź `acquire`: sędzia naciska to
+            # świadomie, po tym jak zobaczył komunikat „mecz prowadzi teraz
+            # ktoś inny". Dowodem jest autorstwo protokołu, którego nie da się
+            # zadeklarować nagłówkiem - patrz `may_reclaim_lead`.
+            if not allowed and req.action == "reclaim":
+                allowed = _may_reclaim_lead(
+                    state,
+                    doc_writer_install=await _fetch_doc_writer_install(match_number),
+                    actor_install=actor.installation_id,
+                )
+                reclaimed = allowed
+
             if not allowed and req.force:
                 # Przejęcie na siłę: WYŁĄCZNIE administrator.
                 #
@@ -1045,6 +1096,7 @@ async def lease_proel_match(
                 # idzie dalej: odmowę wystawia niżej „Mecz prowadzi już inna
                 # osoba", tak samo jak każdemu spoza tej roli.
                 allowed = await rights.granted(actor)
+                forced = allowed
             if not allowed:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
@@ -1052,7 +1104,21 @@ async def lease_proel_match(
                         "code": "LEASE_HELD",
                         "message": "Mecz prowadzi już inna osoba.",
                         "holder": state.get("lease_name") or "",
-                        "holder_judge_id": state.get("lease_judge_id") or "",
+                        # Numer sędziego prowadzącego STĄD ZNIKNĄŁ (15.09.2026).
+                        # Nikt go nie czytał, a wystarczyło przedstawić się nim
+                        # w nagłówku, żeby serwer uznał proszącego za „tego
+                        # samego sędziego z drugiego urządzenia" i oddał
+                        # prowadzenie bez pytania.
+                        #
+                        # W zamian mówimy to, co jest naprawdę potrzebne:
+                        # czy TO urządzenie ma czym odzyskać prowadzenie.
+                        "can_reclaim": _may_reclaim_lead(
+                            state,
+                            doc_writer_install=(
+                                await _fetch_doc_writer_install(match_number)
+                            ),
+                            actor_install=actor.installation_id,
+                        ),
                     },
                 )
             epoch += 1  # przejęcie unieważnia bicie serca poprzednika
@@ -1069,7 +1135,10 @@ async def lease_proel_match(
             "lease_install": actor.installation_id,
             "lease_judge_id": actor.judge_id,
             "lease_name": actor.name,
-            "lease_kind": "app",
+            # Przejęcie SIŁĄ przez administratora zostaje oznaczone: żadna
+            # droga „na dowód" go nie cofnie, bo to rozstrzygnięcie sporu przy
+            # stoliku, a nie zwykłe objęcie prowadzenia.
+            "lease_kind": _LEASE_KIND_ADMIN if forced else _LEASE_KIND_APP,
             "lease_epoch": epoch,
             "lease_until": _now() + timedelta(seconds=ttl),
             "rev": proel_match_state.c.rev + 1,
@@ -1100,12 +1169,20 @@ async def lease_proel_match(
             event_key=f"live:{match_number}",
         )
     if took_over:
+        # Odzyskanie i przejęcie to dwa różne zdarzenia w dzienniku meczu.
+        # „Kto właściwie prowadził ten mecz" to najczęstsze pytanie po fakcie,
+        # a odpowiedź „X odebrał prowadzenie Y" znaczy co innego niż
+        # „X wrócił do protokołu, który sam pisał".
         await log_match_event(
             match_number=match_number,
-            event="table.taken_over",
+            event="table.reclaimed" if reclaimed else "table.taken_over",
             actor=actor,
             zprp_match_id=zprp_id,
-            details={"from": state.get("lease_name") or "", "epoch": epoch},
+            details={
+                "from": state.get("lease_name") or "",
+                "epoch": epoch,
+                **({"forced": True} if forced else {}),
+            },
             event_key=f"lease:{match_number}:{epoch}",
         )
 
@@ -1773,6 +1850,7 @@ async def update_proel_match(
                     version.get("doc_writer_name"),
                     version.get("doc_written_at"),
                     base_rev,
+                    is_restore_write(version.get("doc_writer_install")),
                 )
 
             # Twarda blokada prowadzenia — ale WYŁĄCZNIE dla klientów, które o niej
@@ -1794,6 +1872,15 @@ async def update_proel_match(
                         "code": "LEASE_LOST",
                         "message": "Mecz prowadzi teraz inna osoba.",
                         "holder": state.get("lease_name") or "",
+                        # Autozapis jest pierwszym miejscem, w którym
+                        # prowadzący dowiaduje się o utracie - i tym samym
+                        # pierwszym, które może mu powiedzieć, że wolno mu
+                        # wrócić do protokołu, który sam napisał.
+                        "can_reclaim": _may_reclaim_lead(
+                            state,
+                            doc_writer_install=version.get("doc_writer_install"),
+                            actor_install=str(x_installation_id or "").strip(),
+                        ),
                     },
                 )
 
@@ -1946,6 +2033,7 @@ async def update_proel_match(
                 "base_rev": stale.base_rev,
                 "doc_rev": stale.current_rev,
                 "writer_name": stale.writer_name or "",
+                "restored": stale.restored,
             },
             event_key=conflict_event_key(match_number, stale.current_rev, my_install),
             app_version=x_app_version,
@@ -1954,7 +2042,11 @@ async def update_proel_match(
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail=stale_detail(
-                stale.current_rev, stale.writer_name, stale.written_at, stale.base_rev
+                stale.current_rev,
+                stale.writer_name,
+                stale.written_at,
+                stale.base_rev,
+                stale.restored,
             ),
         ) from stale
     except _MatchIdConflict as conflict:
@@ -2472,6 +2564,9 @@ def _match_item(
         item["doc_written_at"] = row.get("doc_written_at")
         item["doc_writer_name"] = str(row.get("doc_writer_name") or "").strip() or None
         item["doc_writer_is_you"] = same_install(row.get("doc_writer_install"), my_install)
+        # Przywrócenia nie wolno pomylić z czyimkolwiek zapisem - patrz
+        # `writer_view` w `app/proel_doc_version.py`.
+        item["doc_restored"] = is_restore_write(row.get("doc_writer_install"))
     return MatchItem(**item)
 
 
