@@ -379,6 +379,10 @@ class DeviceBatch(BaseModel):
     snapshots: List[DeviceSnapshot] = Field(default_factory=list)
 
 
+#: Pierwsze segmenty ścieżek panelu - nigdy nie są numerem meczu.
+_RESERVED_PATHS = frozenset({"restore", "matches", "one"})
+
+
 async def _require_admin(actor: Actor) -> None:
     if not await is_admin(actor.judge_id):
         raise HTTPException(
@@ -399,88 +403,6 @@ def _stamp(raw: Optional[str]) -> Optional[datetime]:
         return out if out.tzinfo else out.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
-
-
-@router.post("/{match_number:path}", summary="Dosyłka historii z telefonu")
-async def upload_device_snapshots(
-    match_number: str = Path(...),
-    body: DeviceBatch = Body(...),
-    actor: Actor = Depends(proel_actor),
-) -> Dict[str, Any]:
-    """Przyjmij paczkę wersji zebranych przez telefon poza zasięgiem.
-
-    TO SĄ DEKLARACJE URZĄDZENIA, nie obserwacje serwera - zapisujemy je ze
-    źródłem `device` i z ich własnym czasem powstania, a obok własny czas
-    odbioru. Po rozjeździe tych dwóch znaczników widać, że telefon pracował
-    bez sieci, i to jest cała wartość tej trasy.
-
-    Limity są te same, co przy zapisie z serwera (`app/snapshot_rules.py`):
-    odcisk treści odsiewa powtórki, a limit dobowy broni przed zalaniem bazy.
-    """
-    # Numer przyjeżdża w postaci kanonicznej z telefonu (`proelMatchKey`) -
-    # tak samo, jak na każdej innej trasie ProEla.
-    key = str(match_number or "").strip()
-    if not key:
-        raise HTTPException(400, "Brak numeru meczu.")
-
-    items = list(body.snapshots or [])[:MAX_BATCH]
-    if not items:
-        return {"accepted": 0, "skipped": 0}
-
-    accepted = 0
-    skipped = 0
-    failed = 0
-    for item in items:
-        why = await record_snapshot(
-            match_number=key,
-            blob=item.data_json,
-            status=item.status,
-            phase=item.phase,
-            milestone=item.milestone if item.milestone in MILESTONES else None,
-            writer_judge=actor.judge_id,
-            writer_name=actor.name,
-            writer_install=actor.installation_id,
-            source="device",
-            created_at=_stamp(item.at),
-        )
-        if why is None:
-            accepted += 1
-        elif why == "blad":
-            # Awaria po NASZEJ stronie - to nie jest powtórka ani limit.
-            failed += 1
-        else:
-            skipped += 1
-    if accepted:
-        # Widać wtedy, że telefon pracował poza zasięgiem serwera - i ile
-        # tego było. Jeden wpis na paczkę, nie na wersję.
-        from app.proel_journal import log_match_event
-
-        await log_match_event(
-            match_number=key,
-            event="match.snapshots_backfilled",
-            actor=actor,
-            details={"accepted": accepted, "skipped": skipped},
-        )
-
-    if accepted == 0 and failed:
-        # NIC nie weszło, a powodem była awaria bazy - nie wolno odpowiedzieć
-        # „przyjęte", bo telefon kasuje u siebie całą wysłaną paczkę i historia
-        # meczu prowadzonego bez zasięgu przepadłaby bezpowrotnie. Tak właśnie
-        # zniknęła historia z 15.09.2026: tabela migawek nie miała kolumn
-        # dołożonych w kodzie, każdy zapis się wywracał, a telefony po cichu
-        # czyściły kolejkę. Błąd = telefon zatrzymuje paczkę i spróbuje za
-        # minutę (`utils/matchSnapshotSync.ts`).
-        raise HTTPException(
-            503,
-            detail={
-                "code": "SNAPSHOT_STORE_FAILED",
-                "message": "Nie udało się odłożyć historii wersji - spróbuj za chwilę.",
-            },
-        )
-
-    # Telefon kasuje u siebie CAŁĄ paczkę: pominięta wersja to albo powtórka,
-    # albo limit - w obu wypadkach ponawianie niczego nie zmieni.
-    return {"accepted": accepted, "skipped": skipped, "failed": failed}
 
 
 # ─────────────────────────── odczyt: panel administratora ───────────────────
@@ -811,6 +733,18 @@ async def restore_snapshot(
             )
         )
 
+        if state_dict is not None:
+            # Budzik dla POZOSTAŁYCH urządzeń. Long-poll stanu czeka na wyższą
+            # rewizję wiersza stanu, a przywrócenie tego wiersza nie dotyka -
+            # więc drugi telefon dowiadywałby się o cofnięciu meczu dopiero
+            # przy najbliższym wygaśnięciu długiego zapytania. Jedna liczba
+            # w górę i wiedzą od razu.
+            await database.execute(
+                proel_match_state.update()
+                .where(proel_match_state.c.match_number == key)
+                .values(rev=proel_match_state.c.rev + 1, updated_at=func.now())
+            )
+
     await log_match_event(
         match_number=key,
         event="match.restored",
@@ -847,3 +781,107 @@ async def restore_snapshot(
         "restored_from": _iso(snap["created_at"]),
         "kept_as_history": True,
     }
+
+
+# ─────────────── dosylka z telefonu (TRASA ZACHLANNA) ──────────────
+#
+# STOI NA KOŃCU PLIKU I MA TU ZOSTAĆ. `/{match_number:path}` połyka każdą
+# ścieżkę POST tego routera, łącznie z ukosnikami - a FastAPI dopasowuje trasy
+# W KOLEJNOŚCI REJESTRACJI. Gdy ta trasa stała wyżej, `POST /restore/{id}`
+# trafiał tutaj jako „dosłano paczkę dla meczu restore/123": pusta lista
+# migawek, odpowiedź 200, toast „Przywrócono" - i ani jednej zmiany w bazie
+# (zgłoszenie 15.09.2026). Test `test_snapshots_wiring.py` tego pilnuje.
+
+@router.post("/{match_number:path}", summary="Dosyłka historii z telefonu")
+async def upload_device_snapshots(
+    match_number: str = Path(...),
+    body: DeviceBatch = Body(...),
+    actor: Actor = Depends(proel_actor),
+) -> Dict[str, Any]:
+    """Przyjmij paczkę wersji zebranych przez telefon poza zasięgiem.
+
+    TO SĄ DEKLARACJE URZĄDZENIA, nie obserwacje serwera - zapisujemy je ze
+    źródłem `device` i z ich własnym czasem powstania, a obok własny czas
+    odbioru. Po rozjeździe tych dwóch znaczników widać, że telefon pracował
+    bez sieci, i to jest cała wartość tej trasy.
+
+    Limity są te same, co przy zapisie z serwera (`app/snapshot_rules.py`):
+    odcisk treści odsiewa powtórki, a limit dobowy broni przed zalaniem bazy.
+    """
+    # Numer przyjeżdża w postaci kanonicznej z telefonu (`proelMatchKey`) -
+    # tak samo, jak na każdej innej trasie ProEla.
+    key = str(match_number or "").strip()
+    if not key:
+        raise HTTPException(400, "Brak numeru meczu.")
+    if key.split("/", 1)[0] in _RESERVED_PATHS:
+        # Druga linia obrony za kolejnością tras. Gdyby ta trasa kiedykolwiek
+        # znów stanęła nad którąś ze stałych, żądanie skończy się GŁOŚNO -
+        # a nie cichym „przyjęto 0 wersji", które wygląda jak sukces.
+        raise HTTPException(
+            404,
+            detail={
+                "code": "RESERVED_PATH",
+                "message": (
+                    f"Adres {key} to ścieżka panelu, a nie numer meczu."
+                ),
+            },
+        )
+
+    items = list(body.snapshots or [])[:MAX_BATCH]
+    if not items:
+        return {"accepted": 0, "skipped": 0}
+
+    accepted = 0
+    skipped = 0
+    failed = 0
+    for item in items:
+        why = await record_snapshot(
+            match_number=key,
+            blob=item.data_json,
+            status=item.status,
+            phase=item.phase,
+            milestone=item.milestone if item.milestone in MILESTONES else None,
+            writer_judge=actor.judge_id,
+            writer_name=actor.name,
+            writer_install=actor.installation_id,
+            source="device",
+            created_at=_stamp(item.at),
+        )
+        if why is None:
+            accepted += 1
+        elif why == "blad":
+            # Awaria po NASZEJ stronie - to nie jest powtórka ani limit.
+            failed += 1
+        else:
+            skipped += 1
+    if accepted:
+        # Widać wtedy, że telefon pracował poza zasięgiem serwera - i ile
+        # tego było. Jeden wpis na paczkę, nie na wersję.
+        from app.proel_journal import log_match_event
+
+        await log_match_event(
+            match_number=key,
+            event="match.snapshots_backfilled",
+            actor=actor,
+            details={"accepted": accepted, "skipped": skipped},
+        )
+
+    if accepted == 0 and failed:
+        # NIC nie weszło, a powodem była awaria bazy - nie wolno odpowiedzieć
+        # „przyjęte", bo telefon kasuje u siebie całą wysłaną paczkę i historia
+        # meczu prowadzonego bez zasięgu przepadłaby bezpowrotnie. Tak właśnie
+        # zniknęła historia z 15.09.2026: tabela migawek nie miała kolumn
+        # dołożonych w kodzie, każdy zapis się wywracał, a telefony po cichu
+        # czyściły kolejkę. Błąd = telefon zatrzymuje paczkę i spróbuje za
+        # minutę (`utils/matchSnapshotSync.ts`).
+        raise HTTPException(
+            503,
+            detail={
+                "code": "SNAPSHOT_STORE_FAILED",
+                "message": "Nie udało się odłożyć historii wersji - spróbuj za chwilę.",
+            },
+        )
+
+    # Telefon kasuje u siebie CAŁĄ paczkę: pominięta wersja to albo powtórka,
+    # albo limit - w obu wypadkach ponawianie niczego nie zmieni.
+    return {"accepted": accepted, "skipped": skipped, "failed": failed}

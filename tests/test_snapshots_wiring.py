@@ -402,3 +402,74 @@ def test_awaria_archiwum_NIE_kasuje_kolejki_telefonu():
     assert "if accepted == 0 and failed" in body
     # Awaria liczy sie OSOBNO od pominiecia - inaczej nie da sie ich rozroznic.
     assert "elif why == 'blad'" in body or 'elif why == "blad"' in body
+
+
+# ── kolejnosc tras: zachlanna ZAWSZE na koncu ────────────────────
+
+
+def _routes(module: str):
+    """(metoda, sciezka, numer linii) dla kazdej trasy w pliku."""
+    tree = ast.parse(source(module))
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not isinstance(dec, ast.Call):
+                continue
+            fn = dec.func
+            if not isinstance(fn, ast.Attribute) or not dec.args:
+                continue
+            if fn.attr not in ("get", "post", "put", "delete", "patch"):
+                continue
+            path = dec.args[0]
+            if isinstance(path, ast.Constant) and isinstance(path.value, str):
+                out.append((fn.attr, path.value, dec.lineno))
+    return sorted(out, key=lambda item: item[2])
+
+
+def test_trasa_zachlanna_stoi_PO_wszystkich_stalych():
+    """FastAPI dopasowuje trasy w KOLEJNOSCI REJESTRACJI.
+
+    `POST /{match_number:path}` polyka kazda sciezke tego routera, lacznie
+    z ukosnikami. Gdy stala wyzej niz `POST /restore/{id}`, przywracanie
+    wersji trafialo do dosylki z telefonu jako "paczka dla meczu restore/123":
+    pusta lista migawek, odpowiedz 200, toast "Przywrocono" - i ani jednej
+    zmiany w bazie (zgloszenie 15.09.2026). Cicha porazka udajaca sukces.
+    """
+    for method in ("get", "post", "put", "delete", "patch"):
+        routes = [r for r in _routes("app/proel_snapshots.py") if r[0] == method]
+        greedy = [r for r in routes if ":path}" in r[1]]
+        if not greedy:
+            continue
+        first_greedy = min(r[2] for r in greedy)
+        later_fixed = [r for r in routes if ":path}" not in r[1] and r[2] > first_greedy]
+        assert not later_fixed, (
+            f"{method.upper()}: trasy {[r[1] for r in later_fixed]} stoja PO "
+            f"zachlannej {[r[1] for r in greedy]} - nigdy nie dostana zadania"
+        )
+
+
+def test_dosylka_odmawia_sciezkom_panelu_GLOSNO():
+    """Druga linia obrony: gdyby kolejnosc kiedys znow sie zepsula.
+
+    Cicho przyjeta paczka dla "meczu" o nazwie restore/123 wyglada z telefonu
+    dokladnie jak udane przywrocenie - i tak wlasnie wygladala.
+    """
+    from app.proel_snapshots import _RESERVED_PATHS
+
+    assert {"restore", "matches", "one"} <= _RESERVED_PATHS
+    body = function_source("app/proel_snapshots.py", "upload_device_snapshots")
+    assert "_RESERVED_PATHS" in body
+    assert "RESERVED_PATH" in body
+
+
+def test_przywrocenie_budzi_pozostale_urzadzenia():
+    """Long-poll stanu czeka na WYZSZA rewizje wiersza stanu.
+
+    Przywrocenie pisze do `proel_matches`, a nie do `proel_match_state` - wiec
+    bez tego podbicia drugi telefon dowiadywalby sie o cofnieciu meczu dopiero
+    przy wygasnieciu dlugiego zapytania. Jedna liczba w gore i wie od razu.
+    """
+    body = function_source("app/proel_snapshots.py", "restore_snapshot")
+    assert "proel_match_state.c.rev + 1" in body
