@@ -61,6 +61,8 @@ from app.proel_training_key import (
     TRAINING_KEY_LIKE,
     is_training_key,
     key_conflicts_with_blob,
+    match_number_from_key,
+    training_run_from_key,
 )
 from app.proel_doc_version import (
     CLIENT_REASONS as _HISTORY_CLIENT_REASONS,
@@ -1258,6 +1260,16 @@ async def post_proel_history(
         )
         .returning(proel_doc_history.c.id)
     )
+
+    # Kto przyjął wersję z serwera - to widoczna zmiana prowadzenia meczu,
+    # a nie techniczny szczegół. Bez tego wpisu w dzienniku zostaje sama
+    # dziura: zapisy z jednego telefonu urywają się bez powodu.
+    await log_match_event(
+        match_number=key,
+        event="match.version_adopted",
+        actor=actor,
+        details={"rev": req.base_rev, "id": int(new_id)},
+    )
     return {"success": True, "id": int(new_id)}
 
 
@@ -1382,6 +1394,23 @@ async def create_proel_match(
         app_version=x_app_version,
         ip=_client_ip(request, x_forwarded_for),
     )
+    if is_training_key(req.match_number):
+        # Ślad w dzienniku MECZU OFICJALNEGO, nie szkoleniowego: ktoś prowadzi
+        # ten mecz na boku. Bez tego wpisu telefon, który nagle przestał pisać
+        # do prawdziwego wiersza, wygląda na awarię - a po prostu przeniósł się
+        # na zapis szkoleniowy. Klucz gasi powtórzenia: jedno podejście, jeden
+        # wpis, choćby zakładano je kilka razy.
+        official = match_number_from_key(req.match_number)
+        run = training_run_from_key(req.match_number)
+        await log_match_event(
+            match_number=official,
+            event="match.training_run",
+            actor=actor,
+            zprp_match_id=zprp_id,
+            details={"run": run, "key": req.match_number},
+            event_key=f"training_run:{req.match_number}",
+            app_version=x_app_version,
+        )
     await journal_absorbed(
         req.match_number,
         zprp_id,
@@ -1462,6 +1491,18 @@ async def _require_approver(
     )
     if await _may_approve(match_number, state, actor, rights):
         return
+
+    # Odmowa zostawia ŚLAD. Bez niego mecz, którego nikt nie próbował
+    # zatwierdzić, wygląda w dzienniku identycznie jak mecz, w którym
+    # próbowały trzy osoby i każda usłyszała „to nie Ty". Klucz gasi
+    # powtórzenia: jedno naciśnięcie to jeden wpis, a nie seria.
+    await log_match_event(
+        match_number=match_number,
+        event="match.approve_refused",
+        actor=actor,
+        details={"who": (actor.name if actor else "") or ""},
+        event_key=f"approve_refused:{match_number}:{(actor.judge_id if actor else '') or '-'}",
+    )
 
     raise HTTPException(
         status.HTTP_403_FORBIDDEN,

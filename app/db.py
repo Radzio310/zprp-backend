@@ -1663,6 +1663,15 @@ proel_match_snapshots = Table(
     Column("main_time_ms", Integer, nullable=True),
     Column("first_half", Boolean, nullable=True),
     Column("protocol_len", Integer, nullable=True),
+    # OSTATNIE zdarzenie protokołu w tej wersji - żeby panel narysował kafelek
+    # (bramka, kartka z numerem, kara) bez rozpakowywania treści. Co się
+    # WYDARZYŁO między wersjami, wynika z porównania sąsiednich wierszy:
+    # protokół urósł = to zdarzenie doszło, skrócił się = cofnięcie, stoi
+    # w miejscu = zwykły takt zegara.
+    Column("last_event_type", String, nullable=True),
+    Column("last_event_team", String, nullable=True),
+    Column("last_event_player", Integer, nullable=True),
+    Column("last_event_ms", Integer, nullable=True),
     Column("signatures_count", Integer, nullable=True),
     Column("writer_judge", String, nullable=True),
     Column("writer_name", String, nullable=True),

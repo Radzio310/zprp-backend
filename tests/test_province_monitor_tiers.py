@@ -348,6 +348,36 @@ def test_obsadzona_rola_z_api_nadpisuje_stara_pare():
     assert state["NrSedzia_pierwszy_nazwisko"] == "LESIAK Urszula"
 
 
+def test_pelna_obsada_meczu_zasila_kalendarz_kazdego_sedziego():
+    """Jeden mecz komisji musi trafić równocześnie do obu partnerów.
+
+    Token aplikacji nie jest warunkiem obecności meczu w niedyspozycyjności
+    okręgowej. Pomijamy puste gniazda i techniczne zero ZPRP.
+    """
+    state = {
+        "NrSedzia_pierwszy": "101",
+        "NrSedzia_drugi": "202",
+        "NrSedzia_sekretarz": "0",
+        "NrSedzia_czas": "",
+        "NrSedzia_delegat": "303",
+        "NrSedzia_delegat2": None,
+    }
+    assert _monitor._crew_judge_ids(state) == ["101", "202", "303"]
+
+
+def test_pelne_szczegoly_uzupelniaja_tabele_wszystkich_czlonkow_obsady():
+    src = ast.unparse(FUNCTIONS["_upsert_match"])
+    assert "_sync_assignments_from_state" in src
+    assert "if deep" in src
+
+
+def test_monitor_konta_komisji_nie_ogranicza_sie_do_tokenow_aplikacji():
+    src = ast.unparse(FUNCTIONS["_active_judge_ids"])
+    assert "roster_rows" in src
+    assert "province_judges" in src
+    assert "push_tokens" in src
+
+
 def test_pelny_przebieg_nie_gasi_meczow_swiezo_widzianych_gdzie_indziej():
     """Terminarz wojewodztwa nie jest jedynym zrodlem prawdy.
 

@@ -25,10 +25,18 @@ def test_nowe_zdarzenia_maja_etykiety():
     assert EVENT_LABELS["zprp.send_queued"] == "Wysyłka odłożona do dosyłki"
 
 
-def test_aplikacja_moze_zglosic_wylacznie_nieudane_wysylki():
+def test_aplikacja_moze_zglosic_wylacznie_to_czego_serwer_nie_widzi():
     # Wpis „zatwierdzono protokół" musi znaczyć, że protokół NAPRAWDĘ został
     # zatwierdzony - a nie że ktoś tak powiedział.
-    assert _CLIENT_REPORTABLE == {"zprp.send_failed", "zprp.send_queued"}
+    #
+    # Powrót do meczu z zapisu lokalnego doszedł do tej listy razem z historią
+    # wersji (15.09.2026): dzieje się wyłącznie na telefonie, nic wtedy nie
+    # leci na serwer, a wpis nie orzeka o niczyim prawie.
+    assert _CLIENT_REPORTABLE == {
+        "zprp.send_failed",
+        "zprp.send_queued",
+        "match.resumed_local",
+    }
     for forbidden in (
         "match.approved",
         "match.deleted",

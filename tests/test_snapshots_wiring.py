@@ -252,3 +252,94 @@ def test_przywrocenie_nie_podpisuje_sie_urzadzeniem():
     assert "restore_install(actor.installation_id)" in body
     assert "doc_writer_install=actor.installation_id" not in body
     assert "doc_writer_judge=actor.judge_id" in body
+
+
+# ── ostatnie zdarzenie wersji: kafel w panelu ────────────────────
+
+
+def test_wiersz_migawki_niesie_OSTATNIE_ZDARZENIE_protokolu():
+    """Panel rysuje wersje ikona tego, co ja odroznia od poprzedniej.
+
+    Bez tych kolumn oś czasu byla szara kolumna taktow: zeby znalezc bramke,
+    trzeba bylo wchodzic w kazda wersje po kolei. Liczymy to PRZY ZAPISIE
+    migawki, a nie przy odczycie - lista nie ma prawa rozpakowywac tresci
+    kilkuset wierszy, zeby pokazac obrazek.
+    """
+    head = function_source("app/proel_snapshots.py", "_head")
+    assert "_last_event(protocol)" in head
+
+    row = function_source("app/proel_snapshots.py", "_public_row")
+    for field in ("last_event_type", "last_event_team", "last_event_player", "last_event_ms"):
+        assert field in row, field
+
+    schema = source("app/db.py")
+    for column in ("last_event_type", "last_event_team", "last_event_player", "last_event_ms"):
+        assert column in schema, column
+
+
+def test_pusty_protokol_nie_udaje_zdarzenia():
+    """Brak zdarzenia MUSI byc pusty, a nie zerowy.
+
+    Kafel po stronie telefonu (`utils/matchVersionTile.ts`) rozpoznaje brak
+    danych po pustce - zero czytalby jako prawdziwe zdarzenie o numerze 0.
+    """
+    from app.proel_snapshots import _last_event
+
+    assert _last_event([]) == {}
+    assert _last_event(None) == {}
+    assert _last_event("nie lista") == {}
+    got = _last_event([{"type": "warning", "team": "guest", "player": 7, "time": 812000}])
+    assert got["last_event_type"] == "warning"
+    assert got["last_event_player"] == 7
+    assert got["last_event_ms"] == 812000
+
+
+# ── slady w dzienniku: kazda dziura ma sie wytlumaczyc ───────────
+
+
+def test_limit_migawek_zostawia_wpis_w_dzienniku():
+    """Dziura w historii wyglada tak samo, jak mecz, ktorego nikt nie prowadzil.
+
+    Klucz zdarzenia gasi powtorzenia - jeden wpis na mecz na dobe, a nie setka.
+    """
+    body = function_source("app/proel_snapshots.py", "record_snapshot")
+    assert "match.snapshot_limit" in body
+    assert "event_key=f'snapshot_limit:" in body or 'event_key=f"snapshot_limit:' in body
+
+
+def test_doslylka_z_telefonu_zostawia_wpis_tylko_gdy_cos_przyjeto():
+    """Paczka samych powtorek nie jest zdarzeniem - nic sie nie stalo."""
+    body = function_source("app/proel_snapshots.py", "upload_device_snapshots")
+    assert "match.snapshots_backfilled" in body
+    tree = ast.parse(body)
+    guarded = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and "match.snapshots_backfilled" in ast.unparse(node):
+            if ast.unparse(node.test).strip() == "accepted":
+                guarded = True
+    assert guarded, "wpis powstaje takze przy zerowej paczce"
+
+
+def test_przyjecie_wersji_z_serwera_zostawia_wpis():
+    """Inaczej zapisy z jednego telefonu urywaja sie w dzienniku bez powodu."""
+    body = function_source("app/proel.py", "post_proel_history")
+    assert "match.version_adopted" in body
+
+
+def test_cwiczenie_melduje_sie_w_dzienniku_MECZU_OFICJALNEGO():
+    """Wpis pod kluczem szkoleniowym nie mowilby nikomu niczego.
+
+    Pytanie brzmi: „czemu ten mecz ma drugi zapis obok prawdziwego" - i zadaje
+    sie je przy MECZU, a nie przy cwiczeniu.
+    """
+    body = function_source("app/proel.py", "create_proel_match")
+    assert "match.training_run" in body
+    assert "match_number_from_key(req.match_number)" in body
+    assert "event_key=f'training_run:" in body or 'event_key=f"training_run:' in body
+
+
+def test_odmowa_zatwierdzenia_zostawia_wpis_PRZED_bledem():
+    """Po `raise` nic sie nie wykona - wpis musi stac wyzej."""
+    body = function_source("app/proel.py", "_require_approver")
+    assert "match.approve_refused" in body
+    assert body.index("match.approve_refused") < body.index("NOT_AN_APPROVER")

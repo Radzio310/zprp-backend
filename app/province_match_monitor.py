@@ -297,6 +297,24 @@ _CREW_ID_FIELD: Dict[str, str] = {
 _CREW_STATE_KEYS = tuple(_CREW_ID_FIELD)
 
 
+def _crew_judge_ids(state: Dict[str, Any]) -> List[str]:
+    """Wszystkie numery obsady zwrócone dla meczu przez ZPRP.
+
+    Pełne szczegóły meczu są wspólnym, komisjyjnym źródłem prawdy. Dzięki
+    temu jeden pobrany mecz zasila kalendarz KAŻDEJ osoby z obsady, także tej,
+    która nie uruchomiła aplikacji i nie ma tokenu push.
+    """
+    return sorted(
+        {
+            value
+            for id_field, _ in _CREW_FIELD_PAIRS
+            if (value := _str(state.get(id_field)))
+            and value != "0"
+            and value.isdigit()
+        }
+    )
+
+
 def _api_to_state(payload: Dict[str, Any], base: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     rows = payload.get("0")
     match = rows[0] if isinstance(rows, list) and rows else None
@@ -449,8 +467,21 @@ def _prefs_allow(prefs: Any, event_type: str) -> bool:
 
 
 async def _active_judge_ids(province: str) -> List[str]:
+    """Pełny skład okręgu do odczytu przez konto komisji.
+
+    Token push mówi wyłącznie, komu można wysłać powiadomienie. Nie może
+    decydować, czy mecz sędziego istnieje w kalendarzu komisji.
+    """
     from app.mentoring_notifications import monitored_judges
+    from app.settlement_province import spellings
+
     mentored_ids = await monitored_judges(province)
+    variants = spellings(province)
+    roster_rows = await database.fetch_all(
+        select(province_judges.c.judge_id, province_judges.c.province).where(
+            province_judges.c.province.in_(variants or [province])
+        )
+    )
     token_rows = await database.fetch_all(
         select(push_tokens.c.judge_id, push_tokens.c.province)
         .where(push_tokens.c.app_variant == "baza")
@@ -467,7 +498,13 @@ async def _active_judge_ids(province: str) -> List[str]:
         for row in known_rows
     }
     return sorted(
-        set(mentored_ids) | {
+        set(mentored_ids)
+        | {
+            _str(row["judge_id"])
+            for row in roster_rows
+            if _str(row["judge_id"])
+        }
+        | {
             _str(row["judge_id"])
             for row in token_rows
             if _str(row["judge_id"])
@@ -671,21 +708,35 @@ async def _upsert_match(
     }
     if not old_row:
         await database.execute(insert(province_matches).values(province=province, match_id=match_id, **values))
+        assignment_events = (
+            await _sync_assignments_from_state(
+                province, match_id, state, notify=False
+            )
+            if deep
+            else 0
+        )
         from app.mentoring_notifications import enqueue_recent_assignments
         await enqueue_recent_assignments(province, match_id)
-        return True, 0
+        return True, assignment_events
     old = state_dict(old_row["state_json"])
     await database.execute(
         update(province_matches)
         .where(and_(province_matches.c.province == province, province_matches.c.match_id == match_id))
         .values(**values)
     )
+    assignment_events = (
+        await _sync_assignments_from_state(
+            province, match_id, state, notify=True
+        )
+        if deep
+        else 0
+    )
     from app.mentoring_notifications import enqueue_recent_assignments
     await enqueue_recent_assignments(province, match_id)
     if old_row["fingerprint"] == new_fp:
-        return False, 0
+        return False, assignment_events
     targets = await _target_judges(province, match_id)
-    created = 0
+    created = assignment_events
     for event in build_change_events(old, state):
         created += await _create_event(
             province,
@@ -746,6 +797,33 @@ async def _upsert_assignment(province: str, match_id: str, judge_id: str, season
             fingerprint(state),
         )
     return 0
+
+
+async def _sync_assignments_from_state(
+    province: str,
+    match_id: str,
+    state: Dict[str, Any],
+    *,
+    notify: bool,
+) -> int:
+    """Dopisz cały skład meczu, a nie tylko właściciela odpytywanej listy.
+
+    Nie wygaszamy tu nieobecnych numerów: zdarzają się odpowiedzi częściowe.
+    Usunięcia nadal potwierdza prywatna lista sędziego. Pełne szczegóły służą
+    tu do bezpiecznego uzupełniania brakujących partnerów.
+    """
+    created = 0
+    season = _str(state.get("season"))
+    for judge_id in _crew_judge_ids(state):
+        created += await _upsert_assignment(
+            province,
+            match_id,
+            judge_id,
+            season,
+            notify,
+            state,
+        )
+    return created
 
 
 async def _mark_missing_assignments(province: str, judge_id: str, seen_ids: set[str]) -> int:

@@ -81,6 +81,27 @@ def _int(value: Any) -> Optional[int]:
         return None
 
 
+def _last_event(protocol: Any) -> Dict[str, Any]:
+    """Ostatnie zdarzenie protokołu - do kafelka w panelu.
+
+    Panel rysuje wersję ikoną tego, co ją odróżnia od poprzedniej: bramka ma
+    piłkę, upomnienie żółtą kartkę z numerem, kara swój znak. Sam typ nie
+    wystarczy - numer zawodnika i drużyna są częścią tego, co sędzia widzi
+    w przebiegu meczu.
+    """
+    if not isinstance(protocol, list) or not protocol:
+        return {}
+    last = protocol[-1]
+    if not isinstance(last, dict):
+        return {}
+    return {
+        "last_event_type": str(last.get("type") or "") or None,
+        "last_event_team": str(last.get("team") or "") or None,
+        "last_event_player": _int(last.get("player")),
+        "last_event_ms": _int(last.get("time")),
+    }
+
+
 def _head(blob: Any) -> Dict[str, Any]:
     """Metadane do listy - żeby panel nie rozpakowywał treści dla każdego wiersza."""
     if not isinstance(blob, dict):
@@ -92,6 +113,7 @@ def _head(blob: Any) -> Dict[str, Any]:
         "main_time_ms": _int(blob.get("mainTime")),
         "first_half": bool(blob["isFirstHalf"]) if "isFirstHalf" in blob else None,
         "protocol_len": len(protocol) if isinstance(protocol, list) else None,
+        **_last_event(protocol),
     }
 
 
@@ -166,6 +188,18 @@ async def record_snapshot(
             from_device=(source == "device"),
         )
         if not allowed:
+            if why == "limit":
+                # Dziura w historii MA SIĘ WYTŁUMACZYĆ. Bez tego wpisu wygląda
+                # tak samo jak mecz, którego nikt nie prowadził. Klucz gasi
+                # powtórzenia - jeden wpis na mecz na dobę, nie setka.
+                from app.proel_journal import log_match_event
+
+                await log_match_event(
+                    match_number=key,
+                    event="match.snapshot_limit",
+                    details={"limit": today},
+                    event_key=f"snapshot_limit:{key}:{now.date().isoformat()}",
+                )
             return why
 
         lean, stats = strip_heavy(blob)
@@ -395,6 +429,18 @@ async def upload_device_snapshots(
             accepted += 1
         else:
             skipped += 1
+    if accepted:
+        # Widać wtedy, że telefon pracował poza zasięgiem serwera - i ile
+        # tego było. Jeden wpis na paczkę, nie na wersję.
+        from app.proel_journal import log_match_event
+
+        await log_match_event(
+            match_number=key,
+            event="match.snapshots_backfilled",
+            actor=actor,
+            details={"accepted": accepted, "skipped": skipped},
+        )
+
     # Telefon kasuje u siebie CAŁĄ paczkę: pominięta wersja to albo powtórka,
     # albo limit - w obu wypadkach ponawianie niczego nie zmieni.
     return {"accepted": accepted, "skipped": skipped}
@@ -429,6 +475,18 @@ def _public_row(row: Any) -> Dict[str, Any]:
         "main_time_ms": row["main_time_ms"],
         "first_half": row["first_half"],
         "protocol_len": row["protocol_len"],
+        # Ostatnie zdarzenie tej wersji - panel porównuje je z sąsiednim
+        # wierszem i stąd wie, CO tę wersję odróżnia.
+        "last_event": (
+            {
+                "type": row["last_event_type"],
+                "team": row["last_event_team"],
+                "player": row["last_event_player"],
+                "ms": row["last_event_ms"],
+            }
+            if row["last_event_type"]
+            else None
+        ),
         "signatures": row["signatures_count"],
         "writer": {
             "judge_id": row["writer_judge"],

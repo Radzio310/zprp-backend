@@ -106,6 +106,22 @@ EVENT_LABELS: Dict[str, str] = {
     "match.signature_removed": "Usunięcie podpisu",
     # Raport dodatkowy: samo złożenie PDF-u, nie ptaszek „był raport" w polach.
     "report.submitted": "Złożenie raportu dodatkowego",
+    # ── Skąd wziął się ten stan ────────────────────────────────────────
+    #
+    # Dziennik odpowiadał dotąd na „kto co zrobił z protokołem", a nie na
+    # „skąd wziął się ten protokół". To są pytania, które padają przy
+    # reklamacji jako pierwsze - i dotąd nie zostawiały żadnego śladu.
+    "match.resumed_local": "Powrót do meczu z autozapisu",
+    "match.version_adopted": "Przyjęcie wersji z serwera",
+    "match.training_run": "Ten mecz jest prowadzony też jako ćwiczenie",
+    # Ktoś nacisnął „Zatwierdź" i serwer odmówił. Bez tego wpisu mecz, którego
+    # nikt nie próbował zatwierdzić, wygląda identycznie jak mecz, w którym
+    # próbowały trzy osoby i każda dostała odmowę.
+    "match.approve_refused": "Odmowa zatwierdzenia",
+    # ── Życie samego archiwum wersji ───────────────────────────────────
+    "match.snapshots_backfilled": "Dosłano historię wersji z telefonu",
+    # Dziura w historii ma się wytłumaczyć. Bez tego wygląda jak brak zapisu.
+    "match.snapshot_limit": "Limit wersji na dobę osiągnięty",
 }
 
 
@@ -278,6 +294,24 @@ def _entries_word(n: int) -> str:
     if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
         return "opisy"
     return "opisów"
+
+
+def _versions_word(n: int) -> str:
+    """„wersja" / „wersje" / „wersji" - migawki protokołu."""
+    if n == 1:
+        return "wersję"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "wersje"
+    return "wersji"
+
+
+def _records_word(n: int) -> str:
+    """„wpis" / „wpisy" / „wpisów" - pozycje protokołu meczu."""
+    if n == 1:
+        return "wpis"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "wpisy"
+    return "wpisów"
 
 
 def _join_fields(paths: List[str], limit: int = 3) -> str:
@@ -669,6 +703,59 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
             # poszło, więc zostaje sam kontekst zamiast pustki.
             return send_context_sentence(d)
         return _with_context(sentence[:1].upper() + sentence[1:], d)
+
+    if ev == "match.resumed_local":
+        # Telefon meldujący powrót nie mówi, KIEDY zapisał ten plik - mówi, przy
+        # jakim stanie meczu wrócił. To właśnie odpowiada na pytanie „skąd wzięła
+        # się kolejna wersja protokołu godzinę po ostatnim zapisie".
+        host = d.get("scoreHost")
+        guest = d.get("scoreGuest")
+        head = "Wznowiono mecz z zapisu na tym telefonie"
+        if isinstance(host, int) and isinstance(guest, int):
+            head = f"{head} przy stanie {host}:{guest}"
+        try:
+            entries = int(d.get("protocolLen") or 0)
+        except (TypeError, ValueError):
+            entries = 0
+        if entries:
+            return f"{head} ({entries} {_records_word(entries)} w protokole)"
+        return head
+
+    if ev == "match.version_adopted":
+        rev = d.get("rev")
+        head = "Przyjęto wersję z serwera, a treść z telefonu poszła do historii"
+        return f"{head} (telefon stał na wersji {rev})" if rev else head
+
+    if ev == "match.training_run":
+        run = str(d.get("run") or "").strip()
+        head = "Ktoś prowadzi ten mecz również jako ćwiczenie"
+        return f"{head} - podejście {run}" if run else head
+
+    if ev == "match.approve_refused":
+        who = str(d.get("who") or "").strip()
+        head = f"Odmowa zatwierdzenia: {who}" if who else "Odmowa zatwierdzenia"
+        return f"{head} - poza obsadą uprawnioną (delegat, sędziowie boiskowi)"
+
+    if ev == "match.snapshots_backfilled":
+        try:
+            accepted = int(d.get("accepted") or 0)
+        except (TypeError, ValueError):
+            accepted = 0
+        try:
+            skipped = int(d.get("skipped") or 0)
+        except (TypeError, ValueError):
+            skipped = 0
+        head = f"Telefon dosłał {accepted} {_versions_word(accepted)} historii"
+        tail = " - mecz był prowadzony bez zasięgu"
+        if skipped:
+            return f"{head}, {skipped} pominięto jako powtórki{tail}"
+        return f"{head}{tail}"
+
+    if ev == "match.snapshot_limit":
+        limit = d.get("limit")
+        head = "Dobowy limit wersji tego meczu osiągnięty"
+        tail = " - kolejne zapisy idą normalnie, ale nie zostawiają już migawki"
+        return f"{head} ({limit}){tail}" if limit else f"{head}{tail}"
 
     frm = _STATUS_NAMES.get(str(d.get("from") or ""), "")
     to = _STATUS_NAMES.get(str(d.get("to") or ""), "")
@@ -1293,7 +1380,17 @@ async def journal_matches(
 # NAPRAWDĘ został zatwierdzony, a nie że ktoś tak powiedział. Nieudana próba
 # wysyłki jest inna: dzieje się WYŁĄCZNIE na telefonie, między aplikacją a
 # serwerem związku, i serwer BAZY nie ma jak się o niej dowiedzieć.
-_CLIENT_REPORTABLE = {"zprp.send_failed", "zprp.send_queued"}
+#
+# Tą samą miarą przechodzi POWRÓT DO MECZU Z ZAPISU LOKALNEGO: sędzia otwiera
+# mecz z pamięci telefonu i przez pierwsze sekundy nic nie leci na serwer, więc
+# serwer nie ma jak zobaczyć, że ktoś wrócił do prowadzenia. Wpis nie orzeka
+# o niczyim prawie - mówi tylko, że na tym telefonie wznowiono ten mecz - a bez
+# niego autozapisy wracające po godzinie ciszy nie mają żadnego wyjaśnienia.
+_CLIENT_REPORTABLE = {
+    "zprp.send_failed",
+    "zprp.send_queued",
+    "match.resumed_local",
+}
 
 
 class JournalEventIn(BaseModel):
