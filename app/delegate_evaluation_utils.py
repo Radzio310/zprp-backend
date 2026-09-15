@@ -1,7 +1,7 @@
 import hashlib
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 
 MIN_SEASON_START = 2025
@@ -112,7 +112,20 @@ def finalize_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
         "average": round(sum(all_values) / len(all_values), 2) if all_values else None,
         "best": max(all_values) if all_values else None,
         "worst": min(all_values) if all_values else None,
+        "grades": grade_distribution(all_values),
     }
+
+
+def grade_distribution(points: List[int]) -> Dict[str, int]:
+    """Ile razy padła każda litera - w tym te, które nie padły ani razu.
+
+    Liczymy DOKŁADNIE te punkty, z których powstała średnia (ocena sekcji plus
+    każde kryterium), żeby rozkład i średnia nie mówiły o dwóch różnych
+    zbiorach. Litery bez ani jednego trafienia zostają z zerem: pusta kolumna
+    w skali też jest informacją, a brak klucza kazałby ekranowi zgadywać.
+    """
+    counts = Counter(points)
+    return {letter: counts.get(point, 0) for letter, point in GRADE_POINTS.items()}
 
 
 def pair_names(ids: List[str], names: List[Any]) -> List[str]:

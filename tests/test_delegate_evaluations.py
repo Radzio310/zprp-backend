@@ -4,6 +4,7 @@ from app.delegate_evaluation_utils import (
     allowed_season,
     canonical_hash,
     finalize_bucket,
+    grade_distribution,
     grade_values,
     new_bucket,
     pair_names,
@@ -94,3 +95,36 @@ def test_nazwiska_pary_stoja_rownorzednie():
 
 def test_brak_nazwiska_zastepuje_numer_a_nie_pustka():
     assert pair_names(["7", "3"], ["Adamczyk"]) == ["3", "Adamczyk"]
+
+
+def test_rozklad_liter_liczy_to_samo_co_srednia():
+    """Skala ocen pokazuje, ile razy padła każda litera.
+
+    Rozkład powstaje z TYCH SAMYCH punktów co średnia (ocena sekcji plus
+    każde kryterium) - inaczej kafelek „SKALA OCEN" mówiłby o innym zbiorze
+    niż liczba nad nim.
+    """
+    evaluation = {"sections": [
+        {"key": "I", "mainGrade": "D", "items": [{"title": "Krok", "grade": "D"}, {"title": "Gest", "grade": "F"}]},
+    ]}
+    bucket = new_bucket(key="para")
+    absorb_evaluation(bucket, evaluation, grade_values(evaluation))
+    done = finalize_bucket(bucket)
+
+    assert done["grades"]["D"] == 2
+    assert done["grades"]["F"] == 1
+    assert sum(done["grades"].values()) == 3
+
+
+def test_rozklad_ma_wszystkie_litery_takze_te_bez_trafien():
+    """Pusta kolumna w skali to informacja - brak klucza kazałby ekranowi zgadywać."""
+    rozklad = grade_distribution([GRADE_POINTS["C"], GRADE_POINTS["C"]])
+    assert set(rozklad) == set(GRADE_POINTS)
+    assert rozklad["C"] == 2
+    assert rozklad["A"] == 0
+
+
+def test_pusty_worek_nie_wymysla_ocen():
+    done = finalize_bucket(new_bucket(key="para"))
+    assert done["average"] is None
+    assert sum(done["grades"].values()) == 0
