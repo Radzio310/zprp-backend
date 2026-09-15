@@ -3725,6 +3725,15 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_to varchar"))
     _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_at timestamptz"))
     _conn.execute(text("ALTER TABLE proel_matches ADD COLUMN IF NOT EXISTS promoted_from_rev integer"))
+    # Ostatnie zdarzenie wersji protokołu - kafel w panelu historii. Tabela
+    # migawek powstała WCZEŚNIEJ niż te kolumny, więc `create_all` ich nie
+    # dołożył, a każdy `SELECT` po niej kończył się błędem: panel mówił
+    # "Nie udało się pobrać historii wersji", a `record_snapshot` (który nigdy
+    # nie rzuca) po cichu przestawał cokolwiek odkładać.
+    _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_type varchar"))
+    _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_team varchar"))
+    _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_player integer"))
+    _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_ms integer"))
     # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
     # `create_all` kolumny nie dołoży.
     _conn.execute(text("ALTER TABLE extra_reports ADD COLUMN IF NOT EXISTS signatures json"))

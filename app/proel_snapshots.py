@@ -412,6 +412,7 @@ async def upload_device_snapshots(
 
     accepted = 0
     skipped = 0
+    failed = 0
     for item in items:
         why = await record_snapshot(
             match_number=key,
@@ -427,6 +428,9 @@ async def upload_device_snapshots(
         )
         if why is None:
             accepted += 1
+        elif why == "blad":
+            # Awaria po NASZEJ stronie - to nie jest powtórka ani limit.
+            failed += 1
         else:
             skipped += 1
     if accepted:
@@ -441,9 +445,25 @@ async def upload_device_snapshots(
             details={"accepted": accepted, "skipped": skipped},
         )
 
+    if accepted == 0 and failed:
+        # NIC nie weszło, a powodem była awaria bazy - nie wolno odpowiedzieć
+        # „przyjęte", bo telefon kasuje u siebie całą wysłaną paczkę i historia
+        # meczu prowadzonego bez zasięgu przepadłaby bezpowrotnie. Tak właśnie
+        # zniknęła historia z 15.09.2026: tabela migawek nie miała kolumn
+        # dołożonych w kodzie, każdy zapis się wywracał, a telefony po cichu
+        # czyściły kolejkę. Błąd = telefon zatrzymuje paczkę i spróbuje za
+        # minutę (`utils/matchSnapshotSync.ts`).
+        raise HTTPException(
+            503,
+            detail={
+                "code": "SNAPSHOT_STORE_FAILED",
+                "message": "Nie udało się odłożyć historii wersji - spróbuj za chwilę.",
+            },
+        )
+
     # Telefon kasuje u siebie CAŁĄ paczkę: pominięta wersja to albo powtórka,
     # albo limit - w obu wypadkach ponawianie niczego nie zmieni.
-    return {"accepted": accepted, "skipped": skipped}
+    return {"accepted": accepted, "skipped": skipped, "failed": failed}
 
 
 # ─────────────────────────── odczyt: panel administratora ───────────────────

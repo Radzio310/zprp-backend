@@ -343,3 +343,19 @@ def test_odmowa_zatwierdzenia_zostawia_wpis_PRZED_bledem():
     body = function_source("app/proel.py", "_require_approver")
     assert "match.approve_refused" in body
     assert body.index("match.approve_refused") < body.index("NOT_AN_APPROVER")
+
+
+def test_awaria_archiwum_NIE_kasuje_kolejki_telefonu():
+    """Telefon kasuje u siebie cala wyslana paczke, wiec „przyjete" musi byc prawda.
+
+    Gdy nie weszlo NIC, a powodem byla awaria (a nie powtorka czy limit),
+    trasa odpowiada bledem - wtedy telefon zatrzymuje paczke i sprobuje
+    ponownie. Bez tego historia meczu prowadzonego bez zasiegu przepadala przy
+    kazdej awarii archiwum, i raz naprawde przepadla (15.09.2026, brakujaca
+    kolumna w tabeli migawek).
+    """
+    body = function_source("app/proel_snapshots.py", "upload_device_snapshots")
+    assert "SNAPSHOT_STORE_FAILED" in body
+    assert "if accepted == 0 and failed" in body
+    # Awaria liczy sie OSOBNO od pominiecia - inaczej nie da sie ich rozroznic.
+    assert "elif why == 'blad'" in body or 'elif why == "blad"' in body
