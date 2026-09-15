@@ -1,6 +1,8 @@
 # app/delegate.py
 
+import asyncio
 import os
+import httpx
 from urllib.parse import urlparse
 import re
 import secrets
@@ -142,7 +144,17 @@ async def delegate_note(
     try:
         # 3) pobierz PDF z ZPRP
         path = "/" + req.delegate_url.lstrip("./")
-        resp = await client.get(path)
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = await client.get(path, timeout=30.0)
+                break
+            except httpx.TimeoutException:
+                if attempt == 2:
+                    raise HTTPException(504, "Baza ZPRP nie odpowiedziała na czas. Spróbuj ponownie.")
+                await asyncio.sleep(0.6 * (attempt + 1))
+        if resp is None:
+            raise HTTPException(504, "Baza ZPRP nie odpowiedziała na czas")
         if resp.status_code != 200:
             ct = resp.headers.get("content-type", "")
             raise HTTPException(
@@ -232,7 +244,17 @@ async def delegate_html(
     # 3) logowanie i pobranie HTML
     client = await _login_and_client(user, pwd, settings)
     try:
-        resp = await client.get(path)
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = await client.get(path, timeout=30.0)
+                break
+            except httpx.TimeoutException:
+                if attempt == 2:
+                    raise HTTPException(504, "Baza ZPRP nie odpowiedziała na czas. Spróbuj ponownie.")
+                await asyncio.sleep(0.6 * (attempt + 1))
+        if resp is None:
+            raise HTTPException(504, "Baza ZPRP nie odpowiedziała na czas")
         if resp.status_code != 200:
             ct = resp.headers.get("content-type", "")
             # często przy braku sesji jest 302/HTML login — to też tu wpadnie

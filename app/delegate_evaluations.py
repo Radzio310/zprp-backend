@@ -232,17 +232,36 @@ async def overview(
             for key, vals in scores.items():
                 pair["sections"][key].extend(vals)
         for index, judge_id in enumerate(ids):
-            person = people.setdefault(str(judge_id), {"judge_id": str(judge_id), "name": names[index] if index < len(names) else str(judge_id), "evaluations": 0, "sections": defaultdict(list)})
+            if not province and str(judge_id) != actor:
+                continue
+            person = people.setdefault(str(judge_id), {"judge_id": str(judge_id), "name": names[index] if index < len(names) else str(judge_id), "evaluations": 0, "sections": defaultdict(list), "section_details": {}})
             person["evaluations"] += 1
             for key, vals in scores.items():
                 person["sections"][key].extend(vals)
+            for section in (data.get("evaluation_json") or {}).get("sections") or []:
+                key = str(section.get("key") or section.get("title") or "Inne").strip()
+                detail = person["section_details"].setdefault(key, {"title": section.get("title") or key, "grades": [], "parameters": {}})
+                main = GRADE_POINTS.get(str(section.get("mainGrade") or "").strip().upper())
+                if main is not None:
+                    detail["grades"].append(main)
+                for item in section.get("items") or []:
+                    item_title = str(item.get("title") or "Parametr").strip()
+                    point = GRADE_POINTS.get(str(item.get("grade") or "").strip().upper())
+                    if point is not None:
+                        detail["parameters"].setdefault(item_title, []).append(point)
     output = []
     for person in people.values():
         sections = {key: {"average": round(sum(vals) / len(vals), 2), "best": max(vals), "worst": min(vals), "samples": len(vals)} for key, vals in person["sections"].items() if vals}
         all_values = [value for values in person["sections"].values() for value in values]
+        details = {}
+        for key, detail in person["section_details"].items():
+            parameters = [{"title": title, "average": round(sum(vals) / len(vals), 2), "best": max(vals), "worst": min(vals), "samples": len(vals)} for title, vals in detail["parameters"].items() if vals]
+            parameters.sort(key=lambda item: item["title"])
+            details[key] = {"title": detail["title"], "parameters": parameters}
         output.append({
             **person,
             "sections": sections,
+            "section_details": details,
             "average": round(sum(all_values) / len(all_values), 2) if all_values else None,
             "best": max(all_values) if all_values else None,
             "worst": min(all_values) if all_values else None,
