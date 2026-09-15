@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.admin_alerts import admin_judge_ids
@@ -193,6 +193,11 @@ async def overview(
     rows = await _rows_for(actor, province, season)
     people: Dict[str, Dict[str, Any]] = {}
     pairs: Dict[str, Dict[str, Any]] = {}
+    # Worek „Łącznie": WSZYSTKIE arkusze z tego zapytania w jednym zbiorze, więc
+    # każdy oceniony element waży tyle samo co w średniej pojedynczej pary. Para
+    # z dziesięcioma arkuszami wpływa na wynik okręgu mocniej niż para z jednym -
+    # to nie „przeciętna para", to średnia sędziowania w okręgu.
+    total = new_bucket()
     available_seasons = set()
     for row in rows:
         data = dict(row)
@@ -201,6 +206,7 @@ async def overview(
         scores = grade_values(evaluation)
         ids, names = data.get("referee_ids") or [], data.get("referee_names") or []
         clean_ids = [str(value).strip() for value in ids if str(value).strip()]
+        absorb_evaluation(total, evaluation, scores)
         if clean_ids:
             pair_key = "|".join(sorted(clean_ids))
             if pair_key not in pairs:
@@ -225,14 +231,31 @@ async def overview(
     output.sort(key=lambda item: str(item["name"]))
     pair_output = [finalize_bucket(pair) for pair in pairs.values()]
     pair_output.sort(key=lambda item: " ".join(item.get("names") or []))
-    return {
+    result = {
         "access": access,
         "people": output,
         "pairs": pair_output,
+        "total": finalize_bucket(total),
         "evaluations": len(rows),
         "seasons": sorted((value for value in available_seasons if value), reverse=True),
         "grade_scale": GRADE_POINTS,
     }
+    if access.get("admin"):
+        # Licznik arkuszy w każdym okręgu - z tego admin składa wybór województw.
+        # Liczymy BEZ filtra sezonu: inaczej okręg mający arkusze tylko w innym
+        # sezonie wyglądałby na pusty i admin nie miałby po co tam wchodzić.
+        counted = await database.fetch_all(
+            select(
+                delegate_evaluations.c.province,
+                func.count().label("sheets"),
+            ).group_by(delegate_evaluations.c.province)
+        )
+        result["provinces"] = [
+            {"province": str(row["province"] or ""), "sheets": int(row["sheets"] or 0)}
+            for row in counted
+            if str(row["province"] or "").strip()
+        ]
+    return result
 
 
 @router.get("/access/me")

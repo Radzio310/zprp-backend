@@ -128,3 +128,26 @@ def test_pusty_worek_nie_wymysla_ocen():
     done = finalize_bucket(new_bucket(key="para"))
     assert done["average"] is None
     assert sum(done["grades"].values()) == 0
+
+
+def test_lacznie_wazy_ocenionymi_elementami_a_nie_parami():
+    """„Łącznie" to jeden worek na wszystkie arkusze, nie średnia ze średnich par.
+
+    Para z jednym kryterium nie może ciążyć na wyniku okręgu tyle samo, co para
+    z dziesięcioma - ekran liczy wszystkie pozostałe średnie po ocenionych
+    elementach i ta jedna nie może liczyć inaczej.
+    """
+    duza = {"sections": [{"key": "I", "mainGrade": "B", "items": [
+        {"title": f"Kryterium {index}", "grade": "B"} for index in range(9)
+    ]}]}
+    mala = {"sections": [{"key": "I", "mainGrade": "F", "items": []}]}
+
+    lacznie = new_bucket()
+    for arkusz in (duza, mala):
+        absorb_evaluation(lacznie, arkusz, grade_values(arkusz))
+    wynik = finalize_bucket(lacznie)["average"]
+
+    # 10 x B (2 pkt) i 1 x F (6 pkt) = 26 / 11
+    assert wynik == round(26 / 11, 2)
+    # srednia ze srednich par dalaby (2 + 6) / 2 = 4,00 - czyli co innego
+    assert wynik != 4.0
