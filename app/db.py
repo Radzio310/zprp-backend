@@ -2455,6 +2455,49 @@ baza_vips = Table(
     ),
 )
 
+# Oceny sędziów wystawiane przez delegatów ZPRP. Treść jest wersjonowana przez
+# content_hash; source_key zapewnia idempotencję kolejnych synchronizacji.
+delegate_evaluations = Table(
+    "delegate_evaluations", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source_key", String, nullable=False, unique=True, index=True),
+    Column("match_id", String, nullable=False, index=True),
+    Column("season", String, nullable=False, index=True),
+    Column("province", String, nullable=False, index=True),
+    Column("match_number", String, nullable=True),
+    Column("match_date", String, nullable=True),
+    Column("referee_ids", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("referee_names", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("delegate_name", String, nullable=True),
+    Column("source_kind", String, nullable=False, server_default="html"),
+    Column("source_fingerprint", String, nullable=False),
+    Column("content_hash", String, nullable=False),
+    Column("evaluation_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("submitted_by", String, nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+delegate_evaluation_access = Table(
+    "delegate_evaluation_access", metadata,
+    Column("province", String, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("can_view_stats", Boolean, nullable=False, server_default=text("false")),
+    Column("can_view_full", Boolean, nullable=False, server_default=text("false")),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+delegate_evaluation_versions = Table(
+    "delegate_evaluation_versions", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("evaluation_id", BigInteger, ForeignKey("delegate_evaluations.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("content_hash", String, nullable=False),
+    Column("evaluation_json", JSONB, nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("evaluation_id", "content_hash", name="uq_delegate_evaluation_version"),
+)
+
 # -------------------------
 # BEACH: nowe tabele (nowa appka)
 # -------------------------

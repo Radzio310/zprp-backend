@@ -34,6 +34,10 @@ from app.official_role import router as official_role_router
 from app.edit_photo import router as edit_photo_router
 from app.offtime import router as offtime_router
 from app.delegate import router as delegate_router
+from app.delegate_evaluations import (
+    admin_router as delegate_evaluations_admin_router,
+    router as delegate_evaluations_router,
+)
 from app.judge_documents import router as judge_documents_router
 from app.results import router as results_router
 from app.calendar import router as calendar_router
@@ -233,6 +237,8 @@ app.include_router(official_role_router)
 app.include_router(edit_photo_router)
 app.include_router(offtime_router)
 app.include_router(delegate_router)
+app.include_router(delegate_evaluations_router)
+app.include_router(delegate_evaluations_admin_router)
 app.include_router(judge_documents_router)
 app.include_router(results_router)
 # Kalendarze sędziego PRZED trasami Google: `/calendar/events/{match_id:path}`

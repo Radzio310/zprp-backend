@@ -3,6 +3,8 @@
 import os
 from urllib.parse import urlparse
 import re
+import secrets
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,8 +22,20 @@ TMP_DIR = os.path.abspath("tmp_pdfs")
 os.makedirs(TMP_DIR, exist_ok=True)
 
 # stała nazwa pliku wewnątrz TMP_DIR
-_TEMP_FILE = "delegate.pdf"
-_TEMP_PATH = os.path.join(TMP_DIR, _TEMP_FILE)
+_PDF_TTL_SECONDS = 15 * 60
+
+
+def _cleanup_delegate_pdfs() -> None:
+    now = time.time()
+    for name in os.listdir(TMP_DIR):
+        if not name.startswith("delegate_") or not name.endswith(".pdf"):
+            continue
+        path = os.path.join(TMP_DIR, name)
+        try:
+            if now - os.path.getmtime(path) > _PDF_TTL_SECONDS:
+                os.remove(path)
+        except OSError:
+            pass
 
 
 class DelegateNoteRequest(BaseModel):
@@ -138,25 +152,47 @@ async def delegate_note(
     finally:
         await client.aclose()
 
-    # 4) zapisz (nadpisując poprzedni) do TMP_DIR/delegate.pdf
-    with open(_TEMP_PATH, "wb") as f:
+    # 4) osobny, losowy plik per żądanie. Poprzednio wszyscy użytkownicy
+    # współdzielili delegate.pdf i mogli dostać arkusz pobrany przez kogoś innego.
+    _cleanup_delegate_pdfs()
+    token = secrets.token_urlsafe(24)
+    temp_path = os.path.join(TMP_DIR, f"delegate_{token}.pdf")
+    with open(temp_path, "wb") as f:
         f.write(data)
 
     # 5) zwróć link do pobrania
-    download_url = request.url_for("download_delegate_pdf")
-    return {"download_url": str(download_url)}
+    extracted_text = ""
+    try:
+        import fitz
+        document = fitz.open(stream=data, filetype="pdf")
+        extracted_text = "\n".join(page.get_text("text") for page in document)[:120_000]
+        document.close()
+    except Exception:
+        # Starszy lub uszkodzony PDF nadal pozostaje dostępny do pobrania.
+        extracted_text = ""
+    download_url = request.url_for("download_delegate_pdf", token=token)
+    return {"download_url": str(download_url), "extracted_text": extracted_text}
 
 
 @router.get(
-    "/temp/delegate.pdf",
+    "/temp/delegate/{token}.pdf",
     name="download_delegate_pdf",
     summary="(tymczasowe) Pobierz PDF „Ocena Sędziów”",
 )
-async def download_delegate_pdf():
-    if not os.path.exists(_TEMP_PATH):
+async def download_delegate_pdf(token: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", token or ""):
+        raise HTTPException(404, "Plik nie istnieje lub wygasł")
+    temp_path = os.path.abspath(os.path.join(TMP_DIR, f"delegate_{token}.pdf"))
+    if os.path.dirname(temp_path) != TMP_DIR or not os.path.exists(temp_path):
+        raise HTTPException(404, "Plik nie istnieje lub wygasł")
+    if time.time() - os.path.getmtime(temp_path) > _PDF_TTL_SECONDS:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
         raise HTTPException(404, "Plik nie istnieje lub wygasł")
     return FileResponse(
-        path=_TEMP_PATH,
+        path=temp_path,
         media_type="application/pdf",
         filename="OCENA SĘDZIÓW.pdf",  # sugerowana nazwa przy pobieraniu
     )
