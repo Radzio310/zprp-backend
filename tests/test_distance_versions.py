@@ -122,3 +122,40 @@ class TestTrasaManifestu:
         assert manifest > 0, "brak trasy manifestu"
         assert province > 0, "brak trasy wojewodztwa"
         assert manifest < province, "manifest musi byc zadeklarowany wyzej"
+
+
+class TestZnacznikaZmiany:
+    """
+    Wgranie tabeli MUSI przesunac `updated_at`.
+
+    Kolumna ma w `db.py` `onupdate=func.now()`, ale to hak SQLAlchemy odpalany
+    wylacznie przy `Table.update()` - przy "INSERT ... ON CONFLICT DO UPDATE"
+    nie dziala. Bez jawnego ustawienia data stalaby na chwili pierwszego
+    wstawienia, manifest pokazalby stary odcisk i nowa tabela nie doszlaby
+    w tle do zadnego telefonu. Ta sama pulapka zablokowala kiedys odswiezanie
+    dokumentow, wiec pilnujemy jej testem, a nie pamiecia.
+    """
+
+    def _zrodlo(self):
+        import io
+        import os
+
+        return io.open(
+            os.path.join(os.path.dirname(__file__), "..", "app", "admin.py"),
+            encoding="utf-8",
+        ).read()
+
+    def test_upsert_ustawia_updated_at_wprost(self):
+        source = self._zrodlo()
+        start = source.index("async def upsert_okreg_distance")
+        body = source[start : start + 1800]
+        assert "on_conflict_do_update" in body
+        assert '"updated_at": func.now()' in body
+
+    def test_manifest_podaje_drugi_slad_zmiany(self):
+        source = self._zrodlo()
+        start = source.index("async def okreg_distances_manifest")
+        body = source[start : start + 2200]
+        # Sama data potrafi sklamac - odcisk ma jeszcze z czego sie zlozyc.
+        assert '"valid_from"' in body
+        assert '"pairs"' in body

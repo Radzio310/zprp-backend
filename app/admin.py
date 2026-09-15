@@ -956,6 +956,7 @@ async def okreg_distances_manifest():
             parsed = None
         valid_from = parsed.get("validFrom") if isinstance(parsed, dict) else None
         versions = parsed.get("previous") if isinstance(parsed, dict) else None
+        edges = parsed.get("edges") if isinstance(parsed, dict) else None
         files.append(
             {
                 "province": r["province"],
@@ -963,6 +964,11 @@ async def okreg_distances_manifest():
                 "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
                 "valid_from": valid_from if isinstance(valid_from, str) else None,
                 "versions": (1 + len(versions)) if isinstance(versions, list) else 1,
+                # Drugi, NIEZALEZNY slad zmiany. Gdyby tabela kiedys trafila do
+                # bazy droga omijajaca `updated_at` (recznie, migracja, skrypt),
+                # sama data by sklamala i telefon zostalby przy starych
+                # kilometrach - a to sa pieniadze, nie ozdobnik.
+                "pairs": len(edges) if isinstance(edges, list) else 0,
             }
         )
     return {"files": files}
@@ -993,7 +999,18 @@ async def upsert_okreg_distance(province: str, req: UpsertOkregDistanceRequest):
     stmt = (
         pg_insert(okreg_distances)
         .values(province=prov, content=req.content, enabled=req.enabled)
-        .on_conflict_do_update(index_elements=[okreg_distances.c.province], set_={"content": req.content, "enabled": req.enabled})
+        # `updated_at` USTAWIAMY WPROST - dokladnie ta sama pulapka co przy
+        # `json_files` wyzej. Kolumna ma w `db.py` `onupdate=func.now()`, ale to
+        # hak SQLAlchemy odpalany wylacznie przy `Table.update()`; przy
+        # `INSERT ... ON CONFLICT DO UPDATE` nie ma prawa zadzialac. Data stalaby
+        # na chwili pierwszego wstawienia, a to po niej aplikacja poznaje, ze
+        # tabela sie zmienila (`services/distancesSync.ts` porownuje odcisk
+        # `enabled|updated_at|validFrom|liczba par`). Bez tego wgranie nowej
+        # tabeli odleglosci nie doszloby w tle do ZADNEGO telefonu.
+        .on_conflict_do_update(
+            index_elements=[okreg_distances.c.province],
+            set_={"content": req.content, "enabled": req.enabled, "updated_at": func.now()},
+        )
     )
     try:
         await database.execute(stmt)
