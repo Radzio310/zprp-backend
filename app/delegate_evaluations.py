@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
 from collections import defaultdict
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -14,6 +11,19 @@ from sqlalchemy import and_, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.admin_alerts import admin_judge_ids
+from app.delegate_evaluation_utils import (
+    GRADE_POINTS,
+    MIN_SEASON_START,
+    absorb_evaluation,
+    allowed_season,
+    canonical_hash,
+    finalize_bucket,
+    grade_values,
+    new_bucket,
+    pair_names,
+    safe_source_fingerprint,
+    season_start,
+)
 from app.admin_guard import admin_write_guard
 from app.db import (
     database,
@@ -33,41 +43,9 @@ admin_router = APIRouter(
     dependencies=[Depends(admin_write_guard)],
 )
 
-MIN_SEASON_START = 2025
-GRADE_POINTS = {"A": 7, "B": 6, "C": 5, "D": 4, "E": 3, "F": 2, "G": 1}
-
-
-def season_start(value: Any) -> Optional[int]:
-    match = re.search(r"(20\d{2})\s*[/_-]", str(value or ""))
-    return int(match.group(1)) if match else None
-
-
-def allowed_season(value: Any) -> bool:
-    start = season_start(value)
-    return start is not None and start >= MIN_SEASON_START
-
-
-def canonical_hash(value: Any) -> str:
-    body = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
-def safe_source_fingerprint(value: Any) -> str:
-    """Nigdy nie przechowujemy URL-a zawierającego token/parametry ZPRP."""
-    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
-
-
-def grade_values(evaluation: Dict[str, Any]) -> Dict[str, List[int]]:
-    values: Dict[str, List[int]] = defaultdict(list)
-    for section in evaluation.get("sections") or []:
-        key = str(section.get("key") or section.get("title") or "Inne").strip()
-        grades = [section.get("mainGrade")]
-        grades.extend(item.get("grade") for item in section.get("items") or [])
-        for grade in grades:
-            point = GRADE_POINTS.get(str(grade or "").strip().upper())
-            if point is not None:
-                values[key].append(point)
-    return dict(values)
+# Reguły skali, sezonów i odcisków mieszkają w `app/delegate_evaluation_utils.py`.
+# Ten moduł miał ich WŁASNE kopie, więc poprawka w jednym miejscu nie docierała
+# do drugiego - a testy sprawdzały akurat tę kopię, której API nie używało.
 
 
 class EvaluationIn(BaseModel):
@@ -219,66 +197,33 @@ async def overview(
     for row in rows:
         data = dict(row)
         available_seasons.add(str(data.get("season") or ""))
-        scores = grade_values(data.get("evaluation_json") or {})
+        evaluation = data.get("evaluation_json") or {}
+        scores = grade_values(evaluation)
         ids, names = data.get("referee_ids") or [], data.get("referee_names") or []
         clean_ids = [str(value).strip() for value in ids if str(value).strip()]
         if clean_ids:
             pair_key = "|".join(sorted(clean_ids))
-            pair = pairs.setdefault(pair_key, {
-                "key": pair_key, "judge_ids": clean_ids, "names": names,
-                "evaluations": 0, "sections": defaultdict(list),
-            })
-            pair["evaluations"] += 1
-            for key, vals in scores.items():
-                pair["sections"][key].extend(vals)
+            if pair_key not in pairs:
+                pairs[pair_key] = new_bucket(
+                    key=pair_key,
+                    judge_ids=sorted(clean_ids),
+                    names=pair_names(ids, names),
+                )
+            absorb_evaluation(pairs[pair_key], evaluation, scores)
         for index, judge_id in enumerate(ids):
             if not province and str(judge_id) != actor:
                 continue
-            person = people.setdefault(str(judge_id), {"judge_id": str(judge_id), "name": names[index] if index < len(names) else str(judge_id), "evaluations": 0, "sections": defaultdict(list), "section_details": {}})
-            person["evaluations"] += 1
-            for key, vals in scores.items():
-                person["sections"][key].extend(vals)
-            for section in (data.get("evaluation_json") or {}).get("sections") or []:
-                key = str(section.get("key") or section.get("title") or "Inne").strip()
-                detail = person["section_details"].setdefault(key, {"title": section.get("title") or key, "grades": [], "parameters": {}})
-                main = GRADE_POINTS.get(str(section.get("mainGrade") or "").strip().upper())
-                if main is not None:
-                    detail["grades"].append(main)
-                for item in section.get("items") or []:
-                    item_title = str(item.get("title") or "Parametr").strip()
-                    point = GRADE_POINTS.get(str(item.get("grade") or "").strip().upper())
-                    if point is not None:
-                        detail["parameters"].setdefault(item_title, []).append(point)
-    output = []
-    for person in people.values():
-        sections = {key: {"average": round(sum(vals) / len(vals), 2), "best": max(vals), "worst": min(vals), "samples": len(vals)} for key, vals in person["sections"].items() if vals}
-        all_values = [value for values in person["sections"].values() for value in values]
-        details = {}
-        for key, detail in person["section_details"].items():
-            parameters = [{"title": title, "average": round(sum(vals) / len(vals), 2), "best": max(vals), "worst": min(vals), "samples": len(vals)} for title, vals in detail["parameters"].items() if vals]
-            parameters.sort(key=lambda item: item["title"])
-            details[key] = {"title": detail["title"], "parameters": parameters}
-        output.append({
-            **person,
-            "sections": sections,
-            "section_details": details,
-            "average": round(sum(all_values) / len(all_values), 2) if all_values else None,
-            "best": max(all_values) if all_values else None,
-            "worst": min(all_values) if all_values else None,
-        })
+            key = str(judge_id)
+            if key not in people:
+                people[key] = new_bucket(
+                    judge_id=key,
+                    name=str(names[index]) if index < len(names) else key,
+                )
+            absorb_evaluation(people[key], evaluation, scores)
+
+    output = [finalize_bucket(person) for person in people.values()]
     output.sort(key=lambda item: str(item["name"]))
-    pair_output = []
-    for pair in pairs.values():
-        sections = {
-            key: {"average": round(sum(vals) / len(vals), 2), "best": max(vals), "worst": min(vals), "samples": len(vals)}
-            for key, vals in pair["sections"].items() if vals
-        }
-        all_values = [value for values in pair["sections"].values() for value in values]
-        pair_output.append({
-            **pair,
-            "sections": sections,
-            "average": round(sum(all_values) / len(all_values), 2) if all_values else None,
-        })
+    pair_output = [finalize_bucket(pair) for pair in pairs.values()]
     pair_output.sort(key=lambda item: " ".join(item.get("names") or []))
     return {
         "access": access,

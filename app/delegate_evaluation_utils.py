@@ -5,7 +5,15 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 MIN_SEASON_START = 2025
-GRADE_POINTS = {"A": 7, "B": 6, "C": 5, "D": 4, "E": 3, "F": 2, "G": 1}
+
+#: Punkty za literę oceny - WIĘCEJ ZNACZY LEPIEJ.
+#:
+#: Skalę arkusza delegata opisuje legenda w `components/RefereeEvaluationModal.tsx`:
+#: „A - niedopuszczalnie", „D - prawidłowo", „G - wybitnie". Do 15.09.2026 ta mapa
+#: przyznawała literze A siedem punktów, czyli NAJWIĘCEJ ocenie NAJGORSZEJ. Średnie
+#: wychodziły przez to odwrócone: para z samymi „A" miała 7,00 i wyświetlała się
+#: jako wybitna, a `best` wskazywał najsłabszą ocenę w zestawieniu.
+GRADE_POINTS = {"A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "F": 6, "G": 7}
 
 def season_start(value: Any) -> Optional[int]:
     match = re.search(r"(20\d{2})\s*[/_-]", str(value or ""))
@@ -33,3 +41,88 @@ def grade_values(evaluation: Dict[str, Any]) -> Dict[str, List[int]]:
             if point is not None:
                 values[key].append(point)
     return dict(values)
+
+
+def new_bucket(**identity: Any) -> Dict[str, Any]:
+    """Pusty worek na oceny - taki sam dla pojedynczego sędziego i dla pary."""
+    return {
+        **identity,
+        "evaluations": 0,
+        "sections": defaultdict(list),
+        "section_details": {},
+    }
+
+
+def absorb_evaluation(bucket: Dict[str, Any], evaluation: Dict[str, Any], scores: Dict[str, List[int]]) -> None:
+    """Dokłada jeden arkusz do worka.
+
+    PARA I OSOBA LICZĄ SIĘ TAK SAMO. Wcześniej rozpisanie na kryteria
+    (`section_details`) powstawało wyłącznie dla osoby, więc ekran pary musiał
+    i tak sięgać po dane jednego sędziego - a delegat ocenia PARĘ i ta sama
+    litera dotyczy obojga.
+    """
+    bucket["evaluations"] += 1
+    for key, values in scores.items():
+        bucket["sections"][key].extend(values)
+    for section in evaluation.get("sections") or []:
+        key = str(section.get("key") or section.get("title") or "Inne").strip()
+        detail = bucket["section_details"].setdefault(
+            key, {"title": section.get("title") or key, "grades": [], "parameters": {}}
+        )
+        main = GRADE_POINTS.get(str(section.get("mainGrade") or "").strip().upper())
+        if main is not None:
+            detail["grades"].append(main)
+        for item in section.get("items") or []:
+            item_title = str(item.get("title") or "Parametr").strip()
+            point = GRADE_POINTS.get(str(item.get("grade") or "").strip().upper())
+            if point is not None:
+                detail["parameters"].setdefault(item_title, []).append(point)
+
+
+def summary_of(values: List[int]) -> Dict[str, Any]:
+    return {
+        "average": round(sum(values) / len(values), 2),
+        "best": max(values),
+        "worst": min(values),
+        "samples": len(values),
+    }
+
+
+def finalize_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
+    """Worek zamieniony w gotowe liczby."""
+    sections = {
+        key: summary_of(values)
+        for key, values in bucket["sections"].items()
+        if values
+    }
+    details = {}
+    for key, detail in bucket["section_details"].items():
+        parameters = [
+            {"title": title, **summary_of(values)}
+            for title, values in detail["parameters"].items()
+            if values
+        ]
+        parameters.sort(key=lambda item: item["title"])
+        details[key] = {"title": detail["title"], "parameters": parameters}
+    all_values = [value for values in bucket["sections"].values() for value in values]
+    return {
+        **bucket,
+        "sections": sections,
+        "section_details": details,
+        "average": round(sum(all_values) / len(all_values), 2) if all_values else None,
+        "best": max(all_values) if all_values else None,
+        "worst": min(all_values) if all_values else None,
+    }
+
+
+def pair_names(ids: List[str], names: List[Any]) -> List[str]:
+    """Nazwiska pary W KOLEJNOŚCI ALFABETYCZNEJ.
+
+    Kolejność z arkusza stawiałaby jednego sędziego zawsze pierwszego, a para
+    jest równorzędna - nie ma w niej sędziego głównego i pomocniczego.
+    """
+    paired = []
+    for index, judge_id in enumerate(ids):
+        label = str(names[index]).strip() if index < len(names) else ""
+        paired.append(label or str(judge_id))
+    return sorted(paired, key=lambda value: value.casefold())
