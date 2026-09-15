@@ -22,8 +22,10 @@ from app.proel_doc_version import (
     REASON_REJECTED_LOCAL,
     STALE_MESSAGE,
     conflict_event_key,
+    is_restore_write,
     is_stale_write,
     parse_base_seen,
+    restore_install,
     iso,
     parse_base_rev,
     parse_overwrite,
@@ -339,3 +341,37 @@ def test_odczyt_nie_rozbraja_prawdziwego_sporu_wersji():
 
 def test_brak_naglowka_zachowuje_sie_jak_przed_zmiana():
     assert is_stale_write(0, 0, None, "moj-telefon", doc_exists=True) is True
+
+
+# ───── Przywrocenie nie nalezy do zadnego urzadzenia (15.09.2026) ─────
+#
+# Zgloszenie: "ja nadpisuje jako admin, ale uzytkownik wraca do autosave'u
+# lokalnego i nadpisuje mi te zmiane na serwerze". Bramka wersji to lapie -
+# telefon ma starsza wersje bazowa, wiec jego zapis jest odrzucany i sedzia
+# dostaje wybor przy nastepnym wejsciu. JEDEN przypadek wymykal sie regule:
+# przywrocenie zrobione z TEGO SAMEGO telefonu, ktory prowadzi mecz
+# (administrator bywa jednoczesnie sedzia). Warunek "nowsza wersja pochodzi
+# z tego urzadzenia" przepuszczal wtedy autozapis i po cichu cofal przywrocenie.
+
+
+def test_przywrocenie_z_tego_samego_telefonu_nie_jest_jego_wlasnym_zapisem():
+    mark = restore_install("telefon-A")
+    assert is_stale_write(5, 9, mark, "telefon-A", doc_exists=True) is True
+
+
+def test_bez_przywrocenia_wlasny_zapis_dalej_przechodzi():
+    """Zgubiona odpowiedz na wlasny zapis nie moze byc konfliktem z samym soba."""
+    assert is_stale_write(5, 9, "telefon-A", "telefon-A", doc_exists=True) is False
+
+
+def test_znacznik_przywrocenia_da_sie_rozpoznac():
+    assert is_restore_write(restore_install("x")) is True
+    assert is_restore_write("telefon-A") is False
+    assert is_restore_write(None) is False
+
+
+def test_przywrocenie_bez_znanego_urzadzenia_tez_ma_znacznik():
+    """Administrator moze przyjsc bez identyfikatora instalacji - i to nie moze
+    zamienic znacznika w pustke, bo pusta wartosc nie rowna sie niczemu."""
+    assert is_restore_write(restore_install(None)) is True
+    assert is_restore_write(restore_install("")) is True

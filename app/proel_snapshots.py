@@ -607,6 +607,7 @@ async def restore_snapshot(
         proel_match_state,
         saved_matches,
     )
+    from app.proel_doc_version import restore_install
     from app.proel_fields import project
     from app.proel_journal import log_match_event
     from app.proel_lease import lease_active
@@ -703,7 +704,10 @@ async def restore_snapshot(
             .values(
                 data_json=target,
                 doc_rev=saved_matches.c.doc_rev + 1,
-                doc_writer_install=actor.installation_id or None,
+                # NIE identyfikator urządzenia - patrz `restore_install`.
+                # Inaczej autozapis tego samego telefonu przeszedłby jako
+                # „mój własny zapis" i po cichu cofnąłby przywrócenie.
+                doc_writer_install=restore_install(actor.installation_id),
                 doc_writer_judge=actor.judge_id or None,
                 doc_writer_name=actor.name or None,
                 doc_written_at=func.now(),

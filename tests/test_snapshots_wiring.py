@@ -240,3 +240,15 @@ def test_zalozenie_meczu_TEZ_zostawia_migawke():
     body = function_source("app/proel.py", "create_proel_match")
     assert "record_snapshot" in body
     assert "milestone='start'" in body or 'milestone="start"' in body
+
+
+def test_przywrocenie_nie_podpisuje_sie_urzadzeniem():
+    """Inaczej autozapis tego samego telefonu cofnalby przywrocenie po cichu.
+
+    Tozsamosc NIE ginie - kto przywrocil, niosa `doc_writer_judge` i
+    `doc_writer_name`. Znika wylacznie prawo do uznania tego za swoj zapis.
+    """
+    body = function_source("app/proel_snapshots.py", "restore_snapshot")
+    assert "restore_install(actor.installation_id)" in body
+    assert "doc_writer_install=actor.installation_id" not in body
+    assert "doc_writer_judge=actor.judge_id" in body

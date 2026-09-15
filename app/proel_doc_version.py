@@ -95,6 +95,33 @@ def parse_base_seen(raw: Any) -> bool:
     return str(raw or "").strip() in ("1", "true", "yes")
 
 
+#: Przedrostek autorstwa PRZYWRÓCENIA wersji przez administratora.
+#:
+#: Po co osobny kształt, skoro znamy urządzenie administratora. Reguła niżej
+#: (`is_stale_write`) przepuszcza zapis, gdy nowszą wersję zapisało TO SAMO
+#: urządzenie - słusznie, bo telefon nie może być w sporze sam ze sobą.
+#: Ale przywrócenie nie jest zapisem urządzenia, tylko decyzją o cofnięciu
+#: czasu, i bywa robione z tego samego telefonu, który prowadzi mecz
+#: (administrator jest wtedy jednocześnie sędzią). Bez tego przedrostka
+#: najbliższy autozapis tamtego telefonu przechodziłby jako „mój własny"
+#: i po cichu cofałby całe przywrócenie.
+#:
+#: Kto przywrócił, niosą `doc_writer_judge` i `doc_writer_name` - tożsamość
+#: nie ginie, znika wyłącznie prawo do uznania tego za swój zapis.
+RESTORE_INSTALL_PREFIX = "restore:"
+
+
+def restore_install(installation_id: Any) -> str:
+    """Autor przywrócenia - NIGDY równy identyfikatorowi żadnego urządzenia."""
+    raw = str(installation_id or "").strip() or "-"
+    return f"{RESTORE_INSTALL_PREFIX}{raw}"
+
+
+def is_restore_write(writer_install: Any) -> bool:
+    """Czy ostatnią wersję położyło przywrócenie, a nie zapis z urządzenia."""
+    return str(writer_install or "").startswith(RESTORE_INSTALL_PREFIX)
+
+
 def same_install(a: Any, b: Any) -> bool:
     """To samo urządzenie - wyłącznie przy niepustych identyfikatorach po OBU
     stronach. Puste równe pustemu uznałoby każdego starego klienta za autora
