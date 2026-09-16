@@ -139,3 +139,66 @@ def pair_names(ids: List[str], names: List[Any]) -> List[str]:
         label = str(names[index]).strip() if index < len(names) else ""
         paired.append(label or str(judge_id))
     return sorted(paired, key=lambda value: value.casefold())
+
+
+# ---------------------------------------------------------------------------
+# Dostęp
+# ---------------------------------------------------------------------------
+
+#: Uprawnienie konta VIP (panel admina BAZY -> `baza_vips.permissions_json`).
+VIP_PERMISSION = "delegate_evaluations"
+
+#: Wołający z BAZA_web. Tam logują się też konta VIP okręgów, więc oceny okręgu
+#: widzą WYŁĄCZNIE admin i VIP z uprawnieniem - decyzja użytkownika z 16.09.2026.
+#: Dostęp nadany sędziemu w panelu admina działa dalej, ale tylko w aplikacji BAZA.
+WEB_SURFACE = "web"
+
+NO_ACCESS_VIP_PROVINCE = "Konto VIP ma ustawione inne województwo niż to okręgu"
+NO_ACCESS_VIP_PERMISSION = "Konto VIP nie ma uprawnienia „Oceny delegatów”"
+NO_ACCESS_WEB_JUDGE = "W BAZA_web oceny okręgu widzą tylko admin i konta VIP z uprawnieniem „Oceny delegatów”"
+NO_ACCESS_GRANT = "Administrator nie nadał dostępu do ocen tego okręgu"
+
+
+def vip_permissions(raw: Any) -> Dict[str, Any]:
+    """`permissions_json` jako słownik - kolumna JSONB potrafi wrócić napisem."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def vip_sees_evaluations(permissions: Any) -> bool:
+    """VIP z „admin" ma wszystko, pozostali tylko z osobnym uprawnieniem."""
+    perms = vip_permissions(permissions)
+    return bool(perms.get("admin") or perms.get(VIP_PERMISSION))
+
+
+def resolve_access(
+    *,
+    surface: str = "",
+    is_org: bool,
+    is_admin: bool = False,
+    same_province: bool = False,
+    permissions: Any = None,
+    grant: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Kto widzi statystyki (`stats`) i pełne arkusze (`full`) jednego okręgu.
+
+    Konto VIP: własne województwo ORAZ uprawnienie - samo województwo nie
+    wystarcza (do 16.09.2026 wystarczało i oceny widział np. VIP od samych
+    niedyspozycji). Sędzia: admin wszędzie; nadany dostęp tylko poza BAZA_web.
+    Każda odmowa mówi, czego brakuje (`reason`).
+    """
+    if is_org:
+        allowed = same_province and vip_sees_evaluations(permissions)
+        reason = "" if allowed else (NO_ACCESS_VIP_PROVINCE if not same_province else NO_ACCESS_VIP_PERMISSION)
+        return {"stats": allowed, "full": allowed, "admin": False, "commission": allowed, "reason": reason}
+    if is_admin:
+        return {"stats": True, "full": True, "admin": True, "reason": ""}
+    if surface == WEB_SURFACE:
+        return {"stats": False, "full": False, "admin": False, "reason": NO_ACCESS_WEB_JUDGE}
+    stats = bool(grant and grant.get("can_view_stats"))
+    full = bool(grant and grant.get("can_view_full"))
+    return {"stats": stats, "full": full, "admin": False, "reason": "" if stats else NO_ACCESS_GRANT}

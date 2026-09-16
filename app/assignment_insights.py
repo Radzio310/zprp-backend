@@ -10,6 +10,11 @@ Decyzje użytkownika z 16.09.2026:
   - wnioski tylko podglądane; obsadowy wybiera, których Automat ma się
     nauczyć (`app/insights_policy.py`), punkty albo twarda zasada,
   - widzi każdy, kto ma dostęp do panelu obsadowego.
+
+OCENY DELEGATÓW (decyzja z 16.09.2026): w BAZA_web widzą je tylko admin i konta
+VIP z uprawnieniem „Oceny delegatów”. Arkusze liczą się do trudności meczu dla
+wszystkich, ale średnie ocen i słowa delegata dostaje tylko uprawniony token
+(`can_view_province_evaluations`). Dlatego każda trasa wymaga logowania.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -31,6 +36,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app import insights_policy as P
 from app import insights_rules as I
 from app.assignment_scope import current_start
+from app.delegate_evaluations import can_view_province_evaluations
+from app.deps import get_jwt_payload
 from app.db import (
     database,
     delegate_evaluations,
@@ -412,11 +419,14 @@ def _rules_view(saved: Mapping[str, dict], analysis: Mapping[str, Any]) -> Dict[
 
 
 @router.get("", summary="Analiza obsad okręgu z zapisanymi wagami")
-async def insights(province: str = Query(...), horizon: str = Query("5")):
+async def insights(
+    province: str = Query(...), horizon: str = Query("5"), token: dict = Depends(get_jwt_payload)
+):
     key = require_province(province)
     weights = await saved_weights(key)
     analysis = await analysis_for(key, _horizon(horizon), weights)
     marks = await _marks(key)
+    visible = await can_view_province_evaluations(token, key)
     return {
         "province": key,
         "weights": weights,
@@ -424,12 +434,13 @@ async def insights(province: str = Query(...), horizon: str = Query("5")):
         "rules": _rules_view(await saved_rules(key), analysis),
         "marks": len(marks),
         "computing": key in _computing or key in _pending,
-        **analysis,
+        "evaluations_visible": visible,
+        **(analysis if visible else I.hide_evaluations(analysis)),
     }
 
 
 @router.get("/rules", summary="Wnioski wybrane dla Automatu (bez liczenia analizy)")
-async def rules_only(province: str = Query(...)):
+async def rules_only(province: str = Query(...), token: dict = Depends(get_jwt_payload)):
     key = require_province(province)
     saved = await saved_rules(key)
     return {
@@ -446,9 +457,11 @@ class PreviewRequest(BaseModel):
 
 
 @router.post("/preview", summary="Podgląd analizy z innymi wagami (bez zapisu)")
-async def preview(payload: PreviewRequest):
+async def preview(payload: PreviewRequest, token: dict = Depends(get_jwt_payload)):
     key = require_province(payload.province)
-    return await analysis_for(key, _horizon(payload.horizon), I.normalize_weights(payload.weights))
+    analysis = await analysis_for(key, _horizon(payload.horizon), I.normalize_weights(payload.weights))
+    visible = await can_view_province_evaluations(token, key)
+    return {"evaluations_visible": visible, **(analysis if visible else I.hide_evaluations(analysis))}
 
 
 class WeightsRequest(BaseModel):
@@ -458,7 +471,7 @@ class WeightsRequest(BaseModel):
 
 
 @router.put("/weights", summary="Zapisz wagi składników trudności")
-async def save_weights(payload: WeightsRequest):
+async def save_weights(payload: WeightsRequest, token: dict = Depends(get_jwt_payload)):
     key = require_province(payload.province)
     weights = I.normalize_weights(payload.weights)
     statement = pg_insert(province_insight_settings).values(
@@ -483,7 +496,7 @@ class RuleRequest(BaseModel):
 
 
 @router.put("/rules/{rule_key}", summary="Wniosek dla Automatu: włącz, punkty albo twarda zasada")
-async def save_rule(rule_key: str, payload: RuleRequest):
+async def save_rule(rule_key: str, payload: RuleRequest, token: dict = Depends(get_jwt_payload)):
     key = require_province(payload.province)
     if rule_key not in P.RULE_KEYS:
         raise HTTPException(404, detail={"code": "UNKNOWN_RULE", "message": "Nie znam takiego wniosku"})
@@ -521,6 +534,7 @@ async def judge_detail(
     province: str = Query(...),
     horizon: str = Query("5"),
     weights: Optional[str] = Query(None, description="tier,stake,protocol,manual"),
+    token: dict = Depends(get_jwt_payload),
 ):
     key = require_province(province)
     chosen = _weights_from_query(weights, await saved_weights(key))
@@ -537,7 +551,17 @@ async def judge_detail(
     for item in matches:
         item["mark"] = marks.get(item["id"])
     profile = next((item for item in analysis["judges"] if item["judge_id"] == _s(judge_id)), None)
-    return {"province": key, "judge": profile, "matches": matches, "meta": analysis["meta"]}
+    visible = await can_view_province_evaluations(token, key)
+    if not visible:
+        profile = I.hide_judge_evaluations(profile)
+        matches = I.hide_match_evaluations(matches)
+    return {
+        "province": key,
+        "judge": profile,
+        "matches": matches,
+        "meta": analysis["meta"],
+        "evaluations_visible": visible,
+    }
 
 
 class MatchesRequest(BaseModel):
@@ -548,7 +572,7 @@ class MatchesRequest(BaseModel):
 
 
 @router.post("/matches", summary="Mecze-dowody wniosku (trudność i powody)")
-async def matches(payload: MatchesRequest):
+async def matches(payload: MatchesRequest, token: dict = Depends(get_jwt_payload)):
     key = require_province(payload.province)
     weights = I.normalize_weights(payload.weights) if payload.weights else await saved_weights(key)
     analysis = await analysis_for(key, _horizon(payload.horizon), weights)
@@ -584,7 +608,13 @@ async def matches(payload: MatchesRequest):
             }
         )
     out.sort(key=lambda item: -(item["ts"] or 0))
-    return {"province": key, "matches": out, "hard_threshold": analysis["meta"]["hard_threshold"]}
+    visible = await can_view_province_evaluations(token, key)
+    return {
+        "province": key,
+        "matches": out if visible else I.hide_match_evaluations(out),
+        "hard_threshold": analysis["meta"]["hard_threshold"],
+        "evaluations_visible": visible,
+    }
 
 
 class MarkRequest(BaseModel):
@@ -595,7 +625,7 @@ class MarkRequest(BaseModel):
 
 
 @router.put("/marks/{match_id}", summary="Oznacz mecz jako trudny albo łatwy (pusty znak zdejmuje)")
-async def set_mark(match_id: str, payload: MarkRequest):
+async def set_mark(match_id: str, payload: MarkRequest, token: dict = Depends(get_jwt_payload)):
     key = require_province(payload.province)
     mark = _s(payload.mark).lower()
     if mark and mark not in ("hard", "easy"):
@@ -630,7 +660,7 @@ async def set_mark(match_id: str, payload: MarkRequest):
 
 
 @router.get("/marks", summary="Mecze oznaczone ręcznie")
-async def list_marks(province: str = Query(...)):
+async def list_marks(province: str = Query(...), token: dict = Depends(get_jwt_payload)):
     key = require_province(province)
     rows = await database.fetch_all(
         select(province_match_difficulty).where(province_match_difficulty.c.province == key)
@@ -655,7 +685,7 @@ class RecomputeRequest(BaseModel):
 
 
 @router.post("/recompute", summary="Przelicz fakty z archiwum (w tle)")
-async def recompute(payload: RecomputeRequest):
+async def recompute(payload: RecomputeRequest, token: dict = Depends(get_jwt_payload)):
     key = require_province(payload.province)
     if key in _computing:
         return {"started": False, "computing": True}

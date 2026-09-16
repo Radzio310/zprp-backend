@@ -207,3 +207,51 @@ def test_przewidywana_trudnosc_bez_protokolu():
     assert "Junior" in why and "finał" in why
     # Stawka waży tyle, ile szczebel pozwala: junior 0.55 -> 1.0 * 0.775.
     assert abs(value - (35 * 0.55 + 25 * 0.775) / 60) < 1e-9
+
+
+def _grades(value):
+    """Wszystkie wartości pod kluczem „grade”, na dowolnej głębokości."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "grade":
+                yield item
+            yield from _grades(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _grades(item)
+
+
+def test_oceny_delegatow_tylko_dla_uprawnionych():
+    sheet = {"character": {"difficulty": {"short": "Trudny"}}, "sections": [{"mainGrade": "G"}]}
+    seasons = {
+        2024: _season(2024, 12, ("1", "2"), gH=30, gA=29, series="Finał"),
+        2025: _season(2025, 12, ("1", "5"), gH=28, gA=27),
+    }
+    evaluations = {
+        f"2025-S/JK/1-{index}": [{"referee_ids": ["1", "5"], "evaluation_json": sheet}] for index in range(12)
+    }
+    facts = I.build_facts(seasons, marks={}, evaluations=evaluations)
+    people = {
+        "1": I.Person("1", "Anna Starsza", league=True),
+        "2": I.Person("2", "Bartek Drugi"),
+        "5": I.Person("5", "Ela Młoda", young=True),
+    }
+    result = I.analyze(facts, people=people, names={}, weights=I.DEFAULT_WEIGHTS, horizon="5", current=2025)
+    assert 7.0 in set(_grades(result))
+
+    hidden = I.hide_evaluations(result)
+    assert set(_grades(hidden)) == {None}
+    assert hidden["meta"] == result["meta"]
+    # Pamięć podręczna analizy zostaje nietknięta.
+    assert 7.0 in set(_grades(result))
+
+    matches = I.judge_matches(
+        facts, "5", weights=I.DEFAULT_WEIGHTS, threshold=result["meta"]["hard_threshold"], seasons=[2024, 2025]
+    )
+    assert matches and all(item["why"]["manual"] == ["delegat: trudny"] for item in matches)
+    shown = I.hide_match_evaluations(matches)
+    assert all(item["grade"] is None for item in shown)
+    assert all(item["why"]["manual"] == ["z arkusza delegata"] for item in shown)
+    # Arkusz dalej liczy się do trudności - znika tylko to, co napisał delegat.
+    assert [item["difficulty"] for item in shown] == [item["difficulty"] for item in matches]
+    assert all(fact.why["manual"] == ["delegat: trudny"] for fact in facts if fact.season == 2025)

@@ -151,3 +151,50 @@ def test_lacznie_wazy_ocenionymi_elementami_a_nie_parami():
     assert wynik == round(26 / 11, 2)
     # srednia ze srednich par dalaby (2 + 6) / 2 = 4,00 - czyli co innego
     assert wynik != 4.0
+
+
+# ---------------------------------------------------------------------------
+# Dostęp (decyzja z 16.09.2026): w BAZA_web tylko admin i VIP z uprawnieniem
+# ---------------------------------------------------------------------------
+
+from app.delegate_evaluation_utils import (  # noqa: E402
+    NO_ACCESS_GRANT,
+    NO_ACCESS_VIP_PERMISSION,
+    NO_ACCESS_VIP_PROVINCE,
+    NO_ACCESS_WEB_JUDGE,
+    resolve_access,
+)
+
+
+def test_vip_z_samym_wojewodztwem_nie_widzi_ocen():
+    access = resolve_access(surface="web", is_org=True, same_province=True, permissions={"district_unavailability": True})
+    assert not access["stats"] and not access["full"]
+    assert access["reason"] == NO_ACCESS_VIP_PERMISSION
+
+
+def test_vip_z_uprawnieniem_widzi_oceny_swojego_okregu():
+    access = resolve_access(surface="web", is_org=True, same_province=True, permissions={"delegate_evaluations": True})
+    assert access["stats"] and access["full"] and access["reason"] == ""
+    other = resolve_access(surface="web", is_org=True, same_province=False, permissions={"delegate_evaluations": True})
+    assert not other["stats"] and other["reason"] == NO_ACCESS_VIP_PROVINCE
+
+
+def test_vip_admin_z_uprawnieniami_zapisanymi_napisem():
+    access = resolve_access(surface="web", is_org=True, same_province=True, permissions='{"admin": true}')
+    assert access["stats"] and access["full"]
+
+
+def test_admin_widzi_wszedzie():
+    for surface in ("web", ""):
+        access = resolve_access(surface=surface, is_org=False, is_admin=True)
+        assert access["stats"] and access["full"] and access["admin"]
+
+
+def test_dostep_nadany_sedziemu_dziala_tylko_w_aplikacji():
+    grant = {"can_view_stats": True, "can_view_full": False}
+    web = resolve_access(surface="web", is_org=False, grant=grant)
+    assert not web["stats"] and web["reason"] == NO_ACCESS_WEB_JUDGE
+    app = resolve_access(surface="", is_org=False, grant=grant)
+    assert app["stats"] and not app["full"]
+    none = resolve_access(surface="", is_org=False, grant=None)
+    assert not none["stats"] and none["reason"] == NO_ACCESS_GRANT

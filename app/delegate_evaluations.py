@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -14,6 +14,7 @@ from app.admin_alerts import admin_judge_ids
 from app.delegate_evaluation_utils import (
     GRADE_POINTS,
     MIN_SEASON_START,
+    WEB_SURFACE,
     absorb_evaluation,
     allowed_season,
     canonical_hash,
@@ -21,6 +22,7 @@ from app.delegate_evaluation_utils import (
     grade_values,
     new_bucket,
     pair_names,
+    resolve_access,
     safe_source_fingerprint,
     season_start,
 )
@@ -91,17 +93,30 @@ async def _is_admin(judge_id: str) -> bool:
     return judge_id in await admin_judge_ids()
 
 
-async def _access(judge_id: str, province: str) -> Dict[str, bool]:
+async def _access(judge_id: str, province: str, surface: str = "") -> Dict[str, Any]:
+    """Dostęp do ocen okręgu - reguła w `resolve_access`, tu tylko dane z bazy.
+
+    `surface="web"` wysyła BAZA_web: tam oceny okręgu widzą wyłącznie admin
+    i konta VIP z uprawnieniem, a dostęp nadany sędziemu zostaje dla aplikacji.
+    """
     if judge_id.startswith("org:"):
         row = await database.fetch_one(
-            select(baza_vips.c.province).where(baza_vips.c.username == judge_id[4:])
+            select(baza_vips.c.province, baza_vips.c.permissions_json).where(
+                baza_vips.c.username == judge_id[4:]
+            )
         )
-        same_province = bool(
-            row and normalize_province(row["province"]) == normalize_province(province)
+        return resolve_access(
+            surface=surface,
+            is_org=True,
+            same_province=bool(
+                row and normalize_province(row["province"]) == normalize_province(province)
+            ),
+            permissions=row["permissions_json"] if row else None,
         )
-        return {"stats": same_province, "full": same_province, "admin": False, "commission": same_province}
     if await _is_admin(judge_id):
-        return {"stats": True, "full": True, "admin": True}
+        return resolve_access(surface=surface, is_org=False, is_admin=True)
+    if surface == WEB_SURFACE:
+        return resolve_access(surface=surface, is_org=False)
     row = await database.fetch_one(
         select(delegate_evaluation_access).where(
             and_(
@@ -110,11 +125,22 @@ async def _access(judge_id: str, province: str) -> Dict[str, bool]:
             )
         )
     )
-    return {
-        "stats": bool(row and row["can_view_stats"]),
-        "full": bool(row and row["can_view_full"]),
-        "admin": False,
-    }
+    return resolve_access(surface=surface, is_org=False, grant=dict(row) if row else None)
+
+
+async def can_view_province_evaluations(payload: Optional[Dict[str, Any]], province: str) -> bool:
+    """Czy ten token widzi oceny delegatów okręgu w BAZA_web (np. w Analizie obsad).
+
+    Brak tokenu, konto bez numeru i awaria bazy = nie widzi. Wołający chowa
+    wtedy same oceny, a nie całą odpowiedź.
+    """
+    if not payload:
+        return False
+    try:
+        actor = _actor(payload)
+        return bool((await _access(actor, province, "web")).get("stats"))
+    except Exception:
+        return False
 
 
 @router.post("/sync")
@@ -184,12 +210,15 @@ async def _rows_for(judge_id: str, province: str, season: str = ""):
 
 @router.get("/overview")
 async def overview(
-    province: str = Query(""), season: str = Query(""), payload: dict = Depends(get_jwt_payload)
+    province: str = Query(""),
+    season: str = Query(""),
+    surface: str = Query(""),
+    payload: dict = Depends(get_jwt_payload),
 ):
     actor = _actor(payload)
-    access = await _access(actor, province) if province else {"stats": True, "full": True, "admin": await _is_admin(actor)}
+    access = await _access(actor, province, surface) if province else {"stats": True, "full": True, "admin": await _is_admin(actor)}
     if province and not access["stats"]:
-        raise HTTPException(403, "Brak dostępu do statystyk ocen")
+        raise HTTPException(403, access.get("reason") or "Brak dostępu do statystyk ocen")
     rows = await _rows_for(actor, province, season)
     people: Dict[str, Dict[str, Any]] = {}
     pairs: Dict[str, Dict[str, Any]] = {}
@@ -259,19 +288,26 @@ async def overview(
 
 
 @router.get("/access/me")
-async def my_access(province: str = Query(""), payload: dict = Depends(get_jwt_payload)):
+async def my_access(
+    province: str = Query(""), surface: str = Query(""), payload: dict = Depends(get_jwt_payload)
+):
     actor = _actor(payload)
     if not province:
         return {"stats": True, "full": True, "self": True, "admin": await _is_admin(actor)}
-    return await _access(actor, province)
+    return await _access(actor, province, surface)
 
 
 @router.get("/forms")
-async def forms(province: str = Query(""), season: str = Query(""), payload: dict = Depends(get_jwt_payload)):
+async def forms(
+    province: str = Query(""),
+    season: str = Query(""),
+    surface: str = Query(""),
+    payload: dict = Depends(get_jwt_payload),
+):
     actor = _actor(payload)
-    access = await _access(actor, province) if province else {"full": True}
+    access = await _access(actor, province, surface) if province else {"full": True}
     if province and not access["full"]:
-        raise HTTPException(403, "Brak dostępu do pełnych arkuszy")
+        raise HTTPException(403, access.get("reason") or "Brak dostępu do pełnych arkuszy")
     return {"items": [dict(row) for row in await _rows_for(actor, province, season)]}
 
 

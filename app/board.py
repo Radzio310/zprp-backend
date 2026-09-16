@@ -8,11 +8,13 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, insert, update, delete, case
 
 from app.db import database, board_posts, board_tasks, board_members, board_rankings, board_events, province_judges
 from app.deps import get_current_user, get_jwt_payload
+from app.match_market_access import badge_names
+from app.settlement_province import display, spellings
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,7 @@ def _now() -> datetime:
 
 
 def _norm_province(p: str) -> str:
-    return (p or "").strip().upper()
+    return display(p)
 
 
 def _row_to_dict(row) -> dict:
@@ -47,14 +49,14 @@ async def _check_board_write_access(province: str, payload: dict) -> None:
     row = await database.fetch_one(
         select(province_judges).where(
             province_judges.c.judge_id == str(judge_id),
-            province_judges.c.province == prov,
+            province_judges.c.province.in_(spellings(prov)),
         )
     )
     if row is None:
         raise HTTPException(status_code=403, detail="Brak uprawnień do zapisu na tablicę")
-    badges = (row._mapping.get("badges") or {})
-    if not badges.get("Komisja"):
-        raise HTTPException(status_code=403, detail="Wymagany badge 'Komisja'")
+    badges = {name.strip().casefold() for name in badge_names(row._mapping.get("badges"))}
+    if not ({"komisja", "komisja sędziowska"} & badges):
+        raise HTTPException(status_code=403, detail="Wymagana odznaka „Komisja sędziowska”")
 
 
 @router.get("/access")
@@ -101,8 +103,8 @@ async def list_posts(
     prov = _norm_province(province)
     stmt = (
         select(board_posts)
-        .where(board_posts.c.province == prov)
-        .order_by(board_posts.c.pinned.desc(), board_posts.c.created_at.desc())
+        .where(board_posts.c.province.in_(spellings(prov)))
+        .order_by(board_posts.c.pinned.desc(), board_posts.c.order_index, board_posts.c.created_at.desc())
     )
     rows = await database.fetch_all(stmt)
     return [_row_to_dict(r) for r in rows]
@@ -142,13 +144,13 @@ async def update_post(
     values: dict[str, Any] = {}
     if body.type is not None:
         values["type"] = body.type
-    if body.title is not None:
+    if "title" in body.model_fields_set:
         values["title"] = body.title
-    if body.content is not None:
+    if "content" in body.model_fields_set:
         values["content"] = body.content
-    if body.url is not None:
+    if "url" in body.model_fields_set:
         values["url"] = body.url
-    if body.author_name is not None:
+    if "author_name" in body.model_fields_set:
         values["author_name"] = body.author_name
     if body.pinned is not None:
         values["pinned"] = body.pinned
@@ -189,16 +191,22 @@ async def reorder_posts(
     body: ReorderPostsRequest,
     payload: dict = Depends(get_jwt_payload),
 ):
-    if body.ordered_ids:
-        first = await database.fetch_one(
-            select(board_posts.c.province).where(board_posts.c.id == body.ordered_ids[0])
-        )
-        if first:
-            await _check_board_write_access(first._mapping["province"], payload)
+    if not body.ordered_ids:
+        return {"ok": True}
+    rows = await database.fetch_all(
+        select(board_posts.c.id, board_posts.c.province).where(board_posts.c.id.in_(body.ordered_ids))
+    )
+    if len(rows) != len(set(body.ordered_ids)):
+        raise HTTPException(status_code=404, detail="Co najmniej jedno ogłoszenie nie istnieje")
+    provinces = {row._mapping["province"] for row in rows}
+    if len(provinces) != 1:
+        raise HTTPException(status_code=400, detail="Nie można mieszać ogłoszeń z różnych okręgów")
+    province = next(iter(provinces))
+    await _check_board_write_access(province, payload)
     for idx, post_id in enumerate(body.ordered_ids):
         await database.execute(
             update(board_posts)
-            .where(board_posts.c.id == post_id)
+            .where(board_posts.c.id == post_id, board_posts.c.province == province)
             .values(order_index=idx)
         )
     return {"ok": True}
@@ -219,10 +227,10 @@ class CreateTaskRequest(BaseModel):
     description: Optional[str] = None
     status: str = "todo"          # todo | in_progress | done
     priority: Optional[str] = None  # low | medium | high
-    assignee_ids: List[str] = []
+    assignee_ids: List[str] = Field(default_factory=list)
     due_date: Optional[str] = None  # YYYY-MM-DD
     order_index: int = 0
-    checklist: List[ChecklistItem] = []
+    checklist: List[ChecklistItem] = Field(default_factory=list)
 
 
 class UpdateTaskRequest(BaseModel):
@@ -244,7 +252,7 @@ async def list_tasks(
     prov = _norm_province(province)
     stmt = (
         select(board_tasks)
-        .where(board_tasks.c.province == prov)
+        .where(board_tasks.c.province.in_(spellings(prov)))
         .order_by(board_tasks.c.status, board_tasks.c.order_index, board_tasks.c.created_at)
     )
     rows = await database.fetch_all(stmt)
@@ -286,15 +294,15 @@ async def update_task(
     values: dict[str, Any] = {}
     if body.title is not None:
         values["title"] = body.title
-    if body.description is not None:
+    if "description" in body.model_fields_set:
         values["description"] = body.description
     if body.status is not None:
         values["status"] = body.status
-    if body.priority is not None:
+    if "priority" in body.model_fields_set:
         values["priority"] = body.priority
     if body.assignee_ids is not None:
         values["assignee_ids"] = body.assignee_ids
-    if body.due_date is not None:
+    if "due_date" in body.model_fields_set:
         values["due_date"] = body.due_date
     if body.order_index is not None:
         values["order_index"] = body.order_index
@@ -356,7 +364,7 @@ async def list_members(
     prov = _norm_province(province)
     stmt = (
         select(board_members)
-        .where(board_members.c.province == prov)
+        .where(board_members.c.province.in_(spellings(prov)))
         .order_by(board_members.c.created_at)
     )
     rows = await database.fetch_all(stmt)
@@ -395,13 +403,13 @@ async def update_member(
     values: dict[str, Any] = {}
     if body.name is not None:
         values["name"] = body.name
-    if body.judge_id is not None:
+    if "judge_id" in body.model_fields_set:
         values["judge_id"] = body.judge_id
-    if body.role is not None:
+    if "role" in body.model_fields_set:
         values["role"] = body.role
-    if body.icon is not None:
+    if "icon" in body.model_fields_set:
         values["icon"] = body.icon
-    if body.color is not None:
+    if "color" in body.model_fields_set:
         values["color"] = body.color
     if not values:
         raise HTTPException(status_code=400, detail="Brak pól do aktualizacji")
@@ -427,6 +435,26 @@ async def delete_member(
     if existing is None:
         raise HTTPException(status_code=404, detail="Członek nie istnieje")
     await _check_board_write_access(existing._mapping["province"], payload)
+    # Usunięty członek nie może pozostać jako „duch” przypisany do wydarzeń
+    # i zadań. Kolumna zadań jest tablicą napisów, więc czyścimy ją jawnie.
+    province = existing._mapping["province"]
+    assigned_tasks = await database.fetch_all(
+        select(board_tasks.c.id, board_tasks.c.assignee_ids).where(board_tasks.c.province == province)
+    )
+    member_key = str(member_id)
+    for task in assigned_tasks:
+        assignees = list(task._mapping.get("assignee_ids") or [])
+        if member_key in assignees:
+            await database.execute(
+                update(board_tasks)
+                .where(board_tasks.c.id == task._mapping["id"])
+                .values(assignee_ids=[item for item in assignees if item != member_key])
+            )
+    await database.execute(
+        update(board_events)
+        .where(board_events.c.province == province, board_events.c.assignee_id == member_id)
+        .values(assignee_id=None)
+    )
     stmt = delete(board_members).where(board_members.c.id == member_id)
     await database.execute(stmt)
 
@@ -460,7 +488,7 @@ async def list_rankings(
     prov = _norm_province(province)
     stmt = (
         select(board_rankings)
-        .where(board_rankings.c.province == prov)
+        .where(board_rankings.c.province.in_(spellings(prov)))
         .order_by(board_rankings.c.created_at)
     )
     rows = await database.fetch_all(stmt)
@@ -564,7 +592,7 @@ async def list_events(
     prov = _norm_province(province)
     stmt = (
         select(board_events)
-        .where(board_events.c.province == prov)
+        .where(board_events.c.province.in_(spellings(prov)))
         .order_by(board_events.c.date, board_events.c.time_start)
     )
     rows = await database.fetch_all(stmt)
@@ -611,7 +639,7 @@ async def update_event(
     for field in ("title", "description", "date", "time_start", "time_end",
                   "location", "priority", "color", "assignee_id"):
         v = getattr(body, field)
-        if v is not None:
+        if field in body.model_fields_set:
             values[field] = v
     if not values:
         raise HTTPException(status_code=400, detail="Brak pól do aktualizacji")

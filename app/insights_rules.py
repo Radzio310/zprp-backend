@@ -214,6 +214,13 @@ _EVAL_DIFFICULTY: Tuple[Tuple[str, float], ...] = (
 )
 
 
+#: Początek powodu wziętego z arkusza delegata - po nim poznaje go `hide_evaluations`.
+DELEGATE_WHY_PREFIX = "delegat: "
+#: Ten sam powód dla kogoś, kto ocen delegatów nie widzi: składnik zostaje
+#: w trudności meczu, ale bez słów delegata.
+DELEGATE_WHY_HIDDEN = "z arkusza delegata"
+
+
 def evaluation_difficulty(evaluation: Mapping[str, Any]) -> Tuple[Optional[float], str]:
     """„Poziom trudności" z arkusza delegata (`character.difficulty.short`)."""
     character = evaluation.get("character") if isinstance(evaluation, Mapping) else None
@@ -222,7 +229,7 @@ def evaluation_difficulty(evaluation: Mapping[str, Any]) -> Tuple[Optional[float
     text = fold(short)
     for key, value in _EVAL_DIFFICULTY:
         if key in text:
-            return value, f"delegat: {short.lower()}"
+            return value, f"{DELEGATE_WHY_PREFIX}{short.lower()}"
     return None, ""
 
 
@@ -1079,6 +1086,72 @@ def judge_matches(
             }
         )
     out.sort(key=lambda item: -(item["ts"] or 0))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Oceny delegatów tylko dla uprawnionych
+# ---------------------------------------------------------------------------
+#
+# Decyzja użytkownika z 16.09.2026: w BAZA_web oceny delegatów widzą tylko admin
+# i konta VIP z uprawnieniem „Oceny delegatów”. Analizę widzi każdy z dostępem
+# do Obsady, więc arkusze nadal liczą się do trudności meczu, ale średnie ocen
+# i słowa delegata wycinamy z odpowiedzi. Pamięć podręczna analizy zostaje
+# nietknięta - funkcje oddają KOPIE tego, co zmieniają.
+
+
+def _hide_why(why: Any) -> Any:
+    if not isinstance(why, Mapping):
+        return why
+    out = dict(why)
+    manual = out.get("manual")
+    if isinstance(manual, list):
+        out["manual"] = [
+            DELEGATE_WHY_HIDDEN if isinstance(label, str) and label.startswith(DELEGATE_WHY_PREFIX) else label
+            for label in manual
+        ]
+    return out
+
+
+def hide_match_evaluations(items: Iterable[Mapping[str, Any]]) -> List[dict]:
+    """Mecze z `judge_matches` albo trasy dowodów - bez oceny i słów delegata."""
+    out = []
+    for item in items:
+        copy = dict(item)
+        if "grade" in copy:
+            copy["grade"] = None
+        if "why" in copy:
+            copy["why"] = _hide_why(copy["why"])
+        out.append(copy)
+    return out
+
+
+def hide_judge_evaluations(profile: Optional[Mapping[str, Any]]) -> Optional[dict]:
+    if profile is None:
+        return None
+    copy = dict(profile)
+    if isinstance(copy.get("mentoring"), Mapping):
+        copy["mentoring"] = {**copy["mentoring"], "grade": None}
+    return copy
+
+
+def hide_evaluations(analysis: Mapping[str, Any]) -> dict:
+    """Wynik `analyze` bez średnich ocen par, mentorów i sędziów."""
+    out = dict(analysis)
+    out["judges"] = [hide_judge_evaluations(item) for item in analysis.get("judges") or []]
+    conclusions = []
+    for conclusion in analysis.get("conclusions") or []:
+        copy = dict(conclusion)
+        affected = copy.get("affected")
+        if isinstance(affected, Mapping):
+            copy["affected"] = {
+                key: [{**row, "grade": None} if isinstance(row, Mapping) and "grade" in row else row for row in value]
+                if isinstance(value, list)
+                else value
+                for key, value in affected.items()
+            }
+        conclusions.append(copy)
+    out["conclusions"] = conclusions
     return out
 
 
