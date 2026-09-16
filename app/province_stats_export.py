@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -423,3 +423,36 @@ async def export_table_officials_pdf(payload: ReportExportRequest):
             "org_address": org["address"],
         },
     )
+
+
+@router.post("/zprp/statystyki/okreg/export/table-officials-pdf-link")
+async def export_table_officials_pdf_link(payload: ReportExportRequest, request: Request):
+    """Generuje PDF i zwraca adres dla systemowego pobierania na telefonie."""
+    from app.province_settlement_pdf import _org, _province_logo_b64
+
+    province = payload.meta.province
+    org = _org(province)
+    response = _render_pdf(
+        payload,
+        "stoliki_okregu",
+        "okreg_stoliki.html",
+        {"logo": _province_logo_b64(province), "org_name": org["name"], "org_address": org["address"]},
+    )
+    response.background = None
+    token = os.path.basename(str(response.path))
+    base_url = str(request.base_url).rstrip("/")
+    return {
+        "download_url": f"{base_url}/zprp/statystyki/okreg/export/table-officials-pdf-download/{token}",
+        "filename": f"{_safe_name(payload.filename or 'stoliki_okregu', 'stoliki_okregu')}.pdf",
+    }
+
+
+@router.get("/zprp/statystyki/okreg/export/table-officials-pdf-download/{token}")
+async def download_table_officials_pdf(token: str):
+    """Jednorazowe pobranie pliku wygenerowanego przez endpoint linkujący."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.pdf", token):
+        raise HTTPException(404, "Plik nie istnieje.")
+    path = os.path.join(DOWNLOAD_DIR, token)
+    if not os.path.isfile(path):
+        raise HTTPException(404, "Plik wygasł albo został już pobrany.")
+    return FileResponse(path, media_type="application/pdf", filename=token)
