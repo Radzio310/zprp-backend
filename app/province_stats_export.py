@@ -90,7 +90,7 @@ class ReportExportRequest(BaseModel):
 # ---------------------------------------------------------------- formatowanie
 
 
-def _fmt(value: Any, fmt: str) -> str:
+def _fmt(value: Any, fmt: str = "text") -> str:
     """Liczba w postaci, w jakiej widzi ja uzytkownik na ekranie."""
     if value is None or value == "":
         return ""
