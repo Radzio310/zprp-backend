@@ -345,6 +345,17 @@ def _render_pdf(
         autoescape=select_autoescape(["html"]),
     )
     env.filters["cell"] = _fmt
+    def _safe_hex(value: Any) -> str:
+        candidate = str(value or "")
+        return candidate if re.fullmatch(r"#[0-9A-Fa-f]{6}", candidate) else "#0B4F9E"
+
+    def _hex_rgba(value: Any, alpha: float = 0.12) -> str:
+        color = _safe_hex(value).lstrip("#")
+        opacity = max(0.0, min(1.0, float(alpha)))
+        return f"rgba({int(color[0:2], 16)}, {int(color[2:4], 16)}, {int(color[4:6], 16)}, {opacity})"
+
+    env.filters["hexcolor"] = _safe_hex
+    env.filters["hexrgba"] = _hex_rgba
     template = env.get_template(template_name)
 
     context = dict(extra_context or {})

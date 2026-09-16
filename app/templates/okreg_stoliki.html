@@ -1,18 +1,76 @@
-<!DOCTYPE html>
-<html lang="pl"><head><meta charset="utf-8" />
-<style>
-@page{size:A4 landscape;margin:11mm 11mm 13mm;@bottom-right{content:"str. " counter(page) " z " counter(pages);font:7.5pt "DejaVu Sans";color:#8a93a6}}
-*{box-sizing:border-box}body{font-family:"DejaVu Sans",sans-serif;font-size:7.7pt;color:#1d2433;margin:0;line-height:1.25}
-.head{width:100%;border-collapse:collapse;margin-bottom:2mm}.head td{vertical-align:middle;padding:0}.logo{width:26mm}.logo img{width:24mm;max-height:22mm;object-fit:contain}.org{font-size:12pt;font-weight:700;color:#0b4f9e}.addr{font-size:7.5pt;color:#657087;margin-top:.7mm}.doc{text-align:right}.eyebrow{font-size:7pt;letter-spacing:1.5pt;color:#8a93a6;font-weight:700}.doc-title{font-size:16pt;font-weight:800;color:#0b4f9e;margin-top:.5mm}.period{font-size:8pt;color:#3d4658;margin-top:.6mm}
-.rule{height:1.6mm;background:#0b4f9e;margin:2mm 0 3mm}.gold{width:38mm;height:100%;background:#f0a500}.title{font-size:14pt;font-weight:800;color:#16233c}.sub{color:#667187;margin:1mm 0 2.5mm}.summary{display:flex;gap:2mm;margin-bottom:3mm}.pill{border:.35pt solid #d7dce6;background:#f4f7fc;padding:1.7mm 3mm;min-width:31mm}.pill b{font-size:11pt;color:#0b4f9e}.pill span{display:block;font-size:6.4pt;color:#7b8497;text-transform:uppercase;letter-spacing:.6pt}
-table.grid{width:100%;border-collapse:collapse;table-layout:fixed}thead{display:table-header-group}tr{page-break-inside:avoid}th{background:#0b4f9e;color:#fff;padding:2mm 1.2mm;font-size:6.7pt;text-align:left;border:.3pt solid #0b4f9e}td{padding:1.55mm 1.2mm;border:.3pt solid #d7dce6;vertical-align:middle;overflow-wrap:anywhere}tbody tr:nth-child(even) td{background:#f4f7fc}.c{text-align:center}.muted{color:#788298}.team{font-weight:700;color:#16233c}.person{font-weight:650}.missing{color:#b33b46;font-weight:700}.code{display:inline-block;border-radius:2mm;padding:1.1mm 1.6mm;font-weight:800;background:#e9edf4;color:#40506c;white-space:nowrap}.central{background:#e8f1ff;color:#0b4f9e}.cup{background:#fff0cf;color:#8a5900}.top{background:#e8f8ef;color:#147544}.district{background:#f1eafb;color:#67439c}.date{font-weight:700}.time{color:#0b4f9e;font-weight:800}.filters{margin-top:3mm;padding:2mm 3mm;border-left:1.5mm solid #f0a500;background:#fffaf0;color:#5e687c;font-size:7pt}.foot{margin-top:2mm;color:#8a93a6;font-size:6.7pt}
-</style></head><body>
-<table class="head"><tr>{% if logo %}<td class="logo"><img src="data:image/png;base64,{{logo}}" /></td>{% endif %}<td><div class="org">{{org_name}}</div>{% if org_address %}<div class="addr">{{org_address}}</div>{% endif %}</td><td class="doc"><div class="eyebrow">OBSADY STOLIKOWE</div><div class="doc-title">STOLIKI OKRĘGOWE</div><div class="period">{{meta.season}} · wystawiono {{generated_at}}</div></td></tr></table>
-<div class="rule"><div class="gold"></div></div>
-<div class="title">{{meta.title or "Zestawienie obsad stolikowych"}}</div><div class="sub">{{meta.subtitle or "Sekretarze i mierzący czas na meczach klubów okręgu"}}</div>
-{% set section=sections[0] %}<div class="summary">{% for tile in section.tiles %}<div class="pill"><b>{{tile.value}}</b><span>{{tile.label}}</span></div>{% endfor %}</div>
-<table class="grid"><colgroup><col style="width:5%"><col style="width:7%"><col style="width:7%"><col style="width:8%"><col style="width:15%"><col style="width:15%"><col style="width:20%"><col style="width:11.5%"><col style="width:11.5%"></colgroup><thead><tr>{% for col in section.columns %}<th class="{{'c' if col.key in ['lp','date','time','code'] else ''}}">{{col.label}}</th>{% endfor %}</tr></thead><tbody>
-{% for row in section.rows %}{% set prefix=(row.code or '').split('/')[0] %}<tr><td class="c muted">{{row.lp}}</td><td class="c date">{{row.date}}</td><td class="c time">{{row.time}}</td><td class="c"><span class="code {{row.tier or 'central'}}">{{row.code}}</span></td><td class="team">{{row.home}}</td><td class="team">{{row.away}}</td><td>{{row.hall}}</td><td class="person {{'missing' if not row.secretary or row.secretary=='—'}}">{{row.secretary or '—'}}</td><td class="person {{'missing' if not row.timer or row.timer=='—'}}">{{row.timer or '—'}}</td></tr>{% endfor %}
-</tbody></table>
-{% if meta.filters %}<div class="filters"><b>Aktywne filtry:</b> {{meta.filters|join(' · ')}}</div>{% endif %}<div class="foot">Dane: rozgrywki.zprp.pl i baza.zprp.pl · dokument zawiera dokładnie pozycje widoczne po zastosowaniu filtrów.</div>
-</body></html>
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page {
+      size: A4 landscape;
+      margin: 12mm 10mm 15mm;
+      @bottom-center {
+        content: "Dokument został automatycznie wygenerowany przez BAZA_Web · {{ generated_at }}";
+        color: #71809d; font: 7.5pt Arial, sans-serif;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #101b38; font-family: Arial, sans-serif; font-size: 8.4pt; }
+    .brand { display: flex; align-items: stretch; min-height: 25mm; border: 1px solid #d9dfeb; background: #fff; }
+    .brand-logo { width: 27mm; display: flex; align-items: center; justify-content: center; border-right: 1px solid #d9dfeb; padding: 3mm; }
+    .brand-logo img { max-width: 19mm; max-height: 19mm; }
+    .brand-name { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 3mm 5mm; }
+    .brand-name strong { color: #2e55a2; font-size: 15pt; line-height: 1.15; }
+    .brand-name span { margin-top: 1mm; color: #74809a; font-size: 8.2pt; }
+    .brand-title { width: 75mm; display: flex; flex-direction: column; align-items: flex-end; justify-content: center; padding: 3mm 0 3mm 5mm; text-align: right; }
+    .eyebrow { color: #8690aa; font-size: 7pt; font-weight: 800; letter-spacing: 2.2px; }
+    .brand-title h1 { margin: 1.2mm 0 .5mm; color: #2e55a2; font-size: 19pt; line-height: 1; }
+    .brand-title span { color: #34405b; font-size: 8.2pt; }
+    .rule { display: flex; height: 2.2mm; margin-top: 2.2mm; background: #2e55a2; }
+    .rule:before { content: ""; width: 14%; background: #e6b43e; }
+    .report-head { display: flex; align-items: center; justify-content: space-between; gap: 8mm; margin: 4mm 0 3mm; }
+    .report-head h2 { margin: 0; font-size: 17pt; letter-spacing: -.2px; }
+    .count { min-width: 35mm; padding: 2.5mm 5mm; border: 1px solid #d8dfed; border-radius: 3mm; background: #f4f7fc; text-align: right; }
+    .count strong { color: #2e55a2; font-size: 15pt; }
+    .count span { display: block; margin-top: .4mm; color: #7b86a0; font-size: 6.5pt; font-weight: 800; letter-spacing: 1.2px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    thead { display: table-header-group; }
+    th { padding: 2.5mm 1.6mm; color: white; background: #31579f; font-size: 7.4pt; text-align: left; }
+    th:first-child { border-radius: 2mm 0 0 0; text-align: center; }
+    th:last-child { border-radius: 0 2mm 0 0; }
+    td { padding: 2.15mm 1.6mm; border: 1px solid #d9dfeb; line-height: 1.18; vertical-align: middle; overflow-wrap: anywhere; }
+    tbody tr:nth-child(even) td { background: #f4f7fc; }
+    .center { text-align: center; }
+    .strong { font-weight: 700; }
+    .time { color: #2452a0; font-weight: 800; }
+    .badge { display: inline-block; padding: 1.25mm 2.4mm; border: 1px solid; border-radius: 2.5mm; font-weight: 800; white-space: nowrap; }
+    .empty { padding: 14mm; border: 1px solid #d9dfeb; color: #7b86a0; text-align: center; }
+  </style>
+</head>
+<body>
+  <header class="brand">
+    <div class="brand-logo">{% if logo %}<img src="{{ logo }}" alt="">{% endif %}</div>
+    <div class="brand-name"><strong>{{ org_name }}</strong><span>{{ org_address }}</span></div>
+    <div class="brand-title"><div class="eyebrow">OBSADY STOLIKOWE</div><h1>STOLIKI OKRĘGOWE</h1><span>{{ meta.season }} · wystawiono {{ generated_at }}</span></div>
+  </header>
+  <div class="rule"></div>
+  {% for section in sections %}
+    <div class="report-head">
+      <h2>Zestawienie obsad stolikowych</h2>
+      <div class="count"><strong>{{ section.rows|length }}</strong><span>STOLIKÓW</span></div>
+    </div>
+    {% if section.rows %}
+    <table>
+      <colgroup><col style="width:5%"><col style="width:7%"><col style="width:7%"><col style="width:8%"><col style="width:15%"><col style="width:15%"><col style="width:20%"><col style="width:11.5%"><col style="width:11.5%"></colgroup>
+      <thead><tr><th>L.p.</th><th>Data</th><th>Godzina</th><th>Zawody</th><th>Gospodarz</th><th>Gość</th><th>Hala</th><th>Sekretarz</th><th>Mierzący czas</th></tr></thead>
+      <tbody>
+      {% for row in section.rows %}
+        <tr>
+          <td class="center">{{ row.lp|cell }}</td><td class="center strong">{{ row.date|cell }}</td><td class="center time">{{ row.time|cell }}</td>
+          <td class="center"><span class="badge" style="color:{{ row.accent|hexcolor }};border-color:{{ row.accent|hexcolor }};background:{{ row.accent|hexrgba(0.13) }}">{{ row.code|cell }}</span></td>
+          <td class="strong">{{ row.home|cell }}</td><td class="strong">{{ row.away|cell }}</td><td>{{ row.hall|cell }}</td><td>{{ row.secretary|cell }}</td><td>{{ row.timer|cell }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">Brak stolików dla wybranego zakresu.</div>{% endif %}
+  {% endfor %}
+</body>
+</html>
