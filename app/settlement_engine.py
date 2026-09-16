@@ -452,6 +452,17 @@ def _sort_name(value: str) -> tuple:
     return (0, _collate(surname), _collate(given))
 
 
+def display_judge_name(value: str) -> str:
+    """Jednolity zapis na ekranie i dokumentach: ``NAZWISKO Imię``."""
+    parts = split_judge_name(value)
+    if parts is None:
+        return str(value or "").strip()
+    surname, given = parts
+    surname = surname.upper()
+    given = " ".join(part[:1].upper() + part[1:].lower() for part in given.split())
+    return f"{surname} {given}".strip()
+
+
 def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int | float]:
     entries = list(entries)
     return {

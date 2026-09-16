@@ -5,7 +5,7 @@ ZPRP podaje nazwiska jako „Imie NAZWISKO" - sortowanie calego napisu ukladalo
 liste po imieniu, a zamiana na ASCII gubila „Ł".
 """
 
-from app.settlement_engine import _sort_name, split_judge_name
+from app.settlement_engine import _sort_name, display_judge_name, split_judge_name
 
 
 def test_first_name_then_surname():
@@ -22,6 +22,13 @@ def test_already_reversed_and_plain_case():
     assert split_judge_name("KOWALSKI Jan") == ("KOWALSKI", "Jan")
     assert split_judge_name("Jan Kowalski") == ("Kowalski", "Jan")
     assert split_judge_name("KOWALSKI") == ("KOWALSKI", "")
+
+
+def test_display_name_normalizes_order_and_case():
+    assert display_judge_name("Jan KOWALSKI") == "KOWALSKI Jan"
+    assert display_judge_name("KOWALSKI Jan") == "KOWALSKI Jan"
+    assert display_judge_name("marcin zubek") == "ZUBEK Marcin"
+    assert display_judge_name("anna maria kowalska-nowak") == "KOWALSKA-NOWAK Anna Maria"
 
 
 def test_without_a_name():

@@ -331,7 +331,7 @@ def _zprp_summary(matches: list[E.ZprpMatch], *, included: bool) -> dict:
 def _entry_json(entry: E.JudgeSettlement, *, with_matches: bool) -> dict:
     payload = {
         "judge_id": entry.judge_id,
-        "name": entry.judge_name,
+        "name": E.display_judge_name(entry.judge_name),
         "matches": entry.match_count,
         "future": entry.future_count,
         "gross": entry.gross,
@@ -353,7 +353,7 @@ def _entry_json(entry: E.JudgeSettlement, *, with_matches: bool) -> dict:
 def _travel_json(row: E.TravelRow) -> dict:
     return {
         "judge_id": row.judge_id,
-        "name": row.judge_name,
+        "name": E.display_judge_name(row.judge_name),
         "day": row.day.isoformat() if row.day else None,
         "route": row.route,
         "one_way_km": row.one_way_km,

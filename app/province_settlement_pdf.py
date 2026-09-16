@@ -36,6 +36,7 @@ from app.province_settlements import (
     require_province,
 )
 from app.settlement_province import display
+from app.settlement_engine import display_judge_name
 from app.settlement_words import amount_in_words, money, number
 
 logger = logging.getLogger(__name__)
@@ -262,7 +263,7 @@ async def zestawienie_pdf(payload: PdfRequest):
             "rows": [
                 {
                     "judge_id": e.judge_id,
-                    "name": e.judge_name,
+                    "name": display_judge_name(e.judge_name),
                     "matches": e.match_count,
                     "future": e.future_count if payload.include_future else 0,
                     "gross": e.gross,
@@ -305,7 +306,7 @@ async def przejazdy_pdf(payload: PdfRequest):
         rows.append(
             {
                 "judge_id": item.judge_id,
-                "name": item.judge_name,
+                "name": display_judge_name(item.judge_name),
                 "day_label": item.day.strftime("%d.%m.%Y") if item.day else "-",
                 "route": item.route,
                 "one_way_km": item.one_way_km,
