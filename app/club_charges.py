@@ -88,7 +88,7 @@ class RefereeShare:
     name: str
     role: str
     gross: int
-    travel: int
+    travel: float
     triple: bool = False
 
 
@@ -107,8 +107,8 @@ class ChargeRow:
     team_name: str = ""
     club_id: str = ""
     gross: int = 0
-    travel: int = 0
-    amount: int = 0
+    travel: float = 0
+    amount: float = 0
     status: str = CHARGED
     moved: bool = False
     triple: bool = False
@@ -310,7 +310,7 @@ def build_charges(
             row.teams = teams
             row.guest_name = guest_from_teams(teams, row.host_name)
         row.gross += int(item.gross or 0)
-        row.travel += int(item.travel or 0)
+        row.travel = round(row.travel + float(item.travel or 0), 2)
         row.triple = row.triple or bool(getattr(item, "triple_table", False))
         row.referees.append(
             RefereeShare(
@@ -318,14 +318,14 @@ def build_charges(
                 name=judge_names.get(item.judge_id, ""),
                 role=item.role,
                 gross=int(item.gross or 0),
-                travel=int(item.travel or 0),
+                travel=float(item.travel or 0),
                 triple=bool(getattr(item, "triple_table", False)),
             )
         )
 
     out: list[ChargeRow] = []
     for row in grouped.values():
-        row.amount = row.gross + row.travel
+        row.amount = round(row.gross + row.travel, 2)
         row.referees.sort(key=lambda share: (share.role, share.name, share.judge_id))
         override = overrides.get(row.match_key) or MatchOverride()
 
@@ -366,28 +366,28 @@ def build_charges(
     return out
 
 
-def club_totals(rows: Iterable[ChargeRow]) -> dict[str, dict[str, int]]:
+def club_totals(rows: Iterable[ChargeRow]) -> dict[str, dict[str, int | float]]:
     """Suma obciazen na klub - liczymy TYLKO wiersze ze statusem `charged`."""
-    totals: dict[str, dict[str, int]] = {}
+    totals: dict[str, dict[str, int | float]] = {}
     for row in rows:
         if row.status != CHARGED or not row.club_id:
             continue
         entry = totals.setdefault(row.club_id, {"charged": 0, "matches": 0, "gross": 0, "travel": 0})
-        entry["charged"] += row.amount
+        entry["charged"] = round(entry["charged"] + row.amount, 2)
         entry["gross"] += row.gross
-        entry["travel"] += row.travel
+        entry["travel"] = round(entry["travel"] + row.travel, 2)
         entry["matches"] += 1
     return totals
 
 
-def team_totals(rows: Iterable[ChargeRow]) -> dict[str, dict[str, int]]:
+def team_totals(rows: Iterable[ChargeRow]) -> dict[str, dict[str, int | float]]:
     """To samo w rozbiciu na druzyny - do rozliczenia klubu z kilkoma zespolami."""
-    totals: dict[str, dict[str, int]] = {}
+    totals: dict[str, dict[str, int | float]] = {}
     for row in rows:
         if row.status != CHARGED or not row.team_id:
             continue
         entry = totals.setdefault(row.team_id, {"charged": 0, "matches": 0})
-        entry["charged"] += row.amount
+        entry["charged"] = round(entry["charged"] + row.amount, 2)
         entry["matches"] += 1
     return totals
 

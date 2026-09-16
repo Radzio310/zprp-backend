@@ -17,6 +17,7 @@ MODUL-LISC: bez bazy i bez sieci, zeby caly rachunek dalo sie sprawdzic testem.
 from __future__ import annotations
 
 import re
+from decimal import Decimal, ROUND_HALF_UP
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Iterable, Optional
@@ -686,9 +687,10 @@ def _province_km_rate(content: Any, province: str) -> Optional[float]:
     return None
 
 
-def travel_pln(distance_km: float, rate: float) -> int:
-    """Dojazd ZAWSZE w obie strony - tak liczy cala aplikacja."""
-    return round(distance_km * rate * ROUND_TRIP)
+def travel_pln(distance_km: float, rate: float) -> float:
+    """Dojazd w obie strony, rozliczony do grosza (bez obcinania do pelnych zl)."""
+    amount = Decimal(str(distance_km)) * Decimal(str(rate)) * ROUND_TRIP
+    return float(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 # -------------------------

@@ -113,6 +113,18 @@ def test_klub_placi_brutto_i_przejazdy_calej_obsady():
     assert team_totals(rows)["17583"]["charged"] == 234
 
 
+def test_obciazenie_klubu_zachowuje_grosze_przejazdu():
+    rows = charges(
+        [crew("d:99", "5124", E.R.ROLE_FIELD, 132, 28.35)],
+        hosts={"d:99": SOSNICA.name},
+    )
+    [row] = rows
+    assert row.travel == 28.35
+    assert row.amount == 160.35
+    assert row.referees[0].travel == 28.35
+    assert club_totals(rows)["4893"]["charged"] == 160.35
+
+
 def test_nieznana_nazwa_gospodarza_nie_znika():
     rows = charges([crew("d:2", "5124", E.R.ROLE_FIELD, 132, 28)], hosts={"d:2": "Jakiś Klub"})
     assert rows[0].status == UNASSIGNED

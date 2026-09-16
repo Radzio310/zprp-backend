@@ -610,7 +610,7 @@ async def travel(
         "province": key,
         "period": data["period"],
         "rows": rows,
-        "total": sum(r["amount"] for r in rows),
+        "total": round(sum(r["amount"] for r in rows), 2),
         "total_km": sum(r["total_km"] for r in rows),
     }
 

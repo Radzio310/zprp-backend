@@ -317,7 +317,7 @@ async def przejazdy_pdf(payload: PdfRequest):
         )
         previous = item.judge_id
 
-    total_amount = sum(r["amount"] for r in rows)
+    total_amount = round(sum(r["amount"] for r in rows), 2)
     total_km = sum(r["total_km"] for r in rows)
     judges_count = len({r["judge_id"] for r in rows})
 

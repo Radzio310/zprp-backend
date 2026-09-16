@@ -77,7 +77,7 @@ class SettledMatch:
     distance_source: Optional[str]
     km_rate: float
     gross: int
-    travel: int
+    travel: float
     travel_shared: bool
     future: bool
     approved: Optional[bool]
@@ -112,8 +112,8 @@ class JudgeSettlement:
     taxable: int = 0
     tax: int = 0
     net: int = 0
-    travel: int = 0
-    total: int = 0
+    travel: float = 0
+    total: float = 0
 
     match_count: int = 0
     future_count: int = 0
@@ -393,8 +393,8 @@ def settle_judges(
         entry.taxable = parts["taxable"]
         entry.tax = parts["tax"]
         entry.net = parts["net"]
-        entry.travel = sum(m.travel for m in entry.matches)
-        entry.total = entry.net + entry.travel
+        entry.travel = round(sum(m.travel for m in entry.matches), 2)
+        entry.total = round(entry.net + entry.travel, 2)
 
     return sorted(by_judge.values(), key=lambda e: (_sort_name(e.judge_name), e.judge_id))
 
@@ -452,7 +452,7 @@ def _sort_name(value: str) -> tuple:
     return (0, _collate(surname), _collate(given))
 
 
-def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int]:
+def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int | float]:
     entries = list(entries)
     return {
         "judges": len(entries),
@@ -463,8 +463,8 @@ def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int]:
         "taxable": sum(e.taxable for e in entries),
         "tax": sum(e.tax for e in entries),
         "net": sum(e.net for e in entries),
-        "travel": sum(e.travel for e in entries),
-        "total": sum(e.total for e in entries),
+        "travel": round(sum(e.travel for e in entries), 2),
+        "total": round(sum(e.total for e in entries), 2),
     }
 
 
@@ -608,7 +608,7 @@ class TravelRow:
     one_way_km: float
     total_km: float
     rate: float
-    amount: int
+    amount: float
 
 
 def travel_rows(entries: Iterable[JudgeSettlement]) -> list[TravelRow]:

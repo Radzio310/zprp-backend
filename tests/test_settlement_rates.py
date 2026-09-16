@@ -220,7 +220,7 @@ def test_kilometrowka_okregowa_bierze_sie_z_tabeli_wojewodztwa():
 
 
 def test_dojazd_zawsze_w_obie_strony():
-    assert R.travel_pln(93, 0.8) == 149  # 93 km -> 186 km -> 148,80 -> 149
+    assert R.travel_pln(93, 0.8) == 148.80  # 93 km -> 186 km -> 148,80 zl
     assert R.travel_pln(0, 0.8) == 0
 
 
