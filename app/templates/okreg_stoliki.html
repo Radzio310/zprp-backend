@@ -12,19 +12,19 @@
       }
     }
     * { box-sizing: border-box; }
-    body { margin: 0; color: #101b38; font-family: Arial, sans-serif; font-size: 8.4pt; }
-    .brand { display: flex; align-items: stretch; min-height: 25mm; border: 1px solid #d9dfeb; background: #fff; }
-    .brand-logo { width: 27mm; display: flex; align-items: center; justify-content: center; border-right: 1px solid #d9dfeb; padding: 3mm; }
-    .brand-logo img { max-width: 19mm; max-height: 19mm; }
-    .brand-name { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 3mm 5mm; }
-    .brand-name strong { color: #2e55a2; font-size: 15pt; line-height: 1.15; }
-    .brand-name span { margin-top: 1mm; color: #74809a; font-size: 8.2pt; }
-    .brand-title { width: 75mm; display: flex; flex-direction: column; align-items: flex-end; justify-content: center; padding: 3mm 0 3mm 5mm; text-align: right; }
-    .eyebrow { color: #8690aa; font-size: 7pt; font-weight: 800; letter-spacing: 2.2px; }
-    .brand-title h1 { margin: 1.2mm 0 .5mm; color: #2e55a2; font-size: 19pt; line-height: 1; }
-    .brand-title span { color: #34405b; font-size: 8.2pt; }
-    .rule { display: flex; height: 2.2mm; margin-top: 2.2mm; background: #2e55a2; }
-    .rule:before { content: ""; width: 14%; background: #e6b43e; }
+    body { margin: 0; color: #1d2433; font-family: "DejaVu Sans", sans-serif; font-size: 8.4pt; line-height: 1.35; }
+    .head { width: 100%; border-collapse: collapse; margin-bottom: 3mm; table-layout: auto; }
+    .head td { border: 0; background: transparent !important; vertical-align: middle; padding: 0; }
+    .head .logo { width: 26mm; }
+    .head .logo img { display: block; width: 24mm; height: 24mm; object-fit: contain; }
+    .org-name { color: #0B4F9E; font-size: 12pt; font-weight: bold; letter-spacing: .2pt; }
+    .org-addr { color: #5a6478; font-size: 8pt; margin-top: .8mm; }
+    .doc-box { text-align: right; }
+    .doc-kind { color: #8a93a6; font-size: 7.5pt; font-weight: bold; letter-spacing: 1.6pt; text-transform: uppercase; }
+    .doc-number { color: #0B4F9E; font-size: 17pt; font-weight: bold; letter-spacing: .3pt; margin-top: .5mm; }
+    .doc-period { color: #3d4658; font-size: 8.5pt; margin-top: .8mm; }
+    .rule { height: 1.6mm; margin: 2mm 0 3.5mm; background: #0B4F9E; }
+    .rule-gold { float: left; width: 38mm; height: 1.6mm; background: #F0A500; }
     .report-head { display: flex; align-items: center; justify-content: space-between; gap: 8mm; margin: 4mm 0 3mm; }
     .report-head h2 { margin: 0; font-size: 17pt; letter-spacing: -.2px; }
     .count { min-width: 35mm; padding: 2.5mm 5mm; border: 1px solid #d8dfed; border-radius: 3mm; background: #f4f7fc; text-align: right; }
@@ -45,12 +45,21 @@
   </style>
 </head>
 <body>
-  <header class="brand">
-    <div class="brand-logo">{% if logo %}<img src="{{ logo }}" alt="">{% endif %}</div>
-    <div class="brand-name"><strong>{{ org_name }}</strong><span>{{ org_address }}</span></div>
-    <div class="brand-title"><div class="eyebrow">OBSADY STOLIKOWE</div><h1>STOLIKI OKRĘGOWE</h1><span>{{ meta.season }} · wystawiono {{ generated_at }}</span></div>
-  </header>
-  <div class="rule"></div>
+  <table class="head">
+    <tr>
+      {% if logo %}<td class="logo"><img src="data:image/png;base64,{{ logo }}" alt=""></td>{% endif %}
+      <td>
+        <div class="org-name">{{ org_name }}</div>
+        {% if org_address %}<div class="org-addr">{{ org_address }}</div>{% endif %}
+      </td>
+      <td class="doc-box">
+        <div class="doc-kind">Obsady stolikowe</div>
+        <div class="doc-number">STOLIKI OKRĘGOWE</div>
+        <div class="doc-period">{{ meta.season }} · wystawiono {{ generated_at }}</div>
+      </td>
+    </tr>
+  </table>
+  <div class="rule"><div class="rule-gold"></div></div>
   {% for section in sections %}
     <div class="report-head">
       <h2>Zestawienie obsad stolikowych</h2>
