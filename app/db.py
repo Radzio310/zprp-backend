@@ -3075,6 +3075,8 @@ board_posts = Table(
     Column("order_index", Integer, nullable=False, server_default=text("0")),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    # Kosz tablicy (16.09.2026): usunięte wracają przez 30 dni.
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
 )
 
 # board_tasks: zadania w stylu Kanban per prowincja
@@ -3095,6 +3097,10 @@ board_tasks = Table(
     Column("checklist", JSONB, nullable=False, server_default=text("'[]'")),  # [{id, text, done}]
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("created_by", String, nullable=True),       # klucz autora z tokenu (judge:123 / org:login)
+    Column("created_by_name", String, nullable=True),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
 )
 
 # board_members: członkowie komisji okręgowej per prowincja
@@ -3109,6 +3115,13 @@ board_members = Table(
     Column("icon", String, nullable=True),         # nazwa Ionicons
     Column("color", String, nullable=True),        # kolor hex
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    # Skład z odznaki „Komisja Sędziowska” (16.09.2026): `badge` dopisuje serwer,
+    # `manual` dopisał człowiek. Wiersz z odznaki bez odznaki = były członek.
+    Column("description", Text, nullable=True),
+    Column("source", String, nullable=False, server_default=text("'manual'")),
+    Column("active", Boolean, nullable=False, server_default=text("true")),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
 )
 
 # board_rankings: rankingi/tablice wyników per prowincja
@@ -3142,6 +3155,75 @@ board_events = Table(
     Column("assignee_id", Integer, nullable=True), # board_member id
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("created_by", String, nullable=True),
+    Column("created_by_name", String, nullable=True),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
+)
+
+# board_comments: komentarze pod wpisami i zadaniami tablicy
+board_comments = Table(
+    "board_comments",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("target_type", String, nullable=False),   # post | task
+    Column("target_id", Integer, nullable=False),
+    Column("author_key", String, nullable=False),     # judge:123 / org:login - z tokenu
+    Column("author_name", String, nullable=False),
+    Column("author_judge_id", String, nullable=True),
+    Column("body", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
+    Index("ix_board_comments_target", "target_type", "target_id"),
+)
+
+# board_attachments: PDF i zdjęcia przy wpisach, zadaniach i komentarzach.
+# Plik leży w bazie i wychodzi tylko trasą, która sprawdza dostęp komisji -
+# publiczny adres jak w zgłoszeniach wystawiłby dokumenty komisji każdemu.
+board_attachments = Table(
+    "board_attachments",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("target_type", String, nullable=False),   # post | task | comment
+    Column("target_id", Integer, nullable=False),
+    Column("name", String, nullable=False),
+    Column("mime", String, nullable=False),
+    Column("size", Integer, nullable=False),
+    Column("data", LargeBinary, nullable=False),
+    Column("uploaded_by", String, nullable=True),
+    Column("uploaded_by_name", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
+    Index("ix_board_attachments_target", "target_type", "target_id"),
+)
+
+# board_activity: oś zdarzeń komisji (kto co dodał, przesunął, skomentował).
+# Najwyższe `id` okręgu jest też wersją tablicy dla odświeżania na żywo.
+board_activity = Table(
+    "board_activity",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False),
+    Column("actor_key", String, nullable=True),
+    Column("actor_name", String, nullable=True),
+    Column("action", String, nullable=False),        # created | updated | moved | deleted | restored | commented | attached
+    Column("target_type", String, nullable=False),   # post | task | event | member | comment | attachment
+    Column("target_id", Integer, nullable=True),
+    Column("title", String, nullable=True),
+    Column("details_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Index("ix_board_activity_province_id", "province", "id"),
+)
+
+# board_visits: ostatnia wizyta na tablicy - z niej „nowe od ostatniej wizyty”.
+board_visits = Table(
+    "board_visits",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("user_key", String, primary_key=True),
+    Column("seen_at", DateTime(timezone=True), nullable=False),
 )
 
 # ─────────────────── BEACH: Reports (system zgłoszeń) ───────────────────
@@ -3862,6 +3944,24 @@ with engine.connect() as _conn:
         )
     )
     _conn.execute(text("ALTER TABLE mentoring_pairs ADD COLUMN IF NOT EXISTS baseline_at timestamptz"))
+    # Tablica Komisji (16.09.2026): kosz, autorstwo i skład z odznaki. Tabele
+    # istnieją na produkcji, więc `create_all` tych kolumn nie dołoży.
+    for _board_sql in (
+        "ALTER TABLE board_posts ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
+        "ALTER TABLE board_tasks ADD COLUMN IF NOT EXISTS created_by varchar",
+        "ALTER TABLE board_tasks ADD COLUMN IF NOT EXISTS created_by_name varchar",
+        "ALTER TABLE board_tasks ADD COLUMN IF NOT EXISTS completed_at timestamptz",
+        "ALTER TABLE board_tasks ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
+        "ALTER TABLE board_members ADD COLUMN IF NOT EXISTS description text",
+        "ALTER TABLE board_members ADD COLUMN IF NOT EXISTS source varchar NOT NULL DEFAULT 'manual'",
+        "ALTER TABLE board_members ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true",
+        "ALTER TABLE board_members ADD COLUMN IF NOT EXISTS updated_at timestamptz",
+        "ALTER TABLE board_members ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
+        "ALTER TABLE board_events ADD COLUMN IF NOT EXISTS created_by varchar",
+        "ALTER TABLE board_events ADD COLUMN IF NOT EXISTS created_by_name varchar",
+        "ALTER TABLE board_events ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
+    ):
+        _conn.execute(text(_board_sql))
     _conn.execute(text("ALTER TABLE mentoring_active_members ADD COLUMN IF NOT EXISTS seen_at timestamptz"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mentoring_mentor ON mentoring_assignments (mentor_id, ended_at)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_user_id ON beach_reports (user_id)"))

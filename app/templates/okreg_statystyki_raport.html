@@ -7,8 +7,8 @@
   /* Raport idzie na papier i do archiwum, wiec swiadomie jasny - ciemny motyw
      ekranu wydrukowalby sie jako plama tonera i byl nieczytelny w kopii. */
   @page {
-    size: A4;
-    margin: 16mm 14mm 18mm 14mm;
+    size: A4 landscape;
+    margin: 12mm 12mm 16mm 12mm;
     @bottom-center {
       content: "Strona " counter(page) " z " counter(pages);
       font-family: "DejaVu Sans", Arial, sans-serif;
@@ -21,8 +21,9 @@
     --ink: #14161a;
     --muted: #6b7280;
     --line: #dfe3e8;
-    --accent: #1f6f52;
-    --band: #f4f6f8;
+    --accent: #0B4F9E;
+    --gold: #F0A500;
+    --band: #f4f7fc;
   }
 
   * { box-sizing: border-box; }
@@ -35,18 +36,22 @@
   }
 
   header.doc {
-    border-bottom: 2.5pt solid var(--accent);
+    border-bottom: 4pt solid var(--accent);
     padding-bottom: 8pt;
     margin-bottom: 12pt;
   }
+  .brand { display:flex;align-items:center;gap:10pt;margin-bottom:8pt; }
+  .brand img { width:42pt;height:42pt;object-fit:contain; }
+  .org-name { color:var(--accent);font-size:11.5pt;font-weight:800; }
+  .org-address { color:var(--muted);font-size:7.5pt;margin-top:2pt; }
   .eyebrow {
     font-size: 7.5pt;
     letter-spacing: 1.1pt;
     text-transform: uppercase;
-    color: var(--accent);
+    color: var(--gold);
     font-weight: 700;
   }
-  h1 { font-size: 17pt; margin: 3pt 0 2pt; }
+  h1 { font-size: 18pt; color:#16233c; margin: 3pt 0 2pt; }
   .sub { font-size: 9.5pt; color: var(--muted); }
 
   .meta-grid {
@@ -63,7 +68,7 @@
     margin-top: 8pt;
     padding: 6pt 8pt;
     background: var(--band);
-    border-left: 2.5pt solid var(--accent);
+    border-left: 4pt solid var(--gold);
     font-size: 8pt;
   }
   .filters .lbl {
@@ -84,7 +89,7 @@
     font-size: 11pt;
     margin: 0 0 1pt;
     padding-bottom: 3pt;
-    border-bottom: 1pt solid var(--line);
+    border-bottom: 1.5pt solid var(--accent); color:#16233c;
     break-after: avoid;
   }
   section.block > .hint {
@@ -98,11 +103,11 @@
   .tile {
     flex: 1 1 88pt;
     border: 0.7pt solid var(--line);
-    border-radius: 3pt;
+    border-radius: 5pt;
     padding: 5pt 7pt;
     background: var(--band);
   }
-  .tile .v { font-size: 12pt; font-weight: 700; }
+  .tile .v { font-size: 13pt; font-weight: 800; color:var(--accent); }
   .tile .l {
     font-size: 7pt;
     color: var(--muted);
@@ -110,17 +115,17 @@
     letter-spacing: 0.4pt;
   }
 
-  table { width: 100%; border-collapse: collapse; font-size: 8pt; }
+  table { width: 100%; border-collapse: collapse; font-size: 7.5pt; }
   thead { display: table-header-group; }
   th {
     text-align: left;
-    background: #eceff3;
+    background: var(--accent);
     border-bottom: 1pt solid var(--line);
     padding: 4pt 5pt;
     font-size: 7.5pt;
     text-transform: uppercase;
     letter-spacing: 0.4pt;
-    color: #3c424b;
+    color: #fff;
   }
   td { padding: 3.4pt 5pt; border-bottom: 0.5pt solid #eef1f4; }
   tr { break-inside: avoid; }
@@ -149,6 +154,10 @@
 <body>
 
 <header class="doc">
+  <div class="brand">
+    {% if logo %}<img src="data:image/png;base64,{{ logo }}" />{% endif %}
+    <div><div class="org-name">{{ org_name }}</div>{% if org_address %}<div class="org-address">{{ org_address }}</div>{% endif %}</div>
+  </div>
   <div class="eyebrow">Statystyki okregowe</div>
   <h1>{{ meta.title or "Raport sezonu" }}</h1>
   {% if meta.subtitle %}<div class="sub">{{ meta.subtitle }}</div>{% endif %}

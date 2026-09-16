@@ -747,7 +747,8 @@ async def run_archive_scheduler() -> None:
 
             catalog = await season_catalog()
             current = current_start(catalog, _now().date())
-            for province in await enabled_provinces("stats"):
+            provinces = set(await enabled_provinces("stats")) | set(await enabled_provinces("tables"))
+            for province in sorted(provinces):
                 rows = await _season_rows(province)
                 todo = [
                     season
@@ -781,7 +782,7 @@ async def _require_stats(province: str) -> str:
     from app.province_settlement_sync import module_enabled
 
     key = require_province(province)
-    if not await module_enabled(key, "stats"):
+    if not await module_enabled(key, "stats") and not await module_enabled(key, "tables"):
         raise HTTPException(403, "Moduł Statystyk nie jest włączony w tym okręgu")
     return key
 

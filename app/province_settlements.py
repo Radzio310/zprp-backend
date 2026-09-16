@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/province/settlements", tags=["province_settlements"])
 
-MODULES = ("stats", "settlements")
+MODULES = ("stats", "settlements", "tables")
 
 #: Tyle najdluzej zestawienie czeka na nazwiska z obsad meczow (patrz
 #: `settlement_names`). Co nie zdazy, dojdzie przy nastepnym otwarciu.
@@ -437,6 +437,7 @@ async def status(province: str = Query(...)):
         "display": display(key),
         "stats_enabled": await module_enabled(key, "stats"),
         "settlements_enabled": await module_enabled(key, "settlements"),
+        "tables_enabled": await module_enabled(key, "tables"),
         "last_run": {
             "id": run.get("id"),
             "kind": run.get("kind"),

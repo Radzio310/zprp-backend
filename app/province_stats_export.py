@@ -321,7 +321,12 @@ def _ensure_download_dir() -> None:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-def _render_pdf(payload: ReportExportRequest, default_name: str) -> FileResponse:
+def _render_pdf(
+    payload: ReportExportRequest,
+    default_name: str,
+    template_name: str = TEMPLATE_NAME,
+    extra_context: Optional[Dict[str, Any]] = None,
+) -> FileResponse:
     from jinja2 import Environment, FileSystemLoader, select_autoescape
     import weasyprint
 
@@ -329,9 +334,9 @@ def _render_pdf(payload: ReportExportRequest, default_name: str) -> FileResponse
     if not payload.sections:
         raise HTTPException(422, "Raport nie ma zadnej sekcji.")
 
-    template_path = TEMPLATE_DIR / TEMPLATE_NAME
+    template_path = TEMPLATE_DIR / template_name
     if not template_path.exists():
-        raise HTTPException(500, detail=f"Brak szablonu: {TEMPLATE_NAME}")
+        raise HTTPException(500, detail=f"Brak szablonu: {template_name}")
 
     # Autoescape wlaczone: nazwy druzyn i hal pochodza z ZPRP, wiec do szablonu
     # trafia tekst spoza naszej kontroli.
@@ -340,12 +345,18 @@ def _render_pdf(payload: ReportExportRequest, default_name: str) -> FileResponse
         autoescape=select_autoescape(["html"]),
     )
     env.filters["cell"] = _fmt
-    template = env.get_template(TEMPLATE_NAME)
+    template = env.get_template(template_name)
 
+    context = dict(extra_context or {})
+    if "org_name" not in context:
+        from app.province_settlement_pdf import _org, _province_logo_b64
+        org = _org(payload.meta.province)
+        context.update(logo=_province_logo_b64(payload.meta.province), org_name=org["name"], org_address=org["address"])
     html_str = template.render(
         meta=payload.meta,
         sections=payload.sections,
         generated_at=_now_label(),
+        **context,
     )
 
     tmp_dir = tempfile.mkdtemp()
@@ -382,3 +393,22 @@ async def export_season_pdf(payload: ReportExportRequest):
 async def export_referee_pdf(payload: ReportExportRequest):
     """Karta sezonu pojedynczego sedziego."""
     return _render_pdf(payload, "karta_sedziego")
+
+
+@router.post("/zprp/statystyki/okreg/export/table-officials-pdf")
+async def export_table_officials_pdf(payload: ReportExportRequest):
+    """Firmowy A4 landscape: sekretarze i mierzacy czas okregu."""
+    from app.province_settlement_pdf import _org, _province_logo_b64
+
+    province = payload.meta.province
+    org = _org(province)
+    return _render_pdf(
+        payload,
+        "stoliki_okregu",
+        "okreg_stoliki.html",
+        {
+            "logo": _province_logo_b64(province),
+            "org_name": org["name"],
+            "org_address": org["address"],
+        },
+    )
