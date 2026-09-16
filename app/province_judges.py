@@ -8,7 +8,8 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from app.db import database, province_judges
+from app.db import database, province_judges, province_settlement_judges
+from app.settlement_province import display, spellings
 from app.schemas import (
     CreateProvinceJudgeRequest,
     UpdateProvinceJudgeRequest,
@@ -42,6 +43,39 @@ def _row_to_item(row) -> ProvinceJudgeItem:
     if d.get("badges") is None:
         d["badges"] = {}
     return ProvinceJudgeItem(**d)
+
+
+async def _backfill_settlement_judges(province: str) -> None:
+    """Dopisuje brakujące osoby z pełnej listy ZPRP do katalogu badge'y.
+
+    Konflikt oznacza, że rekord jest już zarządzany w panelu — wtedy nie
+    dotykamy badge'y, zdjęcia ani ręcznie poprawionego nazwiska.
+    """
+    rows = await database.fetch_all(
+        select(
+            province_settlement_judges.c.judge_id,
+            province_settlement_judges.c.full_name,
+        ).where(province_settlement_judges.c.province.in_(spellings(province)))
+    )
+    now = datetime.now(timezone.utc)
+    province_name = display(province)
+    for row in rows:
+        judge_id = str(row["judge_id"] or "").strip()
+        full_name = str(row["full_name"] or "").strip()
+        if not judge_id or not full_name:
+            continue
+        await database.execute(
+            pg_insert(province_judges)
+            .values(
+                judge_id=judge_id,
+                full_name=full_name,
+                province=province_name,
+                photo_url="",
+                badges={},
+                updated_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[province_judges.c.judge_id])
+        )
 
 
 @router.post("/", response_model=dict, summary="Upsert sędziego w tabeli province_judges")
@@ -102,6 +136,7 @@ async def list_province_judges():
 @router.get("/province/{province}", response_model=ListProvinceJudgesResponse, summary="Lista sędziów dla wybranego województwa")
 async def list_province_judges_by_province(province: str):
     prov = _norm_province(province)
+    await _backfill_settlement_judges(province)
     q = (
         select(province_judges)
         .where(func.upper(province_judges.c.province) == prov)

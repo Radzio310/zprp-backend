@@ -62,6 +62,7 @@ from app.settlement_distances import (
 )
 from app.settlement_names import fill_missing_names, judge_cities, remember_officials
 from app.settlement_names_rules import officials_from_payload
+from app.settlement_province import display
 from app.settlement_venues import (
     fetch_details_payload,
     looks_like_city,
@@ -552,6 +553,20 @@ async def _store_judges(province: str, judges: dict[str, dict]) -> None:
                 ],
                 set_={k: v for k, v in values.items() if k not in ("province", "judge_id")},
             )
+        )
+        # Ten sam pełny katalog zasila panel badge'y. Dopisujemy wyłącznie
+        # brakujące osoby — istniejących zdjęć, nazw i badge'y nie nadpisujemy.
+        await database.execute(
+            pg_insert(province_judges)
+            .values(
+                judge_id=_s(judge_id),
+                full_name=name,
+                province=display(province),
+                photo_url="",
+                badges={},
+                updated_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[province_judges.c.judge_id])
         )
 
 
