@@ -31,6 +31,7 @@ from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import assignment_rules as A
+from app import assignment_scope as S
 from app import settlement_origin as SO
 from app import settlement_rates as R
 from app.assignment_auto import build_plan
@@ -59,10 +60,11 @@ from app.db import (
     province_matches,
 )
 from app.match_market_rules import is_managed_by_province, state_dict
-from app.province_assignments import _managed_prefixes, own_prefixes_of
+from app.province_assignments import _managed_prefixes, own_prefixes_of, resolve_seasons
 from app.province_settlements import require_province
 from app.settlement_province import display, spellings
 from app.settlement_seasons import season_of
+from app.zprp_seasons import season_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -540,6 +542,12 @@ class AutoRequest(BaseModel):
     include_undated: bool = False
     #: Dopytać Google o brakujące pary miast (tabela odległości ma pierwszeństwo).
     use_google: bool = True
+    #: Rok początku sezonu (2026 = 2026/2027). Automat układa tylko bieżący -
+    #: poprzedni sezon jest na liście do podglądu. Puste = bieżący.
+    season: Optional[int] = None
+    #: Także II liga. Jej obsady ustala związek, więc domyślnie automat jej nie
+    #: rusza - ta sama reguła, co na liście (`app/assignment_scope.py`).
+    include_league: bool = False
     created_by: Optional[str] = None
 
 
@@ -549,6 +557,8 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
     own = await own_prefixes_of(key)
     manual = await manual_match_ids(key)
     wanted_ids = {_s(item) for item in payload.match_ids if _s(item)}
+    catalog = await season_catalog()
+    current = S.current_start(catalog, _now().date())
 
     start = payload.date_from or _now().date()
     end = payload.date_to or (start + timedelta(days=30))
@@ -570,16 +580,34 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
         "undated": 0,
         # Mecze, których nie będzie: pauza drużyny albo wolny los.
         "bye": 0,
+        # II liga bez wyraźnej zgody - jej obsady ustala związek.
+        "league": 0,
+        # Mecz z innego sezonu albo bez rozpoznanego sezonu.
+        "season": 0,
     }
-    needs = []
+    scoped: list[tuple[Any, dict, str]] = []
     for row in rows:
         state = state_dict(row["state_json"])
         code = _s(state.get("RozgrywkiCode") or row["match_code"])
-        match_id = _s(row["match_id"])
         if not code or R.is_test_competition(code):
             continue
         if not is_managed_by_province(code, managed) or SO.is_other_district(code, own):
             skipped["outside"] += 1
+            continue
+        if S.is_league(code) and not payload.include_league:
+            skipped["league"] += 1
+            continue
+        scoped.append((row, state, code))
+
+    seasons_of = await resolve_seasons([(row, state) for row, state, _ in scoped], catalog)
+
+    needs = []
+    for row, state, code in scoped:
+        match_id = _s(row["match_id"])
+        if seasons_of.get(match_id) != current:
+            # Także mecz bez rozpoznanego sezonu: lista go domyślnie nie
+            # pokazuje, więc automat nie ma prawa obsadzić go za plecami.
+            skipped["season"] += 1
             continue
         if wanted_ids and match_id not in wanted_ids:
             continue
@@ -619,6 +647,14 @@ async def run_auto(payload: AutoRequest):
     end = payload.date_to or (start + timedelta(days=30))
     if end < start:
         raise HTTPException(400, "Koniec zakresu nie może być przed jego początkiem")
+    if payload.season:
+        current = S.current_start(await season_catalog(), _now().date())
+        if int(payload.season) != current:
+            raise HTTPException(
+                409,
+                "Automat układa tylko bieżący sezon. Poprzednie sezony są na liście "
+                "wyłącznie do podglądu.",
+            )
 
     # RAZ na okręg: uprawnienia do szczebli. Zbierają się przy okazji otwierania
     # meczów, więc tuż po wdrożeniu tabela jest pusta - a bez liter automat nie
