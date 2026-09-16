@@ -337,6 +337,7 @@ async def _collect_outside(
     current: str,
     beat: Any,
     own_prefixes: Optional[set[str]] = None,
+    lists_sink: Optional[dict[str, list]] = None,
 ) -> tuple[list[dict], dict[str, bool]]:
     """
     Mecze z prywatnych list sedziow - sezon po sezonie, sedzia po sedzi.
@@ -355,6 +356,10 @@ async def _collect_outside(
 
     Mecz, ktory okreg juz zna z wlasnego terminarza, POMIJAMY - inaczej wszedlby
     do rozliczenia dwa razy, raz z kazdego zrodla.
+
+    `lists_sink` - sezony (klucze), ktorych PELNE listy sedziow odkladamy dla
+    archiwum meczow (`app/zprp_archive.py`). Ten sam przebieg zasila wtedy
+    Rozliczenia i Statystyki, zamiast drugi raz chodzic po listach.
     """
     collected: list[dict] = []
     season_ok = {label: True for label in seasons}
@@ -403,6 +408,8 @@ async def _collect_outside(
             if records is None:
                 season_ok[label] = False
                 continue
+            if lists_sink is not None and label in lists_sink:
+                lists_sink[label].append((judge_id, list(records.values())))
 
             past = label != current
             for key, record in records.items():
@@ -499,6 +506,9 @@ async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dic
                 # z ulica po przecinku. Na Liscie kosztow przejazdow ma stac
                 # sama miejscowosc, i po niej szuka sie w tabeli odleglosci.
                 entry["city"] = pretty_city(item.get("city")) or entry["city"]
+                # Surowy wpis dla archiwum meczow - Statystyki potrzebuja go
+                # w ksztalcie `OfficialInfo` (zdjecie, role, para, telefon).
+                entry["official"] = item
 
         absorb(parsed)
 
@@ -1059,6 +1069,11 @@ async def refresh_province(
 
             outside: list[dict] = []
             season_ok: dict[str, bool] = {}
+            # Listy sedziow biezacego sezonu idą tez do archiwum meczow -
+            # Statystyki nie beda po nie chodzic drugi raz.
+            archive_lists: Optional[dict[str, list]] = (
+                {current: []} if with_outside and current in plan else None
+            )
             if with_outside:
                 outside, season_ok = await _collect_outside(
                     client,
@@ -1069,6 +1084,7 @@ async def refresh_province(
                     current=current,
                     beat=beat,
                     own_prefixes=own,
+                    lists_sink=archive_lists,
                 )
 
             rows = district + outside
@@ -1194,12 +1210,25 @@ async def refresh_province(
                     )
                 )
 
-        return await finish(
+        result = await finish(
             True,
             judges=len(judges),
             matches=len(rows),
             outside_matches=len(outside),
         )
+        if archive_lists is not None:
+            # Archiwum meczow buduje sie W TLE, po zamknieciu przebiegu - jego
+            # awaria ani czas nie moga dotknac Rozliczen.
+            from app.zprp_archive import spawn_after_settlement
+
+            spawn_after_settlement(
+                province,
+                season_label=current,
+                lists=archive_lists.get(current) or [],
+                lists_complete=bool(season_ok.get(current)),
+                judges=judges,
+            )
+        return result
     except Exception as exc:
         logger.exception("[settlement] odświeżanie %s nie powiodło się", province)
         return await finish(False, error=str(exc)[:500])

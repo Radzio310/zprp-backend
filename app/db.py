@@ -854,6 +854,69 @@ province_settlement_seasons = Table(
 )
 
 
+# ---------------------------------------------------------------------------
+# Archiwum meczów okręgu (16.09.2026)
+#
+# Wspólne źródło sezonów dla Statystyk okręgowych i analizy obsad. Serwer
+# składa sezon tak, jak dotąd robiła to przeglądarka (`app/archive_rules.py`),
+# a ekran dostaje go jednym zapytaniem. Zamknięty sezon buduje się raz,
+# bieżący nocą. Rozliczenia zostają na `province_settlement_matches`.
+# ---------------------------------------------------------------------------
+
+zprp_archive_seasons = Table(
+    "zprp_archive_seasons",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("season_id", String, primary_key=True),          # ID_sezon ZPRP
+    Column("season_label", String, nullable=False),          # „2025/2026"
+    Column("season_start", Integer, nullable=False),         # 2025
+    Column("wzpr_code", String, nullable=True),
+    Column("schema", Integer, nullable=False, server_default=text("0")),
+    Column("closed", Boolean, nullable=False, server_default=text("false")),
+    Column("matches", Integer, nullable=False, server_default=text("0")),
+    Column("outside_stage", String, nullable=False, server_default=text("'none'")),
+    Column("outside_scanned", Integer, nullable=False, server_default=text("0")),
+    Column("outside_total", Integer, nullable=False, server_default=text("0")),
+    Column("counters_json", JSON().with_variant(JSONB, "postgresql"), nullable=True),
+    # Gotowy `ProvinceDataset` bez sędziów, gzip - wysyłany bez składania na nowo.
+    Column("payload_gz", LargeBinary, nullable=True),
+    Column("etag", String, nullable=True),
+    Column("built_at", DateTime(timezone=True), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("heartbeat_at", DateTime(timezone=True), nullable=True),
+    Column("error", String, nullable=True),
+)
+
+zprp_archive_matches = Table(
+    "zprp_archive_matches",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("season_id", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("ord", Integer, nullable=False, server_default=text("0")),
+    Column("origin", String, nullable=False),                # district | outside
+    Column("code", String, nullable=True),
+    Column("match_at", DateTime(timezone=True), nullable=True),
+    Column("slim_json", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    # Wyciąg ze szczegółów meczu (i sam mecz dla spoza okręgu) - pozwala
+    # przebudować sezon bez pytania API o mecze, które się nie zmieniły.
+    Column("details_json", JSON().with_variant(JSONB, "postgresql"), nullable=True),
+    Column("details_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_zprp_archive_matches_season", zprp_archive_matches.c.province, zprp_archive_matches.c.season_id)
+
+# Lista „Sędziowie i Delegaci" okręgu w kształcie `OfficialInfo` z BAZA_web.
+zprp_archive_officials = Table(
+    "zprp_archive_officials",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("officials_json", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("etag", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+)
+
+
 # Ślad po jednorazowych poprawkach danych.
 #
 # Bez niego każdy restart serwera powtarzałby poprawkę, a ta, która kasuje
@@ -1066,6 +1129,59 @@ Index(
     "ix_province_assignment_changes_run",
     province_assignment_changes.c.province,
     province_assignment_changes.c.run_id,
+)
+
+
+# ---------------------------------------------------------------------------
+# Analiza obsad (16.09.2026) - patrz `app/assignment_insights.py`
+# ---------------------------------------------------------------------------
+
+# Ręczne oznaczenie trudności meczu przez obsadowego („hard" | „easy").
+province_match_difficulty = Table(
+    "province_match_difficulty",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("mark", String, nullable=False),
+    Column("note", String, nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Wagi składników trudności ustawione suwakami w karcie Analiza.
+province_insight_settings = Table(
+    "province_insight_settings",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("weights_json", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+)
+
+# Wnioski wybrane dla Automatu: punkty albo twarda zasada, z siłą.
+province_insight_rules = Table(
+    "province_insight_rules",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("rule_key", String, primary_key=True),
+    Column("enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("mode", String, nullable=False, server_default=text("'points'")),
+    Column("strength", Integer, nullable=False, server_default=text("50")),
+    Column("params_json", JSON().with_variant(JSONB, "postgresql"), nullable=True),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+)
+
+# Policzone fakty o meczach (składniki trudności) - drogie liczenie idzie nocą,
+# a podgląd z innymi wagami składa się z nich od ręki.
+province_insight_facts = Table(
+    "province_insight_facts",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("facts_gz", LargeBinary, nullable=False),
+    Column("matches", Integer, nullable=False, server_default=text("0")),
+    Column("seasons", String, nullable=True),
+    Column("computed_at", DateTime(timezone=True), nullable=False),
 )
 
 

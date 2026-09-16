@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from app.assignment_people import Judge, is_local, pair_ok, table_pair_ok, table_rule
 
@@ -102,6 +102,12 @@ class MatchNeed:
     #: Obsada obecna w gniazdach boiskowych i stolikowych (do reguł par).
     crew_field: list[Judge] = field(default_factory=list)
     crew_table: list[Judge] = field(default_factory=list)
+    #: Przewidywana trudność meczu z analizy obsad (`insights_rules.predicted_difficulty`)
+    #: - tylko gdy obsadowy wybrał wnioski dla Automatu. Bez nich zostaje None.
+    difficulty: Optional[float] = None
+    difficulty_why: list[str] = field(default_factory=list)
+    tier: float = 0.0
+    category: str = ""
 
     @property
     def weekday(self) -> Optional[int]:
@@ -129,6 +135,9 @@ class Context:
     blocked: set[tuple[str, str]] = field(default_factory=set)
     #: Ile meczów sędzia ma już w oknie - punkt wyjścia do równego podziału.
     load: dict[str, int] = field(default_factory=dict)
+    #: Wnioski z analizy obsad wybrane przez obsadowego (`insights_policy.Policy`).
+    #: `None` = Automat dokładnie taki jak przed analizą.
+    policy: Optional[Any] = None
 
 
 @dataclass
@@ -288,6 +297,18 @@ def _score(
         score -= B_TABLE_BADGE
         reasons.append("sędzia stolikowy")
 
+    if ctx.policy is not None:
+        delta, why = ctx.policy.points(
+            judge.judge_id,
+            need,
+            kind=kind,
+            partner_id=partner.judge_id if partner is not None else None,
+            round_no=round_no,
+        )
+        if delta or why:
+            score += delta
+            reasons.extend(f"analiza: {item}" for item in why)
+
     if judge.preferred_days and need.weekday in judge.preferred_days:
         reasons.append("dzień preferowany")
 
@@ -317,6 +338,17 @@ def _candidates(
         if partner is not None:
             ok, why = pair_ok(judge, partner, blocked=ctx.blocked)
             if not ok:
+                refused[why] = refused.get(why, 0) + 1
+                continue
+        if ctx.policy is not None:
+            why = ctx.policy.refuse(
+                judge.judge_id,
+                need,
+                kind=kind,
+                partner_id=partner.judge_id if partner is not None else None,
+                round_no=round_no,
+            )
+            if why:
                 refused[why] = refused.get(why, 0) + 1
                 continue
         score, reasons, km = _score(
@@ -361,6 +393,7 @@ def build_plan(
         partner_of=ctx.partner_of,
         blocked=ctx.blocked,
         load=load,
+        policy=ctx.policy,
     )
 
     # Stan gniazd w trakcie układania: mecz -> gniazdo -> sędzia.
@@ -434,6 +467,8 @@ def build_plan(
                     filled.setdefault(need.match_id, {})[slot] = judge
                     slots[kind] = [item for item in (slots.get(kind) or []) if item != slot]
                     load[judge.judge_id] = load.get(judge.judge_id, 0) + 1
+                    if working.policy is not None:
+                        working.policy.note_assigned(judge.judge_id, need, kind=kind)
                     busy.setdefault(judge.judge_id, []).append(
                         BusyMatch(moment=need.moment, city=need.host_city, match_id=need.match_id)
                     )

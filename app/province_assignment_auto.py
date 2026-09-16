@@ -551,8 +551,8 @@ class AutoRequest(BaseModel):
     created_by: Optional[str] = None
 
 
-async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict]:
-    """Mecze z zakresu przełożone na „czego brakuje", plus co odpadło i czemu."""
+async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict, dict]:
+    """Mecze z zakresu przełożone na „czego brakuje", co odpadło i czemu, oraz stany meczów."""
     managed = await _managed_prefixes(key)
     own = await own_prefixes_of(key)
     manual = await manual_match_ids(key)
@@ -602,6 +602,7 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
     seasons_of = await resolve_seasons([(row, state) for row, state, _ in scoped], catalog)
 
     needs = []
+    states: dict[str, dict] = {}
     for row, state, code in scoped:
         match_id = _s(row["match_id"])
         if seasons_of.get(match_id) != current:
@@ -635,9 +636,10 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
             skipped["no_hall"] += 1
             continue
         needs.append(need)
+        states[match_id] = state
 
     needs.sort(key=lambda item: (item.day or date.max, item.moment or datetime.max, item.code))
-    return needs[:MAX_MATCHES], skipped
+    return needs[:MAX_MATCHES], skipped, states
 
 
 @router.post("", summary="Automat obsady - propozycje do pustych gniazd")
@@ -666,7 +668,23 @@ async def run_auto(payload: AutoRequest):
     if not roster.judges:
         raise HTTPException(400, "Okręg nie ma jeszcze listy sędziów")
 
-    needs, skipped = await _needs_for(payload, key, roster)
+    needs, skipped, states = await _needs_for(payload, key, roster)
+
+    # Wnioski z analizy obsad wybrane przez obsadowego (karta Analiza). Awaria
+    # analizy NIE zatrzymuje Automatu - układa wtedy tak jak przed analizą
+    # i mówi o tym w raporcie.
+    policy = None
+    insights_error = None
+    try:
+        from app.assignment_insights import annotate_needs, policy_for
+
+        policy, insight_weights, _analysis = await policy_for(key)
+        if policy is not None:
+            await annotate_needs(key, [(need, states.get(need.match_id) or {}) for need in needs], insight_weights)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[auto] %s: wnioski z analizy obsad", key)
+        policy = None
+        insights_error = str(exc)[:200]
     book = await load_book(key)
     distances = {"asked": 0, "saved": 0, "missing": 0}
     if needs and payload.use_google:
@@ -680,6 +698,7 @@ async def run_auto(payload: AutoRequest):
         load=load,
         only_judges=payload.judge_ids or None,
     )
+    ctx.policy = policy
     plan = build_plan(needs, ctx, rounds=max(1, min(3, int(payload.rounds or 2))))
 
     window = {"from": start.isoformat(), "to": end.isoformat()}
@@ -687,6 +706,11 @@ async def run_auto(payload: AutoRequest):
         plan, needs, judges=roster.judges, window=window, load_before=load
     )
     report["skipped"] = skipped
+    report["insights"] = {
+        "rules": policy.summary() if policy is not None else [],
+        "threshold": policy.threshold if policy is not None else None,
+        "error": insights_error,
+    }
     report["distances"] = {**book.stats, **distances}
     report["grades"] = {
         "known": sum(1 for judge in roster.judges.values() if judge.letters),

@@ -251,6 +251,10 @@ def plan_rows(plan: Plan, needs: Sequence[MatchNeed]) -> list[dict]:
             "host": need.host,
             "guest": need.guest,
             "slots": [],
+            # Przewidywana trudność z analizy obsad - tylko gdy obsadowy wybrał
+            # wnioski dla Automatu (inaczej None i panel nic nie pokazuje).
+            "difficulty": getattr(need, "difficulty", None),
+            "difficulty_why": list(getattr(need, "difficulty_why", None) or []),
             "taken": taken_slots(need),
             "gaps": [
                 {

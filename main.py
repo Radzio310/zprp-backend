@@ -89,6 +89,8 @@ from app.province_settlement_sync import run_settlement_sync_scheduler
 from app.province_settlement_pdf import router as province_settlement_pdf_router
 from app.province_assignments import router as province_assignments_router
 from app.province_assignment_auto import router as province_assignment_auto_router
+from app.zprp_archive import router as province_archive_router, run_archive_scheduler
+from app.assignment_insights import router as province_insights_router, run_insights_scheduler
 from app.province_clubs import router as province_clubs_router
 from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
@@ -306,6 +308,8 @@ app.include_router(province_settlement_pdf_router)
 app.include_router(province_clubs_router)
 app.include_router(province_assignments_router)
 app.include_router(province_assignment_auto_router)
+app.include_router(province_archive_router)
+app.include_router(province_insights_router)
 app.include_router(province_events_router)
 app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
@@ -1323,6 +1327,13 @@ async def startup():
     # klubow nie opoznila pobrania meczow.
     _clubs_sync_task = asyncio.create_task(run_clubs_sync_scheduler())
     logger.info("✅ Province clubs sync started (24 h)")
+    # Archiwum meczow okregu: wspolne zrodlo sezonow dla Statystyk i analizy
+    # obsad. Zamkniete sezony raz, biezacy co ~20 h (patrz app/zprp_archive.py).
+    asyncio.create_task(run_archive_scheduler())
+    logger.info("✅ Province match archive scheduler started")
+    # Analiza obsad: fakty o meczach po kazdej budowie archiwum i raz na dobe.
+    asyncio.create_task(run_insights_scheduler())
+    logger.info("✅ Assignment insights scheduler started")
     logger.info("✅ MP protocol snapshot scheduler started")
 
 @app.on_event("shutdown")
