@@ -32,12 +32,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import event_poster_file as posters
 from app import official_roster as roster
 from app.event_links import LINK_BASE
 from app import province_event_rules as R
@@ -66,6 +67,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/province-events", tags=["Province Events"])
 
 PDF_DIR = os.path.join(tempfile.gettempdir(), "province_event_pdf")
+#: Plakaty do pobrania leżą godzinę - systemowe pobieranie potrafi zapytać drugi raz.
+POSTER_DIR = os.path.join(tempfile.gettempdir(), "province_event_posters")
+POSTER_TTL_S = 3600
 #: Nieudane próby kodu: najwyżej tyle w oknie, potem chwila przerwy.
 CHECKIN_FAIL_LIMIT = 8
 CHECKIN_FAIL_WINDOW_S = 600
@@ -1275,6 +1279,68 @@ async def pdf_download(token: str, filename: str = Query("obecnosc.pdf")):
     if not os.path.exists(path):
         raise HTTPException(404, "Plik wygasł albo nie istnieje")
     return FileResponse(path, media_type="application/pdf", filename=os.path.basename(filename))
+
+
+def _sweep_posters(now: Optional[float] = None) -> None:
+    moment = time.time() if now is None else now
+    try:
+        names = os.listdir(POSTER_DIR)
+    except FileNotFoundError:
+        return
+    for name in names:
+        path = os.path.join(POSTER_DIR, name)
+        try:
+            if moment - os.path.getmtime(path) > POSTER_TTL_S:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+@router.post("/{event_id}/poster", summary="Plakat lub grafika z kodem - plik do pobrania na telefon")
+async def poster_upload(
+    event_id: int,
+    variant: str = Form(...),
+    name: str = Form(""),
+    file: UploadFile = File(...),
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    """Telefon przysyła zrzut PNG, dostaje adres, który systemowe pobieranie zapisze w Pobranych."""
+    who = _require_judge(actor)
+    event = await _event(event_id)
+    prov = _resolve_province(who, event["province"])
+    _require_manager(who, prov)
+    data = await file.read(posters.MAX_UPLOAD_BYTES + 1)
+    try:
+        kind = posters.check_variant(variant)
+        body, ext = await asyncio.to_thread(posters.build_download, data, kind)
+    except posters.PosterFileError as exc:
+        raise HTTPException(422, str(exc))
+    _sweep_posters()
+    os.makedirs(POSTER_DIR, exist_ok=True)
+    token = uuid.uuid4().hex
+    with open(os.path.join(POSTER_DIR, f"{token}.{ext}"), "wb") as handle:
+        handle.write(body)
+    filename = posters.download_name(name, ext)
+    return {
+        "download_url": f"/province-events/poster/{token}?filename={urllib.parse.quote(filename)}",
+        "filename": filename,
+    }
+
+
+@router.get("/poster/{token}", summary="Pobierz plakat albo grafikę (załącznik)")
+async def poster_download(token: str, filename: str = Query("")):
+    safe = "".join(ch for ch in token.lower() if ch in "0123456789abcdef")[:32]
+    for ext, media in (("pdf", "application/pdf"), ("png", "image/png")):
+        path = os.path.join(POSTER_DIR, f"{safe}.{ext}")
+        if safe and os.path.exists(path):
+            name = posters.download_name(filename, ext)
+            return FileResponse(
+                path,
+                media_type=media,
+                filename=name,
+                headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"},
+            )
+    raise HTTPException(404, "Plik wygasł - pobierz go jeszcze raz z BAZY")
 
 
 # ---------------------------------------------------------------------------
