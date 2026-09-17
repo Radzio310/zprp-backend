@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, select
 
 from app.db import database, joomla_table_publications, zprp_archive_officials, zprp_archive_seasons
-from app.admin_guard import admin_write_guard
+from app.deps import get_jwt_payload
 from app.province_stats_export import ExportColumn, ExportMeta, ExportSection, ReportExportRequest, _render_pdf
 from app.zprp_archive import current_start, season_catalog
 
@@ -237,7 +237,6 @@ async def _sync_tables_to_joomla(trigger: str) -> dict:
 
 
 async def run_joomla_tables_scheduler() -> None:
-    await asyncio.sleep(30 * 60)
     while True:
         await sync_tables_to_joomla()
         await asyncio.sleep(INTERVAL)
@@ -251,7 +250,7 @@ async def publication_history(limit: int = Query(80, ge=1, le=365)):
     return {"province": "ŚLĄSKIE", "items": [dict(row) for row in rows]}
 
 
-@router.post("/check-now", dependencies=[Depends(admin_write_guard)])
-async def check_now():
-    """Ręczne sprawdzenie dla administratora; używa dokładnie tego samego flow co automat."""
+@router.post("/check-now")
+async def check_now(_payload: dict = Depends(get_jwt_payload)):
+    """Ręczne sprawdzenie z panelu VIP; operacja jest deterministyczna i wymaga logowania."""
     return await sync_tables_to_joomla("manual")
