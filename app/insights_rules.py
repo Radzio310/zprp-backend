@@ -474,6 +474,41 @@ class Person:
     letters: Tuple[str, ...] = ()
 
 
+LEAGUE_FIELD_CATEGORIES = frozenset({"II liga", "I liga", "Liga Centralna", "Superliga"})
+LEAGUE_WINDOW = 3
+LEAGUE_MIN_MATCHES = 8
+LEAGUE_MIN_SEASONS = 2
+
+
+def is_district_fact(fact: Fact) -> bool:
+    """Mecz, za ktorego obsade odpowiada okreg."""
+    return fact.origin == "district"
+
+
+def league_activity(rows: Sequence[Fact], *, current: int) -> dict:
+    """Aktualny status ligowca z faktycznych meczow boiskowych od II ligi."""
+    first = current - LEAGUE_WINDOW + 1
+    league_rows = [
+        fact for fact in rows
+        if first <= fact.season <= current and fact.category in LEAGUE_FIELD_CATEGORIES
+    ]
+    by_season = Counter(fact.season for fact in league_rows)
+    active = len(league_rows) >= LEAGUE_MIN_MATCHES and len(by_season) >= LEAGUE_MIN_SEASONS
+    return {
+        "active": active,
+        "matches": len(league_rows),
+        "seasons": len(by_season),
+        "by_season": [
+            {"season": season, "matches": by_season[season]}
+            for season in sorted(by_season)
+        ],
+        "last_season": max(by_season) if by_season else None,
+        "window": LEAGUE_WINDOW,
+        "minimum_matches": LEAGUE_MIN_MATCHES,
+        "minimum_seasons": LEAGUE_MIN_SEASONS,
+    }
+
+
 def percentile(values: Sequence[float], share: float) -> Optional[float]:
     ordered = sorted(values)
     if not ordered:
@@ -525,14 +560,21 @@ def analyze(
     # Trudność liczymy dla CAŁEJ historii - doświadczenie i ścieżka rozwoju
     # patrzą na początek kariery, który bywa sprzed horyzontu.
     difficulty = {fact.id: weighted(fact.components(), weights) for fact in facts}
-    played = [difficulty[fact.id] for fact in in_scope if fact.played]
+    district_scope = [fact for fact in in_scope if is_district_fact(fact)]
+    played = [difficulty[fact.id] for fact in district_scope if fact.played]
     threshold = max(HARD_FLOOR, percentile(played, 1 - HARD_SHARE) or HARD_FLOOR)
     # Próg dla meczu PRZED rozegraniem liczymy z tej samej historii, ale bez
     # protokołu - inaczej przewidywana trudność porównywałaby się z inną skalą.
-    before = [weighted({**fact.components(), "protocol": None}, weights) for fact in in_scope if fact.played]
+    before = [
+        weighted({**fact.components(), "protocol": None}, weights)
+        for fact in district_scope if fact.played
+    ]
     predict_threshold = max(HARD_FLOOR, percentile(before, 1 - HARD_SHARE) or HARD_FLOOR)
-    hard = {fact.id for fact in in_scope if difficulty[fact.id] >= threshold}
-    hard_all = {fact.id for fact in facts if difficulty[fact.id] >= threshold}
+    hard = {fact.id for fact in district_scope if difficulty[fact.id] >= threshold}
+    hard_all = {
+        fact.id for fact in facts
+        if is_district_fact(fact) and difficulty[fact.id] >= threshold
+    }
     first_data_season = min((fact.season for fact in facts), default=current)
     season_weight = {year: SEASON_DECAY ** max(0, current - year) for year in seasons}
 
@@ -631,7 +673,10 @@ def analyze(
     last_season = max(seasons) if seasons else current
 
     def hard_share(judge: str, year: Optional[int] = None) -> Tuple[int, int]:
-        rows = [fact for fact in field_history.get(judge, []) if year is None or fact.season == year]
+        rows = [
+            fact for fact in field_history.get(judge, [])
+            if is_district_fact(fact) and (year is None or fact.season == year)
+        ]
         return sum(1 for fact in rows if fact.id in hard), len(rows)
 
     # --- 5. mentorzy młodych ---
@@ -656,23 +701,28 @@ def analyze(
     group_shares: Dict[str, List[float]] = defaultdict(list)
     for judge_id, person in people.items():
         field_rows = field_history.get(judge_id, [])
-        if field_rows:
+        district_rows = [fact for fact in field_rows if is_district_fact(fact)]
+        if district_rows:
             h, n = hard_share(judge_id)
             if n >= 10:
-                group_shares["league" if person.league else "district"].append(h / n)
+                active = league_activity(all_field.get(judge_id, []), current=current)["active"]
+                group_shares["league" if active else "district"].append(h / n)
 
     for judge_id, person in sorted(people.items(), key=lambda item: item[1].name):
         field_rows = field_history.get(judge_id, [])
+        district_field_rows = [fact for fact in field_rows if is_district_fact(fact)]
+        league_field_rows = [fact for fact in field_rows if fact.category in LEAGUE_FIELD_CATEGORIES]
         table_rows = table_history.get(judge_id, [])
         delegate_rows = delegate_history.get(judge_id, [])
         if not (field_rows or table_rows or delegate_rows) and not person.young:
             continue
-        mix = category_mix(field_rows) if field_rows else category_mix(table_rows)
+        mix = category_mix(district_field_rows) if district_field_rows else category_mix(table_rows)
         total = sum(mix.values())
         dominant, dominant_n = (mix.most_common(1)[0] if mix else ("", 0))
         h, n = hard_share(judge_id)
         h_last, n_last = hard_share(judge_id, last_season)
-        group = "league" if person.league else "district"
+        league_now = league_activity(all_field.get(judge_id, []), current=current)
+        group = "league" if league_now["active"] else "district"
         peer_median = _median(group_shares.get(group, []))
         per_season = []
         for year in sorted(seasons):
@@ -700,7 +750,7 @@ def analyze(
             key=lambda item: -item[1],
         )[:3]
         mentor_entry = mentor.get(judge_id)
-        weighted_field = sum(season_weight.get(fact.season, 0) for fact in field_rows)
+        weighted_field = sum(season_weight.get(fact.season, 0) for fact in district_field_rows)
         top_tier_now = max((value for year, value in max_tier_by.get(judge_id, {}).items()), default=None)
         judges_out.append(
             {
@@ -708,8 +758,12 @@ def analyze(
                 "name": person.name or name_of(judge_id),
                 "young": person.young,
                 "league": person.league,
+                "league_active": league_now["active"],
+                "league_activity": league_now,
                 "letters": list(person.letters),
                 "field": len(field_rows),
+                "field_district": len(district_field_rows),
+                "field_league": len(league_field_rows),
                 "table": len(table_rows),
                 "delegate": len(delegate_rows),
                 "weighted_field": round(weighted_field, 1),

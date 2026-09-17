@@ -192,6 +192,28 @@ def test_horyzont():
     assert I.horizon_seasons("all", 2026, [2020, 2026]) == [2026, 2020]
 
 
+def test_aktywny_ligowiec_wynika_z_meczow_boiskowych_od_drugiej_ligi():
+    rows = (
+        [I.Fact(str(i), 2024, i, "IIM/1", "", "II liga", "A", "B", "league", True,
+                ("1",), (), (), .8, 0, None, None) for i in range(4)]
+        + [I.Fact(str(i), 2025, i, "IM/1", "", "I liga", "A", "B", "league", True,
+                  ("1",), (), (), .88, 0, None, None) for i in range(4, 8)]
+    )
+    activity = I.league_activity(rows, current=2026)
+    assert activity["active"] is True
+    assert activity["matches"] == 8
+    assert activity["seasons"] == 2
+
+
+def test_puchar_i_stolik_nie_nadaja_statusu_ligowca():
+    rows = [
+        I.Fact(str(i), 2026, i, "PPM/1", "", "Puchar Polski / MP", "A", "B", "league", True,
+               (), ("1",), (), .76, 0, None, None)
+        for i in range(12)
+    ]
+    assert I.league_activity(rows, current=2026)["active"] is False
+
+
 def test_przewidywana_trudnosc_bez_protokolu():
     value, why = I.predicted_difficulty(
         code="S/JK/3",
