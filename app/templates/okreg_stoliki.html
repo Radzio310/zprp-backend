@@ -38,6 +38,7 @@
     th:first-child { border-radius: 2mm 0 0 0; text-align: center; }
     th:last-child { border-radius: 0 2mm 0 0; }
     td { padding: 2.15mm 1.6mm; border: 1px solid #d9dfeb; line-height: 1.18; vertical-align: middle; overflow-wrap: anywhere; }
+    tbody tr { break-inside: avoid; page-break-inside: avoid; }
     tbody tr:nth-child(even) td { background: #f4f7fc; }
     .center { text-align: center; }
     .strong { font-weight: 700; }
@@ -45,14 +46,10 @@
     .date, .time { white-space: nowrap; overflow-wrap: normal; word-break: normal; font-size: 7.1pt; }
     .badge { display: inline-block; padding: 1.25mm 2.4mm; border: 1px solid; border-radius: 2.5mm; font-weight: 800; white-space: nowrap; }
     .badge-link { text-decoration: none; }
-    tr.future td:first-child { border-left: 1.2mm solid #31579f; }
-    tr.past td { color: #98a0ae !important; background: #f2f3f5 !important; border-color: #e1e4e9; }
-    tr.past td:first-child { border-left: 1.2mm solid #b9c0ca; }
-    tr.past .strong { color: #7f8794 !important; }
-    tr.past .time { color: #8994a7 !important; }
-    tr.past .badge { color: #8d949e !important; border-color: #b9bec7 !important; background: #e8eaed !important; opacity: .72; }
-    tr.period-separator td { padding: 2.1mm 2.4mm; border: 0; border-top: 1.1mm solid #8592aa; border-bottom: .35mm solid #c4cbd7; background: #e6eaf1 !important; color: #47546c; font-size: 7pt; font-weight: 900; letter-spacing: 1.25pt; text-transform: uppercase; }
-    .separator-dot { display: inline-block; width: 2.2mm; height: 2.2mm; margin-right: 2mm; border-radius: 50%; background: #8c97aa; vertical-align: -0.25mm; }
+    tr.past td { color: #657083 !important; background: #f7f8fa !important; }
+    tr.past .strong { color: #566174 !important; }
+    tr.past .time { color: #6c7fa6 !important; }
+    tr.past .badge { opacity: .68; }
     .empty { padding: 14mm; border: 1px solid #d9dfeb; color: #7b86a0; text-align: center; }
   </style>
 </head>
@@ -84,9 +81,6 @@
       <thead><tr><th>L.p.</th><th>Data</th><th>Godzina</th><th>Zawody</th><th>Gospodarz</th><th>Gość</th><th>Adres hali</th><th>Sekretarz</th><th>Mierzący czas</th></tr></thead>
       <tbody>
       {% for row in section.rows %}
-        {% if row.period_break %}
-        <tr class="period-separator"><td colspan="9"><span class="separator-dot"></span>Mecze minione · delikatnie wygaszone · stan na {{ generated_at }}</td></tr>
-        {% endif %}
         <tr class="{% if row.past %}past{% else %}future{% endif %}">
           <td class="center">{{ row.lp|cell }}</td><td class="center strong date">{{ row.date|cell }}</td><td class="center time">{{ row.time|cell }}</td>
           <td class="center">{% if row.match_url %}<a class="badge-link" href="{{ row.match_url }}" target="_blank" rel="noopener noreferrer">{% endif %}<span class="badge" style="color:{{ row.accent|hexcolor }};border-color:{{ row.accent|hexcolor }};background:{{ row.accent|hexrgba(0.13) }}">{{ row.code|cell }}</span>{% if row.match_url %}</a>{% endif %}</td>
