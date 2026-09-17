@@ -14,6 +14,7 @@ czytamy fakty z bazy i skladamy odpowiedz.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -34,12 +35,14 @@ from app import settlement_rates as R
 from app.db import (
     database,
     province_club_entries,
+    province_competitions,
     province_club_season_closures,
     province_club_seasons,
     province_club_teams,
     province_clubs,
     province_match_overrides,
     province_matches,
+    province_settlement_matches,
 )
 from app.province_clubs_excel import build_workbook, parse_workbook
 from app.province_clubs_scrape import team_key
@@ -516,6 +519,125 @@ async def unassigned(
     rows = [_charge_json(row, key) for row in data["charges"] if row.status == C.UNASSIGNED]
     teams = sorted(data["teams_meta"].values(), key=lambda item: item["name"])
     return {"province": key, "season": season, "matches": rows, "teams": teams}
+
+
+class CreateTeamFromMatchRequest(BaseModel):
+    province: str
+    season: str
+    match_key: str
+    club_name: Optional[str] = None
+    team_name: Optional[str] = None
+    settles_via_district: bool = True
+    include_history: bool = True
+    created_by: Optional[str] = None
+
+
+def _manual_id(prefix: str, value: str) -> str:
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:14]
+    return f"manual:{prefix}:{digest}"
+
+
+@router.post("/teams/from-match", summary="Dodaj nierozpoznanego gospodarza do Panelu klubow")
+async def create_team_from_match(payload: CreateTeamFromMatchRequest):
+    """Tworzy pelnoprawny klub/druzyne i od razu przypisuje wskazany mecz.
+
+    Przy wlaczonej historii ten sam, jednoznaczny gospodarz jest dopisywany do
+    sezonow, w ktorych wystepuje w zapisanych obsadach. Nie laczymy podobnych
+    nazw automatycznie — to chroni przed sklejeniem dwoch roznych klubow.
+    """
+    key = require_province(payload.province)
+    season = _s(payload.season) or season_of(_now())
+    data = await load_clubs(key, season, include_future=True)
+    charge = next((row for row in data["charges"] if row.match_key == payload.match_key), None)
+    if charge is None:
+        raise HTTPException(404, "Nie znaleziono meczu w wybranym sezonie")
+    host = _s(payload.team_name) or _s(charge.host_name)
+    if not host:
+        raise HTTPException(400, "Mecz nie ma rozpoznanej nazwy gospodarza")
+
+    club_name = _s(payload.club_name) or host
+    name_key = team_key(host)
+    club_id = _manual_id("club", team_key(club_name))
+    team_id = _manual_id("team", name_key)
+
+    # Dokladne wystapienia w historii. Tylko identyczny znormalizowany gospodarz;
+    # sponsorzy i skroty wymagaja swiadomego przypisania w panelu.
+    season_codes = {(season, _s(charge.code), _s(charge.category))}
+    if payload.include_history:
+        history = await database.fetch_all(
+            select(
+                province_settlement_matches.c.season,
+                province_settlement_matches.c.match_code,
+                province_settlement_matches.c.teams,
+            ).where(province_settlement_matches.c.province == key)
+        )
+        for row in history:
+            teams = _s(row["teams"])
+            host_text = re.split(r"\s+(?:-|–|—|vs\.?|:)\s+", teams, maxsplit=1, flags=re.I)[0]
+            if host_text and team_key(host_text) == name_key:
+                season_codes.add((_s(row["season"]), _s(row["match_code"]), ""))
+
+    await database.execute(
+        pg_insert(province_clubs).values(
+            province=key,
+            club_id=club_id,
+            display_name=club_name,
+            settles_via_district=bool(payload.settles_via_district),
+            settles_since=None if payload.settles_via_district else date.min,
+            note="Klub dodany z nierozpoznanego gospodarza",
+            updated_by=payload.created_by,
+            updated_at=_now(),
+        ).on_conflict_do_update(
+            index_elements=[province_clubs.c.province, province_clubs.c.club_id],
+            set_={
+                "display_name": club_name,
+                "settles_via_district": bool(payload.settles_via_district),
+                "updated_by": payload.created_by,
+                "updated_at": _now(),
+            },
+        )
+    )
+
+    saved_seasons = set()
+    for item_season, code, fallback_category in season_codes:
+        if not item_season:
+            continue
+        competition_id = _manual_id("competition", f"{item_season}:{code or fallback_category or 'inne'}")
+        await database.execute(
+            pg_insert(province_competitions).values(
+                province=key, season=item_season, competition_id=competition_id,
+                name=code or fallback_category or "Rozgrywki ligowe", code=code,
+                category=fallback_category or None, kind="manual", fetched_at=_now(),
+            ).on_conflict_do_nothing()
+        )
+        await database.execute(
+            pg_insert(province_club_teams).values(
+                province=key, season=item_season, team_id=team_id,
+                competition_id=competition_id, team_name=host, name_key=name_key,
+                team_province=key, club_id=club_id,
+                category=fallback_category or None,
+                competition_name=code or fallback_category or "Rozgrywki ligowe",
+                competition_code=code or None, fetched_at=_now(),
+            ).on_conflict_do_update(
+                index_elements=[province_club_teams.c.province, province_club_teams.c.season,
+                                province_club_teams.c.team_id, province_club_teams.c.competition_id],
+                set_={"team_name": host, "name_key": name_key, "club_id": club_id,
+                      "fetched_at": _now()},
+            )
+        )
+        saved_seasons.add(item_season)
+
+    await set_override(
+        payload.match_key,
+        OverrideRequest(
+            province=key, team_id=team_id, team_name=host,
+            updated_by=payload.created_by,
+        ),
+    )
+    return {
+        "club_id": club_id, "team_id": team_id, "club_name": club_name,
+        "team_name": host, "seasons": sorted(saved_seasons, reverse=True),
+    }
 
 
 @router.get("/{club_id}", summary="Klub: mecze, wpłaty i saldo")

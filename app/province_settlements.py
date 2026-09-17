@@ -41,6 +41,8 @@ from app.settlement_names import fill_missing_names, judge_names
 from app.settlement_names_rules import is_missing_name
 from app.settlement_province import canonical, display, spellings
 from app.settlement_runs import cooldown_left, run_is_active
+from app.settlement_seasons import season_of
+from app.settlement_club_scope import club_scope
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +238,34 @@ async def load_settlement(
         include_zprp=include_zprp,
         names=names,
     )
+    # Klub moze byc prowadzony w panelu, ale rozliczac obsade poza okregiem.
+    # Najpierw rozpoznajemy takie mecze na pelnym wyliczeniu, potem liczymy obie
+    # grupy ponownie. To wazne dla podatku miesiecznego i wspolnych dojazdow.
+    scope = await club_scope(
+        province,
+        season_of(date_from),
+        [match for entry in entries for match in entry.matches],
+    )
+    outside_keys = scope["match_keys"]
+    outside_entries = []
+    if outside_keys:
+        common = dict(
+            province=province,
+            central_versions=central_versions,
+            province_versions=province_versions,
+            now=now,
+            date_from=date_from,
+            date_to=date_to,
+            include_future=include_future,
+            include_zprp=include_zprp,
+            names=names,
+        )
+        entries = E.settle_judges(
+            [item for item in assignments if item.match_key not in outside_keys], **common
+        )
+        outside_entries = E.settle_judges(
+            [item for item in assignments if item.match_key in outside_keys], **common
+        )
     # Obsady ZPRP liczymy ZAWSZE, niezaleznie od przelacznika: wylaczone musza
     # sie wytlumaczyc („1 mecz poza rozliczeniem okregu"), zamiast znikac bez
     # slowa, a przelacznik pokazuje, ile ich dojdzie.
@@ -256,6 +286,12 @@ async def load_settlement(
         "totals": E.totals_of(entries),
         "travel": E.travel_rows(entries),
         "zprp": zprp,
+        "outside_district": {
+            "clubs": scope["clubs"],
+            "entries": outside_entries,
+            "totals": E.totals_of(outside_entries),
+            "travel": E.travel_rows(outside_entries),
+        },
     }
 
 

@@ -221,5 +221,22 @@
 <div class="empty">Brak rozliczeń w wybranym okresie.</div>
 {% endif %}
 
+{% if outside_rows %}
+<section style="margin-top:8mm; page-break-before:auto">
+  <div class="title" style="font-size:11.5pt">Kluby, ktĂłre nie rozliczajÄ… siÄ™ przez okrÄ™g</div>
+  <div class="subtitle">CzÄ™Ĺ›Ä‡ informacyjna â€” poniĹĽsze kwoty nie sÄ… doliczone do zestawienia ani sumy do wypĹ‚aty.</div>
+  <div class="subtitle">{% for club in outside_clubs %}<b>{{ club.club_name }}</b> (spotkaĹ„: {{ club.matches }}){% if not loop.last %} &middot; {% endif %}{% endfor %}</div>
+  <table class="grid">
+    <thead><tr><th class="c">Lp</th><th class="l">Nazwisko i imiÄ™</th><th class="c">Mecze</th><th>Brutto</th><th>Netto</th><th>Przejazdy</th><th>Razem rozliczone</th></tr></thead>
+    <tbody>
+    {% for row in outside_rows %}
+      <tr><td class="c lp">{{ loop.index }}</td><td class="l name">{{ row.name or row.judge_id }}</td><td class="c">{{ row.matches }}</td><td>{{ row.gross | money }}</td><td>{{ row.net | money }}</td><td>{{ row.travel | money }}</td><td class="strong-col">{{ row.total | money }}</td></tr>
+    {% endfor %}
+      <tr class="total"><td></td><td class="l">RAZEM POZA OKRÄGIEM</td><td class="c">{{ outside_totals.matches }}</td><td>{{ outside_totals.gross | money }}</td><td>{{ outside_totals.net | money }}</td><td>{{ outside_totals.travel | money }}</td><td class="gold">{{ outside_totals.total | money }}</td></tr>
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
 </body>
 </html>

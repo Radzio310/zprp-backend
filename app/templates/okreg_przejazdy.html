@@ -207,5 +207,22 @@
 <div class="empty">Brak przejazdów do rozliczenia w wybranym okresie.</div>
 {% endif %}
 
+{% if outside_rows %}
+<section style="margin-top:8mm; page-break-before:auto">
+  <div class="title" style="font-size:11.5pt">Kluby, ktĂłre nie rozliczajÄ… siÄ™ przez okrÄ™g</div>
+  <div class="subtitle">CzÄ™Ĺ›Ä‡ informacyjna â€” przejazdy poniĹĽej nie sÄ… doliczone do gĹ‚Ăłwnej listy.</div>
+  <div class="subtitle">{% for club in outside_clubs %}<b>{{ club.club_name }}</b>{% if not loop.last %} &middot; {% endif %}{% endfor %}</div>
+  <table class="grid">
+    <thead><tr><th class="c">Lp</th><th class="l">Nazwisko i imiÄ™</th><th class="c">Data</th><th class="l">SkÄ…d - dokÄ…d</th><th>Suma (km)</th><th>Rozliczono</th></tr></thead>
+    <tbody>
+    {% for row in outside_rows %}
+      <tr{% if row.first_of_judge %} class="first-of-judge"{% endif %}><td class="c lp">{{ loop.index }}</td><td class="l name">{{ row.name or row.judge_id }}</td><td class="c">{{ row.day_label }}</td><td class="l">{{ row.route }}</td><td>{{ row.total_km | km }}</td><td class="amount">{{ row.amount | money }}</td></tr>
+    {% endfor %}
+      <tr class="total"><td></td><td class="l">RAZEM POZA OKRÄGIEM</td><td></td><td></td><td>{{ outside_total_km | km }}</td><td class="gold">{{ outside_total_amount | money }}</td></tr>
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
 </body>
 </html>

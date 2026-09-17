@@ -227,6 +227,7 @@ async def zestawienie_pdf(payload: PdfRequest):
     )
     entries = data["entries"]
     totals = data["totals"]
+    outside = data["outside_district"]
     _, date_to = month_range(payload.year, payload.month)
 
     number_text = await _reserve_number(
@@ -276,6 +277,14 @@ async def zestawienie_pdf(payload: PdfRequest):
             ],
             "totals": totals,
             "total_in_words": amount_in_words(totals["net"]),
+            "outside_rows": [
+                {"judge_id": e.judge_id, "name": display_judge_name(e.judge_name),
+                 "matches": e.match_count, "gross": e.gross, "net": e.net,
+                 "travel": e.travel, "total": e.total}
+                for e in outside["entries"]
+            ],
+            "outside_totals": outside["totals"],
+            "outside_clubs": outside["clubs"],
         },
     )
 
@@ -298,6 +307,7 @@ async def przejazdy_pdf(payload: PdfRequest):
         judge_ids=payload.judge_ids or None,
     )
     travel = data["travel"]
+    outside = data["outside_district"]
     _, date_to = month_range(payload.year, payload.month)
 
     rows: list[dict] = []
@@ -321,6 +331,19 @@ async def przejazdy_pdf(payload: PdfRequest):
     total_amount = round(sum(r["amount"] for r in rows), 2)
     total_km = sum(r["total_km"] for r in rows)
     judges_count = len({r["judge_id"] for r in rows})
+    outside_rows = []
+    previous_outside = None
+    for item in outside["travel"]:
+        outside_rows.append({
+            "judge_id": item.judge_id,
+            "name": display_judge_name(item.judge_name),
+            "day_label": item.day.strftime("%d.%m.%Y") if item.day else "-",
+            "route": item.route,
+            "total_km": item.total_km,
+            "amount": item.amount,
+            "first_of_judge": item.judge_id != previous_outside,
+        })
+        previous_outside = item.judge_id
 
     number_text = await _reserve_number(
         province,
@@ -358,6 +381,10 @@ async def przejazdy_pdf(payload: PdfRequest):
             "total_amount": total_amount,
             "total_km": total_km,
             "total_in_words": amount_in_words(total_amount),
+            "outside_rows": outside_rows,
+            "outside_total_amount": round(sum(r["amount"] for r in outside_rows), 2),
+            "outside_total_km": sum(r["total_km"] for r in outside_rows),
+            "outside_clubs": outside["clubs"],
         },
     )
 
