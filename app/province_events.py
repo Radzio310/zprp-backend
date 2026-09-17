@@ -1142,7 +1142,7 @@ async def checkin(body: CheckinBody, actor: Actor = Depends(market_actor)) -> Di
 # PDF listy obecności
 # ---------------------------------------------------------------------------
 
-_STATUS_LABEL = {"present": "obecny", "excused": "usprawiedliwiony", "absent": "nieobecny"}
+_STATUS_LABEL = {"present": "obecność", "excused": "usprawiedliwiona", "absent": "nieobecność"}
 _RESPONSE_LABEL = {"yes": "Będę", "no": "Nie będę"}
 
 

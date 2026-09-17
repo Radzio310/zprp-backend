@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, select
+from bs4 import BeautifulSoup
 
 from app.db import database, joomla_table_publications, zprp_archive_officials, zprp_archive_seasons
 from app.deps import get_jwt_payload
@@ -32,9 +33,18 @@ PROVINCE = "SLASKIE"
 MEDIA_PAGE = "https://slzpr.com.pl/administrator/index.php?option=com_media&path=local-images:/dokumenty"
 MEDIA_API = "https://slzpr.com.pl/administrator/index.php"
 PUBLIC_BASE = "https://slzpr.com.pl/images/dokumenty"
+MENU_EDIT = "https://slzpr.com.pl/administrator/index.php?option=com_menus&view=item&client_id=0&layout=edit&id=130"
+PUBLIC_MENU_PAGE = "https://slzpr.com.pl/index.php/home/sedziowie-i-przepisy"
 INTERVAL = 24 * 60 * 60
 WARSAW = ZoneInfo("Europe/Warsaw")
 _sync_lock = asyncio.Lock()
+
+
+def _publication_revision() -> str:
+    """Wymusza publikację również po zmianie wyglądu/flow, nie tylko danych."""
+    template = Path(__file__).parent / "templates" / "okreg_stoliki.html"
+    template_hash = hashlib.sha256(template.read_bytes()).hexdigest()[:16]
+    return f"dated-file-menu-v1:{template_hash}"
 
 
 def _as_dict(value: Any) -> dict:
@@ -60,7 +70,11 @@ def _accent(code: str) -> str:
         "SPM": "#F72585", "SPK": "#F72585", "SM": "#bb9457", "SK": "#936639",
     }
     prefix = str(code or "").split("/", 1)[0].upper()
-    return colors.get(prefix, "#888888")
+    # Kod zawodów zawiera wariant grupy, np. IKB, IMD, LCK. Dokładne
+    # wyszukiwanie robiło z nich szare badge mimo że należą do I ligi itd.
+    # Najpierw dłuższe rodziny, aby `IIIM` nie zostało przejęte przez `IIM`.
+    family = next((key for key in sorted(colors, key=len, reverse=True) if prefix.startswith(key)), None)
+    return colors.get(family or "", "#888888")
 
 
 def _person(match: dict, role: str, officials: dict) -> str:
@@ -144,7 +158,12 @@ async def _report(season_id: str, season_label: str, matches: list[dict], offici
     await enrich_table_official_rows(request)
     # Dzień jest częścią odcisku świadomie: nawet bez zmiany obsady codzienny
     # dokument odświeża stan wizualny meczów, które właśnie stały się minione.
-    canonical = json.dumps({"season": season_id, "day": datetime.now(WARSAW).date().isoformat(), "rows": request.sections[0].rows}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps({
+        "season": season_id,
+        "day": datetime.now(WARSAW).date().isoformat(),
+        "publication_revision": _publication_revision(),
+        "rows": request.sections[0].rows,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return request, request.sections[0].rows, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -159,7 +178,62 @@ def _script_options(html: str) -> dict:
     raise RuntimeError("Joomla nie zwróciła konfiguracji menedżera mediów")
 
 
-async def _upload_joomla(path: str, filename: str) -> None:
+def _menu_form(html: str, link: str) -> list[tuple[str, str]]:
+    """Odwzorowuje udany submit formularza Joomla, zmieniając tylko pole Łącze."""
+    soup = BeautifulSoup(html, "html.parser")
+    form = soup.select_one("form#item-form")
+    if form is None:
+        raise RuntimeError("Joomla nie zwróciła formularza pozycji menu MECZE")
+    fields: list[tuple[str, str]] = []
+    for node in form.select("input[name], select[name], textarea[name]"):
+        name = str(node.get("name") or "")
+        if not name or node.has_attr("disabled"):
+            continue
+        if node.name == "input":
+            kind = str(node.get("type") or "text").lower()
+            if kind in {"button", "submit", "file", "image", "reset"}:
+                continue
+            if kind in {"checkbox", "radio"} and not node.has_attr("checked"):
+                continue
+            value = str(node.get("value") or "")
+        elif node.name == "textarea":
+            value = node.get_text()
+        else:
+            selected = node.select("option[selected]") or node.select("option")[:1]
+            for option in selected:
+                fields.append((name, str(option.get("value") or "")))
+            continue
+        fields.append((name, value))
+    fields = [(name, value) for name, value in fields if name not in {"jform[link]", "task"}]
+    fields.extend((("jform[link]", link), ("task", "item.apply")))
+    return fields
+
+
+async def _update_menu_link(client: httpx.AsyncClient, link: str, cache_key: str) -> None:
+    edit = await client.get(MENU_EDIT)
+    edit.raise_for_status()
+    saved = await client.post(MENU_EDIT, data=_menu_form(edit.text, link))
+    saved.raise_for_status()
+
+    # Źródłem prawdy jest ponownie otwarty formularz, nie sam kod 200 po POST.
+    verify = await client.get(f"{MENU_EDIT}&verify={cache_key}")
+    verify.raise_for_status()
+    soup = BeautifulSoup(verify.text, "html.parser")
+    field = soup.select_one('#jform_link')
+    if field is None or str(field.get("value") or "") != link:
+        raise RuntimeError("PDF wgrano, ale Joomla nie zapisała nowego łącza pozycji MECZE")
+
+    # Sprawdzamy też publiczne menu z cachebusterem. Joomla może chwilę
+    # przebudowywać cache, więc dajemy jej trzy krótkie próby.
+    for attempt in range(3):
+        public_menu = await client.get(f"{PUBLIC_MENU_PAGE}?v={cache_key}-{attempt}")
+        if public_menu.status_code == 200 and link in public_menu.text.replace("&amp;", "&"):
+            return
+        await asyncio.sleep(1.5)
+    raise RuntimeError("Łącze zapisano w Joomla, ale publiczne menu MECZE nie pokazuje jeszcze nowego adresu")
+
+
+async def _upload_joomla(path: str, filename: str, fingerprint: str) -> str:
     username, password = os.getenv("JOOMLA_USERNAME"), os.getenv("JOOMLA_PASSWORD")
     if not username or not password:
         raise RuntimeError("Brak JOOMLA_USERNAME lub JOOMLA_PASSWORD")
@@ -192,7 +266,7 @@ async def _upload_joomla(path: str, filename: str) -> None:
         # Nie zapisujemy sukcesu wyłącznie na podstawie odpowiedzi panelu. Publiczna
         # ścieżka ma już zwracać PDF — cachebuster zapobiega odczytaniu starej kopii.
         public = None
-        cache_key = hashlib.sha256(content[:2048].encode()).hexdigest()[:12]
+        cache_key = fingerprint[:12]
         for attempt in range(3):
             public = await client.get(f"{PUBLIC_BASE}/{filename}?v={cache_key}-{attempt}")
             if public.status_code == 200 and public.content.startswith(b"%PDF"):
@@ -201,6 +275,9 @@ async def _upload_joomla(path: str, filename: str) -> None:
         if public is None or public.status_code != 200 or not public.content.startswith(b"%PDF"):
             code = public.status_code if public is not None else "brak odpowiedzi"
             raise RuntimeError(f"Joomla przyjęła plik, ale publiczny PDF nie jest dostępny (HTTP {code})")
+        menu_link = f"images/dokumenty/{filename}?v={cache_key}"
+        await _update_menu_link(client, menu_link, cache_key)
+        return f"{PUBLIC_BASE}/{filename}?v={cache_key}"
 
 
 async def sync_tables_to_joomla(trigger: str = "scheduled") -> dict:
@@ -213,36 +290,50 @@ async def sync_tables_to_joomla(trigger: str = "scheduled") -> dict:
 async def _sync_tables_to_joomla(trigger: str) -> dict:
     checked_at = datetime.now(timezone.utc)
     season_id = season_label = fingerprint = previous = None
-    filename = "stoliki_26_27.pdf"
+    filename = f"stoliki_{datetime.now(WARSAW):%d_%m_%Y}.pdf"
+    public_url = None
     matches_count = 0
     try:
         season_id, season_label, matches, officials = await _current_payload()
         request, rows, fingerprint = await _report(season_id, season_label, matches, officials)
-        filename, matches_count = f"stoliki_{season_label[2:4]}_{season_label[-2:]}.pdf", len(rows)
-        latest = await database.fetch_one(select(joomla_table_publications.c.fingerprint).where(
+        filename, matches_count = f"stoliki_{datetime.now(WARSAW):%d_%m_%Y}.pdf", len(rows)
+        latest = await database.fetch_one(select(
+            joomla_table_publications.c.fingerprint,
+            joomla_table_publications.c.filename,
+        ).where(
             joomla_table_publications.c.status == "published"
         ).order_by(joomla_table_publications.c.id.desc()).limit(1))
         previous = latest["fingerprint"] if latest else None
-        if fingerprint == previous:
+        # Nie pomijamy pierwszego przebiegu po wdrożeniu nowego schematu nazw.
+        # Dzięki temu starszy sukces dla `stoliki_26_27.pdf` nie zatrzyma
+        # podmiany pozycji MECZE na dzisiejszy, wersjonowany plik.
+        if fingerprint == previous and latest and latest["filename"] == filename:
             status, changed, message = "unchanged", False, "Brak zmian w obsadach — bez publikacji"
         else:
             response = _render_pdf(request, "stoliki_ligowe", "okreg_stoliki.html")
             pdf_path = Path(str(response.path))
             try:
-                await _upload_joomla(str(pdf_path), filename)
+                public_url = await _upload_joomla(str(pdf_path), filename, fingerprint)
             finally:
                 pdf_path.unlink(missing_ok=True)
-            status, changed, message = "published", True, "PDF wygenerowany i nadpisany w Joomla"
+            status, changed, message = "published", True, "PDF wgrany, a łącze MECZE zaktualizowane w Joomla"
     except Exception as exc:
         logger.exception("[joomla-tables] synchronizacja nie powiodła się")
         status, changed, message = "error", False, str(exc)[:1000]
-    public_url = f"{PUBLIC_BASE}/{filename}"
+    public_url = public_url or f"{PUBLIC_BASE}/{filename}?v={(fingerprint or '')[:12]}"
     await database.execute(joomla_table_publications.insert().values(
         checked_at=checked_at, season_id=season_id, season_label=season_label, filename=filename,
         fingerprint=fingerprint, previous_fingerprint=previous, status=status, trigger=trigger, changed=changed,
         matches=matches_count, message=message, public_url=public_url,
     ))
-    return {"status": status, "changed": changed, "matches": matches_count, "filename": filename, "message": message}
+    return {
+        "status": status,
+        "changed": changed,
+        "matches": matches_count,
+        "filename": filename,
+        "message": message,
+        "public_url": public_url,
+    }
 
 
 async def run_joomla_tables_scheduler() -> None:

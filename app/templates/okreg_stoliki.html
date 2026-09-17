@@ -45,10 +45,11 @@
     .date, .time { white-space: nowrap; overflow-wrap: normal; word-break: normal; font-size: 7.1pt; }
     .badge { display: inline-block; padding: 1.25mm 2.4mm; border: 1px solid; border-radius: 2.5mm; font-weight: 800; white-space: nowrap; }
     .badge-link { text-decoration: none; }
-    tr.past td { color: #7f899c; background: #f7f8fb; }
-    tr.past .strong { color: #6f7889; }
-    tr.past .time { color: #7189b8; }
-    tr.past .badge { opacity: .56; }
+    tr.past td { color: #9aa3b2 !important; background: #f1f3f7 !important; }
+    tr.past .strong { color: #858e9d !important; }
+    tr.past .time { color: #8193b6 !important; }
+    tr.past .badge { opacity: .48; }
+    tr.period-separator td { padding: 1.4mm 2mm; border-color: #d9dfeb; background: #e8edf6 !important; color: #68758e; font-size: 6.4pt; font-weight: 800; letter-spacing: 1.15pt; text-transform: uppercase; }
     .empty { padding: 14mm; border: 1px solid #d9dfeb; color: #7b86a0; text-align: center; }
   </style>
 </head>
@@ -71,7 +72,8 @@
   {% for section in sections %}
     <div class="report-head">
       <div class="report-title"><h2>Stoliki ligowe</h2></div>
-      <div class="count-cell"><div class="count"><strong>{{ section.rows|length }}</strong><span>STOLIKÓW</span></div></div>
+      {% set count = section.rows|length %}
+      <div class="count-cell"><div class="count"><strong>{{ count }}</strong><span>{% if count == 1 %}STOLIK{% elif count % 10 in [2, 3, 4] and count % 100 not in [12, 13, 14] %}STOLIKI{% else %}STOLIKÓW{% endif %}</span></div></div>
     </div>
     {% if section.rows %}
     <table>
@@ -79,9 +81,12 @@
       <thead><tr><th>L.p.</th><th>Data</th><th>Godzina</th><th>Zawody</th><th>Gospodarz</th><th>Gość</th><th>Adres hali</th><th>Sekretarz</th><th>Mierzący czas</th></tr></thead>
       <tbody>
       {% for row in section.rows %}
+        {% if row.past and (loop.first or not loop.previtem.past) %}
+        <tr class="period-separator"><td colspan="9">Minione mecze · stan na {{ generated_at }}</td></tr>
+        {% endif %}
         <tr{% if row.past %} class="past"{% endif %}>
           <td class="center">{{ row.lp|cell }}</td><td class="center strong date">{{ row.date|cell }}</td><td class="center time">{{ row.time|cell }}</td>
-          <td class="center">{% if row.match_url %}<a class="badge-link" href="{{ row.match_url }}">{% endif %}<span class="badge" style="color:{{ row.accent|hexcolor }};border-color:{{ row.accent|hexcolor }};background:{{ row.accent|hexrgba(0.13) }}">{{ row.code|cell }}</span>{% if row.match_url %}</a>{% endif %}</td>
+          <td class="center">{% if row.match_url %}<a class="badge-link" href="{{ row.match_url }}" target="_blank" rel="noopener noreferrer">{% endif %}<span class="badge" style="color:{{ row.accent|hexcolor }};border-color:{{ row.accent|hexcolor }};background:{{ row.accent|hexrgba(0.13) }}">{{ row.code|cell }}</span>{% if row.match_url %}</a>{% endif %}</td>
           <td class="strong">{{ row.home|cell }}</td><td class="strong">{{ row.away|cell }}</td><td>{{ row.hall|cell }}</td><td>{{ row.secretary|cell }}</td><td>{{ row.timer|cell }}</td>
         </tr>
       {% endfor %}
