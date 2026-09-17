@@ -13,6 +13,7 @@ dolozenie nowej tabeli po stronie przegladarki nie wymaga zmian w backendzie.
 from __future__ import annotations
 
 import csv
+import asyncio
 import io
 import os
 import re
@@ -28,6 +29,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
+from app.settlement_venues import fetch_venue
+
 router = APIRouter(tags=["Statystyki okregowe: eksport"])
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -39,6 +42,27 @@ DOWNLOAD_DIR = "/tmp/okreg_stats_downloads"
 # wszystkich pozycji obsady razem z meczami spoza okregu.
 MAX_ROWS = 50_000
 MAX_SECTIONS = 40
+
+
+async def enrich_table_official_rows(payload: "ReportExportRequest") -> None:
+    """Dopina oficjalny adres hali do wierszy stolików, bez zgadywania z nazwy."""
+    import httpx
+
+    rows = [row for section in payload.sections for row in section.rows if row.get("match_id")]
+    semaphore = asyncio.Semaphore(8)
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        async def enrich(row: Dict[str, Any]) -> None:
+            async with semaphore:
+                venue = await fetch_venue(client, row.get("match_id"), timeout=12.0)
+            if not venue:
+                return
+            street = " ".join(filter(None, [venue.get("street", "").strip(), venue.get("number", "").strip()]))
+            # Na wydruku ma być adres, nie nazwa obiektu. Miasto zostaje
+            # bezpieczną drogą awaryjną, gdy ZPRP nie podało ulicy.
+            row["hall"] = " · ".join(filter(None, [venue.get("city", "").strip(), street])) or "—"
+
+        await asyncio.gather(*(enrich(row) for row in rows))
 
 
 class ExportColumn(BaseModel):
@@ -412,6 +436,7 @@ async def export_table_officials_pdf(payload: ReportExportRequest):
     from app.province_settlement_pdf import _org, _province_logo_b64
 
     province = payload.meta.province
+    await enrich_table_official_rows(payload)
     org = _org(province)
     return _render_pdf(
         payload,
@@ -431,6 +456,7 @@ async def export_table_officials_pdf_link(payload: ReportExportRequest, request:
     from app.province_settlement_pdf import _org, _province_logo_b64
 
     province = payload.meta.province
+    await enrich_table_official_rows(payload)
     org = _org(province)
     response = _render_pdf(
         payload,

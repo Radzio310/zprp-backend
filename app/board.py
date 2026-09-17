@@ -425,9 +425,24 @@ async def snapshot(province: str = Query(...), payload: dict = Depends(get_jwt_p
         "members": members,
         "comment_counts": {f"{row['target_type']}:{row['target_id']}": int(row["n"]) for row in counts},
         "attachments": attachments,
+        "province_events": await _province_events_preview(prov),
         "version": await _version(prov),
         "server_time": _now().isoformat(),
     }
+
+
+async def _province_events_preview(province: str) -> List[Dict[str, Any]]:
+    """Wydarzenia okręgowe z aplikacji - w kalendarzu Tablicy tylko do podglądu (17.09.2026).
+
+    Awaria tamtego modułu nie może zabrać komisji całej tablicy.
+    """
+    try:
+        from app.province_events import board_preview
+
+        return await board_preview(list(spellings(province)))
+    except Exception:  # noqa: BLE001
+        logger.warning("[board] podgląd wydarzeń okręgowych nieudany", exc_info=True)
+        return []
 
 
 @router.get("/version")

@@ -1492,6 +1492,17 @@ province_events = Table(
     Column("name", String, nullable=False),
     Column("description", Text, nullable=True),
 
+    # Przebudowa 17.09.2026 - na produkcji dokłada je blok ALTER przy starcie.
+    Column("event_type", String, nullable=True),
+    Column("end_date", DateTime(timezone=True), nullable=True),
+    Column("cancelled_at", DateTime(timezone=True), nullable=True),
+    Column("cancel_reason", Text, nullable=True),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
+    Column("series_id", String, nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_by_name", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=True),
+
     # Dowolny JSON: targetowanie, lista invited/present, metadane, etc.
     Column(
         "data_json",
@@ -1510,6 +1521,54 @@ province_events = Table(
 )
 
 Index("ix_province_events_prov_date", province_events.c.province, province_events.c.event_date)
+
+# 18.7a) Wydarzenia okręgowe - przebudowa z 17.09.2026 (`app/province_event_rules.py`).
+# Nowe kolumny `province_events` dokłada blok ALTER przy starcie (tabela istnieje
+# na produkcji). Odpowiedzi i obecność w osobnych tabelach, a nie w `data_json`:
+# sędzia wbijający się kodem i komisja zaznaczająca listę piszą równocześnie
+# i jeden zapis nie może zjeść drugiego.
+province_event_responses = Table(
+    "province_event_responses",
+    metadata,
+    Column("event_id", Integer, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("status", String, nullable=False),  # yes | no
+    Column("reason", Text, nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+province_event_attendance = Table(
+    "province_event_attendance",
+    metadata,
+    Column("event_id", Integer, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("status", String, nullable=False),  # present | excused
+    Column("source", String, nullable=False, server_default="manual"),  # manual | qr | code | legacy
+    Column("marked_by", String, nullable=True),
+    Column("marked_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+province_event_templates = Table(
+    "province_event_templates",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("name", String, nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# Jedno powiadomienie danego rodzaju na osobę i wydarzenie - przejście w tle
+# może się powtórzyć po restarcie i nie wolno mu wysłać drugi raz.
+province_event_notifications = Table(
+    "province_event_notifications",
+    metadata,
+    Column("event_id", Integer, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("kind", String, primary_key=True),
+    Column("sent_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
 
 # (18.8) Province Travel – zapisy przejazdów per sędzia (wszystkie sezony w data_json)
 province_travel = Table(
@@ -3981,6 +4040,21 @@ with engine.connect() as _conn:
         "ALTER TABLE board_events ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
     ):
         _conn.execute(text(_board_sql))
+    # Wydarzenia okręgowe (17.09.2026): typ, koniec, odwołanie, kosz i seria.
+    for _event_sql in (
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS event_type varchar",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS end_date timestamptz",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS cancelled_at timestamptz",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS cancel_reason text",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS series_id varchar",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS created_by varchar",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS created_by_name varchar",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS created_at timestamptz",
+        "CREATE INDEX IF NOT EXISTS ix_province_event_attendance_judge ON province_event_attendance (judge_id)",
+        "CREATE INDEX IF NOT EXISTS ix_province_event_responses_judge ON province_event_responses (judge_id)",
+    ):
+        _conn.execute(text(_event_sql))
     _conn.execute(text("ALTER TABLE mentoring_active_members ADD COLUMN IF NOT EXISTS seen_at timestamptz"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mentoring_mentor ON mentoring_assignments (mentor_id, ended_at)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_user_id ON beach_reports (user_id)"))

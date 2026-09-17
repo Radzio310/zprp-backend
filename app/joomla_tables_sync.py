@@ -22,7 +22,7 @@ from sqlalchemy import and_, select
 
 from app.db import database, joomla_table_publications, zprp_archive_officials, zprp_archive_seasons
 from app.deps import get_jwt_payload
-from app.province_stats_export import ExportColumn, ExportMeta, ExportSection, ReportExportRequest, _render_pdf
+from app.province_stats_export import ExportColumn, ExportMeta, ExportSection, ReportExportRequest, _render_pdf, enrich_table_official_rows
 from app.zprp_archive import current_start, season_catalog
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ async def _current_payload() -> tuple[str, str, list[dict], dict]:
     return season.id, season.label, list(payload.get("matches") or []), _as_dict(roster["officials_json"])
 
 
-def _report(season_id: str, season_label: str, matches: list[dict], officials: dict) -> tuple[ReportExportRequest, list[dict], str]:
+async def _report(season_id: str, season_label: str, matches: list[dict], officials: dict) -> tuple[ReportExportRequest, list[dict], str]:
     ids = {str(key) for key in officials}
     selected = []
     for match in matches:
@@ -108,18 +108,24 @@ def _report(season_id: str, season_label: str, matches: list[dict], officials: d
             continue
         date, time_label, stamp = _date_time(match)
         selected.append((stamp, match, date, time_label))
-    selected.sort(key=lambda item: (item[0], str(item[1].get("code") or "")))
+    selected.sort(key=lambda item: (item[0], str(item[1].get("code") or "")), reverse=True)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     rows = [{
         "lp": index,
         "date": date,
         "time": time_label,
         "code": str(match.get("code") or "—"),
+        "match_id": str(match.get("id") or ""),
+        "match_url": f"https://rozgrywki.zprp.pl/index.php?a=zawody&b=protokol&IdZawody={match.get('id')}" if match.get("id") else "",
         "accent": _accent(str(match.get("code") or "")),
         "home": str(match.get("home") or "—"),
         "away": str(match.get("away") or "—"),
-        "hall": " · ".join(filter(None, [str(match.get("city") or ""), str(match.get("hall") or "")])),
+        # Ulica i numer zostaną dociągnięte z API szczegółów. Przy chwilowej
+        # awarii zostaje samo miasto — nigdy nazwa obiektu udająca adres.
+        "hall": str(match.get("city") or "—"),
         "secretary": _person(match, "secretary", officials),
         "timer": _person(match, "timer", officials),
+        "past": bool(stamp and stamp < now_ms),
     } for index, (_, match, date, time_label) in enumerate(selected, 1)]
     short = season_label.replace("20", "").replace("/", "_")
     filename = f"stoliki_{short}.pdf"
@@ -135,8 +141,11 @@ def _report(season_id: str, season_label: str, matches: list[dict], officials: d
         )],
         filename=filename[:-4],
     )
-    canonical = json.dumps({"season": season_id, "rows": rows}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return request, rows, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    await enrich_table_official_rows(request)
+    # Dzień jest częścią odcisku świadomie: nawet bez zmiany obsady codzienny
+    # dokument odświeża stan wizualny meczów, które właśnie stały się minione.
+    canonical = json.dumps({"season": season_id, "day": datetime.now(WARSAW).date().isoformat(), "rows": request.sections[0].rows}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return request, request.sections[0].rows, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _script_options(html: str) -> dict:
@@ -208,7 +217,7 @@ async def _sync_tables_to_joomla(trigger: str) -> dict:
     matches_count = 0
     try:
         season_id, season_label, matches, officials = await _current_payload()
-        request, rows, fingerprint = _report(season_id, season_label, matches, officials)
+        request, rows, fingerprint = await _report(season_id, season_label, matches, officials)
         filename, matches_count = f"stoliki_{season_label[2:4]}_{season_label[-2:]}.pdf", len(rows)
         latest = await database.fetch_one(select(joomla_table_publications.c.fingerprint).where(
             joomla_table_publications.c.status == "published"

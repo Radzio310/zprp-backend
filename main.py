@@ -1307,6 +1307,12 @@ async def startup():
     from app.match_bombs import run_bomb_notice_sweep
     _bomb_notice_task = asyncio.create_task(run_bomb_notice_sweep())
 
+    # Wydarzenia okręgowe: przypomnienia dobę i godzinę przed oraz ponaglenie
+    # o brak odpowiedzi. Przejście w tle z dziennikiem wysyłek, bo zadanie
+    # odroczone w pamięci procesu zjadłby restart Railway.
+    from app.province_events import run_event_reminder_sweep
+    _province_event_task = asyncio.create_task(run_event_reminder_sweep())
+
     # Ręczne potwierdzenia badań, które związek ma już jako „OK", awansują
     # także w meczach, przy których nikt nie zapisuje już bloba (po ostatnim
     # gwizdku, przed zatwierdzeniem) - patrz `app/proel_exams.py`.

@@ -25,11 +25,13 @@
     .doc-period { color: #3d4658; font-size: 8.5pt; margin-top: .8mm; }
     .rule { height: 1.6mm; margin: 2mm 0 3.5mm; background: #0B4F9E; }
     .rule-gold { float: left; width: 38mm; height: 1.6mm; background: #F0A500; }
-    .report-head { display: flex; align-items: center; justify-content: space-between; gap: 8mm; margin: 4mm 0 3mm; }
-    .report-head h2 { margin: 0; font-size: 17pt; letter-spacing: -.2px; }
-    .count { min-width: 35mm; padding: 2.5mm 5mm; border: 1px solid #d8dfed; border-radius: 3mm; background: #f4f7fc; text-align: right; }
-    .count strong { color: #2e55a2; font-size: 15pt; }
-    .count span { display: block; margin-top: .4mm; color: #7b86a0; font-size: 6.5pt; font-weight: 800; letter-spacing: 1.2px; }
+    .report-head { display: table; width: 100%; margin: 2.5mm 0; }
+    .report-title { display: table-cell; vertical-align: middle; }
+    .report-head h2 { margin: 0; font-size: 16pt; line-height: 1; letter-spacing: -.2px; white-space: nowrap; }
+    .count-cell { display: table-cell; width: 1%; vertical-align: middle; text-align: right; white-space: nowrap; }
+    .count { display: inline-block; min-width: 31mm; padding: 1.5mm 3.5mm; border: 1px solid #d8dfed; border-radius: 2.5mm; background: #f4f7fc; text-align: center; white-space: nowrap; }
+    .count strong { color: #2e55a2; font-size: 13pt; line-height: 1; }
+    .count span { margin-left: 1.5mm; color: #7b86a0; font-size: 6.2pt; font-weight: 800; letter-spacing: 1px; vertical-align: 1.2pt; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     thead { display: table-header-group; }
     th { padding: 2.5mm 1.6mm; color: white; background: #31579f; font-size: 7.4pt; text-align: left; }
@@ -40,7 +42,13 @@
     .center { text-align: center; }
     .strong { font-weight: 700; }
     .time { color: #2452a0; font-weight: 800; }
+    .date, .time { white-space: nowrap; overflow-wrap: normal; word-break: normal; font-size: 7.1pt; }
     .badge { display: inline-block; padding: 1.25mm 2.4mm; border: 1px solid; border-radius: 2.5mm; font-weight: 800; white-space: nowrap; }
+    .badge-link { text-decoration: none; }
+    tr.past td { color: #7f899c; background: #f7f8fb; }
+    tr.past .strong { color: #6f7889; }
+    tr.past .time { color: #7189b8; }
+    tr.past .badge { opacity: .56; }
     .empty { padding: 14mm; border: 1px solid #d9dfeb; color: #7b86a0; text-align: center; }
   </style>
 </head>
@@ -62,18 +70,18 @@
   <div class="rule"><div class="rule-gold"></div></div>
   {% for section in sections %}
     <div class="report-head">
-      <h2>Stoliki ligowe</h2>
-      <div class="count"><strong>{{ section.rows|length }}</strong><span>STOLIKÓW</span></div>
+      <div class="report-title"><h2>Stoliki ligowe</h2></div>
+      <div class="count-cell"><div class="count"><strong>{{ section.rows|length }}</strong><span>STOLIKÓW</span></div></div>
     </div>
     {% if section.rows %}
     <table>
-      <colgroup><col style="width:5%"><col style="width:7%"><col style="width:7%"><col style="width:8%"><col style="width:15%"><col style="width:15%"><col style="width:20%"><col style="width:11.5%"><col style="width:11.5%"></colgroup>
-      <thead><tr><th>L.p.</th><th>Data</th><th>Godzina</th><th>Zawody</th><th>Gospodarz</th><th>Gość</th><th>Hala</th><th>Sekretarz</th><th>Mierzący czas</th></tr></thead>
+      <colgroup><col style="width:4.5%"><col style="width:8.5%"><col style="width:5.5%"><col style="width:8%"><col style="width:15%"><col style="width:15%"><col style="width:20.5%"><col style="width:11.5%"><col style="width:11.5%"></colgroup>
+      <thead><tr><th>L.p.</th><th>Data</th><th>Godzina</th><th>Zawody</th><th>Gospodarz</th><th>Gość</th><th>Adres hali</th><th>Sekretarz</th><th>Mierzący czas</th></tr></thead>
       <tbody>
       {% for row in section.rows %}
-        <tr>
-          <td class="center">{{ row.lp|cell }}</td><td class="center strong">{{ row.date|cell }}</td><td class="center time">{{ row.time|cell }}</td>
-          <td class="center"><span class="badge" style="color:{{ row.accent|hexcolor }};border-color:{{ row.accent|hexcolor }};background:{{ row.accent|hexrgba(0.13) }}">{{ row.code|cell }}</span></td>
+        <tr{% if row.past %} class="past"{% endif %}>
+          <td class="center">{{ row.lp|cell }}</td><td class="center strong date">{{ row.date|cell }}</td><td class="center time">{{ row.time|cell }}</td>
+          <td class="center">{% if row.match_url %}<a class="badge-link" href="{{ row.match_url }}">{% endif %}<span class="badge" style="color:{{ row.accent|hexcolor }};border-color:{{ row.accent|hexcolor }};background:{{ row.accent|hexrgba(0.13) }}">{{ row.code|cell }}</span>{% if row.match_url %}</a>{% endif %}</td>
           <td class="strong">{{ row.home|cell }}</td><td class="strong">{{ row.away|cell }}</td><td>{{ row.hall|cell }}</td><td>{{ row.secretary|cell }}</td><td>{{ row.timer|cell }}</td>
         </tr>
       {% endfor %}
