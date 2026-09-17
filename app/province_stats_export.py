@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
@@ -45,14 +46,48 @@ MAX_SECTIONS = 40
 
 
 async def enrich_table_official_rows(payload: "ReportExportRequest") -> None:
-    """Dopina oficjalny adres hali do wierszy stolików, bez zgadywania z nazwy."""
+    """Dopina adres hali i prawidłowy publiczny URL szczegółów meczu."""
     import httpx
 
     rows = [row for section in payload.sections for row in section.rows if row.get("match_id")]
     semaphore = asyncio.Semaphore(8)
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
+        # Publiczny ekran meczu wymaga jednocześnie ID sezonu, rozgrywek i
+        # meczu. Samo `a=zawody&b=protokol` prowadziło do technicznego widoku.
+        season_ids = {str(row.get("season_id") or "").strip() for row in rows}
+        season_ids.discard("")
+        competition_ids: Dict[tuple[str, str], str] = {}
+        for season_id in season_ids:
+            response = await client.get(
+                "https://rozgrywki.zprp.pl/api/pokaz_rozgrywki.php",
+                params={"Sezon": season_id},
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            payload_json = response.json()
+            competitions = payload_json.values() if isinstance(payload_json, dict) else payload_json
+            for competition in competitions or []:
+                if not isinstance(competition, dict):
+                    continue
+                code = str(competition.get("code_export") or competition.get("code") or "").strip().upper()
+                competition_id = str(competition.get("Id_rozgrywki") or "").strip()
+                if code and competition_id:
+                    competition_ids[(season_id, code)] = competition_id
+
         async def enrich(row: Dict[str, Any]) -> None:
+            season_id = str(row.get("season_id") or "").strip()
+            full_code = str(row.get("code") or "").strip()
+            competition_code = (full_code.rsplit("/", 1)[0] if "/" in full_code else full_code).upper()
+            competition_id = competition_ids.get((season_id, competition_code))
+            if season_id and competition_id:
+                query = urlencode({
+                    "Sezon": season_id,
+                    "Rozgrywki": competition_id,
+                    "Mecz": str(row.get("match_id")),
+                })
+                row["match_url"] = f"https://rozgrywki.zprp.pl/index.php?{query}"
+
             async with semaphore:
                 venue = await fetch_venue(client, row.get("match_id"), timeout=12.0)
             if not venue:
