@@ -22,6 +22,7 @@ Decyzje użytkownika z 17.09.2026 (przebudowa wydarzeń w panelu okręgowym):
 from __future__ import annotations
 
 import calendar
+import math
 import re
 import secrets
 from dataclasses import dataclass
@@ -87,6 +88,11 @@ RSVP_NUDGE = timedelta(hours=24)
 NOTIFY_KINDS = ("new", "changed", "cancelled", "day", "hour", "rsvp")
 
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+#: Identyfikator miejsca Google (ChIJ...). Tylko do nawigacji, więc bez znaków specjalnych.
+_PLACE_ID = re.compile(r"^[A-Za-z0-9_-]{10,300}$")
+#: Przesunięcie pinezki, od którego zaproszeni dostają push o zmianie miejsca
+#: (~160 m na szerokości Polski). Poprawka wejścia do hali to nie przeprowadzka.
+PIN_MOVE = 0.0015
 
 
 def _s(value: Any) -> str:
@@ -246,12 +252,57 @@ def clean_reason(value: Any) -> Optional[str]:
     return text or None
 
 
-def clean_place(value: Any) -> Dict[str, Optional[str]]:
+def _coordinate(value: Any, limit: float) -> Optional[float]:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(number, 6) if math.isfinite(number) and -limit <= number <= limit else None
+
+
+def clean_place(value: Any) -> Dict[str, Any]:
+    """Nazwa, adres i pinezka z mapy.
+
+    Współrzędne przychodzą z wybieraka na mapie i liczą się tylko w parze -
+    to one prowadzą nawigację. Wydarzenie bez pinezki zapisuje się jak dawniej
+    (sama nazwa i adres), więc stare rekordy nie zmieniają kształtu.
+    """
     raw = value if isinstance(value, Mapping) else {}
     name, address = _s(raw.get("name")), _s(raw.get("address"))
     if len(name) > PLACE_MAX or len(address) > PLACE_MAX:
         raise Invalid(f"Miejsce ma najwyżej {PLACE_MAX} znaków")
-    return {"name": name or None, "address": address or None}
+    out: Dict[str, Any] = {"name": name or None, "address": address or None}
+    has_lat = raw.get("lat") not in (None, "")
+    has_lng = raw.get("lng") not in (None, "")
+    if not has_lat and not has_lng:
+        return out
+    lat, lng = _coordinate(raw.get("lat"), 90), _coordinate(raw.get("lng"), 180)
+    if lat is None or lng is None:
+        raise Invalid("Pinezka miejsca ma złe współrzędne - wybierz miejsce na mapie jeszcze raz")
+    out["lat"], out["lng"] = lat, lng
+    place_id = _s(raw.get("place_id"))
+    if _PLACE_ID.match(place_id):
+        out["place_id"] = place_id
+    return out
+
+
+def same_place(before: Any, after: Any) -> bool:
+    """Czy to to samo miejsce dla zaproszonych.
+
+    Nazwa i adres muszą się zgadzać. Pinezka liczy się dopiero wtedy, gdy obie
+    wersje ją mają: dopięcie pinezki do starego wydarzenia pod tym samym
+    adresem nie jest zmianą, a przesunięcie o kilkadziesiąt metrów też nie.
+    """
+    a = before if isinstance(before, Mapping) else {}
+    b = after if isinstance(after, Mapping) else {}
+    if (_s(a.get("name")), _s(a.get("address"))) != (_s(b.get("name")), _s(b.get("address"))):
+        return False
+    coords = [_coordinate(a.get("lat"), 90), _coordinate(a.get("lng"), 180), _coordinate(b.get("lat"), 90), _coordinate(b.get("lng"), 180)]
+    if any(value is None for value in coords):
+        return True
+    return abs(coords[0] - coords[2]) <= PIN_MOVE and abs(coords[1] - coords[3]) <= PIN_MOVE
 
 
 def clean_program(items: Any) -> List[Dict[str, Any]]:
@@ -541,7 +592,9 @@ def due_reminders(
 
 def meaningful_change(before: Mapping[str, Any], after: Mapping[str, Any]) -> bool:
     """Zmiana, o której warto powiadomić: termin albo miejsce, nie literówka w opisie."""
-    keys = ("event_date", "end_date", "place", "online_url")
+    if not same_place(before.get("place"), after.get("place")):
+        return True
+    keys = ("event_date", "end_date", "online_url")
     return any(before.get(key) != after.get(key) for key in keys)
 
 

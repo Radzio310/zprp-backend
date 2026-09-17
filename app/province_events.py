@@ -358,10 +358,15 @@ async def _notify_new(event: Mapping[str, Any], invited: List[str], occurrences:
     await _push(people, title, body, event, "new")
 
 
-async def _notify_changed(event: Mapping[str, Any], invited: List[str], actor_id: str) -> None:
+async def _notify_changed(event: Mapping[str, Any], invited: List[str], actor_id: str, place_only: bool = False) -> None:
     data = _data(event.get("data_json"))
     place = _place_label(data)
-    body = f"Nowy termin: {_when(event)}{f' · {place}' if place else ''}."
+    if place_only:
+        address = _s((data.get("place") or {}).get("address")) if isinstance(data.get("place"), Mapping) else ""
+        where = " · ".join(part for part in (place, address) if part and part != "online") or "sprawdź w aplikacji"
+        body = f"Nowe miejsce: {where}. Termin bez zmian: {_when(event)}."
+    else:
+        body = f"Nowy termin: {_when(event)}{f' · {place}' if place else ''}."
     await _push([j for j in invited if j != actor_id], f"🔁 Zmiana: {event['name']}", body, event, "changed")
 
 
@@ -697,7 +702,12 @@ async def patch_v2(event_id: int, body: EventPatch, actor: Actor = Depends(marke
                 )
             if target["id"] == event_id:
                 fresh = await _event(event_id)
-                await _notify_changed(fresh, R.invited_ids(judges, fresh["data_json"]), who.judge_id)
+                place_only = (
+                    before["event_date"] == after["event_date"]
+                    and before["end_date"] == after["end_date"]
+                    and not R.same_place(before["place"], after["place"])
+                )
+                await _notify_changed(fresh, R.invited_ids(judges, fresh["data_json"]), who.judge_id, place_only)
         changed += 1
     return {"updated": changed}
 

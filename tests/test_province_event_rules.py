@@ -145,6 +145,26 @@ def test_kosz_i_zmiana_warta_powiadomienia():
     assert not R.meaningful_change(before, dict(before))
     assert R.meaningful_change(before, {**before, "place": {"name": "Sala"}})
 
+    # Pinezka dopięta do starego wydarzenia pod tym samym adresem - bez pusha.
+    pinned = {**before, "place": {"name": "Hala", "address": None, "lat": 50.2641, "lng": 19.0238}}
+    assert not R.meaningful_change(before, pinned)
+    # Poprawka o kilkadziesiąt metrów to nie zmiana, inna hala w mieście - tak.
+    nudged = {**pinned, "place": {**pinned["place"], "lat": 50.2645, "lng": 19.0242}}
+    assert not R.meaningful_change(pinned, nudged)
+    moved = {**pinned, "place": {**pinned["place"], "lat": 50.2841, "lng": 19.0238}}
+    assert R.meaningful_change(pinned, moved)
+
+
+def test_miejsce_z_pinezka():
+    place = R.clean_place({"name": " Hala MOSiR ", "address": "Sportowa 1, Katowice", "lat": "50.2641234567", "lng": 19.02381, "place_id": "ChIJx9Lr6d3OFkcRabc123"})
+    assert place == {"name": "Hala MOSiR", "address": "Sportowa 1, Katowice", "lat": 50.264123, "lng": 19.02381, "place_id": "ChIJx9Lr6d3OFkcRabc123"}
+    # Bez współrzędnych kształt jak dawniej; śmieciowy identyfikator Google przepada.
+    assert R.clean_place({"name": "Hala", "lat": None, "lng": ""}) == {"name": "Hala", "address": None}
+    assert "place_id" not in R.clean_place({"lat": 50, "lng": 19, "place_id": "<script>"})
+    for bad in ({"lat": 50}, {"lat": 95, "lng": 19}, {"lat": "x", "lng": 19}, {"lat": True, "lng": 19}):
+        with pytest.raises(R.Invalid, match="współrzędne"):
+            R.clean_place(bad)
+
 
 def test_prompt_grafiki_bez_tekstu():
     prompt = R.title_image_prompt(name="Szkolenie przed rundą", event_type="training", place="Katowice", date_label="01.10")
