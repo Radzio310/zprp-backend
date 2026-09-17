@@ -916,6 +916,25 @@ zprp_archive_officials = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
 )
 
+# Historia automatycznej publikacji śląskich stolików ligowych w Joomla.
+joomla_table_publications = Table(
+    "joomla_table_publications",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("checked_at", DateTime(timezone=True), nullable=False, server_default=func.now(), index=True),
+    Column("season_id", String, nullable=True),
+    Column("season_label", String, nullable=True),
+    Column("filename", String, nullable=False),
+    Column("fingerprint", String, nullable=True),
+    Column("previous_fingerprint", String, nullable=True),
+    Column("status", String, nullable=False),  # published | unchanged | error | skipped
+    Column("trigger", String, nullable=False, server_default=text("'scheduled'")),
+    Column("changed", Boolean, nullable=False, server_default=text("false")),
+    Column("matches", Integer, nullable=False, server_default=text("0")),
+    Column("message", Text, nullable=True),
+    Column("public_url", Text, nullable=True),
+)
+
 
 # Ślad po jednorazowych poprawkach danych.
 #

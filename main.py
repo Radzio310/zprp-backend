@@ -96,6 +96,7 @@ from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
 from app.province_travel import router as province_travel_router
 from app.province_stats_export import router as province_stats_export_router
+from app.joomla_tables_sync import router as joomla_tables_router, run_joomla_tables_scheduler
 from app.province_manual_matches import (
     router as province_manual_matches_router,
     seed_from_file as seed_manual_matches,
@@ -315,6 +316,7 @@ app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
 # /zprp/statystyki/okreg/..., wiec nie wchodzi pod zaden catch-all.
 app.include_router(province_stats_export_router)
+app.include_router(joomla_tables_router)
 # Mecze dopisane recznie (miedzypanstwowe EHF). Ten sam prefiks rodziny
 # /zprp/statystyki/okreg/, wiec kolejnosc rejestracji jest tu bez znaczenia.
 app.include_router(province_manual_matches_router)
@@ -1334,6 +1336,8 @@ async def startup():
     # Analiza obsad: fakty o meczach po kazdej budowie archiwum i raz na dobe.
     asyncio.create_task(run_insights_scheduler())
     logger.info("✅ Assignment insights scheduler started")
+    asyncio.create_task(run_joomla_tables_scheduler())
+    logger.info("✅ Śląskie league tables Joomla publisher started (24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")
 
 @app.on_event("shutdown")
