@@ -27,7 +27,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, func, insert, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 
 from app import board_rules as B
 from app.admin_alerts import admin_judge_ids
@@ -467,13 +467,31 @@ async def activity(
     province: str = Query(...),
     before: Optional[int] = Query(None),
     limit: int = Query(ACTIVITY_PAGE, ge=1, le=100),
+    kind: Optional[str] = Query(None, description="tasks | posts | events | members | talk | trash"),
+    actor: Optional[str] = Query(None, description="klucz autora (judge:123, org:login) albo system"),
     payload: dict = Depends(get_jwt_payload),
 ):
     await _require(payload, province)
+    try:
+        spec = B.activity_filter(kind, actor)
+    except B.Invalid as error:
+        raise _bad(error)
     prov = _norm_province(province)
     conditions = [board_activity.c.province.in_(spellings(prov)), board_activity.c.action.not_in(QUIET_ACTIONS)]
     if before:
         conditions.append(board_activity.c.id < before)
+    # Ten sam warunek co `B.activity_matches`.
+    if spec["targets"] or spec["actions"]:
+        parts = []
+        if spec["targets"]:
+            parts.append(board_activity.c.target_type.in_(spec["targets"]))
+        if spec["actions"]:
+            parts.append(board_activity.c.action.in_(spec["actions"]))
+        conditions.append(or_(*parts))
+    if spec["system"]:
+        conditions.append(board_activity.c.actor_key.is_(None))
+    elif spec["actor"]:
+        conditions.append(board_activity.c.actor_key == spec["actor"])
     rows = await database.fetch_all(
         select(board_activity).where(and_(*conditions)).order_by(board_activity.c.id.desc()).limit(limit)
     )

@@ -185,3 +185,25 @@ def test_nazwa_zalacznika_bezpieczna():
     assert B.safe_filename("", "image/png") == "zalacznik.png"
     assert B.safe_filename("zdjęcie.jpeg", "image/jpeg") == "zdjęcie.jpeg"
     assert B.ascii_filename("Łódź protokół.pdf") == "Lodz protokol.pdf"
+
+
+def test_filtr_historii_rodzaj_albo_czynnosc_i_autor():
+    komentarz_do_zadania = {"action": "commented", "target_type": "task", "actor_key": "judge:7"}
+    do_kosza = {"action": "deleted", "target_type": "member", "actor_key": "org:slaskie"}
+    z_odznaki = {"action": "joined", "target_type": "member", "actor_key": None}
+
+    zadania = B.activity_filter("tasks")
+    assert B.activity_matches(komentarz_do_zadania, zadania)
+    assert not B.activity_matches(do_kosza, zadania)
+    assert B.activity_matches(komentarz_do_zadania, B.activity_filter("talk"))
+    assert B.activity_matches(do_kosza, B.activity_filter("trash"))
+    assert B.activity_matches(do_kosza, B.activity_filter("members"))
+
+    assert B.activity_matches(z_odznaki, B.activity_filter(None, "system"))
+    assert not B.activity_matches(do_kosza, B.activity_filter("", "system"))
+    assert B.activity_matches(komentarz_do_zadania, B.activity_filter("", "judge:7"))
+    assert not B.activity_matches(z_odznaki, B.activity_filter("", "judge:7"))
+    assert all(B.activity_matches(item, B.activity_filter()) for item in (komentarz_do_zadania, do_kosza, z_odznaki))
+
+    with pytest.raises(B.Invalid):
+        B.activity_filter("rankingi")

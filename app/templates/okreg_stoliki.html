@@ -53,8 +53,8 @@
         {% if org_address %}<div class="org-addr">{{ org_address }}</div>{% endif %}
       </td>
       <td class="doc-box">
-        <div class="doc-kind">Obsady stolikowe</div>
-        <div class="doc-number">STOLIKI OKRĘGOWE</div>
+        <div class="doc-kind">Zestawienie</div>
+        <div class="doc-number">STOLIKI LIGOWE NA OKRĘGU</div>
         <div class="doc-period">{{ meta.season }} · wystawiono {{ generated_at }}</div>
       </td>
     </tr>
@@ -62,7 +62,7 @@
   <div class="rule"><div class="rule-gold"></div></div>
   {% for section in sections %}
     <div class="report-head">
-      <h2>Zestawienie obsad stolikowych</h2>
+      <h2>Stoliki ligowe</h2>
       <div class="count"><strong>{{ section.rows|length }}</strong><span>STOLIKÓW</span></div>
     </div>
     {% if section.rows %}

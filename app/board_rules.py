@@ -298,6 +298,52 @@ def days_left(deleted_at: datetime, now: datetime) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Historia (oś zdarzeń)
+# ---------------------------------------------------------------------------
+
+#: Filtry okna „Historia". Zdarzenie pasuje, gdy rodzaj jego celu ALBO
+#: czynność jest na liście - komentarz do zadania trafia i do „Zadań", i do
+#: „Rozmów i plików".
+ACTIVITY_KINDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "tasks": {"targets": ("task",), "actions": ()},
+    "posts": {"targets": ("post",), "actions": ()},
+    "events": {"targets": ("event",), "actions": ()},
+    "members": {"targets": ("member",), "actions": ()},
+    "talk": {"targets": ("comment", "attachment"), "actions": ("commented", "attached")},
+    "trash": {"targets": (), "actions": ("deleted", "restored")},
+}
+#: Autor „system" = zmiany bez człowieka (skład z odznak).
+SYSTEM_ACTOR = "system"
+
+
+def activity_filter(kind: Any = None, actor: Any = None) -> Dict[str, Any]:
+    """Filtr historii z parametrów zapytania. Nieznany rodzaj to błąd, nie cisza."""
+    key = _s(kind).lower()
+    if key and key not in ACTIVITY_KINDS:
+        raise Invalid("Nieznany rodzaj zmian w historii")
+    spec = ACTIVITY_KINDS.get(key, {"targets": (), "actions": ()})
+    who = _s(actor)
+    return {
+        "targets": spec["targets"],
+        "actions": spec["actions"],
+        "system": who == SYSTEM_ACTOR,
+        "actor": who if who and who != SYSTEM_ACTOR else None,
+    }
+
+
+def activity_matches(item: Mapping[str, Any], spec: Mapping[str, Any]) -> bool:
+    """To samo co warunek SQL w `/board/activity` - dla testów i porządku."""
+    if spec["targets"] or spec["actions"]:
+        if item.get("target_type") not in spec["targets"] and item.get("action") not in spec["actions"]:
+            return False
+    if spec["system"]:
+        return not item.get("actor_key")
+    if spec["actor"]:
+        return item.get("actor_key") == spec["actor"]
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Walidacja
 # ---------------------------------------------------------------------------
 
