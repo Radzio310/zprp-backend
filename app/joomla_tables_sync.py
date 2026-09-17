@@ -212,7 +212,15 @@ def _menu_form(html: str, link: str) -> list[tuple[str, str]]:
 async def _update_menu_link(client: httpx.AsyncClient, link: str, cache_key: str) -> None:
     edit = await client.get(MENU_EDIT)
     edit.raise_for_status()
-    saved = await client.post(MENU_EDIT, data=_menu_form(edit.text, link))
+    # httpx.AsyncClient nie może wysłać listy krotek przez `data=`, ponieważ
+    # tworzy wtedy synchroniczny strumień żądania. Kodujemy formularz sami;
+    # lista krotek świadomie zachowuje powtarzające się pola Joomla.
+    encoded_form = urlencode(_menu_form(edit.text, link))
+    saved = await client.post(
+        MENU_EDIT,
+        content=encoded_form.encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
     saved.raise_for_status()
 
     # Źródłem prawdy jest ponownie otwarty formularz, nie sam kod 200 po POST.
