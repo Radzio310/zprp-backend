@@ -47,7 +47,7 @@ except Exception:  # noqa: BLE001
 EVENT_TYPES: Dict[str, str] = {
     "training": "Szkolenie",
     "exam": "Egzamin",
-    "fitness_test": "Egzamin kondycyjny",
+    "fitness_test": "Egzamin biegowy",
     "meeting": "Zebranie",
     "conference": "Konferencja",
     "course": "Kurs",
@@ -170,14 +170,17 @@ def can_view_province(who: Viewer, province: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def invited_ids(judges: Iterable[Mapping[str, Any]], data: Mapping[str, Any]) -> List[str]:
+def invited_ids(judges: Iterable[Mapping[str, Any]], data: Mapping[str, Any], inactive: Iterable[Any] = ()) -> List[str]:
     """Zaproszeni z aktualnych odznak okręgu.
 
     Kolejność pierwszeństwa: ręczne wyłączenie osoby, ręczne dopisanie osoby,
-    wykluczona odznaka, potem „do wszystkich" albo odznaki uwzględnione.
-    Wydarzenie bez żadnego kryterium (stare rekordy) idzie do wszystkich -
-    tak liczył je dawny serwer i nie wolno ich teraz nikomu schować.
+    osoba spoza listy aktywnych okręgu w sezonie wydarzenia (`inactive`, lista
+    z baza.zprp.pl - `app/official_roster.py`), wykluczona odznaka, potem
+    „do wszystkich" albo odznaki uwzględnione. Wydarzenie bez żadnego
+    kryterium (stare rekordy) idzie do wszystkich aktywnych - tak liczył je
+    dawny serwer i nie wolno ich teraz nikomu schować.
     """
+    skipped = {_s(x) for x in inactive or () if _s(x)}
     target = data.get("target") if isinstance(data.get("target"), Mapping) else {}
     include_all = bool(target.get("include_all"))
     include_badges = set(_ids(target.get("include_badges")))
@@ -193,6 +196,8 @@ def invited_ids(judges: Iterable[Mapping[str, Any]], data: Mapping[str, Any]) ->
             continue
         if jid in include_people:
             out.append(jid)
+            continue
+        if jid in skipped:
             continue
         names = set(badge_names(judge.get("badges")))
         if names & exclude_badges:

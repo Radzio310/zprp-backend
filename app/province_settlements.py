@@ -520,6 +520,14 @@ async def summary(
         "include_zprp": include_zprp,
         "totals": data["totals"],
         "entries": [_entry_json(e, with_matches=False) for e in data["entries"]],
+        "outside_district": {
+            "clubs": data["outside_district"]["clubs"],
+            "totals": data["outside_district"]["totals"],
+            "entries": [
+                _entry_json(e, with_matches=False)
+                for e in data["outside_district"]["entries"]
+            ],
+        },
         "zprp": _zprp_summary(data["zprp"], included=include_zprp),
         "document_number_hint": await next_document_number(key, year, month, "zestawienie", peek=True),
     }
@@ -581,6 +589,11 @@ async def _judge_payload(
         names = await _judge_names(key)
         entry = E.JudgeSettlement(judge_id=judge_id, judge_name=names.get(judge_id, ""))
     payload = _entry_json(entry, with_matches=True)
+    outside_entry = next(
+        (e for e in data["outside_district"]["entries"] if e.judge_id == judge_id),
+        E.JudgeSettlement(judge_id=judge_id, judge_name=entry.judge_name),
+    )
+    outside_payload = _entry_json(outside_entry, with_matches=True)
     solo = await _solo_table_matches(key, [item.match_key for item in entry.matches])
     for row in payload.get("rows") or []:
         row["triple_allowed"] = bool(
@@ -596,6 +609,11 @@ async def _judge_payload(
         "include_zprp": include_zprp,
         "entry": payload,
         "travel": [_travel_json(r) for r in E.travel_rows([entry])],
+        "outside_district": {
+            "clubs": data["outside_district"]["clubs"],
+            "entry": outside_payload,
+            "travel": [_travel_json(r) for r in E.travel_rows([outside_entry])],
+        },
         # Obsady ZPRP tego sedziego. Doliczone przelacznikiem siedza tez
         # w `entry.rows` ze znacznikiem `zprp_reason`; niedoliczone - tylko tu,
         # zeby ekran mogl powiedziec, czemu mecz nie ma kwoty.

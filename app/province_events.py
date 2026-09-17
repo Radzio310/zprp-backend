@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import official_roster as roster
 from app import province_event_rules as R
 from app.db import (
     database,
@@ -154,6 +155,19 @@ async def _event(event_id: int, *, deleted_ok: bool = False) -> Dict[str, Any]:
         raise HTTPException(404, "Wydarzenie leży w koszu")
     item["data_json"] = _data(item.get("data_json"))
     return item
+
+
+def _invited(judges: List[Dict[str, Any]], event: Mapping[str, Any]) -> List[str]:
+    """Zaproszeni na wydarzenie - bez sędziów spoza listy aktywnych okręgu w jego sezonie.
+
+    Jedyna droga do `R.invited_ids` w tym module: licznik w aplikacji, pushe,
+    przypomnienia, odpowiedzi, kod obecności i PDF liczą tych samych ludzi.
+    """
+    return R.invited_ids(
+        judges,
+        _data(event.get("data_json")),
+        inactive=roster.inactive_ids(event.get("province"), event.get("event_date"), judges),
+    )
 
 
 async def _judges(province: str) -> List[Dict[str, Any]]:
@@ -296,7 +310,7 @@ def _view(
     return view
 
 
-def _judge_public(judge: Mapping[str, Any]) -> Dict[str, Any]:
+def _judge_public(judge: Mapping[str, Any], province: str) -> Dict[str, Any]:
     from app.match_market_access import badge_names
 
     return {
@@ -304,6 +318,8 @@ def _judge_public(judge: Mapping[str, Any]) -> Dict[str, Any]:
         "name": _s(judge.get("full_name")),
         "photo_url": _s(judge.get("photo_url")) or None,
         "badges": badge_names(judge.get("badges")),
+        # Sezony z listą aktywnych (baza.zprp.pl), w których tej osoby na niej nie ma.
+        "inactive_seasons": roster.inactive_seasons(province, judge.get("full_name")),
     }
 
 
@@ -418,7 +434,7 @@ async def sweep_event_reminders(now: Optional[datetime] = None) -> int:
         province = _province(event["province"])
         if province not in judges_cache:
             judges_cache[province] = await _judges(province)
-        invited = R.invited_ids(judges_cache[province], event["data_json"])
+        invited = _invited(judges_cache[province], event)
         answers = {jid: _s(row.get("status")) for jid, row in responses.get(int(event["id"]), {}).items()}
         due = R.due_reminders(
             now=stamp,
@@ -488,8 +504,7 @@ async def feed(province: str = Query(""), actor: Actor = Depends(market_actor)) 
 
     out = []
     for event in events:
-        data = _data(event.get("data_json"))
-        invited = R.invited_ids(judges, data)
+        invited = _invited(judges, event)
         if not manager and who.judge_id not in invited:
             continue
         out.append(
@@ -507,7 +522,7 @@ async def feed(province: str = Query(""), actor: Actor = Depends(market_actor)) 
         "province": prov,
         "access": {"can_manage": manager, "is_admin": who.is_admin, "judge_id": who.judge_id},
         "events": out,
-        "judges": [_judge_public(j) for j in judges] if manager else [],
+        "judges": [_judge_public(j, prov) for j in judges] if manager else [],
         "types": [{"key": key, "label": label} for key, label in R.EVENT_TYPES.items()],
         "server_time": _now().isoformat(),
     }
@@ -520,7 +535,7 @@ async def item(event_id: int, actor: Actor = Depends(market_actor)) -> Dict[str,
     prov = _resolve_province(who, event["province"])
     manager = R.can_manage(who, prov)
     judges = await _judges(prov)
-    invited = R.invited_ids(judges, event["data_json"])
+    invited = _invited(judges, event)
     if not manager and who.judge_id not in invited:
         raise HTTPException(403, "To wydarzenie nie jest skierowane do Ciebie")
     responses, attendance = await _responses([event_id]), await _attendance([event_id])
@@ -631,7 +646,7 @@ async def create_v2(body: EventBody, actor: Actor = Depends(market_actor)) -> Di
         ids.append(int(row["id"]))
 
     first = await _event(ids[0])
-    invited = R.invited_ids(await _judges(prov), first["data_json"])
+    invited = _invited(await _judges(prov), first)
     await _notify_new(first, invited, len(ids), who.judge_id)
     return {"ids": ids, "series_id": series_id, "invited": len(invited)}
 
@@ -707,7 +722,7 @@ async def patch_v2(event_id: int, body: EventPatch, actor: Actor = Depends(marke
                     and before["end_date"] == after["end_date"]
                     and not R.same_place(before["place"], after["place"])
                 )
-                await _notify_changed(fresh, R.invited_ids(judges, fresh["data_json"]), who.judge_id, place_only)
+                await _notify_changed(fresh, _invited(judges, fresh), who.judge_id, place_only)
         changed += 1
     return {"updated": changed}
 
@@ -735,7 +750,7 @@ async def cancel(event_id: int, body: CancelBody, actor: Actor = Depends(market_
     )
     fresh = await _event(event_id)
     if fresh["event_date"] > _now():
-        await _notify_cancelled(fresh, R.invited_ids(await _judges(prov), fresh["data_json"]), who.judge_id)
+        await _notify_cancelled(fresh, _invited(await _judges(prov), fresh), who.judge_id)
     return {"ok": True}
 
 
@@ -752,7 +767,7 @@ async def uncancel(event_id: int, actor: Actor = Depends(market_actor)) -> Dict[
     )
     fresh = await _event(event_id)
     if fresh["event_date"] > _now():
-        await _notify_changed(fresh, R.invited_ids(await _judges(prov), fresh["data_json"]), who.judge_id)
+        await _notify_changed(fresh, _invited(await _judges(prov), fresh), who.judge_id)
     return {"ok": True}
 
 
@@ -900,7 +915,7 @@ async def rsvp(event_id: int, body: RsvpBody, actor: Actor = Depends(market_acto
     prov = _resolve_province(who, event["province"])
     data = event["data_json"]
     judges = await _judges(prov)
-    invited = R.invited_ids(judges, data)
+    invited = _invited(judges, event)
     responses = (await _responses([event_id])).get(event_id, {})
     current = _s((responses.get(who.judge_id) or {}).get("status")) or None
     yes_count = sum(1 for jid, row in responses.items() if row.get("status") == "yes" and jid in invited)
@@ -1126,7 +1141,7 @@ async def checkin(body: CheckinBody, actor: Actor = Depends(market_actor)) -> Di
         matches = (
             bool(checkin_data.get("token")) and parsed is not None and parsed[1] == checkin_data.get("token")
         ) or (parsed is None and R.normalize_code(body.code) == _s(checkin_data.get("code")))
-        invited = R.invited_ids(await _judges(_province(event["province"])), event["data_json"])
+        invited = _invited(await _judges(_province(event["province"])), event)
         refusal = R.checkin_refusal(
             now=now,
             start=event["event_date"],
@@ -1206,7 +1221,7 @@ async def attendance_pdf(event_id: int, actor: Actor = Depends(market_actor)) ->
     _require_manager(who, prov)
     judges = await _judges(prov)
     by_id = {_s(j["judge_id"]): j for j in judges}
-    invited = R.invited_ids(judges, event["data_json"])
+    invited = _invited(judges, event)
     responses = (await _responses([event_id])).get(event_id, {})
     rows = (await _attendance([event_id])).get(event_id, {})
     legacy = event["data_json"].get("present_ids") or []
@@ -1340,7 +1355,7 @@ async def board_preview(spellings: List[str]) -> List[Dict[str, Any]]:
     out = []
     for event in events:
         data = _data(event.get("data_json"))
-        invited = R.invited_ids(judges, data)
+        invited = _invited(judges, event)
         answers = responses.get(int(event["id"]), {})
         details = _details(data)
         out.append(
@@ -1373,7 +1388,7 @@ async def board_preview(spellings: List[str]) -> List[Dict[str, Any]]:
 
 async def _legacy_item(row: Mapping[str, Any], judges: List[Dict[str, Any]], me: Optional[str]) -> ProvinceEventItem:
     data = _data(row.get("data_json"))
-    invited = R.invited_ids(judges, data)
+    invited = _invited(judges, row)
     rows = (await _attendance([int(row["id"])])).get(int(row["id"]), {})
     legacy = data.get("present_ids") or []
     present = [jid for jid in invited if R.attendance_state(jid, rows, legacy) == "present"]
@@ -1420,7 +1435,7 @@ async def create_province_event(req: CreateProvinceEventRequest, actor: Actor = 
         .returning(province_events.c.id)
     )
     event = await _event(int(row["id"]))
-    await _notify_new(event, R.invited_ids(await _judges(prov), data), 1, who.judge_id)
+    await _notify_new(event, _invited(await _judges(prov), event), 1, who.judge_id)
     return {"success": True, "id": int(row["id"])}
 
 
@@ -1462,7 +1477,7 @@ async def list_visible_events_for_judge(
     out = []
     for raw in rows:
         row = _row(raw)
-        if who.judge_id in R.invited_ids(judges, _data(row.get("data_json"))):
+        if who.judge_id in _invited(judges, row):
             out.append(await _legacy_item(row, judges, who.judge_id))
     return ListProvinceEventsResponse(events=out)
 
@@ -1473,7 +1488,7 @@ async def get_province_event(event_id: int, judge_id: Optional[str] = Query(None
     event = await _event(event_id)
     prov = _resolve_province(who, event["province"])
     judges = await _judges(prov)
-    if not R.can_manage(who, prov) and who.judge_id not in R.invited_ids(judges, event["data_json"]):
+    if not R.can_manage(who, prov) and who.judge_id not in _invited(judges, event):
         raise HTTPException(403, "To wydarzenie nie jest skierowane do Ciebie")
     return await _legacy_item(event, judges, who.judge_id)
 
