@@ -99,6 +99,29 @@ async def enrich_table_official_rows(payload: "ReportExportRequest") -> None:
 
         await asyncio.gather(*(enrich(row) for row in rows))
 
+    # Status liczymy ponownie tuż przed renderowaniem. Dzięki temu nie zależy
+    # od wersji klienta ani od zapisanej wcześniej flagi `past`.
+    now = datetime.now(ZoneInfo("Europe/Warsaw"))
+    for section in payload.sections:
+        def kickoff(row: Dict[str, Any]) -> datetime:
+            try:
+                return datetime.strptime(
+                    f"{row.get('date', '')} {row.get('time', '')}",
+                    "%d.%m.%Y %H:%M",
+                ).replace(tzinfo=ZoneInfo("Europe/Warsaw"))
+            except (TypeError, ValueError):
+                return datetime.min.replace(tzinfo=ZoneInfo("Europe/Warsaw"))
+
+        section.rows.sort(key=kickoff, reverse=True)
+        previous_past = False
+        for index, row in enumerate(section.rows, 1):
+            match_time = kickoff(row)
+            is_past = match_time != datetime.min.replace(tzinfo=ZoneInfo("Europe/Warsaw")) and match_time < now
+            row["lp"] = index
+            row["past"] = is_past
+            row["period_break"] = is_past and not previous_past
+            previous_past = is_past
+
 
 class ExportColumn(BaseModel):
     key: str

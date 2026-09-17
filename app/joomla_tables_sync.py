@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -38,13 +38,17 @@ PUBLIC_MENU_PAGE = "https://slzpr.com.pl/index.php/home/sedziowie-i-przepisy"
 INTERVAL = 24 * 60 * 60
 WARSAW = ZoneInfo("Europe/Warsaw")
 _sync_lock = asyncio.Lock()
+DATED_TABLE_FILE = re.compile(r"^stoliki_(\d{2})_(\d{2})_(\d{4})\.pdf$", re.IGNORECASE)
+LEGACY_TABLE_FILES = {"stoliki_26_27.pdf"}
 
 
 def _publication_revision() -> str:
     """Wymusza publikację również po zmianie wyglądu/flow, nie tylko danych."""
     template = Path(__file__).parent / "templates" / "okreg_stoliki.html"
     template_hash = hashlib.sha256(template.read_bytes()).hexdigest()[:16]
-    return f"dated-file-menu-v1:{template_hash}"
+    # Zmiana wersji wymusza pierwszy przebieg po wdrożeniu również wtedy,
+    # gdy dzisiejszy PDF zdążył już powstać przed dodaniem retencji.
+    return f"dated-file-menu-cleanup-v2:{template_hash}"
 
 
 def _as_dict(value: Any) -> dict:
@@ -242,7 +246,98 @@ async def _update_menu_link(client: httpx.AsyncClient, link: str, cache_key: str
     raise RuntimeError("Łącze zapisano w Joomla, ale publiczne menu MECZE nie pokazuje jeszcze nowego adresu")
 
 
-async def _upload_joomla(path: str, filename: str, fingerprint: str) -> str:
+def _media_names(payload: Any) -> set[str]:
+    """Wyciąga nazwy plików z odpowiedzi Media Managera niezależnie od wersji Joomla."""
+    names: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in ("name", "path", "relativePath"):
+                candidate = value.get(key)
+                if isinstance(candidate, str) and candidate.lower().endswith(".pdf"):
+                    names.add(candidate.replace("\\", "/").rsplit("/", 1)[-1])
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    walk(payload)
+    return names
+
+
+async def _cleanup_old_table_files(
+    client: httpx.AsyncClient,
+    csrf: str,
+    current_filename: str,
+) -> list[str]:
+    """Usuwa tylko pliki utworzone przez nasz automat i starsze niż 30 dni."""
+    tracked_rows = await database.fetch_all(select(joomla_table_publications.c.filename).distinct())
+    tracked = {str(row["filename"] or "") for row in tracked_rows}
+    tracked.update(LEGACY_TABLE_FILES)
+
+    list_query = urlencode({
+        "option": "com_media",
+        "format": "json",
+        "mediatypes": "0,1,2,3",
+        "task": "api.files",
+        "path": "local-images:/dokumenty",
+    })
+    listing = await client.get(f"{MEDIA_API}?{list_query}")
+    listing.raise_for_status()
+    present = _media_names(listing.json())
+    cutoff = datetime.now(WARSAW).date() - timedelta(days=30)
+
+    candidates: list[str] = []
+    for name in sorted(present & tracked):
+        if name == current_filename:
+            continue
+        if name in LEGACY_TABLE_FILES:
+            candidates.append(name)
+            continue
+        match = DATED_TABLE_FILE.fullmatch(name)
+        if not match:
+            continue
+        try:
+            created = datetime.strptime("-".join(reversed(match.groups())), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if created < cutoff:
+            candidates.append(name)
+
+    deleted: list[str] = []
+    for name in candidates:
+        delete_query = urlencode({
+            "option": "com_media",
+            "format": "json",
+            "mediatypes": "0,1,2,3",
+            "task": "api.files",
+            "path": f"local-images:/dokumenty/{name}",
+        })
+        # Dokładnie ten kontrakt stosuje Media Manager Joomla: token jest
+        # nazwą pola w JSON-ie, nie parametrem query string.
+        response = await client.request(
+            "DELETE",
+            f"{MEDIA_API}?{delete_query}",
+            json={csrf: "1"},
+        )
+        response.raise_for_status()
+        body = response.json() if response.content else {"success": True}
+        if isinstance(body, dict) and body.get("success") is False:
+            raise RuntimeError(str(body.get("message") or f"Joomla nie usunęła pliku {name}"))
+        deleted.append(name)
+
+    if deleted:
+        verify = await client.get(f"{MEDIA_API}?{list_query}&cleanup={datetime.now(timezone.utc).timestamp()}")
+        verify.raise_for_status()
+        remaining = _media_names(verify.json())
+        failed = [name for name in deleted if name in remaining]
+        if failed:
+            raise RuntimeError(f"Joomla nadal pokazuje usuwane pliki: {', '.join(failed)}")
+    return deleted
+
+
+async def _upload_joomla(path: str, filename: str, fingerprint: str) -> tuple[str, list[str]]:
     username, password = os.getenv("JOOMLA_USERNAME"), os.getenv("JOOMLA_PASSWORD")
     if not username or not password:
         raise RuntimeError("Brak JOOMLA_USERNAME lub JOOMLA_PASSWORD")
@@ -286,7 +381,8 @@ async def _upload_joomla(path: str, filename: str, fingerprint: str) -> str:
             raise RuntimeError(f"Joomla przyjęła plik, ale publiczny PDF nie jest dostępny (HTTP {code})")
         menu_link = f"images/dokumenty/{filename}?v={cache_key}"
         await _update_menu_link(client, menu_link, cache_key)
-        return f"{PUBLIC_BASE}/{filename}?v={cache_key}"
+        deleted = await _cleanup_old_table_files(client, csrf, filename)
+        return f"{PUBLIC_BASE}/{filename}?v={cache_key}", deleted
 
 
 async def sync_tables_to_joomla(trigger: str = "scheduled") -> dict:
@@ -301,6 +397,7 @@ async def _sync_tables_to_joomla(trigger: str) -> dict:
     season_id = season_label = fingerprint = previous = None
     filename = f"stoliki_{datetime.now(WARSAW):%d_%m_%Y}.pdf"
     public_url = None
+    deleted_files: list[str] = []
     matches_count = 0
     try:
         season_id, season_label, matches, officials = await _current_payload()
@@ -322,10 +419,11 @@ async def _sync_tables_to_joomla(trigger: str) -> dict:
             response = _render_pdf(request, "stoliki_ligowe", "okreg_stoliki.html")
             pdf_path = Path(str(response.path))
             try:
-                public_url = await _upload_joomla(str(pdf_path), filename, fingerprint)
+                public_url, deleted_files = await _upload_joomla(str(pdf_path), filename, fingerprint)
             finally:
                 pdf_path.unlink(missing_ok=True)
-            status, changed, message = "published", True, "PDF wgrany, a łącze MECZE zaktualizowane w Joomla"
+            cleanup_note = f" Usunięto: {', '.join(deleted_files)}." if deleted_files else ""
+            status, changed, message = "published", True, f"PDF wgrany, a łącze MECZE zaktualizowane w Joomla.{cleanup_note}"
     except Exception as exc:
         logger.exception("[joomla-tables] synchronizacja nie powiodła się")
         status, changed, message = "error", False, str(exc)[:1000]
