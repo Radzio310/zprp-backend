@@ -94,6 +94,7 @@ from app.assignment_insights import router as province_insights_router, run_insi
 from app.province_clubs import router as province_clubs_router
 from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
+from app.event_links import router as event_links_router
 from app.province_travel import router as province_travel_router
 from app.province_stats_export import router as province_stats_export_router
 from app.joomla_tables_sync import router as joomla_tables_router, run_joomla_tables_scheduler
@@ -312,6 +313,7 @@ app.include_router(province_assignment_auto_router)
 app.include_router(province_archive_router)
 app.include_router(province_insights_router)
 app.include_router(province_events_router)
+app.include_router(event_links_router)
 app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
 # /zprp/statystyki/okreg/..., wiec nie wchodzi pod zaden catch-all.

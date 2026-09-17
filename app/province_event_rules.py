@@ -422,18 +422,33 @@ def new_checkin_token() -> str:
     return secrets.token_urlsafe(12)
 
 
-def qr_payload(event_id: int, token: str) -> str:
+#: `/e/<id>/<token>` w linku z kodu (https albo schemat aplikacji `refhandballapp://e/...`).
+_QR_LINK = re.compile(r"/e/(\d{1,12})/([A-Za-z0-9_-]{8,64})/?(?:[?#].*)?$")
+
+
+def qr_payload(event_id: int, token: str, base: str = "") -> str:
+    """Treść kodu QR.
+
+    Z adresem bazowym to link `https://.../e/<id>/<token>`, który zwykły aparat
+    telefonu oddaje prosto BAZIE (`app/event_links.py`). Bez niego - dawny
+    zapis `BAZA-EVENT|id|token`, który nadal czyta skaner w aplikacji.
+    """
+    if base:
+        return f"{base.rstrip('/')}/e/{int(event_id)}/{token}"
     return f"{QR_PREFIX}|{int(event_id)}|{token}"
 
 
 def parse_qr(value: Any) -> Optional[Tuple[int, str]]:
-    parts = _s(value).split("|")
-    if len(parts) != 3 or parts[0] != QR_PREFIX:
-        return None
-    try:
-        return int(parts[1]), parts[2]
-    except ValueError:
-        return None
+    text = _s(value)
+    parts = text.split("|")
+    if len(parts) == 3 and parts[0] == QR_PREFIX:
+        try:
+            return int(parts[1]), parts[2]
+        except ValueError:
+            return None
+    # Host nie ma znaczenia: token i tak musi pasować do wydarzenia.
+    match = _QR_LINK.search(text)
+    return (int(match.group(1)), match.group(2)) if match else None
 
 
 def normalize_code(value: Any) -> str:

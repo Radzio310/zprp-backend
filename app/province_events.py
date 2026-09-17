@@ -39,6 +39,7 @@ from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import official_roster as roster
+from app.event_links import LINK_BASE
 from app import province_event_rules as R
 from app.db import (
     database,
@@ -1019,7 +1020,10 @@ async def attendance_v2(event_id: int, body: AttendanceBody, actor: Actor = Depe
 def _qr_matrix(payload: str) -> List[str]:
     import qrcode
 
-    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, border=0)
+    # Korekcja Q (25%): link jest dłuższy niż dawny zapis, a znak w środku
+    # zasłania ~5% modułów. H zagęściłoby kod do 49 modułów, Q daje 41 -
+    # czytelniej z plakatu na ścianie.
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_Q, border=0)
     qr.add_data(payload)
     qr.make(fit=True)
     return ["".join("1" if cell else "0" for cell in row) for row in qr.get_matrix()]
@@ -1027,7 +1031,7 @@ def _qr_matrix(payload: str) -> List[str]:
 
 async def _checkin_view(event: Mapping[str, Any], checkin: Mapping[str, Any]) -> Dict[str, Any]:
     opens, closes = R.checkin_window(event["event_date"], event.get("end_date"))
-    payload = R.qr_payload(int(event["id"]), _s(checkin.get("token")))
+    payload = R.qr_payload(int(event["id"]), _s(checkin.get("token")), LINK_BASE)
     rows = await database.fetch_all(
         select(province_event_attendance)
         .where(province_event_attendance.c.event_id == int(event["id"]))
