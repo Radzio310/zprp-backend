@@ -25,7 +25,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, delete, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -61,6 +61,8 @@ from app.db import (
 )
 from app.match_market_rules import is_managed_by_province, state_dict
 from app.province_assignments import _managed_prefixes, own_prefixes_of, resolve_seasons
+from app.province_panel_access import PANEL_ASSIGNMENTS
+from app.province_panel_guard import panel_write_gate
 from app.province_settlements import require_province
 from app.settlement_province import display, spellings
 from app.settlement_seasons import season_of
@@ -68,7 +70,14 @@ from app.zprp_seasons import season_catalog
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/province/assignment", tags=["province_assignments"])
+# Każdy zapis w Obsadzie (Automat, ustawienia sędziów i klubów, pary, przerwy,
+# mecze ręczne) przechodzi przez bramkę konta VIP z uprawnieniem „Obsada" -
+# patrz `province_panel_guard`. Odczyty zostają wolne.
+router = APIRouter(
+    prefix="/province/assignment",
+    tags=["province_assignments"],
+    dependencies=[Depends(panel_write_gate(PANEL_ASSIGNMENTS, "Zapis w Obsadzie"))],
+)
 
 #: Ile dni pokazuje mikro-podgląd niedyspozycji przy sędzim.
 PREVIEW_DAYS = 14
@@ -1190,6 +1199,7 @@ async def clubs(province: str = Query(...), q: Optional[str] = Query(None)):
                 "teams": [],
                 "matches_at_home": 0,
                 "table_by_club": 0,
+                "table_by_club_since": None,
                 "avoid_local": False,
                 "note": "",
             },
@@ -1206,6 +1216,9 @@ async def clubs(province: str = Query(...), q: Optional[str] = Query(None)):
         if rule is None:
             continue
         entry["table_by_club"] = int(rule["table_by_club"] or 0)
+        entry["table_by_club_since"] = (
+            rule["table_by_club_since"].isoformat() if rule["table_by_club_since"] else None
+        )
         entry["avoid_local"] = bool(rule["avoid_local"])
         entry["note"] = _s(rule["note"])
 
@@ -1237,22 +1250,50 @@ class ClubRuleRequest(BaseModel):
     #: Czy klub stawia JEDNEGO stolikowego z własnych ludzi (0 albo 1).
     #: Okręg daje zawsze co najmniej jednego, więc więcej niż jeden nie ma sensu.
     table_by_club: int = 0
+    #: Od kiedy deklaracja działa na obciążenia klubu. Pusta = zostaje
+    #: dotychczasowa, a nowa deklaracja działa od dziś (`table_since`).
+    table_by_club_since: Optional[date] = None
     avoid_local: bool = False
     note: Optional[str] = None
     updated_by: Optional[str] = None
 
 
+async def _previous_rules(key: str, club_ids: list[str]) -> dict[str, Any]:
+    """Dotychczasowe deklaracje - żeby zapis nie przesunął daty obowiązywania."""
+    from app.db import province_club_assignment
+
+    rows = await database.fetch_all(
+        select(province_club_assignment).where(
+            and_(
+                province_club_assignment.c.province == key,
+                province_club_assignment.c.club_id.in_(club_ids),
+            )
+        )
+    )
+    return {_s(row["club_id"]): row for row in rows}
+
+
 @router.put("/clubs/{club_id}", summary="Ustawienia obsadowe klubu")
 async def save_club_rule(club_id: str, payload: ClubRuleRequest):
     from app.db import province_club_assignment
+    from app.province_clubs_bulk import table_since
 
     key = require_province(payload.province)
+    table_by_club = max(0, min(1, int(payload.table_by_club or 0)))
+    previous = (await _previous_rules(key, [_s(club_id)])).get(_s(club_id))
     values = {
         "province": key,
         "club_id": _s(club_id),
         # ⚠ Najwyżej JEDEN od klubu: okręg nigdy nie zostawia stolika całkiem
         # klubowi - albo daje jednego, albo obu.
-        "table_by_club": max(0, min(1, int(payload.table_by_club or 0))),
+        "table_by_club": table_by_club,
+        "table_by_club_since": table_since(
+            table_by_club,
+            payload.table_by_club_since,
+            int(previous["table_by_club"] or 0) if previous else 0,
+            previous["table_by_club_since"] if previous else None,
+            _now().date(),
+        ),
         "avoid_local": bool(payload.avoid_local),
         "note": _s(payload.note) or None,
         "updated_by": _s(payload.updated_by) or None,
@@ -1282,6 +1323,9 @@ class ClubBulkRequest(BaseModel):
     #: Które ustawienie zmieniamy. Pominięte zostaje takie, jakie było -
     #: akcja grupowa nie ma prawa skasować niczego przy okazji.
     table_by_club: Optional[int] = None
+    #: Od kiedy deklaracja działa na obciążenia - np. początek sezonu z pisma
+    #: okręgu. Pusta: każdy klub zachowuje swoją datę, nowe deklaracje od dziś.
+    table_by_club_since: Optional[date] = None
     avoid_local: Optional[bool] = None
     updated_by: Optional[str] = None
 
@@ -1299,7 +1343,7 @@ async def save_clubs_bulk(payload: ClubBulkRequest):
     klubów (`clean_club_ids`): bez pustych, bez powtórzeń i z limitem.
     """
     from app.db import province_club_assignment
-    from app.province_clubs_bulk import clean_club_ids
+    from app.province_clubs_bulk import clean_club_ids, table_since
 
     key = require_province(payload.province)
     try:
@@ -1311,15 +1355,30 @@ async def save_clubs_bulk(payload: ClubBulkRequest):
 
     now = _now()
     patch: dict[str, Any] = {"updated_by": _s(payload.updated_by) or None, "updated_at": now}
+    table_by_club: Optional[int] = None
     if payload.table_by_club is not None:
         # ⚠ Najwyżej jeden od klubu - okręg zawsze daje co najmniej jednego.
-        patch["table_by_club"] = max(0, min(1, int(payload.table_by_club)))
+        table_by_club = max(0, min(1, int(payload.table_by_club)))
+        patch["table_by_club"] = table_by_club
     if payload.avoid_local is not None:
         patch["avoid_local"] = bool(payload.avoid_local)
+    previous = await _previous_rules(key, club_ids) if table_by_club is not None else {}
 
     async with database.transaction():
         for club_id in club_ids:
-            values = {"province": key, "club_id": club_id, **patch}
+            row_patch = dict(patch)
+            if table_by_club is not None:
+                # Data liczona osobno dla KAŻDEGO klubu: ten, który deklarację
+                # już miał, zachowuje swoją - akcja grupowa jej nie przesuwa.
+                before = previous.get(club_id)
+                row_patch["table_by_club_since"] = table_since(
+                    table_by_club,
+                    payload.table_by_club_since,
+                    int(before["table_by_club"] or 0) if before else 0,
+                    before["table_by_club_since"] if before else None,
+                    now.date(),
+                )
+            values = {"province": key, "club_id": club_id, **row_patch}
             await database.execute(
                 pg_insert(province_club_assignment)
                 .values(**values)
@@ -1330,7 +1389,7 @@ async def save_clubs_bulk(payload: ClubBulkRequest):
                     ],
                     # Do istniejącego wiersza wchodzi SAM `patch` - pola spoza
                     # niego zostają takie, jakie były.
-                    set_=patch,
+                    set_=row_patch,
                 )
             )
     return {"success": True, "updated": len(club_ids)}

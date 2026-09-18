@@ -171,10 +171,27 @@ def _code_order(code: str) -> tuple:
     return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", code))
 
 
-def _item(row: Any, state: dict, code: str, names: dict[str, str]) -> dict:
+def _host_table_by_club(state: dict, clubs: Optional[dict[str, dict]]) -> int:
+    """Ilu stolikowych stawia sam klub gospodarza - po NAZWIE drużyny."""
+    if not clubs:
+        return 0
+    from app.province_clubs_scrape import team_key
+
+    rule = clubs.get(team_key(state.get("ID_zespoly_gosp_ZespolNazwa"))) or {}
+    return int(rule.get("table_by_club", 0) or 0)
+
+
+def _item(
+    row: Any,
+    state: dict,
+    code: str,
+    names: dict[str, str],
+    clubs: Optional[dict[str, dict]] = None,
+) -> dict:
     """Jeden mecz listy: fakty z migawki plus policzony stan obsady."""
     competition = A.competition_key(code)
-    status = A.crew_status(state, code)
+    table_by_club = _host_table_by_club(state, clubs)
+    status = A.crew_status(state, code, table_by_club)
     at = row["match_at"]
     stage = S.round_info(state)
     score_host = _s(state.get("wynik_gosp_full"))
@@ -207,7 +224,10 @@ def _item(row: Any, state: dict, code: str, names: dict[str, str]) -> dict:
             x for x in (_s(state.get("Hala_ulica")), _s(state.get("Hala_numer"))) if x
         ),
         "crew": A.crew(state),
-        "needs": A.crew_needs(code),
+        "needs": A.club_crew_needs(code, table_by_club),
+        # Gospodarz stawia drugiego stolikowego sam - obsadowy widzi, czemu
+        # jeden stolikowy to tu komplet.
+        "table_by_club": table_by_club,
         "status": status,
         "approved": bool(row["approved"]),
         "protocol_status": _s(state.get("protocol_status")),
@@ -270,11 +290,14 @@ async def list_matches(
     ),
     show_unknown: bool = Query(False, description="Także mecze bez rozpoznanego sezonu"),
 ):
+    from app.assignment_context import _club_rules
+
     key = require_province(province)
     managed = await _managed_prefixes(key)
     names = await _competition_names(key)
     own = await own_prefixes_of(key)
     catalog = await season_catalog()
+    clubs = await _club_rules(key)
 
     today = _now().date()
     current = S.current_start(catalog, today)
@@ -348,7 +371,7 @@ async def list_matches(
         counts["dated" if at is not None else "no_date"] += 1
         if not S.when_allows(mode, at is not None):
             continue
-        item = _item(row, state, code, names)
+        item = _item(row, state, code, names, clubs)
         item["season_unknown"] = match_season is None
         window.append(item)
 
@@ -455,9 +478,12 @@ async def match_detail(match_id: str, province: str = Query(...)):
     if row is None:
         raise HTTPException(404, "Nie znamy takiego meczu w terminarzu okręgu")
 
+    from app.assignment_context import _club_rules
+
     state = state_dict(row["state_json"])
     code = _s(state.get("RozgrywkiCode") or row["match_code"])
     names = await _competition_names(key)
+    clubs = await _club_rules(key)
 
     events = await database.fetch_all(
         select(province_match_events)
@@ -473,7 +499,7 @@ async def match_detail(match_id: str, province: str = Query(...)):
 
     return {
         "province": key,
-        "match": _item(row, state, code, names),
+        "match": _item(row, state, code, names, clubs),
         "history": [
             {
                 "kind": _s(event["event_type"]),

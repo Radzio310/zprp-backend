@@ -51,6 +51,26 @@ def crew_needs(code: Any) -> dict[str, int]:
     return {"field": 1 if small else 2, "table": 1 if small else 2}
 
 
+def club_crew_needs(code: Any, table_by_club: Any = 0) -> dict[str, int]:
+    """
+    Czego mecz potrzebuje OD OKRĘGU, gdy klub gospodarza stawia część stolika.
+
+    Klub bywa umówiony, że jednego stolikowego daje z własnych ludzi („4. sędzia"
+    z pisma okręgu) - wtedy okręg posyła o jednego mniej. ⚠ Okręg daje ZAWSZE
+    co najmniej jednego (decyzja użytkownika z 12.09.2026): przy dzieciach, gdzie
+    stolik jest jednoosobowy, deklaracja klubu nie ma czego odjąć.
+
+    Ta sama reguła dla Automatu (`assignment_context.need_from_state`) i dla
+    stanu obsady na liście - inaczej lista wołałaby „lekka różnica" przy meczu,
+    który Automat słusznie uznał za komplet.
+    """
+    needs = dict(crew_needs(code))
+    from_club = max(0, int(table_by_club or 0))
+    if from_club and needs["table"] > 0:
+        needs["table"] = max(1, needs["table"] - from_club)
+    return needs
+
+
 def slot_person(state: Mapping[str, Any], slot: str) -> Optional[dict[str, str]]:
     """
     Kto stoi w gnieździe: numer i nazwisko, albo None.
@@ -75,15 +95,17 @@ def _have(people: Mapping[str, Optional[dict[str, str]]], slots: Iterable[str]) 
     return sum(1 for slot in slots if people.get(slot))
 
 
-def crew_status(state: Mapping[str, Any], code: Any) -> dict:
+def crew_status(state: Mapping[str, Any], code: Any, table_by_club: Any = 0) -> dict:
     """
     Stan obsady meczu: dziury, lekkie różnice i komplet.
 
     Dziura = brakujący boiskowy albo PUSTY stolik. Jeden stolikowy zamiast dwóch
     to `soft` - obsadowy ma to widzieć, ale nie jako błąd do poprawienia.
+    Klub, który drugiego stolikowego stawia sam, ma przy jednym od okręgu
+    KOMPLET - tam „lekkiej różnicy" nie ma.
     """
     people = crew(state)
-    needs = crew_needs(code)
+    needs = club_crew_needs(code, table_by_club)
 
     field_have = _have(people, FIELD_SLOTS)
     table_have = _have(people, TABLE_SLOTS)

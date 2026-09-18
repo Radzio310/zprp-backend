@@ -21,7 +21,7 @@ import re
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import and_, delete, insert, select, update
@@ -34,6 +34,7 @@ from app import settlement_engine as E
 from app import settlement_rates as R
 from app.db import (
     database,
+    province_club_assignment,
     province_club_entries,
     province_competitions,
     province_club_season_closures,
@@ -46,6 +47,8 @@ from app.db import (
 )
 from app.province_clubs_excel import build_workbook, parse_workbook
 from app.province_clubs_scrape import team_key
+from app.province_panel_access import PANEL_SETTLEMENTS
+from app.province_panel_guard import panel_write_gate
 from app.province_clubs_sync import RUN_KIND, last_run, refresh_clubs, start_run
 from app.province_settlement_sync import module_enabled
 from app.province_settlements import (
@@ -60,7 +63,14 @@ from app.settlement_seasons import season_of
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/province/clubs", tags=["province_clubs"])
+# Każdy zapis w panelu klubów (wpłaty, salda, rozliczanie przez okręg, import,
+# rozliczenie sezonu) przechodzi przez bramkę konta VIP z uprawnieniem
+# „Rozliczenia" - patrz `province_panel_guard`. Odczyty zostają wolne.
+router = APIRouter(
+    prefix="/province/clubs",
+    tags=["province_clubs"],
+    dependencies=[Depends(panel_write_gate(PANEL_SETTLEMENTS, "Zapis w panelu klubów"))],
+)
 
 #: Zadania w tle - asyncio trzyma do nich slaba referencje.
 _BACKGROUND: set = set()
@@ -177,6 +187,38 @@ async def _club_settings(province: str) -> dict[str, dict]:
     return {_s(row["club_id"]): dict(row) for row in rows}
 
 
+async def _table_rules(province: str) -> dict[str, dict]:
+    """
+    Kto stawia drugiego stolikowego - deklaracje z zakladki Kluby w Obsadzie.
+
+    ⚠ Jedno zrodlo prawdy: to ta sama tabela, ktora czyta Automat
+    (`assignment_context._club_rules`). Panel klubow jej nie kopiuje, tylko
+    czyta, zeby „kogo wysylamy" i „za kogo klub placi" nie mogly sie rozjechac.
+    """
+    rows = await database.fetch_all(
+        select(province_club_assignment).where(
+            province_club_assignment.c.province.in_(spellings(province))
+        )
+    )
+    return {
+        _s(row["club_id"]): {
+            "table_by_club": int(row["table_by_club"] or 0),
+            "table_by_club_since": row["table_by_club_since"],
+        }
+        for row in rows
+    }
+
+
+def _table_json(rule: Optional[dict]) -> dict:
+    """Deklaracja stolikowego klubu w odpowiedzi - obok platnosci przez okreg."""
+    rule = rule or {}
+    since = rule.get("table_by_club_since")
+    return {
+        "table_by_club": int(rule.get("table_by_club", 0) or 0),
+        "table_by_club_since": since.isoformat() if since else None,
+    }
+
+
 async def _overrides(province: str) -> dict[str, C.MatchOverride]:
     rows = await database.fetch_all(
         select(province_match_overrides).where(province_match_overrides.c.province == province)
@@ -228,12 +270,17 @@ async def load_clubs(province: str, season: str, *, include_future: bool = False
 
     by_id, by_key, meta = await _teams(province, season)
     settings = await _club_settings(province)
+    table_rules = await _table_rules(province)
     clubs_setting = {
         club_id: C.ClubSetting(
-            settles=bool(row.get("settles_via_district", True)),
-            since=row.get("settles_since"),
+            settles=bool((settings.get(club_id) or {}).get("settles_via_district", True)),
+            since=(settings.get(club_id) or {}).get("settles_since"),
+            table_by_club=int((table_rules.get(club_id) or {}).get("table_by_club", 0)),
+            table_since=(table_rules.get(club_id) or {}).get("table_by_club_since"),
         )
-        for club_id, row in settings.items()
+        # Klub bywa tylko w jednej z tabel: platnosc ustawiona w panelu, a
+        # stolik w Obsadzie - albo odwrotnie.
+        for club_id in set(settings) | set(table_rules)
     }
 
     charges = C.build_charges(
@@ -252,6 +299,7 @@ async def load_clubs(province: str, season: str, *, include_future: bool = False
         "teams_by_id": by_id,
         "teams_meta": meta,
         "settings": settings,
+        "table_rules": table_rules,
         "charges": charges,
         "entries": await _entries(province, season),
     }
@@ -307,6 +355,10 @@ def _charge_json(row: C.ChargeRow, province: str) -> dict:
         "moved": row.moved,
         "triple": row.triple,
         "triple_allowed": triple_allowed,
+        # Klub stawia drugiego stolikowego sam; `extra_table` = okreg i tak
+        # wystawil dwoch, a drugiego klubowi nie liczymy.
+        "own_table": row.own_table,
+        "extra_table": row.extra_table,
         "referees": [
             {
                 "judge_id": share.judge_id,
@@ -315,6 +367,7 @@ def _charge_json(row: C.ChargeRow, province: str) -> dict:
                 "gross": share.gross,
                 "travel": share.travel,
                 "triple": share.triple,
+                "charged": share.charged,
             }
             for share in row.referees
         ],
@@ -399,6 +452,7 @@ async def _season_clubs(key: str, season: str, *, include_future: bool = False) 
             "name": _club_name(settings, meta, club_id),
             "settles_via_district": bool(row.get("settles_via_district", True)),
             "settles_since": row["settles_since"].isoformat() if row.get("settles_since") else None,
+            **_table_json(data["table_rules"].get(club_id)),
             "note": _s(row.get("note")),
             "teams": sorted(teams_of.get(club_id, []), key=lambda item: item["name"]),
             "paid_in": round(paid["in"], 2),
@@ -671,6 +725,7 @@ async def club_detail(
             "name": _club_name(data["settings"], data["teams_meta"], club_id),
             "settles_via_district": bool(settings.get("settles_via_district", True)),
             "settles_since": settings["settles_since"].isoformat() if settings.get("settles_since") else None,
+            **_table_json(data["table_rules"].get(club_id)),
             "note": _s(settings.get("note")),
             "paid_in": round(paid_in, 2),
             "paid_out": round(paid_out, 2),

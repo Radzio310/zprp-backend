@@ -44,6 +44,32 @@ def settles_since(settles: bool, since: Optional[date], today: date) -> Optional
     return since or today
 
 
+def table_since(
+    table_by_club: int,
+    requested: Optional[date],
+    previous: int,
+    previous_since: Optional[date],
+    today: date,
+) -> Optional[date]:
+    """
+    Od kiedy deklaracja „drugiego stolikowego stawia klub" dziala na obciazenia.
+
+    - bez deklaracji data znika - klub placi za cala obsade,
+    - podana data wygrywa (np. poczatek sezonu z pisma okregu),
+    - deklaracja, ktora juz obowiazywala, ZACHOWUJE swoja date. Zapis z panelu,
+      ktory rusza cos innego (miejscowi, notatka), nie moze jej przesunac na
+      dzis - inaczej mecze od poczatku sezonu wrocilyby klubowi na rachunek,
+    - nowa deklaracja bez daty dziala od dzis: historia zostaje nietknieta.
+    """
+    if int(table_by_club or 0) <= 0:
+        return None
+    if requested is not None:
+        return requested
+    if int(previous or 0) > 0:
+        return previous_since
+    return today
+
+
 def parse_club_filter(raw: Optional[str]) -> Optional[set[str]]:
     """`club_ids=12,15,19` z adresu szablonu. Pusty napis znaczy „wszystkie"."""
     if not raw:

@@ -1102,6 +1102,12 @@ province_club_assignment = Table(
     # ⚠ Okręg zawsze posyła co najmniej jednego, więc to pole jest 0 albo 1:
     # całego stolika klubowi nie zostawiamy.
     Column("table_by_club", Integer, nullable=False, server_default=text("0")),
+    # Od kiedy deklaracja działa na OBCIĄŻENIA klubu (panel klubów liczy wtedy
+    # tylko jednego stolikowego z okręgu). Automatu data nie obchodzi - on
+    # planuje mecze przyszłe. Bez daty zmiana w połowie sezonu przeliczyłaby
+    # wstecz mecze już rozliczone z klubem; ta sama zasada co `settles_since`.
+    # Pusta przy `table_by_club = 1` znaczy „od zawsze".
+    Column("table_by_club_since", Date, nullable=True),
     # Klub prosi, żeby nie wysyłać tu sędziów z tego samego miasta.
     Column("avoid_local", Boolean, nullable=False, server_default=text("false")),
     Column("note", String, nullable=True),
@@ -4022,6 +4028,11 @@ with engine.connect() as _conn:
         )
     )
     _conn.execute(text("ALTER TABLE mentoring_pairs ADD COLUMN IF NOT EXISTS baseline_at timestamptz"))
+    # Deklaracja stolikowego od klubu działa na obciążenia od wskazanego dnia
+    # (18.09.2026). Tabela istnieje na produkcji, więc `create_all` kolumny nie doda.
+    _conn.execute(
+        text("ALTER TABLE province_club_assignment ADD COLUMN IF NOT EXISTS table_by_club_since date")
+    )
     # Tablica Komisji (16.09.2026): kosz, autorstwo i skład z odznaki. Tabele
     # istnieją na produkcji, więc `create_all` tych kolumn nie dołoży.
     for _board_sql in (

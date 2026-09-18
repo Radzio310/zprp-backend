@@ -12,6 +12,20 @@ Decyzje uzytkownika z 10.09.2026:
   - klub z odznaczonym „rozlicza sie przez okreg" nie jest obciazany od daty
     wskazanej przy odznaczeniu (historia zostaje).
 
+Decyzja uzytkownika z 18.09.2026 - „4. sedzia" (drugi stolikowy):
+  - klub, ktory zadeklarowal, ze drugiego stolikowego stawia SAM
+    (`province_club_assignment.table_by_club = 1`, zakladka Kluby w Obsadzie),
+    placi na meczu OKREGOWYM tylko za JEDNEGO stolikowego z okregu. Gdyby okreg
+    i tak wystawil dwoch, drugiego pokrywa okreg - mecz dostaje ostrzezenie,
+    zamiast po cichu zmienic kwote,
+  - gdy stolikowy klubu sie nie stawi, sedzia okregu zostaje przy stoliku sam
+    i dostaje POTROJNY ryczalt. To jest ten jeden stolikowy, wiec klub placi
+    cale x3 - regula „jeden stolikowy" niczego z tego nie ucina,
+  - stoliki lig centralnych i pucharu wojewodzkiego sa poza regula (tam obu
+    stolikowych daje zawsze okreg, tak samo jak przy potrojnym ryczalcie),
+  - dziala od `table_by_club_since`, zeby zmiana w polowie sezonu nie
+    przeliczyla wstecz meczow juz rozliczonych z klubem.
+
 ⚠ Gospodarz: najpierw terminarz okregu (`province_matches`), a gdy go tam nie
 ma - napis „Gospodarz - Gość", ktory ma KAZDA obsada w bazie. Terminarz trzyma
 tylko BIEZACY sezon: mecze minionych sezonow nie mialy gospodarza, po cichu
@@ -32,6 +46,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Callable, Iterable, Optional
+
+from app import settlement_rates as R
 
 #: Status wiersza obciazenia - powod, dla ktorego mecz placi albo nie placi.
 CHARGED = "charged"
@@ -74,10 +90,14 @@ class MatchOverride:
 
 @dataclass
 class ClubSetting:
-    """Czy i od kiedy klub rozlicza sie przez okreg."""
+    """Czy i od kiedy klub rozlicza sie przez okreg - i kto daje drugi stolik."""
 
     settles: bool = True
     since: Optional[date] = None
+    #: Ilu stolikowych klub stawia SAM, grajac u siebie (0 albo 1).
+    table_by_club: int = 0
+    #: Od kiedy ta deklaracja dziala na obciazenia. Pusta = od zawsze.
+    table_since: Optional[date] = None
 
 
 @dataclass
@@ -90,6 +110,9 @@ class RefereeShare:
     gross: int
     travel: float
     triple: bool = False
+    #: Czy ta osoba wchodzi do rachunku klubu. `False` = drugi stolikowy
+    #: u klubu, ktory stolikowego stawia sam - placi za niego okreg.
+    charged: bool = True
 
 
 @dataclass
@@ -116,6 +139,12 @@ class ChargeRow:
     #: „Gospodarz - Gość" z obsady i sam gosc - panel pokazuje, kto z kim gral.
     teams: str = ""
     guest_name: str = ""
+    #: Klub gospodarza stawia drugiego stolikowego sam (deklaracja w Obsadzie)
+    #: i w dniu meczu ta deklaracja juz obowiazywala.
+    own_table: bool = False
+    #: Okreg wystawil drugiego stolikowego wbrew deklaracji klubu - klub za
+    #: niego nie placi, a panel pokazuje to jako ostrzezenie.
+    extra_table: bool = False
 
 
 def _as_date(value: Any) -> Optional[date]:
@@ -256,6 +285,50 @@ class TeamIndex:
         return options[0]
 
 
+def own_table_applies(setting: Optional[ClubSetting], code: Any, day: Any) -> bool:
+    """
+    Czy na tym meczu klub gospodarza placi tylko za JEDNEGO stolikowego.
+
+    Trzy warunki naraz: klub zadeklarowal wlasnego stolikowego, mecz jest
+    OKREGOWY (stoliki lig centralnych i pucharu wojewodzkiego daje zawsze
+    okreg - ta sama granica co przy potrojnym ryczalcie), a deklaracja
+    obowiazywala juz w dniu meczu.
+    """
+    if setting is None or int(setting.table_by_club or 0) <= 0:
+        return False
+    if R.is_provincial_cup(code) or R.match_level(code) != "district":
+        return False
+    when = _as_date(day)
+    if setting.table_since is not None and (when is None or when < setting.table_since):
+        return False
+    return True
+
+
+def keep_one_table(shares: list[RefereeShare]) -> bool:
+    """
+    Zostawia w rachunku klubu JEDNEGO stolikowego, reszta dostaje `charged=False`.
+
+    Zostaje TANSZY: ryczalt obu stolikowych na tym samym meczu jest ten sam,
+    roznia sie tylko dojazdem, a drugiego wystawil okreg wbrew deklaracji klubu.
+    Klub nie powinien placic za dalszy dojazd osoby, ktorej nie zamawial.
+
+    ⚠ Wybor zalezy wylacznie od danych, ktore zostaja na zawsze (kwoty i numery
+    sedziow). Terminarz okregu wie, kto siedzial na „czasie", ale trzyma tylko
+    biezacy sezon - regula oparta na nim zmienilaby rachunek meczu po przelomie
+    sezonu.
+
+    Zwraca True, gdy cokolwiek zdjeto.
+    """
+    tables = [share for share in shares if share.role.startswith(R.ROLE_TABLE)]
+    if len(tables) < 2:
+        return False
+    keep = min(tables, key=lambda share: (share.gross + share.travel, share.judge_id))
+    for share in tables:
+        if share is not keep:
+            share.charged = False
+    return True
+
+
 def build_charges(
     settled: Iterable[Any],
     *,
@@ -325,7 +398,6 @@ def build_charges(
 
     out: list[ChargeRow] = []
     for row in grouped.values():
-        row.amount = round(row.gross + row.travel, 2)
         row.referees.sort(key=lambda share: (share.role, share.name, share.judge_id))
         override = overrides.get(row.match_key) or MatchOverride()
 
@@ -345,6 +417,17 @@ def build_charges(
             row.team_name = team.name
             row.club_id = team.club_id
 
+        # Drugi stolikowy u klubu, ktory stolikowego stawia sam. Liczymy przed
+        # kwota, bo kwota to suma tylko tych, ktorzy wchodza do rachunku.
+        setting = clubs.get(team.club_id) if team is not None else None
+        if own_table_applies(setting, row.code, row.day):
+            row.own_table = True
+            row.extra_table = keep_one_table(row.referees)
+        charged_shares = [share for share in row.referees if share.charged]
+        row.gross = sum(int(share.gross or 0) for share in charged_shares)
+        row.travel = round(sum(float(share.travel or 0) for share in charged_shares), 2)
+        row.amount = round(row.gross + row.travel, 2)
+
         if override.excluded:
             row.status = EXCLUDED
         elif team is None:
@@ -353,7 +436,7 @@ def build_charges(
             # gospodarzem nie jest nasza sprawa.
             row.status = NO_HOST if row.match_key.startswith(OUTSIDE_PREFIX) else UNASSIGNED
         else:
-            setting = clubs.get(team.club_id) or ClubSetting()
+            setting = setting or ClubSetting()
             if not setting.settles and (
                 setting.since is None or (_as_date(row.day) or date.max) >= setting.since
             ):
