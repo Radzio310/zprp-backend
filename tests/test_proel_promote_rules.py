@@ -199,10 +199,34 @@ def test_oficjalny_wiersz_stanu_tego_samego_meczu_przechodzi():
     assert promotion_verdict(_facts(official_zprp_id=None, official_local_key=None)) is None
 
 
-def test_oficjalny_z_danymi_wspolpracy_trzeba_scalic_recznie():
+def test_overlay_bez_dowodu_tozsamosci_nadal_blokuje():
     out = promotion_verdict(_facts(official_overlay_nonempty=True))
     assert out["reason"] == "overlay_nonempty"
-    assert "ręcznie" in out["message"]
+    assert "IdZawody" in out["message"]
+
+
+def test_overlay_tego_samego_id_zawody_scala_sie_automatycznie():
+    assert (
+        promotion_verdict(
+            _facts(
+                official_overlay_nonempty=True,
+                official_zprp_id="206650",
+            )
+        )
+        is None
+    )
+
+
+def test_overlay_tego_samego_meczu_lokalnego_scala_sie_automatycznie():
+    assert (
+        promotion_verdict(
+            _facts(
+                official_overlay_nonempty=True,
+                official_local_key="SK8|GOSPODARZE|GOSCIE",
+            )
+        )
+        is None
+    )
 
 
 def test_kolejnosc_pytan():

@@ -169,6 +169,27 @@ def _refusal(reason: str, message: str) -> Dict[str, str]:
     return {"reason": reason, "message": message}
 
 
+def _overlay_belongs_to_promoted_match(
+    facts: PromotionFacts, config: Dict[str, Any]
+) -> bool:
+    """Czy dane współpracy pod oficjalnym numerem na pewno są z tego meczu.
+
+    Overlay jest właśnie mechanizmem scalania podpisów, badań i obsady z wielu
+    urządzeń. Nie ma powodu blokować promocji, jeśli obie strony wskazują to samo
+    IdZawody albo ten sam odcisk numeru i drużyn. Przy braku takiego dowodu
+    zostaje dotychczasowa, bezpieczna odmowa — numer meczu wraca co sezon.
+    """
+    incoming = {"matchConfig": config}
+    known_zprp = str(facts.official_zprp_id or "").strip()
+    incoming_zprp = zprp_id_of(incoming)
+    if known_zprp and incoming_zprp and known_zprp == incoming_zprp:
+        return True
+
+    known_local = str(facts.official_local_key or "").strip()
+    incoming_local = local_key_from_blob(incoming)
+    return bool(known_local and incoming_local and known_local == incoming_local)
+
+
 def promotion_verdict(facts: PromotionFacts) -> Optional[Dict[str, str]]:
     """Odmowa `{reason, message}` albo `None`, gdy klucz wolno przenieść.
 
@@ -267,12 +288,14 @@ def promotion_verdict(facts: PromotionFacts) -> Optional[Dict[str, str]]:
             "drużyny). Sprawdź, czy to na pewno ten sam mecz.",
         )
 
-    if facts.official_overlay_nonempty:
+    if facts.official_overlay_nonempty and not _overlay_belongs_to_promoted_match(
+        facts, cfg
+    ):
         return _refusal(
             REASON_OVERLAY_NONEMPTY,
-            f"Oficjalny mecz {official} ma już dane współpracy (podpisy, badania "
-            "albo obsadę wpisane z innych urządzeń). Przeniesienie pomieszałoby je "
-            "z zapisem szkoleniowym - te dane trzeba scalić ręcznie.",
+            f"Oficjalny numer {official} ma już dane współpracy, ale serwer nie "
+            "potrafi potwierdzić, że należą do tego samego meczu. Sprawdź IdZawody "
+            "albo drużyny - bez tego automatyczne scalenie byłoby ryzykowne.",
         )
     return None
 
