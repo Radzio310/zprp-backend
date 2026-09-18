@@ -44,6 +44,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from app.deps import Settings, get_rsa_keys, get_settings
 from app.utils import fetch_with_correct_encoding
 from app.proel_fields import exam_mark_meets
+from app.proel_training_key import blob_is_training
 from app.protocol_category import (
     HeaderMarks,
     exam_requirement_for_code,
@@ -5564,7 +5565,7 @@ async def _with_exam_overlay(data_json: Dict[str, Any]) -> Dict[str, Any]:
     mc = data_json.get("matchConfig") if isinstance(data_json, dict) else None
     if not isinstance(mc, dict):
         return data_json
-    if mc.get("isTest") or (mc.get("training") or {}).get("eventId"):
+    if blob_is_training(data_json):
         return data_json
     number = str(mc.get("matchNumber") or "").strip()
     if not number:
@@ -5640,14 +5641,12 @@ async def generate_protocol_pdf(
     generated_at_iso = generated_dt.isoformat()
     zprp_match_id = _zprp_match_id(data_json)
     match_number = str((data_json.get("matchConfig") or {}).get("matchNumber") or "").strip()
-    # Ćwiczenie z kursokonferencji rozpoznajemy z SAMEGO stanu meczu, a nie z
+    # Każdy zapis szkoleniowy rozpoznajemy z SAMEGO stanu meczu, a nie z
     # osobnej flagi w żądaniu. Flagę dałoby się podnieść przy prawdziwym
     # protokole i wypisać go z dziennika; znacznik w `matchConfig` jedzie razem
     # z danymi, które i tak trafiają do podpisu, więc kłamstwo kosztowałoby
     # podrobienie całego stanu meczu.
-    is_training = bool(
-        ((data_json.get("matchConfig") or {}).get("training") or {}).get("eventId")
-    )
+    is_training = blob_is_training(data_json)
 
     # Ślad audytu liczony PRZED generowaniem: skrót stanu ma opisywać to, co
     # sędzia wysłał, a nie to, co po drodze zrobił z tym generator.

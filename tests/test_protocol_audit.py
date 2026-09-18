@@ -15,6 +15,12 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from app import results as r
 
 
+def test_origin_training_is_recognized_by_protocol_audit():
+    assert r.blob_is_training(
+        {"matchConfig": {"matchNumber": "LCM/8", "origin": "training"}}
+    )
+
+
 @pytest.fixture(scope="module")
 def rsa_keys():
     priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)

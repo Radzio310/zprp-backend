@@ -188,8 +188,7 @@ def test_pdf_prints_the_overlay_but_never_a_foreign_or_training_match():
     # Odcisk stanu liczy się z tego, co przysłał sędzia - PRZED nałożeniem.
     assert source.index("_sha256_bytes(state_bytes)") < source.index("_with_exam_overlay")
     helper = code_of(RESULTS["_with_exam_overlay"])
-    assert "isTest" in helper
-    assert "training" in helper
+    assert "blob_is_training" in helper
     assert "match_id_conflict" in calls_in(RESULTS["_with_exam_overlay"])
     # Tylko wpisy badań - reszta overlaya nie ma prawa podmieniać wydruku.
     assert "startswith('exam.')" in helper
