@@ -177,6 +177,8 @@ def _item(row: Any, state: dict, code: str, names: dict[str, str]) -> dict:
     status = A.crew_status(state, code)
     at = row["match_at"]
     stage = S.round_info(state)
+    score_host = _s(state.get("wynik_gosp_full"))
+    score_guest = _s(state.get("wynik_gosc_full"))
     return {
         "match_id": _s(row["match_id"]),
         "code": code,
@@ -185,6 +187,10 @@ def _item(row: Any, state: dict, code: str, names: dict[str, str]) -> dict:
         "category": A.match_category(code),
         "level": league_level(code),
         "match_at": _iso(at),
+        "score": (
+            {"host": score_host, "guest": score_guest, "label": f"{score_host}:{score_guest}"}
+            if score_host and score_guest else None
+        ),
         "day": at.date().isoformat() if at else None,
         "round": _s(state.get("kolejka") or state.get("Kolejka")),
         # Kolejka do widoku „Kolejki" i do linii granicy kolejki na liscie.
@@ -253,6 +259,7 @@ async def list_matches(
     q: Optional[str] = Query(None, description="Drużyna, numer meczu, hala albo sędzia"),
     only_gaps: bool = Query(False, description="Tylko mecze z dziurą w obsadzie"),
     include_past: bool = Query(False, description="Także mecze sprzed dziś"),
+    past_only: bool = Query(False, description="Tylko mecze rozegrane lub już rozpoczęte"),
     undated: Optional[bool] = Query(None, description="Przestarzałe - zamiast tego `when`"),
     when: Optional[str] = Query(None, description="dated | all | undated"),
     season: Optional[int] = Query(
@@ -276,7 +283,7 @@ async def list_matches(
     read_only = chosen != current
     mode = S.normalize_when(when, undated)
 
-    start = None if read_only else (date_from or (None if include_past else today))
+    start = None if read_only else (date_from or (None if include_past or past_only else today))
     end = None if read_only else date_to
 
     rows = await database.fetch_all(
@@ -310,6 +317,9 @@ async def list_matches(
     window: list[dict] = []
     for row, state, code in candidates:
         at = _as_utc(row["match_at"])
+        has_score = bool(_s(state.get("wynik_gosp_full")) and _s(state.get("wynik_gosc_full")))
+        if past_only and not has_score and (at is None or at >= _now()):
+            continue
         match_season = seasons_of.get(_s(row["match_id"]))
         if match_season is not None:
             per_season[match_season] = per_season.get(match_season, 0) + 1
@@ -368,6 +378,8 @@ async def list_matches(
             _code_order(item["code"]),
         )
     )
+    if past_only:
+        items.reverse()
 
     totals = {
         "matches": len(window),

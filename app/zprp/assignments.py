@@ -539,6 +539,9 @@ class ObsadaSaveRequest(BaseModel):
     #: Przebieg automatu, z którego pochodzi ten zapis. Dzięki niemu historia
     #: wie, co wolno cofnąć jednym ruchem - patrz `province_assignment_changes`.
     run_id: Optional[int] = None
+    #: Uzupełnianie zakończonego meczu: aktualizuj migawkę, ale nie wysyłaj
+    #: spóźnionych powiadomień „dostałeś mecz".
+    silent: bool = False
 
 
 class ObsadaHallFormRequest(BaseModel):
@@ -1488,6 +1491,7 @@ async def _announce_saved_lineup(
             wanted,
             actor=payload.actor or payload.judge_id,
             run_id=payload.run_id,
+            silent=payload.silent,
         )
     except Exception:
         logger.exception("obsada/save: zapis przeszedł, powiadomienie nie")

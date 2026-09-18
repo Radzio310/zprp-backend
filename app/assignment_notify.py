@@ -123,6 +123,7 @@ async def announce_lineup(
     *,
     actor: Optional[str] = None,
     run_id: Optional[int] = None,
+    silent: bool = False,
 ) -> dict:
     """
     Wpisuje zapisana obsadę do migawki i rozsyła powiadomienia.
@@ -148,7 +149,9 @@ async def announce_lineup(
             out = with_slot_holder(out, crew_slot, number, _s(full_name))
         return out
 
-    return await announce_change(province, match_id, patch, actor=actor, run_id=run_id)
+    return await announce_change(
+        province, match_id, patch, actor=actor, run_id=run_id, silent=silent
+    )
 
 
 async def announce_hall(
@@ -191,6 +194,7 @@ async def announce_change(
     *,
     actor: Optional[str] = None,
     run_id: Optional[int] = None,
+    silent: bool = False,
 ) -> dict:
     """
     Rdzeń: poprawia migawkę meczu i ogłasza zmianę tak, jak zrobiłby to monitor.
@@ -281,7 +285,7 @@ async def announce_change(
         # „Dodano nowy mecz", żeby treść powiadomienia była jedna dla wszystkich.
         for judge_id in added:
             created += await _upsert_assignment(
-                province, _s(match_id), judge_id, season, True, new
+                province, _s(match_id), judge_id, season, not silent, new
             )
 
         for judge_id in removed:
@@ -298,17 +302,18 @@ async def announce_change(
                 # doliczyłby swoje dwa przebiegi i ogłosił to samo raz jeszcze.
                 .values(active=False, missing_runs=2, updated_at=func.now())
             )
-            created += await _create_event(
-                province,
-                _s(match_id),
-                code,
-                "assignment_removed",
-                f"Usunięto Twój mecz {code}" + (f" • {details}" if details else ""),
-                [judge_id],
-                new_fp,
-            )
+            if not silent:
+                created += await _create_event(
+                    province,
+                    _s(match_id),
+                    code,
+                    "assignment_removed",
+                    f"Usunięto Twój mecz {code}" + (f" • {details}" if details else ""),
+                    [judge_id],
+                    new_fp,
+                )
 
-        if stayed:
+        if stayed and not silent:
             for event in build_change_events(old, new):
                 created += await _create_event(
                     province,
