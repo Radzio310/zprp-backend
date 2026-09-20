@@ -29,6 +29,8 @@ def test_zaproszeni_licza_sie_z_aktualnych_odznak_i_osob():
     assert R.invited_ids(judges(), {"target": {}}) == ["1", "2", "3", "4", "5"]
     # Same osoby bez odznak = tylko te osoby.
     assert R.invited_ids(judges(), {"target": {}, "include_ids": ["2"]}) == ["2"]
+    young = judges() + [{"judge_id": "6", "badges": [R.YOUNG_DISTRICT_BADGE]}]
+    assert R.invited_ids(young, {"target": {"include_badges": [R.YOUNG_DISTRICT_BADGE]}}) == ["6"]
 
 
 def test_komisja_zarzadza_tylko_swoim_okregiem():

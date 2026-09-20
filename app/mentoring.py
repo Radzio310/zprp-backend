@@ -11,8 +11,27 @@ from app.db import (database, province_judges, province_matches, mentoring_confi
 from app.match_market import market_actor, Actor
 from app.match_market_access import badge_names
 from app.mentoring_rules import CROSS_PROVINCE, may_manage, pair_matches, season_bounds, json_value
+from app.proel_auth import is_admin
+from app.settlement_province import display as province_display, spellings
 
 router = APIRouter(prefix="/mentoring", tags=["Mentoring"])
+
+
+def prov(value) -> str:
+    """
+    Kanoniczna pisownia wojewodztwa, np. „SLASKIE" -> „ŚLĄSKIE".
+
+    ⚠ Ten modul porownywal wojewodztwa DOKLADNYM napisem, a konta sedziow maja
+    je w bazie raz z ogonkami, raz bez. Skutek byl cichy i mylacy: pary lezaly
+    pod „ŚLĄSKIE", panel okregu pytal o „SLASKIE" i pokazywal zero par, a
+    czlonek komisji nie wchodzil tam w ogole (`may_manage` porownuje tak samo).
+    Kazde porownanie i kazdy zapis przechodzi teraz przez te funkcje, a odczyt
+    z bazy przez `spellings()`, ktore zna wszystkie warianty zapisu.
+    """
+    text_value = str(value or "").strip().upper()
+    if not text_value or text_value == CROSS_PROVINCE:
+        return text_value
+    return province_display(text_value)
 
 PROVINCES = (
     "DOLNOŚLĄSKIE", "KUJAWSKO-POMORSKIE", "LUBELSKIE", "LUBUSKIE",
@@ -29,19 +48,41 @@ def now():
 
 
 async def configuration(province):
+    province = prov(province)
     if province == CROSS_PROVINCE:
         return {"province": CROSS_PROVINCE, "enabled": False, "manager_ids": []}
-    row = await database.fetch_one(select(config).where(config.c.province == province))
+    row = await database.fetch_one(select(config).where(config.c.province.in_(spellings(province))))
     return {**dict(row), "manager_ids": json_value(row["manager_ids"], [])} if row else {"province": province, "enabled": False, "manager_ids": []}
 
 
-async def require_manager(actor, province):
+async def can_manage(actor, province) -> bool:
+    province = prov(province)
     if province == CROSS_PROVINCE:
-        if not actor.is_admin:
-            raise HTTPException(403, "Parami międzyokręgowymi zarządza wyłącznie administrator.")
-        return
-    if not may_manage(actor.is_admin, actor.judge_id, actor.province, badge_names(actor.badges), province, await configuration(province)):
+        return bool(actor.is_admin)
+    return may_manage(
+        actor.is_admin, actor.judge_id, prov(actor.province), badge_names(actor.badges),
+        province, await configuration(province),
+    )
+
+
+async def require_manager(actor, province):
+    if prov(province) == CROSS_PROVINCE and not actor.is_admin:
+        raise HTTPException(403, "Parami międzyokręgowymi zarządza wyłącznie administrator.")
+    if not await can_manage(actor, province):
         raise HTTPException(403, "Brak uprawnień do zarządzania mentoringiem tego okręgu.")
+
+
+async def require_pair_write(actor, pair):
+    """
+    Kto moze zmienic te konkretna pare.
+
+    Pare zalozona przez ADMINISTRATORA okreg oglada, ale jej nie rusza
+    (decyzja uzytkownika z 20.09.2026) - inaczej ustalenie krajowe znikaloby
+    po cichu z poziomu okregu. Sam administrator zmienia kazda.
+    """
+    await require_manager(actor, pair["province"])
+    if not actor.is_admin and await is_admin(str(pair.get("created_by") or "")):
+        raise HTTPException(403, "Tę parę założył administrator - okręg może ją tylko oglądać.")
 
 
 async def log(actor, action, data, pair_id=None):
@@ -75,7 +116,7 @@ async def validate_people(actor, province, judge_ids, mentor_ids):
     rows = await database.fetch_all(select(province_judges).where(province_judges.c.judge_id.in_(ids)))
     if len(rows) != len(ids):
         raise HTTPException(422, "Nie znaleziono wszystkich wybranych sędziów.")
-    if not actor.is_admin and any(str(r["province"]).strip().upper() != province for r in rows):
+    if not actor.is_admin and any(prov(r["province"]) != prov(province) for r in rows):
         raise HTTPException(403, "Komisja może wybierać wyłącznie osoby ze swojego okręgu.")
     return rows
 
@@ -86,15 +127,19 @@ def pair_scope(judge_ids, people):
     judge_rows = [row for row in people if str(row["judge_id"]).strip() in wanted]
     if len(judge_rows) != len(wanted) or any(not str(row["province"] or "").strip() for row in judge_rows):
         raise HTTPException(422, "Każdy podopieczny musi mieć przypisany okręg.")
-    provinces = {str(row["province"]).strip().upper() for row in judge_rows}
+    provinces = {prov(row["province"]) for row in judge_rows}
     return next(iter(provinces)) if len(provinces) == 1 else CROSS_PROVINCE
 
 
 @router.get("/access")
 async def access(actor: Actor = Depends(market_actor)):
-    cfg = await configuration(actor.province)
-    return {"isAdmin": actor.is_admin, "province": actor.province, "judgeId": actor.judge_id,
-        "canManage": may_manage(actor.is_admin, actor.judge_id, actor.province, badge_names(actor.badges), actor.province, cfg)}
+    # `canView` to podglad par swojego okregu - bez prawa zmiany. Kafel w panelu
+    # okregowym stoi na nim, zeby sedzia widzial, kto kim sie opiekuje, nawet gdy
+    # zarzadzanie nalezy do komisji albo do administratora.
+    province = prov(actor.province)
+    return {"isAdmin": actor.is_admin, "province": province, "judgeId": actor.judge_id,
+        "canManage": await can_manage(actor, province),
+        "canView": bool(province) or bool(actor.is_admin)}
 
 
 @router.get("/admin/overview")
@@ -126,36 +171,83 @@ async def admin_overview(actor: Actor = Depends(market_actor)):
     } for province in ADMIN_SCOPES]}
 
 
+async def pair_json(record, links, locked):
+    return {**dict(record), "judge_ids": json_value(record["judge_ids"], []),
+        "mentor_ids": [a["mentor_id"] for a in links if a["pair_id"] == record["id"] and a["ended_at"] is None],
+        "mentor_history_ids": list(dict.fromkeys(a["mentor_id"] for a in links if a["pair_id"] == record["id"])),
+        "locked": locked}
+
+
 @router.get("/management")
 async def management(province: str = "", actor: Actor = Depends(market_actor)):
-    province = (province or actor.province).strip().upper()
-    await require_manager(actor, province)
+    """
+    Pary okregu - do prowadzenia albo do samego ogladania.
+
+    PODGLAD BEZ UPRAWNIEN (decyzja uzytkownika z 20.09.2026): ekran ma sie
+    otworzyc kazdemu sedziemu ze SWOJEGO okregu i pokazac, kto kim sie opiekuje.
+    Prawo zmiany mowi `can_manage` i to ono decyduje o przyciskach; bez niego
+    lista jest tylko do czytania. Cudzego okregu nie oglada nikt poza adminem.
+    """
+    province = prov(province or actor.province)
+    manage = await can_manage(actor, province)
+    if not manage and not (province and province == prov(actor.province)):
+        raise HTTPException(403, "Pary mentorskie innego okręgu widzi wyłącznie administrator.")
+
     query = select(province_judges).order_by(province_judges.c.full_name)
     if not actor.is_admin:
-        query = query.where(province_judges.c.province == province)
+        query = query.where(province_judges.c.province.in_(spellings(province)))
     people = [{k: dict(r).get(k) for k in ("judge_id", "full_name", "province", "photo_url")} for r in await database.fetch_all(query)]
+
     # Managers see the active configuration and the archive. Ending a pair revokes
     # access for mentors, but must not erase who was responsible for it.
-    records = await database.fetch_all(select(pairs).where(pairs.c.province == province).order_by(pairs.c.created_at.desc()))
-    links = await database.fetch_all(select(assignments).select_from(assignments.join(pairs, assignments.c.pair_id == pairs.c.id)).where(pairs.c.province == province))
+    names = spellings(province)
+    records = await database.fetch_all(select(pairs).where(pairs.c.province.in_(names)).order_by(pairs.c.created_at.desc()))
+    links = await database.fetch_all(select(assignments).select_from(assignments.join(pairs, assignments.c.pair_id == pairs.c.id)).where(pairs.c.province.in_(names)))
+
+    # Para zalozona przez administratora jest w okregu tylko do ogladania.
+    # `dict(...)` bo wiersz bez tej kolumny (starszy zapis) nie moze wywrocic odczytu.
+    creators = {str(dict(r).get("created_by") or "") for r in records}
+    admin_creators = {who for who in creators if who and await is_admin(who)}
+
+    # Pary miedzyokregowe z sedzia tego okregu. Okreg ich nie prowadzi z zasady,
+    # wiec zawsze sa zamkniete - ale musi o nich wiedziec, zeby nie szukal
+    # podopiecznego, ktory ma juz opieke w parze z sedzia z innego wojewodztwa.
+    ours = {str(row["judge_id"]) for row in people if prov(row.get("province")) == province}
+    cross_records, cross_links, cross_people = [], [], []
+    if province != CROSS_PROVINCE:
+        candidates = await database.fetch_all(
+            select(pairs).where(pairs.c.province == CROSS_PROVINCE).where(pairs.c.ended_at.is_(None))
+        )
+        cross_records = [r for r in candidates if ours & set(json_value(r["judge_ids"], []))]
+        if cross_records:
+            ids = [r["id"] for r in cross_records]
+            cross_links = await database.fetch_all(select(assignments).where(assignments.c.pair_id.in_(ids)))
+            wanted = {str(judge) for r in cross_records for judge in json_value(r["judge_ids"], [])}
+            wanted |= {str(a["mentor_id"]) for a in cross_links}
+            missing = wanted - {str(p["judge_id"]) for p in people}
+            if missing:
+                extra = await database.fetch_all(select(province_judges).where(province_judges.c.judge_id.in_(missing)))
+                cross_people = [{k: dict(r).get(k) for k in ("judge_id", "full_name", "province", "photo_url")} for r in extra]
+
     occupied = await database.fetch_all(select(members.c.judge_id))
-    return {"config": await configuration(province), "people": people,
-        "occupied": [r["judge_id"] for r in occupied if actor.is_admin or r["judge_id"] in {p["judge_id"] for p in people}],
-        "pairs": [{**dict(r), "judge_ids": json_value(r["judge_ids"], []),
-            "mentor_ids": [a["mentor_id"] for a in links if a["pair_id"] == r["id"] and a["ended_at"] is None],
-            "mentor_history_ids": list(dict.fromkeys(a["mentor_id"] for a in links if a["pair_id"] == r["id"]))}
-            for r in records]}
+    known = {p["judge_id"] for p in people}
+    return {"config": await configuration(province), "province": province,
+        "can_manage": manage, "is_admin": bool(actor.is_admin),
+        "people": people + cross_people,
+        "occupied": [r["judge_id"] for r in occupied if actor.is_admin or r["judge_id"] in known],
+        "pairs": [await pair_json(r, links, not manage or (not actor.is_admin and str(dict(r).get("created_by") or "") in admin_creators)) for r in records],
+        "cross_pairs": [await pair_json(r, cross_links, True) for r in cross_records]}
 
 
 @router.put("/config/{province}")
 async def set_config(province: str, req: ConfigRequest, actor: Actor = Depends(market_actor)):
     if not actor.is_admin:
         raise HTTPException(403, "Tylko administrator włącza zarządzanie okręgowe.")
-    province = province.strip().upper()
+    province = prov(province)
     if province == CROSS_PROVINCE:
         raise HTTPException(422, "Pary międzyokręgowe nie mają uprawnień komisji.")
     rows = await database.fetch_all(select(province_judges).where(province_judges.c.judge_id.in_(req.manager_ids)))
-    if len(rows) != len(set(req.manager_ids)) or any(r["province"] != province for r in rows):
+    if len(rows) != len(set(req.manager_ids)) or any(prov(r["province"]) != province for r in rows):
         raise HTTPException(422, "Zarządzający muszą należeć do tego okręgu.")
     async with database.transaction():
         await database.execute(text("SELECT pg_advisory_xact_lock(7419021)"))
@@ -166,7 +258,7 @@ async def set_config(province: str, req: ConfigRequest, actor: Actor = Depends(m
 
 @router.post("/pairs")
 async def create_pair(req: PairRequest, actor: Actor = Depends(market_actor)):
-    requested_province = req.province.strip().upper()
+    requested_province = prov(req.province)
     async with database.transaction():
         await database.execute(text("SELECT pg_advisory_xact_lock(7419021)"))
         await require_manager(actor, requested_province)
@@ -198,7 +290,7 @@ async def replace_mentors(pair_id: str, req: MentorsRequest, actor: Actor = Depe
     async with database.transaction():
         await database.execute(text("SELECT pg_advisory_xact_lock(7419021)"))
         pair = await active_pair(pair_id)
-        await require_manager(actor, pair["province"])
+        await require_pair_write(actor, pair)
         await validate_people(actor, pair["province"], pair["judge_ids"], req.mentor_ids)
         await database.execute(update(assignments).where(assignments.c.pair_id == pair_id).where(assignments.c.ended_at.is_(None)).where(assignments.c.mentor_id.notin_(req.mentor_ids)).values(ended_at=now()))
         for mentor in req.mentor_ids:
@@ -215,7 +307,7 @@ async def end_pair(pair_id: str, actor: Actor = Depends(market_actor)):
     async with database.transaction():
         await database.execute(text("SELECT pg_advisory_xact_lock(7419021)"))
         pair = await active_pair(pair_id)
-        await require_manager(actor, pair["province"])
+        await require_pair_write(actor, pair)
         await database.execute(update(pairs).where(pairs.c.id == pair_id).values(ended_at=now()))
         await database.execute(update(assignments).where(assignments.c.pair_id == pair_id).where(assignments.c.ended_at.is_(None)).values(ended_at=now()))
         await database.execute(delete(members).where(members.c.pair_id == pair_id))

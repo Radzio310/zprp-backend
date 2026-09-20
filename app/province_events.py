@@ -50,6 +50,7 @@ from app.db import (
     province_event_templates,
     province_events,
     province_judges,
+    young_referees,
 )
 from app.match_market import Actor, market_actor
 from app.push.push import send_push_to_judges
@@ -184,7 +185,25 @@ async def _judges(province: str) -> List[Dict[str, Any]]:
             province_judges.c.badges,
         ).where(province_judges.c.province.in_(_names(province)))
     )
-    return [_row(r) for r in rows]
+    judges = [_row(r) for r in rows]
+
+    # „Młodzi sędziowie okręgowi” są listą zarządzaną niezależnie od badge'y
+    # ZPRP. W wydarzeniach zachowujemy jednak jeden mechanizm adresowania:
+    # aktywnym rekordom z YoungRefereesManager dokładamy wirtualną odznakę.
+    # Dzięki temu ten sam filtr steruje feedem, pushami, RSVP, kodem obecności
+    # i PDF-em, zamiast rozjeżdżać się w pięciu osobnych miejscach.
+    young_rows = await database.fetch_all(
+        select(young_referees.c.base_judge_id)
+        .where(young_referees.c.province.in_(_names(province)))
+        .where(young_referees.c.is_active.is_(True))
+    )
+    young_ids = {_s(row["base_judge_id"]) for row in young_rows if _s(row["base_judge_id"])}
+    for judge in judges:
+        badges = list(dict.fromkeys(R.badge_names(judge.get("badges"))))
+        if _s(judge.get("judge_id")) in young_ids:
+            badges.append(R.YOUNG_DISTRICT_BADGE)
+        judge["badges"] = list(dict.fromkeys(badges))
+    return judges
 
 
 async def _responses(event_ids: List[int]) -> Dict[int, Dict[str, Dict[str, Any]]]:

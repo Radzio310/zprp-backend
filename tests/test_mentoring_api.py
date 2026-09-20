@@ -152,19 +152,129 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO mentoring_audit" in sql for sql in statements))
         self.assertFalse(any("DELETE FROM mentoring_pairs" in sql for sql in statements))
 
-    async def test_management_keeps_ended_pairs_and_mentor_history(self):
+    def feed(self, records, links=(), cross=(), people=None):
+        """Kolejność zapytań w `management`: ludzie, pary, opieki, pary międzyokręgowe, zajęci."""
         self.db.database.fetch_all.side_effect = [
-            self.people,
-            [{"id": "ended", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": "date"}],
-            [{"pair_id": "ended", "mentor_id": "3", "ended_at": "date"}],
+            self.people if people is None else people,
+            list(records),
+            list(links),
+            list(cross),
             [],
         ]
         self.db.database.fetch_one.return_value = None
+
+    async def test_management_keeps_ended_pairs_and_mentor_history(self):
+        self.feed(
+            [{"id": "ended", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": "date"}],
+            [{"pair_id": "ended", "mentor_id": "3", "ended_at": "date"}],
+        )
         result = await self.api.management("ŚLĄSKIE", self.actor)
         self.assertEqual(result["pairs"][0]["mentor_ids"], [])
         self.assertEqual(result["pairs"][0]["mentor_history_ids"], ["3"])
         query = str(self.db.database.fetch_all.await_args_list[1].args[0])
         self.assertNotIn("ended_at IS NULL", query)
+
+    # ---------------- pisownia województwa ----------------
+    #
+    # Konta sędziów mają okręg raz z ogonkami, raz bez. Póki moduł porównywał
+    # dokładnym napisem, panel okręgu pokazywał zero par, a komisja nie wchodziła
+    # tam wcale - choć pary leżały w bazie pod „ŚLĄSKIE".
+
+    def test_pisownia_bez_ogonkow_to_ten_sam_okreg(self):
+        self.assertEqual(self.api.prov("SLASKIE"), "ŚLĄSKIE")
+        self.assertEqual(self.api.prov(" śląskie "), "ŚLĄSKIE")
+        self.assertEqual(self.api.prov(self.api.CROSS_PROVINCE), self.api.CROSS_PROVINCE)
+        self.assertEqual(self.api.prov(""), "")
+
+    async def test_pary_znajduja_sie_mimo_zapisu_bez_ogonkow(self):
+        self.feed([{"id": "p1", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": None}])
+        result = await self.api.management("SLASKIE", self.actor)
+        self.assertEqual(result["province"], "ŚLĄSKIE")
+        self.assertEqual(len(result["pairs"]), 1)
+        query = str(self.db.database.fetch_all.await_args_list[1].args[0])
+        self.assertIn("IN (", query.replace("\n", " "))
+
+    async def test_komisja_z_zapisem_bez_ogonkow_ma_uprawnienia(self):
+        actor = types.SimpleNamespace(judge_id="7", is_admin=False, province="SLASKIE", badges={})
+        self.db.database.fetch_one.return_value = {
+            "province": "ŚLĄSKIE", "enabled": True, "manager_ids": ["7"],
+        }
+        self.assertTrue(await self.api.can_manage(actor, "ŚLĄSKIE"))
+
+    # ---------------- podgląd i blokady ----------------
+
+    async def test_sedzia_bez_uprawnien_widzi_pary_swojego_okregu(self):
+        actor = types.SimpleNamespace(judge_id="9", is_admin=False, province="ŚLĄSKIE", badges={})
+        self.feed([{"id": "p1", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": None}])
+        result = await self.api.management("ŚLĄSKIE", actor)
+        self.assertFalse(result["can_manage"])
+        # Widzi, kto kim się opiekuje, ale każda para jest zamknięta.
+        self.assertTrue(result["pairs"][0]["locked"])
+
+    async def test_cudzego_okregu_nie_oglada_nikt_poza_adminem(self):
+        actor = types.SimpleNamespace(judge_id="9", is_admin=False, province="ŚLĄSKIE", badges={})
+        self.db.database.fetch_one.return_value = None
+        with self.assertRaises(HTTPException) as error:
+            await self.api.management("OPOLSKIE", actor)
+        self.assertEqual(error.exception.status_code, 403)
+
+    async def test_pare_zalozona_przez_admina_okreg_tylko_oglada(self):
+        actor = types.SimpleNamespace(judge_id="7", is_admin=False, province="ŚLĄSKIE", badges={})
+        self.feed([
+            {"id": "adminowa", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": None, "created_by": "admin"},
+            {"id": "wlasna", "province": "ŚLĄSKIE", "judge_ids": ["3", "4"], "ended_at": None, "created_by": "7"},
+        ])
+        self.db.database.fetch_one.return_value = {"province": "ŚLĄSKIE", "enabled": True, "manager_ids": ["7"]}
+        with patch.object(self.api, "is_admin", AsyncMock(side_effect=lambda who: who == "admin")):
+            result = await self.api.management("ŚLĄSKIE", actor)
+        self.assertTrue(result["can_manage"])
+        locked = {pair["id"]: pair["locked"] for pair in result["pairs"]}
+        self.assertEqual(locked, {"adminowa": True, "wlasna": False})
+
+    async def test_admin_edytuje_kazda_pare(self):
+        self.feed([
+            {"id": "adminowa", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": None, "created_by": "admin"},
+        ])
+        with patch.object(self.api, "is_admin", AsyncMock(return_value=True)):
+            result = await self.api.management("ŚLĄSKIE", self.actor)
+        self.assertFalse(result["pairs"][0]["locked"])
+
+    async def test_zapis_pary_admina_odrzucony_dla_okregu(self):
+        actor = types.SimpleNamespace(judge_id="7", is_admin=False, province="ŚLĄSKIE", badges={})
+        self.db.database.fetch_one.return_value = {"province": "ŚLĄSKIE", "enabled": True, "manager_ids": ["7"]}
+        with patch.object(self.api, "is_admin", AsyncMock(return_value=True)):
+            with self.assertRaises(HTTPException) as error:
+                await self.api.require_pair_write(actor, {"province": "ŚLĄSKIE", "created_by": "admin"})
+        self.assertEqual(error.exception.status_code, 403)
+        self.assertIn("administrator", error.exception.detail)
+
+    async def test_pary_miedzyokregowe_z_naszym_sedzia_sa_widoczne_i_zamkniete(self):
+        self.feed(
+            [],
+            [],
+            cross=[
+                {"id": "x", "province": self.api.CROSS_PROVINCE, "judge_ids": ["1", "99"], "ended_at": None},
+                {"id": "obca", "province": self.api.CROSS_PROVINCE, "judge_ids": ["50", "51"], "ended_at": None},
+            ],
+        )
+        # Po parach międzyokręgowych dochodzą: opieki i brakujące osoby, potem zajęci.
+        self.db.database.fetch_all.side_effect = [
+            self.people,
+            [],
+            [],
+            [
+                {"id": "x", "province": self.api.CROSS_PROVINCE, "judge_ids": ["1", "99"], "ended_at": None},
+                {"id": "obca", "province": self.api.CROSS_PROVINCE, "judge_ids": ["50", "51"], "ended_at": None},
+            ],
+            [{"pair_id": "x", "mentor_id": "77", "ended_at": None}],
+            [{"judge_id": "99", "full_name": "Sędzia z Opola", "province": "OPOLSKIE"}],
+            [],
+        ]
+        result = await self.api.management("ŚLĄSKIE", self.actor)
+        self.assertEqual([pair["id"] for pair in result["cross_pairs"]], ["x"])
+        self.assertTrue(result["cross_pairs"][0]["locked"])
+        # Nazwisko sędziego z drugiego okręgu musi przyjść razem z parą.
+        self.assertIn("99", [person["judge_id"] for person in result["people"]])
 
     async def test_feed_is_read_only_and_handles_database_json_strings(self):
         self.db.database.fetch_one.side_effect = [{"id": "pair", "judge_ids": '["1", "2"]'}, {"mentor_id": "admin"}]

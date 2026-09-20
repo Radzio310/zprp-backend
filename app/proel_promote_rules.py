@@ -177,7 +177,7 @@ def _overlay_belongs_to_promoted_match(
     Overlay jest właśnie mechanizmem scalania podpisów, badań i obsady z wielu
     urządzeń. Nie ma powodu blokować promocji, jeśli obie strony wskazują to samo
     IdZawody albo ten sam odcisk numeru i drużyn. Przy braku takiego dowodu
-    zostaje dotychczasowa, bezpieczna odmowa — numer meczu wraca co sezon.
+    zostaje dotychczasowa, bezpieczna odmowa - numer meczu wraca co sezon.
     """
     incoming = {"matchConfig": config}
     known_zprp = str(facts.official_zprp_id or "").strip()

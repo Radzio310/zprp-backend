@@ -169,6 +169,8 @@ def can_view_province(who: Viewer, province: str) -> bool:
 # Zaproszeni
 # ---------------------------------------------------------------------------
 
+YOUNG_DISTRICT_BADGE = "Młodzi sędziowie okręgowi"
+
 
 def invited_ids(judges: Iterable[Mapping[str, Any]], data: Mapping[str, Any], inactive: Iterable[Any] = ()) -> List[str]:
     """Zaproszeni z aktualnych odznak okręgu.
