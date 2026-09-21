@@ -48,14 +48,18 @@ from app.db import (
     province_module_config,
 )
 from app.deps import Settings, get_jwt_payload, get_settings
+from app.admin_alerts import admin_judge_ids
 from app.match_market_journal import (
     config_diff_message,
     kinds_in_group,
 )
 from app.match_market_notify import (
     apply_failed as text_apply_failed,
+    change_approved as text_change_approved,
     conflict_sentence,
     claim_created as text_claim_created,
+    claim_created_for_giver as text_claim_created_for_giver,
+    claim_withdrawn as text_claim_withdrawn,
     claim_impossible as text_claim_impossible,
     claim_lost as text_claim_lost,
     crew_changed as text_crew_changed,
@@ -63,14 +67,16 @@ from app.match_market_notify import (
     offer_created as text_offer_created,
     offer_rejected as text_offer_rejected,
     offer_withdrawn as text_offer_withdrawn,
+    offer_withdrawn_for_manager as text_offer_withdrawn_for_manager,
     taker_won as text_taker_won,
 )
 from app.match_market_access import (
     APPROVER_BADGE,
-    approver_judge_ids,
     badge_names,
     may_approve,
     may_manage_config,
+    notification_manager_ids,
+    offer_notification_groups,
     normalize_approver_badges,
 )
 from app.match_market_rules import (
@@ -117,7 +123,7 @@ from app.match_market_rules import (
     with_slot_holder,
 )
 from app.proel_auth import is_admin
-from app.push.push import send_push_to_judges
+from app.push.push import send_push_to_judges_report
 from app.zprp.assignments import (
     SELECT_TO_SLOT,
     _login_zprp,
@@ -223,6 +229,7 @@ async def _config(province: str) -> Dict[str, Any]:
         ),
         "assign_account_mode": _s(data.get("assign_account_mode")) or "own",
         "approver_badges": normalize_approver_badges(data.get("approver_badges")),
+        "notify_admins": bool(data.get("notify_admins", False)),
         # Mecze spoza obsady okręgu - patrz sekcja „Poziom rozgrywek" w liściu
         # reguł. Wymiana domyślnie WYŁĄCZONA; lista lig powierzonych z panelu
         # albo z katalogu domyślnego (`managed_prefixes_custom` mówi, która).
@@ -1023,6 +1030,11 @@ async def _notify(
     judge_ids: List[str],
     text: Tuple[str, str],
     offer: Dict[str, Any],
+    *,
+    broadcast: bool = False,
+    audience: str = "adresaci",
+    record_empty: bool = False,
+    selection_error: bool = False,
 ) -> None:
     """Wysyłka, która nigdy nie wywraca operacji, przy której powstała.
 
@@ -1032,12 +1044,38 @@ async def _notify(
     """
     title, body = text
     targets = sorted({_s(j) for j in judge_ids if _s(j)})
-    if not targets:
+    if not targets and not record_empty:
         return
     try:
-        await send_push_to_judges(targets, title, body, _offer_data(offer))
+        if selection_error:
+            report = {
+                "requestedJudges": 0, "eligibleJudges": 0,
+                "acceptedJudges": 0, "acceptedDevices": 0,
+                "failedDevices": 0, "mutedDevices": 0,
+                "noDeviceJudges": 0, "status": "error",
+                "errorStage": "recipient_lookup",
+            }
+        else:
+            report = await send_push_to_judges_report(
+                targets, title, body, _offer_data(offer),
+                app_variant="baza", market_broadcast=broadcast,
+            )
     except Exception:  # noqa: BLE001
         logger.warning("giełda: powiadomienie nieudane", exc_info=True)
+        report = {
+            "requestedJudges": len(targets), "eligibleJudges": 0,
+            "acceptedJudges": 0, "acceptedDevices": 0,
+            "failedDevices": 0, "mutedDevices": 0,
+            "noDeviceJudges": 0, "status": "error", "errorStage": "dispatch",
+        }
+    await _log(
+        "notification_dispatch",
+        province=_s(offer.get("province")), offer=offer,
+        ok=report["status"] == "accepted",
+        message=f"{title} — {audience}",
+        payload={**report, "audience": audience, "title": title, "body": body,
+                 "broadcast": broadcast},
+    )
 
 
 async def _broadcast_targets(province: str, exclude: str) -> List[str]:
@@ -1049,16 +1087,15 @@ async def _broadcast_targets(province: str, exclude: str) -> List[str]:
     czynnosci adresata i nie chowaja sie za przelacznikiem od listy ofert.
 
     Preferencje siedza per instalacja, bo ten sam sedzia miewa dwa telefony.
-    Wystarczy, ze JEDNO urzadzenie chce - powiadomienie i tak rozejdzie sie
-    na wszystkie jego urzadzenia, a cisza na wszystkich naraz jest tym, o co
-    prosi ten, kto przelaczyl wylacznik wszedzie.
+    Tu wybieramy osoby z co najmniej jednym chętnym urządzeniem. Sam wysyłacz
+    sprawdza preferencję ponownie per instalacja, więc wyciszony telefon milczy.
     """
     rows = await database.fetch_all(
         select(
             push_tokens.c.judge_id,
             push_tokens.c.notification_prefs,
         )
-        .where(push_tokens.c.app_variant == "baza")
+        .where(or_(push_tokens.c.app_variant == "baza", push_tokens.c.app_variant.is_(None)))
         .where(push_tokens.c.judge_id.is_not(None))
     )
     known = await database.fetch_all(
@@ -1079,17 +1116,60 @@ async def _broadcast_targets(province: str, exclude: str) -> List[str]:
 
 
 async def _approvers_of(province: str) -> List[str]:
-    cfg = await _config(province)
-    rows = await database.fetch_all(
-        select(
-            province_judges.c.judge_id,
-            province_judges.c.province,
-            province_judges.c.badges,
-        ).where(province_judges.c.province == province)
+    """Obsadowi i wybrane odznaki; administratorzy tylko po włączeniu w okręgu.
+
+    Nieudany odczyt jednej grupy nie może cofnąć czynności ani uciszyć drugiej.
+    """
+    try:
+        cfg = await _config(province)
+    except Exception:  # noqa: BLE001
+        logger.warning("giełda: ustawienia odbiorców niedostępne dla %s", province, exc_info=True)
+        return []
+    rows: List[Dict[str, Any]] = []
+    try:
+        records = await database.fetch_all(
+            select(
+                province_judges.c.judge_id,
+                province_judges.c.province,
+                province_judges.c.badges,
+            ).where(province_judges.c.province == province)
+        )
+        rows = [_row(r) for r in records]
+    except Exception:  # noqa: BLE001
+        logger.warning("giełda: odczyt odznak niedostępny dla %s", province, exc_info=True)
+    try:
+        admin_ids = await admin_judge_ids()
+    except Exception:  # noqa: BLE001
+        logger.warning("giełda: lista adminów niedostępna", exc_info=True)
+        admin_ids = []
+    return notification_manager_ids(
+        rows, province,
+        admin_ids=admin_ids,
+        notify_admins=cfg["notify_admins"],
+        allowed_badges=cfg["approver_badges"],
     )
-    return approver_judge_ids(
-        [_row(r) for r in rows], province, allowed_badges=cfg["approver_badges"]
+
+
+async def _offer_notification_groups(province: str, exclude: str) -> Tuple[List[str], List[str], bool]:
+    """Rozsyłka per urządzenie i priorytetowa wiadomość dla zarządzających."""
+    try:
+        public = await _broadcast_targets(province, exclude)
+        public_error = False
+    except Exception:  # noqa: BLE001
+        logger.warning("giełda: odbiorcy rozsyłki niedostępni dla %s", province, exc_info=True)
+        public = []
+        public_error = True
+    # Admin nigdy nie wpada przez zwykłą rozsyłkę członków okręgu. Jedyną
+    # bramką jego roli jest przełącznik okręgu w `_approvers_of`.
+    try:
+        admin_ids = await admin_judge_ids()
+    except Exception:  # noqa: BLE001
+        logger.warning("giełda: lista adminów niedostępna dla %s", province, exc_info=True)
+        admin_ids = []
+    public_ids, manager_ids = offer_notification_groups(
+        public, await _approvers_of(province), admin_ids, exclude
     )
+    return public_ids, manager_ids, public_error
 
 
 # ─────────────────────────── modele ───────────────────────────
@@ -1123,6 +1203,7 @@ class ProvinceConfigRequest(BaseModel):
     offer_deadline_hours: Optional[int] = None
     assign_account_mode: Optional[str] = None
     approver_badges: Optional[List[str]] = None
+    notify_admins: Optional[bool] = None
     #: Wymiana meczów spoza obsady okręgu (boiskowe gniazda I ligi i wyżej
     #: oraz obcych II lig). Domyślnie wyłączona - patrz liść reguł.
     foreign_matches_enabled: Optional[bool] = None
@@ -2010,16 +2091,17 @@ async def create_offer(
     # Zainteresowani to sędziowie okręgu, którzy mają aplikację i nie wyłączyli
     # powiadomień giełdy - reszta i tak zobaczy ofertę przy najbliższym wejściu
     # na ekran.
-    await _notify(
-        await _broadcast_targets(province, actor.judge_id),
-        # Migawka i termin są w wierszu meczu, nie w skróconym opisie oferty -
-        # a to one mówią sędziemu „czy mam wtedy czas".
-        text_offer_created(
-            {**offer, "match_at": data.get("match_at"), "match_snapshot": state},
-            actor.full_name,
-        ),
-        offer,
+    public, managers, public_error = await _offer_notification_groups(province, actor.judge_id)
+    # Migawka i termin są w wierszu meczu, nie w skróconym opisie oferty.
+    notification = text_offer_created(
+        {**offer, "match_at": data.get("match_at"), "match_snapshot": state},
+        actor.full_name,
     )
+    await _notify(public, notification, offer, broadcast=True,
+                  audience="sędziowie okręgu", record_empty=True,
+                  selection_error=public_error)
+    await _notify(managers, notification, offer,
+                  audience="obsadowi i administratorzy", record_empty=True)
     return {"id": offer_id, "status": "open"}
 
 
@@ -2090,6 +2172,13 @@ async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) ->
         interested,
         text_offer_withdrawn(offer, actor.full_name),
         offer,
+        audience="zgłoszeni sędziowie",
+    )
+    await _notify(
+        sorted(set(await _approvers_of(province)) - set(interested) - {actor.judge_id}),
+        text_offer_withdrawn_for_manager(offer, actor.full_name),
+        offer,
+        audience="obsadowi i administratorzy",
     )
     return {"id": offer_id, "status": target}
 
@@ -2197,11 +2286,15 @@ async def create_claim(
         message=_s(req.note),
         payload={"conflicts": len(conflicts), "again": bool(existing)},
     )
-    await _notify(
-        await _approvers_of(province),
-        text_claim_created(offer, actor.full_name),
-        offer,
-    )
+    managers = set(await _approvers_of(province)) - {actor.judge_id}
+    await _notify(sorted(managers), text_claim_created(offer, actor.full_name), offer,
+                  audience="obsadowi i administratorzy", record_empty=True)
+    giver_id = _s(offer["from_judge_id"])
+    if giver_id and giver_id not in managers and giver_id != actor.judge_id:
+        await _notify(
+            [giver_id], text_claim_created_for_giver(offer, actor.full_name), offer,
+            audience="oddający mecz",
+        )
     return {"id": claim_id, "status": "pending", "conflicts": conflicts}
 
 
@@ -2233,11 +2326,19 @@ async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor)) ->
         select(match_market_offers).where(match_market_offers.c.id == offer_id)
     )
     if parent:
+        parent_offer = _row(parent)
         await _log(
             "claim_withdrawn",
-            province=_s(_row(parent)["province"]),
+            province=_s(parent_offer["province"]),
             actor=actor,
-            offer=_row(parent),
+            offer=parent_offer,
+        )
+        await _notify(
+            sorted((set(await _approvers_of(_s(parent_offer["province"]))) |
+                    {_s(parent_offer["from_judge_id"])}) - {actor.judge_id}),
+            text_claim_withdrawn(parent_offer, actor.full_name),
+            parent_offer,
+            audience="oddający i zarządzający",
         )
     return {"id": claim["id"], "status": target}
 
@@ -2485,9 +2586,11 @@ async def reject_offer(
         payload={"claimsDropped": len(interested)},
     )
     await _notify(
-        [_s(offer["from_judge_id"])] + interested,
+        sorted((set(await _approvers_of(_s(offer["province"]))) |
+                {_s(offer["from_judge_id"])} | set(interested)) - {actor.judge_id}),
         text_offer_rejected(offer, _s(giver_card.get("full_name")), reason),
         offer,
+        audience="strony i zarządzający",
     )
     return {"id": offer_id, "status": target}
 
@@ -2647,6 +2750,7 @@ async def approve_offer(
             [_s(blocked.claim["judge_id"])],
             text_claim_impossible(blocked.offer, blocked.role),
             blocked.offer,
+            audience="zgłoszony sędzia",
         )
         raise HTTPException(
             409,
@@ -2716,9 +2820,13 @@ async def approve_offer(
         )
         if impossible:
             await _notify(
-                [_s(claim["judge_id"])], text_claim_impossible(offer, role), offer
+                [_s(claim["judge_id"])], text_claim_impossible(offer, role), offer,
+                audience="zgłoszony sędzia",
             )
-        await _notify([actor.judge_id], text_apply_failed(offer, message), offer)
+        await _notify(
+            await _approvers_of(province), text_apply_failed(offer, message), offer,
+            audience="obsadowi i administratorzy",
+        )
         await _log(
             "zprp_failed",
             province=province,
@@ -2885,33 +2993,49 @@ async def approve_offer(
         payload={"from": _s(giver.get("full_name")), "slotLabel": slot_label(offer["slot"])},
     )
 
-    await _notify([_s(claim["judge_id"])], text_taker_won(offer), offer)
+    await _notify([_s(claim["judge_id"])], text_taker_won(offer), offer,
+                  audience="przejmujący mecz")
     await _notify(
         [_s(offer["from_judge_id"])],
         text_giver_released(offer, taker_name),
         offer,
+        audience="oddający mecz",
     )
     others = await database.fetch_all(
         select(match_market_claims.c.judge_id)
         .where(match_market_claims.c.offer_id == offer_id)
         .where(match_market_claims.c.status == "declined")
     )
+    other_ids = [_s(_row(r)["judge_id"]) for r in others]
     await _notify(
-        [_s(_row(r)["judge_id"]) for r in others],
+        other_ids,
         text_claim_lost(offer),
         offer,
+        audience="pozostali chętni",
     )
     # Reszta obsady - drugi sędzia, stolik, delegat. Wcześniej mówił im o tym
     # monitor, gdy zauważył różnicę w migawce; skoro migawka jest już
     # poprawiona, nie ma czego zauważyć, więc wiadomość należy do giełdy. Przy
     # okazji dochodzi natychmiast, a nie po przebiegu monitora.
+    crew_ids = crew_judge_ids(
+        patched,
+        exclude=[_s(offer["from_judge_id"]), _s(claim["judge_id"])],
+    )
     await _notify(
-        crew_judge_ids(
-            patched,
-            exclude=[_s(offer["from_judge_id"]), _s(claim["judge_id"])],
-        ),
+        crew_ids,
         text_crew_changed(offer, taker_name, _s(giver.get("full_name"))),
         offer,
+        audience="pozostała obsada",
+    )
+    already_informed = {
+        actor.judge_id, _s(offer["from_judge_id"]), _s(claim["judge_id"]),
+        *other_ids, *crew_ids,
+    }
+    await _notify(
+        sorted(set(await _approvers_of(province)) - already_informed),
+        text_change_approved(offer, taker_name, _s(giver.get("full_name"))),
+        offer,
+        audience="obsadowi i administratorzy",
     )
 
     return {
@@ -2968,6 +3092,7 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
                 ),
                 "assignAccountMode": mode,
                 "approverBadges": normalize_approver_badges(cfg.get("approver_badges")),
+                "notifyAdmins": bool(cfg.get("notify_admins", False)),
                 "foreignMatchesEnabled": bool(cfg.get("foreign_matches_enabled", False)),
                 "managedPrefixes": managed_prefixes_for(province, cfg.get("managed_prefixes")),
                 "managedPrefixesDefault": managed_prefixes_for(province),
@@ -3043,7 +3168,7 @@ async def admin_province_offers(
 )
 async def admin_journal(
     province: str,
-    group: str = Query("", description="Grupa zdarzen: offers|claims|decisions|config. Pusto = wszystkie."),
+    group: str = Query("", description="Grupa: offers|claims|decisions|notifications|config. Pusto = wszystkie."),
     q: str = Query("", description="Szukanie po nazwisku, numerze meczu albo tresci wpisu."),
     since: str = Query("", description="Od tej daty (ISO). Pusto = bez dolnej granicy."),
     until: str = Query("", description="Do tej daty (ISO). Pusto = bez gornej granicy."),
@@ -3245,6 +3370,8 @@ async def admin_set_province(
         # Pusty wybór NIE wyłącza rozstrzygania - normalizacja wraca do odznaki
         # obsadowego, żeby okręg nie został z giełdą, której nikt nie domknie.
         values["approver_badges"] = normalize_approver_badges(req.approver_badges)
+    if req.notify_admins is not None:
+        values["notify_admins"] = bool(req.notify_admins)
     if req.foreign_matches_enabled is not None:
         values["foreign_matches_enabled"] = bool(req.foreign_matches_enabled)
     if req.reset_managed_prefixes:
@@ -3282,6 +3409,7 @@ async def admin_set_province(
         "deadlineHours": cfg["offer_deadline_hours"],
         "assignAccountMode": cfg["assign_account_mode"],
         "approverBadges": cfg["approver_badges"],
+        "notifyAdmins": cfg["notify_admins"],
         "foreignMatchesEnabled": cfg["foreign_matches_enabled"],
         "managedPrefixes": cfg["managed_prefixes"],
         "managedPrefixesDefault": managed_prefixes_for(key),

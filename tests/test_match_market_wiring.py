@@ -13,7 +13,9 @@ pomyłki, które inaczej wykonałyby się pierwszy raz na produkcji:
 from __future__ import annotations
 
 import ast
+import asyncio
 import pathlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -162,6 +164,87 @@ def test_notifications_never_escape_the_shield():
         if name != "_notify" and "send_push_to_judges" in calls_in(name)
     ]
     assert senders == [], senders
+    assert "send_push_to_judges_report" in calls_in("_notify")
+    assert "_log" in calls_in("_notify")
+    assert "notification_dispatch" in code_of("_notify")
+
+
+def test_notification_audit_records_unique_referees_and_lookup_failures():
+    # Uruchamiamy samą funkcję z izolowanymi atrapami; import całego modułu
+    # giełdy wymagałby produkcyjnego Postgresa.
+    module = ast.fix_missing_locations(ast.Module(body=[
+        ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+        FUNCTIONS["_notify"],
+    ], type_ignores=[]))
+    sent = []
+    entries = []
+
+    async def send(ids, title, body, data, **kwargs):
+        sent.append((ids, title, body, kwargs))
+        return {
+            "requestedJudges": len(ids), "eligibleJudges": len(ids),
+            "acceptedJudges": len(ids), "acceptedDevices": len(ids),
+            "failedDevices": 0, "mutedDevices": 0, "noDeviceJudges": 0,
+            "status": "accepted", "errorStage": "",
+        }
+
+    async def log(kind, **kwargs):
+        entries.append((kind, kwargs))
+
+    namespace = {
+        "_s": lambda value: str(value or "").strip(),
+        "_offer_data": lambda offer: {"offerId": str(offer["id"])},
+        "send_push_to_judges_report": send,
+        "_log": log,
+        "logger": SimpleNamespace(warning=lambda *args, **kwargs: None),
+    }
+    exec(compile(module, "match_market._notify", "exec"), namespace)
+    notify = namespace["_notify"]
+    offer = {"id": 7, "province": "ŚLĄSKIE"}
+
+    asyncio.run(notify(["5", "5", "2"], ("Nowy mecz", "Treść"), offer,
+                       audience="sędziowie okręgu", broadcast=True))
+    assert sent[0][0] == ["2", "5"]
+    assert sent[0][3]["market_broadcast"] is True
+    assert entries[0][0] == "notification_dispatch"
+    assert entries[0][1]["payload"]["acceptedJudges"] == 2
+    assert entries[0][1]["payload"]["body"] == "Treść"
+
+    asyncio.run(notify([], ("Nowy mecz", "Treść"), offer, audience="sędziowie okręgu",
+                       record_empty=True, selection_error=True))
+    assert len(sent) == 1
+    assert entries[1][1]["payload"]["status"] == "error"
+    assert entries[1][1]["payload"]["errorStage"] == "recipient_lookup"
+
+
+def test_notification_routes_cover_all_market_actors():
+    assert "_offer_notification_groups" in calls_in("create_offer")
+    assert "broadcast=True" in code_of("create_offer")
+    assert "_broadcast_targets" in calls_in("_offer_notification_groups")
+    assert "_approvers_of" in calls_in("_offer_notification_groups")
+    assert "admin_judge_ids" in calls_in("_approvers_of")
+    assert "notify_admins" in code_of("_approvers_of")
+    assert "notification_manager_ids" in calls_in("_approvers_of")
+    assert "offer_notification_groups" in calls_in("_offer_notification_groups")
+    assert "from_judge_id" in code_of("create_claim")
+    assert "text_claim_created_for_giver" in calls_in("create_claim")
+    assert "_approvers_of" in calls_in("reject_offer")
+    assert "_approvers_of" in calls_in("approve_offer")
+    assert "text_change_approved" in calls_in("approve_offer")
+    assert "_approvers_of" in calls_in("withdraw_claim")
+    assert "app_variant='baza'" in code_of("_notify")
+    assert "market_broadcast=broadcast" in code_of("_notify")
+    push_source = (APP_DIR / "push" / "push.py").read_text(encoding="utf-8")
+    assert 'push_tokens.c.notification_prefs' in push_source
+    assert 'market_broadcast and not market_pushes_allowed(row["notification_prefs"])' in push_source
+
+
+def test_admin_notification_switch_is_saved_per_province():
+    source = (APP_DIR / "db.py").read_text(encoding="utf-8")
+    assert 'Column("notify_admins", Boolean' in source
+    assert "ADD COLUMN IF NOT EXISTS notify_admins" in source
+    assert "req.notify_admins" in code_of("admin_set_province")
+    assert "'notifyAdmins'" in code_of("admin_provinces")
 
 
 def test_config_endpoints_are_admin_only():

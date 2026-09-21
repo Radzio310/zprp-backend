@@ -48,7 +48,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/province/settlements", tags=["province_settlements"])
 
-MODULES = ("stats", "settlements", "tables")
+#: Moduly wlaczane per okreg.
+#:
+#: `proel_table_write` nie ma nic wspolnego z rozliczeniami - mieszka tu, bo to
+#: ta sama tabela `province_modules` i ten sam panel. Znaczy: stolikowi tego
+#: okregu (sekretarz, mierzacy czas) moga wykonac akcje pomeczowe - zapis
+#: danych, wynik, pelne dane, protokol PDF. ZATWIERDZENIE protokolu zostaje
+#: przy sedziach boiskowych i delegacie, tego przelacznik NIE rusza
+#: (`_require_approver` w `app/proel.py`).
+MODULES = ("stats", "settlements", "tables", "proel_table_write")
 
 #: Tyle najdluzej zestawienie czeka na nazwiska z obsad meczow (patrz
 #: `settlement_names`). Co nie zdazy, dojdzie przy nastepnym otwarciu.

@@ -38,6 +38,8 @@ EVENT_KINDS: Dict[str, Tuple[str, str, str]] = {
     "decision_rejected": ("decisions", "close-circle-outline", "Odrzucił wymianę"),
     "zprp_applied": ("decisions", "checkmark-done-outline", "Zapisano w ZPRP"),
     "zprp_failed": ("decisions", "alert-circle-outline", "Zapis w ZPRP nie przeszedł"),
+    # Diagnostyka wysyłki - FCM potwierdza przyjęcie, nie wyświetlenie.
+    "notification_dispatch": ("notifications", "notifications-outline", "Wysyłka powiadomienia"),
     # Ustawienia okręgu - ręka administratora.
     "config_changed": ("config", "settings-outline", "Zmienił ustawienia giełdy"),
 }
@@ -47,6 +49,7 @@ EVENT_GROUPS: Tuple[Tuple[str, str], ...] = (
     ("offers", "Oferty"),
     ("claims", "Zgłoszenia"),
     ("decisions", "Decyzje"),
+    ("notifications", "Powiadomienia"),
     ("config", "Ustawienia"),
 )
 
@@ -103,6 +106,19 @@ def event_sentence(event: Mapping[str, Any]) -> str:
     where = f" {code}" if code else ""
     message = _s(event.get("message"))
 
+    if kind == "notification_dispatch":
+        payload = event.get("payload") or {}
+        if not isinstance(payload, Mapping):
+            payload = {}
+        accepted = int(payload.get("acceptedJudges") or 0)
+        requested = int(payload.get("requestedJudges") or 0)
+        devices = int(payload.get("acceptedDevices") or 0)
+        audience = _s(payload.get("audience")) or "adresaci"
+        return (
+            f"FCM przyjął powiadomienie dla {accepted} z {requested} sędziów "
+            f"({devices} urządzeń) · {audience}."
+        )
+
     if kind == "offer_created":
         head = f"{actor} wystawił mecz{where} na giełdę"
     elif kind == "offer_withdrawn":
@@ -145,6 +161,7 @@ CONFIG_FIELD_LABELS: Dict[str, str] = {
     "offer_deadline_hours": "próg oddania (h)",
     "assign_account_mode": "konto obsadowe",
     "approver_badges": "odznaki rozstrzygające",
+    "notify_admins": "powiadomienia administratorów",
     "foreign_matches_enabled": "mecze spoza okręgu",
     "managed_prefixes": "ligi powierzone",
 }
@@ -153,6 +170,8 @@ CONFIG_FIELD_LABELS: Dict[str, str] = {
 def _config_value(field: str, value: Any) -> str:
     if field == "market_enabled":
         return "włączona" if value else "wyłączona"
+    if field == "notify_admins":
+        return "włączone" if value else "wyłączone"
     if field == "approver_badges":
         items = value if isinstance(value, (list, tuple)) else []
         return ", ".join(str(x) for x in items) or "brak"

@@ -10,6 +10,8 @@ from __future__ import annotations
 from app.match_market_access import (
     APPROVER_BADGE,
     approver_judge_ids,
+    notification_manager_ids,
+    offer_notification_groups,
     badge_names,
     has_approver_badge,
     may_approve,
@@ -168,3 +170,24 @@ def test_powiadomienia_o_zgloszeniu_ida_do_wybranych_odznak():
     ]
     assert approver_judge_ids(rows, SLASK, allowed_badges=["Komisja"]) == ["2"]
     assert approver_judge_ids(rows, SLASK) == ["1"]
+
+
+def test_admin_switch_controls_role_notifications_even_with_local_badge():
+    rows = [
+        {"judge_id": "1", "province": SLASK, "badges": [APPROVER_BADGE]},
+        {"judge_id": "9", "province": SLASK, "badges": [APPROVER_BADGE]},
+    ]
+    args = dict(rows=rows, province=SLASK, admin_ids=["9", "10"], allowed_badges=[APPROVER_BADGE])
+    assert notification_manager_ids(**args, notify_admins=False) == ["1"]
+    assert notification_manager_ids(**args, notify_admins=True) == ["1", "10", "9"]
+
+
+def test_offer_broadcast_excludes_admins_and_deduplicates_managers():
+    public, managers = offer_notification_groups(
+        public_ids=["1", "2", "3", "9", "2"],
+        manager_ids=["2", "9", "10"],
+        admin_ids=["9", "10"],
+        exclude="1",
+    )
+    assert public == ["3"]
+    assert managers == ["10", "2", "9"]

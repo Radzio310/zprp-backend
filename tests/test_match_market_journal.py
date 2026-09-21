@@ -77,6 +77,15 @@ def test_decision_names_both_sides():
     ) == "OBSADOWY Adam przyznał mecz IIM4/1 sędziemu KOWALSKI Piotr."
 
 
+def test_notification_dispatch_has_its_own_group_and_fcm_counts():
+    assert kinds_in_group("notifications") == ["notification_dispatch"]
+    assert event_sentence({
+        "kind": "notification_dispatch", "match_code": "IIM4/1",
+        "payload": {"acceptedJudges": 2, "requestedJudges": 3,
+                    "acceptedDevices": 4, "audience": "sędziowie okręgu"},
+    }) == "FCM przyjął powiadomienie dla 2 z 3 sędziów (4 urządzeń) · sędziowie okręgu."
+
+
 def test_failed_write_carries_the_reason():
     sentence = event_sentence(
         {
@@ -134,9 +143,16 @@ def test_every_config_field_has_a_human_label():
         "offer_deadline_hours",
         "assign_account_mode",
         "approver_badges",
+        "notify_admins",
         "foreign_matches_enabled",
         "managed_prefixes",
     }
+
+
+def test_admin_notification_switch_is_logged_as_a_change():
+    assert "powiadomienia administratorów: wyłączone → włączone" in config_diff_message(
+        {"notify_admins": False}, {"notify_admins": True}
+    )
 
 
 def test_config_diff_reads_the_foreign_switch_and_the_managed_leagues():

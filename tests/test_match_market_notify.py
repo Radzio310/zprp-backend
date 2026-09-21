@@ -15,6 +15,9 @@ from app.match_market_notify import (
     SLOT_FOR,
     apply_failed,
     claim_created,
+    claim_created_for_giver,
+    claim_withdrawn,
+    change_approved,
     claim_lost,
     crew_changed,
     giver_released,
@@ -23,6 +26,7 @@ from app.match_market_notify import (
     offer_created,
     offer_rejected,
     offer_withdrawn,
+    offer_withdrawn_for_manager,
     match_gen,
     slot_as,
     slot_for,
@@ -162,6 +166,25 @@ def test_claim_names_the_role_in_the_nominative():
     assert title == "🙋 Zgłoszenie na mecz"
     assert body.startswith("KOWALSKI Piotr zgłasza się na mecz IIM4/1 jako sekretarz.")
     assert "Czeka na Twoją decyzję." in body
+
+
+def test_giver_gets_a_claim_without_false_decision_prompt():
+    title, body = claim_created_for_giver(offer(), "KOWALSKI Piotr")
+    assert "Twój mecz" in title
+    assert "KOWALSKI Piotr" in body
+    assert "Obsadowy rozstrzygnie" in body
+    assert "Twoją decyzję" not in body
+
+
+def test_managers_get_neutral_status_updates():
+    _, withdrawn = claim_withdrawn(offer(), "KOWALSKI Piotr")
+    _, removed = offer_withdrawn_for_manager(offer(), "NOWAK Adam")
+    _, approved = change_approved(offer(), "KOWALSKI Piotr", "NOWAK Adam")
+    assert "wycofał zgłoszenie" in withdrawn
+    assert "Twoje zgłoszenie" not in removed
+    assert "KOWALSKI Piotr" in approved
+    assert "NOWAK Adam" in approved
+    assert "IIM4/1" in approved
 
 
 def test_rejection_names_who_keeps_the_match_and_why():

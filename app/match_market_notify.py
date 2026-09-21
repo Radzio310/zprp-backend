@@ -202,6 +202,7 @@ def claim_created(offer: Mapping[str, Any], claimer_name: Any) -> tuple[str, str
             f"{who} zgłasza się na {match_of(offer)} "
             f"jako {slot_as(offer.get('slot'))}",
             when_of(offer),
+            teams_of(offer.get("match_snapshot")),
             "Czeka na Twoją decyzję",
         ),
     )
@@ -218,6 +219,59 @@ def offer_rejected(
         else f"Obsada {match_gen(offer)} zostaje bez zmian"
     )
     return ("🚫 Wymiana odrzucona", _join(head, _s(reason) and f"Powód: {_s(reason)}"))
+
+
+def change_approved(
+    offer: Mapping[str, Any], taker_name: Any, giver_name: Any = ""
+) -> tuple[str, str]:
+    """Potwierdzona zmiana dla pozostałych zarządzających i adminów okręgu."""
+    return (
+        "✅ Wymiana zatwierdzona",
+        _join(
+            f"{judge(taker_name)} przejmuje {match_of(offer)} jako {slot_as(offer.get('slot'))}",
+            _s(giver_name) and f"Mecz oddaje {_s(giver_name)}",
+            when_of(offer),
+            teams_of(offer.get("match_snapshot")),
+            "Obsada została zapisana w bazie związku",
+        ),
+    )
+
+
+def offer_withdrawn_for_manager(offer: Mapping[str, Any], giver_name: Any) -> tuple[str, str]:
+    """Bez osobistego «Twoje zgłoszenie» dla obsadowych i administratorów."""
+    return (
+        "↩️ Oferta wycofana",
+        _join(
+            f"{judge(giver_name)} wycofał {match_of(offer)} z giełdy",
+            when_of(offer),
+            "Nie ma już zgłoszenia do rozstrzygnięcia",
+        ),
+    )
+
+
+def claim_created_for_giver(offer: Mapping[str, Any], claimer_name: Any) -> tuple[str, str]:
+    """Oddający wie o kandydacie, lecz decyzję podejmuje obsadowy."""
+    return (
+        "🙋 Ktoś chce przejąć Twój mecz",
+        _join(
+            f"{judge(claimer_name)} zgłasza się na {match_of(offer)} "
+            f"jako {slot_as(offer.get('slot'))}",
+            when_of(offer),
+            teams_of(offer.get("match_snapshot")),
+            "Obsadowy rozstrzygnie wymianę",
+        ),
+    )
+
+
+def claim_withdrawn(offer: Mapping[str, Any], claimer_name: Any) -> tuple[str, str]:
+    """Zgłoszenie zniknęło z kolejki - do oddającego i zarządzających."""
+    return (
+        "↩️ Zgłoszenie wycofane",
+        _join(
+            f"{judge(claimer_name)} wycofał zgłoszenie na {match_of(offer)}",
+            when_of(offer),
+        ),
+    )
 
 
 def apply_failed(offer: Mapping[str, Any], message: Any) -> tuple[str, str]:

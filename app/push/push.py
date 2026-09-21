@@ -1,11 +1,11 @@
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, insert, or_, select, update
 
 from app.db import (
     admin_alert_notifications,
@@ -45,12 +45,26 @@ def _clean_judge_id(value: Optional[str]) -> Optional[str]:
     return str(value or "").strip() or None
 
 
-async def send_push_to_judges(
+class PushDeliveryReport(TypedDict):
+    requestedJudges: int
+    eligibleJudges: int
+    acceptedJudges: int
+    acceptedDevices: int
+    failedDevices: int
+    mutedDevices: int
+    noDeviceJudges: int
+    status: str
+    errorStage: str
+
+
+async def send_push_to_judges_report(
     judge_ids: List[str],
     title: str,
     body: str,
     data: Optional[Dict[str, Any]] = None,
-) -> int:
+    app_variant: Optional[str] = None,
+    market_broadcast: bool = False,
+) -> PushDeliveryReport:
     """
     Wysyła push NATYCHMIAST na wszystkie urządzenia podanych sędziów.
 
@@ -60,57 +74,88 @@ async def send_push_to_judges(
     po prostu nie dostaną powiadomienia; w aplikacji zostaje im licznik
     nieprzeczytanych.
 
-    Zwraca liczbę urządzeń, do których poszła wysyłka. Nigdy nie rzuca —
-    powiadomienie nie może wywalić operacji, przy której powstało.
+    Zwraca liczby osób i urządzeń. „Accepted” znaczy przyjęte przez FCM,
+    NIE wyświetlone na ekranie telefonu. Nigdy nie rzuca.
     """
-    ids = [str(j).strip() for j in judge_ids if str(j or "").strip()]
+    ids = sorted({str(j).strip() for j in judge_ids if str(j or "").strip()})
+    def report(*, eligible: int = 0, accepted_judges: int = 0,
+               accepted_devices: int = 0, failed_devices: int = 0,
+               muted_devices: int = 0, status: str = "no_recipients",
+               error_stage: str = "") -> PushDeliveryReport:
+        return {
+            "requestedJudges": len(ids),
+            "eligibleJudges": eligible,
+            "acceptedJudges": accepted_judges,
+            "acceptedDevices": accepted_devices,
+            "failedDevices": failed_devices,
+            "mutedDevices": muted_devices,
+            "noDeviceJudges": 0 if status == "error" else max(0, len(ids) - eligible),
+            "status": status,
+            "errorStage": error_stage,
+        }
     if not ids:
-        return 0
+        return report()
     try:
-        rows = await database.fetch_all(
-            select(
+        query = select(
                 push_tokens.c.installation_id,
                 push_tokens.c.judge_id,
                 push_tokens.c.token,
                 push_tokens.c.token_type,
-            ).where(
-                push_tokens.c.judge_id.in_(ids)
-            )
-        )
+                push_tokens.c.notification_prefs,
+            ).where(push_tokens.c.judge_id.in_(ids))
+        if app_variant:
+            query = query.where(or_(
+                push_tokens.c.app_variant == app_variant,
+                push_tokens.c.app_variant.is_(None),
+            ))
+        rows = await database.fetch_all(query)
     except Exception:
         logger.warning("push: odczyt urządzeń nieudany", exc_info=True)
-        return 0
+        return report(status="error", error_stage="device_lookup")
 
     from .fcm import send_fcm_message
+    if market_broadcast:
+        from app.match_market_rules import market_pushes_allowed
 
     # Ile urządzeń odpowiedziało NA SĘDZIEGO, a nie łącznie. Suma nie odróżnia
     # „poszło na trzy telefony jednego admina" od „poszło do trzech adminów",
     # a to jest dokładnie ta różnica, o którą chodzi przy cichej wysyłce.
     delivered: Dict[str, int] = {j: 0 for j in ids}
+    eligible: Dict[str, int] = {j: 0 for j in ids}
     sent = 0
+    failed = 0
+    muted = 0
     for row in rows:
         judge_id = str(row["judge_id"] or "").strip()
         if row["token_type"] != "device_fcm" or not str(row["token"] or "").strip():
             continue
+        if market_broadcast and not market_pushes_allowed(row["notification_prefs"]):
+            muted += 1
+            continue
+        eligible[judge_id] = eligible.get(judge_id, 0) + 1
         try:
             await send_fcm_message(row["token"], title, body, data=data or {})
             sent += 1
             delivered[judge_id] = delivered.get(judge_id, 0) + 1
         except Exception as exc:
+            failed += 1
             logger.warning(
                 "push: wysyłka do instalacji %s nieudana: %s",
                 row["installation_id"],
                 exc,
             )
-            await invalidate_rejected_fcm_token(
-                row["installation_id"],
-                row["token"],
-                exc,
-            )
+            try:
+                await invalidate_rejected_fcm_token(
+                    row["installation_id"], row["token"], exc,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("push: czyszczenie tokenu nieudane", exc_info=True)
             # Wygasły token jednego urządzenia nie może zablokować reszty.
             continue
 
-    silent = [j for j, count in delivered.items() if not count]
+    # Rozsyłka honoruje przełącznik per urządzenie. Cisza użytkownika, który
+    # wyłączył ją na telefonie, nie jest awarią dostarczania.
+    silent = [j for j, count in delivered.items() if not count and (not market_broadcast or eligible.get(j, 0))]
     if silent:
         # Bez tego wpisu „mnie nie przyszło" jest nie do sprawdzenia po fakcie.
         logger.warning(
@@ -118,7 +163,36 @@ async def send_push_to_judges(
             ",".join(sorted(silent)),
             title,
         )
-    return sent
+    eligible_judges = sum(1 for count in eligible.values() if count)
+    accepted_judges = sum(1 for count in delivered.values() if count)
+    status = (
+        "accepted" if accepted_judges == len(ids) and failed == 0 else
+        "partial" if accepted_judges else
+        "failed" if failed else
+        "muted" if muted and not eligible_judges else
+        "no_devices"
+    )
+    return report(
+        eligible=eligible_judges, accepted_judges=accepted_judges,
+        accepted_devices=sent, failed_devices=failed, muted_devices=muted,
+        status=status,
+    )
+
+
+async def send_push_to_judges(
+    judge_ids: List[str],
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+    app_variant: Optional[str] = None,
+    market_broadcast: bool = False,
+) -> int:
+    """Zachowuje dotychczasowy kontrakt pozostałych modułów: liczba urządzeń."""
+    result = await send_push_to_judges_report(
+        judge_ids, title, body, data,
+        app_variant=app_variant, market_broadcast=market_broadcast,
+    )
+    return result["acceptedDevices"]
 
 def _send_hour_utc(dt: datetime) -> int:
     return int(dt.timestamp() // 3600)
