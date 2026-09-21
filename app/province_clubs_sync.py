@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from httpx import AsyncClient
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import and_, insert, not_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
@@ -115,6 +115,13 @@ async def completed_seasons(province: str) -> list[str]:
     return [_s(row["season"]) for row in rows]
 
 
+#: Prefiks identyfikatorow zakladanych RECZNIE w Panelu klubow.
+#:
+#: Nadaje go `_manual_id` w `app/province_clubs.py` przy „Dodaj druzyne do
+#: Panelu" - z nazwy, wiec ten sam gospodarz zawsze dostaje ten sam numer.
+MANUAL_PREFIX = "manual:"
+
+
 async def _store_season(
     province: str,
     season: str,
@@ -126,6 +133,15 @@ async def _store_season(
     Migawka sezonu: kasujemy stare wiersze i wpisujemy to, co przed chwila
     zobaczylismy. Druzyna wycofana z rozgrywek ma zniknac z panelu, a nie zostac
     na wieki z zerowym obciazeniem.
+
+    ⚠ WYJATEK: WPISY RECZNE ZOSTAJA. Gospodarza, ktorego nie ma w rozgrywkach
+    ZPRP, dodaje do panelu czlowiek („Dodaj druzyne do Panelu"), a ZPRP nigdy go
+    nie odda - wiec kazda migawka kasowala go z powrotem. Przypisanie meczu
+    (`province_match_overrides`) przezywalo kasowanie i wskazywalo na nieistniejaca
+    juz druzyne, wiec mecz WRACAL do „bez rozpoznanej druzyny gospodarza" i
+    wygladalo to jak niezapisany zapis. Zgloszone 22.09.2026 (LCK/6, MTS Trendy
+    Top Zory): w bazie stal wyjatek z `moved`, a druzyny z prefiksem
+    `manual:` nie bylo juz ani jednej.
     """
     now = _now()
     await database.execute(
@@ -133,6 +149,7 @@ async def _store_season(
             and_(
                 province_competitions.c.province == province,
                 province_competitions.c.season == season,
+                not_(province_competitions.c.competition_id.like(f"{MANUAL_PREFIX}%")),
             )
         )
     )
@@ -141,6 +158,7 @@ async def _store_season(
             and_(
                 province_club_teams.c.province == province,
                 province_club_teams.c.season == season,
+                not_(province_club_teams.c.team_id.like(f"{MANUAL_PREFIX}%")),
             )
         )
     )
