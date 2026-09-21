@@ -197,6 +197,18 @@ def _require_province(actor: Actor) -> str:
     return actor.province
 
 
+def _market_province(actor: Actor, requested: Optional[str] = None) -> str:
+    """Admin może wybrać okręg, lecz pozostaje sobą przy każdej operacji."""
+    if not _s(requested):
+        return _require_province(actor)
+    province = normalize_province(requested)
+    if not province:
+        raise HTTPException(400, "Nie znam takiego województwa.")
+    if province != actor.province and not actor.is_admin:
+        raise HTTPException(403, "Zmiana okręgu giełdy należy do administratora.")
+    return province
+
+
 async def _config(province: str) -> Dict[str, Any]:
     """Ustawienia okręgu; brak wiersza znaczy moduł WYŁĄCZONY."""
     row = await database.fetch_one(
@@ -1087,6 +1099,7 @@ class CreateOfferRequest(BaseModel):
     match_id: str
     slot: str
     reason: Optional[str] = None
+    province: Optional[str] = None
 
 
 class ClaimRequest(BaseModel):
@@ -1195,6 +1208,7 @@ async def get_my_matches(
             "Ekran maluje się najpierw bez tego, a arkusz „Oddaj mecz” dopytuje."
         ),
     ),
+    province: str = Query(""),
     actor: Actor = Depends(market_actor),
     settings: Settings = Depends(get_settings),
 ) -> Dict[str, Any]:
@@ -1204,7 +1218,7 @@ async def get_my_matches(
     sprawdzenia wskazuje wyłącznie migawka okręgu, więc mecz, o którym okręg
     jeszcze nie wie, tu nie wejdzie. Nowsza aplikacja domyka to trasą POST.
     """
-    return await my_matches(actor, settings, bool(verify), [])
+    return await my_matches(actor, settings, bool(verify), [], province_override=province)
 
 
 class MyMatchesRequest(BaseModel):
@@ -1212,12 +1226,14 @@ class MyMatchesRequest(BaseModel):
 
     match_ids: List[str] = []
     verify: bool = False
+    province: Optional[str] = None
 
 
 class RecheckRequest(BaseModel):
     """Jeden mecz do ponownego sprawdzenia w bazie związku."""
 
     match_id: str
+    province: Optional[str] = None
 
 
 @router.post("/my-matches/recheck", summary="Sprawdź obsadę jednego meczu jeszcze raz")
@@ -1237,7 +1253,8 @@ async def post_my_match_recheck(
     if not match_id:
         raise HTTPException(400, "Brak numeru meczu.")
     data = await my_matches(
-        actor, settings, verify=True, app_ids=[match_id], budget=RECHECK_BUDGET_SECONDS
+        actor, settings, verify=True, app_ids=[match_id],
+        budget=RECHECK_BUDGET_SECONDS, province_override=req.province,
     )
     # Tylko ten jeden wiersz. Lista i tak przegląda terminarz, ale ekran pytał o
     # KONKRETNY mecz i musi wiedzieć, czy właśnie ten wrócił - pusta odpowiedź
@@ -1254,7 +1271,10 @@ async def post_my_matches(
     actor: Actor = Depends(market_actor),
     settings: Settings = Depends(get_settings),
 ) -> Dict[str, Any]:
-    return await my_matches(actor, settings, req.verify, clean_match_ids(req.match_ids))
+    return await my_matches(
+        actor, settings, req.verify, clean_match_ids(req.match_ids),
+        province_override=req.province,
+    )
 
 
 async def my_matches(
@@ -1263,6 +1283,7 @@ async def my_matches(
     verify: bool,
     app_ids: List[str],
     budget: float = LIVE_CREW_BUDGET_SECONDS,
+    province_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Moje mecze do oddania - obsada sprawdzona w bazie związku W TEJ CHWILI.
 
@@ -1287,7 +1308,7 @@ async def my_matches(
     powiadomień, nie ma tam ani wiersza. Terminarz województwa jest niezależny
     od tego, kto ma aplikację.
     """
-    province = _require_province(actor)
+    province = _market_province(actor, province_override)
     cfg = await _require_enabled(province)
     now = _now()
     horizon = now + timedelta(days=MY_MATCHES_HORIZON_DAYS)
@@ -1825,7 +1846,7 @@ async def create_offer(
     actor: Actor = Depends(market_actor),
     settings: Settings = Depends(get_settings),
 ) -> Dict[str, Any]:
-    province = _require_province(actor)
+    province = _market_province(actor, req.province)
     cfg = await _require_enabled(province)
     now = _now()
 
@@ -2004,7 +2025,7 @@ async def create_offer(
 
 @router.delete("/offers/{offer_id}", summary="Wycofaj swoją ofertę")
 async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
-    province = _require_province(actor)
+    province = actor.province
     async with database.transaction():
         # RYGIEL na wierszu, jak przy zatwierdzaniu i odrzucaniu. Bez niego
         # wycofanie potrafilo wejsc w SRODEK zapisu do ZPRP: odczytywalo `open`,
@@ -2019,8 +2040,11 @@ async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) ->
         if not row:
             raise HTTPException(404, "Nie ma takiej oferty.")
         offer = _row(row)
-        if _s(offer["province"]) != province or _s(offer["from_judge_id"]) != actor.judge_id:
+        if _s(offer["from_judge_id"]) != actor.judge_id or (
+            _s(offer["province"]) != province and not actor.is_admin
+        ):
             raise HTTPException(403, "To nie jest Twoja oferta.")
+        province = _s(offer["province"])
         target = next_offer_status(offer["status"], "withdraw")
         if not target:
             raise HTTPException(409, "Tej oferty nie da się już wycofać.")
@@ -2077,15 +2101,16 @@ async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) ->
 async def create_claim(
     offer_id: int, req: ClaimRequest, actor: Actor = Depends(market_actor)
 ) -> Dict[str, Any]:
-    province = _require_province(actor)
-    await _require_enabled(province)
-
     row = await database.fetch_one(
         select(match_market_offers).where(match_market_offers.c.id == offer_id)
     )
-    if not row or _s(_row(row)["province"]) != province:
+    if not row:
         raise HTTPException(404, "Nie ma takiej oferty.")
     offer = _row(row)
+    province = _s(offer["province"])
+    if province != actor.province and not actor.is_admin:
+        raise HTTPException(404, "Nie ma takiej oferty.")
+    await _require_enabled(province)
 
     refusal = may_claim(
         offer["status"], offer["from_judge_id"], actor.judge_id, offer.get("deadline_at"), _now()
@@ -2182,7 +2207,7 @@ async def create_claim(
 
 @router.delete("/offers/{offer_id}/claims/me", summary="Wycofaj swoje zgłoszenie")
 async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
-    _require_province(actor)
+    # Właścicielem zgłoszenia jest numer sędziego, niezależnie od okręgu.
     row = await database.fetch_one(
         select(match_market_claims).where(
             and_(
@@ -2913,7 +2938,10 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
     pending = {
         _s(_row(r)["province"]): int(_row(r)["n"])
         for r in await database.fetch_all(
-            select(match_market_offers.c.province, func.count().label("n"))
+            select(
+                match_market_offers.c.province,
+                func.count(func.distinct(match_market_offers.c.match_id)).label("n"),
+            )
             .where(match_market_offers.c.status == "open")
             .where(
                 or_(
@@ -2988,7 +3016,11 @@ async def admin_province_offers(
         )
     ]
     claims = await _claims_for([int(row["id"]) for row in rows])
-    cards = await _judges_by_id([_s(row["from_judge_id"]) for row in rows])
+    cards = await _judges_by_id(
+        [_s(row["from_judge_id"]) for row in rows]
+        + [_s(claim.get("judge_id")) for group in claims.values() for claim in group]
+    )
+    my_roles = await _viewer_roles(key, [_s(row["match_id"]) for row in rows], actor)
     return {
         "province": key,
         "marketEnabled": True,
@@ -2997,7 +3029,8 @@ async def admin_province_offers(
                 row,
                 cards,
                 claims.get(int(row["id"]), []),
-                viewer_id="",  # Podgląd nie udaje konta sędziego tego okręgu.
+                viewer_id=actor.judge_id,
+                my_crew_label=my_roles.get(_s(row["match_id"]), ""),
             )
             for row in rows
         ],
@@ -3084,6 +3117,47 @@ async def admin_journal(
     )
     events = [_row(r) for r in rows]
 
+    # Dziennik ma pokazać także drużyny i termin meczu. Zdarzenie przechowuje
+    # numer oferty, więc dociągamy migawki raz na stronę, nie raz na kafel.
+    offer_ids = {int(e["offer_id"]) for e in events if e.get("offer_id") is not None}
+    offer_matches: Dict[int, Dict[str, Any]] = {}
+    if offer_ids:
+        offer_rows = await database.fetch_all(
+            select(
+                match_market_offers.c.id,
+                match_market_offers.c.match_snapshot,
+                match_market_offers.c.match_at,
+            ).where(match_market_offers.c.id.in_(offer_ids))
+        )
+        offer_matches = {
+            int(_row(r)["id"]): _match_view(
+                state_dict(_row(r).get("match_snapshot")), _row(r).get("match_at")
+            )
+            for r in offer_rows
+        }
+    missing_ids = {
+        _s(e.get("match_id")) for e in events
+        if e.get("match_id") and (
+            e.get("offer_id") is None or int(e["offer_id"]) not in offer_matches
+        )
+    }
+    fallback_matches: Dict[str, Dict[str, Any]] = {}
+    if missing_ids:
+        match_rows = await database.fetch_all(
+            select(
+                province_matches.c.match_id,
+                province_matches.c.state_json,
+                province_matches.c.match_at,
+            ).where(province_matches.c.province == key)
+            .where(province_matches.c.match_id.in_(missing_ids))
+        )
+        fallback_matches = {
+            _s(_row(r)["match_id"]): _match_view(
+                state_dict(_row(r).get("state_json")), _row(r).get("match_at")
+            )
+            for r in match_rows
+        }
+
     # Liczniki grup licza sie na TYM SAMYM sicie co lista, ale BEZ pigulki grupy:
     # pigulka ma mowic, ile jest do zobaczenia po jej dotknieciu, a nie ile
     # zostalo po jej wlasnym odsiewie.
@@ -3119,6 +3193,10 @@ async def admin_journal(
                 "offerId": int(e["offer_id"]) if e.get("offer_id") is not None else None,
                 "matchId": _s(e.get("match_id")) or None,
                 "matchCode": _s(e.get("match_code")) or None,
+                "match": (
+                    offer_matches.get(int(e["offer_id"]))
+                    if e.get("offer_id") is not None else None
+                ) or fallback_matches.get(_s(e.get("match_id"))),
                 "slot": _s(e.get("slot")) or None,
                 "slotLabel": slot_label(e.get("slot")) if e.get("slot") else None,
                 "actorId": _s(e.get("actor_judge_id")) or None,
