@@ -255,6 +255,8 @@ def test_notification_routes_cover_all_market_actors():
     assert "_approvers_of" in calls_in("withdraw_claim")
     assert "app_variant='baza'" in code_of("_notify")
     assert "market_broadcast=broadcast" in code_of("_notify")
+    assert "spellings(province)" in code_of("_broadcast_targets")
+    assert "spellings(province)" in code_of("_approvers_of")
     push_source = (APP_DIR / "push" / "push.py").read_text(encoding="utf-8")
     assert 'push_tokens.c.notification_prefs' in push_source
     assert 'market_broadcast and not market_pushes_allowed(row["notification_prefs"])' in push_source

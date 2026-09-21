@@ -128,6 +128,7 @@ from app.match_market_rules import (
 )
 from app.proel_auth import is_admin
 from app.push.push import send_push_to_judges_report
+from app.settlement_province import spellings
 from app.zprp.assignments import (
     SELECT_TO_SLOT,
     _login_zprp,
@@ -1110,7 +1111,9 @@ async def _broadcast_targets(province: str, exclude: str) -> List[str]:
         .where(push_tokens.c.judge_id.is_not(None))
     )
     known = await database.fetch_all(
-        select(province_judges.c.judge_id).where(province_judges.c.province == province)
+        select(province_judges.c.judge_id).where(
+            province_judges.c.province.in_(spellings(province))
+        )
     )
     in_province = {_s(_row(r)["judge_id"]) for r in known}
 
@@ -1143,7 +1146,7 @@ async def _approvers_of(province: str) -> List[str]:
                 province_judges.c.judge_id,
                 province_judges.c.province,
                 province_judges.c.badges,
-            ).where(province_judges.c.province == province)
+            ).where(province_judges.c.province.in_(spellings(province)))
         )
         rows = [_row(r) for r in records]
     except Exception:  # noqa: BLE001
@@ -3309,7 +3312,8 @@ async def _notification_test_action(
     key = normalize_province(province)
     if not key:
         raise HTTPException(400, "Nie znam takiego województwa.")
-    if not (await _config(key))["market_enabled"]:
+    cfg = await _config(key)
+    if not cfg["market_enabled"]:
         raise HTTPException(409, "Giełda w tym okręgu jest wyłączona. Prawdziwe zdarzenie nie wysłałoby powiadomienia.")
     plan = await _notification_test_plan(key, req)
     route = [{"audience": b["audience"], "recipients": len(b["ids"]),
@@ -3325,6 +3329,23 @@ async def _notification_test_action(
     device_count = len(device_rows)
     broadcast_devices = sum(1 for row in device_rows
                             if market_pushes_allowed(_row(row).get("notification_prefs")))
+    exclusion_reason = ""
+    if not matching and plan["scenario"] == "offer_created":
+        if _s(plan["offer"].get("from_judge_id")) == plan["recipientId"]:
+            exclusion_reason = "To oferta ID 5124 — wystawiający nie dostaje powiadomienia o własnym meczu."
+        else:
+            admins = []
+            if not cfg["notify_admins"]:
+                try:
+                    admins = await admin_judge_ids()
+                except Exception:  # noqa: BLE001
+                    logger.warning("giełda: lista adminów niedostępna przy diagnozie testu", exc_info=True)
+            if plan["recipientId"] in admins:
+                exclusion_reason = "Administratorzy są wyciszeni w tym okręgu. Włącz ich powiadomienia w ustawieniach giełdy."
+            elif not broadcast_devices:
+                exclusion_reason = "ID 5124 nie ma urządzenia z włączoną rozsyłką nowych ofert."
+    elif not matching:
+        exclusion_reason = "ID 5124 nie pełni roli odbiorcy w tej konkretnej ofercie i zgłoszeniu."
     if send and not matching:
         raise HTTPException(409, "Sędzia nie należy do odbiorców tego scenariusza. Nic nie wysłano.")
     reports = []
@@ -3339,6 +3360,7 @@ async def _notification_test_action(
         "matchCode": _s(plan["offer"].get("match_code")),
         "scenario": plan["scenario"], "recipientId": plan["recipientId"],
         "eligible": bool(matching), "routes": route,
+        "exclusionReason": exclusion_reason,
         "devices": {"registered": device_count, "broadcastEnabled": broadcast_devices},
         "matching": [{"audience": b["audience"], "title": b["text"][0],
                       "body": b["text"][1]} for b in matching],

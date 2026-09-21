@@ -18,14 +18,16 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable, List, Optional
 
+from app.settlement_province import canonical
+
 #: Odznaka dająca prawo zatwierdzania. Ta sama nazwa co w module Beacha, gdzie
 #: „Obsadowy" jest odznaką od początku - jeden słownik pojęć na całą aplikację.
 APPROVER_BADGE = "Obsadowy"
 
 
 def normalize_province(value: Any) -> str:
-    """Województwo do porównania. Ta sama reguła co w `app/board.py`."""
-    return str(value or "").strip().upper()
+    """Jeden klucz dla `ŚLĄSKIE` z katalogu i `SLASKIE` z giełdy."""
+    return canonical(value)
 
 
 def badge_names(badges_raw: Any) -> List[str]:
@@ -142,6 +144,8 @@ def approver_judge_ids(
     ani odznaki, ani wpisu w okręgu.
     """
     prov = normalize_province(province)
+    if not prov:
+        return []
     out: List[str] = []
 
     for row in rows or []:

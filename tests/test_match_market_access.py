@@ -20,9 +20,20 @@ from app.match_market_access import (
     may_approve,
     may_manage_config,
 )
+from app.settlement_province import DISPLAY, spellings
 
 SLASK = "ŚLĄSKIE"
 OPOLE = "OPOLSKIE"
+
+
+def test_all_province_spelling_variants_share_the_same_market_key():
+    from app.match_market_access import normalize_province
+
+    for key, name in DISPLAY.items():
+        assert normalize_province(key) == key
+        assert normalize_province(name) == key
+        assert key in spellings(name)
+        assert name in spellings(key)
 
 
 def test_admin_may_approve_anywhere():
@@ -87,6 +98,21 @@ def test_province_comparison_ignores_case_and_spaces():
     )
 
 
+def test_province_comparison_accepts_display_name_and_canonical_key():
+    assert may_approve(
+        is_admin=False, province="SLASKIE", judge_province="ŚLĄSKIE",
+        badges_raw=[APPROVER_BADGE],
+    )
+    assert may_approve(
+        is_admin=False, province="ŚLĄSKIE", judge_province="SLASKIE",
+        badges_raw=[APPROVER_BADGE],
+    )
+    assert not may_approve(
+        is_admin=False, province="OPOLSKIE", judge_province="ŚLĄSKIE",
+        badges_raw=[APPROVER_BADGE],
+    )
+
+
 def test_badges_read_from_both_shapes():
     assert badge_names({APPROVER_BADGE: True, "Komisja": False}) == [APPROVER_BADGE]
     assert badge_names([APPROVER_BADGE]) == [APPROVER_BADGE]
@@ -107,6 +133,19 @@ def test_notification_targets_are_badge_holders_of_that_province():
         {"judge_id": "300", "province": OPOLE, "badges": {APPROVER_BADGE: True}},
     ]
     assert approver_judge_ids(rows, SLASK) == ["100"]
+
+
+def test_notification_targets_survive_accented_province_rows():
+    rows = [
+        {"judge_id": "100", "province": "ŚLĄSKIE", "badges": {APPROVER_BADGE: True}},
+        {"judge_id": "200", "province": "OPOLSKIE", "badges": {APPROVER_BADGE: True}},
+    ]
+    assert approver_judge_ids(rows, "SLASKIE") == ["100"]
+    assert notification_manager_ids(
+        rows, "SLASKIE", admin_ids=[], notify_admins=False,
+        allowed_badges=[APPROVER_BADGE],
+    ) == ["100"]
+    assert approver_judge_ids(rows, "NIEZNANY OKRĘG", admin_ids=["999"]) == []
 
 
 def test_admins_are_added_even_without_a_province_row():
