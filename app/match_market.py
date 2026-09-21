@@ -2915,6 +2915,12 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
         for r in await database.fetch_all(
             select(match_market_offers.c.province, func.count().label("n"))
             .where(match_market_offers.c.status == "open")
+            .where(
+                or_(
+                    match_market_offers.c.deadline_at.is_(None),
+                    match_market_offers.c.deadline_at > _now(),
+                )
+            )
             .group_by(match_market_offers.c.province)
         )
     }
@@ -2945,6 +2951,57 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
             }
         )
     return {"provinces": out}
+
+
+@router.get(
+    "/admin/provinces/{province}/offers",
+    summary="Podgląd otwartej giełdy województwa dla administratora",
+)
+async def admin_province_offers(
+    province: str,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    """Wyłącznie odczyt. Nie zmienia okręgu aktora ani jego uprawnień do akcji."""
+    if not may_manage_config(is_admin=actor.is_admin):
+        raise HTTPException(403, "Podgląd innych giełd należy do administratora aplikacji.")
+    key = normalize_province(province)
+    if not key:
+        raise HTTPException(400, "Nie znam takiego województwa.")
+    cfg = await _config(key)
+    if not cfg["market_enabled"]:
+        return {"province": key, "marketEnabled": False, "offers": []}
+
+    rows = [
+        _row(row)
+        for row in await database.fetch_all(
+            select(match_market_offers)
+            .where(match_market_offers.c.province == key)
+            .where(match_market_offers.c.status == "open")
+            .where(
+                or_(
+                    match_market_offers.c.deadline_at.is_(None),
+                    match_market_offers.c.deadline_at > _now(),
+                )
+            )
+            .order_by(match_market_offers.c.match_at.asc().nulls_last())
+            .limit(200)
+        )
+    ]
+    claims = await _claims_for([int(row["id"]) for row in rows])
+    cards = await _judges_by_id([_s(row["from_judge_id"]) for row in rows])
+    return {
+        "province": key,
+        "marketEnabled": True,
+        "offers": [
+            await _offer_payload(
+                row,
+                cards,
+                claims.get(int(row["id"]), []),
+                viewer_id="",  # Podgląd nie udaje konta sędziego tego okręgu.
+            )
+            for row in rows
+        ],
+    }
 
 
 @router.get(
