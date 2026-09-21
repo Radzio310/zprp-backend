@@ -979,6 +979,77 @@ async def _live_crews(
 # ─────────────────────────── powiadomienia ───────────────────────────
 
 
+async def _recipient_audit(
+    province: str,
+    targets: List[str],
+    report: Dict[str, Any],
+    *,
+    broadcast: bool,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Migawka osób, a nie instalacji. Raz zapisana nie zmienia się z preferencjami."""
+    local_rows = await database.fetch_all(
+        select(
+            province_judges.c.judge_id,
+            province_judges.c.full_name,
+            province_judges.c.photo_url,
+        ).where(province_judges.c.province.in_(spellings(province)))
+    )
+    cards = {_s(_row(row)["judge_id"]): _row(row) for row in local_rows}
+    local_ids = set(cards)
+    context = context or {}
+    alternative_ids = {_s(value) for value in context.get("managerIds", []) if _s(value)}
+    all_ids = set(cards) | set(targets) | alternative_ids
+    cards.update(await _judges_by_id(sorted(all_ids - local_ids)))
+    device_rows = await database.fetch_all(
+        select(
+            push_tokens.c.judge_id,
+            push_tokens.c.token,
+            push_tokens.c.token_type,
+            push_tokens.c.notification_prefs,
+        ).where(push_tokens.c.judge_id.in_(sorted(all_ids)))
+        .where(or_(push_tokens.c.app_variant == "baza", push_tokens.c.app_variant.is_(None)))
+    ) if all_ids else []
+    devices: Dict[str, List[Dict[str, Any]]] = {}
+    for row in device_rows:
+        data = _row(row)
+        if data.get("token_type") == "device_fcm" and _s(data.get("token")):
+            devices.setdefault(_s(data.get("judge_id")), []).append(data)
+    sent = set(targets)
+    outcomes = report.get("perJudge") or {}
+    manager_outcomes = (context.get("managerReport") or {}).get("perJudge") or {}
+    author_id = _s(context.get("authorId"))
+    people = []
+    for judge_id in sorted(all_ids):
+        card = cards.get(judge_id, {})
+        route = "okręg" if judge_id in local_ids else "administrator dodatkowy"
+        if judge_id in sent:
+            status = _s(outcomes.get(judge_id)) or ("lookup_error" if report.get("errorStage") else "unknown")
+        elif judge_id in alternative_ids:
+            status = _s(manager_outcomes.get(judge_id)) or "unknown"
+            route = "zarządzający"
+        elif broadcast and judge_id == author_id:
+            status = "own_offer"
+        elif broadcast and report.get("errorStage") == "recipient_lookup":
+            status = "lookup_error"
+        elif broadcast and not devices.get(judge_id):
+            status = "no_device"
+        elif broadcast and not any(market_pushes_allowed(d.get("notification_prefs")) for d in devices[judge_id]):
+            status = "muted"
+        elif broadcast:
+            status = "not_selected"
+        else:
+            status = "not_audience"
+        people.append({
+            "judgeId": judge_id,
+            "fullName": _s(card.get("full_name")),
+            "photoUrl": _s(card.get("photo_url")),
+            "route": route,
+            "status": status,
+        })
+    return {"version": 1, "provinceCount": len(local_ids), "people": people}
+
+
 async def _log(
     kind: str,
     *,
@@ -1041,6 +1112,7 @@ async def _notify(
     record_empty: bool = False,
     selection_error: bool = False,
     test: bool = False,
+    audit_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Wysyłka, która nigdy nie wywraca operacji, przy której powstała.
 
@@ -1079,13 +1151,24 @@ async def _notify(
             "failedDevices": 0, "mutedDevices": 0,
             "noDeviceJudges": 0, "status": "error", "errorStage": "dispatch",
         }
+    audit = None
+    if not test:
+        try:
+            audit = await _recipient_audit(
+                _s(offer.get("province")), targets, report,
+                broadcast=broadcast, context=audit_context,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("giełda: migawka odbiorców niedostępna", exc_info=True)
     await _log(
         "notification_dispatch",
         province=_s(offer.get("province")), offer=offer,
         ok=report["status"] == "accepted",
         message=f"{display_title} — {audience}",
-        payload={**report, "audience": audience, "title": display_title, "body": display_body,
-                 "broadcast": broadcast, "test": test},
+        payload={**{key: value for key, value in report.items() if key != "perJudge"},
+                 "audience": audience, "title": display_title, "body": display_body,
+                 "broadcast": broadcast, "test": test,
+                 **({"recipientAudit": audit} if audit is not None else {})},
     )
     return report
 
@@ -2112,11 +2195,13 @@ async def create_offer(
         {**offer, "match_at": data.get("match_at"), "match_snapshot": state},
         actor.full_name,
     )
+    manager_report = await _notify(managers, notification, offer,
+                                   audience="obsadowi i administratorzy", record_empty=True)
     await _notify(public, notification, offer, broadcast=True,
                   audience="sędziowie okręgu", record_empty=True,
-                  selection_error=public_error)
-    await _notify(managers, notification, offer,
-                  audience="obsadowi i administratorzy", record_empty=True)
+                  selection_error=public_error,
+                  audit_context={"authorId": actor.judge_id, "managerIds": managers,
+                                 "managerReport": manager_report})
     return {"id": offer_id, "status": "open"}
 
 
@@ -3558,7 +3643,11 @@ async def admin_journal(
                 "subjectName": _s(e.get("subject_name")) or None,
                 "ok": e.get("ok"),
                 "message": _s(e.get("message")) or None,
-                "payload": state_dict(e.get("payload")),
+                "payload": {
+                    **{k: v for k, v in state_dict(e.get("payload")).items()
+                       if k not in ("recipientAudit", "perJudge")},
+                    "hasRecipientAudit": bool(state_dict(e.get("payload")).get("recipientAudit")),
+                },
                 "at": _iso(e.get("created_at")),
             }
             for e in events
@@ -3567,6 +3656,37 @@ async def admin_journal(
         "total": sum(by_kind.values()),
         # Pusto = nie ma nastepnej strony; inaczej to `before_id` do kolejnego pytania.
         "nextBefore": int(events[-1]["id"]) if len(events) == limit else None,
+    }
+
+
+@router.get(
+    "/admin/provinces/{province}/journal/{event_id}/recipients",
+    summary="Osoby objęte konkretną wysyłką giełdy i przyczyny pominięcia",
+)
+async def admin_journal_recipients(
+    province: str,
+    event_id: int,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    if not may_manage_config(is_admin=actor.is_admin):
+        raise HTTPException(403, "Lista odbiorców należy do administratora aplikacji.")
+    key = normalize_province(province)
+    if not key:
+        raise HTTPException(400, "Nie znam takiego województwa.")
+    row = await database.fetch_one(
+        select(match_market_events.c.kind, match_market_events.c.payload)
+        .where(match_market_events.c.id == event_id)
+        .where(match_market_events.c.province == key)
+    )
+    if not row or _s(_row(row).get("kind")) != "notification_dispatch":
+        raise HTTPException(404, "Nie ma takiej wysyłki w tym okręgu.")
+    audit = state_dict(state_dict(_row(row).get("payload")).get("recipientAudit"))
+    if not audit:
+        return {"available": False, "people": [], "provinceCount": None}
+    return {
+        "available": True,
+        "people": audit.get("people") or [],
+        "provinceCount": audit.get("provinceCount"),
     }
 
 

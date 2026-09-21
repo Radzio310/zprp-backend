@@ -55,6 +55,7 @@ class PushDeliveryReport(TypedDict):
     noDeviceJudges: int
     status: str
     errorStage: str
+    perJudge: Dict[str, str]
 
 
 async def send_push_to_judges_report(
@@ -78,6 +79,7 @@ async def send_push_to_judges_report(
     NIE wyświetlone na ekranie telefonu. Nigdy nie rzuca.
     """
     ids = sorted({str(j).strip() for j in judge_ids if str(j or "").strip()})
+    person_outcomes: Dict[str, str] = {judge_id: "no_device" for judge_id in ids}
     def report(*, eligible: int = 0, accepted_judges: int = 0,
                accepted_devices: int = 0, failed_devices: int = 0,
                muted_devices: int = 0, status: str = "no_recipients",
@@ -92,6 +94,7 @@ async def send_push_to_judges_report(
             "noDeviceJudges": 0 if status == "error" else max(0, len(ids) - eligible),
             "status": status,
             "errorStage": error_stage,
+            "perJudge": person_outcomes,
         }
     if not ids:
         return report()
@@ -111,6 +114,7 @@ async def send_push_to_judges_report(
         rows = await database.fetch_all(query)
     except Exception:
         logger.warning("push: odczyt urządzeń nieudany", exc_info=True)
+        person_outcomes.update({judge_id: "lookup_error" for judge_id in ids})
         return report(status="error", error_stage="device_lookup")
 
     from .fcm import send_fcm_message
@@ -131,12 +135,17 @@ async def send_push_to_judges_report(
             continue
         if market_broadcast and not market_pushes_allowed(row["notification_prefs"]):
             muted += 1
+            if person_outcomes[judge_id] == "no_device":
+                person_outcomes[judge_id] = "muted"
             continue
         eligible[judge_id] = eligible.get(judge_id, 0) + 1
+        if person_outcomes[judge_id] != "accepted":
+            person_outcomes[judge_id] = "failed"
         try:
             await send_fcm_message(row["token"], title, body, data=data or {})
             sent += 1
             delivered[judge_id] = delivered.get(judge_id, 0) + 1
+            person_outcomes[judge_id] = "accepted"
         except Exception as exc:
             failed += 1
             logger.warning(
