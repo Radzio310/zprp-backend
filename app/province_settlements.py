@@ -744,18 +744,62 @@ async def _club_paid_keys(
     return (await club_scope_many(province, by_season))["match_keys"]
 
 
+def _merge_months(district: list[dict], club: list[dict]) -> list[dict]:
+    """
+    Sklada miesiace z dwoch rachunkow w jeden wiersz na miesiac.
+
+    Kwoty sumujemy, bo to dwie ODDZIELNE wyplaty tego samego sedziego: okreg
+    placi swoje, klub swoje, a kazda strona liczy koszty i podatek od SWOJEJ
+    sumy miesiaca (patrz `load_settlement`) - i tak jest podatkowo, bo to dwaj
+    rozni platnicy.
+
+    `judges` to licznik osob, nie kwota, wiec bierzemy wieksza z dwoch wartosci
+    zamiast sumowac. Doliczanie klubow wlacza wylacznie aplikacja sedziego, czyli
+    zawsze jedna osoba - wtedy `max` jest dokladne.
+    """
+    out: dict[tuple[int, int], dict] = {}
+    for row in [*district, *club]:
+        stamp = (row["year"], row["month"])
+        item = out.get(stamp)
+        if item is None:
+            out[stamp] = dict(row)
+            continue
+        for field, value in row.items():
+            if field in ("year", "month"):
+                continue
+            if field == "judges":
+                item[field] = max(item[field], value)
+            else:
+                item[field] = round(item[field] + value, 2)
+    return [out[stamp] for stamp in sorted(out)]
+
+
 @router.get("/months", summary="Sumy miesiąc po miesiącu - do siatki sezonów")
 async def months(
     province: str = Query(...),
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
     judge_id: Optional[str] = Query(None, description="Tylko ten sędzia (aplikacja sędziego)"),
+    include_clubs: bool = Query(
+        False,
+        description="Dolicz mecze, które płaci klub bezpośrednio (aplikacja sędziego)",
+    ),
 ):
     """
     Kwoty kazdego miesiaca, w ktorym cos jest - do mapy ciepla w wyborze okresu.
 
     Liczy tym samym rachunkiem co `/summary` za pojedynczy miesiac, wiec kwota
     w kafelku siatki to kwota, ktora pokaze sie po kliknieciu w ten miesiac.
+
+    ⚠ DWA PUNKTY WIDZENIA, jeden rachunek. Panel okregu pyta „ile WYPLACAM" -
+    mecz klubu, ktory placi obsade sam, nie jest jego wydatkiem. Aplikacja
+    sedziego pyta „ile ZARABIAM" - ten sam mecz jest jego zarobkiem, tyle ze od
+    klubu. Stad `include_clubs`: domyslnie liczymy sam okreg, a aplikacja dolicza
+    czesc klubowa (i pokazuje ja osobno oznaczona).
+
+    Do 22.09.2026 nie bylo tu zadnego podzialu i obie strony dostawaly jedna
+    sume liczona jednym workiem - kafel w aplikacji pokazywal wtedy 173,80 zl,
+    a ekran pod nim 0,00 zl.
     """
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
@@ -764,18 +808,13 @@ async def months(
     assignments = await _assignments(key, judge_ids=[judge_id] if judge_id else None)
     now = _now()
 
-    # PODZIAL WEDLUG TEGO, KTO PLACI. Bez tego siatka pokazywala kwote, ktorej
-    # okreg nie wyplaci: mecz klubu rozliczajacego obsade samodzielnie wchodzil
-    # do sumy miesiaca, a ekran po kliknieciu w ten miesiac (`/me`, `/summary`)
-    # liczyl go juz osobno i pokazywal 0 zl. Kafel „Moje rozliczenie okregowe"
-    # mowil wtedy 173,80 zl, a ekran pod nim 0,00 zl (zgloszone 22.09.2026,
-    # mecz LCK/6 klubu z wylaczonym rozliczaniem przez okreg).
+    # PODZIAL WEDLUG TEGO, KTO PLACI - ta sama granica, co na ekranie miesiaca
+    # (`load_settlement`). Kazda grupa liczy sie osobno, bo koszty uzyskania
+    # i prog 200 zl ida od sumy miesiaca U DANEGO PLATNIKA.
     club_paid = await _club_paid_keys(
         key, assignments, central_versions, province_versions, now
     )
-
-    rows = E.monthly_totals(
-        [item for item in assignments if item.match_key not in club_paid],
+    common = dict(
         province=key,
         central_versions=central_versions,
         province_versions=province_versions,
@@ -783,11 +822,25 @@ async def months(
         include_future=include_future,
         include_zprp=include_zprp,
     )
+
+    rows = E.monthly_totals(
+        [item for item in assignments if item.match_key not in club_paid],
+        **common,
+    )
+    if include_clubs and club_paid:
+        rows = _merge_months(
+            rows,
+            E.monthly_totals(
+                [item for item in assignments if item.match_key in club_paid],
+                **common,
+            ),
+        )
     return {
         "province": key,
         "judge_id": judge_id,
         "include_future": include_future,
         "include_zprp": include_zprp,
+        "include_clubs": include_clubs,
         "months": rows,
     }
 
