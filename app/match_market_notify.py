@@ -26,7 +26,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Iterable, List, Mapping, Optional
 
-from app.match_market_rules import SLOT_LABELS
+from app.match_market_rules import SLOT_LABELS, state_dict
 
 #: Rola po „jako" - mianownik, ten sam co na kaflu.
 #:
@@ -125,14 +125,16 @@ def when_of(offer: Mapping[str, Any]) -> str:
     )
 
 
-def teams_of(snapshot: Optional[Mapping[str, Any]]) -> str:
+def teams_of(snapshot: Any) -> str:
     """„MKS Mysłowice - Hutnik Kraków" albo pusto.
 
     Kolejność jest NOMINALNA, taka jak w stanie meczu - to samo, co pokazuje
     lista giełdy. Powiadomienie nie jest miejscem na rozstrzyganie zamiany
     gospodarza; ma pomóc rozpoznać mecz, nie zastąpić protokół.
     """
-    state = snapshot or {}
+    # asyncpg potrafi oddać JSONB jako surowy napis; powiadomienie nie może
+    # wtedy wywrócić zapisu zgłoszenia ani testu trasy.
+    state = state_dict(snapshot)
     host = _s(state.get("ID_zespoly_gosp_ZespolNazwa"))
     guest = _s(state.get("ID_zespoly_gosc_ZespolNazwa"))
     if host and guest:
@@ -204,6 +206,19 @@ def claim_created(offer: Mapping[str, Any], claimer_name: Any) -> tuple[str, str
             when_of(offer),
             teams_of(offer.get("match_snapshot")),
             "Czeka na Twoją decyzję",
+        ),
+    )
+
+
+def claim_pending_for_claimer(offer: Mapping[str, Any]) -> tuple[str, str]:
+    """Potwierdzenie dla chętnego: zgłoszenie czeka, mecz nie jest jeszcze jego."""
+    return (
+        "🙋 Zgłoszenie wysłane",
+        _join(
+            f"Zgłosiłeś się na {match_of(offer)} jako {slot_as(offer.get('slot'))}",
+            when_of(offer),
+            teams_of(offer.get("match_snapshot")),
+            "Czekasz na decyzję obsadowego",
         ),
     )
 

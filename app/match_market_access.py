@@ -198,3 +198,42 @@ def offer_notification_groups(
     managers = clean(manager_ids) - {str(exclude or "").strip()}
     public = clean(public_ids) - clean(admin_ids) - managers - {str(exclude or "").strip()}
     return sorted(public), sorted(managers)
+
+
+def claim_notification_groups(
+    manager_ids: Iterable[Any], giver_id: Any, claimer_id: Any,
+) -> tuple[List[str], List[str], List[str]]:
+    """To samo rozdzielenie treści dla oddającego i zarządzających w teście i akcji."""
+    claimer = str(claimer_id or "").strip()
+    giver = str(giver_id or "").strip()
+    managers = {str(value or "").strip() for value in manager_ids if str(value or "").strip()} - {claimer}
+    giver_targets = [giver] if giver and giver not in managers and giver != claimer else []
+    return sorted(managers), giver_targets, [claimer] if claimer else []
+
+
+def rejected_notification_targets(
+    manager_ids: Iterable[Any], giver_id: Any, interested_ids: Iterable[Any], actor_id: Any,
+) -> List[str]:
+    ids = {str(value or "").strip() for value in (*manager_ids, giver_id, *interested_ids)
+           if str(value or "").strip()}
+    return sorted(ids - {str(actor_id or "").strip()})
+
+
+def approved_notification_groups(
+    manager_ids: Iterable[Any], giver_id: Any, taker_id: Any,
+    other_ids: Iterable[Any], crew_ids: Iterable[Any], actor_id: Any,
+) -> dict[str, List[str]]:
+    """Adresaci udanej wymiany, rozdzieleni według osobistej treści push-a."""
+    clean = lambda values: sorted({str(value or "").strip() for value in values if str(value or "").strip()})
+    giver = str(giver_id or "").strip()
+    taker = str(taker_id or "").strip()
+    others = clean(other_ids)
+    crew = clean(crew_ids)
+    informed = {giver, taker, str(actor_id or "").strip(), *others, *crew}
+    return {
+        "taker": [taker] if taker else [],
+        "giver": [giver] if giver else [],
+        "others": others,
+        "crew": crew,
+        "managers": sorted(set(clean(manager_ids)) - informed),
+    }

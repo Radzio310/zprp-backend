@@ -16,6 +16,7 @@ from app.match_market_notify import (
     apply_failed,
     claim_created,
     claim_created_for_giver,
+    claim_pending_for_claimer,
     claim_withdrawn,
     change_approved,
     claim_lost,
@@ -117,6 +118,7 @@ def test_teams_need_both_sides_or_what_there_is():
     assert teams_of({"ID_zespoly_gosp_ZespolNazwa": "MKS"}) == "MKS"
     assert teams_of({}) == ""
     assert teams_of(None) == ""
+    assert teams_of('{"ID_zespoly_gosp_ZespolNazwa":"MKS"}') == "MKS"
 
 
 def test_missing_name_never_leaves_a_hole():
@@ -174,6 +176,14 @@ def test_giver_gets_a_claim_without_false_decision_prompt():
     assert "KOWALSKI Piotr" in body
     assert "Obsadowy rozstrzygnie" in body
     assert "Twoją decyzję" not in body
+
+
+def test_claimer_gets_confirmation_without_premature_approval():
+    title, body = claim_pending_for_claimer(offer())
+    assert title == "🙋 Zgłoszenie wysłane"
+    assert "Zgłosiłeś się na mecz IIM4/1 jako sędzia 1" in body
+    assert "Czekasz na decyzję obsadowego" in body
+    assert "Obsada jest już zapisana" not in body
 
 
 def test_managers_get_neutral_status_updates():

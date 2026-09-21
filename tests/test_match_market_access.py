@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from app.match_market_access import (
     APPROVER_BADGE,
+    approved_notification_groups,
     approver_judge_ids,
+    claim_notification_groups,
     notification_manager_ids,
     offer_notification_groups,
+    rejected_notification_targets,
     badge_names,
     has_approver_badge,
     may_approve,
@@ -191,3 +194,20 @@ def test_offer_broadcast_excludes_admins_and_deduplicates_managers():
     )
     assert public == ["3"]
     assert managers == ["10", "2", "9"]
+
+
+def test_claim_routes_giver_separately_from_managers():
+    assert claim_notification_groups(["10", "2", "10"], "3", "2") == (["10"], ["3"], ["2"])
+    assert claim_notification_groups(["10", "3"], "3", "2") == (["10", "3"], [], ["2"])
+
+
+def test_decision_routes_each_role_once_and_excludes_decider_from_manager_copy():
+    groups = approved_notification_groups(
+        manager_ids=["10", "11", "2"], giver_id="1", taker_id="2",
+        other_ids=["3", "3"], crew_ids=["4", "5"], actor_id="10",
+    )
+    assert groups == {
+        "taker": ["2"], "giver": ["1"], "others": ["3"],
+        "crew": ["4", "5"], "managers": ["11"],
+    }
+    assert rejected_notification_targets(["10", "11"], "1", ["2", "3"], "10") == ["1", "11", "2", "3"]

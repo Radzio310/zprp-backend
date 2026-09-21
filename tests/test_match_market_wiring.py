@@ -217,6 +217,26 @@ def test_notification_audit_records_unique_referees_and_lookup_failures():
     assert entries[1][1]["payload"]["errorStage"] == "recipient_lookup"
 
 
+def test_admin_notification_test_is_single_recipient_and_state_preserving():
+    plan = code_of("_notification_test_plan")
+    action = code_of("_notification_test_action")
+    assert "recipient = '5124'" in plan
+    assert "req.recipient_id" not in plan
+    assert "_offer_notification_groups" in calls_in("_notification_test_plan")
+    assert "_approvers_of" in calls_in("_notification_test_plan")
+    assert "text_claim_created_for_giver" in calls_in("_notification_test_plan")
+    assert "text_claim_pending_for_claimer" in calls_in("_notification_test_plan")
+    assert "text_taker_won" in calls_in("_notification_test_plan")
+    assert "text_offer_rejected" in calls_in("_notification_test_plan")
+    assert "actor.is_admin" in action
+    assert "'market_enabled'" in action
+    assert "not matching" in action
+    assert "_notify" in calls_in("_notification_test_action")
+    assert "test=True" in action
+    assert "database.execute" not in action + plan
+    assert "apply_referee_assignment" not in action + plan
+
+
 def test_notification_routes_cover_all_market_actors():
     assert "_offer_notification_groups" in calls_in("create_offer")
     assert "broadcast=True" in code_of("create_offer")
@@ -228,6 +248,7 @@ def test_notification_routes_cover_all_market_actors():
     assert "offer_notification_groups" in calls_in("_offer_notification_groups")
     assert "from_judge_id" in code_of("create_claim")
     assert "text_claim_created_for_giver" in calls_in("create_claim")
+    assert "text_claim_pending_for_claimer" in calls_in("create_claim")
     assert "_approvers_of" in calls_in("reject_offer")
     assert "_approvers_of" in calls_in("approve_offer")
     assert "text_change_approved" in calls_in("approve_offer")

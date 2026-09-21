@@ -59,6 +59,7 @@ from app.match_market_notify import (
     conflict_sentence,
     claim_created as text_claim_created,
     claim_created_for_giver as text_claim_created_for_giver,
+    claim_pending_for_claimer as text_claim_pending_for_claimer,
     claim_withdrawn as text_claim_withdrawn,
     claim_impossible as text_claim_impossible,
     claim_lost as text_claim_lost,
@@ -72,11 +73,14 @@ from app.match_market_notify import (
 )
 from app.match_market_access import (
     APPROVER_BADGE,
+    approved_notification_groups,
     badge_names,
+    claim_notification_groups,
     may_approve,
     may_manage_config,
     notification_manager_ids,
     offer_notification_groups,
+    rejected_notification_targets,
     normalize_approver_badges,
 )
 from app.match_market_rules import (
@@ -1035,7 +1039,8 @@ async def _notify(
     audience: str = "adresaci",
     record_empty: bool = False,
     selection_error: bool = False,
-) -> None:
+    test: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Wysyłka, która nigdy nie wywraca operacji, przy której powstała.
 
     Treść przychodzi GOTOWA z `app.match_market_notify` - para (tytuł, treść).
@@ -1045,7 +1050,12 @@ async def _notify(
     title, body = text
     targets = sorted({_s(j) for j in judge_ids if _s(j)})
     if not targets and not record_empty:
-        return
+        return None
+    display_title = f"🧪 TEST — {title}" if test else title
+    display_body = f"To tylko test — oferta i obsada nie zostały zmienione. {body}" if test else body
+    data = _offer_data(offer)
+    if test:
+        data["is_test"] = "true"
     try:
         if selection_error:
             report = {
@@ -1057,7 +1067,7 @@ async def _notify(
             }
         else:
             report = await send_push_to_judges_report(
-                targets, title, body, _offer_data(offer),
+                targets, display_title, display_body, data,
                 app_variant="baza", market_broadcast=broadcast,
             )
     except Exception:  # noqa: BLE001
@@ -1072,10 +1082,11 @@ async def _notify(
         "notification_dispatch",
         province=_s(offer.get("province")), offer=offer,
         ok=report["status"] == "accepted",
-        message=f"{title} — {audience}",
-        payload={**report, "audience": audience, "title": title, "body": body,
-                 "broadcast": broadcast},
+        message=f"{display_title} — {audience}",
+        payload={**report, "audience": audience, "title": display_title, "body": display_body,
+                 "broadcast": broadcast, "test": test},
     )
+    return report
 
 
 async def _broadcast_targets(province: str, exclude: str) -> List[str]:
@@ -1211,6 +1222,12 @@ class ProvinceConfigRequest(BaseModel):
     #: domyślnego idzie osobnym polem, bo `None` znaczy tu „nie ruszaj".
     managed_prefixes: Optional[List[str]] = None
     reset_managed_prefixes: Optional[bool] = None
+
+
+class NotificationTestRequest(BaseModel):
+    scenario: str
+    offer_id: int
+    claim_id: Optional[int] = None
 
 
 class RouteCheckRequest(BaseModel):
@@ -2286,15 +2303,18 @@ async def create_claim(
         message=_s(req.note),
         payload={"conflicts": len(conflicts), "again": bool(existing)},
     )
-    managers = set(await _approvers_of(province)) - {actor.judge_id}
-    await _notify(sorted(managers), text_claim_created(offer, actor.full_name), offer,
+    managers, giver_targets, claimer_targets = claim_notification_groups(
+        await _approvers_of(province), offer["from_judge_id"], actor.judge_id,
+    )
+    await _notify(managers, text_claim_created(offer, actor.full_name), offer,
                   audience="obsadowi i administratorzy", record_empty=True)
-    giver_id = _s(offer["from_judge_id"])
-    if giver_id and giver_id not in managers and giver_id != actor.judge_id:
+    if giver_targets:
         await _notify(
-            [giver_id], text_claim_created_for_giver(offer, actor.full_name), offer,
+            giver_targets, text_claim_created_for_giver(offer, actor.full_name), offer,
             audience="oddający mecz",
         )
+    await _notify(claimer_targets, text_claim_pending_for_claimer(offer), offer,
+                  audience="zgłoszony sędzia")
     return {"id": claim_id, "status": "pending", "conflicts": conflicts}
 
 
@@ -2586,8 +2606,10 @@ async def reject_offer(
         payload={"claimsDropped": len(interested)},
     )
     await _notify(
-        sorted((set(await _approvers_of(_s(offer["province"]))) |
-                {_s(offer["from_judge_id"])} | set(interested)) - {actor.judge_id}),
+        rejected_notification_targets(
+            await _approvers_of(_s(offer["province"])),
+            offer["from_judge_id"], interested, actor.judge_id,
+        ),
         text_offer_rejected(offer, _s(giver_card.get("full_name")), reason),
         offer,
         audience="strony i zarządzający",
@@ -2993,26 +3015,12 @@ async def approve_offer(
         payload={"from": _s(giver.get("full_name")), "slotLabel": slot_label(offer["slot"])},
     )
 
-    await _notify([_s(claim["judge_id"])], text_taker_won(offer), offer,
-                  audience="przejmujący mecz")
-    await _notify(
-        [_s(offer["from_judge_id"])],
-        text_giver_released(offer, taker_name),
-        offer,
-        audience="oddający mecz",
-    )
     others = await database.fetch_all(
         select(match_market_claims.c.judge_id)
         .where(match_market_claims.c.offer_id == offer_id)
         .where(match_market_claims.c.status == "declined")
     )
     other_ids = [_s(_row(r)["judge_id"]) for r in others]
-    await _notify(
-        other_ids,
-        text_claim_lost(offer),
-        offer,
-        audience="pozostali chętni",
-    )
     # Reszta obsady - drugi sędzia, stolik, delegat. Wcześniej mówił im o tym
     # monitor, gdy zauważył różnicę w migawce; skoro migawka jest już
     # poprawiona, nie ma czego zauważyć, więc wiadomość należy do giełdy. Przy
@@ -3021,18 +3029,24 @@ async def approve_offer(
         patched,
         exclude=[_s(offer["from_judge_id"]), _s(claim["judge_id"])],
     )
+    groups = approved_notification_groups(
+        await _approvers_of(province), offer["from_judge_id"], claim["judge_id"],
+        other_ids, crew_ids, actor.judge_id,
+    )
+    await _notify(groups["taker"], text_taker_won(offer), offer,
+                  audience="przejmujący mecz")
+    await _notify(groups["giver"], text_giver_released(offer, taker_name), offer,
+                  audience="oddający mecz")
+    await _notify(groups["others"], text_claim_lost(offer), offer,
+                  audience="pozostali chętni")
     await _notify(
-        crew_ids,
+        groups["crew"],
         text_crew_changed(offer, taker_name, _s(giver.get("full_name"))),
         offer,
         audience="pozostała obsada",
     )
-    already_informed = {
-        actor.judge_id, _s(offer["from_judge_id"]), _s(claim["judge_id"]),
-        *other_ids, *crew_ids,
-    }
     await _notify(
-        sorted(set(await _approvers_of(province)) - already_informed),
+        groups["managers"],
         text_change_approved(offer, taker_name, _s(giver.get("full_name"))),
         offer,
         audience="obsadowi i administratorzy",
@@ -3160,6 +3174,192 @@ async def admin_province_offers(
             for row in rows
         ],
     }
+
+
+@router.get(
+    "/admin/provinces/{province}/notification-test/cases",
+    summary="Otwarte sprawy do bezpiecznego testu powiadomień giełdy",
+)
+async def admin_notification_test_cases(
+    province: str,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    if not actor.is_admin:
+        raise HTTPException(403, "Test powiadomień należy do administratora aplikacji.")
+    key = normalize_province(province)
+    if not key:
+        raise HTTPException(400, "Nie znam takiego województwa.")
+    offers = [_row(row) for row in await database.fetch_all(
+        select(match_market_offers)
+        .where(match_market_offers.c.province == key)
+        .where(match_market_offers.c.status == "open")
+        .where(or_(match_market_offers.c.deadline_at.is_(None),
+                   match_market_offers.c.deadline_at > _now()))
+        .order_by(match_market_offers.c.id.desc())
+        .limit(40)
+    )]
+    claims = await _claims_for([int(row["id"]) for row in offers])
+    ids = [_s(row.get("from_judge_id")) for row in offers]
+    ids += [_s(c.get("judge_id")) for group in claims.values() for c in group]
+    cards = await _judges_by_id(ids)
+    return {"province": key, "offers": [
+        {
+            "id": row["id"], "matchCode": _s(row.get("match_code")),
+            "fromName": _s(cards.get(_s(row.get("from_judge_id")), {}).get("full_name")),
+            "claims": [
+                {"id": c["id"], "judgeId": _s(c.get("judge_id")),
+                 "name": _s(cards.get(_s(c.get("judge_id")), {}).get("full_name"))}
+                for c in claims.get(int(row["id"]), [])
+                if _s(c.get("status")) == "pending"
+            ],
+        }
+        for row in offers
+    ]}
+
+
+async def _notification_test_plan(province: str, req: NotificationTestRequest) -> Dict[str, Any]:
+    """Te same reguły adresowania i teksty co w akcjach; żadnych zapisów oferty."""
+    scenario = _s(req.scenario)
+    if scenario not in ("offer_created", "claim_created", "decision_approved", "decision_rejected"):
+        raise HTTPException(400, "Nie znam takiego scenariusza powiadomienia.")
+    # Test jest celowo ograniczony do jednego wskazanego sędziego. Endpoint nie
+    # przyjmuje listy ani ID z żądania, więc nie może stać się rozsyłką.
+    recipient = "5124"
+    row = await database.fetch_one(
+        select(match_market_offers)
+        .where(match_market_offers.c.id == req.offer_id)
+        .where(match_market_offers.c.province == province)
+    )
+    if not row:
+        raise HTTPException(404, "Nie ma takiej oferty w tym okręgu.")
+    offer = _row(row)
+    if _s(offer.get("status")) != "open":
+        raise HTTPException(409, "Ta oferta nie jest już otwarta. Wybierz aktualną sprawę.")
+    giver_id = _s(offer.get("from_judge_id"))
+    claims_by_offer = await _claims_for([int(offer["id"])]) if scenario != "offer_created" else {}
+    claims = claims_by_offer.get(int(offer["id"]), [])
+    claim = next((c for c in claims if int(c["id"]) == req.claim_id
+                  and _s(c.get("status")) == "pending"), None)
+    if scenario != "offer_created" and not claim:
+        raise HTTPException(400, "Wybierz aktualne zgłoszenie do tej oferty.")
+    claimer_id = _s((claim or {}).get("judge_id"))
+    cards = await _judges_by_id([giver_id, claimer_id])
+    giver_name = _s(cards.get(giver_id, {}).get("full_name"))
+    claimer_name = _s(cards.get(claimer_id, {}).get("full_name"))
+    managers = set(await _approvers_of(province)) if scenario != "offer_created" else set()
+    # W otwartej ofercie decyzja jest hipotetyczna. Tożsamość rozstrzygającego
+    # nie jest znana, więc plan nie wyłącza go z grona zarządzających.
+    batches: List[Dict[str, Any]] = []
+
+    def add(ids: Any, text: Tuple[str, str], audience: str, broadcast: bool = False) -> None:
+        batches.append({"ids": sorted({_s(j) for j in ids if _s(j)}),
+                        "text": text, "audience": audience, "broadcast": broadcast})
+
+    if scenario == "offer_created":
+        public, manager_ids, public_error = await _offer_notification_groups(province, giver_id)
+        if public_error:
+            raise HTTPException(503, "Nie udało się odczytać odbiorców rozsyłki.")
+        text = text_offer_created(
+            {**offer, "match_at": offer.get("match_at"),
+             "match_snapshot": state_dict(offer.get("match_snapshot"))}, giver_name,
+        )
+        add(public, text, "sędziowie okręgu", True)
+        add(manager_ids, text, "obsadowi i administratorzy")
+    elif scenario == "claim_created":
+        manager_ids, giver_targets, claimer_targets = claim_notification_groups(
+            managers, giver_id, claimer_id,
+        )
+        add(manager_ids, text_claim_created(offer, claimer_name),
+            "obsadowi i administratorzy")
+        if giver_targets:
+            add(giver_targets, text_claim_created_for_giver(offer, claimer_name),
+                "oddający mecz")
+        add(claimer_targets, text_claim_pending_for_claimer(offer), "zgłoszony sędzia")
+    elif scenario == "decision_rejected":
+        interested = {_s(c.get("judge_id")) for c in claims
+                      if _s(c.get("status")) in ("pending", "chosen")}
+        add(rejected_notification_targets(managers, giver_id, interested, ""),
+            text_offer_rejected(offer, giver_name, ""), "strony i zarządzający")
+    else:
+        others = {_s(c.get("judge_id")) for c in claims
+                  if _s(c.get("status")) == "pending" and c["id"] != claim["id"]}
+        crew_ids = crew_judge_ids(state_dict(offer.get("match_snapshot")),
+                                  exclude=[giver_id, claimer_id])
+        groups = approved_notification_groups(
+            managers, giver_id, claimer_id, others, crew_ids, "",
+        )
+        add(groups["taker"], text_taker_won(offer), "przejmujący mecz")
+        add(groups["giver"], text_giver_released(offer, claimer_name), "oddający mecz")
+        add(groups["others"], text_claim_lost(offer), "pozostali chętni")
+        add(groups["crew"], text_crew_changed(offer, claimer_name, giver_name),
+            "pozostała obsada")
+        add(groups["managers"], text_change_approved(offer, claimer_name, giver_name),
+            "obsadowi i administratorzy")
+
+    matching = [b for b in batches if recipient in b["ids"]]
+    return {"province": province, "offer": offer, "recipientId": recipient,
+            "scenario": scenario, "batches": batches, "matching": matching}
+
+
+async def _notification_test_action(
+    province: str, req: NotificationTestRequest, *, send: bool, actor: Actor,
+) -> Dict[str, Any]:
+    if not actor.is_admin:
+        raise HTTPException(403, "Test powiadomień należy do administratora aplikacji.")
+    key = normalize_province(province)
+    if not key:
+        raise HTTPException(400, "Nie znam takiego województwa.")
+    if not (await _config(key))["market_enabled"]:
+        raise HTTPException(409, "Giełda w tym okręgu jest wyłączona. Prawdziwe zdarzenie nie wysłałoby powiadomienia.")
+    plan = await _notification_test_plan(key, req)
+    route = [{"audience": b["audience"], "recipients": len(b["ids"]),
+              "title": b["text"][0], "body": b["text"][1]}
+             for b in plan["batches"]]
+    matching = plan["matching"]
+    device_rows = await database.fetch_all(
+        select(push_tokens.c.notification_prefs)
+        .where(push_tokens.c.judge_id == plan["recipientId"])
+        .where(push_tokens.c.token_type == "device_fcm")
+        .where(or_(push_tokens.c.app_variant == "baza", push_tokens.c.app_variant.is_(None)))
+    )
+    device_count = len(device_rows)
+    broadcast_devices = sum(1 for row in device_rows
+                            if market_pushes_allowed(_row(row).get("notification_prefs")))
+    if send and not matching:
+        raise HTTPException(409, "Sędzia nie należy do odbiorców tego scenariusza. Nic nie wysłano.")
+    reports = []
+    if send:
+        for batch in matching:
+            reports.append(await _notify(
+                [plan["recipientId"]], batch["text"], plan["offer"],
+                broadcast=batch["broadcast"], audience=batch["audience"], test=True,
+            ))
+    return {
+        "province": key, "offerId": plan["offer"]["id"],
+        "matchCode": _s(plan["offer"].get("match_code")),
+        "scenario": plan["scenario"], "recipientId": plan["recipientId"],
+        "eligible": bool(matching), "routes": route,
+        "devices": {"registered": device_count, "broadcastEnabled": broadcast_devices},
+        "matching": [{"audience": b["audience"], "title": b["text"][0],
+                      "body": b["text"][1]} for b in matching],
+        "sent": send, "reports": reports,
+    }
+
+
+@router.post("/admin/provinces/{province}/notification-test/preview")
+async def admin_notification_test_preview(
+    province: str, req: NotificationTestRequest,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    return await _notification_test_action(province, req, send=False, actor=actor)
+
+
+@router.post("/admin/provinces/{province}/notification-test/send")
+async def admin_notification_test_send(
+    province: str, req: NotificationTestRequest,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    return await _notification_test_action(province, req, send=True, actor=actor)
 
 
 @router.get(
