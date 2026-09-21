@@ -42,7 +42,7 @@ from app.settlement_names_rules import is_missing_name
 from app.settlement_province import canonical, display, spellings
 from app.settlement_runs import cooldown_left, run_is_active
 from app.settlement_seasons import season_of
-from app.settlement_club_scope import club_scope
+from app.settlement_club_scope import club_scope, club_scope_many
 
 logger = logging.getLogger(__name__)
 
@@ -701,6 +701,49 @@ async def mine(
     )
 
 
+async def _club_paid_keys(
+    province: str,
+    assignments: list,
+    central_versions: list,
+    province_versions: list,
+    now: datetime,
+) -> set[str]:
+    """
+    Mecze, ktore placi KLUB, a nie okreg - dla calej historii naraz.
+
+    ⚠ `club_scope` potrzebuje meczow PRZELICZONYCH (`SettledMatch`): rozpoznaje
+    gospodarza po nazwie i wyjatkach z panelu, a surowa obsada nie ma ani dnia,
+    ani kategorii. Robimy wiec jeden przebieg silnika na calym zakresie -
+    WYLACZNIE po to, zeby rozpoznac mecze. Kwoty licza sie pozniej miesiac po
+    miesiacu, bo podatek i prog 200 zl ida od sumy MIESIACA.
+
+    Przebieg rozpoznawczy swiadomie bierze wszystko (`include_future`,
+    `include_zprp`): mecz placony przez klub ma wypasc z kwoty okregu niezaleznie
+    od tego, jak ustawione sa przelaczniki.
+    """
+    days = [item.match_at.date() for item in assignments if item.match_at]
+    if not days:
+        return set()
+    probe = E.settle_judges(
+        assignments,
+        province=province,
+        central_versions=central_versions,
+        province_versions=province_versions,
+        now=now,
+        date_from=min(days),
+        date_to=max(days),
+        include_future=True,
+        include_zprp=True,
+    )
+    by_season: dict[str, list] = {}
+    for entry in probe:
+        for match in entry.matches:
+            if match.day is None:
+                continue
+            by_season.setdefault(season_of(match.day), []).append(match)
+    return (await club_scope_many(province, by_season))["match_keys"]
+
+
 @router.get("/months", summary="Sumy miesiąc po miesiącu - do siatki sezonów")
 async def months(
     province: str = Query(...),
@@ -719,12 +762,24 @@ async def months(
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
     central_versions, province_versions = await _versions(key)
     assignments = await _assignments(key, judge_ids=[judge_id] if judge_id else None)
+    now = _now()
+
+    # PODZIAL WEDLUG TEGO, KTO PLACI. Bez tego siatka pokazywala kwote, ktorej
+    # okreg nie wyplaci: mecz klubu rozliczajacego obsade samodzielnie wchodzil
+    # do sumy miesiaca, a ekran po kliknieciu w ten miesiac (`/me`, `/summary`)
+    # liczyl go juz osobno i pokazywal 0 zl. Kafel „Moje rozliczenie okregowe"
+    # mowil wtedy 173,80 zl, a ekran pod nim 0,00 zl (zgloszone 22.09.2026,
+    # mecz LCK/6 klubu z wylaczonym rozliczaniem przez okreg).
+    club_paid = await _club_paid_keys(
+        key, assignments, central_versions, province_versions, now
+    )
+
     rows = E.monthly_totals(
-        assignments,
+        [item for item in assignments if item.match_key not in club_paid],
         province=key,
         central_versions=central_versions,
         province_versions=province_versions,
-        now=_now(),
+        now=now,
         include_future=include_future,
         include_zprp=include_zprp,
     )

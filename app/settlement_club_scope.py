@@ -41,18 +41,37 @@ def _state(value: Any) -> dict:
 
 async def club_scope(province: str, season: str, matches: Iterable[Any]) -> dict:
     """Zwraca klucze meczow poza rozliczeniem i opis klubow do zalacznika."""
+    return await club_scope_many(province, {season: list(matches)})
+
+
+async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
+    """
+    To samo, co `club_scope`, ale dla KILKU sezonow naraz i jednym odczytem bazy.
+
+    Siatka miesiecy (`/province/settlements/months`) siega kilka sezonow wstecz,
+    a pytanie o kazdy sezon osobno byloby kilkudziesiecioma zapytaniami na jedno
+    wejscie na ekran. Dopasowanie druzyn liczymy mimo to SEZON PO SEZONIE: ten
+    sam numer druzyny bywa w innym sezonie w innym klubie, a nazwy druzyn
+    zmieniaja sie miedzy sezonami.
+    """
+    seasons = [season for season in by_season if season]
+    if not seasons:
+        return {"match_keys": set(), "clubs": []}
+
     rows = await database.fetch_all(
         select(province_club_teams).where(
             and_(
                 province_club_teams.c.province == province,
-                province_club_teams.c.season == season,
+                province_club_teams.c.season.in_(seasons),
             )
         )
     )
-    by_id: dict[str, C.TeamRef] = {}
-    by_key: dict[str, C.TeamRef] = {}
-    team_meta: dict[str, dict] = {}
+    #: sezon -> (druzyny po numerze, druzyny po kluczu nazwy)
+    teams: dict[str, tuple[dict[str, C.TeamRef], dict[str, C.TeamRef]]] = {
+        season: ({}, {}) for season in seasons
+    }
     for row in rows:
+        by_id, by_key = teams.setdefault(_s(row["season"]), ({}, {}))
         ref = C.TeamRef(
             team_id=_s(row["team_id"]),
             club_id=_s(row["club_id"]),
@@ -62,7 +81,6 @@ async def club_scope(province: str, season: str, matches: Iterable[Any]) -> dict
         )
         by_id[ref.team_id] = ref
         by_key.setdefault(_s(row["name_key"]) or team_key(ref.name), ref)
-        team_meta[ref.team_id] = {"team_name": ref.name, "club_id": ref.club_id}
 
     setting_rows = await database.fetch_all(
         select(province_clubs).where(province_clubs.c.province == province)
@@ -105,30 +123,33 @@ async def club_scope(province: str, season: str, matches: Iterable[Any]) -> dict
         if host:
             hosts[f"d:{_s(row['match_id'])}"] = host
 
-    charges = C.build_charges(
-        matches,
-        hosts=hosts,
-        teams_by_key=by_key,
-        teams_by_id=by_id,
-        overrides=overrides,
-        clubs=settings,
-        key_of=team_key,
-    )
-    excluded_keys = {row.match_key for row in charges if row.status == C.CLUB_OFF}
-    details = {}
-    for row in charges:
-        if row.match_key not in excluded_keys:
-            continue
-        club_id = row.club_id
-        item = details.setdefault(
-            club_id,
-            {
-                "club_id": club_id,
-                "club_name": club_names.get(club_id) or row.team_name or club_id,
-                "matches": 0,
-                "amount": 0.0,
-            },
+    excluded_keys: set[str] = set()
+    details: dict[str, dict] = {}
+    for season, matches in by_season.items():
+        by_id, by_key = teams.get(season, ({}, {}))
+        charges = C.build_charges(
+            matches,
+            hosts=hosts,
+            teams_by_key=by_key,
+            teams_by_id=by_id,
+            overrides=overrides,
+            clubs=settings,
+            key_of=team_key,
         )
-        item["matches"] += 1
-        item["amount"] = round(item["amount"] + row.amount, 2)
+        for row in charges:
+            if row.status != C.CLUB_OFF:
+                continue
+            excluded_keys.add(row.match_key)
+            club_id = row.club_id
+            item = details.setdefault(
+                club_id,
+                {
+                    "club_id": club_id,
+                    "club_name": club_names.get(club_id) or row.team_name or club_id,
+                    "matches": 0,
+                    "amount": 0.0,
+                },
+            )
+            item["matches"] += 1
+            item["amount"] = round(item["amount"] + row.amount, 2)
     return {"match_keys": excluded_keys, "clubs": list(details.values())}
