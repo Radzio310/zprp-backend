@@ -176,16 +176,13 @@ def notification_manager_ids(
 ) -> List[str]:
     """Powiadomienia roli z per-okręgowym wyłącznikiem administratorów.
 
-    Admin z lokalną odznaką również pozostaje wyciszony, gdy przełącznik jest
-    wyłączony. Osobiste powiadomienia o jego własnym meczu idą inną drogą.
+    Przełącznik dodaje adminów spoza okręgu. Admin z lokalną odznaką nadal
+    dostaje powiadomienie jako obsadowy, nawet gdy dodatek jest wyłączony.
     """
     admins = {str(value or "").strip() for value in admin_ids if str(value or "").strip()}
     known_rows = [dict(row._mapping) if hasattr(row, "_mapping") else dict(row or {}) for row in rows or []]
-    eligible = known_rows if notify_admins else [
-        row for row in known_rows if str(row.get("judge_id") or "").strip() not in admins
-    ]
     return approver_judge_ids(
-        eligible, province,
+        known_rows, province,
         admin_ids=admins if notify_admins else (),
         allowed_badges=allowed_badges,
     )
@@ -194,13 +191,12 @@ def notification_manager_ids(
 def offer_notification_groups(
     public_ids: Iterable[Any],
     manager_ids: Iterable[Any],
-    admin_ids: Iterable[Any],
     exclude: Any,
 ) -> tuple[List[str], List[str]]:
-    """Admin wyłącznie przez rolę, pozostali bez podwójnych powiadomień."""
+    """Admin z okręgu dostaje zwykły push; rola ma pierwszeństwo bez dubla."""
     clean = lambda values: {str(value or "").strip() for value in values if str(value or "").strip()}
     managers = clean(manager_ids) - {str(exclude or "").strip()}
-    public = clean(public_ids) - clean(admin_ids) - managers - {str(exclude or "").strip()}
+    public = clean(public_ids) - managers - {str(exclude or "").strip()}
     return sorted(public), sorted(managers)
 
 

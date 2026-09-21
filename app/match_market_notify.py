@@ -23,8 +23,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, List, Mapping, Optional
+from zoneinfo import ZoneInfo
 
 from app.match_market_rules import SLOT_LABELS, state_dict
 
@@ -50,6 +51,7 @@ _MONTHS = (
     "lipca", "sierpnia", "września", "października", "listopada", "grudnia",
 )
 _WEEKDAYS = ("pon.", "wt.", "śr.", "czw.", "pt.", "sob.", "niedz.")
+_WARSAW = ZoneInfo("Europe/Warsaw")
 
 
 def _s(value: Any) -> str:
@@ -119,6 +121,12 @@ def when_of(offer: Mapping[str, Any]) -> str:
         stamp = None
     if not stamp:
         return ""
+    # `match_at` w giełdzie i w bazie jest chwilą UTC. Kafel aplikacji pokazuje
+    # ją w czasie polskim, więc push musi używać tej samej strefy (także zimą).
+    # Naiwne daty z dawnych wierszy traktujemy jako UTC, zgodnie z zapisem DB.
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    stamp = stamp.astimezone(_WARSAW)
     return (
         f"{_WEEKDAYS[stamp.weekday()]} {stamp.day} {_MONTHS[stamp.month - 1]}, "
         f"{stamp.hour:02d}:{stamp.minute:02d}"

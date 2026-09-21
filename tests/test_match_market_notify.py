@@ -107,7 +107,10 @@ def test_capitalizing_does_not_lowercase_the_match_number():
 
 
 def test_date_is_in_the_genitive():
-    assert when_of(offer()) == "sob. 12 września, 14:00"
+    assert when_of(offer()) == "sob. 12 września, 16:00"
+    assert when_of(offer(match_at=datetime(2026, 9, 25, 14, 30, tzinfo=timezone.utc))) == "pt. 25 września, 16:30"
+    assert when_of(offer(match_at="2026-09-25T14:30:00+00:00")) == "pt. 25 września, 16:30"
+    assert when_of(offer(match_at="2026-12-25T14:30:00+00:00")) == "pt. 25 grudnia, 15:30"
     # Brak terminu to odpowiedz sama w sobie - nie zmyslamy daty.
     assert when_of(offer(match_at=None)) == ""
     assert when_of(offer(match_at="nie-data")) == ""
@@ -138,7 +141,7 @@ def test_the_reported_notification_now_starts_with_the_person():
     # Numer meczu NIE stoi na poczatku - to byl caly klopot.
     assert not body.startswith("IIM4/1")
     assert "·" not in body
-    assert "Sob. 12 września, 14:00" in body
+    assert "Sob. 12 września, 16:00" in body
 
 
 def test_new_offer_says_who_looks_for_what():
@@ -225,7 +228,7 @@ def test_taker_learns_when_and_against_whom():
     title, body = taker_won(offer())
     assert title == "✅ Masz nowy mecz"
     assert body.startswith("Prowadzisz mecz IIM4/1 jako sędzia 1.")
-    assert "Sob. 12 września, 14:00" in body
+    assert "Sob. 12 września, 16:00" in body
     assert "Hutnik Kraków" in body
     assert "Obsada jest już zapisana w bazie związku." in body
 
@@ -292,7 +295,7 @@ def test_crew_learns_who_replaced_whom():
     assert title == "🔁 Zmiana w Twoim meczu"
     assert body.startswith("Nowy sędzia 1 w meczu IIM4/1: Krzysztof WITKOWICZ.")
     assert "Wcześniej: Radosław WITKOWICZ." in body
-    assert "Sob. 12 września, 14:00" in body
+    assert "Sob. 12 września, 16:00" in body
 
 
 def test_crew_message_declines_the_table_role():

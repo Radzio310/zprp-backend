@@ -1173,15 +1173,10 @@ async def _offer_notification_groups(province: str, exclude: str) -> Tuple[List[
         logger.warning("giełda: odbiorcy rozsyłki niedostępni dla %s", province, exc_info=True)
         public = []
         public_error = True
-    # Admin nigdy nie wpada przez zwykłą rozsyłkę członków okręgu. Jedyną
-    # bramką jego roli jest przełącznik okręgu w `_approvers_of`.
-    try:
-        admin_ids = await admin_judge_ids()
-    except Exception:  # noqa: BLE001
-        logger.warning("giełda: lista adminów niedostępna dla %s", province, exc_info=True)
-        admin_ids = []
+    # Admin z listy sędziów okręgu zachowuje zwykłą subskrypcję. Przełącznik
+    # w `_approvers_of` dodaje tylko administratorów bez lokalnej roli.
     public_ids, manager_ids = offer_notification_groups(
-        public, await _approvers_of(province), admin_ids, exclude
+        public, await _approvers_of(province), exclude
     )
     return public_ids, manager_ids, public_error
 
@@ -3340,8 +3335,19 @@ async def _notification_test_action(
                     admins = await admin_judge_ids()
                 except Exception:  # noqa: BLE001
                     logger.warning("giełda: lista adminów niedostępna przy diagnozie testu", exc_info=True)
+            local_admin = False
             if plan["recipientId"] in admins:
-                exclusion_reason = "Administratorzy są wyciszeni w tym okręgu. Włącz ich powiadomienia w ustawieniach giełdy."
+                try:
+                    local_admin = bool(await database.fetch_val(
+                        select(province_judges.c.judge_id).where(
+                            province_judges.c.judge_id == plan["recipientId"],
+                            province_judges.c.province.in_(spellings(key)),
+                        )
+                    ))
+                except Exception:  # noqa: BLE001
+                    logger.warning("giełda: lista okręgu niedostępna przy diagnozie testu", exc_info=True)
+            if plan["recipientId"] in admins and not local_admin:
+                exclusion_reason = "ID 5124 nie jest sędzią tego okręgu. Włącz dodatkowe powiadamianie administratorów, aby je otrzymał."
             elif not broadcast_devices:
                 exclusion_reason = "ID 5124 nie ma urządzenia z włączoną rozsyłką nowych ofert."
     elif not matching:
