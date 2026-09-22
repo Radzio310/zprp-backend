@@ -379,10 +379,40 @@ def build_extra_report_pdf(
                     page_index=index,
                 )
                 _stamp_page_number(page, index, len(pages))
+                # SPIECZENIE JEST OBOWIAZKOWE, nie "mile widziane".
+                #
+                # Dotad nieudane `bake()` konczylo sie wpisem w logu, a raport
+                # i tak szedl dalej - i to byla cicha dziura. Pola, ktorych nie
+                # kasujemy (ptaszki "Nagranie wideo TAK/NIE"), zostaja wtedy
+                # ZYWYMI polami formularza: kazdy, kto dostanie plik, moze je
+                # przekliknac w dowolnej przegladarce PDF. Sprawdzone na tym
+                # wzorze - bez spieczenia zostaja dokladnie te dwa pola, a
+                # dokument dalej jest formularzem.
+                #
+                # Do tego niespieczony formularz KAZDA przegladarka rysuje po
+                # swojemu: wlasnym tlem pola i wlasnym przycieciem tekstu do
+                # ramki. Stad bialy prostokat pod nazwiskiem i nazwa druzyny
+                # urwana w polowie slowa - wartosc w pliku jest pelna, ucina ja
+                # dopiero rysowanie.
+                #
+                # Raport jedzie do zwiazku, wiec ma byc dokumentem, a nie
+                # ankieta. Nie udalo sie spiec - nie ma raportu.
                 try:
                     single.bake()
                 except Exception as exc:
-                    logger.warning("Nie udało się spiec formularza: %s", exc)
+                    raise ExtraReportError(
+                        "Nie udalo sie zamknac formularza w dokument - raportu "
+                        "nie wolno wyslac, bo adresat moglby go zmienic. "
+                        f"Powod: {exc}"
+                    ) from exc
+                left = [w.field_name for w in (page.widgets() or [])]
+                if left:
+                    # Spieczenie "sie udalo", ale cos zostalo - ten sam skutek.
+                    raise ExtraReportError(
+                        "W raporcie zostaly pola formularza: "
+                        + ", ".join(left)
+                        + ". Dokument bylby edytowalny, wiec go nie wydajemy."
+                    )
                 out.insert_pdf(single, from_page=0, to_page=0)
             finally:
                 single.close()
