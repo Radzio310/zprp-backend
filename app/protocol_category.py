@@ -81,11 +81,7 @@ COMPETITION_TOKENS: Dict[str, Tuple[str, str]] = {
     "PPM": ("pp", "M"),
     "PPK": ("pp", "K"),
     "PP": ("pp", ""),
-    # Runda centralna Pucharu Polski ma kod „PM" / „PK", nie „PPM": numery
-    # z bazy ZPRP to „L/PM/1" (2025/2026 i 2026/2027), a „PPM"/„PPK" zostaje
-    # przy eliminacjach wojewódzkich („E/PPM/1", „S/PPK/2"). Wśród 21
-    # przedrostków okręgowych z obu sezonów nie ma „PM" ani „PK", więc
-    # kolizja z członem okręgu nie zachodzi.
+    # PM/PK oznacza PP; prefiks województwa przed tym kodem oznacza eliminacje.
     "PM": ("pp", "M"),
     "PK": ("pp", "K"),
     "JM": ("junior", "M"),
@@ -201,6 +197,21 @@ def classify_match_code(code: object) -> MatchKind:
 ZPRP_EXAM_COMPETITIONS: frozenset = frozenset(
     {"superliga", "superpuchar", "liga_centralna", "i_liga", "pp"}
 )
+
+
+PROVINCE_PREFIXES = frozenset({
+    "B", "C", "D", "E", "F", "G", "K", "KP", "L", "LB", "MLP",
+    "O", "OOM", "P", "R", "S", "T", "W", "WN", "Z", "ZPE",
+})
+
+
+def is_regional_cup_qualifier(code: object) -> bool:
+    segments = [part.strip().upper() for part in str(code or "").split("/")]
+    return (
+        len(segments) >= 3
+        and segments[0] in PROVINCE_PREFIXES
+        and segments[1] in {"PM", "PK", "PPM", "PPK"}
+    )
 
 
 def exam_requirement_for_code(code: object) -> str:

@@ -58,17 +58,16 @@ def test_remis_w_glosowaniu_nie_przypisuje_wojewodztwa():
     assert "X" not in learn_prefix_provinces(rows)
 
 
-def test_runda_centralna_pucharu_nie_uczy_mapy():
-    # „L/PM/1" to runda centralna Pucharu Polski - przedrostek nie jest okręgiem.
+def test_eliminacje_pucharu_ucza_mapy_okregu():
     rows = [("LUBELSKIE", "L/PM/1"), ("LUBELSKIE", "L/PM/2")]
-    assert learn_prefix_provinces(rows) == {}
+    assert learn_prefix_provinces(rows) == {"L": "LUBELSKIE"}
 
 
 def test_wojewodztwo_meczu():
     learned = {"S": "SLASKIE"}
     assert match_province("S/JM/5", "district", learned) == "SLASKIE"
     assert match_province("SM/8", "central", learned) == CENTRAL
-    assert match_province("L/PM/1", "cup", learned) == CENTRAL
+    assert match_province("L/PM/1", "cup", {**learned, "L": "LUBELSKIE"}) == "LUBELSKIE"
     # Przedrostek, którego terminarze nie znają - nie zgadujemy.
     assert match_province("Q/JM/1", "district", learned) == UNKNOWN
 

@@ -15,6 +15,7 @@ from google.auth.transport.requests import Request
 import datetime
 
 from app.deps import get_settings, get_current_user
+from app.calendar_event_ids import google_event_id
 from app.calendar_storage import (
     save_oauth_state,
     get_oauth_state,
@@ -468,13 +469,39 @@ async def create_event(
     }
 
     service = build("calendar", "v3", credentials=creds)
-    request = service.events().insert(calendarId="primary", body=event_body)
+    events = service.events()
+    mapped_id = await get_event_mapping(user_login, payload.matchId)
+    if mapped_id:
+        request = events.update(calendarId="primary", eventId=mapped_id, body=event_body)
+        if _is_label_id(payload.colorId):
+            request = _apply_event_label_version(request)
+        try:
+            updated = request.execute()
+            return {"eventId": updated["id"]}
+        except HttpError as exc:
+            if exc.resp.status not in (404, 410):
+                raise
+            # Stare mapowanie wskazuje wpis ręcznie usunięty w Google.
+
+    # Stałe ID powoduje, że ponowiony POST (także po timeout lub z innego
+    # urządzenia) nie tworzy kolejnego wydarzenia. Google dopuszcza cyfry 0-9
+    # i litery a-v w identyfikatorach; szesnastkowy SHA-256 spełnia ten wymóg.
+    event_id = google_event_id(user_login, payload.matchId)
+    request = events.insert(calendarId="primary", body={**event_body, "id": event_id})
     if _is_label_id(payload.colorId):
         request = _apply_event_label_version(request)
-    created = request.execute()
+    try:
+        saved = request.execute()
+    except HttpError as exc:
+        if exc.resp.status != 409:
+            raise
+        request = events.update(calendarId="primary", eventId=event_id, body=event_body)
+        if _is_label_id(payload.colorId):
+            request = _apply_event_label_version(request)
+        saved = request.execute()
 
-    await save_event_mapping(user_login, payload.matchId, created["id"])
-    return {"eventId": created["id"]}
+    await save_event_mapping(user_login, payload.matchId, saved["id"])
+    return {"eventId": saved["id"]}
 
 @router.put(
     "/events/{match_id:path}",
@@ -538,6 +565,16 @@ async def update_event(
         if _is_label_id(payload.colorId):
             request = _apply_event_label_version(request)
         updated = request.execute()
+    except HttpError as e:
+        if e.resp.status in (404, 410):
+            raise HTTPException(
+                status_code=404,
+                detail="Nie znaleziono powiązanego wydarzenia do edycji",
+            ) from e
+        raise HTTPException(
+            status_code=502,
+            detail=f"Błąd przy aktualizacji wydarzenia: {e}",
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=500,

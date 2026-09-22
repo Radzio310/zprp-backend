@@ -51,8 +51,7 @@ from app.protocol_category import (
         ("PPK/4", "pp", "K"),
         ("PP/846", "pp", ""),
         ("S/PPK/2", "pp", "K"),
-        # Runda centralna Pucharu Polski ma w bazie ZPRP kod „PM"/„PK",
-        # nie „PPM" - numery finalow to „L/PM/1".
+        # PM/PK opisuje PP; prefiks województwa wyróżnia eliminacje.
         ("L/PM/1", "pp", "M"),
         ("ZPE/PM/3", "pp", "M"),
         ("JM/9", "junior", "M"),

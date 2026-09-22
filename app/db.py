@@ -3945,6 +3945,44 @@ extra_reports = Table(
     UniqueConstraint("match_key", "kind", name="uq_extra_reports_key_kind"),
 )
 
+# Historia składania raportów - DOPISYWANA, nigdy nienadpisywana.
+#
+# Dlaczego osobna tabela, skoro `extra_reports` ma `generated_by`/`generated_at`:
+# tamten wiersz jest JEDEN na mecz i rodzaj (`uq_extra_reports_key_kind`), więc
+# każde kolejne złożenie zamazuje poprzednie. Zostaje ostatnie, a pytanie brzmi
+# „kto i kiedy składał raporty", nie „kto złożył ostatni".
+#
+# Dlaczego nie dziennik meczu: `log_by_zprp_id` świadomie MILCZY, gdy nie da się
+# ustalić numeru meczu (mecz, który nigdy nie miał protokołu w aplikacji). To
+# dokładnie te raporty, które powstają na ekranie szczegółów meczu - czyli
+# historia oparta na dzienniku gubiłaby systematycznie połowę zdarzeń.
+#
+# `origin` mówi, z którego ekranu aplikacji raport został złożony:
+# "summary" = podsumowanie meczu, "details" = szczegóły meczu.
+extra_report_history = Table(
+    "extra_report_history",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("match_key", String, nullable=False, index=True),
+    Column("kind", String, nullable=False),
+    Column("match_number", String, nullable=True, index=True),
+    Column("zprp_match_id", String, nullable=True, index=True),
+    # Nazwy drużyn i kategoria zapisane W CHWILI złożenia. Kategorię liczy
+    # aplikacja z numeru meczu, a numer bywa poprawiany - historia ma pokazywać
+    # to, co było wtedy, a nie to, co jest teraz.
+    Column("category", String, nullable=True, index=True),
+    Column("team_host", String, nullable=True),
+    Column("team_guest", String, nullable=True),
+    Column("generated_by", String, nullable=True, index=True),
+    Column("generated_by_name", String, nullable=True),
+    Column("generated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), index=True),
+    Column("origin", String, nullable=True),
+    Column("entries_count", Integer, nullable=False, server_default="0"),
+    # Wynik automatycznej kopii na Discord: "sent" | "partial" | "failed" |
+    # "skipped" | "disabled". Serwer i tak go zna, więc nie ma powodu zgadywać.
+    Column("discord_status", String, nullable=True),
+)
+
 # Adresaci raportu wg kategorii rozgrywek. Kategorię liczy aplikacja z numeru
 # meczu (`utils/matchCategoryColor.ts`) - tu trzymamy tylko przypisanie
 # kategoria -> skrzynki, żeby dało się je zmienić bez wydawania nowego APK.

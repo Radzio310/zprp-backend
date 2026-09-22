@@ -105,10 +105,6 @@ def province_label(key: Any) -> str:
     k = str(key or "")
     return PROVINCE_LABELS.get(k) or (k.capitalize() if k else "Nieznane")
 
-#: Runda centralna Pucharu Polski („L/PM/1") ma przedrostek, ale nie jest
-#: meczem okręgu - patrz nota przy `COMPETITION_TOKENS`.
-_CENTRAL_TOKENS = frozenset({"PM", "PK"})
-
 #: Zdarzenia, które robią z osoby WYKONAWCĘ czynności pomeczowej.
 FINISH_EVENTS: Tuple[str, ...] = (
     "zprp.summary_sent",
@@ -250,9 +246,6 @@ def learn_prefix_provinces(
         prov = canon_province(province)
         if not prov:
             continue
-        kind = classify_match_code(code)
-        if kind.token in _CENTRAL_TOKENS:
-            continue
         prefix = prefix_of(code)
         if prefix:
             votes[prefix][prov] += 1
@@ -270,11 +263,10 @@ def learn_prefix_provinces(
 
 def match_province(code: Any, level: str, learned: Mapping[str, str]) -> str:
     """Województwo MECZU: okręg z przedrostka, grupa centralna albo nieznane."""
-    kind = classify_match_code(code)
     prefix = prefix_of(code)
-    if prefix and kind.token not in _CENTRAL_TOKENS:
+    if prefix:
         return learned.get(prefix) or UNKNOWN
-    if level == "central" or kind.token in _CENTRAL_TOKENS:
+    if level == "central":
         return CENTRAL
     return UNKNOWN
 

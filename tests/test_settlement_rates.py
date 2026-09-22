@@ -41,8 +41,10 @@ SOBOTA_NOWA = date(2026, 9, 5)
         # „JMM" i bez pierwszenstwa pucharu rozliczalby sie jak mecz juniorski.
         ("MPJMM/19", "cup"),
         ("PPM/23", "cup"),
+        ("PM/23", "cup"),
         # Puchar WOJEWODZKI placi stawkami II ligi, wiec liczy sie jak centralny.
         ("S/PPK/2", "central"),
+        ("ZPE/PM/1", "central"),
         # II liga jest centralna takze w wojewodzkiej grupie IIM4.
         ("IIM4/12", "central"),
         ("S/JMM/7", "district"),
@@ -133,8 +135,9 @@ def test_polfinal_pp_placi_jak_final_dopiero_od_nowej_tabeli():
     assert _gross("PPM/23", R.ROLE_FIELD, 50, SOBOTA_NOWA, BOOK_NEW, runda="1/4 finału") == 339
 
 
-def test_puchar_wojewodzki_placi_stawka_ii_ligi():
+def test_eliminacje_pucharu_placa_stawka_el_pp():
     assert _gross("S/PPK/2", R.ROLE_FIELD, 50, SOBOTA_NOWA, BOOK_NEW) == 195
+    assert _gross("ZPE/PM/1", R.ROLE_FIELD, 50, SOBOTA_NOWA, BOOK_NEW) == 195
 
 
 def test_okregowy_od_01_09_2026_to_stala_stawka():

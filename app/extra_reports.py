@@ -41,7 +41,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from starlette.background import BackgroundTask
 
 # `app.db` wchodzi LENIWIE, wewnątrz funkcji (konwencja jak w proel_journal):
@@ -156,6 +156,11 @@ class GeneratePdfBody(BaseModel):
     #: nie dało się wysłać do związku raportu innego niż ten, który widzi
     #: reszta obsady.
     entries: Optional[List[Dict[str, Any]]] = None
+    #: Z którego ekranu aplikacji złożono raport: "summary" (podsumowanie meczu)
+    #: albo "details" (szczegóły meczu). Serwer nie ma jak tego zgadnąć, a w
+    #: historii to najważniejsze rozróżnienie: raport z podsumowania pisze się
+    #: tuż po meczu, ze szczegółów - często dzień później i z innego telefonu.
+    origin: Optional[str] = None
     #: Kategoria z tej samej funkcji klienta co przy rozwiązywaniu adresatów.
     #: Brak w starszej aplikacji = bez automatycznej wysyłki Discord.
     category: str = ""
@@ -477,6 +482,44 @@ async def generate_pdf(
             logger.warning("Extra report Discord dispatch failed")
             discord = {"status": "failed", "deliveries": [],
                        "warning": "Nie udało się wysłać kopii do Discorda."}
+    # Historia składania - DOPISUJEMY, nigdy nie nadpisujemy (patrz
+    # `extra_report_history` w `app/db.py`). Mecz testowy tak samo jak wyżej:
+    # nie zostawia w bazie śladu, więc i tu go nie ma.
+    if row:
+        stored_row = dict(row)
+        teams = [str(t or "").strip() for t in (body.teams or [])]
+        try:
+            # Import TUTAJ, w środku zabezpieczenia: historia jest zapisem
+            # pomocniczym i brak tabeli (starsza baza, atrapa w teście) nie ma
+            # prawa zabrać sędziemu gotowego raportu.
+            from app.db import extra_report_history
+
+            await database.execute(
+                extra_report_history.insert().values(
+                    match_key=match_key,
+                    kind=kind,
+                    match_number=(
+                        body.matchNumber or stored_row.get("match_number") or None
+                    ),
+                    zprp_match_id=(
+                        body.zprpMatchId or stored_row.get("zprp_match_id") or None
+                    ),
+                    category=(body.category or "").strip() or None,
+                    team_host=teams[0] if len(teams) > 0 else None,
+                    team_guest=teams[1] if len(teams) > 1 else None,
+                    generated_by=actor.judge_id or None,
+                    generated_by_name=actor.name or None,
+                    generated_at=now,
+                    origin=(body.origin or "").strip() or None,
+                    entries_count=len(entries),
+                    discord_status=str(discord.get("status") or "") or None,
+                )
+            )
+        except Exception:
+            # Historia jest zapisem pomocniczym - jej awaria nie ma prawa
+            # zabrać sędziemu gotowego raportu tuż przed wysłaniem.
+            logger.warning("Nie udało się dopisać historii raportu")
+
     return {
         "filename": filename,
         "pdfBase64": base64.b64encode(pdf).decode("ascii"),
@@ -614,6 +657,86 @@ async def _resolve_recipients(category: str, match_id: Optional[str]) -> Dict[st
         "discordProvinceUnresolved": province_unresolved,
         "_discordTargets": targets,
     }
+
+
+class ReportHistoryItem(BaseModel):
+    """Jedno złożenie raportu - tak, jak wyglądało w tamtej chwili."""
+
+    id: int
+    matchKey: str
+    kind: str
+    matchNumber: str = ""
+    zprpMatchId: str = ""
+    category: str = ""
+    teams: List[str] = Field(default_factory=list)
+    byJudgeId: str = ""
+    byName: str = ""
+    at: str = ""
+    #: "summary" (podsumowanie meczu) albo "details" (szczegóły meczu).
+    origin: str = ""
+    entries: int = 0
+    discord: str = ""
+
+
+class ReportHistoryPage(BaseModel):
+    items: List[ReportHistoryItem] = Field(default_factory=list)
+    #: Ile wierszy jest w sumie - panel pokazuje to obok licznika przefiltrowanych.
+    total: int = 0
+
+
+@admin_router.get(
+    "/history",
+    response_model=ReportHistoryPage,
+    summary="Historia składania raportów",
+)
+async def report_history(
+    limit: int = Query(300, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+    actor: Actor = Depends(proel_actor),
+) -> ReportHistoryPage:
+    """Kto i kiedy składał dodatkowy raport - od najnowszych.
+
+    Bez filtrowania po stronie serwera: wierszy są setki, nie miliony, a panel
+    filtruje i szuka NA MIEJSCU, więc reaguje na każdą literę bez żadnego
+    żądania. Gdyby to kiedyś urosło, `limit`/`offset` już tu są.
+    """
+    from app.db import database, extra_report_history
+
+    await _require_admin(actor)
+
+    total_row = await database.fetch_one(
+        select(func.count().label("n")).select_from(extra_report_history)
+    )
+    rows = await database.fetch_all(
+        select(extra_report_history)
+        .order_by(extra_report_history.c.generated_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    items: List[ReportHistoryItem] = []
+    for r in rows:
+        d = dict(r)
+        teams = [t for t in (d.get("team_host"), d.get("team_guest")) if t]
+        items.append(
+            ReportHistoryItem(
+                id=d["id"],
+                matchKey=d.get("match_key") or "",
+                kind=d.get("kind") or "",
+                matchNumber=d.get("match_number") or "",
+                zprpMatchId=d.get("zprp_match_id") or "",
+                category=d.get("category") or "",
+                teams=teams,
+                byJudgeId=str(d.get("generated_by") or ""),
+                byName=d.get("generated_by_name") or "",
+                at=_iso(d.get("generated_at")) or "",
+                origin=d.get("origin") or "",
+                entries=int(d.get("entries_count") or 0),
+                discord=d.get("discord_status") or "",
+            )
+        )
+    return ReportHistoryPage(
+        items=items, total=int(dict(total_row)["n"]) if total_row else len(items)
+    )
 
 
 @admin_router.get("/recipients", response_model=RecipientGroups, summary="Grupy adresatów")

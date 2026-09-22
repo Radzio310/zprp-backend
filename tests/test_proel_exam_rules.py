@@ -211,7 +211,8 @@ def test_promotion_by_number_needs_the_same_person():
 
 def test_which_competitions_need_zprp_exams():
     for number in ("SK/5", "OSM/12", "LSM/3", "LC/7", "LCK/7", "IM/4",
-                   "PP/2", "PPK/2", "SPM/1", "S/PPK/2"):
+                   "PP/2", "PPK/2", "SPM/1", "PM/1", "L/PM/1",
+                   "ZPE/PM/3", "S/PK/2", "S/PPK/2"):
         assert exam_requirement_for_code(number) == "zprp", number
     # II i III liga, mlodziez, Mistrzostwa Polski i mecz nierozpoznany
     # zostaja przy WZPR. „IIM4/1" to pulapka czytania numeru przez

@@ -22,6 +22,8 @@ import unicodedata
 from datetime import date, datetime
 from typing import Any, Iterable, Optional
 
+from app.protocol_category import is_regional_cup_qualifier
+
 # -------------------------
 # Role
 # -------------------------
@@ -106,18 +108,15 @@ def is_test_competition(code: Any) -> bool:
 
 def is_provincial_cup(code: Any) -> bool:
     """
-    Puchar z poprzedzajacym segmentem („S/PPK/2") to puchar WOJEWODZKI i liczy
-    sie stawkami II ligi. Od Pucharu Polski („PPM/23") rozroznia go wylacznie
-    to, czy przed „PP" cokolwiek stoi.
+    Prefiks wojewodztwa przed PM/PK lub PPM/PPK oznacza eliminacje PP.
     """
-    value = code_key(code)
-    return "/PP" in value and not value.startswith("PP")
+    return is_regional_cup_qualifier(code)
 
 
 def is_cup_competition(code: Any) -> bool:
     """Puchar centralny rozpoznajemy po POCZATKU numeru, nie po prefiksie."""
     value = code_key(code)
-    return value.startswith("MP") or value.startswith("PP")
+    return value.startswith(("MP", "PP", "PM/", "PK/"))
 
 
 def is_district_competition(code: Any) -> bool:
@@ -155,7 +154,7 @@ def match_level(code: Any) -> str:
     i tam ta pulapka nie ma jak sie sama obronic.
     """
     if is_provincial_cup(code):
-        # Puchar wojewodzki placi stawkami II ligi, wiec liczy sie jak centralny.
+        # Eliminacje PP mają własną stawkę centralną.
         return "central"
     if is_cup_competition(code):
         return "cup"
@@ -350,7 +349,7 @@ def cup_stage(code: Any, round_text: Any, series_text: Any) -> Optional[tuple[st
     value = code_key(code)
     if value.startswith("MP"):
         return cup_stage_from_text("MP", round_text, series_text)
-    if value.startswith("PP"):
+    if value.startswith(("PP", "PM/", "PK/")):
         return cup_stage_from_text("PP", round_text, series_text)
     return None
 
@@ -580,7 +579,7 @@ def calculate_gross(
     # Puchar wojewodzki sprawdzamy PRZED etapem pucharowym: „S/PPK/2" ma w sobie
     # „PP", wiec bez tego wpadlby w tabele Pucharu Polski.
     if is_provincial_cup(code):
-        return central_gross_for(central_book, "II liga", role, distance_km, when)
+        return central_gross_for(central_book, "el. PP", role, distance_km, when)
 
     stage = cup_stage(code, round_text, series_text)
     if stage:
