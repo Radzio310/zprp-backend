@@ -203,6 +203,8 @@ def central_category(code: Any) -> Optional[str]:
 
 
 def category_label(code: Any) -> str:
+    if is_provincial_cup(code):
+        return "el. PP"
     district = district_category(code)
     if district != "Inne":
         return district
@@ -246,7 +248,7 @@ def zprp_settlement_reason(code: Any, role: Any) -> Optional[str]:
     stoliki Mistrzostw Polski, ktore ZPRP rozlicza osobno. Zostaja mecze
     okregowe w kazdej roli, puchar wojewodzki i stoliki lig oraz Pucharu Polski.
 
-    ⚠ Puchar wojewodzki („S/PPK/2") placi stawkami II ligi, wiec `match_level`
+    ⚠ Eliminacje PP („S/PPK/2") mają osobną stawkę „el. PP", a `match_level`
     widzi go jako "central" - ale to mecz OKREGU i zostaje. Dlatego rozstrzyga
     sie go tu pierwszy.
     """
@@ -285,7 +287,7 @@ def triple_table_allowed(code: Any, role: Any, province: Any) -> bool:
     dojazd zostaje normalny, a klub gospodarza placi te sama trzykrotnosc.
 
     ⚠ Tylko stoliki OKREGOWE. Stoliki lig centralnych (II liga w gore) i puchar
-    wojewodzki, ktory placi ich stawkami, sa poza ta opcja.
+    wojewodzki z własną stawką „el. PP" są poza tą opcją.
     """
     if str(role or "").strip() != ROLE_TABLE:
         return False
@@ -615,8 +617,8 @@ ROUND_TRIP = 2
 
 def is_central_level_competition(code: Any) -> bool:
     """
-    Kryterium to samo, ktorym BAZA odroznia „Okreg" od reszty. Puchar wojewodzki
-    liczy sie stawkami II ligi, wiec i kilometrowka centralna.
+    Kryterium to samo, ktorym BAZA odroznia „Okreg" od reszty. Eliminacje PP
+    mają własną stawkę „el. PP" i kilometrówkę centralną.
     """
     if is_provincial_cup(code):
         return True

@@ -77,6 +77,11 @@ def test_turniej_dzieci_ma_wlasna_kategorie():
     assert R.category_label("S/DZM/3") == "Dzieci"
 
 
+def test_eliminacje_pp_maja_osobna_etykiete_rozliczenia():
+    assert R.category_label("ZPE/PM/1") == "el. PP"
+    assert R.category_label("S/PPK/2") == "el. PP"
+
+
 # --------------------------------------------------------------------- etapy
 
 @pytest.mark.parametrize(
