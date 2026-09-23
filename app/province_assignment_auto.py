@@ -1294,50 +1294,9 @@ async def _previous_rules(key: str, club_ids: list[str]) -> dict[str, Any]:
     return newest_rule_per_club(rows, key)
 
 
-@router.put("/clubs/{club_id}", summary="Ustawienia obsadowe klubu")
-async def save_club_rule(club_id: str, payload: ClubRuleRequest):
-    from app.db import province_club_assignment
-    from app.province_clubs_bulk import table_since
-
-    key = require_province(payload.province)
-    table_by_club = max(0, min(1, int(payload.table_by_club or 0)))
-    previous = (await _previous_rules(key, [_s(club_id)])).get(_s(club_id))
-    values = {
-        "province": key,
-        "club_id": _s(club_id),
-        # ⚠ Najwyżej JEDEN od klubu: okręg nigdy nie zostawia stolika całkiem
-        # klubowi - albo daje jednego, albo obu.
-        "table_by_club": table_by_club,
-        "table_by_club_since": table_since(
-            table_by_club,
-            payload.table_by_club_since,
-            int(previous["table_by_club"] or 0) if previous else 0,
-            previous["table_by_club_since"] if previous else None,
-            _now().date(),
-        ),
-        "avoid_local": bool(payload.avoid_local),
-        "note": _s(payload.note) or None,
-        "updated_by": _s(payload.updated_by) or None,
-        "updated_at": _now(),
-    }
-    await database.execute(
-        pg_insert(province_club_assignment)
-        .values(**values)
-        .on_conflict_do_update(
-            index_elements=[
-                province_club_assignment.c.province,
-                province_club_assignment.c.club_id,
-            ],
-            set_={
-                column: values[column]
-                for column in values
-                if column not in ("province", "club_id")
-            },
-        )
-    )
-    return {"success": True, "club_id": _s(club_id), "table_by_club": values["table_by_club"]}
-
-
+# ⚠ Trasa grupowa MUSI stać przed `/clubs/{club_id}` - FastAPI dopasowuje
+# w kolejności i "bulk" wpadał jako numer klubu (do 23.09.2026 akcja grupowa
+# zapisywała deklarację klubowi o numerze "bulk" i odpowiadała "OK").
 class ClubBulkRequest(BaseModel):
     province: str
     club_ids: list[str] = []
@@ -1382,6 +1341,50 @@ async def save_clubs_bulk(payload: ClubBulkRequest):
         updated_by=payload.updated_by,
     )
     return {"success": True, "updated": updated}
+
+
+@router.put("/clubs/{club_id}", summary="Ustawienia obsadowe klubu")
+async def save_club_rule(club_id: str, payload: ClubRuleRequest):
+    from app.db import province_club_assignment
+    from app.province_clubs_bulk import table_since
+
+    key = require_province(payload.province)
+    table_by_club = max(0, min(1, int(payload.table_by_club or 0)))
+    previous = (await _previous_rules(key, [_s(club_id)])).get(_s(club_id))
+    values = {
+        "province": key,
+        "club_id": _s(club_id),
+        # ⚠ Najwyżej JEDEN od klubu: okręg nigdy nie zostawia stolika całkiem
+        # klubowi - albo daje jednego, albo obu.
+        "table_by_club": table_by_club,
+        "table_by_club_since": table_since(
+            table_by_club,
+            payload.table_by_club_since,
+            int(previous["table_by_club"] or 0) if previous else 0,
+            previous["table_by_club_since"] if previous else None,
+            _now().date(),
+        ),
+        "avoid_local": bool(payload.avoid_local),
+        "note": _s(payload.note) or None,
+        "updated_by": _s(payload.updated_by) or None,
+        "updated_at": _now(),
+    }
+    await database.execute(
+        pg_insert(province_club_assignment)
+        .values(**values)
+        .on_conflict_do_update(
+            index_elements=[
+                province_club_assignment.c.province,
+                province_club_assignment.c.club_id,
+            ],
+            set_={
+                column: values[column]
+                for column in values
+                if column not in ("province", "club_id")
+            },
+        )
+    )
+    return {"success": True, "club_id": _s(club_id), "table_by_club": values["table_by_club"]}
 
 
 async def write_club_rules(
@@ -1473,6 +1476,11 @@ async def normalize_club_rule_spellings() -> int:
     from app.db import province_club_assignment
     from app.province_clubs_bulk import newest_rule_per_club
     from app.settlement_province import canonical
+
+    # Ślad po przesłoniętej trasie grupowej: deklaracja klubu o numerze "bulk".
+    await database.execute(
+        delete(province_club_assignment).where(province_club_assignment.c.club_id == "bulk")
+    )
 
     groups: dict[tuple[str, str], list] = {}
     for row in await database.fetch_all(select(province_club_assignment)):
