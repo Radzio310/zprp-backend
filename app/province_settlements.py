@@ -973,7 +973,9 @@ def _season_of(day: Optional[date]) -> str:
 
 
 async def season_load(
-    province: str, judge_ids: Optional[Iterable[str]] = None
+    province: str,
+    judge_ids: Optional[Iterable[str]] = None,
+    season: Optional[str] = None,
 ) -> dict[str, dict[str, int]]:
     """
     Boisko i stolik w bieżącym sezonie dla sędziów okręgu - reguła w
@@ -1002,7 +1004,7 @@ async def season_load(
             province_settlement_matches.c.role,
         ).where(and_(*cond))
     )
-    return L.tally([dict(r) for r in rows], now=_now())
+    return L.tally([dict(r) for r in rows], now=_now(), season=season)
 
 
 #: Zamyka furtkę dla żądań `/province/stats/me` BEZ tokenu. Aplikacje sprzed
@@ -1029,6 +1031,28 @@ async def _stats_viewer_may(key: str, judge_id: str, payload: Optional[dict]) ->
 
     if not await viewer_may_inspect(own, key):
         raise HTTPException(403, "Statystyki innego sędziego widzi tylko obsadowy okręgu i administrator.")
+
+
+@stats_router.get("/compare", summary="Sędzia na tle aktywnych sędziów okręgu")
+async def compare_stats(
+    province: str = Query(...),
+    judge_id: str = Query(...),
+    season: Optional[str] = Query(None, description="np. 2026/2027; brak = bieżący"),
+    payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
+    """
+    Boisko i stolik sędziego na tle okręgu: mediana, percentyl i anonimowy
+    rozkład. Ta sama reguła liczenia co liczniki przy chętnych na Giełdzie
+    (`app/judge_season_load.py`), więc liczby się zgadzają.
+    """
+    key = require_province(province)
+    judge_id = str(judge_id).strip()
+    await _stats_viewer_may(key, judge_id, payload)
+    if not await module_enabled(key, "stats"):
+        raise HTTPException(403, "Moduł Statystyk nie jest włączony w tym okręgu")
+    label = season or season_of(_now())
+    counts = await season_load(key, season=label)
+    return {"province": key, "season": label, **L.compare(counts, judge_id)}
 
 
 @stats_router.get("/me", summary="Moje statystyki - dla aplikacji sędziego")

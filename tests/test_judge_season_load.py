@@ -71,3 +71,26 @@ def test_kind_of_matches_the_bucket_rule():
     assert L.kind_of("S/PPK/2", R.ROLE_FIELD) == "field"
     assert L.kind_of("LCK/6", R.ROLE_TABLE) == "table"
     assert L.kind_of("IMD/3", R.ROLE_FIELD) is None
+
+
+def test_compare_counts_only_active_judges_and_hides_identity():
+    counts = {
+        "me": {"field": 6, "table": 2, "future_field": 0, "future_table": 0},
+        "a": {"field": 2, "table": 0, "future_field": 0, "future_table": 0},
+        "b": {"field": 4, "table": 5, "future_field": 0, "future_table": 0},
+        "zero": {"field": 0, "table": 0, "future_field": 0, "future_table": 0},
+    }
+    out = L.compare(counts, "me")
+    assert out["active"] == 3
+    assert out["field"]["mine"] == 6
+    assert out["field"]["median"] == 4
+    assert out["field"]["percentile"] == 100
+    assert out["table"]["percentile"] == 50
+    assert out["field"]["distribution"] == [2, 4, 6]
+
+
+def test_compare_for_judge_without_matches():
+    out = L.compare({"a": {"field": 3, "table": 1}}, "me")
+    assert out["field"]["mine"] == 0
+    assert out["field"]["percentile"] == 0
+    assert out["active"] == 1

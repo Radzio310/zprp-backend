@@ -2713,8 +2713,12 @@ async def judge_profile(
     from app.judge_season_load import empty, kind_of
     from app.province_settlements import season_load
 
-    prov = await _require_inspector(actor, province)
     judge_id = _s(judge_id)
+    # Własny podgląd (ekran „Moje statystyki") nie wymaga uprawnień obsadowego.
+    if judge_id and judge_id == actor.judge_id and not _s(province):
+        prov = _require_province(actor)
+    else:
+        prov = await _require_inspector(actor, province)
     card = (await _judges_by_id([judge_id])).get(judge_id)
     if not card:
         raise HTTPException(404, "Nie ma takiego sędziego na liście okręgu.")
