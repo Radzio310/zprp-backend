@@ -37,6 +37,7 @@ from app.province_settlements import (
 )
 from app.settlement_province import display
 from app.settlement_engine import display_judge_name
+from app.settlement_pdf_groups import group_by_judge
 from app.settlement_words import amount_in_words, money, number
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,8 @@ def _render(template_name: str, context: dict) -> str:
     env.filters["money"] = money
     env.filters["km"] = lambda value: f"{number(value, 1)} km"
     env.filters["rate"] = lambda value: f"{number(value, 2)} zł/km"
+    # „3 wyjazdy" w wierszu „Razem" sędziego na liście przejazdów.
+    env.filters["trips"] = lambda n: f"{n} {_plural(int(n), 'wyjazd', 'wyjazdy', 'wyjazdów')}"
     return env.get_template(template_name).render(**context)
 
 
@@ -378,10 +381,13 @@ async def przejazdy_pdf(payload: PdfRequest):
             "judges_word": _plural(judges_count, "sędzia", "sędziów", "sędziów"),
             "trips_word": _plural(len(rows), "wyjazd", "wyjazdy", "wyjazdów"),
             "rows": rows,
+            # Wyjazdy zebrane pod sędziami, z wierszem „Razem" dla każdego.
+            "groups": group_by_judge(rows),
             "total_amount": total_amount,
             "total_km": total_km,
             "total_in_words": amount_in_words(total_amount),
             "outside_rows": outside_rows,
+            "outside_groups": group_by_judge(outside_rows),
             "outside_total_amount": round(sum(r["amount"] for r in outside_rows), 2),
             "outside_total_km": sum(r["total_km"] for r in outside_rows),
             "outside_clubs": outside["clubs"],

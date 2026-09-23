@@ -5,7 +5,12 @@
 
    Trasa jest zapisana tam-i-z-powrotem („Bystra-Gliwice-Bystra"), bo dojazd
    rozlicza się w obie strony: kolumna „odległość" to jedna strona, „suma" to
-   podwojenie. #}
+   podwojenie.
+
+   Wyjazdy stoją pod sędzią (osobne <tbody> na osobę), a ostatni wiersz grupy
+   to „Razem" z sumą kilometrów i kwotą do wypłaty - także przy jednym
+   wyjeździe (decyzja z 23.09.2026). Lp numeruje sędziów. Grupy składa
+   `app/settlement_pdf_groups.py`. #}
 <!DOCTYPE html>
 <html lang="pl">
 <head>
@@ -70,21 +75,40 @@
   }
   table.grid td.l { text-align: left; }
   table.grid td.c { text-align: center; }
-  table.grid tbody tr:nth-child(even) td { background: #f4f7fc; }
   table.grid tr { page-break-inside: avoid; }
 
-  .lp { color: #8a93a6; width: 9mm; }
+  .lp { color: #0B4F9E; width: 9mm; font-weight: bold; }
   .name { font-weight: bold; color: #16233c; }
-  .amount { background: #fff8e8 !important; font-weight: bold; color: #7a4d00; }
 
-  /* pierwszy wiersz sędziego dostaje kreskę - widać, gdzie kończy się osoba */
-  tr.first-of-judge td { border-top: .8pt solid #b9c3d6; }
+  /* Jedna osoba = jeden <tbody>. Grupa nie rwie się między stronami, dopóki
+     mieści się na jednej; oddziela ją od następnej wyraźny odstęp. */
+  tbody.judge { page-break-inside: avoid; break-inside: avoid; }
+  tbody.judge tr.trip td { color: #3d4658; }
+  tbody.judge tr.trip td.amount { color: #7a4d00; background: #fffbf1; }
+  tbody.judge tr.trip + tr.trip td { border-top-color: #eceff5; }
+  /* Lp i nazwisko stoją raz na grupę - pod nimi pusta kolumna bez kresek,
+     żeby osoba czytała się jako jeden blok. */
+  tbody.judge tr.trip + tr.trip td:nth-child(-n+2),
+  tbody.judge tr.subtotal td:first-child { border-top-color: transparent; }
 
-  tr.total td {
+  /* Wiersz „Razem" sędziego - tu jest kwota, która idzie do wypłaty. */
+  tr.subtotal td {
+    background: #fff4d9; border-top: .9pt solid #e6c878; border-bottom: 1.4pt solid #0B4F9E;
+    font-weight: bold; color: #5a3b00; padding: 1.9mm 1.8mm;
+  }
+  tr.subtotal td.sub-label { text-align: right; color: #7a5a1a; font-size: 7.8pt; letter-spacing: .2pt; }
+  tr.subtotal td.sub-label b { color: #16233c; }
+  tr.subtotal td.sub-amount {
+    background: #F0A500; color: #2a1c00; font-size: 9.4pt; white-space: nowrap;
+  }
+
+  tbody.summary tr.total td {
     border-top: 1.2pt solid #0B4F9E; background: #eaf1fb;
     font-weight: bold; font-size: 9.4pt; color: #0B4F9E; padding: 2.6mm 1.8mm;
   }
-  tr.total td.gold { background: #F0A500; color: #2a1c00; }
+  tbody.summary tr.total td { border-top: 2pt solid #0B4F9E; }
+  tbody.summary tr.total td.gold { background: #0B4F9E; color: #fff; font-size: 10pt; }
+  tbody.summary tr.gap td { border: none; background: none; padding: 1mm 0; }
 
   /* Pełna szerokość - patrz komentarz w `okreg_zestawienie.html`. */
   .words {
@@ -163,11 +187,12 @@
       <th>Do wypłaty</th>
     </tr>
   </thead>
-  <tbody>
-    {% for row in rows %}
-    <tr{% if row.first_of_judge %} class="first-of-judge"{% endif %}>
-      <td class="c lp">{{ loop.index }}</td>
-      <td class="l name">{{ row.name or row.judge_id }}</td>
+  {% for group in groups %}
+  <tbody class="judge">
+    {% for row in group.trips %}
+    <tr class="trip">
+      <td class="c lp">{% if loop.first %}{{ group.lp }}{% endif %}</td>
+      <td class="l name">{% if loop.first %}{{ group.name or group.judge_id }}{% endif %}</td>
       <td class="c">{{ row.day_label }}</td>
       <td class="l">{{ row.route }}</td>
       <td>{{ row.one_way_km | km }}</td>
@@ -176,11 +201,20 @@
       <td class="amount">{{ row.amount | money }}</td>
     </tr>
     {% endfor %}
+    <tr class="subtotal">
+      <td></td>
+      <td class="sub-label" colspan="4">Razem <b>{{ group.name or group.judge_id }}</b> &middot; {{ group.trips|length | trips }}</td>
+      <td>{{ group.total_km | km }}</td>
+      <td></td>
+      <td class="sub-amount">{{ group.total_amount | money }}</td>
+    </tr>
+  </tbody>
+  {% endfor %}
+  <tbody class="summary">
+    <tr class="gap"><td colspan="8"></td></tr>
     <tr class="total">
       <td></td>
-      <td class="l">RAZEM</td>
-      <td></td>
-      <td></td>
+      <td class="l" colspan="3">RAZEM &middot; {{ judges_count }} {{ judges_word }}</td>
       <td></td>
       <td>{{ total_km | km }}</td>
       <td></td>
@@ -218,15 +252,33 @@
 {% if outside_rows %}
 <section class="outside-section">
   <div class="title" style="font-size:11.5pt">Kluby, które nie rozliczają się przez okręg</div>
-  <div class="subtitle">Część informacyjna — przejazdy poniżej nie są doliczone do głównej listy.</div>
+  <div class="subtitle">Część informacyjna - przejazdy poniżej nie są doliczone do głównej listy.</div>
   <div class="subtitle">{% for club in outside_clubs %}<b>{{ club.club_name }}</b>{% if not loop.last %} &middot; {% endif %}{% endfor %}</div>
   <table class="grid">
     <thead><tr><th class="c">Lp</th><th class="l">Nazwisko i imię</th><th class="c">Data</th><th class="l">Skąd - dokąd</th><th>Suma (km)</th><th>Rozliczono</th></tr></thead>
-    <tbody>
-    {% for row in outside_rows %}
-      <tr{% if row.first_of_judge %} class="first-of-judge"{% endif %}><td class="c lp">{{ loop.index }}</td><td class="l name">{{ row.name or row.judge_id }}</td><td class="c">{{ row.day_label }}</td><td class="l">{{ row.route }}</td><td>{{ row.total_km | km }}</td><td class="amount">{{ row.amount | money }}</td></tr>
+    {% for group in outside_groups %}
+    <tbody class="judge">
+      {% for row in group.trips %}
+      <tr class="trip">
+        <td class="c lp">{% if loop.first %}{{ group.lp }}{% endif %}</td>
+        <td class="l name">{% if loop.first %}{{ group.name or group.judge_id }}{% endif %}</td>
+        <td class="c">{{ row.day_label }}</td>
+        <td class="l">{{ row.route }}</td>
+        <td>{{ row.total_km | km }}</td>
+        <td class="amount">{{ row.amount | money }}</td>
+      </tr>
+      {% endfor %}
+      <tr class="subtotal">
+        <td></td>
+        <td class="sub-label" colspan="3">Razem <b>{{ group.name or group.judge_id }}</b> &middot; {{ group.trips|length | trips }}</td>
+        <td>{{ group.total_km | km }}</td>
+        <td class="sub-amount">{{ group.total_amount | money }}</td>
+      </tr>
+    </tbody>
     {% endfor %}
-      <tr class="total"><td></td><td class="l">RAZEM POZA OKRĘGIEM</td><td></td><td></td><td>{{ outside_total_km | km }}</td><td class="gold">{{ outside_total_amount | money }}</td></tr>
+    <tbody class="summary">
+      <tr class="gap"><td colspan="6"></td></tr>
+      <tr class="total"><td></td><td class="l" colspan="3">RAZEM POZA OKRĘGIEM</td><td>{{ outside_total_km | km }}</td><td class="gold">{{ outside_total_amount | money }}</td></tr>
     </tbody>
   </table>
 </section>
