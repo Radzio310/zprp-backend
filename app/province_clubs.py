@@ -59,7 +59,7 @@ from app.province_settlements import (
     _versions,
     require_province,
 )
-from app.settlement_province import display, spellings
+from app.settlement_province import canonical, display, spellings
 from app.settlement_runs import cooldown_left, run_is_active
 from app.settlement_seasons import season_of
 
@@ -202,12 +202,13 @@ async def _table_rules(province: str) -> dict[str, dict]:
             province_club_assignment.c.province.in_(spellings(province))
         )
     )
+    # Jeden wiersz na klub, najświeższy - patrz `newest_rule_per_club`.
     return {
-        _s(row["club_id"]): {
+        club_id: {
             "table_by_club": int(row["table_by_club"] or 0),
             "table_by_club_since": row["table_by_club_since"],
         }
-        for row in rows
+        for club_id, row in B.newest_rule_per_club(rows, canonical(province)).items()
     }
 
 

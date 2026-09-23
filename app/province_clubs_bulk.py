@@ -128,3 +128,36 @@ def closing_amounts(
 def closing_day(season_end: date, today: date) -> date:
     """Data wpisu: koniec sezonu, a dla sezonu, ktory jeszcze trwa - dzisiaj."""
     return min(season_end, today)
+
+
+def newest_rule_per_club(rows: Iterable[Any], canonical_key: str) -> dict[str, Any]:
+    """
+    Jedna deklaracja obsadowa na klub z wierszy pod WSZYSTKIMI pisowniami okręgu.
+
+    `province_club_assignment` bywał zapisywany jako „ŚLĄSKIE" i jako „SLASKIE".
+    Odczyty biorą obie pisownie (`spellings`), a słownik po numerze klubu
+    zostawiał ten wiersz, który baza oddała jako ostatni - często STARY. Nowy
+    zapis ląduje pod kluczem kanonicznym, więc panel pokazywał znowu stare zero
+    i wyglądało to, jakby serwer kasował „4. sędziego" (23.09.2026).
+
+    Wygrywa najświeższy `updated_at`; przy remisie albo braku dat - wiersz pod
+    kluczem kanonicznym.
+    """
+    from datetime import datetime, timezone
+
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+
+    def rank(row: Any) -> tuple:
+        stamp = row["updated_at"] if "updated_at" in row.keys() else None
+        if stamp is not None and stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return (stamp or floor, str(row["province"] or "") == canonical_key)
+
+    out: dict[str, Any] = {}
+    for row in rows:
+        club_id = str(row["club_id"] or "").strip()
+        if not club_id:
+            continue
+        if club_id not in out or rank(row) > rank(out[club_id]):
+            out[club_id] = row
+    return out

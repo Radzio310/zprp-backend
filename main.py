@@ -997,6 +997,16 @@ async def startup():
             logger.info("Założono %s wspólnych budżetów klubów", _budgets)
     except Exception:
         logger.exception("Nie udało się założyć domyślnych wspólnych budżetów klubów")
+    # Deklaracje „4. sędziego" bywały zapisane pod „ŚLĄSKIE" i „SLASKIE" - stary
+    # wiersz przesłaniał nowy zapis (23.09.2026). Porządek przy każdym starcie.
+    try:
+        from app.province_assignment_auto import normalize_club_rule_spellings
+
+        _rules_fixed = await normalize_club_rule_spellings()
+        if _rules_fixed:
+            logger.info("Uporządkowano deklaracje stolikowe %s klubów (pisownia okręgu)", _rules_fixed)
+    except Exception:
+        logger.exception("Nie udało się uporządkować deklaracji stolikowych klubów")
     # create_all nie zmienia już istniejącej tabeli push_tokens. Te migracje
     # uzupełniają kolumny wymagane przez monitor i są idempotentne na Railway.
     _province_match_migrations = [

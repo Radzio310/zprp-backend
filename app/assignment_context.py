@@ -285,7 +285,9 @@ async def _club_rules(province: str) -> dict[str, dict]:
     from sqlalchemy import and_, select
 
     from app.db import database, province_club_assignment, province_club_teams
+    from app.province_clubs_bulk import newest_rule_per_club
     from app.province_clubs_scrape import team_key
+    from app.settlement_province import canonical
     from app.settlement_seasons import season_of
 
     out: dict[str, dict] = {}
@@ -303,7 +305,8 @@ async def _club_rules(province: str) -> dict[str, dict]:
             "avoid_local": bool(row["avoid_local"]),
             "note": _s(row["note"]),
         }
-        for row in rows
+        # Jeden wiersz na klub, najświeższy - patrz `newest_rule_per_club`.
+        for row in newest_rule_per_club(rows, canonical(province)).values()
     }
 
     season = season_of(datetime.now())

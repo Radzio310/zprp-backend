@@ -1178,14 +1178,17 @@ async def clubs(province: str = Query(...), q: Optional[str] = Query(None)):
             )
         )
     )
-    rules = {
-        _s(row["club_id"]): row
-        for row in await database.fetch_all(
+    # Jeden wiersz na klub, najświeższy - patrz `newest_rule_per_club`.
+    from app.province_clubs_bulk import newest_rule_per_club
+
+    rules = newest_rule_per_club(
+        await database.fetch_all(
             select(province_club_assignment).where(
                 province_club_assignment.c.province.in_(spellings(key))
             )
-        )
-    }
+        ),
+        key,
+    )
 
     # Ile meczów U SIEBIE ma każda drużyna w tym sezonie - stąd waga ustawienia.
     hosted: dict[str, int] = {}
@@ -1278,15 +1281,17 @@ async def _previous_rules(key: str, club_ids: list[str]) -> dict[str, Any]:
     """Dotychczasowe deklaracje - żeby zapis nie przesunął daty obowiązywania."""
     from app.db import province_club_assignment
 
+    from app.province_clubs_bulk import newest_rule_per_club
+
     rows = await database.fetch_all(
         select(province_club_assignment).where(
             and_(
-                province_club_assignment.c.province == key,
+                province_club_assignment.c.province.in_(spellings(key)),
                 province_club_assignment.c.club_id.in_(club_ids),
             )
         )
     )
-    return {_s(row["club_id"]): row for row in rows}
+    return newest_rule_per_club(rows, key)
 
 
 @router.put("/clubs/{club_id}", summary="Ustawienia obsadowe klubu")
@@ -1439,5 +1444,70 @@ async def write_club_rules(
                     set_=row_patch,
                 )
             )
+        # Stary wiersz tego klubu pod inną pisownią okręgu („ŚLĄSKIE" obok
+        # „SLASKIE") przesłaniał nowy zapis przy odczycie. Po zapisie zostaje
+        # jeden wiersz na klub.
+        others = [name for name in spellings(key) if name != key]
+        if others:
+            await database.execute(
+                delete(province_club_assignment).where(
+                    and_(
+                        province_club_assignment.c.province.in_(others),
+                        province_club_assignment.c.club_id.in_(club_ids),
+                    )
+                )
+            )
     return len(club_ids)
 
+
+
+async def normalize_club_rule_spellings() -> int:
+    """
+    Jeden wiersz deklaracji na klub, pod kanonicznym kluczem okręgu.
+
+    Przy starcie serwera - idempotentne, bez duplikatów nic nie robi. Stare
+    wiersze pod „ŚLĄSKIE" obok nowych pod „SLASKIE" przesłaniały zapis
+    (`newest_rule_per_club`); zostaje najświeższy, przeniesiony pod klucz
+    kanoniczny. Zwraca liczbę uporządkowanych klubów.
+    """
+    from app.db import province_club_assignment
+    from app.province_clubs_bulk import newest_rule_per_club
+    from app.settlement_province import canonical
+
+    groups: dict[tuple[str, str], list] = {}
+    for row in await database.fetch_all(select(province_club_assignment)):
+        key = canonical(row["province"]) or _s(row["province"])
+        groups.setdefault((key, _s(row["club_id"])), []).append(row)
+
+    fixed = 0
+    for (key, club_id), rows in groups.items():
+        if len(rows) == 1 and _s(rows[0]["province"]) == key:
+            continue
+        winner = newest_rule_per_club(rows, key).get(club_id)
+        if winner is None:
+            continue
+        async with database.transaction():
+            for row in rows:
+                if row is winner:
+                    continue
+                await database.execute(
+                    delete(province_club_assignment).where(
+                        and_(
+                            province_club_assignment.c.province == row["province"],
+                            province_club_assignment.c.club_id == row["club_id"],
+                        )
+                    )
+                )
+            if _s(winner["province"]) != key:
+                await database.execute(
+                    update(province_club_assignment)
+                    .where(
+                        and_(
+                            province_club_assignment.c.province == winner["province"],
+                            province_club_assignment.c.club_id == winner["club_id"],
+                        )
+                    )
+                    .values(province=key)
+                )
+        fixed += 1
+    return fixed
