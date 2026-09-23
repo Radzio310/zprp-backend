@@ -17,10 +17,16 @@ def test_time_with_zone_becomes_polish_wall_clock():
     assert as_local("") is None
 
 
-def test_match_time_keeps_its_hour():
-    # ⚠ W bazie termin meczu ma tzinfo=UTC, ale niesie godzinę POLSKA.
-    stored = datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc)
+def test_match_time_is_converted_to_polish_wall_clock():
+    # W bazie termin meczu to PRAWDZIWY UTC: mecz o 17:00 w Polsce (CEST)
+    # leży jako 15:00 UTC.
+    stored = datetime(2026, 10, 4, 15, 0, tzinfo=timezone.utc)
     assert match_moment(stored) == datetime(2026, 10, 4, 17, 0)
+    # Zimą (CET) przesunięcie to godzina.
+    winter = datetime(2026, 12, 5, 16, 0, tzinfo=timezone.utc)
+    assert match_moment(winter) == datetime(2026, 12, 5, 17, 0)
+    # Naiwny termin to już czas polski.
+    assert match_moment(datetime(2026, 10, 4, 17, 0)) == datetime(2026, 10, 4, 17, 0)
 
 
 def test_entry_without_end_takes_the_whole_day():

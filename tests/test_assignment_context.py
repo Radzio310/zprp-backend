@@ -70,7 +70,8 @@ def test_asking_for_one_slot_narrows_the_need():
 
 
 def test_match_time_keeps_the_polish_hour():
-    stored = datetime(2026, 10, 5, 18, 0, tzinfo=timezone.utc)
+    # `match_at` w bazie to prawdziwy UTC: 18:00 w Polsce (CEST) = 16:00 UTC.
+    stored = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
     need = need_from_state("1", STATE, "S/JmM/12", stored, roster_with())
     assert need.moment == datetime(2026, 10, 5, 18, 0)
     assert need.day == date(2026, 10, 5)

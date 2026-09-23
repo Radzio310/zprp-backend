@@ -10,9 +10,14 @@ przeniesiona 1:1 - te same przypadki, te same krawędzie.
 
 ⚠ CZAS. Wpisy niedyspozycji z telefonu przychodzą BEZ strefy i znaczą czas
 POLSKI; centralny snapshot ZPRP ma prawidłowy UTC. Terminy meczów w bazie
-(`province_matches.match_at`) to z kolei czas polski PODPISANY jako UTC - tak
-zapisuje je pobieranie. Dlatego wszystko sprowadzamy do ściany zegara
-w Europe/Warsaw: `as_local` przyjmuje oba kształty.
+(`province_matches.match_at`) to PRAWDZIWY UTC - pobieranie bierze napis ZPRP
+(czas polski bez strefy) i przelicza go (`province_match_monitor.parse_match_at`).
+Dlatego wszystko sprowadzamy do ściany zegara w Europe/Warsaw: `as_local`
+przyjmuje oba kształty.
+
+Do 23.09.2026 stało tu, że `match_at` to „czas polski podpisany jako UTC",
+i `match_moment` zdejmował strefę bez przeliczenia - automat porównywał więc
+mecz z niedyspozycjami przesunięty o 2 godziny latem (1 zimą).
 
 ⚠ MECZ w kalendarzu trwa 2 godziny od startu (tak liczy to aplikacja), a wpis
 „BAZOWA" i wpis bez godziny końcowej sa CAŁODNIOWE.
@@ -78,13 +83,12 @@ def as_local(value: Any) -> Optional[datetime]:
 
 def match_moment(value: Any) -> Optional[datetime]:
     """
-    Termin meczu z bazy jako ściana zegara.
+    Termin meczu z bazy jako ściana zegara w Polsce.
 
-    ⚠ `province_matches.match_at` ma `tzinfo=UTC`, ale niesie godzinę POLSKA.
-    Konwersja stref przesunęłaby mecz o dwie godziny, więc strefę zdejmujemy.
+    `province_matches.match_at` to prawdziwy UTC (patrz nagłówek modułu), więc
+    PRZELICZAMY do Europe/Warsaw. Naiwny `datetime` zostaje jak stoi - to już
+    czas polski.
     """
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
     return as_local(value)
 
 
