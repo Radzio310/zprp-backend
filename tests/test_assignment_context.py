@@ -189,3 +189,24 @@ def test_a_club_without_settings_changes_nothing():
     state = {**STATE, "ID_zespoly_gosp_ZespolNazwa": "Nieznany Klub"}
     need = need_from_state("1", state, "S/JmM/12", None, roster)
     assert need.table_needed == ["sekretarz", "czas"]
+
+
+def test_automat_skips_judges_outside_the_active_list():
+    from app.assignment_context import inactive_judges
+
+    active = make_judge("1", "Anders Magdalena", city="Gliwice")
+    gone = make_judge("2", "Nieaktywny Jan", city="Gliwice")
+    roster = roster_with(active, gone)
+    # Śląskie ma listę aktywnych na sezon 2026/2027.
+    skip = inactive_judges("ŚLĄSKIE", date(2026, 10, 5), roster)
+    assert skip == {"2"}
+    ctx = build_context(roster, DistanceBook(DistanceIndex({})), inactive=skip)
+    assert set(ctx.judges) == {"1"}
+
+
+def test_province_without_list_keeps_everyone():
+    from app.assignment_context import inactive_judges
+
+    roster = roster_with(make_judge("2", "Nieaktywny Jan", city="Opole"))
+    assert inactive_judges("OPOLSKIE", date(2026, 10, 5), roster) == set()
+    assert inactive_judges("ŚLĄSKIE", date(2025, 10, 5), roster) == set()

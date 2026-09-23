@@ -472,9 +472,16 @@ def build_context(
     busy: Mapping[str, list[BusyMatch]] | None = None,
     load: Mapping[str, int] | None = None,
     only_judges: Optional[Iterable[str]] = None,
+    inactive: Iterable[str] = (),
 ) -> Context:
-    """Świat gotowy do podania automatowi."""
-    people = dict(roster.judges)
+    """Świat gotowy do podania automatowi.
+
+    `inactive` - numery sędziów spoza listy AKTYWNYCH okręgu w sezonie
+    (`inactive_judges`). Automat ich nie proponuje; ich obecne obsady dalej
+    liczą się w zajętości (`busy`) i zostają w meczach.
+    """
+    skip = {str(item).strip() for item in inactive}
+    people = {key: value for key, value in roster.judges.items() if key not in skip}
     if only_judges is not None:
         wanted = {str(item).strip() for item in only_judges if str(item).strip()}
         people = {key: value for key, value in people.items() if key in wanted}
@@ -488,6 +495,24 @@ def build_context(
         partner_of=dict(roster.pairs),
         blocked=set(roster.blocks),
         load=dict(load or {}),
+    )
+
+
+def inactive_judges(province: str, when: Any, roster: Roster) -> set[str]:
+    """
+    Sędziowie z rejestru okręgu, których nie ma na liście aktywnych
+    z baza.zprp.pl w sezonie `when` (`app/official_roster.py`). Okręg albo
+    sezon bez listy - pusty zbiór, czyli wszyscy jak dawniej.
+
+    Decyzja użytkownika z 23.09.2026: automat obsad bierze pod uwagę TYLKO
+    aktywnych sędziów województwa.
+    """
+    from app.official_roster import inactive_ids
+
+    return inactive_ids(
+        province,
+        when,
+        [{"judge_id": jid, "full_name": judge.name} for jid, judge in roster.judges.items()],
     )
 
 

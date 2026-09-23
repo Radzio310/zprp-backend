@@ -37,6 +37,7 @@ from app import settlement_rates as R
 from app.assignment_auto import build_plan
 from app.assignment_context import (
     build_context,
+    inactive_judges,
     distance_pairs,
     load_busy,
     load_roster,
@@ -708,12 +709,14 @@ async def run_auto(payload: AutoRequest):
         distances = await fill_missing(book, distance_pairs(needs, roster))
 
     busy, load = await load_busy(key, roster, date_from=start, date_to=end)
+    inactive = inactive_judges(key, start, roster)
     ctx = build_context(
         roster,
         book,
         busy=busy,
         load=load,
         only_judges=payload.judge_ids or None,
+        inactive=inactive,
     )
     ctx.policy = policy
     plan = build_plan(needs, ctx, rounds=max(1, min(3, int(payload.rounds or 2))))
@@ -723,6 +726,9 @@ async def run_auto(payload: AutoRequest):
         plan, needs, judges=roster.judges, window=window, load_before=load
     )
     report["skipped"] = skipped
+    # Zero cichych blokad: raport mówi wprost, ilu sędziów automat pominął,
+    # bo nie ma ich na liście aktywnych okręgu w tym sezonie.
+    report["inactive_skipped"] = len(inactive)
     report["insights"] = {
         "rules": policy.summary() if policy is not None else [],
         "threshold": policy.threshold if policy is not None else None,
@@ -1100,7 +1106,9 @@ async def run_optimize(run_id: int, payload: OptimizeRequest):
     start = row["date_from"] or _now().date()
     end = row["date_to"] or (start + timedelta(days=30))
     busy, load = await load_busy(key, roster, date_from=start, date_to=end)
-    ctx = build_context(roster, book, busy=busy, load=load)
+    ctx = build_context(
+        roster, book, busy=busy, load=load, inactive=inactive_judges(key, start, roster)
+    )
     plan = build_plan(needs, ctx, rounds=2)
 
     after = [
