@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 from httpx import AsyncClient
-from sqlalchemy import and_, delete, func, insert, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
@@ -484,7 +484,7 @@ async def _active_judge_ids(province: str) -> List[str]:
     )
     token_rows = await database.fetch_all(
         select(push_tokens.c.judge_id, push_tokens.c.province)
-        .where(push_tokens.c.app_variant == "baza")
+        .where(or_(push_tokens.c.app_variant == "baza", push_tokens.c.app_variant.is_(None)))
         .where(push_tokens.c.judge_id.is_not(None))
     )
     judge_ids = sorted({_str(row["judge_id"]) for row in token_rows if _str(row["judge_id"])})
@@ -581,11 +581,16 @@ async def _create_event(
             push_tokens.c.installation_id,
             push_tokens.c.judge_id,
             push_tokens.c.notification_prefs,
+            push_tokens.c.app_id,
         )
         .where(push_tokens.c.judge_id.in_(targets))
-        .where(push_tokens.c.app_variant == "baza")
+        .where(or_(push_tokens.c.app_variant == "baza", push_tokens.c.app_variant.is_(None)))
     )
+    from app.push.device_policy import dev_pushes_enabled, device_allowed
+    allow_dev = await dev_pushes_enabled()
     for device in devices:
+        if not device_allowed(device, allow_dev):
+            continue
         delivery_status = (
             "pending"
             if _prefs_allow(device["notification_prefs"], event_type)

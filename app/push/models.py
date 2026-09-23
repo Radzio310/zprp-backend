@@ -7,6 +7,7 @@ class PushRegisterRequest(BaseModel):
     token: str
     platform: Optional[str] = None
     app_variant: Optional[str] = None
+    app_id: Optional[str] = None
     # Kto jest zalogowany na tym urządzeniu. Starsze wersje aplikacji tego nie
     # wysyłają — wtedy zostaje None i push kierowany po judge_id ich pominie.
     judge_id: Optional[str] = None

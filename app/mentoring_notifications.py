@@ -1,5 +1,5 @@
 """Fan-out into the existing durable match notification queue."""
-from sqlalchemy import select, update
+from sqlalchemy import select, update, or_
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db import (database, mentoring_pairs as pairs, mentoring_assignments as assignments,
@@ -58,9 +58,17 @@ async def enqueue(event_id, previous_state=None):
         recipients.setdefault(link["mentor_id"], []).append(link["id"])
     if not recipients:
         return
-    devices = await database.fetch_all(select(push_tokens).where(push_tokens.c.judge_id.in_(recipients)).where(push_tokens.c.app_variant == "baza"))
+    devices = await database.fetch_all(
+        select(push_tokens)
+        .where(push_tokens.c.judge_id.in_(recipients))
+        .where(or_(push_tokens.c.app_variant == "baza", push_tokens.c.app_variant.is_(None)))
+    )
+    from app.push.device_policy import dev_pushes_enabled, device_allowed
+    allow_dev = await dev_pushes_enabled()
     from app.province_match_monitor import _prefs_allow
     for device in devices:
+        if not device_allowed(device, allow_dev):
+            continue
         data = {**json_value(event["data_json"], {}), "kind": "mentoring_match_change", "mentoring_pair_ids": recipients[device["judge_id"]], "mentoring_mentor_id": device["judge_id"], "judgeId": device["judge_id"], "mentoring_event_at": event["created_at"].isoformat()}
         await database.execute(pg_insert(province_match_notifications).values(event_id=event_id, installation_id=device["installation_id"], judge_id=device["judge_id"], title="Podopieczni · " + event["title"], body=event["body"], data_json=data, status="pending" if _prefs_allow(device["notification_prefs"], event["event_type"]) else "suppressed").on_conflict_do_nothing(constraint="uq_province_match_notification_event_installation"))
 

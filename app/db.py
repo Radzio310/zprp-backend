@@ -281,6 +281,9 @@ admin_settings = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("allowed_admins", ARRAY(String), nullable=False, default=[]),
+    # Build deweloperski stoi obok sklepowego i ma osobny token FCM. Domyślnie
+    # nie dublujemy na nim zewnętrznych powiadomień produkcyjnych.
+    Column("allow_dev_pushes", Boolean, nullable=False, server_default=text("false")),
 )
 
 # 10b) Wydarzenie szkoleniowe (kursokonferencja)
@@ -2147,6 +2150,9 @@ push_tokens = Table(
     Column("token", Text, nullable=False),
     Column("platform", String, nullable=True),     # ios | android | web
     Column("app_variant", String, nullable=True),
+    # applicationId / bundleIdentifier. `app_variant` jest "baza" zarówno dla
+    # wydania sklepowego, jak i DEV, więc nie potrafi ich rozróżnić.
+    Column("app_id", String, nullable=True),
     # Kto siedzi na tym urządzeniu — potrzebne, żeby wysłać push konkretnemu
     # sędziemu (np. odpowiedź admina na zgłoszenie). Nullable, bo starsze
     # wersje aplikacji nie wysyłają tego pola przy rejestracji tokenu.
@@ -4058,6 +4064,33 @@ metadata.create_all(engine)
 
 # Indexes created separately with IF NOT EXISTS to survive restarts
 with engine.connect() as _conn:
+    # Globalna polityka zewnętrznych pushy i identyfikator konkretnego buildu.
+    # Obie tabele istnieją na produkcji, więc samo metadata.create_all nie
+    # dołoży nowych kolumn przy wdrożeniu.
+    _conn.execute(text("ALTER TABLE admin_settings ADD COLUMN IF NOT EXISTS allow_dev_pushes boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_id varchar"))
+    # Rejestr urządzeń w login_records zna applicationId już od poprzednich
+    # wydań. Uzupełniamy nim istniejące tokeny od razu przy wdrożeniu, żeby
+    # blokada DEV działała bez oczekiwania na ponowne uruchomienie aplikacji.
+    _conn.execute(
+        text(
+            """
+            UPDATE push_tokens AS token
+               SET app_id = device.value ->> 'app_id'
+              FROM login_records AS login
+              CROSS JOIN LATERAL jsonb_each(
+                  CASE
+                      WHEN jsonb_typeof(login.config_json -> 'devices') = 'object'
+                      THEN login.config_json -> 'devices'
+                      ELSE '{}'::jsonb
+                  END
+              ) AS device
+             WHERE token.installation_id = device.value ->> 'installation_id'
+               AND COALESCE(token.app_id, '') = ''
+               AND COALESCE(device.value ->> 'app_id', '') <> ''
+            """
+        )
+    )
     # Jedno potwierdzenie na podmiot i wersję. Ponowne kliknięcie tej samej
     # wersji (druga instalacja, powrót z ProEla) ma NADPISAĆ wpis, a nie
     # rozmnażać go - inaczej lista audytowa zamieniłaby się w dziennik wejść.

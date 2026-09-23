@@ -94,7 +94,11 @@ async def _willing_admins(kind: str, exclude: str = "") -> List[str]:
         return []
     try:
         rows = await database.fetch_all(
-            select(push_tokens.c.judge_id, push_tokens.c.notification_prefs)
+            select(
+                push_tokens.c.judge_id,
+                push_tokens.c.notification_prefs,
+                push_tokens.c.app_id,
+            )
             .where(push_tokens.c.judge_id.in_(admins))
             .where(
                 or_(
@@ -111,10 +115,16 @@ async def _willing_admins(kind: str, exclude: str = "") -> List[str]:
         # Wolimy wysłać niż zamilczeć - cisza wygląda jak „nic się nie stało".
         return admins
 
+    from app.push.device_policy import dev_pushes_enabled, device_allowed
+    allow_dev = await dev_pushes_enabled()
     wanted: Dict[str, bool] = {}
+    registered: set[str] = set()
     for row in rows:
         judge_id = str(row["judge_id"] or "").strip()
         if not judge_id:
+            continue
+        registered.add(judge_id)
+        if not device_allowed(row, allow_dev):
             continue
         wanted[judge_id] = wanted.get(judge_id, False) or admin_pushes_allowed(
             row["notification_prefs"], kind
@@ -123,7 +133,10 @@ async def _willing_admins(kind: str, exclude: str = "") -> List[str]:
     # wyciszyć - zostaje na liście, choćby po to, żeby dostał push po
     # zarejestrowaniu telefonu.
     for admin in admins:
-        wanted.setdefault(admin, True)
+        if admin not in registered:
+            wanted.setdefault(admin, True)
+        else:
+            wanted.setdefault(admin, False)
     return sorted(j for j, ok in wanted.items() if ok)
 
 
@@ -237,6 +250,7 @@ async def admin_alert_reach(kind: str = "new_report") -> List[Dict[str, Any]]:
                 push_tokens.c.token_type,
                 push_tokens.c.platform,
                 push_tokens.c.app_variant,
+                push_tokens.c.app_id,
                 push_tokens.c.notification_prefs,
                 push_tokens.c.updated_at,
             ).where(push_tokens.c.judge_id.in_(admins))
@@ -245,8 +259,12 @@ async def admin_alert_reach(kind: str = "new_report") -> List[Dict[str, Any]]:
         logger.warning("admin_alerts: podgląd zasięgu nieudany", exc_info=True)
         return []
 
+    from app.push.device_policy import dev_pushes_enabled, device_allowed
+    allow_dev = await dev_pushes_enabled()
     by_judge: Dict[str, List[Dict[str, Any]]] = {a: [] for a in admins}
     for row in rows:
+        if not device_allowed(row, allow_dev):
+            continue
         judge_id = str(row["judge_id"] or "").strip()
         if judge_id in by_judge:
             by_judge[judge_id].append(dict(row))

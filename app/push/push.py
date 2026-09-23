@@ -105,6 +105,7 @@ async def send_push_to_judges_report(
                 push_tokens.c.token,
                 push_tokens.c.token_type,
                 push_tokens.c.notification_prefs,
+                push_tokens.c.app_id,
             ).where(push_tokens.c.judge_id.in_(ids))
         if app_variant:
             query = query.where(or_(
@@ -118,6 +119,8 @@ async def send_push_to_judges_report(
         return report(status="error", error_stage="device_lookup")
 
     from .fcm import send_fcm_message
+    from .device_policy import dev_pushes_enabled, device_allowed
+    allow_dev = await dev_pushes_enabled()
     if market_broadcast:
         from app.match_market_rules import market_pushes_allowed
 
@@ -130,6 +133,8 @@ async def send_push_to_judges_report(
     failed = 0
     muted = 0
     for row in rows:
+        if not device_allowed(row, allow_dev):
+            continue
         judge_id = str(row["judge_id"] or "").strip()
         if row["token_type"] != "device_fcm" or not str(row["token"] or "").strip():
             continue
@@ -252,6 +257,7 @@ async def register(req: PushRegisterRequest):
                 token=req.token,
                 platform=req.platform,
                 app_variant=req.app_variant,
+                app_id=req.app_id,
                 # Nie kasujemy zapisanego judge_id, gdy przyjdzie żądanie ze
                 # starszej aplikacji, która tego pola nie zna.
                 **identity_values,
@@ -266,6 +272,7 @@ async def register(req: PushRegisterRequest):
             token=req.token,
             platform=req.platform,
             app_variant=req.app_variant,
+            app_id=req.app_id,
             judge_id=_clean_judge_id(req.judge_id),
             province=normalize_province(req.province) or None,
             notification_prefs=req.notification_prefs or {},
@@ -305,6 +312,16 @@ async def list_match_events(installation_id: str, limit: int = 100):
     """
     if not installation_id:
         raise HTTPException(status_code=400, detail="Missing installation_id")
+    from .device_policy import dev_pushes_enabled, device_allowed
+    registered_device = await database.fetch_one(
+        select(push_tokens.c.app_id).where(
+            push_tokens.c.installation_id == installation_id
+        )
+    )
+    if registered_device and not device_allowed(
+        registered_device, await dev_pushes_enabled()
+    ):
+        return {"items": []}
     limit = max(1, min(200, int(limit)))
     stmt = (
         select(
@@ -346,10 +363,13 @@ async def list_admin_alerts(installation_id: str, limit: int = 100):
         raise HTTPException(status_code=400, detail="Missing installation_id")
 
     device = await database.fetch_one(
-        select(push_tokens.c.judge_id).where(
+        select(push_tokens.c.judge_id, push_tokens.c.app_id).where(
             push_tokens.c.installation_id == installation_id
         )
     )
+    from .device_policy import dev_pushes_enabled, device_allowed
+    if device and not device_allowed(device, await dev_pushes_enabled()):
+        return {"items": []}
     judge_id = _clean_judge_id(device["judge_id"] if device else None)
     if not judge_id:
         return {"items": []}

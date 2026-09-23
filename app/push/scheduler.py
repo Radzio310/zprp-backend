@@ -6,6 +6,7 @@ from sqlalchemy import func, select, update
 
 from app.db import database, province_match_notifications, push_tokens, push_schedules
 from .fcm import send_fcm_message
+from .device_policy import dev_pushes_enabled, device_allowed
 from .token_cleanup import invalidate_rejected_fcm_token
 
 
@@ -46,6 +47,7 @@ async def _get_token(installation_id: str):
         push_tokens.c.token,
         push_tokens.c.platform,
         push_tokens.c.app_variant,
+        push_tokens.c.app_id,
         push_tokens.c.judge_id,
     ).where(push_tokens.c.installation_id == installation_id)
     return await database.fetch_one(stmt)
@@ -166,6 +168,7 @@ async def run_push_scheduler():
 
     while True:
         try:
+            allow_dev = await dev_pushes_enabled()
             due = await _fetch_due(limit=50)
             for row in due:
                 sid = int(row["id"])
@@ -178,6 +181,15 @@ async def run_push_scheduler():
                 tok = await _get_token(installation_id)
                 if not tok:
                     await _mark_failed(sid, attempts, "Missing push token for installation_id", final=True)
+                    continue
+
+                if not device_allowed(tok, allow_dev):
+                    await _mark_failed(
+                        sid,
+                        attempts,
+                        "DEV notifications disabled by administrator",
+                        final=True,
+                    )
                     continue
 
                 token_type = (tok["token_type"] or "").strip()
@@ -212,6 +224,14 @@ async def run_push_scheduler():
                     continue
                 attempts = int(row["attempts"] or 0) + 1
                 token_row = await _get_token(row["installation_id"])
+                if token_row and not device_allowed(token_row, allow_dev):
+                    await _finish_match_notification(
+                        notification_id,
+                        attempts,
+                        "DEV notifications disabled by administrator",
+                        True,
+                    )
+                    continue
                 from app.mentoring_notifications import delivery_allowed
                 if not await delivery_allowed(row["data_json"] or {}, token_row):
                     await _finish_match_notification(notification_id, attempts, "Mentoring access revoked or muted", True)

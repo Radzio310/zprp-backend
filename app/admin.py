@@ -51,6 +51,7 @@ from app.schemas import (
     GenerateHashResponse,
     UpdateAdminsRequest,
     ListAdminsResponse,
+    NotificationDeliverySettings,
     # reports
     CreateUserReportRequest,
     ListUserReportsResponse,
@@ -268,6 +269,37 @@ async def update_admins(req: UpdateAdminsRequest):
         )
 
     return {"success": True}
+
+
+@router.get(
+    "/notification-delivery",
+    response_model=NotificationDeliverySettings,
+    summary="Polityka dostarczania zewnętrznych powiadomień",
+)
+async def get_notification_delivery():
+    row = await database.fetch_one(
+        select(admin_settings.c.allow_dev_pushes).where(admin_settings.c.id == 1)
+    )
+    return NotificationDeliverySettings(
+        allow_dev_pushes=bool(row and row["allow_dev_pushes"])
+    )
+
+
+@router.put(
+    "/notification-delivery",
+    response_model=NotificationDeliverySettings,
+    summary="Zapisz politykę dostarczania zewnętrznych powiadomień",
+)
+async def update_notification_delivery(req: NotificationDeliverySettings):
+    await database.execute(
+        pg_insert(admin_settings)
+        .values(id=1, allowed_admins=[], allow_dev_pushes=req.allow_dev_pushes)
+        .on_conflict_do_update(
+            index_elements=[admin_settings.c.id],
+            set_={"allow_dev_pushes": req.allow_dev_pushes},
+        )
+    )
+    return req
 
 # ---------------------------------------------------------------------
 # Reports

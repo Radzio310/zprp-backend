@@ -200,6 +200,9 @@ class UpdateAdminsRequest(BaseModel):
 class ListAdminsResponse(BaseModel):
     allowed_admins: List[str]
 
+class NotificationDeliverySettings(BaseModel):
+    allow_dev_pushes: bool = False
+
 class GenerateHashRequest(BaseModel):
     pin: str = Field(..., min_length=1, max_length=32, description="Dowolny PIN do zhashowania")
 

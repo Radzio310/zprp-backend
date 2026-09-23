@@ -71,7 +71,7 @@ def _event_key(batch_key: str, judge_id: str, position: int) -> str:
 
 async def _registered_devices(judge_id: str):
     return await database.fetch_all(
-        select(push_tokens.c.installation_id)
+        select(push_tokens.c.installation_id, push_tokens.c.app_id)
         .where(push_tokens.c.judge_id == judge_id)
         .where(push_tokens.c.app_variant == "baza")
         .where(push_tokens.c.token_type == "device_fcm")
@@ -122,7 +122,19 @@ async def run_deploy_test_notifications() -> None:
     interval_seconds = _env_int("PUSH_DEPLOY_TEST_INTERVAL_SECONDS", 10, 1, 3600)
     now = datetime.now(timezone.utc)
     deployment_id = os.getenv("RAILWAY_DEPLOYMENT_ID", "local")
-    installation_ids = sorted({str(row["installation_id"]) for row in devices})
+    from app.push.device_policy import dev_pushes_enabled, device_allowed
+    allow_dev = await dev_pushes_enabled()
+    installation_ids = sorted({
+        str(row["installation_id"])
+        for row in devices
+        if device_allowed(row, allow_dev)
+    })
+    if not installation_ids:
+        logger.info(
+            "Deploy push test batch %s skipped: only DEV devices are registered and DEV delivery is disabled",
+            batch_key,
+        )
+        return
 
     # Jedna transakcja zapobiega pozostawieniu niepełnej paczki po restarcie.
     # Konflikty są ignorowane, więc kilka replik nadal utworzy tylko jeden zestaw.
