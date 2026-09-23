@@ -62,6 +62,9 @@ def _module_level_names(path: pathlib.Path) -> set[str]:
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
+                elif isinstance(target, ast.Tuple):
+                    # `a, b = define_tables(metadata)` - tabele z osobnego modułu.
+                    names.update(elt.id for elt in target.elts if isinstance(elt, ast.Name))
         elif isinstance(node, (ast.AnnAssign,)) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

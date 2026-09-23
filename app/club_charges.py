@@ -145,6 +145,9 @@ class ChargeRow:
     #: Okreg wystawil drugiego stolikowego wbrew deklaracji klubu - klub za
     #: niego nie placi, a panel pokazuje to jako ostrzezenie.
     extra_table: bool = False
+    #: Numer recznego meczu (`manual_charge_rules`) - wiersz dopisany z karty
+    #: klubu, a nie z terminarza. `None` = zwykly mecz.
+    manual_id: Optional[int] = None
 
 
 def _as_date(value: Any) -> Optional[date]:

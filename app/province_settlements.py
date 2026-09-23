@@ -189,6 +189,13 @@ async def _assignments(
                 triple_table=str(row["match_key"]) in triple_keys,
             )
         )
+    # Reczne mecze z rachunkiem (np. SPARING) dopisane z karty klubu - osobna
+    # tabela, bo przebieg serwera przepisuje obsady. Dokladamy je TUTAJ, bo to
+    # jedyne zrodlo obsad dla zestawien, PDF-ow, „Moich rozliczen", siatki
+    # miesiecy i panelu klubow. Import w funkcji - tamten modul importuje nas.
+    from app.province_manual_charges import manual_assignments
+
+    out.extend(await manual_assignments(province, judge_ids=judge_ids))
     return out
 
 
@@ -1116,6 +1123,37 @@ async def my_stats(
             "hall": str(row["hall"] or ""),
             "teams": str(row["teams"] or ""),
             "distance_km": float(row["distance_km"]) if row["distance_km"] is not None else None,
+            "future": bool(when and when > now),
+        })
+
+    # Reczne mecze z rachunkiem (np. SPARING) - sedzia je sedziowal i dostal za
+    # nie pieniadze, wiec licza sie tez do statystyk. Kubelek zawsze „district".
+    from app.province_manual_charges import manual_stats_rows
+
+    for row in await manual_stats_rows(key, judge_id):
+        when = row["match_at"]
+        day = when.date() if when else None
+        season_label = _season_of(day)
+        if season_label:
+            all_seasons.add(season_label)
+        if season and season_label != season:
+            continue
+        code = str(row["match_code"] or "")
+        matches.append({
+            "match_key": row["match_key"],
+            "match_at": when.isoformat() if when else None,
+            "day": day.isoformat() if day else None,
+            "season": season_label,
+            "code": code,
+            "category": R.category_label(code),
+            "level": "district",
+            "role": str(row["role"] or ""),
+            "bucket": row["bucket"],
+            "origin": row["origin"],
+            "city": str(row["city"] or ""),
+            "hall": "",
+            "teams": str(row["teams"] or ""),
+            "distance_km": row["distance_km"],
             "future": bool(when and when > now),
         })
 

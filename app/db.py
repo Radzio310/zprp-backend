@@ -1342,6 +1342,24 @@ province_clubs = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# Wspólny budżet klubów: kilka numerów ZPRP rozliczanych jako jeden klub
+# (reguła w `app/province_club_budgets_rules.py`). Członkowie jako JSON w kolumnie
+# tekstowej - asyncpg pod `databases` i tak oddaje JSONB napisem. Pusta nazwa =
+# nazwa klubu głównego z panelu.
+province_club_budgets = Table(
+    "province_club_budgets",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("name", String, nullable=True),
+    Column("primary_club_id", String, nullable=False),
+    Column("member_ids", Text, nullable=False, server_default=text("'[]'")),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 # Wpłaty i wypłaty. Saldo liczy się z nich i z obciążeń meczowych - nie trzymamy
 # go w kolumnie, bo poprawiona wstecz stawka ma je zmieniać sama.
 province_club_entries = Table(
@@ -1360,6 +1378,37 @@ province_club_entries = Table(
     Column("source", String, nullable=True),             # "manual" | "excel" | "bulk" | "season-close"
     Column("created_by", String, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Ręczne mecze z rachunkiem (np. SPARING) dopisane z karty klubu - reguła
+# w `app/manual_charge_rules.py`, trasy w `app/province_manual_charges.py`.
+# Wchodzą do obciążeń klubu ORAZ do rozliczeń sędziów jak zwykły mecz. Osobna
+# tabela, bo przebieg serwera przepisuje `province_settlement_matches` i ręczny
+# wpis by zniknął. Obsada jako JSON w kolumnie tekstowej (JSONB wraca napisem).
+# ⚠ Nie mylić z `province_manual_matches` (dopiski do statystyk, np. EHF).
+province_manual_charges = Table(
+    "province_manual_charges",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("province", String, nullable=False, index=True),
+    Column("club_id", String, nullable=False, index=True),
+    Column("season", String, nullable=True, index=True),
+    Column("day", Date, nullable=False),
+    Column("match_time", String, nullable=True),          # „HH:MM" czasu polskiego
+    Column("code", String, nullable=True),                # numer meczu albo „SPARING"
+    Column("city", String, nullable=True),
+    Column("distance_source", String, nullable=True),
+    Column("travel_enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("rate_mode", String, nullable=False, server_default=text("'gross'")),  # gross | net
+    Column("field_fee", Float, nullable=True),
+    Column("table_fee", Float, nullable=True),
+    Column("officials", Text, nullable=False, server_default=text("'[]'")),
+    Column("totals", Text, nullable=True),
+    Column("note", String, nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )
 
 # Ręczne wyjątki na meczu: nie licz go klubowi, przenieś na inną drużynę
@@ -4058,6 +4107,14 @@ privacy_consents = Table(
 
 from app.mentoring_tables import define_tables as _define_mentoring_tables
 mentoring_config, mentoring_pairs, mentoring_members, mentoring_assignments, mentoring_audit = _define_mentoring_tables(metadata)
+
+# Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
+from app.province_alert_tables import define_tables as _define_alert_tables
+province_alert_settings, province_alert_state = _define_alert_tables(metadata)
+
+# Faktury PDF wczytywane jako wpłaty klubów (panel klubów) - schemat w osobnym module.
+from app.province_invoice_tables import define_tables as _define_invoice_tables
+province_invoice_batches, province_invoice_items, province_club_nips = _define_invoice_tables(metadata)
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

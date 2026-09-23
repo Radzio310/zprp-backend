@@ -1358,8 +1358,7 @@ async def save_clubs_bulk(payload: ClubBulkRequest):
     Numery klubów przechodzą przez tę samą bramkę, co akcje grupowe w panelu
     klubów (`clean_club_ids`): bez pustych, bez powtórzeń i z limitem.
     """
-    from app.db import province_club_assignment
-    from app.province_clubs_bulk import clean_club_ids, table_since
+    from app.province_clubs_bulk import clean_club_ids
 
     key = require_province(payload.province)
     try:
@@ -1369,27 +1368,59 @@ async def save_clubs_bulk(payload: ClubBulkRequest):
     if payload.table_by_club is None and payload.avoid_local is None:
         raise HTTPException(400, "Nie wskazano, co zmienić")
 
+    updated = await write_club_rules(
+        key,
+        club_ids,
+        table_by_club=payload.table_by_club,
+        table_by_club_since=payload.table_by_club_since,
+        avoid_local=payload.avoid_local,
+        updated_by=payload.updated_by,
+    )
+    return {"success": True, "updated": updated}
+
+
+async def write_club_rules(
+    key: str,
+    club_ids: list[str],
+    *,
+    table_by_club: Optional[int] = None,
+    table_by_club_since: Optional[date] = None,
+    avoid_local: Optional[bool] = None,
+    updated_by: Optional[str] = None,
+) -> int:
+    """
+    Zapis deklaracji obsadowych wielu klubów - WYŁĄCZNIE podanych pól.
+
+    Wspólny dla Obsady (`/province/assignment/clubs/bulk`) i panelu klubów
+    (`/province/clubs/fourth/bulk`). Panel klubów leży w Rozliczeniach i do
+    23.09.2026 pisał trasą Obsady - konto VIP bez uprawnienia do Obsady
+    dostawało odmowę, kafel „4. sędzia" wracał i wyglądało to, jakby serwer
+    kasował ustawienie.
+    """
+    from app.db import province_club_assignment
+    from app.province_clubs_bulk import table_since
+
     now = _now()
-    patch: dict[str, Any] = {"updated_by": _s(payload.updated_by) or None, "updated_at": now}
-    table_by_club: Optional[int] = None
-    if payload.table_by_club is not None:
+    patch: dict[str, Any] = {"updated_by": _s(updated_by) or None, "updated_at": now}
+    table: Optional[int] = None
+    if table_by_club is not None:
         # ⚠ Najwyżej jeden od klubu - okręg zawsze daje co najmniej jednego.
-        table_by_club = max(0, min(1, int(payload.table_by_club)))
-        patch["table_by_club"] = table_by_club
-    if payload.avoid_local is not None:
-        patch["avoid_local"] = bool(payload.avoid_local)
-    previous = await _previous_rules(key, club_ids) if table_by_club is not None else {}
+        table = max(0, min(1, int(table_by_club)))
+        patch["table_by_club"] = table
+    if avoid_local is not None:
+        patch["avoid_local"] = bool(avoid_local)
+    previous = await _previous_rules(key, club_ids) if table is not None else {}
 
     async with database.transaction():
         for club_id in club_ids:
             row_patch = dict(patch)
-            if table_by_club is not None:
+            if table is not None:
                 # Data liczona osobno dla KAŻDEGO klubu: ten, który deklarację
                 # już miał, zachowuje swoją - akcja grupowa jej nie przesuwa.
                 before = previous.get(club_id)
                 row_patch["table_by_club_since"] = table_since(
-                    table_by_club,
-                    payload.table_by_club_since,
+                    table,
+                    table_by_club_since,
                     int(before["table_by_club"] or 0) if before else 0,
                     before["table_by_club_since"] if before else None,
                     now.date(),
@@ -1408,4 +1439,5 @@ async def save_clubs_bulk(payload: ClubBulkRequest):
                     set_=row_patch,
                 )
             )
-    return {"success": True, "updated": len(club_ids)}
+    return len(club_ids)
+

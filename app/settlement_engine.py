@@ -55,6 +55,21 @@ class Assignment:
     approved: Optional[bool] = None
     #: Stolikowy zostal przy stoliku sam - patrz `settlement_rates.triple_table_allowed`.
     triple_table: bool = False
+    #: Recznie dopisany mecz z rachunkiem (`manual_charge_rules`): GOTOWY
+    #: ryczalt brutto i przejazd zamiast stawki z tabeli. `None` = licz tabela.
+    fixed_gross: Optional[float] = None
+    fixed_travel: Optional[float] = None
+    fixed_km_rate: Optional[float] = None
+
+
+def _zprp_reason(assignment: "Assignment") -> Optional[str]:
+    """
+    Powod rozliczenia przez ZPRP - nigdy dla recznego meczu z gotowa kwota:
+    okreg sam go dopisal i sam za niego placi, niezaleznie od wpisanego numeru.
+    """
+    if assignment.fixed_gross is not None:
+        return None
+    return R.zprp_settlement_reason(assignment.match_code, assignment.role)
 
 
 @dataclass
@@ -157,6 +172,9 @@ def _tournament_groups(
     for item in matches:
         if not R.is_children_competition(item.match_code):
             continue
+        if item.origin == "manual":
+            # Reczny mecz ma kwote i dojazd ustalone z gory - nie skleja sie.
+            continue
         if item.day is None:
             # Mecz bez daty nie ma sie z czym skleic - placi po swojemu.
             continue
@@ -233,6 +251,8 @@ def settle_match(
 ) -> SettledMatch:
     """Jeden mecz: stawka, kilometrowka, status."""
     when_date = assignment.match_at.date() if assignment.match_at else None
+    if assignment.fixed_gross is not None:
+        return _settle_fixed(assignment, when_date, now)
     central = R.pick_version(central_versions, when_date)
     provincial = R.pick_version(province_versions, when_date)
     central_book = (central or {}).get("content") if isinstance(central, dict) else getattr(central, "content", None)
@@ -310,6 +330,38 @@ def settle_match(
     )
 
 
+def _settle_fixed(assignment: Assignment, when_date: Optional[date], now: datetime) -> SettledMatch:
+    """Reczny mecz: kwota i dojazd z rekordu, bez tabel stawek."""
+    travel = round(float(assignment.fixed_travel or 0), 2)
+    distance = assignment.distance_km
+    rate = float(assignment.fixed_km_rate or 0)
+    if not rate and travel and distance:
+        rate = round(travel / (float(distance) * R.ROUND_TRIP), 4)
+    return SettledMatch(
+        match_key=assignment.match_key,
+        judge_id=assignment.judge_id,
+        match_at=assignment.match_at,
+        day=when_date,
+        match_code=assignment.match_code,
+        category=R.category_label(assignment.match_code),
+        level=R.match_level(assignment.match_code),
+        role=assignment.role,
+        origin=assignment.origin,
+        city=assignment.city,
+        home_city=assignment.home_city,
+        teams=assignment.teams,
+        distance_km=distance,
+        distance_source=assignment.distance_source,
+        km_rate=rate,
+        gross=round(float(assignment.fixed_gross or 0)),
+        travel=travel,
+        travel_shared=False,
+        future=_is_future(assignment.match_at, now),
+        approved=assignment.approved,
+        status="computed",
+    )
+
+
 def settle_judges(
     assignments: Iterable[Assignment],
     *,
@@ -348,7 +400,7 @@ def settle_judges(
             continue
         # Odsiew PRZED rachunkiem: prog 200 zl i podatek licza sie od sumy tego,
         # co wyplaca OKREG - Superliga nie moze podbic podatku od juniorow.
-        if not include_zprp and R.zprp_settlement_reason(assignment.match_code, assignment.role):
+        if not include_zprp and _zprp_reason(assignment):
             continue
         item = settle_match(
             assignment,
@@ -518,7 +570,7 @@ def zprp_matches(
     """
     out: list[ZprpMatch] = []
     for assignment in assignments:
-        reason = R.zprp_settlement_reason(assignment.match_code, assignment.role)
+        reason = _zprp_reason(assignment)
         if not reason:
             continue
         when = assignment.match_at.date() if assignment.match_at else None
@@ -578,7 +630,7 @@ def monthly_totals(
     for assignment in assignments:
         if assignment.match_at is None:
             continue
-        if not include_zprp and R.zprp_settlement_reason(assignment.match_code, assignment.role):
+        if not include_zprp and _zprp_reason(assignment):
             continue
         if not include_future and _is_future(assignment.match_at, now):
             continue

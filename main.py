@@ -92,7 +92,11 @@ from app.province_assignments import router as province_assignments_router
 from app.province_assignment_auto import router as province_assignment_auto_router
 from app.zprp_archive import router as province_archive_router, run_archive_scheduler
 from app.assignment_insights import router as province_insights_router, run_insights_scheduler
+from app.province_club_budgets import router as province_club_budgets_router, seed_default_budgets
 from app.province_clubs import router as province_clubs_router
+from app.province_invoices import router as province_invoices_router
+from app.province_manual_charges import router as province_manual_charges_router
+from app.province_alerts import router as province_alerts_router, start_alert_scheduler, stop_alert_scheduler
 from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
 from app.event_links import router as event_links_router
@@ -308,7 +312,15 @@ app.include_router(province_settlements_router)
 app.include_router(province_stats_router)
 app.include_router(province_settlement_pdf_router)
 # Panel klubow: /province/clubs. Wlasny prefiks, wiec nie wchodzi pod catch-all.
+# Wspólne budżety klubów: /province/clubs/budgets - PRZED routerem klubów,
+# bo tam GET /{club_id} połknąłby „budgets".
+app.include_router(province_club_budgets_router)
 app.include_router(province_clubs_router)
+# Faktury PDF jako wpłaty klubów: własny prefiks /province/invoices.
+app.include_router(province_invoices_router)
+# Ręczne mecze z rachunkiem (np. SPARING) z karty klubu: /province/manual-charges.
+app.include_router(province_manual_charges_router)
+app.include_router(province_alerts_router)
 app.include_router(province_assignments_router)
 app.include_router(province_assignment_auto_router)
 app.include_router(province_archive_router)
@@ -977,6 +989,14 @@ async def startup():
             logger.info("Opublikowano śląską tabelę odległości obowiązującą od 01.09.2026")
     except Exception:
         logger.exception("Nie udało się opublikować oficjalnej śląskiej tabeli odległości")
+    # Wspólne budżety klubów z decyzji użytkownika (23.09.2026) - raz na okręg,
+    # ślad w app_migrations; rozłączony w panelu budżet nie wraca po restarcie.
+    try:
+        _budgets = await seed_default_budgets()
+        if _budgets:
+            logger.info("Założono %s wspólnych budżetów klubów", _budgets)
+    except Exception:
+        logger.exception("Nie udało się założyć domyślnych wspólnych budżetów klubów")
     # create_all nie zmienia już istniejącej tabeli push_tokens. Te migracje
     # uzupełniają kolumny wymagane przez monitor i są idempotentne na Railway.
     _province_match_migrations = [
@@ -1344,6 +1364,8 @@ async def startup():
     # Dobowe odswiezanie danych do statystyk i rozliczen okregowych. Chodzi
     # tylko po wojewodztwach z WLACZONYM modulem i skonfigurowanym kontem sync.
     _settlement_sync_task = asyncio.create_task(run_settlement_sync_scheduler())
+    # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - obrót co 15 minut.
+    start_alert_scheduler()
     logger.info("✅ Province settlement sync started (24 h)")
     if distance_table_promoted:
         # Zapisane podsumowania i rozliczenia zawierają kilometry, dlatego po
@@ -1376,6 +1398,8 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task, _exam_promotion_task
+
+    await stop_alert_scheduler()
 
     if _cleanup_task:
         _cleanup_task.cancel()
