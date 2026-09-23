@@ -46,6 +46,7 @@ from app.db import (
     province_match_assignability,
     province_matches,
     province_module_config,
+    province_settlement_matches,
 )
 from app.deps import Settings, get_jwt_payload, get_settings
 from app.admin_alerts import admin_judge_ids
@@ -129,6 +130,7 @@ from app.match_market_rules import (
 from app.proel_auth import is_admin
 from app.push.push import send_push_to_judges_report
 from app.settlement_province import spellings
+from app.settlement_seasons import season_of
 from app.zprp.assignments import (
     SELECT_TO_SLOT,
     _login_zprp,
@@ -1284,6 +1286,10 @@ class ApproveRequest(BaseModel):
     #: Domyślnie `False`, więc starsza aplikacja nigdy nie wymusi zapisu przez
     #: przypadek.
     force: bool = False
+    #: Obsadowy zatwierdza SWOJE zgłoszenie. Wolno mu (decyzja użytkownika
+    #: z 23.09.2026), ale tylko świadomie: bez tej flagi serwer odpowiada
+    #: `SELF_APPROVAL`, a aplikacja pokazuje osobne pytanie. Trafia do dziennika.
+    self_confirmed: bool = False
 
 
 class RejectRequest(BaseModel):
@@ -2628,6 +2634,175 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
     return payload
 
 
+# ───────────────────── Podgląd sędziego dla obsadowego ─────────────────────
+#
+# Przy każdym chętnym obsadowy widzi, ile ten ma już meczów w sezonie (boisko
+# i stolik), a po przytrzymaniu - pełny podgląd. To cudzy terminarz, więc
+# obie trasy są TYLKO dla administratora i obsadowego okręgu - dokładnie tych,
+# którzy i tak widzą komplet chętnych w `get_offer`.
+
+
+async def viewer_may_inspect(judge_id: str, province: str) -> bool:
+    """Czy ten numer sędziego może oglądać cudze obciążenie w tym okręgu."""
+    judge_id = _s(judge_id)
+    prov = normalize_province(province)
+    if not judge_id or not prov:
+        return False
+    if await is_admin(judge_id):
+        return True
+    row = await database.fetch_one(
+        select(province_judges.c.province, province_judges.c.badges).where(
+            province_judges.c.judge_id == judge_id
+        )
+    )
+    if not row:
+        return False
+    cfg = await _config(prov)
+    return may_approve(
+        is_admin=False,
+        province=prov,
+        judge_province=_row(row).get("province"),
+        badges_raw=_row(row).get("badges"),
+        allowed_badges=cfg["approver_badges"],
+    )
+
+
+async def _require_inspector(actor: Actor, province: Optional[str]) -> str:
+    prov = _market_province(actor, province)
+    await _require_approver(actor, prov)
+    return prov
+
+
+@router.get("/judges/load", summary="Boisko i stolik w sezonie - liczniki przy chętnych")
+async def judges_load(
+    ids: str = Query(..., description="Numery sędziów po przecinku"),
+    province: Optional[str] = Query(None),
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    from app.judge_season_load import empty
+    from app.province_settlements import season_load
+
+    prov = await _require_inspector(actor, province)
+    wanted = sorted({_s(x) for x in ids.split(",") if _s(x)})[:200]
+    load = await season_load(prov, wanted)
+    return {
+        "province": prov,
+        "season": season_of(_now()),
+        "load": {judge_id: load.get(judge_id) or empty() for judge_id in wanted},
+    }
+
+
+#: Ile dni do przodu pokazuje oś obciążenia w podglądzie sędziego.
+PROFILE_DAYS = 14
+
+
+@router.get("/judges/{judge_id}/profile", summary="Podgląd sędziego dla obsadowego")
+async def judge_profile(
+    judge_id: str,
+    province: Optional[str] = Query(None),
+    offer_id: Optional[int] = Query(None, description="Oferta, przy której liczyć kolizje"),
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    """
+    Wizytówka, liczniki sezonu i najbliższe dwa tygodnie: mecze oraz
+    niedyspozycje. Szczegóły sezonu (wykresy) aplikacja bierze z
+    `/province/stats/me` - ta trasa wpuszcza obsadowego do cudzych.
+    """
+    from app import offtime_rules as O
+    from app.assignment_context import load_roster
+    from app.judge_season_load import empty, kind_of
+    from app.province_settlements import season_load
+
+    prov = await _require_inspector(actor, province)
+    judge_id = _s(judge_id)
+    card = (await _judges_by_id([judge_id])).get(judge_id)
+    if not card:
+        raise HTTPException(404, "Nie ma takiego sędziego na liście okręgu.")
+
+    now = _now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=PROFILE_DAYS)
+    rows = await database.fetch_all(
+        select(province_settlement_matches).where(
+            and_(
+                province_settlement_matches.c.province == prov,
+                province_settlement_matches.c.judge_id == judge_id,
+                province_settlement_matches.c.active.is_(True),
+                province_settlement_matches.c.match_at >= start,
+                province_settlement_matches.c.match_at < end,
+            )
+        )
+    )
+    upcoming = sorted(
+        (
+            {
+                "matchAt": _iso(r["match_at"]),
+                "code": _s(r["match_code"]),
+                "role": _s(r["role"]),
+                # `field` / `table` / null (delegat albo boisko ligowe)
+                "kind": kind_of(r["match_code"], r["role"]),
+                "city": _s(r["city"]),
+                "hall": _s(r["hall"]),
+                "teams": _s(r["teams"]),
+            }
+            for r in (_row(x) for x in rows)
+        ),
+        key=lambda m: m["matchAt"] or "",
+    )
+
+    roster = await load_roster(prov)
+    # Niedyspozycje leżą jako naiwny czas polski (`offtime_rules`).
+    local_start = datetime.combine(O.as_local(now).date(), datetime.min.time())
+    local_end = local_start + timedelta(days=PROFILE_DAYS)
+    offtimes = []
+    for item in roster.offtimes.get(judge_id, []):
+        if item.kind == "MATCH":
+            # Mecz z kalendarza sędziego - te same mecze już są wyżej.
+            continue
+        if item.end < local_start or item.start >= local_end:
+            continue
+        offtimes.append(
+            {
+                "start": item.start.isoformat(),
+                "end": item.end.isoformat(),
+                "allDay": item.all_day,
+                "kind": item.kind,
+                "label": item.label,
+            }
+        )
+
+    conflicts: List[Dict[str, str]] = []
+    if offer_id:
+        offer = await database.fetch_one(
+            select(match_market_offers).where(match_market_offers.c.id == offer_id)
+        )
+        if offer and normalize_province(_row(offer)["province"]) == prov:
+            conflicts = (
+                await _same_day_matches(
+                    prov,
+                    {judge_id: _s(card.get("full_name"))},
+                    _row(offer).get("match_at"),
+                    _s(_row(offer)["match_id"]),
+                )
+            ).get(judge_id, [])
+
+    badges = card.get("badges")
+    return {
+        "province": prov,
+        "season": season_of(now),
+        "person": {
+            **_person(judge_id, card),
+            "city": _s(roster.judges[judge_id].city) if judge_id in roster.judges else "",
+            "badges": badge_names(badges),
+        },
+        "load": (await season_load(prov, [judge_id])).get(judge_id) or empty(),
+        "days": PROFILE_DAYS,
+        "upcoming": upcoming,
+        "offtimes": offtimes,
+        "conflicts": conflicts,
+    }
+
+
 @router.post("/offers/{offer_id}/reject", summary="Odrzuć wymianę")
 async def reject_offer(
     offer_id: int, req: RejectRequest, actor: Actor = Depends(market_actor)
@@ -2810,6 +2985,19 @@ async def approve_offer(
                     },
                 )
 
+            own_claim = _s(claim["judge_id"]) == actor.judge_id
+            if own_claim and not req.self_confirmed:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "SELF_APPROVAL",
+                        "message": (
+                            "To Twoje własne zgłoszenie. Zatwierdzasz sam siebie - "
+                            "potwierdź to, a decyzja trafi do dziennika okręgu."
+                        ),
+                    },
+                )
+
             await database.execute(
                 update(match_market_offers)
                 .where(match_market_offers.c.id == offer_id)
@@ -2891,6 +3079,8 @@ async def approve_offer(
             # ma o niej mówić wprost, razem z tym, ile meczów tego dnia było.
             "forced": bool(clash),
             "conflicts": len(clash),
+            # Obsadowy zatwierdził sam siebie - wolno, ale jawnie.
+            "self": _s(claim["judge_id"]) == actor.judge_id,
         },
     )
 

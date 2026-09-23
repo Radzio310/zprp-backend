@@ -184,6 +184,12 @@ async def judges(
     look = await _badge_look()
     season_from, season_to = await _season_window()
     busy, _load = await load_busy(key, roster, date_from=season_from, date_to=season_to)
+    # Boisko i stolik w sezonie - ta sama liczba, co przy chętnych na Giełdzie
+    # i na kaflach niedyspozycji (`app/judge_season_load.py`).
+    from app.judge_season_load import empty as empty_load
+    from app.province_settlements import season_load
+
+    season_counts = await season_load(key)
 
     today = _now().date()
     horizon = today + timedelta(days=UPCOMING_DAYS)
@@ -236,6 +242,8 @@ async def judges(
                         (item.moment.isoformat() for item in upcoming if item.moment),
                         default=None,
                     ),
+                    # Okręgowe + stoliki ligowe, rozegrane razem z obsadzonymi.
+                    **(season_counts.get(judge_id) or empty_load()),
                 },
                 # Mikro-podgląd: ile minut dnia jest zajęte. 1440 to cały dzień.
                 "preview": [

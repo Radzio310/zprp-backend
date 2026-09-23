@@ -11,16 +11,18 @@ from __future__ import annotations
 import asyncio
 import calendar
 import logging
+import os
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Iterable, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, func, select
 
 from app import settlement_engine as E
 from app import settlement_buckets as B
 from app import settlement_rates as R
+from app import judge_season_load as L
 from app.db import (
     central_rates,
     database,
@@ -43,6 +45,7 @@ from app.settlement_province import canonical, display, spellings
 from app.settlement_runs import cooldown_left, run_is_active
 from app.settlement_seasons import season_of
 from app.settlement_club_scope import club_scope, club_scope_many
+from app.deps import get_optional_jwt_payload
 
 logger = logging.getLogger(__name__)
 
@@ -969,6 +972,65 @@ def _season_of(day: Optional[date]) -> str:
     return f"{year}/{year + 1}"
 
 
+async def season_load(
+    province: str, judge_ids: Optional[Iterable[str]] = None
+) -> dict[str, dict[str, int]]:
+    """
+    Boisko i stolik w bieżącym sezonie dla sędziów okręgu - reguła w
+    `app/judge_season_load.py`. Bez `judge_ids` liczy cały okręg.
+
+    Źródłem jest rejestr rozliczeń, więc liczba zmienia się po przebiegu
+    odświeżania (dobowym albo ręcznym z panelu), a nie w chwili obsady.
+    """
+    key = canonical(province)
+    if not key:
+        return {}
+    cond = [
+        province_settlement_matches.c.province == key,
+        province_settlement_matches.c.active.is_(True),
+    ]
+    if judge_ids is not None:
+        ids = sorted({str(j).strip() for j in judge_ids if str(j or "").strip()})
+        if not ids:
+            return {}
+        cond.append(province_settlement_matches.c.judge_id.in_(ids))
+    rows = await database.fetch_all(
+        select(
+            province_settlement_matches.c.judge_id,
+            province_settlement_matches.c.match_at,
+            province_settlement_matches.c.match_code,
+            province_settlement_matches.c.role,
+        ).where(and_(*cond))
+    )
+    return L.tally([dict(r) for r in rows], now=_now())
+
+
+#: Zamyka furtkę dla żądań `/province/stats/me` BEZ tokenu. Aplikacje sprzed
+#: 23.09.2026 pytają bez nagłówka, więc do czasu ich wygaśnięcia takie żądanie
+#: tylko zostawia ostrzeżenie `[stats_guard]` w logu.
+STATS_STRICT_ENV = "STATS_ME_STRICT"
+
+
+async def _stats_viewer_may(key: str, judge_id: str, payload: Optional[dict]) -> None:
+    """
+    Cudze statystyki ogląda admin i obsadowy okręgu (podgląd sędziego na
+    Giełdzie meczów). Każdy inny tylko własne.
+    """
+    if payload is None:
+        if os.getenv(STATS_STRICT_ENV, "").strip().lower() in {"1", "true", "tak", "yes", "on"}:
+            raise HTTPException(401, "Zaloguj się ponownie, żeby zobaczyć statystyki.")
+        logger.warning("[stats_guard] powod=brak_tokenu province=%s judge=%s", key, judge_id)
+        return
+    own = str(payload.get("judge_id") or "").strip()
+    if own and own == judge_id:
+        return
+    # Import w funkcji - `match_market` ciągnie za sobą pół aplikacji.
+    from app.match_market import viewer_may_inspect
+
+    if not await viewer_may_inspect(own, key):
+        raise HTTPException(403, "Statystyki innego sędziego widzi tylko obsadowy okręgu i administrator.")
+
+
 @stats_router.get("/me", summary="Moje statystyki - dla aplikacji sędziego")
 async def my_stats(
     province: str = Query(...),
@@ -979,8 +1041,10 @@ async def my_stats(
         False,
         description="Wlicz mecze jeszcze nierozegrane - przełącznik jak w rozliczeniu",
     ),
+    payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
     key = require_province(province)
+    await _stats_viewer_may(key, str(judge_id).strip(), payload)
     if not await module_enabled(key, "stats"):
         raise HTTPException(403, "Moduł Statystyk nie jest włączony w tym okręgu")
 
