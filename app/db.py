@@ -4072,25 +4072,34 @@ with engine.connect() as _conn:
     # Rejestr urządzeń w login_records zna applicationId już od poprzednich
     # wydań. Uzupełniamy nim istniejące tokeny od razu przy wdrożeniu, żeby
     # blokada DEV działała bez oczekiwania na ponowne uruchomienie aplikacji.
-    _conn.execute(
-        text(
-            """
-            UPDATE push_tokens AS token
-               SET app_id = device.value ->> 'app_id'
-              FROM login_records AS login
-              CROSS JOIN LATERAL jsonb_each(
-                  CASE
-                      WHEN jsonb_typeof(login.config_json -> 'devices') = 'object'
-                      THEN login.config_json -> 'devices'
-                      ELSE '{}'::jsonb
-                  END
-              ) AS device
-             WHERE token.installation_id = device.value ->> 'installation_id'
-               AND COALESCE(token.app_id, '') = ''
-               AND COALESCE(device.value ->> 'app_id', '') <> ''
-            """
-        )
-    )
+    try:
+        # SAVEPOINT: nawet nieprzewidziany historyczny kształt JSON nie zatruje
+        # transakcji, w której wykonywane są dalsze migracje startowe.
+        with _conn.begin_nested():
+            _conn.execute(
+                text(
+                    """
+                    UPDATE push_tokens AS token
+                       SET app_id = device.value ->> 'app_id'
+                      FROM login_records AS login
+                      CROSS JOIN LATERAL jsonb_each(
+                          CASE
+                              WHEN jsonb_typeof(login.config_json::jsonb -> 'devices') = 'object'
+                              THEN login.config_json::jsonb -> 'devices'
+                              ELSE '{}'::jsonb
+                          END
+                      ) AS device
+                     WHERE token.installation_id = device.value ->> 'installation_id'
+                       AND COALESCE(token.app_id, '') = ''
+                       AND COALESCE(device.value ->> 'app_id', '') <> ''
+                    """
+                )
+            )
+    except Exception:
+        # To tylko przyspieszający backfill. Nowe aplikacje zapisują app_id przy
+        # rejestracji tokenu, więc nietypowy stary rekord nie może zablokować
+        # uruchomienia całego API.
+        pass
     # Jedno potwierdzenie na podmiot i wersję. Ponowne kliknięcie tej samej
     # wersji (druga instalacja, powrót z ProEla) ma NADPISAĆ wpis, a nie
     # rozmnażać go - inaczej lista audytowa zamieniłaby się w dziennik wejść.
