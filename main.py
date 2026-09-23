@@ -81,11 +81,12 @@ from app.province_judges import router as province_judges_router
 from app.badges import router as badges_router
 from app.baza_vips import router as baza_vips_router
 from app.central_rates import router as central_rates_router, seed_central_rates
+from app.distance_table_seed import promote_official_distance_tables
 from app.province_settlements import (
     router as province_settlements_router,
     stats_router as province_stats_router,
 )
-from app.province_settlement_sync import run_settlement_sync_scheduler
+from app.province_settlement_sync import refresh_province, run_settlement_sync_scheduler
 from app.province_settlement_pdf import router as province_settlement_pdf_router
 from app.province_assignments import router as province_assignments_router
 from app.province_assignment_auto import router as province_assignment_auto_router
@@ -965,6 +966,17 @@ async def _cleanup_loop():
 @app.on_event("startup")
 async def startup():
     await database.connect()
+
+    # Oficjalna śląska tabela odległości obowiązuje od 01.09.2026. Publikacja
+    # przy starcie daje obu aplikacjom jedno źródło prawdy od razu po deployu.
+    # Seed jest monotoniczny: nie cofnie wersji nowszej niż ta z repozytorium.
+    distance_table_promoted = False
+    try:
+        distance_table_promoted = await promote_official_distance_tables()
+        if distance_table_promoted:
+            logger.info("Opublikowano śląską tabelę odległości obowiązującą od 01.09.2026")
+    except Exception:
+        logger.exception("Nie udało się opublikować oficjalnej śląskiej tabeli odległości")
     # create_all nie zmienia już istniejącej tabeli push_tokens. Te migracje
     # uzupełniają kolumny wymagane przez monitor i są idempotentne na Railway.
     _province_match_migrations = [
@@ -1333,6 +1345,19 @@ async def startup():
     # tylko po wojewodztwach z WLACZONYM modulem i skonfigurowanym kontem sync.
     _settlement_sync_task = asyncio.create_task(run_settlement_sync_scheduler())
     logger.info("✅ Province settlement sync started (24 h)")
+    if distance_table_promoted:
+        # Zapisane podsumowania i rozliczenia zawierają kilometry, dlatego po
+        # promocji tabeli bieżący sezon przeliczamy od razu, bez czekania na
+        # następny dobowy przebieg. Scheduler rozpozna aktywny run i go nie
+        # zdubluje.
+        async def refresh_silesia_after_distance_change() -> None:
+            try:
+                await refresh_province("ŚLĄSKIE", kind="distance-table")
+            except Exception:
+                logger.exception("Przeliczenie Śląska po zmianie tabeli nie powiodło się")
+
+        asyncio.create_task(refresh_silesia_after_distance_change())
+        logger.info("Zaplanowano natychmiastowe przeliczenie Śląska po zmianie tabeli")
     # Kluby i druzyny sezonu do Panelu klubow - osobna petla, zeby dluga lista
     # klubow nie opoznila pobrania meczow.
     _clubs_sync_task = asyncio.create_task(run_clubs_sync_scheduler())

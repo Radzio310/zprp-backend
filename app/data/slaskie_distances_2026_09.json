@@ -1,0 +1,8651 @@
+{
+  "validFrom": "2026-09-01",
+  "cities": [
+    "Bielsko-Biała",
+    "Bystra",
+    "Bytom",
+    "Cieszyn",
+    "Chorzów",
+    "Czechowice-Dziedzice",
+    "Czuchów",
+    "Dąbrowa Górnicza",
+    "Gliwice",
+    "Godziszka",
+    "Imielin",
+    "Jasienica",
+    "Jastrzębie Zdrój",
+    "Katowice",
+    "Kleszczów",
+    "Kuźnia Raciborska",
+    "Lipnik",
+    "Lubliniec",
+    "Łaziska Górne",
+    "Mikołów",
+    "Mysłowice",
+    "Nakło Śląskie",
+    "Piekary Śląskie",
+    "Pietrowice Wielkie",
+    "Racibórz",
+    "Ruda Śląska",
+    "Siemianowice Śląskie",
+    "Sosnowiec",
+    "Szczyrk",
+    "Świętochłowice",
+    "Tarnowskie Góry",
+    "Tychy",
+    "Ustroń",
+    "Wilkowice",
+    "Zabrze",
+    "Zawiercie",
+    "Żory",
+    "Żywiec",
+    "Częstochowa",
+    "Goczałkowice Zdrój",
+    "Janów",
+    "Niewiesze"
+  ],
+  "edges": [
+    {
+      "from": "Bielsko-Biała",
+      "to": "Bystra",
+      "distance_km": 12
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Bytom",
+      "distance_km": 69
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Cieszyn",
+      "distance_km": 35
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Chorzów",
+      "distance_km": 67
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Czechowice-Dziedzice",
+      "distance_km": 12
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Czuchów",
+      "distance_km": 57
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Dąbrowa Górnicza",
+      "distance_km": 71
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Gliwice",
+      "distance_km": 67
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Godziszka",
+      "distance_km": 15
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Imielin",
+      "distance_km": 44
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Jasienica",
+      "distance_km": 12
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 46
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Katowice",
+      "distance_km": 60
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Kleszczów",
+      "distance_km": 79
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 83
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Lipnik",
+      "distance_km": 131
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Lubliniec",
+      "distance_km": 114
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Łaziska Górne",
+      "distance_km": 45
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Mikołów",
+      "distance_km": 48
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Mysłowice",
+      "distance_km": 60
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Nakło Śląskie",
+      "distance_km": 82
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Piekary Śląskie",
+      "distance_km": 74
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 90
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Racibórz",
+      "distance_km": 81
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Ruda Śląska",
+      "distance_km": 58
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 66
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Sosnowiec",
+      "distance_km": 65
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Szczyrk",
+      "distance_km": 16
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Świętochłowice",
+      "distance_km": 65
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Tarnowskie Góry",
+      "distance_km": 83
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Tychy",
+      "distance_km": 41
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Ustroń",
+      "distance_km": 30
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Wilkowice",
+      "distance_km": 10
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Zabrze",
+      "distance_km": 64
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Zawiercie",
+      "distance_km": 93
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Żory",
+      "distance_km": 41
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Żywiec",
+      "distance_km": 19
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Częstochowa",
+      "distance_km": 129
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 18
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Janów",
+      "distance_km": 122
+    },
+    {
+      "from": "Bielsko-Biała",
+      "to": "Niewiesze",
+      "distance_km": 87
+    },
+    {
+      "from": "Bystra",
+      "to": "Bytom",
+      "distance_km": 79
+    },
+    {
+      "from": "Bystra",
+      "to": "Cieszyn",
+      "distance_km": 43
+    },
+    {
+      "from": "Bystra",
+      "to": "Chorzów",
+      "distance_km": 77
+    },
+    {
+      "from": "Bystra",
+      "to": "Czechowice-Dziedzice",
+      "distance_km": 22
+    },
+    {
+      "from": "Bystra",
+      "to": "Czuchów",
+      "distance_km": 67
+    },
+    {
+      "from": "Bystra",
+      "to": "Dąbrowa Górnicza",
+      "distance_km": 81
+    },
+    {
+      "from": "Bystra",
+      "to": "Gliwice",
+      "distance_km": 77
+    },
+    {
+      "from": "Bystra",
+      "to": "Godziszka",
+      "distance_km": 10
+    },
+    {
+      "from": "Bystra",
+      "to": "Imielin",
+      "distance_km": 56
+    },
+    {
+      "from": "Bystra",
+      "to": "Jasienica",
+      "distance_km": 20
+    },
+    {
+      "from": "Bystra",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 54
+    },
+    {
+      "from": "Bystra",
+      "to": "Katowice",
+      "distance_km": 71
+    },
+    {
+      "from": "Bystra",
+      "to": "Kleszczów",
+      "distance_km": 89
+    },
+    {
+      "from": "Bystra",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 93
+    },
+    {
+      "from": "Bystra",
+      "to": "Lipnik",
+      "distance_km": 141
+    },
+    {
+      "from": "Bystra",
+      "to": "Lubliniec",
+      "distance_km": 123
+    },
+    {
+      "from": "Bystra",
+      "to": "Łaziska Górne",
+      "distance_km": 55
+    },
+    {
+      "from": "Bystra",
+      "to": "Mikołów",
+      "distance_km": 57
+    },
+    {
+      "from": "Bystra",
+      "to": "Mysłowice",
+      "distance_km": 69
+    },
+    {
+      "from": "Bystra",
+      "to": "Nakło Śląskie",
+      "distance_km": 91
+    },
+    {
+      "from": "Bystra",
+      "to": "Piekary Śląskie",
+      "distance_km": 83
+    },
+    {
+      "from": "Bystra",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 99
+    },
+    {
+      "from": "Bystra",
+      "to": "Racibórz",
+      "distance_km": 90
+    },
+    {
+      "from": "Bystra",
+      "to": "Ruda Śląska",
+      "distance_km": 68
+    },
+    {
+      "from": "Bystra",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 77
+    },
+    {
+      "from": "Bystra",
+      "to": "Sosnowiec",
+      "distance_km": 74
+    },
+    {
+      "from": "Bystra",
+      "to": "Szczyrk",
+      "distance_km": 11
+    },
+    {
+      "from": "Bystra",
+      "to": "Świętochłowice",
+      "distance_km": 75
+    },
+    {
+      "from": "Bystra",
+      "to": "Tarnowskie Góry",
+      "distance_km": 92
+    },
+    {
+      "from": "Bystra",
+      "to": "Tychy",
+      "distance_km": 50
+    },
+    {
+      "from": "Bystra",
+      "to": "Ustroń",
+      "distance_km": 38
+    },
+    {
+      "from": "Bystra",
+      "to": "Wilkowice",
+      "distance_km": 8
+    },
+    {
+      "from": "Bystra",
+      "to": "Zabrze",
+      "distance_km": 74
+    },
+    {
+      "from": "Bystra",
+      "to": "Zawiercie",
+      "distance_km": 104
+    },
+    {
+      "from": "Bystra",
+      "to": "Żory",
+      "distance_km": 51
+    },
+    {
+      "from": "Bystra",
+      "to": "Żywiec",
+      "distance_km": 17
+    },
+    {
+      "from": "Bystra",
+      "to": "Częstochowa",
+      "distance_km": 139
+    },
+    {
+      "from": "Bystra",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 27
+    },
+    {
+      "from": "Bystra",
+      "to": "Janów",
+      "distance_km": 131
+    },
+    {
+      "from": "Bystra",
+      "to": "Niewiesze",
+      "distance_km": 97
+    },
+    {
+      "from": "Bytom",
+      "to": "Cieszyn",
+      "distance_km": 80
+    },
+    {
+      "from": "Bytom",
+      "to": "Chorzów",
+      "distance_km": 8
+    },
+    {
+      "from": "Bytom",
+      "to": "Czechowice-Dziedzice",
+      "distance_km": 58
+    },
+    {
+      "from": "Bytom",
+      "to": "Czuchów",
+      "distance_km": 37
+    },
+    {
+      "from": "Bytom",
+      "to": "Dąbrowa Górnicza",
+      "distance_km": 22
+    },
+    {
+      "from": "Bytom",
+      "to": "Gliwice",
+      "distance_km": 22
+    },
+    {
+      "from": "Bytom",
+      "to": "Godziszka",
+      "distance_km": 81
+    },
+    {
+      "from": "Bytom",
+      "to": "Imielin",
+      "distance_km": 36
+    },
+    {
+      "from": "Bytom",
+      "to": "Jasienica",
+      "distance_km": 71
+    },
+    {
+      "from": "Bytom",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 59
+    },
+    {
+      "from": "Bytom",
+      "to": "Katowice",
+      "distance_km": 15
+    },
+    {
+      "from": "Bytom",
+      "to": "Kleszczów",
+      "distance_km": 32
+    },
+    {
+      "from": "Bytom",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 57
+    },
+    {
+      "from": "Bytom",
+      "to": "Lipnik",
+      "distance_km": 77
+    },
+    {
+      "from": "Bytom",
+      "to": "Lubliniec",
+      "distance_km": 43
+    },
+    {
+      "from": "Bytom",
+      "to": "Łaziska Górne",
+      "distance_km": 28
+    },
+    {
+      "from": "Bytom",
+      "to": "Mikołów",
+      "distance_km": 23
+    },
+    {
+      "from": "Bytom",
+      "to": "Mysłowice",
+      "distance_km": 24
+    },
+    {
+      "from": "Bytom",
+      "to": "Nakło Śląskie",
+      "distance_km": 13
+    },
+    {
+      "from": "Bytom",
+      "to": "Piekary Śląskie",
+      "distance_km": 5
+    },
+    {
+      "from": "Bytom",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 78
+    },
+    {
+      "from": "Bytom",
+      "to": "Racibórz",
+      "distance_km": 69
+    },
+    {
+      "from": "Bytom",
+      "to": "Ruda Śląska",
+      "distance_km": 14
+    },
+    {
+      "from": "Bytom",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 11
+    },
+    {
+      "from": "Bytom",
+      "to": "Sosnowiec",
+      "distance_km": 21
+    },
+    {
+      "from": "Bytom",
+      "to": "Szczyrk",
+      "distance_km": 83
+    },
+    {
+      "from": "Bytom",
+      "to": "Świętochłowice",
+      "distance_km": 9
+    },
+    {
+      "from": "Bytom",
+      "to": "Tarnowskie Góry",
+      "distance_km": 12
+    },
+    {
+      "from": "Bytom",
+      "to": "Tychy",
+      "distance_km": 33
+    },
+    {
+      "from": "Bytom",
+      "to": "Ustroń",
+      "distance_km": 83
+    },
+    {
+      "from": "Bytom",
+      "to": "Wilkowice",
+      "distance_km": 77
+    },
+    {
+      "from": "Bytom",
+      "to": "Zabrze",
+      "distance_km": 15
+    },
+    {
+      "from": "Bytom",
+      "to": "Zawiercie",
+      "distance_km": 49
+    },
+    {
+      "from": "Bytom",
+      "to": "Żory",
+      "distance_km": 42
+    },
+    {
+      "from": "Bytom",
+      "to": "Żywiec",
+      "distance_km": 87
+    },
+    {
+      "from": "Bytom",
+      "to": "Częstochowa",
+      "distance_km": 63
+    },
+    {
+      "from": "Bytom",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 51
+    },
+    {
+      "from": "Bytom",
+      "to": "Janów",
+      "distance_km": 68
+    },
+    {
+      "from": "Bytom",
+      "to": "Niewiesze",
+      "distance_km": 34
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Chorzów",
+      "distance_km": 74
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Czechowice-Dziedzice",
+      "distance_km": 38
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Czuchów",
+      "distance_km": 52
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Dąbrowa Górnicza",
+      "distance_km": 93
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Gliwice",
+      "distance_km": 69
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Godziszka",
+      "distance_km": 46
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Imielin",
+      "distance_km": 75
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Jasienica",
+      "distance_km": 24
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 26
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Katowice",
+      "distance_km": 73
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Kleszczów",
+      "distance_km": 81
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 73
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Lipnik",
+      "distance_km": 157
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Lubliniec",
+      "distance_km": 115
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Łaziska Górne",
+      "distance_km": 52
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Mikołów",
+      "distance_km": 60
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Mysłowice",
+      "distance_km": 82
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Nakło Śląskie",
+      "distance_km": 94
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Piekary Śląskie",
+      "distance_km": 86
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 71
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Racibórz",
+      "distance_km": 61
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Ruda Śląska",
+      "distance_km": 65
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 78
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Sosnowiec",
+      "distance_km": 87
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Szczyrk",
+      "distance_km": 46
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Świętochłowice",
+      "distance_km": 76
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Tarnowskie Góry",
+      "distance_km": 86
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Tychy",
+      "distance_km": 63
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Ustroń",
+      "distance_km": 15
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Wilkowice",
+      "distance_km": 42
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Zabrze",
+      "distance_km": 68
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Zawiercie",
+      "distance_km": 122
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Żory",
+      "distance_km": 36
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Żywiec",
+      "distance_km": 51
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Częstochowa",
+      "distance_km": 154
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 43
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Janów",
+      "distance_km": 147
+    },
+    {
+      "from": "Cieszyn",
+      "to": "Niewiesze",
+      "distance_km": 89
+    },
+    {
+      "from": "Chorzów",
+      "to": "Czechowice-Dziedzice",
+      "distance_km": 55
+    },
+    {
+      "from": "Chorzów",
+      "to": "Czuchów",
+      "distance_km": 33
+    },
+    {
+      "from": "Chorzów",
+      "to": "Dąbrowa Górnicza",
+      "distance_km": 22
+    },
+    {
+      "from": "Chorzów",
+      "to": "Gliwice",
+      "distance_km": 23
+    },
+    {
+      "from": "Chorzów",
+      "to": "Godziszka",
+      "distance_km": 80
+    },
+    {
+      "from": "Chorzów",
+      "to": "Imielin",
+      "distance_km": 28
+    },
+    {
+      "from": "Chorzów",
+      "to": "Jasienica",
+      "distance_km": 69
+    },
+    {
+      "from": "Chorzów",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 54
+    },
+    {
+      "from": "Chorzów",
+      "to": "Katowice",
+      "distance_km": 7
+    },
+    {
+      "from": "Chorzów",
+      "to": "Kleszczów",
+      "distance_km": 36
+    },
+    {
+      "from": "Chorzów",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 57
+    },
+    {
+      "from": "Chorzów",
+      "to": "Lipnik",
+      "distance_km": 82
+    },
+    {
+      "from": "Chorzów",
+      "to": "Lubliniec",
+      "distance_km": 51
+    },
+    {
+      "from": "Chorzów",
+      "to": "Łaziska Górne",
+      "distance_km": 22
+    },
+    {
+      "from": "Chorzów",
+      "to": "Mikołów",
+      "distance_km": 17
+    },
+    {
+      "from": "Chorzów",
+      "to": "Mysłowice",
+      "distance_km": 16
+    },
+    {
+      "from": "Chorzów",
+      "to": "Nakło Śląskie",
+      "distance_km": 19
+    },
+    {
+      "from": "Chorzów",
+      "to": "Piekary Śląskie",
+      "distance_km": 12
+    },
+    {
+      "from": "Chorzów",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 78
+    },
+    {
+      "from": "Chorzów",
+      "to": "Racibórz",
+      "distance_km": 69
+    },
+    {
+      "from": "Chorzów",
+      "to": "Ruda Śląska",
+      "distance_km": 10
+    },
+    {
+      "from": "Chorzów",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 8
+    },
+    {
+      "from": "Chorzów",
+      "to": "Sosnowiec",
+      "distance_km": 17
+    },
+    {
+      "from": "Chorzów",
+      "to": "Szczyrk",
+      "distance_km": 81
+    },
+    {
+      "from": "Chorzów",
+      "to": "Świętochłowice",
+      "distance_km": 5
+    },
+    {
+      "from": "Chorzów",
+      "to": "Tarnowskie Góry",
+      "distance_km": 20
+    },
+    {
+      "from": "Chorzów",
+      "to": "Tychy",
+      "distance_km": 26
+    },
+    {
+      "from": "Chorzów",
+      "to": "Ustroń",
+      "distance_km": 78
+    },
+    {
+      "from": "Chorzów",
+      "to": "Wilkowice",
+      "distance_km": 76
+    },
+    {
+      "from": "Chorzów",
+      "to": "Zabrze",
+      "distance_km": 15
+    },
+    {
+      "from": "Chorzów",
+      "to": "Zawiercie",
+      "distance_km": 51
+    },
+    {
+      "from": "Chorzów",
+      "to": "Żory",
+      "distance_km": 37
+    },
+    {
+      "from": "Chorzów",
+      "to": "Żywiec",
+      "distance_km": 85
+    },
+    {
+      "from": "Chorzów",
+      "to": "Częstochowa",
+      "distance_km": 70
+    },
+    {
+      "from": "Chorzów",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 49
+    },
+    {
+      "from": "Chorzów",
+      "to": "Janów",
+      "distance_km": 72
+    },
+    {
+      "from": "Chorzów",
+      "to": "Niewiesze",
+      "distance_km": 42
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Czuchów",
+      "distance_km": 46
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Dąbrowa Górnicza",
+      "distance_km": 60
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Gliwice",
+      "distance_km": 56
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Godziszka",
+      "distance_km": 25
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Imielin",
+      "distance_km": 41
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Jasienica",
+      "distance_km": 15
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 38
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Katowice",
+      "distance_km": 48
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Kleszczów",
+      "distance_km": 68
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 72
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Lipnik",
+      "distance_km": 124
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Lubliniec",
+      "distance_km": 103
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Łaziska Górne",
+      "distance_km": 34
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Mikołów",
+      "distance_km": 37
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Mysłowice",
+      "distance_km": 49
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Nakło Śląskie",
+      "distance_km": 70
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Piekary Śląskie",
+      "distance_km": 63
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 79
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Racibórz",
+      "distance_km": 70
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Ruda Śląska",
+      "distance_km": 47
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 53
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Sosnowiec",
+      "distance_km": 54
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Szczyrk",
+      "distance_km": 26
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Świętochłowice",
+      "distance_km": 54
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Tarnowskie Góry",
+      "distance_km": 71
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Tychy",
+      "distance_km": 29
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Ustroń",
+      "distance_km": 34
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Wilkowice",
+      "distance_km": 21
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Zabrze",
+      "distance_km": 53
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Zawiercie",
+      "distance_km": 89
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Żory",
+      "distance_km": 30
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Żywiec",
+      "distance_km": 30
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Częstochowa",
+      "distance_km": 122
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 6
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Janów",
+      "distance_km": 114
+    },
+    {
+      "from": "Czechowice-Dziedzice",
+      "to": "Niewiesze",
+      "distance_km": 77
+    },
+    {
+      "from": "Czuchów",
+      "to": "Dąbrowa Górnicza",
+      "distance_km": 52
+    },
+    {
+      "from": "Czuchów",
+      "to": "Gliwice",
+      "distance_km": 17
+    },
+    {
+      "from": "Czuchów",
+      "to": "Godziszka",
+      "distance_km": 69
+    },
+    {
+      "from": "Czuchów",
+      "to": "Imielin",
+      "distance_km": 48
+    },
+    {
+      "from": "Czuchów",
+      "to": "Jasienica",
+      "distance_km": 52
+    },
+    {
+      "from": "Czuchów",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 30
+    },
+    {
+      "from": "Czuchów",
+      "to": "Katowice",
+      "distance_km": 37
+    },
+    {
+      "from": "Czuchów",
+      "to": "Kleszczów",
+      "distance_km": 29
+    },
+    {
+      "from": "Czuchów",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 34
+    },
+    {
+      "from": "Czuchów",
+      "to": "Lipnik",
+      "distance_km": 111
+    },
+    {
+      "from": "Czuchów",
+      "to": "Lubliniec",
+      "distance_km": 64
+    },
+    {
+      "from": "Czuchów",
+      "to": "Łaziska Górne",
+      "distance_km": 17
+    },
+    {
+      "from": "Czuchów",
+      "to": "Mikołów",
+      "distance_km": 24
+    },
+    {
+      "from": "Czuchów",
+      "to": "Mysłowice",
+      "distance_km": 43
+    },
+    {
+      "from": "Czuchów",
+      "to": "Nakło Śląskie",
+      "distance_km": 49
+    },
+    {
+      "from": "Czuchów",
+      "to": "Piekary Śląskie",
+      "distance_km": 44
+    },
+    {
+      "from": "Czuchów",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 49
+    },
+    {
+      "from": "Czuchów",
+      "to": "Racibórz",
+      "distance_km": 40
+    },
+    {
+      "from": "Czuchów",
+      "to": "Ruda Śląska",
+      "distance_km": 23
+    },
+    {
+      "from": "Czuchów",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 40
+    },
+    {
+      "from": "Czuchów",
+      "to": "Sosnowiec",
+      "distance_km": 46
+    },
+    {
+      "from": "Czuchów",
+      "to": "Szczyrk",
+      "distance_km": 71
+    },
+    {
+      "from": "Czuchów",
+      "to": "Świętochłowice",
+      "distance_km": 32
+    },
+    {
+      "from": "Czuchów",
+      "to": "Tarnowskie Góry",
+      "distance_km": 38
+    },
+    {
+      "from": "Czuchów",
+      "to": "Tychy",
+      "distance_km": 33
+    },
+    {
+      "from": "Czuchów",
+      "to": "Ustroń",
+      "distance_km": 56
+    },
+    {
+      "from": "Czuchów",
+      "to": "Wilkowice",
+      "distance_km": 65
+    },
+    {
+      "from": "Czuchów",
+      "to": "Zabrze",
+      "distance_km": 23
+    },
+    {
+      "from": "Czuchów",
+      "to": "Zawiercie",
+      "distance_km": 85
+    },
+    {
+      "from": "Czuchów",
+      "to": "Żory",
+      "distance_km": 16
+    },
+    {
+      "from": "Czuchów",
+      "to": "Żywiec",
+      "distance_km": 75
+    },
+    {
+      "from": "Czuchów",
+      "to": "Częstochowa",
+      "distance_km": 92
+    },
+    {
+      "from": "Czuchów",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 39
+    },
+    {
+      "from": "Czuchów",
+      "to": "Janów",
+      "distance_km": 104
+    },
+    {
+      "from": "Czuchów",
+      "to": "Niewiesze",
+      "distance_km": 37
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Gliwice",
+      "distance_km": 43
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Godziszka",
+      "distance_km": 84
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Imielin",
+      "distance_km": 23
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Jasienica",
+      "distance_km": 74
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 69
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Katowice",
+      "distance_km": 15
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Kleszczów",
+      "distance_km": 53
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 78
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Lipnik",
+      "distance_km": 64
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Lubliniec",
+      "distance_km": 66
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Łaziska Górne",
+      "distance_km": 36
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Mikołów",
+      "distance_km": 32
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Mysłowice",
+      "distance_km": 11
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Nakło Śląskie",
+      "distance_km": 31
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Piekary Śląskie",
+      "distance_km": 23
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 99
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Racibórz",
+      "distance_km": 90
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Ruda Śląska",
+      "distance_km": 30
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 16
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Sosnowiec",
+      "distance_km": 8
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Szczyrk",
+      "distance_km": 85
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Świętochłowice",
+      "distance_km": 25
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Tarnowskie Góry",
+      "distance_km": 33
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Tychy",
+      "distance_km": 31
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Ustroń",
+      "distance_km": 93
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Wilkowice",
+      "distance_km": 79
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Zabrze",
+      "distance_km": 35
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Zawiercie",
+      "distance_km": 28
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Żory",
+      "distance_km": 52
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Żywiec",
+      "distance_km": 89
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Częstochowa",
+      "distance_km": 62
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 54
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Janów",
+      "distance_km": 54
+    },
+    {
+      "from": "Dąbrowa Górnicza",
+      "to": "Niewiesze",
+      "distance_km": 55
+    },
+    {
+      "from": "Gliwice",
+      "to": "Godziszka",
+      "distance_km": 80
+    },
+    {
+      "from": "Gliwice",
+      "to": "Imielin",
+      "distance_km": 47
+    },
+    {
+      "from": "Gliwice",
+      "to": "Jasienica",
+      "distance_km": 69
+    },
+    {
+      "from": "Gliwice",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 47
+    },
+    {
+      "from": "Gliwice",
+      "to": "Katowice",
+      "distance_km": 28
+    },
+    {
+      "from": "Gliwice",
+      "to": "Kleszczów",
+      "distance_km": 13
+    },
+    {
+      "from": "Gliwice",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 34
+    },
+    {
+      "from": "Gliwice",
+      "to": "Lipnik",
+      "distance_km": 94
+    },
+    {
+      "from": "Gliwice",
+      "to": "Lubliniec",
+      "distance_km": 47
+    },
+    {
+      "from": "Gliwice",
+      "to": "Łaziska Górne",
+      "distance_km": 23
+    },
+    {
+      "from": "Gliwice",
+      "to": "Mikołów",
+      "distance_km": 24
+    },
+    {
+      "from": "Gliwice",
+      "to": "Mysłowice",
+      "distance_km": 38
+    },
+    {
+      "from": "Gliwice",
+      "to": "Nakło Śląskie",
+      "distance_km": 27
+    },
+    {
+      "from": "Gliwice",
+      "to": "Piekary Śląskie",
+      "distance_km": 24
+    },
+    {
+      "from": "Gliwice",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 55
+    },
+    {
+      "from": "Gliwice",
+      "to": "Racibórz",
+      "distance_km": 46
+    },
+    {
+      "from": "Gliwice",
+      "to": "Ruda Śląska",
+      "distance_km": 16
+    },
+    {
+      "from": "Gliwice",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 32
+    },
+    {
+      "from": "Gliwice",
+      "to": "Sosnowiec",
+      "distance_km": 38
+    },
+    {
+      "from": "Gliwice",
+      "to": "Szczyrk",
+      "distance_km": 81
+    },
+    {
+      "from": "Gliwice",
+      "to": "Świętochłowice",
+      "distance_km": 21
+    },
+    {
+      "from": "Gliwice",
+      "to": "Tarnowskie Góry",
+      "distance_km": 21
+    },
+    {
+      "from": "Gliwice",
+      "to": "Tychy",
+      "distance_km": 33
+    },
+    {
+      "from": "Gliwice",
+      "to": "Ustroń",
+      "distance_km": 73
+    },
+    {
+      "from": "Gliwice",
+      "to": "Wilkowice",
+      "distance_km": 76
+    },
+    {
+      "from": "Gliwice",
+      "to": "Zabrze",
+      "distance_km": 10
+    },
+    {
+      "from": "Gliwice",
+      "to": "Zawiercie",
+      "distance_km": 69
+    },
+    {
+      "from": "Gliwice",
+      "to": "Żory",
+      "distance_km": 33
+    },
+    {
+      "from": "Gliwice",
+      "to": "Żywiec",
+      "distance_km": 85
+    },
+    {
+      "from": "Gliwice",
+      "to": "Częstochowa",
+      "distance_km": 75
+    },
+    {
+      "from": "Gliwice",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 50
+    },
+    {
+      "from": "Gliwice",
+      "to": "Janów",
+      "distance_km": 87
+    },
+    {
+      "from": "Gliwice",
+      "to": "Niewiesze",
+      "distance_km": 21
+    },
+    {
+      "from": "Godziszka",
+      "to": "Imielin",
+      "distance_km": 59
+    },
+    {
+      "from": "Godziszka",
+      "to": "Jasienica",
+      "distance_km": 23
+    },
+    {
+      "from": "Godziszka",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 57
+    },
+    {
+      "from": "Godziszka",
+      "to": "Katowice",
+      "distance_km": 74
+    },
+    {
+      "from": "Godziszka",
+      "to": "Kleszczów",
+      "distance_km": 91
+    },
+    {
+      "from": "Godziszka",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 95
+    },
+    {
+      "from": "Godziszka",
+      "to": "Lipnik",
+      "distance_km": 147
+    },
+    {
+      "from": "Godziszka",
+      "to": "Lubliniec",
+      "distance_km": 126
+    },
+    {
+      "from": "Godziszka",
+      "to": "Łaziska Górne",
+      "distance_km": 58
+    },
+    {
+      "from": "Godziszka",
+      "to": "Mikołów",
+      "distance_km": 60
+    },
+    {
+      "from": "Godziszka",
+      "to": "Mysłowice",
+      "distance_km": 72
+    },
+    {
+      "from": "Godziszka",
+      "to": "Nakło Śląskie",
+      "distance_km": 94
+    },
+    {
+      "from": "Godziszka",
+      "to": "Piekary Śląskie",
+      "distance_km": 86
+    },
+    {
+      "from": "Godziszka",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 102
+    },
+    {
+      "from": "Godziszka",
+      "to": "Racibórz",
+      "distance_km": 93
+    },
+    {
+      "from": "Godziszka",
+      "to": "Ruda Śląska",
+      "distance_km": 71
+    },
+    {
+      "from": "Godziszka",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 79
+    },
+    {
+      "from": "Godziszka",
+      "to": "Sosnowiec",
+      "distance_km": 78
+    },
+    {
+      "from": "Godziszka",
+      "to": "Szczyrk",
+      "distance_km": 6
+    },
+    {
+      "from": "Godziszka",
+      "to": "Świętochłowice",
+      "distance_km": 77
+    },
+    {
+      "from": "Godziszka",
+      "to": "Tarnowskie Góry",
+      "distance_km": 95
+    },
+    {
+      "from": "Godziszka",
+      "to": "Tychy",
+      "distance_km": 53
+    },
+    {
+      "from": "Godziszka",
+      "to": "Ustroń",
+      "distance_km": 38
+    },
+    {
+      "from": "Godziszka",
+      "to": "Wilkowice",
+      "distance_km": 10
+    },
+    {
+      "from": "Godziszka",
+      "to": "Zabrze",
+      "distance_km": 77
+    },
+    {
+      "from": "Godziszka",
+      "to": "Zawiercie",
+      "distance_km": 107
+    },
+    {
+      "from": "Godziszka",
+      "to": "Żory",
+      "distance_km": 54
+    },
+    {
+      "from": "Godziszka",
+      "to": "Żywiec",
+      "distance_km": 10
+    },
+    {
+      "from": "Godziszka",
+      "to": "Częstochowa",
+      "distance_km": 145
+    },
+    {
+      "from": "Godziszka",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 30
+    },
+    {
+      "from": "Godziszka",
+      "to": "Janów",
+      "distance_km": 137
+    },
+    {
+      "from": "Godziszka",
+      "to": "Niewiesze",
+      "distance_km": 100
+    },
+    {
+      "from": "Imielin",
+      "to": "Jasienica",
+      "distance_km": 54
+    },
+    {
+      "from": "Imielin",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 59
+    },
+    {
+      "from": "Imielin",
+      "to": "Katowice",
+      "distance_km": 21
+    },
+    {
+      "from": "Imielin",
+      "to": "Kleszczów",
+      "distance_km": 61
+    },
+    {
+      "from": "Imielin",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 78
+    },
+    {
+      "from": "Imielin",
+      "to": "Lipnik",
+      "distance_km": 85
+    },
+    {
+      "from": "Imielin",
+      "to": "Lubliniec",
+      "distance_km": 90
+    },
+    {
+      "from": "Imielin",
+      "to": "Łaziska Górne",
+      "distance_km": 31
+    },
+    {
+      "from": "Imielin",
+      "to": "Mikołów",
+      "distance_km": 27
+    },
+    {
+      "from": "Imielin",
+      "to": "Mysłowice",
+      "distance_km": 13
+    },
+    {
+      "from": "Imielin",
+      "to": "Nakło Śląskie",
+      "distance_km": 50
+    },
+    {
+      "from": "Imielin",
+      "to": "Piekary Śląskie",
+      "distance_km": 41
+    },
+    {
+      "from": "Imielin",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 98
+    },
+    {
+      "from": "Imielin",
+      "to": "Racibórz",
+      "distance_km": 87
+    },
+    {
+      "from": "Imielin",
+      "to": "Ruda Śląska",
+      "distance_km": 31
+    },
+    {
+      "from": "Imielin",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 26
+    },
+    {
+      "from": "Imielin",
+      "to": "Sosnowiec",
+      "distance_km": 18
+    },
+    {
+      "from": "Imielin",
+      "to": "Szczyrk",
+      "distance_km": 60
+    },
+    {
+      "from": "Imielin",
+      "to": "Świętochłowice",
+      "distance_km": 31
+    },
+    {
+      "from": "Imielin",
+      "to": "Tarnowskie Góry",
+      "distance_km": 53
+    },
+    {
+      "from": "Imielin",
+      "to": "Tychy",
+      "distance_km": 15
+    },
+    {
+      "from": "Imielin",
+      "to": "Ustroń",
+      "distance_km": 73
+    },
+    {
+      "from": "Imielin",
+      "to": "Wilkowice",
+      "distance_km": 54
+    },
+    {
+      "from": "Imielin",
+      "to": "Zabrze",
+      "distance_km": 40
+    },
+    {
+      "from": "Imielin",
+      "to": "Zawiercie",
+      "distance_km": 48
+    },
+    {
+      "from": "Imielin",
+      "to": "Żory",
+      "distance_km": 50
+    },
+    {
+      "from": "Imielin",
+      "to": "Żywiec",
+      "distance_km": 62
+    },
+    {
+      "from": "Imielin",
+      "to": "Częstochowa",
+      "distance_km": 83
+    },
+    {
+      "from": "Imielin",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 35
+    },
+    {
+      "from": "Imielin",
+      "to": "Janów",
+      "distance_km": 75
+    },
+    {
+      "from": "Imielin",
+      "to": "Niewiesze",
+      "distance_km": 69
+    },
+    {
+      "from": "Jasienica",
+      "to": "Jastrzębie Zdrój",
+      "distance_km": 35
+    },
+    {
+      "from": "Jasienica",
+      "to": "Katowice",
+      "distance_km": 63
+    },
+    {
+      "from": "Jasienica",
+      "to": "Kleszczów",
+      "distance_km": 81
+    },
+    {
+      "from": "Jasienica",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 77
+    },
+    {
+      "from": "Jasienica",
+      "to": "Lipnik",
+      "distance_km": 139
+    },
+    {
+      "from": "Jasienica",
+      "to": "Lubliniec",
+      "distance_km": 115
+    },
+    {
+      "from": "Jasienica",
+      "to": "Łaziska Górne",
+      "distance_km": 48
+    },
+    {
+      "from": "Jasienica",
+      "to": "Mikołów",
+      "distance_km": 50
+    },
+    {
+      "from": "Jasienica",
+      "to": "Mysłowice",
+      "distance_km": 62
+    },
+    {
+      "from": "Jasienica",
+      "to": "Nakło Śląskie",
+      "distance_km": 84
+    },
+    {
+      "from": "Jasienica",
+      "to": "Piekary Śląskie",
+      "distance_km": 76
+    },
+    {
+      "from": "Jasienica",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 81
+    },
+    {
+      "from": "Jasienica",
+      "to": "Racibórz",
+      "distance_km": 71
+    },
+    {
+      "from": "Jasienica",
+      "to": "Ruda Śląska",
+      "distance_km": 60
+    },
+    {
+      "from": "Jasienica",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 69
+    },
+    {
+      "from": "Jasienica",
+      "to": "Sosnowiec",
+      "distance_km": 68
+    },
+    {
+      "from": "Jasienica",
+      "to": "Szczyrk",
+      "distance_km": 24
+    },
+    {
+      "from": "Jasienica",
+      "to": "Świętochłowice",
+      "distance_km": 67
+    },
+    {
+      "from": "Jasienica",
+      "to": "Tarnowskie Góry",
+      "distance_km": 85
+    },
+    {
+      "from": "Jasienica",
+      "to": "Tychy",
+      "distance_km": 43
+    },
+    {
+      "from": "Jasienica",
+      "to": "Ustroń",
+      "distance_km": 18
+    },
+    {
+      "from": "Jasienica",
+      "to": "Wilkowice",
+      "distance_km": 19
+    },
+    {
+      "from": "Jasienica",
+      "to": "Zabrze",
+      "distance_km": 67
+    },
+    {
+      "from": "Jasienica",
+      "to": "Zawiercie",
+      "distance_km": 104
+    },
+    {
+      "from": "Jasienica",
+      "to": "Żory",
+      "distance_km": 36
+    },
+    {
+      "from": "Jasienica",
+      "to": "Żywiec",
+      "distance_km": 29
+    },
+    {
+      "from": "Jasienica",
+      "to": "Częstochowa",
+      "distance_km": 137
+    },
+    {
+      "from": "Jasienica",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 20
+    },
+    {
+      "from": "Jasienica",
+      "to": "Janów",
+      "distance_km": 129
+    },
+    {
+      "from": "Jasienica",
+      "to": "Niewiesze",
+      "distance_km": 89
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Katowice",
+      "distance_km": 53
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Kleszczów",
+      "distance_km": 58
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 47
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Lipnik",
+      "distance_km": 128
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Lubliniec",
+      "distance_km": 94
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Łaziska Górne",
+      "distance_km": 32
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Mikołów",
+      "distance_km": 40
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Mysłowice",
+      "distance_km": 59
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Nakło Śląskie",
+      "distance_km": 73
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Piekary Śląskie",
+      "distance_km": 65
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 47
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Racibórz",
+      "distance_km": 38
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Ruda Śląska",
+      "distance_km": 44
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 58
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Sosnowiec",
+      "distance_km": 63
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Szczyrk",
+      "distance_km": 58
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Świętochłowice",
+      "distance_km": 55
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Tarnowskie Góry",
+      "distance_km": 67
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Tychy",
+      "distance_km": 47
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Ustroń",
+      "distance_km": 38
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Wilkowice",
+      "distance_km": 53
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Zabrze",
+      "distance_km": 48
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Zawiercie",
+      "distance_km": 100
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Żory",
+      "distance_km": 16
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Żywiec",
+      "distance_km": 62
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Częstochowa",
+      "distance_km": 122
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 32
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Janów",
+      "distance_km": 119
+    },
+    {
+      "from": "Jastrzębie Zdrój",
+      "to": "Niewiesze",
+      "distance_km": 66
+    },
+    {
+      "from": "Katowice",
+      "to": "Kleszczów",
+      "distance_km": 41
+    },
+    {
+      "from": "Katowice",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 63
+    },
+    {
+      "from": "Katowice",
+      "to": "Lipnik",
+      "distance_km": 76
+    },
+    {
+      "from": "Katowice",
+      "to": "Lubliniec",
+      "distance_km": 61
+    },
+    {
+      "from": "Katowice",
+      "to": "Łaziska Górne",
+      "distance_km": 21
+    },
+    {
+      "from": "Katowice",
+      "to": "Mikołów",
+      "distance_km": 16
+    },
+    {
+      "from": "Katowice",
+      "to": "Mysłowice",
+      "distance_km": 9
+    },
+    {
+      "from": "Katowice",
+      "to": "Nakło Śląskie",
+      "distance_km": 26
+    },
+    {
+      "from": "Katowice",
+      "to": "Piekary Śląskie",
+      "distance_km": 18
+    },
+    {
+      "from": "Katowice",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 84
+    },
+    {
+      "from": "Katowice",
+      "to": "Racibórz",
+      "distance_km": 75
+    },
+    {
+      "from": "Katowice",
+      "to": "Ruda Śląska",
+      "distance_km": 15
+    },
+    {
+      "from": "Katowice",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 6
+    },
+    {
+      "from": "Katowice",
+      "to": "Sosnowiec",
+      "distance_km": 10
+    },
+    {
+      "from": "Katowice",
+      "to": "Szczyrk",
+      "distance_km": 75
+    },
+    {
+      "from": "Katowice",
+      "to": "Świętochłowice",
+      "distance_km": 10
+    },
+    {
+      "from": "Katowice",
+      "to": "Tarnowskie Góry",
+      "distance_km": 27
+    },
+    {
+      "from": "Katowice",
+      "to": "Tychy",
+      "distance_km": 19
+    },
+    {
+      "from": "Katowice",
+      "to": "Ustroń",
+      "distance_km": 77
+    },
+    {
+      "from": "Katowice",
+      "to": "Wilkowice",
+      "distance_km": 70
+    },
+    {
+      "from": "Katowice",
+      "to": "Zabrze",
+      "distance_km": 20
+    },
+    {
+      "from": "Katowice",
+      "to": "Zawiercie",
+      "distance_km": 45
+    },
+    {
+      "from": "Katowice",
+      "to": "Żory",
+      "distance_km": 37
+    },
+    {
+      "from": "Katowice",
+      "to": "Żywiec",
+      "distance_km": 79
+    },
+    {
+      "from": "Katowice",
+      "to": "Częstochowa",
+      "distance_km": 74
+    },
+    {
+      "from": "Katowice",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 42
+    },
+    {
+      "from": "Katowice",
+      "to": "Janów",
+      "distance_km": 66
+    },
+    {
+      "from": "Katowice",
+      "to": "Niewiesze",
+      "distance_km": 50
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Kuźnia Raciborska",
+      "distance_km": 35
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Lipnik",
+      "distance_km": 104
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Lubliniec",
+      "distance_km": 47
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Łaziska Górne",
+      "distance_km": 36
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Mikołów",
+      "distance_km": 36
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Mysłowice",
+      "distance_km": 52
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Nakło Śląskie",
+      "distance_km": 36
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Piekary Śląskie",
+      "distance_km": 34
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 56
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Racibórz",
+      "distance_km": 47
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Ruda Śląska",
+      "distance_km": 30
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 43
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Sosnowiec",
+      "distance_km": 50
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Szczyrk",
+      "distance_km": 93
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Świętochłowice",
+      "distance_km": 34
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Tarnowskie Góry",
+      "distance_km": 30
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Tychy",
+      "distance_km": 45
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Ustroń",
+      "distance_km": 85
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Wilkowice",
+      "distance_km": 88
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Zabrze",
+      "distance_km": 23
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Zawiercie",
+      "distance_km": 80
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Żory",
+      "distance_km": 44
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Żywiec",
+      "distance_km": 97
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Częstochowa",
+      "distance_km": 79
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 62
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Janów",
+      "distance_km": 94
+    },
+    {
+      "from": "Kleszczów",
+      "to": "Niewiesze",
+      "distance_km": 8
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Lipnik",
+      "distance_km": 134
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Lubliniec",
+      "distance_km": 82
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Łaziska Górne",
+      "distance_km": 48
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Mikołów",
+      "distance_km": 53
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Mysłowice",
+      "distance_km": 72
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Nakło Śląskie",
+      "distance_km": 67
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Piekary Śląskie",
+      "distance_km": 59
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 27
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Racibórz",
+      "distance_km": 18
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Ruda Śląska",
+      "distance_km": 47
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 66
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Sosnowiec",
+      "distance_km": 72
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Szczyrk",
+      "distance_km": 97
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Świętochłowice",
+      "distance_km": 56
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Tarnowskie Góry",
+      "distance_km": 56
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Tychy",
+      "distance_km": 63
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Ustroń",
+      "distance_km": 81
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Wilkowice",
+      "distance_km": 91
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Zabrze",
+      "distance_km": 45
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Zawiercie",
+      "distance_km": 105
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Żory",
+      "distance_km": 41
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Żywiec",
+      "distance_km": 101
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Częstochowa",
+      "distance_km": 111
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 65
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Janów",
+      "distance_km": 124
+    },
+    {
+      "from": "Kuźnia Raciborska",
+      "to": "Niewiesze",
+      "distance_km": 42
+    },
+    {
+      "from": "Lipnik",
+      "to": "Lubliniec",
+      "distance_km": 62
+    },
+    {
+      "from": "Lipnik",
+      "to": "Łaziska Górne",
+      "distance_km": 96
+    },
+    {
+      "from": "Lipnik",
+      "to": "Mikołów",
+      "distance_km": 91
+    },
+    {
+      "from": "Lipnik",
+      "to": "Mysłowice",
+      "distance_km": 78
+    },
+    {
+      "from": "Lipnik",
+      "to": "Nakło Śląskie",
+      "distance_km": 70
+    },
+    {
+      "from": "Lipnik",
+      "to": "Piekary Śląskie",
+      "distance_km": 76
+    },
+    {
+      "from": "Lipnik",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 155
+    },
+    {
+      "from": "Lipnik",
+      "to": "Racibórz",
+      "distance_km": 146
+    },
+    {
+      "from": "Lipnik",
+      "to": "Ruda Śląska",
+      "distance_km": 90
+    },
+    {
+      "from": "Lipnik",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 74
+    },
+    {
+      "from": "Lipnik",
+      "to": "Sosnowiec",
+      "distance_km": 72
+    },
+    {
+      "from": "Lipnik",
+      "to": "Szczyrk",
+      "distance_km": 148
+    },
+    {
+      "from": "Lipnik",
+      "to": "Świętochłowice",
+      "distance_km": 85
+    },
+    {
+      "from": "Lipnik",
+      "to": "Tarnowskie Góry",
+      "distance_km": 73
+    },
+    {
+      "from": "Lipnik",
+      "to": "Tychy",
+      "distance_km": 92
+    },
+    {
+      "from": "Lipnik",
+      "to": "Ustroń",
+      "distance_km": 152
+    },
+    {
+      "from": "Lipnik",
+      "to": "Wilkowice",
+      "distance_km": 139
+    },
+    {
+      "from": "Lipnik",
+      "to": "Zabrze",
+      "distance_km": 91
+    },
+    {
+      "from": "Lipnik",
+      "to": "Zawiercie",
+      "distance_km": 41
+    },
+    {
+      "from": "Lipnik",
+      "to": "Żory",
+      "distance_km": 112
+    },
+    {
+      "from": "Lipnik",
+      "to": "Żywiec",
+      "distance_km": 150
+    },
+    {
+      "from": "Lipnik",
+      "to": "Częstochowa",
+      "distance_km": 26
+    },
+    {
+      "from": "Lipnik",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 117
+    },
+    {
+      "from": "Lipnik",
+      "to": "Janów",
+      "distance_km": 10
+    },
+    {
+      "from": "Lipnik",
+      "to": "Niewiesze",
+      "distance_km": 98
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Łaziska Górne",
+      "distance_km": 69
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Mikołów",
+      "distance_km": 66
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Mysłowice",
+      "distance_km": 73
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Nakło Śląskie",
+      "distance_km": 35
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Piekary Śląskie",
+      "distance_km": 42
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 102
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Racibórz",
+      "distance_km": 93
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Ruda Śląska",
+      "distance_km": 57
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 56
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Sosnowiec",
+      "distance_km": 65
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Szczyrk",
+      "distance_km": 127
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Świętochłowice",
+      "distance_km": 52
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Tarnowskie Góry",
+      "distance_km": 31
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Tychy",
+      "distance_km": 76
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Ustroń",
+      "distance_km": 120
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Wilkowice",
+      "distance_km": 122
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Zabrze",
+      "distance_km": 50
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Zawiercie",
+      "distance_km": 66
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Żory",
+      "distance_km": 79
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Żywiec",
+      "distance_km": 131
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Częstochowa",
+      "distance_km": 38
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 96
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Janów",
+      "distance_km": 63
+    },
+    {
+      "from": "Lubliniec",
+      "to": "Niewiesze",
+      "distance_km": 41
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Mikołów",
+      "distance_km": 7
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Mysłowice",
+      "distance_km": 27
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Nakło Śląskie",
+      "distance_km": 41
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Piekary Śląskie",
+      "distance_km": 33
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 64
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Racibórz",
+      "distance_km": 55
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Ruda Śląska",
+      "distance_km": 15
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 26
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Sosnowiec",
+      "distance_km": 30
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Szczyrk",
+      "distance_km": 59
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Świętochłowice",
+      "distance_km": 24
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Tarnowskie Góry",
+      "distance_km": 38
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Tychy",
+      "distance_km": 16
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Ustroń",
+      "distance_km": 56
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Wilkowice",
+      "distance_km": 54
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Zabrze",
+      "distance_km": 20
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Zawiercie",
+      "distance_km": 65
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Żory",
+      "distance_km": 16
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Żywiec",
+      "distance_km": 63
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Częstochowa",
+      "distance_km": 92
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 28
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Janów",
+      "distance_km": 87
+    },
+    {
+      "from": "Łaziska Górne",
+      "to": "Niewiesze",
+      "distance_km": 44
+    },
+    {
+      "from": "Mikołów",
+      "to": "Mysłowice",
+      "distance_km": 22
+    },
+    {
+      "from": "Mikołów",
+      "to": "Nakło Śląskie",
+      "distance_km": 36
+    },
+    {
+      "from": "Mikołów",
+      "to": "Piekary Śląskie",
+      "distance_km": 28
+    },
+    {
+      "from": "Mikołów",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 72
+    },
+    {
+      "from": "Mikołów",
+      "to": "Racibórz",
+      "distance_km": 63
+    },
+    {
+      "from": "Mikołów",
+      "to": "Ruda Śląska",
+      "distance_km": 13
+    },
+    {
+      "from": "Mikołów",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 21
+    },
+    {
+      "from": "Mikołów",
+      "to": "Sosnowiec",
+      "distance_km": 25
+    },
+    {
+      "from": "Mikołów",
+      "to": "Szczyrk",
+      "distance_km": 61
+    },
+    {
+      "from": "Mikołów",
+      "to": "Świętochłowice",
+      "distance_km": 19
+    },
+    {
+      "from": "Mikołów",
+      "to": "Tarnowskie Góry",
+      "distance_km": 35
+    },
+    {
+      "from": "Mikołów",
+      "to": "Tychy",
+      "distance_km": 12
+    },
+    {
+      "from": "Mikołów",
+      "to": "Ustroń",
+      "distance_km": 64
+    },
+    {
+      "from": "Mikołów",
+      "to": "Wilkowice",
+      "distance_km": 56
+    },
+    {
+      "from": "Mikołów",
+      "to": "Zabrze",
+      "distance_km": 20
+    },
+    {
+      "from": "Mikołów",
+      "to": "Zawiercie",
+      "distance_km": 61
+    },
+    {
+      "from": "Mikołów",
+      "to": "Żory",
+      "distance_km": 24
+    },
+    {
+      "from": "Mikołów",
+      "to": "Żywiec",
+      "distance_km": 65
+    },
+    {
+      "from": "Mikołów",
+      "to": "Częstochowa",
+      "distance_km": 86
+    },
+    {
+      "from": "Mikołów",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 30
+    },
+    {
+      "from": "Mikołów",
+      "to": "Janów",
+      "distance_km": 82
+    },
+    {
+      "from": "Mikołów",
+      "to": "Niewiesze",
+      "distance_km": 44
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Nakło Śląskie",
+      "distance_km": 35
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Piekary Śląskie",
+      "distance_km": 27
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 91
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Racibórz",
+      "distance_km": 82
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Ruda Śląska",
+      "distance_km": 25
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 15
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Sosnowiec",
+      "distance_km": 6
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Szczyrk",
+      "distance_km": 74
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Świętochłowice",
+      "distance_km": 19
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Tarnowskie Góry",
+      "distance_km": 36
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Tychy",
+      "distance_km": 20
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Ustroń",
+      "distance_km": 85
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Wilkowice",
+      "distance_km": 68
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Zabrze",
+      "distance_km": 29
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Zawiercie",
+      "distance_km": 40
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Żory",
+      "distance_km": 43
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Żywiec",
+      "distance_km": 77
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Częstochowa",
+      "distance_km": 75
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 43
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Janów",
+      "distance_km": 68
+    },
+    {
+      "from": "Mysłowice",
+      "to": "Niewiesze",
+      "distance_km": 58
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Piekary Śląskie",
+      "distance_km": 8
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 86
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Racibórz",
+      "distance_km": 77
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Ruda Śląska",
+      "distance_km": 27
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 21
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Sosnowiec",
+      "distance_km": 31
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Szczyrk",
+      "distance_km": 95
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Świętochłowice",
+      "distance_km": 21
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Tarnowskie Góry",
+      "distance_km": 6
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Tychy",
+      "distance_km": 45
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Ustroń",
+      "distance_km": 97
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Wilkowice",
+      "distance_km": 90
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Zabrze",
+      "distance_km": 24
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Zawiercie",
+      "distance_km": 41
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Żory",
+      "distance_km": 55
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Żywiec",
+      "distance_km": 99
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Częstochowa",
+      "distance_km": 53
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 64
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Janów",
+      "distance_km": 60
+    },
+    {
+      "from": "Nakło Śląskie",
+      "to": "Niewiesze",
+      "distance_km": 34
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Pietrowice Wielkie",
+      "distance_km": 80
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Racibórz",
+      "distance_km": 71
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Ruda Śląska",
+      "distance_km": 19
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 13
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Sosnowiec",
+      "distance_km": 23
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Szczyrk",
+      "distance_km": 87
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Świętochłowice",
+      "distance_km": 13
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Tarnowskie Góry",
+      "distance_km": 11
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Tychy",
+      "distance_km": 37
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Ustroń",
+      "distance_km": 89
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Wilkowice",
+      "distance_km": 82
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Zabrze",
+      "distance_km": 18
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Zawiercie",
+      "distance_km": 46
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Żory",
+      "distance_km": 47
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Żywiec",
+      "distance_km": 91
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Częstochowa",
+      "distance_km": 58
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 56
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Janów",
+      "distance_km": 66
+    },
+    {
+      "from": "Piekary Śląskie",
+      "to": "Niewiesze",
+      "distance_km": 36
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Racibórz",
+      "distance_km": 11
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Ruda Śląska",
+      "distance_km": 70
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 88
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Sosnowiec",
+      "distance_km": 94
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Szczyrk",
+      "distance_km": 103
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Świętochłowice",
+      "distance_km": 77
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Tarnowskie Góry",
+      "distance_km": 78
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Tychy",
+      "distance_km": 83
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Ustroń",
+      "distance_km": 84
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Wilkowice",
+      "distance_km": 98
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Zabrze",
+      "distance_km": 66
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Zawiercie",
+      "distance_km": 127
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Żory",
+      "distance_km": 49
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Żywiec",
+      "distance_km": 107
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Częstochowa",
+      "distance_km": 132
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 73
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Janów",
+      "distance_km": 146
+    },
+    {
+      "from": "Pietrowice Wielkie",
+      "to": "Niewiesze",
+      "distance_km": 64
+    },
+    {
+      "from": "Racibórz",
+      "to": "Ruda Śląska",
+      "distance_km": 61
+    },
+    {
+      "from": "Racibórz",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 79
+    },
+    {
+      "from": "Racibórz",
+      "to": "Sosnowiec",
+      "distance_km": 85
+    },
+    {
+      "from": "Racibórz",
+      "to": "Szczyrk",
+      "distance_km": 94
+    },
+    {
+      "from": "Racibórz",
+      "to": "Świętochłowice",
+      "distance_km": 68
+    },
+    {
+      "from": "Racibórz",
+      "to": "Tarnowskie Góry",
+      "distance_km": 69
+    },
+    {
+      "from": "Racibórz",
+      "to": "Tychy",
+      "distance_km": 71
+    },
+    {
+      "from": "Racibórz",
+      "to": "Ustroń",
+      "distance_km": 75
+    },
+    {
+      "from": "Racibórz",
+      "to": "Wilkowice",
+      "distance_km": 89
+    },
+    {
+      "from": "Racibórz",
+      "to": "Zabrze",
+      "distance_km": 57
+    },
+    {
+      "from": "Racibórz",
+      "to": "Zawiercie",
+      "distance_km": 118
+    },
+    {
+      "from": "Racibórz",
+      "to": "Żory",
+      "distance_km": 40
+    },
+    {
+      "from": "Racibórz",
+      "to": "Żywiec",
+      "distance_km": 98
+    },
+    {
+      "from": "Racibórz",
+      "to": "Częstochowa",
+      "distance_km": 123
+    },
+    {
+      "from": "Racibórz",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 64
+    },
+    {
+      "from": "Racibórz",
+      "to": "Janów",
+      "distance_km": 137
+    },
+    {
+      "from": "Racibórz",
+      "to": "Niewiesze",
+      "distance_km": 55
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Siemianowice Śląskie",
+      "distance_km": 17
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Sosnowiec",
+      "distance_km": 24
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Szczyrk",
+      "distance_km": 72
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Świętochłowice",
+      "distance_km": 10
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Tarnowskie Góry",
+      "distance_km": 25
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Tychy",
+      "distance_km": 23
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Ustroń",
+      "distance_km": 69
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Wilkowice",
+      "distance_km": 67
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Zabrze",
+      "distance_km": 8
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Zawiercie",
+      "distance_km": 61
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Żory",
+      "distance_km": 28
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Żywiec",
+      "distance_km": 76
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Częstochowa",
+      "distance_km": 76
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 41
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Janów",
+      "distance_km": 80
+    },
+    {
+      "from": "Ruda Śląska",
+      "to": "Niewiesze",
+      "distance_km": 39
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Sosnowiec",
+      "distance_km": 10
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Szczyrk",
+      "distance_km": 80
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Świętochłowice",
+      "distance_km": 12
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Tarnowskie Góry",
+      "distance_km": 23
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Tychy",
+      "distance_km": 25
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Ustroń",
+      "distance_km": 82
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Wilkowice",
+      "distance_km": 75
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Zabrze",
+      "distance_km": 22
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Zawiercie",
+      "distance_km": 45
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Żory",
+      "distance_km": 42
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Żywiec",
+      "distance_km": 85
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Częstochowa",
+      "distance_km": 67
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 47
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Janów",
+      "distance_km": 64
+    },
+    {
+      "from": "Siemianowice Śląskie",
+      "to": "Niewiesze",
+      "distance_km": 44
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Szczyrk",
+      "distance_km": 79
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Świętochłowice",
+      "distance_km": 20
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Tarnowskie Góry",
+      "distance_km": 33
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Tychy",
+      "distance_km": 25
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Ustroń",
+      "distance_km": 88
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Wilkowice",
+      "distance_km": 73
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Zabrze",
+      "distance_km": 29
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Zawiercie",
+      "distance_km": 36
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Żory",
+      "distance_km": 47
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Żywiec",
+      "distance_km": 83
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Częstochowa",
+      "distance_km": 70
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 48
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Janów",
+      "distance_km": 62
+    },
+    {
+      "from": "Sosnowiec",
+      "to": "Niewiesze",
+      "distance_km": 54
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Świętochłowice",
+      "distance_km": 78
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Tarnowskie Góry",
+      "distance_km": 96
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Tychy",
+      "distance_km": 54
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Ustroń",
+      "distance_km": 32
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Wilkowice",
+      "distance_km": 12
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Zabrze",
+      "distance_km": 78
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Zawiercie",
+      "distance_km": 108
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Żory",
+      "distance_km": 55
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Żywiec",
+      "distance_km": 15
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Częstochowa",
+      "distance_km": 146
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 31
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Janów",
+      "distance_km": 138
+    },
+    {
+      "from": "Szczyrk",
+      "to": "Niewiesze",
+      "distance_km": 101
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Tarnowskie Góry",
+      "distance_km": 21
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Tychy",
+      "distance_km": 29
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Ustroń",
+      "distance_km": 79
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Wilkowice",
+      "distance_km": 73
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Zabrze",
+      "distance_km": 12
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Zawiercie",
+      "distance_km": 55
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Żory",
+      "distance_km": 37
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Żywiec",
+      "distance_km": 83
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Częstochowa",
+      "distance_km": 71
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 47
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Janów",
+      "distance_km": 75
+    },
+    {
+      "from": "Świętochłowice",
+      "to": "Niewiesze",
+      "distance_km": 41
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Tychy",
+      "distance_km": 45
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Ustroń",
+      "distance_km": 91
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Wilkowice",
+      "distance_km": 91
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Zabrze",
+      "distance_km": 19
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Zawiercie",
+      "distance_km": 47
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Żory",
+      "distance_km": 50
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Żywiec",
+      "distance_km": 100
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Częstochowa",
+      "distance_km": 54
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 65
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Janów",
+      "distance_km": 65
+    },
+    {
+      "from": "Tarnowskie Góry",
+      "to": "Niewiesze",
+      "distance_km": 28
+    },
+    {
+      "from": "Tychy",
+      "to": "Ustroń",
+      "distance_km": 63
+    },
+    {
+      "from": "Tychy",
+      "to": "Wilkowice",
+      "distance_km": 49
+    },
+    {
+      "from": "Tychy",
+      "to": "Zabrze",
+      "distance_km": 30
+    },
+    {
+      "from": "Tychy",
+      "to": "Zawiercie",
+      "distance_km": 58
+    },
+    {
+      "from": "Tychy",
+      "to": "Żory",
+      "distance_km": 34
+    },
+    {
+      "from": "Tychy",
+      "to": "Żywiec",
+      "distance_km": 58
+    },
+    {
+      "from": "Tychy",
+      "to": "Częstochowa",
+      "distance_km": 93
+    },
+    {
+      "from": "Tychy",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 23
+    },
+    {
+      "from": "Tychy",
+      "to": "Janów",
+      "distance_km": 82
+    },
+    {
+      "from": "Tychy",
+      "to": "Niewiesze",
+      "distance_km": 53
+    },
+    {
+      "from": "Ustroń",
+      "to": "Wilkowice",
+      "distance_km": 37
+    },
+    {
+      "from": "Ustroń",
+      "to": "Zabrze",
+      "distance_km": 72
+    },
+    {
+      "from": "Ustroń",
+      "to": "Zawiercie",
+      "distance_km": 122
+    },
+    {
+      "from": "Ustroń",
+      "to": "Żory",
+      "distance_km": 40
+    },
+    {
+      "from": "Ustroń",
+      "to": "Żywiec",
+      "distance_km": 46
+    },
+    {
+      "from": "Ustroń",
+      "to": "Częstochowa",
+      "distance_km": 146
+    },
+    {
+      "from": "Ustroń",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 40
+    },
+    {
+      "from": "Ustroń",
+      "to": "Janów",
+      "distance_km": 143
+    },
+    {
+      "from": "Ustroń",
+      "to": "Niewiesze",
+      "distance_km": 93
+    },
+    {
+      "from": "Wilkowice",
+      "to": "Zabrze",
+      "distance_km": 73
+    },
+    {
+      "from": "Wilkowice",
+      "to": "Zawiercie",
+      "distance_km": 102
+    },
+    {
+      "from": "Wilkowice",
+      "to": "Żory",
+      "distance_km": 50
+    },
+    {
+      "from": "Wilkowice",
+      "to": "Żywiec",
+      "distance_km": 10
+    },
+    {
+      "from": "Wilkowice",
+      "to": "Częstochowa",
+      "distance_km": 137
+    },
+    {
+      "from": "Wilkowice",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 26
+    },
+    {
+      "from": "Wilkowice",
+      "to": "Janów",
+      "distance_km": 130
+    },
+    {
+      "from": "Wilkowice",
+      "to": "Niewiesze",
+      "distance_km": 96
+    },
+    {
+      "from": "Zabrze",
+      "to": "Zawiercie",
+      "distance_km": 63
+    },
+    {
+      "from": "Zabrze",
+      "to": "Żory",
+      "distance_km": 32
+    },
+    {
+      "from": "Zabrze",
+      "to": "Żywiec",
+      "distance_km": 82
+    },
+    {
+      "from": "Zabrze",
+      "to": "Częstochowa",
+      "distance_km": 74
+    },
+    {
+      "from": "Zabrze",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 47
+    },
+    {
+      "from": "Zabrze",
+      "to": "Janów",
+      "distance_km": 83
+    },
+    {
+      "from": "Zabrze",
+      "to": "Niewiesze",
+      "distance_km": 31
+    },
+    {
+      "from": "Zawiercie",
+      "to": "Żory",
+      "distance_km": 84
+    },
+    {
+      "from": "Zawiercie",
+      "to": "Żywiec",
+      "distance_km": 110
+    },
+    {
+      "from": "Zawiercie",
+      "to": "Częstochowa",
+      "distance_km": 50
+    },
+    {
+      "from": "Zawiercie",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 83
+    },
+    {
+      "from": "Zawiercie",
+      "to": "Janów",
+      "distance_km": 31
+    },
+    {
+      "from": "Zawiercie",
+      "to": "Niewiesze",
+      "distance_km": 77
+    },
+    {
+      "from": "Żory",
+      "to": "Żywiec",
+      "distance_km": 59
+    },
+    {
+      "from": "Żory",
+      "to": "Częstochowa",
+      "distance_km": 106
+    },
+    {
+      "from": "Żory",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 24
+    },
+    {
+      "from": "Żory",
+      "to": "Janów",
+      "distance_km": 102
+    },
+    {
+      "from": "Żory",
+      "to": "Niewiesze",
+      "distance_km": 52
+    },
+    {
+      "from": "Żywiec",
+      "to": "Częstochowa",
+      "distance_km": 148
+    },
+    {
+      "from": "Żywiec",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 35
+    },
+    {
+      "from": "Żywiec",
+      "to": "Janów",
+      "distance_km": 140
+    },
+    {
+      "from": "Żywiec",
+      "to": "Niewiesze",
+      "distance_km": 105
+    },
+    {
+      "from": "Częstochowa",
+      "to": "Goczałkowice Zdrój",
+      "distance_km": 115
+    },
+    {
+      "from": "Częstochowa",
+      "to": "Janów",
+      "distance_km": 27
+    },
+    {
+      "from": "Częstochowa",
+      "to": "Niewiesze",
+      "distance_km": 72
+    },
+    {
+      "from": "Goczałkowice Zdrój",
+      "to": "Janów",
+      "distance_km": 107
+    },
+    {
+      "from": "Goczałkowice Zdrój",
+      "to": "Niewiesze",
+      "distance_km": 70
+    },
+    {
+      "from": "Janów",
+      "to": "Niewiesze",
+      "distance_km": 92
+    }
+  ],
+  "previous": [
+    {
+      "validFrom": "1900-01-01",
+      "validUntil": "2026-08-31",
+      "cities": [
+        "Bielsko-Biała",
+        "Bystra",
+        "Bytom",
+        "Chorzów",
+        "Cieszyn",
+        "Czechowice-Dziedzice",
+        "Czuchów",
+        "Częstochowa",
+        "Dąbrowa Górnicza",
+        "Gliwice",
+        "Goczałkowice Zdrój",
+        "Godziszka",
+        "Imielin",
+        "Janów",
+        "Jasienica",
+        "Jastrzębie Zdrój",
+        "Katowice",
+        "Kleszczów",
+        "Kuźnia Raciborska",
+        "Lipnik",
+        "Lubliniec",
+        "Mikołów",
+        "Mysłowice",
+        "Nakło Śląskie",
+        "Niewiesze",
+        "Piekary Śląskie",
+        "Pietrowice Wielkie",
+        "Racibórz",
+        "Ruda Śląska",
+        "Siemianowice Śląskie",
+        "Sosnowiec",
+        "Szczyrk",
+        "Tarnowskie Góry",
+        "Tychy",
+        "Ustroń",
+        "Wilkowice",
+        "Zabrze",
+        "Zawiercie",
+        "Łaziska Górne",
+        "Świętochłowice",
+        "Żory",
+        "Żywiec"
+      ],
+      "edges": [
+        {
+          "from": "Bielsko-Biała",
+          "to": "Bystra",
+          "distance_km": 14
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Bytom",
+          "distance_km": 72
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Chorzów",
+          "distance_km": 65
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Cieszyn",
+          "distance_km": 38
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Czechowice-Dziedzice",
+          "distance_km": 13
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Czuchów",
+          "distance_km": 54
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Częstochowa",
+          "distance_km": 133
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Dąbrowa Górnicza",
+          "distance_km": 72
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Gliwice",
+          "distance_km": 68
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 17
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Godziszka",
+          "distance_km": 20
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Imielin",
+          "distance_km": 45
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Janów",
+          "distance_km": 124
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Jasienica",
+          "distance_km": 16
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 49
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Katowice",
+          "distance_km": 59
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Kleszczów",
+          "distance_km": 93
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 83
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Lipnik",
+          "distance_km": 131
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Lubliniec",
+          "distance_km": 125
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Mikołów",
+          "distance_km": 48
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Mysłowice",
+          "distance_km": 57
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Nakło Śląskie",
+          "distance_km": 84
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Niewiesze",
+          "distance_km": 104
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Piekary Śląskie",
+          "distance_km": 75
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 90
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Racibórz",
+          "distance_km": 81
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Ruda Śląska",
+          "distance_km": 61
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 70
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Sosnowiec",
+          "distance_km": 62
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Szczyrk",
+          "distance_km": 16
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Tarnowskie Góry",
+          "distance_km": 85
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Tychy",
+          "distance_km": 40
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Ustroń",
+          "distance_km": 31
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Wilkowice",
+          "distance_km": 8
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Zabrze",
+          "distance_km": 81
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Zawiercie",
+          "distance_km": 96
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Łaziska Górne",
+          "distance_km": 46
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Świętochłowice",
+          "distance_km": 68
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Żory",
+          "distance_km": 41
+        },
+        {
+          "from": "Bielsko-Biała",
+          "to": "Żywiec",
+          "distance_km": 19
+        },
+        {
+          "from": "Bystra",
+          "to": "Bytom",
+          "distance_km": 87
+        },
+        {
+          "from": "Bystra",
+          "to": "Chorzów",
+          "distance_km": 81
+        },
+        {
+          "from": "Bystra",
+          "to": "Cieszyn",
+          "distance_km": 51
+        },
+        {
+          "from": "Bystra",
+          "to": "Czechowice-Dziedzice",
+          "distance_km": 22
+        },
+        {
+          "from": "Bystra",
+          "to": "Czuchów",
+          "distance_km": 73
+        },
+        {
+          "from": "Bystra",
+          "to": "Częstochowa",
+          "distance_km": 147
+        },
+        {
+          "from": "Bystra",
+          "to": "Dąbrowa Górnicza",
+          "distance_km": 83
+        },
+        {
+          "from": "Bystra",
+          "to": "Gliwice",
+          "distance_km": 93
+        },
+        {
+          "from": "Bystra",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 29
+        },
+        {
+          "from": "Bystra",
+          "to": "Godziszka",
+          "distance_km": 10
+        },
+        {
+          "from": "Bystra",
+          "to": "Imielin",
+          "distance_km": 59
+        },
+        {
+          "from": "Bystra",
+          "to": "Janów",
+          "distance_km": 139
+        },
+        {
+          "from": "Bystra",
+          "to": "Jasienica",
+          "distance_km": 24
+        },
+        {
+          "from": "Bystra",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 63
+        },
+        {
+          "from": "Bystra",
+          "to": "Katowice",
+          "distance_km": 73
+        },
+        {
+          "from": "Bystra",
+          "to": "Kleszczów",
+          "distance_km": 108
+        },
+        {
+          "from": "Bystra",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 97
+        },
+        {
+          "from": "Bystra",
+          "to": "Lipnik",
+          "distance_km": 146
+        },
+        {
+          "from": "Bystra",
+          "to": "Lubliniec",
+          "distance_km": 138
+        },
+        {
+          "from": "Bystra",
+          "to": "Mikołów",
+          "distance_km": 61
+        },
+        {
+          "from": "Bystra",
+          "to": "Mysłowice",
+          "distance_km": 67
+        },
+        {
+          "from": "Bystra",
+          "to": "Nakło Śląskie",
+          "distance_km": 97
+        },
+        {
+          "from": "Bystra",
+          "to": "Niewiesze",
+          "distance_km": 117
+        },
+        {
+          "from": "Bystra",
+          "to": "Piekary Śląskie",
+          "distance_km": 89
+        },
+        {
+          "from": "Bystra",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 115
+        },
+        {
+          "from": "Bystra",
+          "to": "Racibórz",
+          "distance_km": 98
+        },
+        {
+          "from": "Bystra",
+          "to": "Ruda Śląska",
+          "distance_km": 76
+        },
+        {
+          "from": "Bystra",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 82
+        },
+        {
+          "from": "Bystra",
+          "to": "Sosnowiec",
+          "distance_km": 76
+        },
+        {
+          "from": "Bystra",
+          "to": "Szczyrk",
+          "distance_km": 12
+        },
+        {
+          "from": "Bystra",
+          "to": "Tarnowskie Góry",
+          "distance_km": 111
+        },
+        {
+          "from": "Bystra",
+          "to": "Tychy",
+          "distance_km": 55
+        },
+        {
+          "from": "Bystra",
+          "to": "Ustroń",
+          "distance_km": 46
+        },
+        {
+          "from": "Bystra",
+          "to": "Wilkowice",
+          "distance_km": 8
+        },
+        {
+          "from": "Bystra",
+          "to": "Zabrze",
+          "distance_km": 95
+        },
+        {
+          "from": "Bystra",
+          "to": "Zawiercie",
+          "distance_km": 106
+        },
+        {
+          "from": "Bystra",
+          "to": "Łaziska Górne",
+          "distance_km": 60
+        },
+        {
+          "from": "Bystra",
+          "to": "Świętochłowice",
+          "distance_km": 88
+        },
+        {
+          "from": "Bystra",
+          "to": "Żory",
+          "distance_km": 57
+        },
+        {
+          "from": "Bystra",
+          "to": "Żywiec",
+          "distance_km": 19
+        },
+        {
+          "from": "Bytom",
+          "to": "Chorzów",
+          "distance_km": 8
+        },
+        {
+          "from": "Bytom",
+          "to": "Cieszyn",
+          "distance_km": 91
+        },
+        {
+          "from": "Bytom",
+          "to": "Czechowice-Dziedzice",
+          "distance_km": 59
+        },
+        {
+          "from": "Bytom",
+          "to": "Czuchów",
+          "distance_km": 43
+        },
+        {
+          "from": "Bytom",
+          "to": "Częstochowa",
+          "distance_km": 81
+        },
+        {
+          "from": "Bytom",
+          "to": "Dąbrowa Górnicza",
+          "distance_km": 22
+        },
+        {
+          "from": "Bytom",
+          "to": "Gliwice",
+          "distance_km": 21
+        },
+        {
+          "from": "Bytom",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 56
+        },
+        {
+          "from": "Bytom",
+          "to": "Godziszka",
+          "distance_km": 89
+        },
+        {
+          "from": "Bytom",
+          "to": "Imielin",
+          "distance_km": 34
+        },
+        {
+          "from": "Bytom",
+          "to": "Janów",
+          "distance_km": 71
+        },
+        {
+          "from": "Bytom",
+          "to": "Jasienica",
+          "distance_km": 78
+        },
+        {
+          "from": "Bytom",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 57
+        },
+        {
+          "from": "Bytom",
+          "to": "Katowice",
+          "distance_km": 14
+        },
+        {
+          "from": "Bytom",
+          "to": "Kleszczów",
+          "distance_km": 33
+        },
+        {
+          "from": "Bytom",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 57
+        },
+        {
+          "from": "Bytom",
+          "to": "Lipnik",
+          "distance_km": 83
+        },
+        {
+          "from": "Bytom",
+          "to": "Lubliniec",
+          "distance_km": 44
+        },
+        {
+          "from": "Bytom",
+          "to": "Mikołów",
+          "distance_km": 26
+        },
+        {
+          "from": "Bytom",
+          "to": "Mysłowice",
+          "distance_km": 29
+        },
+        {
+          "from": "Bytom",
+          "to": "Nakło Śląskie",
+          "distance_km": 13
+        },
+        {
+          "from": "Bytom",
+          "to": "Niewiesze",
+          "distance_km": 40
+        },
+        {
+          "from": "Bytom",
+          "to": "Piekary Śląskie",
+          "distance_km": 6
+        },
+        {
+          "from": "Bytom",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 78
+        },
+        {
+          "from": "Bytom",
+          "to": "Racibórz",
+          "distance_km": 68
+        },
+        {
+          "from": "Bytom",
+          "to": "Ruda Śląska",
+          "distance_km": 14
+        },
+        {
+          "from": "Bytom",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 10
+        },
+        {
+          "from": "Bytom",
+          "to": "Sosnowiec",
+          "distance_km": 19
+        },
+        {
+          "from": "Bytom",
+          "to": "Szczyrk",
+          "distance_km": 87
+        },
+        {
+          "from": "Bytom",
+          "to": "Tarnowskie Góry",
+          "distance_km": 12
+        },
+        {
+          "from": "Bytom",
+          "to": "Tychy",
+          "distance_km": 33
+        },
+        {
+          "from": "Bytom",
+          "to": "Ustroń",
+          "distance_km": 88
+        },
+        {
+          "from": "Bytom",
+          "to": "Wilkowice",
+          "distance_km": 82
+        },
+        {
+          "from": "Bytom",
+          "to": "Zabrze",
+          "distance_km": 10
+        },
+        {
+          "from": "Bytom",
+          "to": "Zawiercie",
+          "distance_km": 47
+        },
+        {
+          "from": "Bytom",
+          "to": "Łaziska Górne",
+          "distance_km": 33
+        },
+        {
+          "from": "Bytom",
+          "to": "Świętochłowice",
+          "distance_km": 7
+        },
+        {
+          "from": "Bytom",
+          "to": "Żory",
+          "distance_km": 45
+        },
+        {
+          "from": "Bytom",
+          "to": "Żywiec",
+          "distance_km": 88
+        },
+        {
+          "from": "Chorzów",
+          "to": "Cieszyn",
+          "distance_km": 91
+        },
+        {
+          "from": "Chorzów",
+          "to": "Czechowice-Dziedzice",
+          "distance_km": 56
+        },
+        {
+          "from": "Chorzów",
+          "to": "Czuchów",
+          "distance_km": 42
+        },
+        {
+          "from": "Chorzów",
+          "to": "Częstochowa",
+          "distance_km": 82
+        },
+        {
+          "from": "Chorzów",
+          "to": "Dąbrowa Górnicza",
+          "distance_km": 26
+        },
+        {
+          "from": "Chorzów",
+          "to": "Gliwice",
+          "distance_km": 23
+        },
+        {
+          "from": "Chorzów",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 49
+        },
+        {
+          "from": "Chorzów",
+          "to": "Godziszka",
+          "distance_km": 86
+        },
+        {
+          "from": "Chorzów",
+          "to": "Imielin",
+          "distance_km": 29
+        },
+        {
+          "from": "Chorzów",
+          "to": "Janów",
+          "distance_km": 73
+        },
+        {
+          "from": "Chorzów",
+          "to": "Jasienica",
+          "distance_km": 70
+        },
+        {
+          "from": "Chorzów",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 59
+        },
+        {
+          "from": "Chorzów",
+          "to": "Katowice",
+          "distance_km": 9
+        },
+        {
+          "from": "Chorzów",
+          "to": "Kleszczów",
+          "distance_km": 36
+        },
+        {
+          "from": "Chorzów",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 59
+        },
+        {
+          "from": "Chorzów",
+          "to": "Lipnik",
+          "distance_km": 88
+        },
+        {
+          "from": "Chorzów",
+          "to": "Lubliniec",
+          "distance_km": 52
+        },
+        {
+          "from": "Chorzów",
+          "to": "Mikołów",
+          "distance_km": 19
+        },
+        {
+          "from": "Chorzów",
+          "to": "Mysłowice",
+          "distance_km": 22
+        },
+        {
+          "from": "Chorzów",
+          "to": "Nakło Śląskie",
+          "distance_km": 17
+        },
+        {
+          "from": "Chorzów",
+          "to": "Niewiesze",
+          "distance_km": 44
+        },
+        {
+          "from": "Chorzów",
+          "to": "Piekary Śląskie",
+          "distance_km": 10
+        },
+        {
+          "from": "Chorzów",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 83
+        },
+        {
+          "from": "Chorzów",
+          "to": "Racibórz",
+          "distance_km": 76
+        },
+        {
+          "from": "Chorzów",
+          "to": "Ruda Śląska",
+          "distance_km": 12
+        },
+        {
+          "from": "Chorzów",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 10
+        },
+        {
+          "from": "Chorzów",
+          "to": "Sosnowiec",
+          "distance_km": 13
+        },
+        {
+          "from": "Chorzów",
+          "to": "Szczyrk",
+          "distance_km": 80
+        },
+        {
+          "from": "Chorzów",
+          "to": "Tarnowskie Góry",
+          "distance_km": 20
+        },
+        {
+          "from": "Chorzów",
+          "to": "Tychy",
+          "distance_km": 26
+        },
+        {
+          "from": "Chorzów",
+          "to": "Ustroń",
+          "distance_km": 82
+        },
+        {
+          "from": "Chorzów",
+          "to": "Wilkowice",
+          "distance_km": 73
+        },
+        {
+          "from": "Chorzów",
+          "to": "Zabrze",
+          "distance_km": 17
+        },
+        {
+          "from": "Chorzów",
+          "to": "Zawiercie",
+          "distance_km": 52
+        },
+        {
+          "from": "Chorzów",
+          "to": "Łaziska Górne",
+          "distance_km": 26
+        },
+        {
+          "from": "Chorzów",
+          "to": "Świętochłowice",
+          "distance_km": 4
+        },
+        {
+          "from": "Chorzów",
+          "to": "Żory",
+          "distance_km": 41
+        },
+        {
+          "from": "Chorzów",
+          "to": "Żywiec",
+          "distance_km": 81
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Czechowice-Dziedzice",
+          "distance_km": 39
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Czuchów",
+          "distance_km": 53
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Częstochowa",
+          "distance_km": 159
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Dąbrowa Górnicza",
+          "distance_km": 98
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Gliwice",
+          "distance_km": 73
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 45
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Godziszka",
+          "distance_km": 50
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Imielin",
+          "distance_km": 76
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Janów",
+          "distance_km": 152
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Jasienica",
+          "distance_km": 24
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 27
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Katowice",
+          "distance_km": 87
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Kleszczów",
+          "distance_km": 90
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 77
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Lipnik",
+          "distance_km": 158
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Lubliniec",
+          "distance_km": 122
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Mikołów",
+          "distance_km": 63
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Mysłowice",
+          "distance_km": 85
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Nakło Śląskie",
+          "distance_km": 101
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Niewiesze",
+          "distance_km": 101
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Piekary Śląskie",
+          "distance_km": 101
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 74
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Racibórz",
+          "distance_km": 65
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Ruda Śląska",
+          "distance_km": 81
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 96
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Sosnowiec",
+          "distance_km": 90
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Szczyrk",
+          "distance_km": 58
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Tarnowskie Góry",
+          "distance_km": 96
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Tychy",
+          "distance_km": 68
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Ustroń",
+          "distance_km": 14
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Wilkowice",
+          "distance_km": 50
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Zabrze",
+          "distance_km": 83
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Zawiercie",
+          "distance_km": 124
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Łaziska Górne",
+          "distance_km": 53
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Świętochłowice",
+          "distance_km": 87
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Żory",
+          "distance_km": 37
+        },
+        {
+          "from": "Cieszyn",
+          "to": "Żywiec",
+          "distance_km": 60
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Czuchów",
+          "distance_km": 50
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Częstochowa",
+          "distance_km": 123
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Dąbrowa Górnicza",
+          "distance_km": 65
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Gliwice",
+          "distance_km": 58
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 10
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Godziszka",
+          "distance_km": 32
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Imielin",
+          "distance_km": 42
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Janów",
+          "distance_km": 114
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Jasienica",
+          "distance_km": 16
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 39
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Katowice",
+          "distance_km": 50
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Kleszczów",
+          "distance_km": 82
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 74
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Lipnik",
+          "distance_km": 124
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Lubliniec",
+          "distance_km": 114
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Mikołów",
+          "distance_km": 44
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Mysłowice",
+          "distance_km": 48
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Nakło Śląskie",
+          "distance_km": 93
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Niewiesze",
+          "distance_km": 94
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Piekary Śląskie",
+          "distance_km": 66
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 84
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Racibórz",
+          "distance_km": 74
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Ruda Śląska",
+          "distance_km": 55
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 58
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Sosnowiec",
+          "distance_km": 53
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Szczyrk",
+          "distance_km": 25
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Tarnowskie Góry",
+          "distance_km": 81
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Tychy",
+          "distance_km": 31
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Ustroń",
+          "distance_km": 34
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Wilkowice",
+          "distance_km": 21
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Zabrze",
+          "distance_km": 68
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Zawiercie",
+          "distance_km": 89
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Łaziska Górne",
+          "distance_km": 36
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Świętochłowice",
+          "distance_km": 54
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Żory",
+          "distance_km": 32
+        },
+        {
+          "from": "Czechowice-Dziedzice",
+          "to": "Żywiec",
+          "distance_km": 35
+        },
+        {
+          "from": "Czuchów",
+          "to": "Częstochowa",
+          "distance_km": 117
+        },
+        {
+          "from": "Czuchów",
+          "to": "Dąbrowa Górnicza",
+          "distance_km": 70
+        },
+        {
+          "from": "Czuchów",
+          "to": "Gliwice",
+          "distance_km": 18
+        },
+        {
+          "from": "Czuchów",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 37
+        },
+        {
+          "from": "Czuchów",
+          "to": "Godziszka",
+          "distance_km": 75
+        },
+        {
+          "from": "Czuchów",
+          "to": "Imielin",
+          "distance_km": 54
+        },
+        {
+          "from": "Czuchów",
+          "to": "Janów",
+          "distance_km": 111
+        },
+        {
+          "from": "Czuchów",
+          "to": "Jasienica",
+          "distance_km": 56
+        },
+        {
+          "from": "Czuchów",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 36
+        },
+        {
+          "from": "Czuchów",
+          "to": "Katowice",
+          "distance_km": 44
+        },
+        {
+          "from": "Czuchów",
+          "to": "Kleszczów",
+          "distance_km": 36
+        },
+        {
+          "from": "Czuchów",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 35
+        },
+        {
+          "from": "Czuchów",
+          "to": "Lipnik",
+          "distance_km": 127
+        },
+        {
+          "from": "Czuchów",
+          "to": "Lubliniec",
+          "distance_km": 70
+        },
+        {
+          "from": "Czuchów",
+          "to": "Mikołów",
+          "distance_km": 28
+        },
+        {
+          "from": "Czuchów",
+          "to": "Mysłowice",
+          "distance_km": 55
+        },
+        {
+          "from": "Czuchów",
+          "to": "Nakło Śląskie",
+          "distance_km": 45
+        },
+        {
+          "from": "Czuchów",
+          "to": "Niewiesze",
+          "distance_km": 41
+        },
+        {
+          "from": "Czuchów",
+          "to": "Piekary Śląskie",
+          "distance_km": 51
+        },
+        {
+          "from": "Czuchów",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 49
+        },
+        {
+          "from": "Czuchów",
+          "to": "Racibórz",
+          "distance_km": 41
+        },
+        {
+          "from": "Czuchów",
+          "to": "Ruda Śląska",
+          "distance_km": 31
+        },
+        {
+          "from": "Czuchów",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 61
+        },
+        {
+          "from": "Czuchów",
+          "to": "Sosnowiec",
+          "distance_km": 52
+        },
+        {
+          "from": "Czuchów",
+          "to": "Szczyrk",
+          "distance_km": 68
+        },
+        {
+          "from": "Czuchów",
+          "to": "Tarnowskie Góry",
+          "distance_km": 39
+        },
+        {
+          "from": "Czuchów",
+          "to": "Tychy",
+          "distance_km": 40
+        },
+        {
+          "from": "Czuchów",
+          "to": "Ustroń",
+          "distance_km": 53
+        },
+        {
+          "from": "Czuchów",
+          "to": "Wilkowice",
+          "distance_km": 61
+        },
+        {
+          "from": "Czuchów",
+          "to": "Zabrze",
+          "distance_km": 30
+        },
+        {
+          "from": "Czuchów",
+          "to": "Zawiercie",
+          "distance_km": 101
+        },
+        {
+          "from": "Czuchów",
+          "to": "Łaziska Górne",
+          "distance_km": 21
+        },
+        {
+          "from": "Czuchów",
+          "to": "Świętochłowice",
+          "distance_km": 38
+        },
+        {
+          "from": "Czuchów",
+          "to": "Żory",
+          "distance_km": 18
+        },
+        {
+          "from": "Czuchów",
+          "to": "Żywiec",
+          "distance_km": 69
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Dąbrowa Górnicza",
+          "distance_km": 63
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Gliwice",
+          "distance_km": 106
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 116
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Imielin",
+          "distance_km": 83
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Janów",
+          "distance_km": 30
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Jasienica",
+          "distance_km": 136
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 146
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Katowice",
+          "distance_km": 76
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 105
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Lubliniec",
+          "distance_km": 37
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Mikołów",
+          "distance_km": 92
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Mysłowice",
+          "distance_km": 79
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Nakło Śląskie",
+          "distance_km": 53
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Niewiesze",
+          "distance_km": 78
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Piekary Śląskie",
+          "distance_km": 59
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 161
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Racibórz",
+          "distance_km": 152
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Ruda Śląska",
+          "distance_km": 91
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 71
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Sosnowiec",
+          "distance_km": 70
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Szczyrk",
+          "distance_km": 145
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Tarnowskie Góry",
+          "distance_km": 54
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Tychy",
+          "distance_km": 95
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Ustroń",
+          "distance_km": 153
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Wilkowice",
+          "distance_km": 138
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Zabrze",
+          "distance_km": 103
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Zawiercie",
+          "distance_km": 52
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Łaziska Górne",
+          "distance_km": 98
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Świętochłowice",
+          "distance_km": 85
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Żory",
+          "distance_km": 113
+        },
+        {
+          "from": "Częstochowa",
+          "to": "Żywiec",
+          "distance_km": 146
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Gliwice",
+          "distance_km": 51
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 55
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Godziszka",
+          "distance_km": 92
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Imielin",
+          "distance_km": 25
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Janów",
+          "distance_km": 58
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Jasienica",
+          "distance_km": 80
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 79
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Katowice",
+          "distance_km": 15
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Kleszczów",
+          "distance_km": 65
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 78
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Lipnik",
+          "distance_km": 67
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Lubliniec",
+          "distance_km": 74
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Mikołów",
+          "distance_km": 37
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Mysłowice",
+          "distance_km": 15
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Nakło Śląskie",
+          "distance_km": 38
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Niewiesze",
+          "distance_km": 58
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Piekary Śląskie",
+          "distance_km": 23
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 105
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Racibórz",
+          "distance_km": 96
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Ruda Śląska",
+          "distance_km": 30
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 13
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Sosnowiec",
+          "distance_km": 13
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Szczyrk",
+          "distance_km": 89
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Tarnowskie Góry",
+          "distance_km": 34
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Tychy",
+          "distance_km": 32
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Ustroń",
+          "distance_km": 94
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Wilkowice",
+          "distance_km": 81
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Zabrze",
+          "distance_km": 37
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Zawiercie",
+          "distance_km": 30
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Łaziska Górne",
+          "distance_km": 36
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Świętochłowice",
+          "distance_km": 24
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Żory",
+          "distance_km": 52
+        },
+        {
+          "from": "Dąbrowa Górnicza",
+          "to": "Żywiec",
+          "distance_km": 90
+        },
+        {
+          "from": "Gliwice",
+          "to": "Goczałkowice Zdrój",
+          "distance_km": 51
+        },
+        {
+          "from": "Gliwice",
+          "to": "Godziszka",
+          "distance_km": 97
+        },
+        {
+          "from": "Gliwice",
+          "to": "Imielin",
+          "distance_km": 47
+        },
+        {
+          "from": "Gliwice",
+          "to": "Janów",
+          "distance_km": 95
+        },
+        {
+          "from": "Gliwice",
+          "to": "Jasienica",
+          "distance_km": 73
+        },
+        {
+          "from": "Gliwice",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 48
+        },
+        {
+          "from": "Gliwice",
+          "to": "Katowice",
+          "distance_km": 30
+        },
+        {
+          "from": "Gliwice",
+          "to": "Kleszczów",
+          "distance_km": 13
+        },
+        {
+          "from": "Gliwice",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 35
+        },
+        {
+          "from": "Gliwice",
+          "to": "Lipnik",
+          "distance_km": 109
+        },
+        {
+          "from": "Gliwice",
+          "to": "Lubliniec",
+          "distance_km": 46
+        },
+        {
+          "from": "Gliwice",
+          "to": "Mikołów",
+          "distance_km": 22
+        },
+        {
+          "from": "Gliwice",
+          "to": "Mysłowice",
+          "distance_km": 41
+        },
+        {
+          "from": "Gliwice",
+          "to": "Nakło Śląskie",
+          "distance_km": 27
+        },
+        {
+          "from": "Gliwice",
+          "to": "Niewiesze",
+          "distance_km": 23
+        },
+        {
+          "from": "Gliwice",
+          "to": "Piekary Śląskie",
+          "distance_km": 27
+        },
+        {
+          "from": "Gliwice",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 56
+        },
+        {
+          "from": "Gliwice",
+          "to": "Racibórz",
+          "distance_km": 48
+        },
+        {
+          "from": "Gliwice",
+          "to": "Ruda Śląska",
+          "distance_km": 17
+        },
+        {
+          "from": "Gliwice",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 33
+        },
+        {
+          "from": "Gliwice",
+          "to": "Sosnowiec",
+          "distance_km": 34
+        },
+        {
+          "from": "Gliwice",
+          "to": "Szczyrk",
+          "distance_km": 82
+        },
+        {
+          "from": "Gliwice",
+          "to": "Tarnowskie Góry",
+          "distance_km": 23
+        },
+        {
+          "from": "Gliwice",
+          "to": "Tychy",
+          "distance_km": 34
+        },
+        {
+          "from": "Gliwice",
+          "to": "Ustroń",
+          "distance_km": 75
+        },
+        {
+          "from": "Gliwice",
+          "to": "Wilkowice",
+          "distance_km": 75
+        },
+        {
+          "from": "Gliwice",
+          "to": "Zabrze",
+          "distance_km": 10
+        },
+        {
+          "from": "Gliwice",
+          "to": "Zawiercie",
+          "distance_km": 71
+        },
+        {
+          "from": "Gliwice",
+          "to": "Łaziska Górne",
+          "distance_km": 26
+        },
+        {
+          "from": "Gliwice",
+          "to": "Świętochłowice",
+          "distance_km": 21
+        },
+        {
+          "from": "Gliwice",
+          "to": "Żory",
+          "distance_km": 33
+        },
+        {
+          "from": "Gliwice",
+          "to": "Żywiec",
+          "distance_km": 83
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Imielin",
+          "distance_km": 37
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Janów",
+          "distance_km": 106
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Jasienica",
+          "distance_km": 23
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 33
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Katowice",
+          "distance_km": 42
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 66
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Lubliniec",
+          "distance_km": 108
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Mikołów",
+          "distance_km": 31
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Mysłowice",
+          "distance_km": 48
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Nakło Śląskie",
+          "distance_km": 66
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Niewiesze",
+          "distance_km": 87
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Piekary Śląskie",
+          "distance_km": 58
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 73
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Racibórz",
+          "distance_km": 64
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Ruda Śląska",
+          "distance_km": 53
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 54
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Sosnowiec",
+          "distance_km": 45
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Szczyrk",
+          "distance_km": 31
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Tarnowskie Góry",
+          "distance_km": 67
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Tychy",
+          "distance_km": 23
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Ustroń",
+          "distance_km": 40
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Wilkowice",
+          "distance_km": 25
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Zabrze",
+          "distance_km": 65
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Zawiercie",
+          "distance_km": 79
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Łaziska Górne",
+          "distance_km": 29
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Świętochłowice",
+          "distance_km": 51
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Żory",
+          "distance_km": 24
+        },
+        {
+          "from": "Goczałkowice Zdrój",
+          "to": "Żywiec",
+          "distance_km": 33
+        },
+        {
+          "from": "Godziszka",
+          "to": "Imielin",
+          "distance_km": 67
+        },
+        {
+          "from": "Godziszka",
+          "to": "Jasienica",
+          "distance_km": 23
+        },
+        {
+          "from": "Godziszka",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 70
+        },
+        {
+          "from": "Godziszka",
+          "to": "Katowice",
+          "distance_km": 80
+        },
+        {
+          "from": "Godziszka",
+          "to": "Kleszczów",
+          "distance_km": 115
+        },
+        {
+          "from": "Godziszka",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 104
+        },
+        {
+          "from": "Godziszka",
+          "to": "Lipnik",
+          "distance_km": 155
+        },
+        {
+          "from": "Godziszka",
+          "to": "Lubliniec",
+          "distance_km": 142
+        },
+        {
+          "from": "Godziszka",
+          "to": "Mikołów",
+          "distance_km": 72
+        },
+        {
+          "from": "Godziszka",
+          "to": "Mysłowice",
+          "distance_km": 74
+        },
+        {
+          "from": "Godziszka",
+          "to": "Nakło Śląskie",
+          "distance_km": 103
+        },
+        {
+          "from": "Godziszka",
+          "to": "Piekary Śląskie",
+          "distance_km": 96
+        },
+        {
+          "from": "Godziszka",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 111
+        },
+        {
+          "from": "Godziszka",
+          "to": "Racibórz",
+          "distance_km": 102
+        },
+        {
+          "from": "Godziszka",
+          "to": "Ruda Śląska",
+          "distance_km": 81
+        },
+        {
+          "from": "Godziszka",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 88
+        },
+        {
+          "from": "Godziszka",
+          "to": "Sosnowiec",
+          "distance_km": 83
+        },
+        {
+          "from": "Godziszka",
+          "to": "Szczyrk",
+          "distance_km": 6
+        },
+        {
+          "from": "Godziszka",
+          "to": "Tarnowskie Góry",
+          "distance_km": 115
+        },
+        {
+          "from": "Godziszka",
+          "to": "Tychy",
+          "distance_km": 53
+        },
+        {
+          "from": "Godziszka",
+          "to": "Ustroń",
+          "distance_km": 38
+        },
+        {
+          "from": "Godziszka",
+          "to": "Wilkowice",
+          "distance_km": 10
+        },
+        {
+          "from": "Godziszka",
+          "to": "Zabrze",
+          "distance_km": 102
+        },
+        {
+          "from": "Godziszka",
+          "to": "Zawiercie",
+          "distance_km": 115
+        },
+        {
+          "from": "Godziszka",
+          "to": "Łaziska Górne",
+          "distance_km": 66
+        },
+        {
+          "from": "Godziszka",
+          "to": "Świętochłowice",
+          "distance_km": 84
+        },
+        {
+          "from": "Godziszka",
+          "to": "Żory",
+          "distance_km": 62
+        },
+        {
+          "from": "Godziszka",
+          "to": "Żywiec",
+          "distance_km": 10
+        },
+        {
+          "from": "Imielin",
+          "to": "Janów",
+          "distance_km": 76
+        },
+        {
+          "from": "Imielin",
+          "to": "Jasienica",
+          "distance_km": 53
+        },
+        {
+          "from": "Imielin",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 58
+        },
+        {
+          "from": "Imielin",
+          "to": "Katowice",
+          "distance_km": 21
+        },
+        {
+          "from": "Imielin",
+          "to": "Kleszczów",
+          "distance_km": 65
+        },
+        {
+          "from": "Imielin",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 80
+        },
+        {
+          "from": "Imielin",
+          "to": "Lipnik",
+          "distance_km": 85
+        },
+        {
+          "from": "Imielin",
+          "to": "Lubliniec",
+          "distance_km": 92
+        },
+        {
+          "from": "Imielin",
+          "to": "Mikołów",
+          "distance_km": 26
+        },
+        {
+          "from": "Imielin",
+          "to": "Mysłowice",
+          "distance_km": 8
+        },
+        {
+          "from": "Imielin",
+          "to": "Nakło Śląskie",
+          "distance_km": 44
+        },
+        {
+          "from": "Imielin",
+          "to": "Niewiesze",
+          "distance_km": 73
+        },
+        {
+          "from": "Imielin",
+          "to": "Piekary Śląskie",
+          "distance_km": 37
+        },
+        {
+          "from": "Imielin",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 103
+        },
+        {
+          "from": "Imielin",
+          "to": "Racibórz",
+          "distance_km": 92
+        },
+        {
+          "from": "Imielin",
+          "to": "Ruda Śląska",
+          "distance_km": 31
+        },
+        {
+          "from": "Imielin",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 27
+        },
+        {
+          "from": "Imielin",
+          "to": "Sosnowiec",
+          "distance_km": 20
+        },
+        {
+          "from": "Imielin",
+          "to": "Szczyrk",
+          "distance_km": 64
+        },
+        {
+          "from": "Imielin",
+          "to": "Tarnowskie Góry",
+          "distance_km": 49
+        },
+        {
+          "from": "Imielin",
+          "to": "Tychy",
+          "distance_km": 16
+        },
+        {
+          "from": "Imielin",
+          "to": "Ustroń",
+          "distance_km": 71
+        },
+        {
+          "from": "Imielin",
+          "to": "Wilkowice",
+          "distance_km": 58
+        },
+        {
+          "from": "Imielin",
+          "to": "Zabrze",
+          "distance_km": 42
+        },
+        {
+          "from": "Imielin",
+          "to": "Zawiercie",
+          "distance_km": 47
+        },
+        {
+          "from": "Imielin",
+          "to": "Łaziska Górne",
+          "distance_km": 33
+        },
+        {
+          "from": "Imielin",
+          "to": "Świętochłowice",
+          "distance_km": 30
+        },
+        {
+          "from": "Imielin",
+          "to": "Żory",
+          "distance_km": 51
+        },
+        {
+          "from": "Imielin",
+          "to": "Żywiec",
+          "distance_km": 68
+        },
+        {
+          "from": "Janów",
+          "to": "Jasienica",
+          "distance_km": 130
+        },
+        {
+          "from": "Janów",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 139
+        },
+        {
+          "from": "Janów",
+          "to": "Katowice",
+          "distance_km": 67
+        },
+        {
+          "from": "Janów",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 129
+        },
+        {
+          "from": "Janów",
+          "to": "Lubliniec",
+          "distance_km": 63
+        },
+        {
+          "from": "Janów",
+          "to": "Mikołów",
+          "distance_km": 85
+        },
+        {
+          "from": "Janów",
+          "to": "Mysłowice",
+          "distance_km": 69
+        },
+        {
+          "from": "Janów",
+          "to": "Nakło Śląskie",
+          "distance_km": 61
+        },
+        {
+          "from": "Janów",
+          "to": "Niewiesze",
+          "distance_km": 91
+        },
+        {
+          "from": "Janów",
+          "to": "Piekary Śląskie",
+          "distance_km": 68
+        },
+        {
+          "from": "Janów",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 157
+        },
+        {
+          "from": "Janów",
+          "to": "Racibórz",
+          "distance_km": 149
+        },
+        {
+          "from": "Janów",
+          "to": "Ruda Śląska",
+          "distance_km": 82
+        },
+        {
+          "from": "Janów",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 61
+        },
+        {
+          "from": "Janów",
+          "to": "Sosnowiec",
+          "distance_km": 60
+        },
+        {
+          "from": "Janów",
+          "to": "Szczyrk",
+          "distance_km": 147
+        },
+        {
+          "from": "Janów",
+          "to": "Tarnowskie Góry",
+          "distance_km": 64
+        },
+        {
+          "from": "Janów",
+          "to": "Tychy",
+          "distance_km": 83
+        },
+        {
+          "from": "Janów",
+          "to": "Ustroń",
+          "distance_km": 149
+        },
+        {
+          "from": "Janów",
+          "to": "Wilkowice",
+          "distance_km": 138
+        },
+        {
+          "from": "Janów",
+          "to": "Zabrze",
+          "distance_km": 79
+        },
+        {
+          "from": "Janów",
+          "to": "Zawiercie",
+          "distance_km": 36
+        },
+        {
+          "from": "Janów",
+          "to": "Łaziska Górne",
+          "distance_km": 89
+        },
+        {
+          "from": "Janów",
+          "to": "Świętochłowice",
+          "distance_km": 81
+        },
+        {
+          "from": "Janów",
+          "to": "Żory",
+          "distance_km": 104
+        },
+        {
+          "from": "Janów",
+          "to": "Żywiec",
+          "distance_km": 147
+        },
+        {
+          "from": "Jasienica",
+          "to": "Jastrzębie Zdrój",
+          "distance_km": 45
+        },
+        {
+          "from": "Jasienica",
+          "to": "Katowice",
+          "distance_km": 65
+        },
+        {
+          "from": "Jasienica",
+          "to": "Kleszczów",
+          "distance_km": 94
+        },
+        {
+          "from": "Jasienica",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 84
+        },
+        {
+          "from": "Jasienica",
+          "to": "Lipnik",
+          "distance_km": 140
+        },
+        {
+          "from": "Jasienica",
+          "to": "Lubliniec",
+          "distance_km": 124
+        },
+        {
+          "from": "Jasienica",
+          "to": "Mikołów",
+          "distance_km": 53
+        },
+        {
+          "from": "Jasienica",
+          "to": "Mysłowice",
+          "distance_km": 63
+        },
+        {
+          "from": "Jasienica",
+          "to": "Nakło Śląskie",
+          "distance_km": 88
+        },
+        {
+          "from": "Jasienica",
+          "to": "Niewiesze",
+          "distance_km": 103
+        },
+        {
+          "from": "Jasienica",
+          "to": "Piekary Śląskie",
+          "distance_km": 81
+        },
+        {
+          "from": "Jasienica",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 92
+        },
+        {
+          "from": "Jasienica",
+          "to": "Racibórz",
+          "distance_km": 83
+        },
+        {
+          "from": "Jasienica",
+          "to": "Ruda Śląska",
+          "distance_km": 75
+        },
+        {
+          "from": "Jasienica",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 76
+        },
+        {
+          "from": "Jasienica",
+          "to": "Sosnowiec",
+          "distance_km": 67
+        },
+        {
+          "from": "Jasienica",
+          "to": "Szczyrk",
+          "distance_km": 28
+        },
+        {
+          "from": "Jasienica",
+          "to": "Tarnowskie Góry",
+          "distance_km": 90
+        },
+        {
+          "from": "Jasienica",
+          "to": "Tychy",
+          "distance_km": 46
+        },
+        {
+          "from": "Jasienica",
+          "to": "Ustroń",
+          "distance_km": 18
+        },
+        {
+          "from": "Jasienica",
+          "to": "Wilkowice",
+          "distance_km": 21
+        },
+        {
+          "from": "Jasienica",
+          "to": "Zabrze",
+          "distance_km": 76
+        },
+        {
+          "from": "Jasienica",
+          "to": "Zawiercie",
+          "distance_km": 106
+        },
+        {
+          "from": "Jasienica",
+          "to": "Łaziska Górne",
+          "distance_km": 52
+        },
+        {
+          "from": "Jasienica",
+          "to": "Świętochłowice",
+          "distance_km": 73
+        },
+        {
+          "from": "Jasienica",
+          "to": "Żory",
+          "distance_km": 46
+        },
+        {
+          "from": "Jasienica",
+          "to": "Żywiec",
+          "distance_km": 29
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Katowice",
+          "distance_km": 55
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Kleszczów",
+          "distance_km": 70
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 49
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Lipnik",
+          "distance_km": 143
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Lubliniec",
+          "distance_km": 99
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Mikołów",
+          "distance_km": 40
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Mysłowice",
+          "distance_km": 65
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Nakło Śląskie",
+          "distance_km": 75
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Niewiesze",
+          "distance_km": 78
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Piekary Śląskie",
+          "distance_km": 68
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 43
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Racibórz",
+          "distance_km": 34
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Ruda Śląska",
+          "distance_km": 45
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 63
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Sosnowiec",
+          "distance_km": 63
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Szczyrk",
+          "distance_km": 64
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Tarnowskie Góry",
+          "distance_km": 69
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Tychy",
+          "distance_km": 48
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Ustroń",
+          "distance_km": 47
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Wilkowice",
+          "distance_km": 57
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Zabrze",
+          "distance_km": 56
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Zawiercie",
+          "distance_km": 104
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Łaziska Górne",
+          "distance_km": 33
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Świętochłowice",
+          "distance_km": 54
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Żory",
+          "distance_km": 16
+        },
+        {
+          "from": "Jastrzębie Zdrój",
+          "to": "Żywiec",
+          "distance_km": 65
+        },
+        {
+          "from": "Katowice",
+          "to": "Kleszczów",
+          "distance_km": 41
+        },
+        {
+          "from": "Katowice",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 64
+        },
+        {
+          "from": "Katowice",
+          "to": "Lipnik",
+          "distance_km": 79
+        },
+        {
+          "from": "Katowice",
+          "to": "Lubliniec",
+          "distance_km": 59
+        },
+        {
+          "from": "Katowice",
+          "to": "Mikołów",
+          "distance_km": 17
+        },
+        {
+          "from": "Katowice",
+          "to": "Mysłowice",
+          "distance_km": 15
+        },
+        {
+          "from": "Katowice",
+          "to": "Nakło Śląskie",
+          "distance_km": 24
+        },
+        {
+          "from": "Katowice",
+          "to": "Niewiesze",
+          "distance_km": 55
+        },
+        {
+          "from": "Katowice",
+          "to": "Piekary Śląskie",
+          "distance_km": 16
+        },
+        {
+          "from": "Katowice",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 85
+        },
+        {
+          "from": "Katowice",
+          "to": "Racibórz",
+          "distance_km": 76
+        },
+        {
+          "from": "Katowice",
+          "to": "Ruda Śląska",
+          "distance_km": 14
+        },
+        {
+          "from": "Katowice",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 10
+        },
+        {
+          "from": "Katowice",
+          "to": "Sosnowiec",
+          "distance_km": 7
+        },
+        {
+          "from": "Katowice",
+          "to": "Szczyrk",
+          "distance_km": 73
+        },
+        {
+          "from": "Katowice",
+          "to": "Tarnowskie Góry",
+          "distance_km": 25
+        },
+        {
+          "from": "Katowice",
+          "to": "Tychy",
+          "distance_km": 20
+        },
+        {
+          "from": "Katowice",
+          "to": "Ustroń",
+          "distance_km": 78
+        },
+        {
+          "from": "Katowice",
+          "to": "Wilkowice",
+          "distance_km": 66
+        },
+        {
+          "from": "Katowice",
+          "to": "Zabrze",
+          "distance_km": 22
+        },
+        {
+          "from": "Katowice",
+          "to": "Zawiercie",
+          "distance_km": 46
+        },
+        {
+          "from": "Katowice",
+          "to": "Łaziska Górne",
+          "distance_km": 22
+        },
+        {
+          "from": "Katowice",
+          "to": "Świętochłowice",
+          "distance_km": 9
+        },
+        {
+          "from": "Katowice",
+          "to": "Żory",
+          "distance_km": 37
+        },
+        {
+          "from": "Katowice",
+          "to": "Żywiec",
+          "distance_km": 68
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Kuźnia Raciborska",
+          "distance_km": 35
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Lipnik",
+          "distance_km": 118
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Lubliniec",
+          "distance_km": 47
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Mikołów",
+          "distance_km": 41
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Mysłowice",
+          "distance_km": 59
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Nakło Śląskie",
+          "distance_km": 42
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Piekary Śląskie",
+          "distance_km": 34
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 56
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Racibórz",
+          "distance_km": 47
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Ruda Śląska",
+          "distance_km": 31
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 41
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Sosnowiec",
+          "distance_km": 47
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Szczyrk",
+          "distance_km": 114
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Tarnowskie Góry",
+          "distance_km": 33
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Tychy",
+          "distance_km": 55
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Ustroń",
+          "distance_km": 93
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Wilkowice",
+          "distance_km": 104
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Zabrze",
+          "distance_km": 21
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Zawiercie",
+          "distance_km": 82
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Łaziska Górne",
+          "distance_km": 46
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Świętochłowice",
+          "distance_km": 35
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Żory",
+          "distance_km": 51
+        },
+        {
+          "from": "Kleszczów",
+          "to": "Żywiec",
+          "distance_km": 117
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Lipnik",
+          "distance_km": 147
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Lubliniec",
+          "distance_km": 75
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Mikołów",
+          "distance_km": 57
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Mysłowice",
+          "distance_km": 74
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Nakło Śląskie",
+          "distance_km": 67
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Niewiesze",
+          "distance_km": 42
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Piekary Śląskie",
+          "distance_km": 60
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 28
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Racibórz",
+          "distance_km": 19
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Ruda Śląska",
+          "distance_km": 48
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 74
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Sosnowiec",
+          "distance_km": 70
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Szczyrk",
+          "distance_km": 104
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Tarnowskie Góry",
+          "distance_km": 61
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Tychy",
+          "distance_km": 64
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Ustroń",
+          "distance_km": 84
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Wilkowice",
+          "distance_km": 96
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Zabrze",
+          "distance_km": 48
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Zawiercie",
+          "distance_km": 107
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Łaziska Górne",
+          "distance_km": 48
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Świętochłowice",
+          "distance_km": 55
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Żory",
+          "distance_km": 43
+        },
+        {
+          "from": "Kuźnia Raciborska",
+          "to": "Żywiec",
+          "distance_km": 106
+        },
+        {
+          "from": "Lipnik",
+          "to": "Lubliniec",
+          "distance_km": 65
+        },
+        {
+          "from": "Lipnik",
+          "to": "Mikołów",
+          "distance_km": 104
+        },
+        {
+          "from": "Lipnik",
+          "to": "Mysłowice",
+          "distance_km": 79
+        },
+        {
+          "from": "Lipnik",
+          "to": "Nakło Śląskie",
+          "distance_km": 70
+        },
+        {
+          "from": "Lipnik",
+          "to": "Piekary Śląskie",
+          "distance_km": 81
+        },
+        {
+          "from": "Lipnik",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 169
+        },
+        {
+          "from": "Lipnik",
+          "to": "Racibórz",
+          "distance_km": 159
+        },
+        {
+          "from": "Lipnik",
+          "to": "Ruda Śląska",
+          "distance_km": 102
+        },
+        {
+          "from": "Lipnik",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 74
+        },
+        {
+          "from": "Lipnik",
+          "to": "Sosnowiec",
+          "distance_km": 75
+        },
+        {
+          "from": "Lipnik",
+          "to": "Szczyrk",
+          "distance_km": 152
+        },
+        {
+          "from": "Lipnik",
+          "to": "Tarnowskie Góry",
+          "distance_km": 73
+        },
+        {
+          "from": "Lipnik",
+          "to": "Tychy",
+          "distance_km": 96
+        },
+        {
+          "from": "Lipnik",
+          "to": "Ustroń",
+          "distance_km": 156
+        },
+        {
+          "from": "Lipnik",
+          "to": "Wilkowice",
+          "distance_km": 144
+        },
+        {
+          "from": "Lipnik",
+          "to": "Zabrze",
+          "distance_km": 92
+        },
+        {
+          "from": "Lipnik",
+          "to": "Zawiercie",
+          "distance_km": 41
+        },
+        {
+          "from": "Lipnik",
+          "to": "Łaziska Górne",
+          "distance_km": 108
+        },
+        {
+          "from": "Lipnik",
+          "to": "Świętochłowice",
+          "distance_km": 88
+        },
+        {
+          "from": "Lipnik",
+          "to": "Żory",
+          "distance_km": 116
+        },
+        {
+          "from": "Lipnik",
+          "to": "Żywiec",
+          "distance_km": 155
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Mikołów",
+          "distance_km": 70
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Mysłowice",
+          "distance_km": 73
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Nakło Śląskie",
+          "distance_km": 35
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Niewiesze",
+          "distance_km": 45
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Piekary Śląskie",
+          "distance_km": 42
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 96
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Racibórz",
+          "distance_km": 87
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Ruda Śląska",
+          "distance_km": 63
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 53
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Sosnowiec",
+          "distance_km": 28
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Szczyrk",
+          "distance_km": 142
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Tarnowskie Góry",
+          "distance_km": 31
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Tychy",
+          "distance_km": 89
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Ustroń",
+          "distance_km": 122
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Wilkowice",
+          "distance_km": 136
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Zabrze",
+          "distance_km": 46
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Zawiercie",
+          "distance_km": 65
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Łaziska Górne",
+          "distance_km": 72
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Świętochłowice",
+          "distance_km": 54
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Żory",
+          "distance_km": 82
+        },
+        {
+          "from": "Lubliniec",
+          "to": "Żywiec",
+          "distance_km": 147
+        },
+        {
+          "from": "Mikołów",
+          "to": "Mysłowice",
+          "distance_km": 26
+        },
+        {
+          "from": "Mikołów",
+          "to": "Nakło Śląskie",
+          "distance_km": 36
+        },
+        {
+          "from": "Mikołów",
+          "to": "Niewiesze",
+          "distance_km": 49
+        },
+        {
+          "from": "Mikołów",
+          "to": "Piekary Śląskie",
+          "distance_km": 28
+        },
+        {
+          "from": "Mikołów",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 70
+        },
+        {
+          "from": "Mikołów",
+          "to": "Racibórz",
+          "distance_km": 61
+        },
+        {
+          "from": "Mikołów",
+          "to": "Ruda Śląska",
+          "distance_km": 14
+        },
+        {
+          "from": "Mikołów",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 24
+        },
+        {
+          "from": "Mikołów",
+          "to": "Sosnowiec",
+          "distance_km": 23
+        },
+        {
+          "from": "Mikołów",
+          "to": "Szczyrk",
+          "distance_km": 62
+        },
+        {
+          "from": "Mikołów",
+          "to": "Tarnowskie Góry",
+          "distance_km": 38
+        },
+        {
+          "from": "Mikołów",
+          "to": "Tychy",
+          "distance_km": 12
+        },
+        {
+          "from": "Mikołów",
+          "to": "Ustroń",
+          "distance_km": 67
+        },
+        {
+          "from": "Mikołów",
+          "to": "Wilkowice",
+          "distance_km": 55
+        },
+        {
+          "from": "Mikołów",
+          "to": "Zabrze",
+          "distance_km": 25
+        },
+        {
+          "from": "Mikołów",
+          "to": "Zawiercie",
+          "distance_km": 60
+        },
+        {
+          "from": "Mikołów",
+          "to": "Łaziska Górne",
+          "distance_km": 7
+        },
+        {
+          "from": "Mikołów",
+          "to": "Świętochłowice",
+          "distance_km": 16
+        },
+        {
+          "from": "Mikołów",
+          "to": "Żory",
+          "distance_km": 22
+        },
+        {
+          "from": "Mikołów",
+          "to": "Żywiec",
+          "distance_km": 63
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Nakło Śląskie",
+          "distance_km": 39
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Niewiesze",
+          "distance_km": 61
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Piekary Śląskie",
+          "distance_km": 30
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 95
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Racibórz",
+          "distance_km": 86
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Ruda Śląska",
+          "distance_km": 24
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 25
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Sosnowiec",
+          "distance_km": 17
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Szczyrk",
+          "distance_km": 72
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Tarnowskie Góry",
+          "distance_km": 39
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Tychy",
+          "distance_km": 20
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Ustroń",
+          "distance_km": 80
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Wilkowice",
+          "distance_km": 65
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Zabrze",
+          "distance_km": 37
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Zawiercie",
+          "distance_km": 41
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Łaziska Górne",
+          "distance_km": 32
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Świętochłowice",
+          "distance_km": 23
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Żory",
+          "distance_km": 48
+        },
+        {
+          "from": "Mysłowice",
+          "to": "Żywiec",
+          "distance_km": 73
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Niewiesze",
+          "distance_km": 36
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Piekary Śląskie",
+          "distance_km": 8
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 88
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Racibórz",
+          "distance_km": 79
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Ruda Śląska",
+          "distance_km": 27
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 21
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Sosnowiec",
+          "distance_km": 28
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Szczyrk",
+          "distance_km": 97
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Tarnowskie Góry",
+          "distance_km": 6
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Tychy",
+          "distance_km": 43
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Ustroń",
+          "distance_km": 105
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Wilkowice",
+          "distance_km": 90
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Zabrze",
+          "distance_km": 22
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Zawiercie",
+          "distance_km": 39
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Łaziska Górne",
+          "distance_km": 46
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Świętochłowice",
+          "distance_km": 22
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Żory",
+          "distance_km": 58
+        },
+        {
+          "from": "Nakło Śląskie",
+          "to": "Żywiec",
+          "distance_km": 106
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Piekary Śląskie",
+          "distance_km": 38
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 65
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Racibórz",
+          "distance_km": 60
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Ruda Śląska",
+          "distance_km": 42
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 42
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Sosnowiec",
+          "distance_km": 64
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Szczyrk",
+          "distance_km": 120
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Tarnowskie Góry",
+          "distance_km": 31
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Tychy",
+          "distance_km": 63
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Ustroń",
+          "distance_km": 101
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Wilkowice",
+          "distance_km": 115
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Zabrze",
+          "distance_km": 29
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Zawiercie",
+          "distance_km": 79
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Łaziska Górne",
+          "distance_km": 54
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Świętochłowice",
+          "distance_km": 47
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Żory",
+          "distance_km": 60
+        },
+        {
+          "from": "Niewiesze",
+          "to": "Żywiec",
+          "distance_km": 134
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Pietrowice Wielkie",
+          "distance_km": 81
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Racibórz",
+          "distance_km": 72
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Ruda Śląska",
+          "distance_km": 20
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 12
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Sosnowiec",
+          "distance_km": 21
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Szczyrk",
+          "distance_km": 89
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Tarnowskie Góry",
+          "distance_km": 14
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Tychy",
+          "distance_km": 35
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Ustroń",
+          "distance_km": 91
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Wilkowice",
+          "distance_km": 82
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Zabrze",
+          "distance_km": 14
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Zawiercie",
+          "distance_km": 45
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Łaziska Górne",
+          "distance_km": 35
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Świętochłowice",
+          "distance_km": 14
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Żory",
+          "distance_km": 51
+        },
+        {
+          "from": "Piekary Śląskie",
+          "to": "Żywiec",
+          "distance_km": 90
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Racibórz",
+          "distance_km": 9
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Ruda Śląska",
+          "distance_km": 73
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 91
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Sosnowiec",
+          "distance_km": 95
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Szczyrk",
+          "distance_km": 104
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Tarnowskie Góry",
+          "distance_km": 77
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Tychy",
+          "distance_km": 81
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Ustroń",
+          "distance_km": 84
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Wilkowice",
+          "distance_km": 97
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Zabrze",
+          "distance_km": 67
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Zawiercie",
+          "distance_km": 134
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Łaziska Górne",
+          "distance_km": 60
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Świętochłowice",
+          "distance_km": 82
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Żory",
+          "distance_km": 50
+        },
+        {
+          "from": "Pietrowice Wielkie",
+          "to": "Żywiec",
+          "distance_km": 105
+        },
+        {
+          "from": "Racibórz",
+          "to": "Ruda Śląska",
+          "distance_km": 60
+        },
+        {
+          "from": "Racibórz",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 82
+        },
+        {
+          "from": "Racibórz",
+          "to": "Sosnowiec",
+          "distance_km": 85
+        },
+        {
+          "from": "Racibórz",
+          "to": "Szczyrk",
+          "distance_km": 95
+        },
+        {
+          "from": "Racibórz",
+          "to": "Tarnowskie Góry",
+          "distance_km": 68
+        },
+        {
+          "from": "Racibórz",
+          "to": "Tychy",
+          "distance_km": 71
+        },
+        {
+          "from": "Racibórz",
+          "to": "Ustroń",
+          "distance_km": 75
+        },
+        {
+          "from": "Racibórz",
+          "to": "Wilkowice",
+          "distance_km": 88
+        },
+        {
+          "from": "Racibórz",
+          "to": "Zabrze",
+          "distance_km": 58
+        },
+        {
+          "from": "Racibórz",
+          "to": "Zawiercie",
+          "distance_km": 120
+        },
+        {
+          "from": "Racibórz",
+          "to": "Łaziska Górne",
+          "distance_km": 51
+        },
+        {
+          "from": "Racibórz",
+          "to": "Świętochłowice",
+          "distance_km": 70
+        },
+        {
+          "from": "Racibórz",
+          "to": "Żory",
+          "distance_km": 41
+        },
+        {
+          "from": "Racibórz",
+          "to": "Żywiec",
+          "distance_km": 96
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Siemianowice Śląskie",
+          "distance_km": 20
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Sosnowiec",
+          "distance_km": 22
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Szczyrk",
+          "distance_km": 84
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Tarnowskie Góry",
+          "distance_km": 24
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Tychy",
+          "distance_km": 24
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Ustroń",
+          "distance_km": 69
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Wilkowice",
+          "distance_km": 76
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Zabrze",
+          "distance_km": 13
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Zawiercie",
+          "distance_km": 61
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Łaziska Górne",
+          "distance_km": 15
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Świętochłowice",
+          "distance_km": 10
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Żory",
+          "distance_km": 28
+        },
+        {
+          "from": "Ruda Śląska",
+          "to": "Żywiec",
+          "distance_km": 84
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Sosnowiec",
+          "distance_km": 9
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Szczyrk",
+          "distance_km": 85
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Tarnowskie Góry",
+          "distance_km": 21
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Tychy",
+          "distance_km": 28
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Ustroń",
+          "distance_km": 93
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Wilkowice",
+          "distance_km": 78
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Zabrze",
+          "distance_km": 21
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Zawiercie",
+          "distance_km": 41
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Łaziska Górne",
+          "distance_km": 29
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Świętochłowice",
+          "distance_km": 15
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Żory",
+          "distance_km": 46
+        },
+        {
+          "from": "Siemianowice Śląskie",
+          "to": "Żywiec",
+          "distance_km": 86
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Szczyrk",
+          "distance_km": 76
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Tarnowskie Góry",
+          "distance_km": 30
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Tychy",
+          "distance_km": 22
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Ustroń",
+          "distance_km": 88
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Wilkowice",
+          "distance_km": 69
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Zabrze",
+          "distance_km": 28
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Zawiercie",
+          "distance_km": 39
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Łaziska Górne",
+          "distance_km": 28
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Świętochłowice",
+          "distance_km": 15
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Żory",
+          "distance_km": 45
+        },
+        {
+          "from": "Sosnowiec",
+          "to": "Żywiec",
+          "distance_km": 77
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Tarnowskie Góry",
+          "distance_km": 98
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Tychy",
+          "distance_km": 54
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Ustroń",
+          "distance_km": 45
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Wilkowice",
+          "distance_km": 10
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Zabrze",
+          "distance_km": 96
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Zawiercie",
+          "distance_km": 110
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Łaziska Górne",
+          "distance_km": 61
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Świętochłowice",
+          "distance_km": 82
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Żory",
+          "distance_km": 55
+        },
+        {
+          "from": "Szczyrk",
+          "to": "Żywiec",
+          "distance_km": 18
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Tychy",
+          "distance_km": 44
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Ustroń",
+          "distance_km": 106
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Wilkowice",
+          "distance_km": 91
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Zabrze",
+          "distance_km": 15
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Zawiercie",
+          "distance_km": 46
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Łaziska Górne",
+          "distance_km": 44
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Świętochłowice",
+          "distance_km": 20
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Żory",
+          "distance_km": 54
+        },
+        {
+          "from": "Tarnowskie Góry",
+          "to": "Żywiec",
+          "distance_km": 117
+        },
+        {
+          "from": "Tychy",
+          "to": "Ustroń",
+          "distance_km": 63
+        },
+        {
+          "from": "Tychy",
+          "to": "Wilkowice",
+          "distance_km": 47
+        },
+        {
+          "from": "Tychy",
+          "to": "Zabrze",
+          "distance_km": 42
+        },
+        {
+          "from": "Tychy",
+          "to": "Zawiercie",
+          "distance_km": 57
+        },
+        {
+          "from": "Tychy",
+          "to": "Łaziska Górne",
+          "distance_km": 16
+        },
+        {
+          "from": "Tychy",
+          "to": "Świętochłowice",
+          "distance_km": 34
+        },
+        {
+          "from": "Tychy",
+          "to": "Żory",
+          "distance_km": 34
+        },
+        {
+          "from": "Tychy",
+          "to": "Żywiec",
+          "distance_km": 55
+        },
+        {
+          "from": "Ustroń",
+          "to": "Wilkowice",
+          "distance_km": 38
+        },
+        {
+          "from": "Ustroń",
+          "to": "Zabrze",
+          "distance_km": 81
+        },
+        {
+          "from": "Ustroń",
+          "to": "Zawiercie",
+          "distance_km": 123
+        },
+        {
+          "from": "Ustroń",
+          "to": "Łaziska Górne",
+          "distance_km": 56
+        },
+        {
+          "from": "Ustroń",
+          "to": "Świętochłowice",
+          "distance_km": 79
+        },
+        {
+          "from": "Ustroń",
+          "to": "Żory",
+          "distance_km": 40
+        },
+        {
+          "from": "Ustroń",
+          "to": "Żywiec",
+          "distance_km": 54
+        },
+        {
+          "from": "Wilkowice",
+          "to": "Zabrze",
+          "distance_km": 89
+        },
+        {
+          "from": "Wilkowice",
+          "to": "Zawiercie",
+          "distance_km": 103
+        },
+        {
+          "from": "Wilkowice",
+          "to": "Łaziska Górne",
+          "distance_km": 54
+        },
+        {
+          "from": "Wilkowice",
+          "to": "Świętochłowice",
+          "distance_km": 75
+        },
+        {
+          "from": "Wilkowice",
+          "to": "Żory",
+          "distance_km": 48
+        },
+        {
+          "from": "Wilkowice",
+          "to": "Żywiec",
+          "distance_km": 8
+        },
+        {
+          "from": "Zabrze",
+          "to": "Zawiercie",
+          "distance_km": 58
+        },
+        {
+          "from": "Zabrze",
+          "to": "Łaziska Górne",
+          "distance_km": 29
+        },
+        {
+          "from": "Zabrze",
+          "to": "Świętochłowice",
+          "distance_km": 13
+        },
+        {
+          "from": "Zabrze",
+          "to": "Żory",
+          "distance_km": 41
+        },
+        {
+          "from": "Zabrze",
+          "to": "Żywiec",
+          "distance_km": 97
+        },
+        {
+          "from": "Zawiercie",
+          "to": "Łaziska Górne",
+          "distance_km": 68
+        },
+        {
+          "from": "Zawiercie",
+          "to": "Świętochłowice",
+          "distance_km": 55
+        },
+        {
+          "from": "Zawiercie",
+          "to": "Żory",
+          "distance_km": 94
+        },
+        {
+          "from": "Zawiercie",
+          "to": "Żywiec",
+          "distance_km": 111
+        },
+        {
+          "from": "Łaziska Górne",
+          "to": "Świętochłowice",
+          "distance_km": 22
+        },
+        {
+          "from": "Łaziska Górne",
+          "to": "Żory",
+          "distance_km": 16
+        },
+        {
+          "from": "Łaziska Górne",
+          "to": "Żywiec",
+          "distance_km": 62
+        },
+        {
+          "from": "Świętochłowice",
+          "to": "Żory",
+          "distance_km": 38
+        },
+        {
+          "from": "Świętochłowice",
+          "to": "Żywiec",
+          "distance_km": 83
+        },
+        {
+          "from": "Żory",
+          "to": "Żywiec",
+          "distance_km": 56
+        }
+      ]
+    }
+  ]
+}
