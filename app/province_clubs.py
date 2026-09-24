@@ -21,17 +21,19 @@ import re
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import club_charges as C
+from app import district_payer as DP
 from app import province_clubs_bulk as B
 from app import province_clubs_scope as S
 from app import province_club_budgets as CB
 from app import province_club_budgets_rules as BR
+from app import settlement_cache as SC
 from app import settlement_engine as E
 from app import settlement_rates as R
 from app.db import (
@@ -53,12 +55,8 @@ from app.province_panel_access import PANEL_SETTLEMENTS
 from app.province_panel_guard import panel_write_gate
 from app.province_clubs_sync import RUN_KIND, last_run, refresh_clubs, start_run
 from app.province_settlement_sync import module_enabled
-from app.province_settlements import (
-    _assignments,
-    _judge_names,
-    _versions,
-    require_province,
-)
+from app.province_settlements import _base, require_province
+from app.settlement_money import money, money_sum
 from app.settlement_province import canonical, display, spellings
 from app.settlement_runs import cooldown_left, run_is_active
 from app.settlement_seasons import season_of
@@ -252,11 +250,29 @@ async def _entries(province: str, season: str) -> list[dict]:
 
 
 async def load_clubs(province: str, season: str, *, include_future: bool = False) -> dict:
-    """Jedno wejscie: druzyny, obciazenia, wplaty - dla listy i dla szczegolu."""
+    """
+    Jedno wejscie: druzyny, obciazenia, wplaty - dla listy i dla szczegolu.
+
+    Wynik z pamieci (`settlement_cache`): lista klubow, karta klubu, mecze bez
+    druzyny i szablon Excela czytaja TEN SAM policzony sezon, zamiast liczyc go
+    od nowa na kazde klikniecie. ⚠ Wynik wspolny - tylko do odczytu.
+    """
+    season_range(season)
+    return await SC.remember(
+        "clubs",
+        province,
+        (str(season), bool(include_future)),
+        lambda: _load_clubs(province, season, include_future=include_future),
+    )
+
+
+async def _load_clubs(province: str, season: str, *, include_future: bool = False) -> dict:
     date_from, date_to = season_range(season)
-    central_versions, province_versions = await _versions(province)
-    names = await _judge_names(province)
-    assignments = await _assignments(province)
+    base = await _base(province)
+    central_versions = base["central_versions"]
+    province_versions = base["province_versions"]
+    names = base["names"]
+    assignments = base["assignments"]
 
     settled = E.settle_judges(
         assignments,
@@ -303,6 +319,7 @@ async def load_clubs(province: str, season: str, *, include_future: bool = False
         clubs=clubs_setting,
         judge_names=names,
         key_of=team_key,
+        district_label=DP.label(province, (settings.get(DP.DISTRICT_PAYER_ID) or {}).get("display_name")),
     )
     if manual_matches:
         charges.extend(await manual_charges_for(province, manual_matches, names))
@@ -319,11 +336,13 @@ async def load_clubs(province: str, season: str, *, include_future: bool = False
     }
 
 
-def _club_name(settings: dict, meta: dict, club_id: str) -> str:
+def _club_name(settings: dict, meta: dict, club_id: str, province: str = "") -> str:
     row = settings.get(club_id) or {}
     name = _s(row.get("display_name"))
     if name:
         return name
+    if DP.is_district_payer(club_id):
+        return DP.default_label(province)
     names = [item["name"] for item in meta.values() if item["club_id"] == club_id]
     return sorted(names, key=lambda value: (len(value), value))[0] if names else club_id
 
@@ -432,6 +451,18 @@ async def status(province: str = Query(...)):
 
 async def _season_clubs(key: str, season: str, *, include_future: bool = False) -> dict:
     """
+    Kluby sezonu z saldami - z pamieci (`settlement_cache`), tylko do odczytu.
+    """
+    return await SC.remember(
+        "clubs_season",
+        key,
+        (str(season), bool(include_future)),
+        lambda: _season_clubs_uncached(key, season, include_future=include_future),
+    )
+
+
+async def _season_clubs_uncached(key: str, season: str, *, include_future: bool = False) -> dict:
+    """
     Kluby sezonu z saldami - bez filtrow listy.
 
     Kto nalezy do sezonu, rozstrzyga `province_clubs_scope`: klub z meczem albo
@@ -449,35 +480,40 @@ async def _season_clubs(key: str, season: str, *, include_future: bool = False) 
     settings: dict[str, dict] = data["settings"]
 
     charged = C.club_totals(charges)
-    money: dict[str, dict[str, float]] = {}
+    paid_by: dict[str, dict[str, float]] = {}
     for row in data["entries"]:
-        entry = money.setdefault(_s(row["club_id"]), {"in": 0.0, "out": 0.0, "settled": 0.0})
-        entry[B.entry_bucket(row["kind"], row.get("source"))] += float(row["amount"] or 0)
+        entry = paid_by.setdefault(_s(row["club_id"]), {"in": 0.0, "out": 0.0, "settled": 0.0})
+        bucket = B.entry_bucket(row["kind"], row.get("source"))
+        entry[bucket] = money_sum((entry[bucket], row["amount"]))
 
     teams_of: dict[str, list[dict]] = {}
     for item in meta.values():
         teams_of.setdefault(item["club_id"], []).append(item)
-    club_ids = S.season_club_ids(
-        meta.values(),
-        [row.club_id for row in charges if row.club_id] + list(money.keys()),
+    # Okręg jako płatnik NIE jest klubem sezonu (`district_payer`): osobny
+    # klucz `district`, żeby sumy „kluby razem", Rozlicz sezon, wspólne budżety
+    # i alert salda (wszystkie czytają `clubs`) nie mogły go policzyć.
+    club_ids = DP.without_district(
+        S.season_club_ids(
+            meta.values(),
+            [row.club_id for row in charges if row.club_id] + list(paid_by.keys()),
+        )
     )
 
-    clubs: dict[str, dict] = {}
-    for club_id in sorted(club_ids):
+    def club_row(club_id: str) -> dict:
         row = settings.get(club_id) or {}
         totals = charged.get(club_id) or {"charged": 0, "matches": 0}
-        paid = money.get(club_id) or {"in": 0.0, "out": 0.0, "settled": 0.0}
-        clubs[club_id] = {
+        paid = paid_by.get(club_id) or {"in": 0.0, "out": 0.0, "settled": 0.0}
+        return {
             "club_id": club_id,
-            "name": _club_name(settings, meta, club_id),
+            "name": _club_name(settings, meta, club_id, key),
             "settles_via_district": bool(row.get("settles_via_district", True)),
             "settles_since": row["settles_since"].isoformat() if row.get("settles_since") else None,
             **_table_json(data["table_rules"].get(club_id)),
             "note": _s(row.get("note")),
             "teams": sorted(teams_of.get(club_id, []), key=lambda item: item["name"]),
-            "paid_in": round(paid["in"], 2),
-            "paid_out": round(paid["out"], 2),
-            "settled": round(paid["settled"], 2),
+            "paid_in": money(paid["in"]),
+            "paid_out": money(paid["out"]),
+            "settled": money(paid["settled"]),
             "charged": totals["charged"],
             "matches": totals["matches"],
             "balance": C.balance(
@@ -486,7 +522,11 @@ async def _season_clubs(key: str, season: str, *, include_future: bool = False) 
                 charged=totals["charged"],
             ),
         }
-    return {"clubs": clubs, "charges": charges}
+
+    clubs = {club_id: club_row(club_id) for club_id in sorted(club_ids)}
+    # Kafel okręgu jest ZAWSZE - także bez meczów i wpisów.
+    district = {**club_row(DP.DISTRICT_PAYER_ID), "is_district": True, "settles_via_district": True}
+    return {"clubs": clubs, "charges": charges, "district": district}
 
 
 async def _closure(key: str, season: str, clubs: dict[str, dict]) -> Optional[dict]:
@@ -510,21 +550,17 @@ async def _closure(key: str, season: str, clubs: dict[str, dict]) -> Optional[di
     }
 
 
-@router.get("", summary="Lista klubów z saldami")
-async def list_clubs(
-    province: str = Query(...),
-    season: Optional[str] = Query(None),
-    q: Optional[str] = Query(None, description="Szukaj po nazwie klubu albo drużyny"),
-    category: Optional[str] = Query(None),
-    gender: Optional[str] = Query(None),
-    only_debt: bool = Query(False, description="Tylko kluby na minusie"),
-    include_future: bool = Query(False),
-):
-    key = require_province(province)
-    if not await module_enabled(key, "settlements"):
-        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
-    season = _s(season) or season_of(_now())
-
+async def _list_payload(
+    key: str,
+    season: str,
+    *,
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    gender: Optional[str] = None,
+    only_debt: bool = False,
+    include_future: bool = False,
+) -> dict:
+    """Treść listy klubów - z policzonego sezonu w pamięci, filtry na gotowym."""
     base = await _season_clubs(key, season, include_future=include_future)
     charges: list[C.ChargeRow] = base["charges"]
     # Wspólny budżet = jeden wiersz (23.09.2026). Salda, sumy sezonu i filtry
@@ -563,11 +599,11 @@ async def list_clubs(
     ]
     totals = {
         "clubs": len(clubs),
-        "paid_in": round(sum(item["paid_in"] for item in clubs), 2),
-        "paid_out": round(sum(item["paid_out"] for item in clubs), 2),
-        "settled": round(sum(item["settled"] for item in clubs), 2),
-        "charged": sum(item["charged"] for item in clubs),
-        "balance": sum(item["balance"] for item in clubs),
+        "paid_in": money_sum(item["paid_in"] for item in clubs),
+        "paid_out": money_sum(item["paid_out"] for item in clubs),
+        "settled": money_sum(item["settled"] for item in clubs),
+        "charged": money_sum(item["charged"] for item in clubs),
+        "balance": money_sum(item["balance"] for item in clubs),
         "matches": sum(item["matches"] for item in clubs),
         "unassigned": len(unassigned),
     }
@@ -577,11 +613,82 @@ async def list_clubs(
         "season": season,
         "seasons": await _known_seasons(key) or [season],
         "clubs": clubs,
+        # Okręg jako płatnik - osobno, poza `clubs` i poza `totals` (bez filtrów).
+        "district": base.get("district"),
         "totals": totals,
         "unassigned": unassigned,
         "dismissed": dismissed,
         "closure": await _closure(key, season, budgets),
     }
+
+
+@router.get("", summary="Lista klubów z saldami")
+async def list_clubs(
+    request: Request,
+    province: str = Query(...),
+    season: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, description="Szukaj po nazwie klubu albo drużyny"),
+    category: Optional[str] = Query(None),
+    gender: Optional[str] = Query(None),
+    only_debt: bool = Query(False, description="Tylko kluby na minusie"),
+    include_future: bool = Query(False),
+):
+    key = require_province(province)
+    if not await module_enabled(key, "settlements"):
+        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    season = _s(season) or season_of(_now())
+    season_range(season)
+    params = (season, _s(q), _s(category), _s(gender), bool(only_debt), bool(include_future))
+    pack = await SC.packed(
+        "clubs_list",
+        key,
+        params,
+        lambda: _list_payload(
+            key,
+            season,
+            q=q,
+            category=category,
+            gender=gender,
+            only_debt=only_debt,
+            include_future=include_future,
+        ),
+    )
+    return SC.respond(request, pack)
+
+
+@router.get("/bundle", summary="Cały sezon klubów naraz: lista i karta każdego klubu")
+async def clubs_bundle(
+    request: Request,
+    province: str = Query(...),
+    season: Optional[str] = Query(None),
+    include_future: bool = Query(False),
+):
+    """
+    Lista (bez filtrów) i karta KAŻDEGO klubu sezonu w jednej odpowiedzi.
+
+    Panel ściąga to raz przy wejściu i filtruje u siebie - otwarcie dowolnego
+    klubu, szukanie i filtry działają potem od ręki, bez pytania serwera.
+    Treść kart jest dokładnie taka jak z `GET /{club_id}`.
+    """
+    key = require_province(province)
+    if not await module_enabled(key, "settlements"):
+        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    season = _s(season) or season_of(_now())
+    season_range(season)
+
+    async def build() -> dict:
+        listing = await _list_payload(key, season, include_future=include_future)
+        data = await load_clubs(key, season, include_future=include_future)
+        groups = await CB.budget_groups(key)
+        details = {
+            club["club_id"]: _detail_payload(key, season, club["club_id"], data, groups)
+            for club in listing["clubs"]
+        }
+        details[DP.DISTRICT_PAYER_ID] = _detail_payload(key, season, DP.DISTRICT_PAYER_ID, data, groups)
+        return {**listing, "details": details}
+
+    pack = await SC.packed("clubs_bundle", key, (season, bool(include_future)), build)
+    return SC.respond(request, pack)
 
 
 @router.get("/unassigned", summary="Mecze bez rozpoznanej drużyny gospodarza")
@@ -717,20 +824,15 @@ async def create_team_from_match(payload: CreateTeamFromMatchRequest):
     }
 
 
-@router.get("/{club_id}", summary="Klub: mecze, wpłaty i saldo")
-async def club_detail(
-    club_id: str,
-    province: str = Query(...),
-    season: Optional[str] = Query(None),
-    include_future: bool = Query(False),
-):
-    key = require_province(province)
-    season = _s(season) or season_of(_now())
-    data = await load_clubs(key, season, include_future=include_future)
-
+def _detail_payload(key: str, season: str, club_id: str, data: dict, groups: list[dict]) -> dict:
+    """Karta klubu z policzonego sezonu (`load_clubs`) - bez pytania bazy."""
     # Wejście po numerze DOWOLNEGO członka wspólnego budżetu pokazuje cały
     # budżet: mecze, drużyny i wpisy wszystkich numerów, ustawienia z głównego.
-    group = BR.group_of(_s(club_id), await CB.budget_groups(key))
+    is_district = DP.is_district_payer(club_id)
+    if is_district:
+        club_id = DP.DISTRICT_PAYER_ID
+    # Okręg jako płatnik nigdy nie należy do wspólnego budżetu.
+    group = None if is_district else BR.group_of(_s(club_id), groups)
     member_ids = list(group["member_ids"]) if group else [_s(club_id)]
     primary = _s(group["primary_club_id"]) if group else _s(club_id)
     members = set(member_ids)
@@ -741,14 +843,15 @@ async def club_detail(
 
     buckets = {"in": 0.0, "out": 0.0, "settled": 0.0}
     for row in entries:
-        buckets[B.entry_bucket(row["kind"], row.get("source"))] += float(row["amount"] or 0)
+        bucket = B.entry_bucket(row["kind"], row.get("source"))
+        buckets[bucket] = money_sum((buckets[bucket], row["amount"]))
     paid_in, paid_out, settled = buckets["in"], buckets["out"], buckets["settled"]
-    charged = round(sum(row.amount for row in charges if row.status == C.CHARGED), 2)
+    charged = money_sum(row.amount for row in charges if row.status == C.CHARGED)
     per_team = C.team_totals(charges)
     settings = data["settings"].get(primary) or {}
 
     def member_name(member_id: str) -> str:
-        return _club_name(data["settings"], data["teams_meta"], member_id)
+        return _club_name(data["settings"], data["teams_meta"], member_id, key)
 
     member_rows = [
         {
@@ -769,13 +872,16 @@ async def club_detail(
         "club": {
             "club_id": primary,
             "name": (group or {}).get("name") or member_name(primary),
+            "is_district": is_district,
+            # Nazwa nadana ręcznie (dla okręgu: pusta = skrót związku).
+            "display_name": _s(settings.get("display_name")) or None,
             "settles_via_district": bool(settings.get("settles_via_district", True)),
             "settles_since": settings["settles_since"].isoformat() if settings.get("settles_since") else None,
             **_table_json(data["table_rules"].get(primary)),
             "note": _s(settings.get("note")),
-            "paid_in": round(paid_in, 2),
-            "paid_out": round(paid_out, 2),
-            "settled": round(settled, 2),
+            "paid_in": money(paid_in),
+            "paid_out": money(paid_out),
+            "settled": money(settled),
             "charged": charged,
             "balance": C.balance(paid_in=paid_in + settled, paid_out=paid_out, charged=charged),
             "matches": sum(1 for row in charges if row.status == C.CHARGED),
@@ -799,6 +905,27 @@ async def club_detail(
             for row in entries
         ],
     }
+
+
+@router.get("/{club_id}", summary="Klub: mecze, wpłaty i saldo")
+async def club_detail(
+    request: Request,
+    club_id: str,
+    province: str = Query(...),
+    season: Optional[str] = Query(None),
+    include_future: bool = Query(False),
+):
+    key = require_province(province)
+    season = _s(season) or season_of(_now())
+    season_range(season)
+
+    async def build() -> dict:
+        # Ten sam policzony sezon co lista - karta nie liczy okręgu drugi raz.
+        data = await load_clubs(key, season, include_future=include_future)
+        return _detail_payload(key, season, _s(club_id), data, await CB.budget_groups(key))
+
+    pack = await SC.packed("club_detail", key, (season, _s(club_id), bool(include_future)), build)
+    return SC.respond(request, pack)
 
 
 # ---------------------------------------------------------------------------
@@ -891,10 +1018,12 @@ async def remove_entry(entry_id: int, province: str = Query(...)):
 @router.put("/{club_id}/settings", summary="Ustawienia klubu")
 async def set_club(club_id: str, payload: SettingsRequest):
     key = require_province(payload.province)
+    district = DP.is_district_payer(club_id)
     values = {
         "province": key,
-        "club_id": _s(club_id),
-        "settles_via_district": bool(payload.settles_via_district),
+        "club_id": DP.DISTRICT_PAYER_ID if district else _s(club_id),
+        # Okręg jako płatnik: z ustawień liczy się tylko nazwa i notatka.
+        "settles_via_district": True if district else bool(payload.settles_via_district),
         "settles_since": payload.settles_since,
         "note": _s(payload.note) or None,
         "updated_by": _s(payload.updated_by) or None,
@@ -932,17 +1061,23 @@ class BulkEntryRequest(BaseModel):
     created_by: Optional[str] = None
 
 
-def _bulk_ids(raw: list[str]) -> list[str]:
+def _bulk_ids(raw: list[str], *, action: str = "") -> list[str]:
     try:
-        return B.clean_club_ids(raw)
+        ids = B.clean_club_ids(raw)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    # Przełączniki klubów (rozliczanie przez okręg, 4. sędzia) nie mają sensu
+    # dla samego okręgu - odmowa mówi to wprost, zamiast go po cichu pominąć.
+    reason = DP.refuse_reason(ids, action) if action else ""
+    if reason:
+        raise HTTPException(400, reason)
+    return ids
 
 
 @router.put("/settings/bulk", summary="Akcja grupowa: rozliczanie przez okręg")
 async def set_clubs_bulk(payload: BulkSettingsRequest):
     key = require_province(payload.province)
-    club_ids = _bulk_ids(payload.club_ids)
+    club_ids = _bulk_ids(payload.club_ids, action="Rozliczanie przez okręg")
     now = _now()
     settles = bool(payload.settles_via_district)
     since = B.settles_since(settles, payload.settles_since, now.date())
@@ -988,7 +1123,7 @@ async def set_fourth_bulk(payload: FourthBulkRequest):
     from app.province_assignment_auto import write_club_rules
 
     key = require_province(payload.province)
-    club_ids = _bulk_ids(payload.club_ids)
+    club_ids = _bulk_ids(payload.club_ids, action="4. sędzia przez okręg")
     updated = await write_club_rules(
         key,
         club_ids,
@@ -1034,12 +1169,30 @@ async def add_entries_bulk(payload: BulkEntryRequest):
 
 @router.put("/matches/{match_key}/override", summary="Wyjątek na meczu")
 async def set_override(match_key: str, payload: OverrideRequest):
+    """
+    Wyjątek na meczu: zwolnienie, inna drużyna albo potrójny ryczałt.
+
+    `team_id = "OKREG"` (`district_payer.DISTRICT_PAYER_ID`) przenosi koszt
+    meczu na okręg jako płatnika („Przenieś koszt na okręg"); pusty `team_id`
+    wraca do gospodarza rozpoznanego z terminarza („Przywróć do klubu").
+    """
     key = require_province(payload.province)
+    team_id = _s(payload.team_id)
+    if DP.is_district_payer(team_id):
+        team_id = DP.DISTRICT_PAYER_ID
+    from app.manual_charge_rules import is_manual_key
+
+    if team_id and is_manual_key(match_key):
+        raise HTTPException(
+            400,
+            "Ręczny mecz należy do karty, z której go dopisano - nie da się go przenieść "
+            "wyjątkiem. Usuń go i dopisz na właściwej karcie (klubu albo okręgu).",
+        )
     values = {
         "province": key,
         "match_key": _s(match_key),
         "excluded": bool(payload.excluded),
-        "team_id": _s(payload.team_id) or None,
+        "team_id": team_id or None,
         "team_name": _s(payload.team_name) or None,
         "triple_table": bool(payload.triple_table),
         "note": _s(payload.note) or None,
@@ -1159,11 +1312,8 @@ async def close_season(payload: SeasonCloseRequest):
         club_id: round(sum(float(item["amount"] or 0) for item in items), 2)
         for club_id, items in existing.items()
     }
-    # Saldo co do grosza - lista pokazuje je zaokraglone do zlotych.
-    exact = {
-        club_id: round(club["paid_in"] + club["settled"] - club["paid_out"] - club["charged"], 2)
-        for club_id, club in clubs.items()
-    }
+    # Saldo co do grosza - to samo `balance`, ktore widac na liscie i karcie.
+    exact = {club_id: money(club["balance"]) for club_id, club in clubs.items()}
     plan = B.closing_amounts(exact, before, selected)
 
     changes = sorted(
@@ -1315,8 +1465,8 @@ async def export_xlsx(
                 "club_name": club["name"],
                 "teams_label": f"{count} {word}" + (f" · {', '.join(categories)}" if categories else ""),
                 "charged": club["charged"],
-                "paid_in": round(club["paid_in"] + club["settled"], 2),
-                "balance": club["balance"],
+                "paid_in": money_sum((club["paid_in"], club["settled"])),
+                "balance": money(club["balance"]),
             }
         )
     if not rows:

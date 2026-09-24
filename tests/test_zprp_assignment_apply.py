@@ -248,3 +248,37 @@ async def test_assigner_module_keeps_its_fallback(http):
 
     await apply({"NrSedzia_drugi": ("3", "KTOŚ SPOZA LISTY")})
     assert fake.submitted["NrSedzia_drugi"] == "3"
+
+
+# ── Obsada 2.0: stan, który widział obsadowy (`expect_slots`) ──
+
+
+@pytest.mark.asyncio
+async def test_expect_matching_state_saves_and_reports_before(http):
+    before = form_html({"NrSedzia_pierwszy": "1"}, BASE_OPTIONS)
+    after = form_html({"NrSedzia_pierwszy": "2"}, BASE_OPTIONS)
+    fake = http(before, after)
+
+    out = await apply(
+        {"NrSedzia_pierwszy": ("2", "KOWALSKI Piotr")},
+        expect_slots={"pierwszy": "Jan Nowak", "drugi": ""},
+    )
+    assert out["success"] is True
+    assert len(fake.calls) == 2
+    # Stan sprzed zapisu - z niego żyje dziennik zapisów do ZPRP.
+    assert out["before_slots"]["sedzia1"]["name"] == "NOWAK Jan"
+
+
+@pytest.mark.asyncio
+async def test_expect_mismatch_stops_the_save_with_a_list_of_slots(http):
+    fake = http(form_html({"NrSedzia_pierwszy": "3", "NrSedzia_czas": "2"}, BASE_OPTIONS))
+
+    out = await apply(
+        {"NrSedzia_pierwszy": ("2", "KOWALSKI Piotr")},
+        expect_slots={"pierwszy": "NOWAK Jan", "czas": "KOWALSKI Piotr", "drugi": ""},
+    )
+    assert out["success"] is False
+    assert out["code"] == "ZPRP_CHANGED"
+    assert out["slots"] == {"pierwszy": {"expected": "NOWAK Jan", "actual": "MAZUR Adam"}}
+    # Zero wysyłki - tylko wczytanie formularza.
+    assert len(fake.calls) == 1

@@ -137,6 +137,21 @@ async def _candidates(key: str, season: str) -> tuple[list[dict], dict[str, str]
         names[club_id] = name
         all_names = [name] + [n for n in team_names if n and n != name]
         candidates.append({"club_id": club_id, "name": name, "names": all_names})
+    # Okręg jako płatnik (`district_payer`) - faktura może trafić na niego tak
+    # samo jak na klub. Zawsze na liście, pod nazwą z panelu albo skrótem związku.
+    from app import district_payer as DP
+    from app.settlement_province import display
+
+    district_name = _club_name(settings, meta, DP.DISTRICT_PAYER_ID, key)
+    names[DP.DISTRICT_PAYER_ID] = district_name
+    candidates = [item for item in candidates if item["club_id"] != DP.DISTRICT_PAYER_ID]
+    candidates.append(
+        {
+            "club_id": DP.DISTRICT_PAYER_ID,
+            "name": district_name,
+            "names": list(dict.fromkeys([district_name, DP.default_label(key), f"Okręg {display(key)}"])),
+        }
+    )
     # Nazwy klubów spoza sezonu (np. wpłata do klubu z zeszłego roku).
     for club_id, row in settings.items():
         names.setdefault(club_id, _s(row.get("display_name")) or club_id)

@@ -30,6 +30,7 @@ import json
 from typing import Any, Iterable, Mapping, Optional
 
 from app import club_charges as C
+from app.settlement_money import money_sum
 
 #: Ile numerów ZPRP przyjmuje jeden budżet - więcej to pomyłka w zaznaczeniu.
 MAX_MEMBERS = 12
@@ -208,10 +209,10 @@ def merge_budgets(
         # Ustawienia z klubu głównego; gdy głównego nie ma w sezonie - z pierwszego obecnego.
         anchor = clubs.get(primary) or present[0]
 
-        paid_in = round(sum(_money(item.get("paid_in")) for item in present), 2)
-        paid_out = round(sum(_money(item.get("paid_out")) for item in present), 2)
-        settled = round(sum(_money(item.get("settled")) for item in present), 2)
-        charged = round(sum(_money(item.get("charged")) for item in present), 2)
+        paid_in = money_sum(item.get("paid_in") for item in present)
+        paid_out = money_sum(item.get("paid_out") for item in present)
+        settled = money_sum(item.get("settled") for item in present)
+        charged = money_sum(item.get("charged") for item in present)
         teams = sorted(
             (team for item in present for team in (item.get("teams") or [])),
             key=lambda team: _s(team.get("name")),

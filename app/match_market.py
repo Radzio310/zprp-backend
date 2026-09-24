@@ -873,6 +873,10 @@ async def _sync_slot_holder(
                 updated_at=func.now(),
             )
         )
+        # Obsada 2.0: migawka meczu się zmieniła - gotowy stan panelu do przebudowy.
+        from app.assignment_board_cache import bump
+
+        bump(province)
         return patched
     except Exception:
         logger.exception("giełda: nie udało się odświeżyć migawki meczu %s", match_id)

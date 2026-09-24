@@ -11,6 +11,9 @@ Decyzje użytkownika z 11.09.2026 (Śląsk, ale reguła jest ogólna):
   - DELEGATA na meczach okręgowych nie ma nigdy, na II lidze zdarza się bardzo
     rzadko - nigdy nie liczy się jako brak, pokazujemy go tylko, gdy jest.
 
+Decyzja z 24.09.2026 (Obsada 2.0): Młodzik młodszy i Dzieci NIE MAJĄ stolika
+od okręgu - gniazda stolikowe przy tych meczach nie są brakiem (table 0).
+
 Stąd trzy różne stany, nie dwa: „dziura" (brakuje kogoś, kogo musimy wystawić),
 „lekka różnica" (jeden stolikowy zamiast dwóch) i „komplet".
 """
@@ -27,7 +30,8 @@ TABLE_SLOTS = ("sekretarz", "czas")
 DELEGATE_SLOTS = ("delegat", "delegat2")
 SLOTS = FIELD_SLOTS + TABLE_SLOTS + DELEGATE_SLOTS
 
-#: Kategorie, w których wystarczy jeden boiskowy i jeden stolikowy.
+#: Kategorie, w których wystarczy jeden boiskowy, a stolika od okręgu nie ma
+#: wcale (decyzja z 24.09.2026).
 SMALL_PREFIXES = frozenset({"DZM", "DZK", "MLM1213", "MLK1213"})
 
 #: Napisy, którymi terminarz oznacza mecz, który się NIE ODBĘDZIE. W rozgrywkach
@@ -46,9 +50,38 @@ def _s(value: Any) -> str:
 
 
 def crew_needs(code: Any) -> dict[str, int]:
-    """Ilu ludzi ma stanąć przy tym meczu: boiskowi i stolik."""
+    """
+    Ilu ludzi ma stanąć przy tym meczu: boiskowi i stolik.
+
+    Młodzik młodszy i Dzieci: jeden boiskowy i ZERO stolikowych od okręgu -
+    tam stolik prowadzi gospodarz, więc puste gniazda stolikowe nie są brakiem.
+    """
     small = R.competition_prefix(code) in SMALL_PREFIXES
-    return {"field": 1 if small else 2, "table": 1 if small else 2}
+    return {"field": 1 if small else 2, "table": 0 if small else 2}
+
+
+def club_table_active(table_by_club: Any, since: Any = None, match_day: Any = None) -> int:
+    """
+    Ilu stolikowych stawia klub gospodarza W DNIU TEGO MECZU (0 albo 1).
+
+    Deklaracja działa od `table_by_club_since`: mecz sprzed tej daty liczy się
+    po staremu (okręg daje obu). Brak daty deklaracji znaczy „od zawsze",
+    a mecz bez terminu bierze deklarację taką, jaka jest dziś.
+    """
+    try:
+        declared = max(0, min(1, int(table_by_club or 0)))
+    except (TypeError, ValueError):
+        return 0
+    if not declared:
+        return 0
+    if since is None or match_day is None:
+        return declared
+    day = match_day.date() if hasattr(match_day, "date") and callable(match_day.date) else match_day
+    start = since.date() if hasattr(since, "date") and callable(since.date) else since
+    try:
+        return declared if day >= start else 0
+    except TypeError:
+        return declared
 
 
 def club_crew_needs(code: Any, table_by_club: Any = 0) -> dict[str, int]:
@@ -56,18 +89,25 @@ def club_crew_needs(code: Any, table_by_club: Any = 0) -> dict[str, int]:
     Czego mecz potrzebuje OD OKRĘGU, gdy klub gospodarza stawia część stolika.
 
     Klub bywa umówiony, że jednego stolikowego daje z własnych ludzi („4. sędzia"
-    z pisma okręgu) - wtedy okręg posyła o jednego mniej. ⚠ Okręg daje ZAWSZE
-    co najmniej jednego (decyzja użytkownika z 12.09.2026): przy dzieciach, gdzie
-    stolik jest jednoosobowy, deklaracja klubu nie ma czego odjąć.
+    z pisma okręgu) - wtedy okręg posyła o jednego mniej, a `club_table` mówi,
+    że drugie gniazdo stolika jest „od klubu", nie puste. ⚠ Okręg daje ZAWSZE
+    co najmniej jednego (decyzja użytkownika z 12.09.2026), a przy kategoriach
+    bez stolika (`SMALL_PREFIXES`) deklaracja nie ma czego odjąć: tam
+    `table` = 0 i `club_table` = 0.
 
     Ta sama reguła dla Automatu (`assignment_context.need_from_state`) i dla
     stanu obsady na liście - inaczej lista wołałaby „lekka różnica" przy meczu,
     który Automat słusznie uznał za komplet.
     """
     needs = dict(crew_needs(code))
-    from_club = max(0, int(table_by_club or 0))
-    if from_club and needs["table"] > 0:
+    needs["club_table"] = 0
+    try:
+        from_club = max(0, int(table_by_club or 0))
+    except (TypeError, ValueError):
+        from_club = 0
+    if from_club and needs["table"] > 1:
         needs["table"] = max(1, needs["table"] - from_club)
+        needs["club_table"] = min(from_club, crew_needs(code)["table"] - needs["table"])
     return needs
 
 

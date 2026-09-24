@@ -57,10 +57,11 @@ def test_the_standing_crew_comes_back_as_known_people():
     assert need.crew_field[0].league          # zna uprawnienia, nie samo nazwisko
 
 
-def test_small_categories_need_one_of_each():
+def test_small_categories_need_one_referee_and_no_table():
+    # Młodzik młodszy i Dzieci: stolika od okręgu nie ma (24.09.2026).
     need = need_from_state("1", {**STATE}, "DZM/4", None, roster_with())
     assert need.field_needed == ["pierwszy"]
-    assert need.table_needed == ["sekretarz"]
+    assert need.table_needed == []
 
 
 def test_asking_for_one_slot_narrows_the_need():
@@ -154,16 +155,31 @@ def test_a_club_that_seats_one_table_official_gets_one_from_us():
 
 def test_the_province_always_seats_at_least_one_table_official():
     """
-    Okręg daje albo jednego, albo obu - nigdy nikogo.
+    Okręg daje albo jednego, albo obu - nigdy nikogo (tam, gdzie stolik jest).
 
-    Przy dzieciach stolik jest jednoosobowy, więc deklaracja klubu nie ma czego
-    odjąć: ten jeden i tak jedzie od nas.
+    Przy dzieciach stolika od okręgu nie ma wcale (24.09.2026), więc deklaracja
+    klubu nie ma czego odjąć.
     """
     roster = club_roster({"table_by_club": 1})
     state = {**STATE, "ID_zespoly_gosp_ZespolNazwa": "GKS Katowice"}
-    need = need_from_state("1", state, "DZM/4", None, roster)
+    need = need_from_state("1", state, "S/JmM/12", None, roster)
     assert need.table_needed == ["sekretarz"]
+    need = need_from_state("1", state, "DZM/4", None, roster)
+    assert need.table_needed == []
     assert need.field_needed == ["pierwszy"]
+
+
+def test_declaration_works_from_its_date():
+    # Mecz sprzed daty deklaracji: okręg daje obu stolikowych.
+    roster = club_roster({"table_by_club": 1, "table_by_club_since": date(2026, 10, 10)})
+    state = {**STATE, "ID_zespoly_gosp_ZespolNazwa": "GKS Katowice"}
+    before = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 10, 12, 16, 0, tzinfo=timezone.utc)
+    assert need_from_state("1", state, "S/JmM/12", before, roster).table_needed == [
+        "sekretarz",
+        "czas",
+    ]
+    assert need_from_state("1", state, "S/JmM/12", after, roster).table_needed == ["sekretarz"]
 
 
 def test_even_a_bigger_declaration_does_not_empty_the_table():

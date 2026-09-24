@@ -48,6 +48,8 @@ from datetime import date, datetime
 from typing import Any, Callable, Iterable, Optional
 
 from app import settlement_rates as R
+from app.district_payer import DISTRICT_PAYER_ID, is_district_payer
+from app.settlement_money import balance as _money_balance, money, money_sum
 
 #: Status wiersza obciazenia - powod, dla ktorego mecz placi albo nie placi.
 CHARGED = "charged"
@@ -107,7 +109,7 @@ class RefereeShare:
     judge_id: str
     name: str
     role: str
-    gross: int
+    gross: float
     travel: float
     triple: bool = False
     #: Czy ta osoba wchodzi do rachunku klubu. `False` = drugi stolikowy
@@ -129,7 +131,7 @@ class ChargeRow:
     team_id: str = ""
     team_name: str = ""
     club_id: str = ""
-    gross: int = 0
+    gross: float = 0
     travel: float = 0
     amount: float = 0
     status: str = CHARGED
@@ -342,6 +344,7 @@ def build_charges(
     clubs: Optional[dict[str, ClubSetting]] = None,
     judge_names: Optional[dict[str, str]] = None,
     key_of: Any = None,
+    district_label: str = "",
 ) -> list[ChargeRow]:
     """
     Z obsad policzonych przez silnik robi wiersze obciazen, mecz po meczu.
@@ -350,6 +353,13 @@ def build_charges(
     obsada). `hosts` to gospodarze z terminarza okregu (klucz meczu -> nazwa).
     `key_of` to funkcja normalizujaca nazwe druzyny - wstrzykiwana, zeby modul
     zostal lisciem (parser stron ma wlasne zaleznosci).
+
+    Okreg jako platnik (24.09.2026): wyjatek z `team_id = OKREG`
+    (`district_payer`) przenosi mecz na konto samego okregu. Taki wiersz ma
+    zawsze status `charged` - okreg nie ma przelacznika „rozlicza sie przez
+    okreg" ani deklaracji stolikowego, wiec ani `club-off`, ani regula
+    „jednego stolikowego" go nie dotycza. `district_label` to nazwa platnika
+    na wierszu (bez niej sam numer).
     """
     overrides = overrides or {}
     clubs = clubs or {}
@@ -385,7 +395,7 @@ def build_charges(
             row.host_name = row.host_name or host_from_teams(teams, known=index.keys, key_of=normalize)
             row.teams = teams
             row.guest_name = guest_from_teams(teams, row.host_name)
-        row.gross += int(item.gross or 0)
+        row.gross = money(row.gross + money(item.gross))
         row.travel = round(row.travel + float(item.travel or 0), 2)
         row.triple = row.triple or bool(getattr(item, "triple_table", False))
         row.referees.append(
@@ -393,7 +403,7 @@ def build_charges(
                 judge_id=item.judge_id,
                 name=judge_names.get(item.judge_id, ""),
                 role=item.role,
-                gross=int(item.gross or 0),
+                gross=money(item.gross),
                 travel=float(item.travel or 0),
                 triple=bool(getattr(item, "triple_table", False)),
             )
@@ -405,7 +415,15 @@ def build_charges(
         override = overrides.get(row.match_key) or MatchOverride()
 
         team: Optional[TeamRef] = None
-        if override.team_id:
+        district = is_district_payer(override.team_id)
+        if district:
+            team = TeamRef(
+                team_id=DISTRICT_PAYER_ID,
+                club_id=DISTRICT_PAYER_ID,
+                name=district_label or override.team_name or DISTRICT_PAYER_ID,
+            )
+            row.moved = True
+        elif override.team_id:
             team = teams_by_id.get(override.team_id)
             row.moved = True
             if team is None and override.team_name:
@@ -422,14 +440,14 @@ def build_charges(
 
         # Drugi stolikowy u klubu, ktory stolikowego stawia sam. Liczymy przed
         # kwota, bo kwota to suma tylko tych, ktorzy wchodza do rachunku.
-        setting = clubs.get(team.club_id) if team is not None else None
+        setting = clubs.get(team.club_id) if team is not None and not district else None
         if own_table_applies(setting, row.code, row.day):
             row.own_table = True
             row.extra_table = keep_one_table(row.referees)
         charged_shares = [share for share in row.referees if share.charged]
-        row.gross = sum(int(share.gross or 0) for share in charged_shares)
+        row.gross = money_sum(share.gross for share in charged_shares)
         row.travel = round(sum(float(share.travel or 0) for share in charged_shares), 2)
-        row.amount = round(row.gross + row.travel, 2)
+        row.amount = money_sum((row.gross, row.travel))
 
         if override.excluded:
             row.status = EXCLUDED
@@ -438,6 +456,8 @@ def build_charges(
             # go w „bez rozpoznanej druzyny". Stolik spoza terminarza z obcym
             # gospodarzem nie jest nasza sprawa.
             row.status = NO_HOST if row.match_key.startswith(OUTSIDE_PREFIX) else UNASSIGNED
+        elif district:
+            row.status = CHARGED
         else:
             setting = setting or ClubSetting()
             if not setting.settles and (
@@ -460,7 +480,7 @@ def club_totals(rows: Iterable[ChargeRow]) -> dict[str, dict[str, int | float]]:
             continue
         entry = totals.setdefault(row.club_id, {"charged": 0, "matches": 0, "gross": 0, "travel": 0})
         entry["charged"] = round(entry["charged"] + row.amount, 2)
-        entry["gross"] += row.gross
+        entry["gross"] = money(entry["gross"] + row.gross)
         entry["travel"] = round(entry["travel"] + row.travel, 2)
         entry["matches"] += 1
     return totals
@@ -478,10 +498,12 @@ def team_totals(rows: Iterable[ChargeRow]) -> dict[str, dict[str, int | float]]:
     return totals
 
 
-def balance(*, paid_in: float, paid_out: float, charged: float) -> int:
+def balance(*, paid_in: float, paid_out: float, charged: float) -> float:
     """
-    Saldo klubu: wplaty minus wyplaty minus obciazenia.
+    Saldo klubu: wplaty minus wyplaty minus obciazenia - Z GROSZAMI.
 
-    Dodatnie = klub ma u okregu nadwyzke, ujemne = zalega.
+    Dodatnie = klub ma u okregu nadwyzke, ujemne = zalega. Kiedys `round(...)`
+    do pelnych zlotych - karta pokazywala „Obciążenia 704,60 zł" i „Saldo
+    -705,00 zł". Jedna regula dla wszystkich sald: `settlement_money.balance`.
     """
-    return round(float(paid_in) - float(paid_out) - float(charged))
+    return _money_balance(paid_in=paid_in, paid_out=paid_out, charged=charged)

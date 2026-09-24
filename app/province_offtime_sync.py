@@ -300,6 +300,96 @@ async def _reconcile_roster(province: str, seen_ids: Iterable[str]) -> None:
         )
 
 
+async def persist_zprp_pairs(province: str, officials: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
+    """
+    Pary z listy oficjeli zapisane jako `province_judge_pairs` ze źródłem `zprp`.
+
+    Dopasowanie (po imieniu i nazwisku, wśród sędziów okręgu) to liść
+    `app/assignment_pairs.py`. Tu tylko różnica z tym, co już leży: dopisujemy
+    nowe pary (obie strony), kasujemy znikłe. Pary własne okręgu (`own`) są
+    nietknięte - one wygrywają przy odczycie. Piszemy pod kluczem kanonicznym,
+    a stare wiersze pod inną pisownią okręgu sprzątamy przy okazji.
+    """
+    from sqlalchemy import insert
+
+    from app.assignment_pairs import pair_rows_diff, zprp_pairs
+    from app.db import province_judge_pairs
+    from app.settlement_province import canonical, spellings
+
+    key = canonical(province) or province
+    names = spellings(key) or [key]
+    judges = await database.fetch_all(
+        select(province_judges.c.judge_id, province_judges.c.full_name).where(
+            province_judges.c.province.in_(names)
+        )
+    )
+    wanted = zprp_pairs(officials, [(row["judge_id"], row["full_name"]) for row in judges])
+    rows = await database.fetch_all(
+        select(
+            province_judge_pairs.c.province,
+            province_judge_pairs.c.judge_id,
+            province_judge_pairs.c.partner_id,
+        ).where(
+            and_(
+                province_judge_pairs.c.province.in_(names),
+                province_judge_pairs.c.source == "zprp",
+            )
+        )
+    )
+    foreign = [row for row in rows if _clean(row["province"]) != key]
+    existing = [(row["judge_id"], row["partner_id"]) for row in rows if _clean(row["province"]) == key]
+    to_add, to_drop = pair_rows_diff(existing, wanted)
+    if not to_add and not to_drop and not foreign:
+        return {"pairs": len(wanted) // 2, "added": 0, "removed": 0}
+
+    async with database.transaction():
+        if foreign:
+            await database.execute(
+                delete(province_judge_pairs).where(
+                    and_(
+                        province_judge_pairs.c.province.in_([n for n in names if n != key]),
+                        province_judge_pairs.c.source == "zprp",
+                    )
+                )
+            )
+            # Wiersze spod starej pisowni wracają pod klucz kanoniczny.
+            to_add = sorted(set(to_add) | {
+                (judge_id, partner_id)
+                for judge_id, partner_id in wanted.items()
+                if (judge_id, partner_id) not in set(existing)
+            })
+        for judge_id, partner_id in to_drop:
+            await database.execute(
+                delete(province_judge_pairs).where(
+                    and_(
+                        province_judge_pairs.c.province == key,
+                        province_judge_pairs.c.source == "zprp",
+                        province_judge_pairs.c.judge_id == judge_id,
+                        province_judge_pairs.c.partner_id == partner_id,
+                    )
+                )
+            )
+        for judge_id, partner_id in to_add:
+            await database.execute(
+                insert(province_judge_pairs).values(
+                    province=key,
+                    judge_id=judge_id,
+                    partner_id=partner_id,
+                    source="zprp",
+                    created_by="zprp-sync",
+                )
+            )
+
+    from app.assignment_board_cache import bump
+
+    bump(key)
+    logger.info(
+        "Central offtimes %s: pary z ZPRP %s (+%s / -%s)",
+        key, len(wanted) // 2, len(to_add), len(to_drop),
+    )
+    return {"pairs": len(wanted) // 2, "added": len(to_add), "removed": len(to_drop)}
+
+
 async def _acquire_lease(province: str, holder: str, max_wait_seconds: int) -> bool:
     """Wspólna blokada z monitorem meczów, również między replikami Railway."""
     deadline = asyncio.get_running_loop().time() + max_wait_seconds
@@ -388,6 +478,15 @@ async def _sync_province(
             if re.fullmatch(r"\d+", _clean(judge_id))
         }
         await _reconcile_roster(province, numeric_officials.keys())
+        # Pary „Para z : …" z tej samej listy - po udanym pobraniu całości.
+        # Osłonięte: niedyspozycje są ważniejsze niż pary i błąd par ich nie
+        # zatrzyma (ślad zostaje w logu).
+        try:
+            await persist_zprp_pairs(province, officials)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Central offtimes %s: nie udało się zapisać par z ZPRP", province)
         with_link = {
             judge_id: item
             for judge_id, item in numeric_officials.items()
@@ -465,6 +564,10 @@ async def _execute_province(
             retries=retries,
         )
         status = "partial" if result["errors_count"] else "success"
+        # Obsada 2.0: nowe niedyspozycje i miasta - gotowy stan panelu do przebudowy.
+        from app.assignment_board_cache import bump
+
+        bump(province)
         await database.execute(
             update(province_offtime_sync_runs)
             .where(province_offtime_sync_runs.c.id == run_id)

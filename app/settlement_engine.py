@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Iterable, Optional
 
 from app import settlement_rates as R
+from app.settlement_money import money, money_sum
 
 
 def _city_key(value: Any) -> str:
@@ -91,7 +92,7 @@ class SettledMatch:
     distance_km: Optional[float]
     distance_source: Optional[str]
     km_rate: float
-    gross: int
+    gross: float
     travel: float
     travel_shared: bool
     future: bool
@@ -122,11 +123,11 @@ class JudgeSettlement:
     judge_name: str
     matches: list[SettledMatch] = field(default_factory=list)
 
-    gross: int = 0
+    gross: float = 0
     costs: int = 0
     taxable: int = 0
     tax: int = 0
-    net: int = 0
+    net: float = 0
     travel: float = 0
     total: float = 0
 
@@ -317,7 +318,8 @@ def settle_match(
         distance_km=distance,
         distance_source=assignment.distance_source,
         km_rate=km_rate,
-        gross=round(gross),
+        # Z groszami - stawka z tabeli bywa ulamkowa (24.09.2026).
+        gross=money(gross),
         travel=R.travel_pln(distance, km_rate) if distance else 0,
         travel_shared=False,
         future=_is_future(assignment.match_at, now),
@@ -353,7 +355,8 @@ def _settle_fixed(assignment: Assignment, when_date: Optional[date], now: dateti
         distance_km=distance,
         distance_source=assignment.distance_source,
         km_rate=rate,
-        gross=round(float(assignment.fixed_gross or 0)),
+        # Reczny mecz wpisany jako 150,50 zl zostaje 150,50 zl.
+        gross=money(assignment.fixed_gross),
         travel=travel,
         travel_shared=False,
         future=_is_future(assignment.match_at, now),
@@ -436,7 +439,7 @@ def settle_judges(
         entry.missing_rate = sum(1 for m in entry.matches if m.status == "missing-rate")
         entry.guessed_stage = sum(1 for m in entry.matches if m.stage_guessed)
 
-        total_gross = sum(m.gross for m in entry.matches)
+        total_gross = money_sum(m.gross for m in entry.matches)
         # ⚠ Koszty uzysku i podatek od SUMY miesiaca, nie mecz po meczu -
         # decyzja uzytkownika z 09.09.2026. Prog 200 zl wypada raz.
         parts = R.settle_period(total_gross)
@@ -521,11 +524,11 @@ def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int | float]:
         "judges": len(entries),
         "matches": sum(e.match_count for e in entries),
         "future": sum(e.future_count for e in entries),
-        "gross": sum(e.gross for e in entries),
+        "gross": money_sum(e.gross for e in entries),
         "costs": sum(e.costs for e in entries),
         "taxable": sum(e.taxable for e in entries),
         "tax": sum(e.tax for e in entries),
-        "net": sum(e.net for e in entries),
+        "net": money_sum(e.net for e in entries),
         "travel": round(sum(e.travel for e in entries), 2),
         "total": round(sum(e.total for e in entries), 2),
     }

@@ -542,6 +542,17 @@ class ObsadaSaveRequest(BaseModel):
     #: Uzupełnianie zakończonego meczu: aktualizuj migawkę, ale nie wysyłaj
     #: spóźnionych powiadomień „dostałeś mecz".
     silent: bool = False
+    #: Obsada 2.0: partia „Zapisz w ZPRP" (uuid) - wpisy dziennika zapisów
+    #: z jednej partii tworzą jedną pozycję historii. Bez niej serwer nadaje
+    #: własną, jednorazową.
+    batch_id: Optional[str] = None
+    #: Obsada 2.0: stan, który widział użytkownik - {gniazdo: "NAZWISKO Imię" | ""}.
+    #: Gdy ZPRP ma dziś w którymś gnieździe kogoś innego, zapis NIE idzie,
+    #: a odpowiedź to 409 ZPRP_CHANGED z listą różnic. Bez pola - jak dotąd.
+    expect: Optional[Dict[str, Optional[str]]] = None
+    #: Obsada 2.0: cofnięcie wpisu dziennika - numer wpisu dla całego zapisu
+    #: albo {gniazdo: numer wpisu}.
+    reverted_of: Optional[Any] = None
 
 
 class ObsadaHallFormRequest(BaseModel):
@@ -565,6 +576,11 @@ class ObsadaSaveHallRequest(BaseModel):
     province: Optional[str] = None
     hall: Optional[Dict[str, str]] = None
     actor: Optional[str] = None
+    #: Obsada 2.0 - jak przy obsadzie: partia, oczekiwany stan i cofnięcie.
+    #: `expect` dla hali to {"hall": numer hali w ZPRP albo jej podpis | ""}.
+    batch_id: Optional[str] = None
+    expect: Optional[Dict[str, Optional[str]]] = None
+    reverted_of: Optional[Any] = None
 
 
 class ObsadaScheduleRequest(BaseModel):
@@ -885,8 +901,15 @@ async def apply_referee_assignment(
     require_name_match: bool = False,
     forbid_elsewhere: str = "",
     log_prefix: str = "obsada/save",
+    expect_slots: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Zapisuje obsadę meczu w ZPRP. JEDYNA droga zapisu w całej aplikacji.
+
+    `expect_slots` (Obsada 2.0) to {gniazdo: "NAZWISKO Imię" | ""} - stan, który
+    widział obsadowy. Różnica w KTÓRYMKOLWIEK gnieździe wstrzymuje zapis
+    z kodem `ZPRP_CHANGED` i listą różnic w `slots`. Wynik niesie też
+    `before_slots` - obsadę z formularza wczytanego tuż przed wysyłką (do
+    dziennika zapisów).
 
     `changes` to `{nazwa_pola: (wartość, nazwisko)}`; wartość `None` znaczy „nie
     ruszaj tego gniazda" i wtedy jedzie to, co stoi w formularzu.
@@ -938,6 +961,42 @@ async def apply_referee_assignment(
     )
     _log_html(f"{log_prefix} step1 (load form)", load_html)
     current = _parse_referee_form(load_html)
+    before_slots = {
+        label: {
+            "value": current["slots"].get(label, {}).get("selected_value"),
+            "name": _selected_name(current["slots"].get(label, {})),
+        }
+        for label in SELECT_TO_SLOT.values()
+    }
+
+    if expect_slots:
+        from app.assignment_board_rules import expect_conflicts, normalize_slot
+
+        def _same_or_empty(a: Any, b: Any) -> bool:
+            left, right = str(a or "").strip(), str(b or "").strip()
+            if not left or not right:
+                return not left and not right
+            return _same_person(left, right)
+
+        actual = {normalize_slot(label): data["name"] for label, data in before_slots.items()}
+        conflicts = expect_conflicts(expect_slots, actual, same=_same_or_empty)
+        if conflicts:
+            logger.warning(
+                "%s: obsada w ZPRP inna niz widziana (%s) - zapis wstrzymany",
+                log_prefix, ", ".join(sorted(conflicts)),
+            )
+            return {
+                "success": False,
+                "code": "ZPRP_CHANGED",
+                "fetched_at": _now_iso(),
+                "slots": conflicts,
+                "before_slots": before_slots,
+                "verified_slots": {},
+                "error": (
+                    "Obsada zmieniła się w bazie związku od chwili, gdy ją oglądałeś - "
+                    "zapis wstrzymany. Odśwież mecz i sprawdź zmiany."
+                ),
+            }
 
     if forbid_elsewhere:
         touched = {
@@ -1111,6 +1170,7 @@ async def apply_referee_assignment(
         "success": verification_ok,
         "code": None if verification_ok else "VERIFICATION_FAILED",
         "fetched_at": _now_iso(),
+        "before_slots": before_slots,
         "verified_slots": {
             label: {
                 "value": parsed["slots"].get(label, {}).get("selected_value"),
@@ -1446,9 +1506,46 @@ async def obsada_save(
             user=payload.user,
             keep_hide_s=bool(payload.ukryjObsade),
             keep_hide_d=bool(payload.ukryjObsadeD),
+            expect_slots=payload.expect or None,
+        )
+
+    if result.get("code") == "ZPRP_CHANGED":
+        # Zero cichych blokad: 409 z listą gniazd, w których ZPRP ma kogoś
+        # innego, niż widział obsadowy.
+        raise HTTPException(
+            409,
+            detail={
+                "code": "ZPRP_CHANGED",
+                "slots": result.get("slots") or {},
+                "message": result.get("error"),
+            },
         )
 
     if payload.province and result.get("success"):
+        # Dziennik PRZED ogłoszeniem: ogłoszenie poprawia migawkę, a dziennik
+        # chce jej stanu sprzed zapisu (numery poprzednich sędziów).
+        # Osłonięte - brak wpisu nie unieważnia udanego zapisu.
+        try:
+            from app.assignment_journal import record_lineup_write
+
+            result["journal"] = await record_lineup_write(
+                payload.province,
+                payload.IdZawody,
+                sent=[
+                    SELECT_TO_SLOT[select_name]
+                    for select_name, (value, _name) in changes.items()
+                    if value is not None and select_name in SELECT_TO_SLOT
+                ],
+                before=result.get("before_slots") or {},
+                after=result.get("verified_slots") or {},
+                assigned=payload.assigned or {},
+                batch_id=payload.batch_id,
+                actor=payload.actor or payload.judge_id,
+                run_id=payload.run_id,
+                reverted_of=payload.reverted_of,
+            )
+        except Exception:
+            logger.exception("obsada/save: zapis przeszedł, dziennik nie")
         result["announced"] = await _announce_saved_lineup(payload, changes, result)
     return result
 
@@ -1578,6 +1675,38 @@ async def obsada_save_hall(
             cookies=cookies,
         )
         parsed1 = _parse_hall_form(html1)
+        hall_before = next(
+            (
+                h.get("full_label") or h.get("name") or ""
+                for h in parsed1.get("halls", [])
+                if h.get("id") == parsed1.get("selected_id")
+            ),
+            "",
+        )
+        if payload.expect and "hall" in payload.expect:
+            # Obsada 2.0: hala, którą widział obsadowy - numer albo podpis.
+            wanted_hall = str(payload.expect.get("hall") or "").strip()
+            current_id = str(parsed1.get("selected_id") or "").strip()
+            if wanted_hall or current_id:
+                same_hall = bool(wanted_hall) and (
+                    wanted_hall == current_id
+                    or " ".join(wanted_hall.lower().split())
+                    == " ".join(hall_before.lower().split())
+                )
+            else:
+                same_hall = True
+            if not same_hall:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "ZPRP_CHANGED",
+                        "slots": {"hall": {"expected": wanted_hall, "actual": hall_before}},
+                        "message": (
+                            "Hala zmieniła się w bazie związku od chwili, gdy ją "
+                            "oglądałeś - zapis wstrzymany."
+                        ),
+                    },
+                )
         select_name = parsed1.get("select_name") or "IdHala"
         submit_btn = parsed1.get("submit_btn") or {}
         hidden_inputs = parsed1.get("hidden_inputs") or {}
@@ -1636,6 +1765,20 @@ async def obsada_save_hall(
         }
 
     if payload.province and success:
+        try:
+            from app.assignment_journal import record_hall_write
+
+            result["journal"] = await record_hall_write(
+                payload.province,
+                payload.IdZawody,
+                hall_before=hall_before,
+                hall_after=hall_name,
+                batch_id=payload.batch_id,
+                actor=payload.actor or payload.judge_id,
+                reverted_of=payload.reverted_of,
+            )
+        except Exception:
+            logger.exception("obsada/save-hall: zapis przeszedł, dziennik nie")
         # Osłonięte: hala w bazie związku już stoi, więc nieudane powiadomienie
         # nie ma prawa zamienić udanego zapisu w błąd.
         try:

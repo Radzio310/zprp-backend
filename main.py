@@ -90,6 +90,7 @@ from app.province_settlement_sync import refresh_province, run_settlement_sync_s
 from app.province_settlement_pdf import router as province_settlement_pdf_router
 from app.province_assignments import router as province_assignments_router
 from app.province_assignment_auto import router as province_assignment_auto_router
+from app.province_assignment_board import router as province_assignment_board_router
 from app.zprp_archive import router as province_archive_router, run_archive_scheduler
 from app.assignment_insights import router as province_insights_router, run_insights_scheduler
 from app.province_club_budgets import router as province_club_budgets_router, seed_default_budgets
@@ -97,6 +98,11 @@ from app.province_clubs import router as province_clubs_router
 from app.province_invoices import router as province_invoices_router
 from app.province_manual_charges import router as province_manual_charges_router
 from app.province_alerts import router as province_alerts_router, start_alert_scheduler, stop_alert_scheduler
+from app.district_alerts import (
+    router as district_alerts_router,
+    start_district_alert_scheduler,
+    stop_district_alert_scheduler,
+)
 from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
 from app.event_links import router as event_links_router
@@ -321,8 +327,10 @@ app.include_router(province_invoices_router)
 # Ręczne mecze z rachunkiem (np. SPARING) z karty klubu: /province/manual-charges.
 app.include_router(province_manual_charges_router)
 app.include_router(province_alerts_router)
+app.include_router(district_alerts_router)
 app.include_router(province_assignments_router)
 app.include_router(province_assignment_auto_router)
+app.include_router(province_assignment_board_router)
 app.include_router(province_archive_router)
 app.include_router(province_insights_router)
 app.include_router(province_events_router)
@@ -1376,6 +1384,8 @@ async def startup():
     _settlement_sync_task = asyncio.create_task(run_settlement_sync_scheduler())
     # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - obrót co 15 minut.
     start_alert_scheduler()
+    # Powiadomienia okręgu z Obsady (brak obsady, kolizje) - obrót co 15 minut.
+    start_district_alert_scheduler()
     logger.info("✅ Province settlement sync started (24 h)")
     if distance_table_promoted:
         # Zapisane podsumowania i rozliczenia zawierają kilometry, dlatego po
@@ -1410,6 +1420,7 @@ async def shutdown():
     global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task, _exam_promotion_task
 
     await stop_alert_scheduler()
+    await stop_district_alert_scheduler()
 
     if _cleanup_task:
         _cleanup_task.cancel()

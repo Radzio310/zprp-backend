@@ -137,6 +137,9 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             key_of=team_key,
         )
         for row in charges:
+            # Mecz przeniesiony na OKRĘG jako płatnika (`district_payer`) ma
+            # status `charged`, nie `club-off` - zostaje w rozliczeniu okręgu,
+            # bo to okręg płaci sędziom. Zmienia się tylko, kto jest obciążony.
             if row.status != C.CLUB_OFF:
                 continue
             excluded_keys.add(row.match_key)

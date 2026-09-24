@@ -23,7 +23,11 @@ def load_silesia_2026_table() -> dict[str, Any]:
         content = json.load(handle)
     if content.get("validFrom") != "2026-09-01":
         raise ValueError("Nieprawidłowa data początku śląskiej tabeli odległości")
-    if len(content.get("cities") or []) != 42 or len(content.get("edges") or []) != 861:
+    cities = content.get("cities") or []
+    edges = content.get("edges") or []
+    expected_pairs = len(cities) * (len(cities) - 1) // 2
+    edge_keys = {frozenset((edge.get("from"), edge.get("to"))) for edge in edges}
+    if len(cities) < 2 or len(cities) != len(set(cities)) or len(edges) != expected_pairs or len(edge_keys) != expected_pairs:
         raise ValueError("Niekompletna śląska tabela odległości 2026/2027")
     return content
 

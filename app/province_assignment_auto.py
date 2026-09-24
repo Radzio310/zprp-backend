@@ -106,6 +106,13 @@ def _day_start(day: date) -> datetime:
     return datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
 
 
+def _bump(province: str) -> None:
+    """Zapis zmienił to, co widzi panel - gotowy stan Obsady 2.0 do przebudowy."""
+    from app.assignment_board_cache import bump
+
+    bump(province)
+
+
 def _window(start: date, end: date, undated: bool):
     """
     Warunek na termin meczu, z opcjonalnym miejscem dla meczów BEZ TERMINU.
@@ -196,6 +203,9 @@ async def judges(
     horizon = today + timedelta(days=UPCOMING_DAYS)
     preview_days = [today + timedelta(days=offset) for offset in range(PREVIEW_DAYS)]
 
+    from app.assignment_board_rules import display_name
+    from app.official_roster import is_active
+
     rows: list[dict] = []
     for judge_id, judge in roster.judges.items():
         entries = busy.get(judge_id, [])
@@ -224,6 +234,16 @@ async def judges(
                 "partner": {"judge_id": partner_id, "name": partner.name if partner else ""}
                 if partner_id
                 else None,
+                # Obsada 2.0 (24.09.2026): nagłówek w zapisie ZPRP, aktywność
+                # w sezonie (`official_roster`; okręg bez listy = wszyscy),
+                # para płasko ze źródłem („own" wygrywa z „zprp") i mentorzy
+                # przypisani PARZE tego sędziego.
+                "display_name": display_name(judge.name),
+                "active": is_active(key, _now(), judge.name),
+                "partner_id": partner_id or None,
+                "partner_name": (partner.name if partner else "") or None,
+                "partner_source": roster.pair_source.get(judge_id) if partner_id else None,
+                "mentor_ids": roster.mentors_of(judge_id),
                 "blocked": sorted(
                     {
                         other
@@ -318,6 +338,7 @@ async def save_judge_settings(judge_id: str, payload: JudgeSettingsRequest):
             set_={column: values[column] for column in values if column not in ("province", "judge_id")},
         )
     )
+    _bump(key)
     return {"success": True, "judge_id": _s(judge_id), "preferred_days": days}
 
 
@@ -356,6 +377,7 @@ async def add_block(judge_id: str, payload: BlockRequest):
         )
         .returning(province_judge_blocks.c.id)
     )
+    _bump(key)
     return {"success": True, "id": new_id}
 
 
@@ -370,6 +392,7 @@ async def drop_block(block_id: int, province: str = Query(...)):
             )
         )
     )
+    _bump(key)
     return {"success": True}
 
 
@@ -399,6 +422,7 @@ async def add_pause(judge_id: str, payload: PauseRequest):
         .returning(province_judge_pauses.c.id)
     )
     await _prune_pauses(key)
+    _bump(key)
     return {"success": True, "id": new_id}
 
 
@@ -413,6 +437,7 @@ async def drop_pause(pause_id: int, province: str = Query(...)):
             )
         )
     )
+    _bump(key)
     return {"success": True}
 
 
@@ -472,6 +497,7 @@ async def set_pair(judge_id: str, payload: PairRequest):
                 created_by=_s(payload.created_by) or None,
             )
         )
+    _bump(key)
     return {"success": True}
 
 
@@ -497,6 +523,7 @@ async def drop_pair(judge_id: str, province: str = Query(...)):
             )
         )
     )
+    _bump(key)
     return {"success": True}
 
 
@@ -534,10 +561,33 @@ async def set_manual(payload: ManualRequest):
                 )
             )
         )
+    _bump(key)
     return {"success": True, "manual": bool(payload.manual)}
 
 
 # ───────────────────────────────── automat ─────────────────────────────────
+
+
+async def season_field_counts(key: str) -> dict[str, int]:
+    """
+    Mecze BOISKA w sezonie po numerze sędziego (rozegrane + obsadzone) - z nich
+    reguła par wie, czyja para ma wyraźnie więcej meczów niż inni.
+
+    Awaria licznika nie zatrzymuje Automatu: bez liczników pary mają
+    pierwszeństwo zawsze, a ślad zostaje w logu.
+    """
+    try:
+        from app.province_settlements import season_load
+
+        counts = await season_load(key)
+    except Exception:
+        logger.exception("[auto] %s: licznik sezonu dla reguły par", key)
+        return {}
+    return {
+        judge_id: int((item or {}).get("field", 0) or 0)
+        + int((item or {}).get("future_field", 0) or 0)
+        for judge_id, item in counts.items()
+    }
 
 
 class AutoRequest(BaseModel):
@@ -717,6 +767,7 @@ async def run_auto(payload: AutoRequest):
         load=load,
         only_judges=payload.judge_ids or None,
         inactive=inactive,
+        season_field=await season_field_counts(key),
     )
     ctx.policy = policy
     plan = build_plan(needs, ctx, rounds=max(1, min(3, int(payload.rounds or 2))))
@@ -1107,7 +1158,12 @@ async def run_optimize(run_id: int, payload: OptimizeRequest):
     end = row["date_to"] or (start + timedelta(days=30))
     busy, load = await load_busy(key, roster, date_from=start, date_to=end)
     ctx = build_context(
-        roster, book, busy=busy, load=load, inactive=inactive_judges(key, start, roster)
+        roster,
+        book,
+        busy=busy,
+        load=load,
+        inactive=inactive_judges(key, start, roster),
+        season_field=await season_field_counts(key),
     )
     plan = build_plan(needs, ctx, rounds=2)
 
@@ -1384,6 +1440,7 @@ async def save_club_rule(club_id: str, payload: ClubRuleRequest):
             },
         )
     )
+    _bump(key)
     return {"success": True, "club_id": _s(club_id), "table_by_club": values["table_by_club"]}
 
 
@@ -1460,6 +1517,7 @@ async def write_club_rules(
                     )
                 )
             )
+    _bump(key)
     return len(club_ids)
 
 

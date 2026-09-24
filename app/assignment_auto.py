@@ -25,6 +25,17 @@ KRYTERIA UŻYTKOWNIKA (11.09.2026), w kolejności ważności:
     - mecz tego samego dnia, na który ZDĄŻY - ostateczność,
     - premia za ustaloną parę i za odznakę „Stolikowi" na stoliku okręgowym.
 
+PARY NA BOISKU (decyzja użytkownika z 24.09.2026, „mocno, równość jako druga"):
+    - ustalona para razem to MOCNA premia (`B_FIELD_PAIR`), a już pierwszy
+      boiskowy dostaje premię, gdy jego para też może przyjechać
+      (`B_PAIR_READY`) - inaczej automat brałby połówkę pary, której druga
+      połowa akurat nie może,
+    - gdy druga połowa nie może: połówka pary z kimś z JEJ pary mentorskiej
+      (`B_FIELD_MENTOR`), dopiero potem ktokolwiek,
+    - para traci pierwszeństwo, gdy ma wyraźnie więcej meczów niż inni
+      (`assignment_people.heavy_judges`: sezon boiska > mediana + 2),
+    - przy stoliku ustalona para też razem (`B_PAIR`), ale bez mentorów.
+
 DWA OBIEGI: pierwszy obsadza wyłącznie w dniach preferowanych przez sędziego,
 drugi dobiera resztę. Sędzia bez wskazanych dni pasuje do każdego obiegu.
 """
@@ -35,7 +46,16 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-from app.assignment_people import Judge, is_local, pair_ok, table_pair_ok, table_rule
+from app.assignment_people import (
+    MENTOR,
+    PAIR,
+    Judge,
+    is_local,
+    pair_ok,
+    pair_relation,
+    table_pair_ok,
+    table_rule,
+)
 
 #: Wagi punktowe. Kilometr to jeden punkt - reszta jest wyskalowana względem niego.
 W_KM = 1.0
@@ -57,6 +77,12 @@ W_OFF_DAY = 120.0
 W_SAME_DAY = 600.0
 W_UNKNOWN_KM = 90.0
 B_PAIR = 250.0
+#: Ustalona para na BOISKU - premia warta kilkaset kilometrów (patrz nagłówek).
+B_FIELD_PAIR = 600.0
+#: Połówka pary z kimś z jej pary mentorskiej, gdy druga połówka nie może.
+B_FIELD_MENTOR = 300.0
+#: Pierwszy boiskowy, którego para też może przyjechać na ten mecz.
+B_PAIR_READY = 300.0
 B_TABLE_BADGE = 60.0
 
 #: Ile kilometrów na godzinę zakłada automat, licząc czy sędzia zdąży z meczu na mecz.
@@ -131,6 +157,11 @@ class Context:
     busy: Mapping[str, list[BusyMatch]] = field(default_factory=dict)
     #: Ustalone pary: numer sędziego -> numer partnera.
     partner_of: Mapping[str, str] = field(default_factory=dict)
+    #: Para mentorska PARY sędziego: numer sędziego -> numery mentorów.
+    mentors_of: Mapping[str, tuple] = field(default_factory=dict)
+    #: Sędziowie z wyraźnie większą liczbą meczów boiska w sezonie - ich para
+    #: traci pierwszeństwo (`assignment_people.heavy_judges`).
+    heavy: set[str] = field(default_factory=set)
     #: Pary, których nie wolno stawiać razem.
     blocked: set[tuple[str, str]] = field(default_factory=set)
     #: Ile meczów sędzia ma już w oknie - punkt wyjścia do równego podziału.
@@ -252,8 +283,14 @@ def _score(
     partner: Optional[Judge],
     round_no: int,
     load: Mapping[str, int],
+    pair_ready: Optional[Judge] = None,
 ) -> tuple[float, list[str], Optional[float]]:
-    """Punkty kandydata - mniej znaczy lepiej - razem z uzasadnieniem."""
+    """
+    Punkty kandydata - mniej znaczy lepiej - razem z uzasadnieniem.
+
+    `pair_ready` to para kandydata, która TEŻ może stanąć w tym meczu - podawana
+    tylko przy pierwszym z kilku pustych gniazd boiska.
+    """
     reasons: list[str] = []
     city = ctx.city_of(judge.judge_id, need.day)
     km = ctx.km(city, need.host_city) if city and need.host_city else None
@@ -289,9 +326,31 @@ def _score(
         score += W_SAME_DAY
         reasons.append("ma już mecz tego dnia")
 
-    if partner is not None and ctx.partner_of.get(judge.judge_id) == partner.judge_id:
-        score -= B_PAIR
-        reasons.append(f"para z {partner.name}")
+    if partner is not None:
+        relation = pair_relation(
+            judge.judge_id,
+            partner.judge_id,
+            partner_of=ctx.partner_of,
+            mentors_of=ctx.mentors_of,
+            allow_mentor=kind == "field",
+        )
+        if relation and kind == "field" and (
+            judge.judge_id in ctx.heavy or partner.judge_id in ctx.heavy
+        ):
+            # Zero cichych decyzji: widać, że para BYŁA, tylko ustąpiła równości.
+            reasons.append(
+                f"{'para' if relation == PAIR else 'para mentorska'} z {partner.name} "
+                "bez pierwszeństwa - dużo meczów w sezonie"
+            )
+        elif relation == PAIR:
+            score -= B_FIELD_PAIR if kind == "field" else B_PAIR
+            reasons.append(f"para z {partner.name}")
+        elif relation == MENTOR:
+            score -= B_FIELD_MENTOR
+            reasons.append(f"para mentorska z {partner.name}")
+    elif pair_ready is not None:
+        score -= B_PAIR_READY
+        reasons.append(f"może stanąć ze swoją parą ({pair_ready.name})")
 
     if kind == "table" and judge.table_specialist and not table_rule(need.code):
         score -= B_TABLE_BADGE
@@ -324,9 +383,16 @@ def _candidates(
     round_no: int,
     load: Mapping[str, int],
     taken_ids: set[str],
+    open_count: int = 1,
 ) -> tuple[list[tuple[float, Judge, list[str], Optional[float]]], dict[str, int]]:
-    """Kandydaci posortowani od najlepszego, plus licznik powodów odmowy."""
-    out: list[tuple[float, Judge, list[str], Optional[float]]] = []
+    """
+    Kandydaci posortowani od najlepszego, plus licznik powodów odmowy.
+
+    `open_count` - ile gniazd tej grupy jest jeszcze pustych. Przy pierwszym
+    z dwóch gniazd boiska premiujemy tych, których para też przejdzie
+    wszystkie twarde reguły dla tego meczu.
+    """
+    valid: list[Judge] = []
     refused: dict[str, int] = {}
     for judge in ctx.judges.values():
         if judge.judge_id in taken_ids:
@@ -351,8 +417,32 @@ def _candidates(
             if why:
                 refused[why] = refused.get(why, 0) + 1
                 continue
+        valid.append(judge)
+
+    ready_ids = {judge.judge_id for judge in valid}
+    out: list[tuple[float, Judge, list[str], Optional[float]]] = []
+    for judge in valid:
+        ready: Optional[Judge] = None
+        if kind == "field" and partner is None and open_count >= 2:
+            mate_id = ctx.partner_of.get(judge.judge_id)
+            mate = ctx.judges.get(mate_id) if mate_id else None
+            if (
+                mate is not None
+                and mate.judge_id in ready_ids
+                and judge.judge_id not in ctx.heavy
+                and mate.judge_id not in ctx.heavy
+                and pair_ok(judge, mate, blocked=ctx.blocked)[0]
+            ):
+                ready = mate
         score, reasons, km = _score(
-            ctx, judge, need, kind=kind, partner=partner, round_no=round_no, load=load
+            ctx,
+            judge,
+            need,
+            kind=kind,
+            partner=partner,
+            round_no=round_no,
+            load=load,
+            pair_ready=ready,
         )
         out.append((score, judge, reasons, km))
     out.sort(key=lambda item: (item[0], item[1].name))
@@ -391,6 +481,8 @@ def build_plan(
         km=ctx.km,
         busy=busy,
         partner_of=ctx.partner_of,
+        mentors_of=ctx.mentors_of,
+        heavy=ctx.heavy,
         blocked=ctx.blocked,
         load=load,
         policy=ctx.policy,
@@ -441,6 +533,7 @@ def build_plan(
                         round_no=round_no,
                         load=load,
                         taken_ids=taken,
+                        open_count=len(slots.get(kind) or []),
                     )
 
                     chosen: Optional[tuple[float, Judge, list[str], Optional[float]]] = None

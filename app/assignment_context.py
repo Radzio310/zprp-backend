@@ -32,7 +32,7 @@ from app import assignment_rules as A
 from app import offtime_rules as O
 from app.assignment_auto import BusyMatch, Context, MatchNeed
 from app.assignment_distances import DistanceBook
-from app.assignment_people import Judge, make_judge, name_key
+from app.assignment_people import Judge, heavy_judges, make_judge, name_key, pair_key
 from app.match_market_access import badge_names
 from app.match_market_rules import state_dict
 from app.settlement_province import spellings
@@ -72,7 +72,7 @@ class Roster:
 
     __slots__ = (
         "judges", "offtimes", "cities", "pauses", "pairs", "blocks", "settings",
-        "grades", "clubs",
+        "grades", "clubs", "pair_source", "mentor_pairs",
     )
 
     def __init__(self) -> None:
@@ -86,6 +86,26 @@ class Roster:
         self.grades: dict[str, list[str]] = {}
         #: Ustawienia klubu dla obsady, po kluczu nazwy drużyny gospodarza.
         self.clubs: dict[str, dict] = {}
+        #: Skąd para sędziego: "own" (okręg) albo "zprp" (baza.zprp.pl).
+        self.pair_source: dict[str, str] = {}
+        #: Pary mentorskie: klucz pary sędziowskiej (`pair_key`) -> mentorzy.
+        self.mentor_pairs: dict[str, list[str]] = {}
+
+    def mentors_of(self, judge_id: str) -> list[str]:
+        """Mentorzy przypisani PARZE tego sędziego - bez pary nie ma mentorów."""
+        partner = self.pairs.get(_s(judge_id))
+        if not partner:
+            return []
+        return list(self.mentor_pairs.get(pair_key(judge_id, partner), []))
+
+    def mentor_map(self) -> dict[str, tuple]:
+        """Numer sędziego -> mentorzy jego pary, dla `Context.mentors_of`."""
+        out: dict[str, tuple] = {}
+        for judge_id in self.pairs:
+            mentors = self.mentors_of(judge_id)
+            if mentors:
+                out[judge_id] = tuple(mentors)
+        return out
 
     def available(self, judge_id: str, moment: Optional[datetime]) -> bool:
         return O.is_available_at(self.offtimes.get(judge_id, ()), moment)
@@ -257,21 +277,48 @@ async def load_roster(province: str) -> Roster:
 
     # Pary: własna lista okręgu wygrywa, lista ZPRP uzupełnia braki (decyzja
     # użytkownika z 11.09.2026). Para jest obustronna, więc zapisujemy ja w obie.
-    for source in ("zprp", "own"):
-        for row in await database.fetch_all(
-            select(province_judge_pairs).where(
-                and_(
-                    province_judge_pairs.c.province.in_(names),
-                    province_judge_pairs.c.source == source,
-                )
-            )
-        ):
-            left, right = _s(row["judge_id"]), _s(row["partner_id"])
-            if left and right and left != right:
-                roster.pairs[left] = right
-                roster.pairs[right] = left
+    rows = await database.fetch_all(
+        select(province_judge_pairs).where(province_judge_pairs.c.province.in_(names))
+    )
+    roster.pairs, roster.pair_source = merge_pairs(
+        [(_s(row["judge_id"]), _s(row["partner_id"]), _s(row["source"])) for row in rows]
+    )
+
+    from app.db import province_mentor_pairs
+
+    for row in await database.fetch_all(
+        select(province_mentor_pairs).where(province_mentor_pairs.c.province.in_(names))
+    ):
+        mentors = [_s(item) for item in _json_list(row["mentor_ids"]) if _s(item)]
+        key = _s(row["pair_key"])
+        # Dwie pisownie okręgu - wygrywa wpis z mentorami (pusty to usunięty).
+        if key and mentors:
+            roster.mentor_pairs[key] = mentors
 
     return roster
+
+
+def merge_pairs(rows: Iterable[tuple[str, str, str]]) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    Pary z obu źródeł sklejone w jedną mapę: (numer -> partner, numer -> źródło).
+
+    Własna para okręgu („own") wygrywa z listą ZPRP. ⚠ Wygrywa CAŁA para: gdy
+    okręg sparował A z C, a ZPRP mówi A-B, to B zostaje bez pary - inaczej B
+    wskazywałby na A, a A na C, i każdy miałby inne zdanie o tym, z kim sędziuje.
+    """
+    pairs: dict[str, str] = {}
+    source: dict[str, str] = {}
+    own = [(a, b) for a, b, kind in rows if kind == "own" and a and b and a != b]
+    zprp = [(a, b) for a, b, kind in rows if kind != "own" and a and b and a != b]
+    for left, right in own:
+        pairs[left], pairs[right] = right, left
+        source[left] = source[right] = "own"
+    for left, right in zprp:
+        if left in pairs or right in pairs:
+            continue
+        pairs[left], pairs[right] = right, left
+        source[left] = source[right] = "zprp"
+    return pairs, source
 
 
 async def _club_rules(province: str) -> dict[str, dict]:
@@ -302,6 +349,11 @@ async def _club_rules(province: str) -> dict[str, dict]:
         _s(row["club_id"]): {
             "club_id": _s(row["club_id"]),
             "table_by_club": int(row["table_by_club"] or 0),
+            # Deklaracja działa od tego dnia - mecz sprzed niej liczy się po
+            # staremu (`assignment_rules.club_table_active`).
+            "table_by_club_since": row["table_by_club_since"]
+            if "table_by_club_since" in row.keys()
+            else None,
             "avoid_local": bool(row["avoid_local"]),
             "note": _s(row["note"]),
         }
@@ -370,7 +422,12 @@ def need_from_state(
     # Boiskowych to nie dotyczy: tych zapewnia okręg. Reguła siedzi w
     # `assignment_rules.club_crew_needs`, bo tak samo liczy ją lista obsady.
     club = roster.club_for(state.get("ID_zespoly_gosp_ZespolNazwa"))
-    needs = A.club_crew_needs(code, club.get("table_by_club", 0))
+    needs = A.club_crew_needs(
+        code,
+        A.club_table_active(
+            club.get("table_by_club", 0), club.get("table_by_club_since"), local
+        ),
+    )
 
     crew_ids: set[str] = set()
     crew_field: list[Judge] = []
@@ -476,12 +533,17 @@ def build_context(
     load: Mapping[str, int] | None = None,
     only_judges: Optional[Iterable[str]] = None,
     inactive: Iterable[str] = (),
+    season_field: Optional[Mapping[str, int]] = None,
 ) -> Context:
     """Świat gotowy do podania automatowi.
 
     `inactive` - numery sędziów spoza listy AKTYWNYCH okręgu w sezonie
     (`inactive_judges`). Automat ich nie proponuje; ich obecne obsady dalej
     liczą się w zajętości (`busy`) i zostają w meczach.
+
+    `season_field` - mecze boiska w sezonie po numerze sędziego. Z nich wynika,
+    czyja para traci pierwszeństwo (`assignment_people.heavy_judges`); bez
+    liczników pary mają pierwszeństwo zawsze.
     """
     skip = {str(item).strip() for item in inactive}
     people = {key: value for key, value in roster.judges.items() if key not in skip}
@@ -496,6 +558,8 @@ def build_context(
         km=book.km,
         busy=dict(busy or {}),
         partner_of=dict(roster.pairs),
+        mentors_of=roster.mentor_map(),
+        heavy=heavy_judges(season_field or {}, people.keys()),
         blocked=set(roster.blocks),
         load=dict(load or {}),
     )

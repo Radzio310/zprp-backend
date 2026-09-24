@@ -698,19 +698,56 @@ def travel_pln(distance_km: float, rate: float) -> float:
 # Podatek
 # -------------------------
 
-def net_parts(gross: float) -> dict[str, int]:
+def _whole_pln(value: float) -> int:
+    """
+    Do pelnych zlotych „od polowy w gore" - jak w ordynacji podatkowej (art. 63).
+
+    Tylko dla kosztow uzysku, podstawy i zaliczki na podatek. Przy calkowitym
+    brutto daje dokladnie to, co dawne `round(...)` (polowka nie wypada).
+    """
+    # Najpierw do groszy: 0,2 x 252,50 to w float 50,4999..., a ma byc 50,50 -> 51.
+    cents = Decimal(str(float(value or 0))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return int(cents.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _grosze(value: float) -> float:
+    """Brutto i netto zostaja z groszami - zaokraglenie tylko do 0,01 zl."""
+    return float(Decimal(str(float(value or 0))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) + 0.0
+
+
+def _tax_parts(gross: float) -> dict[str, float]:
+    """
+    Wspolny rachunek `net_parts` i `settle_period`.
+
+    ⚠ ZAMIERZONE zaokraglenia do zlotowki: koszty uzysku, podstawa i zaliczka
+    na podatek - tak liczy kalkulator urzedowy. Brutto i netto NIE: reczny mecz
+    wpisany jako 150,50 zl ma w rozliczeniu 150,50 zl, a nie 151 zl (decyzja
+    uzytkownika z 24.09.2026, „nigdzie tak nie moze byc").
+    """
+    gross = _grosze(gross)
+    costs = _whole_pln(0.2 * gross) if gross > 200 else 0
+    taxable = _whole_pln(gross - costs)
+    tax = _whole_pln(0.12 * taxable)
+    return {
+        "gross": gross,
+        "costs": costs,
+        "taxable": taxable,
+        "tax": tax,
+        "net": _grosze(gross - tax),
+    }
+
+
+def net_parts(gross: float) -> dict[str, float]:
     """
     Koszty uzysku i podatek.
 
     Prog 200 zl: ponizej niego koszty uzysku nie przysluguja. Ta sama regula,
     ktora stosuje `calculateLacznie` w BAZA i `netParts` w BAZA_web.
     """
-    costs = round(0.2 * gross) if gross > 200 else 0
-    tax = round(0.12 * (gross - costs))
-    return {"gross": round(gross), "costs": costs, "taxable": round(gross) - costs, "tax": tax, "net": round(gross) - tax}
+    return _tax_parts(gross)
 
 
-def settle_period(total_gross: float) -> dict[str, int]:
+def settle_period(total_gross: float) -> dict[str, float]:
     """
     Rozliczenie ZBIORCZE za okres - jeden wiersz zestawienia.
 
@@ -720,11 +757,7 @@ def settle_period(total_gross: float) -> dict[str, int]:
     ekwiwalentow. Przy pojedynczym meczu ponizej progu daje to inna kwote niz
     `net_parts`, i to jest zamierzone.
     """
-    gross = round(total_gross)
-    costs = round(0.2 * gross) if gross > 200 else 0
-    taxable = gross - costs
-    tax = round(0.12 * taxable)
-    return {"gross": gross, "costs": costs, "taxable": taxable, "tax": tax, "net": gross - tax}
+    return _tax_parts(total_gross)
 
 
 # -------------------------

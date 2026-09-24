@@ -35,9 +35,9 @@ def test_two_referees_from_mlodzik_up_one_below():
     assert crew_needs("S/MłK/12") == {"field": 2, "table": 2}
     assert crew_needs("S/JmM/3") == {"field": 2, "table": 2}
     assert crew_needs("IIK4/1") == {"field": 2, "table": 2}
-    # Młodzik młodszy i dzieci moga miec jednego.
-    assert crew_needs("S/MłM1213/3") == {"field": 1, "table": 1}
-    assert crew_needs("S/DzK/1") == {"field": 1, "table": 1}
+    # Młodzik młodszy i dzieci: jeden boiskowy, stolika od okręgu brak (24.09.2026).
+    assert crew_needs("S/MłM1213/3") == {"field": 1, "table": 0}
+    assert crew_needs("S/DzK/1") == {"field": 1, "table": 0}
 
 
 def test_zero_is_an_empty_slot_not_a_judge():
@@ -92,6 +92,15 @@ def test_delegate_is_never_a_gap():
 
 def test_small_categories_are_complete_with_one_of_each():
     status = crew_status(state(pierwszy="5124 A", sekretarz="5188 C"), "S/DzK/1")
+    assert status["gaps"] == 0 and status["soft"] == 0
+    assert status["state"] == COMPLETE
+
+
+def test_small_categories_empty_table_is_not_a_gap():
+    # Młodzik młodszy i Dzieci nie mają stolika od okręgu - puste gniazda
+    # stolikowe to nie brak (decyzja z 24.09.2026).
+    status = crew_status(state(pierwszy="5124 A"), "S/MLM1213/2")
+    assert status["table"]["need"] == 0
     assert status["gaps"] == 0 and status["soft"] == 0
     assert status["state"] == COMPLETE
 

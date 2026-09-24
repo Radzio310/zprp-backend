@@ -711,6 +711,11 @@ async def _upsert_match(
         **({"active": True, "missing_full_runs": 0} if seen_in_schedule else {}),
         **({"last_deep_checked_at": now} if deep else {}),
     }
+    if not old_row or old_row["fingerprint"] != new_fp:
+        # Obsada 2.0: nowy albo zmieniony mecz - gotowy stan panelu do przebudowy.
+        from app.assignment_board_cache import bump
+
+        bump(province)
     if not old_row:
         await database.execute(insert(province_matches).values(province=province, match_id=match_id, **values))
         assignment_events = (
@@ -740,6 +745,16 @@ async def _upsert_match(
     await enqueue_recent_assignments(province, match_id)
     if old_row["fingerprint"] == new_fp:
         return False, assignment_events
+    if old_row["match_at"] != values["match_at"]:
+        # Powiadomienia okręgu z Obsady: zmiana terminu może zrobić komuś
+        # z obsady kolizję. Zaczep niczego nie blokuje - zakłada zadanie
+        # w tle, a pętla co 15 minut i tak porówna terminy sama.
+        try:
+            from app.district_alerts import note_match_moved
+
+            note_match_moved(province, match_id)
+        except Exception:  # noqa: BLE001 - monitor nie może na tym paść
+            logger.debug("district alerts hook skipped", exc_info=True)
     targets = await _target_judges(province, match_id)
     created = assignment_events
     for event in build_change_events(old, state):
@@ -1134,6 +1149,11 @@ async def _mark_missing_full_matches(province: str, seen_ids: set[str]) -> int:
             continue
         missing = int(row["missing_full_runs"] or 0) + 1
         active = missing < 2
+        if not active:
+            # Obsada 2.0: mecz znika z terminarza - gotowy stan panelu do przebudowy.
+            from app.assignment_board_cache import bump
+
+            bump(province)
         await database.execute(
             update(province_matches)
             .where(and_(province_matches.c.province == province, province_matches.c.match_id == match_id))

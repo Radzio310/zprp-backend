@@ -4112,9 +4112,28 @@ mentoring_config, mentoring_pairs, mentoring_members, mentoring_assignments, men
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)
 
+# Powiadomienia okręgu z Obsady (mecz bez obsady, kolizja po zmianie terminu)
+# - schemat w osobnym module.
+from app.district_alert_tables import define_tables as _define_district_alert_tables
+(
+    province_district_alert_settings,
+    province_district_alert_marks,
+    province_district_alert_outbox,
+    province_district_alert_times,
+) = _define_district_alert_tables(metadata)
+
 # Faktury PDF wczytywane jako wpłaty klubów (panel klubów) - schemat w osobnym module.
 from app.province_invoice_tables import define_tables as _define_invoice_tables
 province_invoice_batches, province_invoice_items, province_club_nips = _define_invoice_tables(metadata)
+
+# Obsada 2.0: pary mentorskie, wspólny szkic kolejki i dziennik zapisów do ZPRP
+# - schemat w osobnym module.
+from app.assignment_board_tables import define_tables as _define_board_tables
+(
+    province_mentor_pairs,
+    province_assignment_board_drafts,
+    province_zprp_write_journal,
+) = _define_board_tables(metadata)
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

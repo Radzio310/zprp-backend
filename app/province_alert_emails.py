@@ -364,22 +364,42 @@ async def send_alert_email(
     text_body: str,
     *,
     test: bool = False,
+    sender: Optional[str] = None,
+    tag: Optional[str] = None,
+    bcc: Iterable[str] = (),
 ) -> str:
-    """Jeden mail do wszystkich adresów (każdy widzi pozostałych - to lista komisji)."""
+    """
+    Jeden mail do wszystkich adresów (każdy widzi pozostałych - to lista komisji).
+
+    `bcc` - adresy, które nie mają się wzajemnie widzieć (prywatne skrzynki
+    obsadowych z ProEla). Mail wyłącznie z `bcc` dostaje je jako adresatów
+    jawnych, każdy osobno nie jest potrzebny - Brevo wymaga choć jednego „to".
+    `sender` i `tag` pozwalają innym alertom (Obsada) mieć własną nazwę nadawcy
+    i własne statystyki dostarczeń.
+    """
     cfg = get_email_config()
     if not cfg.brevo_api_key or not cfg.from_email:
         raise EmailDeliveryError("Brak konfiguracji nadawcy Brevo", kind="config")
+    recipients = [str(item) for item in recipients if item]
+    visible = {item.lower() for item in recipients}
     to = [{"email": item} for item in recipients]
+    hidden = [{"email": item} for item in bcc if item and item.lower() not in visible]
+    if not to and hidden:
+        # Brevo wymaga jawnego adresata - nadawca pisze „do siebie", reszta w ukryciu.
+        to = [{"email": cfg.from_email}]
     if not to:
         raise EmailDeliveryError("Brak adresatów", kind="request")
+    base_tag = tag or "settlement-alert"
     payload = {
-        "sender": {"name": sender_name(), "email": cfg.from_email},
+        "sender": {"name": sender or sender_name(), "email": cfg.from_email},
         "to": to,
         "subject": subject,
         "htmlContent": html_body,
         "textContent": text_body,
-        "tags": ["settlement-alert-test" if test else "settlement-alert"],
+        "tags": [f"{base_tag}-test" if test else base_tag],
     }
+    if hidden:
+        payload["bcc"] = hidden
     headers = {
         "accept": "application/json",
         "content-type": "application/json",

@@ -241,6 +241,12 @@ async def save_budget(payload: BudgetRequest):
         members = BR.clean_members(payload.primary_club_id, payload.member_ids)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    # Okręg jako płatnik ma własne konto poza klubami - nie łączy się w budżet.
+    from app.district_payer import refuse_reason
+
+    reason = refuse_reason(members, "Wspólny budżet")
+    if reason:
+        raise HTTPException(400, reason)
 
     groups = await budget_groups(key)
     current = None

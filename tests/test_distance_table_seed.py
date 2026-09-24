@@ -9,8 +9,8 @@ def test_bundled_silesia_table_is_complete_and_versioned():
     table = load_silesia_2026_table()
 
     assert table["validFrom"] == "2026-09-01"
-    assert len(table["cities"]) == 42
-    assert len(table["edges"]) == 861
+    assert len(table["cities"]) == 43
+    assert len(table["edges"]) == 903
     assert table["previous"][0]["validUntil"] == "2026-08-31"
     assert len(table["previous"][0]["edges"]) == 849
 

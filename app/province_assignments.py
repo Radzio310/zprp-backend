@@ -171,14 +171,25 @@ def _code_order(code: str) -> tuple:
     return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", code))
 
 
-def _host_table_by_club(state: dict, clubs: Optional[dict[str, dict]]) -> int:
-    """Ilu stolikowych stawia sam klub gospodarza - po NAZWIE drużyny."""
+def _host_table_by_club(
+    state: dict, clubs: Optional[dict[str, dict]], match_at: Any = None
+) -> int:
+    """
+    Ilu stolikowych stawia sam klub gospodarza - po NAZWIE drużyny.
+
+    Deklaracja działa od `table_by_club_since`: mecz sprzed tej daty liczy się
+    po staremu (`assignment_rules.club_table_active`).
+    """
     if not clubs:
         return 0
+    from app.offtime_rules import match_moment
     from app.province_clubs_scrape import team_key
 
     rule = clubs.get(team_key(state.get("ID_zespoly_gosp_ZespolNazwa"))) or {}
-    return int(rule.get("table_by_club", 0) or 0)
+    moment = match_moment(match_at) if match_at else None
+    return A.club_table_active(
+        rule.get("table_by_club", 0), rule.get("table_by_club_since"), moment
+    )
 
 
 def _item(
@@ -190,7 +201,7 @@ def _item(
 ) -> dict:
     """Jeden mecz listy: fakty z migawki plus policzony stan obsady."""
     competition = A.competition_key(code)
-    table_by_club = _host_table_by_club(state, clubs)
+    table_by_club = _host_table_by_club(state, clubs, row["match_at"])
     status = A.crew_status(state, code, table_by_club)
     at = row["match_at"]
     stage = S.round_info(state)
@@ -224,11 +235,16 @@ def _item(
             x for x in (_s(state.get("Hala_ulica")), _s(state.get("Hala_numer"))) if x
         ),
         "crew": A.crew(state),
+        # {field, table, club_table}: `table` to stolikowi OD OKRĘGU, a
+        # `club_table` = 1 znaczy, że drugie gniazdo stolika stawia klub.
         "needs": A.club_crew_needs(code, table_by_club),
         # Gospodarz stawia drugiego stolikowego sam - obsadowy widzi, czemu
         # jeden stolikowy to tu komplet.
         "table_by_club": table_by_club,
         "status": status,
+        # II liga (jej obsady ustala związek) - bootstrap oddaje ją razem z resztą,
+        # a klient chowa ją sam.
+        "league": S.is_league(code),
         "approved": bool(row["approved"]),
         "protocol_status": _s(state.get("protocol_status")),
         "updated_at": _iso(row["last_seen_at"] or row["updated_at"]),
@@ -290,6 +306,48 @@ async def list_matches(
     ),
     show_unknown: bool = Query(False, description="Także mecze bez rozpoznanego sezonu"),
 ):
+    return await match_list_payload(
+        province,
+        date_from=date_from,
+        date_to=date_to,
+        competition=competition,
+        category=category,
+        q=q,
+        only_gaps=only_gaps,
+        include_past=include_past,
+        past_only=past_only,
+        undated=undated,
+        when=when,
+        season=season,
+        include_league=include_league,
+        show_unknown=show_unknown,
+    )
+
+
+async def match_list_payload(
+    province: str,
+    *,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    competition: Optional[str] = None,
+    category: Optional[str] = None,
+    q: Optional[str] = None,
+    only_gaps: bool = False,
+    include_past: bool = False,
+    past_only: bool = False,
+    undated: Optional[bool] = None,
+    when: Optional[str] = None,
+    season: Optional[int] = None,
+    include_league: bool = False,
+    show_unknown: bool = False,
+    limit: Optional[int] = LIMIT,
+) -> dict:
+    """
+    Treść listy meczów - wspólna dla trasy i dla `bootstrap` Obsady 2.0.
+
+    `limit=None` oddaje wszystko: bootstrap bierze cały sezon naraz, a klient
+    filtruje zakres dat u siebie.
+    """
     from app.assignment_context import _club_rules
 
     key = require_province(province)
@@ -406,7 +464,7 @@ async def list_matches(
 
     totals = {
         "matches": len(window),
-        "shown": min(len(items), LIMIT),
+        "shown": len(items) if limit is None else min(len(items), limit),
         "to_fill": sum(1 for item in window if item["status"]["gaps"]),
         "slots": sum(item["status"]["gaps"] for item in window),
         "soft": sum(1 for item in window if not item["status"]["gaps"] and item["status"]["soft"]),
@@ -450,7 +508,7 @@ async def list_matches(
         "when": mode,
         "include_league": include_league,
         "window": {"from": start.isoformat() if start else None, "to": _iso(end)},
-        "matches": items[:LIMIT],
+        "matches": items if limit is None else items[:limit],
         "totals": totals,
         "competitions": competitions,
         "categories": categories,

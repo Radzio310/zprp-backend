@@ -4,7 +4,7 @@ import logging
 import traceback
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -19,7 +19,24 @@ from app.schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/province_judges", tags=["ProvinceJudges"])
+async def _refresh_assignment_board(request: Request):
+    """
+    Po każdym zapisie w rejestrze sędziów gotowy stan Obsady 2.0 idzie do
+    przebudowy (`assignment_board_cache`). Kod po `yield` biegnie po obsłudze
+    trasy; odczyty niczego nie unieważniają.
+    """
+    yield
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        from app.assignment_board_cache import bump_all
+
+        bump_all()
+
+
+router = APIRouter(
+    prefix="/province_judges",
+    tags=["ProvinceJudges"],
+    dependencies=[Depends(_refresh_assignment_board)],
+)
 
 
 def _norm_province(p: str) -> str:

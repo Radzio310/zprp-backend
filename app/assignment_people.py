@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from app import settlement_rates as R
 
@@ -230,3 +230,87 @@ def is_local(judge: Judge, host_city: Any) -> bool:
     """Sędzia z miasta gospodarza - unikamy, ale nie zakazujemy."""
     city = fold(host_city)
     return bool(city) and fold(judge.city) == city
+
+
+# ───────────────────────── pary i pary mentorskie ─────────────────────────
+#
+# Decyzja użytkownika z 24.09.2026 („mocno, równość jako druga"):
+#   - na boisku automat MOCNO woli ustaloną parę razem,
+#   - gdy jedna osoba z pary nie może - połówkę pary z kimś z JEJ pary
+#     mentorskiej, dopiero potem kogokolwiek,
+#   - równy podział dalej się liczy w obrębie tych wyborów, a para traci
+#     pierwszeństwo, gdy ma wyraźnie więcej meczów niż inni: licznik boiska
+#     w sezonie powyżej mediany aktywnych sędziów + `HEAVY_MARGIN`,
+#   - przy stoliku ustalona para też razem, ale bez par mentorskich.
+
+#: O ile meczów boiska w sezonie ponad medianę aktywnych para może mieć
+#: więcej, zanim straci pierwszeństwo.
+HEAVY_MARGIN = 2
+
+PAIR = "pair"
+MENTOR = "mentor"
+
+
+def pair_key(first: Any, second: Any) -> str:
+    """Klucz pary niezależny od kolejności: posortowane numery złączone „|"."""
+    ids = sorted(str(item or "").strip() for item in (first, second))
+    return "|".join(ids)
+
+
+def median(values: Iterable[int]) -> float:
+    ordered = sorted(int(value or 0) for value in values)
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def heavy_judges(
+    season_field: Mapping[str, int],
+    active_ids: Iterable[str],
+    *,
+    margin: int = HEAVY_MARGIN,
+) -> set[str]:
+    """
+    Sędziowie z wyraźnie większą liczbą meczów boiska w sezonie niż inni.
+
+    Mediana liczy się z AKTYWNYCH sędziów (ci, których automat w ogóle może
+    wziąć) - także tych z zerem, bo zero to też informacja o podziale pracy.
+    Bez żadnych liczników nikt nie jest „ciężki".
+    """
+    ids = [str(item).strip() for item in active_ids if str(item or "").strip()]
+    if not ids or not season_field:
+        return set()
+    counts = {judge_id: int(season_field.get(judge_id, 0) or 0) for judge_id in ids}
+    limit = median(counts.values()) + margin
+    return {judge_id for judge_id, count in counts.items() if count > limit}
+
+
+def pair_relation(
+    judge_id: str,
+    other_id: str,
+    *,
+    partner_of: Mapping[str, str],
+    mentors_of: Mapping[str, Iterable[str]],
+    allow_mentor: bool = True,
+) -> Optional[str]:
+    """
+    Kim są dla siebie te dwie osoby: ustaloną parą (`PAIR`), połówką pary
+    i kimś z jej pary mentorskiej (`MENTOR`) albo nikim (`None`).
+
+    Mentor działa w obie strony: mentor może stanąć z podopiecznym i podopieczny
+    z mentorem - chodzi o znajomą parę na boisku, a nie o kierunek opieki.
+    """
+    one, two = str(judge_id or "").strip(), str(other_id or "").strip()
+    if not one or not two or one == two:
+        return None
+    if partner_of.get(one) == two or partner_of.get(two) == one:
+        return PAIR
+    if allow_mentor:
+        if two in {str(x) for x in mentors_of.get(one, ()) or ()}:
+            return MENTOR
+        if one in {str(x) for x in mentors_of.get(two, ()) or ()}:
+            return MENTOR
+    return None

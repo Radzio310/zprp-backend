@@ -42,7 +42,8 @@
     "Częstochowa",
     "Goczałkowice Zdrój",
     "Janów",
-    "Niewiesze"
+    "Niewiesze",
+    "Pilchowice"
   ],
   "edges": [
     {
@@ -251,6 +252,11 @@
       "distance_km": 87
     },
     {
+      "from": "Bielsko-Biała",
+      "to": "Pilchowice",
+      "distance_km": 68
+    },
+    {
       "from": "Bystra",
       "to": "Bytom",
       "distance_km": 79
@@ -451,6 +457,11 @@
       "distance_km": 97
     },
     {
+      "from": "Bystra",
+      "to": "Pilchowice",
+      "distance_km": 78
+    },
+    {
       "from": "Bytom",
       "to": "Cieszyn",
       "distance_km": 80
@@ -646,6 +657,11 @@
       "distance_km": 34
     },
     {
+      "from": "Bytom",
+      "to": "Pilchowice",
+      "distance_km": 35
+    },
+    {
       "from": "Cieszyn",
       "to": "Chorzów",
       "distance_km": 74
@@ -836,6 +852,11 @@
       "distance_km": 89
     },
     {
+      "from": "Cieszyn",
+      "to": "Pilchowice",
+      "distance_km": 62
+    },
+    {
       "from": "Chorzów",
       "to": "Czechowice-Dziedzice",
       "distance_km": 55
@@ -1021,6 +1042,11 @@
       "distance_km": 42
     },
     {
+      "from": "Chorzów",
+      "to": "Pilchowice",
+      "distance_km": 35
+    },
+    {
       "from": "Czechowice-Dziedzice",
       "to": "Czuchów",
       "distance_km": 46
@@ -1201,6 +1227,11 @@
       "distance_km": 77
     },
     {
+      "from": "Czechowice-Dziedzice",
+      "to": "Pilchowice",
+      "distance_km": 57
+    },
+    {
       "from": "Czuchów",
       "to": "Dąbrowa Górnicza",
       "distance_km": 52
@@ -1376,6 +1407,11 @@
       "distance_km": 37
     },
     {
+      "from": "Czuchów",
+      "to": "Pilchowice",
+      "distance_km": 12
+    },
+    {
       "from": "Dąbrowa Górnicza",
       "to": "Gliwice",
       "distance_km": 43
@@ -1546,6 +1582,11 @@
       "distance_km": 55
     },
     {
+      "from": "Dąbrowa Górnicza",
+      "to": "Pilchowice",
+      "distance_km": 56
+    },
+    {
       "from": "Gliwice",
       "to": "Godziszka",
       "distance_km": 80
@@ -1711,6 +1752,11 @@
       "distance_km": 21
     },
     {
+      "from": "Gliwice",
+      "to": "Pilchowice",
+      "distance_km": 13
+    },
+    {
       "from": "Godziszka",
       "to": "Imielin",
       "distance_km": 59
@@ -1871,6 +1917,11 @@
       "distance_km": 100
     },
     {
+      "from": "Godziszka",
+      "to": "Pilchowice",
+      "distance_km": 80
+    },
+    {
       "from": "Imielin",
       "to": "Jasienica",
       "distance_km": 54
@@ -2026,6 +2077,11 @@
       "distance_km": 69
     },
     {
+      "from": "Imielin",
+      "to": "Pilchowice",
+      "distance_km": 56
+    },
+    {
       "from": "Jasienica",
       "to": "Jastrzębie Zdrój",
       "distance_km": 35
@@ -2176,6 +2232,11 @@
       "distance_km": 89
     },
     {
+      "from": "Jasienica",
+      "to": "Pilchowice",
+      "distance_km": 63
+    },
+    {
       "from": "Jastrzębie Zdrój",
       "to": "Katowice",
       "distance_km": 53
@@ -2321,6 +2382,11 @@
       "distance_km": 66
     },
     {
+      "from": "Jastrzębie Zdrój",
+      "to": "Pilchowice",
+      "distance_km": 37
+    },
+    {
       "from": "Katowice",
       "to": "Kleszczów",
       "distance_km": 41
@@ -2461,6 +2527,11 @@
       "distance_km": 50
     },
     {
+      "from": "Katowice",
+      "to": "Pilchowice",
+      "distance_km": 41
+    },
+    {
       "from": "Kleszczów",
       "to": "Kuźnia Raciborska",
       "distance_km": 35
@@ -2596,6 +2667,11 @@
       "distance_km": 8
     },
     {
+      "from": "Kleszczów",
+      "to": "Pilchowice",
+      "distance_km": 19
+    },
+    {
       "from": "Kuźnia Raciborska",
       "to": "Lipnik",
       "distance_km": 134
@@ -2726,6 +2802,11 @@
       "distance_km": 42
     },
     {
+      "from": "Kuźnia Raciborska",
+      "to": "Pilchowice",
+      "distance_km": 22
+    },
+    {
       "from": "Lipnik",
       "to": "Lubliniec",
       "distance_km": 62
@@ -2851,6 +2932,11 @@
       "distance_km": 98
     },
     {
+      "from": "Lipnik",
+      "to": "Pilchowice",
+      "distance_km": 107
+    },
+    {
       "from": "Lubliniec",
       "to": "Łaziska Górne",
       "distance_km": 69
@@ -2971,6 +3057,11 @@
       "distance_km": 41
     },
     {
+      "from": "Lubliniec",
+      "to": "Pilchowice",
+      "distance_km": 60
+    },
+    {
       "from": "Łaziska Górne",
       "to": "Mikołów",
       "distance_km": 7
@@ -3086,6 +3177,11 @@
       "distance_km": 44
     },
     {
+      "from": "Łaziska Górne",
+      "to": "Pilchowice",
+      "distance_km": 26
+    },
+    {
       "from": "Mikołów",
       "to": "Mysłowice",
       "distance_km": 22
@@ -3196,6 +3292,11 @@
       "distance_km": 44
     },
     {
+      "from": "Mikołów",
+      "to": "Pilchowice",
+      "distance_km": 31
+    },
+    {
       "from": "Mysłowice",
       "to": "Nakło Śląskie",
       "distance_km": 35
@@ -3301,6 +3402,11 @@
       "distance_km": 58
     },
     {
+      "from": "Mysłowice",
+      "to": "Pilchowice",
+      "distance_km": 50
+    },
+    {
       "from": "Nakło Śląskie",
       "to": "Piekary Śląskie",
       "distance_km": 8
@@ -3401,6 +3507,11 @@
       "distance_km": 34
     },
     {
+      "from": "Nakło Śląskie",
+      "to": "Pilchowice",
+      "distance_km": 40
+    },
+    {
       "from": "Piekary Śląskie",
       "to": "Pietrowice Wielkie",
       "distance_km": 80
@@ -3496,6 +3607,11 @@
       "distance_km": 36
     },
     {
+      "from": "Piekary Śląskie",
+      "to": "Pilchowice",
+      "distance_km": 37
+    },
+    {
       "from": "Pietrowice Wielkie",
       "to": "Racibórz",
       "distance_km": 11
@@ -3586,6 +3702,11 @@
       "distance_km": 64
     },
     {
+      "from": "Pietrowice Wielkie",
+      "to": "Pilchowice",
+      "distance_km": 43
+    },
+    {
       "from": "Racibórz",
       "to": "Ruda Śląska",
       "distance_km": 61
@@ -3671,6 +3792,11 @@
       "distance_km": 55
     },
     {
+      "from": "Racibórz",
+      "to": "Pilchowice",
+      "distance_km": 34
+    },
+    {
       "from": "Ruda Śląska",
       "to": "Siemianowice Śląskie",
       "distance_km": 17
@@ -3751,6 +3877,11 @@
       "distance_km": 39
     },
     {
+      "from": "Ruda Śląska",
+      "to": "Pilchowice",
+      "distance_km": 25
+    },
+    {
       "from": "Siemianowice Śląskie",
       "to": "Sosnowiec",
       "distance_km": 10
@@ -3826,6 +3957,11 @@
       "distance_km": 44
     },
     {
+      "from": "Siemianowice Śląskie",
+      "to": "Pilchowice",
+      "distance_km": 44
+    },
+    {
       "from": "Sosnowiec",
       "to": "Szczyrk",
       "distance_km": 79
@@ -3896,6 +4032,11 @@
       "distance_km": 54
     },
     {
+      "from": "Sosnowiec",
+      "to": "Pilchowice",
+      "distance_km": 50
+    },
+    {
       "from": "Szczyrk",
       "to": "Świętochłowice",
       "distance_km": 78
@@ -3961,6 +4102,11 @@
       "distance_km": 101
     },
     {
+      "from": "Szczyrk",
+      "to": "Pilchowice",
+      "distance_km": 82
+    },
+    {
       "from": "Świętochłowice",
       "to": "Tarnowskie Góry",
       "distance_km": 21
@@ -4021,6 +4167,11 @@
       "distance_km": 41
     },
     {
+      "from": "Świętochłowice",
+      "to": "Pilchowice",
+      "distance_km": 33
+    },
+    {
       "from": "Tarnowskie Góry",
       "to": "Tychy",
       "distance_km": 45
@@ -4076,6 +4227,11 @@
       "distance_km": 28
     },
     {
+      "from": "Tarnowskie Góry",
+      "to": "Pilchowice",
+      "distance_km": 34
+    },
+    {
       "from": "Tychy",
       "to": "Ustroń",
       "distance_km": 63
@@ -4126,6 +4282,11 @@
       "distance_km": 53
     },
     {
+      "from": "Tychy",
+      "to": "Pilchowice",
+      "distance_km": 41
+    },
+    {
       "from": "Ustroń",
       "to": "Wilkowice",
       "distance_km": 37
@@ -4171,6 +4332,11 @@
       "distance_km": 93
     },
     {
+      "from": "Ustroń",
+      "to": "Pilchowice",
+      "distance_km": 67
+    },
+    {
       "from": "Wilkowice",
       "to": "Zabrze",
       "distance_km": 73
@@ -4211,6 +4377,11 @@
       "distance_km": 96
     },
     {
+      "from": "Wilkowice",
+      "to": "Pilchowice",
+      "distance_km": 77
+    },
+    {
       "from": "Zabrze",
       "to": "Zawiercie",
       "distance_km": 63
@@ -4246,6 +4417,11 @@
       "distance_km": 31
     },
     {
+      "from": "Zabrze",
+      "to": "Pilchowice",
+      "distance_km": 23
+    },
+    {
       "from": "Zawiercie",
       "to": "Żory",
       "distance_km": 84
@@ -4276,6 +4452,11 @@
       "distance_km": 77
     },
     {
+      "from": "Zawiercie",
+      "to": "Pilchowice",
+      "distance_km": 84
+    },
+    {
       "from": "Żory",
       "to": "Żywiec",
       "distance_km": 59
@@ -4301,6 +4482,11 @@
       "distance_km": 52
     },
     {
+      "from": "Żory",
+      "to": "Pilchowice",
+      "distance_km": 27
+    },
+    {
       "from": "Żywiec",
       "to": "Częstochowa",
       "distance_km": 148
@@ -4321,6 +4507,11 @@
       "distance_km": 105
     },
     {
+      "from": "Żywiec",
+      "to": "Pilchowice",
+      "distance_km": 86
+    },
+    {
       "from": "Częstochowa",
       "to": "Goczałkowice Zdrój",
       "distance_km": 115
@@ -4336,6 +4527,11 @@
       "distance_km": 72
     },
     {
+      "from": "Częstochowa",
+      "to": "Pilchowice",
+      "distance_km": 88
+    },
+    {
       "from": "Goczałkowice Zdrój",
       "to": "Janów",
       "distance_km": 107
@@ -4346,9 +4542,24 @@
       "distance_km": 70
     },
     {
+      "from": "Goczałkowice Zdrój",
+      "to": "Pilchowice",
+      "distance_km": 51
+    },
+    {
       "from": "Janów",
       "to": "Niewiesze",
       "distance_km": 92
+    },
+    {
+      "from": "Janów",
+      "to": "Pilchowice",
+      "distance_km": 100
+    },
+    {
+      "from": "Niewiesze",
+      "to": "Pilchowice",
+      "distance_km": 27
     }
   ],
   "previous": [

@@ -25,14 +25,16 @@ def junior(**slots):
 
 class TestPotrzebStolika:
     def test_bez_deklaracji_dwoch_stolikowych(self):
-        assert A.club_crew_needs("S/JmM/7") == {"field": 2, "table": 2}
+        assert A.club_crew_needs("S/JmM/7") == {"field": 2, "table": 2, "club_table": 0}
 
     def test_klub_daje_jednego_okreg_drugiego(self):
-        assert A.club_crew_needs("S/JmM/7", 1) == {"field": 2, "table": 1}
+        assert A.club_crew_needs("S/JmM/7", 1) == {"field": 2, "table": 1, "club_table": 1}
 
-    def test_okreg_zawsze_daje_co_najmniej_jednego(self):
-        # Dzieci: stolik jednoosobowy, deklaracja nie ma czego odjąć.
-        assert A.club_crew_needs("S/DZM/3", 1)["table"] == 1
+    def test_male_kategorie_bez_stolika_nawet_z_deklaracja(self):
+        # Dzieci i Młodzik młodszy: stolika od okręgu nie ma, deklaracja nie ma
+        # czego odjąć (24.09.2026).
+        assert A.club_crew_needs("S/DZM/3", 1) == {"field": 1, "table": 0, "club_table": 0}
+        assert A.club_crew_needs("S/MLK1213/1") == {"field": 1, "table": 0, "club_table": 0}
 
     def test_boiskowych_deklaracja_nie_dotyczy(self):
         assert A.club_crew_needs("S/JmM/7", 1)["field"] == 2
@@ -40,6 +42,28 @@ class TestPotrzebStolika:
     def test_smieci_w_deklaracji_to_brak_deklaracji(self):
         assert A.club_crew_needs("S/JmM/7", None)["table"] == 2
         assert A.club_crew_needs("S/JmM/7", -3)["table"] == 2
+        assert A.club_crew_needs("S/JmM/7", "x")["table"] == 2
+
+
+class TestDeklaracjiWDniuMeczu:
+    def test_bez_deklaracji_zero(self):
+        assert A.club_table_active(0, SEZON, TODAY) == 0
+
+    def test_deklaracja_bez_daty_dziala_zawsze(self):
+        assert A.club_table_active(1, None, date(2020, 1, 1)) == 1
+
+    def test_mecz_przed_data_deklaracji_po_staremu(self):
+        assert A.club_table_active(1, TODAY, date(2026, 9, 1)) == 0
+        assert A.club_table_active(1, TODAY, TODAY) == 1
+
+    def test_mecz_bez_terminu_bierze_deklaracje(self):
+        assert A.club_table_active(1, TODAY, None) == 1
+
+    def test_termin_z_godzina(self):
+        from datetime import datetime
+
+        assert A.club_table_active(1, TODAY, datetime(2026, 9, 17, 18, 0)) == 0
+        assert A.club_table_active(1, TODAY, datetime(2026, 9, 19, 18, 0)) == 1
 
 
 class TestStanuObsady:

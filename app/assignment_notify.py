@@ -270,6 +270,9 @@ async def announce_change(
             .values(state_json=new, fingerprint=new_fp, updated_at=func.now())
         )
         result["changed"] = True
+        from app.assignment_board_cache import bump
+
+        bump(province)
 
         before, after = crew_ids(old), crew_ids(new)
         added = sorted(after - before)

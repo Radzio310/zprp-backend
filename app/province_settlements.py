@@ -15,10 +15,11 @@ import os
 from datetime import date, datetime, timezone
 from typing import Iterable, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import and_, func, select
 
+from app import settlement_cache as SC
 from app import settlement_engine as E
 from app import settlement_buckets as B
 from app import settlement_rates as R
@@ -45,11 +46,17 @@ from app.settlement_province import canonical, display, spellings
 from app.settlement_runs import cooldown_left, run_is_active
 from app.settlement_seasons import season_of
 from app.settlement_club_scope import club_scope, club_scope_many
+from app.settlement_money import money_sum
 from app.deps import get_optional_jwt_payload
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/province/settlements", tags=["province_settlements"])
+
+# Każdy zapis do tabel, z których liczą się rozliczenia, unieważnia pamięć
+# policzonych wyników (`settlement_cache`) - także zapis z modułu, który o niej
+# nic nie wie (tabele stawek, deklaracje stolikowych w Obsadzie).
+SC.install_write_hook(database)
 
 #: Moduly wlaczane per okreg.
 #:
@@ -199,6 +206,30 @@ async def _assignments(
     return out
 
 
+async def _base(province: str) -> dict:
+    """
+    Fakty okręgu, z których liczy się KAŻDY miesiąc i sezon: tabele stawek,
+    nazwiska i wszystkie obsady (z ręcznymi meczami).
+
+    Pamiętane w `settlement_cache` - przełączenie miesiąca albo sezonu nie
+    czyta już całej historii z bazy, tylko przelicza silnik na gotowych danych.
+    ⚠ Wynik jest WSPÓLNY: nie zmieniać list i słowników w miejscu (wyjątek:
+    `names` dostaje nazwiska dociągnięte z obsad, patrz `load_settlement`).
+    """
+    province = require_province(province)
+
+    async def compute() -> dict:
+        central_versions, province_versions = await _versions(province)
+        return {
+            "central_versions": central_versions,
+            "province_versions": province_versions,
+            "names": await _judge_names(province),
+            "assignments": await _assignments(province),
+        }
+
+    return await SC.remember("base", province, (), compute)
+
+
 async def load_settlement(
     province: str,
     *,
@@ -218,9 +249,15 @@ async def load_settlement(
     """
     province = require_province(province)
     date_from, date_to = month_range(year, month)
-    central_versions, province_versions = await _versions(province)
-    names = await _judge_names(province)
-    assignments = await _assignments(province, judge_ids=judge_ids)
+    base = await _base(province)
+    central_versions = base["central_versions"]
+    province_versions = base["province_versions"]
+    names = base["names"]
+    if judge_ids:
+        wanted = {str(item) for item in judge_ids}
+        assignments = [item for item in base["assignments"] if item.judge_id in wanted]
+    else:
+        assignments = base["assignments"]
     now = _now()
 
     # Sedzia bez nazwiska nie czeka na dobowe odswiezenie: jego mecz w API ZPRP
@@ -242,7 +279,11 @@ async def load_settlement(
             logger.info("[settlement] %s: nazwiska z obsad nie zdazyly w limicie", province)
         except Exception as exc:
             logger.warning("[settlement] %s: nazwiska z obsad meczow: %s", province, exc)
-        names = await _judge_names(province)
+        fresh = await _judge_names(province)
+        # Dociągnięte nazwiska trafiają też do wspólnych faktów okręgu - inny
+        # miesiąc nie będzie o nie pytał API drugi raz.
+        base["names"].update(fresh)
+        names = {**names, **fresh}
 
     entries = E.settle_judges(
         assignments,
@@ -311,6 +352,35 @@ async def load_settlement(
             "travel": E.travel_rows(outside_entries),
         },
     }
+
+
+async def cached_settlement(
+    province: str,
+    *,
+    year: int,
+    month: int,
+    include_future: bool = False,
+    include_zprp: bool = False,
+) -> dict:
+    """
+    `load_settlement` całego okręgu z pamięci (`settlement_cache`).
+
+    Wynik jest WSPÓLNY dla wszystkich pytających - tylko do odczytu.
+    """
+    key = require_province(province)
+    month_range(year, month)
+    return await SC.remember(
+        "month",
+        key,
+        (int(year), int(month), bool(include_future), bool(include_zprp)),
+        lambda: load_settlement(
+            key,
+            year=year,
+            month=month,
+            include_future=include_future,
+            include_zprp=include_zprp,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +588,7 @@ async def status(province: str = Query(...)):
 
 @router.get("/summary", summary="Rozliczenie okręgu za miesiąc")
 async def summary(
+    request: Request,
     province: str = Query(...),
     year: int = Query(...),
     month: int = Query(...),
@@ -527,28 +598,38 @@ async def summary(
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    month_range(year, month)
+    # Numer dokumentu zmienia się po każdym wydruku, a rachunek nie - więc jest
+    # częścią klucza pamięci, a nie powodem, żeby liczyć miesiąc od nowa.
+    hint = await next_document_number(key, year, month, "zestawienie", peek=True)
 
-    data = await load_settlement(
-        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+    async def build() -> dict:
+        data = await cached_settlement(
+            key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+        )
+        return {
+            "province": data["province"],
+            "period": data["period"],
+            "include_future": include_future,
+            "include_zprp": include_zprp,
+            "totals": data["totals"],
+            "entries": [_entry_json(e, with_matches=False) for e in data["entries"]],
+            "outside_district": {
+                "clubs": data["outside_district"]["clubs"],
+                "totals": data["outside_district"]["totals"],
+                "entries": [
+                    _entry_json(e, with_matches=False)
+                    for e in data["outside_district"]["entries"]
+                ],
+            },
+            "zprp": _zprp_summary(data["zprp"], included=include_zprp),
+            "document_number_hint": hint,
+        }
+
+    pack = await SC.packed(
+        "summary", key, (int(year), int(month), bool(include_future), bool(include_zprp), hint), build
     )
-    return {
-        "province": data["province"],
-        "period": data["period"],
-        "include_future": include_future,
-        "include_zprp": include_zprp,
-        "totals": data["totals"],
-        "entries": [_entry_json(e, with_matches=False) for e in data["entries"]],
-        "outside_district": {
-            "clubs": data["outside_district"]["clubs"],
-            "totals": data["outside_district"]["totals"],
-            "entries": [
-                _entry_json(e, with_matches=False)
-                for e in data["outside_district"]["entries"]
-            ],
-        },
-        "zprp": _zprp_summary(data["zprp"], included=include_zprp),
-        "document_number_hint": await next_document_number(key, year, month, "zestawienie", peek=True),
-    }
+    return SC.respond(request, pack)
 
 
 async def _solo_table_matches(province: str, keys: list[str]) -> set[str]:
@@ -586,25 +667,32 @@ async def _judge_payload(
     month: int,
     include_future: bool,
     include_zprp: bool,
+    data: Optional[dict] = None,
+    solo: Optional[set[str]] = None,
 ) -> dict:
     """
-    Wspolna tresc `/judge/{id}` i `/me`.
+    Wspolna tresc `/judge/{id}`, `/judges` i `/me`.
 
     Osobna funkcja, a nie wolanie jednej trasy z drugiej: trasa wolana wprost
     dostaje za niepodany parametr obiekt `Query(False)`, ktory jest PRAWDZIWY -
     aplikacja sedziego dostalaby wtedy po cichu obsady ZPRP.
+
+    `data` - gotowy miesiac calego okregu (z pamieci). Sedziowie licza sie
+    niezaleznie od siebie (podatek, turnieje i dojazdy ida po sedzim), wiec
+    wycinek z calego okregu to ten sam rachunek co liczenie jednej osoby.
     """
-    data = await load_settlement(
-        key,
-        year=year,
-        month=month,
-        include_future=include_future,
-        include_zprp=include_zprp,
-        judge_ids=[judge_id],
-    )
+    if data is None:
+        data = await load_settlement(
+            key,
+            year=year,
+            month=month,
+            include_future=include_future,
+            include_zprp=include_zprp,
+            judge_ids=[judge_id],
+        )
     entry = next((e for e in data["entries"] if e.judge_id == judge_id), None)
     if entry is None:
-        names = await _judge_names(key)
+        names = (await _base(key))["names"]
         entry = E.JudgeSettlement(judge_id=judge_id, judge_name=names.get(judge_id, ""))
     payload = _entry_json(entry, with_matches=True)
     outside_entry = next(
@@ -612,7 +700,8 @@ async def _judge_payload(
         E.JudgeSettlement(judge_id=judge_id, judge_name=entry.judge_name),
     )
     outside_payload = _entry_json(outside_entry, with_matches=True)
-    solo = await _solo_table_matches(key, [item.match_key for item in entry.matches])
+    if solo is None:
+        solo = await _solo_table_matches(key, [item.match_key for item in entry.matches])
     for row in payload.get("rows") or []:
         row["triple_allowed"] = bool(
             row["match_key"] in solo
@@ -639,6 +728,62 @@ async def _judge_payload(
     }
 
 
+@router.get("/judges", summary="Szczegóły WSZYSTKICH sędziów miesiąca naraz")
+async def judges_detail(
+    request: Request,
+    province: str = Query(...),
+    year: int = Query(...),
+    month: int = Query(...),
+    include_future: bool = Query(False),
+    include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
+):
+    """
+    Każdy sędzia miesiąca w kształcie `/judge/{id}` - panel ściąga to raz, w tle,
+    i potem otwiera podgląd dowolnego sędziego od ręki, bez pytania serwera.
+    """
+    key = require_province(province)
+    if not await module_enabled(key, "settlements"):
+        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    month_range(year, month)
+
+    async def build() -> dict:
+        data = await cached_settlement(
+            key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+        )
+        ids: list[str] = []
+        for entry in [*data["entries"], *data["outside_district"]["entries"]]:
+            if entry.judge_id not in ids:
+                ids.append(entry.judge_id)
+        # Jedno zapytanie o stoliki dla całego miesiąca zamiast jednego na sędziego.
+        solo = await _solo_table_matches(
+            key, sorted({m.match_key for entry in data["entries"] for m in entry.matches})
+        )
+        judges = {}
+        for judge_id in ids:
+            judges[judge_id] = await _judge_payload(
+                key,
+                judge_id,
+                year=year,
+                month=month,
+                include_future=include_future,
+                include_zprp=include_zprp,
+                data=data,
+                solo=solo,
+            )
+        return {
+            "province": key,
+            "period": data["period"],
+            "include_future": include_future,
+            "include_zprp": include_zprp,
+            "judges": judges,
+        }
+
+    pack = await SC.packed(
+        "judges", key, (int(year), int(month), bool(include_future), bool(include_zprp)), build
+    )
+    return SC.respond(request, pack)
+
+
 @router.get("/judge/{judge_id}", summary="Rozliczenie jednego sędziego, z meczami")
 async def judge_detail(
     judge_id: str,
@@ -649,6 +794,9 @@ async def judge_detail(
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
 ):
     key = require_province(province)
+    data = await cached_settlement(
+        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+    )
     return await _judge_payload(
         key,
         judge_id,
@@ -656,6 +804,7 @@ async def judge_detail(
         month=month,
         include_future=include_future,
         include_zprp=include_zprp,
+        data=data,
     )
 
 
@@ -670,20 +819,17 @@ async def travel(
 ):
     key = require_province(province)
     ids = [x.strip() for x in (judge_ids or "").split(",") if x.strip()] or None
-    data = await load_settlement(
-        key,
-        year=year,
-        month=month,
-        include_future=include_future,
-        include_zprp=include_zprp,
-        judge_ids=ids,
+    data = await cached_settlement(
+        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
     )
-    rows = [_travel_json(r) for r in data["travel"]]
+    # Wycinek z całego okręgu - dojazdy liczą się po sędzim, więc to ta sama lista.
+    entries = [e for e in data["entries"] if ids is None or e.judge_id in ids]
+    rows = [_travel_json(r) for r in E.travel_rows(entries)]
     return {
         "province": key,
         "period": data["period"],
         "rows": rows,
-        "total": round(sum(r["amount"] for r in rows), 2),
+        "total": money_sum(r["amount"] for r in rows),
         "total_km": sum(r["total_km"] for r in rows),
     }
 
@@ -701,6 +847,10 @@ async def mine(
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
     # „Moje rozliczenie OKREGOWE": obsady ZPRP nigdy nie wchodza tu do kwot -
     # decyzja uzytkownika z 10.09.2026. Ekran dostaje je osobno, bez pieniedzy.
+    # Miesiac calego okregu w pamieci (panel go liczyl) - bierzemy wycinek;
+    # inaczej liczymy tylko tego sedziego, zeby telefon nie czekal na caly okreg.
+    month_range(year, month)
+    warm = SC.peek("month", key, (int(year), int(month), bool(include_future), False))
     return await _judge_payload(
         key,
         judge_id,
@@ -708,6 +858,7 @@ async def mine(
         month=month,
         include_future=include_future,
         include_zprp=False,
+        data=warm,
     )
 
 
@@ -730,6 +881,14 @@ async def _club_paid_keys(
     Przebieg rozpoznawczy swiadomie bierze wszystko (`include_future`,
     `include_zprp`): mecz placony przez klub ma wypasc z kwoty okregu niezaleznie
     od tego, jak ustawione sa przelaczniki.
+
+    Okręg jako płatnik (24.09.2026): mecz przeniesiony w panelu klubów na
+    okręg (wyjątek `team_id = OKREG`) NIGDY nie trafia do tych kluczy -
+    `club_charges.build_charges` daje mu status `charged`, a nie `club-off`.
+    Tak ma być: okręg go płaci, więc zostaje w rozliczeniu okręgu. Działa to
+    w obie strony - mecz klubu, który sam płaci sędziom, po przeniesieniu na
+    okręg wraca do rozliczenia okręgu, a po „Przywróć do klubu" znów z niego
+    wypada.
     """
     days = [item.match_at.date() for item in assignments if item.match_at]
     if not days:
@@ -786,6 +945,7 @@ def _merge_months(district: list[dict], club: list[dict]) -> list[dict]:
 
 @router.get("/months", summary="Sumy miesiąc po miesiącu - do siatki sezonów")
 async def months(
+    request: Request,
     province: str = Query(...),
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
@@ -814,45 +974,58 @@ async def months(
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
-    central_versions, province_versions = await _versions(key)
-    assignments = await _assignments(key, judge_ids=[judge_id] if judge_id else None)
-    now = _now()
 
-    # PODZIAL WEDLUG TEGO, KTO PLACI - ta sama granica, co na ekranie miesiaca
-    # (`load_settlement`). Kazda grupa liczy sie osobno, bo koszty uzyskania
-    # i prog 200 zl ida od sumy miesiaca U DANEGO PLATNIKA.
-    club_paid = await _club_paid_keys(
-        key, assignments, central_versions, province_versions, now
-    )
-    common = dict(
-        province=key,
-        central_versions=central_versions,
-        province_versions=province_versions,
-        now=now,
-        include_future=include_future,
-        include_zprp=include_zprp,
-    )
+    async def build() -> dict:
+        base = await _base(key)
+        central_versions, province_versions = base["central_versions"], base["province_versions"]
+        assignments = [
+            item for item in base["assignments"] if not judge_id or item.judge_id == str(judge_id)
+        ]
+        now = _now()
 
-    rows = E.monthly_totals(
-        [item for item in assignments if item.match_key not in club_paid],
-        **common,
-    )
-    if include_clubs and club_paid:
-        rows = _merge_months(
-            rows,
-            E.monthly_totals(
-                [item for item in assignments if item.match_key in club_paid],
-                **common,
-            ),
+        # PODZIAL WEDLUG TEGO, KTO PLACI - ta sama granica, co na ekranie miesiaca
+        # (`load_settlement`). Kazda grupa liczy sie osobno, bo koszty uzyskania
+        # i prog 200 zl ida od sumy miesiaca U DANEGO PLATNIKA.
+        club_paid = await _club_paid_keys(
+            key, assignments, central_versions, province_versions, now
         )
-    return {
-        "province": key,
-        "judge_id": judge_id,
-        "include_future": include_future,
-        "include_zprp": include_zprp,
-        "include_clubs": include_clubs,
-        "months": rows,
-    }
+        common = dict(
+            province=key,
+            central_versions=central_versions,
+            province_versions=province_versions,
+            now=now,
+            include_future=include_future,
+            include_zprp=include_zprp,
+        )
+
+        rows = E.monthly_totals(
+            [item for item in assignments if item.match_key not in club_paid],
+            **common,
+        )
+        if include_clubs and club_paid:
+            rows = _merge_months(
+                rows,
+                E.monthly_totals(
+                    [item for item in assignments if item.match_key in club_paid],
+                    **common,
+                ),
+            )
+        return {
+            "province": key,
+            "judge_id": judge_id,
+            "include_future": include_future,
+            "include_zprp": include_zprp,
+            "include_clubs": include_clubs,
+            "months": rows,
+        }
+
+    pack = await SC.packed(
+        "months",
+        key,
+        (str(judge_id or ""), bool(include_future), bool(include_zprp), bool(include_clubs)),
+        build,
+    )
+    return SC.respond(request, pack)
 
 
 # ---------------------------------------------------------------------------

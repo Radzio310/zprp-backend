@@ -53,8 +53,9 @@ def test_budget_sums_money_and_recomputes_balance():
     assert budget["settled"] == 50
     assert budget["charged"] == 300.6
     assert budget["matches"] == 3
-    # Saldo z sum, nie suma zaokrąglonych sald: 200.8 + 50 - 300.6 = -49.8 -> -50.
-    assert budget["balance"] == -50
+    # Saldo z sum i Z GROSZAMI: 200.8 + 50 - 300.6 = -49.8 (nie -50 - zaokrąglanie
+    # salda do złotówki to błąd z 24.09.2026).
+    assert budget["balance"] == -49.8
     assert [team["name"] for team in budget["teams"]] == ["Beskidzki", "Bystra II"]
     assert budget["member_ids"] == ["3608", "4986"]
     assert [m["name"] for m in budget["members"]] == ["KS Bystra", "Beskidzki Handball"]

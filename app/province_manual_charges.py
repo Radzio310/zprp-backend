@@ -128,6 +128,13 @@ async def _club_names(province: str, club_ids: set[str]) -> dict[str, str]:
             club_id = _s(row["club_id"])
             if name and (club_id not in out or len(name) < len(out[club_id])):
                 out[club_id] = name
+    # Okręg jako płatnik (`district_payer`) nie ma drużyn - bez nazwy nadanej
+    # w panelu dostaje skrót związku („ŚlZPR").
+    from app import district_payer as DP
+
+    for club_id in club_ids:
+        if DP.is_district_payer(club_id) and club_id not in out:
+            out[club_id] = DP.default_label(province)
     return out
 
 

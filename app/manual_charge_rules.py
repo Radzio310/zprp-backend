@@ -38,6 +38,7 @@ from zoneinfo import ZoneInfo
 from app import club_charges as C
 from app import settlement_engine as E
 from app import settlement_rates as R
+from app.settlement_money import money, money_sum
 
 #: Prefiks klucza meczu. Terminarz okręgu ma „d:", lista sędziego „o:".
 KEY_PREFIX = "manual:"
@@ -144,47 +145,52 @@ def match_instant(day: date, match_time: Any = None) -> datetime:
 # Brutto / netto
 # ---------------------------------------------------------------------------
 
-def net_of(gross: float) -> int:
-    """Netto jednego ryczałtu - wprost z `settlement_rates.net_parts`."""
-    return int(R.net_parts(round(float(gross or 0)))["net"])
+def net_of(gross: float) -> float:
+    """Netto jednego ryczałtu - wprost z `settlement_rates.net_parts` (z groszami)."""
+    return money(R.net_parts(money(gross))["net"])
 
 
-def gross_from_net(net: float) -> int:
+def gross_from_net(net: float) -> float:
     """
-    Najmniejsze CAŁKOWITE brutto, którego netto (`net_parts`) jest >= podanego.
+    Najmniejsze brutto, którego netto (`net_parts`) jest >= podanego.
 
     Odwrotność liczona dokładnie, przeszukaniem, a nie wzorem: `net_parts`
-    zaokrągla koszty i podatek do złotówki i ma próg 200 zł (KUP 20% dopiero
-    POWYŻEJ 200 zł, podatek 12% od reszty), więc wzór odwrotny myliłby się
-    o złotówkę przy zaokrągleniach.
+    zaokrągla koszty i podatek do złotówki (tak każe ordynacja podatkowa) i ma
+    próg 200 zł (KUP 20% dopiero POWYŻEJ 200 zł, podatek 12% od reszty), więc
+    wzór odwrotny myliłby się o złotówkę przy zaokrągleniach.
+
+    Grosze netto zostają: podatek jest w pełnych złotych, więc brutto ma te same
+    grosze co netto - szukamy tylko pełnych złotych (24.09.2026: kwoty nigdzie
+    nie mogą być zaokrąglane do złotówki).
 
     ⚠ Luka przy progu: brutto 200 zł daje 176 zł netto, a 201 zł już 182 zł
     (od 201 zł wchodzą koszty uzyskania). Netto 177-181 zł nie da się więc
     uzyskać DOKŁADNIE - dostaje brutto 201 zł, a wycena mówi, ile wyjdzie netto
-    naprawdę (`net_of`). Brutto jest całkowite, bo rozliczenie sędziego i tak
-    zaokrągla ryczałt do złotówki.
+    naprawdę (`net_of`).
     """
-    target = round(float(net or 0))
+    target = money(net)
     if target <= 0:
         return 0
+    cents = int(round(target * 100)) % 100
     # Netto to co najmniej ~84% brutto (0.88 poniżej progu, 0.904 powyżej),
     # więc brutto nie przekroczy 1.2 x netto + zapas na zaokrąglenia.
-    low = max(1, int(target * 0.95) - 2)
+    low = max(0, int(target * 0.95) - 2)
     high = int(target * 1.25) + 10
-    for gross in range(low, high + 1):
-        if net_of(gross) >= target:
+    for whole in range(low, high + 1):
+        gross = money(whole + cents / 100)
+        if gross > 0 and net_of(gross) >= target:
             return gross
-    return high
+    return money(high + cents / 100)
 
 
-def fee_gross(amount: Any, mode: str) -> int:
-    """Ryczałt z formularza (brutto albo netto) -> brutto całkowite."""
+def fee_gross(amount: Any, mode: str) -> float:
+    """Ryczałt z formularza (brutto albo netto) -> brutto z groszami."""
     value = _num(amount) or 0.0
     if value <= 0:
         return 0
     if _s(mode) == MODE_NET:
         return gross_from_net(value)
-    return int(round(value))
+    return money(value)
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +211,7 @@ def default_fee(
     central_versions: Iterable[Any],
     province_versions: Iterable[Any],
     distance_km: float = 10.0,
-) -> tuple[int, str]:
+) -> tuple[float, str]:
     """
     Domyślny ryczałt brutto dla roli - (kwota, skąd).
 
@@ -231,14 +237,14 @@ def default_fee(
             province_content=provincial,
         )
         if hit > 0:
-            return int(round(hit)), "code"
+            return money(hit), "code"
 
     other = R.provincial_gross(provincial, km, "Inne", role_name, day)
     if other > 0:
-        return int(round(other)), "province"
+        return money(other), "province"
     fallback = R.district_fallback(central, km, role_name)
     if fallback > 0:
-        return int(round(fallback)), "central"
+        return money(fallback), "central"
     return FALLBACK_FEES.get(role, FALLBACK_FEES[FIELD]), "fallback"
 
 
@@ -271,8 +277,8 @@ def km_rate(
 def price_officials(
     officials: Iterable[dict],
     *,
-    field_fee: int,
-    table_fee: int,
+    field_fee: float,
+    table_fee: float,
     rate: float,
     travel_enabled: bool,
 ) -> list[dict]:
@@ -300,7 +306,7 @@ def price_officials(
                 "home_city": _s(raw.get("home_city")),
                 "km_one_way": km,
                 "km_source": source,
-                "fee_gross": int(field_fee if role == FIELD else table_fee),
+                "fee_gross": money(field_fee if role == FIELD else table_fee),
                 "travel": float(travel),
             }
         )
@@ -311,8 +317,8 @@ def price_officials(
 
 def totals_of(priced: Iterable[dict]) -> dict:
     items = list(priced)
-    gross = sum(int(item["fee_gross"]) for item in items)
-    travel = round(sum(float(item["travel"]) for item in items), 2)
+    gross = money_sum(item["fee_gross"] for item in items)
+    travel = money_sum(item["travel"] for item in items)
     return {
         "officials": len(items),
         "field": sum(1 for item in items if item["role"] == FIELD),
@@ -320,7 +326,7 @@ def totals_of(priced: Iterable[dict]) -> dict:
         "gross": gross,
         "travel": travel,
         "km": round(sum(float(item["km_one_way"] or 0) for item in items if item["travel"]) * R.ROUND_TRIP, 1),
-        "total": round(gross + travel, 2),
+        "total": money_sum((gross, travel)),
     }
 
 
@@ -329,8 +335,8 @@ def problems(
     day: Optional[date],
     city: Any,
     officials: Iterable[dict],
-    field_fee: int,
-    table_fee: int,
+    field_fee: float,
+    table_fee: float,
     travel_enabled: bool,
 ) -> list[str]:
     """
@@ -511,16 +517,16 @@ def charge_rows(
                 judge_id=item.judge_id,
                 name=judge_names.get(item.judge_id, ""),
                 role=item.role,
-                gross=int(item.gross or 0),
+                gross=money(item.gross),
                 travel=float(item.travel or 0),
             )
         )
     out: list[C.ChargeRow] = []
     for row in grouped.values():
         row.referees.sort(key=lambda share: (share.role, share.name, share.judge_id))
-        row.gross = sum(int(share.gross or 0) for share in row.referees)
-        row.travel = round(sum(float(share.travel or 0) for share in row.referees), 2)
-        row.amount = round(row.gross + row.travel, 2)
+        row.gross = money_sum(share.gross for share in row.referees)
+        row.travel = money_sum(share.travel for share in row.referees)
+        row.amount = money_sum((row.gross, row.travel))
         out.append(row)
     return out
 
