@@ -261,9 +261,9 @@ def test_a_very_long_trip_costs_more_than_its_kilometres():
     Powyżej progu kilometr boli mocniej - inaczej równanie obciążenia wysyłało
     ludzi przez pół województwa.
 
-    Sędzia 130 km stąd, ale bez żadnego meczu, kontra sędzia 40 km stąd z dwoma
-    meczami. Po samych kilometrach i obciążeniu (2 x 35 pkt) wygrywałby ten
-    daleki: 130 < 40 + 70. Z progiem jego przejazd kosztuje tyle, ile wart jest
+    Sędzia 130 km stąd bez meczu kontra sędzia 40 km stąd z JEDNYM meczem
+    więcej. Różnica jednego meczu to „podobnie obciążeni" (24.09.2026), więc
+    rozstrzyga dojazd - a przejazd powyżej progu kosztuje tyle, ile wart jest
     naprawdę.
     """
     far = make_judge("1", "DALEKI Jan", city="Cieszyn", letters=["II"])
@@ -280,7 +280,7 @@ def test_a_very_long_trip_costs_more_than_its_kilometres():
         paused=lambda judge_id, day: False,
         city_of=lambda judge_id, day: {"1": "Cieszyn", "2": "Zabrze"}[judge_id],
         km=km,
-        load={"2": 2},
+        season_counts={"2": {"field": 1}},
     )
     plan = build_plan([match(city="Gliwice", field=1)], ctx)
     assert names(plan) == ["BLISKI Adam"]

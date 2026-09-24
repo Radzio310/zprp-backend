@@ -29,6 +29,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from app import assignment_rules as A
+from app import collision_rules as CR
 from app import offtime_rules as O
 from app.assignment_auto import BusyMatch, Context, MatchNeed
 from app.assignment_distances import DistanceBook
@@ -463,6 +464,7 @@ def need_from_state(
         host=_s(state.get("ID_zespoly_gosp_ZespolNazwa")),
         guest=_s(state.get("ID_zespoly_gosc_ZespolNazwa")),
         hall=_s(state.get("Hala_nazwa")),
+        venue=CR.venue_of(state),
         field_needed=empty_field,
         table_needed=empty_table,
         crew_ids=crew_ids,
@@ -491,6 +493,7 @@ async def load_busy(
     rows = await database.fetch_all(
         select(
             province_matches.c.match_id,
+            province_matches.c.match_code,
             province_matches.c.match_at,
             province_matches.c.state_json,
         ).where(
@@ -520,7 +523,16 @@ async def load_busy(
             entries = busy.setdefault(judge_id, [])
             if any(item.match_id == match_id for item in entries):
                 continue
-            entries.append(BusyMatch(moment=moment, city=city, match_id=match_id))
+            entries.append(
+                BusyMatch(
+                    moment=moment,
+                    city=city,
+                    match_id=match_id,
+                    code=_s(state.get("RozgrywkiCode") or row["match_code"]),
+                    hall=_s(state.get("Hala_nazwa")),
+                    venue=CR.venue_of(state),
+                )
+            )
             load[judge_id] = load.get(judge_id, 0) + 1
     return busy, load
 
@@ -534,6 +546,9 @@ def build_context(
     only_judges: Optional[Iterable[str]] = None,
     inactive: Iterable[str] = (),
     season_field: Optional[Mapping[str, int]] = None,
+    season_counts: Optional[Mapping[str, Mapping[str, int]]] = None,
+    month_counts: Optional[Mapping[str, Mapping[str, Mapping[str, int]]]] = None,
+    collision: Optional[CR.CollisionRules] = None,
 ) -> Context:
     """Świat gotowy do podania automatowi.
 
@@ -544,6 +559,10 @@ def build_context(
     `season_field` - mecze boiska w sezonie po numerze sędziego. Z nich wynika,
     czyja para traci pierwszeństwo (`assignment_people.heavy_judges`); bez
     liczników pary mają pierwszeństwo zawsze.
+
+    `season_counts` / `month_counts` - boisko i stolik w sezonie i w miesiącach
+    (`assignment_load.SeasonBook.counts`), podstawa równego podziału.
+    `collision` - reguła „zdąży z meczu na mecz" okręgu (`collision_rules`).
     """
     skip = {str(item).strip() for item in inactive}
     people = {key: value for key, value in roster.judges.items() if key not in skip}
@@ -562,6 +581,9 @@ def build_context(
         heavy=heavy_judges(season_field or {}, people.keys()),
         blocked=set(roster.blocks),
         load=dict(load or {}),
+        collision=collision or CR.CollisionRules(),
+        season_counts=dict(season_counts or {}),
+        month_counts=dict(month_counts or {}),
     )
 
 

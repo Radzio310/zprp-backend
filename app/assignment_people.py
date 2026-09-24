@@ -18,7 +18,9 @@ Kryteria stolików ligowych (te same słowa, co użytkownik):
   - Superliga i ligi centralne: min. 1 sędzia ligowy albo delegat, druga osoba
     z licencją A; preferowani dwaj ligowcy albo delegaci,
   - I i II liga: min. 1 osoba z licencją A,
-  - stoliki okręgowe: bez wymogu, ale najpierw sędziowie z odznaka „Stolikowi".
+  - stoliki okręgowe: bez wymogu, ale najpierw sędziowie z odznaką „Stolikowi"
+    (pozostali dopiero po nich); w II lidze i wyżej stolik bez tej preferencji
+    (`assignment_auto.table_badge_first`).
 """
 
 from __future__ import annotations
@@ -37,6 +39,8 @@ CENTRAL_LETTERS = frozenset({"I", "LC", "SL"})
 #: Odznaki okręgu, po których automat rozpoznaje ludzi.
 BADGE_LEAGUE = "Ligowcy"
 BADGE_TABLE = "Stolikowi"
+#: Ta sama odznaka w liczbie pojedynczej - okręgi nazywają ją różnie.
+BADGE_TABLE_ALIASES = ("Stolikowi", "Stolikowy", "Stolikowa")
 BADGE_YOUNG = "Młodzi"
 BADGE_DELEGATE = "Delegaci"
 
@@ -123,7 +127,8 @@ class Judge:
 
     @property
     def table_specialist(self) -> bool:
-        return self.has_badge(BADGE_TABLE)
+        """Odznaka „Stolikowi" (także „Stolikowy") - pierwszeństwo przy stoliku okręgowym."""
+        return any(self.has_badge(name) for name in BADGE_TABLE_ALIASES)
 
     @property
     def delegate(self) -> bool:

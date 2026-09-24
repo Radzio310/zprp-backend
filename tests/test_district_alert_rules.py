@@ -224,7 +224,8 @@ def test_overlap_and_city_and_offtime():
     assert kinds == [R.KIND_CITY, R.KIND_OFFTIME, R.KIND_OVERLAP]
     overlap = next(item for item in found if item.kind == R.KIND_OVERLAP)
     assert overlap.other.match_id == "11" and overlap.km == 38.0 and overlap.gap_minutes == 60
-    assert overlap.short_minutes == 120 + 38 + 45 - 60
+    # Junior młodszy (S/JmM) trwa 1:30, do tego dojazd 38 km przy 60 km/h i 30 min zapasu.
+    assert overlap.short_minutes == 90 + 38 + 30 - 60
     only = R.find_collisions("7", "Jan Nowak", moved, [near], [], km_table, kinds=[R.KIND_CITY])
     assert only == []
 

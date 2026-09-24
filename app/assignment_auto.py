@@ -18,12 +18,32 @@ KRYTERIA UŻYTKOWNIKA (11.09.2026), w kolejności ważności:
     7. przerwa sędziego (pauza) i drugie gniazdo w tym samym meczu.
 
   MIĘKKIE - liczą się punktami, mniej znaczy lepiej:
-    - KILOMETRY, bo to główne kryterium,
+    - RÓWNY PODZIAŁ w sezonie i w miesiącu, boisko i stolik osobno (niżej),
+    - KILOMETRY - rozstrzygają między podobnie obciążonymi,
     - sędzia z miasta gospodarza (unikamy),
-    - równy podział (kto ma już dużo, dostaje mniej chętnie),
     - dzień spoza preferowanych przez sędziego,
     - mecz tego samego dnia, na który ZDĄŻY - ostateczność,
-    - premia za ustaloną parę i za odznakę „Stolikowi" na stoliku okręgowym.
+    - premia za ustaloną parę.
+
+RÓWNY PODZIAŁ (decyzja użytkownika z 24.09.2026 - Automat proponował w kółko
+tych samych): liczy się SEZON i MIESIĄC meczu, boisko i stolik osobno, razem
+z meczami przydzielonymi w TYM przebiegu i w kolejce (`pending`).
+    - kilometry decydują tylko między podobnie obciążonymi (różnica 1 meczu
+      kosztuje `W_GAP_ONE`, czyli tyle, co kilkadziesiąt kilometrów),
+    - różnica 2 i więcej meczów względem najmniej obciążonego kandydata kosztuje
+      `W_GAP_STEP` za każdy mecz ponad jeden - więcej niż najdalszy przejazd
+      i więcej niż premia za parę (para nie przebije różnicy 2 meczów),
+    - ponad średnią aktywnych sędziów kara rośnie z kwadratem nadwyżki
+      (`W_OVER_MEAN`).
+
+STOLIK W ROZGRYWKACH OKRĘGOWYCH: najpierw sędziowie z odznaką „Stolikowi"
+(„Stolikowy"), pozostali dopiero, gdy żadnego stolikowego nie da się wziąć.
+W II lidze, I lidze, Lidze Centralnej i Superlidze stolik bez tej preferencji -
+wszyscy na równi (liczą się tylko wymagania licencji z `table_rule`).
+
+KOLIZJE DNIA: `collision_rules` - ta sama hala = mecze nie mogą się nakładać
+(czas meczu z kategorii), inna hala = czas meczu + dojazd + zapas. Wartości
+z ustawień powiadomień okręgu (`Context.collision`).
 
 PARY NA BOISKU (decyzja użytkownika z 24.09.2026, „mocno, równość jako druga"):
     - ustalona para razem to MOCNA premia (`B_FIELD_PAIR`), a już pierwszy
@@ -46,6 +66,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from app import collision_rules as CR
 from app.assignment_people import (
     MENTOR,
     PAIR,
@@ -56,6 +77,7 @@ from app.assignment_people import (
     table_pair_ok,
     table_rule,
 )
+from app.match_market_rules import league_level
 
 #: Wagi punktowe. Kilometr to jeden punkt - reszta jest wyskalowana względem niego.
 W_KM = 1.0
@@ -72,7 +94,16 @@ W_KM = 1.0
 FAR_KM = 45.0
 FAR_FACTOR = 4.0
 W_LOCAL = 400.0
+#: Stara waga obciążenia (mecze w oknie x punkty) - już tylko dla
+#: `Context.legacy_load`, czyli do porównania w testach.
 W_LOAD = 35.0
+#: Równy podział: jeden mecz więcej niż najmniej obciążony kandydat.
+W_GAP_ONE = 40.0
+#: Każdy następny mecz różnicy - więcej niż najdalszy przejazd razem z premią
+#: za parę, więc różnica 2 meczów zawsze przeważa.
+W_GAP_STEP = 1500.0
+#: Kara za nadwyżkę ponad średnią aktywnych sędziów (rośnie z kwadratem).
+W_OVER_MEAN = 12.0
 W_OFF_DAY = 120.0
 W_SAME_DAY = 600.0
 W_UNKNOWN_KM = 90.0
@@ -83,13 +114,13 @@ B_FIELD_PAIR = 600.0
 B_FIELD_MENTOR = 300.0
 #: Pierwszy boiskowy, którego para też może przyjechać na ten mecz.
 B_PAIR_READY = 300.0
-B_TABLE_BADGE = 60.0
 
-#: Ile kilometrów na godzinę zakłada automat, licząc czy sędzia zdąży z meczu na mecz.
-TRAVEL_KMH = 60.0
-#: Mecz trwa dwie godziny, a do tego zapas na protokół i dojazd.
-MATCH_HOURS = 2.0
-SAFETY_MINUTES = 45
+#: Ile kilometrów na godzinę zakłada automat bez ustawień okręgu
+#: (reguła i reszta wartości: `collision_rules`).
+TRAVEL_KMH = float(CR.DEFAULT_TRAVEL_KMH)
+
+FIELD = "field"
+TABLE = "table"
 
 FIELD_SLOTS = ("pierwszy", "drugi")
 TABLE_SLOTS = ("sekretarz", "czas")
@@ -102,6 +133,11 @@ class BusyMatch:
     moment: Optional[datetime]
     city: str
     match_id: str
+    #: Numer meczu - z niego czas trwania (`collision_rules.duration_key`).
+    code: str = ""
+    #: Hala i numer obiektu - ta sama hala nie wymaga dojazdu ani zapasu.
+    hall: str = ""
+    venue: str = ""
 
 
 @dataclass
@@ -134,10 +170,17 @@ class MatchNeed:
     difficulty_why: list[str] = field(default_factory=list)
     tier: float = 0.0
     category: str = ""
+    #: Numer obiektu hali, gdy terminarz go niesie.
+    venue: str = ""
 
     @property
     def weekday(self) -> Optional[int]:
         return self.day.weekday() if self.day else None
+
+    @property
+    def month(self) -> str:
+        """Miesiąc meczu „2026-09" (czas polski) - pusto bez terminu."""
+        return month_key(self.day)
 
 
 @dataclass
@@ -169,6 +212,120 @@ class Context:
     #: Wnioski z analizy obsad wybrane przez obsadowego (`insights_policy.Policy`).
     #: `None` = Automat dokładnie taki jak przed analizą.
     policy: Optional[Any] = None
+    #: Reguła „zdąży z meczu na mecz" okręgu (`collision_rules`).
+    collision: CR.CollisionRules = field(default_factory=CR.CollisionRules)
+    #: Mecze w SEZONIE: numer sędziego -> {"field": n, "table": n}.
+    season_counts: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    #: Mecze w MIESIĄCU: numer sędziego -> „2026-09" -> {"field": n, "table": n}.
+    month_counts: Mapping[str, Mapping[str, Mapping[str, int]]] = field(default_factory=dict)
+    #: Stara reguła obciążenia (`W_LOAD` x mecze w oknie) zamiast równego
+    #: podziału - wyłącznie do testów porównawczych.
+    legacy_load: bool = False
+    #: Liczniki w trakcie przebiegu (ustawia `build_plan`); bez nich - kopia
+    #: `season_counts` i `month_counts`.
+    loads: Optional["Loads"] = None
+
+
+def month_key(day: Any) -> str:
+    """„2026-09" z daty albo chwili (już w czasie polskim)."""
+    if day is None:
+        return ""
+    return f"{day.year:04d}-{day.month:02d}"
+
+
+class Loads:
+    """
+    Liczniki równego podziału w trakcie układania: sezon i miesiąc, boisko
+    i stolik osobno. To kopia - przebieg dopisuje swoje przydziały, a liczniki
+    podane z zewnątrz zostają nietknięte.
+    """
+
+    __slots__ = ("season", "month")
+
+    def __init__(
+        self,
+        season: Optional[Mapping[str, Mapping[str, int]]] = None,
+        month: Optional[Mapping[str, Mapping[str, Mapping[str, int]]]] = None,
+    ) -> None:
+        self.season: dict[str, dict[str, int]] = {
+            str(judge_id): {
+                FIELD: int((item or {}).get(FIELD, 0) or 0),
+                TABLE: int((item or {}).get(TABLE, 0) or 0),
+            }
+            for judge_id, item in (season or {}).items()
+        }
+        self.month: dict[str, dict[str, dict[str, int]]] = {}
+        for judge_id, months in (month or {}).items():
+            own = self.month.setdefault(str(judge_id), {})
+            for label, item in (months or {}).items():
+                own[str(label)] = {
+                    FIELD: int((item or {}).get(FIELD, 0) or 0),
+                    TABLE: int((item or {}).get(TABLE, 0) or 0),
+                }
+
+    def count(self, judge_id: str, kind: str) -> int:
+        return int((self.season.get(judge_id) or {}).get(kind, 0))
+
+    def month_count(self, judge_id: str, month: str, kind: str) -> int:
+        if not month:
+            return 0
+        return int(((self.month.get(judge_id) or {}).get(month) or {}).get(kind, 0))
+
+    def add(self, judge_id: str, kind: str, month: str, delta: int = 1) -> None:
+        if kind not in (FIELD, TABLE) or not judge_id:
+            return
+        own = self.season.setdefault(judge_id, {FIELD: 0, TABLE: 0})
+        own[kind] = max(0, own.get(kind, 0) + delta)
+        if month:
+            slot = self.month.setdefault(judge_id, {}).setdefault(month, {FIELD: 0, TABLE: 0})
+            slot[kind] = max(0, slot.get(kind, 0) + delta)
+
+
+def loads_of(ctx: "Context") -> Loads:
+    """Liczniki przebiegu (`Context.loads`) albo świeża kopia liczników z kontekstu."""
+    if ctx.loads is not None:
+        return ctx.loads
+    return Loads(ctx.season_counts, ctx.month_counts)
+
+
+def fair_points(count: int, floor: int, mean: float) -> float:
+    """
+    Kara za obciążenie w jednym wymiarze (sezon albo miesiąc).
+
+    `floor` to najmniej obciążony kandydat do tego gniazda, `mean` - średnia
+    aktywnych sędziów. Różnica 1 meczu kosztuje tyle, co kilkadziesiąt
+    kilometrów; 2 i więcej - więcej niż jakikolwiek przejazd i premia za parę.
+    """
+    gap = int(count) - int(floor)
+    points = 0.0
+    if gap >= 1:
+        points += W_GAP_ONE
+    if gap >= 2:
+        points += W_GAP_STEP * (gap - 1)
+    over = float(count) - float(mean)
+    if over > 0:
+        points += W_OVER_MEAN * over * over
+    return points
+
+
+def table_badge_first(code: Any) -> bool:
+    """
+    Czy przy stoliku tych rozgrywek najpierw idą sędziowie „Stolikowi".
+
+    Tak w rozgrywkach OKRĘGOWYCH. W II lidze i wyżej (I liga, Liga Centralna,
+    Superliga) stolik obsadzamy bez tej preferencji - wszyscy na równi.
+    """
+    return league_level(code) == "okreg" and not table_rule(code)
+
+
+@dataclass
+class Standing:
+    """Punkt odniesienia równego podziału dla jednego gniazda."""
+
+    floor_season: int = 0
+    floor_month: int = 0
+    mean_season: float = 0.0
+    mean_month: float = 0.0
 
 
 @dataclass
@@ -208,29 +365,35 @@ class Plan:
         return out
 
 
-def travel_minutes(km: Optional[float]) -> float:
+def travel_minutes(km: Optional[float], rules: Optional[CR.CollisionRules] = None) -> float:
     """Ile jedzie się tyle kilometrów. Bez odległości zakładamy godzinę."""
-    if km is None:
-        return 60.0
-    return (float(km) / TRAVEL_KMH) * 60.0
+    return CR.travel_minutes(km, rules)
 
 
 def can_make_both(
     first: Optional[datetime],
     second: Optional[datetime],
     km: Optional[float],
+    *,
+    first_code: Any = "",
+    second_code: Any = "",
+    same_venue: bool = False,
+    rules: Optional[CR.CollisionRules] = None,
 ) -> bool:
     """
-    Czy da się zdążyć z jednego meczu na drugi.
-
-    Mecz trwa dwie godziny, do tego dojazd i zapas bezpieczeństwa. Bez terminu
-    (któregokolwiek) nie wiemy nic - i wtedy NIE blokujemy, bo „nie wiem" nie
-    może odbierać sędziemu meczu.
+    Czy da się zdążyć z jednego meczu na drugi - reguła w `collision_rules`
+    (ta sama hala: bez nakładania; inna hala: czas meczu + dojazd + zapas).
+    Bez terminu (któregokolwiek) NIE blokujemy.
     """
-    if first is None or second is None:
-        return True
-    gap = abs((second - first).total_seconds()) / 60.0
-    return gap >= MATCH_HOURS * 60 + travel_minutes(km) + SAFETY_MINUTES
+    return CR.can_make_both(
+        first,
+        second,
+        km,
+        first_code=first_code,
+        second_code=second_code,
+        same_venue=same_venue,
+        rules=rules,
+    )
 
 
 def _same_day_state(
@@ -247,8 +410,19 @@ def _same_day_state(
     if not same_day:
         return False, True
     for item in same_day:
-        distance = ctx.km(item.city, need.host_city)
-        if not can_make_both(item.moment, need.moment, distance):
+        venue = CR.same_hall(
+            item.hall, item.city, need.hall, need.host_city, a_venue=item.venue, b_venue=need.venue
+        )
+        distance = 0.0 if venue else ctx.km(item.city, need.host_city)
+        if not can_make_both(
+            item.moment,
+            need.moment,
+            distance,
+            first_code=item.code,
+            second_code=need.code,
+            same_venue=venue,
+            rules=ctx.collision,
+        ):
             return True, False
     return True, True
 
@@ -274,6 +448,59 @@ def _hard_reason(
     return None
 
 
+def _fair_score(
+    judge_id: str,
+    need: MatchNeed,
+    kind: str,
+    standing: Optional[Standing],
+    loads: Loads,
+) -> tuple[float, list[str]]:
+    """Punkty i uzasadnienie równego podziału (sezon + miesiąc, ta sama grupa)."""
+    base = standing or Standing()
+    group = "boisko" if kind == FIELD else "stolik"
+    season = loads.count(judge_id, kind)
+    month = loads.month_count(judge_id, need.month, kind)
+    points = fair_points(season, base.floor_season, base.mean_season)
+    reasons = [f"{group}: {season} w sezonie"]
+    if need.month:
+        points += fair_points(month, base.floor_month, base.mean_month)
+        reasons[0] += f", {month} w miesiącu"
+    season_gap = season - base.floor_season
+    month_gap = (month - base.floor_month) if need.month else 0
+    if season_gap <= 0 and month_gap <= 0:
+        reasons.append("najmniej meczów w sezonie i miesiącu" if need.month else "najmniej meczów w sezonie")
+    elif month_gap <= 0 and need.month:
+        reasons.append("najmniej meczów w miesiącu")
+    elif season_gap <= 0:
+        reasons.append("najmniej meczów w sezonie")
+    if max(season_gap, month_gap) >= 2:
+        reasons.append(f"o {max(season_gap, month_gap)} mecze więcej niż najmniej obciążeni")
+    return points, reasons
+
+
+def _standing(
+    ctx: Context,
+    need: MatchNeed,
+    kind: str,
+    group: Iterable[Judge],
+    loads: Loads,
+) -> Standing:
+    """Najmniej obciążony w grupie kandydatów i średnia AKTYWNYCH sędziów."""
+    people = list(group)
+    active = list(ctx.judges)
+    month = need.month
+    seasons = [loads.count(judge.judge_id, kind) for judge in people]
+    months = [loads.month_count(judge.judge_id, month, kind) for judge in people]
+    all_seasons = [loads.count(judge_id, kind) for judge_id in active]
+    all_months = [loads.month_count(judge_id, month, kind) for judge_id in active]
+    return Standing(
+        floor_season=min(seasons) if seasons else 0,
+        floor_month=min(months) if months else 0,
+        mean_season=(sum(all_seasons) / len(all_seasons)) if all_seasons else 0.0,
+        mean_month=(sum(all_months) / len(all_months)) if all_months else 0.0,
+    )
+
+
 def _score(
     ctx: Context,
     judge: Judge,
@@ -284,12 +511,15 @@ def _score(
     round_no: int,
     load: Mapping[str, int],
     pair_ready: Optional[Judge] = None,
+    standing: Optional[Standing] = None,
+    loads: Optional[Loads] = None,
 ) -> tuple[float, list[str], Optional[float]]:
     """
     Punkty kandydata - mniej znaczy lepiej - razem z uzasadnieniem.
 
     `pair_ready` to para kandydata, która TEŻ może stanąć w tym meczu - podawana
-    tylko przy pierwszym z kilku pustych gniazd boiska.
+    tylko przy pierwszym z kilku pustych gniazd boiska. `standing` to punkt
+    odniesienia równego podziału (najmniej obciążony kandydat i średnia).
     """
     reasons: list[str] = []
     city = ctx.city_of(judge.judge_id, need.day)
@@ -311,10 +541,15 @@ def _score(
         score += W_LOCAL
         reasons.append("miejscowy, brano w ostatniej kolejności")
 
-    taken = int(load.get(judge.judge_id, 0))
-    score += taken * W_LOAD
-    if taken:
-        reasons.append(f"ma już {taken} w tym zakresie")
+    if ctx.legacy_load:
+        taken = int(load.get(judge.judge_id, 0))
+        score += taken * W_LOAD
+        if taken:
+            reasons.append(f"ma już {taken} w tym zakresie")
+    else:
+        points, why = _fair_score(judge.judge_id, need, kind, standing, loads or loads_of(ctx))
+        score += points
+        reasons.extend(why)
 
     if round_no > 1 and judge.preferred_days and need.weekday is not None:
         if need.weekday not in judge.preferred_days:
@@ -352,9 +587,9 @@ def _score(
         score -= B_PAIR_READY
         reasons.append(f"może stanąć ze swoją parą ({pair_ready.name})")
 
-    if kind == "table" and judge.table_specialist and not table_rule(need.code):
-        score -= B_TABLE_BADGE
-        reasons.append("sędzia stolikowy")
+    if kind == TABLE and judge.table_specialist and table_badge_first(need.code):
+        # Samo pierwszeństwo daje kolejność grup w `_candidates` - tu tylko ślad.
+        reasons.append("sędzia stolikowy - pierwszeństwo przy stoliku okręgowym")
 
     if ctx.policy is not None:
         delta, why = ctx.policy.points(
@@ -420,6 +655,22 @@ def _candidates(
         valid.append(judge)
 
     ready_ids = {judge.judge_id for judge in valid}
+
+    # Stolik okręgowy: najpierw „Stolikowi", reszta dopiero po nich. Równy
+    # podział liczy się WEWNĄTRZ grupy - inaczej stolikowy z trzema meczami
+    # przegrywałby punktami z kimś spoza grupy, kto ma zero.
+    badge_first = kind == TABLE and table_badge_first(need.code)
+
+    def tier_of(judge: Judge) -> int:
+        return 0 if not badge_first or judge.table_specialist else 1
+
+    loads = loads_of(ctx)
+    standings: dict[int, Standing] = {}
+    for tier in {tier_of(judge) for judge in valid}:
+        standings[tier] = _standing(
+            ctx, need, kind, [judge for judge in valid if tier_of(judge) == tier], loads
+        )
+
     out: list[tuple[float, Judge, list[str], Optional[float]]] = []
     for judge in valid:
         ready: Optional[Judge] = None
@@ -443,9 +694,12 @@ def _candidates(
             round_no=round_no,
             load=load,
             pair_ready=ready,
+            standing=standings.get(tier_of(judge)),
+            loads=loads,
         )
         out.append((score, judge, reasons, km))
-    out.sort(key=lambda item: (item[0], item[1].name))
+    # Grupa przed punktami: przy stoliku okręgowym „Stolikowi" zawsze pierwsi.
+    out.sort(key=lambda item: (tier_of(item[1]), item[0], item[1].name))
     return out, refused
 
 
@@ -486,6 +740,14 @@ def build_plan(
         blocked=ctx.blocked,
         load=load,
         policy=ctx.policy,
+        collision=ctx.collision,
+        season_counts=ctx.season_counts,
+        month_counts=ctx.month_counts,
+        legacy_load=ctx.legacy_load,
+        # Kopia liczników: przydziały z TEGO przebiegu liczą się od razu.
+        loads=Loads(ctx.loads.season, ctx.loads.month)
+        if ctx.loads is not None
+        else Loads(ctx.season_counts, ctx.month_counts),
     )
 
     # Stan gniazd w trakcie układania: mecz -> gniazdo -> sędzia.
@@ -560,10 +822,18 @@ def build_plan(
                     filled.setdefault(need.match_id, {})[slot] = judge
                     slots[kind] = [item for item in (slots.get(kind) or []) if item != slot]
                     load[judge.judge_id] = load.get(judge.judge_id, 0) + 1
+                    working.loads.add(judge.judge_id, kind, need.month)
                     if working.policy is not None:
                         working.policy.note_assigned(judge.judge_id, need, kind=kind)
                     busy.setdefault(judge.judge_id, []).append(
-                        BusyMatch(moment=need.moment, city=need.host_city, match_id=need.match_id)
+                        BusyMatch(
+                            moment=need.moment,
+                            city=need.host_city,
+                            match_id=need.match_id,
+                            code=need.code,
+                            hall=need.hall,
+                            venue=need.venue,
+                        )
                     )
                     plan.proposals.append(
                         Proposal(
@@ -595,3 +865,205 @@ def build_plan(
     plan.proposals.sort(key=lambda item: (item.code, item.slot))
     plan.gaps.sort(key=lambda item: (item.code, item.slot))
     return plan
+
+
+# ───────────────────────── kandydaci na jeden mecz ─────────────────────────
+#
+# Kafelki drag&drop w Obsadzie 2.0 (`POST /province/assignment/candidates`):
+# WSZYSCY aktywni sędziowie okręgu z tą samą oceną, co Automat, plus stan
+# terminu - `off` (niedyspozycja, przerwa, kolizja - z godzinami), `tight`
+# (ten sam dzień, zdąży) albo `free`. Zero cichych odmów: każdy `off` mówi
+# dlaczego.
+
+FREE = "free"
+TIGHT = "tight"
+OFF = "off"
+
+
+def same_day_matches(ctx: Context, judge_id: str, need: MatchNeed) -> list[BusyMatch]:
+    """Inne mecze sędziego tego samego dnia (bez tego meczu)."""
+    if need.day is None:
+        return []
+    return sorted(
+        (
+            item
+            for item in ctx.busy.get(judge_id, [])
+            if item.moment is not None
+            and item.moment.date() == need.day
+            and item.match_id != need.match_id
+        ),
+        key=lambda item: item.moment,
+    )
+
+
+def blocking_match(ctx: Context, judge_id: str, need: MatchNeed) -> Optional[BusyMatch]:
+    """Mecz tego dnia, na który sędzia nie zdąży (albo z którego nie zdąży tutaj)."""
+    for item in same_day_matches(ctx, judge_id, need):
+        venue = CR.same_hall(
+            item.hall, item.city, need.hall, need.host_city, a_venue=item.venue, b_venue=need.venue
+        )
+        distance = 0.0 if venue else ctx.km(item.city, need.host_city)
+        if not can_make_both(
+            item.moment,
+            need.moment,
+            distance,
+            first_code=item.code,
+            second_code=need.code,
+            same_venue=venue,
+            rules=ctx.collision,
+        ):
+            return item
+    return None
+
+
+def _busy_text(item: BusyMatch) -> str:
+    when = f"{item.moment:%H:%M}" if item.moment else "?"
+    place = item.hall or item.city or "hala nieznana"
+    code = f"{item.code} " if item.code else ""
+    return f"{code}o {when} ({place})"
+
+
+@dataclass
+class CandidateView:
+    judge_id: str
+    name: str
+    city: str
+    km: Optional[float]
+    status: str
+    reason: str
+    why: list[str]
+    fits: list[str]
+    rank: int = 0
+    score: Optional[float] = None
+
+
+def describe_candidates(
+    ctx: Context,
+    need: MatchNeed,
+    *,
+    off_reason: Optional[Callable[[str, Optional[datetime]], str]] = None,
+) -> list[CandidateView]:
+    """
+    Wszyscy sędziowie kontekstu jako kandydaci do tego meczu, od najlepszego.
+
+    Ocena ta sama co w Automacie (`_score` z równym podziałem, parami,
+    kilometrami i pierwszeństwem „Stolikowych" przy stoliku okręgowym) dla
+    grupy, której meczowi brakuje (najpierw boisko, potem stolik). `off_reason`
+    opisuje niedyspozycję słowami z kalendarza („Praca, 12:00-18:00").
+    """
+    kind = FIELD if (need.field_needed or not need.table_needed) else TABLE
+    group_crew = {FIELD: list(need.crew_field), TABLE: list(need.crew_table)}
+    loads = loads_of(ctx)
+    badge_first = kind == TABLE and table_badge_first(need.code)
+
+    def tier_of(judge: Judge) -> int:
+        return 0 if not badge_first or judge.table_specialist else 1
+
+    views: dict[str, CandidateView] = {}
+    ready: list[Judge] = []
+    for judge in ctx.judges.values():
+        city = ctx.city_of(judge.judge_id, need.day)
+        km = ctx.km(city, need.host_city) if city and need.host_city else None
+        hard = _hard_reason(ctx, judge, need, round_no=2)
+        if hard:
+            reason = hard
+            if hard == "niedyspozycja" and off_reason is not None:
+                text = off_reason(judge.judge_id, need.moment)
+                reason = f"niedyspozycja: {text}" if text else hard
+            elif hard.startswith("ma tego dnia mecz"):
+                other = blocking_match(ctx, judge.judge_id, need)
+                if other is not None:
+                    reason = f"kolizja: mecz {_busy_text(other)}"
+            elif hard == "już stoi w tym meczu":
+                reason = "już w obsadzie tego meczu"
+            views[judge.judge_id] = CandidateView(
+                judge_id=judge.judge_id,
+                name=judge.name,
+                city=city or judge.city,
+                km=km,
+                status=OFF,
+                reason=reason,
+                why=[reason],
+                fits=[],
+            )
+            continue
+        fits: list[str] = []
+        refusals: list[str] = []
+        for group in (FIELD, TABLE):
+            partner = next(
+                (person for person in group_crew[group] if person.judge_id != judge.judge_id), None
+            )
+            ok, why = pair_ok(judge, partner, blocked=ctx.blocked)
+            if ok:
+                fits.append(group)
+            elif why:
+                refusals.append(f"{'boisko' if group == FIELD else 'stolik'}: {why}")
+        others = same_day_matches(ctx, judge.judge_id, need)
+        status = TIGHT if others else FREE
+        reason = (
+            "tego dnia także " + ", ".join(f"mecz {_busy_text(item)}" for item in others)
+            if others
+            else ""
+        )
+        if refusals:
+            reason = "; ".join([part for part in (reason, *refusals) if part])
+        views[judge.judge_id] = CandidateView(
+            judge_id=judge.judge_id,
+            name=judge.name,
+            city=city or judge.city,
+            km=km,
+            status=status,
+            reason=reason,
+            why=[],
+            fits=fits,
+        )
+        if kind in fits:
+            ready.append(judge)
+
+    standings = {
+        tier: _standing(ctx, need, kind, [judge for judge in ready if tier_of(judge) == tier], loads)
+        for tier in {tier_of(judge) for judge in ready}
+    }
+    ready_ids = {judge.judge_id for judge in ready}
+    partner = next(iter(group_crew[kind]), None)
+    for judge in ready:
+        pair_ready: Optional[Judge] = None
+        if kind == FIELD and partner is None and len(need.field_needed) >= 2:
+            mate = ctx.judges.get(ctx.partner_of.get(judge.judge_id, ""))
+            if (
+                mate is not None
+                and mate.judge_id in ready_ids
+                and judge.judge_id not in ctx.heavy
+                and mate.judge_id not in ctx.heavy
+            ):
+                pair_ready = mate
+        score, reasons, _km = _score(
+            ctx,
+            judge,
+            need,
+            kind=kind,
+            partner=partner if partner is not None and partner.judge_id != judge.judge_id else None,
+            round_no=2,
+            load=ctx.load,
+            pair_ready=pair_ready,
+            standing=standings.get(tier_of(judge)),
+            loads=loads,
+        )
+        view = views[judge.judge_id]
+        view.score = round(score, 2)
+        view.why = reasons
+
+    def order(view: CandidateView) -> tuple:
+        judge = ctx.judges[view.judge_id]
+        return (
+            view.status == OFF,
+            view.score is None,
+            tier_of(judge),
+            view.score if view.score is not None else 0.0,
+            view.name,
+        )
+
+    out = sorted(views.values(), key=order)
+    for index, view in enumerate(out, start=1):
+        view.rank = index
+    return out

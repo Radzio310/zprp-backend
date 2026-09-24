@@ -20,8 +20,10 @@ Dwa alerty (decyzje użytkownika z 24.09.2026):
 
 2. KOLIZJA PO ZMIANIE TERMINU. Mecz zmienił termin i któryś sędzia z jego
    obsady ma teraz problem:
-     - `overlap` - inny mecz, na który nie zdąży (ta sama reguła dojazdu, co
-       w Automacie: 2 h meczu + dojazd 60 km/h + 45 min zapasu),
+     - `overlap` - inny mecz, na który nie zdąży (ta sama reguła, co
+       w Automacie - `collision_rules`: ta sama hala = mecze nie mogą się
+       nakładać, czas meczu z kategorii; inna hala = czas meczu + dojazd
+       60 km/h + 30 min zapasu; wartości do zmiany w sekcji `timing`),
      - `offtime` - nowy termin wpada w niedyspozycję (kalendarz okręgowy,
        centralny i kalendarze iCal z „blokuje obsadę"),
      - `city`    - miękka: tego samego dnia mecz w innym mieście, na który
@@ -46,8 +48,8 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from app import assignment_rules as AR
+from app import collision_rules as CR
 from app import offtime_rules as O
-from app.assignment_auto import can_make_both
 from app.assignment_board_rules import display_name
 from app.assignment_people import fold
 from app.province_alert_rules import AlertRuleError, normalize_emails, plural
@@ -152,6 +154,8 @@ def default_config() -> dict:
             "categories": [],
         },
         "quiet": {"enabled": True, "start": DEFAULT_QUIET_START, "end": DEFAULT_QUIET_END},
+        # Reguła „zdąży z meczu na mecz" - wspólna z Automatem obsady.
+        "timing": CR.default_config(),
     }
 
 
@@ -202,6 +206,7 @@ def normalize_config(raw: Any) -> dict:
     qu["enabled"] = _bool(qu_raw.get("enabled"), True)
     qu["start"] = _hour(qu_raw.get("start"), DEFAULT_QUIET_START)
     qu["end"] = _hour(qu_raw.get("end"), DEFAULT_QUIET_END)
+    base["timing"] = CR.normalize_config(data.get("timing"))
     return base
 
 
@@ -214,6 +219,10 @@ def validate_config(raw: Any) -> dict:
     """
     data = raw if isinstance(raw, Mapping) else {}
     clean = normalize_config(data)
+    try:
+        clean["timing"] = CR.validate_config(data.get("timing"))
+    except CR.TimingError as exc:
+        raise AlertRuleError(str(exc)) from None
     un_raw = data.get(UNASSIGNED) if isinstance(data.get(UNASSIGNED), Mapping) else {}
     if "threshold_hours" in un_raw:
         try:
@@ -561,6 +570,8 @@ class MatchInfo:
     hall: str = ""
     host: str = ""
     guest: str = ""
+    #: Numer obiektu hali, gdy terminarz go niesie.
+    venue: str = ""
 
     @property
     def teams(self) -> str:
@@ -581,6 +592,8 @@ class Collision:
     gap_minutes: Optional[int] = None
     #: Ile minut brakuje, żeby zdążyć (dla `overlap`).
     short_minutes: Optional[int] = None
+    #: Oba mecze w tej samej hali - brakuje czasu na sam mecz, nie na dojazd.
+    same_hall: bool = False
     offtime: Optional[O.Offtime] = None
 
     @property
@@ -628,12 +641,17 @@ def find_collisions(
     km: Callable[[str, str], Optional[float]],
     kinds: Iterable[str] = KINDS,
     previous: Optional[datetime] = None,
+    rules: Optional[CR.CollisionRules] = None,
 ) -> list[Collision]:
     """
     Kolizje jednego sędziego z przeniesionym meczem.
 
     `others` - pozostałe mecze sędziego (czas polski). Mecz bez terminu nie
-    koliduje z niczym: „nie wiem" nie może alarmować.
+    koliduje z niczym: „nie wiem" nie może alarmować. `rules` - ustawienia
+    okręgu (`collision_rules`); bez nich wartości domyślne.
+
+    Ta sama hala (turniej młodzieży: 10:00, 11:50, 13:40) to NIE kolizja,
+    dopóki mecze się nie nakładają - bez dojazdu i bez zapasu.
     """
     wanted = set(kinds)
     out: list[Collision] = []
@@ -642,13 +660,19 @@ def find_collisions(
     for other in others:
         if other.match_id == moved.match_id or other.moment is None:
             continue
-        distance = km(moved.city, other.city) if moved.city and other.city else None
+        venue = CR.same_hall(
+            moved.hall, moved.city, other.hall, other.city, a_venue=moved.venue, b_venue=other.venue
+        )
+        if venue:
+            distance: Optional[float] = 0.0
+        else:
+            distance = km(moved.city, other.city) if moved.city and other.city else None
         gap = int(abs((other.moment - moved.moment).total_seconds()) // 60)
-        if not can_make_both(moved.moment, other.moment, distance):
+        timing = dict(
+            first_code=moved.code, second_code=other.code, same_venue=venue, rules=rules
+        )
+        if not CR.can_make_both(moved.moment, other.moment, distance, **timing):
             if KIND_OVERLAP in wanted:
-                from app.assignment_auto import MATCH_HOURS, SAFETY_MINUTES, travel_minutes
-
-                need = MATCH_HOURS * 60 + travel_minutes(distance) + SAFETY_MINUTES
                 out.append(
                     Collision(
                         kind=KIND_OVERLAP,
@@ -659,7 +683,10 @@ def find_collisions(
                         other=other,
                         km=distance,
                         gap_minutes=gap,
-                        short_minutes=max(0, int(round(need - gap))),
+                        short_minutes=CR.shortfall_minutes(
+                            moved.moment, other.moment, distance, **timing
+                        ),
+                        same_hall=venue,
                     )
                 )
             continue

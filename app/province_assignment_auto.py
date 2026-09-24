@@ -199,6 +199,21 @@ async def judges(
 
     season_counts = await season_load(key)
 
+    # Obsada 2.0, runda 2: zdjęcie przy kafelku i mecze w miesiącach sezonu
+    # (rejestr przykryty świeżym terminarzem - ta sama podstawa, co równy
+    # podział Automatu i liczniki kandydatów).
+    # Świat propozycji jest w pamięci (`province_assignment_board._world`) -
+    # zdjęcia i liczniki sezonu bierzemy stamtąd, bez drugiego zapytania.
+    from app.province_assignment_board import _world
+
+    try:
+        world = await _world(key)
+        photos = dict(world.photos)
+        by_month = world.season.by_month()
+    except Exception:
+        logger.exception("obsada: zdjęcia i mecze w miesiącach %s", key)
+        photos, by_month = {}, {}
+
     today = _now().date()
     horizon = today + timedelta(days=UPCOMING_DAYS)
     preview_days = [today + timedelta(days=offset) for offset in range(PREVIEW_DAYS)]
@@ -244,6 +259,11 @@ async def judges(
                 "partner_name": (partner.name if partner else "") or None,
                 "partner_source": roster.pair_source.get(judge_id) if partner_id else None,
                 "mentor_ids": roster.mentors_of(judge_id),
+                "photo_url": photos.get(judge_id, ""),
+                # „2026-09" -> {field, table, future_field, future_table}, czas polski.
+                "load_by_month": {
+                    month: dict(counts) for month, counts in sorted((by_month.get(judge_id) or {}).items())
+                },
                 "blocked": sorted(
                     {
                         other
@@ -568,25 +588,28 @@ async def set_manual(payload: ManualRequest):
 # ───────────────────────────────── automat ─────────────────────────────────
 
 
-async def season_field_counts(key: str) -> dict[str, int]:
+async def fairness_inputs(key: str) -> dict[str, Any]:
     """
-    Mecze BOISKA w sezonie po numerze sędziego (rozegrane + obsadzone) - z nich
-    reguła par wie, czyja para ma wyraźnie więcej meczów niż inni.
+    Wejście równego podziału dla `build_context`: mecze boiska i stolika
+    w sezonie i w miesiącach (rejestr rozliczeń przykryty świeżym terminarzem,
+    `assignment_load`), mecze boiska dla reguły par i reguła kolizji okręgu.
 
-    Awaria licznika nie zatrzymuje Automatu: bez liczników pary mają
-    pierwszeństwo zawsze, a ślad zostaje w logu.
+    Awaria liczników nie zatrzymuje Automatu: układa wtedy bez równego podziału
+    z sezonu (liczą się przydziały z samego przebiegu), a ślad zostaje w logu.
     """
+    from app.assignment_load import load_season_book
+    from app.district_alerts import collision_rules_for
+
     try:
-        from app.province_settlements import season_load
-
-        counts = await season_load(key)
+        season, months = (await load_season_book(key)).counts()
     except Exception:
-        logger.exception("[auto] %s: licznik sezonu dla reguły par", key)
-        return {}
+        logger.exception("[auto] %s: liczniki sezonu dla równego podziału", key)
+        season, months = {}, {}
     return {
-        judge_id: int((item or {}).get("field", 0) or 0)
-        + int((item or {}).get("future_field", 0) or 0)
-        for judge_id, item in counts.items()
+        "season_field": {judge_id: int(item.get("field", 0)) for judge_id, item in season.items()},
+        "season_counts": season,
+        "month_counts": months,
+        "collision": await collision_rules_for(key),
     }
 
 
@@ -767,7 +790,7 @@ async def run_auto(payload: AutoRequest):
         load=load,
         only_judges=payload.judge_ids or None,
         inactive=inactive,
-        season_field=await season_field_counts(key),
+        **(await fairness_inputs(key)),
     )
     ctx.policy = policy
     plan = build_plan(needs, ctx, rounds=max(1, min(3, int(payload.rounds or 2))))
@@ -1163,7 +1186,7 @@ async def run_optimize(run_id: int, payload: OptimizeRequest):
         busy=busy,
         load=load,
         inactive=inactive_judges(key, start, roster),
-        season_field=await season_field_counts(key),
+        **(await fairness_inputs(key)),
     )
     plan = build_plan(needs, ctx, rounds=2)
 

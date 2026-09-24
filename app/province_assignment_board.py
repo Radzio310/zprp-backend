@@ -12,6 +12,9 @@ Trasy:
                               okręgu, z numerem wersji (`DRAFT_STALE`),
   - `POST /suggest`           „Obsadź automatycznie" jeden mecz - te same
                               reguły co Automat, bez zapisu i bez przebiegu,
+  - `POST /candidates`        kafelki kandydatów na mecz z oceną Automatu
+                              i stanem terminu (free / tight / off),
+  - `GET /distances`          kilometry sędziów okręgu do hali meczu,
   - `GET /zprp-history`       dziennik zapisów do ZPRP w partiach,
   - `GET /bootstrap`          cały sezon naraz z pamięci serwera (ETag, 304).
 
@@ -25,6 +28,7 @@ import asyncio
 import gzip
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -325,20 +329,88 @@ class SuggestRequest(BaseModel):
     exclude_judge_ids: list[str] = []
 
 
-async def _world(key: str):
-    """Sędziowie, kalendarze, odległości i liczniki sezonu - z pamięci, gdy świeże."""
+class CandidatesRequest(BaseModel):
+    province: str
+    match_id: str
+    pending: list[PendingChange] = []
+
+
+@dataclass
+class World:
+    """Świat propozycji okręgu trzymany w pamięci (`WORLD_TTL`, licznik wersji)."""
+
+    roster: Any
+    book: Any
+    #: Rejestr i terminarz sezonu - liczniki równego podziału (`assignment_load`).
+    season: Any
+    #: Reguła „zdąży z meczu na mecz" z ustawień powiadomień okręgu.
+    collision: Any
+    #: Zdjęcia sędziów: numer -> adres (pusto = brak).
+    photos: dict = field(default_factory=dict)
+
+    def counts(self, pending: Any = ()) -> tuple[dict, dict]:
+        return self.season.counts(pending=pending)
+
+    def season_field(self, pending: Any = ()) -> dict[str, int]:
+        """Mecze boiska w sezonie - z nich reguła par liczy „ciężkich"."""
+        season, _months = self.counts(pending)
+        return {judge_id: int(item.get("field", 0)) for judge_id, item in season.items()}
+
+
+async def judge_photos(key: str) -> dict[str, str]:
+    """
+    Zdjęcia sędziów okręgu: najpierw z listy okręgu (`province_judges`), braki
+    z ostatniego logowania w aplikacji (`login_records`). Pusto = brak zdjęcia.
+    """
+    from app.db import login_records, province_judges
+
+    out: dict[str, str] = {}
+    rows = await database.fetch_all(
+        select(province_judges.c.judge_id, province_judges.c.photo_url).where(
+            province_judges.c.province.in_(spellings(key) or [key])
+        )
+    )
+    ids = []
+    for row in rows:
+        judge_id = _s(row["judge_id"])
+        if not judge_id:
+            continue
+        ids.append(judge_id)
+        if _s(row["photo_url"]):
+            out.setdefault(judge_id, _s(row["photo_url"]))
+    missing = [judge_id for judge_id in ids if judge_id not in out]
+    if missing:
+        for row in await database.fetch_all(
+            select(login_records.c.judge_id, login_records.c.photo_url).where(
+                login_records.c.judge_id.in_(missing)
+            )
+        ):
+            if _s(row["photo_url"]):
+                out.setdefault(_s(row["judge_id"]), _s(row["photo_url"]))
+    return out
+
+
+async def _world(key: str) -> World:
+    """Sędziowie, kalendarze, odległości, liczniki sezonu i reguła kolizji - z pamięci, gdy świeże."""
     hit = C.get(key, None, "world", ttl=WORLD_TTL)
     if hit is not None:
         return hit[2]
     from app.assignment_context import load_roster
     from app.assignment_distances import load_book
-    from app.province_assignment_auto import season_field_counts
+    from app.assignment_load import load_season_book
+    from app.district_alerts import collision_rules_for
 
     built = C.version(key)
     roster = await load_roster(key)
     book = await load_book(key)
-    season_field = await season_field_counts(key)
-    world = (roster, book, season_field)
+    season = await load_season_book(key)
+    collision = await collision_rules_for(key)
+    try:
+        photos = await judge_photos(key)
+    except Exception:  # noqa: BLE001 - kafelek bez zdjęcia to nie awaria
+        logger.exception("[obsada] %s: zdjęcia sędziów", key)
+        photos = {}
+    world = World(roster=roster, book=book, season=season, collision=collision, photos=photos)
     C.put(key, None, "world", world, built_version=built)
     return world
 
@@ -357,20 +429,32 @@ def _apply_pending(state: dict, items: list[PendingChange], roster: Any) -> dict
     return out
 
 
-@router.post("/suggest", summary="Obsadź automatycznie jeden mecz - bez zapisu")
-async def suggest(payload: SuggestRequest):
-    """
-    Propozycja Automatu dla JEDNEGO meczu: te same twarde reguły (aktywni,
-    niedyspozycje, przerwy, kolizje dnia, pary wykluczone, młodzi, wymagania
-    stolika) i te same punkty (kilometry, miejscowi, pary i pary mentorskie,
-    równy podział). Zmiany z kolejki (`pending`) liczą się jak już zapisane -
-    zajmują gniazda i ludzi. Niczego nie zapisuje i nie zakłada przebiegu.
-    """
-    from app.assignment_context import build_context, inactive_judges, load_busy, need_from_state
-    from app.offtime_rules import match_moment
+def _normalized_pending(items: list[PendingChange]) -> list[dict]:
+    """Kolejka z gniazdami w słowniku modułu - do liczników sezonu."""
+    out = []
+    for item in items:
+        slot = B.normalize_slot(item.slot)
+        if slot and _s(item.match_id):
+            out.append({"match_id": _s(item.match_id), "slot": slot, "judge_id": _s(item.judge_id)})
+    return out
 
-    key = require_province(payload.province)
-    match_id = _s(payload.match_id)
+
+@dataclass
+class Prepared:
+    """Jeden mecz gotowy do oceny: stan z kolejką, potrzeby i świat Automatu."""
+
+    match_id: str
+    row: Any
+    state: dict
+    code: str
+    need: Any
+    ctx: Any
+    world: World
+    season_counts: dict
+    month_counts: dict
+
+
+async def _match_row(key: str, match_id: str):
     row = await database.fetch_one(
         select(province_matches).where(
             and_(
@@ -381,52 +465,39 @@ async def suggest(payload: SuggestRequest):
     )
     if row is None:
         raise HTTPException(404, "Nie znamy takiego meczu w terminarzu okręgu")
+    return row
 
-    roster, book, season_field = await _world(key)
+
+async def _prepare(
+    key: str,
+    match_id: str,
+    pending: list[PendingChange],
+    *,
+    slots: Optional[list[str]] = None,
+    exclude: Optional[set[str]] = None,
+) -> Prepared:
+    """
+    Wspólne przygotowanie „Obsadź automatycznie" i kandydatów na mecz:
+    kolejka (`pending`) liczy się jak już zapisana - zajmuje gniazda, terminy
+    i liczniki równego podziału w sezonie i w miesiącu.
+    """
+    from app.assignment_context import build_context, inactive_judges, load_busy, need_from_state
+    from app.collision_rules import venue_of
+    from app.offtime_rules import match_moment
+
+    row = await _match_row(key, match_id)
+    world = await _world(key)
+    roster, book = world.roster, world.book
     if not roster.judges:
         raise HTTPException(400, "Okręg nie ma jeszcze listy sędziów")
 
     state = state_dict(row["state_json"]) or {}
     code = _s(state.get("RozgrywkiCode") or row["match_code"])
-    wanted_slots = (
-        [slot for slot in (B.normalize_slot(item) for item in payload.slots) if slot]
-        if payload.slots
-        else None
-    )
-
-    def refuse_all(reason: str) -> dict:
-        needs = A.club_crew_needs(code)
-        slots = wanted_slots or [
-            *A.FIELD_SLOTS[: needs["field"]],
-            *A.TABLE_SLOTS[: needs["table"]],
-        ]
-        return {
-            "match_id": match_id,
-            "picks": [],
-            "skipped": [{"slot": slot, "reason": reason} for slot in slots],
-        }
-
-    if A.is_bye(state):
-        return refuse_all("pauza drużyny - tego meczu nie będzie")
-
-    own = [item for item in payload.pending if _s(item.match_id) == match_id]
+    own = [item for item in pending if _s(item.match_id) == match_id]
     patched = _apply_pending(state, own, roster)
-    need = need_from_state(match_id, patched, code, row["match_at"], roster, slots=wanted_slots)
-    if not need.field_needed and not need.table_needed:
-        return {"match_id": match_id, "picks": [], "skipped": []}
-    if not need.host_city:
-        # Ta sama zasada, co w Automacie: bez miasta hali nie ma kilometrów
-        # ani dojazdu - zgadywanie byłoby gorsze niż „uzupełnij halę".
-        return {
-            "match_id": match_id,
-            "picks": [],
-            "skipped": [
-                {"slot": slot, "reason": "mecz bez hali - najpierw uzupełnij halę"}
-                for slot in [*need.field_needed, *need.table_needed]
-            ],
-        }
+    need = need_from_state(match_id, patched, code, row["match_at"], roster, slots=slots)
 
-    # Równy podział i kolizje: mecze sędziów w oknie wokół tego meczu.
+    # Kolizje dnia: mecze sędziów w oknie wokół tego meczu.
     moment = match_moment(row["match_at"]) if row["match_at"] else None
     center = moment.date() if moment else _now().date()
     busy, load = await load_busy(
@@ -438,11 +509,12 @@ async def suggest(payload: SuggestRequest):
     busy = {judge_id: list(items) for judge_id, items in busy.items()}
 
     # Kolejka na INNYCH meczach: kto wchodzi, zajmuje termin; kto schodzi, zwalnia.
-    others = [item for item in payload.pending if _s(item.match_id) and _s(item.match_id) != match_id]
+    others = [item for item in pending if _s(item.match_id) and _s(item.match_id) != match_id]
     if others:
         other_rows = await database.fetch_all(
             select(
                 province_matches.c.match_id,
+                province_matches.c.match_code,
                 province_matches.c.match_at,
                 province_matches.c.state_json,
             ).where(
@@ -474,34 +546,101 @@ async def suggest(payload: SuggestRequest):
                             moment=match_moment(other["match_at"]) if other["match_at"] else None,
                             city=_s(other_state.get("Hala_miasto")),
                             match_id=_s(item.match_id),
+                            code=_s(other_state.get("RozgrywkiCode") or other["match_code"]),
+                            hall=_s(other_state.get("Hala_nazwa")),
+                            venue=venue_of(other_state),
                         )
                     )
                     load[judge_id] = int(load.get(judge_id, 0)) + 1
 
     # Brakujące odległości do tej hali - na krótkiej smyczy, bo panel czeka.
-    try:
-        from app.assignment_context import distance_pairs
-        from app.assignment_distances import fill_missing
+    if need.host_city:
+        try:
+            from app.assignment_context import distance_pairs
+            from app.assignment_distances import fill_missing
 
-        await asyncio.wait_for(
-            fill_missing(book, distance_pairs([need], roster), budget=SUGGEST_GOOGLE_BUDGET),
-            timeout=SUGGEST_GOOGLE_SECONDS,
-        )
-    except Exception:  # noqa: BLE001 - brak odległości to kara punktowa, nie błąd
-        logger.info("suggest %s/%s: odległości bez dopytania Google", key, match_id)
+            await asyncio.wait_for(
+                fill_missing(book, distance_pairs([need], roster), budget=SUGGEST_GOOGLE_BUDGET),
+                timeout=SUGGEST_GOOGLE_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 - brak odległości to kara punktowa, nie błąd
+            logger.info("obsada %s/%s: odległości bez dopytania Google", key, match_id)
 
+    season_counts, month_counts = world.counts(_normalized_pending(pending))
     inactive = inactive_judges(key, moment or _now(), roster)
-    excluded = {_s(item) for item in payload.exclude_judge_ids if _s(item)}
     ctx = build_context(
         roster,
         book,
         busy=busy,
         load=load,
-        inactive=set(inactive) | excluded,
-        season_field=season_field,
+        inactive=set(inactive) | set(exclude or ()),
+        season_field={judge_id: int(item.get("field", 0)) for judge_id, item in season_counts.items()},
+        season_counts=season_counts,
+        month_counts=month_counts,
+        collision=world.collision,
     )
-    plan = build_plan([need], ctx)
+    return Prepared(
+        match_id=match_id,
+        row=row,
+        state=state,
+        code=code,
+        need=need,
+        ctx=ctx,
+        world=world,
+        season_counts=season_counts,
+        month_counts=month_counts,
+    )
 
+
+@router.post("/suggest", summary="Obsadź automatycznie jeden mecz - bez zapisu")
+async def suggest(payload: SuggestRequest):
+    """
+    Propozycja Automatu dla JEDNEGO meczu: te same twarde reguły (aktywni,
+    niedyspozycje, przerwy, kolizje dnia, pary wykluczone, młodzi, wymagania
+    stolika) i te same punkty (równy podział w sezonie i w miesiącu, kilometry,
+    miejscowi, pary i pary mentorskie). Zmiany z kolejki (`pending`) liczą się
+    jak już zapisane - zajmują gniazda, ludzi i liczniki. Niczego nie zapisuje
+    i nie zakłada przebiegu.
+    """
+    key = require_province(payload.province)
+    match_id = _s(payload.match_id)
+    wanted_slots = (
+        [slot for slot in (B.normalize_slot(item) for item in payload.slots) if slot]
+        if payload.slots
+        else None
+    )
+
+    # Pauza drużyny rozpoznana przed całym światem - szybka odpowiedź.
+    row = await _match_row(key, match_id)
+    state = state_dict(row["state_json"]) or {}
+    code = _s(state.get("RozgrywkiCode") or row["match_code"])
+    if A.is_bye(state):
+        needs = A.club_crew_needs(code)
+        slots = wanted_slots or [*A.FIELD_SLOTS[: needs["field"]], *A.TABLE_SLOTS[: needs["table"]]]
+        return {
+            "match_id": match_id,
+            "picks": [],
+            "skipped": [{"slot": slot, "reason": "pauza drużyny - tego meczu nie będzie"} for slot in slots],
+        }
+
+    excluded = {_s(item) for item in payload.exclude_judge_ids if _s(item)}
+    prepared = await _prepare(key, match_id, payload.pending, slots=wanted_slots, exclude=excluded)
+    need = prepared.need
+    if not need.field_needed and not need.table_needed:
+        return {"match_id": match_id, "picks": [], "skipped": []}
+    if not need.host_city:
+        # Ta sama zasada, co w Automacie: bez miasta hali nie ma kilometrów
+        # ani dojazdu - zgadywanie byłoby gorsze niż „uzupełnij halę".
+        return {
+            "match_id": match_id,
+            "picks": [],
+            "skipped": [
+                {"slot": slot, "reason": "mecz bez hali - najpierw uzupełnij halę"}
+                for slot in [*need.field_needed, *need.table_needed]
+            ],
+        }
+
+    plan = build_plan([need], prepared.ctx)
     return {
         "match_id": match_id,
         "picks": [
@@ -516,6 +655,124 @@ async def suggest(payload: SuggestRequest):
         ],
         "skipped": [{"slot": item.slot, "reason": item.reason} for item in plan.gaps],
     }
+
+
+def _km_value(km: Optional[float]) -> Optional[float]:
+    return None if km is None else round(float(km), 1)
+
+
+@router.post("/candidates", summary="Kandydaci na mecz - kafelki z oceną Automatu")
+async def candidates(payload: CandidatesRequest):
+    """
+    Wszyscy AKTYWNI sędziowie okręgu jako kandydaci do jednego meczu - z tą
+    samą oceną co Automat (równy podział w sezonie i w miesiącu, kilometry,
+    pary, pierwszeństwo „Stolikowych" przy stoliku okręgowym) i ze stanem
+    terminu: `off` (niedyspozycja, przerwa, kolizja - z godzinami), `tight`
+    (ten sam dzień, zdąży), `free`. `pending` jak w `/suggest`. Bez zapisu.
+    """
+    from app.assignment_auto import describe_candidates
+    from app.assignment_board_rules import display_name
+
+    key = require_province(payload.province)
+    match_id = _s(payload.match_id)
+    prepared = await _prepare(key, match_id, payload.pending)
+    need, ctx, world = prepared.need, prepared.ctx, prepared.world
+    note = None
+    if A.is_bye(prepared.state):
+        note = "Pauza drużyny - tego meczu nie będzie."
+    elif not need.host_city:
+        note = "Mecz bez hali - kilometry i dojazd policzymy po uzupełnieniu hali."
+
+    def off_reason(judge_id: str, moment: Any) -> str:
+        from app.district_alert_rules import offtime_text
+        from app.offtime_rules import blocking_offtime
+
+        off = blocking_offtime(world.roster.offtimes.get(judge_id, ()), moment) if moment else None
+        return offtime_text(off) if off is not None else ""
+
+    views = describe_candidates(ctx, need, off_reason=off_reason)
+    month = need.month
+    items = []
+    for view in views:
+        season = prepared.season_counts.get(view.judge_id) or {}
+        months = (prepared.month_counts.get(view.judge_id) or {}).get(month) or {} if month else {}
+        items.append(
+            {
+                "judge_id": view.judge_id,
+                "name": view.name,
+                "display_name": display_name(view.name),
+                "city": view.city,
+                "photo_url": world.photos.get(view.judge_id, ""),
+                "km": _km_value(view.km),
+                "field": int(season.get("field", 0)),
+                "table": int(season.get("table", 0)),
+                "month_field": int(months.get("field", 0)),
+                "month_table": int(months.get("table", 0)),
+                "status": view.status,
+                "reason": view.reason,
+                "why": view.why,
+                "fits": view.fits,
+                "rank": view.rank,
+                "score": view.score,
+            }
+        )
+    return {
+        "match_id": match_id,
+        "month": month or None,
+        "kind": "field" if (need.field_needed or not need.table_needed) else "table",
+        "note": note,
+        "items": items,
+    }
+
+
+#: Ile sekund żyje lista kilometrów do jednego miasta.
+DISTANCES_TTL = 600
+
+
+@router.get("/distances", summary="Kilometry sędziów okręgu do meczu")
+async def distances(province: str = Query(...), match_id: str = Query(...)):
+    """
+    Odległość każdego sędziego okręgu do hali meczu: tabela odległości okręgu,
+    potem zapamiętane pary, a Google tylko dopełnia braki (i zapisuje je).
+    Wynik trzymany w pamięci per miasto (i dzień - czasowa zmiana miasta
+    sędziego). `null` = nie znamy odległości.
+    """
+    from app.offtime_rules import match_moment
+
+    key = require_province(province)
+    match_id = _s(match_id)
+    row = await _match_row(key, match_id)
+    state = state_dict(row["state_json"]) or {}
+    city = _s(state.get("Hala_miasto"))
+    moment = match_moment(row["match_at"]) if row["match_at"] else None
+    day = moment.date() if moment else None
+    world = await _world(key)
+    roster, book = world.roster, world.book
+    if not city:
+        return {"match_id": match_id, "city": "", "km": {judge_id: None for judge_id in roster.judges}}
+
+    cache_key = f"{city.lower()}|{day.isoformat() if day else ''}"
+    hit = C.get(key, cache_key, "distances", ttl=DISTANCES_TTL)
+    if hit is not None:
+        return {"match_id": match_id, "city": city, "km": hit[2]}
+
+    built = C.version(key)
+    origins = {roster.city_of(judge_id, day) for judge_id in roster.judges}
+    pairs = [(origin, city) for origin in sorted(item for item in origins if item)]
+    try:
+        from app.assignment_distances import fill_missing
+
+        await asyncio.wait_for(
+            fill_missing(book, pairs, budget=SUGGEST_GOOGLE_BUDGET), timeout=SUGGEST_GOOGLE_SECONDS
+        )
+    except Exception:  # noqa: BLE001 - brak odległości to null, nie błąd
+        logger.info("obsada %s/%s: kilometry bez dopytania Google", key, match_id)
+    km = {}
+    for judge_id in roster.judges:
+        origin = roster.city_of(judge_id, day)
+        km[judge_id] = _km_value(book.km(origin, city)) if origin else None
+    C.put(key, cache_key, "distances", km, built_version=built)
+    return {"match_id": match_id, "city": city, "km": km}
 
 
 # ──────────────────────────── dziennik zapisów ZPRP ────────────────────────────

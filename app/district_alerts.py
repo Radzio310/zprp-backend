@@ -40,6 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app import district_alert_rules as R
+from app import collision_rules as CR
 from app import district_alert_emails as E
 from app.beach.brevo_email import EmailDeliveryError
 from app.beach.email_config import get_email_config
@@ -162,6 +163,22 @@ def _config_of(row: Optional[dict]) -> dict:
     return R.normalize_config(_json((row or {}).get("config"), {}))
 
 
+async def collision_rules_for(province: Any) -> CR.CollisionRules:
+    """
+    Reguła „zdąży z meczu na mecz" okręgu - sekcja `timing` ustawień
+    powiadomień. Czyta ją też Automat obsady; bez zapisu (albo przy awarii
+    odczytu) wartości domyślne, a ślad awarii idzie do logu.
+    """
+    key = _canonical(province)
+    if not key:
+        return CR.CollisionRules()
+    try:
+        return CR.rules_from_config(_config_of(await _row(key)).get("timing"))
+    except Exception:  # noqa: BLE001 - domyślna reguła jest bezpieczna
+        logger.exception("[district-alerts] %s: ustawienia czasu meczów", key)
+        return CR.CollisionRules()
+
+
 async def _finish(key: str, *, status: str, error: Optional[str] = None, sent: bool = False) -> None:
     from sqlalchemy import update
 
@@ -223,40 +240,77 @@ async def _with_app(judge_ids: Iterable[str]) -> set[str]:
     return {wanted[_id_key(row["judge_id"])] for row in rows if _id_key(row["judge_id"]) in wanted}
 
 
-async def _verified_emails(judge_ids: Iterable[str]) -> dict[str, str]:
+async def _judge_email_detail(
+    key: str,
+    judge_ids: Iterable[str],
+    names: Optional[dict[str, str]] = None,
+) -> dict[str, tuple[str, str]]:
     """
-    Potwierdzone adresy sędziów z kont ProEla (numer DOWIEDZIONY logowaniem).
+    Adresy sędziów do maili okręgu: numer -> (adres, źródło).
 
-    Adres niepotwierdzony albo zablokowany przez dostawcę nie dostaje nic -
-    lepiej nie napisać, niż pisać na cudzą skrzynkę.
+    Najpierw profil logowania w aplikacji (`login_records`), potem kontakty
+    sędziów z ekranu „Kontakty" (`json_files` / `kontakty`) po okręgu, imieniu
+    i nazwisku - reguła w `judge_contact_rules`. Konta ProEla NIE są już
+    źródłem (decyzja użytkownika z 24.09.2026).
     """
     from sqlalchemy import select
 
-    from app.db import database, proel_users
+    from app import judge_contact_rules as JC
+    from app.db import database, json_files, login_records, province_judges
+    from app.settlement_province import spellings
 
     ids = [_s(item) for item in judge_ids if _s(item)]
     if not ids:
         return {}
-    wanted = {_id_key(item): item for item in ids}
+    people: dict[str, str] = {}
     rows = await database.fetch_all(
-        select(
-            proel_users.c.judge_id,
-            proel_users.c.email,
-            proel_users.c.email_verified,
-            proel_users.c.email_delivery_blocked,
-            proel_users.c.judge_id_verified_at,
-        ).where(proel_users.c.judge_id.is_not(None))
+        select(province_judges.c.judge_id, province_judges.c.full_name).where(
+            province_judges.c.province.in_(spellings(key) or [key])
+        )
     )
-    out: dict[str, str] = {}
+    wanted = {_id_key(item): item for item in ids}
     for row in rows:
         own = wanted.get(_id_key(row["judge_id"]))
-        email = _s(row["email"])
-        if not own or not email or not row["email_verified"] or row["email_delivery_blocked"]:
-            continue
-        if row["judge_id_verified_at"] is None:
-            continue
-        out.setdefault(own, email)
-    return out
+        if own and _s(row["full_name"]):
+            people.setdefault(own, _s(row["full_name"]))
+    for judge_id in ids:
+        if judge_id not in people and _s((names or {}).get(judge_id)):
+            people[judge_id] = _s((names or {}).get(judge_id))
+        people.setdefault(judge_id, "")
+
+    variants = sorted({v for item in ids for v in (item, _id_key(item)) if v})
+    login_rows: list[dict] = []
+    try:
+        login_rows = [
+            dict(row)
+            for row in await database.fetch_all(
+                select(login_records).where(login_records.c.judge_id.in_(variants))
+            )
+        ]
+    except Exception:  # noqa: BLE001 - bez profili zostają kontakty
+        logger.exception("[district-alerts] %s: profile logowania", key)
+    contacts: Any = []
+    try:
+        row = await database.fetch_one(select(json_files.c.content).where(json_files.c.key == "kontakty"))
+        contacts = _json(row["content"], []) if row is not None else []
+    except Exception:  # noqa: BLE001 - bez kontaktów zostają profile
+        logger.exception("[district-alerts] %s: kontakty sędziów", key)
+    return JC.resolve_emails(
+        people,
+        login_rows=login_rows,
+        contacts=contacts,
+        province=key,
+        same_judge=lambda a, b: _id_key(a) == _id_key(b),
+    )
+
+
+async def _judge_emails(
+    key: str,
+    judge_ids: Iterable[str],
+    names: Optional[dict[str, str]] = None,
+) -> dict[str, str]:
+    """Numer sędziego -> adres (patrz `_judge_email_detail`)."""
+    return {judge_id: email for judge_id, (email, _source) in (await _judge_email_detail(key, judge_ids, names)).items()}
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +587,8 @@ async def _suggestions(key: str, match_ids: list[str]) -> dict[str, dict]:
 
     out: dict[str, dict] = {}
     try:
-        roster, book, season_field = await _world(key)
+        world = await _world(key)
+        roster, book = world.roster, world.book
     except Exception:  # noqa: BLE001 - bez propozycji mail i tak ma sens
         logger.exception("[district-alerts] świat Automatu %s", key)
         return {mid: {"kind": "", "picks": [], "note": "Automat chwilowo niedostępny."} for mid in match_ids}
@@ -574,7 +629,18 @@ async def _suggestions(key: str, match_ids: list[str]) -> dict[str, dict]:
     except Exception:  # noqa: BLE001 - brak odległości to kara punktowa, nie błąd
         logger.info("[district-alerts] %s: odległości bez dopytania Google", key)
     inactive = inactive_judges(key, _now(), roster)
-    ctx = build_context(roster, book, busy=busy, load=load, inactive=inactive, season_field=season_field)
+    season_counts, month_counts = world.counts()
+    ctx = build_context(
+        roster,
+        book,
+        busy=busy,
+        load=load,
+        inactive=inactive,
+        season_field={judge_id: int(item.get("field", 0)) for judge_id, item in season_counts.items()},
+        season_counts=season_counts,
+        month_counts=month_counts,
+        collision=world.collision,
+    )
     for need in needs:
         kind = "field" if need.field_needed else "table"
         crew = need.crew_field if kind == "field" else need.crew_table
@@ -701,7 +767,7 @@ async def run_unassigned(key: str, cfg: dict) -> tuple[str, Optional[str], bool]
     error: Optional[str] = None
     mailed = [hit for hit in hits if hit.email]
     if section["email"] and mailed:
-        bcc = list((await _verified_emails(manager_ids)).values()) if section["email_managers"] else []
+        bcc = list((await _judge_emails(key, manager_ids)).values()) if section["email_managers"] else []
         to = list(section["emails"])
         if to or bcc:
             suggestions = await _suggestions(key, [hit.match_id for hit in mailed])
@@ -785,6 +851,7 @@ def _info(row: Any, state: dict) -> R.MatchInfo:
         hall=_s(state.get("Hala_nazwa")),
         host=_s(state.get("ID_zespoly_gosp_ZespolNazwa")),
         guest=_s(state.get("ID_zespoly_gosc_ZespolNazwa")),
+        venue=CR.venue_of(state),
     )
 
 
@@ -834,6 +901,7 @@ async def _collisions_for(
     rows: list,
     moved_ids: dict[str, Optional[datetime]],
     kinds: Iterable[str],
+    rules: Optional[CR.CollisionRules] = None,
 ) -> list[R.Collision]:
     """Kolizje sędziów z obsady meczów `moved_ids` (numer meczu -> poprzedni termin)."""
     from app.assignment_context import load_roster
@@ -869,6 +937,7 @@ async def _collisions_for(
                     book.km,
                     kinds,
                     previous=R.local(previous) if previous else None,
+                    rules=rules,
                 )
             )
     return out
@@ -888,10 +957,13 @@ def _collision_cards(items: list[R.Collision], *, personal: bool = False) -> lis
             headline = headline[:1].upper() + headline[1:]
             detail = ""
             if item.kind == R.KIND_OVERLAP and item.other is not None:
+                if item.same_hall:
+                    missing = f", mecze w tej samej hali nakładają się o ok. {item.short_minutes} min." if item.short_minutes else "."
+                else:
+                    missing = f", brakuje ok. {item.short_minutes} min na mecz, dojazd i zapas." if item.short_minutes else "."
                 detail = (
                     f"Tamten mecz: {item.other.code} {item.other.teams}. "
-                    f"Między początkami {item.gap_minutes // 60} h {item.gap_minutes % 60:02d} min"
-                    + (f", brakuje ok. {item.short_minutes} min na mecz, dojazd i zapas." if item.short_minutes else ".")
+                    f"Między początkami {item.gap_minutes // 60} h {item.gap_minutes % 60:02d} min" + missing
                 )
             elif item.kind == R.KIND_CITY and item.other is not None:
                 detail = f"Tamten mecz: {item.other.code} {item.other.teams}, {item.other.hall or item.other.city}."
@@ -986,7 +1058,8 @@ async def run_collisions(key: str, cfg: dict) -> tuple[str, Optional[str], bool]
             continue
         moved[match_id] = previous
 
-    found = await _collisions_for(key, list(rows), moved, section["kinds"]) if moved else []
+    rules = CR.rules_from_config(cfg.get("timing"))
+    found = await _collisions_for(key, list(rows), moved, section["kinds"], rules) if moved else []
     fresh = [
         item
         for item in found
@@ -1006,7 +1079,7 @@ async def run_collisions(key: str, cfg: dict) -> tuple[str, Optional[str], bool]
     province_display = display(key)
     error: Optional[str] = None
     if section["email"]:
-        bcc = list((await _verified_emails(manager_ids)).values()) if section["email_managers"] else []
+        bcc = list((await _judge_emails(key, manager_ids)).values()) if section["email_managers"] else []
         to = list(section["emails"])
         if to or bcc:
             subject, html_body, text_body = E.build_collision_message(
@@ -1017,7 +1090,11 @@ async def run_collisions(key: str, cfg: dict) -> tuple[str, Optional[str], bool]
                 subject=subject, html_body=html_body, text_body=text_body,
             )
         if section["email_judge"]:
-            emails = await _verified_emails({item.judge_id for item in fresh})
+            emails = await _judge_emails(
+                key,
+                {item.judge_id for item in fresh},
+                {item.judge_id: item.judge_name for item in fresh},
+            )
             for judge_id, email in emails.items():
                 own_items = [item for item in fresh if item.judge_id == judge_id]
                 subject, html_body, text_body = E.build_collision_message(
@@ -1309,7 +1386,7 @@ async def _settings_json(key: str, row: Optional[dict]) -> dict:
     managers = await _managers(key)
     ids = [item["judge_id"] for item in managers]
     with_app = await _with_app(ids)
-    with_email = await _verified_emails(ids)
+    with_email = await _judge_email_detail(key, ids)
     return {
         "province": key,
         "display": display(key),
@@ -1318,9 +1395,30 @@ async def _settings_json(key: str, row: Optional[dict]) -> dict:
         "thresholds": list(R.THRESHOLDS),
         "kinds": [{"key": kind, "label": R.KIND_LABELS[kind]} for kind in R.KINDS],
         "managers": [
-            {**item, "app": item["judge_id"] in with_app, "email": item["judge_id"] in with_email}
+            {
+                **item,
+                "app": item["judge_id"] in with_app,
+                "email": item["judge_id"] in with_email,
+                # Skąd adres: "login" (profil w aplikacji) albo "contacts" (Kontakty).
+                "email_source": with_email[item["judge_id"]][1] if item["judge_id"] in with_email else None,
+            }
             for item in managers
         ],
+        "email_summary": {
+            "with_email": sum(1 for item in managers if item["judge_id"] in with_email),
+            "total": len(managers),
+            "sources": ["login", "contacts"],
+        },
+        # Reguła „zdąży z meczu na mecz" (sekcja `timing`) - etykiety i granice pól.
+        "timing_options": {
+            "categories": [
+                {"key": k, "label": CR.CATEGORY_LABELS[k], "default": CR.DEFAULT_DURATIONS[k]}
+                for k in CR.CATEGORY_KEYS
+            ],
+            "travel_kmh": {"default": CR.DEFAULT_TRAVEL_KMH, "min": CR.TRAVEL_KMH_RANGE[0], "max": CR.TRAVEL_KMH_RANGE[1]},
+            "margin_minutes": {"default": CR.DEFAULT_MARGIN_MINUTES, "min": CR.MARGIN_RANGE[0], "max": CR.MARGIN_RANGE[1]},
+            "duration": {"min": CR.DURATION_RANGE[0], "max": CR.DURATION_RANGE[1]},
+        },
         "facets": await _facets(key),
         "recent": await _recent(key),
         "mail_configured": bool(cfg.brevo_api_key and cfg.from_email),
@@ -1383,6 +1481,11 @@ async def put_settings(body: SettingsRequest, payload: dict = Depends(get_jwt_pa
     if others:
         # Wiersz spod starej pisowni przeszedł pod klucz kanoniczny.
         await database.execute(delete(T).where(T.c.province.in_(others)))
+    if clean.get("timing") != before.get("timing"):
+        # Czasy meczów i dojazdu czyta też Automat - jego świat do przebudowy.
+        from app.assignment_board_cache import bump
+
+        bump(key)
     for alert in R.ALERTS:
         if before[alert]["enabled"] and not clean[alert]["enabled"]:
             # Wyłączony alert nie wysyła już nic, także z kolejki ciszy nocnej.
