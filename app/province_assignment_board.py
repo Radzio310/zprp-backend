@@ -670,7 +670,7 @@ async def candidates(payload: CandidatesRequest):
     terminu: `off` (niedyspozycja, przerwa, kolizja - z godzinami), `tight`
     (ten sam dzień, zdąży), `free`. `pending` jak w `/suggest`. Bez zapisu.
     """
-    from app.assignment_auto import describe_candidates
+    from app.assignment_auto import FIELD, TABLE, describe_candidates
     from app.assignment_board_rules import display_name
 
     key = require_province(payload.province)
@@ -691,6 +691,12 @@ async def candidates(payload: CandidatesRequest):
         return offtime_text(off) if off is not None else ""
 
     views = describe_candidates(ctx, need, off_reason=off_reason)
+    # Osobna kolejność dla zakładek „Boisko" i „Stolik" - ta sama ocena, co
+    # w Automacie, ale liczona dla danej roli.
+    rank_by_kind = {
+        kind: {view.judge_id: view.rank for view in describe_candidates(ctx, need, off_reason=off_reason, kind=kind)}
+        for kind in (FIELD, TABLE)
+    }
     month = need.month
     items = []
     for view in views:
@@ -713,6 +719,8 @@ async def candidates(payload: CandidatesRequest):
                 "why": view.why,
                 "fits": view.fits,
                 "rank": view.rank,
+                "rank_field": rank_by_kind[FIELD].get(view.judge_id, view.rank),
+                "rank_table": rank_by_kind[TABLE].get(view.judge_id, view.rank),
                 "score": view.score,
             }
         )

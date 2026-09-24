@@ -942,6 +942,7 @@ def describe_candidates(
     need: MatchNeed,
     *,
     off_reason: Optional[Callable[[str, Optional[datetime]], str]] = None,
+    kind: Optional[str] = None,
 ) -> list[CandidateView]:
     """
     Wszyscy sędziowie kontekstu jako kandydaci do tego meczu, od najlepszego.
@@ -950,8 +951,12 @@ def describe_candidates(
     kilometrami i pierwszeństwem „Stolikowych" przy stoliku okręgowym) dla
     grupy, której meczowi brakuje (najpierw boisko, potem stolik). `off_reason`
     opisuje niedyspozycję słowami z kalendarza („Praca, 12:00-18:00").
+    `kind` wymusza ocenę dla boiska albo stolika - zakładki kandydatów
+    „Boisko" i „Stolik" mają własną kolejkę (stolik okręgowy: najpierw
+    „Stolikowi"), niezależnie od tego, czego meczowi brakuje najpierw.
     """
-    kind = FIELD if (need.field_needed or not need.table_needed) else TABLE
+    if kind not in (FIELD, TABLE):
+        kind = FIELD if (need.field_needed or not need.table_needed) else TABLE
     group_crew = {FIELD: list(need.crew_field), TABLE: list(need.crew_table)}
     loads = loads_of(ctx)
     badge_first = kind == TABLE and table_badge_first(need.code)
