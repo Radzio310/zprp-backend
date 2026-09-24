@@ -722,6 +722,10 @@ async def candidates(payload: CandidatesRequest):
                 "rank_field": rank_by_kind[FIELD].get(view.judge_id, view.rank),
                 "rank_table": rank_by_kind[TABLE].get(view.judge_id, view.rank),
                 "score": view.score,
+                # Rola w obsadzie: „tylko stolik (ZPRP)" itp. - twarda reguła
+                # Automatu; ręczny wybór w panelu pokazuje ją ostrzeżeniem.
+                "role_note": view.role_note or None,
+                "table_only": "tylko stolik" in (view.role_note or ""),
             }
         )
     return {

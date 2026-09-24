@@ -248,6 +248,15 @@ class Policy:
             if key[1]:
                 self.team_counts[key] = self.team_counts.get(key, 0) + 1
 
+    def note_unassigned(self, judge_id: str, need: Any, *, kind: str) -> None:
+        """Wyrównanie w Automacie zdjęło sędziego z meczu - licznik drużyny maleje."""
+        if kind != "field":
+            return
+        for name in {self._need(need, "host", ""), self._need(need, "guest", "")}:
+            key = (judge_id, team_key(name))
+            if key[1] and self.team_counts.get(key, 0) > 0:
+                self.team_counts[key] -= 1
+
     def summary(self) -> List[dict]:
         return [
             {"key": key, "mode": rule["mode"], "strength": rule["strength"], "params": rule["params"]}

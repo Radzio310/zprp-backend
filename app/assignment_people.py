@@ -102,6 +102,9 @@ class Judge:
     preferred_days: frozenset[int] = frozenset()
     #: Ile meczów ma już w oknie - do równego podziału.
     load: int = 0
+    #: „Rola w obsadzie" ustawiona ręcznie przez okręg: "both" / "table" /
+    #: "field", a pusto = według ról z listy ZPRP (`roles`).
+    assign_role: str = ""
 
     def has_badge(self, name: str) -> bool:
         return fold(name) in self.badges
@@ -146,6 +149,7 @@ def make_judge(
     needs_experienced: bool = False,
     preferred_days: Iterable[int] = (),
     load: int = 0,
+    assign_role: Any = "",
 ) -> Judge:
     return Judge(
         judge_id=str(judge_id or "").strip(),
@@ -153,11 +157,101 @@ def make_judge(
         city=str(city or "").strip(),
         letters=frozenset(letter_key(letter) for letter in letters if str(letter or "").strip()),
         badges=frozenset(fold(badge) for badge in badges if str(badge or "").strip()),
-        roles=frozenset(str(role or "").strip() for role in roles if str(role or "").strip()),
+        roles=normalize_roles(roles),
         needs_experienced=bool(needs_experienced),
         preferred_days=frozenset(int(day) for day in preferred_days if day is not None),
         load=int(load or 0),
+        assign_role=normalize_assign_role(assign_role),
     )
+
+
+# ───────────────────────── rola w obsadzie ─────────────────────────
+#
+# Zgłoszenie z 25.09.2026: Automat stawiał na boisku sędziów, którzy dziś
+# robią już tylko stolik (lista ZPRP „Sędziowie i Delegaci" ma przy nich samo
+# „Stolikowy"). Reguła - TWARDA, bo to nie kwestia punktów:
+#   - ręczne ustawienie okręgu wygrywa ("table" = tylko stolik, "field" =
+#     tylko boisko, "both" = bez ograniczeń - także wbrew liście ZPRP),
+#   - bez ustawienia: role ZPRP ZNANE i bez „Sędzia" = nie na boisko,
+#   - role nieznane (brak wpisu z synchronizacji, pusta kolumna) = bez
+#     ograniczeń - „nie wiem" nie odbiera sędziemu meczów.
+
+ROLE_REFEREE = "sedzia"
+ROLE_DELEGATE = "delegat"
+ROLE_TABLE = "stolikowy"
+KNOWN_ROLES = (ROLE_REFEREE, ROLE_DELEGATE, ROLE_TABLE)
+
+ASSIGN_ZPRP = ""
+ASSIGN_BOTH = "both"
+ASSIGN_TABLE = "table"
+ASSIGN_FIELD = "field"
+ASSIGN_ROLES = (ASSIGN_ZPRP, ASSIGN_BOTH, ASSIGN_TABLE, ASSIGN_FIELD)
+
+
+def normalize_roles(roles: Iterable[Any]) -> frozenset[str]:
+    """Role z listy ZPRP w jednym zapisie: „Sędzia" i „sedzia" to to samo."""
+    out = set()
+    for role in roles or ():
+        key = fold(role)
+        if key.startswith("sedzia"):
+            out.add(ROLE_REFEREE)
+        elif key.startswith("delegat"):
+            out.add(ROLE_DELEGATE)
+        elif key.startswith("stolik"):
+            out.add(ROLE_TABLE)
+    return frozenset(out)
+
+
+def normalize_assign_role(value: Any) -> str:
+    """Ręczna rola w obsadzie; wszystko spoza słownika = według ZPRP."""
+    text = fold(value)
+    return text if text in ASSIGN_ROLES else ASSIGN_ZPRP
+
+
+def zprp_field_allowed(roles: Iterable[Any]) -> Optional[bool]:
+    """Czy lista ZPRP pozwala na boisko: True / False, None = nie wiemy."""
+    known = normalize_roles(roles)
+    if not known:
+        return None
+    return ROLE_REFEREE in known
+
+
+def zprp_role_label(roles: Iterable[Any]) -> str:
+    """Krótki opis ról ZPRP do panelu: „boisko i stolik", „tylko stolik", …"""
+    known = normalize_roles(roles)
+    if not known:
+        return ""
+    if ROLE_REFEREE in known:
+        return "boisko i stolik"
+    if ROLE_TABLE in known:
+        return "tylko stolik"
+    return "tylko delegat"
+
+
+def effective_assign_role(judge: Judge) -> str:
+    """Rola, której pilnuje Automat: "both" / "table" / "field"."""
+    if judge.assign_role in (ASSIGN_BOTH, ASSIGN_TABLE, ASSIGN_FIELD):
+        return judge.assign_role
+    allowed = zprp_field_allowed(judge.roles)
+    return ASSIGN_TABLE if allowed is False else ASSIGN_BOTH
+
+
+def role_refusal(judge: Judge, kind: str) -> Optional[str]:
+    """
+    Powód, dla którego sędzia nie może stanąć w tej grupie gniazd
+    ("field" / "table"), albo None. Zawsze z wyjaśnieniem, skąd reguła.
+    """
+    if kind == "field":
+        if judge.assign_role == ASSIGN_TABLE:
+            return "tylko stolik (ustawienie okręgu)"
+        if judge.assign_role in (ASSIGN_BOTH, ASSIGN_FIELD):
+            return None
+        if zprp_field_allowed(judge.roles) is False:
+            return "tylko stolik (ZPRP)" if ROLE_TABLE in judge.roles else "bez roli sędziego w ZPRP"
+        return None
+    if kind == "table" and judge.assign_role == ASSIGN_FIELD:
+        return "tylko boisko (ustawienie okręgu)"
+    return None
 
 
 def table_rule(code: Any) -> dict[str, int]:

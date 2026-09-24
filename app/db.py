@@ -974,6 +974,9 @@ province_judge_settings = Table(
         server_default=text("'[]'"),
     ),
     Column("note", String, nullable=True),
+    # Rola w obsadzie ustawiona przez okręg (25.09.2026): "both" / "table" /
+    # "field"; pusto = według ról z listy ZPRP (`assignment_people.role_refusal`).
+    Column("assign_role", String, nullable=True),
     Column("updated_by", String, nullable=True),
     Column(
         "updated_at",
@@ -4135,6 +4138,11 @@ from app.assignment_board_tables import define_tables as _define_board_tables
     province_zprp_write_journal,
 ) = _define_board_tables(metadata)
 
+# Role sędziów z listy ZPRP (Sędzia / Delegat / Stolikowy) dla Automatu obsady
+# - schemat w osobnym module.
+from app.assignment_role_tables import define_tables as _define_role_tables
+(province_judge_zprp_roles,) = _define_role_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
@@ -4190,6 +4198,11 @@ with engine.connect() as _conn:
     # (18.09.2026). Tabela istnieje na produkcji, więc `create_all` kolumny nie doda.
     _conn.execute(
         text("ALTER TABLE province_club_assignment ADD COLUMN IF NOT EXISTS table_by_club_since date")
+    )
+    # Rola w obsadzie (25.09.2026): tabela istnieje na produkcji, więc
+    # `create_all` kolumny nie doda.
+    _conn.execute(
+        text("ALTER TABLE province_judge_settings ADD COLUMN IF NOT EXISTS assign_role varchar")
     )
     # Tablica Komisji (16.09.2026): kosz, autorstwo i skład z odznaki. Tabele
     # istnieją na produkcji, więc `create_all` tych kolumn nie dołoży.

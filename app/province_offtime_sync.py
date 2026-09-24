@@ -390,6 +390,69 @@ async def persist_zprp_pairs(province: str, officials: Dict[str, Dict[str, Any]]
     return {"pairs": len(wanted) // 2, "added": len(to_add), "removed": len(to_drop)}
 
 
+async def persist_zprp_roles(province: str, officials: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
+    """
+    Role z listy oficjeli zapisane w `province_judge_zprp_roles` pod kluczem
+    kanonicznym okręgu. Dopasowanie oficjela do sędziego okręgu (numer, potem
+    jednoznaczne nazwisko) to liść `app/assignment_roles.py`. Zapisujemy tylko
+    zmienione wpisy; wiersze spod innej pisowni okręgu sprzątamy przy okazji.
+    Sędzia, którego nie ma na liście, zachowuje ostatni znany wpis.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from app.assignment_roles import dump_roles, pick_role_rows, roles_diff, zprp_roles_by_judge
+    from app.db import province_judge_zprp_roles as table
+    from app.settlement_province import canonical, spellings
+
+    key = canonical(province) or province
+    names = spellings(key) or [key]
+    judges = await database.fetch_all(
+        select(province_judges.c.judge_id, province_judges.c.full_name).where(
+            province_judges.c.province.in_(names)
+        )
+    )
+    wanted = zprp_roles_by_judge(officials, [(row["judge_id"], row["full_name"]) for row in judges])
+    rows = await database.fetch_all(select(table).where(table.c.province.in_(names)))
+    foreign = [row for row in rows if _clean(row["province"]) != key]
+    existing = pick_role_rows([dict(row) for row in rows if _clean(row["province"]) == key], key)
+    changed = roles_diff(existing, wanted)
+    if not changed and not foreign:
+        return {"judges": len(wanted), "changed": 0}
+
+    now = _now()
+    async with database.transaction():
+        if foreign:
+            await database.execute(
+                delete(table).where(table.c.province.in_([n for n in names if n != key]))
+            )
+            # Wpisy spod starej pisowni wracają pod klucz kanoniczny.
+            changed = sorted(set(changed) | {jid for jid in wanted if jid not in existing})
+        for judge_id in changed:
+            item = wanted[judge_id]
+            values = {
+                "province": key,
+                "judge_id": judge_id,
+                "full_name": item.get("name") or None,
+                "roles": dump_roles(item.get("roles") or ()),
+                "roles_text": item.get("roles_text") or None,
+                "updated_at": now,
+            }
+            await database.execute(
+                pg_insert(table)
+                .values(**values)
+                .on_conflict_do_update(
+                    index_elements=[table.c.province, table.c.judge_id],
+                    set_={name: values[name] for name in ("full_name", "roles", "roles_text", "updated_at")},
+                )
+            )
+
+    from app.assignment_board_cache import bump
+
+    bump(key)
+    logger.info("Central offtimes %s: role z ZPRP %s (zmienione %s)", key, len(wanted), len(changed))
+    return {"judges": len(wanted), "changed": len(changed)}
+
+
 async def _acquire_lease(province: str, holder: str, max_wait_seconds: int) -> bool:
     """Wspólna blokada z monitorem meczów, również między replikami Railway."""
     deadline = asyncio.get_running_loop().time() + max_wait_seconds
@@ -487,6 +550,14 @@ async def _sync_province(
             raise
         except Exception:
             logger.exception("Central offtimes %s: nie udało się zapisać par z ZPRP", province)
+        # Role „Sędzia / Delegat / Stolikowy" z tej samej listy - Automat obsady
+        # nie stawia na boisku kogoś, kto w ZPRP jest już tylko stolikowym.
+        try:
+            await persist_zprp_roles(province, officials)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Central offtimes %s: nie udało się zapisać ról z ZPRP", province)
         with_link = {
             judge_id: item
             for judge_id, item in numeric_officials.items()

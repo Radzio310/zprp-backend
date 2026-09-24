@@ -15,7 +15,10 @@ KRYTERIA UŻYTKOWNIKA (11.09.2026), w kolejności ważności:
     5. znacznik „wymaga doświadczonego partnera" (partner z licencją A),
     6. wymagania stolików ligowych (Superliga i LC: ligowiec albo delegat plus
        licencja A; I i II liga: licencja A),
-    7. przerwa sędziego (pauza) i drugie gniazdo w tym samym meczu.
+    7. przerwa sędziego (pauza) i drugie gniazdo w tym samym meczu,
+    8. rola w obsadzie (25.09.2026): ręczne ustawienie okręgu („tylko stolik",
+       „tylko boisko", „boisko i stolik"), a bez niego role z listy ZPRP -
+       znane i bez „Sędzia" = nie na boisko (`assignment_people.role_refusal`).
 
   MIĘKKIE - liczą się punktami, mniej znaczy lepiej:
     - RÓWNY PODZIAŁ w sezonie i w miesiącu, boisko i stolik osobno (niżej),
@@ -28,6 +31,12 @@ KRYTERIA UŻYTKOWNIKA (11.09.2026), w kolejności ważności:
 RÓWNY PODZIAŁ (decyzja użytkownika z 24.09.2026 - Automat proponował w kółko
 tych samych): liczy się SEZON i MIESIĄC meczu, boisko i stolik osobno, razem
 z meczami przydzielonymi w TYM przebiegu i w kolejce (`pending`).
+    - OKRES (25.09.2026, „powiela ciągle tych samych"): mecze w układanym
+      zakresie - już obsadzone (`Context.load`) plus wybory tego przebiegu,
+      wszystkie role razem. Kara `period_points` przebija kilometry i premie
+      za pary, więc każdy wolny i uprawniony dostaje mecz, zanim ktoś dostanie
+      drugi; po zachłannym ułożeniu `_rebalance` przenosi propozycje
+      najbardziej obciążonych na tych z co najmniej dwoma mniej,
     - kilometry decydują tylko między podobnie obciążonymi (różnica 1 meczu
       kosztuje `W_GAP_ONE`, czyli tyle, co kilkadziesiąt kilometrów),
     - różnica 2 i więcej meczów względem najmniej obciążonego kandydata kosztuje
@@ -37,7 +46,10 @@ z meczami przydzielonymi w TYM przebiegu i w kolejce (`pending`).
       (`W_OVER_MEAN`).
 
 STOLIK W ROZGRYWKACH OKRĘGOWYCH: najpierw sędziowie z odznaką „Stolikowi"
-(„Stolikowy"), pozostali dopiero, gdy żadnego stolikowego nie da się wziąć.
+(„Stolikowy"), pozostali dopiero, gdy żadnego stolikowego nie da się wziąć -
+ale tylko dopóki stolikowy nie ma w okresie więcej meczów niż najmniej
+obciążony kandydat (`TABLE_BADGE_SLACK`, `badge_tier`). Bez tej granicy
+czterech stolikowych brało po kilkanaście stolików w dwa tygodnie.
 W II lidze, I lidze, Lidze Centralnej i Superlidze stolik bez tej preferencji -
 wszyscy na równi (liczą się tylko wymagania licencji z `table_rule`).
 
@@ -74,6 +86,7 @@ from app.assignment_people import (
     is_local,
     pair_ok,
     pair_relation,
+    role_refusal,
     table_pair_ok,
     table_rule,
 )
@@ -104,6 +117,18 @@ W_GAP_ONE = 40.0
 W_GAP_STEP = 1500.0
 #: Kara za nadwyżkę ponad średnią aktywnych sędziów (rośnie z kwadratem).
 W_OVER_MEAN = 12.0
+#: OKRES (zgłoszenie z 25.09.2026: „powiela ciągle tych samych"): każdy mecz
+#: w układanym okresie ponad najmniej obciążonego kandydata. Kara rośnie
+#: trójkątnie (1, 3, 6 ... x `W_PERIOD`), więc już pierwszy mecz różnicy
+#: przebija kilometry, premie za parę i miejscowego, a drugi - także różnicę
+#: kilku meczów w sezonie. Dzięki temu każdy wolny i uprawniony dostaje coś,
+#: zanim ktoś dostanie drugi mecz w tym samym okresie.
+W_PERIOD = 2500.0
+#: Pierwszeństwo „Stolikowych" przy stoliku okręgowym trzyma się, dopóki
+#: stolikowy ma w okresie najwyżej o tyle meczów więcej niż najmniej obciążony
+#: kandydat. Bez tego progu czterech stolikowych brało po kilkanaście stolików
+#: w dwa tygodnie, a reszta nic (test `test_assignment_period_spread`).
+TABLE_BADGE_SLACK = 0
 W_OFF_DAY = 120.0
 W_SAME_DAY = 600.0
 W_UNKNOWN_KM = 90.0
@@ -240,12 +265,13 @@ class Loads:
     podane z zewnątrz zostają nietknięte.
     """
 
-    __slots__ = ("season", "month")
+    __slots__ = ("season", "month", "period", "run")
 
     def __init__(
         self,
         season: Optional[Mapping[str, Mapping[str, int]]] = None,
         month: Optional[Mapping[str, Mapping[str, Mapping[str, int]]]] = None,
+        period: Optional[Mapping[str, int]] = None,
     ) -> None:
         self.season: dict[str, dict[str, int]] = {
             str(judge_id): {
@@ -262,6 +288,28 @@ class Loads:
                     FIELD: int((item or {}).get(FIELD, 0) or 0),
                     TABLE: int((item or {}).get(TABLE, 0) or 0),
                 }
+        #: Mecze w UKŁADANYM OKRESIE (boisko, stolik i delegatury razem):
+        #: te, które sędzia już ma w zakresie (`Context.load`), plus przydziały
+        #: z tego przebiegu.
+        self.period: dict[str, int] = {
+            str(judge_id): int(value or 0) for judge_id, value in (period or {}).items()
+        }
+        #: Przydziały z TEGO przebiegu: numer -> {"field": n, "table": n}.
+        self.run: dict[str, dict[str, int]] = {}
+
+    def copy(self) -> "Loads":
+        out = Loads(self.season, self.month, self.period)
+        out.run = {judge_id: dict(item) for judge_id, item in self.run.items()}
+        return out
+
+    def period_count(self, judge_id: str) -> int:
+        return int(self.period.get(judge_id, 0))
+
+    def run_count(self, judge_id: str, kind: Optional[str] = None) -> int:
+        own = self.run.get(judge_id) or {}
+        if kind is None:
+            return int(sum(own.values()))
+        return int(own.get(kind, 0))
 
     def count(self, judge_id: str, kind: str) -> int:
         return int((self.season.get(judge_id) or {}).get(kind, 0))
@@ -279,13 +327,16 @@ class Loads:
         if month:
             slot = self.month.setdefault(judge_id, {}).setdefault(month, {FIELD: 0, TABLE: 0})
             slot[kind] = max(0, slot.get(kind, 0) + delta)
+        self.period[judge_id] = max(0, self.period.get(judge_id, 0) + delta)
+        mine = self.run.setdefault(judge_id, {FIELD: 0, TABLE: 0})
+        mine[kind] = max(0, mine.get(kind, 0) + delta)
 
 
 def loads_of(ctx: "Context") -> Loads:
     """Liczniki przebiegu (`Context.loads`) albo świeża kopia liczników z kontekstu."""
     if ctx.loads is not None:
         return ctx.loads
-    return Loads(ctx.season_counts, ctx.month_counts)
+    return Loads(ctx.season_counts, ctx.month_counts, ctx.load)
 
 
 def fair_points(count: int, floor: int, mean: float) -> float:
@@ -308,6 +359,17 @@ def fair_points(count: int, floor: int, mean: float) -> float:
     return points
 
 
+def period_points(count: int, floor: int) -> float:
+    """
+    Kara za mecze w układanym okresie ponad najmniej obciążonego kandydata:
+    1 mecz różnicy = `W_PERIOD`, 2 = 3 x, 3 = 6 x (trójkątnie).
+    """
+    gap = int(count) - int(floor)
+    if gap <= 0:
+        return 0.0
+    return W_PERIOD * gap * (gap + 1) / 2
+
+
 def table_badge_first(code: Any) -> bool:
     """
     Czy przy stoliku tych rozgrywek najpierw idą sędziowie „Stolikowi".
@@ -326,6 +388,9 @@ class Standing:
     floor_month: int = 0
     mean_season: float = 0.0
     mean_month: float = 0.0
+    #: Najmniej meczów w układanym okresie wśród WSZYSTKICH kandydatów do
+    #: gniazda (bez podziału na „Stolikowych" i resztę).
+    floor_period: int = 0
 
 
 @dataclass
@@ -455,16 +520,33 @@ def _fair_score(
     standing: Optional[Standing],
     loads: Loads,
 ) -> tuple[float, list[str]]:
-    """Punkty i uzasadnienie równego podziału (sezon + miesiąc, ta sama grupa)."""
+    """
+    Punkty i uzasadnienie równego podziału: okres (wszystkie role razem),
+    sezon i miesiąc (ta sama grupa). Liczby w opisie to stan W CHWILI wyboru,
+    razem z wcześniejszymi wyborami tego przebiegu.
+    """
     base = standing or Standing()
     group = "boisko" if kind == FIELD else "stolik"
     season = loads.count(judge_id, kind)
     month = loads.month_count(judge_id, need.month, kind)
+    period = loads.period_count(judge_id)
+    in_run = loads.run_count(judge_id, kind)
     points = fair_points(season, base.floor_season, base.mean_season)
-    reasons = [f"{group}: {season} w sezonie"]
+    head = f"{group}: {season} w sezonie"
+    if in_run:
+        head += f" (+{in_run} w tym przebiegu)"
+    reasons = [head]
     if need.month:
         points += fair_points(month, base.floor_month, base.mean_month)
         reasons[0] += f", {month} w miesiącu"
+    period_gap = period - base.floor_period
+    points += period_points(period, base.floor_period)
+    if period:
+        run_all = loads.run_count(judge_id)
+        text = f"{period} w okresie"
+        if run_all:
+            text += f" (+{run_all} w tym przebiegu)"
+        reasons.append(text)
     season_gap = season - base.floor_season
     month_gap = (month - base.floor_month) if need.month else 0
     if season_gap <= 0 and month_gap <= 0:
@@ -475,6 +557,10 @@ def _fair_score(
         reasons.append("najmniej meczów w sezonie")
     if max(season_gap, month_gap) >= 2:
         reasons.append(f"o {max(season_gap, month_gap)} mecze więcej niż najmniej obciążeni")
+    if period_gap >= 1:
+        # Zero cichych decyzji: wybrany ma już więcej w okresie - nikt z mniejszą
+        # liczbą nie mógł (twarde reguły) albo przegrał wyraźnie sezonem.
+        reasons.append(f"o {period_gap} w okresie więcej niż najmniej obciążeni")
     return points, reasons
 
 
@@ -484,13 +570,22 @@ def _standing(
     kind: str,
     group: Iterable[Judge],
     loads: Loads,
+    *,
+    everyone: Optional[Iterable[Judge]] = None,
 ) -> Standing:
-    """Najmniej obciążony w grupie kandydatów i średnia AKTYWNYCH sędziów."""
+    """
+    Najmniej obciążony w grupie kandydatów i średnia AKTYWNYCH sędziów.
+
+    `everyone` - wszyscy kandydaci do gniazda (także spoza grupy „Stolikowych");
+    z nich dno okresu. Bez tego - sama grupa.
+    """
     people = list(group)
+    pool = list(everyone) if everyone is not None else people
     active = list(ctx.judges)
     month = need.month
     seasons = [loads.count(judge.judge_id, kind) for judge in people]
     months = [loads.month_count(judge.judge_id, month, kind) for judge in people]
+    periods = [loads.period_count(judge.judge_id) for judge in pool]
     all_seasons = [loads.count(judge_id, kind) for judge_id in active]
     all_months = [loads.month_count(judge_id, month, kind) for judge_id in active]
     return Standing(
@@ -498,7 +593,25 @@ def _standing(
         floor_month=min(months) if months else 0,
         mean_season=(sum(all_seasons) / len(all_seasons)) if all_seasons else 0.0,
         mean_month=(sum(all_months) / len(all_months)) if all_months else 0.0,
+        floor_period=min(periods) if periods else 0,
     )
+
+
+def badge_tier(judge: Judge, *, badge_first: bool, loads: Loads, floor_period: int) -> int:
+    """
+    Grupa przy stoliku okręgowym: 0 = „Stolikowi" (pierwsi), 1 = reszta.
+
+    Stolikowy traci pierwszeństwo, gdy ma w okresie więcej niż
+    `TABLE_BADGE_SLACK` meczów ponad najmniej obciążonego kandydata - wtedy
+    staje w kolejce na równi z innymi.
+    """
+    if not badge_first:
+        return 0
+    if not judge.table_specialist:
+        return 1
+    if loads.period_count(judge.judge_id) - floor_period > TABLE_BADGE_SLACK:
+        return 1
+    return 0
 
 
 def _score(
@@ -513,6 +626,7 @@ def _score(
     pair_ready: Optional[Judge] = None,
     standing: Optional[Standing] = None,
     loads: Optional[Loads] = None,
+    tier: int = 0,
 ) -> tuple[float, list[str], Optional[float]]:
     """
     Punkty kandydata - mniej znaczy lepiej - razem z uzasadnieniem.
@@ -589,7 +703,10 @@ def _score(
 
     if kind == TABLE and judge.table_specialist and table_badge_first(need.code):
         # Samo pierwszeństwo daje kolejność grup w `_candidates` - tu tylko ślad.
-        reasons.append("sędzia stolikowy - pierwszeństwo przy stoliku okręgowym")
+        if tier == 0:
+            reasons.append("sędzia stolikowy - pierwszeństwo przy stoliku okręgowym")
+        else:
+            reasons.append("sędzia stolikowy bez pierwszeństwa - więcej meczów w okresie niż inni")
 
     if ctx.policy is not None:
         delta, why = ctx.policy.points(
@@ -632,7 +749,7 @@ def _candidates(
     for judge in ctx.judges.values():
         if judge.judge_id in taken_ids:
             continue
-        hard = _hard_reason(ctx, judge, need, round_no=round_no)
+        hard = _hard_reason(ctx, judge, need, round_no=round_no) or role_refusal(judge, kind)
         if hard:
             refused[hard] = refused.get(hard, 0) + 1
             continue
@@ -657,18 +774,30 @@ def _candidates(
     ready_ids = {judge.judge_id for judge in valid}
 
     # Stolik okręgowy: najpierw „Stolikowi", reszta dopiero po nich. Równy
-    # podział liczy się WEWNĄTRZ grupy - inaczej stolikowy z trzema meczami
-    # przegrywałby punktami z kimś spoza grupy, kto ma zero.
+    # podział sezonu i miesiąca liczy się WEWNĄTRZ grupy - inaczej stolikowy
+    # z trzema meczami przegrywałby punktami z kimś spoza grupy, kto ma zero.
+    # Okres liczy się dla wszystkich razem, a stolikowy z wyraźnie większą
+    # liczbą meczów w okresie traci pierwszeństwo (`badge_tier`).
     badge_first = kind == TABLE and table_badge_first(need.code)
+    loads = loads_of(ctx)
+    floor_period = min((loads.period_count(judge.judge_id) for judge in valid), default=0)
+    tiers = {
+        judge.judge_id: badge_tier(judge, badge_first=badge_first, loads=loads, floor_period=floor_period)
+        for judge in valid
+    }
 
     def tier_of(judge: Judge) -> int:
-        return 0 if not badge_first or judge.table_specialist else 1
+        return tiers.get(judge.judge_id, 0)
 
-    loads = loads_of(ctx)
     standings: dict[int, Standing] = {}
-    for tier in {tier_of(judge) for judge in valid}:
+    for tier in set(tiers.values()):
         standings[tier] = _standing(
-            ctx, need, kind, [judge for judge in valid if tier_of(judge) == tier], loads
+            ctx,
+            need,
+            kind,
+            [judge for judge in valid if tier_of(judge) == tier],
+            loads,
+            everyone=valid,
         )
 
     out: list[tuple[float, Judge, list[str], Optional[float]]] = []
@@ -696,6 +825,7 @@ def _candidates(
             pair_ready=ready,
             standing=standings.get(tier_of(judge)),
             loads=loads,
+            tier=tier_of(judge),
         )
         out.append((score, judge, reasons, km))
     # Grupa przed punktami: przy stoliku okręgowym „Stolikowi" zawsze pierwsi.
@@ -720,9 +850,12 @@ def build_plan(
     """
     Ułożenie obsady dla pustych gniazd.
 
-    Idziemy meczami po kolei, w dwóch obiegach: pierwszy trzyma się dni
-    preferowanych przez sędziów, drugi dobiera resztę. Obsadzamy WYŁĄCZNIE
-    puste gniazda - kto już stoi, zostaje (decyzja użytkownika).
+    Idziemy meczami po kolei (w kolejności daty), w dwóch obiegach: pierwszy
+    trzyma się dni preferowanych przez sędziów, drugi dobiera resztę. Każde
+    gniazdo ma własny ranking liczony na bieżąco - wybory z wcześniejszych
+    gniazd przebiegu od razu podnoszą liczniki (sezon, miesiąc, okres). Na
+    końcu `_rebalance` wyrównuje okres. Obsadzamy WYŁĄCZNIE puste gniazda -
+    kto już stoi, zostaje (decyzja użytkownika).
     """
     plan = Plan()
     load = dict(ctx.load)
@@ -745,9 +878,9 @@ def build_plan(
         month_counts=ctx.month_counts,
         legacy_load=ctx.legacy_load,
         # Kopia liczników: przydziały z TEGO przebiegu liczą się od razu.
-        loads=Loads(ctx.loads.season, ctx.loads.month)
+        loads=ctx.loads.copy()
         if ctx.loads is not None
-        else Loads(ctx.season_counts, ctx.month_counts),
+        else Loads(ctx.season_counts, ctx.month_counts, ctx.load),
     )
 
     # Stan gniazd w trakcie układania: mecz -> gniazdo -> sędzia.
@@ -849,6 +982,9 @@ def build_plan(
                         )
                     )
 
+    if not working.legacy_load:
+        _rebalance(plan, needs, working, filled, busy, load, round_no=max(1, rounds))
+
     for need in needs:
         slots = open_slots.get(need.match_id) or {}
         for kind in ("field", "table"):
@@ -865,6 +1001,136 @@ def build_plan(
     plan.proposals.sort(key=lambda item: (item.code, item.slot))
     plan.gaps.sort(key=lambda item: (item.code, item.slot))
     return plan
+
+
+def _group_people(need: MatchNeed, filled: Mapping[str, Mapping[str, Judge]], kind: str) -> list[Judge]:
+    """Kto już stoi w tej grupie gniazd meczu: obecna obsada plus przebieg."""
+    slots = FIELD_SLOTS if kind == FIELD else TABLE_SLOTS
+    return list(need.crew_field if kind == FIELD else need.crew_table) + [
+        judge for key, judge in (filled.get(need.match_id) or {}).items() if key in slots
+    ]
+
+
+def _rebalance(
+    plan: Plan,
+    needs: Sequence[MatchNeed],
+    working: Context,
+    filled: dict[str, dict[str, Judge]],
+    busy: dict[str, list[BusyMatch]],
+    load: dict[str, int],
+    *,
+    round_no: int,
+) -> int:
+    """
+    Wyrównanie po zachłannym układaniu: propozycja sędziego z NAJWIĘKSZĄ
+    liczbą meczów w okresie przechodzi na kogoś, kto ma co najmniej o dwa mniej
+    i przechodzi WSZYSTKIE twarde reguły tego gniazda (niedyspozycja, kolizja
+    dnia, pary, rola, wymagania stolika). Każda zamiana zmniejsza różnicę, więc
+    pętla się kończy; zwraca liczbę zamian.
+
+    Zachłanne układanie z karą okresu zwykle wystarcza - to siatka na
+    przypadki, w których wcześniejszy wybór zamknął drogę lepszemu podziałowi
+    (np. kolizje dnia albo pierwszy obieg dni preferowanych).
+    """
+    by_id = {need.match_id: need for need in needs}
+    loads = working.loads
+    if loads is None:
+        return 0
+    swaps = 0
+    for _ in range(max(1, len(plan.proposals)) * 2):
+        order = sorted(
+            range(len(plan.proposals)),
+            key=lambda index: -loads.period_count(plan.proposals[index].judge_id),
+        )
+        done = False
+        for index in order:
+            item = plan.proposals[index]
+            need = by_id.get(item.match_id)
+            if need is None:
+                continue
+            kind = FIELD if item.slot in FIELD_SLOTS else TABLE
+            before = loads.period_count(item.judge_id)
+            if before < 2:
+                break
+            old = filled.get(need.match_id, {}).get(item.slot)
+            if old is None:
+                continue
+            # Zdejmujemy sędziego z gniazda na próbę.
+            filled[need.match_id].pop(item.slot, None)
+            loads.add(old.judge_id, kind, need.month, -1)
+            kept = [entry for entry in busy.get(old.judge_id, []) if entry.match_id != need.match_id]
+            removed = busy.get(old.judge_id, [])
+            busy[old.judge_id] = kept
+            group = _group_people(need, filled, kind)
+            taken = set(need.crew_ids) | {judge.judge_id for judge in filled.get(need.match_id, {}).values()}
+            taken.add(old.judge_id)
+            ranked, _refused = _candidates(
+                working,
+                need,
+                kind=kind,
+                partner=group[0] if group else None,
+                round_no=round_no,
+                load=load,
+                taken_ids=taken,
+                open_count=1,
+            )
+            chosen = None
+            for candidate in ranked:
+                judge = candidate[1]
+                if loads.period_count(judge.judge_id) > before - 2:
+                    continue
+                if kind == TABLE and table_rule(need.code):
+                    ok, _why = table_pair_ok([person for person in group if person] + [judge], need.code)
+                    if not ok:
+                        continue
+                chosen = candidate
+                break
+            if chosen is None:
+                # Nikt lepszy - wracamy do stanu sprzed próby.
+                filled[need.match_id][item.slot] = old
+                loads.add(old.judge_id, kind, need.month, 1)
+                busy[old.judge_id] = removed
+                continue
+            score, judge, reasons, km = chosen
+            filled[need.match_id][item.slot] = judge
+            loads.add(judge.judge_id, kind, need.month, 1)
+            load[old.judge_id] = max(0, load.get(old.judge_id, 0) - 1)
+            load[judge.judge_id] = load.get(judge.judge_id, 0) + 1
+            if working.policy is not None:
+                forget = getattr(working.policy, "note_unassigned", None)
+                if callable(forget):
+                    forget(old.judge_id, need, kind=kind)
+                working.policy.note_assigned(judge.judge_id, need, kind=kind)
+            busy.setdefault(judge.judge_id, []).append(
+                BusyMatch(
+                    moment=need.moment,
+                    city=need.host_city,
+                    match_id=need.match_id,
+                    code=need.code,
+                    hall=need.hall,
+                    venue=need.venue,
+                )
+            )
+            plan.proposals[index] = Proposal(
+                match_id=item.match_id,
+                code=item.code,
+                slot=item.slot,
+                judge_id=judge.judge_id,
+                judge_name=judge.name,
+                km=km,
+                score=round(score, 2),
+                reasons=[
+                    *reasons,
+                    f"wyrównanie okresu: zamiast {old.name} ({before} w okresie)",
+                ],
+                round_no=item.round_no,
+            )
+            swaps += 1
+            done = True
+            break
+        if not done:
+            break
+    return swaps
 
 
 # ───────────────────────── kandydaci na jeden mecz ─────────────────────────
@@ -935,6 +1201,9 @@ class CandidateView:
     fits: list[str]
     rank: int = 0
     score: Optional[float] = None
+    #: Ograniczenie roli w obsadzie („tylko stolik (ZPRP)", „tylko boisko
+    #: (ustawienie okręgu)") - pusto, gdy sędzia może wszędzie.
+    role_note: str = ""
 
 
 def describe_candidates(
@@ -960,9 +1229,10 @@ def describe_candidates(
     group_crew = {FIELD: list(need.crew_field), TABLE: list(need.crew_table)}
     loads = loads_of(ctx)
     badge_first = kind == TABLE and table_badge_first(need.code)
+    tiers: dict[str, int] = {}
 
     def tier_of(judge: Judge) -> int:
-        return 0 if not badge_first or judge.table_specialist else 1
+        return tiers.get(judge.judge_id, 0 if not badge_first or judge.table_specialist else 1)
 
     views: dict[str, CandidateView] = {}
     ready: list[Judge] = []
@@ -990,11 +1260,22 @@ def describe_candidates(
                 reason=reason,
                 why=[reason],
                 fits=[],
+                role_note="; ".join(
+                    item for item in (role_refusal(judge, FIELD), role_refusal(judge, TABLE)) if item
+                ),
             )
             continue
         fits: list[str] = []
         refusals: list[str] = []
+        role_notes: list[str] = []
         for group in (FIELD, TABLE):
+            role_why = role_refusal(judge, group)
+            if role_why:
+                # Rola w obsadzie to twarda reguła Automatu - kafelek mówi
+                # wprost, czemu sędzia nie pasuje do tej grupy.
+                role_notes.append(role_why)
+                refusals.append(f"{'boisko' if group == FIELD else 'stolik'}: {role_why}")
+                continue
             partner = next(
                 (person for person in group_crew[group] if person.judge_id != judge.judge_id), None
             )
@@ -1021,12 +1302,20 @@ def describe_candidates(
             reason=reason,
             why=[],
             fits=fits,
+            role_note="; ".join(role_notes),
         )
         if kind in fits:
             ready.append(judge)
 
+    floor_period = min((loads.period_count(judge.judge_id) for judge in ready), default=0)
+    for judge in ready:
+        tiers[judge.judge_id] = badge_tier(
+            judge, badge_first=badge_first, loads=loads, floor_period=floor_period
+        )
     standings = {
-        tier: _standing(ctx, need, kind, [judge for judge in ready if tier_of(judge) == tier], loads)
+        tier: _standing(
+            ctx, need, kind, [judge for judge in ready if tier_of(judge) == tier], loads, everyone=ready
+        )
         for tier in {tier_of(judge) for judge in ready}
     }
     ready_ids = {judge.judge_id for judge in ready}
@@ -1053,6 +1342,7 @@ def describe_candidates(
             pair_ready=pair_ready,
             standing=standings.get(tier_of(judge)),
             loads=loads,
+            tier=tier_of(judge),
         )
         view = views[judge.judge_id]
         view.score = round(score, 2)

@@ -15,6 +15,9 @@ Skąd co bierzemy:
   - NIEDYSPOZYCJE te same kalendarze, przez `offtime_rules` - ta sama reguła,
                   co w telefonie,
   - USTAWIENIA    `province_judge_settings`, `_blocks`, `_pauses`, `_pairs`,
+  - ROLE ZPRP     `province_judge_zprp_roles` (Sędzia / Delegat / Stolikowy
+                  z listy oficjeli) - razem z ręczną „Rolą w obsadzie"
+                  z ustawień (`assign_role`) decydują, kto może na boisko,
   - OBCIĄŻENIE    `province_matches` - mecze, które sędzia już ma w zakresie.
 
 ⚠ `state_json` i każda inna kolumna JSON potrafi wrócić z bazy SUROWYM NAPISEM
@@ -73,7 +76,7 @@ class Roster:
 
     __slots__ = (
         "judges", "offtimes", "cities", "pauses", "pairs", "blocks", "settings",
-        "grades", "clubs", "pair_source", "mentor_pairs",
+        "grades", "clubs", "pair_source", "mentor_pairs", "zprp_roles",
     )
 
     def __init__(self) -> None:
@@ -91,6 +94,9 @@ class Roster:
         self.pair_source: dict[str, str] = {}
         #: Pary mentorskie: klucz pary sędziowskiej (`pair_key`) -> mentorzy.
         self.mentor_pairs: dict[str, list[str]] = {}
+        #: Role z listy ZPRP po numerze sędziego ("sedzia", "delegat",
+        #: "stolikowy"); brak wpisu = nie wiemy (`assignment_roles`).
+        self.zprp_roles: dict[str, list[str]] = {}
 
     def mentors_of(self, judge_id: str) -> list[str]:
         """Mentorzy przypisani PARZE tego sędziego - bez pary nie ma mentorów."""
@@ -159,8 +165,11 @@ async def load_roster(province: str) -> Roster:
         zprp_judge_grades,
     )
 
+    from app.settlement_province import canonical as _canonical
+
     roster = Roster()
     names = spellings(province)
+    canonical_key = _canonical(province)
 
     people = await database.fetch_all(
         select(province_judges).where(province_judges.c.province.in_(names))
@@ -181,10 +190,39 @@ async def load_roster(province: str) -> Roster:
                 int(day) for day in _json_list(row["preferred_days"]) if str(day).strip().isdigit()
             ],
             "note": _s(row["note"]),
+            "assign_role": _s(row["assign_role"]) if "assign_role" in row.keys() else "",
         }
-        for row in settings_rows
+        # Dwie pisownie okręgu (ŚLĄSKIE / SLASKIE): wiersz pod kluczem
+        # kanonicznym - tam pisze zapis ustawień - idzie ostatni i wygrywa.
+        for row in sorted(
+            settings_rows,
+            key=lambda row: _s(row["province"]) == (canonical_key or _s(province).upper()),
+        )
     }
     roster.settings = settings
+
+    # Role z listy ZPRP (Sędzia / Delegat / Stolikowy) - zapisuje je
+    # synchronizacja niedyspozycji. Awaria odczytu = role nieznane, czyli bez
+    # ograniczeń (i ślad w logu), a nie zatrzymany Automat.
+    try:
+        from app.assignment_roles import pick_role_rows
+        from app.db import province_judge_zprp_roles
+        from app.settlement_province import canonical
+
+        roster.zprp_roles = pick_role_rows(
+            [
+                dict(row)
+                for row in await database.fetch_all(
+                    select(province_judge_zprp_roles).where(
+                        province_judge_zprp_roles.c.province.in_(names)
+                    )
+                )
+            ],
+            canonical(province) or _s(province).upper(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[obsada] %s: role sędziów z ZPRP", province)
+        roster.zprp_roles = {}
 
     # Kalendarze: okręgowy i centralny. Miasto bierzemy z tego, który je ma -
     # wpis centralny bywa świeższy, a okręgowy pełniejszy.
@@ -242,6 +280,8 @@ async def load_roster(province: str) -> Roster:
             badges=badge_names(row["badges"]),
             needs_experienced=own.get("needs_experienced", False),
             preferred_days=own.get("preferred_days", ()),
+            roles=roster.zprp_roles.get(judge_id, ()),
+            assign_role=own.get("assign_role", ""),
         )
         # Kalendarze dokładamy po ZNORMALIZOWANYM numerze - w rejestrze okręgu i
         # w tokenie ten sam sędzia bywa zapisany inaczej (zero wiodące).

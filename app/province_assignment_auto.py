@@ -219,6 +219,7 @@ async def judges(
     preview_days = [today + timedelta(days=offset) for offset in range(PREVIEW_DAYS)]
 
     from app.assignment_board_rules import display_name
+    from app.assignment_people import effective_assign_role, role_refusal, zprp_role_label
     from app.official_roster import is_active
 
     rows: list[dict] = []
@@ -246,6 +247,14 @@ async def judges(
                 "needs_experienced": judge.needs_experienced,
                 "preferred_days": sorted(judge.preferred_days),
                 "note": _s(settings.get("note")),
+                # Rola w obsadzie (25.09.2026): role z listy ZPRP (pusta lista =
+                # nie wiemy), ręczne ustawienie okręgu ("" = według ZPRP),
+                # rola, której pilnuje Automat, i powód ograniczenia.
+                "roles": sorted(judge.roles),
+                "roles_label": zprp_role_label(judge.roles),
+                "assign_role": judge.assign_role or "",
+                "effective_role": effective_assign_role(judge),
+                "role_note": role_refusal(judge, "field") or role_refusal(judge, "table") or "",
                 "partner": {"judge_id": partner_id, "name": partner.name if partner else ""}
                 if partner_id
                 else None,
@@ -318,8 +327,12 @@ async def judges(
             "young": sum(1 for row in rows if row["young"]),
             "table": sum(1 for row in rows if row["table_specialist"]),
             "with_settings": sum(
-                1 for row in rows if row["needs_experienced"] or row["preferred_days"]
+                1
+                for row in rows
+                if row["needs_experienced"] or row["preferred_days"] or row["assign_role"]
             ),
+            # Sędziowie, których Automat nie stawia na boisku (ZPRP albo okręg).
+            "table_only": sum(1 for row in rows if row["effective_role"] == "table"),
         },
     }
 
@@ -330,6 +343,9 @@ class JudgeSettingsRequest(BaseModel):
     needs_experienced: Optional[bool] = None
     preferred_days: Optional[list[int]] = None
     note: Optional[str] = None
+    #: Rola w obsadzie: "" (według ZPRP), "both", "table", "field".
+    #: `None` = bez zmian (starsze wersje panelu tego pola nie wysyłają).
+    assign_role: Optional[str] = None
     updated_by: Optional[str] = None
 
 
@@ -347,6 +363,18 @@ async def save_judge_settings(judge_id: str, payload: JudgeSettingsRequest):
         "updated_by": _s(payload.updated_by) or None,
         "updated_at": _now(),
     }
+    if payload.assign_role is not None:
+        from app.assignment_people import ASSIGN_ROLES, normalize_assign_role
+
+        wanted_role = _s(payload.assign_role).lower()
+        if wanted_role not in ASSIGN_ROLES:
+            # Zero cichych blokad: nieznana wartość to jasna odmowa, nie „według ZPRP".
+            raise HTTPException(
+                400,
+                "Rola w obsadzie: dozwolone both (boisko i stolik), table (tylko stolik), "
+                "field (tylko boisko) albo puste (według ZPRP).",
+            )
+        values["assign_role"] = normalize_assign_role(wanted_role) or None
     await database.execute(
         pg_insert(province_judge_settings)
         .values(**values)
@@ -359,7 +387,12 @@ async def save_judge_settings(judge_id: str, payload: JudgeSettingsRequest):
         )
     )
     _bump(key)
-    return {"success": True, "judge_id": _s(judge_id), "preferred_days": days}
+    return {
+        "success": True,
+        "judge_id": _s(judge_id),
+        "preferred_days": days,
+        "assign_role": values.get("assign_role") or "",
+    }
 
 
 class BlockRequest(BaseModel):
