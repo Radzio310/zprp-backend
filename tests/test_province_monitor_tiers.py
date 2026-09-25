@@ -393,10 +393,17 @@ def test_pelny_przebieg_nie_gasi_meczow_swiezo_widzianych_gdzie_indziej():
 # ── Kolumny JSON jako napis (asyncpg bez kodeka jsonb) ───────────────────────
 
 
-def test_preferencje_w_napisie_umieja_odmowic():
-    """Napis '{"enabled": false}' przechodzil jako "nie-slownik", czyli zgoda."""
-    assert _monitor._prefs_allow('{"enabled": false}', "match_added") is False
-    assert _monitor._prefs_allow('{"enabled": true}', "match_added") is True
+def test_preferencje_serwerowe_sa_niezalezne_od_lokalnych_przypomnien():
+    assert _monitor._prefs_allow('{"enabled": false}', "match_added") is True
+    assert _monitor._prefs_allow(
+        '{"notificationTypes": {"newMatchAdded": false}}', "match_added"
+    ) is False
+    assert _monitor._prefs_allow(
+        '{"notificationTypes": {"changeLineup": false}}', "lineup_changed"
+    ) is False
+    assert _monitor._prefs_allow(
+        '{"notificationTypes": {"changeMatchData": false}}', "match_date_changed"
+    ) is False
     assert _monitor._prefs_allow("nie-json", "match_added") is True
 
 

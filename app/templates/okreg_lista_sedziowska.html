@@ -1,0 +1,294 @@
+{# Lista sędziowska - część puli miesiąca jednego sędziego, A4 pionowo.
+
+   Pula sędziego za miesiąc podzielona na kilka list (A, B, C...). Każda lista
+   to osobny rachunek z własnym numerem w księdze okręgu: koszty uzyskania 20%
+   tylko na liście powyżej 200 zł, podatek 12% zaokrąglany na każdej liście.
+   Reguła w `app/settlement_split_rules.py`.
+
+   Ta sama rodzina co zestawienie: granat #0B4F9E i złoto #F0A500. `docs` to
+   jedna lista (plik pojedynczy) albo wszystkie (plik zbiorczy) - każda od nowej
+   strony. #}
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<style>
+  @page {
+    size: A4 portrait;
+    margin: 14mm 13mm 15mm 13mm;
+    @bottom-right {
+      content: "str. " counter(page) " z " counter(pages);
+      font-family: "DejaVu Sans", sans-serif;
+      font-size: 7.5pt;
+      color: #8a93a6;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", sans-serif;
+    font-size: 8.8pt;
+    color: #1d2433;
+    margin: 0;
+    line-height: 1.38;
+  }
+
+  .doc + .doc { break-before: page; page-break-before: always; }
+
+  /* ---------- nagłówek ---------- */
+  .head { width: 100%; border-collapse: collapse; margin-bottom: 3mm; }
+  .head td { vertical-align: middle; padding: 0; }
+  .head .logo { width: 24mm; }
+  .head .logo img { width: 21mm; }
+  .org-name { font-size: 11.5pt; font-weight: bold; color: #0B4F9E; letter-spacing: .2pt; }
+  .org-addr { font-size: 8pt; color: #5a6478; margin-top: .8mm; }
+
+  .doc-box { text-align: right; }
+  .doc-kind {
+    font-size: 7.3pt; letter-spacing: 1.6pt; text-transform: uppercase;
+    color: #8a93a6; font-weight: bold;
+  }
+  .doc-number {
+    font-size: 16pt; font-weight: bold; color: #0B4F9E;
+    margin-top: .5mm; letter-spacing: .3pt;
+  }
+  .doc-part {
+    display: inline-block; margin-top: 1mm; padding: .6mm 2.4mm;
+    background: #F0A500; color: #2a1c00; font-weight: bold; font-size: 8pt;
+    border-radius: 1.2mm; letter-spacing: .3pt;
+  }
+  .doc-period { font-size: 8.3pt; color: #3d4658; margin-top: 1mm; }
+
+  .rule { height: 1.6mm; margin: 2mm 0 3.5mm 0; background: #0B4F9E; }
+  .rule-gold { height: 1.6mm; width: 38mm; background: #F0A500; float: left; }
+
+  .title { font-size: 13.5pt; font-weight: bold; color: #16233c; margin: 0 0 1mm 0; }
+  .subtitle { font-size: 8.4pt; color: #5a6478; margin-bottom: 3.5mm; }
+  .reprint {
+    display: inline-block; margin-left: 2mm; padding: .3mm 2mm; border: .5pt solid #b07800;
+    color: #b07800; font-size: 7.2pt; font-weight: bold; letter-spacing: .8pt; border-radius: 1mm;
+  }
+
+  /* ---------- dane sędziego ---------- */
+  table.person { width: 100%; border-collapse: collapse; margin-bottom: 4mm; }
+  table.person td {
+    border: .4pt solid #d7dce6; padding: 2.2mm 3mm; vertical-align: top;
+    background: #f7f9fd;
+  }
+  .person .label {
+    font-size: 6.8pt; letter-spacing: 1.1pt; text-transform: uppercase;
+    color: #8a93a6; font-weight: bold;
+  }
+  .person .value { font-size: 10pt; color: #16233c; font-weight: bold; margin-top: .6mm; }
+
+  /* ---------- mecze ---------- */
+  table.grid { width: 100%; border-collapse: collapse; }
+  table.grid thead { display: table-header-group; }
+  table.grid th {
+    background: #0B4F9E; color: #fff; font-size: 7.4pt; font-weight: bold;
+    padding: 2mm 1.6mm; text-align: right; border: .3pt solid #0B4F9E; line-height: 1.2;
+  }
+  table.grid th.l { text-align: left; }
+  table.grid th.c { text-align: center; }
+  table.grid td {
+    padding: 1.6mm; border: .3pt solid #d7dce6; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.grid td.l { text-align: left; }
+  table.grid td.c { text-align: center; }
+  table.grid tbody tr:nth-child(even) td { background: #f4f7fc; }
+  table.grid tr { page-break-inside: avoid; }
+  .lp { color: #8a93a6; width: 8mm; }
+  .code { font-weight: bold; color: #16233c; }
+  .muted { color: #7a8398; font-size: 7.3pt; }
+  tr.shift td { background: #fff8e8 !important; color: #7a4d00; font-style: italic; }
+  tr.subtotal td {
+    border-top: 1.1pt solid #0B4F9E; background: #eaf1fb !important;
+    font-weight: bold; color: #0B4F9E;
+  }
+
+  /* ---------- rachunek listy ---------- */
+  table.bill { width: 100%; border-collapse: collapse; margin-top: 4mm; }
+  table.bill th {
+    background: #16233c; color: #fff; font-size: 7.3pt; font-weight: bold;
+    padding: 2mm 1.6mm; text-align: right; border: .3pt solid #16233c;
+  }
+  table.bill td {
+    padding: 2.4mm 1.6mm; border: .3pt solid #d7dce6; text-align: right;
+    font-size: 9.6pt; font-weight: bold; color: #16233c;
+  }
+  table.bill td.gold { background: #F0A500; color: #2a1c00; font-size: 10.6pt; }
+
+  .travel {
+    margin-top: 2.4mm; padding: 2mm 3mm; border: .4pt solid #d7dce6;
+    border-left: 2mm solid #0B4F9E; font-size: 8.4pt; color: #3d4658; background: #f7f9fd;
+  }
+  .travel b { color: #0B4F9E; }
+
+  .words {
+    margin-top: 3.5mm;
+    border: .4pt solid #d7dce6; border-left: 2mm solid #F0A500;
+    padding: 2.4mm 3mm; background: #fffdf7;
+  }
+  .words .label {
+    font-size: 7pt; letter-spacing: 1.2pt; text-transform: uppercase;
+    color: #8a93a6; font-weight: bold;
+  }
+  .words .value { font-size: 9.6pt; color: #16233c; margin-top: 1mm; }
+
+  .signs { width: 100%; border-collapse: collapse; margin-top: 14mm; }
+  .signs td { width: 33.3%; text-align: center; padding: 0 3mm; vertical-align: bottom; }
+  .sign-line { border-top: .5pt solid #98a1b4; padding-top: 1.4mm; }
+  .sign-label { font-size: 7.2pt; color: #7a8398; }
+
+  .footnote {
+    margin-top: 7mm; padding-top: 2mm; border-top: .4pt solid #e3e8f0;
+    font-size: 7.1pt; color: #8a93a6; line-height: 1.55;
+  }
+  .footnote b { color: #5a6478; }
+</style>
+</head>
+<body>
+{% for doc in docs %}
+<div class="doc">
+
+<table class="head">
+  <tr>
+    {% if logo %}<td class="logo"><img src="data:image/png;base64,{{ logo }}" alt="" /></td>{% endif %}
+    <td>
+      <div class="org-name">{{ org_name }}</div>
+      {% if org_address %}<div class="org-addr">{{ org_address }}</div>{% endif %}
+    </td>
+    <td class="doc-box">
+      <div class="doc-kind">Lista sędziowska</div>
+      <div class="doc-number">{{ doc.number }}</div>
+      <div class="doc-part">część {{ doc.letter }} z {{ doc.parts }}</div>
+      <div class="doc-period">{{ period_label }}</div>
+    </td>
+  </tr>
+</table>
+
+<div class="rule"><div class="rule-gold"></div></div>
+
+<div class="title">
+  Lista sędziowska nr {{ doc.number }}
+  {%- if reprint %}<span class="reprint">WYDRUK PONOWNY {{ printed_on }}</span>{% endif %}
+</div>
+<div class="subtitle">
+  Część {{ doc.letter }} z {{ doc.parts }} &middot; ekwiwalent sędziowski za {{ period_label }}
+  &middot; pula miesiąca {{ pool_gross | money }} brutto wypłacana listami {{ numbers_label }}
+  &middot; wystawiono {{ issued_on }}
+  {%- if include_future %} &middot; <b>z meczami jeszcze nierozegranymi</b>{% endif %}
+</div>
+
+<table class="person">
+  <tr>
+    <td style="width:52%"><div class="label">Nazwisko i imię</div><div class="value">{{ judge_name }}</div></td>
+    <td style="width:20%"><div class="label">Nr sędziego</div><div class="value">{{ judge_id }}</div></td>
+    <td><div class="label">Miejscowość</div><div class="value">{{ home_city or "-" }}</div></td>
+  </tr>
+</table>
+
+<table class="grid">
+  <thead>
+    <tr>
+      <th class="c">Lp</th>
+      <th class="l">Data</th>
+      <th class="l">Mecz</th>
+      <th class="l">Funkcja</th>
+      <th class="l">Miejsce</th>
+      <th>Ekwiwalent brutto</th>
+      <th>Zwrot dojazdu</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in doc.rows %}
+    <tr>
+      <td class="c lp">{{ row.lp }}</td>
+      <td class="l">{{ row.day_label }}</td>
+      <td class="l">
+        <span class="code">{{ row.code }}</span>
+        {%- if row.category %} <span class="muted">{{ row.category }}</span>{% endif %}
+        {%- if row.teams %}<div class="muted">{{ row.teams }}</div>{% endif %}
+      </td>
+      <td class="l">{{ row.role }}</td>
+      <td class="l">{{ row.city or "-" }}</td>
+      <td>{% if row.rate_shared %}<span class="muted">w stawce turnieju</span>{% else %}{{ row.gross | money }}{% endif %}</td>
+      <td>{% if row.travel_shared %}<span class="muted">wliczony</span>{% else %}{{ row.travel | money }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+    {% if not doc.rows %}
+    <tr><td class="c lp">-</td><td class="l muted" colspan="6">Lista bez meczów - kwota przeniesiona z innych list tego podziału.</td></tr>
+    {% endif %}
+    {% if doc.shift %}
+    <tr class="shift">
+      <td></td>
+      <td class="l" colspan="4">Przesunięcie kwoty między listami tego podziału (mecze {{ doc.matches_gross | money }})</td>
+      <td>{% if doc.shift > 0 %}+{% endif %}{{ doc.shift | money }}</td>
+      <td></td>
+    </tr>
+    {% endif %}
+    <tr class="subtotal">
+      <td></td>
+      <td class="l" colspan="4">RAZEM LISTA {{ doc.letter }}</td>
+      <td>{{ doc.gross | money }}</td>
+      <td>{{ doc.travel | money }}</td>
+    </tr>
+  </tbody>
+</table>
+
+<table class="bill">
+  <thead>
+    <tr>
+      <th>Ekwiwalent brutto</th>
+      <th>Koszt uzyskania 20%</th>
+      <th>Kwota do opodatkowania</th>
+      <th>Podatek 12%</th>
+      <th>Do wypłaty</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>{{ doc.gross | money }}</td>
+      <td>{{ doc.costs | money }}</td>
+      <td>{{ doc.taxable | money }}</td>
+      <td>{{ doc.tax | money }}</td>
+      <td class="gold">{{ doc.net | money }}</td>
+    </tr>
+  </tbody>
+</table>
+
+{% if doc.travel %}
+<div class="travel">
+  Zwrot kosztów dojazdu przy meczach tej listy: <b>{{ doc.travel | money }}</b> - nie podlega
+  opodatkowaniu i nie wchodzi do kwoty do wypłaty powyżej. Razem z dojazdem: <b>{{ doc.total | money }}</b>.
+</div>
+{% endif %}
+
+<div class="words">
+  <div class="label">Słownie do wypłaty</div>
+  <div class="value">{{ doc.net_in_words }}</div>
+</div>
+
+<table class="signs">
+  <tr>
+    <td><div class="sign-line"><div class="sign-label">Sporządził</div></div></td>
+    <td><div class="sign-line"><div class="sign-label">Sprawdzono pod względem formalnym i rachunkowym</div></div></td>
+    <td><div class="sign-line"><div class="sign-label">Zatwierdził</div></div></td>
+  </tr>
+</table>
+
+<div class="footnote">
+  <b>Podstawa:</b> Tabela Ryczałtów Sędziowskich ZPRP oraz stawki okręgowe obowiązujące w dniu
+  każdego meczu. &nbsp;&middot;&nbsp;
+  <b>Lista jest odrębnym rachunkiem:</b> koszty uzyskania 20% przysługują, gdy brutto tej listy
+  przekracza 200 zł{% if not doc.costs_granted %} (ta lista go nie przekracza){% endif %}; koszty,
+  podstawa i podatek zaokrąglone do pełnych złotych (art. 63 Ordynacji podatkowej).
+  &nbsp;&middot;&nbsp; W zestawieniu ekwiwalentów za {{ period_label }} sędzia figuruje jednym wierszem
+  z pełnym brutto i dopiskiem „wypłata listami {{ numbers_label }}".
+</div>
+
+</div>
+{% endfor %}
+</body>
+</html>

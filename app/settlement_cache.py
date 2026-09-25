@@ -79,6 +79,9 @@ WATCHED_TABLES = frozenset(
         "province_club_season_closures",
         "province_club_budgets",
         "province_modules",
+        # Podział puli sędziego na listy sędziowskie: wydane listy zmieniają
+        # koszty, podatek i netto w zestawieniu miesiąca.
+        "province_settlement_splits",
     }
 )
 

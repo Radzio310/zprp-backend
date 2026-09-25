@@ -335,6 +335,12 @@ async def load_settlement(
         date_to=date_to,
         include_future=include_future,
     )
+    # Podział puli na listy sędziowskie: sędzia z WYDANYMI listami ma koszty,
+    # podatek i netto jako sumę list (każda lista to osobny rachunek). Import
+    # w funkcji - tamten moduł importuje nas.
+    from app.province_settlement_splits import apply_splits
+
+    await apply_splits(province, year, month, entries)
 
     return {
         "province": province,
@@ -468,6 +474,8 @@ def _entry_json(entry: E.JudgeSettlement, *, with_matches: bool) -> dict:
         "missing_distance": entry.missing_distance,
         "missing_rate": entry.missing_rate,
         "guessed_stage": entry.guessed_stage,
+        # Podział na listy sędziowskie („3 listy", szkic, nieaktualne) albo None.
+        "split": entry.split,
     }
     if with_matches:
         payload["rows"] = [_match_json(m) for m in entry.matches]
@@ -1002,6 +1010,24 @@ async def months(
             [item for item in assignments if item.match_key not in club_paid],
             **common,
         )
+        # Wydane listy sędziowskie liczą koszty i podatek każdej listy osobno -
+        # kafel miesiąca ma pokazać to samo, co ekran po kliknięciu.
+        from app.province_settlement_splits import split_month_deltas
+
+        deltas = await split_month_deltas(
+            key,
+            assignments=[item for item in assignments if item.match_key not in club_paid],
+            common={**common, "names": base["names"]},
+            judge_id=judge_id,
+        )
+        for row in rows:
+            delta = deltas.get((row["year"], row["month"]))
+            if not delta:
+                continue
+            for field in ("costs", "taxable", "tax"):
+                row[field] = row[field] + delta[field]
+            for field in ("net", "total"):
+                row[field] = round(row[field] + delta[field], 2)
         if include_clubs and club_paid:
             rows = _merge_months(
                 rows,

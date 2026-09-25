@@ -202,6 +202,17 @@ async def _reserve_number(
     return number_text
 
 
+def _split_note(split: Optional[dict]) -> str:
+    """Dopisek pod nazwiskiem w zestawieniu: „wypłata listami SL/09/2026/4-6"."""
+    if not split or split.get("status") != "issued" or not split.get("label"):
+        return ""
+    if split.get("current"):
+        return f"wypłata listami {split['label']}"
+    # Listy wydane, ale miesiąc się pod nimi zmienił - kwoty w wierszu są bez
+    # podziału i dokument mówi to wprost.
+    return f"listy {split['label']} nieaktualne - wiersz liczony bez podziału"
+
+
 class PdfRequest(BaseModel):
     province: str
     year: int
@@ -275,9 +286,13 @@ async def zestawienie_pdf(payload: PdfRequest):
                     "taxable": e.taxable,
                     "tax": e.tax,
                     "net": e.net,
+                    "split_note": _split_note(e.split),
+                    "split_applied": bool(e.split and e.split.get("current")),
                 }
                 for e in entries
             ],
+            # Przypis pod tabelą - tylko gdy ktoś ma wydane listy sędziowskie.
+            "split_rows": sum(1 for e in entries if e.split and e.split.get("current")),
             "totals": totals,
             "total_in_words": amount_in_words(totals["net"]),
             "outside_rows": [
@@ -426,6 +441,8 @@ async def documents(
                 "totals": row["totals_json"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                 "created_by": row["created_by"],
+                # „anulowana" = numer unieważniony przy odblokowaniu podziału na listy.
+                "status": row["status"],
             }
             for row in rows
         ]

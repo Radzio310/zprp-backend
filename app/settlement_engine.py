@@ -136,6 +136,9 @@ class JudgeSettlement:
     missing_distance: int = 0
     missing_rate: int = 0
     guessed_stage: int = 0
+    #: Podział na listy sędziowskie (`settlement_split_rules.list_badge`) -
+    #: dokłada go `province_settlements.load_settlement`; silnik go nie liczy.
+    split: Optional[dict] = None
 
 
 def _is_future(when: Optional[datetime], now: datetime) -> bool:

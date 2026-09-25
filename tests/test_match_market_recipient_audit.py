@@ -100,7 +100,12 @@ def test_push_report_counts_people_once_even_with_multiple_devices():
     push_tree = ast.parse(push_source)
     function = copy.deepcopy(next(node for node in push_tree.body if isinstance(node, ast.AsyncFunctionDef)
                                   and node.name == "send_push_to_judges_report"))
-    function.body = [node for node in function.body if not isinstance(node, ast.ImportFrom) or node.module != "fcm"]
+    function.body = [
+        node
+        for node in function.body
+        if not isinstance(node, ast.ImportFrom)
+        or node.module not in ("fcm", "device_policy")
+    ]
     module = ast.fix_missing_locations(ast.Module(body=[
         ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
         function,
@@ -120,10 +125,15 @@ def test_push_report_counts_people_once_even_with_multiple_devices():
     async def invalidate(*args):
         pass
 
+    async def dev_enabled():
+        return False
+
     namespace = {
         "database": Database(), "push_tokens": SimpleNamespace(c=Columns()),
         "select": lambda *args: Query(), "or_": lambda *args: args,
         "send_fcm_message": send, "invalidate_rejected_fcm_token": invalidate,
+        "dev_pushes_enabled": dev_enabled,
+        "device_allowed": lambda row, allow_dev: True,
         "logger": SimpleNamespace(warning=lambda *args, **kwargs: None),
     }
     exec(compile(module, "push.send_push_to_judges_report", "exec"), namespace)

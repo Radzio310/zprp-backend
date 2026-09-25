@@ -447,23 +447,9 @@ def build_change_events(old: Dict[str, Any], new: Dict[str, Any]) -> List[Dict[s
 
 
 def _prefs_allow(prefs: Any, event_type: str) -> bool:
-    if isinstance(prefs, (str, bytes, bytearray)):
-        # Ten sam sterownikowy kaprys, co przy stanie meczu - patrz nota przy
-        # imporcie `state_dict`. Bez parsowania napis '{"enabled": false}'
-        # przechodzil jako "nie-slownik", czyli ZGODA na powiadomienie.
-        prefs = state_dict(prefs)
-    if not isinstance(prefs, dict):
-        return True
-    if prefs.get("enabled") is False:
-        return False
-    types = prefs.get("notificationTypes")
-    if not isinstance(types, dict):
-        return True
-    if event_type in ("match_added", "match_removed", "assignment_removed"):
-        return types.get("newMatchAdded", True) is not False
-    if event_type == "lineup_changed":
-        return types.get("changeLineup", True) is not False
-    return types.get("changeMatchData", True) is not False
+    from app.push.preferences import province_event_allowed
+
+    return province_event_allowed(prefs, event_type)
 
 
 async def _active_judge_ids(province: str) -> List[str]:
@@ -587,15 +573,13 @@ async def _create_event(
         .where(or_(push_tokens.c.app_variant == "baza", push_tokens.c.app_variant.is_(None)))
     )
     from app.push.device_policy import dev_pushes_enabled, device_allowed
+    from app.push.preferences import province_event_preference_key
     allow_dev = await dev_pushes_enabled()
     for device in devices:
         if not device_allowed(device, allow_dev):
             continue
-        delivery_status = (
-            "pending"
-            if _prefs_allow(device["notification_prefs"], event_type)
-            else "suppressed"
-        )
+        allowed = _prefs_allow(device["notification_prefs"], event_type)
+        delivery_status = "pending" if allowed else "suppressed"
         await database.execute(
             pg_insert(province_match_notifications)
             .values(
@@ -606,6 +590,11 @@ async def _create_event(
                 body=body,
                 data_json=data,
                 status=delivery_status,
+                last_error=(
+                    None
+                    if allowed
+                    else f"notificationTypes.{province_event_preference_key(event_type)} disabled"
+                ),
             )
             .on_conflict_do_nothing(
                 constraint="uq_province_match_notification_event_installation"

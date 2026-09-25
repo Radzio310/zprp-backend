@@ -331,6 +331,7 @@ async def list_match_events(installation_id: str, limit: int = 100):
             province_match_notifications.c.body,
             province_match_notifications.c.data_json,
             province_match_notifications.c.status,
+            province_match_notifications.c.last_error,
             province_match_notifications.c.created_at,
             province_match_notifications.c.sent_at,
             province_match_events.c.match_code,

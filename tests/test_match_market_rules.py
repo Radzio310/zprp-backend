@@ -357,8 +357,8 @@ def test_market_broadcast_is_on_by_default():
     assert market_pushes_allowed({"notificationTypes": {}})
 
 
-def test_global_switch_wins():
-    assert not market_pushes_allowed({"enabled": False})
+def test_local_reminder_switch_does_not_silence_server_market_alerts():
+    assert market_pushes_allowed({"enabled": False})
 
 
 def test_market_switch_can_be_turned_off():
@@ -407,10 +407,12 @@ def test_slots_held_by_dziala_na_stanie_z_napisu():
 
 
 def test_preferencje_w_napisie_nadal_umieja_odmowic():
-    # Bez parsowania napis '{"enabled": false}' przechodzil jako "nie-slownik",
-    # czyli ZGODA - i powiadomienie szlo do kogos, kto je wylaczyl.
-    assert market_pushes_allowed('{"enabled": false}') is False
-    assert market_pushes_allowed('{"enabled": true}') is True
+    # `enabled` dotyczy lokalnych przypomnień. Zewnętrzną Giełdę wyłącza jej
+    # własny przełącznik, także gdy JSONB wróci ze sterownika jako napis.
+    assert market_pushes_allowed('{"enabled": false}') is True
+    assert market_pushes_allowed(
+        '{"notificationTypes": {"matchMarket": false}}'
+    ) is False
     assert market_pushes_allowed("cokolwiek")
 
 

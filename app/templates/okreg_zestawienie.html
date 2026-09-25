@@ -82,6 +82,7 @@
   .name { font-weight: bold; color: #16233c; }
   .muted { color: #7a8398; font-size: 7.6pt; }
   .strong-col { background: #fff8e8 !important; font-weight: bold; color: #7a4d00; }
+  .split-note { font-weight: normal; font-size: 7.2pt; color: #b07800; margin-top: .4mm; }
 
   /* wiersz sumy */
   tr.total td {
@@ -180,6 +181,7 @@
       <td class="l name">
         {{ row.name or row.judge_id }}
         {%- if row.future %} <span class="muted">(w tym {{ row.future }} nierozegr.)</span>{% endif %}
+        {%- if row.split_note %}<div class="split-note">{% if row.split_applied %}*{% endif %} {{ row.split_note }}</div>{% endif %}
       </td>
       <td class="c">{{ row.matches }}</td>
       <td>{{ row.gross | money }}</td>
@@ -219,6 +221,11 @@
   <b>Podstawa:</b> Tabela Ryczałtów Sędziowskich ZPRP oraz stawki okręgowe obowiązujące
   w dniu każdego meczu. &nbsp;&middot;&nbsp;
   <b>Koszty uzyskania i podatek</b> liczone od sumy ekwiwalentów sędziego za wskazany okres.
+  {%- if split_rows %}
+  &nbsp;&middot;&nbsp; <b>*</b> Sędzia wypłacany listami sędziowskimi: brutto to pełna kwota miesiąca,
+  a koszty uzyskania, podstawa, podatek i kwota do wypłaty są sumą list - każda lista jest odrębnym
+  rachunkiem (koszty 20% tylko na liście powyżej 200 zł, podatek zaokrąglany na każdej liście).
+  {%- endif %}
   &nbsp;&middot;&nbsp; Kwoty przejazdów rozliczane są odrębnie, Listą kosztów przejazdów.
   {%- if not include_zprp %}
   &nbsp;&middot;&nbsp; Zestawienie nie obejmuje obsad rozliczanych przez ZPRP: sędziów boiskowych

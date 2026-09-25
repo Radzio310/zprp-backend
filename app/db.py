@@ -1255,6 +1255,9 @@ province_settlement_documents = Table(
     Column("totals_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("created_by", String, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
+    # „anulowana" = numer unieważniony (odblokowany podział na listy). Numer
+    # zostaje w księdze i nigdy nie wraca do puli. Pusto = dokument ważny.
+    Column("status", String, nullable=True),
 )
 
 
@@ -4143,6 +4146,11 @@ from app.assignment_board_tables import define_tables as _define_board_tables
 from app.assignment_role_tables import define_tables as _define_role_tables
 (province_judge_zprp_roles,) = _define_role_tables(metadata)
 
+# Podział puli sędziego na listy sędziowskie (Rozliczenia, 25.09.2026)
+# - schemat w osobnym module.
+from app.settlement_split_tables import define_tables as _define_split_tables
+(province_settlement_splits,) = _define_split_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
@@ -4194,6 +4202,9 @@ with engine.connect() as _conn:
         )
     )
     _conn.execute(text("ALTER TABLE mentoring_pairs ADD COLUMN IF NOT EXISTS baseline_at timestamptz"))
+    # Unieważnione numery list sędziowskich (25.09.2026). Księga dokumentów
+    # istnieje na produkcji, więc `create_all` kolumny nie doda.
+    _conn.execute(text("ALTER TABLE province_settlement_documents ADD COLUMN IF NOT EXISTS status varchar"))
     # Deklaracja stolikowego od klubu działa na obciążenia od wskazanego dnia
     # (18.09.2026). Tabela istnieje na produkcji, więc `create_all` kolumny nie doda.
     _conn.execute(

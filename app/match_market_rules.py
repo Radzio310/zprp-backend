@@ -418,17 +418,9 @@ def market_pushes_allowed(prefs: Any) -> bool:
     włączeniu w okręgu, a nie dopiero po tym, jak każdy sędzia odszuka
     przełącznik w ustawieniach.
     """
-    if isinstance(prefs, (str, bytes, bytearray)):
-        # Ten sam sterownikowy kaprys, co przy stanie meczu - patrz `state_dict`.
-        prefs = state_dict(prefs)
-    if not isinstance(prefs, dict):
-        return True
-    if prefs.get("enabled") is False:
-        return False
-    types = prefs.get("notificationTypes")
-    if not isinstance(types, dict):
-        return True
-    return types.get("matchMarket", True) is not False
+    from app.push.preferences import market_broadcast_allowed
+
+    return market_broadcast_allowed(prefs)
 
 
 #: Gniazdo → (numer, nazwisko) dla CAŁEJ obsady, także tej spoza giełdy.
