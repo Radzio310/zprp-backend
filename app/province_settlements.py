@@ -951,6 +951,38 @@ def _merge_months(district: list[dict], club: list[dict]) -> list[dict]:
     return [out[stamp] for stamp in sorted(out)]
 
 
+async def _split_months(
+    key: str,
+    rows: list[dict],
+    assignments: list,
+    club_paid: set[str],
+    common: dict,
+    names: dict,
+    judge_id: Optional[str],
+) -> None:
+    """
+    Poprawka siatki o wydane listy sędziowskie - kafel miesiąca ma pokazać to
+    samo, co ekran po kliknięciu (koszty i podatek liczone na każdej liście).
+    Import w funkcji - tamten moduł importuje nas.
+    """
+    from app.province_settlement_splits import split_month_deltas
+
+    deltas = await split_month_deltas(
+        key,
+        assignments=[item for item in assignments if item.match_key not in club_paid],
+        common={**common, "names": names},
+        judge_id=judge_id,
+    )
+    for row in rows:
+        delta = deltas.get((row["year"], row["month"]))
+        if not delta:
+            continue
+        for field in ("costs", "taxable", "tax"):
+            row[field] = row[field] + delta[field]
+        for field in ("net", "total"):
+            row[field] = round(row[field] + delta[field], 2)
+
+
 @router.get("/months", summary="Sumy miesiąc po miesiącu - do siatki sezonów")
 async def months(
     request: Request,
@@ -1010,24 +1042,8 @@ async def months(
             [item for item in assignments if item.match_key not in club_paid],
             **common,
         )
-        # Wydane listy sędziowskie liczą koszty i podatek każdej listy osobno -
-        # kafel miesiąca ma pokazać to samo, co ekran po kliknięciu.
-        from app.province_settlement_splits import split_month_deltas
-
-        deltas = await split_month_deltas(
-            key,
-            assignments=[item for item in assignments if item.match_key not in club_paid],
-            common={**common, "names": base["names"]},
-            judge_id=judge_id,
-        )
-        for row in rows:
-            delta = deltas.get((row["year"], row["month"]))
-            if not delta:
-                continue
-            for field in ("costs", "taxable", "tax"):
-                row[field] = row[field] + delta[field]
-            for field in ("net", "total"):
-                row[field] = round(row[field] + delta[field], 2)
+        # Wydane listy sędziowskie: podatek każdej listy osobno (`_split_months`).
+        await _split_months(key, rows, assignments, club_paid, common, base["names"], judge_id)
         if include_clubs and club_paid:
             rows = _merge_months(
                 rows,
