@@ -47,8 +47,8 @@ z meczami przydzielonymi w TYM przebiegu i w kolejce (`pending`).
 
 STOLIK W ROZGRYWKACH OKRĘGOWYCH: najpierw sędziowie z odznaką „Stolikowi"
 („Stolikowy"), pozostali dopiero, gdy żadnego stolikowego nie da się wziąć -
-ale tylko dopóki stolikowy nie ma w okresie więcej meczów niż najmniej
-obciążony kandydat (`TABLE_BADGE_SLACK`, `badge_tier`). Bez tej granicy
+ale tylko dopóki stolikowy nie ma w okresie więcej niż JEDEN mecz ponad
+najmniej obciążonego kandydata (decyzja 25.09.2026) (`TABLE_BADGE_SLACK`, `badge_tier`). Bez tej granicy
 czterech stolikowych brało po kilkanaście stolików w dwa tygodnie.
 W II lidze, I lidze, Lidze Centralnej i Superlidze stolik bez tej preferencji -
 wszyscy na równi (liczą się tylko wymagania licencji z `table_rule`).
@@ -128,7 +128,7 @@ W_PERIOD = 2500.0
 #: stolikowy ma w okresie najwyżej o tyle meczów więcej niż najmniej obciążony
 #: kandydat. Bez tego progu czterech stolikowych brało po kilkanaście stolików
 #: w dwa tygodnie, a reszta nic (test `test_assignment_period_spread`).
-TABLE_BADGE_SLACK = 0
+TABLE_BADGE_SLACK = 1
 W_OFF_DAY = 120.0
 W_SAME_DAY = 600.0
 W_UNKNOWN_KM = 90.0

@@ -274,9 +274,9 @@ async def _next_seq(key: str, year: int, month: int) -> int:
 
 
 def _number(key: str, year: int, month: int, seq: int) -> str:
-    from app.province_settlements import province_short
-
-    return f"{province_short(key)}/{month:02d}/{year}/{seq}"
+    # Własny wyróżnik „LS" (decyzja 25.09.2026): listy mają osobny licznik,
+    # więc bez niego pierwsza lista miesiąca nosiłaby numer Zestawienia.
+    return f"LS/{month:02d}/{year}/{seq}"
 
 
 async def _peek_numbers(key: str, year: int, month: int, count: int) -> list[str]:
