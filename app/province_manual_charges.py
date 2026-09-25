@@ -367,6 +367,12 @@ class OfficialIn(BaseModel):
     km_one_way: Optional[float] = None
     #: "manual" = wpisane ręcznie, nie nadpisujemy przy wycenie.
     km_source: Optional[str] = None
+    #: Własny ryczałt sędziego w podstawie `fee_mode`; brak = stawka roli.
+    fee_amount: Optional[float] = None
+    #: "gross"/"net" (albo "brutto"/"netto"); brak = podstawa całego meczu.
+    fee_mode: Optional[str] = None
+    #: Własny zwrot za dojazd; brak = tak (o ile mecz ma zwrot włączony).
+    travel_on: Optional[bool] = None
 
 
 class ManualChargeIn(BaseModel):
@@ -378,7 +384,8 @@ class ManualChargeIn(BaseModel):
     city: Optional[str] = None
     travel_enabled: bool = True
     rate_mode: str = M.MODE_GROSS
-    #: Ryczałt na sędziego w trybie `rate_mode`; pusto = domyślny z tabeli okręgu.
+    #: DOMYŚLNY ryczałt roli w trybie `rate_mode` - dostaje go każdy sędzia bez
+    #: własnej kwoty (`OfficialIn.fee_amount`); pusto = domyślny z tabeli okręgu.
     field_fee: Optional[float] = None
     table_fee: Optional[float] = None
     officials: list[OfficialIn] = []
@@ -423,6 +430,7 @@ async def _price(payload: ManualChargeIn, key: str) -> dict:
         table_fee=table_gross,
         rate=rate,
         travel_enabled=bool(payload.travel_enabled),
+        rate_mode=mode,
     )
     totals = {**M.totals_of(priced), "km_rate": rate}
     return {

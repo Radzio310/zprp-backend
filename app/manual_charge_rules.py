@@ -17,6 +17,14 @@ Decyzje użytkownika z 23.09.2026:
     wyłącza przejazdy całej obsadzie,
   - rachunek klubu = suma ryczałtów + przejazdy.
 
+Decyzja z 25.09.2026 - STAWKA NA SĘDZIEGO: kwota roli (boiskowy/stolikowy)
+jest tylko DOMYŚLNA. Każdy sędzia może mieć własny ryczałt (`fee_amount`
+w swojej podstawie `fee_mode` - brutto albo netto) i własny zwrot za dojazd
+(`travel_on`). Brak tych pól = sędzia idzie za stawką roli, więc stare
+rekordy (sprzed 25.09) liczą się dokładnie tak jak wcześniej. Rachunek klubu
+= suma brutto KAŻDEGO sędziego + jego przejazd; w rozliczeniu sędziego silnik
+bierze jego własne brutto (`Assignment.fixed_gross`).
+
 JEDEN RACHUNEK, DWIE STRONY. Rekord ręcznego meczu zamienia się tu na zwykłe
 obsady silnika (`settlement_engine.Assignment`) z GOTOWĄ kwotą
 (`fixed_gross`, `fixed_travel`) zamiast stawki z tabeli. Z tych obsad liczy się
@@ -53,6 +61,17 @@ ROLE_OF = {FIELD: R.ROLE_FIELD, TABLE: R.ROLE_TABLE}
 
 MODE_GROSS = "gross"
 MODE_NET = "net"
+#: Słowa, którymi ekran może nazwać podstawę kwoty.
+_MODE_WORDS = {
+    "gross": MODE_GROSS,
+    "brutto": MODE_GROSS,
+    "net": MODE_NET,
+    "netto": MODE_NET,
+}
+
+#: Górna granica ryczałtu jednego sędziego za jeden mecz - wyżej to niemal
+#: na pewno literówka (dodatkowe zero), więc zapis się zatrzymuje i mówi dlaczego.
+MAX_FEE = 5000
 
 #: Godzina meczu bez podanej godziny - środek dnia, żeby żadna strefa czasowa
 #: nie przesunęła meczu na inny dzień (a więc na inny miesiąc rozliczenia).
@@ -183,14 +202,53 @@ def gross_from_net(net: float) -> float:
     return money(high + cents / 100)
 
 
+def normalize_mode(value: Any, fallback: Optional[str] = MODE_GROSS) -> Optional[str]:
+    """„gross"/„brutto" -> gross, „net"/„netto" -> net; inne słowo -> `fallback`."""
+    return _MODE_WORDS.get(_s(value).lower(), fallback)
+
+
 def fee_gross(amount: Any, mode: str) -> float:
     """Ryczałt z formularza (brutto albo netto) -> brutto z groszami."""
     value = _num(amount) or 0.0
     if value <= 0:
         return 0
-    if _s(mode) == MODE_NET:
+    if normalize_mode(mode) == MODE_NET:
         return gross_from_net(value)
     return money(value)
+
+
+def official_fee(raw: dict, *, role_gross: float, record_mode: Any = MODE_GROSS) -> dict:
+    """
+    Ryczałt JEDNEGO sędziego - własny albo domyślny z roli.
+
+    `fee_amount` podany (liczba) = własna stawka w podstawie `fee_mode`
+    (brak podstawy = podstawa całego meczu). Brak `fee_amount` = sędzia idzie
+    za stawką roli - tak liczą się wszystkie rekordy sprzed 25.09.2026.
+
+    Zwraca: fee_amount (None = domyślna), fee_mode, fee_custom, fee_gross, fee_net.
+    """
+    base_mode = normalize_mode(record_mode) or MODE_GROSS
+    mode = normalize_mode(raw.get("fee_mode"), base_mode) or base_mode
+    amount = _num(raw.get("fee_amount"))
+    if amount is None:
+        gross = money(role_gross)
+        return {
+            "fee_amount": None,
+            "fee_mode": mode,
+            "fee_custom": False,
+            "fee_gross": gross,
+            "fee_net": net_of(gross) if gross > 0 else 0.0,
+        }
+    amount = money(amount)
+    gross = fee_gross(amount, mode)
+    return {
+        "fee_amount": amount,
+        "fee_mode": mode,
+        # Kwota równa domyślnej to wciąż „za rolą" - ekran nie pokaże znacznika.
+        "fee_custom": gross != money(role_gross),
+        "fee_gross": gross,
+        "fee_net": net_of(gross) if gross > 0 else 0.0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -281,13 +339,18 @@ def price_officials(
     table_fee: float,
     rate: float,
     travel_enabled: bool,
+    rate_mode: Any = MODE_GROSS,
 ) -> list[dict]:
     """
-    Obsada z kwotami: ryczałt z roli, przejazd z km x 2 x stawka.
+    Obsada z kwotami: ryczałt sędziego (własny albo z roli), przejazd
+    z km x 2 x stawka.
 
     Każdy wiersz: judge_id, name, role (field|table), home_city, km_one_way,
-    km_source, fee_gross, travel. Przejazd liczy `settlement_rates.travel_pln`
-    - ta sama funkcja co dla meczów z terminarza, do grosza.
+    km_source, fee_amount, fee_mode, fee_custom, fee_gross, fee_net,
+    travel_on, travel. Przejazd liczy `settlement_rates.travel_pln` - ta sama
+    funkcja co dla meczów z terminarza, do grosza. Przejazd sędziego wymaga
+    OBU zgód: zwrotu za dojazd całego meczu i jego własnego `travel_on`
+    (brak = tak).
     """
     out: list[dict] = []
     for raw in officials or []:
@@ -297,7 +360,14 @@ def price_officials(
         source = _s(raw.get("km_source")) or ("none" if km is None else "manual")
         if source not in KM_SOURCES:
             source = "manual"
-        travel = R.travel_pln(km, rate) if (travel_enabled and km) else 0.0
+        travel_on = raw.get("travel_on")
+        travel_on = True if travel_on is None else bool(travel_on)
+        travel = R.travel_pln(km, rate) if (travel_enabled and travel_on and km) else 0.0
+        fee = official_fee(
+            raw,
+            role_gross=field_fee if role == FIELD else table_fee,
+            record_mode=rate_mode,
+        )
         out.append(
             {
                 "judge_id": _s(raw.get("judge_id")),
@@ -306,7 +376,8 @@ def price_officials(
                 "home_city": _s(raw.get("home_city")),
                 "km_one_way": km,
                 "km_source": source,
-                "fee_gross": money(field_fee if role == FIELD else table_fee),
+                **fee,
+                "travel_on": travel_on,
                 "travel": float(travel),
             }
         )
@@ -323,7 +394,15 @@ def totals_of(priced: Iterable[dict]) -> dict:
         "officials": len(items),
         "field": sum(1 for item in items if item["role"] == FIELD),
         "table": sum(1 for item in items if item["role"] == TABLE),
+        # Ilu sędziów ma własną stawkę (inną niż stawka roli).
+        "custom": sum(1 for item in items if item.get("fee_custom")),
         "gross": gross,
+        # Netto przy jednym meczu w miesiącu - podpowiedź; naprawdę KUP
+        # i podatek liczą się od sumy miesiąca sędziego.
+        "net": money_sum(
+            item["fee_net"] if item.get("fee_net") is not None else net_of(item["fee_gross"])
+            for item in items
+        ),
         "travel": travel,
         "km": round(sum(float(item["km_one_way"] or 0) for item in items if item["travel"]) * R.ROUND_TRIP, 1),
         "total": money_sum((gross, travel)),
@@ -359,16 +438,28 @@ def problems(
         if key[0] and key in seen:
             out.append(f"{item.get('name') or key[0]} jest dodany dwa razy w tej samej roli.")
         seen.add(key)
-    roles = {normalize_role(item.get("role")) for item in items}
-    if FIELD in roles and field_fee <= 0:
+    # Stawka roli musi być dodatnia tylko wtedy, gdy ktoś za nią idzie.
+    following = {normalize_role(item.get("role")) for item in items if _num(item.get("fee_amount")) is None}
+    if FIELD in following and field_fee <= 0:
         out.append("Podaj ryczałt boiskowego większy od zera.")
-    if TABLE in roles and table_fee <= 0:
+    if TABLE in following and table_fee <= 0:
         out.append("Podaj ryczałt stolikowego większy od zera.")
+    for item in items:
+        name = item.get("name") or item.get("judge_id") or "sędzia"
+        own = _num(item.get("fee_amount"))
+        if own is not None and own <= 0:
+            out.append(f"Ryczałt dla {name} musi być większy od zera - wpisz kwotę albo przywróć domyślną.")
+        gross = _num(item.get("fee_gross")) or 0
+        if gross > MAX_FEE:
+            out.append(
+                f"Ryczałt dla {name} ({_pln(gross)} brutto) wygląda na pomyłkę - "
+                f"najwyżej {_pln(MAX_FEE)} za mecz."
+            )
     if travel_enabled:
         missing = [
             item.get("name") or item.get("judge_id") or "sędzia"
             for item in items
-            if _num(item.get("km_one_way")) is None
+            if item.get("travel_on", True) is not False and _num(item.get("km_one_way")) is None
         ]
         if missing:
             out.append(
@@ -376,6 +467,17 @@ def problems(
                 + ". Wpisz je albo wyłącz zwrot za dojazd."
             )
     return out
+
+
+def _pln(value: float) -> str:
+    """„5 000,00 zł" - kwota w komunikacie, po polsku."""
+    whole, cents = f"{money(value):.2f}".split(".")
+    groups = []
+    while len(whole) > 3:
+        groups.insert(0, whole[-3:])
+        whole = whole[:-3]
+    groups.insert(0, whole)
+    return f"{' '.join(groups)},{cents} zł"
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +543,10 @@ def assignments_of(record: dict, *, club_name: str = "") -> list[E.Assignment]:
         if not judge_id:
             continue
         km = _num(item.get("km_one_way"))
-        travel = float(item.get("travel") or 0) if travel_enabled else 0.0
+        # Sędzia bez własnego zwrotu (`travel_on` false) nie trafia na listę
+        # przejazdów - jak przy wyłączonym zwrocie całego meczu.
+        travel_on = travel_enabled and item.get("travel_on", True) is not False
+        travel = float(item.get("travel") or 0) if travel_on else 0.0
         out.append(
             E.Assignment(
                 match_key=key,
@@ -454,7 +559,7 @@ def assignments_of(record: dict, *, club_name: str = "") -> list[E.Assignment]:
                 city=city,
                 home_city=_s(item.get("home_city")),
                 teams=_teams_label(club_name),
-                distance_km=km if travel_enabled else None,
+                distance_km=km if travel_on else None,
                 distance_source=_s(item.get("km_source")) or None,
                 fixed_gross=float(item.get("fee_gross") or 0),
                 fixed_travel=travel,
