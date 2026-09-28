@@ -412,6 +412,20 @@ async def _notify_changed(event: Mapping[str, Any], invited: List[str], actor_id
     await _push([j for j in invited if j != actor_id], f"🔁 Zmiana: {event['name']}", body, event, "changed")
 
 
+async def _notify_changed_after_update(event_id: int, actor_id: str, place_only: bool = False) -> None:
+    """Powiadomienie po PATCH nie może blokować odpowiedzi dla aplikacji."""
+    try:
+        event = await _event(event_id)
+        judges = await _judges(_province(event["province"]))
+        await _notify_changed(event, _invited(judges, event), actor_id, place_only)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "wydarzenia: powiadomienie o zmianie nieudane event=%s",
+            event_id,
+            exc_info=True,
+        )
+
+
 async def _notify_cancelled(event: Mapping[str, Any], invited: List[str], actor_id: str) -> None:
     reason = _s(event.get("cancel_reason"))
     body = reason or f"Komisja odwołała wydarzenie zaplanowane na {_when(event)}."
@@ -744,7 +758,12 @@ async def create_v2(
 
 
 @router.patch("/v2/{event_id}", summary="Zmień wydarzenie (ten termin albo dalszą część serii)")
-async def patch_v2(event_id: int, body: EventPatch, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def patch_v2(
+    event_id: int,
+    body: EventPatch,
+    background_tasks: BackgroundTasks,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
     who = _require_judge(actor)
     existing = await _event(event_id)
     prov = _resolve_province(who, existing["province"])
@@ -764,7 +783,6 @@ async def patch_v2(event_id: int, body: EventPatch, actor: Actor = Depends(marke
 
     shift = values["event_date"] - existing["event_date"]
     duration = (values["end_date"] - values["event_date"]) if values["end_date"] else None
-    judges = await _judges(prov)
     changed = 0
     for target in targets:
         data = _data(target.get("data_json"))
@@ -808,13 +826,17 @@ async def patch_v2(event_id: int, body: EventPatch, actor: Actor = Depends(marke
                     delete(province_event_notifications).where(province_event_notifications.c.event_id == target["id"])
                 )
             if target["id"] == event_id:
-                fresh = await _event(event_id)
                 place_only = (
                     before["event_date"] == after["event_date"]
                     and before["end_date"] == after["end_date"]
                     and not R.same_place(before["place"], after["place"])
                 )
-                await _notify_changed(fresh, _invited(judges, fresh), who.judge_id, place_only)
+                background_tasks.add_task(
+                    _notify_changed_after_update,
+                    event_id,
+                    who.judge_id,
+                    place_only,
+                )
         changed += 1
     return {"updated": changed}
 
