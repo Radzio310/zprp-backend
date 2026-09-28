@@ -243,6 +243,7 @@ def _person(judge: Optional[Mapping[str, Any]], judge_id: str) -> Dict[str, Any]
 def _details(data: Mapping[str, Any]) -> Dict[str, Any]:
     target = data.get("target") if isinstance(data.get("target"), Mapping) else {}
     image = data.get("title_image") if isinstance(data.get("title_image"), Mapping) else None
+    image_job = data.get("title_image_job") if isinstance(data.get("title_image_job"), Mapping) else None
     return {
         "target": R.clean_target(target),
         "include_ids": [_s(x) for x in data.get("include_ids") or [] if _s(x)],
@@ -254,6 +255,7 @@ def _details(data: Mapping[str, Any]) -> Dict[str, Any]:
         "capacity": data.get("capacity") or None,
         "program": data.get("program") if isinstance(data.get("program"), list) else [],
         "title_image": dict(image) if image else None,
+        "title_image_job": dict(image_job) if image_job else None,
     }
 
 
@@ -712,10 +714,13 @@ async def create_v2(
     if not reused:
         # Push potrafi trwać dłużej niż sam zapis. Odpowiedź wraca od razu,
         # a FastAPI kończy powiadomienia po jej wysłaniu.
-        background_tasks.add_task(_notify_new, first, invited, len(ids), who.judge_id)
         if body.generate_title_image:
             background_tasks.add_task(
-                _generate_and_attach_title_image,
+                _finish_new_event_in_background,
+                first,
+                invited,
+                len(ids),
+                who.judge_id,
                 ids,
                 {
                     "province": prov,
@@ -728,6 +733,8 @@ async def create_v2(
                     "regenerate": False,
                 },
             )
+        else:
+            background_tasks.add_task(_notify_new, first, invited, len(ids), who.judge_id)
     return {
         "ids": ids,
         "series_id": series_id,
@@ -766,7 +773,7 @@ async def patch_v2(event_id: int, body: EventPatch, actor: Actor = Depends(marke
         if details.get("rsvp_deadline") and target["id"] != event_id:
             details["rsvp_deadline"] = (R.parse_iso(details["rsvp_deadline"]) + (start - values["event_date"])).isoformat()
         # Kod obecności i stara lista obecnych nie przychodzą z formularza.
-        for keep in ("checkin", "present_ids", "invited_cache"):
+        for keep in ("checkin", "present_ids", "invited_cache", "title_image_job"):
             if keep in data:
                 details[keep] = data[keep]
         # Brak pola = grafika bez zmian; pusty słownik = usunięta w formularzu.
@@ -1439,11 +1446,8 @@ class TitleImageBody(BaseModel):
     extra_prompt: Optional[str] = None
 
 
-@router.post("/title-image", summary="Wygeneruj grafikę tytułową (OpenAI)")
-async def title_image(body: TitleImageBody, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
-    who = _require_judge(actor)
-    prov = _resolve_province(who, body.province)
-    _require_manager(who, prov)
+async def _render_title_image(body: TitleImageBody) -> Dict[str, Any]:
+    """Generuje plik. Osobna funkcja obsługuje starą trasę i zadanie w tle."""
     if not _s(body.name):
         raise HTTPException(400, "Najpierw wpisz nazwę wydarzenia")
     count = max(0, int(body.regeneration_count or 0))
@@ -1475,6 +1479,114 @@ async def title_image(body: TitleImageBody, actor: Actor = Depends(market_actor)
         "generated_at": _now().isoformat(),
         "regeneration_count": count + 1 if body.regenerate else count,
     }
+
+
+async def _set_title_image_job(
+    event_ids: List[int],
+    *,
+    status: str,
+    image: Optional[Mapping[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Aktualizuje wyłącznie dane grafiki na najświeższym JSON-ie wydarzenia."""
+    for event_id in event_ids:
+        try:
+            event = await _event(event_id, deleted_ok=True)
+            data = _data(event.get("data_json"))
+            if image:
+                data["title_image"] = dict(image)
+            data["title_image_job"] = {
+                "status": status,
+                "updated_at": _now().isoformat(),
+                "error": error,
+            }
+            await database.execute(
+                update(province_events)
+                .where(province_events.c.id == event_id)
+                .values(data_json=data, updated_at=_now())
+            )
+        except Exception:
+            logger.exception("wydarzenia: nie udało się zapisać stanu grafiki event=%s", event_id)
+
+
+async def _generate_and_attach_title_image(
+    event_ids: List[int],
+    payload: Mapping[str, Any],
+) -> None:
+    """Zadanie działa po odpowiedzi HTTP; zamknięcie aplikacji go nie przerywa."""
+    try:
+        image = await _render_title_image(TitleImageBody(**dict(payload)))
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else "Generator grafiki chwilowo nie działa"
+        logger.exception("wydarzenia: generowanie grafiki w tle nie powiodło się")
+        await _set_title_image_job(event_ids, status="failed", error=_s(detail)[:300])
+        return
+    await _set_title_image_job(event_ids, status="complete", image=image)
+
+
+async def _finish_new_event_in_background(
+    event: Mapping[str, Any],
+    invited: List[str],
+    occurrences: int,
+    actor_id: str,
+    event_ids: List[int],
+    image_payload: Mapping[str, Any],
+) -> None:
+    """Push i OpenAI startują równolegle; żadne nie opóźnia odpowiedzi POST."""
+    results = await asyncio.gather(
+        _notify_new(event, invited, occurrences, actor_id),
+        _generate_and_attach_title_image(event_ids, image_payload),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(
+                "wydarzenia: zadanie po utworzeniu nie powiodło się: %s",
+                result,
+            )
+
+
+@router.post("/title-image", summary="Wygeneruj grafikę tytułową (stara aplikacja)")
+async def title_image(body: TitleImageBody, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+    who = _require_judge(actor)
+    prov = _resolve_province(who, body.province)
+    _require_manager(who, prov)
+    return await _render_title_image(body)
+
+
+@router.post("/{event_id}/title-image", summary="Dodaj grafikę do wydarzenia w tle")
+async def queue_title_image(
+    event_id: int,
+    body: TitleImageBody,
+    background_tasks: BackgroundTasks,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    who = _require_judge(actor)
+    event = await _event(event_id)
+    prov = _resolve_province(who, event["province"])
+    _require_manager(who, prov)
+    data = _data(event.get("data_json"))
+    existing = data.get("title_image") if isinstance(data.get("title_image"), Mapping) else {}
+    count = max(0, int((existing or {}).get("regeneration_count") or 0))
+    if body.regenerate and count >= R.TITLE_IMAGE_REGENERATIONS:
+        raise HTTPException(400, "Grafikę można odświeżyć najwyżej 2 razy")
+    queued = {
+        **body.model_dump(),
+        "province": prov,
+        "regeneration_count": count,
+    }
+    data["title_image_job"] = {
+        "status": "queued",
+        "requested_at": _now().isoformat(),
+        "error": None,
+    }
+    await database.execute(
+        update(province_events)
+        .where(province_events.c.id == event_id)
+        .values(data_json=data, updated_at=_now())
+    )
+    background_tasks.add_task(_generate_and_attach_title_image, [event_id], queued)
+    return {"queued": True, "event_id": event_id}
 
 
 # ---------------------------------------------------------------------------
