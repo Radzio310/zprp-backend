@@ -18,6 +18,7 @@ from app.match_bombs_rules import (
     author_is_visible,
     bomb_sentence,
     counts_to_stats,
+    comparable_instant,
     crew_from_payload,
     crew_from_state,
     find_in_crew,
@@ -171,6 +172,24 @@ def test_mecz_bez_daty_nie_odcina_obsady():
 
 def test_okno_konczy_sie_dokladnie_po_dwoch_tygodniach():
     assert report_window_end(MATCH_AT) == MATCH_AT + timedelta(days=14)
+
+
+def test_naiwny_termin_z_aplikacji_jest_czasem_polskim_i_nie_wywala_500():
+    """Regresja z produkcji: query `2026-10-12 19:00:00` nie ma offsetu."""
+    match_at = datetime(2026, 10, 12, 19, 0)  # Europe/Warsaw = 17:00 UTC
+    before = datetime(2026, 10, 12, 16, 59, tzinfo=timezone.utc)
+    after = datetime(2026, 10, 12, 17, 1, tzinfo=timezone.utc)
+
+    assert "jeszcze się nie zaczął" in (may_report(match_at, before) or "")
+    assert may_report(match_at, after) is None
+
+
+def test_porownanie_dziala_tez_gdy_to_zegar_testu_jest_naiwny():
+    match_at = datetime(2026, 12, 1, 19, 0, tzinfo=timezone.utc)
+    now_local = datetime(2026, 12, 1, 20, 1)  # Warszawa = 19:01 UTC
+
+    assert may_report(match_at, now_local) is None
+    assert comparable_instant(now_local).tzinfo == timezone.utc
 
 
 # ─────────────────────────── cofanie i uniewaznianie ───────────────────────────

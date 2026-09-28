@@ -32,10 +32,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, insert, or_, select, update
+from sqlalchemy import and_, delete, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import event_poster_file as posters
@@ -594,6 +594,8 @@ class EventBody(BaseModel):
     details: Dict[str, Any] = Field(default_factory=dict)
     title_image: Optional[Dict[str, Any]] = None
     recurrence: Optional[RecurrenceBody] = None
+    request_id: Optional[str] = None
+    generate_title_image: bool = False
 
 
 class EventPatch(EventBody):
@@ -620,12 +622,21 @@ def _clean_body(body: EventBody) -> Dict[str, Any]:
             "regeneration_count": int(body.title_image.get("regeneration_count") or 0),
             "generated_at": _s(body.title_image.get("generated_at")) or None,
         }
+    if body.generate_title_image and "title_image" not in details:
+        details["title_image_job"] = {
+            "status": "queued",
+            "requested_at": _now().isoformat(),
+        }
     values["details"] = details
     return values
 
 
 @router.post("/v2", summary="Utwórz wydarzenie (również serię)")
-async def create_v2(body: EventBody, actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
+async def create_v2(
+    body: EventBody,
+    background_tasks: BackgroundTasks,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
     who = _require_judge(actor)
     prov = _resolve_province(who, body.province)
     _require_manager(who, prov)
@@ -640,39 +651,89 @@ async def create_v2(body: EventBody, actor: Actor = Depends(market_actor)) -> Di
     except R.Invalid as error:
         raise _bad(error)
 
-    now = _now()
-    series_id = uuid.uuid4().hex if len(dates) > 1 else None
+    request_id = _s(body.request_id)[:96] or None
     ids: List[int] = []
-    for start, end in dates:
-        data = dict(values["details"])
-        if data.get("rsvp_deadline") and start != values["event_date"]:
-            # Termin odpowiedzi przesuwa się razem z terminem serii.
-            shift = start - values["event_date"]
-            data["rsvp_deadline"] = (R.parse_iso(data["rsvp_deadline"]) + shift).isoformat()
-        row = await database.fetch_one(
-            insert(province_events)
-            .values(
-                province=prov,
-                event_date=start,
-                end_date=end,
-                name=values["name"],
-                description=values["description"],
-                event_type=values["event_type"],
-                data_json=data,
-                series_id=series_id,
-                created_by=who.judge_id,
-                created_by_name=actor.full_name or None,
-                created_at=now,
-                updated_at=now,
+    series_id: Optional[str] = None
+    reused = False
+    async with database.transaction():
+        if request_id:
+            # Jeden klucz jest blokowany w bazie, więc dwa procesy serwera nie
+            # przejdą równolegle przez sprawdzenie i INSERT. Drugi POST po
+            # timeoutcie dostanie identyfikatory pierwszego zapisu.
+            lock = f"province-event:{prov}:{who.judge_id}:{request_id}"
+            await database.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:k))").bindparams(k=lock)
             )
-            .returning(province_events.c.id)
-        )
-        ids.append(int(row["id"]))
+            existing = await database.fetch_all(
+                select(province_events)
+                .where(province_events.c.province == prov)
+                .where(province_events.c.created_by == who.judge_id)
+                .where(province_events.c.create_request_id == request_id)
+                .order_by(province_events.c.event_date.asc(), province_events.c.id.asc())
+            )
+            if existing:
+                rows = [_row(row) for row in existing]
+                ids = [int(row["id"]) for row in rows]
+                series_id = rows[0].get("series_id")
+                reused = True
+
+        if not ids:
+            now = _now()
+            series_id = uuid.uuid4().hex if len(dates) > 1 else None
+            for start, end in dates:
+                data = dict(values["details"])
+                if data.get("rsvp_deadline") and start != values["event_date"]:
+                    # Termin odpowiedzi przesuwa się razem z terminem serii.
+                    shift = start - values["event_date"]
+                    data["rsvp_deadline"] = (R.parse_iso(data["rsvp_deadline"]) + shift).isoformat()
+                row = await database.fetch_one(
+                    insert(province_events)
+                    .values(
+                        province=prov,
+                        event_date=start,
+                        end_date=end,
+                        name=values["name"],
+                        description=values["description"],
+                        event_type=values["event_type"],
+                        data_json=data,
+                        series_id=series_id,
+                        created_by=who.judge_id,
+                        created_by_name=actor.full_name or None,
+                        created_at=now,
+                        updated_at=now,
+                        create_request_id=request_id,
+                    )
+                    .returning(province_events.c.id)
+                )
+                ids.append(int(row["id"]))
 
     first = await _event(ids[0])
     invited = _invited(await _judges(prov), first)
-    await _notify_new(first, invited, len(ids), who.judge_id)
-    return {"ids": ids, "series_id": series_id, "invited": len(invited)}
+    if not reused:
+        # Push potrafi trwać dłużej niż sam zapis. Odpowiedź wraca od razu,
+        # a FastAPI kończy powiadomienia po jej wysłaniu.
+        background_tasks.add_task(_notify_new, first, invited, len(ids), who.judge_id)
+        if body.generate_title_image:
+            background_tasks.add_task(
+                _generate_and_attach_title_image,
+                ids,
+                {
+                    "province": prov,
+                    "name": values["name"],
+                    "event_type": values["event_type"],
+                    "place": _s((values["details"].get("place") or {}).get("name"))
+                    or _s((values["details"].get("place") or {}).get("address")),
+                    "event_date": values["event_date"].isoformat(),
+                    "regeneration_count": 0,
+                    "regenerate": False,
+                },
+            )
+    return {
+        "ids": ids,
+        "series_id": series_id,
+        "invited": len(invited),
+        "reused": reused,
+    }
 
 
 @router.patch("/v2/{event_id}", summary="Zmień wydarzenie (ten termin albo dalszą część serii)")

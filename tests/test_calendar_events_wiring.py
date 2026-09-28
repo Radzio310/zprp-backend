@@ -67,3 +67,13 @@ def test_empty_color_id_means_no_color_field():
     src = code_of("_event_color_field")
     assert "if not color_id" in src
     assert "return {}" in src
+
+
+def test_delete_is_idempotent_for_missing_mapping_and_missing_google_event():
+    """Sprzątanie nie alarmuje 404, gdy wpisu już nie ma."""
+    src = code_of("delete_event")
+    assert "if not event_id" in src
+    assert "return" in src.split("if not event_id", 1)[1]
+    assert "except HttpError" in src
+    assert "(404, 410)" in src
+    assert "delete_event_mapping" in src

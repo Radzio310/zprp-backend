@@ -595,7 +595,10 @@ async def delete_event(
 ):
     event_id = await get_event_mapping(user_login, match_id)
     if not event_id:
-        raise HTTPException(status_code=404, detail="Nie znaleziono powiązanego wydarzenia")
+        # DELETE jest idempotentny: brak mapowania znaczy, że żądany stan już
+        # został osiągnięty. 404 generowało niepotrzebne alarmy przy sprzątaniu
+        # duplikatów i po ręcznym usunięciu wpisu przez użytkownika.
+        return
 
     tokens = await get_calendar_tokens(user_login)
     if not tokens:
@@ -624,8 +627,12 @@ async def delete_event(
     service = build("calendar", "v3", credentials=creds)
     try:
         service.events().delete(calendarId="primary", eventId=event_id).execute()
+    except HttpError as e:
+        if e.resp.status not in (404, 410):
+            raise HTTPException(502, f"Błąd przy usuwaniu wydarzenia: {e}") from e
+        # Wydarzenie usunięte ręcznie w Google: czyścimy tylko stare mapowanie.
     except Exception as e:
-        raise HTTPException(500, f"Błąd przy usuwaniu wydarzenia: {e}")
+        raise HTTPException(500, f"Błąd przy usuwaniu wydarzenia: {e}") from e
 
     await delete_event_mapping(user_login, match_id)
     return

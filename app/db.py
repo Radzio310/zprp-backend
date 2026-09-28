@@ -1566,6 +1566,9 @@ province_events = Table(
     Column("created_by", String, nullable=True),
     Column("created_by_name", String, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=True),
+    # Stabilny identyfikator jednego naciśnięcia „Dodaj wydarzenie". Telefon
+    # może ponowić POST po utracie odpowiedzi, ale serwer zwróci te same wiersze.
+    Column("create_request_id", String, nullable=True),
 
     # Dowolny JSON: targetowanie, lista invited/present, metadane, etc.
     Column(
@@ -1585,6 +1588,12 @@ province_events = Table(
 )
 
 Index("ix_province_events_prov_date", province_events.c.province, province_events.c.event_date)
+Index(
+    "ix_province_events_create_request",
+    province_events.c.province,
+    province_events.c.created_by,
+    province_events.c.create_request_id,
+)
 
 # 18.7a) Wydarzenia okręgowe - przebudowa z 17.09.2026 (`app/province_event_rules.py`).
 # Nowe kolumny `province_events` dokłada blok ALTER przy starcie (tabela istnieje
@@ -4244,6 +4253,8 @@ with engine.connect() as _conn:
         "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS created_by varchar",
         "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS created_by_name varchar",
         "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS created_at timestamptz",
+        "ALTER TABLE province_events ADD COLUMN IF NOT EXISTS create_request_id varchar",
+        "CREATE INDEX IF NOT EXISTS ix_province_events_create_request ON province_events (province, created_by, create_request_id)",
         "CREATE INDEX IF NOT EXISTS ix_province_event_attendance_judge ON province_event_attendance (judge_id)",
         "CREATE INDEX IF NOT EXISTS ix_province_event_responses_judge ON province_event_responses (judge_id)",
     ):

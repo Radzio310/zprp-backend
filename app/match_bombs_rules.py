@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
 
 from app.season_rules import (
     SEASON_START_MONTH as _SEASON_START_MONTH,
@@ -42,6 +43,11 @@ COMMISSION_BADGE = "Komisja sędziowska"
 #: świeża i sprawdzalna. Później zgłoszenie dopisuje komisja, żeby stara historia
 #: nie wracała po pół sezonu.
 REPORT_WINDOW_DAYS = 14
+
+# Daty przychodzące z aplikacji bez offsetu są ścianą zegara w Polsce (tak
+# wygląda `data_fakt` ZPRP). Daty z bazy i zegar serwera są świadomym UTC.
+# Przed KAŻDYM porównaniem sprowadzamy oba kształty do prawdziwego UTC.
+WARSAW = ZoneInfo("Europe/Warsaw")
 
 #: Ile trzyma się zgłoszenie, zanim dowie się o nim osoba zgłoszona.
 #:
@@ -242,6 +248,18 @@ def report_window_end(match_at: Optional[datetime]) -> Optional[datetime]:
     return match_at + timedelta(days=REPORT_WINDOW_DAYS)
 
 
+def comparable_instant(value: datetime) -> datetime:
+    """Moment w UTC, niezależnie od tego, czy wejście miało offset.
+
+    Naiwny zapis oznacza czas polski, nie UTC. Jest to dokładnie kształt query
+    wysyłanego przez starsze wersje aplikacji: ``2026-10-12 19:00:00``.
+    Funkcja jest publiczna tylko po to, by tę granicę dało się sprawdzić testem.
+    """
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=WARSAW)
+    return value.astimezone(timezone.utc)
+
+
 def may_report(
     match_at: Optional[datetime],
     now: datetime,
@@ -261,10 +279,12 @@ def may_report(
         return None
     if match_at is None:
         return None
-    if now < match_at:
+    match_moment = comparable_instant(match_at)
+    now_moment = comparable_instant(now)
+    if now_moment < match_moment:
         return "Mecz jeszcze się nie zaczął - nie ma czego zgłaszać."
-    end = report_window_end(match_at)
-    if end is not None and now > end:
+    end = match_moment + timedelta(days=REPORT_WINDOW_DAYS)
+    if now_moment > end:
         return (
             f"Minęło ponad {REPORT_WINDOW_DAYS} dni od meczu. Taką sprawę może "
             "dopisać już tylko komisja sędziowska."
