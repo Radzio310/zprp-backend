@@ -35,3 +35,9 @@ def test_zadanie_w_tle_samo_pobiera_swieze_wydarzenie_i_adresatow():
     assert "await _judges" in src
     assert "await _notify_changed" in src
 
+
+def test_grafika_wydarzenia_ma_osobna_wysoka_jakosc_i_wersje_stylu():
+    src = source_of("_render_title_image")
+    assert 'OPENAI_PROVINCE_EVENT_IMAGE_QUALITY", "high"' in src
+    assert "quality=" in src
+    assert '"style_version": "referee-story-scenes-v2"' in src

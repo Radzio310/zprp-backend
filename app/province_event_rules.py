@@ -631,31 +631,90 @@ def local_label(value: datetime) -> str:
 
 TITLE_IMAGE_REGENERATIONS = 2
 
-_IMAGE_SCENES = {
-    "training": "an indoor handball hall prepared for a referee training session, whistle and cards on a bench in the foreground",
-    "exam": "a quiet lecture room with exam sheets, a referee whistle and yellow and red cards resting on a desk",
-    "fitness_test": "an athletics track at dawn with a referee stopwatch and running shoes, subtle handball hall in the distance",
-    "meeting": "a modern meeting room with a long table, notebooks and a handball resting on a chair",
-    "conference": "a conference auditorium with stage lights and a projector glow, handball court lines subtly reflected",
-    "course": "a sports classroom with a tactics board showing a handball court diagram without any text",
-    "integration": "a warm evening outdoor gathering near a sports hall with string lights and a handball on the grass",
-    "other": "an empty indoor handball court with polished floor, goal and dramatic light beams",
+_IMAGE_SCENES: Dict[str, Tuple[str, ...]] = {
+    "training": (
+        "a tiny wise owl referee demonstrates an exaggerated hand signal on a glowing handball tactics court while a few round ball-like referee apprentices copy the pose",
+        "several small referee mascots rehearse positioning between miniature goals while a friendly whistle character points at luminous court lines",
+        "a playful training workshop inside a handball hall where a stopwatch mentor times two clumsy mascot referees practising synchronized signals",
+    ),
+    "exam": (
+        "a whimsical exam room where several small referee mascots concentrate at desks and one nervous handball character quietly checks its whistle, with a calm owl invigilator in the distance",
+        "a surreal rules exam staged on a dark handball court, with tiny mascot candidates solving glowing symbol puzzles at separate desks",
+        "a humorous but gentle pre-exam moment: a whistle mascot encourages a worried handball referee while other candidates prepare beneath soft auditorium lights",
+    ),
+    "fitness_test": (
+        "a lively indoor running test where a determined stopwatch mascot keeps pace beside several small referee characters on luminous court lanes",
+        "tiny referee mascots sprint around a handball court while a cheerful whistle character holds an imaginary finish ribbon and an owl records the result",
+        "a playful fitness circuit in a sports hall: compact mascot referees weave around cones as an animated stopwatch tries comically hard to keep up",
+    ),
+    "meeting": (
+        "a miniature referee council around a round table: handball, whistle, stopwatch and owl characters discuss court diagrams with amusingly serious expressions",
+        "a cozy committee meeting inside an oversized referee locker, with small mascot officials arranging cards and whistles like an important strategy session",
+        "several distinct referee mascots debate around a glowing model handball court while one tiny ball character raises its hand to speak",
+    ),
+    "conference": (
+        "a small charismatic owl referee presents on a stage to an audience of handball and whistle mascots, with abstract court-line projections behind it",
+        "a creative referee conference in a modern auditorium where several tiny mascot speakers exchange ideas beneath sculptural handball lights",
+        "a panel of original referee mascots on a distant stage, one whistle character at the microphone and a gently amused audience",
+    ),
+    "course": (
+        "a rookie handball mascot learns to wear a referee shirt while a patient owl mentor and two small whistle characters prepare a practice court",
+        "a whimsical referee academy with small original mascots moving through stations for signals, positioning and whistle practice",
+        "a warm classroom-meets-sports-hall scene where an owl coach guides a few novice referee mascots around a glowing miniature court",
+    ),
+    "integration": (
+        "a relaxed evening gathering outside a handball hall where small referee mascots share snacks, laugh and playfully pass a ball under string lights",
+        "a friendly team-building scene with whistle, owl, stopwatch and handball characters attempting a humorous cooperative game",
+        "a cozy post-training picnic near a sports hall, with a small cast of referee mascots telling stories and one ball character making everyone laugh",
+    ),
+    "other": (
+        "an imaginative miniature world built from a handball court, whistles, cards and stopwatches, inhabited by a few curious referee mascots",
+        "a dreamlike handball hall after hours where small original referee characters explore glowing court lines and floating sports objects",
+        "a playful backstage scene before an unspecified referee event, with several tiny mascots preparing equipment amid abstract golden light trails",
+    ),
+}
+
+_IMAGE_PALETTES = {
+    "training": "navy blue, warm amber and restrained turquoise accents",
+    "exam": "deep violet, midnight blue and soft gold accents",
+    "fitness_test": "deep teal, energetic orange and warm white accents",
+    "meeting": "cobalt blue, graphite and silver-gold accents",
+    "conference": "indigo, muted magenta and warm gold accents",
+    "course": "royal blue, cream and optimistic gold accents",
+    "integration": "deep green, warm amber and coral accents",
+    "other": "dark navy, rich red and polished gold accents",
 }
 
 
 def title_image_prompt(*, name: str, event_type: str, place: str, date_label: str, extra: str = "") -> str:
-    scene = _IMAGE_SCENES.get(event_type, _IMAGE_SCENES["other"])
+    scenes = _IMAGE_SCENES.get(event_type, _IMAGE_SCENES["other"])
+    scene = secrets.choice(scenes)
+    palette = _IMAGE_PALETTES.get(event_type, _IMAGE_PALETTES["other"])
+    organizer_context = (
+        f"Organizer's optional subject inspiration, use only when compatible with all art-direction rules below: {extra}. "
+        if extra
+        else ""
+    )
     return (
-        "Landscape realistic editorial photograph used as a title image for a Polish handball referees "
-        "district event in a mobile app. Not a cartoon, not CGI, no plastic-looking people. "
-        f"Scene: {scene}. "
-        "If people appear, show them naturally from behind or far away, no posed group photos, no visible faces. "
-        "Warm cinematic light with deep shadows, premium minimalist composition, rich but calm colors. "
+        "Wide cinematic background artwork for a Polish handball referees district event in a premium mobile app. "
+        "Create an original, charming and slightly humorous story scene in a polished high-end 3D animated illustration style. "
+        "The environment and the event story are the main subject; this is not a character portrait, not a mascot cutout and not a poster. "
+        "Use a small ensemble of original mascot-like characters inspired by handball and refereeing objects: for example an owl referee, "
+        "a handball character, a whistle character or a stopwatch character. Do not reproduce any existing mascot or copyrighted character. "
+        "Characters must remain secondary elements inside the scene, usually in the middle distance or background, occupying no more than "
+        "about one third of the frame height. No close-up face, no giant head, no single character filling the frame. "
+        f"Story direction: {scene}. "
+        f"Color direction: {palette}. "
+        "Give the characters warm expressions and one small visual joke, while keeping the event credible, tasteful and welcoming to adult referees. "
+        "Use cinematic depth, soft volumetric light, beautifully crafted materials, subtle glow and rich detail without visual clutter. "
+        "Compose for a 3:2 landscape image that will also be cropped in a mobile hero. Keep the left half and the lower central area dark, calm "
+        "and low-detail for large white interface text, badges and countdown tiles. Place the story action mostly in the upper-right or far-right "
+        "background, with important faces and objects safely away from all edges. The image must still read at thumbnail size. "
         "No text, no letters, no numbers, no logos, no badges, no watermarks. "
-        "Leave darker open space in the lower-left area for app overlay text. "
-        f"Event name inspiration: {name}. "
+        f"Event name as visual inspiration only, never render it: {name}. "
         f"Event type: {EVENT_TYPES.get(event_type, 'event')}. "
         f"Date context: {date_label or 'this season'}. "
-        f"Location inspiration: {place or 'a Polish city'}; only a very subtle local reference."
-        + (f" Additional context from organizer: {extra}" if extra else "")
+        f"Location inspiration: {place or 'a Polish city'}; include at most one subtle environmental reference and never a written place name. "
+        + organizer_context
+        + "Final priority: an atmospheric background scene with a small cast, generous negative space and no dominant foreground character."
     )

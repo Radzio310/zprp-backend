@@ -316,7 +316,7 @@ async def _get_title_image_regeneration_count(tournament_id: int) -> int:
         return 0
 
 
-async def _generate_openai_title_image(prompt: str) -> bytes:
+async def _generate_openai_title_image(prompt: str, *, quality: Optional[str] = None) -> bytes:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(500, "Brak OPENAI_API_KEY w środowisku serwera")
@@ -326,7 +326,7 @@ async def _generate_openai_title_image(prompt: str) -> bytes:
         "model": model,
         "prompt": prompt,
         "size": "1536x1024",
-        "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
+        "quality": quality or os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
         "n": 1,
     }
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}

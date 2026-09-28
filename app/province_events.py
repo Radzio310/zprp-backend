@@ -1491,7 +1491,10 @@ async def _render_title_image(body: TitleImageBody) -> Dict[str, Any]:
     )
     from app.beach.tournaments import _generate_openai_title_image, _public_static_url, _static_root_dir
 
-    image = await _generate_openai_title_image(prompt)
+    image = await _generate_openai_title_image(
+        prompt,
+        quality=os.getenv("OPENAI_PROVINCE_EVENT_IMAGE_QUALITY", "high"),
+    )
     out_dir = _static_root_dir() / "province-events" / "title-images"
     out_dir.mkdir(parents=True, exist_ok=True)
     path: Path = out_dir / f"{uuid.uuid4().hex}.png"
@@ -1500,6 +1503,7 @@ async def _render_title_image(body: TitleImageBody) -> Dict[str, Any]:
         "url": _public_static_url(path),
         "generated_at": _now().isoformat(),
         "regeneration_count": count + 1 if body.regenerate else count,
+        "style_version": "referee-story-scenes-v2",
     }
 
 

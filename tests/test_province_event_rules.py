@@ -171,3 +171,37 @@ def test_miejsce_z_pinezka():
 def test_prompt_grafiki_bez_tekstu():
     prompt = R.title_image_prompt(name="Szkolenie przed rundą", event_type="training", place="Katowice", date_label="01.10")
     assert "No text" in prompt and "Katowice" in prompt and "Szkolenie" in prompt
+    assert "not a character portrait" in prompt
+    assert "no dominant foreground character" in prompt
+    assert "lower central area dark" in prompt
+
+
+def test_prompt_grafiki_buduje_scenki_dla_kazdego_typu(monkeypatch):
+    monkeypatch.setattr(R.secrets, "choice", lambda scenes: scenes[-1])
+    prompts = {
+        kind: R.title_image_prompt(
+            name=f"Wydarzenie {label}",
+            event_type=kind,
+            place="Katowice",
+            date_label="01.10.2026",
+        )
+        for kind, label in R.EVENT_TYPES.items()
+    }
+    assert len(set(prompts.values())) == len(R.EVENT_TYPES)
+    for prompt in prompts.values():
+        assert "small ensemble of original mascot-like characters" in prompt
+        assert "occupying no more than about one third of the frame height" in prompt
+        assert "upper-right or far-right background" in prompt
+        assert "one small visual joke" in prompt
+
+
+def test_kontekst_organizatora_nie_nadpisuje_kierunku_grafiki():
+    prompt = R.title_image_prompt(
+        name="Spotkanie komisji",
+        event_type="meeting",
+        place="Gliwice",
+        date_label="02.10.2026",
+        extra="więcej złotego światła",
+    )
+    assert "use only when compatible with all art-direction rules below" in prompt
+    assert prompt.endswith("no dominant foreground character.")
