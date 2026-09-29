@@ -370,6 +370,10 @@ ASSIGNABILITY_MESSAGES: Dict[str, str] = {
         "okręg prowadzący te rozgrywki. Wymianę takich meczów okręg może włączyć "
         "w panelu administratora."
     ),
+    "SECOND_LEAGUE_FIELD_OFF": (
+        "Boiskowych meczów II ligi nie można domyślnie oddawać przez giełdę. "
+        "Administrator okręgu może świadomie włączyć taką możliwość w ustawieniach."
+    ),
 }
 
 
@@ -918,21 +922,30 @@ def offerable_slots(
     code: object,
     managed_prefixes: Any,
     foreign_enabled: object,
+    second_league_field_enabled: object = False,
 ) -> Tuple[List[str], List[str]]:
     """Gniazda sędziego w tym meczu: (wolno oddać, zatrzymane przez okręg).
 
-    Mecz obsadzany przez okręg oddaje wszystkie. W meczu spoza okręgu stolik
-    wolno oddać zawsze (obsadza go okręg gospodarza hali, czyli własny), a
-    gniazda boiskowe dopiero po włączeniu wymiany takich meczów w panelu.
-    Zatrzymane gniazda wracają osobno, żeby wołający mógł je policzyć.
+    Stolik wolno oddać zawsze. Boisko II ligi ma osobny, domyślnie zamknięty
+    rygiel nawet wtedy, gdy daną grupę prowadzi ten okręg. Dla obcej II ligi
+    potrzebne są obie zgody: na II ligę oraz na mecze spoza obsady okręgu.
+    Pozostałe mecze własnego okręgu oddają wszystkie gniazda; centralne boisko
+    dopiero po włączeniu wymiany spoza okręgu.
     """
     slots = [str(s or "").strip() for s in (held or []) if str(s or "").strip()]
-    if is_managed_by_province(code, managed_prefixes):
-        return slots, []
+    level = league_level(code)
+    managed = is_managed_by_province(code, managed_prefixes)
     allowed: List[str] = []
     kept: List[str] = []
     for slot in slots:
-        if slot in TABLE_SLOTS or (slot in FIELD_SLOTS and bool(foreign_enabled)):
+        if slot in TABLE_SLOTS:
+            allowed.append(slot)
+        elif slot in FIELD_SLOTS and level == "second":
+            if bool(second_league_field_enabled) and (managed or bool(foreign_enabled)):
+                allowed.append(slot)
+            else:
+                kept.append(slot)
+        elif slot in FIELD_SLOTS and (managed or bool(foreign_enabled)):
             allowed.append(slot)
         else:
             kept.append(slot)

@@ -26,6 +26,7 @@ from app.match_market_notify import (
     match_of,
     offer_created,
     offer_rejected,
+    offer_removed_by_admin,
     offer_withdrawn,
     offer_withdrawn_for_manager,
     match_gen,
@@ -164,6 +165,17 @@ def test_withdrawal_tells_the_claimant_what_it_means_for_them():
     assert title == "↩️ Mecz wrócił do właściciela"
     assert body.startswith("Radosław WITKOWICZ zabrał mecz IIM4/1 z giełdy")
     assert "Twoje zgłoszenie jest już nieaktualne." in body
+
+
+def test_admin_removal_explains_the_consequence_to_each_side():
+    title, giver = offer_removed_by_admin(offer(), "mecz nie podlega wymianie")
+    _, claimant = offer_removed_by_admin(
+        offer(), "mecz nie podlega wymianie", claimant=True
+    )
+    assert title == "🛡️ Oferta zdjęta przez administratora"
+    assert "Mecz pozostaje w Twojej obsadzie." in giver
+    assert "Twoje zgłoszenie jest już nieaktualne." in claimant
+    assert "Wyjaśnienie: mecz nie podlega wymianie." in giver
 
 
 def test_claim_names_the_role_in_the_nominative():

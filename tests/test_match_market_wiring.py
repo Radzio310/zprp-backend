@@ -113,6 +113,7 @@ def test_all_routes_are_registered():
     assert ("post", "/offers/{offer_id}/reject") in paths
     assert ("get", "/admin/provinces") in paths
     assert ("put", "/admin/provinces/{province}") in paths
+    assert ("post", "/admin/provinces/{province}/offers/{offer_id}/withdraw") in paths
 
 
 def test_my_matches_has_a_non_blocking_first_pass():
@@ -852,13 +853,15 @@ def test_foreign_matches_are_filtered_by_the_tested_leaf():
     assert "managed_prefixes" in source
     # Liczba zdjętych wierszy wychodzi na zewnątrz - jak każdy inny limit.
     assert "foreignHidden" in source
+    assert "secondLeagueHidden" in source
 
 
 def test_offer_gate_refuses_field_slots_of_foreign_matches_unless_enabled():
     source = code_of("create_offer")
     assert "FOREIGN_OFF" in source
+    assert "SECOND_LEAGUE_FIELD_OFF" in source
     assert "is_managed_by_province" in calls_in("create_offer")
-    assert "FIELD_SLOTS" in source
+    assert "offerable_slots" in calls_in("create_offer")
     # Sonda meczu spoza okręgu idzie trasą sędziego - tą samą, co zapis.
     assert "walk=" in source.replace(" ", "")
 
@@ -931,15 +934,30 @@ def test_route_check_is_admin_only_and_never_writes():
 
 def test_config_carries_the_foreign_switch_and_the_managed_leagues():
     assert "foreign_matches_enabled" in code_of("_config")
+    assert "second_league_field_enabled" in code_of("_config")
     assert "managed_prefixes_for" in calls_in("_config")
     setter = code_of("admin_set_province")
     assert "foreign_matches_enabled" in setter
+    assert "second_league_field_enabled" in setter
     # Powrót do katalogu domyślnego jest osobną decyzją, bo `None` w
     # żądaniu znaczy „nie ruszaj", a pusta lista - „żadna".
     assert "reset_managed_prefixes" in setter
     for name in ("admin_provinces", "admin_set_province", "get_context"):
         assert "foreignMatchesEnabled" in code_of(name), name
+        assert "secondLeagueFieldEnabled" in code_of(name), name
         assert "managedPrefixes" in code_of(name), name
+
+
+def test_admin_can_remove_an_offer_only_through_the_guarded_audited_route():
+    source = code_of("admin_withdraw_offer")
+    calls = calls_in("admin_withdraw_offer")
+    assert "may_manage_config" in calls
+    assert "with_for_update" in calls
+    assert "next_offer_status" in calls
+    assert "_log" in calls
+    assert "_notify" in calls
+    assert "req.reason" in source
+    assert "offer_removed_admin" in source
 
 
 def test_not_on_list_is_not_remembered():

@@ -68,6 +68,7 @@ from app.match_market_notify import (
     giver_released as text_giver_released,
     offer_created as text_offer_created,
     offer_rejected as text_offer_rejected,
+    offer_removed_by_admin as text_offer_removed_by_admin,
     offer_withdrawn as text_offer_withdrawn,
     offer_withdrawn_for_manager as text_offer_withdrawn_for_manager,
     taker_won as text_taker_won,
@@ -88,7 +89,6 @@ from app.match_market_rules import (
     ASSIGNABILITY_TTL_HOURS,
     apply_known_swaps,
     DEFAULT_DEADLINE_HOURS,
-    FIELD_SLOTS,
     LIVE_CREW_BUDGET_SECONDS,
     LIVE_CREW_LIMIT,
     LIVE_CREW_NOTE,
@@ -241,6 +241,11 @@ async def _config(province: str) -> Dict[str, Any]:
         # reguł. Wymiana domyślnie WYŁĄCZONA; lista lig powierzonych z panelu
         # albo z katalogu domyślnego (`managed_prefixes_custom` mówi, która).
         "foreign_matches_enabled": bool(data.get("foreign_matches_enabled", False)),
+        # Boiskowa II liga jest ryzykowniejsza niż zwykły mecz okręgowy i ma
+        # własną, domyślnie zamkniętą zgodę - także dla ligi powierzonej.
+        "second_league_field_enabled": bool(
+            data.get("second_league_field_enabled", False)
+        ),
         "managed_prefixes": managed_prefixes_for(province, data.get("managed_prefixes")),
         "managed_prefixes_custom": normalize_prefixes(data.get("managed_prefixes")) is not None,
     }
@@ -1309,6 +1314,9 @@ class ProvinceConfigRequest(BaseModel):
     #: Wymiana meczów spoza obsady okręgu (boiskowe gniazda I ligi i wyżej
     #: oraz obcych II lig). Domyślnie wyłączona - patrz liść reguł.
     foreign_matches_enabled: Optional[bool] = None
+    #: Boiskowe gniazda II ligi. Domyślnie zabronione nawet w grupie
+    #: powierzonej okręgowi; stolik pozostaje dostępny.
+    second_league_field_enabled: Optional[bool] = None
     #: II ligi powierzone okręgowi; pusta lista = żadna. Powrót do katalogu
     #: domyślnego idzie osobnym polem, bo `None` znaczy tu „nie ruszaj".
     managed_prefixes: Optional[List[str]] = None
@@ -1326,6 +1334,12 @@ class RouteCheckRequest(BaseModel):
 
     match_code: str
     judge_id: Optional[str] = None
+
+
+class AdminWithdrawRequest(BaseModel):
+    """Wyjaśnienie, które dostanie oddający i wszyscy zgłoszeni."""
+
+    reason: str
 
 
 # ─────────────────────────── kontekst ekranu ───────────────────────────
@@ -1377,6 +1391,9 @@ async def get_context(actor: Actor = Depends(market_actor)) -> Dict[str, Any]:
         # II ligi prowadzi. Ekran nie odsiewa nimi niczego (lista przychodzi z
         # serwera już odsiana); to wiedza do podpisów i na przyszłość.
         "foreignMatchesEnabled": bool(cfg and cfg["foreign_matches_enabled"]),
+        "secondLeagueFieldEnabled": bool(
+            cfg and cfg["second_league_field_enabled"]
+        ),
         "managedPrefixes": (
             cfg["managed_prefixes"] if cfg else managed_prefixes_for(actor.province)
         ),
@@ -1642,6 +1659,7 @@ async def my_matches(
     # nie włączył wymiany takich meczów. Schodzą z listy (decyzja: nie
     # proponować), a liczba wychodzi w odpowiedzi.
     foreign_hidden = 0
+    second_league_hidden = 0
     for match_id in candidates:
         data = dict(rows.get(match_id) or {})
         if match_id in fresh:
@@ -1662,14 +1680,22 @@ async def my_matches(
         # Gniazda, które w TYM meczu wolno oddać. Mecz obsadzany przez okręg
         # oddaje wszystkie; w meczu spoza okręgu (I liga i wyżej, obca II liga)
         # stolik zawsze, boisko dopiero po włączeniu wymiany w panelu.
+        match_code = _s(data.get("match_code")) or _s(state.get("RozgrywkiCode"))
         held, _kept = offerable_slots(
             held,
-            _s(data.get("match_code")) or _s(state.get("RozgrywkiCode")),
+            match_code,
             cfg["managed_prefixes"],
             cfg["foreign_matches_enabled"],
+            cfg["second_league_field_enabled"],
         )
         if not held:
-            foreign_hidden += 1
+            if (
+                league_level(match_code) == "second"
+                and not cfg["second_league_field_enabled"]
+            ):
+                second_league_hidden += 1
+            else:
+                foreign_hidden += 1
             continue
         match_at = data.get("match_at")
         if match_at is not None and (match_at < now or match_at > horizon):
@@ -1861,7 +1887,9 @@ async def my_matches(
         # Ile meczów spoza obsady okręgu zeszło z listy, bo sędzia stoi w nich
         # tylko boiskowo, a okręg nie włączył wymiany takich meczów.
         "foreignHidden": foreign_hidden,
+        "secondLeagueHidden": second_league_hidden,
         "foreignEnabled": cfg["foreign_matches_enabled"],
+        "secondLeagueFieldEnabled": cfg["second_league_field_enabled"],
     }
 
 
@@ -2111,10 +2139,22 @@ async def create_offer(
     # odsiała, ale bramka stoi osobno - starsza aplikacja pyta o to, co ma.
     match_code = _s(data.get("match_code")) or _s(state.get("RozgrywkiCode"))
     managed = is_managed_by_province(match_code, cfg["managed_prefixes"])
-    if not managed and slot in FIELD_SLOTS and not cfg["foreign_matches_enabled"]:
+    allowed_slots, _ = offerable_slots(
+        [slot],
+        match_code,
+        cfg["managed_prefixes"],
+        cfg["foreign_matches_enabled"],
+        cfg["second_league_field_enabled"],
+    )
+    if slot not in allowed_slots:
+        code = (
+            "SECOND_LEAGUE_FIELD_OFF"
+            if league_level(match_code) == "second"
+            else "FOREIGN_OFF"
+        )
         raise HTTPException(
             409,
-            detail={"code": "FOREIGN_OFF", "message": assignability_message("FOREIGN_OFF")},
+            detail={"code": code, "message": assignability_message(code)},
         )
     if data.get("approved"):
         raise HTTPException(409, "Protokół tego meczu jest już zatwierdzony.")
@@ -3216,12 +3256,20 @@ async def approve_offer(
     # włączonej wymianie takich meczów - okręg mógł ją wyłączyć już po
     # wystawieniu oferty i wtedy decyzja ma się o to rozbić tu, nie w ZPRP.
     managed = is_managed_by_province(offer.get("match_code"), cfg["managed_prefixes"])
-    if (
-        not managed
-        and _s(offer["slot"]) in FIELD_SLOTS
-        and not cfg["foreign_matches_enabled"]
-    ):
-        return await fail(assignability_message("FOREIGN_OFF"), "FOREIGN_OFF")
+    allowed_slots, _ = offerable_slots(
+        [_s(offer["slot"])],
+        offer.get("match_code"),
+        cfg["managed_prefixes"],
+        cfg["foreign_matches_enabled"],
+        cfg["second_league_field_enabled"],
+    )
+    if _s(offer["slot"]) not in allowed_slots:
+        code = (
+            "SECOND_LEAGUE_FIELD_OFF"
+            if league_level(offer.get("match_code")) == "second"
+            else "FOREIGN_OFF"
+        )
+        return await fail(assignability_message(code), code)
 
     try:
         async with AsyncClient(
@@ -3410,6 +3458,9 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
                 "approverBadges": normalize_approver_badges(cfg.get("approver_badges")),
                 "notifyAdmins": bool(cfg.get("notify_admins", False)),
                 "foreignMatchesEnabled": bool(cfg.get("foreign_matches_enabled", False)),
+                "secondLeagueFieldEnabled": bool(
+                    cfg.get("second_league_field_enabled", False)
+                ),
                 "managedPrefixes": managed_prefixes_for(province, cfg.get("managed_prefixes")),
                 "managedPrefixesDefault": managed_prefixes_for(province),
                 "managedPrefixesCustom": normalize_prefixes(cfg.get("managed_prefixes")) is not None,
@@ -3476,6 +3527,96 @@ async def admin_province_offers(
             for row in rows
         ],
     }
+
+
+@router.post(
+    "/admin/provinces/{province}/offers/{offer_id}/withdraw",
+    summary="Zdejmij ofertę z giełdy jako administrator",
+)
+async def admin_withdraw_offer(
+    province: str,
+    offer_id: int,
+    req: AdminWithdrawRequest,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    """Zamyka ofertę bez dotykania obsady ZPRP i wyjaśnia decyzję stronom."""
+    if not may_manage_config(is_admin=actor.is_admin):
+        raise HTTPException(403, "Zdejmowanie cudzych ofert należy do administratora aplikacji.")
+    key = normalize_province(province)
+    if not key:
+        raise HTTPException(400, "Nie znam takiego województwa.")
+    reason = _s(req.reason)
+    if not reason:
+        raise HTTPException(400, "Napisz użytkownikowi, dlaczego oferta znika z giełdy.")
+    if len(reason) > 500:
+        raise HTTPException(400, "Wyjaśnienie może mieć najwyżej 500 znaków.")
+
+    async with database.transaction():
+        row = await database.fetch_one(
+            select(match_market_offers)
+            .where(match_market_offers.c.id == offer_id)
+            .where(match_market_offers.c.province == key)
+            .with_for_update()
+        )
+        if not row:
+            raise HTTPException(404, "Nie ma takiej oferty w tym okręgu.")
+        offer = _row(row)
+        target = next_offer_status(_s(offer.get("status")), "withdraw")
+        if not target:
+            raise HTTPException(409, "Tej oferty nie da się już zdjąć z giełdy.")
+        interested = [
+            _s(_row(claim)["judge_id"])
+            for claim in await database.fetch_all(
+                select(match_market_claims.c.judge_id)
+                .where(match_market_claims.c.offer_id == offer_id)
+                .where(match_market_claims.c.status.in_(("pending", "chosen")))
+            )
+        ]
+        changed = await database.fetch_val(
+            update(match_market_offers)
+            .where(match_market_offers.c.id == offer_id)
+            .where(match_market_offers.c.status == _s(offer.get("status")))
+            .values(
+                status=target,
+                decided_by=actor.judge_id,
+                decided_at=func.now(),
+                error=f"Oferta zdjęta przez administratora: {reason}",
+                updated_at=func.now(),
+            )
+            .returning(match_market_offers.c.id)
+        )
+        if not changed:
+            raise HTTPException(409, "Oferta właśnie zmieniła stan. Odśwież giełdę.")
+        await database.execute(
+            update(match_market_claims)
+            .where(match_market_claims.c.offer_id == offer_id)
+            .where(match_market_claims.c.status == "pending")
+            .values(status="declined", updated_at=func.now())
+        )
+
+    await _log(
+        "offer_removed_admin",
+        province=key,
+        actor=actor,
+        offer=offer,
+        subject_id=_s(offer.get("from_judge_id")),
+        message=reason,
+        payload={"claimsDropped": len(interested)},
+    )
+    giver_id = _s(offer.get("from_judge_id"))
+    await _notify(
+        [giver_id],
+        text_offer_removed_by_admin(offer, reason),
+        offer,
+        audience="oddający mecz",
+    )
+    await _notify(
+        interested,
+        text_offer_removed_by_admin(offer, reason, claimant=True),
+        offer,
+        audience="zgłoszeni sędziowie",
+    )
+    return {"id": offer_id, "status": target, "reason": reason}
 
 
 @router.get(
@@ -3941,6 +4082,10 @@ async def admin_set_province(
         values["notify_admins"] = bool(req.notify_admins)
     if req.foreign_matches_enabled is not None:
         values["foreign_matches_enabled"] = bool(req.foreign_matches_enabled)
+    if req.second_league_field_enabled is not None:
+        values["second_league_field_enabled"] = bool(
+            req.second_league_field_enabled
+        )
     if req.reset_managed_prefixes:
         # NULL w kolumnie = katalog domyślny z liścia reguł.
         values["managed_prefixes"] = None
@@ -3978,6 +4123,7 @@ async def admin_set_province(
         "approverBadges": cfg["approver_badges"],
         "notifyAdmins": cfg["notify_admins"],
         "foreignMatchesEnabled": cfg["foreign_matches_enabled"],
+        "secondLeagueFieldEnabled": cfg["second_league_field_enabled"],
         "managedPrefixes": cfg["managed_prefixes"],
         "managedPrefixesDefault": managed_prefixes_for(key),
         "managedPrefixesCustom": cfg["managed_prefixes_custom"],

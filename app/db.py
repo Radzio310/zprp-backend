@@ -2635,6 +2635,9 @@ province_module_config = Table(
     # boiskowe gniazda takich meczów wchodzą na giełdę dopiero po włączeniu,
     # a zapis idzie wtedy „trasą sędziego". Domyślnie wyłączone, świadomie.
     Column("foreign_matches_enabled", Boolean, nullable=False, server_default=text("false")),
+    # Boiskowe gniazda II ligi mają osobny rygiel. Nawet liga powierzona
+    # okręgowi nie trafia na giełdę bez świadomej zgody administratora.
+    Column("second_league_field_enabled", Boolean, nullable=False, server_default=text("false")),
     # II ligi powierzone temu okręgowi (lista prefiksów, np. ["IIM4", "IIK4"]).
     # NULL = katalog domyślny z `match_market_rules.DEFAULT_MANAGED_PREFIXES`;
     # pusta lista = okręg nie prowadzi żadnej II ligi.
@@ -4312,6 +4315,7 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS approver_badges json"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS notify_admins boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS foreign_matches_enabled boolean NOT NULL DEFAULT false"))
+    _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS second_league_field_enabled boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS managed_prefixes json"))
     # Odswiezanie danych okregu sezonami: znak zycia i zakres przebiegu.
     # Tabela przebiegow istnieje na produkcji, wiec `create_all` ich nie doloży.

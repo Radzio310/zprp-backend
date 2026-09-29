@@ -754,12 +754,17 @@ def test_district_manages_its_own_and_entrusted_leagues():
     assert is_managed_by_province("", []) is True
 
 
-def test_foreign_match_keeps_field_slots_until_the_district_opens_them():
+def test_field_slots_need_their_explicit_league_switches():
     held = ["sedzia1", "sekretarz"]
-    assert offerable_slots(held, "IIM4/1", ["IIM4"], False) == (held, [])
+    # Nawet powierzona II liga ma domyślnie zamknięte boisko; stolik zostaje.
+    assert offerable_slots(held, "IIM4/1", ["IIM4"], False) == (["sekretarz"], ["sedzia1"])
+    assert offerable_slots(held, "IIM4/1", ["IIM4"], False, True) == (held, [])
     assert offerable_slots(held, "IMD/3", ["IIM4"], False) == (["sekretarz"], ["sedzia1"])
     assert offerable_slots(held, "IMD/3", ["IIM4"], True) == (held, [])
-    assert offerable_slots(["sedzia2"], "IIM3/7", ["IIM4"], False) == ([], ["sedzia2"])
+    # Obca II liga wymaga obu zgód: na II ligę i na mecze spoza okręgu.
+    assert offerable_slots(["sedzia2"], "IIM3/7", ["IIM4"], True, False) == ([], ["sedzia2"])
+    assert offerable_slots(["sedzia2"], "IIM3/7", ["IIM4"], False, True) == ([], ["sedzia2"])
+    assert offerable_slots(["sedzia2"], "IIM3/7", ["IIM4"], True, True) == (["sedzia2"], [])
     # Stolik obsadza okręg gospodarza hali - zawsze do oddania.
     assert offerable_slots(["czas"], "OSM/12", [], False) == (["czas"], [])
     assert offerable_slots([], "IMD/3", [], False) == ([], [])

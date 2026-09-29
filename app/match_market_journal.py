@@ -29,6 +29,7 @@ EVENT_KINDS: Dict[str, Tuple[str, str, str]] = {
     # Oferty - cykl życia od strony oddającego.
     "offer_created": ("offers", "hand-right-outline", "Wystawił mecz"),
     "offer_withdrawn": ("offers", "arrow-undo-outline", "Wycofał ofertę"),
+    "offer_removed_admin": ("offers", "shield-outline", "Administrator zdjął ofertę"),
     "offer_expired": ("offers", "time-outline", "Minął termin oferty"),
     # Zgłoszenia - kto chciał wziąć mecz.
     "claim_created": ("claims", "hand-left-outline", "Zgłosił się"),
@@ -123,6 +124,8 @@ def event_sentence(event: Mapping[str, Any]) -> str:
         head = f"{actor} wystawił mecz{where} na giełdę"
     elif kind == "offer_withdrawn":
         head = f"{actor} zabrał mecz{where} z giełdy"
+    elif kind == "offer_removed_admin":
+        head = f"{actor} zdjął mecz{where} z giełdy jako administrator"
     elif kind == "offer_expired":
         head = f"Minął termin zgłoszeń na mecz{where}"
     elif kind == "claim_created":
@@ -163,6 +166,7 @@ CONFIG_FIELD_LABELS: Dict[str, str] = {
     "approver_badges": "odznaki rozstrzygające",
     "notify_admins": "powiadomienia administratorów",
     "foreign_matches_enabled": "mecze spoza okręgu",
+    "second_league_field_enabled": "boiskowa II liga",
     "managed_prefixes": "ligi powierzone",
 }
 
@@ -175,7 +179,7 @@ def _config_value(field: str, value: Any) -> str:
     if field == "approver_badges":
         items = value if isinstance(value, (list, tuple)) else []
         return ", ".join(str(x) for x in items) or "brak"
-    if field == "foreign_matches_enabled":
+    if field in ("foreign_matches_enabled", "second_league_field_enabled"):
         return "wymiana włączona" if value else "wymiana wyłączona"
     if field == "managed_prefixes":
         if value is None:

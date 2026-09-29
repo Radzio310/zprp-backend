@@ -145,6 +145,7 @@ def test_every_config_field_has_a_human_label():
         "approver_badges",
         "notify_admins",
         "foreign_matches_enabled",
+        "second_league_field_enabled",
         "managed_prefixes",
     }
 

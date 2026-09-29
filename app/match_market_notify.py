@@ -272,6 +272,25 @@ def offer_withdrawn_for_manager(offer: Mapping[str, Any], giver_name: Any) -> tu
     )
 
 
+def offer_removed_by_admin(
+    offer: Mapping[str, Any], reason: Any, *, claimant: bool = False
+) -> tuple[str, str]:
+    """Administrator zamknął ofertę bez zmiany obsady w bazie związku."""
+    consequence = (
+        "Twoje zgłoszenie jest już nieaktualne"
+        if claimant
+        else "Mecz pozostaje w Twojej obsadzie"
+    )
+    return (
+        "🛡️ Oferta zdjęta przez administratora",
+        _join(
+            f"Administrator zdjął {match_of(offer)} z giełdy",
+            consequence,
+            f"Wyjaśnienie: {_s(reason)}",
+        ),
+    )
+
+
 def claim_created_for_giver(offer: Mapping[str, Any], claimer_name: Any) -> tuple[str, str]:
     """Oddający wie o kandydacie, lecz decyzję podejmuje obsadowy."""
     return (
