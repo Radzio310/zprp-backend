@@ -105,3 +105,26 @@ class SheetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DelegateShapeTests(unittest.TestCase):
+    def test_arkusz_mentora_liczy_sie_jak_delegata(self):
+        from app.delegate_evaluation_utils import grade_values
+        from app.mentor_evaluation_rules import delegate_shape
+
+        shaped = delegate_shape(
+            {
+                "difficulty": "Średni",
+                "character": {"Wyrównany wynik": "Tak"},
+                "sections": {"I": {"main": "E", "items": {"Balans": "D", "Prezencja": None}, "comment": "ok"}},
+                "situations": [{"time": "32:45", "category": "bledna", "description": "Faul ataku"}],
+                "priorities": ["Linia kar", "", ""],
+            }
+        )
+        self.assertEqual(shaped["kind"], "mentor")
+        self.assertEqual(shaped["sections"][0]["title"], "I. Zarządzanie widowiskiem")
+        self.assertEqual(shaped["sections"][0]["items"], [{"idx": 1, "title": "Balans", "grade": "D"}])
+        self.assertEqual(grade_values(shaped), {"I": [5, 4]})
+        self.assertEqual(shaped["keySituations"][0]["category"], "Błędna interpretacja sędziów")
+        self.assertEqual(shaped["priorities"], [{"title": "Priorytet 1", "body": "Linia kar"}])
+        self.assertEqual(shaped["character"]["difficulty"]["short"], "Średni")

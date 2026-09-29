@@ -380,7 +380,7 @@ async def mentor_form_rows(actor_id: str, province: str = "", season: str = "") 
                 "delegate_name": author_names,
                 "mentor_names": [names[a]["full_name"] for a in authors if a in names],
                 "source_kind": "mentor",
-                "evaluation_json": delegate_shape(_loads(r["published_json"]), {"mentors": author_names}),
+                "evaluation_json": delegate_shape(_loads(r["published_json"])),
                 "points": r["points"],
                 "letter": r["letter"],
                 "published_at": r["published_at"],

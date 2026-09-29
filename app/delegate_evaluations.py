@@ -195,6 +195,29 @@ async def sync(req: SyncIn, payload: dict = Depends(get_jwt_payload)):
     return {"ok": True, "inserted": inserted, "updated": updated, "unchanged": unchanged, "skipped": skipped}
 
 
+#: Które oceny oddać: same arkusze delegatów (domyślnie - stare wersje aplikacji
+#: i BAZA_web nie znają ocen mentora), same oceny mentora albo wszystkie razem.
+SOURCES = {"delegate", "mentor", "all"}
+
+
+async def _all_rows(judge_id: str, province: str, season: str, source: str) -> List[Dict[str, Any]]:
+    """Arkusze delegatów i/lub opublikowane oceny mentora w JEDNYM kształcie wiersza.
+
+    Ocena mentora niesie `kind: "mentor"` i `source_kind: "mentor"` - ekrany
+    liczą ją tak samo, a rysują z innym oznaczeniem.
+    """
+    source = source if source in SOURCES else "delegate"
+    rows: List[Dict[str, Any]] = []
+    if source in ("delegate", "all"):
+        rows = [{**dict(row), "kind": "delegate"} for row in await _rows_for(judge_id, province, season)]
+    if source in ("mentor", "all"):
+        from app.mentor_evaluations import mentor_form_rows
+
+        rows += await mentor_form_rows(judge_id, province, season)
+        rows.sort(key=lambda r: str(r.get("match_date") or ""), reverse=True)
+    return rows
+
+
 async def _rows_for(judge_id: str, province: str, season: str = ""):
     conditions = []
     if province:
@@ -213,13 +236,14 @@ async def overview(
     province: str = Query(""),
     season: str = Query(""),
     surface: str = Query(""),
+    source: str = Query("delegate"),
     payload: dict = Depends(get_jwt_payload),
 ):
     actor = _actor(payload)
     access = await _access(actor, province, surface) if province else {"stats": True, "full": True, "admin": await _is_admin(actor)}
     if province and not access["stats"]:
         raise HTTPException(403, access.get("reason") or "Brak dostępu do statystyk ocen")
-    rows = await _rows_for(actor, province, season)
+    rows = await _all_rows(actor, province, season, source)
     people: Dict[str, Dict[str, Any]] = {}
     pairs: Dict[str, Dict[str, Any]] = {}
     # Worek „Łącznie": WSZYSTKIE arkusze z tego zapytania w jednym zbiorze, więc
@@ -236,6 +260,7 @@ async def overview(
         ids, names = data.get("referee_ids") or [], data.get("referee_names") or []
         clean_ids = [str(value).strip() for value in ids if str(value).strip()]
         absorb_evaluation(total, evaluation, scores)
+        is_mentor = data.get("kind") == "mentor"
         if clean_ids:
             pair_key = "|".join(sorted(clean_ids))
             if pair_key not in pairs:
@@ -245,6 +270,8 @@ async def overview(
                     names=pair_names(ids, names),
                 )
             absorb_evaluation(pairs[pair_key], evaluation, scores)
+            # Ile z tych arkuszy to oceny mentora - ekran pokazuje to osobno.
+            pairs[pair_key]["mentor_evaluations"] = pairs[pair_key].get("mentor_evaluations", 0) + int(is_mentor)
         for index, judge_id in enumerate(ids):
             if not province and str(judge_id) != actor:
                 continue
@@ -266,6 +293,8 @@ async def overview(
         "pairs": pair_output,
         "total": finalize_bucket(total),
         "evaluations": len(rows),
+        "mentor_evaluations": sum(1 for r in rows if r.get("kind") == "mentor"),
+        "source": source if source in SOURCES else "delegate",
         "seasons": sorted((value for value in available_seasons if value), reverse=True),
         "grade_scale": GRADE_POINTS,
     }
@@ -302,13 +331,14 @@ async def forms(
     province: str = Query(""),
     season: str = Query(""),
     surface: str = Query(""),
+    source: str = Query("delegate"),
     payload: dict = Depends(get_jwt_payload),
 ):
     actor = _actor(payload)
     access = await _access(actor, province, surface) if province else {"full": True}
     if province and not access["full"]:
         raise HTTPException(403, access.get("reason") or "Brak dostępu do pełnych arkuszy")
-    return {"items": [dict(row) for row in await _rows_for(actor, province, season)]}
+    return {"items": await _all_rows(actor, province, season, source)}
 
 
 @admin_router.get("/access/{province}")
