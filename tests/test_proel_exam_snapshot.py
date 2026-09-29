@@ -74,3 +74,11 @@ def test_archive_restore_keeps_shared_exam_snapshot():
         "exam_snapshot_at=_datetime_value(state.get(\"exam_snapshot_at\"))",
     ):
         assert field in archive
+
+
+def test_snapshot_route_does_not_load_heavy_match_overlay():
+    route = (ROOT / "app" / "proel_exam_snapshot.py").read_text(encoding="utf-8")
+    assert "select(*EXAM_STATE_COLUMNS)" in route
+    columns = route.split("EXAM_STATE_COLUMNS = (", 1)[1].split(")", 1)[0]
+    assert "fields_json" not in columns
+    assert "audit_json" not in columns

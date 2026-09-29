@@ -26,6 +26,22 @@ from app.proel_match_key import (
 
 router = APIRouter(prefix="/proel/exam-snapshot", tags=["ProEl"])
 
+# Endpoint ma być lekkim pierwszym obrazem ekranu. `fields_json` i
+# `audit_json` rosną przez cały mecz, więc nie pobieramy ich tylko po to, żeby
+# odczytać badania.
+EXAM_STATE_COLUMNS = (
+    proel_match_state.c.match_number,
+    proel_match_state.c.zprp_match_id,
+    proel_match_state.c.local_key,
+    proel_match_state.c.guard_json,
+    proel_match_state.c.rev,
+    proel_match_state.c.exam_snapshot_json,
+    proel_match_state.c.exam_snapshot_rev,
+    proel_match_state.c.exam_snapshot_date,
+    proel_match_state.c.exam_snapshot_hash,
+    proel_match_state.c.exam_snapshot_at,
+)
+
 
 class ExamSnapshotPut(BaseModel):
     match_number: str = Field(..., min_length=1, max_length=100)
@@ -99,7 +115,7 @@ async def get_exam_snapshot(
     number = str(match or "").strip()
     row = _as_dict(
         await database.fetch_one(
-            select(proel_match_state).where(
+            select(*EXAM_STATE_COLUMNS).where(
                 proel_match_state.c.match_number == number
             )
         )
@@ -136,7 +152,18 @@ async def put_exam_snapshot(
     zprp_id = str(req.zprp_match_id or "").strip()
     guard = dict(req.guard or {})
     local_key = local_key_from_guard(number, guard) or ""
-    date_key = valid_date_key(req.date_key)
+    if not number:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "MATCH_NUMBER_REQUIRED", "message": "Brakuje numeru meczu."},
+        )
+    try:
+        date_key = valid_date_key(req.date_key)
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "INVALID_MATCH_DATE", "message": str(exc)},
+        ) from exc
     now = _now()
 
     snapshot = clean_snapshot(req.host_players, req.guest_players)
@@ -150,7 +177,7 @@ async def put_exam_snapshot(
     async with database.transaction():
         row = _as_dict(
             await database.fetch_one(
-                select(proel_match_state)
+                select(*EXAM_STATE_COLUMNS)
                 .where(proel_match_state.c.match_number == number)
                 .with_for_update()
             )
@@ -169,7 +196,7 @@ async def put_exam_snapshot(
             )
             row = _as_dict(
                 await database.fetch_one(
-                    select(proel_match_state)
+                    select(*EXAM_STATE_COLUMNS)
                     .where(proel_match_state.c.match_number == number)
                     .with_for_update()
                 )
