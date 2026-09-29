@@ -37,6 +37,7 @@ from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
+    admin_market_notification_preferences,
     match_market_events,
     database,
     match_market_claims,
@@ -69,6 +70,7 @@ from app.match_market_notify import (
     offer_created as text_offer_created,
     offer_rejected as text_offer_rejected,
     offer_removed_by_admin as text_offer_removed_by_admin,
+    offer_removed_by_admin_for_manager as text_offer_removed_by_admin_for_manager,
     offer_withdrawn as text_offer_withdrawn,
     offer_withdrawn_for_manager as text_offer_withdrawn_for_manager,
     taker_won as text_taker_won,
@@ -1223,10 +1225,50 @@ async def _broadcast_targets(province: str, exclude: str) -> List[str]:
     return sorted(j for j, ok in wanted.items() if ok)
 
 
-async def _approvers_of(province: str) -> List[str]:
-    """Obsadowi i wybrane odznaki; administratorzy tylko po włączeniu w okręgu.
+ADMIN_MARKET_NOTIFICATION_COLUMNS = {
+    "new_offers": admin_market_notification_preferences.c.new_offers,
+    "claims": admin_market_notification_preferences.c.claims,
+    "decisions": admin_market_notification_preferences.c.decisions,
+}
+
+
+async def _willing_additional_admins(kind: Optional[str]) -> List[str]:
+    """Admini chcący dodatkowy strumień danego rodzaju na całym koncie.
+
+    Brak wiersza oznacza zgodę. Tak zachowujemy dotychczasowe dostarczanie po
+    wdrożeniu i dla nowego administratora, który jeszcze nie otworzył ustawień.
+    Nieudany odczyt również przepuszcza odbiorców: lepiej wysłać o jedno
+    powiadomienie za dużo niż po cichu zgubić decyzję.
+    """
+    if kind not in ADMIN_MARKET_NOTIFICATION_COLUMNS:
+        return []
+    try:
+        admins = await admin_judge_ids()
+    except Exception:  # noqa: BLE001
+        logger.warning("giełda: lista adminów niedostępna", exc_info=True)
+        return []
+    if not admins:
+        return []
+    try:
+        rows = await database.fetch_all(
+            select(
+                admin_market_notification_preferences.c.judge_id,
+                ADMIN_MARKET_NOTIFICATION_COLUMNS[kind].label("enabled"),
+            ).where(admin_market_notification_preferences.c.judge_id.in_(admins))
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("giełda: preferencje administratorów niedostępne", exc_info=True)
+        return admins
+    saved = {_s(_row(row).get("judge_id")): bool(_row(row).get("enabled")) for row in rows}
+    return sorted(admin for admin in admins if saved.get(admin, True))
+
+
+async def _approvers_of(province: str, admin_notification: Optional[str] = None) -> List[str]:
+    """Obsadowi i wybrane odznaki oraz chętni administratorzy dodatkowi.
 
     Nieudany odczyt jednej grupy nie może cofnąć czynności ani uciszyć drugiej.
+    `admin_notification=None` oznacza zdarzenie, którego użytkownik nie wybrał
+    (np. samodzielne wycofanie) - wtedy dostają je wyłącznie lokalni obsadowi.
     """
     try:
         cfg = await _config(province)
@@ -1245,15 +1287,15 @@ async def _approvers_of(province: str) -> List[str]:
         rows = [_row(r) for r in records]
     except Exception:  # noqa: BLE001
         logger.warning("giełda: odczyt odznak niedostępny dla %s", province, exc_info=True)
-    try:
-        admin_ids = await admin_judge_ids()
-    except Exception:  # noqa: BLE001
-        logger.warning("giełda: lista adminów niedostępna", exc_info=True)
-        admin_ids = []
+    admin_ids = (
+        await _willing_additional_admins(admin_notification)
+        if cfg["notify_admins"]
+        else []
+    )
     return notification_manager_ids(
         rows, province,
         admin_ids=admin_ids,
-        notify_admins=cfg["notify_admins"],
+        notify_admins=bool(admin_ids),
         allowed_badges=cfg["approver_badges"],
     )
 
@@ -1270,7 +1312,7 @@ async def _offer_notification_groups(province: str, exclude: str) -> Tuple[List[
     # Admin z listy sędziów okręgu zachowuje zwykłą subskrypcję. Przełącznik
     # w `_approvers_of` dodaje tylko administratorów bez lokalnej roli.
     public_ids, manager_ids = offer_notification_groups(
-        public, await _approvers_of(province), exclude
+        public, await _approvers_of(province, "new_offers"), exclude
     )
     return public_ids, manager_ids, public_error
 
@@ -1340,6 +1382,14 @@ class AdminWithdrawRequest(BaseModel):
     """Wyjaśnienie, które dostanie oddający i wszyscy zgłoszeni."""
 
     reason: str
+
+
+class AdminMarketNotificationPreferencesRequest(BaseModel):
+    """Osobiste, zsynchronizowane ustawienia dodatkowego strumienia admina."""
+
+    new_offers: bool = True
+    claims: bool = True
+    decisions: bool = True
 
 
 # ─────────────────────────── kontekst ekranu ───────────────────────────
@@ -2458,7 +2508,7 @@ async def create_claim(
         payload={"conflicts": len(conflicts), "again": bool(existing)},
     )
     managers, giver_targets, claimer_targets = claim_notification_groups(
-        await _approvers_of(province), offer["from_judge_id"], actor.judge_id,
+        await _approvers_of(province, "claims"), offer["from_judge_id"], actor.judge_id,
     )
     await _notify(managers, text_claim_created(offer, actor.full_name), offer,
                   audience="obsadowi i administratorzy", record_empty=True)
@@ -2934,7 +2984,7 @@ async def reject_offer(
     )
     await _notify(
         rejected_notification_targets(
-            await _approvers_of(_s(offer["province"])),
+            await _approvers_of(_s(offer["province"]), "decisions"),
             offer["from_judge_id"], interested, actor.judge_id,
         ),
         text_offer_rejected(offer, _s(giver_card.get("full_name")), reason),
@@ -3380,7 +3430,7 @@ async def approve_offer(
         exclude=[_s(offer["from_judge_id"]), _s(claim["judge_id"])],
     )
     groups = approved_notification_groups(
-        await _approvers_of(province), offer["from_judge_id"], claim["judge_id"],
+        await _approvers_of(province, "decisions"), offer["from_judge_id"], claim["judge_id"],
         other_ids, crew_ids, actor.judge_id,
     )
     await _notify(groups["taker"], text_taker_won(offer), offer,
@@ -3412,6 +3462,59 @@ async def approve_offer(
 
 
 # ─────────────────────────── panel administratora ───────────────────────────
+
+
+def _admin_market_preferences_payload(row: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+    data = row or {}
+    return {
+        "newOffers": data.get("new_offers") is not False,
+        "claims": data.get("claims") is not False,
+        "decisions": data.get("decisions") is not False,
+    }
+
+
+@router.get(
+    "/admin/notification-preferences",
+    summary="Moje powiadomienia administratora giełdy",
+)
+async def get_admin_market_notification_preferences(
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, bool]:
+    if not actor.is_admin:
+        raise HTTPException(403, "Te ustawienia należą do administratora aplikacji.")
+    row = await database.fetch_one(
+        select(admin_market_notification_preferences).where(
+            admin_market_notification_preferences.c.judge_id == actor.judge_id
+        )
+    )
+    return _admin_market_preferences_payload(_row(row) if row else None)
+
+
+@router.put(
+    "/admin/notification-preferences",
+    summary="Zapisz moje powiadomienia administratora giełdy",
+)
+async def update_admin_market_notification_preferences(
+    req: AdminMarketNotificationPreferencesRequest,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, bool]:
+    if not actor.is_admin:
+        raise HTTPException(403, "Te ustawienia należą do administratora aplikacji.")
+    values = {
+        "new_offers": bool(req.new_offers),
+        "claims": bool(req.claims),
+        "decisions": bool(req.decisions),
+        "updated_at": func.now(),
+    }
+    await database.execute(
+        pg_insert(admin_market_notification_preferences)
+        .values(judge_id=actor.judge_id, **values)
+        .on_conflict_do_update(
+            index_elements=[admin_market_notification_preferences.c.judge_id],
+            set_=values,
+        )
+    )
+    return _admin_market_preferences_payload(values)
 
 
 @router.get("/admin/provinces", summary="Stan giełdy i kont w województwach")
@@ -3616,6 +3719,17 @@ async def admin_withdraw_offer(
         offer,
         audience="zgłoszeni sędziowie",
     )
+    decision_observers = sorted(
+        set(await _approvers_of(key, "decisions"))
+        - {actor.judge_id, giver_id, *interested}
+    )
+    await _notify(
+        decision_observers,
+        text_offer_removed_by_admin_for_manager(offer, reason, actor.full_name),
+        offer,
+        audience="pozostali zarządzający i administratorzy",
+        record_empty=True,
+    )
     return {"id": offer_id, "status": target, "reason": reason}
 
 
@@ -3689,7 +3803,12 @@ async def _notification_test_plan(province: str, req: NotificationTestRequest) -
     cards = await _judges_by_id([giver_id, claimer_id])
     giver_name = _s(cards.get(giver_id, {}).get("full_name"))
     claimer_name = _s(cards.get(claimer_id, {}).get("full_name"))
-    managers = set(await _approvers_of(province)) if scenario != "offer_created" else set()
+    admin_kind = "claims" if scenario == "claim_created" else "decisions"
+    managers = (
+        set(await _approvers_of(province, admin_kind))
+        if scenario != "offer_created"
+        else set()
+    )
     # W otwartej ofercie decyzja jest hipotetyczna. Tożsamość rozstrzygającego
     # nie jest znana, więc plan nie wyłącza go z grona zarządzających.
     batches: List[Dict[str, Any]] = []

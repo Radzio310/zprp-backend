@@ -1,12 +1,17 @@
 # app/protocol_convert.py
 
+import asyncio
 import io
 import logging
 import os
+import time
+from collections import OrderedDict
 from typing import List, Tuple, Optional
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
-from fastapi.responses import StreamingResponse
+import httpx
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response, StreamingResponse
 from PIL import Image, ImageOps
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
@@ -14,6 +19,140 @@ from reportlab.lib.utils import ImageReader
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Protocol"])
+
+
+# Publiczne pliki meczu można bezpiecznie renderować po stronie serwera, ale
+# endpoint nie może stać się otwartym proxy do dowolnego adresu (SSRF).
+PDF_PREVIEW_HOST = "baza.zprp.pl"
+PDF_PREVIEW_PATH_PREFIX = "/zawody_zalaczniki/"
+PDF_PREVIEW_LEGACY_PREFIX = "/pdf/"
+PDF_PREVIEW_MAX_BYTES = 16 * 1024 * 1024
+PDF_PREVIEW_CACHE_SECONDS = 5 * 60
+PDF_PREVIEW_CACHE_ITEMS = 6
+_pdf_preview_cache: "OrderedDict[str, tuple[float, bytes]]" = OrderedDict()
+
+
+def _validated_public_pdf_url(raw: str) -> str:
+    url = str(raw or "").strip()
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Nieprawidłowy adres PDF.") from exc
+    path = parsed.path.lower()
+    allowed_path = (
+        path.startswith(PDF_PREVIEW_PATH_PREFIX)
+        and path.endswith(".pdf")
+    ) or path.startswith(PDF_PREVIEW_LEGACY_PREFIX)
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() != PDF_PREVIEW_HOST
+        or not allowed_path
+        or parsed.username
+        or parsed.password
+    ):
+        raise HTTPException(status_code=400, detail="Ten adres PDF nie jest obsługiwany.")
+    return url
+
+
+async def _download_preview_pdf(raw_url: str) -> bytes:
+    url = _validated_public_pdf_url(raw_url)
+    cached = _pdf_preview_cache.get(url)
+    now = time.monotonic()
+    if cached and cached[0] > now:
+        _pdf_preview_cache.move_to_end(url)
+        return cached[1]
+    if cached:
+        _pdf_preview_cache.pop(url, None)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(18.0),
+            follow_redirects=True,
+        ) as client:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                # Przekierowanie także musi skończyć się w publicznym katalogu ZPRP.
+                _validated_public_pdf_url(str(response.url))
+                declared = int(response.headers.get("content-length") or 0)
+                if declared > PDF_PREVIEW_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="PDF jest zbyt duży do podglądu.")
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > PDF_PREVIEW_MAX_BYTES:
+                        raise HTTPException(status_code=413, detail="PDF jest zbyt duży do podglądu.")
+                    chunks.append(chunk)
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("PDF preview download failed url=%s error=%s", url, exc)
+        raise HTTPException(status_code=502, detail="Nie udało się pobrać PDF z ZPRP.") from exc
+
+    data = b"".join(chunks)
+    if not data.startswith(b"%PDF"):
+        raise HTTPException(status_code=422, detail="Pobrany plik nie jest dokumentem PDF.")
+    _pdf_preview_cache[url] = (now + PDF_PREVIEW_CACHE_SECONDS, data)
+    _pdf_preview_cache.move_to_end(url)
+    while len(_pdf_preview_cache) > PDF_PREVIEW_CACHE_ITEMS:
+        _pdf_preview_cache.popitem(last=False)
+    return data
+
+
+def _pdf_info(data: bytes) -> dict:
+    import fitz
+
+    try:
+        with fitz.open(stream=data, filetype="pdf") as document:
+            return {"pages": document.page_count}
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Nie udało się odczytać dokumentu PDF.") from exc
+
+
+def _render_pdf_page(data: bytes, page_index: int, target_width: int) -> bytes:
+    import fitz
+
+    try:
+        with fitz.open(stream=data, filetype="pdf") as document:
+            if page_index < 0 or page_index >= document.page_count:
+                raise HTTPException(status_code=404, detail="Ta strona PDF nie istnieje.")
+            page = document.load_page(page_index)
+            scale = max(0.25, target_width / max(1.0, float(page.rect.width)))
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            return pixmap.tobytes("png")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Nie udało się wyrenderować strony PDF.") from exc
+
+
+@router.get(
+    "/judge/protocol/preview/pdf/info",
+    summary="Metadane publicznego protokołu PDF z ZPRP",
+)
+async def protocol_pdf_preview_info(
+    url: str = Query(..., min_length=12, max_length=2048),
+):
+    data = await _download_preview_pdf(url)
+    return await asyncio.to_thread(_pdf_info, data)
+
+
+@router.get(
+    "/judge/protocol/preview/pdf/page",
+    summary="Wyrenderowana strona publicznego protokołu PDF z ZPRP",
+)
+async def protocol_pdf_preview_page(
+    url: str = Query(..., min_length=12, max_length=2048),
+    page: int = Query(0, ge=0, le=99),
+    width: int = Query(900, ge=160, le=1600),
+):
+    data = await _download_preview_pdf(url)
+    png = await asyncio.to_thread(_render_pdf_page, data, page, width)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 # =========================

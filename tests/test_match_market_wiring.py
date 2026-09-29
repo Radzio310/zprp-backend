@@ -253,7 +253,8 @@ def test_notification_routes_cover_all_market_actors():
     assert "broadcast=True" in code_of("create_offer")
     assert "_broadcast_targets" in calls_in("_offer_notification_groups")
     assert "_approvers_of" in calls_in("_offer_notification_groups")
-    assert "admin_judge_ids" in calls_in("_approvers_of")
+    assert "_willing_additional_admins" in calls_in("_approvers_of")
+    assert "admin_judge_ids" in calls_in("_willing_additional_admins")
     assert "notify_admins" in code_of("_approvers_of")
     assert "notification_manager_ids" in calls_in("_approvers_of")
     assert "offer_notification_groups" in calls_in("_offer_notification_groups")
@@ -271,6 +272,22 @@ def test_notification_routes_cover_all_market_actors():
     push_source = (APP_DIR / "push" / "push.py").read_text(encoding="utf-8")
     assert 'push_tokens.c.notification_prefs' in push_source
     assert 'market_broadcast and not market_pushes_allowed(row["notification_prefs"])' in push_source
+
+
+def test_admin_market_preferences_are_account_wide_and_split_by_event():
+    db_source = (APP_DIR / "db.py").read_text(encoding="utf-8")
+    assert '"admin_market_notification_preferences"' in db_source
+    assert 'Column("judge_id", String, primary_key=True)' in db_source
+    assert 'Column("new_offers", Boolean' in db_source
+    assert 'Column("claims", Boolean' in db_source
+    assert 'Column("decisions", Boolean' in db_source
+    assert "new_offers" in code_of("_offer_notification_groups")
+    assert "claims" in code_of("create_claim")
+    assert "decisions" in code_of("reject_offer")
+    assert "decisions" in code_of("approve_offer")
+    assert "pg_insert" in calls_in("update_admin_market_notification_preferences")
+    assert "actor.is_admin" in code_of("get_admin_market_notification_preferences")
+    assert "actor.is_admin" in code_of("update_admin_market_notification_preferences")
 
 
 def test_admin_notification_switch_is_saved_per_province():

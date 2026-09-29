@@ -297,6 +297,8 @@ app.include_router(matches_router)
 app.include_router(partner_offtimes_router)
 from app.mentoring import router as mentoring_router
 app.include_router(mentoring_router)
+from app.mentor_evaluations import router as mentor_evaluations_router
+app.include_router(mentor_evaluations_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)

@@ -291,6 +291,21 @@ def offer_removed_by_admin(
     )
 
 
+def offer_removed_by_admin_for_manager(
+    offer: Mapping[str, Any], reason: Any, admin_name: Any = ""
+) -> tuple[str, str]:
+    """Decyzja administracyjna dla pozostałych zarządzających."""
+    who = _s(admin_name)
+    return (
+        "🛡️ Oferta zdjęta przez administratora",
+        _join(
+            f"Z giełdy zdjęto {match_of(offer)}",
+            who and f"Administrator: {who}",
+            f"Wyjaśnienie: {_s(reason)}",
+        ),
+    )
+
+
 def claim_created_for_giver(offer: Mapping[str, Any], claimer_name: Any) -> tuple[str, str]:
     """Oddający wie o kandydacie, lecz decyzję podejmuje obsadowy."""
     return (

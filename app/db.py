@@ -2483,6 +2483,27 @@ match_market_claims = Table(
     UniqueConstraint("offer_id", "judge_id", name="uq_match_market_claim_offer_judge"),
 )
 
+# Osobiste preferencje DODATKOWEGO strumienia administratora giełdy.
+#
+# Kluczem jest konto, a nie instalacja: zmiana na jednym telefonie obowiązuje
+# na wszystkich urządzeniach administratora. Brak wiersza oznacza komplet
+# włączony, dzięki czemu wdrożenie nie wycisza dotychczasowych administratorów.
+admin_market_notification_preferences = Table(
+    "admin_market_notification_preferences",
+    metadata,
+    Column("judge_id", String, primary_key=True),
+    Column("new_offers", Boolean, nullable=False, server_default=text("true")),
+    Column("claims", Boolean, nullable=False, server_default=text("true")),
+    Column("decisions", Boolean, nullable=False, server_default=text("true")),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
 # Dziennik giełdy meczów - kto, kiedy i co zrobił.
 #
 # Stany na `match_market_offers` mówią, GDZIE sprawa jest teraz; ten dziennik
@@ -4125,6 +4146,10 @@ privacy_consents = Table(
 
 from app.mentoring_tables import define_tables as _define_mentoring_tables
 mentoring_config, mentoring_pairs, mentoring_members, mentoring_assignments, mentoring_audit = _define_mentoring_tables(metadata)
+
+# Oceny mentora (arkusz jak u delegata ZPRP) - schemat w osobnym module.
+from app.mentor_evaluation_tables import define_tables as _define_mentor_evaluation_tables
+mentor_evaluations, mentor_evaluation_versions = _define_mentor_evaluation_tables(metadata)
 
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables

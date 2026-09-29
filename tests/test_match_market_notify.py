@@ -27,6 +27,7 @@ from app.match_market_notify import (
     offer_created,
     offer_rejected,
     offer_removed_by_admin,
+    offer_removed_by_admin_for_manager,
     offer_withdrawn,
     offer_withdrawn_for_manager,
     match_gen,
@@ -275,6 +276,17 @@ def test_no_body_ends_without_a_full_stop():
         assert title
         assert body.endswith("."), body
         assert ".." not in body, body
+
+
+def test_other_admin_gets_a_manager_version_of_removed_offer():
+    title, body = offer_removed_by_admin_for_manager(
+        offer(), "Mecz nie podlega wymianie", "Anna NOWAK"
+    )
+    assert title == "🛡️ Oferta zdjęta przez administratora"
+    assert body.startswith("Z giełdy zdjęto mecz IIM4/1.")
+    assert "Administrator: Anna NOWAK." in body
+    assert "Wyjaśnienie: Mecz nie podlega wymianie." in body
+    assert "Twojej obsadzie" not in body
 
 
 def test_each_sentence_starts_with_a_capital():
