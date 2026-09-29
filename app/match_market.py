@@ -1398,6 +1398,12 @@ async def get_my_matches(
         ),
     ),
     province: str = Query(""),
+    live: int = Query(
+        1,
+        ge=0,
+        le=1,
+        description="0 = szybka migawka bez czekania na publiczne API ZPRP.",
+    ),
     actor: Actor = Depends(market_actor),
     settings: Settings = Depends(get_settings),
 ) -> Dict[str, Any]:
@@ -1407,7 +1413,14 @@ async def get_my_matches(
     sprawdzenia wskazuje wyłącznie migawka okręgu, więc mecz, o którym okręg
     jeszcze nie wie, tu nie wejdzie. Nowsza aplikacja domyka to trasą POST.
     """
-    return await my_matches(actor, settings, bool(verify), [], province_override=province)
+    return await my_matches(
+        actor,
+        settings,
+        bool(verify),
+        [],
+        budget=LIVE_CREW_BUDGET_SECONDS if live else 0.0,
+        province_override=province,
+    )
 
 
 class MyMatchesRequest(BaseModel):
@@ -1415,6 +1428,7 @@ class MyMatchesRequest(BaseModel):
 
     match_ids: List[str] = []
     verify: bool = False
+    live: bool = True
     province: Optional[str] = None
 
 
@@ -1462,6 +1476,7 @@ async def post_my_matches(
 ) -> Dict[str, Any]:
     return await my_matches(
         actor, settings, req.verify, clean_match_ids(req.match_ids),
+        budget=LIVE_CREW_BUDGET_SECONDS if req.live else 0.0,
         province_override=req.province,
     )
 
@@ -1603,9 +1618,15 @@ async def my_matches(
             trusted.add(match_id)
             continue
         bases[match_id] = state_dict(data.get("state_json")) if data else {}
-    fresh, _failed = await _live_crews(
-        province, actor, bases, known=set(rows), vouched=vouched, budget=budget
-    )
+    if budget <= 0:
+        # Pierwszy kadr arkusza ma być natychmiastowy. Migawka jest wyraźnie
+        # oznaczona przez `liveChecked=False`, a drugie wywołanie zaraz potem
+        # pobiera żywą obsadę i werdykty bez blokowania interfejsu.
+        fresh, _failed = {}, list(bases)
+    else:
+        fresh, _failed = await _live_crews(
+            province, actor, bases, known=set(rows), vouched=vouched, budget=budget
+        )
     live_ids = set(fresh) | trusted
 
     # Kandydaci ponad limit sprawdzeń zostają z migawki - i są PODPISANI.

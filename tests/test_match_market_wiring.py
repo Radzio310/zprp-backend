@@ -115,6 +115,16 @@ def test_all_routes_are_registered():
     assert ("put", "/admin/provinces/{province}") in paths
 
 
+def test_my_matches_has_a_non_blocking_first_pass():
+    """Pierwszy kadr arkusza nie może czekać na 12-sekundowy budżet ZPRP."""
+    post = code_of("post_my_matches")
+    body = code_of("my_matches")
+    assert "req.live" in post
+    assert "LIVE_CREW_BUDGET_SECONDS if req.live else 0.0" in post
+    assert "budget <= 0" in body
+    assert "fresh, _failed = ({}, list(bases))" in body
+
+
 def test_every_route_asks_who_is_calling():
     # Trasa bez `market_actor` byłaby otwarta dla świata - a ten moduł zmienia
     # obsadę meczów, które naprawdę się odbędą.
