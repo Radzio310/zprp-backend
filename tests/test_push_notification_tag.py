@@ -11,7 +11,7 @@ powtórnie MUSI mieć ten sam - inaczej ponowienie mnożyłoby kopie.
 """
 from __future__ import annotations
 
-from app.push.fcm import notification_tag
+from app.push.fcm import fcm_message_payload, notification_tag
 
 
 def event(key: str) -> dict:
@@ -66,3 +66,53 @@ def test_tag_is_short_enough_for_android():
 def test_empty_payload_does_not_crash():
     assert notification_tag(None, "T", "B")
     assert notification_tag({}, "T", "B")
+
+
+def test_live_thread_replaces_older_state_even_when_text_changes():
+    first = notification_tag(
+        {"kind": "match_market", "notificationThread": "offer-7"},
+        "Mecz do wzięcia",
+        "Czeka na chętnych",
+    )
+    updated = notification_tag(
+        {"kind": "match_market", "notificationThread": "offer-7"},
+        "3 zgłoszenia",
+        "Anna, Jan i Piotr",
+    )
+    other = notification_tag(
+        {"kind": "match_market", "notificationThread": "offer-8"},
+        "3 zgłoszenia",
+        "Anna, Jan i Piotr",
+    )
+    assert first == updated
+    assert first != other
+
+
+def test_silent_update_uses_the_quiet_channel_without_sound():
+    payload = fcm_message_payload(
+        "secret-token",
+        "2 zgłoszenia",
+        "Anna i Jan",
+        {
+            "notificationThread": "offer-7",
+            "notificationSilent": "true",
+        },
+    )["message"]
+    android = payload["android"]["notification"]
+    aps = payload["apns"]["payload"]["aps"]
+    assert android["channel_id"] == "market_updates_silent"
+    assert "sound" not in android
+    assert "sound" not in aps
+    assert payload["apns"]["headers"]["apns-collapse-id"] == android["tag"]
+
+
+def test_fresh_claim_still_alerts_normally():
+    payload = fcm_message_payload(
+        "secret-token",
+        "Nowe zgłoszenie",
+        "Anna",
+        {"notificationThread": "offer-7"},
+    )["message"]
+    assert payload["android"]["notification"]["channel_id"] == "default"
+    assert payload["android"]["notification"]["sound"] == "default"
+    assert payload["apns"]["payload"]["aps"]["sound"] == "default"

@@ -200,3 +200,77 @@ def sheet_points(sheet: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]
     # z 4,5 czwórkę (zaokrąglenie bankierskie) i litera rozjechałaby się z ekranem.
     letter = GRADES[max(1, min(7, int(points + 0.5))) - 1]
     return points, letter
+
+
+# ─── Arkusz mentora w kształcie arkusza delegata ────────────────────────────
+#
+# Ekrany „Oceny delegatów i mentorów" (aplikacja i BAZA_web) liczą statystyki
+# i rysują arkusze z `evaluation_json` delegata. Ocena mentora trafia tam w tym
+# samym kształcie, oznaczona `kind: "mentor"` - bez drugiej kopii ekranów.
+
+SECTION_TITLES = {
+    "I": "Zarządzanie widowiskiem",
+    "II": "Rozumienie gry",
+    "III": "Poruszanie i współpraca",
+    "IV": "Mowa ciała i komunikacja",
+    "V": "Linia karania",
+    "VI": "Obszar kołowego",
+    "VII": "Rzuty karne",
+    "VIII": "Faul ataku",
+    "IX": "Błędy techniczne",
+    "X": "Umiejętności mentalne",
+}
+SITUATION_LABELS = {
+    "dobra": "Dobra interpretacja sędziów",
+    "bledna": "Błędna interpretacja sędziów",
+    "analiza": "Wymaga analizy pomeczowej",
+    "protest": "Złamanie przepisu, potencjalny protest",
+    "wynik": "Negatywny wpływ na wynik meczu",
+}
+
+
+def delegate_shape(sheet: Dict[str, Any], info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    sheet = clean_sheet(sheet)
+    sections = []
+    for key in SECTION_KEYS:
+        sec = sheet["sections"].get(key) or {}
+        items = [
+            {"idx": i + 1, "title": title, "grade": grade}
+            for i, (title, grade) in enumerate((sec.get("items") or {}).items())
+            if grade
+        ]
+        if not sec.get("main") and not items and not sec.get("comment"):
+            continue
+        sections.append(
+            {
+                "key": key,
+                "title": f"{key}. {SECTION_TITLES[key]}",
+                "mainGrade": sec.get("main"),
+                "comment": sec.get("comment") or "",
+                "items": items,
+            }
+        )
+    criteria = [
+        {"idx": i + 1, "title": title, "value": value}
+        for i, (title, value) in enumerate(sheet["character"].items())
+        if value
+    ]
+    return {
+        "kind": "mentor",
+        "info": dict(info or {}),
+        "character": {"difficulty": {"short": sheet["difficulty"], "full": sheet["difficulty"]}, "criteria": criteria}
+        if sheet["difficulty"] or criteria
+        else None,
+        "sections": sections,
+        "keySituations": [
+            {
+                "idx": i + 1,
+                "time": s["time"],
+                "category": SITUATION_LABELS.get(s["category"] or "", ""),
+                "description": s["description"],
+            }
+            for i, s in enumerate(sheet["situations"])
+        ],
+        "priorities": [{"title": f"Priorytet {i + 1}", "body": p} for i, p in enumerate(sheet["priorities"]) if p.strip()],
+        "vr": [],
+    }

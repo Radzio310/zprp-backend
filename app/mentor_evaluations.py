@@ -36,6 +36,7 @@ from app.match_market import Actor, market_actor
 from app.mentor_evaluation_rules import (
     can_view_published,
     clean_sheet,
+    delegate_shape,
     eligibility,
     json_list,
     pair_key,
@@ -260,7 +261,7 @@ async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> 
                     id=evaluation_id,
                     match_id=str(match_id),
                     province=province_display(match["province"]),
-                    season=match["season"],
+                    season=match["season"] or str(match["state"].get("season") or "") or None,
                     match_number=str(match["state"].get("RozgrywkiCode") or ""),
                     match_at=match["match_at"],
                     pair_key=pair_key(ctx["pair"]),
@@ -283,6 +284,10 @@ async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> 
                     evaluation_id=evaluation_id, saved_by=me, sheet_json=body, points=points, letter=letter, saved_at=stamp
                 )
             )
+    first_publish = publish and not (existing and existing["status"] == "published")
+    if first_publish:
+        authors = [existing["author_id"], *json_list(existing["co_author_ids"])] if existing else [me, *co_ids]
+        await notify_pair(match_id, ctx["pair"], authors, str(match["state"].get("RozgrywkiCode") or ""), letter, points)
     return {"ok": True, "id": evaluation_id, "points": points, "letter": letter, "status": "published" if publish or (existing and existing["status"] == "published") else "draft"}
 
 
@@ -322,3 +327,87 @@ async def for_province(province: str, season: Optional[str] = Query(default=None
         item["match_at"] = r["match_at"]
         out.append(item)
     return {"evaluations": out}
+
+
+# ─── Oceny mentora w ekranie „Oceny delegatów i mentorów" ───────────────────
+
+
+def _match_date(value: Any) -> str:
+    if not value:
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+
+        return value.astimezone(ZoneInfo("Europe/Warsaw")).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(value)[:16]
+
+
+async def mentor_form_rows(actor_id: str, province: str = "", season: str = "") -> List[Dict[str, Any]]:
+    """Opublikowane oceny mentora w kształcie wiersza `delegate_evaluations`.
+
+    Z okręgiem - wszystkie oceny okręgu (dostęp sprawdza wołający). Bez okręgu -
+    tylko oceny par, w których `actor_id` sędziował (jak „moje" arkusze delegata).
+    """
+    query = select(evaluations).where(evaluations.c.status == "published").where(evaluations.c.published_json.isnot(None))
+    if province:
+        query = query.where(evaluations.c.province.in_(spellings(province_display(province))))
+    if season:
+        query = query.where(evaluations.c.season == season)
+    rows = [dict(r) for r in await database.fetch_all(query.order_by(evaluations.c.match_at.desc()))]
+    if not province:
+        rows = [r for r in rows if actor_id in r["pair_key"].split("|")]
+    ids = set()
+    for r in rows:
+        ids |= {r["author_id"], *json_list(r["co_author_ids"]), *r["pair_key"].split("|")}
+    names = await people(ids)
+    out = []
+    for r in rows:
+        pair = r["pair_key"].split("|")
+        authors = [r["author_id"], *json_list(r["co_author_ids"])]
+        author_names = " + ".join(names[a]["full_name"] for a in authors if a in names)
+        out.append(
+            {
+                "id": f"mentor:{r['id']}",
+                "kind": "mentor",
+                "match_id": r["match_id"],
+                "season": r["season"] or "",
+                "province": r["province"],
+                "match_number": r["match_number"] or "",
+                "match_date": _match_date(r["match_at"]),
+                "referee_ids": pair,
+                "referee_names": [names[p]["full_name"] for p in pair if p in names],
+                "delegate_name": author_names,
+                "mentor_names": [names[a]["full_name"] for a in authors if a in names],
+                "source_kind": "mentor",
+                "evaluation_json": delegate_shape(_loads(r["published_json"]), {"mentors": author_names}),
+                "points": r["points"],
+                "letter": r["letter"],
+                "published_at": r["published_at"],
+            }
+        )
+    return out
+
+
+async def notify_pair(match_id: str, pair: tuple, authors: List[str], match_code: str, letter: Optional[str], points: Optional[float]) -> None:
+    """Push do ocenianej pary po PIERWSZEJ publikacji. Awaria wysyłki nie cofa zapisu.
+
+    Ładunek `type: "match_change"` + numer i `IdZawody` otwiera szczegóły tego
+    meczu także w starszych wersjach aplikacji - tam para widzi kartę ocen.
+    """
+    try:
+        from app.push.push import send_push_to_judges
+
+        names = await people(authors)
+        who = " i ".join(names[a]["full_name"] for a in authors if a in names) or "Mentor"
+        score = f" · {letter} ({points:.2f})".replace(".", ",") if letter and points is not None else ""
+        await send_push_to_judges(
+            sorted(set(pair)),
+            "Ocena mentora",
+            f"{who} ocenił{'i' if len(authors) > 1 else ''} Wasz mecz {match_code}{score}".strip(),
+            {"type": "match_change", "kind": "mentor_evaluation", "matchId": str(match_id), "matchNumber": match_code},
+        )
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning("ocena mentora: powiadomienie nieudane", exc_info=True)

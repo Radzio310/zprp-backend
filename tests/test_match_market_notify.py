@@ -15,6 +15,7 @@ from app.match_market_notify import (
     SLOT_FOR,
     apply_failed,
     claim_created,
+    claim_digest,
     claim_created_for_giver,
     claim_pending_for_claimer,
     claim_withdrawn,
@@ -184,6 +185,37 @@ def test_claim_names_the_role_in_the_nominative():
     assert title == "🙋 Zgłoszenie na mecz"
     assert body.startswith("KOWALSKI Piotr zgłasza się na mecz IIM4/1 jako sekretarz.")
     assert "Czeka na Twoją decyzję." in body
+
+
+def test_claim_digest_lists_people_and_role_in_one_live_card():
+    title, body = claim_digest(
+        offer(),
+        ["Patryk URZYŃSKI", "Adrian DYMITRUK", "Magdalena ANDERS"],
+        actionable=True,
+    )
+    assert title == "🙋 3 zgłoszenia · IIM4/1"
+    assert "Patryk URZYŃSKI, Adrian DYMITRUK i Magdalena ANDERS" in body
+    assert "na sędziego 1" in body
+    assert body.endswith("Dotknij, aby rozstrzygnąć.")
+
+
+def test_claim_digest_shortens_a_long_list_without_hiding_the_count():
+    title, body = claim_digest(
+        offer(),
+        ["A" * 60, "B" * 60, "C" * 60, "D" * 60, "E" * 60],
+        actionable=False,
+    )
+    assert title == "🙋 5 zgłoszeń · IIM4/1"
+    assert "inne osoby" in body or "innych osób" in body
+    assert "Obsadowy rozstrzygnie wymianę." in body
+    assert len(body) < 240
+
+
+def test_claim_digest_after_last_withdrawal_keeps_the_offer_clear():
+    title, body = claim_digest(offer(), [], actionable=True)
+    assert title == "🙋 Brak zgłoszeń · IIM4/1"
+    assert "Nie ma już aktywnych zgłoszeń" in body
+    assert "Oferta pozostaje otwarta." in body
 
 
 def test_giver_gets_a_claim_without_false_decision_prompt():

@@ -204,7 +204,7 @@ def test_notification_audit_records_unique_referees_and_lookup_failures():
 
     namespace = {
         "_s": lambda value: str(value or "").strip(),
-        "_offer_data": lambda offer: {"offerId": str(offer["id"])},
+        "_offer_data": lambda offer, **kwargs: {"offerId": str(offer["id"])},
         "send_push_to_judges_report": send,
         "_log": log,
         "logger": SimpleNamespace(warning=lambda *args, **kwargs: None),
@@ -259,7 +259,11 @@ def test_notification_routes_cover_all_market_actors():
     assert "notification_manager_ids" in calls_in("_approvers_of")
     assert "offer_notification_groups" in calls_in("_offer_notification_groups")
     assert "from_judge_id" in code_of("create_claim")
-    assert "text_claim_created_for_giver" in calls_in("create_claim")
+    assert "text_claim_digest" in calls_in("create_claim")
+    assert "_pending_claim_names" in calls_in("create_claim")
+    assert "_pending_claim_names" in calls_in("withdraw_claim")
+    assert "silent=True" in code_of("withdraw_claim")
+    assert "notificationThread" in code_of("_offer_data")
     assert "text_claim_pending_for_claimer" in calls_in("create_claim")
     assert "_approvers_of" in calls_in("reject_offer")
     assert "_approvers_of" in calls_in("approve_offer")

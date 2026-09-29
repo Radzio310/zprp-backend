@@ -150,6 +150,18 @@ def notification_tag(data: Optional[Dict[str, Any]], title: str, body: str) -> s
     zostaja obok siebie.
     """
     payload = data or {}
+    # Powiadomienia, które opisują jeden żywy temat (np. ofertę giełdy),
+    # dostają stały wątek. Kolejne stany tej samej sprawy aktualizują wtedy
+    # istniejący kafelek Androida zamiast dokładać następny. `event_key` nadal
+    # pozostaje identyfikatorem zdarzenia w dzienniku i deduplikacji.
+    thread = str(
+        payload.get("notificationThread")
+        or payload.get("notification_thread")
+        or ""
+    ).strip()
+    if thread:
+        digest = hashlib.sha256(thread.encode("utf-8")).hexdigest()[:32]
+        return f"thr-{digest}"
     key = str(payload.get("event_key") or "").strip()
     if key:
         return f"evt-{key[:32]}"
@@ -165,6 +177,53 @@ def notification_tag(data: Optional[Dict[str, Any]], title: str, body: str) -> s
     return "gen-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def fcm_message_payload(
+    fcm_token: str,
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Buduje wiadomość FCM, również dla testów bez wykonywania sieci."""
+    raw_data = data or {}
+    tag = notification_tag(raw_data, title, body)
+    silent = _truthy(raw_data.get("notificationSilent"))
+    android_notification: Dict[str, Any] = {
+        "tag": tag,
+        "channel_id": "market_updates_silent" if silent else "default",
+    }
+    if not silent:
+        android_notification["sound"] = "default"
+
+    aps: Dict[str, Any] = {"thread-id": tag}
+    if not silent:
+        aps["sound"] = "default"
+
+    return {
+        "message": {
+            "token": fcm_token,
+            "notification": {"title": title, "body": body},
+            "data": {k: str(v) for k, v in raw_data.items()},
+            "android": {
+                # Stały collapse_key sprawia, że telefon, który był offline,
+                # dostaje tylko najświeższy stan żywego wątku.
+                "collapse_key": tag,
+                "priority": "high",
+                "notification": android_notification,
+            },
+            "apns": {
+                # `thread-id` grupuje temat, a collapse-id scala wiadomości,
+                # które jeszcze czekają na dostarczenie przez APNs.
+                "headers": {"apns-collapse-id": tag},
+                "payload": {"aps": aps},
+            },
+        }
+    }
+
+
 async def send_fcm_message(
     fcm_token: str,
     title: str,
@@ -174,33 +233,8 @@ async def send_fcm_message(
     access_token = await _get_access_token()
     project_id = _get_project_id()
 
-    tag = notification_tag(data, title, body)
     url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
-    payload = {
-        "message": {
-            "token": fcm_token,
-            "notification": {"title": title, "body": body},
-            "data": {k: str(v) for k, v in (data or {}).items()},
-            "android": {
-                # Bez wlasnego klucza FCM potrafi scalic wiadomosci czekajace na
-                # wylaczony telefon. Tu kazde zdarzenie ma wlasny.
-                "collapse_key": tag,
-                "priority": "high",
-                # Ten kanał aplikacja zakłada jako MAX. Bez jawnego channel_id
-                # Android potrafi skierować zdalny push do fallbacku FCM, który
-                # na części telefonów jest cichy albo wcześniej wyłączony.
-                "notification": {
-                    "tag": tag,
-                    "channel_id": "default",
-                    "sound": "default",
-                },
-            },
-            "apns": {
-                # Odpowiednik `tag` na iOS. Rozne watki = rozne powiadomienia.
-                "payload": {"aps": {"thread-id": tag}},
-            },
-        }
-    }
+    payload = fcm_message_payload(fcm_token, title, body, data)
 
     headers = {
         "Authorization": f"Bearer {access_token}",

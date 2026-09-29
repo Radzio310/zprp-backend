@@ -60,6 +60,7 @@ from app.match_market_notify import (
     change_approved as text_change_approved,
     conflict_sentence,
     claim_created as text_claim_created,
+    claim_digest as text_claim_digest,
     claim_created_for_giver as text_claim_created_for_giver,
     claim_pending_for_claimer as text_claim_pending_for_claimer,
     claim_withdrawn as text_claim_withdrawn,
@@ -1104,15 +1105,68 @@ async def _log(
         logger.exception("giełda: nie udało się dopisać do dziennika (%s)", kind)
 
 
-def _offer_data(offer: Dict[str, Any]) -> Dict[str, str]:
+def _offer_data(
+    offer: Dict[str, Any], *, silent: bool = False, test: bool = False
+) -> Dict[str, str]:
     """Ładunek push-a - stąd dispatcher deep-linków wie, co otworzyć."""
-    return {
+    offer_id = _s(offer.get("id"))
+    thread_identity = offer_id or ":".join(
+        (
+            _s(offer.get("province")),
+            _s(offer.get("match_id")),
+            _s(offer.get("slot")),
+        )
+    )
+    data = {
         "kind": "match_market",
-        "offerId": str(offer.get("id")),
+        "offerId": offer_id,
         "province": _s(offer.get("province")),
         "matchId": _s(offer.get("match_id")),
         "matchNumber": _s(offer.get("match_code")),
+        # Jeden stały temat na ofertę. Android używa go jako `tag`, iOS jako
+        # `thread-id`; test ma osobny wątek, żeby nie podmienił prawdziwej karty.
+        "notificationThread": (
+            f"match-market-test-{thread_identity}"
+            if test
+            else f"match-market-offer-{thread_identity}"
+        ),
     }
+    if silent:
+        data["notificationSilent"] = "true"
+    return data
+
+
+async def _pending_claim_names(offer_id: int) -> Optional[List[str]]:
+    """Aktualna lista chętnych; awaria podsumowania nie cofa czynności."""
+    try:
+        rows = [
+            _row(row)
+            for row in await database.fetch_all(
+                select(match_market_claims)
+                .where(match_market_claims.c.offer_id == offer_id)
+                .where(match_market_claims.c.status == "pending")
+                .order_by(
+                    match_market_claims.c.updated_at.asc(),
+                    match_market_claims.c.id.asc(),
+                )
+            )
+        ]
+        ids = [_s(row.get("judge_id")) for row in rows]
+        cards = await _judges_by_id(ids)
+        return [
+            _s((cards.get(judge_id) or {}).get("full_name")) or f"Sędzia {judge_id}"
+            for judge_id in ids
+            if judge_id
+        ]
+    except Exception:  # noqa: BLE001
+        # Zgłoszenie jest już zapisane. Nie wolno zwrócić telefonu do formularza
+        # z błędem tylko dlatego, że dodatkowy odczyt nazwisk się nie udał.
+        logger.warning(
+            "giełda: nie udało się zbudować podsumowania zgłoszeń oferty %s",
+            offer_id,
+            exc_info=True,
+        )
+        return None
 
 
 async def _notify(
@@ -1125,6 +1179,7 @@ async def _notify(
     record_empty: bool = False,
     selection_error: bool = False,
     test: bool = False,
+    silent: bool = False,
     audit_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Wysyłka, która nigdy nie wywraca operacji, przy której powstała.
@@ -1139,7 +1194,7 @@ async def _notify(
         return None
     display_title = f"🧪 TEST — {title}" if test else title
     display_body = f"To tylko test — oferta i obsada nie zostały zmienione. {body}" if test else body
-    data = _offer_data(offer)
+    data = _offer_data(offer, silent=silent, test=test)
     if test:
         data["is_test"] = "true"
     try:
@@ -2510,11 +2565,14 @@ async def create_claim(
     managers, giver_targets, claimer_targets = claim_notification_groups(
         await _approvers_of(province, "claims"), offer["from_judge_id"], actor.judge_id,
     )
-    await _notify(managers, text_claim_created(offer, actor.full_name), offer,
+    active_names = await _pending_claim_names(offer_id)
+    if active_names is None:
+        active_names = [actor.full_name]
+    await _notify(managers, text_claim_digest(offer, active_names, actionable=True), offer,
                   audience="obsadowi i administratorzy", record_empty=True)
     if giver_targets:
         await _notify(
-            giver_targets, text_claim_created_for_giver(offer, actor.full_name), offer,
+            giver_targets, text_claim_digest(offer, active_names, actionable=False), offer,
             audience="oddający mecz",
         )
     await _notify(claimer_targets, text_claim_pending_for_claimer(offer), offer,
@@ -2557,13 +2615,35 @@ async def withdraw_claim(offer_id: int, actor: Actor = Depends(market_actor)) ->
             actor=actor,
             offer=parent_offer,
         )
-        await _notify(
-            sorted((set(await _approvers_of(_s(parent_offer["province"]))) |
-                    {_s(parent_offer["from_judge_id"])}) - {actor.judge_id}),
-            text_claim_withdrawn(parent_offer, actor.full_name),
-            parent_offer,
-            audience="oddający i zarządzający",
+        active_names = await _pending_claim_names(offer_id)
+        managers, giver_targets, _ = claim_notification_groups(
+            await _approvers_of(_s(parent_offer["province"]), "claims"),
+            parent_offer["from_judge_id"], actor.judge_id,
         )
+        await _notify(
+            managers,
+            (
+                text_claim_digest(parent_offer, active_names, actionable=True)
+                if active_names is not None
+                else text_claim_withdrawn(parent_offer, actor.full_name)
+            ),
+            parent_offer,
+            audience="obsadowi i administratorzy",
+            record_empty=True,
+            silent=True,
+        )
+        if giver_targets:
+            await _notify(
+                giver_targets,
+                (
+                    text_claim_digest(parent_offer, active_names, actionable=False)
+                    if active_names is not None
+                    else text_claim_withdrawn(parent_offer, actor.full_name)
+                ),
+                parent_offer,
+                audience="oddający mecz",
+                silent=True,
+            )
     return {"id": claim["id"], "status": target}
 
 

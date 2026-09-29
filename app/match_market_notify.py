@@ -218,6 +218,86 @@ def claim_created(offer: Mapping[str, Any], claimer_name: Any) -> tuple[str, str
     )
 
 
+def _claim_count_label(count: int) -> str:
+    if count == 1:
+        return "1 zgłoszenie"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return f"{count} zgłoszenia"
+    return f"{count} zgłoszeń"
+
+
+def _other_people_label(count: int) -> str:
+    if count == 1:
+        return "1 inna osoba"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return f"{count} inne osoby"
+    return f"{count} innych osób"
+
+
+def _listed_people(values: Iterable[Any], *, max_names: int = 3, max_chars: int = 112) -> str:
+    """Nazwiska mieszczące się na ekranie blokady, z uczciwym licznikiem reszty."""
+    names: List[str] = []
+    seen = set()
+    for value in values:
+        name = _s(value)
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    if not names:
+        return ""
+
+    shown: List[str] = []
+    for name in names[:max_names]:
+        candidate = ", ".join((*shown, name))
+        if shown and len(candidate) > max_chars:
+            break
+        shown.append(name)
+    if not shown:
+        shown.append(names[0][:max_chars].rstrip())
+
+    remaining = len(names) - len(shown)
+    if remaining:
+        return f"{', '.join(shown)} i {_other_people_label(remaining)}"
+    if len(shown) == 1:
+        return shown[0]
+    return f"{', '.join(shown[:-1])} i {shown[-1]}"
+
+
+def claim_digest(
+    offer: Mapping[str, Any],
+    claimer_names: Iterable[Any],
+    *,
+    actionable: bool,
+) -> tuple[str, str]:
+    """Jeden aktualizowany kafelek wszystkich aktywnych zgłoszeń oferty."""
+    names = [name for name in claimer_names if _s(name)]
+    code = _s(offer.get("match_code"))
+    suffix = f" · {code}" if code else ""
+    if not names:
+        return (
+            f"🙋 Brak zgłoszeń{suffix}",
+            _join(
+                f"Nie ma już aktywnych zgłoszeń na {slot_for(offer.get('slot'))}",
+                "Oferta pozostaje otwarta",
+            ),
+        )
+
+    ending = (
+        "Dotknij, aby rozstrzygnąć"
+        if actionable
+        else "Obsadowy rozstrzygnie wymianę"
+    )
+    return (
+        f"🙋 {_claim_count_label(len(names))}{suffix}",
+        _join(
+            f"Zgłoszenia na {slot_for(offer.get('slot'))}: {_listed_people(names)}",
+            ending,
+        ),
+    )
+
+
 def claim_pending_for_claimer(offer: Mapping[str, Any]) -> tuple[str, str]:
     """Potwierdzenie dla chętnego: zgłoszenie czeka, mecz nie jest jeszcze jego."""
     return (
