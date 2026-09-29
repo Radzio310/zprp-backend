@@ -27,13 +27,15 @@ import re
 import time
 import uuid
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.deps import get_settings, get_rsa_keys, Settings
-from app.offtime import _decrypt_field, _login_and_client
+from app.zprp_session import decrypt_field as _decrypt_field
+from app.zprp_session import login_and_client as _login_and_client
 
 router = APIRouter()
 
@@ -51,6 +53,14 @@ class DocumentDownloadRequest(BaseModel):
     judge_id: str  # Base64-RSA
     doc_id: int  # numer dokumentu w ZPRP (plik: sedzia_dokumenty/<id>.pdf)
     filename: Optional[str] = None  # nazwa proponowana przy zapisie na telefonie
+
+
+class RawProtocolDownloadRequest(BaseModel):
+    username: str  # Base64-RSA
+    password: str  # Base64-RSA
+    judge_id: str  # Base64-RSA
+    match_id: int  # IdZawody
+    filename: Optional[str] = None
 
 
 def _safe_filename(raw: Optional[str], doc_id: int) -> str:
@@ -71,6 +81,11 @@ def _safe_filename(raw: Optional[str], doc_id: int) -> str:
         name = f"{name}.pdf"
     # 120 znaków to sufit, w którym mieszczą się nazwy ZPRP razem z rozszerzeniem.
     return name[:120]
+
+
+def _safe_protocol_filename(raw: Optional[str], match_id: int) -> str:
+    preferred = (raw or "").strip() or f"protokol_surowy_{match_id}.pdf"
+    return _safe_filename(preferred, match_id)
 
 
 def _sweep_old_files() -> None:
@@ -141,6 +156,67 @@ async def document_download(
     filename = _safe_filename(req.filename, req.doc_id)
     download_url = request.url_for("download_judge_document", token=token)
     return {"download_url": f"{download_url}?name={filename}", "filename": filename}
+
+
+@router.post(
+    "/judge/protocol/raw/download",
+    summary="Pobierz surowy protokół przedmeczowy z konta sędziego ZPRP",
+)
+async def raw_protocol_download(
+    req: RawProtocolDownloadRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    private_key, _ = keys
+
+    try:
+        user = _decrypt_field(req.username, private_key)
+        pwd = _decrypt_field(req.password, private_key)
+        _judge = _decrypt_field(req.judge_id, private_key)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - komunikat idzie do aplikacji
+        raise HTTPException(400, f"Niepoprawny payload: {exc}") from exc
+
+    if req.match_id <= 0:
+        raise HTTPException(400, "Niepoprawny IdZawody")
+
+    client = await _login_and_client(user, pwd, settings)
+    try:
+        response = await client.get(
+            "/zawody_protokol_1.php",
+            params={"IdZawody": int(req.match_id)},
+        )
+        if response.status_code != 200:
+            raise HTTPException(
+                502,
+                f"ZPRP zwrócił HTTP {response.status_code} przy pobieraniu protokołu",
+            )
+        data = await response.aread()
+    finally:
+        await client.aclose()
+
+    # ZPRP przy wygasłej/odrzuconej sesji potrafi odpowiedzieć HTML-em z kodem
+    # 200. Taki plik nie może trafić na telefon z rozszerzeniem .pdf.
+    if not data.startswith(b"%PDF-"):
+        raise HTTPException(
+            502,
+            "ZPRP nie udostępnił surowego protokołu PDF dla tego konta i meczu",
+        )
+
+    _sweep_old_files()
+    token = uuid.uuid4().hex
+    path = os.path.join(TMP_DIR, f"doc_{token}.pdf")
+    with open(path, "wb") as file:
+        file.write(data)
+
+    filename = _safe_protocol_filename(req.filename, req.match_id)
+    download_url = request.url_for("download_judge_document", token=token)
+    return {
+        "download_url": f"{download_url}?name={quote(filename, safe='')}",
+        "filename": filename,
+    }
 
 
 @router.get(

@@ -1800,6 +1800,15 @@ proel_match_state = Table(
     Column("guard_json", JSON, nullable=True),
     Column("rev", BigInteger, nullable=False, server_default=text("0")),
     Column("fields_json", JSON, nullable=False, server_default=text("'{}'")),
+    # Współdzielona migawka badań zawodników. Telefon zapisuje ją po świeżym
+    # odczycie rosteru, a wszystkie urządzenia czytają ten sam stan po dniu
+    # meczu. Osobne kolumny nie obciążają lekkiego `fields_json` ani listy
+    # zapisanych protokołów.
+    Column("exam_snapshot_json", JSON, nullable=True),
+    Column("exam_snapshot_rev", BigInteger, nullable=False, server_default=text("0")),
+    Column("exam_snapshot_date", String, nullable=True),
+    Column("exam_snapshot_hash", String, nullable=True),
+    Column("exam_snapshot_at", DateTime(timezone=True), nullable=True),
     # Ring ostatnich zmian + zużyte op_id (idempotencja ponowień z outboxa).
     Column("audit_json", JSON, nullable=False, server_default=text("'[]'")),
     # Znacznik przejścia PRE → LIVE. NULL = faza przedmeczowa.
@@ -4306,6 +4315,13 @@ with engine.connect() as _conn:
     # Odcisk meczu bez identyfikatora ZPRP. `create_all` nie dokłada kolumn do
     # istniejących tabel, a ta tabela na produkcji istnieje od dawna.
     _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS local_key varchar"))
+    # Współdzielone migawki badań. `create_all` nie dokłada kolumn do
+    # istniejącej tabeli produkcyjnej, więc migracja musi być idempotentna.
+    _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS exam_snapshot_json json"))
+    _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS exam_snapshot_rev bigint NOT NULL DEFAULT 0"))
+    _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS exam_snapshot_date varchar"))
+    _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS exam_snapshot_hash varchar"))
+    _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS exam_snapshot_at timestamptz"))
     # Wersja treści meczu i przeniesienie zapisu szkoleniowego do oficjalnego.
     # `proel_matches` istnieje na produkcji od dawna, więc `create_all` tych
     # kolumn nie dołoży. `DEFAULT 0` bez przepisywania tabeli (Postgres 11+),

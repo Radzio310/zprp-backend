@@ -96,6 +96,18 @@ def _json_value(raw: Any) -> Any:
     return raw
 
 
+def _datetime_value(raw: Any) -> Optional[datetime]:
+    """Odtwarza czas zapisany w JSON-ie archiwum jako ISO 8601."""
+    if isinstance(raw, datetime):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _summary(row) -> Dict[str, Any]:
     """Wiersz archiwum BEZ ciężkich blobów - do listy.
 
@@ -386,9 +398,15 @@ async def restore_deleted(
                 proel_match_state.insert().values(
                     match_number=match_number,
                     zprp_match_id=state.get("zprp_match_id"),
+                    local_key=state.get("local_key"),
                     guard_json=state.get("guard_json"),
                     rev=int(state.get("rev") or 0),
                     fields_json=state.get("fields_json") or {},
+                    exam_snapshot_json=state.get("exam_snapshot_json"),
+                    exam_snapshot_rev=int(state.get("exam_snapshot_rev") or 0),
+                    exam_snapshot_date=state.get("exam_snapshot_date"),
+                    exam_snapshot_hash=state.get("exam_snapshot_hash"),
+                    exam_snapshot_at=_datetime_value(state.get("exam_snapshot_at")),
                     audit_json=state.get("audit_json") or [],
                     status_cache=restored_status,
                 )
