@@ -39,6 +39,7 @@ from app.delegate_evaluations import (
     router as delegate_evaluations_router,
 )
 from app.judge_documents import router as judge_documents_router
+from app.national_distances import router as national_distances_router
 from app.results import router as results_router
 from app.calendar import router as calendar_router
 from app.calendar_feeds import router as calendar_feeds_router
@@ -258,6 +259,7 @@ app.include_router(delegate_router)
 app.include_router(delegate_evaluations_router)
 app.include_router(delegate_evaluations_admin_router)
 app.include_router(judge_documents_router)
+app.include_router(national_distances_router)
 app.include_router(results_router)
 # Kalendarze sędziego PRZED trasami Google: `/calendar/events/{match_id:path}`
 # z tamtego routera złapałoby ścieżkę `/calendar/feeds/...`.

@@ -54,7 +54,7 @@ class AgentQueryRequest(BaseModel):
     max_tokens: int = 2048
     # pomocniczo – ile maksymalnie chunków chcemy użyć w kontekście
     max_context_chunks: int = 32
-    # TRYB pracy Bazylego – BAZA / ProEl / przepisy
+    # TRYB pracy Bazusia – BAZA / ProEl / przepisy
     mode: Optional[AgentMode] = None
 
 
@@ -86,7 +86,7 @@ async def embed_query(text: str) -> List[float]:
 
 def build_system_prompt(mode: Optional[AgentMode]) -> str:
     """
-    Buduje system prompt Bazylego w zależności od trybu.
+    Buduje system prompt Bazusia w zależności od trybu.
     Bardzo mocno pilnujemy:
     - ZERO ściemy / zgadywania,
     - tylko wiedza z rozmowy + ukrytych źródeł (chunków),
@@ -94,7 +94,7 @@ def build_system_prompt(mode: Optional[AgentMode]) -> str:
     """
 
     base = (
-        "Jesteś asystentem Bazyli – praktycznym ekspertem pomagającym sędziom "
+        "Jesteś Bazusiem – praktycznym asystentem pomagającym sędziom "
         "i działaczom w pracy z aplikacją BAZA, systemem ProEl oraz przepisami "
         "i regulaminami piłki ręcznej.\n\n"
         "Podstawowe zasady, których MUSISZ bezwzględnie przestrzegać:\n"

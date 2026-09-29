@@ -4197,6 +4197,14 @@ from app.assignment_role_tables import define_tables as _define_role_tables
 from app.settlement_split_tables import define_tables as _define_split_tables
 (province_settlement_splits,) = _define_split_tables(metadata)
 
+# Ogólnopolska tabela odległości zasilana wyłącznie ryczałtami PDF ZPRP.
+from app.national_distance_tables import define_tables as _define_national_distance_tables
+(
+    national_distance_sources,
+    national_distance_cities,
+    national_distance_connections,
+) = _define_national_distance_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

@@ -78,7 +78,7 @@ def chunk_text(text: str, max_chars: int = 800) -> List[str]:
 @router.get("")
 async def list_docs():
     """
-    Zwraca listę wszystkich dokumentów znanych Bazylemu,
+    Zwraca listę wszystkich dokumentów znanych Bazusiowi,
     posortowaną malejąco po dacie utworzenia.
     """
     query = agent_documents.select().order_by(agent_documents.c.created_at.desc())
