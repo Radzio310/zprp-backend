@@ -238,27 +238,16 @@ def test_plan_unassigned_applies_table_tolerance_only_to_selected_competition():
     assert [hit.match_id for hit in plan.hits] == ["2"]
 
 
-@pytest.mark.asyncio
-async def test_unassigned_window_rejects_matches_of_another_district(monkeypatch):
-    now = utc(2026, 9, 24, 10, 0)
-
-    async def listing(*args, **kwargs):
-        return {
-            "matches": [
-                {"match_id": "ours", "code": "S/MłKR/1", "match_at": (now + timedelta(hours=2)).isoformat()},
-                {"match_id": "foreign", "code": "E/JmK/3", "match_at": (now + timedelta(hours=2)).isoformat()},
-            ]
-        }
-
-    async def scope(_key):
-        return object(), {"S"}
-
-    monkeypatch.setattr("app.province_assignments.match_list_payload", listing)
-    monkeypatch.setattr(DA, "_now", lambda: now)
-    monkeypatch.setattr(DA, "_scope", scope)
+def test_unassigned_window_rejects_matches_of_another_district(monkeypatch):
     monkeypatch.setattr(DA, "_in_scope", lambda code, managed, own: code.startswith("S/"))
-
-    found = await DA._window_items("slaskie", 24)
+    found = DA._own_assignment_items(
+        [
+            {"match_id": "ours", "code": "S/MłKR/1"},
+            {"match_id": "foreign", "code": "E/JmK/3"},
+        ],
+        object(),
+        {"S"},
+    )
     assert [item["match_id"] for item in found] == ["ours"]
 
 
