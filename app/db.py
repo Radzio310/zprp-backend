@@ -4298,6 +4298,10 @@ from app.national_distance_tables import define_tables as _define_national_dista
     national_distance_judges,
 ) = _define_national_distance_tables(metadata)
 
+from app.delegate_evaluation_archive_tables import define_tables as _define_delegate_archive_tables
+
+delegate_evaluation_documents = _define_delegate_archive_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

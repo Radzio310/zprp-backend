@@ -143,56 +143,61 @@ async def can_view_province_evaluations(payload: Optional[Dict[str, Any]], provi
         return False
 
 
+async def upsert_evaluation(item: EvaluationIn, actor: str) -> str:
+    """Zapis jednego arkusza: "inserted", "updated", "unchanged" albo "skipped".
+
+    Wspólny dla synchronizacji z telefonu i archiwum pobieranego w tle -
+    ta sama tożsamość (`source_key`) i te same wersje treści.
+    """
+    if not allowed_season(item.season) or actor not in {str(x).strip() for x in item.referee_ids}:
+        return "skipped"
+    source_key = canonical_hash([item.season, item.match_id, sorted(item.referee_ids)])
+    content_hash = canonical_hash(item.evaluation)
+    existing = await database.fetch_one(
+        select(delegate_evaluations.c.id, delegate_evaluations.c.content_hash).where(
+            delegate_evaluations.c.source_key == source_key
+        )
+    )
+    values = {
+        "source_key": source_key,
+        "match_id": item.match_id,
+        "season": item.season,
+        "province": normalize_province(item.province),
+        "match_number": item.match_number,
+        "match_date": item.match_date,
+        "referee_ids": [str(x).strip() for x in item.referee_ids if str(x).strip()],
+        "referee_names": item.referee_names,
+        "delegate_name": item.delegate_name,
+        "source_kind": item.source_kind,
+        "source_fingerprint": safe_source_fingerprint(item.source_url),
+        "content_hash": content_hash,
+        "evaluation_json": item.evaluation,
+        "submitted_by": actor,
+    }
+    evaluation_id = await database.execute(
+        pg_insert(delegate_evaluations).values(**values).on_conflict_do_update(
+            index_elements=[delegate_evaluations.c.source_key], set_=values
+        ).returning(delegate_evaluations.c.id)
+    )
+    await database.execute(
+        pg_insert(delegate_evaluation_versions).values(
+            evaluation_id=evaluation_id,
+            content_hash=content_hash,
+            evaluation_json=item.evaluation,
+        ).on_conflict_do_nothing()
+    )
+    if not existing:
+        return "inserted"
+    return "updated" if existing["content_hash"] != content_hash else "unchanged"
+
+
 @router.post("/sync")
 async def sync(req: SyncIn, payload: dict = Depends(get_jwt_payload)):
     actor = _actor(payload, judge_required=True)
-    inserted = updated = unchanged = skipped = 0
+    totals = {"inserted": 0, "updated": 0, "unchanged": 0, "skipped": 0}
     for item in req.evaluations:
-        if not allowed_season(item.season) or actor not in {str(x).strip() for x in item.referee_ids}:
-            skipped += 1
-            continue
-        source_key = canonical_hash([item.season, item.match_id, sorted(item.referee_ids)])
-        content_hash = canonical_hash(item.evaluation)
-        existing = await database.fetch_one(
-            select(delegate_evaluations.c.id, delegate_evaluations.c.content_hash).where(
-                delegate_evaluations.c.source_key == source_key
-            )
-        )
-        values = {
-            "source_key": source_key,
-            "match_id": item.match_id,
-            "season": item.season,
-            "province": normalize_province(item.province),
-            "match_number": item.match_number,
-            "match_date": item.match_date,
-            "referee_ids": [str(x).strip() for x in item.referee_ids if str(x).strip()],
-            "referee_names": item.referee_names,
-            "delegate_name": item.delegate_name,
-            "source_kind": item.source_kind,
-            "source_fingerprint": safe_source_fingerprint(item.source_url),
-            "content_hash": content_hash,
-            "evaluation_json": item.evaluation,
-            "submitted_by": actor,
-        }
-        evaluation_id = await database.execute(
-            pg_insert(delegate_evaluations).values(**values).on_conflict_do_update(
-                index_elements=[delegate_evaluations.c.source_key], set_=values
-            ).returning(delegate_evaluations.c.id)
-        )
-        await database.execute(
-            pg_insert(delegate_evaluation_versions).values(
-                evaluation_id=evaluation_id,
-                content_hash=content_hash,
-                evaluation_json=item.evaluation,
-            ).on_conflict_do_nothing()
-        )
-        if not existing:
-            inserted += 1
-        elif existing["content_hash"] != content_hash:
-            updated += 1
-        else:
-            unchanged += 1
-    return {"ok": True, "inserted": inserted, "updated": updated, "unchanged": unchanged, "skipped": skipped}
+        totals[await upsert_evaluation(item, actor)] += 1
+    return {"ok": True, **totals}
 
 
 #: Które oceny oddać: same arkusze delegatów (domyślnie - stare wersje aplikacji

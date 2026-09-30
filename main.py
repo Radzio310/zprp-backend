@@ -425,6 +425,9 @@ app.include_router(beach_mp_appearances_router)
 app.include_router(push_router)
 # Grafiki w nagłówkach maili (obsi, bazus) - `app/mail_brand.py`.
 app.include_router(mail_brand_router)
+# Archiwum arkuszy ocen delegatów zbierane w tle - `app/delegate_evaluation_archive.py`.
+from app.delegate_evaluation_archive import router as delegate_archive_router
+app.include_router(delegate_archive_router)
 
 logger = logging.getLogger("uvicorn")
 
