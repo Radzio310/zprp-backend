@@ -539,6 +539,11 @@ SLOT_LABELS = {
 }
 
 
+def _own_assignment_items(items: Iterable[dict], managed: Any, own: set[str]) -> list[dict]:
+    """Tylko mecze prowadzone przez ten okręg, nie mecze samych jego sędziów."""
+    return [item for item in items if _in_scope(_s(item.get("code")), managed, own)]
+
+
 async def _window_items(key: str, hours: int) -> list[dict]:
     """Mecze z listy obsadowego (bez II ligi) z terminem w najbliższych `hours` h."""
     from app.province_assignments import match_list_payload
@@ -555,12 +560,10 @@ async def _window_items(key: str, hours: int) -> list[dict]:
         limit=None,
     )
     out = []
-    for item in listing.get("matches") or []:
-        # Migawka województwa zawiera także mecze jego sędziów prowadzone
-        # przez inne okręgi. Alert obsadowego nie może przejmować cudzych
-        # rozgrywek tylko dlatego, że stoi w nich nasz sędzia.
-        if not _in_scope(_s(item.get("code")), managed, own):
-            continue
+    # Migawka województwa zawiera także mecze jego sędziów prowadzone przez
+    # inne okręgi. Alert nie może przejmować cudzych rozgrywek tylko dlatego,
+    # że stoi w nich nasz sędzia.
+    for item in _own_assignment_items(listing.get("matches") or [], managed, own):
         try:
             at = datetime.fromisoformat(_s(item.get("match_at")).replace("Z", "+00:00"))
         except ValueError:
