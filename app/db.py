@@ -2460,7 +2460,7 @@ Index(
     match_market_offers.c.match_id,
     match_market_offers.c.slot,
     unique=True,
-    postgresql_where=text("status IN ('open', 'applying')"),
+    postgresql_where=text("status IN ('approval_pending', 'open', 'applying')"),
 )
 Index(
     "ix_match_market_offers_province_status",
@@ -4215,6 +4215,18 @@ metadata.create_all(engine)
 
 # Indexes created separately with IF NOT EXISTS to survive restarts
 with engine.connect() as _conn:
+    # Pilne oddanie meczu (< próg okręgu) najpierw czeka na zgodę obsadowego.
+    # Taki wniosek również zajmuje gniazdo, więc nie może obok niego powstać
+    # zwykła oferta. Indeks istniał wcześniej z dwoma stanami; trzeba go
+    # odtworzyć, bo CREATE IF NOT EXISTS nie zmienia warunku częściowego.
+    _conn.execute(text("DROP INDEX IF EXISTS uq_match_market_live_slot"))
+    _conn.execute(
+        text(
+            "CREATE UNIQUE INDEX uq_match_market_live_slot "
+            "ON match_market_offers (province, match_id, slot) "
+            "WHERE status IN ('approval_pending', 'open', 'applying')"
+        )
+    )
     # Globalna polityka zewnętrznych pushy i identyfikator konkretnego buildu.
     # Obie tabele istnieją na produkcji, więc samo metadata.create_all nie
     # dołoży nowych kolumn przy wdrożeniu.

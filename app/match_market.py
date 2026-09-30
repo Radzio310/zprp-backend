@@ -68,6 +68,9 @@ from app.match_market_notify import (
     claim_lost as text_claim_lost,
     crew_changed as text_crew_changed,
     giver_released as text_giver_released,
+    late_offer_approved as text_late_offer_approved,
+    late_offer_rejected as text_late_offer_rejected,
+    late_offer_requested as text_late_offer_requested,
     offer_created as text_offer_created,
     offer_rejected as text_offer_rejected,
     offer_removed_by_admin as text_offer_removed_by_admin,
@@ -1833,7 +1836,7 @@ async def my_matches(
             match_market_offers.c.status,
         )
         .where(match_market_offers.c.province == province)
-        .where(match_market_offers.c.status.in_(("open", "applying")))
+        .where(match_market_offers.c.status.in_(("approval_pending", "open", "applying")))
         .where(match_market_offers.c.match_id.in_(match_ids or ["__none__"]))
     )
     taken = {(_s(_row(o)["match_id"]), _s(_row(o)["slot"])): _row(o) for o in live}
@@ -1895,6 +1898,10 @@ async def my_matches(
         if not checked:
             live_failed += 1
         offerable = can_offer(data.get("match_at"), now, cfg["offer_deadline_hours"])
+        match_stamp = data.get("match_at")
+        late_requestable = bool(
+            isinstance(match_stamp, datetime) and match_stamp > now and not offerable
+        )
         approved = bool(data.get("approved"))
         # Gniazda, które NIE wiszą już na giełdzie - tylko one dają się oddać.
         free_slots = [s for s in held if (match_id, s) not in taken]
@@ -1903,10 +1910,14 @@ async def my_matches(
             blocked = verdict["message"]
         elif approved:
             blocked = "Protokół jest już zatwierdzony."
+        elif late_requestable:
+            blocked = (
+                f"Do meczu zostało mniej niż {cfg['offer_deadline_hours']} h. "
+                "Możesz poprosić obsadowego o pilne wystawienie."
+            )
         elif not offerable:
             blocked = (
-                f"Za późno - mecz można oddać najpóźniej "
-                f"{cfg['offer_deadline_hours']} h przed pierwszym gwizdkiem."
+                "Mecz już się rozpoczął i nie można go wystawić."
             )
         elif not free_slots:
             # Bez tego wiersz stał na liście „do oddania", a w środku czekał
@@ -1932,6 +1943,12 @@ async def my_matches(
                 ],
                 "canOffer": (
                     bool(offerable)
+                    and not approved
+                    and bool(free_slots)
+                    and verdict["assignable"] is not False
+                ),
+                "canRequestApproval": (
+                    late_requestable
                     and not approved
                     and bool(free_slots)
                     and verdict["assignable"] is not False

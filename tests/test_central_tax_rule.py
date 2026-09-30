@@ -126,3 +126,10 @@ def test_silnik_bez_przelacznika_bez_zmian():
     )
     totals = E.totals_of([entry])
     assert totals["costs"] == parts["costs"]
+
+
+def test_oom_rozlicza_zprp_w_kazdej_roli():
+    assert R.zprp_settlement_reason("OOM/3", R.ROLE_FIELD) == R.ZPRP_OOM
+    assert R.zprp_settlement_reason("OOMK/1", R.ROLE_TABLE) == R.ZPRP_OOM
+    assert R.zprp_settlement_reason("OOM", R.ROLE_DELEGATE) == R.ZPRP_OOM
+    assert R.zprp_settlement_reason("ZOOM/1", R.ROLE_FIELD) is None

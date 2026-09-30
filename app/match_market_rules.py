@@ -45,10 +45,12 @@ DEFAULT_DEADLINE_HOURS = 48
 
 #: Stany, w których oferta ZAJMUJE gniazdo - żadna druga nie może stanąć obok.
 #: Ta sama para siedzi w warunku indeksu `uq_match_market_live_slot` w `db.py`.
-LIVE_OFFER_STATUSES: Set[str] = {"open", "applying"}
+LIVE_OFFER_STATUSES: Set[str] = {"approval_pending", "open", "applying"}
 
 #: Stany, po których nie da się już nic zrobić.
-FINAL_OFFER_STATUSES: Set[str] = {"done", "rejected", "cancelled", "expired"}
+FINAL_OFFER_STATUSES: Set[str] = {
+    "done", "rejected", "approval_rejected", "cancelled", "expired"
+}
 
 # ── Przejścia oferty ────────────────────────────────────────────────────────
 #
@@ -57,6 +59,12 @@ FINAL_OFFER_STATUSES: Set[str] = {"done", "rejected", "cancelled", "expired"}
 # kogo innego - czyli coś, co za pięć minut może się udać. Zamknięcie oferty
 # kazałoby sędziemu wystawiać ją od nowa, a obsadowemu szukać jej w historii.
 _OFFER_TRANSITIONS: Dict[str, Dict[str, str]] = {
+    "approval_pending": {
+        "withdraw": "cancelled",
+        "approve_listing": "open",
+        "reject_listing": "approval_rejected",
+        "expire": "expired",
+    },
     "open": {
         "withdraw": "cancelled",
         "approve": "applying",

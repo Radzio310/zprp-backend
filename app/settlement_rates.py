@@ -252,17 +252,23 @@ def category_label(code: Any) -> str:
 ZPRP_FIELD = "zprp_field"
 ZPRP_DELEGATE = "zprp_delegate"
 ZPRP_MP_TABLE = "zprp_mp_table"
+ZPRP_OOM = "zprp_oom"
 
 #: Opis powodu dla czlowieka - ten sam tekst w aplikacji, na webie i w PDF.
 ZPRP_REASONS: dict[str, str] = {
     ZPRP_FIELD: "sędzia boiskowy na meczu obsadzanym przez ZPRP",
     ZPRP_DELEGATE: "delegat na meczu obsadzanym przez ZPRP",
     ZPRP_MP_TABLE: "stolik na Mistrzostwach Polski, rozliczany osobno przez ZPRP",
+    ZPRP_OOM: "Ogólnopolska Olimpiada Młodzieży, rozliczana przez ZPRP",
 }
 
 #: Rozgrywki ZPRP bez stawki w zadnej tabeli (Superpuchar, mecze EHF) -
 #: `match_level` widzi je jako "unknown", a obsadza je centrala.
 _ZPRP_ONLY_PREFIXES = ("SPM", "SPK", "EHF")
+
+#: Ogolnopolska Olimpiada Mlodziezy: „OOM/3", „OOMK/1". Bliznieta: `OOM_CODE`
+#: w BAZA_web (`rates.ts`) i w aplikacji (`utils/zprpPayroll.ts`).
+_OOM_CODE = re.compile(r"(^|[^A-Z0-9])OOM[KM]?($|[^A-Z0-9])")
 
 
 def zprp_settlement_reason(code: Any, role: Any) -> Optional[str]:
@@ -281,6 +287,9 @@ def zprp_settlement_reason(code: Any, role: Any) -> Optional[str]:
     """
     if is_provincial_cup(code):
         return None
+    # OOM obsadza i rozlicza ZPRP w kazdej roli (decyzja z 30.09.2026).
+    if _OOM_CODE.search(code_key(code)):
+        return ZPRP_OOM
     if match_level(code) not in ("central", "cup") and competition_prefix(code) not in _ZPRP_ONLY_PREFIXES:
         return None
     role_text = str(role or "").strip()

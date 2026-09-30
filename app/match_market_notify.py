@@ -218,6 +218,49 @@ def claim_created(offer: Mapping[str, Any], claimer_name: Any) -> tuple[str, str
     )
 
 
+def late_offer_requested(offer: Mapping[str, Any], giver_name: Any) -> tuple[str, str]:
+    """Pilna prośba o publikację - wyłącznie do osób decyzyjnych."""
+    return (
+        "⏱️ Pilna prośba o wystawienie",
+        _join(
+            f"{judge(giver_name)} chce pilnie wystawić {match_of(offer)} "
+            f"na {slot_for(offer.get('slot'))}",
+            when_of(offer),
+            teams_of(offer.get("match_snapshot")),
+            _s(offer.get("reason")) and f"Uzasadnienie: {_s(offer.get('reason'))}",
+            "Wymaga Twojej decyzji przed rozpoczęciem meczu",
+        ),
+    )
+
+
+def late_offer_approved(offer: Mapping[str, Any], manager_name: Any = "") -> tuple[str, str]:
+    """Zgoda na pilne wystawienie - do sędziego, który poprosił."""
+    return (
+        "✅ Pilne wystawienie zatwierdzone",
+        _join(
+            f"Możesz już szukać zastępstwa na {match_of(offer)}",
+            when_of(offer),
+            _s(manager_name) and f"Decyzję podjął {_s(manager_name)}",
+            "Oferta jest już widoczna na giełdzie",
+        ),
+    )
+
+
+def late_offer_rejected(
+    offer: Mapping[str, Any], reason: Any, manager_name: Any = ""
+) -> tuple[str, str]:
+    """Odmowa pilnej publikacji - do sędziego, który poprosił."""
+    return (
+        "🚫 Pilne wystawienie odrzucone",
+        _join(
+            f"{match_of(offer)} nie został wystawiony na giełdzie",
+            _s(reason) and f"Wyjaśnienie: {_s(reason)}",
+            _s(manager_name) and f"Decyzję podjął {_s(manager_name)}",
+            "Mecz pozostaje w Twojej obsadzie",
+        ),
+    )
+
+
 def _claim_count_label(count: int) -> str:
     if count == 1:
         return "1 zgłoszenie"
