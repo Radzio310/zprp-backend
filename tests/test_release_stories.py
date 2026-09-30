@@ -69,6 +69,29 @@ def test_legacy_image_slide_remains_compatible():
     assert result[0]["poster_key"] is None
 
 
+def test_publikacja_nie_wymaga_tekstow_slajdu():
+    """Slajd bywa celowo samą grafiką - puste kicker, tytuł i opis są w porządku."""
+    result = _clean_and_validate_slides(
+        [_slide(media_key="release/image.webp", kicker="", title="", body="")],
+        publishing=True,
+        allowed_asset_types={"release/image.webp": "image/webp"},
+    )
+
+    assert result[0]["title"] == "" and result[0]["kicker"] == "" and result[0]["body"] == ""
+
+
+def test_publikacja_nadal_wymaga_grafiki_albo_filmu():
+    with pytest.raises(HTTPException) as error:
+        _clean_and_validate_slides(
+            [_slide(media_key=None)],
+            publishing=True,
+            allowed_asset_types={},
+        )
+
+    assert error.value.status_code == 422
+    assert "grafiki albo filmu" in str(error.value.detail)
+
+
 def test_recent_release_window_counts_versions_without_stories():
     assert _recent_available_versions(
         ["1.7.0", "2.0.0", "2.0.1", "2.0.2"], "2.0.1", limit=3

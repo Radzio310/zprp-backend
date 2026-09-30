@@ -676,10 +676,12 @@ def _clean_and_validate_slides(
                 )
             if video_duration_ms:
                 slide["duration_ms"] = video_duration_ms
-        if publishing and (not media_key or not str(slide.get("title") or "").strip()):
+        # Kicker, tytuł i opis są opcjonalne - slajd bywa celowo samą grafiką
+        # albo samym filmem. Bez materiału nie ma jednak czego pokazać.
+        if publishing and not media_key:
             raise HTTPException(
                 status_code=422,
-                detail=f"Slajd {position + 1} wymaga materiału i tytułu przed publikacją.",
+                detail=f"Slajd {position + 1} wymaga grafiki albo filmu przed publikacją.",
             )
         slide["media_key"] = media_key or None
         slide["poster_key"] = poster_key or None
