@@ -127,7 +127,8 @@ class TestKolizje:
             others = [item for item in (a, b, c) if item is not moved]
             assert R.find_collisions("7", "Jan Nowak", moved, others, [], km_table) == []
 
-    def test_stolikowy_moze_prowadzic_krotki_ciag_turnieju_w_jednej_hali(self):
+    @pytest.mark.parametrize("competition", ["S/MłKR", "S/MłMR"])
+    def test_stolikowy_moze_prowadzic_krotki_ciag_turnieju_w_jednej_hali(self, competition):
         judge = make_judge("1", "KOWALSKI Jan", city="Zabrze")
         busy = {
             "1": [
@@ -135,18 +136,18 @@ class TestKolizje:
                     moment=datetime(2026, 10, 3, 10, 0),
                     city="Gliwice",
                     match_id="16",
-                    code="S/MłKR/16",
+                    code=f"{competition}/16",
                     hall=HALL,
                     role="table",
                 )
             ]
         }
-        table = need("S/MłKR/17", table=1, when=datetime(2026, 10, 3, 10, 40))
+        table = need(f"{competition}/17", table=1, when=datetime(2026, 10, 3, 10, 40))
         assert [item.judge_id for item in build_plan([table], world([judge], busy=busy)).proposals] == ["1"]
 
         # Wyjątek dotyczy tylko stolika. Sędzia boiskowy nadal nie może
         # prowadzić dwóch nakładających się meczów.
-        field = need("S/MłKR/17", field=1, table=0, when=datetime(2026, 10, 3, 10, 40))
+        field = need(f"{competition}/17", field=1, table=0, when=datetime(2026, 10, 3, 10, 40))
         assert build_plan([field], world([judge], busy=busy)).proposals == []
 
     def test_ta_sama_hala_po_innym_zapisie_nazwy(self):

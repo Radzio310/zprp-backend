@@ -76,6 +76,10 @@ def test_validate_accepts_and_dedupes_emails():
 
 
 def test_table_shortage_tolerance_is_configurable_per_competition():
+    assert R.default_config()[R.UNASSIGNED]["table_missing_tolerance"] == {
+        "S/MłKR": 1,
+        "S/MłMR": 1,
+    }
     cfg = R.validate_config(
         {"unassigned": {"table_missing_tolerance": {"S/MłKR": 1, "S/MłMR": 2}}}
     )
@@ -249,6 +253,11 @@ def test_unassigned_window_rejects_matches_of_another_district(monkeypatch):
         {"S"},
     )
     assert [item["match_id"] for item in found] == ["ours"]
+
+
+def test_real_scope_recognizes_own_and_foreign_district_codes():
+    assert DA._in_scope("S/MłKR/1", [], {"S"}) is True
+    assert DA._in_scope("E/JmK/3", [], {"S"}) is False
 
 
 # ---------------------------------------------------------------- kolizje
