@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from httpx import AsyncClient
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
+import asyncio
 import base64
 import logging
 
@@ -173,6 +174,28 @@ async def _refresh_server_snapshot(client: AsyncClient, judge_id: str) -> None:
         )
 
 
+_background_refreshes: set = set()
+
+
+def _refresh_in_background(client: AsyncClient, judge_id: str) -> None:
+    """Odświeżenie kopii serwera PO odpowiedzi dla telefonu.
+
+    Dotąd telefon czekał na drugie zapytanie do ZPRP (lista niedyspozycji),
+    choć zapis był już potwierdzony. Zadanie przejmuje sesję i zamyka ją samo;
+    referencję trzymamy, żeby pętla zdarzeń nie zgubiła zadania.
+    """
+
+    async def run() -> None:
+        try:
+            await _refresh_server_snapshot(client, judge_id)
+        finally:
+            await client.aclose()
+
+    task = asyncio.create_task(run())
+    _background_refreshes.add(task)
+    task.add_done_callback(_background_refreshes.discard)
+
+
 def _request_date(value: str):
     """Data z aplikacji (ISO) albo ze starszego formularza ZPRP."""
     for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
@@ -231,9 +254,12 @@ async def create_offtime(
                     "IdOffT": ""
                 }
             )
-            await _refresh_server_snapshot(client, judge_plain)
+            # Sesja przechodzi do zadania w tle - ono ją zamknie.
+            _refresh_in_background(client, judge_plain)
+            client = None
         finally:
-            await client.aclose()
+            if client is not None:
+                await client.aclose()
         alert = None
         if conflicts:
             alert = await enqueue_overlap_mail(
@@ -279,9 +305,12 @@ async def update_offtime(
                     "info": req.Info
                 }
             )
-            await _refresh_server_snapshot(client, judge_plain)
+            # Sesja przechodzi do zadania w tle - ono ją zamknie.
+            _refresh_in_background(client, judge_plain)
+            client = None
         finally:
-            await client.aclose()
+            if client is not None:
+                await client.aclose()
         alert = None
         if conflicts:
             alert = await enqueue_overlap_mail(
@@ -321,9 +350,12 @@ async def delete_offtime(
                 action_str="Usun",
                 overrides={"IdOffT": req.IdOffT}
             )
-            await _refresh_server_snapshot(client, judge_plain)
+            # Sesja przechodzi do zadania w tle - ono ją zamknie.
+            _refresh_in_background(client, judge_plain)
+            client = None
         finally:
-            await client.aclose()
+            if client is not None:
+                await client.aclose()
         return {"success": True}
     except HTTPException:
         raise
