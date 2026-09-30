@@ -68,3 +68,47 @@ def merge_halls(
         merged += 1
 
     return halls, added, merged
+
+
+# ---------------------------------------------------------------------------
+# Szybkie wczytywanie pliku hal i zbiorcze odrzucanie zgłoszeń
+# ---------------------------------------------------------------------------
+
+#: Ile zgłoszeń wolno odrzucić jednym żądaniem.
+MAX_BULK_REJECT = 500
+
+
+def json_file_etag(key: str, updated_at: Any) -> str:
+    """Słaby ETag pliku JSON z klucza i chwili ostatniej zmiany.
+
+    `updated_at` ustawia każdy zapis pliku (PUT i zatwierdzenie hal), więc
+    nowa treść zawsze daje nowy znacznik. Telefon trzyma kopię pliku i pyta
+    `If-None-Match` - bez zmian dostaje krótkie 304 zamiast całej bazy hal.
+    """
+    stamp = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
+    return f'W/"{key}-{stamp}"'
+
+
+def etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """Czy nagłówek `If-None-Match` wskazuje ten sam znacznik (także w liście)."""
+    if not if_none_match:
+        return False
+    wanted = etag.removeprefix("W/")
+    for part in if_none_match.split(","):
+        candidate = part.strip()
+        if candidate == "*" or candidate.removeprefix("W/") == wanted:
+            return True
+    return False
+
+
+def clean_report_ids(raw: Iterable[Any]) -> list[int]:
+    """Identyfikatory zgłoszeń do odrzucenia: dodatnie, bez powtórzeń, w kolejności."""
+    out: list[int] = []
+    for value in raw or []:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0 and number not in out:
+            out.append(number)
+    return out[:MAX_BULK_REJECT]

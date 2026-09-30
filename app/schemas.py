@@ -851,6 +851,10 @@ class AcceptHallReportItem(BaseModel):
 class AcceptHallReportsRequest(BaseModel):
     items: List[AcceptHallReportItem]
 
+class RejectHallReportsRequest(BaseModel):
+    # Limit i czyszczenie pilnuje `hall_reports.clean_report_ids`.
+    ids: List[int] = []
+
 class HallReportItem(BaseModel):
     id: int
     Hala_nazwa: str

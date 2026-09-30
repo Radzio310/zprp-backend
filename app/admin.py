@@ -12,13 +12,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import bcrypt
 from app.okreg_rates_manifest import build_rates_manifest
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, insert, update, delete, and_, or_, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.admin_guard import admin_write_guard
-from app.hall_reports import hall_norm_key, merge_halls
+from app.hall_reports import (
+    clean_report_ids,
+    etag_matches,
+    hall_norm_key,
+    json_file_etag,
+    merge_halls,
+)
 
 from app.db import (
     database,
@@ -102,6 +108,7 @@ from app.schemas import (
     # halls
     CreateHallReportRequest,
     AcceptHallReportsRequest,
+    RejectHallReportsRequest,
     HallReportItem,
     ListHallReportsResponse,
     # contacts
@@ -640,13 +647,29 @@ async def json_files_manifest():
 
 
 @router.get("/json_files/{key}", response_model=GetJsonFileResponse, summary="Pobierz konkretny plik JSON")
-async def get_json_file(key: str):
+async def get_json_file(key: str, request: Request):
+    # Najpierw sam znacznik zmiany - bez treści. Telefon z aktualną kopią
+    # (If-None-Match) dostaje 304 i nie ciągnie całej bazy hal od nowa.
+    head = await database.fetch_one(
+        select(json_files.c.key, json_files.c.updated_at).where(json_files.c.key == key)
+    )
+    if not head:
+        raise HTTPException(404, "Nie znaleziono pliku")
+    etag = json_file_etag(key, head["updated_at"])
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+
     row = await database.fetch_one(select(json_files).where(json_files.c.key == key))
     if not row:
         raise HTTPException(404, "Nie znaleziono pliku")
     raw = row["content"]
     parsed = raw if isinstance(raw, (dict, list)) else json.loads(raw)
-    return GetJsonFileResponse(file=JsonFileItem(key=row["key"], content=parsed, enabled=row["enabled"], updated_at=row["updated_at"]))
+    body = GetJsonFileResponse(
+        file=JsonFileItem(key=row["key"], content=parsed, enabled=row["enabled"], updated_at=row["updated_at"])
+    )
+    headers["ETag"] = json_file_etag(key, row["updated_at"])
+    return JSONResponse(content=body.model_dump(mode="json"), headers=headers)
 
 @router.put("/json_files/{key}", response_model=GetJsonFileResponse, summary="Utwórz lub nadpisz plik JSON")
 async def upsert_json_file(key: str, req: UpsertJsonFileRequest):
@@ -1203,9 +1226,46 @@ async def post_hall_report(req: CreateHallReportRequest):
     return {"success": True}
 
 @router.get("/halls/reports", response_model=ListHallReportsResponse, summary="Pobierz listę zgłoszonych hal")
-async def list_hall_reports():
-    rows = await database.fetch_all(select(hall_reports).order_by(hall_reports.c.created_at.desc()))
+async def list_hall_reports(pending: bool = False):
+    # `pending=1`: same oczekujące - panel i tak odsiewa przetworzone, więc
+    # nie ma po co ich przesyłać. Bez parametru odpowiedź jak dotąd.
+    query = select(hall_reports)
+    if pending:
+        query = query.where(hall_reports.c.is_processed.is_(False))
+    rows = await database.fetch_all(query.order_by(hall_reports.c.created_at.desc()))
     return ListHallReportsResponse(reports=[HallReportItem(**dict(r)) for r in rows])
+
+
+@router.post("/halls/reports/reject", response_model=dict, summary="Odrzuć wiele zgłoszeń hal naraz")
+async def reject_hall_reports(req: RejectHallReportsRequest):
+    """Zbiorcze odrzucenie (np. wszystkich duplikatów z automatycznej analizy).
+
+    Ten sam skutek co `DELETE /halls/reports/{id}` dla każdego zgłoszenia -
+    hala trafia na listę odrzuconych, zgłoszenie znika - ale w jednej
+    transakcji i jednym żądaniu zamiast kilkudziesięciu.
+    """
+    ids = clean_report_ids(req.ids)
+    if not ids:
+        raise HTTPException(400, "Nie wskazano zgłoszeń do odrzucenia")
+    async with database.transaction():
+        rows = await database.fetch_all(select(hall_reports).where(hall_reports.c.id.in_(ids)))
+        found = [int(row["id"]) for row in rows]
+        for row in rows:
+            norm_key = _hall_norm_key(row["Hala_nazwa"], row["Hala_miasto"], row["Hala_ulica"], row["Hala_numer"])
+            await database.execute(
+                pg_insert(rejected_halls)
+                .values(
+                    Hala_nazwa=row["Hala_nazwa"],
+                    Hala_miasto=row["Hala_miasto"],
+                    Hala_ulica=row["Hala_ulica"],
+                    Hala_numer=row["Hala_numer"],
+                    norm_key=norm_key,
+                )
+                .on_conflict_do_nothing(index_elements=[rejected_halls.c.norm_key])
+            )
+        if found:
+            await database.execute(hall_reports.delete().where(hall_reports.c.id.in_(found)))
+    return {"success": True, "rejected_ids": found, "missing_ids": [i for i in ids if i not in found]}
 
 @router.post("/halls/reports/accept", response_model=dict, summary="Zatwierdź zgłoszenia hal i zapisz je w bazie")
 async def accept_hall_reports(req: AcceptHallReportsRequest):
