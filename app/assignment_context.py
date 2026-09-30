@@ -587,6 +587,13 @@ async def load_busy(
                     code=_s(state.get("RozgrywkiCode") or row["match_code"]),
                     hall=_s(state.get("Hala_nazwa")),
                     venue=CR.venue_of(state),
+                    role=(
+                        "field"
+                        if slot in A.FIELD_SLOTS
+                        else "table"
+                        if slot in A.TABLE_SLOTS
+                        else "delegate"
+                    ),
                 )
             )
             load[judge_id] = load.get(judge_id, 0) + 1

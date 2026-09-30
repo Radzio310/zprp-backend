@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import MetaData
 
 from app import assignment_rules as AR
+from app import district_alerts as DA
 from app import district_alert_rules as R
 from app import offtime_rules as O
 from app.district_alert_emails import (
@@ -74,6 +75,15 @@ def test_validate_accepts_and_dedupes_emails():
     assert R.any_enabled(cfg)
 
 
+def test_table_shortage_tolerance_is_configurable_per_competition():
+    cfg = R.validate_config(
+        {"unassigned": {"table_missing_tolerance": {"S/MłKR": 1, "S/MłMR": 2}}}
+    )
+    assert cfg[R.UNASSIGNED]["table_missing_tolerance"] == {"S/MłKR": 1, "S/MłMR": 2}
+    with pytest.raises(AlertRuleError):
+        R.validate_config({"unassigned": {"table_missing_tolerance": {"S/MłKR": 3}}})
+
+
 def test_scope_filter():
     section = {"competitions": ["S/JmM"], "categories": []}
     assert R.scope_allows(section, "s/jmm", "Junior ml.")
@@ -132,6 +142,15 @@ def test_missing_slots_uses_needs_model():
     assert R.missing_slots({"pierwszy": person("X Y")}, kids) == {"field": 0, "table": 0}
     # Delegat nie liczy się nigdy.
     assert R.missing_slots({"delegat": person("D E")}, kids) == {"field": 1, "table": 0}
+
+
+def test_missing_slots_can_tolerate_one_or_whole_table():
+    needs = AR.club_crew_needs("S/MłKR/12")
+    field = {"pierwszy": person("A B"), "drugi": person("C D")}
+    one_table = {**field, "sekretarz": person("E F")}
+    assert R.missing_slots(one_table, needs, table_missing_tolerance=1)["table"] == 0
+    assert R.missing_slots(field, needs, table_missing_tolerance=1)["table"] == 1
+    assert R.missing_slots(field, needs, table_missing_tolerance=2)["table"] == 0
 
 
 def test_due_stages():
@@ -195,6 +214,52 @@ def test_plan_unassigned_filters():
     now = utc(2026, 9, 24, 10, 0)
     section = {**R.default_config()[R.UNASSIGNED], "categories": ["Senior"]}
     assert R.plan_unassigned([item("1", 10, now)], set(), section, now).hits == []
+
+
+def test_plan_unassigned_applies_table_tolerance_only_to_selected_competition():
+    now = utc(2026, 9, 24, 10, 0)
+    crew = {"pierwszy": person("A B"), "drugi": person("C D"), "sekretarz": person("E F")}
+    section = {
+        **R.default_config()[R.UNASSIGNED],
+        "table_missing_tolerance": {"S/MłKR": 1},
+    }
+    youth = item(
+        "1",
+        10,
+        now,
+        code="S/MłKR/1",
+        competition="S/MłKR",
+        category="Młodzik",
+        crew=crew,
+        needs=AR.club_crew_needs("S/MłKR/1"),
+    )
+    junior = item("2", 10, now, crew=crew)
+    plan = R.plan_unassigned([youth, junior], set(), section, now)
+    assert [hit.match_id for hit in plan.hits] == ["2"]
+
+
+@pytest.mark.asyncio
+async def test_unassigned_window_rejects_matches_of_another_district(monkeypatch):
+    now = utc(2026, 9, 24, 10, 0)
+
+    async def listing(*args, **kwargs):
+        return {
+            "matches": [
+                {"match_id": "ours", "code": "S/MłKR/1", "match_at": (now + timedelta(hours=2)).isoformat()},
+                {"match_id": "foreign", "code": "E/JmK/3", "match_at": (now + timedelta(hours=2)).isoformat()},
+            ]
+        }
+
+    async def scope(_key):
+        return object(), {"S"}
+
+    monkeypatch.setattr("app.province_assignments.match_list_payload", listing)
+    monkeypatch.setattr(DA, "_now", lambda: now)
+    monkeypatch.setattr(DA, "_scope", scope)
+    monkeypatch.setattr(DA, "_in_scope", lambda code, managed, own: code.startswith("S/"))
+
+    found = await DA._window_items("slaskie", 24)
+    assert [item["match_id"] for item in found] == ["ours"]
 
 
 # ---------------------------------------------------------------- kolizje

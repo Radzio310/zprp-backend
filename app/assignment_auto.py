@@ -91,6 +91,7 @@ from app.assignment_people import (
     table_rule,
 )
 from app.match_market_rules import league_level
+from app import settlement_rates as SR
 
 #: Wagi punktowe. Kilometr to jeden punkt - reszta jest wyskalowana względem niego.
 W_KM = 1.0
@@ -164,6 +165,9 @@ class BusyMatch:
     #: Hala i numer obiektu - ta sama hala nie wymaga dojazdu ani zapasu.
     hall: str = ""
     venue: str = ""
+    #: Rola w tym meczu. Potrzebna, by stolik turnieju można było prowadzić
+    #: ciągiem bez poluzowania kolizji sędziom boiskowym.
+    role: str = ""
 
 
 @dataclass
@@ -466,8 +470,23 @@ def can_make_both(
     )
 
 
+def _table_tournament_chain(item: BusyMatch, need: MatchNeed, kind: str, same_venue: bool) -> bool:
+    """Kolejne stoliki regionalnego turnieju młodzików w jednej hali."""
+    return bool(
+        kind == TABLE
+        and item.role == TABLE
+        and same_venue
+        and item.moment
+        and need.moment
+        and item.moment.date() == need.moment.date()
+        and item.moment != need.moment
+        and SR.is_regional_youth_competition(item.code)
+        and SR.is_regional_youth_competition(need.code)
+    )
+
+
 def _same_day_state(
-    ctx: Context, judge_id: str, need: MatchNeed
+    ctx: Context, judge_id: str, need: MatchNeed, *, kind: str = ""
 ) -> tuple[bool, bool]:
     """(ma mecz tego dnia, da się zdążyć na oba)."""
     if need.day is None:
@@ -483,6 +502,8 @@ def _same_day_state(
         venue = CR.same_hall(
             item.hall, item.city, need.hall, need.host_city, a_venue=item.venue, b_venue=need.venue
         )
+        if _table_tournament_chain(item, need, kind, venue):
+            continue
         distance = 0.0 if venue else ctx.km(item.city, need.host_city)
         if not can_make_both(
             item.moment,
@@ -549,7 +570,7 @@ def _window_availability(
 
 
 def _hard_reason(
-    ctx: Context, judge: Judge, need: MatchNeed, *, round_no: int
+    ctx: Context, judge: Judge, need: MatchNeed, *, round_no: int, kind: str = ""
 ) -> Optional[str]:
     """Powód, dla którego ten sędzia w ogóle nie wchodzi w rachubę."""
     if judge.judge_id in need.crew_ids:
@@ -562,7 +583,7 @@ def _hard_reason(
             return "przerwa sędziego"
         if not ctx.available(judge.judge_id, need.moment):
             return "niedyspozycja"
-        _, can_make = _same_day_state(ctx, judge.judge_id, need)
+        _, can_make = _same_day_state(ctx, judge.judge_id, need, kind=kind)
         if not can_make:
             return "ma tego dnia mecz, na który nie zdąży"
     if need.avoid_local and is_local(judge, need.host_city):
@@ -738,7 +759,7 @@ def _score(
             score += W_OFF_DAY
             reasons.append("dzień spoza preferowanych")
 
-    has_same_day, _ = _same_day_state(ctx, judge.judge_id, need)
+    has_same_day, _ = _same_day_state(ctx, judge.judge_id, need, kind=kind)
     if has_same_day:
         score += W_SAME_DAY
         reasons.append("ma już mecz tego dnia")
@@ -817,7 +838,7 @@ def _candidates(
     for judge in ctx.judges.values():
         if judge.judge_id in taken_ids:
             continue
-        hard = _hard_reason(ctx, judge, need, round_no=round_no) or role_refusal(judge, kind)
+        hard = _hard_reason(ctx, judge, need, round_no=round_no, kind=kind) or role_refusal(judge, kind)
         if hard:
             refused[hard] = refused.get(hard, 0) + 1
             continue
@@ -1034,6 +1055,7 @@ def build_plan(
                             code=need.code,
                             hall=need.hall,
                             venue=need.venue,
+                            role=kind,
                         )
                     )
                     plan.proposals.append(
@@ -1177,6 +1199,7 @@ def _rebalance(
                     code=need.code,
                     hall=need.hall,
                     venue=need.venue,
+                    role=kind,
                 )
             )
             plan.proposals[index] = Proposal(
@@ -1231,12 +1254,14 @@ def same_day_matches(ctx: Context, judge_id: str, need: MatchNeed) -> list[BusyM
     )
 
 
-def blocking_match(ctx: Context, judge_id: str, need: MatchNeed) -> Optional[BusyMatch]:
+def blocking_match(ctx: Context, judge_id: str, need: MatchNeed, *, kind: str = "") -> Optional[BusyMatch]:
     """Mecz tego dnia, na który sędzia nie zdąży (albo z którego nie zdąży tutaj)."""
     for item in same_day_matches(ctx, judge_id, need):
         venue = CR.same_hall(
             item.hall, item.city, need.hall, need.host_city, a_venue=item.venue, b_venue=need.venue
         )
+        if _table_tournament_chain(item, need, kind, venue):
+            continue
         distance = 0.0 if venue else ctx.km(item.city, need.host_city)
         if not can_make_both(
             item.moment,
@@ -1312,7 +1337,7 @@ def describe_candidates(
         variants = [ctx.km(item, need.host_city) for item in cities if item and need.host_city]
         known = [value for value in variants if value is not None]
         km = max(known) if known else None
-        hard = _hard_reason(ctx, judge, need, round_no=2)
+        hard = _hard_reason(ctx, judge, need, round_no=2, kind=kind)
         if hard:
             reason = hard
             if hard == "brak dostępnego terminu w zakresie kolejki":
@@ -1323,7 +1348,7 @@ def describe_candidates(
                 text = off_reason(judge.judge_id, need.moment)
                 reason = f"niedyspozycja: {text}" if text else hard
             elif hard.startswith("ma tego dnia mecz"):
-                other = blocking_match(ctx, judge.judge_id, need)
+                other = blocking_match(ctx, judge.judge_id, need, kind=kind)
                 if other is not None:
                     reason = f"kolizja: mecz {_busy_text(other)}"
             elif hard == "już stoi w tym meczu":

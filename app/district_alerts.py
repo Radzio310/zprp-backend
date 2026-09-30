@@ -545,6 +545,7 @@ async def _window_items(key: str, hours: int) -> list[dict]:
 
     now = _now()
     today = R.local(now).date()
+    managed, own = await _scope(key)
     listing = await match_list_payload(
         key,
         date_from=today,
@@ -555,6 +556,11 @@ async def _window_items(key: str, hours: int) -> list[dict]:
     )
     out = []
     for item in listing.get("matches") or []:
+        # Migawka województwa zawiera także mecze jego sędziów prowadzone
+        # przez inne okręgi. Alert obsadowego nie może przejmować cudzych
+        # rozgrywek tylko dlatego, że stoi w nich nasz sędzia.
+        if not _in_scope(_s(item.get("code")), managed, own):
+            continue
         try:
             at = datetime.fromisoformat(_s(item.get("match_at")).replace("Z", "+00:00"))
         except ValueError:
@@ -683,16 +689,20 @@ def _card(hit: R.UnassignedHit, suggestion: Optional[dict]) -> E.UnassignedCard:
         if index >= field_need and not person:
             continue
         slots.append(E.SlotLine(SLOT_LABELS[slot], R.judge_label(person.get("name")) if person else None, required=index < field_need))
+    table_missing = int(hit.missing.get("table") or 0)
     for index, slot in enumerate(AR.TABLE_SLOTS):
         person = crew.get(slot)
         from_club = table_need <= index < table_need + club_table
-        if index >= table_need and not person and not from_club:
+        required = not person and table_missing > 0
+        if required:
+            table_missing -= 1
+        if not person and not required and not from_club:
             continue
         slots.append(
             E.SlotLine(
                 SLOT_LABELS[slot],
                 R.judge_label(person.get("name")) if person else None,
-                required=index < table_need,
+                required=required,
                 from_club=from_club and not person,
             )
         )
