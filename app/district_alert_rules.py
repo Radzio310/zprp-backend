@@ -140,6 +140,10 @@ def default_config() -> dict:
             "push": True,
             "competitions": [],
             "categories": [],
+            # Rozgrywki -> ile brakujących miejsc stolika wolno pominąć
+            # w alercie (0, 1 albo 2). Przykład: {"S/MłKR": 1} oznacza,
+            # że jeden obsadzony stolikowy wystarcza do ciszy w tym alercie.
+            "table_missing_tolerance": {},
         },
         COLLISION: {
             "enabled": False,
@@ -191,6 +195,13 @@ def normalize_config(raw: Any) -> dict:
     un["emails"] = _strings(un_raw.get("emails"))
     un["competitions"] = _strings(un_raw.get("competitions"))
     un["categories"] = _strings(un_raw.get("categories"))
+    tolerances = un_raw.get("table_missing_tolerance")
+    if isinstance(tolerances, Mapping):
+        un["table_missing_tolerance"] = {
+            _s(key): max(0, min(2, int(value)))
+            for key, value in tolerances.items()
+            if _s(key) and not isinstance(value, bool) and _s(value).lstrip("-").isdigit()
+        }
 
     co = base[COLLISION]
     for key in ("enabled", "email", "email_managers", "email_judge", "push_judge", "push_managers"):
@@ -232,6 +243,15 @@ def validate_config(raw: Any) -> dict:
         if wanted not in THRESHOLDS:
             allowed = ", ".join(f"{item} h" for item in THRESHOLDS)
             raise AlertRuleError(f"Próg „mecz bez obsady” może wynosić tylko: {allowed}.")
+    if "table_missing_tolerance" in un_raw:
+        tolerances = un_raw.get("table_missing_tolerance")
+        if not isinstance(tolerances, Mapping):
+            raise AlertRuleError("Wyjątki braków stolika muszą być ustawione osobno dla rozgrywek.")
+        for competition, value in tolerances.items():
+            if not _s(competition) or isinstance(value, bool) or _s(value) not in {"0", "1", "2"}:
+                raise AlertRuleError(
+                    "Dla każdej kategorii można pominąć brak 0, 1 albo 2 stolikowych."
+                )
     for alert, label in ((UNASSIGNED, "Mecz bez obsady"), (COLLISION, "Kolizja po zmianie terminu")):
         section = clean[alert]
         section_raw = data.get(alert) if isinstance(data.get(alert), Mapping) else {}
@@ -399,6 +419,7 @@ def missing_slots(
     needs: Mapping[str, Any],
     *,
     count_soft_table: bool = True,
+    table_missing_tolerance: int = 0,
 ) -> dict[str, int]:
     """
     Ile WYMAGANYCH gniazd stoi pustych: {field, table}.
@@ -413,10 +434,31 @@ def missing_slots(
     field_need = int((needs or {}).get("field") or 0)
     table_need = int((needs or {}).get("table") or 0)
     field_missing = max(0, field_need - field_have)
-    table_missing = max(0, table_need - table_have)
+    table_missing = max(0, table_need - table_have - max(0, min(2, int(table_missing_tolerance))))
     if not count_soft_table and table_have:
         table_missing = 0
     return {"field": field_missing, "table": table_missing}
+
+
+def table_missing_tolerance(section: Mapping[str, Any], competition: Any, category: Any = "") -> int:
+    """Ile brakujących miejsc stolika ignoruje alert dla danej kategorii.
+
+    Kluczem jest przede wszystkim konkretna rozgrywka (np. ``S/MłKR``),
+    a kategorię ogólną przyjmujemy jako bezpieczny fallback dla starszych
+    zapisów i ręcznie dodanych wartości.
+    """
+    raw = section.get("table_missing_tolerance")
+    if not isinstance(raw, Mapping):
+        return 0
+    wanted = {_s(competition).casefold(), _s(category).casefold()}
+    for key, value in raw.items():
+        if _s(key).casefold() not in wanted:
+            continue
+        try:
+            return max(0, min(2, int(value)))
+        except (TypeError, ValueError):
+            return 0
+    return 0
 
 
 def due_stages(hours_left: float, threshold: int, remind_24h: bool = True) -> list[str]:
@@ -501,7 +543,14 @@ def plan_unassigned(
         if not scope_allows(section, item.get("competition"), item.get("category")):
             continue
         match_id = _s(item.get("match_id"))
-        missing = missing_slots(item.get("crew") or {}, item.get("needs") or {}, count_soft_table=soft)
+        missing = missing_slots(
+            item.get("crew") or {},
+            item.get("needs") or {},
+            count_soft_table=soft,
+            table_missing_tolerance=table_missing_tolerance(
+                section, item.get("competition"), item.get("category")
+            ),
+        )
         hours_left = (match_at - now).total_seconds() / 3600.0
         if not (missing["field"] or missing["table"]):
             if any(unassigned_key(match_id, stage) in seen for stage in (STAGE_THRESHOLD, STAGE_FINAL)):
