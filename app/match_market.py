@@ -2623,9 +2623,10 @@ async def approve_late_listing(
     public, managers, public_error = await _offer_notification_groups(
         province, _s(offer.get("from_judge_id"))
     )
-    notification = text_offer_created(offer, _s((await _judges_by_id([
-        _s(offer.get("from_judge_id"))
-    ])).get(_s(offer.get("from_judge_id")), {}).get("full_name")))
+    giver_id = _s(offer.get("from_judge_id"))
+    giver_cards = await _judges_by_id([giver_id])
+    giver_name = _s((giver_cards.get(giver_id) or {}).get("full_name"))
+    notification = text_offer_created(offer, giver_name)
     await _notify(
         sorted(set(managers) - {actor.judge_id}),
         notification,
