@@ -986,3 +986,18 @@ def test_not_on_list_is_not_remembered():
     # wejść do bazy związku za godzinę.
     source = code_of("_store_verdict")
     assert "NOT_ON_LIST" in source
+
+
+def test_offer_payload_carries_taker_and_decider_cards():
+    """Arkusz oferty pokazuje zdjęcia obu stron wymiany i zatwierdzającego.
+
+    Wizytówka powstaje z `cards`, więc każde miejsce budujące `_offer_payload`
+    musi dociągnąć także `decided_by` - inaczej zatwierdzający wyjdzie bez
+    nazwiska i zdjęcia.
+    """
+    payload = ast.get_source_segment(SOURCE, FUNCTIONS["_offer_payload"]) or ""
+    assert '"taker":' in payload
+    assert '"decidedBy":' in payload
+    for name in ("get_offer", "list_offers"):
+        segment = ast.get_source_segment(SOURCE, FUNCTIONS[name]) or ""
+        assert "decided_by" in segment, name

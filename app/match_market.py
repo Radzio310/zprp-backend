@@ -2076,6 +2076,25 @@ async def _offer_payload(
             "",
         )
         or None,
+        # Pelne wizytowki obu stron rozstrzygnietej wymiany - arkusz oferty
+        # pokazuje administratorowi i obsadowemu zdjecia: kto oddal, kto przejal
+        # i kto to zatwierdzil. `takerName` zostaje dla starszych klientow.
+        "taker": next(
+            (
+                _person(_s(c.get("judge_id")), cards.get(_s(c.get("judge_id"))))
+                for c in claims
+                if _s(c.get("status")) == "chosen"
+            ),
+            None,
+        ),
+        # `decided_by` to ostatnia decyzja nad oferta: po wymianie - kto ja
+        # zatwierdzil, po pilnym wystawieniu - kto zezwolil. Klient czyta ja
+        # razem ze stanem oferty.
+        "decidedBy": (
+            _person(_s(offer.get("decided_by")), cards.get(_s(offer.get("decided_by"))))
+            if _s(offer.get("decided_by"))
+            else None
+        ),
         "myClaim": next(
             (
                 {"id": c["id"], "status": _s(c.get("status")), "note": _s(c.get("note")) or None}
@@ -2211,6 +2230,7 @@ async def list_offers(
     # zakladce "Moje".
     cards = await _judges_by_id(
         [_s(r["from_judge_id"]) for r in rows]
+        + [_s(r.get("decided_by")) for r in rows]
         + [
             _s(c.get("judge_id"))
             for group in claims.values()
@@ -2996,7 +3016,8 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
         )
     ]
     cards = await _judges_by_id(
-        [_s(offer["from_judge_id"])] + [_s(c["judge_id"]) for c in claims]
+        [_s(offer["from_judge_id"]), _s(offer.get("decided_by"))]
+        + [_s(c["judge_id"]) for c in claims]
     )
 
     # Kolizje liczymy ŚWIEŻO, a nie z chwili zgłoszenia: między jednym a drugim
@@ -3984,6 +4005,7 @@ async def admin_province_offers(
     claims = await _claims_for([int(row["id"]) for row in rows])
     cards = await _judges_by_id(
         [_s(row["from_judge_id"]) for row in rows]
+        + [_s(row.get("decided_by")) for row in rows]
         + [_s(claim.get("judge_id")) for group in claims.values() for claim in group]
     )
     my_roles = await _viewer_roles(key, [_s(row["match_id"]) for row in rows], actor)
