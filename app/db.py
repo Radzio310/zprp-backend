@@ -288,14 +288,18 @@ admin_settings = Table(
 
 # 10b) Wydarzenie szkoleniowe (kursokonferencja)
 #
-# Jeden wiersz na całą tabelę. JSONB, a nie kolumny, bo to USTAWIENIE -
-# kształt będzie się jeszcze zmieniał, a migracja przy każdym nowym polu
-# byłaby kosztem bez zysku. Wybieramy zawsze najnowszy wiersz, więc
-# wersjonowanie dałoby się dopisać później samym `id`.
+# Od 29.09.2026 JEDEN WIERSZ NA OKRES szkoleniowy (wcześniej jeden na całą
+# tabelę, nadpisywany w miejscu). JSONB, a nie kolumny, bo kształt okresu
+# będzie się jeszcze zmieniał. `event_key` to `payload.id` - ten sam
+# identyfikator, którym przebiegi w `training_run` są przypięte do okresu,
+# więc nie zmienia się po pierwszym zapisie. `archived` chowa okres przed
+# sędziami, ale zostawia go w analizie. Reguły: `app/training_events_rules.py`.
 training_event = Table(
     "training_event",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("event_key", String, nullable=True),
+    Column("archived", Boolean, nullable=False, server_default=text("false")),
     Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("updated_by", String, nullable=True),
     Column(
@@ -4203,6 +4207,7 @@ from app.national_distance_tables import define_tables as _define_national_dista
     national_distance_sources,
     national_distance_cities,
     national_distance_connections,
+    national_distance_judges,
 ) = _define_national_distance_tables(metadata)
 
 engine = create_engine(DATABASE_URL)
@@ -4352,6 +4357,43 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_player integer"))
     _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_ms integer"))
     _conn.execute(text("ALTER TABLE proel_match_snapshots ADD COLUMN IF NOT EXISTS last_event_tag varchar"))
+    # Okresy szkoleniowe (29.09.2026): tabela istnieje na produkcji z jednym
+    # wierszem, więc `create_all` nowych kolumn nie doda. Stary wiersz dostaje
+    # klucz ze swojego `payload.id` - tylko najnowszy przy powtórzeniu, żeby
+    # indeks unikalny dało się założyć. SAVEPOINT, żeby nietypowy stan tabeli
+    # nie zatruł reszty migracji startowych.
+    _conn.execute(text("ALTER TABLE training_event ADD COLUMN IF NOT EXISTS event_key varchar"))
+    _conn.execute(text("ALTER TABLE training_event ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false"))
+    try:
+        with _conn.begin_nested():
+            _conn.execute(
+                text(
+                    """
+                    UPDATE training_event AS t
+                       SET event_key = t.payload ->> 'id'
+                     WHERE t.event_key IS NULL
+                       AND coalesce(t.payload ->> 'id', '') <> ''
+                       AND NOT EXISTS (
+                           SELECT 1 FROM training_event o
+                            WHERE o.event_key = t.payload ->> 'id'
+                       )
+                       AND t.id = (
+                           SELECT max(i.id) FROM training_event i
+                            WHERE i.payload ->> 'id' = t.payload ->> 'id'
+                       )
+                    """
+                )
+            )
+            _conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_training_event_key "
+                    "ON training_event (event_key) WHERE event_key IS NOT NULL"
+                )
+            )
+    except Exception:
+        # Bez klucza stary okres dalej działa: zapis z panelu dołoży klucz
+        # sam (patrz `app/training.py`), a analiza odtworzy go z przebiegów.
+        pass
     # Podpisy pod dodatkowym raportem - tabela na produkcji istnieje, więc
     # `create_all` kolumny nie dołoży.
     # Czas złożenia podpisu - kolumna dołożona 15.09.2026 do tabeli, która

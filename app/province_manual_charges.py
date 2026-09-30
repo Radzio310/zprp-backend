@@ -315,28 +315,48 @@ async def _google_km(client: Any, origin: str, destination: str) -> Optional[flo
         return None
 
 
-async def _resolve_km(officials: list[dict], city: str, day: Optional[date], province: str) -> list[dict]:
+async def _resolve_km(
+    officials: list[dict],
+    city: str,
+    day: Optional[date],
+    province: str,
+    code: Optional[str] = None,
+) -> list[dict]:
     """
-    Kilometry w jedną stronę dla sędziów bez ręcznie wpisanej wartości:
-    najpierw tabela okręgu z dnia meczu, potem Google, a gdy i tam nic -
-    `none` i pole do wpisania (nigdy zgadnięte zero).
+    Kilometry w jedną stronę dla sędziów bez ręcznie wpisanej wartości -
+    reguła z `national_lookup_rules` (30.09.2026): mecz okręgowy - to samo
+    miasto, tabela okręgu z dnia meczu, tabela ZPRP, Google; mecz centralny
+    (znany kod rozgrywek) - to samo miasto, tabela ZPRP, Google. Gdy i tam
+    nic - `none` i pole do wpisania (nigdy zgadnięte zero). Wartości „manual"
+    nie ruszamy.
     """
+    from app import national_lookup_rules as NL
+    from app.national_distances import load_national_pairs
+
     todo = [
         item for item in officials
         if _s(item.get("km_source")) != "manual" and _s(item.get("home_city")) and city
     ]
     if not todo:
         return officials
+    central = bool(_s(code)) and R.is_central_level_competition(code)
     _, book = await _distance_book(province)
     index = book.for_day(day)
+    national = await load_national_pairs()
     google_left = GOOGLE_LIMIT
     client = None
     try:
         for item in todo:
-            hit = index.lookup(item["home_city"], city)
+            table_km = None if central else index.lookup(item["home_city"], city)
+            hit = NL.pick_distance(
+                central,
+                home=item["home_city"],
+                city=city,
+                table_km=table_km,
+                national=national,
+            )
             if hit is not None:
-                item["km_one_way"] = float(hit)
-                item["km_source"] = "same-city" if hit == 0 else "table"
+                item["km_one_way"], item["km_source"] = hit
                 continue
             if google_left <= 0:
                 item["km_one_way"], item["km_source"] = None, "none"
@@ -423,7 +443,7 @@ async def _price(payload: ManualChargeIn, key: str) -> dict:
     officials = [item.model_dump() if hasattr(item, "model_dump") else item.dict() for item in payload.officials]
     city = " ".join(_s(payload.city).split())
     if payload.resolve_km:
-        officials = await _resolve_km(officials, city, day, key)
+        officials = await _resolve_km(officials, city, day, key, code=code)
     priced = M.price_officials(
         officials,
         field_fee=field_gross,

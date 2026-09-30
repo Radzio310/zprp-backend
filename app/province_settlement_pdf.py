@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy import insert, select
 
 from app import settlement_rates as R
+from app.national_lookup_rules import NATIONAL_FOOTNOTE, SOURCE_NATIONAL as NATIONAL_SOURCE
 from app.db import database, province_settlement_documents
 from app.province_settlement_sync import module_enabled
 from app.province_settlements import (
@@ -342,6 +343,8 @@ async def przejazdy_pdf(payload: PdfRequest):
                 "rate": item.rate,
                 "amount": item.amount,
                 "first_of_judge": item.judge_id != previous,
+                # Kilometry z ogólnopolskiej tabeli ZPRP - znacznik przy odległości.
+                "national_km": item.distance_source == NATIONAL_SOURCE,
             }
         )
         previous = item.judge_id
@@ -360,6 +363,7 @@ async def przejazdy_pdf(payload: PdfRequest):
             "total_km": item.total_km,
             "amount": item.amount,
             "first_of_judge": item.judge_id != previous_outside,
+            "national_km": item.distance_source == NATIONAL_SOURCE,
         })
         previous_outside = item.judge_id
 
@@ -406,6 +410,9 @@ async def przejazdy_pdf(payload: PdfRequest):
             "outside_total_amount": round(sum(r["amount"] for r in outside_rows), 2),
             "outside_total_km": sum(r["total_km"] for r in outside_rows),
             "outside_clubs": outside["clubs"],
+            "national_km": any(r["national_km"] for r in rows),
+            "outside_national_km": any(r["national_km"] for r in outside_rows),
+            "national_footnote": NATIONAL_FOOTNOTE,
         },
     )
 

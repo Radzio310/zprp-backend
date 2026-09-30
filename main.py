@@ -203,6 +203,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # BAZA_web czyta ETag tabeli odległości ZPRP (`/national-distances/pairs`)
+    # i odsyła go w If-None-Match - bez tego przeglądarka go nie widzi.
+    expose_headers=["ETag"],
 )
 
 limiter = Limiter(key_func=get_remote_address)

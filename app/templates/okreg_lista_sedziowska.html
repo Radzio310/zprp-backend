@@ -146,6 +146,7 @@
     font-size: 7.1pt; color: #8a93a6; line-height: 1.55;
   }
   .footnote b { color: #5a6478; }
+  sup.zprp { font-size: 5.6pt; color: #0B4F9E; font-weight: bold; line-height: 0; margin-left: .4mm; }
 </style>
 </head>
 <body>
@@ -214,7 +215,7 @@
       <td class="l">{{ row.role }}</td>
       <td class="l">{{ row.city or "-" }}</td>
       <td>{% if row.rate_shared %}<span class="muted">w stawce turnieju</span>{% else %}{{ row.gross | money }}{% endif %}</td>
-      <td>{% if row.travel_shared %}<span class="muted">wliczony</span>{% else %}{{ row.travel | money }}{% endif %}</td>
+      <td>{% if row.travel_shared %}<span class="muted">wliczony</span>{% else %}{{ row.travel | money }}{% if row.national_km %}<sup class="zprp">*</sup>{% endif %}{% endif %}</td>
     </tr>
     {% endfor %}
     {% if not doc.rows %}
@@ -286,6 +287,9 @@
   podstawa i podatek zaokrąglone do pełnych złotych (art. 63 Ordynacji podatkowej).
   &nbsp;&middot;&nbsp; W zestawieniu ekwiwalentów za {{ period_label }} sędzia figuruje jednym wierszem
   z pełnym brutto i dopiskiem „wypłata listami {{ numbers_label }}".
+  {%- if doc.national_km %}
+  &nbsp;&middot;&nbsp; <b>*</b> {{ doc.national_footnote[2:] }}.
+  {%- endif %}
 </div>
 
 </div>

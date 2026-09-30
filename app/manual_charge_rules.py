@@ -82,9 +82,10 @@ WARSAW = ZoneInfo("Europe/Warsaw")
 #: gałęzi „okręgowe" tabeli centralnej). Tylko podpowiedź - pole jest edytowalne.
 FALLBACK_FEES = {FIELD: 117, TABLE: 77}
 
-#: Źródła kilometrów - te same słowa co w rozliczeniu (`settlement_distances`),
-#: plus ręczne wpisanie.
-KM_SOURCES = ("same-city", "table", "google", "manual", "none")
+#: Źródła kilometrów - te same słowa co w rozliczeniu (`settlement_distances`,
+#: `national_lookup_rules`: „zprp-table" = ogólnopolska tabela ZPRP), plus
+#: ręczne wpisanie.
+KM_SOURCES = ("same-city", "table", "zprp-table", "google", "manual", "none")
 
 
 def _s(value: Any) -> str:

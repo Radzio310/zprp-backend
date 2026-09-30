@@ -52,11 +52,11 @@ def at(iso: str) -> datetime:
     return datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
 
 
-def make(match_key, code, role, when, *, km=20.0, city="Zabrze", judge="5124", origin="district", runda=None):
+def make(match_key, code, role, when, *, km=20.0, city="Zabrze", judge="5124", origin="district", runda=None, hall=""):
     return E.Assignment(
         match_key=match_key, judge_id=judge, judge_name="KOWALSKI Jan",
         match_at=when, match_code=code, role=role, origin=origin,
-        city=city, home_city="Bystra", distance_km=km, distance_source="table",
+        city=city, hall=hall, home_city="Bystra", distance_km=km, distance_source="table",
         round_text=runda,
     )
 
@@ -281,6 +281,57 @@ def test_dzieci_w_innej_hali_to_inny_wyjazd():
         make("d2", "S/DZM/2", R.ROLE_FIELD, at("2026-10-04T10:30"), city="Bytom"),
     ])
     assert all(m.travel > 0 for m in entries[0].matches)
+
+
+def test_mlodzicy_regionalni_w_jednej_hali_placa_dojazd_raz_i_pelna_stawke():
+    """MłMR/MłKR (29.09.2026): wspolny tylko dojazd, ryczalt za kazdy mecz."""
+    entries = settle([
+        make("r1", "S/MłMR/1", R.ROLE_FIELD, at("2026-10-04T08:00"), hall="Hala MOSiR"),
+        make("r2", "S/MłKR/4", R.ROLE_FIELD, at("2026-10-04T10:00"), hall="Hala MOSiR"),
+        make("r3", "S/MłMR/2", R.ROLE_FIELD, at("2026-10-04T14:00"), hall="Hala MOSiR"),
+    ])
+    entry = entries[0]
+    assert sum(1 for m in entry.matches if m.travel) == 1
+    assert sum(1 for m in entry.matches if m.travel_shared) == 2
+    single = settle([make("x", "S/MłM/1", R.ROLE_FIELD, at("2026-10-04T08:00"))])[0].matches[0]
+    assert single.gross > 40
+    assert all(m.gross == single.gross and not m.rate_shared for m in entry.matches)
+    assert {m.tournament_key for m in entry.matches} == {entry.matches[0].tournament_key}
+    assert entry.matches[0].tournament_key.startswith("mr:")
+
+
+def test_zwykli_mlodzicy_dalej_placa_dojazd_za_kazdy_mecz():
+    entries = settle([
+        make("m1", "S/MłM/1", R.ROLE_FIELD, at("2026-10-04T08:00"), hall="Hala MOSiR"),
+        make("m2", "S/MłM/2", R.ROLE_FIELD, at("2026-10-04T10:00"), hall="Hala MOSiR"),
+    ])
+    assert all(m.travel > 0 for m in entries[0].matches)
+
+
+def test_dwie_hale_w_jednym_miescie_to_dwa_wyjazdy():
+    entries = settle([
+        make("d1", "S/DZM/1", R.ROLE_FIELD, at("2026-10-04T09:00"), hall="Hala MOSiR"),
+        make("d2", "S/DZM/2", R.ROLE_FIELD, at("2026-10-04T13:00"), hall="SP 12"),
+    ])
+    assert all(m.travel > 0 for m in entries[0].matches)
+
+
+def test_turniej_liczy_polski_dzien_a_nie_UTC():
+    """23:30 UTC 3.10 to 1:30 w nocy 4.10 w Polsce - ten sam dzien turnieju."""
+    entries = settle([
+        make("d1", "S/DZM/1", R.ROLE_FIELD, at("2026-10-03T23:30")),
+        make("d2", "S/DZM/2", R.ROLE_FIELD, at("2026-10-04T09:00")),
+    ])
+    assert sum(1 for m in entries[0].matches if m.travel) == 1
+
+
+def test_rozpoznanie_mlodzikow_regionalnych():
+    for code in ("S/MłMR/16", "S/MłKR/2", "S/MłM1213R/3", "MłKR2/7"):
+        assert R.is_regional_youth_competition(code), code
+        assert R.shares_trip_travel(code), code
+    for code in ("S/MłM/16", "S/MłK1213/2", "S/JMM/1", "MPJMM/19", "S/DZK/1"):
+        assert not R.is_regional_youth_competition(code), code
+    assert R.shares_trip_travel("S/DZK/1")
 
 
 def test_sklejanie_idzie_PO_odsiewie_przyszlych():

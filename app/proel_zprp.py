@@ -31,6 +31,10 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Request, Uploa
 from pydantic import BaseModel
 
 from app.proel_users import rate_limit
+from app.zprp_comment_rules import (
+    EVENT_EXTRA_REPORT_VERIFIED,
+    comment_journal_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -888,6 +892,11 @@ class ZprpMatchCommentRequest(BaseModel):
     id_zawody: int
     #: Pusty string = wyczyszczenie pola po stronie ZPRP (zapis NULL).
     komentarz: str = ""
+    #: Po co idzie zapis - WYŁĄCZNIE do dziennika, do ZPRP nie jedzie.
+    #: „extra-report" = samodzielne dopisanie ramki dodatkowego raportu
+    #: (`app/zprp_comment_rules.py`). Brak (starsza aplikacja) = uwagi
+    #: w ramach pełnych danych, jak dotąd.
+    purpose: Optional[str] = None
 
 
 async def submit_match_comment(payload: ZprpMatchCommentRequest) -> Dict[str, Any]:
@@ -974,16 +983,67 @@ async def zprp_match_comment(
     x_elevation: Optional[str] = Header(None),
 ):
     out = await submit_match_comment(payload)
+    # Samodzielny dopisek raportu ma własne zdarzenie - inaczej dziennik
+    # składał go w „przerwaną wysyłkę pełnych danych" (LCK/17).
+    event, details = comment_journal_event(payload.purpose, payload.komentarz)
     await _journal_send(
-        "zprp.comment_sent",
+        event,
         id_zawody=payload.id_zawody,
         judge_id=x_judge_id,
         install=x_installation_id,
         actor_name=x_actor_name,
         authorization=authorization,
         elevation=x_elevation,
+        details=details,
     )
     return out
+
+
+class ZprpExtraReportVerifiedRequest(BaseModel):
+    id_zawody: int
+    #: Długość pola uwag po zapisie - do dziennika.
+    length: Optional[int] = None
+    #: Ramka uratowana ze stanu w ZPRP (tekst do zapisu jej nie miał).
+    preserved: Optional[bool] = None
+
+
+@router.post(
+    "/extra-report-verified",
+    summary="Potwierdzenie: ramka dodatkowego raportu stoi w uwagach ZPRP",
+)
+async def zprp_extra_report_verified(
+    payload: ZprpExtraReportVerifiedRequest,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+):
+    """Aplikacja przeczytała pole uwag PO zapisie i widzi w nim ramkę raportu.
+
+    Niczego nie wysyła do ZPRP. Stawia znacznik `post.extraReportInZprp`
+    (drugi telefon widzi „W uwagach ZPRP: tak" bez własnego odczytu) i wpis
+    w dzienniku. Klucz godzinowy gasi duplikaty, znacznik odświeża godzinę -
+    raport złożony ponownie ma dostać świeże potwierdzenie.
+    """
+    details: Dict[str, Any] = {}
+    if payload.length is not None:
+        details["length"] = int(payload.length)
+    if payload.preserved:
+        details["preserved"] = True
+    await _journal_send(
+        EVENT_EXTRA_REPORT_VERIFIED,
+        id_zawody=payload.id_zawody,
+        judge_id=x_judge_id,
+        install=x_installation_id,
+        actor_name=x_actor_name,
+        authorization=authorization,
+        elevation=x_elevation,
+        details=details,
+        event_key=_hour_key(EVENT_EXTRA_REPORT_VERIFIED, payload.id_zawody),
+        mark_task="extraReportInZprp",
+    )
+    return {"status": "success"}
 
 
 # ─────────────────────── załącznik (protokół) ───────────────────────

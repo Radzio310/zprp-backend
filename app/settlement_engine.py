@@ -19,8 +19,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Iterable, Optional
 
+from zoneinfo import ZoneInfo
+
 from app import settlement_rates as R
+from app.collision_rules import hall_key
 from app.settlement_money import money, money_sum
+
+_PL = ZoneInfo("Europe/Warsaw")
 
 
 def _city_key(value: Any) -> str:
@@ -113,6 +118,9 @@ class SettledMatch:
     tournament_size: int = 1
     #: Stawke za ten mecz zaplacil pierwszy mecz turnieju (stare wersje stawek).
     rate_shared: bool = False
+    #: Hala - tylko do sklejania turnieju (`_tournament_groups`). Na wydruk i do
+    #: tabeli odleglosci idzie wylacznie `city`.
+    hall: str = ""
 
 
 @dataclass
@@ -151,41 +159,66 @@ def _is_future(when: Optional[datetime], now: datetime) -> bool:
     return when > now
 
 
+def _local_day(item: "SettledMatch") -> Optional[date]:
+    """Dzien meczu w czasie POLSKIM. `match_at` to prawdziwy UTC - mecz o 0:30
+    w nocy wypadalby w UTC dzien wczesniej i odklejal od reszty turnieju."""
+    if item.match_at is None:
+        return item.day
+    when = item.match_at
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(_PL).date()
+
+
+def _trip_kind(code: Any) -> Optional[str]:
+    if R.is_children_competition(code):
+        return "dz"
+    if R.is_regional_youth_competition(code):
+        return "mr"
+    return None
+
+
 def _tournament_groups(
     matches: list[SettledMatch],
-) -> dict[tuple[str, str, str], list[SettledMatch]]:
-    """Turnieje dzieci: sedzia + DZIEN + miejsce.
+) -> dict[tuple[str, str, str, str], list[SettledMatch]]:
+    """Turnieje: rodzaj + sedzia + DZIEN + hala (bez hali: miasto).
 
-    Dzien dzieci to w praktyce turniej: kilkanascie spotkan pod rzad w jednej
-    hali, na ktore sedzia przyjechal raz i przy ktorych przesiedzial caly dzien.
+    Dzien dzieci i dzien mlodzikow regionalnych to w praktyce turniej:
+    kilka spotkan pod rzad w jednej hali, na ktore sedzia przyjechal raz.
+    Rodzaje sa w kluczu osobno, bo rozliczaja sie inaczej (patrz nizej).
 
-    ⚠ NIE dzielimy po kategorii. DzM i DzK tego samego dnia w tej samej hali to
-    JEDEN turniej - decyzja uzytkownika z 13.09.2026. Sedzia jedzie raz i siedzi
-    raz, niezaleznie od tego, czy graja chlopcy, czy dziewczeta.
+    ⚠ NIE dzielimy po plci. DzM i DzK (albo MłMR i MłKR) tego samego dnia w tej
+    samej hali to JEDEN turniej - decyzja uzytkownika z 13.09.2026.
 
-    ⚠ Granica to CALY DZIEN, nie przerwa miedzy meczami. Wczesniej dojazd
-    sklejal sie lancuchem trzech godzin i przy dluzszej przerwie ten sam dzien
-    potrafil rozpasc sie na dwa wyjazdy. Stawka i dojazd musza grupowac sie
-    identycznie, inaczej jedna stawka szla z dwoma dojazdami.
+    ⚠ Granica to CALY DZIEN (polski), nie przerwa miedzy meczami. Stawka i
+    dojazd musza grupowac sie identycznie, inaczej jedna stawka szla z dwoma
+    dojazdami.
+
+    ⚠ HALA, nie samo miasto (29.09.2026): dwie hale w jednym miescie to dwa
+    wyjazdy. Mecz bez nazwy hali sklejamy po miescie - lepiej jeden dojazd za
+    duzo scalony niz sedzia bez zadnego rozpoznania.
 
     Ta sama regula stoi w `BAZA/utils/tripTravel.ts` i w `mergeTripTravel`
     w BAZA_web - rozjazd oznaczalby, ze aplikacja sedziego i zestawienie okregu
     placa za co innego.
     """
-    groups: dict[tuple[str, str, str], list[SettledMatch]] = {}
+    groups: dict[tuple[str, str, str, str], list[SettledMatch]] = {}
     for item in matches:
-        if not R.is_children_competition(item.match_code):
+        kind = _trip_kind(item.match_code)
+        if kind is None:
             continue
         if item.origin == "manual":
             # Reczny mecz ma kwote i dojazd ustalone z gory - nie skleja sie.
             continue
-        if item.day is None:
+        day = _local_day(item)
+        if day is None:
             # Mecz bez daty nie ma sie z czym skleic - placi po swojemu.
             continue
-        place = _city_key(item.city)
-        if not place:
+        city = _city_key(item.city)
+        if not city:
             continue
-        groups.setdefault((item.judge_id, item.day.isoformat(), place), []).append(item)
+        place = hall_key(item.hall, item.city) or city
+        groups.setdefault((kind, item.judge_id, day.isoformat(), place), []).append(item)
     return groups
 
 
@@ -211,13 +244,15 @@ def _mark_tournaments(
     przy stawce za mecz - listy w aplikacji i na BAZA_web sklejaja po nim
     turniej w jedna karte, niezaleznie od tego, jak policzyla sie stawka.
     """
-    for group in _tournament_groups(matches).values():
+    for (kind, _judge, day_iso, place), group in _tournament_groups(matches).items():
         ordered = sorted(
             group,
             key=lambda m: (m.match_at or datetime.min.replace(tzinfo=timezone.utc), m.match_key),
         )
         first = ordered[0]
-        key = f"dz:{first.judge_id}:{first.day}:{_city_key(first.city)}"
+        # Przedrostek mowi klientom, jaki to turniej („dz:" dzieci, „mr:"
+        # mlodzicy regionalni) - karta w liscie podpisuje sie po nim.
+        key = f"{kind}:{first.judge_id}:{day_iso}:{place}"
         for item in ordered:
             item.tournament_key = key
             item.tournament_size = len(ordered)
@@ -228,6 +263,11 @@ def _mark_tournaments(
         for item in ordered[1:]:
             item.travel_shared = True
             item.travel = 0
+
+        if kind != "dz":
+            # Mlodzicy regionalni: wspolny TYLKO dojazd. Kazdy mecz placi pelna
+            # stawke „Mlodzik" z tabeli okregu (decyzja z 29.09.2026).
+            continue
 
         # Stawka dziecieca jest liczona OD DNIA MECZU, wiec o sposobie
         # rozliczenia decyduje wersja z dnia turnieju, nie dzisiejsza.
@@ -316,6 +356,7 @@ def settle_match(
         # („Bystra-Hala Sportowa-Bystra"), i dopasowanie do tabeli odleglosci -
         # patrz `settlement_venues`. Mecz bez miasta ma zostac bez dojazdu.
         city=assignment.city,
+        hall=assignment.hall,
         home_city=assignment.home_city,
         teams=assignment.teams,
         distance_km=distance,
@@ -353,6 +394,7 @@ def _settle_fixed(assignment: Assignment, when_date: Optional[date], now: dateti
         role=assignment.role,
         origin=assignment.origin,
         city=assignment.city,
+        hall=assignment.hall,
         home_city=assignment.home_city,
         teams=assignment.teams,
         distance_km=distance,
@@ -678,6 +720,9 @@ class TravelRow:
     total_km: float
     rate: float
     amount: float
+    #: Źródło kilometrów („zprp-table" = ogólnopolska tabela ZPRP) - wydruk
+    #: oznacza nim kilometry potwierdzone oficjalnymi ryczałtami.
+    distance_source: Optional[str] = None
 
 
 def travel_rows(entries: Iterable[JudgeSettlement]) -> list[TravelRow]:
@@ -709,6 +754,7 @@ def travel_rows(entries: Iterable[JudgeSettlement]) -> list[TravelRow]:
                     total_km=float(match.distance_km or 0) * R.ROUND_TRIP,
                     rate=match.km_rate,
                     amount=match.travel,
+                    distance_source=match.distance_source,
                 )
             )
     rows.sort(key=lambda r: (_sort_name(r.judge_name), r.day or date.min, r.route))

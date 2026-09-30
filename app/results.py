@@ -45,6 +45,7 @@ from app.deps import Settings, get_rsa_keys, get_settings
 from app.utils import fetch_with_correct_encoding
 from app.proel_fields import exam_mark_meets
 from app.proel_training_key import blob_is_training
+from app.zprp_comment_rules import fit_comment_limit, preserve_extra_block
 from app.protocol_category import (
     HeaderMarks,
     exam_requirement_for_code,
@@ -817,8 +818,18 @@ def _sanitize_comment_text(s: str) -> str:
     # usuń znaki kontrolne poza \n i \t
     x = "".join(ch for ch in x if ch in ("\n", "\t") or ord(ch) >= 32)
 
-    # opcjonalnie: przytnij długość, żeby nie wpakować megatekstu (możesz zmienić limit)
-    return x.strip()[:2000]
+    # Limit długości zostaje (2000 znaków), ale NIE tnie już od końca: ramka
+    # dodatkowego raportu stoi na końcu i ginęła jako pierwsza (LCK/17).
+    # `fit_comment_limit` przycina verte PRZED ramką - patrz
+    # `app/zprp_comment_rules.py`. O przycięciu mówi `_comment_truncated`.
+    return fit_comment_limit(x.strip())[0]
+
+
+def _comment_truncated(s: str) -> bool:
+    """Czy uwagi musiały zostać przycięte do limitu drogi awaryjnej."""
+    if not isinstance(s, str):
+        return False
+    return fit_comment_limit(s.strip())[1]
 
 
 def _table_text(table) -> str:
@@ -1887,6 +1898,25 @@ async def _apply_protocol_updates_4blocks(
             _dbg("SKIP comment empty desired", req_id=req_id)
         else:
             cur_text = _current_text_value(inp)
+
+            # Pełna blokada ramki raportu (29.09.2026): tekst bez ramki nie
+            # zdejmuje ramki, która stoi w polu na stronie ZPRP.
+            guarded = preserve_extra_block(cur_text or "", referee_comment or "")
+            desired_text = _sanitize_comment_text(guarded)
+            if _comment_truncated(guarded):
+                logger.warning(
+                    "protokół: uwagi przycięte do limitu (req_id=%s, długość=%s)",
+                    req_id,
+                    len(guarded),
+                )
+                skipped_items.append(
+                    {
+                        "section": "comment",
+                        "team": None,
+                        "player": None,
+                        "kind": "komentarz_przyciety",
+                    }
+                )
 
             # DELTA
             cur_norm = _sanitize_comment_text(cur_text or "")

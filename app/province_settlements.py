@@ -238,9 +238,14 @@ async def load_settlement(
     include_future: bool = False,
     include_zprp: bool = False,
     judge_ids: Optional[list[str]] = None,
+    extra: Optional[list[E.Assignment]] = None,
 ) -> dict:
     """
     Jedno wejscie dla panelu, aplikacji i PDF-ow.
+
+    `extra` - obsady spoza bazy, doklejone tylko do TEGO rachunku (prognoza
+    przyszlych meczow z telefonu, `_forecast_assignments`). Nigdy nie trafiaja
+    do pamieci podrecznej ani do tabeli.
 
     `include_zprp` - czy doliczyc obsady rozliczane przez ZPRP (boiskowi
     i delegaci na meczach centralnych, stoliki MP). Domyslnie NIE, bo to jest
@@ -258,6 +263,8 @@ async def load_settlement(
         assignments = [item for item in base["assignments"] if item.judge_id in wanted]
     else:
         assignments = base["assignments"]
+    if extra:
+        assignments = [*assignments, *extra]
     now = _now()
 
     # Sedzia bez nazwiska nie czeka na dobowe odswiezenie: jego mecz w API ZPRP
@@ -492,6 +499,7 @@ def _travel_json(row: E.TravelRow) -> dict:
         "total_km": row.total_km,
         "rate": row.rate,
         "amount": row.amount,
+        "distance_source": row.distance_source,
     }
 
 
@@ -983,6 +991,242 @@ async def _split_months(
             row[field] = round(row[field] + delta[field], 2)
 
 
+async def _months_rows(
+    key: str,
+    *,
+    judge_id: Optional[str],
+    include_future: bool,
+    include_zprp: bool,
+    include_clubs: bool,
+    extra: Optional[list[E.Assignment]] = None,
+) -> list[dict]:
+    """Treść `/months` - wspólna z prognozą (`extra` = mecze z telefonu)."""
+    base = await _base(key)
+    central_versions, province_versions = base["central_versions"], base["province_versions"]
+    assignments = [
+        item for item in base["assignments"] if not judge_id or item.judge_id == str(judge_id)
+    ]
+    if extra:
+        assignments = [*assignments, *extra]
+    now = _now()
+
+    # PODZIAL WEDLUG TEGO, KTO PLACI - ta sama granica, co na ekranie miesiaca
+    # (`load_settlement`). Kazda grupa liczy sie osobno, bo koszty uzyskania
+    # i prog 200 zl ida od sumy miesiaca U DANEGO PLATNIKA.
+    club_paid = await _club_paid_keys(
+        key, assignments, central_versions, province_versions, now
+    )
+    common = dict(
+        province=key,
+        central_versions=central_versions,
+        province_versions=province_versions,
+        now=now,
+        include_future=include_future,
+        include_zprp=include_zprp,
+    )
+
+    rows = E.monthly_totals(
+        [item for item in assignments if item.match_key not in club_paid],
+        **common,
+    )
+    # Wydane listy sędziowskie: podatek każdej listy osobno (`_split_months`).
+    await _split_months(key, rows, assignments, club_paid, common, base["names"], judge_id)
+    if include_clubs and club_paid:
+        rows = _merge_months(
+            rows,
+            E.monthly_totals(
+                [item for item in assignments if item.match_key in club_paid],
+                **common,
+            ),
+        )
+    return rows
+
+
+class ForecastMatch(BaseModel):
+    match_id: str
+    code: str
+    when: str
+    role: Optional[str] = None
+    city: Optional[str] = None
+    hall: Optional[str] = None
+    teams: Optional[str] = None
+    round: Optional[str] = None
+    series: Optional[str] = None
+
+
+class ForecastRequest(BaseModel):
+    province: str
+    judge_id: str
+    year: Optional[int] = None
+    month: Optional[int] = None
+    matches: list[ForecastMatch] = []
+
+
+async def _forecast_assignments(
+    key: str, judge_id: str, items: list[ForecastMatch]
+) -> list[E.Assignment]:
+    """
+    Przyszłe mecze z telefonu, których serwer nie zna -> obsady do rachunku
+    (reguły doboru: `settlement_forecast_rules`).
+
+    Kilometry według reguły z `national_lookup_rules` (30.09.2026): mecz
+    okręgowy - to samo miasto, tabela okręgu (wersja z dnia meczu), tabela
+    ZPRP; mecz centralny - to samo miasto, tabela ZPRP. Gdy tabele milczą -
+    z wcześniejszego meczu tego sędziego w tej samej miejscowości. Google nie
+    pytamy: ekran czeka na odpowiedź, a prognoza ma być szybka. Mecz bez
+    kilometrów pokaże się jako „brak dojazdu", tak jak każdy inny.
+    """
+    import json
+
+    from app import national_lookup_rules as NL
+    from app import settlement_forecast_rules as F
+    from app.db import okreg_distances
+    from app.national_distances import load_national_pairs
+    from app.province_settlement_sync import _own_prefixes
+    from app.settlement_distances import VersionedDistanceIndex, normalize_city
+
+    base = await _base(key)
+    mine = [item for item in base["assignments"] if item.judge_id == str(judge_id)]
+    picked = F.pick_forecast(
+        [item.model_dump() for item in items],
+        known_ids={F.match_id_of(item.match_key) for item in mine},
+        own_prefixes=await _own_prefixes(key),
+        now=_now(),
+    )
+    if not picked:
+        return []
+
+    homes = [item.home_city for item in mine if item.home_city]
+    home = max(set(homes), key=homes.count) if homes else ""
+    if not home:
+        row = await database.fetch_one(
+            select(province_settlement_judges.c.home_city).where(
+                and_(
+                    province_settlement_judges.c.province == key,
+                    province_settlement_judges.c.judge_id == str(judge_id),
+                )
+            )
+        )
+        home = str(row["home_city"] or "") if row else ""
+
+    known_km: dict[str, float] = {}
+    for item in mine:
+        if item.distance_km is not None and item.city:
+            known_km.setdefault(normalize_city(item.city)[0], float(item.distance_km))
+
+    distance_row = await database.fetch_one(
+        select(okreg_distances.c.content).where(okreg_distances.c.province.in_(spellings(key)))
+    )
+    content = distance_row["content"] if distance_row else None
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except Exception:
+            content = None
+    book = VersionedDistanceIndex(content)
+    national = await load_national_pairs()
+
+    out: list[E.Assignment] = []
+    for item in picked:
+        km, source = None, "none"
+        city_key = normalize_city(item["city"])[0] if item["city"] else ""
+        if home and item["city"]:
+            central = R.is_central_level_competition(item["code"])
+            table_km = None if central else book.lookup(home, item["city"], item["match_at"].date())
+            hit = NL.pick_distance(
+                central, home=home, city=item["city"], table_km=table_km, national=national
+            )
+            if hit is not None:
+                km, source = hit
+            elif city_key in known_km:
+                km, source = known_km[city_key], "history"
+        out.append(
+            E.Assignment(
+                match_key=item["match_key"],
+                judge_id=str(judge_id),
+                match_at=item["match_at"],
+                match_code=item["code"],
+                role=item["role"],
+                origin=F.FORECAST_ORIGIN,
+                city=item["city"],
+                hall=item["hall"],
+                home_city=home,
+                teams=item["teams"],
+                round_text=item["round_text"],
+                series_text=item["series_text"],
+                distance_km=km,
+                distance_source=source,
+            )
+        )
+    return out
+
+
+async def _forecast_guard(payload: "ForecastRequest") -> str:
+    key = require_province(payload.province)
+    if not await module_enabled(key, "settlements"):
+        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    return key
+
+
+@router.post("/me/forecast", summary="Moje rozliczenie z prognozą przyszłych meczów z telefonu")
+async def mine_forecast(payload: ForecastRequest):
+    """
+    `/me` z przyszłymi plus mecze z telefonu, których serwer jeszcze nie ma
+    (`origin: "forecast"`). Liczone RAZEM z resztą miesiąca, bo koszty, próg
+    200 zł i turnieje idą od całego miesiąca sędziego. Obsady ZPRP - jak w
+    `/me` - nigdy nie wchodzą do kwot.
+    """
+    key = await _forecast_guard(payload)
+    if payload.year is None or payload.month is None:
+        raise HTTPException(422, "Brak miesiąca prognozy")
+    month_range(payload.year, payload.month)
+    extra = await _forecast_assignments(key, payload.judge_id, payload.matches)
+    data = await load_settlement(
+        key,
+        year=payload.year,
+        month=payload.month,
+        include_future=True,
+        include_zprp=False,
+        judge_ids=[payload.judge_id],
+        extra=extra,
+    )
+    out = await _judge_payload(
+        key,
+        payload.judge_id,
+        year=payload.year,
+        month=payload.month,
+        include_future=True,
+        include_zprp=False,
+        data=data,
+    )
+    out["forecast"] = len(extra)
+    return out
+
+
+@router.post("/months/forecast", summary="Siatka miesięcy sędziego z prognozą z telefonu")
+async def months_forecast(payload: ForecastRequest):
+    """`/months` sędziego (z przyszłymi i klubami) plus doklejone mecze z telefonu."""
+    key = await _forecast_guard(payload)
+    extra = await _forecast_assignments(key, payload.judge_id, payload.matches)
+    rows = await _months_rows(
+        key,
+        judge_id=payload.judge_id,
+        include_future=True,
+        include_zprp=False,
+        include_clubs=True,
+        extra=extra,
+    )
+    return {
+        "province": key,
+        "judge_id": payload.judge_id,
+        "include_future": True,
+        "include_zprp": False,
+        "include_clubs": True,
+        "months": rows,
+        "forecast": len(extra),
+    }
+
+
 @router.get("/months", summary="Sumy miesiąc po miesiącu - do siatki sezonów")
 async def months(
     request: Request,
@@ -1016,42 +1260,13 @@ async def months(
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
 
     async def build() -> dict:
-        base = await _base(key)
-        central_versions, province_versions = base["central_versions"], base["province_versions"]
-        assignments = [
-            item for item in base["assignments"] if not judge_id or item.judge_id == str(judge_id)
-        ]
-        now = _now()
-
-        # PODZIAL WEDLUG TEGO, KTO PLACI - ta sama granica, co na ekranie miesiaca
-        # (`load_settlement`). Kazda grupa liczy sie osobno, bo koszty uzyskania
-        # i prog 200 zl ida od sumy miesiaca U DANEGO PLATNIKA.
-        club_paid = await _club_paid_keys(
-            key, assignments, central_versions, province_versions, now
-        )
-        common = dict(
-            province=key,
-            central_versions=central_versions,
-            province_versions=province_versions,
-            now=now,
+        rows = await _months_rows(
+            key,
+            judge_id=judge_id,
             include_future=include_future,
             include_zprp=include_zprp,
+            include_clubs=include_clubs,
         )
-
-        rows = E.monthly_totals(
-            [item for item in assignments if item.match_key not in club_paid],
-            **common,
-        )
-        # Wydane listy sędziowskie: podatek każdej listy osobno (`_split_months`).
-        await _split_months(key, rows, assignments, club_paid, common, base["names"], judge_id)
-        if include_clubs and club_paid:
-            rows = _merge_months(
-                rows,
-                E.monthly_totals(
-                    [item for item in assignments if item.match_key in club_paid],
-                    **common,
-                ),
-            )
         return {
             "province": key,
             "judge_id": judge_id,

@@ -17,18 +17,24 @@ import logging
 import math
 from typing import Any, Optional
 
+import time
+
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import national_lookup_rules as NL
 from app.db import (
     database,
     national_distance_cities,
     national_distance_connections,
+    national_distance_judges,
     national_distance_sources,
 )
 from app.deps import Settings, get_rsa_keys, get_settings
+from app.national_distance_progress import routes_from_home, summarize_sources
 from app.national_distance_parser import (
     ParsedSettlement,
     normalize_city_key,
@@ -64,6 +70,10 @@ class HarvestRequest(BaseModel):
     password: str
     judge_id: str
     links: list[SettlementCandidate] = Field(default_factory=list, max_length=_MAX_BATCH)
+    #: Pełne pobranie wszystkich sezonów sędziego. Po udanym odszyfrowaniu
+    #: serwer zapisuje wtedy sędziego jako „tabela zbudowana" - także przy
+    #: pustej liście albo samych znanych ryczałtach.
+    full: bool = False
 
 
 def _now() -> datetime:
@@ -408,6 +418,30 @@ async def _process_batch(
         await _process_batch_inner(username, password, candidates, settings)
 
 
+async def _remember_full_judge(judge_id: str, links: int) -> None:
+    """Wpis „sędzia zbudował tabelę" po pełnym pobraniu. Błąd bazy nie psuje harvestu."""
+    key = str(judge_id or "").strip()[:40]
+    if not key:
+        return
+    now = _now()
+    statement = pg_insert(national_distance_judges).values(
+        judge_id=key,
+        first_full_at=now,
+        last_full_at=now,
+        links=max(0, int(links)),
+    )
+    try:
+        await database.execute(
+            statement.on_conflict_do_update(
+                index_elements=[national_distance_judges.c.judge_id],
+                # `links` to liczba ryczałtów w OSTATNIM pełnym pobraniu.
+                set_={"last_full_at": now, "links": max(0, int(links))},
+            )
+        )
+    except Exception as exc:
+        logger.warning("Nie udało się zapisać sędziego po pełnym pobraniu: %s", exc)
+
+
 @router.post(
     "/harvest",
     status_code=status.HTTP_202_ACCEPTED,
@@ -432,17 +466,22 @@ async def harvest_distances(
         if await _reserve(item):
             accepted.append(item)
 
-    if accepted:
+    if accepted or body.full:
         private_key, _ = keys
         try:
             username = decrypt_field(body.username, private_key)
             password = decrypt_field(body.password, private_key)
-            _judge_id = decrypt_field(body.judge_id, private_key)
+            judge_id = decrypt_field(body.judge_id, private_key)
         except HTTPException:
             for item in accepted:
                 await _mark_source(item["source_key"], "failed", "Błąd deszyfrowania")
             raise
-        _spawn(_process_batch(username, password, accepted, settings))
+        if body.full:
+            await _remember_full_judge(judge_id, len(unique))
+        if accepted:
+            _spawn(_process_batch(username, password, accepted, settings))
+        username = ""
+        password = ""
 
     return {
         "accepted": len(accepted),
@@ -510,10 +549,191 @@ async def national_distances_overview(
     }
 
 
+class ProgressRequest(BaseModel):
+    match_ids: list[str] = Field(default_factory=list, max_length=3000)
+    home: Optional[str] = Field(default=None, max_length=120)
+    cities: list[str] = Field(default_factory=list, max_length=1000)
+
+
+@router.post(
+    "/progress",
+    summary="Postęp czytania ryczałtów jednego sędziego (overlay budowy tabeli)",
+)
+async def national_distances_progress(body: ProgressRequest):
+    """Ile ryczałtów z podanych meczów serwer już przeczytał i jakie trasy z nich
+    wyszły. Telefon pyta co kilka sekund po pełnym pobraniu, żeby kilometry
+    dorysowywały się na mapie, gdy tylko powstaną.
+
+    Bez logowania, bo nie zdradza nic ponad to, co i tak pokazuje publiczna mapa:
+    stan przetwarzania dokumentu i kilometry między miastami.
+    """
+    ids = sorted({str(i).strip() for i in body.match_ids if str(i).strip().isdigit()})
+    counts = summarize_sources([])
+    if ids:
+        rows = await database.fetch_all(
+            select(
+                national_distance_sources.c.status,
+                national_distance_sources.c.attempts,
+                func.count(),
+            )
+            .where(national_distance_sources.c.match_id.in_(ids))
+            .group_by(
+                national_distance_sources.c.status,
+                national_distance_sources.c.attempts,
+            )
+        )
+        counts = summarize_sources((row[0], row[1], row[2]) for row in rows)
+
+    connections: list[dict[str, Any]] = []
+    home_key = normalize_city_key(body.home or "")
+    wanted = {normalize_city_key(c) for c in body.cities}
+    wanted.discard("")
+    wanted.discard(home_key)
+    if home_key and wanted:
+        rows = await database.fetch_all(
+            select(national_distance_connections).where(
+                (
+                    (national_distance_connections.c.city_a_key == home_key)
+                    & national_distance_connections.c.city_b_key.in_(wanted)
+                )
+                | (
+                    (national_distance_connections.c.city_b_key == home_key)
+                    & national_distance_connections.c.city_a_key.in_(wanted)
+                )
+            )
+        )
+        connections = routes_from_home(rows, home_key)
+    return {"sources": counts, "connections": connections}
+
+
+class JudgeStatusRequest(BaseModel):
+    judge_id: str = Field(min_length=1, max_length=40)
+    match_ids: list[str] = Field(default_factory=list, max_length=NL.MAX_STATUS_MATCH_IDS)
+
+
+@router.post(
+    "/judge-status",
+    summary="Czy sędzia zbudował już tabelę odległości (pełne pobranie ryczałtów)",
+)
+async def national_distances_judge_status(body: JudgeStatusRequest):
+    """Aplikacja pyta, czy zachęcać sędziego do pełnego pobrania.
+
+    Zbudowana = wpis po pełnym pobraniu albo choć jeden ryczałt z jego meczów
+    w kolejce serwera (sędziowie sprzed wprowadzenia wpisu). Bez logowania:
+    odpowiedź to tylko tak/nie i data.
+    """
+    judge_id = body.judge_id.strip()
+    row = await database.fetch_one(
+        select(
+            national_distance_judges.c.first_full_at,
+            national_distance_judges.c.last_full_at,
+        ).where(national_distance_judges.c.judge_id == judge_id)
+    )
+    judge_row = (
+        {"first_full_at": row["first_full_at"], "last_full_at": row["last_full_at"]}
+        if row
+        else None
+    )
+    has_source, source_at = False, None
+    ids = NL.clean_match_ids(body.match_ids)
+    if not judge_row and ids:
+        source = await database.fetch_one(
+            select(
+                func.count().label("n"),
+                func.min(national_distance_sources.c.created_at).label("at"),
+            ).where(national_distance_sources.c.match_id.in_(ids))
+        )
+        if source and int(source["n"] or 0) > 0:
+            has_source, source_at = True, source["at"]
+    return NL.judge_status(judge_row, source_at, has_source)
+
+
+# ---------------------------------------------------------------------------
+# Tabela ZPRP do liczenia kilometrów (rozliczenia, prognoza, ręczne mecze)
+# ---------------------------------------------------------------------------
+
+_PAIRS_CHECK_EVERY = 60.0
+_pairs_cache: dict[str, Any] = {
+    "signature": None,
+    "checked": 0.0,
+    "version": "0-0",
+    "rows": [],
+    "lookup": {},
+}
+_pairs_lock = asyncio.Lock()
+
+
+async def _refresh_pairs(force: bool = False) -> dict[str, Any]:
+    """Pamięć tabeli w procesie. Podpis (liczba, max(updated_at)) sprawdzamy
+    najwyżej raz na minutę; pełny odczyt tylko wtedy, gdy podpis się zmienił."""
+    now = time.monotonic()
+    cache = _pairs_cache
+    if not force and cache["signature"] is not None and now - cache["checked"] < _PAIRS_CHECK_EVERY:
+        return cache
+    async with _pairs_lock:
+        if not force and cache["signature"] is not None and time.monotonic() - cache["checked"] < _PAIRS_CHECK_EVERY:
+            return cache
+        head = await database.fetch_one(
+            select(
+                func.count().label("n"),
+                func.max(national_distance_connections.c.updated_at).label("at"),
+            ).select_from(national_distance_connections)
+        )
+        signature = (int(head["n"] or 0), head["at"]) if head else (0, None)
+        if signature != cache["signature"]:
+            rows = await database.fetch_all(
+                select(
+                    national_distance_connections.c.city_a_key,
+                    national_distance_connections.c.city_b_key,
+                    national_distance_connections.c.distance_km,
+                    national_distance_connections.c.observations,
+                )
+            )
+            listed = NL.pairs_rows(rows)
+            cache["rows"] = listed
+            cache["lookup"] = NL.expand_pairs({(a, b): km for a, b, km, _ in listed})
+            cache["version"] = NL.pairs_version(*signature)
+            cache["signature"] = signature
+        cache["checked"] = time.monotonic()
+    return cache
+
+
+async def load_national_pairs() -> dict[tuple[str, str], int]:
+    """
+    Tabela ZPRP gotowa do `national_lookup_rules.national_km`: klucze ułożone
+    rosnąco, uzupełnione o warianty pisowni. Błąd bazy = pusta tabela, a nie
+    wywrócone rozliczenie - kilometry pójdą wtedy dalszym źródłem reguły.
+    """
+    try:
+        return (await _refresh_pairs())["lookup"]
+    except Exception as exc:
+        logger.warning("Tabela odległości ZPRP chwilowo niedostępna: %s", exc)
+        return _pairs_cache.get("lookup") or {}
+
+
+@router.get("/pairs", summary="Cała tabela odległości ZPRP w lekkiej postaci (z ETag)")
+async def national_distance_pairs(
+    response: Response,
+    if_none_match: Optional[str] = Header(None, alias="If-None-Match"),
+):
+    cache = await _refresh_pairs()
+    version = cache["version"]
+    headers = {
+        "ETag": f'"{version}"',
+        "Cache-Control": "public, max-age=600",
+    }
+    if NL.etag_matches(if_none_match, version):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    for name, value in headers.items():
+        response.headers[name] = value
+    return {"version": version, "pairs": cache["rows"]}
+
+
 @router.get("/connection", summary="Odległość pomiędzy dwiema miejscowościami")
 async def national_distance_connection(
     from_city: str = Query(..., alias="from", min_length=1, max_length=120),
     to_city: str = Query(..., alias="to", min_length=1, max_length=120),
+    route: int = Query(1, ge=0, le=1, description="0 = bez geometrii trasy"),
 ):
     a = normalize_city_key(from_city)
     b = normalize_city_key(to_city)
@@ -529,5 +749,5 @@ async def national_distance_connection(
     )
     return {
         "found": bool(row),
-        "connection": _connection_payload(row) if row else None,
+        "connection": _connection_payload(row, include_route=bool(route)) if row else None,
     }

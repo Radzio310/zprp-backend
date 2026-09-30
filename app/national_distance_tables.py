@@ -63,5 +63,17 @@ def define_tables(metadata):
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
 
-    return sources, cities, connections
+    # Sędziowie, którzy zbudowali tabelę pełnym pobraniem ryczałtów. Wpis
+    # powstaje po udanym odszyfrowaniu także wtedy, gdy sędzia nie ma żadnego
+    # nowego ryczałtu - aplikacja wie wtedy, że nie musi go już zachęcać.
+    judges = Table(
+        "national_distance_judges",
+        metadata,
+        Column("judge_id", String, primary_key=True),
+        Column("first_full_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("last_full_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("links", Integer, nullable=False, server_default=text("0")),
+    )
+
+    return sources, cities, connections, judges
 

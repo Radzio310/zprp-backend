@@ -153,6 +153,8 @@ def pool_matches(entry: Optional[E.JudgeSettlement]) -> list[dict]:
                 "gross": match.gross,
                 "travel": match.travel,
                 "travel_shared": match.travel_shared,
+                # „zprp-table" = kilometry z ogólnopolskiej tabeli ZPRP (znacznik na liście).
+                "distance_source": match.distance_source,
                 "future": match.future,
                 "tournament_key": match.tournament_key,
                 "rate_shared": match.rate_shared,
@@ -788,6 +790,7 @@ def _snapshot(
 
 
 def _doc_context(snapshot: dict, index: int) -> dict:
+    from app.national_lookup_rules import NATIONAL_FOOTNOTE, SOURCE_NATIONAL
     from app.settlement_words import amount_in_words
 
     item = snapshot["lists"][index]
@@ -807,6 +810,9 @@ def _doc_context(snapshot: dict, index: int) -> dict:
                 "travel": money(match.get("travel")),
                 "travel_shared": bool(match.get("travel_shared")),
                 "rate_shared": bool(match.get("rate_shared")),
+                "national_km": match.get("distance_source") == SOURCE_NATIONAL
+                and not match.get("travel_shared")
+                and money(match.get("travel")) > 0,
             }
         )
     return {
@@ -815,6 +821,8 @@ def _doc_context(snapshot: dict, index: int) -> dict:
         "part": index + 1,
         "parts": len(snapshot["lists"]),
         "rows": rows,
+        "national_km": any(row["national_km"] for row in rows),
+        "national_footnote": NATIONAL_FOOTNOTE,
         "matches_gross": money(item.get("matches_gross")),
         "shift": money(item.get("manual_shift")),
         "gross": money(item.get("gross")),

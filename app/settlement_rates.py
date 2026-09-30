@@ -132,8 +132,35 @@ def is_district_competition(code: Any) -> bool:
 
 
 def is_children_competition(code: Any) -> bool:
-    """Rozgrywki dzieci - jedyne, ktore rozliczaja dojazd zbiorczo."""
+    """Rozgrywki dzieci (DzM/DzK) - turniej: stawka za mecz, dojazd raz."""
     return competition_prefix(code) in ("DZM", "DZK")
+
+
+def is_regional_youth_competition(code: Any) -> bool:
+    """
+    Mlodzicy regionalni: czlon numeru „MłMR" / „MłKR" (takze z rocznikiem,
+    „MłM1213R", i z numerem grupy po literze R).
+
+    Rozpoznajemy po CALYM czlonie miedzy ukosnikami, a nie przez
+    `competition_prefix`: ten szuka podciagu i „MLKR" zamienia w zwykle
+    „MLK" - litera R, ktora odroznia rozgrywki regionalne, ginie.
+    """
+    return any(
+        re.fullmatch(r"ML[MK](1213)?R\d*", part)
+        for part in code_key(code).split("/")
+    )
+
+
+def shares_trip_travel(code: Any) -> bool:
+    """
+    Rozgrywki grane turniejowo - wiele meczow jednego dnia w jednej hali, na
+    ktore sedzia przyjezdza RAZ. Dojazd placi tylko pierwszy mecz dnia.
+
+    Dzieci od 09.09.2026, mlodzicy regionalni od 29.09.2026 (decyzje
+    uzytkownika). Ta sama lista stoi w `BAZA/utils/tripTravel.ts` i w
+    `BAZA_web/utils/province-stats/rates.ts` (`sharesTripTravel`).
+    """
+    return is_children_competition(code) or is_regional_youth_competition(code)
 
 
 #: Kategoria stawek turnieju dzieci (DzM/DzK). W danych stawek jest dopiero od

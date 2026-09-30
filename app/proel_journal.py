@@ -77,6 +77,12 @@ EVENT_LABELS: Dict[str, str] = {
     "zprp.players_sent": "Statystyki zawodników do ZPRP",
     "zprp.officials_sent": "Kary osób towarzyszących do ZPRP",
     "zprp.comment_sent": "Uwagi verte do ZPRP",
+    # Samodzielny dopisek ramki dodatkowego raportu (po złożeniu PDF, ze
+    # szczegółów meczu, z kolejki dopisku) - NIE część pełnych danych, więc
+    # nie składa się w „przerwaną wysyłkę" (LCK/17, 29.09.2026).
+    "zprp.extra_report_comment_sent": "Dodatkowy raport dopisany do uwag ZPRP",
+    # Odczyt po zapisie potwierdził ramkę w polu uwag.
+    "zprp.extra_report_in_zprp": "Dodatkowy raport potwierdzony w uwagach ZPRP",
     # Wysyłka pełnych danych zaczęła się, ale nie zgłosiła końca. To NIE jest
     # osobne zdarzenie w bazie - powstaje przy odczycie z samego początku serii,
     # gdy zabrakło jej domknięcia (patrz `collapse_full_data_run`).
@@ -175,6 +181,7 @@ _POST_NAMES: Dict[str, str] = {
     "fullDataSent": "znacznik: pełne dane w bazie ZPRP",
     "protocolSent": "znacznik: protokół PDF w załącznikach",
     "smsSent": "znacznik: zgłoszenie SMS-em otwarte",
+    "extraReportInZprp": "znacznik: dodatkowy raport w uwagach ZPRP",
 }
 
 _CFG_NAMES: Dict[str, str] = {
@@ -199,6 +206,7 @@ _MARK_SENTENCES: Dict[str, str] = {
     "post.fullDataSent": "pełne dane meczu trafiły do bazy ZPRP",
     "post.protocolSent": "protokół PDF trafił do załączników meczu",
     "post.smsSent": "zgłoszenie wyniku poszło SMS-em",
+    "post.extraReportInZprp": "dodatkowy raport stoi w uwagach meczu w ZPRP",
 }
 
 # Znacznik zadania pomeczowego nie jest zwykłą zmianą rubryki. Powstaje dopiero
@@ -450,6 +458,7 @@ _SEND_BLOCK_NAMES: Dict[str, str] = {
     "comment": "uwag verte",
     "attachment": "protokołu PDF",
     "numbers": "numerów koszulek",
+    "extraReport": "dodatkowego raportu do uwag ZPRP",
 }
 
 
@@ -681,6 +690,20 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
 
     if ev in ("zprp.send_failed", "zprp.send_queued"):
         return send_attempt_sentence(ev, d)
+
+    # Uwagi w ZPRP i ramka dodatkowego raportu - czy ramka BYŁA w zapisie
+    # (LCK/17: bez tego zdania nie da się odpowiedzieć, który zapis ją zdjął).
+    if ev in ("zprp.comment_sent", "zprp.extra_report_comment_sent") and "hasExtraBlock" in d:
+        length = d.get("length")
+        size = f", {length} znaków" if isinstance(length, int) else ""
+        return (
+            f"Z ramką dodatkowego raportu{size}"
+            if d.get("hasExtraBlock")
+            else f"Bez ramki dodatkowego raportu{size}"
+        )
+    if ev == "zprp.extra_report_in_zprp":
+        head = "Odczyt po zapisie: ramka raportu stoi w uwagach meczu"
+        return f"{head} (uratowana ze stanu w ZPRP)" if d.get("preserved") else head
 
     if ev in ("zprp.full_data_running", "zprp.full_data_stalled"):
         # Wiersz powstał z POCZĄTKU serii, więc liczba pod nim mówi, ile żądań
@@ -1049,6 +1072,8 @@ _SEND_EVENTS = set(_SENT_EVENT_BY_PATH.values()) | {
     "zprp.players_sent",
     "zprp.officials_sent",
     "zprp.comment_sent",
+    "zprp.extra_report_comment_sent",
+    "zprp.extra_report_in_zprp",
 }
 _SEND_DEDUP_WINDOW_S = 900
 

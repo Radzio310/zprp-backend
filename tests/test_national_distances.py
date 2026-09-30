@@ -61,3 +61,23 @@ def test_accepts_only_real_zprp_settlement_links():
         validate_settlement_candidate(
             url="https://example.org/sedzia_ryczalt_PDF.php?Id=16294&IdZawody=207406"
         )
+
+
+
+def test_progress_counts_sources_and_returns_only_routes_from_home():
+    from app.national_distance_progress import routes_from_home, summarize_sources
+
+    counts = summarize_sources([("done", 1, 4), ("failed", 3, 1), ("failed", 1, 2), ("queued", 0, 3)])
+    # Porażka po ostatniej próbie to koniec, porażka przed nią wciąż czeka.
+    assert counts == {"total": 10, "done": 4, "failed": 1, "pending": 5}
+
+    rows = [
+        {"city_a_key": "katowice", "city_b_key": "krakow", "city_a_name": "Katowice",
+         "city_b_name": "Kraków", "distance_km": 80},
+        {"city_a_key": "gliwice", "city_b_key": "katowice", "city_a_name": "Gliwice",
+         "city_b_name": "Katowice", "distance_km": 31},
+    ]
+    assert routes_from_home(rows, "katowice") == [
+        {"key": "krakow", "name": "Kraków", "km": 80},
+        {"key": "gliwice", "name": "Gliwice", "km": 31},
+    ]

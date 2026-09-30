@@ -39,7 +39,16 @@ logger = logging.getLogger(__name__)
 #: Zadania pomeczowe, które serwer umie odhaczyć sam. SMS-a tu NIE MA i mieć
 #: nie może: wiadomość wychodzi z telefonu, nasz serwer jej nie widzi, więc
 #: jedynym świadkiem zostaje aplikacja.
-SERVER_MARKED_TASKS = frozenset({"shortResultSent", "fullDataSent", "protocolSent"})
+SERVER_MARKED_TASKS = frozenset(
+    {"shortResultSent", "fullDataSent", "protocolSent", "extraReportInZprp"}
+)
+
+#: Znaczniki, które NIE są „pierwszym wysłaniem", tylko potwierdzeniem stanu -
+#: każde kolejne potwierdzenie przesuwa godzinę. `extraReportInZprp` (ramka
+#: dodatkowego raportu stoi w uwagach ZPRP, LCK/17): aplikacja porównuje jego
+#: godzinę z chwilą złożenia PDF, więc raport złożony ponownie musi dostać
+#: świeże potwierdzenie, a nie to sprzed poprawki.
+REFRESHED_TASKS = frozenset({"extraReportInZprp"})
 
 
 async def mark_post_task(
@@ -84,7 +93,11 @@ async def mark_post_task(
 
             overlay: Dict[str, Any] = dict(_overlay_of(state))
             current = overlay.get(path)
-            if isinstance(current, dict) and current.get("v") is True:
+            if (
+                isinstance(current, dict)
+                and current.get("v") is True
+                and task not in REFRESHED_TASKS
+            ):
                 return False
 
             next_rev = int(state.get("rev") or 0) + 1

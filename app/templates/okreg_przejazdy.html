@@ -126,6 +126,9 @@
     font-size: 7.2pt; color: #8a93a6; line-height: 1.55;
   }
   .footnote b { color: #5a6478; }
+  /* Kilometry z ogólnopolskiej tabeli ZPRP - drobna gwiazdka, bez poszerzania
+     kolumny (A4 poziomo jest wypełnione do krawędzi). */
+  sup.zprp { font-size: 5.6pt; color: #0B4F9E; font-weight: bold; line-height: 0; margin-left: .4mm; }
 
   .signs { width: 100%; border-collapse: collapse; margin-top: 12mm; }
   .signs td { width: 33.3%; text-align: center; padding: 0 4mm; vertical-align: bottom; }
@@ -195,7 +198,7 @@
       <td class="l name">{% if loop.first %}{{ group.name or group.judge_id }}{% endif %}</td>
       <td class="c">{{ row.day_label }}</td>
       <td class="l">{{ row.route }}</td>
-      <td>{{ row.one_way_km | km }}</td>
+      <td>{{ row.one_way_km | km }}{% if row.national_km %}<sup class="zprp">*</sup>{% endif %}</td>
       <td>{{ row.total_km | km }}</td>
       <td>{{ row.rate | rate }}</td>
       <td class="amount">{{ row.amount | money }}</td>
@@ -241,6 +244,9 @@
   &nbsp;&middot;&nbsp; Stawka za kilometr wynika ze szczebla rozgrywek: mecze okręgowe
   rozliczane są stawką wojewódzką, rozgrywki centralne stawką ZPRP.
   &nbsp;&middot;&nbsp; Kilka spotkań dzieci w jednej hali tego samego dnia stanowi jeden wyjazd.
+  {%- if national_km %}
+  &nbsp;&middot;&nbsp; <b>*</b> {{ national_footnote[2:] }}.
+  {%- endif %}
   {%- if not include_zprp %}
   &nbsp;&middot;&nbsp; Lista nie obejmuje przejazdów na obsady rozliczane przez ZPRP.
   {%- endif %}
@@ -264,7 +270,7 @@
         <td class="l name">{% if loop.first %}{{ group.name or group.judge_id }}{% endif %}</td>
         <td class="c">{{ row.day_label }}</td>
         <td class="l">{{ row.route }}</td>
-        <td>{{ row.total_km | km }}</td>
+        <td>{{ row.total_km | km }}{% if row.national_km %}<sup class="zprp">*</sup>{% endif %}</td>
         <td class="amount">{{ row.amount | money }}</td>
       </tr>
       {% endfor %}
@@ -281,6 +287,7 @@
       <tr class="total"><td></td><td class="l" colspan="3">RAZEM POZA OKRĘGIEM</td><td>{{ outside_total_km | km }}</td><td class="gold">{{ outside_total_amount | money }}</td></tr>
     </tbody>
   </table>
+  {% if outside_national_km %}<div class="footnote"><b>*</b> {{ national_footnote[2:] }}.</div>{% endif %}
 </section>
 {% endif %}
 

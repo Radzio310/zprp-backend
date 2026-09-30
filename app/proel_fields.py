@@ -416,6 +416,12 @@ _POST_EXTRAS = {
     # ten wpis niczego nie blokuje. Ma tylko przestać namawiać do zbędnej roboty
     # i pokazać, KTO oraz KIEDY to zrobił.
     "smsSent": "smsSent",
+    # Potwierdzenie „ramka dodatkowego raportu stoi w uwagach ZPRP".
+    #
+    # Stawia je WYŁĄCZNIE serwer (`/proel/zprp/extra-report-verified`), po
+    # odczycie kontrolnym w aplikacji. Pełna blokada z 29.09.2026 (LCK/17):
+    # drugi telefon ma widzieć „W uwagach ZPRP: tak" bez własnego odczytu.
+    "extraReportInZprp": "extraReportInZprp",
 }
 
 _CFG_FIELDS = {
