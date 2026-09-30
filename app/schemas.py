@@ -844,6 +844,13 @@ class CreateHallReportRequest(BaseModel):
     Hala_numer: str
     Druzyny: List[str]
 
+class AcceptHallReportItem(BaseModel):
+    id: int
+    hall: Optional[CreateHallReportRequest] = None
+
+class AcceptHallReportsRequest(BaseModel):
+    items: List[AcceptHallReportItem]
+
 class HallReportItem(BaseModel):
     id: int
     Hala_nazwa: str
@@ -852,6 +859,7 @@ class HallReportItem(BaseModel):
     Hala_numer: str
     Druzyny: List[str]
     created_at: datetime
+    is_processed: bool = False
 
 class ListHallReportsResponse(BaseModel):
     reports: List[HallReportItem]

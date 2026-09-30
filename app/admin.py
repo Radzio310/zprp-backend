@@ -18,6 +18,7 @@ from sqlalchemy import select, insert, update, delete, and_, or_, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.admin_guard import admin_write_guard
+from app.hall_reports import hall_norm_key, merge_halls
 
 from app.db import (
     database,
@@ -100,6 +101,7 @@ from app.schemas import (
     ListSettlementClubsResponse,
     # halls
     CreateHallReportRequest,
+    AcceptHallReportsRequest,
     HallReportItem,
     ListHallReportsResponse,
     # contacts
@@ -1176,7 +1178,7 @@ def _norm_text(s: str) -> str:
     return "".join(ch for ch in s2 if ch.isalnum() or ch.isspace())
 
 def _hall_norm_key(name: str, city: str, street: str, number: str) -> str:
-    return "|".join([_norm_text(name or ""), _norm_text(city or ""), _norm_text(street or ""), _norm_text(number or "")])
+    return hall_norm_key(name, city, street, number)
 
 @router.post("/halls/reports", response_model=dict, summary="Zgłoś nową halę")
 async def post_hall_report(req: CreateHallReportRequest):
@@ -1204,6 +1206,88 @@ async def post_hall_report(req: CreateHallReportRequest):
 async def list_hall_reports():
     rows = await database.fetch_all(select(hall_reports).order_by(hall_reports.c.created_at.desc()))
     return ListHallReportsResponse(reports=[HallReportItem(**dict(r)) for r in rows])
+
+@router.post("/halls/reports/accept", response_model=dict, summary="Zatwierdź zgłoszenia hal i zapisz je w bazie")
+async def accept_hall_reports(req: AcceptHallReportsRequest):
+    if not req.items:
+        raise HTTPException(400, "Nie wskazano zgłoszeń do zatwierdzenia")
+    if len(req.items) > 200:
+        raise HTTPException(400, "Jednorazowo można zatwierdzić najwyżej 200 hal")
+
+    # Ostatnia wersja danego ID wygrywa. Jest to przydatne przy akceptacji z
+    # edycją i chroni przed przypadkowym podwójnym wysłaniem jednego kafelka.
+    items_by_id = {int(item.id): item for item in req.items if int(item.id) > 0}
+    ids = list(items_by_id)
+    if not ids:
+        raise HTTPException(400, "Nieprawidłowe identyfikatory zgłoszeń")
+
+    async with database.transaction():
+        report_rows = await database.fetch_all(
+            select(hall_reports).where(hall_reports.c.id.in_(ids)).with_for_update()
+        )
+        reports_by_id = {int(row["id"]): row for row in report_rows}
+        if not reports_by_id:
+            raise HTTPException(404, "Zgłoszenia nie zostały znalezione")
+
+        file_row = await database.fetch_one(
+            select(json_files).where(json_files.c.key == "hale").with_for_update()
+        )
+        raw_halls = file_row["content"] if file_row else []
+        if isinstance(raw_halls, str):
+            raw_halls = json.loads(raw_halls)
+        if isinstance(raw_halls, dict):
+            halls = [dict(value) for value in raw_halls.values() if isinstance(value, dict)]
+        elif isinstance(raw_halls, list):
+            halls = [dict(value) for value in raw_halls if isinstance(value, dict)]
+        else:
+            halls = []
+
+        resolved_ids: List[int] = []
+        candidates: List[dict] = []
+
+        for report_id in ids:
+            row = reports_by_id.get(report_id)
+            if row is None:
+                continue
+            override = items_by_id[report_id].hall
+            candidate = (
+                override.model_dump()
+                if override is not None
+                else {
+                    "Hala_nazwa": row["Hala_nazwa"],
+                    "Hala_miasto": row["Hala_miasto"],
+                    "Hala_ulica": row["Hala_ulica"],
+                    "Hala_numer": row["Hala_numer"],
+                    "Druzyny": list(row["Druzyny"] or []),
+                }
+            )
+            candidates.append(candidate)
+            resolved_ids.append(report_id)
+
+        halls, added, merged = merge_halls(halls, candidates)
+
+        enabled = bool(file_row["enabled"]) if file_row else True
+        stmt = (
+            pg_insert(json_files)
+            .values(key="hale", content=halls, enabled=enabled, updated_at=func.now())
+            .on_conflict_do_update(
+                index_elements=[json_files.c.key],
+                set_={"content": halls, "enabled": enabled, "updated_at": func.now()},
+            )
+        )
+        await database.execute(stmt)
+        if resolved_ids:
+            await database.execute(
+                hall_reports.delete().where(hall_reports.c.id.in_(resolved_ids))
+            )
+
+    return {
+        "success": True,
+        "accepted_ids": resolved_ids,
+        "added": added,
+        "merged": merged,
+        "file": {"key": "hale", "content": halls, "enabled": enabled},
+    }
 
 @router.delete("/halls/reports/{report_id}", response_model=dict, summary="Usuń zgłoszenie hali (i dodaj ją do listy odrzuconych)")
 async def delete_hall_report(report_id: int):
