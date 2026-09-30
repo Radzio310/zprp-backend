@@ -10,7 +10,9 @@ Dwa alerty (decyzje użytkownika z 24.09.2026):
    ({field, table, club_table}): stolikowy „od klubu", delegaci i stolik
    w kategoriach bez stolika okręgowego (DZM, DZK, MLM1213, MLK1213) brakiem
    nie są. Drugi stolikowy od okręgu jest brakiem, ale da się to wyłączyć
-   (`count_soft_table`), bo lista obsadowego pokazuje go jako „lekką różnicę".
+   globalnie (`count_soft_table`) albo ustawić wyjątek dla konkretnych
+   rozgrywek (`table_missing_tolerance`: 0 = alarmuj o obu, 1 = pomiń brak
+   drugiego, 2 = pomiń brak całego stolika).
      - push do obsadowych RAZ, gdy mecz przekroczy próg, i drugi raz 24 h przed
        meczem, jeśli dalej jest pusty (`remind_24h`),
      - mail: JEDNO zestawienie na sprawdzenie ze wszystkimi meczami, które
@@ -141,9 +143,10 @@ def default_config() -> dict:
             "competitions": [],
             "categories": [],
             # Rozgrywki -> ile brakujących miejsc stolika wolno pominąć
-            # w alercie (0, 1 albo 2). Przykład: {"S/MłKR": 1} oznacza,
-            # że jeden obsadzony stolikowy wystarcza do ciszy w tym alercie.
-            "table_missing_tolerance": {},
+            # w alercie (0, 1 albo 2). Śląskie turnieje młodzików domyślnie
+            # nie alarmują o braku drugiego stolikowego; okręg może każdy
+            # wyjątek zmienić albo wyłączyć w panelu.
+            "table_missing_tolerance": {"S/MłKR": 1, "S/MłMR": 1},
         },
         COLLISION: {
             "enabled": False,
