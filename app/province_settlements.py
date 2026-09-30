@@ -985,9 +985,9 @@ async def _split_months(
         delta = deltas.get((row["year"], row["month"]))
         if not delta:
             continue
-        for field in ("costs", "taxable", "tax"):
-            row[field] = row[field] + delta[field]
-        for field in ("net", "total"):
+        row["tax"] = row["tax"] + delta["tax"]
+        # Koszty i podstawa z groszami - obsady ZPRP (`central_tax_parts`).
+        for field in ("costs", "taxable", "net", "total"):
             row[field] = round(row[field] + delta[field], 2)
 
 

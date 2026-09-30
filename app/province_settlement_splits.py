@@ -250,8 +250,9 @@ async def split_month_deltas(
             continue
         values = S.applied_values(state["calc"])
         slot = out.setdefault((year, month), {"costs": 0, "taxable": 0, "tax": 0, "net": 0.0, "total": 0.0})
-        slot["costs"] += values["costs"] - entry.costs
-        slot["taxable"] += values["taxable"] - entry.taxable
+        # money(): koszty i podstawa z obsad ZPRP maja grosze (`central_tax_parts`).
+        slot["costs"] = money(slot["costs"] + values["costs"] - entry.costs)
+        slot["taxable"] = money(slot["taxable"] + values["taxable"] - entry.taxable)
         slot["tax"] += values["tax"] - entry.tax
         slot["net"] = money(slot["net"] + values["net"] - entry.net)
         slot["total"] = money(slot["total"] + values["total"] - entry.total)

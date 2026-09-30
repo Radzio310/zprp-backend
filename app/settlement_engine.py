@@ -132,8 +132,9 @@ class JudgeSettlement:
     matches: list[SettledMatch] = field(default_factory=list)
 
     gross: float = 0
-    costs: int = 0
-    taxable: int = 0
+    #: Koszty i podstawa: pelne zlote u okregu, z groszami na rachunku ZPRP.
+    costs: float = 0
+    taxable: float = 0
     tax: int = 0
     net: float = 0
     travel: float = 0
@@ -484,10 +485,17 @@ def settle_judges(
         entry.missing_rate = sum(1 for m in entry.matches if m.status == "missing-rate")
         entry.guessed_stage = sum(1 for m in entry.matches if m.stage_guessed)
 
-        total_gross = money_sum(m.gross for m in entry.matches)
         # ⚠ Koszty uzysku i podatek od SUMY miesiaca, nie mecz po meczu -
         # decyzja uzytkownika z 09.09.2026. Prog 200 zl wypada raz.
-        parts = R.settle_period(total_gross)
+        # Obsady rozliczane przez ZPRP (tylko z przelacznikiem `include_zprp`)
+        # licza sie osobno, RACHUNEK PO RACHUNKU (ZPRP wystawia rachunek za
+        # kazdy mecz) i regula rachunku ZPRP: koszty do grosza, podatek do
+        # pelnych zlotych - patrz `R.settle_by_payer`. Bez obsad ZPRP to
+        # dokladnie dawne `R.settle_period(total_gross)`.
+        parts = R.settle_by_payer(
+            money_sum(m.gross for m in entry.matches if not m.zprp_reason),
+            [m.gross for m in entry.matches if m.zprp_reason],
+        )
         entry.gross = parts["gross"]
         entry.costs = parts["costs"]
         entry.taxable = parts["taxable"]
@@ -570,8 +578,8 @@ def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int | float]:
         "matches": sum(e.match_count for e in entries),
         "future": sum(e.future_count for e in entries),
         "gross": money_sum(e.gross for e in entries),
-        "costs": sum(e.costs for e in entries),
-        "taxable": sum(e.taxable for e in entries),
+        "costs": money_sum(e.costs for e in entries),
+        "taxable": money_sum(e.taxable for e in entries),
         "tax": sum(e.tax for e in entries),
         "net": money_sum(e.net for e in entries),
         "travel": round(sum(e.travel for e in entries), 2),

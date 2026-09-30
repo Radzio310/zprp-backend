@@ -787,6 +787,76 @@ def settle_period(total_gross: float) -> dict[str, float]:
     return _tax_parts(total_gross)
 
 
+def _cents_of(value: Any) -> int:
+    """Kwota w groszach jako liczba całkowita - od połowy grosza w górę."""
+    return int(Decimal(str(float(value or 0))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100)
+
+
+def central_tax_parts(gross: float) -> dict[str, float]:
+    """
+    Koszty uzysku i podatek na rachunku ZPRP - mecze CENTRALNE (II liga w górę,
+    MP, PP, Superpuchar, EHF), czyli obsady, które rozlicza ZPRP
+    (`zprp_settlement_reason`).
+
+    Wzór z prawdziwego rachunku ZPRP (brutto 389 zł, przejazd 2 x 122 km po 0,80):
+    koszty 20% = 77,80 zł (DO GROSZA), dochód = 311,20 zł, podatek 12% = 37 zł
+    (PEŁNE ZŁOTE, połówka W GÓRĘ jak Math.round/Excel), netto = 352,00 zł,
+    przejazd 195,20 zł, do wypłaty 547,20 zł.
+
+    Inaczej niż `_tax_parts` (okręg): tam koszty i dochód idą do pełnych złotych.
+    Próg 200 zł brutto zostaje ten sam.
+
+    Liczone w CAŁKOWITYCH groszach, bez float i bez `round()` (bankierski):
+    koszty = (2 x brutto_gr + 5) // 10, podatek = (12 x dochód_gr + 5000) // 10000.
+
+    ⚠ BLIŹNIAKI - zmiana tu to zmiana tam: `centralNetParts` w
+    `BAZA_web/utils/province-stats/rates.ts` i odpowiednik w aplikacji
+    `BAZA/utils/...` (rachunek sędziego w telefonie).
+    """
+    gross_c = _cents_of(gross)
+    costs_c = (2 * gross_c + 5) // 10 if gross_c > 20000 else 0
+    taxable_c = gross_c - costs_c
+    tax = (12 * taxable_c + 5000) // 10000 if taxable_c > 0 else 0
+    return {
+        "gross": gross_c / 100 + 0.0,
+        "costs": costs_c / 100 + 0.0,
+        "taxable": taxable_c / 100 + 0.0,
+        "tax": int(tax),
+        "net": (gross_c - tax * 100) / 100 + 0.0,
+    }
+
+
+def settle_by_payer(district_gross: float, zprp_bills: Iterable[float] = ()) -> dict[str, float]:
+    """
+    Jeden wiersz sędziego, gdy w okresie są obsady OBU płatników.
+
+    Część okręgowa idzie `settle_period` od SUMY okresu (bez zmian). Część
+    rozliczana przez ZPRP - RACHUNEK PO RACHUNKU: ZPRP wystawia rachunek za
+    każdy mecz osobno, więc `zprp_bills` to brutto kolejnych rachunków,
+    a koszty, podatek i netto są sumą ZAOKRĄGLONYCH kwot każdego z nich
+    (`central_tax_parts`), nie zaokrągleniem sumy.
+    Rachunek na 0 zł (brak stawki, brak odległości) nic nie wnosi.
+    """
+    bills = [b for b in (zprp_bills or ()) if _cents_of(b) != 0]
+    parts = []
+    if district_gross or not bills:
+        parts.append(settle_period(district_gross))
+    parts.extend(central_tax_parts(b) for b in bills)
+    if len(parts) == 1:
+        return parts[0]
+
+    def total(name: str) -> float:
+        return sum(_cents_of(p[name]) for p in parts) / 100 + 0.0
+
+    return {
+        "gross": total("gross"),
+        "costs": total("costs"),
+        "taxable": total("taxable"),
+        "tax": int(sum(int(p["tax"]) for p in parts)),
+        "net": total("net"),
+    }
+
+
 # -------------------------
 # Wybor wersji tabeli
 # -------------------------
