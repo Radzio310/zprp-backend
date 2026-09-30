@@ -1,4 +1,4 @@
-"""Archiwum arkuszy ocen delegatów: reguły i praca w tle.
+"""Oceny delegatów zbierane w tle: reguły i praca w tle.
 
 `app.db` łączy się z Postgresem przy imporcie, więc podmieniamy go małą bazą
 SQLite z tą samą tabelą archiwum - reszta modułu działa naprawdę.
@@ -6,6 +6,7 @@ SQLite z tą samą tabelą archiwum - reszta modułu działa naprawdę.
 
 import asyncio
 import gzip
+import pathlib
 import sys
 import types
 
@@ -17,13 +18,14 @@ from app import delegate_evaluation_archive_rules as R
 from app.delegate_evaluation_archive_tables import define_tables
 
 
-def test_przyjmuje_tylko_arkusze_zprp():
-    path, kind = R.normalize_document_path("./statystyki_sedzia_oc_PDF.php?IdZawody=5&Id=7")
-    assert (path, kind) == ("/statystyki_sedzia_oc_PDF.php?Id=7&IdZawody=5", "legacy_pdf")
-    path, kind = R.normalize_document_path("https://baza.zprp.pl/index.php?a=statystyki&b=ocena2&Id=9")
-    assert kind == "html" and path.startswith("/index.php?")
+OCENA = "index.php?a=statystyki&b=ocena2&Id=9"
+
+
+def test_przyjmuje_tylko_formularz_ocen_zprp():
+    assert R.normalize_document_path("https://baza.zprp.pl/" + OCENA) == "/index.php?Id=9&a=statystyki&b=ocena2"
     for bad in (
-        "https://evil.example/statystyki_sedzia_oc_PDF.php?Id=1",
+        "https://evil.example/index.php?b=ocena2",
+        "./statystyki_sedzia_oc_PDF.php?Id=7&IdZawody=5",  # stare PDF-y pomijamy
         "./sedzia_ryczalt_PDF.php?Id=1",
         "./../etc/ocena2.php",
         "javascript:alert(1)",
@@ -34,32 +36,39 @@ def test_przyjmuje_tylko_arkusze_zprp():
 
 
 def test_ta_sama_ocena_w_innej_kolejnosci_parametrow_to_jeden_arkusz():
-    a, _ = R.normalize_document_path("./statystyki_sedzia_oc_PDF.php?Id=7&IdZawody=5")
-    b, _ = R.normalize_document_path("statystyki_sedzia_oc_PDF.php?IdZawody=5&Id=7")
+    a = R.normalize_document_path("./index.php?b=ocena2&Id=9&a=statystyki")
+    b = R.normalize_document_path(OCENA)
     assert R.source_key(a) == R.source_key(b)
+
+
+def test_tylko_zeszly_i_biezacy_sezon():
+    base = {"url": OCENA, "match_id": "206769"}
+    assert R.validated_candidate({**base, "season": "2025/2026"})["season"] == "2025/2026"
+    assert R.validated_candidate({**base, "season": "2026/2027"})
+    for season in ("2024/2025", "", "sezon"):
+        with pytest.raises(ValueError):
+            R.validated_candidate({**base, "season": season})
 
 
 def test_kandydat_czysci_dane_i_wymaga_idzawody():
     item = R.validated_candidate({
-        "url": "./statystyki_sedzia_oc_PDF.php?Id=7",
+        "url": OCENA,
         "match_id": "206769",
         "referee_ids": ["123", "x", ""],
         "referee_names": ["  KOWALSKI   Jan ", ""],
-        "season": "2024/2025",
+        "season": "2025/2026",
     })
     assert item["referee_ids"] == ["123"]
     assert item["referee_names"] == ["KOWALSKI Jan"]
     with pytest.raises(ValueError):
-        R.validated_candidate({"url": "./statystyki_sedzia_oc_PDF.php?Id=7", "match_id": "abc"})
+        R.validated_candidate({"url": OCENA, "match_id": "abc", "season": "2025/2026"})
 
 
-def test_rodzaj_po_tresci_i_strona_logowania():
-    assert R.document_kind(b"%PDF-1.4 ...", "html") == "legacy_pdf"
-    assert R.document_kind(b"<html>ocena</html>", "html") == "html"
-    with pytest.raises(ValueError):
-        R.document_kind(b"<html>login</html>", "legacy_pdf")
+def test_strona_logowania_i_pusty_formularz():
     assert R.looks_like_login_page('<input type="password" name="haslo">')
     assert not R.looks_like_login_page("<h1>Ocena sędziów</h1>")
+    assert not R.has_grades({"sections": []})
+    assert R.has_grades({"sections": [{"key": "I"}]})
 
 
 class _Response:
@@ -113,22 +122,24 @@ def archive(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "_PAUSE_BETWEEN_DOCUMENTS", 0)
     stored = []
 
-    async def legacy(candidate, judge_id, province, text):
-        stored.append((candidate["match_id"], judge_id, text))
+    async def store(candidate, judge_id, province, evaluation):
+        stored.append((candidate["match_id"], judge_id, province, [s["key"] for s in evaluation["sections"]]))
+        return "inserted"
 
-    monkeypatch.setattr(module, "_store_legacy_evaluation", legacy)
+    monkeypatch.setattr(module, "_store_evaluation", store)
     yield module, fake_db.database, table, stored
     sys.modules.pop("app.delegate_evaluation_archive", None)
 
 
-def test_harvest_odpowiada_od_razu_a_w_tle_archiwizuje(archive, monkeypatch):
+FIXTURE = (pathlib.Path(__file__).parent / "fixtures" / "delegate_evaluation_ocena2.html").read_bytes()
+
+
+def test_harvest_odpowiada_od_razu_a_w_tle_przerabia_ocene(archive, monkeypatch):
     module, database, table, stored = archive
-    pdf = b"%PDF-1.4 fake"
-    html = "<html><body>Ocena sędziów - arkusz</body></html>".encode("utf-8")
     client = _Client({
-        "/statystyki_sedzia_oc_PDF.php?Id=1&IdZawody=100": _Response(pdf),
-        "/index.php?Id=2&a=statystyki&b=ocena2": _Response(html),
+        "/index.php?Id=2&a=statystyki&b=ocena2": _Response(FIXTURE),
         "/index.php?Id=3&a=statystyki&b=ocena2": _Response(b'<form><input name="haslo"></form>'),
+        "/index.php?Id=4&a=statystyki&b=ocena2": _Response(b"<html><body>Formularz jeszcze pusty - brak ocen</body></html>"),
     })
 
     async def login(user, password, settings):
@@ -136,7 +147,12 @@ def test_harvest_odpowiada_od_razu_a_w_tle_archiwizuje(archive, monkeypatch):
         return client
 
     monkeypatch.setattr(module, "login_and_client", login)
-    monkeypatch.setattr(module, "_pdf_text", lambda data: "Tekst oceny")
+
+    def link(id_, match_id, season="2025/2026"):
+        return module.ArchiveCandidate(
+            url=f"index.php?a=statystyki&b=ocena2&Id={id_}", match_id=match_id,
+            season=season, referee_ids=["555", "556"],
+        )
 
     body = module.ArchiveHarvestRequest(
         username="login",
@@ -144,11 +160,11 @@ def test_harvest_odpowiada_od_razu_a_w_tle_archiwizuje(archive, monkeypatch):
         judge_id="555",
         province="śląskie",
         links=[
-            module.ArchiveCandidate(url="./statystyki_sedzia_oc_PDF.php?IdZawody=100&Id=1", match_id="100",
-                                    season="2023/2024", referee_ids=["555", "556"]),
-            module.ArchiveCandidate(url="index.php?a=statystyki&b=ocena2&Id=2", match_id="200", season="2026/2027"),
-            module.ArchiveCandidate(url="index.php?a=statystyki&b=ocena2&Id=3", match_id="300", season="2026/2027"),
-            module.ArchiveCandidate(url="https://evil.example/x.php", match_id="400"),
+            link(2, "200"),
+            link(3, "300", "2026/2027"),
+            link(4, "400", "2026/2027"),
+            link(5, "500", "2023/2024"),  # stary sezon - odrzucony
+            module.ArchiveCandidate(url="./statystyki_sedzia_oc_PDF.php?Id=1", match_id="600", season="2025/2026"),
         ],
     )
 
@@ -156,20 +172,19 @@ def test_harvest_odpowiada_od_razu_a_w_tle_archiwizuje(archive, monkeypatch):
         await database.connect()
         try:
             first = await module.harvest_delegate_evaluations(body, settings=None, keys=(None, None))
-            assert first == {"accepted": 3, "known": 0, "rejected": 1, "processing": True}
+            assert first == {"accepted": 3, "known": 0, "rejected": 2, "processing": True}
             await asyncio.gather(*list(module._bg_tasks))
             rows = {r["match_id"]: dict(r) for r in await database.fetch_all(sqlalchemy.select(table))}
 
-            assert rows["100"]["status"] == "done" and rows["100"]["kind"] == "legacy_pdf"
-            assert gzip.decompress(rows["100"]["pdf_gz"]) == pdf
-            assert rows["100"]["pdf_text"] == "Tekst oceny"
-            assert rows["100"]["submitted_by"] == "555"
-            assert gzip.decompress(rows["200"]["html_gz"]).decode("utf-8").count("Ocena sędziów") == 1
+            assert rows["200"]["status"] == "done" and rows["200"]["error"] is None
+            assert gzip.decompress(rows["200"]["html_gz"]) == FIXTURE
+            assert rows["200"]["submitted_by"] == "555"
+            assert stored == [("200", "555", "śląskie", ["I", "II"])]
             assert rows["300"]["status"] == "failed" and "logowania" in rows["300"]["error"]
-            assert stored == [("100", "555", "Tekst oceny")]
+            assert rows["400"]["status"] == "done" and rows["400"]["error"] == "empty"
             assert client.closed
 
-            # Drugie pobranie: znane arkusze nie idą ponownie do ZPRP.
+            # Drugie pobranie: zeszły sezon nie idzie drugi raz do ZPRP.
             again = await module.harvest_delegate_evaluations(body, settings=None, keys=(None, None))
             assert again["accepted"] == 0 and again["processing"] is False
         finally:

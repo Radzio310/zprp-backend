@@ -1,13 +1,14 @@
-"""Pełne archiwum arkuszy ocen delegatów, zbierane w tle.
+"""Oceny delegatów zbierane w tle przy pobieraniu meczów.
 
 Przy każdym pobraniu meczów telefon i tak ma pod ręką linki z komórki
 „Ocena" - wysyła je razem z ryczałtami i niczego więcej nie robi. Endpoint
-rezerwuje nowe arkusze i od razu odpowiada 202; logowanie do ZPRP i pobieranie
-dzieją się później, jedno konto naraz i ze spokojnym tempem.
+rezerwuje nowe arkusze i od razu odpowiada 202; logowanie do ZPRP, pobranie
+i przerobienie formularza dzieją się później, jedno konto naraz i ze
+spokojnym tempem.
 
-Zapisujemy oryginał (HTML nowej oceny albo PDF starej, skompresowane) ze
-WSZYSTKICH sezonów. Tekst starego PDF-u z sezonów, które liczy statystyka,
-trafia od razu do `delegate_evaluations` - tak samo, jak robił to telefon.
+Tylko formularz `ocena2` z sezonów liczonych w statystyce (od 2025/2026);
+stare PDF-y pomijamy. Przerobiona ocena trafia do `delegate_evaluations` -
+tak samo, jak dotąd wysyłał ją telefon - a oryginał HTML zostaje w archiwum.
 Poświadczenia żyją tylko w pamięci jednego zadania.
 """
 
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import insert, select, update
 
 from app import delegate_evaluation_archive_rules as R
+from app.delegate_evaluation_parser import parse_delegate_evaluation_html
 from app.db import database, delegate_evaluation_documents
 from app.deps import Settings, get_rsa_keys, get_settings
 from app.zprp_session import decrypt_field, login_and_client
@@ -35,9 +37,9 @@ _MAX_BATCH = 250
 _STALE_AFTER = timedelta(minutes=30)
 _RETRY_AFTER = timedelta(hours=6)
 _MAX_ATTEMPTS = 3
-#: Arkusz bieżącego sezonu delegat potrafi jeszcze poprawić - raz na tydzień
-#: pobieramy go ponownie. Zakończone sezony są niezmienne.
-_REFRESH_CURRENT_AFTER = timedelta(days=7)
+#: Arkusz bieżącego sezonu delegat potrafi jeszcze poprawić albo dopiero
+#: wypełnić - co trzy dni pobieramy go ponownie. Zakończone sezony są niezmienne.
+_REFRESH_CURRENT_AFTER = timedelta(days=3)
 _PAUSE_BETWEEN_DOCUMENTS = 0.35
 _slots = asyncio.Semaphore(1)
 _bg_tasks: set[asyncio.Task] = set()
@@ -134,7 +136,7 @@ async def _reserve(candidate: dict[str, Any], province: str) -> bool:
             insert(delegate_evaluation_documents).values(
                 source_key=key,
                 path=candidate["path"],
-                kind=candidate["kind"],
+                kind="html",
                 match_id=candidate["match_id"],
                 status="queued",
                 attempts=0,
@@ -156,43 +158,30 @@ async def _mark(key: str, **values: Any) -> None:
     )
 
 
-def _pdf_text(data: bytes) -> str:
-    try:
-        import fitz
-
-        with fitz.open(stream=data, filetype="pdf") as document:
-            return "\n".join(page.get_text("text") for page in document)[:120_000]
-    except Exception:
-        return ""
-
-
-async def _store_legacy_evaluation(
-    candidate: dict[str, Any], judge_id: str, province: str, text: str
-) -> None:
-    """Stary PDF liczy się w statystyce jak z telefonu: `{legacyText}`."""
-    if not text or not R.judge_on_sheet(judge_id, candidate["referee_ids"]):
-        return
+async def _store_evaluation(
+    candidate: dict[str, Any], judge_id: str, province: str, evaluation: dict[str, Any]
+) -> str:
+    """Do statystyk tą samą drogą, co z telefonu - ten sam klucz i ta sama wersja."""
+    if not R.judge_on_sheet(judge_id, candidate["referee_ids"]):
+        return "skipped"
     from app.delegate_evaluations import EvaluationIn, upsert_evaluation
 
-    try:
-        await upsert_evaluation(
-            EvaluationIn(
-                match_id=candidate["match_id"],
-                season=candidate["season"] or "----",
-                province=province or "brak",
-                match_number=candidate["match_code"],
-                match_date=candidate["match_date"],
-                referee_ids=candidate["referee_ids"],
-                referee_names=candidate["referee_names"],
-                delegate_name=candidate["delegate_name"],
-                source_kind="legacy_pdf",
-                source_url=candidate["path"].lstrip("/"),
-                evaluation={"legacyText": text},
-            ),
-            judge_id,
-        )
-    except Exception as exc:
-        logger.warning("Ocena %s nie trafiła do statystyk: %s", candidate["source_key"], exc)
+    return await upsert_evaluation(
+        EvaluationIn(
+            match_id=candidate["match_id"],
+            season=candidate["season"],
+            province=province or "brak",
+            match_number=candidate["match_code"],
+            match_date=candidate["match_date"],
+            referee_ids=candidate["referee_ids"],
+            referee_names=candidate["referee_names"],
+            delegate_name=candidate["delegate_name"],
+            source_kind="html",
+            source_url=candidate["path"].lstrip("/"),
+            evaluation=evaluation,
+        ),
+        judge_id,
+    )
 
 
 async def _fetch_one(client, candidate: dict[str, Any]) -> bytes:
@@ -235,26 +224,25 @@ async def _process_inner(
                     error=None,
                 )
                 data = await _fetch_one(client, candidate)
-                kind = R.document_kind(data, candidate["kind"])
-                values: dict[str, Any] = {
-                    "kind": kind,
-                    "content_hash": R.content_hash(data),
-                    "fetched_at": _now(),
-                    "submitted_by": judge_id,
-                }
-                if kind == "legacy_pdf":
-                    text = _pdf_text(data)
-                    values.update(pdf_gz=gzip.compress(data), pdf_text=text or None, html_gz=None)
-                else:
-                    from app.delegate import _decode_html_bytes
+                from app.delegate import _decode_html_bytes
 
-                    html = _decode_html_bytes(data, "")
-                    if R.looks_like_login_page(html) or len(html.strip()) < 40:
-                        raise ValueError("ZPRP oddał stronę logowania zamiast arkusza")
-                    values.update(html_gz=gzip.compress(html.encode("utf-8")), pdf_gz=None, pdf_text=None)
-                await _mark(key, status="done", error=None, **values)
-                if kind == "legacy_pdf":
-                    await _store_legacy_evaluation(candidate, judge_id, province, values["pdf_text"] or "")
+                html = _decode_html_bytes(data, "")
+                if R.looks_like_login_page(html) or len(html.strip()) < 40:
+                    raise ValueError("ZPRP oddał stronę logowania zamiast arkusza")
+                evaluation = parse_delegate_evaluation_html(html)
+                stored = "empty"
+                if R.has_grades(evaluation):
+                    stored = await _store_evaluation(candidate, judge_id, province, evaluation)
+                await _mark(
+                    key,
+                    status="done",
+                    # Nie błąd - ślad, czemu arkusz nie trafił do statystyk.
+                    error=None if stored != "empty" and stored != "skipped" else stored,
+                    content_hash=R.content_hash(data),
+                    fetched_at=_now(),
+                    submitted_by=judge_id,
+                    html_gz=gzip.compress(html.encode("utf-8")),
+                )
             except Exception as exc:  # jeden wadliwy arkusz nie zatrzymuje paczki
                 logger.warning("Arkusz oceny %s nie został pobrany: %s", key, exc)
                 await _mark(key, status="failed", error=str(exc)[:700])
@@ -279,7 +267,7 @@ async def _process(*args: Any) -> None:
 @router.post(
     "/harvest",
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Kolejkuj arkusze ocen delegatów do archiwum bez blokowania pobierania meczów",
+    summary="Kolejkuj oceny delegatów (formularz ocena2) bez blokowania pobierania meczów",
 )
 async def harvest_delegate_evaluations(
     body: ArchiveHarvestRequest,

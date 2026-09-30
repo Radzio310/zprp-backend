@@ -1,0 +1,95 @@
+{
+  "info": {
+    "delegateVerified": "ZWERYFIKOWANY PRZEZ DELEGATA 13.10.2025",
+    "protocolStatus": "ZATWIERDZONY",
+    "competition": "Liga Centralna Kobiet",
+    "round": "1/8 MPJK gr. A",
+    "kolejka": "Kolejka 3",
+    "homeTeam": "KS Otmęt Krapkowice",
+    "awayTeam": "MKS Zagłębie Lubin",
+    "scoreFull": "37 : 25",
+    "scoreHalf": "( 16 : 11 )",
+    "matchNumber": "IKB/28",
+    "matchDateTime": "11.10.2025 18:00",
+    "city": "Krapkowice",
+    "delegate": "WIŚNIEWSKI Adam",
+    "refereeLeft": "KOWALSKI Jan",
+    "refereeRight": "NOWAK Piotr"
+  },
+  "character": {
+    "criteria": [
+      {
+        "idx": 1,
+        "title": "Mecz o stawkę",
+        "value": "Nie"
+      },
+      {
+        "idx": 2,
+        "title": "Transmisja TV",
+        "value": "ND"
+      }
+    ],
+    "difficulty": {
+      "short": "Trudny",
+      "rest": "derby regionu",
+      "full": "Trudny - derby regionu"
+    }
+  },
+  "sections": [
+    {
+      "key": "I",
+      "title": "I. Zarządzanie widowiskiem",
+      "mainGrade": "D",
+      "mainLabelFull": "Prawidłowo - zgodnie z oczekiwaniami",
+      "mainLabelShort": "Prawidłowo",
+      "mainLabelRest": "zgodnie z oczekiwaniami",
+      "comment": "Bardzo dobra praca pary",
+      "items": [
+        {
+          "idx": 1,
+          "title": "Kontrola & komunikacja",
+          "grade": "E",
+          "gradeLabelFull": "Dobrze - ponad oczekiwania",
+          "gradeLabelShort": "Dobrze",
+          "gradeLabelRest": "ponad oczekiwania"
+        }
+      ]
+    },
+    {
+      "key": "II",
+      "title": "II. Technika sędziowania",
+      "mainGrade": "C",
+      "mainLabelFull": "Z uwagami – poprawa",
+      "mainLabelShort": "Z uwagami",
+      "mainLabelRest": "poprawa",
+      "items": [
+        {
+          "idx": 1,
+          "title": "Faule",
+          "grade": "G",
+          "gradeLabelFull": "Wybitnie",
+          "gradeLabelShort": "Wybitnie"
+        }
+      ]
+    }
+  ],
+  "keySituations": [
+    {
+      "idx": 1,
+      "category": "Kara & wykluczenie",
+      "categoryValue": "k9",
+      "description": "Faul w ataku \"7m\"",
+      "time": "12:30"
+    }
+  ],
+  "priorities": [
+    {
+      "title": "1. Ustawienie przy kole"
+    }
+  ],
+  "vr": [
+    {
+      "title": "Brak zdarzeń"
+    }
+  ]
+}

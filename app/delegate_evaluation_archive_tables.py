@@ -15,9 +15,9 @@ from sqlalchemy import (
 
 
 def define_tables(metadata):
-    # Oryginał każdego arkusza, ze wszystkich sezonów: HTML nowej oceny albo
-    # PDF starej (skompresowane), tekst PDF-u i opis meczu. To źródło prawdy -
-    # z niego da się kiedyś przeliczyć oceny bez ponownego chodzenia do ZPRP.
+    # Oryginał formularza oceny (HTML, skompresowany) i opis meczu - z niego da
+    # się przeliczyć oceny bez ponownego chodzenia do ZPRP. Przerobiona ocena
+    # ląduje w `delegate_evaluations`, skąd czytają ją ekrany i analizy.
     documents = Table(
         "delegate_evaluation_documents",
         metadata,
@@ -38,8 +38,6 @@ def define_tables(metadata):
         Column("error", Text, nullable=True),
         Column("content_hash", String, nullable=True),
         Column("html_gz", LargeBinary, nullable=True),
-        Column("pdf_gz", LargeBinary, nullable=True),
-        Column("pdf_text", Text, nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("fetched_at", DateTime(timezone=True), nullable=True),

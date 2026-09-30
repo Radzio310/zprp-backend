@@ -1,0 +1,93 @@
+{
+  "info": {
+    "delegateVerified": "ZWERYFIKOWANY PRZEZ DELEGATA 13.10.2025",
+    "protocolStatus": "ZATWIERDZONY",
+    "competition": "Mistrzostwa Polski Juniorek",
+    "round": "1/8 MPJK gr. A",
+    "kolejka": "Kolejka 3",
+    "homeTeam": "KS Otmęt Krapkowice",
+    "awayTeam": "MKS Zagłębie Lubin",
+    "scoreFull": "37 : 25",
+    "scoreHalf": "( 16 : 11 )",
+    "matchNumber": "IKB/28",
+    "matchDateTime": "11.10.2025 18:00",
+    "city": "Krapkowice",
+    "hallTitle": "Hala Sportowa, ul. Sportowa 1",
+    "delegate": "WIŚNIEWSKI Adam",
+    "refereeLeft": "KOWALSKI Jan",
+    "refereeRight": "NOWAK Piotr"
+  },
+  "character": {
+    "criteria": [
+      {
+        "idx": 1,
+        "title": "Mecz o stawkę",
+        "value": "Nie"
+      },
+      {
+        "idx": 2,
+        "title": "Transmisja TV",
+        "value": "ND"
+      }
+    ],
+    "difficulty": {
+      "short": "Średni &ndash; wyrównany mecz",
+      "rest": "zacięta końcówka",
+      "full": "Średni &ndash; wyrównany mecz - zacięta końcówka"
+    }
+  },
+  "sections": [
+    {
+      "key": "I",
+      "title": "I. Zarządzanie widowiskiem",
+      "mainGrade": "D",
+      "mainLabelFull": "Prawidłowo - zgodnie z oczekiwaniami",
+      "mainLabelShort": "Prawidłowo",
+      "mainLabelRest": "zgodnie z oczekiwaniami",
+      "comment": "Bardzo dobra praca pary",
+      "items": [
+        {
+          "idx": 1,
+          "title": "Kontrola & komunikacja",
+          "grade": "E",
+          "gradeLabelFull": "Dobrze - ponad oczekiwania",
+          "gradeLabelShort": "Dobrze",
+          "gradeLabelRest": "ponad oczekiwania"
+        }
+      ]
+    },
+    {
+      "key": "II",
+      "title": "II. Technika sędziowania",
+      "mainGrade": "?",
+      "items": [
+        {
+          "idx": 1,
+          "title": "Faule",
+          "grade": "G",
+          "gradeLabelFull": "Wybitnie",
+          "gradeLabelShort": "Wybitnie"
+        }
+      ]
+    }
+  ],
+  "keySituations": [
+    {
+      "idx": 1,
+      "category": "Kara 2 min",
+      "categoryValue": "3",
+      "description": "Faul w ataku \"7m\"",
+      "time": "12:30"
+    }
+  ],
+  "priorities": [
+    {
+      "title": "1. Ustawienie przy kole"
+    }
+  ],
+  "vr": [
+    {
+      "title": "Brak zdarzeń"
+    }
+  ]
+}
