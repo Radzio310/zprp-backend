@@ -28,6 +28,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.admin_guard import admin_write_guard, bearer_token, decode_token
 from app.beach.email_config import get_email_config
 from app.mail_brand import NIEDYSPO_SENDER_EMAIL, brand_cell
+from app.zprp_unavailability_rules import conflict_when, is_tentative, subject_prefix
 from app.db import (
     database,
     province_judges,
@@ -119,6 +120,10 @@ class ConflictMatch(BaseModel):
     home: str = ""
     away: str = ""
     role: str = ""
+    # Mecz bez daty: możliwa kolizja z terminu kolejki (okno dni ISO).
+    tentative: bool = False
+    windowStart: str = ""
+    windowEnd: str = ""
 
 
 def _clean(value: Any) -> str:
@@ -339,6 +344,15 @@ def central_conflicts(
                 "home": _clean(item.get("home")),
                 "away": _clean(item.get("away")),
                 "role": _clean(item.get("role")),
+                **(
+                    {
+                        "tentative": True,
+                        "windowStart": _clean(item.get("windowStart")),
+                        "windowEnd": _clean(item.get("windowEnd")),
+                    }
+                    if is_tentative(item)
+                    else {}
+                ),
             }
         )
     return out
@@ -431,15 +445,15 @@ def render_overlap_email(row: dict[str, Any]) -> tuple[str, str, str]:
     matches = list(row.get("matches_json") or [])
     judge = _clean(row.get("judge_name"))
     judge_id = _clean(row.get("judge_id"))
-    subject = f"Niedyspozycyjność nachodzi na obsadę ZPRP · {judge}"
+    subject = f"{subject_prefix(matches)} · {judge}"
     cards = "".join(
         f"""
         <tr><td style="padding:0 26px 12px 26px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #DDE5F0;border-left:4px solid #F0A500;border-radius:12px;background:#FFFFFF;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #DDE5F0;border-left:4px {'dashed' if is_tentative(m) else 'solid'} #F0A500;border-radius:12px;background:{'#FFFBF2' if is_tentative(m) else '#FFFFFF'};">
             <tr><td style="padding:14px 16px;font-family:Arial,Helvetica,sans-serif;">
-              <div style="font-size:11px;font-weight:bold;letter-spacing:1.2px;color:#A36A00;">{html.escape(_clean(m.get('code')))} · {html.escape(_clean(m.get('category')))}</div>
+              <div style="font-size:11px;font-weight:bold;letter-spacing:1.2px;color:#A36A00;">{html.escape(_clean(m.get('code')))} · {html.escape(_clean(m.get('category')))}{' &nbsp;<span style="display:inline-block;padding:2px 7px;border:1px dashed #F0A500;border-radius:999px;font-size:10px;letter-spacing:0.8px;">MOŻLIWY MECZ</span>' if is_tentative(m) else ''}</div>
               <div style="margin-top:6px;font-size:16px;font-weight:bold;color:#172033;">{html.escape(_clean(m.get('home')))} – {html.escape(_clean(m.get('away')))}</div>
-              <div style="margin-top:6px;font-size:13px;color:#5E6B7E;">{html.escape(_match_time(_clean(m.get('startAt'))))}{(' · ' + html.escape(_clean(m.get('role')))) if _clean(m.get('role')) else ''}</div>
+              <div style="margin-top:6px;font-size:13px;color:#5E6B7E;">{html.escape(conflict_when(m, _match_time))}{(' · ' + html.escape(_clean(m.get('role')))) if _clean(m.get('role')) else ''}</div>
             </td></tr>
           </table>
         </td></tr>"""
@@ -466,7 +480,7 @@ def render_overlap_email(row: dict[str, Any]) -> tuple[str, str, str]:
       </table>
     </td></tr></table></body></html>"""
     text_matches = "\n".join(
-        f"- {_clean(m.get('code'))}: {_clean(m.get('home'))} - {_clean(m.get('away'))}, {_match_time(_clean(m.get('startAt')))}"
+        f"- {_clean(m.get('code'))}: {_clean(m.get('home'))} - {_clean(m.get('away'))}, {conflict_when(m, _match_time)}"
         for m in matches
     )
     text_body = (
@@ -527,7 +541,7 @@ async def _send_discord(row: dict[str, Any], cfg: dict[str, Any]) -> str:
     for match in matches[:10]:
         code = _clean(match.get("code"))
         teams = " – ".join(filter(None, [_clean(match.get("home")), _clean(match.get("away"))]))
-        when = _match_time(_clean(match.get("startAt")))
+        when = conflict_when(match, _match_time)
         lines.append(f"**{code}** · {when}\n{teams}")
     if len(matches) > 10:
         lines.append(f"…i jeszcze {len(matches) - 10}")
