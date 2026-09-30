@@ -156,11 +156,19 @@ def test_offer_being_applied_is_closed_to_everyone():
 
 
 def test_live_statuses_hold_the_slot():
-    assert LIVE_OFFER_STATUSES == {"open", "applying"}
+    assert LIVE_OFFER_STATUSES == {"approval_pending", "open", "applying"}
+    assert offer_is_live("approval_pending")
     assert offer_is_live("open")
     assert offer_is_live("applying")
     assert not offer_is_live("done")
     assert not offer_is_live("expired")
+
+
+def test_late_listing_request_has_a_single_decision_path():
+    assert next_offer_status("approval_pending", "approve_listing") == "open"
+    assert next_offer_status("approval_pending", "reject_listing") == "approval_rejected"
+    assert next_offer_status("approval_pending", "withdraw") == "cancelled"
+    assert next_offer_status("approval_rejected", "approve_listing") is None
 
 
 def test_unknown_action_is_answered_with_none():

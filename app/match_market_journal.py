@@ -31,6 +31,10 @@ EVENT_KINDS: Dict[str, Tuple[str, str, str]] = {
     "offer_withdrawn": ("offers", "arrow-undo-outline", "Wycofał ofertę"),
     "offer_removed_admin": ("offers", "shield-outline", "Administrator zdjął ofertę"),
     "offer_expired": ("offers", "time-outline", "Minął termin oferty"),
+    "late_offer_requested": ("offers", "timer-outline", "Poprosił o pilne wystawienie"),
+    "late_offer_approved": ("decisions", "shield-checkmark-outline", "Zezwolił na pilne wystawienie"),
+    "late_offer_rejected": ("decisions", "close-circle-outline", "Odrzucił pilne wystawienie"),
+    "late_offer_expired": ("decisions", "time-outline", "Pilna prośba wygasła"),
     # Zgłoszenia - kto chciał wziąć mecz.
     "claim_created": ("claims", "hand-left-outline", "Zgłosił się"),
     "claim_withdrawn": ("claims", "close-circle-outline", "Wycofał zgłoszenie"),
@@ -122,6 +126,14 @@ def event_sentence(event: Mapping[str, Any]) -> str:
 
     if kind == "offer_created":
         head = f"{actor} wystawił mecz{where} na giełdę"
+    elif kind == "late_offer_requested":
+        head = f"{actor} poprosił o pilne wystawienie meczu{where}"
+    elif kind == "late_offer_approved":
+        head = f"{actor} zezwolił na pilne wystawienie meczu{where}"
+    elif kind == "late_offer_rejected":
+        head = f"{actor} odrzucił pilne wystawienie meczu{where}"
+    elif kind == "late_offer_expired":
+        head = f"Pilna prośba o wystawienie meczu{where} wygasła"
     elif kind == "offer_withdrawn":
         head = f"{actor} zabrał mecz{where} z giełdy"
     elif kind == "offer_removed_admin":

@@ -4222,7 +4222,7 @@ with engine.connect() as _conn:
     _conn.execute(text("DROP INDEX IF EXISTS uq_match_market_live_slot"))
     _conn.execute(
         text(
-            "CREATE UNIQUE INDEX uq_match_market_live_slot "
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_match_market_live_slot "
             "ON match_market_offers (province, match_id, slot) "
             "WHERE status IN ('approval_pending', 'open', 'applying')"
         )

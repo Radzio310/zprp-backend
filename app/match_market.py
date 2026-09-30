@@ -2018,6 +2018,23 @@ async def my_matches(
 # ─────────────────────────── oferty ───────────────────────────
 
 
+async def _expire_late_listing_requests(province: str) -> None:
+    """Domyka pilne prośby przy najbliższym odczycie po pierwszym gwizdku."""
+    await database.execute(
+        update(match_market_offers)
+        .where(match_market_offers.c.province == province)
+        .where(match_market_offers.c.status == "approval_pending")
+        .where(match_market_offers.c.match_at.is_not(None))
+        .where(match_market_offers.c.match_at <= _now())
+        .values(
+            status="expired",
+            error="Nie podjęto decyzji przed rozpoczęciem meczu.",
+            decided_at=func.now(),
+            updated_at=func.now(),
+        )
+    )
+
+
 async def _offer_payload(
     offer: Dict[str, Any],
     cards: Dict[str, Dict[str, Any]],
@@ -2112,7 +2129,15 @@ async def list_offers(
     actor: Actor = Depends(market_actor),
 ) -> Dict[str, Any]:
     province = _require_province(actor)
-    await _require_enabled(province)
+    cfg = await _require_enabled(province)
+    await _expire_late_listing_requests(province)
+    approver = may_approve(
+        is_admin=actor.is_admin,
+        province=province,
+        judge_province=actor.province,
+        badges_raw=actor.badges,
+        allowed_badges=cfg["approver_badges"],
+    )
 
     query = select(match_market_offers).where(match_market_offers.c.province == province)
     if scope == "market":
@@ -2123,15 +2148,23 @@ async def list_offers(
         # „Czeka na chętnych" i bez przycisku - `canClaim` po stronie aplikacji
         # odcinał zgłoszenie po terminie, więc kafel był ślepy. Właściciel widzi
         # ją dalej w „Moich", z podpisem o terminie.
-        query = (
-            query.where(match_market_offers.c.status == "open")
-            .where(match_market_offers.c.from_judge_id != actor.judge_id)
-            .where(
-                or_(
-                    match_market_offers.c.deadline_at.is_(None),
-                    match_market_offers.c.deadline_at > _now(),
-                )
+        visible = and_(
+            match_market_offers.c.status == "open",
+            or_(
+                match_market_offers.c.deadline_at.is_(None),
+                match_market_offers.c.deadline_at > _now(),
+            ),
+        )
+        if approver:
+            visible = or_(
+                visible,
+                and_(
+                    match_market_offers.c.status == "approval_pending",
+                    match_market_offers.c.match_at > _now(),
+                ),
             )
+        query = query.where(visible).where(
+            match_market_offers.c.from_judge_id != actor.judge_id
         )
         query = query.order_by(match_market_offers.c.match_at.asc().nulls_last())
     elif scope == "mine":
@@ -2149,7 +2182,9 @@ async def list_offers(
                 match_market_offers.c.from_judge_id == actor.judge_id,
                 match_market_offers.c.id.in_(claimed_ids or [-1]),
             )
-        ).where(match_market_offers.c.status.in_(("open", "applying")))
+        ).where(
+            match_market_offers.c.status.in_(("approval_pending", "open", "applying"))
+        )
         query = query.order_by(match_market_offers.c.created_at.desc())
     else:
         # Historia: moje rozstrzygnięte oferty ORAZ te, o które się starałem.
@@ -2164,7 +2199,9 @@ async def list_offers(
                 match_market_offers.c.from_judge_id == actor.judge_id,
                 match_market_offers.c.id.in_(claimed_ids or [-1]),
             )
-        ).where(match_market_offers.c.status.notin_(("open", "applying")))
+        ).where(
+            match_market_offers.c.status.notin_(("approval_pending", "open", "applying"))
+        )
         query = query.order_by(match_market_offers.c.updated_at.desc())
 
     rows = [_row(r) for r in await database.fetch_all(query.limit(200))]
@@ -2291,12 +2328,18 @@ async def create_offer(
             "Ten mecz jest z minionego sezonu - giełda wymienia obsadę tylko w "
             f"sezonie {season_label(season_start_year(now))}.",
         )
-    if not can_offer(data.get("match_at"), now, cfg["offer_deadline_hours"]):
-        raise HTTPException(
-            409,
-            f"Za późno - mecz można oddać najpóźniej {cfg['offer_deadline_hours']} h "
-            "przed pierwszym gwizdkiem.",
-        )
+    ordinary = can_offer(data.get("match_at"), now, cfg["offer_deadline_hours"])
+    match_stamp = data.get("match_at")
+    if not ordinary:
+        if not isinstance(match_stamp, datetime) or match_stamp <= now:
+            raise HTTPException(409, "Mecz już się rozpoczął i nie można go wystawić.")
+        if len(_s(req.reason)) < 5:
+            raise HTTPException(
+                422,
+                "Napisz krótko, dlaczego prosisz o pilne wystawienie. "
+                "Obsadowy zobaczy to przed decyzją.",
+            )
+    initial_status = "open" if ordinary else "approval_pending"
 
     existing = await database.fetch_one(
         select(match_market_offers.c.id).where(
@@ -2304,7 +2347,7 @@ async def create_offer(
                 match_market_offers.c.province == province,
                 match_market_offers.c.match_id == _s(req.match_id),
                 match_market_offers.c.slot == slot,
-                match_market_offers.c.status.in_(("open", "applying")),
+                match_market_offers.c.status.in_(("approval_pending", "open", "applying")),
             )
         )
     )
@@ -2336,8 +2379,12 @@ async def create_offer(
             slot=slot,
             from_judge_id=actor.judge_id,
             reason=_s(req.reason) or None,
-            status="open",
-            deadline_at=deadline_for(data.get("match_at"), cfg["offer_deadline_hours"]),
+            status=initial_status,
+            deadline_at=(
+                data.get("match_at")
+                if initial_status == "approval_pending"
+                else deadline_for(data.get("match_at"), cfg["offer_deadline_hours"])
+            ),
             match_at=data.get("match_at"),
             match_snapshot=state,
         )
@@ -2356,7 +2403,7 @@ async def create_offer(
                     match_market_offers.c.province == province,
                     match_market_offers.c.match_id == _s(req.match_id),
                     match_market_offers.c.slot == slot,
-                    match_market_offers.c.status.in_(("open", "applying")),
+                    match_market_offers.c.status.in_(("approval_pending", "open", "applying")),
                 )
             )
         )
@@ -2370,7 +2417,27 @@ async def create_offer(
         "match_id": _s(req.match_id),
         "match_code": _s(data.get("match_code")),
         "slot": slot,
+        "reason": _s(req.reason) or None,
+        "match_at": data.get("match_at"),
+        "match_snapshot": state,
     }
+    if initial_status == "approval_pending":
+        await _log(
+            "late_offer_requested",
+            province=province,
+            actor=actor,
+            offer=offer,
+            message=_s(req.reason),
+            payload={"deadlineHours": cfg["offer_deadline_hours"]},
+        )
+        await _notify(
+            await _approvers_of(province, "new_offers"),
+            text_late_offer_requested(offer, actor.full_name),
+            offer,
+            audience="obsadowi i administratorzy",
+            record_empty=True,
+        )
+        return {"id": offer_id, "status": initial_status}
     await _log(
         "offer_created",
         province=province,
@@ -2395,7 +2462,7 @@ async def create_offer(
                   selection_error=public_error,
                   audit_context={"authorId": actor.judge_id, "managerIds": managers,
                                  "managerReport": manager_report})
-    return {"id": offer_id, "status": "open"}
+    return {"id": offer_id, "status": initial_status}
 
 
 @router.delete("/offers/{offer_id}", summary="Wycofaj swoją ofertę")
@@ -2474,6 +2541,176 @@ async def withdraw_offer(offer_id: int, actor: Actor = Depends(market_actor)) ->
         audience="obsadowi i administratorzy",
     )
     return {"id": offer_id, "status": target}
+
+
+# ─────────────────────────── zgoda na pilne wystawienie ───────────────────
+
+
+@router.post(
+    "/offers/{offer_id}/listing-approval/approve",
+    summary="Zezwól na pilne wystawienie meczu",
+)
+async def approve_late_listing(
+    offer_id: int, actor: Actor = Depends(market_actor)
+) -> Dict[str, Any]:
+    expired = False
+    async with database.transaction():
+        row = await database.fetch_one(
+            select(match_market_offers)
+            .where(match_market_offers.c.id == offer_id)
+            .with_for_update()
+        )
+        if not row:
+            raise HTTPException(404, "Nie ma takiej prośby.")
+        offer = _row(row)
+        province = _s(offer["province"])
+        await _require_enabled(province)
+        await _require_approver(actor, province)
+        if _s(offer["status"]) != "approval_pending":
+            raise HTTPException(409, "Ta prośba została już rozstrzygnięta.")
+
+        match_at = offer.get("match_at")
+        expired = not isinstance(match_at, datetime) or match_at <= _now()
+        target = "expired" if expired else "open"
+        changed = await database.fetch_val(
+            update(match_market_offers)
+            .where(match_market_offers.c.id == offer_id)
+            .where(match_market_offers.c.status == "approval_pending")
+            .values(
+                status=target,
+                decided_by=actor.judge_id,
+                decided_at=func.now(),
+                error=("Mecz już się rozpoczął." if expired else None),
+                updated_at=func.now(),
+            )
+            .returning(match_market_offers.c.id)
+        )
+        if not changed:
+            raise HTTPException(409, "Ta prośba została właśnie rozstrzygnięta.")
+
+    if expired:
+        await _log(
+            "late_offer_expired",
+            province=province,
+            actor=actor,
+            offer=offer,
+            ok=False,
+            message="Mecz już się rozpoczął.",
+        )
+        await _notify(
+            [_s(offer.get("from_judge_id"))],
+            text_late_offer_rejected(offer, "Mecz już się rozpoczął.", actor.full_name),
+            offer,
+            audience="oddający mecz",
+        )
+        raise HTTPException(409, "Mecz już się rozpoczął. Prośba wygasła.")
+
+    await _log(
+        "late_offer_approved",
+        province=province,
+        actor=actor,
+        offer=offer,
+        subject_id=_s(offer.get("from_judge_id")),
+        ok=True,
+        message=_s(offer.get("reason")),
+    )
+    await _notify(
+        [_s(offer.get("from_judge_id"))],
+        text_late_offer_approved(offer, actor.full_name),
+        offer,
+        audience="oddający mecz",
+    )
+    public, managers, public_error = await _offer_notification_groups(
+        province, _s(offer.get("from_judge_id"))
+    )
+    notification = text_offer_created(offer, _s((await _judges_by_id([
+        _s(offer.get("from_judge_id"))
+    ])).get(_s(offer.get("from_judge_id")), {}).get("full_name")))
+    await _notify(
+        sorted(set(managers) - {actor.judge_id}),
+        notification,
+        offer,
+        audience="pozostali obsadowi i administratorzy",
+        record_empty=True,
+    )
+    await _notify(
+        public,
+        notification,
+        offer,
+        broadcast=True,
+        audience="sędziowie okręgu",
+        record_empty=True,
+        selection_error=public_error,
+    )
+    return {"id": offer_id, "status": "open"}
+
+
+@router.post(
+    "/offers/{offer_id}/listing-approval/reject",
+    summary="Odrzuć pilne wystawienie meczu",
+)
+async def reject_late_listing(
+    offer_id: int,
+    req: RejectRequest,
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    reason = _s(req.reason)
+    if len(reason) < 5:
+        raise HTTPException(422, "Napisz krótkie wyjaśnienie dla sędziego.")
+    async with database.transaction():
+        row = await database.fetch_one(
+            select(match_market_offers)
+            .where(match_market_offers.c.id == offer_id)
+            .with_for_update()
+        )
+        if not row:
+            raise HTTPException(404, "Nie ma takiej prośby.")
+        offer = _row(row)
+        province = _s(offer["province"])
+        await _require_enabled(province)
+        await _require_approver(actor, province)
+        if _s(offer["status"]) != "approval_pending":
+            raise HTTPException(409, "Ta prośba została już rozstrzygnięta.")
+        changed = await database.fetch_val(
+            update(match_market_offers)
+            .where(match_market_offers.c.id == offer_id)
+            .where(match_market_offers.c.status == "approval_pending")
+            .values(
+                status="approval_rejected",
+                decided_by=actor.judge_id,
+                decided_at=func.now(),
+                error=reason,
+                updated_at=func.now(),
+            )
+            .returning(match_market_offers.c.id)
+        )
+        if not changed:
+            raise HTTPException(409, "Ta prośba została właśnie rozstrzygnięta.")
+
+    await _log(
+        "late_offer_rejected",
+        province=province,
+        actor=actor,
+        offer=offer,
+        subject_id=_s(offer.get("from_judge_id")),
+        ok=False,
+        message=reason,
+    )
+    targets = sorted(
+        (
+            set(await _approvers_of(province, "decisions"))
+            | {_s(offer.get("from_judge_id"))}
+        )
+        - {actor.judge_id}
+    )
+    await _notify(
+        targets,
+        text_late_offer_rejected(offer, reason, actor.full_name),
+        offer,
+        audience="oddający i pozostali zarządzający",
+        record_empty=True,
+    )
+    return {"id": offer_id, "status": "approval_rejected", "reason": reason}
 
 
 # ─────────────────────────── zgłoszenia ───────────────────────────
@@ -2728,6 +2965,14 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
         raise HTTPException(404, "Nie ma takiej oferty.")
     offer = _row(row)
     province = _s(offer["province"])
+    if (
+        _s(offer.get("status")) == "approval_pending"
+        and isinstance(offer.get("match_at"), datetime)
+        and offer["match_at"] <= _now()
+    ):
+        await _expire_late_listing_requests(province)
+        offer["status"] = "expired"
+        offer["error"] = "Nie podjęto decyzji przed rozpoczęciem meczu."
 
     mine = _s(offer["from_judge_id"]) == actor.judge_id
     cfg = await _config(province)
@@ -2785,6 +3030,12 @@ async def get_offer(offer_id: int, actor: Actor = Depends(market_actor)) -> Dict
             _s(offer["status"]) == "applying"
             and _apply_is_stale(offer.get("updated_at"), _now())
         )
+    )
+    payload["canApproveLate"] = (
+        approver
+        and _s(offer["status"]) == "approval_pending"
+        and isinstance(offer.get("match_at"), datetime)
+        and offer["match_at"] > _now()
     )
 
     # Komplet chetnych - z nazwiskami, notatkami i cudzym terminarzem - widza
@@ -3630,11 +3881,19 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
                 match_market_offers.c.province,
                 func.count(func.distinct(match_market_offers.c.match_id)).label("n"),
             )
-            .where(match_market_offers.c.status == "open")
             .where(
                 or_(
-                    match_market_offers.c.deadline_at.is_(None),
-                    match_market_offers.c.deadline_at > _now(),
+                    and_(
+                        match_market_offers.c.status == "open",
+                        or_(
+                            match_market_offers.c.deadline_at.is_(None),
+                            match_market_offers.c.deadline_at > _now(),
+                        ),
+                    ),
+                    and_(
+                        match_market_offers.c.status == "approval_pending",
+                        match_market_offers.c.match_at > _now(),
+                    ),
                 )
             )
             .group_by(match_market_offers.c.province)
@@ -3690,17 +3949,26 @@ async def admin_province_offers(
     cfg = await _config(key)
     if not cfg["market_enabled"]:
         return {"province": key, "marketEnabled": False, "offers": []}
+    await _expire_late_listing_requests(key)
 
     rows = [
         _row(row)
         for row in await database.fetch_all(
             select(match_market_offers)
             .where(match_market_offers.c.province == key)
-            .where(match_market_offers.c.status == "open")
             .where(
                 or_(
-                    match_market_offers.c.deadline_at.is_(None),
-                    match_market_offers.c.deadline_at > _now(),
+                    and_(
+                        match_market_offers.c.status == "open",
+                        or_(
+                            match_market_offers.c.deadline_at.is_(None),
+                            match_market_offers.c.deadline_at > _now(),
+                        ),
+                    ),
+                    and_(
+                        match_market_offers.c.status == "approval_pending",
+                        match_market_offers.c.match_at > _now(),
+                    ),
                 )
             )
             .order_by(match_market_offers.c.match_at.asc().nulls_last())

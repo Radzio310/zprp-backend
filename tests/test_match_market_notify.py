@@ -24,6 +24,9 @@ from app.match_market_notify import (
     crew_changed,
     giver_released,
     judge,
+    late_offer_approved,
+    late_offer_rejected,
+    late_offer_requested,
     match_of,
     offer_created,
     offer_rejected,
@@ -160,6 +163,25 @@ def test_new_offer_for_the_table_slot_declines_correctly():
     _, body = offer_created(offer(slot="czas"), "NOWAK Jan")
     assert "na mierzącego czas" in body
     assert "na mierzący czas" not in body
+
+
+def test_late_listing_request_tells_manager_why_and_when():
+    title, body = late_offer_requested(
+        offer(reason="nagła choroba partnera"), "Radosław WITKOWICZ"
+    )
+    assert title == "⏱️ Pilna prośba o wystawienie"
+    assert "Radosław WITKOWICZ" in body
+    assert "nagła choroba partnera" in body
+    assert "przed rozpoczęciem meczu" in body
+
+
+def test_late_listing_decision_is_clear_for_the_giver():
+    _, approved = late_offer_approved(offer(), "Anna NOWAK")
+    _, rejected = late_offer_rejected(offer(), "za mało czasu", "Anna NOWAK")
+    assert "już widoczna na giełdzie" in approved
+    assert "Anna NOWAK" in approved
+    assert "za mało czasu" in rejected
+    assert "pozostaje w Twojej obsadzie" in rejected
 
 
 def test_withdrawal_tells_the_claimant_what_it_means_for_them():
