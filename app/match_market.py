@@ -3881,21 +3881,25 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
                 match_market_offers.c.province,
                 func.count(func.distinct(match_market_offers.c.match_id)).label("n"),
             )
+            .where(match_market_offers.c.status == "open")
             .where(
                 or_(
-                    and_(
-                        match_market_offers.c.status == "open",
-                        or_(
-                            match_market_offers.c.deadline_at.is_(None),
-                            match_market_offers.c.deadline_at > _now(),
-                        ),
-                    ),
-                    and_(
-                        match_market_offers.c.status == "approval_pending",
-                        match_market_offers.c.match_at > _now(),
-                    ),
+                    match_market_offers.c.deadline_at.is_(None),
+                    match_market_offers.c.deadline_at > _now(),
                 )
             )
+            .group_by(match_market_offers.c.province)
+        )
+    }
+    urgent = {
+        _s(_row(r)["province"]): int(_row(r)["n"])
+        for r in await database.fetch_all(
+            select(
+                match_market_offers.c.province,
+                func.count(func.distinct(match_market_offers.c.match_id)).label("n"),
+            )
+            .where(match_market_offers.c.status == "approval_pending")
+            .where(match_market_offers.c.match_at > _now())
             .group_by(match_market_offers.c.province)
         )
     }
@@ -3925,6 +3929,7 @@ async def admin_provinces(actor: Actor = Depends(market_actor)) -> Dict[str, Any
                 "managedPrefixesCustom": normalize_prefixes(cfg.get("managed_prefixes")) is not None,
                 "accounts": account_status(province, mode),
                 "openOffers": pending.get(province, 0),
+                "pendingApprovals": urgent.get(province, 0),
                 "updatedBy": _s(cfg.get("updated_by")) or None,
                 "updatedAt": _iso(cfg.get("updated_at")),
             }
