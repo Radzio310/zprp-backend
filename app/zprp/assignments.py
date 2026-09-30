@@ -344,6 +344,65 @@ def _parse_hall_form(html: str) -> Dict[str, Any]:
 
 
 # =====================
+# Parsers — match date form (zawody_UstawDate)
+# =====================
+
+def _normalise_match_date(value: Any) -> str:
+    """Return the ZPRP wall-clock value as ``YYYY-MM-DD HH:mm`` or empty."""
+    text = _clean(str(value or "")).replace("T", " ")
+    for pattern in ("%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(text, pattern).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+    return ""
+
+
+def _parse_date_form(html: str) -> Dict[str, Any]:
+    """Parse the real ZPRP date form without assuming its input/button names."""
+    soup = BeautifulSoup(html, "html.parser")
+    form = soup.find("form") or soup
+    hidden_inputs: Dict[str, str] = {}
+    for inp in form.find_all("input", attrs={"type": "hidden"}):
+        name = _clean(inp.get("name", ""))
+        if name:
+            hidden_inputs[name] = _clean(inp.get("value", ""))
+
+    submit_btn: Dict[str, str] = {}
+    submit = form.find("input", attrs={"type": "submit"}) or form.find("button", attrs={"type": "submit"})
+    if submit:
+        name = _clean(submit.get("name", ""))
+        if name:
+            submit_btn = {"name": name, "value": _clean(submit.get("value", "") or submit.get_text(" ", strip=True))}
+
+    date_input = form.find("input", attrs={"name": re.compile(r"data.*fakt|termin|data", re.I)})
+    if date_input and str(date_input.get("type", "")).lower() == "hidden":
+        date_input = next(
+            (
+                item for item in form.find_all("input")
+                if str(item.get("type", "text")).lower() not in {"hidden", "submit", "button"}
+                and re.search(r"data.*fakt|termin|data", str(item.get("name", "")), re.I)
+            ),
+            None,
+        )
+    if not date_input:
+        date_input = next(
+            (item for item in form.find_all("input") if str(item.get("type", "text")).lower() in {"text", "datetime-local"}),
+            None,
+        )
+    input_name = _clean(date_input.get("name", "")) if date_input else "data_fakt"
+    raw_value = _clean(date_input.get("value", "")) if date_input else ""
+    return {
+        "IdZawody": _clean(hidden_inputs.get("IdZawody", "")),
+        "input_name": input_name or "data_fakt",
+        "date_value": _normalise_match_date(raw_value),
+        "raw_value": raw_value,
+        "hidden_inputs": hidden_inputs,
+        "submit_btn": submit_btn,
+    }
+
+
+# =====================
 # Parsers — schedule with assignment info
 # =====================
 
@@ -578,6 +637,23 @@ class ObsadaSaveHallRequest(BaseModel):
     actor: Optional[str] = None
     #: Obsada 2.0 - jak przy obsadzie: partia, oczekiwany stan i cofnięcie.
     #: `expect` dla hali to {"hall": numer hali w ZPRP albo jej podpis | ""}.
+    batch_id: Optional[str] = None
+    expect: Optional[Dict[str, Optional[str]]] = None
+    reverted_of: Optional[Any] = None
+
+
+class ObsadaDateFormRequest(BaseModel):
+    username: str
+    password: str
+    judge_id: Optional[str] = None
+    IdZawody: str
+    user: str
+
+
+class ObsadaSaveDateRequest(ObsadaDateFormRequest):
+    date_value: str
+    province: Optional[str] = None
+    actor: Optional[str] = None
     batch_id: Optional[str] = None
     expect: Optional[Dict[str, Optional[str]]] = None
     reverted_of: Optional[Any] = None
@@ -1802,6 +1878,131 @@ async def obsada_save_hall(
             )
         except Exception:
             logger.exception("obsada/save-hall: zapis przeszedł, powiadomienie nie")
+            result["announced"] = {"changed": False, "events": 0, "error": "notify-failed"}
+    return result
+
+
+@router.post("/zprp/obsada/date-form")
+async def obsada_date_form(
+    payload: ObsadaDateFormRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """Read the current official date and the real ZPRP form fields."""
+    private_key, _ = keys
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as exc:
+        raise HTTPException(400, f"Decryption error: {exc}")
+
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
+        cookies = await _login_zprp(client, user_plain, pass_plain)
+        _, html = await fetch_with_correct_encoding(
+            client,
+            "/zawody_UstawDate.php",
+            method="POST",
+            data={"IdZawody": payload.IdZawody, "akcja": "UstawDate", "user": payload.user},
+            cookies=cookies,
+        )
+        _log_html("obsada/date-form", html)
+        return {"fetched_at": _now_iso(), "base_url": settings.ZPRP_BASE_URL, **_parse_date_form(html)}
+
+
+@router.post("/zprp/obsada/save-date")
+async def obsada_save_date(
+    payload: ObsadaSaveDateRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """Save and verify a match wall-clock date, preserving all hidden ZPRP fields."""
+    wanted = _normalise_match_date(payload.date_value)
+    if not wanted:
+        raise HTTPException(422, "Termin musi mieć format YYYY-MM-DD HH:mm")
+
+    private_key, _ = keys
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as exc:
+        raise HTTPException(400, f"Decryption error: {exc}")
+
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
+        cookies = await _login_zprp(client, user_plain, pass_plain)
+        fetch_data = {"IdZawody": payload.IdZawody, "akcja": "UstawDate", "user": payload.user}
+        _, html_before = await fetch_with_correct_encoding(
+            client, "/zawody_UstawDate.php", method="POST", data=fetch_data, cookies=cookies
+        )
+        before = _parse_date_form(html_before)
+        current = _normalise_match_date(before.get("date_value") or before.get("raw_value"))
+        if payload.expect and "date" in payload.expect:
+            expected = _normalise_match_date(payload.expect.get("date"))
+            if expected != current:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "ZPRP_CHANGED",
+                        "slots": {"date": {"expected": expected, "actual": current}},
+                        "message": "Termin zmienił się w ZPRP od chwili otwarcia meczu — zapis wstrzymany.",
+                    },
+                )
+
+        form_data: Dict[str, str] = {"IdZawody": payload.IdZawody, "akcja": "UstawDate"}
+        for key, value in (before.get("hidden_inputs") or {}).items():
+            form_data.setdefault(key, value)
+        form_data[before.get("input_name") or "data_fakt"] = wanted
+        submit = before.get("submit_btn") or {}
+        if submit.get("name"):
+            form_data[submit["name"]] = submit.get("value") or "ZAPISZ ZMIANY"
+
+        _, html_after = await fetch_with_correct_encoding(
+            client, "/zawody_UstawDate.php", method="POST", data=form_data, cookies=cookies
+        )
+        _log_html("obsada/save-date response", html_after)
+        verified = _parse_date_form(html_after)
+        actual = _normalise_match_date(verified.get("date_value") or verified.get("raw_value"))
+        if actual != wanted:
+            # Some ZPRP deployments redirect to a list after saving. Read the form
+            # once more so success is based on persisted state, not response shape.
+            _, verify_html = await fetch_with_correct_encoding(
+                client, "/zawody_UstawDate.php", method="POST", data=fetch_data, cookies=cookies
+            )
+            verified = _parse_date_form(verify_html)
+            actual = _normalise_match_date(verified.get("date_value") or verified.get("raw_value"))
+        success = actual == wanted
+
+    result: Dict[str, Any] = {
+        "success": success,
+        "fetched_at": _now_iso(),
+        "date_value": actual,
+        "error": None if success else f"Date verification failed: selected={actual} wanted={wanted}",
+    }
+    if payload.province and success:
+        try:
+            from app.assignment_journal import record_date_write
+
+            result["journal"] = await record_date_write(
+                payload.province,
+                payload.IdZawody,
+                date_before=current,
+                date_after=wanted,
+                batch_id=payload.batch_id,
+                actor=payload.actor or payload.judge_id,
+                reverted_of=payload.reverted_of,
+            )
+        except Exception:
+            logger.exception("obsada/save-date: zapis przeszedł, dziennik nie")
+        try:
+            from app.assignment_notify import announce_date
+
+            result["announced"] = await announce_date(
+                payload.province,
+                payload.IdZawody,
+                wanted,
+                actor=payload.actor or payload.judge_id,
+            )
+        except Exception:
+            logger.exception("obsada/save-date: zapis przeszedł, powiadomienie nie")
             result["announced"] = {"changed": False, "events": 0, "error": "notify-failed"}
     return result
 

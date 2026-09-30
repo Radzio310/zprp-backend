@@ -321,18 +321,30 @@ class PendingChange(BaseModel):
     judge_id: Optional[str] = ""
 
 
+class MatchContext(BaseModel):
+    match_at: Optional[str] = None
+    time_known: Optional[bool] = None
+    round_window_start: Optional[str] = None
+    round_window_end: Optional[str] = None
+    hall: Optional[str] = None
+    city: Optional[str] = None
+    address: Optional[str] = None
+
+
 class SuggestRequest(BaseModel):
     province: str
     match_id: str
     slots: Optional[list[str]] = None
     pending: list[PendingChange] = []
     exclude_judge_ids: list[str] = []
+    context: Optional[MatchContext] = None
 
 
 class CandidatesRequest(BaseModel):
     province: str
     match_id: str
     pending: list[PendingChange] = []
+    context: Optional[MatchContext] = None
 
 
 @dataclass
@@ -475,6 +487,7 @@ async def _prepare(
     *,
     slots: Optional[list[str]] = None,
     exclude: Optional[set[str]] = None,
+    override: Optional[MatchContext] = None,
 ) -> Prepared:
     """
     Wspólne przygotowanie „Obsadź automatycznie" i kandydatów na mecz:
@@ -495,11 +508,31 @@ async def _prepare(
     code = _s(state.get("RozgrywkiCode") or row["match_code"])
     own = [item for item in pending if _s(item.match_id) == match_id]
     patched = _apply_pending(state, own, roster)
-    need = need_from_state(match_id, patched, code, row["match_at"], roster, slots=slots)
+    effective_moment = row["match_at"]
+    if override is not None:
+        if override.match_at:
+            try:
+                effective_moment = datetime.fromisoformat(override.match_at.replace("T", " "))
+                patched["data_fakt"] = override.match_at.replace("T", " ")
+            except ValueError:
+                raise HTTPException(422, "Kontekst terminu musi mieć format YYYY-MM-DD HH:mm")
+        if override.time_known is not None:
+            patched["data_fakt_time_known"] = override.time_known
+        if override.round_window_start:
+            patched["round_window_start"] = override.round_window_start
+        if override.round_window_end:
+            patched["round_window_end"] = override.round_window_end
+        if override.hall is not None:
+            patched["Hala_nazwa"] = override.hall
+        if override.city is not None:
+            patched["Hala_miasto"] = override.city
+        if override.address is not None:
+            patched["Hala_ulica"] = override.address
+    need = need_from_state(match_id, patched, code, effective_moment, roster, slots=slots)
 
     # Kolizje dnia: mecze sędziów w oknie wokół tego meczu.
-    moment = match_moment(row["match_at"]) if row["match_at"] else None
-    center = moment.date() if moment else _now().date()
+    moment = need.moment
+    center = need.day or (moment.date() if moment else _now().date())
     busy, load = await load_busy(
         key,
         roster,
@@ -567,7 +600,8 @@ async def _prepare(
             logger.info("obsada %s/%s: odległości bez dopytania Google", key, match_id)
 
     season_counts, month_counts = world.counts(_normalized_pending(pending))
-    inactive = inactive_judges(key, moment or _now(), roster)
+    active_at = moment or datetime.combine(center, datetime.min.time())
+    inactive = inactive_judges(key, active_at, roster)
     ctx = build_context(
         roster,
         book,
@@ -624,7 +658,9 @@ async def suggest(payload: SuggestRequest):
         }
 
     excluded = {_s(item) for item in payload.exclude_judge_ids if _s(item)}
-    prepared = await _prepare(key, match_id, payload.pending, slots=wanted_slots, exclude=excluded)
+    prepared = await _prepare(
+        key, match_id, payload.pending, slots=wanted_slots, exclude=excluded, override=payload.context
+    )
     need = prepared.need
     if not need.field_needed and not need.table_needed:
         return {"match_id": match_id, "picks": [], "skipped": []}
@@ -675,7 +711,7 @@ async def candidates(payload: CandidatesRequest):
 
     key = require_province(payload.province)
     match_id = _s(payload.match_id)
-    prepared = await _prepare(key, match_id, payload.pending)
+    prepared = await _prepare(key, match_id, payload.pending, override=payload.context)
     need, ctx, world = prepared.need, prepared.ctx, prepared.world
     note = None
     if A.is_bye(prepared.state):
@@ -853,6 +889,8 @@ async def zprp_history(
                 "after_name": _s(row["after_name"]) or None,
                 "hall_before": _s(row["hall_before"]) or None,
                 "hall_after": _s(row["hall_after"]) or None,
+                "date_before": _s(row["date_before"]) or None,
+                "date_after": _s(row["date_after"]) or None,
                 "reverted_of": row["reverted_of"],
                 "run_id": row["run_id"],
             },

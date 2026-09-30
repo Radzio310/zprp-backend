@@ -191,6 +191,24 @@ def test_season_label_follows_the_first_of_september():
     assert A.zprp_season_label(datetime.datetime(2026, 8, 31, tzinfo=utc)) == "2025/2026"
 
 
+def test_date_form_preserves_hidden_fields_and_reads_exact_minutes():
+    page = """
+    <form name="zawody_data">
+      <input type="hidden" name="IdZawody" value="209640">
+      <input type="hidden" name="akcja" value="UstawDate">
+      <input type="hidden" name="token" value="abc">
+      <input name="data_fakt" type="text" value="2026-09-30 18:37">
+      <input name="akcja_edycja" type="submit" value="ZAPISZ ZMIANY">
+    </form>
+    """
+    parsed = A._parse_date_form(page)
+    assert parsed["IdZawody"] == "209640"
+    assert parsed["input_name"] == "data_fakt"
+    assert parsed["date_value"] == "2026-09-30 18:37"
+    assert parsed["hidden_inputs"]["token"] == "abc"
+    assert parsed["submit_btn"] == {"name": "akcja_edycja", "value": "ZAPISZ ZMIANY"}
+
+
 # ─────────────────────────── trasa ───────────────────────────
 
 

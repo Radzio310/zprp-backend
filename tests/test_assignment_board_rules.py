@@ -62,7 +62,11 @@ def change(**extra):
 
 class TestSzkicuKolejki:
     def test_poprawny_szkic_przechodzi_bez_zmian(self):
-        items = [change(), change(id="c2", kind="hall", slot=None, hall_value="7")]
+        items = [
+            change(),
+            change(id="c2", kind="hall", slot=None, hall_value="7"),
+            change(id="c3", kind="date", slot=None, date_value="2026-10-03 18:37"),
+        ]
         assert B.clean_draft_changes(items) == items
         assert B.clean_draft_changes(None) == []
 

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from app.assignment_auto import BusyMatch, Context, MatchNeed, build_plan, can_make_both
 from app.assignment_people import fold, make_judge
@@ -161,6 +161,25 @@ def test_unavailable_judge_leaves_a_gap_with_a_reason():
     plan = build_plan([match(field=1)], ctx)
     assert not plan.proposals
     assert plan.gaps and "niedyspozycja" in plan.gaps[0].reason
+
+
+def test_partial_round_candidate_is_used_only_after_fully_free_people():
+    need = match(field=1, when=None)
+    need.day = date(2026, 10, 3)
+    need.window_start = date(2026, 10, 3)
+    need.window_end = date(2026, 10, 4)
+    need.time_known = False
+    need.date_source = "round"
+
+    def available(judge_id, moment):
+        return not (judge_id == ANNA.judge_id and moment.date() == date(2026, 10, 3))
+
+    plan = build_plan([need], world([ANNA, PAWEL], available=available))
+    assert names(plan) == [PAWEL.name]
+
+    fallback = build_plan([need], world([ANNA], available=available))
+    assert names(fallback) == [ANNA.name]
+    assert any("częściowo dostępny" in reason for reason in fallback.proposals[0].reasons)
 
 
 def test_nobody_gets_two_slots_in_one_match():

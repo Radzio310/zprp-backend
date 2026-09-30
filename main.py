@@ -33,6 +33,11 @@ from app.proel_token import router as proel_token_router
 from app.official_role import router as official_role_router
 from app.edit_photo import router as edit_photo_router
 from app.offtime import router as offtime_router
+from app.zprp_unavailability import (
+    admin_router as zprp_unavailability_admin_router,
+    public_router as zprp_unavailability_router,
+    run_overlap_mail_scheduler,
+)
 from app.delegate import router as delegate_router
 from app.delegate_evaluations import (
     admin_router as delegate_evaluations_admin_router,
@@ -258,6 +263,8 @@ app.include_router(proel_token_router)
 app.include_router(official_role_router)
 app.include_router(edit_photo_router)
 app.include_router(offtime_router)
+app.include_router(zprp_unavailability_router)
+app.include_router(zprp_unavailability_admin_router)
 app.include_router(delegate_router)
 app.include_router(delegate_evaluations_router)
 app.include_router(delegate_evaluations_admin_router)
@@ -791,6 +798,7 @@ _mp_snapshot_task: asyncio.Task | None = None
 _province_match_monitor_task: asyncio.Task | None = None
 _exam_promotion_task: asyncio.Task | None = None
 _province_offtime_sync_task: asyncio.Task | None = None
+_zprp_unavailability_mail_task: asyncio.Task | None = None
 _deploy_push_test_task: asyncio.Task | None = None
 
 
@@ -1054,6 +1062,17 @@ async def startup():
         # Kilka zdjęć w jednej wiadomości zgłoszenia - tabela wiadomości istnieje
         # na produkcji, więc kolumny nie dołoży `create_all`.
         "ALTER TABLE user_report_messages ADD COLUMN IF NOT EXISTS attachment_urls JSONB",
+        # Niedyspo ZPRP: Discord został dołożony po pierwszej wersji kolejki.
+        # Osobne znaczniki kanałów zapobiegają powtórnemu mailowi, gdy tylko
+        # Discord wymaga ponowienia (i odwrotnie).
+        "ALTER TABLE zprp_unavailability_settings ADD COLUMN IF NOT EXISTS discord_webhook_url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE zprp_unavailability_settings ADD COLUMN IF NOT EXISTS recipient_emails JSONB NOT NULL DEFAULT '[]'::jsonb",
+        "UPDATE zprp_unavailability_settings SET recipient_emails = jsonb_build_array(recipient_email) WHERE recipient_emails = '[]'::jsonb AND COALESCE(recipient_email, '') <> ''",
+        "ALTER TABLE zprp_unavailability_settings ADD COLUMN IF NOT EXISTS province_cc JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE zprp_unavailability_mail_outbox ADD COLUMN IF NOT EXISTS province VARCHAR",
+        "ALTER TABLE zprp_unavailability_mail_outbox ADD COLUMN IF NOT EXISTS email_sent_at TIMESTAMPTZ",
+        "ALTER TABLE zprp_unavailability_mail_outbox ADD COLUMN IF NOT EXISTS discord_sent_at TIMESTAMPTZ",
+        "ALTER TABLE zprp_unavailability_mail_outbox ADD COLUMN IF NOT EXISTS discord_message_id VARCHAR",
     ]
     for stmt in _province_match_migrations:
         try:
@@ -1287,7 +1306,7 @@ async def startup():
         logger.exception("❌ Walidacja konfiguracji e-mail nie powiodła się")
         raise
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task, _exam_promotion_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _zprp_unavailability_mail_task, _deploy_push_test_task, _exam_promotion_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -1334,12 +1353,14 @@ async def startup():
     _deploy_push_test_task = asyncio.create_task(_run_deploy_push_test_safely())
     _province_match_monitor_task = asyncio.create_task(run_province_match_monitor())
     _province_offtime_sync_task = asyncio.create_task(run_province_offtime_sync())
+    _zprp_unavailability_mail_task = asyncio.create_task(run_overlap_mail_scheduler())
     _calendar_feed_task = asyncio.create_task(run_calendar_feed_sync())
     # Sprzątanie migawek meczu - PARTIAMI, żeby pierwsze uruchomienie po
     # dłuższej przerwie nie zablokowało zapisów (`app/proel_snapshots.py`).
     _snapshot_cleanup_task = asyncio.create_task(run_snapshot_cleanup())
     logger.info("Province match monitor started (15 min light / 4 h full)")
     logger.info("Central offtime sync started (2 h)")
+    logger.info("Niedyspo ZPRP mail outbox started")
     logger.info("Kalendarze sędziów (iCal) start (co 6 h)")
     logger.info("Sprzątanie migawek meczu start (co 1 h)")
     logger.info("✅ Push scheduler started")
@@ -1434,7 +1455,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _deploy_push_test_task, _exam_promotion_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _zprp_unavailability_mail_task, _deploy_push_test_task, _exam_promotion_task
 
     await stop_alert_scheduler()
     await stop_district_alert_scheduler()
@@ -1464,6 +1485,12 @@ async def shutdown():
         _province_offtime_sync_task.cancel()
         try:
             await _province_offtime_sync_task
+        except asyncio.CancelledError:
+            pass
+    if _zprp_unavailability_mail_task:
+        _zprp_unavailability_mail_task.cancel()
+        try:
+            await _zprp_unavailability_mail_task
         except asyncio.CancelledError:
             pass
 

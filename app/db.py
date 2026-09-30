@@ -2462,6 +2462,94 @@ Index(
     unique=True,
     postgresql_where=text("status IN ('approval_pending', 'open', 'applying')"),
 )
+
+# Niedyspozycje nachodzące na obsadę centralną ZPRP.
+#
+# Konfiguracja jest globalna: centrala ma jedną skrzynkę niezależnie od
+# województwa sędziego. Kategorie są kodami z numeru meczu (IIM, LCM, MP...),
+# tymi samymi, które aplikacja pokazuje na kolorowych plakietkach.
+zprp_unavailability_settings = Table(
+    "zprp_unavailability_settings",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("recipient_email", String, nullable=False, server_default=text("''")),
+    Column(
+        "recipient_emails",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column(
+        "sender_email",
+        String,
+        nullable=False,
+        server_default=text("'obsady@catchapp.com.pl'"),
+    ),
+    Column(
+        "sender_name",
+        String,
+        nullable=False,
+        server_default=text("'Niedyspo BAZA'"),
+    ),
+    Column(
+        "categories",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column("discord_webhook_url", Text, nullable=False, server_default=text("''")),
+    Column(
+        "province_cc",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    ),
+    Column("updated_by", String, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+# Trwała kolejka maili. Zapis niedyspozycji nie zależy od odpowiedzi Brevo:
+# po sukcesie w ZPRP koperta już leży w bazie i przetrwa restart Railway.
+zprp_unavailability_mail_outbox = Table(
+    "zprp_unavailability_mail_outbox",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("request_id", String, nullable=False, unique=True),
+    Column("judge_id", String, nullable=False, index=True),
+    Column("judge_name", String, nullable=False),
+    Column("province", String, nullable=True, index=True),
+    Column("date_from", Date, nullable=False),
+    Column("date_to", Date, nullable=False),
+    Column("reason", Text, nullable=False),
+    Column(
+        "matches_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column("status", String, nullable=False, server_default=text("'pending'")),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("due_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("last_error", Text, nullable=True),
+    Column("brevo_message_id", String, nullable=True),
+    Column("email_sent_at", DateTime(timezone=True), nullable=True),
+    Column("discord_sent_at", DateTime(timezone=True), nullable=True),
+    Column("discord_message_id", String, nullable=True),
+    Column("sent_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_zprp_unavailability_mail_due",
+    zprp_unavailability_mail_outbox.c.status,
+    zprp_unavailability_mail_outbox.c.due_at,
+)
 Index(
     "ix_match_market_offers_province_status",
     match_market_offers.c.province,
@@ -4424,6 +4512,8 @@ with engine.connect() as _conn:
     # Tabela przebiegow istnieje na produkcji, wiec `create_all` ich nie doloży.
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz"))
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS seasons varchar"))
+    _conn.execute(text("ALTER TABLE province_zprp_write_journal ADD COLUMN IF NOT EXISTS date_before varchar"))
+    _conn.execute(text("ALTER TABLE province_zprp_write_journal ADD COLUMN IF NOT EXISTS date_after varchar"))
     # Dziennik giełdy powstał później niż sama giełda, więc oferty sprzed jego
     # wprowadzenia nie mają ani jednego wpisu. Dopisujemy je WSTECZ z własnych
     # stempli czasu wiersza - tyle, ile z nich wynika: wystawienie zawsze, a

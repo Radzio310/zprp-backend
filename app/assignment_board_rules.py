@@ -18,7 +18,7 @@ from app.match_market_rules import names_match
 DRAFT_MAX_ITEMS = 2000
 DRAFT_MAX_BYTES = 1_000_000
 
-CHANGE_KINDS = frozenset({"slot", "hall"})
+CHANGE_KINDS = frozenset({"slot", "hall", "date"})
 
 #: Gniazdo w każdym z trzech zapisów, jakie krążą po systemie: moduł obsadowy
 #: („pierwszy"), migawka i formularz ZPRP („sedzia1") i pole formularza
@@ -137,7 +137,7 @@ def clean_draft_changes(raw: Any) -> list[dict]:
     Zmiany kolejki gotowe do zapisu - serwer ich nie interpretuje, tylko pilnuje
     kształtu i limitów, żeby jeden zły klient nie zapchał wspólnego szkicu.
 
-    Każda pozycja to obiekt z `id`, `match_id` i `kind` („slot" albo „hall");
+    Każda pozycja to obiekt z `id`, `match_id` i `kind` („slot", „hall" albo „date");
     reszta pól przechodzi bez zmian. Odmowa mówi, co jest nie tak.
     """
     if raw is None:
@@ -156,7 +156,7 @@ def clean_draft_changes(raw: Any) -> list[dict]:
             raise ValueError(f"Zmiana nr {index} nie wskazuje meczu")
         kind = _s(item.get("kind"))
         if kind not in CHANGE_KINDS:
-            raise ValueError(f"Zmiana nr {index}: nieznany rodzaj '{kind}' (slot albo hall)")
+            raise ValueError(f"Zmiana nr {index}: nieznany rodzaj '{kind}' (slot, hall albo date)")
         if kind == "slot" and not normalize_slot(item.get("slot")):
             raise ValueError(f"Zmiana nr {index}: nieznane gniazdo '{_s(item.get('slot'))}'")
         out.append(item)

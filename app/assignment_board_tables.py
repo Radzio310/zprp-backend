@@ -49,7 +49,7 @@ def define_tables(metadata):
         Column("match_id", String, nullable=False, index=True),
         Column("match_code", String, nullable=True),
         Column("match_label", String, nullable=True),
-        #: slot | hall
+        #: slot | hall | date
         Column("kind", String, nullable=False),
         Column("slot", String, nullable=True),
         Column("before_id", String, nullable=True),
@@ -58,6 +58,8 @@ def define_tables(metadata):
         Column("after_name", String, nullable=True),
         Column("hall_before", String, nullable=True),
         Column("hall_after", String, nullable=True),
+        Column("date_before", String, nullable=True),
+        Column("date_after", String, nullable=True),
         Column("actor", String, nullable=True),
         #: Przebieg automatu, z którego pochodzi zapis (gdy jest).
         Column("run_id", Integer, nullable=True),

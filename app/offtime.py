@@ -1,6 +1,7 @@
 from typing import Dict
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from httpx import AsyncClient
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
@@ -10,6 +11,13 @@ import logging
 from app.utils import fetch_with_correct_encoding
 from app.deps import get_settings, get_rsa_keys
 from app.province_offtime_sync import refresh_central_snapshot_after_user_change
+from app.zprp_unavailability import (
+    ConflictMatch,
+    DEFAULT_CATEGORIES,
+    _settings_row as _zprp_unavailability_settings,
+    central_conflicts,
+    enqueue_overlap_mail,
+)
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 
@@ -25,6 +33,11 @@ class CreateOffTimeRequest(BaseModel):
     DataOd: str   # format DD.MM.YYYY
     DataDo: str
     Info: str
+    confirmCentralOverlap: bool = False
+    collisionMatches: list[ConflictMatch] = Field(default_factory=list)
+    alertRequestId: str = ""
+    judgeName: str = ""
+    province: str = ""
 
 class UpdateOffTimeRequest(BaseModel):
     username: str
@@ -34,6 +47,11 @@ class UpdateOffTimeRequest(BaseModel):
     DataOd: str
     DataDo: str
     Info: str
+    confirmCentralOverlap: bool = False
+    collisionMatches: list[ConflictMatch] = Field(default_factory=list)
+    alertRequestId: str = ""
+    judgeName: str = ""
+    province: str = ""
 
 class DeleteOffTimeRequest(BaseModel):
     username: str
@@ -154,6 +172,36 @@ async def _refresh_server_snapshot(client: AsyncClient, judge_id: str) -> None:
             judge_id,
         )
 
+
+def _request_date(value: str):
+    """Data z aplikacji (ISO) albo ze starszego formularza ZPRP."""
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    raise HTTPException(status_code=422, detail="Nieprawidłowy zakres niedyspozycyjności.")
+
+
+async def _confirmed_central_conflicts(req) -> list[dict]:
+    if not req.collisionMatches:
+        return []
+    settings = await _zprp_unavailability_settings()
+    matches = central_conflicts(
+        req.collisionMatches,
+        settings.get("categories") or DEFAULT_CATEGORIES,
+    )
+    if matches and not req.confirmCentralOverlap:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CENTRAL_MATCH_OVERLAP_CONFIRMATION_REQUIRED",
+                "message": "Ta niedyspozycyjność nachodzi na obsadę centralną ZPRP.",
+                "matches": matches,
+            },
+        )
+    return matches
+
 # ----------------- ENDPOINTS -----------------
 
 @router.post("/judge/offtimes/create", summary="Dodaj nową niedyspozycyjność")
@@ -167,6 +215,7 @@ async def create_offtime(
     user_plain = _decrypt_field(req.username, private_key)
     pass_plain = _decrypt_field(req.password, private_key)
     judge_plain = _decrypt_field(req.judge_id, private_key)
+    conflicts = await _confirmed_central_conflicts(req)
     try:
         client = await _login_and_client(user_plain, pass_plain, settings)
         try:
@@ -185,7 +234,19 @@ async def create_offtime(
             await _refresh_server_snapshot(client, judge_plain)
         finally:
             await client.aclose()
-        return {"success": True}
+        alert = None
+        if conflicts:
+            alert = await enqueue_overlap_mail(
+                request_id=req.alertRequestId,
+                judge_id=judge_plain,
+                judge_name=req.judgeName,
+                province=req.province,
+                date_from=_request_date(req.DataOd),
+                date_to=_request_date(req.DataDo),
+                reason=req.Info,
+                matches=conflicts,
+            )
+        return {"success": True, "mailAlert": alert}
     except HTTPException:
         raise
     except Exception as e:
@@ -202,6 +263,7 @@ async def update_offtime(
     user_plain = _decrypt_field(req.username, private_key)
     pass_plain = _decrypt_field(req.password, private_key)
     judge_plain = _decrypt_field(req.judge_id, private_key)
+    conflicts = await _confirmed_central_conflicts(req)
     try:
         client = await _login_and_client(user_plain, pass_plain, settings)
         try:
@@ -220,7 +282,19 @@ async def update_offtime(
             await _refresh_server_snapshot(client, judge_plain)
         finally:
             await client.aclose()
-        return {"success": True}
+        alert = None
+        if conflicts:
+            alert = await enqueue_overlap_mail(
+                request_id=req.alertRequestId,
+                judge_id=judge_plain,
+                judge_name=req.judgeName,
+                province=req.province,
+                date_from=_request_date(req.DataOd),
+                date_to=_request_date(req.DataDo),
+                reason=req.Info,
+                matches=conflicts,
+            )
+        return {"success": True, "mailAlert": alert}
     except HTTPException:
         raise
     except Exception as e:

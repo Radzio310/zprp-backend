@@ -84,6 +84,11 @@ def _str(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
+def _has_clock(value: Any) -> bool:
+    """Czy źródłowy termin zawiera jawne HH:MM (również prawdziwe 00:00)."""
+    return bool(re.search(r"[T\s]\d{1,2}:\d{2}", _str(value)))
+
+
 def parse_match_at(value: Any) -> Optional[datetime]:
     raw = _str(value)
     if not raw:
@@ -229,6 +234,7 @@ def _private_to_state(match: Dict[str, Any]) -> Dict[str, Any]:
         "RozgrywkiCode": _str(match.get("match_code")),
         "season": _str(match.get("season")),
         "data_fakt": _str(match.get("data_fakt")),
+        "data_fakt_time_known": _has_clock(match.get("data_fakt")),
         "ID_zespoly_gosp_ZespolNazwa": _str(teams.get("host")),
         "ID_zespoly_gosc_ZespolNazwa": _str(teams.get("guest")),
         "NrSedzia_pierwszy_nazwisko": _str(officials.get("referee1")),
@@ -337,7 +343,10 @@ def _api_to_state(payload: Dict[str, Any], base: Dict[str, Any]) -> Optional[Dic
         state[key] = incoming
     state["Id"] = _str(match.get("Id") or base.get("Id"))
     state["RozgrywkiCode"] = _str(match.get("RozgrywkiCode") or base.get("RozgrywkiCode"))
-    state["data_fakt"] = _str(match.get("data_fakt") or match.get("data_prop") or base.get("data_fakt"))
+    incoming_date = match.get("data_fakt") or match.get("data_prop")
+    state["data_fakt"] = _str(incoming_date or base.get("data_fakt"))
+    if incoming_date:
+        state["data_fakt_time_known"] = _has_clock(incoming_date)
     state["host_swapped"] = _str(match.get("zamiana")) == "1"
     state["protocol_status"] = "approved" if _str(match.get("protokol_zatwierdz")) == "1" else "before_approval"
     for key in ("delegate_note", "host_contact", "guest_contact", "season", "runda", "kolejka"):

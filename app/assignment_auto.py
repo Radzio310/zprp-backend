@@ -132,6 +132,7 @@ TABLE_BADGE_SLACK = 1
 W_OFF_DAY = 120.0
 W_SAME_DAY = 600.0
 W_UNKNOWN_KM = 90.0
+W_PARTIAL_WINDOW = 1_000_000.0
 B_PAIR = 250.0
 #: Ustalona para na BOISKU - premia warta kilkaset kilometrów (patrz nagłówek).
 B_FIELD_PAIR = 600.0
@@ -174,6 +175,10 @@ class MatchNeed:
     moment: Optional[datetime]
     day: Optional[date]
     host_city: str
+    window_start: Optional[date] = None
+    window_end: Optional[date] = None
+    time_known: bool = True
+    date_source: str = "none"
     #: Klub gospodarza prosi, żeby nie wysyłać tu sędziów z jego miasta.
     #: Bez tego miejscowy jest tylko karany punktami i przy braku chętnych
     #: i tak wchodzi - a to ustawienie ma znaczyć „nie", nie „niechętnie".
@@ -492,19 +497,74 @@ def _same_day_state(
     return True, True
 
 
+def _need_days(need: MatchNeed) -> list[date]:
+    start = need.window_start
+    end = need.window_end
+    if start is None or end is None or start > end:
+        return [need.day] if need.day is not None else []
+    days: list[date] = []
+    current = start
+    while current <= end and len(days) < 62:
+        days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+def _window_availability(
+    ctx: Context, judge_id: str, need: MatchNeed
+) -> tuple[Optional[str], list[str]]:
+    """Availability for a day/range whose exact kick-off time is unknown."""
+    if need.time_known or not need.window_start or not need.window_end:
+        return None, []
+    details: list[str] = []
+    usable_days = 0
+    fully_free_days = 0
+    for day in _need_days(need):
+        label = day.strftime("%d.%m")
+        if ctx.paused(judge_id, day):
+            details.append(f"{label}: przerwa")
+            continue
+        samples = [datetime.combine(day, datetime.min.time()) + timedelta(minutes=30 * index) for index in range(48)]
+        available = [ctx.available(judge_id, sample) for sample in samples]
+        if not any(available):
+            details.append(f"{label}: niedostępny cały dzień")
+            continue
+        usable_days += 1
+        day_details: list[str] = []
+        blocked = [sample.strftime("%H:%M") for sample, ok in zip(samples, available) if not ok]
+        if blocked:
+            day_details.append(f"niedyspozycja od {blocked[0]} do {blocked[-1]}")
+        matches = [item for item in ctx.busy.get(judge_id, ()) if item.moment and item.moment.date() == day]
+        if matches:
+            day_details.extend(f"mecz {_busy_text(item)}" for item in matches)
+        if day_details:
+            details.append(f"{label}: " + ", ".join(day_details))
+        else:
+            fully_free_days += 1
+    if usable_days == 0:
+        return OFF, details
+    if fully_free_days == len(_need_days(need)):
+        return FREE, []
+    return PARTIAL, details
+
+
 def _hard_reason(
     ctx: Context, judge: Judge, need: MatchNeed, *, round_no: int
 ) -> Optional[str]:
     """Powód, dla którego ten sędzia w ogóle nie wchodzi w rachubę."""
     if judge.judge_id in need.crew_ids:
         return "już stoi w tym meczu"
-    if ctx.paused(judge.judge_id, need.day):
-        return "przerwa sędziego"
-    if not ctx.available(judge.judge_id, need.moment):
-        return "niedyspozycja"
-    _, can_make = _same_day_state(ctx, judge.judge_id, need)
-    if not can_make:
-        return "ma tego dnia mecz, na który nie zdąży"
+    window_status, _window_details = _window_availability(ctx, judge.judge_id, need)
+    if window_status == OFF:
+        return "brak dostępnego terminu w zakresie kolejki"
+    if window_status is None:
+        if ctx.paused(judge.judge_id, need.day):
+            return "przerwa sędziego"
+        if not ctx.available(judge.judge_id, need.moment):
+            return "niedyspozycja"
+        _, can_make = _same_day_state(ctx, judge.judge_id, need)
+        if not can_make:
+            return "ma tego dnia mecz, na który nie zdąży"
     if need.avoid_local and is_local(judge, need.host_city):
         return "klub gospodarza nie chce sędziów z tego miasta"
     if round_no == 1 and judge.preferred_days and need.weekday is not None:
@@ -636,10 +696,18 @@ def _score(
     odniesienia równego podziału (najmniej obciążony kandydat i średnia).
     """
     reasons: list[str] = []
-    city = ctx.city_of(judge.judge_id, need.day)
-    km = ctx.km(city, need.host_city) if city and need.host_city else None
+    days = _need_days(need)
+    cities = [ctx.city_of(judge.judge_id, day) for day in days] or [ctx.city_of(judge.judge_id, need.day)]
+    variants = [ctx.km(city, need.host_city) for city in cities if city and need.host_city]
+    known = [value for value in variants if value is not None]
+    km = max(known) if known else None
 
     score = 0.0
+    window_status, window_details = _window_availability(ctx, judge.judge_id, need)
+    if window_status == PARTIAL:
+        score += W_PARTIAL_WINDOW
+        reasons.append("częściowo dostępny — dopiero po w pełni dostępnych")
+        reasons.extend(window_details[:2])
     if km is None:
         score += W_UNKNOWN_KM
         reasons.append("nie znamy odległości")
@@ -1143,6 +1211,7 @@ def _rebalance(
 
 FREE = "free"
 TIGHT = "tight"
+PARTIAL = "partial"
 OFF = "off"
 
 
@@ -1237,12 +1306,20 @@ def describe_candidates(
     views: dict[str, CandidateView] = {}
     ready: list[Judge] = []
     for judge in ctx.judges.values():
-        city = ctx.city_of(judge.judge_id, need.day)
-        km = ctx.km(city, need.host_city) if city and need.host_city else None
+        days = _need_days(need)
+        cities = [ctx.city_of(judge.judge_id, day) for day in days] or [ctx.city_of(judge.judge_id, need.day)]
+        city = cities[0] if cities else judge.city
+        variants = [ctx.km(item, need.host_city) for item in cities if item and need.host_city]
+        known = [value for value in variants if value is not None]
+        km = max(known) if known else None
         hard = _hard_reason(ctx, judge, need, round_no=2)
         if hard:
             reason = hard
-            if hard == "niedyspozycja" and off_reason is not None:
+            if hard == "brak dostępnego terminu w zakresie kolejki":
+                _state, details = _window_availability(ctx, judge.judge_id, need)
+                if details:
+                    reason = "; ".join(details)
+            elif hard == "niedyspozycja" and off_reason is not None:
                 text = off_reason(judge.judge_id, need.moment)
                 reason = f"niedyspozycja: {text}" if text else hard
             elif hard.startswith("ma tego dnia mecz"):
@@ -1285,12 +1362,15 @@ def describe_candidates(
             elif why:
                 refusals.append(f"{'boisko' if group == FIELD else 'stolik'}: {why}")
         others = same_day_matches(ctx, judge.judge_id, need)
-        status = TIGHT if others else FREE
+        window_status, window_details = _window_availability(ctx, judge.judge_id, need)
+        status = window_status or (TIGHT if others else FREE)
         reason = (
             "tego dnia także " + ", ".join(f"mecz {_busy_text(item)}" for item in others)
             if others
             else ""
         )
+        if window_details:
+            reason = "; ".join([part for part in (reason, *window_details) if part])
         if refusals:
             reason = "; ".join([part for part in (reason, *refusals) if part])
         views[judge.judge_id] = CandidateView(

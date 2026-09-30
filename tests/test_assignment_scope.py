@@ -146,6 +146,40 @@ def test_kolejka_z_api_i_zakres_z_terminarza():
         "name": "Kolejka 3",
         "no": 3,
         "span": "03 - 04.10.2026",
+        "start": "2026-10-03",
+        "end": "2026-10-04",
+    }
+
+
+def test_round_span_handles_month_and_year_boundaries():
+    assert S.parse_round_span("30.09 - 01.10.2026") == (
+        date(2026, 9, 30),
+        date(2026, 10, 1),
+    )
+    assert S.parse_round_span("31.12.2026 - 01.01.2027") == (
+        date(2026, 12, 31),
+        date(2027, 1, 1),
+    )
+    assert S.parse_round_span("31.12 - 01.01.2027") == (
+        date(2026, 12, 31),
+        date(2027, 1, 1),
+    )
+    assert S.parse_round_span("03\u201304.10.2026") == (
+        date(2026, 10, 3),
+        date(2026, 10, 4),
+    )
+
+
+def test_round_is_effective_but_not_an_official_match_date():
+    result = S.effective_window(
+        {"kolejka": "03 - 04.10.2026", "data_fakt_time_known": False}, None
+    )
+    assert result == {
+        "start": date(2026, 10, 3),
+        "end": date(2026, 10, 4),
+        "effective_day": date(2026, 10, 3),
+        "date_source": "round",
+        "time_known": False,
     }
 
 

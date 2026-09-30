@@ -187,6 +187,25 @@ async def announce_hall(
     return await announce_change(province, match_id, patch, actor=actor)
 
 
+async def announce_date(
+    province: str,
+    match_id: str,
+    date_value: Any,
+    *,
+    actor: Optional[str] = None,
+) -> dict:
+    """Update the cached official wall-clock date and emit normal change events."""
+    value = _s(date_value)
+
+    def patch(state: Mapping[str, Any]) -> dict:
+        out = dict(state)
+        out["data_fakt"] = value
+        out["data_fakt_time_known"] = True
+        return out
+
+    return await announce_change(province, match_id, patch, actor=actor)
+
+
 async def announce_change(
     province: str,
     match_id: str,

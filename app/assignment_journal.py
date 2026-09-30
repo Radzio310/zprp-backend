@@ -197,3 +197,39 @@ async def record_hall_write(
     )
     bump(key)
     return {"batch_id": batch, "ids": ids}
+
+
+async def record_date_write(
+    province: str,
+    match_id: str,
+    *,
+    date_before: Any,
+    date_after: Any,
+    batch_id: Optional[str] = None,
+    actor: Optional[str] = None,
+    reverted_of: Any = None,
+) -> dict:
+    """Journal one verified match-date write."""
+    from app.assignment_board_cache import bump
+
+    key, code, label, _state = await _match_info(province, match_id)
+    batch = _s(batch_id) or uuid.uuid4().hex
+    ids = await _insert(
+        [
+            {
+                "province": key,
+                "batch_id": batch,
+                "match_id": _s(match_id),
+                "match_code": code or None,
+                "match_label": label or None,
+                "kind": "date",
+                "slot": None,
+                "date_before": _s(date_before) or None,
+                "date_after": _s(date_after) or None,
+                "actor": _s(actor) or None,
+                "reverted_of": B.reverted_for(reverted_of, "date"),
+            }
+        ]
+    )
+    bump(key)
+    return {"batch_id": batch, "ids": ids}

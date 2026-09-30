@@ -185,7 +185,9 @@ def _host_table_by_club(
     from app.offtime_rules import match_moment
     from app.province_clubs_scrape import team_key
 
-    rule = clubs.get(team_key(state.get("ID_zespoly_gosp_ZespolNazwa"))) or {}
+    swapped = _s(state.get("host_swapped")).lower() in {"1", "true", "yes", "tak"}
+    host = state.get("ID_zespoly_gosc_ZespolNazwa") if swapped else state.get("ID_zespoly_gosp_ZespolNazwa")
+    rule = clubs.get(team_key(host)) or {}
     moment = match_moment(match_at) if match_at else None
     return A.club_table_active(
         rule.get("table_by_club", 0), rule.get("table_by_club_since"), moment
@@ -204,9 +206,19 @@ def _item(
     table_by_club = _host_table_by_club(state, clubs, row["match_at"])
     status = A.crew_status(state, code, table_by_club)
     at = row["match_at"]
+    effective = S.effective_window(state, at)
     stage = S.round_info(state)
     score_host = _s(state.get("wynik_gosp_full"))
     score_guest = _s(state.get("wynik_gosc_full"))
+    nominal_host = _s(state.get("ID_zespoly_gosp_ZespolNazwa"))
+    nominal_guest = _s(state.get("ID_zespoly_gosc_ZespolNazwa"))
+    host_swapped = _s(state.get("host_swapped")).lower() in {"1", "true", "yes", "tak"}
+    shown_host, shown_guest = (
+        (nominal_guest, nominal_host) if host_swapped else (nominal_host, nominal_guest)
+    )
+    shown_score_host, shown_score_guest = (
+        (score_guest, score_host) if host_swapped else (score_host, score_guest)
+    )
     return {
         "match_id": _s(row["match_id"]),
         "code": code,
@@ -216,10 +228,21 @@ def _item(
         "level": league_level(code),
         "match_at": _iso(at),
         "score": (
-            {"host": score_host, "guest": score_guest, "label": f"{score_host}:{score_guest}"}
-            if score_host and score_guest else None
+            {
+                "host": shown_score_host,
+                "guest": shown_score_guest,
+                "label": f"{shown_score_host}:{shown_score_guest}",
+            }
+            if shown_score_host and shown_score_guest else None
         ),
         "day": at.date().isoformat() if at else None,
+        "effective_day": (
+            effective["effective_day"].isoformat() if effective["effective_day"] else None
+        ),
+        "date_source": effective["date_source"],
+        "time_known": effective["time_known"],
+        "round_window_start": stage["start"] or None,
+        "round_window_end": stage["end"] or None,
         "round": _s(state.get("kolejka") or state.get("Kolejka")),
         # Kolejka do widoku „Kolejki" i do linii granicy kolejki na liscie.
         "round_key": stage["key"],
@@ -227,8 +250,11 @@ def _item(
         "round_name": stage["name"],
         "round_no": stage["no"],
         "round_span": stage["span"],
-        "host": _s(state.get("ID_zespoly_gosp_ZespolNazwa")),
-        "guest": _s(state.get("ID_zespoly_gosc_ZespolNazwa")),
+        "host": shown_host,
+        "guest": shown_guest,
+        "nominal_host": nominal_host,
+        "nominal_guest": nominal_guest,
+        "host_swapped": host_swapped,
         "hall": _s(state.get("Hala_nazwa")),
         "city": _s(state.get("Hala_miasto")),
         "address": " ".join(
@@ -398,20 +424,32 @@ async def match_list_payload(
     window: list[dict] = []
     for row, state, code in candidates:
         at = _as_utc(row["match_at"])
+        effective = S.effective_window(state, at)
+        effective_start = effective["start"]
+        effective_end = effective["end"]
         has_score = bool(_s(state.get("wynik_gosp_full")) and _s(state.get("wynik_gosc_full")))
-        if past_only and not has_score and (at is None or at >= _now()):
-            continue
+        if past_only and not has_score:
+            if effective["time_known"]:
+                if at is not None and at >= _now():
+                    continue
+            elif effective_end is None or effective_end >= today:
+                continue
         match_season = seasons_of.get(_s(row["match_id"]))
         if match_season is not None:
             per_season[match_season] = per_season.get(match_season, 0) + 1
             if match_season != chosen:
                 continue
-        # Zakres dat dotyczy meczow z terminem. Mecz bez terminu nie ma jak
-        # w niego wpasc, a przeoczyc go najlatwiej - o nim decyduje `when`.
+        # Termin meczu wygrywa. Gdy go brak, zakres kolejki pozwala osadzić
+        # pozycję w poprawnym miejscu bez udawania, że to data oficjalna.
         if at is not None:
             if start and at < _day_start(start):
                 continue
             if end and at >= _day_start(end + timedelta(days=1)):
+                continue
+        elif effective_start is not None and effective_end is not None:
+            if start and effective_end < start:
+                continue
+            if end and effective_start > end:
                 continue
         if S.is_league(code):
             counts["league"] += 1
@@ -448,14 +486,14 @@ async def match_list_payload(
         needle = q.strip().lower()
         items = [item for item in items if needle in _haystack(item)]
 
-    # Najpierw najblizsze terminy, mecze bez terminu na koncu - ale w widoku,
-    # nie poza nim: wlasnie one czekaja najdluzej. W obrebie dnia godzina,
-    # potem numer meczu po liczbie (/3 przed /17).
+    # Dokładny termin wygrywa; bez niego pierwsza data kolejki osadza mecz na
+    # osi czasu. Dopiero całkowity brak obu źródeł trafia na koniec.
     items.sort(
         key=lambda item: (
-            item["day"] is None,
-            item["day"] or "",
-            item["match_at"] or "",
+            item["effective_day"] is None,
+            item["effective_day"] or "",
+            0 if item["date_source"] == "match" else 1,
+            item["match_at"] if item["time_known"] else "",
             _code_order(item["code"]),
         )
     )

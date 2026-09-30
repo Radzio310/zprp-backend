@@ -128,6 +128,11 @@ def _parse_iso_datetime_from_td(td) -> str:
     return f"{yyyy}-{mm}-{dd} {hhmm}:00"
 
 
+def _date_cell_has_time(td) -> bool:
+    """Czy komórka terminarza niesie godzinę, a nie tylko sam dzień."""
+    return bool(td and _RE_TIME.search(td.get_text(" ", strip=True)))
+
+
 def _parse_hall(td) -> Dict[str, Any]:
     out = {
         "Hala_nazwa": "",
@@ -391,7 +396,10 @@ def _find_schedule_table(soup: BeautifulSoup):
     if not soup:
         return None
 
-    must_contain = ["kolejka", "mecz", "data", "gospodarz", "wynik", "gość"]
+    # Nazwa kolumny "Gość" bywa zwracana przez stare strony ZPRP w różnych
+    # kodowaniach. Pozostałe, jednoznaczne nagłówki wystarczą do rozpoznania
+    # tabeli i nie uzależniają parsera od sposobu zdekodowania polskich liter.
+    must_contain = ["kolejka", "mecz", "data", "gospodarz", "wynik"]
 
     for tr in soup.find_all("tr"):
         cells = tr.find_all(["td", "th"], recursive=False)
@@ -531,11 +539,11 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
 
         lp = int(lp_int or 0)
         code = _clean_spaces(td_code.get_text(" ", strip=True))
-        host_name = _clean_spaces(td_host.get_text(" ", strip=True))
-        guest_name = _clean_spaces(td_guest.get_text(" ", strip=True))
+        first_team = _clean_spaces(td_host.get_text(" ", strip=True))
+        second_team = _clean_spaces(td_guest.get_text(" ", strip=True))
         kolejka_raw = _clean_spaces(td_kolejka.get_text(" ", strip=True))
 
-        if _should_skip_bye_placeholder(host_name, guest_name):
+        if _should_skip_bye_placeholder(first_team, second_team):
             i += record_len
             continue
 
@@ -544,6 +552,20 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
         att = _parse_attendance(td_att)
         res = _parse_result(td_res)
         off = _parse_officials(td_off)
+
+        # Terminarz pokazuje strony PROTOKOŁU. Przy zmianie gospodarza pierwsza
+        # jest nominalnym gościem; migawka przechowuje orientację nominalną,
+        # taką samą jak publiczne API. Widok zamieni ją ponownie do protokołu.
+        if res["host_swapped"]:
+            host_name, guest_name = second_team, first_team
+            for host_key, guest_key in (
+                ("wynik_gosp_full", "wynik_gosc_full"),
+                ("wynik_gosp_pol", "wynik_gosc_pol"),
+                ("dogrywka_karne_gosp", "dogrywka_karne_gosc"),
+            ):
+                res[host_key], res[guest_key] = res[guest_key], res[host_key]
+        else:
+            host_name, guest_name = first_team, second_team
 
         m_kno = re.search(r"Kolejka\s+(\d+)", kolejka_raw, re.I)
         kolejka_no = int(m_kno.group(1)) if m_kno else None
@@ -573,6 +595,7 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
             "RozgrywkiCode": code,
             "season": season_label,
             "data_fakt": data_fakt,
+            "data_fakt_time_known": _date_cell_has_time(td_date),
             "runda": "",
             "kolejka": kolejka_range,
             "kolejka_no": kolejka_no,

@@ -32,6 +32,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from app import assignment_rules as A
+from app import assignment_scope as S
 from app import collision_rules as CR
 from app import offtime_rules as O
 from app.assignment_auto import BusyMatch, Context, MatchNeed
@@ -456,13 +457,24 @@ def need_from_state(
     gniazdo w jednym meczu.
     """
     wanted = {str(item).strip() for item in slots} if slots is not None else None
-    local = O.match_moment(moment) if moment else None
+    window = S.effective_window(state, moment)
+    exact_time = bool(window.get("time_known")) and window.get("date_source") == "match"
+    local = O.match_moment(moment) if moment and exact_time else None
+    window_start = window.get("start")
+    window_end = window.get("end")
+    effective_day = window.get("effective_day")
 
     # Klub gospodarza bywa umówiony, że jednego stolikowego stawia z własnych
     # ludzi - wtedy okręg posyła o jednego mniej, ale ZAWSZE co najmniej jednego.
     # Boiskowych to nie dotyczy: tych zapewnia okręg. Reguła siedzi w
     # `assignment_rules.club_crew_needs`, bo tak samo liczy ją lista obsady.
-    club = roster.club_for(state.get("ID_zespoly_gosp_ZespolNazwa"))
+    nominal_host = _s(state.get("ID_zespoly_gosp_ZespolNazwa"))
+    nominal_guest = _s(state.get("ID_zespoly_gosc_ZespolNazwa"))
+    host_swapped = _s(state.get("host_swapped")).lower() in {"1", "true", "yes", "tak"}
+    display_host, display_guest = (
+        (nominal_guest, nominal_host) if host_swapped else (nominal_host, nominal_guest)
+    )
+    club = roster.club_for(display_host)
     needs = A.club_crew_needs(
         code,
         A.club_table_active(
@@ -498,11 +510,15 @@ def need_from_state(
         match_id=_s(match_id),
         code=code,
         moment=local,
-        day=local.date() if local else None,
+        day=local.date() if local else effective_day,
         host_city=_s(state.get("Hala_miasto")),
+        window_start=window_start,
+        window_end=window_end,
+        time_known=bool(window.get("time_known")),
+        date_source=_s(window.get("date_source")) or "none",
         avoid_local=bool(club.get("avoid_local")),
-        host=_s(state.get("ID_zespoly_gosp_ZespolNazwa")),
-        guest=_s(state.get("ID_zespoly_gosc_ZespolNazwa")),
+        host=display_host,
+        guest=display_guest,
         hall=_s(state.get("Hala_nazwa")),
         venue=CR.venue_of(state),
         field_needed=empty_field,

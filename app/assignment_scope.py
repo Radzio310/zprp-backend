@@ -203,6 +203,110 @@ def when_allows(mode: str, has_date: bool) -> bool:
 
 _NUMBER_RE = re.compile(r"(\d+)")
 _DATE_RANGE_RE = re.compile(r"\d{1,2}\.\d{1,2}\.\d{4}")
+_ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_day(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def parse_round_span(value: Any) -> tuple[Optional[date], Optional[date]]:
+    """Daty z podpisu kolejki ZPRP.
+
+    Związek używa kilku wariantów: ``30.09.2026``, ``03 - 04.10.2026`` oraz
+    przy zmianie miesiąca ``30.09 - 01.10.2026``. Pierwsza data dziedziczy
+    brakujący miesiąc i rok z końca zakresu. Nie zgadujemy roku bez ani jednej
+    pełnej daty.
+    """
+    text = _s(value).translate({ord("\u2013"): "-", ord("\u2014"): "-", ord("\u2011"): "-"})
+    if not _DATE_RANGE_RE.search(text):
+        return None, None
+    parts = [part.strip() for part in re.split(r"\s*-\s*", text, maxsplit=1)]
+    token = re.compile(r"^(\d{1,2})(?:\.(\d{1,2}))?(?:\.(\d{4}))?\.?$")
+    if len(parts) == 1:
+        found = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", parts[0])
+        if not found:
+            return None, None
+        point = _valid_day(int(found.group(3)), int(found.group(2)), int(found.group(1)))
+        return point, point
+
+    right_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", parts[1])
+    left_match = token.search(parts[0].split()[-1])
+    if not right_match or not left_match:
+        return None, None
+    end = _valid_day(
+        int(right_match.group(3)), int(right_match.group(2)), int(right_match.group(1))
+    )
+    if end is None:
+        return None, None
+    start_month = int(left_match.group(2) or end.month)
+    start_year = int(left_match.group(3) or end.year)
+    start = _valid_day(start_year, start_month, int(left_match.group(1)))
+    if start and start > end and not left_match.group(3) and start_month > end.month:
+        # Skrócony zapis sylwestrowej kolejki: ``31.12 - 01.01.2027``.
+        start = _valid_day(end.year - 1, start_month, int(left_match.group(1)))
+    if start is None or start > end:
+        return None, None
+    return start, end
+
+
+def round_window(state: Dict[str, Any]) -> tuple[Optional[date], Optional[date]]:
+    """Oficjalny zakres kolejki, w pierwszej kolejności z pól kanonicznych."""
+    start_raw = _s(state.get("round_window_start"))
+    end_raw = _s(state.get("round_window_end"))
+    if _ISO_DAY_RE.fullmatch(start_raw) and _ISO_DAY_RE.fullmatch(end_raw):
+        try:
+            start, end = date.fromisoformat(start_raw), date.fromisoformat(end_raw)
+            if start <= end:
+                return start, end
+        except ValueError:
+            pass
+    return parse_round_span(state.get("kolejka"))
+
+
+def match_time_known(state: Dict[str, Any], match_at: Optional[datetime]) -> bool:
+    """Czy termin ma prawdziwą godzinę, a nie techniczne ``00:00``.
+
+    Nowe parsery zapisują jawny znacznik. Dla starszych migawek bez znacznika
+    bezpieczny fallback uznaje niezerową godzinę za znaną, a północ za brak
+    godziny. Ręczny zapis 00:00 ustawia znacznik na ``True``.
+    """
+    explicit = state.get("data_fakt_time_known")
+    if explicit is not None:
+        if isinstance(explicit, str):
+            return explicit.strip().lower() in {"1", "true", "yes", "tak"}
+        return bool(explicit)
+    raw = _s(state.get("data_fakt") or state.get("data_prop"))
+    if raw and not re.search(r"[T\s]\d{1,2}:\d{2}", raw):
+        return False
+    return bool(match_at and (match_at.hour or match_at.minute or match_at.second))
+
+
+def effective_window(
+    state: Dict[str, Any], match_at: Optional[datetime]
+) -> Dict[str, Any]:
+    """Termin do widoku i oceny dostępności bez udawania oficjalnej daty."""
+    if match_at is not None:
+        day = match_at.date()
+        known = match_time_known(state, match_at)
+        return {
+            "start": day,
+            "end": day,
+            "effective_day": day,
+            "date_source": "match",
+            "time_known": known,
+        }
+    start, end = round_window(state)
+    return {
+        "start": start,
+        "end": end,
+        "effective_day": start,
+        "date_source": "round" if start and end else "none",
+        "time_known": False,
+    }
 
 
 def round_info(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -239,10 +343,13 @@ def round_info(state: Dict[str, Any]) -> Dict[str, Any]:
         series = f"Kolejka {number}"
 
     key = f"{phase}|{series}".lower() if series else ""
+    window_start, window_end = round_window(state)
     return {
         "key": key,
         "phase": phase,
         "name": series,
         "no": number,
         "span": span,
+        "start": window_start.isoformat() if window_start else "",
+        "end": window_end.isoformat() if window_end else "",
     }
