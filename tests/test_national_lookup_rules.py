@@ -88,8 +88,8 @@ def test_status_sedziego():
     assert NL.judge_status({"first_full_at": at, "last_full_at": at}) == {
         "built": True, "at": at.isoformat(), "reason": "judge",
     }
-    assert NL.judge_status(None, at, True) == {"built": True, "at": at.isoformat(), "reason": "sources"}
-    assert NL.judge_status(None, None, False) == {"built": False, "at": None, "reason": None}
+    # Ryczałty z lekkiego odświeżania nie są dowodem pełnego pobrania.
+    assert NL.judge_status(None) == {"built": False, "at": None, "reason": None}
 
 
 def test_czyszczenie_numerow_meczow():

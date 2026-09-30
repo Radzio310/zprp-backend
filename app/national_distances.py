@@ -618,8 +618,7 @@ class JudgeStatusRequest(BaseModel):
 async def national_distances_judge_status(body: JudgeStatusRequest):
     """Aplikacja pyta, czy zachęcać sędziego do pełnego pobrania.
 
-    Zbudowana = wpis po pełnym pobraniu albo choć jeden ryczałt z jego meczów
-    w kolejce serwera (sędziowie sprzed wprowadzenia wpisu). Bez logowania:
+    Zbudowana = wpis po pełnym pobraniu (`full: true`). Bez logowania:
     odpowiedź to tylko tak/nie i data.
     """
     judge_id = body.judge_id.strip()
@@ -634,18 +633,9 @@ async def national_distances_judge_status(body: JudgeStatusRequest):
         if row
         else None
     )
-    has_source, source_at = False, None
-    ids = NL.clean_match_ids(body.match_ids)
-    if not judge_row and ids:
-        source = await database.fetch_one(
-            select(
-                func.count().label("n"),
-                func.min(national_distance_sources.c.created_at).label("at"),
-            ).where(national_distance_sources.c.match_id.in_(ids))
-        )
-        if source and int(source["n"] or 0) > 0:
-            has_source, source_at = True, source["at"]
-    return NL.judge_status(judge_row, source_at, has_source)
+    # `match_ids` zostaje w zapytaniu dla zgodności ze starszymi telefonami,
+    # ale nie jest już dowodem (patrz NL.judge_status).
+    return NL.judge_status(judge_row)
 
 
 # ---------------------------------------------------------------------------

@@ -244,11 +244,13 @@ def clean_match_ids(values: Iterable[Any]) -> list[str]:
     return out
 
 
-def judge_status(judge_row: Optional[Mapping[str, Any]], source_at: Any = None, has_source: bool = False) -> dict:
+def judge_status(judge_row: Optional[Mapping[str, Any]]) -> dict:
     """
-    Czy sędzia zbudował już tabelę: wpis po pełnym pobraniu wygrywa, a gdy go
-    nie ma - wystarczy dowolny ryczałt z jego meczów w kolejce serwera
-    (sędziowie, którzy czytali ryczałty przed wprowadzeniem wpisu).
+    Czy sędzia zbudował już tabelę: TYLKO wpis po pełnym pobraniu.
+
+    Ryczałty w kolejce serwera nic nie dowodzą - zwykłe odświeżanie też je
+    wysyła (bieżący sezon), więc jako dowód łapały wszystkich, którzy choć raz
+    otworzyli aplikację, i plansza nie pokazywała się nikomu (30.09.2026).
     """
 
     def iso(value: Any) -> Optional[str]:
@@ -257,6 +259,4 @@ def judge_status(judge_row: Optional[Mapping[str, Any]], source_at: Any = None, 
     if judge_row:
         at = judge_row.get("last_full_at") or judge_row.get("first_full_at")
         return {"built": True, "at": iso(at), "reason": "judge"}
-    if has_source:
-        return {"built": True, "at": iso(source_at), "reason": "sources"}
     return {"built": False, "at": None, "reason": None}
