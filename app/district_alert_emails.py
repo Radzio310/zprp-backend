@@ -35,6 +35,7 @@ from app.province_alert_emails import (
     logo_url,
 )
 from app.province_alert_rules import plural, province_title
+from app.mail_brand import baza_signature
 
 GREEN = "#1E7F4F"
 SLATE = "#44546A"
@@ -224,7 +225,7 @@ def _frame(
       {_e(footer_note)} Ustawienia: BAZA_web &rarr; Obsada &rarr; dzwonek „Powiadomienia okręgu”.
     </td></tr>
   </table>
-  <div style="padding-top:12px;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#8A96A8;">BAZA &middot; Obsada okręgu</div>
+  {baza_signature(label="BAZA · Obsada okręgu")}
 </td></tr>
 </table>
 </body></html>"""

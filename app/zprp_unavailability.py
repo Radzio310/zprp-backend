@@ -27,6 +27,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.admin_guard import admin_write_guard, bearer_token, decode_token
 from app.beach.email_config import get_email_config
+from app.mail_brand import NIEDYSPO_SENDER_EMAIL, brand_cell
 from app.db import (
     database,
     province_judges,
@@ -103,7 +104,7 @@ class SettingsBody(BaseModel):
     recipientEmails: list[str] = Field(default_factory=list)
     # Zgodność z pierwszą wersją klienta.
     recipientEmail: str = ""
-    senderEmail: str = "obsady@catchapp.com.pl"
+    senderEmail: str = NIEDYSPO_SENDER_EMAIL
     senderName: str = "Niedyspo BAZA"
     discordWebhookUrl: str = ""
     provinceCc: dict[str, list[str]] = Field(default_factory=dict)
@@ -169,7 +170,7 @@ async def _settings_row() -> dict[str, Any]:
         "id": 1,
         "recipient_email": "",
         "recipient_emails": [],
-        "sender_email": "obsady@catchapp.com.pl",
+        "sender_email": NIEDYSPO_SENDER_EMAIL,
         "sender_name": "Niedyspo BAZA",
         "categories": list(DEFAULT_CATEGORIES),
         "discord_webhook_url": "",
@@ -200,7 +201,7 @@ def _settings_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "recipientEmail": recipients[0] if recipients else "",
         "recipientEmails": recipients,
-        "senderEmail": _clean(row.get("sender_email")) or "obsady@catchapp.com.pl",
+        "senderEmail": _clean(row.get("sender_email")) or NIEDYSPO_SENDER_EMAIL,
         "senderName": _clean(row.get("sender_name")) or "Niedyspo BAZA",
         "categories": normalize_categories(row.get("categories") or DEFAULT_CATEGORIES),
         # URL wraca do panelu administratora, bo musi dać się edytować. Nigdy
@@ -447,9 +448,14 @@ def render_overlap_email(row: dict[str, Any]) -> tuple[str, str, str]:
     html_body = f"""<!doctype html><html lang="pl"><body style="margin:0;background:#EEF2F8;font-family:Arial,Helvetica,sans-serif;color:#172033;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:30px 14px;background:#EEF2F8;"><tr><td align="center">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:620px;background:#F8FAFD;border-radius:18px;overflow:hidden;border:1px solid #DDE5F0;">
-        <tr><td style="padding:24px 26px;background:#0D1B2A;color:#FFFFFF;">
-          <div style="font-size:11px;font-weight:bold;letter-spacing:2px;color:#F0A500;">NIEDYSPO BAZA · OBSADA CENTRALNA</div>
-          <div style="margin-top:7px;font-size:23px;line-height:29px;font-weight:bold;">Nowa niedyspozycyjność nachodzi na mecz</div>
+        <tr><td style="padding:22px 26px;background:#0D1B2A;color:#FFFFFF;">
+          <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+            {brand_cell("obsi.png", 60, "Niedyspo BAZA")}
+            <td valign="middle" style="font-family:Arial,Helvetica,sans-serif;color:#FFFFFF;">
+              <div style="font-size:11px;font-weight:bold;letter-spacing:2px;color:#F0A500;">NIEDYSPO BAZA · OBSADA CENTRALNA</div>
+              <div style="margin-top:7px;font-size:22px;line-height:28px;font-weight:bold;">Nowa niedyspozycyjność nachodzi na mecz</div>
+            </td>
+          </tr></table>
         </td></tr>
         <tr><td style="padding:20px 26px 14px 26px;font-size:14px;line-height:22px;">
           <strong>{html.escape(judge)}</strong> (nr {html.escape(judge_id)}) zapisał niedyspozycyjność <strong>{_day(row.get('date_from'))} – {_day(row.get('date_to'))}</strong>.
@@ -482,7 +488,7 @@ async def _send_row(row: dict[str, Any], cfg: dict[str, Any]) -> str:
     subject, html_body, text_body = render_overlap_email(row)
     payload = {
         "sender": {
-            "email": _clean(cfg.get("sender_email")) or "obsady@catchapp.com.pl",
+            "email": _clean(cfg.get("sender_email")) or NIEDYSPO_SENDER_EMAIL,
             "name": _clean(cfg.get("sender_name")) or "Niedyspo BAZA",
         },
         "to": [{"email": email} for email in recipients],

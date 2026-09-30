@@ -22,6 +22,7 @@ from app.beach.brevo_email import (  # moduł bez importu app.db — bezpieczny
     email_delivery_to_http,  # re-eksport dla warstwy routerów
 )
 from app.beach.email_config import get_email_config
+from app.mail_brand import baza_sender_email, brand_cell
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +101,13 @@ def _code_html(heading: str, intro: str, code: str, expires_minutes: int) -> str
       <table role="presentation" width="520" cellpadding="0" cellspacing="0"
              style="background:#ffffff;border-radius:14px;border:1px solid #e5ddd1;">
         <tr><td style="padding:22px 28px 6px 28px;">
-          <div style="font-size:13px;font-weight:bold;letter-spacing:1px;color:{_ACCENT};">PROEL &middot; BAZA</div>
-          <h1 style="margin:10px 0 0 0;font-size:20px;color:#1a1210;">{heading}</h1>
+          <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+            {brand_cell("bazus.png", 52, "BAZA")}
+            <td valign="middle">
+              <div style="font-size:13px;font-weight:bold;letter-spacing:1px;color:{_ACCENT};">PROEL &middot; BAZA</div>
+              <h1 style="margin:8px 0 0 0;font-size:20px;color:#1a1210;">{heading}</h1>
+            </td>
+          </tr></table>
         </td></tr>
         <tr><td style="padding:10px 28px 0 28px;font-size:14px;line-height:21px;color:#4c4238;">{intro}</td></tr>
         <tr><td align="center" style="padding:22px 28px;">
@@ -141,7 +147,7 @@ async def send_verification_code(
     heading = "Potwierdź adres e-mail"
     intro = "Ten adres został podany przy koncie ProEl w aplikacji BAZA. Wpisz poniższy kod, aby go potwierdzić."
     payload = {
-        "sender": {"name": _app_name(), "email": cfg.from_email},
+        "sender": {"name": _app_name(), "email": baza_sender_email(cfg.from_email)},
         "to": [to_entry],
         "subject": "ProEl — kod weryfikacyjny",
         "htmlContent": _code_html(heading, intro, code, expires_minutes),
@@ -164,7 +170,7 @@ async def send_password_reset_code(
     heading = "Reset hasła konta ProEl"
     intro = "Ktoś (mamy nadzieję, że Ty) poprosił o reset hasła. Wpisz poniższy kod w aplikacji, aby ustawić nowe hasło."
     payload = {
-        "sender": {"name": _app_name(), "email": cfg.from_email},
+        "sender": {"name": _app_name(), "email": baza_sender_email(cfg.from_email)},
         "to": [to_entry],
         "subject": "ProEl — kod resetu hasła",
         "htmlContent": _code_html(heading, intro, code, expires_minutes),
@@ -194,8 +200,13 @@ async def send_new_password_email(
       <table role="presentation" width="520" cellpadding="0" cellspacing="0"
              style="background:#ffffff;border-radius:14px;border:1px solid #e5ddd1;">
         <tr><td style="padding:22px 28px;">
-          <div style="font-size:13px;font-weight:bold;letter-spacing:1px;color:{_ACCENT};">PROEL &middot; BAZA</div>
-          <h1 style="margin:10px 0 8px 0;font-size:20px;color:#1a1210;">Hasło zostało zresetowane</h1>
+          <table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:8px;"><tr>
+            {brand_cell("bazus.png", 52, "BAZA")}
+            <td valign="middle">
+              <div style="font-size:13px;font-weight:bold;letter-spacing:1px;color:{_ACCENT};">PROEL &middot; BAZA</div>
+              <h1 style="margin:8px 0 0 0;font-size:20px;color:#1a1210;">Hasło zostało zresetowane</h1>
+            </td>
+          </tr></table>
           <p style="margin:0;font-size:14px;line-height:21px;color:#4c4238;">
             Administrator zresetował hasło do Twojego konta ProEl.</p>
           <p style="margin:14px 0 0 0;font-size:16px;color:#1a1210;">Nowe hasło: <b>{new_password}</b></p>
@@ -215,7 +226,7 @@ async def send_new_password_email(
         "Ze względów bezpieczeństwa zmień to hasło po pierwszym zalogowaniu."
     )
     payload = {
-        "sender": {"name": _app_name(), "email": cfg.from_email},
+        "sender": {"name": _app_name(), "email": baza_sender_email(cfg.from_email)},
         "to": [to_entry],
         "subject": "ProEl — Twoje hasło zostało zresetowane",
         "htmlContent": html,

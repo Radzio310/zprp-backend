@@ -42,6 +42,7 @@ from pydantic import BaseModel
 from app import district_alert_rules as R
 from app import collision_rules as CR
 from app import district_alert_emails as E
+from app.mail_brand import baza_sender_email
 from app.beach.brevo_email import EmailDeliveryError
 from app.beach.email_config import get_email_config
 from app.deps import get_jwt_payload
@@ -1423,7 +1424,7 @@ async def _settings_json(key: str, row: Optional[dict]) -> dict:
         "recent": await _recent(key),
         "mail_configured": bool(cfg.brevo_api_key and cfg.from_email),
         "sender_name": E.sender_name(),
-        "sender_email": cfg.from_email or None,
+        "sender_email": baza_sender_email(cfg.from_email) or None,
         "last_check_at": _iso((row or {}).get("last_check_at")),
         "last_sent_at": _iso((row or {}).get("last_sent_at")),
         "last_status": _s((row or {}).get("last_status")) or None,

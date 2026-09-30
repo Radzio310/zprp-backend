@@ -28,6 +28,7 @@ import httpx
 
 from app.beach.brevo_email import EmailDeliveryError  # moduł bez importu app.db
 from app.beach.email_config import get_email_config
+from app.mail_brand import baza_sender_email, baza_signature
 from app.province_alert_rules import Pace, format_pln, pace_sentence, plural, province_title, subject_line
 
 logger = logging.getLogger(__name__)
@@ -263,7 +264,7 @@ def render_html(
       Próg, częstotliwość i adresy zmienisz w Rozliczeniach, pod ikoną koła zębatego.
     </td></tr>
   </table>
-  <div style="padding-top:12px;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#8A96A8;">BAZA &middot; Rozliczenia okręgu</div>
+  {baza_signature(label="BAZA · Rozliczenia okręgu")}
 </td></tr>
 </table>
 </body></html>"""
@@ -386,12 +387,12 @@ async def send_alert_email(
     hidden = [{"email": item} for item in bcc if item and item.lower() not in visible]
     if not to and hidden:
         # Brevo wymaga jawnego adresata - nadawca pisze „do siebie", reszta w ukryciu.
-        to = [{"email": cfg.from_email}]
+        to = [{"email": baza_sender_email(cfg.from_email)}]
     if not to:
         raise EmailDeliveryError("Brak adresatów", kind="request")
     base_tag = tag or "settlement-alert"
     payload = {
-        "sender": {"name": sender or sender_name(), "email": cfg.from_email},
+        "sender": {"name": sender or sender_name(), "email": baza_sender_email(cfg.from_email)},
         "to": to,
         "subject": subject,
         "htmlContent": html_body,

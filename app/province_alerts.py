@@ -40,6 +40,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app import province_alert_rules as A
+from app.mail_brand import baza_sender_email
 from app.beach.brevo_email import EmailDeliveryError
 from app.beach.email_config import get_email_config
 from app.deps import get_jwt_payload
@@ -280,7 +281,7 @@ def _settings_json(key: str, account: str, row: Optional[dict]) -> dict:
         "updated_at": _iso((row or {}).get("updated_at")),
         "mail_configured": bool(cfg.brevo_api_key and cfg.from_email),
         "sender_name": sender_name(),
-        "sender_email": cfg.from_email or None,
+        "sender_email": baza_sender_email(cfg.from_email) or None,
         "sweep_minutes": SWEEP_EVERY_SECONDS // 60,
     }
 

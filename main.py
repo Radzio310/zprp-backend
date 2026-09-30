@@ -312,6 +312,7 @@ app.include_router(proel_router)
 app.include_router(matches_router)
 app.include_router(partner_offtimes_router)
 from app.mentoring import router as mentoring_router
+from app.mail_brand import router as mail_brand_router
 app.include_router(mentoring_router)
 from app.mentor_evaluations import router as mentor_evaluations_router
 app.include_router(mentor_evaluations_router)
@@ -422,6 +423,8 @@ app.include_router(beach_mp_appearances_router)
 
 # NEW: push router
 app.include_router(push_router)
+# Grafiki w nagłówkach maili (obsi, bazus) - `app/mail_brand.py`.
+app.include_router(mail_brand_router)
 
 logger = logging.getLogger("uvicorn")
 
