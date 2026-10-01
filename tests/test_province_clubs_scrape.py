@@ -16,6 +16,7 @@ from app.province_clubs_scrape import (
     parse_team_club_id,
     parse_teams,
     team_key,
+    unique_club_ids_by_name,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -104,6 +105,22 @@ def test_druzyny_uprawnione_z_prawej_tabeli():
 def test_numer_klubu_ze_strony_skladu():
     html = '<a href="?a=klub&amp;b=edycja&amp;NrKlubu=4321">Szczegóły klubu</a>'
     assert parse_team_club_id(html) == "4321"
+
+
+def test_dwa_numery_druzyny_o_tej_samej_nazwie_lacza_sie_w_jeden_klub():
+    rows = [
+        {"team_id": "junior", "name_key": team_key("KPR Lubliniec"), "club_id": "987"},
+        {"team_id": "mlodzik", "name_key": team_key("KPR Lubliniec"), "club_id": ""},
+    ]
+    assert unique_club_ids_by_name(rows)[team_key("KPR Lubliniec")] == "987"
+
+
+def test_niejednoznacznej_nazwy_nie_sklejamy():
+    rows = [
+        {"name_key": "azs", "club_id": "1"},
+        {"name_key": "azs", "club_id": "2"},
+    ]
+    assert "azs" not in unique_club_ids_by_name(rows)
 
 
 def test_klucz_nazwy_rozroznia_drugie_zespoly():

@@ -329,6 +329,27 @@ def parse_team_club_id(html: str) -> str:
     return ""
 
 
+def unique_club_ids_by_name(rows: list[dict]) -> dict[str, str]:
+    """Jednoznaczne mapowanie nazwy drużyny na klub z już poznanych wierszy.
+
+    ZPRP tworzy osobny numer drużyny dla każdej kategorii. Dwie drużyny
+    „KPR Lubliniec" mogą więc mieć różne `team_id`, ale nadal należą do tego
+    samego `NrKlubu`. Gdy ta sama nazwa wskazuje więcej niż jeden klub, nie
+    zgadujemy i nie zwracamy jej w mapie.
+    """
+    candidates: dict[str, set[str]] = {}
+    for row in rows:
+        key = str(row.get("name_key") or "").strip()
+        club_id = str(row.get("club_id") or "").strip()
+        if key and club_id:
+            candidates.setdefault(key, set()).add(club_id)
+    return {
+        key: next(iter(club_ids))
+        for key, club_ids in candidates.items()
+        if len(club_ids) == 1
+    }
+
+
 def club_display_name(names: list[str]) -> str:
     """
     Nazwa klubu z nazw jego druzyn - do czasu, az ktos ja w panelu poprawi.

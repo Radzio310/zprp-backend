@@ -43,6 +43,7 @@ from app.province_clubs_scrape import (
     parse_selected_province,
     parse_team_club_id,
     parse_teams,
+    unique_club_ids_by_name,
 )
 from app.settlement_province import canonical
 from app.settlement_seasons import normalize_season_label, plan_seasons, season_of
@@ -318,10 +319,14 @@ async def _collect_season(
         for row in teams
         if _s(row.get("team_id")) and _s(row.get("club_id"))
     }
+    # Nazwa może być wspólna tylko wtedy, gdy prowadzi jednoznacznie do jednego
+    # numeru klubu. To łączy np. dwa różne numery drużyn „KPR Lubliniec", ale
+    # nie skleja na siłę dwóch klubów o przypadkiem jednakowej nazwie.
+    unique_club_for_name = unique_club_ids_by_name(teams)
     for team_id, (team, source_competition) in eligible.items():
         if team_id in participant_ids:
             continue
-        team.club_id = known_clubs.get(team_id, "")
+        team.club_id = known_clubs.get(team_id, "") or unique_club_for_name.get(team.key, "")
         if not team.club_id and team.team_path:
             try:
                 _, squad = await fetch_with_correct_encoding(
