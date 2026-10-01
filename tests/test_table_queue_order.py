@@ -90,3 +90,31 @@ class TestDelegatNaBoisku:
         """
         assert role_refusal(judge("7", roles=["delegat"], assign_role="field"), "field") is None
         assert role_refusal(judge("8", roles=["delegat"], assign_role="both"), "field") is None
+
+
+class TestNieSedziujeSam:
+    """
+    Przelacznik sedziego: „nie prowadzi meczu SAM" (decyzja 01.10.2026).
+
+    Dotyczy meczow, przy ktorych stoi JEDEN boiskowy - Dzieci i Mlodzik
+    mlodszy (`assignment_rules.crew_needs`). W parze taki sedzia pracuje
+    normalnie, wiec regula patrzy na mecz, a nie na sedziego.
+    """
+
+    def test_mecz_jednoosobowy_rozpoznany_po_rozgrywkach(self):
+        from app.assignment_auto import solo_match
+
+        assert solo_match("DZM/4") is True
+        assert solo_match("MLK1213/2") is True
+        assert solo_match("S/JmM") is False
+        assert solo_match("IIM4") is False
+
+    def test_sedzia_bez_przelacznika_sedziuje_wszedzie(self):
+        from app.assignment_auto import solo_match
+
+        zwykly = judge("9")
+        assert zwykly.no_solo is False
+        assert solo_match("DZM/4") is True
+
+    def test_przelacznik_zapisuje_sie_na_sedzim(self):
+        assert judge("10", no_solo=True).no_solo is True

@@ -245,6 +245,7 @@ async def judges(
                 "table_specialist": judge.table_specialist,
                 "delegate": judge.delegate,
                 "needs_experienced": judge.needs_experienced,
+                "no_solo": judge.no_solo,
                 "preferred_days": sorted(judge.preferred_days),
                 "note": _s(settings.get("note")),
                 # Rola w obsadzie (25.09.2026): role z listy ZPRP (pusta lista =
@@ -329,7 +330,10 @@ async def judges(
             "with_settings": sum(
                 1
                 for row in rows
-                if row["needs_experienced"] or row["preferred_days"] or row["assign_role"]
+                if row["needs_experienced"]
+                or row["no_solo"]
+                or row["preferred_days"]
+                or row["assign_role"]
             ),
             # Sędziowie, których Automat nie stawia na boisku (ZPRP albo okręg).
             "table_only": sum(1 for row in rows if row["effective_role"] == "table"),
@@ -341,6 +345,9 @@ class JudgeSettingsRequest(BaseModel):
     province: str
     full_name: Optional[str] = None
     needs_experienced: Optional[bool] = None
+    #: „Nie sędziuje sam" - mecze z jednym boiskowym są dla niego zamknięte.
+    #: `None` = bez zmian (starsze wersje panelu tego pola nie wysyłają).
+    no_solo: Optional[bool] = None
     preferred_days: Optional[list[int]] = None
     note: Optional[str] = None
     #: Rola w obsadzie: "" (według ZPRP), "both", "table", "field".
@@ -363,6 +370,8 @@ async def save_judge_settings(judge_id: str, payload: JudgeSettingsRequest):
         "updated_by": _s(payload.updated_by) or None,
         "updated_at": _now(),
     }
+    if payload.no_solo is not None:
+        values["no_solo"] = bool(payload.no_solo)
     if payload.assign_role is not None:
         from app.assignment_people import ASSIGN_ROLES, normalize_assign_role
 
