@@ -80,3 +80,34 @@ def test_rejects_incomplete_or_reversed_window():
 
     assert result.items == []
     assert result.unresolved == ["1"]
+
+
+def test_regional_one_day_round_uses_start_as_end():
+    async def rows(path: str):
+        if path == "pokaz_rundy.php?Rozgrywki=12060":
+            return [{"Id": "31217", "Nazwa": "I Runda"}]
+        if path == "pokaz_kolejki.php?Runda=31217":
+            return [{
+                "ID_kolejka": "67300",
+                "Nazwa": "Kolejka 1",
+                "DataStart": "2026-10-08",
+                "DataKoniec": None,
+            }]
+        return []
+
+    result = asyncio.run(
+        resolve_items(
+            [RoundWindowRequestItem(
+                match_id="regional-1",
+                competition_id="12060",
+                round_name="I Runda",
+                series_name="Kolejka 1",
+            )],
+            rows,
+        )
+    )
+
+    assert [(item.start_date, item.end_date) for item in result.items] == [
+        ("2026-10-08", "2026-10-08")
+    ]
+    assert result.unresolved == []

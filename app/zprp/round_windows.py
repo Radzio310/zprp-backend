@@ -210,6 +210,10 @@ async def resolve_items(
         series = _find_named(series_by_round.get(round_id, []), item.series_name, round_=False)
         start = _valid_iso_date(series.get("DataStart")) if series else ""
         end = _valid_iso_date(series.get("DataKoniec")) if series else ""
+        # W rozgrywkach okregowych ZPRP czesto zapisuje tylko DataStart. To
+        # poprawny jednodniowy termin kolejki, a nie brak danych.
+        if start and not end:
+            end = start
         series_id = _text(series.get("ID_kolejka")) if series else ""
         if not (round_id and series_id and start and end and start <= end):
             unresolved.append(item.match_id)
