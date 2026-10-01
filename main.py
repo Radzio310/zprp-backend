@@ -127,6 +127,7 @@ from app.game_scores import router as game_scores_router
 from app.signatures import router as signatures_router
 from app.board import router as board_router
 from app.release_stories import router as release_stories_router
+from app.public_stats import router as public_stats_router
 
 from app.zprp.schedule import router as schedule_router
 from app.zprp.competitions import router as competitions_router
@@ -205,6 +206,9 @@ app.add_middleware(
         "http://localhost:8081",
         "http://127.0.0.1:8081",
         "https://baza-web-two.vercel.app",
+        # Strona produktu (Hostinger) czyta `GET /public/baza-stats` z przeglądarki.
+        "https://bazaapp.online",
+        "https://www.bazaapp.online",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -374,6 +378,8 @@ app.include_router(game_scores_router)
 app.include_router(signatures_router)
 app.include_router(board_router, tags=["board"])
 app.include_router(release_stories_router)
+# Publiczne sumy dla strony bazaapp.online - własny prefiks /public, bez auth.
+app.include_router(public_stats_router)
 
 app.include_router(schedule_router, tags=["zprp"])
 app.include_router(competitions_router, tags=["zprp"])

@@ -99,6 +99,8 @@ class Judge:
     roles: frozenset[str] = frozenset()
     #: Ustawienia z modułu obsadowego.
     needs_experienced: bool = False
+    #: Nie prowadzi meczu SAM - mecz z jednym boiskowym jest dla niego zamknięty.
+    no_solo: bool = False
     preferred_days: frozenset[int] = frozenset()
     #: Ile meczów ma już w oknie - do równego podziału.
     load: int = 0
@@ -147,6 +149,7 @@ def make_judge(
     badges: Iterable[Any] = (),
     roles: Iterable[Any] = (),
     needs_experienced: bool = False,
+    no_solo: bool = False,
     preferred_days: Iterable[int] = (),
     load: int = 0,
     assign_role: Any = "",
@@ -159,6 +162,7 @@ def make_judge(
         badges=frozenset(fold(badge) for badge in badges if str(badge or "").strip()),
         roles=normalize_roles(roles),
         needs_experienced=bool(needs_experienced),
+        no_solo=bool(no_solo),
         preferred_days=frozenset(int(day) for day in preferred_days if day is not None),
         load=int(load or 0),
         assign_role=normalize_assign_role(assign_role),

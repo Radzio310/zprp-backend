@@ -579,6 +579,18 @@ def _window_availability(
     return PARTIAL, details
 
 
+def solo_match(code: Any) -> bool:
+    """
+    Czy przy tym meczu stoi JEDEN boiskowy (Dzieci, Młodzik młodszy).
+
+    Liczbę ludzi przy meczu zna `assignment_rules.crew_needs` - pytamy jej,
+    zamiast powtarzać listę rozgrywek.
+    """
+    from app.assignment_rules import crew_needs
+
+    return int(crew_needs(code).get("field", 2) or 0) <= 1
+
+
 def _hard_reason(
     ctx: Context, judge: Judge, need: MatchNeed, *, round_no: int, kind: str = ""
 ) -> Optional[str]:
@@ -596,6 +608,11 @@ def _hard_reason(
         _, can_make = _same_day_state(ctx, judge.judge_id, need, kind=kind)
         if not can_make:
             return "ma tego dnia mecz, na który nie zdąży"
+    # „Nie sędziuje sam" (01.10.2026): mecz z JEDNYM boiskowym - Dzieci
+    # i Młodzik młodszy - jest dla niego zamknięty. W parze sędziuje normalnie,
+    # więc reguła patrzy na obsadę meczu, a nie na samego sędziego.
+    if kind == FIELD and judge.no_solo and solo_match(need.code):
+        return "nie sędziuje sam, a ten mecz prowadzi jeden boiskowy"
     if need.avoid_local and is_local(judge, need.host_city):
         return "klub gospodarza nie chce sędziów z tego miasta"
     if round_no == 1 and judge.preferred_days and need.weekday is not None:

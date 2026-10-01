@@ -10,8 +10,10 @@ from pathlib import Path
 from app.province_clubs_scrape import (
     club_display_name,
     parse_competitions,
+    parse_eligible_teams,
     parse_seasons,
     parse_selected_province,
+    parse_team_club_id,
     parse_teams,
     team_key,
 )
@@ -82,9 +84,26 @@ def test_druzyny_tylko_uczestniczace():
     by_id = {item.team_id: item for item in teams}
     assert by_id["18447"].province == "OP"      # gosc z innego wojewodztwa
     assert by_id["18447"].club_id == "4268"
-    # Prawa tabela („druzyny spelniajace kryteria") NIE wchodzi - te kluby
-    # z okregiem nie graja i nie ma za co ich obciazac.
+    # `parse_teams` zachowuje semantyke lewej tabeli. Prawa ma osobny parser,
+    # zeby zespół uprawniony nie udawał uczestnika aktualnych rozgrywek.
     assert "15153" not in by_id
+
+
+def test_druzyny_uprawnione_z_prawej_tabeli():
+    teams = parse_eligible_teams(DRUZYNY)
+    assert len(teams) == 7
+    by_id = {item.team_id: item for item in teams}
+    sosnica = by_id["15153"]
+    assert sosnica.name == "Sośnica Gliwice"
+    assert sosnica.province == "SL"
+    assert sosnica.club_id == ""  # prawa tabela nie podaje numeru klubu
+    assert sosnica.other_competitions == [("12009", "LOTTO Superliga kobiet")]
+    assert "Filtr_zespol=15153" in sosnica.team_path
+
+
+def test_numer_klubu_ze_strony_skladu():
+    html = '<a href="?a=klub&amp;b=edycja&amp;NrKlubu=4321">Szczegóły klubu</a>'
+    assert parse_team_club_id(html) == "4321"
 
 
 def test_klucz_nazwy_rozroznia_drugie_zespoly():

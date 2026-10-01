@@ -988,6 +988,9 @@ province_judge_settings = Table(
     Column("full_name", String, nullable=True),
     # Automat dostawia mu wyłącznie sędziego centralnego boiskowego (I, LC, SL).
     Column("needs_experienced", Boolean, nullable=False, server_default=text("false")),
+    # Nie prowadzi meczu SAM: mecze z jednym boiskowym (Dzieci, Młodzik młodszy)
+    # są dla niego zamknięte, w parze sędziuje normalnie (01.10.2026).
+    Column("no_solo", Boolean, nullable=False, server_default=text("false")),
     # Dni tygodnia, w które sędzia woli sędziować: 0 = poniedziałek, 6 = niedziela.
     Column(
         "preferred_days",
@@ -4395,6 +4398,13 @@ with engine.connect() as _conn:
     # `create_all` kolumny nie doda.
     _conn.execute(
         text("ALTER TABLE province_judge_settings ADD COLUMN IF NOT EXISTS assign_role varchar")
+    )
+    # „Nie sędziuje sam" (01.10.2026) - ta sama sprawa, kolumna dochodzi ręcznie.
+    _conn.execute(
+        text(
+            "ALTER TABLE province_judge_settings "
+            "ADD COLUMN IF NOT EXISTS no_solo boolean NOT NULL DEFAULT false"
+        )
     )
     # Tablica Komisji (16.09.2026): kosz, autorstwo i skład z odznaki. Tabele
     # istnieją na produkcji, więc `create_all` tych kolumn nie dołoży.

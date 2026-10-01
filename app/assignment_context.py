@@ -187,6 +187,7 @@ async def load_roster(province: str) -> Roster:
     settings = {
         _s(row["judge_id"]): {
             "needs_experienced": bool(row["needs_experienced"]),
+            "no_solo": bool(dict(row).get("no_solo") or False),
             "preferred_days": [
                 int(day) for day in _json_list(row["preferred_days"]) if str(day).strip().isdigit()
             ],
@@ -280,6 +281,7 @@ async def load_roster(province: str) -> Roster:
             letters=grades.get(name_key(full_name), ()),
             badges=badge_names(row["badges"]),
             needs_experienced=own.get("needs_experienced", False),
+            no_solo=own.get("no_solo", False),
             preferred_days=own.get("preferred_days", ()),
             roles=roster.zprp_roles.get(judge_id, ()),
             assign_role=own.get("assign_role", ""),

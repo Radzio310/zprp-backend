@@ -23,6 +23,7 @@ from httpx import AsyncClient
 from sqlalchemy import and_, insert, not_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import settlement_cache as SC
 from app.db import (
     database,
     province_club_seasons,
@@ -34,10 +35,13 @@ from app.db import (
 from app.deps import get_settings
 from app.province_clubs_scrape import (
     Competition,
+    Team,
     club_display_name,
     parse_competitions,
+    parse_eligible_teams,
     parse_seasons,
     parse_selected_province,
+    parse_team_club_id,
     parse_teams,
 )
 from app.settlement_province import canonical
@@ -246,6 +250,39 @@ async def _collect_season(
 
     teams: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    participant_ids: set[str] = set()
+    eligible: dict[str, tuple[Team, Competition]] = {}
+    competitions_by_id = {item.id: item for item in competitions}
+
+    def append_team(
+        team: Team,
+        competition: Competition,
+        *,
+        competition_id: Optional[str] = None,
+        competition_name: Optional[str] = None,
+    ) -> None:
+        target_id = competition_id or competition.id
+        key = (team.team_id, target_id)
+        if key in seen:
+            return
+        seen.add(key)
+        teams.append(
+            {
+                "province": "",  # uzupelnia wolajacy
+                "season": "",
+                "team_id": team.team_id,
+                "competition_id": target_id,
+                "team_name": team.name,
+                "name_key": team.key,
+                "team_province": team.province,
+                "club_id": team.club_id,
+                "category": competition.category,
+                "gender": competition.gender,
+                "competition_name": competition_name or competition.name,
+                "competition_code": competition.code,
+            }
+        )
+
     for competition in competitions:
         target = _path(competition.teams_path) or (
             f"/index.php?a=rozgrywki&b=zespoly&IdRozgr={competition.id}&Filtr_sezon={season_id}"
@@ -259,27 +296,63 @@ async def _collect_season(
             logger.warning("[clubs] druzyny %s: %s", competition.id, exc)
             continue
         for team in parse_teams(page):
-            key = (team.team_id, competition.id)
-            if key in seen:
-                continue
-            seen.add(key)
-            teams.append(
-                {
-                    "province": "",  # uzupelnia wolajacy
-                    "season": "",
-                    "team_id": team.team_id,
-                    "competition_id": competition.id,
-                    "team_name": team.name,
-                    "name_key": team.key,
-                    "team_province": team.province,
-                    "club_id": team.club_id,
-                    "category": competition.category,
-                    "gender": competition.gender,
-                    "competition_name": competition.name,
-                    "competition_code": competition.code,
-                }
-            )
+            participant_ids.add(team.team_id)
+            append_team(team, competition)
+        for team in parse_eligible_teams(page):
+            previous = eligible.get(team.team_id)
+            if previous is None:
+                eligible[team.team_id] = (team, competition)
+            else:
+                known = previous[0]
+                for ref in team.other_competitions:
+                    if ref not in known.other_competitions:
+                        known.other_competitions.append(ref)
         await asyncio.sleep(COMPETITION_REQUEST_DELAY)
+
+    # Prawa tabela nie podaje `NrKlubu`. Najpierw wykorzystujemy numer poznany
+    # w innej lidze tego sezonu, a dopiero dla naprawdę brakujących drużyn
+    # wchodzimy raz na stronę składu. Dzięki temu KPR Lubliniec i podobne kluby
+    # trafiają do Panelu, ale nie dublujemy drużyn już zarejestrowanych po lewej.
+    known_clubs = {
+        _s(row.get("team_id")): _s(row.get("club_id"))
+        for row in teams
+        if _s(row.get("team_id")) and _s(row.get("club_id"))
+    }
+    for team_id, (team, source_competition) in eligible.items():
+        if team_id in participant_ids:
+            continue
+        team.club_id = known_clubs.get(team_id, "")
+        if not team.club_id and team.team_path:
+            try:
+                _, squad = await fetch_with_correct_encoding(
+                    client, _path(team.team_path), method="GET", cookies=cookies
+                )
+                team.club_id = parse_team_club_id(squad)
+            except Exception as exc:
+                logger.warning("[clubs] klub druzyny uprawnionej %s: %s", team_id, exc)
+            await asyncio.sleep(COMPETITION_REQUEST_DELAY)
+        if not team.club_id:
+            # Stabilny awaryjny identyfikator jest lepszy niż ponowne zgubienie
+            # drużyny. Gdy ZPRP później poda prawdziwy klub, migawka zastąpi ten
+            # wiersz; osierocone ustawienie nie wejdzie do zakresu sezonu.
+            team.club_id = f"eligible-team:{team_id}"
+
+        if team.other_competitions:
+            target_id, target_name = team.other_competitions[0]
+            target = competitions_by_id.get(target_id) or source_competition
+            append_team(
+                team,
+                target,
+                competition_id=target_id,
+                competition_name=target_name or target.name,
+            )
+        else:
+            append_team(
+                team,
+                source_competition,
+                competition_id=f"eligible:{source_competition.id}",
+                competition_name=f"Uprawniona · {source_competition.name}",
+            )
 
     return competitions, teams, label
 
@@ -375,6 +448,9 @@ async def refresh_clubs(
                 total_teams += len(teams)
                 done.append(label)
 
+        # Panel klubów i rozpoznawanie gospodarzy trzymają gotowy sezon w
+        # pamięci. Po nowej migawce nie mogą czekać na wygaśnięcie TTL.
+        SC.bump(province, base=False, reason="odświeżono kluby i drużyny")
         return await finish(
             True,
             judges=total_competitions,   # kolumny tej tabeli sluza tu za liczniki

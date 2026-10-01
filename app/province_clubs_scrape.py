@@ -89,12 +89,14 @@ class Competition:
 
 @dataclass
 class Team:
-    """Druzyna zgloszona do rozgrywek."""
+    """Druzyna zgloszona albo uprawniona do rozgrywek."""
 
     team_id: str
     name: str
     province: str = ""
     club_id: str = ""
+    team_path: str = ""
+    other_competitions: list[tuple[str, str]] = field(default_factory=list)
     key: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -254,9 +256,77 @@ def parse_teams(html: str) -> list[Team]:
                 name=name,
                 province=province_match.group(1) if province_match else "",
                 club_id=club_id,
+                team_path=str(team_link["href"]).replace("&amp;", "&"),
             )
         )
     return out
+
+
+def parse_eligible_teams(html: str) -> list[Team]:
+    """Druzyny z PRAWEJ tabeli „spelniajace kryteria rozgrywek".
+
+    ZPRP nie pokazuje tam numeru klubu. Zachowujemy wiec odsylacz do skladu,
+    z ktorego synchronizacja dociaga `NrKlubu`, oraz wskazane w trzeciej
+    kolumnie rozgrywki, w ktorych druzyna faktycznie juz uczestniczy.
+
+    To osobny parser, bo prawa tabela nie oznacza zgloszenia do rozgrywek
+    otwartych na stronie. Panel klubow ma jednak znac te druzyny: sa aktywne w
+    okregu, moga byc gospodarzem meczu i powinny dac sie od razu rozpoznac.
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    out: list[Team] = []
+    seen: set[str] = set()
+
+    for row in soup.find_all("tr"):
+        if row.find("table") is not None or row.find("a", href=re.compile(r"zespoly_PDF\.php")):
+            continue
+        parent_table = row.find_parent("table")
+        if parent_table is None or "Drużyna w innych rozgrywkach" not in _text(parent_table):
+            continue
+
+        team_link = None
+        for candidate in row.find_all("a", href=True):
+            href = str(candidate["href"]).replace("&amp;", "&")
+            if _param(href, "Filtr_zespol"):
+                team_link = candidate
+                break
+        if team_link is None:
+            continue
+
+        team_href = str(team_link["href"]).replace("&amp;", "&")
+        team_id = _param(team_href, "Filtr_zespol")
+        if not team_id or team_id in seen:
+            continue
+        raw_name = _text(team_link)
+        province_match = _PROVINCE_SUFFIX.search(raw_name)
+        name = _PROVINCE_SUFFIX.sub("", raw_name).strip()
+        other: list[tuple[str, str]] = []
+        for candidate in row.find_all("a", href=True):
+            href = str(candidate["href"]).replace("&amp;", "&")
+            competition_id = _param(href, "IdRozgr")
+            if competition_id and all(item[0] != competition_id for item in other):
+                other.append((competition_id, _text(candidate)))
+        seen.add(team_id)
+        out.append(
+            Team(
+                team_id=team_id,
+                name=name,
+                province=province_match.group(1) if province_match else "",
+                team_path=team_href,
+                other_competitions=other,
+            )
+        )
+    return out
+
+
+def parse_team_club_id(html: str) -> str:
+    """Numer klubu ze strony skladu druzyny (`NrKlubu`)."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    for candidate in soup.find_all("a", href=True):
+        club_id = _param(str(candidate["href"]).replace("&amp;", "&"), "NrKlubu")
+        if club_id:
+            return club_id
+    return ""
 
 
 def club_display_name(names: list[str]) -> str:
