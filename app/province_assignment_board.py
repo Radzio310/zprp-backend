@@ -347,6 +347,80 @@ class CandidatesRequest(BaseModel):
     context: Optional[MatchContext] = None
 
 
+class LoadPdfRow(BaseModel):
+    judge_id: str
+    name: str
+    city: str = ""
+    field: int = 0
+    table: int = 0
+    queued: int = 0
+    total: int = 0
+
+
+class LoadPdfRequest(BaseModel):
+    province: str
+    period_label: str
+    rows: list[LoadPdfRow]
+    include_queue: bool = True
+    created_by: Optional[str] = None
+
+
+@router.post("/load/pdf", summary="PDF: obciążenie sędziów z aktualnego widoku")
+async def load_pdf(body: LoadPdfRequest):
+    """Drukuje dokładnie ranking widoczny w panelu, razem z aktywnymi filtrami."""
+    key = require_province(body.province)
+    clean = []
+    for item in body.rows[:500]:
+        field_count = max(0, int(item.field or 0))
+        table_count = max(0, int(item.table or 0))
+        queued_count = max(0, int(item.queued or 0)) if body.include_queue else 0
+        clean.append(
+            {
+                "judge_id": _s(item.judge_id),
+                "name": _s(item.name) or _s(item.judge_id),
+                "city": _s(item.city),
+                "field": field_count,
+                "table": table_count,
+                "queued": queued_count,
+                "total": max(field_count + table_count, int(item.total or 0)),
+            }
+        )
+    if not clean:
+        raise HTTPException(400, "Brak sędziów do umieszczenia w PDF.")
+
+    values = sorted(row["total"] for row in clean)
+    middle = len(values) // 2
+    median = (
+        values[middle]
+        if len(values) % 2
+        else (values[middle - 1] + values[middle]) / 2
+    )
+    from app.province_settlement_pdf import _org, _province_logo_b64, _render, _to_pdf
+
+    org = _org(key)
+    html = _render(
+        "okreg_obciazenie_sedziow.html",
+        {
+            "logo": _province_logo_b64(key),
+            "org_name": org["name"],
+            "org_address": org["address"],
+            "period_label": _s(body.period_label) or "wybrany okres",
+            "generated_at": _now().strftime("%d.%m.%Y %H:%M"),
+            "created_by": _s(body.created_by),
+            "rows": clean,
+            "judges_count": len(clean),
+            "matches_count": sum(row["total"] for row in clean),
+            "field_count": sum(row["field"] for row in clean),
+            "table_count": sum(row["table"] for row in clean),
+            "queued_count": sum(row["queued"] for row in clean),
+            "median": f"{median:g}",
+            "include_queue": bool(body.include_queue),
+        },
+    )
+    result = _to_pdf(html, "obciazenie", f"obciazenie_{key.lower()}_{_now():%Y%m%d}.pdf")
+    return {"success": True, **result}
+
+
 @dataclass
 class World:
     """Świat propozycji okręgu trzymany w pamięci (`WORLD_TTL`, licznik wersji)."""

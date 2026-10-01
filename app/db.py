@@ -779,6 +779,24 @@ province_modules = Table(
 )
 
 
+# Konfigurowalne okresy wypłat sędziowskich. Jeden dokument JSON na okręg
+# pozwala przechowywać wiele sezonów i dwa okresy kończące się w tym samym
+# miesiącu (na Śląsku grudzień 2026), czego nie da się opisać samym YYYY-MM.
+province_settlement_period_settings = Table(
+    "province_settlement_period_settings",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("periods_json", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("updated_by", String, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+)
+
+
 # 18.1d) Mecze sędziego do statystyk i rozliczeń
 #
 # Jeden wiersz = JEDNA OBSADA (sędzia + mecz + rola). Trzymamy FAKTY, nie kwoty:

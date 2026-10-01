@@ -169,6 +169,8 @@ async def _reserve_number(
     include_future: bool,
     totals: dict,
     created_by: Optional[str],
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
 ) -> str:
     """Numer zapada dopiero tutaj - po tym, jak plik faktycznie powstal."""
     row = await database.fetch_one(
@@ -182,7 +184,8 @@ async def _reserve_number(
     )
     seq = int(row["seq"]) + 1 if row else 1
     number_text = f"{province_short(province)}/{month:02d}/{year}/{seq}"
-    date_from, date_to = month_range(year, month)
+    if date_from is None or date_to is None:
+        date_from, date_to = month_range(year, month)
 
     await database.execute(
         insert(province_settlement_documents).values(
@@ -224,6 +227,7 @@ class PdfRequest(BaseModel):
     #: Puste = wszyscy sedziowie okregu z tego miesiaca.
     judge_ids: list[str] = []
     created_by: Optional[str] = None
+    period_id: Optional[str] = None
 
 
 @router.post("/zestawienie", summary="PDF: zestawienie ekwiwalentów sędziowskich")
@@ -239,11 +243,13 @@ async def zestawienie_pdf(payload: PdfRequest):
         include_future=payload.include_future,
         include_zprp=payload.include_zprp,
         judge_ids=payload.judge_ids or None,
+        period_id=payload.period_id,
     )
     entries = data["entries"]
     totals = data["totals"]
     outside = data["outside_district"]
-    _, date_to = month_range(payload.year, payload.month)
+    date_from = date.fromisoformat(data["period"]["from"])
+    date_to = date.fromisoformat(data["period"]["to"])
 
     number_text = await _reserve_number(
         province,
@@ -256,6 +262,8 @@ async def zestawienie_pdf(payload: PdfRequest):
         # niego kolumny, a `create_all` nie dopisuje kolumn do istniejacej tabeli.
         totals={**totals, "include_zprp": payload.include_zprp},
         created_by=payload.created_by,
+        date_from=date_from,
+        date_to=date_to,
     )
 
     org = _org(province)
@@ -266,8 +274,10 @@ async def zestawienie_pdf(payload: PdfRequest):
             "org_name": org["name"],
             "org_address": org["address"],
             "document_number": number_text,
-            "period_label": _period_label(
-                payload.year, payload.month, date_to, include_future=payload.include_future
+            "period_label": (
+                f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+                if payload.period_id
+                else _period_label(payload.year, payload.month, date_to, include_future=payload.include_future)
             ),
             "generated_at": datetime.now(timezone.utc).strftime("%d.%m.%Y"),
             "include_future": payload.include_future,
@@ -324,10 +334,12 @@ async def przejazdy_pdf(payload: PdfRequest):
         include_future=payload.include_future,
         include_zprp=payload.include_zprp,
         judge_ids=payload.judge_ids or None,
+        period_id=payload.period_id,
     )
     travel = data["travel"]
     outside = data["outside_district"]
-    _, date_to = month_range(payload.year, payload.month)
+    date_from = date.fromisoformat(data["period"]["from"])
+    date_to = date.fromisoformat(data["period"]["to"])
 
     rows: list[dict] = []
     previous = None
@@ -381,6 +393,8 @@ async def przejazdy_pdf(payload: PdfRequest):
             "include_zprp": payload.include_zprp,
         },
         created_by=payload.created_by,
+        date_from=date_from,
+        date_to=date_to,
     )
 
     org = _org(province)
@@ -391,8 +405,10 @@ async def przejazdy_pdf(payload: PdfRequest):
             "org_name": org["name"],
             "org_address": org["address"],
             "document_number": number_text,
-            "period_label": _period_label(
-                payload.year, payload.month, date_to, include_future=payload.include_future
+            "period_label": (
+                f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+                if payload.period_id
+                else _period_label(payload.year, payload.month, date_to, include_future=payload.include_future)
             ),
             "include_future": payload.include_future,
             "include_zprp": payload.include_zprp,

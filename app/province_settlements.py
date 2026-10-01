@@ -122,6 +122,19 @@ def month_range(year: int, month: int) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, last)
 
 
+async def settlement_range(
+    province: str, year: int, month: int, period_id: Optional[str] = None
+) -> tuple[date, date, Optional[dict]]:
+    """Zakres własnego okresu albo zgodny wstecznie miesiąc kalendarzowy."""
+    if not period_id:
+        start, end = month_range(year, month)
+        return start, end, None
+    from app.province_settlement_periods import resolve_period
+
+    item = await resolve_period(province, period_id)
+    return date.fromisoformat(item["date_from"]), date.fromisoformat(item["date_to"]), item
+
+
 async def _versions(province: str) -> tuple[list[dict], list[dict]]:
     central_rows = await database.fetch_all(
         select(central_rates).order_by(central_rates.c.id.asc())
@@ -239,6 +252,7 @@ async def load_settlement(
     include_zprp: bool = False,
     judge_ids: Optional[list[str]] = None,
     extra: Optional[list[E.Assignment]] = None,
+    period_id: Optional[str] = None,
 ) -> dict:
     """
     Jedno wejscie dla panelu, aplikacji i PDF-ow.
@@ -253,7 +267,9 @@ async def load_settlement(
     nie przekazuje go nigdy.
     """
     province = require_province(province)
-    date_from, date_to = month_range(year, month)
+    date_from, date_to, configured_period = await settlement_range(
+        province, year, month, period_id
+    )
     base = await _base(province)
     central_versions = base["central_versions"]
     province_versions = base["province_versions"]
@@ -347,11 +363,26 @@ async def load_settlement(
     # w funkcji - tamten moduł importuje nas.
     from app.province_settlement_splits import apply_splits
 
-    await apply_splits(province, year, month, entries)
+    # Historyczne podziały są kluczowane miesiącem. Nie wolno ich przykleić
+    # do własnego okresu (w grudniu mogą istnieć dwa różne okresy wypłat).
+    # Edytor list dostanie osobne klucze okresów w kolejnym kroku; do tego
+    # czasu własny okres zawsze pokazuje bezpieczne wyliczenie całej puli.
+    if not period_id:
+        await apply_splits(province, year, month, entries)
 
     return {
         "province": province,
-        "period": {"year": year, "month": month, "from": date_from.isoformat(), "to": date_to.isoformat()},
+        "period": {
+            "year": year,
+            "month": month,
+            "from": date_from.isoformat(),
+            "to": date_to.isoformat(),
+            "id": configured_period.get("id") if configured_period else None,
+            "season": configured_period.get("season") if configured_period else None,
+            "payout_date": configured_period.get("payout_date") if configured_period else None,
+            "kind": configured_period.get("kind") if configured_period else "month",
+            "label": configured_period.get("label") if configured_period else "",
+        },
         "include_future": include_future,
         "include_zprp": include_zprp,
         "entries": entries,
@@ -374,6 +405,7 @@ async def cached_settlement(
     month: int,
     include_future: bool = False,
     include_zprp: bool = False,
+    period_id: Optional[str] = None,
 ) -> dict:
     """
     `load_settlement` całego okręgu z pamięci (`settlement_cache`).
@@ -381,17 +413,19 @@ async def cached_settlement(
     Wynik jest WSPÓLNY dla wszystkich pytających - tylko do odczytu.
     """
     key = require_province(province)
-    month_range(year, month)
+    if not period_id:
+        month_range(year, month)
     return await SC.remember(
         "month",
         key,
-        (int(year), int(month), bool(include_future), bool(include_zprp)),
+        (int(year), int(month), str(period_id or ""), bool(include_future), bool(include_zprp)),
         lambda: load_settlement(
             key,
             year=year,
             month=month,
             include_future=include_future,
             include_zprp=include_zprp,
+            period_id=period_id,
         ),
     )
 
@@ -610,18 +644,20 @@ async def summary(
     month: int = Query(...),
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
+    period_id: Optional[str] = Query(None),
 ):
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
-    month_range(year, month)
+    await settlement_range(key, year, month, period_id)
     # Numer dokumentu zmienia się po każdym wydruku, a rachunek nie - więc jest
     # częścią klucza pamięci, a nie powodem, żeby liczyć miesiąc od nowa.
     hint = await next_document_number(key, year, month, "zestawienie", peek=True)
 
     async def build() -> dict:
         data = await cached_settlement(
-            key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+            key, year=year, month=month, include_future=include_future, include_zprp=include_zprp,
+            period_id=period_id,
         )
         return {
             "province": data["province"],
@@ -643,7 +679,7 @@ async def summary(
         }
 
     pack = await SC.packed(
-        "summary", key, (int(year), int(month), bool(include_future), bool(include_zprp), hint), build
+        "summary", key, (int(year), int(month), str(period_id or ""), bool(include_future), bool(include_zprp), hint), build
     )
     return SC.respond(request, pack)
 
@@ -685,6 +721,7 @@ async def _judge_payload(
     include_zprp: bool,
     data: Optional[dict] = None,
     solo: Optional[set[str]] = None,
+    period_id: Optional[str] = None,
 ) -> dict:
     """
     Wspolna tresc `/judge/{id}`, `/judges` i `/me`.
@@ -705,6 +742,7 @@ async def _judge_payload(
             include_future=include_future,
             include_zprp=include_zprp,
             judge_ids=[judge_id],
+            period_id=period_id,
         )
     entry = next((e for e in data["entries"] if e.judge_id == judge_id), None)
     if entry is None:
@@ -752,6 +790,7 @@ async def judges_detail(
     month: int = Query(...),
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
+    period_id: Optional[str] = Query(None),
 ):
     """
     Każdy sędzia miesiąca w kształcie `/judge/{id}` - panel ściąga to raz, w tle,
@@ -760,11 +799,12 @@ async def judges_detail(
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
-    month_range(year, month)
+    await settlement_range(key, year, month, period_id)
 
     async def build() -> dict:
         data = await cached_settlement(
-            key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+            key, year=year, month=month, include_future=include_future, include_zprp=include_zprp,
+            period_id=period_id,
         )
         ids: list[str] = []
         for entry in [*data["entries"], *data["outside_district"]["entries"]]:
@@ -785,6 +825,7 @@ async def judges_detail(
                 include_zprp=include_zprp,
                 data=data,
                 solo=solo,
+                period_id=period_id,
             )
         return {
             "province": key,
@@ -795,7 +836,7 @@ async def judges_detail(
         }
 
     pack = await SC.packed(
-        "judges", key, (int(year), int(month), bool(include_future), bool(include_zprp)), build
+        "judges", key, (int(year), int(month), str(period_id or ""), bool(include_future), bool(include_zprp)), build
     )
     return SC.respond(request, pack)
 
@@ -808,10 +849,12 @@ async def judge_detail(
     month: int = Query(...),
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
+    period_id: Optional[str] = Query(None),
 ):
     key = require_province(province)
     data = await cached_settlement(
-        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp,
+        period_id=period_id,
     )
     return await _judge_payload(
         key,
@@ -821,6 +864,7 @@ async def judge_detail(
         include_future=include_future,
         include_zprp=include_zprp,
         data=data,
+        period_id=period_id,
     )
 
 
@@ -832,11 +876,13 @@ async def travel(
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
     judge_ids: Optional[str] = Query(None, description="Numery sędziów po przecinku"),
+    period_id: Optional[str] = Query(None),
 ):
     key = require_province(province)
     ids = [x.strip() for x in (judge_ids or "").split(",") if x.strip()] or None
     data = await cached_settlement(
-        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp,
+        period_id=period_id,
     )
     # Wycinek z całego okręgu - dojazdy liczą się po sędzim, więc to ta sama lista.
     entries = [e for e in data["entries"] if ids is None or e.judge_id in ids]
@@ -866,7 +912,7 @@ async def mine(
     # Miesiac calego okregu w pamieci (panel go liczyl) - bierzemy wycinek;
     # inaczej liczymy tylko tego sedziego, zeby telefon nie czekal na caly okreg.
     month_range(year, month)
-    warm = SC.peek("month", key, (int(year), int(month), bool(include_future), False))
+    warm = SC.peek("month", key, (int(year), int(month), "", bool(include_future), False))
     return await _judge_payload(
         key,
         judge_id,

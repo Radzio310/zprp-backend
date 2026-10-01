@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page { size: A4; margin: 18mm 15mm 16mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #172033; font: 11px/1.35 "DejaVu Sans", sans-serif; }
+    header { display: flex; align-items: center; gap: 14px; padding-bottom: 14px; border-bottom: 2px solid #d7ad82; }
+    .logo { width: 52px; height: 52px; object-fit: contain; }
+    h1 { margin: 0; font-size: 21px; letter-spacing: -.3px; }
+    .muted { color: #687284; }
+    .period { margin-top: 3px; color: #9b653d; font-weight: 700; }
+    .stats { display: flex; gap: 8px; margin: 16px 0; }
+    .stat { flex: 1; padding: 10px 12px; border: 1px solid #e4e7ec; border-radius: 10px; background: #f8f9fb; }
+    .stat b { display: block; font-size: 17px; color: #172033; }
+    .stat span { color: #737d8e; font-size: 9px; text-transform: uppercase; letter-spacing: .5px; }
+    table { width: 100%; border-collapse: collapse; }
+    th { padding: 8px 7px; color: #687284; font-size: 8.5px; text-align: right; text-transform: uppercase; border-bottom: 1px solid #cfd5de; }
+    th:first-child, td:first-child { text-align: left; }
+    td { padding: 8px 7px; text-align: right; border-bottom: 1px solid #e9ecf1; }
+    tr:nth-child(even) td { background: #fafbfc; }
+    .name { font-weight: 700; }
+    .city { display: block; color: #7a8494; font-size: 9px; }
+    .field { color: #178659; font-weight: 700; }
+    .table { color: #b47817; font-weight: 700; }
+    .queued { color: #7456b8; font-weight: 700; }
+    .total { font-size: 12px; font-weight: 800; }
+    footer { margin-top: 13px; color: #858e9c; font-size: 8.5px; }
+  </style>
+</head>
+<body>
+  <header>
+    {% if logo %}<img class="logo" src="data:image/png;base64,{{ logo }}">{% endif %}
+    <div>
+      <h1>Obciążenie sędziów</h1>
+      <div class="period">{{ period_label }}</div>
+      <div class="muted">{{ org_name }}{% if org_address %} · {{ org_address }}{% endif %}</div>
+    </div>
+  </header>
+
+  <section class="stats">
+    <div class="stat"><b>{{ judges_count }}</b><span>sędziów</span></div>
+    <div class="stat"><b>{{ matches_count }}</b><span>obsad łącznie</span></div>
+    <div class="stat"><b>{{ field_count }}</b><span>boisko</span></div>
+    <div class="stat"><b>{{ table_count }}</b><span>stolik</span></div>
+    <div class="stat"><b>{{ median }}</b><span>mediana</span></div>
+  </section>
+
+  <table>
+    <thead><tr><th>Sędzia</th><th>Boisko</th><th>Stolik</th>{% if include_queue %}<th>W kolejce</th>{% endif %}<th>Razem</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td><span class="name">{{ loop.index }}. {{ row.name }}</span>{% if row.city %}<span class="city">{{ row.city }} · nr {{ row.judge_id }}</span>{% endif %}</td>
+        <td class="field">{{ row.field }}</td>
+        <td class="table">{{ row.table }}</td>
+        {% if include_queue %}<td class="queued">{% if row.queued %}+{{ row.queued }}{% else %}—{% endif %}</td>{% endif %}
+        <td class="total">{{ row.total + row.queued }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <footer>Wygenerowano {{ generated_at }}{% if created_by %} · {{ created_by }}{% endif %}. Kolejka oznacza obsady zapisane w BAZA_Web, które nie trafiły jeszcze do ZPRP.</footer>
+</body>
+</html>
