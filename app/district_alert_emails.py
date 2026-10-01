@@ -512,7 +512,8 @@ def build_collision_message(
         "Porozmawiaj z obsadowym albo zgłoś mecz na giełdzie."
         if personal
         else "Te mecze zmieniły termin i ktoś z ich obsady ma teraz kolizję. Dwa mecze naraz liczymy tak jak "
-        "Automat: 2 h meczu, dojazd 60 km/h i 45 minut zapasu."
+        "Automat: według zapisanych dla okręgu czasów kategorii, dojazdu i zapasu. "
+        "W tej samej hali sprawdzamy wyłącznie, czy mecze się nakładają."
     )
     html_body = _frame(
         province_key=province_key,

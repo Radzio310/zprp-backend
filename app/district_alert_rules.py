@@ -793,6 +793,33 @@ def offtime_text(off: O.Offtime) -> str:
     return f"{label}, {off.start:%d.%m %H:%M}-{off.end:%d.%m %H:%M}"
 
 
+def looks_like_previous_match_window(
+    off: O.Offtime,
+    previous: Optional[datetime],
+    *,
+    center_tolerance_minutes: int = 15,
+) -> bool:
+    """Czy wpis kalendarza wygląda jak blok wokół poprzedniej godziny meczu.
+
+    Po hurtowym przesunięciu turnieju kalendarz sędziego może przez chwilę
+    nadal zawierać np. „Sędziowanie 13:10-15:10” dla meczu, który wcześniej
+    zaczynał się o 14:10. Nie jest to nowa, niezależna niedyspozycja. Samo
+    rozpoznanie jest celowo wąskie: tylko godzinowy wpis NORMAL, obejmujący
+    stary termin i wyśrodkowany na nim z tolerancją kilku minut.
+    """
+    if previous is None or off.kind != "NORMAL" or off.all_day or off.end <= off.start:
+        return False
+    label = fold(off.label)
+    if not any(marker in label for marker in ("sedziowanie", "mecz", "wyjazd", "dojazd")):
+        return False
+    duration = off.end - off.start
+    if not timedelta(minutes=30) <= duration <= timedelta(hours=4):
+        return False
+    midpoint = off.start + duration / 2
+    tolerance = timedelta(minutes=max(0, center_tolerance_minutes))
+    return off.covers(previous) and abs(midpoint - previous) <= tolerance
+
+
 def _other_when(moved: MatchInfo, other: MatchInfo) -> str:
     """„o 15:00" tego samego dnia, inaczej „w niedz. 28.09 o 11:00"."""
     if moved.moment and other.moment and moved.moment.date() == other.moment.date():

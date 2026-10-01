@@ -332,6 +332,34 @@ def test_offtime_push_mentions_entry():
     assert R.judge_push(item_)[1].endswith("w tym czasie masz niedyspozycję (Praca, 12:00-18:00).")
 
 
+def test_old_calendar_window_of_changed_tournament_match_is_not_a_new_offtime():
+    current = info("4", datetime(2026, 10, 4, 11, 40), "Ruda Śląska")
+    current = R.MatchInfo(**{**current.__dict__, "code": "S/MłKR/4", "hall": "Hala Sportowa MOSiR"})
+    neighbour = R.MatchInfo(
+        match_id="3",
+        code="S/MłKR/3",
+        moment=datetime(2026, 10, 4, 10, 40),
+        city="Ruda Śląska",
+        hall="Hala Sportowa MOSiR",
+    )
+    old_calendar, _ = O.parse_entries(
+        [{"from": "2026-10-04T10:20:00", "to": "2026-10-04T12:20:00", "category_name": "Wyjazdy"}]
+    )
+    work, _ = O.parse_entries(
+        [{"from": "2026-10-04T10:20:00", "to": "2026-10-04T12:20:00", "category_name": "Praca"}]
+    )
+    infos = {
+        "4": (current, {"7": "NOWAK Jan"}),
+        "3": (neighbour, {"7": "NOWAK Jan"}),
+    }
+    moved = {
+        "4": datetime(2026, 10, 4, 12, 20),
+        "3": datetime(2026, 10, 4, 11, 20),
+    }
+    filtered = DA._collision_offtimes("7", current, infos, moved, [*old_calendar, *work])
+    assert [item.label for item in filtered] == ["Praca"]
+
+
 def test_times_are_polish():
     # 12:00 UTC w lecie to 14:00 w Polsce, a w zimie 13:00.
     assert R.when_text(utc(2026, 9, 26, 12, 0)) == "sob. 26.09, 14:00"
@@ -401,6 +429,8 @@ def test_collision_email_renders():
     assert subject.startswith("[TEST] Śląskie: kolizja - S/JmM/10 przeniesiony na sobota")
     assert "DWA MECZE NARAZ" in html_body and "<s>piątek 25.09.2026, 18:00</s>" in html_body
     assert "Wiadomość próbna" in html_body and "Było: piątek" in text_body
+    assert "zapisanych dla okręgu czasów kategorii" in html_body
+    assert "2 h meczu" not in html_body and "45 minut zapasu" not in html_body
 
 
 # ---------------------------------------------------------------- schemat

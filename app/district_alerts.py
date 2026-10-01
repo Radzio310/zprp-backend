@@ -910,6 +910,61 @@ def _crew_of(state: dict) -> dict[str, str]:
     return out
 
 
+def _collision_offtimes(
+    judge_id: str,
+    moved: R.MatchInfo,
+    infos: dict[str, tuple[R.MatchInfo, dict]],
+    moved_ids: dict[str, Optional[datetime]],
+    offtimes: Iterable,
+) -> list:
+    """Niedyspozycje bez starych bloków tego samego turnieju.
+
+    Filtr działa wyłącznie dla regionalnych turniejów młodzików, tej samej
+    hali i tego samego dnia. Zwykła praca, urlop czy wpis z innego turnieju
+    pozostają blokadą.
+    """
+    from app import assignment_rules as AR
+    from app import settlement_rates as SR
+
+    source = list(offtimes)
+    if not moved.moment or not SR.is_regional_youth_competition(moved.code):
+        return source
+
+    previous_moments: list[datetime] = []
+    moved_competition = AR.competition_key(moved.code)
+    for match_id, previous in moved_ids.items():
+        pair = infos.get(match_id)
+        if previous is None or pair is None:
+            continue
+        other, crew = pair
+        if judge_id not in crew or not other.moment:
+            continue
+        if AR.competition_key(other.code) != moved_competition:
+            continue
+        if other.moment.date() != moved.moment.date():
+            continue
+        if not CR.same_hall(
+            moved.hall,
+            moved.city,
+            other.hall,
+            other.city,
+            a_venue=moved.venue,
+            b_venue=other.venue,
+        ):
+            continue
+        local_previous = R.local(previous)
+        if local_previous is not None:
+            previous_moments.append(local_previous)
+
+    if not previous_moments:
+        return source
+    return [
+        off
+        for off in source
+        if not any(R.looks_like_previous_match_window(off, previous) for previous in previous_moments)
+    ]
+
+
 async def _collisions_for(
     key: str,
     rows: list,
@@ -941,13 +996,20 @@ async def _collisions_for(
         for judge_id, crew_name in crew.items():
             judge = roster.judges.get(judge_id)
             name = judge.name if judge else crew_name
+            offtimes = _collision_offtimes(
+                judge_id,
+                info,
+                infos,
+                moved_ids,
+                roster.offtimes.get(judge_id, []),
+            )
             out.extend(
                 R.find_collisions(
                     judge_id,
                     name,
                     info,
                     busy.get(judge_id, []),
-                    roster.offtimes.get(judge_id, []),
+                    offtimes,
                     book.km,
                     kinds,
                     previous=R.local(previous) if previous else None,
