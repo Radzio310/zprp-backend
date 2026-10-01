@@ -45,12 +45,21 @@ z meczami przydzielonymi w TYM przebiegu i w kolejce (`pending`).
     - ponad średnią aktywnych sędziów kara rośnie z kwadratem nadwyżki
       (`W_OVER_MEAN`).
 
-STOLIK W ROZGRYWKACH OKRĘGOWYCH: najpierw sędziowie z odznaką „Stolikowi"
-(„Stolikowy"), pozostali dopiero, gdy żadnego stolikowego nie da się wziąć -
-ale tylko dopóki stolikowy nie ma w okresie więcej niż JEDEN mecz ponad
-najmniej obciążonego kandydata (decyzja 25.09.2026) (`TABLE_BADGE_SLACK`, `badge_tier`). Bez tej granicy
-czterech stolikowych brało po kilkanaście stolików w dwa tygodnie.
-W II lidze, I lidze, Lidze Centralnej i Superlidze stolik bez tej preferencji -
+STOLIK W ROZGRYWKACH OKRĘGOWYCH - KOLEJKA PIĘCIU GRUP (decyzja 01.10.2026,
+`table_tier`). Pierwsza grupa, w której jest kogo wziąć, wygrywa; równy podział
+liczy się WEWNĄTRZ grupy:
+    1. MENTORZY pary, która prowadzi ten mecz na boisku - i tylko wtedy, gdy
+       cała mentorowana para rzeczywiście go sędziuje (`table_mentor_ids`).
+       Mentor siada przy stoliku po to, żeby patrzeć na swoją parę,
+    2. sędziowie z odznaką „Stolikowi",
+    3. delegaci,
+    4. pozostali - ligowcy i okręgowi RAZEM, bez karania za licencję centralną,
+    5. młodzi na końcu.
+Poprzednia wersja (25.09.2026) dawała stolikowym pierwszeństwo tylko do
+przewagi jednego meczu w okresie (`TABLE_BADGE_SLACK`). Granica zniknęła:
+o kolejności decyduje teraz grupa, a wyrównanie obciążenia - punkty okresu
+(`W_PERIOD`), które i tak przebijają wszystko inne.
+W II lidze, I lidze, Lidze Centralnej i Superlidze stolik bez tej kolejki -
 wszyscy na równi (liczą się tylko wymagania licencji z `table_rule`).
 
 KOLIZJE DNIA: `collision_rules` - ta sama hala = mecze nie mogą się nakładać
@@ -125,11 +134,12 @@ W_OVER_MEAN = 12.0
 #: kilku meczów w sezonie. Dzięki temu każdy wolny i uprawniony dostaje coś,
 #: zanim ktoś dostanie drugi mecz w tym samym okresie.
 W_PERIOD = 2500.0
-#: Pierwszeństwo „Stolikowych" przy stoliku okręgowym trzyma się, dopóki
-#: stolikowy ma w okresie najwyżej o tyle meczów więcej niż najmniej obciążony
-#: kandydat. Bez tego progu czterech stolikowych brało po kilkanaście stolików
-#: w dwa tygodnie, a reszta nic (test `test_assignment_period_spread`).
-TABLE_BADGE_SLACK = 1
+#: Kolejka grup przy stoliku okręgowym - patrz `table_tier` i nagłówek modułu.
+TIER_MENTOR = 0
+TIER_TABLE_BADGE = 1
+TIER_DELEGATE = 2
+TIER_REST = 3
+TIER_YOUNG = 4
 W_OFF_DAY = 120.0
 W_SAME_DAY = 600.0
 W_UNKNOWN_KM = 90.0
@@ -678,21 +688,45 @@ def _standing(
     )
 
 
-def badge_tier(judge: Judge, *, badge_first: bool, loads: Loads, floor_period: int) -> int:
+def table_mentor_ids(ctx: Context, field_crew: Iterable[Optional[Judge]]) -> frozenset:
     """
-    Grupa przy stoliku okręgowym: 0 = „Stolikowi" (pierwsi), 1 = reszta.
+    Mentorzy pary, która prowadzi TEN mecz na boisku - pierwsi przy stoliku.
 
-    Stolikowy traci pierwszeństwo, gdy ma w okresie więcej niż
-    `TABLE_BADGE_SLACK` meczów ponad najmniej obciążonego kandydata - wtedy
-    staje w kolejce na równi z innymi.
+    Warunek jest celowo wąski (decyzja 01.10.2026): cała mentorowana para musi
+    sędziować ten mecz. Pojedyncza połówka pary nie wystarczy, bo mentor ma
+    patrzeć na parę przy pracy, a nie na przypadkowy duet.
+
+    `Context.mentors_of` trzyma mentorów PARY, więc pusta odpowiedź znaczy
+    „ci dwaj nie są zapisaną parą" albo „ta para nie ma mentorów".
+    """
+    people = [judge for judge in field_crew if judge is not None]
+    if len(people) < 2:
+        return frozenset()
+    first, second = people[0], people[1]
+    if ctx.partner_of.get(first.judge_id, "") != second.judge_id:
+        return frozenset()
+    return frozenset(ctx.mentors_of.get(first.judge_id, ()))
+
+
+def table_tier(judge: Judge, *, badge_first: bool, mentor_ids: frozenset = frozenset()) -> int:
+    """
+    Grupa w kolejce na stolik okręgowy - mniej znaczy wcześniej.
+
+    Kolejność z nagłówka modułu: mentorzy pary tego meczu, stolikowi, delegaci,
+    pozostali (ligowcy razem z okręgowymi), młodzi. Poza rozgrywkami okręgowymi
+    (`badge_first` = False) kolejki nie ma - wszyscy stoją równo.
     """
     if not badge_first:
-        return 0
-    if not judge.table_specialist:
-        return 1
-    if loads.period_count(judge.judge_id) - floor_period > TABLE_BADGE_SLACK:
-        return 1
-    return 0
+        return TIER_MENTOR
+    if judge.judge_id in mentor_ids:
+        return TIER_MENTOR
+    if judge.table_specialist:
+        return TIER_TABLE_BADGE
+    if judge.delegate:
+        return TIER_DELEGATE
+    if judge.young:
+        return TIER_YOUNG
+    return TIER_REST
 
 
 def _score(
@@ -825,6 +859,7 @@ def _candidates(
     load: Mapping[str, int],
     taken_ids: set[str],
     open_count: int = 1,
+    mentor_ids: frozenset = frozenset(),
 ) -> tuple[list[tuple[float, Judge, list[str], Optional[float]]], dict[str, int]]:
     """
     Kandydaci posortowani od najlepszego, plus licznik powodów odmowy.
@@ -862,16 +897,14 @@ def _candidates(
 
     ready_ids = {judge.judge_id for judge in valid}
 
-    # Stolik okręgowy: najpierw „Stolikowi", reszta dopiero po nich. Równy
-    # podział sezonu i miesiąca liczy się WEWNĄTRZ grupy - inaczej stolikowy
-    # z trzema meczami przegrywałby punktami z kimś spoza grupy, kto ma zero.
-    # Okres liczy się dla wszystkich razem, a stolikowy z wyraźnie większą
-    # liczbą meczów w okresie traci pierwszeństwo (`badge_tier`).
+    # Stolik okręgowy: kolejka grup z `table_tier`. Równy podział sezonu
+    # i miesiąca liczy się WEWNĄTRZ grupy - inaczej stolikowy z trzema meczami
+    # przegrywałby punktami z kimś spoza grupy, kto ma zero. Okres liczy się
+    # dla wszystkich razem i to on wyrównuje obciążenie między grupami.
     badge_first = kind == TABLE and table_badge_first(need.code)
     loads = loads_of(ctx)
-    floor_period = min((loads.period_count(judge.judge_id) for judge in valid), default=0)
     tiers = {
-        judge.judge_id: badge_tier(judge, badge_first=badge_first, loads=loads, floor_period=floor_period)
+        judge.judge_id: table_tier(judge, badge_first=badge_first, mentor_ids=mentor_ids)
         for judge in valid
     }
 
@@ -1018,6 +1051,12 @@ def build_plan(
                         load=load,
                         taken_ids=taken,
                         open_count=len(slots.get(kind) or []),
+                        # Kto stoi na boisku TEGO meczu - stąd mentorzy na stolik.
+                        mentor_ids=(
+                            table_mentor_ids(working, _group_people(need, filled, FIELD))
+                            if kind == TABLE
+                            else frozenset()
+                        ),
                     )
 
                     chosen: Optional[tuple[float, Judge, list[str], Optional[float]]] = None
@@ -1412,11 +1451,11 @@ def describe_candidates(
         if kind in fits:
             ready.append(judge)
 
-    floor_period = min((loads.period_count(judge.judge_id) for judge in ready), default=0)
+    # Podpowiedzi stoją w tej samej kolejce, co Automat - inaczej panel
+    # radziłby co innego, niż serwer sam by ułożył.
+    mentor_ids = table_mentor_ids(ctx, group_crew.get(FIELD) or ()) if kind == TABLE else frozenset()
     for judge in ready:
-        tiers[judge.judge_id] = badge_tier(
-            judge, badge_first=badge_first, loads=loads, floor_period=floor_period
-        )
+        tiers[judge.judge_id] = table_tier(judge, badge_first=badge_first, mentor_ids=mentor_ids)
     standings = {
         tier: _standing(
             ctx, need, kind, [judge for judge in ready if tier_of(judge) == tier], loads, everyone=ready

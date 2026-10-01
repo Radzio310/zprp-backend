@@ -1,66 +1,242 @@
 <!doctype html>
 <html lang="pl">
 <head>
-  <meta charset="utf-8">
-  <style>
-    @page { size: A4; margin: 18mm 15mm 16mm; }
-    * { box-sizing: border-box; }
-    body { margin: 0; color: #172033; font: 11px/1.35 "DejaVu Sans", sans-serif; }
-    header { display: flex; align-items: center; gap: 14px; padding-bottom: 14px; border-bottom: 2px solid #d7ad82; }
-    .logo { width: 52px; height: 52px; object-fit: contain; }
-    h1 { margin: 0; font-size: 21px; letter-spacing: -.3px; }
-    .muted { color: #687284; }
-    .period { margin-top: 3px; color: #9b653d; font-weight: 700; }
-    .stats { display: flex; gap: 8px; margin: 16px 0; }
-    .stat { flex: 1; padding: 10px 12px; border: 1px solid #e4e7ec; border-radius: 10px; background: #f8f9fb; }
-    .stat b { display: block; font-size: 17px; color: #172033; }
-    .stat span { color: #737d8e; font-size: 9px; text-transform: uppercase; letter-spacing: .5px; }
-    table { width: 100%; border-collapse: collapse; }
-    th { padding: 8px 7px; color: #687284; font-size: 8.5px; text-align: right; text-transform: uppercase; border-bottom: 1px solid #cfd5de; }
-    th:first-child, td:first-child { text-align: left; }
-    td { padding: 8px 7px; text-align: right; border-bottom: 1px solid #e9ecf1; }
-    tr:nth-child(even) td { background: #fafbfc; }
-    .name { font-weight: 700; }
-    .city { display: block; color: #7a8494; font-size: 9px; }
-    .field { color: #178659; font-weight: 700; }
-    .table { color: #b47817; font-weight: 700; }
-    .queued { color: #7456b8; font-weight: 700; }
-    .total { font-size: 12px; font-weight: 800; }
-    footer { margin-top: 13px; color: #858e9c; font-size: 8.5px; }
-  </style>
+<meta charset="utf-8" />
+<title>Obciążenie sędziów - {{ period_label }}</title>
+<style>
+  /* Dokument roboczy okręgu: idzie na papier i do archiwum, więc jasny.
+     Ciemny motyw ekranu wydrukowałby się jako plama tonera. */
+  @page {
+    size: A4;
+    margin: 13mm 13mm 15mm 13mm;
+    @bottom-center {
+      content: "Strona " counter(page) " z " counter(pages);
+      font-family: "DejaVu Sans", Arial, sans-serif;
+      font-size: 7.5pt;
+      color: #8a8f98;
+    }
+  }
+
+  :root {
+    --ink: #14161a;
+    --muted: #6b7280;
+    --line: #dfe3e8;
+    --accent: #0B4F9E;
+    --gold: #B47817;
+    --band: #f4f7fc;
+    --field: #178659;
+    --table: #D79A2B;
+    --queue: #7456b8;
+    --over: #c0392b;
+    --under: #2a7f5f;
+  }
+
+  * { box-sizing: border-box; }
+  /* Białe tło WPROST: dokument jest na papier, a przeglądarka w ciemnym
+     motywie podmienia domyślne tło i podgląd kłamie o kontraście. */
+  body { font-family: "DejaVu Sans", Arial, sans-serif; font-size: 9pt; color: var(--ink); margin: 0; background: #fff; }
+
+  /* ---------------------------------------------------------- nagłówek */
+  header.doc { border-bottom: 4pt solid var(--accent); padding-bottom: 7pt; margin-bottom: 10pt; }
+  .brand { display: flex; align-items: center; gap: 10pt; margin-bottom: 7pt; }
+  .brand img { width: 40pt; height: 40pt; object-fit: contain; }
+  .org-name { color: var(--accent); font-size: 11.5pt; font-weight: 800; }
+  .org-address { color: var(--muted); font-size: 7.5pt; margin-top: 2pt; }
+  .eyebrow { font-size: 7.5pt; letter-spacing: 1.1pt; text-transform: uppercase; color: var(--gold); font-weight: 700; }
+  h1 { font-size: 18pt; color: #16233c; margin: 3pt 0 2pt; }
+  .sub { font-size: 9.5pt; color: var(--muted); }
+  .meta-grid { display: flex; flex-wrap: wrap; gap: 3pt 18pt; margin-top: 6pt; font-size: 8pt; color: var(--muted); }
+  .meta-grid b { color: var(--ink); font-weight: 700; }
+
+  /* ------------------------------------------------------------ kafle */
+  .tiles { display: flex; flex-wrap: wrap; gap: 5pt; margin: 9pt 0 4pt; }
+  .tile { flex: 1 1 70pt; border: 0.7pt solid var(--line); border-radius: 5pt; padding: 5pt 7pt; background: var(--band); }
+  .tile .v { font-size: 13pt; font-weight: 800; color: var(--accent); }
+  .tile .l { font-size: 6.6pt; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4pt; }
+  .tile.field .v { color: var(--field); }
+  .tile.table .v { color: var(--gold); }
+  .tile.queue .v { color: var(--queue); }
+
+  /* -------------------------------------------------------- legenda */
+  .legend { display: flex; flex-wrap: wrap; gap: 10pt; margin: 7pt 0 2pt; font-size: 7.5pt; color: var(--muted); }
+  .legend span { display: flex; align-items: center; gap: 4pt; }
+  .dot { width: 7pt; height: 7pt; border-radius: 2pt; display: inline-block; }
+  .dot.field { background: var(--field); }
+  .dot.table { background: var(--table); }
+  .dot.queue { background: var(--queue); }
+  .dot.median { width: 2pt; height: 9pt; border-radius: 0; background: #16233c; }
+
+  /* ------------------------------------------------------- rozkład */
+  section.block { margin-top: 11pt; }
+  section.block > h2 {
+    font-size: 10.5pt; margin: 0 0 5pt; padding-bottom: 3pt;
+    border-bottom: 1.5pt solid var(--accent); color: #16233c; break-after: avoid;
+  }
+  .dist { display: flex; align-items: flex-end; gap: 5pt; height: 56pt; }
+  .dist .bin { flex: 1 1 0; text-align: center; }
+  .dist .col { background: var(--band); border: 0.6pt solid var(--line); border-radius: 3pt 3pt 0 0; position: relative; }
+  .dist .fill { background: var(--accent); border-radius: 3pt 3pt 0 0; }
+  .dist .bin.has-median .fill { background: #16233c; }
+  .dist .n { font-size: 8pt; font-weight: 800; color: #16233c; }
+  .dist .l { font-size: 6.6pt; color: var(--muted); margin-top: 2pt; }
+
+  /* -------------------------------------------------------- ranking */
+  table { width: 100%; border-collapse: collapse; font-size: 8pt; }
+  thead { display: table-header-group; }
+  th {
+    text-align: left; background: var(--accent); color: #fff;
+    padding: 4pt 5pt; font-size: 7pt; text-transform: uppercase; letter-spacing: 0.4pt;
+  }
+  td { padding: 3.2pt 5pt; border-bottom: 0.5pt solid #eef1f4; vertical-align: middle; }
+  tr { break-inside: avoid; }
+  tbody tr:nth-child(even) td { background: #fafbfc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .pos { width: 20pt; font-weight: 800; color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* Nazwisko dostaje stałą szerokość, inaczej pasek zjada kolumnę i wiersze
+     łamią się na trzy linie - wtedy ranking przestaje się czytać z góry. */
+  th.who, td.who { width: 118pt; }
+  th.num, td.num { width: 32pt; }
+  th.delta-col, td.delta-col { width: 44pt; }
+  th { white-space: nowrap; }
+  .pos.top { color: var(--gold); }
+  .name { font-weight: 700; }
+  .city { display: block; color: #7a8494; font-size: 6.8pt; }
+
+  /* Pasek 1:1 z ekranem: boisko, stolik, kolejka i kreska mediany. */
+  .barcell { padding-right: 8pt; }
+  .track { position: relative; height: 11pt; background: #f1f3f7; border-radius: 3pt; overflow: hidden; }
+  .seg { position: absolute; top: 0; height: 11pt; }
+  .seg.field { background: var(--field); border-radius: 3pt 0 0 3pt; }
+  .seg.table { background: var(--table); }
+  .seg.queue { background: var(--queue); opacity: 0.55; }
+  .median-line { position: absolute; top: -1pt; height: 13pt; width: 1.2pt; background: #16233c; }
+
+  .delta { font-weight: 800; font-variant-numeric: tabular-nums; }
+  .delta.over { color: var(--over); }
+  .delta.under { color: var(--under); }
+  .delta.even { color: var(--muted); font-weight: 700; }
+
+  .field-n { color: var(--field); font-weight: 700; }
+  .table-n { color: var(--gold); font-weight: 700; }
+  .queue-n { color: var(--queue); font-weight: 700; }
+  .total-n { font-size: 9.5pt; font-weight: 800; }
+
+  footer.doc {
+    margin-top: 11pt; padding-top: 5pt; border-top: 0.7pt solid var(--line);
+    font-size: 7.2pt; color: var(--muted);
+  }
+  footer.doc li { margin-bottom: 1.5pt; }
+</style>
 </head>
 <body>
-  <header>
-    {% if logo %}<img class="logo" src="data:image/png;base64,{{ logo }}">{% endif %}
+
+<header class="doc">
+  <div class="brand">
+    {% if logo %}<img src="data:image/png;base64,{{ logo }}" />{% endif %}
     <div>
-      <h1>Obciążenie sędziów</h1>
-      <div class="period">{{ period_label }}</div>
-      <div class="muted">{{ org_name }}{% if org_address %} · {{ org_address }}{% endif %}</div>
+      <div class="org-name">{{ org_name }}</div>
+      {% if org_address %}<div class="org-address">{{ org_address }}</div>{% endif %}
     </div>
-  </header>
+  </div>
+  <div class="eyebrow">Obsada okręgu</div>
+  <h1>Obciążenie sędziów</h1>
+  <div class="sub">{{ period_label }}</div>
 
-  <section class="stats">
-    <div class="stat"><b>{{ judges_count }}</b><span>sędziów</span></div>
-    <div class="stat"><b>{{ matches_count }}</b><span>obsad łącznie</span></div>
-    <div class="stat"><b>{{ field_count }}</b><span>boisko</span></div>
-    <div class="stat"><b>{{ table_count }}</b><span>stolik</span></div>
-    <div class="stat"><b>{{ median }}</b><span>mediana</span></div>
-  </section>
+  <div class="meta-grid">
+    <div>Sędziów: <b>{{ judges_count }}</b></div>
+    <div>Obsad łącznie: <b>{{ matches_count }}</b></div>
+    <div>Mediana: <b>{{ median }}</b></div>
+    <div>Wygenerowano: <b>{{ generated_at }}</b></div>
+    {% if created_by %}<div>Przez: <b>{{ created_by }}</b></div>{% endif %}
+  </div>
+</header>
 
+<div class="tiles">
+  <div class="tile"><div class="v">{{ judges_count }}</div><div class="l">sędziów</div></div>
+  <div class="tile"><div class="v">{{ matches_count }}</div><div class="l">obsad łącznie</div></div>
+  <div class="tile field"><div class="v">{{ field_count }}</div><div class="l">boisko</div></div>
+  <div class="tile table"><div class="v">{{ table_count }}</div><div class="l">stolik</div></div>
+  {% if include_queue %}<div class="tile queue"><div class="v">{{ queued_count }}</div><div class="l">w kolejce</div></div>{% endif %}
+  <div class="tile"><div class="v">{{ median }}</div><div class="l">mediana</div></div>
+  <div class="tile"><div class="v">{{ spread }}</div><div class="l">rozpiętość</div></div>
+</div>
+
+<div class="legend">
+  <span><i class="dot field"></i> boisko</span>
+  <span><i class="dot table"></i> stolik</span>
+  {% if include_queue %}<span><i class="dot queue"></i> w kolejce, jeszcze nie w ZPRP</span>{% endif %}
+  <span><i class="dot median"></i> mediana {{ median }}</span>
+</div>
+
+{% if distribution %}
+<section class="block">
+  <h2>Rozkład obciążenia</h2>
+  <div class="dist">
+    {% for bin in distribution %}
+    <div class="bin {% if bin.has_median %}has-median{% endif %}">
+      <div class="n">{{ bin.count }}</div>
+      <div class="col" style="height: 34pt;">
+        <div class="fill" style="height: {{ bin.height }}pt; margin-top: {{ 34 - bin.height }}pt;"></div>
+      </div>
+      <div class="l">{{ bin.label }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="block">
+  <h2>Ranking</h2>
   <table>
-    <thead><tr><th>Sędzia</th><th>Boisko</th><th>Stolik</th>{% if include_queue %}<th>W kolejce</th>{% endif %}<th>Razem</th></tr></thead>
+    <thead>
+      <tr>
+        <th class="pos">Lp.</th>
+        <th class="who">Sędzia</th>
+        <th>Podział obsad</th>
+        <th class="num">Boisko</th>
+        <th class="num">Stolik</th>
+        {% if include_queue %}<th class="num">W kolejce</th>{% endif %}
+        <th class="num">Razem</th>
+        <th class="num delta-col">Do mediany</th>
+      </tr>
+    </thead>
     <tbody>
       {% for row in rows %}
       <tr>
-        <td><span class="name">{{ loop.index }}. {{ row.name }}</span>{% if row.city %}<span class="city">{{ row.city }} · nr {{ row.judge_id }}</span>{% endif %}</td>
-        <td class="field">{{ row.field }}</td>
-        <td class="table">{{ row.table }}</td>
-        {% if include_queue %}<td class="queued">{% if row.queued %}+{{ row.queued }}{% else %}—{% endif %}</td>{% endif %}
-        <td class="total">{{ row.total + row.queued }}</td>
+        <td class="pos {% if row.place <= 3 %}top{% endif %}">{{ row.place }}.</td>
+        <td class="who">
+          <span class="name">{{ row.name }}</span>
+          {% if row.city %}<span class="city">{{ row.city }} - nr {{ row.judge_id }}</span>{% endif %}
+        </td>
+        <td class="barcell">
+          <div class="track">
+            {% if row.pct_field %}<div class="seg field" style="left: 0; width: {{ row.pct_field }}%;"></div>{% endif %}
+            {% if row.pct_table %}<div class="seg table" style="left: {{ row.pct_field }}%; width: {{ row.pct_table }}%;"></div>{% endif %}
+            {% if row.pct_queue %}<div class="seg queue" style="left: {{ row.pct_field + row.pct_table }}%; width: {{ row.pct_queue }}%;"></div>{% endif %}
+            <div class="median-line" style="left: {{ median_pct }}%;"></div>
+          </div>
+        </td>
+        <td class="num field-n">{{ row.field }}</td>
+        <td class="num table-n">{{ row.table }}</td>
+        {% if include_queue %}<td class="num queue-n">{% if row.queued %}+{{ row.queued }}{% else %}-{% endif %}</td>{% endif %}
+        <td class="num total-n">{{ row.grand }}</td>
+        <td class="num delta-col delta {{ row.delta_class }}">{{ row.delta_label }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
-  <footer>Wygenerowano {{ generated_at }}{% if created_by %} · {{ created_by }}{% endif %}. Kolejka oznacza obsady zapisane w BAZA_Web, które nie trafiły jeszcze do ZPRP.</footer>
+</section>
+
+<footer class="doc">
+  <ul>
+    <li>Pasek pokazuje podział obsad jednego sędziego; długość odmierzamy względem największego obciążenia w tym zestawieniu ({{ max_total }}).</li>
+    <li>Kolumna „Do mediany” mówi, o ile obsad sędzia odstaje od środka stawki ({{ median }}).</li>
+    {% if include_queue %}<li>„W kolejce” to obsady zapisane w BAZA_Web, które nie trafiły jeszcze do ZPRP - liczą się do sumy „Razem”.</li>{% endif %}
+    <li>Sędziowie z równą liczbą obsad dzielą to samo miejsce w rankingu.</li>
+    <li>Zestawienie odwzorowuje widok panelu razem z włączonymi filtrami okresu.</li>
+  </ul>
+</footer>
+
 </body>
 </html>

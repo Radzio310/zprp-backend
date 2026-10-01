@@ -254,4 +254,7 @@ class TestRolaWObsadzie:
         assert effective_assign_role(make_judge("2", "X Y", roles=["Stolikowy"])) == "table"
         assert zprp_role_label(["Sędzia", "Stolikowy"]) == "boisko i stolik"
         assert zprp_role_label(["delegat"]) == "tylko delegat"
-        assert role_refusal(make_judge("3", "D E", roles=["delegat"]), "field") == "bez roli sędziego w ZPRP"
+        # Delegat ma teraz WŁASNY powód odmowy (decyzja 01.10.2026) - mocniejszy
+        # niż „brak roli sędziego", bo dotyczy też delegata opisanego w ZPRP
+        # jako sędzia.
+        assert role_refusal(make_judge("3", "D E", roles=["delegat"]), "field") == "delegat - nie na boisko"

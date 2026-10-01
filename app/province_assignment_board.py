@@ -388,16 +388,66 @@ async def load_pdf(body: LoadPdfRequest):
     if not clean:
         raise HTTPException(400, "Brak sędziów do umieszczenia w PDF.")
 
-    values = sorted(row["total"] for row in clean)
-    middle = len(values) // 2
+    # „Razem" na papierze to tyle, ile sedzia ma NA GLOWIE - razem z kolejka,
+    # ktora nie doszla jeszcze do ZPRP. Tak samo liczy ranking w panelu.
+    for row in clean:
+        row["grand"] = row["total"] + row["queued"]
+
+    totals = sorted((row["grand"] for row in clean), reverse=True)
+    middle = len(totals) // 2
     median = (
-        values[middle]
-        if len(values) % 2
-        else (values[middle - 1] + values[middle]) / 2
+        totals[middle]
+        if len(totals) % 2
+        else (totals[middle - 1] + totals[middle]) / 2
     )
+    max_total = totals[0] if totals else 0
+
+    # MIEJSCE liczymy z liczby obsad, a nie z kolejnosci wiersza: zestawienie
+    # drukuje widok panelu (sedzia moze posortowac po nazwisku), a miejsce ma
+    # znaczyc to samo zawsze. Rowna liczba obsad = to samo miejsce, a nastepne
+    # przeskakuje (9, 9, 11) - ta sama regula co w tabelach wynikow.
+    for row in clean:
+        row["place"] = 1 + sum(1 for other in clean if other["grand"] > row["grand"])
+        scale = (100.0 / max_total) if max_total else 0.0
+        row["pct_field"] = round(row["field"] * scale, 2)
+        row["pct_table"] = round(row["table"] * scale, 2)
+        row["pct_queue"] = round(row["queued"] * scale, 2)
+        delta = row["grand"] - median
+        row["delta_class"] = "over" if delta > 0 else "under" if delta < 0 else "even"
+        row["delta_label"] = (
+            "w sam raz" if delta == 0 else f"{delta:+g}"
+        )
+
+    # Rozklad: ile sedziow miesci sie w kolejnych przedzialach obciazenia.
+    # Mowi jednym spojrzeniem to, czego ranking nie powie - czy podzial jest
+    # rowny, czy kilka osob dzwiga wszystko.
+    distribution = []
+    if max_total > 0:
+        bins = 6
+        width = max(1, -(-(max_total + 1) // bins))  # sufit dzielenia
+        raw = []
+        for index in range(bins):
+            low = index * width
+            high = min(max_total, low + width - 1)
+            if low > max_total:
+                break
+            count = sum(1 for row in clean if low <= row["grand"] <= high)
+            raw.append(
+                {
+                    "label": f"{low}" if low == high else f"{low}-{high}",
+                    "count": count,
+                    "has_median": low <= median <= high,
+                }
+            )
+        tallest = max((item["count"] for item in raw), default=0)
+        for item in raw:
+            item["height"] = round(34.0 * item["count"] / tallest, 1) if tallest else 0
+        distribution = raw
+
     from app.province_settlement_pdf import _org, _province_logo_b64, _render, _to_pdf
 
     org = _org(key)
+    matches_count = sum(row["grand"] for row in clean)
     html = _render(
         "okreg_obciazenie_sedziow.html",
         {
@@ -409,16 +459,22 @@ async def load_pdf(body: LoadPdfRequest):
             "created_by": _s(body.created_by),
             "rows": clean,
             "judges_count": len(clean),
-            "matches_count": sum(row["total"] for row in clean),
+            "matches_count": matches_count,
             "field_count": sum(row["field"] for row in clean),
             "table_count": sum(row["table"] for row in clean),
             "queued_count": sum(row["queued"] for row in clean),
             "median": f"{median:g}",
+            "median_pct": round(median * 100.0 / max_total, 2) if max_total else 0,
+            "max_total": max_total,
+            "spread": f"{totals[-1]:g}-{max_total:g}" if totals else "0",
+            "distribution": distribution,
             "include_queue": bool(body.include_queue),
         },
     )
     result = _to_pdf(html, "obciazenie", f"obciazenie_{key.lower()}_{_now():%Y%m%d}.pdf")
-    return {"success": True, **result}
+    # `matches` wraca do aplikacji - nakladka skladania pokazuje te liczbe
+    # jako wynik, zamiast numeru dokumentu, ktorego ten raport nie ma.
+    return {"success": True, "judges": len(clean), "matches": matches_count, **result}
 
 
 @dataclass

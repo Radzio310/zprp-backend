@@ -246,6 +246,12 @@ def role_refusal(judge: Judge, kind: str) -> Optional[str]:
             return "tylko stolik (ustawienie okręgu)"
         if judge.assign_role in (ASSIGN_BOTH, ASSIGN_FIELD):
             return None
+        # DELEGAT NIGDY NA BOISKU (decyzja 01.10.2026). Stoi WYŻEJ niż role
+        # z ZPRP, bo delegat bywa tam opisany także jako „Sędzia" - a mimo to
+        # na boisko nie idzie. Ręczne ustawienie okręgu wygrywa (wyżej), bo
+        # „wolno ręcznie" to świadoma decyzja obsadowego, nie pomyłka automatu.
+        if judge.delegate:
+            return "delegat - nie na boisko"
         if zprp_field_allowed(judge.roles) is False:
             return "tylko stolik (ZPRP)" if ROLE_TABLE in judge.roles else "bez roli sędziego w ZPRP"
         return None
