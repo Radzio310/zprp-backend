@@ -9,6 +9,7 @@ from pathlib import Path
 
 from app.province_clubs_scrape import (
     club_display_name,
+    eligible_fallback_club_id,
     parse_competitions,
     parse_eligible_teams,
     parse_seasons,
@@ -121,6 +122,10 @@ def test_niejednoznacznej_nazwy_nie_sklejamy():
         {"name_key": "azs", "club_id": "2"},
     ]
     assert "azs" not in unique_club_ids_by_name(rows)
+
+
+def test_kategorie_bez_numeru_klubu_dostaja_jeden_stabilny_fallback():
+    assert eligible_fallback_club_id(["17652", "19001", "17652"]) == "eligible-team:17652"
 
 
 def test_klucz_nazwy_rozroznia_drugie_zespoly():

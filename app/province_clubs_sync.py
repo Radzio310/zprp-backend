@@ -37,6 +37,7 @@ from app.province_clubs_scrape import (
     Competition,
     Team,
     club_display_name,
+    eligible_fallback_club_id,
     parse_competitions,
     parse_eligible_teams,
     parse_seasons,
@@ -319,28 +320,50 @@ async def _collect_season(
         for row in teams
         if _s(row.get("team_id")) and _s(row.get("club_id"))
     }
-    # Nazwa może być wspólna tylko wtedy, gdy prowadzi jednoznacznie do jednego
-    # numeru klubu. To łączy np. dwa różne numery drużyn „KPR Lubliniec", ale
-    # nie skleja na siłę dwóch klubów o przypadkiem jednakowej nazwie.
-    unique_club_for_name = unique_club_ids_by_name(teams)
-    for team_id, (team, source_competition) in eligible.items():
+    # Rozstrzygamy KLUB raz dla całej grupy nazw. Dwie prawe pozycje mogą mieć
+    # różne `team_id` (każda kategoria ma własny numer), a jednocześnie żadna
+    # nie występować po lewej. Poprzednio każda dostawała wtedy osobny fallback
+    # i Panel pokazywał dwa kafle „KPR Lubliniec".
+    unresolved_by_name: dict[str, list[tuple[str, Team]]] = {}
+    resolved_club_for_name = unique_club_ids_by_name(teams)
+    for team_id, (team, _source) in eligible.items():
         if team_id in participant_ids:
             continue
-        team.club_id = known_clubs.get(team_id, "") or unique_club_for_name.get(team.key, "")
-        if not team.club_id and team.team_path:
+        known = known_clubs.get(team_id, "")
+        if known:
+            resolved_club_for_name.setdefault(team.key, known)
+        unresolved_by_name.setdefault(team.key, []).append((team_id, team))
+
+    for name_key, group in unresolved_by_name.items():
+        if resolved_club_for_name.get(name_key):
+            continue
+        for team_id, team in group:
+            if not team.team_path:
+                continue
             try:
                 _, squad = await fetch_with_correct_encoding(
                     client, _path(team.team_path), method="GET", cookies=cookies
                 )
-                team.club_id = parse_team_club_id(squad)
+                club_id = parse_team_club_id(squad)
+                if club_id:
+                    resolved_club_for_name[name_key] = club_id
+                    break
             except Exception as exc:
                 logger.warning("[clubs] klub druzyny uprawnionej %s: %s", team_id, exc)
-            await asyncio.sleep(COMPETITION_REQUEST_DELAY)
-        if not team.club_id:
-            # Stabilny awaryjny identyfikator jest lepszy niż ponowne zgubienie
-            # drużyny. Gdy ZPRP później poda prawdziwy klub, migawka zastąpi ten
-            # wiersz; osierocone ustawienie nie wejdzie do zakresu sezonu.
-            team.club_id = f"eligible-team:{team_id}"
+            finally:
+                await asyncio.sleep(COMPETITION_REQUEST_DELAY)
+        if not resolved_club_for_name.get(name_key):
+            # Jeden stabilny fallback NA NAZWĘ, nie na kategorię. Wybór
+            # najmniejszego team_id zachowuje istniejący wpis ustawień po
+            # wcześniejszej, błędnej synchronizacji i scala pozostałe kategorie.
+            resolved_club_for_name[name_key] = eligible_fallback_club_id(
+                [team_id for team_id, _team in group]
+            )
+
+    for team_id, (team, source_competition) in eligible.items():
+        if team_id in participant_ids:
+            continue
+        team.club_id = resolved_club_for_name[team.key]
 
         if team.other_competitions:
             target_id, target_name = team.other_competitions[0]

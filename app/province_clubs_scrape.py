@@ -350,6 +350,12 @@ def unique_club_ids_by_name(rows: list[dict]) -> dict[str, str]:
     }
 
 
+def eligible_fallback_club_id(team_ids: list[str]) -> str:
+    """Jeden stabilny klub awaryjny dla kilku kategorii tej samej nazwy."""
+    clean = sorted({str(team_id or "").strip() for team_id in team_ids if str(team_id or "").strip()})
+    return f"eligible-team:{clean[0]}" if clean else ""
+
+
 def club_display_name(names: list[str]) -> str:
     """
     Nazwa klubu z nazw jego druzyn - do czasu, az ktos ja w panelu poprawi.
