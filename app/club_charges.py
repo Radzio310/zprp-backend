@@ -7,8 +7,8 @@ Decyzje uzytkownika z 10.09.2026:
     `settlement_engine`, tutaj tylko sumujemy),
   - obciazamy mecze okregowe ORAZ stoliki na meczach centralnych - to samo, co
     okreg ma w zestawieniu, wiec kwoty po obu stronach sie schodza,
-  - placi GOSPODARZ; zmiana gospodarza albo zwolnienie meczu z oplaty to reczny
-    wyjatek na meczu,
+  - placi FAKTYCZNY GOSPODARZ; oficjalna zmiana gospodarza z ZPRP odwraca
+    strony automatycznie, a reczny wyjatek sluzy tylko do korekty/zwolnienia,
   - klub z odznaczonym „rozlicza sie przez okreg" nie jest obciazany od daty
     wskazanej przy odznaczeniu (historia zostaje).
 
@@ -26,8 +26,9 @@ Decyzja uzytkownika z 18.09.2026 - „4. sedzia" (drugi stolikowy):
   - dziala od `table_by_club_since`, zeby zmiana w polowie sezonu nie
     przeliczyla wstecz meczow juz rozliczonych z klubem.
 
-⚠ Gospodarz: najpierw terminarz okregu (`province_matches`), a gdy go tam nie
-ma - napis „Gospodarz - Gość", ktory ma KAZDA obsada w bazie. Terminarz trzyma
+⚠ Gospodarz: najpierw terminarz okregu (`province_matches`) wraz ze znacznikiem
+zmiany gospodarza, a gdy go tam nie ma - napis „Gospodarz - Gość", ktory ma
+KAZDA obsada w bazie. Terminarz trzyma
 tylko BIEZACY sezon: mecze minionych sezonow nie mialy gospodarza, po cichu
 nikogo nie obciazaly i panel pokazywal 0 zl za caly sezon 2025/2026.
 
@@ -141,6 +142,10 @@ class ChargeRow:
     #: „Gospodarz - Gość" z obsady i sam gosc - panel pokazuje, kto z kim gral.
     teams: str = ""
     guest_name: str = ""
+    #: ZPRP trzyma strony nominalne i osobno znacznik zamiany gospodarza.
+    #: `True` oznacza, ze `host_name`/`guest_name` sa juz ulozone tak, jak
+    #: faktycznie rozegrano mecz (i kto ma zostac obciazony).
+    host_swapped: bool = False
     #: Klub gospodarza stawia drugiego stolikowego sam (deklaracja w Obsadzie)
     #: i w dniu meczu ta deklaracja juz obowiazywala.
     own_table: bool = False
@@ -162,6 +167,31 @@ def _as_date(value: Any) -> Optional[date]:
 
 def _default_key(value: Any) -> str:
     return " ".join(str(value or "").lower().split())
+
+
+def is_host_swapped(state: dict[str, Any]) -> bool:
+    """Czy terminarz oznacza zamiane gospodarza (stare i nowe migawki)."""
+    truthy = {"1", "true", "yes", "tak", "y"}
+    return any(
+        str(state.get(key, "")).strip().lower() in truthy
+        for key in ("host_swapped", "zamiana")
+    )
+
+
+def actual_match_sides(state: dict[str, Any]) -> tuple[str, str, bool]:
+    """
+    Zwraca faktycznego gospodarza i goscia.
+
+    ZPRP przechowuje strony nominalne w polach `gosp`/`gosc`, a zamiane jako
+    osobna flage. Rozliczenia musza obciazac pierwsza, faktycznie gospodarza
+    druzyne - tak samo jak widok meczu w Obsadzie.
+    """
+    nominal_host = " ".join(str(state.get("ID_zespoly_gosp_ZespolNazwa") or "").split())
+    nominal_guest = " ".join(str(state.get("ID_zespoly_gosc_ZespolNazwa") or "").split())
+    swapped = is_host_swapped(state)
+    if swapped:
+        return nominal_guest, nominal_host, True
+    return nominal_host, nominal_guest, False
 
 
 def host_from_teams(
@@ -338,6 +368,8 @@ def build_charges(
     settled: Iterable[Any],
     *,
     hosts: dict[str, str],
+    guests: Optional[dict[str, str]] = None,
+    swapped_matches: Optional[set[str]] = None,
     teams_by_key: dict[str, TeamRef],
     teams_by_id: Optional[dict[str, TeamRef]] = None,
     overrides: Optional[dict[str, MatchOverride]] = None,
@@ -365,6 +397,8 @@ def build_charges(
     clubs = clubs or {}
     judge_names = judge_names or {}
     teams_by_id = teams_by_id or {}
+    guests = guests or {}
+    swapped_matches = swapped_matches or set()
     normalize = key_of or _default_key
     # Wszystkie druzyny sezonu - `teams_by_key` trzyma tylko pierwsza z danej
     # nazwy, a ta sama nazwa bywa w kilku kategoriach.
@@ -387,7 +421,8 @@ def build_charges(
                 city=item.city,
                 host_name=host,
                 teams=teams,
-                guest_name=guest_from_teams(teams, host),
+                guest_name=guests.get(item.match_key, "") or guest_from_teams(teams, host),
+                host_swapped=item.match_key in swapped_matches,
             )
             grouped[item.match_key] = row
         elif teams and not row.teams:

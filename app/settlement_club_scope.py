@@ -117,11 +117,19 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             )
         )
     )
-    hosts = {}
+    hosts: dict[str, str] = {}
+    guests: dict[str, str] = {}
+    swapped_matches: set[str] = set()
     for row in host_rows:
-        host = _s(_state(row["state_json"]).get("ID_zespoly_gosp_ZespolNazwa"))
+        state = _state(row["state_json"])
+        host, guest, swapped = C.actual_match_sides(state)
+        match_key = f"d:{_s(row['match_id'])}"
         if host:
-            hosts[f"d:{_s(row['match_id'])}"] = host
+            hosts[match_key] = host
+        if guest:
+            guests[match_key] = guest
+        if swapped:
+            swapped_matches.add(match_key)
 
     excluded_keys: set[str] = set()
     details: dict[str, dict] = {}
@@ -130,6 +138,8 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
         charges = C.build_charges(
             matches,
             hosts=hosts,
+            guests=guests,
+            swapped_matches=swapped_matches,
             teams_by_key=by_key,
             teams_by_id=by_id,
             overrides=overrides,

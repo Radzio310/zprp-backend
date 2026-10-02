@@ -33,17 +33,53 @@ def _type_enabled(preferences: Any, key: str) -> bool:
     return types.get(key, True) is not False
 
 
+def _type_enabled_compat(preferences: Any, key: str, legacy_key: str) -> bool:
+    """Czyta nowy przełącznik, a w starym pliku zachowuje dawną decyzję."""
+    prefs = _mapping(preferences)
+    types = _mapping(prefs.get("notificationTypes"))
+    if key in types:
+        return types.get(key) is not False
+    return types.get(legacy_key, True) is not False
+
+
 def province_event_preference_key(event_type: str) -> str:
     if event_type in ("match_added", "match_removed", "assignment_removed"):
-        return "newMatchAdded"
+        return "matchAssignment"
     if event_type == "lineup_changed":
-        return "changeLineup"
+        return "lineup"
+    if event_type in ("protocol_approved", "protocol_reopened"):
+        return "protocolStatus"
+    if event_type == "delegate_evaluation_available":
+        return "delegateEvaluation"
+    if event_type in ("match_date_changed", "match_updated"):
+        return "scheduleVenue"
     return "changeMatchData"
 
 
-def province_event_allowed(preferences: Any, event_type: str) -> bool:
+def province_event_allowed(
+    preferences: Any,
+    event_type: str,
+    *,
+    preference_keys: Any = None,
+) -> bool:
     """Czy urządzenie chce dany typ zmiany meczu z serwera."""
-    return _type_enabled(preferences, province_event_preference_key(event_type))
+    keys = [str(key) for key in (preference_keys or []) if str(key)]
+    if not keys:
+        keys = [province_event_preference_key(event_type)]
+    legacy = {
+        "matchAssignment": "newMatchAdded",
+        "scheduleVenue": "changeMatchData",
+        "lineup": "changeLineup",
+        "protocolStatus": "changeMatchData",
+        "delegateEvaluation": "changeMatchData",
+        "changeMatchData": "changeMatchData",
+    }
+    # Scalona rewizja może należeć do kilku kategorii. Wysyłamy ją, jeżeli
+    # użytkownik pozostawił włączoną przynajmniej jedną z nich.
+    return any(
+        _type_enabled_compat(preferences, key, legacy.get(key, key))
+        for key in keys
+    )
 
 
 def market_broadcast_allowed(preferences: Any) -> bool:

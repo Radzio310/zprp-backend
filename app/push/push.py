@@ -1,11 +1,13 @@
 import logging
 import os
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
     admin_alert_notifications,
@@ -428,33 +430,56 @@ async def bulk(req: PushScheduleBulkRequest):
     now = _utc_now()
     items = req.items or []
 
-    # Dedupe: max 1 pending per hour – realizujemy to przez delete + insert per hour
     inserted = 0
 
     for it in items:
         dt = _parse_utc_iso(it.send_at_utc)
         hour = _send_hour_utc(dt)
+        data = it.data or {}
+        client_id = str(data.get("client_id") or "").strip()
+        match_id = str(
+            data.get("matchId")
+            or data.get("match_id")
+            or data.get("matchNumber")
+            or ""
+        ).strip()
+        kind = str(data.get("type") or data.get("kind") or "scheduled").strip()
+        logical = client_id or f"{kind}|{match_id}|{dt.isoformat()}"
+        dedupe_key = hashlib.sha256(
+            f"{req.installation_id}|{logical}".encode("utf-8")
+        ).hexdigest()
 
-        # usuń istniejące pending w tej godzinie
-        del_stmt = delete(push_schedules).where(
-            (push_schedules.c.installation_id == req.installation_id)
-            & (push_schedules.c.send_hour_utc == hour)
-            & (push_schedules.c.status == "pending")
-        )
-        await database.execute(del_stmt)
-
-        ins = insert(push_schedules).values(
+        ins = pg_insert(push_schedules).values(
             installation_id=req.installation_id,
             send_at_utc=dt,
             send_hour_utc=hour,
+            dedupe_key=dedupe_key,
             title=it.title,
             body=it.body,
-            data_json=it.data or {},
+            data_json=data,
             status="pending",
             attempts=0,
             last_error=None,
             created_at=now,
             updated_at=now,
+        ).on_conflict_do_update(
+            index_elements=[push_schedules.c.dedupe_key],
+            index_where=push_schedules.c.dedupe_key.is_not(None),
+            set_={
+                "send_at_utc": dt,
+                "send_hour_utc": hour,
+                "title": it.title,
+                "body": it.body,
+                "data_json": data,
+                "status": "pending",
+                "attempts": 0,
+                "last_error": None,
+                "updated_at": now,
+            },
+            # Scheduler najpierw atomowo przejmuje rekord jako `processing`.
+            # Równoległa synchronizacja tego samego przypomnienia nie może go
+            # cofnąć do `pending`, bo drugi worker wysłałby tę samą wiadomość.
+            where=push_schedules.c.status != "processing",
         )
         await database.execute(ins)
         inserted += 1

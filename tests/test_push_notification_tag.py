@@ -1,13 +1,9 @@
-"""Znacznik powiadomienia - dlaczego trzy zmiany dają trzy powiadomienia.
+"""Znacznik powiadomienia i grupowanie żywego wątku.
 
-Zmiana daty meczu, dopisanie adresu hali i edycja wyniku skróconego idą JEDNYM
-przebiegiem monitora, w odstępie sekund. Bez własnego `tag` Android potrafi
-podmienić jedno powiadomienie drugim - sędzia widzi wtedy ostatnie i nie ma
-pojęcia, że termin się przesunął.
-
-Te testy pilnują dwóch rzeczy naraz, bo obie da się zepsuć jedną pomyłką:
-różne zdarzenia MUSZĄ mieć różne znaczniki, a to samo zdarzenie wysłane
-powtórnie MUSI mieć ten sam - inaczej ponowienie mnożyłoby kopie.
+Jedna rewizja meczu jest już jednym zdarzeniem, a wszystkie kolejne rewizje
+tego samego meczu dzielą stabilny ``notificationThread``. Android zastępuje
+więc stary kafel nowszym, podczas gdy niezależne zdarzenia bez wątku nadal
+mają różne znaczniki. Ponowienie tej samej dostawy również nie tworzy kopii.
 """
 from __future__ import annotations
 
@@ -25,7 +21,7 @@ def event(key: str) -> dict:
 
 
 def test_different_events_never_share_a_tag():
-    # Trzy zmiany w tym samym meczu, jeden przebieg monitora.
+    # Niezależne zdarzenia bez jawnego wątku pozostają rozdzielone.
     date_change = notification_tag(event("aaa111"), "Zmiana terminu", "Zmieniono datę")
     hall_change = notification_tag(event("bbb222"), "Zmiana danych", "Zmieniono adres hali")
     score_edit = notification_tag(event("ccc333"), "Zmiana danych", "Edytowano wynik")
@@ -86,6 +82,19 @@ def test_live_thread_replaces_older_state_even_when_text_changes():
     )
     assert first == updated
     assert first != other
+
+
+def test_match_thread_replaces_an_older_revision_of_the_same_match():
+    first = event("aaa111") | {"notificationThread": "province-match:slaskie:208136"}
+    updated = event("bbb222") | {"notificationThread": "province-match:slaskie:208136"}
+    other = event("ccc333") | {"notificationThread": "province-match:slaskie:208137"}
+
+    assert notification_tag(first, "Termin", "12:00") == notification_tag(
+        updated, "Hala", "Nowy adres"
+    )
+    assert notification_tag(first, "Termin", "12:00") != notification_tag(
+        other, "Termin", "12:00"
+    )
 
 
 def test_silent_update_uses_the_quiet_channel_without_sound():

@@ -2313,10 +2313,14 @@ push_schedules = Table(
     Column("installation_id", String, nullable=False, index=True),
     Column("send_at_utc", DateTime(timezone=True), nullable=False, index=True),
     Column("send_hour_utc", Integer, nullable=False, index=True),  # floor(timestamp/3600)
+    # Stabilny klucz logicznego przypomnienia. NULL pozostaje dozwolony dla
+    # starszych producentów jednorazowych wiadomości; klient BAZA zawsze go
+    # dostaje i zapisuje przez atomowy upsert.
+    Column("dedupe_key", String, nullable=True, unique=True),
     Column("title", String, nullable=False),
     Column("body", Text, nullable=False),
     Column("data_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
-    Column("status", String, nullable=False, server_default=text("'pending'")),  # pending|sent|failed
+    Column("status", String, nullable=False, server_default=text("'pending'")),  # pending|processing|sent|failed
     Column("attempts", Integer, nullable=False, server_default=text("0")),
     Column("last_error", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
@@ -4345,6 +4349,13 @@ with engine.connect() as _conn:
     # dołoży nowych kolumn przy wdrożeniu.
     _conn.execute(text("ALTER TABLE admin_settings ADD COLUMN IF NOT EXISTS allow_dev_pushes boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_id varchar"))
+    _conn.execute(text("ALTER TABLE push_schedules ADD COLUMN IF NOT EXISTS dedupe_key varchar"))
+    _conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_push_schedules_dedupe_key "
+            "ON push_schedules (dedupe_key) WHERE dedupe_key IS NOT NULL"
+        )
+    )
     # Rejestr urządzeń w login_records zna applicationId już od poprzednich
     # wydań. Uzupełniamy nim istniejące tokeny od razu przy wdrożeniu, żeby
     # blokada DEV działała bez oczekiwania na ponowne uruchomienie aplikacji.

@@ -35,7 +35,8 @@ async def enqueue(event_id, previous_state=None):
     event = await database.fetch_one(select(province_match_events).where(province_match_events.c.id == event_id))
     if not event:
         return
-    previous_refs = json_value(event["data_json"], {}).get("mentoring_previous_refs") or []
+    event_data = json_value(event["data_json"], {})
+    previous_refs = event_data.get("mentoring_previous_refs") or []
     if previous_state is None and len(previous_refs) == 2:
         previous_state = dict(zip(("NrSedzia_pierwszy", "NrSedzia_drugi"), previous_refs))
     match = await database.fetch_one(select(province_matches).where(province_matches.c.province == event["province"]).where(province_matches.c.match_id == event["match_id"]))
@@ -69,8 +70,14 @@ async def enqueue(event_id, previous_state=None):
     for device in devices:
         if not device_allowed(device, allow_dev):
             continue
-        data = {**json_value(event["data_json"], {}), "kind": "mentoring_match_change", "mentoring_pair_ids": recipients[device["judge_id"]], "mentoring_mentor_id": device["judge_id"], "judgeId": device["judge_id"], "mentoring_event_at": event["created_at"].isoformat()}
-        await database.execute(pg_insert(province_match_notifications).values(event_id=event_id, installation_id=device["installation_id"], judge_id=device["judge_id"], title="Podopieczni · " + event["title"], body=event["body"], data_json=data, status="pending" if _prefs_allow(device["notification_prefs"], event["event_type"]) else "suppressed").on_conflict_do_nothing(constraint="uq_province_match_notification_event_installation"))
+        data = {**event_data, "kind": "mentoring_match_change", "mentoring_pair_ids": recipients[device["judge_id"]], "mentoring_mentor_id": device["judge_id"], "judgeId": device["judge_id"], "mentoring_event_at": event["created_at"].isoformat()}
+        external_push = event_data.get("external_push") is not False and event_data.get("priority") != "info"
+        allowed = external_push and _prefs_allow(
+            device["notification_prefs"],
+            event["event_type"],
+            preference_keys=event_data.get("preference_keys"),
+        )
+        await database.execute(pg_insert(province_match_notifications).values(event_id=event_id, installation_id=device["installation_id"], judge_id=device["judge_id"], title="Podopieczni · " + event["title"], body=event["body"], data_json=data, status="pending" if allowed else "suppressed").on_conflict_do_nothing(constraint="uq_province_match_notification_event_installation"))
 
 
 async def delivery_allowed(data, token_row):

@@ -14,6 +14,7 @@ from app.club_charges import (
     ClubSetting,
     MatchOverride,
     TeamRef,
+    actual_match_sides,
     balance,
     build_charges,
     category_matches,
@@ -70,10 +71,12 @@ def crew(
     )
 
 
-def charges(rows, *, hosts, overrides=None, clubs=None):
+def charges(rows, *, hosts, guests=None, swapped_matches=None, overrides=None, clubs=None):
     return build_charges(
         rows,
         hosts=hosts,
+        guests=guests,
+        swapped_matches=swapped_matches,
         teams_by_key=TEAMS_BY_KEY,
         teams_by_id=TEAMS_BY_ID,
         overrides=overrides,
@@ -224,6 +227,57 @@ def test_terminarz_wygrywa_z_napisem_obsady():
         hosts={"d:11": "MKS Start Michałkowice"},
     )
     assert rows[0].club_id == "2851"
+
+
+def test_zmiana_gospodarza_obciaza_faktycznego_gospodarza_i_odwraca_strony():
+    state = {
+        "ID_zespoly_gosp_ZespolNazwa": "SPR Sośnica II Gliwice",
+        "ID_zespoly_gosc_ZespolNazwa": "MKS Start Michałkowice",
+        "host_swapped": True,
+    }
+    host, guest, swapped = actual_match_sides(state)
+    assert (host, guest, swapped) == (
+        "MKS Start Michałkowice",
+        "SPR Sośnica II Gliwice",
+        True,
+    )
+
+    rows = charges(
+        [
+            crew(
+                "d:swap",
+                "5124",
+                E.R.ROLE_FIELD,
+                132,
+                28,
+                teams="SPR Sośnica II Gliwice - MKS Start Michałkowice",
+            )
+        ],
+        hosts={"d:swap": host},
+        guests={"d:swap": guest},
+        swapped_matches={"d:swap"},
+    )
+    [row] = rows
+    assert row.club_id == "2851"
+    assert row.team_name == "MKS Start Michałkowice"
+    assert row.host_name == "MKS Start Michałkowice"
+    assert row.guest_name == "SPR Sośnica II Gliwice"
+    assert row.host_swapped is True
+
+
+def test_stara_flaga_zamiana_jest_nadal_rozumiana():
+    host, guest, swapped = actual_match_sides(
+        {
+            "ID_zespoly_gosp_ZespolNazwa": "Nominalny gospodarz",
+            "ID_zespoly_gosc_ZespolNazwa": "Faktyczny gospodarz",
+            "zamiana": "1",
+        }
+    )
+    assert (host, guest, swapped) == (
+        "Faktyczny gospodarz",
+        "Nominalny gospodarz",
+        True,
+    )
 
 
 def test_mecz_okregowy_bez_gospodarza_widac_do_poprawy():

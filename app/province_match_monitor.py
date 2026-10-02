@@ -69,6 +69,11 @@ EVENT_NOTIFICATION_TITLES: Dict[str, str] = {
     "match_date_changed": "🕒 Zmieniono termin meczu",
     "lineup_changed": "👥 Zmieniono obsadę meczu",
     "match_data_changed": "✏️ Zmieniono dane meczu",
+    "match_updated": "🔔 Zaktualizowano Twój mecz",
+    "match_info_updated": "ℹ️ Zaktualizowano dane meczu",
+    "protocol_approved": "✅ Protokół meczu zatwierdzony",
+    "protocol_reopened": "↩️ Cofnięto zatwierdzenie protokołu",
+    "delegate_evaluation_available": "📝 Pojawiła się ocena delegata",
 }
 
 
@@ -104,7 +109,10 @@ def parse_match_at(value: Any) -> Optional[datetime]:
 
 
 def is_eligible_for_refresh(state: Dict[str, Any], approved: bool = False, now: Optional[datetime] = None) -> bool:
-    if approved or _str(state.get("protocol_status")) == "approved":
+    # Zatwierdzone mecze obsługuje osobny, lekki przebieg `status`. Pełny i
+    # publiczny monitor nie powinny ponownie pobierać całego historycznego
+    # meczu tylko po to, by sprawdzić dwie wartości cyklu życia protokołu.
+    if approved:
         return False
     match_at = parse_match_at(state.get("data_fakt") or state.get("data_prop"))
     if match_at is None:
@@ -405,60 +413,156 @@ def _match_details(state: Dict[str, Any]) -> str:
     return " • ".join(parts)
 
 
-def build_change_events(old: Dict[str, Any], new: Dict[str, Any]) -> List[Dict[str, str]]:
+def build_change_events(
+    old: Dict[str, Any],
+    new: Dict[str, Any],
+    *,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Zwraca najwyżej jedno, kanoniczne zdarzenie dla jednej rewizji meczu.
+
+    ZPRP często zapisuje kilka pól jednocześnie. Rozbijanie takiej rewizji na
+    osobne zdarzenia było bezpośrednią przyczyną serii niemal identycznych
+    pushy. Tutaj najpierw klasyfikujemy wszystkie zmiany, a dopiero potem
+    składamy jeden komunikat i jeden klucz idempotencji.
+    """
+    current = now or _now()
     code = _str(new.get("RozgrywkiCode") or old.get("RozgrywkiCode"))
-    events: List[Dict[str, str]] = []
-    if _changed(old, new, "data_fakt"):
-        body = f"Zmieniono datę meczu {code}"
-        if _str(new.get("data_fakt")):
-            body += f" na {_display_match_at(new.get('data_fakt'))}"
-        events.append({"event_type": "match_date_changed", "body": body})
-    if _changed(old, new, "NrSedzia_pierwszy_nazwisko", "NrSedzia_drugi_nazwisko"):
-        names = ", ".join(filter(None, [_str(new.get("NrSedzia_pierwszy_nazwisko")), _str(new.get("NrSedzia_drugi_nazwisko"))]))
-        events.append({"event_type": "lineup_changed", "body": f"Zmieniono sędziów głównych w meczu {code}: {names}".rstrip(": ")})
-    role_fields = (
-        ("NrSedzia_sekretarz_nazwisko", "sędziego sekretarza"),
-        ("NrSedzia_czas_nazwisko", "sędziego mierzącego czas"),
-        ("NrSedzia_delegat_nazwisko", "delegata"),
-        ("NrSedzia_delegat2_nazwisko", "drugiego delegata"),
+    match_at = parse_match_at(new.get("data_fakt") or new.get("data_prop"))
+    is_future = match_at is None or match_at > current
+    in_lifecycle_window = match_at is None or match_at >= current - timedelta(days=31)
+
+    changed_fields: List[str] = []
+    labels: List[str] = []
+    preference_keys: List[str] = []
+    semantic_types: List[str] = []
+    important = False
+
+    def add(
+        fields: Sequence[str],
+        label: str,
+        preference: str,
+        semantic_type: str,
+        *,
+        external: bool,
+    ) -> None:
+        nonlocal important
+        for field in fields:
+            if old.get(field, "") != new.get(field, "") and field not in changed_fields:
+                changed_fields.append(field)
+        if label not in labels:
+            labels.append(label)
+        # Tylko kategoria, która faktycznie może wysłać push, bierze udział w
+        # decyzji preferencji. Informacyjny kontakt dołączony do ważnej zmiany
+        # terminu nie może obejść wyłączonego przełącznika „Termin i miejsce".
+        if external and preference not in preference_keys:
+            preference_keys.append(preference)
+        if semantic_type not in semantic_types:
+            semantic_types.append(semantic_type)
+        important = important or external
+
+    date_changed = _changed(old, new, "data_fakt")
+    if is_future and date_changed:
+        add(("data_fakt",), "termin", "scheduleVenue", "match_date_changed", external=True)
+
+    venue_fields = ("Hala_nazwa", "Hala_miasto", "Hala_ulica", "Hala_numer")
+    if is_future and _changed(old, new, *venue_fields):
+        add(venue_fields, "hala", "scheduleVenue", "venue_changed", external=True)
+
+    teams_fields = (
+        "ID_zespoly_gosp_ZespolNazwa",
+        "ID_zespoly_gosc_ZespolNazwa",
+        "RozgrywkiCode",
     )
-    for field, label in role_fields:
-        if _changed(old, new, field):
-            value = _str(new.get(field))
-            verb = "Zmieniono" if value else "Usunięto"
-            suffix = f" na {value}" if value else ""
-            events.append({"event_type": "lineup_changed", "body": f"{verb} {label} w meczu {code}{suffix}"})
-    if _changed(old, new, "delegate_note"):
-        events.append({"event_type": "lineup_changed", "body": f"Zmieniono ocenę delegata w meczu {code}"})
-    if bool(new.get("host_swapped")) and _changed(old, new, "host_swapped"):
-        events.append({"event_type": "match_data_changed", "body": f"Zmieniono gospodarza zawodów w meczu {code}"})
-    if _changed(old, new, "Hala_nazwa", "Hala_miasto", "Hala_ulica", "Hala_numer"):
-        address = ", ".join(filter(None, [_str(new.get("Hala_nazwa")), _str(new.get("Hala_miasto")), " ".join(filter(None, [_str(new.get("Hala_ulica")), _str(new.get("Hala_numer"))]))]))
-        events.append({"event_type": "match_data_changed", "body": f"Zmieniono adres hali w meczu {code}" + (f" na {address}" if address else "")})
-    if _changed(old, new, "RozgrywkiCode"):
-        events.append({"event_type": "match_data_changed", "body": f"Zmieniono numer meczu na {code}"})
-    if _changed(old, new, "host_contact"):
-        events.append({"event_type": "match_data_changed", "body": f"Zmieniono dane teleadresowe Gospodarza w meczu {code}"})
-    if _changed(old, new, "guest_contact"):
-        events.append({"event_type": "match_data_changed", "body": f"Zmieniono dane teleadresowe Gościa w meczu {code}"})
-    result_fields = [key for key in FINGERPRINT_FIELDS if key.startswith(("wynik_", "dogrywka_", "karne_", "timeout"))] + ["widzowie"]
-    if _changed(old, new, *result_fields):
-        score = ":".join(filter(None, [_str(new.get("wynik_gosp_full")), _str(new.get("wynik_gosc_full"))]))
-        suffix = f": {score}" if score else ""
-        # Pierwsze wpisanie wyniku to DODANIE, nie edycja. Powiadomienie
-        # systemowe mówiło „Edytowano" także wtedy, gdy wynik pojawiał się po
-        # raz pierwszy - a dzwonek w aplikacji w tej samej chwili mówił
-        # „Dodano". Jedno zdarzenie nie może mieć dwóch opisów.
-        verb = "Dodano" if _was_added(old, new, *result_fields) else "Edytowano"
-        events.append({"event_type": "match_data_changed", "body": f"{verb} wynik skrócony meczu {code}{suffix}"})
-    # Jeden przebieg może wykryć wiele pól; identyczne komunikaty usuwamy.
-    return list({(e["event_type"], e["body"]): e for e in events}.values())
+    changed_team_fields = [
+        field for field in teams_fields if _changed(old, new, field)
+    ]
+    if bool(old.get("host_swapped")) != bool(new.get("host_swapped")):
+        changed_team_fields.append("host_swapped")
+    if is_future and changed_team_fields:
+        add(tuple(changed_team_fields), "dane organizacyjne", "scheduleVenue", "teams_changed", external=True)
+
+    lineup_fields = (
+        "NrSedzia_pierwszy_nazwisko",
+        "NrSedzia_drugi_nazwisko",
+        "NrSedzia_sekretarz_nazwisko",
+        "NrSedzia_czas_nazwisko",
+        "NrSedzia_delegat_nazwisko",
+        "NrSedzia_delegat2_nazwisko",
+    )
+    if is_future and _changed(old, new, *lineup_fields):
+        add(lineup_fields, "obsada", "lineup", "lineup_changed", external=True)
+
+    old_status = _str(old.get("protocol_status"))
+    new_status = _str(new.get("protocol_status"))
+    if in_lifecycle_window and old_status and old_status != new_status:
+        if new_status == "approved":
+            add(("protocol_status",), "zatwierdzenie protokołu", "protocolStatus", "protocol_approved", external=True)
+        elif old_status == "approved":
+            add(("protocol_status",), "cofnięcie zatwierdzenia", "protocolStatus", "protocol_reopened", external=True)
+
+    if in_lifecycle_window and not _str(old.get("delegate_note")) and _str(new.get("delegate_note")):
+        add(("delegate_note",), "ocena delegata", "delegateEvaluation", "delegate_evaluation_available", external=True)
+
+    # Pola informacyjne są widoczne w skrzynce, ale nigdy nie budzą telefonu.
+    # Po rozpoczęciu meczu nie tworzymy nawet wpisu historycznego — wynik i
+    # pozostałe dane są wtedy dostępne bezpośrednio w szczegółach meczu.
+    if is_future:
+        contact_fields = ("host_contact", "guest_contact")
+        if _changed(old, new, *contact_fields):
+            add(contact_fields, "kontakty klubów", "changeMatchData", "contacts_changed", external=False)
+        result_fields = tuple(
+            key
+            for key in FINGERPRINT_FIELDS
+            if key.startswith(("wynik_", "dogrywka_", "karne_", "timeout"))
+        ) + ("widzowie",)
+        if _changed(old, new, *result_fields):
+            add(result_fields, "dane techniczne", "changeMatchData", "result_changed", external=False)
+
+    if not changed_fields:
+        return []
+
+    if semantic_types == ["protocol_approved"]:
+        event_type = "protocol_approved"
+        body = f"Zatwierdzono protokół meczu {code} w bazie ZPRP"
+    elif semantic_types == ["protocol_reopened"]:
+        event_type = "protocol_reopened"
+        body = f"Cofnięto zatwierdzenie protokołu meczu {code}"
+    elif semantic_types == ["delegate_evaluation_available"]:
+        event_type = "delegate_evaluation_available"
+        body = f"Pojawiła się ocena delegata dla meczu {code}"
+    else:
+        event_type = "match_updated" if important else "match_info_updated"
+        prefix = "Zaktualizowano mecz" if important else "Zaktualizowano dane meczu"
+        body = f"{prefix} {code}: {', '.join(labels)}"
+
+    return [
+        {
+            "event_type": event_type,
+            "body": body,
+            "priority": "important" if important else "info",
+            "external_push": important,
+            "changed_fields": changed_fields,
+            "change_types": semantic_types,
+            "preference_keys": preference_keys,
+            "match_at": match_at.isoformat() if match_at else None,
+        }
+    ]
 
 
-def _prefs_allow(prefs: Any, event_type: str) -> bool:
+def _prefs_allow(
+    prefs: Any,
+    event_type: str,
+    *,
+    preference_keys: Optional[Sequence[str]] = None,
+) -> bool:
     from app.push.preferences import province_event_allowed
 
-    return province_event_allowed(prefs, event_type)
+    return province_event_allowed(
+        prefs,
+        event_type,
+        preference_keys=preference_keys,
+    )
 
 
 async def _active_judge_ids(province: str) -> List[str]:
@@ -530,6 +634,13 @@ async def _create_event(
     judge_ids: Iterable[str],
     state_fp: str,
     previous_state: Optional[Dict[str, Any]] = None,
+    *,
+    priority: str = "important",
+    external_push: bool = True,
+    changed_fields: Optional[Sequence[str]] = None,
+    change_types: Optional[Sequence[str]] = None,
+    preference_keys: Optional[Sequence[str]] = None,
+    match_at: Optional[str] = None,
 ) -> int:
     targets = sorted({_str(j) for j in judge_ids if _str(j)})
     if not targets:
@@ -543,6 +654,16 @@ async def _create_event(
         "match_id": match_id,
         "matchNumber": match_code,
         "event_key": event_key,
+        "priority": priority,
+        "external_push": external_push,
+        "changed_fields": list(changed_fields or []),
+        "change_types": list(change_types or [event_type]),
+        "preference_keys": list(preference_keys or []),
+        "match_at": match_at or "",
+        # Jeden żywy wątek na mecz: kolejne rewizje nie układają na Androidzie
+        # stosu starych kafelków, a dziennik w aplikacji nadal zachowuje każdą
+        # kanoniczną rewizję.
+        "notificationThread": f"province-match:{province}:{match_id}",
         **({"mentoring_previous_refs": [previous_state.get("NrSedzia_pierwszy"), previous_state.get("NrSedzia_drugi")]} if previous_state else {}),
     }
     title = notification_title(event_type)
@@ -587,7 +708,11 @@ async def _create_event(
     for device in devices:
         if not device_allowed(device, allow_dev):
             continue
-        allowed = _prefs_allow(device["notification_prefs"], event_type)
+        allowed = external_push and _prefs_allow(
+            device["notification_prefs"],
+            event_type,
+            preference_keys=preference_keys,
+        )
         delivery_status = "pending" if allowed else "suppressed"
         await database.execute(
             pg_insert(province_match_notifications)
@@ -602,7 +727,13 @@ async def _create_event(
                 last_error=(
                     None
                     if allowed
-                    else f"notificationTypes.{province_event_preference_key(event_type)} disabled"
+                    else (
+                        "informational event (in-app only)"
+                        if not external_push
+                        else "notificationTypes."
+                        + ",".join(preference_keys or [province_event_preference_key(event_type)])
+                        + " disabled"
+                    )
                 ),
             )
             .on_conflict_do_nothing(
@@ -680,6 +811,7 @@ async def _upsert_match(
     deep: bool,
     *,
     seen_in_schedule: bool = True,
+    notify_new_assignments: bool = False,
 ) -> tuple[bool, int]:
     """Zapisuje stan meczu i wysyla powiadomienia o tym, co sie zmienilo.
 
@@ -718,7 +850,10 @@ async def _upsert_match(
         await database.execute(insert(province_matches).values(province=province, match_id=match_id, **values))
         assignment_events = (
             await _sync_assignments_from_state(
-                province, match_id, state, notify=False
+                province,
+                match_id,
+                state,
+                notify=notify_new_assignments,
             )
             if deep
             else 0
@@ -755,7 +890,7 @@ async def _upsert_match(
             logger.debug("district alerts hook skipped", exc_info=True)
     targets = await _target_judges(province, match_id)
     created = assignment_events
-    for event in build_change_events(old, state):
+    for event in build_change_events(old, state, now=now):
         created += await _create_event(
             province,
             match_id,
@@ -765,6 +900,12 @@ async def _upsert_match(
             targets,
             new_fp,
             previous_state=old,
+            priority=event.get("priority", "important"),
+            external_push=bool(event.get("external_push", True)),
+            changed_fields=event.get("changed_fields"),
+            change_types=event.get("change_types"),
+            preference_keys=event.get("preference_keys"),
+            match_at=event.get("match_at"),
         )
     return False, created
 
@@ -802,7 +943,9 @@ async def _upsert_assignment(province: str, match_id: str, judge_id: str, season
             set_={"season": season or None, "active": True, "missing_runs": 0, "last_seen_at": now, "updated_at": now},
         )
     )
-    if notify and (not existing or not existing["active"]):
+    match_at = parse_match_at(state.get("data_fakt") or state.get("data_prop"))
+    is_future = match_at is None or match_at > now
+    if notify and is_future and (not existing or not existing["active"]):
         code = _str(state.get("RozgrywkiCode"))
         details = _match_details(state)
         return await _create_event(
@@ -847,7 +990,12 @@ async def _sync_assignments_from_state(
 async def _mark_missing_assignments(province: str, judge_id: str, seen_ids: set[str]) -> int:
     cutoff = _now() - timedelta(days=31)
     rows = await database.fetch_all(
-        select(province_match_judges, province_matches.c.match_code, province_matches.c.fingerprint)
+        select(
+            province_match_judges,
+            province_matches.c.match_code,
+            province_matches.c.fingerprint,
+            province_matches.c.match_at,
+        )
         .select_from(
             province_match_judges.join(
                 province_matches,
@@ -881,7 +1029,8 @@ async def _mark_missing_assignments(province: str, judge_id: str, seen_ids: set[
             )
             .values(missing_runs=missing, active=active, updated_at=_now())
         )
-        if not active:
+        match_at = row["match_at"]
+        if not active and (match_at is None or match_at > _now()):
             code = _str(row["match_code"])
             created += await _create_event(
                 province,
@@ -1046,6 +1195,66 @@ async def _public_window_states(
     return out
 
 
+async def _approved_status_states(
+    province: str,
+    limit: int,
+) -> Dict[str, Dict[str, Any]]:
+    """Zatwierdzone mecze z ostatnich 31 dni do rzadkiego sprawdzenia statusu.
+
+    Nie dokładamy ich do pięciominutowego przebiegu hot. Osobna, godzinna
+    pętla wykrywa cofnięcie zatwierdzenia i ewentualną ocenę delegata bez
+    ponownego uruchamiania hałaśliwych zmian pomeczowych.
+    """
+    now = _now()
+    active_assignment = (
+        select(province_match_judges.c.match_id)
+        .where(province_match_judges.c.province == province_matches.c.province)
+        .where(province_match_judges.c.match_id == province_matches.c.match_id)
+        .where(province_match_judges.c.active.is_(True))
+        .exists()
+    )
+    rows = await database.fetch_all(
+        select(province_matches.c.match_id, province_matches.c.state_json)
+        .where(province_matches.c.province == province)
+        .where(province_matches.c.active.is_(True))
+        .where(province_matches.c.approved.is_(True))
+        .where(active_assignment)
+        .where(province_matches.c.match_at.is_not(None))
+        .where(province_matches.c.match_at >= now - timedelta(days=31))
+        .where(province_matches.c.match_at <= now + timedelta(days=1))
+        .order_by(province_matches.c.match_at.desc())
+        .limit(limit)
+    )
+    return {
+        _str(row["match_id"]): state_dict(row["state_json"])
+        for row in rows
+        if _str(row["match_id"])
+    }
+
+
+async def _run_approved_status(province: str) -> Dict[str, int]:
+    known = await _approved_status_states(province, _PUBLIC_LIMIT)
+    if not known:
+        return {"matches_seen": 0, "details_fetched": 0, "events_created": 0}
+    async with AsyncClient(follow_redirects=True) as public_client:
+        fresh = await _fetch_details_many(public_client, known)
+    events_created = 0
+    for match_id, state in fresh.items():
+        _, created = await _upsert_match(
+            province,
+            match_id,
+            state,
+            True,
+            seen_in_schedule=False,
+        )
+        events_created += created
+    return {
+        "matches_seen": len(known),
+        "details_fetched": len(fresh),
+        "events_created": events_created,
+    }
+
+
 async def _run_public(province: str, mode: str) -> Dict[str, int]:
     """Szybki przebieg BEZ LOGOWANIA - publiczne API po znanych numerach meczow.
 
@@ -1147,6 +1356,7 @@ async def _mark_missing_full_matches(province: str, seen_ids: set[str]) -> int:
             continue
         missing = int(row["missing_full_runs"] or 0) + 1
         active = missing < 2
+        match_at = row["match_at"]
         if not active:
             # Obsada 2.0: mecz znika z terminarza - gotowy stan panelu do przebudowy.
             from app.assignment_board_cache import bump
@@ -1157,7 +1367,7 @@ async def _mark_missing_full_matches(province: str, seen_ids: set[str]) -> int:
             .where(and_(province_matches.c.province == province, province_matches.c.match_id == match_id))
             .values(missing_full_runs=missing, active=active, updated_at=_now())
         )
-        if not active:
+        if not active and (match_at is None or match_at > _now()):
             targets = await _target_judges(province, match_id)
             created += await _create_event(
                 province,
@@ -1204,7 +1414,13 @@ async def _run_full(province: str, username: str, password: str) -> Dict[str, in
                     )
                 )
                 chosen = _merge_partial_state(state_dict(old["state_json"]) if old else None, shallow)
-            _, created = await _upsert_match(province, match_id, chosen, match_id in deep_states)
+            _, created = await _upsert_match(
+                province,
+                match_id,
+                chosen,
+                match_id in deep_states,
+                notify_new_assignments=baseline,
+            )
             events_created += created if baseline else 0
         events_created += await _mark_missing_full_matches(province, seen_ids)
         return {
@@ -1282,7 +1498,7 @@ async def _execute_run(province: str, credentials: tuple[str, str], mode: str, i
     # Szybkie przebiegi NIE stoja w kolejce. Gdy wojewodztwo jest akurat zajete
     # pelnym crawlem, hot pomija cykl i wroci za piec minut - czekanie
     # zbudowaloby ogon przebiegow, ktore i tak pytaja o to samo.
-    if mode in ("hot", "warm"):
+    if mode in ("hot", "warm", "status"):
         max_wait = 20
     elif mode == "light":
         max_wait = 60
@@ -1301,6 +1517,8 @@ async def _execute_run(province: str, credentials: tuple[str, str], mode: str, i
         elif mode in ("hot", "warm"):
             # Bez danych logowania - publiczne API po znanych identyfikatorach.
             result = await _run_public(province, mode)
+        elif mode == "status":
+            result = await _run_approved_status(province)
         else:
             result = await _run_light(province, *credentials)
         await database.execute(
@@ -1346,6 +1564,7 @@ async def run_province_match_monitor() -> None:
     #          najrzadszy.
     hot_interval = max(120, int(os.getenv("ZPRP_MATCH_MONITOR_HOT_SECONDS", "300")))
     warm_interval = max(hot_interval, int(os.getenv("ZPRP_MATCH_MONITOR_WARM_SECONDS", "2700")))
+    status_interval = max(900, int(os.getenv("ZPRP_MATCH_MONITOR_STATUS_SECONDS", "3600")))
     light_interval = max(300, int(os.getenv("ZPRP_MATCH_MONITOR_LIGHT_SECONDS", "900")))
     full_interval = max(light_interval, int(os.getenv("ZPRP_MATCH_MONITOR_FULL_SECONDS", "14400")))
     max_provinces = max(1, int(os.getenv("ZPRP_MATCH_MONITOR_PROVINCE_CONCURRENCY", "2")))
@@ -1383,6 +1602,7 @@ async def run_province_match_monitor() -> None:
     await asyncio.gather(
         mode_loop("hot", hot_interval, public_concurrency),
         mode_loop("warm", warm_interval, public_concurrency, initial_delay=45),
+        mode_loop("status", status_interval, public_concurrency, initial_delay=75),
         mode_loop("light", light_interval, max_provinces, initial_delay=15),
         mode_loop("full", full_interval, full_concurrency, initial_delay=90),
     )

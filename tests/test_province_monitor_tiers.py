@@ -23,6 +23,7 @@ import ast
 import importlib
 import pathlib
 import sys
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -138,9 +139,14 @@ def test_a_real_change_still_gets_through():
     merged = _api_to_state(
         api_payload(data_fakt="2026-09-14 18:00:00"), dict(STORED)
     )
-    events = build_change_events(STORED, merged)
+    events = build_change_events(
+        STORED,
+        merged,
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
 
-    assert [e["event_type"] for e in events] == ["match_date_changed"]
+    assert [e["event_type"] for e in events] == ["match_updated"]
+    assert events[0]["change_types"] == ["match_date_changed"]
 
 
 def test_crew_change_is_visible_to_the_fast_pass():
@@ -152,9 +158,14 @@ def test_crew_change_is_visible_to_the_fast_pass():
     merged = _api_to_state(
         api_payload(NrSedzia_pierwszy_nazwisko="KOWALSKI Piotr"), dict(STORED)
     )
-    events = build_change_events(STORED, merged)
+    events = build_change_events(
+        STORED,
+        merged,
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
 
-    assert any(e["event_type"] == "lineup_changed" for e in events)
+    assert events[0]["event_type"] == "match_updated"
+    assert "lineup_changed" in events[0]["change_types"]
 
 
 # ── Czego szybki przebieg NIE ma prawa zrobić ───────────────────────────────
@@ -193,10 +204,16 @@ def test_public_pass_asks_only_about_matches_with_our_crew():
     assert "_PUBLIC_LIMIT" in ast.unparse(FUNCTIONS["_run_public"])
 
 
-def test_approved_matches_are_left_alone():
-    # Po zatwierdzeniu protokołu nic się już nie zmieni.
-    assert not is_eligible_for_refresh({"protocol_status": "approved"})
-    assert not is_eligible_for_refresh({}, approved=True)
+def test_approved_matches_are_left_to_the_dedicated_status_pass():
+    now = datetime(2026, 10, 2, tzinfo=timezone.utc)
+    assert not is_eligible_for_refresh(
+        {"protocol_status": "approved", "data_fakt": "2026-09-13 14:00:00"},
+        approved=True,
+        now=now,
+    )
+    source = ast.unparse(FUNCTIONS["_approved_status_states"])
+    assert "timedelta(days=31)" in source
+    assert "province_match_judges" in source
 
 
 # ── Okna czasu ──────────────────────────────────────────────────────────────
@@ -224,7 +241,7 @@ def test_warm_starts_where_hot_ends():
 
 def test_every_mode_has_a_loop():
     source = ast.unparse(FUNCTIONS["run_province_match_monitor"])
-    for mode in ("hot", "warm", "light", "full"):
+    for mode in ("hot", "warm", "status", "light", "full"):
         assert f"'{mode}'" in source or f'"{mode}"' in source
 
 
@@ -407,6 +424,51 @@ def test_preferencje_serwerowe_sa_niezalezne_od_lokalnych_przypomnien():
     assert _monitor._prefs_allow("nie-json", "match_added") is True
 
 
+def test_nowe_preferencje_maja_pierwszenstwo_i_zachowuja_stare_ustawienia():
+    assert _monitor._prefs_allow(
+        '{"notificationTypes": {"protocolStatus": false, "changeMatchData": true}}',
+        "protocol_approved",
+    ) is False
+    assert _monitor._prefs_allow(
+        '{"notificationTypes": {"changeMatchData": false}}',
+        "protocol_approved",
+    ) is False
+    assert _monitor._prefs_allow(
+        '{"notificationTypes": {"scheduleVenue": false, "lineup": true}}',
+        "match_updated",
+        preference_keys=["scheduleVenue", "lineup"],
+    ) is True
+
+
+def test_scheduler_przejmuje_przypomnienie_atomowo():
+    scheduler_path = pathlib.Path(__file__).resolve().parents[1] / "app" / "push" / "scheduler.py"
+    scheduler_source = scheduler_path.read_text(encoding="utf-8")
+    scheduler_tree = ast.parse(scheduler_source)
+    claim = next(
+        node
+        for node in ast.walk(scheduler_tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_claim_schedule"
+    )
+    claim_source = ast.unparse(claim)
+    assert "status == 'pending'" in claim_source
+    assert "status='processing'" in claim_source
+
+    push_source = (
+        pathlib.Path(__file__).resolve().parents[1] / "app" / "push" / "push.py"
+    ).read_text(encoding="utf-8")
+    assert 'where=push_schedules.c.status != "processing"' in push_source
+
+
+def test_informacyjne_zdarzenie_nie_budzi_tez_mentora():
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "app"
+        / "mentoring_notifications.py"
+    ).read_text(encoding="utf-8")
+    assert 'event_data.get("external_push") is not False' in source
+    assert 'event_data.get("priority") != "info"' in source
+
+
 def test_stan_z_bazy_przechodzi_przez_parser_kolumny_json():
     """`dict("...")` na napisie rzuca ValueError - monitor umieral na PIERWSZYM
     istniejacym wierszu i nowe mecze (powierzona II liga) nie dochodzily do
@@ -448,55 +510,103 @@ def test_szczegoly_daja_sie_odpytac_na_krotszej_smyczy():
 # telefon pokazywał wtedy dwa różne opisy jednej rzeczy.
 
 
-def _result_body(old: dict, new: dict) -> str:
-    events = [
-        e
-        for e in build_change_events(old, new)
-        if "wynik skrócony" in e["body"]
-    ]
-    assert len(events) == 1, events
-    return events[0]["body"]
+def _future_now() -> datetime:
+    return datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 
-def test_pierwszy_wynik_to_dodanie():
+def test_result_is_one_in_app_only_event():
     old = dict(STORED)
     new = dict(STORED, wynik_gosp_full="28", wynik_gosc_full="24")
-    assert _result_body(old, new) == "Dodano wynik skrócony meczu OSM/12: 28:24"
+    events = build_change_events(old, new, now=_future_now())
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "match_info_updated"
+    assert events[0]["external_push"] is False
+    assert "result_changed" in events[0]["change_types"]
 
 
-def test_poprawka_wyniku_to_edycja():
-    old = dict(STORED, wynik_gosp_full="28", wynik_gosc_full="24")
-    new = dict(STORED, wynik_gosp_full="29", wynik_gosc_full="24")
-    assert _result_body(old, new) == "Edytowano wynik skrócony meczu OSM/12: 29:24"
-
-
-def test_dopisana_liczba_widzow_tez_jest_dodaniem():
-    # Widzowie należą do tego samego formularza, a aplikacja liczy ich tak samo.
-    old = dict(STORED, wynik_gosp_full="28", wynik_gosc_full="24")
-    new = dict(old, widzowie="320")
-    assert _result_body(old, new).startswith("Dodano wynik skrócony")
-
-
-def test_skasowanie_wyniku_nie_jest_dodaniem():
-    old = dict(STORED, wynik_gosp_full="28", wynik_gosc_full="24")
-    new = dict(STORED, wynik_gosp_full="", wynik_gosc_full="")
-    assert _result_body(old, new) == "Edytowano wynik skrócony meczu OSM/12"
-
-
-def test_aplikacja_i_serwer_uzywaja_tych_samych_slow():
-    """Gdyby ktoś zmienił czasownik po jednej stronie, ten test upadnie.
-
-    Sam napis, nie cała reguła - ale to właśnie napis widzi sędzia i to on
-    rozjechał się między dzwonkiem a powiadomieniem systemowym.
-    """
-    engine = (
-        pathlib.Path(__file__).resolve().parents[2]
-        / "BAZA"
-        / "utils"
-        / "matchNotificationsEngine.ts"
+def test_two_contact_changes_are_coalesced_without_push():
+    old = dict(STORED)
+    new = dict(
+        STORED,
+        host_contact={"phone": "111"},
+        guest_contact={"phone": "222"},
     )
-    if not engine.exists():
-        pytest.skip("Repozytorium aplikacji nie jest obok backendu")
-    text = engine.read_text(encoding="utf-8")
-    assert 'anyAddedInResult ? "Dodano" : "Edytowano"' in text
-    assert "Dodano" in SOURCE and "Edytowano" in SOURCE
+    events = build_change_events(old, new, now=_future_now())
+
+    assert len(events) == 1
+    assert events[0]["external_push"] is False
+    assert events[0]["changed_fields"] == ["host_contact", "guest_contact"]
+    assert events[0]["preference_keys"] == []
+
+
+def test_info_field_cannot_bypass_a_disabled_important_category():
+    new = dict(
+        STORED,
+        Hala_miasto="Katowice",
+        host_contact={"phone": "111"},
+    )
+    event = build_change_events(STORED, new, now=_future_now())[0]
+    assert event["preference_keys"] == ["scheduleVenue"]
+
+
+def test_term_venue_and_lineup_are_one_important_event():
+    new = dict(
+        STORED,
+        data_fakt="2026-09-14 18:00:00",
+        Hala_miasto="Katowice",
+        NrSedzia_drugi_nazwisko="KOWALSKI Piotr",
+    )
+    events = build_change_events(STORED, new, now=_future_now())
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "match_updated"
+    assert events[0]["external_push"] is True
+    assert events[0]["preference_keys"] == ["scheduleVenue", "lineup"]
+
+
+def test_past_routine_changes_are_silent():
+    new = dict(STORED, Hala_miasto="Katowice", wynik_gosp_full="28")
+    assert build_change_events(
+        STORED,
+        new,
+        now=datetime(2026, 10, 2, tzinfo=timezone.utc),
+    ) == []
+
+
+def test_protocol_approval_and_reopen_are_lifecycle_events():
+    before = dict(STORED, protocol_status="before_approval")
+    approved = dict(STORED, protocol_status="approved")
+    now = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+    approved_events = build_change_events(before, approved, now=now)
+    reopened_events = build_change_events(approved, before, now=now)
+
+    assert approved_events[0]["event_type"] == "protocol_approved"
+    assert reopened_events[0]["event_type"] == "protocol_reopened"
+    assert approved_events[0]["external_push"] is True
+
+
+def test_first_observation_is_a_baseline_even_when_already_approved():
+    source = ast.unparse(FUNCTIONS["_upsert_match"])
+    baseline_branch = source.index("if not old_row:")
+    change_detection = source.index("for event in build_change_events")
+    assert baseline_branch < change_detection
+    assert "return (True, assignment_events)" in source[baseline_branch:change_detection]
+
+
+def test_full_pass_notifies_about_a_new_match_only_after_baseline():
+    source = ast.unparse(FUNCTIONS["_run_full"])
+    assert "notify_new_assignments=baseline" in source
+    upsert_source = ast.unparse(FUNCTIONS["_upsert_match"])
+    assert "notify=notify_new_assignments" in upsert_source
+
+
+def test_delegate_evaluation_notifies_once_when_it_first_appears():
+    before = dict(STORED, delegate_note="")
+    evaluated = dict(STORED, delegate_note="ocena 9")
+    now = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+    events = build_change_events(before, evaluated, now=now)
+    assert events[0]["event_type"] == "delegate_evaluation_available"
+    assert build_change_events(evaluated, evaluated, now=now) == []

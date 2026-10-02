@@ -115,8 +115,8 @@ async def _known_seasons(province: str) -> list[str]:
     return [_s(row["season"]) for row in rows]
 
 
-async def _hosts(province: str) -> dict[str, str]:
-    """Gospodarz meczu - po NAZWIE, bo mecze nie niosa numeru druzyny."""
+async def _match_sides(province: str) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """Faktyczne strony meczu - po NAZWIE, bo mecze nie niosa numeru druzyny."""
     rows = await database.fetch_all(
         select(province_matches.c.match_id, province_matches.c.state_json).where(
             and_(
@@ -125,13 +125,20 @@ async def _hosts(province: str) -> dict[str, str]:
             )
         )
     )
-    out: dict[str, str] = {}
+    hosts: dict[str, str] = {}
+    guests: dict[str, str] = {}
+    swapped_matches: set[str] = set()
     for row in rows:
         state = _state(row["state_json"])
-        host = _s(state.get("ID_zespoly_gosp_ZespolNazwa"))
+        host, guest, swapped = C.actual_match_sides(state)
+        match_key = f"d:{_s(row['match_id'])}"
         if host:
-            out[f"d:{_s(row['match_id'])}"] = host
-    return out
+            hosts[match_key] = host
+        if guest:
+            guests[match_key] = guest
+        if swapped:
+            swapped_matches.add(match_key)
+    return hosts, guests, swapped_matches
 
 
 async def _teams(province: str, season: str) -> tuple[dict[str, C.TeamRef], dict[str, C.TeamRef], dict[str, dict]]:
@@ -310,9 +317,12 @@ async def _load_clubs(province: str, season: str, *, include_future: bool = Fals
         for club_id in set(settings) | set(table_rules)
     }
 
+    hosts, guests, swapped_matches = await _match_sides(province)
     charges = C.build_charges(
         matches,
-        hosts=await _hosts(province),
+        hosts=hosts,
+        guests=guests,
+        swapped_matches=swapped_matches,
         teams_by_key=by_key,
         teams_by_id=by_id,
         overrides=await _overrides(province),
@@ -383,6 +393,7 @@ def _charge_json(row: C.ChargeRow, province: str) -> dict:
         "city": row.city,
         "host_name": row.host_name,
         "guest_name": row.guest_name,
+        "host_swapped": row.host_swapped,
         "teams": row.teams,
         "team_id": row.team_id,
         "team_name": row.team_name,

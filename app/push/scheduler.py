@@ -23,6 +23,14 @@ def _utc_now():
 
 async def _fetch_due(limit: int = 50):
     now = _utc_now()
+    # Worker, który zginął po przejęciu rekordu, nie może zablokować
+    # przypomnienia na zawsze.
+    await database.execute(
+        update(push_schedules)
+        .where(push_schedules.c.status == "processing")
+        .where(push_schedules.c.updated_at < now - timedelta(minutes=10))
+        .values(status="pending", updated_at=now)
+    )
     stmt = (
         select(
             push_schedules.c.id,
@@ -40,6 +48,16 @@ async def _fetch_due(limit: int = 50):
         .limit(limit)
     )
     return await database.fetch_all(stmt)
+
+
+async def _claim_schedule(schedule_id: int):
+    return await database.fetch_one(
+        update(push_schedules)
+        .where(push_schedules.c.id == schedule_id)
+        .where(push_schedules.c.status == "pending")
+        .values(status="processing", updated_at=_utc_now())
+        .returning(push_schedules.c.id)
+    )
 
 async def _get_token(installation_id: str):
     stmt = select(
@@ -172,6 +190,8 @@ async def run_push_scheduler():
             due = await _fetch_due(limit=50)
             for row in due:
                 sid = int(row["id"])
+                if not await _claim_schedule(sid):
+                    continue
                 installation_id = row["installation_id"]
                 title = row["title"]
                 body = row["body"]
