@@ -90,11 +90,11 @@ def test_field_referee_or_delegate_at_another_district_drops():
     assert fix(role=R.ROLE_DELEGATE) == DROP
 
 
-def test_current_season_foreign_match_is_fixed_too():
-    # Biezacy sezon (06.10.2026): terminarz trzyma mecze z list sedziow, wiec
-    # „d:" meczu innego okregu poprawiamy niezaleznie od tego, kiedy go zapisano.
-    assert fix(season="2026/2027", first_seen=DURING) == OUTSIDE
-    assert fix(season="2026/2027", match_code="E/JmK/3", role=R.ROLE_FIELD) == DROP
+def test_current_season_never_drops_anything():
+    # Decyzja z 06.10.2026 (wieczór): w biezacym sezonie mecz zdejmuje tylko
+    # czlowiek („Nie obciazaj klubow" / „Nie naliczaj"), nie numer.
+    assert fix(season="2026/2027", first_seen=DURING) == KEEP
+    assert fix(season="2026/2027", match_code="E/JmK/3", role=R.ROLE_FIELD) == KEEP
 
 
 def test_everything_else_stays():
@@ -112,8 +112,19 @@ def test_mlodzik_makroregionalny_z_cudzym_przedrostkiem_jest_nasz():
     assert not foreign_district_match("K/MłMR/12", {"S"})
     assert not foreign_district_match("K/MłKR/3", {"S"})
     assert own_past_match("K/MłMR/12", {"S"})
-    assert fix(season="2026/2027", match_code="K/MłMR/12", role=R.ROLE_FIELD) == KEEP
-    assert fix(season="2026/2027", match_code="K/MłMR/12") == KEEP
+    assert fix(match_code="K/MłMR/12", role=R.ROLE_FIELD) == KEEP
+    assert fix(match_code="K/MłMR/12") == KEEP
     # Reszta meczów innych okręgów - bez zmian (sprawa Wiktorii Więcław).
     assert foreign_district_match("E/JmK/3", {"S"})
     assert foreign_district_match("K/MłM/3", {"S"})
+
+
+def test_biezacy_sezon_z_listy_sedziego_liczy_wszystko_poza_zprp():
+    from app.settlement_origin import counts_this_season
+
+    assert counts_this_season("E/JmK/3")          # liga innego okregu
+    assert counts_this_season("K/MłMR/12")        # makroregion
+    assert counts_this_season("E/DzM/4")          # turniej dzieci z inna litera
+    assert counts_this_season("S/PPK/2")          # puchar wojewodzki
+    assert counts_this_season("XYZ/77")           # numer, ktorego nie znamy
+    assert not counts_this_season("SM/8")         # Superliga - placi ZPRP

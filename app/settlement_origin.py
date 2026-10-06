@@ -139,6 +139,20 @@ def collected_after_season(first_seen: Optional[datetime], season: str) -> bool:
     return bool(seen and season and seen > season)
 
 
+def counts_this_season(code: Any) -> bool:
+    """
+    Mecz z listy sędziego w BIEŻĄCYM sezonie liczony w każdej roli.
+
+    Decyzja użytkownika z 06.10.2026 (po meczach Amelii Kwiatoń): z rozliczenia
+    nic nie znika z powodu numeru. Mecz rozgrywek okręgowych - naszych czy
+    cudzych („E/JmK/3", „K/MłMR/12") - i mecz o numerze, którego nie umiemy
+    zaklasyfikować, wchodzi; zdejmuje go tylko człowiek („Nie obciążaj
+    klubów" / „Nie naliczaj"). Poza zostają wyłącznie obsady, które płaci ZPRP
+    (boiskowi i delegaci rozgrywek centralnych) - tych okręg nie wypłaca.
+    """
+    return R.match_level(code) in ("district", "unknown") or R.is_provincial_cup(code)
+
+
 def history_fix(
     *,
     match_key: Any,
@@ -150,25 +164,26 @@ def history_fix(
     own: Iterable[str],
 ) -> str:
     """
-    Co zrobić z obsada „d:" meczu INNEGO okręgu.
+    Co zrobić z obsadą „d:" meczu INNEGO okręgu w MINIONYM sezonie.
 
     Mecz innego okręgu: stolik przechodzi na „o:" (mecz spoza okręgu), każda
-    inna rola gaśnie.
+    inna rola gaśnie - tylko obsady, które przyszły z listy sędziego (zapisane
+    po końcu sezonu). Tamte sezony są rozliczone i zamknięte - ich terminarza
+    nie ruszamy.
 
-    BIEŻĄCY sezon (06.10.2026): zawsze. Terminarz okręgu trzyma też mecze z list
-    naszych sędziów, więc „d:" nie znaczy tu „obsadza nas okręg" - sędzia
-    boiskowy meczu juniorek w Piotrkowie dostawał go od nas jak własny.
-
-    MINIONE sezony: jak dotąd tylko obsady, które przyszły z listy sędziego
-    (zapisane po końcu sezonu). Tamte sezony są rozliczone i zamknięte - ich
-    terminarza nie ruszamy.
+    BIEŻĄCY sezon: zawsze KEEP (decyzja z 06.10.2026, wieczór). Przez kilka
+    godzin tego dnia reguła zdejmowała mecze innych okręgów także w bieżącym
+    sezonie i zabrała sędziom mecze, które okręg wypłaca (młodzik
+    makroregionalny „K/MłMR"). Teraz mecz z rozliczenia zdejmuje tylko
+    człowiek, a panel podpowiada zdjęcie meczów z rozgrywek, które już
+    zdejmowano (`settlement_exclusion_rules`).
     """
     if not str(match_key or "").startswith("d:"):
         return KEEP
-    if not season or not current:
+    if not season or not current or season >= current:
         return KEEP
     if not foreign_district_match(match_code, own):
         return KEEP
-    if season < current and not collected_after_season(first_seen, season):
+    if not collected_after_season(first_seen, season):
         return KEEP
     return OUTSIDE if str(role or "").strip() == R.ROLE_TABLE else DROP

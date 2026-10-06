@@ -1456,6 +1456,9 @@ province_match_overrides = Table(
     Column("note", String, nullable=True),
     Column("updated_by", String, nullable=True),
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+    # „Zostaw" przy podpowiedzi zdjęcia meczu (06.10.2026): człowiek zdecydował,
+    # że mecz zostaje w rozliczeniu - podpowiedź już przy nim nie wraca.
+    Column("kept", Boolean, nullable=False, server_default=text("false")),
 )
 
 # Gospodarz TURNIEJU (06.10.2026). Turniej dzieci i młodzików regionalnych to
@@ -4620,6 +4623,11 @@ with engine.connect() as _conn:
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_province_settlement_splits_period_key "
             "ON province_settlement_splits (province, period_year, period_month, period_id, judge_id)"
         )
+    )
+    # Decyzja „Zostaw" przy podpowiedzi zdjęcia meczu (06.10.2026) - tabela
+    # wyjątków istnieje na produkcji, więc `create_all` kolumny nie doda.
+    _conn.execute(
+        text("ALTER TABLE province_match_overrides ADD COLUMN IF NOT EXISTS kept boolean NOT NULL DEFAULT false")
     )
     # Listy sędziowskie z numerami zniknęły (06.10.2026): podział dzieli pulę
     # na części, a numer dostaje dopiero oficjalne Zestawienie z Rejestru.

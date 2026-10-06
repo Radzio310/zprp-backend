@@ -127,6 +127,9 @@ class SettledMatch:
     #: Hala - tylko do sklejania turnieju (`_tournament_groups`). Na wydruk i do
     #: tabeli odleglosci idzie wylacznie `city`.
     hall: str = ""
+    #: Podpowiedz „zdjac?" - z tych rozgrywek innego okregu zdejmowano juz mecze
+    #: (`settlement_exclusion_rules.hint`). Sam mecz zostaje w rozliczeniu.
+    exclude_hint: Optional[str] = None
 
 
 @dataclass

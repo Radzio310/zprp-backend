@@ -40,6 +40,7 @@ from app.db import (
     database,
     okreg_distances,
     province_judges,
+    province_match_overrides,
     province_matches,
     province_modules,
     province_settlement_matches,
@@ -212,11 +213,14 @@ async def _collect_district(
     Obsady z terminarza okręgu.
 
     ⚠ Terminarz trzyma też mecze z list NASZYCH sędziów, także w innych okręgach
-    (`own_prefixes_of`). Mecz rozgrywek innego okręgu („E/JmK/3" przy naszym
-    „S/") nie jest nasz: wchodzi tylko stolik, jako mecz spoza okręgu (klucz
-    „o:"), a boiskowy i delegat wypadają - jak w minionych sezonach
-    (`settlement_origin.foreign_district_match`, zgłoszenie z 06.10.2026).
+    (`own_prefixes_of`). W BIEŻĄCYM sezonie wchodzą wszystkie, w każdej roli -
+    mecz z rozliczenia zdejmuje tylko człowiek („Nie obciążaj klubów" /
+    „Nie naliczaj"), a panel podpowiada zdjęcie meczów z rozgrywek, które już
+    zdejmowano (decyzja z 06.10.2026, `settlement_exclusion_rules`). Mecz
+    innego okręgu z MINIONEGO sezonu idzie jak dotąd: tylko stolik, jako mecz
+    spoza okręgu (`settlement_origin.foreign_district_match`).
     """
+    current = season_of(_now())
     rows = await database.fetch_all(
         select(province_matches).where(
             and_(
@@ -242,7 +246,8 @@ async def _collect_district(
                 _s(state.get("ID_zespoly_gosc_ZespolNazwa")),
             ) if x
         )
-        foreign = O.foreign_district_match(code, own or ())
+        season = _s(row["season"] or state.get("season")) or season_of(when)
+        foreign = bool(season and season < current) and O.foreign_district_match(code, own or ())
 
         for entry in _district_assignments(state, judges):
             if foreign and entry["role"] != R.ROLE_TABLE:
@@ -441,7 +446,14 @@ async def _collect_outside(
                 level = R.match_level(code)
                 # Mecz innego okregu z listy minionego sezonu nie jest nasz, choc
                 # szczebel ma okregowy (decyzja uzytkownika z 11.09.2026).
-                own = past and O.own_past_match(code, own_prefixes or ())
+                # BIEZACY sezon (06.10.2026): wchodzi kazdy mecz rozgrywek
+                # okregowych (takze cudzych) i kazdy nierozpoznany - zdejmuje
+                # go tylko czlowiek. Poza zostaja obsady placone przez ZPRP.
+                own = (
+                    O.own_past_match(code, own_prefixes or ())
+                    if past
+                    else O.counts_this_season(code)
+                )
                 # ⚠ Spoza okregu TYLKO STOLIKI. Boiskowych centralnych okreg nie rozlicza.
                 if not own and role != R.ROLE_TABLE:
                     continue
@@ -953,6 +965,67 @@ async def fix_history(province: str, *, own: Optional[set[str]] = None) -> dict:
     return {"moved": moved, "dropped": dropped}
 
 
+#: Dopisek przy meczach zdjętych przy wyłączeniu reguły „mecz innego okręgu".
+FOREIGN_EXCLUDED_NOTE = "Zdjęty automatycznie do 06.10.2026 jako mecz innego okręgu - cofnij, jeśli okręg go płaci"
+
+
+async def exclude_foreign_once(province: str, *, own: set[str]) -> int:
+    """
+    Raz: mecze, które reguła „mecz innego okręgu" zdejmowała w BIEŻĄCYM
+    sezonie, dostają „Nie obciążaj klubów" (decyzja z 06.10.2026).
+
+    Reguła przestaje działać i przy najbliższym odświeżeniu te mecze wróciłyby
+    sędziom (np. Wiktorii Więcław mecze juniorek w Piotrkowie). Zamiast tego
+    zostają zdjęte - ale jawnie: widać je w „Poza rozliczeniem okręgu"
+    z przyciskiem „Przywróć", a ich rozgrywki uczą podpowiedzi
+    (`settlement_exclusion_rules`). Młodzik makroregionalny jest wyjęty spod
+    reguły (`settlement_origin.foreign_exempt`), więc go nie zdejmujemy.
+    Decyzji człowieka nie nadpisujemy - istniejący wyjątek meczu zostaje.
+    """
+    if not own:
+        # Bez terminarza nie wiemy, ktore przedrostki sa nasze - nie zgadujemy
+        # i nie zuzywamy jednorazowego znacznika.
+        return 0
+    if not await _claim_once(f"settlement-foreign-excluded-{province}"):
+        return 0
+    current = season_of(_now())
+    rows = await database.fetch_all(
+        select(
+            province_settlement_matches.c.match_key,
+            province_settlement_matches.c.match_code,
+            province_settlement_matches.c.season,
+            province_settlement_matches.c.match_at,
+        ).where(province_settlement_matches.c.province == province)
+    )
+    keys: set[str] = set()
+    for row in rows:
+        season = _s(row["season"]) or season_of(row["match_at"])
+        if season != current or not O.foreign_district_match(row["match_code"], own):
+            continue
+        match_id = _s(row["match_key"]).split(":", 1)[-1]
+        if match_id:
+            keys.add(f"d:{match_id}")
+    now = _now()
+    for key in sorted(keys):
+        await database.execute(
+            pg_insert(province_match_overrides)
+            .values(
+                province=province,
+                match_key=key,
+                excluded=True,
+                note=FOREIGN_EXCLUDED_NOTE,
+                updated_by="system",
+                updated_at=now,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[province_match_overrides.c.province, province_match_overrides.c.match_key]
+            )
+        )
+    if keys:
+        logger.info("[settlement] %s: %d meczów innych okręgów oznaczono „Nie obciążaj klubów”", province, len(keys))
+    return len(keys)
+
+
 # ---------------------------------------------------------------------------
 # Przebieg
 # ---------------------------------------------------------------------------
@@ -1035,6 +1108,9 @@ async def refresh_province(
         # Nasze przedrostki numerow i poprawka historii zapisanej stara regula -
         # sama baza, bez ZPRP (patrz `fix_history`).
         own = await _own_prefixes(province)
+        # Kolejnosc ma znaczenie: najpierw jawne zdjecie meczow, ktore stara
+        # regula zabierala, potem pobranie - inaczej wrocilyby sedziom.
+        await exclude_foreign_once(province, own=own)
         await fix_history(province, own=own)
 
         async with AsyncClient(

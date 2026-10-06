@@ -1234,6 +1234,8 @@ async def set_override(match_key: str, payload: OverrideRequest):
             set_={k: v for k, v in values.items() if k not in ("province", "match_key")},
         )
     )
+    # Zdjęcie meczu zmienia wypłaty sędziów i podpowiedzi w Rozliczeniach.
+    SC.bump(key, base=False, reason="wyjątek meczu w panelu klubów")
     return {"success": True}
 
 

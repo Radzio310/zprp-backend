@@ -421,6 +421,15 @@ async def load_settlement(
     # bo w grudniu mogą istnieć dwa różne okresy z tym samym miesiącem wypłaty.
     await apply_splits(province, year, month, entries, period_id)
 
+    # Podpowiedz „zdjac?" przy meczach rozgrywek innych okregow, z ktorych juz
+    # zdejmowano mecze (06.10.2026). Mecz zostaje - decyduje czlowiek.
+    from app.province_settlement_exclusions import apply_hints, exclusion_hints
+
+    try:
+        apply_hints(entries, await exclusion_hints(province))
+    except Exception as exc:  # podpowiedz to wygoda - nie moze zatrzymac rozliczenia
+        logger.warning("[settlement] %s: podpowiedzi zdjecia meczow: %s", province, exc)
+
     # Bomby z okresu i kary - po listach sedziowskich, bo kara schodzi z kwoty
     # do wyplaty, ktora listy juz ustalily (`settlement_bombs`).
     bomb_rows = _bomb_rows(
@@ -603,6 +612,8 @@ def _match_json(match: E.SettledMatch) -> dict:
         "tournament_key": match.tournament_key,
         "tournament_size": match.tournament_size,
         "rate_shared": match.rate_shared,
+        # „Z rozgrywek E/JmK zdjeto juz 3 mecze - zdjac tez ten?" albo None.
+        "exclude_hint": match.exclude_hint,
     }
 
 
@@ -675,8 +686,10 @@ def _entry_json(entry: E.JudgeSettlement, *, with_matches: bool) -> dict:
         "missing_distance": entry.missing_distance,
         "missing_rate": entry.missing_rate,
         "guessed_stage": entry.guessed_stage,
-        # Podział na listy sędziowskie („3 listy", szkic, nieaktualne) albo None.
+        # Podział puli na części („2 części", nieaktywny) albo None.
         "split": entry.split,
+        # Mecze z podpowiedzią „zdjąć?" - czekają na decyzję człowieka.
+        "to_decide": sum(1 for m in entry.matches if m.exclude_hint),
     }
     if with_matches:
         payload["rows"] = [_match_json(m) for m in entry.matches]
@@ -845,6 +858,8 @@ async def summary(
                 "penalty_left": round(sum(p["left"] for p in (data.get("penalties") or {}).values()), 2),
             },
             "document_number_hint": hint,
+            # Mecze z podpowiedzią „zdjąć?" w całym okresie (06.10.2026).
+            "to_decide": sum(1 for e in data["entries"] for m in e.matches if m.exclude_hint),
         }
 
     pack = await SC.packed(
