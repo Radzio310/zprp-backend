@@ -416,12 +416,10 @@ async def load_settlement(
     # w funkcji - tamten moduł importuje nas.
     from app.province_settlement_splits import apply_splits
 
-    # Historyczne podziały są kluczowane miesiącem. Nie wolno ich przykleić
-    # do własnego okresu (w grudniu mogą istnieć dwa różne okresy wypłat).
-    # Edytor list dostanie osobne klucze okresów w kolejnym kroku; do tego
-    # czasu własny okres zawsze pokazuje bezpieczne wyliczenie całej puli.
-    if not period_id:
-        await apply_splits(province, year, month, entries)
+    # Podział należy do miesiąca ALBO do okresu wypłat (`period_id` w kluczu
+    # tabeli) - podział miesiąca nie przykleja się do okresu i odwrotnie,
+    # bo w grudniu mogą istnieć dwa różne okresy z tym samym miesiącem wypłaty.
+    await apply_splits(province, year, month, entries, period_id)
 
     # Bomby z okresu i kary - po listach sedziowskich, bo kara schodzi z kwoty
     # do wyplaty, ktora listy juz ustalily (`settlement_bombs`).

@@ -14,6 +14,11 @@ GDZIE TO WCHODZI - dwa mosty:
   - `split_month_deltas` - poprawka siatki miesięcy (`/months`), żeby kafel
     miesiąca mówił to samo co ekran po kliknięciu.
 
+OKRES: podział należy do miesiąca kalendarzowego (`period_id` pusty) albo do
+własnego okresu wypłat okręgu (`province_settlement_periods`). Przy okresie
+rok i miesiąc to miesiąc WYPŁATY - z niego numer listy LS/MM/RRRR/n - a pula
+to mecze z dat okresu. Podział z miesiąca nie przechodzi na okres i odwrotnie.
+
 CYKL ŻYCIA: szkic (edytowalny) -> wydane (numery w księdze, zamknięte) ->
 odblokowanie (numery zostają w księdze jako „anulowana", podział wraca do
 szkicu) -> ponowne wydanie z NOWYMI numerami. Numer nigdy nie wraca do puli.
@@ -102,13 +107,21 @@ def _pick(rows: list, key: str) -> Optional[dict]:
     return next((r for r in rows if r["province"] == key), rows[0])
 
 
-async def _row(key: str, year: int, month: int, judge_id: str) -> Optional[dict]:
+def _pid(period_id: Optional[str]) -> str:
+    """Klucz okresu w tabeli - pusty napis = miesiąc kalendarzowy."""
+    return _s(period_id).lower()
+
+
+async def _row(
+    key: str, year: int, month: int, judge_id: str, period_id: Optional[str] = None
+) -> Optional[dict]:
     rows = await database.fetch_all(
         select(T).where(
             and_(
                 T.c.province.in_(spellings(key)),
                 T.c.period_year == int(year),
                 T.c.period_month == int(month),
+                T.c.period_id == _pid(period_id),
                 T.c.judge_id == str(judge_id),
             )
         )
@@ -116,13 +129,16 @@ async def _row(key: str, year: int, month: int, judge_id: str) -> Optional[dict]
     return _pick(list(rows), key)
 
 
-async def _rows_of_month(key: str, year: int, month: int) -> dict[str, dict]:
+async def _rows_of_month(
+    key: str, year: int, month: int, period_id: Optional[str] = None
+) -> dict[str, dict]:
     rows = await database.fetch_all(
         select(T).where(
             and_(
                 T.c.province.in_(spellings(key)),
                 T.c.period_year == int(year),
                 T.c.period_month == int(month),
+                T.c.period_id == _pid(period_id),
                 T.c.status != S.STATUS_VOID,
             )
         )
@@ -176,10 +192,15 @@ def _state_of(row: dict, matches: list[dict]) -> tuple[list[dict], Optional[dict
 # ---------------------------------------------------------------------------
 
 async def apply_splits(
-    key: str, year: int, month: int, entries: list[E.JudgeSettlement]
+    key: str,
+    year: int,
+    month: int,
+    entries: list[E.JudgeSettlement],
+    period_id: Optional[str] = None,
 ) -> None:
     """
-    Dokłada podział do wierszy miesiąca (w miejscu - wołane przed pamięcią).
+    Dokłada podział do wierszy miesiąca albo okresu (w miejscu - wołane
+    przed pamięcią).
 
     Tylko WYDANE i aktualne listy zmieniają kwoty; szkic i listy nieaktualne
     dostają sam znacznik z powodem, a kwoty zostają z rachunku bez podziału.
@@ -187,7 +208,7 @@ async def apply_splits(
     if not entries:
         return
     try:
-        rows = await _rows_of_month(key, year, month)
+        rows = await _rows_of_month(key, year, month, period_id)
     except Exception as exc:  # pragma: no cover - brak tabeli przed pierwszym startem
         logger.warning("[splits] %s %s/%s: odczyt podziałów: %s", key, month, year, exc)
         return
@@ -219,9 +240,16 @@ async def split_month_deltas(
 
     `assignments` - obsady tego samego płatnika, co w siatce (bez meczów
     płaconych przez klub), `common` - argumenty `settle_judges` bez dat.
+
+    Tylko podziały MIESIĘCY: siatka liczy miesiące kalendarzowe, a lista
+    z okresu wypłat (np. 07.09-04.10) nie przekłada się na jeden kafel.
     """
     query = select(T).where(
-        and_(T.c.province.in_(spellings(key)), T.c.status == S.STATUS_ISSUED)
+        and_(
+            T.c.province.in_(spellings(key)),
+            T.c.status == S.STATUS_ISSUED,
+            T.c.period_id == "",
+        )
     )
     if judge_id:
         query = query.where(T.c.judge_id == str(judge_id))
@@ -293,15 +321,50 @@ async def _peek_numbers(key: str, year: int, month: int, count: int) -> list[str
 # ---------------------------------------------------------------------------
 
 async def _month_entry(
-    key: str, judge_id: str, year: int, month: int, include_future: bool, include_zprp: bool
+    key: str,
+    judge_id: str,
+    year: int,
+    month: int,
+    include_future: bool,
+    include_zprp: bool,
+    period_id: Optional[str] = None,
 ) -> tuple[dict, Optional[E.JudgeSettlement]]:
     from app.province_settlements import cached_settlement
 
     data = await cached_settlement(
-        key, year=year, month=month, include_future=include_future, include_zprp=include_zprp
+        key,
+        year=year,
+        month=month,
+        include_future=include_future,
+        include_zprp=include_zprp,
+        period_id=_pid(period_id) or None,
     )
     entry = next((e for e in data["entries"] if e.judge_id == judge_id), None)
     return data, entry
+
+
+async def _period(key: str, year: int, month: int, period_id: Optional[str]) -> dict:
+    """
+    Zakres i podpis podziału: miesiąc kalendarzowy albo własny okres wypłat
+    (podpis jak na Zestawieniu okresu - same daty).
+    """
+    from app.province_settlements import settlement_range
+
+    pid = _pid(period_id)
+    date_from, date_to, _item = await settlement_range(key, year, month, pid or None)
+    label = (
+        f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+        if pid
+        else f"{MONTHS_PL[month]} {year}"
+    )
+    return {
+        "year": year,
+        "month": month,
+        "id": pid or None,
+        "from": date_from.isoformat(),
+        "to": date_to.isoformat(),
+        "label": label,
+    }
 
 
 async def _judge_name(key: str, judge_id: str, entry: Optional[E.JudgeSettlement]) -> str:
@@ -321,17 +384,21 @@ async def _payload(
     *,
     include_future: bool,
     include_zprp: bool,
+    period_id: Optional[str] = None,
     row: Optional[dict] = None,
     fetched: bool = False,
 ) -> dict:
+    period = await _period(key, year, month, period_id)
     if not fetched:
-        row = await _row(key, year, month, judge_id)
+        row = await _row(key, year, month, judge_id, period_id)
     issued = bool(row and row.get("status") == S.STATUS_ISSUED)
     if issued:
         # Wydane listy oglądamy z przełącznikami, z którymi je wydano.
         include_future = bool(row.get("include_future"))
         include_zprp = bool(row.get("include_zprp"))
-    _, entry = await _month_entry(key, judge_id, year, month, include_future, include_zprp)
+    _, entry = await _month_entry(
+        key, judge_id, year, month, include_future, include_zprp, period_id
+    )
     matches = pool_matches(entry)
     keys = [m["match_key"] for m in matches]
 
@@ -371,7 +438,7 @@ async def _payload(
         "province": key,
         "judge_id": judge_id,
         "name": await _judge_name(key, judge_id, entry),
-        "period": {"year": year, "month": month, "label": f"{MONTHS_PL[month]} {year}"},
+        "period": period,
         "include_future": include_future,
         "include_zprp": include_zprp,
         "pool": {
@@ -384,7 +451,8 @@ async def _payload(
         "suggested": suggested,
         "calc": calc,
         "problems": S.problems(lists, matches, for_issue=True) if matches else [
-            "Sędzia nie ma w tym miesiącu meczów rozliczanych przez okręg - nie ma czego dzielić."
+            f"Sędzia nie ma w {'tym okresie' if period['id'] else 'tym miesiącu'} meczów "
+            "rozliczanych przez okręg - nie ma czego dzielić."
         ],
         "notes": notes,
         "voided": voided,
@@ -434,6 +502,8 @@ class SplitBody(BaseModel):
     judge_id: str
     year: int
     month: int
+    #: Własny okres wypłat (`province_settlement_periods`); brak = miesiąc.
+    period_id: Optional[str] = None
     include_future: bool = False
     include_zprp: bool = False
     #: [{letter?, match_keys[], manual_shift}] - litery nadaje serwer po kolei.
@@ -448,6 +518,7 @@ class UnlockBody(BaseModel):
     judge_id: str
     year: int
     month: int
+    period_id: Optional[str] = None
     rev: Optional[int] = None
     reason: Optional[str] = None
     user: Optional[str] = None
@@ -458,6 +529,7 @@ class ReprintBody(BaseModel):
     judge_id: str
     year: int
     month: int
+    period_id: Optional[str] = None
     user: Optional[str] = None
 
 
@@ -467,6 +539,7 @@ async def get_split(
     judge_id: str = Query(...),
     year: int = Query(...),
     month: int = Query(...),
+    period_id: Optional[str] = Query(None),
     include_future: bool = Query(False),
     include_zprp: bool = Query(False),
 ):
@@ -475,7 +548,7 @@ async def get_split(
     _check_period(year, month)
     return await _payload(
         key, str(judge_id).strip(), year, month,
-        include_future=include_future, include_zprp=include_zprp,
+        include_future=include_future, include_zprp=include_zprp, period_id=period_id,
     )
 
 
@@ -498,14 +571,16 @@ async def _save_draft(key: str, body: SplitBody, lists: list[dict], row: Optiona
             province=key,
             period_year=body.year,
             period_month=body.month,
+            period_id=_pid(body.period_id),
             judge_id=body.judge_id,
             **values,
         )
-        .on_conflict_do_update(
-            index_elements=[T.c.province, T.c.period_year, T.c.period_month, T.c.judge_id],
-            set_=values,
-        )
+        .on_conflict_do_update(index_elements=KEY_COLUMNS, set_=values)
     )
+
+
+#: Unikalny klucz podziału (`ux_province_settlement_splits_period_key`).
+KEY_COLUMNS = [T.c.province, T.c.period_year, T.c.period_month, T.c.period_id, T.c.judge_id]
 
 
 def _structural(lists: list[dict]) -> None:
@@ -522,7 +597,7 @@ async def save_split(body: SplitBody):
     await _require_module(key)
     _check_period(body.year, body.month)
     body.judge_id = str(body.judge_id).strip()
-    row = await _row(key, body.year, body.month, body.judge_id)
+    row = await _row(key, body.year, body.month, body.judge_id, body.period_id)
     if row and row.get("status") == S.STATUS_ISSUED:
         raise HTTPException(
             409,
@@ -537,6 +612,7 @@ async def save_split(body: SplitBody):
     return await _payload(
         key, body.judge_id, body.year, body.month,
         include_future=body.include_future, include_zprp=body.include_zprp,
+        period_id=body.period_id,
     )
 
 
@@ -546,13 +622,14 @@ async def discard_split(
     judge_id: str = Query(...),
     year: int = Query(...),
     month: int = Query(...),
+    period_id: Optional[str] = Query(None),
     user: Optional[str] = Query(None),
 ):
     key = _require(province)
     await _require_module(key)
     _check_period(year, month)
     judge_id = str(judge_id).strip()
-    row = await _row(key, year, month, judge_id)
+    row = await _row(key, year, month, judge_id, period_id)
     if row is None or row.get("status") == S.STATUS_VOID:
         return {"ok": True, "message": "Ten sędzia nie ma podziału - rozliczenie idzie jednym rachunkiem."}
     if row.get("status") == S.STATUS_ISSUED:
@@ -580,7 +657,7 @@ async def issue_split(body: SplitBody):
     await _require_module(key)
     _check_period(body.year, body.month)
     body.judge_id = str(body.judge_id).strip()
-    row = await _row(key, body.year, body.month, body.judge_id)
+    row = await _row(key, body.year, body.month, body.judge_id, body.period_id)
     if row and row.get("status") == S.STATUS_ISSUED:
         raise HTTPException(
             409,
@@ -591,12 +668,18 @@ async def issue_split(body: SplitBody):
     lists = S.normalize_lists(body.lists)
     _structural(lists)
 
+    period = await _period(key, body.year, body.month, body.period_id)
     _, entry = await _month_entry(
-        key, body.judge_id, body.year, body.month, body.include_future, body.include_zprp
+        key, body.judge_id, body.year, body.month, body.include_future, body.include_zprp,
+        body.period_id,
     )
     matches = pool_matches(entry)
     if not matches:
-        raise HTTPException(400, "Sędzia nie ma w tym miesiącu meczów rozliczanych przez okręg - nie ma czego dzielić.")
+        raise HTTPException(
+            400,
+            f"Sędzia nie ma w {'tym okresie' if period['id'] else 'tym miesiącu'} meczów "
+            "rozliczanych przez okręg - nie ma czego dzielić.",
+        )
     bad = S.problems(lists, matches, for_issue=True)
     if bad:
         raise HTTPException(400, "Nie da się wydać list: " + " ".join(bad))
@@ -612,7 +695,7 @@ async def issue_split(body: SplitBody):
         await database.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))").bindparams(k=lock))
         start = await _next_seq(key, body.year, body.month)
         numbers = [_number(key, body.year, body.month, start + i) for i in range(len(lists))]
-        snapshot = _snapshot(key, body, name, matches, calc, numbers)
+        snapshot = _snapshot(key, body, name, matches, calc, numbers, period)
         # PDF-y powstają PRZED zapisem numerów - nieudany wydruk cofa całą
         # transakcję i w księdze nie zostaje dziura.
         documents = _render_all(P, key, snapshot, reprint=False)
@@ -628,7 +711,7 @@ async def issue_split(body: SplitBody):
                         period_month=body.month,
                         seq=start + index,
                         number=numbers[index],
-                        date_from=date(body.year, body.month, 1),
+                        date_from=date.fromisoformat(snapshot["period"]["from"]),
                         date_to=date.fromisoformat(snapshot["period"]["to"]),
                         include_future=body.include_future,
                         judge_ids=[body.judge_id],
@@ -644,6 +727,7 @@ async def issue_split(body: SplitBody):
                             "travel": item["travel"],
                             "matches": item["match_count"],
                             "include_zprp": body.include_zprp,
+                            "period_id": period["id"],
                         },
                         created_by=body.user,
                     )
@@ -669,16 +753,21 @@ async def issue_split(body: SplitBody):
         else:
             await database.execute(
                 pg_insert(T)
-                .values(province=key, period_year=body.year, period_month=body.month, judge_id=body.judge_id, **values)
-                .on_conflict_do_update(
-                    index_elements=[T.c.province, T.c.period_year, T.c.period_month, T.c.judge_id],
-                    set_=values,
+                .values(
+                    province=key,
+                    period_year=body.year,
+                    period_month=body.month,
+                    period_id=_pid(body.period_id),
+                    judge_id=body.judge_id,
+                    **values,
                 )
+                .on_conflict_do_update(index_elements=KEY_COLUMNS, set_=values)
             )
     SC.bump(key, base=False, reason="podział na listy: wydanie")
     payload = await _payload(
         key, body.judge_id, body.year, body.month,
         include_future=body.include_future, include_zprp=body.include_zprp,
+        period_id=body.period_id,
     )
     return {**payload, "documents": documents}
 
@@ -688,7 +777,7 @@ async def reprint_split(body: ReprintBody):
     key = _require(body.province)
     await _require_module(key)
     _check_period(body.year, body.month)
-    row = await _row(key, body.year, body.month, str(body.judge_id).strip())
+    row = await _row(key, body.year, body.month, str(body.judge_id).strip(), body.period_id)
     if not row or row.get("status") != S.STATUS_ISSUED:
         raise HTTPException(409, "Listy tego sędziego nie są wydane - nie ma czego drukować ponownie.")
     snapshot = _json(row.get("snapshot_json"), {})
@@ -705,7 +794,7 @@ async def unlock_split(body: UnlockBody):
     await _require_module(key)
     _check_period(body.year, body.month)
     body.judge_id = str(body.judge_id).strip()
-    row = await _row(key, body.year, body.month, body.judge_id)
+    row = await _row(key, body.year, body.month, body.judge_id, body.period_id)
     if not row or row.get("status") != S.STATUS_ISSUED:
         raise HTTPException(409, "Podział nie jest wydany - nie ma czego odblokować.")
     _check_rev(row, body.rev)
@@ -744,6 +833,7 @@ async def unlock_split(body: UnlockBody):
     payload = await _payload(
         key, body.judge_id, body.year, body.month,
         include_future=bool(row.get("include_future")), include_zprp=bool(row.get("include_zprp")),
+        period_id=body.period_id,
     )
     return {**payload, "message": f"Odblokowano. Numery {S.numbers_label(numbers)} zostają w księdze jako anulowane."}
 
@@ -753,12 +843,15 @@ async def unlock_split(body: UnlockBody):
 # ---------------------------------------------------------------------------
 
 def _snapshot(
-    key: str, body: SplitBody, name: str, matches: list[dict], calc: dict, numbers: list[str]
+    key: str,
+    body: SplitBody,
+    name: str,
+    matches: list[dict],
+    calc: dict,
+    numbers: list[str],
+    period: dict,
 ) -> dict:
     """Wszystko, z czego składa się wydruk - duplikat powstaje z tej migawki."""
-    from app.province_settlements import month_range
-
-    date_from, date_to = month_range(body.year, body.month)
     by_key = {m["match_key"]: m for m in matches}
     home = next((m["home_city"] for m in matches if m.get("home_city")), "")
     lists = []
@@ -771,13 +864,7 @@ def _snapshot(
         "judge_id": body.judge_id,
         "name": name,
         "home_city": home,
-        "period": {
-            "year": body.year,
-            "month": body.month,
-            "from": date_from.isoformat(),
-            "to": date_to.isoformat(),
-            "label": f"{MONTHS_PL[body.month]} {body.year}",
-        },
+        "period": dict(period),
         "include_future": body.include_future,
         "include_zprp": body.include_zprp,
         "numbers": numbers,

@@ -3,7 +3,8 @@ Tabela podziałów puli sędziego na listy sędziowskie (25.09.2026) - sam
 schemat, bez połączenia z bazą. Reguła w `app/settlement_split_rules.py`,
 trasy w `app/province_settlement_splits.py`.
 
-  - `province_settlement_splits` - jeden podział na okręg, miesiąc i sędziego:
+  - `province_settlement_splits` - jeden podział na okręg, miesiąc (albo
+    własny okres wypłat - `period_id`) i sędziego:
     listy (mecze + ręczne przesunięcia kwot), stan (szkic / wydane /
     porzucony), numery wydanych list i historia unieważnionych numerów.
 
@@ -23,6 +24,10 @@ def define_tables(metadata):
         Column("province", String, nullable=False),
         Column("period_year", Integer, nullable=False),
         Column("period_month", Integer, nullable=False),
+        #: Własny okres wypłat okręgu (`province_settlement_periods`), a pusty
+        #: napis = miesiąc kalendarzowy. Rok i miesiąc są wtedy miesiącem
+        #: WYPŁATY okresu - w grudniu Śląsk ma dwa okresy, stąd osobny klucz.
+        Column("period_id", String, nullable=False, server_default=text("''")),
         Column("judge_id", String, nullable=False),
         #: draft | issued | void
         Column("status", String, nullable=False, server_default=text("'draft'")),
@@ -49,10 +54,11 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
     Index(
-        "ux_province_settlement_splits_key",
+        "ux_province_settlement_splits_period_key",
         splits.c.province,
         splits.c.period_year,
         splits.c.period_month,
+        splits.c.period_id,
         splits.c.judge_id,
         unique=True,
     )

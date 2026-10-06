@@ -4602,6 +4602,17 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_by varchar"))
     _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_by_name varchar"))
     _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_at timestamptz"))
+    # Podział na listy w okresach wypłat (06.10.2026): klucz dostaje okres,
+    # bo dwa okresy mogą mieć ten sam miesiąc wypłaty. Stary indeks bez okresu
+    # blokowałby drugi podział w tym samym miesiącu.
+    _conn.execute(text("ALTER TABLE province_settlement_splits ADD COLUMN IF NOT EXISTS period_id varchar NOT NULL DEFAULT ''"))
+    _conn.execute(text("DROP INDEX IF EXISTS ux_province_settlement_splits_key"))
+    _conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_province_settlement_splits_period_key "
+            "ON province_settlement_splits (province, period_year, period_month, period_id, judge_id)"
+        )
+    )
     # Odswiezanie danych okregu sezonami: znak zycia i zakres przebiegu.
     # Tabela przebiegow istnieje na produkcji, wiec `create_all` ich nie doloży.
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz"))
