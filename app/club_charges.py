@@ -39,18 +39,41 @@ roznie („SPR Pogoń 1945 II Zabrze" i „SPR Pogoń II Zabrze"). Nazwa, ktorej
 znamy, NIE znika: mecz okregowy dostaje status „unassigned" i czeka na reczne
 wskazanie druzyny.
 
+⚠ Turniej = JEDEN platnik (decyzja uzytkownika z 06.10.2026). Dzien dzieci
+i dzien mlodzikow regionalnych w jednej hali to kilka meczow z roznymi
+gospodarzami, a obsade placi gospodarz TURNIEJU. Regula „kazdy mecz po swoim
+gospodarzu" rozcinala sedziemu jeden wyjazd na dwoch platnikow (turniej
+Grunwaldu w Rudzie Slaskiej: mecz Michalkowic poszedl do „placi klub", reszta
+do okregu, a dojazd zaplacila kazda strona osobno). Kolejnosc rozstrzygania:
+wyjatek na meczu > gospodarz turnieju wskazany w panelu > druzyna z miasta
+hali (jedna) > wspolny klub wszystkich meczow > turniej czeka na wskazanie.
+Od `TOURNAMENT_HOST_SINCE` - minione sezony sa rozliczone i zamkniete.
+
 MODUL-LISC: bez bazy i sieci, zeby cala regula chodzila w tescie.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, Optional
+from zoneinfo import ZoneInfo
 
 from app import settlement_rates as R
+from app.collision_rules import hall_key
 from app.district_payer import DISTRICT_PAYER_ID, is_district_payer
 from app.settlement_money import balance as _money_balance, money, money_sum
+
+_PL = ZoneInfo("Europe/Warsaw")
+
+#: Od tego dnia turniej ma jednego platnika - gospodarza turnieju.
+TOURNAMENT_HOST_SINCE = date(2026, 9, 1)
+
+#: Skad wiemy, kto jest gospodarzem turnieju (pole `tournament_host` wiersza).
+HOST_MANUAL = "manual"
+HOST_HALL_CITY = "hall-city"
+HOST_SAME_CLUB = "same-club"
+HOST_UNKNOWN = "unknown"
 
 #: Status wiersza obciazenia - powod, dla ktorego mecz placi albo nie placi.
 CHARGED = "charged"
@@ -155,6 +178,15 @@ class ChargeRow:
     #: Numer recznego meczu (`manual_charge_rules`) - wiersz dopisany z karty
     #: klubu, a nie z terminarza. `None` = zwykly mecz.
     manual_id: Optional[int] = None
+    #: Hala meczu - do klucza turnieju.
+    hall: str = ""
+    #: Turniej (dzien + hala), do ktorego nalezy mecz; pusto = zwykly mecz.
+    tournament_key: str = ""
+    #: Ile meczow ma ten turniej w danych okregu.
+    tournament_size: int = 0
+    #: Skad gospodarz turnieju: HOST_MANUAL / HOST_HALL_CITY / HOST_SAME_CLUB /
+    #: HOST_UNKNOWN; pusto poza turniejem albo gdy rozstrzygnal wyjatek meczu.
+    tournament_host: str = ""
 
 
 def _as_date(value: Any) -> Optional[date]:
@@ -364,6 +396,81 @@ def keep_one_table(shares: list[RefereeShare]) -> bool:
     return True
 
 
+def _pl_day(match_at: Any, day: Any) -> Optional[date]:
+    if isinstance(match_at, datetime):
+        when = match_at if match_at.tzinfo else match_at.replace(tzinfo=timezone.utc)
+        return when.astimezone(_PL).date()
+    return _as_date(day)
+
+
+def tournament_key(code: Any, match_at: Any, day: Any, hall: Any, city: Any) -> str:
+    """
+    Klucz turnieju: dzien w czasie POLSKIM + hala (bez hali - miasto).
+
+    Te same granice co dojazd w `settlement_engine._tournament_groups`, ale BEZ
+    sedziego i bez rodzaju: platnik jest jeden na caly dzien w hali, takze gdy
+    tego dnia graja i dzieci, i mlodzicy regionalni. Mecz spoza turniejow albo
+    sprzed `TOURNAMENT_HOST_SINCE` - pusto.
+    """
+    if not R.shares_trip_travel(code):
+        return ""
+    when = _pl_day(match_at, day)
+    if when is None or when < TOURNAMENT_HOST_SINCE:
+        return ""
+    place = hall_key(hall, city) or _default_key(city)
+    if not place:
+        return ""
+    return f"t:{when.isoformat()}|{place}"
+
+
+def _city_in_name(city_key: str, name_key: str) -> bool:
+    """„ruda slaska" w „grunwald ruda slaska" - cale slowa, w kolejnosci."""
+    return bool(city_key) and f" {city_key} " in f" {name_key} "
+
+
+def tournament_host(
+    rows: list["ChargeRow"],
+    index: "TeamIndex",
+    *,
+    city: str,
+) -> tuple[Optional[TeamRef], str]:
+    """
+    Gospodarz turnieju bez wskazania czlowieka: (druzyna, skad) albo (None, HOST_UNKNOWN).
+
+    1. Druzyna z turnieju z MIASTA HALI („Grunwald Ruda Slaska" w Rudzie
+       Slaskiej) - gdy wskazuje JEDEN klub.
+    2. Wszystkie mecze turnieju maja gospodarza z jednego klubu - to on.
+    Inaczej turniej czeka na wskazanie w panelu klubow.
+    """
+    city_key = index.normalize(city)
+    clubs: dict[str, TeamRef] = {}
+    hosts: set[str] = set()
+    for row in rows:
+        host = index.find(row.host_name, row.category)
+        hosts.add(host.club_id if host is not None else "")
+        for name in (row.host_name, row.guest_name):
+            team = index.find(name, row.category)
+            if team is None or not team.club_id:
+                continue
+            if _city_in_name(city_key, index.normalize(team.name)):
+                clubs.setdefault(team.club_id, team)
+    if len(clubs) == 1:
+        return next(iter(clubs.values())), HOST_HALL_CITY
+    if len(hosts) == 1 and "" not in hosts:
+        return index.find(rows[0].host_name, rows[0].category), HOST_SAME_CLUB
+    return None, HOST_UNKNOWN
+
+
+def _club_team_for(
+    host: TeamRef, category: Any, teams: Iterable[TeamRef], normalize: Callable[[Any], str]
+) -> TeamRef:
+    """Druzyna klubu gospodarza w kategorii meczu - do rozbicia na druzyny."""
+    for team in teams:
+        if team.club_id == host.club_id and category_matches(team.category, category, normalize):
+            return team
+    return host
+
+
 def build_charges(
     settled: Iterable[Any],
     *,
@@ -377,6 +484,7 @@ def build_charges(
     judge_names: Optional[dict[str, str]] = None,
     key_of: Any = None,
     district_label: str = "",
+    tournament_hosts: Optional[dict[str, MatchOverride]] = None,
 ) -> list[ChargeRow]:
     """
     Z obsad policzonych przez silnik robi wiersze obciazen, mecz po meczu.
@@ -392,8 +500,13 @@ def build_charges(
     okreg" ani deklaracji stolikowego, wiec ani `club-off`, ani regula
     „jednego stolikowego" go nie dotycza. `district_label` to nazwa platnika
     na wierszu (bez niej sam numer).
+
+    `tournament_hosts` - gospodarze turniejow wskazani w panelu (klucz
+    `tournament_key`, wartosc jak wyjatek „przenies na inna druzyne"); patrz
+    uwaga o turniejach na gorze modulu.
     """
     overrides = overrides or {}
+    tournament_hosts = tournament_hosts or {}
     clubs = clubs or {}
     judge_names = judge_names or {}
     teams_by_id = teams_by_id or {}
@@ -412,6 +525,7 @@ def build_charges(
             host = hosts.get(item.match_key, "") or host_from_teams(
                 teams, known=index.keys, key_of=normalize
             )
+            hall = " ".join(str(getattr(item, "hall", "") or "").split())
             row = ChargeRow(
                 match_key=item.match_key,
                 match_at=item.match_at,
@@ -423,6 +537,10 @@ def build_charges(
                 teams=teams,
                 guest_name=guests.get(item.match_key, "") or guest_from_teams(teams, host),
                 host_swapped=item.match_key in swapped_matches,
+                hall=hall,
+                tournament_key=tournament_key(
+                    item.match_code, item.match_at, item.day, hall, item.city
+                ),
             )
             grouped[item.match_key] = row
         elif teams and not row.teams:
@@ -444,6 +562,36 @@ def build_charges(
             )
         )
 
+    # Turnieje: jeden gospodarz na caly dzien w hali (patrz opis modulu).
+    by_tournament: dict[str, list[ChargeRow]] = {}
+    for row in grouped.values():
+        if row.tournament_key:
+            by_tournament.setdefault(row.tournament_key, []).append(row)
+    all_teams = list(teams_by_id.values()) or list(teams_by_key.values())
+    #: turniej -> (druzyna gospodarza albo OKREG, skad wiemy)
+    hosts_of: dict[str, tuple[Optional[TeamRef], str]] = {}
+    for key, rows in by_tournament.items():
+        for row in rows:
+            row.tournament_size = len(rows)
+        chosen = tournament_hosts.get(key)
+        if chosen is not None and (chosen.team_id or chosen.team_name):
+            if is_district_payer(chosen.team_id):
+                ref: Optional[TeamRef] = TeamRef(
+                    team_id=DISTRICT_PAYER_ID,
+                    club_id=DISTRICT_PAYER_ID,
+                    name=district_label or chosen.team_name or DISTRICT_PAYER_ID,
+                )
+            else:
+                ref = teams_by_id.get(chosen.team_id)
+                if ref is None and chosen.team_name:
+                    ref = teams_by_key.get(normalize(chosen.team_name)) or index.find(chosen.team_name)
+            hosts_of[key] = (ref, HOST_MANUAL if ref is not None else HOST_UNKNOWN)
+            continue
+        if len(rows) < 2:
+            # Jeden mecz w hali to nie turniej do rozstrzygania - placi jego gospodarz.
+            continue
+        hosts_of[key] = tournament_host(rows, index, city=rows[0].city)
+
     out: list[ChargeRow] = []
     for row in grouped.values():
         row.referees.sort(key=lambda share: (share.role, share.name, share.judge_id))
@@ -451,7 +599,18 @@ def build_charges(
 
         team: Optional[TeamRef] = None
         district = is_district_payer(override.team_id)
-        if district:
+        tournament = hosts_of.get(row.tournament_key) if row.tournament_key else None
+        if tournament is not None and not override.team_id:
+            host_team, source = tournament
+            row.tournament_host = source
+            if host_team is not None and is_district_payer(host_team.team_id):
+                district = True
+                team = host_team
+            elif host_team is not None:
+                team = _club_team_for(host_team, row.category, all_teams, normalize)
+        if district and team is not None:
+            pass
+        elif district:
             team = TeamRef(
                 team_id=DISTRICT_PAYER_ID,
                 club_id=DISTRICT_PAYER_ID,
@@ -465,7 +624,7 @@ def build_charges(
                 team = teams_by_key.get(normalize(override.team_name)) or index.find(
                     override.team_name
                 )
-        if team is None and not override.team_id:
+        if team is None and not override.team_id and tournament is None:
             team = index.find(row.host_name, row.category)
 
         if team is not None:

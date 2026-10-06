@@ -32,24 +32,34 @@ def _body(source: str, marker: str, length: int = 2000) -> str:
 
 
 class TestSiatkaMiesiecy:
+    # Tresc trasy `/months` siedzi w `_months_rows` - wspolnej z prognoza
+    # z telefonu (`/months/forecast`), wiec tam czytamy regule.
+
     def test_okreg_nie_placi_meczow_klubowych(self):
         """Domyslnie (panel okregu) mecz placony przez klub wypada z sumy."""
-        body = _body(ROUTES, '@router.get("/months"', 3000)
+        body = _body(ROUTES, "async def _months_rows", 3000)
         assert "_club_paid_keys(" in body
-        assert "[item for item in assignments if item.match_key not in club_paid]" in body
+        assert "district = [item for item in assignments if item.match_key not in not_district]" in body
         # Do silnika nie moze juz isc surowa lista obsad.
         assert "monthly_totals(assignments" not in ROUTES
 
+    def test_nie_obciazaj_klubow_wypada_z_wyplat(self):
+        """06.10.2026: „Nie obciazaj klubow" = nikt u nas nie placi - ani okreg, ani klub."""
+        body = _body(ROUTES, "async def _months_rows", 3000)
+        assert "club_paid, excluded = await _club_paid_keys(" in body
+        assert "not_district = club_paid | excluded" in body
+
     def test_sedzia_dolicza_swoj_zarobek_od_klubu(self):
         """`include_clubs` - ten sam mecz jest jego pieniedzmi, tylko od klubu."""
-        body = _body(ROUTES, '@router.get("/months"', 3000)
-        assert "include_clubs: bool = Query(" in body
+        route = _body(ROUTES, '@router.get("/months"', 3000)
+        assert "include_clubs: bool = Query(" in route
+        body = _body(ROUTES, "async def _months_rows", 3000)
         assert "if include_clubs and club_paid:" in body
         assert "[item for item in assignments if item.match_key in club_paid]" in body
 
     def test_kazda_grupa_liczy_sie_osobno(self):
         """Prog 200 zl i koszty ida od sumy miesiaca U PLATNIKA, nie lacznie."""
-        body = _body(ROUTES, '@router.get("/months"', 3000)
+        body = _body(ROUTES, "async def _months_rows", 3000)
         # Dwa niezalezne przebiegi silnika, dopiero ich wyniki sie skladaja.
         assert body.count("E.monthly_totals(") == 2
         assert "_merge_months(" in body
@@ -62,13 +72,13 @@ class TestSiatkaMiesiecy:
 
     def test_rozpoznanie_idzie_przez_ten_sam_modul_co_ekran(self):
         """Dwa rachunki rozjechaly sie raz - nie moga po raz drugi."""
-        body = _body(ROUTES, "async def _club_paid_keys")
+        body = _body(ROUTES, "async def _club_paid_keys", 3500)
         assert "club_scope_many(province, by_season)" in body
         assert "season_of(match.day)" in body
 
     def test_przebieg_rozpoznawczy_bierze_wszystko(self):
         """Podzial „kto placi" nie moze zalezec od przelacznikow ekranu."""
-        body = _body(ROUTES, "async def _club_paid_keys")
+        body = _body(ROUTES, "async def _club_paid_keys", 3500)
         assert "include_future=True" in body
         assert "include_zprp=True" in body
 
@@ -88,4 +98,4 @@ class TestWspolnyPodzial:
 
     def test_pusty_zakres_nie_pyta_bazy(self):
         body = _body(SCOPE, "async def club_scope_many")
-        assert 'return {"match_keys": set(), "clubs": []}' in body
+        assert 'return {"match_keys": set(), "excluded_keys": set(), "clubs": []}' in body

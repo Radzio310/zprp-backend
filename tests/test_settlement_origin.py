@@ -6,6 +6,7 @@ from app.settlement_origin import (
     KEEP,
     OUTSIDE,
     collected_after_season,
+    foreign_district_match,
     history_fix,
     is_other_district,
     own_past_match,
@@ -22,6 +23,22 @@ def test_own_prefixes_come_from_our_schedule():
     assert own_prefixes(SCHEDULE) == {"S"}
     assert own_prefixes(["L/MłK/20", "L/MłK/21"]) == {"L"}
     assert own_prefixes([]) == set()
+
+
+def test_judge_lists_do_not_make_a_foreign_prefix_ours():
+    # Zgloszenie z 06.10.2026: terminarz Slaska ma setki „S/", a sedzia
+    # z Czestochowy wniosl dwa mecze juniorek z Piotrkowa („E/JmK/1", „E/JmK/3").
+    schedule = [f"S/JmM/{n}" for n in range(200)] + ["E/JmK/1", "E/JmK/3"]
+    assert own_prefixes(schedule) == {"S"}
+    # Dwa rowne terminarze (okreg prowadzacy dwie numeracje) zostaja oba.
+    assert own_prefixes(["S/JmM/1"] * 10 + ["X/JmM/1"] * 8) == {"S", "X"}
+
+
+def test_foreign_district_match():
+    assert foreign_district_match("E/JmK/3", {"S"})
+    assert not foreign_district_match("S/JmK/3", {"S"})
+    assert not foreign_district_match("IIM4/1", {"S"})     # II liga - inna regula
+    assert not foreign_district_match("E/JmK/3", set())    # nie znamy swoich
 
 
 def test_other_district_needs_a_foreign_prefix():
@@ -73,9 +90,16 @@ def test_field_referee_or_delegate_at_another_district_drops():
     assert fix(role=R.ROLE_DELEGATE) == DROP
 
 
+def test_current_season_foreign_match_is_fixed_too():
+    # Biezacy sezon (06.10.2026): terminarz trzyma mecze z list sedziow, wiec
+    # „d:" meczu innego okregu poprawiamy niezaleznie od tego, kiedy go zapisano.
+    assert fix(season="2026/2027", first_seen=DURING) == OUTSIDE
+    assert fix(season="2026/2027", match_code="E/JmK/3", role=R.ROLE_FIELD) == DROP
+
+
 def test_everything_else_stays():
     assert fix(match_code="S/MłK/167") == KEEP          # nasz mecz
     assert fix(match_key="o:194144") == KEEP            # juz spoza okregu
-    assert fix(season="2026/2027") == KEEP              # biezacy sezon: terminarz
-    assert fix(first_seen=DURING) == KEEP               # zapisany w trakcie sezonu - terminarz
+    assert fix(first_seen=DURING) == KEEP               # miniony sezon z terminarza - zamkniety
     assert fix(own=set()) == KEEP                       # nie znamy naszych przedrostkow
+    assert fix(season="2026/2027", match_code="S/MłK/1") == KEEP

@@ -58,6 +58,7 @@ from app.training_spk import (
 )
 from app.match_market import router as match_market_router
 from app.match_bombs import router as match_bombs_router
+from app.match_bombs import panel_router as match_bombs_panel_router
 from app.reports import router as reports_router
 from app.login_records import router as login_records_router
 from app.privacy_consents import router as privacy_consents_router
@@ -104,6 +105,7 @@ from app.zprp_archive import router as province_archive_router, run_archive_sche
 from app.assignment_insights import router as province_insights_router, run_insights_scheduler
 from app.province_club_budgets import router as province_club_budgets_router, seed_default_budgets
 from app.province_clubs import router as province_clubs_router
+from app.province_tournament_hosts import router as province_tournament_hosts_router
 from app.province_invoices import router as province_invoices_router
 from app.province_manual_charges import router as province_manual_charges_router
 from app.province_alerts import router as province_alerts_router, start_alert_scheduler, stop_alert_scheduler
@@ -290,6 +292,7 @@ app.include_router(training_spk_admin_router)
 # catch-all - kolejność nie ma tu znaczenia, ale trzyma się rodziny modułów BAZA.
 app.include_router(match_market_router)
 app.include_router(match_bombs_router)
+app.include_router(match_bombs_panel_router)
 app.include_router(reports_router)
 app.include_router(login_records_router)
 app.include_router(privacy_consents_router)
@@ -351,6 +354,8 @@ app.include_router(province_settlement_pdf_router)
 # Wspólne budżety klubów: /province/clubs/budgets - PRZED routerem klubów,
 # bo tam GET /{club_id} połknąłby „budgets".
 app.include_router(province_club_budgets_router)
+# Przed `/province/clubs` - tam `{club_id}` połknąłby `/tournaments`.
+app.include_router(province_tournament_hosts_router)
 app.include_router(province_clubs_router)
 # Faktury PDF jako wpłaty klubów: własny prefiks /province/invoices.
 app.include_router(province_invoices_router)

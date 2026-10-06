@@ -206,6 +206,12 @@ async def _reserve_number(
     return number_text
 
 
+def _pl_date(value: Optional[str]) -> str:
+    """„2026-10-04" -> „04.10.2026"."""
+    text = str(value or "")
+    return f"{text[8:10]}.{text[5:7]}.{text[0:4]}" if len(text) >= 10 else "-"
+
+
 def _split_note(split: Optional[dict]) -> str:
     """Dopisek pod nazwiskiem w zestawieniu: „wypłata listami SL/09/2026/4-6"."""
     if not split or split.get("status") != "issued" or not split.get("label"):
@@ -250,6 +256,11 @@ async def zestawienie_pdf(payload: PdfRequest):
     outside = data["outside_district"]
     date_from = date.fromisoformat(data["period"]["from"])
     date_to = date.fromisoformat(data["period"]["to"])
+    # Kary za bomby (06.10.2026): „Razem do wypłaty" jest PO karze, a kara
+    # stoi w osobnej kolumnie - tylko gdy ktokolwiek ją ma.
+    penalty_total = round(float(totals.get("penalty") or 0), 2)
+    payable_total = round(float(totals["net"]) - penalty_total, 2)
+    bombs = data.get("bombs") or []
 
     number_text = await _reserve_number(
         province,
@@ -297,15 +308,34 @@ async def zestawienie_pdf(payload: PdfRequest):
                     "taxable": e.taxable,
                     "tax": e.tax,
                     "net": e.net,
+                    "penalty": e.penalty,
+                    "penalty_left": e.penalty_left,
+                    "payable": round(e.net - e.penalty, 2),
                     "split_note": _split_note(e.split),
                     "split_applied": bool(e.split and e.split.get("current")),
                 }
                 for e in entries
             ],
+            "has_penalty": penalty_total > 0,
+            "penalty_total": penalty_total,
+            "payable_total": payable_total,
+            # Nieobecności z Rejestru: mecz zdjęty z wypłaty (i ewentualna kara).
+            "bomb_rows": [
+                {
+                    "name": row.get("name") or row["judge_id"],
+                    "day": _pl_date(row.get("day")),
+                    "code": row.get("code") or "",
+                    "teams": row.get("teams") or "",
+                    "role": row.get("role") or "",
+                    "lost": round(float(row.get("lost_gross") or 0) + float(row.get("lost_travel") or 0), 2),
+                    "penalty": float(row.get("penalty") or 0),
+                }
+                for row in bombs
+            ],
             # Przypis pod tabelą - tylko gdy ktoś ma wydane listy sędziowskie.
             "split_rows": sum(1 for e in entries if e.split and e.split.get("current")),
             "totals": totals,
-            "total_in_words": amount_in_words(totals["net"]),
+            "total_in_words": amount_in_words(payable_total),
             "outside_rows": [
                 {"judge_id": e.judge_id, "name": display_judge_name(e.judge_name),
                  "matches": e.match_count, "gross": e.gross, "net": e.net,

@@ -101,9 +101,16 @@ BOMB_STATUSES = ("active", "withdrawn", "voided")
 COUNTED_STATUSES = ("active",)
 
 
+#: Wpis ręczny komisji (06.10.2026), gdy obsady meczu nie znamy - to NIE jest
+#: gniazdo obsady, więc nie stoi w `CREW_SLOTS` (te sprawdzają zgłoszenia).
+MANUAL_SLOT_LABEL = "wpis komisji"
+
+
 def slot_label(slot: Any) -> str:
     """Podpis gniazda dla człowieka; nieznane oddajemy bez zmiany."""
     key = str(slot or "").strip()
+    if key == "reczny":
+        return MANUAL_SLOT_LABEL
     return CREW_SLOTS.get(key, key)
 
 

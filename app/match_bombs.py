@@ -19,14 +19,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+import re
+import uuid
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, func, insert, or_, select, update
 
-from app.db import database, match_bombs, province_judges, province_matches
+from app import settlement_cache as SC
+from app.db import (
+    database,
+    match_bombs,
+    province_judges,
+    province_matches,
+    province_settlement_matches,
+)
 from app.match_bombs_rules import (
     COMMISSION_BADGE,
     SUBJECT_NOTICE_DELAY_HOURS,
@@ -54,12 +64,33 @@ from app.match_bombs_rules import (
 from app.match_market import Actor, market_actor
 from app.match_market_access import badge_names
 from app.match_market_rules import CREW_STATE_FIELDS, state_dict
+from app.province_panel_access import PANEL_SETTLEMENTS
+from app.province_panel_guard import panel_write_gate
 from app.push.push import send_push_to_judges
+from app.settlement_bombs import MANUAL_MATCH_PREFIX, TIME_TOLERANCE, pl_day
+from app.settlement_province import canonical
 from app.zprp_accounts import normalize_province
 
 logger = logging.getLogger("app.match_bombs")
 
 router = APIRouter(prefix="/match-bombs", tags=["Bomby"])
+
+# Kara z panelu Rozliczeń (BAZA_web) - ta sama kolumna co z Rejestru w aplikacji,
+# ale bramką konta VIP z uprawnieniem „Rozliczenia" (decyzja z 06.10.2026:
+# kwotę wpisuje się w obu miejscach, a zapisana jest jedna).
+panel_router = APIRouter(
+    prefix="/province/settlements/bombs",
+    tags=["Bomby"],
+    dependencies=[Depends(panel_write_gate(PANEL_SETTLEMENTS, "Kara za nieobecność"))],
+)
+
+_WARSAW = ZoneInfo("Europe/Warsaw")
+
+#: Gniazdo wpisu ręcznego, gdy obsady meczu nie znamy (`slot_label` podpisuje go).
+MANUAL_SLOT = "reczny"
+
+#: Najwyższa kara, jaką przyjmujemy - większa kwota to pomyłka w polu.
+MAX_PENALTY = 10000
 
 
 def _s(value: Any) -> str:
@@ -186,6 +217,17 @@ async def _photos(bombs: List[Dict[str, Any]]) -> Dict[str, str]:
     }
 
 
+def _penalty(bomb: Dict[str, Any]) -> Optional[float]:
+    value = bomb.get("penalty")
+    if value is None:
+        return None
+    try:
+        amount = round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+    return amount if amount > 0 else None
+
+
 def _view(
     bomb: Dict[str, Any],
     viewer: str,
@@ -194,6 +236,8 @@ def _view(
 ) -> Dict[str, Any]:
     """Zgłoszenie tak, jak wolno je zobaczyć TEMU widzowi."""
     show_author = author_is_visible(bomb, viewer, is_commission=is_commission)
+    # Kara to sprawa komisji i ukaranego - reszta obsady widzi sam fakt.
+    show_penalty = is_commission or _s(bomb.get("subject_judge_id")) == _s(viewer)
     gallery = photos or {}
     return {
         "id": int(bomb["id"]),
@@ -227,6 +271,12 @@ def _view(
         "voidByName": _s(bomb.get("void_by_name")) or None,
         "voidedAt": _iso(bomb.get("voided_at")),
         "crewSource": _s(bomb.get("crew_source")),
+        # Wpis ręczny komisji (06.10.2026): nazwa meczu, gdy nie podano numeru.
+        "source": _s(bomb.get("source")) or "crew",
+        "matchLabel": _s(bomb.get("match_label")) or None,
+        "penalty": _penalty(bomb) if show_penalty else None,
+        "penaltyByName": (_s(bomb.get("penalty_by_name")) or None) if show_penalty else None,
+        "penaltyAt": _iso(bomb.get("penalty_at")) if show_penalty else None,
     }
 
 
@@ -386,6 +436,7 @@ async def report_bomb(
         insert(match_bombs).values(**values).returning(match_bombs.c.id)
     )
     bomb = {**values, "id": int(bomb_id)}
+    _settlements_changed()
 
     # Komisja od razu; osoba zgłoszona dopiero po dobie - zamiata to
     # `run_bomb_notice_sweep`, żeby cofnięta pomyłka nie zdążyła narobić hałasu.
@@ -419,6 +470,7 @@ async def withdraw_bomb(bomb_id: int, actor: Actor = Depends(market_actor)) -> D
         .where(match_bombs.c.id == bomb_id)
         .values(status="withdrawn", withdrawn_at=func.now(), updated_at=func.now())
     )
+    _settlements_changed()
     return {"id": bomb_id, "status": "withdrawn"}
 
 
@@ -458,6 +510,7 @@ async def void_bomb(
             updated_at=func.now(),
         )
     )
+    _settlements_changed()
     await _notify(
         [_s(bomb.get("author_judge_id")), _s(bomb.get("subject_judge_id"))],
         "✅ Zgłoszenie unieważnione",
@@ -465,6 +518,287 @@ async def void_bomb(
         bomb,
     )
     return {"id": bomb_id, "status": "voided"}
+
+
+# ─────────────────────────── wpis ręczny komisji ───────────────────────────
+
+
+def _settlements_changed() -> None:
+    """Bomba zdejmuje sędziego z wypłaty - przeliczamy rozliczenia WSZYSTKICH okręgów.
+
+    Okręg bomby to okręg autora, a zgłoszony sędzia bywa z innego - haczyk na
+    zapisach (`settlement_cache`) widziałby tylko okręg autora.
+    """
+    SC.bump(None, base=True, reason="bomba")
+
+
+class ManualBombRequest(BaseModel):
+    #: Okręg rejestru - liczy się tylko u administratora; komisja pisze do swojego.
+    province: str = ""
+    subject_judge_id: str
+    #: Numer meczu („S/JMM/7") albo jego nazwa („Turniej w Rudzie").
+    match_text: str
+    #: Dzień i godzina meczu w czasie polskim: „2026-10-04", „16:00".
+    match_date: str
+    match_time: str
+    note: str = ""
+    penalty: Optional[float] = None
+
+
+class PenaltyRequest(BaseModel):
+    #: Kwota kary w złotych; pusto albo 0 = bez kary.
+    amount: Optional[float] = None
+    province: str = ""
+    updated_by: Optional[str] = None
+
+
+_CODE_RE = re.compile(r"^[^\s/]{1,12}(/[^\s/]{1,16}){1,3}$")
+
+
+def _looks_like_code(text: str) -> bool:
+    """„S/JMM/7", „IIM4/1" - numer meczu, a nie jego nazwa."""
+    return bool(_CODE_RE.match(text.strip()))
+
+
+def _local_moment(day_text: str, time_text: str) -> datetime:
+    try:
+        day = date.fromisoformat(_s(day_text))
+    except ValueError:
+        raise HTTPException(400, "Podaj datę meczu w postaci RRRR-MM-DD.")
+    match = re.match(r"^(\d{1,2}):(\d{2})$", _s(time_text))
+    if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+        raise HTTPException(400, "Podaj godzinę meczu w postaci GG:MM.")
+    local = datetime.combine(day, time(int(match.group(1)), int(match.group(2))), tzinfo=_WARSAW)
+    return local.astimezone(timezone.utc)
+
+
+def _clean_penalty(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        amount = round(float(value), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Kara musi być kwotą w złotych.")
+    if amount < 0:
+        raise HTTPException(400, "Kara nie może być ujemna.")
+    if amount > MAX_PENALTY:
+        raise HTTPException(400, f"Kara powyżej {MAX_PENALTY} zł wygląda na pomyłkę w polu.")
+    return amount or None
+
+
+async def _resolve_manual_match(
+    province: str, judge_id: str, moment: datetime, text: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Mecz z wpisu ręcznego: obsada tego sędziego z rozliczeń okręgu tego dnia.
+
+    Numer meczu z wpisu zawęża wybór, a godzina rozstrzyga między kilkoma
+    meczami jednego dnia. Niejednoznaczny wpis zostaje bez numeru meczu -
+    rozliczenie spróbuje go powiązać samo (`settlement_bombs.match_bombs`).
+    """
+    key = canonical(province) or province
+    day = pl_day(moment)
+    start = datetime.combine(day, time(0, 0), tzinfo=_WARSAW).astimezone(timezone.utc)
+    rows = [
+        _row(r)
+        for r in await database.fetch_all(
+            select(province_settlement_matches).where(
+                and_(
+                    province_settlement_matches.c.province == key,
+                    province_settlement_matches.c.judge_id == judge_id,
+                    province_settlement_matches.c.active.is_(True),
+                    province_settlement_matches.c.match_at >= start,
+                    province_settlement_matches.c.match_at < start + timedelta(days=1),
+                )
+            )
+        )
+    ]
+    if _looks_like_code(text):
+        from app.settlement_rates import code_key
+
+        coded = [r for r in rows if code_key(r.get("match_code")) == code_key(text)]
+        if coded:
+            rows = coded
+    if len(rows) > 1:
+        rows = [
+            r
+            for r in rows
+            if r.get("match_at") is not None
+            and abs(
+                (r["match_at"] if r["match_at"].tzinfo else r["match_at"].replace(tzinfo=timezone.utc))
+                - moment
+            )
+            <= TIME_TOLERANCE
+        ]
+    return rows[0] if len(rows) == 1 else None
+
+
+@router.post("/manual", status_code=201, summary="Dopisz nieobecność ręcznie (komisja)")
+async def report_manual(
+    req: ManualBombRequest, actor: Actor = Depends(market_actor)
+) -> Dict[str, Any]:
+    """Wpis komisji z Rejestru: sędzia z listy okręgu, mecz, dzień, godzina, opis.
+
+    Decyzja z 06.10.2026 - komisja i administrator. Okno 14 dni i wymóg „byłem
+    w obsadzie" tu nie obowiązują: to rejestr komisji, a nie zgłoszenie świadka.
+    """
+    if not _is_commission(actor):
+        raise HTTPException(
+            403,
+            "Ręcznie dopisuje nieobecność komisja sędziowska okręgu albo administrator.",
+        )
+    province = (
+        normalize_province(req.province) if actor.is_admin and _s(req.province) else ""
+    ) or normalize_province(_require_province(actor))
+    judge_id = _s(req.subject_judge_id)
+    if not judge_id:
+        raise HTTPException(400, "Wybierz sędziego z listy okręgu.")
+    text = " ".join(_s(req.match_text).split())
+    if not text:
+        raise HTTPException(400, "Wpisz numer meczu albo jego nazwę.")
+    if len(text) > 120:
+        raise HTTPException(400, "Nazwa meczu jest za długa - wystarczy numer albo krótki opis.")
+    note = _s(req.note)
+    if len(note) > 160:
+        raise HTTPException(400, "Opis może mieć najwyżej 160 znaków.")
+    moment = _local_moment(req.match_date, req.match_time)
+    penalty = _clean_penalty(req.penalty)
+
+    judge = await database.fetch_one(
+        select(province_judges.c.full_name, province_judges.c.province).where(
+            province_judges.c.judge_id == judge_id
+        )
+    )
+    if judge is None:
+        raise HTTPException(409, "Tego sędziego nie ma na liście sędziów okręgu.")
+    judge_row = _row(judge)
+    if not actor.is_admin and normalize_province(judge_row.get("province")) != province:
+        raise HTTPException(403, "Komisja dopisuje nieobecności sędziów własnego okręgu.")
+
+    found = await _resolve_manual_match(province, judge_id, moment, text)
+    if found:
+        match_id = _s(found.get("match_key")).split(":", 1)[-1]
+        teams = _s(found.get("teams"))
+        host, _, guest = teams.partition(" - ")
+        match_code = _s(found.get("match_code")) or (text if _looks_like_code(text) else "")
+        match_at = found.get("match_at") or moment
+        hall = _s(found.get("hall")) or _s(found.get("city"))
+    else:
+        match_id = MANUAL_MATCH_PREFIX + uuid.uuid4().hex[:12]
+        host = guest = ""
+        match_code = text if _looks_like_code(text) else ""
+        match_at = moment
+        hall = ""
+
+    slot = MANUAL_SLOT
+    if found:
+        crew, _source = await _match_crew(province, match_id, [])
+        place = find_in_crew(crew, judge_id=judge_id, full_name=_s(judge_row.get("full_name")))
+        slot = _s((place or {}).get("slot")) or MANUAL_SLOT
+
+    duplicate = await database.fetch_one(
+        select(match_bombs.c.id)
+        .where(match_bombs.c.match_id == match_id)
+        .where(match_bombs.c.subject_judge_id == judge_id)
+        .where(match_bombs.c.status == "active")
+    )
+    if duplicate:
+        raise HTTPException(409, "Ta nieobecność jest już w rejestrze - popraw istniejący wpis.")
+
+    values = {
+        "province": province,
+        "season": season_of(match_at),
+        "match_id": match_id,
+        "match_code": match_code or None,
+        "match_at": match_at,
+        "host_team": host or None,
+        "guest_team": guest or None,
+        "hall": hall or None,
+        "crew_source": "manual",
+        "source": "manual",
+        "match_label": None if _looks_like_code(text) else text,
+        "subject_judge_id": judge_id,
+        "subject_name": _s(judge_row.get("full_name")) or judge_id,
+        "subject_slot": slot,
+        "author_judge_id": actor.judge_id,
+        "author_name": _s(actor.full_name) or actor.judge_id,
+        "author_slot": None,
+        "note": note or None,
+        "status": "active",
+    }
+    if penalty:
+        values.update(
+            penalty=penalty,
+            penalty_by=actor.judge_id,
+            penalty_by_name=_s(actor.full_name) or actor.judge_id,
+            penalty_at=func.now(),
+        )
+    bomb_id = await database.fetch_val(
+        insert(match_bombs).values(**values).returning(match_bombs.c.id)
+    )
+    _settlements_changed()
+    logger.info("bomby: komisja %s dopisała nieobecność %s (%s)", actor.judge_id, judge_id, match_id)
+    return {"id": int(bomb_id), "status": "active", "linked": bool(found)}
+
+
+async def _save_penalty(bomb_id: int, amount: Optional[float], by: str, by_name: str) -> Dict[str, Any]:
+    clean = _clean_penalty(amount)
+    await database.execute(
+        update(match_bombs)
+        .where(match_bombs.c.id == bomb_id)
+        .values(
+            penalty=clean,
+            penalty_by=by or None,
+            penalty_by_name=by_name or None,
+            penalty_at=func.now() if clean else None,
+            updated_at=func.now(),
+        )
+    )
+    _settlements_changed()
+    return {"id": bomb_id, "penalty": clean}
+
+
+@router.put("/{bomb_id}/penalty", summary="Kara za nieobecność (komisja)")
+async def set_penalty(
+    bomb_id: int, req: PenaltyRequest, actor: Actor = Depends(market_actor)
+) -> Dict[str, Any]:
+    row = await database.fetch_one(select(match_bombs).where(match_bombs.c.id == bomb_id))
+    if not row:
+        raise HTTPException(404, "Nie ma takiego zgłoszenia.")
+    bomb = _row(row)
+    if not _is_commission(actor):
+        raise HTTPException(403, "Karę wpisuje komisja sędziowska albo panel Rozliczeń.")
+    if not actor.is_admin and _s(bomb.get("province")) != normalize_province(actor.province):
+        raise HTTPException(403, "To zgłoszenie należy do innego okręgu.")
+    if _s(bomb.get("status")) != "active":
+        raise HTTPException(409, "Kara dotyczy tylko obowiązującego wpisu.")
+    return await _save_penalty(bomb_id, req.amount, actor.judge_id, _s(actor.full_name))
+
+
+@panel_router.put("/{bomb_id}/penalty", summary="Kara za nieobecność (panel Rozliczeń)")
+async def set_penalty_from_panel(bomb_id: int, req: PenaltyRequest) -> Dict[str, Any]:
+    key = canonical(req.province)
+    if not key:
+        raise HTTPException(400, "Brak okręgu.")
+    row = await database.fetch_one(select(match_bombs).where(match_bombs.c.id == bomb_id))
+    if not row:
+        raise HTTPException(404, "Nie ma takiego zgłoszenia.")
+    bomb = _row(row)
+    if _s(bomb.get("status")) != "active":
+        raise HTTPException(409, "Kara dotyczy tylko obowiązującego wpisu.")
+    # Bomba z rejestru tego okręgu albo o sędzim z jego listy.
+    judge = await database.fetch_one(
+        select(province_judges.c.province).where(
+            province_judges.c.judge_id == _s(bomb.get("subject_judge_id"))
+        )
+    )
+    mine = normalize_province(_s(bomb.get("province"))) == normalize_province(key) or (
+        judge is not None and normalize_province(_row(judge).get("province")) == normalize_province(key)
+    )
+    if not mine:
+        raise HTTPException(403, "Ta nieobecność nie dotyczy sędziego z tego okręgu.")
+    by = _s(req.updated_by) or "panel"
+    return await _save_penalty(bomb_id, req.amount, by, by)
 
 
 # ─────────────────────────── rejestr okręgu ───────────────────────────
@@ -584,13 +918,21 @@ async def sweep_subject_notices(now: Optional[datetime] = None) -> int:
         bomb = _row(raw)
         target = _s(bomb.get("subject_judge_id"))
         if target:
+            what = (
+                _s(bomb.get("match_code")) or _s(bomb.get("match_label")) or "okręgowym"
+            )
+            manual = _s(bomb.get("source")) == "manual"
             await _notify(
                 [target],
                 "🚩 Zgłoszono Twoją nieobecność",
                 (
-                    f"Ktoś z obsady zgłosił, że nie było Cię na meczu "
-                    f"{_s(bomb.get('match_code')) or 'okręgowym'}. Szczegóły masz w "
-                    "ekranie meczu; sprawę prowadzi komisja sędziowska."
+                    f"Komisja sędziowska wpisała Twoją nieobecność na meczu {what} do "
+                    "rejestru okręgu."
+                    if manual
+                    else (
+                        f"Ktoś z obsady zgłosił, że nie było Cię na meczu {what}. "
+                        "Szczegóły masz w ekranie meczu; sprawę prowadzi komisja sędziowska."
+                    )
                 ),
                 bomb,
             )

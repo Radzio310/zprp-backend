@@ -131,3 +131,77 @@ def test_seed_is_idempotent_and_never_moves_a_club():
     # Ktoś ręcznie spiął 5011 z innym klubem - seed tej grupy nie ruszy.
     manual = [{"budget_id": 1, "primary_club_id": "99", "member_ids": ["99", "5011"]}]
     assert [item["primary_club_id"] for item in seed_plan(manual, defaults)] == ["3608", "41", "2049"]
+
+
+# ---------------------------------------------------------------------------
+# Scalenie automatyczne klubów zastępczych (06.10.2026, „pogonie się porozbijały")
+# ---------------------------------------------------------------------------
+
+from app import province_club_budgets_rules as BR  # noqa: E402
+from app.province_clubs_scrape import team_key as _team_key  # noqa: E402
+
+POGON_TEAMS = [
+    ("1001", "SPR Pogoń 1945 Zabrze"),
+    ("eligible-team:11", "SPR Pogoń 1945 II Zabrze"),
+    ("eligible-team:12", "SPR Pogoń 1945 III Zabrze"),
+    ("eligible-team:13", "SPR Pogoń 1945 Zabrze III"),
+    ("manual:club:abc", "SPR Pogoń Zabrze"),
+    ("2002", "MKS Start Michałkowice"),
+]
+
+
+def test_club_base_key_drops_team_marks_but_keeps_year():
+    assert BR.club_base_key(_team_key("SPR Pogoń 1945 II Zabrze")) == "spr pogon 1945 zabrze"
+    assert BR.club_base_key(_team_key("OSP Świętochłowice 1")) == "osp swietochlowice"
+
+
+def test_fallback_teams_join_the_numbered_club():
+    plan = BR.auto_merge_plan(POGON_TEAMS, key_of=_team_key)
+    assert plan == {
+        "eligible-team:11": "1001",
+        "eligible-team:12": "1001",
+        "eligible-team:13": "1001",
+    }
+
+
+def test_real_numbers_and_ambiguous_names_are_never_merged():
+    teams = POGON_TEAMS + [("3003", "SPR Pogoń 1945 Zabrze")]   # drugi klub o tej nazwie
+    assert BR.auto_merge_plan(teams, key_of=_team_key) == {}
+
+
+def test_split_and_manual_budgets_win():
+    plan = BR.auto_merge_plan(
+        POGON_TEAMS, key_of=_team_key, taken=["eligible-team:12"], rejected=["eligible-team:13"]
+    )
+    assert plan == {"eligible-team:11": "1001"}
+
+
+def test_auto_groups_join_existing_manual_budget():
+    manual = [{"budget_id": 5, "name": None, "primary_club_id": "1001", "member_ids": ["1001", "4000"]}]
+    groups = BR.with_auto_groups(manual, {"eligible-team:11": "4000"})
+    assert groups[0]["member_ids"] == ["1001", "4000", "eligible-team:11"]
+    assert groups[0]["auto_member_ids"] == ["eligible-team:11"]
+    assert len(groups) == 1
+
+
+def test_auto_group_is_a_budget_row():
+    groups = BR.with_auto_groups([], {"eligible-team:11": "1001", "eligible-team:12": "1001"})
+    assert groups == [
+        {
+            "budget_id": None,
+            "name": None,
+            "primary_club_id": "1001",
+            "member_ids": ["1001", "eligible-team:11", "eligible-team:12"],
+            "auto": True,
+            "auto_member_ids": ["eligible-team:11", "eligible-team:12"],
+        }
+    ]
+    clubs = {
+        "1001": {"club_id": "1001", "name": "SPR Pogoń 1945 Zabrze", "charged": 100, "paid_in": 0},
+        "eligible-team:11": {"club_id": "eligible-team:11", "name": "SPR Pogoń 1945 II Zabrze", "charged": 20},
+    }
+    merged = BR.merge_budgets(clubs, groups)
+    assert list(merged) == ["1001"]
+    assert merged["1001"]["charged"] == 120
+    assert merged["1001"]["auto_merged"] is True
+    assert merged["1001"]["auto_member_ids"] == ["eligible-team:11", "eligible-team:12"]

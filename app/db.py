@@ -1458,6 +1458,38 @@ province_match_overrides = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# Gospodarz TURNIEJU (06.10.2026). Turniej dzieci i młodzików regionalnych to
+# jeden dzień w jednej hali i jeden płatnik obsady - gospodarz turnieju, a nie
+# gospodarz każdego meczu z osobna. Domyślnie rozpoznajemy go sami (drużyna
+# z miasta hali, `club_charges.tournament_host`); wiersz tutaj to wskazanie
+# człowieka z panelu klubów i wygrywa z automatem. Klucz turnieju:
+# `club_charges.tournament_key` (dzień w czasie polskim + hala).
+province_tournament_hosts = Table(
+    "province_tournament_hosts",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("tournament_key", String, primary_key=True),
+    Column("team_id", String, nullable=True),
+    Column("team_name", String, nullable=True),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+# Cofnięte AUTOMATYCZNE scalenia klubów (06.10.2026). Drużyna bez numeru
+# klubu w ZPRP (klub zastępczy `eligible-team:`) dołącza sama do klubu
+# o tej samej nazwie bez liczebnika („SPR Pogoń 1945 II Zabrze" ->
+# „SPR Pogoń 1945 Zabrze", `province_club_budgets_rules.auto_merge_groups`).
+# Wiersz tutaj to „rozdziel i nie łącz więcej" - klucz to klub zastępczy.
+province_club_merge_rejections = Table(
+    "province_club_merge_rejections",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("club_id", String, primary_key=True),
+    Column("target_club_id", String, nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 # 18.1i) Nazwiska sędziów z listy okręgu, zapamiętane przy pobieraniu rozliczeń
 #
 # `province_judges` prowadzi człowiek w panelu i potrafi nie mieć kogoś, kto ma
@@ -2738,6 +2770,17 @@ match_bombs = Table(
     Column("subject_notified_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    # Skąd wpis (06.10.2026): "crew" - obsada z ekranu meczu, "manual" - komisja
+    # dopisała go ręcznie w Rejestrze (sędzia z listy okręgu, mecz numerem albo
+    # nazwą, data i godzina). `match_label` to wpisana nazwa meczu.
+    Column("source", String, nullable=False, server_default=text("'crew'")),
+    Column("match_label", String, nullable=True),
+    # Kara za nieobecność: kwota potrącana z wypłaty okręgu PO podatku
+    # (`settlement_bombs`). Wpisuje ją komisja w Rejestrze albo panel Rozliczeń.
+    Column("penalty", Numeric(10, 2), nullable=True),
+    Column("penalty_by", String, nullable=True),
+    Column("penalty_by_name", String, nullable=True),
+    Column("penalty_at", DateTime(timezone=True), nullable=True),
 )
 
 # Ten sam człowiek nie zgłasza tej samej osoby przy tym samym meczu dwa razy.
@@ -4551,6 +4594,14 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS foreign_matches_enabled boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS second_league_field_enabled boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE province_module_config ADD COLUMN IF NOT EXISTS managed_prefixes json"))
+    # Bomby w rozliczeniu (06.10.2026): wpis ręczny komisji i kara. Tabela
+    # istnieje na produkcji, więc `create_all` kolumn nie doda.
+    _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS source varchar NOT NULL DEFAULT 'crew'"))
+    _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS match_label varchar"))
+    _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty numeric(10, 2)"))
+    _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_by varchar"))
+    _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_by_name varchar"))
+    _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_at timestamptz"))
     # Odswiezanie danych okregu sezonami: znak zycia i zakres przebiegu.
     # Tabela przebiegow istnieje na produkcji, wiec `create_all` ich nie doloży.
     _conn.execute(text("ALTER TABLE province_settlement_runs ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz"))

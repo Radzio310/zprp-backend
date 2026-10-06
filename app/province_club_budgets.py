@@ -56,8 +56,16 @@ def _key(province: str) -> str:
 # Odczyt
 # ---------------------------------------------------------------------------
 
-async def budget_groups(province: str) -> list[dict]:
-    """Budżety okręgu: [{budget_id, name, primary_club_id, member_ids, ...}]."""
+async def budget_groups(province: str, *, include_auto: bool = True) -> list[dict]:
+    """
+    Budżety okręgu: [{budget_id, name, primary_club_id, member_ids, ...}].
+
+    `include_auto` (domyślnie TAK) dokłada scalenia automatyczne klubów
+    zastępczych (`province_club_budgets_rules.auto_merge_plan`, 06.10.2026) -
+    lista, karta klubu, alerty i faktury widzą je jak budżet. Zapis budżetów
+    ręcznych pyta BEZ nich: scalenie automatyczne nie jest budżetem, którego
+    nie wolno dotknąć, tylko podpowiedzią, którą człowiek może wchłonąć.
+    """
     from sqlalchemy import select
 
     from app.db import database, province_club_budgets
@@ -86,7 +94,47 @@ async def budget_groups(province: str) -> list[dict]:
                 "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
             }
         )
-    return out
+    if not include_auto:
+        return out
+    plan = await auto_plan(key, out)
+    return BR.with_auto_groups(out, plan) if plan else out
+
+
+async def _rejections(province: str) -> dict[str, str]:
+    """Rozdzielone scalenia automatyczne: klub zastępczy -> klub, od którego go odpięto."""
+    from sqlalchemy import select
+
+    from app.db import database, province_club_merge_rejections
+
+    rows = await database.fetch_all(
+        select(province_club_merge_rejections).where(
+            province_club_merge_rejections.c.province == province
+        )
+    )
+    return {_s(row["club_id"]): _s(row["target_club_id"]) for row in rows}
+
+
+async def auto_plan(province: str, groups: Optional[list[dict]] = None) -> dict[str, str]:
+    """Klub zastępczy -> klub z numerem ZPRP, do którego dołącza sam."""
+    from sqlalchemy import select
+
+    from app.db import database, province_club_teams
+    from app.province_clubs_scrape import team_key
+
+    key = canonical(province) or _s(province)
+    if groups is None:
+        groups = await budget_groups(key, include_auto=False)
+    rows = await database.fetch_all(
+        select(province_club_teams.c.club_id, province_club_teams.c.team_name)
+        .where(province_club_teams.c.province == key)
+        .distinct()
+    )
+    return BR.auto_merge_plan(
+        [(row["club_id"], row["team_name"]) for row in rows],
+        key_of=team_key,
+        taken=[club_id for group in groups for club_id in group.get("member_ids") or []],
+        rejected=(await _rejections(key)).keys(),
+    )
 
 
 async def club_names(province: str, club_ids: list[str]) -> dict[str, str]:
@@ -129,10 +177,22 @@ async def merged_clubs(province: str, clubs: dict[str, dict]) -> dict[str, dict]
     """Słownik klubów z `_season_clubs` scalony w budżety (klucz = klub główny)."""
     groups = await budget_groups(province)
     if not groups:
-        return BR.merge_budgets(clubs, [])
-    wanted = [club_id for group in groups for club_id in group["member_ids"] if club_id not in clubs]
-    names = await club_names(province, wanted) if wanted else {}
-    return BR.merge_budgets(clubs, groups, names=names)
+        out = BR.merge_budgets(clubs, [])
+    else:
+        wanted = [club_id for group in groups for club_id in group["member_ids"] if club_id not in clubs]
+        names = await club_names(province, wanted) if wanted else {}
+        out = BR.merge_budgets(clubs, groups, names=names)
+    # Rozdzielone scalenie automatyczne - karta klubu proponuje „Scal z powrotem".
+    split = await _rejections(canonical(province) or _s(province))
+    if split:
+        targets = await club_names(province, [t for t in split.values() if t])
+        for club_id, target in split.items():
+            if club_id in out:
+                out[club_id]["auto_split_target"] = {
+                    "club_id": target,
+                    "name": targets.get(target) or target,
+                }
+    return out
 
 
 async def season_budgets(province: str, season: str, *, include_future: bool = False) -> dict[str, dict]:
@@ -174,7 +234,7 @@ async def seed_default_budgets() -> int:
     for key, defaults in BR.DEFAULT_BUDGETS.items():
         if not await claim_once(f"club-budgets-seed-{key}"):
             continue
-        plan = BR.seed_plan(await budget_groups(key), defaults)
+        plan = BR.seed_plan(await budget_groups(key, include_auto=False), defaults)
         now = _now()
         for item in plan:
             await database.execute(
@@ -248,7 +308,7 @@ async def save_budget(payload: BudgetRequest):
     if reason:
         raise HTTPException(400, reason)
 
-    groups = await budget_groups(key)
+    groups = await budget_groups(key, include_auto=False)
     current = None
     if payload.budget_id is not None:
         current = next((g for g in groups if g["budget_id"] == payload.budget_id), None)
@@ -337,6 +397,70 @@ async def save_budget(payload: BudgetRequest):
     }
 
 
+class AutoSplitRequest(BaseModel):
+    province: str
+    #: Klub zastępczy (`eligible-team:...`), który ma wrócić do osobnego salda.
+    club_id: str
+    updated_by: Optional[str] = None
+
+
+@router.post("/auto/split", summary="Rozdziel scalenie automatyczne klubu")
+async def split_auto_merge(payload: AutoSplitRequest):
+    """
+    „Rozdziel" przy klubie dołączonym automatycznie: wraca do osobnego salda
+    i automat go więcej nie łączy (wiersz w `province_club_merge_rejections`).
+    Wpisy i mecze zostają przy swoich numerach - tak jak przy rozłączeniu budżetu.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from app.db import database, province_club_merge_rejections
+
+    key = _key(payload.province)
+    club_id = _s(payload.club_id)
+    plan = await auto_plan(key)
+    target = plan.get(club_id)
+    if target is None:
+        raise HTTPException(
+            404,
+            "Ten klub nie jest scalony automatycznie - odśwież panel. Ręczny budżet rozłącza się przyciskiem „Rozłącz budżet”.",
+        )
+    statement = pg_insert(province_club_merge_rejections).values(
+        province=key,
+        club_id=club_id,
+        target_club_id=target,
+        created_by=_s(payload.updated_by) or None,
+        created_at=_now(),
+    )
+    await database.execute(
+        statement.on_conflict_do_update(
+            index_elements=[
+                province_club_merge_rejections.c.province,
+                province_club_merge_rejections.c.club_id,
+            ],
+            set_={"target_club_id": target, "created_at": _now()},
+        )
+    )
+    return {"success": True, "club_id": club_id, "target_club_id": target}
+
+
+@router.delete("/auto/split", summary="Cofnij rozdzielenie - automat znów scala klub")
+async def restore_auto_merge(province: str = Query(...), club_id: str = Query(...)):
+    from sqlalchemy import and_, delete
+
+    from app.db import database, province_club_merge_rejections
+
+    key = _key(province)
+    await database.execute(
+        delete(province_club_merge_rejections).where(
+            and_(
+                province_club_merge_rejections.c.province == key,
+                province_club_merge_rejections.c.club_id == _s(club_id),
+            )
+        )
+    )
+    return {"success": True, "club_id": _s(club_id)}
+
+
 @router.delete("/{budget_id}", summary="Rozłącz wspólny budżet - kluby wracają do osobnych sald")
 async def delete_budget(budget_id: int, province: str = Query(...)):
     """
@@ -350,7 +474,9 @@ async def delete_budget(budget_id: int, province: str = Query(...)):
 
     key = _key(province)
     # `databases` na asyncpg nie oddaje liczby usuniętych wierszy - sprawdzamy przed.
-    if not any(group["budget_id"] == budget_id for group in await budget_groups(key)):
+    if not any(
+        group["budget_id"] == budget_id for group in await budget_groups(key, include_auto=False)
+    ):
         raise HTTPException(404, "Nie ma takiego wspólnego budżetu - odśwież panel")
     await database.execute(
         delete(province_club_budgets).where(

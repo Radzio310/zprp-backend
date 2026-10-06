@@ -3,13 +3,20 @@
 Panel klubow od dawna umial oznaczyc klub jako nierozliczany przez okreg, ale
 ta informacja nie byla stosowana do listy wyplat sedziow. Ten modul jest jednym
 mostem pomiedzy tymi dwiema czesciami aplikacji. Nie liczy kwot: rozpoznaje
-wylacznie mecze klubow z wylaczonym rozliczaniem, a silnik rozliczen przelicza
-obie grupy osobno.
+mecze klubow z wylaczonym rozliczaniem (`match_keys`) i mecze zdjete z rozliczen
+przyciskiem „Nie obciazaj klubow" (`excluded_keys`), a silnik rozliczen
+przelicza grupy osobno.
+
+Decyzja uzytkownika z 06.10.2026: „Nie obciazaj klubow" znaczy „nikt u nas za
+ten mecz nie placi" - mecz wypada takze z wyplat okregu (sedzia widzi go
+w bloku „Poza rozliczeniem okregu", bez kwot). Gdy okreg ma placic sam, jest
+„Przenies koszt na okreg" (`district_payer`).
 """
 
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any, Iterable
 
 from sqlalchemy import and_, select
@@ -21,9 +28,15 @@ from app.db import (
     province_clubs,
     province_match_overrides,
     province_matches,
+    province_tournament_hosts,
 )
 from app.province_clubs_scrape import team_key
 from app.settlement_province import spellings
+
+#: Od tego dnia „Nie obciazaj klubow" zdejmuje mecz takze z wyplat okregu.
+#: Wczesniej przycisk znaczyl „okreg placi, klub nie" i tak rozliczono minione
+#: sezony - ich nie przepisujemy (ta sama granica co w `club_charges`).
+EXCLUDED_UNPAID_SINCE = date(2026, 9, 1)
 
 
 def _s(value: Any) -> str:
@@ -56,7 +69,7 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
     """
     seasons = [season for season in by_season if season]
     if not seasons:
-        return {"match_keys": set(), "clubs": []}
+        return {"match_keys": set(), "excluded_keys": set(), "clubs": []}
 
     rows = await database.fetch_all(
         select(province_club_teams).where(
@@ -109,6 +122,16 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
         for row in override_rows
     }
 
+    tournament_rows = await database.fetch_all(
+        select(province_tournament_hosts).where(province_tournament_hosts.c.province == province)
+    )
+    tournament_hosts = {
+        _s(row["tournament_key"]): C.MatchOverride(
+            team_id=_s(row["team_id"]), team_name=_s(row["team_name"])
+        )
+        for row in tournament_rows
+    }
+
     host_rows = await database.fetch_all(
         select(province_matches.c.match_id, province_matches.c.state_json).where(
             and_(
@@ -131,6 +154,7 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
         if swapped:
             swapped_matches.add(match_key)
 
+    club_keys: set[str] = set()
     excluded_keys: set[str] = set()
     details: dict[str, dict] = {}
     for season, matches in by_season.items():
@@ -145,14 +169,19 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             overrides=overrides,
             clubs=settings,
             key_of=team_key,
+            tournament_hosts=tournament_hosts,
         )
         for row in charges:
+            if row.status == C.EXCLUDED:
+                if (row.day or date.min) >= EXCLUDED_UNPAID_SINCE:
+                    excluded_keys.add(row.match_key)
+                continue
             # Mecz przeniesiony na OKRĘG jako płatnika (`district_payer`) ma
             # status `charged`, nie `club-off` - zostaje w rozliczeniu okręgu,
             # bo to okręg płaci sędziom. Zmienia się tylko, kto jest obciążony.
             if row.status != C.CLUB_OFF:
                 continue
-            excluded_keys.add(row.match_key)
+            club_keys.add(row.match_key)
             club_id = row.club_id
             item = details.setdefault(
                 club_id,
@@ -165,4 +194,8 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             )
             item["matches"] += 1
             item["amount"] = round(item["amount"] + row.amount, 2)
-    return {"match_keys": excluded_keys, "clubs": list(details.values())}
+    return {
+        "match_keys": club_keys,
+        "excluded_keys": excluded_keys,
+        "clubs": list(details.values()),
+    }

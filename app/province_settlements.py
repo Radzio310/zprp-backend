@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import and_, func, select
 
+from app import settlement_bombs as SB
 from app import settlement_cache as SC
 from app import settlement_engine as E
 from app import settlement_buckets as B
@@ -27,7 +28,9 @@ from app import judge_season_load as L
 from app.db import (
     central_rates,
     database,
+    match_bombs,
     okreg_rates,
+    province_module_config,
     province_judges,
     province_modules,
     province_match_overrides,
@@ -158,6 +161,32 @@ async def _judge_names(province: str) -> dict[str, str]:
     return await judge_names(province)
 
 
+async def _managed_prefixes(province: str) -> list[str]:
+    """II ligi powierzone okregowi: nadpisanie z panelu albo katalog (IIM4, IIK4)."""
+    from app.match_market_rules import managed_prefixes_for
+
+    row = await database.fetch_one(
+        select(province_module_config.c.managed_prefixes).where(
+            province_module_config.c.province == province
+        )
+    )
+    return managed_prefixes_for(province, row["managed_prefixes"] if row else None)
+
+
+async def _active_bombs() -> list[SB.BombRef]:
+    """Czynne bomby z Rejestru nieobecnosci - wszystkich okregow (tabela jest mala).
+
+    Okreg bomby to okreg AUTORA (jego komisja prowadzi rejestr), a zglosic
+    naszego sedziego moze ktos z innego okregu - dlatego nie filtrujemy tu
+    po okregu, tylko po sedzim w `settlement_bombs.match_bombs`.
+    """
+    rows = await database.fetch_all(select(match_bombs).where(match_bombs.c.status == "active"))
+    return [
+        SB.bomb_from_row(dict(row._mapping) if hasattr(row, "_mapping") else dict(row))
+        for row in rows
+    ]
+
+
 async def _assignments(
     province: str,
     *,
@@ -186,9 +215,13 @@ async def _assignments(
         )
     )
     triple_keys = {str(row["match_key"]) for row in marked}
+    # Boiskowi II ligi powierzonej okregowi (IIM4/IIK4) - od sezonu 2026/2027
+    # placi ich okreg (`settlement_rates.province_pays_field`, 06.10.2026).
+    managed = await _managed_prefixes(province)
 
     out: list[E.Assignment] = []
     for row in rows:
+        role = str(row["role"] or R.ROLE_FIELD)
         out.append(
             E.Assignment(
                 match_key=str(row["match_key"]),
@@ -207,6 +240,8 @@ async def _assignments(
                 distance_source=row["distance_source"],
                 approved=row["approved"],
                 triple_table=str(row["match_key"]) in triple_keys,
+                province_field=role == R.ROLE_FIELD
+                and R.province_pays_field(row["match_code"], managed, row["match_at"]),
             )
         )
     # Reczne mecze z rachunkiem (np. SPARING) dopisane z karty klubu - osobna
@@ -233,11 +268,20 @@ async def _base(province: str) -> dict:
 
     async def compute() -> dict:
         central_versions, province_versions = await _versions(province)
+        names = await _judge_names(province)
+        everything = await _assignments(province)
+        # Bomby z Rejestru nieobecnosci (06.10.2026): obsada z czynna bomba nie
+        # jest wyplacana ani doliczana klubowi. Odsiew TUTAJ, bo z tej bazy licza
+        # sie wszystkie zestawienia, PDF-y, „Moje rozliczenie", siatka miesiecy
+        # i panel klubow - jedno miejsce zamiast pieciu.
+        hits = SB.match_bombs(await _active_bombs(), everything, names=names)
+        payable, bombed = SB.split_bombed(everything, hits)
         return {
             "central_versions": central_versions,
             "province_versions": province_versions,
-            "names": await _judge_names(province),
-            "assignments": await _assignments(province),
+            "names": names,
+            "assignments": payable,
+            "bombed": bombed,
         }
 
     return await SC.remember("base", province, (), compute)
@@ -277,8 +321,10 @@ async def load_settlement(
     if judge_ids:
         wanted = {str(item) for item in judge_ids}
         assignments = [item for item in base["assignments"] if item.judge_id in wanted]
+        bombed = [pair for pair in base.get("bombed", []) if pair[0].judge_id in wanted]
     else:
         assignments = base["assignments"]
+        bombed = list(base.get("bombed", []))
     if extra:
         assignments = [*assignments, *extra]
     now = _now()
@@ -323,14 +369,15 @@ async def load_settlement(
     # Klub moze byc prowadzony w panelu, ale rozliczac obsade poza okregiem.
     # Najpierw rozpoznajemy takie mecze na pelnym wyliczeniu, potem liczymy obie
     # grupy ponownie. To wazne dla podatku miesiecznego i wspolnych dojazdow.
-    scope = await club_scope(
-        province,
-        season_of(date_from),
-        [match for entry in entries for match in entry.matches],
-    )
+    probe = [match for entry in entries for match in entry.matches]
+    scope = await club_scope(province, season_of(date_from), probe)
     outside_keys = scope["match_keys"]
+    # „Nie obciazaj klubow" = nikt u nas nie placi (06.10.2026): mecz wypada
+    # z wyplat okregu, a sedzia widzi go w „Poza rozliczeniem okregu".
+    excluded_keys = scope.get("excluded_keys") or set()
+    excluded = [match for match in probe if match.match_key in excluded_keys]
     outside_entries = []
-    if outside_keys:
+    if outside_keys or excluded_keys:
         common = dict(
             province=province,
             central_versions=central_versions,
@@ -343,11 +390,17 @@ async def load_settlement(
             names=names,
         )
         entries = E.settle_judges(
-            [item for item in assignments if item.match_key not in outside_keys], **common
+            [
+                item
+                for item in assignments
+                if item.match_key not in outside_keys and item.match_key not in excluded_keys
+            ],
+            **common,
         )
-        outside_entries = E.settle_judges(
-            [item for item in assignments if item.match_key in outside_keys], **common
-        )
+        if outside_keys:
+            outside_entries = E.settle_judges(
+                [item for item in assignments if item.match_key in outside_keys], **common
+            )
     # Obsady ZPRP liczymy ZAWSZE, niezaleznie od przelacznika: wylaczone musza
     # sie wytlumaczyc („1 mecz poza rozliczeniem okregu"), zamiast znikac bez
     # slowa, a przelacznik pokazuje, ile ich dojdzie.
@@ -370,6 +423,21 @@ async def load_settlement(
     if not period_id:
         await apply_splits(province, year, month, entries)
 
+    # Bomby z okresu i kary - po listach sedziowskich, bo kara schodzi z kwoty
+    # do wyplaty, ktora listy juz ustalily (`settlement_bombs`).
+    bomb_rows = _bomb_rows(
+        bombed,
+        province=province,
+        central_versions=central_versions,
+        province_versions=province_versions,
+        now=now,
+        date_from=date_from,
+        date_to=date_to,
+        include_future=include_future,
+        names=names,
+    )
+    penalties = _apply_penalties(entries, bomb_rows)
+
     return {
         "province": province,
         "period": {
@@ -389,6 +457,9 @@ async def load_settlement(
         "totals": E.totals_of(entries),
         "travel": E.travel_rows(entries),
         "zprp": zprp,
+        "excluded": excluded,
+        "bombs": bomb_rows,
+        "penalties": penalties,
         "outside_district": {
             "clubs": scope["clubs"],
             "entries": outside_entries,
@@ -396,6 +467,74 @@ async def load_settlement(
             "travel": E.travel_rows(outside_entries),
         },
     }
+
+
+def _bomb_rows(
+    bombed: list,
+    *,
+    province: str,
+    central_versions: list,
+    province_versions: list,
+    now: datetime,
+    date_from: date,
+    date_to: date,
+    include_future: bool,
+    names: Optional[dict[str, str]] = None,
+) -> list[dict]:
+    """
+    Obsady zdjete bomba w okresie - do oznaczenia meczu i do kary.
+
+    „Przepadlo" to kwota, ktora okreg zaplacilby za ten jeden mecz (ryczalt
+    i dojazd liczone jak samotny mecz - bez turnieju i bez podatku miesiaca).
+    Obsady rozliczane przez ZPRP nie byly pieniedzmi okregu - przepada 0 zl.
+    """
+    out: list[dict] = []
+    for assignment, bomb in bombed:
+        when = assignment.match_at.date() if assignment.match_at else None
+        if when is None or when < date_from or when > date_to:
+            continue
+        settled = E.settle_match(
+            assignment,
+            province=province,
+            central_versions=central_versions,
+            province_versions=province_versions,
+            now=now,
+        )
+        if settled.future and not include_future:
+            continue
+        zprp_reason = settled.zprp_reason
+        out.append(
+            {
+                "match_key": assignment.match_key,
+                "judge_id": assignment.judge_id,
+                "name": E.display_judge_name((names or {}).get(assignment.judge_id, "")),
+                "match_at": assignment.match_at.isoformat() if assignment.match_at else None,
+                "day": when.isoformat(),
+                "code": assignment.match_code,
+                "category": settled.category,
+                "role": assignment.role,
+                "city": assignment.city or assignment.hall,
+                "teams": assignment.teams,
+                "future": settled.future,
+                "reason": SB.REASON_BOMB,
+                "reason_label": SB.REASON_LABEL,
+                "kind": "bomb",
+                "bomb_id": bomb.bomb_id,
+                "bomb_source": bomb.source,
+                "bomb_note": bomb.note or None,
+                "bomb_created_at": bomb.created_at.isoformat() if bomb.created_at else None,
+                "penalty": bomb.penalty,
+                "lost_gross": 0.0 if zprp_reason else settled.gross,
+                "lost_travel": 0.0 if zprp_reason else settled.travel,
+            }
+        )
+    out.sort(key=lambda row: (row["match_at"] or "", row["match_key"]))
+    return out
+
+
+def _apply_penalties(entries: list, bomb_rows: list[dict]) -> dict[str, dict]:
+    """Kary za bomby na wpisach sedziow - regula w lisciu `settlement_bombs`."""
+    return SB.apply_penalties(entries, bomb_rows)
 
 
 async def cached_settlement(
@@ -469,6 +608,25 @@ def _match_json(match: E.SettledMatch) -> dict:
     }
 
 
+def _excluded_json(match: E.SettledMatch) -> dict:
+    """Mecz zdjety z rozliczen przyciskiem „Nie obciazaj klubow" - BEZ kwot."""
+    return {
+        "match_key": match.match_key,
+        "judge_id": match.judge_id,
+        "match_at": match.match_at.isoformat() if match.match_at else None,
+        "day": match.day.isoformat() if match.day else None,
+        "code": match.match_code,
+        "category": match.category,
+        "role": match.role,
+        "city": match.city or match.hall,
+        "teams": match.teams,
+        "future": match.future,
+        "reason": R.NOT_PAID_EXCLUDED,
+        "reason_label": R.ZPRP_REASONS.get(R.NOT_PAID_EXCLUDED, ""),
+        "kind": "excluded",
+    }
+
+
 def _zprp_json(match: E.ZprpMatch) -> dict:
     """Obsada rozliczana przez ZPRP - BEZ kwot, bo okreg ich nie wyplaca."""
     return {
@@ -484,6 +642,7 @@ def _zprp_json(match: E.ZprpMatch) -> dict:
         "future": match.future,
         "reason": match.reason,
         "reason_label": R.ZPRP_REASONS.get(match.reason, ""),
+        "kind": "zprp",
     }
 
 
@@ -512,6 +671,9 @@ def _entry_json(entry: E.JudgeSettlement, *, with_matches: bool) -> dict:
         "net": entry.net,
         "travel": entry.travel,
         "total": entry.total,
+        # Kara za bombe potracona w tym okresie i to, czego nie dalo sie potracic.
+        "penalty": entry.penalty,
+        "penalty_left": entry.penalty_left,
         "missing_distance": entry.missing_distance,
         "missing_rate": entry.missing_rate,
         "guessed_stage": entry.guessed_stage,
@@ -675,6 +837,13 @@ async def summary(
                 ],
             },
             "zprp": _zprp_summary(data["zprp"], included=include_zprp),
+            # Poza wyplata z innych powodow niz ZPRP (06.10.2026).
+            "not_paid": {
+                "excluded": len(data.get("excluded") or []),
+                "bombs": len(data.get("bombs") or []),
+                "penalty": round(sum(p["applied"] for p in (data.get("penalties") or {}).values()), 2),
+                "penalty_left": round(sum(p["left"] for p in (data.get("penalties") or {}).values()), 2),
+            },
             "document_number_hint": hint,
         }
 
@@ -778,7 +947,19 @@ async def _judge_payload(
         # Obsady ZPRP tego sedziego. Doliczone przelacznikiem siedza tez
         # w `entry.rows` ze znacznikiem `zprp_reason`; niedoliczone - tylko tu,
         # zeby ekran mogl powiedziec, czemu mecz nie ma kwoty.
-        "zprp": [_zprp_json(m) for m in data["zprp"] if m.judge_id == judge_id],
+        #
+        # 06.10.2026: ta sama lista niesie mecze, ktorych okreg nie wyplaca
+        # z innego powodu - zdjete „Nie obciazaj klubow" (`kind: "excluded"`)
+        # i zdjete bomba (`kind: "bomb"`, z kara). Starsze aplikacje pokazuja
+        # je wtedy w bloku „Poza rozliczeniem okregu" z wlasnym opisem, zamiast
+        # zgubic mecz bez slowa.
+        "zprp": [
+            *[_zprp_json(m) for m in data["zprp"] if m.judge_id == judge_id],
+            *[_excluded_json(m) for m in data.get("excluded") or [] if m.judge_id == judge_id],
+            *[row for row in data.get("bombs") or [] if row["judge_id"] == judge_id],
+        ],
+        "bombs": [row for row in data.get("bombs") or [] if row["judge_id"] == judge_id],
+        "penalty": (data.get("penalties") or {}).get(judge_id),
     }
 
 
@@ -930,9 +1111,10 @@ async def _club_paid_keys(
     central_versions: list,
     province_versions: list,
     now: datetime,
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     """
-    Mecze, ktore placi KLUB, a nie okreg - dla calej historii naraz.
+    Mecze, ktore placi KLUB, a nie okreg - dla calej historii naraz - oraz
+    mecze zdjete z rozliczen „Nie obciazaj klubow" (nikt u nas nie placi).
 
     ⚠ `club_scope` potrzebuje meczow PRZELICZONYCH (`SettledMatch`): rozpoznaje
     gospodarza po nazwie i wyjatkach z panelu, a surowa obsada nie ma ani dnia,
@@ -954,7 +1136,7 @@ async def _club_paid_keys(
     """
     days = [item.match_at.date() for item in assignments if item.match_at]
     if not days:
-        return set()
+        return set(), set()
     probe = E.settle_judges(
         assignments,
         province=province,
@@ -972,7 +1154,8 @@ async def _club_paid_keys(
             if match.day is None:
                 continue
             by_season.setdefault(season_of(match.day), []).append(match)
-    return (await club_scope_many(province, by_season))["match_keys"]
+    scope = await club_scope_many(province, by_season)
+    return scope["match_keys"], scope.get("excluded_keys") or set()
 
 
 def _merge_months(district: list[dict], club: list[dict]) -> list[dict]:
@@ -1059,9 +1242,10 @@ async def _months_rows(
     # PODZIAL WEDLUG TEGO, KTO PLACI - ta sama granica, co na ekranie miesiaca
     # (`load_settlement`). Kazda grupa liczy sie osobno, bo koszty uzyskania
     # i prog 200 zl ida od sumy miesiaca U DANEGO PLATNIKA.
-    club_paid = await _club_paid_keys(
+    club_paid, excluded = await _club_paid_keys(
         key, assignments, central_versions, province_versions, now
     )
+    not_district = club_paid | excluded
     common = dict(
         province=key,
         central_versions=central_versions,
@@ -1071,12 +1255,15 @@ async def _months_rows(
         include_zprp=include_zprp,
     )
 
-    rows = E.monthly_totals(
-        [item for item in assignments if item.match_key not in club_paid],
-        **common,
-    )
+    district = [item for item in assignments if item.match_key not in not_district]
+    rows = E.monthly_totals(district, **common)
     # Wydane listy sędziowskie: podatek każdej listy osobno (`_split_months`).
-    await _split_months(key, rows, assignments, club_paid, common, base["names"], judge_id)
+    await _split_months(key, rows, assignments, not_district, common, base["names"], judge_id)
+    # Kary za bomby - ten sam rachunek co ekran miesiaca (`_apply_penalties`).
+    bombed = [
+        pair for pair in base.get("bombed", []) if not judge_id or pair[0].judge_id == str(judge_id)
+    ]
+    _month_penalties(rows, district, bombed, common)
     if include_clubs and club_paid:
         rows = _merge_months(
             rows,
@@ -1086,6 +1273,36 @@ async def _months_rows(
             ),
         )
     return rows
+
+
+def _month_penalties(rows: list[dict], district: list, bombed: list, common: dict) -> None:
+    """
+    Kary za bomby w siatce miesiecy - kafel ma pokazac to, co ekran miesiaca.
+
+    Liczymy tylko miesiace z kara (zwykle zadnego), kazdy jednym przebiegiem
+    silnika: kara schodzi najwyzej do zera z netto sedziego w tym miesiacu.
+    """
+    if not bombed:
+        return
+    by_month: dict[tuple[int, int], list] = {}
+    for assignment, bomb in bombed:
+        if not bomb.penalty or assignment.match_at is None:
+            continue
+        day = assignment.match_at.date()
+        by_month.setdefault((day.year, day.month), []).append((assignment, bomb))
+    for row in rows:
+        pairs = by_month.get((row["year"], row["month"]))
+        if not pairs:
+            continue
+        start, end = month_range(row["year"], row["month"])
+        entries = E.settle_judges(district, date_from=start, date_to=end, **common)
+        fake_rows = [
+            {"judge_id": assignment.judge_id, "bomb_id": bomb.bomb_id, "penalty": bomb.penalty}
+            for assignment, bomb in pairs
+        ]
+        applied = sum(item["applied"] for item in _apply_penalties(entries, fake_rows).values())
+        row["penalty"] = round(applied, 2)
+        row["total"] = round(row["total"] - applied, 2)
 
 
 class ForecastMatch(BaseModel):
@@ -1172,6 +1389,7 @@ async def _forecast_assignments(
     book = VersionedDistanceIndex(content)
     national = await load_national_pairs()
 
+    managed = await _managed_prefixes(key)
     out: list[E.Assignment] = []
     for item in picked:
         km, source = None, "none"
@@ -1202,6 +1420,8 @@ async def _forecast_assignments(
                 series_text=item["series_text"],
                 distance_km=km,
                 distance_source=source,
+                province_field=item["role"] == R.ROLE_FIELD
+                and R.province_pays_field(item["code"], managed, item["match_at"]),
             )
         )
     return out

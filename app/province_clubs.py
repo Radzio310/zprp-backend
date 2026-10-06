@@ -318,6 +318,8 @@ async def _load_clubs(province: str, season: str, *, include_future: bool = Fals
     }
 
     hosts, guests, swapped_matches = await _match_sides(province)
+    from app.province_tournament_hosts import tournament_host_overrides
+
     charges = C.build_charges(
         matches,
         hosts=hosts,
@@ -330,6 +332,7 @@ async def _load_clubs(province: str, season: str, *, include_future: bool = Fals
         judge_names=names,
         key_of=team_key,
         district_label=DP.label(province, (settings.get(DP.DISTRICT_PAYER_ID) or {}).get("display_name")),
+        tournament_hosts=await tournament_host_overrides(province),
     )
     if manual_matches:
         charges.extend(await manual_charges_for(province, manual_matches, names))
@@ -409,6 +412,13 @@ def _charge_json(row: C.ChargeRow, province: str) -> dict:
         # wystawil dwoch, a drugiego klubowi nie liczymy.
         "own_table": row.own_table,
         "extra_table": row.extra_table,
+        # Turniej (dzien + hala) i skad wiemy, kto go placi (06.10.2026):
+        # "manual" wskazanie z panelu, "hall-city" druzyna z miasta hali,
+        # "same-club" jeden klub we wszystkich meczach, "unknown" czeka.
+        "hall": row.hall,
+        "tournament_key": row.tournament_key or None,
+        "tournament_size": row.tournament_size,
+        "tournament_host": row.tournament_host or None,
         "referees": [
             {
                 "judge_id": share.judge_id,
@@ -902,6 +912,10 @@ def _detail_payload(key: str, season: str, club_id: str, data: dict, groups: lis
             "members": member_rows,
             "mixed_settings": len({item["settles_via_district"] for item in member_rows}) > 1
             or len({item["table_by_club"] for item in member_rows}) > 1,
+            # Scalenie automatyczne (06.10.2026): cała grupa albo dołączone numery
+            # - przy nich panel pokazuje „Rozdziel".
+            "auto_merged": bool((group or {}).get("auto")),
+            "auto_member_ids": list((group or {}).get("auto_member_ids") or []),
         },
         "teams": [
             {**item, "charged": (per_team.get(item["team_id"]) or {}).get("charged", 0),

@@ -84,6 +84,17 @@
   .strong-col { background: #fff8e8 !important; font-weight: bold; color: #7a4d00; }
   .split-note { font-weight: normal; font-size: 7.2pt; color: #b07800; margin-top: .4mm; }
 
+  /* kary i nieobecności (06.10.2026) - czerwień wyraźna, ale nie krzykliwa */
+  .penalty-col { color: #b3261e; font-weight: bold; }
+  .penalty-left { font-weight: normal; font-size: 6.8pt; color: #b3261e; margin-top: .4mm; }
+  .bombs { margin-top: 4mm; page-break-inside: avoid; }
+  .bombs-title {
+    font-size: 8pt; font-weight: bold; color: #b3261e; letter-spacing: .4pt;
+    text-transform: uppercase; margin-bottom: 1.5mm;
+    border-left: 1.6mm solid #b3261e; padding-left: 2mm;
+  }
+  table.bombs-grid th { background: #8e1f19; border-color: #8e1f19; }
+
   /* wiersz sumy */
   tr.total td {
     border-top: 1.2pt solid #0B4F9E;
@@ -171,6 +182,9 @@
       <th>Koszt uzyskania 20%</th>
       <th>Kwota do opodatkowania</th>
       <th>Podatek 12%</th>
+      {%- if has_penalty %}
+      <th>Kara</th>
+      {%- endif %}
       <th>Razem do wypłaty</th>
     </tr>
   </thead>
@@ -188,7 +202,10 @@
       <td>{{ row.costs | money }}</td>
       <td>{{ row.taxable | money }}</td>
       <td>{{ row.tax | money }}</td>
-      <td class="strong-col">{{ row.net | money }}</td>
+      {%- if has_penalty %}
+      <td class="penalty-col">{% if row.penalty %}-{{ row.penalty | money }}{% if row.penalty_left %}<div class="penalty-left">do potrącenia jeszcze {{ row.penalty_left | money }}</div>{% endif %}{% endif %}</td>
+      {%- endif %}
+      <td class="strong-col">{{ row.payable | money }}</td>
     </tr>
     {% endfor %}
     <tr class="total">
@@ -199,10 +216,45 @@
       <td>{{ totals.costs | money }}</td>
       <td>{{ totals.taxable | money }}</td>
       <td>{{ totals.tax | money }}</td>
-      <td class="gold">{{ totals.net | money }}</td>
+      {%- if has_penalty %}
+      <td class="penalty-col">-{{ penalty_total | money }}</td>
+      {%- endif %}
+      <td class="gold">{{ payable_total | money }}</td>
     </tr>
   </tbody>
 </table>
+
+{% if bomb_rows %}
+<div class="bombs">
+  <div class="bombs-title">Nieobecności z Rejestru nieobecności &middot; mecze niewypłacone</div>
+  <table class="grid bombs-grid">
+    <thead>
+      <tr>
+        <th class="c">Lp</th>
+        <th class="l">Nazwisko i imię</th>
+        <th class="c">Data</th>
+        <th class="l">Mecz</th>
+        <th class="l">Rola</th>
+        <th>Nie wypłacono</th>
+        <th>Kara</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in bomb_rows %}
+      <tr>
+        <td class="c lp">{{ loop.index }}</td>
+        <td class="l name">{{ row.name }}</td>
+        <td class="c">{{ row.day }}</td>
+        <td class="l">{{ row.code }}{% if row.teams %} <span class="muted">{{ row.teams }}</span>{% endif %}</td>
+        <td class="l">{{ row.role }}</td>
+        <td>{{ row.lost | money }}</td>
+        <td class="penalty-col">{% if row.penalty %}-{{ row.penalty | money }}{% else %}-{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 
 <div class="words">
   <div class="label">Słownie do wypłaty</div>
@@ -227,6 +279,14 @@
   rachunkiem (koszty 20% tylko na liście powyżej 200 zł, podatek zaokrąglany na każdej liście).
   {%- endif %}
   &nbsp;&middot;&nbsp; Kwoty przejazdów rozliczane są odrębnie, Listą kosztów przejazdów.
+  {%- if bomb_rows %}
+  &nbsp;&middot;&nbsp; <b>Nieobecności</b> zgłoszone w Rejestrze nieobecności zdejmują sędziego z wypłaty za dany mecz
+  (ryczałt i dojazd).
+  {%- endif %}
+  {%- if has_penalty %}
+  &nbsp;&middot;&nbsp; <b>Kara</b> potrącana jest z kwoty do wypłaty po podatku - ekwiwalent brutto, koszty uzyskania
+  i podatek pozostają bez zmian.
+  {%- endif %}
   {%- if not include_zprp %}
   &nbsp;&middot;&nbsp; Zestawienie nie obejmuje obsad rozliczanych przez ZPRP: sędziów boiskowych
   i delegatów na meczach centralnych oraz stolików Mistrzostw Polski.
@@ -239,7 +299,7 @@
 {% if outside_rows %}
 <section class="outside-section">
   <div class="title" style="font-size:11.5pt">Kluby, które nie rozliczają się przez okręg</div>
-  <div class="subtitle">Część informacyjna — poniższe kwoty nie są doliczone do zestawienia ani sumy do wypłaty.</div>
+  <div class="subtitle">Część informacyjna - poniższe kwoty nie są doliczone do zestawienia ani sumy do wypłaty.</div>
   <div class="subtitle">{% for club in outside_clubs %}<b>{{ club.club_name }}</b> (spotkań: {{ club.matches }}){% if not loop.last %} &middot; {% endif %}{% endfor %}</div>
   <table class="grid">
     <thead><tr><th class="c">Lp</th><th class="l">Nazwisko i imię</th><th class="c">Mecze</th><th>Brutto</th><th>Netto</th><th>Przejazdy</th><th>Razem rozliczone</th></tr></thead>

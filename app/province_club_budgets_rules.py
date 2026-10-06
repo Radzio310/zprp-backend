@@ -159,6 +159,113 @@ def seed_plan(
     return plan
 
 
+#: Klub zastępczy z synchronizacji - drużyna, przy której ZPRP nie podał numeru
+#: klubu (`province_clubs_scrape.eligible_fallback_club_id`).
+FALLBACK_PREFIX = "eligible-team:"
+
+#: Człony nazwy, które odróżniają DRUŻYNY jednego klubu, a nie kluby:
+#: liczebniki rzymskie i krótkie numery („OSP Świętochłowice 1").
+_TEAM_MARKS = frozenset({"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"})
+
+
+def club_base_key(name_key: Any) -> str:
+    """
+    Nazwa klubu bez znacznika drużyny: „spr pogon 1945 ii zabrze" -> „spr pogon 1945 zabrze".
+
+    Dostaje KLUCZ nazwy (`province_clubs_scrape.team_key`). Rok w nazwie
+    („1945") zostaje - to część nazwy klubu, nie numer drużyny.
+    """
+    words = [
+        word
+        for word in _s(name_key).split()
+        if word not in _TEAM_MARKS and not (word.isdigit() and len(word) <= 2)
+    ]
+    return " ".join(words)
+
+
+def auto_merge_plan(
+    teams: Iterable[tuple[Any, Any]],
+    *,
+    key_of: Any,
+    taken: Iterable[str] = (),
+    rejected: Iterable[str] = (),
+) -> dict[str, str]:
+    """
+    Automatyczne scalenie: klub zastępczy -> klub z numerem ZPRP (decyzja z 06.10.2026).
+
+    Zgłoszenie: „pogonie się porozbijały" - drużyny „SPR Pogoń 1945 II Zabrze",
+    „... III Zabrze", „... Zabrze III" bez numeru klubu w ZPRP dostały po
+    klubie zastępczym i panel pokazywał pięć Pogoni. Klub zastępczy dołącza
+    do klubu z PRAWDZIWYM numerem, którego drużyna ma tę samą nazwę bez
+    znacznika drużyny (`club_base_key`) - tylko gdy kandydat jest JEDEN.
+
+    Nigdy nie łączymy dwóch prawdziwych numerów ZPRP (to robi człowiek
+    wspólnym budżetem). Pomijamy kluby już w ręcznym budżecie (`taken`)
+    i scalenia rozdzielone w panelu (`rejected`).
+    """
+    taken_set = {_s(club_id) for club_id in taken}
+    rejected_set = {_s(club_id) for club_id in rejected}
+    real: dict[str, set[str]] = {}
+    fallback: dict[str, set[str]] = {}
+    for club_id, name in teams:
+        club = _s(club_id)
+        base = club_base_key(key_of(name))
+        if not club or not base:
+            continue
+        if club.startswith(FALLBACK_PREFIX):
+            fallback.setdefault(club, set()).add(base)
+        elif club != "OKREG":
+            real.setdefault(base, set()).add(club)
+    plan: dict[str, str] = {}
+    for club, bases in fallback.items():
+        if club in taken_set or club in rejected_set:
+            continue
+        targets: set[str] = set()
+        for base in bases:
+            targets |= real.get(base, set())
+        if len(targets) == 1:
+            plan[club] = next(iter(targets))
+    return plan
+
+
+def with_auto_groups(
+    groups: list[dict[str, Any]], plan: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """
+    Budżety ręczne + scalenia automatyczne, jedna lista dla wszystkich odbiorców.
+
+    Klub docelowy w ręcznym budżecie - klub zastępczy dochodzi do TEGO budżetu.
+    Inaczej powstaje grupa automatyczna (`budget_id` None, `auto` True) z klubem
+    docelowym jako głównym. `auto_member_ids` mówi panelowi, które numery da się
+    rozdzielić jednym kliknięciem.
+    """
+    out = [dict(group, member_ids=list(group.get("member_ids") or [])) for group in groups]
+    owner = member_map(out)
+    autos: dict[str, dict[str, Any]] = {}
+    for fallback, target in sorted(plan.items()):
+        primary = owner.get(target)
+        if primary is not None:
+            group = next(g for g in out if _s(g.get("primary_club_id")) == primary)
+            if fallback not in group["member_ids"]:
+                group["member_ids"].append(fallback)
+                group.setdefault("auto_member_ids", []).append(fallback)
+            continue
+        group = autos.get(target)
+        if group is None:
+            group = {
+                "budget_id": None,
+                "name": None,
+                "primary_club_id": target,
+                "member_ids": [target],
+                "auto": True,
+                "auto_member_ids": [],
+            }
+            autos[target] = group
+        group["member_ids"].append(fallback)
+        group["auto_member_ids"].append(fallback)
+    return out + list(autos.values())
+
+
 def _money(value: Any) -> float:
     try:
         return float(value or 0)
@@ -174,6 +281,8 @@ def _solo(club: Mapping[str, Any]) -> dict[str, Any]:
         "member_ids": [club_id],
         "members": [{"club_id": club_id, "name": club.get("name") or club_id, "present": True}],
         "mixed_settings": False,
+        "auto_merged": False,
+        "auto_member_ids": [],
     }
 
 
@@ -262,6 +371,11 @@ def merge_budgets(
             "member_ids": member_ids,
             "members": members,
             "mixed_settings": len(settles_set) > 1 or len(table_set) > 1,
+            # Scalenie automatyczne (06.10.2026): cała grupa albo dołączone numery.
+            "auto_merged": bool(budget.get("auto")),
+            "auto_member_ids": [
+                club_id for club_id in (budget.get("auto_member_ids") or []) if club_id in member_ids
+            ],
         }
 
     for club_id, club in clubs.items():

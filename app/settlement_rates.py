@@ -253,6 +253,9 @@ ZPRP_FIELD = "zprp_field"
 ZPRP_DELEGATE = "zprp_delegate"
 ZPRP_MP_TABLE = "zprp_mp_table"
 ZPRP_OOM = "zprp_oom"
+#: Nie ZPRP, ale tez nie okreg: mecz zdjety z rozliczen w panelu klubow
+#: („Nie obciazaj klubow" - decyzja z 06.10.2026: nikt u nas za niego nie placi).
+NOT_PAID_EXCLUDED = "district_excluded"
 
 #: Opis powodu dla czlowieka - ten sam tekst w aplikacji, na webie i w PDF.
 ZPRP_REASONS: dict[str, str] = {
@@ -260,6 +263,7 @@ ZPRP_REASONS: dict[str, str] = {
     ZPRP_DELEGATE: "delegat na meczu obsadzanym przez ZPRP",
     ZPRP_MP_TABLE: "stolik na Mistrzostwach Polski, rozliczany osobno przez ZPRP",
     ZPRP_OOM: "Ogólnopolska Olimpiada Młodzieży, rozliczana przez ZPRP",
+    NOT_PAID_EXCLUDED: "mecz zdjęty z rozliczeń okręgu w panelu klubów - okręg go nie wypłaca",
 }
 
 #: Rozgrywki ZPRP bez stawki w zadnej tabeli (Superpuchar, mecze EHF) -
@@ -271,9 +275,41 @@ _ZPRP_ONLY_PREFIXES = ("SPM", "SPK", "EHF")
 _OOM_CODE = re.compile(r"(^|[^A-Z0-9])OOM[KM]?($|[^A-Z0-9])")
 
 
-def zprp_settlement_reason(code: Any, role: Any) -> Optional[str]:
+#: Od tego dnia boiskowych II ligi POWIERZONEJ okregowi (IIM4 i IIK4 na Slasku)
+#: placi okreg i obciaza nimi gospodarza - decyzja uzytkownika z 06.10.2026,
+#: z moca od poczatku sezonu 2026/2027. Wczesniejsze mecze zostaja, jak je
+#: rozliczono (obsada ZPRP), bo tamte sezony sa zamkniete.
+MANAGED_FIELD_SINCE = date(2026, 9, 1)
+
+
+def province_pays_field(code: Any, managed_prefixes: Iterable[Any], day: Any) -> bool:
+    """
+    Czy boiskowego TEGO meczu placi okreg, bo to II liga powierzona okregowi.
+
+    Lista powierzonych grup to ta sama lista, z ktorej korzysta Obsada i gielda
+    (`match_market_rules.managed_prefixes_for`: katalog albo nadpisanie z panelu).
+    Liczy sie wylacznie II liga („IIM4/1" przy „IIM4") - wyzsze ligi obsadza
+    i rozlicza zwiazek zawsze. Delegaci tej reguly nie dotyczy.
+    """
+    when = day.date() if isinstance(day, datetime) else day
+    if not isinstance(when, date) or when < MANAGED_FIELD_SINCE:
+        return False
+    head = str(code or "").strip().upper().split("/", 1)[0].strip()
+    if not head.startswith(("IIM", "IIK")):
+        return False
+    return any(
+        head.startswith(str(prefix or "").strip().upper())
+        for prefix in (managed_prefixes or ())
+        if str(prefix or "").strip()
+    )
+
+
+def zprp_settlement_reason(code: Any, role: Any, *, province_field: bool = False) -> Optional[str]:
     """
     Powod, dla ktorego te obsade rozlicza ZPRP, a nie okreg - albo None.
+
+    `province_field` - boiskowy II ligi powierzonej okregowi, ktorego od sezonu
+    2026/2027 placi okreg (`province_pays_field`, decyzja z 06.10.2026).
 
     Decyzja uzytkownika z 10.09.2026. Z rozliczenia okregu wypada wszystko,
     co obsadza ZPRP: boiskowi i delegaci na meczach centralnych (ligi od II
@@ -294,7 +330,7 @@ def zprp_settlement_reason(code: Any, role: Any) -> Optional[str]:
         return None
     role_text = str(role or "").strip()
     if role_text == ROLE_FIELD:
-        return ZPRP_FIELD
+        return None if province_field else ZPRP_FIELD
     if role_text == ROLE_DELEGATE:
         return ZPRP_DELEGATE
     if role_text == ROLE_TABLE and code_key(code).startswith("MP"):

@@ -82,6 +82,14 @@ WATCHED_TABLES = frozenset(
         # Podział puli sędziego na listy sędziowskie: wydane listy zmieniają
         # koszty, podatek i netto w zestawieniu miesiąca.
         "province_settlement_splits",
+        # 06.10.2026: bomby zdejmują sędziego z wypłaty (i niosą karę), ligi
+        # powierzone okręgowi decydują, kto płaci boiskowym II ligi, gospodarz
+        # turnieju - kto płaci za cały turniej, a cofnięte scalenia - który
+        # klub widzi panel.
+        "match_bombs",
+        "province_module_config",
+        "province_tournament_hosts",
+        "province_club_merge_rejections",
     }
 )
 
@@ -98,6 +106,8 @@ BASE_TABLES = frozenset(
         "okreg_rates",
         "province_match_overrides",
         "province_manual_charges",
+        "match_bombs",
+        "province_module_config",
     }
 )
 #: Rodzaje wyników, które zależą TYLKO od tabel faktów.

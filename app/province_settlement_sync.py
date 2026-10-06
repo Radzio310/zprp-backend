@@ -205,7 +205,18 @@ def _district_assignments(state: dict, judges: dict[str, dict]) -> list[dict]:
     return out
 
 
-async def _collect_district(province: str, judges: dict[str, dict]) -> list[dict]:
+async def _collect_district(
+    province: str, judges: dict[str, dict], own: Optional[set[str]] = None
+) -> list[dict]:
+    """
+    Obsady z terminarza okręgu.
+
+    ⚠ Terminarz trzyma też mecze z list NASZYCH sędziów, także w innych okręgach
+    (`own_prefixes_of`). Mecz rozgrywek innego okręgu („E/JmK/3" przy naszym
+    „S/") nie jest nasz: wchodzi tylko stolik, jako mecz spoza okręgu (klucz
+    „o:"), a boiskowy i delegat wypadają - jak w minionych sezonach
+    (`settlement_origin.foreign_district_match`, zgłoszenie z 06.10.2026).
+    """
     rows = await database.fetch_all(
         select(province_matches).where(
             and_(
@@ -231,17 +242,20 @@ async def _collect_district(province: str, judges: dict[str, dict]) -> list[dict
                 _s(state.get("ID_zespoly_gosc_ZespolNazwa")),
             ) if x
         )
+        foreign = O.foreign_district_match(code, own or ())
 
         for entry in _district_assignments(state, judges):
+            if foreign and entry["role"] != R.ROLE_TABLE:
+                continue
             collected.append({
-                "match_key": f"d:{match_id}",
+                "match_key": f"{'o' if foreign else 'd'}:{match_id}",
                 "judge_id": entry["judge_id"],
                 "season": _s(row["season"] or state.get("season")),
                 "match_at": when,
                 "match_code": code,
                 "role": entry["role"],
                 "level": R.match_level(code),
-                "origin": "district",
+                "origin": "outside" if foreign else "district",
                 "city": city,
                 "hall": hall,
                 "teams": teams,
@@ -847,13 +861,15 @@ async def recheck_past_seasons(province: str) -> list[str]:
 
 async def fix_history(province: str, *, own: Optional[set[str]] = None) -> dict:
     """
-    Obsady minionych sezonow zapisane regula sprzed 11.09.2026 - bez sieci.
+    Obsady „d:" meczow INNYCH okregow zapisane stara regula - bez sieci.
 
     Do 11.09.2026 kazdy mecz okregowy z listy sedziego minionego sezonu szedl
-    jako nasz, takze mecz INNEGO okregu („L/MłK/20" w rozliczeniu Slaska). Teraz
-    liczy sie jak w biezacym sezonie: stolik przechodzi na klucz „o:" (mecz spoza
-    okregu), boiskowy i delegat gasna. Werdykt daje `settlement_origin.history_fix`,
-    tu jest tylko zapis. Nie kasujemy - zgaszona obsada zostaje w historii.
+    jako nasz, takze mecz INNEGO okregu („L/MłK/20" w rozliczeniu Slaska), a do
+    06.10.2026 tak samo kazdy mecz terminarza BIEZACEGO sezonu („E/JmK/3"
+    z Piotrkowa u sedziego boiskowego). Teraz stolik przechodzi na klucz „o:"
+    (mecz spoza okregu), boiskowy i delegat gasna. Werdykt daje
+    `settlement_origin.history_fix`, tu jest tylko zapis. Nie kasujemy -
+    zgaszona obsada zostaje w historii.
 
     Idempotentne: drugie wywolanie nie ma juz czego poprawiac, wiec wola je kazde
     odswiezenie i start petli dobowej.
@@ -1064,7 +1080,7 @@ async def refresh_province(
             # Terminarz okregu tylko z sezonow tego przebiegu - reszta zostaje,
             # jak jest (patrz `_store`).
             district = [
-                row for row in await _collect_district(province, judges)
+                row for row in await _collect_district(province, judges, own)
                 if in_scope(row.get("match_at"), scope, current=current)
             ]
             district_ids = {row["match_key"].split(":", 1)[1] for row in district}

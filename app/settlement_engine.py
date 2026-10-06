@@ -66,6 +66,10 @@ class Assignment:
     fixed_gross: Optional[float] = None
     fixed_travel: Optional[float] = None
     fixed_km_rate: Optional[float] = None
+    #: Boiskowy II ligi powierzonej okregowi - placi go okreg, nie ZPRP
+    #: (`settlement_rates.province_pays_field`). Ustawia warstwa HTTP, bo lista
+    #: powierzonych lig siedzi w ustawieniach okregu.
+    province_field: bool = False
 
 
 def _zprp_reason(assignment: "Assignment") -> Optional[str]:
@@ -75,7 +79,9 @@ def _zprp_reason(assignment: "Assignment") -> Optional[str]:
     """
     if assignment.fixed_gross is not None:
         return None
-    return R.zprp_settlement_reason(assignment.match_code, assignment.role)
+    return R.zprp_settlement_reason(
+        assignment.match_code, assignment.role, province_field=assignment.province_field
+    )
 
 
 @dataclass
@@ -148,6 +154,10 @@ class JudgeSettlement:
     #: Podział na listy sędziowskie (`settlement_split_rules.list_badge`) -
     #: dokłada go `province_settlements.load_settlement`; silnik go nie liczy.
     split: Optional[dict] = None
+    #: Kara za bombę potrącona z wypłaty w tym okresie i reszta, której nie było
+    #: z czego potrącić (`settlement_bombs`). `total` jest już PO karze.
+    penalty: float = 0
+    penalty_left: float = 0
 
 
 def _is_future(when: Optional[datetime], now: datetime) -> bool:
@@ -372,7 +382,7 @@ def settle_match(
         stage=stage_hit[0] if stage_hit else None,
         stage_guessed=bool(stage_hit and not stage_hit[1]),
         status=status,
-        zprp_reason=R.zprp_settlement_reason(assignment.match_code, assignment.role),
+        zprp_reason=_zprp_reason(assignment),
         triple_table=triple,
     )
 
@@ -583,6 +593,7 @@ def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int | float]:
         "tax": sum(e.tax for e in entries),
         "net": money_sum(e.net for e in entries),
         "travel": round(sum(e.travel for e in entries), 2),
+        "penalty": money_sum(e.penalty for e in entries),
         "total": round(sum(e.total for e in entries), 2),
     }
 

@@ -32,6 +32,13 @@ from app.settlement_seasons import season_of
 #: go za nasz - jeden zabłąkany numer nie przypisze okręgowi cudzej ligi.
 MIN_OWN_MATCHES = 2
 
+#: ...i taką część meczów NAJCZĘSTSZEGO przedrostka. Terminarz okręgu to nie
+#: tylko nasz terminarz: monitor śledzi też mecze z list naszych sędziów, więc
+#: sędzia z Częstochowy z dwoma meczami juniorek w Piotrkowie („E/JmK/1",
+#: „E/JmK/3") robił z „E" nasz przedrostek (zgłoszenie z 06.10.2026). Własny
+#: przedrostek ma w terminarzu setki meczów, cudzy - pojedyncze.
+OWN_SHARE_OF_TOP = 0.25
+
 #: Werdykty `history_fix` dla obsady zapisanej stara reguła.
 KEEP = "keep"
 OUTSIDE = "outside"
@@ -43,13 +50,26 @@ _OWN_LEVELS = ("district", "cup")
 
 
 def own_prefixes(codes: Iterable[Any], *, min_matches: int = MIN_OWN_MATCHES) -> set[str]:
-    """Przedrostki numerów z terminarza okręgu: rozgrywki okręgowe i puchar wojewódzki."""
+    """
+    Przedrostki numerów z terminarza okręgu: rozgrywki okręgowe i puchar wojewódzki.
+
+    Przedrostek jest nasz, gdy stoi przy co najmniej `min_matches` meczach ORAZ
+    przy ćwierci tego, co ma przedrostek najczęstszy (`OWN_SHARE_OF_TOP`) -
+    patrz uwaga przy stałej.
+    """
     counts: Counter = Counter()
     for code in codes:
         prefix = prefix_of(code)
         if prefix and (R.match_level(code) == "district" or R.is_provincial_cup(code)):
             counts[prefix] += 1
-    return {prefix for prefix, count in counts.items() if count >= min_matches}
+    if not counts:
+        return set()
+    top = max(counts.values())
+    return {
+        prefix
+        for prefix, count in counts.items()
+        if count >= min_matches and count >= top * OWN_SHARE_OF_TOP
+    }
 
 
 def is_other_district(code: Any, own: Iterable[str]) -> bool:
@@ -73,6 +93,16 @@ def _district_level(code: Any) -> bool:
     warunku z minionych sezonów wchodziły same jego stoliki (poprawka 11.09.2026).
     """
     return R.match_level(code) in _OWN_LEVELS or R.is_provincial_cup(code)
+
+
+def foreign_district_match(code: Any, own: Iterable[str]) -> bool:
+    """
+    Mecz rozgrywek okręgowych INNEGO okręgu („E/JmK/3" przy naszym „S/").
+
+    Nie jest nasz w żadnym sezonie: liczy się jak mecz spoza okręgu, czyli tylko
+    stolik (decyzja z 11.09.2026, od 06.10.2026 także w bieżącym sezonie).
+    """
+    return _district_level(code) and is_other_district(code, own)
 
 
 def own_past_match(code: Any, own: Iterable[str]) -> bool:
@@ -102,19 +132,25 @@ def history_fix(
     own: Iterable[str],
 ) -> str:
     """
-    Co zrobić z obsada zapisana reguła sprzed 11.09.2026.
+    Co zrobić z obsada „d:" meczu INNEGO okręgu.
 
-    Dotyczy wyłącznie obsad „d:" z minionych sezonów, które przyszły z listy
-    sędziego (zapisane po końcu sezonu) - terminarz okręgu to nasza kaskada
-    i jego nie ruszamy. Mecz innego okręgu: stolik przechodzi na „o:" (jak
-    w bieżącym sezonie), każda inna rola gaśnie.
+    Mecz innego okręgu: stolik przechodzi na „o:" (mecz spoza okręgu), każda
+    inna rola gaśnie.
+
+    BIEŻĄCY sezon (06.10.2026): zawsze. Terminarz okręgu trzyma też mecze z list
+    naszych sędziów, więc „d:" nie znaczy tu „obsadza nas okręg" - sędzia
+    boiskowy meczu juniorek w Piotrkowie dostawał go od nas jak własny.
+
+    MINIONE sezony: jak dotąd tylko obsady, które przyszły z listy sędziego
+    (zapisane po końcu sezonu). Tamte sezony są rozliczone i zamknięte - ich
+    terminarza nie ruszamy.
     """
     if not str(match_key or "").startswith("d:"):
         return KEEP
-    if not season or not current or season >= current:
+    if not season or not current:
         return KEEP
-    if not collected_after_season(first_seen, season):
+    if not foreign_district_match(match_code, own):
         return KEEP
-    if not _district_level(match_code) or not is_other_district(match_code, own):
+    if season < current and not collected_after_season(first_seen, season):
         return KEEP
     return OUTSIDE if str(role or "").strip() == R.ROLE_TABLE else DROP
