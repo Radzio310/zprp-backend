@@ -51,8 +51,8 @@ def test_kazdy_odczyt_podzialu_zna_okres():
     assert calls, "brak odczytów podziału"
     for call in calls:
         assert "period_id" in call, call
-    # Zapis szkicu i wydania trafia w nowy klucz.
-    assert SPLITS.count("index_elements=KEY_COLUMNS") == 2
+    # Zapis podziału trafia w nowy klucz (od 06.10.2026 bez osobnego wydania).
+    assert SPLITS.count("index_elements=KEY_COLUMNS") == 1
     assert "T.c.period_id, T.c.judge_id]" in SPLITS
 
 
@@ -65,5 +65,3 @@ def test_lista_okresu_nosi_daty_okresu():
     body = SPLITS[SPLITS.index("async def _period(") :][:1200]
     assert "settlement_range" in body
     assert "strftime('%d.%m.%Y')" in body
-    # Wpis w księdze dostaje początek okresu, nie pierwszy dzień miesiąca.
-    assert 'date_from=date.fromisoformat(snapshot["period"]["from"])' in SPLITS

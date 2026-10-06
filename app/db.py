@@ -4357,6 +4357,14 @@ from app.assignment_role_tables import define_tables as _define_role_tables
 from app.settlement_split_tables import define_tables as _define_split_tables
 (province_settlement_splits,) = _define_split_tables(metadata)
 
+# Rejestr oficjalnych dokumentów rozliczeń (06.10.2026): numeracja ciągła
+# w roku, szkice poza rejestrem - schemat w osobnym module.
+from app.settlement_register_tables import define_tables as _define_register_tables
+(
+    province_settlement_register,
+    province_settlement_register_settings,
+) = _define_register_tables(metadata)
+
 # Ogólnopolska tabela odległości zasilana wyłącznie ryczałtami PDF ZPRP.
 from app.national_distance_tables import define_tables as _define_national_distance_tables
 (
@@ -4611,6 +4619,17 @@ with engine.connect() as _conn:
         text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_province_settlement_splits_period_key "
             "ON province_settlement_splits (province, period_year, period_month, period_id, judge_id)"
+        )
+    )
+    # Listy sędziowskie z numerami zniknęły (06.10.2026): podział dzieli pulę
+    # na części, a numer dostaje dopiero oficjalne Zestawienie z Rejestru.
+    # Wydane podziały wracają do zwykłych zapisanych (części zostają), a stare
+    # numery LS przestają cokolwiek blokować. Idempotentne - wydań już nie ma.
+    _conn.execute(
+        text(
+            "UPDATE province_settlement_splits SET status = 'draft', numbers_json = '[]', "
+            "document_ids_json = '[]', snapshot_json = '{}', rev = rev + 1 "
+            "WHERE status = 'issued'"
         )
     )
     # Odswiezanie danych okregu sezonami: znak zycia i zakres przebiegu.

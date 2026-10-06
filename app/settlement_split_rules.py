@@ -20,8 +20,14 @@ ZASADY (decyzje użytkownika):
     w `settlement_rates._tax_parts` (art. 63 ordynacji). Dlatego netto
     z podziałem może się różnić od netto bez podziału - ekran pokazuje różnicę
     przed zapisem.
-  - Zestawienie miesiąca zostawia sędziego jednym wierszem z pełnym brutto,
-    a koszty, podatek i netto są SUMĄ list (`applied_values`).
+  - Rozliczenie sędziego (ekran, aplikacja) ma koszty, podatek i netto jako
+    SUMĘ list (`applied_values`).
+
+OD 06.10.2026 listy nie mają własnych numerów - to CZĘŚCI puli. Zestawienie
+bierze wybrane części wybranych sędziów i każda część to osobny wiersz
+(`list_badge` -> `parts`). Podział obowiązuje od zapisu, o ile jest kompletny
+(`split_state`); stan „issued" został tylko w danych sprzed tej zmiany
+i migracja w `app/db.py` zamienia go na zwykły zapisany podział.
 """
 
 from __future__ import annotations
@@ -36,15 +42,12 @@ from app.settlement_money import money, money_sum
 LETTERS = "ABCDEFGH"
 MAX_LISTS = len(LETTERS)
 
+#: Zapisany podział (nazwa z czasów szkiców - zostaje, bo stoi w danych).
 STATUS_DRAFT = "draft"
+#: Wydane listy z numerami - tylko dane sprzed 06.10.2026 (migracja w db.py).
 STATUS_ISSUED = "issued"
 STATUS_VOID = "void"
 STATUSES = (STATUS_DRAFT, STATUS_ISSUED, STATUS_VOID)
-
-#: Rodzaj dokumentu w księdze `province_settlement_documents`.
-DOCUMENT_KIND = "lista"
-#: Znacznik unieważnionego numeru w księdze - numer zostaje, nie wraca do puli.
-DOCUMENT_VOID = "anulowana"
 
 
 def _cents(value: Any) -> int:
@@ -353,6 +356,11 @@ def issued_state(snapshot: Optional[list[dict]], lists: list[dict], matches: lis
     return {"current": not reasons, "reasons": reasons, "calc": calc}
 
 
+def split_state(lists: list[dict], matches: list[dict]) -> dict:
+    """Czy zapisany podział obowiązuje: kompletny i zgodny z dzisiejszą pulą."""
+    return issued_state(None, lists, matches)
+
+
 def numbers_label(numbers: Iterable[str]) -> str:
     """
     „SL/09/2026/4-6" dla kolejnych numerów z jednego miesiąca, inaczej po
@@ -374,9 +382,32 @@ def numbers_label(numbers: Iterable[str]) -> str:
 
 
 def list_badge(status: str, lists: list[dict], numbers: list[str], state: Optional[dict]) -> dict:
-    """Krótka informacja do wiersza sędziego: „3 listy", szkic albo nieaktualne."""
+    """
+    Krótka informacja do wiersza sędziego: „3 części" albo nieaktualne.
+
+    `parts` - kwoty każdej części, tylko gdy podział obowiązuje: z nich
+    ekran robi wybór części, a Zestawienie swoje wiersze.
+    """
     count = len(lists)
+    parts = []
+    if state and state.get("current"):
+        for item in state["calc"]["lists"]:
+            parts.append(
+                {
+                    "letter": item["letter"],
+                    "match_keys": list(item["match_keys"]),
+                    "match_count": item["match_count"],
+                    "gross": item["gross"],
+                    "costs": item["costs"],
+                    "taxable": item["taxable"],
+                    "tax": item["tax"],
+                    "net": item["net"],
+                    "travel": item["travel"],
+                    "total": item["total"],
+                }
+            )
     return {
+        "parts": parts,
         "status": status,
         "lists": count,
         "numbers": list(numbers or []),

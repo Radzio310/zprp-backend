@@ -21,12 +21,16 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import insert, select
+from sqlalchemy import select, text
 
 from app import settlement_rates as R
+from app import settlement_register_rules as G
+from app.deps import get_optional_jwt_payload
+from app.province_panel_access import PANEL_SETTLEMENTS
+from app.province_panel_guard import ensure_panel_write
 from app.national_lookup_rules import NATIONAL_FOOTNOTE, SOURCE_NATIONAL as NATIONAL_SOURCE
 from app.db import database, province_settlement_documents
 from app.province_settlement_sync import module_enabled
@@ -39,6 +43,7 @@ from app.province_settlements import (
 from app.settlement_province import display
 from app.settlement_engine import display_judge_name
 from app.settlement_pdf_groups import group_by_judge
+from app.settlement_money import money as round2
 from app.settlement_words import amount_in_words, money, number
 
 logger = logging.getLogger(__name__)
@@ -159,68 +164,10 @@ def _to_pdf(html: str, base_name: str, filename: str) -> dict:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-async def _reserve_number(
-    province: str,
-    *,
-    kind: str,
-    year: int,
-    month: int,
-    judge_ids: list[str],
-    include_future: bool,
-    totals: dict,
-    created_by: Optional[str],
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
-) -> str:
-    """Numer zapada dopiero tutaj - po tym, jak plik faktycznie powstal."""
-    row = await database.fetch_one(
-        select(province_settlement_documents.c.seq)
-        .where(province_settlement_documents.c.province == province)
-        .where(province_settlement_documents.c.kind == kind)
-        .where(province_settlement_documents.c.period_year == year)
-        .where(province_settlement_documents.c.period_month == month)
-        .order_by(province_settlement_documents.c.seq.desc())
-        .limit(1)
-    )
-    seq = int(row["seq"]) + 1 if row else 1
-    number_text = f"{province_short(province)}/{month:02d}/{year}/{seq}"
-    if date_from is None or date_to is None:
-        date_from, date_to = month_range(year, month)
-
-    await database.execute(
-        insert(province_settlement_documents).values(
-            province=province,
-            kind=kind,
-            period_year=year,
-            period_month=month,
-            seq=seq,
-            number=number_text,
-            date_from=date_from,
-            date_to=date_to,
-            include_future=include_future,
-            judge_ids=judge_ids,
-            totals_json=totals,
-            created_by=created_by,
-        )
-    )
-    return number_text
-
-
 def _pl_date(value: Optional[str]) -> str:
     """„2026-10-04" -> „04.10.2026"."""
     text = str(value or "")
     return f"{text[8:10]}.{text[5:7]}.{text[0:4]}" if len(text) >= 10 else "-"
-
-
-def _split_note(split: Optional[dict]) -> str:
-    """Dopisek pod nazwiskiem w zestawieniu: „wypłata listami SL/09/2026/4-6"."""
-    if not split or split.get("status") != "issued" or not split.get("label"):
-        return ""
-    if split.get("current"):
-        return f"wypłata listami {split['label']}"
-    # Listy wydane, ale miesiąc się pod nimi zmienił - kwoty w wierszu są bez
-    # podziału i dokument mówi to wprost.
-    return f"listy {split['label']} nieaktualne - wiersz liczony bez podziału"
 
 
 class PdfRequest(BaseModel):
@@ -234,13 +181,228 @@ class PdfRequest(BaseModel):
     judge_ids: list[str] = []
     created_by: Optional[str] = None
     period_id: Optional[str] = None
+    #: Szkic (False) nie zuzywa numeru i nie trafia do rejestru. Oficjalny
+    #: dostaje numer ciagly w roku i zajmuje swoje pozycje (06.10.2026).
+    official: bool = False
+    #: Numer kolejny wpisany recznie przed wydaniem; brak = podpowiedz rejestru.
+    seq: Optional[int] = None
+    #: Czesci puli sedziow z podzialem: {judge_id: ["A"]}. Sedzia, ktorego tu
+    #: nie ma, idzie ze wszystkimi czesciami; pusta lista = bez tego sedziego.
+    parts: dict[str, list[str]] = {}
 
 
-@router.post("/zestawienie", summary="PDF: zestawienie ekwiwalentów sędziowskich")
-async def zestawienie_pdf(payload: PdfRequest):
+#: Szablon kazdego rodzaju dokumentu z rejestru.
+TEMPLATES = {G.ZESTAWIENIE: "okreg_zestawienie.html", G.PRZEJAZDY: "okreg_przejazdy.html"}
+
+#: Napis w miejscu numeru na szkicu.
+DRAFT_NUMBER = "SZKIC"
+
+
+def render_kind(province: str, kind: str, context: dict) -> dict:
+    """
+    PDF z kontekstu szablonu - wspolne dla wydania i ponownego pobrania
+    z rejestru (`province_settlement_register`), zeby duplikat byl tym samym
+    papierem. Logo dokladamy tutaj, bo nie trzymamy go w bazie.
+    """
+    html = _render(TEMPLATES[kind], {**context, "logo": _province_logo_b64(province)})
+    number = str(context.get("document_number") or DRAFT_NUMBER)
+    if context.get("draft"):
+        filename = f"{kind}_SZKIC_{context.get('file_period') or ''}.pdf".replace("__", "_")
+    else:
+        filename = f"{kind}_{number.replace('/', '_')}.pdf"
+    return {"filename": filename, **_to_pdf(html, kind, filename)}
+
+
+def _period_info(payload: PdfRequest, data: dict) -> dict:
+    date_from = date.fromisoformat(data["period"]["from"])
+    date_to = date.fromisoformat(data["period"]["to"])
+    label = (
+        f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+        if payload.period_id
+        else _period_label(payload.year, payload.month, date_to, include_future=payload.include_future)
+    )
+    return {
+        "year": payload.year,
+        "month": payload.month,
+        "id": (payload.period_id or "").strip().lower() or None,
+        "label": label,
+        "from": date_from.isoformat(),
+        "to": date_to.isoformat(),
+    }
+
+
+async def _issue(
+    province: str,
+    kind: str,
+    payload: PdfRequest,
+    period: dict,
+    candidates: list[dict],
+    build,
+) -> dict:
+    """
+    Szkic albo oficjalny dokument z tych samych pozycji.
+
+    `candidates` - pozycje dokumentu w kolejnosci ({judge_id, part, ...}),
+    `build(items, number, draft)` -> (kontekst szablonu, sumy do rejestru).
+
+    Szkic bierze wszystko, a pozycje juz wydane oznacza (`taken_by`). Oficjalny
+    pomija pozycje zajete na innych oficjalnych dokumentach okresu i wydaje
+    reszte pod blokada - dwa wydania naraz nie wezma ani tego samego numeru,
+    ani tej samej czesci. PDF powstaje PRZED wpisem do rejestru: nieudany
+    wydruk cofa transakcje i numer zostaje wolny.
+    """
+    from app import province_settlement_register as REG
+
+    pid = period["id"] or ""
+    if not payload.official:
+        taken = await REG.period_taken(province, kind, period["year"], period["month"], pid)
+        items, _ = G.select_items(candidates, taken, skip_taken=False)
+        if not items:
+            raise HTTPException(400, "Nie wybrano żadnej pozycji do dokumentu.")
+        context, _totals = build(items, DRAFT_NUMBER, True)
+        result = render_kind(province, kind, context)
+        return {
+            "success": True,
+            "official": False,
+            "number": DRAFT_NUMBER,
+            "taken": [
+                {"judge_id": i["judge_id"], "part": i.get("part") or "", "number": i["taken_by"]}
+                for i in items
+                if i.get("taken_by")
+            ],
+            **result,
+        }
+
+    async with database.transaction():
+        await database.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))").bindparams(k=REG.issue_lock(province, kind))
+        )
+        taken = await REG.period_taken(province, kind, period["year"], period["month"], pid)
+        items, skipped = G.select_items(candidates, taken, skip_taken=True)
+        if not items:
+            numbers = sorted({s["taken_by"] for s in skipped})
+            raise HTTPException(
+                409,
+                "Wszystkie wybrane pozycje są już na oficjalnych dokumentach"
+                + (f" ({', '.join(numbers)})" if numbers else "")
+                + " - nie ma czego wydać.",
+            )
+        used = await REG.used_seqs(province, kind, period["year"])
+        seq = payload.seq or G.suggest_seq(used, await REG.start_after(province, kind, period["year"]))
+        problem = G.seq_problem(seq, used)
+        if problem:
+            raise HTTPException(409, problem)
+        number = G.number_text(province_short(province), period["year"], period["month"], int(seq))
+        context, totals = build(items, number, False)
+        result = render_kind(province, kind, context)
+        doc_id = await REG.insert_document(
+            province,
+            kind=kind,
+            seq=int(seq),
+            number=number,
+            period=period,
+            include_future=payload.include_future,
+            include_zprp=payload.include_zprp,
+            items=[_register_item(i) for i in items],
+            totals=totals,
+            context=context,
+            created_by=payload.created_by,
+        )
+    return {
+        "success": True,
+        "official": True,
+        "id": doc_id,
+        "number": number,
+        "skipped": [
+            {
+                "judge_id": i["judge_id"],
+                "name": i.get("name"),
+                "part": i.get("part") or "",
+                "number": i["taken_by"],
+            }
+            for i in skipped
+        ],
+        **result,
+    }
+
+
+def _register_item(item: dict) -> dict:
+    """Pozycja w rejestrze - tyle, ile trzeba do zajetosci i do podgladu."""
+    keep = ("judge_id", "name", "part", "part_of", "matches", "gross", "net", "payable", "amount", "km")
+    return {key: item.get(key) for key in keep if key in item}
+
+
+def _zestawienie_candidates(entries: list, parts: dict[str, list[str]]) -> list[dict]:
+    """
+    Wiersze zestawienia: sedzia bez podzialu jednym wierszem, sedzia
+    z obowiazujacym podzialem - wierszem na kazda WYBRANA czesc (kazda czesc
+    to osobny rachunek: koszty, podatek, netto).
+    """
+    wanted = {str(k): v for k, v in (parts or {}).items()}
+    out: list[dict] = []
+    for e in entries:
+        name = display_judge_name(e.judge_name)
+        split_parts = list((e.split or {}).get("parts") or [])
+        if not split_parts:
+            out.append(
+                {
+                    "judge_id": e.judge_id,
+                    "name": name,
+                    "part": G.WHOLE,
+                    "part_of": 0,
+                    "matches": e.match_count,
+                    "future": e.future_count,
+                    "gross": e.gross,
+                    "costs": e.costs,
+                    "taxable": e.taxable,
+                    "tax": e.tax,
+                    "net": e.net,
+                    "penalty": e.penalty,
+                    "penalty_left": e.penalty_left,
+                    "payable": round(e.net - e.penalty, 2),
+                }
+            )
+            continue
+        letters = G.wanted_parts(
+            [p["letter"] for p in split_parts], wanted.get(e.judge_id)
+        )
+        penalties = G.allocate_penalty(split_parts, e.penalty)
+        future_keys = {m.match_key for m in e.matches if m.future}
+        for part in split_parts:
+            letter = part["letter"]
+            if letter not in letters:
+                continue
+            penalty = penalties.get(letter, 0.0)
+            out.append(
+                {
+                    "judge_id": e.judge_id,
+                    "name": name,
+                    "part": letter,
+                    "part_of": len(split_parts),
+                    "matches": part["match_count"],
+                    "future": sum(1 for k in part.get("match_keys") or [] if k in future_keys),
+                    "gross": part["gross"],
+                    "costs": part["costs"],
+                    "taxable": part["taxable"],
+                    "tax": part["tax"],
+                    "net": part["net"],
+                    "penalty": penalty,
+                    "penalty_left": e.penalty_left if letter == split_parts[0]["letter"] else 0,
+                    "payable": round(part["net"] - penalty, 2),
+                }
+            )
+    return out
+
+
+@router.post("/zestawienie", summary="PDF: zestawienie ekwiwalentów sędziowskich (szkic albo oficjalne)")
+async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_optional_jwt_payload)):
     province = require_province(payload.province)
     if not await module_enabled(province, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    if payload.official:
+        await ensure_panel_write(
+            jwt, province=province, panel=PANEL_SETTLEMENTS, action="Wydanie oficjalnego zestawienia"
+        )
 
     data = await load_settlement(
         province,
@@ -251,45 +413,41 @@ async def zestawienie_pdf(payload: PdfRequest):
         judge_ids=payload.judge_ids or None,
         period_id=payload.period_id,
     )
-    entries = data["entries"]
-    totals = data["totals"]
+    period = _period_info(payload, data)
     outside = data["outside_district"]
-    date_from = date.fromisoformat(data["period"]["from"])
-    date_to = date.fromisoformat(data["period"]["to"])
-    # Kary za bomby (06.10.2026): „Razem do wypłaty" jest PO karze, a kara
-    # stoi w osobnej kolumnie - tylko gdy ktokolwiek ją ma.
-    penalty_total = round(float(totals.get("penalty") or 0), 2)
-    payable_total = round(float(totals["net"]) - penalty_total, 2)
     bombs = data.get("bombs") or []
+    candidates = _zestawienie_candidates(data["entries"], payload.parts)
 
-    number_text = await _reserve_number(
-        province,
-        kind="zestawienie",
-        year=payload.year,
-        month=payload.month,
-        judge_ids=[e.judge_id for e in entries],
-        include_future=payload.include_future,
-        # Znacznik przelacznika jedzie w sumach - tabela dokumentow nie ma na
-        # niego kolumny, a `create_all` nie dopisuje kolumn do istniejacej tabeli.
-        totals={**totals, "include_zprp": payload.include_zprp},
-        created_by=payload.created_by,
-        date_from=date_from,
-        date_to=date_to,
-    )
-
-    org = _org(province)
-    html = _render(
-        "okreg_zestawienie.html",
-        {
-            "logo": _province_logo_b64(province),
-            "org_name": org["name"],
-            "org_address": org["address"],
-            "document_number": number_text,
-            "period_label": (
-                f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-                if payload.period_id
-                else _period_label(payload.year, payload.month, date_to, include_future=payload.include_future)
-            ),
+    def build(items: list[dict], number: str, draft: bool) -> tuple[dict, dict]:
+        judges = {item["judge_id"] for item in items}
+        rows = [
+            {
+                **item,
+                "split_note": G.part_label(item.get("part") or "", item.get("part_of") or 0),
+                "split_applied": bool(item.get("part")),
+                # Na szkicu: pozycja jest juz na oficjalnym dokumencie.
+                "taken_note": f"już na {item['taken_by']}" if draft and item.get("taken_by") else "",
+            }
+            for item in items
+        ]
+        totals = {
+            "judges": len(judges),
+            "matches": sum(int(r["matches"] or 0) for r in rows),
+            "gross": round2(sum(float(r["gross"] or 0) for r in rows)),
+            "costs": round2(sum(float(r["costs"] or 0) for r in rows)),
+            "taxable": round2(sum(float(r["taxable"] or 0) for r in rows)),
+            "tax": sum(int(r["tax"] or 0) for r in rows),
+            "net": round2(sum(float(r["net"] or 0) for r in rows)),
+        }
+        penalty_total = round2(sum(float(r["penalty"] or 0) for r in rows))
+        payable_total = round2(totals["net"] - penalty_total)
+        context = {
+            "draft": draft,
+            "file_period": f"{payload.month:02d}_{payload.year}",
+            "org_name": _org(province)["name"],
+            "org_address": _org(province)["address"],
+            "document_number": number,
+            "period_label": period["label"],
             "generated_at": datetime.now(timezone.utc).strftime("%d.%m.%Y"),
             "include_future": payload.include_future,
             "include_zprp": payload.include_zprp,
@@ -297,29 +455,11 @@ async def zestawienie_pdf(payload: PdfRequest):
             "judges_word": _plural(totals["judges"], "sędzia", "sędziów", "sędziów"),
             "matches_count": totals["matches"],
             "matches_word": _plural(totals["matches"], "mecz", "mecze", "meczów"),
-            "rows": [
-                {
-                    "judge_id": e.judge_id,
-                    "name": display_judge_name(e.judge_name),
-                    "matches": e.match_count,
-                    "future": e.future_count if payload.include_future else 0,
-                    "gross": e.gross,
-                    "costs": e.costs,
-                    "taxable": e.taxable,
-                    "tax": e.tax,
-                    "net": e.net,
-                    "penalty": e.penalty,
-                    "penalty_left": e.penalty_left,
-                    "payable": round(e.net - e.penalty, 2),
-                    "split_note": _split_note(e.split),
-                    "split_applied": bool(e.split and e.split.get("current")),
-                }
-                for e in entries
-            ],
+            "rows": rows,
             "has_penalty": penalty_total > 0,
             "penalty_total": penalty_total,
             "payable_total": payable_total,
-            # Nieobecności z Rejestru: mecz zdjęty z wypłaty (i ewentualna kara).
+            # Nieobecnosci z Rejestru: mecz zdjety z wyplaty (i ewentualna kara).
             "bomb_rows": [
                 {
                     "name": row.get("name") or row["judge_id"],
@@ -331,9 +471,10 @@ async def zestawienie_pdf(payload: PdfRequest):
                     "penalty": float(row.get("penalty") or 0),
                 }
                 for row in bombs
+                if row["judge_id"] in judges
             ],
-            # Przypis pod tabelą - tylko gdy ktoś ma wydane listy sędziowskie.
-            "split_rows": sum(1 for e in entries if e.split and e.split.get("current")),
+            # Przypis pod tabela - tylko gdy ktos jest wyplacany w czesciach.
+            "split_rows": sum(1 for r in rows if r["split_applied"]),
             "totals": totals,
             "total_in_words": amount_in_words(payable_total),
             "outside_rows": [
@@ -341,21 +482,26 @@ async def zestawienie_pdf(payload: PdfRequest):
                  "matches": e.match_count, "gross": e.gross, "net": e.net,
                  "travel": e.travel, "total": e.total}
                 for e in outside["entries"]
+                if e.judge_id in judges
             ],
             "outside_totals": outside["totals"],
             "outside_clubs": outside["clubs"],
-        },
-    )
+        }
+        register_totals = {**totals, "penalty": penalty_total, "payable": payable_total}
+        return context, register_totals
 
-    result = _to_pdf(html, "zestawienie", f"zestawienie_{number_text.replace('/', '_')}.pdf")
-    return {"success": True, "number": number_text, **result}
+    return await _issue(province, G.ZESTAWIENIE, payload, period, candidates, build)
 
 
-@router.post("/przejazdy", summary="PDF: lista kosztów przejazdów")
-async def przejazdy_pdf(payload: PdfRequest):
+@router.post("/przejazdy", summary="PDF: lista kosztów przejazdów (szkic albo oficjalna)")
+async def przejazdy_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_optional_jwt_payload)):
     province = require_province(payload.province)
     if not await module_enabled(province, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    if payload.official:
+        await ensure_panel_write(
+            jwt, province=province, panel=PANEL_SETTLEMENTS, action="Wydanie oficjalnej listy przejazdów"
+        )
 
     data = await load_settlement(
         province,
@@ -366,87 +512,93 @@ async def przejazdy_pdf(payload: PdfRequest):
         judge_ids=payload.judge_ids or None,
         period_id=payload.period_id,
     )
+    period = _period_info(payload, data)
     travel = data["travel"]
     outside = data["outside_district"]
-    date_from = date.fromisoformat(data["period"]["from"])
-    date_to = date.fromisoformat(data["period"]["to"])
 
-    rows: list[dict] = []
-    previous = None
+    # Przejazdy ida cale - sedzia jest pozycja, bez czesci puli.
+    candidates: list[dict] = []
+    seen: set[str] = set()
     for item in travel:
-        rows.append(
+        if item.judge_id in seen:
+            continue
+        seen.add(item.judge_id)
+        mine = [t for t in travel if t.judge_id == item.judge_id]
+        candidates.append(
             {
+                "judge_id": item.judge_id,
+                "name": display_judge_name(item.judge_name),
+                "part": G.WHOLE,
+                "amount": round2(sum(t.amount for t in mine)),
+                "km": sum(t.total_km for t in mine),
+            }
+        )
+    if not candidates:
+        raise HTTPException(400, "W wybranym okresie nie ma przejazdów do rozliczenia.")
+
+    def build(items: list[dict], number: str, draft: bool) -> tuple[dict, dict]:
+        judges = {item["judge_id"] for item in items}
+        taken_by = {item["judge_id"]: item.get("taken_by") for item in items}
+        rows: list[dict] = []
+        previous = None
+        for item in travel:
+            if item.judge_id not in judges:
+                continue
+            rows.append(
+                {
+                    "judge_id": item.judge_id,
+                    "name": display_judge_name(item.judge_name),
+                    "day_label": item.day.strftime("%d.%m.%Y") if item.day else "-",
+                    "route": item.route,
+                    "one_way_km": item.one_way_km,
+                    "total_km": item.total_km,
+                    "rate": item.rate,
+                    "amount": item.amount,
+                    "first_of_judge": item.judge_id != previous,
+                    # Kilometry z ogolnopolskiej tabeli ZPRP - znacznik przy odleglosci.
+                    "national_km": item.distance_source == NATIONAL_SOURCE,
+                    "taken_note": (
+                        f"już na {taken_by[item.judge_id]}"
+                        if draft and taken_by.get(item.judge_id) and item.judge_id != previous
+                        else ""
+                    ),
+                }
+            )
+            previous = item.judge_id
+
+        total_amount = round(sum(r["amount"] for r in rows), 2)
+        total_km = sum(r["total_km"] for r in rows)
+        outside_rows = []
+        previous_outside = None
+        for item in outside["travel"]:
+            if item.judge_id not in judges:
+                continue
+            outside_rows.append({
                 "judge_id": item.judge_id,
                 "name": display_judge_name(item.judge_name),
                 "day_label": item.day.strftime("%d.%m.%Y") if item.day else "-",
                 "route": item.route,
-                "one_way_km": item.one_way_km,
                 "total_km": item.total_km,
-                "rate": item.rate,
                 "amount": item.amount,
-                "first_of_judge": item.judge_id != previous,
-                # Kilometry z ogólnopolskiej tabeli ZPRP - znacznik przy odległości.
+                "first_of_judge": item.judge_id != previous_outside,
                 "national_km": item.distance_source == NATIONAL_SOURCE,
-            }
-        )
-        previous = item.judge_id
+            })
+            previous_outside = item.judge_id
 
-    total_amount = round(sum(r["amount"] for r in rows), 2)
-    total_km = sum(r["total_km"] for r in rows)
-    judges_count = len({r["judge_id"] for r in rows})
-    outside_rows = []
-    previous_outside = None
-    for item in outside["travel"]:
-        outside_rows.append({
-            "judge_id": item.judge_id,
-            "name": display_judge_name(item.judge_name),
-            "day_label": item.day.strftime("%d.%m.%Y") if item.day else "-",
-            "route": item.route,
-            "total_km": item.total_km,
-            "amount": item.amount,
-            "first_of_judge": item.judge_id != previous_outside,
-            "national_km": item.distance_source == NATIONAL_SOURCE,
-        })
-        previous_outside = item.judge_id
-
-    number_text = await _reserve_number(
-        province,
-        kind="przejazdy",
-        year=payload.year,
-        month=payload.month,
-        judge_ids=sorted({r["judge_id"] for r in rows}),
-        include_future=payload.include_future,
-        totals={
-            "amount": total_amount,
-            "km": total_km,
-            "trips": len(rows),
-            "include_zprp": payload.include_zprp,
-        },
-        created_by=payload.created_by,
-        date_from=date_from,
-        date_to=date_to,
-    )
-
-    org = _org(province)
-    html = _render(
-        "okreg_przejazdy.html",
-        {
-            "logo": _province_logo_b64(province),
-            "org_name": org["name"],
-            "org_address": org["address"],
-            "document_number": number_text,
-            "period_label": (
-                f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-                if payload.period_id
-                else _period_label(payload.year, payload.month, date_to, include_future=payload.include_future)
-            ),
+        context = {
+            "draft": draft,
+            "file_period": f"{payload.month:02d}_{payload.year}",
+            "org_name": _org(province)["name"],
+            "org_address": _org(province)["address"],
+            "document_number": number,
+            "period_label": period["label"],
             "include_future": payload.include_future,
             "include_zprp": payload.include_zprp,
-            "judges_count": judges_count,
-            "judges_word": _plural(judges_count, "sędzia", "sędziów", "sędziów"),
+            "judges_count": len(judges),
+            "judges_word": _plural(len(judges), "sędzia", "sędziów", "sędziów"),
             "trips_word": _plural(len(rows), "wyjazd", "wyjazdy", "wyjazdów"),
             "rows": rows,
-            # Wyjazdy zebrane pod sędziami, z wierszem „Razem" dla każdego.
+            # Wyjazdy zebrane pod sedziami, z wierszem „Razem" dla kazdego.
             "groups": group_by_judge(rows),
             "total_amount": total_amount,
             "total_km": total_km,
@@ -459,11 +611,11 @@ async def przejazdy_pdf(payload: PdfRequest):
             "national_km": any(r["national_km"] for r in rows),
             "outside_national_km": any(r["national_km"] for r in outside_rows),
             "national_footnote": NATIONAL_FOOTNOTE,
-        },
-    )
+        }
+        totals = {"judges": len(judges), "amount": total_amount, "km": total_km, "trips": len(rows)}
+        return context, totals
 
-    result = _to_pdf(html, "przejazdy", f"przejazdy_{number_text.replace('/', '_')}.pdf")
-    return {"success": True, "number": number_text, **result}
+    return await _issue(province, G.PRZEJAZDY, payload, period, candidates, build)
 
 
 @router.get("/documents", summary="Wystawione dokumenty okręgu")

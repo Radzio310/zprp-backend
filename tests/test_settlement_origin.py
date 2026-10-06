@@ -103,3 +103,17 @@ def test_everything_else_stays():
     assert fix(first_seen=DURING) == KEEP               # miniony sezon z terminarza - zamkniety
     assert fix(own=set()) == KEEP                       # nie znamy naszych przedrostkow
     assert fix(season="2026/2027", match_code="S/MłK/1") == KEEP
+
+
+def test_mlodzik_makroregionalny_z_cudzym_przedrostkiem_jest_nasz():
+    # Zgłoszenie z 06.10.2026: turniej młodzika makroregionalnego „K/MłMR/12"
+    # (numer nadał Kraków, sędziuje obsada Śląska) zdejmował sędziom boiskowym
+    # mecze, a stolik przenosił na „o:". Makroregion liczy się jak nasz.
+    assert not foreign_district_match("K/MłMR/12", {"S"})
+    assert not foreign_district_match("K/MłKR/3", {"S"})
+    assert own_past_match("K/MłMR/12", {"S"})
+    assert fix(season="2026/2027", match_code="K/MłMR/12", role=R.ROLE_FIELD) == KEEP
+    assert fix(season="2026/2027", match_code="K/MłMR/12") == KEEP
+    # Reszta meczów innych okręgów - bez zmian (sprawa Wiktorii Więcław).
+    assert foreign_district_match("E/JmK/3", {"S"})
+    assert foreign_district_match("K/MłM/3", {"S"})

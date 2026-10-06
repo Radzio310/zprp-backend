@@ -1,27 +1,33 @@
 """
-Podział puli sędziego na listy sędziowskie - warstwa HTTP i most do rozliczeń.
+Podział puli sędziego na części - warstwa HTTP i most do rozliczeń.
 
-Cała reguła (kto na której liście, suma do grosza, podatek każdej listy
+Cała reguła (kto na której części, suma do grosza, podatek każdej części
 osobno, różnica wobec rachunku bez podziału) siedzi w liściu
-`settlement_split_rules`; tutaj tylko baza, numeracja w księdze dokumentów
-i PDF-y.
+`settlement_split_rules`; tutaj tylko baza.
+
+OD 06.10.2026 (zgłoszenie Wojtka Kaszni) podział NIE wydaje własnych list
+z numerami. Dzieli pulę na części A, B, ... i tyle - numer dostaje dopiero
+dokument zbiorczy (Zestawienie), na który człowiek bierze wybrane części
+wybranych sędziów (np. same 300 zł z puli 388 zł). Rejestr oficjalnych
+dokumentów pilnuje, żeby ta sama część nie trafiła na dwa oficjalne dokumenty
+(`settlement_register_rules`).
 
 GDZIE TO WCHODZI - dwa mosty:
   - `apply_splits` - wołane w `province_settlements.load_settlement`: sędzia
-    z WYDANYMI i aktualnymi listami ma w zestawieniu koszty, podatek i netto
-    jako sumę list. Tym samym rachunkiem liczą się `/judge/{id}`, `/judges`,
-    `/me` (aplikacja sędziego) i PDF zestawienia,
+    z ZAPISANYM i aktualnym podziałem ma w rozliczeniu koszty, podatek
+    i netto jako sumę części, a w `split.parts` kwoty każdej części (z nich
+    Zestawienie składa wiersze). Tym samym rachunkiem liczą się `/judge/{id}`,
+    `/judges`, `/me` (aplikacja sędziego) i PDF zestawienia,
   - `split_month_deltas` - poprawka siatki miesięcy (`/months`), żeby kafel
     miesiąca mówił to samo co ekran po kliknięciu.
 
 OKRES: podział należy do miesiąca kalendarzowego (`period_id` pusty) albo do
-własnego okresu wypłat okręgu (`province_settlement_periods`). Przy okresie
-rok i miesiąc to miesiąc WYPŁATY - z niego numer listy LS/MM/RRRR/n - a pula
-to mecze z dat okresu. Podział z miesiąca nie przechodzi na okres i odwrotnie.
+własnego okresu wypłat okręgu (`province_settlement_periods`). Podział
+z miesiąca nie przechodzi na okres i odwrotnie.
 
-CYKL ŻYCIA: szkic (edytowalny) -> wydane (numery w księdze, zamknięte) ->
-odblokowanie (numery zostają w księdze jako „anulowana", podział wraca do
-szkicu) -> ponowne wydanie z NOWYMI numerami. Numer nigdy nie wraca do puli.
+CYKL ŻYCIA: zapisany (obowiązuje, gdy jest kompletny) -> zablokowany, gdy
+którakolwiek część albo cała pula sędziego stoi na OFICJALNYM dokumencie
+w rejestrze. Żeby go zmienić, trzeba usunąć tamten dokument z rejestru.
 
 Zapis przechodzi przez tę samą bramkę co reszta Rozliczeń (konto VIP
 z uprawnieniem „Rozliczenia") - patrz `province_panel_guard`.
@@ -36,13 +42,13 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, delete, insert, select, text, update
+from sqlalchemy import and_, delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import settlement_cache as SC
 from app import settlement_engine as E
 from app import settlement_split_rules as S
-from app.db import database, province_settlement_documents, province_settlement_splits
+from app.db import database, province_settlement_splits
 from app.province_panel_access import PANEL_SETTLEMENTS
 from app.province_panel_guard import panel_write_gate
 from app.settlement_money import money
@@ -179,12 +185,10 @@ def pool_matches(entry: Optional[E.JudgeSettlement]) -> list[dict]:
     return out
 
 
-def _state_of(row: dict, matches: list[dict]) -> tuple[list[dict], Optional[dict]]:
+def _state_of(row: dict, matches: list[dict]) -> tuple[list[dict], dict]:
+    """Listy zapisanego podziału i to, czy zgadzają się z dzisiejszą pulą."""
     lists = S.normalize_lists(_json(row.get("lists_json"), []))
-    if row.get("status") != S.STATUS_ISSUED:
-        return lists, None
-    snapshot = _json(row.get("snapshot_json"), {})
-    return lists, S.issued_state(snapshot.get("lists") or [], lists, matches)
+    return lists, S.split_state(lists, matches)
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +206,9 @@ async def apply_splits(
     Dokłada podział do wierszy miesiąca albo okresu (w miejscu - wołane
     przed pamięcią).
 
-    Tylko WYDANE i aktualne listy zmieniają kwoty; szkic i listy nieaktualne
-    dostają sam znacznik z powodem, a kwoty zostają z rachunku bez podziału.
+    Tylko kompletny i aktualny podział zmienia kwoty; podział niekompletny
+    (np. doszedł mecz spoza części) dostaje sam znacznik z powodem, a kwoty
+    zostają z rachunku bez podziału.
     """
     if not entries:
         return
@@ -217,9 +222,8 @@ async def apply_splits(
         if not row:
             continue
         lists, state = _state_of(row, pool_matches(entry))
-        numbers = [str(n) for n in _json(row.get("numbers_json"), [])]
-        entry.split = S.list_badge(str(row["status"]), lists, numbers, state)
-        if state and state["current"]:
+        entry.split = S.list_badge(str(row["status"]), lists, [], state)
+        if state["current"]:
             values = S.applied_values(state["calc"])
             entry.costs = values["costs"]
             entry.taxable = values["taxable"]
@@ -236,7 +240,7 @@ async def split_month_deltas(
     judge_id: Optional[str] = None,
 ) -> dict[tuple[int, int], dict[str, float]]:
     """
-    Ile wydane listy zmieniają sumy miesiąca (koszty, podatek, netto, razem).
+    Ile zapisane podziały zmieniają sumy miesiąca (koszty, podatek, netto, razem).
 
     `assignments` - obsady tego samego płatnika, co w siatce (bez meczów
     płaconych przez klub), `common` - argumenty `settle_judges` bez dat.
@@ -247,7 +251,7 @@ async def split_month_deltas(
     query = select(T).where(
         and_(
             T.c.province.in_(spellings(key)),
-            T.c.status == S.STATUS_ISSUED,
+            T.c.status != S.STATUS_VOID,
             T.c.period_id == "",
         )
     )
@@ -274,7 +278,7 @@ async def split_month_deltas(
         if entry is None:
             continue
         _, state = _state_of(row, pool_matches(entry))
-        if not state or not state["current"]:
+        if not state["current"]:
             continue
         values = S.applied_values(state["calc"])
         slot = out.setdefault((year, month), {"costs": 0, "taxable": 0, "tax": 0, "net": 0.0, "total": 0.0})
@@ -288,32 +292,24 @@ async def split_month_deltas(
 
 
 # ---------------------------------------------------------------------------
-# Numeracja
+# Rejestr oficjalnych dokumentów
 # ---------------------------------------------------------------------------
 
-async def _next_seq(key: str, year: int, month: int) -> int:
-    row = await database.fetch_one(
-        select(province_settlement_documents.c.seq)
-        .where(province_settlement_documents.c.province == key)
-        .where(province_settlement_documents.c.kind == S.DOCUMENT_KIND)
-        .where(province_settlement_documents.c.period_year == year)
-        .where(province_settlement_documents.c.period_month == month)
-        .order_by(province_settlement_documents.c.seq.desc())
-        .limit(1)
+async def _documents_of(key: str, year: int, month: int, judge_id: str, period_id: Optional[str]) -> dict[str, str]:
+    """Części tego sędziego na oficjalnych zestawieniach okresu: {część: numer}."""
+    from app.province_settlement_register import period_taken
+    from app import settlement_register_rules as G
+
+    taken = await period_taken(key, G.ZESTAWIENIE, year, month, _pid(period_id))
+    return G.judge_view(taken).get(str(judge_id), {})
+
+
+def _locked_message(documents: dict[str, str]) -> str:
+    numbers = sorted(set(documents.values()))
+    return (
+        f"Pula tego sędziego jest już na oficjalnym dokumencie {', '.join(numbers)} - "
+        "żeby zmienić podział, najpierw usuń tamten dokument z Rejestru dokumentów."
     )
-    return int(row["seq"]) + 1 if row else 1
-
-
-def _number(key: str, year: int, month: int, seq: int) -> str:
-    # Własny wyróżnik „LS" (decyzja 25.09.2026): listy mają osobny licznik,
-    # więc bez niego pierwsza lista miesiąca nosiłaby numer Zestawienia.
-    return f"LS/{month:02d}/{year}/{seq}"
-
-
-async def _peek_numbers(key: str, year: int, month: int, count: int) -> list[str]:
-    """Numery, które PADNĄ przy wydaniu - bez rezerwacji."""
-    start = await _next_seq(key, year, month)
-    return [_number(key, year, month, start + i) for i in range(max(0, count))]
 
 
 # ---------------------------------------------------------------------------
@@ -385,17 +381,9 @@ async def _payload(
     include_future: bool,
     include_zprp: bool,
     period_id: Optional[str] = None,
-    row: Optional[dict] = None,
-    fetched: bool = False,
 ) -> dict:
     period = await _period(key, year, month, period_id)
-    if not fetched:
-        row = await _row(key, year, month, judge_id, period_id)
-    issued = bool(row and row.get("status") == S.STATUS_ISSUED)
-    if issued:
-        # Wydane listy oglądamy z przełącznikami, z którymi je wydano.
-        include_future = bool(row.get("include_future"))
-        include_zprp = bool(row.get("include_zprp"))
+    row = await _row(key, year, month, judge_id, period_id)
     _, entry = await _month_entry(
         key, judge_id, year, month, include_future, include_zprp, period_id
     )
@@ -403,36 +391,28 @@ async def _payload(
     keys = [m["match_key"] for m in matches]
 
     notes: list[str] = []
-    state = None
     suggested = False
     if row and row.get("status") != S.STATUS_VOID:
-        if issued:
-            lists, state = _state_of(row, matches)
-        else:
-            lists, notes = S.reconcile(_json(row.get("lists_json"), []), keys)
+        lists, notes = S.reconcile(_json(row.get("lists_json"), []), keys)
     else:
         lists = S.default_lists(keys, 2)
         suggested = True
 
-    calc = state["calc"] if state else S.compute(lists, matches)
-    numbers = [str(n) for n in _json(row.get("numbers_json"), [])] if row else []
-    voided = _json(row.get("voided_json"), []) if row else []
+    calc = S.compute(lists, matches)
+    documents = await _documents_of(key, year, month, judge_id, period_id)
     split = None
     if row and row.get("status") != S.STATUS_VOID:
+        state = S.split_state(S.normalize_lists(_json(row.get("lists_json"), [])), matches)
         split = {
             "status": row["status"],
             "rev": int(row.get("rev") or 0),
             "lists": lists,
-            "numbers": numbers,
-            "numbers_label": S.numbers_label(numbers),
-            "issued_at": _iso(row.get("issued_at")),
-            "issued_by": row.get("issued_by"),
             "updated_at": _iso(row.get("updated_at")),
             "updated_by": row.get("updated_by"),
             "include_future": bool(row.get("include_future")),
             "include_zprp": bool(row.get("include_zprp")),
-            "current": state["current"] if state else None,
-            "reasons": state["reasons"] if state else [],
+            "current": state["current"],
+            "reasons": state["reasons"],
         }
     return {
         "province": key,
@@ -455,9 +435,12 @@ async def _payload(
             "rozliczanych przez okręg - nie ma czego dzielić."
         ],
         "notes": notes,
-        "voided": voided,
         "max_lists": S.MAX_LISTS,
-        "next_numbers": [] if issued else await _peek_numbers(key, year, month, len(lists)),
+        #: Części na oficjalnych zestawieniach okresu ({część: numer}, „" = cała
+        #: pula). Niepuste = podział zablokowany.
+        "documents": documents,
+        "locked": bool(documents),
+        "locked_message": _locked_message(documents) if documents else None,
     }
 
 
@@ -510,26 +493,6 @@ class SplitBody(BaseModel):
     lists: list[dict] = []
     #: Wersja, na której pracował klient (`split.rev`); brak = nowy podział.
     rev: Optional[int] = None
-    user: Optional[str] = None
-
-
-class UnlockBody(BaseModel):
-    province: str
-    judge_id: str
-    year: int
-    month: int
-    period_id: Optional[str] = None
-    rev: Optional[int] = None
-    reason: Optional[str] = None
-    user: Optional[str] = None
-
-
-class ReprintBody(BaseModel):
-    province: str
-    judge_id: str
-    year: int
-    month: int
-    period_id: Optional[str] = None
     user: Optional[str] = None
 
 
@@ -591,24 +554,21 @@ def _structural(lists: list[dict]) -> None:
         raise HTTPException(400, f"Najwięcej {S.MAX_LISTS} list w podziale - jest {len(lists)}.")
 
 
-@router.put("", summary="Zapisz szkic podziału")
+@router.put("", summary="Zapisz podział")
 async def save_split(body: SplitBody):
     key = _require(body.province)
     await _require_module(key)
     _check_period(body.year, body.month)
     body.judge_id = str(body.judge_id).strip()
     row = await _row(key, body.year, body.month, body.judge_id, body.period_id)
-    if row and row.get("status") == S.STATUS_ISSUED:
-        raise HTTPException(
-            409,
-            f"Listy {S.numbers_label(_json(row.get('numbers_json'), []))} są już wydane - "
-            "żeby zmienić podział, najpierw go odblokuj.",
-        )
+    documents = await _documents_of(key, body.year, body.month, body.judge_id, body.period_id)
+    if documents:
+        raise HTTPException(409, _locked_message(documents))
     _check_rev(row, body.rev)
     lists = S.normalize_lists(body.lists)
     _structural(lists)
     await _save_draft(key, body, lists, row)
-    SC.bump(key, base=False, reason="podział na listy: szkic")
+    SC.bump(key, base=False, reason="podział na części: zapis")
     return await _payload(
         key, body.judge_id, body.year, body.month,
         include_future=body.include_future, include_zprp=body.include_zprp,
@@ -616,7 +576,7 @@ async def save_split(body: SplitBody):
     )
 
 
-@router.delete("", summary="Zrezygnuj z podziału (tylko szkic)")
+@router.delete("", summary="Zrezygnuj z podziału")
 async def discard_split(
     province: str = Query(...),
     judge_id: str = Query(...),
@@ -632,11 +592,9 @@ async def discard_split(
     row = await _row(key, year, month, judge_id, period_id)
     if row is None or row.get("status") == S.STATUS_VOID:
         return {"ok": True, "message": "Ten sędzia nie ma podziału - rozliczenie idzie jednym rachunkiem."}
-    if row.get("status") == S.STATUS_ISSUED:
-        raise HTTPException(
-            409,
-            "Listy są wydane - najpierw odblokuj podział (numery zostaną w księdze jako anulowane).",
-        )
+    documents = await _documents_of(key, year, month, judge_id, period_id)
+    if documents:
+        raise HTTPException(409, _locked_message(documents))
     if _json(row.get("voided_json"), []):
         # Historia unieważnionych numerów zostaje - wiersz tylko przestaje działać.
         await database.execute(
@@ -647,317 +605,5 @@ async def discard_split(
         )
     else:
         await database.execute(delete(T).where(T.c.id == row["id"]))
-    SC.bump(key, base=False, reason="podział na listy: rezygnacja")
+    SC.bump(key, base=False, reason="podział na części: rezygnacja")
     return {"ok": True, "message": "Podział usunięty - sędzia rozlicza się jednym rachunkiem."}
-
-
-@router.post("/issue", summary="Wydaj listy: numery w księdze + PDF-y")
-async def issue_split(body: SplitBody):
-    key = _require(body.province)
-    await _require_module(key)
-    _check_period(body.year, body.month)
-    body.judge_id = str(body.judge_id).strip()
-    row = await _row(key, body.year, body.month, body.judge_id, body.period_id)
-    if row and row.get("status") == S.STATUS_ISSUED:
-        raise HTTPException(
-            409,
-            f"Listy {S.numbers_label(_json(row.get('numbers_json'), []))} są już wydane. "
-            "Duplikat PDF pobierzesz przyciskiem „Pobierz ponownie”.",
-        )
-    _check_rev(row, body.rev)
-    lists = S.normalize_lists(body.lists)
-    _structural(lists)
-
-    period = await _period(key, body.year, body.month, body.period_id)
-    _, entry = await _month_entry(
-        key, body.judge_id, body.year, body.month, body.include_future, body.include_zprp,
-        body.period_id,
-    )
-    matches = pool_matches(entry)
-    if not matches:
-        raise HTTPException(
-            400,
-            f"Sędzia nie ma w {'tym okresie' if period['id'] else 'tym miesiącu'} meczów "
-            "rozliczanych przez okręg - nie ma czego dzielić.",
-        )
-    bad = S.problems(lists, matches, for_issue=True)
-    if bad:
-        raise HTTPException(400, "Nie da się wydać list: " + " ".join(bad))
-    calc = S.compute(lists, matches)
-    name = await _judge_name(key, body.judge_id, entry)
-
-    from app import province_settlement_pdf as P
-
-    lock = f"settlement-lista:{key}:{body.year}:{body.month}"
-    async with database.transaction():
-        # Dwa wydania naraz w tym samym okręgu i miesiącu nie dostaną tego
-        # samego numeru - drugie czeka na koniec pierwszego.
-        await database.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))").bindparams(k=lock))
-        start = await _next_seq(key, body.year, body.month)
-        numbers = [_number(key, body.year, body.month, start + i) for i in range(len(lists))]
-        snapshot = _snapshot(key, body, name, matches, calc, numbers, period)
-        # PDF-y powstają PRZED zapisem numerów - nieudany wydruk cofa całą
-        # transakcję i w księdze nie zostaje dziura.
-        documents = _render_all(P, key, snapshot, reprint=False)
-        doc_ids: list[int] = []
-        for index, item in enumerate(calc["lists"]):
-            doc_ids.append(
-                await database.fetch_val(
-                    insert(province_settlement_documents)
-                    .values(
-                        province=key,
-                        kind=S.DOCUMENT_KIND,
-                        period_year=body.year,
-                        period_month=body.month,
-                        seq=start + index,
-                        number=numbers[index],
-                        date_from=date.fromisoformat(snapshot["period"]["from"]),
-                        date_to=date.fromisoformat(snapshot["period"]["to"]),
-                        include_future=body.include_future,
-                        judge_ids=[body.judge_id],
-                        totals_json={
-                            "letter": item["letter"],
-                            "part": index + 1,
-                            "of": len(lists),
-                            "gross": item["gross"],
-                            "costs": item["costs"],
-                            "taxable": item["taxable"],
-                            "tax": item["tax"],
-                            "net": item["net"],
-                            "travel": item["travel"],
-                            "matches": item["match_count"],
-                            "include_zprp": body.include_zprp,
-                            "period_id": period["id"],
-                        },
-                        created_by=body.user,
-                    )
-                    .returning(province_settlement_documents.c.id)
-                )
-            )
-        values = {
-            "status": S.STATUS_ISSUED,
-            "rev": int((row or {}).get("rev") or 0) + 1,
-            "lists_json": _dump(lists),
-            "include_future": body.include_future,
-            "include_zprp": body.include_zprp,
-            "numbers_json": _dump(numbers),
-            "document_ids_json": _dump(doc_ids),
-            "snapshot_json": _dump(snapshot),
-            "issued_at": _now(),
-            "issued_by": body.user,
-            "updated_by": body.user,
-            "updated_at": _now(),
-        }
-        if row is not None:
-            await database.execute(update(T).where(T.c.id == row["id"]).values(province=key, **values))
-        else:
-            await database.execute(
-                pg_insert(T)
-                .values(
-                    province=key,
-                    period_year=body.year,
-                    period_month=body.month,
-                    period_id=_pid(body.period_id),
-                    judge_id=body.judge_id,
-                    **values,
-                )
-                .on_conflict_do_update(index_elements=KEY_COLUMNS, set_=values)
-            )
-    SC.bump(key, base=False, reason="podział na listy: wydanie")
-    payload = await _payload(
-        key, body.judge_id, body.year, body.month,
-        include_future=body.include_future, include_zprp=body.include_zprp,
-        period_id=body.period_id,
-    )
-    return {**payload, "documents": documents}
-
-
-@router.post("/reprint", summary="Duplikat PDF wydanych list (te same numery)")
-async def reprint_split(body: ReprintBody):
-    key = _require(body.province)
-    await _require_module(key)
-    _check_period(body.year, body.month)
-    row = await _row(key, body.year, body.month, str(body.judge_id).strip(), body.period_id)
-    if not row or row.get("status") != S.STATUS_ISSUED:
-        raise HTTPException(409, "Listy tego sędziego nie są wydane - nie ma czego drukować ponownie.")
-    snapshot = _json(row.get("snapshot_json"), {})
-    if not snapshot.get("lists"):
-        raise HTTPException(409, "Brak migawki wydanych list - odblokuj podział i wydaj listy ponownie.")
-    from app import province_settlement_pdf as P
-
-    return {"ok": True, "documents": _render_all(P, key, snapshot, reprint=True)}
-
-
-@router.post("/unlock", summary="Odblokuj podział - wydane numery zostają jako anulowane")
-async def unlock_split(body: UnlockBody):
-    key = _require(body.province)
-    await _require_module(key)
-    _check_period(body.year, body.month)
-    body.judge_id = str(body.judge_id).strip()
-    row = await _row(key, body.year, body.month, body.judge_id, body.period_id)
-    if not row or row.get("status") != S.STATUS_ISSUED:
-        raise HTTPException(409, "Podział nie jest wydany - nie ma czego odblokować.")
-    _check_rev(row, body.rev)
-    numbers = [str(n) for n in _json(row.get("numbers_json"), [])]
-    doc_ids = [int(i) for i in _json(row.get("document_ids_json"), []) if str(i).isdigit()]
-    voided = _json(row.get("voided_json"), [])
-    voided.append(
-        {
-            "numbers": numbers,
-            "label": S.numbers_label(numbers),
-            "voided_at": _now().isoformat(),
-            "voided_by": body.user,
-            "reason": _s(body.reason) or None,
-        }
-    )
-    async with database.transaction():
-        if doc_ids:
-            await database.execute(
-                update(province_settlement_documents)
-                .where(province_settlement_documents.c.id.in_(doc_ids))
-                .values(status=S.DOCUMENT_VOID)
-            )
-        await database.execute(
-            update(T).where(T.c.id == row["id"]).values(
-                status=S.STATUS_DRAFT,
-                rev=int(row.get("rev") or 0) + 1,
-                numbers_json="[]",
-                document_ids_json="[]",
-                snapshot_json="{}",
-                voided_json=_dump(voided),
-                updated_by=body.user,
-                updated_at=_now(),
-            )
-        )
-    SC.bump(key, base=False, reason="podział na listy: odblokowanie")
-    payload = await _payload(
-        key, body.judge_id, body.year, body.month,
-        include_future=bool(row.get("include_future")), include_zprp=bool(row.get("include_zprp")),
-        period_id=body.period_id,
-    )
-    return {**payload, "message": f"Odblokowano. Numery {S.numbers_label(numbers)} zostają w księdze jako anulowane."}
-
-
-# ---------------------------------------------------------------------------
-# PDF
-# ---------------------------------------------------------------------------
-
-def _snapshot(
-    key: str,
-    body: SplitBody,
-    name: str,
-    matches: list[dict],
-    calc: dict,
-    numbers: list[str],
-    period: dict,
-) -> dict:
-    """Wszystko, z czego składa się wydruk - duplikat powstaje z tej migawki."""
-    by_key = {m["match_key"]: m for m in matches}
-    home = next((m["home_city"] for m in matches if m.get("home_city")), "")
-    lists = []
-    for index, item in enumerate(calc["lists"]):
-        rows = [by_key[k] for k in item["match_keys"] if k in by_key]
-        rows.sort(key=lambda m: (m.get("match_at") or "", m["match_key"]))
-        lists.append({**item, "number": numbers[index], "matches": rows})
-    return {
-        "province": key,
-        "judge_id": body.judge_id,
-        "name": name,
-        "home_city": home,
-        "period": dict(period),
-        "include_future": body.include_future,
-        "include_zprp": body.include_zprp,
-        "numbers": numbers,
-        "numbers_label": S.numbers_label(numbers),
-        "pool": calc["pool"],
-        "unsplit": calc["unsplit"],
-        "split": calc["split"],
-        "lists": lists,
-        "issued_on": _now().strftime("%d.%m.%Y"),
-    }
-
-
-def _doc_context(snapshot: dict, index: int) -> dict:
-    from app.national_lookup_rules import NATIONAL_FOOTNOTE, SOURCE_NATIONAL
-    from app.settlement_words import amount_in_words
-
-    item = snapshot["lists"][index]
-    rows = []
-    for lp, match in enumerate(item.get("matches") or [], start=1):
-        day = _s(match.get("day"))
-        rows.append(
-            {
-                "lp": lp,
-                "day_label": f"{day[8:10]}.{day[5:7]}.{day[0:4]}" if len(day) >= 10 else "-",
-                "code": match.get("code") or "",
-                "category": match.get("category") or "",
-                "role": match.get("role") or "",
-                "city": match.get("city") or "",
-                "teams": match.get("teams") or "",
-                "gross": money(match.get("gross")),
-                "travel": money(match.get("travel")),
-                "travel_shared": bool(match.get("travel_shared")),
-                "rate_shared": bool(match.get("rate_shared")),
-                "national_km": match.get("distance_source") == SOURCE_NATIONAL
-                and not match.get("travel_shared")
-                and money(match.get("travel")) > 0,
-            }
-        )
-    return {
-        "number": item["number"],
-        "letter": item["letter"],
-        "part": index + 1,
-        "parts": len(snapshot["lists"]),
-        "rows": rows,
-        "national_km": any(row["national_km"] for row in rows),
-        "national_footnote": NATIONAL_FOOTNOTE,
-        "matches_gross": money(item.get("matches_gross")),
-        "shift": money(item.get("manual_shift")),
-        "gross": money(item.get("gross")),
-        "costs": int(item.get("costs") or 0),
-        "taxable": int(item.get("taxable") or 0),
-        "tax": int(item.get("tax") or 0),
-        "net": money(item.get("net")),
-        "travel": money(item.get("travel")),
-        "total": money(item.get("total")),
-        "net_in_words": amount_in_words(item.get("net")),
-        "costs_granted": money(item.get("gross")) > 200,
-    }
-
-
-def _render_all(P: Any, key: str, snapshot: dict, *, reprint: bool) -> dict:
-    """Jeden plik ze wszystkimi listami (do pobrania) i plik na każdą listę."""
-    org = P._org(key)
-    base = {
-        "logo": P._province_logo_b64(key),
-        "org_name": org["name"],
-        "org_address": org["address"],
-        "judge_name": snapshot.get("name") or snapshot.get("judge_id"),
-        "judge_id": snapshot.get("judge_id"),
-        "home_city": snapshot.get("home_city") or "",
-        "period_label": snapshot["period"]["label"],
-        "issued_on": snapshot.get("issued_on"),
-        "printed_on": _now().strftime("%d.%m.%Y"),
-        "reprint": reprint,
-        "numbers_label": snapshot.get("numbers_label"),
-        "pool_gross": money(snapshot["pool"]["gross"]),
-        "include_future": snapshot.get("include_future"),
-    }
-    docs = [_doc_context(snapshot, i) for i in range(len(snapshot["lists"]))]
-    stem = f"listy_{S.numbers_label(snapshot['numbers']).replace('/', '_').replace(', ', '+')}"
-    bundle = P._to_pdf(
-        P._render("okreg_lista_sedziowska.html", {**base, "docs": docs}),
-        "listy",
-        f"{stem}.pdf",
-    )
-    parts = []
-    for doc in docs:
-        filename = f"lista_{doc['number'].replace('/', '_')}.pdf"
-        result = P._to_pdf(
-            P._render("okreg_lista_sedziowska.html", {**base, "docs": [doc]}), "lista", filename
-        )
-        parts.append({"letter": doc["letter"], "number": doc["number"], "filename": filename, **result})
-    return {
-        "bundle": {"filename": f"{stem}.pdf", "number": snapshot.get("numbers_label"), **bundle},
-        "lists": parts,
-    }

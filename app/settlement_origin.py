@@ -84,6 +84,24 @@ def is_other_district(code: Any, own: Iterable[str]) -> bool:
     return bool(prefix and mine and prefix not in mine)
 
 
+def foreign_exempt(code: Any) -> bool:
+    """
+    Rozgrywki z cudzym przedrostkiem, które mimo to są NASZE.
+
+    Młodzik makroregionalny („K/MłMR/12", „K/MłKR/3"): makroregion prowadzą
+    razem sąsiednie okręgi i numer nadaje jeden z nich, a nasi sędziowie
+    sędziują te turnieje w obsadzie okręgu. Decyzja użytkownika z 06.10.2026:
+    takie mecze liczą się normalnie, w każdej roli - z rozliczenia zdejmuje je
+    tylko „Nie obciążaj klubów" w Panelu klubów. Reguła meczów innych okręgów
+    („E/JmK/3") zostaje dla całej reszty.
+    """
+    return R.is_regional_youth_competition(code)
+
+
+def _foreign(code: Any, own: Iterable[str]) -> bool:
+    return is_other_district(code, own) and not foreign_exempt(code)
+
+
 def _district_level(code: Any) -> bool:
     """
     Szczebel, który z listy minionego sezonu wchodzi jak własny.
@@ -102,7 +120,7 @@ def foreign_district_match(code: Any, own: Iterable[str]) -> bool:
     Nie jest nasz w żadnym sezonie: liczy się jak mecz spoza okręgu, czyli tylko
     stolik (decyzja z 11.09.2026, od 06.10.2026 także w bieżącym sezonie).
     """
-    return _district_level(code) and is_other_district(code, own)
+    return _district_level(code) and _foreign(code, own)
 
 
 def own_past_match(code: Any, own: Iterable[str]) -> bool:
@@ -112,7 +130,7 @@ def own_past_match(code: Any, own: Iterable[str]) -> bool:
     Rozgrywki okręgowe, puchary i puchar wojewódzki - ale bez meczów innych
     okręgów: te idą jak w bieżącym sezonie, tylko stolik, jako mecz spoza okręgu.
     """
-    return _district_level(code) and not is_other_district(code, own)
+    return _district_level(code) and not _foreign(code, own)
 
 
 def collected_after_season(first_seen: Optional[datetime], season: str) -> bool:

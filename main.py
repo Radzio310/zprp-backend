@@ -98,6 +98,7 @@ from app.province_settlement_sync import refresh_province, run_settlement_sync_s
 from app.province_settlement_pdf import router as province_settlement_pdf_router
 from app.province_settlement_periods import router as province_settlement_periods_router
 from app.province_settlement_splits import router as province_settlement_splits_router
+from app.province_settlement_register import router as province_settlement_register_router
 from app.province_assignments import router as province_assignments_router
 from app.province_assignment_auto import router as province_assignment_auto_router
 from app.province_assignment_board import router as province_assignment_board_router
@@ -346,6 +347,7 @@ app.include_router(central_rates_router)
 # Podział puli sędziego na listy sędziowskie: /province/settlements/splits -
 # PRZED routerem rozliczeń, żeby żadna trasa z parametrem go nie połknęła.
 app.include_router(province_settlement_splits_router)
+app.include_router(province_settlement_register_router)
 app.include_router(province_settlement_periods_router)
 app.include_router(province_settlements_router)
 app.include_router(province_stats_router)

@@ -142,9 +142,20 @@
   .outside-section > .title,
   .outside-section > .subtitle { break-after: avoid; page-break-after: avoid; }
   .outside-section table { break-before: avoid; page-break-before: avoid; }
+
+  /* Szkic (06.10.2026): bez numeru w rejestrze - znak wodny na każdej stronie,
+     żeby nikt nie wysłał go do księgowej ani do Urzędu jako dokumentu. */
+  .draft-mark {
+    position: fixed; top: 38%; left: 0; right: 0; text-align: center;
+    font-size: 110pt; font-weight: bold; letter-spacing: 18pt;
+    color: rgba(179, 38, 30, 0.10); transform: rotate(-24deg); z-index: -1;
+  }
+  .doc-number.is-draft { color: #b3261e; letter-spacing: 3pt; }
+  .taken-note { font-weight: normal; font-size: 7pt; color: #b3261e; margin-top: .4mm; }
 </style>
 </head>
 <body>
+{% if draft %}<div class="draft-mark">SZKIC</div>{% endif %}
 
 <table class="head">
   <tr>
@@ -155,7 +166,7 @@
     </td>
     <td class="doc-box">
       <div class="doc-kind">Zestawienie</div>
-      <div class="doc-number">{{ document_number }}</div>
+      <div class="doc-number{% if draft %} is-draft{% endif %}">{{ document_number }}</div>
       <div class="doc-period">{{ period_label }}</div>
     </td>
   </tr>
@@ -196,6 +207,7 @@
         {{ row.name or row.judge_id }}
         {%- if row.future %} <span class="muted">(w tym {{ row.future }} nierozegr.)</span>{% endif %}
         {%- if row.split_note %}<div class="split-note">{% if row.split_applied %}*{% endif %} {{ row.split_note }}</div>{% endif %}
+        {%- if row.taken_note %}<div class="taken-note">{{ row.taken_note }}</div>{% endif %}
       </td>
       <td class="c">{{ row.matches }}</td>
       <td>{{ row.gross | money }}</td>
@@ -274,9 +286,8 @@
   w dniu każdego meczu. &nbsp;&middot;&nbsp;
   <b>Koszty uzyskania i podatek</b> liczone od sumy ekwiwalentów sędziego za wskazany okres.
   {%- if split_rows %}
-  &nbsp;&middot;&nbsp; <b>*</b> Sędzia wypłacany listami sędziowskimi: brutto to pełna kwota miesiąca,
-  a koszty uzyskania, podstawa, podatek i kwota do wypłaty są sumą list - każda lista jest odrębnym
-  rachunkiem (koszty 20% tylko na liście powyżej 200 zł, podatek zaokrąglany na każdej liście).
+  &nbsp;&middot;&nbsp; <b>*</b> Sędzia wypłacany w częściach: wiersz to jedna część jego ekwiwalentu za okres
+  i odrębny rachunek (koszty 20% tylko przy części powyżej 200 zł, podatek zaokrąglany w każdej części).
   {%- endif %}
   &nbsp;&middot;&nbsp; Kwoty przejazdów rozliczane są odrębnie, Listą kosztów przejazdów.
   {%- if bomb_rows %}

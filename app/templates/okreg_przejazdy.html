@@ -147,9 +147,20 @@
   .outside-section > .title,
   .outside-section > .subtitle { break-after: avoid; page-break-after: avoid; }
   .outside-section table { break-before: avoid; page-break-before: avoid; }
+
+  /* Szkic (06.10.2026): bez numeru w rejestrze - znak wodny na każdej stronie,
+     żeby nikt nie wysłał go do księgowej ani do Urzędu jako dokumentu. */
+  .draft-mark {
+    position: fixed; top: 38%; left: 0; right: 0; text-align: center;
+    font-size: 110pt; font-weight: bold; letter-spacing: 18pt;
+    color: rgba(179, 38, 30, 0.10); transform: rotate(-24deg); z-index: -1;
+  }
+  .doc-number.is-draft { color: #b3261e; letter-spacing: 3pt; }
+  .taken-note { font-weight: normal; font-size: 7pt; color: #b3261e; margin-top: .4mm; }
 </style>
 </head>
 <body>
+{% if draft %}<div class="draft-mark">SZKIC</div>{% endif %}
 
 <table class="head">
   <tr>
@@ -160,7 +171,7 @@
     </td>
     <td class="doc-box">
       <div class="doc-kind">Lista przejazdów</div>
-      <div class="doc-number">{{ document_number }}</div>
+      <div class="doc-number{% if draft %} is-draft{% endif %}">{{ document_number }}</div>
       <div class="doc-period">{{ period_label }}</div>
     </td>
   </tr>
@@ -195,7 +206,7 @@
     {% for row in group.trips %}
     <tr class="trip">
       <td class="c lp">{% if loop.first %}{{ group.lp }}{% endif %}</td>
-      <td class="l name">{% if loop.first %}{{ group.name or group.judge_id }}{% endif %}</td>
+      <td class="l name">{% if loop.first %}{{ group.name or group.judge_id }}{% if row.taken_note %}<div class="taken-note">{{ row.taken_note }}</div>{% endif %}{% endif %}</td>
       <td class="c">{{ row.day_label }}</td>
       <td class="l">{{ row.route }}</td>
       <td>{{ row.one_way_km | km }}{% if row.national_km %}<sup class="zprp">*</sup>{% endif %}</td>

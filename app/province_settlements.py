@@ -812,7 +812,9 @@ async def summary(
     await settlement_range(key, year, month, period_id)
     # Numer dokumentu zmienia się po każdym wydruku, a rachunek nie - więc jest
     # częścią klucza pamięci, a nie powodem, żeby liczyć miesiąc od nowa.
-    hint = await next_document_number(key, year, month, "zestawienie", peek=True)
+    from app.province_settlement_register import suggestion
+
+    hint = (await suggestion(key, "zestawienie", year, month))["number"]
 
     async def build() -> dict:
         data = await cached_settlement(
@@ -1622,38 +1624,6 @@ async def refresh(payload: RefreshRequest):
     _BACKGROUND.add(task)
     task.add_done_callback(_BACKGROUND.discard)
     return {"province": key, "started": True, "running": True, "run_id": run_id}
-
-
-# ---------------------------------------------------------------------------
-# Numeracja dokumentow
-# ---------------------------------------------------------------------------
-
-async def next_document_number(
-    province: str, year: int, month: int, kind: str, *, peek: bool = False
-) -> str:
-    """
-    Kolejny numer w okregu, miesiacu i rodzaju dokumentu: `SL/01/2026/1`.
-
-    `peek` podaje numer, ktory PADNIE - nie rezerwuje go. Rezerwacja nastepuje
-    dopiero przy zapisie dokumentu, bo numer bez wydruku to dziura w ksiazce.
-    """
-    from app.db import province_settlement_documents
-
-    row = await database.fetch_one(
-        select(province_settlement_documents.c.seq)
-        .where(
-            and_(
-                province_settlement_documents.c.province == province,
-                province_settlement_documents.c.kind == kind,
-                province_settlement_documents.c.period_year == year,
-                province_settlement_documents.c.period_month == month,
-            )
-        )
-        .order_by(province_settlement_documents.c.seq.desc())
-        .limit(1)
-    )
-    seq = int(row["seq"]) + 1 if row else 1
-    return f"{province_short(province)}/{month:02d}/{year}/{seq}"
 
 
 # ---------------------------------------------------------------------------
