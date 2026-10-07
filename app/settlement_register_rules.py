@@ -7,9 +7,11 @@ Schemat w `settlement_register_tables`, trasy w `province_settlement_register`.
 ZASADY (decyzje użytkownika z 06.10.2026):
   - Szkic nie zużywa numeru i nie trafia do rejestru. Numer dostaje tylko
     dokument OFICJALNY.
-  - Numeracja jest ciągła w ROKU (rok miesiąca wypłaty) i osobna dla każdego
-    rodzaju dokumentu: zestawienia i przejazdy mają własne liczniki. Miesiąc
-    w numerze („SL/10/2026/14") jest informacyjny.
+  - Numeracja jest ciągła w SEZONIE (sierpień-lipiec, `season_rules`) i osobna
+    dla każdego rodzaju dokumentu (decyzja z 07.10.2026): zestawienia
+    „SL/2026_27/14", przejazdy „SLP/2026_27/3". O sezonie decyduje OKRES
+    rozliczenia, nie dzień wydania - zestawienie za lipiec wydane we wrześniu
+    należy do sezonu, który się w lipcu kończył.
   - Podpowiedź = najwyższy numer w rejestrze (albo „kontynuacja" z ustawień,
     gdy większa) + 1. Człowiek może ją przed wydaniem zmienić - byle numer nie
     był zajęty w tym roku i rodzaju.
@@ -22,8 +24,10 @@ ZASADY (decyzje użytkownika z 06.10.2026):
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Iterable, Optional
 
+from app.season_rules import season_start_year
 from app.settlement_money import money
 
 ZESTAWIENIE = "zestawienie"
@@ -46,14 +50,43 @@ def _s(value: Any) -> str:
 # Numeracja
 # ---------------------------------------------------------------------------
 
-def number_text(short: str, year: int, month: int, seq: int) -> str:
-    """„SL/10/2026/14" - miesiąc wypłaty informacyjnie, licznik roczny."""
-    return f"{short}/{int(month):02d}/{int(year)}/{int(seq)}"
+#: Wyróżnik rodzaju dokumentu za skrótem okręgu: przejazdy „SLP/...", żeby
+#: dwa dokumenty nigdy nie nosiły tego samego numeru.
+KIND_MARK = {ZESTAWIENIE: "", PRZEJAZDY: "P"}
 
 
-def number_prefix(short: str, year: int, month: int) -> str:
-    """To, co stoi przed numerem kolejnym - do pola edycji na ekranie."""
-    return f"{short}/{int(month):02d}/{int(year)}/"
+def season_tag(season: int) -> str:
+    """2026 -> „2026_27" (sezon 2026/2027)."""
+    return f"{int(season)}_{(int(season) + 1) % 100:02d}"
+
+
+def season_label(season: int) -> str:
+    """2026 -> „2026/27" - podpis na ekranie."""
+    return f"{int(season)}/{(int(season) + 1) % 100:02d}"
+
+
+def number_prefix(short: str, season: int, kind: str = ZESTAWIENIE) -> str:
+    """To, co stoi przed numerem kolejnym: „SL/2026_27/" - do pola edycji."""
+    return f"{short}{KIND_MARK.get(kind, '')}/{season_tag(season)}/"
+
+
+def number_text(short: str, season: int, seq: int, kind: str = ZESTAWIENIE) -> str:
+    """„SL/2026_27/14" (zestawienie), „SLP/2026_27/3" (przejazdy)."""
+    return f"{number_prefix(short, season, kind)}{int(seq)}"
+
+
+def period_season(date_from: Optional[date], configured: Any = None) -> Optional[int]:
+    """
+    Sezon okresu rozliczenia (rok jego początku).
+
+    Własny okres wypłat okręgu niesie sezon wprost („2026/2027") i to on
+    rozstrzyga. Miesiąc kalendarzowy - sezon pierwszego dnia okresu
+    (granica sierpniowa `season_rules`).
+    """
+    text = str(configured or "").strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        return int(text[:4])
+    return season_start_year(date_from)
 
 
 def suggest_seq(used: Iterable[int], start_after: int = 0) -> int:
@@ -73,7 +106,7 @@ def seq_problem(seq: Any, used: Iterable[int]) -> Optional[str]:
     if value > MAX_SEQ:
         return f"Numer {value} jest podejrzanie duży - najwyżej {MAX_SEQ}."
     if value in {int(s) for s in used}:
-        return f"Numer {value} jest już w rejestrze w tym roku - wybierz inny albo usuń tamten dokument."
+        return f"Numer {value} jest już w rejestrze w tym sezonie - wybierz inny albo usuń tamten dokument."
     return None
 
 

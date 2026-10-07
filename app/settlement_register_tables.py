@@ -12,10 +12,10 @@ więc poprawiony dokument dostawał kolejny numer, a księgowa traciła ciągło
   - usunięcie z rejestru zwalnia numer i pozycje (sędziów i części ich puli).
 
   - `province_settlement_register` - jeden wydany dokument: numer ciągły
-    w roku i rodzaju, okres, pozycje (sędzia + część puli) i pełny kontekst
+    w sezonie i rodzaju, okres, pozycje (sędzia + część puli) i pełny kontekst
     wydruku, z którego powstaje ponowne pobranie.
   - `province_settlement_register_settings` - „kontynuacja numeracji":
-    ostatni numer wydany poza systemem w danym roku i rodzaju.
+    ostatni numer wydany poza systemem w danym sezonie i rodzaju.
 
 JSON jako Text (nie JSONB) - jak w `settlement_split_tables`.
 """
@@ -32,10 +32,12 @@ def define_tables(metadata):
         Column("province", String, nullable=False),
         #: „zestawienie" | „przejazdy" - każdy rodzaj ma własny licznik.
         Column("kind", String, nullable=False),
-        #: Rok numeracji (rok miesiąca wypłaty) i numer kolejny w tym roku.
+        #: Sezon numeracji - ROK JEGO POCZĄTKU (2026 = 2026/27, decyzja
+        #: z 07.10.2026) - i numer kolejny w sezonie. Nazwa kolumny z czasów
+        #: numeracji rocznej; tabela jest już na produkcji.
         Column("number_year", Integer, nullable=False),
         Column("seq", Integer, nullable=False),
-        #: Pełny numer na papierze: „SL/10/2026/14".
+        #: Pełny numer na papierze: „SL/2026_27/14" albo „SLP/2026_27/3".
         Column("number", String, nullable=False),
         #: Okres rozliczenia: miesiąc wypłaty i własny okres (pusty = miesiąc).
         Column("period_year", Integer, nullable=False),
@@ -79,6 +81,7 @@ def define_tables(metadata):
         metadata,
         Column("province", String, primary_key=True),
         Column("kind", String, primary_key=True),
+        #: Sezon (rok początku), jak `number_year` w rejestrze.
         Column("number_year", Integer, primary_key=True),
         #: Ostatni numer wydany POZA systemem - rejestr podpowiada od następnego.
         Column("start_after", Integer, nullable=False, server_default=text("0")),

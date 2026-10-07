@@ -825,9 +825,9 @@ async def summary(
     await settlement_range(key, year, month, period_id)
     # Numer dokumentu zmienia się po każdym wydruku, a rachunek nie - więc jest
     # częścią klucza pamięci, a nie powodem, żeby liczyć miesiąc od nowa.
-    from app.province_settlement_register import suggestion
+    from app.province_settlement_register import season_of_period, suggestion
 
-    hint = (await suggestion(key, "zestawienie", year, month))["number"]
+    hint = (await suggestion(key, "zestawienie", await season_of_period(key, year, month, period_id)))["number"]
 
     async def build() -> dict:
         data = await cached_settlement(

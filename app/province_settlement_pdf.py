@@ -182,7 +182,7 @@ class PdfRequest(BaseModel):
     created_by: Optional[str] = None
     period_id: Optional[str] = None
     #: Szkic (False) nie zuzywa numeru i nie trafia do rejestru. Oficjalny
-    #: dostaje numer ciagly w roku i zajmuje swoje pozycje (06.10.2026).
+    #: dostaje numer ciagly w sezonie i zajmuje swoje pozycje (06.10.2026).
     official: bool = False
     #: Numer kolejny wpisany recznie przed wydaniem; brak = podpowiedz rejestru.
     seq: Optional[int] = None
@@ -224,6 +224,8 @@ def _period_info(payload: PdfRequest, data: dict) -> dict:
     return {
         "year": payload.year,
         "month": payload.month,
+        # Sezon numeracji (07.10.2026): sezon OKRESU, nie dnia wydania.
+        "season": G.period_season(date_from, data["period"].get("season")) or payload.year,
         "id": (payload.period_id or "").strip().lower() or None,
         "label": label,
         "from": date_from.isoformat(),
@@ -287,12 +289,12 @@ async def _issue(
                 + (f" ({', '.join(numbers)})" if numbers else "")
                 + " - nie ma czego wydać.",
             )
-        used = await REG.used_seqs(province, kind, period["year"])
-        seq = payload.seq or G.suggest_seq(used, await REG.start_after(province, kind, period["year"]))
+        used = await REG.used_seqs(province, kind, period["season"])
+        seq = payload.seq or G.suggest_seq(used, await REG.start_after(province, kind, period["season"]))
         problem = G.seq_problem(seq, used)
         if problem:
             raise HTTPException(409, problem)
-        number = G.number_text(province_short(province), period["year"], period["month"], int(seq))
+        number = G.number_text(province_short(province), period["season"], int(seq), kind)
         context, totals = build(items, number, False)
         result = render_kind(province, kind, context)
         doc_id = await REG.insert_document(

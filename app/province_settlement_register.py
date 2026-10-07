@@ -1,7 +1,7 @@
 """
 Rejestr oficjalnych dokumentów rozliczeń okręgu - warstwa HTTP i baza.
 
-Reguła (numeracja ciągła w roku, zajętość części puli) w liściu
+Reguła (numeracja ciągła w sezonie, zajętość części puli) w liściu
 `settlement_register_rules`, schemat w `settlement_register_tables`. Samo
 wydanie dokumentu robią trasy PDF (`province_settlement_pdf`) - tutaj jest
 przegląd rejestru, ponowne pobranie, usunięcie (numer i pozycje wracają do
@@ -92,6 +92,9 @@ def _doc_json(row: Any) -> dict:
         "kind": row["kind"],
         "number": row["number"],
         "number_year": row["number_year"],
+        #: Sezon numeracji: „2026/27" (rok początku w `number_year`).
+        "season": row["number_year"],
+        "season_label": G.season_label(row["number_year"]),
         "seq": row["seq"],
         "period": {
             "year": row["period_year"],
@@ -138,6 +141,14 @@ async def period_taken(
         return {}
 
 
+async def season_of_period(key: str, year: int, month: int, period_id: Optional[str]) -> int:
+    """Sezon numeracji dla okresu rozliczenia (rok początku sezonu)."""
+    from app.province_settlements import settlement_range
+
+    date_from, _date_to, item = await settlement_range(key, year, month, _s(period_id).lower() or None)
+    return G.period_season(date_from, (item or {}).get("season")) or int(year)
+
+
 async def used_seqs(key: str, kind: str, number_year: int) -> list[int]:
     rows = await database.fetch_all(
         select(T.c.seq).where(
@@ -156,18 +167,20 @@ async def start_after(key: str, kind: str, number_year: int) -> int:
     return int(row["start_after"]) if row else 0
 
 
-async def suggestion(key: str, kind: str, year: int, month: int) -> dict:
+async def suggestion(key: str, kind: str, season: int) -> dict:
     """Numer, który podpowiada ekran przed wydaniem - bez rezerwacji."""
-    used = await used_seqs(key, kind, year)
-    after = await start_after(key, kind, year)
+    used = await used_seqs(key, kind, season)
+    after = await start_after(key, kind, season)
     seq = G.suggest_seq(used, after)
     short = _short(key)
     return {
         "seq": seq,
-        "number": G.number_text(short, year, month, seq),
-        "prefix": G.number_prefix(short, year, month),
+        "number": G.number_text(short, season, seq, kind),
+        "prefix": G.number_prefix(short, season, kind),
         "last": max(used) if used else None,
         "start_after": after,
+        "season": season,
+        "season_label": G.season_label(season),
     }
 
 
@@ -193,7 +206,7 @@ async def insert_document(
         .values(
             province=key,
             kind=kind,
-            number_year=int(period["year"]),
+            number_year=int(period["season"]),
             seq=int(seq),
             number=number,
             period_year=int(period["year"]),
@@ -222,24 +235,23 @@ def issue_lock(key: str, kind: str) -> str:
 # Trasy
 # ---------------------------------------------------------------------------
 
-@router.get("", summary="Rejestr oficjalnych dokumentów okręgu")
+@router.get("", summary="Rejestr oficjalnych dokumentów okręgu - jeden sezon")
 async def list_register(
     province: str = Query(...),
-    year: int = Query(...),
-    month: Optional[int] = Query(None),
+    season: int = Query(..., description="Rok początku sezonu: 2026 = 2026/27"),
     kind: Optional[str] = Query(None),
 ):
     key = _require(province)
-    query = select(T).where(and_(T.c.province == key, T.c.number_year == int(year)))
+    query = select(T).where(and_(T.c.province == key, T.c.number_year == int(season)))
     if kind:
         query = query.where(T.c.kind == _kind(kind))
     rows = await database.fetch_all(query.order_by(T.c.kind, T.c.seq.desc()))
-    anchor = int(month or datetime.now().month)
     return {
         "province": key,
-        "year": int(year),
+        "season": int(season),
+        "season_label": G.season_label(season),
         "documents": [_doc_json(row) for row in rows],
-        "next": {k: await suggestion(key, k, int(year), anchor) for k in G.KINDS},
+        "next": {k: await suggestion(key, k, int(season)) for k in G.KINDS},
     }
 
 
@@ -252,6 +264,7 @@ async def period_state(
 ):
     key = _require(province)
     pid = _s(period_id).lower()
+    season = await season_of_period(key, year, month, pid)
     taken = {}
     documents = {}
     for kind in G.KINDS:
@@ -262,9 +275,11 @@ async def period_state(
         taken[kind] = G.judge_view(G.taken_map(docs))
     return {
         "province": key,
+        "season": season,
+        "season_label": G.season_label(season),
         "taken": taken,
         "documents": documents,
-        "next": {kind: await suggestion(key, kind, year, month) for kind in G.KINDS},
+        "next": {kind: await suggestion(key, kind, season) for kind in G.KINDS},
     }
 
 
@@ -312,13 +327,14 @@ async def remove_document(
 class SettingsBody(BaseModel):
     province: str
     kind: str
-    year: int
+    #: Rok początku sezonu: 2026 = 2026/27.
+    season: int
     #: Ostatni numer wydany poza systemem - 0 = numeracja od 1.
     start_after: int = 0
     user: Optional[str] = None
 
 
-@router.put("/settings", summary="Kontynuacja numeracji w roku")
+@router.put("/settings", summary="Kontynuacja numeracji w sezonie")
 async def save_settings(body: SettingsBody):
     key = _require(body.province)
     kind = _kind(body.kind)
@@ -327,7 +343,7 @@ async def save_settings(body: SettingsBody):
     values = {"start_after": int(body.start_after), "updated_by": body.user, "updated_at": _now()}
     await database.execute(
         pg_insert(ST)
-        .values(province=key, kind=kind, number_year=int(body.year), **values)
+        .values(province=key, kind=kind, number_year=int(body.season), **values)
         .on_conflict_do_update(index_elements=[ST.c.province, ST.c.kind, ST.c.number_year], set_=values)
     )
-    return {"ok": True, "next": await suggestion(key, kind, int(body.year), datetime.now().month)}
+    return {"ok": True, "next": await suggestion(key, kind, int(body.season))}

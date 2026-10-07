@@ -12,16 +12,31 @@ from __future__ import annotations
 from app import settlement_register_rules as G
 
 
-def test_numer_ciagly_w_roku_z_podpowiedzia():
-    assert G.number_text("SL", 2026, 10, 14) == "SL/10/2026/14"
-    assert G.number_prefix("SL", 2026, 3) == "SL/03/2026/"
+def test_numer_ciagly_w_sezonie_z_podpowiedzia():
+    # Decyzja z 07.10.2026: numer sezonowy, przejazdy z literą P.
+    assert G.number_text("SL", 2026, 14) == "SL/2026_27/14"
+    assert G.number_text("SL", 2026, 3, G.PRZEJAZDY) == "SLP/2026_27/3"
+    assert G.number_text("SL", 2099, 1) == "SL/2099_00/1"
+    assert G.number_prefix("SL", 2026) == "SL/2026_27/"
+    assert G.season_label(2026) == "2026/27"
     assert G.suggest_seq([]) == 1
     assert G.suggest_seq([1, 2, 5]) == 6
-    # Kontynuacja roku z ustawień: ręcznie wydano już 13 dokumentów.
+    # Kontynuacja sezonu z ustawień: ręcznie wydano już 13 dokumentów.
     assert G.suggest_seq([], start_after=13) == 14
     assert G.suggest_seq([14, 15], start_after=13) == 16
     # Usunięcie ostatniego zwalnia numer.
     assert G.suggest_seq([1, 2]) == 3
+
+
+def test_sezon_okresu_od_sierpnia():
+    from datetime import date
+
+    assert G.period_season(date(2026, 8, 1)) == 2026      # sierpień = nowy sezon
+    assert G.period_season(date(2026, 7, 31)) == 2025     # lipiec = stary
+    assert G.period_season(date(2026, 9, 7)) == 2026
+    # Własny okres wypłat okręgu niesie sezon wprost.
+    assert G.period_season(date(2026, 7, 20), "2026/2027") == 2026
+    assert G.period_season(None) is None
 
 
 def test_reczny_numer_nie_moze_byc_zajety():
