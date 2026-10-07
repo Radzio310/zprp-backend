@@ -189,6 +189,7 @@ def auto_merge_plan(
     key_of: Any,
     taken: Iterable[str] = (),
     rejected: Iterable[str] = (),
+    owner: Optional[Mapping[str, str]] = None,
 ) -> dict[str, str]:
     """
     Automatyczne scalenie: klub zastępczy -> klub z numerem ZPRP (decyzja z 06.10.2026).
@@ -202,7 +203,14 @@ def auto_merge_plan(
     Nigdy nie łączymy dwóch prawdziwych numerów ZPRP (to robi człowiek
     wspólnym budżetem). Pomijamy kluby już w ręcznym budżecie (`taken`)
     i scalenia rozdzielone w panelu (`rejected`).
+
+    `owner` - numer klubu -> klub GŁÓWNY jego budżetu (`member_map`).
+    Zgłoszenie z 07.10.2026: drużyna Junior mł. bez numeru klubu została
+    obok „MKS Olimpia Piekary Śląskie", bo pasowały do niej dwa numery
+    (41 i 4927 - „Sp. z o.o."), choć oba są JEDNYM budżetem. Numery jednego
+    budżetu liczą się teraz jako jeden kandydat - jego klub główny.
     """
+    owner = owner or {}
     taken_set = {_s(club_id) for club_id in taken}
     rejected_set = {_s(club_id) for club_id in rejected}
     real: dict[str, set[str]] = {}
@@ -215,7 +223,7 @@ def auto_merge_plan(
         if club.startswith(FALLBACK_PREFIX):
             fallback.setdefault(club, set()).add(base)
         elif club != "OKREG":
-            real.setdefault(base, set()).add(club)
+            real.setdefault(base, set()).add(_s(owner.get(club)) or club)
     plan: dict[str, str] = {}
     for club, bases in fallback.items():
         if club in taken_set or club in rejected_set:

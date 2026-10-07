@@ -134,6 +134,7 @@ async def auto_plan(province: str, groups: Optional[list[dict]] = None) -> dict[
         key_of=team_key,
         taken=[club_id for group in groups for club_id in group.get("member_ids") or []],
         rejected=(await _rejections(key)).keys(),
+        owner=BR.member_map(groups),
     )
 
 

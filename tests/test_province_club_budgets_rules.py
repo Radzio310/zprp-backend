@@ -205,3 +205,19 @@ def test_auto_group_is_a_budget_row():
     assert merged["1001"]["charged"] == 120
     assert merged["1001"]["auto_merged"] is True
     assert merged["1001"]["auto_member_ids"] == ["eligible-team:11", "eligible-team:12"]
+
+
+def test_druzyna_bez_numeru_dolacza_do_budzetu_z_kilkoma_numerami():
+    # 07.10.2026: Junior mł. Olimpii Piekary bez numeru klubu został obok
+    # budżetu 41 + 4927, bo pasowały do niego dwa numery jednego budżetu.
+    from app.province_club_budgets_rules import auto_merge_plan, member_map
+
+    teams = [
+        ("41", "MKS Olimpia Piekary Śląskie"),
+        ("4927", "MKS Olimpia Piekary Śląskie"),
+        ("eligible-team:77", "MKS Olimpia Piekary Śląskie II"),
+    ]
+    key = lambda name: " ".join(name.lower().split())  # noqa: E731
+    assert auto_merge_plan(teams, key_of=key) == {}  # bez budżetów - dwa kandydaty
+    owner = member_map([{"primary_club_id": "41", "member_ids": ["41", "4927"]}])
+    assert auto_merge_plan(teams, key_of=key, owner=owner) == {"eligible-team:77": "41"}
