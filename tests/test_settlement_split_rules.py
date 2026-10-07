@@ -143,3 +143,35 @@ def test_default_lists():
     lists = S.default_lists(["a", "b"], 3)
     assert [l["letter"] for l in lists] == ["A", "B", "C"]
     assert lists[0]["match_keys"] == ["a", "b"] and lists[1]["match_keys"] == []
+
+
+def test_znikniety_mecz_zmniejsza_czesc_a_podzial_obowiazuje():
+    # 07.10.2026: mecz wypadł z rozliczenia (np. II liga spoza okręgu) -
+    # podział zostaje, maleje część, w której był.
+    lists = [
+        {"letter": "A", "match_keys": ["m1"], "manual_shift": 0.0},
+        {"letter": "B", "match_keys": ["m2", "m3"], "manual_shift": 0.0},
+    ]
+    after = [m for m in POOL if m["match_key"] != "m3"]
+    state = S.split_state(lists, after)
+    assert state["current"] is True
+    by = {row["letter"]: row for row in state["calc"]["lists"]}
+    assert by["B"]["match_keys"] == ["m2"]
+
+
+def test_czesc_z_przesuniecia_pokrywa_minus():
+    total = sum(m["gross"] for m in POOL)
+    lists = [
+        {"letter": "A", "match_keys": [m["match_key"] for m in POOL], "manual_shift": -500.0},
+        {"letter": "B", "match_keys": [], "manual_shift": 0.0},
+        {"letter": "C", "match_keys": [], "manual_shift": 500.0},
+    ]
+    assert S.split_state(lists, POOL)["current"] is True
+    # Zostaje tylko pierwszy mecz - A wyszłaby na minus, C maleje.
+    first = POOL[:1]
+    state = S.split_state(lists, first)
+    assert state["current"] is True, state["reasons"]
+    rows = {row["letter"]: row for row in state["calc"]["lists"]}
+    assert rows["A"]["gross"] == 0 and rows["C"]["gross"] == 400.0
+    assert round(sum(r["gross"] for r in rows.values()), 2) == round(first[0]["gross"], 2)
+    assert total > first[0]["gross"]

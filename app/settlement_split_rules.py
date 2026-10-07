@@ -360,8 +360,63 @@ def issued_state(snapshot: Optional[list[dict]], lists: list[dict], matches: lis
 
 
 def split_state(lists: list[dict], matches: list[dict]) -> dict:
-    """Czy zapisany podział obowiązuje: kompletny i zgodny z dzisiejszą pulą."""
-    return issued_state(None, lists, matches)
+    """
+    Czy zapisany podział obowiązuje - i jego kwoty na DZISIEJSZEJ puli.
+
+    Decyzja z 07.10.2026: zmiana meczów nie psuje podziału. Mecz, który
+    wypadł z rozliczenia (np. II liga u gospodarza spoza okręgu, „Nie
+    naliczaj"), znika z części, w której był, i ta część maleje; mecz, który
+    doszedł, trafia do części A (`reconcile`). Podział przestaje obowiązywać
+    tylko wtedy, gdy na dzisiejszej puli się nie domyka (np. część wyszła na
+    minus albo zostały mniej niż dwie części) - wtedy z powodem.
+    """
+    keys = [_s(m.get("match_key")) for m in matches]
+    effective, notes = reconcile(lists, keys)
+    notes.extend(cover_negative(effective, matches))
+    reasons = problems(effective, matches, for_issue=True)
+    return {
+        "current": not reasons,
+        "reasons": reasons,
+        "calc": compute(effective, matches),
+        "notes": notes,
+    }
+
+
+def cover_negative(lists: list[dict], matches: list[dict]) -> list[str]:
+    """
+    Część na minusie po zniknięciu meczów - brak schodzi z przesunięć innych
+    części (od ostatniej), w miejscu. Suma przesunięć zostaje zerem, więc
+    suma części dalej równa się puli.
+
+    Przykład: C = 300 zł samym przesunięciem z A; mecz z A wypadł z
+    rozliczenia, A wyszłaby na minus - C maleje o tyle, ile brakuje.
+    """
+    notes: list[str] = []
+    for _ in range(len(lists) * 2):
+        calc = compute(lists, matches)
+        short = next((row for row in calc["lists"] if row["gross"] < 0), None)
+        if short is None:
+            break
+        deficit = _cents(-short["gross"])
+        donor = next(
+            (
+                item
+                for item in reversed(lists)
+                if item["letter"] != short["letter"] and _cents(item.get("manual_shift")) > 0
+            ),
+            None,
+        )
+        if donor is None:
+            break
+        moved = min(deficit, _cents(donor["manual_shift"]))
+        donor["manual_shift"] = _pln(_cents(donor["manual_shift"]) - moved)
+        target = next(item for item in lists if item["letter"] == short["letter"])
+        target["manual_shift"] = _pln(_cents(target.get("manual_shift")) + moved)
+        notes.append(
+            f"Część {short['letter']} wyszłaby na minus po zmianie meczów - "
+            f"część {donor['letter']} zmniejszona o {_fmt(_pln(moved))}."
+        )
+    return notes
 
 
 def numbers_label(numbers: Iterable[str]) -> str:

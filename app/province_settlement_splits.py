@@ -394,6 +394,9 @@ async def _payload(
     suggested = False
     if row and row.get("status") != S.STATUS_VOID:
         lists, notes = S.reconcile(_json(row.get("lists_json"), []), keys)
+        # Ten sam rachunek co rozliczenie (`split_state`): część na minusie po
+        # zniknięciu meczów pokrywają przesunięcia innych części.
+        notes.extend(S.cover_negative(lists, matches))
     else:
         lists = S.default_lists(keys, 2)
         suggested = True
