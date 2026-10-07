@@ -44,8 +44,10 @@ T = province_settlement_register
 ST = province_settlement_register_settings
 DS = province_settlement_doc_settings
 
-#: Domyślny wygląd dokumentów - liczba meczów UKRYTA (decyzja z 07.10.2026).
-DOC_DEFAULTS = {"show_matches": False}
+#: Domyślny wygląd dokumentów (decyzje z 07.10.2026): liczba meczów UKRYTA,
+#: podtytuł i okres widoczne, kara najpierw z listy A.
+DOC_DEFAULTS = {"show_matches": False, "show_subtitle": True, "period_display": "all", "penalty_list": "A"}
+PERIOD_DISPLAYS = ("all", "main_only", "none")
 
 
 def _now() -> datetime:
@@ -298,6 +300,8 @@ async def period_state(
         "taken": taken,
         "documents": documents,
         "issued": issued,
+        # Wygląd dokumentów - ekran liczy z niego kary na pasku (lista kar).
+        "look": await doc_settings(key),
         "next": {kind: await suggestion(key, kind, season) for kind in G.KINDS},
     }
 
@@ -377,7 +381,14 @@ async def doc_settings(key: str) -> dict:
         row = None
     if not row:
         return dict(DOC_DEFAULTS)
-    return {"show_matches": bool(row["show_matches"])}
+    display = _s(row["period_display"])
+    letter = _s(row["penalty_list"]).upper()
+    return {
+        "show_matches": bool(row["show_matches"]),
+        "show_subtitle": bool(row["show_subtitle"]),
+        "period_display": display if display in PERIOD_DISPLAYS else "all",
+        "penalty_list": letter if len(letter) == 1 and letter.isalpha() else "A",
+    }
 
 
 @router.get("/doc-settings", summary="Wygląd dokumentów okręgu (np. liczba meczów)")
@@ -389,13 +400,29 @@ async def get_doc_settings(province: str = Query(...)):
 class DocSettingsBody(BaseModel):
     province: str
     show_matches: bool = False
+    show_subtitle: bool = True
+    period_display: str = "all"
+    penalty_list: str = "A"
     user: Optional[str] = None
 
 
 @router.put("/doc-settings", summary="Zapisz wygląd dokumentów okręgu")
 async def save_doc_settings(body: DocSettingsBody):
     key = _require(body.province)
-    values = {"show_matches": bool(body.show_matches), "updated_by": body.user, "updated_at": _now()}
+    display = _s(body.period_display)
+    if display not in PERIOD_DISPLAYS:
+        raise HTTPException(400, "Nieznany sposób pokazywania okresu.")
+    letter = _s(body.penalty_list).upper()
+    if len(letter) != 1 or not letter.isalpha():
+        raise HTTPException(400, "Lista kar to jedna litera (A, B, C...).")
+    values = {
+        "show_matches": bool(body.show_matches),
+        "show_subtitle": bool(body.show_subtitle),
+        "period_display": display,
+        "penalty_list": letter,
+        "updated_by": body.user,
+        "updated_at": _now(),
+    }
     await database.execute(
         pg_insert(DS)
         .values(province=key, **values)

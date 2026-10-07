@@ -95,6 +95,13 @@ def define_tables(metadata):
         metadata,
         Column("province", String, primary_key=True),
         Column("show_matches", Boolean, nullable=False, server_default=text("false")),
+        #: Wiersz „45 sędziów · wystawiono 07.10.2026" pod tytułem.
+        Column("show_subtitle", Boolean, nullable=False, server_default=text("true")),
+        #: Okres rozliczenia w nagłówku: all | main_only (tylko lista A
+        #: i dokument bez list) | none.
+        Column("period_display", String, nullable=False, server_default=text("'all'")),
+        #: Lista, z której najpierw schodzi kara za nieobecność („A").
+        Column("penalty_list", String, nullable=False, server_default=text("'A'")),
         Column("updated_by", String, nullable=True),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )

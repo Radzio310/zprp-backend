@@ -171,9 +171,11 @@ def wanted_parts(available: list[str], requested: Optional[Iterable[Any]]) -> li
     return [letter for letter in available if letter in asked]
 
 
-def allocate_penalty(parts: list[dict], penalty: float) -> dict[str, float]:
+def allocate_penalty(parts: list[dict], penalty: float, first: str = "A") -> dict[str, float]:
     """
-    Kara sędziego rozłożona na części: najpierw z A, reszta z B i dalej.
+    Kara sędziego rozłożona na części: najpierw z listy `first` (ustawienie
+    „Lista kar", domyślnie A - 07.10.2026), reszta z kolejnych części po
+    kolei.
 
     Kara schodzi z kwoty do wypłaty, a części mogą trafić na różne dokumenty -
     stała kolejność sprawia, że każdy dokument wie, ile kary jest jego, bez
@@ -181,6 +183,8 @@ def allocate_penalty(parts: list[dict], penalty: float) -> dict[str, float]:
     """
     left = money(penalty)
     out: dict[str, float] = {}
+    lead = _s(first).upper()
+    parts = sorted(parts, key=lambda part: 0 if _s(part.get("letter")).upper() == lead else 1)
     for part in parts:
         letter = _s(part.get("letter"))
         take = money(min(left, max(0.0, money(part.get("net"))))) if left > 0 else 0.0

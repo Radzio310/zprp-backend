@@ -110,3 +110,11 @@ def test_czesci_jednego_sedziego_scalaja_sie_w_jeden_wiersz():
     src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "province_settlement_pdf.py").read_text(encoding="utf-8")
     assert "for item in merge_parts(items)" in src
     assert "items=[_register_item(i) for i in items]" in src
+
+
+def test_kara_schodzi_najpierw_z_wybranej_listy():
+    # 07.10.2026: ustawienie „Lista kar" - domyślnie A, można np. C.
+    parts = [{"letter": "A", "net": 264.0}, {"letter": "B", "net": 77.44}, {"letter": "C", "net": 100.0}]
+    assert G.allocate_penalty(parts, 50, "C") == {"C": 50.0, "A": 0.0, "B": 0.0}
+    assert G.allocate_penalty(parts, 150, "C") == {"C": 100.0, "A": 50.0, "B": 0.0}
+    assert G.allocate_penalty(parts, 50) == {"A": 50.0, "B": 0.0, "C": 0.0}

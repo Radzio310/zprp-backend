@@ -374,12 +374,29 @@ def merge_parts(items: list[dict]) -> list[dict]:
     return [merged[judge_id] for judge_id in order]
 
 
+def _show_period(look: dict, letter: str) -> bool:
+    """
+    Czy w naglowku stoi okres rozliczenia (ustawienie „Wyglad dokumentow",
+    07.10.2026): wszedzie, nigdzie albo tylko na liscie glownej - liscie A
+    i dokumencie bez podzialu na listy.
+    """
+    mode = look.get("period_display") or "all"
+    if mode == "none":
+        return False
+    if mode == "main_only":
+        return not letter or letter == WHOLE_POOL_LETTER
+    return True
+
+
 #: Lista, na ktora ida sedziowie bez podzialu puli (decyzja z 07.10.2026).
 WHOLE_POOL_LETTER = "A"
 
 
 def _zestawienie_candidates(
-    entries: list, parts: dict[str, list[str]], letter: Optional[str] = None
+    entries: list,
+    parts: dict[str, list[str]],
+    letter: Optional[str] = None,
+    penalty_list: str = "A",
 ) -> list[dict]:
     """
     Wiersze zestawienia: sedzia bez podzialu jednym wierszem, sedzia
@@ -420,7 +437,10 @@ def _zestawienie_candidates(
         letters = G.wanted_parts(
             [p["letter"] for p in split_parts], wanted.get(e.judge_id)
         )
-        penalties = G.allocate_penalty(split_parts, e.penalty)
+        penalties = G.allocate_penalty(split_parts, e.penalty, penalty_list)
+        penalty_lead = next(
+            (p["letter"] for p in split_parts if p["letter"] == penalty_list), split_parts[0]["letter"]
+        )
         future_keys = {m.match_key for m in e.matches if m.future}
         for part in split_parts:
             letter = part["letter"]
@@ -443,7 +463,7 @@ def _zestawienie_candidates(
                     "tax": part["tax"],
                     "net": part["net"],
                     "penalty": penalty,
-                    "penalty_left": e.penalty_left if letter == split_parts[0]["letter"] else 0,
+                    "penalty_left": e.penalty_left if letter == penalty_lead else 0,
                     "payable": round(part["net"] - penalty, 2),
                 }
             )
@@ -472,11 +492,13 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
     period = _period_info(payload, data)
     outside = data["outside_district"]
     bombs = data.get("bombs") or []
-    candidates = _zestawienie_candidates(data["entries"], payload.parts, payload.letter)
-    list_letter = (payload.letter or "").strip().upper()
     from app.province_settlement_register import doc_settings
 
     look = await doc_settings(province)
+    candidates = _zestawienie_candidates(
+        data["entries"], payload.parts, payload.letter, look.get("penalty_list") or "A"
+    )
+    list_letter = (payload.letter or "").strip().upper()
 
     def build(items: list[dict], number: str, draft: bool) -> tuple[dict, dict]:
         judges = {item["judge_id"] for item in items}
@@ -510,6 +532,8 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
         context = {
             "draft": draft,
             "show_matches": bool(look.get("show_matches")),
+            "show_subtitle": bool(look.get("show_subtitle", True)),
+            "show_period": _show_period(look, list_letter),
             "file_period": (f"lista_{list_letter}_" if list_letter else "") + f"{payload.month:02d}_{payload.year}",
             # Znacznik listy - drobny, pod numerem (decyzja z 07.10.2026).
             "list_letter": list_letter,
@@ -665,6 +689,8 @@ async def przejazdy_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_o
         context = {
             "draft": draft,
             "show_matches": bool(look.get("show_matches")),
+            "show_subtitle": bool(look.get("show_subtitle", True)),
+            "show_period": _show_period(look, ""),
             "file_period": f"{payload.month:02d}_{payload.year}",
             "org_name": _org(province)["name"],
             "org_address": _org(province)["address"],

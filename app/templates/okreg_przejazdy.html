@@ -172,7 +172,7 @@
     <td class="doc-box">
       <div class="doc-kind">Lista przejazdów</div>
       <div class="doc-number{% if draft %} is-draft{% endif %}">{{ document_number }}</div>
-      <div class="doc-period">{{ period_label }}</div>
+      {%- if show_period is not defined or show_period %}<div class="doc-period">{{ period_label }}</div>{% endif %}
     </td>
   </tr>
 </table>
@@ -180,12 +180,14 @@
 <div class="rule"><div class="rule-gold"></div></div>
 
 <div class="title">Lista kosztów przejazdów</div>
+{%- if show_subtitle is not defined or show_subtitle %}
 <div class="subtitle">
   {{ judges_count }} {{ judges_word }}{% if show_matches %} &middot; {{ rows|length }} {{ trips_word }}{% endif %}
   &middot; {{ total_km | km }} łącznie
   {%- if include_future %} &middot; <b>uwzględniono mecze jeszcze nierozegrane</b>{% endif %}
   {%- if include_zprp %} &middot; <b>z obsadami rozliczanymi przez ZPRP</b>{% endif %}
 </div>
+{%- endif %}
 
 {% if rows %}
 <table class="grid">

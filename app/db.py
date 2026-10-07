@@ -4625,6 +4625,10 @@ with engine.connect() as _conn:
             "ON province_settlement_splits (province, period_year, period_month, period_id, judge_id)"
         )
     )
+    # Wygląd dokumentów (07.10.2026): kolejne pola - tabela jest już na produkcji.
+    _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS show_subtitle boolean NOT NULL DEFAULT true"))
+    _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS period_display varchar NOT NULL DEFAULT 'all'"))
+    _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS penalty_list varchar NOT NULL DEFAULT 'A'"))
     # Decyzja „Zostaw" przy podpowiedzi zdjęcia meczu (06.10.2026) - tabela
     # wyjątków istnieje na produkcji, więc `create_all` kolumny nie doda.
     _conn.execute(
