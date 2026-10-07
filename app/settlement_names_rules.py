@@ -134,3 +134,74 @@ def pick_unnamed(
         if len(out) >= limit:
             break
     return out
+
+
+def merge_names(
+    seen: dict[str, str],
+    zprp_list: dict[str, str],
+    panel: dict[str, str],
+) -> tuple[dict[str, str], list[dict]]:
+    """
+    Nazwisko pod numerem sędziego z trzech źródeł - i konflikty między nimi.
+
+    `seen` - obsady meczów (numer i nazwisko z jednego gniazda), `zprp_list` -
+    lista „Sędziowie i Delegaci" z ZPRP, `panel` - lista prowadzona ręcznie
+    w panelu okręgu.
+
+    Do 07.10.2026 panel wygrywał ZAWSZE. Zgłoszenie Wojtka Kaszni: był na
+    liście dwa razy, a pod jednym z numerów stały cudze mecze - ręczny wpis
+    w panelu przypisał jego nazwisko do numeru innej osoby, a mecze idą po
+    NUMERZE z obsady ZPRP. Teraz panel wygrywa tylko wtedy, gdy to ta sama
+    osoba co w ZPRP (inny zapis: „Jan Nowak" / „NOWAK Jan"); gdy ZPRP pod tym
+    numerem zna KOGO INNEGO, wygrywa ZPRP, a rozbieżność wraca jako konflikt
+    do pokazania komisji.
+    """
+    from app.match_bombs_rules import same_person
+
+    zprp: dict[str, str] = {}
+    for source in (seen, zprp_list):
+        for judge_id, name in source.items():
+            key = _s(judge_id)
+            if key and not is_missing_name(name, key):
+                zprp[key] = _s(name)
+    out = dict(zprp)
+    conflicts: list[dict] = []
+    for judge_id, name in panel.items():
+        key = _s(judge_id)
+        if not key or is_missing_name(name, key):
+            continue
+        official = zprp.get(key)
+        if official and not same_person(official, name):
+            conflicts.append({"judge_id": key, "panel_name": _s(name), "zprp_name": official})
+            continue
+        out[key] = _s(name)
+    conflicts.sort(key=lambda item: item["judge_id"])
+    return out, conflicts
+
+
+def duplicate_names(names: dict[str, str], judge_ids: Iterable[str]) -> list[dict]:
+    """
+    To samo nazwisko pod kilkoma numerami wśród `judge_ids` (np. sędziowie
+    okresu) - [{name, judge_ids}]. Zwykle pomyłka w numerze albo dwie
+    kartoteki tej samej osoby w ZPRP; komisja musi to zobaczyć.
+    """
+    from app.match_bombs_rules import same_person
+
+    ids = sorted({_s(j) for j in judge_ids if _s(j)})
+    groups: list[list[str]] = []
+    for judge_id in ids:
+        name = names.get(judge_id, "")
+        if is_missing_name(name, judge_id):
+            continue
+        for group in groups:
+            if same_person(names.get(group[0], ""), name):
+                group.append(judge_id)
+                break
+        else:
+            groups.append([judge_id])
+    return [
+        {"name": names.get(group[0], ""), "judge_ids": group}
+        for group in groups
+        if len(group) > 1
+    ]
+

@@ -421,14 +421,19 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
     outside = data["outside_district"]
     bombs = data.get("bombs") or []
     candidates = _zestawienie_candidates(data["entries"], payload.parts)
+    from app.province_settlement_register import doc_settings
+
+    look = await doc_settings(province)
 
     def build(items: list[dict], number: str, draft: bool) -> tuple[dict, dict]:
         judges = {item["judge_id"] for item in items}
         rows = [
             {
                 **item,
-                "split_note": G.part_label(item.get("part") or "", item.get("part_of") or 0),
-                "split_applied": bool(item.get("part")),
+                # Część puli idzie na dokument BEZ oznaczenia „część A"
+                # (decyzja z 07.10.2026) - wiersz to po prostu kwota sędziego.
+                "split_note": "",
+                "split_applied": False,
                 # Na szkicu: pozycja jest juz na oficjalnym dokumencie.
                 "taken_note": f"już na {item['taken_by']}" if draft and item.get("taken_by") else "",
             }
@@ -447,6 +452,7 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
         payable_total = round2(totals["net"] - penalty_total)
         context = {
             "draft": draft,
+            "show_matches": bool(look.get("show_matches")),
             "file_period": f"{payload.month:02d}_{payload.year}",
             "org_name": _org(province)["name"],
             "org_address": _org(province)["address"],
@@ -477,8 +483,8 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
                 for row in bombs
                 if row["judge_id"] in judges
             ],
-            # Przypis pod tabela - tylko gdy ktos jest wyplacany w czesciach.
-            "split_rows": sum(1 for r in rows if r["split_applied"]),
+            # Przypis o czesciach puli - wylaczony razem z oznaczeniem czesci.
+            "split_rows": 0,
             "totals": totals,
             "total_in_words": amount_in_words(payable_total),
             "outside_rows": [
@@ -519,6 +525,9 @@ async def przejazdy_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_o
     period = _period_info(payload, data)
     travel = data["travel"]
     outside = data["outside_district"]
+    from app.province_settlement_register import doc_settings
+
+    look = await doc_settings(province)
 
     # Przejazdy ida cale - sedzia jest pozycja, bez czesci puli.
     candidates: list[dict] = []
@@ -591,6 +600,7 @@ async def przejazdy_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_o
 
         context = {
             "draft": draft,
+            "show_matches": bool(look.get("show_matches")),
             "file_period": f"{payload.month:02d}_{payload.year}",
             "org_name": _org(province)["name"],
             "org_address": _org(province)["address"],

@@ -915,12 +915,34 @@ async def summary(
             "document_number_hint": hint,
             # Mecze z podpowiedzią „zdjąć?" w całym okresie (06.10.2026).
             "to_decide": sum(1 for e in data["entries"] for m in e.matches if m.exclude_hint),
+            # Kontrola nazwisk (07.10.2026): numer, pod ktorym panel okregu ma
+            # kogos innego niz ZPRP, i to samo nazwisko pod kilkoma numerami.
+            "name_check": await _name_check(key, data),
         }
 
     pack = await SC.packed(
         "summary", key, (int(year), int(month), str(period_id or ""), bool(include_future), bool(include_zprp), hint), build
     )
     return SC.respond(request, pack)
+
+
+async def _name_check(key: str, data: dict) -> dict:
+    """Konflikty nazwisk wsród sędziów okresu - patrz `settlement_names_rules`."""
+    from app.settlement_names import judge_names_checked
+    from app.settlement_names_rules import duplicate_names
+
+    try:
+        names, conflicts = await judge_names_checked(key)
+    except Exception as exc:  # kontrola to pomoc - nie moze zatrzymac ekranu
+        logger.warning("[settlement] %s: kontrola nazwisk: %s", key, exc)
+        return {"conflicts": [], "duplicates": []}
+    ids = {e.judge_id for e in data["entries"]} | {
+        e.judge_id for e in data["outside_district"]["entries"]
+    }
+    return {
+        "conflicts": [item for item in conflicts if item["judge_id"] in ids],
+        "duplicates": duplicate_names(names, ids),
+    }
 
 
 async def _solo_table_matches(province: str, keys: list[str]) -> set[str]:

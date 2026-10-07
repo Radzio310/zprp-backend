@@ -92,3 +92,21 @@ def test_pick_recent_matches_of_unnamed_judges_only():
     assert picked == {"465": ["194144", "180001"], "777": ["190000"]}
     assert pick_unnamed(rows, names, only={"777"}) == {"777": ["190000"]}
     assert len(pick_unnamed(rows, names, limit=1)) == 1
+
+
+def test_panel_nie_przypisuje_nazwiska_cudzemu_numerowi():
+    # 07.10.2026: Wojtek Kasznia dwa razy na liście, pod jednym numerem cudze
+    # mecze - panel okręgu miał jego nazwisko pod numerem innej osoby.
+    from app.settlement_names_rules import duplicate_names, merge_names
+
+    seen = {"104": "NOWAK Jan"}
+    listed = {"777": "KASZNIA Wojciech"}
+    panel = {"104": "Wojciech Kasznia", "500": "Anna Kowalska", "777": "Wojciech KASZNIA"}
+    names, conflicts = merge_names(seen, listed, panel)
+    assert names["104"] == "NOWAK Jan"                 # ZPRP zna pod 104 kogoś innego
+    assert names["777"] == "Wojciech KASZNIA"          # ta sama osoba - zapis z panelu
+    assert names["500"] == "Anna Kowalska"             # tylko panel - zostaje
+    assert conflicts == [{"judge_id": "104", "panel_name": "Wojciech Kasznia", "zprp_name": "NOWAK Jan"}]
+
+    dupes = duplicate_names({"104": "KASZNIA Wojciech", "777": "Wojciech Kasznia", "5": "X Y"}, ["104", "777", "5"])
+    assert dupes == [{"name": "KASZNIA Wojciech", "judge_ids": ["104", "777"]}]

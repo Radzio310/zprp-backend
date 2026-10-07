@@ -88,4 +88,14 @@ def define_tables(metadata):
         Column("updated_by", String, nullable=True),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
-    return register, settings
+    #: Wygląd dokumentów okręgu (07.10.2026): na razie jedno pole - czy na
+    #: Zestawieniu i Przejazdach pokazywać liczbę meczów (domyślnie NIE).
+    doc_settings = Table(
+        "province_settlement_doc_settings",
+        metadata,
+        Column("province", String, primary_key=True),
+        Column("show_matches", Boolean, nullable=False, server_default=text("false")),
+        Column("updated_by", String, nullable=True),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    return register, settings, doc_settings

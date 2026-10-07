@@ -23,7 +23,12 @@ from sqlalchemy import and_, delete, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import settlement_register_rules as G
-from app.db import database, province_settlement_register, province_settlement_register_settings
+from app.db import (
+    database,
+    province_settlement_doc_settings,
+    province_settlement_register,
+    province_settlement_register_settings,
+)
 from app.province_panel_access import PANEL_SETTLEMENTS
 from app.province_panel_guard import panel_write_gate
 
@@ -37,6 +42,10 @@ router = APIRouter(
 
 T = province_settlement_register
 ST = province_settlement_register_settings
+DS = province_settlement_doc_settings
+
+#: Domyślny wygląd dokumentów - liczba meczów UKRYTA (decyzja z 07.10.2026).
+DOC_DEFAULTS = {"show_matches": False}
 
 
 def _now() -> datetime:
@@ -347,3 +356,40 @@ async def save_settings(body: SettingsBody):
         .on_conflict_do_update(index_elements=[ST.c.province, ST.c.kind, ST.c.number_year], set_=values)
     )
     return {"ok": True, "next": await suggestion(key, kind, int(body.season))}
+
+
+async def doc_settings(key: str) -> dict:
+    """Wygląd dokumentów okręgu - z bazy albo domyślny (`DOC_DEFAULTS`)."""
+    try:
+        row = await database.fetch_one(select(DS).where(DS.c.province == key))
+    except Exception as exc:  # pragma: no cover - tabela przed pierwszym startem
+        logger.warning("[register] %s: ustawienia dokumentów: %s", key, exc)
+        row = None
+    if not row:
+        return dict(DOC_DEFAULTS)
+    return {"show_matches": bool(row["show_matches"])}
+
+
+@router.get("/doc-settings", summary="Wygląd dokumentów okręgu (np. liczba meczów)")
+async def get_doc_settings(province: str = Query(...)):
+    key = _require(province)
+    return {"province": key, **await doc_settings(key)}
+
+
+class DocSettingsBody(BaseModel):
+    province: str
+    show_matches: bool = False
+    user: Optional[str] = None
+
+
+@router.put("/doc-settings", summary="Zapisz wygląd dokumentów okręgu")
+async def save_doc_settings(body: DocSettingsBody):
+    key = _require(body.province)
+    values = {"show_matches": bool(body.show_matches), "updated_by": body.user, "updated_at": _now()}
+    await database.execute(
+        pg_insert(DS)
+        .values(province=key, **values)
+        .on_conflict_do_update(index_elements=[DS.c.province], set_=values)
+    )
+    return {"ok": True, "province": key, **await doc_settings(key)}
+

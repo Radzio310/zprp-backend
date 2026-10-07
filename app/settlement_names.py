@@ -41,6 +41,7 @@ from app.db import (
 from app.settlement_names_rules import (
     given_first,
     is_missing_name,
+    merge_names,
     officials_from_payload,
     officials_from_record,
     pick_unnamed,
@@ -83,34 +84,44 @@ def _state(raw: Any) -> dict:
 
 
 async def judge_names(province: str) -> dict[str, str]:
-    """Numer sedziego -> nazwisko, z trzech zrodel (patrz naglowek modulu)."""
-    out: dict[str, str] = {}
+    """Numer sedziego -> nazwisko, z trzech zrodel (`merge_names`)."""
+    names, _conflicts = await judge_names_checked(province)
+    return names
 
-    def put(judge_id: Any, name: Any) -> None:
-        key = _clean(judge_id)
-        if key and not is_missing_name(name, key):
-            out[key] = _clean(name)
 
-    for row in await database.fetch_all(
-        select(zprp_judges_seen.c.judge_id, zprp_judges_seen.c.full_name)
-    ):
-        put(row["judge_id"], row["full_name"])
+async def judge_names_checked(province: str) -> tuple[dict[str, str], list[dict]]:
+    """
+    Nazwiska i konflikty: numer, pod ktorym panel okregu wpisal kogos innego
+    niz ZPRP (`settlement_names_rules.merge_names`).
+    """
 
-    for row in await database.fetch_all(
-        select(
-            province_settlement_judges.c.judge_id,
-            province_settlement_judges.c.full_name,
-        ).where(province_settlement_judges.c.province == province)
-    ):
-        put(row["judge_id"], row["full_name"])
+    def collect(rows: Any) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for row in rows:
+            key = _clean(row["judge_id"])
+            if key and not is_missing_name(row["full_name"], key):
+                out[key] = _clean(row["full_name"])
+        return out
 
-    for row in await database.fetch_all(
-        select(province_judges.c.judge_id, province_judges.c.full_name).where(
-            province_judges.c.province.in_(spellings(province))
+    seen = collect(
+        await database.fetch_all(select(zprp_judges_seen.c.judge_id, zprp_judges_seen.c.full_name))
+    )
+    listed = collect(
+        await database.fetch_all(
+            select(
+                province_settlement_judges.c.judge_id,
+                province_settlement_judges.c.full_name,
+            ).where(province_settlement_judges.c.province == province)
         )
-    ):
-        put(row["judge_id"], row["full_name"])
-    return out
+    )
+    panel = collect(
+        await database.fetch_all(
+            select(province_judges.c.judge_id, province_judges.c.full_name).where(
+                province_judges.c.province.in_(spellings(province))
+            )
+        )
+    )
+    return merge_names(seen, listed, panel)
 
 
 async def judge_cities(judge_ids: Iterable[str]) -> dict[str, str]:

@@ -181,7 +181,7 @@
 
 <div class="title">Lista kosztów przejazdów</div>
 <div class="subtitle">
-  {{ judges_count }} {{ judges_word }} &middot; {{ rows|length }} {{ trips_word }}
+  {{ judges_count }} {{ judges_word }}{% if show_matches %} &middot; {{ rows|length }} {{ trips_word }}{% endif %}
   &middot; {{ total_km | km }} łącznie
   {%- if include_future %} &middot; <b>uwzględniono mecze jeszcze nierozegrane</b>{% endif %}
   {%- if include_zprp %} &middot; <b>z obsadami rozliczanymi przez ZPRP</b>{% endif %}
@@ -217,7 +217,7 @@
     {% endfor %}
     <tr class="subtotal">
       <td></td>
-      <td class="sub-label" colspan="4">Razem <b>{{ group.name or group.judge_id }}</b> &middot; {{ group.trips|length | trips }}</td>
+      <td class="sub-label" colspan="4">Razem <b>{{ group.name or group.judge_id }}</b>{% if show_matches %} &middot; {{ group.trips|length | trips }}{% endif %}</td>
       <td>{{ group.total_km | km }}</td>
       <td></td>
       <td class="sub-amount">{{ group.total_amount | money }}</td>
@@ -287,7 +287,7 @@
       {% endfor %}
       <tr class="subtotal">
         <td></td>
-        <td class="sub-label" colspan="3">Razem <b>{{ group.name or group.judge_id }}</b> &middot; {{ group.trips|length | trips }}</td>
+        <td class="sub-label" colspan="3">Razem <b>{{ group.name or group.judge_id }}</b>{% if show_matches %} &middot; {{ group.trips|length | trips }}{% endif %}</td>
         <td>{{ group.total_km | km }}</td>
         <td class="sub-amount">{{ group.total_amount | money }}</td>
       </tr>

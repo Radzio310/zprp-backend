@@ -4366,6 +4366,7 @@ from app.settlement_register_tables import define_tables as _define_register_tab
 (
     province_settlement_register,
     province_settlement_register_settings,
+    province_settlement_doc_settings,
 ) = _define_register_tables(metadata)
 
 # Ogólnopolska tabela odległości zasilana wyłącznie ryczałtami PDF ZPRP.
