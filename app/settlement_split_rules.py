@@ -165,8 +165,8 @@ def problems(
     Co jest nie tak z podziałem - zdania dla człowieka, puste = w porządku.
 
     `matches`: mecze puli, każdy ze słownikiem ``{"match_key", "gross", ...}``.
-    `for_issue`: wydanie list jest ostrzejsze - co najmniej dwie listy i żadnej
-    pustej (lista na 0,00 zł to numer w księdze bez pieniędzy).
+    `for_issue`: podział obowiązujący jest ostrzejszy - co najmniej dwie listy
+    (pusta lista jest dozwolona - patrz niżej).
     """
     out: list[str] = []
     by_key = {_s(m.get("match_key")): m for m in matches}
@@ -198,10 +198,13 @@ def problems(
             f"{word} {_fmt(abs(remainder))}."
         )
     for item in calc["lists"]:
+        # Pusta część (0 zł) NIE jest błędem (07.10.2026, zgłoszenie Wojtka
+        # Kaszni): litery to wspólne listy wszystkich sędziów (B - lista do
+        # Urzędu, C - inna), więc Bejnar bez B, a z C 300 zł ma B pustą.
+        # Usunąć B się nie da - litery idą po kolei i C stałaby się B. Pusta
+        # część po prostu nie trafia na żaden dokument.
         if item["gross"] < 0:
             out.append(f"Lista {item['letter']} wychodzi na minus ({_fmt(item['gross'])}) - zmniejsz przesunięcie.")
-        elif for_issue and item["gross"] == 0:
-            out.append(f"Lista {item['letter']} jest pusta - usuń ją albo przenieś na nią kwotę.")
     if for_issue and len(lists) < 2:
         out.append("Do wydania potrzebne są co najmniej dwie listy - jedna lista to zwykłe zestawienie.")
     return out

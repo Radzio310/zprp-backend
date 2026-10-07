@@ -372,7 +372,9 @@ def _zestawienie_candidates(entries: list, parts: dict[str, list[str]]) -> list[
         future_keys = {m.match_key for m in e.matches if m.future}
         for part in split_parts:
             letter = part["letter"]
-            if letter not in letters:
+            # Pusta część (0 zł - sędzia „nie uwzględniony" na tej liście) nie
+            # trafia na żaden dokument.
+            if letter not in letters or not part["gross"]:
                 continue
             penalty = penalties.get(letter, 0.0)
             out.append(

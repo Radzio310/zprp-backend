@@ -82,11 +82,11 @@ def test_obcy_mecz_i_ujemna_lista():
     assert any("Lista A wychodzi na minus" in p for p in out)
 
 
-def test_wydanie_wymaga_dwoch_niepustych_list():
+def test_podzial_wymaga_dwoch_list_ale_pusta_lista_jest_dozwolona():
     assert any("co najmniej dwie" in p for p in S.problems(_lists(["m1", "m2", "m3"]), POOL, for_issue=True))
+    # 07.10.2026: litery to wspólne listy sędziów - Bejnar bez listy B, z C.
     empty = _lists(["m1", "m2", "m3"], [])
-    assert any("Lista B jest pusta" in p for p in S.problems(empty, POOL, for_issue=True))
-    # Szkic może mieć pustą listę - to dopiero praca w toku.
+    assert S.problems(empty, POOL, for_issue=True) == []
     assert S.problems(empty, POOL) == []
 
 
