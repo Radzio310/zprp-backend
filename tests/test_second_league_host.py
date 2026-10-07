@@ -37,3 +37,15 @@ def test_inne_ligi_i_stare_mecze_bez_zmian():
     assert not C.paid_by_club(row("S/MłK/1", C.UNASSIGNED))
     assert not C.paid_by_club(row("IIK4/12", C.UNASSIGNED, date(2026, 8, 20)))  # przed sezonem
     assert C.is_second_league("IIM4/1") and not C.is_second_league("IIIK/2")
+
+
+def test_klub_z_innego_wojewodztwa_nie_placi_przez_okreg_mimo_statusu():
+    # 07.10.2026: rywal z Szaflar był w słowniku drużyn (grupa II ligi
+    # prowadzona przez okręg) i bez ustawień liczył się jak rozliczany przez okręg.
+    hosted = row("IIM4/7", C.CHARGED)
+    hosted.club_id = "900"
+    assert C.paid_by_club(hosted, {"900"})
+    assert not C.paid_by_club(hosted, {"123"})
+    stolik = row("IKB/5", C.CHARGED)
+    stolik.club_id = "900"
+    assert not C.paid_by_club(stolik, {"900"})          # I liga - bez zmian

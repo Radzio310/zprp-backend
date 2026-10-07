@@ -100,7 +100,7 @@ def is_second_league(code: Any) -> bool:
     return head.startswith(("IIM", "IIK"))
 
 
-def paid_by_club(row: Any) -> bool:
+def paid_by_club(row: Any, foreign_clubs: Iterable[str] = ()) -> bool:
     """
     Czy mecz z rachunku klubow idzie poza wyplaty okregu, jak klub
     rozliczajacy sie sam: klub z wylaczonym rozliczaniem przez okreg albo
@@ -109,10 +109,14 @@ def paid_by_club(row: Any) -> bool:
     """
     if row.status == CLUB_OFF:
         return True
-    return (
-        is_second_league(row.code)
-        and row.status in (UNASSIGNED, NO_HOST)
-        and (row.day or date.min) >= SECOND_LEAGUE_HOST_SINCE
+    # `foreign_clubs` - kluby z INNEGO województwa (07.10.2026): słownik drużyn
+    # ma też rywali z grup II ligi prowadzonych przez okręg (Kielce, Kraków,
+    # Szaflary). Klub bez ustawień liczy się jako rozliczany przez okręg, więc
+    # sam status `charged` przepuszczał ich mecze do wypłat okręgu.
+    if not is_second_league(row.code) or (row.day or date.min) < SECOND_LEAGUE_HOST_SINCE:
+        return False
+    return row.status in (UNASSIGNED, NO_HOST) or (
+        bool(row.club_id) and row.club_id in set(foreign_clubs)
     )
 
 

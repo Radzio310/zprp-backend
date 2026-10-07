@@ -61,6 +61,36 @@ def _state(value: Any) -> dict:
         return {}
 
 
+def _foreign_clubs(rows: Iterable[Any]) -> dict[str, set[str]]:
+    """
+    Kluby z INNEGO wojewodztwa, sezon po sezonie (07.10.2026) - rywale z grup
+    II ligi prowadzonych przez okreg (`club_charges.paid_by_club`). Nasze
+    wojewodztwo jak w panelu klubow (`province_clubs_scope.home_province`);
+    klub z choc jedna druzyna u nas jest nasz.
+    """
+    from app.province_clubs_scope import home_province
+
+    by_season: dict[str, list[dict]] = {}
+    for row in rows:
+        by_season.setdefault(_s(row["season"]), []).append(
+            {
+                "province": _s(row["team_province"]),
+                "codes": [_s(row["competition_code"])],
+                "club_id": _s(row["club_id"]),
+            }
+        )
+    out: dict[str, set[str]] = {}
+    for season, items in by_season.items():
+        home = home_province(items)
+        ours = {
+            i["club_id"]
+            for i in items
+            if i["club_id"] and (not home or not i["province"] or i["province"].upper() == home)
+        }
+        out[season] = {i["club_id"] for i in items if i["club_id"] and i["club_id"] not in ours}
+    return out
+
+
 async def club_scope(province: str, season: str, matches: Iterable[Any]) -> dict:
     """Zwraca klucze meczow poza rozliczeniem i opis klubow do zalacznika."""
     return await club_scope_many(province, {season: list(matches)})
@@ -92,6 +122,7 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
     teams: dict[str, tuple[dict[str, C.TeamRef], dict[str, C.TeamRef]]] = {
         season: ({}, {}) for season in seasons
     }
+    foreign = _foreign_clubs(rows)
     for row in rows:
         by_id, by_key = teams.setdefault(_s(row["season"]), ({}, {}))
         ref = C.TeamRef(
@@ -188,7 +219,7 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             # Mecz przeniesiony na OKRĘG jako płatnika (`district_payer`) ma
             # status `charged`, nie `club-off` - zostaje w rozliczeniu okręgu,
             # bo to okręg płaci sędziom. Zmienia się tylko, kto jest obciążony.
-            if not C.paid_by_club(row):
+            if not C.paid_by_club(row, foreign.get(season, set())):
                 continue
             club_keys.add(row.match_key)
             # Gospodarz spoza panelu (np. klub z Kielc w II lidze) nie ma
