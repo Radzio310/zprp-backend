@@ -4629,6 +4629,7 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS show_subtitle boolean NOT NULL DEFAULT true"))
     _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS period_display varchar NOT NULL DEFAULT 'all'"))
     _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS penalty_list varchar NOT NULL DEFAULT 'A'"))
+    _conn.execute(text("ALTER TABLE province_settlement_doc_settings ADD COLUMN IF NOT EXISTS absences_list varchar NOT NULL DEFAULT 'A'"))
     # Decyzja „Zostaw" przy podpowiedzi zdjęcia meczu (06.10.2026) - tabela
     # wyjątków istnieje na produkcji, więc `create_all` kolumny nie doda.
     _conn.execute(

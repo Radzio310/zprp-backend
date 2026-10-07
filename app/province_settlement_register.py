@@ -46,7 +46,18 @@ DS = province_settlement_doc_settings
 
 #: Domyślny wygląd dokumentów (decyzje z 07.10.2026): liczba meczów UKRYTA,
 #: podtytuł i okres widoczne, kara najpierw z listy A.
-DOC_DEFAULTS = {"show_matches": False, "show_subtitle": True, "period_display": "all", "penalty_list": "A"}
+DOC_DEFAULTS = {
+    "show_matches": False,
+    "show_subtitle": True,
+    "period_display": "all",
+    "penalty_list": "A",
+    "absences_list": "A",
+}
+
+
+def _letter(value: Any) -> str:
+    text = _s(value).upper()
+    return text if len(text) == 1 and text.isalpha() else "A"
 PERIOD_DISPLAYS = ("all", "main_only", "none")
 
 
@@ -382,12 +393,12 @@ async def doc_settings(key: str) -> dict:
     if not row:
         return dict(DOC_DEFAULTS)
     display = _s(row["period_display"])
-    letter = _s(row["penalty_list"]).upper()
     return {
         "show_matches": bool(row["show_matches"]),
         "show_subtitle": bool(row["show_subtitle"]),
         "period_display": display if display in PERIOD_DISPLAYS else "all",
-        "penalty_list": letter if len(letter) == 1 and letter.isalpha() else "A",
+        "penalty_list": _letter(row["penalty_list"]),
+        "absences_list": _letter(row["absences_list"]),
     }
 
 
@@ -403,6 +414,7 @@ class DocSettingsBody(BaseModel):
     show_subtitle: bool = True
     period_display: str = "all"
     penalty_list: str = "A"
+    absences_list: str = "A"
     user: Optional[str] = None
 
 
@@ -413,13 +425,15 @@ async def save_doc_settings(body: DocSettingsBody):
     if display not in PERIOD_DISPLAYS:
         raise HTTPException(400, "Nieznany sposób pokazywania okresu.")
     letter = _s(body.penalty_list).upper()
-    if len(letter) != 1 or not letter.isalpha():
-        raise HTTPException(400, "Lista kar to jedna litera (A, B, C...).")
+    absences = _s(body.absences_list).upper()
+    if len(letter) != 1 or not letter.isalpha() or len(absences) != 1 or not absences.isalpha():
+        raise HTTPException(400, "Lista kar i nieobecności to jedna litera (A, B, C...).")
     values = {
         "show_matches": bool(body.show_matches),
         "show_subtitle": bool(body.show_subtitle),
         "period_display": display,
         "penalty_list": letter,
+        "absences_list": absences,
         "updated_by": body.user,
         "updated_at": _now(),
     }

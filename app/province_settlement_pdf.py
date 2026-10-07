@@ -565,6 +565,9 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
                 }
                 for row in bombs
                 if row["judge_id"] in judges
+                # Sekcja nieobecności tylko na liście ustawionej w „Wyglądzie
+                # dokumentów" (domyślnie A) - jak kary; dokument bez list ma ją zawsze.
+                and (not list_letter or list_letter == (look.get("absences_list") or "A"))
             ],
             # Przypis o czesciach puli - wylaczony razem z oznaczeniem czesci.
             "split_rows": 0,

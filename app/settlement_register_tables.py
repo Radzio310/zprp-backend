@@ -102,6 +102,8 @@ def define_tables(metadata):
         Column("period_display", String, nullable=False, server_default=text("'all'")),
         #: Lista, z której najpierw schodzi kara za nieobecność („A").
         Column("penalty_list", String, nullable=False, server_default=text("'A'")),
+        #: Lista, na której stoi sekcja „Nieobecności z Rejestru" (domyślnie A).
+        Column("absences_list", String, nullable=False, server_default=text("'A'")),
         Column("updated_by", String, nullable=True),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
