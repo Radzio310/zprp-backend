@@ -88,6 +88,35 @@ NO_HOST = "no-host"
 #: Klucz obsady spoza terminarza okregu.
 OUTSIDE_PREFIX = "o:"
 
+#: Od tego dnia mecz II ligi bez gospodarza rozliczanego przez okreg nie idzie
+#: do wyplat okregu (07.10.2026) - ta sama granica co boiskowi II ligi
+#: powierzonej okregowi (`settlement_rates.MANAGED_FIELD_SINCE`).
+SECOND_LEAGUE_HOST_SINCE = date(2026, 9, 1)
+
+
+def is_second_league(code: Any) -> bool:
+    """„IIM4/12", „IIK4/3" - II liga (nie III: „IIIM/9")."""
+    head = str(code or "").strip().upper().split("/", 1)[0].strip()
+    return head.startswith(("IIM", "IIK"))
+
+
+def paid_by_club(row: Any) -> bool:
+    """
+    Czy mecz z rachunku klubow idzie poza wyplaty okregu, jak klub
+    rozliczajacy sie sam: klub z wylaczonym rozliczaniem przez okreg albo
+    mecz II ligi bez gospodarza rozliczanego przez okreg (decyzja z 07.10.2026,
+    opis w `settlement_club_scope`).
+    """
+    if row.status == CLUB_OFF:
+        return True
+    return (
+        is_second_league(row.code)
+        and row.status in (UNASSIGNED, NO_HOST)
+        and (row.day or date.min) >= SECOND_LEAGUE_HOST_SINCE
+    )
+
+
+
 #: Liczebniki rzymskie w nazwach druzyn. „Sośnica" i „Sośnica II" to dwie
 #: rozne druzyny, wiec przy dopasowaniu po slowach musza sie zgadzac.
 _ROMAN = frozenset({"ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"})

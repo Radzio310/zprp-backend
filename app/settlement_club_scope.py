@@ -11,6 +11,15 @@ Decyzja uzytkownika z 06.10.2026: „Nie obciazaj klubow" znaczy „nikt u nas z
 ten mecz nie placi" - mecz wypada takze z wyplat okregu (sedzia widzi go
 w bloku „Poza rozliczeniem okregu", bez kwot). Gdy okreg ma placic sam, jest
 „Przenies koszt na okreg" (`district_payer`).
+
+II LIGA (decyzja z 07.10.2026). Grupa II ligi powierzona okregowi (IIM4/IIK4
+na Slasku) ma kluby z kilku wojewodztw - Szulc i Wieclaw dostawali od Slaska
+mecze w Kielcach. Mecz II ligi idzie do wyplat okregu TYLKO, gdy gospodarzem
+jest klub z panelu tego okregu rozliczany przez okreg (albo koszt
+przeniesiono na okreg); kazdy inny - klub z okregu nierozliczany przez okreg,
+gospodarz spoza okregu, gospodarz nierozpoznany - idzie jak klub
+rozliczajacy sie sam (blok „Rozliczane bezposrednio przez kluby").
+Regula jest ogolna, dla kazdego okregu.
 """
 
 from __future__ import annotations
@@ -179,15 +188,20 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             # Mecz przeniesiony na OKRĘG jako płatnika (`district_payer`) ma
             # status `charged`, nie `club-off` - zostaje w rozliczeniu okręgu,
             # bo to okręg płaci sędziom. Zmienia się tylko, kto jest obciążony.
-            if row.status != C.CLUB_OFF:
+            if not C.paid_by_club(row):
                 continue
             club_keys.add(row.match_key)
-            club_id = row.club_id
+            # Gospodarz spoza panelu (np. klub z Kielc w II lidze) nie ma
+            # numeru klubu - grupujemy po nazwie z terminarza.
+            club_id = row.club_id or f"host:{row.host_name or '?'}"
             item = details.setdefault(
                 club_id,
                 {
                     "club_id": club_id,
-                    "club_name": club_names.get(club_id) or row.team_name or club_id,
+                    "club_name": club_names.get(club_id)
+                    or row.team_name
+                    or row.host_name
+                    or "Gospodarz spoza panelu",
                     "matches": 0,
                     "amount": 0.0,
                 },
