@@ -74,13 +74,32 @@ async def _backfill_settlement_judges(province: str) -> None:
             province_settlement_judges.c.full_name,
         ).where(province_settlement_judges.c.province.in_(spellings(province)))
     )
-    now = datetime.now(timezone.utc)
-    province_name = display(province)
+    candidates: dict[str, str] = {}
     for row in rows:
         judge_id = str(row["judge_id"] or "").strip()
         full_name = str(row["full_name"] or "").strip()
-        if not judge_id or not full_name:
-            continue
+        if judge_id and full_name:
+            candidates.setdefault(judge_id, full_name)
+    if not candidates:
+        return
+    # Najpierw JEDNO pytanie, kogo w katalogu brakuje. Wcześniej każdy odczyt
+    # listy wysyłał osobny INSERT dla każdej osoby z rozliczenia (setki rund do
+    # bazy przy każdym otwarciu wyboru sędziego), choć prawie zawsze wszyscy
+    # już tam byli. Teraz w zwykłym dniu nie leci żaden zapis.
+    known = {
+        str(r["judge_id"] or "").strip()
+        for r in await database.fetch_all(
+            select(province_judges.c.judge_id).where(
+                province_judges.c.judge_id.in_(list(candidates))
+            )
+        )
+    }
+    missing = [(jid, name) for jid, name in candidates.items() if jid not in known]
+    if not missing:
+        return
+    now = datetime.now(timezone.utc)
+    province_name = display(province)
+    for judge_id, full_name in missing:
         await database.execute(
             pg_insert(province_judges)
             .values(

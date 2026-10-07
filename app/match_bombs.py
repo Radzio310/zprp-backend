@@ -808,6 +808,10 @@ async def set_penalty_from_panel(bomb_id: int, req: PenaltyRequest) -> Dict[str,
 async def registry(
     province: str,
     season: Optional[int] = Query(None, description="Rok początku sezonu; brak = wszystkie."),
+    latest: bool = Query(
+        False,
+        description="Bez `season`: od razu najnowszy sezon, w którym coś jest.",
+    ),
     actor: Actor = Depends(market_actor),
 ) -> Dict[str, Any]:
     """Pełna historia zgłoszeń okręgu - dla komisji i administratora.
@@ -855,6 +859,14 @@ async def registry(
         )
     ]
 
+    # Pierwsze otwarcie ekranu: aplikacja chce sezonu, w którym NAPRAWDĘ coś
+    # jest. Dawniej pytała o wszystko, wybierała sezon u siebie i pytała drugi
+    # raz - każde wejście w rejestr kosztowało dwa pełne pobrania.
+    if season is None and latest:
+        season = next(
+            (s["year"] for s in season_list if s["year"] is not None), None
+        )
+
     chosen = [r for r in rows if season is None or r.get("season") == season]
     counted = [r for r in chosen if counts_to_stats(r.get("status"))]
 
@@ -873,6 +885,11 @@ async def registry(
         if key:
             months[key] = months.get(key, 0) + 1
 
+    # Zdjęcia RAZ dla całej listy. Wywołanie w środku listy składanej pytało
+    # bazę osobno przy każdym wpisie - sezon z 60 wpisami to było 60 tych
+    # samych zapytań i rejestr otwierał się kilka sekund.
+    photos = await _photos(chosen)
+
     return {
         "province": wanted,
         "season": season,
@@ -890,7 +907,7 @@ async def registry(
             ],
         },
         "ranking": rank_bombs(tally.values()),
-        "bombs": [_view(r, actor.judge_id, True, await _photos(chosen)) for r in chosen],
+        "bombs": [_view(r, actor.judge_id, True, photos) for r in chosen],
     }
 
 

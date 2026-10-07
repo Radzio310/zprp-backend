@@ -174,6 +174,28 @@ def test_faces_come_from_the_province_list_in_one_query():
     assert "in_(ids)" in source
 
 
+def test_registry_asks_for_faces_once_not_per_row():
+    """Rejestr wolal `_photos` w srodku listy skladanej - zapytanie na kazdy wpis.
+
+    Sezon z kilkudziesiecioma wpisami otwieral sie przez to kilka sekund.
+    """
+    for sub in ast.walk(FUNCTIONS["registry"]):
+        if isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            inner = {
+                c.func.id
+                for c in ast.walk(sub)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            }
+            assert "_photos" not in inner
+
+
+def test_registry_can_open_the_latest_season_in_one_trip():
+    """Pierwsze wejscie: najnowszy sezon z wpisami od razu, bez drugiego pobrania."""
+    args = [a.arg for a in FUNCTIONS["registry"].args.args]
+    assert "latest" in args
+    assert "if season is None and latest" in code_of("registry")
+
+
 def test_the_authors_face_follows_the_authors_name():
     """Komu nie wolno znac nazwiska, temu nie wolno i zdjecia."""
     source = code_of("_view")
