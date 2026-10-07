@@ -189,6 +189,10 @@ class PdfRequest(BaseModel):
     #: Czesci puli sedziow z podzialem: {judge_id: ["A"]}. Sedzia, ktorego tu
     #: nie ma, idzie ze wszystkimi czesciami; pusta lista = bez tego sedziego.
     parts: dict[str, list[str]] = {}
+    #: Zestawienie JEDNEJ listy (07.10.2026): „A", „B"... - na dokumencie tylko
+    #: ta czesc kazdego sedziego, a sedziowie bez podzialu ida na liste A.
+    #: Brak = jeden dokument ze wszystkimi czesciami (scalonymi w wiersz).
+    letter: Optional[str] = None
 
 
 #: Szablon kazdego rodzaju dokumentu z rejestru.
@@ -370,17 +374,29 @@ def merge_parts(items: list[dict]) -> list[dict]:
     return [merged[judge_id] for judge_id in order]
 
 
-def _zestawienie_candidates(entries: list, parts: dict[str, list[str]]) -> list[dict]:
+#: Lista, na ktora ida sedziowie bez podzialu puli (decyzja z 07.10.2026).
+WHOLE_POOL_LETTER = "A"
+
+
+def _zestawienie_candidates(
+    entries: list, parts: dict[str, list[str]], letter: Optional[str] = None
+) -> list[dict]:
     """
     Wiersze zestawienia: sedzia bez podzialu jednym wierszem, sedzia
     z obowiazujacym podzialem - wierszem na kazda WYBRANA czesc (kazda czesc
     to osobny rachunek: koszty, podatek, netto).
+
+    `letter` - zestawienie jednej listy: od sedziego z podzialem tylko ta
+    czesc, sedzia bez podzialu tylko na liscie A.
     """
     wanted = {str(k): v for k, v in (parts or {}).items()}
+    only = (letter or "").strip().upper() or None
     out: list[dict] = []
     for e in entries:
         name = display_judge_name(e.judge_name)
         split_parts = list((e.split or {}).get("parts") or [])
+        if not split_parts and only and only != WHOLE_POOL_LETTER:
+            continue
         if not split_parts:
             out.append(
                 {
@@ -410,7 +426,7 @@ def _zestawienie_candidates(entries: list, parts: dict[str, list[str]]) -> list[
             letter = part["letter"]
             # Pusta część (0 zł - sędzia „nie uwzględniony" na tej liście) nie
             # trafia na żaden dokument.
-            if letter not in letters or not part["gross"]:
+            if letter not in letters or not part["gross"] or (only and letter != only):
                 continue
             penalty = penalties.get(letter, 0.0)
             out.append(
@@ -456,7 +472,8 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
     period = _period_info(payload, data)
     outside = data["outside_district"]
     bombs = data.get("bombs") or []
-    candidates = _zestawienie_candidates(data["entries"], payload.parts)
+    candidates = _zestawienie_candidates(data["entries"], payload.parts, payload.letter)
+    list_letter = (payload.letter or "").strip().upper()
     from app.province_settlement_register import doc_settings
 
     look = await doc_settings(province)
@@ -493,7 +510,9 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
         context = {
             "draft": draft,
             "show_matches": bool(look.get("show_matches")),
-            "file_period": f"{payload.month:02d}_{payload.year}",
+            "file_period": (f"lista_{list_letter}_" if list_letter else "") + f"{payload.month:02d}_{payload.year}",
+            # Znacznik listy - drobny, pod numerem (decyzja z 07.10.2026).
+            "list_letter": list_letter,
             "org_name": _org(province)["name"],
             "org_address": _org(province)["address"],
             "document_number": number,
@@ -537,7 +556,12 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
             "outside_totals": outside["totals"],
             "outside_clubs": outside["clubs"],
         }
-        register_totals = {**totals, "penalty": penalty_total, "payable": payable_total}
+        register_totals = {
+            **totals,
+            "penalty": penalty_total,
+            "payable": payable_total,
+            "letter": list_letter or None,
+        }
         return context, register_totals
 
     return await _issue(province, G.ZESTAWIENIE, payload, period, candidates, build)
@@ -706,6 +730,60 @@ async def documents(
             for row in rows
         ]
     }
+
+
+class ZipFile(BaseModel):
+    token: str
+    filename: str
+
+
+class ZipRequest(BaseModel):
+    files: list[ZipFile]
+    filename: str = "teczka.zip"
+
+
+@router.post("/zip", summary="Teczka: kilka wygenerowanych PDF-ów w jednym ZIP-ie")
+async def zip_pdfs(payload: ZipRequest):
+    """
+    Listy A, B, C... wygenerowane osobno (07.10.2026) - jednym pobraniem.
+    Pliki muszą jeszcze leżeć w katalogu pobrań (żyją tyle, co zwykły PDF).
+    """
+    import zipfile
+
+    if not payload.files:
+        raise HTTPException(400, "Teczka jest pusta.")
+    if len(payload.files) > 40:
+        raise HTTPException(400, "Za dużo plików w jednej teczce.")
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    token = str(uuid.uuid4())
+    target = os.path.join(DOWNLOAD_DIR, f"{token}.zip")
+    used: set[str] = set()
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for item in payload.files:
+            source = os.path.join(DOWNLOAD_DIR, f"{os.path.basename(item.token)}.pdf")
+            if not os.path.exists(source):
+                raise HTTPException(404, f"Plik {item.filename} wygasł - wygeneruj teczkę jeszcze raz.")
+            name = os.path.basename(item.filename) or f"{item.token}.pdf"
+            while name in used:
+                name = f"_{name}"
+            used.add(name)
+            archive.write(source, arcname=name)
+    filename = os.path.basename(payload.filename) or "teczka.zip"
+    return {
+        "token": token,
+        "filename": filename,
+        "download_url": (
+            f"/province/settlements/pdf/download-zip/{token}?filename={urllib.parse.quote(filename)}"
+        ),
+    }
+
+
+@router.get("/download-zip/{token}", summary="Pobierz teczkę ZIP")
+async def download_zip(token: str, filename: str = Query("teczka.zip")):
+    path = os.path.join(DOWNLOAD_DIR, f"{os.path.basename(token)}.zip")
+    if not os.path.exists(path):
+        raise HTTPException(404, "Teczka wygasła albo nie istnieje")
+    return FileResponse(path, media_type="application/zip", filename=filename)
 
 
 @router.get("/download/{token}", summary="Pobierz wygenerowany PDF")

@@ -53,6 +53,8 @@
     margin-top: .5mm; letter-spacing: .3pt;
   }
   .doc-period { font-size: 8.5pt; color: #3d4658; margin-top: .8mm; }
+  /* Znacznik listy (A/B/C) - mały, bo to sprawa wewnętrzna okręgu. */
+  .doc-list { font-size: 7pt; color: #8a93a6; margin-top: .6mm; letter-spacing: .6pt; text-transform: uppercase; }
 
   .rule { height: 1.6mm; margin: 2mm 0 3.5mm 0; background: #0B4F9E; }
   .rule-gold { height: 1.6mm; width: 38mm; background: #F0A500; float: left; }
@@ -172,6 +174,7 @@
       <div class="doc-kind">Zestawienie</div>
       <div class="doc-number{% if draft %} is-draft{% endif %}">{{ document_number }}</div>
       <div class="doc-period">{{ period_label }}</div>
+      {%- if list_letter %}<div class="doc-list">lista {{ list_letter }}</div>{% endif %}
     </td>
   </tr>
 </table>

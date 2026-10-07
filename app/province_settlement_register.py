@@ -276,18 +276,28 @@ async def period_state(
     season = await season_of_period(key, year, month, pid)
     taken = {}
     documents = {}
+    issued = {}
     for kind in G.KINDS:
         docs = await period_documents(key, kind, year, month, pid)
         documents[kind] = [
             {"id": d["id"], "number": d["number"], "created_at": d["created_at"]} for d in docs
         ]
         taken[kind] = G.judge_view(G.taken_map(docs))
+        # Ile z okresu jest już na oficjalnych dokumentach - do paska wypłaty
+        # (07.10.2026): zestawienia netto (przed karą, jak suma na pasku),
+        # przejazdy kwotą.
+        field = "net" if kind == G.ZESTAWIENIE else "amount"
+        issued[kind] = {
+            "amount": round(sum(float((d["totals"] or {}).get(field) or 0) for d in docs), 2),
+            "documents": len(docs),
+        }
     return {
         "province": key,
         "season": season,
         "season_label": G.season_label(season),
         "taken": taken,
         "documents": documents,
+        "issued": issued,
         "next": {kind: await suggestion(key, kind, season) for kind in G.KINDS},
     }
 
