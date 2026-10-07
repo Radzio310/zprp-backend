@@ -45,13 +45,17 @@ ST = province_settlement_register_settings
 DS = province_settlement_doc_settings
 
 #: Domyślny wygląd dokumentów (decyzje z 07.10.2026): liczba meczów UKRYTA,
-#: podtytuł i okres widoczne, kara najpierw z listy A.
+#: podtytuł i okres widoczne, kara najpierw z listy A, nieobecności na A,
+#: kluby rozliczające się same - ukryte (a włączone - na A).
 DOC_DEFAULTS = {
     "show_matches": False,
     "show_subtitle": True,
     "period_display": "all",
     "penalty_list": "A",
     "absences_list": "A",
+    "show_absences": True,
+    "show_outside": False,
+    "outside_list": "A",
 }
 
 
@@ -399,6 +403,9 @@ async def doc_settings(key: str) -> dict:
         "period_display": display if display in PERIOD_DISPLAYS else "all",
         "penalty_list": _letter(row["penalty_list"]),
         "absences_list": _letter(row["absences_list"]),
+        "show_absences": bool(row["show_absences"]),
+        "show_outside": bool(row["show_outside"]),
+        "outside_list": _letter(row["outside_list"]),
     }
 
 
@@ -415,6 +422,9 @@ class DocSettingsBody(BaseModel):
     period_display: str = "all"
     penalty_list: str = "A"
     absences_list: str = "A"
+    show_absences: bool = True
+    show_outside: bool = False
+    outside_list: str = "A"
     user: Optional[str] = None
 
 
@@ -426,14 +436,18 @@ async def save_doc_settings(body: DocSettingsBody):
         raise HTTPException(400, "Nieznany sposób pokazywania okresu.")
     letter = _s(body.penalty_list).upper()
     absences = _s(body.absences_list).upper()
-    if len(letter) != 1 or not letter.isalpha() or len(absences) != 1 or not absences.isalpha():
-        raise HTTPException(400, "Lista kar i nieobecności to jedna litera (A, B, C...).")
+    outside = _s(body.outside_list).upper()
+    if any(len(x) != 1 or not x.isalpha() for x in (letter, absences, outside)):
+        raise HTTPException(400, "Lista kar, nieobecności i klubów to jedna litera (A, B, C...).")
     values = {
         "show_matches": bool(body.show_matches),
         "show_subtitle": bool(body.show_subtitle),
         "period_display": display,
         "penalty_list": letter,
         "absences_list": absences,
+        "show_absences": bool(body.show_absences),
+        "show_outside": bool(body.show_outside),
+        "outside_list": outside,
         "updated_by": body.user,
         "updated_at": _now(),
     }

@@ -104,6 +104,12 @@ def define_tables(metadata):
         Column("penalty_list", String, nullable=False, server_default=text("'A'")),
         #: Lista, na której stoi sekcja „Nieobecności z Rejestru" (domyślnie A).
         Column("absences_list", String, nullable=False, server_default=text("'A'")),
+        #: Czy sekcja „Nieobecności z Rejestru" w ogóle jest (domyślnie TAK).
+        Column("show_absences", Boolean, nullable=False, server_default=text("true")),
+        #: Sekcja „Kluby, które nie rozliczają się przez okręg": domyślnie
+        #: UKRYTA, a włączona - na liście `outside_list` (domyślnie A).
+        Column("show_outside", Boolean, nullable=False, server_default=text("false")),
+        Column("outside_list", String, nullable=False, server_default=text("'A'")),
         Column("updated_by", String, nullable=True),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
