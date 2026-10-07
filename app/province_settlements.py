@@ -9,6 +9,7 @@ wlasna reke - inaczej po miesiacu bylyby trzy rachunki zamiast jednego.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 import calendar
 import logging
 import os
@@ -274,14 +275,19 @@ async def _base(province: str) -> dict:
         # jest wyplacana ani doliczana klubowi. Odsiew TUTAJ, bo z tej bazy licza
         # sie wszystkie zestawienia, PDF-y, „Moje rozliczenie", siatka miesiecy
         # i panel klubow - jedno miejsce zamiast pieciu.
-        hits = SB.match_bombs(await _active_bombs(), everything, names=names)
+        bombs = await _active_bombs()
+        hits = SB.match_bombs(bombs, everything, names=names)
         payable, bombed = SB.split_bombed(everything, hits)
+        # Bomby bez obsady w rozliczeniu (07.10.2026) - wchodza do okresu po
+        # dacie wpisu, z kara (`settlement_bombs.unlinked`).
+        loose = SB.unlinked(bombs, hits, names.keys())
         return {
             "central_versions": central_versions,
             "province_versions": province_versions,
             "names": names,
             "assignments": payable,
             "bombed": bombed,
+            "unlinked_bombs": loose,
         }
 
     return await SC.remember("base", province, (), compute)
@@ -322,9 +328,11 @@ async def load_settlement(
         wanted = {str(item) for item in judge_ids}
         assignments = [item for item in base["assignments"] if item.judge_id in wanted]
         bombed = [pair for pair in base.get("bombed", []) if pair[0].judge_id in wanted]
+        loose_bombs = [b for b in base.get("unlinked_bombs", []) if b.judge_id in wanted]
     else:
         assignments = base["assignments"]
         bombed = list(base.get("bombed", []))
+        loose_bombs = list(base.get("unlinked_bombs", []))
     if extra:
         assignments = [*assignments, *extra]
     now = _now()
@@ -443,6 +451,8 @@ async def load_settlement(
         include_future=include_future,
         names=names,
     )
+    bomb_rows.extend(_loose_bomb_rows(loose_bombs, date_from=date_from, date_to=date_to, names=names))
+    bomb_rows.sort(key=lambda row: (row["match_at"] or "", row["match_key"]))
     penalties = _apply_penalties(entries, bomb_rows)
 
     return {
@@ -536,6 +546,51 @@ def _bomb_rows(
             }
         )
     out.sort(key=lambda row: (row["match_at"] or "", row["match_key"]))
+    return out
+
+
+def _loose_bomb_rows(
+    bombs: list,
+    *,
+    date_from: date,
+    date_to: date,
+    names: Optional[dict[str, str]] = None,
+) -> list[dict]:
+    """
+    Bomby bez obsady w rozliczeniu, których dzień (czas polski) wypada
+    w okresie - wiersz w „Poza wypłatą" z karą, bez kwoty, która przepadła.
+    """
+    out: list[dict] = []
+    for bomb in bombs:
+        day = SB.pl_day(bomb.match_at)
+        if day is None or day < date_from or day > date_to:
+            continue
+        out.append(
+            {
+                "match_key": f"bomb:{bomb.bomb_id}",
+                "judge_id": bomb.judge_id,
+                "name": E.display_judge_name((names or {}).get(bomb.judge_id, "") or bomb.subject_name),
+                "match_at": bomb.match_at.isoformat() if bomb.match_at else None,
+                "day": day.isoformat(),
+                "code": bomb.match_code or "",
+                "category": "",
+                "role": "",
+                "city": "",
+                "teams": bomb.label,
+                "future": False,
+                "reason": SB.REASON_BOMB,
+                "reason_label": SB.REASON_UNLINKED_LABEL,
+                "kind": "bomb",
+                "unlinked": True,
+                "bomb_id": bomb.bomb_id,
+                "bomb_source": bomb.source,
+                "bomb_note": bomb.note or None,
+                "bomb_created_at": bomb.created_at.isoformat() if bomb.created_at else None,
+                "penalty": bomb.penalty,
+                "lost_gross": 0.0,
+                "lost_travel": 0.0,
+            }
+        )
     return out
 
 
@@ -1278,6 +1333,16 @@ async def _months_rows(
     bombed = [
         pair for pair in base.get("bombed", []) if not judge_id or pair[0].judge_id == str(judge_id)
     ]
+    # Bomby bez obsady liczą się w miesiącu swojej daty (07.10.2026).
+    for bomb in base.get("unlinked_bombs", []):
+        if judge_id and bomb.judge_id != str(judge_id):
+            continue
+        day = SB.pl_day(bomb.match_at)
+        stub = SimpleNamespace(
+            judge_id=bomb.judge_id,
+            match_at=datetime.combine(day, datetime.min.time()) if day else None,
+        )
+        bombed.append((stub, bomb))
     _month_penalties(rows, district, bombed, common)
     if include_clubs and club_paid:
         rows = _merge_months(

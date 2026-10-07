@@ -134,3 +134,25 @@ def test_apply_penalties_on_entries():
     # Przejazd zostaje - kara schodzi tylko z netto.
     assert (poor.penalty, poor.penalty_left, poor.total) == (20.0, 30.0, 10.0)
     assert out["999"] == {"due": 15.0, "applied": 0.0, "left": 15.0}
+
+
+def test_bomba_bez_obsady_wchodzi_do_okresu_z_kara():
+    # 07.10.2026: trzy bomby Krzysztofa Draba na 03.10 - tego dnia bez meczu
+    # w rozliczeniu. Nie mogą zostać tylko w rejestrze.
+    from datetime import datetime, timezone
+
+    from app.settlement_bombs import BombRef, match_bombs, unlinked
+
+    loose = BombRef(
+        bomb_id=7, match_id="manual:abc", judge_id="900", subject_name="DRAB Krzysztof",
+        match_at=datetime(2026, 10, 3, 10, 0, tzinfo=timezone.utc), match_code="", penalty=50.0,
+        note="", source="manual", label="turniej",
+    )
+    other = BombRef(
+        bomb_id=8, match_id="manual:def", judge_id="111", subject_name="Obcy",
+        match_at=datetime(2026, 10, 3, 10, 0, tzinfo=timezone.utc), match_code="", penalty=0.0,
+        note="", source="manual", label="",
+    )
+    hits = match_bombs([loose, other], [])
+    assert hits == {}
+    assert unlinked([loose, other], hits, {"900"}) == [loose]

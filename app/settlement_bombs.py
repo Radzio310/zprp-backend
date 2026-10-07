@@ -51,6 +51,9 @@ TIME_TOLERANCE = timedelta(minutes=90)
 #: Powód w liście „Poza rozliczeniem okręgu" - patrz `province_settlements`.
 REASON_BOMB = "bomb"
 REASON_LABEL = "zgłoszona nieobecność (Rejestr nieobecności) - okręg nie wypłaca"
+#: Bomba bez obsady w rozliczeniu (07.10.2026) - np. sędziego zdjęto z obsady
+#: w ZPRP po nieobecności albo dzień we wpisie ręcznym nie trafia w mecz.
+REASON_UNLINKED_LABEL = "zgłoszona nieobecność - meczu nie ma w rozliczeniu okręgu (nic nie przepadło, liczy się kara)"
 
 
 @dataclass(frozen=True)
@@ -193,6 +196,29 @@ def _manual_hit(
         if len(close) == 1:
             return close[0]
     return None
+
+
+def unlinked(
+    bombs: Iterable[BombRef],
+    hits: Mapping[tuple[str, str], BombRef],
+    judges: Iterable[str],
+) -> list[BombRef]:
+    """
+    Czynne bomby NASZYCH sędziów, których nie dało się powiązać z obsadą.
+
+    Zgłoszenie z 07.10.2026: komisja dopisała Krzysztofowi Drabowi trzy bomby
+    na 03.10, a tego dnia nie miał w rozliczeniu żadnego meczu - bomby
+    zostawały tylko w rejestrze, razem z karą. Teraz wchodzą do okresu po
+    swojej dacie (`match_at`) jako wiersz „meczu nie ma w rozliczeniu": nic
+    nie przepada, ale kara schodzi z wypłaty i wpis jest widoczny.
+    """
+    linked = {bomb.bomb_id for bomb in hits.values()}
+    ours = {_s(j) for j in judges}
+    return [
+        bomb
+        for bomb in bombs
+        if bomb.bomb_id not in linked and bomb.judge_id and bomb.judge_id in ours and bomb.match_at
+    ]
 
 
 def split_bombed(

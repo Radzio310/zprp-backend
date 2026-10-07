@@ -161,3 +161,47 @@ async def put_periods(
     )
     SC.bump(key, base=False, reason="okresy rozliczeniowe")
     return _payload(key, periods, True, now)
+
+
+@router.get("/totals", summary="Kwoty okresów już policzonych - do kalendarza okresów")
+async def period_totals(
+    province: str = Query(...),
+    include_future: bool = Query(False),
+    include_zprp: bool = Query(False),
+):
+    """
+    Do wypłaty w każdym okresie, który serwer ma już POLICZONY w pamięci
+    (07.10.2026 - kalendarz okresów w Rozliczeniach).
+
+    Nic tu nie liczymy: przeliczenie kilkunastu okresów naraz trwałoby długo
+    i dla kalendarza nie jest warte czekania. Okres, którego nikt jeszcze nie
+    otwierał, ma `null` - kalendarz pokazuje go bez kwoty.
+    """
+    from app.settlement_engine import totals_of
+
+    key = require_province(province)
+    periods, _saved = await periods_for(key)
+    out = []
+    for item in periods:
+        if not item.get("enabled", True):
+            continue
+        try:
+            year, month = (int(x) for x in str(item.get("payout_date") or "")[:7].split("-"))
+        except ValueError:
+            continue
+        data = None
+        for pid in {str(item.get("id") or ""), str(item.get("id") or "").lower()}:
+            data = SC.peek("month", key, (year, month, pid, bool(include_future), bool(include_zprp)))
+            if data is not None:
+                break
+        totals = totals_of(data["entries"]) if data is not None else None
+        out.append(
+            {
+                "id": item.get("id"),
+                "total": totals["total"] if totals else None,
+                "net": totals["net"] if totals else None,
+                "judges": totals["judges"] if totals else None,
+            }
+        )
+    return {"province": key, "periods": out}
+
