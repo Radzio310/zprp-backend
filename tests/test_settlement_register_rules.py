@@ -100,3 +100,13 @@ def test_kara_schodzi_najpierw_z_czesci_a():
 def test_dopisek_czesci():
     assert G.part_label("A", 2) == "część A z 2"
     assert G.part_label("", 0) == ""
+
+
+def test_czesci_jednego_sedziego_scalaja_sie_w_jeden_wiersz():
+    # 07.10.2026: dwie części tej samej osoby na jednym dokumencie = jeden
+    # wiersz z sumą; w rejestrze dalej osobne pozycje.
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "province_settlement_pdf.py").read_text(encoding="utf-8")
+    assert "for item in merge_parts(items)" in src
+    assert "items=[_register_item(i) for i in items]" in src

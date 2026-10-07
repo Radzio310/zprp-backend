@@ -334,6 +334,42 @@ def _register_item(item: dict) -> dict:
     return {key: item.get(key) for key in keep if key in item}
 
 
+#: Pola kwot, które przy scalaniu części jednego sędziego się sumuje.
+_MERGE_SUM = ("matches", "future", "gross", "costs", "taxable", "tax", "net", "penalty", "penalty_left", "payable")
+
+
+def merge_parts(items: list[dict]) -> list[dict]:
+    """
+    Kilka części puli JEDNEGO sędziego na jednym dokumencie = jeden wiersz
+    (decyzja z 07.10.2026): dwa wiersze z tym samym nazwiskiem nie mają sensu.
+
+    Kwoty to suma części - każda część dalej jest osobnym rachunkiem (koszty
+    i podatek z podziału), więc wiersz mówi dokładnie tyle, ile sędzia dostaje
+    z tych części. W rejestrze zostają osobne pozycje (każda część oznaczona
+    jako wykorzystana), a podział puli się nie zmienia. Kolejność - pierwszego
+    wystąpienia sędziego.
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for item in items:
+        judge_id = item["judge_id"]
+        taken = [item["taken_by"]] if item.get("taken_by") else []
+        if judge_id not in merged:
+            merged[judge_id] = {**item, "parts": [item.get("part") or ""], "taken_numbers": taken}
+            order.append(judge_id)
+            continue
+        row = merged[judge_id]
+        row["parts"].append(item.get("part") or "")
+        for doc_number in taken:
+            if doc_number not in row["taken_numbers"]:
+                row["taken_numbers"].append(doc_number)
+        for key in _MERGE_SUM:
+            if key in item or key in row:
+                total = float(row.get(key) or 0) + float(item.get(key) or 0)
+                row[key] = int(total) if key in ("matches", "future", "tax") else round2(total)
+    return [merged[judge_id] for judge_id in order]
+
+
 def _zestawienie_candidates(entries: list, parts: dict[str, list[str]]) -> list[dict]:
     """
     Wiersze zestawienia: sedzia bez podzialu jednym wierszem, sedzia
@@ -435,9 +471,13 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
                 "split_note": "",
                 "split_applied": False,
                 # Na szkicu: pozycja jest juz na oficjalnym dokumencie.
-                "taken_note": f"już na {item['taken_by']}" if draft and item.get("taken_by") else "",
+                "taken_note": (
+                    f"już na {', '.join(item['taken_numbers'])}"
+                    if draft and item.get("taken_numbers")
+                    else ""
+                ),
             }
-            for item in items
+            for item in merge_parts(items)
         ]
         totals = {
             "judges": len(judges),
