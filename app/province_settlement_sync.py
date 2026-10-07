@@ -965,65 +965,120 @@ async def fix_history(province: str, *, own: Optional[set[str]] = None) -> dict:
     return {"moved": moved, "dropped": dropped}
 
 
-#: Dopisek przy meczach zdjętych przy wyłączeniu reguły „mecz innego okręgu".
+#: Dopisek, z jakim pierwsza wersja poprawki z 06.10.2026 zdejmowała mecze
+#: innych okręgów „Nie obciążaj klubów". Decyzja z 07.10.2026: tak nie wolno -
+#: wpisy z tym dopiskiem (zrobione przez system, nie przez człowieka) kasujemy.
 FOREIGN_EXCLUDED_NOTE = "Zdjęty automatycznie do 06.10.2026 jako mecz innego okręgu - cofnij, jeśli okręg go płaci"
 
+#: Od tego dnia reguła „mecz innego okręgu" gasiła obsady BIEŻĄCEGO sezonu.
+FOREIGN_RULE_SINCE = datetime(2026, 10, 6, tzinfo=timezone.utc)
 
-async def exclude_foreign_once(province: str, *, own: set[str]) -> int:
-    """
-    Raz: mecze, które reguła „mecz innego okręgu" zdejmowała w BIEŻĄCYM
-    sezonie, dostają „Nie obciążaj klubów" (decyzja z 06.10.2026).
 
-    Reguła przestaje działać i przy najbliższym odświeżeniu te mecze wróciłyby
-    sędziom (np. Wiktorii Więcław mecze juniorek w Piotrkowie). Zamiast tego
-    zostają zdjęte - ale jawnie: widać je w „Poza rozliczeniem okręgu"
-    z przyciskiem „Przywróć", a ich rozgrywki uczą podpowiedzi
-    (`settlement_exclusion_rules`). Młodzik makroregionalny jest wyjęty spod
-    reguły (`settlement_origin.foreign_exempt`), więc go nie zdejmujemy.
-    Decyzji człowieka nie nadpisujemy - istniejący wyjątek meczu zostaje.
+async def restore_foreign_once(province: str, *, own: Optional[set[str]] = None) -> dict:
     """
+    Raz: obsady bieżącego sezonu, które 06.10.2026 zgasiła reguła „mecz innego
+    okręgu", wracają do rozliczenia - BEZ czekania na pobranie z ZPRP.
+
+    Decyzja użytkownika z 07.10.2026 (mecze Amelii Kwiatoń K/MłMR wciąż
+    zniknięte): mecze zabrane przez regułę były zabrane BŁĘDNIE i wracają
+    wszystkie. Z rozliczenia zdejmuje wyłącznie człowiek („Nie obciążaj
+    klubów" / „Nie naliczaj") - takie mecze nadal są zdjęte, bo zdjęcie żyje
+    w wyjątkach meczu, a nie w obsadzie.
+
+      - zgaszona obsada „d:" meczu z cudzym przedrostkiem, zgaszona od 06.10,
+        znów jest aktywna,
+      - stolik, który reguła przeniosła na „o:" (spoza okręgu), gaśnie - inaczej
+        sędzia dostałby ten mecz dwa razy,
+      - wyjątki „Nie obciążaj klubów", które system sam założył w pierwszej
+        wersji poprawki (dopisek `FOREIGN_EXCLUDED_NOTE`), znikają.
+
+    Obsada, która zgasła z innego powodu (zmiana obsady w ZPRP), wróci tylko do
+    najbliższego odświeżenia - ono jest źródłem prawdy i zgasi ją ponownie.
+    """
+    province = canonical(province) or province
+    if own is None:
+        own = await _own_prefixes(province)
     if not own:
-        # Bez terminarza nie wiemy, ktore przedrostki sa nasze - nie zgadujemy
-        # i nie zuzywamy jednorazowego znacznika.
-        return 0
-    if not await _claim_once(f"settlement-foreign-excluded-{province}"):
-        return 0
+        return {"restored": 0, "overrides": 0}
+    if not await _claim_once(f"settlement-foreign-restore-{province}"):
+        return {"restored": 0, "overrides": 0}
     current = season_of(_now())
-    rows = await database.fetch_all(
-        select(
-            province_settlement_matches.c.match_key,
-            province_settlement_matches.c.match_code,
-            province_settlement_matches.c.season,
-            province_settlement_matches.c.match_at,
-        ).where(province_settlement_matches.c.province == province)
-    )
-    keys: set[str] = set()
-    for row in rows:
-        season = _s(row["season"]) or season_of(row["match_at"])
-        if season != current or not O.foreign_district_match(row["match_code"], own):
-            continue
-        match_id = _s(row["match_key"]).split(":", 1)[-1]
-        if match_id:
-            keys.add(f"d:{match_id}")
     now = _now()
-    for key in sorted(keys):
-        await database.execute(
-            pg_insert(province_match_overrides)
-            .values(
-                province=province,
-                match_key=key,
-                excluded=True,
-                note=FOREIGN_EXCLUDED_NOTE,
-                updated_by="system",
-                updated_at=now,
-            )
-            .on_conflict_do_nothing(
-                index_elements=[province_match_overrides.c.province, province_match_overrides.c.match_key]
+    rows = await database.fetch_all(
+        select(province_settlement_matches).where(
+            and_(
+                province_settlement_matches.c.province == province,
+                province_settlement_matches.c.active.is_(False),
+                province_settlement_matches.c.match_key.like("d:%"),
             )
         )
-    if keys:
-        logger.info("[settlement] %s: %d meczów innych okręgów oznaczono „Nie obciążaj klubów”", province, len(keys))
-    return len(keys)
+    )
+    restored = 0
+    for row in rows:
+        season = _s(row["season"]) or season_of(row["match_at"])
+        if season != current or not O.is_other_district(row["match_code"], own):
+            continue
+        stamp = row["updated_at"]
+        if stamp is not None and stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if stamp is not None and stamp < FOREIGN_RULE_SINCE:
+            continue
+        judge_id = _s(row["judge_id"])
+        match_id = _s(row["match_key"]).split(":", 1)[1]
+        async with database.transaction():
+            await database.execute(
+                update(province_settlement_matches)
+                .where(
+                    and_(
+                        province_settlement_matches.c.province == province,
+                        province_settlement_matches.c.judge_id == judge_id,
+                        province_settlement_matches.c.match_key == f"d:{match_id}",
+                    )
+                )
+                .values(active=True, origin="district", updated_at=now)
+            )
+            await database.execute(
+                update(province_settlement_matches)
+                .where(
+                    and_(
+                        province_settlement_matches.c.province == province,
+                        province_settlement_matches.c.judge_id == judge_id,
+                        province_settlement_matches.c.match_key == f"o:{match_id}",
+                        province_settlement_matches.c.active.is_(True),
+                    )
+                )
+                .values(active=False, updated_at=now)
+            )
+        restored += 1
+    overrides = await database.fetch_all(
+        select(province_match_overrides.c.match_key).where(
+            and_(
+                province_match_overrides.c.province == province,
+                province_match_overrides.c.note == FOREIGN_EXCLUDED_NOTE,
+                province_match_overrides.c.updated_by == "system",
+            )
+        )
+    )
+    if overrides:
+        await database.execute(
+            delete(province_match_overrides).where(
+                and_(
+                    province_match_overrides.c.province == province,
+                    province_match_overrides.c.note == FOREIGN_EXCLUDED_NOTE,
+                    province_match_overrides.c.updated_by == "system",
+                )
+            )
+        )
+    if restored or overrides:
+        from app import settlement_cache as SC
+
+        SC.bump(province, reason="przywrócenie meczów innych okręgów")
+        logger.info(
+            "[settlement] %s: przywrócono %d obsad meczów innych okręgów, "
+            "skasowano %d automatycznych wyjątków",
+            province, restored, len(overrides),
+        )
+    return {"restored": restored, "overrides": len(overrides)}
 
 
 # ---------------------------------------------------------------------------
@@ -1108,9 +1163,9 @@ async def refresh_province(
         # Nasze przedrostki numerow i poprawka historii zapisanej stara regula -
         # sama baza, bez ZPRP (patrz `fix_history`).
         own = await _own_prefixes(province)
-        # Kolejnosc ma znaczenie: najpierw jawne zdjecie meczow, ktore stara
-        # regula zabierala, potem pobranie - inaczej wrocilyby sedziom.
-        await exclude_foreign_once(province, own=own)
+        # Obsady zgaszone bledna regula z 06.10.2026 wracaja (raz) - patrz
+        # `restore_foreign_once`.
+        await restore_foreign_once(province, own=own)
         await fix_history(province, own=own)
 
         async with AsyncClient(
@@ -1358,6 +1413,9 @@ async def run_settlement_sync_scheduler() -> None:
             set(await enabled_provinces("stats")) | set(await enabled_provinces("settlements"))
         ):
             await fix_history(province)
+            # Raz: mecze innych okregow zgaszone 06.10.2026 wracaja od razu,
+            # bez czekania na dobowe pobranie z ZPRP.
+            await restore_foreign_once(province)
     except Exception:
         logger.exception("[settlement] poprawka historii")
     while True:
