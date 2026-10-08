@@ -153,6 +153,13 @@ def test_okregowy_od_01_09_2026_to_stala_stawka():
     assert _gross("S/IIIM/4", R.ROLE_FIELD, 20, SOBOTA_NOWA, BOOK_NEW) == 131
 
 
+def test_historyczna_nazwa_roli_stolikowej_nie_zeruje_brutto():
+    """Prawdziwe zgłoszenie: S/MłMR i S/MłKR miały przejazd, lecz 0 brutto."""
+    for role in ("stolikowy", "SĘDZIA STOLIKOWY ", "Sekretarz"):
+        assert _gross("S/MłMR/4", role, 28, SOBOTA_NOWA, BOOK_NEW) == 77
+        assert _gross("S/MłKR/1", role, 14, SOBOTA_NOWA, BOOK_NEW) == 77
+
+
 def test_delegat_okregowy_weekend_tanszy_i_doplata_za_100_km():
     sroda = date(2026, 9, 9)
     assert _gross("S/JMM/7", R.ROLE_DELEGATE, 20, sroda, BOOK_NEW) == 356

@@ -235,14 +235,14 @@ async def _assignments(
 
     out: list[E.Assignment] = []
     for row in rows:
-        role = str(row["role"] or R.ROLE_FIELD)
+        role = R.canonical_role(row["role"])
         out.append(
             E.Assignment(
                 match_key=str(row["match_key"]),
                 judge_id=str(row["judge_id"]),
                 match_at=row["match_at"],
                 match_code=str(row["match_code"] or ""),
-                role=str(row["role"] or R.ROLE_FIELD),
+                role=role,
                 origin=str(row["origin"] or "district"),
                 city=str(row["city"] or ""),
                 hall=str(row["hall"] or ""),
@@ -2072,8 +2072,27 @@ async def season_people(
         if item.match_at is not None and start <= item.match_at.date() <= end:
             counts[item.judge_id] = counts.get(item.judge_id, 0) + 1
     names = base["names"]
+    # Zdjęcia z listy sędziów okręgu - arkusz pokazuje twarze, a nie same
+    # numery (08.10.2026). Brak zdjęcia = pusty napis, telefon rysuje inicjały.
+    photos: dict[str, str] = {}
+    if counts:
+        rows = await database.fetch_all(
+            select(province_judges.c.judge_id, province_judges.c.photo_url).where(
+                province_judges.c.judge_id.in_(list(counts))
+            )
+        )
+        for row in rows:
+            data = dict(row._mapping) if hasattr(row, "_mapping") else dict(row)
+            photo = str(data.get("photo_url") or "").strip()
+            if photo:
+                photos[str(data["judge_id"])] = photo
     people = [
-        {"judge_id": judge_id, "name": E.display_judge_name(names.get(judge_id, "")) or judge_id, "matches": n}
+        {
+            "judge_id": judge_id,
+            "name": E.display_judge_name(names.get(judge_id, "")) or judge_id,
+            "matches": n,
+            "photo_url": photos.get(judge_id, ""),
+        }
         for judge_id, n in counts.items()
     ]
     people.sort(key=lambda p: E._sort_name(p["name"]))

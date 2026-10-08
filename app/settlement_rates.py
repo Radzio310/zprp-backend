@@ -45,10 +45,6 @@ CREW_ROLE_FIELDS: dict[str, str] = {
 }
 
 
-def is_table_role(role: Any) -> bool:
-    return str(role or "").strip() == ROLE_TABLE
-
-
 # -------------------------
 # Normalizacja
 # -------------------------
@@ -68,6 +64,27 @@ def code_key(value: Any) -> str:
 
 def province_key(value: Any) -> str:
     return re.sub(r"[^A-Z]", "", strip_dia(value).upper())
+
+
+def canonical_role(role: Any) -> str:
+    """Każdy historyczny zapis roli -> jedna nazwa używana w tabeli stawek.
+
+    W bazie są też starsze warianty, np. ``stolikowy`` albo ``Sędzia
+    stolikowy ``. Aplikacja grupowała je poprawnie po słowie „stolik”, ale
+    silnik szukał w JSON-ie klucza równego *dokładnie* ``Sędzia stolikowy``.
+    Efekt był podstępny: przejazd liczył się normalnie, a brutto wynosiło 0.
+    """
+    text = " ".join(str(role or "").split()).strip()
+    key = strip_dia(text).lower()
+    if "deleg" in key:
+        return ROLE_DELEGATE
+    if any(token in key for token in ("stolik", "sekretarz", "mierzacy czas", "timekeeper")):
+        return ROLE_TABLE
+    return ROLE_FIELD
+
+
+def is_table_role(role: Any) -> bool:
+    return canonical_role(role) == ROLE_TABLE
 
 
 # -------------------------
@@ -328,7 +345,7 @@ def zprp_settlement_reason(code: Any, role: Any, *, province_field: bool = False
         return ZPRP_OOM
     if match_level(code) not in ("central", "cup") and competition_prefix(code) not in _ZPRP_ONLY_PREFIXES:
         return None
-    role_text = str(role or "").strip()
+    role_text = canonical_role(role)
     if role_text == ROLE_FIELD:
         return None if province_field else ZPRP_FIELD
     if role_text == ROLE_DELEGATE:
@@ -361,7 +378,7 @@ def triple_table_allowed(code: Any, role: Any, province: Any) -> bool:
     ⚠ Tylko stoliki OKREGOWE. Stoliki lig centralnych (II liga w gore) i puchar
     wojewodzki z własną stawką „el. PP" są poza tą opcją.
     """
-    if str(role or "").strip() != ROLE_TABLE:
+    if canonical_role(role) != ROLE_TABLE:
         return False
     if is_provincial_cup(code) or match_level(code) != "district":
         return False
@@ -600,6 +617,7 @@ def children_rate_defined(content: Any, role: str, when: date) -> bool:
     Regula jest OGOLNA, nie slaska: okreg, ktory dopisze sobie stawke dzieciec,
     automatycznie przechodzi na rozliczanie za mecz.
     """
+    role = canonical_role(role)
     root = _as_dict(content)
     if not root:
         return False
@@ -650,6 +668,7 @@ def calculate_gross(
     series_text: Any = None,
 ) -> float:
     """Ryczalt brutto za jeden mecz. Port `calculateGross` z BAZA_web."""
+    role = canonical_role(role)
     # Puchar wojewodzki sprawdzamy PRZED etapem pucharowym: „S/PPK/2" ma w sobie
     # „PP", wiec bez tego wpadlby w tabele Pucharu Polski.
     if is_provincial_cup(code):

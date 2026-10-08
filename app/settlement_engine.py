@@ -80,7 +80,9 @@ def _zprp_reason(assignment: "Assignment") -> Optional[str]:
     if assignment.fixed_gross is not None:
         return None
     return R.zprp_settlement_reason(
-        assignment.match_code, assignment.role, province_field=assignment.province_field
+        assignment.match_code,
+        R.canonical_role(assignment.role),
+        province_field=assignment.province_field,
     )
 
 
@@ -309,6 +311,7 @@ def settle_match(
 ) -> SettledMatch:
     """Jeden mecz: stawka, kilometrowka, status."""
     when_date = assignment.match_at.date() if assignment.match_at else None
+    role = R.canonical_role(assignment.role)
     if assignment.fixed_gross is not None:
         return _settle_fixed(assignment, when_date, now)
     central = R.pick_version(central_versions, when_date)
@@ -327,7 +330,7 @@ def settle_match(
     # Znacznik z bazy dziala tylko tam, gdzie regula na to pozwala: stolik
     # OKREGOWY w okregu, ktory ma te opcje wlaczona.
     triple = bool(assignment.triple_table) and R.triple_table_allowed(
-        assignment.match_code, assignment.role, province
+        assignment.match_code, role, province
     )
 
     if distance is None:
@@ -335,7 +338,7 @@ def settle_match(
     else:
         gross = R.calculate_gross(
             code=assignment.match_code,
-            role=assignment.role,
+            role=role,
             distance_km=distance,
             when=when,
             central_book=central_book,
@@ -364,7 +367,7 @@ def settle_match(
         match_code=assignment.match_code,
         category=R.category_label(assignment.match_code),
         level=level,
-        role=assignment.role,
+        role=role,
         origin=assignment.origin,
         # TYLKO miasto. Nazwa hali w tym polu psula i trase na wydruku
         # („Bystra-Hala Sportowa-Bystra"), i dopasowanie do tabeli odleglosci -
@@ -405,7 +408,7 @@ def _settle_fixed(assignment: Assignment, when_date: Optional[date], now: dateti
         match_code=assignment.match_code,
         category=R.category_label(assignment.match_code),
         level=R.match_level(assignment.match_code),
-        role=assignment.role,
+        role=R.canonical_role(assignment.role),
         origin=assignment.origin,
         city=assignment.city,
         hall=assignment.hall,

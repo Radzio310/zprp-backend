@@ -95,6 +95,15 @@ def test_stolik_ligowy_spoza_okregu_placi_kilometrowka_centralna():
     assert match.travel == 80
 
 
+def test_stary_skrot_roli_stolikowej_wraca_jako_kanoniczny_i_ma_stawke():
+    [entry] = settle([
+        make("table-old", "S/MłMR/4", "stolikowy", at("2026-10-04T09:00"), km=28),
+    ])
+    [match] = entry.matches
+    assert match.role == R.ROLE_TABLE
+    assert match.gross == 77
+
+
 def test_podatek_liczy_sie_od_SUMY_miesiaca():
     """Trzy mecze po 117 zl: mecz po meczu koszty nie przyslugiwalyby wcale."""
     entries = settle([
