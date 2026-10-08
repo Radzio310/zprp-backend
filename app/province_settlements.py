@@ -1276,8 +1276,10 @@ async def mine(
     month: int = Query(...),
     include_future: bool = Query(False),
     period_id: Optional[str] = Query(None, description="Okres wypłat okręgu (jak w panelu)"),
+    payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
     key = require_province(province)
+    await _stats_viewer_may(key, str(judge_id).strip(), payload)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
     # „Moje rozliczenie OKREGOWE": obsady ZPRP nigdy nie wchodza tu do kwot -
@@ -1855,30 +1857,50 @@ async def _judge_season(
     today = now.date()
     buckets: list[dict] = []
     totals = {"district": {}, "clubs": {}}
-    for item in ranges:
+
+    async def settle(item: dict) -> Optional[dict]:
+        """Rachunek jednego okresu - panelowy z pamięci albo liczony dla sędziego."""
         is_period = item["kind"] == P.PERIOD
         if item["from"] > today and not include_future:
-            data = None
-        else:
-            warm = None
-            if is_period and not extra:
-                warm = SC.peek(
-                    "month",
-                    key,
-                    (int(item["year"]), int(item["month"]), item["id"], bool(include_future), False),
-                )
-            data = warm or await load_settlement(
+            return None
+        if is_period and not extra:
+            warm = SC.peek(
+                "month",
                 key,
-                year=item["year"],
-                month=item["month"],
-                include_future=include_future,
-                include_zprp=False,
-                judge_ids=[judge_id],
-                extra=extra,
-                period_id=item["id"] if is_period else None,
-                span=None if is_period else (item["from"], item["to"]),
-                scope=scope,
+                (int(item["year"]), int(item["month"]), item["id"], bool(include_future), False),
             )
+            if warm is not None:
+                return warm
+        return await load_settlement(
+            key,
+            year=item["year"],
+            month=item["month"],
+            include_future=include_future,
+            include_zprp=False,
+            judge_ids=[judge_id],
+            extra=extra,
+            period_id=item["id"] if is_period else None,
+            span=None if is_period else (item["from"], item["to"]),
+            scope=scope,
+        )
+
+    # Brakujące nazwisko sędziego dociągamy RAZ, zanim okresy ruszą naraz -
+    # inaczej każdy okres pytałby API ZPRP o to samo równocześnie.
+    if is_missing_name(base["names"].get(judge_id, ""), judge_id):
+        try:
+            await asyncio.wait_for(
+                fill_missing_names(key, only={judge_id}, limit=1), timeout=NAME_FILL_SECONDS
+            )
+            base["names"].update(await _judge_names(key))
+        except Exception as exc:  # nazwisko to wygoda - nie zatrzymuje rozliczenia
+            logger.info("[settlement] %s: nazwisko %s: %s", key, judge_id, exc)
+
+    # Okresy liczą się równolegle - czekanie na bazę (podziały, podpowiedzi)
+    # nakłada się, zamiast iść okres po okresie (08.10.2026: ekran ma się
+    # otwierać bez zacinki).
+    settled = await asyncio.gather(*(settle(item) for item in ranges))
+    for item, data in zip(ranges, settled):
+        is_period = item["kind"] == P.PERIOD
         bucket = {
             "id": item["id"],
             "kind": item["kind"],
@@ -1964,6 +1986,7 @@ async def my_season(
     season: Optional[str] = Query(None, description="Rok początku sezonu (2026) albo 2026/2027; brak = bieżący"),
     include_future: bool = Query(False),
     detail: bool = Query(True, description="Mecze okresów (False = same sumy, dla kafla)"),
+    payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
     """
     Jedno źródło dla wszystkich ekranów sędziego (08.10.2026): kafel
@@ -1975,6 +1998,8 @@ async def my_season(
     nieobecności) - w `detail.zprp`.
     """
     key = require_province(province)
+    # Cudzy sezon - tylko admin i obsadowy okręgu (ta sama reguła co statystyki).
+    await _stats_viewer_may(key, str(judge_id).strip(), payload)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
     start = _season_param(season)
@@ -1997,9 +2022,13 @@ class SeasonForecastRequest(BaseModel):
 
 
 @router.post("/me/season/forecast", summary="Mój sezon z prognozą przyszłych meczów z telefonu")
-async def my_season_forecast(payload: SeasonForecastRequest):
+async def my_season_forecast(
+    payload: SeasonForecastRequest,
+    jwt: Optional[dict] = Depends(get_optional_jwt_payload),
+):
     """`/me/season` z przyszłymi plus mecze z telefonu, których serwer jeszcze nie zna."""
     key = require_province(payload.province)
+    await _stats_viewer_may(key, str(payload.judge_id).strip(), jwt)
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
     extra = await _forecast_assignments(key, payload.judge_id, payload.matches)
@@ -2011,6 +2040,44 @@ async def my_season_forecast(payload: SeasonForecastRequest):
         extra=extra or None,
         detail=payload.detail,
     )
+
+
+@router.get("/me/people", summary="Sędziowie okręgu z rozliczeniami - do podglądu admina")
+async def season_people(
+    province: str = Query(...),
+    season: Optional[str] = Query(None),
+    payload: Optional[dict] = Depends(get_optional_jwt_payload),
+):
+    """
+    Lista do przełącznika „widok sędziego" (08.10.2026): kto w okręgu ma
+    obsady w sezonie, z nazwiskiem i liczbą meczów. Tylko admin i obsadowy
+    okręgu - zwykły sędzia nie przegląda cudzych rozliczeń.
+    """
+    key = require_province(province)
+    own = str((payload or {}).get("judge_id") or "").strip()
+    if not own:
+        raise HTTPException(401, "Zaloguj się ponownie, żeby przeglądać sędziów okręgu.")
+    from app.match_market import viewer_may_inspect
+
+    if not await viewer_may_inspect(own, key):
+        raise HTTPException(403, "Podgląd sędziów okręgu ma tylko admin i obsadowy okręgu.")
+    if not await module_enabled(key, "settlements"):
+        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    from app import settlement_payout_ranges as PR
+
+    start, end = PR.season_span(_season_param(season))
+    base = await _base(key)
+    counts: dict[str, int] = {}
+    for item in [*base["assignments"], *(pair[0] for pair in base.get("bombed", []))]:
+        if item.match_at is not None and start <= item.match_at.date() <= end:
+            counts[item.judge_id] = counts.get(item.judge_id, 0) + 1
+    names = base["names"]
+    people = [
+        {"judge_id": judge_id, "name": E.display_judge_name(names.get(judge_id, "")) or judge_id, "matches": n}
+        for judge_id, n in counts.items()
+    ]
+    people.sort(key=lambda p: E._sort_name(p["name"]))
+    return {"province": key, "season": start.year, "people": people}
 
 
 # ---------------------------------------------------------------------------
