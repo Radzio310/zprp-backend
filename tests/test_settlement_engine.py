@@ -104,6 +104,22 @@ def test_stary_skrot_roli_stolikowej_wraca_jako_kanoniczny_i_ma_stawke():
     assert match.gross == 77
 
 
+def test_stolik_regionalny_ze_zgloszenia_liczy_brutto_i_wspolny_przejazd():
+    """Trzy pozycje ze zrzutu: każdy mecz ma stawkę, dojazd dzieli turniej."""
+    [entry] = settle([
+        make("table-1", "S/MłMR/4", "stolikowy", at("2026-10-03T09:00"), km=28, hall="Hala"),
+        make("table-2", "S/MłKR/1", "stolikowy", at("2026-10-04T08:30"), km=14, hall="Hala"),
+        make("table-3", "S/MłKR/4", "stolikowy", at("2026-10-04T11:40"), km=14, hall="Hala"),
+    ])
+
+    assert [match.gross for match in entry.matches] == [77, 77, 77]
+    assert [match.travel for match in entry.matches] == [39.2, 19.6, 0]
+    assert entry.gross == 231
+    assert entry.net == 209
+    assert entry.travel == 58.8
+    assert entry.total == 267.8
+
+
 def test_podatek_liczy_sie_od_SUMY_miesiaca():
     """Trzy mecze po 117 zl: mecz po meczu koszty nie przyslugiwalyby wcale."""
     entries = settle([
