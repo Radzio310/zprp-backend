@@ -4385,6 +4385,11 @@ from app.settlement_register_tables import define_tables as _define_register_tab
     province_settlement_doc_settings,
 ) = _define_register_tables(metadata)
 
+# SMS z wynikiem meczu (08.10.2026): konfiguracja centralna i per okręg oraz
+# okręg prowadzący mecz - schemat w osobnym module.
+from app.sms_config_tables import define_tables as _define_sms_tables
+(sms_config, match_province_cache) = _define_sms_tables(metadata)
+
 # Ogólnopolska tabela odległości zasilana wyłącznie ryczałtami PDF ZPRP.
 from app.national_distance_tables import define_tables as _define_national_distance_tables
 (

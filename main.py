@@ -333,6 +333,10 @@ app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)
 app.include_router(extra_report_admin_router)
+# SMS z wynikiem meczu: konfiguracja centralna i per okręg (08.10.2026).
+from app.sms_config import router as sms_config_router, admin_router as sms_config_admin_router
+app.include_router(sms_config_router)
+app.include_router(sms_config_admin_router)
 app.include_router(young_referees_router)
 app.include_router(agent_docs_router)
 app.include_router(agent_chat_router)
