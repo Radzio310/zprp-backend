@@ -11,6 +11,8 @@ decyzja, a właśnie ona rozstrzyga, do kogo pójdzie raport.
 """
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from app.extra_report_scope import (
@@ -122,7 +124,39 @@ async def test_awaria_zprp_nie_wywraca_odczytu(monkeypatch):
             raise RuntimeError("ZPRP nie odpowiada")
 
     monkeypatch.setattr("app.extra_report_scope.AsyncClient", lambda **_k: _Boom())
+    monkeypatch.setattr("app.extra_report_scope.asyncio.sleep", AsyncMock())
     assert await fetch_match_province("191335") == ""
+
+
+@pytest.mark.asyncio
+async def test_ustalanie_okregu_uzywa_odpornego_pobieracza(monkeypatch):
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"0": [{"Id": "209643", "NazwaWZPR": "ŚLĄSKIE"}]}
+
+    class _Client:
+        get = AsyncMock(return_value=_Response())
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    client = _Client()
+    monkeypatch.setattr("app.extra_report_scope.AsyncClient", lambda **_k: client)
+
+    assert await fetch_match_province("209643") == "SLASKIE"
+    client.get.assert_awaited_once_with(
+        "https://rozgrywki.zprp.pl/api/pokaz_mecze_szczegoly.php",
+        params={"Zawody": "209643"},
+        timeout=12.0,
+    )
 
 
 def test_l_z_kreska_nie_jest_znakiem_diakrytycznym():

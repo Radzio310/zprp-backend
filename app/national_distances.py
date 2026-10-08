@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import gzip
+import json
 import logging
 import math
 from typing import Any, Optional
@@ -20,12 +22,13 @@ from typing import Any, Optional
 import time
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import national_lookup_rules as NL
+from app import national_route_shape as RS
 from app.db import (
     database,
     national_distance_cities,
@@ -501,7 +504,9 @@ def _city_payload(row: Any) -> dict[str, Any]:
     }
 
 
-def _connection_payload(row: Any, include_route: bool = True) -> dict[str, Any]:
+def _connection_payload(
+    row: Any, include_route: bool = True, route_mode: str = "full"
+) -> dict[str, Any]:
     return {
         "fromKey": row["city_a_key"],
         "toKey": row["city_b_key"],
@@ -510,15 +515,41 @@ def _connection_payload(row: Any, include_route: bool = True) -> dict[str, Any]:
         "distanceKm": int(row["distance_km"]),
         "roundTripKm": int(row["distance_km"]) * 2,
         "observations": int(row["observations"] or 0),
-        "route": row["route_geometry"] if include_route else None,
+        "route": RS.route_for_mode(row["route_geometry"], route_mode) if include_route else None,
         "updatedAt": row["updated_at"].isoformat() if row["updated_at"] else None,
     }
 
 
+#: Od tylu bajtów przegląd idzie skompresowany (gdy telefon to przyjmuje).
+_GZIP_MIN_BYTES = 32 * 1024
+
+
+def _json_response(request: Request, payload: dict[str, Any]) -> Response:
+    """JSON przeglądu, skompresowany gzipem, gdy klient go przyjmuje.
+
+    Serwer nie ma globalnej kompresji, a przegląd to największa odpowiedź
+    mapy. Telefon (OkHttp, NSURLSession) i przeglądarka rozpakowują ją same.
+    """
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    accepts = "gzip" in (request.headers.get("accept-encoding") or "").lower()
+    if accepts and len(body) >= _GZIP_MIN_BYTES:
+        return Response(
+            content=gzip.compress(body, compresslevel=5),
+            media_type="application/json",
+            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+        )
+    return Response(content=body, media_type="application/json")
+
+
 @router.get("", summary="Mapa i katalog miejscowości z ryczałtów ZPRP")
 async def national_distances_overview(
+    request: Request,
     limit: int = Query(1000, ge=1, le=3000),
+    # `slim` = trasy uproszczone do mapy kraju (aplikacja od 08.10.2026),
+    # `none` = bez geometrii, `full` = jak dotąd (starsza aplikacja).
+    routes: Optional[str] = Query(None),
 ):
+    mode = RS.route_mode(routes)
     cities = await database.fetch_all(
         select(national_distance_cities).order_by(national_distance_cities.c.name.asc())
     )
@@ -535,18 +566,19 @@ async def national_distances_overview(
     connections_total = await database.fetch_val(
         select(func.count()).select_from(national_distance_connections)
     )
-    return {
+    return _json_response(request, {
         "cities": [_city_payload(row) for row in cities],
         # Przegląd mapy dostaje geometrię, dzięki czemu po wejściu nic już nie
         # dociąga. Przy dużej bazie limit chroni telefon; wyszukiwarka ma osobny
         # endpoint i zawsze znajdzie także starszą relację.
-        "connections": [_connection_payload(row) for row in connections],
+        "connections": [_connection_payload(row, route_mode=mode) for row in connections],
+        "routes": mode,
         "stats": {
             "cities": len(cities),
             "connections": int(connections_total or 0),
             "documents": int(processed or 0),
         },
-    }
+    })
 
 
 class ProgressRequest(BaseModel):

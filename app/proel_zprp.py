@@ -20,11 +20,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Optional, Set, Tuple
 
 import httpx
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
@@ -112,6 +114,39 @@ async def _journal_send(
         logger.debug("ProEl ZPRP: ślad wysyłki nieudany", exc_info=True)
 
 
+#: Wpisy dziennika w locie. Referencja trzymana do końca zadania, bo pętla
+#: zdarzeń trzyma zadania SŁABO - zadanie bez innej referencji potrafi zniknąć
+#: w połowie zapisu, a wraz z nim wiersz w dzienniku.
+_journal_tasks: Set["asyncio.Task[None]"] = set()
+
+
+def _journal_task_done(task: "asyncio.Task[None]") -> None:
+    _journal_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        # `_journal_send` łapie wszystko sam - tu trafia tylko to, czego nie
+        # przewidział. Ma zostać ślad w logu, a nie „Task exception was never
+        # retrieved" na zamknięciu procesu.
+        logger.warning("ProEl ZPRP: ślad wysyłki w tle nieudany", exc_info=exc)
+
+
+def _journal_send_later(event: str, **kwargs: Any) -> None:
+    """`_journal_send` puszczony w tle - odpowiedź do telefonu na niego nie czeka.
+
+    Wpis to trzy i więcej podróży do bazy (tożsamość, numer meczu, klucz
+    idempotencji), a przy „Zapisz pełne dane meczu" szły one PO KAŻDYM
+    zawodniku, zanim telefon dostał odpowiedź i mógł wysłać następnego. Sędzia
+    czekał na naszą księgowość, nie na ZPRP. Treść wpisu zostaje ta sama, a
+    zasada „nigdy nie wywraca wysyłki" tym bardziej - zadanie nie ma już nawet
+    jak jej zatrzymać.
+    """
+    task = asyncio.create_task(_journal_send(event, **kwargs))
+    _journal_tasks.add(task)
+    task.add_done_callback(_journal_task_done)
+
+
 def _hour_key(event: str, id_zawody: Any) -> str:
     """Klucz idempotencji na godzinę - dla wysyłek po jednym wywołaniu na osobę.
 
@@ -130,6 +165,117 @@ def _base_url() -> str:
     )
 
 
+# ─────────────────────── wspólne połączenie z ZPRP ───────────────────────
+#
+# Do 08.10.2026 każde żądanie do baza.zprp.pl otwierało WŁASNEGO klienta:
+# nowe połączenie TCP i nowy uścisk TLS na jeden zapis jednego zawodnika.
+# „Zapisz pełne dane meczu" to kilkadziesiąt takich zapisów pod rząd, więc
+# sam uścisk dłoni z serwerem związku potrafił kosztować więcej niż odpowiedź.
+# Jeden klient na proces trzyma połączenie żywe między żądaniami (keep-alive)
+# i kolejny zapis idzie już gotową rurą. Limity czasu bez zmian.
+#
+# Klient jest związany z pętlą zdarzeń, na której powstał. Na produkcji pętla
+# jest jedna przez całe życie procesu, ale testy dostają świeżą pętlę na każdy
+# przypadek - stąd sprawdzenie pętli zamiast gołego singletonu.
+
+_shared_client: Optional[httpx.AsyncClient] = None
+_shared_client_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _upstream_client() -> httpx.AsyncClient:
+    """Wspólny klient do ZPRP - tworzony leniwie, przy pierwszym żądaniu."""
+    global _shared_client, _shared_client_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _shared_client is None
+        or _shared_client.is_closed
+        or _shared_client_loop is not loop
+    ):
+        _shared_client = httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT_S)
+        _shared_client_loop = loop
+    return _shared_client
+
+
+async def close_upstream_client() -> None:
+    """Zamknięcie wspólnego klienta przy wyłączaniu serwera (hak w main.py)."""
+    global _shared_client, _shared_client_loop
+    client, _shared_client, _shared_client_loop = _shared_client, None, None
+    if client is None or client.is_closed:
+        return
+    try:
+        await client.aclose()
+    except Exception:
+        logger.debug("ProEl ZPRP: zamknięcie klienta nieudane", exc_info=True)
+
+
+# ─────────────────────── jeden zapis naraz na mecz ───────────────────────
+#
+# Sesja ZPRP nie znosi równoległości: żądanie, które trafi na serwer związku,
+# gdy idzie już inne z tym samym `hash_sesji`, w połowie przypadków dostaje
+# kłamliwe 401 „sesja wygasła" (pomiar z produkcji, mecz TEST/2 - patrz
+# `LANES` w aplikacji). Telefon pilnuje tego u siebie, ale nie widzi drugiego
+# telefonu ani własnych równoległych czynności: wynik skrócony, pełne dane
+# i plik protokołu potrafią ruszyć w tej samej sekundzie. Serwer widzi
+# wszystkie, więc tu jest miejsce na kolejkę - jeden zapis do ZPRP naraz na
+# mecz, reszta czeka na swoją kolej.
+#
+# Zamek obejmuje JEDNO żądanie do ZPRP, nie całą czynność. Wysyłka pełnych
+# danych trzymająca go przez kilkanaście sekund kazałaby wynikowi skróconemu
+# czekać dłużej, niż telefon czeka na odpowiedź (20 s), a tak wynik wchodzi
+# między dwóch zawodników. `asyncio.Lock` budzi czekających w kolejności
+# przyjścia, więc nikt nie przeskoczy kolejki.
+
+
+class _MatchLock:
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
+_match_locks: Dict[str, _MatchLock] = {}
+
+
+def _match_lock_key(id_zawody: Any, hash_sesji: Any = None) -> str:
+    """Klucz zamka: mecz z ZPRP, a bez niego (starsza aplikacja) sama sesja.
+
+    Sesja to zawsze jeden mecz, więc zamek na niej chroni dokładnie to samo -
+    tylko nie łączy się z żądaniami tego meczu, które przyszły z numerem.
+    """
+    try:
+        number = int(str(id_zawody).strip()) if id_zawody is not None else 0
+    except (TypeError, ValueError):
+        number = 0
+    if number > 0:
+        return f"z:{number}"
+    session = str(hash_sesji or "").strip()
+    return f"h:{session}" if session else ""
+
+
+@asynccontextmanager
+async def match_write_lock(key: str) -> AsyncIterator[None]:
+    """Jeden zapis do ZPRP naraz dla danego meczu.
+
+    Wpis znika ze słownika razem z ostatnim chętnym - zamki nie zbierają się
+    w pamięci przez cały sezon, a następny zapis tego meczu dostaje nowy.
+    """
+    if not key:
+        yield
+        return
+    entry = _match_locks.get(key)
+    if entry is None:
+        entry = _match_locks[key] = _MatchLock()
+    entry.users += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.users -= 1
+        if entry.users <= 0 and _match_locks.get(key) is entry:
+            del _match_locks[key]
+
+
 async def _post_upstream(endpoint: str, payload: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     """Jedyny punkt sieciowy modułu — testy podmieniają wyłącznie tę funkcję.
 
@@ -137,8 +283,7 @@ async def _post_upstream(endpoint: str, payload: Dict[str, Any]) -> Tuple[int, D
     w `_call_upstream` — tu ich nie tykamy, żeby monkeypatch w testach mógł
     symulować także timeouty.
     """
-    async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT_S) as client:
-        resp = await client.post(f"{_base_url()}/{endpoint}", json=payload)
+    resp = await _upstream_client().post(f"{_base_url()}/{endpoint}", json=payload)
     try:
         data = resp.json()
     except Exception:
@@ -449,7 +594,8 @@ async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
     upstream_payload: Dict[str, Any] = {"hash_sesji": hash_sesji}
     upstream_payload.update({k: str(v) for k, v in payload.fields.items()})
 
-    status, data = await _call_upstream("summary.php", upstream_payload)
+    async with match_write_lock(_match_lock_key(payload.id_zawody, hash_sesji)):
+        status, data = await _call_upstream("summary.php", upstream_payload)
 
     if status == 200 and str(data.get("status") or "").lower() == "success":
         return {"status": "success", "message": str(data.get("message") or "")}
@@ -513,7 +659,7 @@ async def zprp_summary(
     x_elevation: Optional[str] = Header(None),
 ):
     out = await submit_summary(payload)
-    await _journal_send(
+    _journal_send_later(
         "zprp.summary_sent",
         id_zawody=payload.id_zawody,
         judge_id=x_judge_id,
@@ -604,7 +750,8 @@ async def submit_player_stats(payload: ZprpPlayerStatsRequest) -> Dict[str, Any]
     }
     upstream_payload.update({k: str(v) for k, v in payload.fields.items()})
 
-    status, data = await _call_upstream("player_stats.php", upstream_payload)
+    async with match_write_lock(_match_lock_key(payload.id_zawody, hash_sesji)):
+        status, data = await _call_upstream("player_stats.php", upstream_payload)
 
     if status == 200 and str(data.get("status") or "").lower() == "success":
         return {"status": "success", "message": str(data.get("message") or "")}
@@ -695,7 +842,7 @@ async def zprp_player_stats(
     x_elevation: Optional[str] = Header(None),
 ):
     out = await submit_player_stats(payload)
-    await _journal_send(
+    _journal_send_later(
         "zprp.players_sent",
         id_zawody=payload.id_zawody,
         judge_id=x_judge_id,
@@ -776,7 +923,8 @@ async def submit_officials_stats(payload: ZprpOfficialsStatsRequest) -> Dict[str
     }
     upstream_payload.update({k: str(v) for k, v in payload.fields.items()})
 
-    status, data = await _call_upstream("officials_stats.php", upstream_payload)
+    async with match_write_lock(_match_lock_key(payload.id_zawody, hash_sesji)):
+        status, data = await _call_upstream("officials_stats.php", upstream_payload)
 
     if status == 200 and str(data.get("status") or "").lower() == "success":
         return {"status": "success", "message": str(data.get("message") or "")}
@@ -862,7 +1010,7 @@ async def zprp_officials_stats(
     x_elevation: Optional[str] = Header(None),
 ):
     out = await submit_officials_stats(payload)
-    await _journal_send(
+    _journal_send_later(
         "zprp.officials_sent",
         id_zawody=payload.id_zawody,
         judge_id=x_judge_id,
@@ -919,7 +1067,8 @@ async def submit_match_comment(payload: ZprpMatchCommentRequest) -> Dict[str, An
         "komentarz": payload.komentarz if payload.komentarz is not None else "",
     }
 
-    status, data = await _call_upstream("match_comment.php", upstream_payload)
+    async with match_write_lock(_match_lock_key(payload.id_zawody, hash_sesji)):
+        status, data = await _call_upstream("match_comment.php", upstream_payload)
 
     if status == 200 and str(data.get("status") or "").lower() == "success":
         return {"status": "success", "message": str(data.get("message") or "")}
@@ -986,7 +1135,7 @@ async def zprp_match_comment(
     # Samodzielny dopisek raportu ma własne zdarzenie - inaczej dziennik
     # składał go w „przerwaną wysyłkę pełnych danych" (LCK/17).
     event, details = comment_journal_event(payload.purpose, payload.komentarz)
-    await _journal_send(
+    _journal_send_later(
         event,
         id_zawody=payload.id_zawody,
         judge_id=x_judge_id,
@@ -1083,13 +1232,17 @@ async def _post_upstream_file(
     content: bytes,
     content_type: str,
 ) -> Tuple[int, Dict[str, Any]]:
-    """Multipartowy odpowiednik `_post_upstream` - też jeden punkt sieciowy."""
-    async with httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT_S) as client:
-        resp = await client.post(
-            f"{_base_url()}/{endpoint}",
-            data=data,
-            files={"zalacznik": (filename, content, content_type)},
-        )
+    """Multipartowy odpowiednik `_post_upstream` - też jeden punkt sieciowy.
+
+    Ten sam wspólny klient, ale z własnym, dłuższym limitem czasu na to jedno
+    żądanie - plik ma prawo jechać dłużej niż pola wyniku.
+    """
+    resp = await _upstream_client().post(
+        f"{_base_url()}/{endpoint}",
+        data=data,
+        files={"zalacznik": (filename, content, content_type)},
+        timeout=_UPLOAD_TIMEOUT_S,
+    )
     try:
         parsed = resp.json()
     except Exception:
@@ -1103,8 +1256,13 @@ async def upload_attachment(
     nazwa: str,
     filename: str,
     content: bytes,
+    id_zawody: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Rdzeń wysyłki załącznika - wydzielony z trasy dla testów."""
+    """Rdzeń wysyłki załącznika - wydzielony z trasy dla testów.
+
+    `id_zawody` służy wyłącznie zamkowi zapisu (`match_write_lock`) - do ZPRP
+    nie jedzie, mecz wskazuje tam sama sesja.
+    """
     session = (hash_sesji or "").strip()
     if not session:
         raise HTTPException(
@@ -1140,13 +1298,14 @@ async def upload_attachment(
     label = (nazwa or "").strip() or "Protokół zawodów"
 
     try:
-        status, data = await _post_upstream_file(
-            "upload_attachment.php",
-            {"hash_sesji": session, "nazwa": label},
-            filename=filename,
-            content=content,
-            content_type=ATTACHMENT_CONTENT_TYPES[ext],
-        )
+        async with match_write_lock(_match_lock_key(id_zawody, session)):
+            status, data = await _post_upstream_file(
+                "upload_attachment.php",
+                {"hash_sesji": session, "nazwa": label},
+                filename=filename,
+                content=content,
+                content_type=ATTACHMENT_CONTENT_TYPES[ext],
+            )
     except httpx.TimeoutException:
         logger.warning("ProEl ZPRP upload timeout (%s B)", len(content))
         raise HTTPException(
@@ -1236,8 +1395,9 @@ async def zprp_attachment(
         nazwa=nazwa,
         filename=filename,
         content=content,
+        id_zawody=id_zawody,
     )
-    await _journal_send(
+    _journal_send_later(
         "zprp.attachment_sent",
         id_zawody=id_zawody,
         judge_id=x_judge_id,

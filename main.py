@@ -63,7 +63,8 @@ from app.reports import router as reports_router
 from app.login_records import router as login_records_router
 from app.privacy_consents import router as privacy_consents_router
 from app.proel import router as proel_router
-from app.proel_zprp import router as proel_zprp_router
+from app.proel_zprp import router as proel_zprp_router, close_upstream_client as close_proel_zprp_client
+from app.proel_zprp_batch import router as proel_zprp_batch_router
 from app.proel_archive import router as proel_archive_router
 from app.proel_journal import router as proel_journal_router
 from app.proel_stats import router as proel_stats_router
@@ -302,6 +303,8 @@ app.include_router(privacy_consents_router)
 # więc każdy router ze ścieżkami pod /proel/... MUSI stanąć PRZED proel_router —
 # inaczej `/proel/zprp/auth` wpada w `match_number="zprp/auth"`.
 app.include_router(proel_zprp_router)
+# Pakiet pełnych danych (`/proel/zprp/full-batch`) - też przed catch-allem.
+app.include_router(proel_zprp_batch_router)
 app.include_router(proel_archive_router)
 app.include_router(proel_journal_router)
 # Statystyki PRZED `proel_router`: tamten ma `/proel/{match_number}`
@@ -1565,6 +1568,12 @@ async def shutdown():
             await _mp_snapshot_task
         except asyncio.CancelledError:
             pass
+
+    # Wspólne połączenie z baza.zprp.pl (keep-alive) - patrz app/proel_zprp.py.
+    try:
+        await close_proel_zprp_client()
+    except Exception:
+        logger.debug("ProEl ZPRP: zamknięcie klienta nieudane", exc_info=True)
 
     await database.disconnect()
     logger.info("✅ Disconnected from the database")

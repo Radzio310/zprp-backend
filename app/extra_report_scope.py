@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, FrozenSet, Optional
 
@@ -36,6 +37,7 @@ from app.zprp_accounts import normalize_province
 logger = logging.getLogger(__name__)
 
 DETAILS_URL = "https://rozgrywki.zprp.pl/api/pokaz_mecze_szczegoly.php"
+RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 #: Kategorie, w których o adresata pyta się OKRĘG, a nie centrala.
 #:
@@ -99,10 +101,29 @@ async def fetch_match_province(match_id: Any, *, timeout: float = 12.0) -> str:
     if not mid.isdigit():
         return ""
     try:
-        async with AsyncClient(timeout=timeout) as client:
-            resp = await client.get(DETAILS_URL, params={"Zawody": mid})
-            resp.raise_for_status()
-            payload = resp.json()
+        async with AsyncClient(follow_redirects=True) as client:
+            payload: Any = None
+            for attempt in range(3):
+                try:
+                    response = await client.get(
+                        DETAILS_URL,
+                        params={"Zawody": mid},
+                        timeout=timeout,
+                    )
+                except Exception:
+                    if attempt >= 2:
+                        raise
+                    await asyncio.sleep(0.4 * (2**attempt))
+                    continue
+                if response.status_code in RETRYABLE_STATUS and attempt < 2:
+                    await asyncio.sleep(0.4 * (2**attempt))
+                    continue
+                response.raise_for_status()
+                payload = response.json()
+                break
+        # Świeży mecz bez składów potrafi wrócić jako goła lista `[[{...}]]`.
+        if isinstance(payload, list):
+            payload = {"0": payload[0]} if payload and isinstance(payload[0], list) else None
         rows = payload.get("0") if isinstance(payload, dict) else None
         match = rows[0] if isinstance(rows, list) and rows else None
         return province_from_match(match)
