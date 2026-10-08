@@ -71,6 +71,10 @@ class BombRef:
     source: str
     label: str
     created_at: Optional[datetime] = None
+    #: Kara z skali okręgu (True) czy wpisana ręcznie (False) - od 07.10.2026.
+    penalty_auto: bool = True
+    #: Która to czynna bomba sędziego w sezonie (z niej kwota z skali).
+    penalty_ordinal: Optional[int] = None
 
 
 def _s(value: Any) -> str:
@@ -108,6 +112,8 @@ def bomb_from_row(row: Mapping[str, Any]) -> BombRef:
         source=_s(row.get("source")) or "crew",
         label=_s(row.get("match_label")) or teams,
         created_at=_utc(row.get("created_at")),
+        penalty_auto=_s(row.get("penalty_mode")) != "manual",
+        penalty_ordinal=row.get("penalty_ordinal"),
     )
 
 

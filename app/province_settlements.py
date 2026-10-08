@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import and_, func, select
 
+from app import bomb_penalties as BPEN
 from app import settlement_bombs as SB
 from app import settlement_cache as SC
 from app import settlement_engine as E
@@ -181,11 +182,22 @@ async def _active_bombs() -> list[SB.BombRef]:
     naszego sedziego moze ktos z innego okregu - dlatego nie filtrujemy tu
     po okregu, tylko po sedzim w `settlement_bombs.match_bombs`.
     """
-    rows = await database.fetch_all(select(match_bombs).where(match_bombs.c.status == "active"))
-    return [
-        SB.bomb_from_row(dict(row._mapping) if hasattr(row, "_mapping") else dict(row))
-        for row in rows
+    rows = [
+        dict(row._mapping) if hasattr(row, "_mapping") else dict(row)
+        for row in await database.fetch_all(
+            select(match_bombs).where(match_bombs.c.status == "active")
+        )
     ]
+    # Kara naliczana w sezonie (07.10.2026): kwota z skali okręgu wg kolejnej
+    # bomby sędziego, chyba że ktoś wpisał ją ręcznie - ta sama droga, co w
+    # rejestrze (`bomb_penalties`). Pula to właśnie te czynne bomby.
+    pens = BPEN.effective_from_pool(rows, rows, await BPEN.load_scales())
+    for row in rows:
+        pen = pens.get(int(row["id"]))
+        if pen is not None:
+            row["penalty"] = pen.amount or 0
+            row["penalty_ordinal"] = pen.ordinal
+    return [SB.bomb_from_row(row) for row in rows]
 
 
 async def _assignments(
@@ -541,6 +553,8 @@ def _bomb_rows(
                 "bomb_note": bomb.note or None,
                 "bomb_created_at": bomb.created_at.isoformat() if bomb.created_at else None,
                 "penalty": bomb.penalty,
+                "penalty_auto": bomb.penalty_auto,
+                "penalty_ordinal": bomb.penalty_ordinal,
                 "lost_gross": 0.0 if zprp_reason else settled.gross,
                 "lost_travel": 0.0 if zprp_reason else settled.travel,
             }
@@ -587,6 +601,8 @@ def _loose_bomb_rows(
                 "bomb_note": bomb.note or None,
                 "bomb_created_at": bomb.created_at.isoformat() if bomb.created_at else None,
                 "penalty": bomb.penalty,
+                "penalty_auto": bomb.penalty_auto,
+                "penalty_ordinal": bomb.penalty_ordinal,
                 "lost_gross": 0.0,
                 "lost_travel": 0.0,
             }
