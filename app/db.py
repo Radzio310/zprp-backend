@@ -2784,6 +2784,22 @@ match_bombs = Table(
     Column("penalty_by", String, nullable=True),
     Column("penalty_by_name", String, nullable=True),
     Column("penalty_at", DateTime(timezone=True), nullable=True),
+    # Skąd kwota (07.10.2026): "auto" - z skali okręgu wg kolejnej bomby
+    # sędziego w sezonie (`bomb_penalty_rules`), "manual" - wpisana ręcznie
+    # i wtedy liczy się `penalty` (pusto = bez kary).
+    Column("penalty_mode", String, nullable=True, server_default=text("'auto'")),
+)
+
+# Skala kar za nieobecność okręgu (07.10.2026): kwota pierwszej bomby sędziego
+# w sezonie i przyrost za każdą kolejną. Brak wiersza = 60 zł i +30 zł.
+province_bomb_penalty_scale = Table(
+    "province_bomb_penalty_scale",
+    metadata,
+    Column("province", String, primary_key=True),
+    Column("start", Numeric(10, 2), nullable=False),
+    Column("step", Numeric(10, 2), nullable=False),
+    Column("updated_by", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
 # Ten sam człowiek nie zgłasza tej samej osoby przy tym samym meczu dwa razy.
@@ -4614,6 +4630,38 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_by varchar"))
     _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_by_name varchar"))
     _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_at timestamptz"))
+    # Kara naliczana w sezonie (07.10.2026). Kolumna BEZ domyślnej wartości,
+    # żeby istniejące wiersze zostały puste i dało się je przepiąć niżej -
+    # domyślne „auto" dochodzi dopiero po przepięciu.
+    _conn.execute(text("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_mode varchar"))
+    # Przepięcie wpisów sprzed naliczania (jednorazowe - tylko puste tryby):
+    # kwota równa domyślnej skali dla swojej kolejności (60, 90, 120...) albo
+    # brak kwoty -> „auto" i od teraz przelicza się na żywo; inna kwota to
+    # świadoma decyzja człowieka -> „manual". Sprawdzone 07.10.2026: wszystkie
+    # cztery kary na produkcji zgadzały się ze skalą.
+    _conn.execute(
+        text(
+            """
+            UPDATE match_bombs AS m
+            SET penalty_mode = CASE
+                WHEN m.penalty IS NULL OR r.n IS NULL THEN 'auto'
+                WHEN m.penalty = 60 + 30 * (r.n - 1) THEN 'auto'
+                ELSE 'manual'
+            END
+            FROM (
+                SELECT b.id,
+                       CASE WHEN b.status = 'active' THEN ROW_NUMBER() OVER (
+                           PARTITION BY b.season, (b.status = 'active'),
+                                        COALESCE(NULLIF(b.subject_judge_id, ''), lower(b.subject_name))
+                           ORDER BY b.match_at NULLS LAST, b.created_at, b.id
+                       ) END AS n
+                FROM match_bombs b
+            ) AS r
+            WHERE m.id = r.id AND m.penalty_mode IS NULL
+            """
+        )
+    )
+    _conn.execute(text("ALTER TABLE match_bombs ALTER COLUMN penalty_mode SET DEFAULT 'auto'"))
     # Podział na listy w okresach wypłat (06.10.2026): klucz dostaje okres,
     # bo dwa okresy mogą mieć ten sam miesiąc wypłaty. Stary indeks bez okresu
     # blokowałby drugi podział w tym samym miesiącu.

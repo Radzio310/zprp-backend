@@ -201,3 +201,45 @@ def test_the_authors_face_follows_the_authors_name():
     source = code_of("_view")
     assert "if show_author else ''" in source.replace('"', "'")
     assert source.count("show_author") >= 2
+
+
+def test_kara_w_rejestrze_i_na_ekranie_meczu_z_puli_sezonu():
+    """Kara naliczana w sezonie (07.10.2026) - jedna droga dla obu widoków."""
+    assert "effective_for" in calls_in("registry")
+    assert "effective_for" in calls_in("bombs_for_match")
+    assert "scale_for" in calls_in("registry")
+
+
+def test_zapis_kary_ustawia_tryb_reczny_albo_automat():
+    source = code_of("_save_penalty")
+    assert "penalty_mode" in source
+    assert "MODE_AUTO if auto else BP.MODE_MANUAL" in source
+    manual = code_of("report_manual")
+    # puste pole kary = automat, wpisana kwota (także 0) = ręczna
+    assert "req.penalty is not None" in manual
+    assert "penalty_mode" in manual
+
+
+def test_rozliczenie_bierze_kare_z_tej_samej_puli():
+    settlements = (APP_DIR / "province_settlements.py").read_text(encoding="utf-8")
+    tree = ast.parse(settlements)
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_active_bombs"
+    )
+    called = {
+        c.func.attr if isinstance(c.func, ast.Attribute) else getattr(c.func, "id", "")
+        for c in ast.walk(fn)
+        if isinstance(c, ast.Call)
+    }
+    assert "effective_from_pool" in called
+    assert "load_scales" in called
+
+
+def test_przepiecie_starych_kar_jest_jednorazowe_i_przed_domyslnym_automatem():
+    db = (APP_DIR / "db.py").read_text(encoding="utf-8")
+    add = db.index("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_mode varchar")
+    backfill = db.index("WHERE m.id = r.id AND m.penalty_mode IS NULL")
+    default = db.index("ALTER TABLE match_bombs ALTER COLUMN penalty_mode SET DEFAULT 'auto'")
+    # kolumna bez domyślnej -> przepięcie pustych -> dopiero wtedy domyślne „auto"
+    assert add < backfill < default

@@ -29,6 +29,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, func, insert, or_, select, update
 
+from app import bomb_penalties as BPEN
+from app import bomb_penalty_rules as BP
 from app import settlement_cache as SC
 from app.db import (
     database,
@@ -233,8 +235,13 @@ def _view(
     viewer: str,
     is_commission: bool,
     photos: Optional[Dict[str, str]] = None,
+    pen: Optional[BP.Effective] = None,
 ) -> Dict[str, Any]:
-    """Zgłoszenie tak, jak wolno je zobaczyć TEMU widzowi."""
+    """Zgłoszenie tak, jak wolno je zobaczyć TEMU widzowi.
+
+    `pen` - kara policzona z puli sezonu (`bomb_penalties.effective_for`). Bez
+    niej zostaje to, co zapisane w wierszu (stary kształt, np. w testach).
+    """
     show_author = author_is_visible(bomb, viewer, is_commission=is_commission)
     # Kara to sprawa komisji i ukaranego - reszta obsady widzi sam fakt.
     show_penalty = is_commission or _s(bomb.get("subject_judge_id")) == _s(viewer)
@@ -274,7 +281,11 @@ def _view(
         # Wpis ręczny komisji (06.10.2026): nazwa meczu, gdy nie podano numeru.
         "source": _s(bomb.get("source")) or "crew",
         "matchLabel": _s(bomb.get("match_label")) or None,
-        "penalty": _penalty(bomb) if show_penalty else None,
+        "penalty": (pen.amount if pen else _penalty(bomb)) if show_penalty else None,
+        # Kara z skali okręgu (True) czy wpisana ręcznie (False) - od 07.10.2026.
+        "penaltyAuto": (pen.auto if pen else not BP.is_manual(bomb)) if show_penalty else None,
+        # Która to czynna bomba sędziego w sezonie - z niej wynika kwota z skali.
+        "penaltyOrdinal": (pen.ordinal if pen else None) if show_penalty else None,
         "penaltyByName": (_s(bomb.get("penalty_by_name")) or None) if show_penalty else None,
         "penaltyAt": _iso(bomb.get("penalty_at")) if show_penalty else None,
     }
@@ -347,6 +358,7 @@ async def bombs_for_match(
     )
     bombs = [_row(r) for r in rows]
     photos = await _photos(bombs)
+    pens = await BPEN.effective_for(bombs)
     refusal = may_report(match_at, _now(), is_commission=commission)
     return {
         "matchId": _s(match_id),
@@ -356,7 +368,10 @@ async def bombs_for_match(
         # Powód, dla którego zgłoszenie jest dziś niemożliwe - do napisania na
         # kaflu. Pusty znaczy „wolno".
         "refusal": refusal or ("" if province else "Nie ma Cię na liście sędziów okręgu."),
-        "bombs": [_view(b, actor.judge_id, commission, photos) for b in bombs],
+        "bombs": [
+            _view(b, actor.judge_id, commission, photos, pens.get(int(b["id"])))
+            for b in bombs
+        ],
     }
 
 
@@ -546,9 +561,20 @@ class ManualBombRequest(BaseModel):
 
 
 class PenaltyRequest(BaseModel):
-    #: Kwota kary w złotych; pusto albo 0 = bez kary.
+    #: Kwota kary w złotych; pusto albo 0 = bez kary (ręcznie).
     amount: Optional[float] = None
+    #: True = powrót do kary z skali okręgu; `amount` się wtedy nie liczy.
+    auto: bool = False
     province: str = ""
+    updated_by: Optional[str] = None
+
+
+class PenaltyScaleRequest(BaseModel):
+    province: str = ""
+    start: Optional[float] = None
+    step: Optional[float] = None
+    #: True = powrót do skali domyślnej (60 zł, +30 zł).
+    reset: bool = False
     updated_by: Optional[str] = None
 
 
@@ -662,6 +688,9 @@ async def report_manual(
     if len(note) > 160:
         raise HTTPException(400, "Opis może mieć najwyżej 160 znaków.")
     moment = _local_moment(req.match_date, req.match_time)
+    # Puste pole kary = kara z skali okręgu (naliczana w sezonie); wpisana
+    # kwota - także 0 - to decyzja człowieka i zostaje ręczna.
+    manual_penalty = req.penalty is not None
     penalty = _clean_penalty(req.penalty)
 
     judge = await database.fetch_one(
@@ -725,8 +754,9 @@ async def report_manual(
         "author_slot": None,
         "note": note or None,
         "status": "active",
+        "penalty_mode": BP.MODE_MANUAL if manual_penalty else BP.MODE_AUTO,
     }
-    if penalty:
+    if manual_penalty:
         values.update(
             penalty=penalty,
             penalty_by=actor.judge_id,
@@ -738,24 +768,60 @@ async def report_manual(
     )
     _settlements_changed()
     logger.info("bomby: komisja %s dopisała nieobecność %s (%s)", actor.judge_id, judge_id, match_id)
-    return {"id": int(bomb_id), "status": "active", "linked": bool(found)}
+    pen = await _effective_of(int(bomb_id))
+    return {
+        "id": int(bomb_id),
+        "status": "active",
+        "linked": bool(found),
+        "penalty": pen.amount if pen else penalty,
+        "penaltyAuto": pen.auto if pen else not manual_penalty,
+        "penaltyOrdinal": pen.ordinal if pen else None,
+    }
 
 
-async def _save_penalty(bomb_id: int, amount: Optional[float], by: str, by_name: str) -> Dict[str, Any]:
-    clean = _clean_penalty(amount)
+async def _effective_of(bomb_id: int) -> Optional[BP.Effective]:
+    """Kara jednej bomby po zapisie - liczona tą samą drogą, co w rejestrze."""
+    row = await database.fetch_one(select(match_bombs).where(match_bombs.c.id == bomb_id))
+    if not row:
+        return None
+    return (await BPEN.effective_for([_row(row)])).get(bomb_id)
+
+
+async def _save_penalty(
+    bomb_id: int,
+    amount: Optional[float],
+    by: str,
+    by_name: str,
+    *,
+    auto: bool = False,
+) -> Dict[str, Any]:
+    """Kara ręczna (kwota albo „bez kary") albo powrót do skali okręgu.
+
+    Stare aplikacje wysyłają samo `amount` - to zawsze decyzja człowieka, więc
+    zapisujemy ją jako ręczną (także „bez kary"). Wpis dalej liczy się jako
+    kolejna bomba sędziego w sezonie (decyzja z 07.10.2026).
+    """
+    clean = None if auto else _clean_penalty(amount)
     await database.execute(
         update(match_bombs)
         .where(match_bombs.c.id == bomb_id)
         .values(
             penalty=clean,
+            penalty_mode=BP.MODE_AUTO if auto else BP.MODE_MANUAL,
             penalty_by=by or None,
             penalty_by_name=by_name or None,
-            penalty_at=func.now() if clean else None,
+            penalty_at=func.now(),
             updated_at=func.now(),
         )
     )
     _settlements_changed()
-    return {"id": bomb_id, "penalty": clean}
+    pen = await _effective_of(bomb_id)
+    return {
+        "id": bomb_id,
+        "penalty": pen.amount if pen else clean,
+        "auto": pen.auto if pen else auto,
+        "ordinal": pen.ordinal if pen else None,
+    }
 
 
 @router.put("/{bomb_id}/penalty", summary="Kara za nieobecność (komisja)")
@@ -772,7 +838,9 @@ async def set_penalty(
         raise HTTPException(403, "To zgłoszenie należy do innego okręgu.")
     if _s(bomb.get("status")) != "active":
         raise HTTPException(409, "Kara dotyczy tylko obowiązującego wpisu.")
-    return await _save_penalty(bomb_id, req.amount, actor.judge_id, _s(actor.full_name))
+    return await _save_penalty(
+        bomb_id, req.amount, actor.judge_id, _s(actor.full_name), auto=req.auto
+    )
 
 
 @panel_router.put("/{bomb_id}/penalty", summary="Kara za nieobecność (panel Rozliczeń)")
@@ -798,7 +866,74 @@ async def set_penalty_from_panel(bomb_id: int, req: PenaltyRequest) -> Dict[str,
     if not mine:
         raise HTTPException(403, "Ta nieobecność nie dotyczy sędziego z tego okręgu.")
     by = _s(req.updated_by) or "panel"
-    return await _save_penalty(bomb_id, req.amount, by, by)
+    return await _save_penalty(bomb_id, req.amount, by, by, auto=req.auto)
+
+
+# ─────────────────────────── skala kar okręgu ───────────────────────────
+
+
+@panel_router.get("/penalty-scale", summary="Skala kar za nieobecność (panel Rozliczeń)")
+async def penalty_scale_for_panel(province: str = Query(...)) -> Dict[str, Any]:
+    key = canonical(province)
+    if not key:
+        raise HTTPException(400, "Brak okręgu.")
+    return (await BPEN.scale_for(key)).as_dict()
+
+
+@panel_router.put("/penalty-scale", summary="Zapisz skalę kar za nieobecność (panel Rozliczeń)")
+async def save_penalty_scale_from_panel(req: PenaltyScaleRequest) -> Dict[str, Any]:
+    """Kwota pierwszej bomby sędziego w sezonie i przyrost za każdą kolejną.
+
+    Zmiana przelicza na żywo wszystkie kary z automatu w tym okręgu - ręczne
+    zostają, jak je wpisano.
+    """
+    key = canonical(req.province)
+    if not key:
+        raise HTTPException(400, "Brak okręgu.")
+    by = _s(req.updated_by) or "panel"
+    if req.reset:
+        scale = await BPEN.reset_scale(key)
+    else:
+        try:
+            scale = await BPEN.save_scale(key, req.start, req.step, by)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    _settlements_changed()
+    logger.info("bomby: skala kar %s -> %s (%s)", key, scale.as_dict(), by)
+    return scale.as_dict()
+
+
+@router.get("/penalty-preview", summary="Jaka kara przypadnie nowej nieobecności")
+async def penalty_preview(
+    judge_id: str = Query(...),
+    match_date: str = Query(..., description="Dzień meczu RRRR-MM-DD (czas polski)."),
+    match_time: str = Query("12:00", description="Godzina meczu GG:MM (czas polski)."),
+    province: str = Query("", description="Okręg rejestru - liczy się tylko u administratora."),
+    actor: Actor = Depends(market_actor),
+) -> Dict[str, Any]:
+    """Podpowiedź do arkusza wpisu: „2. nieobecność w sezonie - 90 zł".
+
+    Liczone tą samą drogą, co po zapisie (`bomb_penalty_rules.preview_ordinal`).
+    """
+    if not _is_commission(actor):
+        raise HTTPException(403, "Podgląd kary należy do komisji sędziowskiej.")
+    key = (
+        normalize_province(province) if actor.is_admin and _s(province) else ""
+    ) or normalize_province(_require_province(actor))
+    moment = _local_moment(match_date, match_time)
+    season = season_of(moment)
+    pool = await BPEN.counted_rows({season})
+    ordinal = BP.preview_ordinal(
+        pool, key=BP.subject_key({"subject_judge_id": judge_id}), season=season, match_at=moment
+    )
+    scale = await BPEN.scale_for(key)
+    return {
+        "ordinal": ordinal,
+        "amount": BP.amount_for(ordinal, scale),
+        "season": season,
+        "seasonLabel": season_label(season) if season else "",
+        "scale": scale.as_dict(),
+    }
 
 
 # ─────────────────────────── rejestr okręgu ───────────────────────────
@@ -889,6 +1024,10 @@ async def registry(
     # bazę osobno przy każdym wpisie - sezon z 60 wpisami to było 60 tych
     # samych zapytań i rejestr otwierał się kilka sekund.
     photos = await _photos(chosen)
+    # Kara naliczana w sezonie (07.10.2026) - pula czynnych bomb tych sezonów
+    # ze wszystkich okręgów, bo kolejność liczy się dla SĘDZIEGO.
+    pens = await BPEN.effective_for(chosen)
+    scale = await BPEN.scale_for(wanted)
 
     return {
         "province": wanted,
@@ -907,7 +1046,8 @@ async def registry(
             ],
         },
         "ranking": rank_bombs(tally.values()),
-        "bombs": [_view(r, actor.judge_id, True, photos) for r in chosen],
+        "bombs": [_view(r, actor.judge_id, True, photos, pens.get(int(r["id"]))) for r in chosen],
+        "penaltyScale": scale.as_dict(),
     }
 
 

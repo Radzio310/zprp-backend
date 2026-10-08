@@ -87,6 +87,8 @@ WATCHED_TABLES = frozenset(
         # turnieju - kto płaci za cały turniej, a cofnięte scalenia - który
         # klub widzi panel.
         "match_bombs",
+        # 07.10.2026: skala kar okręgu - zmiana przelicza kary z automatu.
+        "province_bomb_penalty_scale",
         "province_module_config",
         "province_tournament_hosts",
         "province_club_merge_rejections",
@@ -107,6 +109,7 @@ BASE_TABLES = frozenset(
         "province_match_overrides",
         "province_manual_charges",
         "match_bombs",
+        "province_bomb_penalty_scale",
         "province_module_config",
     }
 )
