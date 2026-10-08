@@ -12,9 +12,9 @@ Co wolno dokleic - te same granice, co przy synchronizacji list sedziow:
   * tylko mecze PRZYSZLE (rozegrane zna juz serwer; ich brak to sprawa
     synchronizacji, nie prognozy),
   * stolik zawsze (stoliki spoza okregu tez sa rozliczeniem okregu),
-  * boiskowy i delegat - tylko na meczu NASZEGO okregu albo centralnym
-    (centralny wypadnie w silniku jako obsada ZPRP i pokaze sie bez kwoty),
-    nigdy na okregowym meczu innego wojewodztwa.
+  * boiskowy i delegat - na meczu rozgrywek okregowych (takze innego
+    okregu, jak synchronizacja od 06.10.2026) albo centralnym (centralny
+    wypadnie w silniku jako obsada ZPRP i pokaze sie bez kwoty).
 """
 
 from __future__ import annotations
@@ -59,7 +59,14 @@ def parse_when(raw: Any) -> Optional[datetime]:
 
 
 def may_forecast(code: Any, role: str, own_prefixes: Iterable[str]) -> bool:
-    if role == R.ROLE_TABLE:
+    """
+    Te same granice co synchronizacja BIEZACEGO sezonu (`counts_this_season`,
+    06.10.2026): mecz rozgrywek okregowych - takze innego okregu - wchodzi
+    w kazdej roli; zdejmuje go tylko czlowiek. Do 08.10.2026 prognoza odrzucala
+    boiskowego na meczu innego okregu, a panel ten sam mecz po synchronizacji
+    wyplacal.
+    """
+    if role == R.ROLE_TABLE or O.counts_this_season(code):
         return True
     return not O.is_other_district(code, own_prefixes)
 

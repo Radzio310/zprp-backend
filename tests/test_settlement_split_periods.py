@@ -42,7 +42,8 @@ def test_migracja_zamienia_stary_indeks():
 
 
 def test_rozliczenie_okresu_stosuje_podzial():
-    assert "await apply_splits(province, year, month, entries, period_id)" in ROUTES
+    assert "await apply_splits(province, year, month, entries, split_period)" in ROUTES
+    assert "split_period = period_id" in ROUTES
     assert "if not period_id:\n        await apply_splits" not in ROUTES
 
 

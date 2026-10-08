@@ -98,4 +98,4 @@ class TestWspolnyPodzial:
 
     def test_pusty_zakres_nie_pyta_bazy(self):
         body = _body(SCOPE, "async def club_scope_many")
-        assert 'return {"match_keys": set(), "excluded_keys": set(), "clubs": []}' in body
+        assert 'return {"match_keys": set(), "excluded_keys": set(), "clubs": [], "club_of": {}}' in body

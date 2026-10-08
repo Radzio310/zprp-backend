@@ -108,7 +108,7 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
     """
     seasons = [season for season in by_season if season]
     if not seasons:
-        return {"match_keys": set(), "excluded_keys": set(), "clubs": []}
+        return {"match_keys": set(), "excluded_keys": set(), "clubs": [], "club_of": {}}
 
     rows = await database.fetch_all(
         select(province_club_teams).where(
@@ -197,6 +197,9 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
     club_keys: set[str] = set()
     excluded_keys: set[str] = set()
     details: dict[str, dict] = {}
+    #: mecz -> klub, który za niego płaci (widok jednego sędziego liczy
+    #: kluby tylko ze swoich meczów, choć turniej rozstrzygał się na całym).
+    club_of: dict[str, str] = {}
     for season, matches in by_season.items():
         by_id, by_key = teams.get(season, ({}, {}))
         charges = C.build_charges(
@@ -225,6 +228,7 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
             # Gospodarz spoza panelu (np. klub z Kielc w II lidze) nie ma
             # numeru klubu - grupujemy po nazwie z terminarza.
             club_id = row.club_id or f"host:{row.host_name or '?'}"
+            club_of[row.match_key] = club_id
             item = details.setdefault(
                 club_id,
                 {
@@ -243,4 +247,5 @@ async def club_scope_many(province: str, by_season: dict[str, list]) -> dict:
         "match_keys": club_keys,
         "excluded_keys": excluded_keys,
         "clubs": list(details.values()),
+        "club_of": club_of,
     }

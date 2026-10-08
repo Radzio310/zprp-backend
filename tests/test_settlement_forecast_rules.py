@@ -26,7 +26,9 @@ def test_dokleja_tylko_przyszle_i_nieznane_serwerowi():
     assert out[0]["role"] == R.ROLE_FIELD
 
 
-def test_boiskowy_obcego_okregu_nie_wchodzi_a_stolik_tak():
+def test_mecz_innego_okregu_wchodzi_w_kazdej_roli_jak_synchronizacja():
+    # 08.10.2026: te same granice co synchronizacja bieżącego sezonu
+    # (`counts_this_season`) - panel i tak wypłaci ten mecz po synchronizacji.
     out = pick(
         [
             {"match_id": "1", "code": "L/JMM/1", "when": "2026-11-05T16:00:00Z", "role": "Sędzia boiskowy"},
@@ -35,6 +37,7 @@ def test_boiskowy_obcego_okregu_nie_wchodzi_a_stolik_tak():
         ]
     )
     assert [(item["match_key"], item["role"]) for item in out] == [
+        ("f:1", R.ROLE_FIELD),
         ("f:2", R.ROLE_TABLE),
         # Centralny wchodzi - silnik sam odłoży go jako obsadę ZPRP, bez kwoty.
         ("f:3", R.ROLE_FIELD),

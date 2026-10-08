@@ -49,6 +49,7 @@ from app.settlement_names_rules import is_missing_name
 from app.settlement_province import canonical, display, spellings
 from app.settlement_runs import cooldown_left, run_is_active
 from app.settlement_seasons import season_of
+from app.season_rules import season_label_short, season_start_year
 from app.settlement_club_scope import club_scope, club_scope_many
 from app.settlement_money import money_sum
 from app.deps import get_optional_jwt_payload
@@ -303,9 +304,16 @@ async def load_settlement(
     judge_ids: Optional[list[str]] = None,
     extra: Optional[list[E.Assignment]] = None,
     period_id: Optional[str] = None,
+    span: Optional[tuple[date, date]] = None,
+    scope: Optional[dict] = None,
 ) -> dict:
     """
     Jedno wejscie dla panelu, aplikacji i PDF-ow.
+
+    `span` - dowolny zakres dni zamiast miesiaca (bez `period_id`): luka
+    miedzy okresami okregu w sezonie sedziego (`settlement_payout_ranges`).
+    `scope` - gotowe rozpoznanie platnikow (`club_scope`) policzone raz na
+    caly sezon sedziego, zamiast osobno w kazdym okresie.
 
     `extra` - obsady spoza bazy, doklejone tylko do TEGO rachunku (prognoza
     przyszlych meczow z telefonu, `_forecast_assignments`). Nigdy nie trafiaja
@@ -320,6 +328,13 @@ async def load_settlement(
     date_from, date_to, configured_period = await settlement_range(
         province, year, month, period_id
     )
+    split_period = period_id
+    if span is not None and not period_id:
+        # Luka krótsza niż miesiąc ma własny klucz podziału - podział
+        # całego miesiąca nie pasuje do jego kawałka.
+        if tuple(span) != (date_from, date_to):
+            split_period = f"g:{span[0].isoformat()}"
+        date_from, date_to = span
     base = await _base(province)
     central_versions = base["central_versions"]
     province_versions = base["province_versions"]
@@ -378,12 +393,42 @@ async def load_settlement(
     # Najpierw rozpoznajemy takie mecze na pelnym wyliczeniu, potem liczymy obie
     # grupy ponownie. To wazne dla podatku miesiecznego i wspolnych dojazdow.
     probe = [match for entry in entries for match in entry.matches]
-    scope = await club_scope(province, season_of(date_from), probe)
+    if scope is None:
+        if judge_ids:
+            # Platnika TURNIEJU rozstrzyga caly dzien w hali, nie mecze jednego
+            # sedziego (08.10.2026): sam sedzia z jednym meczem turnieju mial
+            # inny wynik niz panel, ktory widzi wszystkie mecze w hali.
+            mates = _tournament_mates(base["assignments"], assignments, date_from, date_to)
+            if mates:
+                probe = probe + [
+                    match
+                    for entry in E.settle_judges(
+                        mates,
+                        province=province,
+                        central_versions=central_versions,
+                        province_versions=province_versions,
+                        now=now,
+                        date_from=date_from,
+                        date_to=date_to,
+                        include_future=True,
+                        include_zprp=include_zprp,
+                        names=names,
+                    )
+                    for match in entry.matches
+                ]
+        scope = await club_scope(province, season_of(date_from), probe)
+    if judge_ids:
+        scope = _scope_for(scope, {item.match_key for item in assignments})
     outside_keys = scope["match_keys"]
     # „Nie obciazaj klubow" = nikt u nas nie placi (06.10.2026): mecz wypada
     # z wyplat okregu, a sedzia widzi go w „Poza rozliczeniem okregu".
     excluded_keys = scope.get("excluded_keys") or set()
-    excluded = [match for match in probe if match.match_key in excluded_keys]
+    excluded = [
+        match
+        for entry in entries
+        for match in entry.matches
+        if match.match_key in excluded_keys
+    ]
     outside_entries = []
     if outside_keys or excluded_keys:
         common = dict(
@@ -427,7 +472,7 @@ async def load_settlement(
     # Podział należy do miesiąca ALBO do okresu wypłat (`period_id` w kluczu
     # tabeli) - podział miesiąca nie przykleja się do okresu i odwrotnie,
     # bo w grudniu mogą istnieć dwa różne okresy z tym samym miesiącem wypłaty.
-    await apply_splits(province, year, month, entries, period_id)
+    await apply_splits(province, year, month, entries, split_period)
 
     # Podpowiedz „zdjac?" przy meczach rozgrywek innych okregow, z ktorych juz
     # zdejmowano mecze (06.10.2026). Mecz zostaje - decyduje czlowiek.
@@ -483,6 +528,44 @@ async def load_settlement(
             "totals": E.totals_of(outside_entries),
             "travel": E.travel_rows(outside_entries),
         },
+    }
+
+
+def _tournament_mates(
+    everything: list, mine: list, date_from: date, date_to: date
+) -> list:
+    """
+    Obsady INNYCH sedziow z tych samych turniejow (dzien w hali), co mecze
+    `mine` - tylko po to, zeby `club_scope` rozstrzygal platnika turnieju na
+    tym samym zbiorze meczow, co panel okregu.
+    """
+    from app.club_charges import tournament_key
+
+    def key(item) -> str:
+        return tournament_key(item.match_code, item.match_at, None, item.hall, item.city)
+
+    lo, hi = date_from.toordinal() - 1, date_to.toordinal() + 1
+    near = lambda item: item.match_at is not None and lo <= item.match_at.date().toordinal() <= hi
+    keys = {key(item) for item in mine if near(item)} - {""}
+    if not keys:
+        return []
+    own = {item.judge_id for item in mine}
+    return [item for item in everything if item.judge_id not in own and near(item) and key(item) in keys]
+
+
+def _scope_for(scope: dict, keys: set[str]) -> dict:
+    """Rozpoznanie platnikow zawezone do meczow jednego sedziego (kluby z jego meczow)."""
+    club_of = scope.get("club_of") or {}
+    counts: dict[str, int] = {}
+    for match_key in scope["match_keys"] & keys:
+        club = club_of.get(match_key)
+        if club:
+            counts[club] = counts.get(club, 0) + 1
+    return {
+        **scope,
+        "match_keys": scope["match_keys"] & keys,
+        "excluded_keys": (scope.get("excluded_keys") or set()) & keys,
+        "clubs": [{**club, "matches": counts[club["club_id"]]} for club in scope["clubs"] if club["club_id"] in counts],
     }
 
 
@@ -1176,6 +1259,7 @@ async def mine(
     year: int = Query(...),
     month: int = Query(...),
     include_future: bool = Query(False),
+    period_id: Optional[str] = Query(None, description="Okres wypłat okręgu (jak w panelu)"),
 ):
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
@@ -1185,7 +1269,7 @@ async def mine(
     # Miesiac calego okregu w pamieci (panel go liczyl) - bierzemy wycinek;
     # inaczej liczymy tylko tego sedziego, zeby telefon nie czekal na caly okreg.
     month_range(year, month)
-    warm = SC.peek("month", key, (int(year), int(month), "", bool(include_future), False))
+    warm = SC.peek("month", key, (int(year), int(month), str(period_id or ""), bool(include_future), False))
     return await _judge_payload(
         key,
         judge_id,
@@ -1194,6 +1278,7 @@ async def mine(
         include_future=include_future,
         include_zprp=False,
         data=warm,
+        period_id=period_id or None,
     )
 
 
@@ -1203,6 +1288,7 @@ async def _club_paid_keys(
     central_versions: list,
     province_versions: list,
     now: datetime,
+    everything: Optional[list] = None,
 ) -> tuple[set[str], set[str]]:
     """
     Mecze, ktore placi KLUB, a nie okreg - dla calej historii naraz - oraz
@@ -1229,8 +1315,10 @@ async def _club_paid_keys(
     days = [item.match_at.date() for item in assignments if item.match_at]
     if not days:
         return set(), set()
+    # Jeden sędzia: płatnika turnieju rozstrzyga cały dzień w hali, jak w panelu.
+    mates = _tournament_mates(everything, assignments, min(days), max(days)) if everything else []
     probe = E.settle_judges(
-        assignments,
+        [*assignments, *mates],
         province=province,
         central_versions=central_versions,
         province_versions=province_versions,
@@ -1247,7 +1335,8 @@ async def _club_paid_keys(
                 continue
             by_season.setdefault(season_of(match.day), []).append(match)
     scope = await club_scope_many(province, by_season)
-    return scope["match_keys"], scope.get("excluded_keys") or set()
+    own = {item.match_key for item in assignments}
+    return scope["match_keys"] & own, (scope.get("excluded_keys") or set()) & own
 
 
 def _merge_months(district: list[dict], club: list[dict]) -> list[dict]:
@@ -1335,7 +1424,12 @@ async def _months_rows(
     # (`load_settlement`). Kazda grupa liczy sie osobno, bo koszty uzyskania
     # i prog 200 zl ida od sumy miesiaca U DANEGO PLATNIKA.
     club_paid, excluded = await _club_paid_keys(
-        key, assignments, central_versions, province_versions, now
+        key,
+        assignments,
+        central_versions,
+        province_versions,
+        now,
+        everything=base["assignments"] if judge_id else None,
     )
     not_district = club_paid | excluded
     common = dict(
@@ -1452,9 +1546,12 @@ async def _forecast_assignments(
 
     base = await _base(key)
     mine = [item for item in base["assignments"] if item.judge_id == str(judge_id)]
+    # Mecz z nieobecnością z Rejestru serwer ZNA - prognoza nie może go wskrzesić
+    # jako płatnego tylko dlatego, że wciąż stoi w terminarzu telefonu.
+    bombed = [pair[0] for pair in base.get("bombed", []) if pair[0].judge_id == str(judge_id)]
     picked = F.pick_forecast(
         [item.model_dump() for item in items],
-        known_ids={F.match_id_of(item.match_key) for item in mine},
+        known_ids={F.match_id_of(item.match_key) for item in [*mine, *bombed]},
         own_prefixes=await _own_prefixes(key),
         now=_now(),
     )
@@ -1654,6 +1751,253 @@ async def months(
 
 
 # ---------------------------------------------------------------------------
+# Sezon sedziego w okresach wyplat okregu (08.10.2026)
+# ---------------------------------------------------------------------------
+
+#: Pola sum w kubelku - te same co `_entry_json`.
+_SUM_FIELDS = ("matches", "future", "gross", "costs", "taxable", "tax", "net", "travel", "penalty", "penalty_left", "total")
+
+
+def _with_shares(rows: list[dict], costs: float, tax: int) -> None:
+    """Koszty, podatek i netto MECZU - udzial w rachunku okresu (`share_by_gross`)."""
+    from app.settlement_payout_ranges import share_by_gross
+
+    parts = share_by_gross([float(row.get("gross") or 0) for row in rows], costs, tax)
+    for row, (row_costs, row_tax) in zip(rows, parts):
+        row["costs_share"] = row_costs
+        row["tax_share"] = row_tax
+        row["net_share"] = round(float(row.get("gross") or 0) - row_costs - row_tax, 2)
+
+
+def _bucket_sums(entry: dict) -> dict:
+    return {field: entry.get(field) or 0 for field in _SUM_FIELDS}
+
+
+def _add_sums(into: dict, more: dict) -> None:
+    for field in _SUM_FIELDS:
+        value = (into.get(field) or 0) + (more.get(field) or 0)
+        into[field] = value if field in ("matches", "future", "tax") else round(value, 2)
+
+
+async def _judge_season(
+    key: str,
+    judge_id: str,
+    season: int,
+    *,
+    include_future: bool,
+    extra: Optional[list[E.Assignment]] = None,
+    detail: bool = True,
+) -> dict:
+    """
+    Sezon sedziego okres po okresie - te same okresy i ten sam rachunek, co
+    panel okregu (`load_settlement` z `period_id`). Dni poza okresami okregu
+    ida miesiacami (`settlement_payout_ranges`).
+
+    Rozpoznanie platnikow liczymy RAZ na sezon, z meczami calych turniejow
+    (`_tournament_mates`), i podajemy do kazdego okresu - wynik jest ten sam,
+    co w panelu, a sezon nie czyta tabel klubow kilkanascie razy.
+    """
+    from app import settlement_payout_ranges as P
+    from app.province_settlement_periods import periods_for
+
+    judge_id = str(judge_id).strip()
+    start, end = P.season_span(season)
+    periods, _saved = await periods_for(key)
+    ranges = P.payout_ranges(periods, start, end)
+    lo, hi = ranges[0]["from"], ranges[-1]["to"]
+
+    base = await _base(key)
+    mine = [item for item in base["assignments"] if item.judge_id == judge_id]
+    if extra:
+        mine = [*mine, *extra]
+    near = [
+        item
+        for item in mine
+        if item.match_at is not None
+        and lo.toordinal() - 1 <= item.match_at.date().toordinal() <= hi.toordinal() + 1
+    ]
+    now = _now()
+    probe = E.settle_judges(
+        [*near, *_tournament_mates(base["assignments"], near, lo, hi)],
+        province=key,
+        central_versions=base["central_versions"],
+        province_versions=base["province_versions"],
+        now=now,
+        date_from=lo,
+        date_to=hi,
+        include_future=True,
+        include_zprp=False,
+        names=base["names"],
+    )
+    by_season: dict[str, list] = {}
+    for entry in probe:
+        for match in entry.matches:
+            if match.day is not None:
+                by_season.setdefault(season_of(match.day), []).append(match)
+    scope = await club_scope_many(key, by_season)
+
+    today = now.date()
+    buckets: list[dict] = []
+    totals = {"district": {}, "clubs": {}}
+    for item in ranges:
+        is_period = item["kind"] == P.PERIOD
+        if item["from"] > today and not include_future:
+            data = None
+        else:
+            warm = None
+            if is_period and not extra:
+                warm = SC.peek(
+                    "month",
+                    key,
+                    (int(item["year"]), int(item["month"]), item["id"], bool(include_future), False),
+                )
+            data = warm or await load_settlement(
+                key,
+                year=item["year"],
+                month=item["month"],
+                include_future=include_future,
+                include_zprp=False,
+                judge_ids=[judge_id],
+                extra=extra,
+                period_id=item["id"] if is_period else None,
+                span=None if is_period else (item["from"], item["to"]),
+                scope=scope,
+            )
+        bucket = {
+            "id": item["id"],
+            "kind": item["kind"],
+            "from": item["from"].isoformat(),
+            "to": item["to"].isoformat(),
+            "year": item["year"],
+            "month": item["month"],
+            "payout_date": item["payout_date"].isoformat() if item["payout_date"] else None,
+            "label": item["label"],
+            "period_kind": item["period_kind"],
+            "current": item["from"] <= today <= item["to"],
+            "district": _bucket_sums({}),
+            "clubs": {**_bucket_sums({}), "names": []},
+            "off": 0,
+        }
+        if data is not None:
+            payload = await _judge_payload(
+                key,
+                judge_id,
+                year=item["year"],
+                month=item["month"],
+                include_future=include_future,
+                include_zprp=False,
+                data=data,
+                solo=set(),
+                period_id=item["id"] if is_period else None,
+            )
+            entry = payload["entry"]
+            club = payload["outside_district"]["entry"]
+            _with_shares(entry.get("rows") or [], entry["costs"], entry["tax"])
+            _with_shares(club.get("rows") or [], club["costs"], club["tax"])
+            bucket["district"] = _bucket_sums(entry)
+            bucket["clubs"] = {
+                **_bucket_sums(club),
+                "names": [c["club_name"] for c in payload["outside_district"]["clubs"] if c.get("club_name")],
+            }
+            bucket["off"] = len(payload["zprp"])
+            if detail:
+                bucket["detail"] = payload
+        _add_sums(totals["district"], bucket["district"])
+        _add_sums(totals["clubs"], bucket["clubs"])
+        buckets.append(bucket)
+
+    seasons = sorted(
+        {
+            s
+            for s in (season_start_year(item.match_at) for item in mine if item.match_at)
+            if s is not None
+        }
+        | {season_start_year(today), int(season)}
+    )
+    return {
+        "province": key,
+        "judge_id": judge_id,
+        "season": int(season),
+        "season_label": season_label_short(season),
+        # „periods" - okreg placi wedlug wlasnych okresow (choc czesc dni moze
+        # isc miesiacami); „months" - same miesiace kalendarzowe.
+        "mode": "periods" if any(b["kind"] == P.PERIOD for b in buckets) else "months",
+        "include_future": include_future,
+        "generated_at": now.isoformat(),
+        "seasons": seasons,
+        "buckets": buckets,
+        "totals": totals,
+        "forecast": len(extra or []),
+    }
+
+
+def _season_param(season: Optional[str]) -> int:
+    text = str(season or "").strip()
+    if not text:
+        return season_start_year(_now().date())
+    if len(text) >= 4 and text[:4].isdigit():
+        return int(text[:4])
+    raise HTTPException(400, "Sezon to rok jego początku, np. 2026 albo 2026/2027.")
+
+
+@router.get("/me/season", summary="Mój sezon okres po okresie - te same okresy i kwoty co panel okręgu")
+async def my_season(
+    request: Request,
+    province: str = Query(...),
+    judge_id: str = Query(...),
+    season: Optional[str] = Query(None, description="Rok początku sezonu (2026) albo 2026/2027; brak = bieżący"),
+    include_future: bool = Query(False),
+    detail: bool = Query(True, description="Mecze okresów (False = same sumy, dla kafla)"),
+):
+    """
+    Jedno źródło dla wszystkich ekranów sędziego (08.10.2026): kafel
+    „Moje rozliczenie okręgowe", Moje rozliczenie i Podsumowanie ryczałtów.
+
+    Kwota okresu to dokładnie kwota z Zestawienia okręgu. Mecze, które płaci
+    klub bezpośrednio, są OSOBNO (`clubs`) z własnym podatkiem - nie wchodzą
+    do kwoty okręgu. Mecze bez kwot (ZPRP, „Nie obciążaj klubów",
+    nieobecności) - w `detail.zprp`.
+    """
+    key = require_province(province)
+    if not await module_enabled(key, "settlements"):
+        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    start = _season_param(season)
+
+    async def build() -> dict:
+        return await _judge_season(key, judge_id, start, include_future=include_future, detail=detail)
+
+    pack = await SC.packed(
+        "judge_season", key, (str(judge_id).strip(), start, bool(include_future), bool(detail)), build
+    )
+    return SC.respond(request, pack)
+
+
+class SeasonForecastRequest(BaseModel):
+    province: str
+    judge_id: str
+    season: Optional[str] = None
+    detail: bool = True
+    matches: list[ForecastMatch] = []
+
+
+@router.post("/me/season/forecast", summary="Mój sezon z prognozą przyszłych meczów z telefonu")
+async def my_season_forecast(payload: SeasonForecastRequest):
+    """`/me/season` z przyszłymi plus mecze z telefonu, których serwer jeszcze nie zna."""
+    key = require_province(payload.province)
+    if not await module_enabled(key, "settlements"):
+        raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
+    extra = await _forecast_assignments(key, payload.judge_id, payload.matches)
+    return await _judge_season(
+        key,
+        payload.judge_id,
+        _season_param(payload.season),
+        include_future=True,
+        extra=extra or None,
+        detail=payload.detail,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Odswiezanie
 # ---------------------------------------------------------------------------
 
@@ -1739,10 +2083,10 @@ stats_router = APIRouter(prefix="/province/stats", tags=["province_stats"])
 
 
 def _season_of(day: Optional[date]) -> str:
-    if not day:
-        return ""
-    year = day.year if day.month >= 9 else day.year - 1
-    return f"{year}/{year + 1}"
+    # Sezon od SIERPNIA, jak rozliczenia i porownanie (`season_rules`, 08.10.2026);
+    # wczesniej statystyki lamaly sezon we wrzesniu i sierpniowe mecze laly
+    # sie do innego sezonu niz na ekranie rozliczen.
+    return season_of(day) if day else ""
 
 
 async def season_load(
@@ -1856,6 +2200,15 @@ async def my_stats(
     )
 
     now = _now()
+    # Nieobecnosc z Rejestru to mecz, ktorego sedzia NIE sedziowal (decyzja
+    # z 08.10.2026) - nie liczy sie do statystyk. Mecze ZPRP, klubowe i „Nie
+    # naliczaj" zostaja: sedzia je sedziowal, tylko okreg za nie nie placi.
+    bombed_keys = {
+        pair[0].match_key
+        for pair in (await _base(key)).get("bombed", [])
+        if pair[0].judge_id == str(judge_id)
+    }
+    rows = [row for row in rows if str(row["match_key"]) not in bombed_keys]
     matches: list[dict] = []
     # Lista sezonow ze WSZYSTKICH meczow, zanim odfiltrujemy wybrany. Dotad
     # liczona byla po filtrze, wiec po wyborze sezonu (aplikacja wybiera
