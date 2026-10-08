@@ -222,6 +222,20 @@ def select_items(
     return items, skipped
 
 
+def section_on(show: Any, on_list: Any, letter: Any) -> bool:
+    """
+    Czy sekcja dodatkowa („Nieobecności z Rejestru", „Kluby, które nie
+    rozliczają się przez okręg") stoi na tym dokumencie (07.10.2026).
+
+    Wyłączona - nigdzie. Włączona - tylko na liście z ustawień; dokument bez
+    list (cała pula, przejazdy) ma ją zawsze.
+    """
+    if not show:
+        return False
+    letter = _s(letter).upper()
+    return not letter or letter == (_s(on_list).upper() or "A")
+
+
 def part_label(part: str, part_of: int) -> str:
     """Dopisek pod nazwiskiem: „część A z 2"."""
     return f"część {part} z {part_of}" if part else ""

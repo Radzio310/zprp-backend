@@ -499,6 +499,8 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
         data["entries"], payload.parts, payload.letter, look.get("penalty_list") or "A"
     )
     list_letter = (payload.letter or "").strip().upper()
+    absences_on = G.section_on(look.get("show_absences", True), look.get("absences_list"), list_letter)
+    outside_on = G.section_on(look.get("show_outside", False), look.get("outside_list"), list_letter)
 
     def build(items: list[dict], number: str, draft: bool) -> tuple[dict, dict]:
         judges = {item["judge_id"] for item in items}
@@ -565,6 +567,10 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
                 }
                 for row in bombs
                 if row["judge_id"] in judges
+                # Sekcja nieobecności: włączana w „Wyglądzie dokumentów"
+                # (domyślnie tak) i tylko na swojej liście (domyślnie A) - jak
+                # kary; dokument bez list ma ją zawsze, gdy włączona.
+                and absences_on
             ],
             # Przypis o czesciach puli - wylaczony razem z oznaczeniem czesci.
             "split_rows": 0,
@@ -575,7 +581,9 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
                  "matches": e.match_count, "gross": e.gross, "net": e.net,
                  "travel": e.travel, "total": e.total}
                 for e in outside["entries"]
-                if e.judge_id in judges
+                # Kluby rozliczające się same: domyślnie bez tej sekcji,
+                # włączona - tylko na swojej liście (domyślnie A).
+                if e.judge_id in judges and outside_on
             ],
             "outside_totals": outside["totals"],
             "outside_clubs": outside["clubs"],
@@ -672,7 +680,9 @@ async def przejazdy_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get_o
         outside_rows = []
         previous_outside = None
         for item in outside["travel"]:
-            if item.judge_id not in judges:
+            # Przejazdy to jeden dokument bez list - sekcja klubów
+            # rozliczających się samych tylko, gdy włączona w ustawieniach.
+            if item.judge_id not in judges or not look.get("show_outside", False):
                 continue
             outside_rows.append({
                 "judge_id": item.judge_id,

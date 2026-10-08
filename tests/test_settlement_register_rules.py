@@ -118,3 +118,16 @@ def test_kara_schodzi_najpierw_z_wybranej_listy():
     assert G.allocate_penalty(parts, 50, "C") == {"C": 50.0, "A": 0.0, "B": 0.0}
     assert G.allocate_penalty(parts, 150, "C") == {"C": 100.0, "A": 50.0, "B": 0.0}
     assert G.allocate_penalty(parts, 50) == {"A": 50.0, "B": 0.0, "C": 0.0}
+
+
+def test_sekcje_dodatkowe_wlaczane_i_na_swojej_liscie():
+    # Wyłączona - nigdzie, także na dokumencie bez list.
+    assert not G.section_on(False, "A", "")
+    assert not G.section_on(False, "A", "A")
+    # Włączona - tylko na swojej liście; dokument bez list ma ją zawsze.
+    assert G.section_on(True, "A", "")
+    assert G.section_on(True, "A", "a")
+    assert not G.section_on(True, "A", "B")
+    assert G.section_on(True, "C", "C")
+    # Pusta lista w ustawieniach = A.
+    assert G.section_on(True, "", "A")
