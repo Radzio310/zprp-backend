@@ -74,11 +74,21 @@ def pobierz_zrzut(klucz: str, serwis: str, railway: str | None) -> bytes:
         cwd=str(TU.parents[1]),
     )
     wyjscie = proc.stdout or ""
-    m = re.search(r"===ZRZUT-POCZATEK===(.*?)===ZRZUT-KONIEC===", wyjscie, re.S)
-    if not m:
+    if "===ZRZUT-POCZATEK===" not in wyjscie:
         print(wyjscie[-3000:])
         print(proc.stderr[-2000:] if proc.stderr else "")
-        raise SystemExit("Zrzut się nie udał - powyżej odpowiedź serwera.")
+        raise SystemExit(
+            "Zrzut się nie udał - powyżej odpowiedź serwera. Jeśli to problem z terminalem, "
+            "zapisz wynik ręcznie (README.md) i podaj go przez --z-pliku."
+        )
+    return rozpakuj_wyjscie(wyjscie)
+
+
+def rozpakuj_wyjscie(wyjscie: str) -> bytes:
+    """Paczka spomiędzy znaczników `zrzut.py`, sprawdzona sumą z serwera."""
+    m = re.search(r"===ZRZUT-POCZATEK===(.*?)===ZRZUT-KONIEC===", wyjscie, re.S)
+    if not m:
+        raise SystemExit("W podanym tekście nie ma zrzutu (brak znaczników ===ZRZUT-...===).")
     paczka = base64.b64decode(re.sub(r"\s+", "", m.group(1)))
     suma = re.search(r"===SHA256 ([0-9a-f]{64})===", wyjscie)
     if suma and hashlib.sha256(paczka).hexdigest() != suma.group(1):
@@ -138,10 +148,18 @@ def main() -> None:
     ap.add_argument("--bez-pdf", action="store_true", help="tylko HTML")
     arg = ap.parse_args()
 
+    swiezy = not arg.z_pliku
     if arg.z_pliku:
         zrodlo = Path(arg.z_pliku)
         paczka = zrodlo.read_bytes()
         katalog = Path(arg.wyjscie) if arg.wyjscie else zrodlo.parent
+        if paczka[:2] != b"\x1f\x8b":
+            # Tekst z terminala (`railway ssh ... > zrzut.txt`) zamiast pliku .gz -
+            # wyciągamy paczkę spomiędzy znaczników i zapisujemy ją jak świeży zrzut.
+            # PowerShell 5.1 zapisuje `>` w UTF-16 z BOM-em.
+            kod = "utf-16" if paczka[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+            paczka = rozpakuj_wyjscie(paczka.decode(kod, "replace"))
+            swiezy = True
     else:
         if not arg.mecz:
             ap.error("podaj numer meczu albo --z-pliku")
@@ -151,7 +169,7 @@ def main() -> None:
     katalog.mkdir(parents=True, exist_ok=True)
 
     sha = hashlib.sha256(paczka).hexdigest()
-    if not arg.z_pliku:
+    if swiezy:
         (katalog / "zrzut.json.gz").write_bytes(paczka)
         (katalog / "zrzut.sha256.txt").write_text(f"{sha}  zrzut.json.gz\n", encoding="utf-8")
         print(f"✓ Zrzut zapisany: {katalog / 'zrzut.json.gz'}")
