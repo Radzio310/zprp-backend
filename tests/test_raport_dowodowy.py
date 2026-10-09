@@ -229,3 +229,54 @@ def test_wydruk_escapuje_i_ma_numer(zrzut):
     assert "&lt;script&gt;" in tekst
     assert "RD-XK9-ABCDEF12" in tekst
     assert "—" not in tekst and "–" not in tekst
+
+
+# ─────────────────────────── raport o jednej osobie ───────────────────────────
+
+
+def test_teczka_osoby_sklada_sedno_sprawy(zrzut):
+    from dossier import dossier
+    from wydruk_osoby import html_osoby
+
+    d = dossier(zrzut, nazwisko="TESTOWA")
+    g = d["glowne"]
+    assert g["rodzaj"] == "penalty3" and g["czas_meczu"] == "51:05"
+    assert analiza.godz(g["usuniecie"]["czas"]) == "19:34:34"
+    assert round(g["trwanie_s"]) == 635
+    assert g["zdarzen_w_miedzyczasie"] == 1
+    # Bramka po usunięciu i to ta na wynik końcowy, różnicą jednej bramki.
+    assert [z["czas_meczu"] for z in d["po_usunieciu"]] == ["59:00"]
+    assert d["po_usunieciu"][0]["decydujaca"] is True
+    # II kara: wpis z pierwotnym czasem, dwie poprawki z ich godzinami.
+    druga = next(z for z in d["zyciorysy"] if z["rodzaj"] == "penalty2")
+    assert analiza.mmss(druga["klucz_wpisu"][3]) == "44:47"
+    assert [analiza.godz(p["czas"]) for p in druga["poprawki"]] == ["19:16:36", "19:47:56"]
+    assert d["usuniec_w_meczu"] == 1
+    czynnosci = [t for e in d["edytorzy"] for _g, t in e["czynnosci"]]
+    assert "usunięcie III kary 2 min (51:05)" in czynnosci
+    assert "poprawka czasu II kary 2 min: 44:47 → 44:48" in czynnosci
+
+    tekst = html_osoby(d)
+    # Sama treść: bez podpisów i sum kontrolnych.
+    assert "Podpis" not in tekst and "SHA-256" not in tekst
+    assert "Usunięto III karę 2 min z 51:05 i dyskwalifikację" in tekst
+    assert "decydującą o wyniku meczu" in tekst
+    assert "—" not in tekst and "–" not in tekst
+
+
+def test_droga_protokolu_bez_dubli(zrzut):
+    from dossier import dossier
+
+    zrzut["dziennik"] += [
+        {"event": "match.finished", "created_at": "2026-10-07T17:52:16+00:00", "actor_name": "STOLIKOWY Grzegorz"},
+        {"event": "match.reopened", "created_at": "2026-10-07T17:52:25+00:00", "actor_name": "STOLIKOWY Grzegorz"},
+        {"event": "match.finished", "created_at": "2026-10-07T17:52:25+00:00", "actor_name": "STOLIKOWY Grzegorz"},
+        {"event": "zprp.attachment_sent", "created_at": "2026-10-07T18:53:51+00:00", "actor_name": "DELEGAT Adam"},
+        {"event": "zprp.attachment_sent", "created_at": "2026-10-07T18:53:51+00:00", "actor_name": "DELEGAT Adam"},
+    ]
+    zrzut["dziennik"].sort(key=lambda w: w["created_at"])
+    d = dossier(zrzut, nazwisko="TESTOWA")
+    co = [x["co"] for x in d["droga"]]
+    assert co.count("Zakończenie meczu") == 1 and "Wznowienie meczu" not in co
+    assert co.count("Protokół PDF w ZPRP") == 1
+    assert d["zatwierdzenie"]["kto"] == "DELEGAT Adam" and d["zatwierdzenie"]["rola"] == "delegat"

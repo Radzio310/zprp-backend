@@ -7,7 +7,20 @@ zapisanymi zdaniami.
 
 Raport mówi, co zapisano. Nie ocenia, czy zmiana była słuszna.
 
-## Użycie (z katalogu `zprp-backend`)
+## Raport o jednej osobie (zwięzły, 2 strony)
+
+Najczęstszy przypadek: „co się działo z karami tej zawodniczki". Sama treść, bez
+podpisów i sum kontrolnych: sedno sprawy, kafle, oś czasu meczu z przybliżeniem,
+przebieg zapisu krok po kroku, kto edytował, droga protokołu do zatwierdzenia.
+
+```powershell
+python tools\raport_dowodowy\raport_osoby.py SK/24 --nazwisko NOSEK
+python tools\raport_dowodowy\raport_osoby.py --z-pliku ..\output\raporty_dowodowe\SK-24_...\zrzut.json.gz --nazwisko NOSEK
+```
+
+Fakty składa `dossier.py`, szablon to `wydruk_osoby.py` (logotypy BAZA i ProEl z repozytorium).
+
+## Pełny raport meczu (użycie z katalogu `zprp-backend`)
 
 ```powershell
 # raport o jednej osobie (nazwisko albo numer + drużyna)
