@@ -34,8 +34,10 @@ from pathlib import Path
 
 TU = Path(__file__).resolve().parent
 sys.path.insert(0, str(TU))
+# Rdzeń raportu mieszka w pakiecie aplikacji (`app/raport_dowodowy`).
+sys.path.insert(0, str(TU.parents[1]))
 
-from analiza import analizuj  # noqa: E402
+from app.raport_dowodowy.analiza import analizuj  # noqa: E402
 from wydruk import html_raportu  # noqa: E402
 
 DOMYSLNE_WYJSCIE = TU.parents[2] / "output" / "raporty_dowodowe"

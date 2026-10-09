@@ -23,10 +23,12 @@ from pathlib import Path
 
 TU = Path(__file__).resolve().parent
 sys.path.insert(0, str(TU))
+# Rdzeń raportu mieszka w pakiecie aplikacji (`app/raport_dowodowy`).
+sys.path.insert(0, str(TU.parents[1]))
 
-from dossier import dossier  # noqa: E402
+from app.raport_dowodowy.dossier import dossier  # noqa: E402
 from raport import DOMYSLNE_WYJSCIE, DRUZYNY, drukuj_pdf, pobierz_zrzut, rozpakuj_wyjscie  # noqa: E402
-from wydruk_osoby import html_osoby  # noqa: E402
+from app.raport_dowodowy.wydruk_osoby import html_osoby  # noqa: E402
 
 
 def main() -> None:

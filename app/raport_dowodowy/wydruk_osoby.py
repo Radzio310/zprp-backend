@@ -16,15 +16,13 @@ import io
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import analiza as A
-from dossier import BIERNIK, DOPELNIACZ
+from . import analiza as A
+from .dossier import BIERNIK, DOPELNIACZ
 
-TU = Path(__file__).resolve().parent
-ROOT = TU.parents[2]  # BAZA_ALL
-LOGO_BAZA = [ROOT / "zprp-backend" / "app" / "templates" / "baza_logo.png",
-             ROOT / "BAZA" / "assets" / "images" / "baza_logo_official.png"]
-LOGO_PROEL = [ROOT / "BAZA" / "assets" / "images" / "PROEL.png",
-              ROOT / "BAZA" / "assets" / "images" / "proel_small.png"]
+#: Logotypy leżą w `app/templates` - na serwerze nie ma katalogu aplikacji BAZA.
+SZABLONY = Path(__file__).resolve().parents[1] / "templates"
+LOGO_BAZA = [SZABLONY / "baza_logo.png"]
+LOGO_PROEL = [SZABLONY / "proel_logo.png"]
 
 ACCENT = "#E8970A"
 EMBER = "#C2410C"

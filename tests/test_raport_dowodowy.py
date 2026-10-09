@@ -13,8 +13,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "raport_dowodowy"))
 
-import analiza  # noqa: E402
-from analiza import analizuj, czas_pl, klasyfikuj, znajdz_osobe  # noqa: E402
+from app.raport_dowodowy import analiza  # noqa: E402
+from app.raport_dowodowy.analiza import analizuj, czas_pl, klasyfikuj, znajdz_osobe  # noqa: E402
 from wydruk import html_raportu  # noqa: E402
 
 
@@ -235,8 +235,8 @@ def test_wydruk_escapuje_i_ma_numer(zrzut):
 
 
 def test_teczka_osoby_sklada_sedno_sprawy(zrzut):
-    from dossier import dossier
-    from wydruk_osoby import html_osoby
+    from app.raport_dowodowy.dossier import dossier
+    from app.raport_dowodowy.wydruk_osoby import html_osoby
 
     d = dossier(zrzut, nazwisko="TESTOWA")
     g = d["glowne"]
@@ -265,7 +265,7 @@ def test_teczka_osoby_sklada_sedno_sprawy(zrzut):
 
 
 def test_droga_protokolu_bez_dubli(zrzut):
-    from dossier import dossier
+    from app.raport_dowodowy.dossier import dossier
 
     zrzut["dziennik"] += [
         {"event": "match.finished", "created_at": "2026-10-07T17:52:16+00:00", "actor_name": "STOLIKOWY Grzegorz"},

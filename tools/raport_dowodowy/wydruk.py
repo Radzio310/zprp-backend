@@ -11,7 +11,7 @@ import html
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from analiza import KROTKO, data_godz, godz, mmss
+from app.raport_dowodowy.analiza import KROTKO, data_godz, godz, mmss
 
 CSS = """
 @page {

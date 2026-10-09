@@ -18,7 +18,7 @@ import re
 from collections import Counter, OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-import analiza as A
+from . import analiza as A
 
 #: Zdarzenia dziennika, które składają się na „drogę protokołu" po meczu.
 DROGA = OrderedDict([

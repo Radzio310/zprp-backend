@@ -93,7 +93,7 @@ def test_teczka_ma_sume_z_wlasnych_bajtow_i_jest_powtarzalna():
 
 def test_teczka_czyta_sie_narzedziem_raportu():
     """Ten sam format co `zrzut.py` - pobrana teczka to gotowe wejście raportu."""
-    import analiza
+    from app.raport_dowodowy import analiza
 
     paczka, _, _ = _paczka()
     wynik = analiza.analizuj(json.loads(gzip.decompress(paczka)))
