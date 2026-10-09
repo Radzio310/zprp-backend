@@ -39,6 +39,8 @@ from app.proel_bulk_delete_rules import (
     plan_bulk_delete,
 )
 from app.proel_doc_version import HISTORY_RETENTION_DAYS
+from app.proel_evidence import active_holds_select
+from app.proel_evidence_rules import DELETE_REFUSED_MESSAGE as EVIDENCE_DELETE_REFUSED
 from app.proel_journal import log_match_event
 from app.proel_promote_rules import (
     FAILED_MESSAGE as PROMOTE_FAILED_MESSAGE,
@@ -148,6 +150,8 @@ async def _purge_expired() -> int:
             delete(proel_deleted_matches).where(
                 proel_deleted_matches.c.expires_at.is_not(None),
                 proel_deleted_matches.c.expires_at < datetime.now(timezone.utc),
+                # Materiał dowodowy (`app/proel_evidence.py`) nie wygasa nigdy.
+                proel_deleted_matches.c.match_number.not_in(active_holds_select()),
             )
         )
     except Exception:
@@ -230,6 +234,7 @@ async def _purge_expired_history() -> int:
             delete(proel_doc_history).where(
                 proel_doc_history.c.expires_at.is_not(None),
                 proel_doc_history.c.expires_at < datetime.now(timezone.utc),
+                proel_doc_history.c.match_number.not_in(active_holds_select()),
             )
         )
     except Exception:
@@ -534,6 +539,10 @@ async def bulk_delete(
             deleted.append(key)
         elif outcome == "missing":
             missing.append(key)
+        elif outcome == "evidence":
+            refused.append(
+                {"key": key, "reason": "evidence", "message": EVIDENCE_DELETE_REFUSED}
+            )
         else:
             refused.append(
                 {"key": key, "reason": "approved", "message": APPROVED_MESSAGE}

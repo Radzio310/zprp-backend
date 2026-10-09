@@ -128,6 +128,10 @@ EVENT_LABELS: Dict[str, str] = {
     "match.snapshots_backfilled": "Dosłano historię wersji z telefonu",
     # Dziura w historii ma się wytłumaczyć. Bez tego wygląda jak brak zapisu.
     "match.snapshot_limit": "Limit wersji na dobę osiągnięty",
+    # ── Materiał dowodowy (`app/proel_evidence.py`) ─────────────────────
+    "evidence.marked": "Oznaczenie jako materiał dowodowy",
+    "evidence.released": "Zdjęcie oznaczenia materiału dowodowego",
+    "evidence.package": "Nowa teczka dowodowa",
 }
 
 
@@ -632,6 +636,25 @@ def event_summary(event: str, details: Optional[Dict[str, Any]]) -> str:
             f"Wersja {d.get('replaced_rev', '?')} z serwera ({writer}) odłożona "
             "do historii i zastąpiona wersją z telefonu"
         )
+
+    if ev in ("evidence.marked", "evidence.package"):
+        reason = str(d.get("reason") or "").strip()
+        sha = str(d.get("sha256") or "")[:12]
+        lead = (
+            "Historia meczu chroniona, zapis zamrożony w teczce"
+            if ev == "evidence.marked"
+            else "Zapis zamrożony w kolejnej teczce"
+        )
+        if d.get("package_id"):
+            lead += f" nr {d['package_id']}"
+        if sha:
+            lead += f" (SHA-256 {sha}…)"
+        return f"{lead}. Powód: {reason}" if reason else lead
+
+    if ev == "evidence.released":
+        reason = str(d.get("reason") or "").strip()
+        lead = "Wersje znów wygasają jak zwykle, teczki zostają"
+        return f"{lead}. Powód: {reason}" if reason else lead
 
     if ev == "match.promoted":
         return (
@@ -1333,6 +1356,7 @@ async def journal_matches(
     q: Optional[str] = Query(None, description="Fragment numeru meczu"),
     limit: int = Query(40, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    evidence: bool = Query(False, description="Tylko mecze oznaczone jako materiał dowodowy"),
     actor: Actor = Depends(proel_actor),
 ):
     """Poziom pierwszy panelu: co w ogóle się działo i przy którym meczu.
@@ -1344,9 +1368,10 @@ async def journal_matches(
     await _require_admin(actor)
     await _backfill_protocol_pdf_events()
 
-    from app.db import database, proel_activity_log, saved_matches
+    from app.db import database, proel_activity_log, proel_evidence_holds, saved_matches
 
     log = proel_activity_log
+    holds = proel_evidence_holds
     grouped = (
         select(
             log.c.match_number.label("match_number"),
@@ -1359,8 +1384,24 @@ async def journal_matches(
     )
     if q:
         grouped = grouped.where(log.c.match_number.ilike(f"%{str(q).strip()}%"))
+    if evidence:
+        grouped = grouped.where(
+            log.c.match_number.in_(
+                select(holds.c.match_number).where(holds.c.released_at.is_(None))
+            )
+        )
 
     rows = await database.fetch_all(grouped.limit(limit).offset(offset))
+    # Oznaczenia materiału dowodowego dla całej strony JEDNYM zapytaniem.
+    held = {
+        r["match_number"]: dict(r)
+        for r in await database.fetch_all(
+            select(holds).where(
+                holds.c.match_number.in_([r["match_number"] for r in rows]),
+                holds.c.released_at.is_(None),
+            )
+        )
+    } if rows else {}
 
     out: List[Dict[str, Any]] = []
     for row in rows:
@@ -1393,6 +1434,20 @@ async def journal_matches(
                 # Brak wiersza w `proel_matches` znaczy „zapis usunięty" -
                 # dziennik zostaje i to jest jego sens.
                 "status": (doc["status"] if doc is not None else "deleted"),
+                # Materiał dowodowy: kto, kiedy, dlaczego. `None` = zwykły mecz.
+                "evidence": (
+                    {
+                        "marked_at": held[number]["marked_at"].isoformat()
+                        if held[number].get("marked_at") is not None
+                        else None,
+                        "marked_by": held[number].get("marked_by_name")
+                        or held[number].get("marked_by_judge")
+                        or "",
+                        "reason": held[number].get("reason") or "",
+                    }
+                    if number in held
+                    else None
+                ),
             }
         )
     return {"matches": out, "has_more": len(rows) == limit}

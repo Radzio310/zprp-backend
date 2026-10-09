@@ -8,6 +8,7 @@ from app.db import (
     database,
     proel_deleted_matches,
     proel_doc_history,
+    proel_evidence_holds,
     proel_match_state,
     saved_matches,
 )
@@ -115,6 +116,8 @@ from app.proel_lease import (
     same_judge_lease as _same_judge_lease,
 )
 from app.proel_snapshots import carry_snapshots, drop_snapshots, record_snapshot
+from app.proel_evidence import carry_evidence
+from app.proel_evidence_rules import DELETE_REFUSED_MESSAGE as EVIDENCE_DELETE_REFUSED
 from app.proel_status import (
     VALID_STATUSES,
     is_finished_for,
@@ -2218,6 +2221,11 @@ async def delete_proel_match(
     outcome = await archive_and_delete_match(match_number, actor)
     if outcome == "missing":
         raise HTTPException(404, "Nie znaleziono meczu w ProEl'u")
+    if outcome == "evidence":
+        raise HTTPException(
+            status.HTTP_423_LOCKED,
+            detail={"code": "EVIDENCE_HOLD", "message": EVIDENCE_DELETE_REFUSED},
+        )
     return {"success": True}
 
 
@@ -2228,7 +2236,8 @@ async def archive_and_delete_match(
     refuse_approved: bool = False,
     extra_details: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Archiwizacja + usunięcie jednego zapisu. Zwraca "deleted", "missing"
+    """Archiwizacja + usunięcie jednego zapisu. Zwraca "deleted", "missing",
+    "evidence" (mecz oznaczony jako materiał dowodowy - nigdy nie usuwamy)
     albo "approved" (tylko przy `refuse_approved`).
 
     Wspólna dla pojedynczego usunięcia i grupowego (`app/proel_archive.py`),
@@ -2242,6 +2251,17 @@ async def archive_and_delete_match(
         )
         if row is None:
             return "missing"
+        # Materiał dowodowy (`app/proel_evidence.py`): czytane W transakcji,
+        # z tej samej przyczyny co status - oznaczenie mogło przyjść między
+        # zaznaczeniem na liście a usunięciem.
+        held = await database.fetch_one(
+            select(proel_evidence_holds.c.match_number).where(
+                proel_evidence_holds.c.match_number == match_number,
+                proel_evidence_holds.c.released_at.is_(None),
+            )
+        )
+        if held is not None:
+            return "evidence"
         if refuse_approved and (row["status"] or "") == "approved":
             return "approved"
 
@@ -2513,6 +2533,8 @@ async def promote_training_match(
     # awansu, jakby wcześniej nic nie było: wiersze zostają pod kluczem
     # szkoleniowym, którego panel już nie szuka.
     carried = await carry_snapshots(key, official)
+    # Oznaczenie materiału dowodowego i teczki idą za meczem z tego samego powodu.
+    await carry_evidence(key, official)
 
     details = {
         "from": key,

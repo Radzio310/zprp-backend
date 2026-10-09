@@ -189,6 +189,14 @@ async def record_snapshot(
             stamp = stamp.replace(tzinfo=timezone.utc)
 
         prev, today = await _last_and_count(key, now)
+        # Materiał dowodowy (`app/proel_evidence.py`): każda wersja zostaje na
+        # zawsze, a dobowy limit przestaje obowiązywać - sprawa, która się
+        # toczy, potrzebuje każdej wersji, nie co dwudziestej.
+        from app.proel_evidence import is_held
+
+        held = await is_held(key)
+        if held:
+            today = 0
 
         mark = milestone or milestone_of(
             prev=prev,
@@ -250,7 +258,7 @@ async def record_snapshot(
             "source": "device" if source == "device" else "server",
             "created_at": stamp,
             "received_at": now,
-            "expires_at": expires_at(stamp, mark),
+            "expires_at": None if held else expires_at(stamp, mark),
             **head,
         }
 
@@ -308,6 +316,13 @@ async def drop_snapshots(match_number: str) -> int:
         key = str(match_number or "").strip()
         if not key:
             return 0
+        # Druga linia obrony: chroniony mecz nie daje się usunąć
+        # (`archive_and_delete_match`), ale jego historia nie znika nawet wtedy,
+        # gdyby ktoś zawołał to z innej drogi.
+        from app.proel_evidence import is_held
+
+        if await is_held(key):
+            return 0
         return int(await database.execute(delete(T).where(T.c.match_number == key)) or 0)
     except Exception:  # noqa: BLE001
         logger.warning("kasowanie migawek nieudane (%s)", match_number, exc_info=True)
@@ -317,13 +332,22 @@ async def drop_snapshots(match_number: str) -> int:
 async def cleanup_expired(limit: int = CLEANUP_BATCH) -> int:
     """Skasuj wygasłe migawki - PARTIAMI, żeby nie blokować zapisów."""
     from app.db import database, proel_match_snapshots as T
+    from app.proel_evidence import active_holds_select
 
     now = _now()
     ids = [
         row["id"]
         for row in await database.fetch_all(
             select(T.c.id)
-            .where(and_(T.c.expires_at.is_not(None), T.c.expires_at < now))
+            .where(
+                and_(
+                    T.c.expires_at.is_not(None),
+                    T.c.expires_at < now,
+                    # Materiał dowodowy nie wygasa NIGDY - także wtedy, gdy
+                    # jakiś wiersz dostał datę, zanim mecz oznaczono.
+                    T.c.match_number.not_in(active_holds_select()),
+                )
+            )
             .limit(limit)
         )
     ]

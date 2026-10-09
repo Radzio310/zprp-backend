@@ -67,6 +67,7 @@ from app.proel_zprp import router as proel_zprp_router, close_upstream_client as
 from app.proel_zprp_batch import router as proel_zprp_batch_router
 from app.proel_archive import router as proel_archive_router
 from app.proel_journal import router as proel_journal_router
+from app.proel_evidence import router as proel_evidence_router
 from app.proel_stats import router as proel_stats_router
 from app.proel_exam_snapshot import router as proel_exam_snapshot_router
 from app.proel_users.users import router as proel_users_router
@@ -307,6 +308,8 @@ app.include_router(proel_zprp_router)
 app.include_router(proel_zprp_batch_router)
 app.include_router(proel_archive_router)
 app.include_router(proel_journal_router)
+# Materiał dowodowy (`/proel/evidence/...`) - przed catch-allem z tego samego powodu.
+app.include_router(proel_evidence_router)
 # Statystyki PRZED `proel_router`: tamten ma `/proel/{match_number}`
 # i zjadłby „stats" jako numer meczu.
 app.include_router(proel_stats_router)

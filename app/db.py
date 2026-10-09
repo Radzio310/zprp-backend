@@ -2063,6 +2063,59 @@ proel_activity_log = Table(
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
 )
 
+# 21.075) ProEl - mecz jako materiał dowodowy
+#
+# Administrator oznacza w Dzienniku meczu, że ten mecz jest WAŻNY (reklamacja,
+# sprawa dyscyplinarna, spór o karę). Od tej chwili nic z jego historii nie
+# znika: migawki nie wygasają (także dobowy limit przestaje obowiązywać),
+# wersje przegrane w sporze nie wygasają, a samego zapisu nie da się usunąć -
+# ani pojedynczo, ani grupowo. Reguły: `app/proel_evidence_rules.py`.
+#
+# Wiersz NIE znika przy zdjęciu oznaczenia - dostaje `released_at`. Ślad, że
+# mecz był chroniony i kto ochronę zdjął, jest częścią tego samego materiału.
+proel_evidence_holds = Table(
+    "proel_evidence_holds", metadata,
+    Column("match_number", String, primary_key=True),
+    Column("zprp_match_id", String, nullable=True),
+    Column("reason", Text, nullable=True),
+    Column("marked_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("marked_by_judge", String, nullable=True),
+    Column("marked_by_name", String, nullable=True),
+    Column("marked_by_install", String, nullable=True),
+    # NULL = ochrona trwa. Ponowne oznaczenie zeruje te trzy pola.
+    Column("released_at", DateTime(timezone=True), nullable=True, index=True),
+    Column("released_by_judge", String, nullable=True),
+    Column("released_by_name", String, nullable=True),
+    Column("release_reason", Text, nullable=True),
+)
+
+# 21.076) ProEl - teczki dowodowe: zamrożony KOMPLET zapisu meczu
+#
+# Migawki są odchudzone (bez podpisów), a bieżący zapis meczu da się jeszcze
+# zmienić po cofnięciu zatwierdzenia. Teczka to zrzut WSZYSTKIEGO na daną
+# chwilę - zapis z podpisami, overlay, każda wersja, dziennik, spory, PDF-y -
+# spakowany i opatrzony sumą SHA-256. Format jest ten sam co
+# `tools/raport_dowodowy/zrzut.py`, więc z pobranej teczki od razu powstaje
+# raport (`raport.py --z-pliku`).
+#
+# TECZEK NIE KASUJE NIC: nie ma trasy usuwania, nie ma sprzątania i zdjęcie
+# oznaczenia ich nie rusza. Każda nowa teczka to nowy wiersz.
+proel_evidence_packages = Table(
+    "proel_evidence_packages", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("match_number", String, nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("created_by_judge", String, nullable=True),
+    Column("created_by_name", String, nullable=True),
+    Column("reason", Text, nullable=True),
+    # gzip(json zrzutu). Suma liczona z TYCH bajtów - plik pobrany z panelu
+    # ma dokładnie tę samą sumę.
+    Column("payload", LargeBinary, nullable=False),
+    Column("sha256", String, nullable=False),
+    Column("payload_bytes", Integer, nullable=True),
+    Column("counts_json", JSON, nullable=True),
+)
+
 # 21.08) ProEl - podsumowanie meczu do statystyk
 #
 # Panel „Statystyki ProEla" pokazuje WSZYSTKIE mecze naraz, a blob jednego
