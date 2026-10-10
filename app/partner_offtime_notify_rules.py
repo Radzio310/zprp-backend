@@ -1,12 +1,13 @@
-"""Reguły powiadomienia „Twój partner zgłosił niedyspozycję”.
+"""Reguły powiadomienia „Twój partner zgłosił / odwołał niedyspozycję”.
 
 Bez bazy i bez sieci - tylko porównanie dwóch list i tekst powiadomienia.
 
 Aplikacja po KAŻDEJ zmianie w ZPRP odsyła na ``PUT /partner-offtimes/{id}``
 całą swoją listę niedyspozycji. Serwer nie dostaje więc zdarzenia „dodano
 wpis”, tylko stan przed i po. Nową niedyspozycją jest termin (data od-do),
-którego w poprzedniej liście nie było. Zmiana samego opisu nie jest nowym
-terminem - partner nie musi o niej wiedzieć. Przesunięcie dat już tak.
+którego w poprzedniej liście nie było; odwołaną - termin, który z niej
+zniknął. Zmiana samego opisu nie zmienia terminu - partner nie musi o niej
+wiedzieć. Przesunięcie dat już tak (jedno powiadomienie „zmienił”).
 
 Daty przychodzą w trzech zapisach, bo listę wysyłają różne ekrany:
 ``2026-10-12`` (tabela ZPRP), ``12.10.2026`` (starsze widoki ZPRP) i pełne
@@ -19,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date, datetime
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, NamedTuple, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 WARSAW = ZoneInfo("Europe/Warsaw")
@@ -77,29 +78,51 @@ def _range_of(item: dict) -> Optional[Range]:
     return (start, end) if start <= end else (end, start)
 
 
-def new_future_offtimes(old_data: Any, new_data: Any, today: date) -> List[dict]:
-    """Wpisy z nowej listy, których terminu nie było w starej.
+class OfftimeChange(NamedTuple):
+    added: List[dict]
+    removed: List[dict]
 
-    Pomija terminy już zakończone i powtórzenia tego samego terminu.
-    Zwraca ``[]``, gdy którakolwiek lista nie jest listą.
+    def __bool__(self) -> bool:
+        return bool(self.added or self.removed)
+
+
+def _future_spans(items: List[dict], today: date) -> "dict[Range, dict]":
+    spans: "dict[Range, dict]" = {}
+    for item in items:
+        span = _range_of(item)
+        if not span or span[1] < today or span in spans:
+            continue
+        spans[span] = {"from": span[0], "to": span[1], "info": str(item.get("info") or "").strip()}
+    return spans
+
+
+def _sorted(entries: Iterable[dict]) -> List[dict]:
+    return sorted(entries, key=lambda entry: (entry["from"], entry["to"]))
+
+
+def diff_future_offtimes(old_data: Any, new_data: Any, today: date) -> OfftimeChange:
+    """Terminy dodane i odwołane między starą a nową listą.
+
+    Liczą się tylko terminy jeszcze niezakończone; powtórzenia tego samego
+    terminu liczą się raz. Gdy którakolwiek lista nie jest listą - pusto.
+
+    Pusta nowa lista przy kilku odwołanych naraz NIE jest odwołaniem.
+    Aplikacja usuwa terminy pojedynczo i po każdym odsyła listę, a pustą
+    listę daje też nieudany odczyt z ZPRP (wygasła sesja zwraca stronę bez
+    tabeli). Lepiej przemilczeć rzadkie prawdziwe „usuń wszystko” niż
+    powiedzieć partnerowi, że ktoś jest wolny, gdy nie jest.
     """
     old_items = offtime_entries(old_data)
     new_items = offtime_entries(new_data)
     if old_items is None or new_items is None:
-        return []
-    known = {r for r in (_range_of(item) for item in old_items) if r}
-    fresh: List[dict] = []
-    seen = set()
-    for item in new_items:
-        span = _range_of(item)
-        if not span or span in known or span in seen:
-            continue
-        if span[1] < today:
-            continue
-        seen.add(span)
-        fresh.append({"from": span[0], "to": span[1], "info": str(item.get("info") or "").strip()})
-    fresh.sort(key=lambda entry: (entry["from"], entry["to"]))
-    return fresh
+        return OfftimeChange([], [])
+    before = _future_spans(old_items, today)
+    after = _future_spans(new_items, today)
+    added = _sorted(entry for span, entry in after.items() if span not in before)
+    removed = _sorted(entry for span, entry in before.items() if span not in after)
+    if not new_items and len(removed) > 1:
+        removed = []
+    return OfftimeChange(added, removed)
 
 
 def _format_range(start: date, end: date) -> str:
@@ -115,31 +138,55 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def notification_text(full_name: str, entries: Iterable[dict]) -> Tuple[str, str]:
-    items = list(entries)
+def _ranges(entries: List[dict]) -> str:
+    text = ", ".join(_format_range(e["from"], e["to"]) for e in entries[:MAX_LISTED])
+    if len(entries) > MAX_LISTED:
+        text += f" (+{len(entries) - MAX_LISTED})"
+    return text
+
+
+def _with_info(body: str, entry: dict) -> str:
+    return f"{body} · {_clip(entry['info'], MAX_INFO)}" if entry["info"] else body
+
+
+def notification_text(full_name: str, change: OfftimeChange) -> Tuple[str, str]:
+    added, removed = change.added, change.removed
     name = _clip(str(full_name or "").strip(), 60) or "Partner"
-    title = (
-        "Twój partner zgłosił niedyspozycję"
-        if len(items) == 1
-        else "Twój partner zgłosił niedyspozycje"
+    if added and not removed:
+        title = (
+            "Twój partner zgłosił niedyspozycję"
+            if len(added) == 1
+            else "Twój partner zgłosił niedyspozycje"
+        )
+        body = f"{name}: {_ranges(added)}"
+        return title, _with_info(body, added[0]) if len(added) == 1 else body
+    if removed and not added:
+        if len(removed) == 1:
+            return (
+                "Twój partner odwołał niedyspozycję",
+                f"{name}: {_ranges(removed)} – termin odwołany",
+            )
+        return (
+            "Twój partner odwołał niedyspozycje",
+            f"{name}: {_ranges(removed)} – terminy odwołane",
+        )
+    if len(added) == 1 and len(removed) == 1:
+        # Edycja dat w aplikacji: jeden termin znika, jeden przybywa.
+        body = f"{name}: {_ranges(removed)} → {_ranges(added)}"
+        return "Twój partner zmienił niedyspozycję", _with_info(body, added[0])
+    return (
+        "Twój partner zmienił niedyspozycje",
+        f"{name}: nowe {_ranges(added)}; odwołane {_ranges(removed)}",
     )
-    ranges = [_format_range(e["from"], e["to"]) for e in items[:MAX_LISTED]]
-    body = f"{name}: {', '.join(ranges)}"
-    if len(items) > MAX_LISTED:
-        body += f" (+{len(items) - MAX_LISTED})"
-    if len(items) == 1 and items[0]["info"]:
-        body += f" · {_clip(items[0]['info'], MAX_INFO)}"
-    return title, body
 
 
-def event_key(judge_id: str, entries: Iterable[dict]) -> str:
+def event_key(judge_id: str, change: OfftimeChange) -> str:
     """Stały identyfikator zgłoszenia - osobny kafelek na każde zgłoszenie.
 
-    Ten sam zestaw terminów wysłany drugi raz (ponowienie kolejki w aplikacji)
+    Ta sama zmiana wysłana drugi raz (ponowienie kolejki w aplikacji)
     zastępuje swoje powiadomienie zamiast dokładać kopię.
     """
-    seed = "|".join(
-        [str(judge_id)]
-        + [f"{e['from'].isoformat()}/{e['to'].isoformat()}" for e in entries]
-    )
-    return "poff-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+    parts = [str(judge_id)]
+    for sign, entries in (("+", change.added), ("-", change.removed)):
+        parts += [f"{sign}{e['from'].isoformat()}/{e['to'].isoformat()}" for e in entries]
+    return "poff-" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:24]

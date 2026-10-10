@@ -1,4 +1,4 @@
-"""Push do partnera, gdy sędzia zgłosi nową niedyspozycję.
+"""Push do partnera, gdy sędzia zgłosi albo odwoła niedyspozycję.
 
 Reguły (co jest „nowe”, treść) leżą w ``partner_offtime_notify_rules``.
 Tu tylko decyzja, KOMU wolno wysłać, i sama wysyłka.
@@ -14,8 +14,8 @@ from sqlalchemy import select
 from app.db import database, partner_offtimes
 from app.partner_offtime_notify_rules import (
     WARSAW,
+    diff_future_offtimes,
     event_key,
-    new_future_offtimes,
     notification_text,
 )
 
@@ -46,8 +46,8 @@ async def notify_partner_about_new_offtimes(
         partner_id = str(new_partner_id or "").strip()
         if not partner_id or partner_id != str(old_partner_id or "").strip():
             return 0
-        fresh = new_future_offtimes(old_data, new_data, datetime.now(WARSAW).date())
-        if not fresh:
+        change = diff_future_offtimes(old_data, new_data, datetime.now(WARSAW).date())
+        if not change:
             return 0
         partner_row = await database.fetch_one(
             select(partner_offtimes.c.partner_id).where(
@@ -57,7 +57,7 @@ async def notify_partner_about_new_offtimes(
         if not partner_row or str(partner_row["partner_id"] or "").strip() != str(judge_id):
             return 0
 
-        title, body = notification_text(full_name, fresh)
+        title, body = notification_text(full_name, change)
         from app.push.push import send_push_to_judges
 
         return await send_push_to_judges(
@@ -72,7 +72,7 @@ async def notify_partner_about_new_offtimes(
                 "kind": "partner_offtime",
                 "partnerId": str(judge_id),
                 "judgeId": partner_id,
-                "event_key": event_key(judge_id, fresh),
+                "event_key": event_key(judge_id, change),
             },
             app_variant="baza",
             preference_key=PREFERENCE_KEY,
