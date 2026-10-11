@@ -67,6 +67,7 @@ async def send_push_to_judges_report(
     data: Optional[Dict[str, Any]] = None,
     app_variant: Optional[str] = None,
     market_broadcast: bool = False,
+    preference_key: Optional[str] = None,
 ) -> PushDeliveryReport:
     """
     Wysyła push NATYCHMIAST na wszystkie urządzenia podanych sędziów.
@@ -125,6 +126,8 @@ async def send_push_to_judges_report(
     allow_dev = await dev_pushes_enabled()
     if market_broadcast:
         from app.match_market_rules import market_pushes_allowed
+    if preference_key:
+        from .preferences import notification_type_allowed
 
     # Ile urządzeń odpowiedziało NA SĘDZIEGO, a nie łącznie. Suma nie odróżnia
     # „poszło na trzy telefony jednego admina" od „poszło do trzech adminów",
@@ -140,7 +143,13 @@ async def send_push_to_judges_report(
         judge_id = str(row["judge_id"] or "").strip()
         if row["token_type"] != "device_fcm" or not str(row["token"] or "").strip():
             continue
-        if market_broadcast and not market_pushes_allowed(row["notification_prefs"]):
+        # Przełącznik z ustawień telefonu: rozsyłka giełdy albo typ podany
+        # przez wołającego (np. niedyspozycje partnera).
+        muted_here = (
+            (market_broadcast and not market_pushes_allowed(row["notification_prefs"]))
+            or (preference_key and not notification_type_allowed(row["notification_prefs"], preference_key))
+        )
+        if muted_here:
             muted += 1
             if person_outcomes[judge_id] == "no_device":
                 person_outcomes[judge_id] = "muted"
@@ -171,7 +180,8 @@ async def send_push_to_judges_report(
 
     # Rozsyłka honoruje przełącznik per urządzenie. Cisza użytkownika, który
     # wyłączył ją na telefonie, nie jest awarią dostarczania.
-    silent = [j for j, count in delivered.items() if not count and (not market_broadcast or eligible.get(j, 0))]
+    honours_switch = market_broadcast or bool(preference_key)
+    silent = [j for j, count in delivered.items() if not count and (not honours_switch or eligible.get(j, 0))]
     if silent:
         # Bez tego wpisu „mnie nie przyszło" jest nie do sprawdzenia po fakcie.
         logger.warning(
@@ -202,11 +212,13 @@ async def send_push_to_judges(
     data: Optional[Dict[str, Any]] = None,
     app_variant: Optional[str] = None,
     market_broadcast: bool = False,
+    preference_key: Optional[str] = None,
 ) -> int:
     """Zachowuje dotychczasowy kontrakt pozostałych modułów: liczba urządzeń."""
     result = await send_push_to_judges_report(
         judge_ids, title, body, data,
         app_variant=app_variant, market_broadcast=market_broadcast,
+        preference_key=preference_key,
     )
     return result["acceptedDevices"]
 

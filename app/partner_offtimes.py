@@ -1,6 +1,9 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from typing import List
 from app.db import database, partner_offtimes
+from app.deps import get_jwt_payload
+from app.partner_offtime_access import caller_judge_id, write_allowed
+from app.partner_offtime_notify import notify_partner_about_new_offtimes
 from app.schemas import (
     CreatePartnerOfftimeRequest,
     UpdatePartnerOfftimeRequest,
@@ -16,6 +19,8 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+_FORBIDDEN = "Możesz zmieniać tylko własne niedyspozycje"
+
 
 @router.post(
     "/",
@@ -23,7 +28,12 @@ router = APIRouter(
     status_code=status.HTTP_201_CREATED,
     summary="Dodaj nowego sędziego z niedyspozycjami"
 )
-async def create_partner_offtime(req: CreatePartnerOfftimeRequest):
+async def create_partner_offtime(
+    req: CreatePartnerOfftimeRequest,
+    payload: dict = Depends(get_jwt_payload),
+):
+    if not write_allowed(caller_judge_id(payload), req.judge_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=_FORBIDDEN)
     existing = await database.fetch_one(
         select(partner_offtimes)
         .where(partner_offtimes.c.judge_id == req.judge_id)
@@ -52,7 +62,12 @@ async def create_partner_offtime(req: CreatePartnerOfftimeRequest):
     response_model=PartnerOfftimeItem,
     summary="Edytuj istniejącego sędziego po ID"
 )
-async def update_partner_offtime(judge_id: str, req: UpdatePartnerOfftimeRequest):
+async def update_partner_offtime(
+    judge_id: str,
+    req: UpdatePartnerOfftimeRequest,
+    background_tasks: BackgroundTasks,
+    payload: dict = Depends(get_jwt_payload),
+):
     row = await database.fetch_one(
         select(partner_offtimes)
         .where(partner_offtimes.c.judge_id == judge_id)
@@ -60,6 +75,8 @@ async def update_partner_offtime(judge_id: str, req: UpdatePartnerOfftimeRequest
     if not row:
         raise HTTPException(404, f"Sędzia o ID {judge_id} nie istnieje")
     update_data = req.dict(exclude_unset=True)
+    if not write_allowed(caller_judge_id(payload), judge_id, update_data, row["partner_id"]):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=_FORBIDDEN)
     if not update_data:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Brak danych do aktualizacji")
     stmt = (
@@ -72,6 +89,17 @@ async def update_partner_offtime(judge_id: str, req: UpdatePartnerOfftimeRequest
         select(partner_offtimes)
         .where(partner_offtimes.c.judge_id == judge_id)
     )
+    if "data_json" in update_data:
+        # Po odpowiedzi: telefon sędziego nie czeka na wysyłkę do partnera.
+        background_tasks.add_task(
+            notify_partner_about_new_offtimes,
+            judge_id=judge_id,
+            full_name=updated["full_name"],
+            old_partner_id=row["partner_id"],
+            new_partner_id=updated["partner_id"],
+            old_data=row["data_json"],
+            new_data=updated["data_json"],
+        )
     return PartnerOfftimeItem(**updated)
 
 
@@ -80,7 +108,12 @@ async def update_partner_offtime(judge_id: str, req: UpdatePartnerOfftimeRequest
     response_model=dict,
     summary="Usuń sędziego po ID"
 )
-async def delete_partner_offtime(judge_id: str):
+async def delete_partner_offtime(
+    judge_id: str,
+    payload: dict = Depends(get_jwt_payload),
+):
+    if not write_allowed(caller_judge_id(payload), judge_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=_FORBIDDEN)
     result = await database.execute(
         delete(partner_offtimes)
         .where(partner_offtimes.c.judge_id == judge_id)

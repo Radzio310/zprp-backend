@@ -82,6 +82,11 @@ def province_event_allowed(
     )
 
 
+def notification_type_allowed(preferences: Any, key: str) -> bool:
+    """Czy urządzenie chce powiadomienia z przełącznikiem ``key``."""
+    return _type_enabled(preferences, key)
+
+
 def market_broadcast_allowed(preferences: Any) -> bool:
     """Czy urządzenie chce rozsyłkę o nowej ofercie na Giełdzie."""
     return _type_enabled(preferences, "matchMarket")
