@@ -139,6 +139,9 @@ def dossier(
     blob = A._slownik(mecz.get("data_json"))
     osoby = A.Osoby(blob)
     role = role_obsady(blob)
+    if not osoba.get("nazwisko") and not str(nr).isdigit():
+        # Osoba towarzysząca (litera A-E) nie ma karty składu - nazwisko z obsady ławki.
+        osoba["nazwisko"] = osoba_towarzyszaca(blob, d, nr)
     migawki = list(zrzut.get("migawki") or [])
 
     def moja(k: Optional[Tuple]) -> bool:

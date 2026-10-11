@@ -68,6 +68,7 @@ from app.proel_zprp_batch import router as proel_zprp_batch_router
 from app.proel_archive import router as proel_archive_router
 from app.proel_journal import router as proel_journal_router
 from app.proel_evidence import router as proel_evidence_router
+from app.proel_match_history import router as proel_match_history_router
 from app.proel_stats import router as proel_stats_router
 from app.proel_exam_snapshot import router as proel_exam_snapshot_router
 from app.proel_users.users import router as proel_users_router
@@ -310,6 +311,8 @@ app.include_router(proel_archive_router)
 app.include_router(proel_journal_router)
 # Materiał dowodowy (`/proel/evidence/...`) - przed catch-allem z tego samego powodu.
 app.include_router(proel_evidence_router)
+# Historia meczu oczami osób (`/proel/match-history/...`) - też przed catch-allem.
+app.include_router(proel_match_history_router)
 # Statystyki PRZED `proel_router`: tamten ma `/proel/{match_number}`
 # i zjadłby „stats" jako numer meczu.
 app.include_router(proel_stats_router)
@@ -830,6 +833,7 @@ _email_grace_task: asyncio.Task | None = None
 _mp_snapshot_task: asyncio.Task | None = None
 _province_match_monitor_task: asyncio.Task | None = None
 _exam_promotion_task: asyncio.Task | None = None
+_alarm_scan_task: asyncio.Task | None = None
 _province_offtime_sync_task: asyncio.Task | None = None
 _zprp_unavailability_mail_task: asyncio.Task | None = None
 _deploy_push_test_task: asyncio.Task | None = None
@@ -1443,6 +1447,14 @@ async def startup():
     _exam_promotion_task = asyncio.create_task(run_exam_promotion_sweep())
     logger.info("✅ ProEl exam promotion sweep started")
 
+    # Alarmy meczu: usunięte/przeniesione kary, push do adminów przy podejrzanych
+    # (`app/proel_alarm_scan.py`).
+    from app.proel_alarm_scan import run_alarm_scan
+
+    global _alarm_scan_task  # noqa: PLW0603
+    _alarm_scan_task = asyncio.create_task(run_alarm_scan())
+    logger.info("✅ ProEl alarm scan started")
+
     # Tabela Ryczaltow Sedziowskich: wersje startowe wchodza tylko do PUSTEJ
     # tabeli, wiec restart nigdy nie cofnie kwoty poprawionej przez czlowieka.
     try:
@@ -1531,6 +1543,13 @@ async def shutdown():
         _exam_promotion_task.cancel()
         try:
             await _exam_promotion_task
+        except asyncio.CancelledError:
+            pass
+
+    if _alarm_scan_task:
+        _alarm_scan_task.cancel()
+        try:
+            await _alarm_scan_task
         except asyncio.CancelledError:
             pass
 

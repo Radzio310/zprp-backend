@@ -1357,6 +1357,7 @@ async def journal_matches(
     limit: int = Query(40, ge=1, le=200),
     offset: int = Query(0, ge=0),
     evidence: bool = Query(False, description="Tylko mecze oznaczone jako materiał dowodowy"),
+    alarm: bool = Query(False, description="Tylko mecze z alarmem (usunięta albo przeniesiona kara)"),
     actor: Actor = Depends(proel_actor),
 ):
     """Poziom pierwszy panelu: co w ogóle się działo i przy którym meczu.
@@ -1368,10 +1369,17 @@ async def journal_matches(
     await _require_admin(actor)
     await _backfill_protocol_pdf_events()
 
-    from app.db import database, proel_activity_log, proel_evidence_holds, saved_matches
+    from app.db import (
+        database,
+        proel_activity_log,
+        proel_evidence_holds,
+        proel_match_alarms,
+        saved_matches,
+    )
 
     log = proel_activity_log
     holds = proel_evidence_holds
+    alarms = proel_match_alarms
     grouped = (
         select(
             log.c.match_number.label("match_number"),
@@ -1391,7 +1399,22 @@ async def journal_matches(
             )
         )
 
+    if alarm:
+        grouped = grouped.where(
+            log.c.match_number.in_(select(alarms.c.match_number).where(alarms.c.level.isnot(None)))
+        )
+
     rows = await database.fetch_all(grouped.limit(limit).offset(offset))
+    # Alarmy (`app/proel_alarm_scan.py`) dla całej strony JEDNYM zapytaniem.
+    alarmy = {
+        r["match_number"]: dict(r)
+        for r in await database.fetch_all(
+            select(alarms.c.match_number, alarms.c.level, alarms.c.headline, alarms.c.findings_count).where(
+                alarms.c.match_number.in_([r["match_number"] for r in rows]),
+                alarms.c.level.isnot(None),
+            )
+        )
+    } if rows else {}
     # Oznaczenia materiału dowodowego dla całej strony JEDNYM zapytaniem.
     held = {
         r["match_number"]: dict(r)
@@ -1446,6 +1469,16 @@ async def journal_matches(
                         "reason": held[number].get("reason") or "",
                     }
                     if number in held
+                    else None
+                ),
+                # Alarm: „podejrzane" albo „uwaga" + jedno zdanie. `None` = nic.
+                "alarm": (
+                    {
+                        "level": alarmy[number]["level"],
+                        "headline": alarmy[number]["headline"] or "",
+                        "count": int(alarmy[number]["findings_count"] or 0),
+                    }
+                    if number in alarmy
                     else None
                 ),
             }

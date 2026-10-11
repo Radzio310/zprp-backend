@@ -24,7 +24,7 @@ import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import analiza as A
-from .dossier import DOPELNIACZ, dossier, osoba_towarzyszaca
+from .dossier import BIERNIK, dossier, osoba_towarzyszaca
 
 #: Ile sekund kara musi stać w protokole, żeby jej usunięcie nie było „na gorąco".
 PROG_S = 60
@@ -100,8 +100,7 @@ def alarmy_meczu(zrzut: Dict[str, Any]) -> Dict[str, Any]:
             rodzaj = ("przeniesiona" if z["przeniesienie"]
                       else "usunieta_wykluczajaca" if z["wykluczajaca"] else "usunieta_kara")
             opis = (f"{'Przeniesiono' if z['przeniesienie'] else 'Usunięto'} "
-                    f"{DOPELNIACZ.get(z['rodzaj'], z['opis']).replace('kary', 'karę', 1) if False else A.RODZAJE.get(z['rodzaj'], z['rodzaj'])}"
-                    f" z {z['czas_meczu']}")
+                    f"{BIERNIK.get(z['rodzaj'], z['rodzaj'])} z {z['czas_meczu']}")
             znaleziska.append({
                 "rodzaj": rodzaj,
                 "poziom": "podejrzane" if podejrzane else "uwaga",
@@ -153,8 +152,10 @@ def _trwanie(s: int) -> str:
 
 def naglowek(osoba: Dict[str, Any], f: Dict[str, Any]) -> str:
     """Jedno zdanie do plakietki i do powiadomienia."""
-    co = "Przeniesiona" if f["rodzaj"] == "przeniesiona" else "Usunięta"
-    tekst = f"{co} {f['kara'].replace('kara', 'kara', 1)} {osoba['nazwa']} ({f['czas_meczu']})"
+    # Upomnienie jest rodzaju nijakiego - reszta kar to „kara"/„dyskwalifikacja".
+    nijaki = f.get("kara_typ") == "warning"
+    co = ("Przeniesione" if nijaki else "Przeniesiona") if f["rodzaj"] == "przeniesiona" else         ("Usunięte" if nijaki else "Usunięta")
+    tekst = f"{co} {A._maly(f['kara'])}: {osoba['nazwa']} ({f['czas_meczu']})"
     if f["trwanie_s"] >= PROG_S:
         tekst += f" po {_trwanie(int(f['trwanie_s']))} w protokole"
     if f["bramki_po"]:

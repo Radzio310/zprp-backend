@@ -160,6 +160,28 @@ async def _zbierz(key: str) -> Dict[str, Any]:
     }
 
 
+async def zbierz_zrzut(key: str) -> Dict[str, Any]:
+    """Zrzut meczu w formacie teczki, już rozpakowany - wejście dla `app/raport_dowodowy`.
+
+    Rozpakowanie kilkuset migawek idzie w wątku: w tym samym procesie lecą
+    autozapisy meczów w toku i pętla zdarzeń nie może na nie czekać.
+    """
+    from app.proel_evidence_rules import jawne, jawny_wiersz
+
+    zebrane = await _zbierz(key)
+    now = _now()
+
+    def rozpakuj() -> Dict[str, Any]:
+        out: Dict[str, Any] = {"narzedzie": {"nazwa": "app/proel_evidence.py", "wersja": 1},
+                               "wykonano": jawne(now), "klucz": key}
+        for nazwa, wartosc in zebrane.items():
+            out[nazwa] = ([jawny_wiersz(r) for r in wartosc] if isinstance(wartosc, list)
+                          else jawny_wiersz(wartosc))
+        return out
+
+    return await asyncio.to_thread(rozpakuj)
+
+
 async def create_package(key: str, actor: Actor, reason: str) -> Dict[str, Any]:
     """Zamroź komplet zapisu meczu jako nową teczkę. Zwraca jej opis (bez treści)."""
     from app.db import database, proel_evidence_packages as P

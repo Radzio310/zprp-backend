@@ -84,6 +84,11 @@ def snap(i, hhmmss, protocol, row39=None, clock=0, score=(0, 0), milestone=None)
 
 @pytest.fixture
 def zrzut():
+    return zrzut_syntetyczny()
+
+
+def zrzut_syntetyczny():
+    """Scenariusz SK/24 na wymyślonych nazwiskach - używają go też testy alarmów."""
     r1 = {"penalty1": "14:09"}
     r2 = {**r1, "penalty2": "44:47"}
     r2b = {**r1, "penalty2": "44:48"}

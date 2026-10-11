@@ -28,6 +28,9 @@ ADMIN_ALERT_KINDS: Dict[str, Dict[str, str]] = {
     "market_offer": {"emoji": "🔁", "label": "Wymiana do rozstrzygnięcia"},
     "sync_failure": {"emoji": "⚠️", "label": "Awaria synchronizacji"},
     "protocol_failure": {"emoji": "⚠️", "label": "Nieudany protokół"},
+    # Podejrzana zmiana w protokole ProEla (`app/proel_alarm_scan.py`): kara
+    # wykluczająca zdjęta po dłuższej chwili albo zdjęta przed bramką tej osoby.
+    "proel_suspicious": {"emoji": "🛡️", "label": "Podejrzana zmiana w protokole"},
 }
 
 #: Rodzaje, których NIE DA SIĘ wyciszyć.
@@ -35,7 +38,7 @@ ADMIN_ALERT_KINDS: Dict[str, Dict[str, str]] = {
 #: Awaria synchronizacji okręgu i nieudane generowanie protokołu to rzeczy,
 #: które psują aplikację wszystkim innym. Administrator, który je wyłączy,
 #: dowie się o awarii od sędziów - a wtedy jest już po meczu.
-ALWAYS_ON_KINDS = frozenset({"sync_failure", "protocol_failure"})
+ALWAYS_ON_KINDS = frozenset({"sync_failure", "protocol_failure", "proel_suspicious"})
 
 
 def is_known_kind(kind: object) -> bool:

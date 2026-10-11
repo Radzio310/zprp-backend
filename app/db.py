@@ -2116,6 +2116,29 @@ proel_evidence_packages = Table(
     Column("counts_json", JSON, nullable=True),
 )
 
+# 21.077) ProEl - alarmy meczu: usunięte i przeniesione kary
+#
+# Wiersz liczy skaner w tle (`app/proel_alarm_scan.py`) z historii wersji, tą
+# samą analizą co raport (`app/raport_dowodowy/alarmy.py`). Lista Dziennika
+# czyta stąd plakietkę, zamiast rozpakowywać setki migawek przy każdym wejściu.
+# Tabela jest pochodna - można ją wyczyścić, przeliczy się sama.
+proel_match_alarms = Table(
+    "proel_match_alarms", metadata,
+    Column("match_number", String, primary_key=True),
+    # "podejrzane" | "uwaga" | NULL (przeliczono, nic nie ma)
+    Column("level", String, nullable=True, index=True),
+    Column("headline", Text, nullable=True),
+    Column("findings_json", JSON, nullable=True),
+    Column("findings_count", Integer, nullable=False, server_default=text("0")),
+    # Do której migawki (`proel_match_snapshots.id`) przeliczono - nowa = liczymy znowu.
+    Column("last_snapshot_id", Integer, nullable=True),
+    Column("computed_at", DateTime(timezone=True), nullable=True),
+    # Odcisk zbioru PODEJRZANYCH znalezisk, o których już powiadomiono -
+    # push idzie tylko, gdy pojawi się nowe, a nie przy każdym przeliczeniu.
+    Column("pushed_fingerprint", String, nullable=True),
+    Column("pushed_at", DateTime(timezone=True), nullable=True),
+)
+
 # 21.08) ProEl - podsumowanie meczu do statystyk
 #
 # Panel „Statystyki ProEla" pokazuje WSZYSTKIE mecze naraz, a blob jednego
