@@ -1804,21 +1804,18 @@ _SUM_FIELDS = (
 
 def _with_shares(rows: list[dict], costs: float, tax: int, penalty_gross: float = 0.0) -> None:
     """
-    Koszty, podatek i netto MECZU - udzial w rachunku okresu (`share_by_gross`).
-
-    12.10.2026: kara pomniejsza brutto okresu - jej czesc brutto dzielimy na
-    mecze tak samo (`penalty_share`), wiec suma netto meczow = netto okresu.
+    Koszty, podatek, czesc kary i netto MECZU - udzial w rachunku okresu
+    (`settlement_payout_ranges.match_shares`). Netto = brutto - podatek
+    (- czesc kary): koszty uzyskania nie schodza z wyplaty.
     """
-    from app.settlement_payout_ranges import share_by_gross
+    from app.settlement_payout_ranges import match_shares
 
-    grosses = [float(row.get("gross") or 0) for row in rows]
-    parts = share_by_gross(grosses, costs, tax)
-    cuts = [c for c, _ in share_by_gross(grosses, penalty_gross, 0)] if penalty_gross else [0.0] * len(rows)
-    for row, (row_costs, row_tax), cut in zip(rows, parts, cuts):
-        row["costs_share"] = row_costs
-        row["tax_share"] = row_tax
-        row["penalty_share"] = cut
-        row["net_share"] = round(float(row.get("gross") or 0) - cut - row_costs - row_tax, 2)
+    shares = match_shares([float(row.get("gross") or 0) for row in rows], costs, tax, penalty_gross)
+    for row, share in zip(rows, shares):
+        row["costs_share"] = share["costs"]
+        row["tax_share"] = share["tax"]
+        row["penalty_share"] = share["penalty"]
+        row["net_share"] = share["net"]
 
 
 def _bucket_sums(entry: dict) -> dict:

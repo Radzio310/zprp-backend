@@ -54,3 +54,18 @@ def test_podatek_okresu_rozdzielony_na_mecze_co_do_grosza():
     assert parts[0][0] >= parts[2][0]
     assert P.share_by_gross([], 10, 1) == []
     assert P.share_by_gross([0, 0], 0, 0) == [(0.0, 0), (0.0, 0)]
+
+
+def test_netto_meczu_bez_kosztow_uzyskania():
+    # Zgłoszenie 12.10.2026: 4 mecze po 117 zł w okresie (468 zł) -
+    # koszty 94 zł, podatek 45 zł, netto okresu 423 zł. Netto meczu to
+    # brutto - podatek (ok. 105-106 zł), a NIE brutto - koszty - podatek (82,50).
+    from app import settlement_rates as R
+
+    period = R.settle_period(468)
+    shares = P.match_shares([117.0] * 4, period["costs"], period["tax"])
+    assert round(sum(s["net"] for s in shares), 2) == period["net"] == 423.0
+    assert all(105 <= s["net"] <= 106 for s in shares)
+    # Z karą: suma netto meczów = netto okresu po karze.
+    shares = P.match_shares([117.0] * 4, 60, 30, penalty_gross=100.0)
+    assert round(sum(s["net"] for s in shares), 2) == 468 - 100 - 30

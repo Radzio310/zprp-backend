@@ -150,3 +150,34 @@ def share_by_gross(grosses: list[float], costs: float, tax: int) -> list[tuple[f
     cost_parts = [money(x) for x in spread(money(costs), 0.01)]
     tax_parts = [int(round(x)) for x in spread(float(int(tax or 0)), 1.0)]
     return list(zip(cost_parts, tax_parts))
+
+
+def match_shares(
+    grosses: list[float], costs: float, tax: int, penalty_gross: float = 0.0
+) -> list[dict]:
+    """
+    Udział meczu w rachunku okresu: koszty, podatek, część kary i NETTO.
+
+    ⚠ Netto = brutto - podatek (- część kary). Koszty uzyskania NIE schodzą
+    z wypłaty - zmniejszają tylko podstawę podatku. Do 12.10.2026 netto meczu
+    liczyło się jako brutto - koszty - podatek i przy okresie ponad 200 zł
+    Podsumowanie ryczałtów pokazywało 82,50 zł zamiast ok. 106 zł przy 117 zł
+    brutto. Suma `net` meczów = netto okresu co do grosza.
+    """
+    parts = share_by_gross(grosses, costs, tax)
+    cuts = (
+        [c for c, _ in share_by_gross(grosses, penalty_gross, 0)]
+        if penalty_gross
+        else [0.0] * len(grosses)
+    )
+    out = []
+    for gross, (row_costs, row_tax), cut in zip(grosses, parts, cuts):
+        out.append(
+            {
+                "costs": row_costs,
+                "tax": row_tax,
+                "penalty": cut,
+                "net": money(float(gross or 0) - cut - row_tax),
+            }
+        )
+    return out
