@@ -163,6 +163,11 @@ class JudgeSettlement:
     #: z czego potrącić (`settlement_bombs`). `total` jest już PO karze.
     penalty: float = 0
     penalty_left: float = 0
+    #: 12.10.2026 - kara POMNIEJSZA BRUTTO (`settlement_bombs.penalize`):
+    #: `gross_due` to brutto przed karą (None = bez kary), `penalty_gross` -
+    #: ile kara zabrała z brutto. `gross`, `costs`, `tax`, `net` są już PO karze.
+    gross_due: Optional[float] = None
+    penalty_gross: float = 0
 
 
 def _is_future(when: Optional[datetime], now: datetime) -> bool:
@@ -600,6 +605,7 @@ def totals_of(entries: Iterable[JudgeSettlement]) -> dict[str, int | float]:
         "net": money_sum(e.net for e in entries),
         "travel": round(sum(e.travel for e in entries), 2),
         "penalty": money_sum(e.penalty for e in entries),
+        "penalty_gross": money_sum(e.penalty_gross for e in entries),
         "total": round(sum(e.total for e in entries), 2),
     }
 

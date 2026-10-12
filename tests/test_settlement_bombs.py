@@ -119,21 +119,76 @@ def test_bomb_from_row():
     assert ref.source == "crew"
 
 
+def _entry(judge, name, gross, travel):
+    from app import settlement_rates as R
+
+    parts = R.settle_period(gross)
+    return E.JudgeSettlement(
+        judge_id=judge, judge_name=name, gross=parts["gross"], costs=parts["costs"],
+        taxable=parts["taxable"], tax=parts["tax"], net=parts["net"], travel=travel,
+        total=round(parts["net"] + travel, 2),
+    )
+
+
 def test_apply_penalties_on_entries():
-    rich = E.JudgeSettlement(judge_id=DRAB, judge_name="DRAB Jan", net=200, travel=30, total=230)
-    poor = E.JudgeSettlement(judge_id=OTHER, judge_name="NOWAK Anna", net=20, travel=10, total=30)
+    # 12.10.2026: kara POMNIEJSZA BRUTTO - netto spada dokładnie o karę.
+    rich = _entry(DRAB, "DRAB Jan", 445, 30)
+    poor = _entry(OTHER, "NOWAK Anna", 20, 10)
     rows = [
-        {"bomb_id": 1, "judge_id": DRAB, "penalty": 50},
-        {"bomb_id": 1, "judge_id": DRAB, "penalty": 50},   # ta sama bomba, druga rola
+        {"bomb_id": 1, "judge_id": DRAB, "penalty": 270},
+        {"bomb_id": 1, "judge_id": DRAB, "penalty": 270},  # ta sama bomba, druga rola
         {"bomb_id": 2, "judge_id": OTHER, "penalty": 50},
         {"bomb_id": 3, "judge_id": "999", "penalty": 15},  # sedzia bez wyplaty w okresie
         {"bomb_id": 4, "judge_id": DRAB, "penalty": 0},
     ]
     out = apply_penalties([rich, poor], rows)
-    assert (rich.penalty, rich.penalty_left, rich.total) == (50.0, 0.0, 180.0)
-    # Przejazd zostaje - kara schodzi tylko z netto.
-    assert (poor.penalty, poor.penalty_left, poor.total) == (20.0, 30.0, 10.0)
-    assert out["999"] == {"due": 15.0, "applied": 0.0, "left": 15.0}
+    # Przykład księgowej: Drab 132 zł do wypłaty -> brutto 150, nie 445.
+    assert (rich.gross, rich.tax, rich.net) == (150.0, 18, 132.0)
+    assert (rich.gross_due, rich.penalty, rich.penalty_gross, rich.penalty_left) == (445.0, 270.0, 295.0, 0.0)
+    assert rich.total == 162.0  # przejazd zostaje
+    # Kara większa niż ekwiwalent: brutto do zera, przejazd nietknięty, reszta do potrącenia.
+    assert (poor.gross, poor.net, poor.penalty, poor.penalty_left, poor.total) == (0.0, 0.0, 18.0, 32.0, 10.0)
+    assert out["999"]["left"] == 15.0
+
+
+def test_kara_netto_brutto_i_prog_200():
+    from app import settlement_bombs as B
+    from app import settlement_rates as R
+
+    base = R.settle_period(445)
+    r = B.penalize(base, 60)
+    assert r["applied"] == 60.0 and r["left"] == 0.0
+    assert r["parts"]["net"] == base["net"] - 60
+    # Netto 179 nie wychodzi z żadnego brutto (próg 200 zł) - najbliższe wyższe,
+    # różnica zostaje do potrącenia.
+    r = B.penalize(R.settle_period(300), 92)
+    assert r["parts"]["gross"] == 200.01 and r["parts"]["net"] == 181.01
+    assert r["left"] == 2.01
+    # Brutto z groszami zostaje z groszami.
+    r = B.penalize(R.settle_period(150.5), 30)
+    assert r["parts"]["net"] == 102.5
+
+
+def test_kara_na_listach_najpierw_lista_kar():
+    from app import settlement_bombs as B
+    from app import settlement_rates as R
+
+    a, b = R.settle_period(300), R.settle_period(145)
+    entry = E.JudgeSettlement(
+        judge_id=DRAB, judge_name="DRAB Jan",
+        gross=445, costs=a["costs"] + b["costs"], taxable=a["taxable"] + b["taxable"],
+        tax=a["tax"] + b["tax"], net=a["net"] + b["net"], travel=0, total=a["net"] + b["net"],
+        split={"current": True, "parts": [
+            {"letter": "A", **a, "travel": 0, "total": a["net"]},
+            {"letter": "B", **b, "travel": 0, "total": b["net"]},
+        ]},
+    )
+    B.apply_penalties([entry], [{"bomb_id": 1, "judge_id": DRAB, "penalty": 50}], first="B")
+    part_a, part_b = entry.split["parts"]
+    assert part_a.get("penalty") is None  # lista A nietknięta
+    assert part_b["penalty"] == 50.0 and part_b["net"] == b["net"] - 50
+    assert entry.net == a["net"] + b["net"] - 50
+    assert entry.gross == 445 - part_b["penalty_gross"]
 
 
 def test_bomba_bez_obsady_wchodzi_do_okresu_z_kara():

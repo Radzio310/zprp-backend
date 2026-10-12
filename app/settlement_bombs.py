@@ -9,14 +9,26 @@ Decyzje użytkownika z 06.10.2026:
     zostaje na liście sędziego - oznaczony, z kwotą, która przepadła,
   - cofnięcie albo unieważnienie bomby przywraca kwotę (liczymy na żywo, nic
     nie księgujemy),
-  - opcjonalna KARA (kwota przy bombie) to potrącenie od kwoty do wypłaty
-    PO podatku: brutto, koszty i podatek zostają bez zmian. Rodzaj kar
-    okręg ustali później - na razie kwotę wpisuje człowiek.
+  - opcjonalna KARA (kwota przy bombie) jest kwotą NETTO: przelew sędziego
+    maleje dokładnie o nią.
 
-Kara schodzi z ekwiwalentu NETTO z wypłaty okręgu w okresie meczu z bombą,
-najwyżej do zera: zwrot kosztów przejazdu to nie wynagrodzenie, a ujemna
-wypłata nie ma sensu na zestawieniu. Czego nie dało się potrącić, zostaje
-widoczne jako „do potrącenia" - nie przechodzi samo na kolejny miesiąc.
+KARA „WYCHODZI NETTO" (12.10.2026, pytanie księgowej przez Wojtka Kasznię).
+Do tej pory kara schodziła z wypłaty PO podatku, a brutto zostawało pełne -
+księgowa płaciła podatek od kwoty, której nie wypłacała (Drab: brutto 445 zł,
+przelew 132 zł). Teraz kara POMNIEJSZA BRUTTO o tyle, żeby po kosztach
+i podatku netto spadło dokładnie o karę: Drab ma brutto 150 zł, podatek
+18 zł i netto 132 zł (`gross_for_net`). Na Zestawieniu stoi brutto po
+karze, a pod nim dopisek, ile kara zabrała netto i brutto.
+
+Decyzje użytkownika z 12.10.2026:
+  - gdy dokładnego netto nie da się uzyskać (próg 200 zł: netto 177-181 zł
+    nie wychodzi z żadnego brutto) - najbliższe WYŻSZE netto, a różnica
+    zostaje „do potrącenia",
+  - kara większa niż cały ekwiwalent netto - brutto spada do zera, przejazdy
+    zostają nietknięte (zwrot kosztów to nie wynagrodzenie), a reszta jest
+    widoczna jako „do potrącenia" - nie przechodzi sama na kolejny okres,
+  - sędzia z listami (części puli) - kara schodzi najpierw z części na
+    liście ustawionej w „Wyglądzie dokumentów" (domyślnie A), potem z kolejnych.
 
 Powiązanie bomby z obsadą:
   - bomba z ekranu meczu niesie numer meczu ZPRP (`match_id`) i numer
@@ -255,6 +267,66 @@ def penalty_due(bombed: Iterable[tuple[Any, BombRef]]) -> dict[str, float]:
     return out
 
 
+#: Pierwsze brutto z kosztami uzysku - najmniejsze brutto ponad progiem 200 zł.
+_ABOVE_THRESHOLD = 200.01
+
+
+def gross_for_net(target: float, tax_fn=None) -> dict:
+    """
+    Najmniejsze brutto, którego netto (po kosztach i podatku) wynosi CO
+    NAJMNIEJ `target` - a przy osiągalnym netto dokładnie `target`.
+
+    Podatek jest w pełnych złotych, więc brutto = netto + podatek: szukamy
+    najmniejszego `t` z podatkiem(netto + t) <= t. Przy progu 200 zł netto
+    177-181 zł nie wychodzi z żadnego brutto - wtedy pierwsze brutto ponad
+    progiem (200,01 zł) daje najbliższe wyższe netto.
+    """
+    tax_fn = tax_fn or R.settle_period
+    target = money(target)
+    if target <= 0:
+        return tax_fn(0)
+    best = None
+    for t in range(0, int(target * 0.2) + 50):
+        parts = tax_fn(money(target + t))
+        if parts["tax"] <= t:
+            best = parts
+            break
+    over = tax_fn(_ABOVE_THRESHOLD)
+    if over["net"] >= target and (best is None or over["gross"] < best["gross"]):
+        best = over
+    return best if best is not None else tax_fn(target)
+
+
+_PARTS = ("gross", "costs", "taxable", "tax", "net")
+
+
+def penalize(parts: Mapping[str, Any], due: float, tax_fn=None) -> dict:
+    """
+    Kara netto na jednym rachunku (brutto, koszty, podstawa, podatek, netto).
+
+    Zwraca nowy rachunek, ile kary weszło (`applied` - o tyle spadło netto),
+    ile brutto zabrała (`penalty_gross`) i czego nie było z czego potrącić
+    (`left`).
+    """
+    tax_fn = tax_fn or R.settle_period
+    due = money(max(0.0, float(due or 0)))
+    old = {k: float(parts.get(k) or 0) for k in _PARTS}
+    if due <= 0 or old["net"] <= 0:
+        return {"parts": old, "applied": 0.0, "left": due, "penalty_gross": 0.0}
+    target = money(old["net"] - due)
+    new = dict(tax_fn(0) if target <= 0 else gross_for_net(target, tax_fn))
+    if new["gross"] > old["gross"]:  # nie podnosimy brutto - zostaje rachunek bez kary
+        new = dict(old)
+    new = {k: float(new.get(k) or 0) for k in _PARTS}
+    applied = money(old["net"] - new["net"])
+    return {
+        "parts": new,
+        "applied": applied,
+        "left": money(due - applied),
+        "penalty_gross": money(old["gross"] - new["gross"]),
+    }
+
+
 def apply_penalty(net: float, due: float) -> tuple[float, float]:
     """
     Ile kary schodzi z wypłaty, a ile zostaje do potrącenia.
@@ -266,14 +338,32 @@ def apply_penalty(net: float, due: float) -> tuple[float, float]:
     return applied, money(due - applied)
 
 
-def apply_penalties(entries: Iterable[Any], bomb_rows: Iterable[Mapping[str, Any]]) -> dict[str, dict]:
+def _shift(entry: Any, before: Mapping[str, float], after: Mapping[str, float]) -> None:
+    """Przesuwa kwoty wpisu o różnicę rachunku (część okręgowa albo lista)."""
+    for field in ("gross", "costs", "taxable", "net"):
+        setattr(entry, field, money(float(getattr(entry, field) or 0) + after[field] - before[field]))
+    entry.tax = int(round(float(entry.tax or 0) + after["tax"] - before["tax"]))
+
+
+def apply_penalties(
+    entries: Iterable[Any],
+    bomb_rows: Iterable[Mapping[str, Any]],
+    *,
+    first: str = "A",
+) -> dict[str, dict]:
     """
     Kary z wierszy bomb okresu na wpisach sedziow (`JudgeSettlement`).
 
     Kazda bomba liczy sie RAZ (sedzia w dwoch rolach przy jednym meczu ma jedna
-    bombe). Kara schodzi z ekwiwalentu netto (`apply_penalty`), `total` wpisu
-    maleje o to, co potracono; czego nie bylo z czego potracic - `penalty_left`.
-    Zwraca {sedzia: {due, applied, left}} - takze dla sedziow bez wpisu.
+    bombe). Kara POMNIEJSZA BRUTTO tak, zeby netto spadlo dokladnie o nia
+    (`penalize`): wpis dostaje nowe brutto, koszty, podatek i netto, `total`
+    maleje o to samo, co netto. `gross_due` - brutto przed kara,
+    `penalty_gross` - ile kara zabrala z brutto. Przejazdy zostaja.
+
+    Sedzia z obowiazujacymi listami: kara schodzi najpierw z czesci na liscie
+    `first`, potem z kolejnych - kazda czesc to osobny rachunek.
+
+    Zwraca {sedzia: {due, applied, left, gross}} - takze dla sedziow bez wpisu.
     """
     due: dict[str, float] = {}
     seen: set[int] = set()
@@ -287,12 +377,55 @@ def apply_penalties(entries: Iterable[Any], bomb_rows: Iterable[Mapping[str, Any
         due[judge_id] = money(due.get(judge_id, 0) + amount)
     out: dict[str, dict] = {}
     by_judge = {_s(entry.judge_id): entry for entry in entries}
+    lead = _s(first).upper() or "A"
     for judge_id, amount in due.items():
         entry = by_judge.get(judge_id)
-        applied, left = apply_penalty(entry.net if entry is not None else 0, amount)
-        if entry is not None:
-            entry.penalty = applied
-            entry.penalty_left = left
-            entry.total = round(entry.total - applied, 2)
-        out[judge_id] = {"due": amount, "applied": applied, "left": left}
+        if entry is None:
+            out[judge_id] = {"due": amount, "applied": 0.0, "left": amount, "gross": 0.0}
+            continue
+        if getattr(entry, "gross_due", None) is None:
+            entry.gross_due = float(entry.gross or 0)
+        remaining = amount
+        applied_total = 0.0
+        gross_total = 0.0
+        split = getattr(entry, "split", None) or {}
+        parts = list(split.get("parts") or []) if split.get("current") else []
+        if parts:
+            ordered = sorted(parts, key=lambda p: 0 if _s(p.get("letter")).upper() == lead else 1)
+            for part in ordered:
+                if remaining <= 0:
+                    break
+                result = penalize(part, remaining)
+                if not result["applied"]:
+                    continue
+                before = {k: float(part.get(k) or 0) for k in _PARTS}
+                part["gross_due"] = before["gross"]
+                part.update(result["parts"])
+                part["tax"] = int(part["tax"])
+                part["penalty"] = money(float(part.get("penalty") or 0) + result["applied"])
+                part["penalty_gross"] = money(float(part.get("penalty_gross") or 0) + result["penalty_gross"])
+                part["total"] = money(float(part.get("total") or 0) - result["applied"])
+                _shift(entry, before, result["parts"])
+                remaining = money(remaining - result["applied"])
+                applied_total = money(applied_total + result["applied"])
+                gross_total = money(gross_total + result["penalty_gross"])
+        else:
+            # Część OKRĘGOWA rachunku: obsady ZPRP (przełącznik w panelu) mają
+            # własne rachunki i kara ich nie dotyka.
+            zprp = [m for m in getattr(entry, "matches", []) or [] if getattr(m, "zprp_reason", None)]
+            if zprp:
+                district = R.settle_period(money(sum(float(m.gross or 0) for m in entry.matches if not m.zprp_reason)))
+            else:
+                district = {k: float(getattr(entry, k) or 0) for k in _PARTS}
+            result = penalize(district, remaining)
+            if result["applied"]:
+                _shift(entry, district, result["parts"])
+            remaining = money(remaining - result["applied"])
+            applied_total = result["applied"]
+            gross_total = result["penalty_gross"]
+        entry.penalty = applied_total
+        entry.penalty_gross = gross_total
+        entry.penalty_left = remaining
+        entry.total = round(float(entry.total or 0) - applied_total, 2)
+        out[judge_id] = {"due": amount, "applied": applied_total, "left": remaining, "gross": gross_total}
     return out
