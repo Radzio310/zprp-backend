@@ -69,3 +69,21 @@ def test_netto_meczu_bez_kosztow_uzyskania():
     # Z karą: suma netto meczów = netto okresu po karze.
     shares = P.match_shares([117.0] * 4, 60, 30, penalty_gross=100.0)
     assert round(sum(s["net"] for s in shares), 2) == 468 - 100 - 30
+
+
+def test_to_samo_brutto_to_samo_netto():
+    # Zgłoszenie 12.10.2026: 3 x 117 zł w okresie dawało 105 / 106 / 106 zł.
+    from app import settlement_rates as R
+
+    period = R.settle_period(351)
+    shares = P.match_shares([117.0] * 3, period["costs"], period["tax"], net=period["net"])
+    assert len({s["net"] for s in shares}) == 1
+    assert len({s["tax"] for s in shares}) == 1
+    # Grosze, których nie da się równo podzielić, stoją przy okresie.
+    left = P.rounding_left(shares, period["net"])
+    assert abs(left) <= 0.02
+    assert round(sum(s["net"] for s in shares) + left, 2) == period["net"]
+    # Różne brutto: netto w tej samej proporcji.
+    shares = P.match_shares([117.0, 117.0, 60.0], 58.8, 28, net=266.0)
+    assert shares[0] == shares[1]
+    assert shares[2]["net"] < shares[0]["net"]

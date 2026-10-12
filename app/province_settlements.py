@@ -1802,20 +1802,26 @@ _SUM_FIELDS = (
 )
 
 
-def _with_shares(rows: list[dict], costs: float, tax: int, penalty_gross: float = 0.0) -> None:
+def _with_shares(
+    rows: list[dict], costs: float, tax: int, penalty_gross: float = 0.0, net: Optional[float] = None
+) -> float:
     """
     Koszty, podatek, czesc kary i netto MECZU - udzial w rachunku okresu
     (`settlement_payout_ranges.match_shares`). Netto = brutto - podatek
-    (- czesc kary): koszty uzyskania nie schodza z wyplaty.
+    (- czesc kary): koszty uzyskania nie schodza z wyplaty. To samo brutto
+    -> to samo netto; zwraca grosze z zaokraglen, ktore stoja przy okresie.
     """
-    from app.settlement_payout_ranges import match_shares
+    from app.settlement_payout_ranges import match_shares, rounding_left
 
-    shares = match_shares([float(row.get("gross") or 0) for row in rows], costs, tax, penalty_gross)
+    shares = match_shares(
+        [float(row.get("gross") or 0) for row in rows], costs, tax, penalty_gross, net=net
+    )
     for row, share in zip(rows, shares):
         row["costs_share"] = share["costs"]
         row["tax_share"] = share["tax"]
         row["penalty_share"] = share["penalty"]
         row["net_share"] = share["net"]
+    return rounding_left(shares, net) if (net is not None and rows) else 0.0
 
 
 def _bucket_sums(entry: dict) -> dict:
@@ -1889,16 +1895,17 @@ async def _judge_season(
     buckets: list[dict] = []
     totals = {"district": {}, "clubs": {}}
 
-    async def settle(item: dict) -> Optional[dict]:
+    async def settle(item: dict, future: bool = include_future) -> Optional[dict]:
         """Rachunek jednego okresu - panelowy z pamięci albo liczony dla sędziego."""
         is_period = item["kind"] == P.PERIOD
-        if item["from"] > today and not include_future:
+        if item["from"] > today and not future:
             return None
-        if is_period and not extra:
+        more = extra if future else None
+        if is_period and not more:
             warm = SC.peek(
                 "month",
                 key,
-                (int(item["year"]), int(item["month"]), item["id"], bool(include_future), False),
+                (int(item["year"]), int(item["month"]), item["id"], bool(future), False),
             )
             if warm is not None:
                 return warm
@@ -1906,10 +1913,10 @@ async def _judge_season(
             key,
             year=item["year"],
             month=item["month"],
-            include_future=include_future,
+            include_future=future,
             include_zprp=False,
             judge_ids=[judge_id],
-            extra=extra,
+            extra=more,
             period_id=item["id"] if is_period else None,
             span=None if is_period else (item["from"], item["to"]),
             scope=scope,
@@ -1930,6 +1937,7 @@ async def _judge_season(
     # nakłada się, zamiast iść okres po okresie (08.10.2026: ekran ma się
     # otwierać bez zacinki).
     settled = await asyncio.gather(*(settle(item) for item in ranges))
+
     for item, data in zip(ranges, settled):
         is_period = item["kind"] == P.PERIOD
         bucket = {
@@ -1961,13 +1969,47 @@ async def _judge_season(
             )
             entry = payload["entry"]
             club = payload["outside_district"]["entry"]
-            _with_shares(entry.get("rows") or [], entry["costs"], entry["tax"], entry.get("penalty_gross") or 0)
-            _with_shares(club.get("rows") or [], club["costs"], club["tax"])
-            bucket["district"] = _bucket_sums(entry)
+            district_left = _with_shares(
+                entry.get("rows") or [], entry["costs"], entry["tax"],
+                entry.get("penalty_gross") or 0, net=entry["net"],
+            )
+            club_left = _with_shares(club.get("rows") or [], club["costs"], club["tax"], net=club["net"])
+            bucket["district"] = {**_bucket_sums(entry), "rounding": district_left}
             bucket["clubs"] = {
                 **_bucket_sums(club),
+                "rounding": club_left,
                 "names": [c["club_name"] for c in payload["outside_district"]["clubs"] if c.get("club_name")],
             }
+            # Okres w toku z meczami jeszcze przed nami: rachunek SAMYCH
+            # rozegranych - dokładnie to, co „Moje rozliczenie" pokazuje
+            # w trybie Rozegrane. Podatek nie jest liniowy (próg 200 zł, pełne
+            # złote), więc „otrzymane" nie może być kawałkiem kwoty docelowej.
+            played_data = (
+                await settle(item, future=False)
+                if include_future and entry.get("future") and item["from"] <= today
+                else None
+            )
+            if played_data is not None:
+                done = (await _judge_payload(
+                    key,
+                    judge_id,
+                    year=item["year"],
+                    month=item["month"],
+                    include_future=False,
+                    include_zprp=False,
+                    data=played_data,
+                    solo=set(),
+                    period_id=item["id"] if is_period else None,
+                ))["entry"]
+                done_rows = done.get("rows") or []
+                done_left = _with_shares(
+                    done_rows, done["costs"], done["tax"], done.get("penalty_gross") or 0, net=done["net"],
+                )
+                got = {(r.get("match_key"), r.get("role")): r["net_share"] for r in done_rows}
+                for row in entry.get("rows") or []:
+                    if not row.get("future"):
+                        row["played_net_share"] = got.get((row.get("match_key"), row.get("role")), row["net_share"])
+                bucket["played"] = {**_bucket_sums(done), "rounding": done_left}
             bucket["off"] = len(payload["zprp"])
             if detail:
                 bucket["detail"] = payload
