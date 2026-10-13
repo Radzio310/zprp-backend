@@ -4413,7 +4413,7 @@ mentoring_config, mentoring_pairs, mentoring_members, mentoring_assignments, men
 
 # Oceny mentora (arkusz jak u delegata ZPRP) - schemat w osobnym module.
 from app.mentor_evaluation_tables import define_tables as _define_mentor_evaluation_tables
-mentor_evaluations, mentor_evaluation_versions = _define_mentor_evaluation_tables(metadata)
+mentor_evaluations, mentor_evaluation_versions, mentor_evaluation_requests = _define_mentor_evaluation_tables(metadata)
 
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables

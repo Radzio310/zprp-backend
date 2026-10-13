@@ -26,6 +26,7 @@ from app.delegate_evaluation_utils import (
     safe_source_fingerprint,
     season_start,
 )
+from app.delegate_evaluation_comparisons import comparisons_for_form
 from app.admin_guard import admin_write_guard
 from app.db import (
     database,
@@ -223,6 +224,22 @@ async def _all_rows(judge_id: str, province: str, season: str, source: str) -> L
     return rows
 
 
+async def _national_rows(judge_id: str, season: str, source: str) -> List[Dict[str, Any]]:
+    """All forms for an administrator-only national comparison."""
+    source = source if source in SOURCES else "delegate"
+    rows: List[Dict[str, Any]] = []
+    if source in ("delegate", "all"):
+        query = select(delegate_evaluations)
+        if season:
+            query = query.where(delegate_evaluations.c.season == season)
+        rows = [{**dict(row), "kind": "delegate"} for row in await database.fetch_all(query)]
+    if source in ("mentor", "all"):
+        from app.mentor_evaluations import mentor_form_rows
+
+        rows += await mentor_form_rows(judge_id, season=season, all_provinces=True)
+    return rows
+
+
 async def _rows_for(judge_id: str, province: str, season: str = ""):
     conditions = []
     if province:
@@ -337,13 +354,27 @@ async def forms(
     season: str = Query(""),
     surface: str = Query(""),
     source: str = Query("delegate"),
+    comparisons: bool = Query(False),
     payload: dict = Depends(get_jwt_payload),
 ):
     actor = _actor(payload)
     access = await _access(actor, province, surface) if province else {"full": True}
     if province and not access["full"]:
         raise HTTPException(403, access.get("reason") or "Brak dostępu do pełnych arkuszy")
-    return {"items": await _all_rows(actor, province, season, source)}
+    items = [dict(row) for row in await _all_rows(actor, province, season, source)]
+    if comparisons:
+        national = await _national_rows(actor, season, source) if province and access.get("admin") else None
+        metric_cache: Dict[str, Dict[str, Any]] = {}
+        for item in items:
+            item["comparisons"] = comparisons_for_form(
+                item,
+                pair_rows=items,
+                district_rows=items if province else None,
+                national_rows=national,
+                include_combined=source == "all",
+                metric_cache=metric_cache,
+            )
+    return {"items": items}
 
 
 @admin_router.get("/access/{province}")

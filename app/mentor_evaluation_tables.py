@@ -13,7 +13,7 @@ JSON jako Text (nie JSONB): sterownik `databases` oddaje JSONB napisem, więc
 każdy odczyt i tak musiałby go rozbierać.
 """
 
-from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Table, Text, func
+from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Table, Text, UniqueConstraint, func
 
 
 def define_tables(metadata):
@@ -54,4 +54,22 @@ def define_tables(metadata):
         Column("letter", String, nullable=True),
         Column("saved_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
-    return evaluations, versions
+    requests = Table(
+        "mentor_evaluation_requests",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("match_id", String, nullable=False, index=True),
+        Column("province", String, nullable=False, index=True),
+        Column("pair_key", String, nullable=False, index=True),
+        Column("mentor_id", String, nullable=False, index=True),
+        Column("requested_by", String, nullable=False),
+        Column("video_url", Text, nullable=True),
+        Column("channels_json", Text, nullable=False, default="[]"),
+        Column("delivery_json", Text, nullable=False, default="{}"),
+        Column("send_count", Integer, nullable=False, default=1),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("last_sent_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("fulfilled_at", DateTime(timezone=True), nullable=True),
+        UniqueConstraint("match_id", "mentor_id", name="uq_mentor_evaluation_request_match_mentor"),
+    )
+    return evaluations, versions, requests

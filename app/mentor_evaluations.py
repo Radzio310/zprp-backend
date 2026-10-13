@@ -14,23 +14,30 @@ Reguły kto/kiedy/co w liściu `app/mentor_evaluation_rules.py`.
 from __future__ import annotations
 
 import json
+import html
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import (
     database,
+    json_files,
+    login_records,
     mentor_evaluation_versions as versions,
     mentor_evaluations as evaluations,
+    mentor_evaluation_requests as requests,
     mentoring_assignments as assignments,
     mentoring_pairs as mentoring_pairs,
     province_judges,
     province_matches,
     province_mentor_pairs,
+    push_tokens,
 )
 from app.match_market import Actor, market_actor
 from app.mentor_evaluation_rules import (
@@ -43,11 +50,13 @@ from app.mentor_evaluation_rules import (
     pair_of,
     sheet_points,
 )
+from app.mentor_evaluation_request_rules import REQUEST_COOLDOWN, cooldown_hours, normalized_video_url, request_target_error
 from app.settlement_province import display as province_display, spellings
 
 router = APIRouter(prefix="/mentor-evaluations", tags=["Mentor evaluations"])
 
 MAX_SHEET_BYTES = 120_000
+REQUEST_CHANNELS = {"push", "email", "sms"}
 
 
 def now():
@@ -58,6 +67,12 @@ class SaveRequest(BaseModel):
     sheet: Dict[str, Any] = Field(default_factory=dict)
     together: bool = False
     co_author_id: Optional[str] = Field(default=None, max_length=40)
+
+
+class EvaluationRequest(BaseModel):
+    mentor_ids: List[str] = Field(min_length=1, max_length=30)
+    video_url: Optional[str] = Field(default=None, max_length=2048)
+    channels: List[Literal["push", "email", "sms"]] = Field(min_length=1, max_length=3)
 
 
 # ─── Dane z bazy ────────────────────────────────────────────────────────────
@@ -142,6 +157,115 @@ def _loads(value: Any) -> Dict[str, Any]:
         return {}
 
 
+def _json_list(value: Any) -> List[str]:
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, ValueError):
+            parsed = []
+    return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+def _request_shape(row: Dict[str, Any]) -> Dict[str, Any]:
+    last_sent = row.get("last_sent_at")
+    cooldown_until = last_sent + REQUEST_COOLDOWN if last_sent else None
+    return {
+        "id": row["id"],
+        "mentor_id": row["mentor_id"],
+        "requested_by": row["requested_by"],
+        "video_url": row.get("video_url"),
+        "channels": _json_list(row.get("channels_json")),
+        "delivery": _loads(row.get("delivery_json")),
+        "send_count": int(row.get("send_count") or 0),
+        "created_at": row.get("created_at"),
+        "last_sent_at": last_sent,
+        "cooldown_until": cooldown_until,
+        "fulfilled_at": row.get("fulfilled_at"),
+    }
+
+
+def _valid_video_url(value: Optional[str]) -> str:
+    try:
+        return normalized_video_url(value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _phones_in(value: Any) -> List[str]:
+    values = value if isinstance(value, list) else re.split(r"[;,]", str(value or ""))
+    out: List[str] = []
+    for item in values:
+        raw = str(item or "").strip()
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) < 9:
+            continue
+        phone = f"+{digits}" if raw.startswith("+") else digits
+        if phone not in out:
+            out.append(phone)
+    return out
+
+
+async def _mentor_contacts(province: str, mentor_ids: List[str], names: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+    """Resolve contact data conservatively; ambiguous contact rows are ignored."""
+    from app.district_alerts import _judge_email_detail
+    from app.official_roster import person_key
+
+    labels = {mentor_id: str(names.get(mentor_id, {}).get("full_name") or "") for mentor_id in mentor_ids}
+    emails = await _judge_email_detail(province, mentor_ids, labels)
+    rows = [dict(row) for row in await database.fetch_all(select(login_records).where(login_records.c.judge_id.in_(mentor_ids)))]
+    phones: Dict[str, str] = {}
+    for row in rows:
+        config = row.get("config_json") or {}
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except ValueError:
+                config = {}
+        candidates = []
+        for key in ("phone", "telephone", "contact_phone", "user_phone"):
+            candidates += _phones_in(config.get(key) if isinstance(config, dict) else None)
+        for nest in ("profile", "contact", "user", "account"):
+            inner = config.get(nest) if isinstance(config, dict) else None
+            if isinstance(inner, dict):
+                for key in ("phone", "telephone", "contact_phone", "user_phone"):
+                    candidates += _phones_in(inner.get(key))
+        if candidates:
+            phones[str(row["judge_id"])] = candidates[0]
+
+    contact_row = await database.fetch_one(select(json_files.c.content).where(json_files.c.key == "kontakty"))
+    contacts = contact_row["content"] if contact_row else []
+    if isinstance(contacts, str):
+        try:
+            contacts = json.loads(contacts)
+        except ValueError:
+            contacts = []
+    by_name: Dict[str, Optional[str]] = {}
+    for contact in contacts if isinstance(contacts, list) else []:
+        if not isinstance(contact, dict) or contact.get("isTeam") is True:
+            continue
+        key = person_key(f"{contact.get('name', '')} {contact.get('surname', '')}")
+        found = _phones_in(contact.get("phone") or contact.get("phones"))
+        if not key or not found:
+            continue
+        if key in by_name and by_name[key] != found[0]:
+            by_name[key] = None
+        else:
+            by_name.setdefault(key, found[0])
+    for mentor_id, label in labels.items():
+        if mentor_id not in phones:
+            phone = by_name.get(person_key(label))
+            if phone:
+                phones[mentor_id] = phone
+    return {
+        mentor_id: {
+            "email": emails.get(mentor_id, ("", ""))[0],
+            "phone": phones.get(mentor_id, ""),
+        }
+        for mentor_id in mentor_ids
+    }
+
+
 def shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], *, working: bool) -> Dict[str, Any]:
     co = json_list(row["co_author_ids"])
     return {
@@ -212,6 +336,17 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
     for r in rows:
         ids |= {r["author_id"], *json_list(r["co_author_ids"])}
     names = await people(ids)
+    request_rows = [
+        dict(row)
+        for row in await database.fetch_all(select(requests).where(requests.c.match_id == str(match_id)))
+    ]
+    assigned = sorted(ctx["mentors"]["mentoring"] | ctx["mentors"]["obsada"])
+    published_authors = {
+        author
+        for row in rows
+        if row["status"] == "published"
+        for author in [row["author_id"], *json_list(row["co_author_ids"])]
+    }
     return {
         "can_rate": ctx["verdict"]["can_rate"] or mine is not None,
         "source": ctx["verdict"]["source"] or (mine["source"] if mine else None),
@@ -220,7 +355,267 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
         "co_mentors": [names[c] for c in ctx["co_mentors"]],
         "mine": shape(mine, names, working=True) if mine else None,
         "published": [shape(r, names, working=False) for r in published],
+        "requestable_mentors": [names[mentor_id] for mentor_id in assigned if mentor_id in names and mentor_id not in published_authors]
+        if me in pair
+        else [],
+        "requests": [_request_shape(row) for row in request_rows]
+        if me in pair or me in assigned or actor.is_admin
+        else [],
     }
+
+
+def _request_message(match: Dict[str, Any], requester: str, video_url: str) -> tuple[str, str]:
+    state = match["state"]
+    code = str(state.get("RozgrywkiCode") or "meczu").strip()
+    teams = " – ".join(
+        value
+        for value in (
+            str(state.get("ID_zespoly_gosp_ZespolNazwa") or "").strip(),
+            str(state.get("ID_zespoly_gosc_ZespolNazwa") or "").strip(),
+        )
+        if value
+    )
+    title = "Prośba o ocenę mentorską"
+    body = f"{requester} prosi o ocenę meczu {code}"
+    if teams:
+        body += f" · {teams}"
+    when = str(state.get("data_fakt") or state.get("data_prop") or "").strip().replace("T", " ")[:16]
+    place = str(state.get("Hala_miasto") or state.get("Hala_nazwa") or "").strip()
+    if when:
+        body += f" · {when}"
+    if place:
+        body += f" · {place}"
+    if video_url:
+        body += " · dołączono nagranie"
+    return title, body
+
+
+async def _send_request_email(email: str, title: str, body: str, match_id: str, video_url: str) -> str:
+    from app.province_alert_emails import send_alert_email
+
+    app_link = f"refhandballapp://match?matchId={match_id}"
+    video_line = f"\nNagranie: {video_url}" if video_url else ""
+    text_body = f"{body}\n\nOtwórz mecz w BAZIE: {app_link}{video_line}"
+    html_body = (
+        '<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;color:#1f2937">'
+        f'<h2 style="color:#6d4ccf">{html.escape(title)}</h2><p>{html.escape(body)}</p>'
+        f'<p><a href="{html.escape(app_link, quote=True)}" style="display:inline-block;padding:12px 18px;background:#a78bfa;color:#1b1230;text-decoration:none;border-radius:10px;font-weight:bold">Otwórz mecz w BAZIE</a></p>'
+        + (f'<p><a href="{html.escape(video_url, quote=True)}">Otwórz nagranie meczu</a></p>' if video_url else "")
+        + "</div>"
+    )
+    return await send_alert_email([email], title, html_body, text_body, sender="BAZA · Mentoring", tag="mentor-evaluation-request")
+
+
+@router.post("/match/{match_id}/requests")
+async def request_evaluation(match_id: str, req: EvaluationRequest, actor: Actor = Depends(market_actor)):
+    ctx = await context(match_id, actor)
+    me = str(actor.judge_id)
+    pair = tuple(ctx["pair"] or ())
+    mentor_ids = list(dict.fromkeys(str(value).strip() for value in req.mentor_ids if str(value).strip()))
+    assigned = ctx["mentors"]["mentoring"] | ctx["mentors"]["obsada"]
+    channels = list(dict.fromkeys(req.channels))
+    if not channels or any(channel not in REQUEST_CHANNELS for channel in channels):
+        raise HTTPException(422, "Wybierz przynajmniej jeden kanał wysyłki.")
+    video_url = _valid_video_url(req.video_url)
+    published_rows = await database.fetch_all(
+        select(evaluations.c.author_id, evaluations.c.co_author_ids)
+        .where(evaluations.c.match_id == str(match_id))
+        .where(evaluations.c.status == "published")
+    )
+    completed = {
+        author
+        for row in published_rows
+        for author in [row["author_id"], *json_list(row["co_author_ids"])]
+    }
+    target_error = request_target_error(
+        actor_id=me,
+        pair=pair,
+        assigned_mentors=assigned,
+        requested_mentors=mentor_ids,
+        completed_mentors=completed,
+    )
+    if target_error:
+        raise HTTPException(*target_error)
+    stamp = now()
+
+    names = await people(set(pair) | set(mentor_ids))
+    requester = names.get(me, {}).get("full_name") or "Sędziowie meczu"
+    title, body = _request_message(ctx["match"], requester, video_url)
+    try:
+        contacts = await _mentor_contacts(ctx["match"]["province"], mentor_ids, names)
+    except Exception:  # brak/awaria kontaktów nie może skasować trwałej prośby ani pushu
+        import logging
+
+        logging.getLogger(__name__).warning("prośba o ocenę: odczyt kontaktów nieudany", exc_info=True)
+        contacts = {mentor_id: {"email": "", "phone": ""} for mentor_id in mentor_ids}
+    outcomes: List[Dict[str, Any]] = []
+    for mentor_id in mentor_ids:
+        request_id = uuid4().hex
+        values = {
+            "id": request_id,
+            "match_id": str(match_id),
+            "province": province_display(ctx["match"]["province"]),
+            "pair_key": pair_key(pair),
+            "mentor_id": mentor_id,
+            "requested_by": me,
+            "video_url": video_url or None,
+            "channels_json": json.dumps(channels),
+            "created_at": stamp,
+            "last_sent_at": stamp,
+            "fulfilled_at": None,
+            "delivery_json": "{}",
+            "send_count": 1,
+        }
+        update_values = {key: value for key, value in values.items() if key not in {"id", "match_id", "mentor_id", "created_at", "send_count"}}
+        claimed = await database.fetch_one(
+            pg_insert(requests)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=[requests.c.match_id, requests.c.mentor_id],
+                set_={**update_values, "send_count": requests.c.send_count + 1},
+                where=or_(
+                    requests.c.fulfilled_at.is_not(None),
+                    requests.c.last_sent_at <= stamp - REQUEST_COOLDOWN,
+                ),
+            )
+            .returning(requests.c.id)
+        )
+        if not claimed:
+            existing = await database.fetch_one(
+                select(requests.c.id, requests.c.last_sent_at, requests.c.fulfilled_at)
+                .where(requests.c.match_id == str(match_id))
+                .where(requests.c.mentor_id == mentor_id)
+            )
+            hours = cooldown_hours(
+                last_sent_at=existing["last_sent_at"] if existing else stamp,
+                now=stamp,
+                fulfilled_at=existing["fulfilled_at"] if existing else None,
+            )
+            outcomes.append(
+                {
+                    "request_id": existing["id"] if existing else request_id,
+                    "mentor": names[mentor_id],
+                    "delivery": {channel: {"status": "cooldown", "hours": hours or 72} for channel in channels},
+                    "sms_phone": "",
+                    "sms_body": "",
+                }
+            )
+            continue
+        request_id = claimed["id"]
+        delivery: Dict[str, Any] = {}
+        if "push" in channels:
+            try:
+                from app.push.push import send_push_to_judges_report
+
+                delivery["push"] = await send_push_to_judges_report(
+                    [mentor_id],
+                    title,
+                    body,
+                    {
+                        "type": "match_change",
+                        "kind": "mentor_evaluation_request",
+                        "matchId": str(match_id),
+                        "matchNumber": str(ctx["match"]["state"].get("RozgrywkiCode") or ""),
+                        "videoUrl": video_url,
+                    },
+                    app_variant="baza",
+                    preference_key="mentorEvaluations",
+                )
+            except Exception as exc:  # jeden kanał nie blokuje pozostałych
+                delivery["push"] = {"status": "failed", "reason": type(exc).__name__}
+        contact = contacts.get(mentor_id, {})
+        if "email" in channels:
+            if contact.get("email"):
+                try:
+                    delivery["email"] = {"status": "accepted", "message_id": await _send_request_email(contact["email"], title, body, str(match_id), video_url)}
+                except Exception as exc:  # noqa: BLE001 - one channel cannot cancel the request
+                    delivery["email"] = {"status": "failed", "reason": type(exc).__name__}
+            else:
+                delivery["email"] = {"status": "unavailable"}
+        if "sms" in channels:
+            delivery["sms"] = {"status": "ready" if contact.get("phone") else "unavailable"}
+        await database.execute(
+            update(requests).where(requests.c.id == request_id).values(delivery_json=json.dumps(delivery))
+        )
+        outcomes.append(
+            {
+                "request_id": request_id,
+                "mentor": names[mentor_id],
+                "delivery": delivery,
+                "sms_phone": contact.get("phone") if "sms" in channels else "",
+                "sms_body": f"{body}. Otwórz mecz w aplikacji BAZA.{f' Nagranie: {video_url}' if video_url else ''}",
+            }
+        )
+    return {"ok": True, "items": outcomes}
+
+
+@router.post("/requests/{request_id}/sms-opened")
+async def mark_request_sms_opened(request_id: str, actor: Actor = Depends(market_actor)):
+    row = await database.fetch_one(select(requests).where(requests.c.id == request_id))
+    if not row:
+        raise HTTPException(404, "Nie znaleziono prośby o ocenę.")
+    stored = dict(row)
+    ctx = await context(stored["match_id"], actor)
+    if str(actor.judge_id) not in set(ctx["pair"] or ()):
+        raise HTTPException(403, "Tylko sędziowie tej pary mogą aktualizować status SMS.")
+    delivery = _loads(stored.get("delivery_json"))
+    if "sms" not in _json_list(stored.get("channels_json")):
+        raise HTTPException(409, "SMS nie był wybranym kanałem tej prośby.")
+    delivery["sms"] = {"status": "opened", "opened_at": now().isoformat()}
+    await database.execute(
+        update(requests).where(requests.c.id == request_id).values(delivery_json=json.dumps(delivery))
+    )
+    return {"ok": True, "status": "opened"}
+
+
+@router.get("/requests/inbox")
+async def request_inbox(installation_id: str = Query(...), limit: int = Query(100, ge=1, le=200)):
+    device = await database.fetch_one(
+        select(push_tokens.c.judge_id, push_tokens.c.app_id).where(push_tokens.c.installation_id == installation_id)
+    )
+    if not device or not str(device["judge_id"] or "").strip():
+        return {"items": []}
+    from app.push.device_policy import dev_pushes_enabled, device_allowed
+
+    if not device_allowed(device, await dev_pushes_enabled()):
+        return {"items": []}
+    mentor_id = str(device["judge_id"]).strip()
+    rows = await database.fetch_all(
+        select(requests)
+        .where(requests.c.mentor_id == mentor_id)
+        .where(requests.c.fulfilled_at.is_(None))
+        .order_by(requests.c.last_sent_at.desc())
+        .limit(limit)
+    )
+    items = []
+    for raw in rows:
+        row = dict(raw)
+        try:
+            match = await match_state(row["match_id"])
+            code = str(match["state"].get("RozgrywkiCode") or "")
+        except HTTPException:
+            code = ""
+        items.append(
+            {
+                "id": f"mentor-request:{row['id']}",
+                "event_id": 0,
+                "title": "Prośba o ocenę mentorską",
+                "body": f"Sędziowie proszą o ocenę meczu {code or row['match_id']}",
+                "data_json": {
+                    "type": "match_change",
+                    "kind": "mentor_evaluation_request",
+                    "matchId": row["match_id"],
+                    "matchNumber": code,
+                    "videoUrl": row.get("video_url") or "",
+                },
+                "status": "stored",
+                "created_at": row["last_sent_at"],
+                "sent_at": row["last_sent_at"],
+                "match_code": code,
+                "event_type": "mentor_evaluation_request",
+            }
+        )
+    return {"items": items}
 
 
 async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> Dict[str, Any]:
@@ -287,6 +682,13 @@ async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> 
     first_publish = publish and not (existing and existing["status"] == "published")
     if first_publish:
         authors = [existing["author_id"], *json_list(existing["co_author_ids"])] if existing else [me, *co_ids]
+        await database.execute(
+            update(requests)
+            .where(requests.c.match_id == str(match_id))
+            .where(requests.c.mentor_id.in_(authors))
+            .where(requests.c.fulfilled_at.is_(None))
+            .values(fulfilled_at=stamp)
+        )
         await notify_pair(match_id, ctx["pair"], authors, str(match["state"].get("RozgrywkiCode") or ""), letter, points)
     return {"ok": True, "id": evaluation_id, "points": points, "letter": letter, "status": "published" if publish or (existing and existing["status"] == "published") else "draft"}
 
@@ -343,7 +745,13 @@ def _match_date(value: Any) -> str:
         return str(value)[:16]
 
 
-async def mentor_form_rows(actor_id: str, province: str = "", season: str = "") -> List[Dict[str, Any]]:
+async def mentor_form_rows(
+    actor_id: str,
+    province: str = "",
+    season: str = "",
+    *,
+    all_provinces: bool = False,
+) -> List[Dict[str, Any]]:
     """Opublikowane oceny mentora w kształcie wiersza `delegate_evaluations`.
 
     Z okręgiem - wszystkie oceny okręgu (dostęp sprawdza wołający). Bez okręgu -
@@ -355,7 +763,7 @@ async def mentor_form_rows(actor_id: str, province: str = "", season: str = "") 
     if season:
         query = query.where(evaluations.c.season == season)
     rows = [dict(r) for r in await database.fetch_all(query.order_by(evaluations.c.match_at.desc()))]
-    if not province:
+    if not province and not all_provinces:
         rows = [r for r in rows if actor_id in r["pair_key"].split("|")]
     ids = set()
     for r in rows:
