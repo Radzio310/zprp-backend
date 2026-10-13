@@ -16,9 +16,9 @@ ZASADY:
   - Dni, których nie obejmuje żaden okres (okręg bez okresów, minione sezony,
     luka w kalendarzu okręgu), idą w miesiącach kalendarzowych przyciętych do
     luki - tak liczy panel w trybie miesięcy. Nic nie znika.
-  - Podatek okresu dzielimy na mecze według brutto (`share_by_gross`) tylko
-    po to, żeby ekran mógł pokazać „netto meczu". Suma udziałów = podatek
-    okresu co do grosza.
+  - Netto okresu dzielimy na mecze według brutto (`match_shares`) tylko
+    po to, żeby ekran mógł pokazać „netto meczu" - to samo brutto, to samo
+    netto. Grosze z zaokrągleń (`rounding_left`) stoją przy okresie.
 """
 
 from __future__ import annotations
@@ -150,3 +150,52 @@ def share_by_gross(grosses: list[float], costs: float, tax: int) -> list[tuple[f
     cost_parts = [money(x) for x in spread(money(costs), 0.01)]
     tax_parts = [int(round(x)) for x in spread(float(int(tax or 0)), 1.0)]
     return list(zip(cost_parts, tax_parts))
+
+
+def match_shares(
+    grosses: list[float],
+    costs: float,
+    tax: int,
+    penalty_gross: float = 0.0,
+    net: Optional[float] = None,
+) -> list[dict]:
+    """
+    Udział meczu w rachunku okresu: koszty, podatek, część kary i NETTO.
+
+    ⚠ Netto = brutto - podatek (- część kary). Koszty uzyskania NIE schodzą
+    z wypłaty - zmniejszają tylko podstawę podatku. Do 12.10.2026 netto meczu
+    liczyło się jako brutto - koszty - podatek i przy okresie ponad 200 zł
+    Podsumowanie ryczałtów pokazywało 82,50 zł zamiast ok. 106 zł przy 117 zł
+    brutto.
+
+    RÓWNA STAWKA (12.10.2026, decyzja użytkownika): mecz o tym samym brutto ma
+    w okresie TO SAMO netto. Każdy mecz dostaje netto okresu w tej samej
+    proporcji do brutto, w groszach - bez reszt z zaokrągleń doklejanych do
+    jednego meczu (wcześniej 3 x 117 zł dawało 105 / 106 / 106 zł). Suma
+    meczów może przez to odbiegać od netto okresu o grosz-dwa: tę różnicę
+    zwraca `rounding_left` i ekran pokazuje ją przy okresie.
+    """
+    total = sum(max(0.0, float(g or 0)) for g in grosses)
+    penalty = float(penalty_gross or 0)
+    if net is None:
+        net = total - penalty - int(tax or 0)
+    out = []
+    for gross in grosses:
+        g = max(0.0, float(gross or 0))
+        part = g / total if total > 0 else 0.0
+        row_net = money(float(net) * part)
+        cut = money(penalty * part)
+        out.append(
+            {
+                "costs": money(float(costs or 0) * part),
+                "tax": money(g - cut - row_net),
+                "penalty": cut,
+                "net": row_net,
+            }
+        )
+    return out
+
+
+def rounding_left(shares: list[dict], net: float) -> float:
+    """Netto okresu minus suma netto meczów - grosze z zaokrągleń (zwykle 0)."""
+    return money(float(net or 0) - sum(s["net"] for s in shares))

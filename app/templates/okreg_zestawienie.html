@@ -204,9 +204,6 @@
       <th>Koszt uzyskania 20%</th>
       <th>Kwota do opodatkowania</th>
       <th>Podatek 12%</th>
-      {%- if has_penalty %}
-      <th>Kara</th>
-      {%- endif %}
       <th>Razem do wypłaty</th>
     </tr>
   </thead>
@@ -223,13 +220,13 @@
       {%- if show_matches %}
       <td class="c">{{ row.matches }}</td>
       {%- endif %}
-      <td>{{ row.gross | money }}</td>
+      <td>{{ row.gross | money }}
+        {%- if row.penalty %}<div class="penalty-left">kara -{{ row.penalty | money }} netto (-{{ row.penalty_gross | money }} brutto)</div>{% endif %}
+        {%- if row.penalty_left %}<div class="penalty-left">do potrącenia jeszcze {{ row.penalty_left | money }}</div>{% endif %}
+      </td>
       <td>{{ row.costs | money }}</td>
       <td>{{ row.taxable | money }}</td>
       <td>{{ row.tax | money }}</td>
-      {%- if has_penalty %}
-      <td class="penalty-col">{% if row.penalty %}-{{ row.penalty | money }}{% if row.penalty_left %}<div class="penalty-left">do potrącenia jeszcze {{ row.penalty_left | money }}</div>{% endif %}{% endif %}</td>
-      {%- endif %}
       <td class="strong-col">{{ row.payable | money }}</td>
     </tr>
     {% endfor %}
@@ -243,9 +240,6 @@
       <td>{{ totals.costs | money }}</td>
       <td>{{ totals.taxable | money }}</td>
       <td>{{ totals.tax | money }}</td>
-      {%- if has_penalty %}
-      <td class="penalty-col">-{{ penalty_total | money }}</td>
-      {%- endif %}
       <td class="gold">{{ payable_total | money }}</td>
     </tr>
   </tbody>
@@ -310,8 +304,8 @@
   (ryczałt i dojazd).
   {%- endif %}
   {%- if has_penalty %}
-  &nbsp;&middot;&nbsp; <b>Kara</b> potrącana jest z kwoty do wypłaty po podatku - ekwiwalent brutto, koszty uzyskania
-  i podatek pozostają bez zmian.
+  &nbsp;&middot;&nbsp; <b>Kara</b> za nieobecność pomniejsza ekwiwalent brutto tak, aby kwota do wypłaty spadła
+  dokładnie o karę; koszty uzyskania i podatek liczone są od brutto po karze.
   {%- endif %}
   {%- if not include_zprp %}
   &nbsp;&middot;&nbsp; Zestawienie nie obejmuje obsad rozliczanych przez ZPRP: sędziów boiskowych

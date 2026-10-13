@@ -339,7 +339,10 @@ def _register_item(item: dict) -> dict:
 
 
 #: Pola kwot, które przy scalaniu części jednego sędziego się sumuje.
-_MERGE_SUM = ("matches", "future", "gross", "costs", "taxable", "tax", "net", "penalty", "penalty_left", "payable")
+_MERGE_SUM = (
+    "matches", "future", "gross", "costs", "taxable", "tax", "net",
+    "penalty", "penalty_left", "penalty_gross", "gross_due", "payable",
+)
 
 
 def merge_parts(items: list[dict]) -> list[dict]:
@@ -428,16 +431,20 @@ def _zestawienie_candidates(
                     "taxable": e.taxable,
                     "tax": e.tax,
                     "net": e.net,
+                    # 12.10.2026: kara jest JUŻ w brutto i netto (`settlement_bombs`)
+                    # - wiersz pokazuje ją tylko dopiskiem pod brutto.
                     "penalty": e.penalty,
                     "penalty_left": e.penalty_left,
-                    "payable": round(e.net - e.penalty, 2),
+                    "penalty_gross": e.penalty_gross,
+                    "gross_due": e.gross_due if e.gross_due is not None else e.gross,
+                    "payable": e.net,
                 }
             )
             continue
         letters = G.wanted_parts(
             [p["letter"] for p in split_parts], wanted.get(e.judge_id)
         )
-        penalties = G.allocate_penalty(split_parts, e.penalty, penalty_list)
+        # Kara jest już rozłożona na części w rozliczeniu (najpierw lista kar).
         penalty_lead = next(
             (p["letter"] for p in split_parts if p["letter"] == penalty_list), split_parts[0]["letter"]
         )
@@ -448,7 +455,7 @@ def _zestawienie_candidates(
             # trafia na żaden dokument.
             if letter not in letters or not part["gross"] or (only and letter != only):
                 continue
-            penalty = penalties.get(letter, 0.0)
+            penalty = float(part.get("penalty") or 0)
             out.append(
                 {
                     "judge_id": e.judge_id,
@@ -464,7 +471,9 @@ def _zestawienie_candidates(
                     "net": part["net"],
                     "penalty": penalty,
                     "penalty_left": e.penalty_left if letter == penalty_lead else 0,
-                    "payable": round(part["net"] - penalty, 2),
+                    "penalty_gross": float(part.get("penalty_gross") or 0),
+                    "gross_due": float(part.get("gross_due") or part["gross"]),
+                    "payable": part["net"],
                 }
             )
     return out
@@ -530,7 +539,8 @@ async def zestawienie_pdf(payload: PdfRequest, jwt: Optional[dict] = Depends(get
             "net": round2(sum(float(r["net"] or 0) for r in rows)),
         }
         penalty_total = round2(sum(float(r["penalty"] or 0) for r in rows))
-        payable_total = round2(totals["net"] - penalty_total)
+        # Kara jest już w netto - do wypłaty to suma netto (12.10.2026).
+        payable_total = round2(totals["net"])
         context = {
             "draft": draft,
             "show_matches": bool(look.get("show_matches")),

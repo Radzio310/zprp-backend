@@ -510,7 +510,7 @@ async def load_settlement(
     )
     bomb_rows.extend(_loose_bomb_rows(loose_bombs, date_from=date_from, date_to=date_to, names=names))
     bomb_rows.sort(key=lambda row: (row["match_at"] or "", row["match_key"]))
-    penalties = _apply_penalties(entries, bomb_rows)
+    penalties = _apply_penalties(entries, bomb_rows, first=await _penalty_list(province))
 
     return {
         "province": province,
@@ -693,9 +693,24 @@ def _loose_bomb_rows(
     return out
 
 
-def _apply_penalties(entries: list, bomb_rows: list[dict]) -> dict[str, dict]:
-    """Kary za bomby na wpisach sedziow - regula w lisciu `settlement_bombs`."""
-    return SB.apply_penalties(entries, bomb_rows)
+def _apply_penalties(entries: list, bomb_rows: list[dict], first: str = "A") -> dict[str, dict]:
+    """
+    Kary za bomby na wpisach sedziow - regula w lisciu `settlement_bombs`.
+
+    12.10.2026: kara pomniejsza BRUTTO (netto spada dokladnie o kare), a przy
+    listach schodzi najpierw z listy kar z „Wygladu dokumentow" (`first`).
+    """
+    return SB.apply_penalties(entries, bomb_rows, first=first)
+
+
+async def _penalty_list(province: str) -> str:
+    """Lista, z ktorej najpierw schodzi kara - ustawienie okregu (domyslnie A)."""
+    try:
+        from app.province_settlement_register import doc_settings
+
+        return str((await doc_settings(province)).get("penalty_list") or "A")
+    except Exception:  # ustawienie to wygoda - nie zatrzymuje rozliczenia
+        return "A"
 
 
 async def cached_settlement(
@@ -837,6 +852,9 @@ def _entry_json(entry: E.JudgeSettlement, *, with_matches: bool) -> dict:
         # Kara za bombe potracona w tym okresie i to, czego nie dalo sie potracic.
         "penalty": entry.penalty,
         "penalty_left": entry.penalty_left,
+        # 12.10.2026: kara pomniejsza brutto - brutto przed kara i ile zabrala.
+        "gross_due": entry.gross_due if entry.gross_due is not None else entry.gross,
+        "penalty_gross": entry.penalty_gross,
         "missing_distance": entry.missing_distance,
         "missing_rate": entry.missing_rate,
         "guessed_stage": entry.guessed_stage,
@@ -1494,7 +1512,8 @@ def _month_penalties(rows: list[dict], district: list, bombed: list, common: dic
     Kary za bomby w siatce miesiecy - kafel ma pokazac to, co ekran miesiaca.
 
     Liczymy tylko miesiace z kara (zwykle zadnego), kazdy jednym przebiegiem
-    silnika: kara schodzi najwyzej do zera z netto sedziego w tym miesiacu.
+    silnika. 12.10.2026: kara pomniejsza brutto, wiec miesiac dostaje roznice
+    WSZYSTKICH kwot (brutto, koszty, podatek, netto, razem), nie samego razem.
     """
     if not bombed:
         return
@@ -1510,13 +1529,17 @@ def _month_penalties(rows: list[dict], district: list, bombed: list, common: dic
             continue
         start, end = month_range(row["year"], row["month"])
         entries = E.settle_judges(district, date_from=start, date_to=end, **common)
+        before = E.totals_of(entries)
         fake_rows = [
             {"judge_id": assignment.judge_id, "bomb_id": bomb.bomb_id, "penalty": bomb.penalty}
             for assignment, bomb in pairs
         ]
         applied = sum(item["applied"] for item in _apply_penalties(entries, fake_rows).values())
+        after = E.totals_of(entries)
+        for field in ("gross", "costs", "taxable", "net", "total"):
+            row[field] = round(row[field] + after[field] - before[field], 2)
+        row["tax"] = row["tax"] + after["tax"] - before["tax"]
         row["penalty"] = round(applied, 2)
-        row["total"] = round(row["total"] - applied, 2)
 
 
 class ForecastMatch(BaseModel):
@@ -1773,18 +1796,32 @@ async def months(
 # ---------------------------------------------------------------------------
 
 #: Pola sum w kubelku - te same co `_entry_json`.
-_SUM_FIELDS = ("matches", "future", "gross", "costs", "taxable", "tax", "net", "travel", "penalty", "penalty_left", "total")
+_SUM_FIELDS = (
+    "matches", "future", "gross", "costs", "taxable", "tax", "net", "travel",
+    "penalty", "penalty_left", "penalty_gross", "gross_due", "total",
+)
 
 
-def _with_shares(rows: list[dict], costs: float, tax: int) -> None:
-    """Koszty, podatek i netto MECZU - udzial w rachunku okresu (`share_by_gross`)."""
-    from app.settlement_payout_ranges import share_by_gross
+def _with_shares(
+    rows: list[dict], costs: float, tax: int, penalty_gross: float = 0.0, net: Optional[float] = None
+) -> float:
+    """
+    Koszty, podatek, czesc kary i netto MECZU - udzial w rachunku okresu
+    (`settlement_payout_ranges.match_shares`). Netto = brutto - podatek
+    (- czesc kary): koszty uzyskania nie schodza z wyplaty. To samo brutto
+    -> to samo netto; zwraca grosze z zaokraglen, ktore stoja przy okresie.
+    """
+    from app.settlement_payout_ranges import match_shares, rounding_left
 
-    parts = share_by_gross([float(row.get("gross") or 0) for row in rows], costs, tax)
-    for row, (row_costs, row_tax) in zip(rows, parts):
-        row["costs_share"] = row_costs
-        row["tax_share"] = row_tax
-        row["net_share"] = round(float(row.get("gross") or 0) - row_costs - row_tax, 2)
+    shares = match_shares(
+        [float(row.get("gross") or 0) for row in rows], costs, tax, penalty_gross, net=net
+    )
+    for row, share in zip(rows, shares):
+        row["costs_share"] = share["costs"]
+        row["tax_share"] = share["tax"]
+        row["penalty_share"] = share["penalty"]
+        row["net_share"] = share["net"]
+    return rounding_left(shares, net) if (net is not None and rows) else 0.0
 
 
 def _bucket_sums(entry: dict) -> dict:
@@ -1858,16 +1895,17 @@ async def _judge_season(
     buckets: list[dict] = []
     totals = {"district": {}, "clubs": {}}
 
-    async def settle(item: dict) -> Optional[dict]:
+    async def settle(item: dict, future: bool = include_future) -> Optional[dict]:
         """Rachunek jednego okresu - panelowy z pamięci albo liczony dla sędziego."""
         is_period = item["kind"] == P.PERIOD
-        if item["from"] > today and not include_future:
+        if item["from"] > today and not future:
             return None
-        if is_period and not extra:
+        more = extra if future else None
+        if is_period and not more:
             warm = SC.peek(
                 "month",
                 key,
-                (int(item["year"]), int(item["month"]), item["id"], bool(include_future), False),
+                (int(item["year"]), int(item["month"]), item["id"], bool(future), False),
             )
             if warm is not None:
                 return warm
@@ -1875,10 +1913,10 @@ async def _judge_season(
             key,
             year=item["year"],
             month=item["month"],
-            include_future=include_future,
+            include_future=future,
             include_zprp=False,
             judge_ids=[judge_id],
-            extra=extra,
+            extra=more,
             period_id=item["id"] if is_period else None,
             span=None if is_period else (item["from"], item["to"]),
             scope=scope,
@@ -1899,6 +1937,7 @@ async def _judge_season(
     # nakłada się, zamiast iść okres po okresie (08.10.2026: ekran ma się
     # otwierać bez zacinki).
     settled = await asyncio.gather(*(settle(item) for item in ranges))
+
     for item, data in zip(ranges, settled):
         is_period = item["kind"] == P.PERIOD
         bucket = {
@@ -1930,13 +1969,47 @@ async def _judge_season(
             )
             entry = payload["entry"]
             club = payload["outside_district"]["entry"]
-            _with_shares(entry.get("rows") or [], entry["costs"], entry["tax"])
-            _with_shares(club.get("rows") or [], club["costs"], club["tax"])
-            bucket["district"] = _bucket_sums(entry)
+            district_left = _with_shares(
+                entry.get("rows") or [], entry["costs"], entry["tax"],
+                entry.get("penalty_gross") or 0, net=entry["net"],
+            )
+            club_left = _with_shares(club.get("rows") or [], club["costs"], club["tax"], net=club["net"])
+            bucket["district"] = {**_bucket_sums(entry), "rounding": district_left}
             bucket["clubs"] = {
                 **_bucket_sums(club),
+                "rounding": club_left,
                 "names": [c["club_name"] for c in payload["outside_district"]["clubs"] if c.get("club_name")],
             }
+            # Okres w toku z meczami jeszcze przed nami: rachunek SAMYCH
+            # rozegranych - dokładnie to, co „Moje rozliczenie" pokazuje
+            # w trybie Rozegrane. Podatek nie jest liniowy (próg 200 zł, pełne
+            # złote), więc „otrzymane" nie może być kawałkiem kwoty docelowej.
+            played_data = (
+                await settle(item, future=False)
+                if include_future and entry.get("future") and item["from"] <= today
+                else None
+            )
+            if played_data is not None:
+                done = (await _judge_payload(
+                    key,
+                    judge_id,
+                    year=item["year"],
+                    month=item["month"],
+                    include_future=False,
+                    include_zprp=False,
+                    data=played_data,
+                    solo=set(),
+                    period_id=item["id"] if is_period else None,
+                ))["entry"]
+                done_rows = done.get("rows") or []
+                done_left = _with_shares(
+                    done_rows, done["costs"], done["tax"], done.get("penalty_gross") or 0, net=done["net"],
+                )
+                got = {(r.get("match_key"), r.get("role")): r["net_share"] for r in done_rows}
+                for row in entry.get("rows") or []:
+                    if not row.get("future"):
+                        row["played_net_share"] = got.get((row.get("match_key"), row.get("role")), row["net_share"])
+                bucket["played"] = {**_bucket_sums(done), "rounding": done_left}
             bucket["off"] = len(payload["zprp"])
             if detail:
                 bucket["detail"] = payload
