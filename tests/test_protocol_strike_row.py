@@ -1,10 +1,12 @@
-"""Skreślenie wiersza na protokole — brak badań i wiersz bez zawodnika.
+"""Skreślenie wiersza na protokole — wykreślony zawodnik i wiersz bez zawodnika.
 
 Ta sama kreska obsługuje dwa przypadki i oba muszą zostać rozróżnialne
 w testach, bo psują się osobno:
 
-  • zawodnik BEZ WAŻNYCH BADAŃ zostaje na wydruku - był zgłoszony, więc numer
-    i nazwisko muszą być widoczne - ale jego wiersz jest przekreślony,
+  • zawodnik WYKREŚLONY przez sędziego zostaje na wydruku - był zgłoszony,
+    więc numer i nazwisko muszą być widoczne - ale jego wiersz jest
+    przekreślony. Brak ważnych badań wiersza NIE skreśla (decyzja Radka
+    13.10.2026): mówi o nim samo puste pole ptaszka,
   • wiersz BEZ ZAWODNIKA też dostaje kreskę zamiast rzędu myślników w każdej
     rubryce; myślniki czytały się jak wypełnione pola z wartością „brak".
 
@@ -47,7 +49,7 @@ def _sheet():
     return raw, ShiftedWS(raw)
 
 
-def _fill(raw, ws, exam_by_number):
+def _fill(raw, ws, exam_by_number, struck=None):
     _fill_players_block(
         ws,
         players=[7, 61],
@@ -57,6 +59,7 @@ def _fill(raw, ws, exam_by_number):
         end_row=END_ROW,
         exam_by_number=exam_by_number,
         mark_ws=raw,
+        struck_numbers=struck,
     )
 
 
@@ -82,23 +85,34 @@ def _marks(raw, base: int) -> int:
     )
 
 
-def test_brak_badan_skresla_wiersz():
+def test_brak_badan_nie_skresla_wiersza():
     raw, ws = _sheet()
     base = len(raw._images)
 
-    # 7 ma badania, 61 nie - przy niepustej mapie to znaczy „sprawdzone i brak".
+    # 7 ma badania, 61 nie - 61 zostaje zwykłym wierszem bez ptaszka.
     _fill(raw, ws, {7: "zprp"})
+
+    strikes = _strikes(raw, base)
+    assert ROW_PLAYER_2 not in strikes
+    assert ROW_PLAYER_1 not in strikes
+    assert _marks(raw, base) == 1  # ptaszek tylko dla 7
+
+
+def test_wykreslony_skresla_wiersz():
+    raw, ws = _sheet()
+    base = len(raw._images)
+    _fill(raw, ws, {7: "zprp", 61: "zprp"}, struck={61})
 
     strikes = _strikes(raw, base)
     assert ROW_PLAYER_2 in strikes
     assert ROW_PLAYER_1 not in strikes
-    assert _marks(raw, base) == 1  # ptaszek tylko dla 7
+    assert _marks(raw, base) == 1  # wykreślony nie dostaje ptaszka
 
 
 def test_kreska_idzie_od_B_do_AL():
     raw, ws = _sheet()
     base = len(raw._images)
-    _fill(raw, ws, {7: "zprp"})
+    _fill(raw, ws, {7: "zprp"}, struck={61})
 
     anchor = _strikes(raw, base)[ROW_PLAYER_2]
 
@@ -110,7 +124,7 @@ def test_kreska_idzie_od_B_do_AL():
 def test_kreska_jest_w_srodku_wiersza():
     raw, ws = _sheet()
     base = len(raw._images)
-    _fill(raw, ws, {7: "zprp"})
+    _fill(raw, ws, {7: "zprp"}, struck={61})
 
     anchor = _strikes(raw, base)[ROW_PLAYER_2]
 

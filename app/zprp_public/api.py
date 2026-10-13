@@ -1,0 +1,547 @@
+"""Wersjonowane API lokalnej hurtowni rozgrywek piłki ręcznej."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import and_, func, or_, select
+
+from app.admin_guard import admin_write_guard
+from app.db import (
+    database,
+    zprp_public_associations,
+    zprp_public_changes,
+    zprp_public_club_licenses,
+    zprp_public_clubs,
+    zprp_public_competitions,
+    zprp_public_match_players,
+    zprp_public_match_staff,
+    zprp_public_matchdays,
+    zprp_public_matches,
+    zprp_public_players,
+    zprp_public_rounds,
+    zprp_public_scorers,
+    zprp_public_seasons,
+    zprp_public_standings,
+    zprp_public_sync_runs,
+    zprp_public_team_rosters,
+    zprp_public_teams,
+)
+from app.zprp_public.sync import run_sync_job
+
+router = APIRouter(prefix="/api/v1/handball", tags=["handball_public"])
+admin_router = APIRouter(
+    prefix="/admin/handball-sync",
+    tags=["handball_sync"],
+    dependencies=[Depends(admin_write_guard)],
+)
+
+
+def _dict(row: Any) -> dict[str, Any]:
+    return dict(row) if row else {}
+
+
+def _public_player(row: Any) -> dict[str, Any]:
+    data = _dict(row)
+    return {
+        "player_id": data.get("player_id"),
+        "first_name": data.get("first_name"),
+        "last_name": data.get("last_name"),
+        "gender": data.get("gender"),
+        "birth_year": data.get("birth_year"),
+        "photo_url": data.get("photo_url"),
+        "updated_at": data.get("updated_at"),
+    }
+
+
+def _page(limit: int, offset: int, rows: list[Any]) -> dict[str, Any]:
+    return {"items": [_dict(row) for row in rows], "limit": limit, "offset": offset, "count": len(rows)}
+
+
+@router.get("/health")
+async def health() -> dict[str, Any]:
+    last = await database.fetch_one(
+        select(zprp_public_sync_runs.c.status, zprp_public_sync_runs.c.finished_at)
+        .order_by(zprp_public_sync_runs.c.started_at.desc())
+        .limit(1)
+    )
+    return {"ok": True, "last_sync": _dict(last) or None}
+
+
+@router.get("/seasons")
+async def list_seasons(include_historical: bool = False) -> dict[str, Any]:
+    query = select(
+        zprp_public_seasons.c.season_id,
+        zprp_public_seasons.c.start_year,
+        zprp_public_seasons.c.name,
+        zprp_public_seasons.c.active,
+        zprp_public_seasons.c.competition_count,
+        zprp_public_seasons.c.updated_at,
+    ).order_by(zprp_public_seasons.c.start_year.desc())
+    if not include_historical:
+        newest = select(zprp_public_seasons.c.start_year).order_by(zprp_public_seasons.c.start_year.desc()).limit(1).scalar_subquery()
+        query = query.where(zprp_public_seasons.c.start_year >= newest - 1)
+    result = await database.fetch_all(query)
+    return {"items": [_dict(row) for row in result], "count": len(result)}
+
+
+@router.get("/associations")
+async def list_associations() -> dict[str, Any]:
+    result = await database.fetch_all(
+        select(
+            zprp_public_associations.c.association_id,
+            zprp_public_associations.c.name,
+            zprp_public_associations.c.code,
+            zprp_public_associations.c.full_name,
+            zprp_public_associations.c.updated_at,
+        ).order_by(zprp_public_associations.c.name)
+    )
+    return {"items": [_dict(row) for row in result], "count": len(result)}
+
+
+@router.get("/clubs")
+async def list_clubs(
+    q: str = "",
+    association_id: str = "",
+    city: str = "",
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    conditions = []
+    if q.strip():
+        like = f"%{q.strip()}%"
+        conditions.append(or_(zprp_public_clubs.c.name.ilike(like), zprp_public_clubs.c.city.ilike(like)))
+    if association_id.strip():
+        conditions.append(zprp_public_clubs.c.association_id == association_id.strip())
+    if city.strip():
+        conditions.append(zprp_public_clubs.c.city.ilike(f"%{city.strip()}%"))
+    query = select(
+        zprp_public_clubs.c.club_id,
+        zprp_public_clubs.c.association_id,
+        zprp_public_clubs.c.name,
+        zprp_public_clubs.c.member,
+        zprp_public_clubs.c.city,
+        zprp_public_clubs.c.logo_url,
+        zprp_public_clubs.c.archived,
+        zprp_public_clubs.c.updated_at,
+    )
+    if conditions:
+        query = query.where(and_(*conditions))
+    result = await database.fetch_all(query.order_by(zprp_public_clubs.c.name).limit(limit).offset(offset))
+    return _page(limit, offset, result)
+
+
+@router.get("/clubs/{club_id}")
+async def club_details(club_id: str) -> dict[str, Any]:
+    club = await database.fetch_one(
+        select(
+            zprp_public_clubs.c.club_id,
+            zprp_public_clubs.c.association_id,
+            zprp_public_clubs.c.name,
+            zprp_public_clubs.c.member,
+            zprp_public_clubs.c.city,
+            zprp_public_clubs.c.postal_code,
+            zprp_public_clubs.c.street,
+            zprp_public_clubs.c.email,
+            zprp_public_clubs.c.website,
+            zprp_public_clubs.c.phone_1,
+            zprp_public_clubs.c.phone_2,
+            zprp_public_clubs.c.archived,
+            zprp_public_clubs.c.logo_url,
+            zprp_public_clubs.c.source_updated_at,
+            zprp_public_clubs.c.updated_at,
+        ).where(zprp_public_clubs.c.club_id == club_id)
+    )
+    if not club:
+        raise HTTPException(404, "Nie znaleziono klubu")
+    teams = await database.fetch_all(
+        select(
+            zprp_public_teams.c.team_id,
+            zprp_public_teams.c.season_id,
+            zprp_public_teams.c.season_name,
+            zprp_public_teams.c.name,
+            zprp_public_teams.c.gender,
+            zprp_public_teams.c.category,
+        )
+        .where(zprp_public_teams.c.club_id == club_id)
+        .order_by(zprp_public_teams.c.season_name.desc(), zprp_public_teams.c.name)
+    )
+    licenses = await database.fetch_all(
+        select(
+            zprp_public_club_licenses.c.season_name,
+            zprp_public_club_licenses.c.name,
+            zprp_public_club_licenses.c.status,
+            zprp_public_club_licenses.c.gender,
+        )
+        .where(zprp_public_club_licenses.c.club_id == club_id)
+        .order_by(zprp_public_club_licenses.c.season_name.desc(), zprp_public_club_licenses.c.name)
+    )
+    return {"club": _dict(club), "teams": [_dict(row) for row in teams], "licenses": [_dict(row) for row in licenses]}
+
+
+@router.get("/teams/{team_id}")
+async def team_details(team_id: str, season_id: str = Query(...)) -> dict[str, Any]:
+    team = await database.fetch_one(
+        select(zprp_public_teams).where(
+            and_(zprp_public_teams.c.team_id == team_id, zprp_public_teams.c.season_id == season_id)
+        )
+    )
+    if not team:
+        raise HTTPException(404, "Nie znaleziono drużyny w tym sezonie")
+    roster_rows = await database.fetch_all(
+        select(zprp_public_team_rosters, zprp_public_players)
+        .join(zprp_public_players, zprp_public_players.c.player_id == zprp_public_team_rosters.c.player_id)
+        .where(
+            and_(
+                zprp_public_team_rosters.c.team_id == team_id,
+                zprp_public_team_rosters.c.season_id == season_id,
+                zprp_public_team_rosters.c.active.is_(True),
+            )
+        )
+        .order_by(zprp_public_players.c.last_name, zprp_public_players.c.first_name)
+    )
+    roster = []
+    for row in roster_rows:
+        data = _dict(row)
+        roster.append(
+            {
+                **_public_player(data),
+                "shirt_number": data.get("shirt_number"),
+                "position_id": data.get("position_id"),
+                "position": data.get("position"),
+            }
+        )
+    team_public = {key: value for key, value in _dict(team).items() if key not in {"source_hash", "source_json"}}
+    return {"team": team_public, "roster": roster, "roster_count": len(roster)}
+
+
+@router.get("/competitions")
+async def list_competitions(
+    season_id: str = "",
+    association_id: str = "",
+    gender: str = "",
+    category: str = "",
+    q: str = "",
+    limit: int = Query(100, ge=1, le=300),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    conditions = []
+    for column, value in (
+        (zprp_public_competitions.c.season_id, season_id),
+        (zprp_public_competitions.c.association_id, association_id),
+        (zprp_public_competitions.c.gender, gender),
+        (zprp_public_competitions.c.category, category),
+    ):
+        if value.strip():
+            conditions.append(column == value.strip())
+    if q.strip():
+        like = f"%{q.strip()}%"
+        conditions.append(or_(zprp_public_competitions.c.name.ilike(like), zprp_public_competitions.c.code.ilike(like)))
+    query = select(
+        zprp_public_competitions.c.competition_id,
+        zprp_public_competitions.c.season_id,
+        zprp_public_competitions.c.association_id,
+        zprp_public_competitions.c.association_name,
+        zprp_public_competitions.c.name,
+        zprp_public_competitions.c.gender,
+        zprp_public_competitions.c.category,
+        zprp_public_competitions.c.code,
+        zprp_public_competitions.c.team_count,
+        zprp_public_competitions.c.started,
+        zprp_public_competitions.c.has_groups,
+        zprp_public_competitions.c.updated_at,
+    )
+    if conditions:
+        query = query.where(and_(*conditions))
+    result = await database.fetch_all(query.order_by(zprp_public_competitions.c.name).limit(limit).offset(offset))
+    return _page(limit, offset, result)
+
+
+@router.get("/competitions/{competition_id}")
+async def competition_details(competition_id: str) -> dict[str, Any]:
+    competition = await database.fetch_one(
+        select(zprp_public_competitions).where(zprp_public_competitions.c.competition_id == competition_id)
+    )
+    if not competition:
+        raise HTTPException(404, "Nie znaleziono rozgrywek")
+    rounds = await database.fetch_all(
+        select(zprp_public_rounds.c.round_id, zprp_public_rounds.c.name).where(
+            zprp_public_rounds.c.competition_id == competition_id
+        )
+    )
+    round_ids = [row["round_id"] for row in rounds]
+    matchdays = []
+    if round_ids:
+        matchdays = await database.fetch_all(
+            select(
+                zprp_public_matchdays.c.matchday_id,
+                zprp_public_matchdays.c.round_id,
+                zprp_public_matchdays.c.number,
+                zprp_public_matchdays.c.sequence,
+                zprp_public_matchdays.c.name,
+                zprp_public_matchdays.c.starts_on,
+                zprp_public_matchdays.c.ends_on,
+            )
+            .where(zprp_public_matchdays.c.round_id.in_(round_ids))
+            .order_by(zprp_public_matchdays.c.sequence)
+        )
+    public_comp = {key: value for key, value in _dict(competition).items() if key not in {"source_hash", "source_json"}}
+    return {"competition": public_comp, "rounds": [_dict(row) for row in rounds], "matchdays": [_dict(row) for row in matchdays]}
+
+
+@router.get("/competitions/{competition_id}/standings")
+async def competition_standings(competition_id: str, table_id: str = "", group_id: str = "") -> dict[str, Any]:
+    conditions = [zprp_public_standings.c.competition_id == competition_id]
+    if table_id:
+        conditions.append(zprp_public_standings.c.table_id == table_id)
+    if group_id:
+        conditions.append(zprp_public_standings.c.group_id == group_id)
+    result = await database.fetch_all(
+        select(
+            zprp_public_standings.c.competition_id,
+            zprp_public_standings.c.table_id,
+            zprp_public_standings.c.group_id,
+            zprp_public_standings.c.team_id,
+            zprp_public_standings.c.club_id,
+            zprp_public_standings.c.position,
+            zprp_public_standings.c.team_name,
+            zprp_public_standings.c.matches,
+            zprp_public_standings.c.wins,
+            zprp_public_standings.c.draws,
+            zprp_public_standings.c.losses,
+            zprp_public_standings.c.goals_for,
+            zprp_public_standings.c.goals_against,
+            zprp_public_standings.c.goal_difference,
+            zprp_public_standings.c.points,
+            zprp_public_standings.c.fetched_at,
+        )
+        .where(and_(*conditions))
+        .order_by(zprp_public_standings.c.table_id, zprp_public_standings.c.group_id, zprp_public_standings.c.position)
+    )
+    return {"items": [_dict(row) for row in result], "count": len(result)}
+
+
+@router.get("/competitions/{competition_id}/scorers")
+async def competition_scorers(competition_id: str, limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
+    result = await database.fetch_all(
+        select(zprp_public_scorers, zprp_public_players)
+        .join(zprp_public_players, zprp_public_players.c.player_id == zprp_public_scorers.c.player_id)
+        .where(zprp_public_scorers.c.competition_id == competition_id)
+        .order_by(zprp_public_scorers.c.goals.desc(), zprp_public_scorers.c.matches.asc())
+        .limit(limit)
+    )
+    items = []
+    for row in result:
+        data = _dict(row)
+        items.append(
+            {
+                **_public_player(data),
+                "team_id": data.get("team_id"),
+                "team_name": data.get("team_name"),
+                "goals": data.get("goals"),
+                "matches": data.get("matches"),
+                "average": data.get("average"),
+                "warnings": data.get("warnings"),
+                "two_minutes": data.get("two_minutes"),
+                "disqualifications": data.get("disqualifications"),
+                "direct_red_cards": data.get("direct_red_cards"),
+                "penalty_attempts": data.get("penalty_attempts"),
+                "penalty_goals": data.get("penalty_goals"),
+            }
+        )
+    return {"items": items, "count": len(items)}
+
+
+@router.get("/matches")
+async def list_matches(
+    competition_id: str = "",
+    team_id: str = "",
+    season_id: str = "",
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    limit: int = Query(50, ge=1, le=300),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    conditions = []
+    if competition_id:
+        conditions.append(zprp_public_matches.c.competition_id == competition_id)
+    if season_id:
+        conditions.append(zprp_public_matches.c.season_id == season_id)
+    if team_id:
+        conditions.append(or_(zprp_public_matches.c.home_team_id == team_id, zprp_public_matches.c.away_team_id == team_id))
+    if date_from:
+        conditions.append(zprp_public_matches.c.scheduled_at >= date_from)
+    if date_to:
+        conditions.append(zprp_public_matches.c.scheduled_at <= date_to)
+    query = select(zprp_public_matches)
+    if conditions:
+        query = query.where(and_(*conditions))
+    result = await database.fetch_all(query.order_by(zprp_public_matches.c.scheduled_at.desc()).limit(limit).offset(offset))
+    items = [{key: value for key, value in _dict(row).items() if key not in {"source_hash", "source_json"}} for row in result]
+    return {"items": items, "limit": limit, "offset": offset, "count": len(items)}
+
+
+@router.get("/matches/{match_id}")
+async def match_details(match_id: str) -> dict[str, Any]:
+    match = await database.fetch_one(select(zprp_public_matches).where(zprp_public_matches.c.match_id == match_id))
+    if not match:
+        raise HTTPException(404, "Nie znaleziono meczu")
+    player_rows = await database.fetch_all(
+        select(zprp_public_match_players, zprp_public_players)
+        .join(zprp_public_players, zprp_public_players.c.player_id == zprp_public_match_players.c.player_id)
+        .where(zprp_public_match_players.c.match_id == match_id)
+        .order_by(zprp_public_match_players.c.side, zprp_public_match_players.c.goals.desc())
+    )
+    players = []
+    for row in player_rows:
+        data = _dict(row)
+        players.append(
+            {
+                **_public_player(data),
+                **{key: data.get(key) for key in (
+                    "team_id", "side", "shirt_number", "position", "goals", "warnings",
+                    "two_minutes", "disqualifications", "direct_red_cards", "penalty_attempts",
+                    "penalty_goals", "shootout_attempts", "shootout_goals",
+                )},
+            }
+        )
+    staff = await database.fetch_all(
+        select(
+            zprp_public_match_staff.c.team_id,
+            zprp_public_match_staff.c.person_id,
+            zprp_public_match_staff.c.side,
+            zprp_public_match_staff.c.first_name,
+            zprp_public_match_staff.c.last_name,
+            zprp_public_match_staff.c.role,
+            zprp_public_match_staff.c.function,
+            zprp_public_match_staff.c.license,
+        ).where(zprp_public_match_staff.c.match_id == match_id)
+    )
+    public_match = {key: value for key, value in _dict(match).items() if key not in {"source_hash", "source_json"}}
+    return {"match": public_match, "players": players, "staff": [_dict(row) for row in staff]}
+
+
+@router.get("/players")
+async def list_players(q: str = Query(..., min_length=2), limit: int = Query(30, ge=1, le=100)) -> dict[str, Any]:
+    like = f"%{q.strip()}%"
+    result = await database.fetch_all(
+        select(zprp_public_players)
+        .where(or_(zprp_public_players.c.first_name.ilike(like), zprp_public_players.c.last_name.ilike(like)))
+        .order_by(zprp_public_players.c.last_name, zprp_public_players.c.first_name)
+        .limit(limit)
+    )
+    return {"items": [_public_player(row) for row in result], "count": len(result)}
+
+
+@router.get("/players/{player_id}")
+async def player_details(player_id: str) -> dict[str, Any]:
+    player = await database.fetch_one(select(zprp_public_players).where(zprp_public_players.c.player_id == player_id))
+    if not player:
+        raise HTTPException(404, "Nie znaleziono zawodnika")
+    rosters = await database.fetch_all(
+        select(
+            zprp_public_team_rosters.c.team_id,
+            zprp_public_team_rosters.c.season_id,
+            zprp_public_team_rosters.c.shirt_number,
+            zprp_public_team_rosters.c.position,
+            zprp_public_teams.c.name.label("team_name"),
+            zprp_public_teams.c.club_id,
+        )
+        .join(
+            zprp_public_teams,
+            and_(
+                zprp_public_teams.c.team_id == zprp_public_team_rosters.c.team_id,
+                zprp_public_teams.c.season_id == zprp_public_team_rosters.c.season_id,
+            ),
+        )
+        .where(and_(zprp_public_team_rosters.c.player_id == player_id, zprp_public_team_rosters.c.active.is_(True)))
+        .order_by(zprp_public_team_rosters.c.season_id.desc())
+    )
+    totals = await database.fetch_one(
+        select(
+            func.count(zprp_public_match_players.c.match_id).label("matches"),
+            func.coalesce(func.sum(zprp_public_match_players.c.goals), 0).label("goals"),
+            func.coalesce(func.sum(zprp_public_match_players.c.two_minutes), 0).label("two_minutes"),
+            func.coalesce(func.sum(zprp_public_match_players.c.disqualifications), 0).label("disqualifications"),
+        ).where(zprp_public_match_players.c.player_id == player_id)
+    )
+    return {"player": _public_player(player), "teams": [_dict(row) for row in rosters], "totals": _dict(totals)}
+
+
+@router.get("/search")
+async def search(q: str = Query(..., min_length=2), limit_per_type: int = Query(8, ge=1, le=25)) -> dict[str, Any]:
+    like = f"%{q.strip()}%"
+    clubs, teams, competitions, players = await asyncio.gather(
+        database.fetch_all(select(zprp_public_clubs.c.club_id, zprp_public_clubs.c.name, zprp_public_clubs.c.city, zprp_public_clubs.c.logo_url).where(zprp_public_clubs.c.name.ilike(like)).limit(limit_per_type)),
+        database.fetch_all(select(zprp_public_teams.c.team_id, zprp_public_teams.c.season_id, zprp_public_teams.c.name, zprp_public_teams.c.category, zprp_public_teams.c.gender).where(zprp_public_teams.c.name.ilike(like)).limit(limit_per_type)),
+        database.fetch_all(select(zprp_public_competitions.c.competition_id, zprp_public_competitions.c.season_id, zprp_public_competitions.c.name, zprp_public_competitions.c.code).where(or_(zprp_public_competitions.c.name.ilike(like), zprp_public_competitions.c.code.ilike(like))).limit(limit_per_type)),
+        database.fetch_all(select(zprp_public_players).where(or_(zprp_public_players.c.first_name.ilike(like), zprp_public_players.c.last_name.ilike(like))).limit(limit_per_type)),
+    )
+    return {
+        "clubs": [_dict(row) for row in clubs],
+        "teams": [_dict(row) for row in teams],
+        "competitions": [_dict(row) for row in competitions],
+        "players": [_public_player(row) for row in players],
+    }
+
+
+@router.get("/changes")
+async def recent_changes(
+    limit: int = Query(50, ge=1, le=200),
+    resource_type: str = "",
+    since: datetime | None = None,
+) -> dict[str, Any]:
+    query = select(zprp_public_changes)
+    if resource_type:
+        query = query.where(zprp_public_changes.c.resource_type == resource_type)
+    if since:
+        query = query.where(zprp_public_changes.c.changed_at > since)
+    result = await database.fetch_all(query.order_by(zprp_public_changes.c.changed_at.desc()).limit(limit))
+    return {"items": [_dict(row) for row in result], "count": len(result)}
+
+
+@router.get("/sync/status")
+async def public_sync_status() -> dict[str, Any]:
+    result = await database.fetch_all(
+        select(
+            zprp_public_sync_runs.c.id,
+            zprp_public_sync_runs.c.kind,
+            zprp_public_sync_runs.c.status,
+            zprp_public_sync_runs.c.counters,
+            zprp_public_sync_runs.c.started_at,
+            zprp_public_sync_runs.c.heartbeat_at,
+            zprp_public_sync_runs.c.finished_at,
+        )
+        .order_by(zprp_public_sync_runs.c.started_at.desc())
+        .limit(20)
+    )
+    return {"items": [_dict(row) for row in result]}
+
+
+class SyncRequest(BaseModel):
+    kind: str
+    season_id: str | None = None
+
+
+@admin_router.post("/run", status_code=202)
+async def queue_sync(payload: SyncRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    allowed = {"catalog", "live", "clubs", "details", "historical", "cleanup"}
+    if payload.kind not in allowed:
+        raise HTTPException(400, f"kind musi należeć do: {', '.join(sorted(allowed))}")
+    if payload.kind == "historical" and not payload.season_id:
+        raise HTTPException(400, "Synchronizacja historyczna wymaga season_id")
+    background_tasks.add_task(run_sync_job, payload.kind, season_id=payload.season_id)
+    return {"queued": True, "kind": payload.kind, "season_id": payload.season_id}
+
+
+@admin_router.get("/runs")
+async def admin_sync_runs(limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
+    result = await database.fetch_all(
+        select(zprp_public_sync_runs).order_by(zprp_public_sync_runs.c.started_at.desc()).limit(limit)
+    )
+    return {"items": [_dict(row) for row in result]}
+

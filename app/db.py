@@ -4479,6 +4479,32 @@ from app.delegate_evaluation_archive_tables import define_tables as _define_dele
 
 delegate_evaluation_documents = _define_delegate_archive_tables(metadata)
 
+# Publiczna hurtownia rozgrywek ZPRP (bez logowania do baza.zprp.pl).
+# Schemat jest osobno, bo to kilkanaście spójnych tabel o wspólnym prefiksie.
+from app.zprp_public_tables import define_tables as _define_zprp_public_tables
+
+(
+    zprp_public_seasons,
+    zprp_public_associations,
+    zprp_public_clubs,
+    zprp_public_club_licenses,
+    zprp_public_teams,
+    zprp_public_players,
+    zprp_public_team_rosters,
+    zprp_public_competitions,
+    zprp_public_rounds,
+    zprp_public_matchdays,
+    zprp_public_matches,
+    zprp_public_match_players,
+    zprp_public_match_staff,
+    zprp_public_standings,
+    zprp_public_scorers,
+    zprp_public_raw_snapshots,
+    zprp_public_changes,
+    zprp_public_sync_runs,
+    zprp_public_sync_state,
+) = _define_zprp_public_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

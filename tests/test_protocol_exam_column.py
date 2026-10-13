@@ -425,3 +425,29 @@ def test_struck_player_is_crossed_out_despite_valid_exam():
     assert marks_struck == 1
     # Ptaszek zastąpiony kreską - liczba rysunków na arkuszu ta sama.
     assert images_struck == images_plain
+
+
+def test_player_without_exam_is_not_crossed_out():
+    """Brak badań: zwykły wiersz z pustym polem ptaszka, BEZ skreślenia."""
+
+    def images(exams):
+        wb = load_workbook(TEMPLATE)
+        raw = wb.active
+        base = len(raw._images)
+        _fill_players_block(
+            ShiftedWS(raw),
+            players=[7, 9],
+            stats_by_number={},
+            fullnames_by_number={},
+            start_row=11,
+            end_row=26,
+            exam_by_number=exams,
+            mark_ws=raw,
+        )
+        return len(_exam_marks(raw, base)), len(raw._images) - base
+
+    marks_both, images_both = images({7: "zprp", 9: "zprp"})
+    marks_one, images_one = images({7: "zprp"})
+    assert (marks_both, marks_one) == (2, 1)
+    # Nr 9 bez badań: zniknął ptaszek i nic nie przybyło w zamian.
+    assert images_one == images_both - 1

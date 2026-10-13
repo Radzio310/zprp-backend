@@ -3245,15 +3245,10 @@ def _fill_players_block(
             _add_strike_line(mark_ws, row=row)
         elif kind and mark_ws is not None:
             _add_exam_mark(mark_ws, row=row, kind=kind)
-        elif exam_by_number and mark_ws is not None:
-            # Brak ważnych badań = wiersz skreślony.
-            #
-            # Warunek `exam_by_number` (a nie sam brak `kind`) jest tu istotny:
-            # pusta mapa znaczy, że zapis meczu w ogóle nie niesie informacji
-            # o badaniach - tak wygląda protokół sprzed wprowadzenia tej
-            # kolumny. Skreślenie wtedy CAŁEGO składu byłoby nie tyle surowe,
-            # co po prostu nieprawdziwe.
-            _add_strike_line(mark_ws, row=row)
+        # Brak ważnych badań NIE skreśla wiersza (decyzja Radka 13.10.2026):
+        # zawodnik może stać w protokole, tylko nie bierze udziału w akcjach
+        # meczu - tego pilnuje aplikacja. Na wydruku mówi o tym samo puste
+        # pole ptaszka. Skreślenie zostaje dla wykreślonych i pustych wierszy.
         ws[f"Q{row}"].value = "W" if entered else "-"
         ws[f"S{row}"].value = goals if goals > 0 else "-"
         warning_text = (
