@@ -23,6 +23,12 @@ OCENA = "index.php?a=statystyki&b=ocena2&Id=9"
 
 def test_przyjmuje_tylko_formularz_ocen_zprp():
     assert R.normalize_document_path("https://baza.zprp.pl/" + OCENA) == "/index.php?Id=9&a=statystyki&b=ocena2"
+    assert R.normalize_document_path(
+        "?a=zawody&b=ocena2&Filtr_sezon=195&IdRozgr=12010&IdRundy=31120&IdZawody=206764"
+    ) == (
+        "/index.php?Filtr_sezon=195&IdRozgr=12010&IdRundy=31120&IdZawody=206764"
+        "&a=zawody&b=ocena2"
+    )
     for bad in (
         "https://evil.example/index.php?b=ocena2",
         "./statystyki_sedzia_oc_PDF.php?Id=7&IdZawody=5",  # stare PDF-y pomijamy

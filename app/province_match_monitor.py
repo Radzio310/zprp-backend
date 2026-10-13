@@ -501,7 +501,13 @@ def build_change_events(
         elif old_status == "approved":
             add(("protocol_status",), "cofnięcie zatwierdzenia", "protocolStatus", "protocol_reopened", external=True)
 
-    if in_lifecycle_window and not _str(old.get("delegate_note")) and _str(new.get("delegate_note")):
+    old_delegate_note = _str(old.get("delegate_note"))
+    new_delegate_note = _str(new.get("delegate_note"))
+    delegate_evaluation_appeared = (
+        (not old_delegate_note and bool(new_delegate_note))
+        or ("ocena2" not in old_delegate_note.lower() and "ocena2" in new_delegate_note.lower())
+    )
+    if in_lifecycle_window and delegate_evaluation_appeared:
         add(("delegate_note",), "ocena delegata", "delegateEvaluation", "delegate_evaluation_available", external=True)
 
     # Pola informacyjne są widoczne w skrzynce, ale nigdy nie budzą telefonu.
@@ -1092,7 +1098,10 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
                         _str(old_state.get("NrSedzia_delegat_nazwisko"))
                         or _str(old_state.get("NrSedzia_delegat2_nazwisko"))
                     )
-                    and not _str(old_state.get("delegate_note"))
+                    # Stary PDF nie konczy obserwacji. Ocena publikowana jest
+                    # dzis jako formularz `ocena2`, ktory moze pojawic sie obok
+                    # PDF-u dopiero po zatwierdzeniu protokolu.
+                    and "ocena2" not in _str(old_state.get("delegate_note")).lower()
                 )
                 match_at = parse_match_at(state.get("data_fakt"))
                 needs_mentoring_history = judge_id in mentored and match_at and season_start <= match_at < season_end and (not old or not old_state.get("NrSedzia_pierwszy") or not old_state.get("NrSedzia_drugi"))

@@ -32,6 +32,13 @@ def normalize_document_path(url: str) -> str:
     if parsed.scheme not in {"", "http", "https"} or (host and host not in ZPRP_HOSTS):
         raise ValueError("Adres spoza bazy ZPRP")
     path = parsed.path or ""
+    # Aktualny ZPRP wystawia formularz jako href zaczynajacy sie od samego
+    # zapytania, np. `?a=zawody&b=ocena2&IdZawody=206764`. Przegladarka oraz
+    # endpoint podgladu rozwiazuja go wzgledem index.php, wiec ten sam adres
+    # musi zaakceptowac archiwum. Wczesniej pusty `path` zamienial sie w `/`
+    # i odpadał na warunku `.php`, mimo ze arkusz normalnie otwieral sie w UI.
+    if not path and parsed.query:
+        path = "/index.php"
     if path.startswith("./"):
         path = path[1:]
     if not path.startswith("/"):

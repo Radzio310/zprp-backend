@@ -1499,15 +1499,25 @@ def _parse_delegate_cell(td) -> str:
 def _parse_delegate_assessment_link(td) -> str:
     if not td:
         return ""
+    fallback = ""
     for anchor in td.find_all("a", href=True):
         href = _clean_spaces(anchor.get("href", ""))
         text = _clean_spaces(anchor.get_text(" ", strip=True))
         low = href.lower()
         if not href or low.startswith(("javascript:", "mailto:")):
             continue
-        if "statystyki_sedzia_oc_pdf.php" in low or "ocena" in text.lower() or "statystyki_sedzia" in low:
+        # Formularz ocena2 jest aktualnym arkuszem. ZPRP potrafi zostawic obok
+        # niego stary PDF; zwrocenie pierwszego linku sprawialo wtedy, ze monitor
+        # nadal widzial PDF i nigdy nie zauwazal pojawienia sie nowej oceny.
+        if "ocena2" in low:
             return href.removeprefix("./")
-    return ""
+        if (
+            "statystyki_sedzia_oc_pdf.php" in low
+            or "ocena" in text.lower()
+            or "statystyki_sedzia" in low
+        ) and not fallback:
+            fallback = href.removeprefix("./")
+    return fallback
 
 
 def _parse_club_contact_cell(td) -> Dict[str, Any]:

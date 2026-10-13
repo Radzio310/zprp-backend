@@ -216,6 +216,11 @@ def test_approved_matches_are_left_to_the_dedicated_status_pass():
     assert "province_match_judges" in source
 
 
+def test_private_pass_keeps_checking_approved_match_until_ocena2_exists():
+    source = ast.unparse(FUNCTIONS["_run_light"])
+    assert "'ocena2' not in _str(old_state.get('delegate_note')).lower()" in source
+
+
 # ── Okna czasu ──────────────────────────────────────────────────────────────
 
 
@@ -610,3 +615,18 @@ def test_delegate_evaluation_notifies_once_when_it_first_appears():
     events = build_change_events(before, evaluated, now=now)
     assert events[0]["event_type"] == "delegate_evaluation_available"
     assert build_change_events(evaluated, evaluated, now=now) == []
+
+
+def test_delegate_evaluation_notifies_when_ocena2_replaces_legacy_pdf():
+    before = dict(STORED, delegate_note="statystyki_sedzia_oc_PDF.php?Id=7")
+    evaluated = dict(
+        STORED,
+        delegate_note=(
+            "?a=zawody&b=ocena2&Filtr_sezon=195&IdRozgr=12010"
+            "&IdRundy=31120&IdZawody=206764"
+        ),
+    )
+    now = datetime(2026, 10, 12, tzinfo=timezone.utc)
+
+    events = build_change_events(before, evaluated, now=now)
+    assert events[0]["event_type"] == "delegate_evaluation_available"
