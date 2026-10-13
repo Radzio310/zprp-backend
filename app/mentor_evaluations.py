@@ -32,6 +32,7 @@ from app.db import (
     mentor_evaluation_versions as versions,
     mentor_evaluations as evaluations,
     mentor_evaluation_requests as requests,
+    mentor_match_videos as match_videos,
     mentoring_assignments as assignments,
     mentoring_pairs as mentoring_pairs,
     province_judges,
@@ -50,7 +51,14 @@ from app.mentor_evaluation_rules import (
     pair_of,
     sheet_points,
 )
-from app.mentor_evaluation_request_rules import REQUEST_COOLDOWN, cooldown_hours, normalized_video_url, request_target_error
+from app.mentor_evaluation_request_rules import (
+    REQUEST_COOLDOWN,
+    cooldown_hours,
+    normalized_video_url,
+    request_target_error,
+    video_provider,
+    youtube_thumbnail,
+)
 from app.settlement_province import display as province_display, spellings
 
 router = APIRouter(prefix="/mentor-evaluations", tags=["Mentor evaluations"])
@@ -73,6 +81,10 @@ class EvaluationRequest(BaseModel):
     mentor_ids: List[str] = Field(min_length=1, max_length=30)
     video_url: Optional[str] = Field(default=None, max_length=2048)
     channels: List[Literal["push", "email", "sms"]] = Field(min_length=1, max_length=3)
+
+
+class MatchVideoRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
 
 
 # ─── Dane z bazy ────────────────────────────────────────────────────────────
@@ -182,6 +194,19 @@ def _request_shape(row: Dict[str, Any]) -> Dict[str, Any]:
         "last_sent_at": last_sent,
         "cooldown_until": cooldown_until,
         "fulfilled_at": row.get("fulfilled_at"),
+    }
+
+
+def _video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    url = str(row.get("url") or "")
+    author_id = str(row.get("added_by") or "")
+    return {
+        "id": row["id"],
+        "url": url,
+        "provider": row.get("provider") or video_provider(url),
+        "thumbnail_url": youtube_thumbnail(url),
+        "added_by": names.get(author_id, {"judge_id": author_id, "full_name": f"Sędzia {author_id}"}),
+        "created_at": row.get("created_at"),
     }
 
 
@@ -332,7 +357,16 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
             if not access:
                 continue
         published.append(r)
-    ids = set(pair) | set(ctx["co_mentors"])
+    may_view_videos = me in pair or is_pair_mentor or actor.is_admin
+    video_rows = [
+        dict(row)
+        for row in await database.fetch_all(
+            select(match_videos)
+            .where(match_videos.c.match_id == str(match_id))
+            .order_by(match_videos.c.created_at.asc())
+        )
+    ] if may_view_videos else []
+    ids = set(pair) | set(ctx["co_mentors"]) | {str(row["added_by"]) for row in video_rows}
     for r in rows:
         ids |= {r["author_id"], *json_list(r["co_author_ids"])}
     names = await people(ids)
@@ -361,7 +395,77 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
         "requests": [_request_shape(row) for row in request_rows]
         if me in pair or me in assigned or actor.is_admin
         else [],
+        "videos": [_video_shape(row, names) for row in video_rows],
     }
+
+
+@router.post("/match/{match_id}/videos")
+async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor = Depends(market_actor)):
+    ctx = await context(match_id, actor)
+    me = str(actor.judge_id)
+    pair = tuple(ctx["pair"] or ())
+    if me not in pair:
+        raise HTTPException(403, "Tylko sędziowie tej pary mogą dodawać nagrania meczu.")
+    url = _valid_video_url(body.url)
+    existing = await database.fetch_one(
+        select(match_videos).where(
+            match_videos.c.match_id == str(match_id),
+            match_videos.c.normalized_url == url,
+        )
+    )
+    if existing:
+        names = await people([existing["added_by"]])
+        return {"ok": True, "created": False, "video": _video_shape(dict(existing), names)}
+    row = {
+        "id": uuid4().hex,
+        "match_id": str(match_id),
+        "pair_key": pair_key(pair),
+        "url": url,
+        "normalized_url": url,
+        "provider": video_provider(url),
+        "added_by": me,
+        "created_at": now(),
+    }
+    created = True
+    try:
+        await database.execute(match_videos.insert().values(**row))
+    except Exception:
+        # Wyścig obu sędziów dodających ten sam adres kończy się jednym kaflem.
+        existing = await database.fetch_one(
+            select(match_videos).where(
+                match_videos.c.match_id == str(match_id),
+                match_videos.c.normalized_url == url,
+            )
+        )
+        if not existing:
+            raise
+        row = dict(existing)
+        created = False
+    names = await people([row["added_by"]])
+    return {"ok": True, "created": created, "video": _video_shape(row, names)}
+
+
+@router.delete("/match/{match_id}/videos/{video_id}")
+async def remove_match_video(match_id: str, video_id: str, actor: Actor = Depends(market_actor)):
+    ctx = await context(match_id, actor)
+    me = str(actor.judge_id)
+    if me not in set(ctx["pair"] or ()):
+        raise HTTPException(403, "Tylko sędziowie tej pary mogą usuwać nagrania meczu.")
+    row = await database.fetch_one(
+        select(match_videos.c.id).where(
+            match_videos.c.id == video_id,
+            match_videos.c.match_id == str(match_id),
+        )
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono tego nagrania.")
+    await database.execute(
+        match_videos.delete().where(
+            match_videos.c.id == video_id,
+            match_videos.c.match_id == str(match_id),
+        )
+    )
+    return {"ok": True}
 
 
 def _request_message(match: Dict[str, Any], requester: str, video_url: str) -> tuple[str, str]:
@@ -417,6 +521,14 @@ async def request_evaluation(match_id: str, req: EvaluationRequest, actor: Actor
     if not channels or any(channel not in REQUEST_CHANNELS for channel in channels):
         raise HTTPException(422, "Wybierz przynajmniej jeden kanał wysyłki.")
     video_url = _valid_video_url(req.video_url)
+    if not video_url:
+        first_video = await database.fetch_one(
+            select(match_videos.c.url)
+            .where(match_videos.c.match_id == str(match_id))
+            .order_by(match_videos.c.created_at.asc())
+            .limit(1)
+        )
+        video_url = str(first_video["url"] or "") if first_video else ""
     published_rows = await database.fetch_all(
         select(evaluations.c.author_id, evaluations.c.co_author_ids)
         .where(evaluations.c.match_id == str(match_id))

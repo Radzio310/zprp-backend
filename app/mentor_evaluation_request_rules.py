@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import re
 from typing import Iterable, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 
 REQUEST_COOLDOWN = timedelta(hours=72)
@@ -17,7 +18,36 @@ def normalized_video_url(value: Optional[str]) -> str:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Link do nagrania musi zaczynać się od http:// lub https://.")
-    return value
+    # Host i schemat nie są semantycznie czułe na wielkość liter. Usuwamy też
+    # samotny końcowy slash, żeby ten sam film nie powstawał dwa razy.
+    path = parsed.path.rstrip("/") or ""
+    return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.params, parsed.query, parsed.fragment))
+
+
+def video_provider(value: str) -> str:
+    host = (urlparse(value).hostname or "").lower()
+    if host == "youtu.be" or host.endswith(".youtube.com"):
+        return "youtube"
+    if host == "vimeo.com" or host.endswith(".vimeo.com"):
+        return "vimeo"
+    if host.endswith("facebook.com") or host == "fb.watch":
+        return "facebook"
+    if host.endswith("streamable.com"):
+        return "streamable"
+    if host.endswith("drive.google.com"):
+        return "google_drive"
+    return "video"
+
+
+def youtube_thumbnail(value: str) -> str:
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    video_id = parsed.path.strip("/") if host == "youtu.be" else (parse_qs(parsed.query).get("v") or [""])[0]
+    if not video_id and "/shorts/" in parsed.path:
+        video_id = parsed.path.split("/shorts/", 1)[1].split("/", 1)[0]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id or ""):
+        return ""
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
 def request_target_error(

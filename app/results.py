@@ -2886,6 +2886,29 @@ def _add_strike_line(ws_raw, *, row: int) -> bool:
         return False
 
 
+def _struck_numbers_from_cards(cards: List[Any]) -> set:
+    """
+    Numery zawodników WYKREŚLONYCH przez sędziego (`struck: true` na karcie).
+
+    Wykreślony nie bierze udziału w meczu, więc jego wiersz jest skreślony
+    dokładnie tak jak przy braku ważnych badań - choćby badania miał ważne.
+    Badania zostają w zapisie nietknięte (sędzia może wykreślenie cofnąć),
+    tylko wydruk ich nie pokazuje. Starsze wersje aplikacji pola nie wysyłają -
+    zbiór jest wtedy pusty i nic się nie zmienia.
+    """
+    out = set()
+    for c in cards or []:
+        if not isinstance(c, dict) or not c.get("struck"):
+            continue
+        try:
+            num = int(c.get("number"))
+        except Exception:
+            continue
+        if num > 0:
+            out.add(num)
+    return out
+
+
 def _player_exam_map_from_cards(
     cards: List[Any], requirement: str = "any"
 ) -> Dict[int, str]:
@@ -3139,6 +3162,8 @@ def _fill_players_block(
     mark_ws=None,
     # Ostatnia minuta meczu - sufit dla rubryki upomnienia. 0 = bez przycinania.
     max_minute: int = 0,
+    # Wykreśleni przez sędziego - skreślenie niezależne od badań.
+    struck_numbers: Optional[set] = None,
 ) -> None:
     """
     Kolumny wg Twojej specyfikacji:
@@ -3214,7 +3239,11 @@ def _fill_players_block(
         ws[f"C{row}"].value = (fullnames_by_number.get(num) or "")
 
         kind = (exam_by_number or {}).get(num)
-        if kind and mark_ws is not None:
+        if num in (struck_numbers or ()) and mark_ws is not None:
+            # Wykreślony: skreślenie jak przy braku badań, bez ptaszka -
+            # nie zagrał, więc badania nic na tym wierszu nie znaczą.
+            _add_strike_line(mark_ws, row=row)
+        elif kind and mark_ws is not None:
             _add_exam_mark(mark_ws, row=row, kind=kind)
         elif exam_by_number and mark_ws is not None:
             # Brak ważnych badań = wiersz skreślony.
@@ -5755,6 +5784,8 @@ async def generate_protocol_pdf(
     guest_exams = _player_exam_map_from_cards(
         core.get("guestPlayerCards") or [], exam_requirement
     )
+    host_struck = _struck_numbers_from_cards(core.get("hostPlayerCards") or [])
+    guest_struck = _struck_numbers_from_cards(core.get("guestPlayerCards") or [])
 
     host_comp_names = _companion_fullname_map(core.get("hostCompanions") or [])
     guest_comp_names = _companion_fullname_map(core.get("guestCompanions") or [])
@@ -5988,6 +6019,7 @@ async def generate_protocol_pdf(
             exam_by_number=host_exams,
             mark_ws=ws_raw,
             max_minute=core["halfTimeMin"] * 2,
+            struck_numbers=host_struck,
         )
         _fill_players_block(
             ws,
@@ -5999,6 +6031,7 @@ async def generate_protocol_pdf(
             exam_by_number=guest_exams,
             mark_ws=ws_raw,
             max_minute=core["halfTimeMin"] * 2,
+            struck_numbers=guest_struck,
         )
 
         # Osoby towarzyszące gospodarzy

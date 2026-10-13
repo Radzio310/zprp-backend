@@ -72,4 +72,17 @@ def define_tables(metadata):
         Column("fulfilled_at", DateTime(timezone=True), nullable=True),
         UniqueConstraint("match_id", "mentor_id", name="uq_mentor_evaluation_request_match_mentor"),
     )
-    return evaluations, versions, requests
+    videos = Table(
+        "mentor_match_videos",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("match_id", String, nullable=False, index=True),
+        Column("pair_key", String, nullable=False, index=True),
+        Column("url", Text, nullable=False),
+        Column("normalized_url", Text, nullable=False),
+        Column("provider", String, nullable=False),
+        Column("added_by", String, nullable=False, index=True),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
+    )
+    return evaluations, versions, requests, videos

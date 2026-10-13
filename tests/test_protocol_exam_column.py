@@ -382,3 +382,46 @@ def test_every_exam_mark_has_the_same_width():
     assert len(set(spans.values())) == 1, (
         "znaczki badań rozjechały się w poziomie: %r" % spans
     )
+
+
+# ─────────────────────── wykreślenie przez sędziego ───────────────────────
+
+def test_struck_numbers_from_cards():
+    from app.results import _struck_numbers_from_cards
+
+    cards = [
+        {"number": 7, "exam": "zprp", "struck": True},
+        {"number": 9, "exam": "zprp"},
+        {"number": 0, "struck": True},  # czeka na numer - nie ma wiersza
+        "śmieć",
+    ]
+    assert _struck_numbers_from_cards(cards) == {7}
+    assert _struck_numbers_from_cards([]) == set()
+
+
+def test_struck_player_is_crossed_out_despite_valid_exam():
+    """Wykreślony z ważnymi badaniami: zamiast ptaszka - skreślenie wiersza."""
+
+    def fill(struck):
+        wb = load_workbook(TEMPLATE)
+        raw = wb.active
+        base = len(raw._images)
+        _fill_players_block(
+            ShiftedWS(raw),
+            players=[7, 9],
+            stats_by_number={},
+            fullnames_by_number={},
+            start_row=11,
+            end_row=26,
+            exam_by_number={7: "zprp", 9: "zprp"},
+            mark_ws=raw,
+            struck_numbers=struck,
+        )
+        return len(_exam_marks(raw, base)), len(raw._images) - base
+
+    marks_plain, images_plain = fill(set())
+    marks_struck, images_struck = fill({7})
+    assert marks_plain == 2
+    assert marks_struck == 1
+    # Ptaszek zastąpiony kreską - liczba rysunków na arkuszu ta sama.
+    assert images_struck == images_plain
