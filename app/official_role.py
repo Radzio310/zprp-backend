@@ -188,6 +188,34 @@ def _roles_for(match: Dict[str, Any], judge_id: str) -> List[str]:
     return out
 
 
+def _match_from_details_payload(payload: Any) -> Optional[Dict[str, Any]]:
+    """Wyjmij pierwszy mecz z rzeczywistych wariantów publicznego API ZPRP.
+
+    Endpoint `pokaz_mecze_szczegoly.php` na produkcji zwraca obecnie
+    `[[{...}]]`. Starsze testy i część odpowiedzi pośrednich używały
+    `{"0": [{...}]}`. Autoryzacja nie może zależeć od tego opakowania —
+    dowodem pozostają dopiero numery osób wewnątrz rekordu meczu.
+    """
+    current = payload
+    for _ in range(4):
+        if isinstance(current, dict):
+            # Rekord meczu rozpoznajemy po jego identyfikatorze/obsadzie.
+            if "Id" in current or "NrSedzia_pierwszy" in current:
+                return current
+            for key in ("0", "value", "data", "matches"):
+                if key in current:
+                    current = current[key]
+                    break
+            else:
+                return None
+            continue
+        if isinstance(current, list) and current:
+            current = current[0]
+            continue
+        return None
+    return current if isinstance(current, dict) else None
+
+
 def _authorized_crew(match: Dict[str, Any]) -> List[Dict[str, str]]:
     """Numery sędziów, którzy mają w ZPRP prawo pisać do TEGO meczu.
 
@@ -295,11 +323,7 @@ async def match_official_role(
         details.raise_for_status()
         payload = details.json()
 
-    match: Optional[Dict[str, Any]] = None
-    if isinstance(payload, dict):
-        first = payload.get("0")
-        if isinstance(first, list) and first and isinstance(first[0], dict):
-            match = first[0]
+    match = _match_from_details_payload(payload)
     if match is None:
         raise HTTPException(
             502,

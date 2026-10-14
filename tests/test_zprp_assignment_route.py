@@ -159,15 +159,13 @@ class PublicMatchResponse:
         return None
 
     def json(self):
-        return {
-            "0": [
-                {
-                    "NrSedzia_pierwszy": "5124",
-                    "NrSedzia_drugi": "6000",
-                    "NrSedzia_delegat": "7000",
-                }
-            ]
-        }
+        # Dokładny kształt publicznego API użyty m.in. przez IMB/49.
+        return [[{
+            "Id": "207406",
+            "NrSedzia_pierwszy": "5124",
+            "NrSedzia_drugi": "6000",
+            "NrSedzia_delegat": "7000",
+        }]]
 
 
 class PublicMatchClient:

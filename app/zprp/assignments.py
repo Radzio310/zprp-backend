@@ -1603,7 +1603,12 @@ async def _table_official_context(
     season_label: str = "",
 ) -> Dict[str, Any]:
     """Authorize a judge-facing table-official edit and locate its ZPRP form."""
-    from app.official_role import AUTHORIZED_ROLES, DETAILS_URL, _roles_for
+    from app.official_role import (
+        AUTHORIZED_ROLES,
+        DETAILS_URL,
+        _match_from_details_payload,
+        _roles_for,
+    )
 
     wanted = str(id_zawody or "").strip()
     if not wanted.isdigit():
@@ -1620,11 +1625,7 @@ async def _table_official_context(
         logger.warning("table-officials: public match lookup failed: %s", exc)
         raise HTTPException(502, "Nie udało się sprawdzić obsady meczu w ZPRP")
 
-    match: Optional[Dict[str, Any]] = None
-    if isinstance(public_payload, dict):
-        first = public_payload.get("0")
-        if isinstance(first, list) and first and isinstance(first[0], dict):
-            match = first[0]
+    match = _match_from_details_payload(public_payload)
     if match is None:
         raise HTTPException(502, "Baza rozgrywek nie oddała obsady tego meczu")
 

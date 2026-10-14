@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from app.official_role import (
     AUTHORIZED_ROLES,
+    _match_from_details_payload,
     _name_for,
     _roles_for,
     _authorized_crew,
@@ -78,6 +79,17 @@ def test_second_delegate_counts_as_delegate():
     roles = _roles_for(match, "3002")
     assert roles == ["delegate"]
     assert _name_for(match, roles) == "DĄBROWSKI Jan"
+
+
+def test_match_details_payload_accepts_current_nested_api_shape():
+    """Produkcja dla IMB/49 zwraca `[[{...}]]`, nie słownik z kluczem `0`."""
+    assert _match_from_details_payload([[MATCH]]) is MATCH
+
+
+def test_match_details_payload_keeps_legacy_wrappers():
+    assert _match_from_details_payload({"0": [MATCH]}) is MATCH
+    assert _match_from_details_payload({"value": [MATCH]}) is MATCH
+    assert _match_from_details_payload([]) is None
 
 
 def test_same_person_in_two_roles_keeps_both():
