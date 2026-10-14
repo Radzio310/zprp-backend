@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -62,6 +62,12 @@ def _page(limit: int, offset: int, rows: list[Any]) -> dict[str, Any]:
     return {"items": [_dict(row) for row in rows], "limit": limit, "offset": offset, "count": len(rows)}
 
 
+def _public_match(row: Any) -> dict[str, Any]:
+    """Wspólny, stabilny kształt meczu bez surowego payloadu źródłowego."""
+    data = _dict(row)
+    return {key: value for key, value in data.items() if key not in {"source_hash", "source_json"}}
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     last = await database.fetch_one(
@@ -70,6 +76,118 @@ async def health() -> dict[str, Any]:
         .limit(1)
     )
     return {"ok": True, "last_sync": _dict(last) or None}
+
+
+@router.get("/portal/overview")
+async def portal_overview() -> dict[str, Any]:
+    """Jedno lekkie zapytanie startowe dla publicznego Centrum dnia.
+
+    Widok jest celowo złożony po stronie serwera: przeglądarka nie wykonuje
+    kilkunastu niezależnych zapytań, a baza może zoptymalizować agregaty.
+    """
+    now = datetime.now()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    season = await database.fetch_one(
+        select(
+            zprp_public_seasons.c.season_id,
+            zprp_public_seasons.c.start_year,
+            zprp_public_seasons.c.name,
+            zprp_public_seasons.c.active,
+            zprp_public_seasons.c.competition_count,
+            zprp_public_seasons.c.updated_at,
+        ).order_by(zprp_public_seasons.c.active.desc(), zprp_public_seasons.c.start_year.desc()).limit(1)
+    )
+    season_id = season["season_id"] if season else None
+    season_filter = zprp_public_matches.c.season_id == season_id if season_id else True
+
+    today, recent, upcoming = await asyncio.gather(
+        database.fetch_all(
+            select(zprp_public_matches)
+            .where(and_(season_filter, zprp_public_matches.c.scheduled_at >= day_start, zprp_public_matches.c.scheduled_at < day_end))
+            .order_by(zprp_public_matches.c.scheduled_at.asc())
+            .limit(40)
+        ),
+        database.fetch_all(
+            select(zprp_public_matches)
+            .where(and_(season_filter, zprp_public_matches.c.scheduled_at < now, zprp_public_matches.c.score_home.is_not(None)))
+            .order_by(zprp_public_matches.c.scheduled_at.desc())
+            .limit(8)
+        ),
+        database.fetch_all(
+            select(zprp_public_matches)
+            .where(and_(season_filter, zprp_public_matches.c.scheduled_at >= now))
+            .order_by(zprp_public_matches.c.scheduled_at.asc())
+            .limit(8)
+        ),
+    )
+
+    leader_query = (
+        select(
+            zprp_public_players.c.player_id,
+            zprp_public_players.c.first_name,
+            zprp_public_players.c.last_name,
+            zprp_public_players.c.birth_year,
+            zprp_public_players.c.photo_url,
+            func.sum(zprp_public_scorers.c.goals).label("goals"),
+            func.sum(zprp_public_scorers.c.matches).label("matches"),
+        )
+        .join(zprp_public_scorers, zprp_public_scorers.c.player_id == zprp_public_players.c.player_id)
+        .join(zprp_public_competitions, zprp_public_competitions.c.competition_id == zprp_public_scorers.c.competition_id)
+    )
+    if season_id:
+        leader_query = leader_query.where(zprp_public_competitions.c.season_id == season_id)
+    leaders = await database.fetch_all(
+        leader_query.group_by(
+            zprp_public_players.c.player_id,
+            zprp_public_players.c.first_name,
+            zprp_public_players.c.last_name,
+            zprp_public_players.c.birth_year,
+            zprp_public_players.c.photo_url,
+        ).order_by(func.sum(zprp_public_scorers.c.goals).desc()).limit(8)
+    )
+
+    counter_tables = (
+        zprp_public_competitions,
+        zprp_public_clubs,
+        zprp_public_teams,
+        zprp_public_players,
+        zprp_public_matches,
+    )
+    counter_rows = await asyncio.gather(
+        *(database.fetch_val(select(func.count()).select_from(table)) for table in counter_tables)
+    )
+    last_sync = await database.fetch_one(
+        select(zprp_public_sync_runs.c.status, zprp_public_sync_runs.c.finished_at)
+        .where(zprp_public_sync_runs.c.status == "completed")
+        .order_by(zprp_public_sync_runs.c.finished_at.desc())
+        .limit(1)
+    )
+    last_updated = last_sync["finished_at"] if last_sync else None
+    freshness = "unknown"
+    if last_updated:
+        comparable_now = datetime.now(last_updated.tzinfo) if last_updated.tzinfo else now
+        freshness = "fresh" if comparable_now - last_updated <= timedelta(minutes=20) else "delayed"
+
+    leader_items = []
+    for row in leaders:
+        item = _dict(row)
+        matches_count = int(item.get("matches") or 0)
+        goals_count = int(item.get("goals") or 0)
+        item["average"] = round(goals_count / matches_count, 2) if matches_count else 0
+        leader_items.append(item)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "freshness": {"status": freshness, "updated_at": last_updated},
+        "season": _dict(season) or None,
+        "counters": dict(zip(("competitions", "clubs", "teams", "players", "matches"), counter_rows)),
+        "today": [_public_match(row) for row in today],
+        "recent": [_public_match(row) for row in recent],
+        "upcoming": [_public_match(row) for row in upcoming],
+        "leaders": leader_items,
+    }
 
 
 @router.get("/seasons")
@@ -381,7 +499,7 @@ async def list_matches(
     if conditions:
         query = query.where(and_(*conditions))
     result = await database.fetch_all(query.order_by(zprp_public_matches.c.scheduled_at.desc()).limit(limit).offset(offset))
-    items = [{key: value for key, value in _dict(row).items() if key not in {"source_hash", "source_json"}} for row in result]
+    items = [_public_match(row) for row in result]
     return {"items": items, "limit": limit, "offset": offset, "count": len(items)}
 
 

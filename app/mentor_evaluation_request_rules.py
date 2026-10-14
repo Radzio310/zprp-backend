@@ -26,7 +26,7 @@ def normalized_video_url(value: Optional[str]) -> str:
 
 def video_provider(value: str) -> str:
     host = (urlparse(value).hostname or "").lower()
-    if host == "youtu.be" or host.endswith(".youtube.com"):
+    if host in {"youtu.be", "youtube.com"} or host.endswith(".youtube.com"):
         return "youtube"
     if host == "vimeo.com" or host.endswith(".vimeo.com"):
         return "vimeo"
@@ -43,8 +43,10 @@ def youtube_thumbnail(value: str) -> str:
     parsed = urlparse(value)
     host = (parsed.hostname or "").lower()
     video_id = parsed.path.strip("/") if host == "youtu.be" else (parse_qs(parsed.query).get("v") or [""])[0]
-    if not video_id and "/shorts/" in parsed.path:
-        video_id = parsed.path.split("/shorts/", 1)[1].split("/", 1)[0]
+    if not video_id:
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 2 and parts[0].lower() in {"shorts", "live", "embed"}:
+            video_id = parts[1]
     if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id or ""):
         return ""
     return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"

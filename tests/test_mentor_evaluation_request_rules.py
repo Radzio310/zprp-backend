@@ -55,9 +55,13 @@ def test_video_url_accepts_only_http_or_https():
 def test_video_link_is_normalized_and_recognizes_provider():
     assert normalized_video_url(" HTTPS://YouTube.com/watch?v=AbCdEf123 ") == "https://youtube.com/watch?v=AbCdEf123"
     assert video_provider("https://youtu.be/AbCdEf123") == "youtube"
+    assert video_provider("https://youtube.com/live/Sitswd4YP4k?is=wFgQlbrD2P6gvx4G") == "youtube"
     assert video_provider("https://vimeo.com/123456") == "vimeo"
     assert video_provider("https://example.org/replay") == "video"
     assert youtube_thumbnail("https://youtube.com/watch?v=AbCdEf123").endswith("/AbCdEf123/hqdefault.jpg")
+    assert youtube_thumbnail("https://youtube.com/live/Sitswd4YP4k?is=wFgQlbrD2P6gvx4G").endswith(
+        "/Sitswd4YP4k/hqdefault.jpg"
+    )
 
 
 def test_match_video_table_keeps_many_unique_links_per_match():
