@@ -69,6 +69,34 @@ def _decrypt_field(private_key, enc_b64: str) -> str:
     return plain.decode("utf-8")
 
 
+async def _login_zprp_with_identity(
+    client: AsyncClient, username: str, password: str
+) -> Tuple[Dict[str, str], str]:
+    """Log in once and return the cookie jar plus the real judge number."""
+    body = urlencode(
+        {"login": username, "haslo": password, "from": "/index.php?"},
+        encoding="iso-8859-2",
+        errors="replace",
+    ).encode("ascii")
+    resp_login = await client.post(
+        "/login.php",
+        content=body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-2"
+        },
+    )
+    if "/index.php" not in resp_login.url.path:
+        raise HTTPException(401, "Logowanie ZPRP nie powiodło się")
+    html = resp_login.content.decode("iso-8859-2", errors="replace")
+    identity = re.search(r"NrSedzia=(\d+)", html)
+    if not identity:
+        raise HTTPException(
+            403,
+            "To konto nie ma numeru sędziego i nie może zmieniać obsady meczu.",
+        )
+    return dict(client.cookies), identity.group(1)
+
+
 async def _login_zprp(client: AsyncClient, username: str, password: str) -> Dict[str, str]:
     resp_login, _ = await fetch_with_correct_encoding(
         client,
@@ -668,6 +696,23 @@ class ObsadaScheduleRequest(BaseModel):
     id_rozgr: Optional[str] = None
     IdRundy: Optional[str] = "ALL"
     sort: Optional[str] = None
+
+
+class TableOfficialsRequest(BaseModel):
+    """Restricted picker opened by a referee/delegate of the match."""
+
+    username: str
+    password: str
+    IdZawody: str
+    match_code: Optional[str] = None
+    season_label: Optional[str] = None
+
+
+class TableOfficialSaveRequest(TableOfficialsRequest):
+    role: str
+    value: str
+    name: str
+    expected_name: Optional[str] = None
 
 
 # =====================
@@ -1545,6 +1590,220 @@ async def walk_judge_route(
         "host": row["host"],
         "guest": row["guest"],
         "steps": steps,
+    }
+
+
+async def _table_official_context(
+    client: AsyncClient,
+    cookies: Dict[str, str],
+    *,
+    judge_id: str,
+    id_zawody: str,
+    match_code: str = "",
+    season_label: str = "",
+) -> Dict[str, Any]:
+    """Authorize a judge-facing table-official edit and locate its ZPRP form."""
+    from app.official_role import AUTHORIZED_ROLES, DETAILS_URL, _roles_for
+
+    wanted = str(id_zawody or "").strip()
+    if not wanted.isdigit():
+        raise HTTPException(400, "IdZawody musi być numerem meczu")
+
+    try:
+        async with AsyncClient(timeout=30.0) as public:
+            response = await public.get(DETAILS_URL, params={"Zawody": wanted})
+            response.raise_for_status()
+            public_payload = response.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("table-officials: public match lookup failed: %s", exc)
+        raise HTTPException(502, "Nie udało się sprawdzić obsady meczu w ZPRP")
+
+    match: Optional[Dict[str, Any]] = None
+    if isinstance(public_payload, dict):
+        first = public_payload.get("0")
+        if isinstance(first, list) and first and isinstance(first[0], dict):
+            match = first[0]
+    if match is None:
+        raise HTTPException(502, "Baza rozgrywek nie oddała obsady tego meczu")
+
+    roles = _roles_for(match, judge_id)
+    if not any(role in AUTHORIZED_ROLES for role in roles):
+        raise HTTPException(
+            403,
+            "Stolikowych może zmienić tylko sędzia boiskowy lub delegat tego meczu.",
+        )
+
+    route = await walk_judge_route(
+        client,
+        cookies,
+        judge_id=judge_id,
+        id_zawody=wanted,
+        match_code=match_code,
+        season_label=season_label,
+        log_prefix="table-officials/route",
+    )
+    if not route.get("ok"):
+        raise HTTPException(
+            403,
+            route.get("message")
+            or "Na koncie sędziego nie ma dostępu do formularza obsady tego meczu.",
+        )
+    return route
+
+
+def _table_slot_payload(parsed: Dict[str, Any], role: str) -> Dict[str, Any]:
+    slot = (parsed.get("slots") or {}).get(role) or {}
+    options: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for raw in slot.get("options") or []:
+        value = str(raw.get("value") or "").strip()
+        name = str(raw.get("name") or "").strip()
+        key = (value, _norm_name(name))
+        if not value or not name or key in seen:
+            continue
+        seen.add(key)
+        options.append(
+            {
+                "value": value,
+                "name": name,
+                "badges": raw.get("badges") or [],
+                "selected": bool(raw.get("selected")),
+            }
+        )
+    options.sort(key=lambda item: _norm_name(item["name"]))
+    return {
+        "selected_value": slot.get("selected_value") or "",
+        "selected_name": _selected_name(slot),
+        "options": options,
+    }
+
+
+@router.post("/zprp/obsada/table-officials")
+async def table_officials(
+    payload: TableOfficialsRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """Return only secretary/timekeeper choices to an assigned referee/delegate."""
+    private_key, _ = keys
+    try:
+        username = _decrypt_field(private_key, payload.username)
+        password = _decrypt_field(private_key, payload.password)
+    except Exception as exc:
+        raise HTTPException(400, f"Decryption error: {exc}")
+
+    async with AsyncClient(
+        base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
+    ) as client:
+        cookies, judge_id = await _login_zprp_with_identity(
+            client, username, password
+        )
+        route = await _table_official_context(
+            client,
+            cookies,
+            judge_id=judge_id,
+            id_zawody=payload.IdZawody,
+            match_code=payload.match_code or "",
+            season_label=payload.season_label or "",
+        )
+        _, html = await fetch_with_correct_encoding(
+            client,
+            "/zawody_UstawSedziow.php",
+            method="POST",
+            data={
+                "IdZawody": payload.IdZawody,
+                "akcja": "UstawSedziow",
+                "user": route.get("user") or "",
+            },
+            cookies=cookies,
+            headers={"Referer": route.get("detail_path") or ""},
+        )
+        parsed = _parse_referee_form(html)
+
+    return {
+        "ok": True,
+        "fetched_at": _now_iso(),
+        "secretary": _table_slot_payload(parsed, "sekretarz"),
+        "timekeeper": _table_slot_payload(parsed, "czas"),
+    }
+
+
+@router.post("/zprp/obsada/table-officials/save")
+async def save_table_official(
+    payload: TableOfficialSaveRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """Change exactly one table role and preserve the other five ZPRP slots."""
+    role_to_select = {
+        "secretary": "NrSedzia_sekretarz",
+        "timekeeper": "NrSedzia_czas",
+    }
+    role = str(payload.role or "").strip().lower()
+    select_name = role_to_select.get(role)
+    if not select_name:
+        raise HTTPException(400, "role musi mieć wartość secretary albo timekeeper")
+    if not str(payload.name or "").strip():
+        raise HTTPException(400, "Wybierz sędziego z listy ZPRP")
+
+    private_key, _ = keys
+    try:
+        username = _decrypt_field(private_key, payload.username)
+        password = _decrypt_field(private_key, payload.password)
+    except Exception as exc:
+        raise HTTPException(400, f"Decryption error: {exc}")
+
+    async with AsyncClient(
+        base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
+    ) as client:
+        cookies, judge_id = await _login_zprp_with_identity(
+            client, username, password
+        )
+        route = await _table_official_context(
+            client,
+            cookies,
+            judge_id=judge_id,
+            id_zawody=payload.IdZawody,
+            match_code=payload.match_code or "",
+            season_label=payload.season_label or "",
+        )
+        result = await apply_referee_assignment(
+            client,
+            cookies,
+            payload.IdZawody,
+            {select_name: (payload.value, payload.name)},
+            user=route.get("user") or "",
+            referer=route.get("detail_path") or "",
+            require_name_match=True,
+            expect_slots=(
+                {
+                    "sekretarz" if role == "secretary" else "czas": (
+                        payload.expected_name or ""
+                    )
+                }
+                if payload.expected_name is not None
+                else None
+            ),
+            log_prefix="table-officials/save",
+        )
+
+    if not result.get("success"):
+        code = result.get("code") or "SAVE_FAILED"
+        status = 409 if code in {"ZPRP_CHANGED", "NAME_AMBIGUOUS"} else 400
+        raise HTTPException(
+            status,
+            detail={
+                "code": code,
+                "message": result.get("error") or "Zapis nie powiódł się",
+            },
+        )
+    return {
+        "ok": True,
+        "name": str(payload.name).strip(),
+        "role": role,
+        "fetched_at": result.get("fetched_at") or _now_iso(),
     }
 
 

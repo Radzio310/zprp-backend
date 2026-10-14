@@ -76,7 +76,15 @@ ZPRP_PUBLIC_CLUB_BATCH=24
 ZPRP_PUBLIC_ROSTER_BATCH=40
 ZPRP_PUBLIC_DETAILS_BATCH=60
 ZPRP_PUBLIC_RAW_RETENTION_DAYS=90
+POD_REKA_DISCORD_WEBHOOK_URL=
+POD_REKA_DISCORD_DEDUP_SECONDS=1800
 ```
+
+Webhook Discord jest sekretem produkcyjnym i nie może trafić do repozytorium,
+logów ani odpowiedzi API. Alarm zawiera tylko rodzaj procesu, identyfikator
+przebiegu i liczbę błędów — bez treści błędu, danych źródłowych i URL webhooka.
+Powtarzające się alarmy są wyciszane, a pierwszy udany przebieg po awarii wysyła
+krótką informację o odzyskaniu sprawności.
 
 Przy pierwszym wdrożeniu tabele zostaną utworzone przez istniejące
 `metadata.create_all`. Import startuje po opóźnieniu i działa w tle, więc nie
@@ -89,6 +97,7 @@ zmniejszyć trzy wielkości partii, a dopiero później równoległość.
 Najważniejsze endpointy:
 
 - `GET /api/v1/handball/health`
+- `GET /api/v1/handball/portal/overview` — lekki agregat Centrum dnia
 - `GET /api/v1/handball/seasons?include_historical=false`
 - `GET /api/v1/handball/associations`
 - `GET /api/v1/handball/clubs` i `GET /clubs/{club_id}`
@@ -150,12 +159,55 @@ publiczny i równolegle migrować użyteczne widoki:
 5. Na desktopie pokazać równolegle tabelę i ostatnie/następne mecze; na mobile
    przełączać je segmentami. Każdy widok pokazuje `updated_at` i stan synchronizacji.
 
-## Następna faza: panel zdolnych zawodników
+## BAZA pod RĘKĄ: raporty, Strefa trenera i Talenty
 
-Obecny model przygotowuje identyfikatory zawodnika, drużyny, klubu, sezonu i
-kategorii, ale nie miesza publicznych danych ze zgłoszeniami. W kolejnej fazie
-należy dodać osobne tabele aplikacyjne: profile trenerskie, powiązania trenera z
-drużyną, nabory/kryteria, zgłoszenia, decyzje i audyt. Tożsamość trenera powinna
-być potwierdzana serwer-serwer przez `baza.zprp.pl`, a dostęp ograniczony do
-przypisanej drużyny i kategorii wiekowej. Pełna data urodzenia i status badań
-nie powinny być automatycznie kopiowane z publicznej hurtowni także w tej fazie.
+Funkcje produktowe są odseparowane od hurtowni w tabelach `pod_reka_*`. Import
+publiczny nie może nadpisać zgłoszenia, sesji ani raportu.
+
+Publiczne endpointy produktu:
+
+- `POST /api/v1/pod-reka/reports` — migawka albo raport live;
+- `GET /api/v1/pod-reka/reports/{report_id}` — trwały link publiczny;
+- `DELETE /api/v1/pod-reka/reports/{report_id}` — usunięcie tokenem właściciela;
+- `GET /api/v1/pod-reka/talents` — wyłącznie zatwierdzone i opublikowane pola,
+  z filtrami drużyny, kategorii, pozycji, ręki dominującej i wzrostu.
+- `POST /api/v1/pod-reka/push-subscriptions` — zapis zgody przeglądarki wraz z
+  tematami; odpowiedź zwraca jednorazowy token do późniejszego usunięcia;
+- `DELETE /api/v1/pod-reka/push-subscriptions/{id}` — odwołanie subskrypcji
+  tokenem przekazanym w `X-Subscription-Token`.
+
+Katalog sportowy udostępnia również paginowane `GET /api/v1/handball/teams`
+oraz `GET /api/v1/handball/club-licenses`. Szczegóły klubu zwracają jego
+drużyny i licencje, ale celowo nie zawierają adresu, e-maila ani telefonów.
+
+Strefa trenera:
+
+- `POST /api/v1/pod-reka/auth/login` loguje serwer-serwer do `baza.zprp.pl`,
+  odczytuje konto i listę drużyn, po czym natychmiast odrzuca hasło;
+- `GET /api/v1/pod-reka/auth/me` oraz `POST /auth/logout` zarządzają nieprzenośną
+  sesją 12-godzinną;
+- `GET /trainer/roster`, `/trainer/templates` i `/trainer/talents` zwracają tylko
+  zakres potwierdzonego klubu;
+- `POST /trainer/talents`, `PATCH /trainer/talents/{id}` oraz
+  `POST /trainer/talents/{id}/submit` realizują szkic i wysłanie.
+
+Zakres konta jest wyliczany wyłącznie po stronie serwera i ponownie sprawdzany
+co godzinę. Identyfikator drużyny przesłany przez frontend zawsze podlega
+porównaniu z sesją oraz aktywnym składem. Cookie sesji jest `HttpOnly`, `Secure`
+w produkcji i chronione tokenem CSRF. Zaszyfrowane ciasteczka źródłowe służą
+wyłącznie do godzinnego odświeżenia zakresu; hasło nie jest zapisywane. Próby
+logowania są ograniczone czasowo.
+
+Administracja:
+
+- `GET /admin/pod-reka/overview` — raporty, aktywne sesje, szablony i statusy;
+- `GET /admin/pod-reka/talents` — kolejka weryfikacji;
+- `POST /admin/pod-reka/templates` — wersjonowane formularze;
+- `PATCH /admin/pod-reka/talents/{id}` — do poprawy, weryfikacja, akceptacja,
+  publikacja i archiwizacja wraz z listą publicznych pól.
+
+Centrum dowodzenia pokazuje również, czy kanał alarmowy Discord jest
+skonfigurowany, ale nigdy nie zwraca jego adresu.
+
+Pełna data urodzenia, PESEL, badania, kontakt, dane dokumentowe i prywatna ocena
+nie są zwracane publicznie. Każda zmiana workflow trafia do audytu.

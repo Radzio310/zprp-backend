@@ -140,6 +140,7 @@ from app.zprp_public.api import (
     router as handball_public_router,
 )
 from app.zprp_public.sync import run_zprp_public_scheduler
+from app.pod_reka import admin_router as pod_reka_admin_router, ensure_pod_reka_defaults, router as pod_reka_router
 
 from app.zprp.schedule import router as schedule_router
 from app.zprp.competitions import router as competitions_router
@@ -415,6 +416,8 @@ app.include_router(zprp_stats_router, tags=["zprp"])
 app.include_router(assignments_router, tags=["zprp"])
 app.include_router(handball_public_router)
 app.include_router(handball_sync_admin_router)
+app.include_router(pod_reka_router)
+app.include_router(pod_reka_admin_router)
 app.include_router(round_windows_router)
 app.include_router(assignment_drafts_router)
 
@@ -1057,6 +1060,12 @@ async def _cleanup_loop():
 async def startup():
     await database.connect()
 
+    try:
+        if await ensure_pod_reka_defaults():
+            logger.info("Utworzono bazowy szablon zgłoszeń BAZA pod RĘKĄ")
+    except Exception:
+        logger.exception("Nie udało się przygotować bazowego szablonu BAZA pod RĘKĄ")
+
     # Oficjalna śląska tabela odległości obowiązuje od 01.09.2026. Publikacja
     # przy starcie daje obu aplikacjom jedno źródło prawdy od razu po deployu.
     # Seed jest monotoniczny: nie cofnie wersji nowszej niż ta z repozytorium.
@@ -1112,6 +1121,7 @@ async def startup():
         # Discord wymaga ponowienia (i odwrotnie).
         "ALTER TABLE zprp_unavailability_settings ADD COLUMN IF NOT EXISTS discord_webhook_url TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE zprp_unavailability_settings ADD COLUMN IF NOT EXISTS recipient_emails JSONB NOT NULL DEFAULT '[]'::jsonb",
+        "ALTER TABLE zprp_unavailability_settings ADD COLUMN IF NOT EXISTS delegate_recipient_email VARCHAR NOT NULL DEFAULT 'mystkowski@zprp.org.pl'",
         "UPDATE zprp_unavailability_settings SET recipient_emails = jsonb_build_array(recipient_email) WHERE recipient_emails = '[]'::jsonb AND COALESCE(recipient_email, '') <> ''",
         "ALTER TABLE zprp_unavailability_settings ADD COLUMN IF NOT EXISTS province_cc JSONB NOT NULL DEFAULT '{}'::jsonb",
         "ALTER TABLE zprp_unavailability_mail_outbox ADD COLUMN IF NOT EXISTS province VARCHAR",

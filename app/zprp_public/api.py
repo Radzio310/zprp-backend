@@ -32,6 +32,7 @@ from app.db import (
     zprp_public_teams,
 )
 from app.zprp_public.sync import run_sync_job
+from app.zprp_public.privacy import public_club, public_team
 
 router = APIRouter(prefix="/api/v1/handball", tags=["handball_public"])
 admin_router = APIRouter(
@@ -160,7 +161,7 @@ async def portal_overview() -> dict[str, Any]:
     )
     last_sync = await database.fetch_one(
         select(zprp_public_sync_runs.c.status, zprp_public_sync_runs.c.finished_at)
-        .where(zprp_public_sync_runs.c.status == "completed")
+        .where(zprp_public_sync_runs.c.status == "success")
         .order_by(zprp_public_sync_runs.c.finished_at.desc())
         .limit(1)
     )
@@ -253,6 +254,53 @@ async def list_clubs(
     return _page(limit, offset, result)
 
 
+@router.get("/club-licenses")
+async def list_club_licenses(
+    club_id: str = "",
+    season_name: str = "",
+    gender: str = "",
+    status: str = "",
+    q: str = "",
+    limit: int = Query(100, ge=1, le=300),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Publiczny katalog licencji bez pól kontaktowych i surowego payloadu."""
+    conditions = []
+    if club_id.strip():
+        conditions.append(zprp_public_club_licenses.c.club_id == club_id.strip())
+    if season_name.strip():
+        conditions.append(zprp_public_club_licenses.c.season_name == season_name.strip())
+    if gender.strip():
+        conditions.append(zprp_public_club_licenses.c.gender == gender.strip())
+    if status.strip():
+        conditions.append(zprp_public_club_licenses.c.status == status.strip())
+    if q.strip():
+        conditions.append(zprp_public_club_licenses.c.name.ilike(f"%{q.strip()}%"))
+    query = (
+        select(
+            zprp_public_club_licenses.c.id,
+            zprp_public_club_licenses.c.club_id,
+            zprp_public_clubs.c.name.label("club_name"),
+            zprp_public_club_licenses.c.season_name,
+            zprp_public_club_licenses.c.name,
+            zprp_public_club_licenses.c.status,
+            zprp_public_club_licenses.c.gender,
+            zprp_public_club_licenses.c.fetched_at,
+        )
+        .join(zprp_public_clubs, zprp_public_clubs.c.club_id == zprp_public_club_licenses.c.club_id)
+    )
+    if conditions:
+        query = query.where(and_(*conditions))
+    rows = await database.fetch_all(
+        query.order_by(
+            zprp_public_club_licenses.c.season_name.desc(),
+            zprp_public_clubs.c.name,
+            zprp_public_club_licenses.c.name,
+        ).limit(limit).offset(offset)
+    )
+    return _page(limit, offset, rows)
+
+
 @router.get("/clubs/{club_id}")
 async def club_details(club_id: str) -> dict[str, Any]:
     club = await database.fetch_one(
@@ -262,12 +310,7 @@ async def club_details(club_id: str) -> dict[str, Any]:
             zprp_public_clubs.c.name,
             zprp_public_clubs.c.member,
             zprp_public_clubs.c.city,
-            zprp_public_clubs.c.postal_code,
-            zprp_public_clubs.c.street,
-            zprp_public_clubs.c.email,
             zprp_public_clubs.c.website,
-            zprp_public_clubs.c.phone_1,
-            zprp_public_clubs.c.phone_2,
             zprp_public_clubs.c.archived,
             zprp_public_clubs.c.logo_url,
             zprp_public_clubs.c.source_updated_at,
@@ -298,7 +341,47 @@ async def club_details(club_id: str) -> dict[str, Any]:
         .where(zprp_public_club_licenses.c.club_id == club_id)
         .order_by(zprp_public_club_licenses.c.season_name.desc(), zprp_public_club_licenses.c.name)
     )
-    return {"club": _dict(club), "teams": [_dict(row) for row in teams], "licenses": [_dict(row) for row in licenses]}
+    return {"club": public_club(club), "teams": [public_team(row) for row in teams], "licenses": [_dict(row) for row in licenses]}
+
+
+@router.get("/teams")
+async def list_teams(
+    season_id: str = "",
+    club_id: str = "",
+    gender: str = "",
+    category: str = "",
+    q: str = "",
+    limit: int = Query(100, ge=1, le=300),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Lista drużyn w bezpiecznym, publicznym kształcie."""
+    conditions = []
+    if season_id.strip():
+        conditions.append(zprp_public_teams.c.season_id == season_id.strip())
+    if club_id.strip():
+        conditions.append(zprp_public_teams.c.club_id == club_id.strip())
+    if gender.strip():
+        conditions.append(zprp_public_teams.c.gender == gender.strip())
+    if category.strip():
+        conditions.append(zprp_public_teams.c.category == category.strip())
+    if q.strip():
+        conditions.append(zprp_public_teams.c.name.ilike(f"%{q.strip()}%"))
+    query = select(
+        zprp_public_teams.c.team_id,
+        zprp_public_teams.c.season_id,
+        zprp_public_teams.c.club_id,
+        zprp_public_teams.c.season_name,
+        zprp_public_teams.c.name,
+        zprp_public_teams.c.gender,
+        zprp_public_teams.c.category,
+        zprp_public_teams.c.city,
+        zprp_public_teams.c.roster_fetched_at,
+        zprp_public_teams.c.updated_at,
+    )
+    if conditions:
+        query = query.where(and_(*conditions))
+    rows = await database.fetch_all(query.order_by(zprp_public_teams.c.name).limit(limit).offset(offset))
+    return _page(limit, offset, rows)
 
 
 @router.get("/teams/{team_id}")
@@ -333,8 +416,7 @@ async def team_details(team_id: str, season_id: str = Query(...)) -> dict[str, A
                 "position": data.get("position"),
             }
         )
-    team_public = {key: value for key, value in _dict(team).items() if key not in {"source_hash", "source_json"}}
-    return {"team": team_public, "roster": roster, "roster_count": len(roster)}
+    return {"team": public_team(team), "roster": roster, "roster_count": len(roster)}
 
 
 @router.get("/competitions")

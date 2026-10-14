@@ -2616,6 +2616,12 @@ zprp_unavailability_settings = Table(
         server_default=text("'[]'"),
     ),
     Column(
+        "delegate_recipient_email",
+        String,
+        nullable=False,
+        server_default=text("'mystkowski@zprp.org.pl'"),
+    ),
+    Column(
         "sender_email",
         String,
         nullable=False,
@@ -4504,6 +4510,18 @@ from app.zprp_public_tables import define_tables as _define_zprp_public_tables
     zprp_public_sync_runs,
     zprp_public_sync_state,
 ) = _define_zprp_public_tables(metadata)
+
+# Funkcje produktowe BAZA pod RĘKĄ: raporty, sesje klubowe i Talenty.
+from app.pod_reka_tables import define_tables as _define_pod_reka_tables
+
+(
+    pod_reka_reports,
+    pod_reka_club_sessions,
+    pod_reka_talent_templates,
+    pod_reka_talent_submissions,
+    pod_reka_talent_audit,
+    pod_reka_push_subscriptions,
+) = _define_pod_reka_tables(metadata)
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)

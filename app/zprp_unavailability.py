@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -31,12 +32,21 @@ from app.mail_brand import NIEDYSPO_SENDER_EMAIL, brand_cell
 from app.zprp_unavailability_rules import conflict_when, is_tentative, subject_prefix
 from app.db import (
     database,
+    json_files,
+    login_records,
+    partner_offtimes,
     province_judges,
     zprp_unavailability_mail_outbox as OUTBOX,
     zprp_unavailability_settings as SETTINGS,
 )
 from app.extra_report_discord import normalize_webhook_url
 from app.zprp_accounts import normalize_province
+from app.zprp_unavailability_mail_rules import (
+    DEFAULT_DELEGATE_RECIPIENT,
+    cc_recipients,
+    mutual_partner_id,
+    primary_recipients,
+)
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +115,9 @@ class SettingsBody(BaseModel):
     recipientEmails: list[str] = Field(default_factory=list)
     # Zgodność z pierwszą wersją klienta.
     recipientEmail: str = ""
+    # Brak pola oznacza stary panel administratora: zachowujemy wtedy obecną
+    # wartość zamiast nadpisywać ją adresem domyślnym.
+    delegateRecipientEmail: str | None = None
     senderEmail: str = NIEDYSPO_SENDER_EMAIL
     senderName: str = "Niedyspo BAZA"
     discordWebhookUrl: str = ""
@@ -175,6 +188,7 @@ async def _settings_row() -> dict[str, Any]:
         "id": 1,
         "recipient_email": "",
         "recipient_emails": [],
+        "delegate_recipient_email": DEFAULT_DELEGATE_RECIPIENT,
         "sender_email": NIEDYSPO_SENDER_EMAIL,
         "sender_name": "Niedyspo BAZA",
         "categories": list(DEFAULT_CATEGORIES),
@@ -206,6 +220,7 @@ def _settings_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "recipientEmail": recipients[0] if recipients else "",
         "recipientEmails": recipients,
+        "delegateRecipientEmail": _clean(row.get("delegate_recipient_email")) or DEFAULT_DELEGATE_RECIPIENT,
         "senderEmail": _clean(row.get("sender_email")) or NIEDYSPO_SENDER_EMAIL,
         "senderName": _clean(row.get("sender_name")) or "Niedyspo BAZA",
         "categories": normalize_categories(row.get("categories") or DEFAULT_CATEGORIES),
@@ -254,12 +269,19 @@ async def save_admin_settings(
     body: SettingsBody,
     authorization: str | None = Header(None),
 ) -> dict[str, Any]:
+    current = await _settings_row()
     recipients: list[str] = []
     for raw in list(body.recipientEmails or []) + [body.recipientEmail]:
         email = _email(raw, required=False)
         if email and email not in recipients:
             recipients.append(email)
     sender = _email(body.senderEmail, required=True)
+    delegate_recipient = _email(
+        body.delegateRecipientEmail
+        if body.delegateRecipientEmail is not None
+        else current.get("delegate_recipient_email") or DEFAULT_DELEGATE_RECIPIENT,
+        required=True,
+    )
     sender_name = _clean(body.senderName)
     if len(sender_name) < 2:
         raise HTTPException(422, detail="Nazwa nadawcy jest zbyt krótka.")
@@ -288,6 +310,7 @@ async def save_admin_settings(
     values = {
         "recipient_email": recipients[0] if recipients else "",
         "recipient_emails": recipients,
+        "delegate_recipient_email": delegate_recipient,
         "sender_email": sender,
         "sender_name": sender_name,
         "categories": categories,
@@ -421,7 +444,9 @@ async def enqueue_overlap_mail(
         "queued": True,
         "matches": len(filtered),
         "status": _clean(dict(row).get("status")) if row else "pending",
-        "recipientEmail": _clean(cfg.get("recipient_email")),
+        "recipientEmail": (
+            primary_recipients({"matches_json": filtered}, cfg) or [""]
+        )[0],
     }
 
 
@@ -491,12 +516,74 @@ def render_overlap_email(row: dict[str, Any]) -> tuple[str, str, str]:
     return subject, html_body, text_body
 
 
+async def _paired_partner_email(judge_id: str, province: str) -> str:
+    """E-mail zaakceptowanego partnera; jednostronne zaproszenie nie wystarcza."""
+    owner = await database.fetch_one(
+        select(partner_offtimes.c.partner_id).where(
+            partner_offtimes.c.judge_id == _clean(judge_id)
+        )
+    )
+    proposed_partner_id = _clean(owner["partner_id"] if owner else "")
+    if not proposed_partner_id:
+        return ""
+    partner = await database.fetch_one(
+        select(partner_offtimes.c.partner_id, partner_offtimes.c.full_name).where(
+            partner_offtimes.c.judge_id == proposed_partner_id
+        )
+    )
+    partner_id = mutual_partner_id(
+        judge_id,
+        proposed_partner_id,
+        partner["partner_id"] if partner else "",
+    )
+    if not partner_id:
+        return ""
+
+    partner_name = _clean(partner["full_name"])
+    if not partner_name:
+        person = await database.fetch_one(
+            select(province_judges.c.full_name).where(
+                province_judges.c.judge_id == partner_id
+            )
+        )
+        partner_name = _clean(person["full_name"] if person else "")
+    if not partner_name:
+        return ""
+
+    from app.judge_contact_rules import resolve_emails
+
+    login_rows = [
+        dict(item)
+        for item in await database.fetch_all(
+            select(login_records).where(login_records.c.judge_id == partner_id)
+        )
+    ]
+    contact_row = await database.fetch_one(
+        select(json_files.c.content).where(json_files.c.key == "kontakty")
+    )
+    contacts = contact_row["content"] if contact_row else []
+    if isinstance(contacts, str):
+        try:
+            contacts = json.loads(contacts)
+        except ValueError:
+            contacts = []
+    resolved = resolve_emails(
+        {partner_id: partner_name},
+        login_rows=login_rows,
+        contacts=contacts,
+        province=province,
+    )
+    return _clean(resolved.get(partner_id, ("", ""))[0]).lower()
+
+
 async def _send_row(row: dict[str, Any], cfg: dict[str, Any]) -> str:
     email_cfg = get_email_config()
     api_key = _clean(email_cfg.brevo_api_key)
     if not api_key:
         raise RuntimeError("Brak klucza Brevo")
-    recipients = list(_settings_payload(cfg).get("recipientEmails") or [])
+    recipients = [
+        email for email in primary_recipients(row, cfg) if EMAIL_RE.match(_clean(email))
+    ]
     if not recipients:
         raise LookupError("Brak adresu odbiorcy w konfiguracji Niedyspo ZPRP")
     subject, html_body, text_body = render_overlap_email(row)
@@ -512,12 +599,22 @@ async def _send_row(row: dict[str, Any], cfg: dict[str, Any]) -> str:
         "tags": ["zprp-unavailability-overlap"],
     }
     province = normalize_province(row.get("province"))
-    cc = list(dict(cfg.get("province_cc") or {}).get(province) or [])
-    cc = [
-        email
-        for email in cc
-        if EMAIL_RE.match(_clean(email)) and _clean(email) not in recipients
-    ]
+    try:
+        partner_email = await _paired_partner_email(
+            _clean(row.get("judge_id")), province
+        )
+    except Exception:  # partner jest dodatkowym DW i nie może zablokować głównego maila
+        log.warning(
+            "Nie udało się ustalić adresu e-mail partnera dla alertu niedyspozycji",
+            exc_info=True,
+        )
+        partner_email = ""
+    cc = cc_recipients(
+        dict(cfg.get("province_cc") or {}).get(province) or [],
+        partner_email=partner_email,
+        primary=recipients,
+    )
+    cc = [email for email in cc if EMAIL_RE.match(_clean(email))]
     if cc:
         payload["cc"] = [{"email": email} for email in cc]
     headers = {"api-key": api_key, "accept": "application/json", "content-type": "application/json"}
@@ -589,7 +686,7 @@ async def flush_overlap_mail_outbox(limit: int = 10) -> int:
     cfg = await _settings_row()
     for raw in rows:
         row = dict(raw)
-        wants_email = bool(_settings_payload(cfg).get("recipientEmails"))
+        wants_email = bool(primary_recipients(row, cfg))
         wants_discord = bool(_clean(cfg.get("discord_webhook_url")))
         if not wants_email and not wants_discord:
             await database.execute(

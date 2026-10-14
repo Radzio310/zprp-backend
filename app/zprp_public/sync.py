@@ -52,6 +52,7 @@ from app.zprp_public.client import (
     text_value,
 )
 from app.zprp_public.store import insert_ignore, now_utc, store_entity, upsert_values
+from app.zprp_public.discord import notify_failure, notify_recovery
 
 log = logging.getLogger(__name__)
 WARSAW = ZoneInfo("Europe/Warsaw")
@@ -1035,6 +1036,7 @@ async def run_sync_job(kind: str, *, season_id: str | None = None, cycle_key: st
         counters["requests"] = client.requests
         counters["request_errors"] = client.errors
         await _finish_run(run_id, "success", counters, errors)
+        await notify_recovery(kind, run_id)
         return {"started": True, "run_id": run_id, "status": "success", "counters": dict(counters)}
     except asyncio.CancelledError:
         errors.append("cancelled")
@@ -1045,6 +1047,7 @@ async def run_sync_job(kind: str, *, season_id: str | None = None, cycle_key: st
         counters["requests"] = client.requests
         counters["request_errors"] = client.errors
         await _finish_run(run_id, "failed", counters, errors)
+        await notify_failure(kind, run_id, len(errors))
         log.exception("[zprp_public] przebieg %s nieudany", kind)
         return {"started": True, "run_id": run_id, "status": "failed", "errors": errors}
     finally:

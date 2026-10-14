@@ -18,6 +18,43 @@ import pytest
 
 from app.zprp import assignments as A
 
+
+def test_table_slot_payload_exposes_only_clean_picker_data():
+    parsed = {
+        "slots": {
+            "sekretarz": {
+                "selected_value": "2",
+                "options": [
+                    {
+                        "value": "2",
+                        "name": "ŻAK Anna",
+                        "badges": ["S"],
+                        "selected": True,
+                    },
+                    {
+                        "value": "1",
+                        "name": "NOWAK Jan",
+                        "badges": [],
+                        "selected": False,
+                    },
+                    {
+                        "value": "",
+                        "name": "puste",
+                        "badges": [],
+                        "selected": False,
+                    },
+                ],
+            }
+        }
+    }
+
+    out = A._table_slot_payload(parsed, "sekretarz")
+
+    assert out["selected_value"] == "2"
+    assert out["selected_name"] == "ŻAK Anna"
+    assert [option["name"] for option in out["options"]] == ["NOWAK Jan", "ŻAK Anna"]
+    assert set(out["options"][0]) == {"value", "name", "badges", "selected"}
+
 SELECTS = [
     "NrSedzia_pierwszy",
     "NrSedzia_drugi",
