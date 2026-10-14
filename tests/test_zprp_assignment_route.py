@@ -154,6 +154,36 @@ async def walk(**kw):
     return await A.walk_judge_route(None, {}, **kw)
 
 
+class PublicMatchResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {
+            "0": [
+                {
+                    "NrSedzia_pierwszy": "5124",
+                    "NrSedzia_drugi": "6000",
+                    "NrSedzia_delegat": "7000",
+                }
+            ]
+        }
+
+
+class PublicMatchClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def get(self, *args, **kwargs):
+        return PublicMatchResponse()
+
+
 # ─────────────────────────── czytanie stron ───────────────────────────
 
 
@@ -210,6 +240,41 @@ def test_date_form_preserves_hidden_fields_and_reads_exact_minutes():
 
 
 # ─────────────────────────── trasa ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_table_picker_uses_direct_form_without_waiting_for_match_list(monkeypatch):
+    """Przypisany sędzia ma wejść od razu po IdZawody.
+
+    Lista „moje mecze” w ZPRP bywa opóźniona; nie jest dowodem uprawnienia i
+    nie może blokować ani spowalniać pickera. Dowodem pozostaje publiczna obsada.
+    """
+    direct = form_html({}, BASE_OPTIONS)
+    calls = []
+
+    async def fetch(*args, **kwargs):
+        calls.append((args, kwargs))
+        return None, direct
+
+    async def forbidden_walk(*args, **kwargs):
+        raise AssertionError("lista meczów nie powinna być otwierana")
+
+    monkeypatch.setattr(A, "AsyncClient", PublicMatchClient)
+    monkeypatch.setattr(A, "fetch_with_correct_encoding", fetch)
+    monkeypatch.setattr(A, "walk_judge_route", forbidden_walk)
+
+    out = await A._table_official_context(
+        object(),
+        {"PHPSESSID": "session"},
+        judge_id="5124",
+        id_zawody="207406",
+        match_code="IMD/3",
+    )
+
+    assert out["reason"] == "DIRECT_FORM"
+    assert out["prefetched_html"] == direct
+    assert len(calls) == 1
+    assert calls[0][1]["data"]["IdZawody"] == "207406"
 
 
 @pytest.mark.asyncio

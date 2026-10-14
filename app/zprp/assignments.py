@@ -1635,22 +1635,67 @@ async def _table_official_context(
             "Stolikowych może zmienić tylko sędzia boiskowy lub delegat tego meczu.",
         )
 
-    route = await walk_judge_route(
-        client,
-        cookies,
-        judge_id=judge_id,
-        id_zawody=wanted,
-        match_code=match_code,
-        season_label=season_label,
-        log_prefix="table-officials/route",
-    )
-    if not route.get("ok"):
-        raise HTTPException(
-            403,
-            route.get("message")
-            or "Na koncie sędziego nie ma dostępu do formularza obsady tego meczu.",
+    # Najpierw otwieramy właściwy formularz bezpośrednio. Lista meczów sędziego
+    # bywa opóźniona i nie może być wąskim gardłem operacji na meczu, którego
+    # publiczna obsada już jednoznacznie przypisała zalogowanej osobie.
+    direct_html = ""
+    try:
+        _, direct_html = await fetch_with_correct_encoding(
+            client,
+            "/zawody_UstawSedziow.php",
+            method="POST",
+            data={"IdZawody": wanted, "akcja": "UstawSedziow", "user": ""},
+            cookies=cookies,
         )
-    return route
+    except Exception as exc:
+        # Nie kończymy tu 500: starszy wariant serwisu może wymagać wejścia
+        # przez stronę meczu, które wykonujemy niżej.
+        logger.warning("table-officials: direct form probe failed: %s", exc)
+    parsed = _parse_referee_form(direct_html)
+    select_names = _select_names_in(direct_html)
+    required = {"NrSedzia_sekretarz", "NrSedzia_czas"}
+    returned_id = str(parsed.get("IdZawody") or "").strip()
+    if returned_id and returned_id != wanted:
+        raise HTTPException(502, "ZPRP otworzył formularz innego meczu")
+    if required.issubset(select_names):
+        return {
+            "ok": True,
+            "reason": "DIRECT_FORM",
+            "message": "",
+            "user": "",
+            "id_zawody": wanted,
+            "detail_path": "",
+            # Odczyt nie musi pobierać drugi raz tego samego ciężkiego formularza.
+            # Zapis celowo pobierze świeży stan, by zachować pozostałe pięć gniazd.
+            "prefetched_html": direct_html,
+        }
+
+    # Rzadki starszy wariant ZPRP wymaga parametru `user` ze strony meczu. Tylko
+    # wtedy uruchamiamy wolniejsze przejście przez listę/sezon i próbujemy formę
+    # dokładnie tak, jak zrobiłaby to przeglądarka.
+    try:
+        route = await walk_judge_route(
+            client,
+            cookies,
+            judge_id=judge_id,
+            id_zawody=wanted,
+            match_code=match_code,
+            season_label=season_label,
+            log_prefix="table-officials/route",
+        )
+    except Exception as exc:
+        logger.exception("table-officials: route lookup crashed")
+        raise HTTPException(
+            502,
+            "ZPRP nie odpowiedział poprawnie podczas otwierania formularza obsady.",
+        ) from exc
+    if route.get("ok"):
+        return route
+    raise HTTPException(
+        403,
+        route.get("message")
+        or "Na koncie sędziego nie ma dostępu do formularza obsady tego meczu.",
+    )
 
 
 def _table_slot_payload(parsed: Dict[str, Any], role: str) -> Dict[str, Any]:
@@ -1708,18 +1753,27 @@ async def table_officials(
             match_code=payload.match_code or "",
             season_label=payload.season_label or "",
         )
-        _, html = await fetch_with_correct_encoding(
-            client,
-            "/zawody_UstawSedziow.php",
-            method="POST",
-            data={
-                "IdZawody": payload.IdZawody,
-                "akcja": "UstawSedziow",
-                "user": route.get("user") or "",
-            },
-            cookies=cookies,
-            headers={"Referer": route.get("detail_path") or ""},
-        )
+        html = route.get("prefetched_html")
+        if not html:
+            try:
+                _, html = await fetch_with_correct_encoding(
+                    client,
+                    "/zawody_UstawSedziow.php",
+                    method="POST",
+                    data={
+                        "IdZawody": payload.IdZawody,
+                        "akcja": "UstawSedziow",
+                        "user": route.get("user") or "",
+                    },
+                    cookies=cookies,
+                    headers={"Referer": route.get("detail_path") or ""},
+                )
+            except Exception as exc:
+                logger.exception("table-officials: form download failed")
+                raise HTTPException(
+                    502,
+                    "ZPRP nie odpowiedział podczas pobierania listy sędziów stolikowych.",
+                ) from exc
         parsed = _parse_referee_form(html)
 
     return {
@@ -1769,25 +1823,34 @@ async def save_table_official(
             match_code=payload.match_code or "",
             season_label=payload.season_label or "",
         )
-        result = await apply_referee_assignment(
-            client,
-            cookies,
-            payload.IdZawody,
-            {select_name: (payload.value, payload.name)},
-            user=route.get("user") or "",
-            referer=route.get("detail_path") or "",
-            require_name_match=True,
-            expect_slots=(
-                {
-                    "sekretarz" if role == "secretary" else "czas": (
-                        payload.expected_name or ""
-                    )
-                }
-                if payload.expected_name is not None
-                else None
-            ),
-            log_prefix="table-officials/save",
-        )
+        try:
+            result = await apply_referee_assignment(
+                client,
+                cookies,
+                payload.IdZawody,
+                {select_name: (payload.value, payload.name)},
+                user=route.get("user") or "",
+                referer=route.get("detail_path") or "",
+                require_name_match=True,
+                expect_slots=(
+                    {
+                        "sekretarz" if role == "secretary" else "czas": (
+                            payload.expected_name or ""
+                        )
+                    }
+                    if payload.expected_name is not None
+                    else None
+                ),
+                log_prefix="table-officials/save",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("table-officials: save crashed")
+            raise HTTPException(
+                502,
+                "ZPRP nie odpowiedział podczas zapisywania sędziego stolikowego.",
+            ) from exc
 
     if not result.get("success"):
         code = result.get("code") or "SAVE_FAILED"
