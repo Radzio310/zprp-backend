@@ -6,6 +6,7 @@ z baza.zprp.pl + zapis zmian (write-back).
 from __future__ import annotations
 
 import base64
+import asyncio
 import datetime
 import logging
 import re
@@ -266,10 +267,20 @@ def _parse_referee_form(html: str) -> Dict[str, Any]:
     slots: Dict[str, Any] = {}
     for sel_name, label in zip(select_names, slot_labels):
         options, selected = _parse_select_options(soup, sel_name)
+        select_node = soup.find("select", attrs={"name": sel_name})
+        hidden_node = soup.find("input", attrs={"name": sel_name})
+        # Konto sędziego/delegata może EDYTOWAĆ wyłącznie stolik. ZPRP renderuje
+        # wtedy boiskowych i delegatów jako `<input type="hidden">`, nie jako
+        # selecty. Traktowanie braku selecta jak pustego gniazda wysyłało puste
+        # wartości i usuwało całą chronioną obsadę przy dodaniu stolikowego.
+        if select_node is None and hidden_node is not None:
+            selected = _clean(hidden_node.get("value", ""))
         slots[label] = {
             "select_name": sel_name,
             "options": options,
             "selected_value": selected,
+            "field_present": select_node is not None or hidden_node is not None,
+            "field_kind": "select" if select_node is not None else "hidden",
         }
 
     # Parse filter radios
@@ -1188,6 +1199,23 @@ async def apply_referee_assignment(
     for sel_name, slot_label in SELECT_TO_SLOT.items():
         new_val, new_name = changes.get(sel_name, (None, None))
         if new_val is None:
+            if not current["slots"].get(slot_label, {}).get("field_present"):
+                logger.error(
+                    "%s: formularz nie zawiera chronionego pola %s - zapis wstrzymany",
+                    log_prefix,
+                    sel_name,
+                )
+                return {
+                    "success": False,
+                    "code": "FORM_INCOMPLETE",
+                    "fetched_at": _now_iso(),
+                    "before_slots": before_slots,
+                    "verified_slots": {},
+                    "error": (
+                        "ZPRP zwrócił niepełny formularz obsady. Dla bezpieczeństwa "
+                        "niczego nie zapisano."
+                    ),
+                }
             form_data[sel_name] = (
                 current["slots"].get(slot_label, {}).get("selected_value") or ""
             )
@@ -1265,6 +1293,64 @@ async def apply_referee_assignment(
     )
     _log_html(f"{log_prefix} step3 (submit)", html)
     parsed = _parse_referee_form(html)
+
+    # Twarda invarianta: operacja na jednym gnieździe NIE MA PRAWA zmienić
+    # żadnego pozostałego. Sprawdzamy wartości wszystkich nietkniętych pól,
+    # także ukrytych boiskowych/delegatów. Jeżeli obcy formularz mimo wszystko
+    # je zmienił, natychmiast wysyłamy stan sprzed operacji jako rollback.
+    untouched_changed: Dict[str, Dict[str, str]] = {}
+    for sel_name, slot_label in SELECT_TO_SLOT.items():
+        sent_val, _ = changes.get(sel_name, (None, None))
+        if sent_val is not None:
+            continue
+        before_value = str(before_slots.get(slot_label, {}).get("value") or "")
+        after_value = str(
+            parsed["slots"].get(slot_label, {}).get("selected_value") or ""
+        )
+        if before_value != after_value:
+            untouched_changed[slot_label] = {
+                "before": before_value,
+                "after": after_value,
+            }
+
+    if untouched_changed:
+        logger.critical(
+            "%s: ZPRP zmienil chronione gniazda %s - rollback",
+            log_prefix,
+            ", ".join(sorted(untouched_changed)),
+        )
+        rollback_data = dict(form_data)
+        for sel_name, slot_label in SELECT_TO_SLOT.items():
+            rollback_data[sel_name] = str(
+                before_slots.get(slot_label, {}).get("value") or ""
+            )
+        _, rollback_html = await fetch_with_correct_encoding(
+            client,
+            "/zawody_UstawSedziow.php",
+            method="POST",
+            data=rollback_data,
+            cookies=cookies,
+            headers=headers,
+        )
+        rollback = _parse_referee_form(rollback_html)
+        rollback_ok = all(
+            str(rollback["slots"].get(label, {}).get("selected_value") or "")
+            == str(before_slots.get(label, {}).get("value") or "")
+            for label in SELECT_TO_SLOT.values()
+        )
+        return {
+            "success": False,
+            "code": "PROTECTED_CREW_CHANGED",
+            "fetched_at": _now_iso(),
+            "before_slots": before_slots,
+            "verified_slots": {},
+            "protected_changes": untouched_changed,
+            "rollback_succeeded": rollback_ok,
+            "error": (
+                "ZPRP próbował zmienić także inną osobę z obsady. Zapis został "
+                + ("automatycznie cofnięty." if rollback_ok else "zatrzymany; sprawdź obsadę w ZPRP.")
+            ),
+        }
 
     # Krok 4: weryfikacja. Porównujemy NAZWISKA, bo numery opcji w odpowiedzi
     # mogą być przenumerowane względem tych, które wysłaliśmy. Ta sama miara,
@@ -1601,6 +1687,7 @@ async def _table_official_context(
     id_zawody: str,
     match_code: str = "",
     season_label: str = "",
+    public_match: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Authorize a judge-facing table-official edit and locate its ZPRP form."""
     from app.official_role import (
@@ -1614,18 +1701,19 @@ async def _table_official_context(
     if not wanted.isdigit():
         raise HTTPException(400, "IdZawody musi być numerem meczu")
 
-    try:
-        async with AsyncClient(timeout=30.0) as public:
-            response = await public.get(DETAILS_URL, params={"Zawody": wanted})
-            response.raise_for_status()
-            public_payload = response.json()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("table-officials: public match lookup failed: %s", exc)
-        raise HTTPException(502, "Nie udało się sprawdzić obsady meczu w ZPRP")
-
-    match = _match_from_details_payload(public_payload)
+    match = public_match
+    if match is None:
+        try:
+            async with AsyncClient(timeout=30.0) as public:
+                response = await public.get(DETAILS_URL, params={"Zawody": wanted})
+                response.raise_for_status()
+                public_payload = response.json()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("table-officials: public match lookup failed: %s", exc)
+            raise HTTPException(502, "Nie udało się sprawdzić obsady meczu w ZPRP")
+        match = _match_from_details_payload(public_payload)
     if match is None:
         raise HTTPException(502, "Baza rozgrywek nie oddała obsady tego meczu")
 
@@ -1699,6 +1787,25 @@ async def _table_official_context(
     )
 
 
+async def _public_table_match(id_zawody: str) -> Dict[str, Any]:
+    """Publiczna obsada pobierana równolegle z logowaniem do panelu ZPRP."""
+    from app.official_role import DETAILS_URL, _match_from_details_payload
+
+    try:
+        async with AsyncClient(timeout=30.0) as public:
+            response = await public.get(DETAILS_URL, params={"Zawody": id_zawody})
+            response.raise_for_status()
+            match = _match_from_details_payload(response.json())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("table-officials: parallel public lookup failed: %s", exc)
+        raise HTTPException(502, "Nie udało się sprawdzić obsady meczu w ZPRP")
+    if match is None:
+        raise HTTPException(502, "Baza rozgrywek nie oddała obsady tego meczu")
+    return match
+
+
 def _table_slot_payload(parsed: Dict[str, Any], role: str) -> Dict[str, Any]:
     slot = (parsed.get("slots") or {}).get(role) or {}
     options: List[Dict[str, Any]] = []
@@ -1743,8 +1850,9 @@ async def table_officials(
     async with AsyncClient(
         base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
     ) as client:
-        cookies, judge_id = await _login_zprp_with_identity(
-            client, username, password
+        (cookies, judge_id), public_match = await asyncio.gather(
+            _login_zprp_with_identity(client, username, password),
+            _public_table_match(payload.IdZawody),
         )
         route = await _table_official_context(
             client,
@@ -1753,6 +1861,7 @@ async def table_officials(
             id_zawody=payload.IdZawody,
             match_code=payload.match_code or "",
             season_label=payload.season_label or "",
+            public_match=public_match,
         )
         html = route.get("prefetched_html")
         if not html:
@@ -1813,8 +1922,9 @@ async def save_table_official(
     async with AsyncClient(
         base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
     ) as client:
-        cookies, judge_id = await _login_zprp_with_identity(
-            client, username, password
+        (cookies, judge_id), public_match = await asyncio.gather(
+            _login_zprp_with_identity(client, username, password),
+            _public_table_match(payload.IdZawody),
         )
         route = await _table_official_context(
             client,
@@ -1823,6 +1933,7 @@ async def save_table_official(
             id_zawody=payload.IdZawody,
             match_code=payload.match_code or "",
             season_label=payload.season_label or "",
+            public_match=public_match,
         )
         try:
             result = await apply_referee_assignment(
@@ -1855,11 +1966,17 @@ async def save_table_official(
 
     if not result.get("success"):
         code = result.get("code") or "SAVE_FAILED"
-        status = 409 if code in {"ZPRP_CHANGED", "NAME_AMBIGUOUS"} else 400
+        status = 409 if code in {
+            "ZPRP_CHANGED",
+            "NAME_AMBIGUOUS",
+            "PROTECTED_CREW_CHANGED",
+        } else (502 if code == "FORM_INCOMPLETE" else 400)
         raise HTTPException(
             status,
             detail={
                 "code": code,
+                "rollback_succeeded": result.get("rollback_succeeded"),
+                "protected_changes": result.get("protected_changes"),
                 "message": result.get("error") or "Zapis nie powiódł się",
             },
         )

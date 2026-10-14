@@ -82,6 +82,43 @@ def form_html(selected: Dict[str, str], options: Dict[str, List[Tuple[str, str]]
     return "".join(parts)
 
 
+def table_official_form_html(
+    *,
+    referee1: str = "4291",
+    referee2: str = "5124",
+    delegate1: str = "7001",
+    delegate2: str = "",
+    secretary: str = "",
+    timekeeper: str = "",
+) -> str:
+    """Formularz widoczny dla boiskowego/delegata.
+
+    ZPRP nie pokazuje mu selectow dla chronionej obsady. Boiskowi i delegaci
+    sa ukrytymi inputami, a edytowalne pozostaja tylko dwa pola stolika.
+    """
+    parts = ['<html><body><input type="hidden" name="IdZawody" value="208136">']
+    hidden = {
+        "NrSedzia_pierwszy": referee1,
+        "NrSedzia_drugi": referee2,
+        "NrSedzia_delegat": delegate1,
+        "NrSedzia_delegat2": delegate2,
+    }
+    for name, value in hidden.items():
+        parts.append(f'<input type="hidden" name="{name}" value="{value}">')
+    for name, selected_value in (
+        ("NrSedzia_sekretarz", secretary),
+        ("NrSedzia_czas", timekeeper),
+    ):
+        parts.append(f'<select name="{name}">')
+        parts.append('<option value="">--- ---</option>')
+        for value, label in (("5882", "FOJUD Mateusz"), ("5883", "KOWAL Anna")):
+            mark = " selected" if selected_value == value else ""
+            parts.append(f'<option value="{value}"{mark}>{label}</option>')
+        parts.append("</select>")
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
 class FakeHttp:
     """Podstawka pod `fetch_with_correct_encoding`.
 
@@ -89,8 +126,9 @@ class FakeHttp:
     zapisie. Zapamiętuje wysłane dane, bo to one są tu przedmiotem badania.
     """
 
-    def __init__(self, first: str, second: str | None = None):
-        self.pages = [first, second if second is not None else first]
+    def __init__(self, first: str, second: str | None = None, third: str | None = None):
+        second_page = second if second is not None else first
+        self.pages = [first, second_page, third if third is not None else second_page]
         self.calls: List[Dict[str, Any]] = []
 
     async def __call__(self, client, path, method="GET", data=None, cookies=None, **kw):
@@ -112,8 +150,12 @@ BASE_OPTIONS = {
 
 @pytest.fixture
 def http(monkeypatch):
-    def install(first: str, second: str | None = None) -> FakeHttp:
-        fake = FakeHttp(first, second)
+    def install(
+        first: str,
+        second: str | None = None,
+        third: str | None = None,
+    ) -> FakeHttp:
+        fake = FakeHttp(first, second, third)
         monkeypatch.setattr(A, "fetch_with_correct_encoding", fake)
         return fake
 
@@ -158,6 +200,58 @@ async def test_untouched_slots_keep_their_values(http):
 
     assert fake.submitted["NrSedzia_drugi"] == "3"
     assert fake.submitted["NrSedzia_czas"] == "2"
+
+
+def test_hidden_protected_crew_is_parsed_from_limited_form():
+    parsed = A._parse_referee_form(table_official_form_html())
+
+    assert parsed["slots"]["sedzia1"]["selected_value"] == "4291"
+    assert parsed["slots"]["sedzia2"]["selected_value"] == "5124"
+    assert parsed["slots"]["delegat"]["selected_value"] == "7001"
+    assert parsed["slots"]["sedzia1"]["field_kind"] == "hidden"
+    assert parsed["slots"]["sedzia1"]["field_present"] is True
+
+
+@pytest.mark.asyncio
+async def test_table_official_save_preserves_hidden_field_referees_and_delegates(http):
+    before = table_official_form_html()
+    after = table_official_form_html(secretary="5882")
+    fake = http(before, after)
+
+    out = await apply(
+        {"NrSedzia_sekretarz": ("5882", "FOJUD Mateusz")},
+        require_name_match=True,
+    )
+
+    assert out["success"] is True
+    assert fake.submitted["NrSedzia_pierwszy"] == "4291"
+    assert fake.submitted["NrSedzia_drugi"] == "5124"
+    assert fake.submitted["NrSedzia_delegat"] == "7001"
+    assert fake.submitted["NrSedzia_delegat2"] == ""
+
+
+@pytest.mark.asyncio
+async def test_unexpected_protected_crew_change_is_rolled_back(http):
+    before = table_official_form_html()
+    broken_response = table_official_form_html(referee2="", secretary="5882")
+    restored_response = table_official_form_html()
+    fake = http(before, broken_response, restored_response)
+
+    out = await apply(
+        {"NrSedzia_sekretarz": ("5882", "FOJUD Mateusz")},
+        require_name_match=True,
+    )
+
+    assert out["success"] is False
+    assert out["code"] == "PROTECTED_CREW_CHANGED"
+    assert out["rollback_succeeded"] is True
+    assert out["protected_changes"] == {
+        "sedzia2": {"before": "5124", "after": ""},
+    }
+    assert len(fake.calls) == 3
+    assert fake.calls[2]["data"]["NrSedzia_pierwszy"] == "4291"
+    assert fake.calls[2]["data"]["NrSedzia_drugi"] == "5124"
+    assert fake.calls[2]["data"]["NrSedzia_delegat"] == "7001"
 
 
 @pytest.mark.asyncio
