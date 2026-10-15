@@ -4564,6 +4564,11 @@ with engine.connect() as _conn:
     # Globalna polityka zewnętrznych pushy i identyfikator konkretnego buildu.
     # Obie tabele istnieją na produkcji, więc samo metadata.create_all nie
     # dołoży nowych kolumn przy wdrożeniu.
+    # Faktury "oczekujące na płatność": NULL w payment_status = opłacona (stare dane).
+    _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS payment_status varchar"))
+    _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS paid_day date"))
+    _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS paid_by varchar"))
+    _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS paid_at timestamptz"))
     _conn.execute(text("ALTER TABLE admin_settings ADD COLUMN IF NOT EXISTS allow_dev_pushes boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_id varchar"))
     _conn.execute(text("ALTER TABLE push_schedules ADD COLUMN IF NOT EXISTS dedupe_key varchar"))

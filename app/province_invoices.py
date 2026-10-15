@@ -38,10 +38,12 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import and_, func, insert, select, update
+from sqlalchemy import and_, delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import invoice_match_rules as M
+from app import settlement_cache as SC
+from app.invoice_payment_rules import PAY_PAID, PAY_PENDING, is_pending, pay_mode, register_totals
 from app import invoice_parse_rules as P
 from app.db import (
     database,
@@ -78,6 +80,8 @@ STATUS_REJECTED = "rejected"
 STATUS_DUPLICATE = "duplicate"
 STATUS_UNREADABLE = "unreadable"
 
+#: Płatność zatwierdzonej faktury. NULL w bazie = opłacona (dane sprzed funkcji).
+
 #: Kandydaci (kluby i drużyny) na chwilę - panel wysyła pliki po jednym.
 _CANDIDATES: dict[tuple[str, str], tuple[float, list[dict], dict[str, str]]] = {}
 _CANDIDATES_TTL = 90.0
@@ -87,6 +91,8 @@ _ITEM_COLUMNS = [c for c in province_invoice_items.c if c.name != "pdf"]
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
 
 
 def _s(value: Any) -> str:
@@ -221,6 +227,7 @@ async def _approved_by_key(key: str, invoice_keys: list[str], *, skip_item: Opti
             province_invoice_items.c.entry_id,
             province_invoice_items.c.decided_at,
             province_invoice_items.c.club_id,
+            province_invoice_items.c.payment_status,
         ).where(
             and_(
                 province_invoice_items.c.province == key,
@@ -234,7 +241,7 @@ async def _approved_by_key(key: str, invoice_keys: list[str], *, skip_item: Opti
     for row in rows:
         if skip_item and int(row["id"]) == skip_item:
             continue
-        if row["entry_id"] and int(row["entry_id"]) in live:
+        if is_pending(row["payment_status"]) or (row["entry_id"] and int(row["entry_id"]) in live):
             out[_s(row["invoice_key"])] = {
                 "item_id": int(row["id"]),
                 "batch_id": int(row["batch_id"]),
@@ -255,6 +262,7 @@ async def _approved_by_sha(key: str, sha: str) -> Optional[dict]:
             province_invoice_items.c.entry_id,
             province_invoice_items.c.club_id,
             province_invoice_items.c.decided_at,
+            province_invoice_items.c.payment_status,
         ).where(
             and_(
                 province_invoice_items.c.province == key,
@@ -265,7 +273,7 @@ async def _approved_by_sha(key: str, sha: str) -> Optional[dict]:
     )
     live = await _live_entries([row["entry_id"] for row in rows])
     for row in rows:
-        if row["entry_id"] and int(row["entry_id"]) in live:
+        if is_pending(row["payment_status"]) or (row["entry_id"] and int(row["entry_id"]) in live):
             return {
                 "item_id": int(row["id"]),
                 "batch_id": int(row["batch_id"]),
@@ -333,6 +341,8 @@ def _item_json(row: Any, names: dict[str, str], live: set[int]) -> dict:
         "duplicate_of": match.get("duplicate_of"),
         "entry_id": entry_id,
         "entry_missing": bool(entry_id) and entry_id not in live,
+        "payment_status": PAY_PENDING if is_pending(row["payment_status"]) else PAY_PAID,
+        "paid_day": row["paid_day"].isoformat() if row["paid_day"] else None,
         "has_pdf": _has_pdf(row),
         "decided_by": _s(row["decided_by"]),
         "decided_at": row["decided_at"].isoformat() if row["decided_at"] else None,
@@ -619,6 +629,28 @@ async def upload(
 # ---------------------------------------------------------------------------
 
 
+async def _insert_entry(key: str, *, club_id: str, amount: float, description: str, day: date, who: Optional[str]) -> int:
+    """Wpłata klubu z faktury (kind "in", source "invoice") - jedno miejsce dla zatwierdzenia i potwierdzenia."""
+    return int(
+        await database.execute(
+            insert(province_club_entries).values(
+                province=key,
+                club_id=club_id,
+                team_id=None,
+                team_name=None,
+                season=season_of(day),
+                kind="in",
+                amount=amount,
+                description=description,
+                day=day,
+                source="invoice",
+                created_by=who,
+                created_at=_now(),
+            )
+        )
+    )
+
+
 class ApproveItem(BaseModel):
     item_id: int
     club_id: str
@@ -633,6 +665,11 @@ class ApproveRequest(BaseModel):
     items: list[ApproveItem] = []
     #: Pozycje odrzucone świadomie - znikają z „do zatwierdzenia", zostają w historii.
     reject_ids: list[int] = []
+    #: "paid" (domyślnie) = wpłata od razu w saldzie; "pending" = czeka na płatność,
+    #: saldo rośnie dopiero po potwierdzeniu (`/items/confirm`).
+    payment_mode: str = PAY_PAID
+    #: Wyjątki od `payment_mode` dla pojedynczych pozycji: {"<item_id>": "paid"|"pending"}.
+    item_modes: dict[str, str] = {}
 
 
 @router.post("/batches/{batch_id}/approve", summary="Zatwierdź wybrane faktury jako wpłaty klubów")
@@ -663,7 +700,9 @@ async def approve(batch_id: int, payload: ApproveRequest):
         if status == STATUS_REJECTED:
             skipped.append({"item_id": wanted.item_id, "reason": f"{label}: odrzucona - najpierw ją przywróć."})
             continue
-        if status == STATUS_APPROVED and row["entry_id"] and await _live_entries([row["entry_id"]]):
+        if status == STATUS_APPROVED and (
+            is_pending(row["payment_status"]) or (row["entry_id"] and await _live_entries([row["entry_id"]]))
+        ):
             skipped.append({"item_id": wanted.item_id, "reason": f"{label}: już zatwierdzona."})
             continue
         if not row["parsed_json"] and _s(row["method"]) == "none" and status == STATUS_UNREADABLE:
@@ -691,25 +730,17 @@ async def approve(batch_id: int, payload: ApproveRequest):
 
         day = wanted.day or row["issue_date"] or _now().date()
         description = (_s(wanted.description) or _s(row["description"]) or f"Faktura {label}")[:500]
+        mode = pay_mode(
+            (payload.item_modes or {}).get(str(wanted.item_id)),
+            default=pay_mode(payload.payment_mode),
+        )
         async with database.transaction():
-            entry_id = int(
-                await database.execute(
-                    insert(province_club_entries).values(
-                        province=key,
-                        club_id=club_id,
-                        team_id=None,
-                        team_name=None,
-                        season=season_of(day),
-                        kind="in",
-                        amount=amount,
-                        description=description,
-                        day=day,
-                        source="invoice",
-                        created_by=who,
-                        created_at=_now(),
-                    )
+            # Oczekująca na płatność: bez wpisu w saldzie, wpis powstanie przy potwierdzeniu.
+            entry_id = None
+            if mode == PAY_PAID:
+                entry_id = await _insert_entry(
+                    key, club_id=club_id, amount=amount, description=description, day=day, who=who
                 )
-            )
             await database.execute(
                 update(province_invoice_items)
                 .where(province_invoice_items.c.id == row["id"])
@@ -720,6 +751,10 @@ async def approve(batch_id: int, payload: ApproveRequest):
                     description=description,
                     issue_date=day,
                     entry_id=entry_id,
+                    payment_status=mode,
+                    paid_day=day if mode == PAY_PAID else None,
+                    paid_by=who if mode == PAY_PAID else None,
+                    paid_at=_now() if mode == PAY_PAID else None,
                     decided_by=who,
                     decided_at=_now(),
                     note=None,
@@ -747,7 +782,9 @@ async def approve(batch_id: int, payload: ApproveRequest):
                         },
                     )
                 )
-        saved.append({"item_id": int(row["id"]), "entry_id": entry_id, "club_id": club_id, "amount": amount})
+        saved.append(
+            {"item_id": int(row["id"]), "entry_id": entry_id, "club_id": club_id, "amount": amount, "payment_status": mode}
+        )
 
     if payload.reject_ids:
         await database.execute(
@@ -764,6 +801,7 @@ async def approve(batch_id: int, payload: ApproveRequest):
 
     await _refresh_counters(batch_id)
     _CANDIDATES.clear()
+    SC.bump(key, base=False, reason="faktury: zatwierdzenie")
     detail = await _batch_detail(key, batch_id)
     detail["saved"] = saved
     detail["skipped"] = skipped
@@ -889,3 +927,146 @@ async def entry_pdf(
         .limit(1)
     )
     return _pdf_response(row)
+
+
+# ---------------------------------------------------------------------------
+# rejestr zatwierdzonych faktur, potwierdzanie płatności
+# ---------------------------------------------------------------------------
+
+
+
+@router.get("/register", summary="Rejestr zatwierdzonych faktur: opłacone i oczekujące na płatność")
+async def register(province: str = Query(...), season: Optional[str] = Query(None)):
+    key = require_province(province)
+    rows = await database.fetch_all(
+        select(*_ITEM_COLUMNS)
+        .where(
+            and_(
+                province_invoice_items.c.province == key,
+                province_invoice_items.c.status == STATUS_APPROVED,
+            )
+        )
+        .order_by(province_invoice_items.c.issue_date.desc(), province_invoice_items.c.id.desc())
+    )
+    wanted = _s(season)
+    _, names = await _candidates(key, wanted or season_of(_now()))
+    items = []
+    for row in rows:
+        day = row["issue_date"]
+        if wanted and (not day or season_of(day) != wanted):
+            continue
+        club_id = _s(row["club_id"])
+        items.append(
+            {
+                "id": int(row["id"]),
+                "batch_id": int(row["batch_id"]),
+                "club_id": club_id,
+                "club_name": names.get(club_id, club_id),
+                "invoice_no": _s(row["invoice_no"]),
+                "issue_date": day.isoformat() if day else None,
+                "amount": float(row["amount"] or 0),
+                "description": _s(row["description"]),
+                "buyer_name": _s(row["buyer_name"]),
+                "file_name": _s(row["file_name"]),
+                "payment_status": PAY_PENDING if is_pending(row["payment_status"]) else PAY_PAID,
+                "paid_day": row["paid_day"].isoformat() if row["paid_day"] else None,
+                "entry_id": int(row["entry_id"]) if row["entry_id"] else None,
+                "approved_at": row["decided_at"].isoformat() if row["decided_at"] else None,
+            }
+        )
+    return {"items": items, "totals": register_totals(items)}
+
+
+class ConfirmRequest(BaseModel):
+    province: Optional[str] = None
+    item_ids: list[int] = []
+    day: Optional[date] = None
+    created_by: Optional[str] = None
+
+
+class UnconfirmRequest(BaseModel):
+    province: Optional[str] = None
+    item_ids: list[int] = []
+
+
+async def _items_of(key: str, ids: list[int]):
+    if not ids:
+        return []
+    return await database.fetch_all(
+        select(*_ITEM_COLUMNS).where(
+            and_(
+                province_invoice_items.c.province == key,
+                province_invoice_items.c.status == STATUS_APPROVED,
+                province_invoice_items.c.id.in_([int(i) for i in ids]),
+            )
+        )
+    )
+
+
+@router.post("/items/confirm", summary="Potwierdź płatność faktur: wpłata trafia do salda klubu")
+async def confirm_items(payload: ConfirmRequest, province: Optional[str] = Query(None)):
+    key = require_province(_s(payload.province) or _s(province))
+    day = payload.day or _now().date()
+    who = _s(payload.created_by) or None
+    confirmed = 0
+    total_cents = 0
+    async with database.transaction():
+        for row in await _items_of(key, payload.item_ids):
+            if not is_pending(row["payment_status"]):
+                continue  # idempotentnie: opłaconych nie ruszamy
+            label = _s(row["invoice_no"]) or _s(row["file_name"])
+            amount = round(abs(float(row["amount"] or 0)), 2)
+            if amount <= 0 or not _s(row["club_id"]):
+                continue
+            entry_id = await _insert_entry(
+                key,
+                club_id=_s(row["club_id"]),
+                amount=amount,
+                description=(_s(row["description"]) or f"Faktura {label}")[:500],
+                day=day,
+                who=who,
+            )
+            await database.execute(
+                update(province_invoice_items)
+                .where(province_invoice_items.c.id == row["id"])
+                .values(
+                    payment_status=PAY_PAID,
+                    entry_id=entry_id,
+                    paid_day=day,
+                    paid_by=who,
+                    paid_at=_now(),
+                )
+            )
+            confirmed += 1
+            total_cents += int(round(amount * 100))
+    SC.bump(key, base=False, reason="faktury: potwierdzenie płatności")
+    return {"confirmed": confirmed, "total": round(total_cents / 100, 2)}
+
+
+@router.post("/items/unconfirm", summary="Cofnij potwierdzenie płatności: faktura znów czeka na płatność")
+async def unconfirm_items(payload: UnconfirmRequest, province: Optional[str] = Query(None)):
+    key = require_province(_s(payload.province) or _s(province))
+    reverted = 0
+    total_cents = 0
+    async with database.transaction():
+        for row in await _items_of(key, payload.item_ids):
+            if is_pending(row["payment_status"]):
+                continue
+            if row["entry_id"]:
+                await database.execute(
+                    delete(province_club_entries).where(
+                        and_(
+                            province_club_entries.c.id == row["entry_id"],
+                            province_club_entries.c.province == key,
+                        )
+                    )
+                )
+            await database.execute(
+                update(province_invoice_items)
+                .where(province_invoice_items.c.id == row["id"])
+                .values(payment_status=PAY_PENDING, entry_id=None, paid_day=None, paid_by=None, paid_at=None)
+            )
+            reverted += 1
+            total_cents += int(round(float(row["amount"] or 0) * 100))
+    SC.bump(key, base=False, reason="faktury: cofnięcie potwierdzenia")
+    return {"unconfirmed": reverted, "total": round(total_cents / 100, 2)}

@@ -34,6 +34,7 @@ from app import province_clubs_scope as S
 from app import province_club_budgets as CB
 from app import province_club_budgets_rules as BR
 from app import settlement_cache as SC
+from app.invoice_payment_rules import pending_sum
 from app import settlement_engine as E
 from app import settlement_rates as R
 from app.db import (
@@ -45,6 +46,7 @@ from app.db import (
     province_club_seasons,
     province_club_teams,
     province_clubs,
+    province_invoice_items,
     province_match_overrides,
     province_matches,
     province_settlement_matches,
@@ -185,6 +187,46 @@ async def _teams(province: str, season: str) -> tuple[dict[str, C.TeamRef], dict
         if code and code not in entry["codes"]:
             entry["codes"].append(code)
     return by_id, by_key, meta
+
+
+async def pending_invoices(province: str, season: str) -> dict[str, list[dict]]:
+    """
+    Faktury zatwierdzone, ale jeszcze nieopłacone (bez wpisu w saldzie), wg klubu.
+
+    Sezon z daty wystawienia. Nie wchodzą do salda - to osobna informacja
+    „oczekuje", dopóki ktoś nie potwierdzi płatności (province_invoices).
+    """
+    rows = await database.fetch_all(
+        select(
+            province_invoice_items.c.id,
+            province_invoice_items.c.club_id,
+            province_invoice_items.c.invoice_no,
+            province_invoice_items.c.issue_date,
+            province_invoice_items.c.amount,
+        )
+        .where(
+            and_(
+                province_invoice_items.c.province == province,
+                province_invoice_items.c.status == "approved",
+                province_invoice_items.c.payment_status == "pending",
+            )
+        )
+        .order_by(province_invoice_items.c.issue_date.desc(), province_invoice_items.c.id.desc())
+    )
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        day = row["issue_date"]
+        if not day or season_of(day) != season:
+            continue
+        out.setdefault(_s(row["club_id"]), []).append(
+            {
+                "id": int(row["id"]),
+                "invoice_no": _s(row["invoice_no"]),
+                "issue_date": day.isoformat(),
+                "amount": money(row["amount"] or 0),
+            }
+        )
+    return out
 
 
 async def _club_settings(province: str) -> dict[str, dict]:
@@ -587,6 +629,7 @@ async def _list_payload(
     # Wspólny budżet = jeden wiersz (23.09.2026). Salda, sumy sezonu i filtry
     # („Na minusie", „Przez okręg") liczą budżet, nie jego numery osobno.
     budgets = await CB.merged_clubs(key, base["clubs"])
+    pending = await pending_invoices(key, season)
 
     needle = team_key(q) if q else ""
     clubs: list[dict] = []
@@ -607,6 +650,7 @@ async def _list_payload(
         clubs.append(
             {
                 **club,
+                "pending_in": pending_sum(pending, list(club.get("member_ids") or [club["club_id"]])),
                 "teams": teams,
                 "categories": sorted({item["category"] for item in teams if item["category"]}),
             }
@@ -625,6 +669,7 @@ async def _list_payload(
         "settled": money_sum(item["settled"] for item in clubs),
         "charged": money_sum(item["charged"] for item in clubs),
         "balance": money_sum(item["balance"] for item in clubs),
+        "pending_in": money_sum(item["pending_in"] for item in clubs),
         "matches": sum(item["matches"] for item in clubs),
         "unassigned": len(unassigned),
     }
@@ -701,11 +746,12 @@ async def clubs_bundle(
         listing = await _list_payload(key, season, include_future=include_future)
         data = await load_clubs(key, season, include_future=include_future)
         groups = await CB.budget_groups(key)
+        pending = await pending_invoices(key, season)
         details = {
-            club["club_id"]: _detail_payload(key, season, club["club_id"], data, groups)
+            club["club_id"]: _detail_payload(key, season, club["club_id"], data, groups, pending)
             for club in listing["clubs"]
         }
-        details[DP.DISTRICT_PAYER_ID] = _detail_payload(key, season, DP.DISTRICT_PAYER_ID, data, groups)
+        details[DP.DISTRICT_PAYER_ID] = _detail_payload(key, season, DP.DISTRICT_PAYER_ID, data, groups, pending)
         return {**listing, "details": details}
 
     pack = await SC.packed("clubs_bundle", key, (season, bool(include_future)), build)
@@ -845,7 +891,14 @@ async def create_team_from_match(payload: CreateTeamFromMatchRequest):
     }
 
 
-def _detail_payload(key: str, season: str, club_id: str, data: dict, groups: list[dict]) -> dict:
+def _detail_payload(
+    key: str,
+    season: str,
+    club_id: str,
+    data: dict,
+    groups: list[dict],
+    pending: Optional[dict[str, list[dict]]] = None,
+) -> dict:
     """Karta klubu z policzonego sezonu (`load_clubs`) - bez pytania bazy."""
     # Wejście po numerze DOWOLNEGO członka wspólnego budżetu pokazuje cały
     # budżet: mecze, drużyny i wpisy wszystkich numerów, ustawienia z głównego.
@@ -886,10 +939,17 @@ def _detail_payload(key: str, season: str, club_id: str, data: dict, groups: lis
         for member_id in member_ids
     ]
     multi = len(member_ids) > 1
+    pending_items = sorted(
+        [item for member_id in member_ids for item in (pending or {}).get(member_id, [])],
+        key=lambda item: (item["issue_date"], item["id"]),
+        reverse=True,
+    )
 
     return {
         "province": key,
         "season": season,
+        "pending_in": money_sum(item["amount"] for item in pending_items),
+        "pending_invoices": pending_items,
         "club": {
             "club_id": primary,
             "name": (group or {}).get("name") or member_name(primary),
@@ -947,7 +1007,9 @@ async def club_detail(
     async def build() -> dict:
         # Ten sam policzony sezon co lista - karta nie liczy okręgu drugi raz.
         data = await load_clubs(key, season, include_future=include_future)
-        return _detail_payload(key, season, _s(club_id), data, await CB.budget_groups(key))
+        return _detail_payload(
+            key, season, _s(club_id), data, await CB.budget_groups(key), await pending_invoices(key, season)
+        )
 
     pack = await SC.packed("club_detail", key, (season, _s(club_id), bool(include_future)), build)
     return SC.respond(request, pack)

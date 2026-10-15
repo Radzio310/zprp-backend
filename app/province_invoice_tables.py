@@ -64,6 +64,12 @@ def define_tables(metadata):
         Column("entry_id", Integer, nullable=True, index=True),
         Column("decided_by", String, nullable=True),
         Column("decided_at", DateTime(timezone=True), nullable=True),
+        # "paid" | "pending"; NULL = opłacona (faktury sprzed tej funkcji).
+        # Pozycja "pending" nie ma wpisu w saldzie (entry_id NULL) do czasu potwierdzenia.
+        Column("payment_status", String, nullable=True),
+        Column("paid_day", Date, nullable=True),
+        Column("paid_by", String, nullable=True),
+        Column("paid_at", DateTime(timezone=True), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
     )
 
