@@ -685,11 +685,9 @@ async def _schedule_payload(competition, rounds, matchdays, cards, team_id) -> d
     # `matchday_id` nie jest w kartach (lżejsze), dociągamy mapę jednym zapytaniem.
     ids = [c["match_id"] for c in cards]
     day_of: dict[str, Optional[str]] = {}
-    round_of: dict[str, Optional[str]] = {}
     if ids:
         rows = await database.fetch_all(select(M.c.match_id, M.c.matchday_id, M.c.round_id).where(M.c.match_id.in_(ids)))
         day_of = {r["match_id"]: r["matchday_id"] for r in rows}
-        round_of = {r["match_id"]: r["round_id"] for r in rows}
     days_by_round: dict[str, list[dict]] = {}
     known_days = set()
     for d in matchdays:

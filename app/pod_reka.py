@@ -10,16 +10,16 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
 from sqlalchemy import and_, func, insert, select, update
 
@@ -37,6 +37,16 @@ from app.db import (
     zprp_public_teams,
 )
 from app.deps import Settings, get_settings
+from app.pod_reka_login_rules import (
+    AttemptLimiter,
+    LoginError,
+    check_scope,
+    client_key,
+    decode_html,
+    encode_login_form,
+    classify_login_response,
+    merge_cookies,
+)
 from app.pod_reka_rules import parse_club_scope, sanitize_public as _sanitize_public
 from app.zprp_public.discord import webhook_configured
 
@@ -51,7 +61,7 @@ SESSION_COOKIE = "baza_club_session"
 CSRF_COOKIE = "baza_club_csrf"
 SESSION_HOURS = 12
 ALLOWED_STATUSES = {"draft", "submitted", "needs_changes", "under_review", "accepted", "published", "archived"}
-_LOGIN_ATTEMPTS: dict[str, list[datetime]] = {}
+_LOGIN_LIMITER = AttemptLimiter()
 
 
 def _dict(row: Any) -> dict[str, Any]:
@@ -83,10 +93,7 @@ def _decrypt_cookies(payload: str, settings: Settings) -> dict[str, str]:
 
 
 def _decode_response(response: httpx.Response) -> str:
-    content_type = response.headers.get("content-type", "")
-    match = re.search(r"charset=([^;]+)", content_type, re.I)
-    encoding = match.group(1).strip() if match else "iso-8859-2"
-    return response.content.decode(encoding, errors="replace")
+    return decode_html(response.content, response.headers.get("content-type", ""))
 
 
 class ReportCreate(BaseModel):
@@ -131,6 +138,15 @@ class TalentUpdate(BaseModel):
 class TalentReview(BaseModel):
     status: Literal["needs_changes", "under_review", "accepted", "published", "archived"]
     public_fields: list[str] = Field(default_factory=list)
+    # Wewnętrzna ocena admina (0-100); nigdy nie trafia do odpowiedzi publicznych ani trenera.
+    private_score: float | None = Field(default=None, ge=0, le=100)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class TemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    active: bool | None = None
+    schema: dict[str, Any] | None = None
 
 
 class TemplateCreate(BaseModel):
@@ -168,10 +184,20 @@ async def _session(
             async with httpx.AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=20.0) as client:
                 account_response = await client.get("/index.php?a=konto", cookies=cookies)
                 teams_response = await client.get("/index.php?a=druzyny", cookies=cookies)
-        except httpx.HTTPError as exc:
-            raise HTTPException(503, "Nie udało się odświeżyć zakresu konta klubowego") from exc
-        scope = parse_club_scope(_decode_response(account_response), _decode_response(teams_response))
-        if scope["account_type"] != "club" or not scope["active"] or scope["club_id"] != data["club_id"] or not scope["team_ids"]:
+        except httpx.HTTPError:
+            # baza.zprp.pl chwilowo nie odpowiada: sesja BAZY pod RĘKĄ nadal jest
+            # ważna (do 12 h), więc zostajemy przy ostatnio potwierdzonym zakresie
+            # zamiast wylogowywać użytkownika w trakcie awarii źródła.
+            return data
+        if account_response.status_code >= 500 or teams_response.status_code >= 500:
+            return data
+        account_html = _decode_response(account_response)
+        scope = parse_club_scope(account_html, _decode_response(teams_response))
+        try:
+            check_scope(scope, relogin_html=account_html)
+        except LoginError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        if scope["club_id"] != data["club_id"]:
             raise HTTPException(403, "Nie udało się ponownie potwierdzić zakresu konta klubowego")
         now = datetime.now(timezone.utc)
         await database.execute(
@@ -194,6 +220,23 @@ async def _csrf_session(
 
 async def _audit(submission_id: str, actor: str, action: str, changes: dict[str, Any]) -> None:
     await database.execute(insert(pod_reka_talent_audit).values(submission_id=submission_id, actor=actor, action=action, changes_json=changes))
+
+
+async def admin_read_guard(authorization: str | None = Header(default=None)) -> None:
+    """Odczyty panelu admina. Bramka zapisów (`admin_write_guard`) odczytów nie
+    sprawdza, a tu są dane zgłoszeń. Zachowanie jak w całej bramce: dopóki nie
+    ma `ADMIN_WRITE_STRICT`, nic nie odrzucamy; po jego ustawieniu odczyt
+    wymaga tokenu admina z listy `allowed_admins`."""
+    from app import admin_guard as guard
+
+    if not guard.strict_mode():
+        return
+    payload, reason = guard.decode_token(guard.bearer_token(authorization))
+    if payload is None:
+        raise guard._refusal(guard.TIER_ADMIN, reason, None)
+    allowed, reason = await guard._authorize(guard.TIER_ADMIN, "", None, payload)
+    if not allowed:
+        raise guard._refusal(guard.TIER_ADMIN, reason, None)
 
 
 @router.post("/reports", status_code=201)
@@ -295,27 +338,40 @@ async def revoke_push_subscription(
 
 
 @router.post("/auth/login")
-async def club_login(payload: ClubLogin, response: Response, request: Request, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
-    remote = request.client.host if request.client else "unknown"
-    now = datetime.now(timezone.utc)
-    recent = [attempt for attempt in _LOGIN_ATTEMPTS.get(remote, []) if attempt > now - timedelta(minutes=10)]
-    if len(recent) >= 5:
-        raise HTTPException(429, "Zbyt wiele prób logowania. Spróbuj ponownie za kilka minut")
-    recent.append(now)
-    _LOGIN_ATTEMPTS[remote] = recent
-    form = urlencode({"login": payload.username, "haslo": payload.password, "from": "/index.php?"}, encoding="iso-8859-2", errors="strict")
-    headers = {"Content-Type": "application/x-www-form-urlencoded; charset=iso-8859-2"}
-    async with httpx.AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=25.0) as client:
-        login_response = await client.post("/login.php", content=form, headers=headers)
-        login_html = _decode_response(login_response)
-        if "/index.php" not in login_response.url.path or "zaloguj" in login_html.lower() and not login_response.cookies:
-            raise HTTPException(401, "Nieprawidłowy login lub hasło")
-        cookies = dict(login_response.cookies)
-        account_response = await client.get("/index.php?a=konto", cookies=cookies)
-        teams_response = await client.get("/index.php?a=druzyny", cookies=cookies)
-    scope = parse_club_scope(_decode_response(account_response), _decode_response(teams_response))
-    if scope["account_type"] != "club" or not scope["active"] or not scope["club_id"] or not scope["team_ids"]:
-        raise HTTPException(403, "Nie udało się jednoznacznie potwierdzić aktywnego konta klubowego i jego drużyn")
+async def club_login(payload: ClubLogin, response: Response, request: Request, settings: Settings = Depends(get_settings)) -> Any:
+    """Logowanie kontem klubowym baza.zprp.pl (tylko odczyt, hasło nie jest zapisywane).
+
+    Błędy mają `detail` (tekst) oraz `code`: bad_credentials, rate_limited,
+    upstream_unavailable, unexpected_response, not_club_account,
+    inactive_account, no_teams (opis w `app/pod_reka_login_rules.py`)."""
+    address = client_key(request.headers.get("x-forwarded-for", ""), request.client.host if request.client else "")
+    limit_keys = (f"ip:{address}", f"user:{payload.username.strip().lower()}")
+    try:
+        if _LOGIN_LIMITER.blocked(*limit_keys):
+            raise LoginError("rate_limited")
+        form = encode_login_form(payload.username, payload.password)
+        headers = {"Content-Type": "application/x-www-form-urlencoded; charset=iso-8859-2"}
+        try:
+            async with httpx.AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=25.0) as client:
+                login_response = await client.post("/login.php", content=form, headers=headers)
+                classify_login_response(login_response.url.path, login_response.status_code, _decode_response(login_response))
+                cookies = merge_cookies(dict(client.cookies), dict(login_response.cookies))
+                if not cookies:
+                    raise LoginError("unexpected_response")
+                account_response = await client.get("/index.php?a=konto", cookies=cookies)
+                teams_response = await client.get("/index.php?a=druzyny", cookies=cookies)
+        except httpx.HTTPError as exc:
+            raise LoginError("upstream_unavailable") from exc
+        if account_response.status_code >= 500 or teams_response.status_code >= 500:
+            raise LoginError("upstream_unavailable")
+        account_html = _decode_response(account_response)
+        scope = parse_club_scope(account_html, _decode_response(teams_response))
+        check_scope(scope, relogin_html=account_html)
+    except LoginError as exc:
+        if exc.code in {"bad_credentials", "not_club_account", "inactive_account", "no_teams"}:
+            _LOGIN_LIMITER.fail(*limit_keys)
+        return JSONResponse(status_code=exc.status, content=exc.body())
+    _LOGIN_LIMITER.success(*limit_keys)
 
     raw_session = secrets.token_urlsafe(48)
     csrf_token = secrets.token_urlsafe(32)
@@ -446,6 +502,85 @@ async def submit_talent(submission_id: str, session: dict[str, Any] = Depends(_c
     return {"submission_id": submission_id, "status": "submitted"}
 
 
+@router.get("/trainer/overview")
+async def trainer_overview(session: dict[str, Any] = Depends(_session)) -> dict[str, Any]:
+    """Strefa trenera: klub, drużyny z zakresu konta (najnowszy sezon) i liczniki zgłoszeń."""
+    team_ids = [str(value) for value in session.get("team_ids_json") or []]
+    rows = await database.fetch_all(
+        select(
+            zprp_public_teams.c.team_id, zprp_public_teams.c.season_id, zprp_public_teams.c.season_name,
+            zprp_public_teams.c.name, zprp_public_teams.c.category, zprp_public_teams.c.gender,
+        ).where(zprp_public_teams.c.team_id.in_(team_ids or [""]))
+        .order_by(zprp_public_teams.c.season_name.desc())
+    )
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        latest.setdefault(row["team_id"], _dict(row))
+    statuses = await database.fetch_all(
+        select(pod_reka_talent_submissions.c.status, func.count().label("count"))
+        .where(pod_reka_talent_submissions.c.club_id == session["club_id"])
+        .group_by(pod_reka_talent_submissions.c.status)
+    )
+    return {
+        "display_name": session.get("display_name"),
+        "club_id": session["club_id"],
+        "teams": sorted(latest.values(), key=lambda t: t["name"]),
+        "talents": {row["status"]: int(row["count"]) for row in statuses},
+        "expires_at": session.get("expires_at"),
+    }
+
+
+@router.get("/trainer/talents/{submission_id}")
+async def trainer_talent_detail(submission_id: str, session: dict[str, Any] = Depends(_session)) -> dict[str, Any]:
+    row = await database.fetch_one(
+        select(pod_reka_talent_submissions).where(and_(
+            pod_reka_talent_submissions.c.submission_id == submission_id,
+            pod_reka_talent_submissions.c.club_id == session["club_id"],
+        ))
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono zgłoszenia")
+    data = _dict(row)
+    data.pop("private_score", None)
+    audit = await database.fetch_all(
+        select(pod_reka_talent_audit.c.actor, pod_reka_talent_audit.c.action, pod_reka_talent_audit.c.created_at)
+        .where(pod_reka_talent_audit.c.submission_id == submission_id).order_by(pod_reka_talent_audit.c.created_at)
+    )
+    return {"submission": data, "history": [_dict(a) for a in audit]}
+
+
+@router.delete("/trainer/talents/{submission_id}")
+async def archive_talent_draft(submission_id: str, session: dict[str, Any] = Depends(_csrf_session)) -> dict[str, Any]:
+    """Trener wycofuje własny szkic (lub zwrócone do poprawy zgłoszenie) - archiwizacja, nie kasowanie."""
+    current = await database.fetch_one(select(pod_reka_talent_submissions.c.status).where(and_(
+        pod_reka_talent_submissions.c.submission_id == submission_id,
+        pod_reka_talent_submissions.c.club_id == session["club_id"],
+        pod_reka_talent_submissions.c.status.in_(["draft", "needs_changes"]),
+    )))
+    if not current:
+        raise HTTPException(404, "Nie znaleziono szkicu do wycofania")
+    now = datetime.now(timezone.utc)
+    await database.execute(update(pod_reka_talent_submissions).where(pod_reka_talent_submissions.c.submission_id == submission_id).values(status="archived", archived_at=now, updated_at=now))
+    await _audit(submission_id, session["username"], "archived_by_trainer", {"from": current["status"]})
+    return {"submission_id": submission_id, "status": "archived"}
+
+
+@router.get("/talents/{submission_id}")
+async def public_talent_detail(submission_id: str) -> dict[str, Any]:
+    row = await database.fetch_one(
+        select(pod_reka_talent_submissions, zprp_public_players.c.first_name, zprp_public_players.c.last_name, zprp_public_players.c.birth_year, zprp_public_players.c.photo_url.label("source_photo_url"), zprp_public_teams.c.name.label("team_name"), zprp_public_teams.c.category)
+        .join(zprp_public_players, zprp_public_players.c.player_id == pod_reka_talent_submissions.c.player_id)
+        .join(zprp_public_teams, and_(zprp_public_teams.c.team_id == pod_reka_talent_submissions.c.team_id, zprp_public_teams.c.season_id == pod_reka_talent_submissions.c.season_id))
+        .where(and_(pod_reka_talent_submissions.c.submission_id == submission_id, pod_reka_talent_submissions.c.status == "published"))
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono opublikowanego profilu")
+    data = _dict(row)
+    public_fields = set(data.get("public_fields_json") or [])
+    profile = {key: value for key, value in (data.get("data_json") or {}).items() if key in public_fields}
+    return {"submission_id": data["submission_id"], "player_id": data["player_id"], "first_name": data.get("first_name"), "last_name": data.get("last_name"), "birth_year": data.get("birth_year"), "team_id": data["team_id"], "team_name": data.get("team_name"), "category": data.get("category"), "photo_url": data.get("photo_url") or data.get("source_photo_url"), "video_url": data.get("video_url"), "profile": profile, "published_at": data.get("published_at")}
+
+
 @router.get("/talents")
 async def public_talents(
     team_id: str | None = None,
@@ -485,7 +620,7 @@ async def public_talents(
     return {"items": items, "count": len(items)}
 
 
-@admin_router.get("/overview")
+@admin_router.get("/overview", dependencies=[Depends(admin_read_guard)])
 async def admin_overview() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     reports = await database.fetch_val(select(func.count()).select_from(pod_reka_reports).where(pod_reka_reports.c.deleted_at.is_(None)))
@@ -502,13 +637,55 @@ async def admin_overview() -> dict[str, Any]:
     }
 
 
-@admin_router.get("/talents")
+@admin_router.get("/talents", dependencies=[Depends(admin_read_guard)])
 async def admin_talents(status: str | None = None, limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
     statement = select(pod_reka_talent_submissions).order_by(pod_reka_talent_submissions.c.updated_at.desc()).limit(limit)
     if status:
         statement = statement.where(pod_reka_talent_submissions.c.status == status)
     rows = await database.fetch_all(statement)
     return {"items": [_dict(row) for row in rows], "count": len(rows)}
+
+
+@admin_router.get("/talents/{submission_id}", dependencies=[Depends(admin_read_guard)])
+async def admin_talent_detail(submission_id: str) -> dict[str, Any]:
+    row = await database.fetch_one(
+        select(pod_reka_talent_submissions, zprp_public_players.c.first_name, zprp_public_players.c.last_name, zprp_public_players.c.birth_year, zprp_public_teams.c.name.label("team_name"), zprp_public_teams.c.category)
+        .join(zprp_public_players, zprp_public_players.c.player_id == pod_reka_talent_submissions.c.player_id)
+        .join(zprp_public_teams, and_(zprp_public_teams.c.team_id == pod_reka_talent_submissions.c.team_id, zprp_public_teams.c.season_id == pod_reka_talent_submissions.c.season_id))
+        .where(pod_reka_talent_submissions.c.submission_id == submission_id)
+    )
+    if not row:
+        raise HTTPException(404, "Nie znaleziono zgłoszenia")
+    audit = await database.fetch_all(select(pod_reka_talent_audit).where(pod_reka_talent_audit.c.submission_id == submission_id).order_by(pod_reka_talent_audit.c.created_at))
+    return {"submission": _dict(row), "history": [_dict(a) for a in audit]}
+
+
+@admin_router.get("/templates", dependencies=[Depends(admin_read_guard)])
+async def admin_templates(include_inactive: bool = True) -> dict[str, Any]:
+    statement = select(pod_reka_talent_templates).order_by(pod_reka_talent_templates.c.name, pod_reka_talent_templates.c.version.desc())
+    if not include_inactive:
+        statement = statement.where(pod_reka_talent_templates.c.active.is_(True))
+    rows = await database.fetch_all(statement)
+    return {"items": [_dict(row) for row in rows], "count": len(rows)}
+
+
+@admin_router.patch("/templates/{template_id}")
+async def update_template(template_id: int, payload: TemplateUpdate) -> dict[str, Any]:
+    """Zmiana nazwy / włączenie-wyłączenie / nowy schemat (schemat podbija wersję;
+    istniejące zgłoszenia zachowują wersję, na której powstały)."""
+    current = await database.fetch_one(select(pod_reka_talent_templates).where(pod_reka_talent_templates.c.template_id == template_id))
+    if not current:
+        raise HTTPException(404, "Nie znaleziono szablonu")
+    values: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+    if payload.name is not None:
+        values["name"] = payload.name
+    if payload.active is not None:
+        values["active"] = payload.active
+    if payload.schema is not None and payload.schema != current["schema_json"]:
+        values["schema_json"] = payload.schema
+        values["version"] = int(current["version"]) + 1
+    await database.execute(update(pod_reka_talent_templates).where(pod_reka_talent_templates.c.template_id == template_id).values(**values))
+    return {"template_id": template_id, "version": values.get("version", current["version"]), "active": values.get("active", current["active"])}
 
 
 @admin_router.post("/templates", status_code=201)
@@ -527,12 +704,14 @@ async def review_talent(submission_id: str, payload: TalentReview, request: Requ
         raise HTTPException(404, "Nie znaleziono zgłoszenia")
     now = datetime.now(timezone.utc)
     values: dict[str, Any] = {"status": payload.status, "public_fields_json": payload.public_fields, "updated_at": now}
+    if payload.private_score is not None:
+        values["private_score"] = payload.private_score
     if payload.status == "published":
         values["published_at"] = now
     if payload.status == "archived":
         values["archived_at"] = now
     await database.execute(update(pod_reka_talent_submissions).where(pod_reka_talent_submissions.c.submission_id == submission_id).values(**values))
-    await _audit(submission_id, request.headers.get("X-Admin-Actor", "admin"), "reviewed", {"from": current["status"], "to": payload.status, "public_fields": payload.public_fields})
+    await _audit(submission_id, request.headers.get("X-Admin-Actor", "admin"), "reviewed", {"from": current["status"], "to": payload.status, "public_fields": payload.public_fields, "note": payload.note})
     return {"submission_id": submission_id, "status": payload.status}
 
 

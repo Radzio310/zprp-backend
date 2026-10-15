@@ -83,7 +83,9 @@ def looks_like_login_page(html: str) -> bool:
     low = (html or "").lower()
     has_login = 'name="login"' in low or "name='login'" in low
     has_pass = 'name="haslo"' in low or "name='haslo'" in low
-    return (has_login and has_pass) or re.search(r"<form[^>]+action=['\"]?login\.php", low) is not None
+    # Samo `action=login.php` nie wystarcza: formularz zmiany hasła na stronie
+    # konta też tak wygląda, a to poprawnie zalogowany użytkownik.
+    return has_login and has_pass
 
 
 def classify_login_response(final_path: str, status_code: int, html: str) -> None:
@@ -93,7 +95,7 @@ def classify_login_response(final_path: str, status_code: int, html: str) -> Non
     `app/auth.py` i `app/baza_web.py`)."""
     if status_code >= 500:
         raise LoginError("upstream_unavailable")
-    if "/index.php" in (final_path or "") and not looks_like_login_page(html):
+    if "/index.php" in (final_path or ""):
         return
     low = (html or "").lower()
     if (
@@ -117,9 +119,10 @@ def merge_cookies(*sources: Mapping[str, str]) -> dict[str, str]:
 
 def check_scope(scope: Mapping[str, Any], *, relogin_html: str = "") -> None:
     """Zakres konta (z `parse_club_scope`) musi być aktywnym kontem klubowym."""
-    if relogin_html and looks_like_login_page(relogin_html):
-        raise LoginError("session_expired")
     if scope.get("account_type") != "club":
+        # Strona logowania zamiast konta = sesja po stronie ZPRP już nie żyje.
+        if relogin_html and looks_like_login_page(relogin_html):
+            raise LoginError("session_expired")
         raise LoginError("not_club_account")
     if not scope.get("active"):
         raise LoginError("inactive_account")
