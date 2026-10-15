@@ -1638,7 +1638,12 @@ async def _forecast_assignments(
             central = R.is_central_level_competition(item["code"])
             table_km = None if central else book.lookup(home, item["city"], item["match_at"].date())
             hit = NL.pick_distance(
-                central, home=home, city=item["city"], table_km=table_km, national=national
+                central,
+                home=home,
+                city=item["city"],
+                table_km=table_km,
+                national=national,
+                province=key,
             )
             if hit is not None:
                 km, source = hit

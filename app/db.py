@@ -1316,6 +1316,27 @@ zprp_judges_seen = Table(
     Column("seen_at", DateTime(timezone=True), server_default=func.now()),
 )
 
+# Załączniki meczu ukryte na rozgrywki.zprp.pl (`hide_attachment.php`).
+# Ukryty plik znika z publicznego API meczu, więc bez tej księgi nie byłoby
+# skąd wziąć listy „do przywrócenia". Jeden wiersz na parę (mecz, załącznik):
+# ponowne ukrycie po przywróceniu odświeża `hidden_at` i zeruje `restored_at`.
+# Reguły i zapis: `app/zprp_hidden_attachments.py`.
+zprp_hidden_attachments = Table(
+    "zprp_hidden_attachments",
+    metadata,
+    Column("zprp_match_id", String, primary_key=True),   # IdZawody
+    Column("attachment_id", String, primary_key=True),   # protokol_id z API
+    Column("filename", String, nullable=True),
+    Column("label", String, nullable=True),
+    Column("file_url", String, nullable=True),
+    Column("is_pdf", Boolean, nullable=False, server_default=text("false")),
+    Column("hidden_at", DateTime(timezone=True), server_default=func.now()),
+    Column("hidden_by_name", String, nullable=True),
+    Column("hidden_by_judge_id", String, nullable=True),
+    Column("restored_at", DateTime(timezone=True), nullable=True),
+    Column("restored_by_name", String, nullable=True),
+)
+
 
 # 18.1h) Panel klubów: rozgrywki i drużyny z sezonu
 #
@@ -4865,4 +4886,10 @@ with engine.connect() as _conn:
                 """
             )
         )
+    # Ogólnopolska tabela odległości: węzły miejscowości i szczegóły
+    # dokumentów (15.10.2026) - lista w `app/national_distance_tables.py`.
+    from app.national_distance_tables import MIGRATIONS as _NATIONAL_DISTANCE_MIGRATIONS
+
+    for _statement in _NATIONAL_DISTANCE_MIGRATIONS:
+        _conn.execute(text(_statement))
     _conn.commit()

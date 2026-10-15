@@ -81,6 +81,8 @@ EMITTED = [
     "zprp.summary_sent",
     "zprp.full_data_sent",
     "zprp.attachment_sent",
+    "zprp.attachment_hidden",
+    "zprp.attachment_restored",
     # Od 12.09.2026 ślad wysyłki zapisuje także SERWER w chwili wysyłania
     # (`app/proel_send_journal.py`), więc trzy etykiety bez emitera przestały
     # być martwe.

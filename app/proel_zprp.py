@@ -1419,6 +1419,283 @@ async def zprp_attachment(
     return out
 
 
+# ─────────────────── widoczność załącznika na stronie WWW ───────────────────
+#
+# `hide_attachment.php` (API p8) chowa wgrany plik z rozgrywki.zprp.pl albo
+# przywraca go (`ukryty_www` 1/0). Plik zostaje na dysku ZPRP. Upstream nie
+# sprawdza ról ani zatwierdzenia protokołu - sprawdza tylko parę (mecz,
+# załącznik). Dlatego przed wywołaniem pytamy publiczne API meczu:
+#   • protokół zatwierdzony (`protokol_zatwierdz == "1"`) -> 409 MATCH_APPROVED,
+#   • ukrywany plik musi stać w `Zalczniki` tego meczu,
+#   • przywracany plik musi stać w NASZEJ księdze ukrytych dla tego meczu
+#     (ukryty znika z publicznego API, więc innego dowodu nie ma).
+#
+# Uprawnienie do czynności: to samo co przy wysyłce załącznika - `hash_sesji`.
+# Sesję ZPRP otwiera wyłącznie token meczu albo numer sędziego z obsady
+# (`POST /proel/zprp/auth`), a kto ją dostaje na telefonie, rozstrzyga aplikacja
+# (`hasOwnPostMatchAuthority`). Ani `/attachment`, ani `/match-comment` nie
+# sprawdzają roli po stronie serwera - ta trasa trzyma ten sam poziom.
+
+#: Zdarzenia dziennika - etykiety w `app/proel_journal.py`.
+EVENT_ATTACHMENT_HIDDEN = "zprp.attachment_hidden"
+EVENT_ATTACHMENT_RESTORED = "zprp.attachment_restored"
+
+_DETAILS_URL = "https://rozgrywki.zprp.pl/api/pokaz_mecze_szczegoly.php"
+
+
+class ZprpAttachmentVisibilityRequest(BaseModel):
+    hash_sesji: str
+    zprp_match_id: Any
+    attachment_id: Any
+    #: True = ukryj na WWW, False = przywróć.
+    hidden: bool
+    # Opis pliku z telefonu - tylko do księgi, gdy publiczne API go nie poda.
+    filename: Optional[str] = None
+    label: Optional[str] = None
+    file_url: Optional[str] = None
+    is_pdf: Optional[bool] = None
+
+
+async def _fetch_match_details(zprp_match_id: int) -> Optional[Dict[str, Any]]:
+    """Rekord meczu z publicznego API albo `None` (awaria, pusta odpowiedź).
+
+    Osobna funkcja, żeby testy podmieniały ją tak samo jak `_post_upstream`.
+    """
+    from app.zprp_hidden_attachments import match_from_details
+
+    try:
+        resp = await _upstream_client().get(
+            _DETAILS_URL, params={"Zawody": str(zprp_match_id)}
+        )
+        if resp.status_code != 200:
+            return None
+        return match_from_details(resp.json())
+    except Exception:
+        logger.warning("ProEl ZPRP: odczyt szczegółów meczu %s nieudany", zprp_match_id)
+        return None
+
+
+def _visibility_error(status: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+async def set_attachment_visibility(
+    payload: ZprpAttachmentVisibilityRequest,
+    *,
+    by_name: Optional[str] = None,
+    by_judge_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rdzeń ukrycia/przywrócenia załącznika - wydzielony z trasy dla testów.
+
+    Zwraca `{"ok": True, "hidden": bool, "already": bool}`; `already` = stan
+    w ZPRP był już taki, o jaki proszono.
+    """
+    from app import zprp_hidden_attachments as ledger
+
+    hash_sesji = (payload.hash_sesji or "").strip()
+    if not hash_sesji:
+        raise _visibility_error(400, "BAD_REQUEST", "Brak hash_sesji.")
+    match_id = ledger.normalize_match_id(payload.zprp_match_id)
+    attachment_id = ledger.normalize_attachment_id(payload.attachment_id)
+    if match_id is None or attachment_id is None:
+        raise _visibility_error(
+            400, "BAD_REQUEST", "Brak numeru meczu albo identyfikatora załącznika."
+        )
+
+    _require_app_key()
+
+    match = await _fetch_match_details(match_id)
+    if match is None:
+        raise _visibility_error(
+            502,
+            "UPSTREAM_ERROR",
+            "Nie udało się sprawdzić meczu w ZPRP. Spróbuj ponownie za chwilę.",
+        )
+    if ledger.is_approved(match):
+        raise _visibility_error(
+            409,
+            "MATCH_APPROVED",
+            "Protokół jest już zatwierdzony w ZPRP - załącznikami nie da się już zarządzać.",
+        )
+
+    visible = ledger.visible_attachments(match)
+    open_entry: Optional[Dict[str, Any]] = None
+    try:
+        open_entry = await ledger.ledger_open_entry(match_id, attachment_id)
+    except Exception:
+        logger.warning("ProEl ZPRP: odczyt księgi ukrytych nieudany", exc_info=True)
+
+    hidden = bool(payload.hidden)
+    if attachment_id not in visible:
+        if hidden and open_entry is not None:
+            # Plik już schowany (zniknął z API) i to my go schowaliśmy.
+            return {"ok": True, "hidden": True, "already": True}
+        if not hidden and open_entry is None:
+            raise _visibility_error(
+                404,
+                "ATTACHMENT_NOT_FOUND",
+                "Tego załącznika nie ma wśród ukrytych w tym meczu.",
+            )
+        if hidden:
+            raise _visibility_error(
+                404,
+                "ATTACHMENT_NOT_FOUND",
+                "Nie znaleziono takiego załącznika w tym meczu.",
+            )
+    elif not hidden and open_entry is None:
+        # Widoczny, a nikt u nas go nie chował - przywracać nie ma czego.
+        return {"ok": True, "hidden": False, "already": True}
+
+    upstream_payload: Dict[str, Any] = {
+        "hash_sesji": hash_sesji,
+        "id_zawody": match_id,
+        "id_zalacznik": int(attachment_id),
+        "ukryty_www": 1 if hidden else 0,
+    }
+    async with match_write_lock(_match_lock_key(match_id, hash_sesji)):
+        status, data = await _call_upstream("hide_attachment.php", upstream_payload)
+
+    if status == 200 and str(data.get("status") or "").lower() == "success":
+        already = ledger.is_already_current(data.get("message"))
+        try:
+            if hidden:
+                await ledger.ledger_mark_hidden(
+                    match_id,
+                    attachment_id,
+                    values=ledger.ledger_values(
+                        client={
+                            "filename": payload.filename,
+                            "label": payload.label,
+                            "file_url": payload.file_url,
+                            "is_pdf": payload.is_pdf,
+                        },
+                        upstream=visible.get(attachment_id),
+                    ),
+                    by_name=by_name,
+                    by_judge_id=by_judge_id,
+                )
+            else:
+                await ledger.ledger_mark_restored(match_id, attachment_id, by_name=by_name)
+        except Exception:
+            # ZPRP już zmienił stan - odpowiedź ma to powiedzieć. Brak wpisu
+            # w księdze kosztuje najwyżej pozycję w „koszu", nie zmianę.
+            logger.error("ProEl ZPRP: zapis księgi ukrytych nieudany", exc_info=True)
+        return {"ok": True, "hidden": hidden, "already": already}
+
+    if status == 401:
+        raise _visibility_error(
+            401, str(data.get("code") or "SESSION_EXPIRED"), "Sesja ZPRP wygasła."
+        )
+    if status == 404:
+        raise _visibility_error(
+            404,
+            "ATTACHMENT_NOT_FOUND",
+            "Nie znaleziono takiego załącznika dla tego meczu w ZPRP.",
+        )
+    if status == 403 or str(data.get("code") or "").upper() == "PROTOCOL_LOCKED":
+        code = str(data.get("code") or "").upper()
+        if code == "PROTOCOL_LOCKED" or not code:
+            raise _visibility_error(
+                409,
+                "MATCH_APPROVED",
+                "Protokół jest już zatwierdzony w ZPRP - załącznikami nie da się już zarządzać.",
+            )
+        _raise_if_inactive(data)
+        logger.error("ProEl ZPRP hide_attachment odrzucone (403 %s) - sprawdź PROEL_APP_KEY", code)
+        raise _visibility_error(
+            502, "PROEL_CONFIG", "Serwer ZPRP odrzucił aplikację. Zgłoś to administratorowi BAZY."
+        )
+    if status == 400:
+        # Jak przy uwagach: 400 to najczęściej sesja otwarta na inny mecz.
+        raise _visibility_error(
+            400,
+            "MATCH_MISMATCH",
+            str(data.get("message") or "Sesja ZPRP dotyczy innego meczu niż ten załącznik."),
+        )
+
+    logger.warning("ProEl ZPRP hide_attachment: nieoczekiwany status=%s", status)
+    raise _visibility_error(502, "UPSTREAM_ERROR", "Nieoczekiwana odpowiedź serwera ZPRP.")
+
+
+@router.post(
+    "/attachment-visibility",
+    summary="Ukrycie albo przywrócenie załącznika meczu na stronie rozgrywek ZPRP",
+)
+async def zprp_attachment_visibility(
+    payload: ZprpAttachmentVisibilityRequest,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+):
+    by_name: Optional[str] = None
+    by_judge_id: Optional[str] = None
+    try:
+        from app.proel_journal import soft_actor
+
+        actor = await soft_actor(
+            x_judge_id,
+            x_installation_id,
+            x_actor_name,
+            authorization=authorization,
+            x_elevation=x_elevation,
+        )
+        if actor is not None:
+            by_name = actor.name or None
+            jid = str(actor.judge_id or "")
+            # `inst:`/`proel:` to nie numer sędziego - do księgi go nie bierzemy.
+            by_judge_id = jid if jid and ":" not in jid else None
+    except Exception:
+        logger.debug("ProEl ZPRP: tożsamość do księgi ukrytych nieustalona", exc_info=True)
+
+    out = await set_attachment_visibility(payload, by_name=by_name, by_judge_id=by_judge_id)
+    _journal_send_later(
+        EVENT_ATTACHMENT_HIDDEN if payload.hidden else EVENT_ATTACHMENT_RESTORED,
+        id_zawody=payload.zprp_match_id,
+        judge_id=x_judge_id,
+        install=x_installation_id,
+        actor_name=x_actor_name,
+        authorization=authorization,
+        elevation=x_elevation,
+        details={
+            "file": str(payload.label or payload.filename or payload.attachment_id),
+            "attachment_id": str(payload.attachment_id),
+            **({"already": True} if out.get("already") else {}),
+        },
+    )
+    return out
+
+
+@router.get(
+    "/attachments/hidden",
+    summary="Załączniki meczu ukryte na stronie rozgrywek ZPRP (do przywrócenia)",
+)
+async def zprp_hidden_attachments(
+    zprp_match_id: str,
+    x_judge_id: Optional[str] = Header(None),
+    x_installation_id: Optional[str] = Header(None),
+    x_actor_name: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_elevation: Optional[str] = Header(None),
+):
+    """Tylko odczyt. Tożsamość jak przy odczytach ProEla (`proel_actor`)."""
+    from app.proel_auth import proel_actor
+    from app import zprp_hidden_attachments as ledger
+
+    await proel_actor(
+        x_judge_id=x_judge_id,
+        x_installation_id=x_installation_id,
+        x_actor_name=x_actor_name,
+        x_elevation=x_elevation,
+        authorization=authorization,
+    )
+    match_id = ledger.normalize_match_id(zprp_match_id)
+    if match_id is None:
+        raise _visibility_error(400, "BAD_REQUEST", "Brak numeru meczu.")
+    return {"items": await ledger.ledger_hidden_for_match(match_id)}
+
+
 # ─────────────────── koniec wysyłki pełnych danych ───────────────────
 #
 # „Zapisz pełne dane meczu" to nie jedno żądanie, tylko seria: numery koszulek,

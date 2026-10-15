@@ -354,6 +354,7 @@ async def _resolve_km(
                 city=city,
                 table_km=table_km,
                 national=national,
+                province=province,
             )
             if hit is not None:
                 item["km_one_way"], item["km_source"] = hit

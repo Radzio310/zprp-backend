@@ -28,6 +28,7 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import national_lookup_rules as NL
+from app import national_place_rules as NP_RULES
 from app import national_route_shape as RS
 from app.db import (
     database,
@@ -35,11 +36,19 @@ from app.db import (
     national_distance_connections,
     national_distance_judges,
     national_distance_sources,
+    zprp_public_competitions,
+    zprp_public_matches,
 )
 from app.deps import Settings, get_rsa_keys, get_settings
-from app.national_distance_progress import routes_from_home, summarize_sources
+from app.national_distance_progress import (
+    pick_home_node,
+    point_of,
+    routes_from_home,
+    summarize_sources,
+)
 from app.national_distance_parser import (
     ParsedSettlement,
+    hint_columns,
     normalize_city_key,
     parse_settlement_pdf,
     validate_settlement_candidate,
@@ -66,6 +75,12 @@ class SettlementCandidate(BaseModel):
     match_code: Optional[str] = Field(default=None, max_length=80)
     judge_city: Optional[str] = Field(default=None, max_length=120)
     venue_city: Optional[str] = Field(default=None, max_length=120)
+    # Wskazówki położenia (od 15.10.2026) - tylko priorytet przy wyborze
+    # jednej z kilku miejscowości o tej samej nazwie, nigdy rozstrzygnięcie.
+    judge_province: Optional[str] = Field(default=None, max_length=80)
+    judge_postal_code: Optional[str] = Field(default=None, max_length=12)
+    match_province: Optional[str] = Field(default=None, max_length=120)
+    venue_street: Optional[str] = Field(default=None, max_length=160)
 
 
 class HarvestRequest(BaseModel):
@@ -97,7 +112,45 @@ def _validated_candidate(candidate: SettlementCandidate) -> dict[str, str]:
         match_code=candidate.match_code,
         judge_city=candidate.judge_city,
         venue_city=candidate.venue_city,
+        judge_province=candidate.judge_province,
+        judge_postal_code=candidate.judge_postal_code,
+        match_province=candidate.match_province,
+        venue_street=candidate.venue_street,
     )
+
+
+_hint_values = hint_columns
+
+
+async def _remember_hints(candidates: list[dict[str, str]]) -> None:
+    """Znane dokumenty bez wskazówek dostają je z bieżącego wysłania.
+
+    Ryczałty sprzed 15.10.2026 nie mają ani wskazówek, ani szczegółów. Telefon
+    wysyła cały sezon przy każdym pobraniu, więc stare dokumenty dostają
+    wskazówki po cichu, bez ponownego czytania PDF (rozpoznanie miejscowości
+    korzysta z nich przy następnym przebiegu)."""
+    with_hints = [c for c in candidates if any(_hint_values(c).values())]
+    if not with_hints:
+        return
+    try:
+        rows = await database.fetch_all(
+            select(national_distance_sources.c.source_key).where(
+                national_distance_sources.c.source_key.in_([c["source_key"] for c in with_hints]),
+                national_distance_sources.c.hint_judge_city.is_(None),
+                national_distance_sources.c.judge_province.is_(None),
+                national_distance_sources.c.match_province.is_(None),
+            )
+        )
+        missing = {r["source_key"] for r in rows}
+        for candidate in with_hints:
+            if candidate["source_key"] in missing:
+                await database.execute(
+                    update(national_distance_sources)
+                    .where(national_distance_sources.c.source_key == candidate["source_key"])
+                    .values(**_hint_values(candidate))
+                )
+    except Exception as exc:  # wskazówki nigdy nie psują harvestu
+        logger.info("Wskazówki znanych ryczałtów nie zostały zapisane: %s", exc)
 
 
 def _as_utc(value: Any) -> Optional[datetime]:
@@ -130,7 +183,7 @@ async def _reserve(candidate: dict[str, str]) -> bool:
         await database.execute(
             update(national_distance_sources)
             .where(national_distance_sources.c.source_key == key)
-            .values(status="queued", error=None, updated_at=now)
+            .values(status="queued", error=None, updated_at=now, **_hint_values(candidate))
         )
         return True
 
@@ -145,6 +198,7 @@ async def _reserve(candidate: dict[str, str]) -> bool:
                 attempts=0,
                 created_at=now,
                 updated_at=now,
+                **_hint_values(candidate),
             )
         )
         return True
@@ -217,67 +271,66 @@ async def _route_geometry(
         return None
 
 
-async def _city_row(key: str):
-    return await database.fetch_one(
-        select(national_distance_cities).where(national_distance_cities.c.city_key == key)
+def _document_hints(candidate: dict[str, str]) -> tuple[frozenset[str], frozenset[str]]:
+    """Województwa ze wskazówek: (strona sędziego, strona hali)."""
+    judge = NP_RULES.hint_provinces(
+        candidate.get("judge_province"), postal=candidate.get("judge_postal_code")
     )
+    venue = NP_RULES.hint_provinces(candidate.get("match_province"))
+    return judge, venue
 
 
-async def _ensure_city(
-    name: str,
-) -> tuple[str, Optional[tuple[float, float]], bool]:
-    """Zwraca klucz, punkt oraz informację, czy wykonano zapytanie Nominatim."""
-    key = normalize_city_key(name)
-    if not key:
-        raise ValueError("Pusta nazwa miejscowości")
-    row = await _city_row(key)
-    now = _now()
-    if row:
-        await database.execute(
-            update(national_distance_cities)
-            .where(national_distance_cities.c.city_key == key)
-            .values(
-                name=name,
-                observations=int(row["observations"] or 0) + 1,
-                updated_at=now,
+async def _public_match_province(match_id: str) -> str:
+    """Związek prowadzący rozgrywki z publicznej bazy meczów (gdy telefon
+    go nie przysłał). Brak wiersza = pusta wskazówka."""
+    try:
+        row = await database.fetch_one(
+            select(zprp_public_competitions.c.association_name)
+            .select_from(
+                zprp_public_matches.join(
+                    zprp_public_competitions,
+                    zprp_public_competitions.c.competition_id == zprp_public_matches.c.competition_id,
+                )
             )
+            .where(zprp_public_matches.c.match_id == str(match_id))
         )
-        if row["latitude"] is not None and row["longitude"] is not None:
-            return key, (float(row["latitude"]), float(row["longitude"])), False
-    else:
-        await database.execute(
-            insert(national_distance_cities).values(
-                city_key=key,
-                name=name,
-                observations=1,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-
-    point = await _geocode_city(name)
-    if point:
-        await database.execute(
-            update(national_distance_cities)
-            .where(national_distance_cities.c.city_key == key)
-            .values(latitude=point[0], longitude=point[1], updated_at=_now())
-        )
-    return key, point, True
+        return str(row["association_name"] or "") if row else ""
+    except Exception:
+        return ""
 
 
 async def _store_connection(
     parsed: ParsedSettlement,
     candidate: dict[str, str],
-) -> None:
-    first = (normalize_city_key(parsed.judge_city), parsed.judge_city)
-    second = (normalize_city_key(parsed.venue_city), parsed.venue_city)
-    if not first[0] or not second[0] or first[0] == second[0]:
+) -> set[str]:
+    """Zapis jednego ryczałtu. Zwraca klucze nazw, których dotknął (do
+    późniejszego rozpoznania sieci)."""
+    from app import national_places as NP
+
+    judge_name, venue_name = parsed.judge_city, parsed.venue_city
+    judge_nk, venue_nk = normalize_city_key(judge_name), normalize_city_key(venue_name)
+    if not judge_nk or not venue_nk or judge_nk == venue_nk:
         raise ValueError("Ryczałt nie tworzy połączenia między dwiema miejscowościami")
+
+    judge_hints, venue_hints = _document_hints(candidate)
+    if not venue_hints and candidate.get("match_id"):
+        venue_hints = NP_RULES.hint_provinces(await _public_match_province(candidate["match_id"]))
+
+    # Węzeł = nazwa + rozpoznane miejsce (15.10.2026). Dawniej klucz był samą
+    # nazwą, więc dwie różne Krzywe zlewały się w jedną.
+    judge_key, venue_key = await NP.resolve_document(
+        judge_name, venue_name, parsed.one_way_km, judge_hints, venue_hints
+    )
+    if judge_key == venue_key:
+        raise ValueError("Ryczałt nie tworzy połączenia między dwiema miejscowościami")
+    await NP.bump_observations(judge_key)
+    await NP.bump_observations(venue_key)
+
+    first, second = (judge_key, judge_name), (venue_key, venue_name)
     if first[0] > second[0]:
         first, second = second, first
-
-    a_key, a_point, _ = await _ensure_city(first[1])
-    b_key, b_point, _ = await _ensure_city(second[1])
+    a_key, b_key = first[0], second[0]
+    points = await NP.node_points([a_key, b_key])
 
     existing = await database.fetch_one(
         select(national_distance_connections).where(
@@ -286,8 +339,12 @@ async def _store_connection(
         )
     )
     geometry = existing["route_geometry"] if existing else None
-    if not geometry and a_point and b_point:
-        geometry = await _route_geometry(a_point, b_point)
+    pa, pb = points.get(a_key) or {}, points.get(b_key) or {}
+    if not geometry and pa.get("latitude") is not None and pb.get("latitude") is not None:
+        geometry = await _route_geometry(
+            (float(pa["latitude"]), float(pa["longitude"])),
+            (float(pb["latitude"]), float(pb["longitude"])),
+        )
 
     now = _now()
     if existing:
@@ -333,6 +390,20 @@ async def _store_connection(
             )
         )
 
+    # Szczegóły dokumentu - połączenie da się później rozłożyć na dokumenty.
+    await database.execute(
+        update(national_distance_sources)
+        .where(national_distance_sources.c.source_key == candidate["source_key"])
+        .values(
+            judge_city=judge_name[:120],
+            venue_city=venue_name[:120],
+            one_way_km=int(parsed.one_way_km),
+            judge_node=judge_key,
+            venue_node=venue_key,
+        )
+    )
+    return {judge_nk, venue_nk}
+
 
 async def _mark_source(key: str, state: str, error: Optional[str] = None) -> None:
     values: dict[str, Any] = {
@@ -356,6 +427,7 @@ async def _process_batch_inner(
     settings: Settings,
 ) -> None:
     client = None
+    touched: set[str] = set()
     try:
         client = await login_and_client(username, password, settings)
         for candidate in candidates:
@@ -391,7 +463,7 @@ async def _process_batch_inner(
                     judge_city_hint=candidate["judge_city"],
                     venue_city_hint=candidate["venue_city"],
                 )
-                await _store_connection(parsed, candidate)
+                touched |= await _store_connection(parsed, candidate)
                 await _mark_source(key, "done")
             except Exception as exc:  # jeden wadliwy PDF nie zatrzymuje batcha
                 logger.warning("Ryczałt %s nie został przetworzony: %s", key, exc)
@@ -407,6 +479,12 @@ async def _process_batch_inner(
         # lokalne referencje natychmiast po zakończeniu zadania.
         username = ""
         password = ""
+    if touched:
+        # Nowe trasy = nowy dowód: rozpoznanie (i ewentualne przeniesienie albo
+        # rozdzielenie) tylko tych nazw, których paczka dotknęła.
+        from app import national_places as NP
+
+        await NP.reresolve(touched)
 
 
 async def _process_batch(
@@ -468,6 +546,9 @@ async def harvest_distances(
     for item in unique.values():
         if await _reserve(item):
             accepted.append(item)
+    known = [item for item in unique.values() if item not in accepted]
+    if known:
+        await _remember_hints(known)
 
     if accepted or body.full:
         private_key, _ = keys
@@ -495,19 +576,40 @@ async def harvest_distances(
 
 
 def _city_payload(row: Any) -> dict[str, Any]:
+    data = dict(row)
     return {
-        "key": row["city_key"],
-        "name": row["name"],
-        "latitude": row["latitude"],
-        "longitude": row["longitude"],
-        "observations": int(row["observations"] or 0),
+        "key": data["city_key"],
+        "name": data["name"],
+        "latitude": data["latitude"],
+        "longitude": data["longitude"],
+        "observations": int(data["observations"] or 0),
+        # Od 15.10.2026: węzeł = nazwa + miejsce. Kilka węzłów może mieć tę
+        # samą nazwę (`nameKey`), województwo je rozróżnia. `approximate` =
+        # położenie niepewne (mapa rysuje pusty pierścień zamiast kropki).
+        "nameKey": data.get("name_key") or data["city_key"],
+        "province": data.get("province"),
+        "provinceLabel": NP_RULES.province_label(data.get("province") or "") or None,
+        "approximate": bool(data.get("approximate")),
+        "pinned": bool(data.get("pinned")),
     }
 
 
 def _connection_payload(
-    row: Any, include_route: bool = True, route_mode: str = "full"
+    row: Any,
+    include_route: bool = True,
+    route_mode: str = "full",
+    points: Optional[dict[str, dict]] = None,
 ) -> dict[str, Any]:
+    extra: dict[str, Any] = {}
+    if points is not None:
+        # Wyszukiwarka: położenie obu końców, żeby karta trasy wiedziała,
+        # czy któryś jest „przybliżony" (przegląd ma to w `cities`).
+        extra = {
+            "fromPoint": points.get(row["city_a_key"]),
+            "toPoint": points.get(row["city_b_key"]),
+        }
     return {
+        **extra,
         "fromKey": row["city_a_key"],
         "toKey": row["city_b_key"],
         "from": row["city_a_name"],
@@ -585,6 +687,9 @@ class ProgressRequest(BaseModel):
     match_ids: list[str] = Field(default_factory=list, max_length=3000)
     home: Optional[str] = Field(default=None, max_length=120)
     cities: list[str] = Field(default_factory=list, max_length=1000)
+    # Wskazówki domu sędziego (15.10.2026): wybór między węzłami o tej samej nazwie.
+    home_province: Optional[str] = Field(default=None, max_length=80)
+    home_postal_code: Optional[str] = Field(default=None, max_length=12)
 
 
 @router.post(
@@ -617,25 +722,74 @@ async def national_distances_progress(body: ProgressRequest):
         counts = summarize_sources((row[0], row[1], row[2]) for row in rows)
 
     connections: list[dict[str, Any]] = []
-    home_key = normalize_city_key(body.home or "")
+    home_point: Optional[dict[str, Any]] = None
+    home_name = normalize_city_key(body.home or "")
     wanted = {normalize_city_key(c) for c in body.cities}
     wanted.discard("")
-    wanted.discard(home_key)
-    if home_key and wanted:
-        rows = await database.fetch_all(
-            select(national_distance_connections).where(
-                (
-                    (national_distance_connections.c.city_a_key == home_key)
-                    & national_distance_connections.c.city_b_key.in_(wanted)
-                )
-                | (
-                    (national_distance_connections.c.city_b_key == home_key)
-                    & national_distance_connections.c.city_a_key.in_(wanted)
-                )
+    wanted.discard(home_name)
+    if home_name and wanted:
+        # Nazwy -> węzły (kilka miejscowości może nosić tę samą nazwę).
+        T = national_distance_cities
+        node_rows = await database.fetch_all(
+            select(T).where(
+                T.c.name_key.in_([home_name, *wanted]) | T.c.city_key.in_([home_name, *wanted])
             )
         )
-        connections = routes_from_home(rows, home_key)
-    return {"sources": counts, "connections": connections}
+        nodes = {r["city_key"]: dict(r) for r in node_rows}
+        home_keys = [k for k, r in nodes.items() if (r.get("name_key") or k) == home_name]
+        other_keys = [k for k in nodes if k not in home_keys]
+        rows = []
+        if home_keys and other_keys:
+            E = national_distance_connections
+            rows = await database.fetch_all(
+                select(E).where(
+                    (E.c.city_a_key.in_(home_keys) & E.c.city_b_key.in_(other_keys))
+                    | (E.c.city_b_key.in_(home_keys) & E.c.city_a_key.in_(other_keys))
+                )
+            )
+        home_key = pick_home_node(
+            [nodes[k] for k in home_keys],
+            rows,
+            NP_RULES.hint_provinces(body.home_province, postal=body.home_postal_code),
+        )
+        if home_key:
+            connections = routes_from_home(
+                [r for r in rows if home_key in (r["city_a_key"], r["city_b_key"])],
+                home_key,
+                points=nodes,
+            )
+            home_point = point_of(nodes.get(home_key))
+
+    # Węzeł hali per mecz (dokumenty od 15.10.2026 znają swój węzeł) - overlay
+    # stawia kropkę tam, dokąd sędzia naprawdę jechał.
+    venues: dict[str, Any] = {}
+    if ids:
+        S = national_distance_sources
+        venue_rows = await database.fetch_all(
+            select(S.c.match_id, S.c.venue_node)
+            .where(S.c.match_id.in_(ids), S.c.venue_node.isnot(None))
+        )
+        venue_points = await _node_points_by_key({r["venue_node"] for r in venue_rows})
+        for r in venue_rows:
+            point = venue_points.get(r["venue_node"])
+            if point:
+                venues[str(r["match_id"])] = point
+    return {
+        "sources": counts,
+        "connections": connections,
+        "home": home_point,
+        "venues": venues,
+    }
+
+
+async def _node_points_by_key(keys: set[str]) -> dict[str, dict[str, Any]]:
+    wanted = sorted(k for k in keys if k)
+    if not wanted:
+        return {}
+    rows = await database.fetch_all(
+        select(national_distance_cities).where(national_distance_cities.c.city_key.in_(wanted))
+    )
+    return {r["city_key"]: point_of(dict(r)) for r in rows}
 
 
 class JudgeStatusRequest(BaseModel):
@@ -703,17 +857,35 @@ async def _refresh_pairs(force: bool = False) -> dict[str, Any]:
         )
         signature = (int(head["n"] or 0), head["at"]) if head else (0, None)
         if signature != cache["signature"]:
+            E = national_distance_connections
+            A = national_distance_cities.alias("node_a")
+            B = national_distance_cities.alias("node_b")
             rows = await database.fetch_all(
                 select(
-                    national_distance_connections.c.city_a_key,
-                    national_distance_connections.c.city_b_key,
-                    national_distance_connections.c.distance_km,
-                    national_distance_connections.c.observations,
+                    E.c.city_a_key,
+                    E.c.city_b_key,
+                    E.c.distance_km,
+                    E.c.observations,
+                    A.c.name_key.label("a_name_key"),
+                    B.c.name_key.label("b_name_key"),
+                    A.c.province.label("a_province"),
+                    B.c.province.label("b_province"),
+                )
+                .select_from(
+                    E.outerjoin(A, A.c.city_key == E.c.city_a_key).outerjoin(
+                        B, B.c.city_key == E.c.city_b_key
+                    )
                 )
             )
-            listed = NL.pairs_rows(rows)
+            # Wyszukiwanie po NAZWACH: rozliczenia, prognoza i telefon znają
+            # tylko napisy. Węzły o tej samej nazwie (15.10.2026) zostają
+            # wariantami, które rozstrzyga okręg wołającego.
+            listed, variants = NL.name_pairs(rows)
             cache["rows"] = listed
-            cache["lookup"] = NL.expand_pairs({(a, b): km for a, b, km, _ in listed})
+            cache["lookup"] = NL.NationalPairs(
+                NL.expand_pairs({(a, b): km for a, b, km, _ in listed}),
+                variants=variants,
+            )
             cache["version"] = NL.pairs_version(*signature)
             cache["signature"] = signature
         cache["checked"] = time.monotonic()
@@ -761,15 +933,131 @@ async def national_distance_connection(
     b = normalize_city_key(to_city)
     if not a or not b or a == b:
         return {"found": False, "connection": None}
-    if a > b:
-        a, b = b, a
-    row = await database.fetch_one(
-        select(national_distance_connections).where(
-            national_distance_connections.c.city_a_key == a,
-            national_distance_connections.c.city_b_key == b,
+    E = national_distance_connections
+    T = national_distance_cities
+    # Klucz węzła („krzywa|lubuskie") trafia wprost; goła nazwa - wszystkie
+    # węzły tej nazwy, wygrywa najczęściej potwierdzona trasa.
+    raw_a, raw_b = from_city.strip(), to_city.strip()
+    node_rows = await database.fetch_all(
+        select(T).where(
+            T.c.city_key.in_([raw_a, raw_b, a, b]) | T.c.name_key.in_([a, b])
         )
     )
+    nodes = {r["city_key"]: dict(r) for r in node_rows}
+
+    def keys_for(raw: str, name: str) -> list[str]:
+        if raw in nodes:
+            return [raw]
+        return [k for k, r in nodes.items() if (r.get("name_key") or k) == name] or [name]
+
+    left, right = keys_for(raw_a, a), keys_for(raw_b, b)
+    rows = await database.fetch_all(
+        select(E).where(
+            (E.c.city_a_key.in_(left) & E.c.city_b_key.in_(right))
+            | (E.c.city_a_key.in_(right) & E.c.city_b_key.in_(left))
+        )
+    )
+    row = max(rows, key=lambda r: int(r["observations"] or 0)) if rows else None
+    points = {k: point_of(v) for k, v in nodes.items()}
     return {
         "found": bool(row),
-        "connection": _connection_payload(row, include_route=bool(route)) if row else None,
+        "connection": _connection_payload(row, include_route=bool(route), points=points) if row else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Admin: położenie miejscowości (15.10.2026)
+# ---------------------------------------------------------------------------
+
+
+async def _require_admin(authorization: Optional[str] = Header(None)) -> str:
+    """Admin aplikacji z tokenem JWT BAZY (`Authorization: Bearer`).
+
+    Nowe trasy, więc bez okresu przejściowego `app/admin_guard.py`: żadna
+    starsza wersja aplikacji ich nie woła."""
+    from app.admin_guard import bearer_token, decode_token, read_admin_ids
+
+    payload, reason = decode_token(bearer_token(authorization))
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sesja wygasła albo brak logowania. Zaloguj się ponownie i powtórz.",
+        )
+    judge_id = str(payload.get("judge_id") or "").strip()
+    if not judge_id or judge_id not in await read_admin_ids():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Położenie miejscowości zmienia tylko administrator aplikacji.",
+        )
+    return judge_id
+
+
+@router.get("/admin/places", summary="Miejscowości do przejrzenia (przybliżone, przeniesione)")
+async def admin_places(
+    days: int = Query(45, ge=1, le=3650),
+    admin: str = Depends(_require_admin),
+):
+    from app import national_places as NP
+
+    return {"places": await NP.attention_list(days=days)}
+
+
+class RelocateRequest(BaseModel):
+    apply: bool = False
+
+
+@router.post(
+    "/admin/places/relocate",
+    summary="Rozpoznanie położenia wszystkich miejscowości (podgląd albo zapis)",
+)
+async def admin_places_relocate(body: RelocateRequest, admin: str = Depends(_require_admin)):
+    """`apply=false` (domyślnie) - tylko podgląd: kto się przesunie, gdzie
+    i które nazwy się rozdzielą. `apply=true` - zapis w jednej transakcji
+    i przeliczenie geometrii OSRM przeniesionych tras w tle. Kilometry nie
+    zmieniają się nigdy (połączenia przechodzą w całości)."""
+    from app import national_places as NP
+
+    summary = await NP.relocate(bool(body.apply))
+    if body.apply:
+        logger.info("[national-places] relocate przez %s: %s przeniesień", admin, len(summary["moved"]))
+    return summary
+
+
+class PinRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=200)
+    #: Kandydat z listy (gid GeoNames albo „fit:..." / „geo:...") albo własny punkt.
+    gid: Optional[str] = Field(default=None, max_length=80)
+    latitude: Optional[float] = Field(default=None, ge=48.5, le=55.5)
+    longitude: Optional[float] = Field(default=None, ge=13.5, le=24.8)
+    province: Optional[str] = Field(default=None, max_length=40)
+    unpin: bool = False
+
+
+@router.post("/admin/places/pin", summary="Przypnij położenie miejscowości (automat go nie ruszy)")
+async def admin_places_pin(body: PinRequest, admin: str = Depends(_require_admin)):
+    from app import national_places as NP
+
+    if body.unpin:
+        await NP.unpin(body.key)
+        return {"key": body.key, "pinned": False}
+    lat, lon, province = body.latitude, body.longitude, body.province or ""
+    if body.gid and (lat is None or lon is None):
+        gaz = await NP.gazetteer()
+        place = gaz.places.get(body.gid)
+        if place is None:
+            raise HTTPException(status_code=404, detail="Nie znam tego kandydata - odśwież listę.")
+        lat, lon, province = place.lat, place.lon, place.province
+    if lat is None or lon is None:
+        raise HTTPException(status_code=422, detail="Wybierz kandydata albo podaj punkt na mapie.")
+    if not province:
+        gaz = await NP.gazetteer()
+        near = gaz.nearest(lat, lon, 40)
+        province = near.province if near else ""
+    try:
+        result = await NP.pin(
+            body.key, lat=float(lat), lon=float(lon), province=province, gid=body.gid or "", actor=admin
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Tej miejscowości nie ma już w tabeli - odśwież listę.")
+    logger.info("[national-places] %s przypiął %s (%s km)", admin, body.key, result.get("movedKm"))
+    return {**result, "pinned": True}

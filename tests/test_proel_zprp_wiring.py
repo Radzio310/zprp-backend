@@ -39,6 +39,7 @@ WRITE_ROUTES = (
     "zprp_officials_stats",
     "zprp_match_comment",
     "zprp_attachment",
+    "zprp_attachment_visibility",
 )
 
 #: Rdzenie zapisu - każdy rozmawia z ZPRP pod zamkiem meczu.
@@ -48,6 +49,7 @@ WRITE_CORES = (
     "submit_officials_stats",
     "submit_match_comment",
     "upload_attachment",
+    "set_attachment_visibility",
 )
 
 

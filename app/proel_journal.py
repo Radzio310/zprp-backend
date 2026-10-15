@@ -89,6 +89,10 @@ EVENT_LABELS: Dict[str, str] = {
     "zprp.full_data_running": "Trwa wysyłka pełnych danych",
     "zprp.full_data_stalled": "Przerwana wysyłka pełnych danych",
     "zprp.attachment_sent": "Protokół PDF wysłany do ZPRP",
+    # Widoczność pliku na rozgrywki.zprp.pl (`hide_attachment.php`). Plik
+    # zostaje w ZPRP - zmienia się tylko to, czy widzi go publiczna strona.
+    "zprp.attachment_hidden": "Załącznik ukryty na stronie ZPRP",
+    "zprp.attachment_restored": "Załącznik przywrócony na stronie ZPRP",
     # Nieudana próba wysyłki. Dziennik ma odpowiadać na pytanie „czemu dane nie
     # doszły", a nie tylko „kiedy doszły" - bez tego wpisu mecz, którego nie
     # udało się wysłać, wygląda w dzienniku identycznie jak mecz, którego nikt

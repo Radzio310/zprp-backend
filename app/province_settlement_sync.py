@@ -1299,7 +1299,12 @@ async def refresh_province(
                 central = R.is_central_level_competition(row.get("match_code"))
                 table_km = None if central else book.for_day(row.get("match_at")).lookup(home, city)
                 picked = NL.pick_distance(
-                    central, home=home, city=city, table_km=table_km, national=national
+                    central,
+                    home=home,
+                    city=city,
+                    table_km=table_km,
+                    national=national,
+                    province=province,
                 )
                 if picked is not None:
                     hits[position] = picked

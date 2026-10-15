@@ -80,6 +80,8 @@ ZDARZENIA_DZIENNIKA: Dict[str, str] = {
     "zprp.extra_report_comment_sent": "Dodatkowy raport dopisany do uwag ZPRP",
     "zprp.extra_report_in_zprp": "Dodatkowy raport potwierdzony w uwagach ZPRP",
     "zprp.attachment_sent": "Protokół PDF wysłany do ZPRP",
+    "zprp.attachment_hidden": "Załącznik ukryty na stronie ZPRP",
+    "zprp.attachment_restored": "Załącznik przywrócony na stronie ZPRP",
     "zprp.send_failed": "Nieudana próba wysyłki do ZPRP",
     "zprp.send_queued": "Wysyłka odłożona do dosyłki",
     "exam.confirmed": "Potwierdzenie badań",
@@ -94,6 +96,7 @@ KALENDARIUM = (
     "match.reopened", "match.approved", "match.unapproved", "match.deleted",
     "match.restored", "match.doc_conflict", "match.overwritten_by_choice",
     "match.promoted", "protocol.pdf_generated", "zprp.attachment_sent",
+    "zprp.attachment_hidden", "zprp.attachment_restored",
     "zprp.full_data_sent", "zprp.summary_sent", "evidence.marked", "evidence.released",
 )
 #: Zdarzenia, które same w sobie mówią o ingerencji w treść - idą do ustaleń.

@@ -26,6 +26,7 @@ import re
 from typing import Any, Iterable, Mapping, Optional
 
 from app.national_distance_parser import clean_city, normalize_city_key
+from app.national_place_rules import province_slug
 from app.settlement_distances import normalize_city
 
 SOURCE_SAME_CITY = "same-city"
@@ -81,6 +82,51 @@ def _canonical(a: str, b: str) -> tuple[str, str]:
     return (a, b) if a <= b else (b, a)
 
 
+class NationalPairs(dict):
+    """Mapa km po NAZWACH (jak dotąd) + warianty dla par nazw, za którymi stoją
+    różne miejscowości (15.10.2026: „Krzywa" w dolnośląskim i w lubuskim to
+    dwa węzły). `variants[(nazwa_a, nazwa_b)]` = [(km, obserwacje,
+    województwo a, województwo b), ...] - tylko pary z więcej niż jednym
+    wariantem. Zwykły `dict` dla wołających, którzy o wariantach nie wiedzą."""
+
+    def __init__(self, *args: Any, variants: Optional[dict] = None, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.variants: dict[tuple[str, str], list[tuple[int, int, str, str]]] = dict(variants or {})
+
+
+def name_pairs(rows: Iterable[Any]) -> tuple[list[list[Any]], dict[tuple[str, str], list[tuple[int, int, str, str]]]]:
+    """Połączenia węzłów -> połączenia NAZW.
+
+    `rows`: city_a_key, city_b_key, distance_km, observations, a_name_key,
+    b_name_key, a_province, b_province. Para nazw z kilkoma wariantami
+    (różne miejscowości) dostaje w liście ten najczęściej potwierdzony -
+    przy remisie stare połączenie gołych nazw, które było tam od zawsze.
+    Kilometry istniejących par nazw nie zmieniają się więc po rozdzieleniu."""
+    grouped: dict[tuple[str, str], list[tuple[int, int, str, str, bool]]] = {}
+    for row in rows:
+        a_key, b_key = str(row["city_a_key"] or ""), str(row["city_b_key"] or "")
+        na = str(row["a_name_key"] or a_key.split("|")[0])
+        nb = str(row["b_name_key"] or b_key.split("|")[0])
+        if not na or not nb or na == nb:
+            continue
+        pa, pb = str(row["a_province"] or ""), str(row["b_province"] or "")
+        plain = a_key == na and b_key == nb
+        if na > nb:
+            na, nb, pa, pb = nb, na, pb, pa
+        grouped.setdefault((na, nb), []).append(
+            (int(row["distance_km"]), int(row["observations"] or 0), pa, pb, plain)
+        )
+    listed: list[list[Any]] = []
+    variants: dict[tuple[str, str], list[tuple[int, int, str, str]]] = {}
+    for (na, nb), items in grouped.items():
+        best = max(items, key=lambda v: (v[1], v[4]))
+        listed.append([na, nb, best[0], best[1]])
+        if len(items) > 1:
+            variants[(na, nb)] = [(v[0], v[1], v[2], v[3]) for v in items]
+    listed.sort(key=lambda item: (item[0], item[1]))
+    return listed, variants
+
+
 def expand_pairs(pairs_map: Mapping[tuple[str, str], Any]) -> dict[tuple[str, str], int]:
     """
     Mapa z tabeli ZPRP uzupełniona o warianty kluczy obu miast.
@@ -124,14 +170,25 @@ def same_city(a: Any, b: Any) -> bool:
     return bool(set(lookup_keys(a)) & set(lookup_keys(b)))
 
 
-def national_km(pairs_map: Mapping[tuple[str, str], Any], a: Any, b: Any) -> Optional[int]:
+def national_km(
+    pairs_map: Mapping[tuple[str, str], Any],
+    a: Any,
+    b: Any,
+    province: Any = None,
+) -> Optional[int]:
     """
     Kilometry w jedną stronę z tabeli ZPRP albo None.
 
     `pairs_map` to {(klucz_a, klucz_b): km} z kluczami ułożonymi rosnąco
     (najlepiej już po `expand_pairs`). To samo miasto zwraca None - to nie
     jest pytanie do tabeli, tylko pierwszy krok reguły (`same_city`).
+
+    `province` (okręg wołającego) wybiera wariant, gdy za parą nazw stoją
+    różne miejscowości (`NationalPairs.variants`): wygrywa ten, którego
+    końce leżą w tym województwie, potem najczęściej potwierdzony.
     """
+    variants = getattr(pairs_map, "variants", None) or {}
+    slug = province_slug(province) if (province and variants) else ""
     if not pairs_map:
         return None
     left_keys = lookup_keys(a)
@@ -142,7 +199,14 @@ def national_km(pairs_map: Mapping[tuple[str, str], Any], a: Any, b: Any) -> Opt
         return None
     for left in left_keys:
         for right in right_keys:
-            hit = pairs_map.get(_canonical(left, right))
+            key = _canonical(left, right)
+            if slug and key in variants:
+                best = max(
+                    variants[key],
+                    key=lambda v: (int(v[2] == slug) + int(v[3] == slug), v[1]),
+                )
+                return int(best[0])
+            hit = pairs_map.get(key)
             if hit is not None:
                 try:
                     return int(hit)
@@ -158,6 +222,7 @@ def pick_distance(
     city: Any,
     table_km: Optional[float] = None,
     national: Optional[Mapping[tuple[str, str], Any]] = None,
+    province: Any = None,
 ) -> Optional[tuple[float, str]]:
     """
     Pierwsze źródło z reguły, które zna odpowiedź, albo None.
@@ -165,6 +230,7 @@ def pick_distance(
     None znaczy: tabele milczą, wołający pyta dalej (Google w synchronizacji
     i w ręcznych meczach, historia sędziego w prognozie). `table_km` to wynik
     tabeli okręgu z dnia meczu - dla meczu centralnego jest ignorowany.
+    `province` - okręg wołającego, rozstrzyga miejscowości o tej samej nazwie.
     """
     if not str(home or "").strip() or not str(city or "").strip():
         return None
@@ -177,7 +243,7 @@ def pick_distance(
                 value = float(table_km)
                 return value, SOURCE_SAME_CITY if value == 0 else SOURCE_TABLE
         elif source == SOURCE_NATIONAL:
-            hit = national_km(national or {}, home, city)
+            hit = national_km(national or {}, home, city, province)
             if hit is not None:
                 return float(hit), SOURCE_NATIONAL
     return None

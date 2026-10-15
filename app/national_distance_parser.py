@@ -42,6 +42,10 @@ def validate_settlement_candidate(
     match_code: Optional[str] = None,
     judge_city: Optional[str] = None,
     venue_city: Optional[str] = None,
+    judge_province: Optional[str] = None,
+    judge_postal_code: Optional[str] = None,
+    match_province: Optional[str] = None,
+    venue_street: Optional[str] = None,
 ) -> dict[str, str]:
     parsed = urlparse(url)
     host = parsed.hostname.lower() if parsed.hostname else ""
@@ -69,7 +73,41 @@ def validate_settlement_candidate(
         "match_code": clean_city(match_code),
         "judge_city": clean_city(judge_city),
         "venue_city": clean_city(venue_city),
+        # Wskazówki położenia (15.10.2026) - priorytet przy wyborze jednej
+        # z miejscowości o tej samej nazwie, nigdy rozstrzygnięcie.
+        "judge_province": _short(judge_province, 80),
+        "judge_postal_code": _postal(judge_postal_code),
+        "match_province": _short(match_province, 120),
+        "venue_street": _short(venue_street, 160),
     }
+
+
+def _short(value: Optional[str], limit: int) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def _postal(value: Optional[str]) -> str:
+    match = re.search(r"\d{2}\s*-?\s*\d{3}", str(value or ""))
+    if not match:
+        return ""
+    digits = re.sub(r"\D", "", match.group(0))
+    return f"{digits[:2]}-{digits[2:]}"
+
+
+#: Kolumny `national_distance_sources` ze wskazówkami jednego dokumentu.
+HINT_COLUMNS = {
+    "hint_judge_city": "judge_city",
+    "hint_venue_city": "venue_city",
+    "judge_province": "judge_province",
+    "judge_postal_code": "judge_postal_code",
+    "match_province": "match_province",
+    "venue_street": "venue_street",
+}
+
+
+def hint_columns(candidate: dict[str, str]) -> dict[str, Optional[str]]:
+    """Wskazówki kandydata -> wartości kolumn (puste jako NULL)."""
+    return {column: (candidate.get(field) or None) for column, field in HINT_COLUMNS.items()}
 
 
 def _usable_pdf_city(value: str) -> bool:
