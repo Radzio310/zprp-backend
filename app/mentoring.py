@@ -10,7 +10,7 @@ from app.db import (database, province_judges, province_matches, mentoring_confi
     mentoring_audit as audit)
 from app.match_market import market_actor, Actor
 from app.match_market_access import badge_names
-from app.mentoring_rules import CROSS_PROVINCE, may_manage, pair_matches, season_bounds, json_value
+from app.mentoring_rules import CROSS_PROVINCE, DEFAULT_CONFIG, may_manage, pair_matches, season_bounds, json_value
 from app.proel_auth import is_admin
 from app.settlement_province import display as province_display, spellings
 
@@ -51,8 +51,14 @@ async def configuration(province):
     province = prov(province)
     if province == CROSS_PROVINCE:
         return {"province": CROSS_PROVINCE, "enabled": False, "manager_ids": []}
-    row = await database.fetch_one(select(config).where(config.c.province.in_(spellings(province))))
-    return {**dict(row), "manager_ids": json_value(row["manager_ids"], [])} if row else {"province": province, "enabled": False, "manager_ids": []}
+    # Kilka pisowni tego samego okręgu: wygrywa zapis w pisowni kanonicznej, a
+    # nie przypadkowy wiersz - inaczej panel admina i sprawdzenie dostępu
+    # widziałyby dwa różne stany.
+    row = await database.fetch_one(
+        select(config).where(config.c.province.in_(spellings(province)))
+        .order_by((config.c.province == province).desc(), config.c.province)
+    )
+    return {**dict(row), "manager_ids": json_value(row["manager_ids"], [])} if row else {"province": province, **DEFAULT_CONFIG}
 
 
 async def can_manage(actor, province) -> bool:
@@ -158,12 +164,15 @@ async def admin_overview(actor: Actor = Depends(market_actor)):
         .where(pairs.c.ended_at.is_(None)).where(assignments.c.ended_at.is_(None))
         .group_by(pairs.c.province)
     )
-    config_by = {row["province"]: row for row in config_rows}
+    # Klucz przez `prov()`: wiersz zapisany jako „SLASKIE" ma trafić pod „ŚLĄSKIE".
+    config_by = {prov(row["province"]): row for row in config_rows}
     pair_by = {row["province"]: int(row["count"] or 0) for row in pair_rows}
     mentor_by = {row["province"]: int(row["count"] or 0) for row in mentor_rows}
     return {"provinces": [{
         "province": province,
-        "enabled": bool(config_by.get(province) and config_by[province]["enabled"]),
+        "enabled": province != CROSS_PROVINCE and (
+            bool(config_by[province]["enabled"]) if province in config_by else DEFAULT_CONFIG["enabled"]
+        ),
         "manager_ids": json_value(config_by[province]["manager_ids"], []) if province in config_by else [],
         "active_pairs": pair_by.get(province, 0),
         "active_mentors": mentor_by.get(province, 0),

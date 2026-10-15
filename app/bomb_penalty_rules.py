@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Mapping, Optional
 
-from app.match_bombs_rules import counts_to_stats, name_parts
+from app.match_bombs_rules import counts_to_stats
+from app.person_names import person_name_key
 from app.settlement_money import money
 from app.zprp_accounts import normalize_province
 
@@ -113,12 +114,13 @@ def subject_key(row: Mapping[str, Any]) -> str:
     """Kto dostał bombę - numer sędziego, a bez numeru nazwisko bez kolejności członów.
 
     „DRAB Krzysztof" i „Krzysztof DRAB" to ten sam człowiek (ZPRP i lista
-    okręgu piszą nazwisko w różnej kolejności).
+    okręgu piszą nazwisko w różnej kolejności), ale „ZAJĄC Karol" i „ZAJĄC
+    Karol R." to dwie osoby - inicjał zostaje w kluczu.
     """
     judge_id = _s(row.get("subject_judge_id"))
     if judge_id:
         return f"id:{judge_id}"
-    return "n:" + " ".join(sorted(name_parts(row.get("subject_name"))))
+    return "n:" + person_name_key(row.get("subject_name"))
 
 
 def _aware(value: Any) -> Optional[datetime]:

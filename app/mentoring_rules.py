@@ -1,6 +1,9 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import json
+import unicodedata
+
+from app.board_rules import COMMITTEE_BADGES
 
 
 # Osobny koszyk administracyjny dla par złożonych z sędziów dwóch okręgów.
@@ -25,15 +28,39 @@ def pair_matches(judge_ids, state):
     return len(set(judge_ids)) == 2 and "" not in refs and refs == set(judge_ids)
 
 
+#: Okręg bez zapisanej konfiguracji: zarządzanie WŁĄCZONE, bez dodatkowych osób.
+#: Decyzja użytkownika z 15.10.2026 - członek komisji z odznaką ma móc tworzyć
+#: pary od razu, a administrator może okręg świadomie wyłączyć.
+DEFAULT_CONFIG = {"enabled": True, "manager_ids": []}
+
+def has_committee_badge(badges) -> bool:
+    """Odznaka komisji w każdym zapisie, którym wpuszcza tablica komisji.
+
+    Dawniej mentoring żądał dokładnie „Komisja sędziowska" i odznaka
+    „Komisja Sędziowska" (tak pisze ją tablica) nie dawała tu nic.
+    """
+    return any(
+        unicodedata.normalize("NFC", str(name or "")).strip().casefold() in COMMITTEE_BADGES
+        for name in badges or ()
+    )
+
+
 def may_manage(admin, actor_id, actor_province, badges, province, config):
+    """Czy wolno zakładać, zmieniać i kończyć pary tego okręgu.
+
+    Komisja z odznaką w SWOIM okręgu - zawsze, póki administrator nie wyłączył
+    okręgu. Osoby wskazane przez administratora DOKŁADAJĄ SIĘ do komisji
+    (decyzja z 15.10.2026), a nie ją zastępują.
+    """
     if admin:
         return True
-    if province == CROSS_PROVINCE:
+    if province == CROSS_PROVINCE or not actor_province or actor_province != province:
         return False
-    if actor_province != province or not config or not config.get("enabled"):
+    config = config or DEFAULT_CONFIG
+    if not config.get("enabled"):
         return False
-    managers = json_value(config.get("manager_ids"), [])
-    return actor_id in managers if managers else "Komisja sędziowska" in badges
+    managers = {str(m) for m in json_value(config.get("manager_ids"), [])}
+    return str(actor_id) in managers or has_committee_badge(badges)
 
 
 def season_bounds(now=None):

@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+
+from app.person_names import names_match as _person_names_match
 
 #: Gniazda protokołu, którymi wolno się wymieniać, wraz z nazwą pola w
 #: formularzu ZPRP `zawody_UstawSedziow.php`.
@@ -215,48 +216,16 @@ SLOT_STATE_FIELDS: Dict[str, Tuple[str, str]] = {
 }
 
 
-#: Litery, których rozkład NFD NIE tyka.
-#:
-#: „ł" nie jest „l" z ogonkiem, tylko osobnym znakiem, więc `unicodedata`
-#: zostawia je w spokoju - a sito niżej przepuszcza wyłącznie ASCII i kasowało
-#: je bez śladu. „ŁACNY" stawał się przez to „acny", „Bartłomiej" rozpadał się
-#: na „bart" i „omiej", i nazwisko przestawało pasować do samego siebie
-#: zapisanego bez ogonków. Dotyczy każdego polskiego nazwiska z „ł", czyli
-#: kilku procent obsady.
-_HARD_FOLD = str.maketrans({"ł": "l", "Ł": "L", "ø": "o", "Ø": "O", "đ": "d", "Đ": "D"})
-
-
-def _fold(text: object) -> str:
-    """Tekst bez znaków diakrytycznych, małymi literami."""
-    raw = str(text or "").translate(_HARD_FOLD)
-    raw = unicodedata.normalize("NFD", raw)
-    raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
-    return raw.lower().strip()
-
-
-def _name_parts(text: object) -> List[str]:
-    """Znaczące człony nazwiska - bez inicjałów i śmieci."""
-    cleaned = re.sub(r"[^a-z0-9]+", " ", _fold(text))
-    return [p for p in cleaned.split() if len(p) > 1]
-
-
 def names_match(a: object, b: object) -> bool:
     """Czy to ten sam człowiek, mimo innej kolejności członów.
 
     ZPRP zapisuje „NOWAK Jan", a nasza lista sędziów okręgu bywa prowadzona jako
     „Jan Nowak" - i to samo nazwisko z drugiej strony przestawało pasować.
     Porównujemy więc ZBIÓR członów, a nie tekst. Pojedynczy człon nie wystarcza:
-    samo „Nowak" pasowałoby do każdego Nowaka w okręgu.
+    samo „Nowak" pasowałoby do każdego Nowaka w okręgu. Inicjał rozróżnia
+    imienników („Karol ZAJĄC" i „Karol R. ZAJĄC") - reguła w `app.person_names`.
     """
-    pa, pb = _name_parts(a), _name_parts(b)
-    if not pa or not pb:
-        return False
-    if pa == pb:
-        return True
-    if len(pa) < 2 or len(pb) < 2:
-        return False
-    shorter, longer = (pa, pb) if len(pa) <= len(pb) else (pb, pa)
-    return all(part in longer for part in shorter)
+    return _person_names_match(a, b)
 
 
 def slot_holder_name(state: Mapping[str, Any], slot: object) -> str:

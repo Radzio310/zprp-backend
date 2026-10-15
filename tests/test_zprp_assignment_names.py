@@ -132,3 +132,31 @@ def test_zapis_nie_uzywa_juz_doslownego_porownania_w_strazniku():
     body = ast.unparse(fn)
     assert "_same_person(holder, expect_name)" in body
     assert "_norm_name(holder)" not in body
+
+
+# Z produkcji (2026-10-15, Dolnośląskie): ojciec „ZAJĄC Karol" i syn
+# „ZAJĄC Karol R." stoją obok siebie w formularzu. Giełda podawała „Karol ZAJĄC"
+# i dostawała NAME_AMBIGUOUS, bo podzbiór członów łapał obu. Inicjał rozróżnia.
+ZAJAC_OPTIONS = {
+    name: [("1", "NOWAK Jan"), ("4", "ZAJĄC Karol"), ("9", "ZAJĄC Karol R.")]
+    for name in SELECTS
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wanted, value",
+    [("Karol ZAJĄC", "4"), ("Karol R. ZAJĄC", "9"), ("ZAJĄC Karol R", "9")],
+)
+async def test_father_and_son_are_two_options(http, wanted, value):
+    before = form_html({"NrSedzia_drugi": "1"}, ZAJAC_OPTIONS)
+    after = form_html({"NrSedzia_drugi": value}, ZAJAC_OPTIONS)
+    fake = http(before, after)
+
+    out = await apply(
+        {"NrSedzia_drugi": ("", wanted)},
+        require_name_match=True,
+    )
+
+    assert out["success"] is True, out
+    assert fake.submitted["NrSedzia_drugi"] == value

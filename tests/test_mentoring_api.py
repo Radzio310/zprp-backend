@@ -98,7 +98,8 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         opolskie = next(row for row in result["provinces"] if row["province"] == "OPOLSKIE")
         cross = next(row for row in result["provinces"] if row["province"] == self.api.CROSS_PROVINCE)
         self.assertEqual((slaskie["enabled"], slaskie["active_pairs"], slaskie["active_mentors"]), (True, 2, 3))
-        self.assertEqual((opolskie["enabled"], opolskie["active_pairs"]), (False, 0))
+        # Okręg bez zapisanej konfiguracji jest domyślnie włączony (15.10.2026).
+        self.assertEqual((opolskie["enabled"], opolskie["active_pairs"]), (True, 0))
         self.assertEqual((cross["enabled"], cross["admin_only"]), (False, True))
 
     async def test_self_mentoring_rejected(self):

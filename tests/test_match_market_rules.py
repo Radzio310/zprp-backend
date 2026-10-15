@@ -282,7 +282,16 @@ def test_holder_name_is_returned_as_zprp_writes_it():
 def test_name_matching_survives_order_and_diacritics():
     assert names_match("NOWAK Jan", "Jan Nowak")
     assert names_match("ŁACNY Tomasz", "tomasz lacny")
-    assert names_match("KOWALCZYK Bartłomiej O", "Bartłomiej Kowalczyk")
+    assert names_match("KOWALCZYK Bartłomiej O", "Bartłomiej O. Kowalczyk")
+
+
+def test_initial_separates_namesakes():
+    # ZPRP dopisuje inicjał, żeby rozdzielić imienników: w Dolnośląskiem
+    # „ZAJĄC Karol" (ojciec) i „ZAJĄC Karol R." (syn). Dawniej inicjał odpadał
+    # i giełda nie umiała wskazać żadnego z nich.
+    assert not names_match("KOWALCZYK Bartłomiej O", "Bartłomiej Kowalczyk")
+    assert not names_match("ZAJĄC Karol R.", "Karol ZAJĄC")
+    assert names_match("ZAJĄC Karol R.", "Karol R. ZAJĄC")
 
 
 def test_single_part_is_not_a_match():

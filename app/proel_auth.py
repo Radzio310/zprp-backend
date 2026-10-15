@@ -27,7 +27,8 @@ from fastapi import Header, HTTPException
 from sqlalchemy import select
 
 from app.proel_elevation import verify_elevation_token
-from app.proel_fields import ALL_ROLES, normalize_name, same_judge_number
+from app.person_names import split_name
+from app.proel_fields import ALL_ROLES, same_judge_number
 
 #: Aktor, który NIE deklaruje numeru sędziego - konto ProEl albo samo urządzenie.
 #:
@@ -383,10 +384,6 @@ _ROLE_KEYS = (
 )
 
 
-def _tokens(s: Any) -> Set[str]:
-    return {t for t in normalize_name(s).split(" ") if t}
-
-
 def names_match(a: Any, b: Any) -> bool:
     """Port `namesMatch` z BAZA/utils/matchRole.ts, symetryczny.
 
@@ -394,9 +391,13 @@ def names_match(a: Any, b: Any) -> bool:
     nazwisku po jednej stronie i jednoczłonowym po drugiej rola przepadała.
     Skoro rola daje teraz prawo zapisu, sprawdzamy obie strony.
     """
-    ta, tb = _tokens(a), _tokens(b)
-    if not ta or not tb:
+    # Inicjał i Jr/Sr rozróżniają imienników („Karol ZAJĄC" to nie „Karol R.
+    # ZAJĄC") - podzbiór członów nie może ich przeskoczyć. Patrz app.person_names.
+    pa, ma = split_name(a)
+    pb, mb = split_name(b)
+    if not pa or not pb or ma != mb:
         return False
+    ta, tb = set(pa), set(pb)
     return ta.issubset(tb) or tb.issubset(ta)
 
 

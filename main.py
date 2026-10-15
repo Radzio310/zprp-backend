@@ -9,7 +9,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -60,7 +60,7 @@ from app.match_market import router as match_market_router
 from app.match_bombs import router as match_bombs_router
 from app.match_bombs import panel_router as match_bombs_panel_router
 from app.reports import router as reports_router
-from app.login_records import router as login_records_router
+from app.login_records import repair_shared_photos, router as login_records_router
 from app.privacy_consents import router as privacy_consents_router
 from app.proel import router as proel_router
 from app.proel_zprp import router as proel_zprp_router, close_upstream_client as close_proel_zprp_client
@@ -1004,7 +1004,11 @@ async def _cleanup_loop():
                         set_={
                             "full_name": pg_insert(province_judges).excluded.full_name,
                             "province": pg_insert(province_judges).excluded.province,
-                            "photo_url": pg_insert(province_judges).excluded.photo_url,
+                            # Pusty adres w login_records nie kasuje dobrego zdjęcia.
+                            "photo_url": func.coalesce(
+                                func.nullif(pg_insert(province_judges).excluded.photo_url, ""),
+                                province_judges.c.photo_url,
+                            ),
                             "updated_at": now2,
                             # badges zostają jak były (nie nadpisujemy ich z cleanup)
                             "badges": province_judges.c.badges,
@@ -1015,6 +1019,9 @@ async def _cleanup_loop():
                 upserted = len(to_upsert)
 
             logger.info(f"👥 ProvinceJudges sync: upserted {upserted} records from login_records")
+
+            # Zdjęcie przy kilku sędziach naraz jest cudze - patrz app.judge_photos.
+            await repair_shared_photos()
 
             #  Raz na dobę: scal duplikaty klubów w 'kontakty' (sędziów nie ruszamy)
             await refactor_club_contacts_once_per_utc_day()
