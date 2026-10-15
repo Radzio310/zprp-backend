@@ -32,6 +32,9 @@ from app.db import (
     pod_reka_talent_audit,
     pod_reka_talent_submissions,
     pod_reka_talent_templates,
+    zprp_public_associations,
+    zprp_public_clubs,
+    zprp_public_corrections,
     zprp_public_players,
     zprp_public_team_rosters,
     zprp_public_teams,
@@ -48,6 +51,7 @@ from app.pod_reka_login_rules import (
     merge_cookies,
 )
 from app.pod_reka_rules import parse_club_scope, sanitize_public as _sanitize_public
+from app.zprp_public import corrections as public_corrections, portal_rules
 from app.zprp_public.discord import webhook_configured
 
 router = APIRouter(prefix="/api/v1/pod-reka", tags=["pod_reka"])
@@ -346,8 +350,10 @@ async def club_login(payload: ClubLogin, response: Response, request: Request, s
     inactive_account, no_teams (opis w `app/pod_reka_login_rules.py`)."""
     address = client_key(request.headers.get("x-forwarded-for", ""), request.client.host if request.client else "")
     limit_keys = (f"ip:{address}", f"user:{payload.username.strip().lower()}")
+    retry_after = 0
     try:
         if _LOGIN_LIMITER.blocked(*limit_keys):
+            retry_after = _LOGIN_LIMITER.retry_after(*limit_keys)
             raise LoginError("rate_limited")
         form = encode_login_form(payload.username, payload.password)
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=iso-8859-2"}
@@ -370,6 +376,12 @@ async def club_login(payload: ClubLogin, response: Response, request: Request, s
     except LoginError as exc:
         if exc.code in {"bad_credentials", "not_club_account", "inactive_account", "no_teams"}:
             _LOGIN_LIMITER.fail(*limit_keys)
+        if exc.code == "rate_limited":
+            return JSONResponse(
+                status_code=exc.status,
+                content={**exc.body(), "retry_after": retry_after},
+                headers={"Retry-After": str(retry_after)},
+            )
         return JSONResponse(status_code=exc.status, content=exc.body())
     _LOGIN_LIMITER.success(*limit_keys)
 
@@ -565,12 +577,70 @@ async def archive_talent_draft(submission_id: str, session: dict[str, Any] = Dep
     return {"submission_id": submission_id, "status": "archived"}
 
 
+_TALENT_COLUMNS = (
+    pod_reka_talent_submissions,
+    zprp_public_players.c.first_name,
+    zprp_public_players.c.last_name,
+    zprp_public_players.c.birth_year,
+    zprp_public_players.c.photo_url.label("source_photo_url"),
+    zprp_public_teams.c.name.label("team_name"),
+    zprp_public_teams.c.category,
+    zprp_public_teams.c.gender.label("team_gender"),
+    zprp_public_teams.c.club_id,
+    zprp_public_clubs.c.name.label("club_name"),
+    zprp_public_clubs.c.city.label("club_city"),
+    zprp_public_clubs.c.logo_url.label("club_logo_url"),
+    zprp_public_clubs.c.association_id,
+    zprp_public_associations.c.name.label("association_name"),
+)
+
+
+def _talent_source():
+    """Zgłoszenia z zawodnikiem, drużyną, klubem i okręgiem (outer join: brak klubu nie gubi wpisu)."""
+    return (
+        pod_reka_talent_submissions
+        .join(zprp_public_players, zprp_public_players.c.player_id == pod_reka_talent_submissions.c.player_id)
+        .join(zprp_public_teams, and_(zprp_public_teams.c.team_id == pod_reka_talent_submissions.c.team_id, zprp_public_teams.c.season_id == pod_reka_talent_submissions.c.season_id))
+        .outerjoin(zprp_public_clubs, zprp_public_clubs.c.club_id == zprp_public_teams.c.club_id)
+        .outerjoin(zprp_public_associations, zprp_public_associations.c.association_id == zprp_public_clubs.c.association_id)
+    )
+
+
+async def _talent_item(data: dict[str, Any], profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Wspólny kształt publicznego profilu (lista i szczegół) wraz z korektami admina."""
+    over = await public_corrections.active_overrides()
+    club = over.get("club", {}).get(str(data.get("club_id")), {})
+    team = over.get("team", {}).get(str(data.get("team_id")), {})
+    player = over.get("player", {}).get(str(data.get("player_id")), {})
+    association = data.get("association_name")
+    slug = portal_rules.province_hint(association) if association else ""
+    return {
+        "submission_id": data["submission_id"],
+        "player_id": data["player_id"],
+        "first_name": player.get("first_name", data.get("first_name")),
+        "last_name": player.get("last_name", data.get("last_name")),
+        "birth_year": data.get("birth_year"),
+        "team_id": data["team_id"],
+        "team_name": team.get("name", data.get("team_name")),
+        "category": data.get("category"),
+        "gender": data.get("team_gender"),
+        "club_id": data.get("club_id"),
+        "club_name": club.get("name", data.get("club_name")),
+        "city": club.get("city", data.get("club_city")),
+        "club_logo_url": club.get("logo_url", data.get("club_logo_url")),
+        "association_id": data.get("association_id"),
+        "association_name": association,
+        "voivodeship": portal_rules.voivodeship(slug) if slug else None,
+        "photo_url": data.get("photo_url") or player.get("photo_url", data.get("source_photo_url")),
+        "profile": profile if profile is not None else {},
+        "published_at": data.get("published_at"),
+    }
+
+
 @router.get("/talents/{submission_id}")
 async def public_talent_detail(submission_id: str) -> dict[str, Any]:
     row = await database.fetch_one(
-        select(pod_reka_talent_submissions, zprp_public_players.c.first_name, zprp_public_players.c.last_name, zprp_public_players.c.birth_year, zprp_public_players.c.photo_url.label("source_photo_url"), zprp_public_teams.c.name.label("team_name"), zprp_public_teams.c.category)
-        .join(zprp_public_players, zprp_public_players.c.player_id == pod_reka_talent_submissions.c.player_id)
-        .join(zprp_public_teams, and_(zprp_public_teams.c.team_id == pod_reka_talent_submissions.c.team_id, zprp_public_teams.c.season_id == pod_reka_talent_submissions.c.season_id))
+        select(*_TALENT_COLUMNS).select_from(_talent_source())
         .where(and_(pod_reka_talent_submissions.c.submission_id == submission_id, pod_reka_talent_submissions.c.status == "published"))
     )
     if not row:
@@ -578,7 +648,9 @@ async def public_talent_detail(submission_id: str) -> dict[str, Any]:
     data = _dict(row)
     public_fields = set(data.get("public_fields_json") or [])
     profile = {key: value for key, value in (data.get("data_json") or {}).items() if key in public_fields}
-    return {"submission_id": data["submission_id"], "player_id": data["player_id"], "first_name": data.get("first_name"), "last_name": data.get("last_name"), "birth_year": data.get("birth_year"), "team_id": data["team_id"], "team_name": data.get("team_name"), "category": data.get("category"), "photo_url": data.get("photo_url") or data.get("source_photo_url"), "video_url": data.get("video_url"), "profile": profile, "published_at": data.get("published_at")}
+    item = await _talent_item(data, profile)
+    item["video_url"] = data.get("video_url")
+    return item
 
 
 @router.get("/talents")
@@ -591,9 +663,7 @@ async def public_talents(
     max_height: int | None = Query(default=None, ge=100, le=250),
 ) -> dict[str, Any]:
     rows = await database.fetch_all(
-        select(pod_reka_talent_submissions, zprp_public_players.c.first_name, zprp_public_players.c.last_name, zprp_public_players.c.birth_year, zprp_public_players.c.photo_url.label("source_photo_url"), zprp_public_teams.c.name.label("team_name"), zprp_public_teams.c.category)
-        .join(zprp_public_players, zprp_public_players.c.player_id == pod_reka_talent_submissions.c.player_id)
-        .join(zprp_public_teams, and_(zprp_public_teams.c.team_id == pod_reka_talent_submissions.c.team_id, zprp_public_teams.c.season_id == pod_reka_talent_submissions.c.season_id))
+        select(*_TALENT_COLUMNS).select_from(_talent_source())
         .where(pod_reka_talent_submissions.c.status == "published")
         .order_by(pod_reka_talent_submissions.c.published_at.desc())
     )
@@ -616,7 +686,7 @@ async def public_talents(
             continue
         if max_height is not None and (not isinstance(height, (int, float)) or height > max_height):
             continue
-        items.append({"submission_id": data["submission_id"], "player_id": data["player_id"], "first_name": data.get("first_name"), "last_name": data.get("last_name"), "birth_year": data.get("birth_year"), "team_id": data["team_id"], "team_name": data.get("team_name"), "category": data.get("category"), "photo_url": data.get("photo_url") or data.get("source_photo_url"), "profile": profile, "published_at": data.get("published_at")})
+        items.append(await _talent_item(data, profile))
     return {"items": items, "count": len(items)}
 
 
@@ -639,11 +709,20 @@ async def admin_overview() -> dict[str, Any]:
 
 @admin_router.get("/talents", dependencies=[Depends(admin_read_guard)])
 async def admin_talents(status: str | None = None, limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
-    statement = select(pod_reka_talent_submissions).order_by(pod_reka_talent_submissions.c.updated_at.desc()).limit(limit)
+    statement = (
+        select(*_TALENT_COLUMNS).select_from(_talent_source())
+        .order_by(pod_reka_talent_submissions.c.updated_at.desc()).limit(limit)
+    )
     if status:
         statement = statement.where(pod_reka_talent_submissions.c.status == status)
     rows = await database.fetch_all(statement)
-    return {"items": [_dict(row) for row in rows], "count": len(rows)}
+    items = []
+    for row in rows:
+        data = _dict(row)
+        data["player_name"] = " ".join(p for p in (data.get("first_name"), data.get("last_name")) if p) or None
+        data["city"] = data.get("club_city")
+        items.append(data)
+    return {"items": items, "count": len(items)}
 
 
 @admin_router.get("/talents/{submission_id}", dependencies=[Depends(admin_read_guard)])
@@ -713,6 +792,55 @@ async def review_talent(submission_id: str, payload: TalentReview, request: Requ
     await database.execute(update(pod_reka_talent_submissions).where(pod_reka_talent_submissions.c.submission_id == submission_id).values(**values))
     await _audit(submission_id, request.headers.get("X-Admin-Actor", "admin"), "reviewed", {"from": current["status"], "to": payload.status, "public_fields": payload.public_fields, "note": payload.note})
     return {"submission_id": submission_id, "status": payload.status}
+
+
+class CorrectionCreate(BaseModel):
+    entity_type: Literal["club", "team", "player", "match", "competition"]
+    entity_id: str = Field(min_length=1, max_length=64)
+    field: str = Field(min_length=1, max_length=40)
+    value: str | int | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+
+@admin_router.get("/corrections", dependencies=[Depends(admin_read_guard)])
+async def list_corrections(
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    include_revoked: bool = False,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    C = zprp_public_corrections
+    statement = select(C).order_by(C.c.correction_id.desc()).limit(limit)
+    if entity_type:
+        statement = statement.where(C.c.entity_type == entity_type)
+    if entity_id:
+        statement = statement.where(C.c.entity_id == entity_id)
+    if not include_revoked:
+        statement = statement.where(C.c.revoked_at.is_(None))
+    rows = await database.fetch_all(statement)
+    return {"items": [_dict(r) for r in rows], "count": len(rows), "whitelist": {k: sorted(v) for k, v in public_corrections.WHITELIST.items()}}
+
+
+@admin_router.post("/corrections", status_code=201)
+async def create_correction(payload: CorrectionCreate, request: Request) -> dict[str, Any]:
+    try:
+        public_corrections.validate(payload.entity_type, payload.field, payload.value)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not await public_corrections.entity_exists(payload.entity_type, payload.entity_id):
+        raise HTTPException(404, "Nie znaleziono obiektu do korekty")
+    return await public_corrections.create(
+        payload.entity_type, payload.entity_id, payload.field, payload.value, payload.note,
+        request.headers.get("X-Admin-Actor", "admin"),
+    )
+
+
+@admin_router.delete("/corrections/{correction_id}")
+async def delete_correction(correction_id: int, request: Request) -> dict[str, Any]:
+    """Wycofuje korektę (wiersz zostaje jako audyt, dane źródłowe wracają do widoku)."""
+    if not await public_corrections.revoke(correction_id, request.headers.get("X-Admin-Actor", "admin")):
+        raise HTTPException(404, "Nie znaleziono aktywnej korekty")
+    return {"correction_id": correction_id, "revoked": True}
 
 
 async def ensure_pod_reka_defaults() -> int:

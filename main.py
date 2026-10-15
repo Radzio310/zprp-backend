@@ -140,6 +140,7 @@ from app.zprp_public.api import (
     router as handball_public_router,
 )
 from app.zprp_public.portal import router as handball_portal_router
+from app.zprp_public.crest import router as handball_crest_router
 from app.zprp_public.sync import run_zprp_public_scheduler
 from app.pod_reka import admin_router as pod_reka_admin_router, ensure_pod_reka_defaults, router as pod_reka_router
 
@@ -417,6 +418,7 @@ app.include_router(zprp_stats_router, tags=["zprp"])
 app.include_router(assignments_router, tags=["zprp"])
 app.include_router(handball_public_router)
 app.include_router(handball_portal_router)
+app.include_router(handball_crest_router)
 app.include_router(handball_sync_admin_router)
 app.include_router(pod_reka_router)
 app.include_router(pod_reka_admin_router)

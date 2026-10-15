@@ -206,3 +206,61 @@ def test_mecz_terminarz_szukanie_porownanie(portal, monkeypatch):
     assert found["clubs"][0]["name"] == "KS Kielce" and found["matches"]
     assert [i["id"] for i in cmp_["items"]] == ["c1", "c2"]
     assert cmp_["items"][0]["radar"]["wins"] == 1.0 and cmp_["max"]["wins"] == 1
+
+
+def test_korekty_nakladane_przy_odczycie_i_wycofywane(portal):
+    from app.zprp_public import corrections as C
+
+    async def go(m):
+        C.invalidate()
+        assert await C.entity_exists("club", "c1") and not await C.entity_exists("club", "nope")
+        first = await C.create("club", "c1", "name", "KS Kielce 1", "literówka", "tester")
+        await C.create("club", "c1", "logo_url", "https://x.example/l.png", None, "tester")
+        second = await C.create("club", "c1", "name", "Korona Kielce", None, "tester")   # zastępuje pierwszą
+        await C.create("player", "p1", "last_name", "Kowalska", None, "tester")
+        with pytest.raises(ValueError):
+            C.validate("club", "source_json", "x")
+        with pytest.raises(ValueError):
+            C.validate("club", "logo_url", "javascript:alert(1)")
+        club = await m.club_overview("c1")
+        match = await m.match_overview("m1")
+        player = await m.player_overview("p1")
+        assert await C.revoke(second["correction_id"], "tester") and not await C.revoke(first["correction_id"], "tester")
+        after = await m.club_overview("c1")
+        return club, match, player, after
+
+    club, match, player, after = run(portal, go)
+    assert club["club"]["name"] == "Korona Kielce" and club["club"]["corrected_fields"] == ["logo_url", "name"]
+    assert club["recent_matches"][0]["home_logo_url"] == "https://x.example/l.png"
+    assert match["home"]["club_name"] == "Korona Kielce" and match["home"]["logo_url"] == "https://x.example/l.png"
+    assert player["player"]["last_name"] == "Kowalska"
+    assert after["club"]["name"] == "KS Kielce"          # wycofanie przywraca dane źródłowe
+
+
+def test_retry_after_i_kolory_herbu():
+    from datetime import datetime, timedelta, timezone
+    from app.pod_reka_login_rules import AttemptLimiter
+
+    limiter = AttemptLimiter(limit=2, window=timedelta(minutes=10))
+    now = datetime.now(timezone.utc)
+    limiter.fail("ip:1", now=now - timedelta(minutes=4))
+    limiter.fail("ip:1", now=now - timedelta(minutes=1))
+    assert limiter.blocked("ip:1", now=now)
+    assert 5 * 60 <= limiter.retry_after("ip:1", now=now) <= 6 * 60 + 2
+
+    import io
+    from PIL import Image
+    from app.zprp_public.crest import extract_colors
+
+    img = Image.new("RGBA", (40, 40), (255, 255, 255, 255))
+    for x in range(40):
+        for y in range(40):
+            if x < 20:
+                img.putpixel((x, y), (200, 20, 30, 255))
+            elif y < 20:
+                img.putpixel((x, y), (20, 40, 200, 255))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    colors = extract_colors(buf.getvalue())
+    assert colors["primary"].startswith("#c") and colors["secondary"].startswith("#1") and colors["text"] == "#ffffff"
+    assert extract_colors(b"<svg/>") is None

@@ -4530,6 +4530,7 @@ from app.zprp_public_tables import define_tables as _define_zprp_public_tables
     zprp_public_changes,
     zprp_public_sync_runs,
     zprp_public_sync_state,
+    zprp_public_corrections,
 ) = _define_zprp_public_tables(metadata)
 
 # Funkcje produktowe BAZA pod RĘKĄ: raporty, sesje klubowe i Talenty.

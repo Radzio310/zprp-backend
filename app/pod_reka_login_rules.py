@@ -146,6 +146,18 @@ class AttemptLimiter:
         now = now or datetime.now(timezone.utc)
         return any(len(self._recent(k, now)) >= self.limit for k in keys if k)
 
+    def retry_after(self, *keys: str, now: Optional[datetime] = None) -> int:
+        """Sekundy do zwolnienia najdłużej blokującego klucza (min. 1)."""
+        now = now or datetime.now(timezone.utc)
+        waits = []
+        for key in keys:
+            recent = self._recent(key, now) if key else []
+            if len(recent) >= self.limit:
+                # blokada zniknie, gdy najstarsza liczona próba wypadnie z okna
+                unblock_at = sorted(recent)[len(recent) - self.limit] + self.window
+                waits.append((unblock_at - now).total_seconds())
+        return max(1, int(max(waits, default=1)) + 1)
+
     def fail(self, *keys: str, now: Optional[datetime] = None) -> None:
         now = now or datetime.now(timezone.utc)
         if len(self._attempts) > self.max_keys:

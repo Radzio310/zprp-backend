@@ -393,6 +393,22 @@ def define_tables(metadata: MetaData) -> tuple[Table, ...]:
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
 
+    corrections = Table(
+        "zprp_public_corrections",
+        metadata,
+        Column("correction_id", Integer, primary_key=True, autoincrement=True),
+        Column("entity_type", String, nullable=False),
+        Column("entity_id", String, nullable=False),
+        Column("field", String, nullable=False),
+        Column("value", Text, nullable=True),
+        Column("note", Text, nullable=True),
+        Column("actor", String, nullable=False, server_default=text("'admin'")),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("revoked_at", DateTime(timezone=True), nullable=True),
+        Column("revoked_by", String, nullable=True),
+    )
+    Index("ix_zprp_public_corrections_active", corrections.c.entity_type, corrections.c.entity_id, corrections.c.revoked_at)
+
     return (
         seasons,
         associations,
@@ -413,5 +429,6 @@ def define_tables(metadata: MetaData) -> tuple[Table, ...]:
         changes,
         sync_runs,
         sync_state,
+        corrections,
     )
 

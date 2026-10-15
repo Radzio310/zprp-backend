@@ -31,6 +31,7 @@ from app.db import (
     zprp_public_team_rosters,
     zprp_public_teams,
 )
+from app.zprp_public import corrections
 from app.zprp_public.sync import run_sync_job
 from app.zprp_public.privacy import public_club, public_team
 
@@ -67,6 +68,23 @@ def _public_match(row: Any) -> dict[str, Any]:
     """Wspólny, stabilny kształt meczu bez surowego payloadu źródłowego."""
     data = _dict(row)
     return {key: value for key, value in data.items() if key not in {"source_hash", "source_json"}}
+
+
+async def _decorate_matches(items: list[dict[str, Any]]) -> None:
+    """Dokłada herby/nazwy klubów do kart meczów oraz nakłada korekty meczów."""
+    ids = {i for item in items for i in (item.get("home_club_id"), item.get("away_club_id")) if i}
+    lookup: dict[str, dict[str, Any]] = {}
+    if ids:
+        rows = await database.fetch_all(
+            select(zprp_public_clubs.c.club_id, zprp_public_clubs.c.name, zprp_public_clubs.c.logo_url)
+            .where(zprp_public_clubs.c.club_id.in_(list(ids)))
+        )
+        lookup = {r["club_id"]: _dict(r) for r in rows}
+        await corrections.apply("club", list(lookup.values()))
+    for item in items:
+        item["home_logo_url"] = (lookup.get(item.get("home_club_id")) or {}).get("logo_url")
+        item["away_logo_url"] = (lookup.get(item.get("away_club_id")) or {}).get("logo_url")
+    await corrections.apply("match", items)
 
 
 @router.get("/health")
@@ -179,14 +197,18 @@ async def portal_overview() -> dict[str, Any]:
         item["average"] = round(goals_count / matches_count, 2) if matches_count else 0
         leader_items.append(item)
 
+    today_items, recent_items, upcoming_items = (
+        [_public_match(row) for row in rows] for rows in (today, recent, upcoming)
+    )
+    await _decorate_matches(today_items + recent_items + upcoming_items)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "freshness": {"status": freshness, "updated_at": last_updated},
         "season": _dict(season) or None,
         "counters": dict(zip(("competitions", "clubs", "teams", "players", "matches"), counter_rows)),
-        "today": [_public_match(row) for row in today],
-        "recent": [_public_match(row) for row in recent],
-        "upcoming": [_public_match(row) for row in upcoming],
+        "today": today_items,
+        "recent": recent_items,
+        "upcoming": upcoming_items,
         "leaders": leader_items,
     }
 
@@ -251,7 +273,9 @@ async def list_clubs(
     if conditions:
         query = query.where(and_(*conditions))
     result = await database.fetch_all(query.order_by(zprp_public_clubs.c.name).limit(limit).offset(offset))
-    return _page(limit, offset, result)
+    page = _page(limit, offset, result)
+    await corrections.apply("club", page["items"])
+    return page
 
 
 @router.get("/club-licenses")
@@ -341,7 +365,10 @@ async def club_details(club_id: str) -> dict[str, Any]:
         .where(zprp_public_club_licenses.c.club_id == club_id)
         .order_by(zprp_public_club_licenses.c.season_name.desc(), zprp_public_club_licenses.c.name)
     )
-    return {"club": public_club(club), "teams": [public_team(row) for row in teams], "licenses": [_dict(row) for row in licenses]}
+    club_out = await corrections.apply_one("club", public_club(club))
+    teams_out = [public_team(row) for row in teams]
+    await corrections.apply("team", teams_out)
+    return {"club": club_out, "teams": teams_out, "licenses": [_dict(row) for row in licenses]}
 
 
 @router.get("/teams")
@@ -381,7 +408,9 @@ async def list_teams(
     if conditions:
         query = query.where(and_(*conditions))
     rows = await database.fetch_all(query.order_by(zprp_public_teams.c.name).limit(limit).offset(offset))
-    return _page(limit, offset, rows)
+    page = _page(limit, offset, rows)
+    await corrections.apply("team", page["items"])
+    return page
 
 
 @router.get("/teams/{team_id}")
@@ -416,7 +445,8 @@ async def team_details(team_id: str, season_id: str = Query(...)) -> dict[str, A
                 "position": data.get("position"),
             }
         )
-    return {"team": public_team(team), "roster": roster, "roster_count": len(roster)}
+    await corrections.apply("player", roster)
+    return {"team": await corrections.apply_one("team", public_team(team)), "roster": roster, "roster_count": len(roster)}
 
 
 @router.get("/competitions")
@@ -458,7 +488,9 @@ async def list_competitions(
     if conditions:
         query = query.where(and_(*conditions))
     result = await database.fetch_all(query.order_by(zprp_public_competitions.c.name).limit(limit).offset(offset))
-    return _page(limit, offset, result)
+    page = _page(limit, offset, result)
+    await corrections.apply("competition", page["items"])
+    return page
 
 
 @router.get("/competitions/{competition_id}")
@@ -490,6 +522,7 @@ async def competition_details(competition_id: str) -> dict[str, Any]:
             .order_by(zprp_public_matchdays.c.sequence)
         )
     public_comp = {key: value for key, value in _dict(competition).items() if key not in {"source_hash", "source_json"}}
+    await corrections.apply_one("competition", public_comp)
     return {"competition": public_comp, "rounds": [_dict(row) for row in rounds], "matchdays": [_dict(row) for row in matchdays]}
 
 
@@ -582,6 +615,7 @@ async def list_matches(
         query = query.where(and_(*conditions))
     result = await database.fetch_all(query.order_by(zprp_public_matches.c.scheduled_at.desc()).limit(limit).offset(offset))
     items = [_public_match(row) for row in result]
+    await _decorate_matches(items)
     return {"items": items, "limit": limit, "offset": offset, "count": len(items)}
 
 
@@ -622,6 +656,8 @@ async def match_details(match_id: str) -> dict[str, Any]:
         ).where(zprp_public_match_staff.c.match_id == match_id)
     )
     public_match = {key: value for key, value in _dict(match).items() if key not in {"source_hash", "source_json"}}
+    await _decorate_matches([public_match])
+    await corrections.apply("player", players)
     return {"match": public_match, "players": players, "staff": [_dict(row) for row in staff]}
 
 
@@ -634,7 +670,9 @@ async def list_players(q: str = Query(..., min_length=2), limit: int = Query(30,
         .order_by(zprp_public_players.c.last_name, zprp_public_players.c.first_name)
         .limit(limit)
     )
-    return {"items": [_public_player(row) for row in result], "count": len(result)}
+    items = [_public_player(row) for row in result]
+    await corrections.apply("player", items)
+    return {"items": items, "count": len(result)}
 
 
 @router.get("/players/{player_id}")
@@ -669,7 +707,7 @@ async def player_details(player_id: str) -> dict[str, Any]:
             func.coalesce(func.sum(zprp_public_match_players.c.disqualifications), 0).label("disqualifications"),
         ).where(zprp_public_match_players.c.player_id == player_id)
     )
-    return {"player": _public_player(player), "teams": [_dict(row) for row in rosters], "totals": _dict(totals)}
+    return {"player": await corrections.apply_one("player", _public_player(player)), "teams": [_dict(row) for row in rosters], "totals": _dict(totals)}
 
 
 @router.get("/search")

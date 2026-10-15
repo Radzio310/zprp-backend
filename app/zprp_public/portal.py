@@ -42,7 +42,7 @@ from app.db import (
     zprp_public_teams,
 )
 from app.national_distance_parser import normalize_city_key
-from app.zprp_public import portal_rules as R
+from app.zprp_public import corrections, portal_rules as R
 from app.zprp_public.api import _dict, _public_player, search as base_search
 from app.zprp_public.privacy import public_club, public_team
 
@@ -91,7 +91,9 @@ async def _club_lookup(club_ids: set[str]) -> dict[str, dict]:
             zprp_public_clubs.c.logo_url, zprp_public_clubs.c.city,
         ).where(zprp_public_clubs.c.club_id.in_(ids))
     )
-    return {r["club_id"]: _dict(r) for r in rows}
+    found = {r["club_id"]: _dict(r) for r in rows}
+    await corrections.apply("club", list(found.values()))
+    return found
 
 
 async def _cards(rows: list[Any]) -> list[dict[str, Any]]:
@@ -101,6 +103,7 @@ async def _cards(rows: list[Any]) -> list[dict[str, Any]]:
         card["status"] = _status(card)
         card["home_logo_url"] = (lookup.get(card.get("home_club_id")) or {}).get("logo_url")
         card["away_logo_url"] = (lookup.get(card.get("away_club_id")) or {}).get("logo_url")
+    await corrections.apply("match", cards)
     return cards
 
 
@@ -406,12 +409,15 @@ async def club_overview(club_id: str, season_id: str = "") -> dict[str, Any]:
     record = R.team_record(
         cards, lambda side, m: m.get(f"{side}_club_id") == club_id,
     )
+    club_out = await corrections.apply_one("club", public_club(club))
+    teams_out = [public_team(t) for t in teams]
+    await corrections.apply("team", teams_out)
     return {
-        "club": public_club(club),
+        "club": club_out,
         "association_name": assoc or None,
         "season": await _season_info(chosen),
         "seasons": seasons,
-        "teams": [public_team(t) for t in teams],
+        "teams": teams_out,
         "teams_count": len(teams),
         "players_count": int(players_count or 0),
         "recent_matches": recent,
@@ -480,10 +486,12 @@ async def team_overview(team_id: str, season_id: str = "") -> dict[str, Any]:
         })
     cards = await _cards(match_rows)
     recent, upcoming = _split_upcoming(cards, now)
+    club_out = await corrections.apply_one("club", public_club(club)) if club else None
+    await corrections.apply("player", roster)
     return {
-        "team": public_team(team),
-        "club": public_club(club) if club else None,
-        "club_logo_url": club["logo_url"] if club else None,
+        "team": await corrections.apply_one("team", public_team(team)),
+        "club": club_out,
+        "club_logo_url": club_out["logo_url"] if club_out else None,
         "season": await _season_info(chosen),
         "seasons": [_dict(r) for r in seasons_rows],
         "roster": roster,
@@ -561,9 +569,20 @@ async def player_overview(player_id: str) -> dict[str, Any]:
     for card, line in zip(recent, recent_rows):
         card["player_line"] = {c: line.get(c) for c in PLAYER_STAT_COLUMNS}
         card["player_team_id"] = line["player_team_id"]
+    teams_out = [_dict(r) for r in roster_rows]
+    over = await corrections.active_overrides()
+    for t in teams_out:
+        club_patch = over.get("club", {}).get(str(t.get("club_id")), {})
+        team_patch = over.get("team", {}).get(str(t.get("team_id")), {})
+        if "name" in club_patch:
+            t["club_name"] = club_patch["name"]
+        if "logo_url" in club_patch:
+            t["club_logo_url"] = club_patch["logo_url"]
+        if "name" in team_patch:
+            t["team_name"] = team_patch["name"]
     return {
-        "player": _public_player(player),
-        "teams": [_dict(r) for r in roster_rows],
+        "player": await corrections.apply_one("player", _public_player(player)),
+        "teams": teams_out,
         "totals": _player_totals(lines),
         "seasons": seasons,
         "recent_matches": recent,
@@ -581,6 +600,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
     if not match:
         raise HTTPException(404, "Nie znaleziono meczu")
     m = {k: v for k, v in _dict(match).items() if k not in {"source_hash", "source_json"}}
+    await corrections.apply_one("match", m)
     clubs = await _club_lookup({m.get("home_club_id"), m.get("away_club_id")})
 
     def side(prefix: str) -> dict:
