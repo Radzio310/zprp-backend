@@ -10,6 +10,11 @@ from app.board_rules import COMMITTEE_BADGES
 # Nie jest województwem i nigdy nie może odziedziczyć uprawnień komisji.
 CROSS_PROVINCE = "MIĘDZYOKRĘGOWE"
 
+#: Program pary. „Mentor 2028" to para ZPRP: zakłada ją administrator, a
+#: komisja okręgu tylko ją ogląda. Para wojewódzka należy do komisji.
+PROGRAM_2028 = "mentor2028"
+PROGRAM_PROVINCE = "province"
+
 
 def json_value(value, fallback):
     if isinstance(value, str):
@@ -68,3 +73,29 @@ def season_bounds(now=None):
     # Same boundary as match_market_rules.SEASON_START_MONTH/DAY.
     year = now.year if now.month >= 9 else now.year - 1
     return datetime(year, 9, 1, tzinfo=ZoneInfo("Europe/Warsaw")), datetime(year + 1, 9, 1, tzinfo=ZoneInfo("Europe/Warsaw"))
+
+
+def pair_program(stored, created_by_admin=False, province=""):
+    """Program pary; wiersz bez znacznika (sprzed 15.10.2026) - po autorze."""
+    value = str(stored or "").strip()
+    if value in (PROGRAM_2028, PROGRAM_PROVINCE):
+        return value
+    return PROGRAM_2028 if created_by_admin or province == CROSS_PROVINCE else PROGRAM_PROVINCE
+
+
+def program_for_new_pair(admin, province, wanted=None):
+    """Znacznik nowej pary. Administrator: domyślnie „Mentor 2028", na życzenie
+    wojewódzka. Komisja zakłada wyłącznie pary wojewódzkie."""
+    if not admin:
+        return PROGRAM_PROVINCE
+    if province == CROSS_PROVINCE or wanted is None:
+        return PROGRAM_2028
+    return PROGRAM_2028 if wanted else PROGRAM_PROVINCE
+
+
+def pair_locked(admin, manage, program):
+    """Czy ten ktoś widzi parę tylko do odczytu."""
+    if admin:
+        return False
+    return not manage or program == PROGRAM_2028
+

@@ -10,7 +10,10 @@ from app.db import (database, province_judges, province_matches, mentoring_confi
     mentoring_audit as audit)
 from app.match_market import market_actor, Actor
 from app.match_market_access import badge_names
-from app.mentoring_rules import CROSS_PROVINCE, DEFAULT_CONFIG, may_manage, pair_matches, season_bounds, json_value
+from app.mentoring_rules import (
+    CROSS_PROVINCE, DEFAULT_CONFIG, PROGRAM_2028, PROGRAM_PROVINCE, may_manage, pair_locked, pair_matches,
+    pair_program, program_for_new_pair, season_bounds, json_value,
+)
 from app.proel_auth import is_admin
 from app.settlement_province import display as province_display, spellings
 
@@ -78,17 +81,26 @@ async def require_manager(actor, province):
         raise HTTPException(403, "Brak uprawnień do zarządzania mentoringiem tego okręgu.")
 
 
+async def program_of(pair) -> str:
+    """Program pary z jej znacznika; stary wiersz bez znacznika - po autorze."""
+    stored = dict(pair).get("program")
+    if stored:
+        return pair_program(stored)
+    creator = str(dict(pair).get("created_by") or "")
+    return pair_program(None, bool(creator) and await is_admin(creator), prov(pair.get("province")))
+
+
 async def require_pair_write(actor, pair):
     """
     Kto moze zmienic te konkretna pare.
 
-    Pare zalozona przez ADMINISTRATORA okreg oglada, ale jej nie rusza
-    (decyzja uzytkownika z 20.09.2026) - inaczej ustalenie krajowe znikaloby
-    po cichu z poziomu okregu. Sam administrator zmienia kazda.
+    Pare „Mentor 2028" (para ZPRP) okreg oglada, ale jej nie rusza - zmienia ja
+    wylacznie administrator (decyzje uzytkownika z 20.09 i 15.10.2026).
+    Rozstrzyga ZNACZNIK pary, a nie to, kto jest dzis na liscie adminow.
     """
     await require_manager(actor, pair["province"])
-    if not actor.is_admin and await is_admin(str(pair.get("created_by") or "")):
-        raise HTTPException(403, "Tę parę założył administrator - okręg może ją tylko oglądać.")
+    if not actor.is_admin and await program_of(pair) == PROGRAM_2028:
+        raise HTTPException(403, "To para programu Mentor 2028 - zmienia ją wyłącznie administrator.")
 
 
 async def log(actor, action, data, pair_id=None):
@@ -104,6 +116,12 @@ class PairRequest(BaseModel):
     province: str
     judge_ids: list[str] = Field(min_length=2, max_length=2)
     mentor_ids: list[str] = Field(min_length=1, max_length=30)
+    #: Tylko administrator: None = domyślnie „Mentor 2028", False = para wojewódzka.
+    mentor2028: bool | None = None
+
+
+class ProgramRequest(BaseModel):
+    mentor2028: bool
 
 
 class MentorsRequest(BaseModel):
@@ -180,8 +198,9 @@ async def admin_overview(actor: Actor = Depends(market_actor)):
     } for province in ADMIN_SCOPES]}
 
 
-async def pair_json(record, links, locked):
+async def pair_json(record, links, locked, program=None):
     return {**dict(record), "judge_ids": json_value(record["judge_ids"], []),
+        "program": program or await program_of(record),
         "mentor_ids": [a["mentor_id"] for a in links if a["pair_id"] == record["id"] and a["ended_at"] is None],
         "mentor_history_ids": list(dict.fromkeys(a["mentor_id"] for a in links if a["pair_id"] == record["id"])),
         "locked": locked}
@@ -213,10 +232,8 @@ async def management(province: str = "", actor: Actor = Depends(market_actor)):
     records = await database.fetch_all(select(pairs).where(pairs.c.province.in_(names)).order_by(pairs.c.created_at.desc()))
     links = await database.fetch_all(select(assignments).select_from(assignments.join(pairs, assignments.c.pair_id == pairs.c.id)).where(pairs.c.province.in_(names)))
 
-    # Para zalozona przez administratora jest w okregu tylko do ogladania.
-    # `dict(...)` bo wiersz bez tej kolumny (starszy zapis) nie moze wywrocic odczytu.
-    creators = {str(dict(r).get("created_by") or "") for r in records}
-    admin_creators = {who for who in creators if who and await is_admin(who)}
+    # Para „Mentor 2028" jest w okregu tylko do ogladania.
+    programs = {r["id"]: await program_of(r) for r in records}
 
     # Pary miedzyokregowe z sedzia tego okregu. Okreg ich nie prowadzi z zasady,
     # wiec zawsze sa zamkniete - ale musi o nich wiedziec, zeby nie szukal
@@ -244,7 +261,7 @@ async def management(province: str = "", actor: Actor = Depends(market_actor)):
         "can_manage": manage, "is_admin": bool(actor.is_admin),
         "people": people + cross_people,
         "occupied": [r["judge_id"] for r in occupied if actor.is_admin or r["judge_id"] in known],
-        "pairs": [await pair_json(r, links, not manage or (not actor.is_admin and str(dict(r).get("created_by") or "") in admin_creators)) for r in records],
+        "pairs": [await pair_json(r, links, pair_locked(actor.is_admin, manage, programs[r["id"]]), programs[r["id"]]) for r in records],
         "cross_pairs": [await pair_json(r, cross_links, True) for r in cross_records]}
 
 
@@ -278,13 +295,14 @@ async def create_pair(req: PairRequest, actor: Actor = Depends(market_actor)):
         if await database.fetch_one(select(members).where(members.c.judge_id.in_(req.judge_ids))):
             raise HTTPException(409, "Jeden z sędziów należy już do aktywnej pary.")
         pair_id = str(uuid4())
-        await database.execute(pairs.insert().values(id=pair_id, province=province, judge_ids=sorted(req.judge_ids), created_by=actor.judge_id))
+        program = program_for_new_pair(actor.is_admin, province, req.mentor2028)
+        await database.execute(pairs.insert().values(id=pair_id, province=province, judge_ids=sorted(req.judge_ids), created_by=actor.judge_id, program=program))
         for judge in req.judge_ids:
             await database.execute(members.insert().values(judge_id=judge, pair_id=pair_id))
         for mentor in req.mentor_ids:
             await database.execute(assignments.insert().values(pair_id=pair_id, mentor_id=mentor, show_home=True, notify=True))
-        await log(actor, "created", {**req.model_dump(), "province": province}, pair_id)
-    return {"id": pair_id, "province": province}
+        await log(actor, "created", {**req.model_dump(), "province": province, "program": program}, pair_id)
+    return {"id": pair_id, "province": province, "program": program}
 
 
 async def active_pair(pair_id):
@@ -309,6 +327,24 @@ async def replace_mentors(pair_id: str, req: MentorsRequest, actor: Actor = Depe
             await database.execute(pg_insert(assignments).values(pair_id=pair_id, mentor_id=mentor, started_at=now(), show_home=True, notify=True).on_conflict_do_update(index_elements=[assignments.c.pair_id, assignments.c.mentor_id], set_={"ended_at": None, "started_at": now(), "show_home": True, "notify": True}))
         await log(actor, "mentors_changed", req.model_dump(), pair_id)
     return {"ok": True}
+
+
+@router.put("/pairs/{pair_id}/program")
+async def set_program(pair_id: str, req: ProgramRequest, actor: Actor = Depends(market_actor)):
+    """Administrator włącza albo zdejmuje znacznik „Mentor 2028".
+
+    Znacznik odbiera parę komisji okręgu (zostaje jej podgląd), zdjęcie go -
+    oddaje parę komisji.
+    """
+    if not actor.is_admin:
+        raise HTTPException(403, "Program Mentor 2028 ustawia wyłącznie administrator.")
+    program = PROGRAM_2028 if req.mentor2028 else PROGRAM_PROVINCE
+    async with database.transaction():
+        await database.execute(text("SELECT pg_advisory_xact_lock(7419021)"))
+        await active_pair(pair_id)
+        await database.execute(update(pairs).where(pairs.c.id == pair_id).values(program=program))
+        await log(actor, "program", {"program": program}, pair_id)
+    return {"ok": True, "program": program}
 
 
 @router.delete("/pairs/{pair_id}")

@@ -4,9 +4,10 @@
 
 1. Wdrożyć backend. Standardowy start `app.db` tworzy tabele mentoringu i uzupełnia kolumny pierwszej synchronizacji. Nie należy importować `app.db` tylko w celu uruchomienia testów — otwiera rzeczywistą bazę.
 2. Wdrożyć aplikację. Administrator zarządza całą Polską w **Panel admina → Mentoring**. Widzi mapę 16 okręgów, ich aktywne pary i mentorów oraz może tworzyć pary między okręgami bez włączania dostępu komisji.
-3. Dla wybranego okręgu administrator włącza zarządzanie okręgowe. Pusta lista zarządzających oznacza istniejącą odznakę **Komisja sędziowska**; lista niepusta zastępuje ten dostęp wskazanymi osobami. Wyłączenie tej opcji odbiera zarządzanie komisji, nie kończy automatycznie istniejącej opieki.
-4. Utworzyć dwóch podopiecznych i przypisać mentorów. Jedno aktywne członkostwo podopiecznego jest zabezpieczone kluczem głównym i transakcją. Bycie mentorem innej pary nie jest blokowane.
-5. Uprawniona komisja korzysta z **modułu okręgowego → Więcej → Mentorzy i pary**. Ten wariant nie pokazuje mapy kraju ani przełączników dostępu i pozwala wybierać wyłącznie osoby z własnego okręgu.
+3. Zarządzanie okręgowe jest **domyślnie włączone** (15.10.2026): osoba z odznaką **Komisja sędziowska** (w każdym zapisie - wielkość liter i ogonki bez znaczenia) prowadzi pary swojego okręgu od razu. Administrator może okręg wyłączyć. Osoby wskazane przez administratora **dochodzą** do komisji, nie zastępują jej. Wyłączenie odbiera zarządzanie komisji, nie kończy automatycznie istniejącej opieki.
+4. **Program Mentor 2028** (kolumna `mentoring_pairs.program`: `mentor2028` albo `province`). Para administratora dostaje znacznik domyślnie (w kreatorze można go wyłączyć), para międzyokręgowa zawsze. Para Mentor 2028 jest dla komisji tylko do podglądu - zmienia ją wyłącznie administrator. Administrator przełącza znacznik na kafelku pary (`PUT /mentoring/pairs/{id}/program`). Blokadę wyznacza ZNACZNIK, nie bieżąca lista adminów. Wiersze sprzed wdrożenia dostały znacznik raz, przy starcie (`app/db.py`): para autora z listy adminów i międzyokręgowa - Mentor 2028, reszta - wojewódzka.
+5. Utworzyć dwóch podopiecznych i przypisać mentorów. Jedno aktywne członkostwo podopiecznego jest zabezpieczone kluczem głównym i transakcją. Bycie mentorem innej pary nie jest blokowane.
+6. Uprawniona komisja korzysta z **modułu okręgowego → Więcej → Mentorzy i pary**. Ten wariant nie pokazuje mapy kraju ani przełączników dostępu i pozwala wybierać wyłącznie osoby z własnego okręgu.
 
 ## Dane i synchronizacja
 
