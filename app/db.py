@@ -4897,4 +4897,10 @@ with engine.connect() as _conn:
 
     for _statement in _NATIONAL_DISTANCE_MIGRATIONS:
         _conn.execute(text(_statement))
+    # Nagrania meczu dla mentorów: podgląd, znaczniki, status prośby (15.10.2026)
+    # - lista w `app/mentor_evaluation_tables.py`.
+    from app.mentor_evaluation_tables import MIGRATIONS as _MENTOR_EVALUATION_MIGRATIONS
+
+    for _statement in _MENTOR_EVALUATION_MIGRATIONS:
+        _conn.execute(text(_statement))
     _conn.commit()

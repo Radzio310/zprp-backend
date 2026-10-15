@@ -110,3 +110,12 @@ def test_panel_nie_przypisuje_nazwiska_cudzemu_numerowi():
 
     dupes = duplicate_names({"104": "KASZNIA Wojciech", "777": "Wojciech Kasznia", "5": "X Y"}, ["104", "777", "5"])
     assert dupes == [{"name": "KASZNIA Wojciech", "judge_ids": ["104", "777"]}]
+
+
+def test_karol_zajac_i_karol_r_zajac_to_dwie_rozne_osoby():
+    from app.settlement_names_rules import duplicate_names
+
+    assert duplicate_names(
+        {"288": "ZAJĄC Karol", "5601": "ZAJĄC Karol R."},
+        ["288", "5601"],
+    ) == []

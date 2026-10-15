@@ -164,6 +164,25 @@ async def _judge_names(province: str) -> dict[str, str]:
     return await judge_names(province)
 
 
+async def _province_judge_ids(province: str) -> set[str]:
+    """Numery należące do okręgu, bez globalnego katalogu `zprp_judges_seen`."""
+    listed = await database.fetch_all(
+        select(province_settlement_judges.c.judge_id).where(
+            province_settlement_judges.c.province == province
+        )
+    )
+    panel = await database.fetch_all(
+        select(province_judges.c.judge_id).where(
+            province_judges.c.province.in_(spellings(province))
+        )
+    )
+    return {
+        str(row["judge_id"] or "").strip()
+        for row in [*listed, *panel]
+        if str(row["judge_id"] or "").strip()
+    }
+
+
 async def _managed_prefixes(province: str) -> list[str]:
     """II ligi powierzone okregowi: nadpisanie z panelu albo katalog (IIM4, IIK4)."""
     from app.match_market_rules import managed_prefixes_for
@@ -293,7 +312,11 @@ async def _base(province: str) -> dict:
         payable, bombed = SB.split_bombed(everything, hits)
         # Bomby bez obsady w rozliczeniu (07.10.2026) - wchodza do okresu po
         # dacie wpisu, z kara (`settlement_bombs.unlinked`).
-        loose = SB.unlinked(bombs, hits, names.keys())
+        # Nie wolno używać `names.keys()`: słownik zawiera globalny katalog
+        # ZPRP, więc wpuszczał tu niepowiązane bomby ze Śląska do Dolnego Śląska.
+        province_ids = await _province_judge_ids(province)
+        province_ids.update(str(item.judge_id).strip() for item in everything)
+        loose = SB.unlinked(bombs, hits, province_ids)
         return {
             "central_versions": central_versions,
             "province_versions": province_versions,

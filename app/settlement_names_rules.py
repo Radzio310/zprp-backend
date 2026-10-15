@@ -179,6 +179,17 @@ def merge_names(
     return out, conflicts
 
 
+_KNOWN_DISTINCT_JUDGE_IDS = {
+    # Ojciec i syn. ZPRP zapisuje syna jako „Karol R. ZAJĄC” (5601), a ojca
+    # jako „Karol ZAJĄC” (288), więc podobieństwo nazw nie oznacza duplikatu.
+    frozenset({"288", "5601"}),
+}
+
+
+def _known_distinct_people(left_id: str, right_id: str) -> bool:
+    return frozenset({_s(left_id), _s(right_id)}) in _KNOWN_DISTINCT_JUDGE_IDS
+
+
 def duplicate_names(names: dict[str, str], judge_ids: Iterable[str]) -> list[dict]:
     """
     To samo nazwisko pod kilkoma numerami wśród `judge_ids` (np. sędziowie
@@ -194,7 +205,10 @@ def duplicate_names(names: dict[str, str], judge_ids: Iterable[str]) -> list[dic
         if is_missing_name(name, judge_id):
             continue
         for group in groups:
-            if same_person(names.get(group[0], ""), name):
+            if (
+                same_person(names.get(group[0], ""), name)
+                and not _known_distinct_people(group[0], judge_id)
+            ):
                 group.append(judge_id)
                 break
         else:

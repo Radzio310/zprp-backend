@@ -7,6 +7,14 @@ Trasy (prefiks `/mentor-evaluations`):
   PUT  /match/{match_id}          szkic (zapis w tle z telefonu),
   POST /match/{match_id}/publish  publikacja - para widzi ocenę od tej chwili,
   GET  /province/{province}       opublikowane oceny okręgu (komisja, admin).
+  POST /match/{match_id}/requests prośba pary o ocenę (push, e-mail, SMS),
+  POST/PATCH/DELETE /match/{match_id}/videos[/{id}]  galeria nagrań meczu:
+                                  podgląd linku, synchronizacja, znaczniki,
+  GET  /match/{match_id}/timeline oś meczu z protokołu ProEla (do znaczników),
+  GET  /link-preview?url=         podgląd dowolnego linku (SSRF: `app/link_preview_rules.py`).
+
+Status prośby (wysłano / przeczytane / ocenił) i znaczniki nagrań - liść
+`app/mentor_video_rules.py`.
 
 Reguły kto/kiedy/co w liściu `app/mentor_evaluation_rules.py`.
 """
@@ -59,6 +67,7 @@ from app.mentor_evaluation_request_rules import (
     video_provider,
     youtube_thumbnail,
 )
+from app.mentor_video_rules import clean_markers, clean_sync, mentor_states, should_mark_read, timeline_from_blob
 from app.settlement_province import display as province_display, spellings
 
 router = APIRouter(prefix="/mentor-evaluations", tags=["Mentor evaluations"])
@@ -85,6 +94,11 @@ class EvaluationRequest(BaseModel):
 
 class MatchVideoRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
+
+
+class MatchVideoPatch(BaseModel):
+    sync: Optional[Dict[str, Any]] = None
+    markers: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=200)
 
 
 # ─── Dane z bazy ────────────────────────────────────────────────────────────
@@ -194,20 +208,42 @@ def _request_shape(row: Dict[str, Any]) -> Dict[str, Any]:
         "last_sent_at": last_sent,
         "cooldown_until": cooldown_until,
         "fulfilled_at": row.get("fulfilled_at"),
+        "read_at": row.get("read_at"),
     }
 
 
 def _video_shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     url = str(row.get("url") or "")
     author_id = str(row.get("added_by") or "")
+    markers_raw = row.get("markers_json")
+    sync_raw = row.get("sync_json")
     return {
         "id": row["id"],
         "url": url,
         "provider": row.get("provider") or video_provider(url),
-        "thumbnail_url": youtube_thumbnail(url),
+        "thumbnail_url": row.get("thumbnail_url") or youtube_thumbnail(url),
+        "title": row.get("title") or "",
+        "site_name": row.get("site_name") or "",
+        "duration_s": row.get("duration_s"),
+        "sync": clean_sync(_loads(sync_raw)) if sync_raw else None,
+        "markers": clean_markers(json.loads(markers_raw)) if _is_json_list(markers_raw) else [],
         "added_by": names.get(author_id, {"judge_id": author_id, "full_name": f"Sędzia {author_id}"}),
         "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
     }
+
+
+def _is_json_list(value: Any) -> bool:
+    if not value:
+        return False
+    try:
+        return isinstance(json.loads(value), list)
+    except (TypeError, ValueError):
+        return False
+
+
+def _err(status: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status, detail={"code": code, "message": message})
 
 
 def _valid_video_url(value: Optional[str]) -> str:
@@ -374,6 +410,23 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
         dict(row)
         for row in await database.fetch_all(select(requests).where(requests.c.match_id == str(match_id)))
     ]
+    # Mentor otworzył mecz, o którego ocenę go poproszono = „przeczytane".
+    # Robi to serwer, więc działa w każdej wersji aplikacji mentora.
+    for row in request_rows:
+        if should_mark_read(actor_id=me, request=row):
+            stamp = now()
+            try:
+                await database.execute(
+                    update(requests)
+                    .where(requests.c.id == row["id"])
+                    .where(requests.c.read_at.is_(None))
+                    .values(read_at=stamp)
+                )
+                row["read_at"] = stamp
+            except Exception:  # noqa: BLE001 - potwierdzenie nie może zepsuć podglądu
+                import logging
+
+                logging.getLogger(__name__).warning("prośba o ocenę: zapis przeczytania nieudany", exc_info=True)
     assigned = sorted(ctx["mentors"]["mentoring"] | ctx["mentors"]["obsada"])
     published_authors = {
         author
@@ -381,6 +434,18 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
         if row["status"] == "published"
         for author in [row["author_id"], *json_list(row["co_author_ids"])]
     }
+    drafting_authors = {
+        author
+        for row in rows
+        if row["status"] != "published" and row.get("points") is not None
+        for author in [row["author_id"], *json_list(row["co_author_ids"])]
+    }
+    states = mentor_states(
+        assigned=assigned,
+        requests=request_rows,
+        published_authors=published_authors,
+        drafting_authors=drafting_authors,
+    ) if me in pair else {}
     return {
         "can_rate": ctx["verdict"]["can_rate"] or mine is not None,
         "source": ctx["verdict"]["source"] or (mine["source"] if mine else None),
@@ -396,6 +461,11 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
         if me in pair or me in assigned or actor.is_admin
         else [],
         "videos": [_video_shape(row, names) for row in video_rows],
+        # Wszyscy mentorzy pary ze stanem prośby - także ci, którzy już ocenili.
+        "mentor_status": [
+            {**names.get(mentor_id, {"judge_id": mentor_id, "full_name": f"Sędzia {mentor_id}", "photo_url": None}), **state}
+            for mentor_id, state in states.items()
+        ],
     }
 
 
@@ -416,6 +486,10 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
     if existing:
         names = await people([existing["added_by"]])
         return {"ok": True, "created": False, "video": _video_shape(dict(existing), names)}
+    from app.link_preview import preview_or_instant
+
+    preview = await preview_or_instant(url)
+    duration = preview.get("duration_s")
     row = {
         "id": uuid4().hex,
         "match_id": str(match_id),
@@ -425,6 +499,10 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
         "provider": video_provider(url),
         "added_by": me,
         "created_at": now(),
+        "title": str(preview.get("title") or "")[:200] or None,
+        "thumbnail_url": str(preview.get("thumbnail_url") or "")[:2048] or None,
+        "site_name": str(preview.get("site_name") or "")[:80] or None,
+        "duration_s": int(duration) if isinstance(duration, (int, float)) and 0 < duration < 86400 else None,
     }
     created = True
     try:
@@ -443,6 +521,75 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
         created = False
     names = await people([row["added_by"]])
     return {"ok": True, "created": created, "video": _video_shape(row, names)}
+
+
+@router.patch("/match/{match_id}/videos/{video_id}")
+async def update_match_video(match_id: str, video_id: str, body: MatchVideoPatch, actor: Actor = Depends(market_actor)):
+    """Synchronizacja z zegarem meczu i znaczniki akcji - zmienia para."""
+    ctx = await context(match_id, actor)
+    me = str(actor.judge_id)
+    if me not in set(ctx["pair"] or ()):
+        raise _err(403, "PAIR_ONLY", "Znaczniki nagrania ustawiają sędziowie tej pary.")
+    row = await database.fetch_one(
+        select(match_videos).where(match_videos.c.id == video_id, match_videos.c.match_id == str(match_id))
+    )
+    if not row:
+        raise _err(404, "VIDEO_NOT_FOUND", "Nie znaleziono tego nagrania - mogło zostać usunięte.")
+    values: Dict[str, Any] = {"updated_at": now()}
+    if body.sync is not None:
+        values["sync_json"] = json.dumps(clean_sync(body.sync))
+    if body.markers is not None:
+        values["markers_json"] = json.dumps(clean_markers(body.markers), ensure_ascii=False)
+    await database.execute(update(match_videos).where(match_videos.c.id == video_id).values(**values))
+    fresh = dict(await database.fetch_one(select(match_videos).where(match_videos.c.id == video_id)))
+    names = await people([fresh["added_by"]])
+    return {"ok": True, "video": _video_shape(fresh, names)}
+
+
+@router.get("/match/{match_id}/timeline")
+async def match_timeline(match_id: str, actor: Actor = Depends(market_actor)):
+    """Zdarzenia z protokołu ProEla do zaimportowania jako znaczniki nagrania."""
+    ctx = await context(match_id, actor)
+    me = str(actor.judge_id)
+    pair = set(ctx["pair"] or ())
+    is_mentor = me in ctx["mentors"]["mentoring"] or me in ctx["mentors"]["obsada"]
+    if me not in pair and not is_mentor and not actor.is_admin:
+        raise _err(403, "NO_ACCESS", "Oś meczu widzą sędziowie pary i ich mentorzy.")
+    code = str(ctx["match"]["state"].get("RozgrywkiCode") or "").strip()
+    empty = {"available": False, "half_minutes": 30, "break_minutes": 10, "teams": {}, "events": []}
+    if not code:
+        return empty
+    from app.db import saved_matches
+
+    stored = await database.fetch_one(
+        select(saved_matches.c.data_json, saved_matches.c.zprp_match_id).where(saved_matches.c.match_number == code)
+    )
+    if not stored:
+        return empty
+    # Numer meczu nie jest kluczem między sezonami - zapis innego meczu
+    # o tym samym numerze nie może podsunąć cudzych zdarzeń.
+    stored_id = str(stored["zprp_match_id"] or "").strip()
+    if stored_id and stored_id != str(match_id):
+        return empty
+    blob = stored["data_json"]
+    if isinstance(blob, str):
+        try:
+            blob = json.loads(blob)
+        except ValueError:
+            blob = {}
+    return timeline_from_blob(blob)
+
+
+@router.get("/link-preview")
+async def link_preview(url: str = Query(..., min_length=8, max_length=2048), actor: Actor = Depends(market_actor)):
+    """Podgląd linku: YouTube/Vimeo z oEmbed, reszta z `og:*` (z ochroną SSRF)."""
+    from app.link_preview import fetch_preview
+    from app.link_preview_rules import UnsafeUrl
+
+    try:
+        return {"ok": True, "preview": await fetch_preview(url)}
+    except UnsafeUrl as exc:
+        raise _err(422, "UNSAFE_URL", str(exc)) from exc
 
 
 @router.delete("/match/{match_id}/videos/{video_id}")
@@ -471,7 +618,7 @@ async def remove_match_video(match_id: str, video_id: str, actor: Actor = Depend
 def _request_message(match: Dict[str, Any], requester: str, video_url: str) -> tuple[str, str]:
     state = match["state"]
     code = str(state.get("RozgrywkiCode") or "meczu").strip()
-    teams = " – ".join(
+    teams = " - ".join(
         value
         for value in (
             str(state.get("ID_zespoly_gosp_ZespolNazwa") or "").strip(),
@@ -575,6 +722,8 @@ async def request_evaluation(match_id: str, req: EvaluationRequest, actor: Actor
             "created_at": stamp,
             "last_sent_at": stamp,
             "fulfilled_at": None,
+            # Ponowiona prośba wraca do stanu „wysłano".
+            "read_at": None,
             "delivery_json": "{}",
             "send_count": 1,
         }

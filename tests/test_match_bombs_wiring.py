@@ -236,6 +236,19 @@ def test_rozliczenie_bierze_kare_z_tej_samej_puli():
     assert "load_scales" in called
 
 
+def test_niepowiazane_bomby_sa_ograniczone_do_sedziow_okregu():
+    settlements = (APP_DIR / "province_settlements.py").read_text(encoding="utf-8")
+    tree = ast.parse(settlements)
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_base"
+    )
+    source = ast.get_source_segment(settlements, fn) or ""
+    assert "await _province_judge_ids(province)" in source
+    assert "SB.unlinked(bombs, hits, province_ids)" in source
+    assert "SB.unlinked(bombs, hits, names.keys())" not in source
+
+
 def test_przepiecie_starych_kar_jest_jednorazowe_i_przed_domyslnym_automatem():
     db = (APP_DIR / "db.py").read_text(encoding="utf-8")
     add = db.index("ALTER TABLE match_bombs ADD COLUMN IF NOT EXISTS penalty_mode varchar")
