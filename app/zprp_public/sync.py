@@ -941,7 +941,11 @@ async def _sync_detail_backfill(client: PublicZprpClient, season_ids: list[str],
                 zprp_public_matches.c.details_fetched_at.is_(None),
             )
         )
-        .order_by(zprp_public_matches.c.scheduled_at.desc().nullslast())
+        .order_by(
+            # rozegrane mecze (z wynikiem) najpierw; mecze bez scheduled_at (tylko played_at) nie lądują na końcu
+            zprp_public_matches.c.score_home.is_(None).asc(),
+            func.coalesce(zprp_public_matches.c.played_at, zprp_public_matches.c.scheduled_at).desc().nullslast(),
+        )
         .limit(limit)
     )
 

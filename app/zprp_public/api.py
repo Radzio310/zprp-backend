@@ -601,6 +601,7 @@ async def list_matches(
     limit: int = Query(50, ge=1, le=300),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
+    date_from, date_to = MR.naive_local(date_from), MR.naive_local(date_to)
     conditions = []
     if competition_id:
         conditions.append(zprp_public_matches.c.competition_id == competition_id)

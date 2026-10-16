@@ -445,3 +445,11 @@ def attachment_items(attachments: dict[str, dict], hidden_ids: Iterable[str], pr
             "thumb_url": url if kind == "image" else None,
         })
     return out
+
+
+def naive_local(value: datetime | None) -> datetime | None:
+    """Kolumny czasu meczu są naiwne (czas polski); data z "Z"/offsetem dawała 500 w asyncpg."""
+    if value is None or value.tzinfo is None:
+        return value
+    from zoneinfo import ZoneInfo
+    return value.astimezone(ZoneInfo("Europe/Warsaw")).replace(tzinfo=None)
