@@ -44,6 +44,7 @@ from app.db import (
 from app.national_distance_parser import normalize_city_key
 from app.zprp_public import corrections, portal_rules as R
 from app.zprp_public import match_rules as MR
+from app.zprp_public.protocol_times import attach_protocol_times
 from app.zprp_public.enrich import enrich_matches
 from app.zprp_public.ondemand import ensure_details
 from app.zprp_public.api import _dict, _public_player, search as base_search
@@ -671,6 +672,8 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         if m.get(f"{col}_name")
     ]
     status = _status(m)
+    staff_items = [MR.staff_view(_dict(r)) for r in staff_rows]
+    m["times_source"] = await attach_protocol_times(m, [p for side_list in lineups.values() for p in side_list], staff_items)
     return {
         "match": m,
         "status": status,
@@ -679,7 +682,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         "venue": {k: m.get(f"venue_{k}") for k in ("name", "city", "street", "number", "capacity")},
         "officials": officials,
         "lineups": lineups,
-        "staff": [MR.staff_view(_dict(r)) for r in staff_rows],
+        "staff": staff_items,
         "head_to_head": await _cards(h2h_rows),
         "standings": standing,
         # Źródło nie udostępnia przebiegu meczu (bramki w czasie) - tylko statystyki zawodników.

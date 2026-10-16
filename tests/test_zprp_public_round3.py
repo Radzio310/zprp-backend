@@ -361,3 +361,35 @@ def test_scorers_photo_and_player_competitions_order():
              {"season_id": "11", "goals": 9, "name": "c"}, {"season_id": "12", "goals": 4, "name": "d"}]
     out = MR.sort_player_competitions(comps, "11")
     assert [c["name"] for c in out] == ["c", "d", "b", "a"]
+
+
+def test_czasy_kar_z_protokolu_baza():
+    from app.zprp_public import protocol_times as PT
+    blob = {
+        "matchConfig": {"hostPlayerCards": [{"number": 7, "fullName": "KOWALSKI Jan"}]},
+        "protocol": [
+            {"type": "penalty2", "team": "host", "player": 7, "time": 1_200_000},
+            {"type": "penalty1", "team": "host", "player": 7, "time": 600_000},
+            {"type": "warning", "team": "host", "player": 7, "time": 300_000},
+            {"type": "disqualification", "team": "guest", "player": 9, "time": 1_805_000},
+            {"type": "penaltyExtra", "team": "guest", "player": 9, "time": 1_900_000},
+            {"type": "warning", "team": "guest", "player": "A", "time": 61_000},
+            {"type": "penalty1", "team": "guest", "player": 9, "time": 3_600_000, "shootout": True},
+        ],
+    }
+    ex = PT.extract_times(blob)
+    players = [
+        {"side": "home", "shirt_number": "7", "last_name": "Kowalski"},
+        {"side": "home", "shirt_number": "7", "last_name": "Inny"},
+        {"side": "away", "shirt_number": "9", "last_name": "X"},
+    ]
+    staff = [{"side": "away", "letter": "A"}, {"side": "home", "letter": "B"}]
+    assert PT.apply_times(players, staff, ex) == 3
+    assert players[0]["two_minutes_times"] == ["10:00", "20:00"] and players[0]["warning_time"] == "05:00"
+    assert "two_minutes_times" not in players[1]
+    assert players[2]["disqualification_time"] == "30:05" and players[2]["extra_penalty_time"] == "31:40"
+    assert players[2]["extra_penalty"] is True and players[2].get("two_minutes_times") == []
+    assert staff[0]["warning_time"] == "01:01" and "warning_time" not in staff[1]
+    rows = [{"status": "in_progress", "zprp_match_id": "1"}, {"status": "finished", "zprp_match_id": "1"},
+            {"status": "approved", "zprp_match_id": "2"}, {"status": "approved", "zprp_match_id": "1"}]
+    assert PT.pick_row(rows, "1") == rows[3] and PT.pick_row(rows[:1], "1") is None
