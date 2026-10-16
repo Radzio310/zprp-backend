@@ -569,7 +569,6 @@ async def records(season_id: str = "", scope: str = Query("season", pattern="^(s
         for kind, title, column in (
             ("most_goals_player", "Najwięcej bramek zawodnika w meczu", MP.c.goals),
             ("most_penalty_goals_player", "Najwięcej skutecznych karnych w meczu", MP.c.penalty_goals),
-            ("most_two_minutes_player", "Najwięcej kar 2 min w meczu", MP.c.two_minutes),
         ):
             pcond = [column > 0, M.c.score_home.is_not(None)]
             if season:
@@ -586,6 +585,24 @@ async def records(season_id: str = "", scope: str = Query("season", pattern="^(s
                 add(kind, title, int(d["v"]), d, player_id=d["player_id"],
                     club_id=d["home_club_id"] if d["side"] == "home" else d["away_club_id"],
                     player_name=f'{d["first_name"]} {d["last_name"]}'.strip())
+        # Kary 2 min liczone na DRUŻYNĘ w meczu (u zawodnika limit to 3, rekord bez sensu).
+        team_sum = func.sum(MP.c.two_minutes)
+        tcond = [M.c.score_home.is_not(None)]
+        if season:
+            tcond.append(M.c.season_id == season)
+        r = await database.fetch_one(
+            select(MP.c.side, MP.c.team_id, team_sum.label("v"),
+                   M.c.match_id, M.c.season_id, M.c.home_team_name, M.c.away_team_name, M.c.home_club_id, M.c.away_club_id,
+                   M.c.score_home, M.c.score_away)
+            .select_from(MP.join(M, M.c.match_id == MP.c.match_id))
+            .where(and_(*tcond)).group_by(MP.c.side, MP.c.team_id, M.c.match_id, M.c.season_id, M.c.home_team_name, M.c.away_team_name,
+                      M.c.home_club_id, M.c.away_club_id, M.c.score_home, M.c.score_away, M.c.scheduled_at)
+            .having(team_sum > 0).order_by(team_sum.desc(), M.c.scheduled_at.desc()).limit(1)
+        )
+        if r:
+            d = _dict(r)
+            add("most_two_minutes_team_match", "Najwięcej kar 2 min jednej drużyny w meczu", int(d["v"]), d,
+                club_id=d["home_club_id"] if d["side"] == "home" else d["away_club_id"])
         lookup = await _club_lookup({i["club_id"] for i in items})
         for item in items:
             club = lookup.get(item.get("club_id")) or {}

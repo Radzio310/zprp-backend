@@ -648,6 +648,7 @@ async def match_details(match_id: str) -> dict[str, Any]:
                     "two_minutes", "disqualifications", "direct_red_cards", "penalty_attempts",
                     "penalty_goals", "shootout_attempts", "shootout_goals",
                 )},
+                **MR.penalty_fields(data.get("warnings"), data.get("two_minutes"), data.get("disqualifications"), data.get("direct_red_cards")),
             }
         )
     staff = await database.fetch_all(

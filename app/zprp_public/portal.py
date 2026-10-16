@@ -641,6 +641,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         lineups.setdefault(d["side"], []).append({
             **_public_player(d),
             **{k: d.get(k) for k in ("team_id", "side", "shirt_number", "position", *PLAYER_STAT_COLUMNS)},
+            **MR.penalty_fields(d.get("warnings"), d.get("two_minutes"), d.get("disqualifications"), d.get("direct_red_cards")),
         })
     # Dotychczasowe spotkania tych drużyn (po klubach - id drużyn zmieniają się z sezonem).
     h2h_rows = []

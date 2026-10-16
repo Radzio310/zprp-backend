@@ -139,6 +139,19 @@ def apply_match_extras(
 _STAFF_LETTER = re.compile(r"(?:^|[\s(\-])([A-E])(?:$|[\s).:\-])", re.I)
 
 
+def penalty_fields(warnings: Any, two_minutes: Any, disqualifications: Any, direct_red: Any) -> dict:
+    """Pola kar z czasami. Upstream (pokaz_mecze_szczegoly.php) podaje tylko LICZNIKI,
+    bez minut, więc czasy są zawsze null; liczniki zostają w polach *_count istniejących
+    kolumn. `extra_penalty` = kara dodatkowa (pole upstream `kd`)."""
+    return {
+        "warning_time": None,
+        "two_minutes_times": [],
+        "disqualification_time": None,
+        "extra_penalty": (_int(direct_red) or 0) > 0,
+        "extra_penalty_time": None,
+    }
+
+
 def staff_view(row: dict) -> dict:
     """Osoba towarzysząca z kartkami (klucze jak u zawodników w payloadzie)."""
     src = row.get("source_json") if isinstance(row.get("source_json"), dict) else {}
@@ -158,6 +171,9 @@ def staff_view(row: dict) -> dict:
     out["two_minutes"] = _int(src.get("2minuty")) or 0
     out["disqualifications"] = _int(src.get("dyskwalifikacja")) or 0
     out["direct_red_cards"] = _int(src.get("kd")) or 0
+    out["penalty_attempts"] = 0
+    out["penalty_goals"] = 0
+    out.update(penalty_fields(out["warnings"], out["two_minutes"], out["disqualifications"], out["direct_red_cards"]))
     return out
 
 

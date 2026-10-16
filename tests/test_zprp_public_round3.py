@@ -48,6 +48,15 @@ def test_numer_meczu_sezon_i_staff():
     assert staff["letter"] == "A" and staff["warnings"] == 1 and staff["two_minutes"] == 2 and "source_json" not in staff
 
 
+def test_penalty_fields_bez_czasow_upstream():
+    pf = MR.penalty_fields("1", 2, "0", "1")
+    assert pf["warning_time"] is None and pf["two_minutes_times"] == [] and pf["disqualification_time"] is None
+    assert pf["extra_penalty"] is True and pf["extra_penalty_time"] is None
+    assert MR.penalty_fields(0, 0, 0, 0)["extra_penalty"] is False
+    staff = MR.staff_view({"role": "A", "source_json": {"kd": "1"}})
+    assert staff["extra_penalty"] is True and staff["penalty_attempts"] == 0
+
+
 def test_tabela_serie_i_strzelcy():
     def m(h, a, sh, sa, **kw):
         return {"home_team_id": h, "away_team_id": a, "home_team_name": h, "away_team_name": a, "score_home": sh, "score_away": sa, **kw}
