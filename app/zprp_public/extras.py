@@ -451,6 +451,13 @@ async def _team_row(team_id: str, season_id: str = "") -> dict:
     return _dict(row)
 
 
+def _round_from_name(name: Any) -> Optional[int]:
+    """„Kolejka 5" -> 5. Mecz bez matchday_id (bywa przy dopisanych meczach) dostawał
+    numer porządkowy i dublował kolejkę na osi wykresu."""
+    hit = re.search(r"(\d+)", str(name or ""))
+    return int(hit.group(1)) if hit else None
+
+
 @router.get("/teams/{team_id}/season-chart")
 async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]:
     team = await _team_row(team_id, season_id)
@@ -501,7 +508,8 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
         home = m["home_team_id"] == team_id
         day = days.get(m.get("matchday_id")) or {}
         rounds.append({
-            "round": day.get("number") or index, "position": row["position"] if row else None,
+            "round": day.get("number") or _round_from_name(m.get("matchday_name")) or index,
+            "position": row["position"] if row else None,
             "points": row["points"] if row else None, "result": result, "match_id": m["match_id"],
             "opponent": m["away_team_name"] if home else m["home_team_name"], "home": home,
             "score": f'{m["score_home"]}:{m["score_away"]}', "scheduled_at": m["scheduled_at"],
