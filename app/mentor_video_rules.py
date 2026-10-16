@@ -12,7 +12,18 @@ SYNCHRONIZACJA (`sync`) - raz na nagranie:
   - `second_half_s`  sekunda nagrania z początkiem II połowy (opcjonalna;
                      bez niej aplikacja dolicza przerwę z konfiguracji meczu
                      i pokazuje czas jako przybliżony),
-  - `half_minutes`, `break_minutes` z konfiguracji meczu w ProElu.
+  - `half_minutes`, `break_minutes` z konfiguracji meczu w ProElu,
+  - `stream_start_ms` prawdziwa godzina (UTC, ms) sekundy 0:00 nagrania -
+                     dla transmisji YouTube z serwera (`app/link_preview.py`),
+  - `kickoff_wall_ms`, `second_half_wall_ms` godzina pierwszego gwizdka
+                     i wznowienia II połowy ze śladu zegara ProEla
+                     (`app/match_clock_rules.py`) - zapamiętane w nagraniu,
+                     bo migawki, z których je liczymy, wygasają.
+
+GODZINA ZDARZENIA. Znacznik z protokołu niesie też `wall_ms` (o której
+zegar meczu pokazał ten czas) i `wall_err_s` (deklarowany błąd). Aplikacja
+liczy sekundę filmu z godziny: od kotwicy w tej samej połowie, a bez kotwic
+od godziny startu transmisji. Przerwy w grze przestają wtedy przesuwać akcje.
 
 STATUS MENTORA w prośbie o ocenę: wysłano -> przeczytane -> ocenił.
 „Przeczytane" stawia serwer, gdy mentor otworzy szczegóły meczu (każda
@@ -29,6 +40,13 @@ MAX_LABEL = 80
 MAX_VIDEO_SECONDS = 6 * 3600
 MAX_MATCH_MS = 3 * 3600 * 1000
 MARKER_KINDS = ("manual", "goal", "seven", "penalty", "card", "timeout")
+#: Kategorie sędziowskie znacznika „Ważne" - lustro `MARKER_CATEGORIES`
+#: w `BAZA/utils/matchVideoLinks.ts`.
+MARKER_CATEGORIES = ("trafna", "bledna", "dyskusja", "ustawienie", "wspolpraca", "kontrola", "gwizdek", "inne")
+MAX_COMMENT = 280
+#: Godzina ścienna w ms UTC: od 2020 do 2100 - wszystko inne to śmieć.
+MIN_WALL_MS = 1_577_836_800_000
+MAX_WALL_MS = 4_102_444_800_000
 
 #: Rodzaje zdarzeń przebiegu ProEla -> rodzaj znacznika i opis.
 EVENT_KINDS: Dict[str, tuple[str, str]] = {
@@ -73,7 +91,14 @@ def clean_sync(raw: Any) -> Dict[str, Any]:
     out["half_minutes"] = int(half) if half and 5 <= half <= 60 else None
     brk = _num(src.get("break_minutes"))
     out["break_minutes"] = int(brk) if brk is not None and 0 <= brk <= 60 else None
+    for key in ("stream_start_ms", "kickoff_wall_ms", "second_half_wall_ms"):
+        out[key] = _wall(src.get(key))
     return out
+
+
+def _wall(value: Any) -> Optional[int]:
+    n = _num(value)
+    return int(n) if n is not None and MIN_WALL_MS <= n <= MAX_WALL_MS else None
 
 
 def clean_markers(raw: Any) -> List[Dict[str, Any]]:
@@ -100,6 +125,13 @@ def clean_markers(raw: Any) -> List[Dict[str, Any]]:
         half = int(half) if half in (1, 2, "1", "2") else None
         if not label:
             label = "Znacznik"
+        etype = str(item.get("type") or "")
+        wall_ms = _wall(item.get("wall_ms")) if match_ms is not None else None
+        wall_err = _num(item.get("wall_err_s"))
+        important = item.get("important") is True
+        category = str(item.get("category") or "")
+        category = category if category in MARKER_CATEGORIES else ("inne" if important else None)
+        comment = re.sub(r"[ 	]+", " ", str(item.get("comment") or "")).replace("—", "-").replace("–", "-").strip()[:MAX_COMMENT] or None
         seen.add(marker_id)
         out.append(
             {
@@ -110,6 +142,13 @@ def clean_markers(raw: Any) -> List[Dict[str, Any]]:
                 "match_ms": match_ms,
                 "half": half if match_ms is not None else None,
                 "source_key": str(item.get("source_key") or "")[:80] or None,
+                "type": etype if etype in EVENT_KINDS else None,
+                "wall_ms": wall_ms,
+                "wall_err_s": int(min(max(wall_err, 0), 3600)) if wall_ms is not None and wall_err is not None else None,
+                # „Ważne do oceny" - para wskazuje mentorowi, na co patrzeć.
+                "important": important,
+                "category": category if important else None,
+                "comment": comment if important else None,
             }
         )
         if len(out) >= MAX_MARKERS:

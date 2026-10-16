@@ -53,7 +53,9 @@ def test_tabela_serie_i_strzelcy():
         return {"home_team_id": h, "away_team_id": a, "home_team_name": h, "away_team_name": a, "score_home": sh, "score_away": sa, **kw}
 
     table = MR.simulate_table([m("A", "B", 30, 20), m("B", "C", 25, 25), m("C", "A", 20, 21)])
-    assert [r["team_id"] for r in table] == ["A", "C", "B"] and table[0]["points"] == 4 and table[1]["points"] == 1
+    assert [r["team_id"] for r in table] == ["A", "C", "B"] and table[0]["points"] == 6 and table[1]["points"] == 1
+    assert (MR.points_for(True, "regular"), MR.points_for(True, "walkover"), MR.points_for(False, "walkover")) == (3, 3, 0)
+    assert (MR.points_for(True, "shootout"), MR.points_for(False, "shootout"), MR.points_for(False, "regular")) == (2, 1, 0)
     assert MR.streaks(["W", "W", "D", "W", "L", "L"]) == {
         "current": {"type": "L", "length": 2}, "longest_win": 2, "longest_unbeaten": 4, "longest_loss": 2}
     rows = [
@@ -289,7 +291,7 @@ def test_wykres_sezonu_ics_rekordy_h2h(env):
 
     chart, ics, rec, h2h = run(env, go)
     assert [r["result"] for r in chart["rounds"]] == ["W", "D", "W"]
-    assert chart["rounds"][0]["position"] == 1 and chart["rounds"][-1]["points"] == 5
+    assert chart["rounds"][0]["position"] == 1 and chart["rounds"][-1]["points"] == 7
     assert chart["streaks"]["longest_win"] == 1 and chart["best_match"]["match_id"] == "m1"
     assert chart["best_match"]["margin"] == 10
     assert ics.media_type.startswith("text/calendar") and ics.body.count(b"BEGIN:VEVENT") == 3

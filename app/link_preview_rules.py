@@ -313,3 +313,75 @@ class TtlCache:
         self._items[key] = (now + ttl, value)
         while len(self._items) > self.max_items:
             self._items.pop(next(iter(self._items)))
+
+
+# ─── Godzina startu transmisji (YouTube live) ──────────────────────────────
+#
+# Archiwum transmisji na żywo zaczyna się od chwili, w której YouTube zaczął
+# odbierać obraz (`actualStartTime`). Ta godzina zamienia „o której padła
+# akcja" na „która sekunda filmu" - bez ręcznego szukania pierwszego gwizdka.
+# Źródła w kolejności zaufania:
+#   1. YouTube Data API (`liveStreamingDetails.actualStartTime`), gdy jest klucz,
+#   2. strona filmu: `liveBroadcastDetails.startTimestamp` w ytInitialPlayerResponse,
+#   3. strona filmu: `<meta itemprop="startDate">` przy `isLiveBroadcast=True`.
+# Zwykły film (nie transmisja) nie ma tej godziny - wtedy `None`, bez zgadywania
+# z `uploadDate` (to data publikacji, nie sekunda 0:00 nagrania).
+
+#: Strona filmu YouTube ma ~1,3 MB; godzina siedzi w okolicy 0,8 MB.
+MAX_WATCH_HTML_BYTES = 1_800_000
+
+_LIVE_DETAILS = re.compile(r'"liveBroadcastDetails"\s*:\s*\{([^{}]*)\}')
+_START_TS = re.compile(r'"startTimestamp"\s*:\s*"([^"]+)"')
+_META_START = re.compile(r'<meta\s+itemprop="startDate"\s+content="([^"]+)"', re.I)
+_META_LIVE = re.compile(r'<meta\s+itemprop="isLiveBroadcast"\s+content="True"', re.I)
+
+
+def iso_to_ms(value: Any) -> Optional[int]:
+    """ISO 8601 ze strefą -> ms UTC. Bez strefy albo bez godziny -> None."""
+    text = str(value or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", text):
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        from datetime import datetime
+
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        return None
+    return int(stamp.timestamp() * 1000)
+
+
+def stream_start_from_html(text: str) -> Optional[int]:
+    """Godzina startu transmisji ze strony filmu YouTube (ms UTC) albo None."""
+    page = str(text or "")
+    block = _LIVE_DETAILS.search(page)
+    if block:
+        ts = _START_TS.search(block.group(1))
+        ms = iso_to_ms(ts.group(1)) if ts else None
+        if ms:
+            return ms
+    if _META_LIVE.search(page):
+        meta = _META_START.search(page)
+        if meta:
+            return iso_to_ms(meta.group(1))
+    return None
+
+
+def stream_start_from_api(data: Any) -> Optional[int]:
+    """`videos?part=liveStreamingDetails` -> actualStartTime (ms UTC) albo None."""
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        return None
+    details = items[0].get("liveStreamingDetails")
+    if not isinstance(details, dict):
+        return None
+    return iso_to_ms(details.get("actualStartTime"))
+
+
+def youtube_watch_url(url: str) -> Optional[str]:
+    """Kanoniczny adres strony filmu (`/live/ID`, `youtu.be/ID` -> `watch?v=ID`)."""
+    vid = youtube_id(url)
+    return f"https://www.youtube.com/watch?v={vid}" if vid else None

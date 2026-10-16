@@ -294,12 +294,21 @@ async def carry_snapshots(old_key: str, new_key: str) -> int:
         new = str(new_key or "").strip()
         if not old or not new or old == new:
             return 0
-        return int(
+        moved = int(
             await database.execute(
                 T.update().where(T.c.match_number == old).values(match_number=new)
             )
             or 0
         )
+        # Ślad zegara jedzie razem z migawkami (nagrania meczu dla mentora).
+        try:
+            from app.db import proel_match_clock_trace as C
+
+            await database.execute(C.delete().where(C.c.match_number == new))
+            await database.execute(C.update().where(C.c.match_number == old).values(match_number=new, last_snapshot_id=0))
+        except Exception:  # noqa: BLE001
+            logger.warning("przeniesienie sladu zegara nieudane (%s -> %s)", old, new, exc_info=True)
+        return moved
     except Exception:  # noqa: BLE001
         logger.warning("przeniesienie migawek nieudane (%s -> %s)", old_key, new_key, exc_info=True)
         return 0
@@ -323,6 +332,9 @@ async def drop_snapshots(match_number: str) -> int:
 
         if await is_held(key):
             return 0
+        from app.match_clock import drop_trace
+
+        await drop_trace(key)
         return int(await database.execute(delete(T).where(T.c.match_number == key)) or 0)
     except Exception:  # noqa: BLE001
         logger.warning("kasowanie migawek nieudane (%s)", match_number, exc_info=True)
@@ -353,6 +365,11 @@ async def cleanup_expired(limit: int = CLEANUP_BATCH) -> int:
     ]
     if not ids:
         return 0
+    # Zanim zwykłe migawki znikną, ich pary (godzina, czas meczu) idą do śladu
+    # zegara - z niego nagranie meczu wie, o której padła akcja. Nie rzuca.
+    from app.match_clock import remember_from_ids
+
+    await remember_from_ids(ids)
     await database.execute(delete(T).where(T.c.id.in_(ids)))
     return len(ids)
 

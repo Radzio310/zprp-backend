@@ -225,12 +225,18 @@ def test_sync_is_bounded():
         "second_half_s": 2400,
         "half_minutes": 30,
         "break_minutes": 10,
+        "stream_start_ms": None,
+        "kickoff_wall_ms": None,
+        "second_half_wall_ms": None,
     }
     assert clean_sync({"match_start_s": -1, "half_minutes": 500}) == {
         "match_start_s": None,
         "second_half_s": None,
         "half_minutes": None,
         "break_minutes": None,
+        "stream_start_ms": None,
+        "kickoff_wall_ms": None,
+        "second_half_wall_ms": None,
     }
 
 

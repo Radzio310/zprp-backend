@@ -167,10 +167,13 @@ def staff_view(row: dict) -> dict:
 
 
 def points_for(side_won: Optional[bool], decided_by: str) -> int:
-    """Punkty ligowe: wygrana 2, remis 1, porażka 0 (karne rozstrzygają jak wygrana)."""
+    """Punkty Superligi 3/2/1/0: wygrana w regulaminowym czasie (i walkower) 3,
+    wygrana w karnych 2, porażka w karnych 1, porażka 0; remis bez karnych 1."""
     if side_won is None:
         return 1
-    return 2 if side_won else 0
+    if decided_by == "shootout":
+        return 2 if side_won else 1
+    return 3 if side_won else 0
 
 
 def simulate_table(matches: Iterable[dict]) -> list[dict]:

@@ -10,7 +10,9 @@ Trasy (prefiks `/mentor-evaluations`):
   POST /match/{match_id}/requests prośba pary o ocenę (push, e-mail, SMS),
   POST/PATCH/DELETE /match/{match_id}/videos[/{id}]  galeria nagrań meczu:
                                   podgląd linku, synchronizacja, znaczniki,
-  GET  /match/{match_id}/timeline oś meczu z protokołu ProEla (do znaczników),
+  POST /match/{match_id}/videos/{id}/stream-start  godzina startu transmisji YouTube,
+  GET  /match/{match_id}/timeline oś meczu z protokołu ProEla (do znaczników)
+                                  z godziną każdego zdarzenia (`app/match_clock.py`),
   GET  /link-preview?url=         podgląd dowolnego linku (SSRF: `app/link_preview_rules.py`).
 
 Status prośby (wysłano / przeczytane / ocenił) i znaczniki nagrań - liść
@@ -21,6 +23,7 @@ Reguły kto/kiedy/co w liściu `app/mentor_evaluation_rules.py`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import html
 import re
@@ -490,6 +493,7 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
 
     preview = await preview_or_instant(url)
     duration = preview.get("duration_s")
+    stream_start = await _stream_start_or_none(url)
     row = {
         "id": uuid4().hex,
         "match_id": str(match_id),
@@ -504,6 +508,10 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
         "site_name": str(preview.get("site_name") or "")[:80] or None,
         "duration_s": int(duration) if isinstance(duration, (int, float)) and 0 < duration < 86400 else None,
     }
+    if stream_start:
+        # Transmisja na żywo: godzina sekundy 0:00 - znaczniki z ProEla trafią
+        # w akcję bez ręcznego szukania pierwszego gwizdka.
+        row["sync_json"] = json.dumps(clean_sync({"stream_start_ms": stream_start}))
     created = True
     try:
         await database.execute(match_videos.insert().values(**row))
@@ -546,6 +554,43 @@ async def update_match_video(match_id: str, video_id: str, body: MatchVideoPatch
     return {"ok": True, "video": _video_shape(fresh, names)}
 
 
+async def _stream_start_or_none(url: str, timeout_s: float = 6.0) -> Optional[int]:
+    """Godzina startu transmisji YouTube - dodatek: nie rzuca, nie czeka długo."""
+    if video_provider(url) != "youtube":
+        return None
+    from app.link_preview import fetch_stream_start
+
+    try:
+        found = await asyncio.wait_for(fetch_stream_start(url), timeout_s)
+    except Exception:  # noqa: BLE001
+        return None
+    return found.get("stream_start_ms") or None
+
+
+@router.post("/match/{match_id}/videos/{video_id}/stream-start")
+async def refresh_stream_start(match_id: str, video_id: str, actor: Actor = Depends(market_actor)):
+    """Dociągnij godzinę startu transmisji do nagrania dodanego wcześniej (para)."""
+    ctx = await context(match_id, actor)
+    me = str(actor.judge_id)
+    if me not in set(ctx["pair"] or ()):
+        raise _err(403, "PAIR_ONLY", "Dopasowanie nagrania ustawiają sędziowie tej pary.")
+    row = await database.fetch_one(
+        select(match_videos).where(match_videos.c.id == video_id, match_videos.c.match_id == str(match_id))
+    )
+    if not row:
+        raise _err(404, "VIDEO_NOT_FOUND", "Nie znaleziono tego nagrania - mogło zostać usunięte.")
+    current = clean_sync(_loads(row["sync_json"])) if row["sync_json"] else clean_sync({})
+    found = await _stream_start_or_none(str(row["url"] or ""), timeout_s=10.0)
+    if found and found != current.get("stream_start_ms"):
+        current["stream_start_ms"] = found
+        await database.execute(
+            update(match_videos).where(match_videos.c.id == video_id).values(sync_json=json.dumps(clean_sync(current)), updated_at=now())
+        )
+    fresh = dict(await database.fetch_one(select(match_videos).where(match_videos.c.id == video_id)))
+    names = await people([fresh["added_by"]])
+    return {"ok": True, "found": bool(found), "video": _video_shape(fresh, names)}
+
+
 @router.get("/match/{match_id}/timeline")
 async def match_timeline(match_id: str, actor: Actor = Depends(market_actor)):
     """Zdarzenia z protokołu ProEla do zaimportowania jako znaczniki nagrania."""
@@ -577,7 +622,14 @@ async def match_timeline(match_id: str, actor: Actor = Depends(market_actor)):
             blob = json.loads(blob)
         except ValueError:
             blob = {}
-    return timeline_from_blob(blob)
+    timeline = timeline_from_blob(blob)
+    if not timeline["available"]:
+        return timeline
+    # Godzina każdego zdarzenia ze śladu zegara (migawki zapisów meczu).
+    from app.match_clock import clock_points
+    from app.match_clock_rules import annotate_timeline
+
+    return annotate_timeline(timeline, await clock_points(code))
 
 
 @router.get("/link-preview")

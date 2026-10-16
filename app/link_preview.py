@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -30,6 +31,7 @@ from app.link_preview_rules import (
     MAX_HTML_BYTES,
     MAX_JSON_BYTES,
     MAX_REDIRECTS,
+    MAX_WATCH_HTML_BYTES,
     TtlCache,
     UnsafeUrl,
     all_ips_allowed,
@@ -40,6 +42,10 @@ from app.link_preview_rules import (
     parse_html_preview,
     preview_from_oembed,
     redirect_target,
+    stream_start_from_api,
+    stream_start_from_html,
+    youtube_id,
+    youtube_watch_url,
 )
 from urllib.parse import urlparse
 
@@ -63,12 +69,14 @@ async def _fetch_limited(
     accept: str,
     resolver: Resolver,
     transport: Optional[httpx.AsyncBaseTransport] = None,
+    cookies: Optional[Dict[str, str]] = None,
 ) -> tuple[str, str]:
     """(końcowy adres, tekst) - z ręcznymi przekierowaniami i limitem bajtów."""
     current = check_url_shape(url)
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(FETCH_TIMEOUT_S),
         follow_redirects=False,
+        cookies=cookies,
         headers={"User-Agent": USER_AGENT, "Accept": accept, "Accept-Language": "pl,en;q=0.8"},
         transport=transport,
     ) as client:
@@ -155,3 +163,61 @@ async def preview_or_instant(url: str, timeout_s: float = 6.0) -> Dict[str, Any]
             return instant_preview(check_url_shape(url))
         except UnsafeUrl:
             return {"url": url, "provider": "video", "title": "", "thumbnail_url": "", "site_name": "", "duration_s": None}
+
+
+_stream_cache = TtlCache()
+
+#: Zgoda na ciasteczka - bez niej serwer z Europy dostaje stronę zgody
+#: (consent.youtube.com) zamiast strony filmu.
+_YT_CONSENT = {"SOCS": "CAI", "CONSENT": "YES+"}
+
+
+async def fetch_stream_start(
+    url: str,
+    *,
+    resolver: Resolver = _resolve,
+    transport: Optional[httpx.AsyncBaseTransport] = None,
+    clock: Callable[[], float] = time.monotonic,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Godzina startu transmisji YouTube: `{"stream_start_ms", "source"}`.
+
+    Nigdy nie rzuca. Zwykły film albo brak odpowiedzi -> `stream_start_ms: None`.
+    Wynik w pamięci procesu (24 h; brak 10 min).
+    """
+    vid = youtube_id(url)
+    empty: Dict[str, Any] = {"stream_start_ms": None, "source": None}
+    if not vid:
+        return empty
+    now = clock()
+    hit = _stream_cache.get(vid, now)
+    if hit is not None:
+        return hit
+    result = empty
+    key = api_key if api_key is not None else os.getenv("YOUTUBE_API_KEY", "").strip()
+    try:
+        if key:
+            endpoint = f"https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id={vid}&key={key}"
+            _, body = await _fetch_limited(endpoint, max_bytes=MAX_JSON_BYTES, accept="application/json", resolver=resolver, transport=transport)
+            ms = stream_start_from_api(json.loads(body))
+            if ms:
+                result = {"stream_start_ms": ms, "source": "youtube_api"}
+    except Exception:  # noqa: BLE001 - klucz bywa wyczerpany; strona filmu zostaje
+        pass
+    if not result["stream_start_ms"]:
+        try:
+            _, page = await _fetch_limited(
+                youtube_watch_url(url) or url,
+                max_bytes=MAX_WATCH_HTML_BYTES,
+                accept="text/html",
+                resolver=resolver,
+                transport=transport,
+                cookies=_YT_CONSENT,
+            )
+            ms = stream_start_from_html(page)
+            if ms:
+                result = {"stream_start_ms": ms, "source": "youtube_page"}
+        except Exception:  # noqa: BLE001
+            pass
+    _stream_cache.put(vid, result, now, CACHE_TTL_S if result["stream_start_ms"] else CACHE_FAIL_TTL_S)
+    return result

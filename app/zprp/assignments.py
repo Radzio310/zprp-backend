@@ -726,6 +726,13 @@ class TableOfficialSaveRequest(TableOfficialsRequest):
     expected_name: Optional[str] = None
 
 
+class TableOfficialClearRequest(TableOfficialsRequest):
+    """Usunięcie stolikowego, którego zalogowany sam dopisał z aplikacji."""
+
+    role: str
+    expected_name: str
+
+
 # =====================
 # Endpoints
 # =====================
@@ -1372,6 +1379,12 @@ async def apply_referee_assignment(
         elif not got_name and sent_val:
             logger.warning("%s: gniazdo %s puste po zapisie", log_prefix, slot_label)
             verification_ok = False
+        elif not sent_val and got_name:
+            # Pusta wartość = „wyczyść gniazdo". Ktoś w nim został - nie wyszło.
+            logger.warning(
+                "%s: gniazdo %s mialo byc puste, jest %r", log_prefix, slot_label, got_name
+            )
+            verification_ok = False
 
     return {
         "success": verification_ok,
@@ -1886,11 +1899,27 @@ async def table_officials(
                 ) from exc
         parsed = _parse_referee_form(html)
 
+    secretary = _table_slot_payload(parsed, "sekretarz")
+    timekeeper = _table_slot_payload(parsed, "czas")
+    # Kto dopisał obecną osobę z aplikacji - od tego zależy przycisk „Usuń".
+    # Osłonięte: brak bazy nie może zabrać listy.
+    try:
+        from app.table_official_authors import author_view, load_authors
+
+        authors = await load_authors(payload.IdZawody)
+        secretary["author"] = author_view(
+            authors.get("secretary"), secretary["selected_name"], judge_id
+        )
+        timekeeper["author"] = author_view(
+            authors.get("timekeeper"), timekeeper["selected_name"], judge_id
+        )
+    except Exception:
+        logger.exception("table-officials: autorzy wpisow niedostepni")
     return {
         "ok": True,
         "fetched_at": _now_iso(),
-        "secretary": _table_slot_payload(parsed, "sekretarz"),
-        "timekeeper": _table_slot_payload(parsed, "czas"),
+        "secretary": secretary,
+        "timekeeper": timekeeper,
     }
 
 
@@ -1980,12 +2009,118 @@ async def save_table_official(
                 "message": result.get("error") or "Zapis nie powiódł się",
             },
         )
+    # Autor wpisu: tylko on usunie potem tę osobę z aplikacji. Osłonięte -
+    # zapis w ZPRP już przeszedł i brak wpisu go nie unieważnia.
+    try:
+        from app.table_official_authors import author_name_from_match, remember_author
+
+        await remember_author(
+            payload.IdZawody,
+            role,
+            str(payload.name).strip(),
+            judge_id,
+            author_name_from_match(public_match, judge_id),
+        )
+    except Exception:
+        logger.exception("table-officials/save: zapis przeszedl, autor nie")
     return {
         "ok": True,
         "name": str(payload.name).strip(),
         "role": role,
         "fetched_at": result.get("fetched_at") or _now_iso(),
     }
+
+
+@router.post("/zprp/obsada/table-officials/clear")
+async def clear_table_official(
+    payload: TableOfficialClearRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """Usuń stolikowego z ZPRP - wolno tylko temu, kto dopisał go z aplikacji.
+
+    ZPRP przyjmuje pusty wybór jako „wyczyść gniazdo" (pusta wartość selecta w
+    pełnym formularzu); pozostałe pięć gniazd jedzie bez zmian, a weryfikacja
+    po zapisie sprawdza, że gniazdo naprawdę jest puste.
+    """
+    from app.table_official_authors import forget_author, load_authors, removal_refusal
+
+    role_to_select = {
+        "secretary": "NrSedzia_sekretarz",
+        "timekeeper": "NrSedzia_czas",
+    }
+    role = str(payload.role or "").strip().lower()
+    select_name = role_to_select.get(role)
+    if not select_name:
+        raise HTTPException(400, "role musi mieć wartość secretary albo timekeeper")
+
+    private_key, _ = keys
+    try:
+        username = _decrypt_field(private_key, payload.username)
+        password = _decrypt_field(private_key, payload.password)
+    except Exception as exc:
+        raise HTTPException(400, f"Decryption error: {exc}")
+
+    async with AsyncClient(
+        base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0
+    ) as client:
+        (cookies, judge_id), public_match = await asyncio.gather(
+            _login_zprp_with_identity(client, username, password),
+            _public_table_match(payload.IdZawody),
+        )
+        route = await _table_official_context(
+            client,
+            cookies,
+            judge_id=judge_id,
+            id_zawody=payload.IdZawody,
+            match_code=payload.match_code or "",
+            season_label=payload.season_label or "",
+            public_match=public_match,
+        )
+        authors = await load_authors(payload.IdZawody)
+        refusal = removal_refusal(authors.get(role), payload.expected_name, judge_id)
+        if refusal:
+            raise HTTPException(403, detail={"code": "NOT_AUTHOR", "message": refusal})
+        try:
+            result = await apply_referee_assignment(
+                client,
+                cookies,
+                payload.IdZawody,
+                {select_name: ("", "")},
+                user=route.get("user") or "",
+                referer=route.get("detail_path") or "",
+                expect_slots={
+                    "sekretarz" if role == "secretary" else "czas": payload.expected_name
+                },
+                log_prefix="table-officials/clear",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("table-officials: clear crashed")
+            raise HTTPException(
+                502,
+                "ZPRP nie odpowiedział podczas usuwania sędziego stolikowego.",
+            ) from exc
+
+    if not result.get("success"):
+        code = result.get("code") or "SAVE_FAILED"
+        status = 409 if code in {"ZPRP_CHANGED", "PROTECTED_CREW_CHANGED"} else (
+            502 if code == "FORM_INCOMPLETE" else 400
+        )
+        raise HTTPException(
+            status,
+            detail={
+                "code": code,
+                "rollback_succeeded": result.get("rollback_succeeded"),
+                "message": result.get("error") or "Usunięcie nie powiodło się",
+            },
+        )
+    try:
+        await forget_author(payload.IdZawody, role)
+    except Exception:
+        logger.exception("table-officials/clear: usuniete w ZPRP, wpis autora zostal")
+    return {"ok": True, "role": role, "fetched_at": result.get("fetched_at") or _now_iso()}
 
 
 @router.post("/zprp/obsada/save")

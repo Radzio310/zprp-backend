@@ -2049,6 +2049,21 @@ proel_match_snapshots = Table(
     Index("ix_snapshot_match_time", "match_number", "created_at"),
 )
 
+# 21.06b) ProEl - ślad zegara meczu (`app/match_clock.py`)
+#
+# Pary (prawdziwa godzina, czas meczu) wyciągnięte z migawek, zanim zwykłe
+# migawki wygasną po 7 dniach. Z nich nagranie meczu dla mentora dowiaduje
+# się, o której godzinie zegar pokazywał 12:34. Kilkadziesiąt kilobajtów na
+# mecz zamiast całych treści; `last_snapshot_id` pozwala dokładać przyrostowo.
+proel_match_clock_trace = Table(
+    "proel_match_clock_trace", metadata,
+    Column("match_number", String, primary_key=True),
+    # JSON: [[ściana_ms, czas_meczu_ms, połowa 0/1/2, zegar_w_ruchu 0/1], ...]
+    Column("points_json", Text, nullable=False),
+    Column("last_snapshot_id", Integer, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
 # 21.07) ProEl - dziennik zdarzeń meczu
 #
 # Do tej pory na pytanie „kto zakończył ten mecz" nie było odpowiedzi. Połowa
@@ -4544,6 +4559,11 @@ from app.pod_reka_tables import define_tables as _define_pod_reka_tables
     pod_reka_talent_audit,
     pod_reka_push_subscriptions,
 ) = _define_pod_reka_tables(metadata)
+
+# Autor stolikowego dopisanego z aplikacji - kto może go usunąć z ZPRP.
+from app.table_official_authors import define_tables as _define_table_official_authors
+
+zprp_table_official_authors = _define_table_official_authors(metadata)
 
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
