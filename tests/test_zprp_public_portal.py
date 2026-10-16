@@ -264,3 +264,15 @@ def test_retry_after_i_kolory_herbu():
     colors = extract_colors(buf.getvalue())
     assert colors["primary"].startswith("#c") and colors["secondary"].startswith("#1") and colors["text"] == "#ffffff"
     assert extract_colors(b"<svg/>") is None
+
+
+def test_team_record_tolerates_missing_schedule_dates():
+    from datetime import datetime
+    from app.zprp_public import portal_rules as R
+
+    matches = [
+        {"scheduled_at": datetime(2026, 10, 1), "score_home": 20, "score_away": 10, "home_club_id": "a", "away_club_id": "b"},
+        {"scheduled_at": None, "score_home": 15, "score_away": 15, "home_club_id": "b", "away_club_id": "a"},
+    ]
+    rec = R.team_record(matches, lambda side, m: m.get(f"{side}_club_id") == "a")
+    assert rec["played"] == 2 and rec["wins"] == 1 and rec["draws"] == 1

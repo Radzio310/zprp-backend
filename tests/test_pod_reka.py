@@ -58,3 +58,18 @@ def test_pod_reka_schema_separates_sessions_reports_and_talents():
     assert "private_score" in tables["pod_reka_talent_submissions"].c
     assert "endpoint" in tables["pod_reka_push_subscriptions"].c
     assert "delete_token_hash" in tables["pod_reka_push_subscriptions"].c
+
+
+def test_club_scope_reads_real_baza_team_links():
+    account_html = """
+    <small>Zalogowany:</small> KS Szombierki |
+    <select name="uprawnienia"><option value="2" selected>Klub</option></select>
+    <input name="NrKlubu" value="2851">
+    <select name="czy_aktywny"><option value="1" selected>Tak</option></select>
+    """
+    teams_html = """
+    <a href="zespoly_PDF.php?ID_sezon=195&amp;ID_zespol=5192"><img></a>
+    <a href="?a=zespoly&amp;b=sklad&amp;Filtr_sezon=195&amp;Sklad=1&amp;Filtr_zespol=17583">Druga</a>
+    <a href="?a=klub&amp;b=edycja&amp;NrKlubu=2851">SZCZEGOLY</a>
+    """
+    assert parse_club_scope(account_html, teams_html)["team_ids"] == ["17583", "5192"]

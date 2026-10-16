@@ -36,6 +36,7 @@ from app.db import (
     zprp_public_clubs,
     zprp_public_corrections,
     zprp_public_players,
+    zprp_public_seasons,
     zprp_public_team_rosters,
     zprp_public_teams,
 )
@@ -188,15 +189,16 @@ async def _session(
             async with httpx.AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=20.0) as client:
                 account_response = await client.get("/index.php?a=konto", cookies=cookies)
                 teams_response = await client.get("/index.php?a=druzyny", cookies=cookies)
+                zespoly_response = await client.get("/index.php?a=zespoly", cookies=cookies)
         except httpx.HTTPError:
             # baza.zprp.pl chwilowo nie odpowiada: sesja BAZY pod RĘKĄ nadal jest
             # ważna (do 12 h), więc zostajemy przy ostatnio potwierdzonym zakresie
             # zamiast wylogowywać użytkownika w trakcie awarii źródła.
             return data
-        if account_response.status_code >= 500 or teams_response.status_code >= 500:
+        if account_response.status_code >= 500 or teams_response.status_code >= 500 or zespoly_response.status_code >= 500:
             return data
         account_html = _decode_response(account_response)
-        scope = parse_club_scope(account_html, _decode_response(teams_response))
+        scope = await _scope_with_fallback(account_html, _decode_response(teams_response) + _decode_response(zespoly_response))
         try:
             check_scope(scope, relogin_html=account_html)
         except LoginError as exc:
@@ -341,6 +343,21 @@ async def revoke_push_subscription(
     return Response(status_code=204)
 
 
+async def _scope_with_fallback(account_html: str, teams_html: str) -> dict[str, Any]:
+    """Zakres z BAZY; gdy strony drużyn nic nie dały (inny układ strony konta
+    trenera), drużyny klubu bierzemy z lokalnej kopii publicznej BAZY."""
+    scope = parse_club_scope(account_html, teams_html)
+    if scope["account_type"] == "club" and scope["active"] and scope["club_id"] and not scope["team_ids"]:
+        rows = await database.fetch_all(
+            select(zprp_public_teams.c.team_id).where(
+                zprp_public_teams.c.club_id == scope["club_id"],
+                zprp_public_teams.c.season_id.in_(select(zprp_public_seasons.c.season_id).where(zprp_public_seasons.c.active.is_(True))),
+            )
+        )
+        scope["team_ids"] = sorted({str(r["team_id"]) for r in rows})
+    return scope
+
+
 @router.post("/auth/login")
 async def club_login(payload: ClubLogin, response: Response, request: Request, settings: Settings = Depends(get_settings)) -> Any:
     """Logowanie kontem klubowym baza.zprp.pl (tylko odczyt, hasło nie jest zapisywane).
@@ -366,12 +383,13 @@ async def club_login(payload: ClubLogin, response: Response, request: Request, s
                     raise LoginError("unexpected_response")
                 account_response = await client.get("/index.php?a=konto", cookies=cookies)
                 teams_response = await client.get("/index.php?a=druzyny", cookies=cookies)
+                zespoly_response = await client.get("/index.php?a=zespoly", cookies=cookies)
         except httpx.HTTPError as exc:
             raise LoginError("upstream_unavailable") from exc
-        if account_response.status_code >= 500 or teams_response.status_code >= 500:
+        if account_response.status_code >= 500 or teams_response.status_code >= 500 or zespoly_response.status_code >= 500:
             raise LoginError("upstream_unavailable")
         account_html = _decode_response(account_response)
-        scope = parse_club_scope(account_html, _decode_response(teams_response))
+        scope = await _scope_with_fallback(account_html, _decode_response(teams_response) + _decode_response(zespoly_response))
         check_scope(scope, relogin_html=account_html)
     except LoginError as exc:
         if exc.code in {"bad_credentials", "not_club_account", "inactive_account", "no_teams"}:

@@ -6,6 +6,7 @@ Bez bazy i bez sieci - testowalne w izolacji. Wejścia to zwykłe słowniki.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
 
 from app.national_distance_parser import clean_city, normalize_city_key
@@ -108,7 +109,7 @@ def team_record(matches: Iterable[dict], is_mine: Callable[[str, dict], bool]) -
     played = wins = draws = losses = gf = ga = 0
     home_played = away_played = 0
     form: list[str] = []
-    for m in sorted(matches, key=lambda x: x.get("scheduled_at") or 0):
+    for m in sorted(matches, key=lambda x: (x.get("scheduled_at") is not None, x.get("scheduled_at") or datetime.min)):
         sh, sa = m.get("score_home"), m.get("score_away")
         if sh is None or sa is None:
             continue

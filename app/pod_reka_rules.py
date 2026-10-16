@@ -44,7 +44,9 @@ def parse_club_scope(account_html: str, teams_html: str) -> dict[str, Any]:
     team_ids: set[str] = set()
     for link in teams_page.find_all("a", href=True):
         href = str(link.get("href") or "")
-        team_id = _query_param(href, "Filtr_zespol") or _query_param(href, "ID_zespoly")
+        # Prawdziwa BAZA linkuje drużynę jako `Filtr_zespol` (skład) albo
+        # `ID_zespol` (PDF `zespoly_PDF.php`); `ID_zespoly` to starszy zapis.
+        team_id = _query_param(href, "Filtr_zespol") or _query_param(href, "ID_zespol") or _query_param(href, "ID_zespoly")
         linked_club = _query_param(href, "NrKlubu")
         if team_id and (not linked_club or linked_club == club_id):
             team_ids.add(team_id)
