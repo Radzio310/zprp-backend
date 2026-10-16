@@ -175,6 +175,27 @@ def require_manage(**kwargs: Any) -> None:
 # Konfiguracja i szablony
 # ---------------------------------------------------------------------------
 
+#: Progi rzetelności (ustala komisja; zmiana przelicza wskaźnik także po starcie egzaminu).
+#: Klucz = rodzaj zdarzenia albo flaga czasu. `penalties` = kara za jedno zdarzenie,
+#: `max_events` = ile zdarzeń liczy się do kary (górny limit grupy = kara x max_events).
+DEFAULT_INTEGRITY: Dict[str, Any] = {
+    "penalties": {
+        "app_background": 4, "screenshot": 10, "too_fast": 3, "buffered_late": 4, "buffered_over_limit": 6,
+        "stamp_ignored": 3, "future_stamp": 4, "before_shown": 4, "device_change": 25, "similarity": 15,
+    },
+    "max_events": {
+        "app_background": 7, "screenshot": 3, "too_fast": 7, "buffered_late": 3, "buffered_over_limit": 3,
+        "stamp_ignored": 3, "future_stamp": 3, "before_shown": 3, "device_change": 1, "similarity": 2,
+    },
+    "long_absence_s": 30,
+    "long_absence_extra": 4,
+    "ok_min": 80,
+    "warning_min": 50,
+    "similarity_min_common": 3,
+    "similarity_close_s": 30,
+    "similarity_close_min": 2,
+}
+
 DEFAULT_ANTI: Dict[str, Any] = {
     "leave_app": "log",
     "screenshots": False,
@@ -182,6 +203,7 @@ DEFAULT_ANTI: Dict[str, Any] = {
     "similarity": False,
     "single_device": False,
     "room_code": False,
+    "integrity": copy.deepcopy(DEFAULT_INTEGRITY),
 }
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -206,7 +228,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "exclude_ids": [],
     "reminders_hours": [24],
     "results_push": True,
-    "anti": dict(DEFAULT_ANTI),
+    "anti": copy.deepcopy(DEFAULT_ANTI),
 }
 
 TEMPLATES: Dict[str, Dict[str, Any]] = {
@@ -301,6 +323,36 @@ def _strings(values: Any) -> List[str]:
     return out
 
 
+def clean_integrity(raw: Any) -> Dict[str, Any]:
+    """Progi rzetelności: braki z wartości domyślnych, zakresy sprawdzone, polskie komunikaty."""
+    raw = raw if isinstance(raw, Mapping) else {}
+    out: Dict[str, Any] = copy.deepcopy(DEFAULT_INTEGRITY)
+    for group, label, low, high in (("penalties", "kara za zdarzenie", 0, 50), ("max_events", "limit zdarzeń w grupie", 1, 50)):
+        given = raw.get(group) if isinstance(raw.get(group), Mapping) else {}
+        for key in given:
+            if key not in out[group]:
+                raise ExamError("BAD_CONFIG", f"Progi rzetelności: nieznany rodzaj sygnału „{_s(key)}”.")
+        for key in out[group]:
+            if key in given:
+                out[group][key] = _int(given[key], f"Progi rzetelności, {label} ({INTEGRITY_LABELS[key]})", low, high)
+    for key, label, low, high in (
+        ("long_absence_s", "długa nieobecność (sekundy)", 5, 600),
+        ("long_absence_extra", "dopłata za długą nieobecność", 0, 20),
+        ("ok_min", "dolna granica poziomu „w porządku”", 1, 100),
+        ("warning_min", "dolna granica poziomu „uwaga”", 0, 99),
+        ("similarity_min_common", "minimum wspólnych błędów", 2, 20),
+        ("similarity_close_s", "okno bliskości odpowiedzi (sekundy)", 1, 600),
+        ("similarity_close_min", "minimum bliskich w czasie błędów", 1, 20),
+    ):
+        if key in raw:
+            out[key] = _int(raw[key], f"Progi rzetelności, {label}", low, high)
+    if out["warning_min"] >= out["ok_min"]:
+        raise ExamError("BAD_CONFIG", "Progi rzetelności: granica „uwaga” musi być niższa niż granica „w porządku”.")
+    if out["similarity_close_min"] > out["similarity_min_common"]:
+        raise ExamError("BAD_CONFIG", "Progi rzetelności: bliskich w czasie błędów nie może być więcej niż wspólnych.")
+    return out
+
+
 def clean_config(raw: Mapping[str, Any], *, template: Any = None) -> Dict[str, Any]:
     """Pełna, sprawdzona konfiguracja. Rzuca `ExamError` z polskim zdaniem."""
     merged = _merge(template_config(template), raw or {})
@@ -365,6 +417,7 @@ def clean_config(raw: Mapping[str, Any], *, template: Any = None) -> Dict[str, A
         "similarity": bool(anti_raw.get("similarity")),
         "single_device": bool(anti_raw.get("single_device")),
         "room_code": bool(anti_raw.get("room_code")),
+        "integrity": clean_integrity(anti_raw.get("integrity")),
     }
     target_raw = merged.get("target") if isinstance(merged.get("target"), Mapping) else {}
     target = {
@@ -420,7 +473,14 @@ LOCKED_LABELS: Dict[str, str] = {
 
 def locked_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> List[str]:
     """Pola, które ktoś chce zmienić po tym, jak zdający zaczęli egzamin."""
-    return [key for key in LOCKED_AFTER_START if old.get(key) != new.get(key)]
+    def comparable(cfg: Mapping[str, Any], key: str) -> Any:
+        value = cfg.get(key)
+        if key == "anti" and isinstance(value, Mapping):
+            # Progi rzetelności to ocena komisji, nie zasada dla zdającego - nie są zablokowane.
+            return {k: v for k, v in value.items() if k != "integrity"}
+        return value
+
+    return [key for key in LOCKED_AFTER_START if comparable(old, key) != comparable(new, key)]
 
 
 # ---------------------------------------------------------------------------
@@ -1055,39 +1115,54 @@ def room_code_ok(secret: str, exam_id: str, code: Any, now: datetime) -> bool:
 # Rzetelność
 # ---------------------------------------------------------------------------
 
-#: (rodzaj, flaga) -> (etykieta, kara za jedno, górny limit kary).
+#: (rodzaj, flaga) -> (etykieta, kara za jedno, górny limit kary) - WARTOŚCI DOMYŚLNE.
+#: Faktyczne progi egzaminu: `config.anti.integrity` (DEFAULT_INTEGRITY).
+_INTEGRITY_ROWS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("app_background", "app_background", "", "Wyjścia z aplikacji"),
+    ("screenshot", "screenshot", "", "Zrzuty ekranu"),
+    ("too_fast", "time_flag", "too_fast", "Odpowiedzi szybsze niż czas czytania"),
+    ("buffered_late", "time_flag", "buffered_late", "Odpowiedzi długo leżące w telefonie"),
+    ("buffered_over_limit", "time_flag", "buffered_over_limit", "Odpowiedź z bufora starsza niż limit pytania"),
+    ("stamp_ignored", "time_flag", "stamp_ignored", "Stempel czasu odrzucony (brak deklaracji bufora)"),
+    ("future_stamp", "time_flag", "future_stamp", "Stempel czasu z przyszłości"),
+    ("before_shown", "time_flag", "before_shown", "Odpowiedź przed pokazaniem pytania"),
+    ("device_change", "device_change", "", "Wznowienie na innym urządzeniu"),
+    ("similarity", "similarity", "", "Podobieństwo odpowiedzi do innego zdającego"),
+)
+INTEGRITY_LABELS: Dict[str, str] = {key: label for key, _k, _f, label in _INTEGRITY_ROWS}
+_INTEGRITY_KEY_OF: Dict[Tuple[str, str], str] = {(kind, flag): key for key, kind, flag, _l in _INTEGRITY_ROWS}
 INTEGRITY_RULES: Dict[Tuple[str, str], Tuple[str, int, int]] = {
-    ("app_background", ""): ("Wyjścia z aplikacji", 4, 28),
-    ("screenshot", ""): ("Zrzuty ekranu", 10, 30),
-    ("time_flag", "too_fast"): ("Odpowiedzi szybsze niż czas czytania", 3, 21),
-    ("time_flag", "buffered_late"): ("Odpowiedzi długo leżące w telefonie", 4, 12),
-    ("time_flag", "buffered_over_limit"): ("Odpowiedź z bufora starsza niż limit pytania", 6, 18),
-    ("time_flag", "stamp_ignored"): ("Stempel czasu odrzucony (brak deklaracji bufora)", 3, 9),
-    ("time_flag", "future_stamp"): ("Stempel czasu z przyszłości", 4, 12),
-    ("time_flag", "before_shown"): ("Odpowiedź przed pokazaniem pytania", 4, 12),
-    ("device_change", ""): ("Wznowienie na innym urządzeniu", 25, 25),
-    ("similarity", ""): ("Podobieństwo odpowiedzi do innego zdającego", 15, 30),
+    (kind, flag): (label, DEFAULT_INTEGRITY["penalties"][key],
+                   DEFAULT_INTEGRITY["penalties"][key] * DEFAULT_INTEGRITY["max_events"][key])
+    for key, kind, flag, label in _INTEGRITY_ROWS
 }
-LONG_ABSENCE_S = 30
-LONG_ABSENCE_EXTRA = 4
+LONG_ABSENCE_S = DEFAULT_INTEGRITY["long_absence_s"]
+LONG_ABSENCE_EXTRA = DEFAULT_INTEGRITY["long_absence_extra"]
 
 
-def integrity_report(events: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
-    """Wskaźnik 0-100 z rozpisaniem kar. To sygnał dla komisji, nie wyrok."""
+def integrity_report(events: Iterable[Mapping[str, Any]], thresholds: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Wskaźnik 0-100 z rozpisaniem kar. To sygnał dla komisji, nie wyrok.
+
+    `thresholds` = `config.anti.integrity` egzaminu (brak = wartości domyślne).
+    Odpowiedź niesie `thresholds` (z jakich progów powstał wskaźnik) i `custom`."""
+    th = clean_integrity(thresholds)
     groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for event in events:
         kind = _s(event.get("kind"))
         detail = event.get("detail") if isinstance(event.get("detail"), Mapping) else {}
         flag = _s(detail.get("flag")) if kind == "time_flag" else ""
         key = (kind, flag)
-        if key not in INTEGRITY_RULES:
+        name = _INTEGRITY_KEY_OF.get(key)
+        if name is None:
             continue
-        label, per, cap = INTEGRITY_RULES[key]
-        group = groups.setdefault(key, {"kind": kind, "flag": flag or None, "label": label, "count": 0, "raw": 0, "cap": cap})
+        per = th["penalties"][name]
+        cap = per * th["max_events"][name]
+        group = groups.setdefault(key, {"kind": kind, "flag": flag or None, "label": INTEGRITY_LABELS[name],
+                                        "count": 0, "raw": 0, "cap": cap})
         group["count"] += 1
         group["raw"] += per
-        if kind == "app_background" and float(detail.get("seconds") or 0) >= LONG_ABSENCE_S:
-            group["raw"] += LONG_ABSENCE_EXTRA
+        if kind == "app_background" and float(detail.get("seconds") or 0) >= th["long_absence_s"]:
+            group["raw"] += th["long_absence_extra"]
     breakdown = []
     total = 0
     for group in groups.values():
@@ -1096,17 +1171,24 @@ def integrity_report(events: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
         breakdown.append({"kind": group["kind"], "flag": group["flag"], "label": group["label"],
                           "count": group["count"], "penalty": penalty})
     score = max(0, 100 - total)
-    level = "ok" if score >= 80 else "warning" if score >= 50 else "suspicious"
-    return {"score": score, "level": level, "breakdown": breakdown,
+    level = "ok" if score >= th["ok_min"] else "warning" if score >= th["warning_min"] else "suspicious"
+    return {"score": score, "level": level, "breakdown": breakdown, "thresholds": th,
+            "custom": th != DEFAULT_INTEGRITY,
             "note": "Wskaźnik jest sygnałem dla komisji. Nic nie dyskwalifikuje automatycznie."}
 
 
-def similarity_pairs(attempts: Sequence[Mapping[str, Any]], *, min_common: int = 3, close_s: float = 30.0) -> List[Dict[str, Any]]:
-    """Pary z tymi samymi BŁĘDNYMI odpowiedziami (min. 3) i co najmniej dwiema
-    z nich oddanymi w odstępie do 30 s.
+def similarity_pairs(attempts: Sequence[Mapping[str, Any]], *, min_common: Optional[int] = None,
+                     close_s: Optional[float] = None, close_min: Optional[int] = None,
+                     thresholds: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Pary z tymi samymi BŁĘDNYMI odpowiedziami (domyślnie min. 3) i co najmniej dwiema
+    z nich oddanymi w odstępie do 30 s. Progi: `thresholds` (= `anti.integrity`) lub jawne argumenty.
 
     attempt: {"attempt_id", "judge_id", "answers": {qid: {"selected", "correct", "answered_at"}}}
     """
+    th = clean_integrity(thresholds)
+    min_common = th["similarity_min_common"] if min_common is None else min_common
+    close_s = th["similarity_close_s"] if close_s is None else close_s
+    close_min = th["similarity_close_min"] if close_min is None else close_min
     out = []
     items = list(attempts)
     for i in range(len(items)):
@@ -1124,7 +1206,7 @@ def similarity_pairs(attempts: Sequence[Mapping[str, Any]], *, min_common: int =
                 ta, tb = ra.get("answered_at"), rb.get("answered_at")
                 if ta and tb and abs((ta - tb).total_seconds()) <= close_s:
                     close.append(qid)
-            if len(common) >= min_common and len(close) >= 2:
+            if len(common) >= min_common and len(close) >= close_min:
                 out.append({"attempt_ids": [a["attempt_id"], b["attempt_id"]], "judge_ids": [a["judge_id"], b["judge_id"]],
                             "common_wrong": sorted(common), "close_in_time": sorted(close)})
     return out

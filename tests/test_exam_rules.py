@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+import copy
+
 import pytest
 
 from app import exam_rules as X
@@ -382,3 +384,55 @@ def test_pola_wydarzenia_exam():
     assert f["event_type"] == "exam" and f["data_json"]["exam_id"] == "abc" and f["data_json"]["obligatory"] is True
     assert f["data_json"]["target"]["include_badges"] == ["Delegaci"]
     assert f["event_date"] == T0 and f["end_date"] == T0 + timedelta(days=3)
+
+
+# --- progi rzetelności ustawiane przez komisję ------------------------------
+
+
+def test_progi_domyslne_daja_te_same_wyniki_co_stale_stare():
+    th = X.clean_integrity(None)
+    assert th == X.DEFAULT_INTEGRITY
+    events = [{"kind": "screenshot", "detail": {}}] * 20
+    assert X.integrity_report(events)["score"] == X.integrity_report(events, th)["score"] == 70
+    assert X.integrity_report([])["custom"] is False
+    assert cfg()["anti"]["integrity"] == X.DEFAULT_INTEGRITY
+
+
+def test_wlasne_progi_przeliczaja_wskaznik_i_sa_w_raporcie():
+    custom = {"penalties": {"screenshot": 20}, "max_events": {"screenshot": 2}, "ok_min": 90, "warning_min": 60}
+    rep = X.integrity_report([{"kind": "screenshot", "detail": {}}] * 5, custom)
+    assert rep["breakdown"][0]["penalty"] == 40 and rep["score"] == 60 and rep["level"] == "warning"
+    assert rep["custom"] is True and rep["thresholds"]["penalties"]["screenshot"] == 20
+    assert rep["thresholds"]["penalties"]["app_background"] == 4  # braki z domyślnych
+    long_abs = X.integrity_report([{"kind": "app_background", "detail": {"seconds": 12}}], {"long_absence_s": 10, "long_absence_extra": 6})
+    assert long_abs["breakdown"][0]["penalty"] == 10
+
+
+@pytest.mark.parametrize("bad", [
+    {"penalties": {"screenshot": 51}}, {"penalties": {"nieznany": 1}}, {"max_events": {"screenshot": 0}},
+    {"ok_min": 50, "warning_min": 50}, {"similarity_min_common": 1}, {"similarity_min_common": 2, "similarity_close_min": 3},
+    {"similarity_close_s": 0}, {"long_absence_s": 4},
+])
+def test_progi_rzetelnosci_poza_zakresem_odrzucone(bad):
+    with pytest.raises(X.ExamError) as err:
+        cfg(anti={"integrity": bad})
+    assert err.value.code == "BAD_CONFIG" and "Progi rzetelności" in err.value.message
+
+
+def test_progi_podobienstwa_z_konfiguracji():
+    def pack(aid, offset, n=4):
+        return {"attempt_id": aid, "judge_id": aid, "answers": {
+            f"q{i}": {"selected": ["c"], "correct": False, "answered_at": T0 + timedelta(seconds=10 * i + offset)} for i in range(n)}}
+    packs = [pack("a", 0), pack("b", 20)]
+    assert len(X.similarity_pairs(packs)) == 1
+    assert X.similarity_pairs(packs, thresholds={"similarity_close_s": 10}) == []
+    assert X.similarity_pairs(packs, thresholds={"similarity_min_common": 5}) == []
+    assert len(X.similarity_pairs(packs, thresholds={"similarity_min_common": 4, "similarity_close_min": 4})) == 1
+
+
+def test_progi_rzetelnosci_nie_sa_zablokowane_po_starcie():
+    old = cfg()
+    new = X.clean_config(X._merge(copy.deepcopy(old), {"anti": {"integrity": {"ok_min": 90}}}))
+    assert X.locked_changes(old, new) == []
+    changed = X.clean_config(X._merge(copy.deepcopy(old), {"anti": {"screenshots": True}}))
+    assert X.locked_changes(old, changed) == ["anti"]

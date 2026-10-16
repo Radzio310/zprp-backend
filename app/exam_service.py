@@ -413,7 +413,7 @@ def exam_view(exam: Mapping[str, Any], now: datetime, *, full: bool) -> Dict[str
         "allow_back": config["allow_back"], "pass_percent": config["pass_percent"],
         "result_release": config["result_release"],
         # Zasady jawne dla zdającego: przedsionek opisuje je wprost (zero cichych blokad).
-        "anti": dict(config["anti"]), "multi_scoring": config["multi_scoring"],
+        "anti": {k: v for k, v in config["anti"].items() if k != "integrity"}, "multi_scoring": config["multi_scoring"],
     }
     if full:
         base.update(config=config, bank_version=exam["bank_version"], voided=exam["voided"], event_ids=exam["event_ids"],
@@ -972,7 +972,7 @@ async def attempts_list(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
                       "province": a.get("province"), "attempt_no": a["attempt_no"], "status": a["status"],
                       "started_at": _iso(a["started_at"]), "finished_at": _iso(a.get("finished_at")),
                       "points": score.get("points"), "max": score.get("max"), "percent": score.get("percent"),
-                      "passed": score.get("passed"), "integrity": X.integrity_report(events.get(a["id"], []))})
+                      "passed": score.get("passed"), "integrity": X.integrity_report(events.get(a["id"], []), exam["config"]["anti"].get("integrity"))})
     return {"exam_id": exam_id, "pass_percent": exam["config"]["pass_percent"], "attempts": items}
 
 
@@ -993,7 +993,7 @@ async def attempt_card(st: Store, who: Who, exam_id: str, attempt_id: str) -> Di
                          "timed_out": bool(row.get("timed_out")), "changes": row.get("changes"), "flags": row.get("flags")})
     return {"attempt_id": attempt_id, "judge_id": attempt["judge_id"], "judge_name": attempt.get("judge_name"),
             "status": attempt["status"], "finish_reason": attempt.get("finish_reason"), "score": attempt["score"],
-            "device_id": attempt.get("device_id"), "integrity": X.integrity_report(events), "events": events,
+            "device_id": attempt.get("device_id"), "integrity": X.integrity_report(events, exam["config"]["anti"].get("integrity")), "events": events,
             "timeline": timeline}
 
 
@@ -1103,7 +1103,7 @@ async def similarity_scan(st: Store, who: Who, exam_id: str, now: Optional[datet
         packs.append({"attempt_id": a["id"], "judge_id": a["judge_id"], "answers": {
             qid: {"selected": r.get("selected"), "correct": bool(correct.get(qid)), "answered_at": r.get("answered_at")}
             for qid, r in answers.items()}})
-    pairs = X.similarity_pairs(packs)
+    pairs = X.similarity_pairs(packs, thresholds=exam["config"]["anti"].get("integrity"))
     await st.database.execute(delete(st.t.events).where(and_(st.t.events.c.exam_id == exam_id, st.t.events.c.kind == "similarity")))
     by_id = {p["attempt_id"]: p for p in packs}
     for pair in pairs:
