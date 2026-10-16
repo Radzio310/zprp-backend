@@ -456,7 +456,7 @@ async def team_overview(team_id: str, season_id: str = "") -> dict[str, Any]:
     club = await database.fetch_one(select(zprp_public_clubs).where(zprp_public_clubs.c.club_id == team["club_id"])) if team["club_id"] else None
     now = datetime.now()
 
-    roster_rows, stat_rows, match_rows = await asyncio.gather(
+    roster_rows, stat_rows, match_rows, lineup_matches = await asyncio.gather(
         database.fetch_all(
             select(zprp_public_team_rosters, zprp_public_players)
             .join(zprp_public_players, zprp_public_players.c.player_id == zprp_public_team_rosters.c.player_id)
@@ -477,6 +477,12 @@ async def team_overview(team_id: str, season_id: str = "") -> dict[str, Any]:
             select(*_card_cols()).where(and_(
                 M.c.season_id == chosen, or_(M.c.home_team_id == team_id, M.c.away_team_id == team_id)
             )).order_by(M.c.scheduled_at)
+        ),
+        # Mianownik dyscypliny: mecze, w których drużyna ma skład w źródle.
+        database.fetch_val(
+            select(func.count(func.distinct(MP.c.match_id)))
+            .join(M, M.c.match_id == MP.c.match_id)
+            .where(and_(MP.c.team_id == team_id, M.c.season_id == chosen))
         ),
     )
     stats = {r["player_id"]: _dict(r) for r in stat_rows}
@@ -508,6 +514,19 @@ async def team_overview(team_id: str, season_id: str = "") -> dict[str, Any]:
         "stats": R.team_record(cards, lambda side, m: m.get(f"{side}_team_id") == team_id),
         "standings": await _standing_rows([team_id], chosen),
         "top_scorers": await _scorers_for_teams([team_id], chosen, 10),
+        "discipline": _team_discipline(stat_rows, int(lineup_matches or 0)),
+    }
+
+
+def _team_discipline(stat_rows: list[Any], matches: int) -> dict[str, Any]:
+    """Kary drużyny w sezonie - po WSZYSTKICH zawodnikach z protokołów, nie tylko
+    z aktywnej kadry (kto odszedł w trakcie, też łapał kary). `per_match` = None,
+    gdy nie ma ani jednego meczu ze składem."""
+    keys = ("two_minutes", "warnings", "disqualifications", "direct_red_cards")
+    totals = {k: sum(int(_dict(r).get(k) or 0) for r in stat_rows) for k in keys}
+    return {
+        "matches": matches, **totals,
+        "per_match": {k: round(totals[k] / matches, 2) for k in keys} if matches else None,
     }
 
 

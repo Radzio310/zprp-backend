@@ -179,6 +179,7 @@ def test_profile_klubu_druzyny_zawodnika(portal):
     assert all(c["status"] != "live" for c in club["recent_matches"] + club["upcoming_matches"])
     assert club["top_scorers"][0]["goals"] == 9 and club["standings"][0]["position"] == 1
     assert team["roster"][0]["stats"]["goals"] == 9 and team["stats"]["played"] == 1 and len(team["matches"]) == 2
+    assert team["discipline"]["matches"] == 1 and team["discipline"]["per_match"] is not None
     assert player["totals"]["goals"] == 9 and player["totals"]["penalty_accuracy"] == pytest.approx(0.667, abs=1e-3)
     assert player["seasons"][0]["season_id"] == "S1" and player["totals"]["best_match"]["match_id"] == "m1"
     assert player["recent_matches"][0]["player_line"]["goals"] == 9
