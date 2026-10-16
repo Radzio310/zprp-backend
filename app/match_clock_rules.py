@@ -120,6 +120,23 @@ def merge_points(*groups: Iterable[Sequence[int]]) -> List[Point]:
     return points
 
 
+def thin_trace(points: Sequence[Point], cap: int) -> List[Point]:
+    """Najwyżej `cap` punktów - zostają te, przy których zegar zmienia stan."""
+    pts = list(points)
+    if len(pts) <= cap:
+        return pts
+    keep = {0, len(pts) - 1}
+    for i in range(1, len(pts)):
+        if pts[i][2] != pts[i - 1][2] or pts[i][3] != pts[i - 1][3]:
+            keep.update((i - 1, i))
+    rest = [i for i in range(len(pts)) if i not in keep]
+    room = max(0, cap - len(keep))
+    if rest and room:
+        step = len(rest) / room
+        keep.update(rest[int(k * step)] for k in range(min(room, len(rest))))
+    return [pts[i] for i in sorted(keep)][:cap] if len(keep) <= cap else [pts[i] for i in sorted(keep)][:: max(1, len(keep) // cap + 1)]
+
+
 def _half_of(point: Point, half_ms: int) -> int:
     if point[2] in (1, 2):
         return point[2]
@@ -220,5 +237,8 @@ def annotate_timeline(timeline: Dict[str, Any], points: Sequence[Point]) -> Dict
         "kickoff_err_s": int(round(kickoff[1] / 1000)) if kickoff else None,
         "second_half_wall_ms": second[0] if second else None,
         "second_half_err_s": int(round(second[1] / 1000)) if second else None,
+        # Ślad dla aplikacji: „Oznacz teraz" liczy z niego czas gry z godziny.
+        # Tylko od założenia meczu do końca (bez punktów sprzed doby).
+        "trace": [list(p) for p in thin_trace(points, 600)],
     }
     return out
