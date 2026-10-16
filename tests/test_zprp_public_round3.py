@@ -1,0 +1,313 @@
+"""Pod Ręką runda 3: reguły (czyste) i trasy na małej bazie SQLite."""
+
+import asyncio
+import importlib
+import sys
+import types
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock
+
+import pytest
+import sqlalchemy
+from databases import Database
+from sqlalchemy import insert
+
+from app.zprp_public import match_rules as MR
+from app.zprp_public_tables import define_tables as define_public
+from app.national_distance_tables import define_tables as define_national
+
+# ---------------------------------------------------------------------------
+# Reguły
+# ---------------------------------------------------------------------------
+
+
+def test_karne_z_payloadu_i_zero_zero():
+    assert MR.parse_shootout({"dogrywka_karne_gosp": "4", "dogrywka_karne_gosc": "3", "Id": "1"}) == (4, 3)
+    assert MR.parse_shootout({"0": [{"Id": "1", "dogrywka_karne_gosp": 2, "dogrywka_karne_gosc": "5"}]}) == (2, 5)
+    assert MR.parse_shootout([[{"Id": "1", "dogrywka_karne_gosp": "0", "dogrywka_karne_gosc": "0"}]]) == (None, None)
+    assert MR.parse_shootout({"Id": "1", "dogrywka_karne_gosp": None, "dogrywka_karne_gosc": None}) == (None, None)
+    assert MR.parse_shootout(None) == (None, None)
+
+
+def test_zwyciezca_i_sposob_rozstrzygniecia():
+    assert MR.outcome({"score_home": 30, "score_away": 25}) == ("home", "regular")
+    assert MR.outcome({"score_home": 20, "score_away": 20}) == (None, "regular")
+    assert MR.outcome({"score_home": 28, "score_away": 28, "shootout_home": 3, "shootout_away": 4}) == ("away", "shootout")
+    assert MR.outcome({"score_home": 10, "score_away": 0, "walkover_team_id": "t2", "winner": "1"}) == ("home", "walkover")
+    assert MR.outcome({"score_home": None, "score_away": None}) == (None, "regular")
+
+
+def test_numer_meczu_sezon_i_staff():
+    assert MR.full_match_code("S/DzK/1") == "S/DzK/1"
+    assert MR.full_match_code("12", "I liga") == "I liga/12"
+    assert MR.full_match_code("", "x") is None
+    seasons = {"S1": {"season_id": "S1", "name": "2026/27", "start_year": 2026, "active": True}}
+    item = MR.apply_match_extras({"season_id": "S1", "score_home": 1, "score_away": 0, "match_code": "A/1"}, seasons, "S1", {})
+    assert item["season_name"] == "2026/27" and item["is_current_season"] is True and item["winner_side"] == "home"
+    staff = MR.staff_view({"role": "A", "function": "Trener", "source_json": {"upomnienie": "1", "2minuty": 2, "dyskwalifikacja": "0"}})
+    assert staff["letter"] == "A" and staff["warnings"] == 1 and staff["two_minutes"] == 2 and "source_json" not in staff
+
+
+def test_tabela_serie_i_strzelcy():
+    def m(h, a, sh, sa, **kw):
+        return {"home_team_id": h, "away_team_id": a, "home_team_name": h, "away_team_name": a, "score_home": sh, "score_away": sa, **kw}
+
+    table = MR.simulate_table([m("A", "B", 30, 20), m("B", "C", 25, 25), m("C", "A", 20, 21)])
+    assert [r["team_id"] for r in table] == ["A", "C", "B"] and table[0]["points"] == 4 and table[1]["points"] == 1
+    assert MR.streaks(["W", "W", "D", "W", "L", "L"]) == {
+        "current": {"type": "L", "length": 2}, "longest_win": 2, "longest_unbeaten": 4, "longest_loss": 2}
+    rows = [
+        {"player_id": "1", "first_name": "A", "last_name": "A", "team_name": "T", "goals": 10, "matches": 2, "penalty_goals": 3, "penalty_attempts": 3},
+        {"player_id": "1", "first_name": "A", "last_name": "A", "team_name": "T2", "goals": 2, "matches": 1, "penalty_goals": 0, "penalty_attempts": 1},
+        {"player_id": "2", "first_name": "B", "last_name": "B", "team_name": "T", "goals": 12, "matches": 3, "penalty_goals": 1, "penalty_attempts": 2},
+    ]
+    top = MR.aggregate_scorers(rows, "goals")
+    one = next(i for i in top if i["player_id"] == "1")
+    assert one["goals"] == 12 and one["matches"] == 3 and one["team"] == "T" and one["pen_acc"] == 0.75
+    assert [i["rank"] for i in top] == [1, 1]          # 12 bramek w 3 meczach u obu: remis
+    by_acc = MR.aggregate_scorers(rows, "pen_acc")
+    assert [i["player_id"] for i in by_acc] == ["1"]   # gracz 2 ma 2 próby < próg
+
+
+def test_ics_i_adresy_zalacznikow():
+    ics = MR.build_ics("Drużyna, A", [{"match_id": "9", "scheduled_at": datetime(2026, 10, 3, 18, 0),
+                                       "home_team_name": "A", "away_team_name": "B", "venue_name": "Hala"}], "t1")
+    assert ics.startswith("BEGIN:VCALENDAR") and "DTSTART:20261003T160000Z" in ics and "UID:9-t1@" in ics
+    assert "X-WR-CALNAME:Drużyna\\, A" in ics and "\r\n" in ics
+    ok = "https://baza.zprp.pl/zawody_zalaczniki/1_1.jpg"
+    assert MR.is_allowed_attachment_url(ok)
+    for bad in ("http://baza.zprp.pl/zawody_zalaczniki/a.jpg", "https://evil.pl/zawody_zalaczniki/a.jpg",
+                "https://baza.zprp.pl/login", "https://baza.zprp.pl/zawody_zalaczniki/../x",
+                "https://baza.zprp.pl@evil.pl/zawody_zalaczniki/a.jpg", ""):
+        assert not MR.is_allowed_attachment_url(bad)
+    items = MR.attachment_items(
+        {"1": {"filename": "a.jpg", "label": "Skan", "file_url": ok, "is_pdf": False},
+         "2": {"filename": "b.pdf", "label": "PDF", "file_url": ok.replace("1_1.jpg", "b.pdf"), "is_pdf": True},
+         "3": {"filename": "c.jpg", "label": "Ukryty", "file_url": ok, "is_pdf": False}},
+        ["3"], lambda u: "/p?u=" + u)
+    assert [i["id"] for i in items] == ["1", "2"] and items[0]["thumb_url"] and items[1]["thumb_url"] is None
+    assert items[1]["type"] == "pdf" and MR.venue_key("Hala Łódź", "90-001 Łódź") == "hala-lodz--lodz"
+
+
+# ---------------------------------------------------------------------------
+# Trasy
+# ---------------------------------------------------------------------------
+
+MODULES = ("app.zprp_public.store", "app.zprp_public.sync", "app.zprp_public.enrich", "app.zprp_public.api",
+           "app.zprp_public.portal", "app.zprp_public.extras")
+
+
+@pytest.fixture
+def env(monkeypatch, tmp_path):
+    metadata = sqlalchemy.MetaData()
+    pub = define_public(metadata)
+    nat = define_national(metadata)
+    url = f"sqlite:///{tmp_path / 'r3.db'}"
+    metadata.create_all(sqlalchemy.create_engine(url))
+    fake = types.ModuleType("app.db")
+    fake.database = Database(url.replace("sqlite://", "sqlite+aiosqlite://"))
+    fake.DATABASE_URL = url
+    for table in list(pub) + list(nat):
+        setattr(fake, table.name, table)
+    fake.__getattr__ = lambda name: MagicMock()
+    monkeypatch.setitem(sys.modules, "app.db", fake)
+    for name in MODULES:
+        sys.modules.pop(name, None)
+    extras = importlib.import_module("app.zprp_public.extras")
+    extras.clear_cache()
+    importlib.import_module("app.zprp_public.enrich").invalidate()
+    yield extras, fake.database, {t.name: t for t in list(pub) + list(nat)}
+    for name in MODULES:
+        sys.modules.pop(name, None)
+
+
+def _h(**extra):
+    return {"source_hash": "h", "source_json": {}, **extra}
+
+
+async def _seed(db, T):
+    now = datetime.now().replace(microsecond=0)
+
+    def ins(table, /, **v):
+        return db.execute(insert(T[table]).values(**v))
+
+    await ins("zprp_public_seasons", season_id="S1", start_year=2026, name="2026/27", active=True, **_h())
+    await ins("zprp_public_seasons", season_id="S0", start_year=2025, name="2025/26", active=False, **_h())
+    await ins("zprp_public_associations", association_id="A1", name="Śląski ZPRP", **_h())
+    for cid, name, city in (("c1", "KS Kielce", "Kielce"), ("c2", "Piast Gliwice", "Gliwice"), ("c3", "Trzeci", "Opole")):
+        await ins("zprp_public_clubs", club_id=cid, association_id="A1", name=name, city=city, archived=False,
+                  logo_url=f"https://l/{cid}.png", **_h())
+    for tid, cid, name in (("t1", "c1", "Kielce"), ("t2", "c2", "Piast"), ("t3", "c3", "Trzeci")):
+        await ins("zprp_public_teams", team_id=tid, season_id="S1", club_id=cid, season_name="2026/27", name=name, **_h())
+    await ins("zprp_public_competitions", competition_id="K1", season_id="S1", association_id="A1", name="Liga",
+              gender="M", category="Seniorzy", code="I", **_h())
+    await ins("zprp_public_rounds", round_id="R1", competition_id="K1", name="Runda 1", **_h())
+    for i in (1, 2, 3):
+        await ins("zprp_public_matchdays", matchday_id=f"D{i}", round_id="R1", number=i, sequence=i, name=f"Kolejka {i}", **_h())
+    base = dict(season_id="S1", competition_id="K1", round_id="R1", competition_name="Liga", **_h())
+    club_of = {"t1": "c1", "t2": "c2", "t3": "c3"}
+
+    def match(mid, day, h, a, sh, sa, days_ago, **kw):
+        return dict(match_id=mid, matchday_id=day, home_team_id=h, away_team_id=a, home_club_id=club_of[h],
+                    away_club_id=club_of[a], home_team_name=h, away_team_name=a, score_home=sh, score_away=sa,
+                    scheduled_at=now - timedelta(days=days_ago), venue_name="Hala Kielce", venue_city="Kielce", **base, **kw)
+
+    rows = [
+        match("m1", "D1", "t1", "t2", 30, 20, 21, match_code="S/1", spectators=300, referee_1_id="r1", referee_1_name="Jan Sędzia"),
+        match("m2", "D1", "t3", "t2", 25, 25, 20, shootout_home=3, shootout_away=5, match_code="S/2"),
+        match("m3", "D2", "t2", "t1", 22, 22, 14, match_code="S/3"),
+        match("m4", "D2", "t1", "t3", 28, 27, 13, match_code="S/4", spectators=900),
+        match("m5", "D3", "t2", "t3", None, None, -3, match_code="S/5", referee_1_id="r1", referee_1_name="Jan Sędzia"),
+    ]
+    for r in rows:
+        await ins("zprp_public_matches", **r)
+    await ins("zprp_public_players", player_id="p1", first_name="Ala", last_name="Nowak", **_h())
+    await ins("zprp_public_players", player_id="p2", first_name="Ola", last_name="Kot", **_h())
+    await ins("zprp_public_match_players", match_id="m1", team_id="t1", player_id="p1", side="home", goals=12,
+              penalty_goals=3, penalty_attempts=4, **_h())
+    await ins("zprp_public_match_players", match_id="m1", team_id="t2", player_id="p2", side="away", goals=5,
+              two_minutes=2, **_h())
+    await ins("zprp_public_match_staff", match_id="m1", team_id="t1", person_id="s1", side="home", first_name="Jan",
+              last_name="Trener", role="A", function="Trener", source_hash="h",
+              source_json={"rola": "A", "upomnienie": "1", "2minuty": "0"})
+    await ins("zprp_public_scorers", competition_id="K1", player_id="p1", team_id="t1", team_name="Kielce", goals=40,
+              matches=4, penalty_goals=8, penalty_attempts=10, **_h())
+    await ins("zprp_public_scorers", competition_id="K1", player_id="p2", team_id="t2", team_name="Piast", goals=22,
+              matches=4, **_h())
+    await ins("national_distance_cities", city_key="kielce", name="Kielce", name_key="kielce", latitude=50.87,
+              longitude=20.63, province="swietokrzyskie", observations=40)
+
+
+def run(env, factory):
+    module, db, T = env
+
+    async def go():
+        await db.connect()
+        try:
+            await _seed(db, T)
+            return await factory(module)
+        finally:
+            await db.disconnect()
+
+    return asyncio.run(go())
+
+
+def test_karty_meczow_maja_pola_kontraktu(env):
+    async def go(x):
+        api = sys.modules["app.zprp_public.api"]
+        portal = sys.modules["app.zprp_public.portal"]
+        listing = await api.list_matches(competition_id="K1", team_id="", season_id="", date_from=None, date_to=None,
+                                         limit=50, offset=0)
+        detail = await api.match_details("m2")
+        overview = await portal.match_overview("m2")
+        sched = await portal.competition_schedule("K1", "")
+        return listing, detail, overview, sched
+
+    listing, detail, overview, sched = run(env, go)
+    by_id = {m["match_id"]: m for m in listing["items"]}
+    m2 = by_id["m2"]
+    assert (m2["shootout_home"], m2["shootout_away"], m2["winner_side"], m2["decided_by"]) == (3, 5, "away", "shootout")
+    assert m2["match_code_full"] == "S/2" and m2["season_name"] == "2026/27" and m2["is_current_season"] is True
+    assert by_id["m1"]["decided_by"] == "regular" and by_id["m1"]["winner_side"] == "home"
+    assert by_id["m5"]["winner_side"] is None
+    assert detail["match"]["winner_side"] == "away" and overview["match"]["decided_by"] == "shootout"
+    assert overview["home"]["shootout"] == 3
+    cards = [c for r in sched["rounds"] for d in r["matchdays"] for c in d["matches"]] + sched["unassigned"]
+    assert {c["match_id"]: c["winner_side"] for c in cards}["m2"] == "away"
+
+
+def test_sztab_z_kartkami_w_szczegolach(env):
+    async def go(x):
+        api = sys.modules["app.zprp_public.api"]
+        return await api.match_details("m1"), await sys.modules["app.zprp_public.portal"].match_overview("m1")
+
+    detail, overview = run(env, go)
+    for staff in (detail["staff"][0], overview["staff"][0]):
+        assert staff["letter"] == "A" and staff["warnings"] == 1 and "source_json" not in staff
+
+
+def test_zalaczniki_i_proxy(env, monkeypatch):
+    async def go(x):
+        async def fake(match_id):
+            return [{"id": "1", "name": "Skan", "type": "image", "url": "/p", "thumb_url": "/p"}]
+
+        monkeypatch.setattr(x, "_fetch_attachments", fake)
+        resp = await x.match_attachments("1")
+        bad_status = None
+        try:
+            await x.attachment_file(u="https://evil.example/zawody_zalaczniki/a.jpg")
+        except Exception as exc:  # noqa: BLE001
+            bad_status = getattr(exc, "status_code", None)
+        bad_id = None
+        try:
+            await x.match_attachments("abc")
+        except Exception as exc:  # noqa: BLE001
+            bad_id = getattr(exc, "status_code", None)
+        return resp, bad_status, bad_id
+
+    resp, bad_status, bad_id = run(env, go)
+    assert resp.headers["access-control-allow-origin"] == "*" and b"Skan" in resp.body
+    assert bad_status == 400 and bad_id == 400
+
+
+def test_strzelcy_wg_zakresu(env):
+    async def go(x):
+        common = dict(competition_id="", association_id="", season_id="", category="", gender="", limit=10)
+        country = await x.scorers(scope="country", sort="goals", **common)
+        comp = await x.scorers(scope="competition", sort="avg", **{**common, "competition_id": "K1"})
+        empty = await x.scorers(scope="association", sort="goals", **{**common, "association_id": "NOPE"})
+        return country, comp, empty
+
+    country, comp, empty = run(env, go)
+    first = country["items"][0]
+    assert (first["rank"], first["player_id"], first["goals"], first["avg"], first["pen_goals"], first["pen_attempts"]) == (1, "p1", 40, 10.0, 8, 10)
+    assert first["club_id"] == "c1" and first["club_logo_url"] == "https://l/c1.png" and first["name"] == "Ala Nowak"
+    assert {"seasons", "categories", "genders", "associations"} <= set(country["filters"])
+    assert country["filters"]["categories"] == ["Seniorzy"]
+    assert comp["items"][0]["player_id"] == "p1" and empty["items"] == []
+
+
+def test_hale(env):
+    async def go(x):
+        lst = await x.venues(q="kiel", limit=10, offset=0)
+        det = await x.venue_details(lst["items"][0]["key"])
+        return lst, det
+
+    lst, det = run(env, go)
+    assert lst["count"] == 1 and lst["items"][0]["name"] == "Hala Kielce"
+    assert det["lat"] == 50.87 and {c["club_id"] for c in det["clubs"]} >= {"c1"}
+    assert det["attendance_records"][0]["spectators"] == 900 and any(w["match_id"] == "m5" for w in det["week"])
+
+
+def test_wykres_sezonu_ics_rekordy_h2h(env):
+    async def go(x):
+        chart = await x.team_season_chart("t1", "")
+        ics = await x.team_calendar("t1", "")
+        rec = await x.records(season_id="", scope="season")
+        h2h = await x.head_to_head(club_a="c1", club_b="c2", limit=50)
+        return chart, ics, rec, h2h
+
+    chart, ics, rec, h2h = run(env, go)
+    assert [r["result"] for r in chart["rounds"]] == ["W", "D", "W"]
+    assert chart["rounds"][0]["position"] == 1 and chart["rounds"][-1]["points"] == 5
+    assert chart["streaks"]["longest_win"] == 1 and chart["best_match"]["match_id"] == "m1"
+    assert chart["best_match"]["margin"] == 10
+    assert ics.media_type.startswith("text/calendar") and ics.body.count(b"BEGIN:VEVENT") == 3
+    kinds = {i["kind"]: i for i in rec["items"]}
+    assert kinds["highest_attendance"]["value"] == 900 and kinds["most_goals_player"]["value"] == 12
+    assert kinds["most_goals_player"]["player_id"] == "p1" and kinds["biggest_win"]["match_id"] == "m1"
+    assert kinds["shootout_matches"]["value"] == 1
+    assert (h2h["balance"]["a_wins"], h2h["balance"]["b_wins"], h2h["balance"]["draws"]) == (1, 0, 1)
+    assert h2h["biggest_wins"]["a"]["match_id"] == "m1" and h2h["biggest_wins"]["b"] is None
+
+
+def test_kolejka_sedzia(env):
+    async def go(x):
+        return await x.round_review("K1", "2"), await x.referee_profile("r1", 100)
+
+    review, ref = run(env, go)
+    assert {c["match_id"] for c in review["results"]} == {"m3", "m4"}
+    moves = {m["team_id"]: m for m in review["table_moves"]}
+    assert moves["t1"]["position"] == 1 and moves["t1"]["previous_position"] == 1
+    assert moves["t3"]["previous_position"] is not None
+    assert ref["name"] == "Jan Sędzia" and ref["matches_total"] == 2 and ref["seasons"][0]["name"] == "2026/27"

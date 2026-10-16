@@ -251,6 +251,8 @@ def define_tables(metadata: MetaData) -> tuple[Table, ...]:
         Column("venue_street", String, nullable=True),
         Column("venue_number", String, nullable=True),
         Column("venue_capacity", Integer, nullable=True),
+        Column("shootout_home", Integer, nullable=True),
+        Column("shootout_away", Integer, nullable=True),
         Column("upstream_changed_at", String, nullable=True),
         Column("details_fetched_at", DateTime(timezone=True), nullable=True),
         Column("source_hash", String, nullable=False),

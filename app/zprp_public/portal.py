@@ -43,6 +43,8 @@ from app.db import (
 )
 from app.national_distance_parser import normalize_city_key
 from app.zprp_public import corrections, portal_rules as R
+from app.zprp_public import match_rules as MR
+from app.zprp_public.enrich import enrich_matches
 from app.zprp_public.api import _dict, _public_player, search as base_search
 from app.zprp_public.privacy import public_club, public_team
 
@@ -56,6 +58,7 @@ CARD_COLUMNS = (
     "home_team_id", "away_team_id", "home_club_id", "away_club_id", "home_team_name", "away_team_name",
     "scheduled_at", "played_at", "score_home", "score_away", "halftime_home", "halftime_away",
     "winner", "withdrawn", "protocol_approved", "venue_name", "venue_city",
+    "match_code", "shootout_home", "shootout_away", "walkover_team_id",
 )
 PLAYER_STAT_COLUMNS = (
     "goals", "warnings", "two_minutes", "disqualifications", "direct_red_cards",
@@ -104,6 +107,7 @@ async def _cards(rows: list[Any]) -> list[dict[str, Any]]:
         card["home_logo_url"] = (lookup.get(card.get("home_club_id")) or {}).get("logo_url")
         card["away_logo_url"] = (lookup.get(card.get("away_club_id")) or {}).get("logo_url")
     await corrections.apply("match", cards)
+    await enrich_matches(cards)
     return cards
 
 
@@ -601,6 +605,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         raise HTTPException(404, "Nie znaleziono meczu")
     m = {k: v for k, v in _dict(match).items() if k not in {"source_hash", "source_json"}}
     await corrections.apply_one("match", m)
+    await enrich_matches([m])
     clubs = await _club_lookup({m.get("home_club_id"), m.get("away_club_id")})
 
     def side(prefix: str) -> dict:
@@ -610,6 +615,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
             "club_id": m.get(f"{prefix}_club_id"), "club_name": club.get("name"),
             "logo_url": club.get("logo_url"), "city": club.get("city"),
             "score": m.get(f"score_{prefix}"), "halftime": m.get(f"halftime_{prefix}"),
+            "shootout": m.get(f"shootout_{prefix}"),
         }
 
     player_rows, staff_rows = await asyncio.gather(
@@ -620,7 +626,8 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         database.fetch_all(
             select(zprp_public_match_staff.c.team_id, zprp_public_match_staff.c.person_id, zprp_public_match_staff.c.side,
                    zprp_public_match_staff.c.first_name, zprp_public_match_staff.c.last_name,
-                   zprp_public_match_staff.c.role, zprp_public_match_staff.c.function)
+                   zprp_public_match_staff.c.role, zprp_public_match_staff.c.function,
+                   zprp_public_match_staff.c.license, zprp_public_match_staff.c.source_json)
             .where(zprp_public_match_staff.c.match_id == match_id)
         ),
     )
@@ -658,7 +665,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         "venue": {k: m.get(f"venue_{k}") for k in ("name", "city", "street", "number", "capacity")},
         "officials": officials,
         "lineups": lineups,
-        "staff": [_dict(r) for r in staff_rows],
+        "staff": [MR.staff_view(_dict(r)) for r in staff_rows],
         "head_to_head": await _cards(h2h_rows),
         "standings": standing,
         # Źródło nie udostępnia przebiegu meczu (bramki w czasie) - tylko statystyki zawodników.

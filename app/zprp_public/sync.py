@@ -51,6 +51,7 @@ from app.zprp_public.client import (
     sanitize,
     text_value,
 )
+from app.zprp_public.match_rules import parse_shootout
 from app.zprp_public.store import insert_ignore, now_utc, store_entity, upsert_values
 from app.zprp_public.discord import notify_failure, notify_recovery
 
@@ -274,6 +275,7 @@ async def _store_player(source: dict[str, Any], counters: Counters) -> str:
 
 
 def _match_values(item: dict[str, Any], **context: Any) -> dict[str, Any]:
+    shootout_home, shootout_away = parse_shootout(item)
     match_id = text_value(item.get("Id") or item.get("IdZawody") or item.get("ID_zawody"))
     return {
         "match_id": match_id,
@@ -322,6 +324,8 @@ def _match_values(item: dict[str, Any], **context: Any) -> dict[str, Any]:
         "venue_street": text_value(item.get("Hala_ulica")),
         "venue_number": text_value(item.get("Hala_numer")),
         "venue_capacity": int_value(item.get("Hala_pojemnosc")),
+        "shootout_home": shootout_home,
+        "shootout_away": shootout_away,
         "upstream_changed_at": text_value(item.get("DataOstatnieZmiany")),
     }
 

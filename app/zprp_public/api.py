@@ -31,7 +31,8 @@ from app.db import (
     zprp_public_team_rosters,
     zprp_public_teams,
 )
-from app.zprp_public import corrections
+from app.zprp_public import corrections, match_rules as MR
+from app.zprp_public.enrich import enrich_matches
 from app.zprp_public.sync import run_sync_job
 from app.zprp_public.privacy import public_club, public_team
 
@@ -85,6 +86,7 @@ async def _decorate_matches(items: list[dict[str, Any]]) -> None:
         item["home_logo_url"] = (lookup.get(item.get("home_club_id")) or {}).get("logo_url")
         item["away_logo_url"] = (lookup.get(item.get("away_club_id")) or {}).get("logo_url")
     await corrections.apply("match", items)
+    await enrich_matches(items)
 
 
 @router.get("/health")
@@ -653,12 +655,13 @@ async def match_details(match_id: str) -> dict[str, Any]:
             zprp_public_match_staff.c.role,
             zprp_public_match_staff.c.function,
             zprp_public_match_staff.c.license,
+            zprp_public_match_staff.c.source_json,
         ).where(zprp_public_match_staff.c.match_id == match_id)
     )
     public_match = {key: value for key, value in _dict(match).items() if key not in {"source_hash", "source_json"}}
     await _decorate_matches([public_match])
     await corrections.apply("player", players)
-    return {"match": public_match, "players": players, "staff": [_dict(row) for row in staff]}
+    return {"match": public_match, "players": players, "staff": [MR.staff_view(_dict(row)) for row in staff]}
 
 
 @router.get("/players")

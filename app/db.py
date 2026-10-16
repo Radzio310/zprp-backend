@@ -4675,6 +4675,36 @@ with engine.connect() as _conn:
         "CREATE INDEX IF NOT EXISTS ix_province_event_responses_judge ON province_event_responses (judge_id)",
     ):
         _conn.execute(text(_event_sql))
+    # Pod Ręką runda 3: rzuty karne meczu (`dogrywka_karne_gosp/gosc`). `create_all`
+    # nie dokłada kolumn do istniejącej tabeli, więc ALTER + jednorazowy backfill
+    # z surowego payloadu (flaga w zprp_public_sync_state, żeby nie skanować co start).
+    for _shootout_sql in (
+        "ALTER TABLE zprp_public_matches ADD COLUMN IF NOT EXISTS shootout_home integer",
+        "ALTER TABLE zprp_public_matches ADD COLUMN IF NOT EXISTS shootout_away integer",
+    ):
+        _conn.execute(text(_shootout_sql))
+    _conn.commit()
+    try:
+        _done = _conn.execute(text("SELECT 1 FROM zprp_public_sync_state WHERE key = 'shootout_backfill_v1'")).first()
+        if not _done:
+            _conn.execute(text(
+                "UPDATE zprp_public_matches SET "
+                "shootout_home = (regexp_match(source_json::text, '\"dogrywka_karne_gosp\": \"?([0-9]+)\"?[,}]'))[1]::int, "
+                "shootout_away = (regexp_match(source_json::text, '\"dogrywka_karne_gosc\": \"?([0-9]+)\"?[,}]'))[1]::int "
+                "WHERE shootout_home IS NULL AND source_json::text ~ '\"dogrywka_karne_gosp\": \"?[0-9]+\"?[,}]' "
+                "AND source_json::text ~ '\"dogrywka_karne_gosc\": \"?[0-9]+\"?[,}]'"
+            ))
+            _conn.execute(text(
+                "UPDATE zprp_public_matches SET shootout_home = NULL, shootout_away = NULL "
+                "WHERE shootout_home = 0 AND shootout_away = 0"
+            ))
+            _conn.execute(text(
+                "INSERT INTO zprp_public_sync_state (key, value_json) VALUES ('shootout_backfill_v1', '{}') "
+                "ON CONFLICT (key) DO NOTHING"
+            ))
+        _conn.commit()
+    except Exception:  # noqa: BLE001 - backfill jest pomocniczy, start aplikacji ma przejść
+        _conn.rollback()
     _conn.execute(text("ALTER TABLE mentoring_active_members ADD COLUMN IF NOT EXISTS seen_at timestamptz"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mentoring_mentor ON mentoring_assignments (mentor_id, ended_at)"))
     _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_beach_reports_user_id ON beach_reports (user_id)"))
