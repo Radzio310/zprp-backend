@@ -53,6 +53,7 @@ from app.zprp_public.client import (
 )
 from app.zprp_public.match_rules import parse_shootout
 from app.zprp_public.store import insert_ignore, now_utc, store_entity, upsert_values
+from app.zprp_public.ondemand import backfill_sort_key
 from app.zprp_public.discord import notify_failure, notify_recovery
 
 log = logging.getLogger(__name__)
@@ -932,9 +933,14 @@ async def _sync_live(client: PublicZprpClient, season_id: str, counters: Counter
 
 
 async def _sync_detail_backfill(client: PublicZprpClient, season_ids: list[str], counters: Counters) -> None:
-    limit = max(10, min(160, int(os.getenv("ZPRP_PUBLIC_DETAILS_BATCH", "60"))))
-    stale = await database.fetch_all(
-        select(zprp_public_matches.c.match_id)
+    limit = max(10, min(300, int(os.getenv("ZPRP_PUBLIC_DETAILS_BATCH", "150"))))
+    pool = await database.fetch_all(
+        select(
+            zprp_public_matches.c.match_id,
+            zprp_public_matches.c.played_at,
+            zprp_public_matches.c.scheduled_at,
+            zprp_public_matches.c.score_home,
+        )
         .where(
             and_(
                 zprp_public_matches.c.season_id.in_(season_ids),
@@ -942,12 +948,15 @@ async def _sync_detail_backfill(client: PublicZprpClient, season_ids: list[str],
             )
         )
         .order_by(
-            # rozegrane mecze (z wynikiem) najpierw; mecze bez scheduled_at (tylko played_at) nie lądują na końcu
             zprp_public_matches.c.score_home.is_(None).asc(),
             func.coalesce(zprp_public_matches.c.played_at, zprp_public_matches.c.scheduled_at).desc().nullslast(),
         )
-        .limit(limit)
+        .limit(limit * 4)
     )
+    now = datetime.now(timezone.utc)
+    stale = sorted(
+        pool, key=lambda r: backfill_sort_key(r["played_at"], r["scheduled_at"], r["score_home"], now)
+    )[:limit]
 
     async def one(row: Any) -> None:
         try:
@@ -1098,8 +1107,8 @@ async def run_zprp_public_scheduler() -> None:
                 if _due(await _last_success("clubs"), timedelta(minutes=15)):
                     bucket = int(datetime.now(timezone.utc).timestamp() // 900)
                     await run_sync_job("clubs", cycle_key=f"clubs:{bucket}")
-                if _due(await _last_success("details"), timedelta(minutes=15)):
-                    bucket = int(datetime.now(timezone.utc).timestamp() // 900)
+                if _due(await _last_success("details"), timedelta(minutes=5)):
+                    bucket = int(datetime.now(timezone.utc).timestamp() // 300)
                     await run_sync_job("details", cycle_key=f"details:{bucket}")
                 if _due(await _last_success("cleanup"), timedelta(hours=24)):
                     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")

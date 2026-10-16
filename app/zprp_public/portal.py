@@ -45,6 +45,7 @@ from app.national_distance_parser import normalize_city_key
 from app.zprp_public import corrections, portal_rules as R
 from app.zprp_public import match_rules as MR
 from app.zprp_public.enrich import enrich_matches
+from app.zprp_public.ondemand import ensure_details
 from app.zprp_public.api import _dict, _public_player, search as base_search
 from app.zprp_public.privacy import public_club, public_team
 
@@ -603,6 +604,9 @@ async def match_overview(match_id: str) -> dict[str, Any]:
     match = await database.fetch_one(select(M).where(M.c.match_id == match_id))
     if not match:
         raise HTTPException(404, "Nie znaleziono meczu")
+    details_pending = await ensure_details(match)
+    if not details_pending:
+        match = await database.fetch_one(select(M).where(M.c.match_id == match_id)) or match
     m = {k: v for k, v in _dict(match).items() if k not in {"source_hash", "source_json"}}
     await corrections.apply_one("match", m)
     await enrich_matches([m])
@@ -671,6 +675,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         # Źródło nie udostępnia przebiegu meczu (bramki w czasie) - tylko statystyki zawodników.
         "events": [],
         "events_available": False,
+        "details_pending": bool(details_pending),
     }
 
 

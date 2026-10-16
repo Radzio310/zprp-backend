@@ -33,6 +33,7 @@ from app.db import (
 )
 from app.zprp_public import corrections, match_rules as MR
 from app.zprp_public.enrich import enrich_matches
+from app.zprp_public.ondemand import ensure_details
 from app.zprp_public.sync import run_sync_job
 from app.zprp_public.privacy import public_club, public_team
 
@@ -627,6 +628,9 @@ async def match_details(match_id: str) -> dict[str, Any]:
     match = await database.fetch_one(select(zprp_public_matches).where(zprp_public_matches.c.match_id == match_id))
     if not match:
         raise HTTPException(404, "Nie znaleziono meczu")
+    details_pending = await ensure_details(match)
+    if not details_pending:
+        match = await database.fetch_one(select(zprp_public_matches).where(zprp_public_matches.c.match_id == match_id)) or match
     player_rows = await database.fetch_all(
         select(zprp_public_match_players, zprp_public_players)
         .join(zprp_public_players, zprp_public_players.c.player_id == zprp_public_match_players.c.player_id)
@@ -662,7 +666,12 @@ async def match_details(match_id: str) -> dict[str, Any]:
     public_match = {key: value for key, value in _dict(match).items() if key not in {"source_hash", "source_json"}}
     await _decorate_matches([public_match])
     await corrections.apply("player", players)
-    return {"match": public_match, "players": players, "staff": [MR.staff_view(_dict(row)) for row in staff]}
+    return {
+        "match": public_match,
+        "players": players,
+        "staff": [MR.staff_view(_dict(row)) for row in staff],
+        "details_pending": bool(details_pending),
+    }
 
 
 @router.get("/players")
