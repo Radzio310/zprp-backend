@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional
 
 from app import settlement_rates as R
+from app.person_names import person_name_key
 
 #: „Sędzia ligowy" to uprawnienie do II ligi i wyżej.
 LEAGUE_LETTERS = frozenset({"II", "I", "LC", "SL"})
@@ -77,11 +78,12 @@ def name_key(value: Any) -> str:
     jako „Jan Nowak" - to ten sam człowiek i ma mieć ten sam klucz. Ta sama
     myśl, co `names_match` w giełdzie, tylko w postaci klucza, bo uprawnienia
     z formularza zapisujemy do tabeli, a tabela potrzebuje czegoś stałego.
-    Inicjały („J.") odpadają - nie odróżniają nikogo, a psują porównanie.
+    Inicjał zostaje: ZPRP dopisuje go właśnie po to, żeby rozdzielić
+    imienników - „ZAJĄC Karol" i „ZAJĄC Karol R." to ojciec i syn, każdy z
+    własnymi literami uprawnień. Klucz bez inicjału jest taki jak dawniej, więc
+    zapisane wiersze pozostałych sędziów zostają ważne.
     """
-    cleaned = "".join(ch if ch.isalnum() else " " for ch in fold(value))
-    parts = sorted(part for part in cleaned.split() if len(part) > 1)
-    return " ".join(parts)
+    return person_name_key(value)
 
 
 @dataclass

@@ -12,6 +12,9 @@ def define_tables(metadata):
         Column("province", String, nullable=False),
         Column("judge_ids", JSON, nullable=False),
         Column("created_by", String, nullable=False),
+        # Program pary: "mentor2028" (para ZPRP - zmienia ją tylko administrator)
+        # albo "province" (para wojewódzka - prowadzi ją komisja okręgu).
+        Column("program", String),
         Column("baseline_at", DateTime(timezone=True)),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("ended_at", DateTime(timezone=True)))

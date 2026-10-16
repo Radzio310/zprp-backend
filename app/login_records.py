@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.admin_alerts import notify_admins
 from app.db import database, login_records, province_judges
+from app.judge_photos import shared_photo_fixes
 from app.schemas import (
     CreateLoginRecordRequest,
     LoginRecordItem,
@@ -30,6 +31,30 @@ def _photo_or_none(photo_url: str | None) -> str | None:
     # ✅ traktujemy pusty string jako "nie przesłano" (None) dla UPSERT/COALESCE
     t = (photo_url or "").strip()
     return t if t else None
+
+
+async def repair_shared_photos(url: str | None = None) -> int:
+    """Zdejmuje zdjęcie, które stoi przy kilku sędziach naraz (`app.judge_photos`).
+
+    Bez `url` przegląda obie tabele w całości (pętla dobowa), z `url` - tylko
+    ten jeden adres (po zapisie zdjęcia). Zwraca liczbę poprawionych wierszy.
+    """
+    fixed = 0
+    for table in (login_records, province_judges):
+        query = select(table.c.judge_id, table.c.photo_url).where(
+            func.coalesce(table.c.photo_url, "") != ""
+        )
+        if url:
+            query = query.where(table.c.photo_url == url)
+        rows = [dict(r) for r in await database.fetch_all(query)]
+        for judge_id, photo in shared_photo_fixes(rows).items():
+            await database.execute(
+                table.update().where(table.c.judge_id == judge_id).values(photo_url=photo)
+            )
+            fixed += 1
+    if fixed:
+        logger.warning("Wspólne zdjęcie kilku sędziów - poprawiono %d wierszy", fixed)
+    return fixed
 
 
 def _config_or_none(cfg):
@@ -175,6 +200,9 @@ async def upsert_login(req: CreateLoginRecordRequest):
             )
             await database.execute(pj_stmt)
 
+        if photo_norm:
+            await repair_shared_photos(photo_norm)
+
         return {"success": True}
 
     except Exception as e:
@@ -249,6 +277,8 @@ async def patch_login_record(judge_id: str, body: UpdateLoginRecordRequest):
         .where(login_records.c.judge_id == judge_id)
         .values(**update_data)
     )
+    if update_data.get("photo_url"):
+        await repair_shared_photos(update_data["photo_url"])
 
     row = await database.fetch_one(
         select(login_records).where(login_records.c.judge_id == judge_id)
@@ -295,6 +325,8 @@ async def put_login_record(judge_id: str, req: CreateLoginRecordRequest):
     )
 
     await database.execute(stmt)
+    if photo_norm:
+        await repair_shared_photos(photo_norm)
 
     row = await database.fetch_one(
         select(login_records).where(login_records.c.judge_id == judge_id)

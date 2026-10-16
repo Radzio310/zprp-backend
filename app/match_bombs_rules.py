@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
+from app.person_names import names_match
 from app.season_rules import (
     SEASON_START_MONTH as _SEASON_START_MONTH,
     season_label_short,
@@ -122,29 +123,16 @@ def _fold(text: Any) -> str:
     return raw.lower().strip()
 
 
-def name_parts(text: Any) -> List[str]:
-    """Znaczące człony nazwiska - bez inicjałów i śmieci."""
-    cleaned = re.sub(r"[^a-z0-9]+", " ", _fold(text))
-    return sorted(p for p in cleaned.split() if len(p) > 1)
-
-
 def same_person(a: Any, b: Any) -> bool:
     """Czy to ten sam człowiek, mimo innej kolejności członów.
 
-    ZPRP pisze „NOWAK Jan", lista okręgu bywa prowadzona jako „Jan Nowak". Ta
-    sama miara, co w giełdzie (`match_market_rules.names_match`) - kopia jest
-    tu świadoma, bo bomby nie mają mieć nic wspólnego z modułem wymian i nie
-    chcę, żeby zmiana w jednym module po cichu przestawiła drugi.
+    ZPRP pisze „NOWAK Jan", lista okręgu bywa prowadzona jako „Jan Nowak".
+    Inicjał rozróżnia imienników: „Karol ZAJĄC" to nie „ZAJĄC Karol R." -
+    bomba ojca nie może trafić do syna. Reguła tożsamości jest jedna dla
+    całego serwera (`app.person_names`); bomby nie dzielą z giełdą niczego
+    poza nią.
     """
-    pa, pb = name_parts(a), name_parts(b)
-    if not pa or not pb:
-        return False
-    if pa == pb:
-        return True
-    if len(pa) < 2 or len(pb) < 2:
-        return False
-    shorter, longer = (pa, pb) if len(pa) <= len(pb) else (pb, pa)
-    return all(part in longer for part in shorter)
+    return names_match(a, b)
 
 
 def is_blank_name(value: Any) -> bool:

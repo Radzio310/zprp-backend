@@ -98,7 +98,8 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         opolskie = next(row for row in result["provinces"] if row["province"] == "OPOLSKIE")
         cross = next(row for row in result["provinces"] if row["province"] == self.api.CROSS_PROVINCE)
         self.assertEqual((slaskie["enabled"], slaskie["active_pairs"], slaskie["active_mentors"]), (True, 2, 3))
-        self.assertEqual((opolskie["enabled"], opolskie["active_pairs"]), (False, 0))
+        # Okręg bez zapisanej konfiguracji jest domyślnie włączony (15.10.2026).
+        self.assertEqual((opolskie["enabled"], opolskie["active_pairs"]), (True, 0))
         self.assertEqual((cross["enabled"], cross["admin_only"]), (False, True))
 
     async def test_self_mentoring_rejected(self):
@@ -297,6 +298,43 @@ class MentoringApiTests(unittest.IsolatedAsyncioTestCase):
         ]
         result = await self.api.matches("pair", self.actor)
         self.assertEqual(result["matches"], [])
+
+    # ---------------- program Mentor 2028 (15.10.2026) ----------------
+    #
+    # Blokada pary przed komisją wynika ze ZNACZNIKA pary, nie z tego, kto jest
+    # dziś na liście adminów.
+
+    async def test_znacznik_2028_blokuje_komisje_niezaleznie_od_autora(self):
+        actor = types.SimpleNamespace(judge_id="7", is_admin=False, province="ŚLĄSKIE", badges={"Komisja sędziowska": True})
+        self.feed([
+            {"id": "zprp", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": None, "created_by": "7", "program": "mentor2028"},
+            {"id": "woj", "province": "ŚLĄSKIE", "judge_ids": ["3", "4"], "ended_at": None, "created_by": "admin", "program": "province"},
+        ])
+        with patch.object(self.api, "is_admin", AsyncMock(side_effect=lambda who: who == "admin")):
+            result = await self.api.management("ŚLĄSKIE", actor)
+        self.assertTrue(result["can_manage"])
+        got = {pair["id"]: (pair["program"], pair["locked"]) for pair in result["pairs"]}
+        self.assertEqual(got, {"zprp": ("mentor2028", True), "woj": ("province", False)})
+
+    async def test_zapis_pary_2028_odrzucony_dla_komisji(self):
+        actor = types.SimpleNamespace(judge_id="7", is_admin=False, province="ŚLĄSKIE", badges={"Komisja sędziowska": True})
+        self.db.database.fetch_one.return_value = None
+        with patch.object(self.api, "is_admin", AsyncMock(return_value=False)):
+            with self.assertRaises(HTTPException) as error:
+                await self.api.require_pair_write(actor, {"province": "ŚLĄSKIE", "created_by": "7", "program": "mentor2028"})
+            self.assertEqual(error.exception.status_code, 403)
+            self.assertIn("Mentor 2028", error.exception.detail)
+            # Para wojewódzka admina - komisja ją prowadzi.
+            await self.api.require_pair_write(actor, {"province": "ŚLĄSKIE", "created_by": "admin", "program": "province"})
+
+    async def test_znacznik_zmienia_wylacznie_admin(self):
+        actor = types.SimpleNamespace(judge_id="7", is_admin=False, province="ŚLĄSKIE", badges={"Komisja sędziowska": True})
+        with self.assertRaises(HTTPException) as error:
+            await self.api.set_program("p1", self.api.ProgramRequest(mentor2028=False), actor)
+        self.assertEqual(error.exception.status_code, 403)
+        self.db.database.fetch_one.return_value = {"id": "p1", "province": "ŚLĄSKIE", "judge_ids": ["1", "2"], "ended_at": None}
+        result = await self.api.set_program("p1", self.api.ProgramRequest(mentor2028=False), self.actor)
+        self.assertEqual(result["program"], "province")
 
 
 if __name__ == "__main__":

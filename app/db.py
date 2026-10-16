@@ -4620,6 +4620,26 @@ with engine.connect() as _conn:
         )
     )
     _conn.execute(text("ALTER TABLE mentoring_pairs ADD COLUMN IF NOT EXISTS baseline_at timestamptz"))
+    # Program pary (15.10.2026). Blokada pary przed komisją zależała dotąd od
+    # tego, czy autor JEST DZIŚ na liście adminów - liczona przy każdym
+    # odczycie, bez śladu w samej parze. Teraz para niesie znacznik. Wiersze
+    # bez znacznika dostają go raz: para administratora i międzyokręgowa to
+    # „Mentor 2028", reszta jest wojewódzka. Nowe pary zawsze mają znacznik,
+    # więc ten UPDATE po pierwszym przebiegu nie ma już czego dotknąć.
+    _conn.execute(text("ALTER TABLE mentoring_pairs ADD COLUMN IF NOT EXISTS program varchar"))
+    _conn.execute(
+        text(
+            """
+            UPDATE mentoring_pairs AS p
+               SET program = CASE
+                   WHEN p.province = 'MIĘDZYOKRĘGOWE'
+                     OR EXISTS (SELECT 1 FROM admin_settings a
+                                 WHERE p.created_by = ANY(a.allowed_admins))
+                   THEN 'mentor2028' ELSE 'province' END
+             WHERE p.program IS NULL
+            """
+        )
+    )
     # Unieważnione numery list sędziowskich (25.09.2026). Księga dokumentów
     # istnieje na produkcji, więc `create_all` kolumny nie doda.
     _conn.execute(text("ALTER TABLE province_settlement_documents ADD COLUMN IF NOT EXISTS status varchar"))
