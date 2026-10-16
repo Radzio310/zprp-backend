@@ -313,3 +313,14 @@ def test_kolejka_sedzia(env):
     assert moves["t1"]["position"] == 1 and moves["t1"]["previous_position"] == 1
     assert moves["t3"]["previous_position"] is not None
     assert ref["name"] == "Jan Sędzia" and ref["matches_total"] == 2 and ref["seasons"][0]["name"] == "2026/27"
+
+
+def test_scorers_photo_and_player_competitions_order():
+    rows = [{"player_id": "1", "first_name": "A", "last_name": "B", "goals": 3, "matches": 2,
+             "photo_url": "https://baza.zprp.pl/foto/1.jpg"}]
+    assert MR.aggregate_scorers(rows)[0]["photo_url"] == "https://baza.zprp.pl/foto/1.jpg"
+    assert MR.aggregate_scorers([{**rows[0], "photo_url": ""}])[0]["photo_url"] is None
+    comps = [{"season_id": "10", "goals": 5, "name": "a"}, {"season_id": "12", "goals": 1, "name": "b"},
+             {"season_id": "11", "goals": 9, "name": "c"}, {"season_id": "12", "goals": 4, "name": "d"}]
+    out = MR.sort_player_competitions(comps, "11")
+    assert [c["name"] for c in out] == ["c", "d", "b", "a"]

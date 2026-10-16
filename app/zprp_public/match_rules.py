@@ -264,6 +264,22 @@ MIN_MATCHES_AVG = 3
 MIN_PENALTIES_ACC = 3
 
 
+def sort_player_competitions(rows: Iterable[dict], current_season_id: Optional[str] = None) -> list[dict]:
+    """Rozgrywki zawodnika: bieżący sezon pierwszy, potem nowsze sezony, w sezonie wg goli."""
+    items = [dict(r) for r in rows]
+
+    def key(r: dict) -> tuple:
+        sid = str(r.get("season_id") or "")
+        cur = 0 if current_season_id and sid == str(current_season_id) else 1
+        try:
+            sn = -int(sid)
+        except ValueError:
+            sn = 0
+        return (cur, sn, -int(r.get("goals") or 0), str(r.get("name") or ""))
+
+    return sorted(items, key=key)
+
+
 def aggregate_scorers(rows: Iterable[dict], sort: str = "goals", limit: int = 50) -> list[dict]:
     """Łączy wiersze strzelców (zawodnik x rozgrywki x drużyna) w ranking zawodników."""
     by_player: dict[str, dict] = {}
@@ -274,6 +290,7 @@ def aggregate_scorers(rows: Iterable[dict], sort: str = "goals", limit: int = 50
         agg = by_player.setdefault(pid, {
             "player_id": pid, "name": f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip(),
             "team": None, "club_id": r.get("club_id"), "club_logo_url": None,
+            "photo_url": r.get("photo_url") or None,
             "matches": 0, "goals": 0, "pen_goals": 0, "pen_attempts": 0, "two_minutes": 0, "warnings": 0, "disq": 0,
             "_best": -1,
         })

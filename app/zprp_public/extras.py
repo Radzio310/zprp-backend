@@ -219,7 +219,7 @@ async def _scorer_rows(scope: str, competition_id: str, association_id: str, sea
         select(
             S.c.player_id, S.c.team_id, S.c.team_name, S.c.goals, S.c.matches, S.c.warnings, S.c.two_minutes,
             S.c.disqualifications, S.c.penalty_attempts, S.c.penalty_goals,
-            P.c.first_name, P.c.last_name, C.c.season_id.label("season_id"), T.c.club_id.label("club_id"),
+            P.c.first_name, P.c.last_name, P.c.photo_url, C.c.season_id.label("season_id"), T.c.club_id.label("club_id"),
         )
         .select_from(
             S.join(C, C.c.competition_id == S.c.competition_id)
@@ -279,10 +279,12 @@ async def scorers(
         lookup = await _club_lookup({i.get("club_id") for i in items})
         for item in items:
             item["club_logo_url"] = (lookup.get(item.get("club_id")) or {}).get("logo_url")
-        players = [{"player_id": i["player_id"], "first_name": i["name"], "last_name": ""} for i in items]
+        players = [{"player_id": i["player_id"], "first_name": i["name"], "last_name": "", "photo_url": i.get("photo_url")}
+                   for i in items]
         await corrections.apply("player", players)
         for item, p in zip(items, players):
             item["name"] = p["first_name"]
+            item["photo_url"] = p.get("photo_url") or None
         return {"items": items, "filters": await _scorer_filters(scope, season),
                 "applied": {"scope": scope, "season_id": season, "competition_id": competition_id or None,
                             "association_id": association_id or None, "category": category or None,
@@ -291,6 +293,41 @@ async def scorers(
 
     key = f"scorers|{scope}|{competition_id}|{association_id}|{season}|{category}|{gender}|{sort}|{limit}"
     return await _cached(key, _SCORERS_TTL, build)
+
+
+@router.get("/players/{player_id}/competitions")
+async def player_competitions(player_id: str, season_id: str = "") -> dict[str, Any]:
+    S, C, T = zprp_public_scorers, zprp_public_competitions, zprp_public_teams
+    conditions = [S.c.player_id == player_id]
+    if season_id.strip():
+        conditions.append(C.c.season_id == season_id.strip())
+
+    async def build() -> dict[str, Any]:
+        rows = await database.fetch_all(
+            select(
+                C.c.competition_id, C.c.name, C.c.season_id, C.c.category, C.c.gender, C.c.association_id,
+                C.c.association_name, S.c.team_id, S.c.team_name, S.c.goals, S.c.matches,
+                zprp_public_seasons.c.name.label("season_name"), T.c.name.label("tname"),
+            )
+            .select_from(
+                S.join(C, C.c.competition_id == S.c.competition_id)
+                .outerjoin(zprp_public_seasons, zprp_public_seasons.c.season_id == C.c.season_id)
+                .outerjoin(T, and_(T.c.team_id == S.c.team_id, T.c.season_id == C.c.season_id))
+            )
+            .where(and_(*conditions))
+        )
+        items = []
+        for r in rows:
+            d = _dict(r)
+            d["team_name"] = d.get("team_name") or d.pop("tname", None)
+            d.pop("tname", None)
+            d["goals"] = int(d.get("goals") or 0)
+            d["matches"] = int(d.get("matches") or 0)
+            items.append(d)
+        current = (await seasons_info())[1]
+        return {"items": MR.sort_player_competitions(items, current), "count": len(items)}
+
+    return await _cached(f"player-comps|{player_id}|{season_id.strip()}", _SCORERS_TTL, build)
 
 
 # ---------------------------------------------------------------------------
