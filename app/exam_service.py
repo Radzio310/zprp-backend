@@ -409,7 +409,7 @@ def exam_view(exam: Mapping[str, Any], now: datetime, *, full: bool) -> Dict[str
         "window_start": config["window_start"], "window_end": config["window_end"],
         "state": _window_state(config, now), "mandatory": config["mandatory"],
         "question_count": config["question_count"], "time_total_min": config["time_total_min"],
-        "time_per_question_s": config["time_per_question_s"], "max_attempts": config["max_attempts"],
+        "time_per_question_s": config["time_per_question_s"], "max_attempts": config["max_attempts"], "retake": config.get("retake", "any"),
         "allow_back": config["allow_back"], "pass_percent": config["pass_percent"],
         "result_release": config["result_release"],
         # Zasady jawne dla zdającego: przedsionek opisuje je wprost (zero cichych blokad).
