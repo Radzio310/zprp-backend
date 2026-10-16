@@ -51,7 +51,7 @@ from app.zprp_public.client import (
     sanitize,
     text_value,
 )
-from app.zprp_public.match_rules import parse_shootout
+from app.zprp_public.match_rules import lineups_swapped, parse_shootout
 from app.zprp_public.store import insert_ignore, now_utc, store_entity, upsert_values
 from app.zprp_public.ondemand import backfill_sort_key
 from app.zprp_public.discord import notify_failure, notify_recovery
@@ -388,6 +388,17 @@ async def _sync_match_details(client: PublicZprpClient, match_id: str, counters:
     )
 
     side_map = {"gosp": (values.get("home_team_id") or "", "home"), "gosc": (values.get("away_team_id") or "", "away")}
+    if isinstance(payload, dict):
+        def _goal_sum(key: str) -> int:
+            people = payload.get(key)
+            if not isinstance(people, dict):
+                return 0
+            return sum((int_value(i.get("bramki"), 0) or 0) for i in people.values() if isinstance(i, dict))
+        if lineups_swapped(_goal_sum("gosp"), _goal_sum("gosc"), values.get("score_home"), values.get("score_away")):
+            # Źródło ma składy zamienione stronami - przypisujemy je według wyniku.
+            side_map = {"gosp": side_map["gosc"], "gosc": side_map["gosp"]}
+            await database.execute(delete(zprp_public_match_players).where(zprp_public_match_players.c.match_id == match_id))
+            await database.execute(delete(zprp_public_match_staff).where(zprp_public_match_staff.c.match_id == match_id))
     for upstream_side, (team_id, side) in side_map.items():
         people = payload.get(upstream_side) if isinstance(payload, dict) else None
         if isinstance(people, dict):

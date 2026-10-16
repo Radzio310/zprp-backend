@@ -644,6 +644,21 @@ async def match_overview(match_id: str) -> dict[str, Any]:
             **{k: d.get(k) for k in ("team_id", "side", "shirt_number", "position", *PLAYER_STAT_COLUMNS)},
             **MR.penalty_fields(d.get("warnings"), d.get("two_minutes"), d.get("disqualifications"), d.get("direct_red_cards")),
         })
+    staff_items = [MR.staff_view(_dict(r)) for r in staff_rows]
+    # Zabezpieczenie: stare wiersze mogły powstać ze składami zamienionymi stronami przez źródło.
+    sums = {k: sum(int(p.get("goals") or 0) for p in v) for k, v in lineups.items()}
+    sc_h, sc_a = m.get("score_home"), m.get("score_away")
+    if MR.lineups_swapped(sums["home"], sums["away"], sc_h, sc_a):
+        lineups = {"home": lineups["away"], "away": lineups["home"]}
+        for key, tid in (("home", m.get("home_team_id")), ("away", m.get("away_team_id"))):
+            for p in lineups[key]:
+                p["side"] = key
+                if tid:
+                    p["team_id"] = tid
+        for it in staff_items:
+            if it.get("side") in ("home", "away"):
+                it["side"] = "away" if it["side"] == "home" else "home"
+        sums = {"home": sums["away"], "away": sums["home"]}
     # Dotychczasowe spotkania tych drużyn (po klubach - id drużyn zmieniają się z sezonem).
     h2h_rows = []
     if m.get("home_club_id") and m.get("away_club_id"):
@@ -672,7 +687,6 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         if m.get(f"{col}_name")
     ]
     status = _status(m)
-    staff_items = [MR.staff_view(_dict(r)) for r in staff_rows]
     m["times_source"] = await attach_protocol_times(m, [p for side_list in lineups.values() for p in side_list], staff_items)
     return {
         "match": m,
@@ -682,6 +696,8 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         "venue": {k: m.get(f"venue_{k}") for k in ("name", "city", "street", "number", "capacity")},
         "officials": officials,
         "lineups": lineups,
+        # False = źródło nie podało bramek zawodników (front pokazuje "brak danych", nie 0).
+        "lineups_goals_known": MR.goals_known(sums["home"], sums["away"], sc_h, sc_a),
         "staff": staff_items,
         "head_to_head": await _cards(h2h_rows),
         "standings": standing,

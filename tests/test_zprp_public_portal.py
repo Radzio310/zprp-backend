@@ -276,3 +276,17 @@ def test_team_record_tolerates_missing_schedule_dates():
     ]
     rec = R.team_record(matches, lambda side, m: m.get(f"{side}_club_id") == "a")
     assert rec["played"] == 2 and rec["wins"] == 1 and rec["draws"] == 1
+
+
+def test_skladu_zamienione_stronami_i_brak_bramek():
+    from app.zprp_public import match_rules as MR
+
+    # 212530: wynik 44:24, a sumy w kluczach gosp/gosc to 24 i 44
+    assert MR.lineups_swapped(24, 44, 44, 24) is True
+    assert MR.lineups_swapped(44, 24, 44, 24) is False
+    assert MR.lineups_swapped(0, 0, 26, 26) is False          # 208152: brak bramek, nie zgadujemy
+    assert MR.lineups_swapped(10, 10, 10, 10) is False
+    assert MR.lineups_swapped(0, 30, 30, 0) is False          # jednostronne dane - bez zamiany
+    assert MR.goals_known(0, 0, 26, 26) is False
+    assert MR.goals_known(0, 0, 0, 0) is True
+    assert MR.goals_known(44, 24, 44, 24) is True

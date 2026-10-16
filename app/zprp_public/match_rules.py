@@ -486,3 +486,23 @@ def naive_local(value: datetime | None) -> datetime | None:
         return value
     from zoneinfo import ZoneInfo
     return value.astimezone(ZoneInfo("Europe/Warsaw")).replace(tzinfo=None)
+
+
+def lineups_swapped(sum_home: int, sum_away: int, score_home: Optional[int], score_away: Optional[int]) -> bool:
+    """True, gdy sumy bramek ze składów pasują do wyniku dopiero po zamianie stron.
+
+    Źródło (pokaz_mecze_szczegoly.php) bywa błędne: klucze ``gosp``/``gosc`` ze składami
+    są zamienione względem ``ID_zespoly_gosp``/``gosc`` (mecz 212530), a w samych
+    zawodnikach nie ma identyfikatora drużyny. Zamieniamy tylko przy jednoznacznej
+    zgodności odwrotnej (obie sumy dodatnie, różne, bezpośrednio niezgodne).
+    """
+    if score_home is None or score_away is None or score_home == score_away:
+        return False
+    if sum_home <= 0 or sum_away <= 0:
+        return False
+    return (sum_home, sum_away) == (score_away, score_home)
+
+
+def goals_known(sum_home: int, sum_away: int, score_home: Optional[int], score_away: Optional[int]) -> bool:
+    """False, gdy w składach nie ma bramek, choć wynik je zakłada (źródło ich nie podało)."""
+    return (sum_home + sum_away) > 0 or not ((score_home or 0) + (score_away or 0))
