@@ -40,9 +40,23 @@ MAX_LABEL = 80
 MAX_VIDEO_SECONDS = 6 * 3600
 MAX_MATCH_MS = 3 * 3600 * 1000
 MARKER_KINDS = ("manual", "goal", "seven", "penalty", "card", "timeout")
-#: Kategorie sędziowskie znacznika „Ważne" - lustro `MARKER_CATEGORIES`
-#: w `BAZA/utils/matchVideoLinks.ts`.
-MARKER_CATEGORIES = ("trafna", "bledna", "dyskusja", "ustawienie", "wspolpraca", "kontrola", "gwizdek", "inne")
+#: Rodzaje akcji znacznika „Ważne" (16.10.2026: pięć zamiast ośmiu) - lustro
+#: `MARKER_CATEGORIES` w `BAZA/utils/matchVideoLinks.ts`.
+MARKER_CATEGORIES = ("dobra", "zla", "dyskusja", "pytanie", "kluczowa")
+#: Stare kategorie z zapisanych danych i starszych aplikacji -> nowy rodzaj.
+#: Oryginał zostaje w `legacy_category`, gdy niesie więcej niż nowy rodzaj.
+LEGACY_CATEGORIES: Dict[str, str] = {
+    "trafna": "dobra",
+    "bledna": "zla",
+    "dyskusja": "dyskusja",
+    "ustawienie": "dyskusja",
+    "wspolpraca": "dyskusja",
+    "kontrola": "dyskusja",
+    "gwizdek": "dyskusja",
+    "inne": "dyskusja",
+}
+#: Zakres nagrany przyciskiem REC: najdłużej 10 minut.
+MAX_RANGE_S = 600
 MAX_COMMENT = 280
 #: Godzina ścienna w ms UTC: od 2020 do 2100 - wszystko inne to śmieć.
 MIN_WALL_MS = 1_577_836_800_000
@@ -101,6 +115,23 @@ def _wall(value: Any) -> Optional[int]:
     return int(n) if n is not None and MIN_WALL_MS <= n <= MAX_WALL_MS else None
 
 
+def normalize_category(raw: Any, legacy: Any = None) -> tuple[Optional[str], Optional[str]]:
+    """Rodzaj akcji + stara kategoria, jeśli przy mapowaniu zgubiłaby treść.
+
+    trafna/bledna/dyskusja mają dokładny odpowiednik, reszta starych trafia
+    do „dyskusja" i zostaje zapamiętana w `legacy_category`.
+    """
+    key = str(raw or "")
+    old = str(legacy or "")
+    old = old if old in LEGACY_CATEGORIES and LEGACY_CATEGORIES[old] != old and old not in ("trafna", "bledna") else None
+    if key in MARKER_CATEGORIES:
+        return key, old
+    if key in LEGACY_CATEGORIES:
+        mapped = LEGACY_CATEGORIES[key]
+        return mapped, (key if key not in ("trafna", "bledna", "dyskusja") else None)
+    return None, None
+
+
 def clean_markers(raw: Any) -> List[Dict[str, Any]]:
     """Znaczniki od klienta: odrzuca śmieci, przycina opisy, pilnuje limitu."""
     out: List[Dict[str, Any]] = []
@@ -129,8 +160,12 @@ def clean_markers(raw: Any) -> List[Dict[str, Any]]:
         wall_ms = _wall(item.get("wall_ms")) if match_ms is not None else None
         wall_err = _num(item.get("wall_err_s"))
         important = item.get("important") is True
-        category = str(item.get("category") or "")
-        category = category if category in MARKER_CATEGORIES else ("inne" if important else None)
+        category, legacy = normalize_category(item.get("category"), item.get("legacy_category"))
+        if important and category is None:
+            category = "dyskusja"
+        # Koniec zakresu (REC) - tylko przy znaczniku z czasem nagrania.
+        end_s = _num(item.get("end_s"))
+        end_s = int(round(end_s)) if end_s is not None and video_s is not None and video_s < end_s <= min(video_s + MAX_RANGE_S, MAX_VIDEO_SECONDS) else None
         comment = re.sub(r"[ 	]+", " ", str(item.get("comment") or "")).replace("—", "-").replace("–", "-").strip()[:MAX_COMMENT] or None
         seen.add(marker_id)
         out.append(
@@ -139,6 +174,7 @@ def clean_markers(raw: Any) -> List[Dict[str, Any]]:
                 "label": label,
                 "kind": kind,
                 "video_s": video_s,
+                "end_s": end_s,
                 "match_ms": match_ms,
                 "half": half if match_ms is not None else None,
                 "source_key": str(item.get("source_key") or "")[:80] or None,
@@ -148,6 +184,7 @@ def clean_markers(raw: Any) -> List[Dict[str, Any]]:
                 # „Ważne do oceny" - para wskazuje mentorowi, na co patrzeć.
                 "important": important,
                 "category": category if important else None,
+                "legacy_category": legacy if important and legacy else None,
                 "comment": comment if important else None,
             }
         )

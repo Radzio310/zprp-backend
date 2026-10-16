@@ -219,6 +219,26 @@ def test_markers_are_cleaned_and_limited():
     assert len(clean_markers(many)) == MAX_MARKERS
 
 
+def test_markers_categories_map_legacy_and_keep_ranges():
+    raw = [
+        {"id": "a", "video_s": 100, "end_s": 122, "important": True, "category": "zla"},
+        {"id": "b", "video_s": 100, "important": True, "category": "trafna"},
+        {"id": "c", "video_s": 100, "important": True, "category": "ustawienie"},
+        {"id": "d", "video_s": 100, "important": True, "category": "dyskusja", "legacy_category": "gwizdek"},
+        {"id": "e", "video_s": 100, "important": True, "category": "hack"},
+        {"id": "f", "video_s": 100, "end_s": 90},
+        {"id": "g", "match_ms": 5000, "end_s": 90},
+        {"id": "h", "video_s": 100, "end_s": 100 + 601},
+    ]
+    out = {m["id"]: m for m in clean_markers(raw)}
+    assert out["a"]["category"] == "zla" and out["a"]["end_s"] == 122
+    assert out["b"]["category"] == "dobra" and out["b"]["legacy_category"] is None
+    assert out["c"]["category"] == "dyskusja" and out["c"]["legacy_category"] == "ustawienie"
+    assert out["d"]["legacy_category"] == "gwizdek"
+    assert out["e"]["category"] == "dyskusja"
+    assert out["f"]["end_s"] is None and out["g"]["end_s"] is None and out["h"]["end_s"] is None
+
+
 def test_sync_is_bounded():
     assert clean_sync({"match_start_s": 312.4, "second_half_s": "2400", "half_minutes": 30, "break_minutes": 10}) == {
         "match_start_s": 312,
