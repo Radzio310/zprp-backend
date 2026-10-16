@@ -9,7 +9,7 @@ Tabele modułu „Egzamin z przepisów" (16.10.2026) - same schematy, bez połą
   - `exam_events`           zdarzenia antyoszustwa (wyjścia, zrzuty, flagi czasu),
   - `exam_reminders_sent`   dziennik przypomnień push (dedup).
 
-Tabele `exam_live_*` (egzamin na żywo) wejdą w etapie 5 i niczego tu nie blokują.
+Tabele `exam_live_*` (egzamin na żywo, etap 5) są w `app/exam_live_tables.py`.
 JSON jako Text (nie JSONB): sterownik `databases` oddaje JSONB napisem.
 """
 

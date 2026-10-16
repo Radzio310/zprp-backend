@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#050d0b">
+<title>Egzamin na żywo - rzutnik</title>
+<link rel="stylesheet" href="/exam-live/assets/live.css">
+<style>
+  html { font-size: clamp(13px, 1.42vw, 36px); }
+  body { cursor: default; }
+  #top { display: flex; align-items: center; gap: 1.2rem; padding: 1rem 2rem 0; min-height: 3.4rem; }
+  #top .brand { display: flex; flex-direction: column; gap: .15rem; flex: 1; min-width: 0; }
+  #top h1 { margin: 0; font-family: var(--serif); font-size: 1.5rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pinchip { font-family: var(--serif); font-size: 1.25rem; letter-spacing: .18em; padding: .35rem 1rem; border-radius: 999px; background: var(--glass); border: 1px solid var(--line); }
+  .pinchip small { letter-spacing: .12em; font-family: var(--sans); font-size: .62rem; color: var(--muted); margin-right: .6rem; text-transform: uppercase; }
+  .icon { appearance: none; border: 1px solid var(--line); background: var(--glass); color: var(--text); border-radius: 12px; width: 2.6rem; height: 2.6rem; font-size: 1.1rem; cursor: pointer; }
+  body.idle .icon, body.idle .conn { opacity: 0; transition: opacity .6s; }
+  body.idle { cursor: none; }
+  #stage { flex: 1; min-height: 0; padding: 1.2rem 2rem 2.2rem; display: flex; flex-direction: column; }
+  .stage-inner { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  /* Lobby */
+  .lobby { flex: 1; display: grid; grid-template-columns: 1.15fr .85fr; gap: 1.6rem; min-height: 0; }
+  .join-card { padding: 2rem 2.4rem; display: flex; flex-direction: column; gap: 1.2rem; justify-content: center; }
+  .join-card .lead { font-family: var(--serif); font-size: 1.7rem; line-height: 1.25; margin: 0; }
+  .pin { display: flex; gap: .55rem; perspective: 600px; }
+  .pin span { flex: 1; max-width: 5.4rem; text-align: center; font-family: var(--serif); font-weight: 800; font-size: 5.2rem; line-height: 1.15; border-radius: 16px;
+    color: var(--ink); background: var(--paper); box-shadow: 0 10px 0 #b9ac8a, 0 20px 40px rgba(0,0,0,.45); animation: flip .7s var(--ease) both; }
+  .join-row { display: flex; gap: 1.8rem; align-items: center; }
+  .qr { background: #fff; border-radius: 18px; padding: .8rem; width: 11.5rem; flex: none; animation: pop .7s var(--ease) both .3s; }
+  .qr img { display: block; width: 100%; height: auto; }
+  .steps { margin: 0; padding: 0; list-style: none; display: grid; gap: .65rem; font-size: 1.05rem; color: var(--text); }
+  .steps li { display: flex; gap: .8rem; align-items: baseline; }
+  .steps b { color: var(--brass); font-family: var(--serif); }
+  .steps code { font-size: .95em; background: rgba(255,255,255,.1); border-radius: 8px; padding: .1rem .5rem; }
+  .crowd { padding: 1.6rem 1.8rem; display: flex; flex-direction: column; gap: 1rem; min-height: 0; }
+  .crowd .count { display: flex; align-items: baseline; gap: .8rem; }
+  .crowd .count b { font-family: var(--serif); font-size: 4rem; line-height: 1; color: var(--brass-hi); font-variant-numeric: tabular-nums; }
+  .chips { display: flex; flex-wrap: wrap; gap: .5rem; align-content: flex-start; overflow: hidden; }
+  .chip { padding: .35rem .85rem; border-radius: 999px; background: var(--glass-strong); border: 1px solid var(--line); font-size: .95rem; animation: pop .5s var(--ease) both; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip.guest { border-style: dashed; }
+
+  /* Pytanie */
+  .qhead { display: flex; align-items: center; gap: 1.4rem; margin-bottom: 1.1rem; }
+  .qhead .meta { flex: 1; display: flex; flex-direction: column; gap: .25rem; }
+  .qhead .num { font-family: var(--serif); font-size: 1.1rem; color: var(--muted); }
+  .progress { height: .5rem; border-radius: 99px; background: rgba(255,255,255,.12); overflow: hidden; margin-top: .3rem; }
+  .progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--brass), var(--brass-hi)); transition: width .5s var(--ease); }
+  .qcard { padding: 1.6rem 2.2rem; margin-bottom: 1.3rem; }
+  .qcard p { margin: 0; font-family: var(--serif); font-size: 2.05rem; line-height: 1.32; font-weight: 600; }
+  .qcard .hint { display: inline-block; margin-top: .8rem; font-family: var(--sans); font-size: .85rem; letter-spacing: .12em; text-transform: uppercase; color: var(--brass); }
+  .tiles { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1rem 1.2rem; align-content: start; }
+  .tiles .tile { font-size: 1.28rem; cursor: default; padding: 1.1rem 1.5rem; min-height: 5.2rem; }
+  .tiles .tile:disabled { color: #fff; }
+  .fact { margin-top: 1rem; padding: .9rem 1.5rem; border-radius: 16px; background: rgba(216,180,95,.12); border: 1px solid rgba(216,180,95,.4); font-size: 1rem; line-height: 1.4; animation: rise .6s var(--ease) both .4s; }
+  .fact b { color: var(--brass-hi); }
+  .skipnote { color: var(--muted); font-size: .95rem; margin-top: .7rem; }
+
+  /* Ranking i finał */
+  .center { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 1.4rem; max-width: 62rem; width: 100%; margin: 0 auto; }
+  .center h2 { margin: 0; font-family: var(--serif); font-size: 2.6rem; text-align: center; }
+  .center .row { font-size: 1.5rem; padding: 1rem 1.6rem; }
+  .podium { display: flex; align-items: flex-end; justify-content: center; gap: 1.4rem; height: 17rem; margin: .5rem 0 1rem; }
+  .podium .step { width: 14rem; border-radius: 18px 18px 0 0; text-align: center; padding: 1rem .8rem; display: flex; flex-direction: column; gap: .3rem; align-items: center; justify-content: flex-start;
+    background: linear-gradient(180deg, var(--glass-strong), var(--glass)); border: 1px solid var(--line); border-bottom: 0; transform-origin: bottom; animation: grow .9s var(--ease) both; }
+  .podium .step b { font-family: var(--serif); font-size: 2.6rem; }
+  .podium .step span { font-size: 1.2rem; font-weight: 700; word-break: break-word; }
+  .podium .step em { font-style: normal; color: var(--brass-hi); font-family: var(--serif); font-size: 1.3rem; }
+  .podium .s1 { height: 100%; background: linear-gradient(180deg, rgba(245,223,157,.4), rgba(216,180,95,.1)); animation-delay: .5s; }
+  .podium .s2 { height: 74%; animation-delay: .25s; } .podium .s3 { height: 56%; animation-delay: 0s; }
+  @keyframes grow { from { transform: scaleY(0); opacity: 0; } to { transform: scaleY(1); opacity: 1; } }
+  .verdict { text-align: center; }
+  .verdict .paper { display: inline-block; padding: 1.4rem 2.6rem; }
+  .verdict .stamp { font-size: 1.7rem; }
+  .verdict p { margin: .8rem 0 0; font-size: 1.15rem; }
+
+  .waiting { margin: auto; text-align: center; color: var(--muted); font-size: 1.4rem; }
+  .err { margin: auto; text-align: center; max-width: 34rem; }
+  .err h2 { font-family: var(--serif); font-size: 2rem; margin: 0 0 .6rem; }
+
+  @media (max-width: 900px) {
+    html { font-size: 14px; }
+    .lobby { grid-template-columns: 1fr; } .tiles { grid-template-columns: 1fr; }
+    .pin span { font-size: 3rem; } .podium .step { width: 30%; } #stage { padding: 1rem; } #top { padding: 1rem 1rem 0; }
+  }
+</style>
+</head>
+<body>
+<div class="backdrop"></div>
+<div id="app">
+  <header id="top">
+    <div class="brand"><span class="eyebrow" id="eyebrow">BAZA &middot; Egzamin z przepisów</span><h1 id="title">Łączenie z sesją...</h1></div>
+    <div class="pinchip" id="pinchip" hidden><small>PIN</small><span id="pinval"></span></div>
+    <button class="icon" id="fs" type="button" title="Pełny ekran (F)" aria-label="Pełny ekran">&#x26F6;</button>
+  </header>
+  <main id="stage"><div class="waiting">Łączenie z sesją...</div></main>
+</div>
+<div class="conn" id="conn"><i></i><span id="connText">łączenie</span></div>
+<script src="/exam-live/assets/live.js"></script>
+<script src="/exam-live/assets/projector.js"></script>
+</body>
+</html>

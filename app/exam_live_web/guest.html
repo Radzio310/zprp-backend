@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#050d0b">
+<title>Egzamin na żywo - dołącz</title>
+<link rel="stylesheet" href="/exam-live/assets/live.css">
+<style>
+  body { overflow-y: auto; }
+  #app { min-height: 100%; height: auto; padding: max(14px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); max-width: 640px; margin: 0 auto; width: 100%; }
+  header { display: flex; flex-direction: column; gap: 2px; padding: 6px 2px 14px; }
+  header h1 { margin: 0; font-family: var(--serif); font-size: 1.35rem; }
+  main { flex: 1; display: flex; flex-direction: column; gap: 14px; }
+  .card { padding: 20px; }
+  .card h2 { margin: 0 0 6px; font-family: var(--serif); font-size: 1.5rem; }
+  label { display: block; font-size: .8rem; letter-spacing: .14em; text-transform: uppercase; color: var(--brass); margin: 14px 0 6px; font-weight: 700; }
+  input { width: 100%; font: inherit; font-size: 1.3rem; color: var(--text); background: rgba(0,0,0,.35); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; outline: none; }
+  input:focus { border-color: var(--brass-hi); box-shadow: 0 0 0 3px rgba(245,223,157,.2); }
+  input.pin { text-align: center; letter-spacing: .5em; font-family: var(--serif); font-size: 2rem; font-weight: 800; }
+  .btn { width: 100%; margin-top: 18px; }
+  .qhead { display: flex; align-items: center; gap: 14px; }
+  .qhead .meta { flex: 1; display: grid; gap: 6px; }
+  .qhead .ring { width: 64px; height: 64px; } .qhead .ring b { font-size: 1.3rem; }
+  .progress { height: 6px; border-radius: 99px; background: rgba(255,255,255,.12); overflow: hidden; } .progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--brass), var(--brass-hi)); transition: width .4s; }
+  .qcard { padding: 18px 20px; } .qcard p { margin: 0; font-family: var(--serif); font-size: 1.2rem; line-height: 1.4; font-weight: 600; }
+  .tiles { display: grid; gap: 12px; }
+  .tiles .tile { padding: 16px 18px; font-size: 1.05rem; min-height: 64px; }
+  .tiles.only { grid-template-columns: 1fr 1fr; flex: 1; }
+  .tiles.only .tile { justify-content: center; min-height: 28vh; } .tiles.only .tile .shape { width: 4.4rem; height: 4.4rem; }
+  .banner { text-align: center; padding: 18px; border-radius: var(--radius); font-family: var(--serif); font-size: 1.5rem; font-weight: 800; animation: pop .5s var(--ease) both; }
+  .banner small { display: block; font-family: var(--sans); font-weight: 500; font-size: .9rem; margin-top: 4px; opacity: .85; }
+  .banner.ok { background: rgba(63,207,142,.2); border: 1px solid var(--good); color: #b9f5d8; }
+  .banner.no { background: rgba(239,106,106,.18); border: 1px solid var(--bad); color: #ffd0d0; }
+  .banner.none { background: var(--glass); border: 1px solid var(--line); }
+  .wait { text-align: center; padding: 26px 18px; }
+  .wait .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: var(--brass-hi); margin: 0 4px; animation: pulse 1.2s ease-in-out infinite; }
+  .wait .dot:nth-child(2) { animation-delay: .2s; } .wait .dot:nth-child(3) { animation-delay: .4s; }
+  .toast { position: fixed; left: 16px; right: 16px; bottom: max(18px, env(safe-area-inset-bottom)); z-index: 9; max-width: 608px; margin: 0 auto; padding: 14px 18px; border-radius: 16px; background: #2a1414; border: 1px solid var(--bad); color: #ffd9d9; animation: rise .35s var(--ease) both; }
+  .big { font-family: var(--serif); font-size: 3rem; font-weight: 800; line-height: 1; color: var(--brass-hi); }
+  .center { text-align: center; }
+  .paper { padding: 22px 18px; text-align: center; } .paper .stamp { font-size: 1.5rem; }
+  .conn { bottom: auto; top: 10px; right: 10px; padding: 4px 8px; } .conn span { display: none; }
+</style>
+</head>
+<body>
+<div class="backdrop"></div>
+<div id="app">
+  <header><span class="eyebrow" id="eyebrow">BAZA &middot; Egzamin z przepisów</span><h1 id="title">Dołącz do sesji</h1></header>
+  <main id="stage"></main>
+</div>
+<div class="conn" id="conn" hidden><i></i><span id="connText"></span></div>
+<script src="/exam-live/assets/live.js"></script>
+<script src="/exam-live/assets/guest.js"></script>
+</body>
+</html>
