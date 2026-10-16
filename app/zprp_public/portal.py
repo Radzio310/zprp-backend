@@ -646,11 +646,20 @@ async def match_overview(match_id: str) -> dict[str, Any]:
     h2h_rows = []
     if m.get("home_club_id") and m.get("away_club_id"):
         pair = {m["home_club_id"], m["away_club_id"]}
+        h2h_cond = [M.c.match_id != match_id, M.c.home_club_id.in_(pair), M.c.away_club_id.in_(pair),
+                    M.c.score_home.is_not(None)]
+        # Tylko ta sama kategoria i płeć co bieżący mecz (seniorzy nie mieszają się z juniorami).
+        C = zprp_public_competitions
+        if m.get("competition_category") or m.get("competition_gender"):
+            kind = [cond for cond in (
+                (C.c.category == m["competition_category"]) if m.get("competition_category") else None,
+                (C.c.gender == m["competition_gender"]) if m.get("competition_gender") else None,
+            ) if cond is not None]
+            h2h_cond.append(M.c.competition_id.in_(select(C.c.competition_id).where(and_(*kind))))
+        elif m.get("competition_name"):
+            h2h_cond.append(M.c.competition_name == m["competition_name"])
         h2h_rows = await database.fetch_all(
-            select(*_card_cols()).where(and_(
-                M.c.match_id != match_id, M.c.home_club_id.in_(pair), M.c.away_club_id.in_(pair),
-                M.c.score_home.is_not(None),
-            )).order_by(M.c.scheduled_at.desc()).limit(5)
+            select(*_card_cols()).where(and_(*h2h_cond)).order_by(M.c.scheduled_at.desc()).limit(5)
         )
     team_ids = [t for t in (m.get("home_team_id"), m.get("away_team_id")) if t]
     standing = [r for r in await _standing_rows(team_ids, m.get("season_id")) if r["competition_id"] == m.get("competition_id")]

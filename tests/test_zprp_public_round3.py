@@ -303,6 +303,34 @@ def test_wykres_sezonu_ics_rekordy_h2h(env):
     assert h2h["biggest_wins"]["a"]["match_id"] == "m1" and h2h["biggest_wins"]["b"] is None
 
 
+def test_h2h_tylko_ta_sama_kategoria(env):
+    module, db, T = env
+
+    async def go(x):
+        await db.execute(insert(T["zprp_public_competitions"]).values(
+            competition_id="KJ", season_id="S1", association_id="A1", name="Liga Juniorów", gender="M",
+            category="Juniorzy", code="J", **_h()))
+        await db.execute(insert(T["zprp_public_matches"]).values(
+            match_id="mj", season_id="S1", competition_id="KJ", competition_name="Liga Juniorów",
+            home_team_id="t1", away_team_id="t2", home_club_id="c1", away_club_id="c2", home_team_name="t1",
+            away_team_name="t2", score_home=10, score_away=31, scheduled_at=datetime.now() - timedelta(days=2), **_h()))
+        every = await x.head_to_head(club_a="c1", club_b="c2", limit=50)
+        seniors = await x.head_to_head(club_a="c1", club_b="c2", limit=50, category="Seniorzy", gender="M")
+        juniors = await x.head_to_head(club_a="c1", club_b="c2", limit=50, category="Juniorzy")
+        women = await x.head_to_head(club_a="c1", club_b="c2", limit=50, gender="K")
+        overview = await sys.modules["app.zprp_public.portal"].match_overview("m1")
+        return every, seniors, juniors, women, overview
+
+    every, seniors, juniors, women, overview = run(env, go)
+    assert {c["match_id"] for c in every["matches"]} == {"m1", "m3", "mj"}
+    assert {c["match_id"] for c in seniors["matches"]} == {"m1", "m3"}
+    assert [c["match_id"] for c in juniors["matches"]] == ["mj"] and juniors["balance"]["b_wins"] == 1
+    assert women["matches"] == [] and women["total"] == 0
+    assert all(c["competition_category"] == "Seniorzy" for c in seniors["matches"])
+    assert [c["match_id"] for c in overview["head_to_head"]] == ["m3"]
+    assert overview["match"]["competition_category"] == "Seniorzy" and overview["match"]["competition_gender"] == "M"
+
+
 def test_kolejka_sedzia(env):
     async def go(x):
         return await x.round_review("K1", "2"), await x.referee_profile("r1", 100)

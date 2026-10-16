@@ -36,18 +36,25 @@ def invalidate() -> None:
 
 
 async def enrich_matches(items: Iterable[dict[str, Any]]) -> None:
-    """Dokłada winner_side, decided_by, match_code_full, season_name, is_current_season."""
+    """Dokłada winner_side, decided_by, match_code_full, season_name, is_current_season
+    oraz competition_category / competition_gender (H2H tylko w tej samej kategorii)."""
     items = [i for i in items if isinstance(i, dict)]
     if not items:
         return
     seasons, current = await seasons_info()
-    comp_ids = {i.get("competition_id") for i in items if i.get("competition_id") and "/" not in str(i.get("match_code") or "/")}
+    comp_ids = {i.get("competition_id") for i in items if i.get("competition_id")}
+    need_code = {i.get("competition_id") for i in items if i.get("competition_id") and "/" not in str(i.get("match_code") or "/")}
     codes: dict[str, str] = {}
+    kinds: dict[str, tuple[Any, Any]] = {}
     if comp_ids:
+        C = zprp_public_competitions
         rows = await database.fetch_all(
-            select(zprp_public_competitions.c.competition_id, zprp_public_competitions.c.code)
-            .where(zprp_public_competitions.c.competition_id.in_(list(comp_ids)))
+            select(C.c.competition_id, C.c.code, C.c.category, C.c.gender).where(C.c.competition_id.in_(list(comp_ids)))
         )
-        codes = {r["competition_id"]: r["code"] for r in rows if r["code"]}
+        codes = {r["competition_id"]: r["code"] for r in rows if r["code"] and r["competition_id"] in need_code}
+        kinds = {r["competition_id"]: (r["category"], r["gender"]) for r in rows}
     for item in items:
         MR.apply_match_extras(item, seasons, current, codes)
+        category, gender = kinds.get(item.get("competition_id"), (None, None))
+        item.setdefault("competition_category", category)
+        item.setdefault("competition_gender", gender)
