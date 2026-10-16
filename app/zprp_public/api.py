@@ -32,6 +32,7 @@ from app.db import (
     zprp_public_teams,
 )
 from app.zprp_public import corrections, match_rules as MR
+from app.zprp_public.protocol_times import attach_protocol_times
 from app.zprp_public.enrich import enrich_matches
 from app.zprp_public.ondemand import ensure_details
 from app.zprp_public.sync import run_sync_job
@@ -667,10 +668,12 @@ async def match_details(match_id: str) -> dict[str, Any]:
     public_match = {key: value for key, value in _dict(match).items() if key not in {"source_hash", "source_json"}}
     await _decorate_matches([public_match])
     await corrections.apply("player", players)
+    staff_items = [MR.staff_view(_dict(row)) for row in staff]
+    public_match["times_source"] = await attach_protocol_times(public_match, players, staff_items)
     return {
         "match": public_match,
         "players": players,
-        "staff": [MR.staff_view(_dict(row)) for row in staff],
+        "staff": staff_items,
         "details_pending": bool(details_pending),
     }
 
