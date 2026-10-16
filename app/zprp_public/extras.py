@@ -419,7 +419,7 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
     mine = await database.fetch_all(
         select(*[M.c[c] for c in _TEAM_COLS])
         .where(and_(or_(M.c.home_team_id == team_id, M.c.away_team_id == team_id), M.c.season_id == team["season_id"],
-                    M.c.score_home.is_not(None), M.c.score_away.is_not(None)))
+                    M.c.score_home.is_not(None), M.c.score_away.is_not(None), M.c.scheduled_at.is_not(None)))
         .order_by(M.c.scheduled_at)
     )
     played = [_dict(r) for r in mine]
