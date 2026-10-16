@@ -53,6 +53,12 @@ GRACE_S = 3.0
 CLOCK_TOL_S = 5.0
 #: Odpowiedź z bufora, która leżała w telefonie dłużej, dostaje flagę.
 BUFFER_SUSPICIOUS_S = 60.0
+#: Stempel starszy od odbioru o więcej niż tyle sekund to odpowiedź „z bufora": bez
+#: deklaracji `buffered` serwer liczy czas odpowiedzi od odbioru, nie od stempla.
+BUFFER_CLAIM_S = 5.0
+#: Ile po terminie podejścia (i po końcu okna egzaminu) serwer jeszcze przyjmuje paczkę
+#: z bufora, jeśli telefon był poza zasięgiem albo aplikację zabito.
+BUFFER_ACCEPT_WINDOW_S = 6 * 3600.0
 #: Tyle słów na sekundę ktoś jeszcze potrafi przeczytać (poniżej = flaga).
 FAST_READ_WPS = 8.0
 FAST_READ_MIN_S = 1.0
@@ -85,6 +91,7 @@ EVENT_KINDS = CLIENT_EVENT_KINDS + ("time_flag", "device_change", "similarity", 
 LOCKED_AFTER_START = (
     "scope", "question_count", "set_mode", "shuffle_answers", "shuffle_questions", "allow_back",
     "time_per_question_s", "time_total_min", "multi_scoring", "pass_percent", "max_attempts", "retake",
+    "result_release", "anti",
 )
 
 CURIOSITIES: Dict[str, str] = {
@@ -402,6 +409,13 @@ def clean_text(name: Any, description: Any) -> Tuple[str, Optional[str]]:
     if len(desc) > DESCRIPTION_MAX:
         raise ExamError("BAD_CONFIG", f"Opis egzaminu może mieć najwyżej {DESCRIPTION_MAX} znaków.")
     return title, desc or None
+
+
+#: Nazwy pól do komunikatu o blokadzie (czytelne dla człowieka).
+LOCKED_LABELS: Dict[str, str] = {
+    "result_release": "moment ujawniania wyników (result_release)",
+    "anti": "zabezpieczenia antyoszustwa (anti)",
+}
 
 
 def locked_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> List[str]:
@@ -823,6 +837,17 @@ def estimate_answer_time(
     return estimate, flags
 
 
+def buffer_reopen_ok(config: Mapping[str, Any], attempt: Mapping[str, Any], now: datetime) -> bool:
+    """Czy zamknięte przez czas podejście wciąż przyjmie paczkę z bufora (stemple nadal sprawdzane)."""
+    if attempt.get("status") == "in_progress":
+        return False
+    if attempt.get("finish_reason") not in ("time_up", "window_closed", "completed"):
+        return False
+    end = parse_time(config.get("window_end"))
+    limit = max([d for d in (end, attempt.get("deadline_at")) if d is not None] or [now])
+    return now <= limit + timedelta(seconds=BUFFER_ACCEPT_WINDOW_S)
+
+
 def apply_answers(
     config: Mapping[str, Any],
     attempt: Dict[str, Any],
@@ -831,17 +856,35 @@ def apply_answers(
     bank: Mapping[str, Mapping[str, Any]],
     now: datetime,
     client_now_ms: Optional[float] = None,
+    buffered: bool = False,
 ) -> List[Dict[str, Any]]:
     """Przyjmuje paczkę odpowiedzi (także z bufora). Każda pozycja dostaje własny wynik
-    (`accepted` / `duplicate` / `rejected` + kod + zdanie), nigdy ciche pominięcie."""
+    (`accepted` / `duplicate` / `rejected` + kod + zdanie), nigdy ciche pominięcie.
+
+    `buffered` = telefon deklaruje, że odpowiedzi leżały w kolejce offline. Tylko wtedy stempel
+    wcześniejszy od odbioru o więcej niż BUFFER_CLAIM_S jest brany za chwilę odpowiedzi; bez
+    deklaracji czas liczy się od odbioru. Zamknięte przez czas podejście przyjmuje wyłącznie
+    taką paczkę i tylko w oknie BUFFER_ACCEPT_WINDOW_S."""
+    reopened = bool(buffered) and buffer_reopen_ok(config, attempt, now)
     stamped = []
     for pos, item in enumerate(items):
         est, flags = estimate_answer_time(item, client_now_ms, now)
-        stamped.append((est, pos, item, flags))
+        item_buffered = bool(buffered or item.get("buffered"))
+        lag = (now - est).total_seconds()
+        if lag > BUFFER_CLAIM_S:
+            if item_buffered:
+                flags = flags + ["buffered"]
+                if "buffered_late" not in flags and lag > BUFFER_SUSPICIOUS_S:
+                    flags.append("buffered_late")
+            else:
+                est = now
+                flags = flags + ["stamp_ignored"]
+        stamped.append((est, pos, item, flags, item_buffered))
     stamped.sort(key=lambda t: (t[0], t[1]))
     results: List[Dict[str, Any]] = []
-    for est, _pos, item, flags in stamped:
-        results.append(_apply_one(config, attempt, answers, item, bank, now, est, flags))
+    for est, _pos, item, flags, item_buffered in stamped:
+        results.append(_apply_one(config, attempt, answers, item, bank, now, est, flags,
+                                  buffered=item_buffered, reopened=reopened))
     settle(config, attempt, answers, now)
     return results
 
@@ -859,17 +902,27 @@ def _apply_one(
     now: datetime,
     est: datetime,
     flags: List[str],
+    buffered: bool = False,
+    reopened: bool = False,
 ) -> Dict[str, Any]:
     qid = _s(item.get("qid"))
     paper = attempt["paper"]
     index = next((i for i, p in enumerate(paper) if p["qid"] == qid), None)
     if index is None:
         return _reject(qid, "EXAM_UNKNOWN_QUESTION", "Tego pytania nie ma w twoim arkuszu.")
-    if attempt["status"] != "in_progress":
+    closed = attempt["status"] != "in_progress"
+    if closed and not (reopened and buffered):
         return _reject(qid, "EXAM_FINISHED", "To podejście jest już zakończone.", flags)
-    settle(config, attempt, answers, min(est, now))
-    if attempt["status"] != "in_progress":
-        return _reject(qid, "EXAM_TIME_UP", "Czas egzaminu minął, zanim ta odpowiedź została oddana.", flags)
+    if closed:
+        # Podejście zamknął upływ czasu, zanim telefon oddał kolejkę. Liczy się chwila odpowiedzi.
+        if est > attempt["deadline_at"] + timedelta(seconds=GRACE_S):
+            return _reject(qid, "EXAM_TIME_UP", "Czas egzaminu minął, zanim ta odpowiedź została oddana.", flags)
+        if "buffered_late" not in flags:
+            flags = flags + ["buffered_late"]
+    else:
+        settle(config, attempt, answers, min(est, now))
+        if attempt["status"] != "in_progress":
+            return _reject(qid, "EXAM_TIME_UP", "Czas egzaminu minął, zanim ta odpowiedź została oddana.", flags)
     question = bank[qid]
     selected = [k for k in dict.fromkeys(_s(k) for k in item.get("selected") or []) if k]
     valid = {a["key"] for a in question["answers"]}
@@ -880,13 +933,21 @@ def _apply_one(
     if len(selected) > 1 and not question.get("multi"):
         return _reject(qid, "EXAM_SINGLE_ONLY", "To pytanie ma jedną prawidłową odpowiedź.", flags)
     current = attempt["current_index"]
-    lost = answers.get(qid)
-    if lost and lost.get("timed_out"):
-        return _reject(qid, "EXAM_QUESTION_TIME_UP", "Czas na to pytanie minął - pytanie przepadło, bez punktów.", flags)
-    if index > current:
-        return _reject(qid, "EXAM_ORDER", "Najpierw odpowiedz na bieżące pytanie - następne odblokuje się po nim.", flags)
+    limit = config.get("time_per_question_s")
     row = answers.get(qid)
-    if index < current and not config.get("allow_back"):
+    revived = False
+    if (buffered and row and row.get("timed_out") and row.get("shown_at") is not None
+            and (not limit or (est - row["shown_at"]).total_seconds() <= float(limit) + GRACE_S)
+            and est <= attempt["deadline_at"] + timedelta(seconds=GRACE_S)):
+        # Serwer zamknął pytanie po swoim zegarze, zanim telefon oddał odpowiedź udzieloną w czasie.
+        row.update(answered_at=None, selected=None, timed_out=False, dirty=True)
+        flags = flags + ["buffered_revived"]
+        revived = True
+    if row and row.get("timed_out"):
+        return _reject(qid, "EXAM_QUESTION_TIME_UP", "Czas na to pytanie minął - pytanie przepadło, bez punktów.", flags)
+    if index > current and not closed:
+        return _reject(qid, "EXAM_ORDER", "Najpierw odpowiedz na bieżące pytanie - następne odblokuje się po nim.", flags)
+    if index < current and not config.get("allow_back") and not revived:
         if row and row.get("answered_at") is not None and set(row.get("selected") or []) == set(selected):
             return {"qid": qid, "status": "duplicate", "code": "EXAM_DUPLICATE", "message": "Ta odpowiedź już jest zapisana.", "flags": flags}
         return _reject(qid, "EXAM_ALREADY_ANSWERED", "Na to pytanie już odpowiedziano, a egzamin nie pozwala wracać.", flags)
@@ -896,19 +957,19 @@ def _apply_one(
     if est < shown - timedelta(seconds=CLOCK_TOL_S):
         flags = flags + ["before_shown"]
         est = shown
+    # Bez deklaracji bufora est == now (patrz apply_answers), więc czas liczy się od odbioru.
     elapsed = max(0.0, (est - shown).total_seconds())
-    limit = config.get("time_per_question_s")
+    if limit and buffered and (now - est).total_seconds() > float(limit):
+        flags = flags + ["buffered_over_limit"]
     if limit and row.get("answered_at") is None and elapsed > float(limit) + GRACE_S:
         row.update(answered_at=shown + timedelta(seconds=float(limit)), selected=[], timed_out=True, dirty=True)
-        if index == current:
+        if index == current and not closed:
             attempt["current_index"] += 1
             attempt["dirty"] = True
         return _reject(qid, "EXAM_QUESTION_TIME_UP",
                        f"Czas na to pytanie ({int(limit)} s) minął - pytanie przepadło, bez punktów.", flags)
     if row.get("answered_at") is not None and set(row.get("selected") or []) == set(selected) and not row.get("timed_out"):
         return {"qid": qid, "status": "duplicate", "code": "EXAM_DUPLICATE", "message": "Ta odpowiedź już jest zapisana.", "flags": flags}
-    if row.get("timed_out"):
-        return _reject(qid, "EXAM_QUESTION_TIME_UP", "To pytanie już przepadło po czasie.", flags)
     if (config.get("anti") or {}).get("speed_flags") and elapsed < _min_read_seconds(question):
         flags = flags + ["too_fast"]
     if row.get("answered_at") is not None:
@@ -916,7 +977,7 @@ def _apply_one(
     row.update(selected=selected, answered_at=est, dirty=True)
     row["flags"] = list(dict.fromkeys(list(row.get("flags") or []) + flags))
     row["elapsed_ms"] = int(elapsed * 1000)
-    if index == current:
+    if index == current and not closed:
         attempt["current_index"] += 1
         attempt["dirty"] = True
         if attempt["current_index"] >= len(paper) and not config.get("allow_back"):
@@ -1000,6 +1061,8 @@ INTEGRITY_RULES: Dict[Tuple[str, str], Tuple[str, int, int]] = {
     ("screenshot", ""): ("Zrzuty ekranu", 10, 30),
     ("time_flag", "too_fast"): ("Odpowiedzi szybsze niż czas czytania", 3, 21),
     ("time_flag", "buffered_late"): ("Odpowiedzi długo leżące w telefonie", 4, 12),
+    ("time_flag", "buffered_over_limit"): ("Odpowiedź z bufora starsza niż limit pytania", 6, 18),
+    ("time_flag", "stamp_ignored"): ("Stempel czasu odrzucony (brak deklaracji bufora)", 3, 9),
     ("time_flag", "future_stamp"): ("Stempel czasu z przyszłości", 4, 12),
     ("time_flag", "before_shown"): ("Odpowiedź przed pokazaniem pytania", 4, 12),
     ("device_change", ""): ("Wznowienie na innym urządzeniu", 25, 25),

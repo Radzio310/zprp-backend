@@ -4788,6 +4788,11 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS local_key varchar"))
     # Współdzielone migawki badań. `create_all` nie dokłada kolumn do
     # istniejącej tabeli produkcyjnej, więc migracja musi być idempotentna.
+    # Egzamin: tabele powstały wcześniej niż te kolumny (create_all ich nie dołoży).
+    _conn.execute(text("ALTER TABLE exam_definitions ADD COLUMN IF NOT EXISTS client_key varchar"))
+    _conn.execute(text("CREATE INDEX IF NOT EXISTS ix_exam_definitions_client_key ON exam_definitions (created_by, client_key)"))
+    _conn.execute(text("ALTER TABLE exam_live_sessions ADD COLUMN IF NOT EXISTS projector_token varchar"))
+    _conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_live_sessions_projector_token ON exam_live_sessions (projector_token)"))
     _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS exam_snapshot_json json"))
     _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS exam_snapshot_rev bigint NOT NULL DEFAULT 0"))
     _conn.execute(text("ALTER TABLE proel_match_state ADD COLUMN IF NOT EXISTS exam_snapshot_date varchar"))

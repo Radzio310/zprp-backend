@@ -283,7 +283,7 @@ async def test_czas_serwerowy_pytanie_przepada_i_buforowana_odpowiedz_na_czas(st
     now = t + timedelta(minutes=3)
     client_now = now.timestamp() * 1000 + 5000
     stamp = (t.timestamp() + 20) * 1000 + 5000
-    out = await S.post_answers(st, PLAIN, aid, {"client_now_ms": client_now, "answers": [
+    out = await S.post_answers(st, PLAIN, aid, {"client_now_ms": client_now, "buffered": True, "answers": [
         {"qid": q["qid"], "selected": [CORRECT[q["qid"]]], "client_ts_ms": stamp}]}, now)
     assert out["results"][0]["status"] == "accepted" and "buffered_late" in out["results"][0]["flags"]
     q2 = out["state"]["question"]

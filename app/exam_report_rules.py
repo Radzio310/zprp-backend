@@ -384,7 +384,9 @@ def clean_export_options(raw: Mapping[str, Any], *, national: bool) -> Dict[str,
     if not sections:
         raise ExamError("BAD_EXPORT", "Zaznacz co najmniej jedną sekcję raportu - pusty plik nikomu się nie przyda.")
     ordered = [s for s in EXPORT_SECTIONS if s in sections]
-    return {"format": fmt, "range": rng, "theme": theme, "anonymize": bool(raw.get("anonymize")),
+    anon = raw.get("anonymize")
+    anonymize = ("cards" in ordered) if anon is None else bool(anon)
+    return {"format": fmt, "range": rng, "theme": theme, "anonymize": anonymize,
             "seal": raw.get("seal") is not False, "sections": ordered}
 
 

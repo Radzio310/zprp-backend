@@ -52,4 +52,6 @@ COPY . .
 EXPOSE 8000
 
 # 6. Domyślna komenda startowa (BEZ ZMIAN)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Railway stoi za proxy: bez --proxy-headers każdy klient ma adres proxy (limity po IP, np. PIN-y
+# egzaminu na żywo, byłyby wspólne dla całej sali). Proxy Railway jest jedynym wejściem do kontenera.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

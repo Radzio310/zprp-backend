@@ -69,6 +69,8 @@ def define_tables(metadata):
         Column("closes_at", DateTime(timezone=True), nullable=False, index=True),
         Column("created_by", String, nullable=True),
         Column("created_by_name", String, nullable=True),
+        #: Idempotencja POST /exams: localId szkicu z telefonu (ten sam autor + klucz = ten sam egzamin).
+        Column("client_key", String, nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("deleted_at", DateTime(timezone=True), nullable=True),

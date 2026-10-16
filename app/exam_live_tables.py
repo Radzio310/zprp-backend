@@ -27,6 +27,8 @@ def define_tables(metadata):
         Column("pin", String, nullable=False, index=True),
         #: Nie do zgadnięcia token z adresu rzutnika i z kodu QR.
         Column("token", String, nullable=False, unique=True),
+        #: Osobny sekret rzutnika: kto zna tylko token z QR (uczestnik), nie obejrzy ekranu prowadzącego.
+        Column("projector_token", String, nullable=True, unique=True),
         Column("host_id", String, nullable=False, index=True),
         Column("host_name", String, nullable=True),
         #: national | province

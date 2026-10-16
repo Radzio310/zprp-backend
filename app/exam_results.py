@@ -39,7 +39,8 @@ _TASKS: set = set()
 class ExportBody(BaseModel):
     format: str = "pdf"
     range: str = "best"
-    anonymize: bool = False
+    #: Brak = decyzja serwera: z kartami zdających domyślnie TAK (dane osobowe), bez nich NIE.
+    anonymize: Optional[bool] = None
     sections: Optional[List[str]] = None
     theme: str = "paper"
     seal: bool = True

@@ -109,6 +109,8 @@ class ExamBody(BaseModel):
     description: Optional[str] = None
     template: Optional[str] = None
     config: Dict[str, Any] = Field(default_factory=dict)
+    #: Idempotencja: localId szkicu. Ten sam autor + ten sam klucz = ten sam egzamin (bez drugiej publikacji).
+    client_key: Optional[str] = None
 
 
 class ExamPatch(BaseModel):
@@ -119,16 +121,23 @@ class ExamPatch(BaseModel):
 
 class PoolBody(BaseModel):
     scope: Dict[str, Any] = Field(default_factory=dict)
+    province: Optional[str] = None
 
 
 class StartBody(BaseModel):
     device_id: Optional[str] = None
     room_code: Optional[str] = None
+    #: Kolejka offline z zabitej aplikacji (jak `answers`): przyjmowana PRZED zamknięciem pytań po czasie.
+    buffered: Optional[List[Dict[str, Any]]] = None
+    client_now_ms: Optional[float] = None
 
 
 class AnswersBody(BaseModel):
     device_id: Optional[str] = None
     client_now_ms: Optional[float] = None
+    #: true = paczka z kolejki offline. Tylko wtedy stempel starszy od odbioru jest uznany; zamknięte
+    #: przez czas podejście przyjmuje wyłącznie taką paczkę (do 6 h po terminie).
+    buffered: bool = False
     answers: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -177,14 +186,16 @@ async def bank_import(body: BankImportBody, who: S.Who = Depends(_who)) -> Dict[
 
 
 @router.get("/templates", summary="Szablony egzaminów")
-async def templates(who: S.Who = Depends(_who)) -> Dict[str, Any]:
+async def templates(province: Optional[str] = Query(None), who: S.Who = Depends(_who)) -> Dict[str, Any]:
     from app import exam_rules as X
 
+    await _run(S.require_any_manage(who, province))
     return {"templates": X.templates_view(), "defaults": X.DEFAULT_CONFIG}
 
 
 @router.post("/pool", summary="Ile pytań mieści zakres (podgląd w kreatorze)")
 async def pool(body: PoolBody, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    await _run(S.require_any_manage(who, body.province))
     return await _run(S.pool_preview(_store(), body.scope))
 
 

@@ -253,6 +253,22 @@ async def require_manage(who: Who, scope: str, province: Any) -> None:
         raise ExamError("EXAM_FORBIDDEN", reason, 403)
 
 
+async def require_any_manage(who: Who, province: Any = None) -> None:
+    """Kreator i prowadzący na żywo: wystarczy prawo zarządzania którymkolwiek okręgiem (albo admin).
+    Zwykły zdający nie ma tu czego szukać (szablony i podgląd puli są dla autorów)."""
+    if who.is_admin or X.has_committee_badge(who.badges):
+        return
+    for prov in dict.fromkeys(p for p in (_s(province), _s(who.province)) if p):
+        if who.teach_check:
+            try:
+                if await who.teach_check(prov):
+                    return
+            except Exception:  # noqa: BLE001
+                logger.warning("egzamin: sprawdzenie Teach Mastera nie powiodło się", exc_info=True)
+    raise ExamError("EXAM_FORBIDDEN", "Szablony i podgląd puli są dla osób, które zarządzają egzaminami: komisji sędziowskiej, "
+                    "Teach Mastera okręgu albo administratora aplikacji.", 403)
+
+
 # ---------------------------------------------------------------------------
 # Wczytywanie egzaminów
 # ---------------------------------------------------------------------------
@@ -411,6 +427,15 @@ async def create_exam(st: Store, who: Who, body: Mapping[str, Any], now: Optiona
     now = now or utcnow()
     scope, province = _scope_and_province(body, who)
     await require_manage(who, scope, province)
+    client_key = _s(body.get("client_key"))[:80] or None
+    if client_key:
+        # Ponowienie tego samego szkicu (zerwana sieć, podwójne dotknięcie) oddaje ten sam egzamin.
+        t = st.t.definitions
+        again = await st.database.fetch_one(select(t.c.id).where(and_(
+            t.c.created_by == who.judge_id, t.c.client_key == client_key, t.c.deleted_at.is_(None))))
+        if again:
+            existing = await _exam(st, again["id"])
+            return {**exam_view(existing, now, full=True), "existing": True}, []
     name, description = X.clean_text(body.get("name"), body.get("description"))
     template = _s(body.get("template")) or None
     config = X.clean_config(body.get("config") or {}, template=template)
@@ -424,7 +449,7 @@ async def create_exam(st: Store, who: Who, body: Mapping[str, Any], now: Optiona
             id=exam_id, scope=scope, province=province, name=name, description=description, template=template,
             config_json=_dumps(config), bank_version=version, question_ids_json=_dumps(pool), voided_json="{}",
             event_ids_json="{}", opens_at=opens, closes_at=closes, created_by=who.judge_id,
-            created_by_name=who.name or None, created_at=now, updated_at=now))
+            created_by_name=who.name or None, client_key=client_key, created_at=now, updated_at=now))
         exam = await _exam(st, exam_id)
         published = await _publish_events(st, exam, who, now)
     return exam_view(exam, now, full=True), published
@@ -440,7 +465,7 @@ async def update_exam(st: Store, who: Who, exam_id: str, body: Mapping[str, Any]
     started = await st.database.fetch_val(select(func.count()).select_from(st.t.attempts).where(st.t.attempts.c.exam_id == exam_id))
     locked = X.locked_changes(exam["config"], config)
     if started and locked:
-        raise ExamError("EXAM_LOCKED", "Ktoś już zaczął ten egzamin, więc nie można zmienić: " + ", ".join(locked) +
+        raise ExamError("EXAM_LOCKED", "Ktoś już zaczął ten egzamin, więc nie można zmienić: " + ", ".join(X.LOCKED_LABELS.get(k, k) for k in locked) +
                         ". Zmienić można nazwę, opis, termin zamknięcia okna, adresatów i przypomnienia.", 409, {"locked": locked})
     pool = exam["question_ids"]
     if locked and not started:
@@ -745,7 +770,17 @@ async def start_attempt(st: Store, who: Who, exam_id: str, body: Mapping[str, An
             running = await _attempt_row(st, attempt_id)
     attempt = running
     await _check_device(st, exam, attempt, body.get("device_id"), now)
-    return await _serve(st, exam, attempt, None, now, resumed=bool(attempts and running in attempts))
+    flushed = None
+    pending = body.get("buffered")
+    if isinstance(pending, list) and pending and len(pending) <= 200:
+        # Kolejka offline z zabitej aplikacji: przyjmujemy ją PRZED settle, żeby termin pytania
+        # liczony zegarem serwera nie zamknął odpowiedzi udzielonych w czasie.
+        answers = await _load_answers(st, attempt["id"])
+        flushed = await _apply_batch(st, exam, attempt, answers, pending, body.get("client_now_ms"), True, now)
+    state = await _serve(st, exam, attempt, None, now, resumed=bool(attempts and running in attempts))
+    if flushed is not None:
+        state["buffered_results"] = flushed
+    return state
 
 
 async def _serve(st: Store, exam: Mapping[str, Any], attempt: Dict[str, Any], index: Optional[int], now: datetime,
@@ -767,6 +802,28 @@ async def attempt_state(st: Store, who: Who, attempt_id: str, index: Optional[in
     return await _serve(st, exam, attempt, index, now)
 
 
+#: Flagi, które są tylko opisem trasy odpowiedzi (nie sygnałem dla komisji) - nie trafiają do dziennika zdarzeń.
+_QUIET_FLAGS = ("buffered", "buffered_revived")
+
+
+async def _apply_batch(st: Store, exam: Mapping[str, Any], attempt: Dict[str, Any], answers: Dict[str, Dict[str, Any]],
+                       items: List[Any], client_now_ms: Any, buffered: bool, now: datetime) -> List[Dict[str, Any]]:
+    """Przyjmuje paczkę odpowiedzi i zapisuje jej ślady. Zamknięte przez czas podejście dostaje nową ocenę."""
+    bank = await load_bank(st, exam["bank_version"])
+    was_closed = attempt["status"] != "in_progress"
+    items = [i for i in items if isinstance(i, Mapping)]
+    results = X.apply_answers(exam["config"], attempt, answers, items, bank, now, client_now_ms, buffered)
+    for res in results:
+        for flag in res.get("flags") or []:
+            if flag not in _QUIET_FLAGS:
+                await _record_event(st, exam["id"], attempt, "time_flag", {"flag": flag, "qid": res.get("qid")}, now=now)
+    await _save(st, attempt, answers)
+    if attempt["status"] != "in_progress" and (attempt.get("score") is None or (
+            was_closed and any(r.get("status") == "accepted" for r in results))):
+        await _finalize_score(st, exam, attempt, answers)
+    return results
+
+
 async def post_answers(st: Store, who: Who, attempt_id: str, body: Mapping[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or utcnow()
     attempt = await _own_attempt(st, who, attempt_id)
@@ -780,13 +837,7 @@ async def post_answers(st: Store, who: Who, attempt_id: str, body: Mapping[str, 
         await _check_device(st, exam, attempt, body.get("device_id"), now)
     bank = await load_bank(st, exam["bank_version"])
     answers = await _load_answers(st, attempt_id)
-    results = X.apply_answers(exam["config"], attempt, answers, items, bank, now, body.get("client_now_ms"))
-    for res in results:
-        for flag in res.get("flags") or []:
-            await _record_event(st, exam["id"], attempt, "time_flag", {"flag": flag, "qid": res.get("qid")}, now=now)
-    await _save(st, attempt, answers)
-    if attempt["status"] != "in_progress" and attempt.get("score") is None:
-        await _finalize_score(st, exam, attempt, answers)
+    results = await _apply_batch(st, exam, attempt, answers, items, body.get("client_now_ms"), bool(body.get("buffered")), now)
     served = None
     if attempt["status"] == "in_progress":
         served = X.serve_question(exam["config"], attempt, answers, now, None)
@@ -802,6 +853,8 @@ async def post_events(st: Store, who: Who, attempt_id: str, body: Mapping[str, A
     items = body.get("events") or []
     if not isinstance(items, list) or not items:
         raise ExamError("EXAM_EMPTY_BATCH", "Brak zdarzeń do zapisania (pole „events”).")
+    if any(not isinstance(i, Mapping) for i in items[:50]):
+        raise ExamError("EXAM_BAD_EVENT", "Każde zdarzenie w polu „events” musi być obiektem {kind, detail?, client_ts_ms?}.", 400)
     if attempt["status"] == "in_progress":
         await _check_device(st, exam, attempt, body.get("device_id"), now)
     count = await st.database.fetch_val(select(func.count()).select_from(st.t.events).where(st.t.events.c.attempt_id == attempt_id))
@@ -816,12 +869,15 @@ async def post_events(st: Store, who: Who, attempt_id: str, body: Mapping[str, A
         if kind == "screenshot" and not anti["screenshots"]:
             ignored.append({"kind": kind, "reason": "Wykrywanie zrzutów jest wyłączone dla tego egzaminu."})
             continue
-        if count + recorded >= MAX_EVENTS_PER_ATTEMPT:
+        if kind != "app_background" and count + recorded >= MAX_EVENTS_PER_ATTEMPT:
             ignored.append({"kind": kind, "reason": "Limit zdarzeń na jedno podejście został wyczerpany."})
             continue
         detail = item.get("detail") if isinstance(item.get("detail"), Mapping) else {}
-        await _record_event(st, exam["id"], attempt, kind, dict(detail), item.get("client_ts_ms"), now)
-        recorded += 1
+        if count + recorded < MAX_EVENTS_PER_ATTEMPT:
+            await _record_event(st, exam["id"], attempt, kind, dict(detail), item.get("client_ts_ms"), now)
+            recorded += 1
+        else:
+            ignored.append({"kind": kind, "reason": "Limit zdarzeń wyczerpany - to zdarzenie nie trafiło do dziennika, ale polityka wyjścia zadziałała."})
         if kind == "app_background" and attempt["status"] == "in_progress":
             policy = X.apply_leave_policy(exam["config"], attempt, answers, now)
     await _save(st, attempt, answers)

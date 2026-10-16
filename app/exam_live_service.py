@@ -98,6 +98,24 @@ async def session_by_token(ls: LiveStore, token: str) -> Dict[str, Any]:
     return _session(raw)
 
 
+async def session_by_projector(ls: LiveStore, token: str) -> Dict[str, Any]:
+    """Rzutnik wchodzi WYŁĄCZNIE tokenem rzutnika (token dołączania z QR tu nie działa)."""
+    value = str(token or "")
+    raw = await ls.database.fetch_one(select(ls.t.sessions).where(ls.t.sessions.c.projector_token == value)) if value else None
+    if not raw:
+        raise ExamError("LIVE_NOT_FOUND", "Nie znaleziono takiej sesji. Sprawdź kod albo link.", 404)
+    return _session(raw)
+
+
+async def _ensure_projector_token(ls: LiveStore, s: Dict[str, Any]) -> None:
+    """Sesje założone przed wprowadzeniem tokenu rzutnika dostają go przy pierwszym odczycie."""
+    if s.get("projector_token"):
+        return
+    value = secrets.token_urlsafe(16)
+    await ls.database.execute(update(ls.t.sessions).where(ls.t.sessions.c.id == s["id"]).values(projector_token=value))
+    s["projector_token"] = value
+
+
 async def _active_pins(ls: LiveStore, now: datetime) -> Dict[str, Dict[str, Any]]:
     rows = await ls.database.fetch_all(select(ls.t.sessions).where(ls.t.sessions.c.phase != "end"))
     out: Dict[str, Dict[str, Any]] = {}
@@ -155,15 +173,18 @@ async def _all_answers(ls: LiveStore, session_id: str) -> List[Dict[str, Any]]:
     return out
 
 
-def links_for(token: str) -> Dict[str, str]:
-    """Adresy WZGLĘDNE (rzutnik i QR składają z nich pełny adres z bieżącego hosta)."""
-    return {"join_url": f"/exam-live/join/{token}", "qr_url": f"/exam-live/projector/{token}/qr.svg",
-            "projector_url": f"/exam-live/projector/{token}", "join_page": "/exam-live/join"}
+def links_for(token: str, projector_token: Optional[str] = None) -> Dict[str, str]:
+    """Adresy WZGLĘDNE (rzutnik i QR składają z nich pełny adres z bieżącego hosta).
+    Rzutnik i jego QR mają własny token; `join_url` niesie token dołączania."""
+    ptoken = projector_token or token
+    return {"join_url": f"/exam-live/join/{token}", "qr_url": f"/exam-live/projector/{ptoken}/qr.svg",
+            "projector_url": f"/exam-live/projector/{ptoken}", "join_page": "/exam-live/join"}
 
 
 async def load_state(ls: LiveStore, session_id: str, now: datetime) -> Dict[str, Any]:
     """Wszystko, z czego buduje się widoki. Zawiera klucze pytania - nie wychodzi poza serwer."""
     s = await session_row(ls, session_id)
+    await _ensure_projector_token(ls, s)
     parts = await _participants(ls, session_id)
     answers: Dict[str, Dict[str, Any]] = {}
     question = None
@@ -174,7 +195,7 @@ async def load_state(ls: LiveStore, session_id: str, now: datetime) -> Dict[str,
     return {
         "session": s, "participants": parts, "answers": answers, "question": question,
         "result": S._loads(s.get("result_json"), None) if s["phase"] == "end" else None,
-        "links": links_for(s["token"]), "server_now": now,
+        "links": links_for(s["token"], s.get("projector_token")), "server_now": now,
     }
 
 
@@ -246,7 +267,7 @@ async def create_session(ls: LiveStore, who: S.Who, body: Mapping[str, Any], now
         raise ExamError("LIVE_TOO_MANY", f"Masz już {len(mine)} aktywnych sesji. Zakończ którąś, zanim założysz następną.", 409)
     pin = L.generate_pin(set(active))
     await ls.database.execute(insert(ls.t.sessions).values(
-        id=session_id, pin=pin, token=secrets.token_urlsafe(16), host_id=who.judge_id, host_name=who.name,
+        id=session_id, pin=pin, token=secrets.token_urlsafe(16), projector_token=secrets.token_urlsafe(16), host_id=who.judge_id, host_name=who.name,
         scope=scope, province=province, exam_id=exam["id"] if exam else None, title=title, character=character,
         phone_view=phone_view, guests_allowed=bool(body.get("guests_allowed", False)),
         config_json=S._dumps(cfg), bank_version=bank_version, question_ids_json=S._dumps(qids),

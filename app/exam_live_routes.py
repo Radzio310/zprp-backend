@@ -37,6 +37,7 @@ from app import exam_live_service as V
 from app import exam_service as S
 from app.exam_live_hub import Conn, Hub
 from app.exam_rules import ExamError
+from app.pod_reka_login_rules import client_key as _forwarded_key
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,17 @@ def _page(name: str) -> HTMLResponse:
                                        "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
 
 
+def _ip(request: Request) -> str:
+    """Klucz limitu prób: pierwszy adres z X-Forwarded-For (Railway), inaczej adres połączenia.
+    Bez tego cała sala za proxy dzieliłaby jeden limit błędnych PIN-ów."""
+    return _forwarded_key(request.headers.get("x-forwarded-for", ""), request.client.host if request.client else "?")
+
+
+def _guest_from(request: Request, query_value: Optional[str] = None, body_value: Optional[str] = None) -> str:
+    """guest_token: nagłówek X-Guest-Token (zalecany), ciało albo query `gt` (przestarzałe, zgodność)."""
+    return request.headers.get("x-guest-token") or body_value or query_value or ""
+
+
 def _base_url(request: Request) -> str:
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
@@ -225,7 +237,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
 
     @router.post("/join", summary="Dołącz do sesji PIN-em albo tokenem z QR (zalogowany)")
     async def join(request: Request, body: JoinBody, who: S.Who = Depends(deps.who)) -> Dict[str, Any]:
-        key = request.client.host if request.client else "?"
+        key = _ip(request)
         try:
             throttle.check(key)
         except ExamError as error:
@@ -244,7 +256,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
 
     @router.post("/guest/join", summary="Dołącz z przeglądarki jako gość (nick, tylko gdy prowadzący włączył gości)")
     async def guest_join(request: Request, body: JoinBody) -> Dict[str, Any]:
-        key = request.client.host if request.client else "?"
+        key = _ip(request)
         try:
             throttle.check(key)
         except ExamError as error:
@@ -263,9 +275,10 @@ def build_router(deps: LiveDeps) -> APIRouter:
                 "snapshot": L.view_for("player", state, viewer_of(state, p["id"]), deps.now())}
 
     @router.get("/guest/{sid}/state", summary="Migawka dla gościa")
-    async def guest_state(sid: str, response: Response, gt: str = Query(""), since_rev: Optional[int] = Query(None)) -> Dict[str, Any]:
+    async def guest_state(sid: str, request: Request, response: Response, gt: str = Query(""),
+                          since_rev: Optional[int] = Query(None)) -> Dict[str, Any]:
         async def go() -> Dict[str, Any]:
-            p = await V.participant_by_guest(ls(), sid, gt)
+            p = await V.participant_by_guest(ls(), sid, _guest_from(request, gt))
             if not p:
                 raise ExamError("LIVE_NOT_JOINED", "Nie rozpoznaję Cię w tej sesji. Dołącz ponownie kodem PIN.", 403)
             state = await fresh_state(sid)
@@ -274,9 +287,9 @@ def build_router(deps: LiveDeps) -> APIRouter:
         return await _run(go())
 
     @router.post("/guest/{sid}/answer", summary="Odpowiedź gościa")
-    async def guest_answer(sid: str, body: AnswerBody) -> Dict[str, Any]:
+    async def guest_answer(sid: str, body: AnswerBody, request: Request) -> Dict[str, Any]:
         async def go() -> Dict[str, Any]:
-            p = await V.participant_by_guest(ls(), sid, body.gt or "")
+            p = await V.participant_by_guest(ls(), sid, _guest_from(request, None, body.gt))
             if not p:
                 raise ExamError("LIVE_NOT_JOINED", "Nie rozpoznaję Cię w tej sesji. Dołącz ponownie kodem PIN.", 403)
             return await answer_flow(sid, p["id"], body.selected)
@@ -294,7 +307,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
     @router.get("/projector/{token}/state", summary="Migawka rzutnika (dostęp przez token sesji)")
     async def projector_state(token: str, response: Response, since_rev: Optional[int] = Query(None)) -> Dict[str, Any]:
         async def go() -> Dict[str, Any]:
-            s = await V.session_by_token(ls(), token)
+            s = await V.session_by_projector(ls(), token)
             state = await fresh_state(s["id"])
             return view_response(state, "projector", None, since_rev, response)
 
@@ -305,8 +318,8 @@ def build_router(deps: LiveDeps) -> APIRouter:
         import qrcode
         import qrcode.image.svg
 
-        await _run(V.session_by_token(ls(), token))
-        url = f"{_base_url(request)}/exam-live/join/{token}"
+        s = await _run(V.session_by_projector(ls(), token))
+        url = f"{_base_url(request)}/exam-live/join/{s['token']}"
         img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=1,
                           error_correction=qrcode.constants.ERROR_CORRECT_M)
         buf = io.BytesIO()
@@ -315,6 +328,7 @@ def build_router(deps: LiveDeps) -> APIRouter:
 
     @router.get("/projector/{token}", summary="Strona rzutnika", response_class=HTMLResponse)
     async def projector_page(token: str) -> HTMLResponse:
+        await _run(V.session_by_projector(ls(), token))
         return _page("projector.html")
 
     @router.get("/join", summary="Strona gościa: PIN + nick", response_class=HTMLResponse)
@@ -383,7 +397,9 @@ def build_router(deps: LiveDeps) -> APIRouter:
     async def ws_endpoint(websocket: WebSocket, ref: str, role: str = Query(...), token: Optional[str] = Query(None),
                           gt: Optional[str] = Query(None)) -> None:
         """Jedno gniazdo na urządzenie. `role`: host | player | guest | projector.
-        host/player: `token` = JWT aplikacji. guest: `gt` = guest_token. projector: `ref` = token sesji.
+        host/player: JWT aplikacji, guest: guest_token - w pierwszej ramce {"type":"auth","token"|"gt"} albo w
+        nagłówku (Authorization: Bearer / X-Guest-Token); query `token`/`gt` działa, ale jest przestarzałe.
+        projector: `ref` = token RZUTNIKA (session.links.projector_url), nie token dołączania.
         Ramki serwera: snapshot, ack, error, pong. Ramki klienta: ping, refresh, answer, control (host)."""
         await websocket.accept()
 
@@ -394,13 +410,31 @@ def build_router(deps: LiveDeps) -> APIRouter:
             except Exception:  # noqa: BLE001
                 pass
 
+        async def ws_credentials(r: str, tok: Optional[str], guest: Optional[str]):
+            """Sekret z query (przestarzałe), z nagłówka (Authorization: Bearer / X-Guest-Token)
+            albo z pierwszej ramki `{"type":"auth","token"|"gt":...}` - adres nie trafia wtedy do logów."""
+            auth = websocket.headers.get("authorization", "")
+            tok = tok or (auth[7:].strip() if auth.lower().startswith("bearer ") else None)
+            guest = guest or websocket.headers.get("x-guest-token")
+            if (r == "guest" and not guest) or (r != "guest" and not tok):
+                try:
+                    frame = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+                except Exception:  # noqa: BLE001 - brak ramki, zła ramka, rozłączenie
+                    frame = {}
+                if isinstance(frame, dict) and frame.get("type") == "auth":
+                    tok = tok or (str(frame.get("token") or "") or None)
+                    guest = guest or (str(frame.get("gt") or "") or None)
+            return tok, guest
+
         try:
             store = ls()
             if role == "projector":
-                s = await V.session_by_token(store, ref)
+                s = await V.session_by_projector(store, ref)
                 conn = Conn(websocket, "projector")
             else:
                 s = await V.session_row(store, ref)
+                if role in ("host", "player", "guest"):
+                    token, gt = await ws_credentials(role, token, gt)
                 if role == "host" or role == "player":
                     judge = await deps.identify(token or "")
                     if not judge:

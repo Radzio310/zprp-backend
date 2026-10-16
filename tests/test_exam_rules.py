@@ -233,7 +233,8 @@ def test_bufor_ze_stemplem_klienta_z_tolerancja_i_flagami():
     # telefon odpowiedział po 20 s, ale paczka dotarła po 5 minutach; jego zegar spieszy o godzinę
     client_now = (now.timestamp() + 3600) * 1000
     stamp = (T0.timestamp() + 20 + 3600) * 1000
-    res = X.apply_answers(c, a, answers, [{"qid": "q1", "selected": ["a"], "client_ts_ms": stamp}], BANK, now, client_now)
+    res = X.apply_answers(c, a, answers, [{"qid": "q1", "selected": ["a"], "client_ts_ms": stamp}], BANK, now, client_now,
+                          buffered=True)
     assert res[0]["status"] == "accepted" and "buffered_late" in res[0]["flags"]
     assert answers["q1"]["answered_at"] == T0 + timedelta(seconds=20)
     # stempel z przyszłości ignorujemy i oznaczamy
