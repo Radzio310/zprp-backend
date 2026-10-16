@@ -517,6 +517,14 @@ async def run_event_reminder_sweep() -> None:
             await sweep_event_reminders()
         except Exception:  # noqa: BLE001
             logger.exception("wydarzenia: przejście przypomnień nie powiodło się")
+        # Egzaminy z przepisów (przypomnienia do nieprzystąpionych, wyniki dostępne,
+        # domknięcie spóźnionych podejść) jadą na tej samej pętli co przypomnienia.
+        try:
+            from app.exams import run_exam_sweep
+
+            await run_exam_sweep()
+        except Exception:  # noqa: BLE001
+            logger.exception("egzaminy: przejście przypomnień nie powiodło się")
         await asyncio.sleep(interval)
 
 

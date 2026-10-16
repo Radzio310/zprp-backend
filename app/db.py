@@ -4565,6 +4565,19 @@ from app.table_official_authors import define_tables as _define_table_official_a
 
 zprp_table_official_authors = _define_table_official_authors(metadata)
 
+# Egzamin z przepisów (bank pytań, egzaminy, podejścia, zdarzenia) - schemat w osobnym module.
+from app.exam_tables import define_tables as _define_exam_tables
+
+(
+    exam_banks,
+    exam_bank_questions,
+    exam_definitions,
+    exam_attempts,
+    exam_answers,
+    exam_events,
+    exam_reminders_sent,
+) = _define_exam_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 

@@ -121,6 +121,7 @@ from app.district_alerts import (
 )
 from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
+from app.exams import router as exams_router
 from app.event_links import router as event_links_router
 from app.province_travel import router as province_travel_router
 from app.province_stats_export import router as province_stats_export_router
@@ -395,6 +396,7 @@ app.include_router(province_assignment_board_router)
 app.include_router(province_archive_router)
 app.include_router(province_insights_router)
 app.include_router(province_events_router)
+app.include_router(exams_router)
 app.include_router(event_links_router)
 app.include_router(province_travel_router)
 # Eksport statystyk okregowych (CSV/XLSX/PDF). Wlasny prefiks
