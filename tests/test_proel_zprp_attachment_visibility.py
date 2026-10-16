@@ -30,6 +30,7 @@ def anyio_backend():
 @pytest.fixture(autouse=True)
 def _app_key(monkeypatch):
     monkeypatch.setenv("PROEL_APP_KEY", "test-app-key")
+    z._details_cache_clear()
 
 
 def _match(approved: bool = False, attachments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

@@ -1475,6 +1475,36 @@ async def _fetch_match_details(zprp_match_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 
+#: Krótka pamięć rekordu meczu. Aplikacja ponawia całe żądanie po fałszywym
+#: 401 ZPRP (co czwarte), a każde ponowienie pytało publiczne API od nowa.
+#: Stan po zmianie i tak zna ZPRP (`PROTOCOL_LOCKED`), więc pamięć nie jest
+#: bramką - po sukcesie wpis jest kasowany.
+_DETAILS_TTL_S = 15.0
+_details_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+
+
+def _details_cache_clear(match_id: Optional[int] = None) -> None:
+    if match_id is None:
+        _details_cache.clear()
+    else:
+        _details_cache.pop(match_id, None)
+
+
+async def _fetch_match_details_cached(match_id: int) -> Optional[Dict[str, Any]]:
+    import time
+
+    hit = _details_cache.get(match_id)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < _DETAILS_TTL_S:
+        return hit[1]
+    match = await _fetch_match_details(match_id)
+    if match is not None:
+        if len(_details_cache) > 200:
+            _details_cache.clear()
+        _details_cache[match_id] = (now, match)
+    return match
+
+
 def _visibility_error(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
@@ -1484,6 +1514,7 @@ async def set_attachment_visibility(
     *,
     by_name: Optional[str] = None,
     by_judge_id: Optional[str] = None,
+    actor_task: Optional["asyncio.Future[Tuple[Optional[str], Optional[str]]]"] = None,
 ) -> Dict[str, Any]:
     """Rdzeń ukrycia/przywrócenia załącznika - wydzielony z trasy dla testów.
 
@@ -1504,7 +1535,30 @@ async def set_attachment_visibility(
 
     _require_app_key()
 
-    match = await _fetch_match_details(match_id)
+    import time
+
+    t0 = time.perf_counter()
+
+    async def _timed(coro: Any) -> Tuple[Any, float]:
+        t = time.perf_counter()
+        try:
+            return await coro, (time.perf_counter() - t) * 1000
+        except Exception as exc:
+            return exc, (time.perf_counter() - t) * 1000
+
+    async def _open_entry() -> Optional[Dict[str, Any]]:
+        return await ledger.ledger_open_entry(match_id, attachment_id)
+
+    # Szczegóły meczu (HTTP do ZPRP) i księga (baza) nie zależą od siebie.
+    (match, ms_approval), (open_entry, ms_ledger) = await asyncio.gather(
+        _timed(_fetch_match_details_cached(match_id)),
+        _timed(_open_entry()),
+    )
+    if isinstance(open_entry, Exception):
+        logger.warning("ProEl ZPRP: odczyt księgi ukrytych nieudany", exc_info=open_entry)
+        open_entry = None
+    if isinstance(match, Exception):
+        match = None
     if match is None:
         raise _visibility_error(
             502,
@@ -1512,6 +1566,7 @@ async def set_attachment_visibility(
             "Nie udało się sprawdzić meczu w ZPRP. Spróbuj ponownie za chwilę.",
         )
     if ledger.is_approved(match):
+        _details_cache_clear(match_id)
         raise _visibility_error(
             409,
             "MATCH_APPROVED",
@@ -1519,11 +1574,6 @@ async def set_attachment_visibility(
         )
 
     visible = ledger.visible_attachments(match)
-    open_entry: Optional[Dict[str, Any]] = None
-    try:
-        open_entry = await ledger.ledger_open_entry(match_id, attachment_id)
-    except Exception:
-        logger.warning("ProEl ZPRP: odczyt księgi ukrytych nieudany", exc_info=True)
 
     hidden = bool(payload.hidden)
     if attachment_id not in visible:
@@ -1552,11 +1602,26 @@ async def set_attachment_visibility(
         "id_zalacznik": int(attachment_id),
         "ukryty_www": 1 if hidden else 0,
     }
+    t_up = time.perf_counter()
     async with match_write_lock(_match_lock_key(match_id, hash_sesji)):
         status, data = await _call_upstream("hide_attachment.php", upstream_payload)
+    ms_zprp = (time.perf_counter() - t_up) * 1000
+    if not (status == 200 and str(data.get("status") or "").lower() == "success"):
+        logger.info(
+            "attachment-visibility timing: approval=%.0fms ledger_read=%.0fms zprp=%.0fms "
+            "status=%s total=%.0fms",
+            ms_approval, ms_ledger, ms_zprp, status, (time.perf_counter() - t0) * 1000,
+        )
 
     if status == 200 and str(data.get("status") or "").lower() == "success":
         already = ledger.is_already_current(data.get("message"))
+        _details_cache_clear(match_id)
+        if actor_task is not None:
+            try:
+                by_name, by_judge_id = await actor_task
+            except Exception:
+                pass
+        t_db = time.perf_counter()
         try:
             if hidden:
                 await ledger.ledger_mark_hidden(
@@ -1580,6 +1645,13 @@ async def set_attachment_visibility(
             # ZPRP już zmienił stan - odpowiedź ma to powiedzieć. Brak wpisu
             # w księdze kosztuje najwyżej pozycję w „koszu", nie zmianę.
             logger.error("ProEl ZPRP: zapis księgi ukrytych nieudany", exc_info=True)
+        logger.info(
+            "attachment-visibility timing: approval=%.0fms ledger_read=%.0fms zprp=%.0fms "
+            "db_write=%.0fms total=%.0fms",
+            ms_approval, ms_ledger, ms_zprp,
+            (time.perf_counter() - t_db) * 1000,
+            (time.perf_counter() - t0) * 1000,
+        )
         return {"ok": True, "hidden": hidden, "already": already}
 
     if status == 401:
@@ -1629,27 +1701,34 @@ async def zprp_attachment_visibility(
     authorization: Optional[str] = Header(None),
     x_elevation: Optional[str] = Header(None),
 ):
-    by_name: Optional[str] = None
-    by_judge_id: Optional[str] = None
-    try:
-        from app.proel_journal import soft_actor
+    async def _resolve_actor() -> Tuple[Optional[str], Optional[str]]:
+        try:
+            from app.proel_journal import soft_actor
 
-        actor = await soft_actor(
-            x_judge_id,
-            x_installation_id,
-            x_actor_name,
-            authorization=authorization,
-            x_elevation=x_elevation,
-        )
-        if actor is not None:
-            by_name = actor.name or None
+            actor = await soft_actor(
+                x_judge_id,
+                x_installation_id,
+                x_actor_name,
+                authorization=authorization,
+                x_elevation=x_elevation,
+            )
+            if actor is None:
+                return None, None
             jid = str(actor.judge_id or "")
             # `inst:`/`proel:` to nie numer sędziego - do księgi go nie bierzemy.
-            by_judge_id = jid if jid and ":" not in jid else None
-    except Exception:
-        logger.debug("ProEl ZPRP: tożsamość do księgi ukrytych nieustalona", exc_info=True)
+            return (actor.name or None), (jid if jid and ":" not in jid else None)
+        except Exception:
+            logger.debug("ProEl ZPRP: tożsamość do księgi ukrytych nieustalona", exc_info=True)
+            return None, None
 
-    out = await set_attachment_visibility(payload, by_name=by_name, by_judge_id=by_judge_id)
+    # Tożsamość (baza) szuka się równolegle ze sprawdzeniem meczu w ZPRP;
+    # potrzebna dopiero do wpisu w księdze.
+    actor_task = asyncio.ensure_future(_resolve_actor())
+    try:
+        out = await set_attachment_visibility(payload, actor_task=actor_task)
+    finally:
+        if not actor_task.done():
+            actor_task.cancel()
     _journal_send_later(
         EVENT_ATTACHMENT_HIDDEN if payload.hidden else EVENT_ATTACHMENT_RESTORED,
         id_zawody=payload.zprp_match_id,
