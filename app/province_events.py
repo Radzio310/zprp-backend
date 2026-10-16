@@ -256,6 +256,8 @@ def _details(data: Mapping[str, Any]) -> Dict[str, Any]:
         "program": data.get("program") if isinstance(data.get("program"), list) else [],
         "title_image": dict(image) if image else None,
         "title_image_job": dict(image_job) if image_job else None,
+        # Wydarzenie typu exam prowadzi do egzaminu (deep-link w aplikacji).
+        "exam_id": data.get("exam_id") or None,
     }
 
 

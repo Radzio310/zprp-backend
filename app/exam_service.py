@@ -396,6 +396,8 @@ def exam_view(exam: Mapping[str, Any], now: datetime, *, full: bool) -> Dict[str
         "time_per_question_s": config["time_per_question_s"], "max_attempts": config["max_attempts"],
         "allow_back": config["allow_back"], "pass_percent": config["pass_percent"],
         "result_release": config["result_release"],
+        # Zasady jawne dla zdającego: przedsionek opisuje je wprost (zero cichych blokad).
+        "anti": dict(config["anti"]), "multi_scoring": config["multi_scoring"],
     }
     if full:
         base.update(config=config, bank_version=exam["bank_version"], voided=exam["voided"], event_ids=exam["event_ids"],
