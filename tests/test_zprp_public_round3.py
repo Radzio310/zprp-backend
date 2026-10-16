@@ -393,3 +393,30 @@ def test_czasy_kar_z_protokolu_baza():
     rows = [{"status": "in_progress", "zprp_match_id": "1"}, {"status": "finished", "zprp_match_id": "1"},
             {"status": "approved", "zprp_match_id": "2"}, {"status": "approved", "zprp_match_id": "1"}]
     assert PT.pick_row(rows, "1") == rows[3] and PT.pick_row(rows[:1], "1") is None
+
+
+def test_wykres_sezonu_tylko_wlasna_grupa_i_tabela_zprp(env):
+    """Rozgrywki z dwiema grupami pod jednym competition_id: symulacja nie miesza
+    grup, a ostatni punkt wykresu to miejsce z tabeli ZPRP."""
+    module, db, T = env
+
+    async def go(x):
+        now = datetime.now().replace(microsecond=0)
+        for tid in ("t8", "t9"):
+            await db.execute(insert(T["zprp_public_teams"]).values(
+                team_id=tid, season_id="S1", club_id="c3", season_name="2026/27", name=tid, **_h()))
+        # Druga grupa: wysoka wygrana przed pierwszą kolejką t1 - bez poprawki t8 wyprzedzał t1.
+        await db.execute(insert(T["zprp_public_matches"]).values(
+            match_id="g2", season_id="S1", competition_id="K1", competition_name="Liga", home_team_id="t8",
+            away_team_id="t9", home_club_id="c3", away_club_id="c3", home_team_name="t8", away_team_name="t9",
+            score_home=40, score_away=10, scheduled_at=now - timedelta(days=22), **_h()))
+        for tid, pos, table in (("t1", 2, "G1"), ("t2", 3, "G1"), ("t3", 1, "G1"), ("t8", 1, "G2"), ("t9", 2, "G2")):
+            await db.execute(insert(T["zprp_public_standings"]).values(
+                competition_id="K1", table_id=table, group_id="", team_id=tid, position=pos, team_name=tid,
+                matches=3 if tid == "t1" else 2, source_hash="h"))
+        return await x.team_season_chart("t1", "")
+
+    chart = run(env, go)
+    assert chart["rounds"][0]["position"] == 1
+    assert chart["table_size"] == 3
+    assert chart["rounds"][-1]["position"] == 2 and chart["rounds"][-1]["official"] is True

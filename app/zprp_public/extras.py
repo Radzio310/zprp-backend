@@ -33,6 +33,7 @@ from app.db import (
     zprp_public_rounds,
     zprp_public_scorers,
     zprp_public_seasons,
+    zprp_public_standings,
     zprp_public_teams,
 )
 from app.zprp_public import corrections, match_rules as MR, portal_rules as R
@@ -469,6 +470,24 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
         select(*[M.c[c] for c in _TEAM_COLS]).where(and_(M.c.competition_id == competition_id, M.c.score_home.is_not(None),
                                                          M.c.score_away.is_not(None), M.c.scheduled_at.is_not(None)))
     )]
+    # Rozgrywki bywają podzielone na grupy/tabele pod jednym competition_id. Symulacja
+    # po wszystkich meczach mieszała grupy (drużyna „1." na wykresie, a 3. w swojej
+    # tabeli). Liczymy wyłącznie mecze drużyn z TEJ SAMEJ tabeli co drużyna.
+    S = zprp_public_standings
+    mine_st = await database.fetch_one(
+        select(S.c.table_id, S.c.group_id, S.c.position, S.c.matches)
+        .where(and_(S.c.competition_id == competition_id, S.c.team_id == team_id)).limit(1)
+    )
+    table_size = None
+    if mine_st:
+        same = [S.c.competition_id == competition_id]
+        for col in ("table_id", "group_id"):
+            same.append(S.c[col].is_(None) if mine_st[col] is None else S.c[col] == mine_st[col])
+        peers = {r["team_id"] for r in await database.fetch_all(select(S.c.team_id).where(and_(*same)))}
+        if team_id in peers:
+            comp = [c for c in comp if c["home_team_id"] in peers and c["away_team_id"] in peers]
+            played = [m for m in played if m["home_team_id"] in peers and m["away_team_id"] in peers] or played
+            table_size = len(peers)
     days = {r["matchday_id"]: _dict(r) for r in await database.fetch_all(
         select(zprp_public_matchdays.c.matchday_id, zprp_public_matchdays.c.number, zprp_public_matchdays.c.sequence)
     )}
@@ -487,13 +506,20 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
             "opponent": m["away_team_name"] if home else m["home_team_name"], "home": home,
             "score": f'{m["score_home"]}:{m["score_away"]}', "scheduled_at": m["scheduled_at"],
         })
+    # Ostatni punkt = tabela ZPRP, gdy liczy tyle samo meczów (remisy punktowe ZPRP
+    # rozstrzyga też meczami bezpośrednimi - tego symulacja nie odtworzy).
+    official_position = mine_st["position"] if mine_st else None
+    if rounds and mine_st and mine_st["position"] is not None and int(mine_st["matches"] or 0) == len(rounds):
+        rounds[-1]["position"] = mine_st["position"]
+        rounds[-1]["official"] = True
     best = max(played, key=lambda m: (MR.margin_for(m, team_id) or -999, m["scheduled_at"]))
     best_card = None
     if (MR.margin_for(best, team_id) or 0) > 0:
         best_card = (await _cards([best]))[0]
         best_card["margin"] = MR.margin_for(best, team_id)
     return {"team_id": team_id, "season_id": team["season_id"], "competition_id": competition_id,
-            "rounds": rounds, "streaks": MR.streaks([r for r in results if r]), "best_match": best_card}
+            "rounds": rounds, "streaks": MR.streaks([r for r in results if r]), "best_match": best_card,
+            "table_size": table_size, "official_position": official_position}
 
 
 @router.get("/teams/{team_id}/calendar.ics")
