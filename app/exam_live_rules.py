@@ -165,10 +165,31 @@ def next_phase(phase: str, q_index: int, q_total: int, leaderboard_each: bool) -
     raise ExamError("LIVE_ENDED", "Ta sesja jest już zakończona.", 409)
 
 
+#: Polecenia pilota prowadzącego poza fazami (17.10.2026); lista idzie w `session.controls`.
+PILOT_ACTIONS = ("pause", "resume", "extend", "skip", "lock", "unlock")
+CONTROLS = ("pause", "resume", "extend", "skip", "lock", "unlock", "kick")
+EXTEND_DEFAULT_S = 15
+
+
+def pilot_refusal(action: str, phase: str, paused: bool) -> Optional[ExamError]:
+    """Czemu polecenie pilota nie działa teraz (zero cichych blokad) albo None."""
+    if phase == "end":
+        return ExamError("LIVE_ENDED", "Ta sesja jest już zakończona.", 409)
+    if action in ("lock", "unlock"):
+        return None
+    if phase != "question":
+        return ExamError("LIVE_BAD_PHASE", "To polecenie działa w trakcie pytania.", 409)
+    if action == "pause" and paused:
+        return ExamError("LIVE_PAUSED", "Pytanie jest już wstrzymane.", 409)
+    if action == "resume" and not paused:
+        return ExamError("LIVE_NOT_PAUSED", "Pytanie nie jest wstrzymane.", 409)
+    return None
+
+
 def control_action(action: str, phase: str) -> str:
     """Normalizacja akcji prowadzącego: next | reveal | end."""
     if action not in ("next", "reveal", "end"):
-        raise ExamError("LIVE_BAD_ACTION", "Nieznana akcja. Dozwolone: next (dalej), reveal (odsłoń), end (zakończ).")
+        raise ExamError("LIVE_BAD_ACTION", "Nieznana akcja. Dozwolone: next, reveal, end, pause, resume, extend, skip, lock, unlock.")
     if phase == "end":
         raise ExamError("LIVE_ENDED", "Ta sesja jest już zakończona.", 409)
     if action == "reveal" and phase != "question":
@@ -206,7 +227,9 @@ def clean_selection(question: Mapping[str, Any], selected: Any) -> List[str]:
     return keys
 
 
-def answer_refusal(phase: str, deadline: Optional[datetime], now: datetime) -> Optional[ExamError]:
+def answer_refusal(phase: str, deadline: Optional[datetime], now: datetime, paused: bool = False) -> Optional[ExamError]:
+    if phase == "question" and paused:
+        return ExamError("LIVE_PAUSED", "Prowadzący wstrzymał pytanie. Odpowiesz, gdy czas ruszy.", 409)
     if phase != "question":
         return ExamError("LIVE_NOT_ACCEPTING", "Teraz nie przyjmujemy odpowiedzi - poczekaj na następne pytanie.", 409)
     if deadline is not None and (now - X._aware(deadline)).total_seconds() > ANSWER_GRACE_S:
@@ -327,7 +350,14 @@ def _session_block(state: Mapping[str, Any], role: str) -> Dict[str, Any]:
         "auto_reveal": cfg["auto_reveal"], "late_join": cfg["late_join"],
         "joined": len(state["participants"]), "scope": s.get("scope"), "province": s.get("province"),
         "started_at": _iso(s.get("phase_started_at")),
+        "paused": s["phase"] == "question" and cfg.get("paused_left") is not None,
+        "locked": bool(cfg.get("locked")),
     }
+    if role == "host":
+        block["controls"] = list(CONTROLS)
+        nq = state.get("next_question")
+        block["next"] = ({"index": s["q_index"] + 1, "number": nq.get("number"), "rule": nq.get("rule"), "kind": nq.get("kind"),
+                          "multi": bool(nq.get("multi")), "text": nq.get("text")} if nq else None)
     if role in ("host", "projector"):
         block["pin"] = s["pin"]
         block["links"] = dict(state.get("links") or {})
@@ -355,6 +385,11 @@ def _question_block(state: Mapping[str, Any], role: str, now: datetime) -> Optio
     block["time_s"] = s["config"]["question_time_s"]
     block["deadline_at"] = _iso(s.get("deadline_at"))
     block["seconds_left"] = _seconds_left(s.get("deadline_at"), now) if s["phase"] == "question" else 0.0
+    paused_left = s["config"].get("paused_left")
+    if s["phase"] == "question" and paused_left is not None:
+        # Pauza: zegar zamrożony, termin pusty (przesuwa się przy wznowieniu).
+        block["paused"] = True
+        block["seconds_left"] = round(float(paused_left), 2)
     return block
 
 

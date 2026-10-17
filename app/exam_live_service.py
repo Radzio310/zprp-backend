@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 
 from app import exam_live_rules as L
 from app import exam_rules as X
@@ -178,7 +178,12 @@ def links_for(token: str, projector_token: Optional[str] = None) -> Dict[str, st
     Rzutnik i jego QR mają własny token; `join_url` niesie token dołączania."""
     ptoken = projector_token or token
     return {"join_url": f"/exam-live/join/{token}", "qr_url": f"/exam-live/projector/{ptoken}/qr.svg",
-            "projector_url": f"/exam-live/projector/{ptoken}", "join_page": "/exam-live/join"}
+            "projector_url": f"/exam-live/projector/{ptoken}", "join_page": "/exam-live/join",
+            # 17.10.2026: krótki adres z markowego kodu i macierz kodu dla animowanego rysowania
+            "join_short": f"/exam-live/j/{token}", "qr_json": f"/exam-live/projector/{ptoken}/qr.json",
+            "qr_brand": f"/exam-live/projector/{ptoken}/qr.svg?style=brand",
+            "qr_json_url": f"/exam-live/projector/{ptoken}/qr.json", "poster_url": f"/exam-live/projector/{ptoken}/poster.pdf",
+            "story_url": f"/exam-live/projector/{ptoken}/story.png"}
 
 
 async def load_state(ls: LiveStore, session_id: str, now: datetime) -> Dict[str, Any]:
@@ -188,12 +193,16 @@ async def load_state(ls: LiveStore, session_id: str, now: datetime) -> Dict[str,
     parts = await _participants(ls, session_id)
     answers: Dict[str, Dict[str, Any]] = {}
     question = None
+    next_question = None
     if s["phase"] in ("question", "reveal") and 0 <= s["q_index"] < s["q_total"]:
         answers = await _answers_for(ls, session_id, s["q_index"])
         bank = await S.load_bank(ls.exam, s["bank_version"])
         question = bank.get(s["question_ids"][s["q_index"]])
+    if s["phase"] != "end" and s["q_index"] + 1 < s["q_total"]:
+        # Zapowiedź dla prowadzącego (`session.next`); bank siedzi w pamięci podręcznej.
+        next_question = (await S.load_bank(ls.exam, s["bank_version"])).get(s["question_ids"][s["q_index"] + 1])
     return {
-        "session": s, "participants": parts, "answers": answers, "question": question,
+        "session": s, "participants": parts, "answers": answers, "question": question, "next_question": next_question,
         "result": S._loads(s.get("result_json"), None) if s["phase"] == "end" else None,
         "links": links_for(s["token"], s.get("projector_token")), "server_now": now,
     }
@@ -300,8 +309,10 @@ async def _finish(ls: LiveStore, s: Mapping[str, Any], now: datetime) -> None:
     bank = await S.load_bank(ls.exam, s["bank_version"])
     parts = await _participants(ls, s["id"])
     answers = await _all_answers(ls, s["id"])
+    skipped = set(s["config"].get("skipped") or [])
     result = L.build_result(character=s["character"], pass_percent=s["config"].get("pass_percent"),
-                            question_ids=s["question_ids"], bank=bank, participants=parts, answers=answers)
+                            question_ids=[q for q in s["question_ids"] if q not in skipped] or s["question_ids"],
+                            bank=bank, participants=parts, answers=[a for a in answers if a["qid"] not in skipped])
     await _bump(ls, s["id"], now, phase="end", phase_started_at=now, deadline_at=None, ended_at=now,
                 result_json=S._dumps(result))
 
@@ -331,6 +342,9 @@ async def control(ls: LiveStore, who: S.Who, session_id: str, action: str, now: 
                 expect.get("from_index") is not None and expect["from_index"] != s["q_index"]):
             raise ExamError("LIVE_STALE", "Faza zdążyła się już zmienić (np. skończył się czas). Odśwież widok i spróbuj ponownie.",
                             409, {"phase": s["phase"], "q_index": s["q_index"]})
+        if action in L.PILOT_ACTIONS:
+            await _pilot(ls, s, action, now, expect)
+            return await load_state(ls, session_id, now)
         action = L.control_action(action, s["phase"])
         if action == "end":
             if s["phase"] == "question":
@@ -348,6 +362,83 @@ async def control(ls: LiveStore, who: S.Who, session_id: str, action: str, now: 
         else:
             await _bump(ls, session_id, now, phase=phase, phase_started_at=now, deadline_at=None)
     return await load_state(ls, session_id, now)
+
+
+async def _pilot(ls: LiveStore, s: Mapping[str, Any], action: str, now: datetime, extra: Mapping[str, Any]) -> None:
+    """Pauza, wznowienie, dodatkowy czas, pominięcie pytania, zamknięcie sali (17.10.2026).
+    Stan w `config_json` (bez migracji tabel): `paused_left`, `locked`, `skipped`, `kicked`."""
+    cfg = dict(s["config"])
+    paused = cfg.get("paused_left") is not None
+    refusal = L.pilot_refusal(action, s["phase"], paused)
+    if refusal:
+        raise refusal
+    sid = s["id"]
+    if action in ("lock", "unlock"):
+        cfg["locked"] = action == "lock"
+        await _bump(ls, sid, now, config_json=S._dumps(cfg))
+        return
+    total = float(cfg["question_time_s"])
+    if action == "pause":
+        left = max(0.0, (s["deadline_at"] - now).total_seconds()) if s["deadline_at"] else total
+        cfg["paused_left"] = round(left, 3)
+        await _bump(ls, sid, now, config_json=S._dumps(cfg), deadline_at=None)
+    elif action == "resume":
+        left = float(cfg.pop("paused_left") or 0)
+        # Start pytania przesunięty o pauzę: punkty za szybkość liczą tylko czas, gdy zegar szedł.
+        await _bump(ls, sid, now, config_json=S._dumps(cfg), deadline_at=now + timedelta(seconds=left),
+                    phase_started_at=now - timedelta(seconds=max(0.0, total - left)))
+    elif action == "extend":
+        raw = extra.get("seconds")
+        seconds = X._int(raw if raw is not None else L.EXTEND_DEFAULT_S, "Dodatkowy czas (s)", 5, 120)
+        if paused:
+            cfg["paused_left"] = float(cfg["paused_left"]) + seconds
+            await _bump(ls, sid, now, config_json=S._dumps(cfg))
+        else:
+            base = s["deadline_at"] if s["deadline_at"] and s["deadline_at"] > now else now
+            await _bump(ls, sid, now, deadline_at=base + timedelta(seconds=seconds))
+    elif action == "skip":
+        # Pytanie wypada z sesji: odpowiedzi kasujemy, nie liczy się do wyniku ani do progu.
+        qid = s["question_ids"][s["q_index"]]
+        cfg.pop("paused_left", None)
+        cfg["skipped"] = list(dict.fromkeys(list(cfg.get("skipped") or []) + [qid]))
+        t = ls.t.answers
+        await ls.database.execute(delete(t).where((t.c.session_id == sid) & (t.c.q_index == s["q_index"])))
+        await _commit_scores(ls, sid)
+        if s["q_index"] + 1 < s["q_total"]:
+            await _bump(ls, sid, now, config_json=S._dumps(cfg), q_index=s["q_index"] + 1, phase_started_at=now,
+                        deadline_at=now + timedelta(seconds=total))
+        else:
+            await _bump(ls, sid, now, config_json=S._dumps(cfg))
+            await _finish(ls, await session_row(ls, sid), now)
+
+
+async def kick(ls: LiveStore, who: S.Who, session_id: str, participant_id: str, now: datetime) -> Dict[str, Any]:
+    """Prowadzący usuwa osobę z sali: znika z listy i rankingu, nie wraca tym samym kontem ani biletem gościa."""
+    async with lock_for(session_id):
+        s = await session_row(ls, session_id)
+        if s["host_id"] != who.judge_id:
+            raise ExamError("LIVE_NOT_HOST", "Z sali usuwa tylko prowadzący.", 403)
+        if s["phase"] == "end":
+            raise ExamError("LIVE_ENDED", "Ta sesja jest już zakończona.", 409)
+        t = ls.t.participants
+        raw = await ls.database.fetch_one(select(t).where((t.c.session_id == session_id) & (t.c.id == participant_id)))
+        if not raw:
+            raise ExamError("LIVE_NO_PARTICIPANT", "Tej osoby już nie ma w sali.", 404)
+        p = _row(raw)
+        cfg = dict(s["config"])
+        kicked = list(cfg.get("kicked") or [])
+        kicked.append(f"j:{p['judge_id']}" if p.get("judge_id") else f"g:{p.get('guest_token')}")
+        cfg["kicked"] = kicked[-500:]
+        a = ls.t.answers
+        await ls.database.execute(delete(a).where((a.c.session_id == session_id) & (a.c.participant_id == participant_id)))
+        await ls.database.execute(delete(t).where(t.c.id == participant_id))
+        await _bump(ls, session_id, now, config_json=S._dumps(cfg))
+    return await load_state(ls, session_id, now)
+
+
+def was_kicked(s: Mapping[str, Any], *, judge_id: Optional[str] = None, guest_token: Optional[str] = None) -> bool:
+    kicked = s["config"].get("kicked") or []
+    return (judge_id is not None and f"j:{judge_id}" in kicked) or (guest_token is not None and f"g:{guest_token}" in kicked)
 
 
 async def patch_session(ls: LiveStore, who: S.Who, session_id: str, body: Mapping[str, Any], now: datetime) -> Dict[str, Any]:
@@ -411,6 +502,10 @@ async def _admit(ls: LiveStore, s: Mapping[str, Any], now: datetime, *, kind: st
         fresh = await session_row(ls, s["id"])
         if fresh["phase"] == "end":
             raise ExamError("LIVE_ENDED", "Ta sesja jest już zakończona.", 409)
+        if judge_id and was_kicked(fresh, judge_id=judge_id):
+            raise ExamError("LIVE_KICKED", "Prowadzący usunął Cię z tej sesji.", 403)
+        if fresh["config"].get("locked"):
+            raise ExamError("LIVE_LOCKED", "Prowadzący zamknął salę - nowe osoby nie mogą już dołączyć.", 409)
         if fresh["phase"] != "lobby" and not fresh["config"]["late_join"]:
             raise ExamError("LIVE_STARTED", "Ta sesja już wystartowała, a prowadzący nie pozwala dołączać po starcie.", 409)
         parts = await _participants(ls, s["id"])
@@ -451,7 +546,7 @@ async def submit_answer(ls: LiveStore, session_id: str, participant_id: str, sel
         if s["phase"] == "question" and s["config"]["auto_reveal"] and s["deadline_at"] and now >= s["deadline_at"] + timedelta(seconds=L.ANSWER_GRACE_S):
             await _reveal(ls, s, now)
             s = await session_row(ls, session_id)
-        refusal = L.answer_refusal(s["phase"], s["deadline_at"], now)
+        refusal = L.answer_refusal(s["phase"], s["deadline_at"], now, s["config"].get("paused_left") is not None)
         if refusal:
             raise refusal
         t = ls.t.answers

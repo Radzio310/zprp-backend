@@ -21,17 +21,21 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from app import exam_live_brand as BR
 from app import exam_live_rules as L
 from app import exam_live_service as V
 from app import exam_service as S
@@ -66,6 +70,9 @@ class LiveDeps:
     identify: Callable[[str], Awaitable[Optional[str]]]
     now: Callable[[], datetime] = _utcnow
     hub: Hub = field(default_factory=Hub)
+    #: async (login, hasło) -> {access_token, judge_id, name, expires_in}; logowanie kontem BAZY ze strony WWW.
+    #: Rzuca ExamError z kodem i zdaniem. `None` = logowanie WWW wyłączone (503).
+    login: Optional[Callable[[str, str], Awaitable[Dict[str, Any]]]] = None
 
 
 class _Throttle:
@@ -108,6 +115,8 @@ class ControlBody(BaseModel):
     action: str
     from_phase: Optional[str] = None
     from_index: Optional[int] = None
+    #: tylko `extend`: ile sekund dołożyć (5-120, domyślnie 15)
+    seconds: Optional[int] = None
 
 
 class PatchBody(BaseModel):
@@ -122,6 +131,11 @@ class JoinBody(BaseModel):
     pin: Optional[str] = None
     token: Optional[str] = None
     nick: Optional[str] = None
+
+
+class WebLoginBody(BaseModel):
+    username: str = ""
+    password: str = ""
 
 
 class AnswerBody(BaseModel):
@@ -140,8 +154,8 @@ async def _run(call: Awaitable[Any]) -> Any:
         raise _http(error)
 
 
-def _page(name: str) -> HTMLResponse:
-    html = (WEB_DIR / name).read_text(encoding="utf-8")
+def _page(name: str, og: str = "") -> HTMLResponse:
+    html = (WEB_DIR / name).read_text(encoding="utf-8").replace("<!--OG-->", og)
     return HTMLResponse(html, headers={"Content-Security-Policy": PAGE_CSP, "Cache-Control": "no-store",
                                        "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
 
@@ -196,7 +210,8 @@ def build_router(deps: LiveDeps) -> APIRouter:
                     await render(s["id"])
 
             hub.arm(s["id"], (s["q_index"], s["deadline_at"].isoformat()), delay, fire)
-        elif s["phase"] != "question":
+        else:
+            # Poza pytaniem albo w pauzie (termin pusty): stary zegar nie może odsłonić pytania.
             hub.forget(s["id"])
 
     async def render(sid: str) -> None:
@@ -209,7 +224,17 @@ def build_router(deps: LiveDeps) -> APIRouter:
         shared: Dict[str, Dict[str, Any]] = {}
         for conn in conns:
             if conn.role == "player":
-                view = L.view_for("player", state, viewer_of(state, conn.participant_id), now)
+                viewer = viewer_of(state, conn.participant_id)
+                if viewer is None:
+                    # Usunięty z sali przez prowadzącego: mówimy wprost i zamykamy gniazdo.
+                    await hub.send(sid, conn, {"type": "error", "code": "LIVE_KICKED", "message": "Prowadzący usunął Cię z tej sesji."})
+                    hub.remove(sid, conn)
+                    try:
+                        await conn.ws.close(code=WS_FORBIDDEN)
+                    except Exception:  # noqa: BLE001 - gniazdo mogło już zniknąć
+                        pass
+                    continue
+                view = L.view_for("player", state, viewer, now)
             else:
                 view = shared.get(conn.role) or shared.setdefault(conn.role, L.view_for(conn.role, state, None, now))
             await hub.send(sid, conn, {"type": "snapshot", "rev": view["rev"], "snapshot": view})
@@ -278,8 +303,11 @@ def build_router(deps: LiveDeps) -> APIRouter:
     async def guest_state(sid: str, request: Request, response: Response, gt: str = Query(""),
                           since_rev: Optional[int] = Query(None)) -> Dict[str, Any]:
         async def go() -> Dict[str, Any]:
-            p = await V.participant_by_guest(ls(), sid, _guest_from(request, gt))
+            token = _guest_from(request, gt)
+            p = await V.participant_by_guest(ls(), sid, token)
             if not p:
+                if V.was_kicked(await V.session_row(ls(), sid), guest_token=token):
+                    raise ExamError("LIVE_KICKED", "Prowadzący usunął Cię z tej sesji.", 403)
                 raise ExamError("LIVE_NOT_JOINED", "Nie rozpoznaję Cię w tej sesji. Dołącz ponownie kodem PIN.", 403)
             state = await fresh_state(sid)
             return view_response(state, "player", p["id"], since_rev, response)
@@ -313,31 +341,239 @@ def build_router(deps: LiveDeps) -> APIRouter:
 
         return await _run(go())
 
-    @router.get("/projector/{token}/qr.svg", summary="Kod QR do dołączenia (SVG)")
-    async def projector_qr(token: str, request: Request) -> Response:
-        import qrcode
-        import qrcode.image.svg
+    # -- oprawa marki: kod QR, karty, plakat ------------------------------
 
+    def join_url_for(request: Request, s: Mapping[str, Any]) -> str:
+        """Adres z kodu QR: krótki `/exam-live/j/{token}` (mniej modułów = większe kropki z końca sali)."""
+        return f"{_base_url(request)}/exam-live/j/{s['token']}"
+
+    def brand_of(s: Mapping[str, Any]) -> Dict[str, Any]:
+        palette = BR.palette_for(s.get("scope"), s.get("province"))
+        return {"palette": palette, "crest_url": f"/exam-live/assets/img/{BR.crest_name(palette)}",
+                "province_label": BR.province_label(s.get("scope"), s.get("province"))}
+
+    def qr_svg_response(request: Request, s: Mapping[str, Any], style: str) -> Response:
+        url = join_url_for(request, s) if style == "brand" else f"{_base_url(request)}/exam-live/join/{s['token']}"
+        if style == "brand":
+            palette = BR.palette_for(s.get("scope"), s.get("province"))
+            body = BR.brand_svg(url, palette, crest=BR.crest_data_uri(palette)).encode("utf-8")
+        else:
+            import qrcode
+            import qrcode.image.svg
+
+            img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=1,
+                              error_correction=qrcode.constants.ERROR_CORRECT_M)
+            buf = io.BytesIO()
+            img.save(buf)
+            body = buf.getvalue()
+        return Response(body, media_type="image/svg+xml", headers={"Cache-Control": "private, max-age=600"})
+
+    def qr_json_payload(request: Request, s: Mapping[str, Any]) -> Dict[str, Any]:
+        brand = brand_of(s)
+        extra: Dict[str, Any] = {"title": s.get("title") or "", "character": s.get("character"), "pin": s.get("pin"),
+                                 "province_label": brand["province_label"],
+                                 "join_page": f"{_base_url(request)}/exam-live/join"}
+        return BR.qr_json(join_url_for(request, s), brand["palette"], brand["crest_url"], extra)
+
+    async def hosted_session(sid: str, who: S.Who) -> Dict[str, Any]:
+        """Kod, plakat i obraz sesji: jak linki w `session.links` - prowadzący (admin też)."""
+        s = await V.session_row(ls(), sid)
+        if s["host_id"] != who.judge_id and not who.is_admin:
+            raise ExamError("LIVE_NOT_HOST", "Kod i plakat tej sesji ma tylko prowadzący.", 403)
+        return s
+
+    @router.get("/{sid}/qr.svg", summary="Kod QR sesji (SVG): style=brand (kropki w barwach okręgu, herb) albo plain")
+    async def session_qr_svg(sid: str, request: Request, style: str = Query("brand"),
+                             who: S.Who = Depends(deps.who)) -> Response:
+        s = await _run(hosted_session(sid, who))
+        return qr_svg_response(request, s, style)
+
+    @router.get("/{sid}/qr.json", summary="Macierz kodu QR + barwy + herb (aplikacja rysuje animowany kod)")
+    async def session_qr_json(sid: str, request: Request, response: Response, who: S.Who = Depends(deps.who)) -> Dict[str, Any]:
+        s = await _run(hosted_session(sid, who))
+        response.headers["Cache-Control"] = "private, max-age=600"
+        return qr_json_payload(request, s)
+
+    @router.get("/{sid}/story.png", summary="Obraz 9:16 (1080x1920) do udostępnienia")
+    async def session_story(sid: str, request: Request, who: S.Who = Depends(deps.who)) -> Response:
+        return await story_response(request, await _run(hosted_session(sid, who)))
+
+    @router.get("/projector/{token}/story.png", summary="Obraz 9:16 przez token rzutnika (jak link rzutnika)")
+    async def projector_story(token: str, request: Request) -> Response:
+        return await story_response(request, await _run(V.session_by_projector(ls(), token)))
+
+    @router.get("/projector/{token}/poster.pdf", summary="Plakat A4 przez token rzutnika (jak link rzutnika)")
+    async def projector_poster(token: str, request: Request) -> Response:
+        return await poster_response(request, await _run(V.session_by_projector(ls(), token)))
+
+    async def story_response(request: Request, s: Mapping[str, Any]) -> Response:
+        brand = brand_of(s)
+        host = _base_url(request).split("://", 1)[-1]
+        png = await run_in_threadpool(
+            lambda: BR.story_png(title=s.get("title") or "", pin=s["pin"], character=s.get("character") or "quiz",
+                                 palette=brand["palette"], url=join_url_for(request, s), province_label=brand["province_label"],
+                                 join_hint=f"albo {host}/exam-live/join i kod PIN"))
+        return Response(png, media_type="image/png", headers={"Cache-Control": "private, max-age=300",
+                                                              "Content-Disposition": f'inline; filename="egzamin-{s["pin"]}.png"'})
+
+    def poster_html_for(request: Request, s: Mapping[str, Any]) -> str:
+        from app.exam_report_html import seal_svg
+
+        brand = brand_of(s)
+        when = s.get("created_at") or deps.now()
+        return BR.poster_html(title=s.get("title") or "Egzamin z przepisów", pin=s["pin"], character=s.get("character") or "quiz",
+                              palette=brand["palette"], url=join_url_for(request, s),
+                              join_page=f"{_base_url(request)}/exam-live/join", province_label=brand["province_label"],
+                              seal=seal_svg(132, brand["palette"]["from"], "NA ŻYWO", when.strftime("%d.%m.%Y")))
+
+    @router.get("/{sid}/poster.pdf", summary="Plakat A4 do druku (weasyprint)")
+    async def session_poster(sid: str, request: Request, who: S.Who = Depends(deps.who)) -> Response:
+        return await poster_response(request, await _run(hosted_session(sid, who)))
+
+    async def poster_response(request: Request, s: Mapping[str, Any]) -> Response:
+        html = poster_html_for(request, s)
+        try:
+            from weasyprint import HTML  # ciężka zależność, ładowana dopiero tutaj
+        except Exception:  # noqa: BLE001 - brak biblioteki albo jej natywnych zależności
+            raise _http(ExamError("LIVE_PDF_UNAVAILABLE", "Serwer nie składa teraz PDF-ów. Udostępnij obraz albo spróbuj za chwilę.", 503))
+        pdf = await run_in_threadpool(lambda: HTML(string=html).write_pdf())
+        return Response(pdf, media_type="application/pdf",
+                        headers={"Content-Disposition": f'inline; filename="plakat-{s["pin"]}.pdf"', "Cache-Control": "private, max-age=300"})
+
+    card_cache: Dict[tuple, bytes] = {}
+
+    async def card_png(request: Request, s: Optional[Mapping[str, Any]]) -> bytes:
+        live = s is not None and s["phase"] != "end"
+        key: tuple = (s["token"], s.get("title"), s.get("pin"), s.get("province"), s.get("scope"), s.get("character"),
+                      _base_url(request)) if live else ("generic",)
+        if key in card_cache:
+            return card_cache[key]
+        if live:
+            brand = brand_of(s)
+            png = await run_in_threadpool(
+                lambda: BR.og_card_png(title=s.get("title") or "", pin=s.get("pin"), character=s.get("character") or "quiz",
+                                       palette=brand["palette"], url=join_url_for(request, s), province_label=brand["province_label"]))
+        else:
+            png = await run_in_threadpool(
+                lambda: BR.og_card_png(title="Egzamin z przepisów na żywo", pin=None, character="quiz",
+                                       palette=BR.palette_for("national", None), url=None, province_label=""))
+        if len(card_cache) > 64:
+            card_cache.clear()
+        card_cache[key] = png
+        return png
+
+    async def session_for_join(token: str) -> Optional[Dict[str, Any]]:
+        try:
+            return await V.session_by_token(ls(), token)
+        except ExamError:
+            return None
+
+    def og_meta(request: Request, s: Optional[Mapping[str, Any]], token: Optional[str]) -> str:
+        """Karta podglądu linku (Messenger, WhatsApp, SMS): tytuł, opis z PIN-em i obraz 1200x630."""
+        base = _base_url(request)
+        if s is not None and s["phase"] != "end" and token:
+            brand = brand_of(s)
+            kind = "Egzamin na sali" if s.get("character") == "exam" else "Quiz szkoleniowy"
+            title = f"Dołącz: {s.get('title') or 'Egzamin z przepisów'}"
+            desc = (f"{kind} · {brand['province_label']} · na żywo w BAZIE. Kod PIN {s.get('pin')}. "
+                    "Zaloguj się kontem BAZY i odpowiadaj z telefonu.")
+            image, url = f"{base}/exam-live/join/{token}/card.png", f"{base}/exam-live/j/{token}"
+        else:
+            title = "Egzamin z przepisów na żywo"
+            desc = "Dołącz kodem PIN z ekranu prowadzącego i odpowiadaj z telefonu. BAZA · ZPRP."
+            image, url = f"{base}/exam-live/card.png", f"{base}/exam-live/join"
+
+        def e(v: Any) -> str:
+            return escape(str(v), quote=True)
+
+        return (f'<meta property="og:type" content="website"><meta property="og:site_name" content="BAZA">'
+                f'<meta property="og:title" content="{e(title)}"><meta property="og:description" content="{e(desc)}">'
+                f'<meta property="og:url" content="{e(url)}"><meta property="og:image" content="{e(image)}">'
+                f'<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">'
+                f'<meta name="twitter:card" content="summary_large_image"><meta name="description" content="{e(desc)}">')
+
+    @router.get("/card.png", summary="Ogólna karta podglądu linku (1200x630)")
+    async def generic_card(request: Request) -> Response:
+        return Response(await card_png(request, None), media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+
+    @router.get("/join/{token}/card.png", summary="Karta podglądu linku sesji (Open Graph, 1200x630)")
+    async def join_card(token: str, request: Request) -> Response:
+        s = await session_for_join(token)
+        return Response(await card_png(request, s), media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
+
+    @router.get("/peek", summary="Co to za sesja (przed dołączeniem): nazwa, herb, czy wpuszcza gości")
+    async def peek(request: Request, response: Response, pin: Optional[str] = Query(None),
+                   token: Optional[str] = Query(None)) -> Dict[str, Any]:
+        key = _ip(request)
+        try:
+            throttle.check(key)
+            s = await V.session_by_ref(ls(), {"pin": pin, "token": token}, deps.now())
+        except ExamError as error:
+            if error.code in ("LIVE_PIN_UNKNOWN", "LIVE_BAD_PIN", "LIVE_NOT_FOUND"):
+                throttle.fail(key)
+            raise _http(error)
+        response.headers["Cache-Control"] = "no-store"
+        brand = brand_of(s)
+        late = bool(s["config"].get("late_join"))
+        locked = bool(s["config"].get("locked"))
+        return {"session_id": s["id"], "title": s.get("title") or "", "character": s.get("character"), "scope": s.get("scope"),
+                "province": s.get("province"), "province_label": brand["province_label"], "phase": s["phase"],
+                "q_total": s["q_total"], "guests_allowed": bool(s["guests_allowed"]), "late_join": late,
+                "locked": locked, "joinable": not locked and (s["phase"] == "lobby" or late), "brand": {"palette": brand["palette"], "crest_url": brand["crest_url"]}}
+
+    login_throttle = _Throttle(limit=10)
+
+    @router.post("/web-login", summary="Logowanie kontem BAZY ze strony uczestnika (te same dane co w aplikacji)")
+    async def web_login(request: Request, body: WebLoginBody) -> Dict[str, Any]:
+        key = _ip(request)
+        try:
+            login_throttle.check(key)
+            if not deps.login:
+                raise ExamError("LIVE_LOGIN_UNAVAILABLE", "Logowanie ze strony jest chwilowo wyłączone. Dołącz w aplikacji BAZA.", 503)
+            if not body.username.strip() or not body.password:
+                raise ExamError("LIVE_LOGIN_EMPTY", "Wpisz login i hasło - te same, co w aplikacji BAZA.")
+            try:
+                return await deps.login(body.username.strip(), body.password)
+            except ExamError as error:
+                if error.status in (401, 403):
+                    login_throttle.fail(key)
+                raise
+        except ExamError as error:
+            raise _http(error)
+
+    @router.get("/projector/{token}/qr.svg", summary="Kod QR do dołączenia (SVG; style=brand dla markowego)")
+    async def projector_qr(token: str, request: Request, style: str = Query("plain")) -> Response:
         s = await _run(V.session_by_projector(ls(), token))
-        url = f"{_base_url(request)}/exam-live/join/{s['token']}"
-        img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=1,
-                          error_correction=qrcode.constants.ERROR_CORRECT_M)
-        buf = io.BytesIO()
-        img.save(buf)
-        return Response(buf.getvalue(), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+        return qr_svg_response(request, s, style)
+
+    @router.get("/projector/{token}/qr.json", summary="Macierz kodu QR dla rzutnika (animowane budowanie kodu)")
+    async def projector_qr_json(token: str, request: Request, response: Response) -> Dict[str, Any]:
+        s = await _run(V.session_by_projector(ls(), token))
+        response.headers["Cache-Control"] = "private, max-age=600"
+        return qr_json_payload(request, s)
 
     @router.get("/projector/{token}", summary="Strona rzutnika", response_class=HTMLResponse)
     async def projector_page(token: str) -> HTMLResponse:
         await _run(V.session_by_projector(ls(), token))
         return _page("projector.html")
 
-    @router.get("/join", summary="Strona gościa: PIN + nick", response_class=HTMLResponse)
-    async def join_page() -> HTMLResponse:
-        return _page("guest.html")
+    @router.get("/join", summary="Strona uczestnika: PIN, logowanie kontem BAZY albo nick gościa", response_class=HTMLResponse)
+    async def join_page(request: Request) -> HTMLResponse:
+        return _page("guest.html", og_meta(request, None, None))
 
-    @router.get("/join/{token}", summary="Strona gościa z kodu QR", response_class=HTMLResponse)
-    async def join_page_token(token: str) -> HTMLResponse:
-        return _page("guest.html")
+    @router.get("/join/{token}", summary="Strona uczestnika z linku (karta podglądu Open Graph)", response_class=HTMLResponse)
+    async def join_page_token(token: str, request: Request) -> HTMLResponse:
+        return _page("guest.html", og_meta(request, await session_for_join(token), token))
+
+    @router.get("/j/{token}", summary="Krótki adres z kodu QR (ta sama strona uczestnika)", response_class=HTMLResponse)
+    async def join_page_short(token: str, request: Request) -> HTMLResponse:
+        return _page("guest.html", og_meta(request, await session_for_join(token), token))
+
+    @router.get("/assets/img/{name:path}", summary="Herby okręgów i znak ZPRP (kod QR, strony, karty)")
+    async def asset_img(name: str) -> Response:
+        if not re.fullmatch(r"(zprp|okregi/[a-z_]+)\.png", name) or not (BR.IMG_DIR / name).exists():
+            raise HTTPException(404, detail={"code": "LIVE_ASSET", "message": "Nie ma takiego pliku."})
+        return Response((BR.IMG_DIR / name).read_bytes(), media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
 
     @router.get("/assets/{name}", summary="Style i skrypty stron rzutnika i gościa")
     async def asset(name: str) -> Response:
@@ -357,6 +593,8 @@ def build_router(deps: LiveDeps) -> APIRouter:
                 return view_response(state, "host", None, since_rev, response)
             p = await V.participant_by_judge(ls(), sid, who.judge_id)
             if not p:
+                if V.was_kicked(s, judge_id=who.judge_id):
+                    raise ExamError("LIVE_KICKED", "Prowadzący usunął Cię z tej sesji.", 403)
                 raise ExamError("LIVE_NOT_JOINED", "Nie dołączyłeś(-aś) do tej sesji. Wpisz kod PIN, żeby dołączyć.", 403)
             state = await fresh_state(sid)
             return view_response(state, "player", p["id"], since_rev, response)
@@ -366,8 +604,14 @@ def build_router(deps: LiveDeps) -> APIRouter:
     @router.post("/{sid}/control", summary="Sterowanie fazami (tylko prowadzący): next | reveal | end")
     async def control(sid: str, body: ControlBody, who: S.Who = Depends(deps.who)) -> Dict[str, Any]:
         state = await _run(V.control(ls(), who, sid, body.action, deps.now(),
-                                     {"from_phase": body.from_phase, "from_index": body.from_index}))
+                                     {"from_phase": body.from_phase, "from_index": body.from_index, "seconds": body.seconds}))
         arm_timer(state)
+        changed(sid, immediate=True)
+        return L.view_for("host", state, None, deps.now())
+
+    @router.delete("/{sid}/participants/{pid}", summary="Usuń osobę z sali (prowadzący) -> widok hosta")
+    async def kick(sid: str, pid: str, who: S.Who = Depends(deps.who)) -> Dict[str, Any]:
+        state = await _run(V.kick(ls(), who, sid, pid, deps.now()))
         changed(sid, immediate=True)
         return L.view_for("host", state, None, deps.now())
 
@@ -499,7 +743,8 @@ def build_router(deps: LiveDeps) -> APIRouter:
                 s = await V.session_row(ls(), sid)
                 who = S.Who(judge_id=s["host_id"], name=s.get("host_name") or "", province="", is_admin=False, badges={})
                 state = await V.control(ls(), who, sid, str(data.get("action") or ""), deps.now(),
-                                        {"from_phase": data.get("from_phase"), "from_index": data.get("from_index")})
+                                        {"from_phase": data.get("from_phase"), "from_index": data.get("from_index"),
+                                         "seconds": data.get("seconds")})
                 arm_timer(state)
                 changed(sid, immediate=True)
             except ExamError as error:
