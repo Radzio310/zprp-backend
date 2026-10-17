@@ -365,7 +365,8 @@ def _cover(report: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], options
     crest = "" if national else crest_data_uri(exam.get("province"))
     emblem = (f'<img class="crest" src="{crest}" alt="Herb okręgu"/>' if crest
               else seal_svg(150, th["seal"] if options["theme"] != "zprp" else "#FFFFFF", "KOMISJA", when.strftime("%d.%m.%Y")))
-    scope = "Egzamin ogólnopolski" if national else f"Egzamin okręgowy · {exam.get('province') or ''}"
+    scope = (f"Egzamin ogólnopolski · wyniki okręgu {exam.get('cut_province')}" if exam.get("cut_province")
+             else "Egzamin ogólnopolski" if national else f"Egzamin okręgowy · {exam.get('province') or ''}")
     sections = "".join(f"<li>{_e(SECTION_LABELS[k])}</li>" for k in options["sections"])
     facts = [
         ("zdawalność", _rate(s.get("pass_rate"))), ("przystąpili", f'{s["people"]} z {s["invited"]}'),
@@ -506,7 +507,8 @@ def render_report(report: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], 
             parts.append(_provinces(no, report, th))
         elif key == "cards":
             parts.append(_cards(no, rows, th, progress))
-    scope = "Egzamin ogólnopolski" if exam.get("scope") == "national" else f"Egzamin okręgowy · {exam.get('province') or ''}"
+    scope = (f"Egzamin ogólnopolski · wyniki okręgu {exam.get('cut_province')}" if exam.get("cut_province")
+             else "Egzamin ogólnopolski" if exam.get("scope") == "national" else f"Egzamin okręgowy · {exam.get('province') or ''}")
     seal = seal_svg(96, th["seal"], "KOMISJA", when.strftime("%d.%m.%Y")) if options.get("seal") else ""
     anon = " · dane zanonimizowane" if options.get("anonymize") else ""
     cover = _cover(report, rows, options, th, when) if (options.get("layout") or {}).get("cover") else ""

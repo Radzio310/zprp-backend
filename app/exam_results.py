@@ -9,8 +9,8 @@ Egzamin z przepisów - wyniki komisji i eksport (etap 4, 16.10.2026). Trasy cien
   GET  /exam-exports/jobs/{job_id}             postęp zadania (tylko zlecający)
   GET  /exam-exports/files/{token}             plik (bez logowania - token jest sekretem, 30 min)
 
-Uprawnienia jak w komisji (`_managed_exam`): krajowy tylko admin, okręgowy admin /
-komisja TEGO okręgu / Teach Master. Kontrakt: BAZA/docs/egzamin-api.md.
+Uprawnienia jak w komisji (`_managed_exam`): krajowy: admin (całość) albo komisja/Teach Master
+okręgu (odczyt przycięty do jego okręgu, bez unieważniania); okręgowy admin / komisja TEGO okręgu / Teach Master. Kontrakt: BAZA/docs/egzamin-api.md.
 """
 from __future__ import annotations
 
@@ -92,9 +92,9 @@ def _compose(st: S.Store, who: S.Who, exam_id: str, options: Dict[str, Any]):
 @router.post("/exams/{exam_id}/exports", summary="Eksport wyników komisji do HTML/PDF")
 async def create_export(exam_id: str, body: ExportBody, who: S.Who = Depends(_who)) -> Dict[str, Any]:
     st = _store()
-    exam = await _run(S._managed_exam(st, who, exam_id))
+    exam = await _run(S._managed_exam(st, who, exam_id, read=True))
     try:
-        options = R.clean_export_options(body.model_dump(), national=exam["scope"] == "national")
+        options = R.clean_export_options(body.model_dump(), national=exam["scope"] == "national" and not exam["cut_province"])
         if options["format"] == "pdf" and not E.pdf_available():
             raise ExamError("EXPORT_PDF_UNAVAILABLE",
                             "Serwer nie potrafi teraz złożyć PDF (brak biblioteki weasyprint). Wybierz HTML - da się go wydrukować do PDF.",

@@ -26,7 +26,8 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
     """Pełny obraz egzaminu dla komisji. `with_scores` dokłada do podejść wiersze
     pytań (do kart zdających w eksporcie)."""
     now = now or S.utcnow()
-    exam = await S._managed_exam(st, who, exam_id)
+    exam = await S._managed_exam(st, who, exam_id, read=True)
+    cut = exam["cut_province"]  # egzamin krajowy oglądany przez komisję okręgu: tylko jej sędziowie
     attempts = (await S.attempts_list(st, who, exam_id))["attempts"]
     stats = await S.exam_stats(st, who, exam_id)
     missing = (await S.missing(st, who, exam_id))["missing"]
@@ -65,16 +66,19 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
 
     pass_percent = float(exam["config"]["pass_percent"])
     provinces_seen = {a.get("province") for a in attempts} | {m.get("province") for m in missing}
-    national = exam["scope"] == "national"
+    national = exam["scope"] == "national" and not cut
+    view = S.exam_view(exam, now, full=True)
+    if cut:
+        view.update(can_manage=False, read_only=True, cut_province=cut)
     return {
-        "exam": S.exam_view(exam, now, full=True),
+        "exam": view,
         "generated_at": now.isoformat(),
         "summary": R.summary(attempts, len(missing), pass_percent),
         "questions": questions,
         "hardest": R.hardest_questions(questions),
         "weakest_rules": R.weakest_rules(questions, limit=0),
         "violations": R.violation_map(attempts),
-        "provinces": R.province_comparison(attempts, missing) if national or len(provinces_seen) > 1 else [],
+        "provinces": R.province_comparison(attempts, missing) if national or (not cut and len(provinces_seen) > 1) else [],
         "ranking": R.ranking(attempts),
         "missing": missing,
         "attempts": attempts,

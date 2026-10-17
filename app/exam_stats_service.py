@@ -13,7 +13,7 @@ uprawnienia i JEDNO pobranie na zapytanie, bez N+1:
 
 Uprawnienia jak teczka (`exam_service.require_manage`): krajowy tylko admin,
 okręgowy admin / komisja TEGO okręgu / Teach Master tego okręgu.
-Zakres okręgowy obejmuje egzaminy okręgu (krajowe ogląda administrator).
+Zakres okręgowy obejmuje egzaminy okręgu oraz (dla nie-admina) krajowe, liczone wyłącznie dla osób z tego okręgu.
 
 Importy bazy tylko przez `Store` (app/db.py łączy się przy imporcie).
 """
@@ -51,10 +51,14 @@ async def resolve_scope(who: S.Who, province: Optional[str]) -> Tuple[str, Optio
     return scope, prov
 
 
-async def _exams(st: S.Store, scope: str, prov: Optional[str], source: str, now: datetime) -> List[Dict[str, Any]]:
+async def _exams(st: S.Store, scope: str, prov: Optional[str], source: str, now: datetime,
+                 with_national: bool = False) -> List[Dict[str, Any]]:
     d = st.t.definitions
     q = select(d).where(d.c.deleted_at.is_(None))
-    if scope == "province":
+    if scope == "province" and with_national:
+        # Komisja okręgu widzi też krajowe - tylko osoby z jej okręgu (patrz `_cut_attempts`).
+        q = q.where(or_(d.c.scope == "national", and_(d.c.scope == "province", d.c.province == prov)))
+    elif scope == "province":
         q = q.where(and_(d.c.scope == "province", d.c.province == prov))
     elif source == "national":
         q = q.where(d.c.scope == "national")
@@ -110,6 +114,15 @@ async def _attempts(st: S.Store, exam_ids: List[str], judge_id: Optional[str] = 
     return out
 
 
+def _cut_attempts(attempts: List[Dict[str, Any]], exams: List[Dict[str, Any]], scope: str, prov: Optional[str],
+                  who: S.Who) -> List[Dict[str, Any]]:
+    """Egzaminy krajowe w zakresie okręgowym liczą tylko podejścia osób z tego okręgu."""
+    if scope != "province" or who.is_admin:
+        return attempts
+    national = {e["id"] for e in exams if e["scope"] == "national"}
+    return [a for a in attempts if a["exam_id"] not in national or (display(S._s(a.get("province"))) or S._s(a.get("province"))) == prov]
+
+
 async def _qinfo(st: S.Store, exams: List[Dict[str, Any]]) -> Dict[str, Dict[str, Tuple[Any, Any]]]:
     banks: Dict[str, Dict[str, Tuple[Any, Any]]] = {}
     out = {}
@@ -138,7 +151,7 @@ def _attach_invited(exams: List[Dict[str, Any]], people: Mapping[str, Mapping[st
 async def _load(ss: StatsStore, who: S.Who, province: Optional[str], raw: Mapping[str, Any], now: datetime):
     filters = SR.clean_filters(raw)
     scope, prov = await resolve_scope(who, province)
-    catalog = await _exams(ss.st, scope, prov, filters["source"], now)
+    catalog = await _exams(ss.st, scope, prov, filters["source"], now, with_national=scope == "province" and not who.is_admin)
     exams = _select(catalog, filters)
     provinces = [prov] if scope == "province" else list(S.ALL_PROVINCES)
     roster = await ss.roster(provinces)
@@ -157,7 +170,7 @@ async def stats_overview(ss: StatsStore, who: S.Who, province: Optional[str], ra
                          now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or S.utcnow()
     filters, scope, prov, catalog, exams, people, pairs = await _load(ss, who, province, raw, now)
-    attempts = await _attempts(ss.st, [e["id"] for e in exams])
+    attempts = _cut_attempts(await _attempts(ss.st, [e["id"] for e in exams]), exams, scope, prov, who)
     qinfo = await _qinfo(ss.st, exams)
     body = SR.overview(exams, attempts, people, pairs, qinfo, filters, national=scope == "national")
     return {**_head(scope, prov, catalog, now), **body}
@@ -167,7 +180,7 @@ async def judges_list(ss: StatsStore, who: S.Who, province: Optional[str], raw: 
                       now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or S.utcnow()
     filters, scope, prov, catalog, exams, people, pairs = await _load(ss, who, province, raw, now)
-    attempts = await _attempts(ss.st, [e["id"] for e in exams])
+    attempts = _cut_attempts(await _attempts(ss.st, [e["id"] for e in exams]), exams, scope, prov, who)
     rows = SR.judge_rows(exams, attempts, people, pairs, now)
     badges = sorted({b for r in rows for b in r["badges"]}, key=str.lower)
     return {**_head(scope, prov, catalog, now), "exams": [SR.exam_brief(e) for e in exams], "judges": rows,
@@ -179,7 +192,7 @@ async def judge_card(ss: StatsStore, who: S.Who, judge_id: str, province: Option
     now = now or S.utcnow()
     jid = S._s(judge_id)
     filters, scope, prov, catalog, exams, people, pairs = await _load(ss, who, province, raw, now)
-    attempts = await _attempts(ss.st, [e["id"] for e in exams])
+    attempts = _cut_attempts(await _attempts(ss.st, [e["id"] for e in exams]), exams, scope, prov, who)
     if jid not in people and not any(a["judge_id"] == jid for a in attempts):
         raise ExamError("STATS_JUDGE_UNKNOWN", "Tego sędziego nie ma na liście okręgu ani wśród zdających egzaminów tej teczki.", 404)
     qinfo = await _qinfo(ss.st, exams)

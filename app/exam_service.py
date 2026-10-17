@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from sqlalchemy import and_, case, delete, func, insert, select, update
+from sqlalchemy import and_, case, delete, func, insert, or_, select, update
 
 from app import exam_rules as X
 from app import province_event_rules as R
@@ -542,6 +542,13 @@ async def get_exam(st: Store, who: Who, exam_id: str, now: Optional[datetime] = 
     refusal = await manage_refusal(who, exam["scope"], exam.get("province"))
     if not refusal:
         return exam_view(exam, now, full=True)
+    if exam["scope"] == "national":
+        try:
+            cut = await national_cut(who)
+        except ExamError:
+            cut = None
+        if cut:
+            return {**exam_view(exam, now, full=True), "can_manage": False, "read_only": True, "cut_province": cut}
     await _eligibility(st, who, exam)
     return exam_view(exam, now, full=False)
 
@@ -549,14 +556,23 @@ async def get_exam(st: Store, who: Who, exam_id: str, now: Optional[datetime] = 
 _FINISHED = ("submitted", "expired")
 
 
-async def _attempt_counts(st: Store, exam_ids: List[str]) -> Dict[str, Dict[str, int]]:
-    """Podejścia wg statusu dla całej teczki jednym zapytaniem."""
+def _province_filter(column: Any, province: Optional[str]) -> Any:
+    """Warunek okręgu uczestnika (kolumna trzyma nazwę wyświetlaną, ale bywa stara pisownia)."""
+    names = {province} | {k for k, v in DISPLAY.items() if v == province} if province else set()
+    return column.in_(sorted(names))
+
+
+async def _attempt_counts(st: Store, exam_ids: List[str], province: Optional[str] = None) -> Dict[str, Dict[str, int]]:
+    """Podejścia wg statusu dla całej teczki jednym zapytaniem (`province` = tylko osoby z okręgu)."""
     if not exam_ids:
         return {}
     a = st.t.attempts
+    cond = a.c.exam_id.in_(exam_ids)
+    if province:
+        cond = and_(cond, _province_filter(a.c.province, province))
     # Kolumny nazwane, nie po indeksie: rekord `databases` na asyncpg nie wspiera r[0].
     rows = await st.database.fetch_all(select(a.c.exam_id.label("exam_id"), a.c.status.label("status"),
-                                              func.count().label("n")).where(a.c.exam_id.in_(exam_ids))
+                                              func.count().label("n")).where(cond)
                                        .group_by(a.c.exam_id, a.c.status))
     out: Dict[str, Dict[str, int]] = {}
     for r in rows:
@@ -565,7 +581,7 @@ async def _attempt_counts(st: Store, exam_ids: List[str]) -> Dict[str, Dict[str,
     return out
 
 
-async def _people_summary(st: Store, exam_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+async def _people_summary(st: Store, exam_ids: List[str], province: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
     """Miniatura wyników teczki - jedno zapytanie agregujące dla wszystkich egzaminów.
 
     Osoba liczy się RAZ, jak w raporcie komisji (`exam_report_rules.summary`):
@@ -578,6 +594,9 @@ async def _people_summary(st: Store, exam_ids: List[str]) -> Dict[str, Dict[str,
         return {}
     a = st.t.attempts
     done = a.c.status.in_(_FINISHED)
+    cond = a.c.exam_id.in_(exam_ids)
+    if province:
+        cond = and_(cond, _province_filter(a.c.province, province))
     rows = await st.database.fetch_all(
         select(
             a.c.exam_id.label("exam_id"),
@@ -585,7 +604,7 @@ async def _people_summary(st: Store, exam_ids: List[str]) -> Dict[str, Dict[str,
             func.max(case((done, a.c.percent), else_=None)).label("best"),
             func.max(case((and_(done, a.c.passed.is_(True)), 1), else_=0)).label("ok"),
         )
-        .where(a.c.exam_id.in_(exam_ids))
+        .where(cond)
         .group_by(a.c.exam_id, a.c.judge_id)
     )
     out: Dict[str, Dict[str, Any]] = {}
@@ -632,7 +651,14 @@ async def list_manage(st: Store, who: Who, province: Optional[str], now: Optiona
     await require_manage(who, scope, prov)
     t = st.t
     q = select(t.definitions).where(t.definitions.c.deleted_at.is_(None))
-    q = q.where(t.definitions.c.scope == "national") if scope == "national" else q.where(t.definitions.c.province == prov)
+    # Komisja okręgu widzi też egzaminy krajowe - tylko do odczytu, wyniki jej okręgu.
+    with_national = scope == "province" and not who.is_admin
+    if scope == "national":
+        q = q.where(t.definitions.c.scope == "national")
+    elif with_national:
+        q = q.where(or_(t.definitions.c.province == prov, t.definitions.c.scope == "national"))
+    else:
+        q = q.where(t.definitions.c.province == prov)
     rows = await st.database.fetch_all(q.order_by(t.definitions.c.closes_at.desc()))
     exams = []
     for raw in rows:
@@ -642,20 +668,24 @@ async def list_manage(st: Store, who: Who, province: Optional[str], now: Optiona
         exam["event_ids"] = _loads(exam["event_ids_json"], {})
         exam["question_ids"] = _loads(exam["question_ids_json"], [])
         exams.append(exam)
-    ids = [e["id"] for e in exams]
-    counts = await _attempt_counts(st, ids)
-    people = await _people_summary(st, ids)
+    nat_ids = [e["id"] for e in exams if e["scope"] == "national"] if with_national else []
+    own_ids = [e["id"] for e in exams if e["id"] not in set(nat_ids)]
+    counts = {**await _attempt_counts(st, own_ids), **await _attempt_counts(st, nat_ids, prov)}
+    people = {**await _people_summary(st, own_ids), **await _people_summary(st, nat_ids, prov)}
     roster: Dict[str, List[Dict[str, Any]]] = {}
     items = []
     for exam in exams:
         view = exam_view(exam, now, full=True)
         view["attempt_counts"] = counts.get(exam["id"], {})
         invited: List[str] = []
-        for p in _exam_provinces(exam):
+        read_only = exam["id"] in nat_ids
+        for p in ([prov] if read_only else _exam_provinces(exam)):
             if p not in roster:
                 roster[p] = await st.judges(p)  # raz na okręg dla całej teczki
             invited += await _invited_ids(st, exam, p, roster[p])
         view["summary"] = summary_view(people.get(exam["id"]), invited)
+        if read_only:
+            view.update(can_manage=False, read_only=True, cut_province=prov)
         items.append(view)
     return {"scope": scope, "province": prov, "exams": items, "templates": X.templates_view()}
 
@@ -1031,8 +1061,32 @@ async def attempt_review(st: Store, who: Who, attempt_id: str, now: Optional[dat
 # ---------------------------------------------------------------------------
 
 
-async def _managed_exam(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
+async def national_cut(who: Who) -> str:
+    """Okręg, do którego przycięty jest widok egzaminu KRAJOWEGO dla zarządzającego okręgiem
+    (komisja / Teach Master): tylko jego sędziowie, bez prawa zmian. Brak prawa = 403."""
+    prov = display(who.province) if who.province else ""
+    if not prov or prov not in DISPLAY.values():
+        raise ExamError("EXAM_FORBIDDEN", "Wyniki egzaminu krajowego widzi administrator aplikacji albo zarządzający swoim okręgiem "
+                        "(komisja sędziowska, Teach Master). Twoje konto nie ma przypisanego okręgu.", 403)
+    reason = await manage_refusal(who, "province", prov)
+    if reason:
+        raise ExamError("EXAM_FORBIDDEN", "Wyniki egzaminu krajowego widzi administrator aplikacji albo osoba zarządzająca "
+                        "egzaminami swojego okręgu (komisja sędziowska, Teach Master).", 403)
+    return prov
+
+
+def _in_cut(province: Any, cut: Optional[str]) -> bool:
+    return cut is None or (display(_s(province)) or _s(province)) == cut
+
+
+async def _managed_exam(st: Store, who: Who, exam_id: str, *, read: bool = False) -> Dict[str, Any]:
+    """`read=True`: odczyt wyników - komisja okręgu może oglądać egzamin krajowy, ale tylko własny okręg
+    (`exam["cut_province"]`). Zmiany (unieważnienie, edycja, kod sali...) zostają przy adminie."""
     exam = await _exam(st, exam_id)
+    exam["cut_province"] = None
+    if read and exam["scope"] == "national" and not who.is_admin:
+        exam["cut_province"] = await national_cut(who)
+        return exam
     await require_manage(who, exam["scope"], exam.get("province"))
     return exam
 
@@ -1048,13 +1102,15 @@ async def _events_by_attempt(st: Store, exam_id: str) -> Dict[str, List[Dict[str
 
 
 async def attempts_list(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
-    exam = await _managed_exam(st, who, exam_id)
+    exam = await _managed_exam(st, who, exam_id, read=True)
     rows = await st.database.fetch_all(select(st.t.attempts).where(st.t.attempts.c.exam_id == exam_id)
                                        .order_by(st.t.attempts.c.judge_name, st.t.attempts.c.attempt_no))
     events = await _events_by_attempt(st, exam_id)
     items = []
     for raw in rows:
         a = _attempt(raw)
+        if not _in_cut(a.get("province"), exam["cut_province"]):
+            continue
         score = a["score"] or {}
         items.append({"attempt_id": a["id"], "judge_id": a["judge_id"], "judge_name": a.get("judge_name"),
                       "province": a.get("province"), "attempt_no": a["attempt_no"], "status": a["status"],
@@ -1065,9 +1121,9 @@ async def attempts_list(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
 
 
 async def attempt_card(st: Store, who: Who, exam_id: str, attempt_id: str) -> Dict[str, Any]:
-    exam = await _managed_exam(st, who, exam_id)
+    exam = await _managed_exam(st, who, exam_id, read=True)
     attempt = await _attempt_row(st, attempt_id)
-    if attempt["exam_id"] != exam_id:
+    if attempt["exam_id"] != exam_id or not _in_cut(attempt.get("province"), exam["cut_province"]):
         raise ExamError("ATTEMPT_NOT_FOUND", "To podejście nie należy do tego egzaminu.", 404)
     answers = await _load_answers(st, attempt_id)
     bank = await load_bank(st, exam["bank_version"])
@@ -1086,10 +1142,11 @@ async def attempt_card(st: Store, who: Who, exam_id: str, attempt_id: str) -> Di
 
 
 async def exam_stats(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
-    exam = await _managed_exam(st, who, exam_id)
+    exam = await _managed_exam(st, who, exam_id, read=True)
     t = st.t
     done = [_attempt(r) for r in await st.database.fetch_all(select(t.attempts).where(and_(
         t.attempts.c.exam_id == exam_id, t.attempts.c.status != "in_progress")))]
+    done = [a for a in done if _in_cut(a.get("province"), exam["cut_province"])]
     ids = [a["id"] for a in done]
     rows = []
     if ids:
@@ -1112,11 +1169,11 @@ async def exam_stats(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
 
 
 async def missing(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
-    exam = await _managed_exam(st, who, exam_id)
+    exam = await _managed_exam(st, who, exam_id, read=True)
     rows = await st.database.fetch_all(select(st.t.attempts.c.judge_id).where(st.t.attempts.c.exam_id == exam_id))
     attended = {r["judge_id"] for r in rows}
     out = []
-    for prov in _exam_provinces(exam):
+    for prov in ([exam["cut_province"]] if exam["cut_province"] else _exam_provinces(exam)):
         judges = await st.judges(prov)
         by_id = {_s(j["judge_id"]): j for j in judges}
         for jid in await _invited_ids(st, exam, prov, judges):
