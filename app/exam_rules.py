@@ -231,38 +231,38 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "anti": copy.deepcopy(DEFAULT_ANTI),
 }
 
+#: Odznaki okręgu wyłączane z „Egzaminu 25" i „Egzaminu 15". Nazwy 1:1 jak w
+#: automacie obsad (`app/assignment_people.BADGE_LEAGUE` / `BADGE_DELEGATE`) -
+#: `invited_ids` porównuje odznaki dokładnie, bez zwijania wielkości liter.
+#: Stała wpisana tutaj, a nie importowana: moduł reguł egzaminu zostaje liściem.
+TEMPLATE_EXCLUDED_BADGES = ["Ligowcy", "Delegaci"]
+
+_TEMPLATE_BASE: Dict[str, Any] = {
+    # Pełna pula pytań (pusty zakres = wszystkie 432), jeden zestaw, 100 s na pytanie.
+    "scope": {"rules": [], "topics": [], "kinds": [], "manual_ids": [], "difficulty": "any"},
+    "set_mode": "shared", "shuffle_answers": True, "shuffle_questions": False, "allow_back": False,
+    "time_per_question_s": 100, "time_total_min": None, "max_attempts": 1, "retake": "any",
+    "pass_percent": 75, "result_release": "after_close", "mandatory": True,
+    "include_ids": [], "exclude_ids": [], "reminders_hours": [72, 24, 2], "results_push": True,
+    "anti": {"leave_app": "warn", "screenshots": True, "speed_flags": True, "similarity": True,
+             "single_device": True, "room_code": False},
+}
+
+
+def _template(count: int, exclude_badges: List[str]) -> Dict[str, Any]:
+    config = copy.deepcopy(_TEMPLATE_BASE)
+    config["question_count"] = count
+    config["target"] = {"include_all": True, "include_badges": [], "exclude_badges": list(exclude_badges)}
+    return config
+
+
+# Decyzja właściciela 17.10.2026: trzy druki, okno 7 dni, próg 75%, wynik po
+# zamknięciu okna. „Egzamin 30" obowiązkowy dla wszystkich; 25 i 15 dla
+# wszystkich oprócz odznak „Ligowcy" i „Delegaci".
 TEMPLATES: Dict[str, Dict[str, Any]] = {
-    "season": {
-        "label": "Egzamin sezonowy",
-        "window_days": 14,
-        "config": {
-            "question_count": 40, "set_mode": "shared", "shuffle_answers": True, "allow_back": False,
-            "time_total_min": 60, "max_attempts": 1, "pass_percent": 75, "result_release": "after_close",
-            "mandatory": True, "reminders_hours": [72, 24, 2],
-            "anti": {"leave_app": "warn", "screenshots": True, "speed_flags": True, "similarity": True,
-                     "single_device": True, "room_code": False},
-        },
-    },
-    "quiz10": {
-        "label": "Kartkówka 10",
-        "window_days": 7,
-        "config": {
-            "question_count": 10, "set_mode": "drawn", "shuffle_answers": True, "allow_back": True,
-            "time_total_min": 15, "max_attempts": 3, "retake": "any", "pass_percent": 60,
-            "result_release": "immediate", "mandatory": False, "reminders_hours": [24],
-            "anti": {"leave_app": "log"},
-        },
-    },
-    "after_changes": {
-        "label": "Sprawdzian po zmianach",
-        "window_days": 10,
-        "config": {
-            "question_count": 20, "set_mode": "shared", "shuffle_answers": True, "allow_back": False,
-            "time_per_question_s": 45, "max_attempts": 1, "pass_percent": 80, "result_release": "after_close",
-            "mandatory": True, "reminders_hours": [48, 6],
-            "anti": {"leave_app": "void_question", "speed_flags": True},
-        },
-    },
+    "exam25": {"label": "Egzamin 25", "window_days": 7, "config": _template(25, TEMPLATE_EXCLUDED_BADGES)},
+    "exam30": {"label": "Egzamin 30", "window_days": 7, "config": _template(30, [])},
+    "exam15": {"label": "Egzamin 15", "window_days": 7, "config": _template(15, TEMPLATE_EXCLUDED_BADGES)},
 }
 
 

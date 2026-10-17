@@ -72,11 +72,9 @@ def test_szablony_i_domyslna_punktacja():
     for key in X.TEMPLATES:
         c = X.clean_config({"window_start": T0.isoformat(), "window_end": (T0 + timedelta(days=5)).isoformat()}, template=key)
         assert c["multi_scoring"] == "all_or_nothing"
-    assert X.TEMPLATES["season"]["label"] == "Egzamin sezonowy"
-    assert X.TEMPLATES["quiz10"]["label"] == "Kartkówka 10"
-    assert X.TEMPLATES["after_changes"]["label"] == "Sprawdzian po zmianach"
-    quiz = X.clean_config({"window_start": T0.isoformat(), "window_end": (T0 + timedelta(days=5)).isoformat()}, template="quiz10")
-    assert quiz["question_count"] == 10 and quiz["result_release"] == "immediate"
+    assert [X.TEMPLATES[k]["label"] for k in X.TEMPLATES] == ["Egzamin 25", "Egzamin 30", "Egzamin 15"]
+    short = X.clean_config({"window_start": T0.isoformat(), "window_end": (T0 + timedelta(days=5)).isoformat()}, template="exam15")
+    assert short["question_count"] == 15 and short["result_release"] == "after_close"
 
 
 @pytest.mark.parametrize("raw, fragment", [

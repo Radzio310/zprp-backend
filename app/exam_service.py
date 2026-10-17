@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from sqlalchemy import and_, delete, func, insert, select, update
+from sqlalchemy import and_, case, delete, func, insert, select, update
 
 from app import exam_rules as X
 from app import province_event_rules as R
@@ -546,6 +546,80 @@ async def get_exam(st: Store, who: Who, exam_id: str, now: Optional[datetime] = 
     return exam_view(exam, now, full=False)
 
 
+_FINISHED = ("submitted", "expired")
+
+
+async def _attempt_counts(st: Store, exam_ids: List[str]) -> Dict[str, Dict[str, int]]:
+    """Podejścia wg statusu dla całej teczki jednym zapytaniem."""
+    if not exam_ids:
+        return {}
+    a = st.t.attempts
+    rows = await st.database.fetch_all(select(a.c.exam_id, a.c.status, func.count()).where(a.c.exam_id.in_(exam_ids))
+                                       .group_by(a.c.exam_id, a.c.status))
+    out: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        out.setdefault(r[0], {})[r[1]] = int(r[2])
+    return out
+
+
+async def _people_summary(st: Store, exam_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Miniatura wyników teczki - jedno zapytanie agregujące dla wszystkich egzaminów.
+
+    Osoba liczy się RAZ, jak w raporcie komisji (`exam_report_rules.summary`):
+    najlepsze zakończone podejście. Baza grupuje (egzamin, sędzia) i oddaje
+    najlepszy procent i to, czy osoba zdała - wiersz na osobę, nie na podejście
+    i nie na odpowiedź. `passed` rośnie razem z procentem (jeden próg
+    egzaminu), więc „zdał którekolwiek zakończone” = „zdał najlepszym”.
+    """
+    if not exam_ids:
+        return {}
+    a = st.t.attempts
+    done = a.c.status.in_(_FINISHED)
+    rows = await st.database.fetch_all(
+        select(
+            a.c.exam_id.label("exam_id"),
+            a.c.judge_id.label("judge_id"),
+            func.max(case((done, a.c.percent), else_=None)).label("best"),
+            func.max(case((and_(done, a.c.passed.is_(True)), 1), else_=0)).label("ok"),
+        )
+        .where(a.c.exam_id.in_(exam_ids))
+        .group_by(a.c.exam_id, a.c.judge_id)
+    )
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        m = _row(r)
+        agg = out.setdefault(m["exam_id"], {"judges": set(), "best": [], "passed": 0})
+        agg["judges"].add(_s(m["judge_id"]))
+        if m["best"] is not None:
+            agg["best"].append(float(m["best"]))
+            agg["passed"] += int(m["ok"] or 0)
+    return out
+
+
+def summary_view(people: Optional[Mapping[str, Any]], invited_ids: Sequence[str]) -> Dict[str, Any]:
+    """Liczby miniatury na karcie teczki (te same definicje co raport komisji).
+
+    `attempted` = osoby z jakimkolwiek podejściem, `finished` = z zakończonym,
+    `pass_rate` = zdali / zakończyli (None, gdy nikt nie skończył),
+    `not_started` = zaproszeni bez żadnego podejścia, `invited` = przystąpili +
+    nie przystąpili (jak `summary.invited` w raporcie).
+    """
+    p = people or {}
+    judges = p.get("judges") or set()
+    best = p.get("best") or []
+    passed = int(p.get("passed") or 0)
+    not_started = len({_s(j) for j in invited_ids} - set(judges))
+    return {
+        "attempted": len(judges),
+        "finished": len(best),
+        "passed": passed,
+        "avg_percent": round(sum(best) / len(best), 2) if best else None,
+        "pass_rate": round(passed / len(best), 4) if best else None,
+        "not_started": not_started,
+        "invited": len(judges) + not_started,
+    }
+
+
 async def list_manage(st: Store, who: Who, province: Optional[str], now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or utcnow()
     scope = "province" if province or not who.is_admin else "national"
@@ -557,17 +631,28 @@ async def list_manage(st: Store, who: Who, province: Optional[str], now: Optiona
     q = select(t.definitions).where(t.definitions.c.deleted_at.is_(None))
     q = q.where(t.definitions.c.scope == "national") if scope == "national" else q.where(t.definitions.c.province == prov)
     rows = await st.database.fetch_all(q.order_by(t.definitions.c.closes_at.desc()))
-    items = []
+    exams = []
     for raw in rows:
         exam = _row(raw)
         exam["config"] = _loads(exam["config_json"], {})
         exam["voided"] = _loads(exam["voided_json"], {})
         exam["event_ids"] = _loads(exam["event_ids_json"], {})
         exam["question_ids"] = _loads(exam["question_ids_json"], [])
+        exams.append(exam)
+    ids = [e["id"] for e in exams]
+    counts = await _attempt_counts(st, ids)
+    people = await _people_summary(st, ids)
+    roster: Dict[str, List[Dict[str, Any]]] = {}
+    items = []
+    for exam in exams:
         view = exam_view(exam, now, full=True)
-        counts = await st.database.fetch_all(select(t.attempts.c.status, func.count()).where(t.attempts.c.exam_id == exam["id"])
-                                             .group_by(t.attempts.c.status))
-        view["attempt_counts"] = {c[0]: int(c[1]) for c in counts}
+        view["attempt_counts"] = counts.get(exam["id"], {})
+        invited: List[str] = []
+        for p in _exam_provinces(exam):
+            if p not in roster:
+                roster[p] = await st.judges(p)  # raz na okręg dla całej teczki
+            invited += await _invited_ids(st, exam, p, roster[p])
+        view["summary"] = summary_view(people.get(exam["id"]), invited)
         items.append(view)
     return {"scope": scope, "province": prov, "exams": items, "templates": X.templates_view()}
 
