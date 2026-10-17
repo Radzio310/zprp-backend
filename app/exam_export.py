@@ -138,12 +138,17 @@ class ExportJob:
     code: Optional[str] = None
     created: float = field(default_factory=time.time)
     seq: int = 0
+    #: Liczba stron PDF po złożeniu układu (None, dopóki weasyprint nie skończy układu; HTML - zawsze None).
+    pages: Optional[int] = None
 
     def view(self) -> Dict[str, Any]:
+        label = STAGE_LABELS.get(self.stage, "")
+        if self.stage == "pdf" and self.pages:
+            label = f"Strony ułożone ({self.pages}) - zapisujemy PDF."
         return {"job_id": self.id, "exam_id": self.exam_id, "format": self.format, "status": self.status,
-                "stage": self.stage, "stage_label": STAGE_LABELS.get(self.stage, ""), "done": self.done,
+                "stage": self.stage, "stage_label": label, "done": self.done,
                 "total": self.total, "names": list(self.names), "seq": self.seq, "file": self.file,
-                "code": self.code, "message": self.message}
+                "code": self.code, "message": self.message, "pages": self.pages}
 
 
 _JOBS: Dict[str, ExportJob] = {}
@@ -201,10 +206,15 @@ def _progress(job: ExportJob) -> Callable[[str, int, int, Optional[str]], None]:
     return tick
 
 
-def render_pdf(html: str) -> bytes:
+def render_pdf(html: str, on_pages: Optional[Callable[[int], None]] = None) -> bytes:
+    """PDF w dwóch krokach weasyprint: układ stron (wtedy znamy ich liczbę - prawdziwy
+    postęp dla sceny) i zapis. `on_pages(n)` woła się między nimi."""
     import weasyprint
 
-    return weasyprint.HTML(string=html).write_pdf()
+    document = weasyprint.HTML(string=html).render()
+    if on_pages:
+        on_pages(len(document.pages))
+    return document.write_pdf()
 
 
 async def run(job: ExportJob, compose: Callable[[Callable[[str, int, int, Optional[str]], None]], Awaitable[Tuple[str, str]]]) -> ExportJob:
@@ -220,7 +230,11 @@ async def run(job: ExportJob, compose: Callable[[Callable[[str, int, int, Option
         html, base = await compose(_progress(job))
         if job.format == "pdf":
             job.stage, job.seq = "pdf", job.seq + 1
-            data = await asyncio.to_thread(render_pdf, html)
+
+            def pages(n: int) -> None:
+                job.pages, job.seq = n, job.seq + 1
+
+            data = await asyncio.to_thread(render_pdf, html, pages)
         else:
             data = html.encode("utf-8")
         job.stage, job.seq = "seal", job.seq + 1

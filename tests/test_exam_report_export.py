@@ -118,6 +118,61 @@ async def test_najwyzej_dwa_zadania_naraz_i_dwa_na_osobe(tmp_path, monkeypatch):
     E._JOBS.clear()
 
 
+async def test_html_kolejnosc_sekcji_okladka_poziom_i_motywy(st):
+    exam = await _two_done(st)
+    rep = await RS.build_report(st, COMMISSION, exam["id"], with_scores=True)
+    for theme in R.EXPORT_THEMES:
+        options = R.clean_export_options({"format": "html", "theme": theme, "sections": ["ranking", "summary", "questions"],
+                                          "layout": {"orientation": "landscape", "density": "compact", "cover": True},
+                                          "questions": {"rules": [1]}}, national=False)
+        rows = R.apply_people(R.select_rows(rep["attempts"], options["range"]), options["people"])
+        html = H.render_report(rep, rows, options)
+        assert "size: A4 landscape" in html and 'class="cover"' in html and "W pliku" in html
+        # Kolejność komisji: lista przed podsumowaniem, numeracja w nagłówkach.
+        assert html.index('id="s-ranking"') < html.index('id="s-summary"') < html.index('id="s-questions"')
+        assert '<span class="sn">1</span>Lista wyników' in html and "Filtr pytań: przepisy 1" in html
+    plain = H.render_report(rep, R.select_rows(rep["attempts"], "best"), R.clean_export_options({"format": "html"}, national=False))
+    assert 'class="cover"' not in plain and "size: A4 portrait" in plain
+
+
+async def test_html_filtr_zdajacych_i_stale_kody_anonimizacji(st):
+    exam = await _two_done(st)
+    rep = await RS.build_report(st, COMMISSION, exam["id"])
+    options = R.clean_export_options({"format": "html", "anonymize": True, "sections": ["ranking"],
+                                      "people": {"min_percent": 90}}, national=False)
+    rows = R.select_rows(rep["attempts"], options["range"])
+    missing = [dict(m) for m in rep["missing"]]
+    R.anonymize(rows, missing)
+    full_codes = {r["judge_id"]: r["judge_name"] for r in rows}
+    picked = R.apply_people(rows, options["people"])
+    assert len(picked) == 1 and picked[0]["judge_name"] == full_codes[picked[0]["judge_id"]]
+    html = H.render_report({**rep, "missing": missing}, picked, options)
+    assert "wynik 90-100%" in html and "(1 os.)" in html
+
+
+def test_herb_okregu_na_okladce():
+    uri = H.crest_data_uri("ŚLĄSKIE")
+    assert uri.startswith("data:image/png;base64,") and len(uri) > 200
+    assert H.crest_data_uri("KUJAWSKO-POMORSKIE").startswith("data:image/png")
+    assert H.crest_data_uri("Atlantyda") == ""
+
+
+def test_rampa_i_napis_na_komorce():
+    th = H.THEMES["paper"]
+    assert H.heat(th, 0) == "#B8322A" and H.heat(th, 1) == "#2F8F5B"
+    assert H.on_color("#FFFFFF") == "#111111" and H.on_color("#111111") == "#FFFFFF"
+
+
+@pytest.mark.skipif(not E.pdf_available(), reason="weasyprint niedostępny lokalnie (jest w obrazie Dockera)")
+async def test_pdf_poziomy_z_okladka_liczy_strony(st):
+    exam = await _two_done(st)
+    rep = await RS.build_report(st, COMMISSION, exam["id"])
+    options = R.clean_export_options({"format": "pdf", "layout": {"orientation": "landscape", "cover": True}}, national=False)
+    seen = []
+    pdf = E.render_pdf(H.render_report(rep, R.select_rows(rep["attempts"], "best"), options), seen.append)
+    assert pdf[:4] == b"%PDF" and seen and seen[0] >= 2  # okładka + treść
+
+
 @pytest.mark.skipif(not E.pdf_available(), reason="weasyprint niedostępny lokalnie (jest w obrazie Dockera)")
 async def test_pdf_przez_weasyprint(st):
     exam = await _two_done(st)

@@ -81,9 +81,17 @@ def test_podglad_unieważnienia_drop_i_credit():
 
 
 def test_opcje_eksportu_z_powodem_odmowy():
-    ok = R.clean_export_options({"format": "html", "sections": ["cards", "summary", "provinces"]}, national=False)
-    assert ok["sections"] == ["summary", "cards"] and ok["seal"] is True and ok["range"] == "best"
-    for bad in ({"format": "docx"}, {"range": "x"}, {"theme": "neon"}, {"sections": ["nope"]}, {"sections": []}):
+    ok = R.clean_export_options({"format": "html", "sections": ["cards", "summary", "provinces", "cards"]}, national=False)
+    # Kolejność to kolejność komisji (przeciąganie), powtórzenia i okręgi przy egzaminie okręgowym odpadają.
+    assert ok["sections"] == ["cards", "summary"] and ok["seal"] is True and ok["range"] == "best"
+    assert ok["anonymize"] is True and ok["layout"] == {"orientation": "portrait", "density": "comfortable", "cover": False}
+    assert ok["people"]["sort"] == "place" and ok["questions"]["voided"] == "include"
+    for bad in ({"format": "docx"}, {"range": "x"}, {"theme": "neon"}, {"sections": ["nope"]}, {"sections": []},
+                {"layout": {"orientation": "ukos"}}, {"layout": {"density": "x"}}, {"layout": "pion"},
+                {"people": {"min_percent": 80, "max_percent": 20}}, {"people": {"min_percent": 120}},
+                {"people": {"sort": "losowo"}}, {"people": {"flags": "x"}}, {"people": {"provinces": "ŚLĄSKIE"}},
+                {"questions": {"rules": ["osiem"]}}, {"questions": {"weakest": 0}}, {"questions": {"difficulty": "x"}},
+                {"questions": {"voided": "x"}}):
         with pytest.raises(ExamError) as err:
             R.clean_export_options(bad, national=True)
         assert err.value.code == "BAD_EXPORT" and err.value.message
@@ -100,3 +108,67 @@ def test_zakres_listy_i_anonimizacja_bez_zdradzania_miejsca():
     assert names["2"] == "Zdający 001" and missing[0]["name"] == "Zdający 002" and names["1"] == "Zdający 004"
     assert R.export_filename("Egzamin sezonowy 2026/27 - Śląsk", "pdf", __import__("datetime").datetime(2026, 11, 2)) \
         == "wyniki-egzamin-sezonowy-2026-27-slask-2026-11-02.pdf"
+
+
+def test_nowe_motywy_i_uklad_przechodza():
+    out = R.clean_export_options({"theme": "ink", "layout": {"orientation": "landscape", "density": "compact", "cover": True},
+                                  "people": {"flags": "only", "min_percent": 40, "max_percent": 80, "provinces": ["ŚLĄSKIE"], "sort": "name"},
+                                  "questions": {"rules": [8, "16"], "difficulty": "hard", "weakest": 10, "voided": "exclude"}},
+                                 national=True)
+    assert out["theme"] == "ink" and out["layout"]["cover"] is True and out["layout"]["orientation"] == "landscape"
+    assert out["people"]["provinces"] == ["ŚLĄSKIE"] and out["questions"]["rules"] == [8, 16]
+    assert R.clean_export_options({"theme": "zprp"}, national=False)["theme"] == "zprp"
+
+
+def _flag(score=40):
+    return {"score": score, "level": "suspicious" if score < 50 else "warning", "breakdown": []}
+
+
+def test_filtr_zdajacych_rzetelnosc_przedzial_okreg_i_miejsce_w_okregu():
+    rows = R.select_rows([att("1", 90, prov="ŚLĄSKIE"), att("2", 80, prov="OPOLSKIE"), att("3", 80, prov="ŚLĄSKIE"),
+                          att("4", 55, prov="ŚLĄSKIE", integrity=_flag()), att("5", 30, prov="OPOLSKIE")], "best")
+    assert [r["place"] for r in rows] == [1, 2, 2, 4, 5]
+    only = R.apply_people(rows, {"flags": "only"})
+    assert [r["judge_id"] for r in only] == ["4"] and only[0]["place"] == 4  # miejsce z zakresu zostaje
+    clean = R.apply_people(rows, {"flags": "none", "min_percent": 50, "max_percent": 85})
+    assert [r["judge_id"] for r in clean] == ["2", "3"]
+    sl = R.apply_people(rows, {"provinces": ["slaskie"]})
+    # Zawężenie do okręgu = miejsce w okręgu.
+    assert [(r["judge_id"], r["place"]) for r in sl] == [("1", 1), ("3", 2), ("4", 3)]
+    asc = R.apply_people(rows, {"sort": "percent_asc"})
+    assert [r["judge_id"] for r in asc][:2] == ["5", "4"]
+    by_int = R.apply_people(rows, {"sort": "integrity"})
+    assert by_int[0]["judge_id"] == "4"
+    by_name = R.apply_people(rows, {"sort": "name"})
+    assert [r["judge_name"] for r in by_name] == sorted(r["judge_name"] for r in rows)
+    missing = R.filter_missing([{"judge_id": "9", "name": "Zenon", "province": "OPOLSKIE"},
+                                {"judge_id": "8", "name": "Adam", "province": "ŚLĄSKIE"}], {"provinces": ["ŚLĄSKIE"]})
+    assert [m["judge_id"] for m in missing] == ["8"]
+
+
+def test_filtr_pytan_przepisy_trudnosc_najslabsze_uniewaznione():
+    qs = [{"qid": "a", "number": "8.2", "rule": 8, "total": 10, "correct_rate": 0.2, "voided": None},
+          {"qid": "b", "number": "8.1", "rule": 8, "total": 10, "correct_rate": 0.6, "voided": None},
+          {"qid": "c", "number": "1.1", "rule": 1, "total": 10, "correct_rate": 0.9, "voided": None},
+          {"qid": "d", "number": "1.2", "rule": 1, "total": 10, "correct_rate": 0.1, "voided": "drop"},
+          {"qid": "e", "number": "16.1", "rule": 16, "total": 0, "correct_rate": None, "voided": None}]
+    allq = R.filter_questions(qs, None)
+    assert [q["number"] for q in allq["grid"]] == ["1.1", "1.2", "8.1", "8.2", "16.1"] and allq["note"] == ""
+    assert [q["qid"] for q in allq["table"]] == ["a", "b", "c"]
+    r8 = R.filter_questions(qs, {"rules": [8]})
+    assert [q["qid"] for q in r8["grid"]] == ["b", "a"] and "przepisy 8" in r8["note"]
+    hard = R.filter_questions(qs, {"difficulty": "hard"})
+    assert [q["qid"] for q in hard["grid"]] == ["a"]  # unieważnione i bez odpowiedzi nie mają trudności
+    weak = R.filter_questions(qs, {"weakest": 2})
+    assert {q["qid"] for q in weak["grid"]} == {"a", "b"} and "2 najsłabszych" in weak["note"]
+    only_void = R.filter_questions(qs, {"voided": "only"})
+    assert [q["qid"] for q in only_void["grid"]] == ["d"]
+    assert "d" not in {q["qid"] for q in R.filter_questions(qs, {"voided": "exclude"})["grid"]}
+
+
+def test_opis_kogo_obejmuje_plik():
+    opts = R.clean_export_options({"range": "failed", "people": {"flags": "only", "min_percent": 40.5, "max_percent": 70,
+                                                                  "provinces": ["OPOLSKIE"], "sort": "name"}}, national=True)
+    text = R.describe_people(opts, 3)
+    assert "tylko niezaliczone" in text and "z uwagami" in text and "40,5-70%" in text and "OPOLSKIE" in text
+    assert "nazwisko" in text and text.endswith("(3 os.)")

@@ -45,6 +45,12 @@ class ExportBody(BaseModel):
     theme: str = "paper"
     seal: bool = True
     background: bool = False
+    #: {orientation: portrait|landscape, density: comfortable|compact, cover: bool}
+    layout: Optional[Dict[str, Any]] = None
+    #: {flags: any|only|none, min_percent, max_percent, provinces: [..], sort: place|name|percent_asc|integrity|province|duration}
+    people: Optional[Dict[str, Any]] = None
+    #: {rules: [int], difficulty: all|hard|medium|easy, weakest: int|null, voided: include|exclude|only}
+    questions: Optional[Dict[str, Any]] = None
 
 
 @router.get("/exams/{exam_id}/report", summary="Wyniki egzaminu dla komisji: agregaty, ranking ex aequo, okręgi")
@@ -70,9 +76,11 @@ def _compose(st: S.Store, who: S.Who, exam_id: str, options: Dict[str, Any]):
         progress("collect", 1, 1, None)
         rows = R.select_rows(report["attempts"], options["range"])
         missing = [dict(m) for m in report["missing"]]
+        # Kody „Zdający 001" z PEŁNEGO zakresu - filtr komisji nie przenumerowuje osób.
         if options["anonymize"]:
             R.anonymize(rows, missing)
-        report = {**report, "missing": missing}
+        rows = R.apply_people(rows, options["people"])
+        report = {**report, "missing": R.filter_missing(missing, options["people"])}
         html = await asyncio.to_thread(H.render_report, report, rows, options, progress)
         when = S.utcnow()
         name = R.export_filename(report["exam"]["name"], options["format"], when).rsplit(".", 1)[0]
