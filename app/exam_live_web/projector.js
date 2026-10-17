@@ -515,7 +515,12 @@
   client.start();
 
   /* ----- pełny ekran, klawisze, kursor ----- */
+  /* Duży przycisk startowy tylko na powitanie: po pierwszym użyciu albo po 8 s znika na dobre
+     (pełny ekran ma wtedy przycisk w rogu), więc nigdy nie zasłania podium. */
+  function hush() { document.body.classList.add("hush"); }
+  setTimeout(hush, 8000);
   function full() {
+    hush();
     var d = document;
     if (d.fullscreenElement || d.webkitFullscreenElement) (d.exitFullscreen || d.webkitExitFullscreen).call(d);
     else { var e = d.documentElement; (e.requestFullscreen || e.webkitRequestFullscreen).call(e); }

@@ -156,6 +156,9 @@ def decode_token(token: str) -> tuple[Optional[dict], str]:
         return None, REASON_BAD_TOKEN
     if not isinstance(payload, dict) or payload.get("sub") is None:
         return None, REASON_BAD_TOKEN
+    if payload.get("scope") is not None:
+        # Token z zakresem (strona egzaminu na żywo) nie otwiera zapisów administratora.
+        return None, REASON_BAD_TOKEN
     return payload, REASON_OK
 
 

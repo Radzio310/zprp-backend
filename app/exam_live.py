@@ -56,7 +56,7 @@ async def _web_login(username: str, password: str) -> Dict[str, Any]:
     from fastapi import HTTPException
 
     from app.auth import LoginRequest, login
-    from app.deps import get_settings
+    from app.deps import WEB_SCOPE, get_settings
 
     settings = get_settings()
     try:
@@ -74,7 +74,7 @@ async def _web_login(username: str, password: str) -> Dict[str, Any]:
                         "albo dołącz jako gość, jeśli prowadzący na to pozwala.", 403)
     name = str(data.get("display_name") or "").split("|")[0].strip()
     now = dt.datetime.now(dt.timezone.utc)
-    payload = {"sub": username, "judge_id": judge, "account_type": "judge", "display_name": name, "scope": "exam-live-web",
+    payload = {"sub": username, "judge_id": judge, "account_type": "judge", "display_name": name, "scope": WEB_SCOPE,
                "iat": int(now.timestamp()), "exp": int((now + dt.timedelta(hours=WEB_TOKEN_HOURS)).timestamp())}
     token = pyjwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return {"access_token": token, "token_type": "bearer", "expires_in": WEB_TOKEN_HOURS * 3600, "judge_id": judge, "name": name}

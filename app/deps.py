@@ -2,7 +2,7 @@ import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 
@@ -76,7 +76,24 @@ credentials_exception = HTTPException(
     headers={"WWW-Authenticate": "Bearer"},
 )
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
+#: Zakres tokenu logowania ze strony uczestnika egzaminu na żywo (`/exam-live/web-login`).
+#: Taki token jest w localStorage przeglądarki, więc działa WYŁĄCZNIE na trasach `/exam-live`.
+WEB_SCOPE = "exam-live-web"
+WEB_SCOPE_PREFIX = "/exam-live"
+
+
+def scope_allows(payload: dict, request: Request | None) -> bool:
+    """Token bez zakresu (zwykły token aplikacji) przechodzi wszędzie; token z zakresem tylko na swoich trasach."""
+    scope = payload.get("scope")
+    if scope is None:
+        return True
+    if scope != WEB_SCOPE or request is None:
+        return False
+    path = request.url.path
+    return path == WEB_SCOPE_PREFIX or path.startswith(WEB_SCOPE_PREFIX + "/")
+
+
+async def get_current_user(request: Request = None, token: str = Depends(oauth2_scheme)) -> str:
     """
     Dekoduje JWT i zwraca login użytkownika (pole 'sub').
     Jeśli token jest nieważny lub brak pola 'sub' → 401.
@@ -85,14 +102,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         user_login: str = payload.get("sub")
-        if user_login is None:
+        if user_login is None or not scope_allows(payload, request):
             raise credentials_exception
     except JWTError:
         raise credentials_exception
     return user_login
 
 
-async def get_jwt_payload(token: str = Depends(oauth2_scheme)) -> dict:
+async def get_jwt_payload(request: Request = None, token: str = Depends(oauth2_scheme)) -> dict:
     """
     Dekoduje JWT i zwraca pełny payload (wszystkie claimy).
     Jeśli token jest nieważny lub brak pola 'sub' → 401.
@@ -100,7 +117,7 @@ async def get_jwt_payload(token: str = Depends(oauth2_scheme)) -> dict:
     settings = get_settings()
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        if payload.get("sub") is None:
+        if payload.get("sub") is None or not scope_allows(payload, request):
             raise credentials_exception
     except JWTError:
         raise credentials_exception
@@ -108,6 +125,7 @@ async def get_jwt_payload(token: str = Depends(oauth2_scheme)) -> dict:
 
 async def get_optional_jwt_payload(
     token: str | None = Depends(oauth2_scheme_optional),
+    request: Request = None,
 ) -> dict | None:
     """Payload tokenu albo `None`, gdy żądanie przyszło bez niego.
 
@@ -134,7 +152,7 @@ async def get_optional_jwt_payload(
         )
     except JWTError:
         return None
-    if payload.get("sub") is None:
+    if payload.get("sub") is None or not scope_allows(payload, request):
         return None
     return payload
 
