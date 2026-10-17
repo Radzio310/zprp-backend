@@ -709,8 +709,19 @@ def merge_guard(
     wpisy z numerami, które przysłał wcześniej ekran meczu. A numer jest
     rozstrzygający przy rozpoznawaniu roli.
     """
-    out: Dict[str, Any] = dict(existing or {})
-    for key, value in (incoming or {}).items():
+    # JSONB bywa zapisany jako napis (stare wiersze) - wtedy najpierw rozpakować.
+    if isinstance(existing, str):
+        try:
+            existing = json.loads(existing)
+        except ValueError:
+            existing = None
+    if isinstance(incoming, str):
+        try:
+            incoming = json.loads(incoming)
+        except ValueError:
+            incoming = None
+    out: Dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in (incoming.items() if isinstance(incoming, dict) else ()):
         if key != "officials":
             out[key] = value
             continue

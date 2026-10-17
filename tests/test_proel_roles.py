@@ -262,3 +262,12 @@ def test_header_text_is_idempotent():
 
     once = header_text(_as_server_sees("WITKOWICZ Radosław"))
     assert header_text(once) == once
+
+
+def test_merge_guard_przyjmuje_jsonb_jako_napis():
+    import json as _json
+    from app.proel_auth import merge_guard
+    old = _json.dumps({"match": "X", "officials": {}})
+    out = merge_guard(old, {"note": 1})
+    assert out["match"] == "X" and out["note"] == 1
+    assert merge_guard("nie-json", None) == {}

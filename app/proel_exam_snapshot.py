@@ -63,6 +63,11 @@ def _now() -> datetime:
 
 
 def _officials(guard: Any) -> Dict[str, Any]:
+    if isinstance(guard, str):  # JSONB zapisany jako napis
+        try:
+            guard = json.loads(guard)
+        except ValueError:
+            return {}
     if not isinstance(guard, dict):
         return {}
     officials = guard.get("officials")

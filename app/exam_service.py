@@ -554,11 +554,14 @@ async def _attempt_counts(st: Store, exam_ids: List[str]) -> Dict[str, Dict[str,
     if not exam_ids:
         return {}
     a = st.t.attempts
-    rows = await st.database.fetch_all(select(a.c.exam_id, a.c.status, func.count()).where(a.c.exam_id.in_(exam_ids))
+    # Kolumny nazwane, nie po indeksie: rekord `databases` na asyncpg nie wspiera r[0].
+    rows = await st.database.fetch_all(select(a.c.exam_id.label("exam_id"), a.c.status.label("status"),
+                                              func.count().label("n")).where(a.c.exam_id.in_(exam_ids))
                                        .group_by(a.c.exam_id, a.c.status))
     out: Dict[str, Dict[str, int]] = {}
     for r in rows:
-        out.setdefault(r[0], {})[r[1]] = int(r[2])
+        m = _row(r)
+        out.setdefault(m["exam_id"], {})[m["status"]] = int(m["n"])
     return out
 
 
