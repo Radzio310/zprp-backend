@@ -9,7 +9,12 @@ Taksonomia błędów (pole `code` w odpowiedzi, obok dotychczasowego `detail`):
 * `not_club_account`     403 - konto poprawne, ale nie klubowe (np. sędzia),
 * `inactive_account`     403 - konto klubowe wyłączone,
 * `no_teams`             403 - konto klubowe bez drużyn w zakresie,
-* `session_expired`      401 - sesja BAZY wygasła po stronie ZPRP.
+* `session_expired`      401 - sesja BAZY wygasła po stronie ZPRP,
+* `not_admin`            403 - konto sędziowskie, które nie jest administratorem BAZA.
+
+Administrator BAZA (numer sędziego z listy `allowed_admins`) wchodzi tym samym
+formularzem co klub: `resolve_account` zwraca wtedy `"admin"` zamiast zakresu
+klubu, a klub wybiera już po zalogowaniu.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ STATUS_BY_CODE = {
     "inactive_account": 403,
     "no_teams": 403,
     "session_expired": 401,
+    "not_admin": 403,
 }
 
 MESSAGES = {
@@ -41,6 +47,7 @@ MESSAGES = {
     "inactive_account": "Konto klubowe jest nieaktywne w bazie ZPRP",
     "no_teams": "Konto klubowe nie ma przypisanych drużyn",
     "session_expired": "Sesja w bazie ZPRP wygasła. Zaloguj się ponownie",
+    "not_admin": "To konto sędziowskie nie jest na liście administratorów BAZA, więc nie ma wstępu do Strefy klubu. Wejście dostają konta klubowe i administratorzy aplikacji",
 }
 
 
@@ -128,6 +135,31 @@ def check_scope(scope: Mapping[str, Any], *, relogin_html: str = "") -> None:
         raise LoginError("inactive_account")
     if not scope.get("club_id") or not scope.get("team_ids"):
         raise LoginError("no_teams")
+
+
+def extract_judge_id(html: str) -> str:
+    """Numer sędziego z odpowiedzi logowania (ten sam wzorzec co `app/auth.py`)."""
+    match = re.search(r"NrSedzia=(\d+)", html or "")
+    return match.group(1) if match else ""
+
+
+def resolve_account(
+    scope: Mapping[str, Any], *, judge_id: str = "", admin_ids: Optional[set[str]] = None
+) -> str:
+    """Rodzaj wpuszczonego konta: `"club"` albo `"admin"` (w przeciwnym razie `LoginError`).
+
+    Tuż po udanym logowaniu strona konta bez formularza klubu NIE oznacza
+    wygasłej sesji (to konto sędziowskie ma inną stronę konta), więc
+    `session_expired` nie jest tu nigdy zwracane - mówimy wprost, czemu odmowa."""
+    if scope.get("account_type") == "club":
+        check_scope(scope)
+        return "club"
+    judge_id = str(judge_id or "").strip()
+    if judge_id and judge_id in (admin_ids or set()):
+        return "admin"
+    if judge_id:
+        raise LoginError("not_admin")
+    raise LoginError("not_club_account")
 
 
 class AttemptLimiter:

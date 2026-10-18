@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -23,7 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
 from sqlalchemy import and_, func, insert, select, update
 
-from app.admin_guard import admin_write_guard
+from app.admin_guard import admin_write_guard, read_admin_ids
 from app.db import (
     database,
     pod_reka_club_sessions,
@@ -46,6 +47,9 @@ from app.pod_reka_login_rules import (
     LoginError,
     check_scope,
     client_key,
+    extract_judge_id,
+    resolve_account,
+    looks_like_login_page,
     decode_html,
     encode_login_form,
     classify_login_response,
@@ -95,6 +99,11 @@ def _decrypt_cookies(payload: str, settings: Settings) -> dict[str, str]:
     if not isinstance(data, dict):
         raise HTTPException(401, "Sesja klubowa jest nieprawidłowa")
     return {str(k): str(v) for k, v in data.items()}
+
+
+def _logged_label(html: str) -> str:
+    match = re.search(r"Zalogowany:\s*</small>\s*([^<]+?)\s*\|", html or "", re.I)
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
 
 
 def _decode_response(response: httpx.Response) -> str:
@@ -162,12 +171,36 @@ class TemplateCreate(BaseModel):
     schema: dict[str, Any] = Field(default_factory=dict)
 
 
+async def _refresh_admin_session(data: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    """Co godzinę potwierdza, że sesja administratora w baza.zprp.pl żyje, a numer
+    nadal jest na liście `allowed_admins`. Awaria baza.zprp.pl nie wylogowuje."""
+    cookies = _decrypt_cookies(data["upstream_cookies_encrypted"], settings)
+    try:
+        async with httpx.AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=20.0) as client:
+            response = await client.get("/index.php", cookies=cookies)
+    except httpx.HTTPError:
+        return data
+    if response.status_code >= 500:
+        return data
+    html = _decode_response(response)
+    if looks_like_login_page(html):
+        raise HTTPException(401, {"detail": LoginError("session_expired").message, "code": "session_expired"})
+    if extract_judge_id(html) not in await read_admin_ids():
+        raise HTTPException(403, {"detail": "To konto nie jest już na liście administratorów BAZA. Zaloguj się kontem klubowym", "code": "not_admin"})
+    now = datetime.now(timezone.utc)
+    await database.execute(
+        update(pod_reka_club_sessions).where(pod_reka_club_sessions.c.session_hash == data["session_hash"]).values(scope_refreshed_at=now)
+    )
+    data["scope_refreshed_at"] = now
+    return data
+
+
 async def _session(
     baza_club_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     if not baza_club_session:
-        raise HTTPException(401, "Zaloguj się kontem klubowym")
+        raise HTTPException(401, {"detail": "Zaloguj się kontem klubowym albo kontem administratora BAZA", "code": "unauthenticated"})
     row = await database.fetch_one(
         select(pod_reka_club_sessions).where(
             and_(
@@ -178,12 +211,14 @@ async def _session(
         )
     )
     if not row:
-        raise HTTPException(401, "Sesja klubowa wygasła")
+        raise HTTPException(401, {"detail": "Sesja w Strefie klubu wygasła (limit 12 godzin albo wylogowanie). Zaloguj się ponownie", "code": "session_expired"})
     data = _dict(row)
     refreshed_at = data.get("scope_refreshed_at")
     if refreshed_at and refreshed_at.tzinfo is None:
         refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
     if not refreshed_at or refreshed_at <= datetime.now(timezone.utc) - timedelta(hours=1):
+        if data.get("account_type") == "admin":
+            return await _refresh_admin_session(data, settings)
         cookies = _decrypt_cookies(data["upstream_cookies_encrypted"], settings)
         try:
             async with httpx.AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=20.0) as client:
@@ -202,9 +237,9 @@ async def _session(
         try:
             check_scope(scope, relogin_html=account_html)
         except LoginError as exc:
-            raise HTTPException(exc.status, exc.message) from exc
+            raise HTTPException(exc.status, {"detail": exc.message, "code": exc.code}) from exc
         if scope["club_id"] != data["club_id"]:
-            raise HTTPException(403, "Nie udało się ponownie potwierdzić zakresu konta klubowego")
+            raise HTTPException(403, {"detail": "Nie udało się ponownie potwierdzić zakresu konta klubowego: klub na koncie w baza.zprp.pl zmienił się od logowania. Zaloguj się ponownie", "code": "forbidden"})
         now = datetime.now(timezone.utc)
         await database.execute(
             update(pod_reka_club_sessions)
@@ -364,7 +399,7 @@ async def club_login(payload: ClubLogin, response: Response, request: Request, s
 
     Błędy mają `detail` (tekst) oraz `code`: bad_credentials, rate_limited,
     upstream_unavailable, unexpected_response, not_club_account,
-    inactive_account, no_teams (opis w `app/pod_reka_login_rules.py`)."""
+    inactive_account, no_teams, not_admin (opis w `app/pod_reka_login_rules.py`)."""
     address = client_key(request.headers.get("x-forwarded-for", ""), request.client.host if request.client else "")
     limit_keys = (f"ip:{address}", f"user:{payload.username.strip().lower()}")
     retry_after = 0
@@ -377,7 +412,8 @@ async def club_login(payload: ClubLogin, response: Response, request: Request, s
         try:
             async with httpx.AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=25.0) as client:
                 login_response = await client.post("/login.php", content=form, headers=headers)
-                classify_login_response(login_response.url.path, login_response.status_code, _decode_response(login_response))
+                login_html = _decode_response(login_response)
+                classify_login_response(login_response.url.path, login_response.status_code, login_html)
                 cookies = merge_cookies(dict(client.cookies), dict(login_response.cookies))
                 if not cookies:
                     raise LoginError("unexpected_response")
@@ -390,9 +426,13 @@ async def club_login(payload: ClubLogin, response: Response, request: Request, s
             raise LoginError("upstream_unavailable")
         account_html = _decode_response(account_response)
         scope = await _scope_with_fallback(account_html, _decode_response(teams_response) + _decode_response(zespoly_response))
-        check_scope(scope, relogin_html=account_html)
+        # Administrator BAZA (numer z listy allowed_admins) wchodzi tym samym formularzem,
+        # a klub wybiera po zalogowaniu. Reszta kont nieklubowych dostaje wprost powód.
+        kind = resolve_account(scope, judge_id=extract_judge_id(login_html), admin_ids=set() if scope.get("account_type") == "club" else await read_admin_ids())
+        if kind == "admin":
+            scope = {**scope, "club_id": "", "team_ids": [], "display_name": scope["display_name"] or _logged_label(login_html)}
     except LoginError as exc:
-        if exc.code in {"bad_credentials", "not_club_account", "inactive_account", "no_teams"}:
+        if exc.code in {"bad_credentials", "not_club_account", "inactive_account", "no_teams", "not_admin"}:
             _LOGIN_LIMITER.fail(*limit_keys)
         if exc.code == "rate_limited":
             return JSONResponse(
@@ -409,7 +449,7 @@ async def club_login(payload: ClubLogin, response: Response, request: Request, s
     await database.execute(
         insert(pod_reka_club_sessions).values(
             session_hash=_hash(raw_session), username=payload.username, display_name=scope["display_name"],
-            account_type="club", club_id=scope["club_id"], team_ids_json=scope["team_ids"],
+            account_type=kind, club_id=scope["club_id"], team_ids_json=scope["team_ids"],
             upstream_cookies_encrypted=_encrypt_cookies(cookies, settings), csrf_hash=_hash(csrf_token), expires_at=expires_at,
         )
     )
@@ -417,12 +457,51 @@ async def club_login(payload: ClubLogin, response: Response, request: Request, s
     same_site = "none" if secure else "lax"
     response.set_cookie(SESSION_COOKIE, raw_session, max_age=SESSION_HOURS * 3600, httponly=True, secure=secure, samesite=same_site, path="/")
     response.set_cookie(CSRF_COOKIE, csrf_token, max_age=SESSION_HOURS * 3600, httponly=False, secure=secure, samesite=same_site, path="/")
-    return {"account_type": "club", "display_name": scope["display_name"], "club_id": scope["club_id"], "team_ids": scope["team_ids"], "expires_at": expires_at, "csrf_token": csrf_token}
+    return {"account_type": kind, "display_name": scope["display_name"], "club_id": scope["club_id"], "team_ids": scope["team_ids"], "expires_at": expires_at, "csrf_token": csrf_token}
 
 
 @router.get("/auth/me")
 async def club_me(session: dict[str, Any] = Depends(_session)) -> dict[str, Any]:
     return {key: session.get(key) for key in ("display_name", "account_type", "club_id", "team_ids_json", "scope_refreshed_at", "expires_at")}
+
+
+def _require_admin_session(session: dict[str, Any]) -> None:
+    if session.get("account_type") != "admin":
+        raise HTTPException(403, {"detail": "Wybór klubu jest tylko dla administratorów BAZA. To konto jest kontem klubowym", "code": "forbidden"})
+
+
+@router.get("/auth/clubs")
+async def admin_clubs(session: dict[str, Any] = Depends(_session)) -> dict[str, Any]:
+    """Lista klubów do wyboru przez administratora BAZA (z lokalnej kopii publicznej BAZY)."""
+    _require_admin_session(session)
+    rows = await database.fetch_all(
+        select(zprp_public_clubs.c.club_id, zprp_public_clubs.c.name, zprp_public_clubs.c.logo_url).order_by(zprp_public_clubs.c.name)
+    )
+    return {"items": [_dict(row) for row in rows], "count": len(rows)}
+
+
+class AdminClubChoice(BaseModel):
+    club_id: str = Field(min_length=1, max_length=40)
+
+
+@router.post("/auth/club")
+async def admin_choose_club(payload: AdminClubChoice, session: dict[str, Any] = Depends(_csrf_session)) -> dict[str, Any]:
+    """Administrator BAZA wchodzi w zakres wybranego klubu (jego drużyny z aktywnych sezonów)."""
+    _require_admin_session(session)
+    club = await database.fetch_one(select(zprp_public_clubs.c.club_id, zprp_public_clubs.c.name).where(zprp_public_clubs.c.club_id == payload.club_id))
+    if not club:
+        raise HTTPException(404, {"detail": "Nie ma takiego klubu w bazie. Odśwież listę klubów", "code": "not_found"})
+    rows = await database.fetch_all(
+        select(zprp_public_teams.c.team_id).where(
+            zprp_public_teams.c.club_id == payload.club_id,
+            zprp_public_teams.c.season_id.in_(select(zprp_public_seasons.c.season_id).where(zprp_public_seasons.c.active.is_(True))),
+        )
+    )
+    team_ids = sorted({str(r["team_id"]) for r in rows})
+    await database.execute(
+        update(pod_reka_club_sessions).where(pod_reka_club_sessions.c.session_hash == session["session_hash"]).values(club_id=payload.club_id, team_ids_json=team_ids)
+    )
+    return {"account_type": "admin", "club_id": payload.club_id, "club_name": club["name"], "team_ids": team_ids}
 
 
 @router.post("/auth/logout", status_code=204)

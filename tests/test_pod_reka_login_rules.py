@@ -94,3 +94,48 @@ def test_adres_klienta_z_naglowka_proxy():
 def test_blad_ma_tekst_i_kod():
     body = LoginError("rate_limited").body()
     assert body["code"] == "rate_limited" and "prób" in body["detail"]
+
+
+# --- Administrator BAZA w Strefie klubu ---------------------------------------
+
+def _scope(**kw):
+    base = {"account_type": "unknown", "active": False, "club_id": "", "team_ids": [], "display_name": ""}
+    return {**base, **kw}
+
+
+def test_admin_baza_wchodzi_formularzem_klubu():
+    from app.pod_reka_login_rules import extract_judge_id, resolve_account
+
+    html = '<a href="index.php?a=edycja&NrSedzia=4417">dane</a>'
+    assert extract_judge_id(html) == "4417"
+    assert resolve_account(_scope(), judge_id="4417", admin_ids={"4417", "9"}) == "admin"
+
+
+def test_sedzia_spoza_listy_adminow_dostaje_wprost_powod_a_nie_sesje_wygasla():
+    import pytest
+    from app.pod_reka_login_rules import LoginError, resolve_account
+
+    with pytest.raises(LoginError) as err:
+        resolve_account(_scope(), judge_id="5", admin_ids={"4417"})
+    assert err.value.code == "not_admin" and err.value.status == 403
+    assert "administrator" in err.value.message
+
+
+def test_konto_bez_numeru_sedziego_to_nie_klubowe_nigdy_session_expired():
+    import pytest
+    from app.pod_reka_login_rules import LoginError, resolve_account
+
+    with pytest.raises(LoginError) as err:
+        resolve_account(_scope(), judge_id="", admin_ids={"4417"})
+    assert err.value.code == "not_club_account"
+
+
+def test_konto_klubowe_nadal_przechodzi_i_bez_druzyn_jest_odrzucone():
+    import pytest
+    from app.pod_reka_login_rules import LoginError, resolve_account
+
+    club = _scope(account_type="club", active=True, club_id="42", team_ids=["1"])
+    assert resolve_account(club) == "club"
+    with pytest.raises(LoginError) as err:
+        resolve_account({**club, "team_ids": []})
+    assert err.value.code == "no_teams"
