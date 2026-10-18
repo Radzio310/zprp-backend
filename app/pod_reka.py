@@ -47,6 +47,8 @@ from app.pod_reka_login_rules import (
     LoginError,
     check_scope,
     client_key,
+    csrf_matches,
+    issue_csrf,
     extract_judge_id,
     resolve_account,
     looks_like_login_page,
@@ -254,8 +256,8 @@ async def _csrf_session(
     session: dict[str, Any] = Depends(_session),
     x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
 ) -> dict[str, Any]:
-    if not x_csrf_token or not secrets.compare_digest(_hash(x_csrf_token), session["csrf_hash"]):
-        raise HTTPException(403, "Nieprawidłowy token CSRF")
+    if not csrf_matches(session["csrf_hash"], x_csrf_token):
+        raise HTTPException(403, {"detail": "Token zabezpieczający wygasł (np. po odświeżeniu strony albo logowaniu w drugiej karcie). Odśwież token i spróbuj ponownie", "code": "csrf"})
     return session
 
 
@@ -485,7 +487,7 @@ class AdminClubChoice(BaseModel):
 
 
 @router.post("/auth/club")
-async def admin_choose_club(payload: AdminClubChoice, session: dict[str, Any] = Depends(_session)) -> dict[str, Any]:
+async def admin_choose_club(payload: AdminClubChoice, session: dict[str, Any] = Depends(_csrf_session)) -> dict[str, Any]:
     """Administrator BAZA wchodzi w zakres wybranego klubu (jego drużyny z aktywnych sezonów)."""
     _require_admin_session(session)
     club = await database.fetch_one(select(zprp_public_clubs.c.club_id, zprp_public_clubs.c.name).where(zprp_public_clubs.c.club_id == payload.club_id))
@@ -502,6 +504,20 @@ async def admin_choose_club(payload: AdminClubChoice, session: dict[str, Any] = 
         update(pod_reka_club_sessions).where(pod_reka_club_sessions.c.session_hash == session["session_hash"]).values(club_id=payload.club_id, team_ids_json=team_ids)
     )
     return {"account_type": "admin", "club_id": payload.club_id, "club_name": club["name"], "team_ids": team_ids}
+
+
+@router.get("/auth/csrf")
+async def club_csrf(request: Request, response: Response, session: dict[str, Any] = Depends(_session)) -> dict[str, Any]:
+    """Świeży token CSRF powiązany z sesją. Strona (inna domena niż backend) nie czyta
+    ciasteczka CSRF, więc po odświeżeniu pobiera token tą trasą. Poprzedni token przestaje działać."""
+    token, token_hash = issue_csrf()
+    await database.execute(
+        update(pod_reka_club_sessions).where(pod_reka_club_sessions.c.session_hash == session["session_hash"]).values(csrf_hash=token_hash)
+    )
+    secure = request.url.scheme == "https"
+    response.set_cookie(CSRF_COOKIE, token, max_age=SESSION_HOURS * 3600, httponly=False, secure=secure, samesite="none" if secure else "lax", path="/")
+    response.headers["Cache-Control"] = "no-store"
+    return {"csrf_token": token}
 
 
 @router.post("/auth/logout", status_code=204)

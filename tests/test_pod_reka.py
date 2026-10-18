@@ -73,3 +73,17 @@ def test_club_scope_reads_real_baza_team_links():
     <a href="?a=klub&amp;b=edycja&amp;NrKlubu=2851">SZCZEGOLY</a>
     """
     assert parse_club_scope(account_html, teams_html)["team_ids"] == ["17583", "5192"]
+
+
+def test_csrf_swiezy_token_przechodzi_a_stary_przestaje_dzialac():
+    """/auth/csrf zapisuje skrót nowego tokenu: zapis po odświeżeniu strony przechodzi nowym, starym nie."""
+    from app.pod_reka_login_rules import csrf_matches, issue_csrf
+
+    old, old_hash = issue_csrf()
+    assert csrf_matches(old_hash, old)
+    new, new_hash = issue_csrf()  # w sesji ląduje skrót nowego (UPDATE csrf_hash)
+    assert new != old
+    assert csrf_matches(new_hash, new)
+    assert not csrf_matches(new_hash, old)
+    assert not csrf_matches(new_hash, "")
+    assert not csrf_matches("", new)

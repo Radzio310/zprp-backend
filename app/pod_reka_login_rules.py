@@ -19,7 +19,9 @@ klubu, a klub wybiera już po zalogowaniu.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 from urllib.parse import urlencode
@@ -135,6 +137,20 @@ def check_scope(scope: Mapping[str, Any], *, relogin_html: str = "") -> None:
         raise LoginError("inactive_account")
     if not scope.get("club_id") or not scope.get("team_ids"):
         raise LoginError("no_teams")
+
+
+def hash_secret(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def issue_csrf() -> tuple[str, str]:
+    """(token dla klienta, skrót do zapisania w sesji)."""
+    token = secrets.token_urlsafe(32)
+    return token, hash_secret(token)
+
+
+def csrf_matches(stored_hash: str, token: str) -> bool:
+    return bool(token) and bool(stored_hash) and secrets.compare_digest(hash_secret(token), stored_hash)
 
 
 def extract_judge_id(html: str) -> str:
