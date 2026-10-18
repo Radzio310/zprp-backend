@@ -485,7 +485,7 @@ class AdminClubChoice(BaseModel):
 
 
 @router.post("/auth/club")
-async def admin_choose_club(payload: AdminClubChoice, session: dict[str, Any] = Depends(_csrf_session)) -> dict[str, Any]:
+async def admin_choose_club(payload: AdminClubChoice, session: dict[str, Any] = Depends(_session)) -> dict[str, Any]:
     """Administrator BAZA wchodzi w zakres wybranego klubu (jego drużyny z aktywnych sezonów)."""
     _require_admin_session(session)
     club = await database.fetch_one(select(zprp_public_clubs.c.club_id, zprp_public_clubs.c.name).where(zprp_public_clubs.c.club_id == payload.club_id))
@@ -505,10 +505,28 @@ async def admin_choose_club(payload: AdminClubChoice, session: dict[str, Any] = 
 
 
 @router.post("/auth/logout", status_code=204)
-async def club_logout(response: Response, session: dict[str, Any] = Depends(_csrf_session)) -> Response:
-    await database.execute(update(pod_reka_club_sessions).where(pod_reka_club_sessions.c.session_hash == session["session_hash"]).values(revoked_at=datetime.now(timezone.utc)))
-    response.delete_cookie(SESSION_COOKIE, path="/")
-    response.delete_cookie(CSRF_COOKIE, path="/")
+async def club_logout(
+    request: Request,
+    response: Response,
+    baza_club_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> Response:
+    """Wylogowanie unieważnia sesję na serwerze zawsze, gdy ciasteczko sesji dotarło.
+
+    Bez wymogu nagłówka CSRF: strona (inna domena niż backend) nie czyta
+    ciasteczka CSRF, więc dawny wymóg kończył się 403 i sesja żyła dalej mimo
+    „Wyloguj". Wylogowanie cudzej sesji nie daje atakującemu nic (sesji nie
+    da się odgadnąć), a ciasteczko SameSite chroni przed fałszywym żądaniem."""
+    if baza_club_session:
+        await database.execute(
+            update(pod_reka_club_sessions)
+            .where(and_(pod_reka_club_sessions.c.session_hash == _hash(baza_club_session), pod_reka_club_sessions.c.revoked_at.is_(None)))
+            .values(revoked_at=datetime.now(timezone.utc))
+        )
+    secure = request.url.scheme == "https"
+    same_site = "none" if secure else "lax"
+    # Usunięcie musi mieć te same atrybuty co ustawienie, inaczej przeglądarka zostawia ciasteczko.
+    for name in (SESSION_COOKIE, CSRF_COOKIE):
+        response.delete_cookie(name, path="/", secure=secure, httponly=name == SESSION_COOKIE, samesite=same_site)
     response.status_code = 204
     return response
 
