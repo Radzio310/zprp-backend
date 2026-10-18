@@ -833,8 +833,10 @@ async def candidates(payload: CandidatesRequest):
     Wszyscy AKTYWNI sędziowie okręgu jako kandydaci do jednego meczu - z tą
     samą oceną co Automat (równy podział w sezonie i w miesiącu, kilometry,
     pary, pierwszeństwo „Stolikowych" przy stoliku okręgowym) i ze stanem
-    terminu: `off` (niedyspozycja, przerwa, kolizja - z godzinami), `tight`
-    (ten sam dzień, zdąży), `free`. `pending` jak w `/suggest`. Bez zapisu.
+    terminu: `off` (niedyspozycja, przerwa - z godzinami), `gap` (za mały odstęp
+    do innego meczu tego dnia - OSTRZEŻENIE ze stopniem `gap_level`, ręcznie
+    wolno obsadzić), `tight` (ten sam dzień, zdąży), `free`. `pending` jak
+    w `/suggest`. Bez zapisu.
     """
     from app.assignment_auto import FIELD, TABLE, describe_candidates
     from app.assignment_board_rules import display_name
@@ -892,6 +894,11 @@ async def candidates(payload: CandidatesRequest):
                 # Automatu; ręczny wybór w panelu pokazuje ją ostrzeżeniem.
                 "role_note": view.role_note or None,
                 "table_only": "tylko stolik" in (view.role_note or ""),
+                # Za mały odstęp (status "gap"): stopień yellow/orange/red,
+                # brakujące minuty i zdanie do powiadomienia sędziego.
+                "gap_level": view.gap_level or None,
+                "gap_shortfall": view.gap_shortfall or None,
+                "gap_note": view.gap_note or None,
             }
         )
     return {

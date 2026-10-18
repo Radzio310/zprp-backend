@@ -254,6 +254,75 @@ def shortfall_minutes(
 
 
 # ---------------------------------------------------------------------------
+# Stopnie ostrzeżenia o za małym odstępie (RĘCZNE obsadzanie, 18.10.2026)
+# ---------------------------------------------------------------------------
+#
+# Automat, optymalizacja i zamiany nadal używają `can_make_both` jako twardej
+# blokady. Obsadzający ręcznie widzi jednak stopień, a decyzję podejmuje sam:
+#   żółty    - zdąży, ale zjada zapas okręgu (`margin_minutes`),
+#   pomarańczowy - brakuje do 30 min ponad zapas,
+#   czerwony - brakuje więcej albo mecze nachodzą na siebie.
+
+GAP_YELLOW = "yellow"
+GAP_ORANGE = "orange"
+GAP_RED = "red"
+GAP_LEVELS: tuple[str, ...] = (GAP_YELLOW, GAP_ORANGE, GAP_RED)
+#: Ile minut ponad zapas jeszcze jest „pomarańczowe" (dalej czerwone).
+ORANGE_EXTRA_MINUTES = 30
+
+
+@dataclass(frozen=True)
+class GapGrade:
+    level: str
+    #: Ilu minut brakuje do pełnego odstępu (z zapasem), co najmniej 1.
+    shortfall: int
+    #: Mecz wcześniejszy jeszcze trwa, gdy zaczyna się późniejszy.
+    overlap: bool
+
+
+def gap_severity(level: Optional[str]) -> int:
+    """0 = brak ostrzeżenia, 1-3 = żółty, pomarańczowy, czerwony."""
+    return GAP_LEVELS.index(level) + 1 if level in GAP_LEVELS else 0
+
+
+def gap_grade(
+    first: Optional[datetime],
+    second: Optional[datetime],
+    km: Optional[float],
+    *,
+    first_code: Any = "",
+    second_code: Any = "",
+    same_venue: bool = False,
+    rules: Optional[CollisionRules] = None,
+) -> Optional[GapGrade]:
+    """
+    Stopień ostrzeżenia dla pary meczów albo None, gdy odstęp wystarcza
+    (albo nie znamy terminu - „nie wiem" nie ostrzega).
+    """
+    if first is None or second is None:
+        return None
+    rules = rules or DEFAULT_RULES
+    if can_make_both(
+        first, second, km, first_code=first_code, second_code=second_code,
+        same_venue=same_venue, rules=rules,
+    ):
+        return None
+    earlier_code = first_code if first <= second else second_code
+    gap = gap_minutes(first, second)
+    need = needed_minutes(earlier_code, km, same_venue=same_venue, rules=rules)
+    shortfall = max(1, int(round(need - gap)))
+    overlap = gap < float(rules.duration(earlier_code))
+    margin = 0 if same_venue else int(rules.margin_minutes)
+    if overlap or shortfall > margin + ORANGE_EXTRA_MINUTES:
+        level = GAP_RED
+    elif shortfall > margin:
+        level = GAP_ORANGE
+    else:
+        level = GAP_YELLOW
+    return GapGrade(level=level, shortfall=shortfall, overlap=overlap)
+
+
+# ---------------------------------------------------------------------------
 # Ustawienia
 # ---------------------------------------------------------------------------
 

@@ -247,8 +247,9 @@ class TestKandydaci:
         assert by_id["1"].status == "free" and by_id["1"].fits == ["field", "table"]
         assert by_id["2"].status == TIGHT and "09:00" in by_id["2"].reason
         assert by_id["3"].status == OFF and by_id["3"].reason == "niedyspozycja: Praca, 12:00-18:00"
-        assert by_id["4"].status == OFF and "kolizja" in by_id["4"].reason and "13:00" in by_id["4"].reason
-        # Stolik okręgowy: stolikowy pierwszy, zajęci na końcu.
+        # Za mały odstęp to od 18.10.2026 OSTRZEŻENIE (status gap), nie odmowa.
+        assert by_id["4"].status == "gap" and by_id["4"].gap_level == "red" and "13:00" in by_id["4"].reason
+        # Stolik okręgowy: stolikowy pierwszy, potem ostrzeżenie, niedyspozycja na końcu.
         assert views[0].judge_id == "5" and views[0].rank == 1
-        assert [view.status for view in views[-2:]] == [OFF, OFF]
+        assert [view.status for view in views[-2:]] == ["gap", OFF]
         assert any("km" in item for item in by_id["1"].why)

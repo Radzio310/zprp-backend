@@ -592,9 +592,21 @@ def solo_match(code: Any) -> bool:
 
 
 def _hard_reason(
-    ctx: Context, judge: Judge, need: MatchNeed, *, round_no: int, kind: str = ""
+    ctx: Context,
+    judge: Judge,
+    need: MatchNeed,
+    *,
+    round_no: int,
+    kind: str = "",
+    allow_gap: bool = False,
 ) -> Optional[str]:
-    """Powód, dla którego ten sędzia w ogóle nie wchodzi w rachubę."""
+    """
+    Powód, dla którego ten sędzia w ogóle nie wchodzi w rachubę.
+
+    `allow_gap` (TYLKO kafelki ręcznej obsady, 18.10.2026): za mały odstęp
+    między meczami nie jest wtedy powodem odmowy - kafelek dostaje stopień
+    ostrzeżenia (`gap_with`). Automat nigdy tego nie ustawia.
+    """
     if judge.judge_id in need.crew_ids:
         return "już stoi w tym meczu"
     window_status, _window_details = _window_availability(ctx, judge.judge_id, need)
@@ -605,9 +617,10 @@ def _hard_reason(
             return "przerwa sędziego"
         if not ctx.available(judge.judge_id, need.moment):
             return "niedyspozycja"
-        _, can_make = _same_day_state(ctx, judge.judge_id, need, kind=kind)
-        if not can_make:
-            return "ma tego dnia mecz, na który nie zdąży"
+        if not allow_gap:
+            _, can_make = _same_day_state(ctx, judge.judge_id, need, kind=kind)
+            if not can_make:
+                return "ma tego dnia mecz, na który nie zdąży"
     # „Nie sędziuje sam" (01.10.2026): mecz z JEDNYM boiskowym - Dzieci
     # i Młodzik młodszy - jest dla niego zamknięty. W parze sędziuje normalnie,
     # więc reguła patrzy na obsadę meczu, a nie na samego sędziego.
@@ -1292,6 +1305,9 @@ FREE = "free"
 TIGHT = "tight"
 PARTIAL = "partial"
 OFF = "off"
+#: Za mały odstęp do innego meczu tego dnia: w RĘCZNEJ obsadzie ostrzeżenie
+#: (stopień w `CandidateView.gap_level`), w Automacie nadal twarda blokada.
+GAP = "gap"
 
 
 def same_day_matches(ctx: Context, judge_id: str, need: MatchNeed) -> list[BusyMatch]:
@@ -1332,6 +1348,67 @@ def blocking_match(ctx: Context, judge_id: str, need: MatchNeed, *, kind: str = 
     return None
 
 
+def gap_with(
+    ctx: Context, judge_id: str, need: MatchNeed, *, kind: str = ""
+) -> Optional[tuple[BusyMatch, CR.GapGrade]]:
+    """
+    Najgorszy stopień odstępu sędziego do jego innych meczów tego dnia
+    (None = odstęp wystarcza). Tylko do OSTRZEŻEŃ w ręcznej obsadzie -
+    Automat dalej używa `blocking_match` jako twardej blokady.
+    """
+    worst: Optional[tuple[BusyMatch, CR.GapGrade]] = None
+    for item in same_day_matches(ctx, judge_id, need):
+        venue = CR.same_hall(
+            item.hall, item.city, need.hall, need.host_city, a_venue=item.venue, b_venue=need.venue
+        )
+        if _table_tournament_chain(item, need, kind, venue):
+            continue
+        distance = 0.0 if venue else ctx.km(item.city, need.host_city)
+        grade = CR.gap_grade(
+            item.moment,
+            need.moment,
+            distance,
+            first_code=item.code,
+            second_code=need.code,
+            same_venue=venue,
+            rules=ctx.collision,
+        )
+        if grade is None:
+            continue
+        key = (CR.gap_severity(grade.level), grade.shortfall)
+        if worst is None or key > (CR.gap_severity(worst[1].level), worst[1].shortfall):
+            worst = (item, grade)
+    return worst
+
+
+def _gap_place(item: BusyMatch) -> str:
+    when = f"{item.moment:%H:%M}" if item.moment else "?"
+    place = item.hall or item.city or "hala nieznana"
+    code = f"{item.code} " if item.code else ""
+    return f"{code}o {when} w {place}"
+
+
+def gap_reason(item: BusyMatch, grade: CR.GapGrade, ctx: Context) -> str:
+    """Opis dla obsadzającego - zawsze z meczem i minutami."""
+    where = _gap_place(item)
+    if grade.overlap:
+        return f"mecze nachodzą na siebie: brakuje {grade.shortfall} min do meczu {where}"
+    if grade.level == CR.GAP_YELLOW:
+        return (
+            f"zdąży, ale zjada {grade.shortfall} min zapasu okręgu "
+            f"({int(ctx.collision.margin_minutes)} min) przy meczu {where}"
+        )
+    return f"brakuje {grade.shortfall} min do meczu {where}"
+
+
+def gap_note_for_judge(item: BusyMatch, grade: CR.GapGrade) -> str:
+    """Dopisek do powiadomienia sędziego o obsadzie (krótki, bez żargonu)."""
+    return (
+        f"Uwaga: tego dnia masz też mecz {_gap_place(item)} - "
+        f"odstęp między meczami jest krótki (brakuje {grade.shortfall} min do zapasu)."
+    )
+
+
 def _busy_text(item: BusyMatch) -> str:
     when = f"{item.moment:%H:%M}" if item.moment else "?"
     place = item.hall or item.city or "hala nieznana"
@@ -1354,6 +1431,11 @@ class CandidateView:
     #: Ograniczenie roli w obsadzie („tylko stolik (ZPRP)", „tylko boisko
     #: (ustawienie okręgu)") - pusto, gdy sędzia może wszędzie.
     role_note: str = ""
+    #: Tylko dla `status == GAP`: stopień (yellow/orange/red), brakujące
+    #: minuty i zdanie do powiadomienia sędziego.
+    gap_level: str = ""
+    gap_shortfall: int = 0
+    gap_note: str = ""
 
 
 def describe_candidates(
@@ -1393,7 +1475,7 @@ def describe_candidates(
         variants = [ctx.km(item, need.host_city) for item in cities if item and need.host_city]
         known = [value for value in variants if value is not None]
         km = max(known) if known else None
-        hard = _hard_reason(ctx, judge, need, round_no=2, kind=kind)
+        hard = _hard_reason(ctx, judge, need, round_no=2, kind=kind, allow_gap=True)
         if hard:
             reason = hard
             if hard == "brak dostępnego terminu w zakresie kolejki":
@@ -1450,6 +1532,16 @@ def describe_candidates(
             if others
             else ""
         )
+        gap = gap_with(ctx, judge.judge_id, need, kind=kind) if window_status is None else None
+        gap_fields: dict = {}
+        if gap is not None:
+            status = GAP
+            reason = gap_reason(gap[0], gap[1], ctx)
+            gap_fields = {
+                "gap_level": gap[1].level,
+                "gap_shortfall": gap[1].shortfall,
+                "gap_note": gap_note_for_judge(gap[0], gap[1]),
+            }
         if window_details:
             reason = "; ".join([part for part in (reason, *window_details) if part])
         if refusals:
@@ -1464,6 +1556,7 @@ def describe_candidates(
             why=[],
             fits=fits,
             role_note="; ".join(role_notes),
+            **gap_fields,
         )
         if kind in fits:
             ready.append(judge)
@@ -1513,6 +1606,7 @@ def describe_candidates(
         judge = ctx.judges[view.judge_id]
         return (
             view.status == OFF,
+            view.status == GAP,
             view.score is None,
             tier_of(judge),
             view.score if view.score is not None else 0.0,

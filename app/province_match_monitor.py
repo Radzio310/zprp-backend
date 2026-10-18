@@ -916,7 +916,16 @@ async def _upsert_match(
     return False, created
 
 
-async def _upsert_assignment(province: str, match_id: str, judge_id: str, season: str, notify: bool, state: Dict[str, Any]) -> int:
+async def _upsert_assignment(
+    province: str,
+    match_id: str,
+    judge_id: str,
+    season: str,
+    notify: bool,
+    state: Dict[str, Any],
+    note: str = "",
+) -> int:
+    """`note` - dopisek ręcznej obsady (np. krótki odstęp do drugiego meczu)."""
     now = _now()
     existing = await database.fetch_one(
         select(province_match_judges).where(
@@ -959,7 +968,7 @@ async def _upsert_assignment(province: str, match_id: str, judge_id: str, season
             match_id,
             code,
             "match_added",
-            f"Dodano nowy mecz {code}" + (f" • {details}" if details else ""),
+            f"Dodano nowy mecz {code}" + (f" • {details}" if details else "") + (f" • {note}" if note else ""),
             [judge_id],
             fingerprint(state),
         )

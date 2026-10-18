@@ -651,6 +651,9 @@ class ObsadaSaveRequest(BaseModel):
     #: Obsada 2.0: cofnięcie wpisu dziennika - numer wpisu dla całego zapisu
     #: albo {gniazdo: numer wpisu}.
     reverted_of: Optional[Any] = None
+    #: Obsada ręczna: {numer sędziego: zdanie} dla obsad z ostrzeżeniem o za
+    #: małym odstępie - dopisek do powiadomienia "Dodano nowy mecz".
+    gap_notes: Optional[Dict[str, str]] = None
 
 
 class ObsadaHallFormRequest(BaseModel):
@@ -2240,6 +2243,7 @@ async def _announce_saved_lineup(
             actor=payload.actor or payload.judge_id,
             run_id=payload.run_id,
             silent=payload.silent,
+            gap_notes=payload.gap_notes,
         )
     except Exception:
         logger.exception("obsada/save: zapis przeszedł, powiadomienie nie")

@@ -124,6 +124,7 @@ async def announce_lineup(
     actor: Optional[str] = None,
     run_id: Optional[int] = None,
     silent: bool = False,
+    gap_notes: Optional[Mapping[str, str]] = None,
 ) -> dict:
     """
     Wpisuje zapisana obsadę do migawki i rozsyła powiadomienia.
@@ -150,7 +151,8 @@ async def announce_lineup(
         return out
 
     return await announce_change(
-        province, match_id, patch, actor=actor, run_id=run_id, silent=silent
+        province, match_id, patch, actor=actor, run_id=run_id, silent=silent,
+        notes=clean_notes(gap_notes),
     )
 
 
@@ -206,6 +208,16 @@ async def announce_date(
     return await announce_change(province, match_id, patch, actor=actor)
 
 
+def clean_notes(raw: Optional[Mapping[str, str]]) -> dict[str, str]:
+    """Dopiski do powiadomień o obsadzie: {numer sędziego: krótkie zdanie}."""
+    out: dict[str, str] = {}
+    for judge_id, text in (raw or {}).items():
+        number, note = _s(judge_id), " ".join(_s(text).split())[:200]
+        if number and note:
+            out[number] = note
+    return out
+
+
 async def announce_change(
     province: str,
     match_id: str,
@@ -214,6 +226,7 @@ async def announce_change(
     actor: Optional[str] = None,
     run_id: Optional[int] = None,
     silent: bool = False,
+    notes: Optional[Mapping[str, str]] = None,
 ) -> dict:
     """
     Rdzeń: poprawia migawkę meczu i ogłasza zmianę tak, jak zrobiłby to monitor.
@@ -307,7 +320,8 @@ async def announce_change(
         # „Dodano nowy mecz", żeby treść powiadomienia była jedna dla wszystkich.
         for judge_id in added:
             created += await _upsert_assignment(
-                province, _s(match_id), judge_id, season, not silent, new
+                province, _s(match_id), judge_id, season, not silent, new,
+                note=(notes or {}).get(judge_id, ""),
             )
 
         for judge_id in removed:
