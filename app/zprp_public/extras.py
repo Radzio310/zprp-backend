@@ -587,18 +587,22 @@ async def records(season_id: str = "", scope: str = Query("season", pattern="^(s
             win = max(regular, key=lambda m: abs(m["score_home"] - m["score_away"]))
             margin = abs(win["score_home"] - win["score_away"])
             if margin:
-                add("biggest_win", "Najwyższe zwycięstwo", margin, win,
-                    club_id=win["home_club_id"] if win["score_home"] > win["score_away"] else win["away_club_id"])
+                home_won = win["score_home"] > win["score_away"]
+                add("biggest_win", "Najwyższe zwycięstwo", margin, win, side="home" if home_won else "away",
+                    club_id=win["home_club_id"] if home_won else win["away_club_id"])
             hi = max(regular, key=lambda m: max(m["score_home"], m["score_away"]))
+            home_hi = hi["score_home"] >= hi["score_away"]
             add("most_goals_by_team", "Najwięcej bramek jednej drużyny", max(hi["score_home"], hi["score_away"]), hi,
-                club_id=hi["home_club_id"] if hi["score_home"] >= hi["score_away"] else hi["away_club_id"])
+                side="home" if home_hi else "away", club_id=hi["home_club_id"] if home_hi else hi["away_club_id"])
         crowd = [m for m in rows if m["spectators"]]
         if crowd:
             m = max(crowd, key=lambda m: m["spectators"])
             add("highest_attendance", "Najwięcej widzów", int(m["spectators"]), m)
         shootouts = [m for m in rows if m["shootout_home"] is not None]
         if shootouts:
-            add("shootout_matches", "Mecze rozstrzygnięte rzutami karnymi", len(shootouts))
+            # Rekord zbiorczy (bez jednego meczu): karta bez herbów, a „ostatni” to podpowiedź z linkiem.
+            last = max(shootouts, key=lambda m: m["scheduled_at"] or datetime.min)
+            add("shootout_matches", "Mecze rozstrzygnięte rzutami karnymi", len(shootouts), latest_match_id=last["match_id"])
 
         for kind, title, column in (
             ("most_goals_player", "Najwięcej bramek zawodnika w meczu", MP.c.goals),
@@ -609,6 +613,7 @@ async def records(season_id: str = "", scope: str = Query("season", pattern="^(s
                 pcond.append(M.c.season_id == season)
             r = await database.fetch_one(
                 select(MP.c.player_id, MP.c.side, column.label("v"), zprp_public_players.c.first_name, zprp_public_players.c.last_name,
+                       zprp_public_players.c.photo_url,
                        M.c.match_id, M.c.season_id, M.c.home_team_name, M.c.away_team_name, M.c.home_club_id, M.c.away_club_id,
                        M.c.score_home, M.c.score_away)
                 .select_from(MP.join(M, M.c.match_id == MP.c.match_id).join(zprp_public_players, zprp_public_players.c.player_id == MP.c.player_id))
@@ -616,9 +621,13 @@ async def records(season_id: str = "", scope: str = Query("season", pattern="^(s
             )
             if r:
                 d = _dict(r)
-                add(kind, title, int(d["v"]), d, player_id=d["player_id"],
+                person = {"player_id": d["player_id"], "first_name": d["first_name"], "last_name": d["last_name"],
+                          "photo_url": d.get("photo_url")}
+                await corrections.apply("player", [person])
+                add(kind, title, int(d["v"]), d, player_id=d["player_id"], side=d["side"],
                     club_id=d["home_club_id"] if d["side"] == "home" else d["away_club_id"],
-                    player_name=f'{d["first_name"]} {d["last_name"]}'.strip())
+                    player_name=f'{person["first_name"] or ""} {person["last_name"] or ""}'.strip(),
+                    player_photo_url=person.get("photo_url") or None)
         # Kary 2 min liczone na DRUŻYNĘ w meczu (u zawodnika limit to 3, rekord bez sensu).
         team_sum = func.sum(MP.c.two_minutes)
         tcond = [M.c.score_home.is_not(None)]
@@ -635,12 +644,23 @@ async def records(season_id: str = "", scope: str = Query("season", pattern="^(s
         )
         if r:
             d = _dict(r)
-            add("most_two_minutes_team_match", "Najwięcej kar 2 min jednej drużyny w meczu", int(d["v"]), d,
+            add("most_two_minutes_team_match", "Najwięcej kar 2 min jednej drużyny w meczu", int(d["v"]), d, side=d["side"],
                 club_id=d["home_club_id"] if d["side"] == "home" else d["away_club_id"])
         lookup = await _club_lookup({i["club_id"] for i in items})
         for item in items:
             club = lookup.get(item.get("club_id")) or {}
             item["club_name"], item["club_logo_url"] = club.get("name"), club.get("logo_url")
+        # Karta meczu-rekordu: herby obu drużyn, wynik, data i rozgrywki z tej samej bazy
+        # (jedno zapytanie na wszystkie rekordy, zero zapytań do ZPRP).
+        ids = {i.get("match_id") for i in items} | {i.get("latest_match_id") for i in items}
+        ids.discard(None)
+        cards = {c["match_id"]: c for c in await _cards(
+            await database.fetch_all(select(*_card_cols()).where(M.c.match_id.in_(list(ids))))
+        )} if ids else {}
+        for item in items:
+            item["match"] = cards.get(item.get("match_id"))
+            if item.get("latest_match_id"):
+                item["latest"] = cards.get(item["latest_match_id"])
         return {"items": items, "season_id": season, "scope": scope, "matches_considered": len(rows)}
 
     return await _cached(f"records|{season}|{scope}", _RECORDS_TTL, build)

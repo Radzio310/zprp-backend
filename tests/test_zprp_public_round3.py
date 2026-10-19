@@ -308,6 +308,13 @@ def test_wykres_sezonu_ics_rekordy_h2h(env):
     assert kinds["highest_attendance"]["value"] == 900 and kinds["most_goals_player"]["value"] == 12
     assert kinds["most_goals_player"]["player_id"] == "p1" and kinds["biggest_win"]["match_id"] == "m1"
     assert kinds["shootout_matches"]["value"] == 1
+    # Karta meczu-rekordu: obie drużyny z herbami, wynik, data i rozgrywki bez dodatkowych zapytań do ZPRP.
+    card = kinds["biggest_win"]["match"]
+    assert card["home_logo_url"] == "https://l/c1.png" and card["away_logo_url"] == "https://l/c2.png"
+    assert (card["score_home"], card["score_away"], card["competition_name"]) == (30, 20, "Liga") and card["scheduled_at"]
+    assert kinds["biggest_win"]["side"] == "home" and kinds["most_goals_player"]["side"] == "home"
+    assert kinds["most_goals_player"]["player_name"] == "Ala Nowak" and kinds["most_goals_player"]["match"]["match_id"] == "m1"
+    assert kinds["shootout_matches"]["match"] is None and kinds["shootout_matches"]["latest"]["match_id"] == "m2"
     assert (h2h["balance"]["a_wins"], h2h["balance"]["b_wins"], h2h["balance"]["draws"]) == (1, 0, 1)
     assert h2h["biggest_wins"]["a"]["match_id"] == "m1" and h2h["biggest_wins"]["b"] is None
 
