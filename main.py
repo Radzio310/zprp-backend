@@ -226,6 +226,9 @@ app.add_middleware(
         "http://localhost:8081",
         "http://127.0.0.1:8081",
         "https://baza-web-two.vercel.app",
+        # Domena BAZA pod Ręką (Vercel, ten sam projekt co panel); apex przekierowuje na www.
+        "https://bazapodreka.app",
+        "https://www.bazapodreka.app",
         # Strona produktu (Hostinger) czyta `GET /public/baza-stats` z przeglądarki.
         "https://bazaapp.online",
         "https://www.bazaapp.online",
