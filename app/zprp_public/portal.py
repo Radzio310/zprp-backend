@@ -794,6 +794,48 @@ async def _schedule_payload(competition, rounds, matchdays, cards, team_id) -> d
 # ---------------------------------------------------------------------------
 
 
+_REF_INDEX: dict[str, Any] = {"at": 0.0, "rows": []}
+_REF_TTL = 600
+
+
+def _match_referees(rows: list[dict], q: str, limit: int) -> list[dict]:
+    """Sędziowie pasujący do frazy: wszystkie słowa frazy w nazwisku, bez wielkości liter i ogonków.
+    Najpierw nazwisko zaczynające się od frazy, potem więcej meczów."""
+    tokens = [t for t in MR._fold(q).split("-") if t]
+    if not tokens:
+        return []
+    hits = []
+    for r in rows:
+        folded = MR._fold(r["name"])
+        parts = folded.split("-")
+        if all(any(p.startswith(t) or t in p for p in parts) for t in tokens):
+            starts = folded.startswith(tokens[0]) or any(p.startswith(tokens[0]) for p in parts[:1])
+            hits.append((0 if starts else 1, -r["matches"], r))
+    hits.sort(key=lambda x: x[:2])
+    return [h[2] for h in hits[:limit]]
+
+
+async def _referee_index() -> list[dict]:
+    """Publiczna lista sędziów z meczów: id, nazwa, liczba meczów (tylko dane z API ZPRP)."""
+    if _REF_INDEX["rows"] and time.time() - _REF_INDEX["at"] < _REF_TTL:
+        return _REF_INDEX["rows"]
+    acc: dict[str, dict] = {}
+    for idc, nmc in (("referee_1_id", "referee_1_name"), ("referee_2_id", "referee_2_name")):
+        rows = await database.fetch_all(
+            select(M.c[idc].label("rid"), M.c[nmc].label("rname"), func.count().label("n"))
+            .where(and_(M.c[idc].isnot(None), M.c[idc] != "", M.c[nmc].isnot(None), M.c[nmc] != ""))
+            .group_by(M.c[idc], M.c[nmc])
+        )
+        for r in rows:
+            e = acc.setdefault(r["rid"], {"referee_id": r["rid"], "name": r["rname"], "matches": 0, "_best": 0})
+            e["matches"] += int(r["n"])
+            if int(r["n"]) > e["_best"]:
+                e["_best"], e["name"] = int(r["n"]), r["rname"]
+    out = [{k: v for k, v in e.items() if k != "_best"} for e in acc.values()]
+    _REF_INDEX.update(at=time.time(), rows=out)
+    return out
+
+
 @router.get("/search/global")
 async def search_global(q: str = Query(..., min_length=2), limit_per_type: int = Query(8, ge=1, le=25)) -> dict[str, Any]:
     like = f"%{q.strip()}%"
@@ -805,6 +847,10 @@ async def search_global(q: str = Query(..., min_length=2), limit_per_type: int =
         ),
         _cached_map(await _resolve_season()),
     )
+    try:
+        referees = _match_referees(await _referee_index(), q, limit_per_type)
+    except Exception:  # sędziowie to dodatek, szukajka działa dalej bez nich
+        referees = []
     needle = normalize_city_key(q)
     cities = []
     for c in map_payload["cities"]:
@@ -822,6 +868,7 @@ async def search_global(q: str = Query(..., min_length=2), limit_per_type: int =
             for _, _, c in cities[:limit_per_type]
         ],
         "matches": await _cards(match_rows),
+        "referees": referees,
     }
 
 

@@ -291,3 +291,23 @@ def test_skladu_zamienione_stronami_i_brak_bramek():
     assert MR.goals_known(0, 0, 26, 26) is False
     assert MR.goals_known(0, 0, 0, 0) is True
     assert MR.goals_known(44, 24, 44, 24) is True
+
+
+def test_szukanie_sedziow_bez_ogonkow_i_wielkosci(portal):
+    async def go(m):
+        rows = [
+            {"referee_id": "1", "name": "Żółkiewski Łukasz", "matches": 10},
+            {"referee_id": "2", "name": "Zółkowska Anna", "matches": 40},
+            {"referee_id": "3", "name": "Kowalski Jan", "matches": 5},
+        ]
+        found = m._match_referees(rows, "ZOLK", 5)
+        both = m._match_referees(rows, "lukasz zolkiewski", 5)
+        none = m._match_referees(rows, "x", 5)
+        route = await m.search_global(q="sedzia", limit_per_type=5)
+        return found, both, none, route
+
+    found, both, none, route = run(portal, go)
+    assert [r["referee_id"] for r in found] == ["2", "1"]     # więcej meczów wyżej przy równym trafieniu
+    assert [r["referee_id"] for r in both] == ["1"]
+    assert none == []
+    assert route["referees"] == []
