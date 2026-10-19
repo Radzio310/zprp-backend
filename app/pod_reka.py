@@ -297,7 +297,7 @@ async def create_report(payload: ReportCreate) -> dict[str, Any]:
             manage_token_hash=_hash(manage_token),
         )
     )
-    return {"report_id": report_id, "manage_token": manage_token, "url": f"/pod-reka/raport/{report_id}"}
+    return {"report_id": report_id, "manage_token": manage_token, "url": f"/raport/{report_id}"}
 
 
 @router.get("/reports/{report_id}")

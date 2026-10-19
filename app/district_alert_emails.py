@@ -8,7 +8,7 @@ flexboksa). Wysyłka idzie tym samym `send_alert_email`, tylko z własną nazwą
 nadawcy („BAZA - Obsada okręgu", env `ASSIGNMENT_ALERT_FROM_NAME`) i tagiem
 `assignment-alert`, żeby statystyki dostarczeń się nie mieszały.
 
-Każdy mecz ma własny przycisk: `BAZA_WEB_URL/assignments?match=<IdZawody>`
+Każdy mecz ma własny przycisk: `BAZA_WEB_URL/panel/obsada?match=<IdZawody>`
 otwiera Obsadę od razu na tym meczu.
 """
 
@@ -50,12 +50,12 @@ TAG = "assignment-alert"
 
 def obsada_url(match_id: str = "") -> str:
     """Obsada w BAZA_web; z numerem meczu - od razu na tym meczu."""
-    base = f"{baza_web_url()}/assignments"
+    base = f"{baza_web_url()}/panel/obsada"
     return f"{base}?match={quote(str(match_id), safe='')}" if match_id else base
 
 
 def settings_url() -> str:
-    return f"{baza_web_url()}/assignments?alerts=1"
+    return f"{baza_web_url()}/panel/obsada?alerts=1"
 
 
 def _e(value: object) -> str:

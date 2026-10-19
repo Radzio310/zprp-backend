@@ -48,7 +48,7 @@ LINE = "#E3E8F0"
 PAGE = "#EEF2F8"
 
 #: Adres BAZA_web - przycisk w mailu prowadzi do Rozliczeń.
-DEFAULT_BAZA_WEB_URL = "https://baza-web-two.vercel.app"
+DEFAULT_BAZA_WEB_URL = "https://bazapodreka.app"
 
 
 def sender_name() -> str:
@@ -60,9 +60,9 @@ def baza_web_url() -> str:
 
 
 def panel_url() -> str:
-    """Rozliczenia w BAZA_web (`app/(tabs)/explore.tsx`). Panel nie ma parametru
+    """Rozliczenia w BAZA_web (`app/panel/rozliczenia.tsx`). Panel nie ma parametru
     otwierającego konkretny klub, więc prowadzimy do samego panelu."""
-    return f"{baza_web_url()}/explore"
+    return f"{baza_web_url()}/panel/rozliczenia"
 
 
 def logo_url(province_key: str) -> str:

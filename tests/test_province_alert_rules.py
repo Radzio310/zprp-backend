@@ -173,7 +173,7 @@ def test_message_renders_escaped_html_and_text(monkeypatch):
     )
     assert subject == "Śląskie: 2 kluby poniżej 500 zł"
     assert "MKS &lt;Zabrze&gt;" in html_body and "<Zabrze>" not in html_body
-    assert "https://baza.example/explore" in html_body
+    assert "https://baza.example/panel/rozliczenia" in html_body
     assert "https://api.example/province/alerts/logo/SLASKIE.png" in html_body
     assert "NA MINUSIE" in html_body and "PONIŻEJ PROGU" in html_body
     long_dash = chr(0x2014)  # zero długich myślników w treści maila

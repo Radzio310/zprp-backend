@@ -7,7 +7,7 @@ okręgu z uprawnieniem nadanym w panelu admina:
   - panel klubów (Rozliczenia) - `settlements`,
   - Obsada - `assignments`,
 
-(`BAZA_web/app/(tabs)/explore.tsx` i `assignments.tsx`). Konto sędziego ma przy
+(`BAZA_web/app/panel/rozliczenia.tsx` i `obsada.tsx`). Konto sędziego ma przy
 logowaniu do BAZA_web kasowany rekord VIP, więc na tych ekranach w ogóle nie
 staje - a aplikacja mobilna do tych tras nie pisze. Dlatego zwykła bramka
 okręgowa (`province_guard.ensure_province_write`) tu nie pasuje: pyta o listę
