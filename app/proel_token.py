@@ -1,3 +1,4 @@
+import asyncio
 # app/proel_token.py
 #
 # Włączanie i wyłączanie tokenu ProEl dla pojedynczego meczu.
@@ -172,7 +173,7 @@ async def set_match_proel(
         # Mecz ze starszego sezonu nie jest na stronie domyślnej. Zaglądamy do
         # kolejnych sezonów, ale tylko kilku - patrz MAX_SEASONS_TO_SCAN.
         if cell is None:
-            for season in _season_values(html)[:MAX_SEASONS_TO_SCAN]:
+            for season in await asyncio.to_thread(_season_values, html)[:MAX_SEASONS_TO_SCAN]:
                 _, html_season = await fetch_with_correct_encoding(
                     client,
                     f"/index.php?a=statystyki&b=sedzia&NrSedzia={judge_plain}"

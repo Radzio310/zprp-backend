@@ -241,9 +241,9 @@ async def _collect_season(
         path += f"&Filtr_woj={province_id}"
     _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
 
-    competitions = parse_competitions(html)
+    competitions = await asyncio.to_thread(parse_competitions, html)
     label = ""
-    for option in parse_seasons(html):
+    for option in await asyncio.to_thread(parse_seasons, html):
         if option.id == season_id:
             label = normalize_season_label(option.label)
             break
@@ -297,10 +297,10 @@ async def _collect_season(
             # Jedne rozgrywki bez listy nie moga wywalic calego sezonu.
             logger.warning("[clubs] druzyny %s: %s", competition.id, exc)
             continue
-        for team in parse_teams(page):
+        for team in await asyncio.to_thread(parse_teams, page):
             participant_ids.add(team.team_id)
             append_team(team, competition)
-        for team in parse_eligible_teams(page):
+        for team in await asyncio.to_thread(parse_eligible_teams, page):
             previous = eligible.get(team.team_id)
             if previous is None:
                 eligible[team.team_id] = (team, competition)
@@ -344,7 +344,7 @@ async def _collect_season(
                 _, squad = await fetch_with_correct_encoding(
                     client, _path(team.team_path), method="GET", cookies=cookies
                 )
-                club_id = parse_team_club_id(squad)
+                club_id = await asyncio.to_thread(parse_team_club_id, squad)
                 if club_id:
                     resolved_club_for_name[name_key] = club_id
                     break
@@ -429,18 +429,13 @@ async def refresh_clubs(
             _, home = await fetch_with_correct_encoding(
                 client, "/index.php", method="GET", cookies=cookies
             )
-            href = _extract_menu_href_from_page(
-                home,
-                label_regex=r"^\s*Rozgrywki\s*$",
-                href_regex=r"\ba=rozgrywki\b",
-                human_label="Rozgrywki",
-            )
+            href = await asyncio.to_thread(_extract_menu_href_from_page, home, label_regex=r"^\s*Rozgrywki\s*$", href_regex=r"\ba=rozgrywki\b", human_label="Rozgrywki")
             _, first = await fetch_with_correct_encoding(
                 client, _path(href), method="GET", cookies=cookies
             )
 
-            options = parse_seasons(first)
-            province_id = parse_selected_province(first)
+            options = await asyncio.to_thread(parse_seasons, first)
+            province_id = await asyncio.to_thread(parse_selected_province, first)
             by_label = {normalize_season_label(item.label): item.id for item in options}
             by_label.pop("", None)
 

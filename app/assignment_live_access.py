@@ -62,7 +62,7 @@ async def verify_matches(province: str, states: dict[str, dict]) -> dict[str, di
                     _, html = await fetch_with_correct_encoding(client, "/zawody_UstawSedziow.php",
                         method="POST", cookies=cookies,
                         data={"IdZawody": mid, "akcja": "UstawSedziow", "user": ""})
-                    parsed = _parse_referee_form(html)
+                    parsed = await asyncio.to_thread(_parse_referee_form, html)
                     if parsed.get("IdZawody") != mid:
                         raise ValueError("Formularz nie potwierdza tożsamości meczu")
                     slots = parsed["slots"]
@@ -120,7 +120,7 @@ async def warm_monitor(province: str, match_ids: list[str]) -> dict:
         async def read(mid):
             _, html = await fetch_with_correct_encoding(client, "/zawody_UstawSedziow.php", method="POST",
                 cookies=cookies, data={"IdZawody": mid, "akcja": "UstawSedziow", "user": ""})
-            return _parse_referee_form(html)
+            return await asyncio.to_thread(_parse_referee_form, html)
         return await rights_store.warm(account, ids, read)
 
 

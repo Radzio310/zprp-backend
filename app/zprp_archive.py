@@ -276,7 +276,7 @@ async def _judge_lists(
                     logger.warning("[archive] %s: sędzia %s, sezon %s: %s", province, judge_id, label, exc)
                     stats[label] = (ok, failed + 1)
                     continue
-                records = _records_from_page(soup)
+                records = await asyncio.to_thread(_records_from_page, soup)
                 if records is None:
                     stats[label] = (ok, failed + 1)
                     continue

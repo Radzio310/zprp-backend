@@ -1,6 +1,8 @@
 # app/zprp/competitions.py
 from __future__ import annotations
 
+import asyncio
+
 import base64
 import datetime
 import logging
@@ -389,7 +391,7 @@ async def _scrape_one_season(
     path = "/index.php?" + urlencode(qs, doseq=True)
 
     _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
-    parsed = _parse_competitions_page(html)
+    parsed = await asyncio.to_thread(_parse_competitions_page, html)
     comps = parsed["competitions"]
 
     for cid, comp in comps.items():
@@ -401,7 +403,7 @@ async def _scrape_one_season(
 
         try:
             _, html_teams = await fetch_with_correct_encoding(client, teams_href, method="GET", cookies=cookies)
-            teams = _parse_competition_teams_from_teams_page(html_teams)
+            teams = await asyncio.to_thread(_parse_competition_teams_from_teams_page, html_teams)
             comp["teams"] = teams
             comp["teams_count"] = len(teams)
             comp["teams_page_href"] = teams_href
@@ -442,10 +444,10 @@ async def get_rozgrywki_meta(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
-        rozgrywki_href, filtr_woj, filtr_sezon = _extract_rogrywki_link_from_home(html_home)
+        rozgrywki_href, filtr_woj, filtr_sezon = await asyncio.to_thread(_extract_rogrywki_link_from_home, html_home)
 
         _, html0 = await fetch_with_correct_encoding(client, rozgrywki_href, method="GET", cookies=cookies)
-        parsed0 = _parse_competitions_page(html0)
+        parsed0 = await asyncio.to_thread(_parse_competitions_page, html0)
 
         filters = parsed0["filters"]
         seasons_opts = [(x["value"], x["label"], bool(x.get("selected"))) for x in filters.get("Filtr_sezon", [])]
@@ -488,10 +490,10 @@ async def scrape_rozgrywki_lite(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
-        rozgrywki_href, filtr_woj_home, _ = _extract_rogrywki_link_from_home(html_home)
+        rozgrywki_href, filtr_woj_home, _ = await asyncio.to_thread(_extract_rogrywki_link_from_home, html_home)
 
         _, html0 = await fetch_with_correct_encoding(client, rozgrywki_href, method="GET", cookies=cookies)
-        parsed0 = _parse_competitions_page(html0)
+        parsed0 = await asyncio.to_thread(_parse_competitions_page, html0)
         filters0 = parsed0["filters"]
 
         seasons_list = filters0.get("Filtr_sezon", []) or []
@@ -561,10 +563,10 @@ async def scrape_rozgrywki_full(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
-        rozgrywki_href, filtr_woj_home, filtr_sezon_home = _extract_rogrywki_link_from_home(html_home)
+        rozgrywki_href, filtr_woj_home, filtr_sezon_home = await asyncio.to_thread(_extract_rogrywki_link_from_home, html_home)
 
         _, html0 = await fetch_with_correct_encoding(client, rozgrywki_href, method="GET", cookies=cookies)
-        parsed0 = _parse_competitions_page(html0)
+        parsed0 = await asyncio.to_thread(_parse_competitions_page, html0)
 
         filters0 = parsed0["filters"]
         seasons_list = filters0.get("Filtr_sezon", []) or []

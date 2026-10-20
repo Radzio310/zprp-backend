@@ -1,6 +1,8 @@
 # app/zprp/schedule.py
 from __future__ import annotations
 
+import asyncio
+
 import base64
 import datetime
 import logging
@@ -863,7 +865,7 @@ async def scrape_terminarz_full(
                 _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
 
                 context_prefix = f"{picked_season}|{cat_val}|{rozgr_val}"
-                matches_map = _parse_matches_table(html, context_prefix=context_prefix)
+                matches_map = await asyncio.to_thread(_parse_matches_table, html, context_prefix=context_prefix)
 
                 cnt = len(matches_map)
                 cat_total_matches += cnt
@@ -994,7 +996,7 @@ async def scrape_terminarz_slim(
             _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
 
             context_prefix = f"{picked_season}|{cat_val}|{rozgr_val}"
-            matches_map = _parse_matches_table(html, context_prefix=context_prefix)
+            matches_map = await asyncio.to_thread(_parse_matches_table, html, context_prefix=context_prefix)
 
             cnt = len(matches_map)
             total_matches += cnt

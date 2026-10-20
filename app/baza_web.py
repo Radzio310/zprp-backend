@@ -658,7 +658,7 @@ async def baza_web_profile(
                 "Sesja do bazy nieaktywna lub przekierowanie do logowania",
             )
 
-        parsed = _parse_profile_from_edit_form(html_get)
+        parsed = await asyncio.to_thread(_parse_profile_from_edit_form, html_get)
         if not parsed:
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,

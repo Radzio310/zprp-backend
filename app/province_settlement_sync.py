@@ -425,7 +425,7 @@ async def _collect_outside(
                 season_ok[label] = False
                 continue
 
-            records = _records_from_page(soup)
+            records = await asyncio.to_thread(_records_from_page, soup)
             if records is None:
                 season_ok[label] = False
                 continue
@@ -514,14 +514,9 @@ async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dic
 
     try:
         _, home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
-        href = _extract_menu_href_from_page(
-            home,
-            label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
-            href_regex=r"\ba=sedzia\b",
-            human_label="Sędziowie i Delegaci",
-        )
+        href = await asyncio.to_thread(_extract_menu_href_from_page, home, label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$", href_regex=r"\ba=sedzia\b", human_label="Sędziowie i Delegaci")
         _, page = await fetch_with_correct_encoding(client, href, method="GET", cookies=cookies)
-        parsed = _parse_officials_page(page, current_offset=0)
+        parsed = await asyncio.to_thread(_parse_officials_page, page, current_offset=0)
 
         def absorb(payload: dict) -> None:
             for judge_id, item in (payload.get("officials") or {}).items():
@@ -554,7 +549,7 @@ async def _load_judges(client: AsyncClient, cookies: dict, province: str) -> dic
             _, extra = await fetch_with_correct_encoding(
                 client, "/index.php?" + urlencode(qs, doseq=True), method="GET", cookies=cookies
             )
-            absorb(_parse_officials_page(extra, current_offset=offset))
+            absorb(await asyncio.to_thread(_parse_officials_page, extra, current_offset=offset))
     except Exception as exc:
         logger.warning("[settlement] lista sedziow okregu %s: %s", province, exc)
 

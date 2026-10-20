@@ -220,7 +220,7 @@ async def _update_menu_link(client: httpx.AsyncClient, link: str, cache_key: str
     # httpx.AsyncClient nie może wysłać listy krotek przez `data=`, ponieważ
     # tworzy wtedy synchroniczny strumień żądania. Kodujemy formularz sami;
     # lista krotek świadomie zachowuje powtarzające się pola Joomla.
-    encoded_form = urlencode(_menu_form(edit.text, link))
+    encoded_form = urlencode(await asyncio.to_thread(_menu_form, edit.text, link))
     saved = await client.post(
         MENU_EDIT,
         content=encoded_form.encode("utf-8"),

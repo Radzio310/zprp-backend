@@ -1087,7 +1087,7 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
         for judge_id in judge_ids:
             path = _build_judge_matches_path(judge_id, None)
             _, html = await fetch_with_correct_encoding(private_client, path, method="GET", cookies=cookies)
-            parsed = _parse_match_rows_from_soup(BeautifulSoup(html, "html.parser"))
+            parsed = await asyncio.to_thread(_parse_match_rows_from_soup, BeautifulSoup(html, "html.parser"))
             seen_ids: set[str] = set()
             candidates: Dict[str, Dict[str, Any]] = {}
             for item in (parsed.get("matches") or {}).values():
@@ -1344,7 +1344,7 @@ async def _scrape_full_schedule(client: AsyncClient, cookies: Dict[str, str]) ->
         for competition, _, _ in competitions:
             path = "/index.php?" + urlencode({"a": "terminarz", "Filtr_sezon": season, "Filtr_kategoria": cat_value, "IdRozgr": competition, "IdRundy": "ALL"})
             _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
-            parsed = _parse_matches_table(html, context_prefix=f"{season}|{cat_value}|{competition}")
+            parsed = await asyncio.to_thread(_parse_matches_table, html, context_prefix=f"{season}|{cat_value}|{competition}")
             for match_id, item in parsed.items():
                 if _str(item.get("IdZawody")).isdigit():
                     output[_str(item.get("IdZawody"))] = _schedule_to_state(item)

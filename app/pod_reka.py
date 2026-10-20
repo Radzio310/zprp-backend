@@ -7,6 +7,8 @@ Nie wykonuje żadnych zapisów w ``baza.zprp.pl``.
 
 from __future__ import annotations
 
+import asyncio
+
 import base64
 import hashlib
 import json
@@ -383,7 +385,7 @@ async def revoke_push_subscription(
 async def _scope_with_fallback(account_html: str, teams_html: str) -> dict[str, Any]:
     """Zakres z BAZY; gdy strony drużyn nic nie dały (inny układ strony konta
     trenera), drużyny klubu bierzemy z lokalnej kopii publicznej BAZY."""
-    scope = parse_club_scope(account_html, teams_html)
+    scope = await asyncio.to_thread(parse_club_scope, account_html, teams_html)
     if scope["account_type"] == "club" and scope["active"] and scope["club_id"] and not scope["team_ids"]:
         rows = await database.fetch_all(
             select(zprp_public_teams.c.team_id).where(

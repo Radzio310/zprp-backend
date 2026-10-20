@@ -140,15 +140,11 @@ async def _scrape_officials(
     _, home_html = await fetch_with_correct_encoding(
         client, "/index.php", method="GET", cookies=cookies
     )
-    officials_href = _extract_menu_href_from_page(
-        home_html,
-        label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
-        href_regex=r"\ba=sedzia\b",
-    )
+    officials_href = await asyncio.to_thread(_extract_menu_href_from_page, home_html, label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$", href_regex=r"\ba=sedzia\b")
     _, first_html = await fetch_with_correct_encoding(
         client, officials_href, method="GET", cookies=cookies
     )
-    first = _parse_officials_page(first_html, current_offset=0)
+    first = await asyncio.to_thread(_parse_officials_page, first_html, current_offset=0)
     officials: Dict[str, Dict[str, Any]] = {}
     _merge_officials(officials, first["officials"])
 
@@ -172,7 +168,7 @@ async def _scrape_officials(
             method="GET",
             cookies=cookies,
         )
-        page = _parse_officials_page(html, current_offset=offset)
+        page = await asyncio.to_thread(_parse_officials_page, html, current_offset=offset)
         _merge_officials(officials, page["officials"])
 
     if not officials:
@@ -194,7 +190,7 @@ async def _fetch_offtimes(
             _, html = await fetch_with_correct_encoding(
                 client, path, method="GET", cookies=cookies
             )
-            return _parse_offtime_rows(html)
+            return await asyncio.to_thread(_parse_offtime_rows, html)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -727,7 +723,7 @@ async def refresh_central_snapshot_after_user_change(
         f"/index.php?a=sedzia&b=off&NrSedzia={judge_id}",
         method="GET",
     )
-    parsed = _parse_offtime_rows(html)
+    parsed = await asyncio.to_thread(_parse_offtime_rows, html)
 
     candidates: Dict[str, Dict[str, str]] = {}
     central_rows = await database.fetch_all(

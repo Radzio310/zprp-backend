@@ -1,6 +1,8 @@
 # app/zprp/officials.py
 from __future__ import annotations
 
+import asyncio
+
 import base64
 import datetime
 import logging
@@ -580,17 +582,12 @@ async def scrape_officials_full(
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
         _log_html_fingerprint("Home fetched", html_home)
 
-        sedzia_href = _extract_menu_href_from_page(
-            html_home,
-            label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
-            href_regex=r"\ba=sedzia\b",
-            human_label="Sędziowie i Delegaci",
-        )
+        sedzia_href = await asyncio.to_thread(_extract_menu_href_from_page, html_home, label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$", href_regex=r"\ba=sedzia\b", human_label="Sędziowie i Delegaci")
 
         _, html0 = await fetch_with_correct_encoding(client, sedzia_href, method="GET", cookies=cookies)
         _log_html_fingerprint("Officials page[0] fetched", html0)
 
-        parsed0 = _parse_officials_page(html0, current_offset=0)
+        parsed0 = await asyncio.to_thread(_parse_officials_page, html0, current_offset=0)
 
         all_officials: Dict[str, Dict[str, Any]] = {}
         added0, overwritten0 = _merge_officials(all_officials, parsed0["officials"])
@@ -625,7 +622,7 @@ async def scrape_officials_full(
             _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
             _log_html_fingerprint(f"Officials page[{offset}] fetched", html)
 
-            parsed = _parse_officials_page(html, current_offset=offset)
+            parsed = await asyncio.to_thread(_parse_officials_page, html, current_offset=offset)
             added, overwritten = _merge_officials(all_officials, parsed["officials"])
 
             logger.info(
@@ -690,17 +687,12 @@ async def scrape_officials_lite(
         _, html_home = await fetch_with_correct_encoding(client, "/index.php", method="GET", cookies=cookies)
         _log_html_fingerprint("Home fetched(lite)", html_home)
 
-        sedzia_href = _extract_menu_href_from_page(
-            html_home,
-            label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$",
-            href_regex=r"\ba=sedzia\b",
-            human_label="Sędziowie i Delegaci",
-        )
+        sedzia_href = await asyncio.to_thread(_extract_menu_href_from_page, html_home, label_regex=r"^\s*Sędziowie\s+i\s+Delegaci\s*$", href_regex=r"\ba=sedzia\b", human_label="Sędziowie i Delegaci")
 
         _, html0 = await fetch_with_correct_encoding(client, sedzia_href, method="GET", cookies=cookies)
         _log_html_fingerprint("Officials page[0] fetched(lite)", html0)
 
-        parsed0 = _parse_officials_page(html0, current_offset=0)
+        parsed0 = await asyncio.to_thread(_parse_officials_page, html0, current_offset=0)
         officials = parsed0["officials"]
         role_stats = _summarize_roles(officials)
 
@@ -1115,7 +1107,7 @@ async def read_official_edit_page(
         _, html = await fetch_with_correct_encoding(client, edit_path, method="GET", cookies=cookies)
         _log_html_fingerprint("Official edit page fetched", html)
 
-        parsed = _parse_official_edit_page(html, include_select_options=bool(payload.include_select_options))
+        parsed = await asyncio.to_thread(_parse_official_edit_page, html, include_select_options=bool(payload.include_select_options))
 
         return {
             "fetched_at": _now_iso(),
@@ -1160,7 +1152,7 @@ async def save_official_edit_page(
         _, html_before = await fetch_with_correct_encoding(client, edit_path, method="GET", cookies=cookies)
         _log_html_fingerprint("Official edit page(before save) fetched", html_before)
 
-        parsed_before = _parse_official_edit_page(html_before, include_select_options=False)
+        parsed_before = await asyncio.to_thread(_parse_official_edit_page, html_before, include_select_options=False)
 
         # 2) zbuduj POST data: komplet + patch
         post_data = _build_post_data_for_save(parsed_before, payload.patch or {})
@@ -1213,7 +1205,7 @@ async def save_official_edit_page(
         # 6) zwróć też odświeżone wartości (żebyś mógł porównać / potwierdzić zapis)
         parsed_after = None
         try:
-            parsed_after = _parse_official_edit_page(html_after, include_select_options=False)
+            parsed_after = await asyncio.to_thread(_parse_official_edit_page, html_after, include_select_options=False)
         except Exception:
             parsed_after = None
 
@@ -1973,7 +1965,7 @@ async def scrape_judge_matches_all_seasons(
                 seasons = seasons_retry
 
         if not seasons:
-            parsed0 = _parse_match_rows_from_soup(soup0)
+            parsed0 = await asyncio.to_thread(_parse_match_rows_from_soup, soup0)
             return {
                 "fetched_at": _now_iso(),
                 "base_url": settings.ZPRP_BASE_URL,
@@ -2008,7 +2000,7 @@ async def scrape_judge_matches_all_seasons(
             _log_html_fingerprint(f"Judge matches page[season={season_value}] fetched", html)
 
             soup = BeautifulSoup(html, "html.parser")
-            parsed = _parse_match_rows_from_soup(soup)
+            parsed = await asyncio.to_thread(_parse_match_rows_from_soup, soup)
             total_rows += int(parsed.get("rows") or 0)
             seasons_fetched += 1
 
@@ -2074,7 +2066,7 @@ async def scrape_judge_matches_one_season(
 
         soup = BeautifulSoup(html, "html.parser")
         seasons = _parse_seasons_from_page(soup)
-        parsed = _parse_match_rows_from_soup(soup)
+        parsed = await asyncio.to_thread(_parse_match_rows_from_soup, soup)
 
         nr = payload.NrSedzia
         if not nr:
@@ -2233,7 +2225,7 @@ async def scrape_judge_offtimes(
         _, html = await fetch_with_correct_encoding(client, entry_path, method="GET", cookies=cookies)
         _log_html_fingerprint("Judge offtimes page fetched", html)
 
-        parsed = _parse_offtime_rows(html)
+        parsed = await asyncio.to_thread(_parse_offtime_rows, html)
 
         nr = payload.NrSedzia
         if not nr:
