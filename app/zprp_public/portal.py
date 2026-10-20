@@ -707,8 +707,14 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         elif m.get("competition_name"):
             h2h_cond.append(M.c.competition_name == m["competition_name"])
         h2h_rows = await database.fetch_all(
-            select(*_card_cols()).where(and_(*h2h_cond)).order_by(M.c.scheduled_at.desc()).limit(5)
+            select(*_card_cols()).where(and_(*h2h_cond)).order_by(M.c.scheduled_at.desc())
         )
+        # Tylko te dwie drużyny (nie inne drużyny tych klubów, nie mecz klubu z samym sobą).
+        h2h_rows = R.h2h_between(
+            [_dict(r) for r in h2h_rows],
+            {"club_id": m.get("home_club_id"), "team_id": m.get("home_team_id"), "name": m.get("home_team_name")},
+            {"club_id": m.get("away_club_id"), "team_id": m.get("away_team_id"), "name": m.get("away_team_name")},
+        )[:5]
     team_ids = [t for t in (m.get("home_team_id"), m.get("away_team_id")) if t]
     standing = [r for r in await _standing_rows(team_ids, m.get("season_id")) if r["competition_id"] == m.get("competition_id")]
     officials = [

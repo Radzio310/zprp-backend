@@ -155,3 +155,44 @@ def normalise_for_radar(entities: list[dict], metrics: list[str]) -> dict[str, A
             for metric in metrics
         }
     return {"max": maxima}
+
+
+# ---------------------------------------------------------------------------
+# Tożsamość drużyny przez sezony (bilans bezpośredni)
+# ---------------------------------------------------------------------------
+
+
+def team_key(name: object) -> str:
+    """Klucz nazwy drużyny: bez wielkości liter, polskich znaków, interpunkcji i podwójnych spacji.
+
+    team_id zmienia się co sezon, a klub może mieć kilka drużyn w jednej kategorii
+    (np. „SMS Enea Gniezno" i „Enea MKS Gniezno"), więc tożsamość = klub + nazwa drużyny.
+    """
+    import unicodedata
+
+    text = unicodedata.normalize("NFKD", str(name or "").replace("ł", "l").replace("Ł", "L"))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+
+def h2h_between(rows: Iterable[dict], team_a: dict, team_b: dict) -> list[dict]:
+    """Zostawia tylko mecze dokładnie tych dwóch drużyn (w dowolnej kolejności stron).
+
+    `team_a`/`team_b`: {club_id, team_id?, name}. Strona pasuje, gdy ten sam klub i (ta sama
+    drużyna po id albo po znormalizowanej nazwie). Mecz klubu z samym sobą odpada zawsze.
+    """
+    def same(row: dict, side: str, team: dict) -> bool:
+        if not team.get("club_id") or row.get(f"{side}_club_id") != team["club_id"]:
+            return False
+        if team.get("team_id") and row.get(f"{side}_team_id") == team["team_id"]:
+            return True
+        key = team_key(team.get("name"))
+        return bool(key) and team_key(row.get(f"{side}_team_name")) == key
+
+    out = []
+    for r in rows:
+        if r.get("home_club_id") and r.get("home_club_id") == r.get("away_club_id"):
+            continue
+        if (same(r, "home", team_a) and same(r, "away", team_b)) or (same(r, "home", team_b) and same(r, "away", team_a)):
+            out.append(r)
+    return out

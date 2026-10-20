@@ -427,3 +427,44 @@ def test_wykres_sezonu_tylko_wlasna_grupa_i_tabela_zprp(env):
     assert chart["rounds"][0]["position"] == 1
     assert chart["table_size"] == 3
     assert chart["rounds"][-1]["position"] == 2 and chart["rounds"][-1]["official"] is True
+
+
+def test_h2h_tylko_te_dwie_druzyny_przez_sezony(env):
+    """Inna drużyna tego samego klubu i mecz klubu z samym sobą nie wchodzą do bilansu;
+    ta sama drużyna ze starszego sezonu (inne team_id, ta sama nazwa) - tak."""
+    module, db, T = env
+
+    async def go(x):
+        def row(mid, hid, hclub, hname, aid, aclub, aname, days):
+            return dict(match_id=mid, season_id="S1", competition_id="K1", competition_name="Liga",
+                        home_team_id=hid, away_team_id=aid, home_club_id=hclub, away_club_id=aclub,
+                        home_team_name=hname, away_team_name=aname, score_home=20, score_away=18,
+                        scheduled_at=datetime.now() - timedelta(days=days), **_h())
+        for r in (
+            row("old", "t1-old", "c1", "T1", "t2-old", "c2", "T2", 400),          # ta sama para, stary sezon
+            row("mks", "t9", "c1", "Kielce MKS", "t2", "c2", "t2", 5),              # inna drużyna klubu A
+            row("self", "t1", "c1", "t1", "t9", "c1", "Kielce MKS", 6),            # klub z samym sobą
+        ):
+            await db.execute(insert(T["zprp_public_matches"]).values(**r))
+        overview = await sys.modules["app.zprp_public.portal"].match_overview("m1")
+        by_name = await x.head_to_head(club_a="c1", club_b="c2", limit=50, team_a="t1", team_b="t2")
+        return overview, by_name
+
+    overview, by_name = run(env, go)
+    assert {c["match_id"] for c in overview["head_to_head"]} == {"m3", "old"}
+    assert {c["match_id"] for c in by_name["matches"]} == {"m1", "m3", "old"}
+
+
+def test_sezony_historyczne_tylko_z_danymi(env):
+    module, db, T = env
+
+    async def go(x):
+        await db.execute(insert(T["zprp_public_seasons"]).values(season_id="S9", start_year=2019, name="2019/20", active=False, **_h()))
+        await db.execute(insert(T["zprp_public_seasons"]).values(season_id="S8", start_year=2018, name="2018/19", active=False, **_h()))
+        await db.execute(insert(T["zprp_public_competitions"]).values(
+            competition_id="KOLD", season_id="S9", association_id="A1", name="Stara liga", gender="M", category="Seniorzy", code="X", **_h()))
+        return await sys.modules["app.zprp_public.api"].list_seasons(include_historical=True)
+
+    out = run(env, go)
+    ids = {s["season_id"] for s in out["items"]}
+    assert "S9" in ids and "S8" not in ids and "S0" not in ids and "S1" in ids

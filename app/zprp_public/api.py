@@ -230,6 +230,12 @@ async def list_seasons(include_historical: bool = False) -> dict[str, Any]:
     if not include_historical:
         newest = select(zprp_public_seasons.c.start_year).order_by(zprp_public_seasons.c.start_year.desc()).limit(1).scalar_subquery()
         query = query.where(zprp_public_seasons.c.start_year >= newest - 1)
+    else:
+        # Archiwum pobiera się w tle: pokazujemy sezon, gdy ma już dane (choć jedną rozgrywkę),
+        # a bieżący/aktywny zawsze.
+        has_data = select(zprp_public_competitions.c.season_id).where(
+            zprp_public_competitions.c.season_id == zprp_public_seasons.c.season_id).exists()
+        query = query.where(or_(has_data, zprp_public_seasons.c.active.is_(True)))
     result = await database.fetch_all(query)
     return {"items": [_dict(row) for row in result], "count": len(result)}
 

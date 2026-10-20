@@ -674,9 +674,12 @@ async def records(season_id: str = "", scope: str = Query("season", pattern="^(s
 @router.get("/h2h")
 async def head_to_head(club_a: str = Query(..., min_length=1), club_b: str = Query(..., min_length=1),
                        limit: int = Query(50, ge=1, le=200),
-                       category: Optional[str] = None, gender: Optional[str] = None) -> dict[str, Any]:
+                       category: Optional[str] = None, gender: Optional[str] = None,
+                       team_a: Optional[str] = None, team_b: Optional[str] = None) -> dict[str, Any]:
     """`category`/`gender` (opcjonalne, jak w `zprp_public_competitions`) zawężają bilans
-    do jednej kategorii — seniorzy nie mieszają się z juniorami tych samych klubów."""
+    do jednej kategorii — seniorzy nie mieszają się z juniorami tych samych klubów.
+    `team_a`/`team_b` (nazwy drużyn klubów A i B) zawężają do tych dwóch drużyn przez sezony
+    (id drużyny zmienia się co sezon); bez nich bilans jest na poziomie klubów."""
     if club_a == club_b:
         raise HTTPException(400, "Wybierz dwa różne kluby")
     conds = [
@@ -692,6 +695,9 @@ async def head_to_head(club_a: str = Query(..., min_length=1), club_b: str = Que
                             (C.c.gender == gender) if gender else None) if c is not None]
         conds.append(M.c.competition_id.in_(select(C.c.competition_id).where(and_(*kind))))
     rows = await database.fetch_all(select(*_card_cols()).where(and_(*conds)).order_by(M.c.scheduled_at.desc()))
+    team_a, team_b = (team_a or "").strip(), (team_b or "").strip()
+    if team_a and team_b:
+        rows = R.h2h_between([dict(r) for r in rows], {"club_id": club_a, "name": team_a}, {"club_id": club_b, "name": team_b})
     cards = await _cards(rows)
     bal = {"a_wins": 0, "b_wins": 0, "draws": 0, "shootouts": 0, "a_goals": 0, "b_goals": 0}
     best: dict[str, Optional[dict]] = {"a": None, "b": None}
@@ -718,6 +724,7 @@ async def head_to_head(club_a: str = Query(..., min_length=1), club_b: str = Que
         "club_b": {"club_id": club_b, **{k: (lookup.get(club_b) or {}).get(k) for k in ("name", "logo_url", "city")}},
         "matches": cards[:limit], "total": len(cards), "balance": bal, "biggest_wins": best,
         "category": category, "gender": gender,
+        "team_a": team_a or None, "team_b": team_b or None,
     }
 
 
