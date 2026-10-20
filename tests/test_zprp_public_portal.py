@@ -311,3 +311,14 @@ def test_szukanie_sedziow_bez_ogonkow_i_wielkosci(portal):
     assert [r["referee_id"] for r in both] == ["1"]
     assert none == []
     assert route["referees"] == []
+
+
+def test_invalidate_caches_czysci_indeks_sedziow_i_pamiec_extras(portal):
+    from app.zprp_public import extras
+
+    portal = portal[0]
+    portal._REF_INDEX.update(at=1e12, rows=[{"referee_id": "1"}])
+    portal._map_cache["x"] = (0.0, {})
+    extras._cache["venue-index"] = (0.0, [])
+    portal.invalidate_caches()
+    assert portal._REF_INDEX["rows"] == [] and not portal._map_cache and not extras._cache

@@ -41,13 +41,3 @@ def test_negative_cache_ttl():
     assert cache.blocked("a")
     t[0] = 11
     assert not cache.blocked("a")
-
-
-def test_invalidate_caches_clears_referee_index_and_extras():
-    from app.zprp_public import extras, portal
-
-    portal._REF_INDEX.update(at=1e12, rows=[{"referee_id": "1"}])
-    portal._map_cache["x"] = (0.0, {})
-    extras._cache["venue-index"] = (0.0, [])
-    portal.invalidate_caches()
-    assert portal._REF_INDEX["rows"] == [] and not portal._map_cache and not extras._cache
