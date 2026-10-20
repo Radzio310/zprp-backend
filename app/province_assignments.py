@@ -181,7 +181,7 @@ def _host_table_by_club(
     Deklaracja działa od `table_by_club_since`: mecz sprzed tej daty liczy się
     po staremu (`assignment_rules.club_table_active`).
     """
-    if not clubs:
+    if not clubs or A.drk_runs_match(state):
         return 0
     from app.offtime_rules import match_moment
     from app.province_clubs_scrape import team_key
@@ -205,6 +205,8 @@ def _item(
 ) -> dict:
     """Jeden mecz listy: fakty z migawki plus policzony stan obsady."""
     competition = A.competition_key(code)
+    if access is not None:
+        state = {**state, "assignment_access": access}
     table_by_club = _host_table_by_club(state, clubs, row["match_at"])
     status = A.crew_status(state, code, table_by_club,
                            slots=access["editable_slots"] if access is not None else None)
