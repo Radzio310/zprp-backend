@@ -1090,6 +1090,13 @@ async def _cleanup_loop():
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    # Wyszukiwarka publiczna: indeks sędziów i mapa miast budują się w tle.
+    try:
+        from app.zprp_public.portal import warm_search
+
+        asyncio.ensure_future(warm_search())
+    except Exception:
+        logger.exception("Rozgrzewka wyszukiwarki nie wystartowała")
 
     try:
         if await ensure_pod_reka_defaults():

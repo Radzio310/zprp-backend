@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy import and_, func, or_, select
 
 from app.db import (
@@ -45,6 +45,7 @@ from app.db import (
 from app.national_distance_parser import normalize_city_key
 from app.zprp_public import corrections, portal_rules as R
 from app.zprp_public import match_rules as MR
+from app.zprp_public import search_rules as SR
 from app.zprp_public.protocol_times import attach_protocol_times
 from app.zprp_public.enrich import enrich_matches
 from app.zprp_public.ondemand import ensure_details
@@ -818,7 +819,8 @@ _REF_TTL = 600
 
 def invalidate_caches() -> None:
     """Zmiana obsady/wyniku: zapomnij indeks sędziów i gotowe mapy."""
-    _REF_INDEX.update(at=0.0, rows=[])
+    _REF_INDEX.update(at=0.0)  # zostaje stary indeks, odświeży się w tle
+    _SEARCH_CACHE.clear()
     _map_cache.clear()
     _nodes_cache.update(at=0.0, index={})
     from app.zprp_public import extras
@@ -841,7 +843,7 @@ def _match_referees(rows: list[dict], q: str, limit: int) -> list[dict]:
         return []
     hits = []
     for r in rows:
-        folded = MR._fold(r["name"])
+        folded = r.get("_folded") or MR._fold(r["name"])
         parts = folded.split("-")
         if all(any(p.startswith(t) or t in p for p in parts) for t in tokens):
             starts = folded.startswith(tokens[0]) or any(p.startswith(tokens[0]) for p in parts[:1])
@@ -850,10 +852,7 @@ def _match_referees(rows: list[dict], q: str, limit: int) -> list[dict]:
     return [h[2] for h in hits[:limit]]
 
 
-async def _referee_index() -> list[dict]:
-    """Publiczna lista sędziów z meczów: id, nazwa, liczba meczów (tylko dane z API ZPRP)."""
-    if _REF_INDEX["rows"] and time.time() - _REF_INDEX["at"] < _REF_TTL:
-        return _REF_INDEX["rows"]
+async def _build_referee_index() -> list[dict]:
     acc: dict[str, dict] = {}
     for idc, nmc in (("referee_1_id", "referee_1_name"), ("referee_2_id", "referee_2_name")):
         rows = await database.fetch_all(
@@ -868,44 +867,151 @@ async def _referee_index() -> list[dict]:
             if int(r["n"]) > e["_best"]:
                 e["_best"], e["name"] = int(r["n"]), name
     out = [{k: v for k, v in e.items() if k != "_best"} for e in acc.values()]
-    _REF_INDEX.update(at=time.time(), rows=out)
+    for e in out:  # złożone raz, żeby fraza nie składała nazwisk przy każdym żądaniu
+        e["_folded"] = MR._fold(e["name"])
     return out
 
 
+_REF_BUILDING: Optional["asyncio.Task"] = None
+
+
+async def _refresh_referees() -> None:
+    global _REF_BUILDING
+    try:
+        _REF_INDEX.update(at=time.time(), rows=await _build_referee_index())
+    except Exception:  # noqa: BLE001 - zostaje poprzedni indeks
+        pass
+    finally:
+        _REF_BUILDING = None
+
+
+def _kick_referees() -> None:
+    global _REF_BUILDING
+    if _REF_BUILDING is None:
+        _REF_BUILDING = asyncio.ensure_future(_refresh_referees())
+
+
+async def _referee_index() -> list[dict]:
+    """Indeks sędziów żyje w tle: żądanie nigdy na niego nie czeka (zimny start = pusta lista,
+    rozgrzewka z `warm_search`). Przeterminowany wraca od razu, a odświeża się w tle."""
+    if not _REF_INDEX["rows"] or time.time() - _REF_INDEX["at"] >= _REF_TTL:
+        _kick_referees()
+    return _REF_INDEX["rows"]
+
+
+async def warm_search() -> None:
+    """Start serwera: zbuduj indeks sędziów i pierwszą mapę, zanim ktoś wpisze pierwszą literę."""
+    await _refresh_referees()
+    try:
+        await _cached_map(await _resolve_season())
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# Krótki cache gorących fraz: paleta pyta o każdy prefiks, a ten sam wpis wraca często.
+_SEARCH_CACHE: dict[tuple, tuple[float, dict]] = {}
+_SEARCH_TTL = 20.0
+_SEARCH_MAX = 400
+_CITY_IDX: dict[str, Any] = {"src": None, "rows": []}
+_SEASON_CACHE: dict[str, Any] = {"at": 0.0, "id": None}
+
+
+async def _current_season() -> Optional[str]:
+    if time.time() - _SEASON_CACHE["at"] > 300:
+        _SEASON_CACHE.update(at=time.time(), id=await _resolve_season())
+    return _SEASON_CACHE["id"]
+
+
+def _city_rows(map_payload: dict) -> list[tuple[dict, list[str]]]:
+    """Miasta z już znormalizowanymi nazwami (raz na wersję mapy)."""
+    cities = map_payload["cities"]
+    if _CITY_IDX["src"] is not cities:
+        _CITY_IDX.update(
+            src=cities,
+            rows=[(c, [normalize_city_key(n) for n in [c["city"], *c.get("aliases", [])]]) for c in cities],
+        )
+    return _CITY_IDX["rows"]
+
+
+async def _match_by_number(q: str, limit: int, season: Optional[str]) -> list[Any]:
+    keys = SR.variants(q)
+    folded = func.lower(func.replace(M.c.match_code, " ", ""))
+    cond = or_(*[folded.like(k.replace("%", "").replace("_", r"\_") + "%") for k in keys])
+    rows = await database.fetch_all(
+        select(*_card_cols()).where(and_(M.c.match_code.isnot(None), cond))
+        .order_by(M.c.scheduled_at.desc()).limit(120)
+    )
+    ranked = SR.rank([_dict(r) for r in rows], q, current_season=season)
+    return ranked[: max(limit, 10)]
+
+
 @router.get("/search/global")
-async def search_global(q: str = Query(..., min_length=2), limit_per_type: int = Query(8, ge=1, le=25)) -> dict[str, Any]:
+async def search_global(
+    q: str = Query(..., min_length=2),
+    limit_per_type: int = Query(8, ge=1, le=25),
+    response: Response = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    t0 = time.perf_counter()
+    ckey = (q.strip().lower(), limit_per_type)
+    hit = _SEARCH_CACHE.get(ckey)
+    if hit and time.time() - hit[0] < _SEARCH_TTL:
+        if response is not None:
+            response.headers["X-Search-Ms"] = "0"
+        return hit[1]
+    out = await _search_global(q, limit_per_type)
+    if len(_SEARCH_CACHE) >= _SEARCH_MAX:
+        _SEARCH_CACHE.clear()
+    _SEARCH_CACHE[ckey] = (time.time(), out)
+    if response is not None:
+        response.headers["X-Search-Ms"] = str(int((time.perf_counter() - t0) * 1000))
+    return out
+
+
+async def _search_global(q: str, limit_per_type: int) -> dict[str, Any]:
     like = f"%{q.strip()}%"
-    base, match_rows, map_payload = await asyncio.gather(
-        base_search(q=q, limit_per_type=limit_per_type),
+    by_number = SR.looks_like_number(q)
+    season = await _current_season()
+    team_matches = (
         database.fetch_all(
             select(*_card_cols()).where(or_(M.c.home_team_name.ilike(like), M.c.away_team_name.ilike(like)))
             .order_by(M.c.scheduled_at.desc()).limit(limit_per_type)
-        ),
-        _cached_map(await _resolve_season()),
+        )
+        if "/" not in q
+        else _empty()
     )
-    try:
-        referees = _match_referees(await _referee_index(), q, limit_per_type)
-    except Exception:  # sędziowie to dodatek, szukajka działa dalej bez nich
-        referees = []
+    base, match_rows, num_rows, map_payload = await asyncio.gather(
+        base_search(q=q, limit_per_type=limit_per_type),
+        team_matches,
+        _match_by_number(q, limit_per_type, season) if by_number else _empty(),
+        _cached_map(season),
+    )
+    referees = _match_referees(await _referee_index(), q, limit_per_type)
     needle = normalize_city_key(q)
     cities = []
-    for c in map_payload["cities"]:
-        names = [c["city"], *c.get("aliases", [])]
-        hit = any(needle in normalize_city_key(n) for n in names)
-        # Pierwsze trafienia: nazwa zaczyna się od frazy.
-        if hit:
-            starts = any(normalize_city_key(n).startswith(needle) for n in names)
+    for c, names in _city_rows(map_payload):
+        if any(needle in n for n in names):
+            starts = any(n.startswith(needle) for n in names)
             cities.append((0 if starts else 1, -c["clubs_count"], c))
     cities.sort(key=lambda x: x[:2])
+    # Trafienia po numerze idą pierwsze, bez dubli z wyszukiwania po nazwie drużyny.
+    num_ids = {r["match_id"] for r in num_rows}
+    merged = [*num_rows, *[r for r in match_rows if r["match_id"] not in num_ids]]
+    cards = await _cards(merged)
+    for card in cards:
+        card["by_number"] = card["match_id"] in num_ids
     return {
         **base,
         "cities": [
             {k: c[k] for k in ("key", "city", "lat", "lon", "voivodeship", "clubs_count", "teams_count", "matches_today")}
             for _, _, c in cities[:limit_per_type]
         ],
-        "matches": await _cards(match_rows),
-        "referees": referees,
+        "matches": cards,
+        "referees": [{k: v for k, v in r.items() if not k.startswith("_")} for r in referees],
     }
+
+
+async def _empty() -> list:
+    return []
 
 
 # ---------------------------------------------------------------------------

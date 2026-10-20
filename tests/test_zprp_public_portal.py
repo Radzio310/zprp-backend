@@ -321,4 +321,44 @@ def test_invalidate_caches_czysci_indeks_sedziow_i_pamiec_extras(portal):
     portal._map_cache["x"] = (0.0, {})
     extras._cache["venue-index"] = (0.0, [])
     portal.invalidate_caches()
-    assert portal._REF_INDEX["rows"] == [] and not portal._map_cache and not extras._cache
+    assert portal._REF_INDEX["at"] == 0.0 and not portal._map_cache and not extras._cache
+
+
+# ---------------------------------------------------------------------------
+# Szukanie meczu po numerze
+# ---------------------------------------------------------------------------
+
+
+def test_numer_meczu_rozpoznawanie_i_warianty():
+    from app.zprp_public import search_rules as SR
+
+    assert SR.looks_like_number("lcm/32") and SR.looks_like_number("S / JmM / 13") and SR.looks_like_number("jk6")
+    assert not SR.looks_like_number("kowalski") and not SR.looks_like_number("AZS Kielce")
+    assert SR.variants("S / JmM / 13") == ["s/jmm/13"]
+    assert SR.variants("lcm/32") == ["lcm/32", "icm/32"]   # mała L bywa wielkim I
+
+
+def test_numer_meczu_w_wyszukiwarce_wielkosc_liter_l_i_spacje(portal):
+    async def go(m):
+        db, T = portal[1], portal[2]
+        now = datetime.now().replace(microsecond=0)
+        base = dict(season_id="S1", competition_id="K1", home_team_name="Kielce SPR", away_team_name="Piast U18",
+                    home_team_id="t1", away_team_id="t2", home_club_id="c1", away_club_id="c2", **_hash())
+        for mid, code, days in (("n1", "ICM/32", 3), ("n2", "ICM/320", 1), ("n3", "JmK/5", 2), ("n4", "JMK/5", 9), ("n5", "S/JmM/13", 4)):
+            await db.execute(insert(T["zprp_public_matches"]).values(
+                match_id=mid, match_code=code, scheduled_at=now + timedelta(days=days), **base))
+        m._SEARCH_CACHE.clear()
+        out = {}
+        for q in ("lcm/32", "ICM / 32", "icm/32", "jmk/5", "JmK/5", "s/jmm/13", "S / JmM / 13", "zzz/1"):
+            out[q] = [(c["match_code"], c["by_number"]) for c in (await m.search_global(q=q, limit_per_type=8))["matches"] if c["by_number"]]
+            m._SEARCH_CACHE.clear()
+        return out
+
+    out = run(portal, go)
+    assert out["lcm/32"][0][0] == "ICM/32"            # l -> I, dokładny przed prefiksem ICM/320
+    assert [c for c, _ in out["lcm/32"]] == ["ICM/32", "ICM/320"]
+    assert out["ICM / 32"][0][0] == "ICM/32" and out["icm/32"][0][0] == "ICM/32"
+    assert [c for c, _ in out["JmK/5"]] == ["JmK/5", "JMK/5"]   # dokładna pisownia pierwsza, obie widoczne
+    assert [c for c, _ in out["jmk/5"]] == ["JmK/5", "JMK/5"]   # bliższy w czasie pierwszy
+    assert out["s/jmm/13"][0][0] == "S/JmM/13" and out["S / JmM / 13"][0][0] == "S/JmM/13"
+    assert out["zzz/1"] == []

@@ -5016,3 +5016,11 @@ with engine.connect() as _conn:
     for _statement in _MENTOR_EVALUATION_MIGRATIONS:
         _conn.execute(text(_statement))
     _conn.commit()
+
+# Indeksy wyszukiwarki publicznej (pg_trgm, numer meczu) - w tle, nie blokują startu.
+try:
+    from app.zprp_public.search_index import ensure_in_background as _search_indexes
+
+    _search_indexes(engine)
+except Exception:  # noqa: BLE001
+    pass
