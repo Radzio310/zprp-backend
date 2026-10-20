@@ -307,7 +307,7 @@ async def _judge_season_pages(
     """
     entry_path = _build_judge_matches_path(judge_id, None)
     _, html = await fetch_with_correct_encoding(client, entry_path, method="GET", cookies=cookies)
-    soup = BeautifulSoup(html, "html.parser")
+    soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
     options: dict[str, str] = {}
     selected = ""
     for item in _parse_seasons_from_page(soup) or []:
@@ -419,7 +419,7 @@ async def _collect_outside(
                     _, html = await fetch_with_correct_encoding(
                         client, path, method="GET", cookies=cookies
                     )
-                    soup = BeautifulSoup(html, "html.parser")
+                    soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
             except Exception as exc:
                 logger.warning("[settlement] sedzia %s, sezon %s: %s", judge_id, label, exc)
                 season_ok[label] = False

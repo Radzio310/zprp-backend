@@ -1094,6 +1094,13 @@ async def _cleanup_loop():
 async def startup():
     await database.connect()
     _loop_lag.start()  # monitor opóźnienia pętli (GET /admin/loop-lag)
+    # Wątki z parsowaniem (bs4, JSON) dzielą GIL z pętlą: krótszy kwant (1 ms zamiast 5 ms)
+    # i ograniczona pula, żeby pętla szybko wracała do głosu mimo kilku parserów naraz.
+    import sys as _sys
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    _sys.setswitchinterval(0.001)
+    asyncio.get_running_loop().set_default_executor(_TPE(max_workers=8, thread_name_prefix="cpu"))
     # Schemat OpenAPI liczy się kilka sekund czystego CPU - w wątku, żeby pierwsze
     # wejście na /openapi.json nie zatrzymało pętli (potem leci z pamięci).
     asyncio.ensure_future(asyncio.to_thread(app.openapi))

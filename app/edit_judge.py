@@ -1,3 +1,4 @@
+import asyncio
 # app/edit_judge.py
 from fastapi import APIRouter, HTTPException, Depends
 from httpx import AsyncClient
@@ -65,7 +66,7 @@ async def edit_judge(
         _, html_get = await fetch_with_correct_encoding(
             client, path, method="GET", cookies=cookies
         )
-        soup = BeautifulSoup(html_get, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, html_get, "html.parser")
         form = soup.find("form", {"name": "edycja"})
         if not form:
             raise HTTPException(500, "Nie znaleziono formularza edycji")
@@ -131,7 +132,7 @@ async def edit_judge(
 
         # 6) Sprawdzenie, czy wartości w odpowiedzi zostały zaktualizowane
         html_edit = resp_edit.content.decode("iso-8859-2", errors="replace")
-        soup2 = BeautifulSoup(html_edit, "html.parser")
+        soup2 = await asyncio.to_thread(BeautifulSoup, html_edit, "html.parser")
         form2 = soup2.find("form", {"name": "edycja"})
         if not form2:
             # formularz zniknął? to sukces:

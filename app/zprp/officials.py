@@ -1193,7 +1193,7 @@ async def save_official_edit_page(
         _log_html_fingerprint("Official edit page(after save) fetched", html_after)
 
         # 5) spróbuj wyciągnąć komunikat (w przykładzie <div id="info_edit"...>)
-        soup_after = BeautifulSoup(html_after, "html.parser")
+        soup_after = await asyncio.to_thread(BeautifulSoup, html_after, "html.parser")
         info_msg = ""
         try:
             div_info = soup_after.find(id="info_edit")
@@ -1947,7 +1947,7 @@ async def scrape_judge_matches_all_seasons(
         _, html0 = await fetch_with_correct_encoding(client, entry_path, method="GET", cookies=cookies)
         _log_html_fingerprint("Judge matches page[entry] fetched", html0)
 
-        soup0 = BeautifulSoup(html0, "html.parser")
+        soup0 = await asyncio.to_thread(BeautifulSoup, html0, "html.parser")
         seasons = _parse_seasons_from_page(soup0)
 
         # Gdy wejściowy href miał sezon, w którym sędzia nie ma nic (np. świeży 195),
@@ -1957,7 +1957,7 @@ async def scrape_judge_matches_all_seasons(
             logger.info("ZPRP judge matches(all): empty seasons, retry without Filtr_sezon path=%s", retry_path)
             _, html_retry = await fetch_with_correct_encoding(client, retry_path, method="GET", cookies=cookies)
             _log_html_fingerprint("Judge matches page[entry-retry] fetched", html_retry)
-            soup_retry = BeautifulSoup(html_retry, "html.parser")
+            soup_retry = await asyncio.to_thread(BeautifulSoup, html_retry, "html.parser")
             seasons_retry = _parse_seasons_from_page(soup_retry)
             if seasons_retry:
                 entry_path = retry_path
@@ -1999,7 +1999,7 @@ async def scrape_judge_matches_all_seasons(
             _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
             _log_html_fingerprint(f"Judge matches page[season={season_value}] fetched", html)
 
-            soup = BeautifulSoup(html, "html.parser")
+            soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
             parsed = await asyncio.to_thread(_parse_match_rows_from_soup, soup)
             total_rows += int(parsed.get("rows") or 0)
             seasons_fetched += 1
@@ -2064,7 +2064,7 @@ async def scrape_judge_matches_one_season(
         _, html = await fetch_with_correct_encoding(client, base_path, method="GET", cookies=cookies)
         _log_html_fingerprint(f"Judge matches page[season={season_value}] fetched", html)
 
-        soup = BeautifulSoup(html, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
         seasons = _parse_seasons_from_page(soup)
         parsed = await asyncio.to_thread(_parse_match_rows_from_soup, soup)
 

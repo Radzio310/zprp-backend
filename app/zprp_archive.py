@@ -270,7 +270,7 @@ async def _judge_lists(
                         _, html = await fetch_with_correct_encoding(
                             client, _build_judge_matches_path(judge_id, value), method="GET", cookies=cookies
                         )
-                        soup = BeautifulSoup(html, "html.parser")
+                        soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
                         await asyncio.sleep(JUDGE_REQUEST_DELAY)
                 except Exception as exc:
                     logger.warning("[archive] %s: sędzia %s, sezon %s: %s", province, judge_id, label, exc)

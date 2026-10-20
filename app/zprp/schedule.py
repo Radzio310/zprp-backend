@@ -726,7 +726,7 @@ async def get_terminarz_meta(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
         _, html0 = await fetch_with_correct_encoding(client, "/index.php?a=terminarz", method="GET", cookies=cookies)
-        soup0 = BeautifulSoup(html0, "html.parser")
+        soup0 = await asyncio.to_thread(BeautifulSoup, html0, "html.parser")
 
         sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
         seasons = _parse_select_options(sel_season)
@@ -764,7 +764,7 @@ async def get_terminarz_meta(
             path_cat = "/index.php?" + urlencode(qs, doseq=True)
 
             _, html_cat = await fetch_with_correct_encoding(client, path_cat, method="GET", cookies=cookies)
-            soup_cat = BeautifulSoup(html_cat, "html.parser")
+            soup_cat = await asyncio.to_thread(BeautifulSoup, html_cat, "html.parser")
 
             sel_rozgr = soup_cat.find("select", attrs={"name": "IdRozgr"})
             rozgr_opts0 = _parse_select_options(sel_rozgr)
@@ -806,7 +806,7 @@ async def scrape_terminarz_full(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
         _, html0 = await fetch_with_correct_encoding(client, "/index.php?a=terminarz", method="GET", cookies=cookies)
-        soup0 = BeautifulSoup(html0, "html.parser")
+        soup0 = await asyncio.to_thread(BeautifulSoup, html0, "html.parser")
 
         sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
         seasons = _parse_select_options(sel_season)
@@ -837,7 +837,7 @@ async def scrape_terminarz_full(
             path_cat = "/index.php?" + urlencode(qs, doseq=True)
 
             _, html_cat = await fetch_with_correct_encoding(client, path_cat, method="GET", cookies=cookies)
-            soup_cat = BeautifulSoup(html_cat, "html.parser")
+            soup_cat = await asyncio.to_thread(BeautifulSoup, html_cat, "html.parser")
 
             sel_rozgr = soup_cat.find("select", attrs={"name": "IdRozgr"})
             rozgr_opts0 = _parse_select_options(sel_rozgr)
@@ -943,7 +943,7 @@ async def scrape_terminarz_slim(
         cookies = await _login_zprp_and_get_cookies(client, user_plain, pass_plain)
 
         _, html0 = await fetch_with_correct_encoding(client, "/index.php?a=terminarz", method="GET", cookies=cookies)
-        soup0 = BeautifulSoup(html0, "html.parser")
+        soup0 = await asyncio.to_thread(BeautifulSoup, html0, "html.parser")
 
         sel_season = soup0.find("select", attrs={"name": "Filtr_sezon"})
         seasons = _parse_select_options(sel_season)
@@ -964,7 +964,7 @@ async def scrape_terminarz_slim(
         path_cat = "/index.php?" + urlencode(qs_cat, doseq=True)
 
         _, html_cat = await fetch_with_correct_encoding(client, path_cat, method="GET", cookies=cookies)
-        soup_cat = BeautifulSoup(html_cat, "html.parser")
+        soup_cat = await asyncio.to_thread(BeautifulSoup, html_cat, "html.parser")
 
         sel_rozgr = soup_cat.find("select", attrs={"name": "IdRozgr"})
         rozgr_opts0 = _parse_select_options(sel_rozgr)

@@ -231,7 +231,7 @@ async def _update_menu_link(client: httpx.AsyncClient, link: str, cache_key: str
     # Źródłem prawdy jest ponownie otwarty formularz, nie sam kod 200 po POST.
     verify = await client.get(f"{MENU_EDIT}&verify={cache_key}")
     verify.raise_for_status()
-    soup = BeautifulSoup(verify.text, "html.parser")
+    soup = await asyncio.to_thread(BeautifulSoup, verify.text, "html.parser")
     field = soup.select_one('#jform_link')
     if field is None or str(field.get("value") or "") != link:
         raise RuntimeError("PDF wgrano, ale Joomla nie zapisała nowego łącza pozycji MECZE")

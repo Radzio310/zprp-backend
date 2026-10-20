@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import base64
 import re
@@ -121,7 +122,7 @@ async def upload_judge_photo(
         if prof.status_code != 200:
             raise HTTPException(status_code=500, detail="Nie udało się pobrać strony edycji")
 
-        soup = BeautifulSoup(prof.text, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, prof.text, "html.parser")
         img = soup.find("img", src=re.compile(r"foto_sedzia/"))
         if not img or not img.get("src"):
             raise HTTPException(status_code=500, detail="Nie znaleziono finalnego zdjęcia")

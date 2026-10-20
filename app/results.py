@@ -161,7 +161,7 @@ async def _submit_short_result(
         method="POST",
         data=initial_data,
     )
-    soup = BeautifulSoup(html, "html.parser")
+    soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
     form = soup.find("form", {"name": "zawody_WynikSkrocony"})
     if not form:
         return False
@@ -289,7 +289,7 @@ async def short_result(
                 method="GET",
                 cookies=client.cookies,
             )
-            soup = BeautifulSoup(html, "html.parser")
+            soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
             host_swapped = _is_host_swapped(soup)
 
             # 3) sprawdź dostępność przycisku/modalu
@@ -2017,7 +2017,7 @@ async def save_protocol_from_json(
                 method="GET",
                 cookies=client.cookies,
             )
-            soup = BeautifulSoup(html, "html.parser")
+            soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
 
             stats_map = _build_stats_map(data_json)
             mc = data_json.get("matchConfig") or {}
