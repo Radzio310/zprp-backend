@@ -361,6 +361,10 @@ async def _sync_match_details(client: PublicZprpClient, match_id: str, counters:
             header = zero
     if not header:
         header = _first(payload)
+    if not header and isinstance(payload, list) and payload:
+        # goła tablica [[{...}]] (mecz bez składów)
+        bucket = payload[0]
+        header = bucket[0] if isinstance(bucket, list) and bucket and isinstance(bucket[0], dict) else {}
     if not header:
         return ""
     existing_match = await database.fetch_one(
@@ -614,6 +618,35 @@ async def _sync_competition_tree(
         await _sync_competition_stats(client, competition_id, counters)
 
 
+async def _store_competition(item: dict[str, Any], season_id: str, counters: Counters) -> str:
+    competition_id = text_value(item.get("Id_rozgrywki"))
+    await store_entity(
+        zprp_public_competitions,
+        {
+            "competition_id": competition_id,
+            "season_id": text_value(item.get("ID_sezon") or season_id),
+            "association_id": text_value(item.get("NrWZPR")),
+            "association_name": text_value(item.get("NazwaWZPR")),
+            "name": text_value(item.get("Nazwa")),
+            "gender": text_value(item.get("Plec")),
+            "category": text_value(item.get("Kategoria")),
+            "code": text_value(item.get("code")),
+            "export_code": text_value(item.get("code_export")),
+            "team_count": int_value(item.get("IleZespolow"), 0) or 0,
+            "started": _truth(item.get("Wystartowano")),
+            "protocol_type": text_value(item.get("Protokol_typ")),
+            "regulations_url": text_value(item.get("Regulamin")),
+            "has_groups": _truth(item.get("Grupy")),
+        },
+        key_columns=("competition_id",),
+        resource_type="competition",
+        resource_key=competition_id,
+        source=item,
+    )
+    counters.add("competitions")
+    return competition_id
+
+
 async def _sync_season(
     client: PublicZprpClient,
     season_id: str,
@@ -625,31 +658,7 @@ async def _sync_season(
     payload = await client.get(f"pokaz_rozgrywki.php?Sezon={season_id}")
     competitions = [item for item in rows(payload) if item.get("Id_rozgrywki")]
     for item in competitions:
-        competition_id = text_value(item.get("Id_rozgrywki"))
-        await store_entity(
-            zprp_public_competitions,
-            {
-                "competition_id": competition_id,
-                "season_id": text_value(item.get("ID_sezon") or season_id),
-                "association_id": text_value(item.get("NrWZPR")),
-                "association_name": text_value(item.get("NazwaWZPR")),
-                "name": text_value(item.get("Nazwa")),
-                "gender": text_value(item.get("Plec")),
-                "category": text_value(item.get("Kategoria")),
-                "code": text_value(item.get("code")),
-                "export_code": text_value(item.get("code_export")),
-                "team_count": int_value(item.get("IleZespolow"), 0) or 0,
-                "started": _truth(item.get("Wystartowano")),
-                "protocol_type": text_value(item.get("Protokol_typ")),
-                "regulations_url": text_value(item.get("Regulamin")),
-                "has_groups": _truth(item.get("Grupy")),
-            },
-            key_columns=("competition_id",),
-            resource_type="competition",
-            resource_key=competition_id,
-            source=item,
-        )
-        counters.add("competitions")
+        await _store_competition(item, season_id, counters)
 
     async def one(item: dict[str, Any]) -> None:
         try:

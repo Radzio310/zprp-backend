@@ -199,8 +199,8 @@ async def refresh_match(match_id: str, force: bool = False) -> dict[str, Any]:
                     timeout=float(os.getenv("ZPRP_PUBLIC_REFRESH_TIMEOUT", "8")),
                 )
             if not counters.get("match_details"):
-                _refreshed_at[match_id] = now - REFRESH_MIN_INTERVAL + 20  # krótka blokada po pustej odpowiedzi
-                return {"refreshed": False, "changed": False, "throttled": False}
+                _refreshed_at[match_id] = time.monotonic() - REFRESH_MIN_INTERVAL + 20  # krótka blokada po pustej odpowiedzi
+                return {"refreshed": False, "changed": False, "throttled": False, "empty": True}
             _refreshed_at[match_id] = time.monotonic()
             if len(_refreshed_at) > 5000:
                 cutoff = time.monotonic() - REFRESH_MIN_INTERVAL
