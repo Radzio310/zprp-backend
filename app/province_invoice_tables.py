@@ -70,6 +70,9 @@ def define_tables(metadata):
         Column("paid_day", Date, nullable=True),
         Column("paid_by", String, nullable=True),
         Column("paid_at", DateTime(timezone=True), nullable=True),
+        # Kosz: status "trashed" + deleted_at. Pozycja leży 30 dni, potem znika z plikiem.
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+        Column("deleted_by", String, nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
     )
 

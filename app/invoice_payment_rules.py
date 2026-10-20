@@ -46,3 +46,16 @@ def register_totals(items: Iterable[dict]) -> dict:
 def pending_sum(pending: dict[str, list[dict]], club_ids: list[str]) -> float:
     """Suma oczekujących faktur wskazanych klubów (zł, z groszami)."""
     return round(sum(_cents(item["amount"]) for cid in club_ids for item in pending.get(cid, [])) / 100, 2)
+
+
+#: Kosz faktur: pozycja leży tyle dni, potem znika razem z plikiem.
+TRASH_DAYS = 30
+STATUS_TRASHED = "trashed"
+
+
+def trash_days_left(deleted_at: Any, now: Any) -> int:
+    """Ile pełnych dni zostało do trwałego usunięcia (min. 0). Brak daty = pełny okres."""
+    if deleted_at is None:
+        return TRASH_DAYS
+    left = TRASH_DAYS - (now - deleted_at).days
+    return max(0, min(TRASH_DAYS, left))

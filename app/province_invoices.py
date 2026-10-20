@@ -31,7 +31,7 @@ import inspect
 import json
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -43,7 +43,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import invoice_match_rules as M
 from app import settlement_cache as SC
-from app.invoice_payment_rules import PAY_PAID, PAY_PENDING, is_pending, pay_mode, register_totals
+from app.invoice_payment_rules import (
+    PAY_PAID,
+    PAY_PENDING,
+    STATUS_TRASHED,
+    TRASH_DAYS,
+    is_pending,
+    pay_mode,
+    register_totals,
+    trash_days_left,
+)
 from app import invoice_parse_rules as P
 from app.db import (
     database,
@@ -938,6 +947,7 @@ async def entry_pdf(
 @router.get("/register", summary="Rejestr zatwierdzonych faktur: opłacone i oczekujące na płatność")
 async def register(province: str = Query(...), season: Optional[str] = Query(None)):
     key = require_province(province)
+    await _purge_expired(key)
     rows = await database.fetch_all(
         select(*_ITEM_COLUMNS)
         .where(
@@ -974,7 +984,18 @@ async def register(province: str = Query(...), season: Optional[str] = Query(Non
                 "approved_at": row["decided_at"].isoformat() if row["decided_at"] else None,
             }
         )
-    return {"items": items, "totals": register_totals(items)}
+    trash_count = int(
+        await database.fetch_val(
+            select(func.count()).select_from(province_invoice_items).where(
+                and_(
+                    province_invoice_items.c.province == key,
+                    province_invoice_items.c.status == STATUS_TRASHED,
+                )
+            )
+        )
+        or 0
+    )
+    return {"items": items, "totals": register_totals(items), "trash_count": trash_count}
 
 
 class ConfirmRequest(BaseModel):
@@ -1070,3 +1091,161 @@ async def unconfirm_items(payload: UnconfirmRequest, province: Optional[str] = Q
             total_cents += int(round(float(row["amount"] or 0) * 100))
     SC.bump(key, base=False, reason="faktury: cofnięcie potwierdzenia")
     return {"unconfirmed": reverted, "total": round(total_cents / 100, 2)}
+
+
+# ---------------------------------------------------------------------------
+# kosz: usunięcie faktury z rejestru na 30 dni
+# ---------------------------------------------------------------------------
+
+
+async def _purge_expired(key: str) -> None:
+    """Trwale usuwa pozycje, które leżą w koszu dłużej niż TRASH_DAYS (razem z plikiem)."""
+    border = _now() - timedelta(days=TRASH_DAYS)
+    await database.execute(
+        delete(province_invoice_items).where(
+            and_(
+                province_invoice_items.c.province == key,
+                province_invoice_items.c.status == STATUS_TRASHED,
+                province_invoice_items.c.deleted_at < border,
+            )
+        )
+    )
+
+
+async def _trashed_of(key: str, ids: list[int]):
+    if not ids:
+        return []
+    return await database.fetch_all(
+        select(*_ITEM_COLUMNS).where(
+            and_(
+                province_invoice_items.c.province == key,
+                province_invoice_items.c.status == STATUS_TRASHED,
+                province_invoice_items.c.id.in_([int(i) for i in ids]),
+            )
+        )
+    )
+
+
+class TrashRequest(BaseModel):
+    province: Optional[str] = None
+    item_ids: list[int] = []
+    deleted_by: Optional[str] = None
+
+
+@router.post("/items/trash", summary="Usuń faktury z rejestru do kosza (30 dni, z możliwością przywrócenia)")
+async def trash_items(payload: TrashRequest, province: Optional[str] = Query(None)):
+    key = require_province(_s(payload.province) or _s(province))
+    who = _s(payload.deleted_by) or None
+    trashed = 0
+    total_cents = 0
+    async with database.transaction():
+        for row in await _items_of(key, payload.item_ids):
+            # Wpłata z faktury znika z salda; przywrócenie założy ją na nowo (paid_day).
+            if row["entry_id"]:
+                await database.execute(
+                    delete(province_club_entries).where(
+                        and_(
+                            province_club_entries.c.id == row["entry_id"],
+                            province_club_entries.c.province == key,
+                        )
+                    )
+                )
+            await database.execute(
+                update(province_invoice_items)
+                .where(province_invoice_items.c.id == row["id"])
+                .values(status=STATUS_TRASHED, entry_id=None, deleted_at=_now(), deleted_by=who)
+            )
+            trashed += 1
+            total_cents += int(round(float(row["amount"] or 0) * 100))
+    SC.bump(key, base=False, reason="faktury: usunięcie do kosza")
+    return {"trashed": trashed, "total": round(total_cents / 100, 2)}
+
+
+@router.post("/items/restore", summary="Przywróć faktury z kosza do rejestru")
+async def restore_items(payload: TrashRequest, province: Optional[str] = Query(None)):
+    key = require_province(_s(payload.province) or _s(province))
+    who = _s(payload.deleted_by) or None
+    restored = 0
+    skipped: list[dict] = []
+    async with database.transaction():
+        for row in await _trashed_of(key, payload.item_ids):
+            label = _s(row["invoice_no"]) or _s(row["file_name"])
+            inv_key = _s(row["invoice_key"])
+            if inv_key:
+                twin = (await _approved_by_key(key, [inv_key], skip_item=int(row["id"]))).get(inv_key)
+                if twin:
+                    skipped.append({"item_id": int(row["id"]), "reason": f"{label}: ta sama faktura jest już w rejestrze."})
+                    continue
+            entry_id = None
+            if not is_pending(row["payment_status"]):
+                amount = round(abs(float(row["amount"] or 0)), 2)
+                club_id = _s(row["club_id"])
+                if amount <= 0 or not club_id:
+                    skipped.append({"item_id": int(row["id"]), "reason": f"{label}: brak klubu lub kwoty, nie da się odtworzyć wpłaty."})
+                    continue
+                day = row["paid_day"] or row["issue_date"] or _now().date()
+                entry_id = await _insert_entry(
+                    key,
+                    club_id=club_id,
+                    amount=amount,
+                    description=(_s(row["description"]) or f"Faktura {label}")[:500],
+                    day=day,
+                    who=_s(row["paid_by"]) or who,
+                )
+            await database.execute(
+                update(province_invoice_items)
+                .where(province_invoice_items.c.id == row["id"])
+                .values(status=STATUS_APPROVED, entry_id=entry_id, deleted_at=None, deleted_by=None)
+            )
+            restored += 1
+    SC.bump(key, base=False, reason="faktury: przywrócenie z kosza")
+    return {"restored": restored, "skipped": skipped}
+
+
+@router.post("/items/purge", summary="Usuń faktury z kosza trwale")
+async def purge_items(payload: TrashRequest, province: Optional[str] = Query(None)):
+    key = require_province(_s(payload.province) or _s(province))
+    rows = await _trashed_of(key, payload.item_ids)
+    ids = [int(row["id"]) for row in rows]
+    if ids:
+        await database.execute(delete(province_invoice_items).where(province_invoice_items.c.id.in_(ids)))
+    return {"purged": len(ids)}
+
+
+@router.get("/trash", summary="Kosz faktur (30 dni)")
+async def trash(province: str = Query(...)):
+    key = require_province(province)
+    await _purge_expired(key)
+    rows = await database.fetch_all(
+        select(*_ITEM_COLUMNS)
+        .where(
+            and_(
+                province_invoice_items.c.province == key,
+                province_invoice_items.c.status == STATUS_TRASHED,
+            )
+        )
+        .order_by(province_invoice_items.c.deleted_at.desc(), province_invoice_items.c.id.desc())
+    )
+    _, names = await _candidates(key, season_of(_now()))
+    now = _now()
+    items = []
+    for row in rows:
+        day = row["issue_date"]
+        club_id = _s(row["club_id"])
+        items.append(
+            {
+                "id": int(row["id"]),
+                "club_id": club_id,
+                "club_name": names.get(club_id, club_id),
+                "invoice_no": _s(row["invoice_no"]),
+                "issue_date": day.isoformat() if day else None,
+                "amount": float(row["amount"] or 0),
+                "buyer_name": _s(row["buyer_name"]),
+                "file_name": _s(row["file_name"]),
+                "payment_status": PAY_PENDING if is_pending(row["payment_status"]) else PAY_PAID,
+                "deleted_at": row["deleted_at"].isoformat() if row["deleted_at"] else None,
+                "deleted_by": _s(row["deleted_by"]),
+                "days_left": trash_days_left(row["deleted_at"], now),
+            }
+        )
+    return {"items": items, "days": TRASH_DAYS}

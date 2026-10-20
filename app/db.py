@@ -4612,6 +4612,8 @@ with engine.connect() as _conn:
     _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS paid_day date"))
     _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS paid_by varchar"))
     _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS paid_at timestamptz"))
+    _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS deleted_at timestamptz"))
+    _conn.execute(text("ALTER TABLE province_invoice_items ADD COLUMN IF NOT EXISTS deleted_by varchar"))
     _conn.execute(text("ALTER TABLE admin_settings ADD COLUMN IF NOT EXISTS allow_dev_pushes boolean NOT NULL DEFAULT false"))
     _conn.execute(text("ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_id varchar"))
     _conn.execute(text("ALTER TABLE push_schedules ADD COLUMN IF NOT EXISTS dedupe_key varchar"))

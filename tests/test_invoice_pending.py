@@ -37,3 +37,13 @@ def test_pending_does_not_change_balance():
     assert base == C.balance(paid_in=0.0, paid_out=0.0, charged=250.0) == -250.0
     # po potwierdzeniu wpłata wchodzi do salda
     assert C.balance(paid_in=100.0, paid_out=0.0, charged=250.0) == -150.0
+
+
+def test_trash_days_left_counts_down_and_clamps():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 10, 20, tzinfo=timezone.utc)
+    assert I.trash_days_left(None, now) == I.TRASH_DAYS
+    assert I.trash_days_left(now, now) == 30
+    assert I.trash_days_left(now - timedelta(days=10), now) == 20
+    assert I.trash_days_left(now - timedelta(days=45), now) == 0
