@@ -416,7 +416,7 @@ async def _sync_tables_to_joomla(trigger: str) -> dict:
         if fingerprint == previous and latest and latest["filename"] == filename:
             status, changed, message = "unchanged", False, "Brak zmian w obsadach — bez publikacji"
         else:
-            response = _render_pdf(request, "stoliki_ligowe", "okreg_stoliki.html")
+            response = await asyncio.to_thread(_render_pdf, request, "stoliki_ligowe", "okreg_stoliki.html")
             pdf_path = Path(str(response.path))
             try:
                 public_url, deleted_files = await _upload_joomla(str(pdf_path), filename, fingerprint)
