@@ -820,6 +820,10 @@ def invalidate_caches() -> None:
     """Zmiana obsady/wyniku: zapomnij indeks sędziów i gotowe mapy."""
     _REF_INDEX.update(at=0.0, rows=[])
     _map_cache.clear()
+    _nodes_cache.update(at=0.0, index={})
+    from app.zprp_public import extras
+
+    extras._cache.clear()  # indeks hal, rekordy, strzelcy
 
 
 def _clean_ref_name(raw: str) -> str:

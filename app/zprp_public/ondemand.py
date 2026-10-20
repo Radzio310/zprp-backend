@@ -162,7 +162,8 @@ REFRESH_MIN_INTERVAL = float(os.getenv("ZPRP_PUBLIC_REFRESH_INTERVAL", "120"))
 _refreshed_at: dict[str, float] = {}
 _refresh_locks: dict[str, asyncio.Lock] = {}
 _OFFICIAL_COLS = ("referee_1_id", "referee_1_name", "referee_2_id", "referee_2_name", "scheduled_at",
-                  "venue_name", "venue_city", "score_home", "score_away")
+                  "venue_name", "venue_city", "score_home", "score_away", "home_team_id", "away_team_id",
+                  "home_club_id", "away_club_id", "home_team_name", "away_team_name")
 
 
 async def refresh_match(match_id: str, force: bool = False) -> dict[str, Any]:
