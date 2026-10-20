@@ -123,6 +123,18 @@ _PREFIX_ORDER = [
 ]
 
 
+def _by_text(fn):
+    """Czysta funkcja numeru meczu z pamięcią podręczną (te same numery wracają tysiące razy)."""
+    cached = functools.lru_cache(maxsize=65536)(fn)
+
+    @functools.wraps(fn)
+    def wrapper(code: Any):
+        return cached(code if isinstance(code, str) else str(code or ""))
+
+    return wrapper
+
+
+@_by_text
 def competition_prefix(code: Any) -> str:
     value = code_key(code)
     for prefix in _PREFIX_ORDER:
@@ -131,11 +143,13 @@ def competition_prefix(code: Any) -> str:
     return value.split("/")[0] if value else ""
 
 
+@_by_text
 def is_test_competition(code: Any) -> bool:
     """Mecze testowe ZPRP („test/1"). Bez odsiewu wchodza do kazdej statystyki."""
     return bool(re.match(r"^TEST(/|$)", code_key(code)))
 
 
+@_by_text
 def is_provincial_cup(code: Any) -> bool:
     """
     Prefiks wojewodztwa przed PM/PK lub PPM/PPK oznacza eliminacje PP.
@@ -143,12 +157,14 @@ def is_provincial_cup(code: Any) -> bool:
     return is_regional_cup_qualifier(code)
 
 
+@_by_text
 def is_cup_competition(code: Any) -> bool:
     """Puchar centralny rozpoznajemy po POCZATKU numeru, nie po prefiksie."""
     value = code_key(code)
     return value.startswith(("MP", "PP", "PM/", "PK/"))
 
 
+@_by_text
 def is_district_competition(code: Any) -> bool:
     """
     III liga i nizej.
@@ -161,11 +177,13 @@ def is_district_competition(code: Any) -> bool:
     )
 
 
+@_by_text
 def is_children_competition(code: Any) -> bool:
     """Rozgrywki dzieci (DzM/DzK) - turniej: stawka za mecz, dojazd raz."""
     return competition_prefix(code) in ("DZM", "DZK")
 
 
+@_by_text
 def is_regional_youth_competition(code: Any) -> bool:
     """
     Mlodzicy regionalni: czlon numeru „MłMR" / „MłKR" (takze z rocznikiem,
@@ -181,6 +199,7 @@ def is_regional_youth_competition(code: Any) -> bool:
     )
 
 
+@_by_text
 def shares_trip_travel(code: Any) -> bool:
     """
     Rozgrywki grane turniejowo - wiele meczow jednego dnia w jednej hali, na
@@ -199,6 +218,7 @@ def shares_trip_travel(code: Any) -> bool:
 CHILDREN_CATEGORY = "Dzieci"
 
 
+@_by_text
 def match_level(code: Any) -> str:
     """
     Szczebel meczu: "cup" | "district" | "central" | "unknown".
@@ -222,6 +242,7 @@ def match_level(code: Any) -> str:
     return "unknown"
 
 
+@_by_text
 def district_category(code: Any) -> str:
     prefix = competition_prefix(code)
     if prefix in ("MLM1213", "MLK1213"):
@@ -259,6 +280,7 @@ def central_category(code: Any) -> Optional[str]:
     return None
 
 
+@_by_text
 def category_label(code: Any) -> str:
     if is_provincial_cup(code):
         return "el. PP"
@@ -719,6 +741,7 @@ CENTRAL_KM_RATE_NEW = 0.8
 ROUND_TRIP = 2
 
 
+@_by_text
 def is_central_level_competition(code: Any) -> bool:
     """
     Kryterium to samo, ktorym BAZA odroznia „Okreg" od reszty. Eliminacje PP

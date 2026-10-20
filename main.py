@@ -1094,6 +1094,9 @@ async def _cleanup_loop():
 async def startup():
     await database.connect()
     _loop_lag.start()  # monitor opóźnienia pętli (GET /admin/loop-lag)
+    # Schemat OpenAPI liczy się kilka sekund czystego CPU - w wątku, żeby pierwsze
+    # wejście na /openapi.json nie zatrzymało pętli (potem leci z pamięci).
+    asyncio.ensure_future(asyncio.to_thread(app.openapi))
     # Wyszukiwarka publiczna: indeks sędziów i mapa miast budują się w tle.
     try:
         from app.zprp_public.portal import warm_search
