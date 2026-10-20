@@ -247,6 +247,9 @@ app.add_middleware(
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
+from app import loop_lag as _loop_lag
+app.add_middleware(_loop_lag.RequestNoteMiddleware)
+app.include_router(_loop_lag.make_router())
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.exception_handler(HTTPException)
@@ -1090,6 +1093,7 @@ async def _cleanup_loop():
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    _loop_lag.start()  # monitor opóźnienia pętli (GET /admin/loop-lag)
     # Wyszukiwarka publiczna: indeks sędziów i mapa miast budują się w tle.
     try:
         from app.zprp_public.portal import warm_search
