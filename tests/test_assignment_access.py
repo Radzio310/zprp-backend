@@ -54,6 +54,13 @@ def test_missing_button_hides_match_even_with_own_team():
     assert not access["manual"] and not access["recommended"]
 
 
+def test_old_snapshot_cannot_infer_permission_from_own_competition_prefix():
+    access = access_for({}, "S/JM/1", managed={"S"}, own={"S"}, own_team=True)
+    assert not access["manual"] and not access["recommended"]
+    assert access["editable_slots"] == [] and access["auto_slots"] == []
+    assert not access["hall"] and not access["date"]
+
+
 def test_drk_group_takes_precedence_also_for_second_league_code():
     data = state("IIK1/5")
     data["organizer_label"] = "Departament Rozgrywek Krajowych"

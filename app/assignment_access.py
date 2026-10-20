@@ -67,8 +67,8 @@ def access_for(state: Mapping[str, Any], code: str, *, managed=(), own=(),
     controls = state.get("assignment_controls")
     modern = isinstance(controls, dict)
     legacy_own = is_managed_by_province(code, managed) and not is_other_district(code, own)
-    # Stare migawki zachowują dotychczasowy zakres do następnego pełnego pobrania.
-    visible = controls.get("referees") is True if modern else legacy_own
+    # Sam prefiks starej migawki nie potwierdza przycisku ani prawa do obsady.
+    visible = controls.get("referees") is True if modern else False
     from app.zprp_accounts import normalize_province
     label = team_key(state.get("organizer_label"))
     central = league_level(code) == "central" or label == "departament rozgrywek krajowych"
@@ -91,8 +91,8 @@ def access_for(state: Mapping[str, Any], code: str, *, managed=(), own=(),
         "auto_slots": [s for s in editable if s in AUTO_SLOTS] if recommended else [],
         "own_team": bool(own_team),
         "recommended": bool(recommended),
-        "hall": controls.get("hall") is True if modern else True,
-        "date": controls.get("date") is True if modern else True,
+        "hall": controls.get("hall") is True if modern else False,
+        "date": controls.get("date") is True if modern else False,
         "source": "schedule" if modern else "legacy",
         "organizer": str(state.get("organizer_label") or ("DRK" if central else "")),
         "organizer_kind": "drk" if central else ("own" if own_organizer else "foreign"),
