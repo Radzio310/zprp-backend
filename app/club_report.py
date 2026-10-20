@@ -27,7 +27,7 @@ import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -36,6 +36,8 @@ from app import club_charges as C
 from app import club_report_rules as RR
 from app import province_club_budgets as CB
 from app.club_report_excel import build_report_workbook
+from app.province_panel_access import PANEL_SETTLEMENTS
+from app.province_panel_guard import panel_read_gate
 from app.settlement_money import money_sum
 from app.settlement_province import display
 from app.settlement_seasons import season_of
@@ -43,6 +45,10 @@ from app.settlement_seasons import season_of
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/province/club-report", tags=["province_clubs"])
+
+# Finanse klubów to dane prywatne okręgu - tylko dla osób z panelem Rozliczeń.
+# ZIP skleja wyłącznie pliki z tokenów wydanych za tą bramką.
+_READ = Depends(panel_read_gate(PANEL_SETTLEMENTS, "Raport finansów klubów"))
 
 #: Ile meczów i wpisów idzie w podglądzie jednego klubu - kartka na ekranie
 #: pokazuje początek, a resztę mówi liczbą.
@@ -267,7 +273,7 @@ async def categories():
 
 
 @router.post("/preview", summary="Kreator raportu: podgląd na żywo")
-async def preview(payload: PreviewRequest):
+async def preview(payload: PreviewRequest, _access: None = _READ):
     ctx = await _scope(payload)
     info = await _public_info([club["club_id"] for club in ctx["clubs"]])
 
@@ -401,7 +407,7 @@ def render_statement_html(context: dict) -> str:
 
 
 @router.post("/pdf", summary="Kreator raportu: wyciąg klubu (PDF)")
-async def statement_pdf(payload: PdfRequest):
+async def statement_pdf(payload: PdfRequest, _access: None = _READ):
     from app.province_settlement_pdf import _province_logo_b64, _to_pdf
 
     ctx = await _scope(payload.model_copy(update={"club_ids": [payload.club_id]}))
@@ -467,7 +473,7 @@ async def statements_zip(payload: ZipRequest):
 
 
 @router.post("/xlsx", summary="Kreator raportu: zeszyt Excela")
-async def statements_xlsx(payload: ReportFilter):
+async def statements_xlsx(payload: ReportFilter, _access: None = _READ):
     ctx = await _scope(payload)
     if not ctx["clubs"]:
         raise HTTPException(404, "W tym filtrze nie ma żadnego klubu.")
