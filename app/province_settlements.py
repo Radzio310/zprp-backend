@@ -54,6 +54,9 @@ from app.season_rules import season_label_short, season_start_year
 from app.settlement_club_scope import club_scope, club_scope_many
 from app.settlement_money import money_sum
 from app.deps import get_optional_jwt_payload
+from app.access_control import require_app_admin
+from app.province_panel_access import PANEL_SETTLEMENTS
+from app.province_panel_guard import ensure_panel_write, panel_read_gate
 
 logger = logging.getLogger(__name__)
 
@@ -928,7 +931,12 @@ async def list_modules():
 
 
 @router.put("/modules/{province}/{module}", summary="Włącz lub wyłącz moduł w okręgu")
-async def set_module(province: str, module: str, payload: ModuleToggleRequest):
+async def set_module(
+    province: str,
+    module: str,
+    payload: ModuleToggleRequest,
+    _admin: dict = Depends(require_app_admin),
+):
     if module not in MODULES:
         raise HTTPException(400, f"Nieznany moduł: {module}")
     key = require_province(province)
@@ -1013,6 +1021,7 @@ async def summary(
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
     period_id: Optional[str] = Query(None),
+    _access: None = Depends(panel_read_gate(PANEL_SETTLEMENTS, "Odczyt rozliczen okregu")),
 ):
     key = require_province(province)
     if not await module_enabled(key, "settlements"):
@@ -1204,6 +1213,7 @@ async def judges_detail(
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
     period_id: Optional[str] = Query(None),
+    _access: None = Depends(panel_read_gate(PANEL_SETTLEMENTS, "Odczyt rozliczen okregu")),
 ):
     """
     Każdy sędzia miesiąca w kształcie `/judge/{id}` - panel ściąga to raz, w tle,
@@ -1263,6 +1273,7 @@ async def judge_detail(
     include_future: bool = Query(False),
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
     period_id: Optional[str] = Query(None),
+    _access: None = Depends(panel_read_gate(PANEL_SETTLEMENTS, "Odczyt rozliczen okregu")),
 ):
     key = require_province(province)
     data = await cached_settlement(
@@ -1290,6 +1301,7 @@ async def travel(
     include_zprp: bool = Query(False, description="Dolicz obsady rozliczane przez ZPRP"),
     judge_ids: Optional[str] = Query(None, description="Numery sędziów po przecinku"),
     period_id: Optional[str] = Query(None),
+    _access: None = Depends(panel_read_gate(PANEL_SETTLEMENTS, "Odczyt przejazdow okregu")),
 ):
     key = require_province(province)
     ids = [x.strip() for x in (judge_ids or "").split(",") if x.strip()] or None
@@ -1772,6 +1784,7 @@ async def months(
         False,
         description="Dolicz mecze, które płaci klub bezpośrednio (aplikacja sędziego)",
     ),
+    payload: Optional[dict] = Depends(get_optional_jwt_payload),
 ):
     """
     Kwoty kazdego miesiaca, w ktorym cos jest - do mapy ciepla w wyborze okresu.
@@ -1790,6 +1803,15 @@ async def months(
     a ekran pod nim 0,00 zl.
     """
     key = require_province(province)
+    if judge_id:
+        await _stats_viewer_may(key, str(judge_id).strip(), payload)
+    else:
+        await ensure_panel_write(
+            payload,
+            province=key,
+            panel=PANEL_SETTLEMENTS,
+            action="Odczyt miesiecy rozliczeniowych okregu",
+        )
     if not await module_enabled(key, "settlements"):
         raise HTTPException(403, "Moduł Rozliczeń nie jest włączony w tym okręgu")
 

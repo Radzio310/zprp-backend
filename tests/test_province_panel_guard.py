@@ -127,10 +127,10 @@ def org(login="ksdzpr"):
 
 
 class TestBramki:
-    async def test_bez_tokenu_przechodzi_z_sladem_w_logu(self, lookup, caplog):
-        with caplog.at_level(logging.WARNING):
+    async def test_bez_tokenu_jest_odrzucony(self, lookup):
+        with pytest.raises(HTTPException) as err:
             await G.ensure_panel_write(None, province="ŚLĄSKIE", panel=PANEL_SETTLEMENTS, action="Zapis")
-        assert "zapis bez tokenu" in caplog.text
+        assert err.value.status_code == 401
 
     async def test_tryb_scisly_zamyka_furtke(self, lookup, monkeypatch):
         monkeypatch.setenv(STRICT_ENV, "1")
@@ -206,9 +206,9 @@ class TestRoutera:
         bad = client(org("obcy")).delete("/panel/entries/5", params={"province": "ŚLĄSKIE"})
         assert bad.status_code == 403
 
-    def test_bez_tokenu_przechodzi_w_okresie_przejsciowym(self, lookup):
+    def test_bez_tokenu_jest_odrzucony(self, lookup):
         response = client(None).post("/panel/entries", json={"province": "ŚLĄSKIE"})
-        assert response.status_code == 200
+        assert response.status_code == 401
 
 
 APP_DIR = pathlib.Path(__file__).resolve().parents[1] / "app"

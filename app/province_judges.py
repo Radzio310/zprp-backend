@@ -9,6 +9,9 @@ from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import database, province_judges, province_settlement_judges
+from app.deps import get_jwt_payload
+from app.province_panel_access import PANEL_PROVINCE_JUDGES
+from app.province_panel_guard import ensure_panel_write
 from app.settlement_province import display, spellings
 from app.schemas import (
     CreateProvinceJudgeRequest,
@@ -60,6 +63,21 @@ def _row_to_item(row) -> ProvinceJudgeItem:
     if d.get("badges") is None:
         d["badges"] = {}
     return ProvinceJudgeItem(**d)
+
+
+async def _require_write(payload: dict, province: str, action: str) -> None:
+    await ensure_panel_write(
+        payload,
+        province=province,
+        panel=PANEL_PROVINCE_JUDGES,
+        action=action,
+    )
+
+
+async def _existing(judge_id: str):
+    return await database.fetch_one(
+        select(province_judges).where(province_judges.c.judge_id == judge_id)
+    )
 
 
 async def _backfill_settlement_judges(province: str) -> None:
@@ -115,7 +133,10 @@ async def _backfill_settlement_judges(province: str) -> None:
 
 
 @router.post("/", response_model=dict, summary="Upsert sędziego w tabeli province_judges")
-async def upsert_province_judge(req: CreateProvinceJudgeRequest):
+async def upsert_province_judge(
+    req: CreateProvinceJudgeRequest,
+    payload: dict = Depends(get_jwt_payload),
+):
     """
     Upsert:
     - judge_id = PK
@@ -125,6 +146,10 @@ async def upsert_province_judge(req: CreateProvinceJudgeRequest):
     """
     now = datetime.now(timezone.utc)
     prov = _norm_province(req.province)
+    existing = await _existing(str(req.judge_id))
+    if existing:
+        await _require_write(payload, str(existing["province"]), "Edycja sedziego wojewodzkiego")
+    await _require_write(payload, prov, "Edycja sedziego wojewodzkiego")
     badges = _badges_or_default(req.badges)
     photo_url = _photo_or_none(getattr(req, "photo_url", None))
 
@@ -193,12 +218,18 @@ async def get_province_judge(judge_id: str):
 
 
 @router.patch("/{judge_id}", response_model=ProvinceJudgeItem, summary="Częściowa edycja sędziego (province_judges)")
-async def patch_province_judge(judge_id: str, body: UpdateProvinceJudgeRequest):
-    existing = await database.fetch_one(
-        select(province_judges).where(province_judges.c.judge_id == judge_id)
-    )
+async def patch_province_judge(
+    judge_id: str,
+    body: UpdateProvinceJudgeRequest,
+    payload: dict = Depends(get_jwt_payload),
+):
+    existing = await _existing(judge_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Nie znaleziono sędziego")
+
+    await _require_write(payload, str(existing["province"]), "Edycja sedziego wojewodzkiego")
+    if body.province is not None:
+        await _require_write(payload, body.province, "Przeniesienie sedziego do wojewodztwa")
 
     update_data = {}
     if body.full_name is not None:
@@ -231,9 +262,17 @@ async def patch_province_judge(judge_id: str, body: UpdateProvinceJudgeRequest):
 
 
 @router.put("/{judge_id}", response_model=ProvinceJudgeItem, summary="Upsert sędziego po judge_id (province_judges)")
-async def put_province_judge(judge_id: str, req: CreateProvinceJudgeRequest):
+async def put_province_judge(
+    judge_id: str,
+    req: CreateProvinceJudgeRequest,
+    payload: dict = Depends(get_jwt_payload),
+):
     now = datetime.now(timezone.utc)
     prov = _norm_province(req.province)
+    existing = await _existing(judge_id)
+    if existing:
+        await _require_write(payload, str(existing["province"]), "Edycja sedziego wojewodzkiego")
+    await _require_write(payload, prov, "Edycja sedziego wojewodzkiego")
     badges = _badges_or_default(req.badges)
     photo_url = _photo_or_none(getattr(req, "photo_url", None))
 
@@ -271,7 +310,14 @@ async def put_province_judge(judge_id: str, req: CreateProvinceJudgeRequest):
 
 
 @router.delete("/{judge_id}", response_model=dict, summary="Usuń sędziego (province_judges)")
-async def delete_province_judge(judge_id: str):
+async def delete_province_judge(
+    judge_id: str,
+    payload: dict = Depends(get_jwt_payload),
+):
+    existing = await _existing(judge_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Nie znaleziono sedziego")
+    await _require_write(payload, str(existing["province"]), "Usuniecie sedziego wojewodzkiego")
     await database.execute(
         province_judges.delete().where(province_judges.c.judge_id == judge_id)
     )

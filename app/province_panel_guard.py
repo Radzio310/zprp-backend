@@ -1,39 +1,18 @@
-"""
-Bramka zapisów w panelach okręgu z BAZA_web: panel klubów i Obsada.
-
-Do 18.09.2026 trasy zapisu pod `/province/clubs` i `/province/assignment` nie
-sprawdzały NIC - kto znał adres API, zmieniał wpłaty i salda klubów, rozliczanie
-przez okręg i deklaracje obsadowe. Reguła (kto może) siedzi w liściu
-`province_panel_access`; tutaj tylko czytamy bazę i pilnujemy tras.
-
-OKRES PRZEJŚCIOWY - ten sam, co w `province_guard`:
-  - żądanie Z tokenem jest sprawdzane zawsze i bez ulgi,
-  - żądanie BEZ tokenu przechodzi i zostawia ostrzeżenie w logu,
-  - `PROVINCE_WRITE_STRICT=1` na Railway zamyka tę furtkę (wystarczy restart).
-BAZA_web wysyła od tej wersji token przy każdym zapisie, więc po jej wdrożeniu
-w logu nie powinno zostać żadne ostrzeżenie - to znak, że można domknąć.
-
-BRAMKA NA CAŁYM ROUTERZE, nie przy każdej trasie: `panel_write_gate` przepuszcza
-odczyty (GET, HEAD, OPTIONS), a każdą inną metodę sprawdza. Dzięki temu nowa
-trasa zapisu nie może o bramce zapomnieć. Okręg bierze z parametru `province`
-w adresie albo z pola `province` w treści JSON - tak samo, jak trasy przekazują
-go do `require_province`. Formularzy z plikiem nie rozbieramy: import Excela
-ma okręg w adresie.
-"""
+"""Server-side authorization gates for BAZA_web district panels."""
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Callable, Optional, Tuple
 
 from fastapi import Depends, HTTPException, Request, status
 
-from app.deps import get_optional_jwt_payload
-from app.province_access import normalize_province
-from app.province_guard import strict_mode
-from app.province_panel_access import VipRecord, panel_write_refusal, vip_permissions
-
-log = logging.getLogger(__name__)
+from app.deps import get_jwt_payload, get_optional_jwt_payload
+from app.province_panel_access import (
+    VipRecord,
+    choose_vip_row,
+    panel_write_refusal,
+    vip_permissions,
+)
 
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -43,9 +22,7 @@ def _s(value: Any) -> str:
 
 
 async def _lookup(payload: dict) -> Tuple[bool, Optional[VipRecord]]:
-    """(czy sędzia z tokenu jest adminem, rekord VIP konta z tokenu)."""
-    # Import w środku: `app.db` łączy się z bazą przy imporcie, a testy
-    # podmieniają tę funkcję, żeby sprawdzić samą bramkę.
+    """Return (is application admin, matching organization VIP record)."""
     from sqlalchemy import func, select
 
     from app.admin_alerts import admin_judge_ids
@@ -66,9 +43,7 @@ async def _lookup(payload: dict) -> Tuple[bool, Optional[VipRecord]]:
     )
     if not rows:
         return False, None
-    # Login bywa wpisany raz małymi, raz wielkimi literami - dokładne trafienie
-    # wygrywa, a gdy go nie ma, bierzemy jedyny rekord tej samej nazwy.
-    row = next((item for item in rows if _s(item["username"]) == login), rows[0])
+    row = choose_vip_row(rows, login)
     return False, VipRecord(
         username=_s(row["username"]),
         province=_s(row["province"]),
@@ -83,22 +58,12 @@ async def ensure_panel_write(
     panel: str,
     action: str,
 ) -> None:
-    """Wpuszcza albo odmawia z powodem. Nic nie zwraca - liczy się to, czy rzuci."""
+    """Authorize one panel operation or raise a clear 401/403 response."""
     if payload is None:
-        if strict_mode():
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"{action} wymaga zalogowania. Zaloguj się ponownie i spróbuj jeszcze raz.",
-            )
-        # Okres przejściowy: przepuszczamy, ale zostawiamy ślad. Po tych wpisach
-        # widać, czy ktoś jeszcze pisze bez tokenu i czy można domknąć bramkę.
-        log.warning(
-            "[province_panel_guard] zapis bez tokenu: action=%s panel=%s province=%s",
-            action,
-            panel,
-            normalize_province(province),
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"{action} wymaga zalogowania. Zaloguj sie ponownie i sprobuj jeszcze raz.",
         )
-        return
 
     is_admin, vip = await _lookup(payload)
     reason = panel_write_refusal(
@@ -115,23 +80,24 @@ async def ensure_panel_write(
 
 
 async def _request_province(request: Request) -> str:
-    """Okręg z adresu, a gdy go tam nie ma - z pola `province` w treści JSON."""
+    """Read province from query/path parameters or a JSON request body."""
     province = _s(request.query_params.get("province"))
+    if province:
+        return province
+    province = _s(request.path_params.get("province"))
     if province:
         return province
     if "application/json" not in (request.headers.get("content-type") or "").lower():
         return ""
     try:
-        # FastAPI czyta treść PRZED zależnościami, więc to odczyt z pamięci,
-        # a trasa i tak dostanie swój model bez ponownego czytania strumienia.
         body = await request.json()
-    except Exception:  # noqa: BLE001 - zła treść odrzuci już sama trasa
+    except Exception:  # noqa: BLE001
         return ""
     return _s(body.get("province")) if isinstance(body, dict) else ""
 
 
 def panel_write_gate(panel: str, action: str) -> Callable:
-    """Zależność dla CAŁEGO routera panelu: odczyty wolne, zapisy przez bramkę."""
+    """Router dependency: public reads, authenticated and authorized writes."""
 
     async def gate(
         request: Request,
@@ -139,6 +105,23 @@ def panel_write_gate(panel: str, action: str) -> Callable:
     ) -> None:
         if request.method.upper() in READ_METHODS:
             return
+        await ensure_panel_write(
+            payload,
+            province=await _request_province(request),
+            panel=panel,
+            action=action,
+        )
+
+    return gate
+
+
+def panel_read_gate(panel: str, action: str) -> Callable:
+    """Dependency for reads of private, district-wide data."""
+
+    async def gate(
+        request: Request,
+        payload: dict = Depends(get_jwt_payload),
+    ) -> None:
         await ensure_panel_write(
             payload,
             province=await _request_province(request),

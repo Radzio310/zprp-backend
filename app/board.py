@@ -46,6 +46,7 @@ from app.db import (
     province_judges,
 )
 from app.deps import get_jwt_payload
+from app.province_panel_access import choose_vip_row, vip_covers_province
 from app.settlement_province import canonical, display, spellings
 
 logger = logging.getLogger(__name__)
@@ -134,15 +135,19 @@ async def _actor(payload: dict) -> B.Actor:
 async def _verdict(actor: B.Actor, province: str) -> Dict[str, Any]:
     prov = _norm_province(province)
     if actor.is_org:
-        row = await database.fetch_one(
-            select(baza_vips.c.province, baza_vips.c.permissions_json).where(
-                baza_vips.c.username == actor.key[len("org:"):]
+        login = actor.key[len("org:"):]
+        rows = await database.fetch_all(
+            select(baza_vips.c.username, baza_vips.c.province, baza_vips.c.permissions_json).where(
+                func.lower(baza_vips.c.username) == login.lower()
             )
         )
+        row = choose_vip_row(rows, login)
         return B.resolve_access(
             is_org=True,
             is_judge=False,
-            vip_same_province=bool(row and canonical(row["province"]) and canonical(row["province"]) == canonical(prov)),
+            vip_same_province=bool(
+                row and vip_covers_province(row["province"], row["permissions_json"], prov)
+            ),
             vip_permissions_raw=row["permissions_json"] if row else None,
         )
     if actor.judge_id in await admin_judge_ids():

@@ -16,9 +16,10 @@ from app.deps import get_settings, Settings
 
 # VIP DB (u Ciebie już istnieje)
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import func, select
 from app.db import database, baza_vips
 from app.vip_tabs import compute_tab_access
+from app.province_panel_access import choose_vip_row
 
 router = APIRouter(prefix="/baza_web", tags=["BAZA Web"])
 
@@ -446,7 +447,10 @@ async def _vip_upsert_from_login(
 
     now = datetime.utcnow()
 
-    row = await database.fetch_one(select(baza_vips).where(baza_vips.c.username == u))
+    rows = await database.fetch_all(
+        select(baza_vips).where(func.lower(baza_vips.c.username) == u.lower())
+    )
+    row = choose_vip_row(rows, u)
     if not row:
         ins = {
             "username": u,
@@ -471,9 +475,9 @@ async def _vip_upsert_from_login(
         upd["login_info_json"] = login_info_json or {}
 
     await database.execute(
-        baza_vips.update().where(baza_vips.c.username == u).values(**upd)
+        baza_vips.update().where(baza_vips.c.id == row["id"]).values(**upd)
     )
-    row2 = await database.fetch_one(select(baza_vips).where(baza_vips.c.username == u))
+    row2 = await database.fetch_one(select(baza_vips).where(baza_vips.c.id == row["id"]))
     return False, dict(row2) if row2 else None
 
 

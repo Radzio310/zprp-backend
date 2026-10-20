@@ -2,11 +2,14 @@ import json
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.sql import and_
 
 from app.db import database, baza_vips
+from app.access_control import require_app_admin
+from app.deps import get_jwt_payload
+from app.province_panel_access import choose_vip_row
 from app.vip_tabs import tab_access_from_login_info, tabs_meta
 from app.schemas import (
     BazaVipUpsertRequest,
@@ -22,6 +25,17 @@ router = APIRouter(prefix="/baza_vips", tags=["baza_vips"])
 
 def _norm_username(u: str) -> str:
     return (u or "").strip()
+
+
+async def _find_vip(username: str):
+    """Case-insensitive lookup that still prefers the exact stored spelling."""
+    value = _norm_username(username)
+    if not value:
+        return None
+    rows = await database.fetch_all(
+        select(baza_vips).where(func.lower(baza_vips.c.username) == value.lower())
+    )
+    return choose_vip_row(rows, value)
 
 
 def _merge_login_info(previous: Any, incoming: Any) -> dict:
@@ -66,7 +80,10 @@ async def get_tabs_meta():
 
 
 @router.post("/upsert_from_login", response_model=BazaVipUpsertResponse)
-async def upsert_from_login(payload: BazaVipUpsertRequest):
+async def upsert_from_login(
+    payload: BazaVipUpsertRequest,
+    jwt: dict = Depends(get_jwt_payload),
+):
     """
     Tworzy rekord VIP jeśli nie istnieje (permissions_json = {}).
     Jeśli istnieje: aktualizuje last_login_at, opcjonalnie judge_id/province/login_info_json.
@@ -78,13 +95,16 @@ async def upsert_from_login(payload: BazaVipUpsertRequest):
     username = _norm_username(payload.username)
     if not username:
         raise HTTPException(status_code=400, detail="username is required")
+    if (
+        str(jwt.get("account_type") or "").strip().lower() != "org"
+        or str(jwt.get("sub") or "").strip().casefold() != username.casefold()
+    ):
+        raise HTTPException(status_code=403, detail="Mozesz odswiezyc tylko wlasny rekord VIP")
 
     now = datetime.utcnow()
 
     # 1) czy istnieje?
-    row = await database.fetch_one(
-        select(baza_vips).where(baza_vips.c.username == username)
-    )
+    row = await _find_vip(username)
 
     if not row:
         created = True
@@ -126,13 +146,11 @@ async def upsert_from_login(payload: BazaVipUpsertRequest):
 
         await database.execute(
             baza_vips.update()
-            .where(baza_vips.c.username == username)
+            .where(baza_vips.c.id == row["id"])
             .values(**update_values)
         )
 
-        row = await database.fetch_one(
-            select(baza_vips).where(baza_vips.c.username == username)
-        )
+        row = await database.fetch_one(select(baza_vips).where(baza_vips.c.id == row["id"]))
 
     if not row:
         return BazaVipUpsertResponse(success=False, created=False, record=None)
@@ -145,15 +163,16 @@ async def upsert_from_login(payload: BazaVipUpsertRequest):
 
 
 @router.post("/", response_model=BazaVipItem, status_code=status.HTTP_201_CREATED)
-async def create_vip(payload: BazaVipCreateRequest):
+async def create_vip(
+    payload: BazaVipCreateRequest,
+    _admin: dict = Depends(require_app_admin),
+):
     """Tworzy nowego VIP-a bez udawania logowania użytkownika."""
     username = _norm_username(payload.username)
     if not username:
         raise HTTPException(status_code=400, detail="username is required")
 
-    existing = await database.fetch_one(
-        select(baza_vips).where(baza_vips.c.username == username)
-    )
+    existing = await _find_vip(username)
     if existing:
         raise HTTPException(status_code=409, detail="VIP user already exists")
 
@@ -178,14 +197,12 @@ async def create_vip(payload: BazaVipCreateRequest):
 
 
 @router.get("/{username}", response_model=BazaVipItem)
-async def get_vip(username: str):
+async def get_vip(username: str, _admin: dict = Depends(require_app_admin)):
     username = _norm_username(username)
     if not username:
         raise HTTPException(status_code=400, detail="username is required")
 
-    row = await database.fetch_one(
-        select(baza_vips).where(baza_vips.c.username == username)
-    )
+    row = await _find_vip(username)
     if not row:
         raise HTTPException(status_code=404, detail="VIP user not found")
 
@@ -193,7 +210,11 @@ async def get_vip(username: str):
 
 
 @router.patch("/{username}", response_model=BazaVipItem)
-async def update_vip(username: str, payload: BazaVipUpdateRequest):
+async def update_vip(
+    username: str,
+    payload: BazaVipUpdateRequest,
+    _admin: dict = Depends(require_app_admin),
+):
     """
     Endpoint do ustawienia province i permissions_json (np. panel/admin).
     Uwaga: tu docelowo dodaj autoryzację (JWT/admin).
@@ -202,9 +223,7 @@ async def update_vip(username: str, payload: BazaVipUpdateRequest):
     if not username:
         raise HTTPException(status_code=400, detail="username is required")
 
-    row = await database.fetch_one(
-        select(baza_vips).where(baza_vips.c.username == username)
-    )
+    row = await _find_vip(username)
     if not row:
         raise HTTPException(status_code=404, detail="VIP user not found")
 
@@ -232,30 +251,29 @@ async def update_vip(username: str, payload: BazaVipUpdateRequest):
 
     await database.execute(
         baza_vips.update()
-        .where(baza_vips.c.username == username)
+        .where(baza_vips.c.id == row["id"])
         .values(**update_values)
     )
 
-    row2 = await database.fetch_one(
-        select(baza_vips).where(baza_vips.c.username == username)
-    )
+    row2 = await database.fetch_one(select(baza_vips).where(baza_vips.c.id == row["id"]))
     return _item(row2)
 
 
 @router.delete("/{username}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_vip(username: str) -> Response:
+async def delete_vip(
+    username: str,
+    _admin: dict = Depends(require_app_admin),
+) -> Response:
     username = _norm_username(username)
     if not username:
         raise HTTPException(status_code=400, detail="username is required")
 
-    row = await database.fetch_one(
-        select(baza_vips).where(baza_vips.c.username == username)
-    )
+    row = await _find_vip(username)
     if not row:
         raise HTTPException(status_code=404, detail="VIP user not found")
 
     await database.execute(
-        baza_vips.delete().where(baza_vips.c.username == username)
+        baza_vips.delete().where(baza_vips.c.id == row["id"])
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -265,6 +283,7 @@ async def list_vips(
     q: Optional[str] = Query(None, description="opcjonalny filtr po username (contains)"),
     province: Optional[str] = Query(None, description="opcjonalny filtr po province (exact)"),
     limit: int = Query(200, ge=1, le=2000),
+    _admin: dict = Depends(require_app_admin),
 ):
     """
     Prosta lista (do panelu). Docelowo: autoryzacja.

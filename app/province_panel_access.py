@@ -36,11 +36,13 @@ from app.province_access import normalize_province
 
 PANEL_SETTLEMENTS = "settlements"
 PANEL_ASSIGNMENTS = "assignments"
+PANEL_PROVINCE_JUDGES = "province_judges"
 
 #: Nazwa uprawnienia tak, jak widzi ją administrator w panelu kont VIP.
 PANEL_LABELS = {
     PANEL_SETTLEMENTS: "Rozliczenia",
     PANEL_ASSIGNMENTS: "Obsada",
+    PANEL_PROVINCE_JUDGES: "Sedziowie wojewodzcy",
 }
 
 NO_PROVINCE = "Żądanie nie wskazuje okręgu, więc nie da się sprawdzić uprawnień."
@@ -64,6 +66,25 @@ def vip_permissions(raw: Any) -> Dict[str, Any]:
         except ValueError:
             return {}
     return dict(raw) if isinstance(raw, dict) else {}
+
+
+def choose_vip_row(rows: Any, login: str):
+    """Pick the safest record when historical case-only duplicates exist.
+
+    A record with assigned permissions wins over an empty auto-created record;
+    exact username spelling is only the tie breaker.
+    """
+    items = list(rows or [])
+    if not items:
+        return None
+
+    def score(row: Any) -> tuple[bool, bool]:
+        return (
+            bool(vip_permissions(row["permissions_json"])),
+            str(row["username"] or "") == str(login or ""),
+        )
+
+    return max(items, key=score)
 
 
 def vip_has_panel(permissions: Any, panel: str) -> bool:

@@ -38,6 +38,7 @@ from app.db import (
 )
 from app.deps import get_jwt_payload
 from app.province_access import normalize_province
+from app.province_panel_access import choose_vip_row, vip_covers_province
 
 router = APIRouter(prefix="/delegate-evaluations", tags=["Delegate evaluations"])
 admin_router = APIRouter(
@@ -101,16 +102,18 @@ async def _access(judge_id: str, province: str, surface: str = "") -> Dict[str, 
     i konta VIP z uprawnieniem, a dostęp nadany sędziemu zostaje dla aplikacji.
     """
     if judge_id.startswith("org:"):
-        row = await database.fetch_one(
-            select(baza_vips.c.province, baza_vips.c.permissions_json).where(
-                baza_vips.c.username == judge_id[4:]
+        login = judge_id[4:]
+        rows = await database.fetch_all(
+            select(baza_vips.c.username, baza_vips.c.province, baza_vips.c.permissions_json).where(
+                func.lower(baza_vips.c.username) == login.lower()
             )
         )
+        row = choose_vip_row(rows, login)
         return resolve_access(
             surface=surface,
             is_org=True,
             same_province=bool(
-                row and normalize_province(row["province"]) == normalize_province(province)
+                row and vip_covers_province(row["province"], row["permissions_json"], province)
             ),
             permissions=row["permissions_json"] if row else None,
         )
