@@ -793,12 +793,85 @@ async def obsada_match_form(
         from app.assignment_grades import remember_grades
 
         await remember_grades(parsed)
+        # Prawa tego konta do tego meczu - kolejne otwarcie zna je od razu.
+        from app import assignment_rights as rights_store
+
+        if parsed.get("IdZawody") == str(payload.IdZawody):
+            rights = rights_store.compact(parsed)
+            await rights_store.remember(rights_store.account_key(user_plain, pass_plain), str(payload.IdZawody), rights)
 
         return {
             "fetched_at": _now_iso(),
             "base_url": settings.ZPRP_BASE_URL,
             **parsed,
         }
+
+
+class ObsadaRightsRequest(BaseModel):
+    username: str       # RSA-encrypted
+    password: str       # RSA-encrypted
+    judge_id: Optional[str] = None
+    match_ids: List[str] = []
+
+
+def _rights_account(payload: "ObsadaRightsRequest", keys) -> Tuple[str, str, str]:
+    from app import assignment_rights as rights_store
+
+    private_key, _ = keys
+    try:
+        user_plain = _decrypt_field(private_key, payload.username)
+        pass_plain = _decrypt_field(private_key, payload.password)
+    except Exception as e:
+        raise HTTPException(400, f"Decryption error: {e}")
+    return user_plain, pass_plain, rights_store.account_key(user_plain, pass_plain)
+
+
+@router.post("/zprp/obsada/rights")
+async def obsada_rights(payload: ObsadaRightsRequest, keys=Depends(get_rsa_keys)):
+    """
+    Zapamiętane prawa konta do formularzy meczów - BEZ kontaktu z ZPRP.
+    Odpowiada od razu; mecz bez wpisu po prostu go nie ma. `fresh` mówi, które
+    odczyty są młodsze niż TTL (reszta jest do odświeżenia w tle).
+    """
+    from app import assignment_rights as rights_store
+
+    _, _, account = _rights_account(payload, keys)
+    stored = await rights_store.recall_many(account, payload.match_ids[:400])
+    return {"rights": {mid: rights_store.public_view(item) for mid, item in stored.items()},
+            "fresh_seconds": rights_store.FRESH_SECONDS}
+
+
+@router.post("/zprp/obsada/rights/warm")
+async def obsada_rights_warm(
+    payload: ObsadaRightsRequest,
+    settings: Settings = Depends(get_settings),
+    keys=Depends(get_rsa_keys),
+):
+    """
+    Rozgrzewanie w tle: jedno logowanie, potem odczyt formularzy meczów bez
+    świeżych praw (kolejność z żądania, po dwa naraz, najwyżej 8 meczów).
+    Wyłącznie odczyt - żadnej akcji zapisu.
+    """
+    from app import assignment_rights as rights_store
+
+    user_plain, pass_plain, account = _rights_account(payload, keys)
+    ids = [m for m in dict.fromkeys(str(x) for x in payload.match_ids) if m][: rights_store.WARM_MAX_IDS]
+    known = await rights_store.recall_many(account, ids, rights_store.FRESH_SECONDS)
+    if all(mid in known for mid in ids):
+        return {"busy": False, "failed": [], "skipped": [],
+                "rights": {m: rights_store.public_view(r) for m, r in known.items()}}
+    async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=30.0) as client:
+        cookies = await _login_zprp(client, user_plain, pass_plain)
+
+        async def read(mid: str):
+            _, html = await fetch_with_correct_encoding(
+                client, "/zawody_UstawSedziow.php", method="POST", cookies=cookies,
+                data={"IdZawody": mid, "akcja": "UstawSedziow", "user": ""})
+            return _parse_referee_form(html)
+
+        done = await rights_store.warm(account, ids, read)
+    done["rights"] = {m: rights_store.public_view(r) for m, r in done["rights"].items()}
+    return done
 
 
 @router.post("/zprp/obsada/match-form-filtered")

@@ -1077,6 +1077,18 @@ zprp_judge_grades = Table(
     ),
 )
 
+# Prawa do formularza obsady per (konto ZPRP, mecz) - ostatni odczyt, po którym
+# panel od razu zna gniazda. Klucz konta to skrót loginu; zapis w ZPRP dalej
+# czyta formularz na żywo. Patrz `app/assignment_rights.py`.
+assignment_form_rights = Table(
+    "assignment_form_rights",
+    metadata,
+    Column("account_key", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("rights", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("read_at", DateTime(timezone=True), nullable=False, index=True),
+)
+
 # Mecze, które obsadowy układa RĘCZNIE - automat ich nie rusza.
 province_match_manual = Table(
     "province_match_manual",
