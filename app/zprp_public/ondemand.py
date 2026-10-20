@@ -155,3 +155,71 @@ async def ensure_details(match: Any) -> bool:
     finally:
         if not lock.locked():
             _locks.pop(match_id, None)
+
+
+# --- Odświeżenie meczu na żądanie (wejście na stronę meczu / profil sędziego) ---
+REFRESH_MIN_INTERVAL = float(os.getenv("ZPRP_PUBLIC_REFRESH_INTERVAL", "120"))
+_refreshed_at: dict[str, float] = {}
+_refresh_locks: dict[str, asyncio.Lock] = {}
+_OFFICIAL_COLS = ("referee_1_id", "referee_1_name", "referee_2_id", "referee_2_name", "scheduled_at",
+                  "venue_name", "venue_city", "score_home", "score_away")
+
+
+async def refresh_match(match_id: str, force: bool = False) -> dict[str, Any]:
+    """Pobiera mecz z ZPRP (nie częściej niż co REFRESH_MIN_INTERVAL). Nigdy nie rzuca:
+    błąd/timeout = stan z bazy. Zwraca {refreshed, changed, throttled, error}."""
+    from sqlalchemy import select
+    from app.db import database, zprp_public_matches as M
+
+    match_id = str(match_id)
+    now = time.monotonic()
+    last = _refreshed_at.get(match_id)
+    if not force and last is not None and now - last < REFRESH_MIN_INTERVAL:
+        return {"refreshed": False, "changed": False, "throttled": True}
+    lock = _refresh_locks.setdefault(match_id, asyncio.Lock())
+    if lock.locked():
+        # drugie wejście czeka na to samo pobranie zamiast robić własne
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=10)
+            lock.release()
+        except asyncio.TimeoutError:
+            pass
+        return {"refreshed": False, "changed": False, "throttled": True}
+    try:
+        async with lock:
+            before = await database.fetch_one(select(M).where(M.c.match_id == match_id))
+            if not before:
+                return {"refreshed": False, "changed": False, "throttled": False}
+            async with _slots:
+                from app.zprp_public.sync import Counters, _sync_match_details
+
+                counters = Counters()
+                await asyncio.wait_for(
+                    _sync_match_details(_get_client(), match_id, counters),
+                    timeout=float(os.getenv("ZPRP_PUBLIC_REFRESH_TIMEOUT", "8")),
+                )
+            if not counters.get("match_details"):
+                _refreshed_at[match_id] = now - REFRESH_MIN_INTERVAL + 20  # krótka blokada po pustej odpowiedzi
+                return {"refreshed": False, "changed": False, "throttled": False}
+            _refreshed_at[match_id] = time.monotonic()
+            if len(_refreshed_at) > 5000:
+                cutoff = time.monotonic() - REFRESH_MIN_INTERVAL
+                for k in [k for k, v in _refreshed_at.items() if v < cutoff]:
+                    _refreshed_at.pop(k, None)
+            after = await database.fetch_one(select(M).where(M.c.match_id == match_id))
+            changed = bool(after) and any(before[c] != after[c] for c in _OFFICIAL_COLS)
+            if changed:
+                try:
+                    from app.zprp_public import portal
+
+                    portal.invalidate_caches()
+                except Exception:  # pragma: no cover
+                    log.exception("[zprp_public] invalidate_caches")
+            return {"refreshed": True, "changed": changed, "throttled": False}
+    except Exception as exc:
+        _refreshed_at[match_id] = time.monotonic() - REFRESH_MIN_INTERVAL + 20
+        log.warning("[zprp_public] refresh %s: %r", match_id, exc)
+        return {"refreshed": False, "changed": False, "throttled": False, "error": True}
+    finally:
+        if not lock.locked():
+            _refresh_locks.pop(match_id, None)

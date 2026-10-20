@@ -784,6 +784,23 @@ async def round_review(competition_id: str, round: str) -> dict[str, Any]:  # no
 # ---------------------------------------------------------------------------
 
 
+@router.post("/referees/{referee_id}/refresh")
+async def referee_refresh(referee_id: str) -> dict[str, Any]:
+    """Odświeża z ZPRP najbliższe mecze sędziego (maks. 10; limit 2 min na mecz w refresh_match)."""
+    from datetime import datetime, timedelta, timezone
+    from app.zprp_public.ondemand import refresh_match
+
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    rows = await database.fetch_all(
+        select(M.c.match_id)
+        .where(and_(or_(M.c.referee_1_id == referee_id, M.c.referee_2_id == referee_id), M.c.scheduled_at >= since))
+        .order_by(M.c.scheduled_at.asc()).limit(10)
+    )
+    results = await asyncio.gather(*(refresh_match(r["match_id"]) for r in rows))
+    return {"checked": len(results), "refreshed": sum(1 for r in results if r["refreshed"]),
+            "changed": any(r["changed"] for r in results)}
+
+
 @router.get("/referees/{referee_id}")
 async def referee_profile(referee_id: str, limit: int = Query(100, ge=1, le=300)) -> dict[str, Any]:
     rows = await database.fetch_all(

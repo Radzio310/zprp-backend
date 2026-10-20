@@ -620,6 +620,17 @@ async def player_overview(player_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+@router.post("/matches/{match_id}/refresh")
+async def match_refresh(match_id: str) -> dict[str, Any]:
+    """Odświeża mecz z ZPRP (limit 1 na 2 min na mecz); błąd ZPRP nie psuje odpowiedzi."""
+    from app.zprp_public.ondemand import refresh_match
+
+    exists = await database.fetch_one(select(M.c.match_id).where(M.c.match_id == match_id))
+    if not exists:
+        raise HTTPException(404, "Nie znaleziono meczu")
+    return await refresh_match(match_id)
+
+
 @router.get("/matches/{match_id}/overview")
 async def match_overview(match_id: str) -> dict[str, Any]:
     match = await database.fetch_one(select(M).where(M.c.match_id == match_id))
@@ -797,6 +808,12 @@ async def _schedule_payload(competition, rounds, matchdays, cards, team_id) -> d
 
 _REF_INDEX: dict[str, Any] = {"at": 0.0, "rows": []}
 _REF_TTL = 600
+
+
+def invalidate_caches() -> None:
+    """Zmiana obsady/wyniku: zapomnij indeks sędziów i gotowe mapy."""
+    _REF_INDEX.update(at=0.0, rows=[])
+    _map_cache.clear()
 
 
 def _clean_ref_name(raw: str) -> str:
