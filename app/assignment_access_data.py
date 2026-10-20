@@ -13,6 +13,10 @@ PROVINCE_SHORT = dict(zip(
      "WIELKOPOLSKIE", "ZACHODNIOPOMORSKIE"),
     ("DS", "KP", "LU", "LB", "LD", "MA", "MZ", "OP", "PK", "PD", "PM", "SL", "SK", "WN", "WP", "ZP")))
 
+# Publiczne rozgrywki.zprp.pl używa innego słownika niż prywatna BAZA.
+PUBLIC_PROVINCE_CODE = dict(zip(PROVINCE_SHORT,
+    ("DOL", "KPO", "LBE", "LBU", "LDZ", "MLP", "MAZ", "OPL", "PDK", "POD", "POM", "SLK", "SWK", "WMZ", "WLP", "ZPO")))
+
 
 async def own_teams(province: str) -> dict[str, tuple[set[str], set[str]]]:
     from sqlalchemy import select
@@ -35,7 +39,7 @@ async def own_teams(province: str) -> dict[str, tuple[set[str], set[str]]]:
         select(public_teams.c.team_id, public_teams.c.name, public_teams.c.season_name)
         .select_from(public_teams.join(clubs, public_teams.c.club_id == clubs.c.club_id)
                      .join(associations, clubs.c.association_id == associations.c.association_id))
-        .where(associations.c.code == PROVINCE_SHORT.get(key, "")))
+        .where(associations.c.code == PUBLIC_PROVINCE_CODE.get(key, "")))
     for row in public_rows:
         names, ids = result.setdefault(normalize_season_label(row["season_name"]), (set(), set()))
         names.add(team_key(row["name"]))

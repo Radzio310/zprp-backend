@@ -278,7 +278,7 @@ def _item(
         "status": status,
         # II liga (jej obsady ustala związek) - bootstrap oddaje ją razem z resztą,
         # a klient chowa ją sam.
-        "league": league_level(code) == "second",
+        "league": league_level(code) == "second" and (not access or access["organizer_kind"] != "drk"),
         "approved": bool(row["approved"]),
         "protocol_status": _s(state.get("protocol_status")),
         "updated_at": _iso(row["last_seen_at"] or row["updated_at"]),
@@ -459,7 +459,7 @@ async def match_list_payload(
                 continue
             if end and effective_start > end:
                 continue
-        if league_level(code) == "second":
+        if league_level(code) == "second" and state["assignment_access"]["organizer_kind"] != "drk":
             counts["league"] += 1
             if not include_league:
                 continue

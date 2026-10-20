@@ -69,13 +69,13 @@ def access_for(state: Mapping[str, Any], code: str, *, managed=(), own=(),
     legacy_own = is_managed_by_province(code, managed) and not is_other_district(code, own)
     # Stare migawki zachowują dotychczasowy zakres do następnego pełnego pobrania.
     visible = controls.get("referees") is True if modern else legacy_own
-    central = league_level(code) == "central"
     from app.zprp_accounts import normalize_province
     label = team_key(state.get("organizer_label"))
+    central = league_level(code) == "central" or label == "departament rozgrywek krajowych"
     organization_provinces = {
         "dolnoslaski": "DOLNOSLASKIE", "kujawsko pomorski": "KUJAWSKO_POMORSKIE",
         "lubelski": "LUBELSKIE", "lubuski": "LUBUSKIE", "lodzki": "LODZKIE",
-        "malopolski": "MALOPOLSKIE", "mazowiecki": "MAZOWIECKIE", "opolski": "OPOLSKIE",
+        "malopolski": "MALOPOLSKIE", "mazowiecki": "MAZOWIECKIE", "warszawsko mazowiecki": "MAZOWIECKIE", "opolski": "OPOLSKIE",
         "podkarpacki": "PODKARPACKIE", "podlaski": "PODLASKIE", "pomorski": "POMORSKIE",
         "slaski": "SLASKIE", "swietokrzyski": "SWIETOKRZYSKIE",
         "warminsko mazurski": "WARMINSKO_MAZURSKIE", "wielkopolski": "WIELKOPOLSKIE",

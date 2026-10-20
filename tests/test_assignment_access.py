@@ -54,6 +54,14 @@ def test_missing_button_hides_match_even_with_own_team():
     assert not access["manual"] and not access["recommended"]
 
 
+def test_drk_group_takes_precedence_also_for_second_league_code():
+    data = state("IIK1/5")
+    data["organizer_label"] = "Departament Rozgrywek Krajowych"
+    access = access_for(data, "IIK1/5", own_team=True)
+    assert access["organizer_kind"] == "drk"
+    assert access["editable_slots"] == ["sekretarz", "czas"]
+
+
 def test_membership_uses_season_and_catalogue_not_city():
     data = state()
     catalogue = {"2026/2027": ({"mts trendy top zory"}, {"100"})}
@@ -201,3 +209,27 @@ def test_schedule_retains_actual_organizer_and_enabled_controls():
     assert parsed["organizer_label"] == "Małopolski Związek Piłki Ręcznej"
     assert parsed["competition_id"] == "12033"
     assert parsed["competition_label"] == "Liga Juniorów"
+
+
+async def test_team_catalogue_uses_public_association_codes_and_actual_membership(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from sqlalchemy import MetaData, table, column
+    from app.zprp_public_tables import define_tables
+    from app.assignment_access_data import own_teams
+    tables = {item.name: item for item in define_tables(MetaData())}
+    db = SimpleNamespace(fetch_all=AsyncMock(side_effect=[
+        [{"team_province": "SL", "season": "2026/2027", "team_name": "Własna drużyna", "team_id": "1"},
+         {"team_province": "MA", "season": "2026/2027", "team_name": "Obca drużyna", "team_id": "2"}],
+        [{"season_name": "2026/2027", "name": "DRK własna drużyna", "team_id": "3"}],
+    ]))
+    monkeypatch.setitem(sys.modules, "app.db", SimpleNamespace(database=db,
+        province_club_teams=table("province_club_teams", column("province")), **tables))
+    result = await own_teams("SLASKIE")
+    names, ids = result["2026/2027"]
+    assert ids == {"1", "3"}
+    assert names == {"wlasna druzyna", "drk wlasna druzyna"}
+    query = db.fetch_all.call_args_list[1].args[0]
+    assert "SLK" in query.compile().params.values()
+    assert "SL" not in query.compile().params.values()
