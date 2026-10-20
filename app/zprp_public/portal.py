@@ -16,6 +16,7 @@ odpowiedzi się nie zmienia - to nowe trasy:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -798,6 +799,13 @@ _REF_INDEX: dict[str, Any] = {"at": 0.0, "rows": []}
 _REF_TTL = 600
 
 
+def _clean_ref_name(raw: str) -> str:
+    """Nazwisko z ZPRP bywa dopełnione spacjami i znacznikiem na końcu ("KOWALCZYK Jan          O").
+    Znacznik odcięty tylko, gdy stoi za długim odstępem; reszta spacji zwinięta do jednej."""
+    s = re.sub(r"\s{2,}\S\s*$", "", raw or "")
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _match_referees(rows: list[dict], q: str, limit: int) -> list[dict]:
     """Sędziowie pasujący do frazy: wszystkie słowa frazy w nazwisku, bez wielkości liter i ogonków.
     Najpierw nazwisko zaczynające się od frazy, potem więcej meczów."""
@@ -827,10 +835,11 @@ async def _referee_index() -> list[dict]:
             .group_by(M.c[idc], M.c[nmc])
         )
         for r in rows:
-            e = acc.setdefault(r["rid"], {"referee_id": r["rid"], "name": r["rname"], "matches": 0, "_best": 0})
+            name = _clean_ref_name(r["rname"])
+            e = acc.setdefault(r["rid"], {"referee_id": r["rid"], "name": name, "matches": 0, "_best": 0})
             e["matches"] += int(r["n"])
             if int(r["n"]) > e["_best"]:
-                e["_best"], e["name"] = int(r["n"]), r["rname"]
+                e["_best"], e["name"] = int(r["n"]), name
     out = [{k: v for k, v in e.items() if k != "_best"} for e in acc.values()]
     _REF_INDEX.update(at=time.time(), rows=out)
     return out
