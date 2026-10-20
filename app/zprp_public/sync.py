@@ -473,10 +473,21 @@ async def _sync_competition_stats(client: PublicZprpClient, competition_id: str,
     scorers_payload, tables_payload = await asyncio.gather(
         client.get(f"pokaz_strzelcow.php?Rozgrywki={competition_id}"),
         client.get(f"pokaz_tabele_spis.php?Rozgrywki={competition_id}"),
+        return_exceptions=True,
     )
+    if isinstance(tables_payload, BaseException):
+        raise tables_payload
+    scorers_failed = isinstance(scorers_payload, BaseException)
+    if scorers_failed:
+        # ZPRP potrafi odpowiedzieć 500 na strzelców jednej rozgrywki (np. 11333): pomijamy
+        # samych strzelców i zostawiamy poprzednie dane, a tabele i reszta idą dalej.
+        if isinstance(scorers_payload, asyncio.CancelledError):
+            raise scorers_payload
+        log.warning("Strzelcy rozgrywek %s pominięci: %s", competition_id, scorers_payload)
+        scorers_payload = None
 
     scorer_rows = [item for item in rows(scorers_payload) if item.get("NrZawodnika")]
-    if scorer_rows or scorers_payload in ({}, [], None):
+    if not scorers_failed and (scorer_rows or scorers_payload in ({}, [], None)):
         await database.execute(delete(zprp_public_scorers).where(zprp_public_scorers.c.competition_id == competition_id))
     for item in scorer_rows:
         player_id = await _store_player(item, counters)
