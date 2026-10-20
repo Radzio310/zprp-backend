@@ -16,6 +16,7 @@ MODUL-LISC: bez bazy i bez sieci, zeby caly rachunek dalo sie sprawdzic testem.
 
 from __future__ import annotations
 
+import functools
 import re
 from decimal import Decimal, ROUND_HALF_UP
 import unicodedata
@@ -49,13 +50,21 @@ CREW_ROLE_FIELDS: dict[str, str] = {
 # Normalizacja
 # -------------------------
 
-def strip_dia(value: Any) -> str:
-    """Bez ogonkow. „l" MUSI zejsc osobno - NFD go nie rozklada."""
-    text = str(value or "").replace("Ł", "L").replace("ł", "l")
+@functools.lru_cache(maxsize=65536)
+def _strip_dia_text(raw: str) -> str:
+    text = raw.replace("Ł", "L").replace("ł", "l")
     return "".join(
         ch for ch in unicodedata.normalize("NFD", text)
         if unicodedata.category(ch) != "Mn"
     )
+
+
+def strip_dia(value: Any) -> str:
+    """Bez ogonkow. „l" MUSI zejsc osobno - NFD go nie rozklada.
+
+    Pamiec podreczna: te same kody i role wracaja dziesiatki tysiecy razy na przelicz,
+    a normalizacja Unicode znaków na pętli zdarzeń potrafiła trwać sekundy."""
+    return _strip_dia_text(str(value or ""))
 
 
 def code_key(value: Any) -> str:
@@ -67,6 +76,11 @@ def province_key(value: Any) -> str:
 
 
 def canonical_role(role: Any) -> str:
+    return _canonical_role_text(" ".join(str(role or "").split()).strip())
+
+
+@functools.lru_cache(maxsize=4096)
+def _canonical_role_text(text: str) -> str:
     """Każdy historyczny zapis roli -> jedna nazwa używana w tabeli stawek.
 
     W bazie są też starsze warianty, np. ``stolikowy`` albo ``Sędzia
@@ -74,7 +88,6 @@ def canonical_role(role: Any) -> str:
     silnik szukał w JSON-ie klucza równego *dokładnie* ``Sędzia stolikowy``.
     Efekt był podstępny: przejazd liczył się normalnie, a brutto wynosiło 0.
     """
-    text = " ".join(str(role or "").split()).strip()
     key = strip_dia(text).lower()
     if "deleg" in key:
         return ROLE_DELEGATE

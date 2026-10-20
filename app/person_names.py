@@ -17,6 +17,7 @@ rozdzielić imienników, więc nie wolno go gubić.
 
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 from typing import Any, FrozenSet, List, Tuple
@@ -38,7 +39,12 @@ _GENERATION = {
 
 
 def _fold(text: Any) -> str:
-    raw = str(text or "").translate(_HARD_FOLD)
+    return _fold_text(str(text or ""))
+
+
+@functools.lru_cache(maxsize=65536)
+def _fold_text(text: str) -> str:
+    raw = text.translate(_HARD_FOLD)
     raw = unicodedata.normalize("NFD", raw)
     raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
     return raw.lower().strip()

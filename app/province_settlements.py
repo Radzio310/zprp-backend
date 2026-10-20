@@ -256,7 +256,9 @@ async def _assignments(
     managed = await _managed_prefixes(province)
 
     out: list[E.Assignment] = []
-    for row in rows:
+    for index, row in enumerate(rows):
+        if index and index % 300 == 0:
+            await asyncio.sleep(0)  # tysiące wierszy: oddaj pętlę innym żądaniom
         role = R.canonical_role(row["role"])
         out.append(
             E.Assignment(
@@ -415,18 +417,7 @@ async def load_settlement(
         base["names"].update(fresh)
         names = {**names, **fresh}
 
-    entries = E.settle_judges(
-        assignments,
-        province=province,
-        central_versions=central_versions,
-        province_versions=province_versions,
-        now=now,
-        date_from=date_from,
-        date_to=date_to,
-        include_future=include_future,
-        include_zprp=include_zprp,
-        names=names,
-    )
+    entries = await asyncio.to_thread(E.settle_judges, assignments, province=province, central_versions=central_versions, province_versions=province_versions, now=now, date_from=date_from, date_to=date_to, include_future=include_future, include_zprp=include_zprp, names=names)
     # Klub moze byc prowadzony w panelu, ale rozliczac obsade poza okregiem.
     # Najpierw rozpoznajemy takie mecze na pelnym wyliczeniu, potem liczymy obie
     # grupy ponownie. To wazne dla podatku miesiecznego i wspolnych dojazdow.
@@ -440,18 +431,7 @@ async def load_settlement(
             if mates:
                 probe = probe + [
                     match
-                    for entry in E.settle_judges(
-                        mates,
-                        province=province,
-                        central_versions=central_versions,
-                        province_versions=province_versions,
-                        now=now,
-                        date_from=date_from,
-                        date_to=date_to,
-                        include_future=True,
-                        include_zprp=include_zprp,
-                        names=names,
-                    )
+                    for entry in await asyncio.to_thread(E.settle_judges, mates, province=province, central_versions=central_versions, province_versions=province_versions, now=now, date_from=date_from, date_to=date_to, include_future=True, include_zprp=include_zprp, names=names)
                     for match in entry.matches
                 ]
         scope = await club_scope(province, season_of(date_from), probe)
@@ -1388,17 +1368,7 @@ async def _club_paid_keys(
         return set(), set()
     # Jeden sędzia: płatnika turnieju rozstrzyga cały dzień w hali, jak w panelu.
     mates = _tournament_mates(everything, assignments, min(days), max(days)) if everything else []
-    probe = E.settle_judges(
-        [*assignments, *mates],
-        province=province,
-        central_versions=central_versions,
-        province_versions=province_versions,
-        now=now,
-        date_from=min(days),
-        date_to=max(days),
-        include_future=True,
-        include_zprp=True,
-    )
+    probe = await asyncio.to_thread(E.settle_judges, [*assignments, *mates], province=province, central_versions=central_versions, province_versions=province_versions, now=now, date_from=min(days), date_to=max(days), include_future=True, include_zprp=True)
     by_season: dict[str, list] = {}
     for entry in probe:
         for match in entry.matches:
@@ -1922,18 +1892,7 @@ async def _judge_season(
         and lo.toordinal() - 1 <= item.match_at.date().toordinal() <= hi.toordinal() + 1
     ]
     now = _now()
-    probe = E.settle_judges(
-        [*near, *_tournament_mates(base["assignments"], near, lo, hi)],
-        province=key,
-        central_versions=base["central_versions"],
-        province_versions=base["province_versions"],
-        now=now,
-        date_from=lo,
-        date_to=hi,
-        include_future=True,
-        include_zprp=False,
-        names=base["names"],
-    )
+    probe = await asyncio.to_thread(E.settle_judges, [*near, *_tournament_mates(base["assignments"], near, lo, hi)], province=key, central_versions=base["central_versions"], province_versions=base["province_versions"], now=now, date_from=lo, date_to=hi, include_future=True, include_zprp=False, names=base["names"])
     by_season: dict[str, list] = {}
     for entry in probe:
         for match in entry.matches:
