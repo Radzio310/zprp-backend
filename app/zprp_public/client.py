@@ -90,10 +90,22 @@ def rows(payload: Any) -> list[dict[str, Any]]:
 class PublicZprpClient:
     """Klient współdzielący jedną sesję i globalny limit równoległości."""
 
-    def __init__(self) -> None:
-        concurrency = max(1, min(6, int(os.getenv("ZPRP_PUBLIC_API_CONCURRENCY", "3"))))
+    def __init__(
+        self,
+        *,
+        min_interval: float | None = None,
+        concurrency: int | None = None,
+        retries: int | None = None,
+    ) -> None:
+        """Parametry nadpisują zmienne środowiskowe (pętla historyczna jedzie wolniej)."""
+        self._retries_override = retries
+        if concurrency is None:
+            concurrency = int(os.getenv("ZPRP_PUBLIC_API_CONCURRENCY", "3"))
+        concurrency = max(1, min(6, concurrency))
         self._gate = asyncio.Semaphore(concurrency)
-        self._spacing = max(0.05, float(os.getenv("ZPRP_PUBLIC_API_MIN_INTERVAL", "0.18")))
+        if min_interval is None:
+            min_interval = float(os.getenv("ZPRP_PUBLIC_API_MIN_INTERVAL", "0.18"))
+        self._spacing = max(0.05, min_interval)
         self._last_started = 0.0
         self._start_lock = asyncio.Lock()
         self._client = AsyncClient(
@@ -116,7 +128,8 @@ class PublicZprpClient:
             self._last_started = time.monotonic()
 
     async def get(self, path: str) -> Any:
-        retries = max(0, min(4, int(os.getenv("ZPRP_PUBLIC_API_RETRIES", "2"))))
+        raw_retries = self._retries_override if self._retries_override is not None else int(os.getenv("ZPRP_PUBLIC_API_RETRIES", "2"))
+        retries = max(0, min(4, raw_retries))
         async with self._gate:
             for attempt in range(retries + 1):
                 await self._wait_for_slot()

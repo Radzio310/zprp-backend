@@ -147,6 +147,7 @@ from app.zprp_public.portal import router as handball_portal_router
 from app.zprp_public.extras import router as handball_round3_router
 from app.zprp_public.crest import router as handball_crest_router
 from app.zprp_public.sync import run_zprp_public_scheduler
+from app.zprp_public.history import run_history_scheduler
 from app.pod_reka import admin_router as pod_reka_admin_router, ensure_pod_reka_defaults, router as pod_reka_router
 
 from app.zprp.schedule import router as schedule_router
@@ -865,6 +866,7 @@ _province_offtime_sync_task: asyncio.Task | None = None
 _zprp_unavailability_mail_task: asyncio.Task | None = None
 _deploy_push_test_task: asyncio.Task | None = None
 _zprp_public_sync_task: asyncio.Task | None = None
+_zprp_history_task: asyncio.Task | None = None
 
 
 async def _run_deploy_push_test_safely() -> None:
@@ -1385,7 +1387,7 @@ async def startup():
         logger.exception("❌ Walidacja konfiguracji e-mail nie powiodła się")
         raise
 
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _zprp_unavailability_mail_task, _deploy_push_test_task, _exam_promotion_task, _zprp_public_sync_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _email_grace_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _zprp_unavailability_mail_task, _deploy_push_test_task, _exam_promotion_task, _zprp_public_sync_task, _zprp_history_task
 
     # ── Jednorazowe migracje ról (multi-team) ──────────────────────────────
     try:
@@ -1539,12 +1541,13 @@ async def startup():
     asyncio.create_task(run_joomla_tables_scheduler())
     logger.info("✅ Śląskie league tables Joomla publisher started (24 h)")
     _zprp_public_sync_task = asyncio.create_task(run_zprp_public_scheduler())
+    _zprp_history_task = asyncio.create_task(run_history_scheduler())
     logger.info("✅ Publiczna hurtownia ZPRP wystartowała (lekki cykl 2/15 min + katalog 24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _zprp_unavailability_mail_task, _deploy_push_test_task, _exam_promotion_task, _zprp_public_sync_task
+    global _cleanup_task, _push_task, _notif_generator_task, _beach_sync_task, _beach_medical_task, _standings_sync_task, _mp_snapshot_task, _province_match_monitor_task, _province_offtime_sync_task, _zprp_unavailability_mail_task, _deploy_push_test_task, _exam_promotion_task, _zprp_public_sync_task, _zprp_history_task
 
     await stop_alert_scheduler()
     await stop_district_alert_scheduler()
@@ -1553,6 +1556,13 @@ async def shutdown():
         _zprp_public_sync_task.cancel()
         try:
             await _zprp_public_sync_task
+        except asyncio.CancelledError:
+            pass
+
+    if _zprp_history_task:
+        _zprp_history_task.cancel()
+        try:
+            await _zprp_history_task
         except asyncio.CancelledError:
             pass
 

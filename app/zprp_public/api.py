@@ -800,3 +800,30 @@ async def admin_sync_runs(limit: int = Query(100, ge=1, le=500)) -> dict[str, An
     )
     return {"items": [_dict(row) for row in result]}
 
+
+class HistoryStart(BaseModel):
+    retry_failed: bool = False
+
+
+@admin_router.get("/history/status")
+async def history_status() -> dict[str, Any]:
+    """Postęp pobierania minionych sezonów (odczyt, bez logowania jak reszta GET /admin)."""
+    from app.zprp_public import history
+
+    return await history.status()
+
+
+@admin_router.post("/history/start", status_code=202)
+async def history_start(payload: HistoryStart | None = None) -> dict[str, Any]:
+    from app.zprp_public import history
+
+    await history.start(retry_failed=bool(payload and payload.retry_failed))
+    return {"started": True}
+
+
+@admin_router.post("/history/stop")
+async def history_stop() -> dict[str, Any]:
+    from app.zprp_public import history
+
+    await history.stop()
+    return {"stopped": True, "note": "pętla kończy bieżący krok i zapamiętuje postęp; autostart wyłączony do następnego start"}
