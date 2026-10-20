@@ -99,7 +99,7 @@ def _s(value: Any) -> str:
 
 def _initials(name: str) -> str:
     words = [w for w in _s(name).replace("-", " ").split() if w[:1].isalpha()]
-    skip = {"KS", "MKS", "UKS", "SPR", "KPR", "MUKS", "LKS", "AZS", "SMS", "GKS", "MTS", "KU"}
+    skip = {"KS", "MKS", "UKS", "SPR", "KPR", "MUKS", "LKS", "AZS", "SMS", "GKS", "MTS", "KU", "IKS", "ZPRP"}
     meaningful = [w for w in words if w.upper() not in skip] or words
     return "".join(w[0] for w in meaningful[:2]).upper() or "?"
 
