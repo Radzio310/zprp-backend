@@ -96,6 +96,9 @@ def access_for(state: Mapping[str, Any], code: str, *, managed=(), own=(),
         "source": "schedule" if modern else "legacy",
         "organizer": str(state.get("organizer_label") or ("DRK" if central else "")),
         "organizer_kind": "drk" if central else ("own" if own_organizer else "foreign"),
+        # Województwo związku-organizatora (herb i barwy w panelu). Puste dla DRK
+        # i gdy nazwy grupy nie da się przypisać - wtedy panel nie zgaduje.
+        "organizer_province": "" if central else (owner or (normalize_province(province) if own_organizer and province else "")),
     }
 
 

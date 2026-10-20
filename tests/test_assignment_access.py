@@ -86,6 +86,19 @@ def test_group_organizer_overrides_prefix_frequency():
     assert access_for(data, "K/JM/18", own={"K", "S"}, province="SLASKIE")["organizer_kind"] == "foreign"
 
 
+def test_organizer_province_comes_from_group_owner_not_guessing():
+    data = state("K/JM/18")
+    data["organizer_label"] = "Małopolski Związek Piłki Ręcznej"
+    assert access_for(data, "K/JM/18", province="SLASKIE")["organizer_province"] == "MALOPOLSKIE"
+    data["organizer_label"] = "Śląski Związek Piłki Ręcznej"
+    own = access_for(data, "K/JM/18", province="SLASKIE")
+    assert own["organizer_kind"] == "own" and own["organizer_province"] == "SLASKIE"
+    data["organizer_label"] = "Departament Rozgrywek Krajowych"
+    assert access_for(data, "K/JM/18", province="SLASKIE")["organizer_province"] == ""
+    data["organizer_label"] = "Nieznana grupa"
+    assert access_for(data, "K/JM/18", province="SLASKIE")["organizer_province"] in ("", "SLASKIE")
+
+
 def test_need_cannot_be_widened_with_request_slots():
     data = state()
     need = need_from_state("39", data, "LCK/39", datetime(2026, 10, 31, 17), Roster(),
