@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<title>Wyciąg klubu - {{ club.name }} - {{ period_label }}</title>
+<style>
+  /* Wyciąg idzie do klubu mailem i na papier - jasny, jak reszta dokumentów okręgu. */
+  @page {
+    size: A4;
+    margin: 12mm 12mm 15mm 12mm;
+    @bottom-left {
+      content: "{{ footer_css|safe }}";
+      font-family: "DejaVu Sans", Arial, sans-serif; font-size: 7pt; color: #8a8f98;
+    }
+    @bottom-right {
+      content: "Strona " counter(page) " z " counter(pages);
+      font-family: "DejaVu Sans", Arial, sans-serif; font-size: 7pt; color: #8a8f98;
+    }
+  }
+
+  :root {
+    --ink: #14161a;
+    --muted: #6b7280;
+    --line: #dfe3e8;
+    --accent: #0B4F9E;
+    --deep: #16233c;
+    --gold: #B47817;
+    --gold-soft: #fbf1e1;
+    --band: #f4f7fc;
+    --debt: #c0392b;
+    --net: #2a7f5f;
+  }
+
+  * { box-sizing: border-box; }
+  body { font-family: "DejaVu Sans", Arial, sans-serif; font-size: 8.6pt; color: var(--ink); margin: 0; background: #fff; }
+
+  /* ------------------------------------------------------------ nagłówek */
+  .top { width: 100%; border-collapse: collapse; }
+  .top td { vertical-align: middle; padding: 0; }
+  .org img { width: 38pt; height: 38pt; object-fit: contain; vertical-align: middle; }
+  .org .names { display: inline-block; vertical-align: middle; margin-left: 7pt; }
+  .org-name { color: var(--accent); font-size: 10.5pt; font-weight: 800; }
+  .org-address { color: var(--muted); font-size: 7.2pt; margin-top: 1.5pt; }
+  .club-cell { text-align: right; }
+  .crest { width: 44pt; height: 44pt; object-fit: contain; }
+  .mono {
+    display: inline-block; width: 44pt; height: 44pt; border-radius: 22pt;
+    background: var(--deep); color: #fff; font-weight: 800; font-size: 14pt;
+    text-align: center; line-height: 44pt;
+  }
+
+  .ribbon { height: 4pt; margin: 8pt 0 9pt; background: linear-gradient(90deg, var(--accent) 0%, var(--accent) 62%, var(--gold) 100%); }
+
+  .eyebrow { font-size: 7.4pt; letter-spacing: 1.2pt; text-transform: uppercase; color: var(--gold); font-weight: 800; }
+  h1 { font-size: 19pt; color: var(--deep); margin: 2pt 0 1pt; line-height: 1.15; }
+  .club-meta { font-size: 8pt; color: var(--muted); }
+  .meta { width: 100%; border-collapse: collapse; margin-top: 7pt; }
+  .meta td { font-size: 7.6pt; color: var(--muted); padding: 1.5pt 10pt 1.5pt 0; }
+  .meta b { color: var(--ink); }
+
+  .flag { margin-top: 6pt; padding: 4pt 7pt; border-radius: 4pt; font-size: 7.6pt; }
+  .flag.warn { background: var(--gold-soft); color: #7a5208; border: 0.6pt solid #ecd2a6; }
+
+  /* ------------------------------------------------------- równanie salda */
+  .ledger { width: 100%; border-collapse: separate; border-spacing: 4pt 0; margin: 11pt -4pt 3pt; }
+  .ledger td { width: 20%; border: 0.7pt solid var(--line); border-radius: 5pt; background: var(--band); padding: 6pt 7pt 7pt; vertical-align: top; }
+  .ledger .op { font-size: 9pt; font-weight: 800; color: var(--muted); }
+  .ledger .l { font-size: 6.6pt; text-transform: uppercase; letter-spacing: 0.4pt; color: var(--muted); margin-top: 1pt; }
+  .ledger .v { font-size: 12pt; font-weight: 800; color: var(--deep); margin-top: 3pt; white-space: nowrap; }
+  .ledger td.close { background: var(--deep); border-color: var(--deep); }
+  .ledger td.close .l, .ledger td.close .op { color: rgba(255,255,255,0.7); }
+  .ledger td.close .v { color: #fff; font-size: 13.5pt; }
+  .ledger td.close.debt { background: var(--debt); border-color: var(--debt); }
+  .ledger td.close.net { background: var(--net); border-color: var(--net); }
+  .ledger .v.debt { color: var(--debt); }
+  .ledger .v.net { color: var(--net); }
+  .ledger-note { font-size: 7pt; color: var(--muted); margin-top: 4pt; }
+
+  /* ------------------------------------------------------------- sekcje */
+  section { margin-top: 12pt; }
+  h2 {
+    font-size: 10pt; margin: 0 0 5pt; padding-bottom: 3pt; color: var(--deep);
+    border-bottom: 1.4pt solid var(--accent); break-after: avoid;
+  }
+  h2 small { font-size: 7.6pt; color: var(--muted); font-weight: 600; margin-left: 4pt; }
+
+  table.grid { width: 100%; border-collapse: collapse; font-size: 7.8pt; }
+  table.grid thead { display: table-header-group; }
+  table.grid th {
+    text-align: left; background: var(--accent); color: #fff; padding: 3.6pt 5pt;
+    font-size: 6.6pt; text-transform: uppercase; letter-spacing: 0.35pt; white-space: nowrap;
+  }
+  table.grid th.num { text-align: right; }
+  table.grid td { padding: 3pt 5pt; border-bottom: 0.5pt solid #eef1f4; vertical-align: top; }
+  table.grid tr { break-inside: avoid; }
+  table.grid tbody tr:nth-child(even) td { background: #fafbfc; }
+  .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .lp { width: 16pt; color: var(--muted); }
+  .date { width: 44pt; white-space: nowrap; }
+  .cat b { display: block; font-size: 7.4pt; }
+  .cat span { color: var(--muted); font-size: 6.6pt; }
+  .small { display: block; color: #7a8494; font-size: 6.6pt; margin-top: 1pt; }
+  tr.total td { background: var(--gold-soft) !important; font-weight: 800; color: var(--deep); border-top: 1pt solid var(--gold); }
+  tr.other td { color: var(--muted); font-style: italic; }
+
+  /* Podsumowanie per kategoria - pasek udziału 1:1 z podglądem na ekranie. */
+  .bar { height: 6pt; border-radius: 3pt; background: #eef1f6; }
+  .bar i { display: block; height: 6pt; border-radius: 3pt; background: linear-gradient(90deg, var(--accent), #3f7fd0); }
+  td.barcell { width: 150pt; vertical-align: middle; }
+
+  .in { color: var(--net); font-weight: 700; }
+  .out { color: var(--debt); font-weight: 700; }
+  .pill { display: inline-block; padding: 0.5pt 4pt; border-radius: 6pt; font-size: 6.4pt; font-weight: 700; background: #eef1f6; color: var(--muted); }
+
+  .empty { padding: 8pt; text-align: center; color: var(--muted); font-size: 8pt; border: 0.6pt dashed var(--line); border-radius: 5pt; }
+
+  footer.doc { margin-top: 14pt; padding-top: 5pt; border-top: 0.7pt solid var(--line); font-size: 6.8pt; color: var(--muted); }
+  footer.doc p { margin: 0 0 2pt; }
+</style>
+</head>
+<body>
+
+<table class="top">
+  <tr>
+    <td class="org">
+      {% if logo %}<img src="data:image/png;base64,{{ logo }}" />{% endif %}
+      <div class="names">
+        <div class="org-name">{{ org_name }}</div>
+        {% if org_address %}<div class="org-address">{{ org_address }}</div>{% endif %}
+      </div>
+    </td>
+    <td class="club-cell">
+      {% if club.crest %}<img class="crest" src="{{ club.crest }}" />{% else %}<span class="mono">{{ club.initials }}</span>{% endif %}
+    </td>
+  </tr>
+</table>
+
+<div class="ribbon"></div>
+
+<div class="eyebrow">Wyciąg klubu · rozliczenia sędziowskie</div>
+<h1>{{ club.name }}</h1>
+<div class="club-meta">
+  Nr klubu ZPRP {{ club.club_id }}{% if club.address %} · {{ club.address }}{% endif %}
+  {% if club.members|length > 1 %} · wspólny budżet: {{ club.members|join(", ") }}{% endif %}
+</div>
+
+<table class="meta">
+  <tr>
+    <td>Okres: <b>{{ period_label }}</b></td>
+    <td>Sezon: <b>{{ season }}</b></td>
+    <td>Zakres meczów: <b>{{ scope_label }}</b></td>
+    <td>Wygenerowano: <b>{{ generated_label }}</b></td>
+  </tr>
+</table>
+
+{% if club.off %}
+<div class="flag warn">Klub jest poza programem rozliczeń okręgu - okręg nie pobiera od niego opłat za obsady. Wyciąg pokazuje stan informacyjnie.</div>
+{% endif %}
+{% for note in notes %}<div class="flag warn">{{ note }}</div>{% endfor %}
+
+<table class="ledger">
+  <tr>
+    <td>
+      <div class="l">Saldo otwarcia</div>
+      <div class="v {{ 'debt' if st.opening < 0 else '' }}">{{ st.opening|money }}</div>
+      <div class="l">na {{ opening_label }}</div>
+    </td>
+    <td>
+      <div class="l"><span class="op">-</span> Obciążenia za mecze</div>
+      <div class="v">{{ st.charged|money }}</div>
+      <div class="l">{{ all_count_label }}</div>
+    </td>
+    <td>
+      <div class="l"><span class="op">+</span> Wpłaty</div>
+      <div class="v net">{{ (st.paid_in + st.settled)|money }}</div>
+      <div class="l">{{ entries_in_label }}</div>
+    </td>
+    <td>
+      <div class="l"><span class="op">-</span> Wypłaty</div>
+      <div class="v">{{ st.paid_out|money }}</div>
+      <div class="l">zwroty dla klubu</div>
+    </td>
+    <td class="close {{ 'debt' if st.closing < 0 else ('net' if st.closing > 0 else '') }}">
+      <div class="l"><span class="op">=</span> Saldo zamknięcia</div>
+      <div class="v">{{ st.closing|money }}</div>
+      <div class="l">{{ closing_hint }}</div>
+    </td>
+  </tr>
+</table>
+<div class="ledger-note">
+  Saldo dodatnie = nadpłata klubu u okręgu, ujemne = kwota do zapłaty.
+  {% if st.charged_other %}Obciążenia obejmują też {{ other_label }} spoza wybranego zakresu ({{ st.charged_other|money }}) - saldo dotyczy całego klubu.{% endif %}
+  {% if st.pending_in %}Faktury czekające na wpłatę ({{ st.pending_in|money }}) nie są jeszcze w saldzie.{% endif %}
+</div>
+
+{% if st.by_category %}
+<section>
+  <h2>Podsumowanie per kategoria <small>{{ scope_label }}</small></h2>
+  <table class="grid">
+    <thead><tr><th>Kategoria</th><th class="num">Mecze</th><th>Udział</th><th class="num">Kwota</th></tr></thead>
+    <tbody>
+      {% for item in st.by_category %}
+      <tr>
+        <td><b>{{ item.label }}</b></td>
+        <td class="num">{{ item.matches }}</td>
+        <td class="barcell"><div class="bar"><i style="width: {{ (item.share * 100)|round(1) }}%"></i></div></td>
+        <td class="num">{{ item.amount|money }}</td>
+      </tr>
+      {% endfor %}
+      <tr class="total"><td>Razem</td><td class="num">{{ st.matches|length }}</td><td></td><td class="num">{{ st.charged_scope|money }}</td></tr>
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section>
+  <h2>Mecze <small>{{ match_count_label }} · {{ scope_label }}</small></h2>
+  {% if st.matches %}
+  <table class="grid">
+    <thead>
+      <tr><th class="lp">Lp.</th><th class="date">Data</th><th>Kategoria</th><th>Mecz</th><th>Para sędziów</th><th class="num">Kwota</th></tr>
+    </thead>
+    <tbody>
+      {% for line in st.matches %}
+      <tr>
+        <td class="lp">{{ loop.index }}</td>
+        <td class="date">{{ line.date_label }}</td>
+        <td class="cat"><b>{{ line.category_label }}</b><span>{{ line.code }}</span></td>
+        <td>{{ line.teams }}{% if line.city %}<span class="small">{{ line.city }}</span>{% endif %}</td>
+        <td>{{ line.field or "-" }}{% if line.table %}<span class="small">stolik: {{ line.table }}</span>{% endif %}</td>
+        <td class="num">{{ line.amount|money }}</td>
+      </tr>
+      {% endfor %}
+      {% if st.charged_other %}
+      <tr class="other"><td></td><td colspan="4">Pozostałe kategorie ({{ other_label }})</td><td class="num">{{ st.charged_other|money }}</td></tr>
+      {% endif %}
+      <tr class="total"><td></td><td colspan="4">Razem obciążenia w okresie</td><td class="num">{{ st.charged|money }}</td></tr>
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">W tym okresie klub nie ma meczów z obciążeniem{% if st.charged_other %} w wybranych kategoriach ({{ other_label }} w pozostałych){% endif %}.</div>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Wpłaty i wypłaty <small>{{ st.entries|length }} {{ entries_word }}</small></h2>
+  {% if st.entries %}
+  <table class="grid">
+    <thead><tr><th class="date">Data</th><th>Rodzaj</th><th>Opis</th><th class="num">Kwota</th></tr></thead>
+    <tbody>
+      {% for entry in st.entries %}
+      <tr>
+        <td class="date">{{ entry.date_label }}</td>
+        <td><span class="{{ 'out' if entry.kind == 'out' else 'in' }}">{{ entry.kind_label }}</span> <span class="pill">{{ entry.source_label }}</span></td>
+        <td>{{ entry.description or entry.team_name or "-" }}</td>
+        <td class="num {{ 'out' if entry.kind == 'out' else 'in' }}">{{ entry.signed|money }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Brak wpłat i wypłat w tym okresie.</div>
+  {% endif %}
+
+  {% if st.pending %}
+  <table class="grid" style="margin-top: 7pt;">
+    <thead><tr><th class="date">Wystawiona</th><th>Faktura czekająca na wpłatę (poza saldem)</th><th class="num">Kwota</th></tr></thead>
+    <tbody>
+      {% for item in st.pending %}
+      <tr><td class="date">{{ item.date_label }}</td><td>{{ item.invoice_no or "-" }}</td><td class="num">{{ item.amount|money }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<footer class="doc">
+  <p>Dokument informacyjny z panelu rozliczeń okręgu (BAZA). Kwoty obciążeń liczy ten sam silnik, który wystawia zestawienia sędziom - kwota u klubu i u sędziego to ta sama kwota.</p>
+  <p>Saldo otwarcia liczone od początku sezonu {{ season }} ({{ season_start_label }}). Wyciąg nie jest fakturą.</p>
+</footer>
+
+</body>
+</html>

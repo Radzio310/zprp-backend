@@ -110,6 +110,7 @@ from app.zprp_archive import router as province_archive_router, run_archive_sche
 from app.assignment_insights import router as province_insights_router, run_insights_scheduler
 from app.province_club_budgets import router as province_club_budgets_router, seed_default_budgets
 from app.province_clubs import router as province_clubs_router
+from app.club_report import router as club_report_router
 from app.province_tournament_hosts import router as province_tournament_hosts_router
 from app.province_invoices import router as province_invoices_router
 from app.province_manual_charges import router as province_manual_charges_router
@@ -391,6 +392,8 @@ app.include_router(province_club_budgets_router)
 # Przed `/province/clubs` - tam `{club_id}` połknąłby `/tournaments`.
 app.include_router(province_tournament_hosts_router)
 app.include_router(province_clubs_router)
+# Kreator raportu finansów klubów (wyciągi PDF, Excel): /province/club-report.
+app.include_router(club_report_router)
 # Faktury PDF jako wpłaty klubów: własny prefiks /province/invoices.
 app.include_router(province_invoices_router)
 # Ręczne mecze z rachunkiem (np. SPARING) z karty klubu: /province/manual-charges.
