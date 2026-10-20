@@ -803,9 +803,18 @@ async def referee_refresh(referee_id: str) -> dict[str, Any]:
         .where(and_(or_(M.c.referee_1_id == referee_id, M.c.referee_2_id == referee_id), M.c.scheduled_at >= since))
         .order_by(M.c.scheduled_at.asc()).limit(10)
     )
-    results = await asyncio.gather(*(refresh_match(r["match_id"]) for r in rows))
-    return {"checked": len(results), "refreshed": sum(1 for r in results if r["refreshed"]),
-            "changed": any(r["changed"] for r in results)}
+    async def run() -> dict[str, Any]:
+        results = []
+        for r in rows:  # po kolei, żeby nie młotkować ZPRP
+            results.append(await refresh_match(r["match_id"]))
+        return {"checked": len(results), "refreshed": sum(1 for r in results if r["refreshed"]),
+                "changed": any(r["changed"] for r in results)}
+
+    task = asyncio.ensure_future(run())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=6)
+    except asyncio.TimeoutError:
+        return {"checked": len(rows), "refreshed": 0, "changed": False, "pending": True}  # reszta dobiega w tle
 
 
 @router.get("/referees/{referee_id}")

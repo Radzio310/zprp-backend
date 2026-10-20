@@ -166,6 +166,33 @@ _OFFICIAL_COLS = ("referee_1_id", "referee_1_name", "referee_2_id", "referee_2_n
                   "home_club_id", "away_club_id", "home_team_name", "away_team_name")
 
 
+async def _refresh_header(match_id: str, existing: Any) -> bool:
+    """Lekkie odświeżenie: tylko nagłówek meczu (obsada, termin, hala, wynik, drużyny).
+    Bez składów, migawek i gzip - żadnej ciężkiej pracy na pętli zdarzeń."""
+    from app.zprp_public.client import rows
+    from app.zprp_public.store import now_utc, upsert_values
+    from app.zprp_public.sync import _match_values
+    from app.db import zprp_public_matches as M
+
+    payload = await _get_client().get(f"pokaz_mecze_szczegoly.php?Zawody={match_id}")
+    header: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        zero = payload.get("0")
+        header = zero[0] if isinstance(zero, list) and zero and isinstance(zero[0], dict) else (zero if isinstance(zero, dict) else {})
+    elif isinstance(payload, list) and payload:  # goła tablica [[{...}]]
+        bucket = payload[0]
+        header = bucket[0] if isinstance(bucket, list) and bucket and isinstance(bucket[0], dict) else {}
+    if not header:
+        return False
+    keep = {c: existing[c] for c in ("season_id", "competition_id", "competition_name", "round_id", "round_name",
+                                      "matchday_id", "matchday_name")}
+    values = _match_values(header, **keep)
+    values["details_fetched_at"] = now_utc()
+    # Nie ruszamy source_hash/source_json: pełny zapis zrobi synchronizacja.
+    await upsert_values(M, values, key_columns=("match_id",))
+    return True
+
+
 async def refresh_match(match_id: str, force: bool = False) -> dict[str, Any]:
     """Pobiera mecz z ZPRP (nie częściej niż co REFRESH_MIN_INTERVAL). Nigdy nie rzuca:
     błąd/timeout = stan z bazy. Zwraca {refreshed, changed, throttled, error}."""
@@ -192,14 +219,11 @@ async def refresh_match(match_id: str, force: bool = False) -> dict[str, Any]:
             if not before:
                 return {"refreshed": False, "changed": False, "throttled": False}
             async with _slots:
-                from app.zprp_public.sync import Counters, _sync_match_details
-
-                counters = Counters()
-                await asyncio.wait_for(
-                    _sync_match_details(_get_client(), match_id, counters),
+                ok = await asyncio.wait_for(
+                    _refresh_header(match_id, before),
                     timeout=float(os.getenv("ZPRP_PUBLIC_REFRESH_TIMEOUT", "8")),
                 )
-            if not counters.get("match_details"):
+            if not ok:
                 _refreshed_at[match_id] = time.monotonic() - REFRESH_MIN_INTERVAL + 20  # krótka blokada po pustej odpowiedzi
                 return {"refreshed": False, "changed": False, "throttled": False, "empty": True}
             _refreshed_at[match_id] = time.monotonic()
