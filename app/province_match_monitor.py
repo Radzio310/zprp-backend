@@ -833,6 +833,10 @@ async def _upsert_match(
             and_(province_matches.c.province == province, province_matches.c.match_id == match_id)
         )
     )
+    if old_row:
+        previous = state_dict(old_row["state_json"])
+        state = {**{k: previous[k] for k in ("assignment_controls", "organizer_label", "competition_id", "competition_label")
+                    if k in previous}, **state}
     new_fp = fingerprint(state)
     approved = _str(state.get("protocol_status")) == "approved"
     values = {
@@ -847,7 +851,8 @@ async def _upsert_match(
         **({"active": True, "missing_full_runs": 0} if seen_in_schedule else {}),
         **({"last_deep_checked_at": now} if deep else {}),
     }
-    if not old_row or old_row["fingerprint"] != new_fp:
+    if (not old_row or old_row["fingerprint"] != new_fp
+            or state_dict(old_row["state_json"]).get("assignment_controls") != state.get("assignment_controls")):
         # Obsada 2.0: nowy albo zmieniony mecz - gotowy stan panelu do przebudowy.
         from app.assignment_board_cache import bump
 

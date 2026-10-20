@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
+from app.assignment_access import node_enabled
 from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import APIRouter, Depends, HTTPException
 from httpx import AsyncClient
@@ -172,6 +173,7 @@ def _parse_select_options(soup: BeautifulSoup, select_name: str) -> Tuple[List[D
         if not val:
             continue
         parsed = _parse_option(opt)
+        parsed["disabled"] = not node_enabled(opt)
         options.append(parsed)
         if parsed["selected"]:
             selected_value = val
@@ -280,7 +282,8 @@ def _parse_referee_form(html: str) -> Dict[str, Any]:
             "options": options,
             "selected_value": selected,
             "field_present": select_node is not None or hidden_node is not None,
-            "field_kind": "select" if select_node is not None else "hidden",
+            "field_kind": "select" if select_node is not None else "hidden" if hidden_node is not None else "absent",
+            "editable": select_node is not None and node_enabled(select_node),
         }
 
     # Parse filter radios
@@ -375,6 +378,7 @@ def _parse_hall_form(html: str) -> Dict[str, Any]:
     return {
         "IdZawody": id_zawody,
         "halls": halls,
+        "editable": node_enabled(sel),
         "selected_id": selected_id,
         "select_name": select_name,
         "hidden_inputs": hidden_inputs,
@@ -433,6 +437,7 @@ def _parse_date_form(html: str) -> Dict[str, Any]:
     raw_value = _clean(date_input.get("value", "")) if date_input else ""
     return {
         "IdZawody": _clean(hidden_inputs.get("IdZawody", "")),
+        "editable": node_enabled(date_input) and not date_input.has_attr("readonly") if date_input else False,
         "input_name": input_name or "data_fakt",
         "date_value": _normalise_match_date(raw_value),
         "raw_value": raw_value,
@@ -1026,7 +1031,8 @@ def _select_names_in(html: str) -> Set[str]:
     Twój". `_parse_select_options` zwraca w obu wypadkach pustą listę, więc
     rozróżnienie musi przyjść stąd.
     """
-    return set(re.findall(r'<select[^>]*?\s+name\s*=\s*["\']([^"\']+)', html or "", re.I))
+    return {str(node.get("name")) for node in BeautifulSoup(html or "", "html.parser").find_all("select")
+            if node.get("name") and node_enabled(node)}
 
 
 async def apply_referee_assignment(
@@ -1103,6 +1109,17 @@ async def apply_referee_assignment(
     )
     _log_html(f"{log_prefix} step1 (load form)", load_html)
     current = _parse_referee_form(load_html)
+    # Weryfikacja przed jakąkolwiek wysyłką, także przy czyszczeniu i nadpisaniu konfliktu.
+    for field, (value, name) in changes.items():
+        if value is None:
+            continue
+        slot = current["slots"].get(SELECT_TO_SLOT.get(field, ""), {})
+        if not slot.get("editable"):
+            return {"success": False, "code": "SLOT_FORBIDDEN", "fetched_at": _now_iso(),
+                    "verified_slots": {}, "error": "Konto ZPRP nie ma prawa zmieniać tej roli obsady."}
+        if value and not name and not any(o["value"] == value and not o.get("disabled") for o in slot.get("options", [])):
+            return {"success": False, "code": "NAME_NOT_IN_OPTIONS", "fetched_at": _now_iso(),
+                    "verified_slots": {}, "error": "Wybrana osoba nie jest dopuszczona do tej roli w formularzu ZPRP."}
     before_slots = {
         label: {
             "value": current["slots"].get(label, {}).get("selected_value"),
@@ -1233,7 +1250,7 @@ async def apply_referee_assignment(
 
         resolved_val = new_val
         if new_name:
-            options = current["slots"].get(slot_label, {}).get("options", [])
+            options = [o for o in current["slots"].get(slot_label, {}).get("options", []) if not o.get("disabled")]
             match, candidates = _resolve_option(options, new_name)
             if match:
                 resolved_val = match["value"]
@@ -2161,6 +2178,7 @@ async def obsada_save(
             keep_hide_s=bool(payload.ukryjObsade),
             keep_hide_d=bool(payload.ukryjObsadeD),
             expect_slots=payload.expect or None,
+            require_name_match=True,
         )
 
     if result.get("code") == "ZPRP_CHANGED":
@@ -2330,6 +2348,8 @@ async def obsada_save_hall(
             cookies=cookies,
         )
         parsed1 = _parse_hall_form(html1)
+        if not parsed1["editable"]:
+            raise HTTPException(403, "Konto ZPRP nie ma prawa zmieniać hali tego meczu.")
         hall_before = next(
             (
                 h.get("full_label") or h.get("name") or ""
@@ -2513,6 +2533,8 @@ async def obsada_save_date(
             client, "/zawody_UstawDate.php", method="POST", data=fetch_data, cookies=cookies
         )
         before = _parse_date_form(html_before)
+        if not before["editable"]:
+            raise HTTPException(403, "Konto ZPRP nie ma prawa zmieniać terminu tego meczu.")
         current = _normalise_match_date(before.get("date_value") or before.get("raw_value"))
         if payload.expect and "date" in payload.expect:
             expected = _normalise_match_date(payload.expect.get("date"))

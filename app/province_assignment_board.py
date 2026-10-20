@@ -635,6 +635,15 @@ async def _prepare(
         raise HTTPException(400, "Okręg nie ma jeszcze listy sędziów")
 
     state = state_dict(row["state_json"]) or {}
+    from app.assignment_access_data import own_teams, resolve_access
+    from app.province_assignments import _managed_prefixes, own_prefixes_of
+    from app.assignment_live_access import verify_matches
+    access = resolve_access(state, _s(state.get("RozgrywkiCode") or row["match_code"]),
+                            await own_teams(key), season=_s(row["season"]),
+                            managed=await _managed_prefixes(key), own=await own_prefixes_of(key), province=key)
+    state = {**state, "assignment_access": access}
+    if access["recommended"]:
+        state = (await verify_matches(key, {match_id: state}))[match_id]
     code = _s(state.get("RozgrywkiCode") or row["match_code"])
     own = [item for item in pending if _s(item.match_id) == match_id]
     patched = _apply_pending(state, own, roster)
@@ -859,6 +868,9 @@ async def candidates(payload: CandidatesRequest):
         return offtime_text(off) if off is not None else ""
 
     views = describe_candidates(ctx, need, off_reason=off_reason)
+    if need.allowed_slots is not None and not need.allowed_slots:
+        return {"match_id": match_id, "month": need.month or None, "kind": "table",
+                "note": "Mecz dostępny do ręcznej obsady; brak sugestii w tym zakresie.", "items": []}
     # Osobna kolejność dla zakładek „Boisko" i „Stolik" - ta sama ocena, co
     # w Automacie, ale liczona dla danej roli.
     rank_by_kind = {

@@ -135,7 +135,7 @@ def _have(people: Mapping[str, Optional[dict[str, str]]], slots: Iterable[str]) 
     return sum(1 for slot in slots if people.get(slot))
 
 
-def crew_status(state: Mapping[str, Any], code: Any, table_by_club: Any = 0) -> dict:
+def crew_status(state: Mapping[str, Any], code: Any, table_by_club: Any = 0, *, slots=None) -> dict:
     """
     Stan obsady meczu: dziury, lekkie różnice i komplet.
 
@@ -146,9 +146,12 @@ def crew_status(state: Mapping[str, Any], code: Any, table_by_club: Any = 0) -> 
     """
     people = crew(state)
     needs = club_crew_needs(code, table_by_club)
+    allowed = set(SLOTS if slots is None else slots)
+    needs["field"] = min(needs["field"], len(allowed.intersection(FIELD_SLOTS)))
+    needs["table"] = min(needs["table"], len(allowed.intersection(TABLE_SLOTS)))
 
-    field_have = _have(people, FIELD_SLOTS)
-    table_have = _have(people, TABLE_SLOTS)
+    field_have = _have(people, [s for s in FIELD_SLOTS if s in allowed])
+    table_have = _have(people, [s for s in TABLE_SLOTS if s in allowed])
     delegate_have = _have(people, DELEGATE_SLOTS)
 
     field_missing = max(0, needs["field"] - field_have)

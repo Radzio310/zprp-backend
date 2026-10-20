@@ -552,6 +552,14 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
         att = _parse_attendance(td_att)
         res = _parse_result(td_res)
         off = _parse_officials(td_off)
+        from app.assignment_access import schedule_controls
+        controls = schedule_controls(rec)
+        competition_id = context_prefix.rsplit("|", 1)[-1] if context_prefix else ""
+        selector = soup.find("select", attrs={"name": "IdRozgr"})
+        option = (selector.find("option", attrs={"value": competition_id}) if selector and competition_id
+                  else selector.find("option", selected=True) if selector else None)
+        group = option.find_parent("optgroup") if option else None
+        organizer_label = _clean_spaces(group.get("label", "")) if group else ""
 
         # Terminarz pokazuje strony PROTOKOŁU. Przy zmianie gospodarza pierwsza
         # jest nominalnym gościem; migawka przechowuje orientację nominalną,
@@ -589,6 +597,10 @@ def _parse_matches_table(html: str, context_prefix: str = "") -> Dict[str, Dict[
             idzawody_field = ""
 
         out[match_id] = {
+            "assignment_controls": controls,
+            "organizer_label": organizer_label,
+            "competition_id": competition_id,
+            "competition_label": _clean_spaces(option.get_text(" ", strip=True)) if option else "",
             "Id": match_id,
             "IdZawody": idzawody_field,
             "Lp": lp,

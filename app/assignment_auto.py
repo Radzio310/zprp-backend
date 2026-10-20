@@ -99,7 +99,7 @@ from app.assignment_people import (
     table_pair_ok,
     table_rule,
 )
-from app.match_market_rules import league_level
+from app.match_market_rules import league_level, names_match
 from app import settlement_rates as SR
 
 #: Wagi punktowe. Kilometr to jeden punkt - reszta jest wyskalowana względem niego.
@@ -203,6 +203,8 @@ class MatchNeed:
     hall: str = ""
     field_needed: list[str] = field(default_factory=list)
     table_needed: list[str] = field(default_factory=list)
+    allowed_slots: Optional[set[str]] = None
+    allowed_names: Optional[dict[str, list[str]]] = None
     #: Kto już stoi w tym meczu - nie dostanie drugiego gniazda.
     crew_ids: set[str] = field(default_factory=set)
     #: Obsada obecna w gniazdach boiskowych i stolikowych (do reguł par).
@@ -607,6 +609,9 @@ def _hard_reason(
     między meczami nie jest wtedy powodem odmowy - kafelek dostaje stopień
     ostrzeżenia (`gap_with`). Automat nigdy tego nie ustawia.
     """
+    access_reason = role_access_refusal(judge, need, kind)
+    if access_reason:
+        return access_reason
     if judge.judge_id in need.crew_ids:
         return "już stoi w tym meczu"
     window_status, _window_details = _window_availability(ctx, judge.judge_id, need)
@@ -631,6 +636,20 @@ def _hard_reason(
     if round_no == 1 and judge.preferred_days and need.weekday is not None:
         if need.weekday not in judge.preferred_days:
             return "dzień spoza preferowanych"
+    return None
+
+
+def role_access_refusal(judge: Judge, need: MatchNeed, kind: str) -> Optional[str]:
+    if not kind or need.allowed_slots is None:
+        return None
+    slots = [s for s in (FIELD_SLOTS if kind == FIELD else TABLE_SLOTS) if s in need.allowed_slots]
+    if not slots:
+        return "brak prawa ZPRP do tej roli"
+    # Jeden kandydat musi pasować do każdego sugerowanego gniazda grupy.
+    if need.allowed_names is not None and any(
+        not any(names_match(judge.name, name) for name in need.allowed_names.get(slot, [])) for slot in slots
+    ):
+        return "osoby nie ma na liście ZPRP dla tej roli"
     return None
 
 
@@ -1509,7 +1528,7 @@ def describe_candidates(
         refusals: list[str] = []
         role_notes: list[str] = []
         for group in (FIELD, TABLE):
-            role_why = role_refusal(judge, group)
+            role_why = role_access_refusal(judge, need, group) or role_refusal(judge, group)
             if role_why:
                 # Rola w obsadzie to twarda reguła Automatu - kafelek mówi
                 # wprost, czemu sędzia nie pasuje do tej grupy.

@@ -32,6 +32,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import assignment_rules as A
 from app import assignment_scope as S
+from app.assignment_access_data import own_teams, resolve_access
+from app.assignment_live_access import verify_matches
 from app import settlement_origin as SO
 from app import settlement_rates as R
 from app.assignment_auto import build_plan
@@ -688,6 +690,7 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
     """Mecze z zakresu przełożone na „czego brakuje", co odpadło i czemu, oraz stany meczów."""
     managed = await _managed_prefixes(key)
     own = await own_prefixes_of(key)
+    teams = await own_teams(key)
     manual = await manual_match_ids(key)
     wanted_ids = {_s(item) for item in payload.match_ids if _s(item)}
     catalog = await season_catalog()
@@ -724,23 +727,24 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
         code = _s(state.get("RozgrywkiCode") or row["match_code"])
         if not code or R.is_test_competition(code):
             continue
-        if not is_managed_by_province(code, managed) or SO.is_other_district(code, own):
+        access = resolve_access(state, code, teams, season=_s(row["season"]), managed=managed, own=own, province=key)
+        if not access["recommended"]:
             skipped["outside"] += 1
             continue
-        if S.is_league(code) and not payload.include_league:
+        if access["organizer_kind"] == "own" and S.is_league(code) and not payload.include_league:
             skipped["league"] += 1
             continue
-        scoped.append((row, state, code))
+        scoped.append((row, {**state, "assignment_access": access}, code))
 
     seasons_of = await resolve_seasons([(row, state) for row, state, _ in scoped], catalog)
 
     needs = []
     states: dict[str, dict] = {}
+    # Weryfikacja sieciowa dopiero po tanich filtrach; raport zachowuje powody pominięcia.
+    eligible = []
     for row, state, code in scoped:
         match_id = _s(row["match_id"])
         if seasons_of.get(match_id) != current:
-            # Także mecz bez rozpoznanego sezonu: lista go domyślnie nie
-            # pokazuje, więc automat nie ma prawa obsadzić go za plecami.
             skipped["season"] += 1
             continue
         if wanted_ids and match_id not in wanted_ids:
@@ -751,10 +755,15 @@ async def _needs_for(payload: AutoRequest, key: str, roster) -> tuple[list, dict
             skipped["manual"] += 1
             continue
         if A.is_bye(state):
-            # Wiersz terminarza z pauzującą drużyną wygląda jak mecz, ale nikt
-            # na niego nie pojedzie.
             skipped["bye"] += 1
             continue
+        eligible.append((row, state, code))
+    eligible.sort(key=lambda item: (_s(item[0]["match_at"]) or "9999", item[2]))
+    eligible = eligible[:MAX_MATCHES]
+    verified = await verify_matches(key, {_s(row["match_id"]): state for row, state, _ in eligible})
+    for row, _, code in eligible:
+        match_id = _s(row["match_id"])
+        state = verified[match_id]
         need = need_from_state(match_id, state, code, row["match_at"], roster, slots=payload.slots)
         if not need.field_needed and not need.table_needed:
             skipped["complete"] += 1

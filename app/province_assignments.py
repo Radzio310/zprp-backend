@@ -36,6 +36,7 @@ from sqlalchemy import and_, select
 
 from app import assignment_rules as A
 from app import assignment_scope as S
+from app.assignment_access_data import own_teams, resolve_access
 from app import settlement_origin as O
 from app import settlement_rates as R
 from app.db import (
@@ -200,11 +201,17 @@ def _item(
     code: str,
     names: dict[str, str],
     clubs: Optional[dict[str, dict]] = None,
+    access: Optional[dict] = None,
 ) -> dict:
     """Jeden mecz listy: fakty z migawki plus policzony stan obsady."""
     competition = A.competition_key(code)
     table_by_club = _host_table_by_club(state, clubs, row["match_at"])
-    status = A.crew_status(state, code, table_by_club)
+    status = A.crew_status(state, code, table_by_club,
+                           slots=access["editable_slots"] if access is not None else None)
+    needs = A.club_crew_needs(code, table_by_club)
+    if access is not None:
+        needs["field"] = status["field"]["need"]
+        needs["table"] = status["table"]["need"]
     at = row["match_at"]
     effective = S.effective_window(state, at)
     stage = S.round_info(state)
@@ -220,10 +227,11 @@ def _item(
         (score_guest, score_host) if host_swapped else (score_host, score_guest)
     )
     return {
+        "access": access,
         "match_id": _s(row["match_id"]),
         "code": code,
         "competition": competition,
-        "competition_label": names.get(competition.upper(), ""),
+        "competition_label": _s(state.get("competition_label")) or names.get(competition.upper(), ""),
         "category": A.match_category(code),
         "level": league_level(code),
         "match_at": _iso(at),
@@ -263,14 +271,14 @@ def _item(
         "crew": A.crew(state),
         # {field, table, club_table}: `table` to stolikowi OD OKRĘGU, a
         # `club_table` = 1 znaczy, że drugie gniazdo stolika stawia klub.
-        "needs": A.club_crew_needs(code, table_by_club),
+        "needs": needs,
         # Gospodarz stawia drugiego stolikowego sam - obsadowy widzi, czemu
         # jeden stolikowy to tu komplet.
         "table_by_club": table_by_club,
         "status": status,
         # II liga (jej obsady ustala związek) - bootstrap oddaje ją razem z resztą,
         # a klient chowa ją sam.
-        "league": S.is_league(code),
+        "league": league_level(code) == "second",
         "approved": bool(row["approved"]),
         "protocol_status": _s(state.get("protocol_status")),
         "updated_at": _iso(row["last_seen_at"] or row["updated_at"]),
@@ -382,6 +390,7 @@ async def match_list_payload(
     own = await own_prefixes_of(key)
     catalog = await season_catalog()
     clubs = await _club_rules(key)
+    teams = await own_teams(key)
 
     today = _now().date()
     current = S.current_start(catalog, today)
@@ -410,11 +419,10 @@ async def match_list_payload(
             continue
         # Zakres: tylko to, co obsadza okreg - rozgrywki okregowe, puchar
         # wojewodzki i grupy II ligi powierzone temu okregowi.
-        if not is_managed_by_province(code, managed):
+        access = resolve_access(state, code, teams, season=_s(row["season"]), managed=managed, own=own, province=key)
+        if not access["manual"]:
             continue
-        # Mecz innego okregu z listy sedziego - obsadza go tamten okreg.
-        if O.is_other_district(code, own):
-            continue
+        state = {**state, "assignment_access": access}
         candidates.append((row, state, code))
 
     seasons_of = await resolve_seasons([(row, state) for row, state, _ in candidates], catalog)
@@ -451,7 +459,7 @@ async def match_list_payload(
                 continue
             if end and effective_start > end:
                 continue
-        if S.is_league(code):
+        if league_level(code) == "second":
             counts["league"] += 1
             if not include_league:
                 continue
@@ -467,7 +475,7 @@ async def match_list_payload(
         counts["dated" if at is not None else "no_date"] += 1
         if not S.when_allows(mode, at is not None):
             continue
-        item = _item(row, state, code, names, clubs)
+        item = _item(row, state, code, names, clubs, state["assignment_access"])
         item["season_unknown"] = match_season is None
         window.append(item)
 
@@ -595,7 +603,9 @@ async def match_detail(match_id: str, province: str = Query(...)):
 
     return {
         "province": key,
-        "match": _item(row, state, code, names, clubs),
+        "match": _item(row, state, code, names, clubs,
+                       resolve_access(state, code, await own_teams(key), season=_s(row["season"]),
+                                      managed=await _managed_prefixes(key), own=await own_prefixes_of(key), province=key)),
         "history": [
             {
                 "kind": _s(event["event_type"]),

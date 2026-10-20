@@ -459,6 +459,10 @@ def need_from_state(
     gniazdo w jednym meczu.
     """
     wanted = {str(item).strip() for item in slots} if slots is not None else None
+    access = state.get("assignment_access")
+    if isinstance(access, dict):
+        permitted = set(access.get("auto_slots") or [])
+        wanted = permitted if wanted is None else wanted.intersection(permitted)
     window = S.effective_window(state, moment)
     exact_time = bool(window.get("time_known")) and window.get("date_source") == "match"
     local = O.match_moment(moment) if moment and exact_time else None
@@ -523,6 +527,8 @@ def need_from_state(
         guest=display_guest,
         hall=_s(state.get("Hala_nazwa")),
         venue=CR.venue_of(state),
+        allowed_slots=set(access.get("auto_slots") or []) if isinstance(access, dict) else None,
+        allowed_names=access.get("allowed_names") if isinstance(access, dict) else None,
         field_needed=empty_field,
         table_needed=empty_table,
         crew_ids=crew_ids,
