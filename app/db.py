@@ -4457,6 +4457,26 @@ mentoring_config, mentoring_pairs, mentoring_members, mentoring_assignments, men
 from app.mentor_evaluation_tables import define_tables as _define_mentor_evaluation_tables
 mentor_evaluations, mentor_evaluation_versions, mentor_evaluation_requests, mentor_match_videos = _define_mentor_evaluation_tables(metadata)
 
+# Panel „Mentor" pary (21.10.2026) - schemat w osobnym module, kontrakt
+# w `docs/mentor-panel.md`.
+from app.mentor_panel_tables import define_tables as _define_mentor_panel_tables
+(
+    mentor_panels,
+    mentor_match_flags,
+    mentor_categories,
+    mentor_clips,
+    mentor_compilations,
+    mentor_compilation_items,
+    mentor_threads,
+    mentor_comments,
+    mentor_reads,
+    mentor_uploads,
+    mentor_reports,
+    mentor_web_sessions,
+    mentor_qr_logins,
+    mentor_audit,
+) = _define_mentor_panel_tables(metadata)
+
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.
 from app.province_alert_tables import define_tables as _define_alert_tables
 province_alert_settings, province_alert_state = _define_alert_tables(metadata)
@@ -5004,3 +5024,18 @@ with engine.connect() as _conn:
     for _statement in _MENTOR_EVALUATION_MIGRATIONS:
         _conn.execute(text(_statement))
     _conn.commit()
+
+# Panel „Mentor": indeksy na numerach sędziów w hurtowni i archiwum
+# (`app/mentor_panel_tables.py`). Każdy osobno - brak jednego (np. inna
+# baza w trybie deweloperskim) nie może zatrzymać startu serwera.
+from app.mentor_panel_tables import MIGRATIONS as _MENTOR_PANEL_MIGRATIONS
+
+for _statement in _MENTOR_PANEL_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Indeks panelu Mentor nie powstał: %s", _statement, exc_info=True)

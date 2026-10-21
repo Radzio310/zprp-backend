@@ -198,6 +198,23 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
 - Odczyt: `GET /mentor-panel/public/{token}` → `{kind:"clip"|"compilation"|"report", ...}` (bez nazwisk zawodników, bez arkuszy; klip: źródło + zakres + kategoria + opis; mecz młodzieżowy - ostrzeżenie przy publikacji, nie blokada).
 - Web: `https://www.bazapodreka.app/mentor/k/{token}` (klip), `/mentor/z/{token}` (zestawienie), `/mentor/r/{token}` (raport) - działają też na telefonie.
 
+### 4.13 Szczegóły backendu (wdrożone 21.10.2026, wszystko dodatkowe - kształty z 4.1-4.12 bez zmian)
+- Moduły: `app/mentor_panel.py` (pary, pulpit, mecze, flagi, arkusze, zmiany), `_auth`, `_library` (kategorie, klipy, zestawienia, wątki, publiczne), `_media` (wideo, R2, ffmpeg, retencja), `_reports`, `_notify`, `_core`, czyste reguły `_rules` (testy `tests/test_mentor_panel_*.py`).
+- Błędy zawsze `{detail: {code, message}}`; 401 `UNAUTHENTICATED` / `SESSION_EXPIRED`, 403 `NO_ACCESS` / `PANEL_DISABLED` / `READ_ONLY` / `NOT_OWNER` / `CSRF` / `NO_TOGGLE`, 404 `PAIR_NOT_FOUND` / `MATCH_NOT_FOUND` / `NOT_FOUND`, 409 `MP4_NOT_READY` / `MP4_LINK_VIDEO` / `QR_USED`, 422 kody walidacji (`CLIP_TOO_LONG`, `CLIP_RANGE`, `CATEGORY_COLOR`...), 429 `RATE_LIMITED`, 503 `STORAGE_OFF`.
+- `me` = `{judge_id, display_name, is_admin, province, photo_url, via}` (+ `csrf` w `GET /auth/me`; `null` dla JWT). `POST /auth/qr` zwraca też `app_url` (`refhandballapp://mentor/login/{code}`); `GET /auth/qr/{code}` przy `approved` zwraca `{status, me, csrf}`; `POST /auth/login` → `{me, csrf}`. Token CSRF nie wygasa przy `GET /auth/me` (druga karta działa), wymienia go dopiero `GET /auth/csrf`.
+- `PairCard = {id, program, province, judges, mentors, created_at, ended_at, enabled, role, unread, next_match, counts:{matches, clips, open_threads, to_discuss}, links}`; `GET /pairs` zwraca też `me`.
+- `PairDashboard` ma dodatkowo `can: {flag, video, create, categories, publish, toggle}` i `compilations` (6 ostatnich, kształt z 4.7). `ThreadSummary` = Thread bez `comments`, z `comments_count` i `last_comment: {author, body (≤160), created_at}`. `MatchRoom` ma też `can`.
+- `PanelState = {pair_id, enabled, enabled_by, enabled_at, rev}`. `GET /mentoring/management` - każda para ma `panel_enabled`.
+- `Video` ma `can_edit`; dla `kind=upload` `url` = `play_url` (podpisany, 6 h), `thumbnail_url` = `poster_url`. `PATCH .../videos/{id}` przyjmuje też `title`; `sync` jest łączony z dotychczasowym.
+- Wgrywanie: start → `{upload_id, part_size, total_parts, parts:[{n, url}] (do 40 naraz), expires_at}`; `complete` → `{status:"processing", video_id}` (nagranie od razu na liście z `upload_status`). R2 musi mieć CORS dla `PUT` z `bazapodreka.app` z `ExposeHeaders: ETag`.
+- `Category = {id, key, name, color, icon, description, sort, archived, global, created_by}`; `GET` zwraca też zarchiwizowane (`archived: true`) - stare klipy mają czym się narysować. `POST` z `global: true` tylko admin; `PATCH` z `archived: false` przywraca z archiwum.
+- `Clip` z `source=marker` w `markers_from_app` ma `read_only: true` i `category_key` (dawna kategoria znacznika).
+- Zestawienie: `Compilation = {id, pair_id, name, mode, description, created_by, created_at, updated_at, public_url, can_edit, items}`; `POST` przyjmuje też `items`. Zmiana pozycji = edycja (tylko autor / admin).
+- `Thread` i `Comment` mają `can_edit`; status wątku zmienia każdy z pary/mentorów, tytuł - autor.
+- Publikacja → `{public_url, youth_warning: bool, warning: string|null}` (ostrzeżenie dla meczu młodzieżowego). Raport: `POST /reports/{id}/publish` i `DELETE`, `POST /pairs/{id}/reports` przyjmuje `publish: true`; `pdf_url` to podpisany adres R2 (1 h) albo `/mentor-panel/reports/{id}/pdf` (z logowaniem). Publiczny raport ma `pdf_url` = `/mentor-panel/public/{token}/pdf`.
+- `GET /changes` → `scopes` z: `matches, clips, threads, compilations, sheets, videos, categories, reports, panel`; `since` większe niż `rev` = `changed: true` ze wszystkimi zakresami.
+- Push: `data = {type:"mentor_panel", kind:"mentor_panel", pairId, matchId?, clipId?, threadId?}`, przełącznik `mentorPanel`. E-mail zbiorczy z kolejki w pamięci procesu (po restarcie oczekujące listy przepadają, push już poszedł).
+
 ## 5. Web (BAZA_web, `app/(mentor)/`)
 - `/mentor` - lista moich par (karty par, nieprzeczytane, następny mecz) albo logowanie QR.
 - `/mentor/zaloguj/{code}` - strona dla telefonu bez aplikacji (otwórz w BAZA / pobierz).

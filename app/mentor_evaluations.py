@@ -397,6 +397,8 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
                 continue
         published.append(r)
     may_view_videos = me in pair or is_pair_mentor or actor.is_admin
+    # Własne nagrania z panelu „Mentor" (`kind=upload`) nie mają publicznego
+    # adresu - starsze aplikacje otwierałyby je jak link, więc tu ich nie ma.
     video_rows = [
         dict(row)
         for row in await database.fetch_all(
@@ -404,6 +406,7 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
             .where(match_videos.c.match_id == str(match_id))
             .order_by(match_videos.c.created_at.asc())
         )
+        if (dict(row).get("kind") or "link") == "link"
     ] if may_view_videos else []
     ids = set(pair) | set(ctx["co_mentors"]) | {str(row["added_by"]) for row in video_rows}
     for r in rows:
@@ -480,6 +483,17 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
     if me not in pair:
         raise HTTPException(403, "Tylko sędziowie tej pary mogą dodawać nagrania meczu.")
     url = _valid_video_url(body.url)
+    row, created = await insert_link_video(match_id, pair_key(pair), url, me)
+    names = await people([row["added_by"]])
+    return {"ok": True, "created": created, "video": _video_shape(row, names)}
+
+
+async def insert_link_video(match_id: str, pair_key_value: str, url: str, added_by: str) -> tuple[Dict[str, Any], bool]:
+    """Nagranie-link meczu: podgląd linku, start transmisji YouTube, jeden wiersz na adres.
+
+    Wspólne dla galerii w aplikacji i panelu „Mentor" (`app/mentor_panel_media.py`).
+    `url` musi być już znormalizowany (`normalized_video_url`).
+    """
     existing = await database.fetch_one(
         select(match_videos).where(
             match_videos.c.match_id == str(match_id),
@@ -487,8 +501,7 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
         )
     )
     if existing:
-        names = await people([existing["added_by"]])
-        return {"ok": True, "created": False, "video": _video_shape(dict(existing), names)}
+        return dict(existing), False
     from app.link_preview import preview_or_instant
 
     preview = await preview_or_instant(url)
@@ -497,11 +510,12 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
     row = {
         "id": uuid4().hex,
         "match_id": str(match_id),
-        "pair_key": pair_key(pair),
+        "pair_key": pair_key_value,
         "url": url,
         "normalized_url": url,
         "provider": video_provider(url),
-        "added_by": me,
+        "added_by": str(added_by),
+        "kind": "link",
         "created_at": now(),
         "title": str(preview.get("title") or "")[:200] or None,
         "thumbnail_url": str(preview.get("thumbnail_url") or "")[:2048] or None,
@@ -527,8 +541,7 @@ async def add_match_video(match_id: str, body: MatchVideoRequest, actor: Actor =
             raise
         row = dict(existing)
         created = False
-    names = await people([row["added_by"]])
-    return {"ok": True, "created": created, "video": _video_shape(row, names)}
+    return row, created
 
 
 @router.patch("/match/{match_id}/videos/{video_id}")
@@ -600,7 +613,15 @@ async def match_timeline(match_id: str, actor: Actor = Depends(market_actor)):
     is_mentor = me in ctx["mentors"]["mentoring"] or me in ctx["mentors"]["obsada"]
     if me not in pair and not is_mentor and not actor.is_admin:
         raise _err(403, "NO_ACCESS", "Oś meczu widzą sędziowie pary i ich mentorzy.")
-    code = str(ctx["match"]["state"].get("RozgrywkiCode") or "").strip()
+    return await timeline_for_match(match_id, str(ctx["match"]["state"].get("RozgrywkiCode") or ""))
+
+
+async def timeline_for_match(match_id: str, code: str) -> Dict[str, Any]:
+    """Oś meczu z protokołu ProEla z godzinami zdarzeń - bez sprawdzania dostępu.
+
+    Wspólna dla `/mentor-evaluations/match/{id}/timeline` i pokoju meczu panelu „Mentor".
+    """
+    code = str(code or "").strip()
     empty = {"available": False, "half_minutes": 30, "break_minutes": 10, "teams": {}, "events": []}
     if not code:
         return empty
@@ -724,6 +745,7 @@ async def request_evaluation(match_id: str, req: EvaluationRequest, actor: Actor
         first_video = await database.fetch_one(
             select(match_videos.c.url)
             .where(match_videos.c.match_id == str(match_id))
+            .where(or_(match_videos.c.kind.is_(None), match_videos.c.kind == "link"))
             .order_by(match_videos.c.created_at.asc())
             .limit(1)
         )

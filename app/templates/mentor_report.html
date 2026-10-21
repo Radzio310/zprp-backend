@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<title>{{ snap.title }} - {{ snap.scope_label }}</title>
+<style>
+  /* Raport pary z panelu Mentor - ten sam szablon dla podglądu A4 i PDF (WeasyPrint). */
+  @page {
+    size: A4;
+    margin: 13mm 12mm 15mm 12mm;
+    @bottom-left { content: "BAZA · Mentor · {{ snap.scope_label|replace('"', '') }}"; font-family: "DejaVu Sans", Arial, sans-serif; font-size: 7pt; color: #8a8f98; }
+    @bottom-right { content: "Strona " counter(page) " z " counter(pages); font-family: "DejaVu Sans", Arial, sans-serif; font-size: 7pt; color: #8a8f98; }
+  }
+  :root { --ink: #14161a; --muted: #6b7280; --line: #e3e6eb; --accent: #6d4ccf; --deep: #1b1230; --soft: #f5f2fd; --good: #0f9f6e; --bad: #d13a4f; }
+  * { box-sizing: border-box; }
+  html { background: #e9e9ee; }
+  body { font-family: "DejaVu Sans", Arial, sans-serif; font-size: 8.8pt; color: var(--ink); margin: 0 auto; background: #fff; max-width: 210mm; }
+  @media screen { body { padding: 13mm 12mm; box-shadow: 0 4px 24px rgba(0,0,0,.12); min-height: 297mm; } }
+  .eyebrow { font-size: 7.4pt; letter-spacing: 1.2pt; text-transform: uppercase; color: var(--accent); font-weight: 800; }
+  h1 { font-size: 20pt; color: var(--deep); margin: 3pt 0 2pt; line-height: 1.15; }
+  h2 { font-size: 12pt; color: var(--deep); margin: 16pt 0 6pt; padding-bottom: 3pt; border-bottom: 2pt solid var(--soft); page-break-after: avoid; }
+  .ribbon { height: 4pt; margin: 8pt 0 10pt; background: linear-gradient(90deg, var(--accent) 0%, #a78bfa 70%, #f0abfc 100%); border-radius: 2pt; }
+  .meta { color: var(--muted); font-size: 8pt; }
+  .people { margin-top: 6pt; }
+  .chip { display: inline-block; padding: 1.5pt 6pt; border-radius: 8pt; background: var(--soft); color: var(--deep); font-size: 7.6pt; margin: 0 3pt 3pt 0; }
+  .tiles { width: 100%; border-collapse: separate; border-spacing: 6pt 0; margin: 0 -6pt; }
+  .tile { background: var(--soft); border-radius: 8pt; padding: 8pt 10pt; width: 25%; vertical-align: top; }
+  .tile b { display: block; font-size: 17pt; color: var(--deep); }
+  .tile span { color: var(--muted); font-size: 7.6pt; }
+  .story { margin: 8pt 0 0; padding-left: 14pt; }
+  .story li { margin-bottom: 2pt; }
+  table.list { width: 100%; border-collapse: collapse; }
+  table.list th { text-align: left; font-size: 7.2pt; text-transform: uppercase; letter-spacing: .6pt; color: var(--muted); border-bottom: 1pt solid var(--line); padding: 3pt 4pt; }
+  table.list td { border-bottom: 1pt solid var(--line); padding: 4pt; vertical-align: top; }
+  .num { text-align: right; white-space: nowrap; }
+  .star { color: #f59e0b; font-weight: 800; }
+  .clips { width: 100%; }
+  .clip { display: inline-block; width: 48.5%; vertical-align: top; margin: 0 0 8pt 0; border: 1pt solid var(--line); border-radius: 8pt; overflow: hidden; page-break-inside: avoid; }
+  .clip:nth-child(odd) { margin-right: 2.5%; }
+  .clip .thumb { width: 100%; height: 34mm; object-fit: cover; background: #1b1230; display: block; }
+  .clip .nothumb { width: 100%; height: 34mm; background: linear-gradient(135deg, #1b1230, #6d4ccf); }
+  .clip .body { padding: 6pt 8pt; }
+  .clip .title { font-weight: 800; color: var(--deep); }
+  .clip .range { color: var(--muted); font-size: 7.6pt; }
+  .clip .qr { float: right; width: 18mm; height: 18mm; margin-left: 6pt; }
+  .cat { display: inline-block; padding: 1pt 5pt; border-radius: 6pt; color: #fff; font-size: 7pt; margin: 3pt 3pt 0 0; }
+  .thread { border-left: 3pt solid var(--soft); padding: 2pt 0 2pt 8pt; margin-bottom: 8pt; page-break-inside: avoid; }
+  .thread .t { font-weight: 800; color: var(--deep); }
+  .comment { margin: 3pt 0 0; }
+  .comment .who { color: var(--muted); font-size: 7.4pt; }
+  .bar { height: 5pt; background: var(--soft); border-radius: 3pt; position: relative; width: 60mm; }
+  .bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3pt; }
+  .goals { background: var(--soft); border-radius: 8pt; padding: 10pt 12pt; white-space: pre-wrap; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+  <div class="eyebrow">BAZA · Mentor{% if public %} · raport publiczny{% endif %}</div>
+  <h1>{{ snap.title }}</h1>
+  <div class="meta">{{ snap.scope_label }} · wygenerowano {{ generated }}</div>
+  {% if snap.pair %}
+  <div class="people">
+    {% for j in snap.pair.judges or [] %}<span class="chip">{{ j.full_name }}</span>{% endfor %}
+    {% for m in snap.pair.mentors or [] %}<span class="chip">Mentor: {{ m.full_name }}</span>{% endfor %}
+  </div>
+  {% endif %}
+  <div class="ribbon"></div>
+
+  {% set sections = snap.sections or [] %}
+
+  {% if 'summary' in sections and snap.summary %}
+  <h2>{{ labels.summary }}</h2>
+  <table class="tiles"><tr>
+    <td class="tile"><b>{{ snap.summary.matches }}</b><span>mecze</span></td>
+    <td class="tile"><b>{{ snap.summary.starred }}</b><span>istotne</span></td>
+    <td class="tile"><b>{{ snap.summary.clips }}</b><span>klipy</span></td>
+    <td class="tile"><b>{{ snap.summary.threads_open }}</b><span>otwarte wątki</span></td>
+  </tr></table>
+  {% if snap.summary.story %}<ul class="story">{% for line in snap.summary.story %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+  {% endif %}
+
+  {% if 'matches' in sections %}
+  <h2>{{ labels.matches }}</h2>
+  {% if snap.matches %}
+  <table class="list">
+    <tr><th>Data</th><th>Rozgrywki</th><th>Mecz</th><th class="num">Wynik</th>{% if not public %}<th class="num">Delegat</th><th class="num">Mentor</th>{% endif %}</tr>
+    {% for m in snap.matches %}
+    <tr>
+      <td>{{ m.scheduled_at|pldate }}</td>
+      <td>{{ m.competition_name or '-' }}{% if m.match_code %}<div class="muted">{{ m.match_code }}</div>{% endif %}</td>
+      <td>{% if m.starred %}<span class="star">★</span> {% endif %}{{ m.home.name or '?' }} - {{ m.away.name or '?' }}{% if m.star_reason and not public %}<div class="muted">{{ m.star_reason }}</div>{% endif %}</td>
+      <td class="num">{% if m.home.score is not none %}{{ m.home.score }}:{{ m.away.score }}{% else %}-{% endif %}</td>
+      {% if not public %}<td class="num">{{ m.sheets.delegate|points if m.sheets else '-' }}</td><td class="num">{{ m.sheets.mentor|points if m.sheets else '-' }}</td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Brak meczów w zakresie raportu.</p>{% endif %}
+  {% endif %}
+
+  {% if 'clips' in sections %}
+  <h2>{{ labels.clips }}</h2>
+  {% if snap.clips %}
+  <div class="clips">
+    {% for c in snap.clips %}
+    <div class="clip">
+      {% if c.thumbnail_url %}<img class="thumb" src="{{ c.thumbnail_url }}" alt="" />{% else %}<div class="nothumb"></div>{% endif %}
+      <div class="body">
+        {% set code = c.public_url|qr %}{% if code %}<img class="qr" src="{{ code }}" alt="QR" />{% endif %}
+        <div class="title">{{ c.title or 'Klip' }}</div>
+        <div class="range">{{ c.start_s|clock }} - {{ c.end_s|clock }}{% if c.author and not public %} · {{ c.author.name }}{% endif %}</div>
+        {% for cat in c.categories or [] %}<span class="cat" style="background: {{ cat.color|hex }}">{{ cat.name }}</span>{% endfor %}
+        {% if c.note %}<div style="margin-top:3pt">{{ c.note }}</div>{% endif %}
+        {% if c.public_url %}<div class="range">{{ c.public_url }}</div>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="muted">Brak klipów w zakresie raportu.</p>{% endif %}
+  {% endif %}
+
+  {% if 'compilations' in sections and snap.compilations %}
+  <h2>{{ labels.compilations }}</h2>
+  <table class="list">
+    <tr><th>Zestawienie</th><th>Rodzaj</th><th class="num">Klipy</th><th>Link</th></tr>
+    {% for z in snap.compilations %}
+    <tr><td><b>{{ z.name }}</b>{% if z.description %}<div class="muted">{{ z.description }}</div>{% endif %}</td>
+      <td>{{ {'contrast': 'kontrast', 'similar': 'podobne', 'free': 'wolne'}.get(z.mode, z.mode) }}</td>
+      <td class="num">{{ z.items_count }}</td><td class="muted">{{ z.public_url or '-' }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if 'threads' in sections and snap.threads %}
+  <h2>{{ labels.threads }}</h2>
+  {% for t in snap.threads %}
+  <div class="thread">
+    <div class="t">{{ t.title or 'Wątek' }}{% if t.status == 'resolved' %} · <span style="color: var(--good)">rozwiązany</span>{% endif %}</div>
+    {% for c in t.comments or [] %}
+    <div class="comment"><span class="who">{% if c.author and not public %}{{ c.author.name }} · {% endif %}{{ {'pair': 'para', 'mentor': 'mentor', 'admin': 'admin'}.get(c.role or (c.author.role if c.author else ''), '') }}</span><br />{{ c.body }}</div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if 'sheets' in sections and not public %}
+  <h2>{{ labels.sheets }}</h2>
+  {% if snap.delegate_sheets or snap.mentor_sheets %}
+  <table class="list">
+    <tr><th>Data</th><th>Źródło</th><th>Autor</th><th class="num">Ocena</th></tr>
+    {% for d in snap.delegate_sheets or [] %}<tr><td>{{ d.match_date|pldate }}</td><td>Arkusz delegata</td><td>{{ d.delegate_name or '-' }}</td><td class="num">{{ d.points|points }}</td></tr>{% endfor %}
+    {% for m in snap.mentor_sheets or [] %}<tr><td>{{ m.match_at|pldate }}</td><td>Ocena mentora</td><td>{% for a in m.authors %}{{ a.name }}{% if not loop.last %}, {% endif %}{% endfor %}</td><td class="num">{{ m.letter or '' }} {{ m.points|points }}</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Skala A = 1 … G = 7 (średnia liter sekcji I-X).</p>
+  {% else %}<p class="muted">Brak arkuszy w zakresie raportu.</p>{% endif %}
+  {% endif %}
+
+  {% if 'trends' in sections and not public and section_rows %}
+  <h2>{{ labels.trends }}</h2>
+  <table class="list">
+    <tr><th>Sekcja</th><th class="num">Delegat</th><th class="num">Mentor</th><th>Skala</th></tr>
+    {% for r in section_rows %}{% if r.samples %}
+    <tr><td>{{ r.label }}</td><td class="num">{{ r.delegate|points }}</td><td class="num">{{ r.mentor|points }}</td>
+      <td><div class="bar">{% if r.delegate %}<i style="width: {{ (r.delegate / 7 * 100)|round(0) }}%; background: #a78bfa"></i>{% endif %}</div></td></tr>
+    {% endif %}{% endfor %}
+  </table>
+  {% endif %}
+
+  {% if 'priorities' in sections and snap.priorities %}
+  <h2>{{ labels.priorities }}</h2>
+  <table class="list">
+    <tr><th>Priorytet</th><th class="num">Ile razy</th><th>Ostatnio</th></tr>
+    {% for p in snap.priorities %}<tr><td>{{ p.text }}</td><td class="num">{{ p.count }}</td><td>{{ p.last|pldate }}</td></tr>{% endfor %}
+  </table>
+  {% endif %}
+
+  {% if 'goals' in sections and snap.goals %}
+  <h2>{{ labels.goals }}</h2>
+  <div class="goals">{{ snap.goals }}</div>
+  {% endif %}
+</body>
+</html>
