@@ -1,3 +1,4 @@
+import asyncio
 # app/official_role.py
 #
 # „Czy to konto jest sędzią boiskowym albo delegatem TEGO meczu?"
@@ -143,9 +144,7 @@ async def _zprp_judge_id_by_login(
             prof = await client.get(
                 f"/index.php?a=sedzia&b=edycja&NrSedzia={judge_id}"
             )
-            parsed = _parse_profile_from_edit_form(
-                prof.content.decode("iso-8859-2", errors="replace")
-            )
+            parsed = await asyncio.to_thread(_parse_profile_from_edit_form, prof.content.decode("iso-8859-2", errors="replace"))
             values = (parsed or {}).get("values", {}) or {}
             last = _clean(values.get("Nazwisko"))
             first = _clean(values.get("Imie"))

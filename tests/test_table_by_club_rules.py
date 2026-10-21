@@ -110,3 +110,33 @@ class TestDatyDeklaracji:
     def test_stara_deklaracja_bez_daty_zostaje_bez_daty(self):
         # Pusta data przy deklaracji znaczy „od zawsze" - nie wolno jej zawęzić.
         assert table_since(1, None, 1, None, TODAY) is None
+
+
+class TestDrkBezDeklaracjiKlubu:
+    """Decyzja 21.10.2026: na meczach prowadzonych przez DRK stolikowych daje okręg."""
+
+    def test_drk_rozpoznane_po_organizatorze(self):
+        assert A.drk_runs_match({"assignment_access": {"organizer_kind": "drk"}})
+        assert not A.drk_runs_match({"assignment_access": {"organizer_kind": "own"}})
+        assert not A.drk_runs_match({})
+
+    def test_lista_drk_bierze_zero_od_klubu(self):
+        # Lista (province_assignments._host_table_by_club) i Automat pytaja
+        # tego samego drk_runs_match; modul listy wymaga bazy, wiec tu sama regula.
+        drk = {"assignment_access": {"organizer_kind": "drk"}}
+        table = 0 if A.drk_runs_match(drk) else A.club_table_active(1)
+        assert A.club_crew_needs("S/JmM/7", table) == {"field": 2, "table": 2, "club_table": 0}
+
+    def test_automat_drk_z_deklaracja_szuka_dwoch_stolikowych(self):
+        from datetime import datetime
+        from app.assignment_context import Roster, need_from_state
+
+        roster = Roster()
+        roster.clubs = {"spr gliwice": {"table_by_club": 1}}
+        state = {"RozgrywkiCode": "S/JmM/12", "ID_zespoly_gosp_ZespolNazwa": "SPR Gliwice",
+                 "ID_zespoly_gosc_ZespolNazwa": "MKS Zabrze"}
+        when = datetime(2026, 10, 5, 18)
+        own = need_from_state("1", state, "S/JmM/12", when, roster)
+        assert own.table_needed == ["sekretarz"]
+        drk = {**state, "assignment_access": {"organizer_kind": "drk", "auto_slots": ["sekretarz", "czas"]}}
+        assert need_from_state("1", drk, "S/JmM/12", when, roster).table_needed == ["sekretarz", "czas"]

@@ -247,6 +247,9 @@ app.add_middleware(
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
+from app import loop_lag as _loop_lag
+app.add_middleware(_loop_lag.RequestNoteMiddleware)
+app.include_router(_loop_lag.make_router())
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.exception_handler(HTTPException)
@@ -1093,6 +1096,24 @@ async def _cleanup_loop():
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    _loop_lag.start()  # monitor opóźnienia pętli (GET /admin/loop-lag)
+    # Wątki z parsowaniem (bs4, JSON) dzielą GIL z pętlą: krótszy kwant (1 ms zamiast 5 ms)
+    # i ograniczona pula, żeby pętla szybko wracała do głosu mimo kilku parserów naraz.
+    import sys as _sys
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    _sys.setswitchinterval(0.001)
+    asyncio.get_running_loop().set_default_executor(_TPE(max_workers=8, thread_name_prefix="cpu"))
+    # Schemat OpenAPI liczy się kilka sekund czystego CPU - w wątku, żeby pierwsze
+    # wejście na /openapi.json nie zatrzymało pętli (potem leci z pamięci).
+    asyncio.ensure_future(asyncio.to_thread(app.openapi))
+    # Wyszukiwarka publiczna: indeks sędziów i mapa miast budują się w tle.
+    try:
+        from app.zprp_public.portal import warm_search
+
+        asyncio.ensure_future(warm_search())
+    except Exception:
+        logger.exception("Rozgrzewka wyszukiwarki nie wystartowała")
 
     try:
         if await ensure_pod_reka_defaults():

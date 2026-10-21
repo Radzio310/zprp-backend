@@ -85,6 +85,7 @@ _FILE_TTL = 3600.0
 _FILE_CACHE_BYTES = 60 * 1024 * 1024
 _attachment_cache: dict[str, tuple[float, list[dict]]] = {}
 _file_cache: dict[str, tuple[float, bytes, str]] = {}
+_thumb_cache: dict[str, bytes] = {}
 
 
 def _proxy_url(file_url: str) -> str:
@@ -151,7 +152,7 @@ def _remember_file(url: str, body: bytes, ctype: str) -> None:
 
 
 @router.get("/attachments/file")
-async def attachment_file(u: str = Query(..., max_length=600), download: bool = False, name: str = "") -> Response:
+async def attachment_file(u: str = Query(..., max_length=600), download: bool = False, name: str = "", w: int = Query(0, ge=0, le=1600)) -> Response:
     """Proxy plików protokołu (CORS `*`). Tylko https, hosty ZPRP, katalog załączników, limit 15 MB."""
     if not MR.is_allowed_attachment_url(u):
         raise HTTPException(400, "Niedozwolony adres pliku")
@@ -184,6 +185,17 @@ async def attachment_file(u: str = Query(..., max_length=600), download: bool = 
         if not (ctype == "application/pdf" or ctype.startswith("image/")):
             ctype = "application/octet-stream"
         _remember_file(u, body, ctype)
+    if w and ctype.startswith("image/"):
+        key = f"{u}|{w}"
+        thumb = _thumb_cache.get(key)
+        if thumb is None:
+            thumb = await asyncio.to_thread(MR.make_thumbnail, body, w)
+            if thumb is not None:
+                if len(_thumb_cache) > 400:
+                    _thumb_cache.clear()
+                _thumb_cache[key] = thumb
+        if thumb is not None:
+            return Response(thumb, media_type="image/jpeg", headers={**_CORS, "Cache-Control": "public, max-age=604800, immutable", "X-Content-Type-Options": "nosniff"})
     filename = re.sub(r"[^A-Za-z0-9._-]+", "_", name or u.rsplit("/", 1)[-1])[:80] or "zalacznik"
     headers = {
         **_CORS,

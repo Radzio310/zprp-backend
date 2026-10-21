@@ -18,6 +18,8 @@ liczy `name_key`, więc „NOWAK Jan" i „Jan Nowak" trafiają w to samo miejsc
 
 from __future__ import annotations
 
+import asyncio
+
 import logging
 from typing import Any, Iterable, Mapping
 
@@ -207,7 +209,7 @@ async def backfill_grades(province: str, *, limit: int = BACKFILL_FORMS) -> dict
                         data={"IdZawody": match_id, "akcja": "UstawSedziow", "user": ""},
                         cookies=cookies,
                     )
-                    parsed = _parse_referee_form(html)
+                    parsed = await asyncio.to_thread(_parse_referee_form, html)
                     found = options_grades(parsed)
                     if not found:
                         continue

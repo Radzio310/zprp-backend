@@ -1,3 +1,4 @@
+import asyncio
 # app/password_change.py
 
 import logging
@@ -125,7 +126,7 @@ async def _submit_password_change(
         method="GET",
         cookies=client.cookies,
     )
-    soup = BeautifulSoup(html, "html.parser")
+    soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
 
     # 2) Znajdź formularz z akcją '?a=konto'
     form = soup.find("form", {"action": "?a=konto"})

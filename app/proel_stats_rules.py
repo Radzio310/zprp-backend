@@ -33,6 +33,7 @@ dnia zamieniłoby każdy wykres w wykres szkolenia.
 """
 from __future__ import annotations
 
+import functools
 import json
 import statistics
 import unicodedata
@@ -214,6 +215,11 @@ LEVEL_LABELS: Dict[str, str] = {
 
 
 def prefix_of(code: Any) -> str:
+    return _prefix_of_text(code if isinstance(code, str) else str(code or ""))
+
+
+@functools.lru_cache(maxsize=65536)
+def _prefix_of_text(code: str) -> str:
     """Przedrostek okręgu z numeru meczu, albo pusty napis.
 
     Przedrostek jest wtedy, gdy PIERWSZY człon numeru nie jest kodem rozgrywek:

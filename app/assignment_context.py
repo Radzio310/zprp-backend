@@ -483,7 +483,7 @@ def need_from_state(
     club = roster.club_for(display_host)
     needs = A.club_crew_needs(
         code,
-        A.club_table_active(
+        0 if A.drk_runs_match(state) else A.club_table_active(
             club.get("table_by_club", 0), club.get("table_by_club_since"), local
         ),
     )

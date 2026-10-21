@@ -60,6 +60,18 @@ def crew_needs(code: Any) -> dict[str, int]:
     return {"field": 1 if small else 2, "table": 0 if small else 2}
 
 
+def drk_runs_match(state: Any) -> bool:
+    """
+    Czy mecz prowadzi DRK (organizator z grupy rozgrywek, nie prefiks ligi).
+
+    Decyzja 21.10.2026: na takich meczach deklaracja „drugi stolikowy od klubu"
+    NIGDY nie działa - okręg daje obu stolikowych. To jedyne miejsce, które
+    to rozstrzyga; Automat i lista obsady biorą tę wartość stąd.
+    """
+    access = state.get("assignment_access") if isinstance(state, Mapping) else None
+    return isinstance(access, Mapping) and access.get("organizer_kind") == "drk"
+
+
 def club_table_active(table_by_club: Any, since: Any = None, match_day: Any = None) -> int:
     """
     Ilu stolikowych stawia klub gospodarza W DNIU TEGO MECZU (0 albo 1).

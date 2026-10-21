@@ -1376,7 +1376,7 @@ async def _fetch_squad_for_team(
 ) -> Dict[str, Any]:
     resp = await client.get(squad_url, cookies=client.cookies)
     html = resp.content.decode("iso-8859-2", errors="replace")
-    return _parse_beach_team_squad_html(html, squad_url=squad_url)
+    return await asyncio.to_thread(_parse_beach_team_squad_html, html, squad_url=squad_url)
 
 
 async def _fetch_teams_from_zprp(
@@ -1404,7 +1404,7 @@ async def _fetch_teams_from_zprp(
         )
         resp = await client.get(url, cookies=client.cookies)
         html = resp.content.decode("iso-8859-2", errors="replace")
-        teams = _parse_beach_teams_html(html)
+        teams = await asyncio.to_thread(_parse_beach_teams_html, html)
 
         if include_squads:
             for team in teams:
@@ -1446,7 +1446,7 @@ async def _fetch_filters_from_zprp(
         )
         resp = await client.get(url, cookies=client.cookies)
         html = resp.content.decode("iso-8859-2", errors="replace")
-        return _parse_beach_filters_html(html)
+        return await asyncio.to_thread(_parse_beach_filters_html, html)
     finally:
         await client.aclose()
 

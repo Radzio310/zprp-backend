@@ -1087,7 +1087,7 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
         for judge_id in judge_ids:
             path = _build_judge_matches_path(judge_id, None)
             _, html = await fetch_with_correct_encoding(private_client, path, method="GET", cookies=cookies)
-            parsed = _parse_match_rows_from_soup(BeautifulSoup(html, "html.parser"))
+            parsed = await asyncio.to_thread(_parse_match_rows_from_soup, await asyncio.to_thread(BeautifulSoup, html, "html.parser"))
             seen_ids: set[str] = set()
             candidates: Dict[str, Dict[str, Any]] = {}
             for item in (parsed.get("matches") or {}).values():
@@ -1329,7 +1329,7 @@ async def _run_public(province: str, mode: str) -> Dict[str, int]:
 
 async def _scrape_full_schedule(client: AsyncClient, cookies: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
     _, html0 = await fetch_with_correct_encoding(client, "/index.php?a=terminarz", method="GET", cookies=cookies)
-    soup0 = BeautifulSoup(html0, "html.parser")
+    soup0 = await asyncio.to_thread(BeautifulSoup, html0, "html.parser")
     seasons = _parse_select_options(soup0.find("select", attrs={"name": "Filtr_sezon"}))
     season = _pick_season_id(seasons, None)
     cats = [x for x in _parse_select_options(soup0.find("select", attrs={"name": "Filtr_kategoria"})) if x[0] and x[0] != "0"]
@@ -1339,12 +1339,12 @@ async def _scrape_full_schedule(client: AsyncClient, cookies: Dict[str, str]) ->
     for cat_value, cat_label, _ in cats:
         path_cat = "/index.php?" + urlencode({"a": "terminarz", "Filtr_sezon": season, "Filtr_kategoria": cat_value, "IdRundy": "ALL"})
         _, html_cat = await fetch_with_correct_encoding(client, path_cat, method="GET", cookies=cookies)
-        soup_cat = BeautifulSoup(html_cat, "html.parser")
+        soup_cat = await asyncio.to_thread(BeautifulSoup, html_cat, "html.parser")
         competitions = [x for x in _parse_select_options(soup_cat.find("select", attrs={"name": "IdRozgr"})) if x[0] and x[0] != "0"]
         for competition, _, _ in competitions:
             path = "/index.php?" + urlencode({"a": "terminarz", "Filtr_sezon": season, "Filtr_kategoria": cat_value, "IdRozgr": competition, "IdRundy": "ALL"})
             _, html = await fetch_with_correct_encoding(client, path, method="GET", cookies=cookies)
-            parsed = _parse_matches_table(html, context_prefix=f"{season}|{cat_value}|{competition}")
+            parsed = await asyncio.to_thread(_parse_matches_table, html, context_prefix=f"{season}|{cat_value}|{competition}")
             for match_id, item in parsed.items():
                 if _str(item.get("IdZawody")).isdigit():
                     output[_str(item.get("IdZawody"))] = _schedule_to_state(item)

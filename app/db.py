@@ -1077,6 +1077,18 @@ zprp_judge_grades = Table(
     ),
 )
 
+# Prawa do formularza obsady per (konto ZPRP, mecz) - ostatni odczyt, po którym
+# panel od razu zna gniazda. Klucz konta to skrót loginu; zapis w ZPRP dalej
+# czyta formularz na żywo. Patrz `app/assignment_rights.py`.
+assignment_form_rights = Table(
+    "assignment_form_rights",
+    metadata,
+    Column("account_key", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("rights", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("read_at", DateTime(timezone=True), nullable=False, index=True),
+)
+
 # Mecze, które obsadowy układa RĘCZNIE - automat ich nie rusza.
 province_match_manual = Table(
     "province_match_manual",
@@ -5039,3 +5051,11 @@ for _statement in _MENTOR_PANEL_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Indeks panelu Mentor nie powstał: %s", _statement, exc_info=True)
+
+# Indeksy wyszukiwarki publicznej (pg_trgm, numer meczu) - w tle, nie blokują startu.
+try:
+    from app.zprp_public.search_index import ensure_in_background as _search_indexes
+
+    _search_indexes(engine)
+except Exception:  # noqa: BLE001
+    pass

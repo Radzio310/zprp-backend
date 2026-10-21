@@ -113,7 +113,7 @@ async def _submit_offtime(
             data=initial_data,
         )
 
-        soup = BeautifulSoup(html, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
         form = soup.find("form", {"name": "OffTimeForm"})
         if not form:
             raise RuntimeError("Nie znaleziono formularza OffTimeForm; HTML fragment=" + html[:500])

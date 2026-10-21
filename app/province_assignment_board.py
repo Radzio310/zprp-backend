@@ -922,6 +922,44 @@ async def candidates(payload: CandidatesRequest):
     }
 
 
+class WarmRequest(BaseModel):
+    province: str
+    match_ids: list[str] = []
+
+
+@router.post("/warm", summary="Rozgrzej prawa konta monitora do kandydatów - tylko odczyt")
+async def warm(payload: WarmRequest):
+    """
+    Po wczytaniu listy panel prosi o odczyt formularzy meczów, na które Automat
+    będzie liczył kandydatów, zanim obsadowy je otworzy. Czyta najwyżej dwa
+    formularze naraz kontem monitora i nigdy niczego nie zapisuje w ZPRP.
+    Do rozgrzania kwalifikują się tylko mecze z własną drużyną (`recommended`).
+    """
+    from app.assignment_access_data import own_teams, resolve_access
+    from app.assignment_live_access import warm_monitor
+    from app.province_assignments import _managed_prefixes, own_prefixes_of
+
+    key = require_province(payload.province)
+    ids = [mid for mid in dict.fromkeys(_s(m) for m in payload.match_ids) if mid][:8]
+    if not ids:
+        return {"rights": {}, "failed": [], "skipped": []}
+    rows = await database.fetch_all(
+        select(province_matches).where(and_(
+            province_matches.c.province.in_(spellings(key) or [key]),
+            province_matches.c.match_id.in_(ids))))
+    teams, managed, own = await own_teams(key), await _managed_prefixes(key), await own_prefixes_of(key)
+    eligible = set()
+    for row in rows:
+        state = state_dict(row["state_json"]) or {}
+        access = resolve_access(state, _s(state.get("RozgrywkiCode") or row["match_code"]), teams,
+                                season=_s(row["season"]), managed=managed, own=own, province=key)
+        if access["recommended"]:
+            eligible.add(_s(row["match_id"]))
+    result = await warm_monitor(key, [mid for mid in ids if mid in eligible])
+    return {"failed": result.get("failed", []), "skipped": result.get("skipped", []),
+            "ready": sorted(result.get("rights", {})), "busy": bool(result.get("busy"))}
+
+
 #: Ile sekund żyje lista kilometrów do jednego miasta.
 DISTANCES_TTL = 600
 

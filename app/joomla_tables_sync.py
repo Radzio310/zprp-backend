@@ -220,7 +220,7 @@ async def _update_menu_link(client: httpx.AsyncClient, link: str, cache_key: str
     # httpx.AsyncClient nie może wysłać listy krotek przez `data=`, ponieważ
     # tworzy wtedy synchroniczny strumień żądania. Kodujemy formularz sami;
     # lista krotek świadomie zachowuje powtarzające się pola Joomla.
-    encoded_form = urlencode(_menu_form(edit.text, link))
+    encoded_form = urlencode(await asyncio.to_thread(_menu_form, edit.text, link))
     saved = await client.post(
         MENU_EDIT,
         content=encoded_form.encode("utf-8"),
@@ -231,7 +231,7 @@ async def _update_menu_link(client: httpx.AsyncClient, link: str, cache_key: str
     # Źródłem prawdy jest ponownie otwarty formularz, nie sam kod 200 po POST.
     verify = await client.get(f"{MENU_EDIT}&verify={cache_key}")
     verify.raise_for_status()
-    soup = BeautifulSoup(verify.text, "html.parser")
+    soup = await asyncio.to_thread(BeautifulSoup, verify.text, "html.parser")
     field = soup.select_one('#jform_link')
     if field is None or str(field.get("value") or "") != link:
         raise RuntimeError("PDF wgrano, ale Joomla nie zapisała nowego łącza pozycji MECZE")
@@ -416,7 +416,7 @@ async def _sync_tables_to_joomla(trigger: str) -> dict:
         if fingerprint == previous and latest and latest["filename"] == filename:
             status, changed, message = "unchanged", False, "Brak zmian w obsadach — bez publikacji"
         else:
-            response = _render_pdf(request, "stoliki_ligowe", "okreg_stoliki.html")
+            response = await asyncio.to_thread(_render_pdf, request, "stoliki_ligowe", "okreg_stoliki.html")
             pdf_path = Path(str(response.path))
             try:
                 public_url, deleted_files = await _upload_joomla(str(pdf_path), filename, fingerprint)

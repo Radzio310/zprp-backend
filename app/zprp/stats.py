@@ -1,6 +1,8 @@
 # app/zprp/stats.py
 from __future__ import annotations
 
+import asyncio
+
 import base64
 import datetime
 import logging
@@ -646,7 +648,7 @@ async def get_statystyki_meta(
 
         url = _stats_url("strzelec", season_id=season_id, id_rozgr=id_rozgr)
         _, html = await fetch_with_correct_encoding(client, url, method="GET", cookies=cookies)
-        meta = _parse_meta_from_strzelec_page(html)
+        meta = await asyncio.to_thread(_parse_meta_from_strzelec_page, html)
 
         return {
             "fetched_at": _now_iso(),
@@ -744,7 +746,7 @@ async def get_player_matches(
             extra["Filtr_sezon"] = season_id
         url = "/index.php?" + urlencode({"a": "statystyki", "b": "zawodnik", "NrZawodnika": zawodnik_id})
         _, html = await fetch_with_correct_encoding(client, url, method="GET", cookies=cookies)
-        result = _parse_player_matches(html)
+        result = await asyncio.to_thread(_parse_player_matches, html)
 
         return {
             "fetched_at": _now_iso(),
@@ -784,7 +786,7 @@ async def get_top_scorers(
         # First load meta page to get valid season/rozgr
         meta_url = _stats_url("strzelec", season_id=season_id, id_rozgr=id_rozgr)
         _, html_meta = await fetch_with_correct_encoding(client, meta_url, method="GET", cookies=cookies)
-        meta = _parse_meta_from_strzelec_page(html_meta)
+        meta = await asyncio.to_thread(_parse_meta_from_strzelec_page, html_meta)
 
         effective_season = season_id or meta["current_season_id"]
         effective_rozgr = id_rozgr or meta["current_id_rozgr"]
@@ -797,9 +799,9 @@ async def get_top_scorers(
         url = _stats_url("strzelec", season_id=effective_season, id_rozgr=effective_rozgr, extra=extra or None)
         _, html = await fetch_with_correct_encoding(client, url, method="GET", cookies=cookies)
 
-        scorers = _parse_scorers_table(html)
-        teams_filter = _parse_teams_filter(html)
-        competition_title = _extract_competition_title(html)
+        scorers = await asyncio.to_thread(_parse_scorers_table, html)
+        teams_filter = await asyncio.to_thread(_parse_teams_filter, html)
+        competition_title = await asyncio.to_thread(_extract_competition_title, html)
 
         return {
             "fetched_at": _now_iso(),
@@ -843,7 +845,7 @@ async def get_team_stats(
         # Load meta first for season/rozgr discovery
         meta_url = _stats_url("strzelec", season_id=season_id, id_rozgr=id_rozgr)
         _, html_meta = await fetch_with_correct_encoding(client, meta_url, method="GET", cookies=cookies)
-        meta = _parse_meta_from_strzelec_page(html_meta)
+        meta = await asyncio.to_thread(_parse_meta_from_strzelec_page, html_meta)
 
         effective_season = season_id or meta["current_season_id"]
         effective_rozgr = id_rozgr or meta["current_id_rozgr"]
@@ -851,8 +853,8 @@ async def get_team_stats(
         url = _stats_url("druzyn", season_id=effective_season, id_rozgr=effective_rozgr)
         _, html = await fetch_with_correct_encoding(client, url, method="GET", cookies=cookies)
 
-        teams = _parse_team_stats_table(html)
-        competition_title = _extract_competition_title(html)
+        teams = await asyncio.to_thread(_parse_team_stats_table, html)
+        competition_title = await asyncio.to_thread(_extract_competition_title, html)
 
         return {
             "fetched_at": _now_iso(),
@@ -895,7 +897,7 @@ async def get_league_table(
         # Load meta first
         meta_url = _stats_url("strzelec", season_id=season_id, id_rozgr=id_rozgr)
         _, html_meta = await fetch_with_correct_encoding(client, meta_url, method="GET", cookies=cookies)
-        meta = _parse_meta_from_strzelec_page(html_meta)
+        meta = await asyncio.to_thread(_parse_meta_from_strzelec_page, html_meta)
 
         effective_season = season_id or meta["current_season_id"]
         effective_rozgr = id_rozgr or meta["current_id_rozgr"]
@@ -903,9 +905,9 @@ async def get_league_table(
         url = _stats_url("tabela", season_id=effective_season, id_rozgr=effective_rozgr)
         _, html = await fetch_with_correct_encoding(client, url, method="GET", cookies=cookies)
 
-        table_rows = _parse_league_table(html)
-        competition_title = _extract_competition_title(html)
-        table_types = _parse_table_type_select(html)
+        table_rows = await asyncio.to_thread(_parse_league_table, html)
+        competition_title = await asyncio.to_thread(_extract_competition_title, html)
+        table_types = await asyncio.to_thread(_parse_table_type_select, html)
 
         return {
             "fetched_at": _now_iso(),

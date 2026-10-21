@@ -47,6 +47,7 @@ from app.db import (
 from app.zprp_public.client import PublicZprpClient, int_value, rows, text_value
 from app.zprp_public.store import now_utc, upsert_values
 from app.zprp_public import sync as sync_mod
+from app import loop_lag
 
 log = logging.getLogger(__name__)
 
@@ -137,6 +138,11 @@ class Runner:
 
     async def checkpoint(self, *, force: bool = False) -> None:
         """Zapisuje postęp (z dławieniem co ok. 5 s) i przerywa, gdy trzeba."""
+        if not force:
+            # Archiwum ma najniższy priorytet: przy ruchu użytkowników albo spóźnionej
+            # pętli robi przerwę (do 5 s na krok), zawsze oddaje pętlę innym zadaniom.
+            await loop_lag.wait_for_calm(max_wait=5.0)
+            await asyncio.sleep(0)
         loop_time = asyncio.get_running_loop().time()
         if not force and loop_time - self._last_save < 5:
             return
