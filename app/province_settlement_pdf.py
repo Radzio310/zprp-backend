@@ -68,6 +68,11 @@ ORG_DETAILS: dict[str, dict[str, str]] = {
 }
 
 
+#: Logo okregu po przeskalowaniu: (slug, mtime pliku) -> base64. Bez tego kazdy PDF
+#: skanowal katalog, dekodowal PNG, skalowal LANCZOS-em i kompresowal od nowa.
+_LOGO_CACHE: dict[tuple[str, float], str] = {}
+
+
 def _province_logo_b64(province: str) -> str:
     """Logo okregu, przeskalowane - pelnowymiarowy PNG puchnie plik bez potrzeby."""
     slug = R.province_key(province).lower()
@@ -84,19 +89,28 @@ def _province_logo_b64(province: str) -> str:
     if not path:
         return ""
     try:
+        cache_key = (path.name, path.stat().st_mtime)
+    except OSError:
+        cache_key = None
+    if cache_key and cache_key in _LOGO_CACHE:
+        return _LOGO_CACHE[cache_key]
+    try:
         from PIL import Image
         import io as _io
 
         image = Image.open(path)
         image.thumbnail((420, 420), Image.LANCZOS)
         buffer = _io.BytesIO()
-        image.save(buffer, "PNG", optimize=True)
-        return base64.b64encode(buffer.getvalue()).decode()
+        image.save(buffer, "PNG")
+        out = base64.b64encode(buffer.getvalue()).decode()
     except Exception:
         try:
-            return base64.b64encode(path.read_bytes()).decode()
+            out = base64.b64encode(path.read_bytes()).decode()
         except Exception:
             return ""
+    if cache_key:
+        _LOGO_CACHE[cache_key] = out
+    return out
 
 
 def _org(province: str) -> dict[str, str]:
@@ -127,41 +141,55 @@ def _period_label(year: int, month: int, date_to: date, *, include_future: bool)
     return f"{MONTHS_PL[month]} {year}"
 
 
-def _render(template_name: str, context: dict) -> str:
-    from jinja2 import Environment, FileSystemLoader
+_JINJA_ENV = None
 
-    env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=True)
-    env.filters["money"] = money
-    env.filters["km"] = lambda value: f"{number(value, 1)} km"
-    env.filters["rate"] = lambda value: f"{number(value, 2)} zł/km"
-    # „3 wyjazdy" w wierszu „Razem" sędziego na liście przejazdów.
-    env.filters["trips"] = lambda n: f"{n} {_plural(int(n), 'wyjazd', 'wyjazdy', 'wyjazdów')}"
-    return env.get_template(template_name).render(**context)
+
+def _jinja_env():
+    """Jedno środowisko na proces - szablon kompiluje się raz, nie przy każdym PDF-ie."""
+    global _JINJA_ENV
+    if _JINJA_ENV is None:
+        from jinja2 import Environment, FileSystemLoader
+
+        env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=True)
+        env.filters["money"] = money
+        env.filters["km"] = lambda value: f"{number(value, 1)} km"
+        env.filters["rate"] = lambda value: f"{number(value, 2)} zł/km"
+        # „3 wyjazdy" w wierszu „Razem" sędziego na liście przejazdów.
+        env.filters["trips"] = lambda n: f"{n} {_plural(int(n), 'wyjazd', 'wyjazdy', 'wyjazdów')}"
+        _JINJA_ENV = env
+    return _JINJA_ENV
+
+
+def _render(template_name: str, context: dict) -> str:
+    return _jinja_env().get_template(template_name).render(**context)
+
+
+def _offline_fetcher(url: str, *args, **kwargs):
+    """WeasyPrint nie wychodzi do sieci: obrazki są osadzone jako data URI, a fonty systemowe.
+    Zablokowany zasób to szybki błąd (WeasyPrint go pomija), nie wiszące połączenie."""
+    if url.startswith("data:"):
+        from weasyprint import default_url_fetcher
+
+        return default_url_fetcher(url, *args, **kwargs)
+    raise ValueError(f"zasób zewnętrzny zablokowany w PDF-ie: {url[:80]}")
 
 
 def _to_pdf(html: str, base_name: str, filename: str) -> dict:
     import weasyprint
 
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        html_path = os.path.join(tmp_dir, f"{base_name}.html")
-        pdf_path = os.path.join(tmp_dir, f"{base_name}.pdf")
-        with open(html_path, "w", encoding="utf-8") as handle:
-            handle.write(html)
-        weasyprint.HTML(filename=html_path).write_pdf(pdf_path)
-
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-        token = str(uuid.uuid4())
-        shutil.copyfile(pdf_path, os.path.join(DOWNLOAD_DIR, f"{token}.pdf"))
-        return {
-            "token": token,
-            "download_url": (
-                f"/province/settlements/pdf/download/{token}"
-                f"?filename={urllib.parse.quote(filename)}"
-            ),
-        }
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    token = str(uuid.uuid4())
+    # Prosto do katalogu pobrań (bez tymczasowego HTML-a i kopii pliku).
+    weasyprint.HTML(string=html, url_fetcher=_offline_fetcher).write_pdf(
+        os.path.join(DOWNLOAD_DIR, f"{token}.pdf")
+    )
+    return {
+        "token": token,
+        "download_url": (
+            f"/province/settlements/pdf/download/{token}"
+            f"?filename={urllib.parse.quote(filename)}"
+        ),
+    }
 
 
 def _pl_date(value: Optional[str]) -> str:

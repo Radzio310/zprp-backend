@@ -57,7 +57,20 @@ PREVIEW_ENTRIES = 20
 #: Teczka ZIP: kluby okręgu mieszczą się z zapasem.
 ZIP_LIMIT = 400
 
-_CREST_CACHE: dict[str, str] = {}
+#: Herb jako data URI: url -> (uri, ważny do). Udany zostaje na 6 h, nieudany na 60 s
+#: (żeby chwilowa awaria CDN nie odbierała herbu do restartu).
+_CREST_CACHE: dict[str, tuple[str, float]] = {}
+CREST_TTL = 6 * 3600.0
+CREST_FAIL_TTL = 60.0
+CREST_TIMEOUT = 2.5
+CREST_MAX_BYTES = 2_000_000
+
+#: Policzony sezon okręgu (bez wyboru klubów): (okręg, sezon, przyszłe) ->
+#: (czas, wersja settlement_cache, wynik). Kreator robi podgląd, potem PDF, a ZIP
+#: N PDF-ów - wszystko z tym samym sezonem. 60 s, a zapis do tabel rozliczeń
+#: unieważnia wcześniej (wersja).
+_SCOPE_BASE: dict[tuple, tuple[float, tuple, dict]] = {}
+SCOPE_TTL = 60.0
 
 
 class ReportFilter(BaseModel):
@@ -104,9 +117,45 @@ def _initials(name: str) -> str:
     return "".join(w[0] for w in meaningful[:2]).upper() or "?"
 
 
+async def _scope_base(key: str, season: str, include_future: bool) -> dict:
+    """Ciężka, wspólna część `_scope` - z pamięci na krótko. ⚠ Wynik wspólny, tylko do odczytu."""
+    import time
+
+    from app import settlement_cache as SC
+    from app.province_clubs import _season_clubs, load_clubs, pending_invoices
+
+    cache_key = (key, season, bool(include_future))
+    version = SC.version(key)
+    now = time.monotonic()
+    hit = _SCOPE_BASE.get(cache_key)
+    if hit and hit[2] is not None and hit[1] == version and now - hit[0] < SCOPE_TTL:
+        return hit[2]
+
+    data, season_clubs = await asyncio.gather(
+        load_clubs(key, season, include_future=include_future),
+        _season_clubs(key, season, include_future=include_future),
+    )
+    merged, pending = await asyncio.gather(
+        CB.merged_clubs(key, season_clubs["clubs"]),
+        pending_invoices(key, season),
+    )
+    charges_by: dict[str, list] = {}
+    for row in data["charges"]:
+        if row.status == C.CHARGED and row.club_id:
+            charges_by.setdefault(_s(row.club_id), []).append(row)
+    entries_by: dict[str, list] = {}
+    for row in data["entries"]:
+        entries_by.setdefault(_s(row["club_id"]), []).append(row)
+    out = {"merged": merged, "pending": pending, "charges_by": charges_by, "entries_by": entries_by}
+    if len(_SCOPE_BASE) > 32:
+        _SCOPE_BASE.clear()
+    _SCOPE_BASE[cache_key] = (now, version, out)
+    return out
+
+
 async def _scope(payload: ReportFilter) -> dict:
     """Policzony sezon, zakres dat i wybrane kluby - wspólne dla trzech wyników."""
-    from app.province_clubs import _season_clubs, load_clubs, pending_invoices, season_range
+    from app.province_clubs import season_range
     from app.province_settlements import require_province
 
     key = require_province(payload.province)
@@ -118,11 +167,8 @@ async def _scope(payload: ReportFilter) -> dict:
     if unknown:
         raise HTTPException(400, f"Nieznane kategorie raportu: {', '.join(unknown)}")
 
-    data = await load_clubs(key, season, include_future=payload.include_future)
-    merged = await CB.merged_clubs(
-        key, (await _season_clubs(key, season, include_future=payload.include_future))["clubs"]
-    )
-    pending = await pending_invoices(key, season)
+    base = await _scope_base(key, season, payload.include_future)
+    merged, pending = base["merged"], base["pending"]
 
     wanted = {_s(item) for item in payload.club_ids if _s(item)}
     picked: list[dict] = []
@@ -141,13 +187,7 @@ async def _scope(payload: ReportFilter) -> dict:
     if wanted and not picked:
         raise HTTPException(404, "Żaden z wybranych klubów nie ma danych w tym sezonie.")
 
-    charges_by: dict[str, list] = {}
-    for row in data["charges"]:
-        if row.status == C.CHARGED and row.club_id:
-            charges_by.setdefault(_s(row.club_id), []).append(row)
-    entries_by: dict[str, list] = {}
-    for row in data["entries"]:
-        entries_by.setdefault(_s(row["club_id"]), []).append(row)
+    charges_by, entries_by = base["charges_by"], base["entries_by"]
 
     return {
         "key": key,
@@ -217,33 +257,48 @@ async def _public_info(club_ids: list[str]) -> dict[str, dict]:
 
 async def _crest_data_uri(url: Optional[str]) -> str:
     """Herb klubu jako data URI do PDF-a. Brak herbu albo sieci = monogram, nie błąd."""
+    import time
+
     if not url:
         return ""
-    if url in _CREST_CACHE:
-        return _CREST_CACHE[url]
+    now = time.monotonic()
+    hit = _CREST_CACHE.get(url)
+    if hit and hit[1] > now:
+        return hit[0]
     uri = ""
     try:
         import httpx
 
-        async with httpx.AsyncClient(timeout=4.0, follow_redirects=True) as client:
+        timeout = httpx.Timeout(CREST_TIMEOUT, connect=1.5)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.get(url)
-        if response.status_code == 200 and response.content:
+        if response.status_code == 200 and response.content and len(response.content) <= CREST_MAX_BYTES:
             kind = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
             if "svg" in kind:
                 uri = "data:image/svg+xml;base64," + base64.b64encode(response.content).decode()
             else:
-                from PIL import Image
-                import io as _io
-
-                image = Image.open(_io.BytesIO(response.content))
-                image.thumbnail((240, 240))
-                buffer = _io.BytesIO()
-                image.save(buffer, "PNG", optimize=True)
-                uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+                # Dekodowanie i skalowanie to CPU - poza pętlą zdarzeń.
+                uri = await asyncio.to_thread(_shrink_crest, response.content)
     except Exception:
         logger.info("club_report: herb %s nie zszedł - monogram", url, exc_info=True)
-    _CREST_CACHE[url] = uri
+    if len(_CREST_CACHE) > 600:
+        _CREST_CACHE.clear()
+    _CREST_CACHE[url] = (uri, now + (CREST_TTL if uri else CREST_FAIL_TTL))
     return uri
+
+
+def _shrink_crest(content: bytes) -> str:
+    """Herb do 240 px (w PDF-ie ma ok. 15 mm) - mniejszy plik i szybszy WeasyPrint."""
+    import io as _io
+
+    from PIL import Image
+
+    image = Image.open(_io.BytesIO(content))
+    image.draft("RGB", (480, 480))  # JPEG dekoduje się od razu w mniejszej skali
+    image.thumbnail((240, 240))
+    buffer = _io.BytesIO()
+    image.save(buffer, "PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
 
 
 def _club_json(club: dict, st: dict, info: dict) -> dict:
