@@ -461,6 +461,27 @@ def is_allowed_attachment_url(url: Any) -> bool:
     return path.startswith(ATTACHMENT_PATH_PREFIX) and ".." not in path and len(path) > len(ATTACHMENT_PATH_PREFIX)
 
 
+THUMB_SIDE = 480
+
+
+def make_thumbnail(body: bytes, side: int = THUMB_SIDE) -> bytes | None:
+    """Miniatura JPEG (dłuższy bok `side`, q75). None, gdy to nie obraz do odczytu."""
+    try:
+        import io
+
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(body)) as im:
+            im.draft("RGB", (side * 2, side * 2))  # JPEG: dekodowanie w zmniejszeniu, mało RAM
+            im = ImageOps.exif_transpose(im)
+            im.thumbnail((side, side))
+            out = io.BytesIO()
+            im.convert("RGB").save(out, "JPEG", quality=75, optimize=True)
+            return out.getvalue()
+    except Exception:  # noqa: BLE001 - uszkodzony/nieobsługiwany plik: front pokaże kartkę
+        return None
+
+
 def attachment_items(attachments: dict[str, dict], hidden_ids: Iterable[str], proxy_url) -> list[dict]:
     """`visible_attachments` + księga ukrytych -> lista kontraktu."""
     hidden = {str(h) for h in hidden_ids}
@@ -475,7 +496,7 @@ def attachment_items(attachments: dict[str, dict], hidden_ids: Iterable[str], pr
             "name": info.get("label") or info.get("filename"),
             "type": kind,
             "url": url,
-            "thumb_url": url if kind == "image" else None,
+            "thumb_url": f"{url}&w={THUMB_SIDE}" if kind == "image" else None,
         })
     return out
 
