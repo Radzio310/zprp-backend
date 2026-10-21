@@ -1,0 +1,223 @@
+# Mentor - panel mentorski pary (kontrakt web + aplikacja + backend)
+
+Decyzje właściciela z 21.10.2026. Ten plik jest JEDYNYM kontraktem między
+`zprp-backend` (API), `BAZA_web` (panel na komputerze, trasa `/mentor`) i `BAZA`
+(pełny panel natywnie). Zmiana kształtu odpowiedzi = zmiana tutaj najpierw.
+
+## 1. Decyzje (stan na 21.10.2026)
+
+| Temat | Decyzja |
+|---|---|
+| Nazwa | **Mentor**. Web: `https://www.bazapodreka.app/mentor` (lista moich par) i `/mentor/{pairId}` (stały link pary). |
+| Technologia web | BAZA_web (Expo Router web, system projektowy Pod Ręką, Reanimated), nowa grupa tras `app/(mentor)/`. Telefon w przeglądarce: ekran „Otwórz na komputerze albo w aplikacji BAZA” (publiczne klipy/zestawienia/raporty działają też na telefonie). |
+| Logowanie web | Kod QR na komputerze → zatwierdzenie w aplikacji BAZA (zalogowany sędzia). Zapasowo login+hasło ZPRP. Sesja w ciasteczku httpOnly 30 dni + CSRF (wzór: `pod_reka` club session). |
+| Dostęp | Para (2 sędziów) + jej aktywni mentorzy + admin: pełny. Komisja/menedżerowie mentoringu okręgu: podgląd swoich par okręgowych. Publiczne linki tylko do wybranych klipów, zestawień i raportów. |
+| Włączanie panelu | Admin (wszystkie pary, w tym Mentor 2028) + menedżerowie mentoringu okręgu (pary okręgowe swojego okręgu). |
+| Mecze | Wszystkie mecze pary z całej historii (sezony jako rozdziały), nowe dokładają się same. Gwiazdka „istotny” ręcznie (z powodem). Zgłoszenie meczu do omówienia (tablica „Do omówienia”, termin). |
+| Układ web | Pulpit pary (bento) + oś sezonu z meczami; mecz otwiera **Pokój meczu**. |
+| Odtwarzacz | Tryb **Studio** (wideo + zdarzenia ProEl/klipy obok, oś z falą meczu, skróty) i **Kino** (pełny ekran, akcje wysuwają się z krawędzi i chowają). |
+| Zestawienia | Klipy łączone w nazwane zestawienia („kontrast” - dwie kolumny przeciwstawne, „podobne”, „wolne”), „Dodaj do zestawienia” z dowolną nazwą, odtwarzanie kolejką. |
+| Wątki | Przy meczu i przy klipie; odpowiedzi, @wzmianki, kotwica w sekundzie wideo, status pytanie/rozwiązane. Push (BAZA) + e-mail. Na żywo bez odświeżania. |
+| Źródła wideo | YouTube + Vimeo (pełne API) + **własne nagrania** (upload do Cloudflare R2). Facebook/Twitch tylko jako zwykły link zewnętrzny (bez synchronizacji). |
+| Klipy | **Wirtualne klipy** zawsze (zakres z oryginału, pętla). **MP4** tylko z własnych nagrań (cięcie ffmpeg na serwerze). YouTube przez konto Premium/yt-dlp: NIE (regulamin, blokada IP). |
+| Retencja | Pełne wgrane nagrania 12 mies. od meczu, klipy do ręcznego usunięcia. Publiczny link do klipu z meczu młodzieżowego - ostrzeżenie przed publikacją. |
+| Kategorie | Per para + domyślne (5 dzisiejszych) + globalne admina; nazwa, kolor z palety, ikona z biblioteki, opis; „Przywróć domyślne”; klip może mieć kilka kategorii. |
+| Uprawnienia klipów | Para i mentorzy tworzą klipy, znaczniki, kategorie, komentarze; edytują/usuwają tylko swoje (autor widoczny). Komisja: podgląd. |
+| Arkusze | Wszystkie arkusze delegatów pary (nowa reguła dostępu), arkusze mentorów z wersjami, trendy (sekcje I-X w czasie, priorytety, delegat vs mentor), kluczowe sytuacje z arkusza jako znaczniki na osi wideo. |
+| Raporty | Kreator z podglądem A4 na żywo (zakres: mecz/okres/sezon; sekcje do zaznaczenia), PDF + publiczny link. |
+| Aplikacja | Pełny panel natywnie; kafel „Mentor” w Więcej (gdy mam parę z włączonym panelem); w szczegółach meczu dotychczasowa ikona (wideo + prośba o ocenę) rozbudowana do huba „Mentor” tego meczu; „Otwórz na komputerze” (kopiuj link / wyślij / QR). |
+| Hosting nagrań | Cloudflare R2 tym samym schematem co kopie zapasowe (`BACKUP_S3_*`), z własnym prefiksem i opcjonalnym nadpisaniem `MENTOR_S3_*`. Cięcie i transkodowanie ffmpeg na serwerze. |
+| Etapy | Wszystko w jednej rundzie. |
+
+## 2. Model danych (nowe tabele, `app/mentor_panel_tables.py`)
+
+Schemat jak reszta repo: `define_tables(metadata)` + rejestracja w `app/db.py`
+(`create_all` + `ALTER ... IF NOT EXISTS` przy starcie). Identyfikatory tekstowe (uuid4 hex).
+
+- `mentor_panels`: `pair_id` PK (FK `mentoring_pairs.id`), `enabled` bool, `enabled_by`, `enabled_at`,
+  `rev` BigInteger (licznik zmian - long-poll), `settings_json` JSON, `updated_at`.
+- `mentor_match_flags`: PK (`pair_id`, `match_id`), `starred` bool, `star_reason` (≤120), `starred_by`,
+  `submitted` bool, `submitted_by`, `submitted_at`, `due_at`, `review_status` (`open|discussed|closed`), `note` (≤500), `updated_at`.
+- `mentor_categories`: `id`, `pair_id` (NULL = globalna admina), `key` (np. `dobra`, dla domyślnych), `name` (≤40),
+  `color` (token z palety, np. `emerald`), `icon` (nazwa z biblioteki ikon, np. `checkmark-circle`), `description` (≤160),
+  `sort`, `archived` bool, `created_by`, `created_at`.
+  Domyślne (seed per para przy pierwszym wejściu): dobra „Dobra decyzja” emerald, zla „Zła decyzja” rose,
+  dyskusja „Do dyskusji” amber, pytanie „Pytanie do mentora” sky, kluczowa „Kluczowa akcja meczu” pink.
+- `mentor_clips`: `id`, `pair_id`, `match_id`, `video_id` (FK `mentor_match_videos.id`), `start_s` float, `end_s` float
+  (≤600 s długości), `title` (≤80), `note` (≤1000), `category_ids` JSON[], `source` (`manual|proel|sheet|marker`),
+  `source_key` (klucz zdarzenia ProEl / sytuacji arkusza), `match_ms`, `half`, `author_id`, `created_at`, `updated_at`,
+  `deleted_at`, `mp4_status` (`none|queued|working|ready|failed`), `mp4_key`, `mp4_size`, `public_token`, `published_at`.
+- `mentor_compilations`: `id`, `pair_id`, `name` (≤60), `description` (≤500), `mode` (`contrast|similar|free`),
+  `created_by`, `created_at`, `updated_at`, `public_token`, `published_at`.
+- `mentor_compilation_items`: PK (`compilation_id`, `clip_id`), `position` int, `column` (`a|b`, dla `contrast`), `note` (≤280).
+- `mentor_threads`: `id`, `pair_id`, `target_kind` (`match|clip|compilation|pair`), `target_id`, `match_id` (gdy dotyczy),
+  `title` (≤120), `kind` (`question|note|task`), `status` (`open|resolved`), `created_by`, `created_at`, `updated_at`, `last_comment_at`.
+- `mentor_comments`: `id`, `thread_id`, `author_id`, `body` (≤4000), `video_id`, `video_s` (kotwica), `drawing_json`
+  (strzałki/kółka na stopklatce, ≤20 kształtów), `mentions` JSON[], `created_at`, `edited_at`, `deleted_at`.
+- `mentor_reads`: PK (`pair_id`, `judge_id`), `seen_rev`, `seen_at` (nieprzeczytane w pulpicie).
+- `mentor_uploads`: `id`, `pair_id`, `match_id`, `video_id` (po zakończeniu), `uploader_id`, `filename`, `size`,
+  `content_type`, `r2_key`, `upload_id` (multipart), `status` (`uploading|processing|ready|failed|expired`),
+  `duration_s`, `width`, `height`, `play_key` (H.264 MP4 faststart), `poster_key`, `error`, `created_at`, `expires_at` (+12 mies. od meczu).
+- `mentor_reports`: `id`, `pair_id`, `title`, `config_json` (zakres + sekcje), `snapshot_json`, `created_by`, `created_at`,
+  `public_token`, `published_at`, `pdf_key`.
+- `mentor_web_sessions`: jak `pod_reka_club_sessions`: `id`, `judge_id`, `session_hash`, `csrf_hash`, `created_at`,
+  `expires_at` (30 dni), `last_seen_at`, `revoked_at`, `user_agent`.
+- `mentor_qr_logins`: `code` PK (8 znaków bez dwuznacznych), `poll_hash`, `created_at`, `expires_at` (+3 min),
+  `approved_by`, `approved_at`, `consumed_at`.
+- `mentor_audit`: `id`, `pair_id`, `actor_id`, `action`, `data` JSON, `created_at`.
+
+Istniejące i zostające: `mentoring_*` (pary, mentorzy), `mentor_match_videos` (+ nowe kolumny:
+`kind` `link|upload`, `upload_id`), `mentor_evaluations*`, `delegate_evaluations*`.
+Istniejące znaczniki (`markers_json`) zostają dla aplikacji; panel pokazuje znaczniki z zakresem (`end_s`)
+jako klipy tylko do odczytu („z aplikacji”), a przycisk „Zrób klip” kopiuje je do `mentor_clips`.
+
+## 3. Uprawnienia (`app/mentor_panel_rules.py`, czyste, z testami)
+
+`role_in_pair(actor, pair, assignments, config) -> "pair" | "mentor" | "admin" | "committee" | None`
+- `pair`: `actor.judge_id in pair.judge_ids`.
+- `mentor`: aktywny wiersz `mentoring_assignments` (ended_at IS NULL) dla tej pary.
+- `admin`: `is_admin(judge_id)`.
+- `committee`: menedżer okręgu pary (`mentoring_config.manager_ids` albo odznaka „Komisja sędziowska” tego okręgu wg `may_manage`); nigdy dla par `mentor2028`/`MIĘDZYOKRĘGOWE` (tam tylko admin).
+
+| Akcja | pair | mentor | admin | committee |
+|---|---|---|---|---|
+| widzieć panel (gdy włączony) | ✓ | ✓ | ✓ (także wyłączony) | ✓ (podgląd) |
+| gwiazdka / zgłoszenie meczu | ✓ | ✓ | ✓ | - |
+| wideo: dodać link / wgrać | ✓ | ✓ | ✓ | - |
+| klip / komentarz / zestawienie: tworzyć | ✓ | ✓ | ✓ | - |
+| edytować / usuwać | tylko swoje | tylko swoje | wszystko | - |
+| kategorie pary: dodać/zmienić/przywróć domyślne | ✓ | ✓ | ✓ | - |
+| publikować link (klip/zestawienie/raport) | ✓ | ✓ | ✓ | - |
+| włączyć/wyłączyć panel | - | - | ✓ | ✓ tylko okręgowe swojego okręgu |
+| arkusze delegatów pary | ✓ | ✓ | ✓ | ✓ |
+
+## 4. API (prefiks `/mentor-panel`, router `app/mentor_panel.py` + moduły)
+
+Uwierzytelnianie: **albo** nagłówek `Authorization: Bearer <JWT sędziego>` (aplikacja BAZA),
+**albo** ciasteczko `baza_mentor_session` + nagłówek `X-CSRF-Token` przy zapisie (web).
+Wspólna zależność `mentor_actor` → `{judge_id, display_name, is_admin, province, via: "jwt"|"web"}`.
+Błędy: `{detail: {code, message}}` po polsku, kody HTTP 401/403/404/409/422/429.
+Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmienia bez drugiego zapytania).
+
+### 4.1 Logowanie web
+- `POST /auth/qr` → `{code, poll_token, expires_at, approve_url}`; `approve_url` = `https://www.bazapodreka.app/mentor/zaloguj/{code}` (QR na komputerze; telefon z BAZA otwiera deep link `refhandballapp://mentor/login/{code}`, przeglądarka telefonu pokazuje „Otwórz w aplikacji BAZA”).
+- `GET /auth/qr/{code}?poll_token=&wait=20` (long-poll) → `{status: "waiting"|"approved"|"expired"}`; przy `approved` ustawia ciasteczka sesji (+ `baza_mentor_csrf` czytelne dla JS) i zwraca `me`.
+- `POST /auth/qr/{code}/approve` (JWT sędziego, z aplikacji) → `{ok, device_hint}`.
+- `POST /auth/login` `{username, password}` (ZPRP, jak `exam_live._web_login`, z limitem prób) → ustawia sesję.
+- `GET /auth/me` → `{judge_id, display_name, is_admin, csrf}`; `POST /auth/logout`.
+- `GET /auth/csrf` → odświeża token CSRF.
+
+### 4.2 Pary i włączanie
+- `GET /pairs` → `{pairs: PairCard[]}` - pary, do których mam dostęp (jako para / mentor / admin / komisja), z `enabled`, `role`, `unread`, `next_match`, `counts`.
+- `PATCH /pairs/{pairId}/panel` `{enabled}` (admin / komisja okręgu) → `PanelState`. Aplikacja: przełącznik na karcie pary w zakładce Mentoring.
+- `GET /pairs/{pairId}` → `PairDashboard`:
+  ```
+  { pair: {id, program, province, judges:[{judge_id, full_name, photo_url}], mentors:[...], created_at},
+    role, enabled, rev, me,
+    next_match: MatchCard|null, last_match: MatchCard|null,
+    to_discuss: MatchCard[] (zgłoszone, open), starred_recent: MatchCard[],
+    new_clips: Clip[] (ostatnie 8), open_threads: ThreadSummary[] (ostatnie 8),
+    sheets_summary: {delegate:{count, last_points, trend:[{date, points}]}, mentor:{count, last_points}},
+    seasons: [{season, label, matches, starred, clips}],
+    links: {web: "https://www.bazapodreka.app/mentor/{pairId}", app: "refhandballapp://mentor/{pairId}"} }
+  ```
+
+### 4.3 Mecze
+- `GET /pairs/{pairId}/matches?season=&starred=&submitted=&q=` → `{matches: MatchCard[], seasons:[...]}`.
+  Źródło: `zprp_public_matches` gdzie oba numery sędziów = para (dowolna kolejność) + `province_matches`
+  (bieżący sezon, gdy publiczne nie mają) + `zprp_archive_matches` (starsze sezony). Indeksy na `referee_1_id`,`referee_2_id`.
+  `MatchCard = {match_id, season, scheduled_at, competition_name, category, round_name, home:{name, logo_url, score}, away:{...},
+   halftime, venue_city, match_code, delegate_name, starred, star_reason, submitted, review_status, due_at,
+   has_proel, videos:{count, uploads}, clips:{count}, threads:{open, total}, sheets:{delegate: points|null, mentor: points|null},
+   stream_url}`
+- `GET /pairs/{pairId}/matches/{matchId}` → `MatchRoom`:
+  ```
+  { match: MatchCard, videos: Video[], clips: Clip[], markers_from_app: Clip[] (tylko odczyt),
+    timeline: {available, half_minutes, break_minutes, events: TimelineEvent[], clock?},  // jak /mentor-evaluations/match/{id}/timeline
+    sheet_situations: [{source:"delegate"|"mentor", author, category, description, time, match_ms}],
+    delegate_sheets: DelegateSheet[], mentor_sheets: MentorSheet[],
+    threads: Thread[] (z komentarzami), rev }
+  ```
+- `PUT /pairs/{pairId}/matches/{matchId}/flag` `{starred?, star_reason?, submitted?, due_at?, review_status?, note?}` → `MatchCard`.
+  Zgłoszenie (`submitted=true`) wysyła push + e-mail do mentorów (para zgłasza) albo do pary (mentor zgłasza).
+
+### 4.4 Wideo
+- `POST /pairs/{pairId}/matches/{matchId}/videos` `{url}` → `Video` (link YouTube/Vimeo/inne; reużywa `mentor_evaluations` add + link preview + stream start).
+- `PATCH .../videos/{videoId}` `{sync}` → `Video` (kotwice: `match_start_s`, `second_half_s`, ...; jak dziś).
+- `DELETE .../videos/{videoId}` (autor albo admin).
+- `Video = {id, kind:"link"|"upload", provider:"youtube"|"vimeo"|"upload"|"facebook"|..., url, title, thumbnail_url,
+   duration_s, sync, added_by, created_at, playable: bool, play_url? (upload: presigned GET 6 h), poster_url?, upload_status?}`
+
+### 4.5 Wgrywanie nagrań (R2)
+- `POST /pairs/{pairId}/matches/{matchId}/uploads` `{filename, size, content_type}` (≤ 20 GB) → `{upload_id, part_size, parts:[{n, url}]}` (presigned multipart; partie po 64 MB; kolejne partie: `POST .../uploads/{id}/parts?from=n`).
+- `POST .../uploads/{uploadId}/complete` `{parts:[{n, etag}]}` → `{status:"processing"}`; serwer w tle: ffprobe → transkodowanie do H.264/AAC MP4 faststart (≤1080p, CRF 23, preset veryfast) + plakat JPG → `Video(kind=upload)`.
+- `GET .../uploads/{uploadId}` → postęp `{status, progress, error}`; `DELETE` przerywa.
+- Kolejka: tabela `mentor_uploads` + pętla w procesie (maks. 1 transkodowanie naraz), ffmpeg w obrazie (dodać do Dockerfile).
+- Retencja: zadanie dzienne kasuje oryginał po udanym transkodowaniu i całe nagranie po `expires_at`.
+
+### 4.6 Klipy i kategorie
+- `GET /pairs/{pairId}/categories` → `{categories: Category[], palette:[...], icons:[...]}` (seed domyślnych przy pierwszym wywołaniu).
+- `POST /pairs/{pairId}/categories` `{name, color, icon, description}`; `PATCH /categories/{id}`; `DELETE` (archiwizuje); `POST /pairs/{pairId}/categories/reset` (przywraca domyślne, własne archiwizuje).
+- `POST /pairs/{pairId}/clips` `{match_id, video_id, start_s, end_s, title?, note?, category_ids[], source?, source_key?, match_ms?, half?}` → `Clip`.
+- `PATCH /clips/{clipId}`, `DELETE /clips/{clipId}` (autor albo admin; miękkie).
+- `GET /pairs/{pairId}/clips?category=&match_id=&author=&q=` → `{clips: Clip[]}` (biblioteka klipów pary).
+- `POST /clips/{clipId}/mp4` → `{mp4_status}` (tylko klipy z `kind=upload`; ffmpeg `-ss/-to -c copy`, a gdy precyzja ważna - przekodowanie samego klipu); `GET /clips/{clipId}/mp4` → `{url}` (presigned 1 h, `Content-Disposition: attachment; filename="..."`).
+- `Clip = {id, match_id, video_id, start_s, end_s, title, note, category_ids, source, source_key, match_ms, half,
+   author:{judge_id, name}, created_at, updated_at, can_edit, mp4_status, public_url|null, thread:{id, open, comments}|null}`
+
+### 4.7 Zestawienia
+- `GET /pairs/{pairId}/compilations` → `{compilations:[{id, name, mode, description, items_count, cover_clip, created_by, updated_at, public_url}]}`.
+- `POST /pairs/{pairId}/compilations` `{name, mode, description?}`; `PATCH /compilations/{id}`; `DELETE`.
+- `PUT /compilations/{id}/items` `{items:[{clip_id, column?, note?}]}` (całość w kolejności) → `Compilation`; `POST /compilations/{id}/items` `{clip_id, column?}` („Dodaj do zestawienia”).
+- `GET /compilations/{id}` → `{..., items:[{clip: Clip, column, note, position}]}`.
+
+### 4.8 Wątki
+- `GET /pairs/{pairId}/threads?target_kind=&target_id=&status=` → `{threads: Thread[]}`.
+- `POST /pairs/{pairId}/threads` `{target_kind, target_id, title?, kind, body, video_id?, video_s?, drawing?, mentions?}` → `Thread`.
+- `POST /threads/{threadId}/comments` `{body, video_id?, video_s?, drawing?, mentions?}` → `Comment`; `PATCH/DELETE /comments/{id}` (autor).
+- `PATCH /threads/{threadId}` `{status?, title?}`.
+- Powiadomienia: nowy wątek/komentarz/wzmianka → push (`kind=mentor_panel`, `{pairId, matchId?, clipId?, threadId}`) do pozostałych osób pary i mentorów (preferencja `mentorPanel`), e-mail zbiorczy (Brevo) najwyżej co 30 min na osobę.
+- `Thread = {id, target_kind, target_id, match_id, title, kind, status, created_by:{judge_id,name}, created_at, last_comment_at, comments: Comment[]}`;
+  `Comment = {id, author:{judge_id,name,role}, body, video_id, video_s, drawing, mentions, created_at, edited_at, can_edit}`.
+
+### 4.9 Arkusze
+- `GET /pairs/{pairId}/sheets?season=` → `{delegate: DelegateSheet[], mentor: MentorSheet[], trends: {sections:[{key, label, points:[{date, value, source}]}], priorities:[{text, count, last}], delegate_vs_mentor:[{match_id, delegate, mentor}]}}`.
+  Nowa reguła: rola w parze (pair/mentor/admin/committee) widzi arkusze delegatów meczów tej pary (`delegate_evaluations.referee_ids` = para).
+
+### 4.10 Zmiany na żywo
+- `GET /pairs/{pairId}/changes?since={rev}&wait=25` (long-poll, wspólny zegar jak `zprp_public/live.py`) → `{rev, changed: bool, scopes:["matches","clips","threads","compilations","sheets","videos"], match_ids:[...], viewers:[{judge_id, name, where}]}`.
+- `POST /pairs/{pairId}/presence` `{where: "dashboard"|"match:{id}"|"clip:{id}"}` co 30 s (wskaźnik „Mentor ogląda teraz”; w pamięci procesu, TTL 60 s).
+
+### 4.11 Raporty
+- `POST /pairs/{pairId}/reports/preview` `{scope:{kind:"match"|"range"|"season", match_id?, from?, to?, season?}, sections:[...], title?}` → `{html}` (A4, ten sam szablon co PDF).
+  Sekcje: `summary` (liczby, forma), `matches` (lista), `clips` (miniatury + link/QR do każdego), `compilations`, `threads` (pytania i odpowiedzi), `sheets` (oceny delegatów/mentorów), `trends`, `priorities`, `goals` (notatka mentora).
+- `POST /pairs/{pairId}/reports` (ta sama treść) → `{id, pdf_url, public_url?}`; `GET /pairs/{pairId}/reports`.
+
+### 4.12 Publiczne linki (bez logowania)
+- Publikacja: `POST /clips/{id}/publish`, `/compilations/{id}/publish`, `/reports/{id}/publish` → `{public_url}`; `DELETE .../publish` wyłącza (nowy token przy ponownej publikacji).
+- Odczyt: `GET /mentor-panel/public/{token}` → `{kind:"clip"|"compilation"|"report", ...}` (bez nazwisk zawodników, bez arkuszy; klip: źródło + zakres + kategoria + opis; mecz młodzieżowy - ostrzeżenie przy publikacji, nie blokada).
+- Web: `https://www.bazapodreka.app/mentor/k/{token}` (klip), `/mentor/z/{token}` (zestawienie), `/mentor/r/{token}` (raport) - działają też na telefonie.
+
+## 5. Web (BAZA_web, `app/(mentor)/`)
+- `/mentor` - lista moich par (karty par, nieprzeczytane, następny mecz) albo logowanie QR.
+- `/mentor/zaloguj/{code}` - strona dla telefonu bez aplikacji (otwórz w BAZA / pobierz).
+- `/mentor/{pairId}` - **Pulpit**: bento (najbliższy mecz, Do omówienia, Nowe klipy, Otwarte wątki, Forma w arkuszach, Zestawienia) + **oś sezonu** (mecze jako pigułki na osi czasu, gwiazdki, ikony wideo/klipów/wątków, filtry, przełącznik sezonów).
+- `/mentor/{pairId}/mecz/{matchId}` - **Pokój meczu**: tryb **Studio** (wideo 16:9 + prawa kolumna: Zdarzenia ProEl / Klipy / Wątki / Arkusze; pod wideo oś czasu z falą meczu, klipami, znacznikami z arkusza; skróty: Spacja, J/K/L, ←/→ 5 s, Shift+←/→ poprzednie/następne zdarzenie, M znacznik, I/O początek/koniec klipu, Enter zapisz klip, F tryb Kino, 1-9 kategoria) i tryb **Kino** (pełny ekran, bilety najbliższych zdarzeń przy krawędzi, pasek akcji wysuwany ruchem myszy, chowa się po 2 s, REC/I/O/M bez wychodzenia).
+- `/mentor/{pairId}/klipy` - biblioteka klipów (siatka kafli z kategorią, filtry, zaznaczanie wielu → „Dodaj do zestawienia”).
+- `/mentor/{pairId}/zestawienia/{id}` - zestawienie (kontrast: dwie kolumny A/B; odtwarzanie kolejką, przeciąganie kolejności).
+- `/mentor/{pairId}/arkusze` - arkusze + trendy. `/mentor/{pairId}/raport` - kreator raportu z podglądem A4. `/mentor/{pairId}/ustawienia` - kategorie (kolor, ikona, przywróć domyślne).
+- Odtwarzacz: `PlayerAdapter` (YouTube IFrame API, Vimeo player.js, HTML5 `<video>` dla nagrań) - `load/play/pause/seek/getTime/setRate/onTime/onState`, wirtualny klip = pętla `start..end`.
+- Telefon w przeglądarce: ekran „Mentor najlepiej działa na komputerze albo w aplikacji BAZA” (+ otwórz w aplikacji, wyślij link na komputer); publiczne `/mentor/k|z|r/...` w pełni działają.
+
+## 6. Aplikacja BAZA
+- Kafel „Mentor” w Więcej (szeroki, gdy `GET /mentor-panel/pairs` zwraca co najmniej jedną włączoną parę).
+- Pełny panel natywnie: lista par → pulpit → mecze (oś sezonu pionowo) → pokój meczu (istniejący `MatchVideoPlayer` rozszerzony o klipy, kategorie pary, zestawienia, wątki, arkusze) → biblioteka klipów → zestawienia → ustawienia kategorii.
+- Szczegóły meczu: dotychczasowa ikona w nagłówku (wideo + prośba o ocenę) otwiera **hub „Mentor” meczu**: nagrania, prośba o ocenę (jak dziś), gwiazdka/zgłoś do omówienia, klipy i wątki meczu, „Otwórz pokój meczu”, „Otwórz na komputerze”.
+- Logowanie QR: skaner (aparat) + deep link `refhandballapp://mentor/login/{code}` → arkusz „Zalogować komputer?” → `POST /auth/qr/{code}/approve`.
+- „Otwórz na komputerze”: animowana karta z linkiem (Kopiuj / Wyślij / QR).
+- Reguła iOS jednego modala (`docs/claude/modale-ios.md`) obowiązuje.
+
+## 7. Projekt i ruch (wspólne)
+- Zasady jak Communio (`Communio/docs/motion.md`): sprężyna osiada raz (`damping 24, stiffness 240, mass .85`), sukces `{13,240,.7}`; animujemy tylko transform/opacity; stan końcowy = stan bazowy; kaskady 45-90 ms, max ~8; reduced-motion; pętle tylko gdy widać.
+- Web: system projektowy Pod Ręką (`components/pod-reka/ds`), ciemny motyw domyślny, tryb lekki na dotyku. Wektorowe ilustracje pustych stanów (np. pusta oś = tablica z gwizdkiem).
+- Kolory kategorii z palety tokenów (bez hexów w ekranach).
