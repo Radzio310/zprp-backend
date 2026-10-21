@@ -1,0 +1,268 @@
+"""
+Tabele panelu „Mentor" (21.10.2026) - same schematy, bez połączenia z bazą.
+
+Kontrakt: `docs/mentor-panel.md`, sekcja 2. Identyfikatory tekstowe (uuid4 hex).
+JSON jako Text (jak `mentor_evaluation_tables`): sterownik `databases` oddaje
+JSONB napisem, więc każdy odczyt i tak rozbiera go `json_value`.
+
+Do kontraktu dołożone (tylko wewnętrznie, bez zmiany kształtu odpowiedzi):
+  - `mentor_audit.rev/scope/match_id` - z nich `GET /changes` wie, CO się
+    zmieniło od numeru `since`,
+  - `mentor_qr_logins.user_agent` - podpowiedź „Chrome na Windows" przy
+    zatwierdzaniu logowania w aplikacji.
+"""
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Table,
+    Text,
+    func,
+    text,
+)
+
+
+def define_tables(metadata):
+    panels = Table(
+        "mentor_panels",
+        metadata,
+        Column("pair_id", String, ForeignKey("mentoring_pairs.id"), primary_key=True),
+        Column("enabled", Boolean, nullable=False, server_default=text("false")),
+        Column("enabled_by", String, nullable=True),
+        Column("enabled_at", DateTime(timezone=True), nullable=True),
+        Column("rev", BigInteger, nullable=False, server_default=text("0")),
+        Column("settings_json", Text, nullable=False, server_default=text("'{}'")),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    flags = Table(
+        "mentor_match_flags",
+        metadata,
+        Column("pair_id", String, primary_key=True),
+        Column("match_id", String, primary_key=True),
+        Column("starred", Boolean, nullable=False, server_default=text("false")),
+        Column("star_reason", String, nullable=True),
+        Column("starred_by", String, nullable=True),
+        Column("submitted", Boolean, nullable=False, server_default=text("false")),
+        Column("submitted_by", String, nullable=True),
+        Column("submitted_at", DateTime(timezone=True), nullable=True),
+        Column("due_at", DateTime(timezone=True), nullable=True),
+        Column("review_status", String, nullable=True),
+        Column("note", String, nullable=True),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    categories = Table(
+        "mentor_categories",
+        metadata,
+        Column("id", String, primary_key=True),
+        #: NULL = kategoria globalna administratora (widzą ją wszystkie pary).
+        Column("pair_id", String, nullable=True, index=True),
+        Column("key", String, nullable=True),
+        Column("name", String, nullable=False),
+        Column("color", String, nullable=False),
+        Column("icon", String, nullable=False),
+        Column("description", String, nullable=True),
+        Column("sort", Integer, nullable=False, server_default=text("0")),
+        Column("archived", Boolean, nullable=False, server_default=text("false")),
+        Column("created_by", String, nullable=True),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    clips = Table(
+        "mentor_clips",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("pair_id", String, nullable=False),
+        Column("match_id", String, nullable=False),
+        Column("video_id", String, nullable=False, index=True),
+        Column("start_s", Float, nullable=False),
+        Column("end_s", Float, nullable=False),
+        Column("title", String, nullable=True),
+        Column("note", Text, nullable=True),
+        Column("category_ids", Text, nullable=False, server_default=text("'[]'")),
+        Column("source", String, nullable=False, server_default=text("'manual'")),
+        Column("source_key", String, nullable=True),
+        Column("match_ms", BigInteger, nullable=True),
+        Column("half", Integer, nullable=True),
+        Column("author_id", String, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+        Column("mp4_status", String, nullable=False, server_default=text("'none'")),
+        Column("mp4_key", String, nullable=True),
+        Column("mp4_size", BigInteger, nullable=True),
+        Column("public_token", String, nullable=True, unique=True),
+        Column("published_at", DateTime(timezone=True), nullable=True),
+    )
+    Index("ix_mentor_clips_pair_match", clips.c.pair_id, clips.c.match_id)
+    Index("ix_mentor_clips_pair_created", clips.c.pair_id, clips.c.created_at)
+    compilations = Table(
+        "mentor_compilations",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("pair_id", String, nullable=False, index=True),
+        Column("name", String, nullable=False),
+        Column("description", Text, nullable=True),
+        Column("mode", String, nullable=False, server_default=text("'free'")),
+        Column("created_by", String, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("public_token", String, nullable=True, unique=True),
+        Column("published_at", DateTime(timezone=True), nullable=True),
+    )
+    compilation_items = Table(
+        "mentor_compilation_items",
+        metadata,
+        Column("compilation_id", String, primary_key=True),
+        Column("clip_id", String, primary_key=True),
+        Column("position", Integer, nullable=False, server_default=text("0")),
+        Column("column", String, nullable=True),
+        Column("note", String, nullable=True),
+    )
+    threads = Table(
+        "mentor_threads",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("pair_id", String, nullable=False),
+        Column("target_kind", String, nullable=False),
+        Column("target_id", String, nullable=False),
+        Column("match_id", String, nullable=True),
+        Column("title", String, nullable=True),
+        Column("kind", String, nullable=False, server_default=text("'question'")),
+        Column("status", String, nullable=False, server_default=text("'open'")),
+        Column("created_by", String, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("last_comment_at", DateTime(timezone=True), nullable=True),
+    )
+    Index("ix_mentor_threads_target", threads.c.pair_id, threads.c.target_kind, threads.c.target_id)
+    comments = Table(
+        "mentor_comments",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("thread_id", String, nullable=False, index=True),
+        Column("author_id", String, nullable=False),
+        Column("body", Text, nullable=False),
+        Column("video_id", String, nullable=True),
+        Column("video_s", Float, nullable=True),
+        Column("drawing_json", Text, nullable=True),
+        Column("mentions", Text, nullable=False, server_default=text("'[]'")),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("edited_at", DateTime(timezone=True), nullable=True),
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+    )
+    reads = Table(
+        "mentor_reads",
+        metadata,
+        Column("pair_id", String, primary_key=True),
+        Column("judge_id", String, primary_key=True),
+        Column("seen_rev", BigInteger, nullable=False, server_default=text("0")),
+        Column("seen_at", DateTime(timezone=True), nullable=True),
+    )
+    uploads = Table(
+        "mentor_uploads",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("pair_id", String, nullable=False, index=True),
+        Column("match_id", String, nullable=False),
+        Column("video_id", String, nullable=True),
+        Column("uploader_id", String, nullable=False),
+        Column("filename", String, nullable=False),
+        Column("size", BigInteger, nullable=False),
+        Column("content_type", String, nullable=True),
+        Column("r2_key", String, nullable=True),
+        Column("upload_id", String, nullable=True),
+        Column("status", String, nullable=False, server_default=text("'uploading'"), index=True),
+        Column("duration_s", Float, nullable=True),
+        Column("width", Integer, nullable=True),
+        Column("height", Integer, nullable=True),
+        Column("play_key", String, nullable=True),
+        Column("poster_key", String, nullable=True),
+        Column("error", String, nullable=True),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("expires_at", DateTime(timezone=True), nullable=True),
+    )
+    reports = Table(
+        "mentor_reports",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("pair_id", String, nullable=False, index=True),
+        Column("title", String, nullable=False),
+        Column("config_json", Text, nullable=False, server_default=text("'{}'")),
+        Column("snapshot_json", Text, nullable=False, server_default=text("'{}'")),
+        Column("created_by", String, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("public_token", String, nullable=True, unique=True),
+        Column("published_at", DateTime(timezone=True), nullable=True),
+        Column("pdf_key", String, nullable=True),
+    )
+    web_sessions = Table(
+        "mentor_web_sessions",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("judge_id", String, nullable=False, index=True),
+        Column("session_hash", String, nullable=False, unique=True),
+        Column("csrf_hash", String, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("expires_at", DateTime(timezone=True), nullable=False),
+        Column("last_seen_at", DateTime(timezone=True), nullable=True),
+        Column("revoked_at", DateTime(timezone=True), nullable=True),
+        Column("user_agent", String, nullable=True),
+    )
+    qr_logins = Table(
+        "mentor_qr_logins",
+        metadata,
+        Column("code", String, primary_key=True),
+        Column("poll_hash", String, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("expires_at", DateTime(timezone=True), nullable=False),
+        Column("approved_by", String, nullable=True),
+        Column("approved_at", DateTime(timezone=True), nullable=True),
+        Column("consumed_at", DateTime(timezone=True), nullable=True),
+        Column("user_agent", String, nullable=True),
+    )
+    audit = Table(
+        "mentor_audit",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("pair_id", String, nullable=True),
+        Column("actor_id", String, nullable=True),
+        Column("action", String, nullable=False),
+        Column("data", Text, nullable=False, server_default=text("'{}'")),
+        Column("rev", BigInteger, nullable=True),
+        Column("scope", String, nullable=True),
+        Column("match_id", String, nullable=True),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    Index("ix_mentor_audit_pair_rev", audit.c.pair_id, audit.c.rev)
+    return (
+        panels,
+        flags,
+        categories,
+        clips,
+        compilations,
+        compilation_items,
+        threads,
+        comments,
+        reads,
+        uploads,
+        reports,
+        web_sessions,
+        qr_logins,
+        audit,
+    )
+
+
+#: Wykonywane przy starcie przez `app/db.py` (PostgreSQL). Indeksy na numerach
+#: sędziów - lista meczów pary pyta hurtownię i archiwum po obu numerach.
+MIGRATIONS = (
+    "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_1 ON zprp_public_matches (referee_1_id)",
+    "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_2 ON zprp_public_matches (referee_2_id)",
+    "CREATE INDEX IF NOT EXISTS ix_zprp_archive_matches_ref_first ON zprp_archive_matches ((slim_json->'refs'->>'first'))",
+    "CREATE INDEX IF NOT EXISTS ix_zprp_archive_matches_ref_second ON zprp_archive_matches ((slim_json->'refs'->>'second'))",
+)

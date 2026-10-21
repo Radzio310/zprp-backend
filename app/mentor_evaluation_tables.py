@@ -96,6 +96,10 @@ def define_tables(metadata):
         Column("sync_json", Text, nullable=True),
         Column("markers_json", Text, nullable=True),
         Column("updated_at", DateTime(timezone=True), nullable=True),
+        #: Panel „Mentor" (21.10.2026): `link` (YouTube/Vimeo/inne) albo `upload`
+        #: (własne nagranie w R2, `mentor_uploads.id` w `upload_id`).
+        Column("kind", String, nullable=True),
+        Column("upload_id", String, nullable=True),
         UniqueConstraint("match_id", "normalized_url", name="uq_mentor_match_video_url"),
     )
     return evaluations, versions, requests, videos
@@ -112,4 +116,6 @@ MIGRATIONS = (
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS sync_json text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS markers_json text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS updated_at timestamptz",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS kind varchar",
+    "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS upload_id varchar",
 )

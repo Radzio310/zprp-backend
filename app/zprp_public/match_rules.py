@@ -6,6 +6,7 @@ rekordy, agregacja strzelców, plik .ics i walidacja adresów załączników.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -235,6 +236,160 @@ def team_result(match: dict, team_id: str) -> Optional[str]:
     if side is None:
         return "D"
     return "W" if side == mine else "L"
+
+
+# ---------------------------------------------------------------------------
+# Bilans w czterech stanach: piłka ręczna nie zna remisu
+# ---------------------------------------------------------------------------
+
+#: Kody wyniku z punktu widzenia drużyny: zwycięstwo, zwycięstwo po rzutach
+#: karnych, porażka po rzutach karnych, porażka. Walkower liczy się jak W/L.
+RESULT_CODES = ("W", "WK", "LK", "L")
+#: Punkty za wynik (system 3/2/1/0).
+RESULT_POINTS = {"W": 3, "WK": 2, "LK": 1, "L": 0}
+
+
+def side_result(match: dict, side: str) -> Optional[str]:
+    """``W``/``WK``/``LK``/``L`` dla strony ``home``/``away`` albo None.
+
+    None: mecz bez wyniku albo równy wynik bez serii karnych w danych (źródło
+    nie podało rozstrzygnięcia - nie zgadujemy i nie nazywamy tego remisem).
+    """
+    side_won, decided = outcome(match)
+    if side_won is None:
+        return None
+    if decided != "walkover" and (match.get("score_home") is None or match.get("score_away") is None):
+        return None
+    won = side_won == side
+    if decided == "shootout":
+        return "WK" if won else "LK"
+    return "W" if won else "L"
+
+
+def team_result_detail(match: dict, team_id: str) -> Optional[str]:
+    """Jak :func:`side_result`, ale strona z ``team_id`` (gospodarz/gość)."""
+    if match.get("home_team_id") == team_id:
+        return side_result(match, "home")
+    if match.get("away_team_id") == team_id:
+        return side_result(match, "away")
+    return None
+
+
+def empty_record() -> dict[str, int]:
+    return {"w": 0, "wk": 0, "lk": 0, "l": 0}
+
+
+def tally_results(results: Iterable[Optional[str]]) -> dict[str, int]:
+    """``{"w", "wk", "lk", "l"}`` z ciągu kodów (None pomijane)."""
+    rec = empty_record()
+    for r in results:
+        if r in RESULT_POINTS:
+            rec[r.lower()] += 1
+    return rec
+
+
+def record_points(rec: dict) -> int:
+    """Punkty 3/2/1/0 z bilansu ``{"w", "wk", "lk", "l"}``."""
+    return 3 * int(rec.get("w") or 0) + 2 * int(rec.get("wk") or 0) + int(rec.get("lk") or 0)
+
+
+def basic_result(code: Optional[str]) -> Optional[str]:
+    """Stary kod W/L z nowego (karne to też zwycięstwo/porażka)."""
+    return {"W": "W", "WK": "W", "LK": "L", "L": "L"}.get(code or "")
+
+
+# --- Tabela ZPRP: rozbicie zwycięstw i porażek po karnych ------------------
+
+def _fold_key(key: Any) -> str:
+    base = unicodedata.normalize("NFKD", str(key or "").lower().replace("ł", "l"))
+    return re.sub(r"[^a-z0-9]+", "", "".join(c for c in base if not unicodedata.combining(c)))
+
+
+def explicit_shootout_columns(source: Any) -> Optional[tuple[int, int]]:
+    """(zwycięstwa po karnych, porażki po karnych) z wiersza pokaz_tabela.php,
+    jeśli źródło ma takie kolumny (np. ``ZwyciestwaKarne``/``PrzegraneKarne``).
+    Bramki z karnych (``BramkiKarne``) się nie liczą."""
+    if isinstance(source, str):
+        try:
+            source = json.loads(source)
+        except ValueError:
+            return None
+    if not isinstance(source, dict):
+        return None
+    wins = losses = None
+    for key, value in source.items():
+        k = _fold_key(key)
+        if "bram" in k or "gol" in k or not any(x in k for x in ("karn", "shootout", "penalt")):
+            continue
+        n = _int(value)
+        if n is None:
+            continue
+        if any(x in k for x in ("zw", "wyg", "win")):
+            wins = n
+        elif any(x in k for x in ("prz", "por", "los")):
+            losses = n
+    return (wins, losses) if wins is not None and losses is not None else None
+
+
+def _split_standing(wins: int, draws: int, losses: int, matches: int, wk: int, lk: int) -> Optional[dict[str, int]]:
+    """Dopasowuje (wk, lk) do kolumn W/D/L tabeli. Źródło trzyma mecze z karnymi
+    albo w „Remisach" (D = wk + lk), albo wlicza je do zwycięstw/porażek."""
+    if wk < 0 or lk < 0:
+        return None
+    if draws > 0:
+        return {"w": wins, "wk": wk, "lk": lk, "l": losses} if wk + lk == draws else None
+    if (wk or lk) and matches and wins + losses + wk + lk == matches:
+        return {"w": wins, "wk": wk, "lk": lk, "l": losses}
+    if wins >= wk and losses >= lk:
+        return {"w": wins - wk, "wk": wk, "lk": lk, "l": losses - lk}
+    return None
+
+
+def standing_record(row: dict, counted: Optional[dict] = None) -> Optional[dict[str, Any]]:
+    """Bilans Z/Zk/Pk/P wiersza tabeli ZPRP: ``{"w", "wk", "lk", "l", "source"}``.
+
+    Kolejność źródeł: kolumny karnych w samym wierszu (``extra_json``) →
+    mecze drużyny w tych rozgrywkach (``counted``: ``{"played", "w", "wk", "lk", "l"}``)
+    → punkty 3/2/1/0 (gdy „Remisy" > 0, rozkład z punktów jest jednoznaczny).
+    None: tabela ma „Remisy", a podziału nie da się ustalić.
+    """
+    wins, draws, losses = (int(row.get(k) or 0) for k in ("wins", "draws", "losses"))
+    matches, points = int(row.get("matches") or 0), row.get("points")
+    explicit = explicit_shootout_columns(row.get("extra_json"))
+    if explicit:
+        hit = _split_standing(wins, draws, losses, matches, *explicit)
+        if hit:
+            return {**hit, "source": "zprp"}
+    if counted:
+        hit = _split_standing(wins, draws, losses, matches, int(counted.get("wk") or 0), int(counted.get("lk") or 0))
+        if hit:
+            return {**hit, "source": "matches"}
+        if matches and int(counted.get("played") or 0) == matches:
+            return {**{k: int(counted.get(k) or 0) for k in ("w", "wk", "lk", "l")}, "source": "matches"}
+    if draws > 0:
+        if points is not None:
+            wk = int(points) - 3 * wins - draws
+            if 0 <= wk <= draws:
+                return {"w": wins, "wk": wk, "lk": draws - wk, "l": losses, "source": "points"}
+        return None
+    return {"w": wins, "wk": 0, "lk": 0, "l": losses, "source": "zprp"}
+
+
+def count_team_results(matches: Iterable[dict]) -> dict[str, dict]:
+    """Bilans każdej drużyny z listy meczów: ``{team_id: {"played", "w", "wk", "lk", "l"}}``."""
+    out: dict[str, dict] = {}
+    for m in matches:
+        if m.get("withdrawn") and not m.get("walkover_team_id"):
+            continue  # jak w simulate_table: wycofanie bez walkowera nie wchodzi do tabeli
+        for side in ("home", "away"):
+            tid = m.get(f"{side}_team_id")
+            code = side_result(m, side)
+            if not tid or code is None:
+                continue
+            rec = out.setdefault(tid, {"played": 0, **empty_record()})
+            rec["played"] += 1
+            rec[code.lower()] += 1
+    return out
 
 
 def streaks(results: list[str]) -> dict[str, Any]:

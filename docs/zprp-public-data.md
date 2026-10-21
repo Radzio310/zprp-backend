@@ -111,6 +111,26 @@ Najważniejsze endpointy:
 - `GET /api/v1/handball/changes?since=...`
 - `GET /api/v1/handball/sync/status`
 
+### Bilans bez remisów (Z / Zk / Pk / P)
+
+Piłka ręczna nie zna remisu: równy wynik rozstrzygają rzuty karne. Kody wyniku
+drużyny (`match_rules.side_result`): `W` zwycięstwo, `WK` zwycięstwo po karnych,
+`LK` porażka po karnych, `L` porażka (walkower = W/L); punkty 3/2/1/0.
+Pola dodane obok starych (zgodność):
+
+- `stats` klubu/drużyny i `metrics` porównywarki: `record {w, wk, lk, l}`,
+  `form_detail`, płaskie `wins_regular`/`wins_shootout`/`losses_shootout`/`losses_regular`
+  (to one są metrykami `/compare`). `wins`/`losses` liczą też karne,
+  `draws` = tylko równy wynik bez serii karnych w danych (zwykle 0).
+- wiersze tabeli (`/competitions/{id}/standings`, `standings` w overview):
+  `record {w, wk, lk, l, source}` albo `null`. `source`: `zprp` (kolumny karnych
+  w wierszu pokaz_tabela.php albo brak karnych), `matches` (policzone z meczów
+  drużyny w rozgrywkach), `points` (rozkład „Remisów” z punktów 3/2/1/0).
+  Kolumny `wins`/`draws`/`losses` są wprost ze źródła (mecze z karnymi źródło
+  liczy jako „Remisy” albo wlicza do W/L - `record` rozstrzyga oba przypadki).
+- `/teams/{id}/season-chart`: `rounds[].result_detail`, `rounds[].decided_by`, `record`.
+- `/h2h`: `balance.a_wins_shootout`/`b_wins_shootout`, `balance.a_record`/`b_record`.
+
 Endpointy administracyjne są chronione istniejącą bramką administratora:
 
 - `POST /admin/handball-sync/run` — `catalog`, `live`, `clubs`, `details`,

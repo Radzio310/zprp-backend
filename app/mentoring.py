@@ -257,12 +257,24 @@ async def management(province: str = "", actor: Actor = Depends(market_actor)):
 
     occupied = await database.fetch_all(select(members.c.judge_id))
     known = {p["judge_id"] for p in people}
+    pair_items = [await pair_json(r, links, pair_locked(actor.is_admin, manage, programs[r["id"]]), programs[r["id"]]) for r in records]
+    cross_items = [await pair_json(r, cross_links, True) for r in cross_records]
+    # Panel „Mentor" (21.10.2026): przełącznik na karcie pary. Pole dodatkowe -
+    # starsze aplikacje go nie czytają; awaria odczytu nie psuje listy par.
+    try:
+        from app.mentor_panel import panel_enabled_map
+
+        enabled = await panel_enabled_map([item["id"] for item in pair_items + cross_items])
+    except Exception:  # noqa: BLE001
+        enabled = {}
+    for item in pair_items + cross_items:
+        item["panel_enabled"] = bool(enabled.get(item["id"]))
     return {"config": await configuration(province), "province": province,
         "can_manage": manage, "is_admin": bool(actor.is_admin),
         "people": people + cross_people,
         "occupied": [r["judge_id"] for r in occupied if actor.is_admin or r["judge_id"] in known],
-        "pairs": [await pair_json(r, links, pair_locked(actor.is_admin, manage, programs[r["id"]]), programs[r["id"]]) for r in records],
-        "cross_pairs": [await pair_json(r, cross_links, True) for r in cross_records]}
+        "pairs": pair_items,
+        "cross_pairs": cross_items}
 
 
 @router.put("/config/{province}")

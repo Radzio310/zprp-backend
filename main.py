@@ -357,6 +357,9 @@ from app.mail_brand import router as mail_brand_router
 app.include_router(mentoring_router)
 from app.mentor_evaluations import router as mentor_evaluations_router
 app.include_router(mentor_evaluations_router)
+# Panel „Mentor" pary (web BAZA pod Ręką + aplikacja) - kontrakt `docs/mentor-panel.md`.
+from app.mentor_panel import panel_router as mentor_panel_router
+app.include_router(mentor_panel_router)
 app.include_router(short_result_records_router)
 # Dodatkowy raport sędziów/delegata: treść, PDF i adresaci.
 app.include_router(extra_report_router)
@@ -1568,6 +1571,14 @@ async def startup():
     logger.info("✅ Śląskie league tables Joomla publisher started (24 h)")
     _zprp_public_sync_task = asyncio.create_task(run_zprp_public_scheduler())
     _zprp_history_task = asyncio.create_task(run_history_scheduler())
+    # Panel „Mentor": kolejka ffmpeg (1 naraz), retencja nagrań raz na dobę
+    # i zbiorczy e-mail o nowych wątkach (najwyżej co 30 min na osobę).
+    from app.mentor_panel_media import run_media_worker, run_retention
+    from app.mentor_panel_notify import run_email_digest
+    asyncio.create_task(run_media_worker())
+    asyncio.create_task(run_retention())
+    asyncio.create_task(run_email_digest())
+    logger.info("✅ Mentor panel: media worker, retencja i e-maile wystartowały")
     logger.info("✅ Publiczna hurtownia ZPRP wystartowała (lekki cykl 2/15 min + katalog 24 h)")
     logger.info("✅ MP protocol snapshot scheduler started")
 

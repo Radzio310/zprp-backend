@@ -9,9 +9,9 @@ from __future__ import annotations
 import time
 from typing import Any, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
-from app.db import database, zprp_public_competitions, zprp_public_seasons
+from app.db import database, zprp_public_competitions, zprp_public_matches, zprp_public_seasons
 from app.zprp_public import match_rules as MR
 
 _SEASONS_TTL = 300.0
@@ -58,3 +58,33 @@ async def enrich_matches(items: Iterable[dict[str, Any]]) -> None:
         category, gender = kinds.get(item.get("competition_id"), (None, None))
         item.setdefault("competition_category", category)
         item.setdefault("competition_gender", gender)
+
+
+async def attach_standing_records(rows: list[dict[str, Any]]) -> None:
+    """Dokłada do wierszy tabeli `record` {w, wk, lk, l, source} (Z/Zk/Pk/P).
+
+    Wiersze mogą mieć `extra_json` (surowy wiersz pokaz_tabela.php) - po
+    odczytaniu kolumn karnych jest usuwany z odpowiedzi. Mecze drużyn w tych
+    rozgrywkach (jedno zapytanie na całą listę) rozstrzygają, ile „Remisów"
+    ZPRP to zwycięstwa, a ile porażki po rzutach karnych.
+    """
+    rows = [r for r in rows if isinstance(r, dict)]
+    comps = sorted({str(r["competition_id"]) for r in rows if r.get("competition_id")})
+    teams = sorted({str(r["team_id"]) for r in rows if r.get("team_id")})
+    counted: dict[str, dict[str, dict]] = {}
+    if comps and teams:
+        M = zprp_public_matches
+        found = await database.fetch_all(
+            select(M.c.competition_id, M.c.home_team_id, M.c.away_team_id, M.c.score_home, M.c.score_away,
+                   M.c.shootout_home, M.c.shootout_away, M.c.winner, M.c.walkover_team_id, M.c.withdrawn)
+            .where(and_(M.c.competition_id.in_(comps), M.c.score_home.is_not(None), M.c.score_away.is_not(None),
+                        or_(M.c.home_team_id.in_(teams), M.c.away_team_id.in_(teams))))
+        )
+        by_comp: dict[str, list[dict]] = {}
+        for m in found:
+            by_comp.setdefault(m["competition_id"], []).append(dict(m))
+        counted = {cid: MR.count_team_results(ms) for cid, ms in by_comp.items()}
+    for r in rows:
+        mine = (counted.get(str(r.get("competition_id") or "")) or {}).get(str(r.get("team_id") or ""))
+        r["record"] = MR.standing_record(r, mine)
+        r.pop("extra_json", None)

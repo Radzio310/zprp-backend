@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from app.national_distance_parser import clean_city, normalize_city_key
 from app.national_place_rules import province_label, province_slug
+from app.zprp_public import match_rules as MR
 
 _PREFIXES = re.compile(r"^(m|gm|msc|miasto|gmina)\.?\s+", re.I)
 _LEADING_POSTAL = re.compile(r"^\d{2}\s*-\s*\d{3}[\s,]*")
@@ -105,10 +106,21 @@ def voivodeship(slug: str) -> Optional[str]:
 
 def team_record(matches: Iterable[dict], is_mine: Callable[[str, dict], bool]) -> dict[str, Any]:
     """Bilans z rozegranych meczów. `is_mine(side, match)` mówi, czy strona
-    'home'/'away' to badany podmiot (drużyna albo klub)."""
-    played = wins = draws = losses = gf = ga = 0
+    'home'/'away' to badany podmiot (drużyna albo klub).
+
+    Piłka ręczna nie zna remisu: równy wynik rozstrzygają rzuty karne, walkower
+    liczy się jak zwycięstwo/porażka. Nowe pola: `record` {w, wk, lk, l},
+    płaskie `wins_regular`/`wins_shootout`/`losses_shootout`/`losses_regular`
+    (porównywarka) i `form_detail` (W/WK/LK/L, ostatnie 5 rozstrzygniętych).
+    Stare pola zostają dla zgodności: `wins`/`losses` liczą też rozstrzygnięcia
+    po karnych, `draws` to wyłącznie mecze z równym wynikiem BEZ serii karnych
+    w danych (źródło nie podało rozstrzygnięcia, zwykle 0).
+    """
+    played = draws = gf = ga = 0
     home_played = away_played = 0
     form: list[str] = []
+    detail: list[str] = []
+    rec = MR.empty_record()
     for m in sorted(matches, key=lambda x: (x.get("scheduled_at") is not None, x.get("scheduled_at") or datetime.min)):
         sh, sa = m.get("score_home"), m.get("score_away")
         if sh is None or sa is None:
@@ -122,23 +134,27 @@ def team_record(matches: Iterable[dict], is_mine: Callable[[str, dict], bool]) -
         away_played += 0 if mine_home else 1
         gf += mine
         ga += theirs
-        if mine > theirs:
-            wins += 1
-            form.append("W")
-        elif mine < theirs:
-            losses += 1
-            form.append("L")
-        else:
+        code = MR.side_result(m, "home" if mine_home else "away")
+        if code is None:
             draws += 1
             form.append("D")
+            continue
+        rec[code.lower()] += 1
+        detail.append(code)
+        form.append(MR.basic_result(code) or "D")
+    wins, losses = rec["w"] + rec["wk"], rec["l"] + rec["lk"]
     return {
         "played": played, "wins": wins, "draws": draws, "losses": losses,
+        "wins_regular": rec["w"], "wins_shootout": rec["wk"],
+        "losses_shootout": rec["lk"], "losses_regular": rec["l"],
+        "record": rec,
         "goals_for": gf, "goals_against": ga, "goal_difference": gf - ga,
         "avg_goals_for": round(gf / played, 2) if played else None,
         "avg_goals_against": round(ga / played, 2) if played else None,
         "win_rate": round(wins / played, 3) if played else None,
         "home_played": home_played, "away_played": away_played,
         "form": form[-5:],
+        "form_detail": detail[-5:],
     }
 
 

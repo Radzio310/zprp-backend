@@ -47,7 +47,7 @@ from app.zprp_public import corrections, portal_rules as R
 from app.zprp_public import match_rules as MR
 from app.zprp_public import search_rules as SR
 from app.zprp_public.protocol_times import attach_protocol_times
-from app.zprp_public.enrich import enrich_matches
+from app.zprp_public.enrich import attach_standing_records, enrich_matches
 from app.zprp_public.ondemand import ensure_details
 from app.zprp_public.api import _dict, _public_player, search as base_search
 from app.zprp_public.privacy import public_club, public_team
@@ -154,7 +154,7 @@ async def _standing_rows(team_ids: list[str], season_id: Optional[str]) -> list[
             zprp_public_standings.c.position, zprp_public_standings.c.matches,
             zprp_public_standings.c.wins, zprp_public_standings.c.draws, zprp_public_standings.c.losses,
             zprp_public_standings.c.goals_for, zprp_public_standings.c.goals_against,
-            zprp_public_standings.c.points,
+            zprp_public_standings.c.points, zprp_public_standings.c.extra_json,
             zprp_public_competitions.c.name.label("competition_name"),
             zprp_public_competitions.c.season_id,
             zprp_public_competitions.c.team_count,
@@ -164,7 +164,9 @@ async def _standing_rows(team_ids: list[str], season_id: Optional[str]) -> list[
     )
     if season_id:
         query = query.where(zprp_public_competitions.c.season_id == season_id)
-    return [_dict(r) for r in await database.fetch_all(query)]
+    rows = [_dict(r) for r in await database.fetch_all(query)]
+    await attach_standing_records(rows)
+    return rows
 
 
 async def _scorers_for_teams(team_ids: list[str], season_id: Optional[str], limit: int = 10) -> list[dict]:
@@ -1019,8 +1021,10 @@ async def _empty() -> list:
 # ---------------------------------------------------------------------------
 
 COMPARE_TYPES = {"club", "team", "player"}
-RECORD_METRICS = ["played", "wins", "draws", "losses", "goals_for", "goals_against", "goal_difference",
-                  "avg_goals_for", "avg_goals_against", "win_rate"]
+# Bilans w czterech stanach (Z/Zk/Pk/P) - remisu w piłce ręcznej nie ma. Pola
+# `wins`/`draws`/`losses` nadal są w `metrics` (zgodność), ale nie jako metryki.
+RECORD_METRICS = ["played", "wins_regular", "wins_shootout", "losses_shootout", "losses_regular",
+                  "goals_for", "goals_against", "goal_difference", "avg_goals_for", "avg_goals_against", "win_rate"]
 PLAYER_METRICS = ["matches", "goals", "goals_per_match", "penalty_goals", "penalty_accuracy", "two_minutes",
                   "warnings", "disqualifications"]
 

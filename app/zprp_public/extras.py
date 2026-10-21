@@ -482,7 +482,7 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
     played = [_dict(r) for r in mine]
     if not played:
         return {"team_id": team_id, "season_id": team["season_id"], "competition_id": None, "rounds": [],
-                "streaks": MR.streaks([]), "best_match": None}
+                "streaks": MR.streaks([]), "best_match": None, "record": MR.empty_record()}
     competition_id = Counter(m["competition_id"] for m in played).most_common(1)[0][0]
     played = [m for m in played if m["competition_id"] == competition_id]
     comp = [_dict(r) for r in await database.fetch_all(
@@ -510,19 +510,22 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
     days = {r["matchday_id"]: _dict(r) for r in await database.fetch_all(
         select(zprp_public_matchdays.c.matchday_id, zprp_public_matchdays.c.number, zprp_public_matchdays.c.sequence)
     )}
-    rounds, results = [], []
+    rounds, results, details = [], [], []
     for index, m in enumerate(played, start=1):
         upto = [c for c in comp if c["scheduled_at"] <= m["scheduled_at"] + timedelta(hours=12)]
         table = MR.simulate_table(upto)
         row = next((r for r in table if r["team_id"] == team_id), None)
         result = MR.team_result(m, team_id)
+        detail = MR.team_result_detail(m, team_id)
         results.append(result)
+        details.append(detail)
         home = m["home_team_id"] == team_id
         day = days.get(m.get("matchday_id")) or {}
         rounds.append({
             "round": day.get("number") or _round_from_name(m.get("matchday_name")) or index,
             "position": row["position"] if row else None,
-            "points": row["points"] if row else None, "result": result, "match_id": m["match_id"],
+            "points": row["points"] if row else None, "result": result, "result_detail": detail,
+            "decided_by": MR.outcome(m)[1], "match_id": m["match_id"],
             "opponent": m["away_team_name"] if home else m["home_team_name"], "home": home,
             "score": f'{m["score_home"]}:{m["score_away"]}', "scheduled_at": m["scheduled_at"],
         })
@@ -539,7 +542,7 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
         best_card["margin"] = MR.margin_for(best, team_id)
     return {"team_id": team_id, "season_id": team["season_id"], "competition_id": competition_id,
             "rounds": rounds, "streaks": MR.streaks([r for r in results if r]), "best_match": best_card,
-            "table_size": table_size, "official_position": official_position}
+            "table_size": table_size, "official_position": official_position, "record": MR.tally_results(details)}
 
 
 @router.get("/teams/{team_id}/calendar.ics")
@@ -711,7 +714,10 @@ async def head_to_head(club_a: str = Query(..., min_length=1), club_b: str = Que
     if team_a and team_b:
         rows = R.h2h_between([dict(r) for r in rows], {"club_id": club_a, "name": team_a}, {"club_id": club_b, "name": team_b})
     cards = await _cards(rows)
-    bal = {"a_wins": 0, "b_wins": 0, "draws": 0, "shootouts": 0, "a_goals": 0, "b_goals": 0}
+    # `a_wins`/`b_wins` liczą też zwycięstwa po karnych; `draws` = równy wynik bez serii karnych
+    # w danych (nierozstrzygnięte w źródle). Bilans w czterech stanach: `a_record`/`b_record`.
+    bal = {"a_wins": 0, "b_wins": 0, "draws": 0, "shootouts": 0, "a_goals": 0, "b_goals": 0,
+           "a_wins_shootout": 0, "b_wins_shootout": 0}
     best: dict[str, Optional[dict]] = {"a": None, "b": None}
     for c in cards:
         a_home = c["home_club_id"] == club_a
@@ -726,10 +732,15 @@ async def head_to_head(club_a: str = Query(..., min_length=1), club_b: str = Que
             continue
         a_won = (side == "home") == a_home
         bal["a_wins" if a_won else "b_wins"] += 1
+        if c.get("decided_by") == "shootout":
+            bal["a_wins_shootout" if a_won else "b_wins_shootout"] += 1
         key = "a" if a_won else "b"
         margin = abs(a_goals - b_goals)
         if c.get("decided_by") != "walkover" and margin and (best[key] is None or margin > best[key]["margin"]):
             best[key] = {**c, "margin": margin}
+    a_wk, b_wk = bal["a_wins_shootout"], bal["b_wins_shootout"]
+    bal["a_record"] = {"w": bal["a_wins"] - a_wk, "wk": a_wk, "lk": b_wk, "l": bal["b_wins"] - b_wk}
+    bal["b_record"] = {"w": bal["b_wins"] - b_wk, "wk": b_wk, "lk": a_wk, "l": bal["a_wins"] - a_wk}
     lookup = await _club_lookup({club_a, club_b})
     return {
         "club_a": {"club_id": club_a, **{k: (lookup.get(club_a) or {}).get(k) for k in ("name", "logo_url", "city")}},
