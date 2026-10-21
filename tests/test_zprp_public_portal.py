@@ -206,7 +206,7 @@ def test_mecz_terminarz_szukanie_porownanie(portal, monkeypatch):
     assert [c["city"] for c in found["cities"]] == ["Kielce"]
     assert found["clubs"][0]["name"] == "KS Kielce" and found["matches"]
     assert [i["id"] for i in cmp_["items"]] == ["c1", "c2"]
-    assert cmp_["items"][0]["radar"]["wins"] == 1.0 and cmp_["max"]["wins"] == 1
+    assert cmp_["items"][0]["radar"]["wins_regular"] == 1.0 and cmp_["max"]["wins_regular"] == 1
 
 
 def test_korekty_nakladane_przy_odczycie_i_wycofywane(portal):

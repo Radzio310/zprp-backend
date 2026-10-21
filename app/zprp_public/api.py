@@ -33,7 +33,7 @@ from app.db import (
 )
 from app.zprp_public import corrections, match_rules as MR
 from app.zprp_public.protocol_times import attach_protocol_times
-from app.zprp_public.enrich import enrich_matches
+from app.zprp_public.enrich import attach_standing_records, enrich_matches
 from app.zprp_public.ondemand import ensure_details
 from app.zprp_public.sync import run_sync_job
 from app.zprp_public.privacy import public_club, public_team
@@ -561,11 +561,14 @@ async def competition_standings(competition_id: str, table_id: str = "", group_i
             zprp_public_standings.c.goal_difference,
             zprp_public_standings.c.points,
             zprp_public_standings.c.fetched_at,
+            zprp_public_standings.c.extra_json,
         )
         .where(and_(*conditions))
         .order_by(zprp_public_standings.c.table_id, zprp_public_standings.c.group_id, zprp_public_standings.c.position)
     )
-    return {"items": [_dict(row) for row in result], "count": len(result)}
+    items = [_dict(row) for row in result]
+    await attach_standing_records(items)
+    return {"items": items, "count": len(result)}
 
 
 @router.get("/competitions/{competition_id}/scorers")

@@ -468,3 +468,36 @@ def test_sezony_historyczne_tylko_z_danymi(env):
     out = run(env, go)
     ids = {s["season_id"] for s in out["items"]}
     assert "S9" in ids and "S8" not in ids and "S0" not in ids and "S1" in ids
+
+
+def test_bilans_bez_remisow_tabela_h2h_wykres(env):
+    """Z/Zk/Pk/P: karne rozbijają „Remisy” tabeli, H2H i wykres sezonu znają Zk/Pk."""
+    module, db, T = env
+
+    async def go(x):
+        for tid, pos, w, d, lo, pts in (("t1", 1, 2, 0, 0, 6), ("t2", 2, 0, 1, 1, 2), ("t3", 3, 0, 1, 1, 1)):
+            await db.execute(insert(T["zprp_public_standings"]).values(
+                competition_id="K1", table_id="T", group_id="", team_id=tid, position=pos, team_name=tid,
+                matches=2, wins=w, draws=d, losses=lo, points=pts, source_hash="h"))
+        api = sys.modules["app.zprp_public.api"]
+        table = await api.competition_standings("K1")
+        h2h = await x.head_to_head(club_a="c2", club_b="c3", limit=50)
+        chart = await x.team_season_chart("t2", "")
+        team = await sys.modules["app.zprp_public.portal"].team_overview("t2")
+        return table, h2h, chart, team
+
+    table, h2h, chart, team = run(env, go)
+    rec = {r["team_id"]: r["record"] for r in table["items"]}
+    assert rec["t2"] == {"w": 0, "wk": 1, "lk": 0, "l": 1, "source": "matches"}
+    assert rec["t3"] == {"w": 0, "wk": 0, "lk": 1, "l": 1, "source": "matches"}
+    assert rec["t1"]["w"] == 2 and "extra_json" not in table["items"][0]
+    bal = h2h["balance"]
+    assert bal["a_wins"] == 1 and bal["a_wins_shootout"] == 1 and bal["draws"] == 0
+    assert bal["a_record"] == {"w": 0, "wk": 1, "lk": 0, "l": 0} and bal["b_record"] == {"w": 0, "wk": 0, "lk": 1, "l": 0}
+    by_match = {r["match_id"]: r for r in chart["rounds"]}
+    assert by_match["m2"]["result_detail"] == "WK" and by_match["m2"]["result"] == "W"
+    assert by_match["m2"]["decided_by"] == "shootout" and by_match["m1"]["result_detail"] == "L"
+    assert chart["record"]["wk"] == 1 and chart["record"]["l"] == 1
+    assert team["stats"]["record"] == {"w": 0, "wk": 1, "lk": 0, "l": 1}
+    assert team["stats"]["form_detail"] == ["L", "WK"] and team["stats"]["draws"] == 1
+    assert team["standings"][0]["record"]["wk"] == 1
