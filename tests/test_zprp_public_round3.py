@@ -468,3 +468,64 @@ def test_sezony_historyczne_tylko_z_danymi(env):
     out = run(env, go)
     ids = {s["season_id"] for s in out["items"]}
     assert "S9" in ids and "S8" not in ids and "S0" not in ids and "S1" in ids
+
+
+def test_statystyki_sedziego_czyste():
+    from app.zprp_public import referee_stats as RS
+    rows = [
+        {"match_id": "a", "referee_1_id": "r1", "referee_2_id": "r2", "referee_2_name": "PARA  Jan",
+         "score_home": 30, "score_away": 20, "venue_name": "Hala A", "venue_city": "Kielce", "competition_id": "K",
+         "competition_name": "Liga", "home_club_id": "c1", "away_club_id": "c2"},
+        {"match_id": "b", "referee_1_id": "r2", "referee_1_name": "PARA Jan", "referee_2_id": "r1",
+         "score_home": 10, "score_away": 0, "walkover_team_id": "t2", "venue_name": "Hala B", "venue_city": "Opole",
+         "competition_id": "K", "competition_name": "Liga", "home_club_id": "c1", "away_club_id": "c3"},
+        {"match_id": "c", "referee_1_id": "r1", "score_home": None, "score_away": None, "venue_name": "Hala A",
+         "venue_city": "Kielce", "competition_id": "J", "competition_name": "Juniorzy", "home_club_id": "c2", "away_club_id": "c3"},
+    ]
+    out = RS.summarize(rows, "r1", {"a": {"two_minutes": 6, "disqualifications": 1, "warnings": 4}},
+                       venue_key=MR.venue_key, display_city=lambda c: c, clean_name=lambda s: " ".join(s.split()),
+                       kinds={"K": ("Seniorzy", "M"), "J": ("Juniorzy", "M")})
+    assert (out["matches"], out["finished"], out["upcoming"]) == (3, 2, 1)
+    assert out["partners"][0]["referee_id"] == "r2" and out["partners"][0]["matches"] == 2 and out["partners"][0]["name"] == "PARA Jan"
+    av = out["averages"]
+    assert av["goals_per_match"] == 50.0 and av["matches"] == 1  # walkower bez bramek do średniej
+    assert av["two_minutes_per_match"] == 6.0 and av["red_cards"] == 1
+    assert out["cities"][0]["city"] == "Kielce" and out["cities"][0]["matches"] == 2
+    assert [c["category"] for c in out["by_category"]] == ["Seniorzy", "Juniorzy"]
+    assert dict(out["club_counts"])["c1"] == 2
+    RS.attach_geo(out, {"Kielce": (50.87, 20.63), "Opole": (50.67, 17.93)})
+    assert out["base"]["city"] == "Kielce"
+    km = out["km"]
+    assert km["approximate"] and km["farthest"]["city"] == "Opole" and 230 < km["farthest"]["km"] < 270
+    assert abs(km["total"] - 2 * km["farthest"]["km"]) <= 2  # Kielce = baza (0 km), Opole raz tam i z powrotem
+    RS.attach_geo(out, {})
+    assert out["km"] is None and out["base"] is None
+
+
+def test_statystyki_sedziego_trasa(env):
+    async def go(x):
+        db = sys.modules["app.db"].database
+        T = sys.modules["app.db"]
+        await db.execute(insert(T.zprp_public_matches).values(
+            match_id="m9", season_id="S1", competition_id="K1", competition_name="Liga", home_team_id="t3",
+            away_team_id="t1", home_club_id="c3", away_club_id="c1", home_team_name="t3", away_team_name="t1",
+            score_home=20, score_away=24, scheduled_at=datetime.now() - timedelta(days=5), venue_name="Hala Opole",
+            venue_city="Opole", referee_1_id="r2", referee_1_name="Adam Para", referee_2_id="r1",
+            referee_2_name="Jan Sędzia", **_h()))
+        stats = await x.referee_stats("r1", "")
+        missing = None
+        try:
+            await x.referee_stats("nikt", "")
+        except Exception as exc:  # noqa: BLE001
+            missing = getattr(exc, "status_code", None)
+        return stats, missing
+
+    stats, missing = run(env, go)
+    assert missing == 404
+    assert stats["season"]["season_id"] == "S1" and stats["matches"] == 3
+    assert stats["next"]["match_id"] == "m5" and [c["match_id"] for c in stats["recent"]] == ["m9", "m1"]
+    assert stats["partners"][0]["name"] == "Adam Para"
+    assert stats["averages"]["two_minutes"] == 2 and stats["averages"]["protocol_matches"] == 1
+    assert stats["by_competition"][0]["category"] == "Seniorzy"
+    assert stats["clubs"][0]["logo_url"].startswith("https://l/")
+    assert stats["base"]["city"] == "Kielce" and stats["recent"][0]["referee_1_name"] == "Adam Para"

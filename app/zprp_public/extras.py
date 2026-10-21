@@ -855,3 +855,82 @@ async def referee_profile(referee_id: str, limit: int = Query(100, ge=1, le=300)
         "matches": cards[:limit],
         "competitions": sorted(by_comp.values(), key=lambda e: -e["matches"]),
     }
+
+
+@router.get("/referees/{referee_id}/stats")
+async def referee_stats(referee_id: str, season_id: str = "") -> dict[str, Any]:
+    # Krótki cache: Moje pyta o każdego obserwowanego sędziego; zmiana obsady czyści _cache.
+    return await _cached(f"refstats:{referee_id}:{season_id.strip()}", 120, lambda: _referee_stats(referee_id, season_id))
+
+
+async def _referee_stats(referee_id: str, season_id: str) -> dict[str, Any]:
+    """Sezon sędziego dla „Moje Pod Ręką” i profilu: najbliższy mecz, ostatnie wyniki,
+    rozgrywki/kategorie, partner w parze, hale/miasta z przybliżonymi km, średnie
+    bramek i kar 2 min, czerwone kartki, kluby. Bez `season_id`: bieżący sezon,
+    a gdy sędzia nie ma w nim meczów - ostatni sezon, w którym gwizdał."""
+    from app.zprp_public import referee_stats as RS
+    from app.zprp_public.portal import _clean_ref_name
+
+    ref_cols = (M.c.referee_1_id, M.c.referee_1_name, M.c.referee_2_id, M.c.referee_2_name)
+    who = or_(M.c.referee_1_id == referee_id, M.c.referee_2_id == referee_id)
+    per_season = await database.fetch_all(
+        select(M.c.season_id, func.count().label("n")).where(who).group_by(M.c.season_id)
+    )
+    if not per_season:
+        raise HTTPException(404, "Nie znaleziono sędziego")
+    seasons_map, current = await seasons_info()
+    counts = {r["season_id"]: int(r["n"]) for r in per_season}
+    order = sorted(counts, key=lambda sid: -((seasons_map.get(sid) or {}).get("start_year") or 0))
+    wanted = season_id.strip() or (current if counts.get(current) else order[0])
+
+    rows = [_dict(r) for r in await database.fetch_all(
+        select(*_card_cols(), *ref_cols).where(and_(who, M.c.season_id == wanted)).order_by(M.c.scheduled_at.desc())
+    )]
+    ids = [r["match_id"] for r in rows]
+    protocol: dict[str, dict] = {}
+    if ids:
+        sums = await database.fetch_all(
+            select(MP.c.match_id, func.sum(MP.c.two_minutes).label("two_minutes"),
+                   func.sum(MP.c.disqualifications).label("disqualifications"),
+                   func.sum(MP.c.warnings).label("warnings"))
+            .where(MP.c.match_id.in_(ids)).group_by(MP.c.match_id)
+        )
+        protocol = {r["match_id"]: _dict(r) for r in sums}
+    kinds: dict[str, tuple[Any, Any]] = {}
+    comp_ids = list({r["competition_id"] for r in rows if r.get("competition_id")})
+    if comp_ids:
+        C = zprp_public_competitions
+        kinds = {r["competition_id"]: (r["category"], r["gender"]) for r in await database.fetch_all(
+            select(C.c.competition_id, C.c.category, C.c.gender).where(C.c.competition_id.in_(comp_ids)))}
+
+    summary = RS.summarize(rows, referee_id, protocol, venue_key=MR.venue_key, display_city=R.display_city,
+                           clean_name=_clean_ref_name, kinds=kinds)
+    coords = {}
+    for c in summary["cities"]:
+        coords[c["city"]] = await _geocode(c["city"])
+    RS.attach_geo(summary, coords)
+
+    club_counts = summary.pop("club_counts")
+    lookup = await _club_lookup({cid for cid, _ in club_counts})
+    clubs = [{"club_id": cid, "name": (lookup.get(cid) or {}).get("name"), "logo_url": (lookup.get(cid) or {}).get("logo_url"),
+              "city": (lookup.get(cid) or {}).get("city"), "matches": n} for cid, n in club_counts]
+
+    cards = await _cards(rows)  # wiersze mają kolumny pary, więc karta niesie obu sędziów
+    now = datetime.now()
+    upcoming = sorted((c for c in cards if c["status"] == "scheduled" and c.get("scheduled_at")
+                       and c["scheduled_at"] >= now - timedelta(hours=3)), key=lambda c: c["scheduled_at"])
+    recent = [c for c in cards if c["status"] == "finished"][:5]
+    names = Counter(_clean_ref_name(r["referee_1_name"] if r["referee_1_id"] == referee_id else r["referee_2_name"] or "")
+                    for r in rows)
+    return {
+        "referee_id": referee_id,
+        "name": names.most_common(1)[0][0] if names else None,
+        "season": {"season_id": wanted, "name": (seasons_map.get(wanted) or {}).get("name"),
+                   "is_current": wanted == current},
+        "seasons": [{"season_id": sid, "name": (seasons_map.get(sid) or {}).get("name"), "matches": counts[sid]} for sid in order],
+        "next": upcoming[0] if upcoming else None,
+        "upcoming_count": len(upcoming),
+        "recent": recent,
+        "clubs": clubs,
+        **summary,
+    }
