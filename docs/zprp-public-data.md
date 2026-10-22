@@ -97,6 +97,8 @@ zmniejszyć trzy wielkości partii, a dopiero później równoległość.
 Najważniejsze endpointy:
 
 - `GET /api/v1/handball/health`
+- transmisje meczów (`/matches/{id}/streams`, `/streams/now`, `/competitions/{id}/streams`,
+  `/clubs/{id}/streams`) — osobny kontrakt: `docs/streams.md`
 - `GET /api/v1/handball/portal/overview` — lekki agregat Centrum dnia
 - `GET /api/v1/handball/seasons?include_historical=false`
 - `GET /api/v1/handball/associations`

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <link rel="self" href="http://www.youtube.com/feeds/videos.xml?playlist_id=PL3NkJuwI5L5d7vPRyvudHKhgP8Q1AMGeP"/>
+ <id>yt:playlist:PL3NkJuwI5L5d7vPRyvudHKhgP8Q1AMGeP</id>
+ <yt:playlistId>PL3NkJuwI5L5d7vPRyvudHKhgP8Q1AMGeP</yt:playlistId>
+ <yt:channelId>UCczarnypiotrusmedia0001</yt:channelId>
+ <title>I liga mężczyzn 2026/27</title>
+ <link rel="alternate" href="https://www.youtube.com/playlist?list=PL3NkJuwI5L5d7vPRyvudHKhgP8Q1AMGeP"/>
+ <author>
+  <name>Czarny Piotruś MEDIA</name>
+  <uri>https://www.youtube.com/channel/UCczarnypiotrusmedia0001</uri>
+ </author>
+ <published>2026-08-20T08:00:00+00:00</published>
+ <entry>
+  <id>yt:video:ILvid000001</id>
+  <yt:videoId>ILvid000001</yt:videoId>
+  <yt:channelId>UCczarnypiotrusmedia0001</yt:channelId>
+  <title>SPR Grudziądz – Pomezania Malbork | I liga | NA ŻYWO</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=ILvid000001"/>
+  <author><name>Czarny Piotruś MEDIA</name><uri>https://www.youtube.com/channel/UCczarnypiotrusmedia0001</uri></author>
+  <published>2026-10-16T20:00:00+00:00</published>
+  <updated>2026-10-18T14:00:00+00:00</updated>
+  <media:group>
+   <media:title>SPR Grudziądz – Pomezania Malbork | I liga | NA ŻYWO</media:title>
+   <media:thumbnail url="https://i4.ytimg.com/vi/ILvid000001/hqdefault.jpg" width="480" height="360"/>
+   <media:description>Mecz 6. kolejki I ligi mężczyzn.</media:description>
+  </media:group>
+ </entry>
+</feed>

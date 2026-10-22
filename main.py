@@ -150,6 +150,8 @@ from app.zprp_public.extras import router as handball_round3_router
 from app.zprp_public.crest import router as handball_crest_router
 from app.zprp_public.sync import run_zprp_public_scheduler
 from app.zprp_public.history import run_history_scheduler
+from app.streams.routes import admin_router as handball_streams_admin_router, router as handball_streams_router
+from app.streams.worker import run_streams_scheduler
 from app.pod_reka import admin_router as pod_reka_admin_router, ensure_pod_reka_defaults, router as pod_reka_router
 
 from app.zprp.schedule import router as schedule_router
@@ -444,6 +446,8 @@ app.include_router(handball_portal_router)
 app.include_router(handball_live_router)
 app.include_router(handball_round3_router)
 app.include_router(handball_crest_router)
+app.include_router(handball_streams_router)
+app.include_router(handball_streams_admin_router)
 app.include_router(handball_sync_admin_router)
 app.include_router(pod_reka_router)
 app.include_router(pod_reka_admin_router)
@@ -1571,6 +1575,8 @@ async def startup():
     logger.info("✅ Śląskie league tables Joomla publisher started (24 h)")
     _zprp_public_sync_task = asyncio.create_task(run_zprp_public_scheduler())
     _zprp_history_task = asyncio.create_task(run_history_scheduler())
+    # Transmisje meczow portalu (RSS/YouTube API, strony klubow) - `docs/streams.md`.
+    asyncio.create_task(run_streams_scheduler())
     # Panel „Mentor": kolejka ffmpeg (1 naraz), retencja nagrań raz na dobę
     # i zbiorczy e-mail o nowych wątkach (najwyżej co 30 min na osobę).
     from app.mentor_panel_media import run_media_worker, run_retention

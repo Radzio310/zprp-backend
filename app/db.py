@@ -4592,6 +4592,15 @@ from app.pod_reka_tables import define_tables as _define_pod_reka_tables
     pod_reka_push_subscriptions,
 ) = _define_pod_reka_tables(metadata)
 
+# Transmisje meczow portalu (kanaly, wykryte transmisje, limit YouTube API) - `docs/streams.md`.
+from app.stream_tables import define_tables as _define_stream_tables
+
+(
+    stream_channels,
+    match_streams,
+    stream_quota,
+) = _define_stream_tables(metadata)
+
 # Autor stolikowego dopisanego z aplikacji - kto może go usunąć z ZPRP.
 from app.table_official_authors import define_tables as _define_table_official_authors
 
@@ -5051,6 +5060,19 @@ for _statement in _MENTOR_PANEL_MIGRATIONS:
         import logging as _logging
 
         _logging.getLogger("app.db").warning("Indeks panelu Mentor nie powstał: %s", _statement, exc_info=True)
+
+# Transmisje meczow: indeksy (`app/stream_tables.py`) - kazdy osobno, brak jednego nie zatrzymuje startu.
+from app.stream_tables import MIGRATIONS as _STREAM_MIGRATIONS
+
+for _statement in _STREAM_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Indeks transmisji nie powstal: %s", _statement, exc_info=True)
 
 # Indeksy wyszukiwarki publicznej (pg_trgm, numer meczu) - w tle, nie blokują startu.
 try:

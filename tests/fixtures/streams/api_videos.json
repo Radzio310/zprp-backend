@@ -1,0 +1,45 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "x",
+  "items": [
+    {
+      "kind": "youtube#video", "etag": "a", "id": "LCvid000001",
+      "snippet": {
+        "publishedAt": "2026-10-14T09:00:12Z", "channelId": "UCabcdefghijklmnopqrstuv",
+        "title": "LIVE: Wybrzeże Gdańsk - Pogoń Szczecin | Liga Centralna mężczyzn | 18.10.2026",
+        "description": "Transmisja meczu Ligi Centralnej.",
+        "thumbnails": {"default": {"url": "https://i.ytimg.com/vi/LCvid000001/default.jpg"},
+                       "high": {"url": "https://i.ytimg.com/vi/LCvid000001/hqdefault_live.jpg"}},
+        "channelTitle": "Handball Polska", "liveBroadcastContent": "live"
+      },
+      "contentDetails": {"duration": "P0D"},
+      "liveStreamingDetails": {"actualStartTime": "2026-10-18T15:57:31Z", "scheduledStartTime": "2026-10-18T15:55:00Z",
+                               "concurrentViewers": "412"}
+    },
+    {
+      "kind": "youtube#video", "etag": "b", "id": "ILvid000001",
+      "snippet": {
+        "publishedAt": "2026-10-16T20:00:00Z", "channelId": "UCczarnypiotrusmedia0001",
+        "title": "SPR Grudziądz – Pomezania Malbork | I liga | NA ŻYWO", "description": "",
+        "thumbnails": {"medium": {"url": "https://i.ytimg.com/vi/ILvid000001/mqdefault.jpg"}},
+        "channelTitle": "Czarny Piotruś MEDIA", "liveBroadcastContent": "upcoming"
+      },
+      "contentDetails": {"duration": "P0D"},
+      "liveStreamingDetails": {"scheduledStartTime": "2026-10-18T15:50:00Z"}
+    },
+    {
+      "kind": "youtube#video", "etag": "c", "id": "LCvid000003",
+      "snippet": {
+        "publishedAt": "2026-10-17T12:00:00Z", "channelId": "UCabcdefghijklmnopqrstuv",
+        "title": "KPR Legionowo vs MKS Kalisz | Liga Centralna", "description": "",
+        "thumbnails": {"maxres": {"url": "https://i.ytimg.com/vi/LCvid000003/maxresdefault.jpg"}},
+        "channelTitle": "Handball Polska", "liveBroadcastContent": "none"
+      },
+      "contentDetails": {"duration": "PT1H41M12S"},
+      "liveStreamingDetails": {"actualStartTime": "2026-10-17T13:58:00Z", "actualEndTime": "2026-10-17T15:39:12Z",
+                               "scheduledStartTime": "2026-10-17T14:00:00Z"}
+    },
+    {"kind": "youtube#video", "id": "bad"}
+  ],
+  "pageInfo": {"totalResults": 3, "resultsPerPage": 3}
+}

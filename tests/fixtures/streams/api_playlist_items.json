@@ -1,0 +1,18 @@
+{
+  "kind": "youtube#playlistItemListResponse",
+  "items": [
+    {
+      "kind": "youtube#playlistItem", "id": "UEwzTmt",
+      "snippet": {
+        "publishedAt": "2026-10-16T20:01:00Z", "channelId": "UCczarnypiotrusmedia0001",
+        "title": "SPR Grudziądz – Pomezania Malbork | I liga | NA ŻYWO", "description": "Mecz 6. kolejki",
+        "thumbnails": {"high": {"url": "https://i.ytimg.com/vi/ILvid000001/hqdefault.jpg"}},
+        "channelTitle": "Czarny Piotruś MEDIA", "playlistId": "PL3NkJuwI5L5d7vPRyvudHKhgP8Q1AMGeP", "position": 0,
+        "resourceId": {"kind": "youtube#video", "videoId": "ILvid000001"},
+        "videoOwnerChannelTitle": "Czarny Piotruś MEDIA", "videoOwnerChannelId": "UCczarnypiotrusmedia0001"
+      },
+      "contentDetails": {"videoId": "ILvid000001", "videoPublishedAt": "2026-10-16T20:00:00Z"}
+    },
+    {"kind": "youtube#playlistItem", "snippet": {"title": "Deleted video"}, "contentDetails": {}}
+  ]
+}

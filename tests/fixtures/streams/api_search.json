@@ -1,0 +1,10 @@
+{
+  "kind": "youtube#searchListResponse", "regionCode": "PL",
+  "pageInfo": {"totalResults": 2, "resultsPerPage": 10},
+  "items": [
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "SRvid000001"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#channel", "channelId": "UCzzzzzzzzzzzzzzzzzzzzzz"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "SRvid000001"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "SRvid000002"}}
+  ]
+}
