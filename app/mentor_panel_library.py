@@ -776,6 +776,17 @@ async def delete_comment(comment_id: str, actor: Actor = Depends(mentor_actor)):
     return {"ok": True}
 
 
+@router.delete("/threads/{thread_id}")
+async def delete_thread(thread_id: str, actor: Actor = Depends(mentor_actor)):
+    """Usunięcie całego wątku - tylko autor wątku albo administrator. Razem z odpowiedziami."""
+    ctx, row = await _ctx_for(mentor_threads, thread_id, actor, missing="Nie ma takiego wątku.")
+    C.check(ctx, "edit", owner=R.s(row.get("created_by")) == actor.judge_id)
+    await database.execute(mentor_comments.delete().where(mentor_comments.c.thread_id == thread_id))
+    await database.execute(mentor_threads.delete().where(mentor_threads.c.id == thread_id))
+    await C.touch(ctx, actor.judge_id, "thread_deleted", "threads", row.get("match_id"), {"id": thread_id})
+    return {"ok": True}
+
+
 # ─── Publiczne linki ────────────────────────────────────────────────────────
 
 PUBLISHABLE = {"clip": mentor_clips, "compilation": mentor_compilations, "report": mentor_reports}
