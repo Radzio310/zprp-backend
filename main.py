@@ -1584,6 +1584,9 @@ async def startup():
     logger.info("✅ Śląskie league tables Joomla publisher started (24 h)")
     _zprp_public_sync_task = asyncio.create_task(run_zprp_public_scheduler())
     _zprp_history_task = asyncio.create_task(run_history_scheduler())
+    # Geokoder miast portalu (Nominatim, 1 zapytanie/s, wyłącznik GEOCODE_DISABLED=1).
+    from app.zprp_public.geocode import run_geocode_scheduler
+    asyncio.create_task(run_geocode_scheduler())
     # Transmisje meczow portalu (RSS/YouTube API, strony klubow) - `docs/streams.md`.
     asyncio.create_task(run_streams_scheduler())
     # Panel „Mentor": kolejka ffmpeg (1 naraz), retencja nagrań raz na dobę

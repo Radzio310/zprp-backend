@@ -64,8 +64,6 @@ _RETRY_AFTER = timedelta(minutes=5)
 _MAX_ATTEMPTS = 3
 _bg_tasks: set[asyncio.Task] = set()
 _harvest_slots = asyncio.Semaphore(2)
-_geocode_lock = asyncio.Lock()
-_last_geocode_at = 0.0
 
 
 class SettlementCandidate(BaseModel):
@@ -207,29 +205,24 @@ async def _reserve(candidate: dict[str, str]) -> bool:
 
 
 async def _geocode_city(name: str) -> Optional[tuple[float, float]]:
-    global _last_geocode_at
+    # Ogranicznik wspólny z geokoderem portalu: 1 zapytanie/s na cały proces.
+    from app.zprp_public.geocode_rules import NOMINATIM_LIMITER
+
     try:
-        async with _geocode_lock:
-            loop = asyncio.get_running_loop()
-            pause = 1.05 - (loop.time() - _last_geocode_at)
-            if pause > 0:
-                await asyncio.sleep(pause)
+        async with NOMINATIM_LIMITER.slot():
             async with httpx.AsyncClient(
                 timeout=8.0,
                 headers={"User-Agent": "BAZA-ZPRP-national-distances/1.0"},
             ) as client:
-                try:
-                    response = await client.get(
-                        "https://nominatim.openstreetmap.org/search",
-                        params={
-                            "q": f"{name}, Polska",
-                            "format": "jsonv2",
-                            "limit": 1,
-                            "countrycodes": "pl",
-                        },
-                    )
-                finally:
-                    _last_geocode_at = loop.time()
+                response = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={
+                        "q": f"{name}, Polska",
+                        "format": "jsonv2",
+                        "limit": 1,
+                        "countrycodes": "pl",
+                    },
+                )
                 response.raise_for_status()
                 items = response.json()
                 if not isinstance(items, list) or not items:

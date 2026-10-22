@@ -4580,6 +4580,11 @@ from app.zprp_public_tables import define_tables as _define_zprp_public_tables
     zprp_public_corrections,
 ) = _define_zprp_public_tables(metadata)
 
+# Pamięć geokodera miast portalu (Nominatim, 1 zapytanie/s, porażka ponawiana po 30 dniach).
+from app.zprp_public_geocode_tables import define_tables as _define_zprp_public_geocode_tables
+
+zprp_public_geocode_cache = _define_zprp_public_geocode_tables(metadata)
+
 # Funkcje produktowe BAZA pod RĘKĄ: raporty, sesje klubowe i Talenty.
 from app.pod_reka_tables import define_tables as _define_pod_reka_tables
 

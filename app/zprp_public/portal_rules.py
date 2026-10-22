@@ -6,7 +6,7 @@ Bez bazy i bez sieci - testowalne w izolacji. Wejścia to zwykłe słowniki.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Optional
 
 from app.national_distance_parser import clean_city, normalize_city_key
@@ -68,11 +68,14 @@ def resolve_city(
     index: dict[str, list[dict]],
     hint: str = "",
     fallback: Optional[Callable[[str], list[dict]]] = None,
+    cache: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> Optional[dict]:
     """Nazwa miasta -> {lat, lon, province, name, source} albo None.
 
     `index`: name_key -> kandydaci z tabeli odległości (klucze lat, lon,
-    province, weight). `fallback`: skorowidz GeoNames (ta sama postać)."""
+    province, weight). `fallback`: skorowidz GeoNames (ta sama postać).
+    `cache`: klucz nazwy -> punkt z trwałej pamięci geokodera (Nominatim) albo
+    None - ostatnia deska, tylko dla nazw, których nie znają dwa pierwsze źródła."""
     for key in city_variants(raw):
         hit = pick_best(index.get(key, []), hint)
         if hit and hit.get("lat") is not None and hit.get("lon") is not None:
@@ -82,6 +85,12 @@ def resolve_city(
             hit = pick_best(fallback(key) or [], hint)
             if hit and hit.get("lat") is not None:
                 return {**hit, "source": "gazetteer"}
+    if cache:
+        for key in city_variants(raw):
+            hit = cache(key)
+            if hit and hit.get("lat") is not None and hit.get("lon") is not None:
+                return {"key": f"geo:{key}", "name": hit.get("name") or display_city(raw), "province": hit.get("province") or "",
+                        "weight": 0, "approximate": False, **hit, "source": "nominatim"}
     return None
 
 
@@ -156,6 +165,44 @@ def team_record(matches: Iterable[dict], is_mine: Callable[[str, dict], bool]) -
         "form": form[-5:],
         "form_detail": detail[-5:],
     }
+
+
+UPCOMING_GRACE = timedelta(hours=3)
+
+
+def is_played(card: dict) -> bool:
+    """Rozegrany = jest wynik (ta sama reguła co `team_record` i `isPlayed` w kliencie)."""
+    return card.get("score_home") is not None and card.get("score_away") is not None
+
+
+def is_upcoming(card: dict, now: datetime) -> bool:
+    """Przed nami = bez wyniku, nie wycofany i nie starszy niż 3 h (mecz w toku też)."""
+    if is_played(card) or card.get("withdrawn"):
+        return False
+    at = card.get("scheduled_at")
+    return at is None or not isinstance(at, datetime) or at >= now - UPCOMING_GRACE
+
+
+def match_counts(cards: Iterable[dict], now: datetime) -> dict[str, int]:
+    """Liczniki list meczów liczone na serwerze z PEŁNEJ listy (bez obcięcia do 5).
+
+    `all` = played + upcoming + pending (+ wycofane bez wyniku, liczone w `withdrawn`).
+    `pending` = termin minął, a wyniku nie ma (czeka na protokół)."""
+    out = {"all": 0, "played": 0, "upcoming": 0, "today": 0, "pending": 0, "withdrawn": 0}
+    for card in cards:
+        out["all"] += 1
+        at = card.get("scheduled_at")
+        if isinstance(at, datetime) and at.date() == now.date():
+            out["today"] += 1
+        if is_played(card):
+            out["played"] += 1
+        elif card.get("withdrawn"):
+            out["withdrawn"] += 1
+        elif is_upcoming(card, now):
+            out["upcoming"] += 1
+        else:
+            out["pending"] += 1
+    return out
 
 
 def normalise_for_radar(entities: list[dict], metrics: list[str]) -> dict[str, Any]:
