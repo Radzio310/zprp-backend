@@ -4487,6 +4487,7 @@ from app.mentor_panel_tables import define_tables as _define_mentor_panel_tables
     mentor_web_sessions,
     mentor_qr_logins,
     mentor_audit,
+    mentor_short_links,
 ) = _define_mentor_panel_tables(metadata)
 
 # Alerty mailowe o saldzie klubów (Rozliczenia BAZA_web) - schemat w osobnym module.

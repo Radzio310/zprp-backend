@@ -226,6 +226,18 @@ def define_tables(metadata):
         Column("consumed_at", DateTime(timezone=True), nullable=True),
         Column("user_agent", String, nullable=True),
     )
+    # Krótki adres „bazapodreka.app/m/7K2Q" z ekranu telefonu (przepisanie na
+    # komputerze). Kod = klucz, ścieżka panelu, ważność 24 h (`mentor_handoff_rules`).
+    short_links = Table(
+        "mentor_short_links",
+        metadata,
+        Column("code", String, primary_key=True),
+        Column("path", String, nullable=False),
+        Column("created_by", String, nullable=True),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("expires_at", DateTime(timezone=True), nullable=False, index=True),
+        Column("hits", Integer, nullable=False, server_default=text("0")),
+    )
     audit = Table(
         "mentor_audit",
         metadata,
@@ -255,6 +267,7 @@ def define_tables(metadata):
         web_sessions,
         qr_logins,
         audit,
+        short_links,
     )
 
 

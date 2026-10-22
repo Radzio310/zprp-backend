@@ -406,12 +406,13 @@ async def presence(pair_id: str, body: PresenceBody, actor: Actor = Depends(ment
 
 
 def _assemble() -> APIRouter:
+    from app.mentor_panel_handoff import router as handoff_router
     from app.mentor_panel_library import router as library_router
     from app.mentor_panel_media import router as media_router
     from app.mentor_panel_reports import router as reports_router
 
     combined = APIRouter()
-    for part in (auth_router, router, library_router, media_router, reports_router):
+    for part in (auth_router, router, library_router, media_router, reports_router, handoff_router):
         combined.include_router(part)
     return combined
 

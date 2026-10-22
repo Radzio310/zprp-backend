@@ -23,6 +23,7 @@ from app.zprp_public_tables import define_tables as define_public
 MODULES = (
     "app.mentor_panel", "app.mentor_panel_core", "app.mentor_panel_auth", "app.mentor_panel_library",
     "app.mentor_panel_media", "app.mentor_panel_reports", "app.mentor_panel_notify", "app.mentor_evaluations",
+    "app.mentor_panel_handoff",
     "app.mentoring", "app.proel_auth",
 )
 
