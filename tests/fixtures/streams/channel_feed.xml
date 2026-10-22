@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <link rel="self" href="http://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnopqrstuv"/>
+ <id>yt:channel:abcdefghijklmnopqrstuv</id>
+ <yt:channelId>UCabcdefghijklmnopqrstuv</yt:channelId>
+ <title>Handball Polska</title>
+ <link rel="alternate" href="https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv"/>
+ <author>
+  <name>Handball Polska</name>
+  <uri>https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv</uri>
+ </author>
+ <published>2014-03-11T10:21:05+00:00</published>
+ <entry>
+  <id>yt:video:LCvid000001</id>
+  <yt:videoId>LCvid000001</yt:videoId>
+  <yt:channelId>UCabcdefghijklmnopqrstuv</yt:channelId>
+  <title>LIVE: Wybrzeże Gdańsk - Pogoń Szczecin | Liga Centralna mężczyzn | 18.10.2026</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=LCvid000001"/>
+  <author>
+   <name>Handball Polska</name>
+   <uri>https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv</uri>
+  </author>
+  <published>2026-10-14T09:00:12+00:00</published>
+  <updated>2026-10-18T15:58:40+00:00</updated>
+  <media:group>
+   <media:title>LIVE: Wybrzeże Gdańsk - Pogoń Szczecin | Liga Centralna mężczyzn | 18.10.2026</media:title>
+   <media:content url="https://www.youtube.com/v/LCvid000001?version=3" type="application/x-shockwave-flash" width="640" height="390"/>
+   <media:thumbnail url="https://i2.ytimg.com/vi/LCvid000001/hqdefault.jpg" width="480" height="360"/>
+   <media:description>Transmisja meczu Ligi Centralnej. Realizacja: RCS Livestream.</media:description>
+   <media:community>
+    <media:starRating count="12" average="5.00" min="1" max="5"/>
+    <media:statistics views="431"/>
+   </media:community>
+  </media:group>
+ </entry>
+ <entry>
+  <id>yt:video:LCvid000002</id>
+  <yt:videoId>LCvid000002</yt:videoId>
+  <yt:channelId>UCabcdefghijklmnopqrstuv</yt:channelId>
+  <title>Wywiad po meczu Wybrzeże Gdańsk - Pogoń Szczecin</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=LCvid000002"/>
+  <author><name>Handball Polska</name><uri>https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv</uri></author>
+  <published>2026-10-18T19:40:00+00:00</published>
+  <updated>2026-10-18T19:40:00+00:00</updated>
+  <media:group>
+   <media:title>Wywiad po meczu</media:title>
+   <media:thumbnail url="https://i3.ytimg.com/vi/LCvid000002/hqdefault.jpg" width="480" height="360"/>
+   <media:description></media:description>
+  </media:group>
+ </entry>
+ <entry>
+  <id>yt:video:LCvid000003</id>
+  <yt:videoId>LCvid000003</yt:videoId>
+  <yt:channelId>UCabcdefghijklmnopqrstuv</yt:channelId>
+  <title>KPR Legionowo vs MKS Kalisz | Liga Centralna</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=LCvid000003"/>
+  <author><name>Handball Polska</name><uri>https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv</uri></author>
+  <published>2026-10-17T12:00:00+00:00</published>
+  <updated>2026-10-17T12:00:00+00:00</updated>
+  <media:group>
+   <media:title>KPR Legionowo vs MKS Kalisz</media:title>
+   <media:thumbnail url="https://i1.ytimg.com/vi/LCvid000003/hqdefault.jpg" width="480" height="360"/>
+   <media:description>Liga Centralna</media:description>
+  </media:group>
+ </entry>
+</feed>

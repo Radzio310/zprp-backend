@@ -214,6 +214,7 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
 - `Thread` i `Comment` mają `can_edit`; status wątku zmienia każdy z pary/mentorów, tytuł - autor.
 - Publikacja → `{public_url, youth_warning: bool, warning: string|null}` (ostrzeżenie dla meczu młodzieżowego). Raport: `POST /reports/{id}/publish` i `DELETE`, `POST /pairs/{id}/reports` przyjmuje `publish: true`; `pdf_url` to podpisany adres R2 (1 h) albo `/mentor-panel/reports/{id}/pdf` (z logowaniem). Publiczny raport ma `pdf_url` = `/mentor-panel/public/{token}/pdf`.
 - `GET /changes` → `scopes` z: `matches, clips, threads, compilations, sheets, videos, categories, reports, panel`; `since` większe niż `rev` = `changed: true` ze wszystkimi zakresami.
+- `MatchRoom.suggested_streams: Stream[]` (22.10.2026, dodatkowe) - transmisje meczu wykryte dla portalu (`docs/streams.md`): tylko YouTube, pewność `official`/`confirmed`, bez filmów już dodanych do pokoju (porównanie po identyfikatorze filmu YouTube); `Stream = {id, match_id, platform, url, embed_url, video_id, title, thumbnail_url, channel, state, starts_at, duration_s, confidence}`. Web/aplikacja może pokazać je jako „Dodaj nagranie” (dalej zwykłe `POST .../videos` z `url`). Błąd odczytu = pusta lista.
 - Push: `data = {type:"mentor_panel", kind:"mentor_panel", pairId, matchId?, clipId?, threadId?}`, przełącznik `mentorPanel`. E-mail zbiorczy z kolejki w pamięci procesu (po restarcie oczekujące listy przepadają, push już poszedł).
 
 ## 5. Web (BAZA_web, `app/(mentor)/`)

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, union
 
 from app.db import (
     database,
@@ -43,11 +43,11 @@ from app.db import (
     zprp_public_teams,
 )
 from app.national_distance_parser import normalize_city_key
-from app.zprp_public import corrections, portal_rules as R
+from app.zprp_public import corrections, geocode, portal_rules as R
 from app.zprp_public import match_rules as MR
 from app.zprp_public import search_rules as SR
 from app.zprp_public.protocol_times import attach_protocol_times
-from app.zprp_public.enrich import attach_standing_records, enrich_matches
+from app.zprp_public.enrich import attach_standing_records, enrich_matches, seasons_info
 from app.zprp_public.ondemand import ensure_details
 from app.zprp_public.api import _dict, _public_player, search as base_search
 from app.zprp_public.privacy import public_club, public_team
@@ -251,7 +251,8 @@ async def build_map(season_id: Optional[str]) -> dict[str, Any]:
     now = datetime.now()
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     index = await _node_index()
-    club_rows, assoc_rows, team_rows, today_rows = await asyncio.gather(
+    venue_scope = M.c.season_id == season_id if season_id else M.c.scheduled_at >= day_start - timedelta(days=365)
+    club_rows, assoc_rows, team_rows, today_rows, venue_rows = await asyncio.gather(
         database.fetch_all(
             select(zprp_public_clubs.c.club_id, zprp_public_clubs.c.name, zprp_public_clubs.c.city,
                    zprp_public_clubs.c.logo_url, zprp_public_clubs.c.association_id)
@@ -266,6 +267,15 @@ async def build_map(season_id: Optional[str]) -> dict[str, Any]:
         database.fetch_all(
             select(M.c.match_id, M.c.venue_city, M.c.home_club_id)
             .where(and_(M.c.scheduled_at >= day_start, M.c.scheduled_at < day_start + timedelta(days=1)))
+        ),
+        # Miasta hal sezonu i najbliższych tygodni (także bez klubu) - do `places`.
+        database.fetch_all(
+            select(M.c.venue_city, M.c.home_club_id, func.count().label("n"))
+            .where(and_(M.c.venue_city.is_not(None), or_(
+                venue_scope,
+                and_(M.c.scheduled_at >= day_start - timedelta(days=14), M.c.scheduled_at < day_start + timedelta(days=30)),
+            )))
+            .group_by(M.c.venue_city, M.c.home_club_id)
         ),
     )
     assoc_province = {r["association_id"]: R.province_hint(r["name"]) for r in assoc_rows}
@@ -303,10 +313,10 @@ async def build_map(season_id: Optional[str]) -> dict[str, Any]:
         resolved_map[vkey] = R.resolve_city(bucket["raw"], index, bucket["hint"])
     if any(v is None for v in resolved_map.values()):
         fallback_fn = await _gazetteer_lookup()
-        if fallback_fn:
-            for vkey, bucket in unresolved.items():
-                if resolved_map[vkey] is None:
-                    resolved_map[vkey] = R.resolve_city(bucket["raw"], index, bucket["hint"], fallback_fn)
+        cache_fn = await geocode.cache_lookup()
+        for vkey, bucket in unresolved.items():
+            if resolved_map[vkey] is None:
+                resolved_map[vkey] = R.resolve_city(bucket["raw"], index, bucket["hint"], fallback_fn, cache_fn)
 
     unmatched = []
     for vkey, bucket in unresolved.items():
@@ -343,18 +353,63 @@ async def build_map(season_id: Optional[str]) -> dict[str, Any]:
             "today_match_ids": match_ids[:20],
         })
     cities.sort(key=lambda c: (-c["clubs_count"], c["city"]))
+    places, unmatched_places = await _venue_places(venue_rows, unresolved, groups, index, assoc_province, club_by_id, fallback_fn)
     club_total = len(club_rows)
     matched_clubs = sum(c["clubs_count"] for c in cities)
     return {
         "season_id": season_id,
         "generated_at": now,
         "cities": cities,
+        # Miasta hal spoza `cities` (bez klubu albo inna pisownia) - te same współrzędne,
+        # po które sięgają hale, ekran meczu i atlasy; na warstwy mapy NIE trafiają.
+        "places": places,
         "stats": {
             "cities": len(cities), "clubs": club_total, "clubs_on_map": matched_clubs,
             "matches_today": sum(c["matches_today"] for c in cities),
+            "places": len(places), "places_unmatched": unmatched_places,
         },
         "unmatched": {"count": len(unmatched), "clubs": club_total - matched_clubs, "items": unmatched[:100]},
     }
+
+
+async def _venue_places(venue_rows, club_buckets: dict, groups: dict, index: dict, assoc_province: dict,
+                        club_by_id: dict, fallback_fn) -> tuple[list[dict], int]:
+    """Miasta hal, których nie ma w `cities` pod tą pisownią: {key, city, lat, lon,
+    voivodeship, aliases, source, matches, city_key}. `city_key` wskazuje miasto
+    klubowe, gdy to tylko inna pisownia tego samego miejsca."""
+    names: dict[str, dict] = {}
+    for row in venue_rows:
+        variants = R.city_variants(row["venue_city"])
+        if not variants or variants[0] in club_buckets:
+            continue
+        entry = names.setdefault(variants[0], {"raw": row["venue_city"], "hint": "", "n": 0})
+        entry["n"] += int(row["n"] or 0)
+        if not entry["hint"]:
+            entry["hint"] = assoc_province.get((club_by_id.get(row["home_club_id"]) or {}).get("association_id"), "")
+    if not names:
+        return [], 0
+    cache_fn = await geocode.cache_lookup()
+    if fallback_fn is None:
+        fallback_fn = await _gazetteer_lookup()
+    out: dict[str, dict] = {}
+    missing = 0
+    for entry in names.values():
+        place = R.resolve_city(entry["raw"], index, entry["hint"], fallback_fn, cache_fn)
+        if not place:
+            missing += 1
+            continue
+        label = R.display_city(entry["raw"])
+        item = out.setdefault(place["key"], {
+            "key": place["key"], "city": place.get("name") or label, "lat": place["lat"], "lon": place["lon"],
+            "province": place.get("province") or "", "voivodeship": R.voivodeship(place.get("province") or ""),
+            "approximate": bool(place.get("approximate")), "source": place["source"],
+            "aliases": [], "matches": 0, "city_key": place["key"] if place["key"] in groups else None,
+        })
+        item["matches"] += entry["n"]
+        if label not in item["aliases"]:
+            item["aliases"].append(label)
+    places = sorted(out.values(), key=lambda p: (-p["matches"], p["city"]))
+    return places, missing
 
 
 async def _cached_map(season_id: Optional[str]) -> dict[str, Any]:
@@ -430,9 +485,12 @@ async def club_overview(club_id: str, season_id: str = "") -> dict[str, Any]:
         "teams": teams_out,
         "teams_count": len(teams),
         "players_count": int(players_count or 0),
+        # recent/upcoming to podgląd (po 5); pełna lista sezonu i liczniki z niej - `matches`, `match_counts`.
         "recent_matches": recent,
         "upcoming_matches": upcoming,
         "today_matches": today,
+        "matches": cards,
+        "match_counts": R.match_counts(cards, now),
         "stats": record,
         "standings": await _standing_rows(team_ids, chosen),
         "top_scorers": await _scorers_for_teams(team_ids, chosen, 10),
@@ -513,6 +571,8 @@ async def team_overview(team_id: str, season_id: str = "") -> dict[str, Any]:
         "roster": roster,
         "roster_count": len(roster),
         "matches": cards,
+        "match_counts": R.match_counts(cards, now),
+        "upcoming_count": sum(1 for c in cards if R.is_upcoming(c, now)),
         "recent_matches": recent,
         "upcoming_matches": upcoming,
         "stats": R.team_record(cards, lambda side, m: m.get(f"{side}_team_id") == team_id),
@@ -539,6 +599,10 @@ def _team_discipline(stat_rows: list[Any], matches: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_BEST_MATCH_FIELDS = ("home_team_name", "away_team_name", "home_team_id", "away_team_id", "scheduled_at",
+                      "competition_name", "score_home", "score_away", "season_id", "player_team_id")
+
+
 def _player_totals(rows: list[dict]) -> dict[str, Any]:
     total = {c: 0 for c in PLAYER_STAT_COLUMNS}
     best: Optional[dict] = None
@@ -546,7 +610,9 @@ def _player_totals(rows: list[dict]) -> dict[str, Any]:
         for c in PLAYER_STAT_COLUMNS:
             total[c] += int(r.get(c) or 0)
         if best is None or int(r.get("goals") or 0) > best["goals"]:
-            best = {"goals": int(r.get("goals") or 0), "match_id": r.get("match_id")}
+            best = {"goals": int(r.get("goals") or 0), "match_id": r.get("match_id"),
+                    # Opis meczu z protokołu - karta rekordu nie zależy od tego, czy mecz jest wśród 10 ostatnich.
+                    **{k: r.get(k) for k in _BEST_MATCH_FIELDS if r.get(k) is not None}}
     matches = len(rows)
     return {
         "matches": matches, **total,
@@ -576,28 +642,28 @@ async def player_overview(player_id: str) -> dict[str, Any]:
             .where(and_(zprp_public_team_rosters.c.player_id == player_id, zprp_public_team_rosters.c.active.is_(True)))
             .order_by(zprp_public_team_rosters.c.season_id.desc())
         ),
-        database.fetch_all(
-            select(*_card_cols(), *[MP.c[c] for c in PLAYER_STAT_COLUMNS], MP.c.team_id.label("player_team_id"),
-                   MP.c.shirt_number.label("player_shirt_number"))
-            .join(M, M.c.match_id == MP.c.match_id)
-            .where(MP.c.player_id == player_id).order_by(M.c.scheduled_at.desc())
-        ),
+        _player_lines(player_id),
     )
-    lines = [_dict(r) for r in line_rows]
+    lines = line_rows
     by_season: dict[str, list[dict]] = {}
     for line in lines:
         by_season.setdefault(line["season_id"] or "", []).append(line)
+    # Nazwy sezonów z tabeli sezonów (nie tylko ze składów - mecz bez zgłoszenia też ma sezon).
+    known = (await seasons_info())[0]
     season_names = {r["season_id"]: r["season_name"] for r in roster_rows}
+    season_names.update({sid: info.get("name") for sid, info in known.items() if info.get("name")})
+
+    def newest_first(sid: Optional[str]) -> tuple:
+        # Rok startu z tabeli sezonów (identyfikatory ZPRP to liczby w tekście - „99” > „100”).
+        return ((known.get(sid or "") or {}).get("start_year") or 0, len(sid or ""), sid or "")
+
     seasons = [
         {"season_id": sid, "season_name": season_names.get(sid), "team_ids": sorted({l["player_team_id"] for l in rows}),
-         **_player_totals(rows)}
-        for sid, rows in sorted(by_season.items(), reverse=True)
+         "teams": _line_teams(rows), **_player_totals(rows)}
+        for sid, rows in sorted(by_season.items(), key=lambda kv: newest_first(kv[0]), reverse=True)
     ]
-    recent_rows = lines[:10]
-    recent = await _cards([{k: v for k, v in l.items() if k in CARD_COLUMNS} for l in recent_rows])
-    for card, line in zip(recent, recent_rows):
-        card["player_line"] = {c: line.get(c) for c in PLAYER_STAT_COLUMNS}
-        card["player_team_id"] = line["player_team_id"]
+    roster_rows = sorted(roster_rows, key=lambda r: newest_first(r["season_id"]), reverse=True)
+    recent = await _line_cards(lines[:10])
     teams_out = [_dict(r) for r in roster_rows]
     over = await corrections.active_overrides()
     for t in teams_out:
@@ -614,7 +680,66 @@ async def player_overview(player_id: str) -> dict[str, Any]:
         "teams": teams_out,
         "totals": _player_totals(lines),
         "seasons": seasons,
+        # Podgląd 10 ostatnich; pełna lista (bez limitu, też per sezon): GET /players/{id}/matches.
         "recent_matches": recent,
+        "matches_count": len(lines),
+        "seasons_count": len(seasons),
+    }
+
+
+async def _player_lines(player_id: str, season_id: Optional[str] = None) -> list[dict]:
+    """Wszystkie wiersze protokołów zawodnika (najnowsze najpierw), opcjonalnie z jednego sezonu."""
+    cond = [MP.c.player_id == player_id]
+    if season_id:
+        cond.append(M.c.season_id == season_id)
+    rows = await database.fetch_all(
+        select(*_card_cols(), *[MP.c[c] for c in PLAYER_STAT_COLUMNS], MP.c.team_id.label("player_team_id"),
+               MP.c.shirt_number.label("player_shirt_number"))
+        .join(M, M.c.match_id == MP.c.match_id)
+        .where(and_(*cond)).order_by(M.c.scheduled_at.desc())
+    )
+    return [_dict(r) for r in rows]
+
+
+def _line_teams(rows: list[dict]) -> list[dict]:
+    """Drużyny zawodnika z protokołów sezonu: {team_id, team_name, matches} (nazwa ze strony meczu)."""
+    out: dict[str, dict] = {}
+    for line in rows:
+        tid = line.get("player_team_id")
+        if not tid:
+            continue
+        side = "home" if line.get("home_team_id") == tid else "away"
+        entry = out.setdefault(tid, {"team_id": tid, "team_name": line.get(f"{side}_team_name"), "matches": 0})
+        entry["matches"] += 1
+    return sorted(out.values(), key=lambda t: -t["matches"])
+
+
+async def _line_cards(lines: list[dict]) -> list[dict]:
+    cards = await _cards([{k: v for k, v in line.items() if k in CARD_COLUMNS} for line in lines])
+    for card, line in zip(cards, lines):
+        card["player_line"] = {c: line.get(c) for c in PLAYER_STAT_COLUMNS}
+        card["player_team_id"] = line["player_team_id"]
+    return cards
+
+
+@router.get("/players/{player_id}/matches")
+async def player_matches(player_id: str, season_id: str = "") -> dict[str, Any]:
+    """Wszystkie mecze zawodnika z protokołów (bez limitu) w zakresie: cała kariera
+    albo `season_id`. `totals` liczone z tej samej listy, więc licznik zakładki, kafle
+    statystyk i lista zawsze się zgadzają."""
+    exists = await database.fetch_val(select(zprp_public_players.c.player_id).where(zprp_public_players.c.player_id == player_id))
+    if not exists:
+        raise HTTPException(404, "Nie znaleziono zawodnika")
+    sid = season_id.strip() or None
+    lines = await _player_lines(player_id, sid)
+    return {
+        "player_id": player_id,
+        "season_id": sid,
+        "season": await _season_info(sid),
+        "count": len(lines),
+        "totals": _player_totals(lines),
+        "teams": _line_teams(lines),
+        "matches": await _line_cards(lines),
     }
 
 
@@ -854,6 +979,24 @@ def _match_referees(rows: list[dict], q: str, limit: int) -> list[dict]:
     return [h[2] for h in hits[:limit]]
 
 
+async def _referee_match_totals() -> dict[str, int]:
+    """Mecze sędziego w całej karierze: różne mecze z jego id na którejkolwiek pozycji pary,
+    także te bez nazwiska w terminarzu - ta sama definicja co profil (`career.matches`)."""
+    pairs = union(
+        select(M.c.match_id, M.c.referee_1_id.label("rid")).where(and_(M.c.referee_1_id.isnot(None), M.c.referee_1_id != "")),
+        select(M.c.match_id, M.c.referee_2_id.label("rid")).where(and_(M.c.referee_2_id.isnot(None), M.c.referee_2_id != "")),
+    ).subquery()
+    rows = await database.fetch_all(select(pairs.c.rid, func.count().label("n")).group_by(pairs.c.rid))
+    return {r["rid"]: int(r["n"]) for r in rows}
+
+
+def note_referee_total(referee_id: str, matches: int) -> None:
+    """Profil policzył karierę na świeżo: indeks wyszukiwarki pokaże tę samą liczbę od razu."""
+    for row in _REF_INDEX["rows"]:
+        if row["referee_id"] == referee_id:
+            row["matches"] = matches
+
+
 async def _build_referee_index() -> list[dict]:
     acc: dict[str, dict] = {}
     for idc, nmc in (("referee_1_id", "referee_1_name"), ("referee_2_id", "referee_2_name")):
@@ -868,6 +1011,10 @@ async def _build_referee_index() -> list[dict]:
             e["matches"] += int(r["n"])
             if int(r["n"]) > e["_best"]:
                 e["_best"], e["name"] = int(r["n"]), name
+    # Suma po nazwiskach gubiła mecze bez nazwiska w terminarzu - liczba meczów z samego id.
+    totals = await _referee_match_totals()
+    for rid, e in acc.items():
+        e["matches"] = totals.get(rid, e["matches"])
     out = [{k: v for k, v in e.items() if k != "_best"} for e in acc.values()]
     for e in out:  # złożone raz, żeby fraza nie składała nazwisk przy każdym żądaniu
         e["_folded"] = MR._fold(e["name"])

@@ -559,13 +559,20 @@ async def trainer_roster(session: dict[str, Any] = Depends(_session)) -> dict[st
             zprp_public_team_rosters.c.team_id, zprp_public_team_rosters.c.season_id,
             zprp_public_team_rosters.c.position, zprp_public_team_rosters.c.shirt_number,
             zprp_public_teams.c.name.label("team_name"), zprp_public_teams.c.category,
+            zprp_public_teams.c.season_name,
         )
         .join(zprp_public_team_rosters, zprp_public_team_rosters.c.player_id == zprp_public_players.c.player_id)
         .join(zprp_public_teams, and_(zprp_public_teams.c.team_id == zprp_public_team_rosters.c.team_id, zprp_public_teams.c.season_id == zprp_public_team_rosters.c.season_id))
         .where(and_(zprp_public_team_rosters.c.team_id.in_(team_ids), zprp_public_team_rosters.c.active.is_(True)))
         .order_by(zprp_public_teams.c.name, zprp_public_players.c.last_name)
     )
-    return {"items": [_dict(row) for row in rows], "count": len(rows)}
+    # Ten sam zakres co /trainer/overview: drużyna w NAJNOWSZYM sezonie. Wcześniej szły
+    # składy ze wszystkich sezonów (ten sam team_id), więc „N os.” przy drużynie było zawyżone.
+    latest: dict[str, str] = {}
+    for row in sorted(rows, key=lambda r: str(r["season_name"] or ""), reverse=True):
+        latest.setdefault(row["team_id"], row["season_id"])
+    items = [_dict(row) for row in rows if latest.get(row["team_id"]) == row["season_id"]]
+    return {"items": items, "count": len(items)}
 
 
 @router.get("/trainer/templates")

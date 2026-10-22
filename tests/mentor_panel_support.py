@@ -18,13 +18,14 @@ from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Table, 
 from app.mentor_evaluation_tables import define_tables as define_evaluations
 from app.mentor_panel_tables import define_tables as define_panel
 from app.mentoring_tables import define_tables as define_mentoring
+from app.stream_tables import define_tables as define_streams
 from app.zprp_public_tables import define_tables as define_public
 
 MODULES = (
     "app.mentor_panel", "app.mentor_panel_core", "app.mentor_panel_auth", "app.mentor_panel_library",
     "app.mentor_panel_media", "app.mentor_panel_reports", "app.mentor_panel_notify", "app.mentor_evaluations",
     "app.mentor_panel_handoff",
-    "app.mentoring", "app.proel_auth",
+    "app.mentoring", "app.proel_auth", "app.streams.store",
 )
 
 PAIR = "pair-1"
@@ -72,6 +73,8 @@ class Env:
         for table in define_panel(metadata):
             tables[table.name] = table
         for table in define_public(metadata):
+            tables[table.name] = table
+        for table in define_streams(metadata):
             tables[table.name] = table
         tables.update(_extra_tables(metadata))
         self.url = f"sqlite:///{tmp_path / 'mentor.db'}"

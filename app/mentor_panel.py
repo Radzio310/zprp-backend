@@ -301,7 +301,21 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
         "delegate_sheets": [delegate_sheet_shape(r) for r in delegate], "mentor_sheets": mentor_shapes,
         "threads": await C.threads_payload(ctx, thread_rows), "rev": ctx["rev"],
         "can": {action: C.may(ctx, action) for action in ("flag", "video", "create", "categories", "publish")},
+        "suggested_streams": await _suggested_streams(card["match_id"], raw_videos),
     }
+
+
+async def _suggested_streams(match_id: str, raw_videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Transmisje YouTube z portalu (`official`/`confirmed`), których para jeszcze nie dodała."""
+    try:
+        from app.link_preview_rules import youtube_id
+        from app.streams.store import suggested_for_match
+
+        added = [youtube_id(R.s(v.get("url"))) for v in raw_videos]
+        return await suggested_for_match(R.s(match_id), added)
+    except Exception:  # noqa: BLE001 - podpowiedź nie psuje pokoju meczu
+        C.logger.warning("mentor: podpowiedzi transmisji nieczytelne", exc_info=True)
+        return []
 
 
 class FlagBody(BaseModel):

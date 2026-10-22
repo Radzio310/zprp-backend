@@ -17,6 +17,43 @@ from collections import Counter
 from typing import Any, Callable, Optional
 
 ROAD_FACTOR = 1.25  # linia prosta -> droga (średnio dla Polski)
+ALL_SEASONS = "all"  # zakres „Wszystkie”: cała kariera sędziego
+
+
+def is_all(season_id: Any) -> bool:
+    return str(season_id or "").strip().lower() in (ALL_SEASONS, "wszystkie", "*")
+
+
+def pick_season(requested: Any, counts: dict[str, int], current: Optional[str], order: list[str]) -> str:
+    """Jeden zakres dla CAŁEGO profilu (liczby, mapa, kluby, rozgrywki, mecze, para).
+
+    `all` = cała kariera; wskazany sezon = ten sezon; bez wskazania - bieżący,
+    a gdy sędzia nie ma w nim meczów - ostatni sezon, w którym gwizdał."""
+    if is_all(requested):
+        return ALL_SEASONS
+    req = str(requested or "").strip()
+    if req:
+        return req
+    if current and counts.get(current):
+        return current
+    return order[0] if order else (current or ALL_SEASONS)
+
+
+def career_totals(groups: list[dict]) -> dict[str, Any]:
+    """Kariera bez limitów z wierszy (season_id, competition_id, n) - jedno GROUP BY w bazie.
+
+    Ta sama definicja meczu co profil i wyszukiwarka: mecz, w którym sędzia stał
+    na którejkolwiek pozycji pary, liczony raz."""
+    by_season: Counter = Counter()
+    comps: set = set()
+    total = 0
+    for g in groups:
+        n = int(g.get("n") or 0)
+        total += n
+        by_season[g.get("season_id")] += n
+        if g.get("competition_id"):
+            comps.add(g["competition_id"])
+    return {"matches": total, "seasons": len(by_season), "competitions": len(comps), "by_season": dict(by_season)}
 
 
 def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -114,6 +151,8 @@ def summarize(
         "by_category": [{"category": k, "matches": n} for k, n in cats.most_common()],
         "partners": sorted(partners.values(), key=lambda e: (-e["matches"], e["name"]))[:5],
         "venues": sorted(venues.values(), key=lambda v: (-v["matches"], v["name"]))[:30],
+        "venues_count": len(venues),
+        "no_city_matches": sum(1 for r in rows if not (r.get("venue_city") or "").strip()),
         "cities": [{**{k: v for k, v in c.items() if k != "venues"}, "venues": sorted(c["venues"])}
                    for c in sorted(cities.values(), key=lambda c: (-c["matches"], c["city"]))],
         "club_counts": clubs.most_common(8),
@@ -136,6 +175,13 @@ def attach_geo(summary: dict, coords: dict[str, tuple[Optional[float], Optional[
         lat, lon = coords.get(c["city"], (None, None))
         c["lat"], c["lon"] = lat, lon
     located = [c for c in summary["cities"] if c.get("lat") is not None]
+    # Uczciwie: miasta bez współrzędnych (i mecze bez miasta) nie trafiają na mapę ani do km.
+    missing = [c for c in summary["cities"] if c.get("lat") is None]
+    summary["unlocated"] = {
+        "cities": len(missing),
+        "matches": sum(c["matches"] for c in missing) + int(summary.get("no_city_matches") or 0),
+        "names": [c["city"] for c in missing][:12],
+    }
     base = located[0] if located else None
     summary["base"] = {"city": base["city"], "lat": base["lat"], "lon": base["lon"], "source": "most_frequent_city"} if base else None
     if not base:

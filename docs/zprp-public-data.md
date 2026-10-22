@@ -86,6 +86,27 @@ przebiegu i liczbę błędów — bez treści błędu, danych źródłowych i UR
 Powtarzające się alarmy są wyciszane, a pierwszy udany przebieg po awarii wysyła
 krótką informację o odzyskaniu sprawności.
 
+### Geokoder miast (mapa, hale, atlasy)
+
+Współrzędne miasta daje jedna funkcja (`portal_rules.resolve_city`, w `extras._geocode`
+i `portal.build_map`): tabela odległości -> skorowidz GeoNames (`app/data/pl_places.tsv.gz`)
+-> trwała pamięć geokodera `zprp_public_geocode_cache`. Pamięć wypełnia w tle
+`app/zprp_public/geocode.py`: tylko nazwy nieznane dwóm pierwszym źródłom, kolejno
+miasta meczów najbliższych w czasie (-14/+30 dni), kluby, reszta hal; OpenStreetMap
+Nominatim (`city=`, `countrycodes=pl`, województwo z okręgu klubu jako `state=`),
+najwyżej 1 zapytanie/s na proces (ogranicznik wspólny z tabelą odległości), własny
+User-Agent. Trafienie zostaje na zawsze; brak trafienia (`failed`) wraca po 30 dniach;
+429/5xx/sieć przerywa cykl bez zapisu. Przyjmujemy tylko miejscowość albo jej część
+w granicach Polski o zgodnej nazwie - bez środków powiatów i województw (lepiej bez
+pinezki niż w złym miejscu). `/map` ma dodatkowo `places`: miasta hal spoza `cities`.
+
+```dotenv
+GEOCODE_DISABLED=0            # 1 = pętla nie startuje (pamięć dalej jest czytana)
+GEOCODE_BATCH=60              # nazw na cykl
+GEOCODE_INTERVAL_SECONDS=1800 # przerwa, gdy kolejka pusta (60 s, gdy coś zostało)
+GEOCODE_START_DELAY_SECONDS=120
+```
+
 Przy pierwszym wdrożeniu tabele zostaną utworzone przez istniejące
 `metadata.create_all`. Import startuje po opóźnieniu i działa w tle, więc nie
 blokuje uruchomienia API. Na pierwsze wdrożenie warto obserwować
@@ -97,6 +118,8 @@ zmniejszyć trzy wielkości partii, a dopiero później równoległość.
 Najważniejsze endpointy:
 
 - `GET /api/v1/handball/health`
+- transmisje meczów (`/matches/{id}/streams`, `/streams/now`, `/competitions/{id}/streams`,
+  `/clubs/{id}/streams`) — osobny kontrakt: `docs/streams.md`
 - `GET /api/v1/handball/portal/overview` — lekki agregat Centrum dnia
 - `GET /api/v1/handball/seasons?include_historical=false`
 - `GET /api/v1/handball/associations`

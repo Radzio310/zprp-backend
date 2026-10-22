@@ -1,0 +1,12 @@
+{
+  "kind": "youtube#channelListResponse",
+  "pageInfo": {"totalResults": 1, "resultsPerPage": 5},
+  "items": [
+    {
+      "kind": "youtube#channel", "id": "UCabcdefghijklmnopqrstuv",
+      "snippet": {"title": "Handball Polska", "description": "Oficjalny kanał ZPRP", "customUrl": "@handballpolska",
+                  "publishedAt": "2014-03-11T10:21:05Z"},
+      "contentDetails": {"relatedPlaylists": {"likes": "", "uploads": "UUabcdefghijklmnopqrstuv"}}
+    }
+  ]
+}
