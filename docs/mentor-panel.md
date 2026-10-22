@@ -158,6 +158,7 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
 ### 4.6 Klipy i kategorie
 - `GET /pairs/{pairId}/categories` → `{categories: Category[], palette:[...], icons:[...]}` (seed domyślnych przy pierwszym wywołaniu).
 - `POST /pairs/{pairId}/categories` `{name, color, icon, description}`; `PATCH /categories/{id}`; `DELETE` (archiwizuje); `POST /pairs/{pairId}/categories/reset` (przywraca domyślne, własne archiwizuje).
+- Każda kategoria w `GET` ma `clips_count` (żywe klipy pary). `PUT /pairs/{pairId}/categories/order` `{ids}` → pozycja = `sort` (klawisz 1-9 w pokoju meczu), globalne pomijane, brakujące na koniec. `POST /categories/{id}/merge` `{into}` → klipy dostają docelową, źródło do archiwum, odpowiedź = payload kategorii + `merged: {from, into, clips: [{id, added}]}`; `POST /categories/{id}/unmerge` `{into, clips}` cofa scalanie co do klipu.
 - `POST /pairs/{pairId}/clips` `{match_id, video_id, start_s, end_s, title?, note?, category_ids[], source?, source_key?, match_ms?, half?}` → `Clip`.
 - `PATCH /clips/{clipId}`, `DELETE /clips/{clipId}` (autor albo admin; miękkie).
 - `GET /pairs/{pairId}/clips?category=&match_id=&author=&q=` → `{clips: Clip[]}` (biblioteka klipów pary).

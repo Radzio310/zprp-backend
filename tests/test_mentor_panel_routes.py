@@ -135,6 +135,39 @@ def test_kategorie_seed_dodaj_i_przywroc(env):
     assert len([c for c in reset["categories"] if not c["archived"]]) == 5
 
 
+def test_kategorie_kolejnosc_licznik_scalanie_i_cofniecie(env):
+    async def go():
+        L = env.library
+        pair = await env.actor(JUDGES[0])
+        committee = await env.actor(COMMITTEE)
+        cats = (await L.list_categories(PAIR, pair))["categories"]
+        a, b, c = cats[0]["id"], cats[1]["id"], cats[2]["id"]
+        only_a = await L.create_clip(PAIR, clip_body(env, category_ids=[a]), pair)
+        both = await L.create_clip(PAIR, clip_body(env, category_ids=[a, b], start_s=200, end_s=210), pair)
+        await L.create_clip(PAIR, clip_body(env, category_ids=[c], start_s=300, end_s=310), pair)
+        counted = await L.list_categories(PAIR, pair)
+        ordered = await L.order_categories(PAIR, L.OrderBody(ids=[c, a, "obca", b]), pair)
+        no_rights = await raises(L.order_categories(PAIR, L.OrderBody(ids=[a]), committee))
+        same = await raises(L.merge_category(a, L.MergeBody(into=a), pair))
+        merged = await L.merge_category(a, L.MergeBody(into=b), pair)
+        after = {x["id"]: x["category_ids"] for x in (await L.list_clips(PAIR, "", "", "", "", pair))["clips"]}
+        undone = await L.unmerge_category(a, L.UnmergeBody(into=b, clips=merged["merged"]["clips"]), pair)
+        back = {x["id"]: x["category_ids"] for x in (await L.list_clips(PAIR, "", "", "", "", pair))["clips"]}
+        return a, b, c, only_a, both, counted, ordered, no_rights, same, merged, after, undone, back
+
+    a, b, c, only_a, both, counted, ordered, no_rights, same, merged, after, undone, back = env.run(go)
+    usage = {x["id"]: x["clips_count"] for x in counted["categories"]}
+    assert usage[a] == 2 and usage[b] == 1 and usage[c] == 1
+    live = [x["id"] for x in ordered["categories"] if not x["archived"]]
+    assert live[:3] == [c, a, b]
+    assert no_rights[0] == 403 and same == (422, "MERGE_TARGET")
+    by_id = {x["id"]: x for x in merged["categories"]}
+    assert by_id[a]["archived"] is True and by_id[b]["clips_count"] == 2
+    assert after[only_a["id"]] == [b] and after[both["id"]] == [b]
+    assert {x["id"]: x["archived"] for x in undone["categories"]}[a] is False
+    assert back[only_a["id"]] == [a] and sorted(back[both["id"]]) == sorted([a, b])
+
+
 def test_klipy_wlasnosc_i_walidacja(env):
     async def go():
         L = env.library

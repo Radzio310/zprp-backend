@@ -44,9 +44,26 @@ async def _ctx_for(table, row_id: str, actor: Actor, *, action: str = "view", mi
 # ─── Kategorie ──────────────────────────────────────────────────────────────
 
 
+async def _live_clip_rows(pair_id: str) -> List[Dict[str, Any]]:
+    return await C.rows(select(mentor_clips.c.id, mentor_clips.c.category_ids)
+                        .where(mentor_clips.c.pair_id == pair_id).where(mentor_clips.c.deleted_at.is_(None)))
+
+
+async def category_usage(pair_id: str) -> Dict[str, int]:
+    """Ile żywych klipów pary nosi każdą kategorię (licznik w Ustawieniach)."""
+    usage: Dict[str, int] = {}
+    for r in await _live_clip_rows(pair_id):
+        for cid in R.json_value(r.get("category_ids"), []):
+            key = R.s(cid)
+            if key:
+                usage[key] = usage.get(key, 0) + 1
+    return usage
+
+
 async def categories_payload(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    return {"categories": [C.category_shape(r) for r in await C.categories(ctx)], "palette": list(R.PALETTE),
-            "icons": list(R.ICONS)}
+    usage = await category_usage(ctx["pair_id"])
+    return {"categories": [{**C.category_shape(r), "clips_count": usage.get(r["id"], 0)} for r in await C.categories(ctx)],
+            "palette": list(R.PALETTE), "icons": list(R.ICONS)}
 
 
 @router.get("/pairs/{pair_id}/categories")
@@ -138,6 +155,100 @@ async def reset_categories(pair_id: str, actor: Actor = Depends(mentor_actor)):
             id=R.new_id(), pair_id=ctx["pair_id"], key=d["key"], name=d["name"], color=d["color"], icon=d["icon"],
             description=d["description"], sort=d["sort"], archived=False, created_by=actor.judge_id, created_at=C.now()))
     await C.touch(ctx, actor.judge_id, "categories_reset", "categories")
+    return await categories_payload(ctx)
+
+
+class OrderBody(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=R.MAX_CATEGORIES * 2)
+
+
+@router.put("/pairs/{pair_id}/categories/order")
+async def order_categories(pair_id: str, body: OrderBody, actor: Actor = Depends(mentor_actor)):
+    """Nowa kolejność kategorii pary (pozycja = klawisz 1-9 w pokoju meczu). Globalne pomijamy."""
+    ctx = await C.pair_context(pair_id, actor, action="categories")
+    own = {r["id"] for r in await C.categories(ctx) if r.get("pair_id") == ctx["pair_id"]}
+    ids: List[str] = []
+    for raw in body.ids:
+        value = R.s(raw)
+        if value in own and value not in ids:
+            ids.append(value)
+    if not ids:
+        raise C.err(422, "ORDER_EMPTY", "Kolejność nie zawiera żadnej kategorii tej pary.")
+    for i, category_id in enumerate(ids):
+        await database.execute(update(mentor_categories).where(mentor_categories.c.id == category_id).values(sort=i))
+    # Kategorie pominięte w liście (np. zarchiwizowane) idą na koniec, w dotychczasowym porządku.
+    rest = [r for r in await C.categories(ctx, seed=False) if r["id"] in own and r["id"] not in ids]
+    for j, r in enumerate(rest):
+        await database.execute(update(mentor_categories).where(mentor_categories.c.id == r["id"]).values(sort=len(ids) + j))
+    await C.touch(ctx, actor.judge_id, "categories_ordered", "categories", data={"ids": ids})
+    return await categories_payload(ctx)
+
+
+class MergeBody(BaseModel):
+    into: str = Field(min_length=1, max_length=80)
+
+
+class UnmergeBody(BaseModel):
+    into: str = Field(min_length=1, max_length=80)
+    #: Klipy z odpowiedzi scalania: `added` = klip dostał kategorię docelową dopiero przy scalaniu.
+    clips: List[Dict[str, Any]] = Field(default_factory=list, max_length=5000)
+
+
+def _ids_of(row: Dict[str, Any]) -> List[str]:
+    return [R.s(x) for x in R.json_value(row.get("category_ids"), []) if R.s(x)]
+
+
+async def _merge_pair(category_id: str, into: str, actor: Actor) -> tuple:
+    ctx, source = await _category_ctx(category_id, actor)
+    if ctx is None:
+        raise C.err(403, "GLOBAL_CATEGORY", "Kategorii globalnej nie scala się w parze.")
+    target = next((r for r in await C.categories(ctx, seed=False) if r["id"] == R.s(into)), None)
+    if not target or target["id"] == source["id"]:
+        raise C.err(422, "MERGE_TARGET", "Wybierz inną kategorię tej pary.")
+    return ctx, source, target
+
+
+@router.post("/categories/{category_id}/merge")
+async def merge_category(category_id: str, body: MergeBody, actor: Actor = Depends(mentor_actor)):
+    """Scal: klipy z kategorią źródłową dostają docelową, źródło idzie do archiwum.
+    Odpowiedź niesie listę ruchów - `/unmerge` cofa scalanie co do klipu."""
+    ctx, source, target = await _merge_pair(category_id, body.into, actor)
+    moved: List[Dict[str, Any]] = []
+    for r in await _live_clip_rows(ctx["pair_id"]):
+        ids = _ids_of(r)
+        if source["id"] not in ids:
+            continue
+        added = target["id"] not in ids
+        out = [target["id"] if x == source["id"] else x for x in ids] if added else [x for x in ids if x != source["id"]]
+        await database.execute(update(mentor_clips).where(mentor_clips.c.id == r["id"])
+                               .values(category_ids=C.dumps(out), updated_at=C.now()))
+        moved.append({"id": r["id"], "added": added})
+    await database.execute(update(mentor_categories).where(mentor_categories.c.id == source["id"]).values(archived=True))
+    await C.touch(ctx, actor.judge_id, "categories_merged", "categories",
+                  data={"from": source["id"], "into": target["id"], "clips": len(moved)})
+    return {**await categories_payload(ctx), "merged": {"from": source["id"], "into": target["id"], "clips": moved}}
+
+
+@router.post("/categories/{category_id}/unmerge")
+async def unmerge_category(category_id: str, body: UnmergeBody, actor: Actor = Depends(mentor_actor)):
+    """Cofnięcie scalania: źródło wraca z archiwum, klipy odzyskują kategorię źródłową."""
+    ctx, source, target = await _merge_pair(category_id, body.into, actor)
+    plan = {R.s(c.get("id")): bool(c.get("added")) for c in body.clips if isinstance(c, dict) and R.s(c.get("id"))}
+    restored = 0
+    for r in await _live_clip_rows(ctx["pair_id"]):
+        if r["id"] not in plan:
+            continue
+        ids = _ids_of(r)
+        if plan[r["id"]]:
+            ids = [source["id"] if x == target["id"] else x for x in ids] if target["id"] in ids else ids + [source["id"]]
+        elif source["id"] not in ids:
+            ids = ids + [source["id"]]
+        await database.execute(update(mentor_clips).where(mentor_clips.c.id == r["id"])
+                               .values(category_ids=C.dumps(ids[:8]), updated_at=C.now()))
+        restored += 1
+    await database.execute(update(mentor_categories).where(mentor_categories.c.id == source["id"]).values(archived=False))
+    await C.touch(ctx, actor.judge_id, "categories_unmerged", "categories",
+                  data={"from": source["id"], "into": target["id"], "clips": restored})
     return await categories_payload(ctx)
 
 
