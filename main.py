@@ -1139,6 +1139,15 @@ async def startup():
             logger.info("Założono %s wspólnych budżetów klubów", _budgets)
     except Exception:
         logger.exception("Nie udało się założyć domyślnych wspólnych budżetów klubów")
+    # Jednorazowy wsad adresów okręgów (Niedyspo DW + Dodatkowy raport, 22.10.2026).
+    # Ślad w app_migrations dopiero po sukcesie; edycje admina już nie wracają.
+    try:
+        from app.seed_province_emails import run_seed as _seed_province_emails
+
+        if await _seed_province_emails():
+            logger.info("Wykonano jednorazowy wsad adresów okręgów")
+    except Exception:
+        logger.exception("Nie udało się wykonać wsadu adresów okręgów")
     # Deklaracje „4. sędziego" bywały zapisane pod „ŚLĄSKIE" i „SLASKIE" - stary
     # wiersz przesłaniał nowy zapis (23.09.2026). Porządek przy każdym starcie.
     try:
