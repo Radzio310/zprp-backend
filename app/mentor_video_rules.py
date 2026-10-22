@@ -272,8 +272,20 @@ def timeline_from_blob(blob: Any) -> Dict[str, Any]:
         "half_minutes": int(half) if half and 5 <= half <= 60 else 30,
         "break_minutes": int(brk) if brk is not None and 0 <= brk <= 60 else 10,
         "teams": teams,
+        "colors": {
+            side: _hex_color(cfg.get(f"{side}JerseyColor") or data.get(f"{side}JerseyColor"))
+            for side in ("host", "guest")
+        },
         "events": events,
     }
+
+
+def _hex_color(value: Any) -> Any:
+    """Kolor koszulki z meczu ProEla jako #rrggbb albo None."""
+    text = str(value or "").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+        return text.lower()
+    return None
 
 
 def mentor_states(
