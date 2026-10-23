@@ -198,9 +198,8 @@ def test_mecz_terminarz_szukanie_porownanie(portal, monkeypatch):
 
     match, schedule, found, cmp_ = run(portal, go)
     assert match["home"]["score"] == 30 and match["lineups"]["home"][0]["goals"] == 9
-    # Drugi sędzia nie jest wyznaczony: wolne miejsce w parze (front: „brak obsady").
-    assert match["officials"] == [{"role": "Sędzia", "id": None, "name": "Jan Sędzia"},
-                                  {"role": "Sędzia", "id": None, "name": None, "vacant": True}]
+    # Drugi sędzia nie jest wyznaczony: puste pole znika (bez „brak obsady").
+    assert match["officials"] == [{"role": "Sędzia", "id": None, "name": "Jan Sędzia"}]
     assert match["events_available"] is False and match["status"] == "finished"
     assert match["head_to_head"] == []                      # m2 jest przyszły
     assert schedule["rounds"][0]["matchdays"][0]["matches"][0]["match_id"] in {"m1", "m2"}

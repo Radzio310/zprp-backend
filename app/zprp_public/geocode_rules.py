@@ -8,11 +8,22 @@
                        starsza niż 30 dni; trafienia zostają na zawsze,
 * `RateLimiter`      - najwyżej 1 zapytanie na sekundę na cały proces,
 * `order_candidates` - kolejność: mecze najbliższe w czasie, potem kluby, potem reszta hal.
+
+Adresy hal (pinezka na hali, nie w środku miasta) - niski priorytet, po miastach:
+
+* `venue_addr_key`        - klucz pamięci: znormalizowane (miasto, ulica z numerem),
+* `address_queries`       - co pytamy: ulica z numerem, potem sama ulica,
+* `address_query_params`  - zapytanie strukturalne (`street=`, `city=`, `countrycodes=pl`),
+* `parse_address`         - wynik przyjęty tylko jako budynek / obiekt / ulica
+                            najwyżej ~15 km od punktu miasta (bez powiatów,
+                            województw i środków miejscowości).
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -83,6 +94,109 @@ def parse_nominatim(payload: Any, city: str) -> Optional[dict[str, Any]]:
             continue
         return {"lat": round(lat, 6), "lon": round(lon, 6), "name": str(name), "display_name": item.get("display_name"),
                 "place_type": kind}
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Adres hali (ulica)
+# ---------------------------------------------------------------------------
+
+# Klasa wyniku Nominatim, która może być halą albo jej ulicą.
+ADDRESS_CLASSES = frozenset({"building", "amenity", "leisure", "highway", "place"})
+# Jednostki administracyjne - ich środek to nie hala.
+ADDRESS_REJECT_TYPES = frozenset({
+    "county", "state", "province", "region", "country", "municipality", "administrative", "district",
+    "state_district", "postcode",
+})
+ADDRESS_MAX_KM = 15.0
+
+_STREET_PREFIX = re.compile(r"^\s*(ul\.?|ulica)\s+", re.IGNORECASE)
+_STREET_ABBR = (
+    (re.compile(r"^\s*al\.?\s+", re.IGNORECASE), "aleja "),
+    (re.compile(r"^\s*os\.?\s+", re.IGNORECASE), "osiedle "),
+    (re.compile(r"^\s*pl\.?\s+", re.IGNORECASE), "plac "),
+)
+
+
+def clean_street(street: object) -> str:
+    """„ul. Sportowa” -> „Sportowa”, „al. Pokoju” -> „aleja Pokoju” (Nominatim nie zna skrótów)."""
+    text = re.sub(r"\s+", " ", str(street or "")).strip(" ,.;")
+    text = _STREET_PREFIX.sub("", text)
+    for pattern, full in _STREET_ABBR:
+        text = pattern.sub(full, text)
+    return text.strip()
+
+
+def _street_line(street: object, number: object) -> str:
+    base = clean_street(street)
+    num = str(number or "").strip(" ,.;")
+    if not base:
+        return ""
+    # Numer bywa już w polu ulicy („Sportowa 5”).
+    if num and not re.search(r"\d", base):
+        return f"{base} {num}"
+    return base
+
+
+def venue_addr_key(city: object, street: object, number: object = None) -> str:
+    """Klucz pamięci adresu hali: „kielce|sportowa 5” (pusty, gdy brak miasta albo ulicy)."""
+    c = city_norm(city)
+    s = city_norm(_street_line(street, number))
+    return f"{c}|{s}" if c and s else ""
+
+
+def address_queries(street: object, number: object = None) -> list[str]:
+    """Ulica z numerem (Nominatim: „5 Sportowa” / „Sportowa 5” - podajemy jak w danych),
+    potem sama ulica (punkt ulicy też leży przy hali, lepiej niż środek miasta)."""
+    full = _street_line(street, number)
+    bare = re.sub(r"\s+\d+[\w/-]*$", "", full).strip()
+    out = [q for q in (full, bare) if q]
+    return list(dict.fromkeys(out))
+
+
+def address_query_params(street: str, city: str) -> dict[str, Any]:
+    return {"format": "jsonv2", "countrycodes": "pl", "street": street, "city": city, "limit": 1}
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(h)))
+
+
+def parse_address(payload: Any, city_lat: float, city_lon: float, max_km: float = ADDRESS_MAX_KM) -> Optional[dict[str, Any]]:
+    """Wynik jsonv2 zapytania o ulicę -> {lat, lon, display_name, place_class, place_type, km} albo None.
+
+    Przyjmujemy tylko budynek / obiekt / teren sportowy / ulicę (klasa) w Polsce,
+    najwyżej `max_km` od punktu miasta hali. Powiat, województwo, gmina albo
+    środek samej miejscowości (`place=city/town/...`) odpadają - to nie hala."""
+    if not isinstance(payload, list):
+        return None
+    for item in payload[:3]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            lat, lon = float(item["lat"]), float(item["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (_LAT[0] <= lat <= _LAT[1] and _LON[0] <= lon <= _LON[1]):
+            continue
+        klass = str(item.get("category") or item.get("class") or "")
+        kind = str(item.get("type") or "")
+        addresstype = str(item.get("addresstype") or "")
+        if klass not in ADDRESS_CLASSES:
+            continue
+        if kind in ADDRESS_REJECT_TYPES or addresstype in ADDRESS_REJECT_TYPES:
+            continue
+        if klass == "place" and (kind in PLACE_TYPES or addresstype in PLACE_TYPES):
+            continue
+        km = haversine_km(lat, lon, city_lat, city_lon)
+        if km > max_km:
+            continue
+        return {"lat": round(lat, 6), "lon": round(lon, 6), "display_name": item.get("display_name"),
+                "place_class": klass, "place_type": kind or addresstype or None, "km": round(km, 2)}
     return None
 
 

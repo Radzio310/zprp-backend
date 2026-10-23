@@ -10,6 +10,12 @@ ta pamięć). Tu dokładamy trzecie źródło dla nazw, których dwa pierwsze ni
 * wynik na zawsze w `zprp_public_geocode_cache`; porażka wraca po 30 dniach,
 * `cache_lookup()` - słownik w pamięci (odświeżany co 5 min) do `resolve_city`.
 
+Adresy hal (niski priorytet): gdy kolejka miast jest pusta, ten sam proces
+pyta o ulice hal (`run_venue_cycle`, wspólny ogranicznik 1/s, najwyżej
+`GEOCODE_VENUE_BATCH` adresów na cykl). Wynik w `zprp_public_venue_geocode_cache`
+(trafienie na zawsze, porażka wraca po 30 dniach); `venue_points()` czytają
+/venues, /venues/{key} i karta meczu (`coords_precision: "address"`).
+
 Bez środków województw ani innych przybliżeń: lepiej brak pinezki niż zła.
 """
 
@@ -33,6 +39,7 @@ log = logging.getLogger(__name__)
 
 _CACHE_TTL = 300.0
 _mem: dict[str, Any] = {"at": 0.0, "points": {}}
+_vmem: dict[str, Any] = {"at": 0.0, "points": {}}
 
 
 class TransientGeocodeError(Exception):
@@ -88,6 +95,34 @@ async def cache_lookup() -> Callable[[str], Optional[dict]]:
 
 def invalidate() -> None:
     _mem["at"] = 0.0
+    _vmem["at"] = 0.0
+
+
+async def venue_points(force: bool = False) -> dict[str, dict]:
+    """addr_norm -> {lat, lon} (tylko trafienia adresów hal)."""
+    if not force and _vmem["at"] and time.monotonic() - _vmem["at"] < _CACHE_TTL:
+        return _vmem["points"]
+    try:
+        from app.db import database, zprp_public_venue_geocode_cache as V
+
+        rows = await database.fetch_all(
+            select(V.c.addr_norm, V.c.lat, V.c.lon)
+            .where(and_(V.c.failed.is_(False), V.c.lat.is_not(None), V.c.lon.is_not(None)))
+        )
+        points = {r["addr_norm"]: {"lat": float(r["lat"]), "lon": float(r["lon"])} for r in rows}
+    except Exception:  # noqa: BLE001 - brak tabeli (stara baza, testy) = brak punktów adresów
+        log.debug("Pamięć adresów hal niedostępna", exc_info=True)
+        points = _vmem["points"]
+    _vmem.update(at=time.monotonic(), points=points)
+    return points
+
+
+async def venue_point(city: object, street: object, number: object = None) -> Optional[dict]:
+    """Punkt adresu hali z pamięci geokodera albo None (wtedy zostaje punkt miasta)."""
+    key = G.venue_addr_key(city, street, number)
+    if not key:
+        return None
+    return (await venue_points()).get(key)
 
 
 # ---------------------------------------------------------------------------
@@ -240,25 +275,172 @@ async def run_cycle(client: Optional[httpx.AsyncClient] = None, max_lookups: int
     return stats
 
 
+# ---------------------------------------------------------------------------
+# Adresy hal (ulica) - po miastach
+# ---------------------------------------------------------------------------
+
+
+async def pending_venue_candidates(now: Optional[datetime] = None) -> list[dict]:
+    """Adresy hal (miasto + ulica) bez punktu, którym należy się zapytanie - hale
+    z największą liczbą meczów najpierw. Tylko hale, których miasto ma punkt
+    (bez niego nie sprawdzimy, czy wynik leży w tym mieście)."""
+    from app.db import database, zprp_public_matches as M, zprp_public_venue_geocode_cache as V
+    from app.zprp_public.portal import _gazetteer_lookup, _node_index
+
+    now = now or _now()
+    naive = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo else now
+    rows = await database.fetch_all(
+        select(M.c.venue_city, M.c.venue_street, M.c.venue_number, func.count().label("n"))
+        .where(and_(M.c.venue_city.is_not(None), M.c.venue_street.is_not(None),
+                    M.c.scheduled_at >= naive - timedelta(days=400)))
+        .group_by(M.c.venue_city, M.c.venue_street, M.c.venue_number)
+    )
+    grouped: dict[str, dict] = {}
+    for r in rows:
+        city = R.display_city(r["venue_city"]) if r["venue_city"] else ""
+        key = G.venue_addr_key(city, r["venue_street"], r["venue_number"])
+        if not key:
+            continue
+        n = int(r["n"] or 0)
+        entry = grouped.setdefault(key, {"addr_norm": key, "city": city, "raw_city": r["venue_city"], "street": r["venue_street"],
+                                         "number": r["venue_number"], "n": 0, "_best": -1})
+        entry["n"] += n
+        if n > entry["_best"]:
+            entry.update(_best=n, raw_city=r["venue_city"], street=r["venue_street"], number=r["venue_number"])
+    if not grouped:
+        return []
+    known = {r["addr_norm"]: dict(r) for r in await database.fetch_all(select(V))}
+    index = await _node_index()
+    gazetteer = await _gazetteer_lookup()
+    cache = await cache_lookup()
+    out = []
+    for cand in sorted(grouped.values(), key=lambda c: (-c["n"], c["addr_norm"])):
+        if not G.due_for_lookup(known.get(cand["addr_norm"]), now):
+            continue
+        place = R.resolve_city(cand["raw_city"], index, "", gazetteer, cache)
+        if not place:
+            continue
+        cand.pop("_best", None)
+        out.append({**cand, "city_lat": float(place["lat"]), "city_lon": float(place["lon"]),
+                    "attempts": int((known.get(cand["addr_norm"]) or {}).get("attempts") or 0)})
+    return out
+
+
+async def lookup_venue(client: httpx.AsyncClient, cand: dict) -> tuple[Optional[dict], str]:
+    """Nominatim dla adresu hali: (punkt albo None, zapytana ulica). Najpierw ulica
+    z numerem, potem sama ulica. `TransientGeocodeError` przy sieci/429/5xx."""
+    asked = ""
+    for street in G.address_queries(cand["street"], cand.get("number")):
+        asked = street
+        try:
+            async with G.NOMINATIM_LIMITER.slot():
+                response = await client.get(G.NOMINATIM_URL, params=G.address_query_params(street, cand["city"]),
+                                            headers={"User-Agent": G.USER_AGENT})
+        except httpx.HTTPError as exc:
+            raise TransientGeocodeError(str(exc)) from exc
+        if response.status_code == 429 or response.status_code >= 500:
+            raise TransientGeocodeError(f"HTTP {response.status_code}")
+        if response.status_code >= 400:
+            return None, asked
+        try:
+            payload = response.json()
+        except ValueError:
+            return None, asked
+        hit = G.parse_address(payload, cand["city_lat"], cand["city_lon"])
+        if hit:
+            return hit, street
+    return None, asked
+
+
+async def store_venue(cand: dict, hit: Optional[dict], asked: str, now: Optional[datetime] = None) -> None:
+    from app.db import database, zprp_public_venue_geocode_cache as V
+
+    now = now or _now()
+    key = cand["addr_norm"]
+    street = " ".join(str(x) for x in (cand.get("street"), cand.get("number")) if x)
+    values = {
+        "city": cand["city"], "street": street or str(cand.get("street") or ""), "query": asked, "looked_up_at": now,
+        "attempts": int(cand.get("attempts") or 0) + 1, "source": "nominatim", "failed": hit is None,
+        "lat": hit["lat"] if hit else None, "lon": hit["lon"] if hit else None,
+        "display_name": (hit or {}).get("display_name"), "place_class": (hit or {}).get("place_class"),
+        "place_type": (hit or {}).get("place_type"), "km_from_city": (hit or {}).get("km"),
+    }
+    exists = await database.fetch_val(select(V.c.addr_norm).where(V.c.addr_norm == key))
+    if exists:
+        await database.execute(update(V).where(V.c.addr_norm == key).values(**values))
+        return
+    try:
+        await database.execute(insert(V).values(addr_norm=key, **values))
+    except Exception:  # noqa: BLE001 - druga replika była szybsza
+        await database.execute(update(V).where(V.c.addr_norm == key).values(**values))
+
+
+async def run_venue_cycle(client: Optional[httpx.AsyncClient] = None, max_lookups: int = 30,
+                          now: Optional[datetime] = None) -> dict[str, int]:
+    """Jeden przebieg adresów hal: najwyżej `max_lookups` adresów (każdy 1-2 zapytania)."""
+    candidates = await pending_venue_candidates(now)
+    stats = {"pending": len(candidates), "found": 0, "failed": 0, "transient": 0}
+    if not candidates:
+        return stats
+    own = client is None
+    client = client or httpx.AsyncClient(timeout=10.0, headers={"User-Agent": G.USER_AGENT})
+    try:
+        for cand in candidates[:max_lookups]:
+            try:
+                hit, asked = await lookup_venue(client, cand)
+            except TransientGeocodeError as exc:
+                log.info("[geocode] adresy hal - przerwa: %s", exc)
+                stats["transient"] += 1
+                break
+            await store_venue(cand, hit, asked, now)
+            stats["found" if hit else "failed"] += 1
+    finally:
+        if own:
+            await client.aclose()
+    if stats["found"]:
+        _vmem["at"] = 0.0
+    return stats
+
+
+async def scheduler_step(batch: int, venue_batch: int, idle: int) -> int:
+    """Jeden obrót pętli: miasta, a gdy ich kolejka jest pusta - adresy hal.
+    Zwraca przerwę (s) do następnego obrotu."""
+    pause = idle
+    stats = await run_cycle(max_lookups=batch)
+    if stats["pending"]:
+        log.info("[geocode] cykl: %s", stats)
+    if stats["transient"]:
+        return 3600
+    if stats["pending"] > batch:
+        return 60
+    if venue_batch <= 0 or _flag("GEOCODE_VENUES_DISABLED"):
+        return pause
+    vstats = await run_venue_cycle(max_lookups=venue_batch)
+    if vstats["pending"]:
+        log.info("[geocode] adresy hal: %s", vstats)
+    if vstats["transient"]:
+        return 3600
+    if vstats["pending"] > venue_batch:
+        return 60
+    return pause
+
+
 async def run_geocode_scheduler() -> None:
     """Pętla w tle. `GEOCODE_DISABLED=1` wyłącza; `GEOCODE_BATCH` (60) nazw na cykl,
-    `GEOCODE_INTERVAL_SECONDS` (1800) przerwy, gdy kolejka pusta."""
+    `GEOCODE_VENUE_BATCH` (30) adresów hal na cykl, gdy miasta są gotowe
+    (`GEOCODE_VENUES_DISABLED=1` wyłącza same adresy), `GEOCODE_INTERVAL_SECONDS`
+    (1800) przerwy, gdy obie kolejki są puste."""
     if _flag("GEOCODE_DISABLED"):
         log.info("[geocode] wyłączony przez GEOCODE_DISABLED")
         return
     await asyncio.sleep(max(5, _int_env("GEOCODE_START_DELAY_SECONDS", 120)))
     batch = max(1, _int_env("GEOCODE_BATCH", 60))
+    venue_batch = max(0, _int_env("GEOCODE_VENUE_BATCH", 30))
     idle = max(60, _int_env("GEOCODE_INTERVAL_SECONDS", 1800))
     while True:
         pause = idle
         try:
-            stats = await run_cycle(max_lookups=batch)
-            if stats["pending"]:
-                log.info("[geocode] cykl: %s", stats)
-            if stats["transient"]:
-                pause = 3600
-            elif stats["pending"] > batch:
-                pause = 60
+            pause = await scheduler_step(batch, venue_batch, idle)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

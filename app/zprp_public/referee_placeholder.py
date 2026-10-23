@@ -6,8 +6,9 @@ WSPÓLNYM numerem dla tysięcy meczów. Portal brał ją za prawdziwego sędzieg
 profil „--- ---" z 4287 meczami w 334 rozgrywkach, „-- -- 10 meczów razem" w
 parze, wyszukiwarka, Moje.
 
-Decyzja właściciela (23.10.2026): wszędzie jako BRAK OBSADY. Taki slot nie jest
-sędzią ani partnerem, nie liczy się nigdzie, nie ma profilu ani linku.
+Decyzja właściciela (23.10.2026, ostateczna): „--- ---" to PUSTE POLE - wszędzie
+znika. Taki slot nie jest sędzią ani partnerem, nie liczy się nigdzie, nie ma
+profilu ani linku i nie zostawia po sobie napisu („brak obsady", wolne miejsce).
 
 - `is_placeholder_referee(id, name)` - jedno źródło prawdy (czyste, bez bazy).
 - `clean_official(id, name)` - (id, nazwisko) do zapisu: placeholder -> (None, None).
@@ -20,9 +21,9 @@ sędzią ani partnerem, nie liczy się nigdzie, nie ma profilu ani linku.
   sędzia", nie „nie znamy".
 
 Zastrzeżenie: w ZPRP bywa też PRAWDZIWY sędzia, którego nazwisko terminarz
-ukrywa za „--- ---" (np. numer 1107 w Śląskiem - patrz BAZA_web
-utils/province-stats/resolveOfficial.ts). Zgodnie z decyzją także on jest tu
-brakiem obsady; numer z `source_json` zostaje, gdyby trzeba to było odwrócić.
+ukrywa za „--- ---" (np. numer 1107 w Śląskiem). Zgodnie z decyzją także on jest
+tu pustym polem (BAZA_web nie dopytuje już o jego nazwisko); numer z `source_json`
+zostaje, gdyby trzeba to było odwrócić.
 Do rejestru placeholderów trafia jednak tylko numer, który NIE może być jedną
 osobą (te same godziny w kilku meczach naraz albo bardzo wiele meczów), żeby
 profil prawdziwej osoby nie mówił „to nie jest sędzia".
@@ -139,21 +140,14 @@ _OFFICIAL_ROLES = (("referee_1", "Sędzia"), ("referee_2", "Sędzia"), ("delegat
                    ("delegate_2", "Delegat"), ("secretary", "Sekretarz"), ("timekeeper", "Czas"))
 
 
-def officials_with_vacancies(match: dict[str, Any]) -> list[dict[str, Any]]:
-    """Obsada strony meczu. Pusty slot sędziego przy obsadzonym meczu wraca jako
-    {"role": "Sędzia", "id": None, "name": None, "vacant": True} - front pisze „brak obsady".
-    Starsze klienty filtrują po `name`, więc wolnego miejsca nie zobaczą wcale (jak dotąd)."""
+def match_officials(match: dict[str, Any]) -> list[dict[str, Any]]:
+    """Obsada strony meczu: tylko wyznaczone osoby, w stałej kolejności ról.
+
+    Placeholder („--- ---") jest pustym polem, więc znika bez śladu - bez wolnego
+    miejsca i bez napisu (decyzja właściciela 23.10.2026)."""
     m = clean_match_officials(dict(match))
-    people = [{"role": label, "id": m.get(f"{col}_id"), "name": m.get(f"{col}_name")}
-              for col, label in _OFFICIAL_ROLES if m.get(f"{col}_name")]
-    if not people:
-        return []  # nikt nie jest wyznaczony - strona meczu nie pokazuje sekcji obsady
-    referees = [p for p in people if p["role"] == "Sędzia"]
-    vacant = {"role": "Sędzia", "id": None, "name": None, "vacant": True}
-    # Jeden sędzia w parze: drugie miejsce wolne. Sam stolik bez sędziów: jedno „brak obsady".
-    # Slot z samym numerem (nazwiska brak w terminarzu) to wyznaczona osoba, nie wakat.
-    missing = 1 if any(not m.get(f"{col}_id") and not m.get(f"{col}_name") for col, _ in _OFFICIAL_ROLES[:2]) else 0
-    return referees + [dict(vacant) for _ in range(missing)] + [p for p in people if p["role"] != "Sędzia"]
+    return [{"role": label, "id": m.get(f"{col}_id"), "name": m.get(f"{col}_name")}
+            for col, label in _OFFICIAL_ROLES if m.get(f"{col}_name")]
 
 
 def known_ids() -> frozenset[str]:

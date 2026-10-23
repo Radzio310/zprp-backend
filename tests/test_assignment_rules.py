@@ -50,6 +50,14 @@ def test_zero_is_an_empty_slot_not_a_judge():
     }
 
 
+def test_placeholder_is_an_empty_slot_even_with_a_number():
+    """„--- ---" z ZPRP to puste pole, także z numerem (np. 1107)."""
+    for junk in ("--- ---", "-- --", "---", "brak"):
+        assert slot_person({"NrSedzia_drugi": "1107", "NrSedzia_drugi_nazwisko": junk}, "drugi") is None
+    status = crew_status(dict(FULL, NrSedzia_drugi="1107", NrSedzia_drugi_nazwisko="--- ---"), "S/MłK/12")
+    assert status["gaps"] == 1
+
+
 def test_full_crew_is_complete():
     status = crew_status(FULL, "S/MłK/12")
     assert status["gaps"] == 0 and status["soft"] == 0

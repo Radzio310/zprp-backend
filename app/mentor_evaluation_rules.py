@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from app.mentoring_rules import state_ref
+
 GRADES = ("A", "B", "C", "D", "E", "F", "G")
 GRADE_OPTIONS = set(GRADES) | {"ND"}
 SECTION_KEYS = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X")
@@ -61,7 +63,7 @@ def json_list(value: Any) -> List[str]:
 
 def pair_of(state: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     """Para sędziów głównych po numerach - bez nazwisk (nieznana tożsamość nie daje dostępu)."""
-    ids = [_s(state.get(field)) for field in REFEREE_FIELDS]
+    ids = [state_ref(state, field) for field in REFEREE_FIELDS]  # „--- ---" = puste gniazdo
     if not all(ids) or ids[0] == ids[1]:
         return None
     a, b = sorted(ids)

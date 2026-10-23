@@ -166,6 +166,15 @@ def test_crew_pomija_puste_gniazda():
     assert [c["role"] for c in crew] == ["referee1", "referee2"]
 
 
+def test_placeholder_z_numerem_to_puste_gniazdo():
+    """„--- ---" z numerem (np. 1107) to puste pole: bez roli, bez wpisu w crew, bez nazwiska."""
+    match = dict(MATCH, NrSedzia_drugi="1107", NrSedzia_drugi_nazwisko="--- ---")
+    assert _roles_for(match, "1107") == []
+    assert [c["role"] for c in _authorized_crew(match)] == ["referee1", "delegate"]
+    only = dict(match, NrSedzia_pierwszy_nazwisko="---")
+    assert _name_for(only, ["referee1", "referee2"]) == ""
+
+
 def test_crew_bez_duplikatow():
     """Ten sam czlowiek w dwoch gniazdach daje JEDEN wpis.
 

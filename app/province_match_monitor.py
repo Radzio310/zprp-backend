@@ -43,6 +43,7 @@ from app.deps import get_settings
 # nie dochodzily do zapisu, a niczego nie odswiezal. Lokalnie (SQLite w
 # testach) kolumna wraca slownikiem, wiec pekalo wylacznie na produkcji.
 from app.match_market_rules import state_dict
+from app.zprp_public.referee_placeholder import is_blank_name, is_placeholder_name
 from app.zprp_accounts import (  # noqa: F401  (re-eksport dla zgodności)
     PROVINCE_ENV_SUFFIXES,
     configured_provinces,
@@ -323,10 +324,12 @@ def _crew_judge_ids(state: Dict[str, Any]) -> List[str]:
     return sorted(
         {
             value
-            for id_field, _ in _CREW_FIELD_PAIRS
+            for id_field, name_field in _CREW_FIELD_PAIRS
             if (value := _str(state.get(id_field)))
             and value != "0"
             and value.isdigit()
+            # „--- ---" to puste pole (placeholder ZPRP), także z numerem.
+            and not is_placeholder_name(state.get(name_field))
         }
     )
 
@@ -1111,8 +1114,8 @@ async def _run_light(province: str, username: str, password: str) -> Dict[str, i
                     old
                     and old["approved"]
                     and (
-                        _str(old_state.get("NrSedzia_delegat_nazwisko"))
-                        or _str(old_state.get("NrSedzia_delegat2_nazwisko"))
+                        not is_blank_name(old_state.get("NrSedzia_delegat_nazwisko"))
+                        or not is_blank_name(old_state.get("NrSedzia_delegat2_nazwisko"))
                     )
                     # Stary PDF nie konczy obserwacji. Ocena publikowana jest
                     # dzis jako formularz `ocena2`, ktory moze pojawic sie obok

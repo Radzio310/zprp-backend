@@ -136,6 +136,7 @@ from app.match_market_rules import (
 from app.proel_auth import is_admin
 from app.push.push import send_push_to_judges_report
 from app.settlement_province import spellings
+from app.zprp_public.referee_placeholder import is_blank_name
 from app.settlement_seasons import season_of
 from app.zprp.assignments import (
     SELECT_TO_SLOT,
@@ -306,8 +307,9 @@ def _match_view(state: Dict[str, Any], match_at: Any) -> Dict[str, Any]:
         "matchAt": _iso(match_at),
         "hall": hall,
         "season": _s(state.get("season")),
+        # „--- ---" to puste pole (placeholder ZPRP) - na kaflu nie stoi nic.
         "crew": {
-            key: _s(state.get(field))
+            key: "" if is_blank_name(state.get(field)) else _s(state.get(field))
             for key, field in (
                 ("sedzia1", "NrSedzia_pierwszy_nazwisko"),
                 ("sedzia2", "NrSedzia_drugi_nazwisko"),

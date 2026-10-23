@@ -23,6 +23,8 @@ from typing import Any, Dict, Mapping, Optional
 
 from sqlalchemy import Column, DateTime, MetaData, String, Table
 
+from app.zprp_public.referee_placeholder import is_blank_name
+
 logger = logging.getLogger(__name__)
 
 ROLES = ("secretary", "timekeeper")
@@ -75,7 +77,7 @@ def author_name_from_match(match: Optional[Mapping[str, Any]], judge_id: str) ->
     for id_key, name_key_ in _ROLE_NAME_KEYS:
         if _same_number(match.get(id_key), judge_id):
             name = str(match.get(name_key_) or "").strip()
-            if name:
+            if not is_blank_name(name):  # „--- ---" to puste pole, nie nazwisko
                 return name
     return ""
 

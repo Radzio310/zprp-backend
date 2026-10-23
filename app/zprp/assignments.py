@@ -29,6 +29,7 @@ from app.match_market_rules import (
     season_start_year,
 )
 from app.utils import fetch_with_correct_encoding
+from app.zprp_public.referee_placeholder import is_blank_name
 from app.zprp.schedule import _parse_matches_table
 
 router = APIRouter()
@@ -1205,7 +1206,9 @@ async def apply_referee_assignment(
         from app.assignment_board_rules import expect_conflicts, normalize_slot
 
         def _same_or_empty(a: Any, b: Any) -> bool:
-            left, right = str(a or "").strip(), str(b or "").strip()
+            # „--- ---" w formularzu albo w oczekiwaniu to puste gniazdo, nie osoba.
+            left = "" if is_blank_name(a) else str(a or "").strip()
+            right = "" if is_blank_name(b) else str(b or "").strip()
             if not left or not right:
                 return not left and not right
             return _same_person(left, right)

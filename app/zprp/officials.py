@@ -18,6 +18,7 @@ from httpx import AsyncClient
 from app.deps import Settings, get_settings, get_rsa_keys
 from app.schemas import ZprpScheduleScrapeRequest
 from app.utils import fetch_with_correct_encoding
+from app.zprp_public import referee_placeholder as RP
 
 router = APIRouter()
 
@@ -207,7 +208,8 @@ def _normalize_partner_name(raw: str) -> str:
     - inaczej tylko skapitalizuj tokeny w oryginalnej kolejności
     """
     s = _clean_spaces(_RE_PARENS.sub(" ", raw or ""))
-    if not s:
+    # „Para z: --- ---" to puste pole (placeholder ZPRP), nie partner.
+    if RP.is_blank_name(s):
         return ""
 
     parts = [p for p in s.split(" ") if p]
@@ -465,6 +467,11 @@ def _parse_officials_page(html: str, *, current_offset: int = 0) -> Dict[str, An
 
         photo = _parse_photo_src(tds[1])
         name, phone = _parse_name_and_phone(tds[2])
+        # „--- ---" na liście to puste pole ZPRP, nie sędzia (formatowanie zjada kreski,
+        # więc patrzymy też na surowy tekst komórki).
+        if RP.is_blank_name(name) and RP.is_placeholder_name(tds[2].get_text(" ", strip=True)):
+            skipped_rows += 1
+            continue
         city = _parse_city(tds[3])
 
         roles_td = _pick_roles_td(tds)

@@ -124,8 +124,16 @@ def team_record(matches: Iterable[dict], is_mine: Callable[[str, dict], bool]) -
     Stare pola zostają dla zgodności: `wins`/`losses` liczą też rozstrzygnięcia
     po karnych, `draws` to wyłącznie mecze z równym wynikiem BEZ serii karnych
     w danych (źródło nie podało rozstrzygnięcia, zwykle 0).
+
+    Derby klubu (obie drużyny tego samego klubu, `is_mine` prawdziwe po obu
+    stronach) to JEDEN rozegrany mecz klubu: wchodzi do `played` (i do
+    `home_played` - klub był gospodarzem), więc liczba w hero zgadza się z listą
+    „Rozegrane” (`match_counts.played`). Do bilansu W/WK/LK/L, bramek, formy
+    i średnich NIE wchodzi - klub wygrałby i przegrał ten sam mecz. Liczbę takich
+    meczów podaje `derbies` (front: „w tym N derbów klubu”); `win_rate` i średnie
+    liczone są z meczów bez derbów.
     """
-    played = draws = gf = ga = 0
+    played = draws = gf = ga = derbies = 0
     home_played = away_played = 0
     form: list[str] = []
     detail: list[str] = []
@@ -135,7 +143,12 @@ def team_record(matches: Iterable[dict], is_mine: Callable[[str, dict], bool]) -
         if sh is None or sa is None:
             continue
         mine_home, mine_away = is_mine("home", m), is_mine("away", m)
-        if mine_home == mine_away:  # nie nasz mecz albo mecz z samym sobą
+        if mine_home and mine_away:  # derby klubu: rozegrany raz, poza bilansem
+            played += 1
+            home_played += 1
+            derbies += 1
+            continue
+        if not mine_home and not mine_away:  # nie nasz mecz
             continue
         mine, theirs = (sh, sa) if mine_home else (sa, sh)
         played += 1
@@ -152,15 +165,17 @@ def team_record(matches: Iterable[dict], is_mine: Callable[[str, dict], bool]) -
         detail.append(code)
         form.append(MR.basic_result(code) or "D")
     wins, losses = rec["w"] + rec["wk"], rec["l"] + rec["lk"]
+    scored = played - derbies  # mecze z bilansem (bez derbów klubu)
     return {
         "played": played, "wins": wins, "draws": draws, "losses": losses,
+        "derbies": derbies,
         "wins_regular": rec["w"], "wins_shootout": rec["wk"],
         "losses_shootout": rec["lk"], "losses_regular": rec["l"],
         "record": rec,
         "goals_for": gf, "goals_against": ga, "goal_difference": gf - ga,
-        "avg_goals_for": round(gf / played, 2) if played else None,
-        "avg_goals_against": round(ga / played, 2) if played else None,
-        "win_rate": round(wins / played, 3) if played else None,
+        "avg_goals_for": round(gf / scored, 2) if scored else None,
+        "avg_goals_against": round(ga / scored, 2) if scored else None,
+        "win_rate": round(wins / scored, 3) if scored else None,
         "home_played": home_played, "away_played": away_played,
         "form": form[-5:],
         "form_detail": detail[-5:],

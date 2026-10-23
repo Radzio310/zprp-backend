@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from app.person_names import names_match as _person_names_match
+from app.zprp_public.referee_placeholder import is_placeholder_name
 
 #: Gniazda protokołu, którymi wolno się wymieniać, wraz z nazwą pola w
 #: formularzu ZPRP `zawody_UstawSedziow.php`.
@@ -255,6 +256,9 @@ def slots_held_by(
     wanted_id = str(judge_id or "").strip()
     out: List[str] = []
     for slot, (id_field, name_field) in SLOT_STATE_FIELDS.items():
+        # „--- ---" to puste gniazdo (placeholder ZPRP), także z numerem - nikogo tu nie ma.
+        if is_placeholder_name((state or {}).get(name_field)):
+            continue
         raw_id = str((state or {}).get(id_field) or "").strip()
         if raw_id:
             if wanted_id and raw_id == wanted_id:

@@ -85,6 +85,16 @@ def test_pusty_napis_w_czasie_to_zero_jak_number():
     assert AR.timeout_seconds(None) is None
 
 
+def test_placeholder_z_numerem_to_puste_pole():
+    """„--- ---" z numerem (np. 1107) nie jest sędzią - jak w toSlim.ts."""
+    row = {"Id": "1", "NrSedzia_pierwszy": "465", "NrSedzia_pierwszy_nazwisko": "BLOCH Wojciech",
+           "NrSedzia_drugi": "1107", "NrSedzia_drugi_nazwisko": "--- ---",
+           "NrSedzia_czas": "2002", "NrSedzia_czas_nazwisko": ""}
+    slim = AR.to_slim(row, origin="district")
+    assert slim["refs"] == {"first": "465", "timer": "2002"}
+    assert slim["refNames"] == {"first": "Wojciech Bloch"}
+
+
 def test_nazwisko_i_numer_sedziego():
     assert AR.pretty_person_name("KOWALSKA-NOWAK Anna Maria") == "Anna Maria Kowalska-Nowak"
     assert AR.pretty_person_name("ŁUCZAK Jan") == "Jan Łuczak"

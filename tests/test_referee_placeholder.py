@@ -86,17 +86,33 @@ def test_czyszczenie_slownika_meczu_tylko_obecne_klucze():
     assert RP.clean_match_officials({"match_id": "m"}) == {"match_id": "m"}
 
 
-def test_obsada_strony_meczu_wolne_miejsce():
-    one = RP.officials_with_vacancies({"referee_1_id": "r1", "referee_1_name": "A", "referee_2_id": "999",
-                                       "referee_2_name": "--- ---", "delegate_1_name": "D"})
-    assert one == [{"role": "Sędzia", "id": "r1", "name": "A"},
-                   {"role": "Sędzia", "id": None, "name": None, "vacant": True},
-                   {"role": "Delegat", "id": None, "name": "D"}]
-    pair = RP.officials_with_vacancies({"referee_1_id": "r1", "referee_1_name": "A", "referee_2_id": "r2", "referee_2_name": "B"})
-    assert [o.get("vacant") for o in pair] == [None, None]
-    assert RP.officials_with_vacancies({"referee_1_name": "--- ---", "referee_2_name": ""}) == []   # nic nie wyznaczono
-    only_table = RP.officials_with_vacancies({"secretary_name": "S"})
-    assert only_table[0] == {"role": "Sędzia", "id": None, "name": None, "vacant": True} and len(only_table) == 2
+def test_obsada_strony_meczu_placeholder_jak_puste_pole():
+    # „--- ---" to puste pole: znika, bez wolnego miejsca i napisu „brak obsady".
+    one = RP.match_officials({"referee_1_id": "r1", "referee_1_name": "A", "referee_2_id": "999",
+                              "referee_2_name": "--- ---", "delegate_1_name": "D"})
+    assert one == [{"role": "Sędzia", "id": "r1", "name": "A"}, {"role": "Delegat", "id": None, "name": "D"}]
+    assert all("vacant" not in o for o in one)
+    pair = RP.match_officials({"referee_1_id": "r1", "referee_1_name": "A", "referee_2_id": "r2", "referee_2_name": "B"})
+    assert [o["name"] for o in pair] == ["A", "B"]
+    assert RP.match_officials({"referee_1_name": "--- ---", "referee_2_name": ""}) == []
+    assert RP.match_officials({"secretary_name": "S"}) == [{"role": "Sekretarz", "id": None, "name": "S"}]
+
+
+def test_lista_sedziow_okregu_bez_placeholdera():
+    """„Para z: --- ---" i wiersz „--- ---" na liście ZPRP to puste pole, nie osoba."""
+    from app.zprp.officials import _normalize_partner_name, _parse_officials_page
+
+    assert _normalize_partner_name("--- ---") == "" and _normalize_partner_name("-- --") == ""
+    assert _normalize_partner_name("KASZNIA Wojciech") == "Wojciech Kasznia"
+
+    def row(nr, name):
+        return (f"<tr><td title='{nr}'>1.</td><td></td><td>{name}</td><td>Katowice</td>"
+                f"<td></td><td></td><td>Sędzia<br>Para z : --- ---</td><td></td></tr>")
+
+    html = "<table id='tabelka'>" + row("465", "BLOCH Wojciech") + row("1107", "--- ---") + "</table>"
+    parsed = _parse_officials_page(html)
+    assert list(parsed["officials"]) == ["465"]
+    assert parsed["officials"]["465"]["partner"] == ""
 
 
 def test_para_bez_placeholdera_i_licznik_meczow_bez_partnera():

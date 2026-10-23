@@ -29,6 +29,7 @@ from sqlalchemy import select
 from app.proel_elevation import verify_elevation_token
 from app.person_names import split_name
 from app.proel_fields import ALL_ROLES, same_judge_number
+from app.zprp_public import referee_placeholder as RP
 
 #: Aktor, który NIE deklaruje numeru sędziego - konto ProEl albo samo urządzenie.
 #:
@@ -401,15 +402,13 @@ def names_match(a: Any, b: Any) -> bool:
     return ta.issubset(tb) or tb.issubset(ta)
 
 
-#: Czym API ZPRP wypełnia NIEOBSADZONE role: „--- ---", „---", myślnik, kropka.
-#: Port `isBlankRefereeName` z BAZA/utils/refereeName.ts.
-_PLACEHOLDER_RE = re.compile(r"^[\s\-\u2013\u2014_.\u00b7\u2022]+$")
-
-
 def clean_person_name(value: Any) -> str:
-    """Nazwisko z obsady - pusty string, gdy to w istocie pusty slot."""
+    """Nazwisko z obsady - pusty string, gdy to w istocie pusty slot.
+
+    Czym API ZPRP wypełnia NIEOBSADZONE role („--- ---", „---", myślnik, kropka,
+    „brak") rozstrzyga jedna reguła: `referee_placeholder.is_blank_name`."""
     v = _clean(value)
-    return "" if not v or _PLACEHOLDER_RE.match(v) else v
+    return "" if RP.is_blank_name(v) else v
 
 
 def clean_judge_number(value: Any) -> str:
@@ -423,11 +422,8 @@ def clean_judge_number(value: Any) -> str:
     błąd widziany z dwóch stron.
     """
     v = _clean(value)
-    if not v or _PLACEHOLDER_RE.match(v):
-        return ""
-    if v.isdigit() and not v.lstrip("0"):
-        return ""
-    return v
+    # Pusto, same zera, same kreski albo znany wspólny numer placeholdera ZPRP.
+    return "" if RP.is_placeholder_id(v) else v
 
 
 def official_name(raw: Any) -> str:
@@ -438,8 +434,13 @@ def official_name(raw: Any) -> str:
 
 
 def official_judge_id(raw: Any) -> str:
-    """Numer sędziego z wpisu obsady."""
+    """Numer sędziego z wpisu obsady.
+
+    Wpis z nazwiskiem „--- ---" to PUSTE POLE (decyzja właściciela 23.10.2026),
+    także gdy ZPRP dał mu numer - taki numer nikomu nie daje roli."""
     if isinstance(raw, dict):
+        if RP.is_placeholder_name(raw.get("name") or raw.get("fullName")):
+            return ""
         return clean_judge_number(raw.get("judgeId") or raw.get("judge_id"))
     return ""
 
