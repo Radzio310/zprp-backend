@@ -4,6 +4,7 @@ import json
 import unicodedata
 
 from app.board_rules import COMMITTEE_BADGES
+from app.zprp_public.referee_placeholder import is_placeholder_name
 
 
 # Osobny koszyk administracyjny dla par złożonych z sędziów dwóch okręgów.
@@ -25,11 +26,18 @@ def json_value(value, fallback):
     return value if isinstance(value, type(fallback)) else fallback
 
 
+def state_ref(state, key):
+    """Numer z gniazda obsady; „--- ---" (placeholder ZPRP) to puste pole, także z numerem."""
+    if is_placeholder_name((state or {}).get(f"{key}_nazwisko")):
+        return ""
+    return str((state or {}).get(key) or "").strip()
+
+
 def pair_matches(judge_ids, state):
     """No surname fallback: unknown identity never grants access."""
     judge_ids = json_value(judge_ids, [])
     state = json_value(state, {})
-    refs = {str(state.get(key) or "").strip() for key in ("NrSedzia_pierwszy", "NrSedzia_drugi")}
+    refs = {state_ref(state, key) for key in ("NrSedzia_pierwszy", "NrSedzia_drugi")}
     return len(set(judge_ids)) == 2 and "" not in refs and refs == set(judge_ids)
 
 

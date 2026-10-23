@@ -158,6 +158,8 @@ def summarize(
         "by_competition": sorted(comps.values(), key=lambda e: (-e["matches"], e["name"] or "")),
         "by_category": [{"category": k, "matches": n} for k, n in cats.most_common()],
         "partners": sorted(partners.values(), key=lambda e: (-e["matches"], e["name"]))[:5],
+        # Tylko dla zgodności API (starsze klienty); portal tej liczby już nie pokazuje -
+        # placeholder to puste pole, nie „mecz bez partnera".
         "no_partner_matches": solo,
         "venues": sorted(venues.values(), key=lambda v: (-v["matches"], v["name"]))[:30],
         "venues_count": len(venues),

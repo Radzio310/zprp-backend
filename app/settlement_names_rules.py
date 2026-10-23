@@ -23,6 +23,7 @@ from typing import Any, Iterable, Optional
 
 from app.settlement_engine import split_judge_name
 from app.settlement_venues import _records, pretty_city
+from app.zprp_public.referee_placeholder import is_blank_name
 
 #: Gniazda obsady w odpowiedzi API (pola `NrSedzia_<gniazdo>`).
 SLOTS = ("pierwszy", "drugi", "sekretarz", "czas", "delegat", "delegat2")
@@ -35,9 +36,10 @@ def _s(value: Any) -> str:
 
 
 def is_missing_name(name: Any, judge_id: Any = "") -> bool:
-    """Brak nazwiska: pusto, sam numer albo numer sedziego zamiast nazwiska."""
+    """Brak nazwiska: pusto, sam numer, numer sedziego zamiast nazwiska albo
+    placeholder ZPRP („--- ---" to puste pole, nie nazwisko)."""
     text = _s(name)
-    return not text or text.isdigit() or text == _s(judge_id)
+    return not text or text.isdigit() or text == _s(judge_id) or is_blank_name(text)
 
 
 def given_first(name: Any) -> str:

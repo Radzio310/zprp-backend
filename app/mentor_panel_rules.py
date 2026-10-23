@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.mentoring_rules import CROSS_PROVINCE, PROGRAM_2028, may_manage
+from app.zprp_public.referee_placeholder import is_blank_name
 
 # ─── Drobne ─────────────────────────────────────────────────────────────────
 
@@ -655,7 +656,8 @@ def card_from_state(match_id: Any, state: Mapping[str, Any], match_at: Any = Non
                  "score": _int_or_none(state.get("wynik_bramki_gosc") or state.get("wynik_gosc_full"))},
         "halftime": f"{ht_h}:{ht_a}" if ht_h is not None and ht_a is not None else None,
         "venue_city": state.get("Hala_miasto"), "match_code": state.get("RozgrywkiCode"),
-        "delegate_name": state.get("NrSedzia_delegat_nazwisko"), "stream_url": state.get("transmisja") or None,
+        "delegate_name": None if is_blank_name(state.get("NrSedzia_delegat_nazwisko")) else state.get("NrSedzia_delegat_nazwisko"),
+        "stream_url": state.get("transmisja") or None,
         "source": "province",
     })
     return card

@@ -37,11 +37,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from app.settlement_rates import is_test_competition
+from app.zprp_public.referee_placeholder import is_blank_name, is_placeholder_name as is_marked_empty
 
 #: Wersja kształtu meczu w archiwum. Podbicie = przebudowa wszystkich sezonów.
-ARCHIVE_SCHEMA = 1
+ARCHIVE_SCHEMA = 2  # 2: "--- ---" jako puste pole - archiwa zbudowane wczesniej przebuduja sie same
 #: `CACHE_SCHEMA` z `utils/province-stats/statsCache.ts` - ekran odrzuca inny.
-CLIENT_SCHEMA = 2
+CLIENT_SCHEMA = 3
 
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -181,8 +182,8 @@ def strip_diacritics(text: str) -> str:
 
 
 def is_placeholder_name(raw: Any) -> bool:
-    text = js_str(raw)
-    return not text or bool(re.fullmatch(r"[-\s—–_.]*", text))
+    """Puste albo znacznik ZPRP („--- ---", „brak") - jedna reguła z portalem i toSlim.ts."""
+    return is_blank_name(js_str(raw))
 
 
 def clean_ref_id(raw: Any) -> Optional[str]:
@@ -364,7 +365,8 @@ def to_slim(row: dict, *, origin: str, round_name: str = "", series: str = "") -
     for role, field in ROLE_FIELD.items():
         judge = clean_ref_id(row.get(field))
         raw_name = js_str(row.get(f"{field}_nazwisko"))
-        if judge:
+        # „--- ---" to puste pole, także z numerem (np. 1107) - nikt nie sędziował.
+        if judge and not is_marked_empty(raw_name):
             refs[role] = judge
         if not is_placeholder_name(raw_name):
             ref_names[role] = pretty_person_name(raw_name)

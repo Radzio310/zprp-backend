@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from sqlalchemy import and_, func, or_, select, text, update
 
 from app import mentor_panel_rules as R
+from app.mentoring_rules import state_ref
 from app.db import (
     database,
     delegate_evaluations,
@@ -428,7 +429,7 @@ async def _province_cards(a: str, b: str) -> List[Dict[str, Any]]:
         if match_id in seen:
             continue
         state = R.json_value(r.get("state_json"), {})
-        if not R.pair_refs_match((a, b), state.get("NrSedzia_pierwszy"), state.get("NrSedzia_drugi")):
+        if not R.pair_refs_match((a, b), state_ref(state, "NrSedzia_pierwszy"), state_ref(state, "NrSedzia_drugi")):
             continue
         seen.add(match_id)
         out.append(R.card_from_state(match_id, state, r.get("match_at")))

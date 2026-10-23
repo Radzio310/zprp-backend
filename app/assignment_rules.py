@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping, Optional
 
 from app import settlement_rates as R
+from app.zprp_public.referee_placeholder import is_placeholder_name
 
 #: Gniazda obsady w kolejności, w jakiej pokazuje je formularz ZPRP.
 FIELD_SLOTS = ("pierwszy", "drugi")
@@ -128,11 +129,15 @@ def slot_person(state: Mapping[str, Any], slot: str) -> Optional[dict[str, str]]
     Kto stoi w gnieździe: numer i nazwisko, albo None.
 
     ⚠ „0" to PUSTE GNIAZDO, nie sędzia - tak ZPRP zapisuje zdjęta obsadę.
+    ⚠ „--- ---" (i inne znaczniki ZPRP) to też PUSTE GNIAZDO, nawet z numerem -
+    decyzja właściciela z 23.10.2026: placeholder jest równoznaczny z pustym polem.
     Nazwisko bez numeru też jest człowiekiem: terminarz podaje same nazwiska,
     numery dochodzą dopiero z publicznego API.
     """
     number = _s(state.get(f"NrSedzia_{slot}"))
     name = _s(state.get(f"NrSedzia_{slot}_nazwisko"))
+    if is_placeholder_name(name):
+        return None
     if number in ("", "0") and not name:
         return None
     return {"number": "" if number == "0" else number, "name": name}

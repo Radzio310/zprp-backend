@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from app.deps import get_settings, Settings, get_rsa_keys
 from app.proel_auth import APPROVE_ROLES as _APPROVE_ROLES
 from app.proel_fields import same_judge_number
+from app.zprp_public import referee_placeholder as RP
 
 router = APIRouter()
 
@@ -176,8 +177,11 @@ def _roles_for(match: Dict[str, Any], judge_id: str) -> List[str]:
     (ta sama reguła co w `BAZA/utils/matchRole.ts`).
     """
     out: List[str] = []
-    for role, id_keys, _ in ROLE_KEYS:
-        for key in id_keys:
+    for role, id_keys, name_keys in ROLE_KEYS:
+        for idx, key in enumerate(id_keys):
+            # „--- ---" to puste pole, także z numerem - nikomu nie daje roli.
+            if idx < len(name_keys) and RP.is_placeholder_name(match.get(name_keys[idx])):
+                continue
             # Zapis numeru nie moze decydowac o roli: obsada z publicznego API
             # i profil z logowania potrafia roznic sie zerem wiodacym, a skutkiem
             # bylby sedzia z obsady slyszacy "tego konta nie ma w obsadzie".
@@ -248,10 +252,12 @@ def _authorized_crew(match: Dict[str, Any]) -> List[Dict[str, str]]:
             continue
         for idx, key in enumerate(id_keys):
             nr = _clean(match.get(key))
-            if not nr or nr in seen:
+            if RP.is_placeholder_id(nr) or nr in seen:
                 continue
-            seen.add(nr)
             name_key = name_keys[idx] if idx < len(name_keys) else ""
+            if name_key and RP.is_placeholder_name(match.get(name_key)):
+                continue  # „--- ---" to puste pole, nie osoba z obsady
+            seen.add(nr)
             out.append(
                 {
                     "role": role,
@@ -273,7 +279,7 @@ def _delegate_name(match: Dict[str, Any]) -> str:
     """
     for key in ("NrSedzia_delegat_nazwisko", "NrSedzia_delegat2_nazwisko"):
         name = _clean(match.get(key))
-        if name and name != "--- ---":
+        if not RP.is_blank_name(name):
             return name
     return ""
 
@@ -284,7 +290,7 @@ def _name_for(match: Dict[str, Any], roles: List[str]) -> str:
             continue
         for key in name_keys:
             name = _clean(match.get(key))
-            if name:
+            if not RP.is_blank_name(name):
                 return name
     return ""
 

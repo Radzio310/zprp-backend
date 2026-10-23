@@ -168,6 +168,16 @@ def test_zero_w_numerze_to_pusty_slot():
     assert clean_judge_number("0444") == "0444"
 
 
+def test_placeholder_z_numerem_to_pusty_slot():
+    """„--- ---" z prawdziwym numerem (np. 1107) to puste pole - numer nie daje roli."""
+    from app.proel_auth import official_judge_id
+
+    assert official_judge_id({"name": "--- ---", "judgeId": "1107"}) == ""
+    assert official_judge_id({"fullName": "brak", "judgeId": "1107"}) == ""
+    assert official_judge_id({"name": "", "judgeId": "1107"}) == "1107"
+    assert official_judge_id({"name": "KOWALSKI Jan", "judgeId": "1107"}) == "1107"
+
+
 def test_placeholder_delegata_nie_odbiera_nikomu_zatwierdzenia():
     """DOKLADNIE ten przypadek zapalal przycisk i odmawial po dotknieciu.
 
