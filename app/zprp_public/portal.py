@@ -761,7 +761,6 @@ async def match_refresh(match_id: str) -> dict[str, Any]:
     return await refresh_match(match_id)
 
 
-@router.get("/matches/{match_id}/overview")
 async def _venue_payload(m: dict) -> dict[str, Any]:
     """Hala meczu; `lat`/`lon` tylko z adresu hali (geokoder ulic, `coords_precision:
     "address"`) - bez niego puste, klient bierze punkt miasta z /venues/{key} albo /map."""
@@ -773,6 +772,7 @@ async def _venue_payload(m: dict) -> dict[str, Any]:
     return venue
 
 
+@router.get("/matches/{match_id}/overview")
 async def match_overview(match_id: str) -> dict[str, Any]:
     match = await database.fetch_one(select(M).where(M.c.match_id == match_id))
     if not match:

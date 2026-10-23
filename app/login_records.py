@@ -72,7 +72,6 @@ def _row_to_login_item(row) -> LoginRecordItem:
     return LoginRecordItem(**d)
 
 
-@router.post("/", response_model=dict, summary="Upsert ostatniego logowania")
 def _clean_name(value) -> str:
     return " ".join(str(value or "").split()) or "Nowy sędzia"
 
@@ -93,6 +92,7 @@ def _new_user_body(full_name, province, app_version) -> str:
     return " · ".join(parts)
 
 
+@router.post("/", response_model=dict, summary="Upsert ostatniego logowania")
 async def upsert_login(req: CreateLoginRecordRequest):
     """
     - Zawsze nadpisuje: full_name, last_login_at
