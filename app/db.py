@@ -4585,6 +4585,10 @@ from app.zprp_public_tables import define_tables as _define_zprp_public_tables
 from app.zprp_public_geocode_tables import define_tables as _define_zprp_public_geocode_tables
 
 zprp_public_geocode_cache = _define_zprp_public_geocode_tables(metadata)
+# Adresy hal (ulica) z tego samego geokodera - pinezka na hali, nie w środku miasta.
+from app.zprp_public_geocode_tables import define_venue_table as _define_zprp_public_venue_geocode_table
+
+zprp_public_venue_geocode_cache = _define_zprp_public_venue_geocode_table(metadata)
 
 # Funkcje produktowe BAZA pod RĘKĄ: raporty, sesje klubowe i Talenty.
 from app.pod_reka_tables import define_tables as _define_pod_reka_tables

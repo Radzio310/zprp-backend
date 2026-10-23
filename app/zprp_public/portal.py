@@ -762,6 +762,17 @@ async def match_refresh(match_id: str) -> dict[str, Any]:
 
 
 @router.get("/matches/{match_id}/overview")
+async def _venue_payload(m: dict) -> dict[str, Any]:
+    """Hala meczu; `lat`/`lon` tylko z adresu hali (geokoder ulic, `coords_precision:
+    "address"`) - bez niego puste, klient bierze punkt miasta z /venues/{key} albo /map."""
+    venue: dict[str, Any] = {k: m.get(f"venue_{k}") for k in ("name", "city", "street", "number", "capacity")}
+    city = R.display_city(venue["city"]) if venue.get("city") else None
+    exact = await geocode.venue_point(city, venue.get("street"), venue.get("number")) if city else None
+    venue["lat"], venue["lon"] = (exact["lat"], exact["lon"]) if exact else (None, None)
+    venue["coords_precision"] = "address" if exact else None
+    return venue
+
+
 async def match_overview(match_id: str) -> dict[str, Any]:
     match = await database.fetch_one(select(M).where(M.c.match_id == match_id))
     if not match:
@@ -847,7 +858,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         )[:5]
     team_ids = [t for t in (m.get("home_team_id"), m.get("away_team_id")) if t]
     standing = [r for r in await _standing_rows(team_ids, m.get("season_id")) if r["competition_id"] == m.get("competition_id")]
-    officials = RP.officials_with_vacancies(m)
+    officials = RP.match_officials(m)
     status = _status(m)
     m["times_source"] = await attach_protocol_times(m, [p for side_list in lineups.values() for p in side_list], staff_items)
     return {
@@ -855,7 +866,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         "status": status,
         "home": side("home"),
         "away": side("away"),
-        "venue": {k: m.get(f"venue_{k}") for k in ("name", "city", "street", "number", "capacity")},
+        "venue": await _venue_payload(m),
         "officials": officials,
         "lineups": lineups,
         # False = źródło nie podało bramek zawodników (front pokazuje "brak danych", nie 0).

@@ -402,10 +402,14 @@ async def venues(q: str = "", limit: int = Query(100, ge=1, le=500), offset: int
     items.sort(key=lambda v: (-v["matches"], v["name"]))
     page = items[offset: offset + limit]
     # Punkt MIASTA hali (ta sama funkcja co /venues/{key} i atlasy) - hala bez adresu
-    # na mapie stoi w swoim mieście; `lat`/`lon` zostają puste (to nie adres hali).
+    # na mapie stoi w swoim mieście. `lat`/`lon` tylko z adresu hali (geokoder ulic,
+    # `coords_precision: "address"`); bez niego puste (punkt miasta to nie hala).
     coords = {city: await _geocode(city) for city in {v["city"] for v in page if v.get("city")}}
     for v in page:
         v["city_lat"], v["city_lon"] = coords.get(v.get("city"), (None, None))
+        exact = await geocode.venue_point(v.get("city"), v.get("street"), v.get("number"))
+        v["lat"], v["lon"] = (exact["lat"], exact["lon"]) if exact else (None, None)
+        v["coords_precision"] = "address" if exact else ("city" if v["city_lat"] is not None else None)
     return {"items": page, "limit": limit, "offset": offset, "count": len(items)}
 
 
@@ -434,10 +438,13 @@ async def venue_details(key: str) -> dict[str, Any]:
          "matches": n}
         for cid, n in home_clubs.most_common(20)
     ]
-    lat, lon = await _geocode(venue["city"])
+    # Adres hali (geokoder ulic), a bez niego punkt miasta - `coords_precision` mówi, który.
+    exact = await geocode.venue_point(venue["city"], venue["street"], venue["number"])
+    lat, lon = (exact["lat"], exact["lon"]) if exact else await _geocode(venue["city"])
+    precision = "address" if exact else ("city" if lat is not None else None)
     return {
         "key": key, "name": venue["name"], "city": venue["city"], "street": venue["street"], "number": venue["number"],
-        "lat": lat, "lon": lon, "coords_precision": "city" if lat is not None else None,
+        "lat": lat, "lon": lon, "coords_precision": precision,
         "capacity": venue["capacity"], "matches": venue["matches"],
         "clubs": clubs, "today": today, "week": week,
         "attendance_records": [
