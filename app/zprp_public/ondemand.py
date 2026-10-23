@@ -5,6 +5,8 @@ Funkcje czyste (``is_finished``, ``needs_details``, ``backfill_sort_key``,
 """
 from __future__ import annotations
 
+from app.zprp_details import details_path
+
 import asyncio
 import logging
 import os
@@ -174,7 +176,7 @@ async def _refresh_header(match_id: str, existing: Any) -> bool:
     from app.zprp_public.sync import _match_values
     from app.db import zprp_public_matches as M
 
-    payload = await _get_client().get(f"pokaz_mecze_szczegoly.php?Zawody={match_id}")
+    payload = await _get_client().get(await details_path(match_id))
     header: dict[str, Any] = {}
     if isinstance(payload, dict):
         zero = payload.get("0")

@@ -153,8 +153,7 @@ async def test_ustalanie_okregu_uzywa_odpornego_pobieracza(monkeypatch):
 
     assert await fetch_match_province("209643") == "SLASKIE"
     client.get.assert_awaited_once_with(
-        "https://rozgrywki.zprp.pl/api/pokaz_mecze_szczegoly.php",
-        params={"Zawody": "209643"},
+        "https://rozgrywki.zprp.pl/api/pokaz_mecze_szczegoly.php?Zawody=209643&ProEl=ToKeN135@$",
         timeout=12.0,
     )
 

@@ -45,6 +45,7 @@ def _upstream(status: int, data: dict):
 
 def _req(**over):
     base = dict(
+        baseline_seen=True,
         hash_sesji="abc123",
         id_zawody=208136,
         komentarz="Zawodnik nr 7 opuścił boisko bez zgody sędziego.",

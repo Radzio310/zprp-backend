@@ -229,6 +229,20 @@ async def generate_pin_hash(req: GenerateHashRequest):
     hashed = bcrypt.hashpw(req.pin.encode("utf-8"), bcrypt.gensalt())
     return GenerateHashResponse(hash=hashed.decode("utf-8"))
 
+@router.get("/zprp/details-suffix", summary="Dopisek do pokaz_mecze_szczegoly")
+async def admin_get_details_suffix():
+    from app.zprp_details import zprp_details_suffix
+
+    return {"suffix": await zprp_details_suffix()}
+
+
+@router.put("/zprp/details-suffix", summary="Ustaw dopisek (pusty = domyślny)")
+async def admin_put_details_suffix(body: dict):
+    from app.zprp_details import save_suffix
+
+    return {"suffix": await save_suffix((body or {}).get("suffix"))}
+
+
 @router.get("/admins", response_model=ListAdminsResponse, summary="Pobierz listę ID adminów")
 async def get_admins():
     row = await database.fetch_one(select(admin_settings).limit(1))

@@ -26,6 +26,8 @@
 
 from __future__ import annotations
 
+from app.zprp_details import details_url
+
 import asyncio
 import logging
 from typing import Any, Dict, FrozenSet, Optional
@@ -106,8 +108,7 @@ async def fetch_match_province(match_id: Any, *, timeout: float = 12.0) -> str:
             for attempt in range(3):
                 try:
                     response = await client.get(
-                        DETAILS_URL,
-                        params={"Zawody": mid},
+                        await details_url(mid),
                         timeout=timeout,
                     )
                 except Exception:

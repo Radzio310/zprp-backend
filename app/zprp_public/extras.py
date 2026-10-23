@@ -8,6 +8,8 @@ Prefiks jak reszta publicznego API (`/api/v1/handball`). Logika w
 
 from __future__ import annotations
 
+from app.zprp_details import details_url
+
 import asyncio
 import re
 import time
@@ -109,7 +111,7 @@ async def _fetch_attachments(match_id: str) -> list[dict]:
     from app import zprp_hidden_attachments as ledger
 
     async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "BAZA-PodReka/1.0"}) as client:
-        resp = await client.get(_DETAILS_URL, params={"Zawody": match_id})
+        resp = await client.get(await details_url(match_id))
     if resp.status_code != 200:
         raise HTTPException(502, "Rozgrywki ZPRP nie odpowiadają")
     match = ledger.match_from_details(resp.json()) or {}

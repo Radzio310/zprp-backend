@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+from app.zprp_details import details_url
+
 import asyncio
 import logging
 import os
@@ -1045,6 +1047,10 @@ class ZprpMatchCommentRequest(BaseModel):
     #: (`app/zprp_comment_rules.py`). Brak (starsza aplikacja) = uwagi
     #: w ramach pełnych danych, jak dotąd.
     purpose: Optional[str] = None
+    #: Nowa aplikacja czyta stan z ZPRP przed zapisem i wysyła true (zachowanie
+    #: bez zmian). Stara go nie zna: serwer scala wtedy tekst ze stanem w ZPRP
+    #: i nigdy nie kasuje istniejących uwag.
+    baseline_seen: bool = False
 
 
 async def submit_match_comment(payload: ZprpMatchCommentRequest) -> Dict[str, Any]:
@@ -1067,11 +1073,46 @@ async def submit_match_comment(payload: ZprpMatchCommentRequest) -> Dict[str, An
         "komentarz": payload.komentarz if payload.komentarz is not None else "",
     }
 
+    merged = False
     async with match_write_lock(_match_lock_key(payload.id_zawody, hash_sesji)):
+        if not payload.baseline_seen:
+            # Stary build nie czytał stanu przed zapisem: jego (często pusty)
+            # tekst nie może nadpisać uwag stojących w ZPRP. Scalamy po stronie
+            # serwera, a gdy nie umiemy odczytać stanu - nie zapisujemy na ślepo.
+            from app.zprp_comment_rules import merge_comment_additive
+
+            match = await _fetch_match_details(int(payload.id_zawody))
+            if match is None or "komentarz" not in match:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "code": "COMMENT_READ_FAILED",
+                        "message": "Nie udało się odczytać aktualnych uwag z ZPRP - zapis wstrzymany, żeby ich nie nadpisać.",
+                    },
+                )
+            current = str(match.get("komentarz") or "")
+            desired = merge_comment_additive(current, upstream_payload["komentarz"])
+            merged = True
+            same = lambda t: str(t or "").replace(chr(13) + chr(10), chr(10)).strip()  # noqa: E731
+            if same(desired) == same(current):
+                return {
+                    "status": "success",
+                    "message": "",
+                    "unchanged": True,
+                    "merged": True,
+                    "_text": current,
+                }
+            upstream_payload["komentarz"] = desired
         status, data = await _call_upstream("match_comment.php", upstream_payload)
 
     if status == 200 and str(data.get("status") or "").lower() == "success":
-        return {"status": "success", "message": str(data.get("message") or "")}
+        _details_cache_clear(int(payload.id_zawody))
+        return {
+            "status": "success",
+            "message": str(data.get("message") or ""),
+            "merged": merged,
+            "_text": upstream_payload["komentarz"],
+        }
 
     if status == 401:
         raise HTTPException(
@@ -1132,9 +1173,15 @@ async def zprp_match_comment(
     x_elevation: Optional[str] = Header(None),
 ):
     out = await submit_match_comment(payload)
+    sent_text = out.pop("_text", payload.komentarz)
     # Samodzielny dopisek raportu ma własne zdarzenie - inaczej dziennik
     # składał go w „przerwaną wysyłkę pełnych danych" (LCK/17).
-    event, details = comment_journal_event(payload.purpose, payload.komentarz)
+    event, details = comment_journal_event(payload.purpose, sent_text)
+    details["baselineSeen"] = bool(payload.baseline_seen)
+    if out.get("merged"):
+        details["merged"] = True
+        details["incomingLength"] = len(payload.komentarz or "")
+        details["unchanged"] = bool(out.get("unchanged"))
     _journal_send_later(
         event,
         id_zawody=payload.id_zawody,
@@ -1465,7 +1512,7 @@ async def _fetch_match_details(zprp_match_id: int) -> Optional[Dict[str, Any]]:
 
     try:
         resp = await _upstream_client().get(
-            _DETAILS_URL, params={"Zawody": str(zprp_match_id)}
+            await details_url(zprp_match_id)
         )
         if resp.status_code != 200:
             return None

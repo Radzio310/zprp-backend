@@ -114,6 +114,37 @@ def fit_comment_limit(text: Any, limit: int = LEGACY_COMMENT_LIMIT) -> Tuple[str
     return (compose(body, block) if body else block), True
 
 
+def _contains(haystack: str, needle: str) -> bool:
+    flat = lambda t: " ".join(_unix(t).split())  # noqa: E731
+    return bool(flat(needle)) and flat(needle) in flat(haystack)
+
+
+def merge_comment_additive(current: Any, incoming: Any) -> str:
+    """Scala przychodzące uwagi z tym, co stoi w ZPRP - niczego nie kasuje.
+
+    Dla starego buildu, który nie czytał stanu przed zapisem (`baseline_seen`
+    brak): jego tekst bywa pusty albo okrojony, więc NIE jest poleceniem
+    skasowania. Reguły:
+      * verte z ZPRP zostaje zawsze; przychodzące verte dochodzi tylko, gdy
+        jeszcze go tam nie ma (jeśli zawiera obecne - bierzemy dłuższe),
+      * ramka raportu z przychodzącego podmienia stojącą, a bez niej stoi
+        dotychczasowa.
+    """
+    cur = _unix(current)
+    inc = _unix(incoming)
+    cur_body = strip_extra_blocks(cur).strip()
+    inc_body = strip_extra_blocks(inc).strip()
+    block = extract_extra_block(inc) or extract_extra_block(cur)
+
+    if not inc_body or _contains(cur_body, inc_body):
+        body = cur_body
+    elif not cur_body or _contains(inc_body, cur_body):
+        body = inc_body
+    else:
+        body = compose(cur_body, inc_body)
+    return compose(body, block) if block else body
+
+
 def comment_journal_event(
     purpose: Optional[str], komentarz: Any
 ) -> Tuple[str, Dict[str, Any]]:

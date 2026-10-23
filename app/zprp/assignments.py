@@ -1796,9 +1796,9 @@ async def _table_official_context(
     public_match: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Authorize a judge-facing table-official edit and locate its ZPRP form."""
+    from app.zprp_details import details_url
     from app.official_role import (
         AUTHORIZED_ROLES,
-        DETAILS_URL,
         _match_from_details_payload,
         _roles_for,
     )
@@ -1811,7 +1811,7 @@ async def _table_official_context(
     if match is None:
         try:
             async with AsyncClient(timeout=30.0) as public:
-                response = await public.get(DETAILS_URL, params={"Zawody": wanted})
+                response = await public.get(await details_url(wanted))
                 response.raise_for_status()
                 public_payload = response.json()
         except HTTPException:
@@ -1895,11 +1895,12 @@ async def _table_official_context(
 
 async def _public_table_match(id_zawody: str) -> Dict[str, Any]:
     """Publiczna obsada pobierana równolegle z logowaniem do panelu ZPRP."""
-    from app.official_role import DETAILS_URL, _match_from_details_payload
+    from app.zprp_details import details_url
+    from app.official_role import _match_from_details_payload
 
     try:
         async with AsyncClient(timeout=30.0) as public:
-            response = await public.get(DETAILS_URL, params={"Zawody": id_zawody})
+            response = await public.get(await details_url(id_zawody))
             response.raise_for_status()
             match = _match_from_details_payload(response.json())
     except HTTPException:

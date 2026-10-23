@@ -23,6 +23,8 @@ zamknięty mecz ma je na zawsze, a przebudowa sezonu bez zmian to sama kaskada.
 
 from __future__ import annotations
 
+from app.zprp_details import details_path
+
 import asyncio
 import gzip
 import json
@@ -333,7 +335,8 @@ async def _stored_matches(province: str, season_id: str) -> Dict[str, dict]:
 
 async def _fetch_details(api: PublicApi, ids: Iterable[str]) -> Dict[str, dict]:
     ids = [match_id for match_id in ids if _s(match_id).isdigit()]
-    payloads = await asyncio.gather(*(api.get(f"pokaz_mecze_szczegoly.php?Zawody={match_id}") for match_id in ids))
+    paths = [await details_path(match_id) for match_id in ids]
+    payloads = await asyncio.gather(*(api.get(path) for path in paths))
     out: Dict[str, dict] = {}
     for match_id, payload in zip(ids, payloads):
         det = AR.details_from_payload(payload)

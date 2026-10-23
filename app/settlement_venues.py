@@ -26,6 +26,8 @@ polaczen - siec dostaje gotowego klienta.
 
 from __future__ import annotations
 
+from app.zprp_details import details_url
+
 import logging
 import re
 from typing import Any, Optional
@@ -129,7 +131,7 @@ async def fetch_details_payload(client: Any, match_id: Any, *, timeout: float = 
     if client is None or not key:
         return None
     try:
-        response = await client.get(DETAILS_URL, params={"Zawody": key}, timeout=timeout)
+        response = await client.get(await details_url(key), timeout=timeout)
         response.raise_for_status()
         return response.json()
     except Exception as exc:

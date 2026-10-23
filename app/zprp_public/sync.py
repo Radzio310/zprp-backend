@@ -8,6 +8,8 @@ małymi partiami.
 
 from __future__ import annotations
 
+from app.zprp_details import details_path
+
 import asyncio
 import logging
 import os
@@ -353,7 +355,7 @@ async def _store_match(item: dict[str, Any], counters: Counters, **context: Any)
 
 
 async def _sync_match_details(client: PublicZprpClient, match_id: str, counters: Counters) -> str:
-    payload = await client.get(f"pokaz_mecze_szczegoly.php?Zawody={match_id}")
+    payload = await client.get(await details_path(match_id))
     header: dict[str, Any] = {}
     if isinstance(payload, dict):
         zero = payload.get("0")

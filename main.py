@@ -296,6 +296,8 @@ app.include_router(edit_router)
 # Przełącznik tokenu ProEl przy meczu. Stoi przy rodzinie akcji ZPRP
 # wykonywanych z poświadczeń sędziego (edycja danych, niedyspozycyjność).
 app.include_router(proel_token_router)
+from app.zprp_details import public_router as zprp_details_router
+app.include_router(zprp_details_router)
 app.include_router(official_role_router)
 app.include_router(edit_photo_router)
 app.include_router(offtime_router)
@@ -1523,6 +1525,11 @@ async def startup():
     # Wydarzenia okręgowe: przypomnienia dobę i godzinę przed oraz ponaglenie
     # o brak odpowiedzi. Przejście w tle z dziennikiem wysyłek, bo zadanie
     # odroczone w pamięci procesu zjadłby restart Railway.
+    # Jednorazowe uzupełnienie pustych uwag w portalu publicznym (po poprawce
+    # dopisku ProEl). Znacznik i kursor w beach_app_settings, lock w Postgresie.
+    from app.zprp_comment_resync import run_comment_resync_once
+    _comment_resync_task = asyncio.create_task(run_comment_resync_once())
+
     from app.province_events import run_event_reminder_sweep
     _province_event_task = asyncio.create_task(run_event_reminder_sweep())
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.zprp_details import details_url
+
 import asyncio
 import hashlib
 import json
@@ -764,10 +766,10 @@ async def _fetch_public_details(
     if retries is None:
         retries = max(0, int(os.getenv("ZPRP_MATCH_MONITOR_DETAIL_RETRIES", "2")))
     retries = max(0, int(retries))
-    url = "https://rozgrywki.zprp.pl/api/pokaz_mecze_szczegoly.php"
+    url = await details_url(match_id)
     for attempt in range(retries + 1):
         try:
-            response = await client.get(url, params={"Zawody": match_id}, timeout=timeout)
+            response = await client.get(url, timeout=timeout)
             if response.status_code in (408, 425, 429, 500, 502, 503, 504) and attempt < retries:
                 await asyncio.sleep(0.4 * (2**attempt))
                 continue

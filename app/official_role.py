@@ -39,6 +39,7 @@ from app.proel_fields import same_judge_number
 
 router = APIRouter()
 
+from app.zprp_details import details_url  # noqa: E402
 DETAILS_URL = "https://rozgrywki.zprp.pl/api/pokaz_mecze_szczegoly.php"
 
 #: Rola → (pola z numerem sędziego, pola z nazwiskiem).
@@ -318,7 +319,7 @@ async def match_official_role(
 
     # ── 2) Czy jesteś w obsadzie: publiczne API rozgrywek ───────────────────
     async with AsyncClient(timeout=30.0) as public:
-        details = await public.get(DETAILS_URL, params={"Zawody": match_id})
+        details = await public.get(await details_url(match_id))
         details.raise_for_status()
         payload = details.json()
 
