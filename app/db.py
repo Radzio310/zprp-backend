@@ -5087,3 +5087,12 @@ try:
     _search_indexes(engine)
 except Exception:  # noqa: BLE001
     pass
+
+# Brak obsady w terminarzu ZPRP ("--- ---" i podobne) jako NULL w istniejacych meczach -
+# idempotentne, partiami, w watku w tle (app/zprp_public/referee_placeholder.py).
+try:
+    from app.zprp_public.referee_placeholder import cleanup_in_background as _referee_placeholders
+
+    _referee_placeholders(engine)
+except Exception:  # noqa: BLE001
+    pass

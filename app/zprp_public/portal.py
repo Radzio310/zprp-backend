@@ -45,6 +45,7 @@ from app.db import (
 from app.national_distance_parser import normalize_city_key
 from app.zprp_public import corrections, geocode, portal_rules as R
 from app.zprp_public import match_rules as MR
+from app.zprp_public import referee_placeholder as RP
 from app.zprp_public import search_rules as SR
 from app.zprp_public.protocol_times import attach_protocol_times
 from app.zprp_public.enrich import attach_standing_records, enrich_matches, seasons_info
@@ -107,6 +108,7 @@ async def _cards(rows: list[Any]) -> list[dict[str, Any]]:
     cards = [_dict(r) for r in rows]
     lookup = await _club_lookup({c.get(k) for c in cards for k in ("home_club_id", "away_club_id")})
     for card in cards:
+        RP.clean_match_officials(card, RP.REFEREE_SLOTS)  # „--- ---" z niesprzątniętych wierszy = brak obsady
         card["status"] = _status(card)
         card["home_logo_url"] = (lookup.get(card.get("home_club_id")) or {}).get("logo_url")
         card["away_logo_url"] = (lookup.get(card.get("away_club_id")) or {}).get("logo_url")
@@ -767,7 +769,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
     details_pending = await ensure_details(match)
     if not details_pending:
         match = await database.fetch_one(select(M).where(M.c.match_id == match_id)) or match
-    m = {k: v for k, v in _dict(match).items() if k not in {"source_hash", "source_json"}}
+    m = RP.clean_match_officials({k: v for k, v in _dict(match).items() if k not in {"source_hash", "source_json"}})
     await corrections.apply_one("match", m)
     await enrich_matches([m])
     clubs = await _club_lookup({m.get("home_club_id"), m.get("away_club_id")})
@@ -845,12 +847,7 @@ async def match_overview(match_id: str) -> dict[str, Any]:
         )[:5]
     team_ids = [t for t in (m.get("home_team_id"), m.get("away_team_id")) if t]
     standing = [r for r in await _standing_rows(team_ids, m.get("season_id")) if r["competition_id"] == m.get("competition_id")]
-    officials = [
-        {"role": label, "id": m.get(f"{col}_id"), "name": m.get(f"{col}_name")}
-        for col, label in (("referee_1", "Sędzia"), ("referee_2", "Sędzia"), ("delegate_1", "Delegat"),
-                           ("delegate_2", "Delegat"), ("secretary", "Sekretarz"), ("timekeeper", "Czas"))
-        if m.get(f"{col}_name")
-    ]
+    officials = RP.officials_with_vacancies(m)
     status = _status(m)
     m["times_source"] = await attach_protocol_times(m, [p for side_list in lineups.values() for p in side_list], staff_items)
     return {
@@ -999,7 +996,8 @@ def note_referee_total(referee_id: str, matches: int) -> None:
 
 async def _build_referee_index() -> list[dict]:
     acc: dict[str, dict] = {}
-    for idc, nmc in (("referee_1_id", "referee_1_name"), ("referee_2_id", "referee_2_name")):
+    marked: dict[str, int] = {}  # mecze numeru przy znaczniku braku obsady („--- ---")
+    for idc, nmc in RP.REFEREE_SLOTS:
         rows = await database.fetch_all(
             select(M.c[idc].label("rid"), M.c[nmc].label("rname"), func.count().label("n"))
             .where(and_(M.c[idc].isnot(None), M.c[idc] != "", M.c[nmc].isnot(None), M.c[nmc] != ""))
@@ -1007,10 +1005,16 @@ async def _build_referee_index() -> list[dict]:
         )
         for r in rows:
             name = _clean_ref_name(r["rname"])
+            if RP.is_placeholder_referee(r["rid"], name) or RP.is_placeholder_id(r["rid"]):
+                marked[r["rid"]] = marked.get(r["rid"], 0) + int(r["n"])
+                continue
             e = acc.setdefault(r["rid"], {"referee_id": r["rid"], "name": name, "matches": 0, "_best": 0})
             e["matches"] += int(r["n"])
             if int(r["n"]) > e["_best"]:
                 e["_best"], e["name"] = int(r["n"]), name
+    # Numer, przy którym znaczniki przeważają (wspólny numer placeholdera), nie jest sędzią.
+    for rid in [rid for rid, e in acc.items() if marked.get(rid, 0) >= e["matches"]]:
+        acc.pop(rid)
     # Suma po nazwiskach gubiła mecze bez nazwiska w terminarzu - liczba meczów z samego id.
     totals = await _referee_match_totals()
     for rid, e in acc.items():

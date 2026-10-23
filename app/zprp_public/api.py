@@ -32,6 +32,7 @@ from app.db import (
     zprp_public_teams,
 )
 from app.zprp_public import corrections, match_rules as MR
+from app.zprp_public.referee_placeholder import clean_match_officials
 from app.zprp_public.protocol_times import attach_protocol_times
 from app.zprp_public.enrich import attach_standing_records, enrich_matches
 from app.zprp_public.ondemand import ensure_details
@@ -70,7 +71,8 @@ def _page(limit: int, offset: int, rows: list[Any]) -> dict[str, Any]:
 def _public_match(row: Any) -> dict[str, Any]:
     """Wspólny, stabilny kształt meczu bez surowego payloadu źródłowego."""
     data = _dict(row)
-    return {key: value for key, value in data.items() if key not in {"source_hash", "source_json"}}
+    # Placeholder ZPRP („--- ---") w obsadzie to brak obsady, nie osoba - także w starych wierszach.
+    return clean_match_officials({key: value for key, value in data.items() if key not in {"source_hash", "source_json"}})
 
 
 async def _decorate_matches(items: list[dict[str, Any]]) -> None:
@@ -674,7 +676,7 @@ async def match_details(match_id: str) -> dict[str, Any]:
             zprp_public_match_staff.c.source_json,
         ).where(zprp_public_match_staff.c.match_id == match_id)
     )
-    public_match = {key: value for key, value in _dict(match).items() if key not in {"source_hash", "source_json"}}
+    public_match = _public_match(match)
     await _decorate_matches([public_match])
     await corrections.apply("player", players)
     staff_items = [MR.staff_view(_dict(row)) for row in staff]

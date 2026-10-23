@@ -16,6 +16,8 @@ import math
 from collections import Counter
 from typing import Any, Callable, Optional
 
+from app.zprp_public import referee_placeholder as RP
+
 ROAD_FACTOR = 1.25  # linia prosta -> droga (średnio dla Polski)
 ALL_SEASONS = "all"  # zakres „Wszystkie”: cała kariera sędziego
 
@@ -64,12 +66,16 @@ def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 def partner_of(row: dict, referee_id: str) -> tuple[Optional[str], Optional[str]]:
-    """Drugi sędzia z pary (id, nazwisko) albo (None, None), gdy sędziował sam."""
+    """Drugi sędzia z pary (id, nazwisko) albo (None, None), gdy sędziował sam.
+
+    Placeholder ZPRP („--- ---", wspólny numer braku obsady) to BRAK partnera, nie osoba."""
     if row.get("referee_1_id") == referee_id:
-        return row.get("referee_2_id") or None, (row.get("referee_2_name") or "").strip() or None
-    if row.get("referee_2_id") == referee_id:
-        return row.get("referee_1_id") or None, (row.get("referee_1_name") or "").strip() or None
-    return None, None
+        pid, pname = row.get("referee_2_id"), row.get("referee_2_name")
+    elif row.get("referee_2_id") == referee_id:
+        pid, pname = row.get("referee_1_id"), row.get("referee_1_name")
+    else:
+        return None, None
+    return RP.clean_official(pid, pname)
 
 
 def _finished(row: dict) -> bool:
@@ -104,9 +110,11 @@ def summarize(
         cats[cat or "Inne"] += 1
 
     partners: dict[str, dict] = {}
+    solo = 0  # mecze bez drugiego sędziego w obsadzie (pusto albo placeholder ZPRP)
     for r in rows:
         pid, pname = partner_of(r, referee_id)
         if not pid and not pname:
+            solo += 1
             continue
         key = pid or f"name:{pname}"
         e = partners.setdefault(key, {"referee_id": pid, "name": clean_name(pname or ""), "matches": 0, "last_at": None})
@@ -150,6 +158,7 @@ def summarize(
         "by_competition": sorted(comps.values(), key=lambda e: (-e["matches"], e["name"] or "")),
         "by_category": [{"category": k, "matches": n} for k, n in cats.most_common()],
         "partners": sorted(partners.values(), key=lambda e: (-e["matches"], e["name"]))[:5],
+        "no_partner_matches": solo,
         "venues": sorted(venues.values(), key=lambda v: (-v["matches"], v["name"]))[:30],
         "venues_count": len(venues),
         "no_city_matches": sum(1 for r in rows if not (r.get("venue_city") or "").strip()),

@@ -36,6 +36,7 @@ from app.db import (
     zprp_public_teams,
 )
 from app.zprp_public import corrections, match_rules as MR, portal_rules as R, referee_stats as RS
+from app.zprp_public import referee_placeholder as RP
 from app.zprp_public.api import _dict
 from app.zprp_public import geocode
 from app.zprp_public.enrich import seasons_info
@@ -826,6 +827,8 @@ async def referee_refresh(referee_id: str) -> dict[str, Any]:
     """Odświeża z ZPRP najbliższe mecze sędziego (maks. 10; limit 2 min na mecz w refresh_match)."""
     from app.zprp_public.ondemand import refresh_match
 
+    if RP.is_placeholder_id(referee_id):  # brak obsady nie ma czego odświeżać
+        return {"checked": 0, "refreshed": 0, "changed": False}
     since = datetime.now(timezone.utc) - timedelta(days=1)
     rows = await database.fetch_all(
         select(M.c.match_id)
@@ -863,15 +866,46 @@ def _who(referee_id: str):
     return or_(M.c.referee_1_id == referee_id, M.c.referee_2_id == referee_id)
 
 
+def _placeholder_404() -> HTTPException:
+    """Numer, którym ZPRP oznacza brak obsady: 404 z kodem, front pokazuje wyjaśnienie, nie liczby."""
+    return HTTPException(404, {"detail": RP.ERROR_MESSAGE, "code": RP.ERROR_CODE})
+
+
+async def _referee_names(referee_id: str) -> Counter:
+    """Nazwiska przy tym numerze (oczyszczone, z liczbą meczów) - także znaczniki braku obsady."""
+    names: Counter = Counter()
+    for idc, nmc in RP.REFEREE_SLOTS:
+        for r in await database.fetch_all(
+            select(M.c[nmc].label("name"), func.count().label("n")).where(M.c[idc] == referee_id).group_by(M.c[nmc])
+        ):
+            name = _clean_ref_name(r["name"] or "")
+            if name:
+                names[name] += int(r["n"])
+    return names
+
+
 async def _referee_scope(referee_id: str, season_id: str = "") -> dict[str, Any]:
-    """Kariera (jedno GROUP BY, bez limitu) i rozstrzygnięty zakres. 404, gdy sędzia nie ma meczów."""
+    """Kariera (jedno GROUP BY, bez limitu) i rozstrzygnięty zakres. 404, gdy sędzia nie ma meczów;
+    404 z kodem REFEREE_PLACEHOLDER, gdy numer to placeholder ZPRP (brak obsady)."""
+    if RP.is_placeholder_id(referee_id):
+        raise _placeholder_404()
     groups = [_dict(r) for r in await database.fetch_all(
         select(M.c.season_id, M.c.competition_id, func.max(M.c.competition_name).label("competition_name"),
                func.count().label("n"))
         .where(_who(referee_id)).group_by(M.c.season_id, M.c.competition_id)
     )]
     if not groups:
+        # Po sprzątaniu stary link do placeholdera nie ma meczów - rejestr mówi, czym był.
+        await RP.load_known_ids()
+        if RP.is_placeholder_id(referee_id):
+            raise _placeholder_404()
         raise HTTPException(404, "Nie znaleziono sędziego")
+    # Dane sprzed sprzątania: numer, przy którym stoją głównie znaczniki „--- ---", to brak obsady.
+    names = await _referee_names(referee_id)
+    real = Counter({n: c for n, c in names.items() if not RP.is_blank_name(n)})
+    marked = sum(c for n, c in names.items() if RP.is_placeholder_name(n))
+    if marked and marked >= sum(real.values()):
+        raise _placeholder_404()
     seasons_map, current = await seasons_info()
     career = RS.career_totals(groups)
     counts = career.pop("by_season")
@@ -879,6 +913,7 @@ async def _referee_scope(referee_id: str, season_id: str = "") -> dict[str, Any]
     seasons = [{"season_id": sid, "name": (seasons_map.get(sid) or {}).get("name"), "matches": counts[sid],
                 "is_current": sid == current} for sid in order]
     return {
+        "name": real.most_common(1)[0][0] if real else None,
         "groups": groups, "career": career, "seasons": seasons, "current": current, "seasons_map": seasons_map,
         "default": RS.pick_season("", counts, current, order),
         "wanted": RS.pick_season(season_id, counts, current, order),
@@ -900,18 +935,6 @@ async def _scope_rows(referee_id: str, wanted: str) -> list[dict]:
     return [_dict(r) for r in await database.fetch_all(
         select(*_card_cols(), *_ref_cols()).where(cond).order_by(M.c.scheduled_at.desc())
     )]
-
-
-async def _referee_name(referee_id: str) -> Optional[str]:
-    names: Counter = Counter()
-    for idc, nmc in (("referee_1_id", "referee_1_name"), ("referee_2_id", "referee_2_name")):
-        for r in await database.fetch_all(
-            select(M.c[nmc].label("name"), func.count().label("n")).where(M.c[idc] == referee_id).group_by(M.c[nmc])
-        ):
-            name = _clean_ref_name(r["name"] or "")
-            if name:
-                names[name] += int(r["n"])
-    return names.most_common(1)[0][0] if names else None
 
 
 @router.get("/referees/{referee_id}")
@@ -939,7 +962,7 @@ async def _referee_profile(referee_id: str, limit: int) -> dict[str, Any]:
     career = scope["career"]
     P.note_referee_total(referee_id, career["matches"])  # wyszukiwarka pokaże tę samą liczbę
     return {
-        "referee_id": referee_id, "name": await _referee_name(referee_id),
+        "referee_id": referee_id, "name": scope["name"],
         "matches_total": career["matches"],
         "career": career,
         "current_season_id": scope["current"],
@@ -1025,11 +1048,11 @@ async def _referee_stats(referee_id: str, season_id: str) -> dict[str, Any]:
     upcoming = sorted((c for c in cards if c["status"] == "scheduled" and c.get("scheduled_at")
                        and c["scheduled_at"] >= now - timedelta(hours=3)), key=lambda c: c["scheduled_at"])
     recent = [c for c in cards if c["status"] == "finished"][:5]
-    names = Counter(_clean_ref_name(r["referee_1_name"] if r["referee_1_id"] == referee_id else r["referee_2_name"] or "")
-                    for r in rows)
+    names = Counter(n for n in (_clean_ref_name((r["referee_1_name"] if r["referee_1_id"] == referee_id else r["referee_2_name"]) or "")
+                                for r in rows) if not RP.is_blank_name(n))
     return {
         "referee_id": referee_id,
-        "name": (names.most_common(1)[0][0] if names else None) or await _referee_name(referee_id),
+        "name": (names.most_common(1)[0][0] if names else None) or scope["name"],
         "season": _scope_meta(scope),
         "scope": "all" if scope["wanted"] == RS.ALL_SEASONS else "season",
         "seasons": scope["seasons"],

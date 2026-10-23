@@ -52,6 +52,7 @@ from app.zprp_public.client import (
     text_value,
 )
 from app.zprp_public.match_rules import lineups_swapped, parse_shootout
+from app.zprp_public.referee_placeholder import clean_match_officials
 from app.zprp_public.store import insert_ignore, now_utc, store_entity, upsert_values
 from app.zprp_public.ondemand import backfill_sort_key
 from app.zprp_public.discord import notify_failure, notify_recovery
@@ -278,7 +279,8 @@ async def _store_player(source: dict[str, Any], counters: Counters) -> str:
 def _match_values(item: dict[str, Any], **context: Any) -> dict[str, Any]:
     shootout_home, shootout_away = parse_shootout(item)
     match_id = text_value(item.get("Id") or item.get("IdZawody") or item.get("ID_zawody"))
-    return {
+    # Brak obsady („--- ---" i podobne) zapisujemy jako NULL - patrz referee_placeholder.
+    return clean_match_officials({
         "match_id": match_id,
         "season_id": text_value(item.get("ID_sezon") or context.get("season_id")),
         "competition_id": text_value(item.get("Id_rozgrywki") or item.get("IdRozgrywki") or context.get("competition_id")),
@@ -328,7 +330,7 @@ def _match_values(item: dict[str, Any], **context: Any) -> dict[str, Any]:
         "shootout_home": shootout_home,
         "shootout_away": shootout_away,
         "upstream_changed_at": text_value(item.get("DataOstatnieZmiany")),
-    }
+    })
 
 
 async def _store_match(item: dict[str, Any], counters: Counters, **context: Any) -> tuple[str, bool]:
