@@ -62,6 +62,9 @@ BUFFER_ACCEPT_WINDOW_S = 6 * 3600.0
 #: Tyle słów na sekundę ktoś jeszcze potrafi przeczytać (poniżej = flaga).
 FAST_READ_WPS = 8.0
 FAST_READ_MIN_S = 1.0
+#: Pytanie z wyprzedzenia: telefon może przesunąć start jego zegara najwyżej o tyle
+#: za chwilę zamknięcia poprzedniego (3 s tolerancji serwera + 2 s na przejście).
+LOOKAHEAD_SLACK_S = 5.0
 #: Kod sali zmienia się co tyle sekund; przyjmujemy bieżący i poprzedni.
 ROOM_CODE_STEP_S = 30
 
@@ -1072,12 +1075,15 @@ def apply_answers(
             else:
                 est = now
                 flags = flags + ["stamp_ignored"]
-        stamped.append((est, pos, item, flags, item_buffered))
+        shown_est = None
+        if item.get("shown_ts_ms") is not None and client_now_ms is not None:
+            shown_est, _ = estimate_answer_time({"client_ts_ms": item.get("shown_ts_ms")}, client_now_ms, now)
+        stamped.append((est, pos, item, flags, item_buffered, shown_est))
     stamped.sort(key=lambda t: (t[0], t[1]))
     results: List[Dict[str, Any]] = []
-    for est, _pos, item, flags, item_buffered in stamped:
+    for est, _pos, item, flags, item_buffered, shown_est in stamped:
         results.append(_apply_one(config, attempt, answers, item, bank, now, est, flags,
-                                  buffered=item_buffered, reopened=reopened))
+                                  buffered=item_buffered, reopened=reopened, shown_est=shown_est))
     settle(config, attempt, answers, now)
     return results
 
@@ -1097,6 +1103,7 @@ def _apply_one(
     flags: List[str],
     buffered: bool = False,
     reopened: bool = False,
+    shown_est: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     qid = _s(item.get("qid"))
     paper = attempt["paper"]
@@ -1146,6 +1153,20 @@ def _apply_one(
         if row and row.get("answered_at") is not None and set(row.get("selected") or []) == set(selected):
             return {"qid": qid, "status": "duplicate", "code": "EXAM_DUPLICATE", "message": "Ta odpowiedź już jest zapisana.", "flags": flags}
         return _reject(qid, "EXAM_ALREADY_ANSWERED", "Na to pytanie już odpowiedziano, a egzamin nie pozwala wracać.", flags)
+    if (row is None or row.get("shown_at") is None) and item.get("lookahead") and index == current and index > 0 and not closed:
+        # Telefon pokazał to pytanie z wyprzedzenia (`next_question`), zanim serwer je wydał -
+        # np. po upływie czasu poprzedniego bez zasięgu. Zegar startuje chwilą zamknięcia
+        # poprzedniego; stempel telefonu może go przesunąć najwyżej o LOOKAHEAD_SLACK_S.
+        prev = answers.get(paper[index - 1]["qid"]) or {}
+        closed_at = prev.get("answered_at")
+        if closed_at is not None:
+            start = closed_at
+            if shown_est is not None:
+                start = min(max(shown_est, closed_at), closed_at + timedelta(seconds=LOOKAHEAD_SLACK_S))
+            if row is None:
+                row = answers[qid] = new_answer_row(qid, index)
+            row.update(shown_at=min(start, est, now), dirty=True)
+            flags = flags + ["lookahead"]
     if row is None or row.get("shown_at") is None:
         return _reject(qid, "EXAM_NOT_SERVED", "Najpierw pobierz to pytanie z serwera - zegar pytania liczy się od pokazania.", flags)
     shown = row["shown_at"]
@@ -1172,13 +1193,35 @@ def _apply_one(
     row.update(selected=selected, answered_at=est, dirty=True)
     row["flags"] = list(dict.fromkeys(list(row.get("flags") or []) + flags))
     row["elapsed_ms"] = int(elapsed * 1000)
+    client_ms = _client_time_ms(item.get("time_ms"))
+    if client_ms is not None:
+        # Przy cofaniu telefon sumuje czas wszystkich wizyt - ostatnia wartość jest pełna.
+        row["client_time_ms"] = client_ms
     if index == current and not closed:
         attempt["current_index"] += 1
         attempt["dirty"] = True
         if attempt["current_index"] >= len(paper) and not config.get("allow_back"):
             finish_attempt(attempt, est, "completed")
+        elif item.get("advance") and attempt["current_index"] < len(paper):
+            # Telefon pokazał następne pytanie w chwili tej odpowiedzi (wyprzedzenie) -
+            # jego zegar biegnie od `est`, nie od chwili, w której paczka doszła.
+            nxt_qid = paper[attempt["current_index"]]["qid"]
+            nxt = answers.get(nxt_qid)
+            if nxt is None:
+                nxt = answers[nxt_qid] = new_answer_row(nxt_qid, attempt["current_index"])
+            if nxt.get("shown_at") is None:
+                nxt.update(shown_at=est, dirty=True)
     return {"qid": qid, "status": "accepted", "code": None, "message": None, "flags": flags,
             "elapsed_ms": int(elapsed * 1000)}
+
+
+def _client_time_ms(value: Any) -> Optional[int]:
+    """Czas na pytaniu wg telefonu: liczba całkowita 0..24 h, inaczej brak."""
+    try:
+        ms = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return ms if 0 <= ms <= 24 * 3600 * 1000 else None
 
 
 def finish_refusal(config: Mapping[str, Any], attempt: Mapping[str, Any]) -> Optional[ExamError]:

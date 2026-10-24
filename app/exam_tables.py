@@ -27,6 +27,8 @@ MIGRATIONS: list = [
     "ALTER TABLE exam_attempts ADD COLUMN IF NOT EXISTS deleted_by varchar",
     "ALTER TABLE exam_attempts ADD COLUMN IF NOT EXISTS deleted_by_name varchar",
     "CREATE INDEX IF NOT EXISTS ix_exam_attempts_deleted ON exam_attempts (deleted_at) WHERE deleted_at IS NOT NULL",
+    # Czas na pytaniu zmierzony telefonem (od pokazania do zatwierdzenia, sumowany przy cofaniu) - 24.10.2026.
+    "ALTER TABLE exam_answers ADD COLUMN IF NOT EXISTS client_time_ms integer",
 ]
 
 
@@ -127,6 +129,8 @@ def define_tables(metadata):
         Column("selected_json", Text, nullable=True),
         Column("timed_out", Boolean, nullable=False, default=False),
         Column("elapsed_ms", Integer, nullable=True),
+        #: Czas na pytaniu wg telefonu (pokazanie -> zatwierdzenie, bez sieci). `elapsed_ms` liczy serwer.
+        Column("client_time_ms", Integer, nullable=True),
         Column("changes", Integer, nullable=False, default=0),
         Column("flags_json", Text, nullable=False, default="[]"),
     )

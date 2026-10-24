@@ -791,6 +791,7 @@ async def _load_answers(st: Store, attempt_id: str) -> Dict[str, Dict[str, Any]]
         out[r["qid"]] = {"qid": r["qid"], "position": r["position"], "shown_at": _dt(r["shown_at"]),
                          "answered_at": _dt(r["answered_at"]), "selected": _loads(r["selected_json"], None),
                          "timed_out": bool(r["timed_out"]), "elapsed_ms": r["elapsed_ms"], "changes": r["changes"] or 0,
+                         "client_time_ms": r.get("client_time_ms"),
                          "flags": _loads(r["flags_json"], []), "dirty": False}
     return out
 
@@ -803,6 +804,7 @@ async def _save(st: Store, attempt: Dict[str, Any], answers: Dict[str, Dict[str,
         values = dict(position=row["position"], shown_at=row["shown_at"], answered_at=row["answered_at"],
                       selected_json=None if row["selected"] is None else _dumps(row["selected"]),
                       timed_out=bool(row["timed_out"]), elapsed_ms=row.get("elapsed_ms"), changes=row.get("changes") or 0,
+                      client_time_ms=row.get("client_time_ms"),
                       flags_json=_dumps(row.get("flags") or []))
         exists = await db.fetch_val(select(func.count()).select_from(t.answers).where(
             and_(t.answers.c.attempt_id == attempt["id"], t.answers.c.qid == qid)))
@@ -882,7 +884,22 @@ def _state(exam: Mapping[str, Any], attempt: Mapping[str, Any], answers: Mapping
     }
     if attempt["status"] == "in_progress" and index is not None:
         state["question"] = _question_view(exam, attempt, answers, bank, index, now)
+        state["next_question"] = _lookahead_view(exam, attempt, answers, bank, index)
     return state
+
+
+def _lookahead_view(exam: Mapping[str, Any], attempt: Mapping[str, Any], answers: Mapping[str, Mapping[str, Any]],
+                    bank: Mapping[str, Mapping[str, Any]], index: int) -> Optional[Dict[str, Any]]:
+    """Następne pytanie z wyprzedzeniem (24.10.2026): telefon pokazuje je w chwili zatwierdzenia
+    bieżącego, bez czekania na sieć. Zegar pytania NIE startuje tu - startuje chwilą odpowiedzi
+    na bieżące (`advance`) albo chwilą zamknięcia poprzedniego (`lookahead`, patrz exam_rules)."""
+    nxt = index + 1
+    if index != attempt["current_index"] or nxt >= len(attempt["paper"]):
+        return None
+    item = attempt["paper"][nxt]
+    view = X.exam_question(exam["config"], bank[item["qid"]], item["keys"])
+    view.update(index=nxt, selected=None, answered=False, seconds_left=None)
+    return view
 
 
 async def _settle_and_save(st: Store, exam: Mapping[str, Any], attempt: Dict[str, Any], answers: Dict[str, Dict[str, Any]],
@@ -966,7 +983,7 @@ async def attempt_state(st: Store, who: Who, attempt_id: str, index: Optional[in
 
 
 #: Flagi, które są tylko opisem trasy odpowiedzi (nie sygnałem dla komisji) - nie trafiają do dziennika zdarzeń.
-_QUIET_FLAGS = ("buffered", "buffered_revived")
+_QUIET_FLAGS = ("buffered", "buffered_revived", "lookahead")
 
 
 async def _apply_batch(st: Store, exam: Mapping[str, Any], attempt: Dict[str, Any], answers: Dict[str, Dict[str, Any]],
