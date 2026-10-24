@@ -38,6 +38,7 @@ from app.db import (
     zprp_public_teams,
 )
 from app import time_pl as TP
+from app.standings_refresh import apply_provisional
 from app.zprp_public import corrections, match_rules as MR, portal_rules as R, referee_stats as RS
 from app.zprp_public import referee_placeholder as RP
 from app.zprp_public.api import _dict
@@ -548,10 +549,18 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
         })
     # Ostatni punkt = tabela ZPRP, gdy liczy tyle samo meczów (remisy punktowe ZPRP
     # rozstrzyga też meczami bezpośrednimi - tego symulacja nie odtworzy).
-    official_position = mine_st["position"] if mine_st else None
-    if rounds and mine_st and mine_st["position"] is not None and int(mine_st["matches"] or 0) == len(rounds):
-        rounds[-1]["position"] = mine_st["position"]
-        rounds[-1]["official"] = True
+    st_item = dict(mine_st) if mine_st else None
+    provisional = False
+    if st_item:
+        st_item.update(competition_id=competition_id, team_id=team_id)
+        # Po wyniku skróconym ostatni punkt to tabela wstępna (do czasu oficjalnej).
+        provisional = await apply_provisional([st_item])
+    official_position = st_item["position"] if st_item else None
+    if rounds and st_item and st_item["position"] is not None and int(st_item["matches"] or 0) == len(rounds):
+        rounds[-1]["position"] = st_item["position"]
+        rounds[-1]["official"] = not provisional
+        if provisional:
+            rounds[-1]["provisional"] = True
     best = max(played, key=lambda m: (MR.margin_for(m, team_id) or -999, m["scheduled_at"]))
     best_card = None
     if (MR.margin_for(best, team_id) or 0) > 0:
@@ -559,7 +568,7 @@ async def team_season_chart(team_id: str, season_id: str = "") -> dict[str, Any]
         best_card["margin"] = MR.margin_for(best, team_id)
     return {"team_id": team_id, "season_id": team["season_id"], "competition_id": competition_id,
             "rounds": rounds, "streaks": MR.streaks([r for r in results if r]), "best_match": best_card,
-            "table_size": table_size, "official_position": official_position, "record": MR.tally_results(details)}
+            "table_size": table_size, "official_position": official_position, "provisional": provisional, "record": MR.tally_results(details)}
 
 
 @router.get("/teams/{team_id}/calendar.ics")

@@ -43,6 +43,7 @@ from app.db import (
     zprp_public_teams,
 )
 from app import time_pl as TP
+from app.standings_refresh import apply_provisional
 from app.national_distance_parser import normalize_city_key
 from app.zprp_public import corrections, geocode, portal_rules as R
 from app.zprp_public import match_rules as MR
@@ -170,6 +171,7 @@ async def _standing_rows(team_ids: list[str], season_id: Optional[str]) -> list[
         query = query.where(zprp_public_competitions.c.season_id == season_id)
     rows = [_dict(r) for r in await database.fetch_all(query)]
     await attach_standing_records(rows)
+    await apply_provisional(rows)
     return rows
 
 

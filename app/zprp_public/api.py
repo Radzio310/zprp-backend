@@ -40,6 +40,8 @@ from app.zprp_public.ondemand import ensure_details
 from app.zprp_public.sync import run_sync_job
 from app.zprp_public.privacy import public_club, public_team
 
+from app.standings_refresh import apply_provisional, refresh_competition
+
 router = APIRouter(prefix="/api/v1/handball", tags=["handball_public"])
 admin_router = APIRouter(
     prefix="/admin/handball-sync",
@@ -586,7 +588,17 @@ async def competition_standings(competition_id: str, table_id: str = "", group_i
     )
     items = [_dict(row) for row in result]
     await attach_standing_records(items)
-    return {"items": items, "count": len(result)}
+    # Po wyniku skróconym tabela leży wstępnie przeliczona (items[].provisional) do czasu oficjalnej.
+    provisional = await apply_provisional(items)
+    fetched = max((i["fetched_at"] for i in items if i.get("fetched_at")), default=None)
+    return {"items": items, "count": len(result), "provisional": provisional, "fetched_at": fetched}
+
+
+@router.post("/competitions/{competition_id}/refresh")
+async def competition_refresh(competition_id: str) -> dict[str, Any]:
+    """Odśwież tabelę i mecze ligi z ZPRP. Najwyżej jedno pobranie na 2 min na ligę;
+    pozostali dostają świeży stan z bazy (`throttled: true`) bez nowego pytania do ZPRP."""
+    return await refresh_competition(competition_id)
 
 
 @router.get("/competitions/{competition_id}/scorers")

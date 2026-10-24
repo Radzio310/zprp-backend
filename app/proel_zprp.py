@@ -600,7 +600,21 @@ async def submit_summary(payload: ZprpSummaryRequest) -> Dict[str, Any]:
         status, data = await _call_upstream("summary.php", upstream_payload)
 
     if status == 200 and str(data.get("status") or "").lower() == "success":
-        return {"status": "success", "message": str(data.get("message") or "")}
+        out: Dict[str, Any] = {"status": "success", "message": str(data.get("message") or "")}
+        if payload.id_zawody:
+            # Tabela grupy od razu wstępnie z wpisanego wyniku; oficjalna dociągana w tle
+            # (ok. 1/5/15 min). Odpowiedź niesie wynik tego kroku, żeby aplikacja
+            # odświeżyła widok sezonu bez zgadywania. Nigdy nie psuje zapisu.
+            try:
+                from app.standings_refresh import record_short_result
+
+                standings = await record_short_result(str(payload.id_zawody), payload.fields)
+                if standings.get("provisional") or standings.get("refresh"):
+                    out["standings"] = standings
+            except Exception:
+                # Zapis w ZPRP już się udał - tabela dociągnie się sama (auto/na żądanie).
+                logger.exception("Tabela po wyniku skróconym: nie uruchomiono przeliczenia")
+        return out
 
     if status == 401:
         # Sesja wygasła. Aplikacja umie się przelogować z zapamiętanego

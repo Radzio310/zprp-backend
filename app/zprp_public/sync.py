@@ -548,6 +548,18 @@ async def _sync_competition_stats(client: PublicZprpClient, competition_id: str,
         )
         counters.add("scorers")
 
+    await _store_competition_tables(client, competition_id, tables_payload, counters)
+
+
+async def _sync_competition_tables(client: PublicZprpClient, competition_id: str, counters: Counters) -> None:
+    """Tabele (bez strzelców) - lekkie odświeżenie po wyniku skróconym i w dni meczowe."""
+    tables_payload = await client.get(f"pokaz_tabele_spis.php?Rozgrywki={competition_id}")
+    await _store_competition_tables(client, competition_id, tables_payload, counters)
+
+
+async def _store_competition_tables(
+    client: PublicZprpClient, competition_id: str, tables_payload: Any, counters: Counters
+) -> None:
     for table_item in rows(tables_payload):
         table_id = text_value(table_item.get("tabela_id"))
         if not table_id:
@@ -1155,6 +1167,33 @@ def _due(last: datetime | None, interval: timedelta) -> bool:
     return now_utc() - last >= interval
 
 
+def catalog_due(last: datetime | None, local_now: datetime) -> bool:
+    """Katalog (z tabelami wszystkich lig) raz na dobę, w nocy (2-5 czasu polskiego).
+
+    Po awarii nie czekamy do kolejnej nocy w nieskończoność: po 30 h rusza o każdej porze.
+    """
+    if last is None:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = now_utc() - last
+    if age >= timedelta(hours=30):
+        return True
+    return age >= timedelta(hours=20) and 2 <= local_now.hour < 5
+
+
+async def _auto_refresh_tables() -> None:
+    """Ligi z dzisiejszymi meczami: tabela i mecze co ok. 15 min od końca meczu (lekka, ograniczona)."""
+    try:
+        from app.standings_refresh import run_auto_refresh
+
+        await run_auto_refresh()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("[zprp_public] auto-odświeżanie tabel dni meczowych")
+
+
 async def run_zprp_public_scheduler() -> None:
     """Jedna oszczędna pętla; unikalny ``cycle_key`` chroni wiele replik."""
     if os.getenv("ZPRP_PUBLIC_SYNC_ENABLED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
@@ -1164,7 +1203,7 @@ async def run_zprp_public_scheduler() -> None:
     while True:
         try:
             async with _run_lock:
-                if _due(await _last_success("catalog"), timedelta(hours=24)):
+                if catalog_due(await _last_success("catalog"), _local_now()):
                     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                     await run_sync_job("catalog", cycle_key=f"catalog:{day}")
                 if _due(await _last_success("live"), timedelta(minutes=2)):
@@ -1176,6 +1215,7 @@ async def run_zprp_public_scheduler() -> None:
                 if _due(await _last_success("details"), timedelta(minutes=5)):
                     bucket = int(datetime.now(timezone.utc).timestamp() // 300)
                     await run_sync_job("details", cycle_key=f"details:{bucket}")
+                await _auto_refresh_tables()
                 if _due(await _last_success("cleanup"), timedelta(hours=24)):
                     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                     await run_sync_job("cleanup", cycle_key=f"cleanup:{day}")

@@ -4595,6 +4595,11 @@ from app.zprp_public_tables import define_tables as _define_zprp_public_tables
 # Pamięć geokodera miast portalu (Nominatim, 1 zapytanie/s, porażka ponawiana po 30 dniach).
 from app.zprp_public_geocode_tables import define_tables as _define_zprp_public_geocode_tables
 
+# Wstępne wyniki skrócone (nakładka na tabelę ZPRP do czasu oficjalnego przeliczenia).
+from app.standings_provisional_tables import define_table as _define_provisional_results_table
+
+zprp_public_provisional_results = _define_provisional_results_table(metadata)
+
 zprp_public_geocode_cache = _define_zprp_public_geocode_tables(metadata)
 # Adresy hal (ulica) z tego samego geokodera - pinezka na hali, nie w środku miasta.
 from app.zprp_public_geocode_tables import define_venue_table as _define_zprp_public_venue_geocode_table
