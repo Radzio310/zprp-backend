@@ -471,6 +471,10 @@ async def compilation_payload(ctx: Dict[str, Any], compilation_id: str) -> Dict[
     clips = await _live_clips(ctx["pair_id"], [i["clip_id"] for i in items])
     live = [i for i in items if i["clip_id"] in clips]
     shaped = {c["id"]: c for c in await C.clips_payload(ctx, [clips[i["clip_id"]] for i in live])}
+    # Sekcje meczów w playliście (herby, numer, data, wynik) - skrót karty meczu przy klipie.
+    cards = {c["match_id"]: c for c in await C.pair_match_cards(ctx["judge_ids"])} if live else {}
+    for clip in shaped.values():
+        clip["match"] = R.slim_match(cards.get(clip.get("match_id")))
     names = await C.people([comp.get("created_by")])
     return {
         "id": comp["id"], "pair_id": comp.get("pair_id"), "name": comp.get("name"), "mode": comp.get("mode"),

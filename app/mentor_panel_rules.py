@@ -459,6 +459,16 @@ def append_item(existing: Sequence[Mapping[str, Any]], clip_id: str, column: Any
     return order_items([*ordered, {"clip_id": clip_id, "column": column, "label": label}], mode)
 
 
+SLIM_MATCH_KEYS = ("match_id", "season", "scheduled_at", "match_code", "category", "competition_name", "home", "away")
+
+
+def slim_match(card: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Skrót karty meczu przy klipie zestawienia: nagłówek sekcji (herby, numer, data, wynik)."""
+    if not card:
+        return None
+    return {k: card.get(k) for k in SLIM_MATCH_KEYS}
+
+
 def playlist_items(items: Sequence[Mapping[str, Any]], mode: str) -> List[Dict[str, Any]]:
     """
     Zapisane pozycje -> playlista (zmiana trybu na „wolne”): stary „kontrast”

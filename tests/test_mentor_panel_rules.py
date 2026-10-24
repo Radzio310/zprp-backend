@@ -224,6 +224,10 @@ def test_playlista_etykiety_i_stary_kontrast():
     assert R.legacy_label({"column": "b"}, "contrast") == "Do poprawy"
     assert R.legacy_label({"column": "b"}, "free") is None
     assert R.append_item([], "c5", None, "free", "Wzorzec")[0]["label"] == "Wzorzec"
+    assert R.slim_match(None) is None
+    assert R.slim_match({"match_id": "m1", "match_code": "KS1", "venue": "x", "home": {"name": "A"}}) == {
+        "match_id": "m1", "season": None, "scheduled_at": None, "match_code": "KS1", "category": None,
+        "competition_name": None, "home": {"name": "A"}, "away": None}
 
 
 # ─── Wątki i flagi ──────────────────────────────────────────────────────────
