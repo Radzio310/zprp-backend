@@ -32,6 +32,9 @@ from app.db import (
     mentor_match_videos,
     mentor_panels,
     mentor_reads,
+    mentor_sheet_seen,
+    mentor_thread_prefs,
+    mentor_thread_reads,
     mentor_threads,
     mentoring_assignments,
     mentoring_pairs,
@@ -517,6 +520,50 @@ async def mentor_sheet_rows(pair_key: str) -> List[Dict[str, Any]]:
                       .where(mentor_evaluations.c.status == "published"))
 
 
+async def unread_threads(pair_id: str, judge_id: str) -> Dict[str, Optional[str]]:
+    """Wątki z odpowiedziami innych po moim ostatnim przeczytaniu: `{thread_id: match_id}`."""
+    me = R.s(judge_id)
+    last: Dict[str, Any] = {}
+    for c in await rows(select(mentor_comments.c.thread_id, mentor_comments.c.created_at)
+                        .select_from(mentor_comments.join(mentor_threads, mentor_threads.c.id == mentor_comments.c.thread_id))
+                        .where(mentor_threads.c.pair_id == pair_id).where(mentor_comments.c.deleted_at.is_(None))
+                        .where(mentor_comments.c.author_id != me)):
+        at = R.aware(c.get("created_at"))
+        if at and (c["thread_id"] not in last or at > last[c["thread_id"]]):
+            last[c["thread_id"]] = at
+    if not last:
+        return {}
+    reads = {r["thread_id"]: R.aware(r.get("seen_at")) for r in await rows(
+        select(mentor_thread_reads).where(mentor_thread_reads.c.judge_id == me).where(mentor_thread_reads.c.thread_id.in_(list(last))))}
+    out = {tid: at for tid, at in last.items() if reads.get(tid) is None or at > reads[tid]}
+    if not out:
+        return {}
+    found = await rows(select(mentor_threads.c.id, mentor_threads.c.match_id).where(mentor_threads.c.id.in_(list(out))))
+    return {r["id"]: r.get("match_id") for r in found}
+
+
+async def unseen_sheets(pair_key: str, judge_id: str) -> Dict[str, str]:
+    """Wysłane oceny mentorów nieotwarte przeze mnie (poza moimi): `{evaluation_id: match_id}`."""
+    me = R.s(judge_id)
+    sheets = [r for r in await mentor_sheet_rows(pair_key)
+              if r.get("author_id") != me and me not in R.json_value(r.get("co_author_ids"), [])]
+    if not sheets:
+        return {}
+    seen = {r["evaluation_id"] for r in await rows(select(mentor_sheet_seen.c.evaluation_id).where(mentor_sheet_seen.c.judge_id == me)
+                                                   .where(mentor_sheet_seen.c.evaluation_id.in_([r["id"] for r in sheets])))}
+    return {r["id"]: R.s(r["match_id"]) for r in sheets if r["id"] not in seen}
+
+
+async def mark_sheets_seen(pair_key: str, match_id: str, judge_id: str) -> int:
+    stamp = now()
+    done = 0
+    for evaluation_id, mid in (await unseen_sheets(pair_key, judge_id)).items():
+        if mid == R.s(match_id):
+            await database.execute(mentor_sheet_seen.insert().values(evaluation_id=evaluation_id, judge_id=R.s(judge_id), seen_at=stamp))
+            done += 1
+    return done
+
+
 async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Flagi pary, wideo, klipy, wątki i punkty arkuszy na kartach meczów (zapytania zbiorcze)."""
     if not cards:
@@ -564,6 +611,11 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
                 proel_codes.add(R.s(p.get("match_number")))
     except Exception:  # noqa: BLE001
         logger.warning("mentor: odczyt protokołów ProEla nieudany", exc_info=True)
+    me = ctx["actor"].judge_id
+    unseen_by_match: Dict[str, int] = {}
+    for mid in (await unread_threads(pair_id, me)).values():
+        unseen_by_match[R.s(mid)] = unseen_by_match.get(R.s(mid), 0) + 1
+    sheet_unseen = set((await unseen_sheets(key, me)).values()) if me in ctx["judge_ids"] else set()
     for card in cards:
         match_id = card["match_id"]
         flag = flags.get(match_id) or {}
@@ -578,6 +630,7 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
             "clips": {"count": clips.get(match_id, 0)},
             "threads": threads.get(match_id, {"open": 0, "total": 0}),
             "sheets": {"delegate": delegate_points.get(match_id), "mentor": mentor_points.get(match_id)},
+            "unseen": {"threads": unseen_by_match.get(match_id, 0), "sheet": match_id in sheet_unseen},
         })
         card.pop("source", None)
     return cards
@@ -677,6 +730,10 @@ async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]]
         for c in await rows(select(mentor_comments).where(mentor_comments.c.thread_id.in_(ids))
                             .where(mentor_comments.c.deleted_at.is_(None)).order_by(mentor_comments.c.created_at.asc())):
             comments.setdefault(c["thread_id"], []).append(c)
+    me = ctx["actor"].judge_id
+    my_prefs = {r["thread_id"]: r["mode"] for r in await rows(select(mentor_thread_prefs).where(mentor_thread_prefs.c.judge_id == me)
+                                                               .where(mentor_thread_prefs.c.thread_id.in_(ids)))} if ids else {}
+    unread_ids = set(await unread_threads(ctx["pair_id"], me)) if ids else set()
     names = await people({t.get("created_by") for t in thread_rows} | {t.get("acted_by") for t in thread_rows}
                          | {c.get("author_id") for cs in comments.values() for c in cs}
                          | {c.get("acted_by") for cs in comments.values() for c in cs})
@@ -688,6 +745,7 @@ async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]]
             "title": t.get("title"), "kind": t.get("kind"), "status": t.get("status"),
             "created_by": person(names, t.get("created_by")), **acted_fields(names, t), "created_at": t.get("created_at"),
             "last_comment_at": t.get("last_comment_at"),
+            "my_follow": my_prefs.get(t["id"]) or "auto", "unread": t["id"] in unread_ids,
             "can_edit": may(ctx, "edit", owner=R.s(t.get("created_by")) == ctx["actor"].judge_id),
         }
         if with_comments:

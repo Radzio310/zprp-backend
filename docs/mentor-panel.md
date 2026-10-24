@@ -249,3 +249,10 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
 - Zasady jak Communio (`Communio/docs/motion.md`): sprężyna osiada raz (`damping 24, stiffness 240, mass .85`), sukces `{13,240,.7}`; animujemy tylko transform/opacity; stan końcowy = stan bazowy; kaskady 45-90 ms, max ~8; reduced-motion; pętle tylko gdy widać.
 - Web: system projektowy Pod Ręką (`components/pod-reka/ds`), ciemny motyw domyślny, tryb lekki na dotyku. Wektorowe ilustracje pustych stanów (np. pusta oś = tablica z gwizdkiem).
 - Kolory kategorii z palety tokenów (bez hexów w ekranach).
+
+## 5. Dopiski 24.10.2026: act_as, powiadomienia, kropki
+
+- `?act_as=<judge_id mentora>` na trasach panelu: tylko administrator i tylko mentor tej pary (inaczej 403 `ACT_AS_FORBIDDEN` / `ACT_AS_NOT_MENTOR`). Wpisy mają autora = mentor oraz `acted_by` + `acted_by_name` (null gdy brak); ślad w `mentor_audit.acted_by`.
+- Push `kind=mentor_panel`: `pairId, matchId, threadId, messageId, sheetId, target (sheet|thread|message), tag, notificationTag, notificationColor=#FF7A59` (+ `notificationSilent/Priority` przy cichej aktualizacji, `notificationImage` herb gospodarza). Tag: `mentor-thread-<threadId>`, `mentor-sheet-<matchId>`.
+- Wątek: `my_follow` (`auto|follow|mute`), `unread`; `PUT /threads/{id}/follow {mode}`; `POST /threads/{id}/seen`.
+- Kropki: `unread_threads`, `new_sheets` na liście par i w pulpicie; `unseen: {threads, sheet}` na karcie meczu (oś i pokój); `POST /pairs/{id}/matches/{mid}/sheet/seen`.

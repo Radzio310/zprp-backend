@@ -96,6 +96,13 @@ async def _unread(pair_id: str, me: str) -> int:
     return R.unread_count(items, me, seen)
 
 
+async def _dots(pair: Dict[str, Any], me: str) -> Dict[str, int]:
+    """Kropki nowości: wątki z cudzymi odpowiedziami i nowe oceny mentorów (dla sędziów pary)."""
+    key = "|".join(sorted(R.s(j) for j in pair["judge_ids"]))
+    return {"unread_threads": len(await C.unread_threads(pair["id"], me)),
+            "new_sheets": len(await C.unseen_sheets(key, me)) if me in pair["judge_ids"] else 0}
+
+
 @router.get("/pairs")
 async def list_pairs(actor: Actor = Depends(mentor_actor)):
     pairs = await accessible_pairs(actor)
@@ -127,6 +134,8 @@ async def list_pairs(actor: Actor = Depends(mentor_actor)):
             "enabled": enabled,
             "role": pair["role"],
             "unread": await _unread(pair["id"], actor.judge_id) if enabled and pair["role"] in ("pair", "mentor") else 0,
+            **(await _dots(pair, actor.judge_id) if enabled and pair["role"] in ("pair", "mentor") else
+               {"unread_threads": 0, "new_sheets": 0}),
             "next_match": R.public_match(nxt) if nxt else None,
             "counts": {"matches": len(matches), **counts[pair["id"]]},
             "links": C.links_of(pair["id"]),
@@ -183,6 +192,7 @@ async def dashboard(pair_id: str, actor: Actor = Depends(mentor_actor)):
         "pair": C.pair_people_shape(ctx["pair"], ctx["mentor_ids"], names),
         "mentors": C.pair_people_shape(ctx["pair"], ctx["mentor_ids"], names)["mentors"],
         "role": ctx["role"], "enabled": ctx["enabled"], "rev": ctx["rev"], "me": actor.me(),
+        **await _dots(ctx["pair"], actor.judge_id),
         "can": {action: C.may(ctx, action) for action in ("flag", "video", "create", "categories", "publish", "toggle")},
         "next_match": nxt, "last_match": last,
         "to_discuss": [c for c in cards if c.get("submitted") and c.get("review_status") == "open"],
@@ -317,6 +327,13 @@ class FlagBody(BaseModel):
     due_at: Optional[str] = Field(default=None, max_length=40)
     review_status: Optional[str] = Field(default=None, max_length=20)
     note: Optional[str] = Field(default=None, max_length=2000)
+
+
+@router.post("/pairs/{pair_id}/matches/{match_id}/sheet/seen")
+async def sheet_seen(pair_id: str, match_id: str, actor: Actor = Depends(mentor_actor)):
+    """Oznacza wysłane oceny mentora z tego meczu jako obejrzane przeze mnie (gasi kropkę)."""
+    ctx = await C.pair_context(pair_id, actor)
+    return {"ok": True, "marked": await C.mark_sheets_seen(ctx["pair_key"], match_id, actor.judge_id)}
 
 
 @router.put("/pairs/{pair_id}/matches/{match_id}/flag")

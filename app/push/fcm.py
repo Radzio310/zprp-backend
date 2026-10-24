@@ -150,6 +150,10 @@ def notification_tag(data: Optional[Dict[str, Any]], title: str, body: str) -> s
     zostaja obok siebie.
     """
     payload = data or {}
+    # Jawny tag od wołającego (np. `mentor-thread-<id>`): jeden kafelek na temat.
+    explicit = str(payload.get("notificationTag") or "").strip()
+    if explicit:
+        return explicit[:64]
     # Ten sam identyfikator co lokalny fallback iOS. Nowy przydział nigdy
     # nie zostaje zastąpiony przez zmianę obsady/terminu tego meczu.
     if payload.get("kind") == "province_match_change" and payload.get("event_type") == "match_added":
@@ -203,6 +207,13 @@ def fcm_message_payload(
     }
     if not silent:
         android_notification["sound"] = "default"
+    # Opcjonalny wygląd: kolor akcentu, obraz (BigPicture) i niski priorytet.
+    color = str(raw_data.get("notificationColor") or "").strip()
+    if color:
+        android_notification["color"] = color
+    image = str(raw_data.get("notificationImage") or "").strip()
+    if image.startswith("https://"):
+        android_notification["image"] = image
 
     # Zmiany meczu nie mogą czekać tygodniami na nieaktywny telefon.
     # Termin jest stały dla zdarzenia, więc ponowienie nie przedłuża ważności.
@@ -225,7 +236,7 @@ def fcm_message_payload(
                 # Stały collapse_key sprawia, że telefon, który był offline,
                 # dostaje tylko najświeższy stan żywego wątku.
                 "collapse_key": tag,
-                "priority": "high",
+                "priority": "normal" if str(raw_data.get("notificationPriority") or "") == "normal" else "high",
                 **({"ttl": f"{max(0, min(2419200, expiry - int(time.time())))}s"} if expiry is not None else {}),
                 "notification": android_notification,
             },

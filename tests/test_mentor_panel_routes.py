@@ -293,7 +293,7 @@ def test_watki_komentarze_wzmianki(env):
     assert ("Anna Nowak wspomina o Tobie", (MENTOR,)) in titles
     assert ("Nowy wątek: Czy to był faul?", (JUDGES[1],)) in titles
     assert ("Jan Mentor wspomina o Tobie", (JUDGES[1],)) in titles
-    assert ("Jan Mentor odpowiada", (JUDGES[0],)) in titles
+    assert ("Czy to był faul?", (JUDGES[0],)) in titles
 
 
 # ─── Publiczne linki ────────────────────────────────────────────────────────
@@ -723,7 +723,8 @@ def test_push_i_zbiorczy_email(env, monkeypatch):
 
     first, soon, later = asyncio.run(go())
     assert pushes[0][0] == [JUDGES[1], MENTOR] and pushes[0][3] == "mentorPanel"
-    assert pushes[0][2] == {"type": "mentor_panel", "kind": "mentor_panel", "pairId": PAIR, "matchId": "m1", "threadId": "t1"}
+    assert pushes[0][2] == {"type": "mentor_panel", "kind": "mentor_panel", "pairId": PAIR, "matchId": "m1", "threadId": "t1",
+                           "target": "thread", "notificationColor": "#FF7A59"}
     assert first == 2 and sorted(m[0][0] for m in mails[:2]) == [f"{JUDGES[1]}@x.pl", f"{MENTOR}@x.pl"]
     assert mails[0][1] == "Mentor: 2 nowe sprawy w panelu pary"
     # Autor („Kolejny" - mentor) nie dostaje; Anna jeszcze nie miała listu, Piotr - dopiero po 30 min.

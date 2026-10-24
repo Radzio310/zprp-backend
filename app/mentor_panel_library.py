@@ -24,6 +24,8 @@ from app.db import (
     mentor_compilations,
     mentor_match_videos,
     mentor_reports,
+    mentor_thread_prefs,
+    mentor_thread_reads,
     mentor_threads,
     mentoring_pairs,
 )
@@ -675,20 +677,104 @@ def _comment_values(ctx: Dict[str, Any], body: Any, *, partial: bool = False) ->
     return values
 
 
-async def _notify_comment(ctx: Dict[str, Any], actor: Actor, thread: Dict[str, Any], body: str, mentions: List[str], *, new: bool) -> None:
+def _surname(full_name: Any) -> str:
+    parts = R.s(full_name).split()
+    return parts[-1] if parts else "Ktoś"
+
+
+def digest_body(unread: List[Dict[str, Any]], names: Dict[str, Dict[str, Any]]) -> str:
+    """„Kowalski i 2 inne: <ostatnia treść>" - od ostatniego przeczytania odbiorcy."""
+    authors: List[str] = []
+    for c in reversed(unread):
+        if c["author_id"] not in authors:
+            authors.append(c["author_id"])
+    lead = _surname((names.get(authors[0]) or {}).get("full_name"))
+    if len(authors) > 1:
+        rest = len(authors) - 1
+        lead += f" i {rest} {'inna' if rest == 1 else 'inne'}"
+    last = R.s(unread[-1].get("body"))
+    return f"{lead}: {last if len(last) <= 120 else last[:117] + '...'}"
+
+
+async def _engaged(ctx: Dict[str, Any], thread: Dict[str, Any], comments: List[Dict[str, Any]], mentions: List[str]) -> List[str]:
+    """Odbiorcy odpowiedzi: autor wątku, piszący, wspomniani i obserwujący, minus wyciszeni."""
+    engaged = {R.s(thread.get("created_by"))} | {R.s(c["author_id"]) for c in comments} | set(mentions)
+    for c in comments:
+        engaged |= set(R.json_value(c.get("mentions"), []))
+    prefs = await C.rows(select(mentor_thread_prefs).where(mentor_thread_prefs.c.thread_id == thread["id"]))
+    engaged |= {R.s(p["judge_id"]) for p in prefs if p["mode"] == "follow"}
+    engaged -= {R.s(p["judge_id"]) for p in prefs if p["mode"] == "mute"}
+    return sorted(engaged & {*ctx["judge_ids"], *ctx["mentor_ids"]})
+
+
+async def _notify_comment(ctx: Dict[str, Any], actor: Actor, thread: Dict[str, Any], body: str, mentions: List[str], *,
+                          new: bool, message_id: Optional[str] = None) -> None:
+    """Jeden push na wątek (tag `mentor-thread-<id>`); treść liczona osobno od przeczytania odbiorcy."""
     from app.mentor_panel_notify import notify, recipients_for
 
+    me = actor.judge_id
     target = thread.get("target_id") if thread.get("target_kind") == "clip" else None
     link = f"{C.WEB_BASE}/{ctx['pair_id']}" + (f"/mecz/{thread['match_id']}" if thread.get("match_id") else "")
-    excerpt = body if len(body) <= 120 else body[:117] + "..."
-    mentioned = [m for m in mentions if m != actor.judge_id]
-    if mentioned:
-        await notify(ctx, actor.judge_id, f"{actor.display_name} wspomina o Tobie", excerpt, recipients=mentioned,
-                     match_id=thread.get("match_id"), clip_id=target, thread_id=thread["id"], link=link)
-    others = [r for r in recipients_for(ctx, actor.judge_id) if r not in mentioned]
-    title = ("Nowy wątek: " + (thread.get("title") or "bez tytułu")) if new else f"{actor.display_name} odpowiada"
-    await notify(ctx, actor.judge_id, title[:120], excerpt, recipients=others, match_id=thread.get("match_id"),
-                 clip_id=target, thread_id=thread["id"], link=link)
+    comments = await C.rows(select(mentor_comments).where(mentor_comments.c.thread_id == thread["id"])
+                            .where(mentor_comments.c.deleted_at.is_(None)).order_by(mentor_comments.c.created_at.asc()))
+    mentioned = {m for m in mentions if m != me}
+    recipients = recipients_for(ctx, me) if new else [r for r in await _engaged(ctx, thread, comments, mentions) if r != me]
+    if not recipients:
+        return
+    names = await C.people({c["author_id"] for c in comments})
+    reads = {R.s(r["judge_id"]): r.get("seen_at") for r in await C.rows(
+        select(mentor_thread_reads).where(mentor_thread_reads.c.thread_id == thread["id"]))}
+    for judge_id in recipients:
+        seen = R.aware(reads.get(judge_id))
+        unread = [c for c in comments if c["author_id"] != judge_id and (seen is None or (R.aware(c.get("created_at")) or seen) > seen)]
+        text = digest_body(unread, names) if unread else (body if len(body) <= 120 else body[:117] + "...")
+        if judge_id in mentioned:
+            title = f"{actor.display_name} wspomina o Tobie"
+        elif new:
+            title = "Nowy wątek: " + (thread.get("title") or "bez tytułu")
+        else:
+            title = thread.get("title") or "Odpowiedź w wątku"
+        await notify(ctx, me, title[:120], text, recipients=[judge_id], match_id=thread.get("match_id"), clip_id=target,
+                     thread_id=thread["id"], message_id=message_id, target="message" if message_id and not new else "thread",
+                     tag=f"mentor-thread-{thread['id']}", link=link)
+
+
+async def mark_thread_read(thread_id: str, judge_id: str) -> None:
+    stamp = C.now()
+    where = (mentor_thread_reads.c.thread_id == thread_id) & (mentor_thread_reads.c.judge_id == judge_id)
+    if await C.one(select(mentor_thread_reads).where(where)):
+        await database.execute(update(mentor_thread_reads).where(where).values(seen_at=stamp))
+    else:
+        await database.execute(mentor_thread_reads.insert().values(thread_id=thread_id, judge_id=judge_id, seen_at=stamp))
+
+
+class FollowBody(BaseModel):
+    mode: str = Field(max_length=10)
+
+
+@router.put("/threads/{thread_id}/follow")
+async def set_follow(thread_id: str, body: FollowBody, actor: Actor = Depends(mentor_actor)):
+    """Obserwuj / wycisz wątek (stan per osoba). `auto` kasuje wybór. Odpowiedź: `{"my_follow": ...}`."""
+    ctx, _row = await _ctx_for(mentor_threads, thread_id, actor, missing="Nie ma takiego wątku.")
+    if body.mode not in ("follow", "mute", "auto"):
+        raise C.err(422, "FOLLOW_MODE", "Tryb wątku: follow (obserwuj), mute (wycisz) albo auto.")
+    where = (mentor_thread_prefs.c.thread_id == thread_id) & (mentor_thread_prefs.c.judge_id == actor.judge_id)
+    if body.mode == "auto":
+        await database.execute(delete(mentor_thread_prefs).where(where))
+    elif await C.one(select(mentor_thread_prefs).where(where)):
+        await database.execute(update(mentor_thread_prefs).where(where).values(mode=body.mode, updated_at=C.now()))
+    else:
+        await database.execute(mentor_thread_prefs.insert().values(thread_id=thread_id, judge_id=actor.judge_id,
+                                                                   mode=body.mode, updated_at=C.now()))
+    return {"my_follow": body.mode, "thread_id": thread_id}
+
+
+@router.post("/threads/{thread_id}/seen")
+async def thread_seen(thread_id: str, actor: Actor = Depends(mentor_actor)):
+    """Oznacza wątek jako przeczytany przez mnie (zeruje kropkę i podstawę treści zbiorczego push)."""
+    await _ctx_for(mentor_threads, thread_id, actor, missing="Nie ma takiego wątku.")
+    await mark_thread_read(thread_id, actor.judge_id)
+    return {"ok": True}
 
 
 async def thread_payload(ctx: Dict[str, Any], thread_id: str) -> Dict[str, Any]:
@@ -725,10 +811,13 @@ async def create_thread(pair_id: str, body: ThreadBody, actor: Actor = Depends(m
               "created_by": actor.judge_id, "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp,
               "last_comment_at": stamp}
     await database.execute(mentor_threads.insert().values(**thread))
-    await database.execute(mentor_comments.insert().values(id=R.new_id(), thread_id=thread["id"], author_id=actor.judge_id,
+    first_id = R.new_id()
+    await database.execute(mentor_comments.insert().values(id=first_id, thread_id=thread["id"], author_id=actor.judge_id,
                                                            acted_by=actor.acted_by, created_at=stamp, mentions=comment.pop("mentions", "[]"), **comment))
     await C.touch(ctx, actor.judge_id, "thread_created", "threads", match_id, {"id": thread["id"]})
-    await _notify_comment(ctx, actor, thread, body.body, R.clean_mentions(body.mentions, [*ctx["judge_ids"], *ctx["mentor_ids"]]), new=True)
+    await _notify_comment(ctx, actor, thread, body.body, R.clean_mentions(body.mentions, [*ctx["judge_ids"], *ctx["mentor_ids"]]),
+                          new=True, message_id=first_id)
+    await mark_thread_read(thread["id"], actor.judge_id)
     return await thread_payload(ctx, thread["id"])
 
 
@@ -759,7 +848,9 @@ async def add_comment(thread_id: str, body: CommentBody, actor: Actor = Depends(
     await database.execute(update(mentor_threads).where(mentor_threads.c.id == thread_id)
                            .values(last_comment_at=stamp, updated_at=stamp))
     await C.touch(ctx, actor.judge_id, "comment_created", "threads", thread.get("match_id"), {"id": comment_id})
-    await _notify_comment(ctx, actor, thread, values["body"], R.json_value(values.get("mentions"), []), new=False)
+    await _notify_comment(ctx, actor, thread, values["body"], R.json_value(values.get("mentions"), []),
+                          new=False, message_id=comment_id)
+    await mark_thread_read(thread_id, actor.judge_id)
     row = await C.one(select(mentor_comments).where(mentor_comments.c.id == comment_id))
     return C.comment_shape(ctx, row, await C.people([actor.judge_id, actor.acted_by]))
 

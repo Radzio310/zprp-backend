@@ -1024,7 +1024,12 @@ async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> 
             .where(requests.c.fulfilled_at.is_(None))
             .values(fulfilled_at=stamp)
         )
-        await notify_pair(match_id, ctx["pair"], authors, str(match["state"].get("RozgrywkiCode") or ""), letter, points)
+        await notify_pair(match_id, ctx["pair"], authors, str(match["state"].get("RozgrywkiCode") or ""), letter, points,
+                          evaluation_id=evaluation_id, state=match["state"])
+    elif publish and existing and existing["status"] == "published":
+        await notify_pair(match_id, ctx["pair"], [existing["author_id"], *json_list(existing["co_author_ids"])],
+                          str(match["state"].get("RozgrywkiCode") or ""), letter, points, evaluation_id=evaluation_id,
+                          state=match["state"], updated=True)
     return {"ok": True, "id": evaluation_id, "points": points, "letter": letter, "status": "published" if publish or (existing and existing["status"] == "published") else "draft"}
 
 
@@ -1132,7 +1137,20 @@ async def mentor_form_rows(
     return out
 
 
-async def notify_pair(match_id: str, pair: tuple, authors: List[str], match_code: str, letter: Optional[str], points: Optional[float]) -> None:
+async def panel_pair_of(pair: tuple) -> Optional[str]:
+    """Id pary z włączonym panelem Mentor dla tych dwóch sędziów (inaczej None)."""
+    from app.db import mentor_panels, mentoring_pairs
+
+    wanted = sorted(str(j) for j in pair)
+    for row in await database.fetch_all(select(mentoring_pairs.c.id, mentoring_pairs.c.judge_ids, mentoring_pairs.c.ended_at)):
+        if row["ended_at"] is None and sorted(str(j) for j in json_list(row["judge_ids"])) == wanted:
+            panel = await database.fetch_one(select(mentor_panels.c.enabled).where(mentor_panels.c.pair_id == row["id"]))
+            return row["id"] if panel and panel["enabled"] else None
+    return None
+
+
+async def notify_pair(match_id: str, pair: tuple, authors: List[str], match_code: str, letter: Optional[str], points: Optional[float],
+                      *, evaluation_id: Optional[str] = None, state: Optional[Dict[str, Any]] = None, updated: bool = False) -> None:
     """Push do ocenianej pary po PIERWSZEJ publikacji. Awaria wysyłki nie cofa zapisu.
 
     Ładunek `type: "match_change"` + numer i `IdZawody` otwiera szczegóły tego
@@ -1142,6 +1160,25 @@ async def notify_pair(match_id: str, pair: tuple, authors: List[str], match_code
         from app.push.push import send_push_to_judges
 
         names = await people(authors)
+        pair_id = await panel_pair_of(pair) if evaluation_id else None
+        if pair_id:
+            # Para z panelem Mentor: push otwiera ocenę w panelu, jeden kafelek na mecz.
+            from app.mentor_panel_notify import match_image, push_data
+            from app.push.push import send_push_to_judges
+
+            state = state or {}
+            home, away = str(state.get("ID_zespoly_gosp_ZespolNazwa") or "").strip(), str(state.get("ID_zespoly_gosc_ZespolNazwa") or "").strip()
+            teams = f"{home} - {away}" if home and away else match_code
+            score = " · ".join(x for x in (f"forma {letter}" if letter else "", f"{points:.2f} pkt".replace(".", ",") if points is not None else "") if x)
+            data = push_data(pair_id, target="sheet", match_id=str(match_id), sheet_id=evaluation_id,
+                             tag=f"mentor-sheet-{match_id}", quiet=updated, image=await match_image(str(match_id)))
+            await send_push_to_judges(
+                sorted(set(pair) - set(authors)),
+                "Ocena zaktualizowana" if updated else f"Nowa ocena: {teams}"[:120],
+                (teams + (f" · {score}" if score else "")) if updated else (score or "Mentor opublikował ocenę Waszego meczu"),
+                data, app_variant="baza", preference_key="mentorPanel",
+            )
+            return
         who = " i ".join(names[a]["full_name"] for a in authors if a in names) or "Mentor"
         score = f" · {letter} ({points:.2f})".replace(".", ",") if letter and points is not None else ""
         await send_push_to_judges(

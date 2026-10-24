@@ -261,6 +261,29 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
     Index("ix_mentor_audit_pair_rev", audit.c.pair_id, audit.c.rev)
+    # Powiadomienia i kropki nowości (24.10.2026): stan per osoba, tylko dopisywany.
+    thread_prefs = Table(
+        "mentor_thread_prefs",
+        metadata,
+        Column("thread_id", String, primary_key=True),
+        Column("judge_id", String, primary_key=True),
+        Column("mode", String, nullable=False),  # follow | mute (brak wiersza = auto)
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    thread_reads = Table(
+        "mentor_thread_reads",
+        metadata,
+        Column("thread_id", String, primary_key=True),
+        Column("judge_id", String, primary_key=True),
+        Column("seen_at", DateTime(timezone=True), nullable=False),
+    )
+    sheet_seen = Table(
+        "mentor_sheet_seen",
+        metadata,
+        Column("evaluation_id", String, primary_key=True),
+        Column("judge_id", String, primary_key=True),
+        Column("seen_at", DateTime(timezone=True), nullable=False),
+    )
     # Wyszukiwanie nagrania meczu na YouTube na żądanie pary (24.10.2026,
     # `app/mentor_panel_streams.py`): licznik dobowy (doba warszawska), ostatni
     # wynik (wspólny dla sędziów i mentorów) i odrzucone filmy („Nie ten").
@@ -295,6 +318,9 @@ def define_tables(metadata):
         audit,
         short_links,
         stream_searches,
+        thread_prefs,
+        thread_reads,
+        sheet_seen,
     )
 
 

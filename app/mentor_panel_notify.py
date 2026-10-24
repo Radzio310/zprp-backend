@@ -2,8 +2,9 @@
 Panel „Mentor" - powiadomienia: push (BAZA) od razu i zbiorczy e-mail (Brevo)
 najwyżej co 30 minut na osobę (`docs/mentor-panel.md`, 4.3 i 4.8).
 
-Push: `kind=mentor_panel` + `pairId`, `matchId`, `clipId`, `threadId` (napisy -
-FCM przyjmuje tylko napisy), przełącznik w telefonie `mentorPanel`.
+Push: `kind=mentor_panel` + `pairId`, `matchId`, `clipId`, `threadId`, `messageId`,
+`sheetId`, `target` (sheet|thread|message), `tag` (napisy - FCM przyjmuje tylko
+napisy), przełącznik w telefonie `mentorPanel`. `tag` skleja powiadomienia w jeden kafelek.
 E-mail: zdarzenia czekają w pamięci procesu i wychodzą jednym listem, gdy od
 poprzedniego listu do tej osoby minęło 30 minut. Restart serwera gubi
 oczekujące (push już dotarł), więc e-mail jest tylko przypomnieniem.
@@ -38,16 +39,60 @@ def recipients_for(ctx: Dict[str, Any], actor_id: str, only: Optional[Iterable[s
     return sorted({str(x) for x in everyone if str(x) and str(x) != str(actor_id)})
 
 
+ACCENT = "#FF7A59"  # koral Mentora (kolor ikony powiadomienia Androida)
+
+
+async def match_image(match_id: Optional[str]) -> Optional[str]:
+    """Herb gospodarza meczu (https, nie SVG) jako obraz powiadomienia; brak = bez obrazu."""
+    if not match_id:
+        return None
+    try:
+        from sqlalchemy import select
+
+        from app.db import database, zprp_public_clubs, zprp_public_matches
+
+        match = await database.fetch_one(select(zprp_public_matches.c.home_club_id)
+                                         .where(zprp_public_matches.c.match_id == str(match_id)))
+        club_id = match["home_club_id"] if match else None
+        if not club_id:
+            return None
+        club = await database.fetch_one(select(zprp_public_clubs.c.logo_url).where(zprp_public_clubs.c.club_id == club_id))
+        url = str(club["logo_url"] or "") if club else ""
+        return url if url.startswith("https://") and not url.lower().split("?")[0].endswith(".svg") else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def push_data(pair_id: Any, *, target: Optional[str] = None, match_id: Optional[str] = None, clip_id: Optional[str] = None,
+              thread_id: Optional[str] = None, message_id: Optional[str] = None, sheet_id: Optional[str] = None,
+              tag: Optional[str] = None, quiet: bool = False, image: Optional[str] = None) -> Dict[str, str]:
+    """Ładunek push panelu (FCM: same napisy). `tag` = tag Androida + collapse key + apns-collapse-id."""
+    data = {"type": "mentor_panel", "kind": "mentor_panel", "pairId": str(pair_id)}
+    for key, value in (("matchId", match_id), ("clipId", clip_id), ("threadId", thread_id), ("messageId", message_id),
+                       ("sheetId", sheet_id), ("target", target), ("tag", tag)):
+        if value:
+            data[key] = str(value)
+    if tag:
+        data["notificationTag"] = str(tag)
+    data["notificationColor"] = ACCENT
+    if image:
+        data["notificationImage"] = image
+    if quiet:
+        data["notificationSilent"] = "1"
+        data["notificationPriority"] = "normal"
+    return data
+
+
 async def notify(ctx: Dict[str, Any], actor_id: str, title: str, body: str, *, recipients: Optional[List[str]] = None,
                  match_id: Optional[str] = None, clip_id: Optional[str] = None, thread_id: Optional[str] = None,
-                 link: str = "") -> Dict[str, Any]:
+                 link: str = "", message_id: Optional[str] = None, sheet_id: Optional[str] = None,
+                 target: Optional[str] = None, tag: Optional[str] = None, quiet: bool = False) -> Dict[str, Any]:
     ids = recipients if recipients is not None else recipients_for(ctx, actor_id)
     if not ids:
         return {"push": None, "queued": 0}
-    data = {"type": "mentor_panel", "kind": "mentor_panel", "pairId": str(ctx["pair_id"])}
-    for key, value in (("matchId", match_id), ("clipId", clip_id), ("threadId", thread_id)):
-        if value:
-            data[key] = str(value)
+    target = target or ("thread" if thread_id else None)
+    data = push_data(ctx["pair_id"], target=target, match_id=match_id, clip_id=clip_id, thread_id=thread_id,
+                     message_id=message_id, sheet_id=sheet_id, tag=tag, quiet=quiet, image=await match_image(match_id))
     report = None
     try:
         from app.push.push import send_push_to_judges_report
