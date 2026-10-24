@@ -80,6 +80,10 @@ credentials_exception = HTTPException(
 #: Taki token jest w localStorage przeglądarki, więc działa WYŁĄCZNIE na trasach `/exam-live`.
 WEB_SCOPE = "exam-live-web"
 WEB_SCOPE_PREFIX = "/exam-live"
+#: Egzamin na komputerze (`/exam-web`, BAZA_web /egzamin) - token tylko na tych trasach (24.10.2026).
+EXAM_WEB_SCOPE = "exam-web"
+EXAM_WEB_SCOPE_PREFIX = "/exam-web"
+_SCOPE_PREFIXES = {WEB_SCOPE: WEB_SCOPE_PREFIX, EXAM_WEB_SCOPE: EXAM_WEB_SCOPE_PREFIX}
 
 
 def scope_allows(payload: dict, request: Request | None) -> bool:
@@ -87,10 +91,11 @@ def scope_allows(payload: dict, request: Request | None) -> bool:
     scope = payload.get("scope")
     if scope is None:
         return True
-    if scope != WEB_SCOPE or request is None:
+    prefix = _SCOPE_PREFIXES.get(scope)
+    if prefix is None or request is None:
         return False
     path = request.url.path
-    return path == WEB_SCOPE_PREFIX or path.startswith(WEB_SCOPE_PREFIX + "/")
+    return path == prefix or path.startswith(prefix + "/")
 
 
 async def get_current_user(request: Request = None, token: str = Depends(oauth2_scheme)) -> str:

@@ -211,6 +211,30 @@ DEFAULT_ANTI: Dict[str, Any] = {
     "integrity": copy.deepcopy(DEFAULT_INTEGRITY),
 }
 
+#: Egzamin na komputerze (BAZA_web /egzamin, 24.10.2026): reakcja na naruszenie
+#: (wyjście z pełnego ekranu, zmiana karty, PrtScn, devtools, druga sesja, telefon-strażnik).
+#: `log` = tylko zapis, `warn` = zapis + ostrzeżenie pełnoekranowe, `submit` = jak `warn`,
+#: a po `submit_after` naruszeniach arkusz oddaje się sam. Domyślnie ostrzeżenie, po 3 oddanie.
+WEB_REACTIONS = ("log", "warn", "submit")
+DEFAULT_WEB: Dict[str, Any] = {"reaction": "submit", "submit_after": 3}
+DEFAULT_ANTI["web"] = dict(DEFAULT_WEB)
+
+
+def clean_web(raw: Any) -> Dict[str, Any]:
+    """Ustawienie reakcji egzaminu na komputerze; brak = domyślne (stary egzamin też)."""
+    given = raw if isinstance(raw, Mapping) else {}
+    reaction = _s(given.get("reaction")) or DEFAULT_WEB["reaction"]
+    if reaction not in WEB_REACTIONS:
+        raise ExamError("BAD_CONFIG", "Reakcja na naruszenie na komputerze: zapis, ostrzeżenie albo oddanie po N naruszeniach.")
+    after = given.get("submit_after", DEFAULT_WEB["submit_after"])
+    try:
+        after = int(after)
+    except (TypeError, ValueError) as error:
+        raise ExamError("BAD_CONFIG", "Oddanie po N naruszeniach: podaj liczbę od 1 do 20.") from error
+    if not 1 <= after <= 20:
+        raise ExamError("BAD_CONFIG", "Oddanie po N naruszeniach: dozwolony zakres to 1-20.")
+    return {"reaction": reaction, "submit_after": after}
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "scope": {"rules": [], "topics": [], "kinds": [], "manual_ids": [], "difficulty": "any"},
     "question_count": 20,
@@ -428,6 +452,7 @@ def clean_config(raw: Mapping[str, Any], *, template: Any = None) -> Dict[str, A
         "single_device": bool(anti_raw.get("single_device")),
         "room_code": bool(anti_raw.get("room_code")),
         "integrity": clean_integrity(anti_raw.get("integrity")),
+        "web": clean_web(anti_raw.get("web")),
     }
     target_raw = merged.get("target") if isinstance(merged.get("target"), Mapping) else {}
     target = {
@@ -495,7 +520,8 @@ def locked_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> List[str]:
             return sorted(value or [])
         if key == "anti" and isinstance(value, Mapping):
             # Progi rzetelności to ocena komisji, nie zasada dla zdającego - nie są zablokowane.
-            return {k: v for k, v in value.items() if k != "integrity"}
+            # Egzamin sprzed egzaminu na komputerze (24.10.2026) nie ma `web` - brak = domyślne.
+            return {**{k: v for k, v in value.items() if k != "integrity"}, "web": value.get("web") or dict(DEFAULT_WEB)}
         return value
 
     return [key for key in LOCKED_AFTER_START if comparable(old, key) != comparable(new, key)]

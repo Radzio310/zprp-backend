@@ -124,6 +124,7 @@ from app.province_clubs_sync import run_clubs_sync_scheduler
 from app.province_events import router as province_events_router
 from app.exams import router as exams_router
 from app.exam_live import router as exam_live_router
+from app.exam_web import router as exam_web_router
 from app.exam_results import router as exam_results_router
 from app.exam_stats import router as exam_stats_router
 from app.event_links import router as event_links_router
@@ -419,6 +420,7 @@ app.include_router(province_insights_router)
 app.include_router(province_events_router)
 app.include_router(exams_router)
 app.include_router(exam_live_router)
+app.include_router(exam_web_router)
 app.include_router(exam_results_router)
 app.include_router(exam_stats_router)
 app.include_router(event_links_router)

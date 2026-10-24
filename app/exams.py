@@ -324,12 +324,24 @@ async def attempts(exam_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
 
 @router.get("/{exam_id}/attempts/{attempt_id}", summary="Karta zdającego: oś czasu, zdarzenia, rzetelność")
 async def attempt_card(exam_id: str, attempt_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
-    return await _run(S.attempt_card(_store(), who, exam_id, attempt_id))
+    return await _with_web_extras(await _run(S.attempt_card(_store(), who, exam_id, attempt_id)), attempt_id)
 
 
 @router.get("/{exam_id}/attempts/{attempt_id}/review", summary="Przegląd podejścia dla komisji: klucz, czasy, oś zdarzeń i flagi")
 async def committee_review(exam_id: str, attempt_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
-    return await _run(S.committee_review(_store(), who, exam_id, attempt_id))
+    return await _with_web_extras(await _run(S.committee_review(_store(), who, exam_id, attempt_id)), attempt_id)
+
+
+async def _with_web_extras(body: Dict[str, Any], attempt_id: str) -> Dict[str, Any]:
+    """Egzamin na komputerze (24.10.2026): `events[].t_ms/label`, `flags` (rytm, kliknięcia, strażnik...) i `web`.
+    Błąd dodatków nie psuje karty - komisja dostaje wtedy kartę bez nich."""
+    try:
+        from app.exam_web import card_extras, merge_card
+
+        return merge_card(body, await card_extras(attempt_id))
+    except Exception:  # noqa: BLE001
+        logger.warning("exam-web: dodatki karty podejścia nieudane", exc_info=True)
+        return body
 
 
 @router.post("/{exam_id}/attempts/{attempt_id}/allow-device", summary="Zgoda komisji na wznowienie na innym urządzeniu")
@@ -373,4 +385,10 @@ async def similarity(exam_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]
 
 
 async def run_exam_sweep() -> int:
+    try:
+        from app.exam_web import cleanup as _web_cleanup
+
+        await _web_cleanup()
+    except Exception:  # noqa: BLE001 - sprzątanie kodów QR komputera nie może zatrzymać przypomnień
+        logger.warning("exam-web: sprzątanie nieudane", exc_info=True)
     return await S.sweep_exam_reminders(_store())

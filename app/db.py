@@ -4649,6 +4649,15 @@ from app.exam_live_tables import define_tables as _define_exam_live_tables
     exam_live_answers,
 ) = _define_exam_live_tables(metadata)
 
+# Egzamin na komputerze (kody QR, komputer + telefon-strażnik, sesje w przeglądarce).
+from app.exam_web_tables import define_tables as _define_exam_web_tables
+
+(
+    exam_web_codes,
+    exam_web_links,
+    exam_web_sessions,
+) = _define_exam_web_tables(metadata)
+
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
