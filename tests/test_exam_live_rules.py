@@ -95,9 +95,21 @@ def test_punkty_za_szybkosc():
 
 def test_odpowiedz_walidacja_i_termin():
     assert L.clean_selection(Q, ["a", "a"]) == ["a"]
-    for bad in ([], ["z"], ["a", "b"]):
+    for bad in ([], ["z"]):
         with pytest.raises(ExamError):
             L.clean_selection(Q, bad)
+    # Domyślnie wolno zaznaczyć kilka (jak w egzaminie indywidualnym); blokuje to tylko podpowiedź "jedna poprawna".
+    assert L.clean_selection(Q, ["a", "b"]) == ["a", "b"]
+    assert L.clean_selection(Q, ["a", "b"], L.clean_live_config({}, "quiz")) == ["a", "b"]
+    for hinted in ({"single_hint_all": True}, {"single_hint_ids": ["q1-1"]}):
+        cfg = L.clean_live_config(hinted, "quiz")
+        with pytest.raises(ExamError) as e:
+            L.clean_selection(Q, ["a", "b"], cfg)
+        assert e.value.code == "LIVE_SINGLE_ONLY"
+        assert L.clean_selection(Q, ["a"], cfg) == ["a"]
+    pub = L._public_question(Q, tiles=False, cfg=L.clean_live_config({"single_hint_all": True}, "quiz"))
+    assert pub["multi"] is False and pub["single_hint"] is True
+    assert L._public_question(Q, tiles=False, cfg=L.clean_live_config({}, "quiz"))["multi"] is True
     dl = NOW + timedelta(seconds=20)
     assert L.answer_refusal("question", dl, NOW + timedelta(seconds=20)) is None
     assert L.answer_refusal("question", dl, NOW + timedelta(seconds=21)) is None  # zapas sieci

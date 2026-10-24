@@ -73,6 +73,9 @@ def clean_live_config(raw: Optional[Mapping[str, Any]], character: str) -> Dict[
         "multi_scoring": X._choice(raw.get("multi_scoring", "all_or_nothing"), X.MULTI_SCORING, "Punktacja wielokrotnego wyboru"),
         "auto_reveal": bool(raw.get("auto_reveal", True)),
         "late_join": bool(raw.get("late_join", not exam)),
+        # Ta sama opcja co w egzaminie indywidualnym: domyślnie wolno zaznaczyć kilka, z podpowiedzią = jedna.
+        "single_hint_all": bool(raw.get("single_hint_all")),
+        "single_hint_ids": X._strings(raw.get("single_hint_ids")),
     }
     rank = raw.get("ranking") if isinstance(raw.get("ranking"), Mapping) else {}
     cfg["ranking"] = {
@@ -213,7 +216,7 @@ def speed_points(mode: str, fraction: float, elapsed_ms: Optional[float], limit_
     return int(round(POINTS_MAX * fraction * (1.0 - 0.5 * ratio)))
 
 
-def clean_selection(question: Mapping[str, Any], selected: Any) -> List[str]:
+def clean_selection(question: Mapping[str, Any], selected: Any, config: Optional[Mapping[str, Any]] = None) -> List[str]:
     keys = [str(k).strip() for k in (selected or []) if str(k).strip()]
     keys = list(dict.fromkeys(keys))
     if not keys:
@@ -222,7 +225,7 @@ def clean_selection(question: Mapping[str, Any], selected: Any) -> List[str]:
     bad = [k for k in keys if k not in valid]
     if bad:
         raise ExamError("LIVE_BAD_KEY", f"Nie ma takiej odpowiedzi: {', '.join(bad)}.")
-    if len(keys) > 1 and not question.get("multi"):
+    if len(keys) > 1 and X.single_hint(config or {}, question):
         raise ExamError("LIVE_SINGLE_ONLY", "To pytanie ma jedną poprawną odpowiedź - zaznacz tylko jedną.")
     return keys
 
@@ -357,18 +360,18 @@ def _session_block(state: Mapping[str, Any], role: str) -> Dict[str, Any]:
         block["controls"] = list(CONTROLS)
         nq = state.get("next_question")
         block["next"] = ({"index": s["q_index"] + 1, "number": nq.get("number"), "rule": nq.get("rule"), "kind": nq.get("kind"),
-                          "multi": bool(nq.get("multi")), "text": nq.get("text")} if nq else None)
+                          "multi": not X.single_hint(cfg, nq), "text": nq.get("text")} if nq else None)
     if role in ("host", "projector"):
         block["pin"] = s["pin"]
         block["links"] = dict(state.get("links") or {})
     return block
 
 
-def _public_question(q: Mapping[str, Any], *, tiles: bool) -> Dict[str, Any]:
-    pub = X.public_question(q)
+def _public_question(q: Mapping[str, Any], *, tiles: bool, cfg: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    pub = X.exam_question(cfg or {}, q)
     if tiles:
         # Same kafle: telefon nie dostaje treści pytania ani odpowiedzi, tylko klucze (kolor/kształt).
-        return {"qid": pub["qid"], "multi": pub["multi"], "tiles_only": True,
+        return {"qid": pub["qid"], "multi": pub["multi"], "single_hint": pub["single_hint"], "tiles_only": True,
                 "answers": [{"key": a["key"]} for a in pub["answers"]]}
     return pub
 
@@ -379,7 +382,7 @@ def _question_block(state: Mapping[str, Any], role: str, now: datetime) -> Optio
     if not q or s["phase"] not in ("question", "reveal"):
         return None
     tiles = role == "player" and s["phone_view"] == "tiles" and s["phase"] == "question"
-    block = _public_question(q, tiles=tiles)
+    block = _public_question(q, tiles=tiles, cfg=s["config"])
     block["index"] = s["q_index"]
     block["total"] = s["q_total"]
     block["time_s"] = s["config"]["question_time_s"]

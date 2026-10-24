@@ -238,6 +238,8 @@ async def create_session(ls: LiveStore, who: S.Who, body: Mapping[str, Any], now
         if ecfg.get("time_per_question_s"):
             raw_config.setdefault("question_time_s", min(600, int(ecfg["time_per_question_s"])))
         raw_config.setdefault("multi_scoring", ecfg.get("multi_scoring") or "all_or_nothing")
+        raw_config.setdefault("single_hint_all", ecfg.get("single_hint_all"))
+        raw_config.setdefault("single_hint_ids", ecfg.get("single_hint_ids"))
         title_default = title_default or exam["name"]
     else:
         scope, province = S._scope_and_province(body, who)
@@ -557,8 +559,8 @@ async def submit_answer(ls: LiveStore, session_id: str, participant_id: str, sel
             raise ExamError("LIVE_ALREADY_ANSWERED", "Odpowiedź na to pytanie już wysłałeś(-aś) - nie można jej zmienić.", 409)
         bank = await S.load_bank(ls.exam, s["bank_version"])
         question = bank[qid]
-        keys = L.clean_selection(question, selected)
         cfg = s["config"]
+        keys = L.clean_selection(question, selected, cfg)
         fraction = X.score_question(question, keys, cfg["multi_scoring"])
         elapsed = max(0.0, (now - s["phase_started_at"]).total_seconds() * 1000.0) if s["phase_started_at"] else None
         points = L.speed_points(cfg["ranking"]["mode"], fraction, elapsed, cfg["question_time_s"])

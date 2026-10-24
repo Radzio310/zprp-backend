@@ -8,9 +8,10 @@ i zdarzeniami.
 
 Wynik w koszu znika OD RAZU ze wszystkiego, co ogląda komisja: listy teczki,
 raportu, rankingu, statystyk łącznych i karty sędziego - każde z tych zapytań
-ma warunek `exam_service._live` (`exam_attempts.deleted_at IS NULL`). Sędzia
-w swojej aplikacji dalej widzi własne podejście (to jego arkusz) i nie dostaje
-przez to drugiego podejścia - kosz nie jest furtką do poprawki.
+ma warunek `exam_service._live` (`exam_attempts.deleted_at IS NULL`). Wynik
+w koszu nie liczy się też do limitu podejść: sędzia może podejść do egzaminu
+ponownie (decyzja 24.10). Przywrócenie wyniku, gdy sędzia ma już nowsze
+podejście, jest odrzucane z wyjaśnieniem (RESULT_NEWER_ATTEMPT).
 
 Uprawnienia jak reszta teczki: `require_manage` okręgu egzaminu (krajowy = admin);
 komisja okręgu oglądająca egzamin krajowy niczego tu nie usuwa.
@@ -66,6 +67,12 @@ async def restore_result(st: S.Store, who: S.Who, exam_id: str, judge_id: str) -
     n = await st.database.fetch_val(select(func.count()).select_from(a).where(cond))
     if not n:
         raise ExamError("RESULT_NOT_IN_TRASH", "Tego wyniku nie ma w koszu - mógł już wrócić albo zniknąć na stałe.", 404)
+    newer = await st.database.fetch_val(select(func.count()).select_from(a).where(
+        and_(a.c.exam_id == exam_id, a.c.judge_id == S._s(judge_id), S._live(a))))
+    if newer:
+        raise ExamError("RESULT_NEWER_ATTEMPT",
+                        "Ten sędzia podszedł już do egzaminu ponownie, więc starego wyniku nie da się przywrócić "
+                        "(w teczce byłyby dwa podejścia). Usuń nowszy wynik albo zostaw stary w koszu.", 409)
     await st.database.execute(update(a).where(cond).values(deleted_at=None, deleted_by=None, deleted_by_name=None))
     return {"exam_id": exam_id, "judge_id": S._s(judge_id), "restored": True, "exam_in_trash": exam.get("deleted_at") is not None}
 

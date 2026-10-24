@@ -511,7 +511,7 @@ async def list_for_judge(st: Store, who: Who, now: Optional[datetime] = None) ->
     t = st.t
     rows = await st.database.fetch_all(select(t.definitions).where(t.definitions.c.deleted_at.is_(None))
                                        .order_by(t.definitions.c.closes_at.desc()).limit(300))
-    mine = await st.database.fetch_all(select(t.attempts).where(t.attempts.c.judge_id == who.judge_id))
+    mine = await st.database.fetch_all(select(t.attempts).where(and_(t.attempts.c.judge_id == who.judge_id, _live(t.attempts))))
     attempts: Dict[str, List[Dict[str, Any]]] = {}
     for raw in mine:
         a = _row(raw)
@@ -738,10 +738,14 @@ async def _eligibility(st: Store, who: Who, exam: Mapping[str, Any]) -> None:
         raise ExamError("EXAM_NOT_INVITED", "Ten egzamin jest skierowany do innej grupy sędziów (ustawiono adresatów po odznakach).", 403)
 
 
-async def _my_attempts(st: Store, exam_id: str, judge_id: str) -> List[Dict[str, Any]]:
+async def _my_attempts(st: Store, exam_id: str, judge_id: str, *, with_trash: bool = False) -> List[Dict[str, Any]]:
+    """Podejścia sędziego w egzaminie. Domyślnie bez kosza teczki: wynik w koszu nie liczy się do limitu
+    podejść, więc sędzia może podejść ponownie (decyzja 24.10). `with_trash` służy tylko do numeracji."""
     t = st.t
-    rows = await st.database.fetch_all(select(t.attempts).where(and_(t.attempts.c.exam_id == exam_id, t.attempts.c.judge_id == judge_id))
-                                       .order_by(t.attempts.c.attempt_no))
+    cond = and_(t.attempts.c.exam_id == exam_id, t.attempts.c.judge_id == judge_id)
+    if not with_trash:
+        cond = and_(cond, _live(t.attempts))
+    rows = await st.database.fetch_all(select(t.attempts).where(cond).order_by(t.attempts.c.attempt_no))
     out = []
     for raw in rows:
         out.append(_attempt(raw))
@@ -899,7 +903,9 @@ async def start_attempt(st: Store, who: Who, exam_id: str, body: Mapping[str, An
         if config["anti"]["room_code"] and not X.room_code_ok(st.secret, exam_id, body.get("room_code"), now):
             raise ExamError("EXAM_ROOM_CODE", "Podaj aktualny kod sali (6 cyfr z ekranu prowadzącego, zmienia się co 30 s).", 403)
         bank = await load_bank(st, exam["bank_version"])
-        attempt_no = len(attempts) + 1
+        # Numer rośnie też ponad podejścia z kosza (ux_exam_attempt_no obejmuje cały egzamin sędziego).
+        everything = await _my_attempts(st, exam_id, who.judge_id, with_trash=True)
+        attempt_no = max([a["attempt_no"] for a in everything] + [0]) + 1
         paper = X.build_paper(config, exam["question_ids"], bank, exam_id=exam_id, judge_id=who.judge_id, attempt_no=attempt_no)
         attempt_id = uuid.uuid4().hex
         device = _s(body.get("device_id")) or None
@@ -1165,8 +1171,11 @@ async def attempt_card(st: Store, who: Who, exam_id: str, attempt_id: str) -> Di
     timeline = []
     for item in attempt["paper"]:
         row = answers.get(item["qid"]) or {}
+        order = list(item.get("keys") or [])
+        # Litera = pozycja odpowiedzi na karcie zdającego (a-d od góry), nie klucz z katalogu.
+        letters = [chr(97 + order.index(k)) for k in (row.get("selected") or []) if k in order]
         timeline.append({"position": row.get("position"), "qid": item["qid"], "number": bank[item["qid"]]["number"],
-                         "selected": row.get("selected"), "shown_at": _iso(row.get("shown_at")),
+                         "selected": row.get("selected"), "selected_letters": letters, "keys": order, "shown_at": _iso(row.get("shown_at")),
                          "answered_at": _iso(row.get("answered_at")), "elapsed_ms": row.get("elapsed_ms"),
                          "timed_out": bool(row.get("timed_out")), "changes": row.get("changes"), "flags": row.get("flags")})
     return {"attempt_id": attempt_id, "judge_id": attempt["judge_id"], "judge_name": attempt.get("judge_name"),

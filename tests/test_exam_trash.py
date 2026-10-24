@@ -98,3 +98,34 @@ def test_miniatura_bez_parametrow_w_case():
     asyncio.run(S._people_summary(st, ["x"]))
     params = captured["sql"].params
     assert not any(isinstance(v, int) and not isinstance(v, bool) for v in params.values()), params
+
+
+async def test_wynik_w_koszu_pozwala_podejsc_ponownie(st):
+    exam, now = await _two_results(st)
+    await T.delete_result(st, COMMISSION, exam["id"], PLAIN.judge_id, now=now)
+    # Limit to jedno podejście, ale to z kosza się nie liczy.
+    listing = await S.list_for_judge(st, PLAIN, now=now)
+    mine = {e["id"]: e for e in listing["exams"]}[exam["id"]]
+    assert mine["my_attempts"] == [] and mine["attempts_left"] == 1
+    state = await S.start_attempt(st, PLAIN, exam["id"], {}, now=now)
+    assert state["attempt"]["attempt_no"] == 2  # numer rośnie ponad podejście z kosza
+
+
+async def test_przywrocenie_przy_nowszym_podejsciu_sie_tlumaczy(st):
+    exam, now = await _two_results(st)
+    await T.delete_result(st, COMMISSION, exam["id"], PLAIN.judge_id, now=now)
+    await S.start_attempt(st, PLAIN, exam["id"], {}, now=now)
+    with pytest.raises(ExamError) as e:
+        await T.restore_result(st, COMMISSION, exam["id"], PLAIN.judge_id)
+    assert e.value.code == "RESULT_NEWER_ATTEMPT" and e.value.status == 409 and e.value.message
+
+
+async def test_os_czasu_podejscia_ma_litery_pozycji(st):
+    exam, now = await _two_results(st)
+    report = await RS.build_report(st, COMMISSION, exam["id"], now=now)
+    aid = next(r["attempt_id"] for r in report["ranking"] if r["judge_id"] == PLAIN.judge_id)
+    card = await S.attempt_card(st, COMMISSION, exam["id"], aid)
+    for step in card["timeline"]:
+        assert len(step["keys"]) >= 2
+        for k, letter in zip(step["selected"] or [], step["selected_letters"]):
+            assert letter == chr(97 + step["keys"].index(k))
