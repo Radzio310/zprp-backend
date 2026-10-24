@@ -90,6 +90,7 @@ def define_tables(metadata):
         Column("match_ms", BigInteger, nullable=True),
         Column("half", Integer, nullable=True),
         Column("author_id", String, nullable=False),
+        Column("acted_by", String, nullable=True),  # admin działający okiem mentora
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
@@ -110,6 +111,7 @@ def define_tables(metadata):
         Column("description", Text, nullable=True),
         Column("mode", String, nullable=False, server_default=text("'free'")),
         Column("created_by", String, nullable=False),
+        Column("acted_by", String, nullable=True),  # admin działający okiem mentora
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("public_token", String, nullable=True, unique=True),
@@ -140,6 +142,7 @@ def define_tables(metadata):
         Column("kind", String, nullable=False, server_default=text("'question'")),
         Column("status", String, nullable=False, server_default=text("'open'")),
         Column("created_by", String, nullable=False),
+        Column("acted_by", String, nullable=True),  # admin działający okiem mentora
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("last_comment_at", DateTime(timezone=True), nullable=True),
@@ -151,6 +154,7 @@ def define_tables(metadata):
         Column("id", String, primary_key=True),
         Column("thread_id", String, nullable=False, index=True),
         Column("author_id", String, nullable=False),
+        Column("acted_by", String, nullable=True),  # admin działający okiem mentora
         Column("body", Text, nullable=False),
         Column("video_id", String, nullable=True),
         Column("video_s", Float, nullable=True),
@@ -253,6 +257,7 @@ def define_tables(metadata):
         Column("rev", BigInteger, nullable=True),
         Column("scope", String, nullable=True),
         Column("match_id", String, nullable=True),
+        Column("acted_by", String, nullable=True),  # admin działający okiem mentora (`actor_id` = mentor)
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
     Index("ix_mentor_audit_pair_rev", audit.c.pair_id, audit.c.rev)
@@ -296,6 +301,11 @@ def define_tables(metadata):
 #: Wykonywane przy starcie przez `app/db.py` (PostgreSQL). Indeksy na numerach
 #: sędziów - lista meczów pary pyta hurtownię i archiwum po obu numerach.
 MIGRATIONS = (
+    "ALTER TABLE mentor_clips ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
+    "ALTER TABLE mentor_compilations ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
+    "ALTER TABLE mentor_threads ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
+    "ALTER TABLE mentor_comments ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
+    "ALTER TABLE mentor_audit ADD COLUMN IF NOT EXISTS acted_by VARCHAR",
     "ALTER TABLE mentor_compilation_items ADD COLUMN IF NOT EXISTS label VARCHAR",
     "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_1 ON zprp_public_matches (referee_1_id)",
     "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_2 ON zprp_public_matches (referee_2_id)",

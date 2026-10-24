@@ -109,6 +109,27 @@ async def _decode_bearer(request: Request, token: str) -> Dict[str, Any]:
 
 
 async def mentor_actor(request: Request) -> C.MentorActor:
+    """Zależność tras panelu: sędzia z `base_actor`, a z `?act_as=<judge_id mentora>` administrator
+    działający okiem mentora (uprawnienia i autorstwo mentora, ślad `acted_by`)."""
+    actor = await base_actor(request)
+    act_as = R.s(request.query_params.get("act_as"))
+    if not act_as or act_as == actor.judge_id:
+        return actor
+    if not actor.is_admin:
+        raise C.err(403, "ACT_AS_FORBIDDEN", "Tylko administrator może działać okiem mentora.")
+    target = await C.load_actor(act_as, via=actor.via, session=actor.session)
+    if not target.display_name or target.display_name == f"Sędzia {act_as}":
+        found = await C.one(select(C.province_judges).where(C.province_judges.c.judge_id == act_as))
+        if not found:
+            raise C.err(403, "ACT_AS_UNKNOWN", f"Nie ma sędziego o numerze {act_as}.")
+    # Uprawnienia czysto mentorskie: nawet administrator-mentor nie dziedziczy ról admina.
+    target.is_admin = False
+    target.acted_by = actor.judge_id
+    target.acted_by_name = actor.display_name
+    return target
+
+
+async def base_actor(request: Request) -> C.MentorActor:
     """JWT aplikacji albo sesja web; przy zapisie z sesji web wymagany `X-CSRF-Token`."""
     auth = request.headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
@@ -142,7 +163,7 @@ async def jwt_actor(request: Request) -> C.MentorActor:
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("bearer "):
         raise C.err(401, "APP_ONLY", "Logowanie komputera zatwierdza się w aplikacji BAZA.")
-    return await mentor_actor(request)
+    return await base_actor(request)
 
 
 def me_payload(actor: C.MentorActor) -> Dict[str, Any]:
@@ -287,12 +308,12 @@ async def password_login(body: LoginBody, request: Request, response: Response):
 
 
 @router.get("/auth/me")
-async def auth_me(actor: C.MentorActor = Depends(mentor_actor)):
+async def auth_me(actor: C.MentorActor = Depends(base_actor)):
     return me_payload(actor)
 
 
 @router.get("/auth/csrf")
-async def auth_csrf(request: Request, response: Response, actor: C.MentorActor = Depends(mentor_actor)):
+async def auth_csrf(request: Request, response: Response, actor: C.MentorActor = Depends(base_actor)):
     if actor.via != "web" or not actor.session:
         return {"csrf": None}
     salt = _hash(secrets.token_urlsafe(32))

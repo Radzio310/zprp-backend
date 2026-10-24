@@ -181,6 +181,7 @@ async def dashboard(pair_id: str, actor: Actor = Depends(mentor_actor)):
 
     return {
         "pair": C.pair_people_shape(ctx["pair"], ctx["mentor_ids"], names),
+        "mentors": C.pair_people_shape(ctx["pair"], ctx["mentor_ids"], names)["mentors"],
         "role": ctx["role"], "enabled": ctx["enabled"], "rev": ctx["rev"], "me": actor.me(),
         "can": {action: C.may(ctx, action) for action in ("flag", "video", "create", "categories", "publish", "toggle")},
         "next_match": nxt, "last_match": last,

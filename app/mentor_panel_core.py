@@ -93,7 +93,8 @@ class MentorActor:
 
     def __init__(self, judge_id: str, *, display_name: str = "", is_admin: bool = False, province: str = "",
                  badges: Iterable[str] = (), via: str = "jwt", session: Optional[Dict[str, Any]] = None,
-                 photo_url: Optional[str] = None):
+                 photo_url: Optional[str] = None, acted_by: Optional[str] = None,
+                 acted_by_name: Optional[str] = None):
         self.judge_id = R.s(judge_id)
         self.display_name = display_name or f"Sędzia {self.judge_id}"
         self.is_admin = bool(is_admin)
@@ -102,13 +103,17 @@ class MentorActor:
         self.via = via
         self.session = session
         self.photo_url = photo_url
+        # Tryb `act_as`: administrator (`acted_by`) działa okiem mentora `judge_id`.
+        self.acted_by = acted_by or None
+        self.acted_by_name = acted_by_name or None
 
     def as_rule_actor(self) -> Dict[str, Any]:
         return {"judge_id": self.judge_id, "is_admin": self.is_admin, "province": self.province, "badges": self.badges}
 
     def me(self) -> Dict[str, Any]:
         return {"judge_id": self.judge_id, "display_name": self.display_name, "is_admin": self.is_admin,
-                "province": self.province, "photo_url": self.photo_url, "via": self.via}
+                "province": self.province, "photo_url": self.photo_url, "via": self.via,
+                "acted_by": self.acted_by, "acted_by_name": self.acted_by_name}
 
 
 def canonical_province(value: Any) -> str:
@@ -156,6 +161,14 @@ async def people(ids: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
             "photo_url": (by_id.get(i) or {}).get("photo_url")}
         for i in wanted
     }
+
+
+def acted_fields(names: Dict[str, Dict[str, Any]], row: Dict[str, Any]) -> Dict[str, Any]:
+    """`acted_by` (administrator działający okiem mentora) i jego nazwisko; null gdy brak."""
+    key = R.s(row.get("acted_by"))
+    if not key:
+        return {"acted_by": None, "acted_by_name": None}
+    return {"acted_by": key, "acted_by_name": (names.get(key) or {}).get("full_name") or f"Sędzia {key}"}
 
 
 def person(names: Dict[str, Dict[str, Any]], judge_id: Any) -> Dict[str, Any]:
@@ -224,6 +237,10 @@ async def pair_context(pair_id: str, actor: MentorActor, *, action: str = "view"
         config = await mentoring_config(pair["province"])
         role = role or R.role_in_pair(rule_actor, pair, links, config)
     manages = actor.is_admin or (config is not None and R.committee_scope(rule_actor, pair, config))
+    if actor.acted_by:
+        if role != "mentor" or actor.judge_id not in {R.s(link["mentor_id"]) for link in links if link.get("ended_at") is None}:
+            raise err(403, "ACT_AS_NOT_MENTOR",
+                      f"Sędzia {actor.display_name} nie jest mentorem tej pary - nie można działać jego oczami.")
     if role is None:
         raise err(403, "NO_ACCESS", "Nie masz dostępu do panelu tej pary.")
     panel = await ensure_panel(pair["id"])
@@ -294,6 +311,7 @@ async def touch(ctx_or_pair: Any, actor_id: str, action: str, scope: str, match_
                 data: Optional[Dict[str, Any]] = None) -> int:
     """Każdy zapis podbija `mentor_panels.rev` i zostawia ślad w `mentor_audit`."""
     pair_id = ctx_or_pair["pair_id"] if isinstance(ctx_or_pair, dict) else str(ctx_or_pair)
+    acted_by = ctx_or_pair["actor"].acted_by if isinstance(ctx_or_pair, dict) and ctx_or_pair.get("actor") else None
     await ensure_panel(pair_id)
     await database.execute(
         update(mentor_panels).where(mentor_panels.c.pair_id == pair_id)
@@ -304,7 +322,7 @@ async def touch(ctx_or_pair: Any, actor_id: str, action: str, scope: str, match_
     try:
         await database.execute(mentor_audit.insert().values(
             id=R.new_id(), pair_id=pair_id, actor_id=str(actor_id or ""), action=action, data=dumps(data or {}),
-            rev=rev, scope=scope, match_id=match_id, created_at=now(),
+            rev=rev, scope=scope, match_id=match_id, acted_by=acted_by, created_at=now(),
         ))
     except Exception:  # noqa: BLE001 - ślad nie może cofnąć zapisu
         logger.warning("mentor: zapis śladu nieudany", exc_info=True)
@@ -607,7 +625,7 @@ def clip_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dict[s
         "start_s": row.get("start_s"), "end_s": row.get("end_s"), "title": row.get("title"), "note": row.get("note"),
         "category_ids": R.json_value(row.get("category_ids"), []), "source": row.get("source"),
         "source_key": row.get("source_key"), "match_ms": row.get("match_ms"), "half": row.get("half"),
-        "author": person(names, row.get("author_id")), "created_at": row.get("created_at"),
+        "author": person(names, row.get("author_id")), **acted_fields(names, row), "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"), "can_edit": may(ctx, "edit", owner=owner),
         "mp4_status": row.get("mp4_status") or "none",
         "public_url": R.public_url("clip", row.get("public_token")),
@@ -634,7 +652,7 @@ async def clip_threads(pair_id: str, clip_ids: List[str]) -> Dict[str, Dict[str,
 
 
 async def clips_payload(ctx: Dict[str, Any], clip_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    names = await people({r.get("author_id") for r in clip_rows})
+    names = await people({r.get("author_id") for r in clip_rows} | {r.get("acted_by") for r in clip_rows})
     threads = await clip_threads(ctx["pair_id"], [r["id"] for r in clip_rows])
     return [clip_shape(ctx, r, names, threads.get(r["id"])) for r in clip_rows]
 
@@ -644,7 +662,8 @@ def comment_shape(ctx: Dict[str, Any], row: Dict[str, Any], names: Dict[str, Dic
     owner = author["judge_id"] == ctx["actor"].judge_id
     drawing = R.json_value(row.get("drawing_json"), [])
     return {
-        "id": row["id"], "author": {**author, "role": member_role(ctx, author["judge_id"])}, "body": row.get("body"),
+        "id": row["id"], "author": {**author, "role": member_role(ctx, author["judge_id"])}, **acted_fields(names, row),
+        "body": row.get("body"),
         "video_id": row.get("video_id"), "video_s": row.get("video_s"), "drawing": drawing or None,
         "mentions": R.json_value(row.get("mentions"), []), "created_at": row.get("created_at"),
         "edited_at": row.get("edited_at"), "can_edit": may(ctx, "edit", owner=owner),
@@ -658,14 +677,16 @@ async def threads_payload(ctx: Dict[str, Any], thread_rows: List[Dict[str, Any]]
         for c in await rows(select(mentor_comments).where(mentor_comments.c.thread_id.in_(ids))
                             .where(mentor_comments.c.deleted_at.is_(None)).order_by(mentor_comments.c.created_at.asc())):
             comments.setdefault(c["thread_id"], []).append(c)
-    names = await people({t.get("created_by") for t in thread_rows} | {c.get("author_id") for cs in comments.values() for c in cs})
+    names = await people({t.get("created_by") for t in thread_rows} | {t.get("acted_by") for t in thread_rows}
+                         | {c.get("author_id") for cs in comments.values() for c in cs}
+                         | {c.get("acted_by") for cs in comments.values() for c in cs})
     out = []
     for t in thread_rows:
         items = comments.get(t["id"], [])
         shaped = {
             "id": t["id"], "target_kind": t.get("target_kind"), "target_id": t.get("target_id"), "match_id": t.get("match_id"),
             "title": t.get("title"), "kind": t.get("kind"), "status": t.get("status"),
-            "created_by": person(names, t.get("created_by")), "created_at": t.get("created_at"),
+            "created_by": person(names, t.get("created_by")), **acted_fields(names, t), "created_at": t.get("created_at"),
             "last_comment_at": t.get("last_comment_at"),
             "can_edit": may(ctx, "edit", owner=R.s(t.get("created_by")) == ctx["actor"].judge_id),
         }

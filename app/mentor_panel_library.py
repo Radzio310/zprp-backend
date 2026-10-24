@@ -322,7 +322,7 @@ async def create_clip(pair_id: str, body: ClipBody, actor: Actor = Depends(mento
         "source": source, "source_key": R.plain(body.source_key, 120) or None,
         "match_ms": body.match_ms if body.match_ms is None or 0 <= body.match_ms <= 3 * 3600 * 1000 else None,
         "half": body.half if body.half in (1, 2) else None, "author_id": actor.judge_id,
-        "created_at": stamp, "updated_at": stamp, "mp4_status": "none",
+        "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp, "mp4_status": "none",
     }
     await database.execute(mentor_clips.insert().values(**row))
     await C.touch(ctx, actor.judge_id, "clip_created", "clips", card["match_id"], {"id": row["id"]})
@@ -450,7 +450,7 @@ def _cover(clip: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 async def compilation_summaries(ctx: Dict[str, Any], comp_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    names = await C.people({r.get("created_by") for r in comp_rows})
+    names = await C.people({r.get("created_by") for r in comp_rows} | {r.get("acted_by") for r in comp_rows})
     out = []
     for comp in comp_rows:
         items = await _items(comp["id"])
@@ -459,7 +459,7 @@ async def compilation_summaries(ctx: Dict[str, Any], comp_rows: List[Dict[str, A
         out.append({
             "id": comp["id"], "name": comp.get("name"), "mode": comp.get("mode"), "description": comp.get("description"),
             "items_count": len(live), "cover_clip": _cover(clips.get(live[0]["clip_id"])) if live else None,
-            "created_by": C.person(names, comp.get("created_by")), "updated_at": comp.get("updated_at"),
+            "created_by": C.person(names, comp.get("created_by")), **C.acted_fields(names, comp), "updated_at": comp.get("updated_at"),
             "public_url": R.public_url("compilation", comp.get("public_token")),
         })
     return out
@@ -475,10 +475,10 @@ async def compilation_payload(ctx: Dict[str, Any], compilation_id: str) -> Dict[
     cards = {c["match_id"]: c for c in await C.pair_match_cards(ctx["judge_ids"])} if live else {}
     for clip in shaped.values():
         clip["match"] = R.slim_match(cards.get(clip.get("match_id")))
-    names = await C.people([comp.get("created_by")])
+    names = await C.people([comp.get("created_by"), comp.get("acted_by")])
     return {
         "id": comp["id"], "pair_id": comp.get("pair_id"), "name": comp.get("name"), "mode": comp.get("mode"),
-        "description": comp.get("description"), "created_by": C.person(names, comp.get("created_by")),
+        "description": comp.get("description"), "created_by": C.person(names, comp.get("created_by")), **C.acted_fields(names, comp),
         "created_at": comp.get("created_at"), "updated_at": comp.get("updated_at"),
         "public_url": R.public_url("compilation", comp.get("public_token")),
         "can_edit": C.may(ctx, "edit", owner=R.s(comp.get("created_by")) == ctx["actor"].judge_id),
@@ -521,7 +521,7 @@ async def create_compilation(pair_id: str, body: CompilationBody, actor: Actor =
     items = await _valid_items(ctx, body.items or [], mode)
     stamp = C.now()
     row = {"id": R.new_id(), "pair_id": ctx["pair_id"], "name": name, "description": R.plain(body.description, 500) or None,
-           "mode": mode, "created_by": actor.judge_id, "created_at": stamp, "updated_at": stamp}
+           "mode": mode, "created_by": actor.judge_id, "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp}
     await database.execute(mentor_compilations.insert().values(**row))
     await _write_items(row["id"], items)
     await C.touch(ctx, actor.judge_id, "compilation_created", "compilations", data={"id": row["id"]})
@@ -722,10 +722,11 @@ async def create_thread(pair_id: str, body: ThreadBody, actor: Actor = Depends(m
     stamp = C.now()
     thread = {"id": R.new_id(), "pair_id": ctx["pair_id"], "target_kind": body.target_kind, "target_id": body.target_id,
               "match_id": match_id, "title": R.plain(body.title, 120) or None, "kind": body.kind, "status": "open",
-              "created_by": actor.judge_id, "created_at": stamp, "updated_at": stamp, "last_comment_at": stamp}
+              "created_by": actor.judge_id, "acted_by": actor.acted_by, "created_at": stamp, "updated_at": stamp,
+              "last_comment_at": stamp}
     await database.execute(mentor_threads.insert().values(**thread))
     await database.execute(mentor_comments.insert().values(id=R.new_id(), thread_id=thread["id"], author_id=actor.judge_id,
-                                                           created_at=stamp, mentions=comment.pop("mentions", "[]"), **comment))
+                                                           acted_by=actor.acted_by, created_at=stamp, mentions=comment.pop("mentions", "[]"), **comment))
     await C.touch(ctx, actor.judge_id, "thread_created", "threads", match_id, {"id": thread["id"]})
     await _notify_comment(ctx, actor, thread, body.body, R.clean_mentions(body.mentions, [*ctx["judge_ids"], *ctx["mentor_ids"]]), new=True)
     return await thread_payload(ctx, thread["id"])
@@ -754,13 +755,13 @@ async def add_comment(thread_id: str, body: CommentBody, actor: Actor = Depends(
     stamp = C.now()
     comment_id = R.new_id()
     await database.execute(mentor_comments.insert().values(id=comment_id, thread_id=thread_id, author_id=actor.judge_id,
-                                                           created_at=stamp, **{"mentions": "[]", **values}))
+                                                           acted_by=actor.acted_by, created_at=stamp, **{"mentions": "[]", **values}))
     await database.execute(update(mentor_threads).where(mentor_threads.c.id == thread_id)
                            .values(last_comment_at=stamp, updated_at=stamp))
     await C.touch(ctx, actor.judge_id, "comment_created", "threads", thread.get("match_id"), {"id": comment_id})
     await _notify_comment(ctx, actor, thread, values["body"], R.json_value(values.get("mentions"), []), new=False)
     row = await C.one(select(mentor_comments).where(mentor_comments.c.id == comment_id))
-    return C.comment_shape(ctx, row, await C.people([actor.judge_id]))
+    return C.comment_shape(ctx, row, await C.people([actor.judge_id, actor.acted_by]))
 
 
 async def _comment_ctx(comment_id: str, actor: Actor) -> tuple:
@@ -781,7 +782,7 @@ async def update_comment(comment_id: str, body: CommentPatch, actor: Actor = Dep
     await database.execute(update(mentor_comments).where(mentor_comments.c.id == comment_id).values(**values))
     await C.touch(ctx, actor.judge_id, "comment_updated", "threads", thread.get("match_id"), {"id": comment_id})
     fresh = await C.one(select(mentor_comments).where(mentor_comments.c.id == comment_id))
-    return C.comment_shape(ctx, fresh, await C.people([fresh.get("author_id")]))
+    return C.comment_shape(ctx, fresh, await C.people([fresh.get("author_id"), fresh.get("acted_by")]))
 
 
 @router.delete("/comments/{comment_id}")
