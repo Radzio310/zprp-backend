@@ -228,6 +228,31 @@ def test_zestawienia_kolejnosc_i_wlasnosc(env):
     assert renamed["mode"] == "free" and renamed["items"][0]["column"] is None
 
 
+def test_zestawienie_jako_playlista_z_etykietami(env):
+    async def go():
+        L = env.library
+        pair = await env.actor(JUDGES[0])
+        a = await L.create_clip(PAIR, clip_body(env, start_s=10, end_s=20), pair)
+        b = await L.create_clip(PAIR, clip_body(env, start_s=30, end_s=40), pair)
+        c = await L.create_clip(PAIR, clip_body(env, start_s=50, end_s=60), pair)
+        old = await L.create_compilation(PAIR, L.CompilationBody(name="Stary", mode="contrast",
+                                                                 items=[{"clip_id": a["id"], "column": "a"}, {"clip_id": b["id"], "column": "b"}]), pair)
+        legacy_read = await L.get_compilation(old["id"], pair)
+        saved = await L.replace_items(old["id"], L.ItemsBody(mode="free", items=[
+            {"clip_id": b["id"], "label": "Zła decyzja", "note": "spóźniony gwizdek"},
+            {"clip_id": a["id"], "label": "Dobra decyzja"}]), pair)
+        added = await L.add_item(old["id"], L.ItemBody(clip_id=c["id"], label="Balans", note="obie strony"), pair)
+        bad = await raises(L.replace_items(old["id"], L.ItemsBody(mode="inne", items=[]), pair))
+        return legacy_read, saved, added, bad
+
+    legacy_read, saved, added, bad = env.run(go)
+    assert [i["label"] for i in legacy_read["items"]] == ["Wzorzec", "Do poprawy"]
+    assert saved["mode"] == "free" and [(i["label"], i["note"], i["column"]) for i in saved["items"]] == [
+        ("Zła decyzja", "spóźniony gwizdek", None), ("Dobra decyzja", None, None)]
+    assert [(i["label"], i["note"]) for i in added["items"]][-1] == ("Balans", "obie strony")
+    assert bad == (422, "COMPILATION_MODE")
+
+
 # ─── Wątki ──────────────────────────────────────────────────────────────────
 
 

@@ -49,7 +49,7 @@ Schemat jak reszta repo: `define_tables(metadata)` + rejestracja w `app/db.py`
   `deleted_at`, `mp4_status` (`none|queued|working|ready|failed`), `mp4_key`, `mp4_size`, `public_token`, `published_at`.
 - `mentor_compilations`: `id`, `pair_id`, `name` (≤60), `description` (≤500), `mode` (`contrast|similar|free`),
   `created_by`, `created_at`, `updated_at`, `public_token`, `published_at`.
-- `mentor_compilation_items`: PK (`compilation_id`, `clip_id`), `position` int, `column` (`a|b`, dla `contrast`), `note` (≤280).
+- `mentor_compilation_items`: PK (`compilation_id`, `clip_id`), `position` int, `column` (`a|b`, dla `contrast`), `note` (≤280), `label` (≤40, od 24.10.2026).
 - `mentor_threads`: `id`, `pair_id`, `target_kind` (`match|clip|compilation|pair`), `target_id`, `match_id` (gdy dotyczy),
   `title` (≤120), `kind` (`question|note|task`), `status` (`open|resolved`), `created_by`, `created_at`, `updated_at`, `last_comment_at`.
 - `mentor_comments`: `id`, `thread_id`, `author_id`, `body` (≤4000), `video_id`, `video_s` (kotwica), `drawing_json`
@@ -169,8 +169,9 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt (klient podmie
 ### 4.7 Zestawienia
 - `GET /pairs/{pairId}/compilations` → `{compilations:[{id, name, mode, description, items_count, cover_clip, created_by, updated_at, public_url}]}`.
 - `POST /pairs/{pairId}/compilations` `{name, mode, description?}`; `PATCH /compilations/{id}`; `DELETE`.
-- `PUT /compilations/{id}/items` `{items:[{clip_id, column?, note?}]}` (całość w kolejności) → `Compilation`; `POST /compilations/{id}/items` `{clip_id, column?}` („Dodaj do zestawienia”).
-- `GET /compilations/{id}` → `{..., items:[{clip: Clip, column, note, position}]}`.
+- `PUT /compilations/{id}/items` `{items:[{clip_id, column?, note?, label?}], mode?}` (całość w kolejności) → `Compilation`; `POST /compilations/{id}/items` `{clip_id, column?, note?, label?}` („Dodaj do zestawienia”).
+- `GET /compilations/{id}` → `{..., items:[{clip: Clip, column, note, label, position}]}`.
+- **Playlista (24.10.2026, addytywnie).** Zestawienie = nazwa + opis („co pokazujemy”) + dowolna liczba klipów z różnych meczów; każdy klip ma `label` (podpowiedzi: Dobra decyzja, Zła decyzja, Balans, Dysproporcja, Wzorzec, Do poprawy, albo dowolny tekst ≤40) i `note` (≤280). Nowi klienci tworzą i zapisują `mode: "free"`. Stary `contrast` czytany jako playlista: `label` pusty = z kolumny (`a` → „Wzorzec”, `b` → „Do poprawy”, `rules.legacy_label`); `PUT .../items` z `mode:"free"` albo `PATCH {mode:"free"}` przepisuje go na playlistę (kolejność A1, B1, A2..., `rules.playlist_items`). Publiczny odczyt oddaje też `label`. Migracja: `ALTER TABLE mentor_compilation_items ADD COLUMN IF NOT EXISTS label`.
 
 ### 4.8 Wątki
 - `GET /pairs/{pairId}/threads?target_kind=&target_id=&status=` → `{threads: Thread[]}`.

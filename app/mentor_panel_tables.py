@@ -123,6 +123,10 @@ def define_tables(metadata):
         Column("position", Integer, nullable=False, server_default=text("0")),
         Column("column", String, nullable=True),
         Column("note", String, nullable=True),
+        # Etykieta klipu w playliście (24.10.2026): „Dobra decyzja”, „Balans”
+        # albo dowolny tekst. Stare zestawienia „kontrast” mają ją pustą - A/B
+        # zamienia na etykiety klient (`legacy_label`).
+        Column("label", String, nullable=True),
     )
     threads = Table(
         "mentor_threads",
@@ -292,6 +296,7 @@ def define_tables(metadata):
 #: Wykonywane przy starcie przez `app/db.py` (PostgreSQL). Indeksy na numerach
 #: sędziów - lista meczów pary pyta hurtownię i archiwum po obu numerach.
 MIGRATIONS = (
+    "ALTER TABLE mentor_compilation_items ADD COLUMN IF NOT EXISTS label VARCHAR",
     "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_1 ON zprp_public_matches (referee_1_id)",
     "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_2 ON zprp_public_matches (referee_2_id)",
     "CREATE INDEX IF NOT EXISTS ix_zprp_archive_matches_ref_first ON zprp_archive_matches ((slim_json->'refs'->>'first'))",

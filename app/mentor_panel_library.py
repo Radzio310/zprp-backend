@@ -411,12 +411,16 @@ class CompilationPatch(BaseModel):
 
 class ItemsBody(BaseModel):
     items: List[Dict[str, Any]] = Field(default_factory=list, max_length=R.MAX_COMPILATION_ITEMS)
+    # Playlista (24.10.2026): klient zapisuje całość jako „free” - stary
+    # „kontrast” przechodzi w playlistę tym samym zapisem.
+    mode: Optional[str] = Field(default=None, max_length=20)
 
 
 class ItemBody(BaseModel):
     clip_id: str = Field(min_length=1, max_length=80)
     column: Optional[str] = Field(default=None, max_length=2)
     note: Optional[str] = Field(default=None, max_length=1000)
+    label: Optional[str] = Field(default=None, max_length=200)
 
 
 def _mode(value: Optional[str]) -> str:
@@ -474,7 +478,8 @@ async def compilation_payload(ctx: Dict[str, Any], compilation_id: str) -> Dict[
         "created_at": comp.get("created_at"), "updated_at": comp.get("updated_at"),
         "public_url": R.public_url("compilation", comp.get("public_token")),
         "can_edit": C.may(ctx, "edit", owner=R.s(comp.get("created_by")) == ctx["actor"].judge_id),
-        "items": [{"clip": shaped[i["clip_id"]], "column": i.get("column"), "note": i.get("note"), "position": n}
+        "items": [{"clip": shaped[i["clip_id"]], "column": i.get("column"), "note": i.get("note"),
+                   "label": R.legacy_label(i, comp.get("mode") or "free"), "position": n}
                   for n, i in enumerate(live)],
     }
 
@@ -542,7 +547,10 @@ async def update_compilation(compilation_id: str, body: CompilationPatch, actor:
         values["description"] = R.plain(patch["description"], 500) or None
     if patch.get("mode") is not None and patch["mode"] != row.get("mode"):
         values["mode"] = _mode(patch["mode"])
-        await _write_items(compilation_id, R.order_items(await _items(compilation_id), values["mode"]))
+        current = await _items(compilation_id)
+        # Kontrast -> playlista: kolumny A/B przechodzą w etykiety, kolejność A1, B1...
+        reordered = R.playlist_items(current, row.get("mode") or "free") if values["mode"] == "free" else R.order_items(current, values["mode"])
+        await _write_items(compilation_id, reordered)
     await database.execute(update(mentor_compilations).where(mentor_compilations.c.id == compilation_id).values(**values))
     await C.touch(ctx, actor.judge_id, "compilation_updated", "compilations", data={"id": compilation_id})
     return await compilation_payload(ctx, compilation_id)
@@ -560,9 +568,13 @@ async def delete_compilation(compilation_id: str, actor: Actor = Depends(mentor_
 @router.put("/compilations/{compilation_id}/items")
 async def replace_items(compilation_id: str, body: ItemsBody, actor: Actor = Depends(mentor_actor)):
     ctx, row = await _editable_compilation(compilation_id, actor)
-    items = await _valid_items(ctx, body.items, row.get("mode") or "free")
+    mode = _mode(body.mode) if body.mode is not None else (row.get("mode") or "free")
+    items = await _valid_items(ctx, body.items, mode)
     await _write_items(compilation_id, items)
-    await database.execute(update(mentor_compilations).where(mentor_compilations.c.id == compilation_id).values(updated_at=C.now()))
+    values: Dict[str, Any] = {"updated_at": C.now()}
+    if mode != row.get("mode"):
+        values["mode"] = mode
+    await database.execute(update(mentor_compilations).where(mentor_compilations.c.id == compilation_id).values(**values))
     await C.touch(ctx, actor.judge_id, "compilation_items", "compilations", data={"id": compilation_id})
     return await compilation_payload(ctx, compilation_id)
 
@@ -571,7 +583,7 @@ async def replace_items(compilation_id: str, body: ItemsBody, actor: Actor = Dep
 async def add_item(compilation_id: str, body: ItemBody, actor: Actor = Depends(mentor_actor)):
     ctx, row = await _editable_compilation(compilation_id, actor)
     mode = row.get("mode") or "free"
-    items = R.append_item(await _items(compilation_id), body.clip_id, body.column, mode)
+    items = R.append_item(await _items(compilation_id), body.clip_id, body.column, mode, body.label)
     if body.note:
         for item in items:
             if item["clip_id"] == body.clip_id:
@@ -879,7 +891,9 @@ async def public_view(token: str):
         for i in items:
             if i["clip_id"] in clips:
                 out_items.append({"clip": await _public_clip(clips[i["clip_id"]], cards, cats), "column": i.get("column"),
-                                  "note": R.strip_player_names(i.get("note")) or None, "position": len(out_items)})
+                                  "note": R.strip_player_names(i.get("note")) or None,
+                                  "label": R.strip_player_names(R.legacy_label(i, comp.get("mode") or "free")) or None,
+                                  "position": len(out_items)})
         return {"kind": "compilation", "id": comp["id"], "name": comp.get("name"), "mode": comp.get("mode"),
                 "description": comp.get("description"), "items": out_items}
     report = await C.one(select(mentor_reports).where(mentor_reports.c.public_token == token))

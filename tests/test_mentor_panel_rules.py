@@ -211,6 +211,21 @@ def test_dodaj_do_zestawienia():
     assert [i["clip_id"] for i in R.append_item(existing, "c1", None, "contrast")] == ["c0", "c1"]
 
 
+def test_playlista_etykiety_i_stary_kontrast():
+    items = [{"clip_id": "c1", "label": "  Dobra decyzja ", "note": "n"}, {"clip_id": "c2", "label": "x" * 90}]
+    out = R.order_items(items, "free")
+    assert out[0]["label"] == "Dobra decyzja" and len(out[1]["label"]) == R.MAX_ITEM_LABEL and out[0]["note"] == "n"
+    # Stary kontrast: A1, A2, B1 zapisane po kolei -> playlista A1, B1, A2, kolumny w etykietach.
+    legacy = [{"clip_id": "a1", "column": "a", "position": 0}, {"clip_id": "a2", "column": "a", "position": 1},
+              {"clip_id": "b1", "column": "b", "position": 2, "label": "Balans"}]
+    playlist = R.playlist_items(legacy, "contrast")
+    assert [(i["clip_id"], i["label"], i["column"], i["position"]) for i in playlist] == [
+        ("a1", "Wzorzec", None, 0), ("b1", "Balans", None, 1), ("a2", "Wzorzec", None, 2)]
+    assert R.legacy_label({"column": "b"}, "contrast") == "Do poprawy"
+    assert R.legacy_label({"column": "b"}, "free") is None
+    assert R.append_item([], "c5", None, "free", "Wzorzec")[0]["label"] == "Wzorzec"
+
+
 # ─── Wątki i flagi ──────────────────────────────────────────────────────────
 
 

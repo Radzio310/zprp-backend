@@ -14,6 +14,7 @@ import json
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from itertools import zip_longest
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.mentoring_rules import CROSS_PROVINCE, PROGRAM_2028, may_manage
@@ -413,10 +414,24 @@ def markers_as_clips(video: Mapping[str, Any], markers: Iterable[Mapping[str, An
 
 COMPILATION_MODES = ("contrast", "similar", "free")
 MAX_COMPILATION_ITEMS = 120
+MAX_ITEM_LABEL = 40
+# Stare zestawienia „kontrast” (kolumny A/B) czytane jako playlista: kolumna
+# przechodzi w etykietę, gdy klip nie ma własnej.
+LEGACY_COLUMN_LABELS = {"a": "Wzorzec", "b": "Do poprawy"}
+
+
+def legacy_label(item: Mapping[str, Any], mode: str) -> Optional[str]:
+    """Etykieta pozycji: własna, a w starym „kontraście” - z kolumny A/B."""
+    own = plain(item.get("label"), MAX_ITEM_LABEL)
+    if own:
+        return own
+    if mode == "contrast":
+        return LEGACY_COLUMN_LABELS.get(s(item.get("column")).lower() or "a")
+    return None
 
 
 def order_items(items: Sequence[Mapping[str, Any]], mode: str) -> List[Dict[str, Any]]:
-    """Pozycje zestawienia w podanej kolejności: bez powtórzeń, kolumna a/b tylko dla „kontrastu"."""
+    """Pozycje zestawienia w podanej kolejności: bez powtórzeń, kolumna a/b tylko dla „kontrastu”, etykieta i notatka per klip."""
     out: List[Dict[str, Any]] = []
     seen = set()
     for item in items or ():
@@ -429,6 +444,7 @@ def order_items(items: Sequence[Mapping[str, Any]], mode: str) -> List[Dict[str,
             "clip_id": clip_id,
             "column": (column if column in ("a", "b") else "a") if mode == "contrast" else None,
             "note": plain(item.get("note"), 280) or None,
+            "label": plain(item.get("label"), MAX_ITEM_LABEL) or None,
             "position": len(out),
         })
         if len(out) >= MAX_COMPILATION_ITEMS:
@@ -436,11 +452,24 @@ def order_items(items: Sequence[Mapping[str, Any]], mode: str) -> List[Dict[str,
     return out
 
 
-def append_item(existing: Sequence[Mapping[str, Any]], clip_id: str, column: Any, mode: str) -> List[Dict[str, Any]]:
+def append_item(existing: Sequence[Mapping[str, Any]], clip_id: str, column: Any, mode: str, label: Any = None) -> List[Dict[str, Any]]:
     ordered = sorted(existing, key=lambda r: int(r.get("position") or 0))
     if any(s(r.get("clip_id")) == s(clip_id) for r in ordered):
         return order_items(ordered, mode)
-    return order_items([*ordered, {"clip_id": clip_id, "column": column}], mode)
+    return order_items([*ordered, {"clip_id": clip_id, "column": column, "label": label}], mode)
+
+
+def playlist_items(items: Sequence[Mapping[str, Any]], mode: str) -> List[Dict[str, Any]]:
+    """
+    Zapisane pozycje -> playlista (zmiana trybu na „wolne”): stary „kontrast”
+    oddaje kolejność oglądania A1, B1, A2, B2..., a kolumny stają się etykietami.
+    """
+    ordered = sorted(items or (), key=lambda r: int(r.get("position") or 0))
+    if mode == "contrast":
+        a = [i for i in ordered if s(i.get("column")).lower() != "b"]
+        b = [i for i in ordered if s(i.get("column")).lower() == "b"]
+        ordered = [x for pair in zip_longest(a, b) for x in pair if x is not None]
+    return order_items([{**i, "label": legacy_label(i, mode)} for i in ordered], "free")
 
 
 # ─── Wątki ──────────────────────────────────────────────────────────────────
