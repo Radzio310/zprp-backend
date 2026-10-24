@@ -361,7 +361,12 @@ def _api_to_state(payload: Dict[str, Any], base: Dict[str, Any]) -> Optional[Dic
     if incoming_date:
         state["data_fakt_time_known"] = _has_clock(incoming_date)
     state["host_swapped"] = _str(match.get("zamiana")) == "1"
-    state["protocol_status"] = "approved" if _str(match.get("protokol_zatwierdz")) == "1" else "before_approval"
+    # Brak flagi (także null/pusty tekst) nie jest cofnięciem zatwierdzenia.
+    # Uboższa odpowiedź API resetowała status, a kolejny odczyt wysyłał
+    # identyczne „zatwierdzono” z innym fingerprintem całego meczu.
+    approval_flag = _str(match.get("protokol_zatwierdz"))
+    if approval_flag in {"0", "1"}:
+        state["protocol_status"] = "approved" if approval_flag == "1" else "before_approval"
     for key in ("delegate_note", "host_contact", "guest_contact", "season", "runda", "kolejka"):
         if not state.get(key) and base.get(key):
             state[key] = base[key]
@@ -674,7 +679,13 @@ async def _create_event(
         # Jeden żywy wątek na mecz: kolejne rewizje nie układają na Androidzie
         # stosu starych kafelków, a dziennik w aplikacji nadal zachowuje każdą
         # kanoniczną rewizję.
-        "notificationThread": f"province-match:{province}:{match_id}",
+        "notificationThread": (
+            f"new-match-{match_id}" if event_type == "match_added"
+            else f"province-match:{province}:{match_id}"
+        ),
+        "notificationExpiresAt": str(int((_now() + timedelta(
+            days=7 if event_type == "match_added" else 1
+        )).timestamp())),
         **({"mentoring_previous_refs": [previous_state.get("NrSedzia_pierwszy"), previous_state.get("NrSedzia_drugi")]} if previous_state else {}),
     }
     title = notification_title(event_type)
@@ -840,8 +851,9 @@ async def _upsert_match(
     )
     if old_row:
         previous = state_dict(old_row["state_json"])
-        state = {**{k: previous[k] for k in ("assignment_controls", "organizer_label", "competition_id", "competition_label")
-                    if k in previous}, **state}
+        # Migawka z prywatnej listy bywa częściowa. Zachowujemy pola,
+        # których to źródło nie zwróciło (w tym status protokołu).
+        state = {**previous, **state}
     new_fp = fingerprint(state)
     approved = _str(state.get("protocol_status")) == "approved"
     values = {

@@ -125,3 +125,24 @@ def test_fresh_claim_still_alerts_normally():
     assert payload["android"]["notification"]["channel_id"] == "default"
     assert payload["android"]["notification"]["sound"] == "default"
     assert payload["apns"]["payload"]["aps"]["sound"] == "default"
+
+
+def test_new_assignment_is_separate_from_all_later_updates():
+    added = event("first") | {"event_type": "match_added", "notificationThread": "province-match:slaskie:208136"}
+    changed = event("second") | {"notificationThread": "province-match:slaskie:208136"}
+    assert notification_tag(added, "Nowy mecz", "B") == "new-match-208136"
+    assert notification_tag(added, "Nowy mecz", "B") != notification_tag(changed, "Zmiana", "B")
+    message = fcm_message_payload("token", "Nowy mecz", "B", added)["message"]
+    assert message["apns"]["headers"]["apns-collapse-id"] == "new-match-208136"
+    assert message["apns"]["payload"]["aps"]["thread-id"] == "new-match-208136"
+
+
+def test_match_expiration_is_fixed_across_delivery_retries(monkeypatch):
+    monkeypatch.setattr("app.push.fcm.time.time", lambda: 1000)
+    data = event("a") | {"notificationExpiresAt": "1100"}
+    first = fcm_message_payload("token", "T", "B", data)["message"]
+    monkeypatch.setattr("app.push.fcm.time.time", lambda: 1050)
+    retry = fcm_message_payload("token", "T", "B", data)["message"]
+    assert first["android"]["ttl"] == "100s"
+    assert retry["android"]["ttl"] == "50s"
+    assert first["apns"]["headers"]["apns-expiration"] == retry["apns"]["headers"]["apns-expiration"] == "1100"

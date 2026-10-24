@@ -630,3 +630,24 @@ def test_delegate_evaluation_notifies_when_ocena2_replaces_legacy_pdf():
 
     events = build_change_events(before, evaluated, now=now)
     assert events[0]["event_type"] == "delegate_evaluation_available"
+
+
+@pytest.mark.parametrize("flag", [None, "", " "])
+def test_missing_approval_flag_preserves_approved_status(flag):
+    approved = dict(STORED, protocol_status="approved")
+    new = _api_to_state({"0": [{"Id": "208136", "protokol_zatwierdz": flag}]}, approved)
+    assert new["protocol_status"] == "approved"
+    assert build_change_events(approved, new, now=datetime(2026, 10, 2, tzinfo=timezone.utc)) == []
+
+
+def test_absent_approval_flag_does_not_invent_a_status():
+    state = _api_to_state({"0": [{"Id": "208136"}]}, STORED)
+    assert "protocol_status" not in state
+
+
+def test_explicit_zero_still_reopens_approved_protocol():
+    approved = dict(STORED, protocol_status="approved")
+    new = _api_to_state({"0": [{"Id": "208136", "protokol_zatwierdz": "0"}]}, approved)
+    assert new["protocol_status"] == "before_approval"
+    events = build_change_events(approved, new, now=datetime(2026, 10, 2, tzinfo=timezone.utc))
+    assert events[0]["event_type"] == "protocol_reopened"

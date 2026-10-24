@@ -150,6 +150,12 @@ def notification_tag(data: Optional[Dict[str, Any]], title: str, body: str) -> s
     zostaja obok siebie.
     """
     payload = data or {}
+    # Ten sam identyfikator co lokalny fallback iOS. Nowy przydział nigdy
+    # nie zostaje zastąpiony przez zmianę obsady/terminu tego meczu.
+    if payload.get("kind") == "province_match_change" and payload.get("event_type") == "match_added":
+        match_id = str(payload.get("match_id") or payload.get("matchId") or "").strip()
+        if match_id.isdigit():
+            return f"new-match-{match_id}"
     # Powiadomienia, które opisują jeden żywy temat (np. ofertę giełdy),
     # dostają stały wątek. Kolejne stany tej samej sprawy aktualizują wtedy
     # istniejący kafelek Androida zamiast dokładać następny. `event_key` nadal
@@ -198,6 +204,14 @@ def fcm_message_payload(
     if not silent:
         android_notification["sound"] = "default"
 
+    # Zmiany meczu nie mogą czekać tygodniami na nieaktywny telefon.
+    # Termin jest stały dla zdarzenia, więc ponowienie nie przedłuża ważności.
+    expiry = None
+    if raw_data.get("kind") == "province_match_change" or raw_data.get("notificationExpiresAt"):
+        try:
+            expiry = int(raw_data.get("notificationExpiresAt") or (time.time() + 86400))
+        except (TypeError, ValueError):
+            expiry = int(time.time()) + 86400
     aps: Dict[str, Any] = {"thread-id": tag}
     if not silent:
         aps["sound"] = "default"
@@ -212,12 +226,14 @@ def fcm_message_payload(
                 # dostaje tylko najświeższy stan żywego wątku.
                 "collapse_key": tag,
                 "priority": "high",
+                **({"ttl": f"{max(0, min(2419200, expiry - int(time.time())))}s"} if expiry is not None else {}),
                 "notification": android_notification,
             },
             "apns": {
                 # `thread-id` grupuje temat, a collapse-id scala wiadomości,
                 # które jeszcze czekają na dostarczenie przez APNs.
-                "headers": {"apns-collapse-id": tag},
+                "headers": {"apns-collapse-id": tag,
+                    **({"apns-expiration": str(expiry)} if expiry is not None else {})},
                 "payload": {"aps": aps},
             },
         }

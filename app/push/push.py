@@ -1,7 +1,7 @@
 import logging
 import os
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from fastapi import APIRouter, HTTPException, Request
@@ -16,6 +16,7 @@ from app.db import (
     province_match_events,
     province_match_notifications,
     province_match_sync_runs,
+    push_local_match_receipts,
     push_schedules,
     push_tokens,
 )
@@ -315,6 +316,43 @@ async def update_push_identity(req: PushIdentityRequest):
         .values(**values)
     )
     return {"ok": True, "updated": bool(changed)}
+
+
+class LocalMatchReceiptRequest(BaseModel):
+    judge_id: str
+    installation_id: str
+    match_id: str
+    observed_at: datetime
+
+
+@router.post("/match-added/seen")
+async def acknowledge_local_match_added(req: LocalMatchReceiptRequest):
+    """Telefon już pokazał przydział; opóźniony monitor nie ma go powtarzać."""
+    device = await database.fetch_one(select(push_tokens.c.judge_id).where(
+        push_tokens.c.installation_id == req.installation_id))
+    judge_id = _clean_judge_id(device["judge_id"]) if device else None
+    if not judge_id or not req.match_id.isdigit():
+        raise HTTPException(status_code=400, detail="Registered judge and numeric match_id required")
+    if judge_id != _clean_judge_id(req.judge_id):
+        raise HTTPException(status_code=409, detail="Push identity is not synchronized")
+    now = _utc_now()
+    observed_at = req.observed_at
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    observed_at = min(observed_at, now)
+    if observed_at < now - timedelta(days=7):
+        return {"ok": True, "expired": True}
+    await database.execute(pg_insert(push_local_match_receipts).values(
+        installation_id=req.installation_id, judge_id=judge_id,
+        match_id=req.match_id, observed_at=observed_at,
+    ).on_conflict_do_update(
+        index_elements=[push_local_match_receipts.c.installation_id,
+            push_local_match_receipts.c.judge_id, push_local_match_receipts.c.match_id],
+        # Starsza zaległa synchronizacja nie cofa nowszego potwierdzenia.
+        set_={"observed_at": observed_at},
+        where=push_local_match_receipts.c.observed_at < observed_at,
+    ))
+    return {"ok": True}
 
 
 @router.get("/match-events")

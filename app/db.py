@@ -2562,6 +2562,16 @@ province_match_notifications = Table(
     UniqueConstraint("event_id", "installation_id", name="uq_province_match_notification_event_installation"),
 )
 
+# Potwierdzenie lokalnego fallbacku: monitor może odkryć przydział później
+# niż telefon. Receipt jest osobny od preferencji i przetrwa rotację tokenu.
+push_local_match_receipts = Table(
+    "push_local_match_receipts", metadata,
+    Column("installation_id", String, primary_key=True),
+    Column("judge_id", String, primary_key=True),
+    Column("match_id", String, primary_key=True),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+)
+
 province_match_sync_runs = Table(
     "province_match_sync_runs",
     metadata,

@@ -4,7 +4,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select, update
 
-from app.db import database, province_match_notifications, push_tokens, push_schedules
+from app.db import database, province_match_events, province_match_notifications, push_local_match_receipts, push_tokens, push_schedules
+from app.match_market_rules import state_dict
 from .fcm import send_fcm_message
 from .device_policy import dev_pushes_enabled, device_allowed
 from .token_cleanup import invalidate_rejected_fcm_token
@@ -88,12 +89,72 @@ async def _fetch_pending_match_notifications(limit: int = 50):
             province_match_notifications.c.body,
             province_match_notifications.c.data_json,
             province_match_notifications.c.attempts,
+            province_match_notifications.c.judge_id,
+            province_match_notifications.c.event_id,
+            province_match_notifications.c.created_at,
         )
         .where(province_match_notifications.c.status == "pending")
         .where(province_match_notifications.c.send_at_utc <= now)
         .order_by(province_match_notifications.c.send_at_utc.asc())
         .limit(limit)
     )
+
+
+async def _local_match_receipt_reason(row, data, now):
+    if not data.get("match_id") or not row["judge_id"]:
+        return None
+    seen = await database.fetch_val(select(push_local_match_receipts.c.observed_at)
+        .where(push_local_match_receipts.c.installation_id == row["installation_id"])
+        .where(push_local_match_receipts.c.judge_id == row["judge_id"])
+        .where(push_local_match_receipts.c.match_id == str(data["match_id"]))
+        .where(push_local_match_receipts.c.observed_at >= now - timedelta(days=7)))
+    if not seen:
+        return None
+    # Usunięcie i ponowny przydział otwierają nowy cykl. Potwierdzenie z
+    # poprzedniego cyklu nie może wyciszyć nowego przydziału.
+    removed_since = await database.fetch_val(
+        select(province_match_notifications.c.id)
+        .select_from(province_match_notifications.join(province_match_events,
+            province_match_events.c.id == province_match_notifications.c.event_id))
+        .where(province_match_notifications.c.installation_id == row["installation_id"])
+        .where(province_match_notifications.c.judge_id == row["judge_id"])
+        .where(province_match_events.c.match_id == str(data["match_id"]))
+        .where(province_match_events.c.event_type.in_(["assignment_removed", "match_removed"]))
+        .where(province_match_events.c.created_at > seen)
+        .where(province_match_events.c.id < row["event_id"])
+        .limit(1))
+    return None if removed_since else "New match already presented locally (inbox retained)"
+
+
+async def _match_notification_stale_reason(row, data):
+    if data.get("kind") != "province_match_change":
+        return None
+    now = _utc_now()
+    created_at = row["created_at"]
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    added = data.get("event_type") == "match_added"
+    if created_at < now - timedelta(days=7 if added else 1):
+        return "Expired match notification (inbox retained)"
+    if added:
+        return await _local_match_receipt_reason(row, data, now)
+    if not data.get("match_id") or not data.get("province"):
+        return None
+    # Event_id odzwierciedla kolejność zmian, send_at może być przesunięty
+    # przez retry. Nowsza ważna rewizja unieważnia starszy push, nie historię.
+    newer = await database.fetch_val(
+        select(province_match_notifications.c.id)
+        .select_from(province_match_notifications.join(province_match_events,
+            province_match_events.c.id == province_match_notifications.c.event_id))
+        .where(province_match_notifications.c.installation_id == row["installation_id"])
+        .where(province_match_notifications.c.event_id > row["event_id"])
+        .where(province_match_notifications.c.status.in_(["pending", "processing", "sent"]))
+        .where(province_match_events.c.province == str(data["province"]))
+        .where(province_match_events.c.match_id == str(data["match_id"]))
+        .where(province_match_events.c.event_type.notin_(["match_added", "match_info_updated"]))
+        .limit(1)
+    )
+    return "Superseded match revision (inbox retained)" if newer else None
 
 
 async def _next_match_notification_delay(default_seconds: int) -> float:
@@ -195,8 +256,16 @@ async def run_push_scheduler():
                 installation_id = row["installation_id"]
                 title = row["title"]
                 body = row["body"]
-                data_json = row["data_json"] or {}
+                data_json = state_dict(row["data_json"])
                 attempts = int(row["attempts"] or 0) + 1
+                if data_json.get("match_start_utc") or data_json.get("type") == "match_reminder":
+                    expiry = row["send_at_utc"] + timedelta(minutes=15)
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    if expiry <= _utc_now():
+                        await _mark_failed(sid, attempts, "Expired match reminder", final=True)
+                        continue
+                    data_json = {**data_json, "notificationExpiresAt": str(int(expiry.timestamp()))}
 
                 tok = await _get_token(installation_id)
                 if not tok:
@@ -243,6 +312,11 @@ async def run_push_scheduler():
                 if not await _claim_match_notification(notification_id):
                     continue
                 attempts = int(row["attempts"] or 0) + 1
+                data = state_dict(row["data_json"])
+                stale_reason = await _match_notification_stale_reason(row, data)
+                if stale_reason:
+                    await _finish_match_notification(notification_id, attempts, stale_reason, True)
+                    continue
                 token_row = await _get_token(row["installation_id"])
                 if token_row and not device_allowed(token_row, allow_dev):
                     await _finish_match_notification(
@@ -277,7 +351,7 @@ async def run_push_scheduler():
                         _stripped(token_row["token"]),
                         row["title"],
                         row["body"],
-                        data=row["data_json"] or {},
+                        data=data,
                     )
                     await _finish_match_notification(notification_id, attempts, None, True)
                     logger.info("Match push notification %s sent", notification_id)
