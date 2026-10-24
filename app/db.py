@@ -5085,6 +5085,19 @@ for _statement in _STREAM_MIGRATIONS:
 
         _logging.getLogger("app.db").warning("Indeks transmisji nie powstal: %s", _statement, exc_info=True)
 
+# Egzamin: kosz teczki (kolumny deleted_* w exam_attempts i exam_definitions) - `app/exam_tables.py`.
+from app.exam_tables import MIGRATIONS as _EXAM_MIGRATIONS
+
+for _statement in _EXAM_MIGRATIONS:
+    try:
+        with engine.connect() as _conn:
+            _conn.execute(text(_statement))
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("app.db").warning("Migracja egzaminu nie przeszla: %s", _statement, exc_info=True)
+
 # Indeksy wyszukiwarki publicznej (pg_trgm, numer meczu) - w tle, nie blokują startu.
 try:
     from app.zprp_public.search_index import ensure_in_background as _search_indexes

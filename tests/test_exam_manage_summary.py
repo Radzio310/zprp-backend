@@ -27,17 +27,19 @@ async def test_miniatura_liczy_osoby_raz_i_nie_przystapionych(st):
     by_id = {e["id"]: e for e in out["exams"]}
     s = by_id[exam["id"]]["summary"]
     assert s == {"attempted": 3, "finished": 2, "passed": 1, "avg_percent": 50.0, "pass_rate": 0.5,
-                 "not_started": 2, "invited": 5}
+                 "not_started": 2, "invited": 5,
+                 "histogram_10pct": [1, 0, 0, 0, 0, 0, 0, 0, 0, 1]}
     assert by_id[exam["id"]]["attempt_counts"] == {"submitted": 2, "in_progress": 1}
     e = by_id[empty["id"]]["summary"]
     assert e == {"attempted": 0, "finished": 0, "passed": 0, "avg_percent": None, "pass_rate": None,
-                 "not_started": 5, "invited": 5}
+                 "not_started": 5, "invited": 5, "histogram_10pct": [0] * 10}
     assert by_id[empty["id"]]["attempt_counts"] == {}
 
 
 def test_summary_view_bez_danych():
     assert S.summary_view(None, []) == {"attempted": 0, "finished": 0, "passed": 0, "avg_percent": None,
-                                        "pass_rate": None, "not_started": 0, "invited": 0}
+                                        "pass_rate": None, "not_started": 0, "invited": 0,
+                                        "histogram_10pct": [0] * 10}
 
 
 def test_druki_25_30_15():

@@ -42,7 +42,8 @@ async def _roster(provinces: List[str]) -> Dict[str, Any]:
 
     names = sorted({n for p in provinces for n in PE._names(p)})
     rows = await database.fetch_all(select(province_judges.c.judge_id, province_judges.c.full_name, province_judges.c.province,
-                                           province_judges.c.badges).where(province_judges.c.province.in_(names)))
+                                           province_judges.c.badges, province_judges.c.photo_url)
+                                    .where(province_judges.c.province.in_(names)))
     young = {S._s(r["base_judge_id"]) for r in await database.fetch_all(
         select(young_referees.c.base_judge_id).where(and_(young_referees.c.province.in_(names), young_referees.c.is_active.is_(True))))}
     keys = {name_key(r["full_name"]): S._s(r["judge_id"]) for r in rows}
@@ -60,7 +61,8 @@ async def _roster(provinces: List[str]) -> Dict[str, Any]:
         if jid in young:
             badges.append(PR.YOUNG_DISTRICT_BADGE)
         people[jid] = {"name": S._s(r["full_name"]), "province": display(r["province"]) or S._s(r["province"]),
-                       "badges": list(dict.fromkeys(badges)), "letters": grades.get(name_key(r["full_name"]), [])}
+                       "badges": list(dict.fromkeys(badges)), "letters": grades.get(name_key(r["full_name"]), []),
+                       "photo": S._s(r["photo_url"]) or None}
     pair_rows = await database.fetch_all(select(province_judge_pairs).where(province_judge_pairs.c.province.in_(names)))
     pairs, _source = merge_pairs([(S._s(p["judge_id"]), S._s(p["partner_id"]), S._s(p["source"])) for p in pair_rows])
     return {"people": people, "pairs": pairs}

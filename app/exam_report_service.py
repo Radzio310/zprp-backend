@@ -11,6 +11,7 @@ Importy bazy tylko przez `Store` (app/db.py łączy się przy imporcie).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -28,10 +29,12 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
     now = now or S.utcnow()
     exam = await S._managed_exam(st, who, exam_id, read=True)
     cut = exam["cut_province"]  # egzamin krajowy oglądany przez komisję okręgu: tylko jej sędziowie
-    attempts = (await S.attempts_list(st, who, exam_id))["attempts"]
-    stats = await S.exam_stats(st, who, exam_id)
-    missing = (await S.missing(st, who, exam_id))["missing"]
-    bank = await S.load_bank(st, exam["bank_version"])
+    # Cztery niezależne odczyty naraz (raport otwiera się z teczki - ma nie czekać po kolei).
+    listed, stats, missed, bank = await asyncio.gather(
+        S.attempts_list(st, who, exam_id), S.exam_stats(st, who, exam_id), S.missing(st, who, exam_id),
+        S.load_bank(st, exam["bank_version"]))
+    attempts, missing = listed["attempts"], missed["missing"]
+    photos = await _photos(st, [cut] if cut else S._exam_provinces(exam), {a["judge_id"] for a in attempts})
 
     questions = []
     for q in stats["questions"]:
@@ -82,7 +85,26 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
         "ranking": R.ranking(attempts),
         "missing": missing,
         "attempts": attempts,
+        #: Zdjęcia sędziów z listy okręgu (`province_judges.photo_url`) - podium i arkusze Areny.
+        "photos": photos,
     }
+
+
+async def _photos(st: S.Store, provinces: List[str], judge_ids: set) -> Dict[str, str]:
+    """numer -> adres zdjęcia, tylko dla osób z wynikiem (lista okręgu ma zdjęcia z panelu okręgu)."""
+    if not judge_ids:
+        return {}
+    out: Dict[str, str] = {}
+    lists = await asyncio.gather(*(st.judges(p) for p in provinces), return_exceptions=True)
+    for judges in lists:
+        if isinstance(judges, BaseException):
+            continue
+        for j in judges:
+            jid = S._s(j.get("judge_id"))
+            url = S._s(j.get("photo_url"))
+            if jid in judge_ids and url:
+                out[jid] = url
+    return out
 
 
 async def void_preview(st: S.Store, who: S.Who, exam_id: str, qid: str) -> Dict[str, Any]:
@@ -94,6 +116,6 @@ async def void_preview(st: S.Store, who: S.Who, exam_id: str, qid: str) -> Dict[
         raise ExamError("EXAM_ALREADY_VOIDED",
                         "To pytanie jest już unieważnione - najpierw cofnij unieważnienie, żeby porównać tryby.", 409)
     rows = await st.database.fetch_all(select(st.t.attempts.c.score_json).where(and_(
-        st.t.attempts.c.exam_id == exam_id, st.t.attempts.c.status != "in_progress")))
+        st.t.attempts.c.exam_id == exam_id, st.t.attempts.c.status != "in_progress", S._live(st.t.attempts))))
     scores: List[Dict[str, Any]] = [s for s in (S._loads(r["score_json"], None) for r in rows) if s]
     return {"exam_id": exam_id, **R.void_preview(scores, qid, float(exam["config"]["pass_percent"]))}

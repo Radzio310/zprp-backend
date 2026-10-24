@@ -20,6 +20,7 @@ Importy bazy tylko przez `Store` (app/db.py łączy się przy imporcie).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
@@ -99,7 +100,7 @@ async def _attempts(st: S.Store, exam_ids: List[str], judge_id: Optional[str] = 
     a = st.t.attempts
     q = select(a.c.id, a.c.exam_id, a.c.judge_id, a.c.judge_name, a.c.province, a.c.attempt_no, a.c.status,
                a.c.finish_reason, a.c.started_at, a.c.finished_at, a.c.percent, a.c.passed, a.c.score_json
-               ).where(a.c.exam_id.in_(exam_ids))
+               ).where(and_(a.c.exam_id.in_(exam_ids), S._live(a)))
     if judge_id is not None:
         q = q.where(a.c.judge_id == judge_id)
     out = []
@@ -151,10 +152,12 @@ def _attach_invited(exams: List[Dict[str, Any]], people: Mapping[str, Mapping[st
 async def _load(ss: StatsStore, who: S.Who, province: Optional[str], raw: Mapping[str, Any], now: datetime):
     filters = SR.clean_filters(raw)
     scope, prov = await resolve_scope(who, province)
-    catalog = await _exams(ss.st, scope, prov, filters["source"], now, with_national=scope == "province" and not who.is_admin)
-    exams = _select(catalog, filters)
     provinces = [prov] if scope == "province" else list(S.ALL_PROVINCES)
-    roster = await ss.roster(provinces)
+    # Egzaminy zakresu i lista sędziów naraz - nie zależą od siebie.
+    catalog, roster = await asyncio.gather(
+        _exams(ss.st, scope, prov, filters["source"], now, with_national=scope == "province" and not who.is_admin),
+        ss.roster(provinces))
+    exams = _select(catalog, filters)
     people = roster.get("people") or {}
     pairs = roster.get("pairs") or {}
     _attach_invited(exams, people)
@@ -170,8 +173,8 @@ async def stats_overview(ss: StatsStore, who: S.Who, province: Optional[str], ra
                          now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or S.utcnow()
     filters, scope, prov, catalog, exams, people, pairs = await _load(ss, who, province, raw, now)
-    attempts = _cut_attempts(await _attempts(ss.st, [e["id"] for e in exams]), exams, scope, prov, who)
-    qinfo = await _qinfo(ss.st, exams)
+    raw_attempts, qinfo = await asyncio.gather(_attempts(ss.st, [e["id"] for e in exams]), _qinfo(ss.st, exams))
+    attempts = _cut_attempts(raw_attempts, exams, scope, prov, who)
     body = SR.overview(exams, attempts, people, pairs, qinfo, filters, national=scope == "national")
     return {**_head(scope, prov, catalog, now), **body}
 
@@ -182,6 +185,8 @@ async def judges_list(ss: StatsStore, who: S.Who, province: Optional[str], raw: 
     filters, scope, prov, catalog, exams, people, pairs = await _load(ss, who, province, raw, now)
     attempts = _cut_attempts(await _attempts(ss.st, [e["id"] for e in exams]), exams, scope, prov, who)
     rows = SR.judge_rows(exams, attempts, people, pairs, now)
+    for row in rows:
+        row["photo"] = (people.get(row["judge_id"]) or {}).get("photo")
     badges = sorted({b for r in rows for b in r["badges"]}, key=str.lower)
     return {**_head(scope, prov, catalog, now), "exams": [SR.exam_brief(e) for e in exams], "judges": rows,
             "badges": badges, "levels": [{"key": k, "label": v} for k, v in SR.LEVELS]}
@@ -212,4 +217,6 @@ async def judge_card(ss: StatsStore, who: S.Who, judge_id: str, province: Option
         return {"score": rep["score"], "level": rep["level"], "breakdown": rep["breakdown"]}
 
     card = SR.judge_card(jid, exams, attempts, people, pairs, qinfo, integrity, now)
+    if isinstance(card.get("judge"), dict):
+        card["judge"]["photo"] = (people.get(jid) or {}).get("photo")
     return {**_head(scope, prov, catalog, now), **card}

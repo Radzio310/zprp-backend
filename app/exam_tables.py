@@ -17,7 +17,17 @@ from sqlalchemy import (
     Boolean, Column, DateTime, Float, Index, Integer, String, Table, Text, UniqueConstraint, func,
 )
 
-MIGRATIONS: list = []
+#: Kosz teczki (24.10.2026): egzamin i wynik sędziego leżą w koszu 30 dni, potem
+#: znikają trwale. Tabele istnieją na produkcji, więc `create_all` kolumn nie dołoży -
+#: `app/db.py` wykonuje te zdania po `create_all`, każde osobno.
+MIGRATIONS: list = [
+    "ALTER TABLE exam_definitions ADD COLUMN IF NOT EXISTS deleted_by varchar",
+    "ALTER TABLE exam_definitions ADD COLUMN IF NOT EXISTS deleted_by_name varchar",
+    "ALTER TABLE exam_attempts ADD COLUMN IF NOT EXISTS deleted_at timestamptz",
+    "ALTER TABLE exam_attempts ADD COLUMN IF NOT EXISTS deleted_by varchar",
+    "ALTER TABLE exam_attempts ADD COLUMN IF NOT EXISTS deleted_by_name varchar",
+    "CREATE INDEX IF NOT EXISTS ix_exam_attempts_deleted ON exam_attempts (deleted_at) WHERE deleted_at IS NOT NULL",
+]
 
 
 def define_tables(metadata):
@@ -74,6 +84,9 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("deleted_at", DateTime(timezone=True), nullable=True),
+        #: Kto wrzucił do kosza (kosz teczki pokazuje autora).
+        Column("deleted_by", String, nullable=True),
+        Column("deleted_by_name", String, nullable=True),
     )
     attempts = Table(
         "exam_attempts",
@@ -97,6 +110,10 @@ def define_tables(metadata):
         Column("passed", Boolean, nullable=True),
         Column("device_id", String, nullable=True),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        #: Wynik w koszu teczki: niewidoczny w raporcie, statystykach i rankingach (30 dni do przywrócenia).
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+        Column("deleted_by", String, nullable=True),
+        Column("deleted_by_name", String, nullable=True),
         UniqueConstraint("exam_id", "judge_id", "attempt_no", name="ux_exam_attempt_no"),
     )
     answers = Table(

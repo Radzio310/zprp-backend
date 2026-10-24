@@ -204,6 +204,13 @@ async def manage_list(province: Optional[str] = Query(None), who: S.Who = Depend
     return await _run(S.list_manage(_store(), who, province))
 
 
+@router.get("/trash", summary="Kosz teczki: usunięte egzaminy i wyniki z 30 dni")
+async def trash(province: Optional[str] = Query(None), who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_trash as T
+
+    return await _run(T.trash_list(_store(), who, province))
+
+
 @router.get("/mine", summary="Egzaminy widoczne dla mnie, z moimi podejściami")
 async def mine(who: S.Who = Depends(_who)) -> Dict[str, Any]:
     return await _run(S.list_for_judge(_store(), who))
@@ -277,6 +284,27 @@ async def patch(exam_id: str, body: ExamPatch, background: BackgroundTasks, who:
 @router.delete("/{exam_id}", summary="Usuń egzamin (wydarzenia do kosza, wyniki zostają)")
 async def delete_one(exam_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
     return await _run(S.delete_exam(_store(), who, exam_id))
+
+
+@router.post("/{exam_id}/restore", summary="Przywróć egzamin z kosza teczki (z wynikami i wydarzeniami)")
+async def restore_one(exam_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_trash as T
+
+    return await _run(T.restore_exam(_store(), who, exam_id))
+
+
+@router.delete("/{exam_id}/results/{judge_id}", summary="Wynik sędziego do kosza teczki (30 dni)")
+async def delete_result(exam_id: str, judge_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_trash as T
+
+    return await _run(T.delete_result(_store(), who, exam_id, judge_id))
+
+
+@router.post("/{exam_id}/results/{judge_id}/restore", summary="Przywróć wynik sędziego z kosza teczki")
+async def restore_result(exam_id: str, judge_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_trash as T
+
+    return await _run(T.restore_result(_store(), who, exam_id, judge_id))
 
 
 @router.post("/{exam_id}/start", summary="Zacznij albo wznów podejście")
