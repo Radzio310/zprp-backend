@@ -141,9 +141,17 @@ async def sklad(match_number: str, actor: Actor = Depends(proel_actor)):
     zrzut, alarmy = await analiza_meczu(key)
     blob = A._slownik((zrzut.get("mecz") or {}).get("data_json"))
     wynik = await asyncio.to_thread(sklad_meczu, zrzut, alarmy)
+    cfg = A.konfiguracja(blob)
+    try:
+        polowa = int(cfg.get("halfTime") or 30)
+    except (TypeError, ValueError):
+        polowa = 30
     return {
         "match_number": key,
         "mecz": A._dane_meczu(zrzut, blob, A.Osoby(blob)),
+        # Karta alarmu: oś meczu (2 x połowa) i barwy koszulek obu drużyn.
+        "polowa_min": polowa if 10 <= polowa <= 45 else 30,
+        "barwy": {"host": cfg.get("hostJerseyColor") or None, "guest": cfg.get("guestJerseyColor") or None},
         "wynik": [blob.get("scoreHost"), blob.get("scoreGuest")],
         "alarm": _alarm_meczu(alarmy),
         "alarmy": alarmy.get("osoby") or [],
