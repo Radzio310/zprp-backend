@@ -251,7 +251,7 @@ async def attempt_result(attempt_id: str, who: S.Who = Depends(_who)) -> Dict[st
     return await _run(S.attempt_result(_store(), who, attempt_id))
 
 
-@router.get("/attempts/{attempt_id}/review", summary="Przegląd odpowiedzi z kluczem (po zamknięciu okna)")
+@router.get("/attempts/{attempt_id}/review", summary="Przegląd odpowiedzi z kluczem (wg ustawienia egzaminu answers_release)")
 async def attempt_review(attempt_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
     return await _run(S.attempt_review(_store(), who, attempt_id))
 
@@ -325,6 +325,11 @@ async def attempts(exam_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
 @router.get("/{exam_id}/attempts/{attempt_id}", summary="Karta zdającego: oś czasu, zdarzenia, rzetelność")
 async def attempt_card(exam_id: str, attempt_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
     return await _run(S.attempt_card(_store(), who, exam_id, attempt_id))
+
+
+@router.get("/{exam_id}/attempts/{attempt_id}/review", summary="Przegląd podejścia dla komisji: klucz, czasy, oś zdarzeń i flagi")
+async def committee_review(exam_id: str, attempt_id: str, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    return await _run(S.committee_review(_store(), who, exam_id, attempt_id))
 
 
 @router.post("/{exam_id}/attempts/{attempt_id}/allow-device", summary="Zgoda komisji na wznowienie na innym urządzeniu")

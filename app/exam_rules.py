@@ -77,6 +77,11 @@ SCOPES = ("national", "province")
 SET_MODES = ("shared", "drawn")
 MULTI_SCORING = ("all_or_nothing", "partial")
 RESULT_RELEASE = ("immediate", "after_close")
+#: Kiedy zdający widzi poprawne odpowiedzi (przegląd z kluczem). Decyzja 24.10.2026:
+#: domyślnie od razu po oddaniu - katalog pytań jest publiczny. Egzamin sprzed tej
+#: zmiany pola nie ma i zachowuje się jak dawniej („po zamknięciu").
+ANSWERS_RELEASE = ("immediate", "after_close", "never")
+ANSWERS_RELEASE_LEGACY = "after_close"
 RETAKE = ("any", "only_failed")
 LEAVE_POLICIES = ("log", "warn", "void_question", "end")
 DIFFICULTY = ("any", "hard", "easy")
@@ -226,6 +231,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "single_hint_all": False,
     "single_hint_ids": [],
     "result_release": "after_close",
+    "answers_release": "immediate",
     "mandatory": False,
     "target": {"include_all": False, "include_badges": [], "exclude_badges": []},
     "include_ids": [],
@@ -448,6 +454,7 @@ def clean_config(raw: Mapping[str, Any], *, template: Any = None) -> Dict[str, A
         "single_hint_all": bool(merged.get("single_hint_all")),
         "single_hint_ids": _strings(merged.get("single_hint_ids")),
         "result_release": release,
+        "answers_release": _choice(merged.get("answers_release") or "immediate", ANSWERS_RELEASE, "kiedy poprawne odpowiedzi"),
         "mandatory": bool(merged.get("mandatory")),
         "target": target,
         "include_ids": _strings(merged.get("include_ids")),
@@ -725,12 +732,66 @@ def result_view(config: Mapping[str, Any], attempt: Mapping[str, Any], now: date
     }
 
 
+def answers_release(config: Mapping[str, Any]) -> str:
+    """Kiedy zdający widzi klucz. Brak pola = egzamin sprzed 24.10.2026 (po zamknięciu okna)."""
+    value = _s(config.get("answers_release"))
+    return value if value in ANSWERS_RELEASE else ANSWERS_RELEASE_LEGACY
+
+
 def review_refusal(config: Mapping[str, Any], attempt_status: str, now: datetime) -> Optional[str]:
+    """Powód, dla którego zdający NIE widzi przeglądu z kluczem; None = widzi.
+
+    Klucz nigdy nie wyprzedza wyniku: przy wyniku po zamknięciu okna przegląd
+    „od razu" też czeka na zamknięcie (inaczej punkty dałoby się policzyć z klucza).
+    """
     if attempt_status == "in_progress":
         return "Przegląd odpowiedzi jest dostępny dopiero po zakończeniu podejścia."
-    if not window_closed(config, now):
+    mode = answers_release(config)
+    if mode == "never":
+        return ("Autor egzaminu nie udostępnia poprawnych odpowiedzi. Wynik zostaje na Twoim koncie, "
+                "a pytania przećwiczysz w Katalogu pytań.")
+    if not result_visible(config, attempt_status, now):
+        return "Poprawne odpowiedzi pokażemy razem z wynikiem - po zamknięciu okna egzaminu, dla wszystkich naraz."
+    if mode == "after_close" and not window_closed(config, now):
         return "Przegląd odpowiedzi z kluczem otwiera się dla wszystkich dopiero po zamknięciu okna egzaminu."
     return None
+
+
+def review_opens_at(config: Mapping[str, Any], attempt_status: str, now: datetime) -> Optional[str]:
+    """Chwila otwarcia przeglądu, gdy jeszcze zamknięty; None = otwarty albo nigdy."""
+    if review_refusal(config, attempt_status, now) is None or answers_release(config) == "never":
+        return None
+    return config.get("window_end")
+
+
+#: Zdarzenia podejścia, które NIE są naruszeniem (wznowienie, kod sali, sygnały liczone przez serwer).
+NOT_VIOLATIONS = frozenset({"resume", "room_code", "time_flag", "similarity", "device_change"})
+
+
+def violation_count(events: Sequence[Mapping[str, Any]], flags: Sequence[Any] = ()) -> int:
+    """Liczba naruszeń, którą widzi sam zdający (bez szczegółów osi komisji)."""
+    return sum(1 for e in events if _s(e.get("kind")) not in NOT_VIOLATIONS) + len([f for f in flags if _s(f)])
+
+
+def event_axis(events: Sequence[Mapping[str, Any]], started_at: Optional[datetime]) -> List[Dict[str, Any]]:
+    """Oś zdarzeń podejścia dla komisji: `t_ms` od startu (z pola zdarzenia albo z chwili zapisu)."""
+    start = _aware(started_at)
+    out = []
+    for e in events:
+        detail = e.get("detail") if isinstance(e.get("detail"), Mapping) else {}
+        t_ms = e.get("t_ms", detail.get("t_ms"))
+        if t_ms is None and start is not None:
+            at = parse_time(e.get("at")) if e.get("at") else None
+            if at is not None:
+                t_ms = max(0, int((at - start).total_seconds() * 1000))
+        try:
+            t_ms = int(t_ms) if t_ms is not None else None
+        except (TypeError, ValueError):
+            t_ms = None
+        out.append({"t_ms": t_ms, "kind": _s(e.get("kind")), "detail": dict(detail), "at": e.get("at"),
+                    "violation": _s(e.get("kind")) not in NOT_VIOLATIONS})
+    out.sort(key=lambda x: (x["t_ms"] is None, x["t_ms"] or 0))
+    return out
 
 
 def review_view(
@@ -739,21 +800,32 @@ def review_view(
     answers: Mapping[str, Mapping[str, Any]],
     bank: Mapping[str, Mapping[str, Any]],
     score: Mapping[str, Any],
+    difficulty: Optional[Mapping[str, float]] = None,
 ) -> List[Dict[str, Any]]:
+    """Pytania przeglądu w kolejności arkusza. `answers` stoją w kolejności, w jakiej
+    widział je zdający (litera = pozycja). `time_ms` = czas z telefonu (gdy runner
+    go przysłał), `elapsed_ms` = czas zmierzony serwerem; `difficulty` = odsetek
+    poprawnych w tym egzaminie (0-1), do sortowania po trudności."""
     per = {row["qid"]: row for row in score.get("questions") or []}
     out = []
-    for item in paper:
+    for i, item in enumerate(paper):
         q = bank[item["qid"]]
         ans = answers.get(item["qid"]) or {}
         row = per.get(item["qid"]) or {}
         out.append({
             **exam_question(config, q, item.get("keys")),
+            "position": i,
             "correct_keys": sorted(correct_keys(q)),
             "selected": list(ans.get("selected") or []),
+            "answered": ans.get("selected") is not None,
             "points": row.get("points"),
             "max": row.get("max"),
             "voided": row.get("voided"),
             "timed_out": bool(ans.get("timed_out")),
+            "time_ms": ans.get("client_time_ms"),
+            "elapsed_ms": ans.get("elapsed_ms"),
+            "changes": ans.get("changes") or 0,
+            "difficulty": (difficulty or {}).get(item["qid"]),
             "refs": q.get("refs") or [],
             "curiosity": q.get("curiosity"),
         })

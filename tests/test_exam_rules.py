@@ -295,8 +295,8 @@ def test_wynik_od_razu_albo_po_zamknieciu_okna():
     assert X.result_view(now_cfg, {"status": "in_progress"}, inside)["visible"] is False
 
 
-def test_przeglad_zawsze_po_zamknieciu_okna_nawet_przy_wyniku_od_razu():
-    c = cfg(result_release="immediate")
+def test_przeglad_po_zamknieciu_okna_gdy_tak_ustawiono():
+    c = cfg(result_release="immediate", answers_release="after_close")
     assert "zamknięciu okna" in X.review_refusal(c, "submitted", T0 + timedelta(days=1))
     assert X.review_refusal(c, "submitted", T0 + timedelta(days=4)) is None
     assert X.review_refusal(c, "in_progress", T0 + timedelta(days=4))
@@ -476,3 +476,58 @@ def test_stary_egzamin_bez_pol_podpowiedzi_nie_blokuje_edycji():
     assert X.single_hint(old, Q_SINGLE) is False
     assert X.locked_changes(old, cfg()) == []
     assert "single_hint_all" in X.locked_changes(old, cfg(single_hint_all=True))
+
+
+# --- kiedy poprawne odpowiedzi (24.10.2026) ----------------------------------
+
+
+def test_klucz_domyslnie_od_razu_po_oddaniu():
+    c = cfg(result_release="immediate")
+    assert c["answers_release"] == "immediate"
+    inside = T0 + timedelta(days=1)
+    assert X.review_refusal(c, "submitted", inside) is None
+    assert X.review_opens_at(c, "submitted", inside) is None
+    assert X.review_refusal(c, "in_progress", inside)
+
+
+def test_klucz_nie_wyprzedza_wyniku():
+    c = cfg(result_release="after_close", answers_release="immediate")
+    inside = T0 + timedelta(days=1)
+    assert "razem z wynikiem" in X.review_refusal(c, "submitted", inside)
+    assert X.review_opens_at(c, "submitted", inside) == c["window_end"]
+    assert X.review_refusal(c, "submitted", T0 + timedelta(days=4)) is None
+
+
+def test_klucz_nigdy_i_stary_egzamin():
+    never = cfg(result_release="immediate", answers_release="never")
+    late = T0 + timedelta(days=9)
+    assert "nie udostępnia" in X.review_refusal(never, "submitted", late)
+    assert X.review_opens_at(never, "submitted", late) is None
+    old = dict(cfg(result_release="immediate"))
+    old.pop("answers_release")
+    assert X.answers_release(old) == "after_close"
+    assert X.review_refusal(old, "submitted", T0 + timedelta(days=1))
+    with pytest.raises(X.ExamError):
+        cfg(answers_release="kiedys")
+
+
+def test_przeglad_niesie_pozycje_czas_i_trudnosc():
+    c = cfg()
+    paper = attempt(c)["paper"]
+    answers = {"q1": {"selected": ["b"], "client_time_ms": 4200, "elapsed_ms": 4600, "changes": 1}}
+    score = X.score_attempt(c, paper, answers, BANK, {})
+    review = X.review_view(c, paper, answers, {"q1": Q_SINGLE, "q2": Q_MULTI}, score, {"q1": 0.25})
+    assert review[0]["position"] == 0 and review[0]["time_ms"] == 4200 and review[0]["elapsed_ms"] == 4600
+    assert review[0]["difficulty"] == 0.25 and review[0]["answered"] is True
+    assert review[1]["answered"] is False and review[1]["time_ms"] is None
+
+
+def test_naruszenia_i_os_zdarzen():
+    start = T0
+    events = [{"kind": "app_background", "detail": {"seconds": 4}, "at": (T0 + timedelta(seconds=30)).isoformat()},
+              {"kind": "resume", "detail": {}, "at": (T0 + timedelta(seconds=34)).isoformat()},
+              {"kind": "tab_hidden", "detail": {"t_ms": 12000}, "at": None}]
+    assert X.violation_count(events, ["rhythm"]) == 3
+    axis = X.event_axis(events, start)
+    assert [e["t_ms"] for e in axis] == [12000, 30000, 34000]
+    assert [e["violation"] for e in axis] == [True, True, False]

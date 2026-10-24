@@ -115,3 +115,22 @@ async def judge(
     who: S.Who = Depends(_who),
 ) -> Dict[str, Any]:
     return await _run(SS.judge_card(_stats_store(), who, judge_id, province, _params(exams, date_from, date_to, source=source)))
+
+
+# ---------------------------------------------------------------------------
+# Kartoteka sędziego (24.10.2026): jeden kształt dla sędziego i komisji
+# ---------------------------------------------------------------------------
+
+
+@router.get("/me/record", summary="Moja kartoteka egzaminów: wyniki wg polityki egzaminu, czasy, forma")
+async def my_record(who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_record as RC
+
+    return await _run(RC.my_record(_stats_store(), who))
+
+
+@router.get("/judges/{judge_id}/record", summary="Kartoteka sędziego dla komisji (bramka teczki, bez kosza)")
+async def judge_record(judge_id: str, province: Optional[str] = None, who: S.Who = Depends(_who)) -> Dict[str, Any]:
+    from app import exam_record as RC
+
+    return await _run(RC.judge_record(_stats_store(), who, judge_id, province))

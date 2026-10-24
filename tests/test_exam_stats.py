@@ -232,4 +232,43 @@ def test_trasy_zarejestrowane_i_bez_bazy_na_gorze():
         top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
         assert not any(getattr(n, "module", "") == "app.db" for n in top), name
     src = (root / "app" / "exam_stats.py").read_text(encoding="utf-8")
-    assert src.count("Depends(_who)") == 3
+    assert src.count("Depends(_who)") == 5
+
+
+async def test_kartoteka_sedziego_i_komisji(st):
+    from app import exam_record as RC
+
+    first, second = await scenario(st)
+    ss = ss_of(st)
+    mine = await RC.my_record(ss, PLAIN, now=AFTER)
+    assert mine["viewer"] == "self" and mine["judge"]["name"] == "Jan Zwykły"
+    t = mine["totals"]
+    assert t["tests"] == 2 and t["attempts"] == 2 and t["best_percent"] == 100.0 and t["best_exam_id"] == first["id"]
+    assert t["avg_percent"] == round((100.0 + 66.67) / 2, 2) and t["best_duration_s"] is not None
+    assert [f["exam_id"] for f in mine["form"]] == [first["id"], second["id"]]
+    assert mine["exams"][0]["exam_id"] == second["id"] and mine["exams"][0]["attempts"][0]["review_available"] is True
+    row = mine["exams"][0]["attempts"][0]
+    assert row["right"] == 2 and row["wrong"] == 1 and row["violations"] == 0
+    board = await RC.judge_record(ss, COMMISSION, "3", "ŚLĄSKIE", now=AFTER)
+    assert board["viewer"] == "committee" and board["totals"] == t
+    with pytest.raises(X.ExamError):
+        await RC.judge_record(ss, PLAIN, "3", "ŚLĄSKIE", now=AFTER)
+    # Wynik w koszu znika z kartoteki obu widzów.
+    from app import exam_trash as T
+
+    await T.delete_result(st, COMMISSION, second["id"], "3", now=AFTER)
+    after = await RC.my_record(ss, PLAIN, now=AFTER)
+    assert [e["exam_id"] for e in after["exams"]] == [first["id"]]
+    assert (await RC.judge_record(ss, COMMISSION, "3", "ŚLĄSKIE", now=AFTER))["totals"]["tests"] == 1
+
+
+async def test_kartoteka_ukrywa_wynik_wg_polityki(st):
+    from app import exam_record as RC
+
+    exam, _ = await make(st, result_release="after_close")
+    await write(st, PLAIN, exam["id"], OPEN + timedelta(minutes=5))
+    mine = await RC.my_record(ss_of(st), PLAIN, now=OPEN + timedelta(hours=1))
+    row = mine["exams"][0]["attempts"][0]
+    assert row["visible"] is False and row["percent"] is None and row["right"] is None
+    assert row["review_available"] is False and "razem z wynikiem" in row["review_reason"]
+    assert mine["totals"]["tests"] == 1 and mine["totals"]["avg_percent"] is None and mine["weak_rules"] == []

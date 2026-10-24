@@ -245,7 +245,7 @@ async def test_ocena_tylko_na_serwerze_i_polityka_wyniku(st):
 
 
 async def test_wynik_od_razu_ale_przeglad_dopiero_po_oknie(st):
-    exam, _ = await make(st, result_release="immediate")
+    exam, _ = await make(st, result_release="immediate", answers_release="after_close")
     t = OPEN + timedelta(minutes=5)
     state = await S.start_attempt(st, PLAIN, exam["id"], {}, now=t)
     final, _, end = await answer_all(st, PLAIN, state["attempt"]["id"], t, choose=lambda q: ["d"], state=state)
@@ -436,3 +436,22 @@ async def test_sweep_przypomnien_z_dedupem_i_push_wynikow(st):
     assert len([p for p in st.pushes if p["data"]["notice"] == "exam_results"]) == 1
     row = dict((await st.database.fetch_one(select(st.t.attempts)))._mapping)
     assert row["status"] == "expired"
+
+
+async def test_klucz_od_razu_po_oddaniu_i_przeglad_komisji(st):
+    exam, _ = await make(st, result_release="immediate")
+    t = OPEN + timedelta(minutes=5)
+    state = await S.start_attempt(st, PLAIN, exam["id"], {}, now=t)
+    aid = state["attempt"]["id"]
+    await S.post_events(st, PLAIN, aid, {"events": [{"kind": "app_background", "detail": {"seconds": 3}}]}, now=t)
+    _final, _, end = await answer_all(st, PLAIN, aid, t, choose=lambda q: ["d"], state=state)
+    mine = await S.attempt_review(st, PLAIN, aid, now=end)
+    assert mine["violations"] == 1 and "events" not in mine and mine["exam"]["answers_release"] == "immediate"
+    assert all("position" in q and "difficulty" in q for q in mine["questions"])
+    listed = await S.list_for_judge(st, PLAIN, now=end)
+    att = next(e for e in listed["exams"] if e["id"] == exam["id"])["my_attempts"][0]
+    assert att["review_available"] is True and att["review_reason"] is None
+    full = await S.committee_review(st, COMMISSION, exam["id"], aid)
+    assert full["violations"] == 1 and full["events"][0]["kind"] == "app_background" and full["flags"] == []
+    with pytest.raises(X.ExamError):
+        await S.committee_review(st, PLAIN, exam["id"], aid)

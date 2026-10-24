@@ -415,6 +415,7 @@ def exam_view(exam: Mapping[str, Any], now: datetime, *, full: bool) -> Dict[str
         "time_per_question_s": config["time_per_question_s"], "max_attempts": config["max_attempts"], "retake": config.get("retake", "any"),
         "allow_back": config["allow_back"], "pass_percent": config["pass_percent"],
         "result_release": config["result_release"],
+        "answers_release": X.answers_release(config),
         # Zasady jawne dla zdającego: przedsionek opisuje je wprost (zero cichych blokad).
         "anti": {k: v for k, v in config["anti"].items() if k != "integrity"}, "multi_scoring": config["multi_scoring"],
     }
@@ -464,7 +465,10 @@ async def update_exam(st: Store, who: Who, exam_id: str, body: Mapping[str, Any]
     await require_manage(who, exam["scope"], exam.get("province"))
     name, description = X.clean_text(body.get("name", exam["name"]), body.get("description", exam.get("description")))
     patch = body.get("config") or {}
-    config = X.clean_config(X._merge(copy.deepcopy(exam["config"]), patch))
+    base = copy.deepcopy(exam["config"])
+    # Egzamin sprzed „kiedy poprawne odpowiedzi" zostaje przy dawnym zachowaniu, dopóki komisja nie wybierze.
+    base.setdefault("answers_release", X.ANSWERS_RELEASE_LEGACY)
+    config = X.clean_config(X._merge(base, patch))
     started = await st.database.fetch_val(select(func.count()).select_from(st.t.attempts).where(st.t.attempts.c.exam_id == exam_id))
     locked = X.locked_changes(exam["config"], config)
     if started and locked:
@@ -537,9 +541,12 @@ async def list_for_judge(st: Store, who: Who, now: Optional[datetime] = None) ->
 def _attempt_summary(config: Mapping[str, Any], attempt: Mapping[str, Any], now: datetime) -> Dict[str, Any]:
     score = _loads(attempt.get("score_json"), None)
     shaped = {"status": attempt["status"], "score": score}
+    refusal = X.review_refusal(config, attempt["status"], now)
     return {"id": attempt["id"], "attempt_no": attempt["attempt_no"], "status": attempt["status"],
             "started_at": _iso(attempt["started_at"]), "finished_at": _iso(attempt.get("finished_at")),
-            "result": X.result_view(config, shaped, now)}
+            "result": X.result_view(config, shaped, now),
+            "review_available": refusal is None, "review_reason": refusal,
+            "review_opens_at": X.review_opens_at(config, attempt["status"], now)}
 
 
 async def get_exam(st: Store, who: Who, exam_id: str, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -1073,10 +1080,86 @@ async def attempt_result(st: Store, who: Who, attempt_id: str, now: Optional[dat
         await _save(st, attempt, answers)
         if attempt["status"] != "in_progress" and attempt.get("score") is None:
             await _finalize_score(st, exam, attempt, answers)
+    refusal = X.review_refusal(exam["config"], attempt["status"], now)
     return {"attempt_id": attempt_id, "status": attempt["status"], "attempt_no": attempt["attempt_no"],
             "result": X.result_view(exam["config"], attempt, now),
-            "review_available": X.review_refusal(exam["config"], attempt["status"], now) is None,
-            "review_opens_at": exam["config"]["window_end"], "server_now": now.isoformat()}
+            "review_available": refusal is None, "review_reason": refusal,
+            "review_mode": X.answers_release(exam["config"]),
+            "review_opens_at": X.review_opens_at(exam["config"], attempt["status"], now), "server_now": now.isoformat()}
+
+
+#: Trudność pytań egzaminu (odsetek poprawnych) - pamięć procesu na kilka minut, bo przegląd
+#: otwiera wiele osób naraz, a wynik zmienia się tylko z nowym oddaniem.
+_DIFFICULTY_CACHE: Dict[str, Tuple[float, Dict[str, float]]] = {}
+_DIFFICULTY_TTL_S = 300.0
+
+
+async def _exam_difficulty(st: Store, exam: Mapping[str, Any], bank: Mapping[str, Mapping[str, Any]]) -> Dict[str, float]:
+    import time as _time
+    hit = _DIFFICULTY_CACHE.get(exam["id"])
+    if hit and _time.monotonic() - hit[0] < _DIFFICULTY_TTL_S:
+        return hit[1]
+    t = st.t
+    rows = await st.database.fetch_all(
+        select(t.answers.c.qid, t.answers.c.selected_json)
+        .select_from(t.answers.join(t.attempts, t.attempts.c.id == t.answers.c.attempt_id))
+        .where(and_(t.attempts.c.exam_id == exam["id"], t.attempts.c.status != "in_progress", _live(t.attempts))))
+    sums: Dict[str, List[float]] = {}
+    scoring = exam["config"].get("multi_scoring") or "all_or_nothing"
+    for r in rows:
+        q = bank.get(r["qid"])
+        if not q:
+            continue
+        b = sums.setdefault(r["qid"], [0, 0.0])
+        b[0] += 1
+        b[1] += X.score_question(q, _loads(r["selected_json"], []) or [], scoring)
+    out = {qid: round(tot / n, 4) for qid, (n, tot) in sums.items() if n}
+    _DIFFICULTY_CACHE[exam["id"]] = (_time.monotonic(), out)
+    return out
+
+
+async def _attempt_events(st: Store, attempt_id: str) -> List[Dict[str, Any]]:
+    rows = await st.database.fetch_all(select(st.t.events).where(st.t.events.c.attempt_id == attempt_id).order_by(st.t.events.c.id))
+    out = []
+    for raw in rows:
+        r = _row(raw)
+        out.append({"id": r["id"], "kind": r["kind"], "detail": _loads(r["detail_json"], {}),
+                    "client_ts_ms": r.get("client_ts_ms"), "at": _iso(r["created_at"])})
+    return out
+
+
+def attempt_flags(attempt: Mapping[str, Any]) -> List[str]:
+    """Flagi podejścia z trybu komputerowego (kontrakt 24.10: `flags: string[]`); kolumny może jeszcze nie być."""
+    raw = attempt.get("flags")
+    if raw is None and attempt.get("flags_json") is not None:
+        raw = _loads(attempt.get("flags_json"), [])
+    return [str(f) for f in (raw or []) if str(f or "").strip()]
+
+
+def _duration_s(attempt: Mapping[str, Any]) -> Optional[float]:
+    start, end = attempt.get("started_at"), attempt.get("finished_at")
+    if start and end and end >= start:
+        return round((end - start).total_seconds(), 1)
+    return None
+
+
+async def _review_payload(st: Store, exam: Mapping[str, Any], attempt: Dict[str, Any], result: Mapping[str, Any]) -> Dict[str, Any]:
+    answers = await _load_answers(st, attempt["id"])
+    if attempt.get("score") is None:
+        await _finalize_score(st, exam, attempt, answers)
+    bank = await load_bank(st, exam["bank_version"])
+    difficulty = await _exam_difficulty(st, exam, bank)
+    config = exam["config"]
+    return {
+        "attempt_id": attempt["id"], "result": result,
+        "exam": {"id": exam["id"], "name": exam["name"], "scope": exam["scope"], "province": exam.get("province"),
+                 "pass_percent": config.get("pass_percent"), "time_per_question_s": config.get("time_per_question_s"),
+                 "multi_scoring": config.get("multi_scoring"), "answers_release": X.answers_release(config)},
+        "attempt": {"attempt_no": attempt["attempt_no"], "status": attempt["status"], "finish_reason": attempt.get("finish_reason"),
+                    "started_at": _iso(attempt.get("started_at")), "finished_at": _iso(attempt.get("finished_at")),
+                    "duration_s": _duration_s(attempt), "judge_id": attempt.get("judge_id"), "judge_name": attempt.get("judge_name")},
+        "questions": X.review_view(config, attempt["paper"], answers, bank, attempt["score"], difficulty),
+    }
 
 
 async def attempt_review(st: Store, who: Who, attempt_id: str, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -1085,13 +1168,35 @@ async def attempt_review(st: Store, who: Who, attempt_id: str, now: Optional[dat
     exam = await _exam(st, attempt["exam_id"], deleted_ok=True)
     refusal = X.review_refusal(exam["config"], attempt["status"], now)
     if refusal:
-        raise ExamError("EXAM_REVIEW_LOCKED", refusal, 403, {"opens_at": exam["config"]["window_end"]})
-    answers = await _load_answers(st, attempt_id)
-    if attempt.get("score") is None:
-        await _finalize_score(st, exam, attempt, answers)
-    bank = await load_bank(st, exam["bank_version"])
-    return {"attempt_id": attempt_id, "result": X.result_view(exam["config"], attempt, now),
-            "questions": X.review_view(exam["config"], attempt["paper"], answers, bank, attempt["score"])}
+        raise ExamError("EXAM_REVIEW_LOCKED", refusal, 403, {"opens_at": X.review_opens_at(exam["config"], attempt["status"], now),
+                                                             "mode": X.answers_release(exam["config"])})
+    body = await _review_payload(st, exam, attempt, X.result_view(exam["config"], attempt, now))
+    # Zdający widzi tylko LICZBĘ naruszeń - oś zdarzeń jest dla komisji.
+    body["violations"] = X.violation_count(await _attempt_events(st, attempt_id), attempt_flags(attempt))
+    return body
+
+
+async def committee_review(st: Store, who: Who, exam_id: str, attempt_id: str) -> Dict[str, Any]:
+    """Przegląd podejścia dla komisji (bramka teczki): zawsze z kluczem, z osią zdarzeń i flagami."""
+    exam = await _managed_exam(st, who, exam_id, read=True)
+    attempt = await _attempt_row(st, attempt_id)
+    if attempt.get("deleted_at") is not None:
+        raise ExamError("ATTEMPT_IN_TRASH", "Ten wynik leży w koszu teczki - przywróć go, żeby obejrzeć arkusz.", 404)
+    if attempt["exam_id"] != exam_id or not _in_cut(attempt.get("province"), exam["cut_province"]):
+        raise ExamError("ATTEMPT_NOT_FOUND", "To podejście nie należy do tego egzaminu.", 404)
+    if attempt["status"] == "in_progress":
+        raise ExamError("ATTEMPT_IN_PROGRESS", "Sędzia jeszcze pisze - przegląd otworzy się po oddaniu arkusza.", 409)
+    score = attempt.get("score") or {}
+    result = {"visible": True, "points": score.get("points"), "max": score.get("max"), "percent": score.get("percent"),
+              "passed": score.get("passed"), "pass_percent": score.get("pass_percent")}
+    body = await _review_payload(st, exam, attempt, result)
+    events = await _attempt_events(st, attempt_id)
+    flags = attempt_flags(attempt)
+    body["violations"] = X.violation_count(events, flags)
+    body["events"] = X.event_axis(events, attempt.get("started_at"))
+    body["flags"] = flags
+    body["integrity"] = X.integrity_report(events, exam["config"]["anti"].get("integrity"))
+    return body
 
 
 # ---------------------------------------------------------------------------
