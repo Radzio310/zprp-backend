@@ -222,6 +222,32 @@ async def test_pytania_w_sesji_nie_maja_kluczy_i_leca_po_kolei(st):
     assert final["attempt"]["status"] == "submitted" and final["question"] is None
 
 
+async def test_caly_arkusz_bez_kluczy_w_kolejnosci_podejscia_i_odpowiedzi_bez_sieci(st):
+    exam, _ = await make(st, time_per_question_s=60)
+    t = OPEN + timedelta(minutes=5)
+    state = await S.start_attempt(st, PLAIN, exam["id"], {}, now=t)
+    aid = state["attempt"]["id"]
+    paper = await S.attempt_paper(st, PLAIN, aid, None, now=t + timedelta(seconds=1))
+    flat = json.dumps(paper, ensure_ascii=False)
+    assert '"correct' not in flat and paper["total"] == 3
+    assert [q["index"] for q in paper["questions"]] == [0, 1, 2]
+    assert paper["questions"][0]["qid"] == state["question"]["qid"]
+    assert [a["key"] for a in paper["questions"][0]["answers"]] == [a["key"] for a in state["question"]["answers"]]
+    # Cały arkusz rozwiązany bez sieci (łańcuch advance) i wysłany jedną paczką po kwadransie.
+    ms = lambda d: d.timestamp() * 1000  # noqa: E731
+    items, at = [], t
+    for i, q in enumerate(paper["questions"]):
+        at += timedelta(seconds=20)
+        items.append({"qid": q["qid"], "selected": [CORRECT[q["qid"]]], "client_ts_ms": ms(at), "advance": i < 2, "time_ms": 19000})
+    late = t + timedelta(minutes=15)
+    out = await S.post_answers(st, PLAIN, aid, {"answers": items, "buffered": True, "client_now_ms": ms(late)}, late)
+    assert [r["status"] for r in out["results"]] == ["accepted"] * 3
+    assert out["state"]["attempt"]["status"] == "submitted"
+    with pytest.raises(X.ExamError) as err:
+        await S.attempt_paper(st, PLAIN, aid, None, now=late)
+    assert err.value.code == "EXAM_FINISHED"
+
+
 async def test_ocena_tylko_na_serwerze_i_polityka_wyniku(st):
     exam, _ = await make(st, result_release="after_close")
     t = OPEN + timedelta(minutes=5)

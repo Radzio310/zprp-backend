@@ -973,6 +973,28 @@ async def _serve(st: Store, exam: Mapping[str, Any], attempt: Dict[str, Any], in
     return state
 
 
+async def attempt_paper(st: Store, who: Who, attempt_id: str, device_id: Any, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Cały arkusz podejścia dla telefonu (decyzja 24.10.2026): pytania w kolejności i z
+    wymieszaniem TEGO podejścia, BEZ kluczy poprawności. Telefon trzyma go na dysku, więc
+    brak sieci w trakcie (także po zabiciu aplikacji) niczego nie zatrzymuje. Zegar pytania
+    nadal liczy serwer: startuje odpowiedzią na poprzednie (`advance`) albo zamknięciem
+    poprzedniego (`lookahead`), nie pobraniem arkusza."""
+    now = now or utcnow()
+    attempt = await _own_attempt(st, who, attempt_id)
+    exam = await _exam(st, attempt["exam_id"], deleted_ok=True)
+    if attempt["status"] != "in_progress":
+        raise ExamError("EXAM_FINISHED", "To podejście jest już zakończone.", 409)
+    await _check_device(st, exam, attempt, device_id, now)
+    await _save(st, attempt, {})
+    bank = await load_bank(st, exam["bank_version"])
+    questions = []
+    for i, item in enumerate(attempt["paper"]):
+        view = X.exam_question(exam["config"], bank[item["qid"]], item["keys"])
+        view.update(index=i)
+        questions.append(view)
+    return {"attempt_id": attempt["id"], "total": len(questions), "questions": questions}
+
+
 async def attempt_state(st: Store, who: Who, attempt_id: str, index: Optional[int], device_id: Any, now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or utcnow()
     attempt = await _own_attempt(st, who, attempt_id)

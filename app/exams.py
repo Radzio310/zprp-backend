@@ -231,6 +231,15 @@ async def attempt_state(
     return await _run(S.attempt_state(_store(), who, attempt_id, index, device_id))
 
 
+@router.get("/attempts/{attempt_id}/paper", summary="Cały arkusz podejścia (bez kluczy) - praca bez sieci")
+async def attempt_paper(
+    attempt_id: str,
+    device_id: Optional[str] = Query(None),
+    who: S.Who = Depends(_who),
+) -> Dict[str, Any]:
+    return await _run(S.attempt_paper(_store(), who, attempt_id, device_id))
+
+
 @router.post("/attempts/{attempt_id}/answers", summary="Oddaj odpowiedzi (także z bufora ze stemplem)")
 async def attempt_answers(attempt_id: str, body: AnswersBody, who: S.Who = Depends(_who)) -> Dict[str, Any]:
     return await _run(S.post_answers(_store(), who, attempt_id, body.model_dump()))
