@@ -434,3 +434,45 @@ def test_progi_rzetelnosci_nie_sa_zablokowane_po_starcie():
     assert X.locked_changes(old, new) == []
     changed = X.clean_config(X._merge(copy.deepcopy(old), {"anti": {"screenshots": True}}))
     assert X.locked_changes(old, changed) == ["anti"]
+
+
+# --- podpowiedź „jedna poprawna" (24.10.2026) -------------------------------
+
+
+def test_bez_podpowiedzi_pytanie_z_jedna_poprawna_przyjmuje_kilka_odpowiedzi_i_ocenia_zbior():
+    c = cfg()
+    assert c["single_hint_all"] is False and c["single_hint_ids"] == []
+    view = X.exam_question(c, Q_SINGLE, ["c", "a", "b"])
+    # Karta nie zdradza liczby poprawnych: wolno zaznaczyć kilka.
+    assert view["multi"] is True and view["single_hint"] is False
+    assert [x["key"] for x in view["answers"]] == ["c", "a", "b"]
+    a, answers = attempt(c), {}
+    serve(c, a, answers, T0)
+    out = X.apply_answers(c, a, answers, [{"qid": "q1", "selected": ["a", "b"]}], BANK, T0 + timedelta(seconds=10))
+    assert out[0]["status"] == "accepted"
+    assert X.score_question(Q_SINGLE, ["a", "b"], "all_or_nothing") == 0.0
+    assert X.score_question(Q_SINGLE, ["a", "b"], "partial") == 0.0
+    assert X.score_question(Q_SINGLE, ["a"], "all_or_nothing") == 1.0
+
+
+def test_podpowiedz_dla_pytania_i_dla_calego_egzaminu():
+    picked = cfg(single_hint_ids=["q1", "q2"])
+    assert X.exam_question(picked, Q_SINGLE)["single_hint"] is True
+    assert X.exam_question(picked, Q_SINGLE)["multi"] is False
+    # Pytanie z kilkoma poprawnymi nigdy nie dostaje podpowiedzi „jedna".
+    assert X.exam_question(picked, Q_MULTI)["single_hint"] is False
+    every = cfg(single_hint_all=True)
+    assert X.single_hint(every, Q_SINGLE) and not X.single_hint(every, Q_MULTI)
+    a, answers = attempt(picked), {}
+    serve(picked, a, answers, T0)
+    out = X.apply_answers(picked, a, answers, [{"qid": "q1", "selected": ["a", "b"]}], BANK, T0 + timedelta(seconds=10))
+    assert out[0]["code"] == "EXAM_SINGLE_ONLY"
+
+
+def test_stary_egzamin_bez_pol_podpowiedzi_nie_blokuje_edycji():
+    old = cfg()
+    old.pop("single_hint_all")
+    old.pop("single_hint_ids")
+    assert X.single_hint(old, Q_SINGLE) is False
+    assert X.locked_changes(old, cfg()) == []
+    assert "single_hint_all" in X.locked_changes(old, cfg(single_hint_all=True))

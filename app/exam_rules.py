@@ -91,7 +91,7 @@ EVENT_KINDS = CLIENT_EVENT_KINDS + ("time_flag", "device_change", "similarity", 
 LOCKED_AFTER_START = (
     "scope", "question_count", "set_mode", "shuffle_answers", "shuffle_questions", "allow_back",
     "time_per_question_s", "time_total_min", "multi_scoring", "pass_percent", "max_attempts", "retake",
-    "result_release", "anti",
+    "result_release", "anti", "single_hint_all", "single_hint_ids",
 )
 
 CURIOSITIES: Dict[str, str] = {
@@ -221,6 +221,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retake": "any",
     "pass_percent": 75.0,
     "multi_scoring": "all_or_nothing",
+    #: Podpowiedź „jedna odpowiedź jest poprawna" (decyzja 24.10.2026: domyślnie WYŁĄCZONA).
+    #: Bez niej każde pytanie pozwala zaznaczyć kilka odpowiedzi - zdający nie wie, ile jest poprawnych.
+    "single_hint_all": False,
+    "single_hint_ids": [],
     "result_release": "after_close",
     "mandatory": False,
     "target": {"include_all": False, "include_badges": [], "exclude_badges": []},
@@ -441,6 +445,8 @@ def clean_config(raw: Mapping[str, Any], *, template: Any = None) -> Dict[str, A
         "retake": retake,
         "pass_percent": round(pass_percent, 2),
         "multi_scoring": _choice(merged.get("multi_scoring"), MULTI_SCORING, "punktacja wielokrotnego wyboru"),
+        "single_hint_all": bool(merged.get("single_hint_all")),
+        "single_hint_ids": _strings(merged.get("single_hint_ids")),
         "result_release": release,
         "mandatory": bool(merged.get("mandatory")),
         "target": target,
@@ -475,6 +481,11 @@ def locked_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> List[str]:
     """Pola, które ktoś chce zmienić po tym, jak zdający zaczęli egzamin."""
     def comparable(cfg: Mapping[str, Any], key: str) -> Any:
         value = cfg.get(key)
+        if key in HINT_DEFAULTS and value is None:
+            # Egzamin sprzed podpowiedzi (24.10.2026) nie ma tych pól - brak = domyślnie wyłączona.
+            return HINT_DEFAULTS[key]
+        if key == "single_hint_ids":
+            return sorted(value or [])
         if key == "anti" and isinstance(value, Mapping):
             # Progi rzetelności to ocena komisji, nie zasada dla zdającego - nie są zablokowane.
             return {k: v for k, v in value.items() if k != "integrity"}
@@ -486,6 +497,30 @@ def locked_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> List[str]:
 # ---------------------------------------------------------------------------
 # Pytania: pula, zestaw, kolejność
 # ---------------------------------------------------------------------------
+
+
+HINT_DEFAULTS: Dict[str, Any] = {"single_hint_all": False, "single_hint_ids": []}
+
+
+def single_hint(config: Mapping[str, Any], question: Mapping[str, Any]) -> bool:
+    """Czy karta mówi zdającemu „jedna odpowiedź jest poprawna".
+
+    Tylko pytanie z JEDNĄ poprawną i tylko z włączoną podpowiedzią (dla całego
+    egzaminu albo dla tego pytania). Stare egzaminy pól nie mają = bez podpowiedzi."""
+    if len(correct_keys(question)) != 1:
+        return False
+    if config.get("single_hint_all"):
+        return True
+    return question.get("qid") in set(config.get("single_hint_ids") or [])
+
+
+def exam_question(config: Mapping[str, Any], question: Mapping[str, Any],
+                  keys_order: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """Pytanie na arkuszu egzaminu. `multi` znaczy tu „wolno zaznaczyć kilka" -
+    bez podpowiedzi zawsze prawda, więc karta nie zdradza liczby poprawnych.
+    `single_hint` = karta mówi wprost, że poprawna jest jedna."""
+    hint = single_hint(config, question)
+    return {**public_question(question, keys_order), "multi": not hint, "single_hint": hint}
 
 
 def public_question(question: Mapping[str, Any], keys_order: Optional[Sequence[str]] = None) -> Dict[str, Any]:
@@ -712,7 +747,7 @@ def review_view(
         ans = answers.get(item["qid"]) or {}
         row = per.get(item["qid"]) or {}
         out.append({
-            **public_question(q, item.get("keys")),
+            **exam_question(config, q, item.get("keys")),
             "correct_keys": sorted(correct_keys(q)),
             "selected": list(ans.get("selected") or []),
             "points": row.get("points"),
@@ -990,8 +1025,10 @@ def _apply_one(
         return _reject(qid, "EXAM_EMPTY_ANSWER", "Zaznacz co najmniej jedną odpowiedź.", flags)
     if any(k not in valid for k in selected):
         return _reject(qid, "EXAM_BAD_KEY", "Zaznaczono odpowiedź, której to pytanie nie ma.", flags)
-    if len(selected) > 1 and not question.get("multi"):
-        return _reject(qid, "EXAM_SINGLE_ONLY", "To pytanie ma jedną prawidłową odpowiedź.", flags)
+    if len(selected) > 1 and single_hint(config, question):
+        # Tylko pytanie z podpowiedzią „jedna poprawna" przyjmuje jedną odpowiedź. Bez niej
+        # zdający może zaznaczyć kilka - ocena i tak liczy zbiór (wszystko albo nic / częściowa).
+        return _reject(qid, "EXAM_SINGLE_ONLY", "W tym pytaniu poprawna jest jedna odpowiedź - zaznacz tylko jedną.", flags)
     current = attempt["current_index"]
     limit = config.get("time_per_question_s")
     row = answers.get(qid)

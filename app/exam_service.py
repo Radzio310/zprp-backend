@@ -12,6 +12,7 @@ przechodzi przez `_dt`.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -22,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from sqlalchemy import and_, case, delete, func, insert, or_, select, update
+from sqlalchemy import and_, case, delete, func, insert, literal_column, or_, select, update
 
 from app import exam_rules as X
 from app import province_event_rules as R
@@ -35,6 +36,8 @@ SEED_PATH = Path(__file__).resolve().parent / "data" / "exam_questions_default.j
 #: Zaległe podejścia domyka przejście w tle dopiero po tej zwłoce (bufor z telefonu).
 SWEEP_GRACE = timedelta(seconds=120)
 RESULTS_PUSH_DAYS = 14
+#: Kosz teczki: egzamin albo wynik sędziego czeka tyle dni na przywrócenie, potem znika trwale.
+TRASH_DAYS = 30
 MAX_EVENTS_PER_ATTEMPT = 300
 
 ALL_PROVINCES: List[str] = sorted(DISPLAY.values())
@@ -378,10 +381,10 @@ async def _sync_events(st: Store, exam: Dict[str, Any], now: datetime) -> bool:
     return moved
 
 
-async def _trash_events(st: Store, exam: Mapping[str, Any], now: datetime) -> None:
+async def _trash_events(st: Store, exam: Mapping[str, Any], now: datetime, *, restore: bool = False) -> None:
     for event_id in (exam["event_ids"] or {}).values():
         await st.database.execute(update(st.t.province_events).where(st.t.province_events.c.id == int(event_id))
-                                  .values(deleted_at=now, updated_at=now))
+                                  .values(deleted_at=None if restore else now, updated_at=now))
 
 
 # ---------------------------------------------------------------------------
@@ -486,9 +489,12 @@ async def delete_exam(st: Store, who: Who, exam_id: str, now: Optional[datetime]
     now = now or utcnow()
     exam = await _exam(st, exam_id)
     await require_manage(who, exam["scope"], exam.get("province"))
-    await st.database.execute(update(st.t.definitions).where(st.t.definitions.c.id == exam_id).values(deleted_at=now, updated_at=now))
+    await st.database.execute(update(st.t.definitions).where(st.t.definitions.c.id == exam_id).values(
+        deleted_at=now, updated_at=now, deleted_by=who.judge_id, deleted_by_name=who.name or None))
     await _trash_events(st, exam, now)
-    return {"id": exam_id, "deleted": True, "note": "Podejścia i wyniki zostają w bazie; wydarzenia trafiły do kosza okręgu."}
+    purge_at = now + timedelta(days=TRASH_DAYS)
+    return {"id": exam_id, "deleted": True, "purge_at": purge_at.isoformat(),
+            "note": f"Egzamin leży w koszu teczki {TRASH_DAYS} dni - do tego czasu przywrócisz go razem z wynikami."}
 
 
 async def _invited_ids(st: Store, exam: Mapping[str, Any], province: str, judges: Optional[List[Dict[str, Any]]] = None) -> List[str]:
@@ -556,6 +562,18 @@ async def get_exam(st: Store, who: Who, exam_id: str, now: Optional[datetime] = 
 _FINISHED = ("submitted", "expired")
 
 
+def _live(a: Any) -> Any:
+    """Podejście poza koszem teczki - jedyny warunek, pod którym komisja widzi wynik."""
+    return a.c.deleted_at.is_(None)
+
+
+def histogram_10(values: Sequence[float]) -> List[int]:
+    out = [0] * 10
+    for v in values:
+        out[min(9, max(0, int(float(v) // 10)))] += 1
+    return out
+
+
 def _province_filter(column: Any, province: Optional[str]) -> Any:
     """Warunek okręgu uczestnika (kolumna trzyma nazwę wyświetlaną, ale bywa stara pisownia)."""
     names = {province} | {k for k, v in DISPLAY.items() if v == province} if province else set()
@@ -567,7 +585,7 @@ async def _attempt_counts(st: Store, exam_ids: List[str], province: Optional[str
     if not exam_ids:
         return {}
     a = st.t.attempts
-    cond = a.c.exam_id.in_(exam_ids)
+    cond = and_(a.c.exam_id.in_(exam_ids), _live(a))
     if province:
         cond = and_(cond, _province_filter(a.c.province, province))
     # Kolumny nazwane, nie po indeksie: rekord `databases` na asyncpg nie wspiera r[0].
@@ -594,7 +612,7 @@ async def _people_summary(st: Store, exam_ids: List[str], province: Optional[str
         return {}
     a = st.t.attempts
     done = a.c.status.in_(_FINISHED)
-    cond = a.c.exam_id.in_(exam_ids)
+    cond = and_(a.c.exam_id.in_(exam_ids), _live(a))
     if province:
         cond = and_(cond, _province_filter(a.c.province, province))
     rows = await st.database.fetch_all(
@@ -602,7 +620,10 @@ async def _people_summary(st: Store, exam_ids: List[str], province: Optional[str
             a.c.exam_id.label("exam_id"),
             a.c.judge_id.label("judge_id"),
             func.max(case((done, a.c.percent), else_=None)).label("best"),
-            func.max(case((and_(done, a.c.passed.is_(True)), 1), else_=0)).label("ok"),
+            # Stałe wpisane w SQL, NIE parametry: `CASE WHEN .. THEN $1 ELSE $2` bez typu Postgres
+            # odgaduje jako text, a asyncpg odmawia wysłania liczby do parametru tekstowego
+            # („expected str, got int”) - to był 500 każdej teczki z egzaminami (24.10.2026).
+            func.max(case((and_(done, a.c.passed.is_(True)), literal_column("1")), else_=literal_column("0"))).label("ok"),
         )
         .where(cond)
         .group_by(a.c.exam_id, a.c.judge_id)
@@ -639,6 +660,8 @@ def summary_view(people: Optional[Mapping[str, Any]], invited_ids: Sequence[str]
         "pass_rate": round(passed / len(best), 4) if best else None,
         "not_started": not_started,
         "invited": len(judges) + not_started,
+        # Mini histogram biletu w teczce: najlepsze wyniki osób w dziesiątkach procent.
+        "histogram_10pct": histogram_10(best),
     }
 
 
@@ -670,9 +693,20 @@ async def list_manage(st: Store, who: Who, province: Optional[str], now: Optiona
         exams.append(exam)
     nat_ids = [e["id"] for e in exams if e["scope"] == "national"] if with_national else []
     own_ids = [e["id"] for e in exams if e["id"] not in set(nat_ids)]
-    counts = {**await _attempt_counts(st, own_ids), **await _attempt_counts(st, nat_ids, prov)}
-    people = {**await _people_summary(st, own_ids), **await _people_summary(st, nat_ids, prov)}
-    roster: Dict[str, List[Dict[str, Any]]] = {}
+    # Okręgi potrzebne do zaproszonych - każdy raz dla całej teczki.
+    provinces: List[str] = []
+    for exam in exams:
+        for p in ([prov] if exam["id"] in nat_ids else _exam_provinces(exam)):
+            if p and p not in provinces:
+                provinces.append(p)
+    # Wszystko naraz: liczniki, miniatury i listy okręgów nie czekają na siebie nawzajem.
+    c_own, c_nat, p_own, p_nat, *lists = await asyncio.gather(
+        _attempt_counts(st, own_ids), _attempt_counts(st, nat_ids, prov),
+        _people_summary(st, own_ids), _people_summary(st, nat_ids, prov),
+        *(st.judges(p) for p in provinces))
+    counts = {**c_own, **c_nat}
+    people = {**p_own, **p_nat}
+    roster: Dict[str, List[Dict[str, Any]]] = dict(zip(provinces, lists))
     items = []
     for exam in exams:
         view = exam_view(exam, now, full=True)
@@ -680,9 +714,7 @@ async def list_manage(st: Store, who: Who, province: Optional[str], now: Optiona
         invited: List[str] = []
         read_only = exam["id"] in nat_ids
         for p in ([prov] if read_only else _exam_provinces(exam)):
-            if p not in roster:
-                roster[p] = await st.judges(p)  # raz na okręg dla całej teczki
-            invited += await _invited_ids(st, exam, p, roster[p])
+            invited += await _invited_ids(st, exam, p, roster.get(p) or [])
         view["summary"] = summary_view(people.get(exam["id"]), invited)
         if read_only:
             view.update(can_manage=False, read_only=True, cut_province=prov)
@@ -814,7 +846,7 @@ def _question_view(exam: Mapping[str, Any], attempt: Mapping[str, Any], answers:
                    bank: Mapping[str, Mapping[str, Any]], index: int, now: datetime) -> Dict[str, Any]:
     item = attempt["paper"][index]
     row = answers.get(item["qid"]) or {}
-    view = X.public_question(bank[item["qid"]], item["keys"])
+    view = X.exam_question(exam["config"], bank[item["qid"]], item["keys"])
     view.update(index=index, selected=row.get("selected"), answered=row.get("answered_at") is not None,
                 seconds_left=X.question_seconds_left(exam["config"], row, now))
     return view
@@ -1103,7 +1135,7 @@ async def _events_by_attempt(st: Store, exam_id: str) -> Dict[str, List[Dict[str
 
 async def attempts_list(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
     exam = await _managed_exam(st, who, exam_id, read=True)
-    rows = await st.database.fetch_all(select(st.t.attempts).where(st.t.attempts.c.exam_id == exam_id)
+    rows = await st.database.fetch_all(select(st.t.attempts).where(and_(st.t.attempts.c.exam_id == exam_id, _live(st.t.attempts)))
                                        .order_by(st.t.attempts.c.judge_name, st.t.attempts.c.attempt_no))
     events = await _events_by_attempt(st, exam_id)
     items = []
@@ -1123,6 +1155,8 @@ async def attempts_list(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
 async def attempt_card(st: Store, who: Who, exam_id: str, attempt_id: str) -> Dict[str, Any]:
     exam = await _managed_exam(st, who, exam_id, read=True)
     attempt = await _attempt_row(st, attempt_id)
+    if attempt.get("deleted_at") is not None:
+        raise ExamError("ATTEMPT_IN_TRASH", "Ten wynik leży w koszu teczki - przywróć go, żeby obejrzeć arkusz.", 404)
     if attempt["exam_id"] != exam_id or not _in_cut(attempt.get("province"), exam["cut_province"]):
         raise ExamError("ATTEMPT_NOT_FOUND", "To podejście nie należy do tego egzaminu.", 404)
     answers = await _load_answers(st, attempt_id)
@@ -1145,7 +1179,7 @@ async def exam_stats(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
     exam = await _managed_exam(st, who, exam_id, read=True)
     t = st.t
     done = [_attempt(r) for r in await st.database.fetch_all(select(t.attempts).where(and_(
-        t.attempts.c.exam_id == exam_id, t.attempts.c.status != "in_progress")))]
+        t.attempts.c.exam_id == exam_id, t.attempts.c.status != "in_progress", _live(t.attempts))))]
     done = [a for a in done if _in_cut(a.get("province"), exam["cut_province"])]
     ids = [a["id"] for a in done]
     rows = []
@@ -1170,7 +1204,8 @@ async def exam_stats(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
 
 async def missing(st: Store, who: Who, exam_id: str) -> Dict[str, Any]:
     exam = await _managed_exam(st, who, exam_id, read=True)
-    rows = await st.database.fetch_all(select(st.t.attempts.c.judge_id).where(st.t.attempts.c.exam_id == exam_id))
+    rows = await st.database.fetch_all(select(st.t.attempts.c.judge_id).where(and_(
+        st.t.attempts.c.exam_id == exam_id, _live(st.t.attempts))))
     attended = {r["judge_id"] for r in rows}
     out = []
     for prov in ([exam["cut_province"]] if exam["cut_province"] else _exam_provinces(exam)):
@@ -1239,7 +1274,7 @@ async def similarity_scan(st: Store, who: Who, exam_id: str, now: Optional[datet
     if not exam["config"]["anti"]["similarity"]:
         raise ExamError("EXAM_FEATURE_OFF", "Wykrywanie podobieństwa par jest wyłączone dla tego egzaminu.", 409)
     rows = await st.database.fetch_all(select(st.t.attempts).where(and_(
-        st.t.attempts.c.exam_id == exam_id, st.t.attempts.c.status != "in_progress")))
+        st.t.attempts.c.exam_id == exam_id, st.t.attempts.c.status != "in_progress", _live(st.t.attempts))))
     packs = []
     for raw in rows:
         a = _attempt(raw)
@@ -1308,6 +1343,12 @@ async def sweep_exam_reminders(st: Store, now: Optional[datetime] = None) -> int
     t = st.t
     total = 0
     await _finalize_overdue(st, now)
+    try:
+        from app import exam_trash as T  # kosz importuje ten moduł - import w funkcji
+
+        await T.purge_trash(st, now)
+    except Exception:  # noqa: BLE001 - kosz nie może zatrzymać przypomnień
+        logger.warning("egzamin: sprzątanie kosza nieudane", exc_info=True)
 
     # 1) „X przed końcem okna" do tych, którzy jeszcze nie przystąpili
     rows = await st.database.fetch_all(select(t.definitions).where(and_(
