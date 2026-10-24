@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -346,6 +346,8 @@ def shape(row: Dict[str, Any], names: Dict[str, Dict[str, Any]], *, working: boo
         "letter": row["letter"],
         "updated_at": row["updated_at"],
         "published_at": row["published_at"],
+        "acted_by": row.get("acted_by") or None,
+        "acted_by_name": (names.get(row["acted_by"]) or {}).get("full_name") if row.get("acted_by") else None,
     }
 
 
@@ -365,6 +367,36 @@ async def context(match_id: str, actor: Actor) -> Dict[str, Any]:
     return {"match": match, "pair": pair, "mentors": mentors, "verdict": verdict, "co_mentors": co_mentors}
 
 
+async def evaluation_actor(request: Request, actor: Actor = Depends(market_actor)) -> Actor:
+    """`market_actor`, a z `?act_as=<judge_id mentora>` administrator oceniający okiem mentora tej pary.
+
+    Reguły jak w panelu Mentor: tylko administrator, wskazany musi być mentorem pary meczu (403 ACT_AS_*).
+    Autorem oceny jest mentor; `acted_by` / `acted_by_name` niosą administratora.
+    """
+    act_as = str(request.query_params.get("act_as") or "").strip()
+    actor.acted_by = None
+    actor.acted_by_name = None
+    if not act_as or act_as == str(actor.judge_id):
+        return actor
+    if not actor.is_admin:
+        raise _err(403, "ACT_AS_FORBIDDEN", "Tylko administrator może oceniać okiem mentora.")
+    match_id = request.path_params.get("match_id")
+    row = await database.fetch_one(
+        select(province_judges.c.judge_id, province_judges.c.full_name, province_judges.c.province,
+               province_judges.c.photo_url, province_judges.c.badges).where(province_judges.c.judge_id == act_as))
+    if not row:
+        raise _err(403, "ACT_AS_UNKNOWN", f"Nie ma sędziego o numerze {act_as}.")
+    target = Actor({"judge_id": act_as}, dict(row), False)
+    if match_id:
+        ctx = await context(str(match_id), target)
+        if act_as not in (ctx["mentors"]["mentoring"] | ctx["mentors"]["obsada"]):
+            raise _err(403, "ACT_AS_NOT_MENTOR",
+                       f"{target.full_name or act_as} nie jest mentorem pary tego meczu - nie można oceniać jego oczami.")
+    target.acted_by = str(actor.judge_id)
+    target.acted_by_name = actor.full_name or f"Sędzia {actor.judge_id}"
+    return target
+
+
 async def my_row(match_id: str, me: str) -> Optional[Dict[str, Any]]:
     rows = await database.fetch_all(select(evaluations).where(evaluations.c.match_id == str(match_id)))
     for r in rows:
@@ -377,7 +409,7 @@ async def my_row(match_id: str, me: str) -> Optional[Dict[str, Any]]:
 
 
 @router.get("/match/{match_id}")
-async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
+async def for_match(match_id: str, actor: Actor = Depends(evaluation_actor)):
     ctx = await context(match_id, actor)
     me = str(actor.judge_id)
     pair = ctx["pair"] or ()
@@ -410,7 +442,7 @@ async def for_match(match_id: str, actor: Actor = Depends(market_actor)):
     ] if may_view_videos else []
     ids = set(pair) | set(ctx["co_mentors"]) | {str(row["added_by"]) for row in video_rows}
     for r in rows:
-        ids |= {r["author_id"], *json_list(r["co_author_ids"])}
+        ids |= {r["author_id"], *json_list(r["co_author_ids"]), *([r["acted_by"]] if r.get("acted_by") else [])}
     names = await people(ids)
     request_rows = [
         dict(row)
@@ -978,6 +1010,8 @@ async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> 
         if existing:
             # Współautor nie zmienia składu autorów - robi to tylko zakładający.
             values: Dict[str, Any] = {"sheet_json": body, "points": points, "letter": letter, "updated_at": stamp}
+            if getattr(actor, "acted_by", None):
+                values["acted_by"] = actor.acted_by
             if existing["author_id"] == me:
                 values["co_author_ids"] = json.dumps(co_ids)
             if publish:
@@ -1006,6 +1040,7 @@ async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> 
                     created_at=stamp,
                     updated_at=stamp,
                     published_at=stamp if publish else None,
+                    acted_by=getattr(actor, "acted_by", None),
                 )
             )
         if publish:
@@ -1014,6 +1049,9 @@ async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> 
                     evaluation_id=evaluation_id, saved_by=me, sheet_json=body, points=points, letter=letter, saved_at=stamp
                 )
             )
+    if getattr(actor, "acted_by", None):
+        await audit_acted(ctx["pair"], me, actor.acted_by, "evaluation_published" if publish else "evaluation_saved",
+                          str(match_id), evaluation_id)
     first_publish = publish and not (existing and existing["status"] == "published")
     if first_publish:
         authors = [existing["author_id"], *json_list(existing["co_author_ids"])] if existing else [me, *co_ids]
@@ -1030,16 +1068,18 @@ async def save(match_id: str, req: SaveRequest, actor: Actor, publish: bool) -> 
         await notify_pair(match_id, ctx["pair"], [existing["author_id"], *json_list(existing["co_author_ids"])],
                           str(match["state"].get("RozgrywkiCode") or ""), letter, points, evaluation_id=evaluation_id,
                           state=match["state"], updated=True)
-    return {"ok": True, "id": evaluation_id, "points": points, "letter": letter, "status": "published" if publish or (existing and existing["status"] == "published") else "draft"}
+    acted = getattr(actor, "acted_by", None)
+    return {"ok": True, "id": evaluation_id, "points": points, "letter": letter,
+            "acted_by": acted, "acted_by_name": getattr(actor, "acted_by_name", None) if acted else None, "status": "published" if publish or (existing and existing["status"] == "published") else "draft"}
 
 
 @router.put("/match/{match_id}")
-async def save_draft(match_id: str, req: SaveRequest, actor: Actor = Depends(market_actor)):
+async def save_draft(match_id: str, req: SaveRequest, actor: Actor = Depends(evaluation_actor)):
     return await save(match_id, req, actor, publish=False)
 
 
 @router.post("/match/{match_id}/publish")
-async def publish(match_id: str, req: SaveRequest, actor: Actor = Depends(market_actor)):
+async def publish(match_id: str, req: SaveRequest, actor: Actor = Depends(evaluation_actor)):
     return await save(match_id, req, actor, publish=True)
 
 
@@ -1135,6 +1175,29 @@ async def mentor_form_rows(
             }
         )
     return out
+
+
+async def audit_acted(pair: tuple, as_judge: str, acted_by: str, action: str, match_id: str, evaluation_id: str) -> None:
+    """Ślad `act_as` w `mentor_audit` (`actor_id` = mentor, `acted_by` = administrator)."""
+    try:
+        from app.db import mentor_audit
+
+        pair_id = await pair_id_of(pair)
+        await database.execute(mentor_audit.insert().values(
+            id=uuid4().hex, pair_id=pair_id, actor_id=str(as_judge), acted_by=str(acted_by), action=action,
+            data=json.dumps({"id": evaluation_id}), scope="evaluations", match_id=str(match_id), created_at=now()))
+    except Exception:  # noqa: BLE001 - ślad nie cofa zapisu
+        import logging
+
+        logging.getLogger(__name__).warning("ocena act_as: zapis śladu nieudany", exc_info=True)
+
+
+async def pair_id_of(pair: tuple) -> Optional[str]:
+    wanted = sorted(str(j) for j in pair)
+    for row in await database.fetch_all(select(mentoring_pairs.c.id, mentoring_pairs.c.judge_ids, mentoring_pairs.c.ended_at)):
+        if row["ended_at"] is None and sorted(str(j) for j in json_list(row["judge_ids"])) == wanted:
+            return row["id"]
+    return None
 
 
 async def panel_pair_of(pair: tuple) -> Optional[str]:

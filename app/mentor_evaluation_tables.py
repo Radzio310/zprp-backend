@@ -43,6 +43,7 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("published_at", DateTime(timezone=True), nullable=True),
+        Column("acted_by", String, nullable=True),  # admin wystawiający ocenę okiem mentora (`act_as`)
         Index("ux_mentor_evaluations_match_author", "match_id", "author_id", unique=True),
     )
     versions = Table(
@@ -108,6 +109,7 @@ def define_tables(metadata):
 #: Kolumny dołożone po pierwszym wdrożeniu - tabele istnieją na produkcji,
 #: więc `create_all` ich nie doda. Wykonuje je `app/db.py` przy starcie.
 MIGRATIONS = (
+    "ALTER TABLE mentor_evaluations ADD COLUMN IF NOT EXISTS acted_by varchar",
     "ALTER TABLE mentor_evaluation_requests ADD COLUMN IF NOT EXISTS read_at timestamptz",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS title text",
     "ALTER TABLE mentor_match_videos ADD COLUMN IF NOT EXISTS thumbnail_url text",
