@@ -85,6 +85,8 @@ next_check_at, error`. Poziomy w `scope`: `OS` (Superliga), `LC`, `I`, `II`,
 Pokój meczu panelu mentorskiego (`GET /mentor-panel/pairs/{pair}/matches/{id}`)
 ma pole `suggested_streams: Stream[]` — tylko YouTube, `official`/`confirmed`,
 bez filmów już dodanych do pokoju. Szczegóły: `docs/mentor-panel.md` 4.13.
+Para może też poszukać nagrania na żądanie (`POST .../streams/search`, 3 na
+mecz na dobę na parę, z tej samej puli dobowej) - `docs/mentor-panel.md` 4.14.
 
 ## Źródła, pewność i harmonogram
 

@@ -143,9 +143,23 @@ class YouTube:
         return P.parse_api_channel(data) if data else None
 
     async def search(self, query: str, event_type: str) -> list[str]:
-        data = await self._get("search", {"part": "id", "type": "video", "eventType": event_type, "q": query,
-                                          "maxResults": 10, "regionCode": "PL", "relevanceLanguage": "pl"})
-        return P.parse_api_search(data) if data else []
+        return await self.search_ids(query, event_type) or []
+
+    async def search_ids(self, query: str, event_type: Optional[str] = None, *,
+                         published_after: Optional[str] = None) -> Optional[list[str]]:
+        """`search.list` → identyfikatory albo None (bez klucza, limit, sieć milczy).
+
+        `event_type` None = zwykłe filmy (nagranie wgrane po meczu), z `published_after`
+        (RFC 3339) zawężającym okno publikacji.
+        """
+        params: dict[str, Any] = {"part": "id", "type": "video", "q": query, "maxResults": 10,
+                                  "regionCode": "PL", "relevanceLanguage": "pl"}
+        if event_type:
+            params["eventType"] = event_type
+        if published_after:
+            params["publishedAfter"] = published_after
+        data = await self._get("search", params)
+        return P.parse_api_search(data) if data is not None else None
 
     async def playlist(self, playlist_id: str) -> list[dict[str, Any]]:
         data = await self._get("playlistItems", {"part": "snippet,contentDetails", "playlistId": playlist_id,

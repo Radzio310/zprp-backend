@@ -25,7 +25,7 @@ MODULES = (
     "app.mentor_panel", "app.mentor_panel_core", "app.mentor_panel_auth", "app.mentor_panel_library",
     "app.mentor_panel_media", "app.mentor_panel_reports", "app.mentor_panel_notify", "app.mentor_evaluations",
     "app.mentor_panel_handoff",
-    "app.mentoring", "app.proel_auth", "app.streams.store",
+    "app.mentoring", "app.proel_auth", "app.streams.store", "app.streams.worker", "app.mentor_panel_streams",
 )
 
 PAIR = "pair-1"
@@ -96,7 +96,10 @@ class Env:
             monkeypatch.delitem(sys.modules, name, raising=False)
             # `from app import mentor_panel_core` bierze atrybut pakietu, jeśli jest -
             # bez tego moduły z poprzedniego testu trzymałyby starą bazę.
-            monkeypatch.delattr(app_package, name.split(".", 1)[1], raising=False)
+            parent_name, leaf = name.rsplit(".", 1)
+            parent = app_package if parent_name == "app" else sys.modules.get(parent_name)
+            if parent is not None:
+                monkeypatch.delattr(parent, leaf, raising=False)
         self.db = fake.database
         self.T = tables
         self.panel = importlib.import_module("app.mentor_panel")

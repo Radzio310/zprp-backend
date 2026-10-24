@@ -252,6 +252,23 @@ def define_tables(metadata):
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
     Index("ix_mentor_audit_pair_rev", audit.c.pair_id, audit.c.rev)
+    # Wyszukiwanie nagrania meczu na YouTube na żądanie pary (24.10.2026,
+    # `app/mentor_panel_streams.py`): licznik dobowy (doba warszawska), ostatni
+    # wynik (wspólny dla sędziów i mentorów) i odrzucone filmy („Nie ten").
+    stream_searches = Table(
+        "mentor_stream_searches",
+        metadata,
+        Column("pair_id", String, primary_key=True),
+        Column("match_id", String, primary_key=True),
+        Column("day", String, nullable=True),
+        Column("day_count", Integer, nullable=False, server_default=text("0")),
+        Column("searched_at", DateTime(timezone=True), nullable=True),
+        Column("searched_by", String, nullable=True),
+        Column("last_count", Integer, nullable=True),
+        Column("found_json", Text, nullable=False, server_default=text("'[]'")),
+        Column("rejected_json", Text, nullable=False, server_default=text("'[]'")),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
     return (
         panels,
         flags,
@@ -268,6 +285,7 @@ def define_tables(metadata):
         qr_logins,
         audit,
         short_links,
+        stream_searches,
     )
 
 
