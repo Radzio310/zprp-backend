@@ -150,6 +150,32 @@ from app.zprp_accounts import account_status, assign_credentials, normalize_prov
 
 logger = logging.getLogger("app.match_market")
 
+# Ile twarzy chętnych niesie lista ofert (resztę pokazuje `claimCount`).
+CLAIMERS_PREVIEW_LIMIT = 8
+
+# Zadania w tle trzymamy na własnej liście: pętla zdarzeń trzyma tylko słabe
+# odwołania, więc zadanie bez właściciela może zniknąć w pół drogi.
+_BACKGROUND_TASKS: Set["asyncio.Future[Any]"] = set()
+
+
+def _spawn_background(label: str, coro: Any) -> None:
+    """Uruchamia robotę, na którą odpowiedź dla użytkownika nie czeka.
+
+    Powiadomienia po wystawieniu to wiele wejść na FCM i do bazy - sędzia nie
+    ma czekać, aż skończą się wysyłać do całego okręgu. Wyjątek idzie do logu
+    (dziennik i tak ma swój wpis `offer_created` zapisany PRZED startem).
+    """
+
+    async def runner() -> None:
+        try:
+            await coro
+        except Exception:  # noqa: BLE001
+            logger.exception("Zadanie w tle giełdy nie powiodło się: %s", label)
+
+    task = asyncio.ensure_future(runner())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
 router = APIRouter(prefix="/match-market", tags=["Giełda meczów"])
 
 
@@ -2066,6 +2092,17 @@ async def _offer_payload(
         # i tak nie przyjmie serwer (`create_claim`).
         "myCrewLabel": _s(my_crew_label),
         "claimCount": len([c for c in claims if _s(c.get("status")) == "pending"]),
+        # Chetni jako same twarze, dla KAZDEGO, kto ofertę widzi: lista ma od
+        # razu pokazać „3 + 2" bez osobnego zapytania na wiersz (wizytówki
+        # przyszły już w `cards`). Notatek i kolizji tu nie ma - te zostają w
+        # widoku decyzji. Kolejność = kolejność zgłoszeń.
+        "claimers": [
+            _person(_s(c.get("judge_id")), cards.get(_s(c.get("judge_id"))))
+            for c in sorted(
+                (c for c in claims if _s(c.get("status")) in ("pending", "chosen")),
+                key=lambda c: (_iso(c.get("created_at")) or "", int(c.get("id") or 0)),
+            )[:CLAIMERS_PREVIEW_LIMIT]
+        ],
         # Kto przejal mecz - historia ma powiedziec „oddany KOWALSKIEMU", a nie
         # samo „przekazany". Nazwisko wybranego jest juz jawne dla obu stron
         # wymiany, wiec nie odslania niczego nowego.
@@ -2283,6 +2320,32 @@ async def create_offer(
         )
     )
     data = _row(match) if match else {}
+    # Sonda uprawnień i pytanie o żywą obsadę to dwie rozmowy z serwerem
+    # związku, które się nie znają - dotąd szły jedna po drugiej i ich czasy
+    # się SUMOWAŁY (to była główna przyczyna długiego wystawiania). Gdy mecz
+    # jest w terminarzu okręgu, kod rozgrywek znamy z wiersza, więc sondę
+    # puszczamy od razu, obok pytania o obsadę. Odmowy zbieramy w TEJ SAMEJ
+    # kolejności co dawniej: tańsze bramki (gniazdo, termin, duplikat) mówią
+    # pierwsze, sonda na końcu.
+    pre_code = _s(data.get("match_code")) or _s(state_dict(data.get("state_json")).get("RozgrywkiCode"))
+    pre_managed = is_managed_by_province(pre_code, cfg["managed_prefixes"])
+    probe_task: Optional["asyncio.Future[None]"] = None
+    if match:
+        probe_task = asyncio.ensure_future(
+            _require_assignable(
+                province,
+                cfg,
+                match_id,
+                settings,
+                slot=slot,
+                walk=not pre_managed,
+                giver_id=actor.judge_id,
+            )
+        )
+    if probe_task is not None:
+        # Gdy wcześniejsza bramka odmówi, sonda dobiega w tle; jej wyjątek nikogo
+        # już nie obchodzi, a pętla nie ma narzekać na nieodebrany.
+        probe_task.add_done_callback(lambda t: t.cancelled() or t.exception())
     # Obsada z bazy związku W TEJ CHWILI - ta sama droga, co na liście „Oddaj
     # mecz", żeby lista i bramka odpowiadały na to samo pytanie tak samo. Sędzia
     # wybrał ten mecz z listy, więc telefon za niego ręczy (`vouched`): mecz,
@@ -2380,17 +2443,24 @@ async def create_offer(
     # obsadza ten mecz. Bez tego można by wystawić spotkanie ligi centralnej,
     # którego konto wojewódzkie nie ma prawa tknąć - i dowiedzieć się o tym
     # dopiero przy zatwierdzaniu, gdy oddający dawno przestał szukać zastępstwa.
-    await _require_assignable(
-        province,
-        cfg,
-        _s(req.match_id),
-        settings,
-        slot=slot,
+    if probe_task is not None and managed == pre_managed:
+        # Sonda ruszyła razem z pytaniem o obsadę - tu tylko odbieramy wynik.
+        await probe_task
+    else:
         # Mecz spoza terminarza okręgu sondujemy trasą sędziego - tą samą,
-        # którą pójdzie zapis przy zatwierdzeniu.
-        walk=not managed,
-        giver_id=actor.judge_id,
-    )
+        # którą pójdzie zapis przy zatwierdzeniu. (Kod rozgrywek wyszedł z
+        # żywej obsady inny niż z wiersza albo wiersza nie było: pytamy teraz.)
+        if probe_task is not None and not probe_task.done():
+            probe_task.cancel()
+        await _require_assignable(
+            province,
+            cfg,
+            _s(req.match_id),
+            settings,
+            slot=slot,
+            walk=not managed,
+            giver_id=actor.judge_id,
+        )
 
     insertion = (
         insert(match_market_offers)
@@ -2452,13 +2522,18 @@ async def create_offer(
             message=_s(req.reason),
             payload={"deadlineHours": cfg["offer_deadline_hours"]},
         )
-        await _notify(
-            await _approvers_of(province, "new_offers"),
-            text_late_offer_requested(offer, actor.full_name),
-            offer,
-            audience="obsadowi i administratorzy",
-            record_empty=True,
-        )
+        # Powiadomienia idą w tle: oferta jest już zapisana, a sędzia nie ma
+        # czekać na wysyłkę do obsadowych.
+        async def tell_approvers() -> None:
+            await _notify(
+                await _approvers_of(province, "new_offers"),
+                text_late_offer_requested(offer, actor.full_name),
+                offer,
+                audience="obsadowi i administratorzy",
+                record_empty=True,
+            )
+
+        _spawn_background("late_offer_requested", tell_approvers())
         return {"id": offer_id, "status": initial_status}
     await _log(
         "offer_created",
@@ -2470,20 +2545,30 @@ async def create_offer(
     )
     # Zainteresowani to sędziowie okręgu, którzy mają aplikację i nie wyłączyli
     # powiadomień giełdy - reszta i tak zobaczy ofertę przy najbliższym wejściu
-    # na ekran.
-    public, managers, public_error = await _offer_notification_groups(province, actor.judge_id)
-    # Migawka i termin są w wierszu meczu, nie w skróconym opisie oferty.
-    notification = text_offer_created(
-        {**offer, "match_at": data.get("match_at"), "match_snapshot": state},
-        actor.full_name,
-    )
-    manager_report = await _notify(managers, notification, offer,
-                                   audience="obsadowi i administratorzy", record_empty=True)
-    await _notify(public, notification, offer, broadcast=True,
-                  audience="sędziowie okręgu", record_empty=True,
-                  selection_error=public_error,
-                  audit_context={"authorId": actor.judge_id, "managerIds": managers,
-                                 "managerReport": manager_report})
+    # na ekran. Wysyłka idzie W TLE: wybór adresatów i push do całego okręgu to
+    # kilka zapytań i wejść na FCM, a oferta jest już zapisana i widoczna.
+    async def tell_province() -> None:
+        public, managers, public_error = await _offer_notification_groups(
+            province, actor.judge_id
+        )
+        # Migawka i termin są w wierszu meczu, nie w skróconym opisie oferty.
+        notification = text_offer_created(
+            {**offer, "match_at": data.get("match_at"), "match_snapshot": state},
+            actor.full_name,
+        )
+        manager_report = await _notify(
+            managers, notification, offer,
+            audience="obsadowi i administratorzy", record_empty=True,
+        )
+        await _notify(
+            public, notification, offer, broadcast=True,
+            audience="sędziowie okręgu", record_empty=True,
+            selection_error=public_error,
+            audit_context={"authorId": actor.judge_id, "managerIds": managers,
+                           "managerReport": manager_report},
+        )
+
+    _spawn_background("offer_created", tell_province())
     return {"id": offer_id, "status": initial_status}
 
 

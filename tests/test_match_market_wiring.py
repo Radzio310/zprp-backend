@@ -347,7 +347,11 @@ def test_the_gate_is_the_last_check_not_the_first():
     # Sonda to wejście na serwer związku. Tanie sprawdzenia - gniazdo, próg,
     # duplikat - muszą odpaść wcześniej, żeby nie płacić za nie ruchem po sieci.
     body = ast.unparse(FUNCTIONS["create_offer"])
-    gate = body.index("_require_assignable")
+    # Sonda rusza wcześniej, równolegle z pytaniem o żywą obsadę (czasy się nie
+    # sumują), ale ODMOWA z niej jest odbierana dopiero na końcu: `await
+    # probe_task` albo awaryjne wywołanie sekwencyjne.
+    assert "_require_assignable" in body
+    gate = body.index("await probe_task")
     for cheap in ("slot_is_tradeable", "slots_held_by", "can_offer"):
         assert body.index(cheap) < gate, f"{cheap} stoi po sondzie"
 
