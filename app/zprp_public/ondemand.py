@@ -14,6 +14,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from app.time_pl import has_kickoff_time, warsaw_to_utc
+
 log = logging.getLogger(__name__)
 
 RECENT_WINDOW = timedelta(days=3)
@@ -28,15 +30,25 @@ def _aware(value: datetime | None) -> datetime | None:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+def _match_aware(value: datetime | None) -> datetime | None:
+    """Termin meczu (naiwny = czas WARSZAWSKI, nie UTC) → aware UTC."""
+    return warsaw_to_utc(value) if isinstance(value, datetime) else None
+
+
 def match_moment(played_at: datetime | None, scheduled_at: datetime | None) -> datetime | None:
-    return _aware(played_at) or _aware(scheduled_at)
+    return _match_aware(played_at) or _match_aware(scheduled_at)
 
 
 def is_finished(score_home: Any, played_at: datetime | None, scheduled_at: datetime | None, now: datetime) -> bool:
-    """Mecz rozegrany: ma wynik albo datę rozegrania w przeszłości."""
+    """Mecz rozegrany: ma wynik albo datę rozegrania w przeszłości.
+
+    Termin bez godziny (00:00 = do ustalenia) mija dopiero z końcem swojej doby.
+    """
     if score_home is not None:
         return True
-    played = _aware(played_at)
+    played = _match_aware(played_at)
+    if played is not None and not has_kickoff_time(played_at):
+        played = _match_aware(played_at + timedelta(days=1))
     return played is not None and played <= now
 
 

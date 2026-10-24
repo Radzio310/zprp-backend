@@ -31,6 +31,7 @@ from app.db import (
     zprp_public_team_rosters,
     zprp_public_teams,
 )
+from app import time_pl as TP
 from app.zprp_public import corrections, match_rules as MR
 from app.zprp_public.referee_placeholder import clean_match_officials
 from app.zprp_public.protocol_times import attach_protocol_times
@@ -103,6 +104,9 @@ async def health() -> dict[str, Any]:
     return {"ok": True, "last_sync": _dict(last) or None}
 
 
+TODAY_LIMIT = 400
+
+
 @router.get("/portal/overview")
 async def portal_overview() -> dict[str, Any]:
     """Jedno lekkie zapytanie startowe dla publicznego Centrum dnia.
@@ -110,9 +114,9 @@ async def portal_overview() -> dict[str, Any]:
     Widok jest celowo złożony po stronie serwera: przeglądarka nie wykonuje
     kilkunastu niezależnych zapytań, a baza może zoptymalizować agregaty.
     """
-    now = datetime.now()
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
+    # Doba i "teraz" po polsku (serwer chodzi w UTC, scheduled_at to naiwny czas warszawski).
+    now = TP.warsaw_now()
+    day_start, day_end = TP.day_bounds(now.date())
 
     season = await database.fetch_one(
         select(
@@ -127,26 +131,35 @@ async def portal_overview() -> dict[str, Any]:
     season_id = season["season_id"] if season else None
     season_filter = zprp_public_matches.c.season_id == season_id if season_id else True
 
-    today, recent, upcoming = await asyncio.gather(
+    today_filter = and_(season_filter, zprp_public_matches.c.scheduled_at >= day_start, zprp_public_matches.c.scheduled_at < day_end)
+    today, today_total, recent, upcoming = await asyncio.gather(
+        # Pełna sobota to 300+ meczów - dawny limit 40 obcinał dzień do porannych i "00:00".
         database.fetch_all(
             select(zprp_public_matches)
-            .where(and_(season_filter, zprp_public_matches.c.scheduled_at >= day_start, zprp_public_matches.c.scheduled_at < day_end))
+            .where(today_filter)
             .order_by(zprp_public_matches.c.scheduled_at.asc())
-            .limit(40)
+            .limit(TODAY_LIMIT)
         ),
+        database.fetch_val(select(func.count()).select_from(zprp_public_matches).where(today_filter)),
         database.fetch_all(
             select(zprp_public_matches)
             .where(and_(season_filter, zprp_public_matches.c.scheduled_at < now, zprp_public_matches.c.score_home.is_not(None)))
             .order_by(zprp_public_matches.c.scheduled_at.desc())
             .limit(8)
         ),
+        # Mecz dzisiejszy bez godziny (00:00 = "do ustalenia") jest wciąż przed nami.
         database.fetch_all(
             select(zprp_public_matches)
-            .where(and_(season_filter, zprp_public_matches.c.scheduled_at >= now))
+            .where(and_(season_filter, or_(
+                zprp_public_matches.c.scheduled_at >= now,
+                and_(zprp_public_matches.c.scheduled_at == day_start, zprp_public_matches.c.score_home.is_(None)),
+            )))
             .order_by(zprp_public_matches.c.scheduled_at.asc())
-            .limit(8)
+            .limit(16)
         ),
     )
+    today = sorted(today, key=lambda r: TP.kickoff_sort_key(r["scheduled_at"]))
+    upcoming = sorted(upcoming, key=lambda r: TP.kickoff_sort_key(r["scheduled_at"]))[:8]
 
     leader_query = (
         select(
@@ -192,7 +205,9 @@ async def portal_overview() -> dict[str, Any]:
     last_updated = last_sync["finished_at"] if last_sync else None
     freshness = "unknown"
     if last_updated:
-        comparable_now = datetime.now(last_updated.tzinfo) if last_updated.tzinfo else now
+        # finished_at to UTC (w SQLite wraca naiwny) - porównanie z UTC, nie z czasem polskim.
+        utc = TP.utc_now()
+        comparable_now = utc if last_updated.tzinfo else utc.replace(tzinfo=None)
         freshness = "fresh" if comparable_now - last_updated <= timedelta(minutes=20) else "delayed"
 
     leader_items = []
@@ -213,6 +228,7 @@ async def portal_overview() -> dict[str, Any]:
         "season": _dict(season) or None,
         "counters": dict(zip(("competitions", "clubs", "teams", "players", "matches"), counter_rows)),
         "today": today_items,
+        "today_total": int(today_total or 0),
         "recent": recent_items,
         "upcoming": upcoming_items,
         "leaders": leader_items,

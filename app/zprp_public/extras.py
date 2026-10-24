@@ -37,6 +37,7 @@ from app.db import (
     zprp_public_standings,
     zprp_public_teams,
 )
+from app import time_pl as TP
 from app.zprp_public import corrections, match_rules as MR, portal_rules as R, referee_stats as RS
 from app.zprp_public import referee_placeholder as RP
 from app.zprp_public.api import _dict
@@ -426,12 +427,11 @@ async def venue_details(key: str) -> dict[str, Any]:
     )
     mine = [r for r in rows if MR.venue_key(r["venue_name"], r["venue_city"]) == key]
     cards = await _cards(mine)
-    now = datetime.now()
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start, _ = TP.today_bounds()
     today = [c for c in cards if c.get("scheduled_at") and day_start <= c["scheduled_at"] < day_start + timedelta(days=1)]
     week = [c for c in cards if c.get("scheduled_at") and day_start + timedelta(days=1) <= c["scheduled_at"] < day_start + timedelta(days=8)]
-    today.sort(key=lambda c: c["scheduled_at"])
-    week.sort(key=lambda c: c["scheduled_at"])
+    today.sort(key=lambda c: TP.kickoff_sort_key(c["scheduled_at"]))
+    week.sort(key=lambda c: TP.kickoff_sort_key(c["scheduled_at"]))
     attendance = sorted((c for c in cards if c.get("spectators")), key=lambda c: -int(c["spectators"]))[:5]
     home_clubs = Counter(c["home_club_id"] for c in cards if c.get("home_club_id"))
     lookup = await _club_lookup(set(home_clubs))
@@ -1053,9 +1053,10 @@ async def _referee_stats(referee_id: str, season_id: str) -> dict[str, Any]:
               "city": (lookup.get(cid) or {}).get("city"), "matches": n} for cid, n in club_counts]
 
     cards = await _cards(rows)  # wiersze mają kolumny pary, więc karta niesie obu sędziów
-    now = datetime.now()
+    now = TP.warsaw_now()
     upcoming = sorted((c for c in cards if c["status"] == "scheduled" and c.get("scheduled_at")
-                       and c["scheduled_at"] >= now - timedelta(hours=3)), key=lambda c: c["scheduled_at"])
+                       and TP.is_upcoming_at(c["scheduled_at"], now, R.UPCOMING_GRACE)),
+                      key=lambda c: TP.kickoff_sort_key(c["scheduled_at"]))
     recent = [c for c in cards if c["status"] == "finished"][:5]
     names = Counter(n for n in (_clean_ref_name((r["referee_1_name"] if r["referee_1_id"] == referee_id else r["referee_2_name"]) or "")
                                 for r in rows) if not RP.is_blank_name(n))

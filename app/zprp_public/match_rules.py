@@ -14,6 +14,8 @@ from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from app.time_pl import has_kickoff_time, to_warsaw_naive, warsaw_to_utc
+
 WARSAW = ZoneInfo("Europe/Warsaw")
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,9 @@ def apply_match_extras(
     item["is_current_season"] = bool(current_id and item.get("season_id") == current_id)
     item.setdefault("shootout_home", None)
     item.setdefault("shootout_away", None)
+    if "scheduled_at" in item:
+        # 00:00 / sam dzień ze ZPRP = godzina do ustalenia (klient: nie "00:00", nie start o północy).
+        item["kickoff_time_known"] = has_kickoff_time(item.get("scheduled_at"))
     return item
 
 
@@ -547,7 +552,7 @@ def _fold_line(line: str) -> str:
 
 
 def _utc(local: datetime) -> str:
-    return local.replace(tzinfo=WARSAW).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return warsaw_to_utc(local).strftime("%Y%m%dT%H%M%SZ")
 
 
 def build_ics(name: str, matches: Iterable[dict], team_id: str, now: Optional[datetime] = None) -> str:
@@ -568,12 +573,17 @@ def build_ics(name: str, matches: Iterable[dict], team_id: str, now: Optional[da
             title += f" ({m['score_home']}:{m['score_away']})"
         desc = " | ".join(x for x in (m.get("competition_name"), m.get("match_code_full") or m.get("match_code")) if x)
         place = ", ".join(x for x in (m.get("venue_name"), m.get("venue_city")) if x)
+        if has_kickoff_time(start):
+            when = [f"DTSTART:{_utc(start)}", f"DTEND:{_utc(start + timedelta(hours=2))}"]
+        else:
+            # Godzina do ustalenia: wydarzenie całodniowe, nie mecz o północy.
+            day = start.date()
+            when = [f"DTSTART;VALUE=DATE:{day:%Y%m%d}", f"DTEND;VALUE=DATE:{day + timedelta(days=1):%Y%m%d}"]
         lines += [
             "BEGIN:VEVENT",
             f"UID:{m.get('match_id')}-{team_id}@podreka.baza",
             f"DTSTAMP:{stamp}",
-            f"DTSTART:{_utc(start)}",
-            f"DTEND:{_utc(start + timedelta(hours=2))}",
+            *when,
             f"SUMMARY:{_ics_escape(title)}",
         ]
         if desc:
@@ -658,10 +668,7 @@ def attachment_items(attachments: dict[str, dict], hidden_ids: Iterable[str], pr
 
 def naive_local(value: datetime | None) -> datetime | None:
     """Kolumny czasu meczu są naiwne (czas polski); data z "Z"/offsetem dawała 500 w asyncpg."""
-    if value is None or value.tzinfo is None:
-        return value
-    from zoneinfo import ZoneInfo
-    return value.astimezone(ZoneInfo("Europe/Warsaw")).replace(tzinfo=None)
+    return to_warsaw_naive(value)
 
 
 def lineups_swapped(sum_home: int, sum_away: int, score_home: Optional[int], score_away: Optional[int]) -> bool:

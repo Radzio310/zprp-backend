@@ -31,6 +31,7 @@ from typing import Any, Callable, Optional
 import httpx
 from sqlalchemy import and_, func, insert, select, update
 
+from app import time_pl as TP
 from app.national_place_rules import province_label
 from app.zprp_public import geocode_rules as G
 from app.zprp_public import portal_rules as R
@@ -138,7 +139,7 @@ async def _candidate_rows(now: datetime) -> tuple[list[dict], list[dict], list[d
         zprp_public_matches as M,
     )
 
-    naive = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo else now
+    naive = TP.warsaw_now(now) if now.tzinfo else now  # scheduled_at to naiwny czas polski
     assoc_rows, club_rows, window_rows, venue_rows = await asyncio.gather(
         database.fetch_all(select(A.c.association_id, A.c.name)),
         database.fetch_all(select(C.c.club_id, C.c.city, C.c.association_id).where(C.c.archived.is_(False))),
@@ -170,7 +171,7 @@ async def pending_candidates(now: Optional[datetime] = None) -> list[dict]:
 
     now = now or _now()
     matches, clubs, venues = await _candidate_rows(now)
-    ordered = G.order_candidates(matches, clubs, venues, now.replace(tzinfo=None))
+    ordered = G.order_candidates(matches, clubs, venues, TP.warsaw_now(now) if now.tzinfo else now)
     if not ordered:
         return []
     index = await _node_index()
@@ -288,7 +289,7 @@ async def pending_venue_candidates(now: Optional[datetime] = None) -> list[dict]
     from app.zprp_public.portal import _gazetteer_lookup, _node_index
 
     now = now or _now()
-    naive = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo else now
+    naive = TP.warsaw_now(now) if now.tzinfo else now  # scheduled_at to naiwny czas polski
     rows = await database.fetch_all(
         select(M.c.venue_city, M.c.venue_street, M.c.venue_number, func.count().label("n"))
         .where(and_(M.c.venue_city.is_not(None), M.c.venue_street.is_not(None),

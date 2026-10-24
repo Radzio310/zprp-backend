@@ -42,6 +42,7 @@ from app.db import (
     zprp_public_team_rosters,
     zprp_public_teams,
 )
+from app import time_pl as TP
 from app.national_distance_parser import normalize_city_key
 from app.zprp_public import corrections, geocode, portal_rules as R
 from app.zprp_public import match_rules as MR
@@ -141,8 +142,9 @@ async def _season_info(season_id: Optional[str]) -> Optional[dict]:
 def _split_upcoming(cards: list[dict], now: datetime, limit: int = 5) -> tuple[list[dict], list[dict]]:
     played = [c for c in cards if c["status"] == "finished"]
     played.sort(key=lambda c: c.get("scheduled_at") or datetime.min, reverse=True)
-    upcoming = [c for c in cards if c["status"] == "scheduled" and (c.get("scheduled_at") or now) >= now - timedelta(hours=3)]
-    upcoming.sort(key=lambda c: c.get("scheduled_at") or datetime.max)
+    # Reguła 3 h z czasem polskim; mecz "godz. do ustalenia" (00:00) jest przed nami do końca swojej doby.
+    upcoming = [c for c in cards if c["status"] == "scheduled" and TP.is_upcoming_at(c.get("scheduled_at"), now, R.UPCOMING_GRACE)]
+    upcoming.sort(key=lambda c: TP.kickoff_sort_key(c.get("scheduled_at")))
     return played[:limit], upcoming[:limit]
 
 
@@ -250,8 +252,8 @@ async def _gazetteer_lookup():
 
 
 async def build_map(season_id: Optional[str]) -> dict[str, Any]:
-    now = datetime.now()
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    now = TP.warsaw_now()
+    day_start, _ = TP.day_bounds(now.date())
     index = await _node_index()
     venue_scope = M.c.season_id == season_id if season_id else M.c.scheduled_at >= day_start - timedelta(days=365)
     club_rows, assoc_rows, team_rows, today_rows, venue_rows = await asyncio.gather(
@@ -415,11 +417,14 @@ async def _venue_places(venue_rows, club_buckets: dict, groups: dict, index: dic
 
 
 async def _cached_map(season_id: Optional[str]) -> dict[str, Any]:
-    key = season_id or ""
+    # Doba w kluczu: "mecze dziś" w mapie nie przeżywają północy.
+    key = f"{season_id or ''}|{TP.warsaw_today()}"
     hit = _map_cache.get(key)
     if hit and time.monotonic() - hit[0] < _MAP_TTL:
         return hit[1]
     payload = await build_map(season_id)
+    for stale in [k for k in _map_cache if not k.endswith(key[key.rindex("|"):])]:
+        _map_cache.pop(stale, None)
     _map_cache[key] = (time.monotonic(), payload)
     return payload
 
@@ -451,7 +456,7 @@ async def club_overview(club_id: str, season_id: str = "") -> dict[str, Any]:
     chosen = season_id.strip() or (seasons[0]["season_id"] if seasons else await _resolve_season())
     teams = [t for t in all_teams if t["season_id"] == chosen]
     team_ids = [t["team_id"] for t in teams]
-    now = datetime.now()
+    now = TP.warsaw_now()
 
     match_rows, players_count, assoc = await asyncio.gather(
         database.fetch_all(
@@ -472,7 +477,8 @@ async def club_overview(club_id: str, season_id: str = "") -> dict[str, Any]:
     )
     cards = await _cards(match_rows)
     recent, upcoming = _split_upcoming(cards, now)
-    today = [c for c in cards if c.get("scheduled_at") and c["scheduled_at"].date() == now.date()]
+    today = sorted((c for c in cards if c.get("scheduled_at") and c["scheduled_at"].date() == now.date()),
+                   key=lambda c: TP.kickoff_sort_key(c.get("scheduled_at")))
     record = R.team_record(
         cards, lambda side, m: m.get(f"{side}_club_id") == club_id,
     )
@@ -518,7 +524,7 @@ async def team_overview(team_id: str, season_id: str = "") -> dict[str, Any]:
     if not team:
         raise HTTPException(404, "Nie znaleziono drużyny w tym sezonie")
     club = await database.fetch_one(select(zprp_public_clubs).where(zprp_public_clubs.c.club_id == team["club_id"])) if team["club_id"] else None
-    now = datetime.now()
+    now = TP.warsaw_now()
 
     roster_rows, stat_rows, match_rows, lineup_matches = await asyncio.gather(
         database.fetch_all(

@@ -101,7 +101,8 @@ async def streams_now() -> dict[str, Any]:
             "live": [{**s, "match": cards[s["match_id"]]} for s in live if s["match_id"] in cards],
             "soon": [{**s, "match": cards[s["match_id"]]} for s in soon if s["match_id"] in cards],
             "today_tv": [{"match": cards[m["match_id"]], "links": [dict(link) for link in TV_LINKS[m["tier"]]]}
-                         for m in sorted(today, key=lambda m: m["kickoff"]) if m["match_id"] in cards],
+                         # Godz. do ustalenia (00:00) na końcu dnia, nie jako „pierwszy" mecz o północy.
+                         for m in sorted(today, key=lambda m: (not m.get("kickoff_known", True), m["kickoff"])) if m["match_id"] in cards],
             "updated_at": _updated(rows),
         }
 

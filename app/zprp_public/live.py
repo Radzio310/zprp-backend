@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import and_, or_, select
 
+from app import time_pl as TP
 from app.db import database, proel_match_state as S, saved_matches as T, zprp_public_matches as M
 from app.proel_match_key import zprp_id_of
 from app.proel_training_key import TRAINING_KEY_LIKE
@@ -43,7 +44,7 @@ MAX_WAIT_S = 25
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return TP.utc_now()
 
 
 def _aware(dt: Any) -> Optional[datetime]:
@@ -134,7 +135,7 @@ async def _zprp_cards(ids: List[str], codes: List[str]) -> Tuple[Dict[str, dict]
     if ids:
         cond.append(M.c.match_id.in_(ids))
     if codes:
-        local = datetime.now(WARSAW).replace(tzinfo=None)
+        local = TP.warsaw_now()
         cond.append(and_(M.c.match_code.in_(codes), M.c.scheduled_at >= local - timedelta(days=1),
                          M.c.scheduled_at <= local + timedelta(days=1)))
     if not cond:
@@ -203,7 +204,7 @@ async def _build_live(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         target = live if phase == "live" else finished
         target.append(_live_item(card, r, blob, phase))
 
-    local = datetime.now(WARSAW).replace(tzinfo=None)
+    local = TP.warsaw_now()
     sched = await _cards(await database.fetch_all(
         select(*_card_cols())
         .where(M.c.scheduled_at >= local - WINDOW_BACK, M.c.scheduled_at <= local + SOON_AHEAD)
@@ -214,7 +215,8 @@ async def _build_live(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if c["match_id"] in seen or c.get("withdrawn"):
             continue
         at = c.get("scheduled_at")
-        if not isinstance(at, datetime):
+        # Bez godziny (00:00 = do ustalenia) mecz nie "powinien trwać" po północy ani nie jest "za chwilę" o 22:00.
+        if not isinstance(at, datetime) or not TP.has_kickoff_time(at):
             continue
         if at <= local and c["status"] == "scheduled":
             window.append(c)
@@ -245,7 +247,7 @@ async def live_matches(
     async def token() -> str:
         rows = await _live_rows_memo.get(_live_rows)
         # Terminarz zmienia się co minutę - minuta wchodzi do odcisku, żeby „powinny trwać" przechodziło do „za chwilę".
-        return _token(rows, datetime.now(WARSAW).strftime("%H:%M"))
+        return _token(rows, TP.warsaw_now().strftime("%Y-%m-%d %H:%M"))
 
     tok = await _wait_for(token, since, wait)
     if _live_built["token"] != tok or _live_built["body"] is None:

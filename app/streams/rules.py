@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo
 
+from app.time_pl import has_kickoff_time
 from app.protocol_category import classify_match_code
 from app.zprp_public.proel_live_rules import fold
 
@@ -76,6 +77,22 @@ def warsaw_iso(value: Any) -> Optional[str]:
     """Aware/naiwny-UTC → naiwny czas warszawski ISO (jak `scheduled_at` w kartach)."""
     dt = aware(value)
     return dt.astimezone(WARSAW).replace(tzinfo=None).isoformat() if dt else None
+
+
+def timed_kickoff(match: dict[str, Any]) -> Optional[datetime]:
+    """Kickoff do okien czasowych (szukanie, „na żywo", plan sprawdzeń) - None, gdy
+    ZPRP nie podał godziny (00:00 = do ustalenia): taki mecz nie „startuje o północy"."""
+    return match.get("kickoff") if match.get("kickoff_known", True) else None
+
+
+def state_kickoff(match: dict[str, Any]) -> Optional[datetime]:
+    """Kickoff dla `state_without_api`: bez godziny - koniec doby meczu minus LIVE_SPAN
+    (film „upcoming" do północy, potem „vod")."""
+    kickoff = match.get("kickoff")
+    if kickoff is None or match.get("kickoff_known", True):
+        return kickoff
+    day_end = kickoff.astimezone(WARSAW).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    return day_end.replace(tzinfo=WARSAW).astimezone(timezone.utc) - LIVE_SPAN
 
 
 def pacific_day(now: datetime) -> str:
@@ -379,7 +396,7 @@ def pick_search_targets(matches: Iterable[dict[str, Any]], covered: set[str], se
     for m in sorted(matches, key=lambda m: (-TIER_PRIORITY.get(m.get("tier") or "other", 0), m.get("kickoff") or now)):
         if len(out) >= min(per_cycle, max(0, remaining)):
             break
-        kickoff = m.get("kickoff")
+        kickoff = timed_kickoff(m)
         if m.get("tier") not in SEARCH_TIERS or not kickoff or m["match_id"] in covered:
             continue
         if kickoff - timedelta(minutes=30) <= now < kickoff:
@@ -499,6 +516,7 @@ def match_context(row: dict[str, Any]) -> dict[str, Any]:
         "away_club_id": row.get("away_club_id"),
         "scheduled_at": row.get("scheduled_at"),
         "kickoff": kickoff_utc(row.get("scheduled_at")),
+        "kickoff_known": has_kickoff_time(row.get("scheduled_at")),
         "tier": competition_tier(name, row.get("match_code"), category),
         "gender": gender_of(row.get("comp_gender"), row.get("match_code")),
         "youth": is_youth(name, category),

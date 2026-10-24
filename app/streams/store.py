@@ -25,6 +25,7 @@ from app.db import (
     zprp_public_matches,
     zprp_public_sync_state,
 )
+from app.time_pl import warsaw_now
 from app.streams import rules as R
 from app.streams.seeds import SEED_CHANNELS
 
@@ -280,7 +281,7 @@ async def competition_match_ids(competition_id: str) -> list[str]:
 
 
 async def club_match_ids(club_id: str, *, since_days: int = 400) -> list[str]:
-    since = datetime.now() - timedelta(days=since_days)
+    since = warsaw_now() - timedelta(days=since_days)  # scheduled_at to naiwny czas polski
     rows = await database.fetch_all(select(M.c.match_id).where(or_(M.c.home_club_id == club_id, M.c.away_club_id == club_id))
                                     .where(M.c.scheduled_at >= since))
     return [str(r["match_id"]) for r in rows]

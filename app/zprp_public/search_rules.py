@@ -13,6 +13,8 @@ import unicodedata
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
+from app.time_pl import warsaw_now
+
 _NUMBER_RE = re.compile(r"^[A-Za-z]{1,6}\s*\d{1,5}$")
 
 
@@ -62,7 +64,7 @@ def variants(raw: str) -> list[str]:
 def rank(rows: Iterable[dict], raw: str, now: Optional[datetime] = None, current_season: Optional[str] = None) -> list[dict]:
     """Kolejność: dokładna pisownia, ten sam numer (inna wielkość liter), prefiks; potem
     wariant l<->I za wpisanym; w grupie bieżący sezon i najbliższy w czasie."""
-    now = now or datetime.now()
+    now = now or warsaw_now()  # scheduled_at to naiwny czas polski
     q = tidy(raw)
     keys = variants(raw)
 

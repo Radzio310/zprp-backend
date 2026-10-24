@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Optional
 
 from app.national_distance_parser import clean_city, normalize_city_key
+from app.time_pl import is_upcoming_at
 from app.national_place_rules import province_label, province_slug
 from app.zprp_public import match_rules as MR
 
@@ -194,8 +195,8 @@ def is_upcoming(card: dict, now: datetime) -> bool:
     """Przed nami = bez wyniku, nie wycofany i nie starszy niż 3 h (mecz w toku też)."""
     if is_played(card) or card.get("withdrawn"):
         return False
-    at = card.get("scheduled_at")
-    return at is None or not isinstance(at, datetime) or at >= now - UPCOMING_GRACE
+    # `now` = naiwny czas polski (time_pl.warsaw_now); 00:00 = godz. do ustalenia, przed nami do końca doby.
+    return is_upcoming_at(card.get("scheduled_at"), now, UPCOMING_GRACE)
 
 
 def match_counts(cards: Iterable[dict], now: datetime) -> dict[str, int]:

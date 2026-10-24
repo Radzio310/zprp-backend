@@ -87,8 +87,8 @@ async def import_zprp(matches: list[dict[str, Any]], now: datetime) -> int:
             "match_id": m["match_id"], "url": _watch_url(vid) if vid else url, "platform": platform, "video_id": vid,
             "title": f"{m.get('home_team_name') or ''} – {m.get('away_team_name') or ''}".strip(" –") or None,
             "thumbnail_url": P.thumb(vid) if vid else None,
-            "state": R.state_without_api(m.get("kickoff"), now) if vid else "link",
-            "starts_at": m.get("kickoff"), "confidence": "official", "source": "zprp", "verified_by": "zprp",
+            "state": R.state_without_api(R.state_kickoff(m), now) if vid else "link",
+            "starts_at": R.timed_kickoff(m), "confidence": "official", "source": "zprp", "verified_by": "zprp",
         }
         changed += await store.upsert_stream(values)
     return changed
@@ -108,8 +108,8 @@ async def _known_channel(channel_id: Optional[str], fallback: Optional[dict[str,
 async def store_candidate(video: dict[str, Any], match: dict[str, Any], level: str, channel: Optional[dict[str, Any]],
                           *, source: str, verified_by: str, now: datetime) -> bool:
     vid = video["video_id"]
-    state = video.get("state") if verified_by in ("api", "page") else R.state_without_api(match.get("kickoff"), now)
-    starts = video.get("starts_at") if verified_by == "api" else match.get("kickoff")
+    state = video.get("state") if verified_by in ("api", "page") else R.state_without_api(R.state_kickoff(match), now)
+    starts = video.get("starts_at") if verified_by == "api" else R.timed_kickoff(match)
     values = {
         "match_id": match["match_id"], "url": _watch_url(vid), "platform": "youtube", "video_id": vid,
         "channel_ref": (channel or {}).get("id"),
@@ -171,7 +171,7 @@ async def resolve_channel(ch: dict[str, Any], yt: net.YouTube) -> Optional[str]:
 async def check_channel(ch: dict[str, Any], matches: list[dict[str, Any]], now: datetime, yt: net.YouTube,
                         counters: Counter) -> int:
     relevant = R.relevant_matches(ch, matches)
-    nxt = R.next_check_at([m["kickoff"] for m in relevant if m.get("kickoff")], now)
+    nxt = R.next_check_at([k for k in (R.timed_kickoff(m) for m in relevant) if k], now)
     if ch.get("platform") != "youtube" or ch.get("kind") == "tv":
         await store.update_channel(ch["id"], last_checked_at=now, next_check_at=now + timedelta(days=7))
         return 0
@@ -215,7 +215,7 @@ def _maybe(entry: dict[str, Any], matches: list[dict[str, Any]]) -> bool:
 async def _probe_live_page(ch: dict[str, Any], matches: list[dict[str, Any]], now: datetime, yt: net.YouTube) -> int:
     if ch.get("kind") not in ("club", "official") or not ch.get("channel_id"):
         return 0
-    live_now = [m for m in matches if m.get("kickoff") and m["kickoff"] - timedelta(minutes=30) <= now <= m["kickoff"] + R.LIVE_SPAN]
+    live_now = [m for m in matches if R.timed_kickoff(m) and m["kickoff"] - timedelta(minutes=30) <= now <= m["kickoff"] + R.LIVE_SPAN]
     if not live_now:
         return 0
     known = {s.get("video_id") for s in await store.streams_for([m["match_id"] for m in live_now], include_hidden=True)}
@@ -250,7 +250,7 @@ async def refresh_states(matches: list[dict[str, Any]], now: datetime, yt: net.Y
             if row.get("verified_by") != "admin":
                 patch["verified_by"] = "api"
         elif row.get("verified_by") in ("rss", "zprp", "page"):
-            patch = {"state": R.state_without_api((by_match.get(row["match_id"]) or {}).get("kickoff"), now)}
+            patch = {"state": R.state_without_api(R.state_kickoff(by_match.get(row["match_id"]) or {}), now)}
         else:
             continue
         if any(R.aware(row.get(k)) != R.aware(v) if isinstance(v, datetime) else row.get(k) != v for k, v in patch.items()):
@@ -265,7 +265,8 @@ async def refresh_states(matches: list[dict[str, Any]], now: datetime, yt: net.Y
 
 
 def _matchday(matches: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
-    return [m for m in matches if m.get("kickoff") and m["kickoff"] - timedelta(hours=3) <= now <= m["kickoff"] + timedelta(hours=2)]
+    # Bez godziny (00:00 = do ustalenia) mecz nie ma okna - inaczej limit YouTube szedłby na Superligę o północy.
+    return [m for m in matches if R.timed_kickoff(m) and m["kickoff"] - timedelta(hours=3) <= now <= m["kickoff"] + timedelta(hours=2)]
 
 
 async def hints(matches: list[dict[str, Any]], now: datetime, yt: net.YouTube) -> int:

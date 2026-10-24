@@ -53,6 +53,7 @@ from app.zprp_public.client import (
     sanitize,
     text_value,
 )
+from app.time_pl import has_kickoff_time, to_warsaw_naive, warsaw_now
 from app.zprp_public.match_rules import lineups_swapped, parse_shootout
 from app.zprp_public.referee_placeholder import clean_match_officials
 from app.zprp_public.store import insert_ignore, now_utc, store_entity, upsert_values
@@ -72,6 +73,13 @@ def _dt(value: Any) -> datetime | None:
     raw = text_value(value)
     if not raw:
         return None
+    # ZPRP podaje czas polski bez strefy; gdyby przyszedł ze strefą („Z"/„+02:00"),
+    # przeliczamy na naiwny czas warszawski zamiast obcinać strefę (przesunięcie o 1-2 h).
+    if len(raw) > 19 and (raw.endswith(("Z", "z")) or raw[19:].lstrip(".0123456789")[:1] in {"+", "-"}):
+        try:
+            return to_warsaw_naive(datetime.fromisoformat(raw[:-1] + "+00:00" if raw[-1] in "Zz" else raw))
+        except ValueError:
+            pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y %H:%M", "%Y-%m-%d"):
         try:
             return datetime.strptime(raw[:19], fmt)
@@ -80,8 +88,24 @@ def _dt(value: Any) -> datetime | None:
     return None
 
 
+def _kickoff(item: dict[str, Any]) -> datetime | None:
+    """Termin meczu do `scheduled_at`: `data_fakt` (termin faktyczny) przed `data_prop` (proponowany).
+
+    Tak czyta termin reszta BAZY (archiwum, monitor obsad, ProEl). Sam `data_prop` dawał
+    portalowi stary termin przełożonych meczów i „00:00" tam, gdzie ZPRP ma godzinę
+    już tylko w `data_fakt`. 00:00 = godzina do ustalenia (time_pl.has_kickoff_time):
+    gdy faktyczny ma samą datę, a proponowany tego samego dnia godzinę - bierzemy godzinę.
+    """
+    fakt, prop = _dt(item.get("data_fakt")), _dt(item.get("data_prop"))
+    if fakt is None:
+        return prop
+    if not has_kickoff_time(fakt) and prop is not None and has_kickoff_time(prop) and prop.date() == fakt.date():
+        return prop
+    return fakt
+
+
 def _local_now() -> datetime:
-    return datetime.now(WARSAW).replace(tzinfo=None)
+    return warsaw_now()
 
 
 def _truth(value: Any) -> bool:
@@ -298,7 +322,7 @@ def _match_values(item: dict[str, Any], **context: Any) -> dict[str, Any]:
         "away_club_id": text_value(item.get("ID_zespoly_gosc_ZespolNrKlubu")),
         "home_team_name": text_value(item.get("ID_zespoly_gosp_ZespolNazwa")),
         "away_team_name": text_value(item.get("ID_zespoly_gosc_ZespolNazwa")),
-        "scheduled_at": _dt(item.get("data_prop")),
+        "scheduled_at": _kickoff(item),
         "played_at": _dt(item.get("data_fakt")),
         "halftime_home": int_value(item.get("wynik_gosp_pol")),
         "halftime_away": int_value(item.get("wynik_gosc_pol")),
@@ -938,17 +962,24 @@ async def _sync_live(client: PublicZprpClient, season_id: str, counters: Counter
     payload = await client.get(f"pokaz_terminarz.php?{query}")
     changed_competitions: set[str] = set()
     active_ids: list[str] = []
+    untimed_ids: list[str] = []
     now = _local_now()
     for item in rows(payload):
         match_id, changed = await _store_match(item, counters)
         competition_id = text_value(item.get("IdRozgrywki"))
         if changed and competition_id:
             changed_competitions.add(competition_id)
-        when = _dt(item.get("data_fakt") or item.get("data_prop"))
-        if match_id and when and now - timedelta(hours=12) <= when <= now + timedelta(hours=4):
+        when = _kickoff(item)
+        if not match_id or not when:
+            continue
+        if not has_kickoff_time(when):
+            # 00:00 = godzina do ustalenia: mecz dnia, ale za tymi z godziną (limit 40 nie zjada sobotnich).
+            if (now - timedelta(hours=12)).date() <= when.date() <= now.date():
+                untimed_ids.append(match_id)
+        elif now - timedelta(hours=12) <= when <= now + timedelta(hours=4):
             active_ids.append(match_id)
 
-    for match_id in active_ids[:40]:
+    for match_id in (active_ids + untimed_ids)[:40]:
         try:
             competition_id = await _sync_match_details(client, match_id, counters)
             if competition_id:
