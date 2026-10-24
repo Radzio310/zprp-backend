@@ -1299,6 +1299,8 @@ async def attempt_card(st: Store, who: Who, exam_id: str, attempt_id: str) -> Di
         timeline.append({"position": row.get("position"), "qid": item["qid"], "number": bank[item["qid"]]["number"],
                          "selected": row.get("selected"), "selected_letters": letters, "keys": order, "shown_at": _iso(row.get("shown_at")),
                          "answered_at": _iso(row.get("answered_at")), "elapsed_ms": row.get("elapsed_ms"),
+                         # Czas z telefonu (runner, 24.10.2026); stare podejścia go nie mają - wtedy `elapsed_ms`.
+                         "client_time_ms": row.get("client_time_ms"),
                          "timed_out": bool(row.get("timed_out")), "changes": row.get("changes"), "flags": row.get("flags")})
     return {"attempt_id": attempt_id, "judge_id": attempt["judge_id"], "judge_name": attempt.get("judge_name"),
             "status": attempt["status"], "finish_reason": attempt.get("finish_reason"), "score": attempt["score"],

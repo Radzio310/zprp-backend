@@ -451,6 +451,8 @@ async def test_klucz_od_razu_po_oddaniu_i_przeglad_komisji(st):
     listed = await S.list_for_judge(st, PLAIN, now=end)
     att = next(e for e in listed["exams"] if e["id"] == exam["id"])["my_attempts"][0]
     assert att["review_available"] is True and att["review_reason"] is None
+    card = await S.attempt_card(st, COMMISSION, exam["id"], aid)
+    assert all("client_time_ms" in row for row in card["timeline"])
     full = await S.committee_review(st, COMMISSION, exam["id"], aid)
     assert full["violations"] == 1 and full["events"][0]["kind"] == "app_background" and full["flags"] == []
     with pytest.raises(X.ExamError):
