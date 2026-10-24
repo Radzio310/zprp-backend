@@ -13,6 +13,7 @@ from sqlalchemy import and_, or_, select
 
 from app.db import database, zprp_public_competitions, zprp_public_matches, zprp_public_seasons
 from app.zprp_public import match_rules as MR
+from app.zprp_public.proel_cards import apply_proel_fallback, invalidate as invalidate_proel
 
 _SEASONS_TTL = 300.0
 _seasons_cache: dict[str, Any] = {"at": 0.0, "seasons": {}, "current": None}
@@ -33,14 +34,20 @@ async def seasons_info() -> tuple[dict[str, dict], str | None]:
 
 def invalidate() -> None:
     _seasons_cache["at"] = 0.0
+    invalidate_proel()
 
 
 async def enrich_matches(items: Iterable[dict[str, Any]]) -> None:
     """Dokłada winner_side, decided_by, match_code_full, season_name, is_current_season
-    oraz competition_category / competition_gender (H2H tylko w tej samej kategorii)."""
+    oraz competition_category / competition_gender (H2H tylko w tej samej kategorii).
+
+    Najpierw zapas z ProEla (godzina meczu bez godziny w ZPRP, wynik zakończonego
+    protokołu, którego ZPRP jeszcze nie ma: `score_source`/`kickoff_source`/
+    `result_pending`), potem zwycięzca - liczony już z wyniku po zapasie."""
     items = [i for i in items if isinstance(i, dict)]
     if not items:
         return
+    await apply_proel_fallback(items)
     seasons, current = await seasons_info()
     comp_ids = {i.get("competition_id") for i in items if i.get("competition_id")}
     need_code = {i.get("competition_id") for i in items if i.get("competition_id") and "/" not in str(i.get("match_code") or "/")}

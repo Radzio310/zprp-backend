@@ -33,6 +33,7 @@ from app.db import (
 )
 from app import time_pl as TP
 from app.zprp_public import corrections, match_rules as MR
+from app.zprp_public import round_rules as ROUNDS
 from app.zprp_public.referee_placeholder import clean_match_officials
 from app.zprp_public.protocol_times import attach_protocol_times
 from app.zprp_public.enrich import attach_standing_records, enrich_matches
@@ -551,7 +552,8 @@ async def competition_details(competition_id: str) -> dict[str, Any]:
         )
     public_comp = {key: value for key, value in _dict(competition).items() if key not in {"source_hash", "source_json"}}
     await corrections.apply_one("competition", public_comp)
-    return {"competition": public_comp, "rounds": [_dict(row) for row in rounds], "matchdays": [_dict(row) for row in matchdays]}
+    days = [ROUNDS.decorate_matchday(_dict(row)) for row in matchdays]  # + label „Kolejka N", date_from/date_to
+    return {"competition": public_comp, "rounds": [_dict(row) for row in rounds], "matchdays": days}
 
 
 @router.get("/competitions/{competition_id}/standings")

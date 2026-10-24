@@ -149,6 +149,20 @@ def _journal_send_later(event: str, **kwargs: Any) -> None:
     task.add_done_callback(_journal_task_done)
 
 
+def _kick_public(id_zawody: Any, delay: float, debounce: bool = False) -> None:
+    """Wysyłka do ZPRP zmienia publiczny protokół meczu - portal dociąga go w tle.
+
+    Statystyki lecą po jednym zawodniku, więc dla nich `debounce`: pobranie po
+    ostatnim z serii (najwyżej 2 min od pierwszego). Nigdy nie rzuca.
+    """
+    try:
+        from app.zprp_public.ondemand import kick_details_refresh
+
+        kick_details_refresh(id_zawody, delay=delay, debounce=debounce)
+    except Exception:
+        logger.debug("ProEl ZPRP: odświeżenie portalu nieudane", exc_info=True)
+
+
 def _hour_key(event: str, id_zawody: Any) -> str:
     """Klucz idempotencji na godzinę - dla wysyłek po jednym wywołaniu na osobę.
 
@@ -674,6 +688,7 @@ async def zprp_summary(
         # o zadaniu - znacznik idzie od razu.
         mark_task="shortResultSent",
     )
+    _kick_public(payload.id_zawody, 10.0)
     return out
 
 
@@ -854,6 +869,7 @@ async def zprp_player_stats(
         elevation=x_elevation,
         event_key=_hour_key("zprp.players_sent", payload.id_zawody),
     )
+    _kick_public(payload.id_zawody, 45.0, debounce=True)
     return out
 
 
@@ -1022,6 +1038,7 @@ async def zprp_officials_stats(
         elevation=x_elevation,
         event_key=_hour_key("zprp.officials_sent", payload.id_zawody),
     )
+    _kick_public(payload.id_zawody, 45.0, debounce=True)
     return out
 
 
@@ -1891,4 +1908,5 @@ async def zprp_full_data_done(
         event_key=_hour_key("zprp.full_data_sent", payload.id_zawody),
         mark_task="fullDataSent",
     )
+    _kick_public(payload.id_zawody, 5.0)
     return {"status": "success"}

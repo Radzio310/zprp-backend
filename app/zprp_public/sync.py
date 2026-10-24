@@ -54,6 +54,7 @@ from app.zprp_public.client import (
     text_value,
 )
 from app.time_pl import has_kickoff_time, to_warsaw_naive, warsaw_now
+from app.zprp_public.proel_card_rules import with_clock
 from app.zprp_public.match_rules import lineups_swapped, parse_shootout
 from app.zprp_public.referee_placeholder import clean_match_officials
 from app.zprp_public.store import insert_ignore, now_utc, store_entity, upsert_values
@@ -97,11 +98,17 @@ def _kickoff(item: dict[str, Any]) -> datetime | None:
     gdy faktyczny ma samą datę, a proponowany tego samego dnia godzinę - bierzemy godzinę.
     """
     fakt, prop = _dt(item.get("data_fakt")), _dt(item.get("data_prop"))
-    if fakt is None:
-        return prop
-    if not has_kickoff_time(fakt) and prop is not None and has_kickoff_time(prop) and prop.date() == fakt.date():
-        return prop
-    return fakt
+    when = prop if fakt is None else fakt
+    if fakt is not None and not has_kickoff_time(fakt) and prop is not None and has_kickoff_time(prop) and prop.date() == fakt.date():
+        when = prop
+    if when is not None and not has_kickoff_time(when):
+        # Rozgrywki centralne (Superliga) czekają na ramówkę TV: termin ma 00:00. Jeśli ZPRP
+        # wpisał godzinę transmisji (`transmisja_godzina`, „18:00"), to jest godzina meczu.
+        # Bez niej - dalej „do ustalenia" (godzinę dołoży ProEl: proel_cards).
+        tv = with_clock(when, item.get("transmisja_godzina"))
+        if tv is not None:
+            return tv
+    return when
 
 
 def _local_now() -> datetime:
@@ -326,8 +333,8 @@ def _match_values(item: dict[str, Any], **context: Any) -> dict[str, Any]:
         "played_at": _dt(item.get("data_fakt")),
         "halftime_home": int_value(item.get("wynik_gosp_pol")),
         "halftime_away": int_value(item.get("wynik_gosc_pol")),
-        "score_home": int_value(item.get("wynik_bramki_gosp") or item.get("wynik_gosp_full")),
-        "score_away": int_value(item.get("wynik_bramki_gosc") or item.get("wynik_gosc_full")),
+        "score_home": int_value(item.get("wynik_bramki_gosp") or item.get("wynik_gosp_full") or item.get("wynik_koncowy_gosp")),
+        "score_away": int_value(item.get("wynik_bramki_gosc") or item.get("wynik_gosc_full") or item.get("wynik_koncowy_gosc")),
         "winner": text_value(item.get("zwyciezca")),
         "withdrawn": _truth(item.get("wycofany")),
         "walkover_team_id": text_value(item.get("walkower_ID_zespoly")),
@@ -998,6 +1005,87 @@ async def _sync_live(client: PublicZprpClient, season_id: str, counters: Counter
             log.warning("[zprp_public] statystyki %s: %s", competition_id, exc)
 
 
+async def _hot_candidates(now: datetime, limit: int) -> list[str]:
+    """Mecze po końcowej syrenie z niepełnym protokołem ZPRP, które czas pobrać ponownie.
+
+    Źródła: terminarz (rozpoczęte w ostatnich HOT_WINDOW, także bez godziny -
+    cała doba) i ProEl (zakończone/zatwierdzone w tym oknie). Kolejność: najpierw
+    mecze z protokołem elektronicznym (pewne, że ZPRP dostanie skład), potem
+    najdawniej pobierane. `_sync_live` bierze co 2 min tylko 40 pierwszych meczów
+    terminarza z okna -12 h..+4 h - w sobotę to przedpołudniowe mecze młodzieży,
+    a wieczorna Superliga wypadała poza limit i jej skład wisiał z pobrania w trakcie.
+    """
+    from app.zprp_public import ondemand as OD
+
+    M = zprp_public_matches
+    local = to_warsaw_naive(now)
+    window = OD.HOT_WINDOW
+    cols = (M.c.match_id, M.c.played_at, M.c.scheduled_at, M.c.score_home, M.c.score_away, M.c.details_fetched_at)
+    rows = list(await database.fetch_all(
+        select(*cols).where(and_(
+            func.coalesce(M.c.played_at, M.c.scheduled_at) <= local,
+            func.coalesce(M.c.played_at, M.c.scheduled_at) >= local - window - timedelta(days=1),
+            M.c.withdrawn.is_not(True),
+        )).order_by(func.coalesce(M.c.played_at, M.c.scheduled_at).desc()).limit(600)
+    ))
+    try:
+        from app.db import saved_matches as T
+
+        done = await database.fetch_all(
+            select(T.c.zprp_match_id).where(and_(
+                T.c.status.in_(("finished", "approved")),
+                T.c.updated_at >= now - window,
+                T.c.zprp_match_id.is_not(None),
+            )).limit(200)
+        )
+        known = {text_value(r["match_id"]) for r in rows}
+        extra = [text_value(r["zprp_match_id"]) for r in done if text_value(r["zprp_match_id"]) not in known]
+        if extra:
+            rows.extend(await database.fetch_all(select(*cols).where(M.c.match_id.in_(extra[:200]))))
+    except Exception:
+        log.debug("[zprp_public] gorące mecze: odczyt ProEl", exc_info=True)
+    info = await OD.freshness_inputs([text_value(r["match_id"]) for r in rows])
+    picked: list[tuple[tuple[int, float], str]] = []
+    for r in rows:
+        mid = text_value(r["match_id"])
+        cad = OD.cadence_for(r, info.get(mid), now)
+        if cad["complete"]:
+            continue
+        moment = OD.match_moment(r["played_at"], r["scheduled_at"])
+        if not OD.in_hot_window(moment, now, cad["proel_done_at"], cad["timed"]):
+            continue
+        if not OD.needs_details(r["details_fetched_at"], True, moment, now, **cad):
+            continue
+        fetched = OD._aware(r["details_fetched_at"])
+        priority = 0 if (cad["proel_linked"] or cad["proel_done_at"] is not None) else 1
+        picked.append(((priority, fetched.timestamp() if fetched else 0.0), mid))
+    picked.sort()
+    return [mid for _, mid in picked[:limit]]
+
+
+async def _sync_hot_details(client: PublicZprpClient, counters: Counters) -> None:
+    """Dobiera szczegóły świeżo zakończonych meczów, aż ZPRP poda komplet (patrz `_hot_candidates`)."""
+    limit = max(0, min(60, int(os.getenv("ZPRP_PUBLIC_HOT_BATCH", "16"))))
+    if not limit:
+        return
+    try:
+        ids = await _hot_candidates(now_utc(), limit)
+    except Exception as exc:  # dodatek do cyklu LIVE - nie wywraca terminarza
+        counters.add("hot_errors")
+        log.warning("[zprp_public] gorące mecze: %s", exc)
+        return
+
+    async def one(match_id: str) -> None:
+        try:
+            await _sync_match_details(client, match_id, counters)
+            counters.add("hot_details")
+        except Exception as exc:
+            counters.add("detail_errors")
+            log.warning("[zprp_public] gorący mecz %s: %s", match_id, exc)
+
+    await _chunks(ids, 4, one)
+
+
 async def _sync_detail_backfill(client: PublicZprpClient, season_ids: list[str], counters: Counters) -> None:
     limit = max(10, min(300, int(os.getenv("ZPRP_PUBLIC_DETAILS_BATCH", "150"))))
     pool = await database.fetch_all(
@@ -1100,6 +1188,8 @@ async def run_sync_job(kind: str, *, season_id: str | None = None, cycle_key: st
                 seasons_for_run = _selected_seasons(upstream)
             if seasons_for_run:
                 await _sync_live(client, seasons_for_run[0], counters)
+            # Po terminarzu: mecze po syrenie z niepełnym protokołem (co 5-15 min do skutku).
+            await _sync_hot_details(client, counters)
         elif kind == "clubs":
             if not seasons_for_run:
                 upstream = await _store_seasons(client, counters)
