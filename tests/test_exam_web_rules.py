@@ -72,6 +72,7 @@ def test_merge_quiet_sumuje_klikniecia_i_strefy():
     q = R.merge_quiet(q, "click_outside", {"count": 2, "zones": {"top": 1}})
     q = R.merge_quiet(q, "copy", {})
     assert q["clicks"] == 5 and q["zones"] == {"top": 3, "left": 1} and q["counts"] == {"copy": 1}
+    assert R.merge_quiet(q, "resume", {"seconds": 41})["longest_s"] == 41
 
 
 def test_os_zdarzen_t_ms_i_etykiety():

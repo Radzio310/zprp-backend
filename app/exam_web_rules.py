@@ -124,7 +124,14 @@ def record_shape(signal: str, detail: Mapping[str, Any]) -> Optional[Dict[str, A
 
 def merge_quiet(quiet: Mapping[str, Any], signal: str, detail: Mapping[str, Any]) -> Dict[str, Any]:
     """Licznik sygnałów cichych sesji: `{counts:{copy:n,...}, clicks:n, zones:{strefa:n}}`."""
-    out = {"counts": dict(quiet.get("counts") or {}), "clicks": int(quiet.get("clicks") or 0), "zones": dict(quiet.get("zones") or {})}
+    out = {"counts": dict(quiet.get("counts") or {}), "clicks": int(quiet.get("clicks") or 0), "zones": dict(quiet.get("zones") or {}),
+           "longest_s": float(quiet.get("longest_s") or 0)}
+    if signal == "resume":
+        # Powrót niesie czas nieobecności - najdłuższa przerwa daje flagę „długa nieobecność".
+        try:
+            out["longest_s"] = max(out["longest_s"], float(detail.get("seconds") or 0))
+        except (TypeError, ValueError):
+            pass
     if signal == "click_outside":
         try:
             n = max(1, min(500, int(detail.get("count") or 1)))
@@ -236,6 +243,8 @@ def attempt_flags(events: Sequence[Mapping[str, Any]], elapsed_ms: Sequence[Opti
         detail = e.get("detail") if isinstance(e.get("detail"), Mapping) else {}
         if name in ("second_session", "devtools", "printscreen", "guard_left", "guard_lost"):
             found.add(name)
+        if kind == "time_flag" and detail.get("source") == "web" and detail.get("flag") in FLAG_LABELS:
+            found.add(_s(detail.get("flag")))
         if kind == "app_background":
             leaves += 1
             try:
@@ -246,6 +255,8 @@ def attempt_flags(events: Sequence[Mapping[str, Any]], elapsed_ms: Sequence[Opti
     if leaves >= 3:
         found.add("left_often")
     q = quiet or {}
+    if float(q.get("longest_s") or 0) >= LONG_ABSENCE_S:
+        found.add("long_absence")
     if int(q.get("clicks") or 0) >= CLICKS_FLAG_MIN:
         found.add("clicks_outside")
     if sum(int(v or 0) for k, v in (q.get("counts") or {}).items() if k in ("copy", "cut", "paste", "context_menu", "print", "select_all")) >= BLOCKED_FLAG_MIN:
@@ -263,7 +274,7 @@ def label_events(events: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         detail = e.get("detail") if isinstance(e.get("detail"), Mapping) else {}
         label = LABELS.get(name, LABELS.get(_s(e.get("kind")), name))
         if _s(e.get("kind")) == "time_flag" and detail.get("flag"):
-            label = f"{LABELS['time_flag']}: {detail.get('flag')}"
+            label = _s(detail.get("label")) or FLAG_LABELS.get(_s(detail.get("flag"))) or f"{LABELS['time_flag']}: {detail.get('flag')}"
         out.append({**dict(e), "signal": name, "label": label, "source": detail.get("source") or "app"})
     return out
 

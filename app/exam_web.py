@@ -336,6 +336,7 @@ async def _force_submit(attempt_id: str, now: datetime) -> None:
     await S._save(st, attempt, answers)
     if attempt.get("score") is None:
         await S._finalize_score(st, exam, attempt, answers)
+    await _persist_quietly(attempt_id)
 
 
 async def _record(attempt: Dict[str, Any], signal: str, detail: Dict[str, Any], client_ts_ms: Any, now: datetime,
@@ -457,7 +458,10 @@ async def session_answers(sid: str, body: Dict[str, Any], payload: Dict[str, Any
     session = await _own_session(sid, payload, who)
     data = {"answers": body.get("answers"), "client_now_ms": body.get("client_now_ms"), "buffered": bool(body.get("buffered")),
             "device_id": _device(session)}
-    return await _run(S.post_answers(_store(), who, session["attempt_id"], data))
+    res = await _run(S.post_answers(_store(), who, session["attempt_id"], data))
+    if ((res.get("state") or {}).get("attempt") or {}).get("status") not in (None, "in_progress"):
+        await _persist_quietly(session["attempt_id"])
+    return res
 
 
 class EventItem(BaseModel):
@@ -531,6 +535,7 @@ async def session_finish(sid: str, payload: Dict[str, Any] = Depends(get_jwt_pay
     database, _, _, sessions = _tables()
     session = await _own_session(sid, payload, who)
     res = await _run(S.finish_attempt(_store(), who, session["attempt_id"]))
+    await _persist_quietly(session["attempt_id"])
     await database.execute(update(sessions).where(sessions.c.id == sid).values(status="ended", ended_at=_now(), end_reason="finished"))
     return res
 
@@ -567,6 +572,7 @@ async def card_extras(attempt_id: str) -> Dict[str, Any]:
         for key, value in (q.get("counts") or {}).items():
             quiet.setdefault("counts", {})[key] = int(quiet.get("counts", {}).get(key, 0)) + int(value or 0)
         quiet["clicks"] = int(quiet.get("clicks") or 0) + int(q.get("clicks") or 0)
+        quiet["longest_s"] = max(float(quiet.get("longest_s") or 0), float(q.get("longest_s") or 0))
         for zone, value in (q.get("zones") or {}).items():
             quiet.setdefault("zones", {})[zone] = int(quiet.get("zones", {}).get(zone, 0)) + int(value or 0)
     flags = R.attempt_flags(events, elapsed, quiet, attempt.get("finish_reason"))
@@ -574,6 +580,35 @@ async def card_extras(attempt_id: str) -> Dict[str, Any]:
             "events": R.timeline_events(events, attempt.get("started_at")),
             "web": {"clicks_outside": int(quiet.get("clicks") or 0), "zones": quiet.get("zones") or {}, "blocked": quiet.get("counts") or {},
                     "violations": R.violation_count(events), "on_computer": str(attempt.get("device_id") or "").startswith("web:")}}
+
+
+async def persist_flags(attempt_id: str) -> List[str]:
+    """Flagi komputera do magazynu zdarzeń (uzgodnienie z przeglądem komisji 24.10): `time_flag`
+    z `detail.flag` i `source:"web"` - oś komisji je pokazuje, a liczba naruszeń sędziego ich NIE
+    liczy (`time_flag` jest w NOT_VIOLATIONS). Wołane przy oddaniu; bez powtórek tej samej flagi."""
+    st = _store()
+    attempt = await S._attempt_row(st, attempt_id)
+    if attempt["status"] == "in_progress" or not str(attempt.get("device_id") or "").startswith("web:"):
+        return []
+    extras = await card_extras(attempt_id)
+    have = {(e.get("detail") or {}).get("flag") for e in extras["events"] if e.get("kind") == "time_flag"}
+    added = []
+    for flag in extras["flags"]:
+        if flag in have:
+            continue
+        await S._record_event(st, attempt["exam_id"], attempt, "time_flag",
+                              {"flag": flag, "source": "web", "label": R.FLAG_LABELS.get(flag, flag)}, None, _now())
+        added.append(flag)
+    return added
+
+
+async def _persist_quietly(attempt_id: str) -> None:
+    try:
+        await persist_flags(attempt_id)
+    except Exception:  # noqa: BLE001 - flagi to sygnał dla komisji, nie mogą zepsuć oddania
+        import logging
+
+        logging.getLogger(__name__).warning("exam-web: zapis flag nieudany", exc_info=True)
 
 
 def merge_card(body: Dict[str, Any], extras: Dict[str, Any]) -> Dict[str, Any]:
