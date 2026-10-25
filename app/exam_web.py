@@ -554,6 +554,13 @@ async def session_result(sid: str, payload: Dict[str, Any] = Depends(get_jwt_pay
     return res
 
 
+@router.get("/sessions/{sid}/review", summary="Przegląd odpowiedzi z kluczem (wg answers_release) - jak /exams/attempts/{id}/review")
+async def session_review(sid: str, payload: Dict[str, Any] = Depends(get_jwt_payload), who: S.Who = Depends(_who)):
+    # Ta sama bramka co w aplikacji: klucz nigdy nie wyprzedza wyniku; odmowa = EXAM_REVIEW_LOCKED z opens_at.
+    session = await _own_session(sid, payload, who, active=False)
+    return await _run(S.attempt_review(_store(), who, session["attempt_id"]))
+
+
 # ─── Karta podejścia dla komisji (kontrakt 24.10: events[t_ms,kind,detail] + flags) ─
 
 
