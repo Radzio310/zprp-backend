@@ -27,6 +27,7 @@ import asyncio
 import json
 import html
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
@@ -70,7 +71,7 @@ from app.mentor_evaluation_request_rules import (
     video_provider,
     youtube_thumbnail,
 )
-from app.mentor_video_rules import clean_markers, clean_sync, mentor_states, should_mark_read, timeline_from_blob
+from app.mentor_video_rules import clean_markers, clean_sync, merge_markers, mentor_states, should_mark_read, timeline_from_blob
 from app.settlement_province import display as province_display, spellings
 
 router = APIRouter(prefix="/mentor-evaluations", tags=["Mentor evaluations"])
@@ -101,7 +102,10 @@ class MatchVideoRequest(BaseModel):
 
 class MatchVideoPatch(BaseModel):
     sync: Optional[Dict[str, Any]] = None
-    markers: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=200)
+    # Upsert po id: brak znacznika na liście NIE oznacza usunięcia.
+    markers: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=400)
+    # Nagrobki: id znaczników usuniętych na telefonie (lista id albo {"id"}).
+    deleted: Optional[List[Any]] = Field(default=None, max_length=400)
 
 
 # ─── Dane z bazy ────────────────────────────────────────────────────────────
@@ -591,8 +595,9 @@ async def update_match_video(match_id: str, video_id: str, body: MatchVideoPatch
     values: Dict[str, Any] = {"updated_at": now()}
     if body.sync is not None:
         values["sync_json"] = json.dumps(clean_sync(body.sync))
-    if body.markers is not None:
-        values["markers_json"] = json.dumps(clean_markers(body.markers), ensure_ascii=False)
+    if body.markers is not None or body.deleted:
+        _, to_store = merge_markers(json.loads(row["markers_json"]) if _is_json_list(row.get("markers_json")) else [], body.markers, body.deleted, me, int(time.time() * 1000))
+        values["markers_json"] = json.dumps(to_store, ensure_ascii=False)
     await database.execute(update(match_videos).where(match_videos.c.id == video_id).values(**values))
     fresh = dict(await database.fetch_one(select(match_videos).where(match_videos.c.id == video_id)))
     names = await people([fresh["added_by"]])

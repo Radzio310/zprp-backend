@@ -384,27 +384,80 @@ def clip_filename(title: Any, match_code: Any, start_s: float) -> str:
     return safe_filename(f"{base} {minute:02d}-{second:02d}", "mp4", "klip")
 
 
+#: Znacznik bez końca (bez REC) pokazujemy jako klip wokół punktu: tyle sekund
+#: przed i po. Jedno miejsce prawdy dla panelu Mentora.
+POINT_LEAD_S = 6
+POINT_TAIL_S = 4
+
+
+def _marker_video_second(video: Mapping[str, Any], m: Mapping[str, Any]) -> Optional[float]:
+    """Sekunda nagrania: własna, a dla znacznika z ProEla - z kotwic synchronizacji."""
+    if m.get("video_s") is not None:
+        return float(m["video_s"])
+    sync = json_value(video.get("sync_json"), {})
+    ms = m.get("match_ms")
+    if ms is None or not isinstance(sync, Mapping):
+        return None
+    seconds = float(ms) / 1000.0
+    half_len = (sync.get("half_minutes") or 0) * 60
+    if m.get("half") == 2:
+        if sync.get("second_half_s") is not None and half_len:
+            return float(sync["second_half_s"]) + max(0.0, seconds - half_len)
+        if sync.get("match_start_s") is not None:
+            return float(sync["match_start_s"]) + seconds + (sync.get("break_minutes") or 0) * 60
+        return None
+    if sync.get("match_start_s") is not None:
+        return float(sync["match_start_s"]) + seconds
+    return None
+
+
 def markers_as_clips(video: Mapping[str, Any], markers: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Znaczniki z zakresem z aplikacji (REC) jako klipy tylko do odczytu („z aplikacji")."""
+    """Znaczniki z aplikacji jako klipy tylko do odczytu („z aplikacji").
+
+    Zakres (REC) idzie wprost; znacznik punktowy - jako okno wokół punktu
+    (`POINT_LEAD_S`/`POINT_TAIL_S`, `point: true`). Niesie też rodzaj, typ
+    zdarzenia ProEla i jego klucze, by panel mógł je narysować jak w aplikacji.
+    """
     out = []
+    duration = video.get("duration_s")
     for m in markers or ():
-        start, end = m.get("video_s"), m.get("end_s")
-        if start is None or end is None:
+        at = _marker_video_second(video, m)
+        if at is None:
             continue
+        end = m.get("end_s")
+        point = end is None
+        if point:
+            start, end = max(0.0, at - POINT_LEAD_S), at + POINT_TAIL_S
+            if isinstance(duration, (int, float)) and duration > 0:
+                end = min(end, float(duration))
+            if end <= start:
+                continue
+        else:
+            start, end = float(m["video_s"]), float(end)
         out.append({
             "id": f"marker:{video.get('id')}:{m.get('id')}",
             "match_id": video.get("match_id"),
             "video_id": video.get("id"),
-            "start_s": float(start),
+            "start_s": start,
             "end_s": float(end),
+            "point": point,
+            "point_s": float(at),
             "title": m.get("label") or "Znacznik",
             "note": m.get("comment"),
             "category_ids": [],
             "category_key": m.get("category"),
+            "legacy_category": m.get("legacy_category"),
+            "important": bool(m.get("important")),
+            "kind": m.get("kind"),
+            "type": m.get("type"),
             "source": "marker",
             "source_key": m.get("id"),
+            "event_key": m.get("source_key"),
+            "marker_id": m.get("id"),
             "match_ms": m.get("match_ms"),
             "half": m.get("half"),
+            "wall_ms": m.get("wall_ms"),
+            "author_id": m.get("judge_id"),
             "read_only": True,
         })
     return out

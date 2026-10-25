@@ -35,7 +35,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-MAX_MARKERS = 80
+#: Na nagranie (mecz + zapisy z kilku telefonów pary). Aplikacja i tak tnie do 80 na telefon.
+MAX_MARKERS = 300
 MAX_LABEL = 80
 MAX_VIDEO_SECONDS = 6 * 3600
 MAX_MATCH_MS = 3 * 3600 * 1000
@@ -55,8 +56,12 @@ LEGACY_CATEGORIES: Dict[str, str] = {
     "gwizdek": "dyskusja",
     "inne": "dyskusja",
 }
-#: Zakres nagrany przyciskiem REC: najdłużej 10 minut.
-MAX_RANGE_S = 600
+#: Zakres nagrany przyciskiem REC: najdłużej 30 minut (wcześniej 10 - dłuższy
+#: zakres cicho tracił koniec i stawał się punktem).
+MAX_RANGE_S = 1800
+#: Nagrobki usuniętych znaczników: trzymamy, by spóźniony telefon ich nie wskrzesił.
+TOMBSTONE_TTL_MS = 90 * 24 * 3600 * 1000
+MAX_TOMBSTONES = 500
 MAX_COMMENT = 280
 #: Godzina ścienna w ms UTC: od 2020 do 2100 - wszystko inne to śmieć.
 MIN_WALL_MS = 1_577_836_800_000
@@ -186,11 +191,64 @@ def clean_markers(raw: Any) -> List[Dict[str, Any]]:
                 "category": category if important else None,
                 "legacy_category": legacy if important and legacy else None,
                 "comment": comment if important else None,
+                # Autor (sędzia, który dodał); scalanie na serwerze nadpisuje to
+                # prawdziwym nadawcą - wartość od klienta jest tylko podpowiedzią.
+                "judge_id": str(item.get("judge_id") or "")[:40] or None,
             }
         )
         if len(out) >= MAX_MARKERS:
             break
     return out
+
+
+def _tombstones(raw: Any, now_ms: int) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        marker_id = str(item.get("id") or "").strip()
+        at = _num(item.get("deleted_at"))
+        if _ID.match(marker_id) and at is not None and now_ms - at <= TOMBSTONE_TTL_MS:
+            out[marker_id] = int(at)
+    return out
+
+
+def merge_markers(
+    stored_raw: Any,
+    incoming: Any,
+    deleted: Any,
+    judge_id: Any,
+    now_ms: int,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Scala znaczniki z telefonu z zapisanymi (po `id`), nie podmienia listy.
+
+    Brak znacznika w `incoming` NIE jest usunięciem - kasuje tylko nagrobek
+    (`deleted`: lista id albo {"id"}). Starsze buildy wysyłają pełną listę bez
+    nagrobków i nie mogą skasować cudzych znaczników. Usunięty id nie wraca,
+    nawet gdy spóźniony telefon go jeszcze wysyła. Autor = pierwszy, który
+    dodał znacznik. Zwraca (żywe znaczniki, lista do zapisu z nagrobkami).
+    """
+    me = str(judge_id or "")[:40] or None
+    stored_list = stored_raw if isinstance(stored_raw, list) else []
+    tombs = _tombstones(stored_list, now_ms)
+    live: Dict[str, Dict[str, Any]] = {}
+    for m in clean_markers(stored_list):
+        live[m["id"]] = m
+    for item in deleted if isinstance(deleted, list) else []:
+        marker_id = str(item.get("id") if isinstance(item, Mapping) else item or "").strip()
+        if not _ID.match(marker_id):
+            continue
+        live.pop(marker_id, None)
+        tombs[marker_id] = tombs.get(marker_id) or now_ms
+    for m in clean_markers(incoming):
+        if m["id"] in tombs:
+            continue
+        old = live.get(m["id"])
+        m["judge_id"] = (old or {}).get("judge_id") or me
+        live[m["id"]] = m
+    markers = list(live.values())[-MAX_MARKERS:] if len(live) > MAX_MARKERS else list(live.values())
+    kept = sorted(tombs.items(), key=lambda kv: kv[1])[-MAX_TOMBSTONES:]
+    return markers, markers + [{"id": i, "deleted_at": at} for i, at in kept]
 
 
 def _clock(ms: int) -> str:

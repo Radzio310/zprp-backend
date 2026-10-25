@@ -26,6 +26,7 @@ from app.mentor_evaluation_tables import MIGRATIONS, define_tables
 from app.mentor_video_rules import (
     MAX_MARKERS,
     clean_markers,
+    merge_markers,
     clean_sync,
     mentor_states,
     should_mark_read,
@@ -228,7 +229,7 @@ def test_markers_categories_map_legacy_and_keep_ranges():
         {"id": "e", "video_s": 100, "important": True, "category": "hack"},
         {"id": "f", "video_s": 100, "end_s": 90},
         {"id": "g", "match_ms": 5000, "end_s": 90},
-        {"id": "h", "video_s": 100, "end_s": 100 + 601},
+        {"id": "h", "video_s": 100, "end_s": 100 + 1801},
     ]
     out = {m["id"]: m for m in clean_markers(raw)}
     assert out["a"]["category"] == "zla" and out["a"]["end_s"] == 122
@@ -237,6 +238,64 @@ def test_markers_categories_map_legacy_and_keep_ranges():
     assert out["d"]["legacy_category"] == "gwizdek"
     assert out["e"]["category"] == "dyskusja"
     assert out["f"]["end_s"] is None and out["g"]["end_s"] is None and out["h"]["end_s"] is None
+
+
+NOW = 1_800_000_000_000
+
+
+def _mk(i, **kw):
+    return {"id": i, "label": i, "video_s": 10, **kw}
+
+
+def test_scalanie_dwoch_telefonow_zachowuje_oba_znaczniki():
+    a, stored = merge_markers([], [_mk("a")], None, "J1", NOW)
+    b, stored = merge_markers(stored, [_mk("b")], None, "J2", NOW)
+    assert {m["id"]: m["judge_id"] for m in b} == {"a": "J1", "b": "J2"}
+    # Telefon 1 z nieaktualnym stanem (zna tylko "a") nie kasuje "b".
+    c, stored = merge_markers(stored, [_mk("a", label="zmieniony")], None, "J1", NOW)
+    assert {m["id"] for m in c} == {"a", "b"} and next(m for m in c if m["id"] == "a")["label"] == "zmieniony"
+    # Autor zostaje pierwszy, nawet gdy edytuje drugi telefon.
+    d, _ = merge_markers(stored, [_mk("a", label="x")], None, "J2", NOW)
+    assert next(m for m in d if m["id"] == "a")["judge_id"] == "J1"
+
+
+def test_stary_build_z_pelna_lista_bez_nagrobka_nic_nie_kasuje():
+    _, stored = merge_markers([], [_mk("a"), _mk("b")], None, "J1", NOW)
+    live, _ = merge_markers(stored, [_mk("a")], None, "J2", NOW)
+    assert {m["id"] for m in live} == {"a", "b"}
+    live, _ = merge_markers(stored, [], None, "J2", NOW)
+    assert {m["id"] for m in live} == {"a", "b"}
+
+
+def test_nagrobek_usuwa_i_nie_pozwala_wskrzesic():
+    _, stored = merge_markers([], [_mk("a"), _mk("b")], None, "J1", NOW)
+    live, stored = merge_markers(stored, [], ["a", {"id": "zz"}], "J1", NOW + 5)
+    assert [m["id"] for m in live] == ["b"]
+    assert any(i.get("id") == "a" and i.get("deleted_at") == NOW + 5 for i in stored)
+    # Spóźniony telefon wciąż wysyła "a" - nie wraca.
+    live, stored = merge_markers(stored, [_mk("a"), _mk("b")], None, "J2", NOW + 10)
+    assert [m["id"] for m in live] == ["b"]
+    # Odczyt zapisu (clean_markers) pomija nagrobki.
+    assert [m["id"] for m in clean_markers(stored)] == ["b"]
+    # Po 90 dniach nagrobek wygasa.
+    _, later = merge_markers(stored, [], None, "J1", NOW + 91 * 24 * 3600 * 1000)
+    assert not any(i.get("id") == "a" for i in later)
+
+
+def test_znacznik_bez_end_s_jest_widoczny_jako_klip():
+    from app import mentor_panel_rules as R
+
+    video = {"id": "v", "match_id": "m", "duration_s": 100, "sync_json": json.dumps({"match_start_s": 60, "half_minutes": 30})}
+    marks = clean_markers([
+        {"id": "p", "label": "Punkt", "video_s": 3, "type": "goal", "source_key": "ev1", "kind": "goal"},
+        {"id": "q", "label": "ProEl", "match_ms": 10000, "half": 1, "type": "penalty1", "kind": "penalty"},
+        {"id": "r", "label": "Zakres", "video_s": 5, "end_s": 905},
+    ])
+    clips = {c["marker_id"]: c for c in R.markers_as_clips(video, marks)}
+    assert clips["p"]["start_s"] == 0 and clips["p"]["end_s"] == 7 and clips["p"]["point"]
+    assert clips["p"]["type"] == "goal" and clips["p"]["event_key"] == "ev1" and clips["p"]["kind"] == "goal"
+    assert clips["q"]["start_s"] == 64 and clips["q"]["end_s"] == 74
+    assert clips["r"]["end_s"] == 905 and not clips["r"]["point"]
 
 
 def test_sync_is_bounded():
