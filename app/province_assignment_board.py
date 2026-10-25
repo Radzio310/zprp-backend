@@ -28,6 +28,7 @@ import asyncio
 import gzip
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -581,6 +582,44 @@ def _normalized_pending(items: list[PendingChange]) -> list[dict]:
     return out
 
 
+#: Ile sekund żyją wejścia dostępu (drużyny własne, przedrostki) - dane z terminarza, zmieniają się wolno.
+ACCESS_INPUTS_TTL = 300
+#: Zajętość sędziów w oknie wokół meczu - krótko, bo obsada zmienia się często (zapis i tak podbija wersję).
+BUSY_TTL = 60
+#: Gotowa odpowiedź „kandydaci" na ten sam mecz z tą samą kolejką i kontekstem.
+CANDIDATES_TTL = 45
+_CANDIDATE_ANSWERS: dict[str, tuple[int, float, Any]] = {}
+_CANDIDATE_ANSWERS_MAX = 300
+
+
+async def _access_inputs(key: str) -> tuple[Any, list, set]:
+    """Drużyny własne, ligi powierzone i przedrostki okręgu - trzy zapytania naraz, z pamięci, gdy świeże."""
+    from app.province_assignments import _managed_prefixes, own_prefixes_of
+    from app.assignment_access_data import own_teams
+
+    hit = C.get(key, None, "access_inputs", ttl=ACCESS_INPUTS_TTL)
+    if hit is not None:
+        return hit[2]
+    built = C.version(key)
+    value = tuple(await asyncio.gather(own_teams(key), _managed_prefixes(key), own_prefixes_of(key)))
+    C.put(key, None, "access_inputs", value, built_version=built)
+    return value
+
+
+async def _busy_window(key: str, roster: Any, date_from: Any, date_to: Any) -> tuple[dict, dict]:
+    """`load_busy` z pamięcią na minutę. Wpisy kopiujemy, bo wołający je zmienia."""
+    from app.assignment_context import load_busy
+
+    kind = f"busy|{date_from.isoformat()}|{date_to.isoformat()}"
+    hit = C.get(key, None, kind, ttl=BUSY_TTL)
+    if hit is None:
+        built = C.version(key)
+        busy, load = await load_busy(key, roster, date_from=date_from, date_to=date_to)
+        hit = C.put(key, None, kind, (busy, load), built_version=built)
+    busy, load = hit[2]
+    return {judge_id: list(items) for judge_id, items in busy.items()}, dict(load)
+
+
 @dataclass
 class Prepared:
     """Jeden mecz gotowy do oceny: stan z kolejką, potrzeby i świat Automatu."""
@@ -624,23 +663,24 @@ async def _prepare(
     kolejka (`pending`) liczy się jak już zapisana - zajmuje gniazda, terminy
     i liczniki równego podziału w sezonie i w miesiącu.
     """
-    from app.assignment_context import build_context, inactive_judges, load_busy, need_from_state
+    from app.assignment_context import build_context, inactive_judges, need_from_state
     from app.collision_rules import venue_of
     from app.offtime_rules import match_moment
 
-    row = await _match_row(key, match_id)
-    world = await _world(key)
+    # Wiersz meczu, świat okręgu i wejścia dostępu to niezależne odczyty - naraz.
+    row, world, (teams, managed, own_prefixes) = await asyncio.gather(
+        _match_row(key, match_id), _world(key), _access_inputs(key)
+    )
     roster, book = world.roster, world.book
     if not roster.judges:
         raise HTTPException(400, "Okręg nie ma jeszcze listy sędziów")
 
     state = state_dict(row["state_json"]) or {}
-    from app.assignment_access_data import own_teams, resolve_access
-    from app.province_assignments import _managed_prefixes, own_prefixes_of
+    from app.assignment_access_data import resolve_access
     from app.assignment_live_access import verify_matches
     access = resolve_access(state, _s(state.get("RozgrywkiCode") or row["match_code"]),
-                            await own_teams(key), season=_s(row["season"]),
-                            managed=await _managed_prefixes(key), own=await own_prefixes_of(key), province=key)
+                            teams, season=_s(row["season"]),
+                            managed=managed, own=own_prefixes, province=key)
     state = {**state, "assignment_access": access}
     if access["recommended"]:
         state = (await verify_matches(key, {match_id: state}))[match_id]
@@ -672,13 +712,12 @@ async def _prepare(
     # Kolizje dnia: mecze sędziów w oknie wokół tego meczu.
     moment = need.moment
     center = need.day or (moment.date() if moment else _now().date())
-    busy, load = await load_busy(
+    busy, load = await _busy_window(
         key,
         roster,
-        date_from=center - timedelta(days=SUGGEST_WINDOW_DAYS),
-        date_to=center + timedelta(days=SUGGEST_WINDOW_DAYS),
+        center - timedelta(days=SUGGEST_WINDOW_DAYS),
+        center + timedelta(days=SUGGEST_WINDOW_DAYS),
     )
-    busy = {judge_id: list(items) for judge_id, items in busy.items()}
 
     # Kolejka na INNYCH meczach: kto wchodzi, zajmuje termin; kto schodzi, zwalnia.
     others = [item for item in pending if _s(item.match_id) and _s(item.match_id) != match_id]
@@ -847,11 +886,30 @@ async def candidates(payload: CandidatesRequest):
     wolno obsadzić), `tight` (ten sam dzień, zdąży), `free`. `pending` jak
     w `/suggest`. Bez zapisu.
     """
+    key = require_province(payload.province)
+    match_id = _s(payload.match_id)
+    started = time.perf_counter()
+    # Ten sam mecz z tą samą kolejką i kontekstem - odpowiedź z pamięci (wersja okręgu ją unieważnia).
+    answer_key = json.dumps(
+        [key, match_id, sorted(_normalized_pending(payload.pending), key=lambda i: (i["match_id"], i["slot"], i["judge_id"])),
+         payload.context.model_dump() if payload.context is not None else None],
+        sort_keys=True, default=str, ensure_ascii=False)
+    cached = _CANDIDATE_ANSWERS.get(answer_key)
+    if cached and cached[0] == C.version(key) and time.time() - cached[1] < CANDIDATES_TTL:
+        return cached[2]
+    built_version = C.version(key)
+    result = await _build_candidates(key, match_id, payload)
+    _CANDIDATE_ANSWERS[answer_key] = (built_version, time.time(), result)
+    while len(_CANDIDATE_ANSWERS) > _CANDIDATE_ANSWERS_MAX:
+        _CANDIDATE_ANSWERS.pop(next(iter(_CANDIDATE_ANSWERS)))
+    logger.info("obsada %s/%s: kandydaci w %.0f ms", key, match_id, (time.perf_counter() - started) * 1000)
+    return result
+
+
+async def _build_candidates(key: str, match_id: str, payload: "CandidatesRequest") -> dict:
     from app.assignment_auto import FIELD, TABLE, describe_candidates
     from app.assignment_board_rules import display_name
 
-    key = require_province(payload.province)
-    match_id = _s(payload.match_id)
     prepared = await _prepare(key, match_id, payload.pending, override=payload.context)
     need, ctx, world = prepared.need, prepared.ctx, prepared.world
     note = None
@@ -873,9 +931,15 @@ async def candidates(payload: CandidatesRequest):
                 "note": "Mecz dostępny do ręcznej obsady; brak sugestii w tym zakresie.", "items": []}
     # Osobna kolejność dla zakładek „Boisko" i „Stolik" - ta sama ocena, co
     # w Automacie, ale liczona dla danej roli.
+    # `views` to już ocena dla tej grupy, której meczowi brakuje - drugą liczymy dopiero teraz.
+    default_kind = FIELD if (need.field_needed or not need.table_needed) else TABLE
+    other_kind = TABLE if default_kind == FIELD else FIELD
     rank_by_kind = {
-        kind: {view.judge_id: view.rank for view in describe_candidates(ctx, need, off_reason=off_reason, kind=kind)}
-        for kind in (FIELD, TABLE)
+        default_kind: {view.judge_id: view.rank for view in views},
+        other_kind: {
+            view.judge_id: view.rank
+            for view in describe_candidates(ctx, need, off_reason=off_reason, kind=other_kind)
+        },
     }
     month = need.month
     items = []
@@ -935,9 +999,8 @@ async def warm(payload: WarmRequest):
     formularze naraz kontem monitora i nigdy niczego nie zapisuje w ZPRP.
     Do rozgrzania kwalifikują się tylko mecze z własną drużyną (`recommended`).
     """
-    from app.assignment_access_data import own_teams, resolve_access
+    from app.assignment_access_data import resolve_access
     from app.assignment_live_access import warm_monitor
-    from app.province_assignments import _managed_prefixes, own_prefixes_of
 
     key = require_province(payload.province)
     ids = [mid for mid in dict.fromkeys(_s(m) for m in payload.match_ids) if mid][:8]
@@ -947,7 +1010,7 @@ async def warm(payload: WarmRequest):
         select(province_matches).where(and_(
             province_matches.c.province.in_(spellings(key) or [key]),
             province_matches.c.match_id.in_(ids))))
-    teams, managed, own = await own_teams(key), await _managed_prefixes(key), await own_prefixes_of(key)
+    teams, managed, own = await _access_inputs(key)
     eligible = set()
     for row in rows:
         state = state_dict(row["state_json"]) or {}

@@ -112,6 +112,44 @@ async def _login_zprp(client: AsyncClient, username: str, password: str) -> Dict
     return dict(resp_login.cookies)
 
 
+# Sesje ZPRP kont panelu obsady: krótka pamięć, żeby kolejne otwarcia meczów
+# nie płaciły za logowanie za każdym razem. Wpis żyje chwilę i znika przy
+# pierwszej odmowie ZPRP (patrz `obsada_match_form`).
+_SESSION_TTL_SECONDS = 240.0
+_SESSION_MAX = 200
+_SESSIONS: Dict[str, Tuple[float, Dict[str, str]]] = {}
+
+
+def _session_key(username: str, password: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(f"{username}\x00{password}".encode("utf-8")).hexdigest()
+
+
+def _session_get(key: str) -> Optional[Dict[str, str]]:
+    import time
+
+    entry = _SESSIONS.get(key)
+    if entry is None:
+        return None
+    if time.monotonic() - entry[0] > _SESSION_TTL_SECONDS:
+        _SESSIONS.pop(key, None)
+        return None
+    return dict(entry[1])
+
+
+def _session_put(key: str, cookies: Dict[str, str]) -> None:
+    import time
+
+    if len(_SESSIONS) >= _SESSION_MAX:
+        _SESSIONS.pop(next(iter(_SESSIONS)), None)
+    _SESSIONS[key] = (time.monotonic(), dict(cookies))
+
+
+def _session_drop(key: str) -> None:
+    _SESSIONS.pop(key, None)
+
+
 def _log_html(prefix: str, html: str) -> None:
     try:
         soup = BeautifulSoup(html, "html.parser")
@@ -761,9 +799,6 @@ async def obsada_match_form(
         raise HTTPException(400, f"Decryption error: {e}")
 
     async with AsyncClient(base_url=settings.ZPRP_BASE_URL, follow_redirects=True, timeout=60.0) as client:
-        cookies = await _login_zprp(client, user_plain, pass_plain)
-        logger.info("ZPRP obsada/match-form: login ok IdZawody=%s", payload.IdZawody)
-
         form_data = {
             "IdZawody": payload.IdZawody,
             "akcja": "UstawSedziow",
@@ -778,16 +813,36 @@ async def obsada_match_form(
         if payload.off is not None:
             form_data["off"] = payload.off
 
-        resp, html = await fetch_with_correct_encoding(
-            client,
-            "/zawody_UstawSedziow.php",
-            method="POST",
-            data=form_data,
-            cookies=cookies,
-        )
-        _log_html("obsada/match-form", html)
+        async def read_form(cookies: Dict[str, str]) -> Dict[str, Any]:
+            _resp, html = await fetch_with_correct_encoding(
+                client,
+                "/zawody_UstawSedziow.php",
+                method="POST",
+                data=form_data,
+                cookies=cookies,
+            )
+            _log_html("obsada/match-form", html)
+            return await asyncio.to_thread(_parse_referee_form, html)
 
-        parsed = await asyncio.to_thread(_parse_referee_form, html)
+        # Logowanie do ZPRP to osobne, wolne zapytanie - sesję tego konta
+        # trzymamy chwilę i używamy ponownie. Gdy ZPRP ją unieważnił (formularz
+        # nie potwierdza meczu albo nie da się go odczytać), logujemy się od nowa.
+        session_key = _session_key(user_plain, pass_plain)
+        reused = _session_get(session_key)
+        parsed: Optional[Dict[str, Any]] = None
+        if reused is not None:
+            try:
+                parsed = await read_form(reused)
+            except Exception:  # noqa: BLE001 - zła sesja: logujemy się od nowa
+                parsed = None
+            if not parsed or str(parsed.get("IdZawody") or "") != str(payload.IdZawody):
+                _session_drop(session_key)
+                parsed = None
+        if parsed is None:
+            cookies = await _login_zprp(client, user_plain, pass_plain)
+            logger.info("ZPRP obsada/match-form: login ok IdZawody=%s", payload.IdZawody)
+            _session_put(session_key, cookies)
+            parsed = await read_form(cookies)
         # Przy okazji zapamietujemy uprawnienia do szczebli - litery w nawiasach
         # przy nazwisku to jedyne miejsce, w ktorym ZPRP je podaje, a automat
         # obsady bez nich nie odrozni stolika ligowego od okregowego.
