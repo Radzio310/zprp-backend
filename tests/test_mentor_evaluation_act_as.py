@@ -36,6 +36,15 @@ def request(act_as, judge="m1"):
                     "query_string": f"act_as={act_as}".encode(), "path_params": {"match_id": judge}})
 
 
+def request_as_panel(env, act_as):
+    async def decode(_request, _token):
+        return {"judge_id": ADMIN}
+
+    env.auth._decode_bearer = decode
+    return Request({"type": "http", "method": "GET", "headers": [(b"authorization", b"Bearer x")],
+                    "query_string": f"act_as={act_as}".encode(), "path": "/"})
+
+
 def base(judge_id, name, admin):
     return FakeActor({"judge_id": judge_id}, {"full_name": name}, admin)
 
@@ -75,3 +84,26 @@ def test_odmowy(env):
         return non_admin, not_mentor, unknown
 
     assert env.run(go) == ((403, "ACT_AS_FORBIDDEN"), (403, "ACT_AS_NOT_MENTOR"), (403, "ACT_AS_UNKNOWN"))
+
+
+def test_trasy_panelu_ocena_z_sesji(env):
+    from tests.mentor_panel_support import PAIR
+
+    async def go():
+        P = env.panel
+        mentor = await env.actor(MENTOR)
+        before = await P.match_evaluation(PAIR, "m1", mentor)
+        saved = await P.save_match_evaluation(PAIR, "m1", P.EvaluationBody(sheet=sheet()), mentor)
+        published = await P.publish_match_evaluation(PAIR, "m1", P.EvaluationBody(sheet=sheet()), mentor)
+        wrong = await denied(P.match_evaluation(PAIR, "m5", mentor))
+        admin = await env.actor(ADMIN)
+        admin.acted_by, admin.acted_by_name = None, None
+        as_mentor = await env.auth.mentor_actor(request_as_panel(env, MENTOR))
+        by_admin = await P.match_evaluation(PAIR, "m1", as_mentor)
+        return before, saved, published, wrong, by_admin
+
+    before, saved, published, wrong, by_admin = env.run(go)
+    assert before["can_rate"] is True and before["mine"] is None
+    assert saved["status"] == "draft" and published["status"] == "published" and published["acted_by"] is None
+    assert wrong == (404, "MATCH_NOT_FOUND")
+    assert by_admin["mine"]["author"]["judge_id"] == MENTOR

@@ -329,6 +329,54 @@ class FlagBody(BaseModel):
     note: Optional[str] = Field(default=None, max_length=2000)
 
 
+# ─── Ocena mentora z przeglądarki (nakładki na `mentor_evaluations`) ────────
+
+
+class EvaluationBody(BaseModel):
+    sheet: Dict[str, Any] = Field(default_factory=dict)
+    together: bool = False
+    co_author_id: Optional[str] = Field(default=None, max_length=40)
+
+
+def _evaluation_actor(actor: Actor):
+    """Aktor sesji panelu w kształcie, którego oczekuje `mentor_evaluations` (z `acted_by` przy act_as)."""
+    from app.mentor_evaluations import Actor as MarketActor
+
+    row = {"province": actor.province, "full_name": actor.display_name, "photo_url": actor.photo_url, "badges": actor.badges}
+    out = MarketActor({"judge_id": actor.judge_id}, row, actor.is_admin)
+    out.acted_by, out.acted_by_name = actor.acted_by, actor.acted_by_name
+    return out
+
+
+async def _evaluation_ctx(pair_id: str, match_id: str, actor: Actor, action: str) -> str:
+    ctx = await C.pair_context(pair_id, actor, action=action)
+    return (await C.match_card(ctx, match_id))["match_id"]
+
+
+@router.get("/pairs/{pair_id}/matches/{match_id}/evaluation")
+async def match_evaluation(pair_id: str, match_id: str, actor: Actor = Depends(mentor_actor)):
+    from app import mentor_evaluations as ME
+
+    real_id = await _evaluation_ctx(pair_id, match_id, actor, "view")
+    return await ME.for_match(real_id, _evaluation_actor(actor))
+
+
+@router.put("/pairs/{pair_id}/matches/{match_id}/evaluation")
+async def save_match_evaluation(pair_id: str, match_id: str, body: "EvaluationBody", actor: Actor = Depends(mentor_actor)):
+    from app import mentor_evaluations as ME
+
+    real_id = await _evaluation_ctx(pair_id, match_id, actor, "create")
+    return await ME.save(real_id, ME.SaveRequest(**body.model_dump()), _evaluation_actor(actor), publish=False)
+
+
+@router.post("/pairs/{pair_id}/matches/{match_id}/evaluation/publish")
+async def publish_match_evaluation(pair_id: str, match_id: str, body: "EvaluationBody", actor: Actor = Depends(mentor_actor)):
+    from app import mentor_evaluations as ME
+
+    real_id = await _evaluation_ctx(pair_id, match_id, actor, "create")
+    return await ME.save(real_id, ME.SaveRequest(**body.model_dump()), _evaluation_actor(actor), publish=True)
+
+
 @router.post("/pairs/{pair_id}/matches/{match_id}/sheet/seen")
 async def sheet_seen(pair_id: str, match_id: str, actor: Actor = Depends(mentor_actor)):
     """Oznacza wysłane oceny mentora z tego meczu jako obejrzane przeze mnie (gasi kropkę)."""
