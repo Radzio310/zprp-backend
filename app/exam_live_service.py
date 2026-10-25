@@ -327,10 +327,12 @@ async def _finish(ls: LiveStore, s: Mapping[str, Any], now: datetime) -> None:
 
 
 async def tick(ls: LiveStore, session_id: str, now: datetime) -> bool:
-    """Leniwy upływ czasu: po terminie pytania (gdy auto_reveal) przechodzimy do reveal."""
+    """Leniwy upływ czasu: po terminie pytania (gdy auto_reveal) przechodzimy do reveal.
+    Odsłaniamy dopiero po tolerancji `ANSWER_GRACE_S` - w tym oknie telefony i przeglądarki
+    dosyłają same zaznaczone, niezatwierdzone odpowiedzi (koniec czasu = wysłanie)."""
     async with lock_for(session_id):
         s = await session_row(ls, session_id)
-        if s["phase"] == "question" and s["config"]["auto_reveal"] and s["deadline_at"] and now >= s["deadline_at"]:
+        if s["phase"] == "question" and s["config"]["auto_reveal"] and s["deadline_at"] and now >= s["deadline_at"] + timedelta(seconds=L.ANSWER_GRACE_S):
             await _reveal(ls, s, now)
             return True
     return False
@@ -343,7 +345,7 @@ async def control(ls: LiveStore, who: S.Who, session_id: str, action: str, now: 
         s = await session_row(ls, session_id)
         if s["host_id"] != who.judge_id and not (who.is_admin and action == "end"):
             raise ExamError("LIVE_NOT_HOST", "Fazami tej sesji steruje tylko jej prowadzący.", 403)
-        if s["phase"] == "question" and s["config"]["auto_reveal"] and s["deadline_at"] and now >= s["deadline_at"]:
+        if s["phase"] == "question" and s["config"]["auto_reveal"] and s["deadline_at"] and now >= s["deadline_at"] + timedelta(seconds=L.ANSWER_GRACE_S):
             await _reveal(ls, s, now)
             s = await session_row(ls, session_id)
         expect = expect or {}

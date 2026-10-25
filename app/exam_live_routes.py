@@ -191,7 +191,8 @@ def build_router(deps: LiveDeps) -> APIRouter:
     def arm_timer(state: Dict[str, Any]) -> None:
         s = state["session"]
         if s["phase"] == "question" and s["deadline_at"] and s["config"]["auto_reveal"]:
-            delay = (s["deadline_at"] - deps.now()).total_seconds() + 0.05
+            # Odsłonięcie po terminie + tolerancja: spóźnione auto-wysyłki z końca czasu jeszcze wchodzą.
+            delay = (s["deadline_at"] - deps.now()).total_seconds() + L.ANSWER_GRACE_S + 0.05
 
             async def fire() -> None:
                 if await V.tick(ls(), s["id"], deps.now()):

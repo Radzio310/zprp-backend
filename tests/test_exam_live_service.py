@@ -127,12 +127,42 @@ async def test_leniwy_tick_odslania_po_terminie(ls):
     sid, _ = await new_session(ls)
     await V.control(ls, HOST, sid, "next", T0)
     assert await V.tick(ls, sid, T0 + timedelta(seconds=19)) is False
-    assert await V.tick(ls, sid, T0 + timedelta(seconds=21)) is True
+    # po terminie (20 s) czekamy jeszcze ANSWER_GRACE_S na auto-wysyłki z końca czasu
+    assert await V.tick(ls, sid, T0 + timedelta(seconds=21)) is False
+    assert await V.tick(ls, sid, T0 + timedelta(seconds=20 + L.ANSWER_GRACE_S + 0.1)) is True
     assert (await V.session_row(ls, sid))["phase"] == "reveal"
     await V.patch_session(ls, HOST, sid, {"auto_reveal": False}, T0)  # w reveal nic nie zmienia
     sid2, _ = await new_session(ls, config={"auto_reveal": False})
     await V.control(ls, HOST, sid2, "next", T0)
     assert await V.tick(ls, sid2, T0 + timedelta(minutes=5)) is False
+
+
+async def test_auto_wysylka_z_konca_czasu_w_tolerancji(ls):
+    """Koniec czasu: telefon dosyła zaznaczoną, niezatwierdzoną odpowiedź. Serwer przyjmuje ją do
+    ANSWER_GRACE_S po terminie (zegar serwera) i liczy jak zwykłą odpowiedź (tryb speed: minimum 500)."""
+    sid, _ = await new_session(ls)
+    p = await join_players(ls, sid, 3)
+    await V.control(ls, HOST, sid, "next", T0)
+    late = T0 + timedelta(seconds=20 + L.ANSWER_GRACE_S - 0.3)
+    res = await V.submit_answer(ls, sid, p[0]["id"], [CORRECT["q1-1"]], late)
+    assert res["accepted"] is True
+    state = await V.load_state(ls, sid, late)
+    assert state["session"]["phase"] == "question"
+    row = state["answers"][p[0]["id"]]
+    assert row["points"] == 500
+    too_late = T0 + timedelta(seconds=20 + L.ANSWER_GRACE_S + 0.2)
+    code = await code_of(ls, V.submit_answer(ls, sid, p[1]["id"], ["a"], too_late))
+    assert code in ("LIVE_TIME_UP", "LIVE_NOT_ACCEPTING")
+    assert (await V.session_row(ls, sid))["phase"] == "reveal"
+
+
+async def test_auto_wysylka_odrzucona_w_pauzie(ls):
+    sid, _ = await new_session(ls)
+    p = await join_players(ls, sid, 2)
+    await V.control(ls, HOST, sid, "next", T0)
+    await V.control(ls, HOST, sid, "pause", T0 + timedelta(seconds=5))
+    assert await code_of(ls, V.submit_answer(ls, sid, p[0]["id"], ["a"], T0 + timedelta(seconds=21))) == "LIVE_PAUSED"
+    assert await V.tick(ls, sid, T0 + timedelta(minutes=2)) is False
 
 
 # --- ocena i punkty ---------------------------------------------------------
