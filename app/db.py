@@ -4531,6 +4531,13 @@ from app.assignment_board_tables import define_tables as _define_board_tables
     province_zprp_write_journal,
 ) = _define_board_tables(metadata)
 
+# Oferty obsadowego na giełdzie meczów (25.10.2026) - schemat w osobnym module.
+from app.match_market_crew_tables import define_tables as _define_crew_market_tables
+(
+    match_market_crew_offers,
+    match_market_crew_claims,
+) = _define_crew_market_tables(metadata)
+
 # Role sędziów z listy ZPRP (Sędzia / Delegat / Stolikowy) dla Automatu obsady
 # - schemat w osobnym module.
 from app.assignment_role_tables import define_tables as _define_role_tables

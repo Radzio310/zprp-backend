@@ -57,6 +57,7 @@ from app.training_spk import (
     router as training_spk_router,
 )
 from app.match_market import router as match_market_router
+from app.match_market_crew import router as match_market_crew_router
 from app.match_bombs import router as match_bombs_router
 from app.match_bombs import panel_router as match_bombs_panel_router
 from app.reports import router as reports_router
@@ -323,6 +324,7 @@ app.include_router(training_spk_admin_router)
 # Giełda meczów. Własny prefiks `/match-market`, więc nie wchodzi pod żaden
 # catch-all - kolejność nie ma tu znaczenia, ale trzyma się rodziny modułów BAZA.
 app.include_router(match_market_router)
+app.include_router(match_market_crew_router)
 app.include_router(match_bombs_router)
 app.include_router(match_bombs_panel_router)
 app.include_router(reports_router)
