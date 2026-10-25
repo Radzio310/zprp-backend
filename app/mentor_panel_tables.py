@@ -337,4 +337,6 @@ MIGRATIONS = (
     "CREATE INDEX IF NOT EXISTS ix_zprp_public_matches_referee_2 ON zprp_public_matches (referee_2_id)",
     "CREATE INDEX IF NOT EXISTS ix_zprp_archive_matches_ref_first ON zprp_archive_matches ((slim_json->'refs'->>'first'))",
     "CREATE INDEX IF NOT EXISTS ix_zprp_archive_matches_ref_second ON zprp_archive_matches ((slim_json->'refs'->>'second'))",
+    # Arkusze delegatów pary pytają `referee_ids @> [a] AND referee_ids @> [b]` - bez GIN to skan całej tabeli.
+    "CREATE INDEX IF NOT EXISTS ix_delegate_evaluations_referee_ids ON delegate_evaluations USING gin (referee_ids jsonb_path_ops)",
 )

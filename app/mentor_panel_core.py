@@ -482,13 +482,15 @@ async def pair_match_cards(judge_ids: Iterable[str]) -> List[Dict[str, Any]]:
     if cached and time.monotonic() - cached[0] < MATCH_CACHE_S:
         return [dict(c, home=dict(c["home"]), away=dict(c["away"])) for c in cached[1]]
     a, b = ids
-    sources = []
-    for loader in (_public_cards, _province_cards, _archive_cards):
+    async def load(loader):
         try:
-            sources.append(await loader(a, b))
+            return await loader(a, b)
         except Exception:  # noqa: BLE001 - jedno źródło nie zabiera reszty
             logger.warning("mentor: źródło meczów %s nieudane", loader.__name__, exc_info=True)
-            sources.append([])
+            return []
+
+    # Trzy niezależne źródła (hurtownia, monitor okręgu, archiwum) naraz.
+    sources = list(await asyncio.gather(*(load(l) for l in (_public_cards, _province_cards, _archive_cards))))
     cards = R.merge_matches(*sources)
     _match_cache[key] = (time.monotonic(), cards)
     if len(_match_cache) > 500:
@@ -521,25 +523,23 @@ async def mentor_sheet_rows(pair_key: str) -> List[Dict[str, Any]]:
 
 
 async def unread_threads(pair_id: str, judge_id: str) -> Dict[str, Optional[str]]:
-    """Wątki z odpowiedziami innych po moim ostatnim przeczytaniu: `{thread_id: match_id}`."""
+    """Wątki z odpowiedziami innych po moim ostatnim przeczytaniu: `{thread_id: match_id}`.
+
+    Jedno zapytanie (GROUP BY po wątku + LEFT JOIN do moich odczytów) zamiast
+    wczytywania wszystkich komentarzy pary do Pythona.
+    """
     me = R.s(judge_id)
-    last: Dict[str, Any] = {}
-    for c in await rows(select(mentor_comments.c.thread_id, mentor_comments.c.created_at)
-                        .select_from(mentor_comments.join(mentor_threads, mentor_threads.c.id == mentor_comments.c.thread_id))
-                        .where(mentor_threads.c.pair_id == pair_id).where(mentor_comments.c.deleted_at.is_(None))
-                        .where(mentor_comments.c.author_id != me)):
-        at = R.aware(c.get("created_at"))
-        if at and (c["thread_id"] not in last or at > last[c["thread_id"]]):
-            last[c["thread_id"]] = at
-    if not last:
-        return {}
-    reads = {r["thread_id"]: R.aware(r.get("seen_at")) for r in await rows(
-        select(mentor_thread_reads).where(mentor_thread_reads.c.judge_id == me).where(mentor_thread_reads.c.thread_id.in_(list(last))))}
-    out = {tid: at for tid, at in last.items() if reads.get(tid) is None or at > reads[tid]}
-    if not out:
-        return {}
-    found = await rows(select(mentor_threads.c.id, mentor_threads.c.match_id).where(mentor_threads.c.id.in_(list(out))))
-    return {r["id"]: r.get("match_id") for r in found}
+    last = (select(mentor_comments.c.thread_id.label("thread_id"), mentor_threads.c.match_id.label("match_id"),
+                   func.max(mentor_comments.c.created_at).label("last_at"))
+            .select_from(mentor_comments.join(mentor_threads, mentor_threads.c.id == mentor_comments.c.thread_id))
+            .where(mentor_threads.c.pair_id == pair_id).where(mentor_comments.c.deleted_at.is_(None))
+            .where(mentor_comments.c.author_id != me)
+            .group_by(mentor_comments.c.thread_id, mentor_threads.c.match_id)).subquery()
+    query = (select(last.c.thread_id, last.c.match_id)
+             .select_from(last.outerjoin(mentor_thread_reads, and_(mentor_thread_reads.c.thread_id == last.c.thread_id,
+                                                                   mentor_thread_reads.c.judge_id == me)))
+             .where(or_(mentor_thread_reads.c.seen_at.is_(None), last.c.last_at > mentor_thread_reads.c.seen_at)))
+    return {r["thread_id"]: r.get("match_id") for r in await rows(query)}
 
 
 async def unseen_sheets(pair_key: str, judge_id: str) -> Dict[str, str]:
@@ -570,52 +570,76 @@ async def enrich_cards(ctx: Dict[str, Any], cards: List[Dict[str, Any]]) -> List
         return cards
     ids = [c["match_id"] for c in cards]
     pair_id, key = ctx["pair_id"], ctx["pair_key"]
-    flags = {r["match_id"]: r for r in await rows(select(mentor_match_flags).where(mentor_match_flags.c.pair_id == pair_id)
-                                                     .where(mentor_match_flags.c.match_id.in_(ids)))}
-    videos: Dict[str, Dict[str, int]] = {}
-    for v in await rows(select(mentor_match_videos.c.match_id, mentor_match_videos.c.kind)
-                        .where(mentor_match_videos.c.match_id.in_(ids)).where(mentor_match_videos.c.pair_key == key)):
-        entry = videos.setdefault(R.s(v["match_id"]), {"count": 0, "uploads": 0})
-        entry["count"] += 1
-        entry["uploads"] += 1 if v.get("kind") == "upload" else 0
-    clips: Dict[str, int] = {}
-    for c in await rows(select(mentor_clips.c.match_id, func.count().label("n")).where(mentor_clips.c.pair_id == pair_id)
-                        .where(mentor_clips.c.deleted_at.is_(None)).where(mentor_clips.c.match_id.in_(ids))
-                        .group_by(mentor_clips.c.match_id)):
-        clips[R.s(c["match_id"])] = int(c["n"] or 0)
-    threads: Dict[str, Dict[str, int]] = {}
-    for t in await rows(select(mentor_threads.c.match_id, mentor_threads.c.status).where(mentor_threads.c.pair_id == pair_id)
-                        .where(mentor_threads.c.match_id.in_(ids))):
-        entry = threads.setdefault(R.s(t["match_id"]), {"open": 0, "total": 0})
-        entry["total"] += 1
-        entry["open"] += 1 if t.get("status") == "open" else 0
-    delegate_points: Dict[str, Optional[float]] = {}
-    try:
-        for d in await delegate_sheet_rows(ctx["judge_ids"], ids):
-            delegate_points[R.s(d["match_id"])] = R.sheet_points(R.json_value(d.get("evaluation_json"), {}))
-    except Exception:  # noqa: BLE001
-        logger.warning("mentor: arkusze delegatów nieczytelne", exc_info=True)
-    mentor_points: Dict[str, Optional[float]] = {}
-    for m in await mentor_sheet_rows(key):
-        mentor_points[R.s(m["match_id"])] = m.get("points")
-    proel_ids, proel_codes = set(), set()
-    codes = sorted({R.s(c.get("match_code")) for c in cards if R.s(c.get("match_code"))})
-    try:
-        cond = [saved_matches.c.zprp_match_id.in_(ids)]
-        if codes:
-            cond.append(saved_matches.c.match_number.in_(codes))
-        for p in await rows(select(saved_matches.c.match_number, saved_matches.c.zprp_match_id).where(or_(*cond))):
-            if R.s(p.get("zprp_match_id")):
-                proel_ids.add(R.s(p["zprp_match_id"]))
-            else:
-                proel_codes.add(R.s(p.get("match_number")))
-    except Exception:  # noqa: BLE001
-        logger.warning("mentor: odczyt protokołów ProEla nieudany", exc_info=True)
     me = ctx["actor"].judge_id
+
+    async def load_flags() -> Dict[str, Any]:
+        return {r["match_id"]: r for r in await rows(select(mentor_match_flags).where(mentor_match_flags.c.pair_id == pair_id)
+                                                     .where(mentor_match_flags.c.match_id.in_(ids)))}
+
+    async def load_videos() -> Dict[str, Dict[str, int]]:
+        out: Dict[str, Dict[str, int]] = {}
+        for v in await rows(select(mentor_match_videos.c.match_id, mentor_match_videos.c.kind)
+                            .where(mentor_match_videos.c.match_id.in_(ids)).where(mentor_match_videos.c.pair_key == key)):
+            entry = out.setdefault(R.s(v["match_id"]), {"count": 0, "uploads": 0})
+            entry["count"] += 1
+            entry["uploads"] += 1 if v.get("kind") == "upload" else 0
+        return out
+
+    async def load_clips() -> Dict[str, int]:
+        return {R.s(c["match_id"]): int(c["n"] or 0) for c in await rows(
+            select(mentor_clips.c.match_id, func.count().label("n")).where(mentor_clips.c.pair_id == pair_id)
+            .where(mentor_clips.c.deleted_at.is_(None)).where(mentor_clips.c.match_id.in_(ids))
+            .group_by(mentor_clips.c.match_id))}
+
+    async def load_threads() -> Dict[str, Dict[str, int]]:
+        out: Dict[str, Dict[str, int]] = {}
+        for t in await rows(select(mentor_threads.c.match_id, mentor_threads.c.status).where(mentor_threads.c.pair_id == pair_id)
+                            .where(mentor_threads.c.match_id.in_(ids))):
+            entry = out.setdefault(R.s(t["match_id"]), {"open": 0, "total": 0})
+            entry["total"] += 1
+            entry["open"] += 1 if t.get("status") == "open" else 0
+        return out
+
+    async def load_delegate() -> Dict[str, Optional[float]]:
+        out: Dict[str, Optional[float]] = {}
+        try:
+            for d in await delegate_sheet_rows(ctx["judge_ids"], ids):
+                out[R.s(d["match_id"])] = R.sheet_points(R.json_value(d.get("evaluation_json"), {}))
+        except Exception:  # noqa: BLE001
+            logger.warning("mentor: arkusze delegatów nieczytelne", exc_info=True)
+        return out
+
+    async def load_mentor() -> Dict[str, Optional[float]]:
+        return {R.s(m["match_id"]): m.get("points") for m in await mentor_sheet_rows(key)}
+
+    codes = sorted({R.s(c.get("match_code")) for c in cards if R.s(c.get("match_code"))})
+
+    async def load_proel() -> Tuple[set, set]:
+        proel_ids, proel_codes = set(), set()
+        try:
+            cond = [saved_matches.c.zprp_match_id.in_(ids)]
+            if codes:
+                cond.append(saved_matches.c.match_number.in_(codes))
+            for p in await rows(select(saved_matches.c.match_number, saved_matches.c.zprp_match_id).where(or_(*cond))):
+                if R.s(p.get("zprp_match_id")):
+                    proel_ids.add(R.s(p["zprp_match_id"]))
+                else:
+                    proel_codes.add(R.s(p.get("match_number")))
+        except Exception:  # noqa: BLE001
+            logger.warning("mentor: odczyt protokołów ProEla nieudany", exc_info=True)
+        return proel_ids, proel_codes
+
+    async def load_sheet_unseen() -> set:
+        return set((await unseen_sheets(key, me)).values()) if me in ctx["judge_ids"] else set()
+
+    # Niezależne odczyty równolegle (każdy na własnym połączeniu z puli).
+    (flags, videos, clips, threads, delegate_points, mentor_points, (proel_ids, proel_codes),
+     unread, sheet_unseen) = await asyncio.gather(
+        load_flags(), load_videos(), load_clips(), load_threads(), load_delegate(), load_mentor(), load_proel(),
+        unread_threads(pair_id, me), load_sheet_unseen())
     unseen_by_match: Dict[str, int] = {}
-    for mid in (await unread_threads(pair_id, me)).values():
+    for mid in unread.values():
         unseen_by_match[R.s(mid)] = unseen_by_match.get(R.s(mid), 0) + 1
-    sheet_unseen = set((await unseen_sheets(key, me)).values()) if me in ctx["judge_ids"] else set()
     for card in cards:
         match_id = card["match_id"]
         flag = flags.get(match_id) or {}

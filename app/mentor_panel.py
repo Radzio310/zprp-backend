@@ -14,6 +14,7 @@ Każdy zapis podbija `mentor_panels.rev` i zwraca świeży obiekt.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -123,23 +124,42 @@ async def list_pairs(actor: Actor = Depends(mentor_actor)):
             for row in await C.rows(query):
                 counts[row["pair_id"]][key] = int(row["n"] or 0)
     now = C.now()
-    cards = []
-    for pair in pairs:
+
+    async def build(pair: Dict[str, Any]) -> Dict[str, Any]:
         enabled = bool((panels.get(pair["id"]) or {}).get("enabled"))
-        matches = await C.pair_match_cards(pair["judge_ids"])
+        live = enabled and pair["role"] in ("pair", "mentor")
+
+        async def nothing() -> int:
+            return 0
+
+        async def no_dots() -> Dict[str, int]:
+            return {"unread_threads": 0, "new_sheets": 0}
+
+        matches, unread, dots = await asyncio.gather(
+            C.pair_match_cards(pair["judge_ids"]),
+            _unread(pair["id"], actor.judge_id) if live else nothing(),
+            _dots(pair, actor.judge_id) if live else no_dots())
         nxt, _last = R.next_and_last(matches, now)
         base = C.pair_people_shape(pair, pair["mentor_ids"], names)
-        cards.append({
+        return {
             **base,
             "enabled": enabled,
             "role": pair["role"],
-            "unread": await _unread(pair["id"], actor.judge_id) if enabled and pair["role"] in ("pair", "mentor") else 0,
-            **(await _dots(pair, actor.judge_id) if enabled and pair["role"] in ("pair", "mentor") else
-               {"unread_threads": 0, "new_sheets": 0}),
+            "unread": unread,
+            **dots,
             "next_match": R.public_match(nxt) if nxt else None,
             "counts": {"matches": len(matches), **counts[pair["id"]]},
             "links": C.links_of(pair["id"]),
-        })
+        }
+
+    # Pary niezależne od siebie: karty liczone równolegle, w ograniczonej paczce (pula połączeń).
+    gate = asyncio.Semaphore(4)
+
+    async def limited(pair: Dict[str, Any]) -> Dict[str, Any]:
+        async with gate:
+            return await build(pair)
+
+    cards = list(await asyncio.gather(*(limited(p) for p in pairs)))
     order = {"pair": 0, "mentor": 1, "committee": 2, "admin": 3}
     cards.sort(key=lambda c: (not c["enabled"], order.get(c["role"], 9), " ".join(j["full_name"] for j in c["judges"])))
     return {"pairs": cards, "me": actor.me()}
@@ -170,36 +190,52 @@ async def toggle_panel(pair_id: str, body: PanelBody, actor: Actor = Depends(men
 @router.get("/pairs/{pair_id}")
 async def dashboard(pair_id: str, actor: Actor = Depends(mentor_actor)):
     ctx = await C.pair_context(pair_id, actor)
-    cards = await C.enrich_cards(ctx, await C.pair_match_cards(ctx["judge_ids"]))
-    nxt, last = R.next_and_last(cards, C.now())
-    names = await C.people([*ctx["judge_ids"], *ctx["mentor_ids"]])
-    clip_rows = await C.rows(select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"])
+    raw_cards = await C.pair_match_cards(ctx["judge_ids"])
+    raw_ids = [c["match_id"] for c in raw_cards]
+    from app.mentor_panel_library import compilation_summaries
+
+    async def load_clips():
+        found = await C.rows(select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"])
                              .where(mentor_clips.c.deleted_at.is_(None)).order_by(mentor_clips.c.created_at.desc()).limit(8))
-    thread_rows = await C.rows(select(mentor_threads).where(mentor_threads.c.pair_id == ctx["pair_id"])
-                               .where(mentor_threads.c.status == "open")
-                               .order_by(func.coalesce(mentor_threads.c.last_comment_at, mentor_threads.c.created_at).desc()).limit(8))
-    comp_rows = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"])
+        return await C.clips_payload(ctx, found)
+
+    async def load_threads():
+        found = await C.rows(select(mentor_threads).where(mentor_threads.c.pair_id == ctx["pair_id"])
+                             .where(mentor_threads.c.status == "open")
+                             .order_by(func.coalesce(mentor_threads.c.last_comment_at, mentor_threads.c.created_at).desc()).limit(8))
+        return await C.threads_payload(ctx, found, with_comments=False)
+
+    async def load_compilations():
+        found = await C.rows(select(mentor_compilations).where(mentor_compilations.c.pair_id == ctx["pair_id"])
                              .order_by(mentor_compilations.c.updated_at.desc()).limit(6))
-    delegate = await C.delegate_sheet_rows(ctx["judge_ids"], [c["match_id"] for c in cards])
-    mentor = await C.mentor_sheet_rows(ctx["pair_key"])
+        return await compilation_summaries(ctx, found)
+
+    # Niezależne odczyty pulpitu równolegle (wcześniej szły jeden po drugim).
+    cards, names, new_clips, open_threads, compilations, delegate, mentor, dots = await asyncio.gather(
+        C.enrich_cards(ctx, raw_cards),
+        C.people([*ctx["judge_ids"], *ctx["mentor_ids"]]),
+        load_clips(), load_threads(), load_compilations(),
+        C.delegate_sheet_rows(ctx["judge_ids"], raw_ids),
+        C.mentor_sheet_rows(ctx["pair_key"]),
+        _dots(ctx["pair"], actor.judge_id))
+    nxt, last = R.next_and_last(cards, C.now())
     d_rows = [{"date": r.get("match_date"), "points": R.sheet_points(R.json_value(r.get("evaluation_json"), {}))} for r in delegate]
     m_rows = [{"date": r.get("match_at"), "points": r.get("points")} for r in mentor]
     d_trend, m_trend = R.points_trend(d_rows), R.points_trend(m_rows)
     await C.mark_read(ctx)
-    from app.mentor_panel_library import compilation_summaries
 
     return {
         "pair": C.pair_people_shape(ctx["pair"], ctx["mentor_ids"], names),
         "mentors": C.pair_people_shape(ctx["pair"], ctx["mentor_ids"], names)["mentors"],
         "role": ctx["role"], "enabled": ctx["enabled"], "rev": ctx["rev"], "me": actor.me(),
-        **await _dots(ctx["pair"], actor.judge_id),
+        **dots,
         "can": {action: C.may(ctx, action) for action in ("flag", "video", "create", "categories", "publish", "toggle")},
         "next_match": nxt, "last_match": last,
         "to_discuss": [c for c in cards if c.get("submitted") and c.get("review_status") == "open"],
         "starred_recent": [c for c in cards if c.get("starred")][:6],
-        "new_clips": await C.clips_payload(ctx, clip_rows),
-        "open_threads": await C.threads_payload(ctx, thread_rows, with_comments=False),
-        "compilations": await compilation_summaries(ctx, comp_rows),
+        "new_clips": new_clips,
+        "open_threads": open_threads,
+        "compilations": compilations,
         "sheets_summary": {
             "delegate": {"count": len(delegate), "last_points": d_trend[-1]["points"] if d_trend else None, "trend": d_trend},
             "mentor": {"count": len(mentor), "last_points": m_trend[-1]["points"] if m_trend else None},
@@ -285,35 +321,52 @@ async def match_room(pair_id: str, match_id: str, actor: Actor = Depends(mentor_
     ctx = await C.pair_context(pair_id, actor)
     card = await C.match_card(ctx, match_id)
     from app.mentor_panel_media import video_list
-
-    videos, raw_videos = await video_list(ctx, match_id)
-    clip_rows = await C.rows(select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"])
-                             .where(mentor_clips.c.match_id == card["match_id"]).where(mentor_clips.c.deleted_at.is_(None))
-                             .order_by(mentor_clips.c.start_s.asc()))
-    markers: List[Dict[str, Any]] = []
+    from app.mentor_panel_streams import room_streams
     from app.mentor_video_rules import clean_markers
 
+    mid = card["match_id"]
+
+    async def load_videos():
+        videos, raw = await video_list(ctx, mid)
+        # Podpowiedzi transmisji potrzebują nagrań, ale nie blokują reszty pokoju.
+        return videos, raw, await room_streams(ctx, card, raw)
+
+    async def load_clips():
+        found = await C.rows(select(mentor_clips).where(mentor_clips.c.pair_id == ctx["pair_id"])
+                             .where(mentor_clips.c.match_id == mid).where(mentor_clips.c.deleted_at.is_(None))
+                             .order_by(mentor_clips.c.start_s.asc()))
+        return await C.clips_payload(ctx, found)
+
+    async def load_delegate():
+        return [r for r in await C.delegate_sheet_rows(ctx["judge_ids"], [mid]) if R.s(r.get("match_id")) == mid]
+
+    async def load_mentor():
+        found = [r for r in await C.mentor_sheet_rows(ctx["pair_key"]) if R.s(r.get("match_id")) == mid]
+        return await mentor_sheet_shapes(found)
+
+    async def load_threads():
+        found = await C.rows(select(mentor_threads).where(mentor_threads.c.pair_id == ctx["pair_id"])
+                             .where(mentor_threads.c.match_id == mid).order_by(mentor_threads.c.created_at.asc()))
+        return await C.threads_payload(ctx, found)
+
+    # Niezależne odczyty pokoju (w tym oś ProEla) równolegle zamiast kolejno.
+    (videos, raw_videos, streams), clips, delegate, mentor_shapes, threads, timeline = await asyncio.gather(
+        load_videos(), load_clips(), load_delegate(), load_mentor(), load_threads(),
+        _timeline(mid, R.s(card.get("match_code"))))
+    markers: List[Dict[str, Any]] = []
     for video in raw_videos:
         markers += R.markers_as_clips(video, clean_markers(R.json_value(video.get("markers_json"), [])))
-    delegate = [r for r in await C.delegate_sheet_rows(ctx["judge_ids"], [card["match_id"]]) if R.s(r.get("match_id")) == card["match_id"]]
-    mentor = [r for r in await C.mentor_sheet_rows(ctx["pair_key"]) if R.s(r.get("match_id")) == card["match_id"]]
-    mentor_shapes = await mentor_sheet_shapes(mentor)
     situations: List[Dict[str, Any]] = []
     for r in delegate:
         situations += R.situations_from_sheet(R.json_value(r.get("evaluation_json"), {}), "delegate", r.get("delegate_name"))
     for m in mentor_shapes:
         situations += R.situations_from_sheet(m["sheet"], "mentor", " + ".join(a["name"] for a in m["authors"]))
-    thread_rows = await C.rows(select(mentor_threads).where(mentor_threads.c.pair_id == ctx["pair_id"])
-                               .where(mentor_threads.c.match_id == card["match_id"]).order_by(mentor_threads.c.created_at.asc()))
-    from app.mentor_panel_streams import room_streams
-
-    streams = await room_streams(ctx, card, raw_videos)
     return {
-        "match": card, "videos": videos, "clips": await C.clips_payload(ctx, clip_rows), "markers_from_app": markers,
-        "timeline": await _timeline(card["match_id"], R.s(card.get("match_code"))),
+        "match": card, "videos": videos, "clips": clips, "markers_from_app": markers,
+        "timeline": timeline,
         "sheet_situations": situations,
         "delegate_sheets": [delegate_sheet_shape(r) for r in delegate], "mentor_sheets": mentor_shapes,
-        "threads": await C.threads_payload(ctx, thread_rows), "rev": ctx["rev"],
+        "threads": threads, "rev": ctx["rev"],
         "can": {action: C.may(ctx, action) for action in ("flag", "video", "create", "categories", "publish")},
         "suggested_streams": streams["streams"],
         "stream_search": streams["search"],
