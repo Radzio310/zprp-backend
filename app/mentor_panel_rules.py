@@ -426,6 +426,11 @@ def markers_as_clips(video: Mapping[str, Any], markers: Iterable[Mapping[str, An
             continue
         end = m.get("end_s")
         point = end is None
+        # Punkt bez oznaczenia to zwykły spis zdarzeń zaciągnięty z osi ProEla
+        # (import w aplikacji) - zdarzenia panel już ma, klipem jest dopiero
+        # świadome oznaczenie (kategoria, ważne, komentarz) albo zakres REC.
+        if point and not (m.get("important") or m.get("category") or m.get("comment")):
+            continue
         if point:
             start, end = max(0.0, at - POINT_LEAD_S), at + POINT_TAIL_S
             if isinstance(duration, (int, float)) and duration > 0:

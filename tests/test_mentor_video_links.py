@@ -287,8 +287,10 @@ def test_znacznik_bez_end_s_jest_widoczny_jako_klip():
 
     video = {"id": "v", "match_id": "m", "duration_s": 100, "sync_json": json.dumps({"match_start_s": 60, "half_minutes": 30})}
     marks = clean_markers([
-        {"id": "p", "label": "Punkt", "video_s": 3, "type": "goal", "source_key": "ev1", "kind": "goal"},
-        {"id": "q", "label": "ProEl", "match_ms": 10000, "half": 1, "type": "penalty1", "kind": "penalty"},
+        {"id": "p", "label": "Punkt", "video_s": 3, "type": "goal", "source_key": "ev1", "kind": "goal", "important": True},
+        {"id": "q", "label": "ProEl", "match_ms": 10000, "half": 1, "type": "penalty1", "kind": "penalty", "important": True},
+        # Zwykły punkt z importu osi ProEla (bez oznaczenia) - to nie klip.
+        {"id": "s", "label": "Import", "video_s": 40, "type": "goal", "source_key": "ev2", "kind": "goal"},
         {"id": "r", "label": "Zakres", "video_s": 5, "end_s": 905},
     ])
     clips = {c["marker_id"]: c for c in R.markers_as_clips(video, marks)}
@@ -296,6 +298,7 @@ def test_znacznik_bez_end_s_jest_widoczny_jako_klip():
     assert clips["p"]["type"] == "goal" and clips["p"]["event_key"] == "ev1" and clips["p"]["kind"] == "goal"
     assert clips["q"]["start_s"] == 64 and clips["q"]["end_s"] == 74
     assert clips["r"]["end_s"] == 905 and not clips["r"]["point"]
+    assert "s" not in clips
 
 
 def test_sync_is_bounded():

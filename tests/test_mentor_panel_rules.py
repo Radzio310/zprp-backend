@@ -187,9 +187,9 @@ def test_ciecie_klipu_i_nazwa_pliku():
 
 def test_znaczniki_z_zakresem_jako_klipy_do_odczytu():
     video = {"id": "v1", "match_id": "m1"}
-    markers = [{"id": "a", "label": "Akcja", "video_s": 10, "end_s": 30, "category": "dobra"}, {"id": "b", "video_s": 5}]
+    markers = [{"id": "a", "label": "Akcja", "video_s": 10, "end_s": 30, "category": "dobra"}, {"id": "b", "video_s": 5, "important": True}, {"id": "c", "video_s": 50}]
     clips = R.markers_as_clips(video, markers)
-    # "b" bez końca = punkt: okno -6/+4 s wokół 5 s (start przycięty do 0).
+    # "c" (punkt bez oznaczenia, import osi) nie jest klipem; "b" bez końca = punkt: okno -6/+4 s wokół 5 s (start przycięty do 0).
     assert len(clips) == 2 and clips[1]["point"] and (clips[1]["start_s"], clips[1]["end_s"]) == (0.0, 9.0)
     assert clips[0]["read_only"] and clips[0]["source"] == "marker"
     assert clips[0]["id"] == "marker:v1:a" and clips[0]["category_key"] == "dobra"
