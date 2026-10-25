@@ -453,6 +453,12 @@ async def session_state(sid: str, index: Optional[int] = Query(None, ge=0, le=20
     return await _run(S.attempt_state(_store(), who, session["attempt_id"], index, _device(session)))
 
 
+@router.get("/sessions/{sid}/paper", summary="Cały arkusz podejścia (bez kluczy) - jak /exams/attempts/{id}/paper")
+async def session_paper(sid: str, payload: Dict[str, Any] = Depends(get_jwt_payload), who: S.Who = Depends(_who)):
+    session = await _own_session(sid, payload, who)
+    return await _run(S.attempt_paper(_store(), who, session["attempt_id"], _device(session)))
+
+
 @router.post("/sessions/{sid}/answers", summary="Odpowiedzi z kolejki przeglądarki - jak /exams/attempts/{id}/answers")
 async def session_answers(sid: str, body: Dict[str, Any], payload: Dict[str, Any] = Depends(get_jwt_payload), who: S.Who = Depends(_who)):
     session = await _own_session(sid, payload, who)
