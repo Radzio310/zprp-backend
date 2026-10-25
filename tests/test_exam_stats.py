@@ -201,9 +201,9 @@ def test_miejsca_ex_aequo_i_czas_krotszy_wyzej():
     rows = [{"label": "A", "avg_percent": 80.0, "avg_duration_s": 300}, {"label": "B", "avg_percent": 80.004, "avg_duration_s": 200},
             {"label": "C", "avg_percent": 70.0, "avg_duration_s": 200}, {"label": "D", "avg_percent": None, "avg_duration_s": None}]
     by_pct = SR.place_by([dict(r) for r in rows], "avg_percent")
-    assert [(r["label"], r["place"], r["shared"]) for r in by_pct] == [("B", 1, True), ("A", 1, True), ("C", 3, False), ("D", None, False)]
+    assert [(r["label"], r["place"], r["shared"]) for r in by_pct] == [("B", 1, True), ("A", 1, True), ("C", 2, False), ("D", None, False)]
     by_time = SR.place_by([dict(r) for r in rows], "avg_duration_s")
-    assert [(r["label"], r["place"]) for r in by_time] == [("B", 1), ("C", 1), ("A", 3), ("D", None)]
+    assert [(r["label"], r["place"]) for r in by_time] == [("B", 1), ("C", 1), ("A", 2), ("D", None)]
 
 
 def test_szczebel_sezon_i_rozklad_czasu():

@@ -73,10 +73,12 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
     view = S.exam_view(exam, now, full=True)
     if cut:
         view.update(can_manage=False, read_only=True, cut_province=cut)
+    summary = R.summary(attempts, len(missing), pass_percent)
+    summary["web_people"] = await _web_people(st, exam_id, {a["judge_id"] for a in attempts})
     return {
         "exam": view,
         "generated_at": now.isoformat(),
-        "summary": R.summary(attempts, len(missing), pass_percent),
+        "summary": summary,
         "questions": questions,
         "hardest": R.hardest_questions(questions),
         "weakest_rules": R.weakest_rules(questions, limit=0),
@@ -88,6 +90,24 @@ async def build_report(st: S.Store, who: S.Who, exam_id: str, now: Optional[date
         #: Zdjęcia sędziów z listy okręgu (`province_judges.photo_url`) - podium i arkusze Areny.
         "photos": photos,
     }
+
+
+async def _web_people(st: S.Store, exam_id: str, judge_ids: set) -> Optional[int]:
+    """Ilu zdających pisało na komputerze (sesja `exam_web_sessions` w tym egzaminie).
+    Tylko osoby z podejściem w raporcie (komisja okręgu nie liczy cudzych). Brak tabeli
+    albo błąd odczytu = None - pasek Areny pokaże wtedy myślnik, raport nie pada."""
+    if not judge_ids:
+        return 0
+    try:
+        from sqlalchemy import MetaData
+
+        from app.exam_web_tables import define_tables
+
+        _, _, ws = define_tables(MetaData())
+        rows = await st.database.fetch_all(select(ws.c.judge_id).where(ws.c.exam_id == exam_id).distinct())
+    except Exception:
+        return None
+    return len({S._s(r["judge_id"]) for r in rows} & {S._s(j) for j in judge_ids})
 
 
 async def _photos(st: S.Store, provinces: List[str], judge_ids: set) -> Dict[str, str]:

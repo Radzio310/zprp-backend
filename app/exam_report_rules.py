@@ -121,17 +121,19 @@ def _ts(value: Any) -> Optional[datetime]:
 
 def place_ex_aequo(values: Sequence[Optional[float]], *, digits: int = 2) -> List[Optional[int]]:
     """Miejsca dla wartości już POSORTOWANYCH malejąco: równe = wspólne miejsce,
-    następne przeskakuje (1, 2, 2, 4). `None` (brak wyniku) nie dostaje miejsca."""
+    następne BEZ przeskoku (1, 2, 2, 3) - decyzja właściciela 25.10.2026, tylko
+    egzaminy (tabele rozgrywek i bomby zostają przy 1, 2, 2, 4).
+    `None` (brak wyniku) nie dostaje miejsca."""
     out: List[Optional[int]] = []
     last: Optional[float] = None
     last_place = 0
-    for i, v in enumerate(values):
+    for v in values:
         if v is None:
             out.append(None)
             continue
         r = round(float(v), digits)
         if last is None or r != last:
-            last_place = i + 1
+            last_place += 1
             last = r
         out.append(last_place)
     return out
@@ -231,6 +233,9 @@ def summary(attempts: Sequence[Mapping[str, Any]], missing_count: int, pass_perc
         "histogram_10pct": histogram_10(percents),
         "avg_duration_s": round(sum(durs) / len(durs), 1) if durs else None,
         "median_duration_s": round(_median(durs), 1) if durs else None,
+        #: Pasek liczb Areny (25.10.2026): najlepszy wynik i najkrótsze zakończone podejście.
+        "best_percent": round(max(percents), 2) if percents else None,
+        "min_duration_s": round(min(durs), 1) if durs else None,
     }
 
 

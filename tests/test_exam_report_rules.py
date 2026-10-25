@@ -15,14 +15,14 @@ def att(jid, pct, *, no=1, status="submitted", passed=None, prov="ŚLĄSKIE", na
 
 
 def test_miejsca_ex_aequo_1_2_2_4():
-    assert R.place_ex_aequo([90, 80, 80, 70]) == [1, 2, 2, 4]
-    assert R.place_ex_aequo([66.666, 66.667, 50]) == [1, 1, 3]
+    assert R.place_ex_aequo([90, 80, 80, 70]) == [1, 2, 2, 3]
+    assert R.place_ex_aequo([66.666, 66.667, 50]) == [1, 1, 2]
     assert R.place_ex_aequo([100, None]) == [1, None]
 
 
 def test_ranking_bierze_najlepsze_podejscie_osoby_i_liczy_podejscia():
     rows = R.ranking([att("1", 50, no=1), att("1", 80, no=2), att("2", 80), att("3", 40), att("4", None, status="in_progress")])
-    assert [(r["judge_id"], r["place"]) for r in rows] == [("1", 1), ("2", 1), ("3", 3)]
+    assert [(r["judge_id"], r["place"]) for r in rows] == [("1", 1), ("2", 1), ("3", 2)]
     assert rows[0]["attempts_used"] == 2 and rows[0]["attempt_no"] == 2
 
 
@@ -127,9 +127,9 @@ def _flag(score=40):
 def test_filtr_zdajacych_rzetelnosc_przedzial_okreg_i_miejsce_w_okregu():
     rows = R.select_rows([att("1", 90, prov="ŚLĄSKIE"), att("2", 80, prov="OPOLSKIE"), att("3", 80, prov="ŚLĄSKIE"),
                           att("4", 55, prov="ŚLĄSKIE", integrity=_flag()), att("5", 30, prov="OPOLSKIE")], "best")
-    assert [r["place"] for r in rows] == [1, 2, 2, 4, 5]
+    assert [r["place"] for r in rows] == [1, 2, 2, 3, 4]
     only = R.apply_people(rows, {"flags": "only"})
-    assert [r["judge_id"] for r in only] == ["4"] and only[0]["place"] == 4  # miejsce z zakresu zostaje
+    assert [r["judge_id"] for r in only] == ["4"] and only[0]["place"] == 3  # miejsce z zakresu zostaje
     clean = R.apply_people(rows, {"flags": "none", "min_percent": 50, "max_percent": 85})
     assert [r["judge_id"] for r in clean] == ["2", "3"]
     sl = R.apply_people(rows, {"provinces": ["slaskie"]})
