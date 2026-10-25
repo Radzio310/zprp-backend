@@ -87,10 +87,14 @@ def apple_app_site_association(team_id: str) -> Dict[str, Any]:
                     # kody QR panelu Mentor i egzaminu na komputerze otwierają aplikację.
                     {"/": "/mentor/zaloguj/*", "comment": "Logowanie komputera do panelu Mentor"},
                     {"/": "/egzamin/p/*", "comment": "Egzamin na komputerze: logowanie i telefon-strażnik"},
+                    # Egzamin na żywo (25.10.2026): /sala/<PIN> otwiera dołączanie w aplikacji,
+                    # ekran sali /sala/ekran/<token> zostaje w przeglądarce (rzutnik).
+                    {"/": "/sala/ekran/*", "exclude": True, "comment": "Ekran sali - przeglądarka"},
+                    {"/": "/sala/*", "comment": "Egzamin na żywo: dołączenie PIN-em"},
                 ],
                 # Stary zapis dla iOS 12 i starszych.
                 "appID": app_id,
-                "paths": ["/e/*", "/mentor/zaloguj/*", "/egzamin/p/*"],
+                "paths": ["/e/*", "/mentor/zaloguj/*", "/egzamin/p/*", "NOT /sala/ekran/*", "/sala/*"],
             }
         )
     return {"applinks": {"apps": [], "details": details}}

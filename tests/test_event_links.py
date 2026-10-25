@@ -30,3 +30,10 @@ def test_zapasowe_przekierowanie_androida():
     assert intent.startswith("intent://e/12/AbC_def-123456#Intent;scheme=refhandballapp;")
     assert "package=" not in intent and intent.endswith(";end")
     assert "S.browser_fallback_url=https%3A%2F%2F" in intent
+
+
+def test_sala_otwiera_aplikacje_a_ekran_sali_zostaje_w_przegladarce():
+    comps = L.apple_app_site_association("TEAM123")["applinks"]["details"][0]["components"]
+    paths = [c["/"] for c in comps]
+    assert paths.index("/sala/ekran/*") < paths.index("/sala/*")
+    assert comps[paths.index("/sala/ekran/*")]["exclude"] is True
