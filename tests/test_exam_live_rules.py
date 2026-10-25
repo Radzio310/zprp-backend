@@ -119,7 +119,18 @@ def test_odpowiedz_walidacja_i_termin():
 
 def test_ranking_ex_aequo():
     parts = [{"id": str(i), "name": n, "kind": "user", "score": s} for i, (n, s) in enumerate([("A", 900), ("B", 900), ("C", 500), ("D", 500), ("E", 100)])]
-    assert [r["place"] for r in L.rank_participants(parts)] == [1, 1, 3, 3, 5]
+    # Gęsto, jak rankingi egzaminów (decyzja 25.10.2026): 1, 1, 2, 2, 3.
+    assert [r["place"] for r in L.rank_participants(parts)] == [1, 1, 2, 2, 3]
+
+
+def test_wynik_trwaly_czas_namyslu_i_kolejnosc_w_remisie():
+    bank = {"q1-1": Q}
+    parts = [{"id": "p1", "kind": "user", "name": "Ala", "score": 900}, {"id": "p2", "kind": "user", "name": "Bob", "score": 900},
+             {"id": "p3", "kind": "guest", "name": "Cyd", "score": 0}]
+    answers = [{"participant_id": "p1", "qid": "q1-1", "fraction": 1.0, "points": 900, "selected": ["a"], "elapsed_ms": 8000},
+               {"participant_id": "p2", "qid": "q1-1", "fraction": 1.0, "points": 900, "selected": ["a"], "elapsed_ms": 3000}]
+    res = L.build_result(character="quiz", pass_percent=None, question_ids=["q1-1"], bank=bank, participants=parts, answers=answers)
+    assert [(e["name"], e["place"], e["time_ms"]) for e in res["ranking"]] == [("Bob", 1, 3000), ("Ala", 1, 8000), ("Cyd", 2, None)]
 
 
 def test_klucz_tylko_w_reveal_per_rola():

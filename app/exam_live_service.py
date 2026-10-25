@@ -381,13 +381,19 @@ async def control(ls: LiveStore, who: S.Who, session_id: str, action: str, now: 
 
 async def _pilot(ls: LiveStore, s: Mapping[str, Any], action: str, now: datetime, extra: Mapping[str, Any]) -> None:
     """Pauza, wznowienie, dodatkowy czas, pominięcie pytania, zamknięcie sali (17.10.2026).
-    Stan w `config_json` (bez migracji tabel): `paused_left`, `locked`, `skipped`, `kicked`."""
+    Stan w `config_json` (bez migracji tabel): `paused_left`, `locked`, `skipped`, `kicked`, `unveil`."""
     cfg = dict(s["config"])
     paused = cfg.get("paused_left") is not None
     refusal = L.pilot_refusal(action, s["phase"], paused)
     if refusal:
         raise refusal
     sid = s["id"]
+    if action in L.UNVEIL_ACTIONS:
+        cur = int(cfg.get("unveil") or 0)
+        cfg["unveil"] = L.UNVEIL_MAX if action == "unveil_all" else min(L.UNVEIL_MAX, cur + 1)
+        if cfg["unveil"] != cur:
+            await _bump(ls, sid, now, config_json=S._dumps(cfg))
+        return
     if action in ("lock", "unlock"):
         cfg["locked"] = action == "lock"
         await _bump(ls, sid, now, config_json=S._dumps(cfg))

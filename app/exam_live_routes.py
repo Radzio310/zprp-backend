@@ -273,7 +273,8 @@ def build_router(deps: LiveDeps) -> APIRouter:
         brand = brand_of(s)
         view["brand"] = {"palette": brand["palette"], "crest_url": brand["crest_url"], "province_label": brand["province_label"],
                          "join_url": L.web_join_url(s.get("pin")), "short": L.WEB_SHORT}
-        rows = list(view.get("participants") or []) + list((view.get("leaderboard") or {}).get("top") or [])
+        rows = (list(view.get("participants") or []) + list((view.get("leaderboard") or {}).get("top") or [])
+                + list((view.get("final") or {}).get("board") or []))
         if rows:
             photos = await photos_of(state)
             if photos:

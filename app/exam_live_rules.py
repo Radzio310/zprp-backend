@@ -195,13 +195,22 @@ def next_phase(phase: str, q_index: int, q_total: int, leaderboard_each: bool) -
 
 
 #: Polecenia pilota prowadzącego poza fazami (17.10.2026); lista idzie w `session.controls`.
-PILOT_ACTIONS = ("pause", "resume", "extend", "skip", "lock", "unlock")
-CONTROLS = ("pause", "resume", "extend", "skip", "lock", "unlock", "kick")
+PILOT_ACTIONS = ("pause", "resume", "extend", "skip", "lock", "unlock", "unveil", "unveil_all")
+CONTROLS = ("pause", "resume", "extend", "skip", "lock", "unlock", "kick", "unveil")
 EXTEND_DEFAULT_S = 15
+#: Ceremonia wyników po zakończeniu (25.10.2026): prowadzący odsłania kolejne etapy na rzutniku
+#: (dalsze miejsca od końca, 3., 2., 1., pełna tabela). Serwer trzyma sam numer kroku w `config_json`;
+#: etapy liczy ekran z rankingu. `unveil_all` = od razu pełna tabela.
+UNVEIL_ACTIONS = ("unveil", "unveil_all")
+UNVEIL_MAX = 9
 
 
 def pilot_refusal(action: str, phase: str, paused: bool) -> Optional[ExamError]:
     """Czemu polecenie pilota nie działa teraz (zero cichych blokad) albo None."""
+    if action in UNVEIL_ACTIONS:
+        if phase != "end":
+            return ExamError("LIVE_BAD_PHASE", "Wyniki odsłania się po zakończeniu sesji.", 409)
+        return None
     if phase == "end":
         return ExamError("LIVE_ENDED", "Ta sesja jest już zakończona.", 409)
     if action in ("lock", "unlock"):
@@ -218,7 +227,7 @@ def pilot_refusal(action: str, phase: str, paused: bool) -> Optional[ExamError]:
 def control_action(action: str, phase: str) -> str:
     """Normalizacja akcji prowadzącego: next | reveal | end."""
     if action not in ("next", "reveal", "end"):
-        raise ExamError("LIVE_BAD_ACTION", "Nieznana akcja. Dozwolone: next, reveal, end, pause, resume, extend, skip, lock, unlock.")
+        raise ExamError("LIVE_BAD_ACTION", "Nieznana akcja. Dozwolone: next, reveal, end, pause, resume, extend, skip, lock, unlock, unveil, unveil_all.")
     if phase == "end":
         raise ExamError("LIVE_ENDED", "Ta sesja jest już zakończona.", 409)
     if action == "reveal" and phase != "question":
@@ -267,19 +276,21 @@ def answer_refusal(phase: str, deadline: Optional[datetime], now: datetime, paus
 
 
 # ---------------------------------------------------------------------------
-# Ranking (remisy ex aequo: 1, 2, 2, 4)
+# Ranking (remisy ex aequo gęsto: 1, 2, 2, 3 - decyzja 25.10.2026 dla egzaminów z przepisów)
 # ---------------------------------------------------------------------------
 
 
 def rank_participants(participants: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Równe punkty = wspólne miejsce, następne bez przeskoku (1, 2, 2, 3), jak w rankingach
+    egzaminów (`exam_report_rules.place_ex_aequo`). W remisie kolejność wierszy: nazwisko."""
     ordered = sorted(participants, key=lambda p: (-int(p.get("score") or 0), str(p.get("name") or "").lower()))
     out: List[Dict[str, Any]] = []
     prev_score: Optional[int] = None
     place = 0
-    for index, p in enumerate(ordered, start=1):
+    for p in ordered:
         score = int(p.get("score") or 0)
         if score != prev_score:
-            place = index
+            place += 1
             prev_score = score
         out.append({"participant_id": p["id"], "place": place, "name": p.get("name"), "kind": p.get("kind"),
                     "score": score, "correct": int(p.get("correct_count") or 0)})
@@ -322,14 +333,18 @@ def build_result(
         rows = by_pid.get(p["id"], [])
         fraction_sum = sum(float(r.get("fraction") or 0) for r in rows)
         percent = round(100.0 * fraction_sum / total_q, 1) if total_q else 0.0
+        timed = [int(r["elapsed_ms"]) for r in rows if r.get("elapsed_ms") is not None]
         ranking.append({
             "participant_id": p["id"], "judge_id": p.get("judge_id"), "name": p.get("name"), "kind": p.get("kind"),
             "place": ranked[p["id"]]["place"], "score": int(p.get("score") or 0),
             "correct": sum(1 for r in rows if float(r.get("fraction") or 0) >= 1.0),
             "answered": len(rows), "percent": percent,
+            #: Łączny czas namysłu nad oddanymi odpowiedziami (ms); None = serwer nie zmierzył żadnej.
+            "time_ms": sum(timed) if timed else None,
             "passed": (percent >= float(pass_percent)) if (character == "exam" and pass_percent is not None) else None,
         })
-    ranking.sort(key=lambda e: (e["place"], str(e["name"] or "").lower()))
+    # W remisie szybszy wyżej (sam wiersz; miejsce zostaje wspólne).
+    ranking.sort(key=lambda e: (e["place"], e["time_ms"] if e["time_ms"] is not None else 1 << 62, str(e["name"] or "").lower()))
     questions = []
     n = len(participants)
     for qid in question_ids:
@@ -382,6 +397,8 @@ def _session_block(state: Mapping[str, Any], role: str) -> Dict[str, Any]:
         "paused": s["phase"] == "question" and cfg.get("paused_left") is not None,
         "locked": bool(cfg.get("locked")),
     }
+    if s["phase"] == "end":
+        block["unveil"] = int(cfg.get("unveil") or 0)
     if role == "host":
         block["controls"] = list(CONTROLS)
         nq = state.get("next_question")
@@ -526,6 +543,12 @@ def _final_for(state: Mapping[str, Any], viewer: Optional[Mapping[str, Any]], ro
     if role == "host":
         out["ranking"] = result["ranking"][:FULL_RANKING_MAX]
         out["questions"] = result["questions"]
+    if role == "projector":
+        # Pełna tabela ceremonii: wszyscy, bez numerów uczestników i sędziów (barwa koszulki z `key`).
+        out["board"] = [{"key": public_key(e["participant_id"]), "place": e["place"], "name": e["name"], "kind": e["kind"],
+                         "score": e["score"], "correct": e["correct"], "answered": e["answered"], "percent": e["percent"],
+                         "passed": e["passed"], "time_ms": e.get("time_ms")}
+                        for e in result["ranking"][:FULL_RANKING_MAX]]
     return out
 
 

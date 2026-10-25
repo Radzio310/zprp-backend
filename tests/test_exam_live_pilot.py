@@ -152,3 +152,22 @@ def test_usuniety_dostaje_komunikat_przez_gniazdo(env):
         while frame["type"] == "snapshot":
             frame = ws.receive_json()
         assert frame == {"type": "error", "code": "LIVE_KICKED", "message": "Prowadzący usunął Cię z tej sesji."}
+
+
+def test_ceremonia_wynikow_krok_po_kroku_tylko_po_koncu(env):
+    c, _clock = env
+    _v, sid, ptok = started(c)
+    refused = ctl(c, sid, "unveil")
+    assert refused.status_code == 409 and err(refused) == "LIVE_BAD_PHASE"
+    assert ctl(c, sid, "end").status_code == 200
+    proj = c.get(f"/exam-live/projector/{ptok}/state").json()
+    assert proj["session"]["unveil"] == 0
+    board = proj["final"]["board"]
+    assert len(board) == 2 and all(len(r["key"]) == 12 and "participant_id" not in r and "judge_id" not in r for r in board)
+    assert {"place", "score", "correct", "answered", "time_ms", "percent"} <= set(board[0])
+    assert ctl(c, sid, "unveil", from_phase="end").json()["session"]["unveil"] == 1
+    assert ctl(c, sid, "unveil").json()["session"]["unveil"] == 2
+    assert ctl(c, sid, "unveil_all").json()["session"]["unveil"] == L.UNVEIL_MAX
+    assert ctl(c, sid, "unveil").json()["session"]["unveil"] == L.UNVEIL_MAX
+    assert c.get(f"/exam-live/projector/{ptok}/state").json()["session"]["unveil"] == L.UNVEIL_MAX
+    assert "board" not in c.get(f"/exam-live/{sid}/state", headers=h("p1")).json()["final"]
